@@ -64,9 +64,10 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 	}
 
 	void MeasurementHook::SetFrame(const MeasurementRect& rectIn, const double weightsIn[3],
-		double boostIn)
+		double boostIn, uint64_t sequenceIn)
 	{
 		rect = rectIn;
+		sequence = sequenceIn;
 		boost = static_cast<float>(boostIn);
 		for (int i = 0; i < 3; ++i) weights[i] = static_cast<float>(weightsIn[i]);
 	}
@@ -198,13 +199,15 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 			return failed;
 		}
 		busy[slot] = true;
+		slotSequence[slot] = sequence;
 		submitted.push_back(slot);
 		next = (next + 1) % RING;
 		++measured;
 		return none;
 	}
 
-	int MeasurementHook::Collect(std::vector<RawMeasurement>& out, int waitMs)
+	int MeasurementHook::Collect(std::vector<RawMeasurement>& out, int waitMs,
+		std::vector<uint64_t>* sequences)
 	{
 		int collected = 0;
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
@@ -222,6 +225,7 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 			if (pl_buf_read(gpu, ring[slot], 0, &raw, sizeof(raw)))
 			{
 				out.push_back(raw);
+				if (sequences) sequences->push_back(slotSequence[slot]);
 				++collected;
 			}
 			busy[slot] = false;

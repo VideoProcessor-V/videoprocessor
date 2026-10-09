@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Layer 2 of the LED drive module: pure, deterministic control logic. No
@@ -77,6 +78,26 @@ namespace LedDrive
 	// truncated like the script; not floored or limited.
 	int CurveLevel(const LedDriveConfig& config, int apl);
 
+	// Relative light output against the LPW1 level ([projector] flux_table).
+	// Without a table the flux is proportional to the level.
+	class FluxModel
+	{
+	public:
+		FluxModel() = default;
+		explicit FluxModel(const std::vector<std::pair<double, double>>& table);
+		bool Linear() const { return table.empty(); }
+		// Piecewise-linear between the table's points, clamped to its end values.
+		double Flux(double level) const;
+		// flux(ceiling) / flux(level): the linear gain that restores the picture.
+		double Gain(int ceiling, double level) const;
+		// The lowest whole level in [low, ceiling] giving at least `fraction` of
+		// the ceiling's flux; the ceiling when none does.
+		int LevelFor(double fraction, int low, int ceiling) const;
+
+	private:
+		std::vector<std::pair<double, double>> table;
+	};
+
 	// beta_22.py ported parameter for parameter. Light: the configured curve
 	// and step tables. Contrast: the script's bands and dynamics, emulated in
 	// VP (never sent to the projector).
@@ -100,43 +121,71 @@ namespace LedDrive
 		int contrast;
 	};
 
-	// mode: compensate (docs/VP-led-drive-module.md 4.2-4.4). The projector's
-	// contrast stays at 50; the picture is compensated in linear light so only
-	// the black floor moves. Highlight policy: persistence gates protection
-	// (via FrameStats::sustainedHighlight), area decides between the knee and
-	// the global gain, everything continuous; one taste parameter,
-	// highlight_tolerance_stops.
+	// A queued frame further ahead than the one a command is for: lets
+	// mode: compensate start a ramp early (docs/VP-led-drive-delta-1.md 4).
+	struct Lookahead
+	{
+		FrameStats stats;
+		// A cut was seen between now and that frame.
+		bool cutAhead = false;
+		int framesAhead = 0;
+	};
+
+	// mode: compensate (docs/VP-led-drive-module.md 4.2-4.4, delta-1 3-4). The
+	// projector's contrast stays at 50; the picture is compensated in linear
+	// light so only the black floor moves. Runs once per output frame and
+	// ramps the LED by at most rate_up / rate_down levels per second, holding
+	// still within the deadband. Highlight policy: persistence gates
+	// protection (via FrameStats::sustainedHighlight), area decides between
+	// the knee and the global gain, everything continuous; one taste
+	// parameter, highlight_tolerance_stops.
 	class CompensateController
 	{
 	public:
-		explicit CompensateController(const LedDriveConfig& config);
+		explicit CompensateController(const LedDriveConfig& config, const FluxModel& flux = FluxModel());
 		void Reset(int light);
-		// elapsedMs: time since the previous tick.
-		ControllerOutput Tick(const FrameStats& stats, int elapsedMs);
+		// stats: the frame the command is for (shown when the LED gets there).
+		// elapsedMs: time since the previous frame. ahead: the furthest queued
+		// frame, when there is one (used only with early_ramp).
+		ControllerOutput Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead = nullptr);
 		int Light() const { return light; }
+		double Level() const { return level; }
 		double Protection() const { return protection; }
 		double Area() const { return area; }
 
 	private:
 		LedDriveConfig config;
+		FluxModel flux;
+		double level;
 		int light;
 		double protection = 0.0;
 		double area = 0.0;
 		double previousApl = -1.0;
+		bool ramping = false;
 	};
 
-	// gain_led = ceiling / LED level, in linear light.
+	// gain_led = flux(ceiling) / flux(LED level), in linear light.
+	inline double LedGain(const FluxModel& flux, int ceiling, double light)
+	{
+		return flux.Gain(ceiling, light);
+	}
+
 	inline double LedGain(int ceiling, double light)
 	{
-		return light > 0.0 ? static_cast<double>(ceiling) / light : 1.0;
+		return LedGain(FluxModel(), ceiling, light);
 	}
 
 	// The final linear gain for a frame from the modelled LED level and the
 	// controller's highlight limit.
-	inline double CompensationGainFor(int ceiling, double light, const ControllerOutput& out)
+	inline double CompensationGainFor(const FluxModel& flux, int ceiling, double light, const ControllerOutput& out)
 	{
-		const double ledGain = LedGain(ceiling, light);
+		const double ledGain = LedGain(flux, ceiling, light);
 		const double capped = ledGain < out.highlightCap ? ledGain : out.highlightCap;
 		return ledGain * (1.0 - out.capWeight) + capped * out.capWeight;
+	}
+
+	inline double CompensationGainFor(int ceiling, double light, const ControllerOutput& out)
+	{
+		return CompensationGainFor(FluxModel(), ceiling, light, out);
 	}
 }

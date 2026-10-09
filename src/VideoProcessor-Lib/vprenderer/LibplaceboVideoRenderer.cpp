@@ -40,6 +40,8 @@
 #include <vprenderer/CustomHookChain.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
+#include <led/LedRawTransfer.h>
+#include <QueuedFrameStatistics.h>
 #include <SceneDetector.h>
 #include <vprenderer/LibplaceboOutputPolicy.h>
 #include <HdrTargetLuminance.h>
@@ -3627,8 +3629,11 @@ struct LibplaceboVideoRenderer::Impl
 	CustomHookChain::Chain customHooks{ GlslHookLoader() };
 	// LED drive (owned by the outer renderer). Per frame: the measurement hook
 	// and the compensation hook run first at PRE_OUTPUT; the module is touched
-	// only by SubmitMeasurement (after rendering) and CurrentGain (before).
+	// only by BeginFrame (before rendering) and SubmitMeasurement (after).
 	std::shared_ptr<LedDrive::LedDriveModule> ledDrive;
+	uint64_t ledRawTransferSignature = 0;
+	// Statistics consumers of the queued-frame walk (read-only).
+	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
 	LedDrive::MeasurementHook ledMeasurement;
 	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
 	bool ledCompensationConfigured = false;
@@ -13921,11 +13926,27 @@ struct LibplaceboVideoRenderer::Impl
             compensation.eotf = ledCompensationEotf.load(std::memory_order_acquire);
             if (led)
             {
-                compensation = led->CurrentGain();
+                compensation = led->BeginFrame(sourceSequence);
+                if (led->WantsPredictions())
+                {
+                    // The lookahead's raw-to-output transfer follows this frame's
+                    // colour mapping; rebuilt only when that changes.
+                    const pl_color_map_params* colorMap = renderParams.color_map_params ?
+                        renderParams.color_map_params : &pl_color_map_default_params;
+                    const uint64_t transferSignature =
+                        LedDrive::RawTransferSignature(renderImage.color, target.color, colorMap);
+                    if (transferSignature != ledRawTransferSignature)
+                    {
+                        ledRawTransferSignature = transferSignature;
+                        led->SetRawTransfer(std::make_shared<const LedDrive::RawTransfer>(
+                            LedDrive::BuildRawTransfer(renderImage.color, target.color, colorMap)));
+                    }
+                }
                 ledMeasurement.SetFrame(LedDrive::ActivePictureRect(hdrTrustedPicture.available,
                     hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right,
                     hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
-                    renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent);
+                    renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent,
+                    sourceSequence);
                 frameHooks.push_back(ledMeasurement.Hook());
             }
             const size_t compensationStart = frameHooks.size();
@@ -13986,9 +14007,10 @@ struct LibplaceboVideoRenderer::Impl
         if (led)
         {
             std::vector<LedDrive::RawMeasurement> measured;
-            ledMeasurement.Collect(measured);
-            for (const LedDrive::RawMeasurement& measurement : measured)
-                led->SubmitMeasurement(measurement);
+            std::vector<uint64_t> measuredSequences;
+            ledMeasurement.Collect(measured, 0, &measuredSequences);
+            for (size_t i = 0; i < measured.size(); ++i)
+                led->SubmitMeasurement(measured[i], measuredSequences[i]);
         }
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
@@ -15206,6 +15228,9 @@ void LibplaceboVideoRenderer::Build()
 	// RenderLoop performs the actual initialization on its own thread.
 	m_impl.reset(new Impl());
 	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
+	if (m_ledDrive && m_ledDrive->WantsPredictions())
+		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
+			m_ledDrive, &m_ledDrive->Lookahead()));
 	m_impl->ledBoostExponent.store(m_ledBoostExponent, std::memory_order_release);
 	m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
 	m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
@@ -15481,7 +15506,11 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	m_ledDriveSignature = signature;
 	std::shared_ptr<LedDrive::LedDriveModule> previous = m_ledDrive;
 	m_ledDrive.reset();
-	if (m_impl) std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+	if (m_impl)
+	{
+		std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
+	}
 	if (previous) previous->Stop();
 	if (!valid)
 	{
@@ -15498,7 +15527,15 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
 		LedDrive::ReadProjectorConfig(configuration), led);
 	m_ledDrive->Start();
-	if (m_impl) std::atomic_store(&m_impl->ledDrive, m_ledDrive);
+	if (m_impl)
+	{
+		std::atomic_store(&m_impl->ledDrive, m_ledDrive);
+		// The module's lookahead watches the queued-frame walk; the aliasing
+		// pointer keeps the module alive while the walk holds it.
+		if (m_ledDrive->WantsPredictions())
+			std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
+				m_ledDrive, &m_ledDrive->Lookahead()));
+	}
 }
 
 std::vector<CString> LibplaceboVideoRenderer::ActiveShaders() const
@@ -16866,6 +16903,11 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
 {
     const uint8_t availableLookahead = static_cast<uint8_t>((std::min)(
         queuedFutureFrames, size_t{UINT8_MAX}));
+    // Statistics observers see every frame this walk decodes, current first.
+    const std::shared_ptr<QueuedFrameStatistics::IObserver> statisticsObserver =
+        std::atomic_load(&m_impl->queuedFrameObserver);
+    if (statisticsObserver)
+        statisticsObserver->BeginWalk(previewFrames.empty() ? 0 : previewFrames.size() - 1);
     ActivePictureBounds proofBase;
     ActivePictureTransitionModel liveProofModel;
     bool inwardProofEligible = false;
@@ -17128,6 +17170,22 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
             preview.nearBlackEvaluated, preview.nearBlack);
         preview.identity = sample.identity;
         preview.observation = sample.observation;
+        if (statisticsObserver)
+        {
+            QueuedFrameStatistics::PictureRect picture;
+            picture.right = source.width;
+            picture.bottom = source.height;
+            const auto& bounds = preview.observation.bounds;
+            if (preview.observation.classification == ActivePictureClassification::BAR_CROP_TRUSTED &&
+                bounds.right > bounds.left && bounds.bottom > bounds.top)
+            {
+                picture.left = bounds.left;
+                picture.top = bounds.top;
+                picture.right = bounds.right;
+                picture.bottom = bounds.bottom;
+            }
+            statisticsObserver->ObserveFrame(queued.sourceSequence, rememberedIndex, source, picture);
+        }
 		if (observations.empty())
 		{
 			const auto& target = preview.observation.bounds;

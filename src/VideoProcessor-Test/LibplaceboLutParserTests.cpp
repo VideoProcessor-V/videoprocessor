@@ -10,6 +10,7 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <led/LedMeasurementHook.h>
+#include <led/LedRawTransfer.h>
 #include <NlsGeometryPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <libplacebo/renderer.h>
@@ -1787,6 +1788,58 @@ namespace VideoProcessorTest
 				measured.front().blocks;
 			Assert::IsTrue(boostedApl > apl + 2.0, L"The boost lifts the measured APL");
 			hook.Release();
+		}
+
+		TEST_METHOD(LedRawTransferMatchesTheRenderedOutput)
+		{
+			// The lookahead's CPU transfer against libplacebo rendering the same
+			// grey levels with the same colour spaces and colour mapping.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(),
+				L"Could not create the libplacebo WARP test device");
+			pl_render_params params = pl_render_default_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			params.deband_params = nullptr;
+			params.peak_detect_params = nullptr;
+			struct Case { pl_color_transfer source; float sourceNits; pl_color_transfer target; float targetNits; };
+			const Case cases[] = {
+				{ PL_COLOR_TRC_BT_1886, 0.0f, PL_COLOR_TRC_GAMMA22, 0.0f },
+				{ PL_COLOR_TRC_BT_1886, 0.0f, PL_COLOR_TRC_GAMMA24, 0.0f },
+				{ PL_COLOR_TRC_PQ, 1000.0f, PL_COLOR_TRC_GAMMA22, 100.0f },
+				{ PL_COLOR_TRC_PQ, 4000.0f, PL_COLOR_TRC_GAMMA24, 48.0f } };
+			std::wstring failures;
+			for (const Case& c : cases)
+			{
+				pl_color_space source{}, target{};
+				source.primaries = target.primaries = PL_COLOR_PRIM_BT_709;
+				source.transfer = c.source;
+				target.transfer = c.target;
+				source.hdr.max_luma = source.hdr.max_cll = source.hdr.max_fall = c.sourceNits;
+				if (c.sourceNits > 0.0f) source.hdr.min_luma = PL_COLOR_HDR_BLACK;
+				target.hdr.max_luma = c.targetNits;
+				if (c.targetNits > 0.0f) target.hdr.min_luma = PL_COLOR_HDR_BLACK;
+				const LedDrive::RawTransfer transfer =
+					LedDrive::BuildRawTransfer(source, target, params.color_map_params);
+				double worst = 0.0;
+				int worstLevel = 0;
+				for (int level = 16; level <= 240; level += 16)
+				{
+					const uint8_t v = static_cast<uint8_t>(level);
+					const RgbaPixel out = fixture.Render(nullptr, params, PL_COLOR_LEVELS_FULL,
+						PL_LUT_NORMALIZED, { v, v, v, 255 }, c.source, c.target,
+						PL_COLOR_PRIM_BT_709, PL_COLOR_PRIM_BT_709, c.sourceNits, c.targetNits);
+					const double predicted = transfer[std::lround(level / 255.0 * (LedDrive::RAW_TRANSFER_SIZE - 1))];
+					const double difference = std::abs(out.r / 255.0 - predicted);
+					if (difference > worst) { worst = difference; worstLevel = level; }
+				}
+				const std::wstring evidence = L"transfer " + std::to_wstring(static_cast<int>(c.source)) +
+					L"->" + std::to_wstring(static_cast<int>(c.target)) + L" worst " +
+					std::to_wstring(worst * 255.0) + L" codes at " + std::to_wstring(worstLevel);
+				Logger::WriteMessage(evidence.c_str());
+				if (worst > 3.0 / 255.0) failures += evidence + L"; ";
+			}
+			Assert::IsTrue(failures.empty(), failures.c_str());
 		}
 
 		TEST_METHOD(LedCompensationShaderAppliesGainWithASoftKnee)

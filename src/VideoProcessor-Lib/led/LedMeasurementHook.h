@@ -32,11 +32,15 @@ namespace LedDrive
 		const pl_hook* Hook() const { return &hook; }
 		// Before rendering: which part of the picture to measure, the R, G, B
 		// weights for the APL, and the gamma boost exponent (the statistics
-		// describe the boosted picture, as the script's screenshots did).
-		void SetFrame(const MeasurementRect& rect, const double weights[3], double boost = 1.0);
-		// After rendering: finished measurements in frame order. wait > 0
-		// blocks up to that many milliseconds for the oldest (tests only).
-		int Collect(std::vector<RawMeasurement>& out, int waitMs = 0);
+		// describe the boosted picture, as the script's screenshots did), and
+		// the frame's source sequence, handed back with its measurement.
+		void SetFrame(const MeasurementRect& rect, const double weights[3], double boost = 1.0,
+			uint64_t sequence = 0);
+		// After rendering: finished measurements in frame order, and their
+		// sequences when asked. wait > 0 blocks up to that many milliseconds
+		// for the oldest (tests only).
+		int Collect(std::vector<RawMeasurement>& out, int waitMs = 0,
+			std::vector<uint64_t>* sequences = nullptr);
 		// Destroys the GPU buffers; call before the GPU is destroyed.
 		void Release();
 		int Dropped() const { return dropped; }
@@ -50,6 +54,8 @@ namespace LedDrive
 		pl_gpu gpu = nullptr;
 		pl_buf ring[RING] = {};
 		bool busy[RING] = {};
+		uint64_t slotSequence[RING] = {};
+		uint64_t sequence = 0;
 		std::deque<int> submitted;
 		int next = 0;
 		MeasurementRect rect;

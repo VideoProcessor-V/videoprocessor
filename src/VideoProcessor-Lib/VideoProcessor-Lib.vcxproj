@@ -198,6 +198,9 @@
     <ClInclude Include="led\LedMeasurement.h" />
     <ClInclude Include="led\LedDriveModule.h" />
     <ClInclude Include="led\LedMeasurementHook.h" />
+    <ClInclude Include="led\LedLookahead.h" />
+    <ClInclude Include="led\LedRawTransfer.h" />
+    <ClInclude Include="QueuedFrameStatistics.h" />
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
@@ -377,6 +380,7 @@
     <ClCompile Include="led\LedController.cpp" />
     <ClCompile Include="led\LedMeasurement.cpp" />
     <ClCompile Include="led\LedDriveModule.cpp" />
+    <ClCompile Include="led\LedLookahead.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
     <ClCompile Include="EOTF.cpp" />

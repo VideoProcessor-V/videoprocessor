@@ -60,14 +60,20 @@ namespace LedDrive
 		int minCommandGapMs = 100;
 		bool echo = true;
 		Terminator terminator = Terminator::Auto;
+		// Command transmission plus projector response, as pure dead time: the
+		// LED is modelled as reaching a commanded level this long after the
+		// command (whole output frames). Measured once with a camera.
+		int ledLatencyMs = 80;
+		// lpw : relative flux, ascending lpw; empty = flux proportional to lpw.
+		std::vector<std::pair<double, double>> fluxTable;
 	};
 
 	struct LedDriveConfig
 	{
 		bool enabled = false;
 		Mode mode = Mode::LogOnly;
+		// mode: script only; mode: compensate runs per output frame.
 		int tickMs = 400;
-		int leadMs = 0;
 		int ledFloor = 100;
 		int ledFloorBlack = 60;
 		int ledCeiling = 255;
@@ -86,6 +92,13 @@ namespace LedDrive
 		int antiPumpBand = 3;
 		// mode: script's highlightdetect (the script used max >= 215).
 		int scriptHighlightCode = 215;
+		// mode: compensate ramps: levels per second, and no movement while
+		// |target - current| <= deadband. early_ramp lets the ramp start ahead
+		// of a cut the lookahead has seen.
+		double rateUp = 400.0;
+		double rateDown = 120.0;
+		int deadband = 3;
+		bool earlyRamp = true;
 		double compensationEotf = 2.2;
 		// "Encode as if for this display gamma" on the projector's
 		// compensation_eotf: the old output_gamma 2.4 on film 2.2 lift, applied
@@ -98,8 +111,6 @@ namespace LedDrive
 		double highlightAreaSmall = 0.005;
 		double highlightAreaLarge = 0.05;
 		int highlightReleaseMs = 2000;
-		// One-pole model of the LED's response; 0 until it has been measured.
-		int ledResponseMs = 0;
 		int fadeFrames = 6;
 		double fadeMinStep = 0.5;
 		double cutThreshold = 24.0;
@@ -194,6 +205,21 @@ namespace LedDrive
 		return true;
 	}
 
+	// lpw : relative flux pairs, lpw ascending (0-255), flux positive.
+	inline bool ParseFluxTable(const std::string& text, std::vector<std::pair<double, double>>& table)
+	{
+		std::vector<std::pair<double, double>> pairs;
+		if (!Detail::ParsePairs(text, pairs)) return false;
+		for (size_t i = 0; i < pairs.size(); ++i)
+		{
+			if (pairs[i].first < 0 || pairs[i].first > 255 || pairs[i].second <= 0.0 || pairs[i].second > 10.0)
+				return false;
+			if (i > 0 && pairs[i].first <= pairs[i - 1].first) return false;
+		}
+		table = pairs;
+		return true;
+	}
+
 	inline bool ParseWeights(const std::string& text, double weights[3])
 	{
 		const auto items = Detail::SplitList(text);
@@ -241,6 +267,10 @@ namespace LedDrive
 			Integer("min_command_gap_ms", 0, 5000),
 			Boolean("echo"),
 			Choice("terminator", { "auto", "cr", "literal_cr", "script" }),
+			Integer("led_latency_ms", 0, 2000),
+			Custom("flux_table", [](const std::string& value)
+				{ std::vector<std::pair<double, double>> t; return ParseFluxTable(value, t); },
+				"ascending lpw:relative_flux pairs, e.g. 60:0.55, 80:0.78, 100:1.00"),
 		};
 	}
 
@@ -252,7 +282,10 @@ namespace LedDrive
 			Boolean("enabled"),
 			Choice("mode", { "compensate", "script", "log_only" }),
 			Integer("tick_ms", 50, 5000),
-			Integer("lead_ms", 0, 2000),
+			Number("rate_up", 1.0, 10000.0),
+			Number("rate_down", 1.0, 10000.0),
+			Integer("deadband", 0, 50),
+			Boolean("early_ramp"),
 			Integer("led_floor", 0, 255),
 			Integer("led_floor_black", 0, 255),
 			Integer("led_ceiling", 1, 255),
@@ -282,7 +315,6 @@ namespace LedDrive
 			Number("highlight_area_small", 0.0, 1.0),
 			Number("highlight_area_large", 0.0, 1.0),
 			Integer("highlight_release_ms", 0, 60000),
-			Integer("led_response_ms", 0, 10000),
 			Integer("fade_frames", 2, 120),
 			Number("fade_min_step", 0.0, 50.0),
 			Number("cut_threshold", 1.0, 255.0),
@@ -300,6 +332,17 @@ namespace LedDrive
 			const bool projector = section == "projector" || section.rfind("projector.", 0) == 0;
 			const bool led = section == "led_drive" || section.rfind("led_drive.", 0) == 0;
 			if (!projector && !led) continue;
+			std::string moved;
+			if (led && config.TryGetString(section, "led_response_ms", moved))
+			{
+				error = "[" + section + "] led_response_ms has moved: use led_latency_ms in [projector.Default]";
+				return false;
+			}
+			if (led && config.TryGetString(section, "lead_ms", moved))
+			{
+				error = "[" + section + "] lead_ms was removed: the lead is derived from the lookahead and led_latency_ms";
+				return false;
+			}
 			if (!ConfigSchema::ValidateSection(config, section,
 				projector ? projectorRules : ledRules, error))
 				return false;
@@ -355,6 +398,8 @@ namespace LedDrive
 		if (config.TryGetString(section, "min_command_gap_ms", value)) Detail::ParseInt(value, 0, 5000, result.minCommandGapMs);
 		config.TryGetBool(section, "echo", result.echo);
 		if (config.TryGetString(section, "terminator", value)) result.terminator = ParseTerminator(value);
+		if (config.TryGetString(section, "led_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.ledLatencyMs);
+		if (config.TryGetString(section, "flux_table", value)) ParseFluxTable(value, result.fluxTable);
 		return result;
 	}
 
@@ -380,7 +425,10 @@ namespace LedDrive
 				mode == "script" ? Mode::Script : Mode::LogOnly;
 		}
 		readInt("tick_ms", 50, 5000, result.tickMs);
-		readInt("lead_ms", 0, 2000, result.leadMs);
+		readNumber("rate_up", result.rateUp);
+		readNumber("rate_down", result.rateDown);
+		readInt("deadband", 0, 50, result.deadband);
+		config.TryGetBool(section, "early_ramp", result.earlyRamp);
 		readInt("led_floor", 0, 255, result.ledFloor);
 		readInt("led_floor_black", 0, 255, result.ledFloorBlack);
 		readInt("led_ceiling", 1, 255, result.ledCeiling);
@@ -403,7 +451,6 @@ namespace LedDrive
 		readNumber("highlight_area_small", result.highlightAreaSmall);
 		readNumber("highlight_area_large", result.highlightAreaLarge);
 		readInt("highlight_release_ms", 0, 60000, result.highlightReleaseMs);
-		readInt("led_response_ms", 0, 10000, result.ledResponseMs);
 		readInt("fade_frames", 2, 120, result.fadeFrames);
 		readNumber("fade_min_step", result.fadeMinStep);
 		readNumber("cut_threshold", result.cutThreshold);

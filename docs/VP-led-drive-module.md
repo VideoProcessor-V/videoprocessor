@@ -261,7 +261,11 @@ graduated, no visible change when the LED moves.
 
 ### 4.4 Modes by event
 
-- **Cut:** jump the light target (masked by the cut). Reset persistence.
+- **Cut:** `script` mode jumps the light target (masked by the cut).
+  `compensate` mode ramps to it like any other change when the lookahead
+  did not see the cut (the gain keeps content constant; a dark-to-bright
+  cut dims briefly while the LED comes up, bounded by headroom), and
+  ramps early when it did (below). Reset persistence.
 - **Scene:** drift — per-tick step tables in `script` mode; slew-limited
   per-frame ramps (`rate_up`/`rate_down`, `deadband`) in `compensate` mode.
 - **Fade to black:** track the light down toward `led_floor_black` at the
@@ -406,3 +410,53 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
     and cut jumps; lookahead statistics come from raw queued frames through
     a 1D transfer (answers-2 B6).
   - No key binding for `highlight_tolerance_stops` (owner: keys optional).
+
+### Step 5 (delta-1) implementation notes
+
+- Dead time: commands are numbered by output frame; the modelled level is
+  the last command at least `led_latency_ms` (rounded to whole frames at
+  the measured frame rate) old, and the gain follows it. One model serves
+  both cases: with lookahead the command is computed for the frame shown
+  when it lands; without, from the latest exact measurement.
+- `compensate` runs inside the render thread's per-frame call
+  (BeginFrame), under a short lock; serial commands are only queued to the
+  driver's own thread, which coalesces them. The module thread only logs.
+- Deadband with hysteresis: it stops a resting LED from starting to move,
+  but a ramp that has started runs on to its target (otherwise a ramp could
+  end up to `deadband` levels short).
+- Fades: the LED follows the fade's APL ratio, never faster than
+  `rate_down`; no deadband during a fade; the gain is still held.
+- Early ramp trigger: a cut anywhere in the visible queue, or an APL
+  difference of at least `cut_threshold` between the furthest queued frame
+  and the frame the command is for. "Current scene" for the dimming bound
+  is the frame shown when the command lands.
+- `script` mode: unchanged controller; its emulated contrast (the gain) is
+  applied `led_latency_ms` after the script step, so it lands with the LED
+  commands the script sends alongside it (as the old script's CNTR
+  commands did). Never early; never uses predictions.
+- Flux table: outside its range the flux is clamped to the end values
+  (delta-1 item 1), so a table that starts above `led_floor_black` gives no
+  extra gain below its first point; measure down to the lowest level used.
+  With no table the startup log line reports `lpw_max` (`?M`, else
+  `led_ceiling`).
+- Raw lookahead path: luma only, from the fork's `AnalysisLumaSource`
+  (YUV: native limited-range codes; 10-bit RGB: limited-range luma with
+  BT.709/BT.2020 weights; 8/12-bit RGB: full range). The exact pass uses
+  `apl_weights` on RGB, so coloured scenes differ; the correction ratio
+  (exact / predicted APL above black, 3 s window, reset whenever the
+  transfer is rebuilt) absorbs it. The transfer matches libplacebo's own
+  rendering of grey within about half a code for SDR and PQ sources
+  (test LedRawTransferMatchesTheRenderedOutput), including the SDR black
+  level that BT.1886 adds.
+- Third call site: the queued-frame walk calls a neutral
+  `QueuedFrameStatistics::IObserver` (src/VideoProcessor-Lib/
+  QueuedFrameStatistics.h); the module subscribes from the outer renderer's
+  LED update. Nothing in the walk names the LED module.
+- Side effect: `active_picture_lookahead_frames: 8` also turns on the
+  fork's own look-ahead inspection (crop proofs) for `[queue.Normal]`, so
+  it costs some CPU per frame whether or not the LED module is enabled.
+- Serial rate: per-frame targets are coalesced to what the port carries
+  (about 5-10 commands a second), so the real LED moves in coarser steps
+  than the model while the gain moves smoothly (answers-2 B3 accepts
+  this). If a staircase shows in acceptance test 1, the fix is to make the
+  model follow the commands actually sent.

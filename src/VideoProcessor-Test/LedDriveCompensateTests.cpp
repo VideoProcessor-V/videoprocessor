@@ -214,55 +214,33 @@ namespace VideoProcessorTest
 			Assert::IsTrue(out.light < 120, L"The LED follows the fade faster than the scene drift would");
 		}
 
-		TEST_METHOD(CutsJumpAndCutsToBlackUseTheBlackFloor)
-		{
-			const LedDriveConfig config = Compensate();
-			StatsBuilder builder(config);
-			CompensateController controller(config);
-			double now = 0.0;
-			for (int tick = 0; tick < 40; ++tick)
-				controller.Tick(Play(builder, now, 400.0, Frame(120.0)), 400);
-			const FrameStats cut = builder.Build(Frame(30.0), now);
-			Assert::IsTrue(cut.cut);
-			const auto toDark = controller.Tick(cut, 400);
-			Assert::AreEqual(CurveLevel(config, 30), toDark.light, L"A cut jumps straight to the target");
-			StatsBuilder bright(config);
-			CompensateController fromBright(config);
-			double later = 0.0;
-			for (int tick = 0; tick < 40; ++tick)
-				fromBright.Tick(Play(bright, later, 400.0, Frame(120.0)), 400);
-			const FrameStats black = bright.Build(Frame(17.0), later);
-			Assert::IsTrue(black.cut);
-			const auto toBlack = fromBright.Tick(black, 400);
-			Assert::AreEqual(config.ledFloorBlack, toBlack.light, L"A cut to black uses led_floor_black");
-		}
-
-		TEST_METHOD(ModuleCompensatesAlongTheModelledLedTrajectory)
+		TEST_METHOD(ModuleCompensatesAlongTheModelledLedLevel)
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
 			LedDriveConfig config = Compensate();
-			config.tickMs = 50;
-			config.ledResponseMs = 300;
 			ProjectorConfig port;
 			port.protocol = "barco_ascii";
 			port.ackTimeoutMs = 60;
 			port.minCommandGapMs = 0;
+			port.ledLatencyMs = 80;
 			{
 				LedDriveModule module(port, config,
 					[projector] { return std::make_unique<FakePort>(projector); });
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				Assert::AreEqual(1.0, module.CurrentGain().gain, 1e-9);
-				for (int frame = 0; frame < 10; ++frame)
-					module.SubmitMeasurement(Frame(18.0));
-				Assert::IsTrue(WaitFor([&] { return projector->light < 200; }));
-				const auto gain = module.CurrentGain();
+				module.SubmitMeasurement(Frame(18.0));
+				CompensationGain gain;
+				for (int frame = 1; frame <= 30; ++frame)
+					gain = module.BeginFrameAt(0, frame * 1000.0 / 60.0);
+				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }));
 				Assert::IsTrue(gain.active);
 				Assert::IsTrue(gain.domain == GainDomain::Linear);
 				const double modelled = module.ModelledLight();
-				Assert::IsTrue(modelled > projector->light, L"The model lags the commanded level");
-				Assert::AreEqual(255.0 / modelled, gain.gain, 0.05);
+				Assert::IsTrue(modelled < 255.0 && modelled > 60.0);
+				Assert::AreEqual(255.0 / modelled, gain.gain, 1e-9, L"The gain follows the modelled level");
+				Assert::AreEqual(module.CurrentGain().gain, gain.gain, 1e-12);
 				for (const auto& write : projector->Writes())
 					Assert::IsFalse(write.rfind(":CNTR", 0) == 0 && write != ":CNTR?\r",
 						L"compensate never touches the projector's contrast");

@@ -152,20 +152,55 @@ namespace LedDrive
 		return out;
 	}
 
-	CompensateController::CompensateController(const LedDriveConfig& configIn)
-		: config(configIn), light(configIn.ledCeiling)
+	FluxModel::FluxModel(const std::vector<std::pair<double, double>>& tableIn) : table(tableIn)
+	{
+	}
+
+	double FluxModel::Flux(double value) const
+	{
+		if (table.empty()) return value;
+		if (value <= table.front().first) return table.front().second;
+		if (value >= table.back().first) return table.back().second;
+		for (size_t i = 1; i < table.size(); ++i)
+			if (value <= table[i].first)
+			{
+				const auto& a = table[i - 1];
+				const auto& b = table[i];
+				return a.second + (b.second - a.second) * (value - a.first) / (b.first - a.first);
+			}
+		return table.back().second;
+	}
+
+	double FluxModel::Gain(int ceiling, double value) const
+	{
+		const double actual = Flux(value);
+		return actual > 0.0 ? Flux(ceiling) / actual : 1.0;
+	}
+
+	int FluxModel::LevelFor(double fraction, int low, int ceiling) const
+	{
+		const double needed = fraction * Flux(ceiling);
+		for (int candidate = std::max(0, low); candidate < ceiling; ++candidate)
+			if (Flux(candidate) >= needed - 1e-12) return candidate;
+		return ceiling;
+	}
+
+	CompensateController::CompensateController(const LedDriveConfig& configIn, const FluxModel& fluxIn)
+		: config(configIn), flux(fluxIn), level(configIn.ledCeiling), light(configIn.ledCeiling)
 	{
 	}
 
 	void CompensateController::Reset(int lightIn)
 	{
 		light = lightIn;
+		level = lightIn;
 		protection = 0.0;
 		area = 0.0;
 		previousApl = -1.0;
+		ramping = false;
 	}
 
-	ControllerOutput CompensateController::Tick(const FrameStats& stats, int elapsedMs)
+	ControllerOutput CompensateController::Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead)
 	{
 		ControllerOutput out;
 		const int ceiling = config.ledCeiling;
@@ -173,13 +208,17 @@ namespace LedDrive
 		const double knee = config.knee;
 		// The LED target follows the sustained APL: never chase a flash.
 		const int apl = std::max(0, static_cast<int>(stats.sustainedApl));
-		const double elapsed = std::max(1, elapsedMs);
+		const double elapsed = std::max(1.0, elapsedMs);
+		auto linearOf = [eotf](double code)
+		{
+			return std::pow(std::max(0.0, std::min((code - 16.0) / 219.0, 1.0)), eotf);
+		};
 
 		// Sustained highlight in linear light at full LED; a flash shorter than
 		// highlight_persist_ms never reaches it.
-		const double highlightLinear = std::pow(
-			std::max(0.0, std::min((stats.sustainedHighlight - 16.0) / 219.0, 1.0)), eotf);
-		const double fraction = static_cast<double>(light) / ceiling;
+		const double highlightLinear = linearOf(stats.sustainedHighlight);
+		// The LED's share of full light, by flux (flux_table), not by level.
+		const double fraction = flux.Flux(level) / flux.Flux(ceiling);
 		// Would it reach the knee once compensated for the current LED level?
 		const bool exceeds = highlightLinear / fraction > 1.0 - knee;
 		// Engage within ~100 ms of a sustained highlight, relax over
@@ -206,7 +245,7 @@ namespace LedDrive
 		// scene never raises the floor.
 		const double allowedStops = config.highlightToleranceStops * (1.0 - large);
 		const double highlightFloor = protection *
-			std::ceil(highlightLinear / std::pow(2.0, allowedStops) * ceiling);
+			flux.LevelFor(highlightLinear / std::pow(2.0, allowedStops), 0, ceiling);
 
 		const bool cutToBlack = stats.cut && apl < 20;
 		const bool toBlack = stats.fade || cutToBlack;
@@ -215,28 +254,60 @@ namespace LedDrive
 		out.lightTarget = std::max(config.ledFloorBlack, std::min(ceiling,
 			std::max(base, static_cast<int>(highlightFloor))));
 
-		const int before = light;
-		if (stats.cut)
-			light = out.lightTarget; // a cut masks the jump
-		else if (stats.fade && light > out.lightTarget)
+		// Early ramp: a cut or a large APL change in the queue. Brightening
+		// ahead of it is free (headroom only grows); dimming ahead of it stops
+		// where the current scene's highlights would pass the tolerance.
+		int target = out.lightTarget;
+		bool early = false;
+		if (ahead && config.earlyRamp &&
+			(ahead->cutAhead || std::abs(ahead->stats.apl - stats.apl) >= config.cutThreshold))
 		{
-			// Follow the fade at its own rate (its APL ratio above black), at
-			// least one down-table step.
+			const int aheadApl = std::max(0, static_cast<int>(ahead->stats.apl));
+			const int aheadTarget = std::max(config.ledFloorBlack, std::min(ceiling, aheadApl < 20 ?
+				config.ledFloorBlack : std::max(CurveLevel(config, aheadApl), config.ledFloor)));
+			if (aheadTarget > target)
+			{
+				target = aheadTarget;
+				early = true;
+			}
+			else if (aheadTarget < target)
+			{
+				const int currentLimit = std::max(config.ledFloorBlack, flux.LevelFor(
+					linearOf(stats.highlight) / std::pow(2.0, config.highlightToleranceStops), 0, ceiling));
+				const int bounded = std::max(aheadTarget, currentLimit);
+				if (bounded < target)
+				{
+					target = bounded;
+					early = true;
+				}
+			}
+		}
+
+		const double maxUp = config.rateUp * elapsed / 1000.0;
+		const double maxDown = config.rateDown * elapsed / 1000.0;
+		if (stats.fade && level > target)
+		{
+			// Follow the fade at its own rate (its APL ratio above black), never
+			// faster than rate_down.
 			const double ratio = previousApl > 16.0 ?
 				std::max(0.0, std::min((stats.apl - 16.0) / (previousApl - 16.0), 1.0)) : 1.0;
-			const int stepped = light - config.stepsDown.StepFor(light - out.lightTarget);
-			light = std::max(out.lightTarget, std::min(stepped, static_cast<int>(std::floor(light * ratio))));
+			level = std::max(static_cast<double>(target), level - std::min(maxDown, level * (1.0 - ratio)));
 		}
-		else if (light != out.lightTarget)
+		else
 		{
-			const int distance = std::abs(out.lightTarget - light);
-			if (out.lightTarget > light)
-				light += (apl < config.stepsUpSplitApl ? config.stepsUpDark : config.stepsUpBright)
-					.StepFor(distance);
-			else
-				light -= config.stepsDown.StepFor(distance);
+			// The deadband only keeps a resting LED still; a ramp that has
+			// started runs on to its target.
+			if (std::abs(target - level) > config.deadband) ramping = true;
+			if (ramping)
+			{
+				if (target > level) level = std::min(static_cast<double>(target), level + maxUp);
+				else level = std::max(static_cast<double>(target), level - maxDown);
+				ramping = level != target;
+			}
 		}
-		if (light != before) out.lightCommand = light;
+		const int commanded = static_cast<int>(std::lround(level));
+		if (commanded != light) out.lightCommand = commanded;
+		light = commanded;
 		previousApl = stats.apl;
 
 		out.light = light;
@@ -245,10 +316,11 @@ namespace LedDrive
 		out.highlightCap = highlightLinear > 0.0 ? 1.0 / highlightLinear : 1e9;
 		out.capWeight = protection * large;
 		out.holdGain = stats.fade;
-		out.gain = CompensationGainFor(ceiling, light, out);
+		out.gain = CompensationGainFor(flux, ceiling, light, out);
 		std::ostringstream log;
 		log << "LED compensate: apl=" << apl << " sustained_highlight=" << static_cast<int>(stats.sustainedHighlight)
-			<< " light " << light << "/" << out.lightTarget << (out.lightCommand >= 0 ? " sent" : "")
+			<< " light " << light << "/" << out.lightTarget << (early ? " early:" + std::to_string(target) : "")
+			<< (out.lightCommand >= 0 ? " sent" : "")
 			<< " protection=" << protection << " area=" << area << " gain=" << out.gain
 			<< (stats.cut ? " cut" : "") << (stats.fade ? " fade" : "");
 		out.log = log.str();

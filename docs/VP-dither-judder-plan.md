@@ -674,9 +674,14 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   - `mode: compensate` interpretations of guide 4.2-4.4 (sustained APL for
     the LED target, 100 ms engage / `highlight_release_ms` relax,
     area-blended floor and gain cap, fade gain hold, cut jumps) are listed
-    in `VP-led-drive-module.md` section 9 for the planning side to confirm.
-  - `led_response_ms` is 0 until the LED step response has been filmed;
-    with real lag, a dimming step will briefly show as a flash.
+    in `VP-led-drive-module.md` section 9 for the planning side to confirm;
+    step 5 replaced the cut jumps with ramps and early ramps.
+  - `led_latency_ms` (in `[projector.Default]`) defaults to 80 ms until the
+    LED step response has been filmed; if it is wrong, a hard cut shows a
+    brief flash or dip (acceptance test 2).
+  - Step 5 implementation notes (deadband hysteresis, script-mode gain
+    delay, early-ramp trigger, raw-path luma weights, serial-rate
+    coalescing) are in `VP-led-drive-module.md` section 9.
 - Stage 2 addendum (2026-10-09): FSRCNNX_x2_16-0-4-1 (igv, LGPL-3.0),
   ArtCNN_C4F16 (Artoriuz, MIT) and SSimSuperRes (igv, LGPL-3.0) installed as
   disabled `[shader.standard.*]` entries; once enabled each engages itself
