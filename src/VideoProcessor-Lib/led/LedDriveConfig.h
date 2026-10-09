@@ -87,6 +87,17 @@ namespace LedDrive
 		// mode: script's highlightdetect (the script used max >= 215).
 		int scriptHighlightCode = 215;
 		double compensationEotf = 2.2;
+		// "Encode as if for this display gamma" on the projector's
+		// compensation_eotf: the old output_gamma 2.4 on film 2.2 lift, applied
+		// by the module whether or not it drives the LED. 0 = off.
+		double gammaBoost = 0.0;
+		// mode: compensate's highlight policy: below highlight_area_small the
+		// knee absorbs sustained highlights, above highlight_area_large the
+		// global gain makes room; blended in between. Protection relaxes over
+		// highlight_release_ms (it engages over highlight_persist_ms).
+		double highlightAreaSmall = 0.005;
+		double highlightAreaLarge = 0.05;
+		int highlightReleaseMs = 2000;
 		// One-pole model of the LED's response; 0 until it has been measured.
 		int ledResponseMs = 0;
 		int fadeFrames = 6;
@@ -262,6 +273,15 @@ namespace LedDrive
 			Integer("anti_pump_band", 0, 50),
 			Integer("script_highlight_code", 16, 255),
 			Number("compensation_eotf", 1.0, 3.0),
+			Custom("gamma_boost", [](const std::string& value)
+				{
+					double gamma = 0.0;
+					return ConfigFile::NormalizeName(value) == "off" ||
+						(Detail::ParseNumber(value, gamma) && gamma >= 1.0 && gamma <= 3.0);
+				}, "off or a display gamma from 1.0 to 3.0, e.g. 2.4"),
+			Number("highlight_area_small", 0.0, 1.0),
+			Number("highlight_area_large", 0.0, 1.0),
+			Integer("highlight_release_ms", 0, 60000),
 			Integer("led_response_ms", 0, 10000),
 			Integer("fade_frames", 2, 120),
 			Number("fade_min_step", 0.0, 50.0),
@@ -293,6 +313,14 @@ namespace LedDrive
 				if (floor > ceiling || floorBlack > floor)
 				{
 					error = "[" + section + "] needs led_floor_black <= led_floor <= led_ceiling";
+					return false;
+				}
+				double areaSmall = 0.005, areaLarge = 0.05;
+				if (config.TryGetString(section, "highlight_area_small", value)) Detail::ParseNumber(value, areaSmall);
+				if (config.TryGetString(section, "highlight_area_large", value)) Detail::ParseNumber(value, areaLarge);
+				if (areaSmall >= areaLarge)
+				{
+					error = "[" + section + "] needs highlight_area_small < highlight_area_large";
 					return false;
 				}
 			}
@@ -369,11 +397,24 @@ namespace LedDrive
 		readInt("anti_pump_band", 0, 50, result.antiPumpBand);
 		readInt("script_highlight_code", 16, 255, result.scriptHighlightCode);
 		readNumber("compensation_eotf", result.compensationEotf);
+		if (config.TryGetString(section, "gamma_boost", value))
+			result.gammaBoost = ConfigFile::NormalizeName(value) == "off" ? 0.0 :
+				(Detail::ParseNumber(value, result.gammaBoost) ? result.gammaBoost : 0.0);
+		readNumber("highlight_area_small", result.highlightAreaSmall);
+		readNumber("highlight_area_large", result.highlightAreaLarge);
+		readInt("highlight_release_ms", 0, 60000, result.highlightReleaseMs);
 		readInt("led_response_ms", 0, 10000, result.ledResponseMs);
 		readInt("fade_frames", 2, 120, result.fadeFrames);
 		readNumber("fade_min_step", result.fadeMinStep);
 		readNumber("cut_threshold", result.cutThreshold);
 		return result;
+	}
+
+	// Exponent the compensation hook (and the measurement) apply to the
+	// encoded signal for gamma_boost: compensation_eotf / gamma_boost. 1 = off.
+	inline double BoostExponent(const LedDriveConfig& led)
+	{
+		return led.gammaBoost > 0.0 ? led.compensationEotf / led.gammaBoost : 1.0;
 	}
 
 	// The module talks to the projector only when it is enabled and not in

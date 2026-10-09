@@ -238,6 +238,7 @@
     <ClCompile Include="LedDriveProtocolTests.cpp" />
     <ClCompile Include="LedDriveControllerTests.cpp" />
     <ClCompile Include="LedDriveMeasurementTests.cpp" />
+    <ClCompile Include="LedDriveCompensateTests.cpp" />
     <ClCompile Include="ConfigEditorCoreTests.cpp" />
     <ClCompile Include="ConfigurationRpcServerTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>

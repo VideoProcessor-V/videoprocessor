@@ -30,9 +30,10 @@ namespace LedDrive
 		MeasurementHook& operator=(const MeasurementHook&) = delete;
 
 		const pl_hook* Hook() const { return &hook; }
-		// Before rendering: which part of the picture to measure and the
-		// R, G, B weights for the APL.
-		void SetFrame(const MeasurementRect& rect, const double weights[3]);
+		// Before rendering: which part of the picture to measure, the R, G, B
+		// weights for the APL, and the gamma boost exponent (the statistics
+		// describe the boosted picture, as the script's screenshots did).
+		void SetFrame(const MeasurementRect& rect, const double weights[3], double boost = 1.0);
 		// After rendering: finished measurements in frame order. wait > 0
 		// blocks up to that many milliseconds for the oldest (tests only).
 		int Collect(std::vector<RawMeasurement>& out, int waitMs = 0);
@@ -53,6 +54,7 @@ namespace LedDrive
 		int next = 0;
 		MeasurementRect rect;
 		float weights[3] = { 0.114f, 0.587f, 0.299f };
+		float boost = 1.0f;
 		int dropped = 0;
 		int measured = 0;
 	};

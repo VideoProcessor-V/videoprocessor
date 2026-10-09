@@ -43,7 +43,7 @@ namespace LedDrive
 	{
 	}
 
-	FrameStats StatsBuilder::Build(const RawMeasurement& raw)
+	FrameStats StatsBuilder::Build(const RawMeasurement& raw, double timeMs)
 	{
 		FrameStats stats;
 		if (raw.blocks == 0) return stats;
@@ -57,6 +57,19 @@ namespace LedDrive
 		for (int code = std::max(0, std::min(config.scriptHighlightCode, 255)); code < HISTOGRAM_BINS; ++code)
 			bright += raw.histogram[code];
 		stats.highlightArea = static_cast<double>(bright) / raw.blocks;
+
+		// Sustained highlight: minimum over the persistence window (the window
+		// always includes this frame and the newest one before it began).
+		history.push_back({ timeMs, stats.highlight, stats.apl });
+		while (history.size() > 1 && history[1].time <= timeMs - config.highlightPersistMs)
+			history.pop_front();
+		stats.sustainedHighlight = stats.highlight;
+		stats.sustainedApl = stats.apl;
+		for (const Sample& sample : history)
+		{
+			stats.sustainedHighlight = std::min(stats.sustainedHighlight, sample.highlight);
+			stats.sustainedApl = std::min(stats.sustainedApl, sample.apl);
+		}
 
 		std::vector<double> cells(GRID_W * GRID_H, -1.0);
 		for (int i = 0; i < GRID_W * GRID_H; ++i)

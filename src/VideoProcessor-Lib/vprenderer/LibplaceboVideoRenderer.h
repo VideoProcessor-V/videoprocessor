@@ -310,5 +310,9 @@ private:
 	// full light. Recreated only when its configuration sections change.
 	std::shared_ptr<LedDrive::LedDriveModule> m_ledDrive;
 	std::string m_ledDriveSignature;
+	// gamma_boost (and the hook's knee/EOTF) as last published, for new Impls.
+	double m_ledBoostExponent = 1.0;
+	double m_ledCompensationEotf = 2.2;
+	double m_ledKnee = 0.08;
 	void UpdateLedDrive(const ConfigFile& configuration);
 };

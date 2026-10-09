@@ -3632,6 +3632,11 @@ struct LibplaceboVideoRenderer::Impl
 	LedDrive::MeasurementHook ledMeasurement;
 	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
 	bool ledCompensationConfigured = false;
+	// [led_drive] gamma_boost applies whether or not the module drives the
+	// LED; published by the outer renderer from the configuration.
+	std::atomic<double> ledBoostExponent{ 1.0 };
+	std::atomic<double> ledCompensationEotf{ 2.2 };
+	std::atomic<double> ledKnee{ 0.08 };
 	std::vector<const pl_hook*> frameHooks;
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
@@ -13899,7 +13904,8 @@ struct LibplaceboVideoRenderer::Impl
         // LED drive, gain in: measurement first (it must see the picture before
         // the gain), then the compensation hook with this frame's parameters.
         const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
-        if (led)
+        const double boostExponent = ledBoostExponent.load(std::memory_order_acquire);
+        if (led || boostExponent != 1.0)
         {
             if (!ledCompensationConfigured)
             {
@@ -13910,12 +13916,18 @@ struct LibplaceboVideoRenderer::Impl
                 ledCompensationConfigured = true;
             }
             ledCompensation.Ensure(hookTemplates);
-            const LedDrive::CompensationGain compensation = led->CurrentGain();
-            ledMeasurement.SetFrame(LedDrive::ActivePictureRect(hdrTrustedPicture.available,
-                hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right,
-                hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
-                renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights);
-            frameHooks.push_back(ledMeasurement.Hook());
+            LedDrive::CompensationGain compensation;
+            compensation.knee = ledKnee.load(std::memory_order_acquire);
+            compensation.eotf = ledCompensationEotf.load(std::memory_order_acquire);
+            if (led)
+            {
+                compensation = led->CurrentGain();
+                ledMeasurement.SetFrame(LedDrive::ActivePictureRect(hdrTrustedPicture.available,
+                    hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right,
+                    hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
+                    renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent);
+                frameHooks.push_back(ledMeasurement.Hook());
+            }
             const size_t compensationStart = frameHooks.size();
             ledCompensation.Collect(false, frameHooks);
             for (size_t i = compensationStart; i < frameHooks.size(); ++i)
@@ -13926,6 +13938,7 @@ struct LibplaceboVideoRenderer::Impl
                 CustomHookChain::SetHookParameter(frameHooks[i], "gain_domain",
                     compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0);
                 CustomHookChain::SetHookParameter(frameHooks[i], "compensation_eotf", compensation.eotf);
+                CustomHookChain::SetHookParameter(frameHooks[i], "boost", boostExponent);
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
@@ -15193,6 +15206,9 @@ void LibplaceboVideoRenderer::Build()
 	// RenderLoop performs the actual initialization on its own thread.
 	m_impl.reset(new Impl());
 	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
+	m_impl->ledBoostExponent.store(m_ledBoostExponent, std::memory_order_release);
+	m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
+	m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
 	m_impl->displayRefreshRate.SetEventSink(
 		[this](const std::string& event, double actualRefreshRate,
 			double requestedRefreshRate, double previousRefreshRate)
@@ -15442,18 +15458,35 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		if (const auto* values = configuration.GetSectionValues(section))
 			for (const auto& value : *values)
 				signature += std::string(section) + "." + value.first + "=" + value.second + "\n";
+	std::string validationError;
+	const bool valid = LedDrive::Validate(configuration, validationError);
+	// The gamma boost applies even with the module off or in log_only.
+	const LedDrive::LedDriveConfig boostConfig = valid ?
+		LedDrive::ReadLedDriveConfig(configuration) : LedDrive::LedDriveConfig();
+	if (LedDrive::BoostExponent(boostConfig) != m_ledBoostExponent)
+		DebugLog::Log("LED drive: gamma boost %s (exponent %.4f)",
+			boostConfig.gammaBoost > 0.0 ? "on" : "off", LedDrive::BoostExponent(boostConfig));
+	m_ledBoostExponent = LedDrive::BoostExponent(boostConfig);
+	m_ledCompensationEotf = boostConfig.compensationEotf;
+	m_ledKnee = boostConfig.knee;
+	if (m_impl)
+	{
+		m_impl->ledBoostExponent.store(m_ledBoostExponent, std::memory_order_release);
+		m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
+		m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
+	}
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
-		LedDrive::ReadLedDriveConfig(configuration).enabled)
+		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
 		return;
 	m_ledDriveSignature = signature;
 	std::shared_ptr<LedDrive::LedDriveModule> previous = m_ledDrive;
 	m_ledDrive.reset();
 	if (m_impl) std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
 	if (previous) previous->Stop();
-	std::string error;
-	if (!LedDrive::Validate(configuration, error))
+	if (!valid)
 	{
-		DebugLog::Log("LED drive: configuration rejected (%s); module off", error.c_str());
+		DebugLog::Log("LED drive: configuration rejected (%s); module and gamma boost off",
+			validationError.c_str());
 		return;
 	}
 	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);

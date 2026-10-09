@@ -27,7 +27,7 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
     for (int dy = 0; dy < 3; dy++)
         for (int dx = 0; dx < 3; dx++) {
             ivec2 p = clamp(origin + ivec2(dx, dy), lo, hi);
-            acc += dot(clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0)), weights);
+            acc += dot(pow(clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0)), vec3(boost)), weights);
         }
     float code = 16.0 + 219.0 * clamp(acc / 9.0, 0.0, 1.0);
     uint scaled = uint(code * 16.0 + 0.5);
@@ -63,9 +63,11 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 		Release();
 	}
 
-	void MeasurementHook::SetFrame(const MeasurementRect& rectIn, const double weightsIn[3])
+	void MeasurementHook::SetFrame(const MeasurementRect& rectIn, const double weightsIn[3],
+		double boostIn)
 	{
 		rect = rectIn;
+		boost = static_cast<float>(boostIn);
 		for (int i = 0; i < 3; ++i) weights[i] = static_cast<float>(weightsIn[i]);
 	}
 
@@ -156,11 +158,12 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 		descriptors[1].num_buffer_vars = 5;
 		descriptors[1].memory = PL_MEMORY_COHERENT;
 
-		const pl_shader_var variables[4] = {
+		const pl_shader_var variables[5] = {
 			{ pl_var_vec4("rect_px"), rectPx, true },
 			{ pl_var_vec2("blocks"), blocks, true },
 			{ pl_var_vec2("block_step"), step, true },
-			{ pl_var_vec3("weights"), weights, true } };
+			{ pl_var_vec3("weights"), weights, true },
+			{ pl_var_float("boost"), &boost, true } };
 
 		pl_custom_shader custom{};
 		custom.description = "VideoProcessor LED drive measurement";
@@ -170,7 +173,7 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 		custom.descriptors = descriptors;
 		custom.num_descriptors = 2;
 		custom.variables = variables;
-		custom.num_variables = 4;
+		custom.num_variables = 5;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;

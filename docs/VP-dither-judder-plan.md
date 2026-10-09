@@ -563,3 +563,14 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   - Step order: the compensation shader (encoded gain only) moved into step
     3, because `mode: script` cannot work without applying its contrast
     gain. Step 4 adds the linear domain and `mode: compensate`.
+  - Owner decision: the gamma boost moved into the LED module
+    (`gamma_boost: 2.4`, applied always, measured as boosted) and
+    `output_gamma` is now 2.2. Check by eye that the picture with the module
+    off matches the old output_gamma 2.4 look.
+  - `mode: compensate` interpretations of guide 4.2-4.4 (sustained APL for
+    the LED target, 100 ms engage / `highlight_release_ms` relax,
+    area-blended floor and gain cap, fade gain hold, cut jumps) are listed
+    in `VP-led-drive-module.md` section 9 for the planning side to confirm.
+  - `led_response_ms` is 0 until the LED step response has been filmed;
+    with real lag, a dimming step will briefly show as a flash.
+

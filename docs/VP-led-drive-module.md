@@ -316,3 +316,41 @@ On the projector (owner):
 - No new windows or menus; Config app sections and key bindings only.
 - Nothing in `Low_Latency` changes except `lead_ms` being forced to 0.
 - Keep `mode: script` working for as long as the module exists.
+
+## 9. Owner decisions and implementation notes (2026-10-09, step 4)
+
+- **Gamma boost lives in the module.** `[led_drive] gamma_boost: 2.4`
+  ("encode as if for a 2.4 display" on `compensation_eotf` 2.2) replaces the
+  old `output_gamma: 2.4` lift; VP's `output_gamma` is set honestly to 2.2.
+  The compensation hook applies `v^(compensation_eotf / gamma_boost)` first,
+  then the script contrast gain or the compensate linear gain, matching the
+  old physical order (VP's boosted signal, then the projector). The boost
+  applies whenever it is configured, even with `enabled: false` or in
+  `log_only`; `gamma_boost: off` disables it. The measurement applies the
+  same boost so the statistics describe the boosted picture, as the script's
+  screenshots did. With no calibration LUT this is identical to the old
+  pipeline.
+- **mode: compensate as implemented** (interpretations to confirm):
+  - The LED target follows the *sustained* APL (minimum over
+    `highlight_persist_ms`), so a flash never makes the LED chase it; a
+    darkening acts at once.
+  - Protection engages within ~100 ms once a sustained highlight would
+    reach the knee after compensation, and relaxes linearly over
+    `highlight_release_ms` (new key, default 2000).
+  - Highlight floor = `protection x ceil(h_lin / 2^(tolerance x (1 - large)) x ceiling)`,
+    where `large` is a smoothstep of the highlight area between the new keys
+    `highlight_area_small` (0.005) and `highlight_area_large` (0.05):
+    small sustained highlights are compressed by the knee within the
+    tolerance, large ones lower the global gain (`gain = mix(gain_led,
+    min(gain_led, 1/h_lin), protection x large)`).
+  - Tiny highlights are free because the 99.5th-percentile statistic does
+    not see anything under 0.5% of the picture (the same size as
+    `highlight_area_small`); no separate rule.
+  - Fade: the light target is `led_floor_black`, the LED follows the fade's
+    APL ratio (at least one down-table step per tick) and the gain is held
+    at its pre-fade value. Cut: jump to the target; a cut to black (APL
+    below 20) uses `led_floor_black`.
+  - The gain follows a one-pole model of the LED (`led_response_ms`, 0 =
+    instant until the camera measurement exists), never the target.
+  - No key binding for `highlight_tolerance_stops` (owner: keys optional).
+

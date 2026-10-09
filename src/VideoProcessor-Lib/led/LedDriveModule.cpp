@@ -4,6 +4,7 @@
 #include "../DebugLog.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace LedDrive
 {
@@ -17,10 +18,26 @@ namespace LedDrive
 
 	LedDriveModule::LedDriveModule(const ProjectorConfig& projectorIn, const LedDriveConfig& ledIn,
 		SerialPortFactory portFactoryIn)
-		: projector(projectorIn), led(ledIn), portFactory(std::move(portFactoryIn)), statsBuilder(ledIn)
+		: projector(projectorIn), led(ledIn), portFactory(std::move(portFactoryIn)), statsBuilder(ledIn),
+		created(std::chrono::steady_clock::now())
 	{
 		gain.knee = led.knee;
 		gain.eotf = led.compensationEotf;
+		modelFrom = modelTo = led.ledCeiling;
+		modelStart = created;
+	}
+
+	double LedDriveModule::ModelledLightLocked(std::chrono::steady_clock::time_point now) const
+	{
+		if (led.ledResponseMs <= 0) return modelTo;
+		const double elapsed = std::chrono::duration<double, std::milli>(now - modelStart).count();
+		return modelTo + (modelFrom - modelTo) * std::exp(-elapsed / led.ledResponseMs);
+	}
+
+	double LedDriveModule::ModelledLight() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return ModelledLightLocked(std::chrono::steady_clock::now());
 	}
 
 	LedDriveModule::~LedDriveModule()
@@ -53,7 +70,8 @@ namespace LedDrive
 	void LedDriveModule::SubmitMeasurement(const RawMeasurement& raw)
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		const FrameStats stats = statsBuilder.Build(raw);
+		const FrameStats stats = statsBuilder.Build(raw, std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - created).count());
 		if (stats.blocks == 0) return;
 		latest = stats;
 		haveStats = true;
@@ -65,7 +83,17 @@ namespace LedDrive
 	CompensationGain LedDriveModule::CurrentGain() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		return gain;
+		CompensationGain current = gain;
+		if (compensating && applyGain)
+		{
+			// Follow the LED's modelled trajectory every frame, never the target,
+			// so content brightness stays constant while it moves.
+			current.active = true;
+			current.domain = GainDomain::Linear;
+			current.gain = holding ? heldGain : CompensationGainFor(led.ledCeiling,
+				ModelledLightLocked(std::chrono::steady_clock::now()), policy);
+		}
+		return current;
 	}
 
 	bool LedDriveModule::DrivingProjector() const
@@ -111,15 +139,21 @@ namespace LedDrive
 			live = driving;
 		}
 		BringToKnownState(*driver, led.ledCeiling);
-		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms%s", ModeName(led.mode),
-			driving ? protocol.c_str() : "none (dry run)", led.tickMs,
-			led.mode == Mode::Compensate ? " (compensate arrives in step 4; behaving as script)" : "");
+		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f",
+			ModeName(led.mode), driving ? protocol.c_str() : "none (dry run)", led.tickMs, led.gammaBoost);
 
 		ScriptController controller(led);
 		controller.Reset(led.ledCeiling, 50);
-		// The emulated contrast is applied to the picture only while the
-		// projector is really being driven; a dry run never changes the picture.
-		const bool applyGain = driving && led.mode != Mode::LogOnly;
+		CompensateController compensator(led);
+		compensator.Reset(led.ledCeiling);
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			compensating = led.mode == Mode::Compensate;
+			// Compensation is applied to the picture only while the projector
+			// is really being driven; a dry run never changes the picture.
+			applyGain = driving && led.mode != Mode::LogOnly;
+		}
+		auto previousTick = std::chrono::steady_clock::now();
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
@@ -137,7 +171,35 @@ namespace LedDrive
 				pendingCut = pendingFade = false;
 			}
 			int durationMs = 0;
-			if (have)
+			if (have && compensating)
+			{
+				const int elapsed = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+					tickStart - previousTick).count());
+				const ControllerOutput out = compensator.Tick(stats, elapsed);
+				if (out.lightCommand >= 0) driver->SetLight(out.lightCommand);
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					if (out.lightCommand >= 0 && applyGain)
+					{
+						modelFrom = ModelledLightLocked(tickStart);
+						modelTo = out.lightCommand;
+						modelStart = tickStart;
+					}
+					if (out.holdGain && !holding)
+						heldGain = CompensationGainFor(led.ledCeiling, ModelledLightLocked(tickStart), policy);
+					holding = out.holdGain;
+					policy = out;
+					gain.knee = out.knee;
+					++ticks;
+				}
+				const auto now = std::chrono::steady_clock::now();
+				if (out.lightCommand >= 0 || now - lastLogTime >= std::chrono::seconds(10))
+				{
+					DebugLog::Log("%s%s", out.log.c_str(), applyGain ? "" : " (dry run)");
+					lastLogTime = now;
+				}
+			}
+			else if (have)
 			{
 				const ControllerOutput out = controller.Tick(stats);
 				if (out.lightCommand >= 0) driver->SetLight(out.lightCommand);
@@ -163,6 +225,7 @@ namespace LedDrive
 				std::lock_guard<std::mutex> guard(mutex);
 				++ticks;
 			}
+			previousTick = tickStart;
 			if (!WaitUntil(tickStart + std::chrono::milliseconds(std::max(led.tickMs, durationMs))))
 				break;
 		}
@@ -171,6 +234,7 @@ namespace LedDrive
 			std::lock_guard<std::mutex> guard(mutex);
 			gain.active = false;
 			gain.gain = 1.0;
+			compensating = false;
 		}
 		if (driving) RestoreFullLight(*driver, led.ledCeiling);
 		driver->Close();

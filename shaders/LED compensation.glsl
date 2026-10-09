@@ -17,6 +17,9 @@
  *                projector's CNTR control); 1 = multiply linear light
  *                (mode: compensate), linearised with compensation_eotf
  *   compensation_eotf  the projector's real display gamma (FL35: film 2.2)
+ *   boost        gamma boost exponent, compensation_eotf / gamma_boost
+ *                (2.2 / 2.4 for the old output_gamma 2.4 lift); applied first,
+ *                always, even when the LED is not being driven. 1 = off
  *
  * Above 1 - knee the result rolls off with slope 1 at the knee point and
  * approaches 1.0, so a boosted highlight keeps its gradation instead of
@@ -54,6 +57,13 @@
 //!MAXIMUM 3.0
 2.2
 
+//!PARAM boost
+//!DESC Gamma boost exponent (1 = off)
+//!TYPE float
+//!MINIMUM 0.2
+//!MAXIMUM 3.0
+1.0
+
 //!HOOK PREOUTPUT
 //!BIND HOOKED
 //!DESC VideoProcessor LED drive compensation
@@ -68,9 +78,15 @@ vec3 soft_knee(vec3 x, float k)
 vec4 hook()
 {
     vec4 color = HOOKED_texOff(0);
-    if (gain == 1.0)
+    if (gain == 1.0 && boost == 1.0)
         return color;
     vec3 v = max(color.rgb, vec3(0.0));
+    // The gamma boost comes first: the old pipeline boosted VP's output, and
+    // the projector's contrast or LED acted on that boosted signal.
+    if (boost != 1.0)
+        v = pow(v, vec3(boost));
+    if (gain == 1.0)
+        return vec4(v, color.a);
     bool linear = gain_domain > 0.5;
     vec3 x = linear ? pow(v, vec3(compensation_eotf)) : v;
     x *= gain;

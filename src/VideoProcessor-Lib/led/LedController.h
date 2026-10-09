@@ -22,6 +22,12 @@ namespace LedDrive
 		// percentile of 3x3 block means).
 		double highlight = 16.0;
 		double highlightArea = 0.0;
+		// The lowest highlight of the last highlight_persist_ms: a flash shorter
+		// than that never raises it.
+		double sustainedHighlight = 16.0;
+		// The lowest APL of the same window: mode: compensate aims the LED at it,
+		// so a flash never makes the LED chase it (a fall still acts at once).
+		double sustainedApl = 16.0;
 		bool cut = false;
 		bool fade = false;
 		// Block-mean histogram in code units and the number of blocks measured.
@@ -57,8 +63,19 @@ namespace LedDrive
 		// How long this tick took in the script (its sleeps); the runner waits
 		// at least this long before the next tick.
 		int durationMs = 0;
+		// mode: compensate. The per-frame gain is ceiling / modelled LED level
+		// (the module computes it), limited towards highlightCap by capWeight
+		// (large sustained highlights), or held at its last value while
+		// holdGain is set (fades to black).
+		double highlightCap = 1e9;
+		double capWeight = 0.0;
+		bool holdGain = false;
 		std::string log;
 	};
+
+	// The light level the configured curve gives for an APL (code units),
+	// truncated like the script; not floored or limited.
+	int CurveLevel(const LedDriveConfig& config, int apl);
 
 	// beta_22.py ported parameter for parameter. Light: the configured curve
 	// and step tables. Contrast: the script's bands and dynamics, emulated in
@@ -82,4 +99,44 @@ namespace LedDrive
 		int light;
 		int contrast;
 	};
+
+	// mode: compensate (docs/VP-led-drive-module.md 4.2-4.4). The projector's
+	// contrast stays at 50; the picture is compensated in linear light so only
+	// the black floor moves. Highlight policy: persistence gates protection
+	// (via FrameStats::sustainedHighlight), area decides between the knee and
+	// the global gain, everything continuous; one taste parameter,
+	// highlight_tolerance_stops.
+	class CompensateController
+	{
+	public:
+		explicit CompensateController(const LedDriveConfig& config);
+		void Reset(int light);
+		// elapsedMs: time since the previous tick.
+		ControllerOutput Tick(const FrameStats& stats, int elapsedMs);
+		int Light() const { return light; }
+		double Protection() const { return protection; }
+		double Area() const { return area; }
+
+	private:
+		LedDriveConfig config;
+		int light;
+		double protection = 0.0;
+		double area = 0.0;
+		double previousApl = -1.0;
+	};
+
+	// gain_led = ceiling / LED level, in linear light.
+	inline double LedGain(int ceiling, double light)
+	{
+		return light > 0.0 ? static_cast<double>(ceiling) / light : 1.0;
+	}
+
+	// The final linear gain for a frame from the modelled LED level and the
+	// controller's highlight limit.
+	inline double CompensationGainFor(int ceiling, double light, const ControllerOutput& out)
+	{
+		const double ledGain = LedGain(ceiling, light);
+		const double capped = ledGain < out.highlightCap ? ledGain : out.highlightCap;
+		return ledGain * (1.0 - out.capWeight) + capped * out.capWeight;
+	}
 }

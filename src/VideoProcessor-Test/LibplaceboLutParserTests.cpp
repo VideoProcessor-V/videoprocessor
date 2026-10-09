@@ -1777,6 +1777,15 @@ namespace VideoProcessorTest
 			const double left = static_cast<double>(measured.front().sum) / LedDrive::SUM_SCALE /
 				measured.front().blocks;
 			Assert::IsTrue(left < apl - 5.0);
+
+			// The statistics describe the gamma-boosted picture.
+			hook.SetFrame({}, weights, 2.2 / 2.4);
+			fixture.RenderCoordinateField(hook.Hook());
+			measured.clear();
+			Assert::AreEqual(1, hook.Collect(measured, 5000));
+			const double boostedApl = static_cast<double>(measured.front().sum) / LedDrive::SUM_SCALE /
+				measured.front().blocks;
+			Assert::IsTrue(boostedApl > apl + 2.0, L"The boost lifts the measured APL");
 			hook.Release();
 		}
 
@@ -1810,8 +1819,9 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected LED compensation.glsl");
 			Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
 			const pl_hook* hook = hooks[0];
-			auto set = [hook](double gain, double domain)
+			auto set = [hook](double gain, double domain, double boost = 1.0)
 			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", boost));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", gain));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.08));
@@ -1836,6 +1846,15 @@ namespace VideoProcessorTest
 			const auto linear = fixture.RenderCoordinateField(hook);
 			const double expected = 255.0 * std::pow(2.0 * std::pow(baseline[quarter].r / 255.0, 2.2), 1.0 / 2.2);
 			Assert::AreEqual(expected, static_cast<double>(linear[quarter].r), 2.0);
+
+			// Gamma boost alone (gain 1): the old output_gamma 2.4 on film 2.2 lift.
+			set(1.0, 0.0, 2.2 / 2.4);
+			const auto boosted = fixture.RenderCoordinateField(hook);
+			for (size_t x : { size_t{ 8 }, quarter, size_t{ 32 }, size_t{ 48 } })
+				Assert::AreEqual(255.0 * std::pow(baseline[x].r / 255.0, 2.2 / 2.4),
+					static_cast<double>(boosted[x].r), 1.5);
+			Assert::AreEqual(static_cast<int>(baseline[63].r), static_cast<int>(boosted[63].r),
+				L"White stays white");
 		}
 
 		TEST_METHOD(BundledCustomHooksParseAndSigmaDeltaRunsOnTheRealGpuPath)

@@ -52,9 +52,14 @@ namespace LedDrive
 		int Ticks() const;
 		const LedDriveConfig& Config() const { return led; }
 
+		// mode: compensate's model of the LED's actual level (one-pole lag of
+		// led_response_ms after each command; the commanded level when 0).
+		double ModelledLight() const;
+
 	private:
 		void Run();
 		bool WaitUntil(std::chrono::steady_clock::time_point when);
+		double ModelledLightLocked(std::chrono::steady_clock::time_point now) const;
 
 		ProjectorConfig projector;
 		LedDriveConfig led;
@@ -76,5 +81,15 @@ namespace LedDrive
 		bool live = false;
 		CompensationGain gain;
 		int ticks = 0;
+
+		const std::chrono::steady_clock::time_point created;
+		bool compensating = false;
+		bool applyGain = false;
+		ControllerOutput policy;
+		double modelFrom = 255.0;
+		double modelTo = 255.0;
+		std::chrono::steady_clock::time_point modelStart;
+		bool holding = false;
+		double heldGain = 1.0;
 	};
 }

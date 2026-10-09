@@ -48,7 +48,8 @@ namespace LedDrive
 	{
 	public:
 		explicit StatsBuilder(const LedDriveConfig& config);
-		FrameStats Build(const RawMeasurement& raw);
+		// timeMs: the frame's time, for highlight persistence.
+		FrameStats Build(const RawMeasurement& raw, double timeMs = 0.0);
 		// Mean absolute difference of block luma against the previous frame,
 		// in codes (the cut metric); 0 before there is a previous frame.
 		double LastDifference() const { return lastDifference; }
@@ -57,6 +58,9 @@ namespace LedDrive
 		LedDriveConfig config;
 		std::vector<double> previousCells;
 		std::deque<double> aplHistory;
+		// (time, highlight, APL) over the persistence window.
+		struct Sample { double time; double highlight; double apl; };
+		std::deque<Sample> history;
 		double lastDifference = 0.0;
 	};
 }
