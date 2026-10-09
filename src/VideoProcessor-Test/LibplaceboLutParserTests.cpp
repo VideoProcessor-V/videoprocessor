@@ -1857,6 +1857,73 @@ namespace VideoProcessorTest
 				L"White stays white");
 		}
 
+		TEST_METHOD(AllBundledStandardShadersLoadAndUpscalersEngageByHeight)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(),
+				L"Could not create the libplacebo WARP test device");
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			const char* files[] = { "CfL_Prediction.glsl", "FSRCNNX_x2_16-0-4-1.glsl",
+				"ArtCNN_C4F16.glsl", "SSimDownscaler.glsl", "SSimSuperRes.glsl",
+				"Temporal sigma-delta.glsl" };
+			std::vector<ConfiguredShaderRule> rules;
+			unsigned order = 0;
+			for (const char* file : files)
+			{
+				ConfiguredShaderRule rule;
+				rule.name = file;
+				rule.filename = file;
+				rule.profileSelectionOrder = order++;
+				rules.push_back(rule);
+			}
+			chain.Configure(rules);
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = 2560;
+			values.outputHeight = 1600;
+			values.sourceWidth = 1920;
+			values.sourceHeight = 1080;
+			values.refreshHz = 60.0;
+			values.sourceFps = 24.0;
+			std::string libplaceboLog;
+			fixture.CaptureLog(&libplaceboLog);
+			chain.Ensure(values);
+			fixture.CaptureLog(nullptr);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			const std::wstring rejected = L"A bundled standard shader did not load: " +
+				std::wstring(libplaceboLog.begin(), libplaceboLog.end());
+			Assert::AreEqual(size_t{ 6 }, hooks.size(), rejected.c_str());
+			Assert::IsTrue((hooks[1]->stages & PL_HOOK_LUMA_INPUT) != 0, L"FSRCNNX doubles luma");
+			Assert::IsTrue((hooks[2]->stages & PL_HOOK_LUMA_INPUT) != 0, L"ArtCNN doubles luma");
+			Assert::IsTrue((hooks[4]->stages & PL_HOOK_POST_KERNEL) != 0, L"SSimSuperRes refines after scaling");
+
+			// With the 1.33x lens a 1080p 16:9 picture is enlarged ~1.48x
+			// vertically but ~1.11x horizontally: the upscalers must engage on
+			// height alone, and each keeps the authors' 1.3x minimum.
+			for (const char* file : { "FSRCNNX_x2_16-0-4-1.glsl", "ArtCNN_C4F16.glsl" })
+			{
+				const std::string source = LoadBundledShader(file);
+				// Directives start a line; the header comment quotes the old rule.
+				Assert::IsTrue(source.find("\n//!WHEN OUTPUT.w LUMA.w") == std::string::npos,
+					L"The upstream both-axes rule must be gone");
+				Assert::IsTrue(source.find("\n//!WHEN OUTPUT.h LUMA.h / 1.3") != std::string::npos);
+			}
+			for (const char* file : { "SSimDownscaler.glsl", "SSimSuperRes.glsl" })
+				Assert::IsTrue(LoadBundledShader(file).find("NATIVE_CROPPED.h") != std::string::npos,
+					L"The SSIM pair engages from the live source and output heights");
+		}
+
 		TEST_METHOD(BundledCustomHooksParseAndSigmaDeltaRunsOnTheRealGpuPath)
 		{
 			TargetLutGpuFixture fixture;

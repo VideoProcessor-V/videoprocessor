@@ -182,7 +182,8 @@ namespace VideoProcessorTest
                 snapshot->effectiveSelections.at("standard_shaders")),
                 L"All custom shaders must start disabled");
 
-            for (const char* shader : { "cfl_chroma", "ssim_downscaler", "sigma_delta" })
+            for (const char* shader : { "cfl_chroma", "ssim_downscaler", "fsrcnnx", "artcnn",
+                "ssim_superres", "sigma_delta" })
             {
                 UnifiedProfileRuntime::SelectionResult selected;
                 Assert::IsTrue(runtime.SelectProfile("standard_shaders", shader, true,
@@ -210,6 +211,45 @@ namespace VideoProcessorTest
             Assert::AreEqual(10.0, std::stod(parameters.at("swapchain_bits")), 1e-12);
             Assert::AreEqual(0.0, std::stod(parameters.at("levels_full")), 1e-12);
             Assert::AreEqual(0.0, std::stod(parameters.at("test_ramp")), 1e-12);
+        }
+
+        TEST_METHOD(CinemaTestConfigurationPicksLowLatencyForHighFrameRates)
+        {
+            std::string repository = __FILE__;
+            for (int level = 0; level < 3; ++level)
+                repository.resize(repository.find_last_of("\\/"));
+            std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
+                std::ios::binary);
+            const std::string contents((std::istreambuf_iterator<char>(shipped)),
+                std::istreambuf_iterator<char>());
+            Assert::IsFalse(contents.empty());
+            CachedConfigTestFile file;
+            std::ofstream(file.path, std::ios::binary) << contents;
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            auto source = [](const char* rate)
+            {
+                return [rate](const std::string& variable, std::string& value)
+                {
+                    if (variable != "source_rate") return false;
+                    value = rate;
+                    return true;
+                };
+            };
+            UnifiedProfileRuntime::Runtime runtime;
+            std::string error;
+            Assert::IsTrue(runtime.Initialize(config, source("59.94"), error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::AreEqual(std::string("low_latency"), RendererProfileConfig::FormatSelection(
+                runtime.GetSnapshot()->effectiveSelections.at("queue")),
+                L"A 60p source selects the game queue");
+            UnifiedProfileRuntime::RefreshResult film;
+            Assert::IsTrue(runtime.Refresh(source("23.976"), film, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::AreEqual(std::string("normal"), RendererProfileConfig::FormatSelection(
+                film.snapshot->effectiveSelections.at("queue")),
+                L"Film goes back to the cinema queue");
+            Assert::IsTrue(film.snapshot->queue.queueSize > 1);
         }
 
         TEST_METHOD(CustomGlslStandardShaderRejectsNonNumericParams)

@@ -672,3 +672,20 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
     in `VP-led-drive-module.md` section 9 for the planning side to confirm.
   - `led_response_ms` is 0 until the LED step response has been filmed;
     with real lag, a dimming step will briefly show as a flash.
+- Stage 2 addendum (2026-10-09): FSRCNNX_x2_16-0-4-1 (igv, LGPL-3.0),
+  ArtCNN_C4F16 (Artoriuz, MIT) and SSimSuperRes (igv, LGPL-3.0) installed as
+  disabled `[shader.standard.*]` entries; once enabled each engages itself
+  through its own `//!WHEN` rule on live texture sizes (no literals):
+  SSimDownscaler when the source is taller than the output, SSimSuperRes
+  when shorter. FSRCNNX and ArtCNN upstream require a 1.3x enlargement on
+  both axes, which never happens for 1080p 16:9 with the 1.33x lens (~1.48x
+  vertical, ~1.11x horizontal); their shipped copies test the height ratio
+  only (modification documented in each file header). They hook LUMA, so
+  they act on YUV capture only, not RGB input. Enable at most one of the two.
+  The profile-group `when` mechanism was not used for this: a `when` on a
+  standard-shader member would auto-enable it, not merely gate it.
+- Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the
+  test configuration (syntax per CONFIGURATION.html; tested: 59.94 fps
+  selects Low_Latency, 23.976 fps returns to Normal); Shift+L still
+  switches by hand.
+

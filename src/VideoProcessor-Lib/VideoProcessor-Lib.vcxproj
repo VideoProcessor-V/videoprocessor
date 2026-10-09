@@ -523,6 +523,22 @@
       <Link>shaders\CfL_Prediction.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\shaders\FSRCNNX_x2_16-0-4-1.glsl">
+      <Link>shaders\FSRCNNX_x2_16-0-4-1.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\shaders\ArtCNN_C4F16.glsl">
+      <Link>shaders\ArtCNN_C4F16.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\shaders\ArtCNN-LICENSE.txt">
+      <Link>shaders\ArtCNN-LICENSE.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\shaders\SSimSuperRes.glsl">
+      <Link>shaders\SSimSuperRes.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="..\..\shaders\LED compensation.glsl">
       <Link>shaders\LED compensation.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
