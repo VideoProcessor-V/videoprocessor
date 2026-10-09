@@ -8,6 +8,7 @@
 #include <vprenderer/AnamorphicPresentation.h>
 #include <vprenderer/NativeStatsOverlayPlacement.h>
 #include <vprenderer/NlsHookRecovery.h>
+#include <vprenderer/CustomHookChain.h>
 #include <NlsGeometryPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <libplacebo/renderer.h>
@@ -499,6 +500,21 @@ namespace
 		pl_gpu Gpu() const
 		{
 			return m_d3d11 ? m_d3d11->gpu : nullptr;
+		}
+
+		// Routes libplacebo warnings and errors into `sink` (nullptr restores
+		// silence), so a failing assertion can say why a shader was rejected.
+		void CaptureLog(std::string* sink)
+		{
+			pl_log_params logParams{};
+			logParams.log_level = sink ? PL_LOG_WARN : PL_LOG_NONE;
+			logParams.log_priv = sink;
+			if (sink)
+				logParams.log_cb = [](void* priv, enum pl_log_level, const char* message)
+				{
+					*static_cast<std::string*>(priv) += std::string(message) + "\n";
+				};
+			pl_log_update(m_log, &logParams);
 		}
 
 		pl_render_errors Errors() const
@@ -1701,6 +1717,69 @@ namespace VideoProcessorTest
             Assert::AreEqual(2, calls);
             Assert::IsTrue(g.retried);
         }
+
+		TEST_METHOD(BundledCustomHooksParseAndSigmaDeltaRunsOnTheRealGpuPath)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(),
+				L"Could not create the libplacebo WARP test device");
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			auto rule = [](const char* name, const char* file, unsigned order)
+			{
+				ConfiguredShaderRule configured;
+				configured.name = name;
+				configured.filename = file;
+				configured.stageOrder = order;
+				return configured;
+			};
+			ConfiguredShaderRule sigma = rule("sigma_delta", "Temporal sigma-delta.glsl", 90);
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" },
+				{ "swapchain_bits", "8" }, { "noise_amplitude", "0" }, { "test_ramp", "1" } };
+			chain.Configure({ rule("cfl", "CfL_Prediction.glsl", 10),
+				rule("ssim", "SSimDownscaler.glsl", 20), sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = 64;
+			values.outputHeight = 64;
+			values.sourceWidth = 64;
+			values.sourceHeight = 64;
+			values.refreshHz = 60.0;
+			values.sourceFps = 24.0;
+			std::string libplaceboLog;
+			fixture.CaptureLog(&libplaceboLog);
+			chain.Ensure(values);
+			fixture.CaptureLog(nullptr);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			const std::wstring rejected = L"libplacebo rejected a bundled custom shader: " +
+				std::wstring(libplaceboLog.begin(), libplaceboLog.end());
+			Assert::AreEqual(size_t{ 3 }, hooks.size(), rejected.c_str());
+			Assert::IsTrue((hooks[0]->stages & PL_HOOK_CHROMA_INPUT) != 0, L"CfL must hook CHROMA");
+			Assert::IsTrue((hooks[1]->stages & PL_HOOK_POST_KERNEL) != 0, L"SSimDownscaler must hook POSTKERNEL");
+			Assert::IsTrue(CustomHookChain::HooksOutput(hooks[2]), L"Sigma-delta must hook OUTPUT");
+			Assert::IsTrue(chain.SuppressesDither(false));
+
+			// The ramp replaces the picture, so the readback proves the compute
+			// pass, its storage textures and the parameter values all ran.
+			const std::vector<RgbaPixel> pixels = fixture.RenderCoordinateField(hooks[2]);
+			const size_t row = 32 * 64;
+			Assert::IsTrue(pixels[row].r <= 2, L"Ramp must start at black");
+			Assert::IsTrue(pixels[row + 63].r >= 253, L"Ramp must end at white");
+			for (int x = 1; x < 64; ++x)
+				Assert::IsTrue(pixels[row + x].r >= pixels[row + x - 1].r, L"Ramp must be monotonic");
+			Assert::AreEqual(static_cast<int>(pixels[5 * 64 + 20].r),
+				static_cast<int>(pixels[50 * 64 + 20].r), L"Ramp must not depend on the picture");
+		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)
 		{

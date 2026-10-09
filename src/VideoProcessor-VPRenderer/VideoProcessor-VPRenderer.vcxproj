@@ -103,6 +103,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\VideoProcessor-Lib\VideoProcessor-Lib.vcxproj">

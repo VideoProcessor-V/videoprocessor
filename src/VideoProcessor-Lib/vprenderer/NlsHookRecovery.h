@@ -1,5 +1,6 @@
 #pragma once
 #include <libplacebo/renderer.h>
+#include <vector>
 
 namespace NlsHookRecovery
 {
@@ -40,8 +41,13 @@ namespace NlsHookRecovery
         if (!disabled) return result;
         result.retried = true;
         result.failedSignature = activeNls->signature;
-        params.hooks = nullptr;
-        params.num_hooks = 0;
+        // Only the failed NLS hook is withdrawn; custom hooks keep running.
+        std::vector<const pl_hook*> remaining;
+        for (int i = 0; i < params.num_hooks; ++i)
+            if (params.hooks[i] != activeNls)
+                remaining.push_back(params.hooks[i]);
+        params.hooks = remaining.empty() ? nullptr : remaining.data();
+        params.num_hooks = static_cast<int>(remaining.size());
         rebuildFallback();
         const float black[] = { 0.0f, 0.0f, 0.0f };
         pl_frame_clear(gpu, &fullTarget, black);

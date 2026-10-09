@@ -43,6 +43,9 @@ namespace LibplaceboRenderParameters
 		PeakDetection peakDetection = PeakDetection::Auto;
 		bool hasContrastRecovery = false;
 		float contrastRecovery = 0.0f;
+		// Saturation offset in percent (-100..100). 0 leaves libplacebo's
+		// colour adjustment unset; +5 matches madVR's "saturation +5".
+		int saturation = 0;
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		// Canonical setting for new configuration. "Auto" preserves the
@@ -78,6 +81,7 @@ namespace LibplaceboRenderParameters
 		pl_sigmoid_params sigmoidParams{};
 		pl_deband_params debandParams{};
 		pl_dither_params ditherParams{};
+		pl_color_adjustment colorAdjustment{};
 	};
 
 	// The target calibration LUT is attached to pl_frame, not render parameters;

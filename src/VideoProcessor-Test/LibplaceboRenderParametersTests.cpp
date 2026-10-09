@@ -627,6 +627,30 @@ namespace VideoProcessorTest
 				L"Disabled dithering must also disable the preferred error-diffusion path.");
 		}
 
+		TEST_METHOD(SaturationOffsetProjectsToColorAdjustmentOnlyWhenNonZero)
+		{
+			Settings settings;
+			Projection neutral;
+			BuildOrFail(settings, false, neutral);
+			Assert::IsTrue(neutral.renderParams.color_adjustment == nullptr,
+				L"Saturation 0 must leave libplacebo's colour adjustment untouched");
+
+			settings.saturation = 5;
+			Projection boosted;
+			BuildOrFail(settings, false, boosted);
+			Assert::IsTrue(boosted.renderParams.color_adjustment == &boosted.colorAdjustment);
+			Assert::AreEqual(1.05f, boosted.colorAdjustment.saturation, 1e-6f);
+			Assert::AreEqual(pl_color_adjustment_neutral.brightness, boosted.colorAdjustment.brightness);
+			Assert::AreEqual(pl_color_adjustment_neutral.contrast, boosted.colorAdjustment.contrast);
+			Assert::AreEqual(pl_color_adjustment_neutral.hue, boosted.colorAdjustment.hue);
+			Assert::AreEqual(pl_color_adjustment_neutral.gamma, boosted.colorAdjustment.gamma);
+
+			settings.saturation = -100;
+			Projection grey;
+			BuildOrFail(settings, false, grey);
+			Assert::AreEqual(0.0f, grey.colorAdjustment.saturation, 1e-6f);
+		}
+
 		TEST_METHOD(DisplayBitDepthTargetsDitheringWithoutChangingSwapchainStorage)
 		{
 			pl_color_repr target{};

@@ -55,6 +55,8 @@ struct ConfiguredShaderRule
 	std::map<std::string, std::string> parameters;
 	bool nls = false;
 	bool none = false;
+	// Custom hooks only: skipped while the Low_Latency queue profile is active.
+	bool cinemaOnly = false;
 	// Unified profile selections execute primarily in this list order. The
 	// per-profile stage order remains a secondary ordering key.
 	unsigned int profileSelectionOrder = UINT_MAX;

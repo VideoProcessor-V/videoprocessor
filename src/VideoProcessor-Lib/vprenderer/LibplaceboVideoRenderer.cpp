@@ -37,6 +37,7 @@
 #include <vprenderer/AnamorphicPresentation.h>
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
+#include <vprenderer/CustomHookChain.h>
 #include <SceneDetector.h>
 #include <vprenderer/LibplaceboOutputPolicy.h>
 #include <HdrTargetLuminance.h>
@@ -365,6 +366,23 @@ namespace
 			return false;
 		}
 		return true;
+	}
+
+	// Integer refresh of the monitor showing the output window, for the
+	// {{refresh_hz}} custom-hook template. 0 when unknown.
+	double MonitorRefreshHz(HWND window)
+	{
+		if (!window) return 0.0;
+		MONITORINFOEXW monitor{};
+		monitor.cbSize = sizeof(monitor);
+		if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
+			return 0.0;
+		DEVMODEW mode{};
+		mode.dmSize = sizeof(mode);
+		if (!EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode) ||
+			mode.dmDisplayFrequency <= 1)
+			return 0.0;
+		return static_cast<double>(mode.dmDisplayFrequency);
 	}
 
 	std::string FileNameFromPath(const std::string& path)
@@ -781,6 +799,7 @@ namespace
 		PeakDetection peakDetection = PeakDetection::Auto;
 		bool hasContrastRecovery = false;
 		float contrastRecovery = 0.0f;
+		int saturation = 0;
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string debandStrength = "auto";
@@ -892,6 +911,7 @@ namespace
 			<< settings.toneMapping << '|' << settings.gamutMapping << '|'
 			<< static_cast<int>(settings.peakDetection) << '|'
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
+			<< settings.saturation << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1694,6 +1714,15 @@ namespace
             readChoice("hdr_tone_map_target_gamma", settings.hdrToneMapTargetGamma,
                 { "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
         }
+		if (config.TryGetString(rule.section, "saturation", raw))
+		{
+			int parsedSaturation = 0;
+			if (ParseInteger(raw, -100, 100, parsedSaturation))
+				settings.saturation = parsedSaturation;
+			else
+				DebugLog::Log("profile '%s': invalid saturation '%s'; using 0",
+					rule.section.c_str(), raw.c_str());
+		}
 		if (config.TryGetString(rule.section, "contrast_recovery", raw))
 		{
 			settings.hasContrastRecovery = false;
@@ -3576,7 +3605,28 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t anamorphicSuppressedLayouts = 0;
 	std::string activeNlsShaderPath;
 	std::string lastNlsHookBindingPolicy;
+	// Custom GLSL hooks ([shader.standard.*] with glsl_file). Loaded lazily on
+	// the render thread; the status copy is read under shaderStatusMutex.
+	CustomHookChain::Chain customHooks{ CustomHookChain::Loader{
+		[](const std::string& filename, std::string& source, std::string& reason)
+		{
+			std::string resolvedPath;
+			return ReadUserShader(filename, source, resolvedPath, reason);
+		},
+		[this](const std::string& source) -> const pl_hook*
+		{
+			return d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) :
+				nullptr;
+		},
+		[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } } };
+	std::vector<const pl_hook*> frameHooks;
+	std::vector<std::string> activeCustomShaders;
+	std::atomic<bool> lowLatencyQueueActive{ false };
+	bool customHooksPublishedLowLatency = false;
+	double customHookRefreshHz = 0.0;
+	ULONGLONG customHookRefreshTick = 0;
 	struct pl_color_map_params colorMapParams{};
+	struct pl_color_adjustment colorAdjustment{};
 	struct pl_peak_detect_params peakDetectParams{};
 	struct pl_sigmoid_params sigmoidParams{};
 	struct pl_deband_params debandParams{};
@@ -4222,6 +4272,7 @@ struct LibplaceboVideoRenderer::Impl
 				if (worker.joinable()) worker.join();
 			captureWorkers.clear();
 			pl_mpv_user_shader_destroy(&nlsHook);
+			customHooks.Clear();
 			pl_renderer_destroy(&renderer);
 			pl_lut_free(&displayLut);
 			if (d3d11)
@@ -4877,6 +4928,7 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.peakDetection = settings.peakDetection;
 		parameterSettings.hasContrastRecovery = settings.hasContrastRecovery;
 		parameterSettings.contrastRecovery = settings.contrastRecovery;
+		parameterSettings.saturation = settings.saturation;
 		parameterSettings.upscaler = settings.upscaler;
 		parameterSettings.downscaler = settings.downscaler;
 		parameterSettings.debandStrength = settings.debandStrength;
@@ -4904,7 +4956,10 @@ struct LibplaceboVideoRenderer::Impl
 		sigmoidParams = projection.sigmoidParams;
 		debandParams = projection.debandParams;
 		ditherParams = projection.ditherParams;
+		colorAdjustment = projection.colorAdjustment;
 		renderParams.color_map_params = &colorMapParams;
+		renderParams.color_adjustment =
+			projection.renderParams.color_adjustment ? &colorAdjustment : nullptr;
 		renderParams.peak_detect_params =
 			projection.renderParams.peak_detect_params ? &peakDetectParams : nullptr;
 		renderParams.sigmoid_params =
@@ -7269,6 +7324,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.peakDetection = next.peakDetection;
 		currentTransport.hasContrastRecovery = next.hasContrastRecovery;
 		currentTransport.contrastRecovery = next.contrastRecovery;
+		currentTransport.saturation = next.saturation;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.debandStrength = next.debandStrength;
@@ -7325,6 +7381,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.peakDetection != next.peakDetection, "peak_detection");
 		changed(current.hasContrastRecovery != next.hasContrastRecovery ||
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
+		changed(current.saturation != next.saturation, "saturation");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
@@ -7652,6 +7709,10 @@ struct LibplaceboVideoRenderer::Impl
 		renderParams.hooks = nullptr;
 		renderParams.num_hooks = 0;
 		pl_mpv_user_shader_destroy(&nlsHook);
+		for (const uint64_t signature : customHooks.Configure(selection))
+			NlsHookRecovery::ResetFailedHook(renderer, signature);
+		PublishCustomShaderStatus();
+		const size_t customCount = customHooks.ConfiguredCount();
 
 		const auto none = std::find_if(selection.begin(), selection.end(),
 			[](const ConfiguredShaderRule& rule) { return rule.none; });
@@ -7669,6 +7730,18 @@ struct LibplaceboVideoRenderer::Impl
 
 		const auto nls = std::find_if(selection.begin(), selection.end(),
 			[](const ConfiguredShaderRule& rule) { return rule.nls; });
+		if ((nls == selection.end() || nls->filename.empty()) && customCount > 0)
+		{
+			// Custom GLSL hooks without NLS: ordinary lens-aware presentation.
+			SetShaderStatus("NLS: Off, custom: " + std::to_string(customCount));
+			MadVRShaderLoader::SetRuntimeShaderSelection(
+				requestedShaderSelector, requestedShaderSelector,
+				NlsMappingMode::OFF);
+			DebugLog::Log(
+				"Alpha shaders: selected \"%s\" (NLS off, %zu custom hook(s))",
+				requestedShaderSelector.c_str(), customCount);
+			return;
+		}
 		if (nls == selection.end() || nls->filename.empty())
 		{
 			SetShaderStatus("Rejected: Alpha NLS rule required");
@@ -7689,10 +7762,18 @@ struct LibplaceboVideoRenderer::Impl
 			requestedShaderSelector, requestedShaderSelector,
 			NlsMappingMode::WAITING);
 		DebugLog::Log(
-			"Alpha shaders: armed \"%s\" with applicable rule \"%s\" file=%s renderer_generation=%llu",
+			"Alpha shaders: armed \"%s\" with applicable rule \"%s\" file=%s renderer_generation=%llu custom_hooks=%zu",
 			requestedShaderSelector.c_str(), nlsRule.name.c_str(),
 			nlsRule.filename.c_str(),
-			static_cast<unsigned long long>(nlsRendererGeneration));
+			static_cast<unsigned long long>(nlsRendererGeneration), customCount);
+	}
+
+	void PublishCustomShaderStatus()
+	{
+		const auto descriptions = customHooks.ActiveDescriptions(
+			lowLatencyQueueActive.load(std::memory_order_acquire));
+		std::lock_guard<std::mutex> guard(shaderStatusMutex);
+		activeCustomShaders = descriptions;
 	}
 
 	static std::map<std::string, std::string> FixedNlsParameters(
@@ -13772,9 +13853,46 @@ struct LibplaceboVideoRenderer::Impl
 			&originalPrPassAccumulator : nullptr;
 		frameGpuTiming.BeginStage(
 			AlphaD3D11FrameGpuTimer::Stage::CoreRender);
-        const pl_hook* submittedNls = renderParams.num_hooks == 1 ? nlsHook : nullptr;
+        // renderParams carries only the NLS hook; custom hooks join it in a
+        // per-frame copy. An OUTPUT-stage custom hook owns quantisation, so
+        // libplacebo's dither is cleared for that frame only.
+        const bool nlsHookSubmitted =
+            renderParams.num_hooks == 1 && renderParams.hooks == &nlsHook;
+        const pl_hook* submittedNls = nlsHookSubmitted ? nlsHook : nullptr;
+        const bool lowLatencyQueue =
+            lowLatencyQueueActive.load(std::memory_order_acquire);
+        CustomHookChain::TemplateValues hookTemplates;
+        hookTemplates.outputWidth = static_cast<int>(std::lround(baseTarget.crop.x1 - baseTarget.crop.x0));
+        hookTemplates.outputHeight = static_cast<int>(std::lround(baseTarget.crop.y1 - baseTarget.crop.y0));
+        hookTemplates.sourceWidth = width;
+        hookTemplates.sourceHeight = height;
+        if (customHookRefreshTick == 0 || GetTickCount64() - customHookRefreshTick >= 2000)
+        {
+            customHookRefreshHz = MonitorRefreshHz(videoHwnd);
+            customHookRefreshTick = GetTickCount64();
+        }
+        hookTemplates.refreshHz = customHookRefreshHz;
+        hookTemplates.sourceFps = nominalSourceRateHz;
+        if (customHooks.Ensure(hookTemplates) ||
+            lowLatencyQueue != customHooksPublishedLowLatency)
+        {
+            customHooksPublishedLowLatency = lowLatencyQueue;
+            PublishCustomShaderStatus();
+        }
+        frameHooks.clear();
+        customHooks.Collect(lowLatencyQueue, frameHooks);
+        if (submittedNls)
+            frameHooks.push_back(submittedNls);
+        pl_render_params frameParams = renderParams;
+        frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
+        frameParams.num_hooks = static_cast<int>(frameHooks.size());
+        if (customHooks.SuppressesDither(lowLatencyQueue))
+        {
+            frameParams.dither_params = nullptr;
+            frameParams.error_diffusion = nullptr;
+        }
         const auto hookRender = NlsHookRecovery::Render(renderer, d3d11->gpu,
-            renderImage, target, baseTarget, renderParams, submittedNls, [&]()
+            renderImage, target, baseTarget, frameParams, submittedNls, [&]()
             {
                 runtimeRejectedNlsHookSignature = nlsHookSignature;
                 runtimeRejectedNlsSignature = nlsHook->signature;
@@ -13789,6 +13907,17 @@ struct LibplaceboVideoRenderer::Impl
                 assembleOverlays();
             });
         bool rendered = hookRender.rendered;
+        if (hookRender.retried)
+        {
+            renderParams.hooks = nullptr;
+            renderParams.num_hooks = 0;
+        }
+        {
+            const auto hookErrors = pl_renderer_get_errors(renderer);
+            if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
+                hookErrors.num_disabled_hooks))
+                PublishCustomShaderStatus();
+        }
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -15258,6 +15387,8 @@ std::vector<CString> LibplaceboVideoRenderer::ActiveShaders() const
 				m_impl->activeNlsShaderPath).c_str());
 		shaders.push_back(label);
 	}
+	for (const std::string& custom : m_impl->activeCustomShaders)
+		shaders.push_back(CString(custom.c_str()));
 	return shaders;
 }
 
@@ -15303,6 +15434,11 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	std::unique_lock<std::mutex> guard(m_stateMutex);
 	const std::map<std::string, std::string> next =
 		RendererProfileConfig::FormatSelections(snapshot.effectiveSelections);
+	// cinema_only custom hooks stay out of the game queue.
+	if (m_impl)
+		m_impl->lowLatencyQueueActive.store(
+			ConfigFile::NormalizeName(snapshot.queue.profile) == "low_latency",
+			std::memory_order_release);
 	VideoStateComPtr state = m_videoState;
 	auto candidateConfiguration = m_rendererConfiguration;
 	if (!candidateConfiguration || snapshot.configuration != m_applicationConfiguration)

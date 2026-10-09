@@ -5871,6 +5871,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* contrastRecovery = addText(QStringLiteral("Contrast recovery (0 to 2)"), QStringLiteral("contrast_recovery"));
         contrastRecovery->setPlaceholderText(QStringLiteral("Auto or a value from 0 to 2"));
         addRendererAutoStatus(QStringLiteral("contrast_recovery"), contrastRecovery);
+        auto* saturation = addText(QStringLiteral("Saturation (-100 to +100)"), QStringLiteral("saturation"), QStringLiteral("%"));
+        saturation->setValidator(new QIntValidator(-100, 100, saturation));
+        saturation->setToolTip(QStringLiteral(
+            "Colour saturation offset in percent. 0 is neutral; +5 matches madVR's saturation +5."));
 
         form = addCollapsibleSection(QStringLiteral("processing"), QStringLiteral("Processing"),
             QString(), false);
@@ -6388,6 +6392,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (key == QStringLiteral("sdr_target_nits")) return QStringLiteral("203");
                 if (key == QStringLiteral("sdr_black_nits")) return QString::number(HdrTargetLuminance::DefaultBlack);
                 if (key == QStringLiteral("contrast_recovery")) return QStringLiteral("Auto");
+                if (key == QStringLiteral("saturation")) return QStringLiteral("0");
 				if (key == QStringLiteral("deband_strength")) return QStringLiteral("AUTO");
 				if (key == QStringLiteral("report_bt2020_to_display") ||
                     key == QStringLiteral("output_diagnostics") ||

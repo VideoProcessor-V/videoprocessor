@@ -218,6 +218,15 @@ namespace LibplaceboRenderParameters
 			projection.colorMapParams.contrast_recovery = settings.contrastRecovery;
 		projection.renderParams.color_map_params = &projection.colorMapParams;
 
+		projection.colorAdjustment = pl_color_adjustment_neutral;
+		projection.renderParams.color_adjustment = nullptr;
+		if (settings.saturation != 0)
+		{
+			projection.colorAdjustment.saturation =
+				1.0f + static_cast<float>(settings.saturation) / 100.0f;
+			projection.renderParams.color_adjustment = &projection.colorAdjustment;
+		}
+
 		auto setToggle = [&error](Toggle toggle, const char* exportName,
 			auto& destination, auto& parameter) -> bool
 		{

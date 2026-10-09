@@ -347,6 +347,8 @@ struct ShaderRule
 	std::string inactiveRule;
 	std::vector<ShaderEntry> preScale;
 	std::vector<ShaderEntry> postScale;
+	// Custom VP Renderer hooks that must not run in the Low_Latency queue.
+	bool cinemaOnly = false;
 	// Set only by the unified profile-selection path. Legacy rule selectors
 	// retain UINT_MAX and continue to use their explicit order values.
 	unsigned int profileSelectionOrder = UINT_MAX;
@@ -1431,6 +1433,18 @@ ShaderRule LoadTargetRule(const ConfigFile& config, const std::string& name,
 		}
 		LoadTypedNlsSettings(config, section, rule);
 	}
+	else if (backend == ShaderRendererBackend::LIBPLACEBO)
+	{
+		// Custom GLSL hooks take //!PARAM values and {{name}} templates from
+		// param_<name>; cinema_only skips the hook in the Low_Latency queue.
+		LoadShaderParameters(config, section, rule);
+		if (config.TryGetString(section, "cinema_only", value) &&
+			!config.TryGetBool(section, "cinema_only", rule.cinemaOnly))
+		{
+			DebugLog::Log("Shaders: [%s] cinema_only must be true or false", section.c_str());
+			rule.valid = false;
+		}
+	}
 	std::string stage = "pre_resize";
 	config.TryGetString(section, "stage", stage);
 	stage = ConfigFile::NormalizeName(stage);
@@ -1687,6 +1701,7 @@ ConfiguredShaderRule ToConfiguredShaderRule(const ShaderRule& rule)
 	configured.parameters = rule.parameters;
 	configured.nls = rule.nls;
 	configured.none = rule.none;
+	configured.cinemaOnly = rule.cinemaOnly;
 	configured.profileSelectionOrder = rule.profileSelectionOrder;
 	if (!rule.preScale.empty())
 		configured.stageOrder = rule.preScale.front().order;

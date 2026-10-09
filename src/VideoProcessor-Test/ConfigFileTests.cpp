@@ -33,6 +33,7 @@
 
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -105,6 +106,159 @@ namespace VideoProcessorTest
             Assert::AreEqual(15, snapshot->viewport.blankRight);
             Assert::AreEqual(0, snapshot->viewport.blankTop);
             Assert::AreEqual(0, snapshot->viewport.blankBottom);
+        }
+
+        TEST_METHOD(CustomGlslStandardShaderCarriesParamsAndCinemaOnlyToVPRenderer)
+        {
+            CachedConfigTestFile file;
+            std::ofstream(file.path) << "[shader.standard]\ntype: multi\nlabel: Off\n"
+                "[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\n"
+                "stage: post_resize\norder: 90\nglsl_file: Temporal sigma-delta.glsl\n"
+                "param_noise_amplitude: 0.2\nparam_test_ramp: 1\ncinema_only: true\n"
+                "[shader.standard.cfl]\nshader_type: custom\nstage: pre_resize\norder: 10\n"
+                "glsl_file: CfL_Prediction.glsl\n";
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Assert::IsTrue(ShaderConfigValidation::Validate(config, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            std::vector<ConfiguredShaderRule> selection;
+            Assert::IsTrue(MadVRShaderLoader::ResolveConfiguredRuleSelection(config,
+                "@shader-profiles:standard.sigma_delta|standard.cfl",
+                ShaderRendererBackend::LIBPLACEBO, selection, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::AreEqual(size_t{ 2 }, selection.size(),
+                L"Standard GLSL shaders must resolve without an NLS rule");
+            const ConfiguredShaderRule& sigma = selection[0];
+            Assert::IsFalse(sigma.nls || sigma.none);
+            Assert::AreEqual(std::string("Temporal sigma-delta.glsl"), sigma.filename);
+            Assert::AreEqual(90u, sigma.stageOrder);
+            Assert::IsTrue(sigma.cinemaOnly);
+            Assert::AreEqual(0.2, std::stod(sigma.parameters.at("noise_amplitude")), 1e-12);
+            Assert::AreEqual(1.0, std::stod(sigma.parameters.at("test_ramp")), 1e-12);
+            Assert::IsFalse(selection[1].cinemaOnly);
+            Assert::IsTrue(selection[1].parameters.empty());
+
+            // madVR has no hlsl_file for these entries, so it simply ignores them.
+            std::vector<ConfiguredShaderRule> madvr;
+            Assert::IsTrue(MadVRShaderLoader::ResolveConfiguredRuleSelection(config,
+                "@shader-profiles:standard.sigma_delta|standard.cfl",
+                ShaderRendererBackend::MADVR, madvr, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::AreEqual(size_t{ 1 }, madvr.size());
+            Assert::IsTrue(madvr.front().none);
+        }
+
+        TEST_METHOD(CinemaTestConfigurationStartsWithShadersDisabledAndEnablesThemOneAtATime)
+        {
+            std::string repository = __FILE__;
+            for (int level = 0; level < 3; ++level)
+                repository.resize(repository.find_last_of("\\/"));
+            std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
+                std::ios::binary);
+            const std::string contents((std::istreambuf_iterator<char>(shipped)),
+                std::istreambuf_iterator<char>());
+            Assert::IsFalse(contents.empty(), L"docs/cinema/VideoProcessor-test.cfg not found");
+            // A temporary copy keeps the selection state file out of the repository.
+            CachedConfigTestFile file;
+            std::ofstream(file.path, std::ios::binary) << contents;
+
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Assert::IsTrue(MainConfigSchema::Validate(config, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::IsTrue(ShaderConfigValidation::Validate(config, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            UnifiedProfileRuntime::Runtime runtime;
+            Assert::IsTrue(runtime.Initialize(config, {}, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            const auto snapshot = runtime.GetSnapshot();
+            Assert::IsTrue(snapshot != nullptr);
+            Assert::AreEqual(std::string("cinema"), snapshot->viewport.profile);
+            Assert::AreEqual(10, snapshot->viewport.blankLeft);
+            Assert::AreEqual(15, snapshot->viewport.blankRight);
+            Assert::AreEqual(std::string("base"), RendererProfileConfig::FormatSelection(
+                snapshot->effectiveSelections.at("standard_shaders")),
+                L"All custom shaders must start disabled");
+
+            for (const char* shader : { "cfl_chroma", "ssim_downscaler", "sigma_delta" })
+            {
+                UnifiedProfileRuntime::SelectionResult selected;
+                Assert::IsTrue(runtime.SelectProfile("standard_shaders", shader, true,
+                    {}, selected, error), std::wstring(error.begin(), error.end()).c_str());
+                Assert::AreEqual(std::string(shader), RendererProfileConfig::FormatSelection(
+                    selected.snapshot->effectiveSelections.at("standard_shaders")));
+                std::vector<ConfiguredShaderRule> rules;
+                Assert::IsTrue(MadVRShaderLoader::ResolveConfiguredRuleSelection(config,
+                    std::string("@shader-profiles:standard.") + shader,
+                    ShaderRendererBackend::LIBPLACEBO, rules, error),
+                    std::wstring(error.begin(), error.end()).c_str());
+                Assert::AreEqual(size_t{ 1 }, rules.size());
+                Assert::IsFalse(rules.front().none || rules.front().nls);
+                Assert::IsTrue(runtime.SelectProfile("standard_shaders", shader, false,
+                    {}, selected, error), std::wstring(error.begin(), error.end()).c_str());
+            }
+
+            std::vector<ConfiguredShaderRule> sigma;
+            Assert::IsTrue(MadVRShaderLoader::ResolveConfiguredRuleSelection(config,
+                "@shader-profiles:standard.sigma_delta",
+                ShaderRendererBackend::LIBPLACEBO, sigma, error));
+            const auto& parameters = sigma.front().parameters;
+            Assert::AreEqual(size_t{ 6 }, parameters.size());
+            Assert::AreEqual(0.15, std::stod(parameters.at("noise_amplitude")), 1e-12);
+            Assert::AreEqual(10.0, std::stod(parameters.at("swapchain_bits")), 1e-12);
+            Assert::AreEqual(0.0, std::stod(parameters.at("levels_full")), 1e-12);
+            Assert::AreEqual(0.0, std::stod(parameters.at("test_ramp")), 1e-12);
+        }
+
+        TEST_METHOD(CustomGlslStandardShaderRejectsNonNumericParams)
+        {
+            for (const char* setting : { "param_noise_amplitude: lots\n", "cinema_only: sometimes\n" })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[shader.standard]\ntype: multi\n"
+                    "[shader.standard.sigma_delta]\nshader_type: custom\n"
+                    "glsl_file: Temporal sigma-delta.glsl\n" << setting;
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                std::vector<ConfiguredShaderRule> selection;
+                Assert::IsFalse(MadVRShaderLoader::ResolveConfiguredRuleSelection(config,
+                    "@shader-profiles:standard.sigma_delta",
+                    ShaderRendererBackend::LIBPLACEBO, selection, error));
+            }
+        }
+
+        TEST_METHOD(SaturationIsAnInputProfileSettingFromMinus100To100)
+        {
+            for (const char* value : { "+5", "0", "-100", "100" })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                    "[vprenderer.input.cinema]\nsaturation: " << value << "\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsTrue(MainConfigSchema::Validate(config, error) &&
+                    runtime.Initialize(config, {}, error),
+                    std::wstring(error.begin(), error.end()).c_str());
+            }
+            for (const char* value : { "101", "-101", "5%", "high" })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                    "[vprenderer.input.cinema]\nsaturation: " << value << "\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsFalse(MainConfigSchema::Validate(config, error) &&
+                    runtime.Initialize(config, {}, error));
+                Assert::IsTrue(error.find("saturation") != std::string::npos,
+                    std::wstring(error.begin(), error.end()).c_str());
+            }
         }
 
         TEST_METHOD(EdgeBlankingRejectsInvalidValues)
