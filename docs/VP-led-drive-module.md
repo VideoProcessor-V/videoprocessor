@@ -8,15 +8,9 @@ before writing the controller, because the behaviour the owner has tuned by
 eye over years lives in its curves, step tables and special cases.
 
 Written 2026-10-09 against fork tag `1.4-beta-rc1` plus the Stage 2 work
-(blanking keys, custom GLSL hook chain).
-
-**Revised 2026-10-09 with `VP-led-drive-answers-r1.md`, which wins where the
-two differ.** In short: modes are `compensate | script | log_only` (no
-`contrast` mode; CNTR is only ever written once at startup to restore 50);
-the script's contrast behaviour is emulated in VP as an encoded-domain gain;
-step tables follow the script exactly with a configurable APL split; the
-measurement pass and the compensation hook both sit at PRE_OUTPUT, measurement
-first; `SerialPort` is separate from `BarcoAsciiDriver`; plain config sections.
+(blanking keys, custom GLSL hook chain). Revised the same day to fold in
+`VP-led-drive-answers-1.md`; where the two still differ, the answers file
+wins.
 
 ---
 
@@ -51,11 +45,11 @@ tracks it; never a fixed crop) on the **output** codes — after tone map,
 gamma, LUT, in the limited-range code domain where black = 16 — producing
 per frame:
 
-- `apl`: weighted mean of the gamma-encoded output, in limited-range code
-  units (`code = 16 + 219 × value`). Weights `apl_weights`, default
-  `0.114, 0.587, 0.299` (R, G, B): the script ran `cv2.cvtColor(BGR2GRAY)` on
-  an RGB screenshot, so its effective weights are Rec.601 with R and B
-  swapped. Measured at PRE_OUTPUT before the compensation gain (answers §4).
+- `apl`: weighted mean of the gamma-encoded output codes on a 0–255 scale
+  (`code = 16 + 219 × value` from the normalised PRE_OUTPUT value), weights
+  `apl_weights`, default `0.114 R, 0.587 G, 0.299 B` — the weights the
+  script effectively used (cv2 BGR2GRAY on an RGB array), so the owner's
+  curves carry over; true Rec.601 is the documented alternative.
 - `highlight`: the 99.5th percentile of 3×3-block means (replaces the
   script's "max of an 854×480 downscale ≥ 215"), plus `highlight_area`: the
   fraction of blocks above the knee threshold.
@@ -65,9 +59,11 @@ per frame:
   with block structure otherwise static.
 - `ts`: the frame's presentation timestamp from the queue.
 
-When the time-based queue (Stage 5) exists, statistics are produced for
-frames still in the queue, so the controller sees them `lead_ms` early. Until
-then they are produced for the frame being rendered (reactive mode).
+Statistics are produced inside the fork's existing queued-frame lookahead
+walk (`AnalyzeActivePictureLookahead`), so the controller sees them as early
+as that walk reaches; its depth is the fork's `active_picture_lookahead_frames`
+and the queue's real depth. No separate lookahead key. In `Low_Latency` the
+queue holds one frame, so the module is reactive.
 
 Readback to the CPU: one small buffer per frame, asynchronously (never stall
 the render thread on a GPU readback).
@@ -91,7 +87,7 @@ open(config)            // port, baud; fails cleanly if the port is absent
 query_light_range()     // -> (min, max) or "unknown"
 read_state()            // current light level, contrast, etc.
 set_light(level)        // returns when ACKed or on timeout
-set_contrast(value)     // only the one-off startup correction to 50
+set_contrast(value)     // only used once at startup to restore CNTR 50
 close()
 ```
 
@@ -117,55 +113,60 @@ echo: on                     # protocol must be in ECHO on mode for ACKs
 [led_drive.Default]
 enabled: true
 mode: compensate             # compensate | script | log_only
+compensation_eotf: 2.2       # projector's real display gamma (not VP's 2.4)
+apl_weights: 0.114, 0.587, 0.299   # script's effective weights; Rec.601 = 0.299,0.587,0.114
 tick_ms: 400
-lead_ms: 0                   # cinema profile sets ~120 once Stage 5 exists
+led_response_ms: 80          # measured LED settling time; commands are sent
+                             # this far ahead of the frame, never earlier.
+                             # Lead itself is derived from the lookahead walk.
 led_floor: 100               # scene floor (owner's anti-pump floor)
 led_floor_black: 60          # floor for fades / cuts to black
 led_ceiling: 255
 # target curve: APL -> light level, piecewise linear between points
 curve: 0:100, 20:100, 40:200, 70:230, 100:255, 255:255
-# step tables by |distance to target|, per tick (script: beta_22.py)
-steps_up_dark:   100:7, 50:5, 25:4, 10:1, 0:1
-steps_up_bright: 100:7, 50:4, 25:2, 10:1, 0:1
+# step tables by |distance to target|, per tick
+steps_up_dark:   100:7, 50:5, 25:4, 10:1, 0:1   # APL < steps_up_split_apl
+steps_up_bright: 100:7, 50:4, 25:2, 10:1, 0:1   # APL >= split
 steps_up_split_apl: 40
-steps_down:      100:5, 50:3, 25:2, 10:1, 0:1
-apl_weights: 0.114, 0.587, 0.299
+steps_down:      (transcribe exactly from beta_22.py)
+fade_frames: 6
+fade_min_step: 0.5
+cut_threshold: 24
 highlight_percentile: 99.5
 highlight_persist_ms: 250
 highlight_tolerance_stops: 0.33
 knee: 0.08
 anti_pump_band: 3
-compensation_eotf: 2.2
-fade_frames: 6
-fade_min_step: 0.5
-cut_threshold: 24
 ```
 
-Both sections are live-editable in the Config app like any other profile,
-and `enabled` is toggleable from a key. The `Low_Latency` queue profile
-forces `lead_ms: 0`; nothing else differs between profiles.
+Both sections are live-editable in the Config app (plain settings sections,
+no profile groups, no key toggle — answers file §9). Nothing is profile-
+specific: in `Low_Latency` the lookahead walk holds one frame, so the module
+is reactive by construction.
 
 ## 4. Controller specification
 
 ### 4.1 Port the script faithfully first
 
-`mode: script` (formerly `contrast`) must reproduce `beta_22.py` as closely as
-the tick allows. The contrast path is emulated in VP (gain =
-contrast_actual / 50 on the encoded value), never sent to the projector:
+`mode: script` must reproduce `beta_22.py` as closely as the tick allows —
+with the projector's contrast control **emulated in VP** rather than sent
+(answers file §1): `gain_encoded = contrast_actual / 50`, applied in encoded
+space at the compensation hook with `gain_domain = encoded`.
 
 - Light target from `curve` (the script: 255 above APL 100, 230 at 70,
   200 at 40, 100 at 20, floor below).
 - Contrast target from the script's bands (50 at APL ≥ 60; 50/51 between 45
   and 60 depending on highlight state; rising to 62 at 30 and 74 at 20; 74
-  below), applied as the VP gain described above (never sent to the projector).
-- Per tick, move the light level by the step from `steps_up`/`steps_down`
-  for the current distance to target (the script brightens faster than it
-  dims — keep that asymmetry).
-- Contrast moves one step per tick, except the script's **fast dump**: when
-  contrast must drop by ≥ 10 while a highlight is present, step it down
-  quickly (the script did one step per 100 ms) until within 10 of target.
-  The script also fast-steps contrast down every 100 ms whenever it is 7–9
-  above target, highlight or not; `mode: script` keeps both dumps (answers §3).
+  below), realised as the emulated gain, never as a CNTR command.
+- Per tick, move the light level by the step from `steps_up_dark` /
+  `steps_up_bright` (chosen by APL against `steps_up_split_apl`) or
+  `steps_down` for the current distance to target — transcribed from the
+  script, which brightens faster than it dims; keep that asymmetry.
+- Contrast moves one step per tick, except the script's two **fast dumps**:
+  (a) when contrast must drop by ≥ 10 while a highlight is present, step
+  down quickly (one step per 100 ms) until within 10 of target; (b) when
+  contrast is 7–9 above target, step down every 100 ms regardless of
+  highlight state. Both kept in `script` mode only.
 - **Anti-pump:** ignore contrast differences within `anti_pump_band` in the
   direction the script ignores them (read the script for which direction
   depends on highlight state).
@@ -175,13 +176,16 @@ contrast_actual / 50 on the encoded value), never sent to the projector:
   the feel by eye.
 
 This mode exists so the owner can confirm the port before anything new is
-enabled. It also stays as the fallback.
+enabled. It also stays as the fallback. CNTR itself is read at startup and
+set to 50 once if it was left elsewhere; after that it is never written.
 
 ### 4.2 `mode: compensate` — the intended form
 
 The projector contrast command is never sent; contrast is left at the
 owner's calibrated 50. Instead the controller outputs a gain that VP applies
-in linear light **before** the LUT and the sigma-delta quantizer:
+in linear light at `PL_HOOK_PRE_OUTPUT` — after tone map, gamut map and the
+target LUT, before encode and before the sigma-delta OUTPUT hook; the hook
+linearises with `compensation_eotf` (answers file §7):
 
 ```
 gain_led       = light_full / light_actual
@@ -224,8 +228,8 @@ LED level is the single dial and compensation holds everything else fixed.
   area, eased in over a few frames. Protection engages faster than it
   relaxes (the script's "dump fast, recover slowly", made continuous).
 - **One taste parameter:** `highlight_tolerance_stops` — how much knee
-  compression is accepted in exchange for a lower floor. Start at 1/3 stop.
-  Bind it to a key pair so the owner can nudge it from the seat.
+  compression is accepted in exchange for a lower floor. Start at 1/3 stop;
+  edited live in the Config app.
 
 Headlights in a dark scene are the acceptance case: dark road at full
 compensated brightness, deep floor, headlight core and bloom still
@@ -238,9 +242,11 @@ graduated, no visible change when the LED moves.
 - **Fade to black:** track the light down toward `led_floor_black` at the
   fade's own rate; gain unchanged; resume normal behaviour when the picture
   returns.
-- With lookahead (`lead_ms > 0`): act on the statistics of the frame that
-  will be shown `lead_ms` from now, minus the LED's modelled response time,
-  so the level lands with the frame.
+- With lookahead: send each command `led_response_ms` ahead of the frame
+  that needs it, so the level lands with the frame — never earlier, or the
+  picture visibly changes before the cut. Frames visible beyond that
+  horizon are used only for detection (e.g. hold steady before a known
+  cut), not for moving the LED.
 
 ## 5. Barco ASCII protocol driver
 
@@ -273,14 +279,15 @@ script:
 
 ## 6. Compensation hook
 
-A libplacebo custom hook at `PL_HOOK_PRE_OUTPUT` (after tone map, gamut map
-and the target LUT; before the limited-range encode and the sigma-delta OUTPUT
-hook), installed through the Stage 2 hook chain, with `//!PARAM gain`,
-`//!PARAM knee` and `//!PARAM gain_domain` set each frame from the controller.
-In the linear domain it linearises with `compensation_eotf` itself. The
-shader is trivial: multiply by gain, apply the knee above the headroom
-limit. Parameters are set via the hook's `pl_hook_par` data (the pattern the
-NLS hook already uses for `stretch_ratio`) — no template reparse per frame.
+A libplacebo custom hook at `PL_HOOK_PRE_OUTPUT` (verify the value domain in
+renderer.c: full-range normalised, target transfer, pre-encode), placed in
+the Stage 2 hook chain **after** the measurement pass and **before** the
+sigma-delta OUTPUT hook. Parameters set each frame from the controller via
+`pl_hook_par` data (the pattern the NLS hook uses for `stretch_ratio`):
+`gain`, `knee`, `gain_domain` (0 = encoded for `script` mode, 1 = linear for
+`compensate`), `compensation_eotf`. Linear path:
+`lin = pow(v, eotf); lin *= gain; knee above the headroom limit;
+v' = pow(lin, 1/eotf)`. Encoded path: multiply `v` directly, same knee.
 
 ## 7. Tests and acceptance
 
@@ -313,9 +320,15 @@ On the projector (owner):
   (or `vprenderer/led/`), plus one shader file.
 - Renderer integration: exactly two call sites (stats out, gain in) and one
   hook-chain entry.
-- No new windows or menus; Config app sections and key bindings only.
-- Nothing in `Low_Latency` changes except `lead_ms` being forced to 0.
+- No new windows or menus; plain Config app sections only (no profile
+  groups, no key bindings — answers file §9).
+- Nothing in `Low_Latency` changes; the module is reactive there because
+  the queue holds one frame, not because of a profile-specific setting.
 - Keep `mode: script` working for as long as the module exists.
+- Exit/disable/startup state handling per answers file §6 (LED restored to
+  `led_ceiling` on clean exit or disable; known state re-established at
+  startup).
+- `SerialPort` separated from `BarcoAsciiDriver` (answers file §11).
 
 ## 9. Owner decisions and implementation notes (2026-10-09, step 4)
 
@@ -352,5 +365,11 @@ On the projector (owner):
     below 20) uses `led_floor_black`.
   - The gain follows a one-pole model of the LED (`led_response_ms`, 0 =
     instant until the camera measurement exists), never the target.
+    Pending: rev 13 makes `led_response_ms` (default 80) also the command
+    lead and removes `lead_ms`; not yet implemented.
+  - Statistics source (open, raised with the planner): this build measures
+    the output picture at PRE_OUTPUT (answers file 4). The fork's
+    `AnalyzeActivePictureLookahead` walk analyses captured *source* frames on
+    the CPU before tone mapping, so section 2's "statistics ride on the
+    lookahead walk" needs a decision before Stage 5.
   - No key binding for `highlight_tolerance_stops` (owner: keys optional).
-

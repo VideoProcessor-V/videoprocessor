@@ -1,7 +1,11 @@
 # VideoProcessor: temporal dithering, judder reduction, LED drive — project brief
 
-Status: design agreed, nothing built yet. Revision 7, 2026-10-08, against
-`billslack2/videoprocessor` tag `1.4-beta-rc1`.
+Status: design agreed; Stage 2 blanking keys and hook chain coded (untested on
+the projector); Stage 7 in progress. Revision 13, 2026-10-09, against
+`billslack2/videoprocessor` tag `1.4-beta-rc1`. **Rebase onto `1.4-beta-rc2`
+(subtitle moving, remote Config) after the current Stage 7 step and before
+Stage 5**, since RC2 touches the viewport/active-picture area Stage 5 builds
+on; re-check the lookahead path and the sample config after rebasing.
 
 This is the handoff to a Claude Code session and the project's record. Read it
 fully before touching source. When a decision changes, change it here.
@@ -52,7 +56,10 @@ fully before touching source. When a decision changes, change it here.
    Config "Standard shader parameters" table. The LED module gets its own
    config section, editable the same way. No new menus or windows.
 3. **`Low_Latency` profile untouched** (one-frame queue, Shift+L; used for
-   games). Dithering stages run in every profile (sub-frame cost). De-judder
+   games). Queue profiles auto-select by the fork's `when:` rules on
+   `source_rate` (> 59 → `Low_Latency`, else cinema), mirroring the madVR
+   fps rule; Shift+L stays as manual override. Verify the numeric `when:`
+   syntax from the rule parser. Dithering stages run in every profile (sub-frame cost). De-judder
    and the time-based queue are cinema-profile only. The LED module runs in
    both, with lead time 0 in `Low_Latency`.
 4. **Fail safe.** A shader that fails to load logs one line and libplacebo's
@@ -68,7 +75,17 @@ fully before touching source. When a decision changes, change it here.
 6. **Range chain stays as is:** VP outputs limited (video) levels; GPU set to
    full so the driver does not remap; projector input level "video". BTB/WTW
    preserved. The quantizer is written for this.
-7. **Edge blanking is the gating requirement for the first deploy.** The
+7. **Survey before designing.** Before starting any stage, read the fork's
+   source for mechanisms that already do part of the job, and build on them
+   rather than beside them. This has already collapsed the lookahead work
+   (the fork's black-bar lookahead walk carries our statistics) and the
+   time-based queue (a derived frame count, not a new policy). For stage 6
+   in particular, inspect the fork's frame-mixing scaffolding
+   (`pl_render_image_mix`, the "frame_mixing_active" path, `pl_queue` use if
+   any) even though it is switched off, and report what it provides before
+   proposing a two-frame render path. Write the survey findings into this
+   document under the stage before writing code.
+8. **Edge blanking is the gating requirement for the first deploy.** The
    light-engine mod leaves the extreme left and right columns blue-tinted and
    unusable; madVR currently masks left 10 / right 15. The fork has NO
    horizontal blanking today (`screen_edge_padding` is only a vertical shift
@@ -76,13 +93,16 @@ fully before touching source. When a decision changes, change it here.
    `blank_left`, `blank_right`, `blank_top`, `blank_bottom` (output pixels,
    default 0) to the viewport profile; they shrink the destination rectangle
    so the picture is scaled into the lit area and the blanked columns are
-   black. Do this FIRST in stage 2, verify on the projector, then the hook
-   chain. No uniformity mask — a colour-cast edge cannot be gained back.
-8. **No P010 conversion.** The old path needed `V210_TO_P010` (4:2:2→4:2:0,
+   black. Code this FIRST in stage 2 so it is in the first deploy; it is the
+   first thing checked in the first cinema session. (The owner is banking
+   builds and testing in batches, so the hook chain may be coded before that
+   session; the blanking commit stays separate.) No uniformity mask — a
+   colour-cast edge cannot be gained back.
+9. **No P010 conversion.** The old path needed `V210_TO_P010` (4:2:2→4:2:0,
    halving vertical chroma) for the anamorphic stretch. The VP Renderer takes
    v210 4:2:2 natively; `video_conversion` is off in the test config and the
    stretch is done by the viewport/NLS profile.
-9. **Colour chain stays as is:** projector RealColor targets P3 (0.680/0.320,
+10. **Colour chain stays as is:** projector RealColor targets P3 (0.680/0.320,
    0.265/0.690, 0.150/0.060), VP `target_primaries: p3_d65`. Use the P3 pair
    for BT.2020 sources too (VP gamut-maps 2020→P3 in float); do not switch to
    a 2020 container on an 8-bit link.
@@ -206,7 +226,7 @@ config; later stages deliberately change some of them.
 - Smooth motion: enabled, "only if there would be motion judder" — i.e. 24p
   is currently frame-blended. Fork equivalent: oversample frame mixer
   (`pl_render_image_mix`), but frame mixing is OFF in the fork and enabling
-  it is part of the stage 5/6 presentation-path change — NOT in the first
+  it is part of the stage 6 presentation-path change — NOT in the first
   deploy. Until then the first comparison is plain 3:2 vs madVR's blend;
   judge dithering and colour, not judder, in that comparison.
 - Zoom profiles (rule: AR ≤ 1.9 → zoom169, else zoom1): both detect hard-coded
@@ -240,21 +260,34 @@ Stage numbers are labels, not sequence. **Build in this order:**
 
 1. Stage 1 — environment, clean baseline build.
 2. Stage 2 — **first: `blank_left/right/top/bottom` viewport keys** (set
-   10 / 15 / 0 / 0) + the test config, deployed and checked on the projector;
+   10 / 15 / 0 / 0, constraint 8) + the test config, as its own commit;
    **then** hook chain + `Temporal sigma-delta.glsl` + igv's
    `SSimDownscaler.glsl` + a chroma hook (Artoriuz CfL as the NGU stand-in)
-   as `[shader.standard.*]` entries + a `saturation` rendering key. Two
-   deploy folders if that is more convenient.
+   as `[shader.standard.*]` entries + a `saturation` rendering key. One
+   combined deploy folder with all shaders disabled by default. Stage 2
+   addendum (upscaling shaders) as a small follow-on step.
 3. Stage 3 — ramp photo. Go/no-go for everything after.
 4. Stage 7 — LED module, **reactive form first** (lead time 0): port,
    gain compensation, highlight policy, configurable floors, side-by-side
    logging against the script. Needs only the hook chain and serial code.
-5. Stage 5 — time-based queue. LED module then gains lookahead by config;
+5. **Checkpoint:** Stage 2 addendum (upscaling shaders); then review
+   packages for every completed step → design review → fixes → Code-session
+   audits per `docs/audit/README.md` (one audit file per step, re-audit if
+   blockers); then **rebase onto
+   `1.4-beta-rc2`** and audit the rebase (conflicts, lookahead path, config
+   key changes). Nothing further is built on RC1.
+6. Stage 5 — time-based queue. LED module then gains lookahead by config;
    audio delay set once.
-6. Stage 4 — motion-compensated residual carry.
-7. Stage 6 — de-judder (open-ended, skippable).
-8. Stage 8 — adaptive downscale blend on top of the SSIM shader.
-9. Stage 9 — ambient-light switching.
+7. Stage 4 — motion-compensated residual carry.
+8. Stage 6 — de-judder (open-ended, skippable).
+9. Stage 8 — adaptive downscale blend on top of the SSIM shader.
+10. Stage 9 — ambient-light switching.
+
+Every step ends with: a commit → a review package per
+`docs/REVIEW-PACKAGE.md` for the design reviewer → the implementer addresses
+design findings → then the Code-session audit per `docs/audit/README.md`.
+Design review comes first so an implementation change does not invalidate a
+code audit already done.
 
 The fork's viewport profiles already cover the madVR screen-config feature
 set: `anamorphic_scale` (set 4:3 for the ISCO III, matching madVR's 4/3), `mode: normal|scope`,
@@ -270,9 +303,10 @@ component; Git for Windows; Claude Desktop (Code tab). Clone at tag
 baseline and a first deploy folder.
 
 ### Stage 2 — Blanking keys, custom GLSL hook chain, saturation key (the only renderer changes for stages 2–4, 8)
-0. Before anything else: the four `blank_*` viewport keys (constraint 7),
-   deployed and verified on the projector. Then a `saturation` key in the
-   rendering profile (libplacebo colour adjustment; madVR runs +5).
+0. Before anything else: the four `blank_*` viewport keys (constraint 8),
+   as their own commit, first item on the first cinema checklist. Then a
+   `saturation` key in the rendering profile (libplacebo colour adjustment;
+   madVR runs +5).
 New `vprenderer/CustomHookChain.h/.cpp`, owned by the renderer:
 1. In `SetConfiguredShaderSelection`, collect rules with
    `!nls && !none && !filename.empty()` ordered by `stageOrder` then
@@ -303,6 +337,17 @@ New `vprenderer/CustomHookChain.h/.cpp`, owned by the renderer:
 Then install `Temporal sigma-delta.glsl` in `shaders/`, add the config
 section (§8), deploy, run §7.
 
+**Stage 2 addendum (after stage 2 was completed):** add an image *upscaling*
+hook for sub-native sources (1080p → 1600p is a 1.5× upscale). madVR uses
+NGU Sharp for this; the open stand-in is igv's `FSRCNNX_x2_16-0-4-1.glsl`,
+with Artoriuz ArtCNN as the A/B alternative and igv `SSimSuperRes.glsl` as
+an optional refinement pass. Install as a `[shader.standard.*]` entry with
+a rule that engages only when the source height is below the current
+*output* height — use the output-height variable, never a literal, so it
+survives a raster change — and make the SSIM downscaler's rule the mirror
+(source height above output height). Verify the rule syntax from the fork's
+parser. Disabled by default. Cost: a few ms at 1080p on the 3090.
+
 ### Stage 3 — Verify on the projector
 Ramp protocol (§7). Settle converter rounding vs truncation. Tune
 `noise_amplitude`, `motion_threshold`. If the time-average does not converge
@@ -316,12 +361,27 @@ confidence in a storage texture. Quantizer warps the residual along vectors;
 low confidence ⇒ existing gate. Budget ≈1 ms. Reference: FFmpeg
 `vf_minterpolate` (algorithm, not code).
 
-### Stage 5 — Time-based queue target (presentation path, cinema profile)
-New queue-profile key `target_latency_ms` (e.g. 120). Frame depth derived
-per source rate; release the frame whose timestamp is that old. `Low_Latency`
-unchanged. OSD shows effective delay so the audio offset is set once. Raise
-`queue_size` accordingly (8 frames at 60p is trivial). Provides lookahead for
-stages 6 and 7 and the first-frame-early cut flag.
+### Stage 5 — Time-based queue target (cinema profile; low-risk form)
+New queue-profile key `target_latency_ms` (e.g. 120). **Implement as a
+derived frame count, not a new presentation policy:**
+`target_frames = ceil(target_latency_ms × source_rate)`, re-evaluated on a
+source-format change. The fork's pacing code (cadence repeats, clock-drift
+handling, startup preroll) works in frame counts and must be left untouched;
+it only receives a number that now comes from time. Profiles without the key
+behave exactly as today; `Low_Latency` unchanged. Raise `queue_size`
+accordingly (8 frames at 60p is trivial). OSD shows the effective delay
+(quantised to whole source frames: ≈125 ms at 24p, ≈133 ms at 60p for a
+120 ms target) so the audio offset is set once.
+
+Lookahead: the fork already walks queued future frames for its black-bar
+detector (`AnalyzeActivePictureLookahead`, `ActivePictureDecisionTimeline`,
+per-profile `active_picture_lookahead_frames`, clamped to what the queue
+holds). Stage 7's statistics reuse that path — a second analysis in the
+same walk with its own frame-depth key — never a parallel mechanism. In
+`Low_Latency` the queue holds one frame, so both analyses act on the current
+frame, as the crop detector does today. Upstream candidate: the derived
+count and a generic statistics hook, with no reference to the LED module
+by name or purpose.
 
 ### Stage 6 — Low-strength motion-compensated de-judder (cinema profile)
 Needs the render path to see frame A and next frame B (second texture to a
@@ -336,11 +396,18 @@ outcome, built last of the picture stages, skippable. Owner dislikes both
 frame-blend blur and soap-opera effect — do not offer either.
 
 ### Stage 7 — LED drive module (native; replaces `beta_22.py`)
-Built right after stage 3 in reactive form (lead time 0); lookahead arrives
-with stage 5 as a config change.
+Built right after stage 3 in reactive form (lead 0); lookahead arrives with
+stage 5 automatically, because the statistics ride on the fork's existing
+queued-frame walk (see stage 5) and the available lead is whatever depth
+that walk has. Detailed spec: `docs/VP-led-drive-module.md` and
+`docs/VP-led-drive-answers-1.md` (the answers file overrides both on
+conflict: modes are `compensate | script | log_only`, CNTR is never driven,
+hook at PRE_OUTPUT).
 **Measurement (GPU, per frame, over the active picture, not a fixed crop):**
-APL = mean of Rec.601 luma (0.299/0.587/0.114) of the *output* codes
-(gamma-encoded, after tone map/LUT, limited range, so black = code 16);
+APL = weighted mean of the *output* codes (gamma-encoded, after tone
+map/LUT, limited range, so black = code 16), weights configurable and
+defaulting to the script's effective `0.114 R / 0.587 G / 0.299 B` (see
+answers file §5);
 highlight statistic = high percentile (≈99.5th) of 3×3-block means with a
 rolloff, replacing the script's "max of 854×480 ≥ 215"; plus cut flag (step
 change) and fade flag (monotonic APL decline toward black over consecutive
@@ -348,20 +415,23 @@ frames, structure otherwise static).
 
 **Controller (ported from the script, parameter for parameter):**
 LED target vs APL: 255 above 100; 230 at 70; 200 at 40; 100 at 20;
-floor below. Step tables by distance to target (up 7/5/4/2/1, down 5/3/2/1
-per tick). Highlight rules: anti-crush (fast protective response when a
+floor below. Step tables by distance to target, transcribed from the
+script (up-steps are APL-dependent: `steps_up_dark` / `steps_up_bright`
+split at APL 40; see answers file §2). Highlight rules: anti-crush (fast protective response when a
 highlight appears) and anti-pump (ignore small differences in one direction).
 `sudden_flag` path is dead code — omit. Tick period: the script's loop was
 unfixed (~300–500 ms); start at 400 ms and match by eye, or from a timestamp
 log if provided.
 
 **New: gain compensation in VP instead of projector contrast.** Apply gain =
-full/LED_actual in linear light before the LUT and quantizer, so content
-brightness is constant and only the black floor moves. Gain must follow the
+full/LED_actual in linear light at PRE_OUTPUT (after tone map, gamut map and
+LUT, before encode and the sigma-delta; the hook linearises with
+`compensation_eotf` = the projector's real 2.2), so content brightness is
+constant and only the black floor moves. Gain must follow the
 LED's *actual* trajectory (one-off camera measurement of LED step response →
 model), never the commanded target, or there will be flashes. The projector
-contrast command is retired; keep `mode: contrast` as a fallback that
-reproduces the script's contrast curve. Contrast steps were the most visible
+contrast command is never driven; `mode: script` reproduces the script's
+contrast curve as an encoded-space gain in VP instead (answers file §1). Contrast steps were the most visible
 artifact of the old scheme and the reason the LED floor was held at 100; with
 float gain that limit disappears.
 
@@ -381,21 +451,26 @@ dial; compensation holds everything else fixed.
   scene could toggle across; response strength is a smooth function of
   persistence and area, eased in over a few frames (hysteresis comes free).
   Asymmetry preserved: protection engages faster than it relaxes.
-- *One taste parameter:* `highlight_tolerance` (stops of knee compression
+- *One taste parameter:* `highlight_tolerance_stops` (stops of knee compression
   accepted in exchange for a lower floor; start ≈1/3 stop). The controller
   picks the lowest LED level that keeps compression within it. Tiny
   highlights spend little of it, so dark scenes go deep. Nudgeable from a key.
 
 **Modes:** cut ⇒ jump (masked by the cut); scene ⇒ drift at the script's
-rates; fade ⇒ track to black, contrast/gain unchanged. Lead time =
-`lead_ms` in the cinema profile (acts before the frame is shown), 0 in
-`Low_Latency` (reactive; the only residual artifact is a brief soft dip after
-dark→bright cuts).
+rates; fade ⇒ track to black, contrast/gain unchanged. Lead is not a
+setting: it is derived from the lookahead walk depth and the source rate,
+and the controller sends each command `led_response_ms` (the measured LED
+settling time) ahead of the frame that needs it — never earlier, or the
+picture would change before the cut. The OSD reports the effective lead. In
+`Low_Latency` the walk holds one frame, so the module acts as early as it
+can (reactive; the only residual artifact is a brief soft dip after
+dark→bright cuts). Lookahead beyond `led_response_ms` is used only for
+detection (hold steady before a known cut), never for moving the LED early.
 
-**Config:** `[led_drive.Default]` with `com_port`, `baud`, `lead_ms`,
-`tick_ms`, `led_floor` (default 100, the owner's anti-pump floor),
+**Config:** `[led_drive.Default]` with `led_response_ms` (lead is derived,
+see above), `tick_ms`, `led_floor` (default 100, the owner's anti-pump floor),
 `led_floor_black` (default 60, for fades/cuts to black), `led_ceiling`,
-`highlight_percentile`, `highlight_tolerance`, `highlight_persist_ms`,
+`highlight_percentile`, `highlight_tolerance_stops`, `highlight_persist_ms`,
 `knee`, `mode`, and the target curve / step tables.
 Module clamps to `LPW1 ?N/?M`, reads back state at startup (`CNTR?`,
 `LPW1?`), paces on ACKs (`ECHO` on), serial on a background thread, logs what
@@ -410,6 +485,27 @@ black is code 16, and can only act through integer contrast steps. All four
 go away here. With compensation, lag no longer moves content brightness, so
 the floor can likely drop to 60 later with the same drift rates — test, keep
 it configurable.
+
+A fifth limit, and the origin of the gamma boost: the script starts dimming
+the LED below APL 100 but only raises contrast below APL 60, so scenes
+between 60 and 100 lost light with nothing compensating. The 2.4-vs-2.2
+`output_gamma` mismatch was a global patch for that average loss.
+`compensate` mode ties gain to the LED level at every APL, so that loss no
+longer exists. **Do not change `output_gamma` or `contrast_recovery` in
+code**; they stay at 2.4 / Log Medium–High for the like-for-like comparison.
+Afterwards the owner revisits them by config, stepping gamma toward 2.2 with
+contrast recovery following (they are one adjustment with two knobs) and
+stopping where it looks right — possibly at 2.4 anyway.
+
+**Owner decision, 2026-10-09 (supersedes the paragraph above for
+`output_gamma`):** the gamma boost lives in the LED module as a switchable
+option, `[led_drive] gamma_boost: 2.4` (or `off`), applied at the
+PRE_OUTPUT compensation hook whether or not the module drives the LED, and
+the measurement sees the boosted picture. `output_gamma` is 2.2 (the
+projector's real gamma) in the test configuration. With no calibration LUT
+the picture is identical to `output_gamma: 2.4`. Stepping the boost toward
+2.2 or `off` is the config knob described above; `contrast_recovery` is
+unchanged.
 
 ### Stage 8 — Adaptive downscale blend (4K → 1600p, anisotropic)
 Plain SSIM downscaling (igv's shader, unmodified) is installed in stage 2;
@@ -432,7 +528,8 @@ Automatic version: room lights are not smart, so use a lux sensor —
 ESP32/Arduino + VEML7700 (or TSL2591) over USB serial, or a Yocto-Light-V4 —
 mounted facing the ceiling behind the seating so it never sees the screen;
 calibrate lights-off/lights-on readings once; switch with hysteresis.
-`[ambient]` config section; read on the LED module's serial thread.
+`[ambient]` config section; a second `SerialPort` instance with its own
+small driver (the transport is already separated from the Barco driver).
 
 ## 7. Test protocol (stage 3)
 
@@ -482,7 +579,7 @@ the picture side from §4b: `target_primaries: p3_d65`, `output_gamma: 2.4`
 approximating the zoom169/zoom1 rules, standard shaders: SSimDownscaler
 (gamma light to match today; A/B linear later), CfL chroma (A/B vs
 ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
-§4b); 24p shows plain 3:2 until stage 5/6.
+§4b); 24p shows plain 3:2 until stage 6.
 
 ## 9. References (reach for these rather than inventing)
 
@@ -490,6 +587,8 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   header before any PR).
 - Artoriuz CfL (chroma-from-luma) and ArtCNN; igv KrigBilateral — chroma
   upscaling hooks standing in for madVR NGU (no open NGU exists).
+- igv FSRCNNX (x2 16-0-4-1), Artoriuz ArtCNN, igv SSimSuperRes — image
+  upscaling for 1080p sources, standing in for NGU Sharp.
 - FFmpeg `vf_minterpolate` — block matching, bidirectional vectors, occlusion
   handling, OBMC (port the algorithm to compute shaders).
 - FFmpeg `scdet` / `select` scene score — cut detection.
@@ -517,7 +616,7 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
 - Upstream PR vs private patch (after stage 3 works).
 - Stage 7 (LED drive), from implementation against the real code
   (2026-10-09; detail in `VP-led-drive-module.md` and
-  `VP-led-drive-answers-r1.md`):
+  `VP-led-drive-answers-1.md`):
   - The guide's and this brief's up-step table (7/5/4/2/1) did not match
     `beta_22.py`: the script brightens by 1 for distance 10–24 and uses
     APL-dependent steps (+5/+4, +4/+2 split at APL 40). Fixed: the script is
@@ -573,4 +672,3 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
     in `VP-led-drive-module.md` section 9 for the planning side to confirm.
   - `led_response_ms` is 0 until the LED step response has been filmed;
     with real lag, a dimming step will briefly show as a flash.
-

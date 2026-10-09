@@ -10,7 +10,7 @@
 // Layer 2 of the LED drive module: pure, deterministic control logic. No
 // hardware, no renderer, no clock: the caller supplies the statistics and
 // runs Tick() every tick_ms. See docs/VP-led-drive-module.md section 4 and
-// docs/VP-led-drive-answers-r1.md.
+// docs/VP-led-drive-answers-1.md.
 namespace LedDrive
 {
 	// Per-frame statistics from the measurement layer, in limited-range code

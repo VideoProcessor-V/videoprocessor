@@ -11,7 +11,7 @@
 #include <vector>
 
 // Configuration for the LED drive module (brief Stage 7,
-// docs/VP-led-drive-module.md and docs/VP-led-drive-answers-r1.md).
+// docs/VP-led-drive-module.md and docs/VP-led-drive-answers-1.md).
 // [projector.<name>] configures the transport, [led_drive.<name>] the
 // controller. Plain application sections: only the "default" name is used.
 namespace LedDrive
