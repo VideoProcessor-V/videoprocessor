@@ -194,6 +194,7 @@
     <ClInclude Include="led\SerialPort.h" />
     <ClInclude Include="led\ProjectorDriver.h" />
     <ClInclude Include="led\BarcoAsciiDriver.h" />
+    <ClInclude Include="led\LedController.h" />
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
@@ -370,6 +371,7 @@
     <ClCompile Include="led\SerialPort.cpp" />
     <ClCompile Include="led\ProjectorDriver.cpp" />
     <ClCompile Include="led\BarcoAsciiDriver.cpp" />
+    <ClCompile Include="led\LedController.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
     <ClCompile Include="EOTF.cpp" />

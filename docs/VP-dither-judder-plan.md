@@ -542,3 +542,13 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
     terminator and spacing the FL35 accepts, the reply format, the `?N`/`?M`
     range queries and the sustainable command rate are all to be confirmed on
     first connection (the driver probes and logs what it finds).
+  - `mode: script` reproduces `beta_22.py` tick for tick (tested against a
+    literal transcription of the script). Two small, deliberate or inherited
+    differences: the configurable LED curve uses the exact 25/30 slope between
+    APL 70 and 100, so the target is one level higher than the script's
+    rounded 0.8333 at APL 76, 82, 88 and 94; and the guide's "contrast 62 at
+    APL 30" is really 61 in the script (0.7333 truncates), jumping to 63 at
+    29 - the port follows the script.
+  - The script's contrast fast dumps happen inside one loop pass (100 ms
+    steps, then 200 ms). The controller returns them as a timed schedule
+    within the tick, and the next tick waits until the schedule has run.

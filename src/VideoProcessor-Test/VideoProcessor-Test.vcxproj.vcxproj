@@ -232,6 +232,7 @@
     <ClCompile Include="ConfigFileTests.cpp" />
     <ClCompile Include="CustomHookChainTests.cpp" />
     <ClCompile Include="LedDriveProtocolTests.cpp" />
+    <ClCompile Include="LedDriveControllerTests.cpp" />
     <ClCompile Include="ConfigEditorCoreTests.cpp" />
     <ClCompile Include="ConfigurationRpcServerTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
