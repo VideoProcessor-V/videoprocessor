@@ -6009,6 +6009,21 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		connect(verticalAlignment, qOverload<int>(&QComboBox::currentIndexChanged),
 			this, [updateScreenEdgePadding](int) { updateScreenEdgePadding(); });
 		updateScreenEdgePadding();
+		for (const auto& blank : {
+			std::make_pair(QStringLiteral("Blank left edge"), QStringLiteral("blank_left")),
+			std::make_pair(QStringLiteral("Blank right edge"), QStringLiteral("blank_right")),
+			std::make_pair(QStringLiteral("Blank top edge"), QStringLiteral("blank_top")),
+			std::make_pair(QStringLiteral("Blank bottom edge"), QStringLiteral("blank_bottom")) })
+		{
+			auto* blankEdge = addText(blank.first, blank.second, QStringLiteral("px"));
+			blankEdge->setValidator(new QIntValidator(0, 4000, blankEdge));
+			blankEdge->setToolTip(QStringLiteral(
+				"Output pixels at this panel edge that are always black. The picture "
+				"is scaled into the remaining area, so nothing is cut off."));
+		}
+		form->addRow(QString(), helpLabel(QStringLiteral(
+			"Use for panel edges the display cannot show cleanly. Ignored if the "
+			"blanked area would exceed half the output width or height.")));
         anamorphicEnabled = new QCheckBox(QStringLiteral("Enable anamorphic lens compensation"));
         anamorphicEnabled->setObjectName(controlName(sectionPrefix,
             QStringLiteral("anamorphic_enabled")));
@@ -6337,6 +6352,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (key == QStringLiteral("screen_aspect")) return QString();
                 if (key == QStringLiteral("vertical_alignment")) return QStringLiteral("center");
 				if (key == QStringLiteral("screen_edge_padding")) return QStringLiteral("0");
+				if (key == QStringLiteral("blank_left") || key == QStringLiteral("blank_right") ||
+					key == QStringLiteral("blank_top") || key == QStringLiteral("blank_bottom"))
+					return QStringLiteral("0");
             }
             if (sectionPrefix == QStringLiteral("vprenderer.zoom"))
             {

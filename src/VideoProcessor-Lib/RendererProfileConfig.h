@@ -207,6 +207,11 @@ namespace RendererProfileConfig
 		bool hasScreenAspect = false;
 		std::string verticalAlignment = "center";
 		int screenEdgePadding = 0;
+		// Output pixels blanked at each panel edge; the picture fits inside.
+		int blankLeft = 0;
+		int blankTop = 0;
+		int blankRight = 0;
+		int blankBottom = 0;
 		AspectRatio anamorphicScale{ 1, 1, 1.0 };
 		// automatic_crop is retained for compatibility with existing profiles.
 		// The two fill settings independently enable trusted automatic crop.
@@ -609,6 +614,11 @@ namespace RendererProfileConfig
 			if (screenGroup && key == "screen_edge_padding")
 			{
 				int parsed = 0; return ParseInteger(value, 0, 100000, parsed);
+			}
+			if (screenGroup && (key == "blank_left" || key == "blank_top" ||
+				key == "blank_right" || key == "blank_bottom"))
+			{
+				int parsed = 0; return ParseInteger(value, 0, 4000, parsed);
 			}
 			if (screenGroup && key == "anamorphic_scale")
 				return IsAspectInRange(value, 0.5, 2.0);
@@ -2233,6 +2243,21 @@ namespace RendererProfileConfig
 			error = "[profiles.viewport." + viewport.profile +
 				"] screen_edge_padding must be a whole number from 0 to 100000";
 			return false;
+		}
+		for (const auto& blank : {
+			std::make_pair("blank_left", &viewport.blankLeft),
+			std::make_pair("blank_top", &viewport.blankTop),
+			std::make_pair("blank_right", &viewport.blankRight),
+			std::make_pair("blank_bottom", &viewport.blankBottom) })
+		{
+			value = settings.find(blank.first);
+			if (value != settings.end() &&
+				!ParseInteger(value->second, 0, 4000, *blank.second))
+			{
+				error = "[profiles.viewport." + viewport.profile + "] " +
+					blank.first + " must be a whole number from 0 to 4000";
+				return false;
+			}
 		}
 		value = settings.find("anamorphic_scale");
 		if (value != settings.end() &&

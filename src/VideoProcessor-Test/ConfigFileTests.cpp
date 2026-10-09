@@ -85,6 +85,46 @@ namespace VideoProcessorTest
             Assert::AreEqual(std::string("50"), padding);
         }
 
+        TEST_METHOD(EdgeBlankingSurvivesAcceptedConfiguration)
+        {
+            CachedConfigTestFile file;
+            std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                "[vprenderer.viewport.cinema]\nanamorphic_scale: 4:3\n"
+                "blank_left: 10\nblank_right: 15\n";
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Assert::IsTrue(MainConfigSchema::Validate(config, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            UnifiedProfileRuntime::Runtime runtime;
+            Assert::IsTrue(runtime.Initialize(config, {}, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            const auto snapshot = runtime.GetSnapshot();
+            Assert::IsTrue(snapshot != nullptr);
+            Assert::AreEqual(10, snapshot->viewport.blankLeft);
+            Assert::AreEqual(15, snapshot->viewport.blankRight);
+            Assert::AreEqual(0, snapshot->viewport.blankTop);
+            Assert::AreEqual(0, snapshot->viewport.blankBottom);
+        }
+
+        TEST_METHOD(EdgeBlankingRejectsInvalidValues)
+        {
+            for (const char* value : { "-1", "4001", "ten", "1.5" })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                    "[vprenderer.viewport.cinema]\nblank_left: " << value << "\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsFalse(MainConfigSchema::Validate(config, error) &&
+                    runtime.Initialize(config, {}, error));
+                Assert::IsTrue(error.find("blank_left") != std::string::npos,
+                    std::wstring(error.begin(), error.end()).c_str());
+            }
+        }
+
 		TEST_METHOD(RestartReadersReuseOneReadAndExplicitReloadSamplesIndependently)
 		{
 			CachedConfigTestFile file;

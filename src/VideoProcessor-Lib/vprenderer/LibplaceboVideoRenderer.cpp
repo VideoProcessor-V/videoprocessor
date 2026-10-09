@@ -35,6 +35,7 @@
 #include <vprenderer/HdrPeakAnalysisCrop.h>
 #include <vprenderer/NativeStatsOverlayPlacement.h>
 #include <vprenderer/AnamorphicPresentation.h>
+#include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <SceneDetector.h>
 #include <vprenderer/LibplaceboOutputPolicy.h>
@@ -818,6 +819,7 @@ namespace
 		bool configuredScreenTarget = false;
 		std::string verticalAlignment = "center";
 		int screenEdgePadding = 0;
+		EdgeBlanking::Insets edgeBlanking;
 		double anamorphicScale = 1.0;
 		bool automaticSourceCrop = false;
 		bool automaticSourceCropRequested = false;
@@ -1751,6 +1753,17 @@ namespace
 		if (readViewportString("screen_edge_padding", raw) &&
 			ParseInteger(raw, 0, 100000, parsedScreenEdgePadding))
 			settings.screenEdgePadding = parsedScreenEdgePadding;
+		for (const auto& blank : {
+			std::make_pair("blank_left", &settings.edgeBlanking.left),
+			std::make_pair("blank_top", &settings.edgeBlanking.top),
+			std::make_pair("blank_right", &settings.edgeBlanking.right),
+			std::make_pair("blank_bottom", &settings.edgeBlanking.bottom) })
+		{
+			int parsed = 0;
+			if (readViewportString(blank.first, raw) &&
+				ParseInteger(raw, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
+				*blank.second = parsed;
+		}
 		if (config.TryGetString(rule.section, "anamorphic_scale", raw))
 		{
 			double value = 0.0;
@@ -3626,6 +3639,8 @@ struct LibplaceboVideoRenderer::Impl
 	bool configuredScreenTarget = false;
 	std::string verticalAlignment = "center";
 	int screenEdgePadding = 0;
+	EdgeBlanking::Insets edgeBlanking;
+	bool edgeBlankingLogged = false;
 	double anamorphicScale = 1.0;
 	bool automaticSourceCrop = false;
 	bool automaticSourceCropRequested = false;
@@ -6995,6 +7010,8 @@ struct LibplaceboVideoRenderer::Impl
 		configuredScreenTarget = settings.configuredScreenTarget;
 		verticalAlignment = settings.verticalAlignment;
 		screenEdgePadding = settings.screenEdgePadding;
+		edgeBlanking = settings.edgeBlanking;
+		edgeBlankingLogged = false;
 		anamorphicScale = settings.anamorphicScale;
 		automaticSourceCropRequested = settings.automaticSourceCropRequested;
 		automaticSourceCrop = settings.automaticSourceCrop;
@@ -7110,6 +7127,7 @@ struct LibplaceboVideoRenderer::Impl
 			configuredScreenTarget != settings.configuredScreenTarget ||
 			verticalAlignment != settings.verticalAlignment ||
 			screenEdgePadding != settings.screenEdgePadding ||
+			edgeBlanking != settings.edgeBlanking ||
 			anamorphicScale != settings.anamorphicScale ||
 			automaticSourceCropRequested != settings.automaticSourceCropRequested ||
 			automaticSourceCrop != settings.automaticSourceCrop ||
@@ -7145,6 +7163,8 @@ struct LibplaceboVideoRenderer::Impl
 		configuredScreenTarget = settings.configuredScreenTarget;
 		verticalAlignment = settings.verticalAlignment;
 		screenEdgePadding = settings.screenEdgePadding;
+		edgeBlanking = settings.edgeBlanking;
+		edgeBlankingLogged = false;
 		anamorphicScale = settings.anamorphicScale;
 		automaticSourceCropRequested = settings.automaticSourceCropRequested;
 		automaticSourceCrop = settings.automaticSourceCrop;
@@ -7180,6 +7200,7 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings.configuredScreenTarget = settings.configuredScreenTarget;
 		activeSettings.verticalAlignment = settings.verticalAlignment;
 		activeSettings.screenEdgePadding = settings.screenEdgePadding;
+		activeSettings.edgeBlanking = settings.edgeBlanking;
 		activeSettings.anamorphicScale = settings.anamorphicScale;
 		activeSettings.automaticSourceCropRequested = settings.automaticSourceCropRequested;
 		activeSettings.automaticSourceCrop = settings.automaticSourceCrop;
@@ -10299,9 +10320,9 @@ struct LibplaceboVideoRenderer::Impl
 			outputClient.right > outputClient.left &&
 			outputClient.bottom > outputClient.top)
 		{
-			outputPanelAspect = static_cast<double>(
-				outputClient.right - outputClient.left) /
-				(outputClient.bottom - outputClient.top);
+			outputPanelAspect = EdgeBlanking::BlankedAspect(
+				outputClient.right - outputClient.left,
+				outputClient.bottom - outputClient.top, edgeBlanking);
 		}
 		const double frameNlsTargetAspect = AnamorphicPresentation::PhysicalTarget(
 			configuredScreenActive, configuredScreenAspect,
@@ -13314,6 +13335,39 @@ struct LibplaceboVideoRenderer::Impl
 
 		struct pl_frame renderImage{};
 		struct pl_frame target = baseTarget;
+		// Edge blanking shrinks the usable panel before any layout decision, so
+		// crop, NLS and screen fitting all see only the lit area. The blanked
+		// strips remain part of the whole-surface clear above.
+		const EdgeBlanking::Result blankedPanel = EdgeBlanking::Apply(
+			{ target.crop.x0, target.crop.y0, target.crop.x1, target.crop.y1 },
+			edgeBlanking);
+		if (blankedPanel.applied)
+		{
+			if (!edgeBlankingLogged)
+			{
+				edgeBlankingLogged = true;
+				DebugLog::Log(
+					"viewport: edge blanking %d,%d,%d,%d (left,top,right,bottom); lit area %.0f,%.0f-%.0f,%.0f of %.0fx%.0f",
+					edgeBlanking.left, edgeBlanking.top, edgeBlanking.right,
+					edgeBlanking.bottom, blankedPanel.rect.left,
+					blankedPanel.rect.top, blankedPanel.rect.right,
+					blankedPanel.rect.bottom, target.crop.x1 - target.crop.x0,
+					target.crop.y1 - target.crop.y0);
+			}
+			target.crop = { static_cast<float>(blankedPanel.rect.left),
+				static_cast<float>(blankedPanel.rect.top),
+				static_cast<float>(blankedPanel.rect.right),
+				static_cast<float>(blankedPanel.rect.bottom) };
+		}
+		else if (blankedPanel.rejected && !edgeBlankingLogged)
+		{
+			edgeBlankingLogged = true;
+			DebugLog::Log(
+				"viewport: edge blanking %d,%d,%d,%d (left,top,right,bottom) would leave less than half of the %.0fx%.0f output; ignored",
+				edgeBlanking.left, edgeBlanking.top, edgeBlanking.right,
+				edgeBlanking.bottom, target.crop.x1 - target.crop.x0,
+				target.crop.y1 - target.crop.y0);
+		}
 		bool trustedActivePicture = false;
 		HdrPeakAnalysisCrop::TrustedPicture hdrTrustedPicture;
 		configureViewport(
