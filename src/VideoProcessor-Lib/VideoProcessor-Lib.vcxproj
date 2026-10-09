@@ -190,6 +190,10 @@
     <ClInclude Include="cie.h" />
     <ClInclude Include="ColorSpace.h" />
     <ClInclude Include="ConfigFile.h" />
+    <ClInclude Include="led\LedDriveConfig.h" />
+    <ClInclude Include="led\SerialPort.h" />
+    <ClInclude Include="led\ProjectorDriver.h" />
+    <ClInclude Include="led\BarcoAsciiDriver.h" />
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
@@ -363,6 +367,9 @@
 	<ClCompile Include="OutputReadinessController.cpp" />
 	<ClCompile Include="RationalLiveOutputSequencer.cpp" />
     <ClCompile Include="ConfigFile.cpp" />
+    <ClCompile Include="led\SerialPort.cpp" />
+    <ClCompile Include="led\ProjectorDriver.cpp" />
+    <ClCompile Include="led\BarcoAsciiDriver.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
     <ClCompile Include="EOTF.cpp" />

@@ -2,6 +2,7 @@
 
 #include "ConfigSchema.h"
 #include "QueueConfiguration.h"
+#include "led/LedDriveConfig.h"
 
 #include <algorithm>
 #include <cctype>
@@ -45,7 +46,8 @@ namespace MainConfigSchema
 			section == "display_refresh_rate_override" ||
 			section == "shaders" ||
 			section.rfind("shaders.", 0) == 0 ||
-			section.rfind("shader.", 0) == 0;
+			section.rfind("shader.", 0) == 0 ||
+			LedDrive::OwnsSection(section);
 	}
 
 	inline bool BoundedInvalidCaptureRecoveryEnabled(const ConfigFile& config)
@@ -242,6 +244,8 @@ namespace MainConfigSchema
 		};
 		if (!ConfigSchema::ValidateSection(
 			config, "directshow.ppm", ppmRules, error))
+			return false;
+		if (!LedDrive::Validate(config, error))
 			return false;
 		if (const auto* aliases = config.GetSectionValues("renderer_alias"))
 			for (const auto& alias : *aliases)

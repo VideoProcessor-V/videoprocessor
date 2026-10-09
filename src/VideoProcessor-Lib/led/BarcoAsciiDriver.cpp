@@ -1,0 +1,358 @@
+#include <pch.h>
+#include "BarcoAsciiDriver.h"
+
+#include "../DebugLog.h"
+
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <vector>
+
+namespace LedDrive
+{
+	namespace
+	{
+		bool AllOf(const std::string& text, int (*predicate)(int))
+		{
+			return std::all_of(text.begin(), text.end(),
+				[predicate](char c) { return predicate(static_cast<unsigned char>(c)) != 0; });
+		}
+
+		std::string Printable(const std::string& bytes)
+		{
+			std::string text;
+			for (char c : bytes)
+				text += c == '\r' ? std::string("\\r") : c == '\n' ? std::string("\\n") : std::string(1, c);
+			return text;
+		}
+
+		bool SameMnemonic(const std::string& a, const char* b)
+		{
+			const std::string other(b);
+			return a.size() == other.size() && std::equal(a.begin(), a.end(), other.begin(),
+				[](char x, char y)
+				{
+					return std::toupper(static_cast<unsigned char>(x)) ==
+						std::toupper(static_cast<unsigned char>(y));
+				});
+		}
+	}
+
+	BarcoAsciiDriver::BarcoAsciiDriver(const ProjectorConfig& configIn,
+		std::unique_ptr<ISerialPort> portIn)
+		: config(configIn), port(std::move(portIn)),
+		framing{ "cr", false, "\r", true },
+		nextSendAllowed(std::chrono::steady_clock::now())
+	{
+	}
+
+	BarcoAsciiDriver::~BarcoAsciiDriver()
+	{
+		Close();
+	}
+
+	bool BarcoAsciiDriver::ParseReply(const std::string& line, std::string& mnemonic, int& value)
+	{
+		std::istringstream fields(line);
+		std::string address, name, number, extra;
+		if (!(fields >> address >> name >> number) || (fields >> extra))
+			return false;
+		if (address.size() != 4 || address[0] != '%' ||
+			!AllOf(address.substr(1), ::isdigit))
+			return false;
+		if (name.size() != 4 || !AllOf(name, ::isalnum))
+			return false;
+		if (number.empty() || number.size() > 9 || !AllOf(number, ::isdigit))
+			return false;
+		mnemonic = name;
+		value = std::stoi(number);
+		return true;
+	}
+
+	std::string BarcoAsciiDriver::Format(const char* mnemonic, const std::string& argument) const
+	{
+		std::string name(mnemonic);
+		if (framing.lowercase)
+			std::transform(name.begin(), name.end(), name.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return ":" + name + argument + framing.suffix;
+	}
+
+	bool BarcoAsciiDriver::Transact(const std::string& command, const char* mnemonic,
+		int* value, int timeoutMs, int maxGapWaitMs)
+	{
+		using namespace std::chrono;
+		const auto now = steady_clock::now();
+		if (nextSendAllowed > now)
+			std::this_thread::sleep_for(std::min<steady_clock::duration>(
+				nextSendAllowed - now, milliseconds(std::max(0, maxGapWaitMs))));
+		port->DiscardInput();
+		std::string error;
+		const bool written = port->Write(command, error);
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			if (written) ++commands;
+		}
+		bool ok = written && !framing.acknowledged;
+		if (!written)
+			DebugLog::Log("LED drive: projector write of \"%s\" failed: %s",
+				Printable(command).c_str(), error.c_str());
+		else if (framing.acknowledged)
+		{
+			const auto deadline = steady_clock::now() + milliseconds(timeoutMs);
+			std::string line;
+			for (;;)
+			{
+				const auto remaining = duration_cast<milliseconds>(deadline - steady_clock::now()).count();
+				if (remaining <= 0 || !port->ReadLine(static_cast<int>(remaining), line))
+					break;
+				std::string name;
+				int parsed = 0;
+				if (ParseReply(line, name, parsed) && SameMnemonic(name, mnemonic))
+				{
+					if (value) *value = parsed;
+					ok = true;
+					break;
+				}
+				if (!line.empty())
+					DebugLog::Log("LED drive: projector reply \"%s\" ignored while waiting for %s",
+						Printable(line).c_str(), mnemonic);
+			}
+			if (!ok)
+			{
+				{
+					std::lock_guard<std::mutex> guard(stateMutex);
+					++timeouts;
+				}
+				DebugLog::Log("LED drive: no %s reply within %d ms to \"%s\"",
+					mnemonic, timeoutMs, Printable(command).c_str());
+			}
+		}
+		const int gap = framing.acknowledged ? config.minCommandGapMs :
+			std::max(config.minCommandGapMs, 200);
+		nextSendAllowed = steady_clock::now() + milliseconds(gap);
+		return ok;
+	}
+
+	bool BarcoAsciiDriver::QueryLocked(const char* mnemonic, const std::string& argument, int& value)
+	{
+		return framing.acknowledged &&
+			Transact(Format(mnemonic, argument), mnemonic, &value,
+				config.ackTimeoutMs, config.ackTimeoutMs);
+	}
+
+	// Candidate framings, tried in order for terminator: auto. The script's
+	// bytes (lower case, literal "cr", then echo's CR LF) are the
+	// unacknowledged fallback: what the projector accepted for years without
+	// anyone reading its replies.
+	void BarcoAsciiDriver::SelectFraming()
+	{
+		const Framing cr{ "cr", false, "\r", true };
+		const Framing literalCr{ "literal_cr", false, "cr\r", true };
+		const Framing script{ "script", true, "cr\r\n", false };
+		std::vector<Framing> candidates;
+		switch (config.terminator)
+		{
+		case Terminator::Cr: candidates = { cr }; break;
+		case Terminator::LiteralCr: candidates = { literalCr }; break;
+		case Terminator::Script: framing = script; return;
+		default: candidates = { cr, literalCr }; break;
+		}
+		for (const Framing& candidate : candidates)
+		{
+			framing = candidate;
+			if (config.echo)
+				Transact(Format("ECHO", "1"), "ECHO", nullptr, config.ackTimeoutMs, config.ackTimeoutMs);
+			int light = 0;
+			if (QueryLocked("LPW1", "?", light))
+			{
+				std::lock_guard<std::mutex> guard(stateMutex);
+				state.lightKnown = true;
+				state.light = light;
+				DebugLog::Log("LED drive: projector answers with framing \"%s\" (LPW1=%d)",
+					framing.name, light);
+				return;
+			}
+		}
+		if (config.terminator == Terminator::Auto)
+		{
+			framing = script;
+			DebugLog::Log(
+				"LED drive: projector did not answer with \\r or cr\\r framing; sending the old script's exact bytes without waiting for replies");
+		}
+		else
+			DebugLog::Log("LED drive: projector did not answer with configured framing \"%s\"",
+				framing.name);
+	}
+
+	bool BarcoAsciiDriver::Open(std::string& error)
+	{
+		Close();
+		if (!port || !port->Open(config.port, config.baud, error))
+		{
+			if (!port) error = "no serial port";
+			DebugLog::Log("LED drive: %s; projector control disabled", error.c_str());
+			return false;
+		}
+		{
+			std::lock_guard<std::mutex> guard(portMutex);
+			SelectFraming();
+			int minimum = 0, maximum = 0;
+			if (framing.acknowledged)
+			{
+				const bool haveMin = config.lightMin >= 0 || QueryLocked("LPW1", " ?N", minimum);
+				const bool haveMax = config.lightMax >= 0 || QueryLocked("LPW1", " ?M", maximum);
+				int contrast = 0;
+				const bool haveContrast = QueryLocked("CNTR", "?", contrast);
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				if (haveMin && haveMax)
+				{
+					range.known = true;
+					range.minimum = config.lightMin >= 0 ? config.lightMin : minimum;
+					range.maximum = config.lightMax >= 0 ? config.lightMax : maximum;
+				}
+				state.contrastKnown = haveContrast;
+				state.contrast = contrast;
+			}
+		}
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			stopping = false;
+			pendingLight = -1;
+			opened = true;
+		}
+		worker = std::thread(&BarcoAsciiDriver::Worker, this);
+		const LightRange reported = QueryLightRange();
+		DebugLog::Log("LED drive: barco_ascii on %s %d baud, framing=%s acknowledged=%d range=%s",
+			config.port.c_str(), config.baud, framing.name, framing.acknowledged ? 1 : 0,
+			reported.known ? (std::to_string(reported.minimum) + "-" +
+				std::to_string(reported.maximum)).c_str() : "unknown");
+		return true;
+	}
+
+	LightRange BarcoAsciiDriver::QueryLightRange()
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		LightRange result = range;
+		if (!result.known && config.lightMin >= 0 && config.lightMax >= 0)
+		{
+			result.known = true;
+			result.minimum = config.lightMin;
+			result.maximum = config.lightMax;
+		}
+		return result;
+	}
+
+	ProjectorState BarcoAsciiDriver::ReadState()
+	{
+		if (opened && framing.acknowledged)
+		{
+			std::lock_guard<std::mutex> guard(portMutex);
+			int light = 0, contrast = 0;
+			const bool haveLight = QueryLocked("LPW1", "?", light);
+			const bool haveContrast = QueryLocked("CNTR", "?", contrast);
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			if (haveLight) { state.lightKnown = true; state.light = light; }
+			if (haveContrast) { state.contrastKnown = true; state.contrast = contrast; }
+		}
+		std::lock_guard<std::mutex> guard(stateMutex);
+		return state;
+	}
+
+	int BarcoAsciiDriver::Clamp(int level) const
+	{
+		int low = config.lightMin >= 0 ? config.lightMin : range.known ? range.minimum : 0;
+		int high = config.lightMax >= 0 ? config.lightMax : range.known ? range.maximum : 255;
+		if (low > high) std::swap(low, high);
+		return std::max(low, std::min(level, high));
+	}
+
+	void BarcoAsciiDriver::SetLight(int level)
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (!opened) return;
+		pendingLight = Clamp(level);
+		wake.notify_one();
+	}
+
+	bool BarcoAsciiDriver::SetLightNow(int level, int timeoutMs)
+	{
+		int clamped = 0;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			if (!opened) return false;
+			pendingLight = -1;
+			clamped = Clamp(level);
+		}
+		std::lock_guard<std::mutex> guard(portMutex);
+		int confirmed = -1;
+		// The whole call, gap wait included, stays within timeoutMs.
+		const bool ok = Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
+			std::min(timeoutMs * 3 / 4, config.ackTimeoutMs), timeoutMs / 4);
+		std::lock_guard<std::mutex> stateGuard(stateMutex);
+		if (ok) lastLight = confirmed >= 0 ? confirmed : clamped;
+		return ok;
+	}
+
+	bool BarcoAsciiDriver::SetContrast(int value)
+	{
+		if (!opened) return false;
+		std::lock_guard<std::mutex> guard(portMutex);
+		int confirmed = -1;
+		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
+			config.ackTimeoutMs, config.ackTimeoutMs);
+		std::lock_guard<std::mutex> stateGuard(stateMutex);
+		if (ok)
+		{
+			state.contrastKnown = true;
+			state.contrast = confirmed >= 0 ? confirmed : value;
+		}
+		return ok;
+	}
+
+	void BarcoAsciiDriver::Worker()
+	{
+		for (;;)
+		{
+			int target = -1;
+			{
+				std::unique_lock<std::mutex> lock(stateMutex);
+				wake.wait(lock, [this] { return stopping || pendingLight >= 0; });
+				if (stopping) return;
+				target = pendingLight;
+				pendingLight = -1;
+			}
+			std::lock_guard<std::mutex> guard(portMutex);
+			int confirmed = -1;
+			const bool ok = Transact(Format("LPW1", std::to_string(target)), "LPW1", &confirmed,
+				config.ackTimeoutMs, config.minCommandGapMs + 200);
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			if (ok) lastLight = confirmed >= 0 ? confirmed : target;
+		}
+	}
+
+	void BarcoAsciiDriver::Close()
+	{
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			stopping = true;
+			opened = false;
+			pendingLight = -1;
+		}
+		wake.notify_all();
+		if (worker.joinable()) worker.join();
+		if (port) port->Close();
+	}
+
+	DriverStatus BarcoAsciiDriver::Status() const
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		DriverStatus status;
+		status.framing = framing.name;
+		status.acknowledged = framing.acknowledged;
+		status.commands = commands;
+		status.timeouts = timeouts;
+		status.lastLight = lastLight;
+		return status;
+	}
+}
