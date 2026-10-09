@@ -515,3 +515,30 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
 - Exact fork keys for saturation (to add) and whether `contrast_recovery`
   maps closely enough to madVR's.
 - Upstream PR vs private patch (after stage 3 works).
+- Stage 7 (LED drive), from implementation against the real code
+  (2026-10-09; detail in `VP-led-drive-module.md` and
+  `VP-led-drive-answers-r1.md`):
+  - The guide's and this brief's up-step table (7/5/4/2/1) did not match
+    `beta_22.py`: the script brightens by 1 for distance 10–24 and uses
+    APL-dependent steps (+5/+4, +4/+2 split at APL 40). Fixed: the script is
+    authoritative; `steps_up_dark` / `steps_up_bright` / `steps_up_split_apl`.
+  - Projector contrast (CNTR) is never driven; `mode: contrast` became
+    `mode: script`, which emulates the script's contrast bands in VP as an
+    encoded-domain gain. Assumption to verify by eye: CNTR acts as a gain on
+    the encoded signal with 50 = unity (else try the linear domain).
+  - The script's APL weights were effectively 0.114 R / 0.587 G / 0.299 B
+    (BGR2GRAY on an RGB screenshot); kept as the default `apl_weights`.
+  - Measurement must see the picture before the compensation gain, or the
+    loop feeds back. A plain GLSL user shader cannot hand statistics back to
+    VP (libplacebo exposes no host access to a user shader's buffers), so the
+    measurement pass is a native C++ `pl_hook` at PRE_OUTPUT, ahead of the
+    compensation hook. (Verify in renderer.c that the target LUT is applied
+    before PRE_OUTPUT.)
+  - `mode: script` needs the script's highlight test (max ≥ 215 on an
+    854×480 downscale); its mapping to the new 99.5th-percentile statistic is
+    unspecified. Implemented as `script_highlight_code: 215` against the
+    highlight statistic; tune if the port's highlight behaviour differs.
+  - Barco framing: the script sent `:lpw1255cr` plus echo's CR/LF; which
+    terminator and spacing the FL35 accepts, the reply format, the `?N`/`?M`
+    range queries and the sustainable command rate are all to be confirmed on
+    first connection (the driver probes and logs what it finds).
