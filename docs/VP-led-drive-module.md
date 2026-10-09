@@ -9,8 +9,8 @@ eye over years lives in its curves, step tables and special cases.
 
 Written 2026-10-09 against fork tag `1.4-beta-rc1` plus the Stage 2 work
 (blanking keys, custom GLSL hook chain). Revised the same day to fold in
-`VP-led-drive-answers-1.md`; where the two still differ, the answers file
-wins.
+`VP-led-drive-answers-1.md` and `VP-led-drive-answers-2.md`; precedence on
+any conflict: answers-2 > answers-1 > this guide.
 
 ---
 
@@ -25,6 +25,13 @@ What the owner gets: deeper blacks in dark scenes, no visible pumping, no
 highlight crush, one set-and-forget configuration, works in both the cinema
 and `Low_Latency` queue profiles.
 
+Why it is worth its place: the projector's *internal* black floor scales
+with LED level, while room bounce scales with screen content. Dimming the
+LED and restoring content with per-frame gain therefore lowers the dark
+parts of a scene for the same bright parts — a real intra-scene (ANSI)
+contrast gain, not only an on/off one. The LED is the only actuator; the
+lens irises are static and are never motorised.
+
 ## 2. Architecture — three layers, strictly separated
 
 ```
@@ -34,9 +41,13 @@ and `Low_Latency` queue profiles.
 ```
 
 Each layer is its own source file(s). The renderer touches the module at
-exactly two points: it hands over the statistics after rendering a frame,
-and it reads the current gain before rendering the next one. The protocol
-layer never sees the renderer. The controller never sees a COM port.
+exactly three points: it hands over the exact statistics after rendering a
+frame; it reads the current gain before rendering the next one; and the
+existing queued-frame walk calls a neutral "queued-frame statistics"
+observer interface that the module subscribes to (that interface, and the
+walk code, never mention the LED module, so they stay PR-able). The
+protocol layer never sees the renderer. The controller never sees a COM
+port.
 
 ### Layer 1 — Measurement (GPU, in the renderer)
 
@@ -109,16 +120,20 @@ light_max: auto              # auto = query (?M)
 ack_timeout_ms: 300
 min_command_gap_ms: 100      # start conservative; see §5
 echo: on                     # protocol must be in ECHO on mode for ACKs
+led_latency_ms: 80           # command + projector response; measured once (answers-2 §B2)
+flux_table:                  # lpw:relative_flux pairs, piecewise linear; absent = linear
+                             # (answers-2 §B1; the engine is non-stock, measure later)
 
 [led_drive.Default]
 enabled: true
 mode: compensate             # compensate | script | log_only
 compensation_eotf: 2.2       # projector's real display gamma (not VP's 2.4)
 apl_weights: 0.114, 0.587, 0.299   # script's effective weights; Rec.601 = 0.299,0.587,0.114
-tick_ms: 400
-led_response_ms: 80          # measured LED settling time; commands are sent
-                             # this far ahead of the frame, never earlier.
-                             # Lead itself is derived from the lookahead walk.
+tick_ms: 400                 # script mode only; compensate mode is per frame
+rate_up: 400                 # compensate mode: max levels/second brightening
+rate_down: 120               # compensate mode: max levels/second dimming
+deadband: 3                  # compensate mode; = anti_pump_band in script mode
+early_ramp: true             # compensate mode: ramp ahead of a known cut (answers-2 §B4)
 led_floor: 100               # scene floor (owner's anti-pump floor)
 led_floor_black: 60          # floor for fades / cuts to black
 led_ceiling: 255
@@ -188,16 +203,25 @@ target LUT, before encode and before the sigma-delta OUTPUT hook; the hook
 linearises with `compensation_eotf` (answers file §7):
 
 ```
-gain_led       = light_full / light_actual
-gain_highlight = 1 / highlight_linear           (with the knee, §4.3)
+gain_led       = flux(led_ceiling) / flux(light_actual)   // flux_table; linear if absent
+gain_highlight = 1 / highlight_linear                      (with the knee, §4.3)
 gain           = min(gain_led, gain_highlight)
 ```
 
 `light_actual` is the LED's modelled *current* level, not the target: the LED
-has a response time (measure once with a camera: command a step, film it,
-fit a first-order lag) and the compensation must follow that trajectory or
-the picture flashes. Until the measurement exists, use the last ACKed level
-with a configurable one-pole lag.
+has a latency (`led_latency_ms`, measured once with a camera: command a
+step, film it) modelled as pure dead time — the modelled level switches to
+the commanded value `led_latency_ms` after the command, in whole output
+frames, and the gain switches with it (a separate `led_settle_ms` can be
+added later if the measurement shows a gradual settle). With lookahead the
+command is sent `led_latency_ms` ahead and the gain lands on the frame;
+without it, the command goes now and the gain is delayed by the same
+amount. In
+`compensate` mode the controller runs per frame with slew-limited ramps
+(`rate_up`, `rate_down`, `deadband`); the gain follows the same ramp on the
+same frames. Per-frame targets exceed the serial rate, so the driver
+coalesces to the newest target and the modelled trajectory, not the ACK
+stream, drives the gain (answers-2 §B3).
 
 Light target is still from `curve`, but the floor is chosen per scene as the
 lowest level that keeps highlight compression within
@@ -238,15 +262,21 @@ graduated, no visible change when the LED moves.
 ### 4.4 Modes by event
 
 - **Cut:** jump the light target (masked by the cut). Reset persistence.
-- **Scene:** drift at the step tables.
+- **Scene:** drift — per-tick step tables in `script` mode; slew-limited
+  per-frame ramps (`rate_up`/`rate_down`, `deadband`) in `compensate` mode.
 - **Fade to black:** track the light down toward `led_floor_black` at the
   fade's own rate; gain unchanged; resume normal behaviour when the picture
   returns.
-- With lookahead: send each command `led_response_ms` ahead of the frame
-  that needs it, so the level lands with the frame — never earlier, or the
-  picture visibly changes before the cut. Frames visible beyond that
-  horizon are used only for detection (e.g. hold steady before a known
-  cut), not for moving the LED.
+- With lookahead, `script` mode: send each command `led_latency_ms` ahead
+  of the frame that needs it — never earlier, because without compensation
+  the picture would change before the cut.
+- With lookahead, `compensate` mode (`early_ramp: true`): the ramp may
+  begin ahead of a known cut so the LED arrives on the cut frame, because
+  the gain holds content constant during the ramp. Dimming ahead of a cut
+  is bounded by the *current* scene's highlight headroom
+  (`highlight_tolerance_stops`); brightening ahead of a cut is
+  unconstrained. Within those bounds, start as early as the walk allows
+  (answers-2 §B4).
 
 ## 5. Barco ASCII protocol driver
 
@@ -302,24 +332,31 @@ Unit tests (fork style, no hardware):
   timeout, clamping.
 - `none` driver and `log_only` mode never open a port.
 
-On the projector (owner):
-1. `mode: script` side by side with the Python script (log-only in one,
-   live in the other) until the owner is satisfied the port matches.
-2. Static dark frame with a small highlight, `mode: compensate`: step the
-   LED from 255 to 60 with compensation on. Mid-tones must not move.
-3. Night-driving scene: headlights graduated, road at full brightness, no
+On the projector (owner), in cinema-time order (answers-2 §B5):
+1. Slow grey fade to black — continuous; staircase ⇒ ramp rate or flux
+   table.
+2. Hard cut dark → bright — no flash, no clipped highlights; flash or dip ⇒
+   `led_latency_ms` wrong.
+3. Static mid-APL scene, 30 s — no breathing; breathing ⇒ deadband too
+   small or flux-table error.
+4. 5–10% grey full field (dither test alongside) — static; any sense of
+   motion ⇒ sigma-delta motion gate not holding.
+5. Static dark frame with a small highlight, `mode: compensate`: step the
+   LED 255 → 60; mid-tones must not move.
+6. Night-driving scene: headlights graduated, road at full brightness, no
    visible change when the LED moves. Tune `highlight_tolerance_stops`.
-4. Lightning / muzzle-flash scene: no dip.
-5. Fade to black: floor follows the fade; no step at the end.
-6. One-off: LED step response filmed; `SHUT 1` / `PMUT 1` speed and
-   audibility for true black on cuts.
+7. Lightning / muzzle-flash scene: no dip.
+8. `mode: script` side by side with the Python script (log-only in one,
+   live in the other) until the owner is satisfied the port matches.
+9. One-off: LED latency filmed; `SHUT 1` / `PMUT 1` speed and audibility.
 
 ## 8. Portability rules (restated)
 
 - Three layers in their own files under `src/VideoProcessor-Lib/led/`
   (or `vprenderer/led/`), plus one shader file.
-- Renderer integration: exactly two call sites (stats out, gain in) and one
-  hook-chain entry.
+- Renderer integration: exactly three call sites (exact stats out, gain in,
+  and the generic queued-frame statistics observer in the lookahead walk)
+  and one hook-chain entry.
 - No new windows or menus; plain Config app sections only (no profile
   groups, no key bindings — answers file §9).
 - Nothing in `Low_Latency` changes; the module is reactive there because
@@ -363,13 +400,9 @@ On the projector (owner):
     APL ratio (at least one down-table step per tick) and the gain is held
     at its pre-fade value. Cut: jump to the target; a cut to black (APL
     below 20) uses `led_floor_black`.
-  - The gain follows a one-pole model of the LED (`led_response_ms`, 0 =
-    instant until the camera measurement exists), never the target.
-    Pending: rev 13 makes `led_response_ms` (default 80) also the command
-    lead and removes `lead_ms`; not yet implemented.
-  - Statistics source (open, raised with the planner): this build measures
-    the output picture at PRE_OUTPUT (answers file 4). The fork's
-    `AnalyzeActivePictureLookahead` walk analyses captured *source* frames on
-    the CPU before tone mapping, so section 2's "statistics ride on the
-    lookahead walk" needs a decision before Stage 5.
+  - Superseded by step 5 (delta-1 and its answers): `led_latency_ms` dead
+    time replaces the one-pole `led_response_ms` model; compensate mode is
+    per frame with `rate_up`/`rate_down`/`deadband` instead of step tables
+    and cut jumps; lookahead statistics come from raw queued frames through
+    a 1D transfer (answers-2 B6).
   - No key binding for `highlight_tolerance_stops` (owner: keys optional).

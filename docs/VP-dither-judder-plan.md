@@ -1,7 +1,7 @@
 # VideoProcessor: temporal dithering, judder reduction, LED drive — project brief
 
 Status: design agreed; Stage 2 blanking keys and hook chain coded (untested on
-the projector); Stage 7 in progress. Revision 13, 2026-10-09, against
+the projector); Stage 7 in progress. Revision 14, 2026-10-09, against
 `billslack2/videoprocessor` tag `1.4-beta-rc1`. **Rebase onto `1.4-beta-rc2`
 (subtitle moving, remote Config) after the current Stage 7 step and before
 Stage 5**, since RC2 touches the viewport/active-picture area Stage 5 builds
@@ -400,9 +400,11 @@ Built right after stage 3 in reactive form (lead 0); lookahead arrives with
 stage 5 automatically, because the statistics ride on the fork's existing
 queued-frame walk (see stage 5) and the available lead is whatever depth
 that walk has. Detailed spec: `docs/VP-led-drive-module.md` and
-`docs/VP-led-drive-answers-1.md` (the answers file overrides both on
-conflict: modes are `compensate | script | log_only`, CNTR is never driven,
-hook at PRE_OUTPUT).
+`docs/VP-led-drive-answers-1.md` and `docs/VP-led-drive-answers-2.md`
+(precedence answers-2 > answers-1 > guide > this brief: modes are
+`compensate | script | log_only`, CNTR is never driven, hook at PRE_OUTPUT,
+flux table for the non-stock light engine, `led_latency_ms`, slew-limited
+per-frame ramps and early ramps before known cuts in `compensate` mode).
 **Measurement (GPU, per frame, over the active picture, not a fixed crop):**
 APL = weighted mean of the *output* codes (gamma-encoded, after tone
 map/LUT, limited range, so black = code 16), weights configurable and
@@ -457,18 +459,21 @@ dial; compensation holds everything else fixed.
   highlights spend little of it, so dark scenes go deep. Nudgeable from a key.
 
 **Modes:** cut ⇒ jump (masked by the cut); scene ⇒ drift at the script's
-rates; fade ⇒ track to black, contrast/gain unchanged. Lead is not a
-setting: it is derived from the lookahead walk depth and the source rate,
-and the controller sends each command `led_response_ms` (the measured LED
-settling time) ahead of the frame that needs it — never earlier, or the
-picture would change before the cut. The OSD reports the effective lead. In
-`Low_Latency` the walk holds one frame, so the module acts as early as it
-can (reactive; the only residual artifact is a brief soft dip after
-dark→bright cuts). Lookahead beyond `led_response_ms` is used only for
-detection (hold steady before a known cut), never for moving the LED early.
+rates (`script` mode) or slew-limited per-frame ramps (`compensate` mode);
+fade ⇒ track to black, contrast/gain unchanged. Lead is not a setting: it
+is derived from the lookahead walk depth and the source rate. The LED's
+measured `led_latency_ms` is used both ways: with lookahead, commands go
+that far ahead of the frame; without it, the gain is delayed by that much.
+In `script` mode the LED never moves earlier than that; in `compensate`
+mode it may ramp ahead of a known cut, because the gain holds the content
+constant, bounded by the current scene's highlight headroom. The OSD
+reports the effective lead. In `Low_Latency` the walk holds one frame, so
+the module is reactive (the only residual artifact is a brief soft dip
+after dark→bright cuts).
 
-**Config:** `[led_drive.Default]` with `led_response_ms` (lead is derived,
-see above), `tick_ms`, `led_floor` (default 100, the owner's anti-pump floor),
+**Config:** `[projector.Default]` with `led_latency_ms` and `flux_table`;
+`[led_drive.Default]` with `rate_up`, `rate_down`, `deadband`, `early_ramp`,
+`tick_ms` (script mode), `led_floor` (default 100, the owner's anti-pump floor),
 `led_floor_black` (default 60, for fades/cuts to black), `led_ceiling`,
 `highlight_percentile`, `highlight_tolerance_stops`, `highlight_persist_ms`,
 `knee`, `mode`, and the target curve / step tables.
@@ -689,3 +694,12 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   selects Low_Latency, 23.976 fps returns to Normal); Shift+L still
   switches by hand.
 
+- Lookahead depth (delta-1 answers 4): `active_picture_lookahead_frames: 8`
+  in `[queue.Normal]` only. Until Stage 5 the queue itself holds only
+  `target_frames` (3) frames ahead, so the effective lookahead is ~3 frames
+  regardless of the 8-frame cap and early ramps are partial.
+- Gamma (delta-1 answers 7): `gamma_boost` is not only a read of the
+  profile's `output_gamma`. Per the owner's decision above, the module
+  applies the boost itself at the PRE_OUTPUT hook and `output_gamma` is 2.2;
+  the raw-frame transfer includes both the profile's `output_gamma` and the
+  module's `gamma_boost`, so it matches what the exact measurement sees.

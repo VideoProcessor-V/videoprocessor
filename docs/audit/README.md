@@ -83,9 +83,11 @@ can see what was covered, not only what was wrong)
 
 1. Every numbered decision in `VP-led-drive-answers-1.md` that the step
    touches is implemented as written.
-2. Renderer touch points stay within the guide's limits (two call sites for
-   the LED module plus one hook-chain entry; blanking/hook-chain/saturation
-   for stage 2).
+2. Renderer touch points stay within the guide's limits (three call sites
+   for the LED module — exact stats out, gain in, generic queued-frame
+   statistics observer in the lookahead walk — plus one hook-chain entry;
+   blanking/hook-chain/saturation for stage 2). The observer interface and
+   the walk code must not reference the LED module by name or purpose.
 3. Tests exercise the behaviour the owner tuned, not merely that code runs.
 4. The `Low_Latency` queue profile is unchanged.
 5. The build is clean and the full suite passes on the auditor's own run.
@@ -123,7 +125,8 @@ can see what was covered, not only what was wrong)
 - Highlight percentile, `highlight_area` headroom limit, `fade_frames`,
   `fade_min_step`, `cut_threshold` as defined in the answers file §8.
 - Async readback; the render thread never waits on it.
-- Exactly two renderer call sites.
+- Exactly three renderer call sites, the third being the generic
+  queued-frame statistics observer inside the existing lookahead walk.
 
 **Step 4 — compensate mode and the hook**
 - Hook at `PL_HOOK_PRE_OUTPUT`; value domain verified against
