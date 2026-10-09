@@ -2,6 +2,8 @@
 
 #include "LedDriveConfig.h"
 
+#include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,9 @@ namespace LedDrive
 		double highlightArea = 0.0;
 		bool cut = false;
 		bool fade = false;
+		// Block-mean histogram in code units and the number of blocks measured.
+		std::array<uint32_t, 256> histogram{};
+		uint32_t blocks = 0;
 	};
 
 	// One step of the emulated projector contrast, offsetMs after the tick

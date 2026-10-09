@@ -38,6 +38,8 @@
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
+#include <led/LedDriveModule.h>
+#include <led/LedMeasurementHook.h>
 #include <SceneDetector.h>
 #include <vprenderer/LibplaceboOutputPolicy.h>
 #include <HdrTargetLuminance.h>
@@ -3607,18 +3609,29 @@ struct LibplaceboVideoRenderer::Impl
 	std::string lastNlsHookBindingPolicy;
 	// Custom GLSL hooks ([shader.standard.*] with glsl_file). Loaded lazily on
 	// the render thread; the status copy is read under shaderStatusMutex.
-	CustomHookChain::Chain customHooks{ CustomHookChain::Loader{
-		[](const std::string& filename, std::string& source, std::string& reason)
-		{
-			std::string resolvedPath;
-			return ReadUserShader(filename, source, resolvedPath, reason);
-		},
-		[this](const std::string& source) -> const pl_hook*
-		{
-			return d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) :
-				nullptr;
-		},
-		[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } } };
+	CustomHookChain::Loader GlslHookLoader()
+	{
+		return {
+			[](const std::string& filename, std::string& source, std::string& reason)
+			{
+				std::string resolvedPath;
+				return ReadUserShader(filename, source, resolvedPath, reason);
+			},
+			[this](const std::string& source) -> const pl_hook*
+			{
+				return d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) :
+					nullptr;
+			},
+			[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
+	}
+	CustomHookChain::Chain customHooks{ GlslHookLoader() };
+	// LED drive (owned by the outer renderer). Per frame: the measurement hook
+	// and the compensation hook run first at PRE_OUTPUT; the module is touched
+	// only by SubmitMeasurement (after rendering) and CurrentGain (before).
+	std::shared_ptr<LedDrive::LedDriveModule> ledDrive;
+	LedDrive::MeasurementHook ledMeasurement;
+	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
+	bool ledCompensationConfigured = false;
 	std::vector<const pl_hook*> frameHooks;
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
@@ -4273,6 +4286,9 @@ struct LibplaceboVideoRenderer::Impl
 			captureWorkers.clear();
 			pl_mpv_user_shader_destroy(&nlsHook);
 			customHooks.Clear();
+			ledMeasurement.Release();
+			ledCompensation.Clear();
+			ledCompensationConfigured = false;
 			pl_renderer_destroy(&renderer);
 			pl_lut_free(&displayLut);
 			if (d3d11)
@@ -13880,6 +13896,38 @@ struct LibplaceboVideoRenderer::Impl
             PublishCustomShaderStatus();
         }
         frameHooks.clear();
+        // LED drive, gain in: measurement first (it must see the picture before
+        // the gain), then the compensation hook with this frame's parameters.
+        const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
+        if (led)
+        {
+            if (!ledCompensationConfigured)
+            {
+                ConfiguredShaderRule compensationRule;
+                compensationRule.name = "led_compensation";
+                compensationRule.filename = "LED compensation.glsl";
+                ledCompensation.Configure({ compensationRule });
+                ledCompensationConfigured = true;
+            }
+            ledCompensation.Ensure(hookTemplates);
+            const LedDrive::CompensationGain compensation = led->CurrentGain();
+            ledMeasurement.SetFrame(LedDrive::ActivePictureRect(hdrTrustedPicture.available,
+                hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right,
+                hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
+                renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights);
+            frameHooks.push_back(ledMeasurement.Hook());
+            const size_t compensationStart = frameHooks.size();
+            ledCompensation.Collect(false, frameHooks);
+            for (size_t i = compensationStart; i < frameHooks.size(); ++i)
+            {
+                CustomHookChain::SetHookParameter(frameHooks[i], "gain",
+                    compensation.active ? compensation.gain : 1.0);
+                CustomHookChain::SetHookParameter(frameHooks[i], "knee", compensation.knee);
+                CustomHookChain::SetHookParameter(frameHooks[i], "gain_domain",
+                    compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0);
+                CustomHookChain::SetHookParameter(frameHooks[i], "compensation_eotf", compensation.eotf);
+            }
+        }
         customHooks.Collect(lowLatencyQueue, frameHooks);
         if (submittedNls)
             frameHooks.push_back(submittedNls);
@@ -13917,6 +13965,17 @@ struct LibplaceboVideoRenderer::Impl
             if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks))
                 PublishCustomShaderStatus();
+            ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
+                hookErrors.num_disabled_hooks);
+        }
+        // LED drive, stats out: finished measurements (a few frames old; the
+        // render thread never waits for them).
+        if (led)
+        {
+            std::vector<LedDrive::RawMeasurement> measured;
+            ledMeasurement.Collect(measured);
+            for (const LedDrive::RawMeasurement& measurement : measured)
+                led->SubmitMeasurement(measurement);
         }
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
@@ -15133,6 +15192,7 @@ void LibplaceboVideoRenderer::Build()
 	// driver for seconds. Build only captures an immutable construction request;
 	// RenderLoop performs the actual initialization on its own thread.
 	m_impl.reset(new Impl());
+	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
 	m_impl->displayRefreshRate.SetEventSink(
 		[this](const std::string& event, double actualRefreshRate,
 			double requestedRefreshRate, double previousRefreshRate)
@@ -15373,6 +15433,41 @@ bool LibplaceboVideoRenderer::RefreshShaderRule(
 }
 
 
+void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
+{
+	// Only [projector.default] and [led_drive.default] matter; any other
+	// configuration change leaves a running module alone.
+	std::string signature;
+	for (const char* section : { LedDrive::PROJECTOR_SECTION, LedDrive::LED_DRIVE_SECTION })
+		if (const auto* values = configuration.GetSectionValues(section))
+			for (const auto& value : *values)
+				signature += std::string(section) + "." + value.first + "=" + value.second + "\n";
+	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
+		LedDrive::ReadLedDriveConfig(configuration).enabled)
+		return;
+	m_ledDriveSignature = signature;
+	std::shared_ptr<LedDrive::LedDriveModule> previous = m_ledDrive;
+	m_ledDrive.reset();
+	if (m_impl) std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+	if (previous) previous->Stop();
+	std::string error;
+	if (!LedDrive::Validate(configuration, error))
+	{
+		DebugLog::Log("LED drive: configuration rejected (%s); module off", error.c_str());
+		return;
+	}
+	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);
+	if (!led.enabled)
+	{
+		if (previous) DebugLog::Log("LED drive: disabled");
+		return;
+	}
+	m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
+		LedDrive::ReadProjectorConfig(configuration), led);
+	m_ledDrive->Start();
+	if (m_impl) std::atomic_store(&m_impl->ledDrive, m_ledDrive);
+}
+
 std::vector<CString> LibplaceboVideoRenderer::ActiveShaders() const
 {
 	std::vector<CString> shaders;
@@ -15439,6 +15534,8 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		m_impl->lowLatencyQueueActive.store(
 			ConfigFile::NormalizeName(snapshot.queue.profile) == "low_latency",
 			std::memory_order_release);
+	if (snapshot.configuration)
+		UpdateLedDrive(*snapshot.configuration);
 	VideoStateComPtr state = m_videoState;
 	auto candidateConfiguration = m_rendererConfiguration;
 	if (!candidateConfiguration || snapshot.configuration != m_applicationConfiguration)

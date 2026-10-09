@@ -11,6 +11,10 @@
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <atomic>
+#include <memory>
+#include <string>
+
+namespace LedDrive { class LedDriveModule; }
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -301,4 +305,10 @@ private:
 	// One manual selection per independent unified profile group. This state is
 	// copied into rebuilt renderer instances only after the selection is accepted.
 	std::map<std::string, std::string> m_manualUnifiedProfiles;
+	// The LED drive module (brief Stage 7) lives here rather than in Impl, so
+	// internal renderer resets neither restart it nor return the projector to
+	// full light. Recreated only when its configuration sections change.
+	std::shared_ptr<LedDrive::LedDriveModule> m_ledDrive;
+	std::string m_ledDriveSignature;
+	void UpdateLedDrive(const ConfigFile& configuration);
 };

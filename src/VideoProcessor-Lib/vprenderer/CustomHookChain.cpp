@@ -169,6 +169,14 @@ namespace CustomHookChain
         return applied;
     }
 
+    bool SetHookParameter(const pl_hook* hook, const char* name, double value)
+    {
+        char text[64];
+        std::snprintf(text, sizeof(text), "%.9g", value);
+        const auto applied = ApplyHookParameters(hook, { { name, text } });
+        return !applied.empty();
+    }
+
     Chain::Chain(Loader loaderIn) : loader(std::move(loaderIn))
     {
     }
@@ -254,6 +262,17 @@ namespace CustomHookChain
             {
                 entry.loadFailed = true;
                 DebugLog::Log("Custom hooks: \"%s\" file=%s not loaded: libplacebo rejected the shader",
+                    entry.rule.name.c_str(), entry.rule.filename.c_str());
+                continue;
+            }
+            if (entry.hook->stages == 0)
+            {
+                // libplacebo accepts an unknown //!HOOK name (e.g. PRE_OUTPUT for
+                // PREOUTPUT) and the hook then never runs: report it instead.
+                if (loader.destroy) loader.destroy(entry.hook);
+                entry.hook = nullptr;
+                entry.loadFailed = true;
+                DebugLog::Log("Custom hooks: \"%s\" file=%s not loaded: no known //!HOOK stage",
                     entry.rule.name.c_str(), entry.rule.filename.c_str());
                 continue;
             }

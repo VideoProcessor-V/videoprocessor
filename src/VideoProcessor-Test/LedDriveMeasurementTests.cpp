@@ -1,0 +1,216 @@
+#include "pch.h"
+#include "CppUnitTest.h"
+
+#include <led/LedDriveModule.h>
+#include <led/LedMeasurement.h>
+
+#include "LedDriveTestSupport.h"
+
+#include <chrono>
+#include <cstring>
+#include <thread>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+using namespace LedDrive;
+
+namespace
+{
+	// A uniform picture at `code`, with `brightBlocks` of the blocks at `bright`.
+	RawMeasurement Uniform(double code, uint32_t blocks = 1000, uint32_t brightBlocks = 0,
+		int bright = 235)
+	{
+		RawMeasurement raw{};
+		const uint32_t plain = blocks - brightBlocks;
+		raw.histogram[static_cast<int>(code)] += plain;
+		raw.histogram[bright] += brightBlocks;
+		raw.blocks = blocks;
+		raw.sum = static_cast<uint32_t>(code * SUM_SCALE * plain + bright * SUM_SCALE * brightBlocks);
+		for (int i = 0; i < GRID_W * GRID_H; ++i)
+		{
+			raw.cellCount[i] = 2;
+			raw.cellSum[i] = static_cast<uint32_t>(2 * code * SUM_SCALE);
+		}
+		return raw;
+	}
+
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			if (condition()) return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		return condition();
+	}
+
+	LedDriveConfig FastScript()
+	{
+		LedDriveConfig config;
+		config.enabled = true;
+		config.mode = Mode::Script;
+		config.tickMs = 50;
+		return config;
+	}
+
+	ProjectorConfig FastProjector()
+	{
+		ProjectorConfig config;
+		config.protocol = "barco_ascii";
+		config.ackTimeoutMs = 60;
+		config.minCommandGapMs = 0;
+		return config;
+	}
+}
+
+namespace VideoProcessorTest
+{
+	TEST_CLASS(LedDriveMeasurementTests)
+	{
+	public:
+		TEST_METHOD(MeasurementFollowsTheTrustedActivePicture)
+		{
+			// Scope picture inside a 1920x1080 16:9 raster, all of it displayed.
+			const auto scope = ActivePictureRect(true, 0, 138, 1920, 942, 0, 0, 1920, 1080);
+			Assert::AreEqual(0.0, scope.x0, 1e-9);
+			Assert::AreEqual(1.0, scope.x1, 1e-9);
+			Assert::AreEqual(138.0 / 1080.0, scope.y0, 1e-9);
+			Assert::AreEqual(942.0 / 1080.0, scope.y1, 1e-9);
+			// Relative to a displayed crop.
+			const auto cropped = ActivePictureRect(true, 240, 0, 1680, 1080, 240, 0, 1680, 1080);
+			Assert::AreEqual(0.0, cropped.x0, 1e-9);
+			Assert::AreEqual(1.0, cropped.x1, 1e-9);
+			// No trusted picture, or a sliver: measure everything.
+			for (const auto rect : { ActivePictureRect(false, 0, 138, 1920, 942, 0, 0, 1920, 1080),
+				ActivePictureRect(true, 0, 500, 1920, 520, 0, 0, 1920, 1080),
+				ActivePictureRect(true, 0, 0, 0, 0, 0, 0, 1920, 1080) })
+			{
+				Assert::AreEqual(0.0, rect.x0, 1e-9);
+				Assert::AreEqual(1.0, rect.y1, 1e-9);
+			}
+		}
+
+		TEST_METHOD(StatisticsAreInTheScriptsCodeUnits)
+		{
+			StatsBuilder builder{ LedDriveConfig() };
+			const FrameStats grey = builder.Build(Uniform(60.0));
+			Assert::AreEqual(60.0, grey.apl, 1e-9);
+			Assert::AreEqual(60.0, grey.highlight, 1e-9);
+			Assert::AreEqual(0.0, grey.highlightArea, 1e-9);
+			Assert::AreEqual(1000u, grey.blocks);
+
+			// 1% of blocks at white: above the 99.5th percentile, so the highlight
+			// statistic sees them; 0.2% would not.
+			const FrameStats lamp = builder.Build(Uniform(30.0, 1000, 10));
+			Assert::AreEqual(235.0, lamp.highlight, 1e-9);
+			Assert::AreEqual(0.01, lamp.highlightArea, 1e-9);
+			Assert::AreEqual((30.0 * 990 + 235.0 * 10) / 1000.0, lamp.apl, 1e-6);
+			const FrameStats speck = builder.Build(Uniform(30.0, 1000, 2));
+			Assert::AreEqual(30.0, speck.highlight, 1e-9);
+
+			uint32_t histogram[256] = {};
+			histogram[16] = 500;
+			histogram[100] = 495;
+			histogram[200] = 5;
+			Assert::AreEqual(100.0, HistogramPercentile(histogram, 1000, 99.5), 1e-9);
+			Assert::AreEqual(200.0, HistogramPercentile(histogram, 1000, 99.6), 1e-9);
+			Assert::AreEqual(16.0, HistogramPercentile(histogram, 0, 99.5), 1e-9);
+		}
+
+		TEST_METHOD(CutsAreLargeBlockChangesAndFadesAreSteadyDeclines)
+		{
+			LedDriveConfig config;
+			StatsBuilder builder(config);
+			Assert::IsFalse(builder.Build(Uniform(100.0)).cut, L"No previous frame");
+			Assert::IsFalse(builder.Build(Uniform(110.0)).cut, L"10 codes is a scene change, not a cut");
+			Assert::IsTrue(builder.Build(Uniform(30.0)).cut, L"80 codes is a cut");
+			Assert::AreEqual(80.0, builder.LastDifference(), 1e-9);
+
+			StatsBuilder fading(config);
+			double apl = 120.0;
+			FrameStats stats;
+			for (int frame = 0; frame < config.fadeFrames; ++frame)
+			{
+				stats = fading.Build(Uniform(apl));
+				Assert::IsFalse(stats.fade, L"Needs fade_frames declines");
+				apl -= 2.0;
+			}
+			stats = fading.Build(Uniform(apl));
+			Assert::IsTrue(stats.fade);
+			stats = fading.Build(Uniform(apl));
+			Assert::IsFalse(stats.fade, L"A held frame ends the fade");
+
+			StatsBuilder slow(config);
+			apl = 120.0;
+			for (int frame = 0; frame <= config.fadeFrames + 2; ++frame)
+			{
+				stats = slow.Build(Uniform(apl));
+				apl -= 0.25;
+			}
+			Assert::IsFalse(stats.fade, L"Below fade_min_step is drift, not a fade");
+		}
+
+		TEST_METHOD(ScriptModeDrivesTheProjectorAndEmulatesContrastAsGain)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 74;
+			{
+				LedDriveModule module(FastProjector(), FastScript(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
+				Assert::IsTrue(WaitFor([&] { return projector->contrast == 50 && projector->light == 255; }),
+					L"Startup puts the projector in a known state");
+				Assert::IsFalse(module.CurrentGain().active, L"No statistics yet: picture untouched");
+				for (int frame = 0; frame < 5; ++frame)
+					module.SubmitMeasurement(Uniform(10.0));
+				Assert::IsTrue(WaitFor([&] { return projector->light < 240; }), L"Dark scene dims the LED");
+				Assert::IsTrue(WaitFor([&] { return module.CurrentGain().gain > 1.0; }),
+					L"Dark scene raises the emulated contrast");
+				const auto gain = module.CurrentGain();
+				Assert::IsTrue(gain.active);
+				Assert::IsTrue(gain.domain == GainDomain::Encoded);
+				Assert::IsTrue(gain.gain <= 74.0 / 50.0 + 1e-9);
+				for (const auto& write : projector->Writes())
+					Assert::IsFalse(write.rfind(":CNTR", 0) == 0 && write != ":CNTR?\r" && write != ":CNTR50\r",
+						L"Contrast is emulated in VP, never sent");
+			}
+			Assert::AreEqual(255, projector->light, L"Stopping restores full light");
+		}
+
+		TEST_METHOD(LogOnlyNeverOpensAPortOrTouchesThePicture)
+		{
+			int ports = 0;
+			LedDriveConfig config = FastScript();
+			config.mode = Mode::LogOnly;
+			LedDriveModule module(FastProjector(), config,
+				[&ports] { ++ports; return std::unique_ptr<ISerialPort>(); });
+			module.Start();
+			for (int frame = 0; frame < 5; ++frame)
+				module.SubmitMeasurement(Uniform(10.0));
+			Assert::IsTrue(WaitFor([&] { return module.Ticks() >= 5; }));
+			Assert::IsFalse(module.DrivingProjector());
+			Assert::IsFalse(module.CurrentGain().active);
+			Assert::AreEqual(1.0, module.CurrentGain().gain, 1e-12);
+			Assert::IsTrue(module.ProjectorStatus().lastLight < 255, L"The dry run still logs the levels");
+			module.Stop();
+			Assert::AreEqual(0, ports);
+		}
+
+		TEST_METHOD(UnavailablePortDegradesToADryRun)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;
+			LedDriveModule module(FastProjector(), FastScript(),
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			for (int frame = 0; frame < 5; ++frame)
+				module.SubmitMeasurement(Uniform(10.0));
+			Assert::IsTrue(WaitFor([&] { return module.Ticks() >= 5; }));
+			Assert::IsFalse(module.DrivingProjector());
+			Assert::IsFalse(module.CurrentGain().active, L"Without the LED dimming, no compensating gain");
+			module.Stop();
+			Assert::IsTrue(projector->Writes().empty());
+		}
+	};
+}

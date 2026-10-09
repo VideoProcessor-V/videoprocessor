@@ -48,6 +48,10 @@ namespace CustomHookChain
     std::vector<std::string> ApplyHookParameters(const pl_hook* hook,
         const std::map<std::string, std::string>& parameters);
 
+    // Sets one //!PARAM by name, clamped to its range, without reparsing (the
+    // per-frame pattern NLS uses for stretch_ratio). False if it is absent.
+    bool SetHookParameter(const pl_hook* hook, const char* name, double value);
+
     inline bool HooksOutput(const pl_hook* hook)
     {
         return hook && (hook->stages & PL_HOOK_OUTPUT) != 0;

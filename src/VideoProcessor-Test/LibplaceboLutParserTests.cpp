@@ -9,6 +9,7 @@
 #include <vprenderer/NativeStatsOverlayPlacement.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
+#include <led/LedMeasurementHook.h>
 #include <NlsGeometryPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <libplacebo/renderer.h>
@@ -1717,6 +1718,125 @@ namespace VideoProcessorTest
             Assert::AreEqual(2, calls);
             Assert::IsTrue(g.retried);
         }
+
+		TEST_METHOD(LedMeasurementHookMeasuresWithoutTouchingThePicture)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(),
+				L"Could not create the libplacebo WARP test device");
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			LedDrive::MeasurementHook hook;
+			const double weights[3] = { 0.299, 0.587, 0.114 };
+			hook.SetFrame({}, weights);
+			std::string libplaceboLog;
+			fixture.CaptureLog(&libplaceboLog);
+			const std::vector<RgbaPixel> pixels = fixture.RenderCoordinateField(hook.Hook());
+			fixture.CaptureLog(nullptr);
+			for (size_t i = 0; i < pixels.size(); ++i)
+				Assert::IsTrue(pixels[i].r == baseline[i].r && pixels[i].g == baseline[i].g &&
+					pixels[i].b == baseline[i].b, L"The measurement must never change the picture");
+			std::vector<LedDrive::RawMeasurement> measured;
+			const std::wstring failure = L"No measurement came back: " +
+				std::wstring(libplaceboLog.begin(), libplaceboLog.end());
+			Assert::AreEqual(1, hook.Collect(measured, 5000), failure.c_str());
+			const LedDrive::RawMeasurement& raw = measured.front();
+
+			// The same blocks measured on the CPU from the rendered pixels.
+			const int blocks = 64 / 3;
+			const double step = 64.0 / blocks;
+			double expected = 0.0;
+			for (int by = 0; by < blocks; ++by)
+				for (int bx = 0; bx < blocks; ++bx)
+				{
+					double acc = 0.0;
+					for (int dy = 0; dy < 3; ++dy)
+						for (int dx = 0; dx < 3; ++dx)
+						{
+							const int x = std::min(63, static_cast<int>(bx * step) + dx);
+							const int y = std::min(63, static_cast<int>(by * step) + dy);
+							const RgbaPixel& p = baseline[y * 64 + x];
+							acc += (weights[0] * p.r + weights[1] * p.g + weights[2] * p.b) / 255.0;
+						}
+					expected += 16.0 + 219.0 * acc / 9.0;
+				}
+			expected /= blocks * blocks;
+			Assert::AreEqual(static_cast<uint32_t>(blocks * blocks), raw.blocks);
+			uint32_t histogramTotal = 0, cellTotal = 0;
+			for (uint32_t count : raw.histogram) histogramTotal += count;
+			for (uint32_t count : raw.cellCount) cellTotal += count;
+			Assert::AreEqual(raw.blocks, histogramTotal);
+			Assert::AreEqual(raw.blocks, cellTotal);
+			const double apl = static_cast<double>(raw.sum) / LedDrive::SUM_SCALE / raw.blocks;
+			Assert::AreEqual(expected, apl, 0.75);
+
+			// Measuring only the left half sees less red.
+			hook.SetFrame({ 0.0, 0.0, 0.5, 1.0 }, weights);
+			fixture.RenderCoordinateField(hook.Hook());
+			measured.clear();
+			Assert::AreEqual(1, hook.Collect(measured, 5000));
+			const double left = static_cast<double>(measured.front().sum) / LedDrive::SUM_SCALE /
+				measured.front().blocks;
+			Assert::IsTrue(left < apl - 5.0);
+			hook.Release();
+		}
+
+		TEST_METHOD(LedCompensationShaderAppliesGainWithASoftKnee)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(),
+				L"Could not create the libplacebo WARP test device");
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 64;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected LED compensation.glsl");
+			Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
+			const pl_hook* hook = hooks[0];
+			auto set = [hook](double gain, double domain)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", gain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.08));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", 2.2));
+			};
+
+			set(1.0, 0.0);
+			const auto unity = fixture.RenderCoordinateField(hook);
+			for (size_t i = 0; i < unity.size(); ++i)
+				Assert::AreEqual(static_cast<int>(baseline[i].r), static_cast<int>(unity[i].r));
+
+			const size_t quarter = 16;           // r = 16/63 of full scale
+			const size_t bright = 62;            // r close to white
+			set(1.25, 0.0);
+			const auto encoded = fixture.RenderCoordinateField(hook);
+			Assert::AreEqual(baseline[quarter].r * 1.25, static_cast<double>(encoded[quarter].r), 1.5);
+			Assert::IsTrue(encoded[bright].r >= baseline[bright].r && encoded[bright].r <= 255);
+			for (size_t x = 1; x < 64; ++x)
+				Assert::IsTrue(encoded[x].r >= encoded[x - 1].r, L"The knee keeps the ramp monotonic");
+
+			set(2.0, 1.0);
+			const auto linear = fixture.RenderCoordinateField(hook);
+			const double expected = 255.0 * std::pow(2.0 * std::pow(baseline[quarter].r / 255.0, 2.2), 1.0 / 2.2);
+			Assert::AreEqual(expected, static_cast<double>(linear[quarter].r), 2.0);
+		}
 
 		TEST_METHOD(BundledCustomHooksParseAndSigmaDeltaRunsOnTheRealGpuPath)
 		{

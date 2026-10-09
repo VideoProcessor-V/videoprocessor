@@ -195,6 +195,9 @@
     <ClInclude Include="led\ProjectorDriver.h" />
     <ClInclude Include="led\BarcoAsciiDriver.h" />
     <ClInclude Include="led\LedController.h" />
+    <ClInclude Include="led\LedMeasurement.h" />
+    <ClInclude Include="led\LedDriveModule.h" />
+    <ClInclude Include="led\LedMeasurementHook.h" />
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
@@ -372,6 +375,8 @@
     <ClCompile Include="led\ProjectorDriver.cpp" />
     <ClCompile Include="led\BarcoAsciiDriver.cpp" />
     <ClCompile Include="led\LedController.cpp" />
+    <ClCompile Include="led\LedMeasurement.cpp" />
+    <ClCompile Include="led\LedDriveModule.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
     <ClCompile Include="EOTF.cpp" />
@@ -516,6 +521,10 @@
     </None>
     <None Include="..\..\shaders\CfL_Prediction.glsl">
       <Link>shaders\CfL_Prediction.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\shaders\LED compensation.glsl">
+      <Link>shaders\LED compensation.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="..\..\shaders\CfL_Prediction-LICENSE.txt">

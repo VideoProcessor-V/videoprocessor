@@ -58,8 +58,8 @@ namespace
 					parsed.push_back(source);
 					if (source.find("FAIL") != std::string::npos) return nullptr;
 					auto* hook = new pl_hook{};
-					hook->stages = source.find("OUTPUT") != std::string::npos ?
-						PL_HOOK_OUTPUT : PL_HOOK_CHROMA_INPUT;
+					hook->stages = source.find("NOSTAGE") != std::string::npos ? static_cast<pl_hook_stage>(0) :
+						source.find("OUTPUT") != std::string::npos ? PL_HOOK_OUTPUT : PL_HOOK_CHROMA_INPUT;
 					hook->signature = nextSignature++;
 					hook->parameters = &parameter;
 					hook->num_parameters = 1;
@@ -228,11 +228,13 @@ namespace VideoProcessorTest
 			shaders.files["good.glsl"] = "CHROMA";
 			shaders.files["broken.glsl"] = "OUTPUT FAIL";
 			shaders.files["template.glsl"] = "OUTPUT {{nope}}";
+			shaders.files["nostage.glsl"] = "NOSTAGE";
 			CustomHookChain::Chain chain(shaders.Loader());
 			chain.Configure({ CustomRule("missing", "absent.glsl", 1),
 				CustomRule("broken", "broken.glsl", 2),
 				CustomRule("template", "template.glsl", 3),
-				CustomRule("good", "good.glsl", 4) });
+				CustomRule("nostage", "nostage.glsl", 4),
+				CustomRule("good", "good.glsl", 5) });
 			chain.Ensure(Output2560x1600());
 			std::vector<const pl_hook*> hooks;
 			chain.Collect(false, hooks);

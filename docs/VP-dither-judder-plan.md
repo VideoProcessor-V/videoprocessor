@@ -552,3 +552,14 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   - The script's contrast fast dumps happen inside one loop pass (100 ms
     steps, then 200 ms). The controller returns them as a timed schedule
     within the tick, and the next tick waits until the schedule has run.
+  - Verified in libplacebo 7.360.1 renderer.c: tone mapping, gamut mapping
+    and a PL_LUT_NORMALIZED/CONVERSION target LUT (VP's calibration LUT is
+    normalized) all run in pass_convert_colors, before pass_output_target's
+    PL_HOOK_PRE_OUTPUT; values there are the target transfer, 0-1, before
+    the limited-range encode. A PL_LUT_NATIVE target LUT would come after.
+  - mpv-style shader files spell the stage `PREOUTPUT`, not `PRE_OUTPUT`;
+    libplacebo silently accepts an unknown name and the hook never runs. The
+    custom hook chain now reports such shaders as not loaded.
+  - Step order: the compensation shader (encoded gain only) moved into step
+    3, because `mode: script` cannot work without applying its contrast
+    gain. Step 4 adds the linear domain and `mode: compensate`.
