@@ -28,10 +28,10 @@
  *   and for an 8-bit swapchain in either range  k/255.
  *
  * State
- *   Two persistent storage textures. The //!SIZE lines (and the clamp in
- *   hook()) are hardcoded to the projector raster (2560x1600) until the
- *   hook chain supplies {{output_width}} {{output_height}} templates; then
- *   replace them. RESID holds the carried residual (rgb) and a validity tag
+ *   Two persistent storage textures sized to the output surface through the
+ *   hook chain's {{output_width}} {{output_height}} templates (re-applied on
+ *   renderer reset, so they follow resolution changes). The OUTPUT texture is
+ *   never larger than the surface. RESID holds the carried residual (rgb) and a validity tag
  *   (a); PREV holds the last presented input code value for the motion gate.
  *   Storage textures start uninitialised, so the tag guards the first use.
  *
@@ -82,14 +82,14 @@
 0.0
 
 //!TEXTURE RESID
-//!SIZE 2560 1600
+//!SIZE {{output_width}} {{output_height}}
 //!FORMAT rgba16f
 //!FILTER NEAREST
 //!BORDER CLAMP
 //!STORAGE
 
 //!TEXTURE PREV
-//!SIZE 2560 1600
+//!SIZE {{output_width}} {{output_height}}
 //!FORMAT rgba16f
 //!FILTER NEAREST
 //!BORDER CLAMP
@@ -144,7 +144,7 @@ void hook()
     vec3 d = vec3((ign(vec2(pos), frame) - 0.5) * 2.0 * noise_amplitude);
 
     if (enabled > 0.5) {
-        ivec2 spos = clamp(pos, ivec2(0), ivec2(2559, 1599));
+        ivec2 spos = clamp(pos, ivec2(0), imageSize(RESID) - ivec2(1));
         vec4 rs = imageLoad(RESID, spos);
         vec4 ps = imageLoad(PREV, spos);
 

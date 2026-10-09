@@ -149,11 +149,11 @@ if ($expected.Contains('CONFIGURATION.html') -or
 $shaderDestinations = @($copyPlan | Where-Object {
     $_.RelativeDestination -like 'shaders\*'
 })
-if ($shaderDestinations.Count -ne 7 -or
+if ($shaderDestinations.Count -ne 11 -or
     @($copyPlan | Where-Object {
         $_.RelativeDestination -like 'vprenderer\shaders\*'
     }).Count -ne 0) {
-    throw 'The release must contain exactly one seven-file shader tree at the application root.'
+    throw 'The release must contain exactly one eleven-file shader tree at the application root.'
 }
 
 Write-Host "Microsoft x64 runtime minimum: $($runtimeRequirement.minimumVersion); installer: $($runtimeRequirement.installerVersion)"
