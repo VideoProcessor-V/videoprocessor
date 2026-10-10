@@ -392,6 +392,14 @@ Verified on the real libplacebo path (WARP) in VideoProcessor-Test:
 - Still pictures are unchanged.
 - A scene cut carries nothing.
 
+**Backward-only by design; occlusion handling is deferred to the Stage 6
+plumbing (see Stage 6).** This is the sigma-delta delta 2 decision,
+2026-10-10. At an occlusion a wrong backward vector can deposit at most
+±0.5 code for one refresh, and only where both `match_tolerance` and the
+per-pixel gate passed, so the effect is bounded and rare. Until then,
+`match_tolerance` is the owner's lever: if reveal edges ever show anything
+in a dark-scene A/B, tighten it.
+
 The GPU time budget (≈1 ms) has not been measured on the 3090. Storage is
 six full-size rgba16f textures, about 200 MB at 2560x1600. They are full size only because a hook file
 cannot size a texture as a fraction of the output (`{{output_width}}` is the
@@ -491,6 +499,29 @@ hard hold of the nearest frame, never a blend**; no synthesis across cuts;
 `s` applied globally per frame. Budget ≈3 ms. Highest-risk stage, taste
 outcome, built last of the picture stages, skippable. Owner dislikes both
 frame-blend blur and soap-opera effect — do not offer either.
+
+**Required deliverable of this stage (sigma-delta delta 2, 2026-10-10):**
+- The two-frame render path includes a **generic app-provided texture input
+  to the hook chain**. It must be PR-able, with no LED or dither naming.
+- The de-judder's bidirectional matcher publishes its forward/backward
+  consistency as an **occlusion mask** on that input.
+- The sigma-delta gains an `occlusion_mask` input and skips the carry where
+  a block is marked untrusted, falling back to the gate, then to plain
+  rounding.
+- Cinema profile only; `Low_Latency` stays backward-only.
+- **Stage 6 is not complete until the sigma-delta is consuming the mask.**
+  Occlusion handling is not optional once Stage 6 exists, and it is built
+  here, not as a Stage 4 addition.
+
+Not to do:
+- render frames twice to get forward vectors;
+- add a second motion-estimation pass to the dither shader;
+- touch the presentation path for this.
+
+The lookahead walk already has the next frame's raw luma on the CPU, but
+delivering anything to the hook needs the app-provided texture input
+above, which is also how the de-judder receives frame B. Build it once,
+here.
 
 ### Stage 7 — LED drive module (native; replaces `beta_22.py`)
 Built right after stage 3 in reactive form (lead 0); lookahead arrives with
