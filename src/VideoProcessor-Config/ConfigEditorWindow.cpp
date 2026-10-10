@@ -8320,7 +8320,22 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
                 markDirty();
                 (*refreshRawParameters)();
             };
-            if (parameter.integer)
+            // An on/off setting: range 0-1 and a description that says what 0
+            // or 1 means ("1 = ...", "0 for ..."). A tick box, not 0.000-1.000.
+            const bool toggle = parameter.hasMinimum && parameter.hasMaximum &&
+                parameter.minimum == 0.0 && parameter.maximum == 1.0 &&
+                QRegularExpression(QStringLiteral("^\\s*[01]\\s*(=|for\\b|when\\b)"))
+                    .match(parameter.description).hasMatch();
+            if (toggle)
+            {
+                auto* check = new QCheckBox;
+                check->setChecked(current >= 0.5);
+                check->setAccessibleName(parameter.description);
+                connect(check, &QCheckBox::toggled, this,
+                    [save](bool on) { save(on ? QStringLiteral("1") : QStringLiteral("0")); });
+                control = check;
+            }
+            else if (parameter.integer)
             {
                 auto* spin = new QSpinBox;
                 spin->setRange(static_cast<int>(minimum), static_cast<int>(maximum));

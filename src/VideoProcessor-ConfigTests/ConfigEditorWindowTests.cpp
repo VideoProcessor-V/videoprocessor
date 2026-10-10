@@ -947,6 +947,9 @@ void testShaderSettingsComeFromTheShaderFile()
         require(shader.open(QIODevice::WriteOnly), "shader fixture");
         shader.write("//!PARAM noise_amplitude\n//!DESC Noise strength\n//!TYPE float\n"
             "//!MINIMUM 0.0\n//!MAXIMUM 0.5\n0.15\n\n"
+            "//!PARAM motion\n//!DESC 1 = follow the motion, 0 = plain\n//!TYPE float\n"
+            "//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.0\n\n"
+            "//!PARAM strength\n//!DESC Strength\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.5\n\n"
             "//!PARAM bits\n//!DESC Output bits\n//!TYPE DEFINE\n//!MINIMUM 8\n//!MAXIMUM 10\n10\n\n"
             "//!HOOK OUTPUT\n//!BIND HOOKED\nvec4 hook() { return HOOKED_tex(HOOKED_pos); }\n");
         QFile plain(dir.filePath("shaders/Plain.glsl"));
@@ -981,12 +984,19 @@ void testShaderSettingsComeFromTheShaderFile()
     require(std::abs(noise->maximum() - 0.5) < 1e-9 && noise->minimum() == 0.0, "The shader's range is not used");
     auto* bits = requireControl<QSpinBox>(window, QStringLiteral("config.shader.standard.setting.bits"));
     require(bits->value() == 10, "The shader's default is not shown");
+    // An on/off setting (range 0-1, "1 = ..." description) is a tick box;
+    // a 0-1 strength stays a number.
+    auto* motion = requireControl<QCheckBox>(window, QStringLiteral("config.shader.standard.setting.motion"));
+    require(!motion->isChecked(), "The on/off setting does not show its default (off)");
+    requireControl<QDoubleSpinBox>(window, QStringLiteral("config.shader.standard.setting.strength"));
+    motion->setChecked(true);
     noise->setValue(0.2);
     QCoreApplication::processEvents();
     QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
     apply->click();
     QCoreApplication::processEvents();
     require(readBytes(path).contains("param_noise_amplitude: 0.2"), "The shader setting was not saved");
+    require(readBytes(path).contains("param_motion: 1"), "The tick box did not save 1");
 
     require(select(QStringLiteral("shader.standard.plain")), "plain shader missing");
     auto* note = requireControl<QLabel>(window, QStringLiteral("config.shader.standard.settings_note"));
