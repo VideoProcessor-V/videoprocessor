@@ -727,8 +727,10 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   together | turns, `ftb_step_ms` 100 (the contrast-dump pace),
   `ftb_custom_start` (custom value matching LPW1 60, to be measured),
   `ftb_custom_floor`. Separate per-colour commands can tint the black
-  briefly; "turns" keeps the colours within one step. Leaving is always all
-  three at once. Low_Latency now sets `active_picture_lookahead_frames: 0`
+  briefly; "turns" keeps the colours within one step. Owner test
+  2026-10-10: the custom values run 0-40 per colour, 40 is about 40/255
+  (below LPW1's 60) and 0 turns that LED off; defaults are now start 40,
+  floor 0 (true black), ranges 1-40 and 0-39. Low_Latency now sets `active_picture_lookahead_frames: 0`
   explicitly (it inherited Normal's 8); the LED drive follows the queue it
   is given and is reactive there.
 - Reactive vs look-ahead (owner 2026-10-10): the LED drive follows the

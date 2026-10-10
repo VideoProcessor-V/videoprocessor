@@ -147,13 +147,16 @@ namespace LedDrive
 		double cutThreshold = 24.0;
 		// Experimental (owner 2026-10-10): once the picture has been black for
 		// ftb_black_ms with the LED at led_floor_black, switch to the custom
-		// LED dim and step from ftb_custom_start (the custom value that equals
-		// LPW1 at led_floor_black - to be measured) down to ftb_custom_floor,
+		// LED dim and step from ftb_custom_start down to ftb_custom_floor. The
+		// FL35's custom values run 0-40 (owner-tested 2026-10-10: 40 is about
+		// 40/255, below LPW1's minimum of 60, and 0 turns that LED off), so
+		// entering is a small step down from 60/255 and the floor can be true
+		// black;
 		// one command every ftb_step_ms; back up and off at the first light.
 		FtbCustomDim ftbCustomDim = FtbCustomDim::Off;
 		int ftbStepMs = 100;
-		int ftbCustomStart = 60;
-		int ftbCustomFloor = 30;
+		int ftbCustomStart = 40;
+		int ftbCustomFloor = 0;
 		int ftbTurnStep = 2;
 		int ftbBlackMs = 500;
 	};
@@ -332,8 +335,8 @@ namespace LedDrive
 			Integer("tick_ms", 50, 5000),
 			Choice("ftb_custom_dim", { "off", "together", "turns" }),
 			Integer("ftb_step_ms", 50, 1000),
-			Integer("ftb_custom_start", 0, 255),
-			Integer("ftb_custom_floor", 0, 255),
+			Integer("ftb_custom_start", 1, 40),
+			Integer("ftb_custom_floor", 0, 39),
 			Integer("ftb_turn_step", 1, 50),
 			Integer("ftb_black_ms", 100, 10000),
 			Number("rate_up", 1.0, 10000.0),
@@ -428,9 +431,9 @@ namespace LedDrive
 					error = "[" + section + "] needs highlight_area_small < highlight_area_large";
 					return false;
 				}
-				int customStart = 60, customFloor = 30;
-				if (config.TryGetString(section, "ftb_custom_start", value)) Detail::ParseInt(value, 0, 255, customStart);
-				if (config.TryGetString(section, "ftb_custom_floor", value)) Detail::ParseInt(value, 0, 255, customFloor);
+				int customStart = 40, customFloor = 0;
+				if (config.TryGetString(section, "ftb_custom_start", value)) Detail::ParseInt(value, 1, 40, customStart);
+				if (config.TryGetString(section, "ftb_custom_floor", value)) Detail::ParseInt(value, 0, 39, customFloor);
 				if (customFloor >= customStart)
 				{
 					error = "[" + section + "] needs ftb_custom_floor < ftb_custom_start";
@@ -613,8 +616,8 @@ namespace LedDrive
 				method == "turns" ? FtbCustomDim::Turns : FtbCustomDim::Off;
 		}
 		readInt("ftb_step_ms", 50, 1000, result.ftbStepMs);
-		readInt("ftb_custom_start", 0, 255, result.ftbCustomStart);
-		readInt("ftb_custom_floor", 0, 255, result.ftbCustomFloor);
+		readInt("ftb_custom_start", 1, 40, result.ftbCustomStart);
+		readInt("ftb_custom_floor", 0, 39, result.ftbCustomFloor);
 		readInt("ftb_turn_step", 1, 50, result.ftbTurnStep);
 		readInt("ftb_black_ms", 100, 10000, result.ftbBlackMs);
 	}

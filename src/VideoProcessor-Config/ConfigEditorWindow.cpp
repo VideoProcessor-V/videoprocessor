@@ -8911,10 +8911,12 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // the three colours closer (less colour shift) but takes longer.
     auto* turnStep = numberSetting(QStringLiteral("ftb_turn_step"), 1, 50, 2, QStringLiteral(" levels"));
     experimentForm->addRow(QStringLiteral("Step size per colour"), turnStep);
-    auto* customStart = numberSetting(QStringLiteral("ftb_custom_start"), 1, 255, 60, QString());
-    experimentForm->addRow(QStringLiteral("Custom level matching 60"), customStart);
-    auto* customFloor = numberSetting(QStringLiteral("ftb_custom_floor"), 0, 254, 30, QString());
-    experimentForm->addRow(QStringLiteral("Deepest custom level"), customFloor);
+    // The FL35's custom LED dim runs 0-40 per colour (40 is about 40/255, below
+    // LPW1's 60; 0 is off).
+    auto* customStart = numberSetting(QStringLiteral("ftb_custom_start"), 1, 40, 40, QString());
+    experimentForm->addRow(QStringLiteral("Starting custom level (1-40)"), customStart);
+    auto* customFloor = numberSetting(QStringLiteral("ftb_custom_floor"), 0, 39, 0, QString());
+    experimentForm->addRow(QStringLiteral("Deepest custom level (0 = off)"), customFloor);
     customFloor->setMaximum(customStart->value() - 1);
     connect(customStart, qOverload<int>(&QSpinBox::valueChanged), customFloor,
         [customFloor](int start) { customFloor->setMaximum(start - 1); });
@@ -8923,7 +8925,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "fade-to-black level, VP switches the projector to its custom LED dim and steps the red, green and "
         "blue LEDs down, one command per step interval; at the first light it switches back. \"Taking turns\" "
         "keeps the three colours within one small step of each other, so the black does not change colour. "
-        "The custom level matching 60 must be measured on the projector first (DEPLOY.txt).")));
+        "The custom dim runs 0-40 (40 is about 40/255, a small step down from LPW1's 60; 0 turns the LEDs "
+        "off, true black).")));
     auto syncExperiment = [experimentEnabled, method, stepMs, turnStep, customStart, customFloor]
     {
         const bool on = experimentEnabled->isChecked();

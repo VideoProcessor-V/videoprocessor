@@ -99,8 +99,8 @@ its options are greyed out until it is ticked):
 |---|---|---|---|
 | Method | `ftb_custom_dim` | off | `together`: all three colours straight to the deepest level (one quick tint); `turns`: the colours take turns in small steps, never more than one step apart |
 | Step interval | `ftb_step_ms` | 100 | time between custom-dim commands (like the old script's 100 ms contrast steps) |
-| Custom level matching 60 | `ftb_custom_start` | 60 | the custom value that gives the same light as LPW1 60 - **measure it first** |
-| Deepest custom level | `ftb_custom_floor` | 30 | how low the fade goes |
+| Starting custom level | `ftb_custom_start` | 40 | where the custom dim starts (1-40; 40 is about 40/255, a small step down from LPW1's 60) |
+| Deepest custom level | `ftb_custom_floor` | 0 | how low the fade goes (0-39; 0 turns the LEDs off - true black) |
 | Step size per colour | `ftb_turn_step` | 2 | levels each colour moves per command when taking turns (smaller: less colour shift, slower) |
 | (profile only) | `ftb_black_ms` | 500 | how long the picture must be black first |
 

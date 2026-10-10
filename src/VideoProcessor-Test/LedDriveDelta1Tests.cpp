@@ -233,8 +233,8 @@ namespace VideoProcessorTest
 			LedDriveConfig config = Compensate();
 			config.ftbCustomDim = FtbCustomDim::Turns;
 			config.ftbStepMs = 100;
-			config.ftbCustomStart = 60;
-			config.ftbCustomFloor = 50;
+			config.ftbCustomStart = 40;
+			config.ftbCustomFloor = 30;
 			config.ftbTurnStep = 5;
 			config.ftbBlackMs = 200;
 			{
@@ -281,8 +281,8 @@ namespace VideoProcessorTest
 						dim.push_back(writes[i]);
 						times.push_back(writeTimes[i]);
 					}
-				const std::vector<std::string> expected = { ":LDCR60\r", ":LDCG60\r", ":LDCB60\r", ":LDMM1\r",
-					":LDCR55\r", ":LDCG55\r", ":LDCB55\r", ":LDCR50\r", ":LDCG50\r", ":LDCB50\r" };
+				const std::vector<std::string> expected = { ":LDCR40\r", ":LDCG40\r", ":LDCB40\r", ":LDMM1\r",
+					":LDCR35\r", ":LDCG35\r", ":LDCB35\r", ":LDCR30\r", ":LDCG30\r", ":LDCB30\r" };
 				Assert::AreEqual(expected.size(), dim.size());
 				for (size_t i = 0; i < expected.size(); ++i)
 					Assert::AreEqual(expected[i], dim[i], L"Colours take turns, one small step each");
@@ -441,7 +441,11 @@ namespace VideoProcessorTest
 		{
 			std::string error;
 			Assert::IsTrue(Validates("[led_drive.Default]\nftb_custom_dim: turns\nftb_step_ms: 100\n"
-				"ftb_custom_start: 60\nftb_custom_floor: 20\n", error), std::wstring(error.begin(), error.end()).c_str());
+				"ftb_custom_start: 40\nftb_custom_floor: 0\n", error), std::wstring(error.begin(), error.end()).c_str());
+			Assert::IsFalse(Validates("[led_drive.Default]\nftb_custom_start: 60\n", error),
+				L"The FL35's custom dim stops at 40");
+			Assert::AreEqual(40, LedDriveConfig().ftbCustomStart);
+			Assert::AreEqual(0, LedDriveConfig().ftbCustomFloor, L"Deepest default: off");
 			Assert::IsFalse(Validates("[led_drive.Default]\nftb_custom_dim: sometimes\n", error));
 			Assert::IsFalse(Validates("[led_drive.Default]\nftb_custom_start: 40\nftb_custom_floor: 40\n", error));
 			Assert::IsTrue(error.find("ftb_custom_floor") != std::string::npos);
