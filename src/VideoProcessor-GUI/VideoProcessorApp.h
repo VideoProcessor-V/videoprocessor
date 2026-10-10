@@ -40,6 +40,10 @@ public:
 		m_presentationLeadFrames = value;
 		m_hasPresentationLeadFrames = true;
 	}
+	// Stage 5: the default queue's target as time (0 = not set). It is turned
+	// into target_frames once the source rate is known.
+	int GetQueueTargetLatencyMs() const { return m_queueTargetLatencyMs; }
+	void SetQueueTargetLatencyMs(int value) { m_queueTargetLatencyMs = value; }
 	size_t GetActivePictureLookaheadFrames() const
 	{
 		return m_activePictureLookaheadFrames;
@@ -56,6 +60,7 @@ private:
 	size_t m_presentationLeadFrames = 1;
 	bool m_hasPresentationLeadFrames = true;
 	size_t m_activePictureLookaheadFrames = 0;
+	int m_queueTargetLatencyMs = 0;
 	std::string m_displayRecoveryStatePath;
 	bool m_targetOnlyDisplaySessionActive = false;
 	int m_startupExitCode = 0;

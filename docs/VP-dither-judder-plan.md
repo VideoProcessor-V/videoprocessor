@@ -362,6 +362,29 @@ low confidence ⇒ existing gate. Budget ≈1 ms. Reference: FFmpeg
 `vf_minterpolate` (algorithm, not code).
 
 ### Stage 5 — Time-based queue target (cinema profile; low-risk form)
+
+**Status (2026-10-10): built, not yet on the projector.** Built on
+`stage7-step5-delta1`, before the planned rebase onto rc2, at the owner's
+request. Where it lives:
+- `src/VideoProcessor-Lib/QueueLatency.h`: the derived count and its order of
+  precedence.
+- `CVideoProcessorDlg::ApplyUnifiedProfileSnapshot`: re-evaluated with every profile
+  snapshot, which changes when `${cadence}` does.
+- The Config app's Queue page: "Target delay", with a note showing the real
+  delay at 24, 25, 30, 50 and 60p.
+- The stats OSD: "Queue delay: N fr = X ms".
+
+Rules as built:
+- A profile's own `target_frames` switches off a time target inherited from
+  the default queue (so `Low_Latency` keeps 1 frame).
+- `target_latency_ms: 0` also switches it off.
+- Range is 0-1000 ms, and the result is clamped to 1-16 frames (same as
+  `target_frames`).
+
+The test cfg sets 120 ms on Normal. That gives 3 frames at 24p, the same
+delay as before, so lip sync does not change. A plain `[queue]` section with
+no profiles ignores the key, because profiles are what carry the source
+rate.
 New queue-profile key `target_latency_ms` (e.g. 120). **Implement as a
 derived frame count, not a new presentation policy:**
 `target_frames = ceil(target_latency_ms × source_rate)`, re-evaluated on a

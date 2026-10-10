@@ -256,6 +256,9 @@ namespace RendererProfileConfig
 		size_t leadFrames = 0;
 		bool hasTargetFrames = false;
 		size_t targetFrames = 0;
+		// Stage 5: target as time; 0 switches an inherited time target off.
+		bool hasTargetLatencyMs = false;
+		int targetLatencyMs = 0;
 		bool hasActivePictureLookaheadFrames = false;
 		size_t activePictureLookaheadFrames = 0;
 		bool hasStartupPrerollFrames = false;
@@ -678,6 +681,8 @@ namespace RendererProfileConfig
 				return ParseInteger(value, 0, 16, parsed);
 			if (key == "active_picture_lookahead_frames")
 				return ParseInteger(value, 0, 8, parsed);
+			if (key == "target_latency_ms")
+				return ParseInteger(value, 0, 1000, parsed);
 			if (key == "reset_after_render_restart_seconds")
 				return ParseInteger(value, 1, INT_MAX, parsed);
 			if (key == "reset_queue_too_large_percent")
@@ -1404,6 +1409,13 @@ namespace RendererProfileConfig
 					ApplySectionSetting(profile.settings, variantSection,
                         *values, entry.first, entry.second);
 				}
+				// Stage 5: a queue variant's own frame target switches off a time
+				// target it would inherit (Low_Latency's target_frames: 1 must not
+				// become 120 ms worth of frames).
+				if (std::string(spec.name) == "queue" &&
+					(values->count("target_frames") || values->count("steady_reserve_frames")) &&
+					!values->count("target_latency_ms"))
+					profile.settings.erase("target_latency_ms");
 				if (!MergeShortcutIntoWhen(profileShortcut, "[" + variantSection + "]", profile.when, error))
 					return false;
 				if (!profileCycleShortcut.empty() &&
@@ -2679,6 +2691,8 @@ namespace RendererProfileConfig
 				queue.activePictureLookaheadFrames) ||
 			!resolveSize("startup_preroll_frames", 0, 16,
 				queue.hasStartupPrerollFrames, queue.startupPrerollFrames) ||
+			!resolveInteger("target_latency_ms", 0, 1000,
+				queue.hasTargetLatencyMs, queue.targetLatencyMs) ||
 			!resolveInteger("reset_after_render_restart_seconds", 1, INT_MAX,
 				queue.hasResetAfterRendererRestartSeconds,
 				queue.resetAfterRendererRestartSeconds) ||

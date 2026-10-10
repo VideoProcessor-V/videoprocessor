@@ -786,6 +786,63 @@ void testQueueFrameRateRuleIsAPlainControl()
     require(!readBytes(path).contains("source_rate"), "Switching the frame-rate rule off did not remove it");
 }
 
+void testQueueTargetDelayIsOnTheQueuePage()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.First]\nquality: high\n"
+        "[queue.Normal]\nqueue_size: 32\ntarget_frames: 3\ntarget_latency_ms: 120\n"
+        "[queue.Low_Latency]\nwhen: ${source_rate} > 59\nqueue_size: 1\ntarget_frames: 1\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(1);
+    auto* profiles = requireControl<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+    auto select = [profiles](const QString& section)
+    {
+        for (int row = 0; row < profiles->count(); ++row)
+            if (profiles->item(row)->data(Qt::UserRole).toString().compare(section, Qt::CaseInsensitive) == 0)
+            {
+                profiles->setCurrentRow(row);
+                QCoreApplication::processEvents();
+                return true;
+            }
+        return false;
+    };
+    auto* delay = requireControl<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"));
+    auto* note = requireControl<QLabel>(window, QStringLiteral("config.queue.target_latency_note"));
+    require(select(QStringLiteral("queue.normal")), "Normal missing");
+    require(delay->value() == 120, "The saved delay is not shown");
+    require(note->text().contains(QStringLiteral("24p 3 frames (125 ms)")) &&
+        note->text().contains(QStringLiteral("60p 8 frames (133 ms)")),
+        "The note does not show the real delay in whole frames");
+    require(select(QStringLiteral("queue.low_latency")), "Low_Latency missing");
+    require(delay->value() == 0 && delay->text() == QStringLiteral("Off"),
+        "A queue without a delay does not show Off");
+    require(note->text().startsWith(QStringLiteral("Off")), "The Off note is missing");
+
+    require(select(QStringLiteral("queue.normal")), "Normal missing");
+    delay->setValue(200);
+    QCoreApplication::processEvents();
+    require(note->text().contains(QStringLiteral("24p 5 frames (209 ms)")), "The note does not follow the value");
+    QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("target_latency_ms: 200"), "The new delay was not saved");
+
+    // A buffering preset is a frame-count baseline: it switches the delay off.
+    auto* policy = requireControl<QComboBox>(window, QStringLiteral("config.queue.policy_preset"));
+    policy->setCurrentIndex(policy->findData(QStringLiteral("reliable")));
+    QCoreApplication::processEvents();
+    require(delay->value() == 0 && note->text().startsWith(QStringLiteral("Off")),
+        "A preset left the delay on");
+    require(policy->currentData().toString() == QStringLiteral("reliable"), "The preset did not stick");
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("target_latency_ms: 0"), "The preset did not switch the delay off in the file");
+}
+
 void testShaderSettingsComeFromTheShaderFile()
 {
     QTemporaryDir dir;
@@ -3321,6 +3378,7 @@ void testQueueUnitsAndLutControlsUseConsistentRows()
         QStringLiteral("lead_frames"),
         QStringLiteral("startup_preroll_frames"),
         QStringLiteral("target_frames"),
+        QStringLiteral("target_latency_ms"),
         QStringLiteral("active_picture_lookahead_frames"),
         QStringLiteral("reset_after_render_restart_seconds"),
         QStringLiteral("reset_queue_too_large_percent")
@@ -6733,6 +6791,7 @@ int main(int argc, char** argv)
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
+    failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);
     failures += run("target dropdown refreshes inline", testTargetDropdownRefreshesInline);
     failures += run("remote target switch keeps window responsive",
         testRemoteTargetSwitchKeepsWindowResponsive);

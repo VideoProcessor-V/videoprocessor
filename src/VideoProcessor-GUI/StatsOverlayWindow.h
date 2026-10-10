@@ -62,6 +62,13 @@ struct StatsData
 	// Alpha/libplacebo owns one in-process FIFO.  Its queue target is a desired
 	// depth, not the DirectShow raw/converted/total capacity tuple.
 	bool isAlphaRenderer = false;
+	// Stage 5: the queue target when it comes from target_latency_ms - the
+	// frame count, what it really delays (whole source frames) and the
+	// configured time. queueTargetFromTime false hides the row.
+	bool queueTargetFromTime = false;
+	size_t queueTargetFrames = 0;
+	double queueTargetEffectiveMs = 0.0;
+	int queueTargetLatencyMs = 0;
 
 	// DirectShow's scheduled latency is VP's video delay relative to the shared
 	// capture/audio clock baseline. Alpha's target value is diagnostic only

@@ -39,6 +39,7 @@
 #include <InvalidCaptureStateGrace.h>
 #include <RendererQueueLaunchContractModel.h>
 #include <QueueProfileRestartPolicy.h>
+#include <QueueLatency.h>
 #include <EventActionLauncher.h>
 #include <UnifiedProfileRuntime.h>
 #include <VideoFrame.h>
@@ -689,6 +690,9 @@ protected:
 	size_t m_profileBaseQueueCapacity = 32;
 	size_t m_profileBaseLeadFrames = 1;
 	size_t m_profileBaseTargetFrames = 0;
+	int m_profileBaseTargetLatencyMs = 0;
+	// Stage 5: how the current queue target was reached (for the OSD).
+	QueueLatency::TargetDecision m_queueTargetDecision;
 	size_t m_profileBaseActivePictureLookaheadFrames = 0;
 	size_t m_profileBaseStartupPrerollFrames = 0;
 	int m_profileBaseQueueResetDelaySeconds = 5;

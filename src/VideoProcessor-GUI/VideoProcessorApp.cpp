@@ -731,6 +731,16 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 			defaultQueueSection.c_str(), frames));
 	}
 
+	std::string targetLatencyMs;
+	if (tryGetDefaultQueueString("target_latency_ms", targetLatencyMs))
+	{
+		const int milliseconds = std::stoi(targetLatencyMs);
+		videoProcessorApp.SetQueueTargetLatencyMs(milliseconds);
+		DbgLog((LOG_TRACE, 1,
+			TEXT("VideoProcessor: Using [%S] target_latency_ms=%d (target_frames follows the source rate)"),
+			defaultQueueSection.c_str(), milliseconds));
+	}
+
 	std::string leadFrames;
 	const bool queueLeadConfigured = tryGetDefaultQueueString(
 		"lead_frames", leadFrames);

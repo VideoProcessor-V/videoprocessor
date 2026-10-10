@@ -16,6 +16,7 @@
 #include <EventActionLauncher.h>
 #include <MainConfigSchema.h>
 #include <QueueConfiguration.h>
+#include <QueueLatency.h>
 #include <QueueProfileRestartPolicy.h>
 #include <ProfileChangeOverlay.h>
 #include <blackmagic_decklink/BlackMagicDeckLinkTranslate.h>
@@ -260,6 +261,116 @@ namespace VideoProcessorTest
             Assert::IsTrue(game.snapshot->queue.hasActivePictureLookaheadFrames,
                 L"Low_Latency must not inherit Normal's look-ahead");
             Assert::AreEqual<size_t>(0, game.snapshot->queue.activePictureLookaheadFrames);
+
+            // Stage 5: Normal's target is time; film gets today's 3 frames from
+            // 120 ms, and Low_Latency's own target_frames beats the inherited time.
+            Assert::IsTrue(film.snapshot->queue.hasTargetLatencyMs);
+            Assert::AreEqual(120, film.snapshot->queue.targetLatencyMs);
+            const auto filmTarget = QueueLatency::ResolveTargetFrames(
+                film.snapshot->queue.hasTargetLatencyMs, film.snapshot->queue.targetLatencyMs,
+                film.snapshot->queue.hasTargetFrames, film.snapshot->queue.targetFrames,
+                120, 3, 24000.0 / 1001.0);
+            Assert::IsTrue(filmTarget.fromLatency);
+            Assert::AreEqual<size_t>(3, filmTarget.frames);
+            Assert::IsFalse(game.snapshot->queue.hasTargetLatencyMs);
+            const auto gameTarget = QueueLatency::ResolveTargetFrames(
+                game.snapshot->queue.hasTargetLatencyMs, game.snapshot->queue.targetLatencyMs,
+                game.snapshot->queue.hasTargetFrames, game.snapshot->queue.targetFrames,
+                120, 3, 60000.0 / 1001.0);
+            Assert::IsFalse(gameTarget.fromLatency);
+            Assert::AreEqual<size_t>(1, gameTarget.frames, L"Low_Latency keeps its one frame");
+        }
+
+        TEST_METHOD(QueueTargetLatencyBecomesWholeSourceFrames)
+        {
+            using QueueLatency::FramesForLatency;
+            const double film = 24000.0 / 1001.0;
+            Assert::AreEqual<size_t>(3, FramesForLatency(120, film));
+            Assert::AreEqual<size_t>(3, FramesForLatency(120, 25.0));
+            Assert::AreEqual<size_t>(4, FramesForLatency(120, 30000.0 / 1001.0));
+            Assert::AreEqual<size_t>(6, FramesForLatency(120, 50.0));
+            Assert::AreEqual<size_t>(8, FramesForLatency(120, 60000.0 / 1001.0));
+            Assert::AreEqual<size_t>(5, FramesForLatency(200, film));
+            // Exactly whole frames do not round up from floating-point noise.
+            Assert::AreEqual<size_t>(3, FramesForLatency(120, 25.0));
+            Assert::AreEqual<size_t>(6, FramesForLatency(100, 60.0));
+            // Bounds: at least one frame, never more than target_frames allows.
+            Assert::AreEqual<size_t>(1, FramesForLatency(1, film));
+            Assert::AreEqual<size_t>(QueueLatency::MaxTargetFrames, FramesForLatency(1000, 60.0));
+            Assert::AreEqual<size_t>(1, FramesForLatency(120, 0.0));
+            Assert::AreEqual(125.125, QueueLatency::EffectiveLatencyMs(3, film), 1e-9);
+
+            using QueueLatency::ResolveTargetFrames;
+            // Own time target wins over own frames and the default's values.
+            auto decision = ResolveTargetFrames(true, 200, true, 2, 120, 3, film);
+            Assert::IsTrue(decision.fromLatency);
+            Assert::AreEqual<size_t>(5, decision.frames);
+            Assert::AreEqual(200, decision.latencyMs);
+            // Own frames beat an inherited time target.
+            decision = ResolveTargetFrames(false, 0, true, 1, 120, 3, film);
+            Assert::IsFalse(decision.fromLatency);
+            Assert::AreEqual<size_t>(1, decision.frames);
+            // Inherited time target when the profile says nothing.
+            decision = ResolveTargetFrames(false, 0, false, 0, 120, 3, 50.0);
+            Assert::IsTrue(decision.fromLatency);
+            Assert::AreEqual<size_t>(6, decision.frames);
+            // target_latency_ms: 0 switches an inherited time target off.
+            decision = ResolveTargetFrames(true, 0, false, 0, 120, 3, 50.0);
+            Assert::IsFalse(decision.fromLatency);
+            Assert::AreEqual<size_t>(3, decision.frames);
+            // No time target anywhere: exactly the old frame count.
+            decision = ResolveTargetFrames(false, 0, false, 0, 0, 4, 50.0);
+            Assert::IsFalse(decision.fromLatency);
+            Assert::AreEqual<size_t>(4, decision.frames);
+            // Rate not known yet: the frame count it would otherwise use.
+            decision = ResolveTargetFrames(true, 200, true, 2, 120, 3, 0.0);
+            Assert::IsFalse(decision.fromLatency);
+            Assert::AreEqual<size_t>(2, decision.frames);
+            decision = ResolveTargetFrames(false, 0, false, 0, 120, 3, 0.0);
+            Assert::AreEqual<size_t>(3, decision.frames);
+        }
+
+        TEST_METHOD(QueueTargetLatencyIsValidatedAndResolvedPerProfile)
+        {
+            CachedConfigTestFile file;
+            {
+                std::ofstream out(file.path, std::ios::out | std::ios::trunc);
+                out << "[queue.normal]\nqueue_size: 32\ntarget_frames: 3\ntarget_latency_ms: 120\n"
+                    "[queue.low]\nwhen: ${source_rate} > 59\nqueue_size: 1\ntarget_frames: 1\n"
+                    "[queue.hdr]\nwhen: ${eotf} == \"HDR\"\nqueue_size: 8\n";
+            }
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Assert::IsTrue(MainConfigSchema::Validate(config, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            RendererProfileConfig::Model model;
+            Assert::IsTrue(RendererProfileConfig::Read(config, model, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            RendererProfileConfig::ResolvedQueue resolved;
+            Assert::IsTrue(RendererProfileConfig::ResolveQueue(model, "normal", resolved, error));
+            Assert::IsTrue(resolved.hasTargetLatencyMs);
+            Assert::AreEqual(120, resolved.targetLatencyMs);
+            // Its own target_frames switches the inherited time target off...
+            Assert::IsTrue(RendererProfileConfig::ResolveQueue(model, "low", resolved, error));
+            Assert::IsFalse(resolved.hasTargetLatencyMs);
+            Assert::AreEqual<size_t>(1, resolved.targetFrames);
+            // ...a profile that says nothing about its target inherits it.
+            Assert::IsTrue(RendererProfileConfig::ResolveQueue(model, "hdr", resolved, error));
+            Assert::IsTrue(resolved.hasTargetLatencyMs);
+            Assert::AreEqual(120, resolved.targetLatencyMs);
+
+            for (const char* bad : { "1001", "-1", "fast" })
+            {
+                {
+                    std::ofstream out(file.path, std::ios::out | std::ios::trunc);
+                    out << "[queue.normal]\ntarget_latency_ms: " << bad << "\n";
+                }
+                Assert::IsTrue(config.Load(file.path));
+                error.clear();
+                Assert::IsFalse(MainConfigSchema::Validate(config, error));
+                Assert::IsTrue(error.find("target_latency_ms") != std::string::npos);
+            }
         }
 
         TEST_METHOD(CinemaTestConfigurationSwitchesBlackBarZoomFromTheConfigApp)

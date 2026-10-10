@@ -78,6 +78,17 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 
+// The exact source rate the profile rules saw (${cadence}); 0 when unknown.
+double SnapshotSourceRateHz(const UnifiedProfileRuntime::Snapshot& snapshot)
+{
+	std::string text;
+	double rate = 0.0;
+	if (!snapshot.LookupVariable("cadence", text) ||
+		!DisplayRuleExpression::ParseNumber(text, rate) || !(rate > 0.0))
+		return 0.0;
+	return rate;
+}
+
 constexpr wchar_t ConfigurationEditorRelativePath[] =
 	L"config\\VideoProcessorConfig.exe";
 
@@ -12473,6 +12484,8 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				videoProcessorApp.GetPresentationLeadFrames();
 			m_profileBaseTargetFrames =
 				videoProcessorApp.GetQueueSteadyReserveFrames();
+			m_profileBaseTargetLatencyMs =
+				videoProcessorApp.GetQueueTargetLatencyMs();
 			m_profileBaseActivePictureLookaheadFrames =
 				videoProcessorApp.GetActivePictureLookaheadFrames();
 			m_profileBaseStartupPrerollFrames =
@@ -12505,8 +12518,14 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 			m_videoRenderer->SetPresentationLeadFrames(desiredLeadFrames, true);
 			queuePolicyChanged = true;
 		}
-		const size_t desiredTargetFrames = snapshot->queue.hasTargetFrames ?
-			snapshot->queue.targetFrames : m_profileBaseTargetFrames;
+		// Stage 5: a time target becomes the frame count for this source rate;
+		// the pacing below still works only in frames.
+		m_queueTargetDecision = QueueLatency::ResolveTargetFrames(
+			snapshot->queue.hasTargetLatencyMs, snapshot->queue.targetLatencyMs,
+			snapshot->queue.hasTargetFrames, snapshot->queue.targetFrames,
+			m_profileBaseTargetLatencyMs, m_profileBaseTargetFrames,
+			SnapshotSourceRateHz(*snapshot));
+		const size_t desiredTargetFrames = m_queueTargetDecision.frames;
 		const size_t desiredStartupPreroll =
 			snapshot->queue.hasStartupPrerollFrames ?
 			snapshot->queue.startupPrerollFrames :
@@ -12555,6 +12574,12 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				videoProcessorApp.GetQueueSteadyReserveFrames(),
 				videoProcessorApp.GetActivePictureLookaheadFrames(),
 				m_queueResetDelaySeconds, m_queueResetHighWaterPercent);
+		if (queuePolicyChanged && m_queueTargetDecision.fromLatency)
+			DebugLog::Log(
+				"Queue target from time: target_latency_ms=%d source_rate=%.3f "
+				"target_frames=%zu effective_delay_ms=%.1f",
+				m_queueTargetDecision.latencyMs, m_queueTargetDecision.rateHz,
+				m_queueTargetDecision.frames, m_queueTargetDecision.effectiveMs);
 	}
 
 	CString activeState;
@@ -16292,6 +16317,10 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		stats.currentQueueSize = stats.rawQueueSize + stats.convertedQueueSize;
 		stats.maxQueueSize = GetRendererVideoFrameQueueSizeMax();
 		stats.isQueueFull = (stats.currentQueueSize >= stats.maxQueueSize);
+		stats.queueTargetFromTime = m_queueTargetDecision.fromLatency;
+		stats.queueTargetFrames = m_queueTargetDecision.frames;
+		stats.queueTargetEffectiveMs = m_queueTargetDecision.effectiveMs;
+		stats.queueTargetLatencyMs = m_queueTargetDecision.latencyMs;
 
 		RendererLatencySnapshot latencySnapshot;
 		if (m_videoRenderer->GetLatencySnapshot(latencySnapshot))

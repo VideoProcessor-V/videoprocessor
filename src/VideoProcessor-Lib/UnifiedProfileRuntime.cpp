@@ -108,6 +108,8 @@ namespace
 			left.queue.leadFrames != right.queue.leadFrames ||
 			left.queue.hasTargetFrames != right.queue.hasTargetFrames ||
 			left.queue.targetFrames != right.queue.targetFrames ||
+			left.queue.hasTargetLatencyMs != right.queue.hasTargetLatencyMs ||
+			left.queue.targetLatencyMs != right.queue.targetLatencyMs ||
 			left.queue.hasActivePictureLookaheadFrames !=
 				right.queue.hasActivePictureLookaheadFrames ||
 			left.queue.activePictureLookaheadFrames !=

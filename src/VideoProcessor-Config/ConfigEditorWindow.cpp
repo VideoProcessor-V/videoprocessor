@@ -15,6 +15,7 @@
 #include <ConfigEditorCore.h>
 #include <ConfigurationRpcClient.h>
 #include <RendererProfileConfig.h>
+#include <QueueLatency.h>
 
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
@@ -427,6 +428,28 @@ protected:
         QSplitter::resizeEvent(event);
     }
 };
+
+// Stage 5: what a Target delay really gives at the common frame rates.
+QString queueLatencyNoteText(int milliseconds)
+{
+    if (milliseconds <= 0)
+        return QStringLiteral(
+            "Off: the queue holds Target frames (Advanced), so the delay changes with the frame rate.");
+    QStringList parts;
+    const struct { const char* name; double rate; } rates[] = {
+        { "24p", 24000.0 / 1001.0 }, { "25p", 25.0 }, { "30p", 30000.0 / 1001.0 },
+        { "50p", 50.0 }, { "60p", 60000.0 / 1001.0 } };
+    for (const auto& rate : rates)
+    {
+        const size_t frames = QueueLatency::FramesForLatency(milliseconds, rate.rate);
+        parts << QStringLiteral("%1 %2 frames (%3 ms)").arg(QString::fromLatin1(rate.name))
+            .arg(frames).arg(qRound(QueueLatency::EffectiveLatencyMs(frames, rate.rate)));
+    }
+    return QStringLiteral(
+        "Real delay, in whole frames: %1. Set the audio delay once to match. "
+        "A profile's own Target frames (like Low latency's 1) still wins over a delay it would inherit.")
+        .arg(parts.join(QStringLiteral(", ")));
+}
 
 QLabel* helpLabel(const QString& text)
 {
@@ -5398,6 +5421,26 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Choose a policy for a complete queue baseline."));
         queuePolicySummary->setObjectName(QStringLiteral("config.queue.policy_summary"));
         form->addRow(QString(), queuePolicySummary);
+        // Stage 5: the queue target as time. VP turns it into Target frames
+        // for each source rate, so the delay - and the audio offset - stays
+        // about the same at 24p, 30p and 60p.
+        addInteger(QStringLiteral("Target delay"), QStringLiteral("target_latency_ms"),
+            0, QueueLatency::MaxTargetLatencyMs, QStringLiteral("ms"));
+        auto* latencySpin = qobject_cast<QSpinBox*>(fields->back().widget);
+        latencySpin->setSpecialValueText(QStringLiteral("Off"));
+        latencySpin->setToolTip(QStringLiteral(
+            "Off uses Target frames. A delay in ms becomes whole source frames "
+            "for each frame rate; a longer delay gives the LED drive and the crop "
+            "detector more frames to look ahead."));
+        auto* latencyNote = helpLabel(QString());
+        latencyNote->setObjectName(QStringLiteral("config.queue.target_latency_note"));
+        form->addRow(QString(), latencyNote);
+        const auto updateLatencyNote = [latencyNote](int milliseconds)
+        {
+            latencyNote->setText(queueLatencyNoteText(milliseconds));
+        };
+        connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, updateLatencyNote);
+        updateLatencyNote(0);
         form = addCollapsibleSection(QStringLiteral("queueAdvanced"),
             QStringLiteral("Advanced"), QStringLiteral(
                 "Fine-tune individual queue values. Editing one switches this profile to Custom."), false);
@@ -6450,6 +6493,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             if (queueValue(QStringLiteral("queue_size")) == policy.capacity &&
                 queueValue(QStringLiteral("lead_frames")) == policy.lead &&
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
+                queueValue(QStringLiteral("target_latency_ms")) <= 0 &&
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
                 queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
@@ -6529,6 +6573,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (key == QStringLiteral("queue_size")) return QStringLiteral("32");
                 if (key == QStringLiteral("lead_frames")) return QStringLiteral("1");
                 if (key == QStringLiteral("target_frames")) return QStringLiteral("4");
+                if (key == QStringLiteral("target_latency_ms")) return QStringLiteral("0");
                 if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("startup_preroll_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("steady_reserve_frames")) return QStringLiteral("4");
@@ -6674,6 +6719,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			if (!requiresExplicitValue && configured.isEmpty() && list->count() > 0)
                 configured = defaultProfile ? fallback(field.key) :
                     profileValue(list->item(0)->data(Qt::UserRole).toString(), field.key);
+			// Stage 5, as VP reads it: a queue's own Target frames switches off a
+			// delay it would inherit, so it shows Off rather than the default's.
+			if (sectionPrefix == QStringLiteral("queue") && !defaultProfile && raw.isEmpty() &&
+				field.key == QStringLiteral("target_latency_ms") &&
+				(!value(section, QStringLiteral("target_frames")).isEmpty() ||
+				 !value(section, QStringLiteral("steady_reserve_frames")).isEmpty()))
+				configured = QStringLiteral("0");
 			if (!requiresExplicitValue && configured.isEmpty())
 				configured = fallback(field.key);
             if (defaultOnlyField && !defaultProfile && list->count() > 0)
@@ -6945,6 +6997,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("lead_frames", selected->lead);
             setValue("startup_preroll_frames", 0);
             setValue("target_frames", selected->target);
+            setValue("target_latency_ms", 0);
             setValue("active_picture_lookahead_frames", 0);
             setValue("reset_after_render_restart_seconds", 5);
             setValue("reset_queue_too_large_percent", 75);
@@ -6960,6 +7013,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     QSignalBlocker blocker(field.widget);
                     qobject_cast<QSpinBox*>(field.widget)->setValue(value);
                 }
+            // A preset switches Target delay off; its note follows.
+            if (auto* note = findChild<QLabel*>(QStringLiteral("config.queue.target_latency_note")))
+                note->setText(queueLatencyNoteText(0));
             markDirty();
             updateQueuePolicyPresentation();
         });

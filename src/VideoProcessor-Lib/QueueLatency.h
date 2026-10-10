@@ -1,0 +1,88 @@
+#pragma once
+
+#include <cmath>
+#include <cstddef>
+
+// Stage 5: a queue target expressed as time. target_latency_ms is turned into
+// the existing frame count (target_frames) for the current source rate and
+// handed to the unchanged frame-count pacing; nothing here is a presentation
+// policy. Profiles without the key behave exactly as before.
+namespace QueueLatency
+{
+	// Same ceiling as target_frames in the configuration grammar.
+	constexpr size_t MaxTargetFrames = 16;
+	constexpr int MaxTargetLatencyMs = 1000;
+
+	// ceil(ms x rate), at least one frame and at most MaxTargetFrames. A rate
+	// that lands a hair above a whole frame (23.976 x 125.1 ms) is not pushed
+	// up a frame by floating-point noise.
+	inline size_t FramesForLatency(int latencyMs, double rateHz)
+	{
+		if (latencyMs <= 0 || !(rateHz > 0.0))
+			return 1;
+		const double exact = static_cast<double>(latencyMs) * rateHz / 1000.0;
+		double frames = std::ceil(exact - 1e-6);
+		if (frames < 1.0) frames = 1.0;
+		if (frames > static_cast<double>(MaxTargetFrames))
+			frames = static_cast<double>(MaxTargetFrames);
+		return static_cast<size_t>(frames);
+	}
+
+	// The delay that frame count really gives (whole source frames).
+	inline double EffectiveLatencyMs(size_t frames, double rateHz)
+	{
+		return rateHz > 0.0 ? static_cast<double>(frames) * 1000.0 / rateHz : 0.0;
+	}
+
+	struct TargetDecision
+	{
+		size_t frames = 0;
+		bool fromLatency = false;   // derived from target_latency_ms
+		int latencyMs = 0;          // the configured time target when derived
+		double rateHz = 0.0;        // the source rate it was derived for
+		double effectiveMs = 0.0;   // frames as time (0 when the rate is unknown)
+	};
+
+	// Precedence, most specific first:
+	//   1. the profile's own target_latency_ms (> 0);
+	//   2. the profile's own target_frames - also when the profile says
+	//      target_latency_ms: 0, which switches an inherited time target off;
+	//   3. the default queue's target_latency_ms (> 0), inherited;
+	//   4. the default queue's target_frames.
+	// So Low_Latency's own "target_frames: 1" beats a time target it would
+	// otherwise inherit from the default queue. (Queue variants copy the
+	// default's settings; the profile model drops an inherited
+	// target_latency_ms from a variant with its own target_frames, so the
+	// "own" values here are already resolved.) Until the source rate is known
+	// a time target falls back to the frame count it would otherwise use.
+	inline TargetDecision ResolveTargetFrames(
+		bool ownHasLatency, int ownLatencyMs,
+		bool ownHasFrames, size_t ownFrames,
+		int baseLatencyMs, size_t baseFrames, double rateHz)
+	{
+		TargetDecision decision;
+		decision.rateHz = rateHz;
+		int latency = 0;
+		size_t frames = baseFrames;
+		if (ownHasLatency && ownLatencyMs > 0)
+			latency = ownLatencyMs;
+		else if (ownHasFrames)
+			frames = ownFrames;
+		else if (!ownHasLatency && baseLatencyMs > 0)
+			latency = baseLatencyMs;
+		if (latency > 0 && rateHz > 0.0)
+		{
+			decision.frames = FramesForLatency(latency, rateHz);
+			decision.fromLatency = true;
+			decision.latencyMs = latency;
+		}
+		else
+		{
+			// An unknown rate keeps the frame count this profile would use
+			// without the time target.
+			decision.frames = latency > 0 && ownHasFrames ? ownFrames : frames;
+		}
+		decision.effectiveMs = EffectiveLatencyMs(decision.frames, rateHz);
+		return decision;
+	}
+}

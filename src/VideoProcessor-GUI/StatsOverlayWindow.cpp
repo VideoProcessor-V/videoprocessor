@@ -853,6 +853,15 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 			m_stats.isQueueFull ? TEXT(" [FULL]") : TEXT(""));
 	DrawText(hdc, line, PADDING, y);
 	y += lineHeight;
+	if (m_stats.queueTargetFromTime)
+	{
+		// The delay to set the audio offset to, in whole source frames.
+		line.Format(TEXT("Queue delay:      %zu fr = %.0f ms (target %d ms)"),
+			m_stats.queueTargetFrames, m_stats.queueTargetEffectiveMs,
+			m_stats.queueTargetLatencyMs);
+		DrawText(hdc, line, PADDING, y);
+		y += lineHeight;
+	}
 
 	// Render cost. GPU frame is the rolling average of the tightly bounded
 	// source-upload, changed-overlay-upload, and core-render stages from one
@@ -996,6 +1005,8 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 			++lineCount;
 	}
 	if (!stats.displayLut.IsEmpty())
+		++lineCount;
+	if (stats.queueTargetFromTime)
 		++lineCount;
 
 	// The selected rule and shader summary are always visible, followed by one row per active
