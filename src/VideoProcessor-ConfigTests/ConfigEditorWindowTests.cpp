@@ -634,6 +634,10 @@ void testLedDrivePageAndLiveSwitches()
         "Fade-to-black level does not default to its minimum, 60");
     floor->setValue(80);
     require(floorBlack->maximum() == 80, "The fade-to-black level may exceed the lowest LED level");
+    auto* floorReactive = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor_reactive"));
+    require(floorReactive->value() == 100 && floorReactive->minimum() == 60,
+        "The reactive floor does not default to the script's 100");
+    floorReactive->setValue(110);
     auto* profile = requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.profile_file"));
     require(profile->text().isEmpty(), "A profile file appeared from nowhere");
     profile->setText(QStringLiteral("my-led.cfg"));
@@ -664,7 +668,8 @@ void testLedDrivePageAndLiveSwitches()
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
-        "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20" })
+        "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
+        "led_floor_reactive: 110" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);

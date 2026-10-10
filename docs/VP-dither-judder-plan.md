@@ -731,6 +731,18 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   three at once. Low_Latency now sets `active_picture_lookahead_frames: 0`
   explicitly (it inherited Normal's 8); the LED drive follows the queue it
   is given and is reactive there.
+- Reactive vs look-ahead (owner 2026-10-10): the LED drive follows the
+  queue it is given. `led_floor_reactive` (default 100, the script's floor;
+  on the LED drive page) applies whenever the look-ahead does not reach the
+  frame the LED will land on; `led_floor` applies when it does. A cut the
+  look-ahead has seen is one jump timed to land on the cut frame
+  (`cut_jump`, both directions); an unseen dark-to-bright cut goes straight
+  up in one command like the script's contrast dump (`bright_cut_dump`) -
+  this supersedes delta-1 answer 3's "unseen cuts are rate-limited" for the
+  brightening case. Both default on, in the LED profile. The experimental
+  custom-dim fade to black engages only with look-ahead and leaves with a
+  single `LDMM 0` as soon as light is seen in the queue (assumes LDMM 0
+  returns to LPW1 at once - to be checked on the projector).
 - Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the
   test configuration (syntax per CONFIGURATION.html; tested: 59.94 fps
   selects Low_Latency, 23.976 fps returns to Normal); Shift+L still

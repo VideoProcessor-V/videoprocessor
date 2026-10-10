@@ -91,7 +91,12 @@ namespace LedDrive
 		Mode mode = Mode::LogOnly;
 		// mode: script only; mode: compensate runs per output frame.
 		int tickMs = 400;
+		// Lowest LED level when the look-ahead covers the LED's response time
+		// (led_floor), and when it does not (led_floor_reactive: reactive
+		// mode cannot see a bright scene coming, so it stays higher; the
+		// higher of the two applies).
 		int ledFloor = 100;
+		int ledFloorReactive = 100;
 		int ledFloorBlack = 60;
 		int ledCeiling = 255;
 		std::vector<CurvePoint> curve = {
@@ -119,6 +124,12 @@ namespace LedDrive
 		double rateDown = 120.0;
 		int deadband = 3;
 		bool earlyRamp = true;
+		// A cut the look-ahead has seen: one jump to the new scene's level,
+		// timed to land on the cut frame (both directions; the cut hides it).
+		bool cutJump = true;
+		// A dark-to-bright cut it has not seen: straight up in one command,
+		// like the old script's contrast dump, instead of ramping.
+		bool brightCutDump = true;
 		double compensationEotf = 2.2;
 		// "Encode as if for this display gamma" on the projector's
 		// compensation_eotf: the old output_gamma 2.4 on film 2.2 lift, applied
@@ -329,6 +340,9 @@ namespace LedDrive
 			Number("rate_down", 1.0, 10000.0),
 			Integer("deadband", 0, 50),
 			Boolean("early_ramp"),
+			Boolean("cut_jump"),
+			Boolean("bright_cut_dump"),
+			Integer("led_floor_reactive", 0, 255),
 			Integer("led_floor", 0, 255),
 			Integer("led_floor_black", 0, 255),
 			Integer("led_ceiling", 1, 255),
@@ -563,6 +577,9 @@ namespace LedDrive
 		readNumber("rate_down", result.rateDown);
 		readInt("deadband", 0, 50, result.deadband);
 		config.TryGetBool(section, "early_ramp", result.earlyRamp);
+		config.TryGetBool(section, "cut_jump", result.cutJump);
+		config.TryGetBool(section, "bright_cut_dump", result.brightCutDump);
+		readInt("led_floor_reactive", 0, 255, result.ledFloorReactive);
 		readInt("led_floor", 0, 255, result.ledFloor);
 		readInt("led_floor_black", 0, 255, result.ledFloorBlack);
 		readInt("led_ceiling", 1, 255, result.ledCeiling);

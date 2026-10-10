@@ -8827,7 +8827,13 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* floor = levelControl(QStringLiteral("led_floor"), 100);
     driveForm->addRow(QStringLiteral("Lowest LED level"), floor);
     driveForm->addRow(QString(), helpLabel(QStringLiteral(
-        "How far the LED may dim in dark scenes, 60 (darkest) to 255 (never dims). Your script used 100.")));
+        "How far the LED may dim in dark scenes, 60 (darkest) to 255 (never dims), when VP can see the "
+        "coming frames (Normal queue).")));
+    auto* floorReactive = levelControl(QStringLiteral("led_floor_reactive"), 100);
+    driveForm->addRow(QStringLiteral("Lowest LED level without look-ahead"), floorReactive);
+    driveForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Used when VP cannot see ahead (Low Latency queue): it cannot prepare for a bright scene, so it "
+        "should not sit as low. Your script used 100.")));
     auto* floorBlack = levelControl(QStringLiteral("led_floor_black"), 60);
     driveForm->addRow(QStringLiteral("Lowest level in fades to black"), floorBlack);
     // A fade can dim further than a scene, never less far.

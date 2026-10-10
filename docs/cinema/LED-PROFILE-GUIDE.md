@@ -13,7 +13,8 @@ the one before:
    `[led_drive.Default]` section holding only the lines you want to change.
 3. **The main configuration's `[led_drive.Default]`** - the core settings
    the Config app's LED drive page edits: `enabled`, `mode`, `led_floor`,
-   `led_floor_black`, `highlight_tolerance_stops`, `gamma_boost`, and
+   `led_floor_reactive`, `led_floor_black`, `highlight_tolerance_stops`,
+   `gamma_boost`, the experimental fade-to-black settings, and
    `profile_file` (which file to use). These always win.
 
 So a profile changes the *behaviour* (curve, ramps, thresholds); the page
@@ -56,6 +57,8 @@ full light.
 | `rate_up`, `rate_down` | compensate | LED speed in levels per second | lower `rate_down` for gentler dimming; raise `rate_up` for faster recovery after a dark-to-bright cut |
 | `deadband` | compensate | ignore tiny target changes while still | raise if the LED "breathes" on a static scene |
 | `early_ramp` | compensate | start before a cut seen in the queue | leave on |
+| `cut_jump` | compensate | a seen cut: one jump timed to land on the cut frame | leave on; off ramps instead |
+| `bright_cut_dump` | compensate | an unseen dark-to-bright cut: straight up, like the script's dump | leave on; off ramps at `rate_up` |
 | `knee`, `highlight_*` | compensate | how highlights hold the LED up | raise `highlight_release_ms` if the LED drops too soon after headlights pass |
 | `apl_persist_ms` | compensate | flash rejection window | raise if lightning or muzzle flashes still move the LED |
 | `cut_threshold`, `fade_frames`, `fade_min_step` | both | scene-change detection | raise `cut_threshold` if ordinary motion is taken for cuts |

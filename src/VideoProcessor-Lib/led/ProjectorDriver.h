@@ -65,6 +65,8 @@ namespace LedDrive
 		// Asynchronous and coalesced: if a newer target arrives before the
 		// previous command completes, only the newest is sent.
 		virtual void SetLight(int level) = 0;
+		// The same, sent whole (a cut jump): not split by max_levels_per_command.
+		virtual void SetLightJump(int level) { SetLight(level); }
 		// Synchronous, bounded by timeoutMs (used at startup and exit).
 		// timeoutMs > 0 bounds the whole call (exit); 0 waits as long as the
 		// command gap and pause require (startup).
@@ -81,6 +83,12 @@ namespace LedDrive
 			(void)commands;
 			(void)stepMs;
 			return false;
+		}
+		// The same, without waiting for the step interval since the last
+		// sequence command (leaving the custom dim as light returns).
+		virtual bool QueueSequenceNow(const std::vector<std::pair<std::string, int>>& commands, int stepMs)
+		{
+			return QueueSequence(commands, stepMs);
 		}
 		// One command now (startup, exit); timeoutMs > 0 bounds the call.
 		virtual bool SendNow(const std::string& mnemonic, int value, int timeoutMs)

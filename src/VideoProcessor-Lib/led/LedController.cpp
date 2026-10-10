@@ -209,8 +209,11 @@ namespace LedDrive
 		ramping = false;
 	}
 
-	ControllerOutput CompensateController::Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead)
+	ControllerOutput CompensateController::Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead,
+		bool predicted, bool covered)
 	{
+		// Without look-ahead covering the LED's response the floor is higher.
+		const int floor = covered ? config.ledFloor : std::max(config.ledFloor, config.ledFloorReactive);
 		ControllerOutput out;
 		const int ceiling = config.ledCeiling;
 		const double eotf = config.compensationEotf;
@@ -259,7 +262,7 @@ namespace LedDrive
 		const bool cutToBlack = stats.cut && apl < 20;
 		const bool toBlack = stats.fade || cutToBlack;
 		const int base = toBlack ? config.ledFloorBlack :
-			std::max(CurveLevel(config, apl), config.ledFloor);
+			std::max(CurveLevel(config, apl), floor);
 		out.lightTarget = std::max(config.ledFloorBlack, std::min(ceiling,
 			std::max(base, static_cast<int>(highlightFloor))));
 
@@ -273,7 +276,7 @@ namespace LedDrive
 		{
 			const int aheadApl = std::max(0, static_cast<int>(ahead->stats.apl));
 			const int aheadTarget = std::max(config.ledFloorBlack, std::min(ceiling, aheadApl < 20 ?
-				config.ledFloorBlack : std::max(CurveLevel(config, aheadApl), config.ledFloor)));
+				config.ledFloorBlack : std::max(CurveLevel(config, aheadApl), floor)));
 			if (aheadTarget > target)
 			{
 				target = aheadTarget;
@@ -294,7 +297,18 @@ namespace LedDrive
 
 		const double maxUp = config.rateUp * elapsed / 1000.0;
 		const double maxDown = config.rateDown * elapsed / 1000.0;
-		if (stats.fade && level > target)
+		// A seen cut lands now: jump to the new scene (the cut hides it). An
+		// unseen dark-to-bright cut: straight up, like the script's dump, so
+		// highlights are squashed only for the LED's response time.
+		const bool seenCut = predicted && stats.cut && config.cutJump;
+		const bool brightDump = !predicted && stats.cut && config.brightCutDump && out.lightTarget > level;
+		if (seenCut || brightDump)
+		{
+			level = seenCut ? out.lightTarget : std::max(static_cast<double>(target), static_cast<double>(out.lightTarget));
+			ramping = false;
+			out.jump = true;
+		}
+		else if (stats.fade && level > target)
 		{
 			// Follow the fade at its own rate (its APL ratio above black), never
 			// faster than rate_down.
@@ -331,7 +345,8 @@ namespace LedDrive
 			<< " light " << light << "/" << out.lightTarget << (early ? " early:" + std::to_string(target) : "")
 			<< (out.lightCommand >= 0 ? " sent" : "")
 			<< " protection=" << protection << " area=" << area << " gain=" << out.gain
-			<< (stats.cut ? " cut" : "") << (stats.fade ? " fade" : "");
+			<< (stats.cut ? " cut" : "") << (stats.fade ? " fade" : "")
+			<< (seenCut ? " cut-jump" : brightDump ? " bright-dump" : "") << (covered ? "" : " reactive");
 		out.log = log.str();
 		return out;
 	}

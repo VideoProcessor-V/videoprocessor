@@ -53,14 +53,11 @@ namespace LedDrive
 			return commands;
 		}
 
-		// Out again: the picture is coming back, so speed beats colour - all
-		// three colours straight back, then standard dim mode.
-		Commands CustomDimUp(const LedDriveConfig& led)
+		// Out again as the picture returns: one command, standard dim mode,
+		// back on LPW1 (the colour values are set again on the next entry).
+		Commands CustomDimUp(const LedDriveConfig&)
 		{
-			Commands commands;
-			for (const char* channel : CUSTOM_CHANNELS) commands.push_back({ channel, led.ftbCustomStart });
-			commands.push_back({ "LDMM", 0 });
-			return commands;
+			return { { "LDMM", 0 } };
 		}
 	}
 
@@ -368,7 +365,10 @@ namespace LedDrive
 		target.fade = pendingFade;
 		const auto first = predictions.upper_bound(sequence);
 		const auto forCommand = predictions.upper_bound(sequence + static_cast<uint64_t>(latency));
-		if (sequence != 0 && first != forCommand)
+		const bool predicted = sequence != 0 && first != forCommand;
+		// The look-ahead reaches the frame the LED will land on.
+		const bool covered = predicted && std::prev(forCommand)->first >= sequence + static_cast<uint64_t>(latency);
+		if (predicted)
 		{
 			target = Corrected(std::prev(forCommand)->second);
 			for (auto it = first; it != forCommand; ++it) target.cut = target.cut || it->second.cut;
@@ -386,12 +386,17 @@ namespace LedDrive
 			for (auto it = first; it != horizon; ++it) ahead.cutAhead = ahead.cutAhead || it->second.cut;
 			haveAhead = true;
 		}
-		const ControllerOutput out = compensator.Tick(target, elapsedMs, haveAhead ? &ahead : nullptr);
+		const ControllerOutput out = compensator.Tick(target, elapsedMs, haveAhead ? &ahead : nullptr,
+			predicted, covered);
+		lookaheadCovers = covered;
 		// Queued to the driver's thread, which keeps only the newest and
 		// sends it when the command gap allows; the model follows what it
 		// actually sends (above).
-		if (out.lightCommand >= 0 && applyGain && fadeToBlack == FadeToBlack::Normal)
-			driver->SetLight(out.lightCommand);
+		if (out.lightCommand >= 0 && applyGain && fadeToBlack != FadeToBlack::Deep)
+		{
+			if (out.jump) driver->SetLightJump(out.lightCommand);
+			else driver->SetLight(out.lightCommand);
+		}
 		policy = out;
 		gain.knee = out.knee;
 		++ticks;
@@ -420,7 +425,8 @@ namespace LedDrive
 		switch (fadeToBlack)
 		{
 		case FadeToBlack::Normal:
-			if (led.ftbCustomDim != FtbCustomDim::Off && black && !lightAhead &&
+			// Only with look-ahead: leaving must be seen coming.
+			if (led.ftbCustomDim != FtbCustomDim::Off && black && !lightAhead && lookaheadCovers &&
 				timeMs - blackSinceMs >= led.ftbBlackMs && modelledLevel <= led.ledFloorBlack &&
 				!status.busy && !status.sequenceBusy &&
 				driver->QueueSequence(CustomDimDown(led), led.ftbStepMs))
@@ -434,9 +440,11 @@ namespace LedDrive
 			break;
 		case FadeToBlack::Deep:
 			if ((!black || lightAhead || led.ftbCustomDim == FtbCustomDim::Off) &&
-				driver->QueueSequence(CustomDimUp(led), led.ftbStepMs))
+				driver->QueueSequenceNow(CustomDimUp(led), led.ftbStepMs))
 			{
 				fadeToBlack = FadeToBlack::Leaving;
+				// Then the LED straight to the coming scene's level.
+				driver->SetLightJump(compensator.Light());
 				pendingLog = "LED drive: fade to black - picture returning, custom dim off";
 				pendingLogSent = true;
 			}

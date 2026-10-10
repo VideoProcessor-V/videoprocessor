@@ -41,6 +41,7 @@ namespace
 		config.enabled = true;
 		config.mode = Mode::Compensate;
 		config.ledFloor = 60;
+		config.ledFloorReactive = 60;
 		ParseCurve("0:60, 20:60, 40:200, 70:230, 100:255, 255:255", config.curve);
 		return config;
 	}

@@ -174,5 +174,7 @@ namespace LedDrive
 		enum class FadeToBlack { Normal, Deep, Leaving };
 		FadeToBlack fadeToBlack = FadeToBlack::Normal;
 		double blackSinceMs = -1.0;
+		// The look-ahead reached the frame the last command lands on.
+		bool lookaheadCovers = false;
 	};
 }

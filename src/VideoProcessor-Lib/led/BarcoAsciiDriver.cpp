@@ -324,7 +324,28 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(stateMutex);
 		if (!opened) return;
 		pendingLight = Clamp(level);
+		pendingJump = false;
 		wake.notify_one();
+	}
+
+	void BarcoAsciiDriver::SetLightJump(int level)
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (!opened) return;
+		pendingLight = Clamp(level);
+		pendingJump = true;
+		wake.notify_one();
+	}
+
+	bool BarcoAsciiDriver::QueueSequenceNow(const std::vector<std::pair<std::string, int>>& commands, int stepMs)
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (!opened || shuttingDown) return false;
+		sequence.assign(commands.begin(), commands.end());
+		sequenceStepMs = std::max(1, stepMs);
+		sequenceNextAllowed = std::chrono::steady_clock::now();
+		wake.notify_one();
+		return true;
 	}
 
 	bool BarcoAsciiDriver::QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs)
@@ -471,10 +492,12 @@ namespace LedDrive
 				if (shuttingDown || pendingLight < 0) continue;
 				target = pendingLight;
 				pendingLight = -1;
-				// Dim at most max_levels_per_command per command; the rest of
-				// the drop stays pending for the next command unless a newer
-				// target replaces it.
-				if (config.maxLevelsPerCommand > 0 && lastSentLight >= 0 &&
+				const bool jump = pendingJump;
+				pendingJump = false;
+				// Dim at most max_levels_per_command per command (a cut jump is
+				// sent whole); the rest of the drop stays pending for the next
+				// command unless a newer target replaces it.
+				if (!jump && config.maxLevelsPerCommand > 0 && lastSentLight >= 0 &&
 					target < lastSentLight - config.maxLevelsPerCommand)
 				{
 					pendingLight = target;

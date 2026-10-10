@@ -50,6 +50,7 @@ namespace
 		config.enabled = true;
 		config.mode = Mode::Compensate;
 		config.ledFloor = 60;
+		config.ledFloorReactive = 60;
 		ParseCurve("0:60, 20:60, 40:200, 70:230, 100:255, 255:255", config.curve);
 		return config;
 	}
@@ -227,7 +228,7 @@ namespace VideoProcessorTest
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
-			ProjectorConfig port = Port(50);
+			ProjectorConfig port = Port(50); // 3 frames at 60 Hz
 			port.maxLevelsPerCommand = 0;
 			LedDriveConfig config = Compensate();
 			config.ftbCustomDim = FtbCustomDim::Turns;
@@ -245,19 +246,27 @@ namespace VideoProcessorTest
 				Assert::IsTrue(std::find(startup.begin(), startup.end(), std::string(":LDMM0\r")) != startup.end(),
 					L"Startup puts the dim mode back to standard when the experiment is configured");
 
-				// A black picture: the LED goes to the fade-to-black floor, then
-				// (after ftb_black_ms) into the custom dim.
+				// A black stretch, seen in the queue (3 frames ahead).
+				module.SetLookaheadDepth(3);
+				StatsBuilder builder(module.Config());
+				auto predict = [&](uint64_t from, uint64_t to, double code)
+				{
+					for (uint64_t sequence = from; sequence < to; ++sequence)
+						module.SubmitPrediction(sequence, builder.Build(Frame(code), sequence * FRAME_MS));
+				};
+				predict(1, 400, 16.0);
 				module.SubmitMeasurement(Frame(16.0));
-				uint64_t frame = 0;
+				uint64_t sequence = 0;
 				auto render = [&](int frames)
 				{
-					for (int i = 0; i < frames; ++i, ++frame)
+					for (int i = 0; i < frames; ++i)
 					{
-						module.BeginFrameAt(0, frame * FRAME_MS);
+						++sequence;
+						module.BeginFrameAt(sequence, sequence * FRAME_MS);
 						WaitFor([&] { return !module.ProjectorStatus().busy; });
 					}
 				};
-				for (int i = 0; i < 400 && !module.CustomDimEngaged(); ++i) render(1);
+				for (int i = 0; i < 300 && !module.CustomDimEngaged(); ++i) render(1);
 				Assert::IsTrue(module.CustomDimEngaged(), L"The custom dim engaged on a black picture");
 				Assert::IsTrue(module.ModelledLight() <= config.ledFloorBlack, L"Only after the LED reached its floor");
 				Assert::IsTrue(WaitFor([&] { return !module.ProjectorStatus().sequenceBusy; }, 5000));
@@ -280,31 +289,152 @@ namespace VideoProcessorTest
 				for (size_t i = 1; i < times.size(); ++i)
 					Assert::IsTrue(std::chrono::duration<double, std::milli>(times[i] - times[i - 1]).count() >= 95.0,
 						L"One custom-dim command every ftb_step_ms (100 ms)");
-				const size_t lightsWhileDeep = std::count_if(writes.begin(), writes.end(),
-					[](const std::string& w) { return w.rfind(":LPW1", 0) == 0; });
+				const size_t before = projector->Writes().size();
 
-				// Light returns: back up, standard mode, LED commands resume.
-				module.SubmitMeasurement(Frame(120.0));
-				for (int i = 0; i < 300 && module.CustomDimEngaged(); ++i)
+				// A bright scene comes into the queue: leave as soon as it is seen
+				// - one LDMM 0 at once, then the LED straight to the new level.
+				predict(sequence + 10, sequence + 400, 120.0);
+				for (int i = 0; i < 40 && module.CustomDimEngaged(); ++i)
 				{
 					render(1);
 					std::this_thread::sleep_for(std::chrono::milliseconds(5));
 				}
-				Assert::IsFalse(module.CustomDimEngaged(), L"The custom dim ends when the picture returns");
+				Assert::IsFalse(module.CustomDimEngaged(), L"The custom dim ends before the bright scene");
 				const auto after = projector->Writes();
-				std::vector<std::string> modes;
-				for (const auto& w : after) if (w.rfind(":LDMM", 0) == 0) modes.push_back(w);
-				Assert::AreEqual(std::string(":LDMM0\r"), modes.back(), L"Standard dim mode at the end");
-				render(30);
-				const auto resumed = projector->Writes();
-				const size_t lightsAfter = std::count_if(resumed.begin(), resumed.end(),
-					[](const std::string& w) { return w.rfind(":LPW1", 0) == 0; });
-				Assert::IsTrue(lightsAfter > lightsWhileDeep, L"LED commands resume after the custom dim");
+				std::vector<std::string> added(after.begin() + before, after.end());
+				Assert::IsTrue(added.size() >= 2);
+				Assert::AreEqual(std::string(":LDMM0\r"), added[0], L"Leaving is one command, sent first");
+				Assert::AreEqual(std::string(":LPW1255\r"), added[1], L"then the LED jumps to the bright scene, whole");
+				for (const auto& w : added) Assert::IsTrue(w.rfind(":LDC", 0) != 0, L"No colour commands on the way out");
 			}
 			// Exit: standard dim mode, then full light.
 			const auto final = projector->Writes();
 			Assert::AreEqual(std::string(":LPW1255\r"), final.back());
 			Assert::AreEqual(std::string(":LDMM0\r"), final[final.size() - 2]);
+		}
+
+		TEST_METHOD(ExperimentalFadeToBlackNeedsTheLookahead)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			config.ftbCustomDim = FtbCustomDim::Together;
+			config.ftbBlackMs = 100;
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(16.0));
+			for (uint64_t frame = 1; frame <= 200; ++frame)
+			{
+				module.BeginFrameAt(0, frame * FRAME_MS); // no look-ahead (Low_Latency)
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+			}
+			Assert::IsTrue(module.ModelledLight() <= config.ledFloorBlack);
+			Assert::IsFalse(module.CustomDimEngaged(), L"Without look-ahead the custom dim never engages");
+			for (const auto& w : projector->Writes())
+				Assert::IsTrue(w.rfind(":LDC", 0) != 0 && w != ":LDMM1\r");
+		}
+
+		TEST_METHOD(ReactiveModeUsesItsOwnFloor)
+		{
+			LedDriveConfig config = Compensate();
+			config.ledFloor = 60;
+			config.ledFloorReactive = 100;
+			auto settle = [&config](bool covered)
+			{
+				CompensateController controller(config);
+				StatsBuilder builder(config);
+				for (int frame = 0; frame < 600; ++frame)
+					controller.Tick(builder.Build(Frame(18.0), frame * FRAME_MS), FRAME_MS, nullptr, covered, covered);
+				return controller.Light();
+			};
+			Assert::AreEqual(60, settle(true), L"With look-ahead: led_floor");
+			Assert::AreEqual(100, settle(false), L"Without: led_floor_reactive");
+			Assert::AreEqual(100, LedDriveConfig().ledFloorReactive, L"Default: the script's 100");
+		}
+
+		TEST_METHOD(SeenCutsJumpAndUnseenBrightCutsDump)
+		{
+			const LedDriveConfig config = Compensate();
+			auto settled = [&config](double code, StatsBuilder& builder, double& now)
+			{
+				CompensateController controller(config);
+				for (int frame = 0; frame < 600; ++frame, now += FRAME_MS)
+					controller.Tick(builder.Build(Frame(code), now), FRAME_MS, nullptr, true, true);
+				return controller;
+			};
+			// Seen dark-to-bright cut: one jump to the new level, sent whole.
+			{
+				StatsBuilder builder(config);
+				double now = 0.0;
+				CompensateController controller = settled(18.0, builder, now);
+				Assert::AreEqual(60, controller.Light());
+				const FrameStats cut = builder.Build(Frame(120.0), now);
+				Assert::IsTrue(cut.cut);
+				const ControllerOutput out = controller.Tick(cut, FRAME_MS, nullptr, true, true);
+				Assert::AreEqual(255, out.light, L"A seen cut jumps");
+				Assert::IsTrue(out.jump);
+			}
+			// Seen bright-to-dark cut: jumps down too (the cut hides it).
+			{
+				StatsBuilder builder(config);
+				double now = 0.0;
+				CompensateController controller = settled(120.0, builder, now);
+				const FrameStats cut = builder.Build(Frame(30.0), now);
+				const ControllerOutput out = controller.Tick(cut, FRAME_MS, nullptr, true, true);
+				Assert::AreEqual(CurveLevel(config, 30), out.light);
+				Assert::IsTrue(out.jump);
+			}
+			// Unseen dark-to-bright cut: straight up (the script's dump)...
+			{
+				StatsBuilder builder(config);
+				double now = 0.0;
+				CompensateController controller = settled(18.0, builder, now);
+				const ControllerOutput out = controller.Tick(builder.Build(Frame(120.0), now), FRAME_MS);
+				Assert::AreEqual(255, out.light, L"An unseen bright cut dumps straight up");
+				Assert::IsTrue(out.jump);
+			}
+			// ...but an unseen bright-to-dark cut ramps, and the switches work.
+			{
+				StatsBuilder builder(config);
+				double now = 0.0;
+				CompensateController controller = settled(120.0, builder, now);
+				const ControllerOutput out = controller.Tick(builder.Build(Frame(30.0), now), FRAME_MS);
+				Assert::AreEqual(253, out.light, L"An unseen dimming cut ramps");
+				Assert::IsFalse(out.jump);
+			}
+			{
+				LedDriveConfig off = config;
+				off.cutJump = false;
+				off.brightCutDump = false;
+				StatsBuilder builder(off);
+				CompensateController controller(off);
+				for (int frame = 0; frame < 600; ++frame)
+					controller.Tick(builder.Build(Frame(18.0), frame * FRAME_MS), FRAME_MS, nullptr, true, true);
+				const ControllerOutput out = controller.Tick(builder.Build(Frame(120.0), 600 * FRAME_MS),
+					FRAME_MS, nullptr, true, true);
+				Assert::IsTrue(out.light < 255 && !out.jump, L"cut_jump: false ramps instead");
+			}
+		}
+
+		TEST_METHOD(CutJumpsAreNotSplitByTheDimmingCap)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = Port(80);
+			config.readBack = false;
+			config.minCommandGapMs = 20;
+			config.maxLevelsPerCommand = 12;
+			auto driver = CreateProjectorDriver("barco_ascii", config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			std::string error;
+			Assert::IsTrue(driver->Open(error));
+			Assert::IsTrue(driver->SetLightNow(255, 0));
+			driver->SetLightJump(60);
+			Assert::IsTrue(WaitFor([&] { return driver->Status().lastSentLight == 60; }));
+			Assert::AreEqual<size_t>(2, projector->Writes().size(), L"255, then 60 in one command");
 		}
 
 		TEST_METHOD(ExperimentalFadeToBlackSettingsAreValidated)
@@ -360,6 +490,7 @@ namespace VideoProcessorTest
 		{
 			LedDriveConfig config = Compensate();
 			config.deadband = 10;
+			config.brightCutDump = false; // the ramps themselves
 			CompensateController controller(config);
 			StatsBuilder builder(config);
 			double now = 0.0;

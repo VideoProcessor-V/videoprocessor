@@ -75,6 +75,9 @@ namespace LedDrive
 		double highlightCap = 1e9;
 		double capWeight = 0.0;
 		bool holdGain = false;
+		// This command is a cut jump or a bright-cut dump: send it whole
+		// (not split by max_levels_per_command).
+		bool jump = false;
 		std::string log;
 	};
 
@@ -152,8 +155,12 @@ namespace LedDrive
 		void Reconfigure(const LedDriveConfig& config, const FluxModel& flux);
 		// stats: the frame the command is for (shown when the LED gets there).
 		// elapsedMs: time since the previous frame. ahead: the furthest queued
-		// frame, when there is one (used only with early_ramp).
-		ControllerOutput Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead = nullptr);
+		// frame, when there is one (used only with early_ramp). predicted:
+		// stats come from the look-ahead (the frame the LED will land on);
+		// covered: the look-ahead reaches that far (led_floor applies, else
+		// led_floor_reactive too).
+		ControllerOutput Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead = nullptr,
+			bool predicted = false, bool covered = false);
 		int Light() const { return light; }
 		double Level() const { return level; }
 		double Protection() const { return protection; }

@@ -27,9 +27,11 @@ namespace LedDrive
 		LightRange QueryLightRange() override;
 		ProjectorState ReadState() override;
 		void SetLight(int level) override;
+		void SetLightJump(int level) override;
 		bool SetLightNow(int level, int timeoutMs) override;
 		void BeginShutdown() override;
 		bool QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
+		bool QueueSequenceNow(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
 		bool SendNow(const std::string& mnemonic, int value, int timeoutMs) override;
 		bool SetContrast(int value) override;
 		void Close() override;
@@ -74,6 +76,7 @@ namespace LedDrive
 		bool stopping = false;
 		bool opened = false;
 		int pendingLight = -1;
+		bool pendingJump = false;
 		int commands = 0;
 		int timeouts = 0;
 		int lastLight = -1;
