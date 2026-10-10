@@ -1,6 +1,8 @@
 #include "pch.h"
+#include <vprenderer/SubtitleBarRecovery.h>
 
 #include <ActivePictureEvidence.h>
+#include <vprenderer/SubtitleAspectRetention.h>
 #include <ActivePictureDecisionTimeline.h>
 #include <vprenderer/AlphaSourceCropPolicy.h>
 #include <vprenderer/BufferedPictureExpansion.h>
@@ -232,6 +234,321 @@ namespace VideoProcessorTest
 	TEST_CLASS(ActivePictureEvidenceTests)
 	{
 	public:
+        TEST_METHOD(SharedSubtitleRecoveryReprovesBarsWithoutActiveCaptionHold)
+        {
+            P010Frame frame(640,360); frame.BlackOutside(0,46,640,314);
+            // The opaque caption straddles the lower boundary; bright strokes
+            // produce asymmetric generic evidence, but both flanks stay black.
+            frame.FillRectangle(180,302,460,314,64);
+            for(int x=194;x<448;x+=12)frame.FillRectangle(x,308,x+5,322,800);
+            auto source=frame.P010Source();
+            ActivePictureBounds trusted{0,45,640,315,640,360,0.0,ActivePictureBounds::BarAxes::TOP_BOTTOM};
+            for(int repeat=0;repeat<8;++repeat) {
+                const auto b=RecoverSubtitleInspectionBars(source,trusted,1,
+                    ActivePictureClassification::PROVISIONAL,true,false);
+                Assert::AreEqual(640,b.rasterWidth);
+                Assert::AreEqual(45,b.top); Assert::AreEqual(315,b.bottom);
+            }
+        }
+        TEST_METHOD(SharedSubtitleRecoveryRejectsExpansionStaleAndDisabledContexts)
+        {
+            P010Frame frame(640,360);frame.BlackOutside(0,46,640,314);
+            auto source=frame.P010Source();
+            ActivePictureBounds trusted{0,46,640,314,640,360,0.0,ActivePictureBounds::BarAxes::TOP_BOTTOM};
+            auto check=[&](uint64_t generation,ActivePictureClassification c,bool enabled,bool blocked) {
+                return RecoverSubtitleInspectionBars(source,trusted,generation,c,enabled,blocked).rasterWidth;
+            };
+            Assert::AreEqual(0,check(2,ActivePictureClassification::PROVISIONAL,true,false));
+            Assert::AreEqual(0,check(1,ActivePictureClassification::FULL_RASTER_TRUSTED,true,false));
+            Assert::AreEqual(0,check(1,ActivePictureClassification::UNAVAILABLE,true,false));
+            Assert::AreEqual(0,check(1,ActivePictureClassification::PROVISIONAL,false,false));
+            Assert::AreEqual(0,check(1,ActivePictureClassification::PROVISIONAL,true,true));
+            frame.FillRectangle(0,314,640,315,300); // even one picture row must not be clipped
+            Assert::AreEqual(0,check(1,ActivePictureClassification::PROVISIONAL,true,false));
+            frame.FillRectangle(0,314,640,330,300); // genuine broad picture expansion
+            Assert::AreEqual(0,check(1,ActivePictureClassification::PROVISIONAL,true,false));
+            frame.Fill(64,512,512); // all black cannot establish physical edges
+            Assert::AreEqual(0,check(1,ActivePictureClassification::PROVISIONAL,true,false));
+        }
+
+        TEST_METHOD(SharedSubtitleRecoveryRevalidatesDarkEdgesWithoutCreatingCaption)
+        {
+            P010Frame frame(640,360); frame.Fill(64,512,512);
+            // Both outside flanks are black scenery. Only distributed interior
+            // sections expose the encoded edge; first-run acquisition must fail.
+            for(int x : {144,432}) {
+                frame.FillRectangle(x,46,x+64,53,180);
+                frame.FillRectangle(x,307,x+64,314,180);
+            }
+            const auto source=frame.P010Source();
+            const auto raw=ExtractSubtitleBarEvidence(source);
+            Assert::IsFalse(raw.top>0 && raw.bottom<360);
+            ActivePictureBounds trusted{0,46,640,314,640,360,0.0,ActivePictureBounds::BarAxes::TOP_BOTTOM};
+            const auto recovered=RecoverSubtitleInspectionBars(source,trusted,1,
+                ActivePictureClassification::PROVISIONAL,true,false);
+            Assert::AreEqual(46,recovered.top); Assert::AreEqual(314,recovered.bottom);
+            SubtitleBoxDetector detector;
+            for(uint64_t sequence=1;sequence<=4;++sequence)
+                Assert::IsFalse(detector.Analyze(source,recovered.top,recovered.bottom,sequence,1).detected,
+                    L"Fresh bar inspection is not subtitle ownership");
+        }
+        TEST_METHOD(SharedSubtitleReferenceRecoveryRequiresBothEdgesAndRejectsUnsafeBands)
+        {
+            ActivePictureBounds trusted{0,46,640,314,640,360,0.0,ActivePictureBounds::BarAxes::TOP_BOTTOM};
+            auto check=[&](P010Frame& frame,uint64_t generation=1) {
+                return RecoverSubtitleInspectionBars(frame.P010Source(),trusted,generation,
+                    ActivePictureClassification::PROVISIONAL,true,false).rasterWidth;
+            };
+            P010Frame frame(640,360); frame.Fill(64,512,512);
+            Assert::AreEqual(0,check(frame)); // all black cannot prove either edge
+            for(int x : {144,432})frame.FillRectangle(x,46,x+64,53,180);
+            Assert::AreEqual(0,check(frame)); // one edge cannot reopen inspection
+            for(int x : {144,432})frame.FillRectangle(x,307,x+64,314,180);
+            Assert::AreEqual(640,check(frame));
+            Assert::AreEqual(0,check(frame,2));
+            frame.FillRectangle(0,314,640,315,300);
+            Assert::AreEqual(0,check(frame)); // last native bar row, off sample grid
+            frame.FillRectangle(0,314,640,330,300);
+            Assert::AreEqual(0,check(frame)); // genuine broad picture expansion
+            P010Frame changed(640,360); changed.BlackOutside(0,60,640,300);
+            Assert::AreEqual(0,check(changed)); // freshly proved different format wins
+        }
+
+        TEST_METHOD(SubtitleStylesShareCropAspectAndOnlyChangeFinalTranslation)
+        {
+            using namespace AlphaSourceCrop;
+            for(int shift:{-30,0,30})for(bool expanded:{false,true}) {
+                Input input; input.automaticCropEnabled=input.sharedGeometryAvailable=input.latestObservationSupportsCrop=true;
+                input.geometry=ScopePresentation(640,360,48,312);
+                input.classification=input.latestObservationClassification=ActivePictureClassification::BAR_CROP_TRUSTED;
+                input.geometrySourceGeneration=input.frameSourceGeneration=1;
+                input.rasterWidth=640;input.rasterHeight=360;
+                input.verticalTranslationActive=shift!=0;input.verticalTranslationPixels=shift;
+                input.verticalTranslationBase=input.geometry;input.verticalTranslationSourceGeneration=1;
+                if(expanded) {
+                    input.outwardPresentationActive=input.outwardExpansionAvailable=true;
+                    input.outwardExpansion=input.geometry;input.outwardExpansion.top=40;input.outwardExpansion.bottom=320;
+                    input.outwardExpansionSourceGeneration=1;
+                }
+                const auto shared=Evaluate(input);
+                Assert::AreEqual(!(expanded && shift!=0),shared.applyCrop);
+                for(auto mode:{SubtitlePreviewMode::None,SubtitlePreviewMode::GeneratedGrayBackground,SubtitlePreviewMode::BlackBackground}) {
+                    const auto display=SubtitlePresentationBounds(shared,mode);
+                    Assert::AreEqual(shared.sourceBounds.right-shared.sourceBounds.left,display.right-display.left);
+                    Assert::AreEqual(shared.sourceBounds.bottom-shared.sourceBounds.top,display.bottom-display.top);
+                    const int undo=mode==SubtitlePreviewMode::None?0:shared.verticalTranslationPixels;
+                    Assert::AreEqual(shared.sourceBounds.top-undo,display.top);
+                    Assert::AreEqual(shared.sourceBounds.bottom-undo,display.bottom);
+                }
+            }
+        }
+        TEST_METHOD(SubtitleStylesDoNotOverrideFailedCropOrRealPictureExpansion)
+        {
+            using namespace AlphaSourceCrop;
+            for(bool crop:{false,true}) {
+                Decision shared;shared.applyCrop=crop;shared.sourceBounds=ScopePresentation(640,360,10,350);
+                shared.outwardExpanded=true;
+                for(auto mode:{SubtitlePreviewMode::None,SubtitlePreviewMode::GeneratedGrayBackground,SubtitlePreviewMode::BlackBackground}) {
+                    const auto display=SubtitlePresentationBounds(shared,mode);
+                    Assert::AreEqual(10,display.top);Assert::AreEqual(350,display.bottom);
+                }
+            }
+        }
+		TEST_METHOD(RelocatedResidualDotsAndQuotesCanRetainPresentationWithoutChangingRawEvidence)
+		{
+			const auto scope=ScopePresentation(640,360,48,312);
+			const ActivePictureBounds erased={200,320,400,344,640,360};
+			for(bool quotes:{false,true})
+			{
+				P010Frame frame(640,360);frame.BlackOutside(0,48,640,312);
+				frame.FillRectangle(200,320,400,344,700);
+				if(quotes)
+				{
+					frame.FillRectangle(412,324,415,334,700);
+					frame.FillRectangle(424,324,427,334,700);
+				}
+				else for(int x:{412,424,436})frame.FillRectangle(x,336,x+4,340,700);
+				const auto raw=EvaluateActivePicturePresentationRetention(frame.P010Source(),scope);
+				const auto strict=EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					frame.P010Source(),scope,raw,erased);
+				const auto tolerant=EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					frame.P010Source(),scope,raw,erased,24);
+				Assert::IsFalse(strict.relocatedOverlayResidualsExcluded);
+				Assert::IsFalse(strict.excludedBandsPixelSafe);
+				Assert::IsTrue(tolerant.relocatedOverlayResidualsExcluded);
+				Assert::IsTrue(tolerant.excludedBandsPixelSafe);
+				Assert::IsFalse(tolerant.outwardVisibleBoundsAvailable);
+				Assert::AreEqual(raw.activePicture.reason,tolerant.activePicture.reason);
+				Assert::AreEqual(raw.activePicture.proposedBounds.bottom,tolerant.activePicture.proposedBounds.bottom);
+				Assert::AreEqual(raw.expandingBottom.lumaP90,tolerant.expandingBottom.lumaP90);
+			}
+		}
+
+		TEST_METHOD(RelocatedResidualToleranceRejectsUiColorExpansionAndFarMarks)
+		{
+			const auto scope=ScopePresentation(640,360,48,312);
+			const ActivePictureBounds erased={200,320,400,344,640,360};
+			for(int conflict=0;conflict<5;++conflict)
+			{
+				P010Frame frame(640,360);frame.BlackOutside(0,48,640,312);
+				frame.FillRectangle(200,320,400,344,700);
+				if(conflict==0)frame.FillRectangle(410,322,450,342,700);
+				if(conflict==1)frame.FillRectangle(412,324,420,336,700,700,512);
+				if(conflict==2)frame.FillRectangle(0,312,640,318,300);
+				if(conflict==3)frame.FillRectangle(510,330,520,340,700);
+				if(conflict==4)frame.FillRectangle(410,322,416,342,700); // Tall UI stroke.
+				const auto raw=EvaluateActivePicturePresentationRetention(frame.P010Source(),scope);
+				const auto tolerant=EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					frame.P010Source(),scope,raw,erased,24);
+				Assert::IsFalse(tolerant.relocatedOverlayResidualsExcluded);
+				Assert::IsFalse(tolerant.excludedBandsPixelSafe);
+			}
+		}
+
+		TEST_METHOD(RelocatedResidualProofCannotHideSeparateUiOutsideItsHalo)
+		{
+			P010Frame frame(640,360);frame.BlackOutside(0,48,640,312);
+			frame.FillRectangle(200,320,400,344,700);
+			for(int x:{412,424,436})frame.FillRectangle(x,336,x+4,340,700);
+			frame.FillRectangle(100,12,540,28,700);
+			const auto scope=ScopePresentation(640,360,48,312);
+			const ActivePictureBounds erased={200,320,400,344,640,360};
+			const auto raw=EvaluateActivePicturePresentationRetention(frame.P010Source(),scope);
+			const auto tolerant=EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+				frame.P010Source(),scope,raw,erased,24);
+			Assert::IsTrue(tolerant.relocatedOverlayResidualsExcluded);
+			Assert::IsFalse(tolerant.excludedBandsPixelSafe);
+			Assert::IsTrue(tolerant.outwardVisibleBoundsAvailable);
+			Assert::IsTrue(tolerant.outwardVisibleBounds.top<scope.top);
+			Assert::AreEqual(scope.bottom,tolerant.outwardVisibleBounds.bottom);
+		}
+
+		TEST_METHOD(RelocatedOverlayRetention4KSampleBudget)
+		{
+			P010Frame frame(3840, 2160);
+			frame.BlackOutside(0, 276, 3840, 1884);
+			frame.FillRectangle(900, 1930, 2940, 2030, 700);
+			const auto scope = ScopePresentation(3840, 2160, 276, 1884);
+			const ActivePictureBounds erased = {900, 1930, 2940, 2030, 3840, 2160};
+			const auto raw = EvaluateActivePicturePresentationRetention(frame.P010Source(), scope);
+			const auto start = std::chrono::steady_clock::now();
+			ActivePicturePresentationRetentionEvidence result;
+			const int repeats = 16;
+			for (int i = 0; i < repeats; ++i)
+				result = EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					frame.P010Source(), scope, raw, erased);
+			const double elapsed = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - start).count() / repeats;
+			Assert::IsTrue(result.relocatedOverlayExclusionEvaluated);
+			Assert::IsTrue(result.excludedBandsPixelSafe);
+			// One affected edge only; excludes extraction/global/perimeter and the other edges.
+			Assert::IsTrue(result.lumaSamples - raw.lumaSamples < 100000);
+			std::ostringstream message;
+			message << "Relocated overlay 4K retention recheck: " << elapsed
+				<< " ms/frame, luma=" << result.lumaSamples - raw.lumaSamples
+				<< ", chroma=" << result.chromaSamples - raw.chromaSamples;
+			Logger::WriteMessage(message.str().c_str());
+			frame.FillRectangle(2970,1980,2980,1998,700);
+			frame.FillRectangle(2988,1980,2998,1998,700);
+			const auto residualRaw=EvaluateActivePicturePresentationRetention(frame.P010Source(),scope);
+			const auto residualStart=std::chrono::steady_clock::now();
+			for(int i=0;i<repeats;++i)
+				result=EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					frame.P010Source(),scope,residualRaw,erased,48);
+			const double residualMs=std::chrono::duration<double,std::milli>(
+				std::chrono::steady_clock::now()-residualStart).count()/repeats;
+			Assert::IsTrue(result.relocatedOverlayResidualsExcluded);
+			Assert::IsTrue(result.excludedBandsPixelSafe);
+			Assert::IsTrue(result.lumaSamples-residualRaw.lumaSamples<400000);
+			std::ostringstream residualMessage;
+			residualMessage << "Relocated residual 4K recheck: " << residualMs
+				<< " ms/frame, luma=" << result.lumaSamples-residualRaw.lumaSamples;
+			Logger::WriteMessage(residualMessage.str().c_str());
+		}
+
+		TEST_METHOD(RelocatedOverlayRecheckPreservesRawEvidenceAndProtectsOtherContent)
+		{
+			const auto scope = ScopePresentation(640, 360, 48, 312);
+			ActivePictureBounds erased = {100, 326, 540, 348, 640, 360};
+			for (int otherContent = 0; otherContent < 4; ++otherContent)
+			{
+				P010Frame frame(640, 360);
+				frame.BlackOutside(0, 48, 640, 312);
+				frame.FillRectangle(100, 326, 540, 348, 700);
+				if (otherContent == 1) frame.FillRectangle(100, 10, 540, 24, 700);
+				if (otherContent == 2) frame.FillRectangle(10, 326, 80, 348, 700);
+				if (otherContent == 3) frame.FillRectangle(0, 312, 640, 322, 300);
+				const auto raw = EvaluateActivePicturePresentationRetention(frame.P010Source(), scope);
+				const auto corrected = EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					frame.P010Source(), scope, raw, erased);
+				Assert::IsFalse(raw.excludedBandsPixelSafe);
+				Assert::IsTrue(corrected.relocatedOverlayExclusionEvaluated);
+				Assert::AreEqual(static_cast<int>(raw.activePicture.classification),
+					static_cast<int>(corrected.activePicture.classification));
+				Assert::AreEqual(raw.activePicture.proposedBounds.bottom, corrected.activePicture.proposedBounds.bottom);
+				Assert::AreEqual(raw.activePicture.reason, corrected.activePicture.reason);
+				Assert::AreEqual(raw.globalLumaP90, corrected.globalLumaP90);
+				Assert::AreEqual(raw.expandingBottom.lumaP90, corrected.expandingBottom.lumaP90);
+				if (otherContent == 0)
+				{
+					Assert::IsTrue(corrected.excludedBandsPixelSafe);
+					Assert::IsFalse(corrected.outwardVisibleBoundsAvailable);
+				}
+				else
+				{
+					Assert::IsFalse(corrected.excludedBandsPixelSafe);
+					Assert::IsTrue(corrected.outwardVisibleBoundsAvailable);
+					if (otherContent == 1)
+					{
+						Assert::IsTrue(corrected.outwardVisibleBounds.top < scope.top);
+						Assert::AreEqual(scope.bottom, corrected.outwardVisibleBounds.bottom);
+					}
+					else Assert::IsTrue(corrected.outwardVisibleBounds.bottom > scope.bottom);
+				}
+			}
+		}
+
+		TEST_METHOD(RelocatedOverlayRecheckRejectsMismatchedBaseAndInvalidFootprint)
+		{
+			P010Frame frame(640, 360);
+			frame.BlackOutside(0, 48, 640, 312);
+			frame.FillRectangle(100, 326, 540, 348, 700);
+			const auto scope = ScopePresentation(640, 360, 48, 312);
+			const auto raw = EvaluateActivePicturePresentationRetention(frame.P010Source(), scope);
+			const ActivePictureBounds valid = {100, 326, 540, 348, 640, 360};
+			for (int invalid = 0; invalid < 4; ++invalid)
+			{
+				auto base = scope;
+				auto erased = valid;
+				auto source = frame.P010Source();
+				if (invalid == 0) base.bottom -= 2;
+				if (invalid == 1) erased.rasterWidth = 1280;
+				if (invalid == 2) { erased.top = 100; erased.bottom = 120; }
+				if (invalid == 3) source.data = nullptr;
+				const auto corrected = EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+					source, base, raw, erased);
+				Assert::IsFalse(corrected.relocatedOverlayExclusionEvaluated);
+				Assert::AreEqual(raw.excludedBandsPixelSafe, corrected.excludedBandsPixelSafe);
+				Assert::AreEqual(raw.outwardVisibleBounds.bottom, corrected.outwardVisibleBounds.bottom);
+			}
+		}
+
+		TEST_METHOD(RelocatedOverlayFootprintCannotSuppressSideBarContent)
+		{
+			P010Frame frame(640, 360);
+			frame.BlackOutside(80, 48, 560, 312);
+			frame.FillRectangle(0, 326, 640, 348, 700);
+			ActivePictureBounds base = {80, 48, 560, 312, 640, 360};
+			ActivePictureBounds erased = {0, 300, 640, 348, 640, 360};
+			const auto raw = EvaluateActivePicturePresentationRetention(frame.P010Source(), base);
+			const auto corrected = EvaluateActivePicturePresentationRetentionExcludingRelocatedOverlay(
+				frame.P010Source(), base, raw, erased);
+			Assert::IsTrue(corrected.relocatedOverlayExclusionEvaluated);
+			Assert::IsFalse(corrected.excludedBandsPixelSafe);
+			Assert::AreEqual(raw.excludedHorizontalBandsPixelSafe, corrected.excludedHorizontalBandsPixelSafe);
+			Assert::AreEqual(raw.activePicture.proposedBounds.bottom, corrected.activePicture.proposedBounds.bottom);
+		}
+
         TEST_METHOD(WeakFringeMeasuredReplayP010AndP210)
         {
             const auto crop = ScopePresentation(3840, 2160, 42, 2118);
