@@ -1,0 +1,90 @@
+# LED profile files - a guide
+
+For the owner, and for any agent asked to help build or tune an LED profile.
+
+## What a profile is
+
+VideoProcessor's LED drive has three layers of settings, each overriding
+the one before:
+
+1. **Built-in** - the values in `led-profile-example.cfg`. They reproduce
+   the old `beta_22.py` script (its curve and step tables).
+2. **An LED profile file** (optional) - a small file with a
+   `[led_drive.Default]` section holding only the lines you want to change.
+3. **The main configuration's `[led_drive.Default]`** - the core settings
+   the Config app's LED drive page edits: `enabled`, `mode`, `led_floor`,
+   `led_floor_black`, `highlight_tolerance_stops`, `gamma_boost`, and
+   `profile_file` (which file to use). These always win.
+
+So a profile changes the *behaviour* (curve, ramps, thresholds); the page
+keeps the everyday choices (on/off, mode, how low the LED goes).
+
+## Making one
+
+1. Copy `docs/cinema/led-profile-example.cfg` next to the main configuration
+   (`VideoProcessor-test.cfg`), e.g. as `my-led-profile.cfg`.
+2. Change the lines you want; delete the rest.
+3. In the Config app: LED drive page -> LED profile -> Browse..., choose the
+   file, Apply. (Or add `profile_file: my-led-profile.cfg` to
+   `[led_drive.Default]`; a name without a folder means "next to the main
+   configuration".)
+4. To go back: "Use built-in" (or delete the `profile_file` line).
+
+VP re-reads the profile whenever the configuration is applied, and when the
+profile file itself changes and the configuration is applied again. Edits
+carry on from the LED's current level; they do not flash the projector to
+full light.
+
+## Rules VP enforces (an invalid profile is rejected with a message)
+
+- The section must be `[led_drive.Default]`.
+- `enabled` and `profile_file` are not allowed in a profile (main file only).
+- Values must be in range, the same rules as the main file (listed in
+  `src/VideoProcessor-Lib/led/LedDriveConfig.h`, `LedDriveRules()`).
+- Together with the main settings: `led_floor_black <= led_floor <=
+  led_ceiling`, and `highlight_area_small < highlight_area_large`.
+- Projector settings (`port`, `led_latency_ms`, `flux_table`, command timing)
+  are not read from a profile; they live in `[projector.Default]`.
+
+## What each setting does, and what to change first
+
+| Setting | Mode | Effect | Typical change |
+|---|---|---|---|
+| `curve` | both | LED level for each picture brightness (APL code : level) | the main shape of the dimming; lower the middle points to dim more in mid-bright scenes |
+| `led_ceiling` | both | maximum LED level | lower to cap brightness |
+| `tick_ms`, `steps_*`, `anti_pump_band`, `script_highlight_code` | script | the script's own stepping and contrast rules | leave as the script had them unless comparing |
+| `rate_up`, `rate_down` | compensate | LED speed in levels per second | lower `rate_down` for gentler dimming; raise `rate_up` for faster recovery after a dark-to-bright cut |
+| `deadband` | compensate | ignore tiny target changes while still | raise if the LED "breathes" on a static scene |
+| `early_ramp` | compensate | start before a cut seen in the queue | leave on |
+| `knee`, `highlight_*` | compensate | how highlights hold the LED up | raise `highlight_release_ms` if the LED drops too soon after headlights pass |
+| `apl_persist_ms` | compensate | flash rejection window | raise if lightning or muzzle flashes still move the LED |
+| `cut_threshold`, `fade_frames`, `fade_min_step` | both | scene-change detection | raise `cut_threshold` if ordinary motion is taken for cuts |
+| `apl_weights`, `compensation_eotf` | both | how brightness is measured / the projector's gamma | leave |
+
+The most important everyday setting - how low the LED goes - is not in the
+profile: it is "Lowest LED level" (`led_floor`, 60-255) on the LED drive
+page, with "Lowest level in fades to black" (`led_floor_black`, default 60)
+beside it. 60 is the lowest LPW1 accepts.
+
+## For an agent building a profile
+
+- Start from `led-profile-example.cfg`; keep only changed lines.
+- Change one group at a time and say why, in a comment above the line.
+- Check the file with VP's own validator: load the main configuration with
+  `profile_file` set and run the native test
+  `LedDriveDelta1Tests::LedProfileFileFillsInWhatTheMainSettingsLeaveOut` as
+  a model, or start VP and read `C:\logs\vp.log` for "LED drive:
+  configuration rejected (...)".
+- Never put `enabled`, `profile_file` or projector settings in the profile.
+- The owner judges on the projector with the acceptance tests in
+  `docs/VP-led-drive-module.md` section 7 (slow fade to black, hard cut dark
+  to bright, a static scene for 30 s).
+
+## Open: fade to black below 60
+
+LPW1 stops at 60. `SHUT` is out (the FL35 here has no mechanical shutter)
+and `PMUT` only blanks the pixels at the current LED level. The projector
+also has a custom LED dim mode (`LDMM` 1 = custom, with `LDCR` / `LDCG` /
+`LDCB` per colour) that may reach lower but bypasses the automatic colour
+balance. Whether it can refine fades to black is to be measured on the
+projector (see DEPLOY.txt); nothing in VP uses it yet.

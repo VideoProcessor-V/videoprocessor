@@ -58,6 +58,7 @@
 #include <QTableWidget>
 #include <QTabBar>
 #include <QTemporaryDir>
+#include <QDoubleSpinBox>
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
@@ -597,6 +598,158 @@ void testOmittedAndAutoFrameOffsetDisplayNinety()
     }
 }
 
+void testLedDrivePageAndLiveSwitches()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.First]\nquality: high\n"
+        "[vprenderer.zoom]\nlabel: Off (whole picture)\nautomatic_crop: false\n"
+        "[vprenderer.zoom.black_bars]\nlabel: Black bars removed\nautomatic_crop: true\n"
+        "[shader.standard]\ntype: multi\nlabel: Off\n"
+        "[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\n"
+        "glsl_file: Temporal sigma-delta.glsl\n"
+        "[led_drive.Default]\nenabled: false\nmode: log_only\n"
+        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+
+    // LED drive: real controls, saved to the configuration on Apply.
+    window.selectPage(19);
+    auto* enabled = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.enabled"));
+    require(!enabled->isChecked(), "LED drive did not load as off");
+    auto* mode = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.mode"));
+    require(mode->currentData().toString() == QStringLiteral("log_only"), "LED mode did not load");
+    auto* boost = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.gamma_boost"));
+    auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
+    require(port->text() == QStringLiteral("COM1"), "COM port did not load");
+    auto* readBack = requireControl<QCheckBox>(window, QStringLiteral("config.projector.default.read_back"));
+    require(!readBack->isChecked(), "Read-back did not default to off");
+    auto* floor = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"));
+    auto* floorBlack = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor_black"));
+    require(floor->value() == 100 && floor->minimum() == 60 && floor->maximum() == 255,
+        "Lowest LED level is not 60-255 with the script's 100");
+    require(floorBlack->value() == 60 && floorBlack->minimum() == 60,
+        "Fade-to-black level does not default to its minimum, 60");
+    floor->setValue(80);
+    require(floorBlack->maximum() == 80, "The fade-to-black level may exceed the lowest LED level");
+    auto* profile = requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.profile_file"));
+    require(profile->text().isEmpty(), "A profile file appeared from nowhere");
+    profile->setText(QStringLiteral("my-led.cfg"));
+    requireControl<QPushButton>(window, QStringLiteral("config.led_drive.default.profile_builtin"))->click();
+    require(profile->text().isEmpty(), "Use built-in did not clear the profile file");
+    enabled->setChecked(true);
+    selectData(mode, QStringLiteral("compensate"));
+    selectData(boost, QStringLiteral("2.4"));
+    port->setText(QStringLiteral("COM3"));
+    readBack->setChecked(true);
+    QCoreApplication::processEvents();
+    QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    require(apply->isEnabled(), "LED drive edits did not enable Apply");
+    apply->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
+        "port: COM3", "read_back: true", "led_floor: 80" })
+        require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
+            .arg(QString::fromLatin1(expected)).toStdString().c_str());
+
+    // Live switches: visible buttons next to the shader and zoom lists.
+    auto* shaders = requireControl<QListWidget>(window, QStringLiteral("config.shader.standard.items"));
+    QListWidgetItem* sigma = nullptr;
+    for (int row = 0; row < shaders->count(); ++row)
+        if (shaders->item(row)->data(Qt::UserRole).toString().compare(
+            QStringLiteral("shader.standard.sigma_delta"), Qt::CaseInsensitive) == 0)
+            sigma = shaders->item(row);
+    require(sigma != nullptr, "Shader fixture missing");
+    shaders->setCurrentItem(sigma);
+    auto* shaderSwitch = requireControl<QPushButton>(window, QStringLiteral("config.shader.standard.live_toggle"));
+    window.setActiveProfileStatusForTesting({}, {}, {}, {}, {});
+    QCoreApplication::processEvents();
+    require(shaderSwitch->text() == QStringLiteral("Switch on in VP"),
+        "An inactive shader does not offer Switch on in VP");
+    window.setActiveProfileStatusForTesting({}, {}, {}, {}, { QStringLiteral("shader.standard.sigma_delta") });
+    QCoreApplication::processEvents();
+    require(shaderSwitch->text() == QStringLiteral("Switch off in VP"),
+        "An active shader does not offer Switch off in VP");
+
+    auto* zoomProfiles = requireControl<QListWidget>(window, QStringLiteral("config.vprenderer.zoom.profiles"));
+    QListWidgetItem* blackBars = nullptr;
+    for (int row = 0; row < zoomProfiles->count(); ++row)
+        if (zoomProfiles->item(row)->data(Qt::UserRole).toString().compare(
+            QStringLiteral("vprenderer.zoom.black_bars"), Qt::CaseInsensitive) == 0)
+            blackBars = zoomProfiles->item(row);
+    require(blackBars != nullptr, "Zoom fixture missing");
+    zoomProfiles->setCurrentItem(blackBars);
+    auto* zoomSwitch = requireControl<QPushButton>(window, QStringLiteral("config.vprenderer.zoom.live_toggle"));
+    window.setActiveProfileStatusForTesting({}, {}, {}, {}, {}, true, QStringLiteral("vprenderer.zoom"));
+    QCoreApplication::processEvents();
+    require(zoomSwitch->text() == QStringLiteral("Use in VP") && zoomSwitch->isEnabled(),
+        "An inactive zoom profile does not offer Use in VP");
+    window.setActiveProfileStatusForTesting({}, {}, {}, {}, {}, true, QStringLiteral("vprenderer.zoom.black_bars"));
+    QCoreApplication::processEvents();
+    require(zoomSwitch->text() == QStringLiteral("In use in VP") && !zoomSwitch->isEnabled(),
+        "The active zoom profile is not shown as in use");
+}
+
+void testShaderSettingsComeFromTheShaderFile()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    require(QDir(dir.path()).mkdir(QStringLiteral("shaders")), "shader folder");
+    {
+        QFile shader(dir.filePath("shaders/Test dither.glsl"));
+        require(shader.open(QIODevice::WriteOnly), "shader fixture");
+        shader.write("//!PARAM noise_amplitude\n//!DESC Noise strength\n//!TYPE float\n"
+            "//!MINIMUM 0.0\n//!MAXIMUM 0.5\n0.15\n\n"
+            "//!PARAM bits\n//!DESC Output bits\n//!TYPE DEFINE\n//!MINIMUM 8\n//!MAXIMUM 10\n10\n\n"
+            "//!HOOK OUTPUT\n//!BIND HOOKED\nvec4 hook() { return HOOKED_tex(HOOKED_pos); }\n");
+        QFile plain(dir.filePath("shaders/Plain.glsl"));
+        require(plain.open(QIODevice::WriteOnly), "shader fixture");
+        plain.write("//!HOOK OUTPUT\n//!BIND HOOKED\nvec4 hook() { return HOOKED_tex(HOOKED_pos); }\n");
+    }
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.First]\nquality: high\n"
+        "[shader.standard]\ntype: multi\nlabel: Off\n"
+        "[shader.standard.dither]\nshader_type: custom\nlabel: Test dither\nglsl_file: Test dither.glsl\n"
+        "param_noise_amplitude: 0.3\n"
+        "[shader.standard.plain]\nshader_type: custom\nlabel: Plain\nglsl_file: Plain.glsl\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(8);
+    auto* shaders = requireControl<QListWidget>(window, QStringLiteral("config.shader.standard.items"));
+    auto select = [shaders](const QString& section)
+    {
+        for (int row = 0; row < shaders->count(); ++row)
+            if (shaders->item(row)->data(Qt::UserRole).toString().compare(section, Qt::CaseInsensitive) == 0)
+            {
+                shaders->setCurrentRow(row);
+                QCoreApplication::processEvents();
+                return true;
+            }
+        return false;
+    };
+    require(select(QStringLiteral("shader.standard.dither")), "dither shader missing");
+    auto* noise = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.shader.standard.setting.noise_amplitude"));
+    require(std::abs(noise->value() - 0.3) < 1e-9, "The configured value is not shown");
+    require(std::abs(noise->maximum() - 0.5) < 1e-9 && noise->minimum() == 0.0, "The shader's range is not used");
+    auto* bits = requireControl<QSpinBox>(window, QStringLiteral("config.shader.standard.setting.bits"));
+    require(bits->value() == 10, "The shader's default is not shown");
+    noise->setValue(0.2);
+    QCoreApplication::processEvents();
+    QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("param_noise_amplitude: 0.2"), "The shader setting was not saved");
+
+    require(select(QStringLiteral("shader.standard.plain")), "plain shader missing");
+    auto* note = requireControl<QLabel>(window, QStringLiteral("config.shader.standard.settings_note"));
+    require(note->text().contains(QStringLiteral("no adjustable settings")),
+        "A shader without settings does not say so");
+}
+
 void testEveryPageRoundTrips()
 {
     QTemporaryDir directory;
@@ -626,8 +779,8 @@ void testEveryPageRoundTrips()
 
     QStackedWidget* pages = requireControl<QStackedWidget>(window,
         QStringLiteral("settingsPages"));
-    require(pages->count() == 19,
-        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, and shortcut pages were not added as dedicated settings pages");
+    require(pages->count() == 20,
+        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut and LED drive pages were not added as dedicated settings pages");
     for (QPushButton* button : window.findChildren<QPushButton*>())
         require(!button->property("navChild").toBool(),
             "Grouped settings still expose child entries in the left navigation");
@@ -3599,8 +3752,9 @@ void testChoiceLabelsAndVpRendererName()
             require(visible != QStringLiteral("AUTO"),
                 "A selector still exposes AUTO instead of Auto");
             if (!choice->isEditable())
-                require(!visible.contains(u'_'),
-                    "A known selector exposes a raw underscored config token");
+                require(!visible.contains(u'_'), QStringLiteral(
+                    "A known selector exposes a raw underscored config token: %1 shows %2")
+                    .arg(choice->objectName(), visible).toStdString().c_str());
         }
     for (QLineEdit* edit : window.findChildren<QLineEdit*>())
         require(edit->text() != QStringLiteral("AUTO"),
@@ -6483,6 +6637,8 @@ int main(int argc, char** argv)
     failures += run("missing configuration can be created from editor",
         testMissingConfigurationCanBeCreatedFromEditor);
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
+    failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
+    failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("target dropdown refreshes inline", testTargetDropdownRefreshesInline);
     failures += run("remote target switch keeps window responsive",
         testRemoteTargetSwitchKeepsWindowResponsive);

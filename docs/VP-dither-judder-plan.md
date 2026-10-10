@@ -707,6 +707,22 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   `crop_narrower_content_to_fill_screen` from 1.7:1, standing in for
   zoom169's "reduce big bars by 50%", which the fork cannot do by halves)
   and `off`; VP starts with the zoom off. Judge on the projector.
+- Config app (owner 2026-10-10: switches, not keyboard shortcuts; keep it
+  simple): live "Switch on/off in VP" / "Use in VP" buttons on the shader,
+  zoom, screen, queue and NLS pages; a Shader settings box built from each
+  GLSL shader's own //!PARAM blocks (saved as param_<name>); an LED drive
+  page with on/off and five core settings (lowest LED level 60-255, default
+  100; lowest level in fades to black, default and minimum 60; mode;
+  highlight protection; gamma boost), the projector connection, and an
+  optional LED profile file for everything else
+  (docs/cinema/LED-PROFILE-GUIDE.md). The built-in profile is the beta_22
+  script's curve and tables. The zoom's Shift+Z key was dropped.
+- Fade to black below LPW1 60 (owner 2026-10-10): `SHUT` is not usable (no
+  mechanical shutter in this FL35; too slow and noisy anyway) and `PMUT`
+  only blanks pixels at the current LED level. The custom LED dim mode
+  (`LDMM` 1, `LDCR`/`LDCG`/`LDCB`) may go lower but bypasses the automatic
+  colour balance; measure on the projector whether it can refine fades to
+  black before designing anything.
 - Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the
   test configuration (syntax per CONFIGURATION.html; tested: 59.94 fps
   selects Low_Latency, 23.976 fps returns to Normal); Shift+L still

@@ -252,7 +252,7 @@ namespace VideoProcessorTest
             Assert::IsTrue(film.snapshot->queue.queueSize > 1);
         }
 
-        TEST_METHOD(CinemaTestConfigurationTogglesBlackBarZoomWithShiftZ)
+        TEST_METHOD(CinemaTestConfigurationSwitchesBlackBarZoomFromTheConfigApp)
         {
             std::string repository = __FILE__;
             for (int level = 0; level < 3; ++level)
@@ -262,6 +262,8 @@ namespace VideoProcessorTest
             const std::string contents((std::istreambuf_iterator<char>(shipped)),
                 std::istreambuf_iterator<char>());
             Assert::IsFalse(contents.empty());
+            Assert::IsTrue(contents.find("cycle_shortcut") == std::string::npos,
+                L"Zoom is switched from the Config app, not a key");
             CachedConfigTestFile file;
             std::ofstream(file.path, std::ios::binary) << contents;
             ConfigFile config;
@@ -273,8 +275,9 @@ namespace VideoProcessorTest
                 std::wstring(error.begin(), error.end()).c_str());
             Assert::IsFalse(runtime.GetSnapshot()->viewport.automaticCrop, L"VP starts with the zoom off");
 
+            // What the Config app's "Use in VP" button sends (RPC SelectProfile).
             UnifiedProfileRuntime::SelectionResult selected;
-            Assert::IsTrue(runtime.SelectCycleKey("Shift+Z", noSource, selected, error),
+            Assert::IsTrue(runtime.SelectProfile("zoom", "black_bars", true, noSource, selected, error),
                 std::wstring(error.begin(), error.end()).c_str());
             Assert::AreEqual("black_bars", selected.snapshot->viewport.zoomProfile.c_str());
             Assert::IsTrue(selected.snapshot->viewport.automaticCrop);
@@ -282,18 +285,14 @@ namespace VideoProcessorTest
             Assert::AreEqual("cinema", selected.snapshot->viewport.profile.c_str(),
                 L"The zoom leaves the blanked screen profile in place");
 
-            Assert::IsTrue(runtime.SelectCycleKey("Shift+Z", noSource, selected, error));
+            Assert::IsTrue(runtime.SelectProfile("zoom", "fill", true, noSource, selected, error));
             Assert::AreEqual("fill", selected.snapshot->viewport.zoomProfile.c_str());
             Assert::IsTrue(selected.snapshot->viewport.automaticCrop);
             Assert::IsTrue(selected.snapshot->viewport.cropNarrowerContentToFillScreen);
 
-            Assert::IsTrue(runtime.SelectCycleKey("Shift+Z", noSource, selected, error));
+            Assert::IsTrue(runtime.SelectProfile("zoom", "off", true, noSource, selected, error));
             Assert::AreEqual("off", selected.snapshot->viewport.zoomProfile.c_str());
             Assert::IsFalse(selected.snapshot->viewport.automaticCrop);
-
-            Assert::IsTrue(runtime.SelectCycleKey("Shift+Z", noSource, selected, error));
-            Assert::AreEqual("black_bars", selected.snapshot->viewport.zoomProfile.c_str(),
-                L"and round again");
         }
 
         TEST_METHOD(CustomGlslStandardShaderRejectsNonNumericParams)

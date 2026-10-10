@@ -20,6 +20,7 @@ class QComboBox;
 class QHideEvent;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
 class QMenu;
 class QProgressBar;
 class QPushButton;
@@ -107,6 +108,7 @@ private:
     QWidget* createShortcutsSetupPage();
     QWidget* createShortcutsPage();
     QWidget* createLogsPage();
+    QWidget* createLedDrivePage();
     QWidget* createProfilePage(const QString& title, const QString& description,
         const QString& sectionPrefix);
     QWidget* createCard(const QString& title, const QString& description, QWidget* content);
@@ -183,6 +185,15 @@ private:
     void setWarningStatus(const QString& message);
     void refreshActiveProfileIndicators();
     void installProfileContextMenu(QListWidget* list, const QString& sectionPrefix);
+    // The live command for a profile row: which group and profile to select
+    // in VP, whether it switches on (or off, for standard shaders) and the
+    // command text. False when the row has no live command.
+    bool liveProfileCommand(const QString& sectionPrefix, const QListWidgetItem* item,
+        QString& group, QString& name, bool& enable, QString& label) const;
+    // A visible button that switches the selected profile in VP (the same
+    // command as the row's right-click menu).
+    QPushButton* addLiveToggle(QListWidget* list, const QString& sectionPrefix);
+    void refreshLiveToggles();
     void installActionContextMenu(QListWidget* list);
     void runTargetCommand(const QString& group, const QString& name,
         bool enabled, bool action);
@@ -303,6 +314,7 @@ private:
         QListWidget* list;
         QString sectionPrefix;
         QLabel* selectedTitle = nullptr;
+        QPushButton* liveToggle = nullptr;
         bool pendingActiveSelection = true;
         bool editSelectionTouched = false;
     };

@@ -15506,6 +15506,14 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		if (const auto* values = configuration.GetSectionValues(section))
 			for (const auto& value : *values)
 				signature += std::string(section) + "." + value.first + "=" + value.second + "\n";
+	// An LED profile file is part of the settings: editing it applies too.
+	const std::string ledProfilePath = LedDrive::LedProfilePath(configuration);
+	if (!ledProfilePath.empty())
+	{
+		std::ifstream profile(ledProfilePath, std::ios::binary);
+		signature += "profile=" + std::string((std::istreambuf_iterator<char>(profile)),
+			std::istreambuf_iterator<char>());
+	}
 	std::string validationError;
 	const bool valid = LedDrive::Validate(configuration, validationError);
 	// The gamma boost applies even with the module off or in log_only.

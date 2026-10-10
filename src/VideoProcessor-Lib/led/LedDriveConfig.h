@@ -300,6 +300,8 @@ namespace LedDrive
 		return {
 			Boolean("enabled"),
 			Choice("mode", { "compensate", "script", "log_only" }),
+			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
+				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
 			Number("rate_up", 1.0, 10000.0),
 			Number("rate_down", 1.0, 10000.0),
@@ -343,6 +345,10 @@ namespace LedDrive
 
 	// Strict validation of every [projector*] / [led_drive*] section, plus the
 	// cross-key rules (floors within the ceiling).
+	inline std::string LedProfilePath(const ConfigFile& config);
+	inline std::string LedProfileSection(const ConfigFile& profile);
+	inline LedDriveConfig ReadLedDriveConfig(const ConfigFile& config);
+
 	inline bool Validate(const ConfigFile& config, std::string& error)
 	{
 		const auto projectorRules = ProjectorRules();
@@ -388,6 +394,49 @@ namespace LedDrive
 				}
 			}
 		}
+		const std::string profilePath = LedProfilePath(config);
+		if (!profilePath.empty())
+		{
+			ConfigFile profile;
+			if (!profile.Load(profilePath, ConfigFile::ReadPolicy::Fresh))
+			{
+				error = "[led_drive.Default] profile_file: cannot read " + profilePath;
+				return false;
+			}
+			const std::string section = LedProfileSection(profile);
+			if (section.empty())
+			{
+				error = "LED profile " + profilePath + " has no [led_drive.Default] section";
+				return false;
+			}
+			std::string nested;
+			if (profile.TryGetString(section, "profile_file", nested) ||
+				profile.TryGetString(section, "enabled", nested))
+			{
+				error = "LED profile " + profilePath +
+					": enabled and profile_file belong in the main configuration";
+				return false;
+			}
+			std::string profileError;
+			if (!ConfigSchema::ValidateSection(profile, section, ledRules, profileError))
+			{
+				error = "LED profile " + profilePath + ": " + profileError;
+				return false;
+			}
+			// The profile and the main settings together.
+			const LedDriveConfig merged = ReadLedDriveConfig(config);
+			if (merged.ledFloor > merged.ledCeiling || merged.ledFloorBlack > merged.ledFloor)
+			{
+				error = "LED profile " + profilePath +
+					" with [led_drive.Default]: needs led_floor_black <= led_floor <= led_ceiling";
+				return false;
+			}
+			if (merged.highlightAreaSmall >= merged.highlightAreaLarge)
+			{
+				error = "LED profile " + profilePath + ": needs highlight_area_small < highlight_area_large";
+				return false;
+			}
+		}
 		return true;
 	}
 
@@ -428,11 +477,37 @@ namespace LedDrive
 	}
 
 	// Reads [led_drive.default]; absent keys keep their defaults.
-	inline LedDriveConfig ReadLedDriveConfig(const ConfigFile& config)
+	// profile_file, resolved against the folder of the configuration that
+	// names it ("" when not set).
+	inline std::string LedProfilePath(const ConfigFile& config)
 	{
-		LedDriveConfig result;
 		std::string value;
-		const std::string section = LED_DRIVE_SECTION;
+		if (!config.TryGetString(LED_DRIVE_SECTION, "profile_file", value)) return {};
+		std::string path = ConfigFile::Trim(value);
+		if (path.size() >= 2 && path.front() == '"' && path.back() == '"') path = path.substr(1, path.size() - 2);
+		if (path.empty()) return {};
+		const bool absolute = (path.size() > 1 && path[1] == ':') || path[0] == '\\' || path[0] == '/';
+		if (absolute) return path;
+		const std::string& owner = config.GetLoadedPath();
+		const size_t slash = owner.find_last_of("\\/");
+		return slash == std::string::npos ? path : owner.substr(0, slash + 1) + path;
+	}
+
+	// The LED profile file's own settings section: [led_drive.Default] (or
+	// [led_drive]); empty when it has neither.
+	inline std::string LedProfileSection(const ConfigFile& profile)
+	{
+		for (const std::string& section : profile.GetSectionNames())
+			if (section == LED_DRIVE_SECTION) return section;
+		for (const std::string& section : profile.GetSectionNames())
+			if (section == "led_drive") return section;
+		return {};
+	}
+
+	// Applies one [led_drive] section's values over `result`.
+	inline void ApplyLedDriveSection(const ConfigFile& config, const std::string& section, LedDriveConfig& result)
+	{
+		std::string value;
 		auto readInt = [&](const char* key, int minimum, int maximum, int& target)
 		{
 			if (config.TryGetString(section, key, value)) Detail::ParseInt(value, minimum, maximum, target);
@@ -479,6 +554,25 @@ namespace LedDrive
 		readInt("fade_frames", 2, 120, result.fadeFrames);
 		readNumber("fade_min_step", result.fadeMinStep);
 		readNumber("cut_threshold", result.cutThreshold);
+	}
+
+	// Built-in defaults (the beta_22 script's curve and tables), then the LED
+	// profile file if one is named, then the configuration's own
+	// [led_drive.Default] - so the Config app's core settings always win.
+	inline LedDriveConfig ReadLedDriveConfig(const ConfigFile& config)
+	{
+		LedDriveConfig result;
+		const std::string profilePath = LedProfilePath(config);
+		if (!profilePath.empty())
+		{
+			ConfigFile profile;
+			if (profile.Load(profilePath, ConfigFile::ReadPolicy::Fresh))
+			{
+				const std::string section = LedProfileSection(profile);
+				if (!section.empty()) ApplyLedDriveSection(profile, section, result);
+			}
+		}
+		ApplyLedDriveSection(config, LED_DRIVE_SECTION, result);
 		return result;
 	}
 

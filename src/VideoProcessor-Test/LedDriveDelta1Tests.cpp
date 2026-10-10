@@ -186,6 +186,79 @@ namespace VideoProcessorTest
 			Assert::IsFalse(Validates("[projector.Default]\nled_latency_ms: -1\n", error));
 		}
 
+		TEST_METHOD(LedProfileFileFillsInWhatTheMainSettingsLeaveOut)
+		{
+			char directory[MAX_PATH]{};
+			GetTempPathA(MAX_PATH, directory);
+			const std::string profilePath = std::string(directory) + "vp-led-profile-test.cfg";
+			std::ofstream(profilePath, std::ios::trunc) << "[led_drive.Default]\nrate_down: 60\nled_floor: 90\n"
+				"curve: 0:100, 40:180, 100:255, 255:255\n";
+			std::string error;
+			const std::string main = Write("[led_drive.Default]\nenabled: true\nmode: compensate\n"
+				"led_floor: 80\nprofile_file: vp-led-profile-test.cfg\n");
+			ConfigFile config;
+			Assert::IsTrue(config.Load(main.c_str()));
+			Assert::IsTrue(Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+			const LedDriveConfig read = ReadLedDriveConfig(config);
+			Assert::AreEqual(60.0, read.rateDown, 1e-12, L"From the profile");
+			Assert::AreEqual(80, read.ledFloor, L"The main settings (Config app page) win");
+			Assert::AreEqual<size_t>(4, read.curve.size());
+			Assert::AreEqual(400.0, read.rateUp, 1e-12, L"Left out of both: built-in");
+			DeleteFileA(main.c_str());
+
+			// Problems with the profile are reported, not ignored.
+			for (const char* bad : { "[led_drive.Default]\nenabled: true\n", "[led_drive.Default]\nrate_down: fast\n",
+				"[projector.Default]\nport: COM2\n" })
+			{
+				std::ofstream(profilePath, std::ios::trunc) << bad;
+				const std::string withBad = Write("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n");
+				ConfigFile badConfig;
+				Assert::IsTrue(badConfig.Load(withBad.c_str()));
+				Assert::IsFalse(Validate(badConfig, error), std::wstring(bad, bad + strlen(bad)).c_str());
+				DeleteFileA(withBad.c_str());
+			}
+			DeleteFileA(profilePath.c_str());
+			Assert::IsFalse(Validates("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n", error));
+			Assert::IsTrue(error.find("cannot read") != std::string::npos);
+		}
+
+		TEST_METHOD(ShippedExampleProfileIsValidAndEqualsTheBuiltInValues)
+		{
+			std::string repository = __FILE__;
+			for (int level = 0; level < 3; ++level)
+				repository.resize(repository.find_last_of("\\/"));
+			const std::string example = repository + "\\docs\\cinema\\led-profile-example.cfg";
+			std::string error;
+			const std::string main = Write("[led_drive.Default]\nprofile_file: " + example + "\n");
+			ConfigFile config;
+			Assert::IsTrue(config.Load(main.c_str()));
+			Assert::IsTrue(Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+			const LedDriveConfig fromExample = ReadLedDriveConfig(config);
+			DeleteFileA(main.c_str());
+			const LedDriveConfig builtIn;
+			Assert::AreEqual(builtIn.curve.size(), fromExample.curve.size());
+			for (size_t i = 0; i < builtIn.curve.size(); ++i)
+			{
+				Assert::AreEqual(builtIn.curve[i].apl, fromExample.curve[i].apl);
+				Assert::AreEqual(builtIn.curve[i].level, fromExample.curve[i].level);
+			}
+			for (int distance : { 0, 9, 10, 24, 25, 49, 50, 99, 100, 200 })
+			{
+				Assert::AreEqual(builtIn.stepsUpDark.StepFor(distance), fromExample.stepsUpDark.StepFor(distance));
+				Assert::AreEqual(builtIn.stepsUpBright.StepFor(distance), fromExample.stepsUpBright.StepFor(distance));
+				Assert::AreEqual(builtIn.stepsDown.StepFor(distance), fromExample.stepsDown.StepFor(distance));
+			}
+			Assert::AreEqual(builtIn.rateUp, fromExample.rateUp, 1e-12);
+			Assert::AreEqual(builtIn.rateDown, fromExample.rateDown, 1e-12);
+			Assert::AreEqual(builtIn.deadband, fromExample.deadband);
+			Assert::AreEqual(builtIn.knee, fromExample.knee, 1e-12);
+			Assert::AreEqual(builtIn.highlightReleaseMs, fromExample.highlightReleaseMs);
+			Assert::AreEqual(builtIn.aplPersistMs, fromExample.aplPersistMs);
+			Assert::AreEqual(builtIn.cutThreshold, fromExample.cutThreshold, 1e-12);
+			Assert::AreEqual(builtIn.aplWeights[0], fromExample.aplWeights[0], 1e-12);
+			Assert::AreEqual(builtIn.compensationEotf, fromExample.compensationEotf, 1e-12);
+		}
+
 		TEST_METHOD(CompensateRampsAtTheRateLimitsAndHoldsInsideTheDeadband)
 		{
 			LedDriveConfig config = Compensate();

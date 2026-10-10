@@ -45,6 +45,8 @@
 #include <QHash>
 #include <QHideEvent>
 #include <QHBoxLayout>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QIcon>
 #include <QInputDialog>
 #include <QIntValidator>
@@ -654,6 +656,64 @@ struct ShaderEditorState
     QString section;
     bool loading = false;
 };
+
+// One //!PARAM block of an mpv-style GLSL shader.
+struct GlslShaderParameter
+{
+    QString name;
+    QString description;
+    bool integer = false;
+    bool hasMinimum = false;
+    bool hasMaximum = false;
+    double minimum = 0.0;
+    double maximum = 0.0;
+    double defaultValue = 0.0;
+};
+
+// The numeric //!PARAM blocks of a shader file; found is false when the file
+// cannot be read. ENUM parameters (non-numeric defaults) are skipped.
+QList<GlslShaderParameter> readGlslShaderParameters(const QString& path, bool& found)
+{
+    QList<GlslShaderParameter> parameters;
+    QFile file(path);
+    found = file.open(QIODevice::ReadOnly | QIODevice::Text);
+    if (!found) return parameters;
+    GlslShaderParameter current;
+    bool inParameter = false;
+    for (QString line : QString::fromUtf8(file.readAll()).split(u'\n'))
+    {
+        line = line.trimmed();
+        if (line.startsWith(QStringLiteral("//!")))
+        {
+            const QString header = line.mid(3);
+            const int space = header.indexOf(u' ');
+            const QString key = (space < 0 ? header : header.left(space)).toUpper();
+            const QString argument = space < 0 ? QString() : header.mid(space + 1).trimmed();
+            if (key == QStringLiteral("PARAM"))
+            {
+                current = GlslShaderParameter();
+                current.name = argument;
+                inParameter = !argument.isEmpty();
+            }
+            else if (!inParameter) continue;
+            else if (key == QStringLiteral("DESC")) current.description = argument;
+            else if (key == QStringLiteral("TYPE"))
+                current.integer = !argument.contains(QStringLiteral("float"), Qt::CaseInsensitive);
+            else if (key == QStringLiteral("MINIMUM"))
+                current.minimum = argument.toDouble(&current.hasMinimum);
+            else if (key == QStringLiteral("MAXIMUM"))
+                current.maximum = argument.toDouble(&current.hasMaximum);
+            else inParameter = false;
+            continue;
+        }
+        if (!inParameter || line.isEmpty()) continue;
+        bool numeric = false;
+        current.defaultValue = line.toDouble(&numeric);
+        if (numeric) parameters.push_back(current);
+        inParameter = false;
+    }
+    return parameters;
+}
 
 struct ShaderParameterControls
 {
@@ -2323,8 +2383,26 @@ void ConfigEditorWindow::installProfileContextMenu(QListWidget* list,
 		{
 			QListWidgetItem* item = list->itemAt(point);
 			if (!item) return;
+			QString group, name, label;
+			bool enabled = true;
+			if (!liveProfileCommand(sectionPrefix, item, group, name, enabled, label)) return;
+			QMenu menu(list);
+			QAction* command = menu.addAction(label);
+			command->setEnabled(!noTarget_ && !manualCommandThread_);
+			command->setToolTip(QStringLiteral(
+				"Uses the configuration currently saved in VideoProcessor."));
+			if (menu.exec(list->viewport()->mapToGlobal(point)) == command)
+				runTargetCommand(group, name, enabled, false);
+		});
+}
+
+bool ConfigEditorWindow::liveProfileCommand(const QString& sectionPrefix,
+	const QListWidgetItem* item, QString& group, QString& name, bool& enabled,
+	QString& label) const
+{
+			if (!item) return false;
 			const QString section = item->data(Qt::UserRole).toString();
-			if (section.isEmpty()) return;
+			if (section.isEmpty()) return false;
 			const QMap<QString, QString> groups{
 				{ QStringLiteral("queue"), QStringLiteral("queue") },
 				{ QStringLiteral("vprenderer"), QStringLiteral("display") },
@@ -2337,29 +2415,66 @@ void ConfigEditorWindow::installProfileContextMenu(QListWidget* list,
 				{ QStringLiteral("shader.nls"), QStringLiteral("nls") },
 				{ QStringLiteral("shader.standard"), QStringLiteral("standard_shaders") }
 			};
-			const QString group = groups.value(sectionPrefix);
+			group = groups.value(sectionPrefix);
 			if (group.isEmpty() ||
 				(section.compare(sectionPrefix, Qt::CaseInsensitive) != 0 &&
 				 !section.startsWith(sectionPrefix + u'.', Qt::CaseInsensitive)))
-				return;
-			const QString name = section.compare(sectionPrefix,
+				return false;
+			name = section.compare(sectionPrefix,
 				Qt::CaseInsensitive) == 0 ? QStringLiteral("base") :
 				section.mid(sectionPrefix.size() + 1);
 			const bool standard = group == QStringLiteral("standard_shaders");
 			const bool defaultShader = standard && name == QStringLiteral("base");
-			const bool enabled = !standard || defaultShader ||
+			enabled = !standard || defaultShader ||
 				!item->data(ActiveProfileRole).toBool();
-			QMenu menu(list);
-			QAction* command = menu.addAction(standard && !defaultShader ?
+			label = standard && !defaultShader ?
 				(enabled ? QStringLiteral("Enable in VP") :
 					QStringLiteral("Disable in VP")) :
-				QStringLiteral("Activate in VP"));
-			command->setEnabled(!noTarget_ && !manualCommandThread_);
-			command->setToolTip(QStringLiteral(
-				"Uses the configuration currently saved in VideoProcessor."));
-			if (menu.exec(list->viewport()->mapToGlobal(point)) == command)
-				runTargetCommand(group, name, enabled, false);
-		});
+				QStringLiteral("Activate in VP");
+			return true;
+}
+
+QPushButton* ConfigEditorWindow::addLiveToggle(QListWidget* list, const QString& sectionPrefix)
+{
+	auto* toggle = new QPushButton(QStringLiteral("Switch on in VP"));
+	toggle->setObjectName(controlName(sectionPrefix, QStringLiteral("live_toggle")));
+	toggle->setAccessibleDescription(QStringLiteral(
+		"Switches the selected profile in the running VideoProcessor, using its saved configuration."));
+	toggle->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+	for (ProfileListBinding& binding : activeProfileLists_)
+		if (binding.list == list) binding.liveToggle = toggle;
+	connect(toggle, &QPushButton::clicked, this, [this, list, sectionPrefix]
+	{
+		QString group, name, label;
+		bool enabled = true;
+		if (liveProfileCommand(sectionPrefix, list->currentItem(), group, name, enabled, label))
+			runTargetCommand(group, name, enabled, false);
+	});
+	connect(list, &QListWidget::currentItemChanged, this, [this] { refreshLiveToggles(); });
+	return toggle;
+}
+
+void ConfigEditorWindow::refreshLiveToggles()
+{
+	for (const ProfileListBinding& binding : activeProfileLists_)
+	{
+		if (!binding.liveToggle || !binding.list) continue;
+		const QListWidgetItem* item = binding.list->currentItem();
+		QString group, name, label;
+		bool enabled = true;
+		const bool command = liveProfileCommand(binding.sectionPrefix, item, group, name, enabled, label);
+		const bool standard = group == QStringLiteral("standard_shaders") && name != QStringLiteral("base");
+		const bool active = item && item->data(ActiveProfileRole).toBool();
+		QString text = standard ? (active ? QStringLiteral("Switch off in VP") :
+			QStringLiteral("Switch on in VP")) :
+			(active ? QStringLiteral("In use in VP") : QStringLiteral("Use in VP"));
+		const bool usable = command && !noTarget_ && !manualCommandThread_ && (standard || !active);
+		if (binding.liveToggle->text() != text) binding.liveToggle->setText(text);
+		binding.liveToggle->setEnabled(usable);
+		binding.liveToggle->setToolTip(noTarget_ ?
+			QStringLiteral("Start VideoProcessor (or choose it as the target) to switch this live.") :
+			QStringLiteral("Takes effect in VideoProcessor at once and is remembered when VP restarts."));
+	}
 }
 
 void ConfigEditorWindow::installActionContextMenu(QListWidget* list)
@@ -2417,6 +2532,7 @@ void ConfigEditorWindow::runTargetCommand(const QString& group,
 		{
 			if (manualCommandThread_ == worker) manualCommandThread_ = nullptr;
 			worker->deleteLater();
+			refreshLiveToggles();
 			if ((remoteClient_ ? remoteHost_ : QStringLiteral("127.0.0.1")) != host ||
 				(remoteClient_ ? remotePort_ : 41686) != port ||
 				currentInstanceId_ != instanceId) return;
@@ -2427,6 +2543,7 @@ void ConfigEditorWindow::runTargetCommand(const QString& group,
 			if (result->success) refreshActiveProfileIndicators();
 		});
 	manualCommandThread_->start();
+	refreshLiveToggles();
 }
 
 void ConfigEditorWindow::refreshActiveProfileIndicators()
@@ -2610,6 +2727,7 @@ void ConfigEditorWindow::applyActiveProfileIndicators(bool available,
                 binding.selectedTitle->setText(title);
         }
     }
+    refreshLiveToggles();
     refreshRendererAutoStatus();
 }
 
@@ -4061,6 +4179,7 @@ QWidget* ConfigEditorWindow::createShell()
     pages_->addWidget(createColorConfigPage());
 	pages_->addWidget(createScalingPage());
 	pages_->addWidget(createZoomPage());
+	pages_->addWidget(createLedDrivePage()); // 19
 
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
@@ -4078,6 +4197,7 @@ QWidget* ConfigEditorWindow::createShell()
     QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"), 14);
     addLeaf(QStringLiteral("Actions"), 7);
     QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
+    addLeaf(QStringLiteral("LED drive"), 19);
     addLeaf(QStringLiteral("Logs"), 10);
     navLayout->addSpacing(8);
     QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"), 2);
@@ -4832,7 +4952,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     selectedTitle->setProperty("cardTitle", true);
     detailLayout->addWidget(selectedTitle);
     if (showsActiveProfile)
+    {
         activeProfileLists_.back().selectedTitle = selectedTitle;
+        detailLayout->addWidget(addLiveToggle(list, sectionPrefix), 0, Qt::AlignLeft);
+    }
     auto* name = new QLineEdit;
     name->setObjectName(controlName(sectionPrefix, QStringLiteral("name")));
     detailLayout->addWidget(fieldWithHelp(QStringLiteral("Name"), name,
@@ -7260,6 +7383,7 @@ QWidget* ConfigEditorWindow::createNlsShadersPage()
     list->setItemDelegate(new ProfileStateItemDelegate(list));
     activeProfileLists_.push_back({ list, QStringLiteral("shader.nls") });
     installProfileContextMenu(list, QStringLiteral("shader.nls"));
+    QPushButton* nlsLiveToggle = addLiveToggle(list, QStringLiteral("shader.nls"));
     auto* profileActions = new QHBoxLayout;
     auto* addProfile = new QPushButton(QStringLiteral("+ Add profile"));
     addProfile->setObjectName(QStringLiteral("config.shader.nls.add"));
@@ -7290,6 +7414,7 @@ QWidget* ConfigEditorWindow::createNlsShadersPage()
     selectionLayout->addWidget(helpLabel(
         QStringLiteral("A single NLS profile can be active.")));
     selectionLayout->addWidget(list, 1);
+    selectionLayout->addWidget(nlsLiveToggle, 0, Qt::AlignLeft);
 
     QStringList manualSections;
     bool editableSingleGroup = true;
@@ -7774,7 +7899,9 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
     selectionLayout->addWidget(helpLabel(
         QStringLiteral("Multiple standard shaders profile can be active.")));
     selectionLayout->addWidget(list, 1);
+    selectionLayout->addWidget(addLiveToggle(list, root), 0, Qt::AlignLeft);
     selectionLayout->addWidget(helpLabel(QStringLiteral(
+        "Select a shader, then switch it on or off in VP with the button above (a green dot marks shaders on in VP). "
         "Standard profiles do not inherit shader settings. A profile with no shader files is unconfigured (Off). Matching profiles compose in this order.")));
     auto* details = new QWidget;
     auto* detailsLayout = new QVBoxLayout(details);
@@ -7830,10 +7957,142 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
         "A blank backend file is intentional: that renderer does not support this shader implementation. "
         "Other existing shader sections are preserved unchanged."));
     detailsLayout->addWidget(unsupported);
+
+    // The selected shader's own settings (its //!PARAM blocks): description,
+    // range and default from the shader file, saved as param_<name> - the
+    // same keys the custom parameter table below shows.
+    auto* settingsTitle = new QLabel(QStringLiteral("Shader settings"));
+    settingsTitle->setObjectName(QStringLiteral("config.shader.standard.settings_title"));
+    auto* settingsBox = new QWidget;
+    settingsBox->setObjectName(QStringLiteral("config.shader.standard.settings"));
+    auto* settingsForm = new QFormLayout(settingsBox);
+    settingsForm->setContentsMargins(0, 0, 0, 0);
+    settingsForm->setHorizontalSpacing(18);
+    settingsForm->setVerticalSpacing(8);
+    auto* settingsNote = helpLabel(QString());
+    settingsNote->setObjectName(QStringLiteral("config.shader.standard.settings_note"));
+    auto* settingsReset = new QPushButton(QStringLiteral("Reset to shader defaults"));
+    settingsReset->setObjectName(QStringLiteral("config.shader.standard.settings_reset"));
+    settingsReset->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    detailsLayout->addWidget(settingsTitle);
+    detailsLayout->addWidget(settingsBox);
+    detailsLayout->addWidget(settingsNote);
+    detailsLayout->addWidget(settingsReset, 0, Qt::AlignLeft);
+    auto refreshRawParameters = std::make_shared<std::function<void()>>([] {});
+    auto reloadSettings = std::make_shared<std::function<void()>>();
+    auto shaderFile = [this](const QString& name)
+    {
+        // VP loads shaders from the shaders folder next to VideoProcessor.exe;
+        // Config lives in that folder's config subfolder or beside it.
+        const QStringList candidates = {
+            QDir(QFileInfo(configPath_).absolutePath()).filePath(QStringLiteral("shaders/") + name),
+            QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("shaders/") + name),
+            QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../shaders/") + name) };
+        for (const QString& candidate : candidates)
+            if (QFileInfo::exists(candidate)) return candidate;
+        return QString();
+    };
+    *reloadSettings = [this, state, glsl, settingsTitle, settingsBox, settingsForm, settingsNote,
+        settingsReset, refreshRawParameters, shaderFile]
+    {
+        while (settingsForm->rowCount() > 0) settingsForm->removeRow(0);
+        const QString name = glsl->text().trimmed();
+        const bool available = !state->section.isEmpty();
+        settingsTitle->setVisible(available);
+        settingsBox->setVisible(false);
+        settingsReset->setVisible(false);
+        settingsNote->setVisible(available);
+        if (!available) return;
+        if (name.isEmpty())
+        {
+            settingsNote->setText(QStringLiteral("Set the VP Renderer shader file to see its settings."));
+            return;
+        }
+        const QString path = remoteClient_ ? QString() : shaderFile(name);
+        bool found = false;
+        const QList<GlslShaderParameter> parameters = path.isEmpty() ?
+            QList<GlslShaderParameter>() : readGlslShaderParameters(path, found);
+        if (!found)
+        {
+            settingsNote->setText(remoteClient_ ?
+                QStringLiteral("The shader files are on the VP computer; use Custom parameters below.") :
+                QStringLiteral("%1 was not found in VP's shaders folder.").arg(name));
+            return;
+        }
+        if (parameters.isEmpty())
+        {
+            settingsNote->setText(QStringLiteral("This shader has no adjustable settings."));
+            return;
+        }
+        settingsNote->setVisible(false);
+        settingsBox->setVisible(true);
+        settingsReset->setVisible(true);
+        for (const GlslShaderParameter& parameter : parameters)
+        {
+            const QString key = QStringLiteral("param_") + parameter.name;
+            bool configured = false;
+            const double stored = value(state->section, key).toDouble(&configured);
+            const double minimum = parameter.hasMinimum ? parameter.minimum : -1.0e6;
+            const double maximum = parameter.hasMaximum ? parameter.maximum : 1.0e6;
+            const double current = std::max(minimum, std::min(configured ? stored : parameter.defaultValue, maximum));
+            QWidget* control = nullptr;
+            const QString objectName = QStringLiteral("config.shader.standard.setting.") + parameter.name;
+            const auto save = [this, state, key, refreshRawParameters](const QString& text)
+            {
+                if (state->loading || state->section.isEmpty() || !document_) return;
+                document_->SetKnown(state->section.toStdString(), key.toLocal8Bit().constData(),
+                    text.toLocal8Bit().constData());
+                markDirty();
+                (*refreshRawParameters)();
+            };
+            if (parameter.integer)
+            {
+                auto* spin = new QSpinBox;
+                spin->setRange(static_cast<int>(minimum), static_cast<int>(maximum));
+                spin->setValue(static_cast<int>(std::lround(current)));
+                connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,
+                    [save](int number) { save(QString::number(number)); });
+                control = spin;
+            }
+            else
+            {
+                auto* spin = new QDoubleSpinBox;
+                spin->setDecimals(3);
+                spin->setRange(minimum, maximum);
+                spin->setSingleStep(parameter.hasMinimum && parameter.hasMaximum ?
+                    std::max(0.001, (maximum - minimum) / 100.0) : 0.1);
+                spin->setValue(current);
+                connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                    [save](double number) { save(QString::number(number, 'g', 6)); });
+                control = spin;
+            }
+            control->setObjectName(objectName);
+            control->setMaximumWidth(120);
+            control->setToolTip(QStringLiteral("%1 (default %2)").arg(key)
+                .arg(parameter.defaultValue, 0, 'g', 6));
+            settingsForm->addRow(parameter.description.isEmpty() ? parameter.name : parameter.description, control);
+        }
+    };
+    connect(glsl, &QLineEdit::textChanged, this, [reloadSettings] { (*reloadSettings)(); });
+    connect(settingsReset, &QPushButton::clicked, this, [this, state, glsl, reloadSettings,
+        refreshRawParameters, shaderFile]
+    {
+        if (state->section.isEmpty() || !document_) return;
+        bool found = false;
+        for (const GlslShaderParameter& parameter :
+            readGlslShaderParameters(shaderFile(glsl->text().trimmed()), found))
+            document_->RemoveKnown(state->section.toStdString(),
+                (QStringLiteral("param_") + parameter.name).toLocal8Bit().constData());
+        markDirty();
+        (*reloadSettings)();
+        (*refreshRawParameters)();
+    });
+
     const ShaderParameterControls parameterEditor = addShaderParameterControls(
         this, this, detailsLayout, state, [this] { return document_.get(); },
         [this] { markDirty(); }, QStringLiteral("config.shader.standard"),
         QStringLiteral("Standard shader parameters"), QStringLiteral("standard shader"));
+    *refreshRawParameters = parameterEditor.reload;
     auto* empty = helpLabel(QStringLiteral(
         "No standard shader configurations are present. The shipped example configuration includes optional defaults."));
     empty->setProperty("emptyState", true);
@@ -7909,7 +8168,7 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
     });
 
     auto load = [this, state, title, shortcut, useRule, rule, ruleField, label,
-        stage, hlsl, glsl, parameterEditor, empty, unsupported](QListWidgetItem* item)
+        stage, hlsl, glsl, parameterEditor, empty, unsupported, reloadSettings](QListWidgetItem* item)
     {
         state->loading = true;
         state->section = item ? item->data(Qt::UserRole).toString() : QString();
@@ -7931,6 +8190,7 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
             hlsl->clear();
             glsl->clear();
             parameterEditor.reload();
+            (*reloadSettings)();
             state->loading = false;
             return;
         }
@@ -7949,6 +8209,7 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
         glsl->setText(value(state->section, QStringLiteral("glsl_file")));
         parameterEditor.reload();
         state->loading = false;
+        (*reloadSettings)();
     };
     ProfileListPolicy listPolicy;
     listPolicy.sections = [this, root]
@@ -8455,6 +8716,141 @@ QWidget* ConfigEditorWindow::createActionsPage()
     splitter->setSizes({ 310, 620 });
     return createPage(QStringLiteral("Actions"),
         QStringLiteral("Run external commands when selected VideoProcessor events occur."), splitter);
+}
+
+QWidget* ConfigEditorWindow::createLedDrivePage()
+{
+    // Plain [led_drive.Default] / [projector.Default] settings (Stage 7). Only
+    // the core choices are here; everything else comes from the built-in
+    // profile (the beta_22 script's curve and tables) or an LED profile file.
+    // VP applies changes on Apply without restarting the LED module unless it
+    // starts or stops driving the projector.
+    const QString led = QStringLiteral("led_drive.default");
+    const QString projector = QStringLiteral("projector.default");
+    auto* cards = new ResponsiveCardGrid;
+
+    // The projector's LED cannot go below 60 with LPW1, so neither can these.
+    auto levelControl = [this, led](const QString& key, int fallback)
+    {
+        auto* spin = new QSpinBox;
+        spin->setObjectName(controlName(led, key));
+        spin->setRange(60, 255);
+        spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
+        spin->setMaximumWidth(108);
+        spin->setAlignment(Qt::AlignRight);
+        bool valid = false;
+        const int configured = value(led, key).toInt(&valid);
+        spin->setValue(valid ? std::max(60, std::min(configured, 255)) : fallback);
+        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, key](int level)
+        {
+            if (!document_) return;
+            const std::string section = led.toStdString();
+            if (!document_->SetKnown(section, key.toStdString().c_str(), std::to_string(level)))
+            {
+                document_->AddSection(section);
+                document_->SetKnown(section, key.toStdString().c_str(), std::to_string(level));
+            }
+            markDirty();
+        });
+        return spin;
+    };
+
+    auto* drive = new QWidget;
+    auto* driveForm = new QFormLayout(drive);
+    driveForm->setContentsMargins(0, 0, 0, 0);
+    driveForm->setVerticalSpacing(8);
+    auto* enabled = bindCheckField(QStringLiteral("LED drive on"), led, QStringLiteral("enabled"), false);
+    enabled->setAccessibleDescription(QStringLiteral(
+        "Lets VideoProcessor drive the projector's LED. Off: nothing is sent to the projector."));
+    driveForm->addRow(QString(), enabled);
+    auto* floor = levelControl(QStringLiteral("led_floor"), 100);
+    driveForm->addRow(QStringLiteral("Lowest LED level"), floor);
+    driveForm->addRow(QString(), helpLabel(QStringLiteral(
+        "How far the LED may dim in dark scenes, 60 (darkest) to 255 (never dims). Your script used 100.")));
+    auto* floorBlack = levelControl(QStringLiteral("led_floor_black"), 60);
+    driveForm->addRow(QStringLiteral("Lowest level in fades to black"), floorBlack);
+    // A fade can dim further than a scene, never less far.
+    floorBlack->setMaximum(floor->value());
+    connect(floor, qOverload<int>(&QSpinBox::valueChanged), floorBlack,
+        [floorBlack](int level) { floorBlack->setMaximum(level); });
+    driveForm->addRow(QStringLiteral("Mode"), bindChoiceField(led, QStringLiteral("mode"),
+        { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate") },
+        { QStringLiteral("Log only (watch, never send)"),
+          QStringLiteral("Script (your beta 22 script)"),
+          QStringLiteral("Compensate (dim the LED, keep the picture)") }));
+    driveForm->addRow(QStringLiteral("Highlight protection"), bindChoiceField(led,
+        QStringLiteral("highlight_tolerance_stops"),
+        { QStringLiteral("0.33"), QStringLiteral("0.15"), QStringLiteral("0.6") },
+        { QStringLiteral("Medium"), QStringLiteral("Strong (keep highlights; the LED dims less)"),
+          QStringLiteral("Light (the LED dims more; highlights compress more)") }));
+    driveForm->addRow(QStringLiteral("Gamma boost"), bindChoiceField(led, QStringLiteral("gamma_boost"),
+        { QStringLiteral("off"), QStringLiteral("2.4") },
+        { QStringLiteral("Off (plain output gamma)"),
+          QStringLiteral("2.4 (the look of the old output gamma 2.4)") }));
+    driveForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Highlight protection only matters in Compensate. The gamma boost applies even with the LED drive off. "
+        "Switching the LED drive on or off, or to or from Log only, returns the projector to full light; "
+        "other changes carry on from the current level.")));
+
+    auto* profile = new QWidget;
+    auto* profileLayout = new QVBoxLayout(profile);
+    profileLayout->setContentsMargins(0, 0, 0, 0);
+    profileLayout->setSpacing(8);
+    auto* profileRow = new QHBoxLayout;
+    auto* profilePath = bindTextField(led, QStringLiteral("profile_file"));
+    profilePath->setPlaceholderText(QStringLiteral("Built-in (your beta 22 script)"));
+    auto* browse = new QPushButton(QStringLiteral("Browse…"));
+    browse->setObjectName(QStringLiteral("config.led_drive.default.profile_browse"));
+    auto* builtIn = new QPushButton(QStringLiteral("Use built-in"));
+    builtIn->setObjectName(QStringLiteral("config.led_drive.default.profile_builtin"));
+    profileRow->addWidget(profilePath, 1);
+    profileRow->addWidget(browse);
+    profileRow->addWidget(builtIn);
+    profileLayout->addLayout(profileRow);
+    profileLayout->addWidget(helpLabel(QStringLiteral(
+        "Optional. A profile file can change the light curve, step tables, ramp speeds, LED latency, flux table "
+        "and the other details; anything it leaves out uses the built-in value, and the settings on this page "
+        "always win. See docs\\cinema\\LED-PROFILE-GUIDE.md.")));
+    connect(browse, &QPushButton::clicked, this, [this, profilePath]
+    {
+        const QString start = QFileInfo(configPath_).absolutePath();
+        const QString chosen = QFileDialog::getOpenFileName(this, QStringLiteral("LED profile"),
+            start, QStringLiteral("LED profiles (*.cfg *.txt);;All files (*)"));
+        if (chosen.isEmpty()) return;
+        // Next to the configuration: store just the name, so the folder can move.
+        const QString relative = QDir(start).relativeFilePath(chosen);
+        profilePath->setText(relative.startsWith(QStringLiteral("..")) ? chosen : relative);
+    });
+    connect(builtIn, &QPushButton::clicked, profilePath, [profilePath] { profilePath->clear(); });
+    browse->setEnabled(!remoteClient_);
+    if (remoteClient_)
+        browse->setToolTip(QStringLiteral("The profile file must be on the VP computer; type its path."));
+
+    auto* connection = new QWidget;
+    auto* connectionForm = new QFormLayout(connection);
+    connectionForm->setContentsMargins(0, 0, 0, 0);
+    connectionForm->setVerticalSpacing(8);
+    connectionForm->addRow(QStringLiteral("Protocol"), bindChoiceField(projector, QStringLiteral("protocol"),
+        { QStringLiteral("barco_ascii"), QStringLiteral("none") },
+        { QStringLiteral("Barco serial (RS232)"), QStringLiteral("None (never open a port)") }));
+    auto* port = bindTextField(projector, QStringLiteral("port"), QStringLiteral("COM1"));
+    port->setMaximumWidth(140);
+    connectionForm->addRow(QStringLiteral("COM port"), port);
+    auto* readBack = bindCheckField(QStringLiteral("Read the projector's replies"), projector,
+        QStringLiteral("read_back"), false);
+    connectionForm->addRow(QString(), readBack);
+    connectionForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Off: send only, exactly like the old script. On: wait for each reply, ask the projector its range and "
+        "log lost commands. 19200 baud, 8 data bits, no parity, 1 stop bit, no flow control.")));
+
+    cards->addCard(createCard(QStringLiteral("LED drive"),
+        QStringLiteral("Dim the projector's LED with the picture, as your beta 22 script did."), drive));
+    cards->addCard(createCard(QStringLiteral("LED profile"),
+        QStringLiteral("The detailed behaviour: built-in, or your own file."), profile));
+    cards->addCard(createCard(QStringLiteral("Projector connection"),
+        QStringLiteral("The serial link to the projector."), connection));
+    return createPage(QStringLiteral("LED drive"),
+        QStringLiteral("Projector LED dimming and the gamma boost."), cards);
 }
 
 QWidget* ConfigEditorWindow::createLogsPage()
