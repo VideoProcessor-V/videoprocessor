@@ -700,6 +700,13 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   they act on YUV capture only, not RGB input. Enable at most one of the two.
   The profile-group `when` mechanism was not used for this: a `when` on a
   standard-shader member would auto-enable it, not merely gate it.
+- Black-bar zoom (brief §8 "automatic crop approximating zoom169/zoom1";
+  owner 2026-10-09: similar, but switchable): `[vprenderer.zoom]` profiles
+  in the test configuration, cycled with Shift+Z - `black_bars`
+  (`automatic_crop`, both madVR profiles' bar removal), `fill` (also
+  `crop_narrower_content_to_fill_screen` from 1.7:1, standing in for
+  zoom169's "reduce big bars by 50%", which the fork cannot do by halves)
+  and `off`; VP starts with the zoom off. Judge on the projector.
 - Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the
   test configuration (syntax per CONFIGURATION.html; tested: 59.94 fps
   selects Low_Latency, 23.976 fps returns to Normal); Shift+L still
