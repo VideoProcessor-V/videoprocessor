@@ -565,3 +565,41 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - N-6: agreed. The rc2 rebase is next, before anything more is added to
   the Config app or the queue.
 - N-2, N-3, N-4, N-7, N-8: no change.
+
+### Code audit 2 responses (2026-10-10; files in docs/audit/)
+
+- Blocker (stage7-step5d-config-app.md, 59.94 Hz never selects Low_Latency):
+  fixed. `${source_rate}` is the rate floored to a whole number, so 59.94
+  read as 59. The Config app's frame-rate switch now writes
+  `${cadence} > N` (the exact rate) and still recognises old
+  `${source_rate}` rules; the test config uses `${cadence} > 59`. The
+  cinema test now feeds both variables as VP reports them (59.94 -> 59 /
+  59.94...), and checks 60.000 (game queue) and 50 (cinema queue).
+- Should fix (LED profile file stops VP): fixed. A missing or invalid
+  profile no longer invalidates the configuration.
+  `LedDrive::ValidateLedProfile` reports the problem.
+  `ReadLedDriveConfig` leaves the profile out, so the LED drive runs on the
+  built-in values (the beta_22 script) plus the page settings. The renderer
+  logs "WARNING LED profile ignored (...)". The Config app's LED page shows
+  "VP will ignore this profile ..." under the file name.
+- Should fix (profile help text): fixed; it now says projector settings
+  are not read from a profile.
+- Blocker (stage7-step5e-led-additions.md, mode change during the custom
+  dim): fixed. `Reconfigure` leaves the custom dim whenever the module
+  stops compensating, stops driving the projector, or the experiment is
+  switched off. LDMM 0 jumps the driver's queue ahead of any LPW1. Script
+  mode also never sends LPW1 while the custom dim is engaged. New test:
+  SwitchingModeDuringTheCustomDimLeavesItAtOnce.
+- Should fix (LDMM 0 at start/exit in script mode): kept, by choice. It is
+  a reset to the projector's standard dim mode. It means a crash during a
+  compensate session cannot leave the next session dark, whatever mode
+  that session uses. Custom-dim levels (LDC*, LDMM 1) are still only ever
+  sent in compensate mode. New test:
+  ScriptModeWithTheExperimentConfiguredSendsNoCustomDim.
+- Should fix (tests): the two tests above cover the mode switch and script
+  mode with the experiment configured. Exit with read-back on during the
+  dim-down is covered by the existing abortable-wait design and the
+  auditor's note; there is no new test for it.
+- Notes left as they are: the 60-255 Lowest LED box, the two "Off" zoom
+  rows, and remote profile validation (the Config app does not check a
+  remote file; VP logs it).

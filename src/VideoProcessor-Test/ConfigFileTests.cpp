@@ -228,18 +228,32 @@ namespace VideoProcessorTest
             std::ofstream(file.path, std::ios::binary) << contents;
             ConfigFile config;
             Assert::IsTrue(config.Load(file.path));
+            // As VP reports them (StateVariables): source_rate is the rate
+            // floored to a whole number, cadence the exact rate.
             auto source = [](const char* rate)
             {
-                return [rate](const std::string& variable, std::string& value)
+                const double exact = std::stod(rate);
+                return [exact](const std::string& variable, std::string& value)
                 {
-                    if (variable != "source_rate") return false;
-                    value = rate;
+                    if (variable == "source_rate")
+                        value = std::to_string(static_cast<int>(std::floor(exact)));
+                    else if (variable == "cadence")
+                    {
+                        std::ostringstream text;
+                        text.imbue(std::locale::classic());
+                        text.precision(17);
+                        text << exact;
+                        value = text.str();
+                    }
+                    else
+                        return false;
                     return true;
                 };
             };
             UnifiedProfileRuntime::Runtime runtime;
             std::string error;
-            Assert::IsTrue(runtime.Initialize(config, source("59.94"), error),
+            // Audit round 2: 59.94 Hz (source_rate 59) must select the game queue.
+            Assert::IsTrue(runtime.Initialize(config, source("59.94005994005994"), error),
                 std::wstring(error.begin(), error.end()).c_str());
             Assert::AreEqual(std::string("low_latency"), RendererProfileConfig::FormatSelection(
                 runtime.GetSnapshot()->effectiveSelections.at("queue")),
@@ -261,6 +275,14 @@ namespace VideoProcessorTest
             Assert::IsTrue(game.snapshot->queue.hasActivePictureLookaheadFrames,
                 L"Low_Latency must not inherit Normal's look-ahead");
             Assert::AreEqual<size_t>(0, game.snapshot->queue.activePictureLookaheadFrames);
+            // Exact 60 also switches; 50p stays in the cinema queue.
+            UnifiedProfileRuntime::RefreshResult other;
+            Assert::IsTrue(runtime.Refresh(source("50"), other, error));
+            Assert::AreEqual(std::string("normal"), RendererProfileConfig::FormatSelection(
+                other.snapshot->effectiveSelections.at("queue")), L"50p is not a game rate");
+            Assert::IsTrue(runtime.Refresh(source("60"), other, error));
+            Assert::AreEqual(std::string("low_latency"), RendererProfileConfig::FormatSelection(
+                other.snapshot->effectiveSelections.at("queue")), L"60.000 selects the game queue");
 
             // Stage 5: Normal's target is time (owner: 200 ms); film gets 5
             // frames, and Low_Latency's own target_frames beats the inherited time

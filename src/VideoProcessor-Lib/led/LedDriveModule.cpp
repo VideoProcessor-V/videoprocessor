@@ -170,6 +170,18 @@ namespace LedDrive
 			}
 			compensating = nowCompensating;
 			applyGain = live && led.mode != Mode::LogOnly;
+			// Only the compensate step leaves the custom dim, so a switch away
+			// from it (or the experiment switched off) leaves here: LDMM 0 jumps
+			// the driver's queue, ahead of any LPW1 the new mode sends.
+			if (fadeToBlack != FadeToBlack::Normal &&
+				(!compensating || !applyGain || led.ftbCustomDim == FtbCustomDim::Off))
+			{
+				if (fadeToBlack == FadeToBlack::Deep)
+					driver->QueueSequenceNow(CustomDimUp(led), led.ftbStepMs);
+				fadeToBlack = FadeToBlack::Normal;
+				blackSinceMs = -1.0;
+				DebugLog::Log("LED drive: fade to black - custom dim off (settings changed)");
+			}
 		}
 		++configGeneration;
 		wake.notify_all();
@@ -613,7 +625,9 @@ namespace LedDrive
 			else if (have)
 			{
 				const ControllerOutput out = controller.Tick(stats);
-				if (out.lightCommand >= 0) driver->SetLight(out.lightCommand);
+				// Never LPW1 while the custom dim is on (Reconfigure leaves it
+				// before script mode runs; this only guards the order).
+				if (out.lightCommand >= 0 && !CustomDimEngaged()) driver->SetLight(out.lightCommand);
 				for (const ContrastStep& step : out.contrastSchedule)
 				{
 					if (!WaitUntil(tickStart + std::chrono::milliseconds(step.offsetMs))) break;

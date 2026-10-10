@@ -16,6 +16,7 @@
 #include <ConfigurationRpcClient.h>
 #include <RendererProfileConfig.h>
 #include <QueueLatency.h>
+#include <led/LedDriveConfig.h>
 
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
@@ -5035,8 +5036,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QSignalBlocker blockRule(rateRule);
             QSignalBlocker blockThreshold(rateThreshold);
             const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
+            // ${cadence} is the exact rate (59.94); ${source_rate} is a whole
+            // number (59.94 reads as 59), so the switch writes cadence. Rules
+            // written with source_rate are still recognised.
             const QRegularExpressionMatch match = QRegularExpression(QStringLiteral(
-                "^\\$\\{source_rate\\}\\s*>\\s*([0-9]+(?:\\.[0-9]+)?)$")).match(text);
+                "^\\$\\{(?:cadence|source_rate)\\}\\s*>\\s*([0-9]+(?:\\.[0-9]+)?)$")).match(text);
             const bool custom = !text.isEmpty() && !match.hasMatch();
             rateRule->setChecked(match.hasMatch());
             if (match.hasMatch()) rateThreshold->setValue(match.captured(1).toDouble());
@@ -5048,7 +5052,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         {
             if (rateRule->isChecked())
             {
-                rule->setPlainText(QStringLiteral("${source_rate} > %1")
+                rule->setPlainText(QStringLiteral("${cadence} > %1")
                     .arg(QString::number(rateThreshold->value(), 'g', 6)));
                 useRule->setChecked(true);
             }
@@ -9021,9 +9025,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     profileRow->addWidget(builtIn);
     profileLayout->addLayout(profileRow);
     profileLayout->addWidget(helpLabel(QStringLiteral(
-        "Optional. A profile file can change the light curve, step tables, ramp speeds, LED latency, flux table "
-        "and the other details; anything it leaves out uses the built-in value, and the settings on this page "
-        "always win. See docs\\cinema\\LED-PROFILE-GUIDE.md.")));
+        "Optional. A profile file can change the light curve, step tables, ramp speeds "
+        "and the other LED details; anything it leaves out uses the built-in value, and the settings on this page "
+        "always win. Projector settings (connection, LED response time, flux table) are not read from a profile. "
+        "See docs\\cinema\\LED-PROFILE-GUIDE.md.")));
     connect(browse, &QPushButton::clicked, this, [this, profilePath]
     {
         const QString start = QFileInfo(configPath_).absolutePath();
@@ -9035,6 +9040,31 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         profilePath->setText(relative.startsWith(QStringLiteral("..")) ? chosen : relative);
     });
     connect(builtIn, &QPushButton::clicked, profilePath, [profilePath] { profilePath->clear(); });
+    // Audit round 2: a broken profile no longer stops VP (it is left out),
+    // so say here when VP would leave it out.
+    auto* profileStatus = helpLabel(QString());
+    profileStatus->setObjectName(QStringLiteral("config.led_drive.default.profile_status"));
+    profileLayout->addWidget(profileStatus);
+    const auto checkProfile = [this, profileStatus](const QString& text)
+    {
+        const QString name = text.trimmed();
+        if (name.isEmpty() || remoteClient_)
+        {
+            profileStatus->setVisible(false);
+            return;
+        }
+        const QString full = QFileInfo(name).isAbsolute() ? name :
+            QDir(QFileInfo(configPath_).absolutePath()).filePath(name);
+        std::string problem;
+        const bool ok = LedDrive::ValidateLedProfileFile(
+            QDir::toNativeSeparators(full).toLocal8Bit().toStdString(), problem);
+        profileStatus->setText(ok ? QStringLiteral("Profile file OK.") :
+            QStringLiteral("VP will ignore this profile and use the built-in values: %1")
+                .arg(QString::fromLocal8Bit(problem.c_str())));
+        profileStatus->setVisible(true);
+    };
+    connect(profilePath, &QLineEdit::textChanged, this, checkProfile);
+    checkProfile(profilePath->text());
     browse->setEnabled(!remoteClient_);
     if (remoteClient_)
         browse->setToolTip(QStringLiteral("The profile file must be on the VP computer; type its path."));

@@ -441,37 +441,58 @@ namespace LedDrive
 				}
 			}
 		}
+		return true;
+	}
+
+	// The LED profile file on its own (audit round 2): a missing or invalid
+	// profile never invalidates the configuration - VP still starts and the
+	// LED drive runs on the built-in values plus the main settings. This
+	// reports the problem for the log and the Config app.
+	inline LedDriveConfig ReadLedDriveConfigWith(const ConfigFile& config, bool useProfile);
+	// The profile file by itself: readable, an [led_drive.Default] section,
+	// only LED tuning keys with valid values.
+	inline bool ValidateLedProfileFile(const std::string& profilePath, std::string& error)
+	{
+		error.clear();
+		ConfigFile profile;
+		if (!profile.Load(profilePath, ConfigFile::ReadPolicy::Fresh))
+		{
+			error = "[led_drive.Default] profile_file: cannot read " + profilePath;
+			return false;
+		}
+		const std::string section = LedProfileSection(profile);
+		if (section.empty())
+		{
+			error = "LED profile " + profilePath + " has no [led_drive.Default] section";
+			return false;
+		}
+		std::string nested;
+		if (profile.TryGetString(section, "profile_file", nested) ||
+			profile.TryGetString(section, "enabled", nested))
+		{
+			error = "LED profile " + profilePath +
+				": enabled and profile_file belong in the main configuration";
+			return false;
+		}
+		std::string profileError;
+		if (!ConfigSchema::ValidateSection(profile, section, LedDriveRules(), profileError))
+		{
+			error = "LED profile " + profilePath + ": " + profileError;
+			return false;
+		}
+		return true;
+	}
+
+	inline bool ValidateLedProfile(const ConfigFile& config, std::string& error)
+	{
+		error.clear();
 		const std::string profilePath = LedProfilePath(config);
 		if (!profilePath.empty())
 		{
-			ConfigFile profile;
-			if (!profile.Load(profilePath, ConfigFile::ReadPolicy::Fresh))
-			{
-				error = "[led_drive.Default] profile_file: cannot read " + profilePath;
+			if (!ValidateLedProfileFile(profilePath, error))
 				return false;
-			}
-			const std::string section = LedProfileSection(profile);
-			if (section.empty())
-			{
-				error = "LED profile " + profilePath + " has no [led_drive.Default] section";
-				return false;
-			}
-			std::string nested;
-			if (profile.TryGetString(section, "profile_file", nested) ||
-				profile.TryGetString(section, "enabled", nested))
-			{
-				error = "LED profile " + profilePath +
-					": enabled and profile_file belong in the main configuration";
-				return false;
-			}
-			std::string profileError;
-			if (!ConfigSchema::ValidateSection(profile, section, ledRules, profileError))
-			{
-				error = "LED profile " + profilePath + ": " + profileError;
-				return false;
-			}
 			// The profile and the main settings together.
-			const LedDriveConfig merged = ReadLedDriveConfig(config);
+			const LedDriveConfig merged = ReadLedDriveConfigWith(config, true);
 			if (merged.ledFloor > merged.ledCeiling || merged.ledFloorBlack > merged.ledFloor)
 			{
 				error = "LED profile " + profilePath +
@@ -625,10 +646,10 @@ namespace LedDrive
 	// Built-in defaults (the beta_22 script's curve and tables), then the LED
 	// profile file if one is named, then the configuration's own
 	// [led_drive.Default] - so the Config app's core settings always win.
-	inline LedDriveConfig ReadLedDriveConfig(const ConfigFile& config)
+	inline LedDriveConfig ReadLedDriveConfigWith(const ConfigFile& config, bool useProfile)
 	{
 		LedDriveConfig result;
-		const std::string profilePath = LedProfilePath(config);
+		const std::string profilePath = useProfile ? LedProfilePath(config) : std::string();
 		if (!profilePath.empty())
 		{
 			ConfigFile profile;
@@ -640,6 +661,13 @@ namespace LedDrive
 		}
 		ApplyLedDriveSection(config, LED_DRIVE_SECTION, result);
 		return result;
+	}
+
+	// A profile with a problem is left out (see ValidateLedProfile).
+	inline LedDriveConfig ReadLedDriveConfig(const ConfigFile& config)
+	{
+		std::string problem;
+		return ReadLedDriveConfigWith(config, ValidateLedProfile(config, problem));
 	}
 
 	// Exponent the compensation hook (and the measurement) apply to the

@@ -643,9 +643,14 @@ void testLedDrivePageAndLiveSwitches()
     latency->setValue(100);
     auto* profile = requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.profile_file"));
     require(profile->text().isEmpty(), "A profile file appeared from nowhere");
+    auto* profileStatus = requireControl<QLabel>(window, QStringLiteral("config.led_drive.default.profile_status"));
+    require(profileStatus->isHidden(), "A profile status shows with no profile");
     profile->setText(QStringLiteral("my-led.cfg"));
+    require(!profileStatus->isHidden() && profileStatus->text().contains(QStringLiteral("ignore")),
+        "A missing profile file is not reported on the page");
     requireControl<QPushButton>(window, QStringLiteral("config.led_drive.default.profile_builtin"))->click();
     require(profile->text().isEmpty(), "Use built-in did not clear the profile file");
+    require(profileStatus->isHidden(), "The profile status stays after Use built-in");
     enabled->setChecked(true);
     selectData(mode, QStringLiteral("compensate"));
     selectData(boost, QStringLiteral("2.4"));
@@ -759,7 +764,7 @@ void testQueueFrameRateRuleIsAPlainControl()
         "The above-59 rule does not show as the frame-rate switch");
     rateFps->setValue(50.0);
     QCoreApplication::processEvents();
-    require(rule->toPlainText() == QStringLiteral("${source_rate} > 50"),
+    require(rule->toPlainText() == QStringLiteral("${cadence} > 50"),
         "Changing the frame rate did not rewrite the rule");
 
     require(select(QStringLiteral("queue.normal")), "Normal missing");
@@ -775,7 +780,7 @@ void testQueueFrameRateRuleIsAPlainControl()
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    require(saved.contains("when: ${source_rate} > 50"), "The new frame-rate rule was not saved");
+    require(saved.contains("when: ${cadence} > 50"), "The new frame-rate rule was not saved");
     require(saved.contains("when: ${eotf} == \"HDR\""), "The custom rule was changed");
 
     require(select(QStringLiteral("queue.low_latency")), "Low_Latency missing");
@@ -783,7 +788,7 @@ void testQueueFrameRateRuleIsAPlainControl()
     QCoreApplication::processEvents();
     apply->click();
     QCoreApplication::processEvents();
-    require(!readBytes(path).contains("source_rate"), "Switching the frame-rate rule off did not remove it");
+    require(!readBytes(path).contains("source_rate") && !readBytes(path).contains("cadence"), "Switching the frame-rate rule off did not remove it");
 }
 
 void testQueueTargetDelayIsOnTheQueuePage()

@@ -15534,6 +15534,12 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
 		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
 		return;
+	// A broken LED profile never stops VP: it is left out (built-in values
+	// plus the main settings) and said once per change.
+	std::string profileProblem;
+	if (!LedDrive::ValidateLedProfile(configuration, profileProblem))
+		DebugLog::Log("LED drive: WARNING LED profile ignored (%s); using the built-in values",
+			profileProblem.c_str());
 	// Tuning and script/compensate switches go to the running module, so the
 	// LED carries on from its level instead of restoring full light.
 	if (valid && m_ledDrive && m_ledDrive->Reconfigure(LedDrive::ReadProjectorConfig(configuration),

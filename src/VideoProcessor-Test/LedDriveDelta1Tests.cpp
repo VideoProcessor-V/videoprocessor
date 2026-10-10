@@ -208,20 +208,35 @@ namespace VideoProcessorTest
 			Assert::AreEqual(400.0, read.rateUp, 1e-12, L"Left out of both: built-in");
 			DeleteFileA(main.c_str());
 
-			// Problems with the profile are reported, not ignored.
-			for (const char* bad : { "[led_drive.Default]\nenabled: true\n", "[led_drive.Default]\nrate_down: fast\n",
-				"[projector.Default]\nport: COM2\n" })
+			// Audit round 2: a broken or missing profile is reported but never
+			// invalidates the configuration (VP must still start); the LED drive
+			// leaves it out and runs on the built-in values plus the main settings.
+			for (const char* bad : { "[led_drive.Default]\nenabled: true\n",
+				"[led_drive.Default]\nrate_down: fast\nrate_up: 300\n",
+				"[projector.Default]\nport: COM2\n", "[led_drive.Default]\nled_ceiling: 70\n" })
 			{
 				std::ofstream(profilePath, std::ios::trunc) << bad;
-				const std::string withBad = Write("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n");
+				const std::string withBad = Write("[led_drive.Default]\nled_floor: 80\nprofile_file: vp-led-profile-test.cfg\n");
 				ConfigFile badConfig;
 				Assert::IsTrue(badConfig.Load(withBad.c_str()));
-				Assert::IsFalse(Validate(badConfig, error), std::wstring(bad, bad + strlen(bad)).c_str());
+				const std::wstring label(bad, bad + strlen(bad));
+				Assert::IsTrue(Validate(badConfig, error), label.c_str());
+				Assert::IsFalse(ValidateLedProfile(badConfig, error), label.c_str());
+				Assert::IsFalse(error.empty());
+				const LedDriveConfig fallback = ReadLedDriveConfig(badConfig);
+				Assert::AreEqual(400.0, fallback.rateUp, 1e-12, L"Nothing from a broken profile is used");
+				Assert::AreEqual(80, fallback.ledFloor, L"The main settings still apply");
 				DeleteFileA(withBad.c_str());
 			}
 			DeleteFileA(profilePath.c_str());
-			Assert::IsFalse(Validates("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n", error));
+			Assert::IsTrue(Validates("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n", error),
+				L"A missing profile does not stop VP");
+			const std::string missing = Write("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n");
+			ConfigFile missingConfig;
+			Assert::IsTrue(missingConfig.Load(missing.c_str()));
+			Assert::IsFalse(ValidateLedProfile(missingConfig, error));
 			Assert::IsTrue(error.find("cannot read") != std::string::npos);
+			DeleteFileA(missing.c_str());
 		}
 
 		TEST_METHOD(ExperimentalFadeToBlackUsesTheCustomDimAndComesBack)
@@ -311,6 +326,79 @@ namespace VideoProcessorTest
 			const auto final = projector->Writes();
 			Assert::AreEqual(std::string(":LPW1255\r"), final.back());
 			Assert::AreEqual(std::string(":LDMM0\r"), final[final.size() - 2]);
+		}
+
+		TEST_METHOD(SwitchingModeDuringTheCustomDimLeavesItAtOnce)
+		{
+			// Audit round 2: compensate -> script while the custom dim is on must
+			// send LDMM 0 before any LPW1, or the screen stays dark.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			config.ftbCustomDim = FtbCustomDim::Together;
+			config.ftbStepMs = 100;
+			config.ftbBlackMs = 200;
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SetLookaheadDepth(3);
+			StatsBuilder builder(module.Config());
+			for (uint64_t s = 1; s < 400; ++s)
+				module.SubmitPrediction(s, builder.Build(Frame(16.0), s * FRAME_MS));
+			module.SubmitMeasurement(Frame(16.0));
+			uint64_t sequence = 0;
+			for (int i = 0; i < 300 && !module.CustomDimEngaged(); ++i)
+			{
+				++sequence;
+				module.BeginFrameAt(sequence, sequence * FRAME_MS);
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+			}
+			Assert::IsTrue(module.CustomDimEngaged());
+			Assert::IsTrue(WaitFor([&] { return !module.ProjectorStatus().sequenceBusy; }, 5000));
+			const size_t before = projector->Writes().size();
+
+			LedDriveConfig script = config;
+			script.mode = Mode::Script;
+			Assert::IsTrue(module.Reconfigure(port, script), L"A mode change is applied live");
+			Assert::IsFalse(module.CustomDimEngaged(), L"Leaving the compensate mode leaves the custom dim");
+			Assert::IsTrue(WaitFor([&] { return projector->Writes().size() > before; }, 3000));
+			// Let script mode run a little; it may send LPW1, but only after LDMM 0.
+			std::this_thread::sleep_for(std::chrono::milliseconds(600));
+			const auto after = projector->Writes();
+			Assert::AreEqual(std::string(":LDMM0\r"), after[before], L"LDMM 0 is the first command after the switch");
+			for (size_t i = before + 1; i < after.size(); ++i)
+				Assert::IsTrue(after[i].rfind(":LDC", 0) != 0 && after[i] != ":LDMM1\r",
+					L"Script mode never sends custom-dim commands");
+		}
+
+		TEST_METHOD(ScriptModeWithTheExperimentConfiguredSendsNoCustomDim)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.ftbCustomDim = FtbCustomDim::Turns;
+			config.ftbBlackMs = 100;
+			{
+				LedDriveModule module(port, config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
+				for (uint64_t frame = 1; frame <= 120; ++frame)
+				{
+					module.SubmitMeasurement(Frame(16.0), frame);
+					module.BeginFrameAt(frame, frame * FRAME_MS);
+					std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				}
+				Assert::IsFalse(module.CustomDimEngaged(), L"A black picture in script mode never engages it");
+			}
+			for (const auto& w : projector->Writes())
+				Assert::IsTrue(w.rfind(":LDC", 0) != 0 && w != ":LDMM1\r",
+					L"Only the LDMM 0 safety reset, never custom-dim levels, outside compensate");
 		}
 
 		TEST_METHOD(ExperimentalFadeToBlackNeedsTheLookahead)
