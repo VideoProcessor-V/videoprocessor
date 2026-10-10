@@ -8907,6 +8907,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     };
     auto* stepMs = numberSetting(QStringLiteral("ftb_step_ms"), 50, 1000, 100, QStringLiteral(" ms"));
     experimentForm->addRow(QStringLiteral("Step interval"), stepMs);
+    // How far each colour moves per command when taking turns: smaller keeps
+    // the three colours closer (less colour shift) but takes longer.
+    auto* turnStep = numberSetting(QStringLiteral("ftb_turn_step"), 1, 50, 2, QStringLiteral(" levels"));
+    experimentForm->addRow(QStringLiteral("Step size per colour"), turnStep);
     auto* customStart = numberSetting(QStringLiteral("ftb_custom_start"), 1, 255, 60, QString());
     experimentForm->addRow(QStringLiteral("Custom level matching 60"), customStart);
     auto* customFloor = numberSetting(QStringLiteral("ftb_custom_floor"), 0, 254, 30, QString());
@@ -8920,11 +8924,13 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "blue LEDs down, one command per step interval; at the first light it switches back. \"Taking turns\" "
         "keeps the three colours within one small step of each other, so the black does not change colour. "
         "The custom level matching 60 must be measured on the projector first (DEPLOY.txt).")));
-    auto syncExperiment = [experimentEnabled, method, stepMs, customStart, customFloor]
+    auto syncExperiment = [experimentEnabled, method, stepMs, turnStep, customStart, customFloor]
     {
         const bool on = experimentEnabled->isChecked();
         for (QWidget* control : std::vector<QWidget*>{ method, stepMs, customStart, customFloor })
             control->setEnabled(on);
+        // The step size only matters when the colours take turns.
+        turnStep->setEnabled(on && method->currentData().toString() == QStringLiteral("turns"));
     };
     syncExperiment();
     connect(experimentEnabled, &QCheckBox::toggled, this, [syncExperiment, saveLed, method](bool on)
@@ -8933,8 +8939,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         saveLed(QStringLiteral("ftb_custom_dim"), on ? method->currentData().toString() : QStringLiteral("off"));
     });
     connect(method, qOverload<int>(&QComboBox::currentIndexChanged), this,
-        [experimentEnabled, saveLed, method](int)
+        [experimentEnabled, saveLed, method, syncExperiment](int)
     {
+        syncExperiment();
         if (experimentEnabled->isChecked())
             saveLed(QStringLiteral("ftb_custom_dim"), method->currentData().toString());
     });

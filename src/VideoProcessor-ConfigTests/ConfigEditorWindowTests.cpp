@@ -662,7 +662,12 @@ void testLedDrivePageAndLiveSwitches()
     experiment->setChecked(true);
     require(method->isEnabled() && stepMs->isEnabled() && customFloor->isEnabled(),
         "Switching the experiment on did not enable its options");
+    auto* turnStep = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.ftb_turn_step"));
+    selectData(method, QStringLiteral("together"));
+    require(!turnStep->isEnabled(), "The step size is offered for 'together', where it does nothing");
     selectData(method, QStringLiteral("turns"));
+    require(turnStep->isEnabled() && turnStep->value() == 2, "The step size is not offered for 'taking turns'");
+    turnStep->setValue(3);
     customFloor->setValue(20);
     QCoreApplication::processEvents();
     QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
@@ -672,7 +677,7 @@ void testLedDrivePageAndLiveSwitches()
     const QByteArray saved = readBytes(path);
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
-        "led_floor_reactive: 110", "led_latency_ms: 100" })
+        "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);
