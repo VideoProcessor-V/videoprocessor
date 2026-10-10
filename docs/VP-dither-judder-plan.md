@@ -747,7 +747,10 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   in `docs/reference/LED-power-vs-contrast.md`): equal white at LED L and
   contrast C fits `L = 255 x (50/C)^2.41` (rms 1 level). Confirms CNTR as an
   encoded-domain gain with 50 = unity (script mode) and flux proportional
-  to LPW1 on the original engine; suggests the projector's effective gamma
+  to LPW1 on the original engine. Owner: the projector fits its LED drive
+  at every startup, so the non-stock engine tracks LPW1 too - linear flux
+  stays the default and a flux_table is optional (supersedes answers-2 B1's
+  "do not assume linear"). It suggests the projector's effective gamma
   was ~2.4, so `compensation_eotf` 2.2 would under-compensate by ~7% at LED
   100 - decision pending (settable in an LED profile).
 - Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the

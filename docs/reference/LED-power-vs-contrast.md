@@ -58,10 +58,14 @@ So, on the original light engine:
    assumption behind `mode: script` (answers-1 §1, `gain = contrast / 50`)
    is confirmed.
 2. **Light output was proportional to LPW1** - the linear flux default
-   (answers-2 B1) held for the original engine. The current light engine is
-   non-stock and still needs its own `flux_table` measurement.
+   (answers-2 B1) held for the original engine. Owner, 2026-10-10: the
+   projector measures an LED drive ramp at every startup (colour balance and
+   drive current vs output), so the output tracks LPW1 on the non-stock
+   engine too, and anecdotally it does. The linear default therefore stands;
+   a `flux_table` measurement is an optional check, not a requirement.
 3. **The effective display gamma relating signal to light was about 2.4,
-   not 2.2.** `compensation_eotf` (the exponent the compensation hook
+   not 2.2** (with flux proportional to LPW1, the 2.41 can only come from
+   the projector's own gamma). `compensation_eotf` (the exponent the compensation hook
    linearises with in `mode: compensate`) defaults to 2.2 from answers-1
    §7 ("the FL35 runs film 2.2"). If the projector still behaves this way,
    2.2 under-compensates slightly: at LED 100 the picture would be about 7%
