@@ -9,6 +9,7 @@
 #include <vprenderer/NativeStatsOverlayPlacement.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
+#include <vprenderer/DejudderWarp.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <NlsGeometryPolicy.h>
@@ -504,6 +505,8 @@ namespace
 		{
 			return m_d3d11 ? m_d3d11->gpu : nullptr;
 		}
+
+		pl_log Log() const { return m_log; }
 
 		// Routes libplacebo warnings and errors into `sink` (nullptr restores
 		// silence), so a failing assertion can say why a shader was rejected.
@@ -3614,6 +3617,347 @@ namespace VideoProcessorTest
 				}
 			Assert::IsTrue(carriedPixels * 50 <= total,
 				(L"Pixels carrying a residual across the cut: " + std::to_wstring(carriedPixels)).c_str());
+		}
+
+		// Stage 6a: the de-judder's matcher and warp on the real GPU path.
+		struct DejudderFrame
+		{
+			int width = 0, height = 0;
+			std::vector<uint16_t> luma;     // width x height
+			std::vector<uint16_t> chroma;   // (width / 2) x height, CbCr interleaved
+		};
+
+		// Aperiodic texture with detail at three scales (4, 16 and 64 px
+		// cells), like a real picture: fine detail survives the half-resolution
+		// luma and the broad structure survives the coarse pyramid levels.
+		// Values in 16-bit code units.
+		static uint16_t DejudderTexture(int x, int y, unsigned salt = 0)
+		{
+			auto noise = [salt](int cx, int cy, unsigned level) -> unsigned
+			{
+				const unsigned cell = (static_cast<unsigned>(cx) * 73856093u) ^
+					(static_cast<unsigned>(cy) * 19349663u) ^ (salt * 83492791u) ^ (level * 2246822519u);
+				return ((cell * 2654435761u) >> 16) % 16000u;
+			};
+			// Floor division, so negative coordinates (outside the picture) stay aperiodic.
+			auto cellOf = [](int v, int size) { return v >= 0 ? v / size : -((-v + size - 1) / size); };
+			return static_cast<uint16_t>(8000 + noise(cellOf(x, 4), cellOf(y, 4), 1) +
+				noise(cellOf(x, 16), cellOf(y, 16), 2) + noise(cellOf(x, 64), cellOf(y, 64), 3));
+		}
+
+		template <typename Luma, typename Chroma>
+		static DejudderFrame MakeDejudderFrame(int width, int height, Luma luma, Chroma chroma)
+		{
+			DejudderFrame frame;
+			frame.width = width;
+			frame.height = height;
+			frame.luma.resize(static_cast<size_t>(width) * height);
+			frame.chroma.resize(static_cast<size_t>(width / 2) * height * 2);
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width; ++x)
+					frame.luma[static_cast<size_t>(y) * width + x] = luma(x, y);
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width / 2; ++x)
+				{
+					const size_t i = (static_cast<size_t>(y) * (width / 2) + x) * 2;
+					frame.chroma[i] = chroma(x, y, 0);
+					frame.chroma[i + 1] = chroma(x, y, 1);
+				}
+			return frame;
+		}
+
+		struct DejudderGpuPlanes
+		{
+			pl_gpu gpu = nullptr;
+			Dejudder::Planes planes;
+			~DejudderGpuPlanes()
+			{
+				pl_tex_destroy(gpu, &planes.luma);
+				pl_tex_destroy(gpu, &planes.chroma);
+			}
+		};
+
+		static void UploadDejudderFrame(pl_gpu gpu, const DejudderFrame& frame, DejudderGpuPlanes& out)
+		{
+			const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE);
+			pl_fmt r16 = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16, caps);
+			pl_fmt rg16 = pl_find_fmt(gpu, PL_FMT_UNORM, 2, 16, 16, caps);
+			Assert::IsNotNull(r16, L"No storable R16 format");
+			Assert::IsNotNull(rg16, L"No storable RG16 format");
+			out.gpu = gpu;
+			pl_tex_params luma{};
+			luma.w = frame.width;
+			luma.h = frame.height;
+			luma.format = r16;
+			luma.sampleable = true;
+			luma.host_readable = true;
+			luma.initial_data = frame.luma.data();
+			out.planes.luma = pl_tex_create(gpu, &luma);
+			pl_tex_params chroma = luma;
+			chroma.w = frame.width / 2;
+			chroma.format = rg16;
+			chroma.initial_data = frame.chroma.data();
+			out.planes.chroma = pl_tex_create(gpu, &chroma);
+			out.planes.chromaShiftX = 1;
+			out.planes.chromaShiftY = 0;
+			Assert::IsNotNull(out.planes.luma);
+			Assert::IsNotNull(out.planes.chroma);
+		}
+
+		static std::vector<uint16_t> DownloadPlane(pl_gpu gpu, pl_tex tex)
+		{
+			std::vector<uint16_t> data(static_cast<size_t>(tex->params.w) * tex->params.h *
+				tex->params.format->num_components);
+			pl_tex_transfer_params download{};
+			download.tex = tex;
+			download.ptr = data.data();
+			Assert::IsTrue(pl_tex_download(gpu, &download));
+			return data;
+		}
+
+		struct DejudderField
+		{
+			std::vector<float> texels;   // rgba per block
+			int blocksX = 0, blocksY = 0;
+			float vx(int bx, int by) const { return texels[(by * blocksX + bx) * 4]; }
+			float vy(int bx, int by) const { return texels[(by * blocksX + bx) * 4 + 1]; }
+			bool trusted(int bx, int by) const { return texels[(by * blocksX + bx) * 4 + 2] > 0.5f; }
+		};
+
+		static DejudderField DownloadField(pl_gpu gpu, const Dejudder::MotionWarp& warp, pl_tex which = nullptr)
+		{
+			pl_tex field = which ? which : warp.Field();
+			Assert::IsNotNull(field);
+			DejudderField result;
+			result.blocksX = warp.BlocksX();
+			result.blocksY = warp.BlocksY();
+			std::vector<uint16_t> half(static_cast<size_t>(result.blocksX) * result.blocksY * 4);
+			pl_tex_transfer_params download{};
+			download.tex = field;
+			download.ptr = half.data();
+			Assert::IsTrue(pl_tex_download(gpu, &download), L"Field is not host-readable");
+			result.texels.resize(half.size());
+			for (size_t i = 0; i < half.size(); ++i)
+			{
+				// IEEE half -> float
+				const uint16_t h = half[i];
+				const int sign = (h >> 15) & 1, exponent = (h >> 10) & 31, mantissa = h & 1023;
+				float value = exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -24) :
+					exponent == 31 ? (mantissa ? NAN : INFINITY) :
+					std::ldexp(static_cast<float>(mantissa | 1024), exponent - 25);
+				result.texels[i] = sign ? -value : value;
+			}
+			return result;
+		}
+
+		static Dejudder::Settings DejudderTestSettings()
+		{
+			Dejudder::Settings settings;
+			settings.hostReadable = true;
+			return settings;
+		}
+
+		TEST_METHOD(DejudderFollowsAMovingPictureAndWarpsBySDelta)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			// Content moves (12, 6) source pixels from A to B.
+			static constexpr int dx = 12, dy = 6;
+			auto chromaA = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, chromaA);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+
+			std::string log;
+			fixture.CaptureLog(&log);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			const bool estimated = warp.Estimate(planesA.planes, planesB.planes);
+			fixture.CaptureLog(nullptr);
+			Assert::IsTrue(estimated, std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+
+			// Interior blocks: trusted, vector (12, 6).
+			const DejudderField field = DownloadField(gpu, warp);
+			int interior = 0, good = 0;
+			for (int by = 2; by < field.blocksY - 2; ++by)
+				for (int bx = 2; bx < field.blocksX - 2; ++bx)
+				{
+					++interior;
+					if (field.trusted(bx, by) && std::abs(field.vx(bx, by) - dx) < 0.6f &&
+						std::abs(field.vy(bx, by) - dy) < 0.6f)
+						++good;
+				}
+			// Both searches, for the message: the trust needs them to agree.
+			const DejudderField fwdField = DownloadField(gpu, warp, warp.Forward());
+			const DejudderField bwdField = DownloadField(gpu, warp, warp.Backward());
+			int fwdOk = 0, bwdOk = 0;
+			for (int by = 2; by < field.blocksY - 2; ++by)
+				for (int bx = 2; bx < field.blocksX - 2; ++bx)
+				{
+					fwdOk += (std::abs(fwdField.vx(bx, by) - 6) < 0.3f && std::abs(fwdField.vy(bx, by) - 3) < 0.3f) ? 1 : 0;
+					bwdOk += (std::abs(bwdField.vx(bx, by) + 6) < 0.3f && std::abs(bwdField.vy(bx, by) + 3) < 0.3f) ? 1 : 0;
+				}
+			Assert::IsTrue(good * 100 >= interior * 95,
+				(L"Trusted (12, 6) vectors: " + std::to_wstring(good) + L" of " + std::to_wstring(interior) +
+					L" (forward right " + std::to_wstring(fwdOk) + L", backward right " + std::to_wstring(bwdOk) +
+					L"); log: " + std::wstring(log.begin(), log.end())).c_str());
+
+			// shift 0.5: the picture lands half way, (6, 3).
+			Dejudder::Planes out;
+			Assert::IsTrue(warp.Warp(planesA.planes, 0.5f, out));
+			Assert::IsTrue(out.luma != planesA.planes.luma, L"A warp writes new planes");
+			const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+			int checked = 0, exact = 0;
+			for (int y = 24; y < height - 24; ++y)
+				for (int x = 24; x < width - 24; ++x)
+				{
+					++checked;
+					if (std::abs(static_cast<int>(luma[y * width + x]) - DejudderTexture(x - 6, y - 3)) <= 2)
+						++exact;
+				}
+			Assert::IsTrue(exact * 100 >= checked * 95, // held (untrusted) blocks excepted
+				(L"Warped luma at (6, 3): " + std::to_wstring(exact) + L" of " + std::to_wstring(checked)).c_str());
+
+			// CbCr (4:2:2): the horizontal motion is half in chroma pixels.
+			const std::vector<uint16_t> chroma = DownloadPlane(gpu, out.chroma);
+			int cchecked = 0, cexact = 0;
+			for (int y = 24; y < height - 24; ++y)
+				for (int x = 12; x < width / 2 - 12; ++x)
+				{
+					++cchecked;
+					const int expected = DejudderTexture((x - 3) * 2, y - 3, 7);
+					if (std::abs(static_cast<int>(chroma[(y * (width / 2) + x) * 2]) - expected) <= 2)
+						++cexact;
+				}
+			Assert::IsTrue(cexact * 100 >= cchecked * 95,
+				(L"Warped chroma at (3, 3): " + std::to_wstring(cexact) + L" of " + std::to_wstring(cchecked)).c_str());
+
+			// Edges clamp to A's edge pixel, never black: the left columns of a
+			// picture moving right sample beyond the edge.
+			for (int y = 24; y < height - 24; y += 7)
+				for (int x = 0; x < 6; ++x)
+					Assert::IsTrue(luma[y * width + x] > 4000,
+						L"A sample beyond the edge must clamp to the picture, not black");
+
+			// shift 0 (the refresh A starts on) is A itself.
+			Assert::IsTrue(warp.Warp(planesA.planes, 0.0f, out));
+			Assert::IsTrue(out.luma == planesA.planes.luma && out.chroma == planesA.planes.chroma);
+		}
+
+		TEST_METHOD(DejudderRefinesToHalfAPixel)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			// (7, 3) source pixels = (3.5, 1.5) at half resolution.
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - 7, y - 3); }, chroma);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+			const DejudderField field = DownloadField(gpu, warp);
+			int interior = 0, good = 0;
+			for (int by = 2; by < field.blocksY - 2; ++by)
+				for (int bx = 2; bx < field.blocksX - 2; ++bx)
+				{
+					++interior;
+					if (std::abs(field.vx(bx, by) - 7.0f) <= 1.0f && std::abs(field.vy(bx, by) - 3.0f) <= 1.0f)
+						++good;
+				}
+			Assert::IsTrue(good * 100 >= interior * 90,
+				(L"(7, 3) within one pixel: " + std::to_wstring(good) + L" of " + std::to_wstring(interior)).c_str());
+		}
+
+		TEST_METHOD(DejudderHoldsAtACutAndAtOcclusions)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+
+			// A cut: B is an unrelated picture. Nothing is trusted, so the warp
+			// is a hard hold of A everywhere.
+			{
+				const DejudderFrame a = MakeDejudderFrame(width, height,
+					[](int x, int y) { return DejudderTexture(x, y); }, chroma);
+				const DejudderFrame b = MakeDejudderFrame(width, height,
+					[](int x, int y) { return DejudderTexture(x, y, 99); }, chroma);
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, a, planesA);
+				UploadDejudderFrame(gpu, b, planesB);
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				const DejudderField field = DownloadField(gpu, warp);
+				int trusted = 0;
+				for (int by = 0; by < field.blocksY; ++by)
+					for (int bx = 0; bx < field.blocksX; ++bx)
+						trusted += field.trusted(bx, by) ? 1 : 0;
+				Assert::IsTrue(trusted * 100 <= field.blocksX * field.blocksY * 2,
+					(L"Trusted blocks across a cut: " + std::to_wstring(trusted)).c_str());
+				Dejudder::Planes out;
+				Assert::IsTrue(warp.Warp(planesA.planes, 0.3f, out));
+				const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+				int held = 0;
+				for (size_t i = 0; i < luma.size(); ++i)
+					held += luma[i] == a.luma[i] ? 1 : 0;
+				Assert::IsTrue(held * 100 >= static_cast<int>(luma.size()) * 97,
+					L"Across a cut the warp must be a hard hold of A (no blend)");
+				// The caller's own cut flag holds everything.
+				Assert::IsTrue(warp.Warp(planesA.planes, 0.3f, out, false));
+				Assert::IsTrue(out.luma == planesA.planes.luma);
+			}
+
+			// Occlusion: a textured square moves 16 px right over a still
+			// background. Blocks at its leading and trailing edges are covered
+			// or revealed and must hold; the square and the far background
+			// keep their own motion.
+			{
+				auto scene = [](int shift)
+				{
+					return [shift](int x, int y)
+					{
+						const bool inside = x >= 80 + shift && x < 144 + shift && y >= 32 && y < 96;
+						return inside ? DejudderTexture(x - shift, y, 5) : DejudderTexture(x, y);
+					};
+				};
+				const DejudderFrame a = MakeDejudderFrame(width, height, scene(0), chroma);
+				const DejudderFrame b = MakeDejudderFrame(width, height, scene(16), chroma);
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, a, planesA);
+				UploadDejudderFrame(gpu, b, planesB);
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				const DejudderField field = DownloadField(gpu, warp);
+				// Blocks are 16x16 source pixels: the square covers bx 5..8,
+				// by 2..5. bx 9 is about to be covered (leading edge).
+				Assert::IsFalse(field.trusted(9, 3), L"A block about to be covered must not be trusted");
+				Assert::IsTrue(field.trusted(6, 3) && std::abs(field.vx(6, 3) - 16.0f) < 0.6f,
+					L"The square's inside keeps its motion");
+				Assert::IsTrue(field.trusted(1, 1) && std::abs(field.vx(1, 1)) < 0.6f,
+					L"The still background far away is trusted with no motion");
+				Dejudder::Planes out;
+				Assert::IsTrue(warp.Warp(planesA.planes, 0.4f, out));
+				const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+				// Inside an untrusted block the output is A, unchanged.
+				for (int y = 50; y < 60; ++y)
+					for (int x = 150; x < 158; ++x)
+						Assert::AreEqual(static_cast<int>(a.luma[y * width + x]),
+							static_cast<int>(luma[y * width + x]), L"Occluded blocks are a hard hold of A");
+			}
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)

@@ -516,6 +516,42 @@ override the sketch below where they differ.
   blend.
 - **Build order:** 6a standalone component with WARP tests → 6b ring,
   presents, phase, flag, stats, Config → 6c mask.
+
+**6a status (2026-10-10): built, not connected.** `vprenderer/DejudderWarp.h/.cpp`
+holds `Dejudder::MotionWarp`, a native compute component with its own
+`pl_dispatch`.
+
+`Estimate(A, B)` runs the motion search:
+- Half-resolution luma, with a pyramid at 1/8 and 1/32 source resolution.
+- Per 8×8 half-resolution block (16×16 source pixels):
+  - a full search at 1/32 (±3 texels = ±96 px);
+  - at 1/8, half-texel steps within ±3 of zero and of the 1/32 result;
+  - at half resolution, whole pixels within ±3 of both 1/8 results and ±2
+    of zero, then half a pixel.
+  Keeping both candidates made the search robust: two pure coarse-to-fine
+  versions failed on the tests.
+- The search runs both ways. A block is trusted when its match error is
+  ≤ `matchTolerance` (3 codes) and the two directions agree within 1
+  half-resolution pixel.
+
+`Warp(A, s·δ)` warps the Y and CbCr planes:
+- the vector is interpolated bilinearly between trusted block centres;
+- the CbCr vector is divided by the subsampling (horizontal halved for
+  4:2:2);
+- edges clamp;
+- an untrusted block, or a `trusted = false` frame, is a hard hold of A's
+  pixels. There is never a blend.
+
+WARP GPU tests in `LibplaceboLutParserTests.cpp` cover:
+- (12, 6) px motion: ≥95% of blocks trusted with the right vector; luma and
+  chroma land at s·δ = 0.5; edges clamp, never black;
+- (7, 3) px: within 1 px;
+- a cut: ≤2% of blocks trusted, output = A;
+- occlusion: a square moving over a still background. The covered edge is
+  untrusted and held; the square and the far background keep their motion.
+
+A libplacebo quirk found on the way: a pass that binds the same texture
+twice is rejected only in the log, not as a failed dispatch.
 Needs the render path to see frame A and next frame B (second texture to a
 hook, or `pl_render_image_mix`). Per refresh, true position t between A and B
 (3:2 at 60 Hz cycles 0, .4, .8, .2, .6); render at
