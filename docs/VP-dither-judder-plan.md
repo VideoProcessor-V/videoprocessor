@@ -354,6 +354,46 @@ Ramp protocol (§7). Settle converter rounding vs truncation. Tune
 on this display, stop and reassess before any further stage.
 
 ### Stage 4 — Motion-compensated residual carry
+
+**Status (2026-10-10): built, not yet on the projector.** It is on
+`stage7-rc2` and lives in `shaders/Temporal sigma-delta.glsl`, which is
+still one file. The new parameter `motion_compensation` defaults to 0
+(off), so the sigma-delta can be judged on its own first (stage 3); 1
+switches the motion-compensated carry on. Both are in the Config app's
+Shader settings box.
+
+Passes:
+1. Quarter-resolution luma, from gamma-encoded code values, plus a coarse
+   1/16-resolution level computed from it.
+2. Hierarchical block matching per 16x16 block:
+   - coarse: a full search within ±4 coarse texels (±64 full pixels);
+   - fine: a full search within ±2 quarter pixels of zero and of the coarse
+     result, and ±1 of the block's last non-zero vector. That vector is kept
+     through 3:2 repeats, so a film pan keeps its predictor.
+   Vectors and confidence (mean luma error ≤ `match_tolerance`, default
+   1.5 codes) go into a texture. A first version without the coarse level
+   was not enough: its three-step search missed 20 px/refresh motion on
+   fine texture.
+3. A state pass. The quantizer reads one set of residual/value textures and
+   writes a staging set, so no pixel overwrites a value another pixel still
+   reads.
+4. The quantizer. It takes the residual from where the content was on the
+   previous refresh. Each carried value must pass the existing per-pixel
+   motion gate; otherwise it falls back to the plain gate, then to zero.
+
+libplacebo's `frame` uniform counts shader passes, not refreshes, so it
+cannot be used to alternate the buffers; that is why there is a staging
+set.
+
+Verified on the real libplacebo path (WARP) in VideoProcessor-Test:
+- A textured picture moving at 4 or 20 px per refresh: the time-average
+  along the motion comes back to the true value (the plain gate leaves a
+  quarter-code bias).
+- Still pictures are unchanged.
+- A scene cut carries nothing.
+
+The GPU time budget (≈1 ms) has not been measured on the 3090. Storage is
+six full-size rgba16f textures, about 200 MB at 2560x1600.
 Compute pass before the quantizer: hierarchical block matching on
 gamma-encoded luma at quarter resolution (vector error only misplaces ≤0.5
 code), forward-only from a persistent previous-luma texture; vectors +

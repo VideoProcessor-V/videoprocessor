@@ -530,6 +530,71 @@ namespace
 			return pl_renderer_get_hdr_metadata(m_renderer, &metadata);
 		}
 
+		// Renders a sequence of frames through one hook (full-range 8-bit
+		// target, same colour space in and out, no dither) and returns the red
+		// codes of each frame. code(frame, x, y) is the source value in 8-bit
+		// code units, with fractions (the source texture is 32-bit float).
+		template <typename Code>
+		std::vector<std::vector<int>> RenderSequence(const pl_hook* hook,
+			int width, int height, int frames, Code code)
+		{
+			pl_gpu gpu = m_d3d11->gpu;
+			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(sourceFormat);
+			Assert::IsNotNull(targetFormat);
+			pl_tex_params targetParams{};
+			targetParams.w = width;
+			targetParams.h = height;
+			targetParams.format = targetFormat;
+			targetParams.renderable = true;
+			targetParams.host_readable = true;
+			pl_tex targetTexture = pl_tex_create(gpu, &targetParams);
+			Assert::IsNotNull(targetTexture);
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			params.hooks = &hook;
+			params.num_hooks = 1;
+			std::vector<std::vector<int>> result;
+			std::vector<float> input(static_cast<size_t>(width) * height * 4);
+			std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
+			for (int frame = 0; frame < frames; ++frame)
+			{
+				for (int y = 0; y < height; ++y)
+					for (int x = 0; x < width; ++x)
+					{
+						const float value = static_cast<float>(code(frame, x, y)) / 255.0f;
+						float* texel = &input[(static_cast<size_t>(y) * width + x) * 4];
+						texel[0] = texel[1] = texel[2] = value;
+						texel[3] = 1.0f;
+					}
+				pl_tex_params sourceParams{};
+				sourceParams.w = width;
+				sourceParams.h = height;
+				sourceParams.format = sourceFormat;
+				sourceParams.sampleable = true;
+				sourceParams.initial_data = input.data();
+				pl_tex sourceTexture = pl_tex_create(gpu, &sourceParams);
+				Assert::IsNotNull(sourceTexture);
+				pl_frame image = MakeRgbFrame(sourceTexture);
+				pl_frame target = MakeRgbFrame(targetTexture);
+				Assert::IsTrue(pl_render_image(m_renderer, &image, &target, &params));
+				pl_gpu_finish(gpu);
+				pl_tex_transfer_params download{};
+				download.tex = targetTexture;
+				download.ptr = output.data();
+				Assert::IsTrue(pl_tex_download(gpu, &download));
+				pl_tex_destroy(gpu, &sourceTexture);
+				std::vector<int> red(output.size());
+				for (size_t i = 0; i < output.size(); ++i) red[i] = output[i].r;
+				result.push_back(std::move(red));
+			}
+			pl_tex_destroy(gpu, &targetTexture);
+			return result;
+		}
+
 		std::vector<RgbaPixel> RenderCoordinateField(
 			const pl_hook* hook, int width = 64, int height = 64,
 			const LuminanceCase* luminance = nullptr, AnamorphicGpuCase* geometry = nullptr)
@@ -3387,6 +3452,148 @@ namespace VideoProcessorTest
 				Assert::IsTrue(pixels[row + x].r >= pixels[row + x - 1].r, L"Ramp must be monotonic");
 			Assert::AreEqual(static_cast<int>(pixels[5 * 64 + 20].r),
 				static_cast<int>(pixels[50 * 64 + 20].r), L"Ramp must not depend on the picture");
+		}
+
+		// Stage 4: the sigma-delta's carried residual follows the picture's
+		// motion. A textured picture with a quarter-code fraction moves 4
+		// pixels right per refresh. With the plain gate every pixel changes, so
+		// the residual is thrown away and the output is always the rounded
+		// value (a quarter code low on average). With motion compensation the
+		// residual travels with the content and the average along the motion
+		// comes back to the true value.
+		struct SigmaDeltaRun
+		{
+			double meanError = 0.0;   // along the motion, interior pixels
+			std::vector<std::vector<int>> frames;
+		};
+
+		static double SigmaDeltaTexture(int x, int y)
+		{
+			// Aperiodic integer texture in 2x2 cells (so it survives the
+			// quarter-resolution luma), plus a quarter code everywhere.
+			const unsigned cell = static_cast<unsigned>((x >> 1) * 73856093u) ^
+				static_cast<unsigned>((y >> 1) * 19349663u);
+			return 40.0 + static_cast<double>((cell * 2654435761u >> 24) % 150u) + 0.25;
+		}
+
+		static SigmaDeltaRun RunSigmaDelta(bool motionCompensation, int speed, int frames,
+			bool cutAtFrame4 = false)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.stageOrder = 90;
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" }, { "swapchain_bits", "8" },
+				{ "noise_amplitude", "0" }, { "motion_threshold", "1" },
+				{ "motion_compensation", motionCompensation ? "1" : "0" } };
+			chain.Configure({ sigma });
+			const int width = 128 + speed * 8, height = 64;
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = width;
+			values.outputHeight = height;
+			values.sourceWidth = width;
+			values.sourceHeight = height;
+			values.refreshHz = 60.0;
+			values.sourceFps = 60.0;
+			std::string log;
+			fixture.CaptureLog(&log);
+			chain.Ensure(values);
+			fixture.CaptureLog(nullptr);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			const std::wstring rejected = L"libplacebo rejected the sigma-delta shader: " +
+				std::wstring(log.begin(), log.end());
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), rejected.c_str());
+
+			auto code = [speed, cutAtFrame4](int frame, int x, int y)
+			{
+				if (cutAtFrame4 && frame >= 4)
+					return SigmaDeltaTexture(x * 3 + 1000, y * 5 + 777); // a different picture
+				return SigmaDeltaTexture(x - speed * frame, y);
+			};
+			fixture.CaptureLog(&log);
+			SigmaDeltaRun run;
+			run.frames = fixture.RenderSequence(hooks[0], width, height, frames, code);
+			fixture.CaptureLog(nullptr);
+
+			// Follow each piece of content along its motion over frames 1..8
+			// (8 refreshes: whole cycles of a quarter-code residual).
+			if (frames < 9)
+				return run;
+			double error = 0.0;
+			int count = 0;
+			for (int y = 16; y < height - 16; ++y)
+				for (int x0 = 16; x0 < width - 16 - speed * 8; ++x0)
+				{
+					double sum = 0.0;
+					for (int frame = 1; frame <= 8; ++frame)
+						sum += run.frames[frame][y * width + x0 + speed * frame];
+					error += std::abs(sum / 8.0 - SigmaDeltaTexture(x0, y));
+					++count;
+				}
+			run.meanError = error / count;
+			return run;
+		}
+
+		TEST_METHOD(SigmaDeltaCarriesTheResidualAlongTheMotion)
+		{
+			const SigmaDeltaRun gate = RunSigmaDelta(false, 4, 9);
+			const SigmaDeltaRun carried = RunSigmaDelta(true, 4, 9);
+			Assert::IsTrue(gate.meanError > 0.2,
+				(L"With the plain gate a moving picture should round (error " +
+					std::to_wstring(gate.meanError) + L")").c_str());
+			Assert::IsTrue(carried.meanError < 0.05,
+				(L"With motion compensation the time-average along the motion should converge (error " +
+					std::to_wstring(carried.meanError) + L")").c_str());
+
+			// A still picture is unchanged by motion compensation (the plain
+			// gate still carries the residual in place).
+			// Faster motion (20 pixels per refresh) is beyond the +-8 pixel
+			// fine search around zero.
+			const SigmaDeltaRun fast = RunSigmaDelta(true, 20, 9);
+			Assert::IsTrue(fast.meanError < 0.05,
+				(L"Fast motion error " + std::to_wstring(fast.meanError)).c_str());
+			// A fast pan (48 pixels per refresh) needs the coarse level of the
+			// hierarchical search.
+			const SigmaDeltaRun faster = RunSigmaDelta(true, 48, 9);
+			Assert::IsTrue(faster.meanError < 0.05,
+				(L"48 px/refresh error " + std::to_wstring(faster.meanError)).c_str());
+			const SigmaDeltaRun still = RunSigmaDelta(true, 0, 9);
+			Assert::IsTrue(still.meanError < 0.05,
+				(L"Still picture error " + std::to_wstring(still.meanError)).c_str());
+		}
+
+		TEST_METHOD(SigmaDeltaDropsTheResidualAtASceneCut)
+		{
+			// After a cut to an unrelated picture no residual is carried: every
+			// pixel of the first new frame is the plain rounded value.
+			const SigmaDeltaRun run = RunSigmaDelta(true, 4, 6, true);
+			const int width = 128 + 4 * 8; // as RunSigmaDelta sizes it for speed 4
+			int carriedPixels = 0, total = 0;
+			for (int y = 0; y < 64; ++y)
+				for (int x = 0; x < width; ++x)
+				{
+					const double value = SigmaDeltaTexture(x * 3 + 1000, y * 5 + 777);
+					if (run.frames[4][y * width + x] != static_cast<int>(std::floor(value + 0.5)))
+						++carriedPixels;
+					++total;
+				}
+			Assert::IsTrue(carriedPixels * 50 <= total,
+				(L"Pixels carrying a residual across the cut: " + std::to_wstring(carriedPixels)).c_str());
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)
