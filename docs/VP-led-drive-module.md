@@ -560,8 +560,8 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - N-1: DEPLOY.txt §6 now asks for `read_back` on for the first custom-dim
   run. With read-back on, a missing or refused LDC*/LDMM reply is logged
   ("no LDCR reply ..." or "reply ... ignored while waiting for LDCR").
-- N-5 (`target_latency_ms` 120 vs 200): the owner's call; the test config
-  keeps 120 (no lip-sync change) until he decides.
+- N-5 (`target_latency_ms` 120 vs 200): owner chose 200 ms; the test config
+  now sets 200 (5 frames at 24p) and the audio delay goes up ~84 ms once.
 - N-6: agreed. The rc2 rebase is next, before anything more is added to
   the Config app or the queue.
 - N-2, N-3, N-4, N-7, N-8: no change.

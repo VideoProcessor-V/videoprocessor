@@ -381,8 +381,10 @@ Rules as built:
 - Range is 0-1000 ms, and the result is clamped to 1-16 frames (same as
   `target_frames`).
 
-The test cfg sets 120 ms on Normal. That gives 3 frames at 24p, the same
-delay as before, so lip sync does not change. A plain `[queue]` section with
+The test cfg sets 200 ms on Normal (owner, after design review 2 N-5;
+first built with 120 ms). That gives 5 frames at 24p (209 ms, 4 future
+frames, about 167 ms of LED look-ahead), so the audio delay goes up about
+84 ms, once. A plain `[queue]` section with
 no profiles ignores the key, because profiles are what carry the source
 rate.
 New queue-profile key `target_latency_ms` (e.g. 120). **Implement as a

@@ -262,23 +262,27 @@ namespace VideoProcessorTest
                 L"Low_Latency must not inherit Normal's look-ahead");
             Assert::AreEqual<size_t>(0, game.snapshot->queue.activePictureLookaheadFrames);
 
-            // Stage 5: Normal's target is time; film gets today's 3 frames from
-            // 120 ms, and Low_Latency's own target_frames beats the inherited time.
+            // Stage 5: Normal's target is time (owner: 200 ms); film gets 5
+            // frames, and Low_Latency's own target_frames beats the inherited time
+            // at every source rate.
             Assert::IsTrue(film.snapshot->queue.hasTargetLatencyMs);
-            Assert::AreEqual(120, film.snapshot->queue.targetLatencyMs);
+            Assert::AreEqual(200, film.snapshot->queue.targetLatencyMs);
             const auto filmTarget = QueueLatency::ResolveTargetFrames(
                 film.snapshot->queue.hasTargetLatencyMs, film.snapshot->queue.targetLatencyMs,
                 film.snapshot->queue.hasTargetFrames, film.snapshot->queue.targetFrames,
-                120, 3, 24000.0 / 1001.0);
+                200, 5, 24000.0 / 1001.0);
             Assert::IsTrue(filmTarget.fromLatency);
-            Assert::AreEqual<size_t>(3, filmTarget.frames);
+            Assert::AreEqual<size_t>(5, filmTarget.frames);
             Assert::IsFalse(game.snapshot->queue.hasTargetLatencyMs);
-            const auto gameTarget = QueueLatency::ResolveTargetFrames(
-                game.snapshot->queue.hasTargetLatencyMs, game.snapshot->queue.targetLatencyMs,
-                game.snapshot->queue.hasTargetFrames, game.snapshot->queue.targetFrames,
-                120, 3, 60000.0 / 1001.0);
-            Assert::IsFalse(gameTarget.fromLatency);
-            Assert::AreEqual<size_t>(1, gameTarget.frames, L"Low_Latency keeps its one frame");
+            for (const double rate : { 24000.0 / 1001.0, 25.0, 50.0, 60000.0 / 1001.0, 120.0 })
+            {
+                const auto gameTarget = QueueLatency::ResolveTargetFrames(
+                    game.snapshot->queue.hasTargetLatencyMs, game.snapshot->queue.targetLatencyMs,
+                    game.snapshot->queue.hasTargetFrames, game.snapshot->queue.targetFrames,
+                    200, 5, rate);
+                Assert::IsFalse(gameTarget.fromLatency);
+                Assert::AreEqual<size_t>(1, gameTarget.frames, L"Low_Latency keeps its one frame");
+            }
         }
 
         TEST_METHOD(QueueTargetLatencyBecomesWholeSourceFrames)
