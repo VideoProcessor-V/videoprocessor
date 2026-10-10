@@ -750,9 +750,13 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   to LPW1 on the original engine. Owner: the projector fits its LED drive
   at every startup, so the non-stock engine tracks LPW1 too - linear flux
   stays the default and a flux_table is optional (supersedes answers-2 B1's
-  "do not assume linear"). It suggests the projector's effective gamma
-  was ~2.4, so `compensation_eotf` 2.2 would under-compensate by ~7% at LED
-  100 - decision pending (settable in an LED profile).
+  "do not assume linear"). The table implies a gamma of ~2.4 at the time,
+  but the projector has its own gamma settings and reports 2.2 at the one
+  in use; owner keeps `compensation_eotf` 2.2 (if it were really 2.4,
+  compensation would be ~9% too bright at LED 100). Compensate mode applies
+  the exact equal-brightness compensation at every LED level down to the
+  floor - no fall-off like the script's contrast limit; the highlight
+  protection is what limits it near white.
 - Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the
   test configuration (syntax per CONFIGURATION.html; tested: 59.94 fps
   selects Low_Latency, 23.976 fps returns to Normal); Shift+L still

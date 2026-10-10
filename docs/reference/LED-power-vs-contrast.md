@@ -67,7 +67,10 @@ So, on the original light engine:
    not 2.2** (with flux proportional to LPW1, the 2.41 can only come from
    the projector's own gamma). `compensation_eotf` (the exponent the compensation hook
    linearises with in `mode: compensate`) defaults to 2.2 from answers-1
-   §7 ("the FL35 runs film 2.2"). If the projector still behaves this way,
-   2.2 under-compensates slightly: at LED 100 the picture would be about 7%
-   too dark in linear light. Owner / planner to decide; it can be set in an
-   LED profile (`compensation_eotf: 2.4`) without code changes.
+   §7 ("the FL35 runs film 2.2"). If the projector behaved like 2.4 while
+   VP assumes 2.2, compensation would come out slightly too bright (x1.05
+   at LED 150, x1.09 at 100, x1.15 at 60). Owner decision 2026-10-10: keep
+   2.2 - the projector has its own gamma settings, reports 2.2 at the
+   setting in use, and the gamma of the old measurement is unknown. It can
+   be changed in an LED profile (`compensation_eotf`) if the projector
+   shows otherwise.
