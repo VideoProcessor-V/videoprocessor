@@ -43,6 +43,22 @@ namespace LedDrive
 	{
 	}
 
+	namespace
+	{
+		// The lowest value of a window that always includes the newest sample
+		// and the newest one from before the window began.
+		double WindowMinimum(std::deque<StatsBuilder::Sample>& history, double timeMs, double value, int windowMs)
+		{
+			history.push_back({ timeMs, value });
+			while (history.size() > 1 && history[1].time <= timeMs - windowMs)
+				history.pop_front();
+			double minimum = value;
+			for (const StatsBuilder::Sample& sample : history)
+				minimum = std::min(minimum, sample.value);
+			return minimum;
+		}
+	}
+
 	FrameStats StatsBuilder::Build(const RawMeasurement& raw, double timeMs)
 	{
 		FrameStats stats;
@@ -58,18 +74,13 @@ namespace LedDrive
 			bright += raw.histogram[code];
 		stats.highlightArea = static_cast<double>(bright) / raw.blocks;
 
-		// Sustained highlight: minimum over the persistence window (the window
-		// always includes this frame and the newest one before it began).
-		history.push_back({ timeMs, stats.highlight, stats.apl });
-		while (history.size() > 1 && history[1].time <= timeMs - config.highlightPersistMs)
-			history.pop_front();
-		stats.sustainedHighlight = stats.highlight;
-		stats.sustainedApl = stats.apl;
-		for (const Sample& sample : history)
-		{
-			stats.sustainedHighlight = std::min(stats.sustainedHighlight, sample.highlight);
-			stats.sustainedApl = std::min(stats.sustainedApl, sample.apl);
-		}
+		// The script's highlight test used the maximum of its downscale.
+		stats.maximum = raw.maximum > 0 ? static_cast<double>(raw.maximum) / SUM_SCALE : stats.highlight;
+
+		// Sustained highlight: minimum over highlight_persist_ms, so a flash
+		// shorter than that never raises it.
+		stats.sustainedHighlight = WindowMinimum(highlightHistory, timeMs, stats.highlight,
+			config.highlightPersistMs);
 
 		std::vector<double> cells(GRID_W * GRID_H, -1.0);
 		for (int i = 0; i < GRID_W * GRID_H; ++i)
@@ -87,6 +98,12 @@ namespace LedDrive
 		lastDifference = compared > 0 ? difference / compared : 0.0;
 		stats.cut = compared > 0 && lastDifference > config.cutThreshold;
 		previousCells = cells;
+
+		// Sustained APL: minimum over apl_persist_ms, restarted at a cut so
+		// the new scene's APL counts at once (a dark-to-bright cut must not
+		// wait out the window; a flash without a cut still does).
+		if (stats.cut) sustainHistory.clear();
+		stats.sustainedApl = WindowMinimum(sustainHistory, timeMs, stats.apl, config.aplPersistMs);
 
 		// Fade: APL fell by at least fade_min_step on each of the last
 		// fade_frames frames, with no cut among them.

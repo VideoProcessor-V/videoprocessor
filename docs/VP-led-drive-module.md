@@ -118,7 +118,8 @@ baud: 19200
 light_min: auto              # auto = query (?N); or an integer override
 light_max: auto              # auto = query (?M)
 ack_timeout_ms: 300
-min_command_gap_ms: 500      # Barco: >= 500 ms between commands; see §5
+min_command_gap_ms: 200      # the script's proven pace; Barco documents >= 500; see §5
+max_levels_per_command: 12   # largest LED drop per command (0 = no limit)
 burst_commands: 0            # optional pause after this many commands (Barco: 20); 0 = none
 burst_pause_ms: 5000         # length of that pause (Barco: 5 s)
 read_back: off               # off = send only (the script's way); on = wait for replies
@@ -303,11 +304,16 @@ script:
 - Documented timing (Barco RS232 user guide TDE6115, 2.1): ≥ 500 ms between
   commands, wait for the response, ≥ 2 s before re-sending when none came,
   5 s pause after 20 commands. The script ran at 400 ms ticks (100 ms
-  contrast steps) for years without the pause. **Owner decision
-  (2026-10-09):** `min_command_gap_ms: 500` is a hard floor for every
-  command (startup included; only the bounded exit restore may cut a wait
-  short, and logs it); the 20/5 s pause is optional (`burst_commands`,
-  default 0 = off); read-backs are a toggle (`read_back`, default off).
+  contrast steps) for years without the pause. **Owner decisions
+  (2026-10-09, revised after design review 1 SF-2):** `min_command_gap_ms`
+  is a hard floor for every command (startup included; only the bounded
+  exit restore may cut a wait short, and logs it), default 200 ms - the
+  script's proven pace - with Barco's 500 ms as the documented conservative
+  value; `max_levels_per_command` (default 12) caps each LED *drop* so the
+  black floor never steps far (the rest of the drop follows in later
+  commands); brightening is not capped, so a bright scene never waits; the
+  20/5 s pause is optional (`burst_commands`, default 0 = off); read-backs
+  are a toggle (`read_back`, default off).
 - `read_back: off`: send only - the script's exact bytes (or the configured
   terminator), no `ECHO`, no queries; contrast is reset to 50 blind at
   startup and light set to the ceiling, as the script did; the range comes
@@ -465,13 +471,39 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - Side effect: `active_picture_lookahead_frames: 8` also turns on the
   fork's own look-ahead inspection (crop proofs) for `[queue.Normal]`, so
   it costs some CPU per frame whether or not the LED module is enabled.
-- Serial rate: with the 500 ms floor the port carries at most 2 LED
-  commands a second (not the 5-10 answers-2 B3 expected). The driver keeps
-  only the newest target, and the modelled LED level follows the levels the
-  driver actually wrote (counted at the write, in the frame it happened),
-  so the gain steps with each real LED step rather than ramping between
-  them. A ramp therefore lands in steps of up to `rate * 0.5 s` levels
-  (60 at `rate_down: 120`); if that shows, lower the rates.
+- Serial rate: at 200 ms the port carries up to 5 LED commands a second.
+  The driver keeps only the newest target, and the modelled LED level
+  follows the levels the driver actually wrote (counted at the write, in
+  the frame it happened), so the gain steps with each real LED step. Each
+  drop is at most `max_levels_per_command` (12): a full dim from 255 to 60
+  takes about 3.3 s; rises are limited only by `rate_up` and the gap.
 - Not built: a reserve of commands for cuts. It only matters with the
   optional pause on (a cut could otherwise wait up to `burst_pause_ms`);
   add it before enabling `burst_commands`.
+
+### Design review 1 responses (2026-10-09)
+
+- SF-1 (withdrawn; gamma boost stays in the module): the boost exponent
+  depends only on `gamma_boost` and `compensation_eotf`, never on `enabled`
+  or `mode` (tested for every combination), and the renderer runs the
+  compensation hook whenever the boost is on. If the hook is configured but
+  not running, the log says so once, loudly ("WARNING gamma boost NOT
+  applied"), and again when it recovers.
+- SF-2: owner chose 200 ms default (500 ms documented); new
+  `max_levels_per_command` (12). Decision: the cap applies to dimming only.
+  A capped rise would leave a bright scene's highlights compressed by the
+  headroom bound for seconds, which SF-3 exists to prevent; a rise is also
+  usually a cut, which masks the floor change.
+- SF-3: new `apl_persist_ms` (100) for the sustained APL, separate from
+  `highlight_persist_ms` (250). A cut restarts the APL window, so the new
+  scene's APL drives the target at once (dimming already acted at once).
+  The suggested alternative ("an APL rise of cut_threshold for two frames")
+  was not built: a lightning flash covering a fifth of the picture rises
+  that much for 2-5 frames and would then lift the LED. A flash that trips
+  the cut detector (whole-picture change) does lift the target; tune
+  `cut_threshold` if lightning shows it.
+- SF-4: the GPU pass also reduces the brightest 3x3 block (`max_block`, in
+  the same storage buffer, checked on the GPU in
+  LedMeasurementHookMeasuresWithoutTouchingThePicture); `script` mode's
+  highlight test uses it, `compensate` keeps the percentile. The raw
+  lookahead path fills the same field.

@@ -255,7 +255,7 @@ namespace VideoProcessorTest
 					scene.Advance();
 					FrameStats stats;
 					stats.apl = scene.apl;
-					stats.highlight = scene.highlight;
+					stats.maximum = scene.highlight;
 					const ControllerOutput out = controller.Tick(stats);
 					const auto expected = reference.Step(scene.apl, scene.highlight);
 					const std::wstring where = L"seed " + std::to_wstring(seed) +
@@ -307,7 +307,7 @@ namespace VideoProcessorTest
 			controller.Reset(230, 74);
 			FrameStats stats;
 			stats.apl = 70;          // light target 230 (no light change), contrast target 50
-			stats.highlight = 230;   // highlight on screen
+			stats.maximum = 230;   // highlight on screen
 			const auto out = controller.Tick(stats);
 			Assert::AreEqual(-1, out.lightCommand);
 			// 74 -> 60 in fast steps (distance 24 -> 10), then 59 after 200 ms.
@@ -322,7 +322,7 @@ namespace VideoProcessorTest
 
 			// Without a highlight the same drop is one step per tick.
 			controller.Reset(230, 74);
-			stats.highlight = 180;
+			stats.maximum = 180;
 			const auto slow = controller.Tick(stats);
 			Assert::AreEqual(size_t{ 1 }, slow.contrastSchedule.size());
 			Assert::AreEqual(73, slow.contrast);
@@ -334,7 +334,7 @@ namespace VideoProcessorTest
 			controller.Reset(230, 59);
 			FrameStats stats;
 			stats.apl = 70;          // contrast target 50, distance 9
-			stats.highlight = 180;   // no highlight: this dump runs regardless
+			stats.maximum = 180;   // no highlight: this dump runs regardless
 			const auto out = controller.Tick(stats);
 			// 58, 57, 56 at 100 ms, then the fall-through step to 55.
 			Assert::AreEqual(size_t{ 4 }, out.contrastSchedule.size());
@@ -349,19 +349,19 @@ namespace VideoProcessorTest
 			FrameStats stats;
 			stats.apl = 70; // contrast target 50
 			controller.Reset(230, 52);
-			stats.highlight = 180;
+			stats.maximum = 180;
 			Assert::AreEqual(52, controller.Tick(stats).contrast, L"No highlight: small decreases ignored");
 			controller.Reset(230, 52);
-			stats.highlight = 230;
+			stats.maximum = 230;
 			Assert::AreEqual(51, controller.Tick(stats).contrast, L"Highlight: small decreases allowed");
 			controller.Reset(230, 48);
-			stats.highlight = 230;
+			stats.maximum = 230;
 			Assert::AreEqual(48, controller.Tick(stats).contrast, L"Highlight: small increases ignored");
 			controller.Reset(230, 48);
-			stats.highlight = 180;
+			stats.maximum = 180;
 			Assert::AreEqual(49, controller.Tick(stats).contrast, L"No highlight: small increases allowed");
 			controller.Reset(230, 55);
-			stats.highlight = 180;
+			stats.maximum = 180;
 			Assert::AreEqual(54, controller.Tick(stats).contrast, L"Outside the band both directions move");
 		}
 
@@ -404,7 +404,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(102, controller.Tick(stats).light);
 			controller.Reset(230, 52);
 			stats.apl = 70;
-			stats.highlight = 205; // counts as a highlight at 200
+			stats.maximum = 205; // counts as a highlight at 200
 			Assert::AreEqual(51, controller.Tick(stats).contrast);
 		}
 	};

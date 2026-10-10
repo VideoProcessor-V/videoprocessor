@@ -275,6 +275,16 @@ namespace VideoProcessorTest
 			const LedDriveConfig read = ReadLedDriveConfig(config);
 			Assert::IsFalse(read.enabled, L"The boost does not need the LED module enabled");
 			Assert::AreEqual(2.2 / 2.4, BoostExponent(read), 1e-12);
+			// Owner decision (design review SF-1): switching the LED drive off
+			// or changing its mode never changes the picture's gamma.
+			for (const bool enabled : { false, true })
+				for (const Mode mode : { Mode::LogOnly, Mode::Script, Mode::Compensate })
+				{
+					LedDriveConfig any = read;
+					any.enabled = enabled;
+					any.mode = mode;
+					Assert::AreEqual(2.2 / 2.4, BoostExponent(any), 1e-12);
+				}
 			Assert::AreEqual(0.1, read.highlightAreaLarge, 1e-12);
 			for (const char* bad : { "gamma_boost: 4\n", "gamma_boost: lots\n",
 				"highlight_area_small: 0.2\nhighlight_area_large: 0.1\n" })

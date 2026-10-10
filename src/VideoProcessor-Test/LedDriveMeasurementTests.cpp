@@ -25,6 +25,7 @@ namespace
 		raw.histogram[bright] += brightBlocks;
 		raw.blocks = blocks;
 		raw.sum = static_cast<uint32_t>(code * SUM_SCALE * plain + bright * SUM_SCALE * brightBlocks);
+		raw.maximum = static_cast<uint32_t>((brightBlocks > 0 ? bright : code) * SUM_SCALE);
 		for (int i = 0; i < GRID_W * GRID_H; ++i)
 		{
 			raw.cellCount[i] = 2;
@@ -108,6 +109,8 @@ namespace VideoProcessorTest
 			Assert::AreEqual((30.0 * 990 + 235.0 * 10) / 1000.0, lamp.apl, 1e-6);
 			const FrameStats speck = builder.Build(Uniform(30.0, 1000, 2));
 			Assert::AreEqual(30.0, speck.highlight, 1e-9);
+			Assert::AreEqual(235.0, speck.maximum, 1e-9,
+				L"A 0.2% lamp is missed by the percentile but is the block maximum (script mode)");
 
 			uint32_t histogram[256] = {};
 			histogram[16] = 500;

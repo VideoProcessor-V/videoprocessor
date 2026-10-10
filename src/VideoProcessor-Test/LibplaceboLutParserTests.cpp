@@ -1745,7 +1745,7 @@ namespace VideoProcessorTest
 			// The same blocks measured on the CPU from the rendered pixels.
 			const int blocks = 64 / 3;
 			const double step = 64.0 / blocks;
-			double expected = 0.0;
+			double expected = 0.0, brightest = 0.0;
 			for (int by = 0; by < blocks; ++by)
 				for (int bx = 0; bx < blocks; ++bx)
 				{
@@ -1759,6 +1759,7 @@ namespace VideoProcessorTest
 							acc += (weights[0] * p.r + weights[1] * p.g + weights[2] * p.b) / 255.0;
 						}
 					expected += 16.0 + 219.0 * acc / 9.0;
+					brightest = std::max(brightest, 16.0 + 219.0 * acc / 9.0);
 				}
 			expected /= blocks * blocks;
 			Assert::AreEqual(static_cast<uint32_t>(blocks * blocks), raw.blocks);
@@ -1769,6 +1770,8 @@ namespace VideoProcessorTest
 			Assert::AreEqual(raw.blocks, cellTotal);
 			const double apl = static_cast<double>(raw.sum) / LedDrive::SUM_SCALE / raw.blocks;
 			Assert::AreEqual(expected, apl, 0.75);
+			Assert::AreEqual(brightest, static_cast<double>(raw.maximum) / LedDrive::SUM_SCALE, 0.75,
+				L"The block maximum comes back in the same readback buffer");
 
 			// Measuring only the left half sees less red.
 			hook.SetFrame({ 0.0, 0.0, 0.5, 1.0 }, weights);

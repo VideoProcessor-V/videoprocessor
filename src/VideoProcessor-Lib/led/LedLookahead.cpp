@@ -68,6 +68,7 @@ namespace LedDrive
 				out.histogram[std::min(static_cast<int>(code), HISTOGRAM_BINS - 1)] += 1;
 				out.sum += scaled;
 				out.blocks += 1;
+				out.maximum = std::max(out.maximum, scaled);
 				const int cell = std::min(by * GRID_H / blocksY, GRID_H - 1) * GRID_W +
 					std::min(bx * GRID_W / blocksX, GRID_W - 1);
 				out.cellSum[cell] += scaled;

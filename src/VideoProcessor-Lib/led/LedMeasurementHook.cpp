@@ -34,6 +34,7 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
     atomicAdd(hist[min(int(code), 255)], 1u);
     atomicAdd(total_sum, scaled);
     atomicAdd(total_blocks, 1u);
+    atomicMax(max_block, scaled);
     int cell = min(int(float(b.y) * 18.0 / blocks.y), 17) * 32 +
                min(int(float(b.x) * 32.0 / blocks.x), 31);
     atomicAdd(cell_sum[cell], scaled);
@@ -125,12 +126,13 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 			std::min<float>(MAX_BLOCKS_Y, std::floor(height / 3.0f)) };
 		const float step[2] = { width / blocks[0], height / blocks[1] };
 
-		pl_buffer_var bufferVars[5] = {
+		pl_buffer_var bufferVars[6] = {
 			{ UintArray("hist", HISTOGRAM_BINS), {} },
 			{ UintArray("cell_sum", GRID_W * GRID_H), {} },
 			{ UintArray("cell_count", GRID_W * GRID_H), {} },
 			{ pl_var_uint("total_sum"), {} },
-			{ pl_var_uint("total_blocks"), {} } };
+			{ pl_var_uint("total_blocks"), {} },
+			{ pl_var_uint("max_block"), {} } };
 		size_t offset = 0;
 		for (pl_buffer_var& var : bufferVars)
 		{
@@ -156,7 +158,7 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 		descriptors[1].desc.access = PL_DESC_ACCESS_READWRITE;
 		descriptors[1].binding.object = ring[slot];
 		descriptors[1].buffer_vars = bufferVars;
-		descriptors[1].num_buffer_vars = 5;
+		descriptors[1].num_buffer_vars = 6;
 		descriptors[1].memory = PL_MEMORY_COHERENT;
 
 		const pl_shader_var variables[5] = {

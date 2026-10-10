@@ -374,6 +374,15 @@ namespace LedDrive
 				if (pendingLight < 0) continue;
 				target = pendingLight;
 				pendingLight = -1;
+				// Dim at most max_levels_per_command per command; the rest of
+				// the drop stays pending for the next command unless a newer
+				// target replaces it.
+				if (config.maxLevelsPerCommand > 0 && lastSentLight >= 0 &&
+					target < lastSentLight - config.maxLevelsPerCommand)
+				{
+					pendingLight = target;
+					target = lastSentLight - config.maxLevelsPerCommand;
+				}
 				transmitting = true;
 			}
 			std::lock_guard<std::mutex> guard(portMutex);

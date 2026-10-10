@@ -411,6 +411,65 @@ namespace VideoProcessorTest
 			Assert::IsTrue(wasSent, std::to_wstring(modelled).c_str());
 		}
 
+		TEST_METHOD(DimmingIsCappedPerCommandSoTheFloorNeverStepsFar)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = Port(80);
+			config.readBack = false;
+			config.minCommandGapMs = 20;
+			config.maxLevelsPerCommand = 12;
+			auto driver = CreateProjectorDriver("barco_ascii", config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			std::string error;
+			Assert::IsTrue(driver->Open(error));
+			Assert::IsTrue(driver->SetLightNow(255, 0));
+			driver->SetLight(60);
+			Assert::IsTrue(WaitFor([&] { return driver->Status().lastSentLight == 60; }));
+			std::vector<int> sent;
+			for (const auto& write : projector->Writes())
+				sent.push_back(std::stoi(write.substr(5)));
+			Assert::AreEqual(255, sent.front());
+			for (size_t i = 1; i < sent.size(); ++i)
+				Assert::IsTrue(sent[i - 1] - sent[i] <= 12 && sent[i] < sent[i - 1], L"At most 12 levels down per command");
+			Assert::AreEqual<size_t>(1 + 17, sent.size(), L"255 to 60 in 12-level steps");
+			// Brightening is not capped: a bright scene must not wait.
+			driver->SetLight(200);
+			Assert::IsTrue(WaitFor([&] { return driver->Status().lastSentLight == 200; }));
+			Assert::AreEqual<size_t>(19, projector->Writes().size());
+			Assert::AreEqual(200, ProjectorConfig().minCommandGapMs, L"Default gap 200 ms");
+			Assert::AreEqual(12, ProjectorConfig().maxLevelsPerCommand);
+		}
+
+		TEST_METHOD(SustainedAplRejectsFlashesButFollowsACutAtOnce)
+		{
+			LedDriveConfig config = Compensate();
+			Assert::AreEqual(100, config.aplPersistMs);
+			StatsBuilder builder(config);
+			double now = 0.0;
+			FrameStats stats;
+			for (int frame = 0; frame < 30; ++frame, now += FRAME_MS)
+				stats = builder.Build(Frame(20.0), now);
+			// A bright cut: every block changes, so the new APL counts at once.
+			stats = builder.Build(Frame(120.0), now);
+			Assert::IsTrue(stats.cut);
+			Assert::AreEqual(120.0, stats.sustainedApl, 1e-9);
+			now += FRAME_MS;
+			stats = builder.Build(Frame(120.0), now);
+			Assert::AreEqual(120.0, stats.sustainedApl, 1e-9, L"and keeps counting after the cut frame");
+			// A flash without a cut (a fifth of the picture, blocks unchanged):
+			// held back for apl_persist_ms.
+			StatsBuilder flashes(config);
+			double t = 0.0;
+			for (int frame = 0; frame < 30; ++frame, t += FRAME_MS)
+				stats = flashes.Build(Frame(20.0), t);
+			for (int frame = 0; frame < 3; ++frame, t += FRAME_MS)
+			{
+				stats = flashes.Build(Frame(20.0, 2000), t);
+				Assert::IsFalse(stats.cut);
+				Assert::AreEqual(20.0, stats.sustainedApl, 1e-9, L"A 3-frame flash never lifts the LED target");
+			}
+		}
+
 		TEST_METHOD(EffectiveLookaheadIsClampedToTheFramesActuallyQueued)
 		{
 			// Until Stage 5 the queue holds the current frame plus target_frames

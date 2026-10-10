@@ -26,9 +26,13 @@ namespace LedDrive
 		// The lowest highlight of the last highlight_persist_ms: a flash shorter
 		// than that never raises it.
 		double sustainedHighlight = 16.0;
-		// The lowest APL of the same window: mode: compensate aims the LED at it,
-		// so a flash never makes the LED chase it (a fall still acts at once).
+		// The lowest APL of the last apl_persist_ms (since the last cut, when
+		// that is more recent): mode: compensate aims the LED at it, so a flash
+		// never makes the LED chase it; a fall, or a cut, acts at once.
 		double sustainedApl = 16.0;
+		// The brightest 3x3 block (the script's max of its downscale): the
+		// highlight test of mode: script.
+		double maximum = 16.0;
 		bool cut = false;
 		bool fade = false;
 		// Block-mean histogram in code units and the number of blocks measured.

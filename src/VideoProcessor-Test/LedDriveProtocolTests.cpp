@@ -30,6 +30,7 @@ namespace
 		config.protocol = "barco_ascii";
 		config.ackTimeoutMs = 60;
 		config.minCommandGapMs = 0;
+		config.maxLevelsPerCommand = 0;
 		config.readBack = true;
 		return config;
 	}
@@ -388,7 +389,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(20, projector.burstCommands);
 			Assert::AreEqual(5000, projector.burstPauseMs);
 			const ProjectorConfig projectorDefaults;
-			Assert::AreEqual(500, projectorDefaults.minCommandGapMs, L"Barco: at least 500 ms between commands");
+			Assert::AreEqual(200, projectorDefaults.minCommandGapMs, L"The old script's proven pace (Barco documents 500)");
 			Assert::AreEqual(0, projectorDefaults.burstCommands, L"No pause unless asked for");
 			Assert::IsFalse(projectorDefaults.readBack, L"Send-only, like the old script");
 			const LedDriveConfig led = ReadLedDriveConfig(config);

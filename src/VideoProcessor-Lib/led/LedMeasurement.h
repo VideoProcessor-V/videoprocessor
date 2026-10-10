@@ -27,6 +27,8 @@ namespace LedDrive
 		uint32_t cellCount[GRID_W * GRID_H];
 		uint32_t sum;
 		uint32_t blocks;
+		// Brightest block, in SUM_SCALE units; 0 = not measured.
+		uint32_t maximum;
 	};
 
 	// Normalised rectangle (0..1) of the hooked picture to measure.
@@ -54,13 +56,15 @@ namespace LedDrive
 		// in codes (the cut metric); 0 before there is a previous frame.
 		double LastDifference() const { return lastDifference; }
 
+		// (time, value) over a persistence window.
+		struct Sample { double time; double value; };
+
 	private:
 		LedDriveConfig config;
 		std::vector<double> previousCells;
 		std::deque<double> aplHistory;
-		// (time, highlight, APL) over the persistence window.
-		struct Sample { double time; double highlight; double apl; };
-		std::deque<Sample> history;
+		std::deque<Sample> highlightHistory;
+		std::deque<Sample> sustainHistory;
 		double lastDifference = 0.0;
 	};
 }

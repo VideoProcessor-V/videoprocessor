@@ -57,8 +57,12 @@ namespace LedDrive
 		int lightMin = -1;
 		int lightMax = -1;
 		int ackTimeoutMs = 300;
-		// Never two commands closer than this (Barco: at least 500 ms).
-		int minCommandGapMs = 500;
+		// Never two commands closer than this. Barco documents at least 500 ms;
+		// the old script ran 200 ms gaps for years without a lost command.
+		int minCommandGapMs = 200;
+		// Largest LPW1 drop in one command, so the black floor never falls in
+		// big steps (later commands continue the ramp); 0 = no limit.
+		int maxLevelsPerCommand = 12;
 		// Optional pause after every burstCommands commands (Barco: 5 s after
 		// 20); 0 = no pause.
 		int burstCommands = 0;
@@ -95,6 +99,9 @@ namespace LedDrive
 		double aplWeights[3] = { 0.114, 0.587, 0.299 };
 		double highlightPercentile = 99.5;
 		int highlightPersistMs = 250;
+		// The window for the sustained APL that mode: compensate aims the LED
+		// at (flash rejection); a cut uses the new scene's APL at once.
+		int aplPersistMs = 100;
 		double highlightToleranceStops = 0.33;
 		double knee = 0.08;
 		int antiPumpBand = 3;
@@ -273,6 +280,7 @@ namespace LedDrive
 			Custom("light_max", autoOrLevel, "auto or a level from 0 to 255"),
 			Integer("ack_timeout_ms", 20, 5000),
 			Integer("min_command_gap_ms", 0, 5000),
+			Integer("max_levels_per_command", 0, 255),
 			Integer("burst_commands", 0, 1000),
 			Integer("burst_pause_ms", 0, 60000),
 			Boolean("read_back"),
@@ -312,6 +320,7 @@ namespace LedDrive
 				"three non-negative R, G, B weights summing to 1"),
 			Number("highlight_percentile", 50.0, 100.0),
 			Integer("highlight_persist_ms", 0, 10000),
+			Integer("apl_persist_ms", 0, 10000),
 			Number("highlight_tolerance_stops", 0.0, 4.0),
 			Number("knee", 0.0, 0.5),
 			Integer("anti_pump_band", 0, 50),
@@ -407,6 +416,7 @@ namespace LedDrive
 			Detail::ParseInt(value, 0, 255, result.lightMax);
 		if (config.TryGetString(section, "ack_timeout_ms", value)) Detail::ParseInt(value, 20, 5000, result.ackTimeoutMs);
 		if (config.TryGetString(section, "min_command_gap_ms", value)) Detail::ParseInt(value, 0, 5000, result.minCommandGapMs);
+		if (config.TryGetString(section, "max_levels_per_command", value)) Detail::ParseInt(value, 0, 255, result.maxLevelsPerCommand);
 		if (config.TryGetString(section, "burst_commands", value)) Detail::ParseInt(value, 0, 1000, result.burstCommands);
 		if (config.TryGetString(section, "burst_pause_ms", value)) Detail::ParseInt(value, 0, 60000, result.burstPauseMs);
 		config.TryGetBool(section, "read_back", result.readBack);
@@ -454,6 +464,7 @@ namespace LedDrive
 		if (config.TryGetString(section, "apl_weights", value)) ParseWeights(value, result.aplWeights);
 		readNumber("highlight_percentile", result.highlightPercentile);
 		readInt("highlight_persist_ms", 0, 10000, result.highlightPersistMs);
+		readInt("apl_persist_ms", 0, 10000, result.aplPersistMs);
 		readNumber("highlight_tolerance_stops", result.highlightToleranceStops);
 		readNumber("knee", result.knee);
 		readInt("anti_pump_band", 0, 50, result.antiPumpBand);

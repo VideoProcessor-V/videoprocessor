@@ -68,7 +68,10 @@ namespace LedDrive
 		ControllerOutput out;
 		// The script truncates the mean (mean2 = int(mean)).
 		const int apl = std::max(0, static_cast<int>(stats.apl));
-		const bool highlight = stats.highlight >= config.scriptHighlightCode;
+		// The script tested the brightest pixel of its 854x480 downscale; the
+		// brightest 3x3 block is the closest measure (a lamp under 0.5% of
+		// the picture still counts, unlike the percentile).
+		const bool highlight = stats.maximum >= config.scriptHighlightCode;
 		out.lightTarget = LightTargetFor(apl);
 		out.contrastTarget = ContrastTargetFor(apl, highlight);
 		int elapsed = 0;
@@ -144,7 +147,7 @@ namespace LedDrive
 		out.knee = config.knee;
 		out.durationMs = elapsed;
 		std::ostringstream log;
-		log << "LED script: apl=" << apl << " highlight=" << static_cast<int>(stats.highlight)
+		log << "LED script: apl=" << apl << " max=" << static_cast<int>(stats.maximum)
 			<< (highlight ? "*" : "") << " light " << light << "/" << out.lightTarget
 			<< (out.lightCommand >= 0 ? " sent" : "") << " contrast " << contrast << "/"
 			<< out.contrastTarget << " gain=" << out.gain;

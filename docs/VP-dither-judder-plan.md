@@ -611,10 +611,13 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
 - rgba16f storage support on this D3D11 build (else rgba32f).
 - Converter rounds or truncates (stage 3).
 - LED response time and `?N` minimum; `SHUT`/`PMUT` speed (stage 7).
-- Real sustainable serial command rate (stage 7). Owner decision
-  2026-10-09: Barco's documented 500 ms minimum gap as a hard floor, the
-  documented 5 s pause after 20 commands as an option (off), read-backs as
-  a toggle (off) - see `VP-led-drive-module.md` §5.
+- Real sustainable serial command rate (stage 7). Owner decisions
+  2026-10-09 (revised after design review 1): a 200 ms minimum gap (the
+  script's proven pace; Barco documents 500 ms), at most 12 levels per
+  dimming command, the documented 5 s pause after 20 commands as an option
+  (off), read-backs as a toggle (off; switch on once the terminator and
+  replies are confirmed on the port, and record the result here) - see
+  `VP-led-drive-module.md` §5 and §9.
 - Script loop period for tick matching (stage 7).
 - RealColor white y 0.340 vs D65 (spectro session, unrelated to this work).
 - Differences between madVR HDR profiles 1/2/3 and the rules for colour /

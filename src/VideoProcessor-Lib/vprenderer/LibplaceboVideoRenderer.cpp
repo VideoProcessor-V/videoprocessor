@@ -3632,6 +3632,9 @@ struct LibplaceboVideoRenderer::Impl
 	// only by BeginFrame (before rendering) and SubmitMeasurement (after).
 	std::shared_ptr<LedDrive::LedDriveModule> ledDrive;
 	uint64_t ledRawTransferSignature = 0;
+	// The gamma boost lives in the compensation hook: say so loudly when it
+	// is configured but the hook is not running.
+	bool ledBoostMissingLogged = false;
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
 	LedDrive::MeasurementHook ledMeasurement;
@@ -13951,6 +13954,19 @@ struct LibplaceboVideoRenderer::Impl
             }
             const size_t compensationStart = frameHooks.size();
             ledCompensation.Collect(false, frameHooks);
+            if (boostExponent != 1.0 && frameHooks.size() == compensationStart)
+            {
+                if (!ledBoostMissingLogged)
+                    DebugLog::Log("LED drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
+                        boostExponent);
+                ledBoostMissingLogged = true;
+            }
+            else if (frameHooks.size() > compensationStart)
+            {
+                if (ledBoostMissingLogged)
+                    DebugLog::Log("LED drive: gamma boost applied again (compensation hook running)");
+                ledBoostMissingLogged = false;
+            }
             for (size_t i = compensationStart; i < frameHooks.size(); ++i)
             {
                 CustomHookChain::SetHookParameter(frameHooks[i], "gain",
