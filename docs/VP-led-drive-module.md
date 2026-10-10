@@ -539,3 +539,29 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
   shader uses it; the compensation shader's clamp below black (BTB) is
   unchanged - libplacebo has already clamped there; with `read_back: off`
   the driver clamps to 0-255 while both controllers keep inside the floors.
+
+### Design review 2 responses (2026-10-10; round-2 packages 15e202ec..c1b46205)
+
+- SF-1 (`compensation_eotf`): open, waiting on the owner. The 2.41 does not
+  come from a code-to-light measurement, nor through VP. It comes from the
+  light-meter table of CNTR against LPW1 at equal white
+  (docs/reference/LED-power-vs-contrast.md), measured on the original light
+  engine. If CNTR is a gain on the encoded signal ahead of the projector's
+  gamma (the fit with 50 as unity says it is), white light goes as
+  (CNTR/50)^E, so 2.41 estimates the display exponent E, at whatever gamma
+  preset was set at the time; that preset is unknown. The same E also
+  decides `gamma_boost` (0.9167 = 2.2/2.4 assumes E = 2.2): if E were 2.4,
+  the boost would make the picture darker than intended. Proposed check: a
+  direct code-to-light reading with the LED drive off (so no boost), black
+  subtracted, for a 50% field (code 126) against white (code 235):
+  ratio 0.218 means E = 2.2, ratio 0.189 means E = 2.4. Until then the
+  owner's decision of 2.2 stands. The value, and how it was measured, will
+  go into the brief §4 and the config comment.
+- N-1: DEPLOY.txt §6 now asks for `read_back` on for the first custom-dim
+  run. With read-back on, a missing or refused LDC*/LDMM reply is logged
+  ("no LDCR reply ..." or "reply ... ignored while waiting for LDCR").
+- N-5 (`target_latency_ms` 120 vs 200): the owner's call; the test config
+  keeps 120 (no lip-sync change) until he decides.
+- N-6: agreed. The rc2 rebase is next, before anything more is added to
+  the Config app or the queue.
+- N-2, N-3, N-4, N-7, N-8: no change.
