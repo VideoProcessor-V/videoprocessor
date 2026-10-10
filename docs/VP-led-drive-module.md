@@ -603,3 +603,25 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - Notes left as they are: the 60-255 Lowest LED box, the two "Off" zoom
   rows, and remote profile validation (the Config app does not check a
   remote file; VP logs it).
+
+### SF-1 measurement, refined by the planner (2026-10-10)
+
+1. Read full fields at codes 16 (black), 40, 80, 126, 180 and 235. With
+   black subtracted, each reading divided by white should equal
+   ((code - 16) / 219)^E. Code 126 is 0.502 of the range: 0.218 means
+   E = 2.2 and 0.189 means E = 2.4. If the points do not all fit one
+   exponent (a "film" curve with a toe), the darks show where the
+   compensation would drift. A measured 1D curve can then replace the
+   single exponent later.
+2. Cleanest: a pattern source straight into the projector, bypassing VP.
+   Through VP instead:
+   - LED drive off (no boost), sigma-delta and every standard shader off;
+   - an SDR pattern, not LLDV;
+   - the stats overlay showing no tone map.
+   Then `output_gamma: 2.2` leaves the codes unchanged.
+3. Consequence: if E is about 2.4, madVR's "2.40 pure power" was accurate
+   calibration, not a boost. The brightening the owner remembers would
+   then come from elsewhere (contrast recovery or the mid-APL dimming
+   compensation), and `gamma_boost` would be set off. If E is 2.2, the
+   boost is real and stays. One measurement settles `compensation_eotf`
+   and `gamma_boost` together.
