@@ -510,6 +510,10 @@ override the sketch below where they differ.
 - **Occlusion mask:** M1 (mask in the warped frame's alpha, read by the
   sigma-delta at OUTPUT), proven on the GPU harness first; M3 (accept the
   bounded error) is the fallback.
+  **Mask-only mode is required in 6c:** `occlusion_mask: on|off` beside
+  `dejudder_strength`. With strength 0 and the mask on, the matcher runs
+  once per source frame and publishes the mask, with no extra presents and
+  no warp (design review 4). If M3 is the outcome, it is a documented no-op.
 - **LED:** the correction ratio pairs readings by source-frame identity,
   not present count.
 - **Acceptance criteria:** `s` global per frame, a hard hold on failure, no

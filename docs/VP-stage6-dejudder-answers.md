@@ -49,6 +49,16 @@ Approved, with the note's own guards made explicit requirements:
 Whichever lands, record it in the brief under Stage 6 and in the shader's
 header.
 
+**Mask-only mode (required in 6c; added after design review 4):** the
+dither's occlusion refinement must not depend on the de-judder being on.
+- Add `occlusion_mask: on|off` beside `dejudder_strength`.
+- With strength 0 and the mask on, the component runs the bidirectional
+  matcher once per source frame and publishes the mask (M1 path). It makes
+  no extra presents and no warp; the presentation loop is untouched. The
+  cost is the matching plus B's upload, nothing else.
+- Cinema profile only, as with the rest.
+- If M3 is the outcome, the key still exists and is a documented no-op.
+
 ## Q3 — half-resolution 8×8 matcher on source luma: yes
 
 It suits the budget and the use. Two requirements go beyond Stage 4's
