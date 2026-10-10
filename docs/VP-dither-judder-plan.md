@@ -399,6 +399,33 @@ only size it gets); if the fork ever offers divided sizes to hooks, the
 previous-luma and previous-vector textures should shrink to 1/4 and 1/16
 (design review 3, N-4). If the GPU time is over budget, the first lever is
 the coarse search range (±64 px), the second the fine ±2 sets (N-5).
+
+Code audit (docs/audit/stage4-mc-dither.md), responses:
+- Should fix, `motion_compensation 0` was not byte-for-byte the stage 2
+  output: fixed. The quantizer seeds its noise with `frame / 5`, which is
+  the refresh count, because libplacebo counts 5 passes per refresh. The
+  noise sequence is now the stage 2 one.
+- Should fix, 4-pixel vector steps: fixed. A full-resolution refinement
+  compares every whole-pixel vector within ±2 px of the quarter result on
+  the 16x16 block, using last refresh's stored values. Trust now comes from
+  that full-resolution match. MV now holds full-pixel vectors; MVPREV keeps
+  quarter ones. New GPU tests cover 5 and 10 px/refresh, diagonal (6, 3)
+  motion, and noise 0.15 (carried vs plain gate).
+- Note acted on: with `motion_compensation 0` the search is skipped, saving
+  its GPU time.
+- Notes left as they are, since every carry is still gated and so harmless:
+  - picture edges (the carry source is checked against the whole output,
+    not the picture);
+  - LQPREV's single validity tag at (0,0).
+- Still untested:
+  - limited range and a 10-bit swapchain: the GPU harness reads back 8-bit
+    full range, and the quantizer's range handling is unchanged from
+    stage 2;
+  - occlusion edges;
+  - 3:2 cadence.
+- Projector gamma: the gamma boost exponent is `compensation_eotf /
+  gamma_boost`, so at 2.41 with boost 2.4 there is practically no lift
+  left. The two move together, as design review 2 SF-1 expected.
 Compute pass before the quantizer: hierarchical block matching on
 gamma-encoded luma at quarter resolution (vector error only misplaces ≤0.5
 code), forward-only from a persistent previous-luma texture; vectors +

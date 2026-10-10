@@ -3477,7 +3477,7 @@ namespace VideoProcessorTest
 		}
 
 		static SigmaDeltaRun RunSigmaDelta(bool motionCompensation, int speed, int frames,
-			bool cutAtFrame4 = false)
+			bool cutAtFrame4 = false, int speedY = 0, double noise = 0.0)
 		{
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
@@ -3498,10 +3498,10 @@ namespace VideoProcessorTest
 			sigma.filename = "Temporal sigma-delta.glsl";
 			sigma.stageOrder = 90;
 			sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" }, { "swapchain_bits", "8" },
-				{ "noise_amplitude", "0" }, { "motion_threshold", "1" },
+				{ "noise_amplitude", std::to_string(noise) }, { "motion_threshold", "1" },
 				{ "motion_compensation", motionCompensation ? "1" : "0" } };
 			chain.Configure({ sigma });
-			const int width = 128 + speed * 8, height = 64;
+			const int width = 128 + speed * 8, height = 64 + speedY * 8;
 			CustomHookChain::TemplateValues values;
 			values.outputWidth = width;
 			values.outputHeight = height;
@@ -3519,11 +3519,11 @@ namespace VideoProcessorTest
 				std::wstring(log.begin(), log.end());
 			Assert::AreEqual(size_t{ 1 }, hooks.size(), rejected.c_str());
 
-			auto code = [speed, cutAtFrame4](int frame, int x, int y)
+			auto code = [speed, speedY, cutAtFrame4](int frame, int x, int y)
 			{
 				if (cutAtFrame4 && frame >= 4)
 					return SigmaDeltaTexture(x * 3 + 1000, y * 5 + 777); // a different picture
-				return SigmaDeltaTexture(x - speed * frame, y);
+				return SigmaDeltaTexture(x - speed * frame, y - speedY * frame);
 			};
 			fixture.CaptureLog(&log);
 			SigmaDeltaRun run;
@@ -3536,13 +3536,13 @@ namespace VideoProcessorTest
 				return run;
 			double error = 0.0;
 			int count = 0;
-			for (int y = 16; y < height - 16; ++y)
+			for (int y0 = 16; y0 < height - 16 - speedY * 8; ++y0)
 				for (int x0 = 16; x0 < width - 16 - speed * 8; ++x0)
 				{
 					double sum = 0.0;
 					for (int frame = 1; frame <= 8; ++frame)
-						sum += run.frames[frame][y * width + x0 + speed * frame];
-					error += std::abs(sum / 8.0 - SigmaDeltaTexture(x0, y));
+						sum += run.frames[frame][(y0 + speedY * frame) * width + x0 + speed * frame];
+					error += std::abs(sum / 8.0 - SigmaDeltaTexture(x0, y0));
 					++count;
 				}
 			run.meanError = error / count;
@@ -3559,6 +3559,26 @@ namespace VideoProcessorTest
 			Assert::IsTrue(carried.meanError < 0.05,
 				(L"With motion compensation the time-average along the motion should converge (error " +
 					std::to_wstring(carried.meanError) + L")").c_str());
+
+			// Speeds that are not a multiple of 4 px (the quarter-resolution
+			// step) need the full-pixel refinement (stage 4 audit).
+			for (int speed : { 5, 10 })
+			{
+				const SigmaDeltaRun odd = RunSigmaDelta(true, speed, 9);
+				Assert::IsTrue(odd.meanError < 0.05,
+					(std::to_wstring(speed) + L" px/refresh error " + std::to_wstring(odd.meanError)).c_str());
+			}
+			// Diagonal motion.
+			const SigmaDeltaRun diagonal = RunSigmaDelta(true, 6, 9, false, 3);
+			Assert::IsTrue(diagonal.meanError < 0.05,
+				(L"Diagonal (6, 3) px/refresh error " + std::to_wstring(diagonal.meanError)).c_str());
+			// With the default decorrelation noise (0.15) the carry still
+			// converges; without it a moving picture keeps its rounding bias.
+			const SigmaDeltaRun noisy = RunSigmaDelta(true, 5, 9, false, 0, 0.15);
+			const SigmaDeltaRun noisyGate = RunSigmaDelta(false, 5, 9, false, 0, 0.15);
+			Assert::IsTrue(noisy.meanError < 0.1 && noisyGate.meanError > 0.2,
+				(L"With noise 0.15: carried " + std::to_wstring(noisy.meanError) +
+					L", plain gate " + std::to_wstring(noisyGate.meanError)).c_str());
 
 			// A still picture is unchanged by motion compensation (the plain
 			// gate still carries the residual in place).

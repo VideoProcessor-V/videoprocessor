@@ -28,15 +28,17 @@
  *             error. Hierarchical: a full search within +-4 coarse texels
  *             (+-64 full pixels), then a full search within +-2 quarter
  *             pixels of zero and of the coarse result, and +-1 of the
- *             block's last real motion (kept through 3:2 repeats)
+ *             block's last real motion (kept through 3:2 repeats), then a
+ *             full-resolution refinement to whole pixels (+-2 px)
  *   4. state  moves last refresh's residual/value from the staging textures
  *             into the read textures, and stores this refresh's luma (both
  *             levels) for the next search (the quantizer reads one set and
  *             writes the other, so no pixel can overwrite a value another
  *             pixel still reads)
  *   5. quantizer, as before, with the motion-compensated carry
- *   With motion_compensation = 0 passes 1-4 still run (cheaply) and the
- *   quantizer behaves exactly as the stage 2 version.
+ *   With motion_compensation = 0 the search is skipped (passes 1, 2 and 4
+ *   still run, cheaply) and the quantizer output is byte-for-byte the stage 2
+ *   version's (same noise sequence: see `frame / 5`).
  *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and
@@ -227,6 +229,8 @@ void hook()
 //!BIND LUMAC
 //!BIND LQPREV
 //!BIND MVPREV
+//!BIND RESID_NEXT
+//!BIND PREV_NEXT
 //!SAVE MV
 //!WIDTH HOOKED.w 7.5 + 16 /
 //!HEIGHT HOOKED.h 7.5 + 16 /
@@ -253,6 +257,37 @@ float lq_prev(ivec2 p)
 {
     p = clamp(p, ivec2(0), lq_size - ivec2(1));
     return imageLoad(LQPREV, p).r;
+}
+
+// Full-resolution luma for the final refinement: this refresh from the
+// picture, the previous refresh from PREV_NEXT (the value the quantizer
+// stored last refresh; the state pass has not moved it yet).
+float full_scale;
+ivec2 full_size;
+
+float luma_cur(ivec2 p)
+{
+    p = clamp(p, ivec2(0), full_size - ivec2(1));
+    vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * full_scale;
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float luma_prev(ivec2 p)
+{
+    p = clamp(p, ivec2(0), min(full_size, imageSize(PREV_NEXT)) - ivec2(1));
+    return dot(imageLoad(PREV_NEXT, p).rgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Full-resolution match of the 16x16 block displaced by v (full pixels).
+float sad_full(ivec2 corner, ivec2 v)
+{
+    float s = 0.0;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) {
+            ivec2 p = corner + ivec2(x, y);
+            s += abs(luma_cur(p) - luma_prev(p - v));
+        }
+    return s;
 }
 
 ivec2 lc_size;
@@ -304,6 +339,13 @@ void hook()
     lq_size = textureSize(LUMAQ_raw, 0);
     ivec2 origin = block * 4;
 
+    // Motion compensation off: no search (saves its GPU time); the block's
+    // last real vector is kept for when it is switched on again.
+    if (motion_compensation < 0.5) {
+        imageStore(out_image, block, vec4(0.0));
+        return;
+    }
+
     // The previous refresh's luma is valid once this shader has stored it.
     vec4 tag = imageLoad(LQPREV, ivec2(0));
     prev_valid = abs(tag.g - VALID_TAG) < 1e-3 && !isnan(tag.r);
@@ -353,7 +395,36 @@ void hook()
     float samples = float((WIN1 - WIN0) * (WIN1 - WIN0));
     float error = best_sad / samples;
     float confidence = error <= match_tolerance ? 1.0 : 0.0;
-    imageStore(out_image, block, vec4(vec2(best), confidence, error));
+
+    // Final refinement to whole pixels (audit, stage 4): the quarter level
+    // moves in 4-pixel steps, so every full-pixel vector within +-2 of it is
+    // compared on the full-resolution block. Without it a pan that is not a
+    // multiple of 4 px per refresh carries from beside the true source and
+    // mostly fails the per-pixel gate. Skipped until the previous refresh's
+    // values exist (RESID_NEXT tag).
+    ivec2 full = best * 4;
+    full_size = textureSize(HOOKED_raw, 0);
+    full_scale = levels_full < 0.5 ? 256.0 : 255.0;
+    ivec2 corner = block * 16;
+    ivec2 tagpos = clamp(corner, ivec2(0), imageSize(RESID_NEXT) - ivec2(1));
+    if (abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3) {
+        ivec2 centre = full;
+        float full_sad = sad_full(corner, centre);
+        for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++) {
+                if (dx == 0 && dy == 0)
+                    continue;
+                ivec2 v = centre + ivec2(dx, dy);
+                float s = sad_full(corner, v);
+                if (s < full_sad) { full_sad = s; full = v; }
+            }
+        // Trust comes from the full-resolution match: at 4-pixel steps a
+        // motion between them matches only roughly at quarter resolution.
+        error = full_sad / 256.0;
+        confidence = error <= match_tolerance ? 1.0 : 0.0;
+    }
+    // MV holds the vector in full pixels (MVPREV keeps quarter pixels).
+    imageStore(out_image, block, vec4(vec2(full), confidence, error));
     // A repeated film frame (no motion this refresh) keeps the last real
     // vector as the next starting point.
     if (best != ivec2(0) || !have_prev)
@@ -466,7 +537,11 @@ void hook()
     }
 
     vec3 k;
-    vec3 d = vec3((ign(vec2(pos), frame) - 0.5) * 2.0 * noise_amplitude);
+    // libplacebo adds 1 to `frame` for every pass it runs and this is the
+    // fifth of five, so frame / 5 is the refresh count: the same noise
+    // sequence as the one-pass stage 2 shader (motion_compensation 0 is then
+    // byte-for-byte the stage 2 output).
+    vec3 d = vec3((ign(vec2(pos), frame / 5) - 0.5) * 2.0 * noise_amplitude);
 
     if (enabled > 0.5) {
         ivec2 state_size = imageSize(RESID);
@@ -479,7 +554,7 @@ void hook()
         if (motion_compensation > 0.5) {
             vec4 mv = MV_mul * texelFetch(MV_raw,
                 min(pos / 16, textureSize(MV_raw, 0) - ivec2(1)), 0);
-            ivec2 v = ivec2(round(mv.xy)) * 4;
+            ivec2 v = ivec2(round(mv.xy));   // full pixels
             ivec2 from = pos - v;
             if (mv.z > 0.5 && v != ivec2(0) &&
                 all(greaterThanEqual(from, ivec2(0))) && all(lessThan(from, state_size)))
