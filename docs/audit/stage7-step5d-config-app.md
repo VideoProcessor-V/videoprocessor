@@ -81,3 +81,39 @@ checks (a) and (b).
 - Tests: LED drive page loads/saves the keys above, floor-black can't exceed
   the floor, live switches change text/state, rate-rule control follows and
   steps aside for custom rules, shader settings come from the shader file.
+
+## Re-audit (548b4a5a, diff 2d3bf2d3..548b4a5a)
+
+Build: OK — full x64 Release /t:Rebuild at 548b4a5a, 0 errors.
+Tests: native 2057 passed, 2 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted,
+SameSizeEditWithRestoredWriteTimeInvalidatesCache — both known); VideoProcessorConfigTests
+91 passed, 2 failed (the two known RPC tests).
+
+- Blocker, 59.94 Hz never selects Low_Latency — **resolved.** Test config and
+  the Config app switch now use `${cadence} > N` (the exact rate); old
+  `${source_rate}` rules are still recognised by the switch. The test now feeds
+  both variables the way VP reports them.
+- Should fix, broken LED profile stops VP — **resolved.** The main
+  configuration check no longer reads the profile; a missing or invalid
+  profile is logged ("WARNING LED profile ignored") and left out entirely.
+- Should fix, profile help text — **resolved.** It now says projector settings
+  are not read from a profile.
+- Notes (60–255 box, two "Off" zoom rows, remote profile check) — left as they
+  are by choice; I agree, none affects the picture.
+
+Owner checks:
+- (1) **OK.** With `${cadence}` (exact): 59.94 and 60 are above 59 → Low_Latency;
+  23.976, 25 and 50 are not → Normal. Tested for 59.94, 60, 50 and 23.976 with
+  the real reporting (source_rate floored, cadence exact); 25 follows from the
+  same rule.
+- (2) **OK.** VP starts and other edits apply with a missing or broken profile
+  (test: missing profile validates; four broken profiles validate). Nothing
+  from such a profile is used: the whole file is skipped, including when it
+  only fails together with the main settings (test: built-in `rate_up` 400 and
+  the main `led_floor` 80 apply). The Config app shows "VP will ignore this
+  profile …" under the file name.
+- (4) **OK.** Only the Low_Latency *selection rule* changed; its
+  `target_frames: 1` and all pacing code are untouched.
+
+Note: the implementer's commit also added this round's three audit files to
+git, unchanged from what I wrote.

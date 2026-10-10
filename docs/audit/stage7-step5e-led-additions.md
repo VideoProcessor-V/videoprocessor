@@ -82,3 +82,33 @@ LED-PROFILE-GUIDE.md "Fade to black below 60", README §4, owner check (c).
   `compensation_eotf`; the light-meter doc does not change the value (owner
   keeps 2.2; SF-1 open pending measurement).
 - No renderer change in this unit.
+
+## Re-audit (548b4a5a, diff 2d3bf2d3..548b4a5a)
+
+Build: OK — full x64 Release /t:Rebuild at 548b4a5a, 0 errors.
+Tests: native 2057 passed, 2 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted,
+SameSizeEditWithRestoredWriteTimeInvalidatesCache — both known); VideoProcessorConfigTests
+91 passed, 2 failed (the two known RPC tests).
+
+- Blocker, mode change during the custom dim leaves the screen dark —
+  **resolved.** `Reconfigure` now leaves the custom dim when the module stops
+  compensating, stops driving the projector, or the experiment is switched
+  off; script mode also refuses to send LPW1 while it is engaged.
+- Should fix, LDMM 0 at start and exit in script mode — **disputed-and-I-agree.**
+  Kept on purpose as a safety reset (standard dim mode), so a crash in a
+  compensate session can never leave a later session dark; custom-dim levels
+  (LDC*, LDMM 1) are still only sent in compensate mode (new test
+  ScriptModeWithTheExperimentConfiguredSendsNoCustomDim).
+- Should fix, missing tests — **resolved** for the mode switch and script
+  mode (two new tests); exit with read-back on during the dim-down has no
+  test, which I accept because the earlier "abortable wait" note shows it is
+  safe.
+- Notes — unchanged; no action was needed.
+
+Owner check (3) **OK.** On a mode change while the custom dim is on,
+`LDMM 0` is queued with `QueueSequenceNow`; the driver always sends queued
+sequence commands before any LPW1, so it goes first. If the dim was already
+leaving, its `LDMM 0` is already in that same priority queue. Test
+SwitchingModeDuringTheCustomDimLeavesItAtOnce checks that `LDMM 0` is the
+first command after the switch and that no custom-dim levels follow.
+Owner check (4) **OK.** No change to frame pacing or the queue in this unit.
