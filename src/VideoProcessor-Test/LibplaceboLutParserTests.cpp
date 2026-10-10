@@ -3528,10 +3528,12 @@ namespace VideoProcessorTest
 					return SigmaDeltaTexture(x * 3 + 1000, y * 5 + 777); // a different picture
 				return SigmaDeltaTexture(x - speed * frame, y - speedY * frame);
 			};
+			AssertCleanLibplaceboLog(log);
 			fixture.CaptureLog(&log);
 			SigmaDeltaRun run;
 			run.frames = fixture.RenderSequence(hooks[0], width, height, frames, code);
 			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 
 			// Follow each piece of content along its motion over frames 1..8
 			// (8 refreshes: whole cycles of a quarter-code residual).
@@ -3751,6 +3753,15 @@ namespace VideoProcessorTest
 			return result;
 		}
 
+		// libplacebo reports some failures (a rejected pass) only in its log,
+		// with the call still returning success (design review 4, N-6), so the
+		// GPU tests also require a clean log.
+		static void AssertCleanLibplaceboLog(const std::string& log)
+		{
+			Assert::IsTrue(log.empty(),
+				(L"libplacebo logged a warning or error: " + std::wstring(log.begin(), log.end())).c_str());
+		}
+
 		static Dejudder::Settings DejudderTestSettings()
 		{
 			Dejudder::Settings settings;
@@ -3780,7 +3791,6 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(&log);
 			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
 			const bool estimated = warp.Estimate(planesA.planes, planesB.planes);
-			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(estimated, std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
 
 			// Interior blocks: trusted, vector (12, 6).
@@ -3849,6 +3859,8 @@ namespace VideoProcessorTest
 			// shift 0 (the refresh A starts on) is A itself.
 			Assert::IsTrue(warp.Warp(planesA.planes, 0.0f, out));
 			Assert::IsTrue(out.luma == planesA.planes.luma && out.chroma == planesA.planes.chroma);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 		}
 
 		TEST_METHOD(DejudderRefinesToHalfAPixel)
@@ -3856,6 +3868,8 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
 			const int width = 256, height = 128;
 			// (7, 3) source pixels = (3.5, 1.5) at half resolution.
 			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
@@ -3879,6 +3893,8 @@ namespace VideoProcessorTest
 				}
 			Assert::IsTrue(good * 100 >= interior * 90,
 				(L"(7, 3) within one pixel: " + std::to_wstring(good) + L" of " + std::to_wstring(interior)).c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 		}
 
 		TEST_METHOD(DejudderHoldsAtACutAndAtOcclusions)
@@ -3886,6 +3902,8 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
 			const int width = 256, height = 128;
 			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
 
@@ -3958,6 +3976,8 @@ namespace VideoProcessorTest
 						Assert::AreEqual(static_cast<int>(a.luma[y * width + x]),
 							static_cast<int>(luma[y * width + x]), L"Occluded blocks are a hard hold of A");
 			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)
