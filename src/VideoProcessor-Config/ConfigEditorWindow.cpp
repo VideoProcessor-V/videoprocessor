@@ -9068,7 +9068,17 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         { QStringLiteral("off"), QStringLiteral("2.4") },
         { QStringLiteral("Off (plain output gamma)"),
           QStringLiteral("2.4 (the look of the old output gamma 2.4)") }));
+    // The projector's own display gamma, which Compensate linearises with
+    // (compensation_eotf). 2.2 is the FL35's menu setting; 2.4 is offered
+    // until a light-meter reading settles it (design review 2, SF-1).
+    driveForm->addRow(QStringLiteral("Projector gamma"), bindChoiceField(led,
+        QStringLiteral("compensation_eotf"),
+        { QStringLiteral("2.2"), QStringLiteral("2.4") },
+        { QStringLiteral("2.2 (the projector's gamma setting)"),
+          QStringLiteral("2.4 (if a light meter shows the projector is really 2.4)") }));
     driveForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Projector gamma is how the projector turns the signal into light; Compensate needs it to keep the "
+        "picture's brightness exact while the LED dims. Leave it at 2.2 unless measured otherwise.\n"
         "Highlight protection only matters in Compensate. The gamma boost applies even with the LED drive off. "
         "Switching the LED drive on or off, or to or from Log only, returns the projector to full light; "
         "other changes carry on from the current level.")));

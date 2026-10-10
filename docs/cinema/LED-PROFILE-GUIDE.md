@@ -62,7 +62,8 @@ full light.
 | `knee`, `highlight_*` | compensate | how highlights hold the LED up | raise `highlight_release_ms` if the LED drops too soon after headlights pass |
 | `apl_persist_ms` | compensate | flash rejection window | raise if lightning or muzzle flashes still move the LED |
 | `cut_threshold`, `fade_frames`, `fade_min_step` | both | scene-change detection | raise `cut_threshold` if ordinary motion is taken for cuts |
-| `apl_weights`, `compensation_eotf` | both | how brightness is measured / the projector's gamma | leave |
+| `apl_weights` | both | how brightness is measured | leave |
+| `compensation_eotf` | compensate | the projector's gamma (2.2); also on the LED drive page as "Projector gamma", which wins | leave |
 
 The most important everyday setting - how low the LED goes - is not in the
 profile: it is "Lowest LED level" (`led_floor`, 60-255) on the LED drive
