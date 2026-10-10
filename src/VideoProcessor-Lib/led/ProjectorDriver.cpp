@@ -114,6 +114,7 @@ namespace LedDrive
 
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling)
 	{
+		driver.BeginShutdown();
 		const bool ok = driver.SetLightNow(ledCeiling, 1000);
 		DebugLog::Log("LED drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
 		return ok;

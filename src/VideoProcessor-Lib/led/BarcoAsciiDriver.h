@@ -27,6 +27,7 @@ namespace LedDrive
 		ProjectorState ReadState() override;
 		void SetLight(int level) override;
 		bool SetLightNow(int level, int timeoutMs) override;
+		void BeginShutdown() override;
 		bool SetContrast(int value) override;
 		void Close() override;
 		DriverStatus Status() const override;
@@ -48,8 +49,10 @@ namespace LedDrive
 		// portMutex.
 		// maxGapWaitMs < 0 waits the full gap or pause; sentLight >= 0 records
 		// an LPW1 write.
+		// abortable: the reply wait ends early once BeginShutdown() is called
+		// (the driver thread's commands only).
 		bool Transact(const std::string& command, const char* mnemonic, int* value,
-			int timeoutMs, int maxGapWaitMs, int sentLight = -1);
+			int timeoutMs, int maxGapWaitMs, int sentLight = -1, bool abortable = false);
 		bool QueryLocked(const char* mnemonic, const std::string& argument, int& value);
 		void SelectFraming();
 		int Clamp(int level) const;
@@ -62,7 +65,7 @@ namespace LedDrive
 		ProjectorState state;
 
 		mutable std::mutex stateMutex;
-		std::mutex portMutex;
+		std::timed_mutex portMutex;
 		std::condition_variable wake;
 		std::thread worker;
 		bool stopping = false;
@@ -74,6 +77,7 @@ namespace LedDrive
 		int lightSends = 0;
 		int lastSentLight = -1;
 		bool transmitting = false;
+		bool shuttingDown = false;
 		int sinceBurst = 0;
 		// Guarded by stateMutex.
 		std::chrono::steady_clock::time_point nextSendAllowed;

@@ -470,6 +470,114 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(SettingChangesCarryOnFromTheCurrentLedLevel)
+		{
+			// Audit blocker (stage7-step4-compensate.md): tuning or switching
+			// script/compensate must not restore full light.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(18.0));
+			uint64_t frame = 0;
+			auto render = [&](int frames)
+			{
+				for (int i = 0; i < frames; ++i, ++frame)
+				{
+					module.BeginFrameAt(0, frame * FRAME_MS);
+					WaitFor([&] { return !module.ProjectorStatus().busy; });
+				}
+			};
+			render(60);
+			Assert::IsTrue(projector->light < 200, L"Dimmed for the dark scene");
+			auto fullLightWrites = [&]
+			{
+				int count = 0;
+				for (const auto& write : projector->Writes())
+					if (write == ":LPW1255\r") ++count;
+				return count;
+			};
+			const int startupRestores = fullLightWrites();
+			const int dimmed = projector->light;
+
+			LedDriveConfig tuned = config;
+			tuned.highlightToleranceStops = 0.5;
+			Assert::IsTrue(module.Reconfigure(port, tuned));
+			Assert::AreEqual(0.5, module.Config().highlightToleranceStops, 1e-12);
+			render(10);
+			Assert::AreEqual(startupRestores, fullLightWrites(), L"Tuning never restores full light");
+			Assert::IsTrue(projector->light <= dimmed, L"The LED carried on from its level");
+
+			LedDriveConfig script = tuned;
+			script.mode = Mode::Script;
+			Assert::IsTrue(module.Reconfigure(port, script));
+			Assert::IsFalse(module.WantsPredictions());
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			Assert::AreEqual(startupRestores, fullLightWrites(), L"compensate -> script: no restore");
+			Assert::IsTrue(module.Reconfigure(port, tuned));
+			Assert::IsTrue(module.WantsPredictions());
+			render(10);
+			Assert::AreEqual(startupRestores, fullLightWrites(), L"script -> compensate: no restore");
+
+			// Changes that need a new module are refused (the renderer then
+			// restarts it, restoring full light as before).
+			ProjectorConfig otherPort = port;
+			otherPort.port = "COM9";
+			Assert::IsFalse(module.Reconfigure(otherPort, tuned));
+			LedDriveConfig logOnly = tuned;
+			logOnly.mode = Mode::LogOnly;
+			Assert::IsFalse(module.Reconfigure(port, logOnly));
+			LedDriveConfig disabled = tuned;
+			disabled.enabled = false;
+			Assert::IsFalse(module.Reconfigure(port, disabled));
+			ProjectorConfig longer = port;
+			longer.ledLatencyMs = 100;
+			Assert::IsTrue(module.Reconfigure(longer, tuned), L"led_latency_ms and flux_table apply live");
+			Assert::AreEqual(6, module.LatencyFrames());
+		}
+
+		TEST_METHOD(FilmIn60HzCountsTheLatencyInSourceFrames)
+		{
+			// Audit (stage7-step5-delta1.md): 24p in a 60 Hz output shows each
+			// source frame for 3 or 2 output frames. 80 ms is 5 output frames but
+			// 2 source frames: the command for a cut must go out about 2 source
+			// frames ahead, not 5.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(80);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			config.earlyRamp = false; // the command timing alone
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(120.0));
+			module.SetLookaheadDepth(8);
+			const uint64_t cut = 20;
+			StatsBuilder builder(module.Config());
+			for (uint64_t sequence = 1; sequence < 40; ++sequence)
+				module.SubmitPrediction(sequence, builder.Build(Frame(sequence < cut ? 120.0 : 18.0),
+					sequence * 1000.0 / 24.0));
+			uint64_t frame = 0, landedAt = 0;
+			for (uint64_t sequence = 1; sequence <= cut + 2 && landedAt == 0; ++sequence)
+				for (int repeat = 0; repeat < (sequence % 2 ? 3 : 2) && landedAt == 0; ++repeat, ++frame)
+				{
+					module.BeginFrameAt(sequence, frame * FRAME_MS, 24.0);
+					if (module.ModelledLight() < 255.0) landedAt = sequence;
+					WaitFor([&] { return !module.ProjectorStatus().busy; });
+				}
+			Assert::AreEqual(5, module.LatencyFrames(), L"Dead time is in output frames");
+			Assert::AreEqual(1000.0 / 24.0, module.SourceFramePeriodMs(), 1e-9);
+			Assert::IsTrue(landedAt >= cut - 1 && landedAt <= cut,
+				(L"the LED landed on source frame " + std::to_wstring(landedAt)).c_str());
+		}
+
 		TEST_METHOD(EffectiveLookaheadIsClampedToTheFramesActuallyQueued)
 		{
 			// Until Stage 5 the queue holds the current frame plus target_frames

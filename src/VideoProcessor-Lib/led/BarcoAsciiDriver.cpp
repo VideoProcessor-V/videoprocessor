@@ -79,7 +79,7 @@ namespace LedDrive
 	}
 
 	bool BarcoAsciiDriver::Transact(const std::string& command, const char* mnemonic,
-		int* value, int timeoutMs, int maxGapWaitMs, int sentLight)
+		int* value, int timeoutMs, int maxGapWaitMs, int sentLight, bool abortable)
 	{
 		using namespace std::chrono;
 		steady_clock::time_point allowed;
@@ -129,8 +129,15 @@ namespace LedDrive
 			for (;;)
 			{
 				const auto remaining = duration_cast<milliseconds>(deadline - steady_clock::now()).count();
-				if (remaining <= 0 || !port->ReadLine(static_cast<int>(remaining), line))
+				if (remaining <= 0)
 					break;
+				// Short reads, so an exit can end the wait of a command in flight.
+				if (!port->ReadLine(static_cast<int>(std::min<long long>(remaining, 50)), line))
+				{
+					std::lock_guard<std::mutex> guard(stateMutex);
+					if (abortable && shuttingDown) break;
+					continue;
+				}
 				std::string name;
 				int parsed = 0;
 				if (ParseReply(line, name, parsed) && SameMnemonic(name, mnemonic))
@@ -239,7 +246,7 @@ namespace LedDrive
 			return false;
 		}
 		{
-			std::lock_guard<std::mutex> guard(portMutex);
+			std::lock_guard<std::timed_mutex> guard(portMutex);
 			SelectFraming();
 			int minimum = 0, maximum = 0;
 			if (framing.acknowledged)
@@ -262,6 +269,7 @@ namespace LedDrive
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			stopping = false;
+			shuttingDown = false;
 			pendingLight = -1;
 			opened = true;
 		}
@@ -291,7 +299,7 @@ namespace LedDrive
 	{
 		if (opened && framing.acknowledged)
 		{
-			std::lock_guard<std::mutex> guard(portMutex);
+			std::lock_guard<std::timed_mutex> guard(portMutex);
 			int light = 0, contrast = 0;
 			const bool haveLight = QueryLocked("LPW1", "?", light);
 			const bool haveContrast = QueryLocked("CNTR", "?", contrast);
@@ -319,8 +327,18 @@ namespace LedDrive
 		wake.notify_one();
 	}
 
+	void BarcoAsciiDriver::BeginShutdown()
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		shuttingDown = true;
+		pendingLight = -1;
+		wake.notify_all();
+	}
+
 	bool BarcoAsciiDriver::SetLightNow(int level, int timeoutMs)
 	{
+		using namespace std::chrono;
+		const auto start = steady_clock::now();
 		int clamped = 0;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
@@ -328,13 +346,26 @@ namespace LedDrive
 			pendingLight = -1;
 			clamped = Clamp(level);
 		}
-		std::lock_guard<std::mutex> guard(portMutex);
+		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
+		if (timeoutMs > 0)
+		{
+			// Bounded (exit): the whole call stays within timeoutMs - up to half
+			// waiting for a command in flight (BeginShutdown ends its reply
+			// wait), the rest split between the gap and the reply.
+			if (!lock.try_lock_for(milliseconds(timeoutMs / 2)))
+			{
+				DebugLog::Log("LED drive: port still busy after %d ms; light not restored", timeoutMs / 2);
+				return false;
+			}
+		}
+		else
+			lock.lock();
 		int confirmed = -1;
-		// Bounded (exit): the whole call, gap wait included, stays within
-		// timeoutMs - half for the gap, half for the reply.
+		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
+			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
 		const bool ok = timeoutMs > 0 ?
 			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
-				std::min(timeoutMs / 2, config.ackTimeoutMs), timeoutMs / 2, clamped) :
+				std::max(1, std::min(left / 2, config.ackTimeoutMs)), left / 2, clamped) :
 			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
 				config.ackTimeoutMs, -1, clamped);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
@@ -345,7 +376,7 @@ namespace LedDrive
 	bool BarcoAsciiDriver::SetContrast(int value)
 	{
 		if (!opened) return false;
-		std::lock_guard<std::mutex> guard(portMutex);
+		std::lock_guard<std::timed_mutex> guard(portMutex);
 		int confirmed = -1;
 		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
 			config.ackTimeoutMs, -1);
@@ -371,7 +402,7 @@ namespace LedDrive
 				while (!stopping && std::chrono::steady_clock::now() < nextSendAllowed)
 					wake.wait_until(lock, nextSendAllowed);
 				if (stopping) return;
-				if (pendingLight < 0) continue;
+				if (shuttingDown || pendingLight < 0) continue;
 				target = pendingLight;
 				pendingLight = -1;
 				// Dim at most max_levels_per_command per command; the rest of
@@ -385,10 +416,20 @@ namespace LedDrive
 				}
 				transmitting = true;
 			}
-			std::lock_guard<std::mutex> guard(portMutex);
+			std::lock_guard<std::timed_mutex> guard(portMutex);
+			{
+				// The exit restore may have begun while this target waited for
+				// the port: never send a stale level after it.
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				if (shuttingDown)
+				{
+					transmitting = false;
+					continue;
+				}
+			}
 			int confirmed = -1;
 			const bool ok = Transact(Format("LPW1", std::to_string(target)), "LPW1", &confirmed,
-				config.ackTimeoutMs, -1, target);
+				config.ackTimeoutMs, -1, target, true);
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
 			transmitting = false;
 			if (ok) lastLight = confirmed >= 0 ? confirmed : target;

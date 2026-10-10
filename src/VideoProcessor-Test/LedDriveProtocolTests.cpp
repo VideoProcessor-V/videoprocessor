@@ -274,6 +274,37 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t{ 1 }, projector->Writes().size(), L"140 was still inside the pause");
 		}
 
+		TEST_METHOD(ExitRestoreIsNeverOvertakenByADimCommand)
+		{
+			// Audit (stage7-step1-protocol.md): a dim target the driver thread is
+			// sending, or still holds, must not land after the full-light restore,
+			// and the restore stays within its second even with a long reply wait.
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.ackTimeoutMs = 3000;
+			auto driver = OpenDriver(projector, config);
+			const size_t before = projector->Writes().size();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->holdReplies = true;
+			}
+			driver->SetLight(100);
+			Assert::IsTrue(projector->WaitForWrites(before + 1), L"100 is on the wire, its reply held back");
+			driver->SetLight(90); // queued behind it
+			const auto start = std::chrono::steady_clock::now();
+			RestoreFullLight(*driver, 255);
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			Assert::IsTrue(elapsed < 1100, (L"restore took " + std::to_wstring(elapsed) + L" ms").c_str());
+			projector->Release();
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			driver->Close();
+			const auto lights = LightCommands(projector->Writes());
+			Assert::AreEqual(std::string(":LPW1255\r"), lights.back(), L"Full light is the last level sent");
+			for (const auto& light : lights)
+				Assert::IsTrue(light != ":LPW190\r", L"The queued dim target was dropped");
+		}
+
 		TEST_METHOD(MissingReplyIsCountedAndTheDriverCarriesOn)
 		{
 			auto projector = std::make_shared<FakeProjector>();

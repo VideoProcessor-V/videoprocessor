@@ -48,11 +48,13 @@ namespace LedDrive
 		// thread. Called by the destructor.
 		void Stop();
 
-		// Render thread, before each frame: the source sequence of the frame
-		// about to be rendered. Returns the gain for that frame.
-		CompensationGain BeginFrame(uint64_t sequence);
+		// Render thread, before each output frame: the source sequence of the
+		// frame about to be rendered and the source frame rate (0 = unknown;
+		// output frames are then assumed to be source frames). Returns the gain
+		// for that frame.
+		CompensationGain BeginFrame(uint64_t sequence, double sourceFps = 0.0);
 		// The same with an explicit clock (tests).
-		CompensationGain BeginFrameAt(uint64_t sequence, double timeMs);
+		CompensationGain BeginFrameAt(uint64_t sequence, double timeMs, double sourceFps = 0.0);
 		// Render thread, after a frame: the GPU pass's counts for a frame
 		// (sequence 0 when unknown).
 		void SubmitMeasurement(const RawMeasurement& raw, uint64_t sequence = 0);
@@ -63,7 +65,7 @@ namespace LedDrive
 		// to its queued-frame walk and hands over the raw-to-output transfer
 		// whenever its colour mapping changes.
 		QueuedFrameStatistics::IObserver& Lookahead() { return lookahead; }
-		bool WantsPredictions() const { return led.mode == Mode::Compensate; }
+		bool WantsPredictions() const;
 		void SetRawTransfer(std::shared_ptr<const RawTransfer> transfer);
 		std::shared_ptr<const RawTransfer> CurrentRawTransfer() const;
 		void SetLookaheadDepth(size_t futureFrames);
@@ -73,8 +75,18 @@ namespace LedDrive
 		bool DrivingProjector() const;
 		DriverStatus ProjectorStatus() const;
 		int Ticks() const;
-		const LedDriveConfig& Config() const { return led; }
-		const FluxModel& Flux() const { return flux; }
+		// Settings changed while running: applies them to the running module
+		// (the LED and both controllers carry on from where they are) and
+		// returns true; false when the change needs a new module - the
+		// connection settings differ, or the module would start or stop
+		// driving the projector (enabled, log_only).
+		bool Reconfigure(const ProjectorConfig& projector, const LedDriveConfig& led);
+		// Increases with every Reconfigure().
+		uint64_t ConfigGeneration() const;
+		LedDriveConfig Config() const;
+		// Real-time length of one source frame (the output frame period when the
+		// source rate is unknown).
+		double SourceFramePeriodMs() const;
 		// The LED level the gain is following: the last level the driver
 		// actually wrote to the port that has had led_latency_ms (whole frames)
 		// to land (dead time, no lag). Targets the driver skipped (it keeps to
@@ -91,6 +103,7 @@ namespace LedDrive
 		bool WaitUntil(std::chrono::steady_clock::time_point when);
 		double NowMs() const;
 		int LatencyFramesLocked() const;
+		int LatencySourceFramesLocked() const;
 		CompensationGain GainLocked() const;
 		FrameStats Corrected(const FrameStats& predicted) const;
 		void StepCompensateLocked(uint64_t sequence, double elapsedMs);
@@ -106,7 +119,9 @@ namespace LedDrive
 		bool stopping = false;
 		bool started = false;
 
+		uint64_t configGeneration = 0;
 		StatsBuilder statsBuilder;
+		uint64_t lastMeasuredSequence = 0;
 		bool haveStats = false;
 		FrameStats latest;
 		bool pendingCut = false;
@@ -130,6 +145,7 @@ namespace LedDrive
 		uint64_t frameIndex = 0;
 		double lastFrameMs = -1.0;
 		double framePeriodMs = 1000.0 / 60.0;
+		double sourceFps = 0.0;
 		struct Command { uint64_t frame; int level; };
 		std::deque<Command> commands;
 		int seenSends = 0;

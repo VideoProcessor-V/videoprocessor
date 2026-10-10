@@ -56,6 +56,7 @@ namespace LedDrive
 	private:
 		LedDriveModule& module;
 		StatsBuilder builder;
+		uint64_t builderGeneration = 0;
 		uint64_t lastSequence = 0;
 		std::shared_ptr<const RawTransfer> transfer;
 		std::vector<float> boosted;

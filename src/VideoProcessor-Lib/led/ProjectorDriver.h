@@ -63,6 +63,9 @@ namespace LedDrive
 		// timeoutMs > 0 bounds the whole call (exit); 0 waits as long as the
 		// command gap and pause require (startup).
 		virtual bool SetLightNow(int level, int timeoutMs) = 0;
+		// Before the exit restore: drop queued targets and stop the driver's
+		// own thread from sending anything more, so the restore is last.
+		virtual void BeginShutdown() {}
 		// Only the one-off startup correction to 50; CNTR is never driven.
 		virtual bool SetContrast(int value) = 0;
 		virtual void Close() = 0;

@@ -148,6 +148,8 @@ namespace LedDrive
 	public:
 		explicit CompensateController(const LedDriveConfig& config, const FluxModel& flux = FluxModel());
 		void Reset(int light);
+		// New settings, same state (LED level, protection, ramp): live tuning.
+		void Reconfigure(const LedDriveConfig& config, const FluxModel& flux);
 		// stats: the frame the command is for (shown when the LED gets there).
 		// elapsedMs: time since the previous frame. ahead: the furthest queued
 		// frame, when there is one (used only with early_ramp).

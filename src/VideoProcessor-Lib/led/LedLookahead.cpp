@@ -78,7 +78,7 @@ namespace LedDrive
 	}
 
 	LookaheadObserver::LookaheadObserver(LedDriveModule& moduleIn)
-		: module(moduleIn), builder(moduleIn.Config())
+		: module(moduleIn), builder(LedDriveConfig())
 	{
 	}
 
@@ -92,6 +92,14 @@ namespace LedDrive
 	{
 		(void)framesAhead;
 		if (!module.WantsPredictions()) return;
+		// Settings changed (or first use): this thread owns the builder.
+		const uint64_t generation = module.ConfigGeneration() + 1;
+		if (generation != builderGeneration)
+		{
+			builder = StatsBuilder(module.Config());
+			builderGeneration = generation;
+			transfer.reset();
+		}
 		// Each frame once, in source order; a jump backwards is a new stream.
 		if (sourceSequence != 0 && sourceSequence <= lastSequence &&
 			lastSequence - sourceSequence < 1000)
@@ -108,7 +116,8 @@ namespace LedDrive
 		RawMeasurement raw;
 		if (!MeasureRawFrame(luma, activePicture, boosted, raw)) return;
 		lastSequence = sourceSequence;
-		const FrameStats stats = builder.Build(raw, sourceSequence * module.FramePeriodMs());
+		// The builder's windows are in real time: one source frame apart.
+		const FrameStats stats = builder.Build(raw, sourceSequence * module.SourceFramePeriodMs());
 		module.SubmitPrediction(sourceSequence, stats);
 	}
 }

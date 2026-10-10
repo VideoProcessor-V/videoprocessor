@@ -507,3 +507,35 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
   LedMeasurementHookMeasuresWithoutTouchingThePicture); `script` mode's
   highlight test uses it, `compensate` keeps the percentile. The raw
   lookahead path fills the same field.
+
+### Code audit 1 responses (2026-10-09; files in docs/audit/)
+
+- Blocker (stage7-step4-compensate.md, restart on every edit): fixed.
+  `LedDriveModule::Reconfigure` applies `[led_drive]` changes, script and
+  compensate switches, `led_latency_ms` and `flux_table` to the running
+  module; the LED and both controllers carry on from the current level
+  (a switch resets the script's emulated contrast to 50). The renderer only
+  builds a new module - restoring full light, as answers-1 §6 asks - when
+  the connection settings change, or the module starts or stops driving
+  the projector (`enabled`, `log_only`).
+- Should fix (stage7-step1-protocol.md / step5b, exit restore): fixed.
+  `RestoreFullLight` first calls `BeginShutdown()`: queued targets are
+  dropped, a command waiting for its reply stops waiting, and the driver
+  thread never sends after it. The restore itself is bounded to 1 s in
+  total, including the wait for the port.
+- Should fix (stage7-step5-delta1.md, output vs source frames): fixed. The
+  renderer passes the source frame rate; the queued frame a command is for
+  is `led_latency_ms` in source frames ahead, and the raw-path statistics
+  run on the source frame clock. Dead time stays in output frames. New test
+  FilmIn60HzCountsTheLatencyInSourceFrames (24p in 60 Hz, 3:2 repeats).
+- Notes acted on: the exact path skips a repeated source frame (24p fades
+  are detected again); a libplacebo runtime disable of the measurement pass
+  is logged; the `terminator` comment in the test config is reworded (it
+  also contained two stray carriage-return bytes since step 1).
+- Notes left as they are: `automatic_crop` in the test config is the owner's
+  call; custom-shader order (profile order before stage, following the
+  fork's madVR loader, vs the brief's stage first) and the saturation
+  equivalence go to the planner; `{{refresh_hz}}` is an integer but no
+  shader uses it; the compensation shader's clamp below black (BTB) is
+  unchanged - libplacebo has already clamped there; with `read_back: off`
+  the driver clamps to 0-255 while both controllers keep inside the floors.

@@ -55,6 +55,96 @@ namespace LedDrive
 		return static_cast<int>(std::lround(projector.ledLatencyMs / framePeriodMs));
 	}
 
+	// led_latency_ms in source frames, for finding the queued frame a command
+	// is for (predictions are keyed by source sequence; 24p film in a 60 Hz
+	// output shows each source frame for 2-3 output frames).
+	int LedDriveModule::LatencySourceFramesLocked() const
+	{
+		return sourceFps > 0.0 ? static_cast<int>(std::lround(projector.ledLatencyMs * sourceFps / 1000.0)) :
+			LatencyFramesLocked();
+	}
+
+	double LedDriveModule::SourceFramePeriodMs() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return sourceFps > 0.0 ? 1000.0 / sourceFps : framePeriodMs;
+	}
+
+	bool LedDriveModule::WantsPredictions() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return led.mode == Mode::Compensate;
+	}
+
+	LedDriveConfig LedDriveModule::Config() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return led;
+	}
+
+	uint64_t LedDriveModule::ConfigGeneration() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return configGeneration;
+	}
+
+	namespace
+	{
+		// Everything the driver was built from except the two values the
+		// module reads live (latency, flux table).
+		bool SameConnection(const ProjectorConfig& a, const ProjectorConfig& b)
+		{
+			return a.protocol == b.protocol && a.port == b.port && a.baud == b.baud &&
+				a.lightMin == b.lightMin && a.lightMax == b.lightMax && a.ackTimeoutMs == b.ackTimeoutMs &&
+				a.minCommandGapMs == b.minCommandGapMs && a.maxLevelsPerCommand == b.maxLevelsPerCommand &&
+				a.burstCommands == b.burstCommands && a.burstPauseMs == b.burstPauseMs &&
+				a.readBack == b.readBack && a.echo == b.echo && a.terminator == b.terminator;
+		}
+	}
+
+	bool LedDriveModule::Reconfigure(const ProjectorConfig& projectorIn, const LedDriveConfig& ledIn)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		if (!ledIn.enabled || !SameConnection(projector, projectorIn) ||
+			EffectiveProtocol(projector, led) != EffectiveProtocol(projectorIn, ledIn))
+			return false;
+		const bool wasCompensating = led.mode == Mode::Compensate;
+		projector = projectorIn;
+		led = ledIn;
+		flux = FluxModel(projector.fluxTable);
+		statsBuilder = StatsBuilder(led);
+		compensator.Reconfigure(led, flux);
+		gain.knee = led.knee;
+		gain.eotf = led.compensationEotf;
+		if (started && driver)
+		{
+			const bool nowCompensating = led.mode == Mode::Compensate;
+			if (nowCompensating && !wasCompensating)
+			{
+				// From script: carry on from the LED's current level.
+				const DriverStatus status = driver->Status();
+				compensator.Reset(status.lastSentLight >= 0 ? status.lastSentLight : modelledLevel);
+				seenSends = status.lightSends;
+				scheduledGains.clear();
+				policy = ControllerOutput();
+				holding = false;
+			}
+			if (!nowCompensating && wasCompensating)
+			{
+				gain.active = false;
+				gain.gain = 1.0;
+				holding = false;
+			}
+			compensating = nowCompensating;
+			applyGain = live && led.mode != Mode::LogOnly;
+		}
+		++configGeneration;
+		wake.notify_all();
+		DebugLog::Log("LED drive: settings applied to the running module (mode=%s); the LED carries on from its current level",
+			ModeName(led.mode));
+		return true;
+	}
+
 	double LedDriveModule::ModelledLight() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
@@ -110,6 +200,10 @@ namespace LedDrive
 	void LedDriveModule::SubmitMeasurement(const RawMeasurement& raw, uint64_t sequence)
 	{
 		std::lock_guard<std::mutex> guard(mutex);
+		// A source frame shown again (24p in a 60 Hz output) adds nothing and
+		// would hide fades (APL "unchanged" on every repeat).
+		if (sequence != 0 && sequence == lastMeasuredSequence) return;
+		lastMeasuredSequence = sequence;
 		const FrameStats stats = statsBuilder.Build(raw, NowMs());
 		if (stats.blocks == 0) return;
 		latest = stats;
@@ -171,14 +265,15 @@ namespace LedDrive
 		return stats;
 	}
 
-	CompensationGain LedDriveModule::BeginFrame(uint64_t sequence)
+	CompensationGain LedDriveModule::BeginFrame(uint64_t sequence, double sourceFpsIn)
 	{
-		return BeginFrameAt(sequence, NowMs());
+		return BeginFrameAt(sequence, NowMs(), sourceFpsIn);
 	}
 
-	CompensationGain LedDriveModule::BeginFrameAt(uint64_t sequence, double timeMs)
+	CompensationGain LedDriveModule::BeginFrameAt(uint64_t sequence, double timeMs, double sourceFpsIn)
 	{
 		std::lock_guard<std::mutex> guard(mutex);
+		sourceFps = sourceFpsIn > 0.0 && sourceFpsIn < 1000.0 ? sourceFpsIn : 0.0;
 		double elapsed = framePeriodMs;
 		if (lastFrameMs >= 0.0)
 		{
@@ -226,8 +321,9 @@ namespace LedDrive
 	{
 		// The frame a command sent now is for: the one shown when the LED gets
 		// there. Its predicted statistics when the walk has seen it (or the
-		// furthest it has seen); otherwise the latest exact ones.
-		const int latency = LatencyFramesLocked();
+		// furthest it has seen); otherwise the latest exact ones. Predictions
+		// are by source frame, so the latency is counted in source frames.
+		const int latency = LatencySourceFramesLocked();
 		FrameStats target = latest;
 		target.cut = pendingCut;
 		target.fade = pendingFade;
@@ -353,8 +449,15 @@ namespace LedDrive
 			applyGain = driving && led.mode != Mode::LogOnly;
 		}
 
-		ScriptController controller(led);
-		controller.Reset(led.ledCeiling, 50);
+		LedDriveConfig current;
+		uint64_t generation = 0;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			current = led;
+			generation = configGeneration;
+		}
+		ScriptController controller(current);
+		controller.Reset(current.ledCeiling, 50);
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
@@ -365,6 +468,16 @@ namespace LedDrive
 			{
 				std::lock_guard<std::mutex> guard(mutex);
 				if (stopping) break;
+				if (generation != configGeneration)
+				{
+					// New settings: the script controller carries on from the
+					// LED's current level (contrast back to unity).
+					generation = configGeneration;
+					current = led;
+					const DriverStatus status = driver->Status();
+					controller = ScriptController(current);
+					controller.Reset(status.lastSentLight >= 0 ? status.lastSentLight : current.ledCeiling, 50);
+				}
 				have = haveStats;
 				if (!compensating)
 				{
@@ -424,7 +537,7 @@ namespace LedDrive
 				std::lock_guard<std::mutex> guard(mutex);
 				++ticks;
 			}
-			if (!WaitUntil(tickStart + std::chrono::milliseconds(std::max(led.tickMs, durationMs))))
+			if (!WaitUntil(tickStart + std::chrono::milliseconds(std::max(current.tickMs, durationMs))))
 				break;
 		}
 
@@ -435,7 +548,7 @@ namespace LedDrive
 			scheduledGains.clear();
 			compensating = false;
 		}
-		if (driving) RestoreFullLight(*driver, led.ledCeiling);
+		if (driving) RestoreFullLight(*driver, current.ledCeiling);
 		driver->Close();
 	}
 }

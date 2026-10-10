@@ -193,6 +193,12 @@ namespace LedDrive
 	{
 	}
 
+	void CompensateController::Reconfigure(const LedDriveConfig& configIn, const FluxModel& fluxIn)
+	{
+		config = configIn;
+		flux = fluxIn;
+	}
+
 	void CompensateController::Reset(int lightIn)
 	{
 		light = lightIn;

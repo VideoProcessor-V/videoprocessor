@@ -3635,6 +3635,7 @@ struct LibplaceboVideoRenderer::Impl
 	// The gamma boost lives in the compensation hook: say so loudly when it
 	// is configured but the hook is not running.
 	bool ledBoostMissingLogged = false;
+	bool ledMeasurementDisabledLogged = false;
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
 	LedDrive::MeasurementHook ledMeasurement;
@@ -13929,7 +13930,7 @@ struct LibplaceboVideoRenderer::Impl
             compensation.eotf = ledCompensationEotf.load(std::memory_order_acquire);
             if (led)
             {
-                compensation = led->BeginFrame(sourceSequence);
+                compensation = led->BeginFrame(sourceSequence, nominalSourceRateHz);
                 if (led->WantsPredictions())
                 {
                     // The lookahead's raw-to-output transfer follows this frame's
@@ -14017,6 +14018,12 @@ struct LibplaceboVideoRenderer::Impl
                 PublishCustomShaderStatus();
             ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks);
+            for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
+                if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
+                {
+                    DebugLog::Log("LED drive: WARNING libplacebo disabled the measurement pass; the LED keeps its last statistics");
+                    ledMeasurementDisabledLogged = true;
+                }
         }
         // LED drive, stats out: finished measurements (a few frames old; the
         // render thread never waits for them).
@@ -15519,6 +15526,18 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
 		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
 		return;
+	// Tuning and script/compensate switches go to the running module, so the
+	// LED carries on from its level instead of restoring full light.
+	if (valid && m_ledDrive && m_ledDrive->Reconfigure(LedDrive::ReadProjectorConfig(configuration),
+		LedDrive::ReadLedDriveConfig(configuration)))
+	{
+		m_ledDriveSignature = signature;
+		if (m_impl)
+			std::atomic_store(&m_impl->queuedFrameObserver, m_ledDrive->WantsPredictions() ?
+				std::shared_ptr<QueuedFrameStatistics::IObserver>(m_ledDrive, &m_ledDrive->Lookahead()) :
+				std::shared_ptr<QueuedFrameStatistics::IObserver>());
+		return;
+	}
 	m_ledDriveSignature = signature;
 	std::shared_ptr<LedDrive::LedDriveModule> previous = m_ledDrive;
 	m_ledDrive.reset();
