@@ -26,6 +26,42 @@ namespace LedDrive
 		{
 			return std::max(0.0, std::min(16.0 + (code - 16.0) * ratio, 255.0));
 		}
+
+		using Commands = std::vector<std::pair<std::string, int>>;
+		const char* const CUSTOM_CHANNELS[3] = { "LDCR", "LDCG", "LDCB" };
+
+		// Into the custom dim: all three colours to the value that matches
+		// LPW1 at the fade-to-black floor, custom mode on, then down - in one
+		// move for all three, or the colours taking turns in small steps so
+		// they are never more than one step apart.
+		Commands CustomDimDown(const LedDriveConfig& led)
+		{
+			Commands commands;
+			for (const char* channel : CUSTOM_CHANNELS) commands.push_back({ channel, led.ftbCustomStart });
+			commands.push_back({ "LDMM", 1 });
+			if (led.ftbCustomDim == FtbCustomDim::Turns)
+			{
+				for (int level = led.ftbCustomStart - led.ftbTurnStep; ; level -= led.ftbTurnStep)
+				{
+					level = std::max(level, led.ftbCustomFloor);
+					for (const char* channel : CUSTOM_CHANNELS) commands.push_back({ channel, level });
+					if (level == led.ftbCustomFloor) break;
+				}
+			}
+			else
+				for (const char* channel : CUSTOM_CHANNELS) commands.push_back({ channel, led.ftbCustomFloor });
+			return commands;
+		}
+
+		// Out again: the picture is coming back, so speed beats colour - all
+		// three colours straight back, then standard dim mode.
+		Commands CustomDimUp(const LedDriveConfig& led)
+		{
+			Commands commands;
+			for (const char* channel : CUSTOM_CHANNELS) commands.push_back({ channel, led.ftbCustomStart });
+			commands.push_back({ "LDMM", 0 });
+			return commands;
+		}
 	}
 
 	LedDriveModule::LedDriveModule(const ProjectorConfig& projectorIn, const LedDriveConfig& ledIn,
@@ -297,7 +333,10 @@ namespace LedDrive
 			scheduledGains.pop_front();
 		}
 		if (compensating && haveStats)
+		{
 			StepCompensateLocked(sequence, elapsed);
+			StepFadeToBlackLocked(sequence, timeMs);
+		}
 		// Dead time: the LED reaches a commanded level led_latency_ms (in
 		// whole frames) after the command, and the gain switches with it.
 		const int latency = LatencyFramesLocked();
@@ -351,7 +390,7 @@ namespace LedDrive
 		// Queued to the driver's thread, which keeps only the newest and
 		// sends it when the command gap allows; the model follows what it
 		// actually sends (above).
-		if (out.lightCommand >= 0 && applyGain)
+		if (out.lightCommand >= 0 && applyGain && fadeToBlack == FadeToBlack::Normal)
 			driver->SetLight(out.lightCommand);
 		policy = out;
 		gain.knee = out.knee;
@@ -361,6 +400,62 @@ namespace LedDrive
 			pendingLog = out.log;
 			pendingLogSent = out.lightCommand >= 0;
 		}
+	}
+
+	void LedDriveModule::StepFadeToBlackLocked(uint64_t sequence, double timeMs)
+	{
+		if ((led.ftbCustomDim == FtbCustomDim::Off && fadeToBlack == FadeToBlack::Normal) ||
+			!applyGain || !driver)
+			return;
+		const bool black = latest.apl < 17.0 && latest.highlight < 20.0;
+		if (!black) blackSinceMs = -1.0;
+		else if (blackSinceMs < 0.0) blackSinceMs = timeMs;
+		// Light coming in the queue: leave before it reaches the screen.
+		bool lightAhead = false;
+		if (sequence != 0)
+			for (auto it = predictions.upper_bound(sequence);
+				it != predictions.end() && it->first <= sequence + lookaheadDepth; ++it)
+				lightAhead = lightAhead || Corrected(it->second).apl >= 17.5;
+		const DriverStatus status = driver->Status();
+		switch (fadeToBlack)
+		{
+		case FadeToBlack::Normal:
+			if (led.ftbCustomDim != FtbCustomDim::Off && black && !lightAhead &&
+				timeMs - blackSinceMs >= led.ftbBlackMs && modelledLevel <= led.ledFloorBlack &&
+				!status.busy && !status.sequenceBusy &&
+				driver->QueueSequence(CustomDimDown(led), led.ftbStepMs))
+			{
+				fadeToBlack = FadeToBlack::Deep;
+				pendingLog = led.ftbCustomDim == FtbCustomDim::Turns ?
+					"LED drive: fade to black - custom dim on, colours taking turns" :
+					"LED drive: fade to black - custom dim on, colours together";
+				pendingLogSent = true;
+			}
+			break;
+		case FadeToBlack::Deep:
+			if ((!black || lightAhead || led.ftbCustomDim == FtbCustomDim::Off) &&
+				driver->QueueSequence(CustomDimUp(led), led.ftbStepMs))
+			{
+				fadeToBlack = FadeToBlack::Leaving;
+				pendingLog = "LED drive: fade to black - picture returning, custom dim off";
+				pendingLogSent = true;
+			}
+			break;
+		case FadeToBlack::Leaving:
+			if (!status.sequenceBusy)
+			{
+				fadeToBlack = FadeToBlack::Normal;
+				// The controller may have moved meanwhile: resend its level.
+				driver->SetLight(compensator.Light());
+			}
+			break;
+		}
+	}
+
+	bool LedDriveModule::CustomDimEngaged() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return fadeToBlack != FadeToBlack::Normal;
 	}
 
 	CompensationGain LedDriveModule::GainLocked() const
@@ -430,7 +525,7 @@ namespace LedDrive
 			opened->Open(error);
 			driving = false;
 		}
-		BringToKnownState(*opened, led.ledCeiling);
+		BringToKnownState(*opened, led.ledCeiling, led.ftbCustomDim != FtbCustomDim::Off);
 		const LightRange range = opened->QueryLightRange();
 		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f led_latency=%d ms",
 			ModeName(led.mode), driving ? protocol.c_str() : "none (dry run)", led.tickMs, led.gammaBoost,
@@ -548,7 +643,9 @@ namespace LedDrive
 			scheduledGains.clear();
 			compensating = false;
 		}
-		if (driving) RestoreFullLight(*driver, current.ledCeiling);
+		if (driving)
+			RestoreFullLight(*driver, current.ledCeiling,
+				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal);
 		driver->Close();
 	}
 }

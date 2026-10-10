@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <thread>
 
@@ -28,6 +29,8 @@ namespace LedDrive
 		void SetLight(int level) override;
 		bool SetLightNow(int level, int timeoutMs) override;
 		void BeginShutdown() override;
+		bool QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
+		bool SendNow(const std::string& mnemonic, int value, int timeoutMs) override;
 		bool SetContrast(int value) override;
 		void Close() override;
 		DriverStatus Status() const override;
@@ -78,6 +81,12 @@ namespace LedDrive
 		int lastSentLight = -1;
 		bool transmitting = false;
 		bool shuttingDown = false;
+		// Experimental custom dim sequence (guarded by stateMutex).
+		std::deque<std::pair<std::string, int>> sequence;
+		int sequenceStepMs = 100;
+		bool sequenceInFlight = false;
+		int sequencesDone = 0;
+		std::chrono::steady_clock::time_point sequenceNextAllowed;
 		int sinceBurst = 0;
 		// Guarded by stateMutex.
 		std::chrono::steady_clock::time_point nextSendAllowed;

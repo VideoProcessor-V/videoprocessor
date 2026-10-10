@@ -722,7 +722,15 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   only blanks pixels at the current LED level. The custom LED dim mode
   (`LDMM` 1, `LDCR`/`LDCG`/`LDCB`) may go lower but bypasses the automatic
   colour balance; measure on the projector whether it can refine fades to
-  black before designing anything.
+  black. Owner 2026-10-10: built as an **experimental** option on the LED
+  drive page (off by default, options greyed until on): `ftb_custom_dim`
+  together | turns, `ftb_step_ms` 100 (the contrast-dump pace),
+  `ftb_custom_start` (custom value matching LPW1 60, to be measured),
+  `ftb_custom_floor`. Separate per-colour commands can tint the black
+  briefly; "turns" keeps the colours within one step. Leaving is always all
+  three at once. Low_Latency now sets `active_picture_lookahead_frames: 0`
+  explicitly (it inherited Normal's 8); the LED drive follows the queue it
+  is given and is reactive there.
 - Queue auto-select: `[queue.Low_Latency] when: ${source_rate} > 59` in the
   test configuration (syntax per CONFIGURATION.html; tested: 59.94 fps
   selects Low_Latency, 23.976 fps returns to Normal); Shift+L still

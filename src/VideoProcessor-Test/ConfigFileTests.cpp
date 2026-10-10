@@ -250,6 +250,16 @@ namespace VideoProcessorTest
                 film.snapshot->effectiveSelections.at("queue")),
                 L"Film goes back to the cinema queue");
             Assert::IsTrue(film.snapshot->queue.queueSize > 1);
+            // Look-ahead follows the queue: Normal looks ahead, Low_Latency (a
+            // one-frame queue) does not, so the LED drive works reactively there.
+            Assert::IsTrue(film.snapshot->queue.hasActivePictureLookaheadFrames);
+            Assert::AreEqual<size_t>(8, film.snapshot->queue.activePictureLookaheadFrames);
+            UnifiedProfileRuntime::RefreshResult game;
+            Assert::IsTrue(runtime.Refresh(source("59.94"), game, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::IsTrue(game.snapshot->queue.hasActivePictureLookaheadFrames,
+                L"Low_Latency must not inherit Normal's look-ahead");
+            Assert::AreEqual<size_t>(0, game.snapshot->queue.activePictureLookaheadFrames);
         }
 
         TEST_METHOD(CinemaTestConfigurationSwitchesBlackBarZoomFromTheConfigApp)

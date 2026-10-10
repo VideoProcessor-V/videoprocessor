@@ -6,6 +6,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 // Layer 3 of the LED drive module: projector protocols. The controller posts
 // light targets; a driver never sees the renderer and the controller never
@@ -44,6 +46,10 @@ namespace LedDrive
 		int lastSentLight = -1;
 		// A light target is waiting or being transmitted.
 		bool busy = false;
+		// A command sequence (experimental custom dim) is waiting or being
+		// sent, and how many sequences have finished.
+		bool sequenceBusy = false;
+		int sequencesDone = 0;
 	};
 
 	class IProjectorDriver
@@ -66,6 +72,24 @@ namespace LedDrive
 		// Before the exit restore: drop queued targets and stop the driver's
 		// own thread from sending anything more, so the restore is last.
 		virtual void BeginShutdown() {}
+		// Experimental custom LED dim: commands (mnemonic, value) sent stepMs
+		// apart by the driver's own thread, ahead of light targets; a new
+		// sequence replaces the unsent rest of the previous one. False when
+		// the driver cannot send.
+		virtual bool QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs)
+		{
+			(void)commands;
+			(void)stepMs;
+			return false;
+		}
+		// One command now (startup, exit); timeoutMs > 0 bounds the call.
+		virtual bool SendNow(const std::string& mnemonic, int value, int timeoutMs)
+		{
+			(void)mnemonic;
+			(void)value;
+			(void)timeoutMs;
+			return false;
+		}
 		// Only the one-off startup correction to 50; CNTR is never driven.
 		virtual bool SetContrast(int value) = 0;
 		virtual void Close() = 0;
@@ -82,9 +106,12 @@ namespace LedDrive
 	// Startup: logs what the projector reports, then sets the light to the
 	// ceiling and CNTR to 50 when it is not already 50 (a previous run of the
 	// old script may have left 74). Returns a one-line summary.
-	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling);
+	// resetDimMode: also set the LED dim mode back to standard (LDMM 0) - used
+	// when the experimental custom dim is configured, so a crash cannot leave
+	// the projector in custom mode.
+	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false);
 
 	// Clean exit, disable or switch to log_only: light back to the ceiling,
 	// never blocking for more than a second.
-	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling);
+	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false);
 }

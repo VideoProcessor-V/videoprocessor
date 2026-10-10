@@ -80,6 +80,11 @@ namespace LedDrive
 		std::vector<std::pair<double, double>> fluxTable;
 	};
 
+	// Experimental deeper fade to black with the projector's custom LED dim
+	// (LDMM 1 + LDCR / LDCG / LDCB): off, all three colours at once, or the
+	// colours taking turns in small steps.
+	enum class FtbCustomDim { Off, Together, Turns };
+
 	struct LedDriveConfig
 	{
 		bool enabled = false;
@@ -129,6 +134,17 @@ namespace LedDrive
 		int fadeFrames = 6;
 		double fadeMinStep = 0.5;
 		double cutThreshold = 24.0;
+		// Experimental (owner 2026-10-10): once the picture has been black for
+		// ftb_black_ms with the LED at led_floor_black, switch to the custom
+		// LED dim and step from ftb_custom_start (the custom value that equals
+		// LPW1 at led_floor_black - to be measured) down to ftb_custom_floor,
+		// one command every ftb_step_ms; back up and off at the first light.
+		FtbCustomDim ftbCustomDim = FtbCustomDim::Off;
+		int ftbStepMs = 100;
+		int ftbCustomStart = 60;
+		int ftbCustomFloor = 30;
+		int ftbTurnStep = 2;
+		int ftbBlackMs = 500;
 	};
 
 	namespace Detail
@@ -303,6 +319,12 @@ namespace LedDrive
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
+			Choice("ftb_custom_dim", { "off", "together", "turns" }),
+			Integer("ftb_step_ms", 50, 1000),
+			Integer("ftb_custom_start", 0, 255),
+			Integer("ftb_custom_floor", 0, 255),
+			Integer("ftb_turn_step", 1, 50),
+			Integer("ftb_black_ms", 100, 10000),
 			Number("rate_up", 1.0, 10000.0),
 			Number("rate_down", 1.0, 10000.0),
 			Integer("deadband", 0, 50),
@@ -392,6 +414,14 @@ namespace LedDrive
 					error = "[" + section + "] needs highlight_area_small < highlight_area_large";
 					return false;
 				}
+				int customStart = 60, customFloor = 30;
+				if (config.TryGetString(section, "ftb_custom_start", value)) Detail::ParseInt(value, 0, 255, customStart);
+				if (config.TryGetString(section, "ftb_custom_floor", value)) Detail::ParseInt(value, 0, 255, customFloor);
+				if (customFloor >= customStart)
+				{
+					error = "[" + section + "] needs ftb_custom_floor < ftb_custom_start";
+					return false;
+				}
 			}
 		}
 		const std::string profilePath = LedProfilePath(config);
@@ -429,6 +459,11 @@ namespace LedDrive
 			{
 				error = "LED profile " + profilePath +
 					" with [led_drive.Default]: needs led_floor_black <= led_floor <= led_ceiling";
+				return false;
+			}
+			if (merged.ftbCustomFloor >= merged.ftbCustomStart)
+			{
+				error = "LED profile " + profilePath + ": needs ftb_custom_floor < ftb_custom_start";
 				return false;
 			}
 			if (merged.highlightAreaSmall >= merged.highlightAreaLarge)
@@ -554,6 +589,17 @@ namespace LedDrive
 		readInt("fade_frames", 2, 120, result.fadeFrames);
 		readNumber("fade_min_step", result.fadeMinStep);
 		readNumber("cut_threshold", result.cutThreshold);
+		if (config.TryGetString(section, "ftb_custom_dim", value))
+		{
+			const std::string method = ConfigFile::NormalizeName(value);
+			result.ftbCustomDim = method == "together" ? FtbCustomDim::Together :
+				method == "turns" ? FtbCustomDim::Turns : FtbCustomDim::Off;
+		}
+		readInt("ftb_step_ms", 50, 1000, result.ftbStepMs);
+		readInt("ftb_custom_start", 0, 255, result.ftbCustomStart);
+		readInt("ftb_custom_floor", 0, 255, result.ftbCustomFloor);
+		readInt("ftb_turn_step", 1, 50, result.ftbTurnStep);
+		readInt("ftb_black_ms", 100, 10000, result.ftbBlackMs);
 	}
 
 	// Built-in defaults (the beta_22 script's curve and tables), then the LED

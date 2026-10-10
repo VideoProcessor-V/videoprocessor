@@ -5,6 +5,7 @@
 
 #include <led/SerialPort.h>
 
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -62,6 +63,10 @@ namespace
 			else if (body == ":CNTR?") replies.push_back(Reply("CNTR", contrast));
 			else if (body.rfind(":LPW1", 0) == 0) { light = std::stoi(body.substr(5)); replies.push_back(Reply("LPW1", light)); }
 			else if (body.rfind(":CNTR", 0) == 0) { contrast = std::stoi(body.substr(5)); replies.push_back(Reply("CNTR", contrast)); }
+			// Any other ":MNEMvalue" (LDMM, LDCR, ...) is acknowledged with its value.
+			else if (body.size() > 5 && body[0] == ':' && body.find('?') == std::string::npos &&
+				std::isdigit(static_cast<unsigned char>(body[5])))
+				replies.push_back(Reply(body.substr(1, 4).c_str(), std::stoi(body.substr(5))));
 			changed.notify_all();
 		}
 

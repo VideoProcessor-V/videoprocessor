@@ -11,6 +11,7 @@
 
 #include "LedDriveTestSupport.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -220,6 +221,102 @@ namespace VideoProcessorTest
 			DeleteFileA(profilePath.c_str());
 			Assert::IsFalse(Validates("[led_drive.Default]\nprofile_file: vp-led-profile-test.cfg\n", error));
 			Assert::IsTrue(error.find("cannot read") != std::string::npos);
+		}
+
+		TEST_METHOD(ExperimentalFadeToBlackUsesTheCustomDimAndComesBack)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			config.ftbCustomDim = FtbCustomDim::Turns;
+			config.ftbStepMs = 100;
+			config.ftbCustomStart = 60;
+			config.ftbCustomFloor = 50;
+			config.ftbTurnStep = 5;
+			config.ftbBlackMs = 200;
+			{
+				LedDriveModule module(port, config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+				const auto startup = projector->Writes();
+				Assert::IsTrue(std::find(startup.begin(), startup.end(), std::string(":LDMM0\r")) != startup.end(),
+					L"Startup puts the dim mode back to standard when the experiment is configured");
+
+				// A black picture: the LED goes to the fade-to-black floor, then
+				// (after ftb_black_ms) into the custom dim.
+				module.SubmitMeasurement(Frame(16.0));
+				uint64_t frame = 0;
+				auto render = [&](int frames)
+				{
+					for (int i = 0; i < frames; ++i, ++frame)
+					{
+						module.BeginFrameAt(0, frame * FRAME_MS);
+						WaitFor([&] { return !module.ProjectorStatus().busy; });
+					}
+				};
+				for (int i = 0; i < 400 && !module.CustomDimEngaged(); ++i) render(1);
+				Assert::IsTrue(module.CustomDimEngaged(), L"The custom dim engaged on a black picture");
+				Assert::IsTrue(module.ModelledLight() <= config.ledFloorBlack, L"Only after the LED reached its floor");
+				Assert::IsTrue(WaitFor([&] { return !module.ProjectorStatus().sequenceBusy; }, 5000));
+
+				std::vector<std::string> dim;
+				std::vector<std::chrono::steady_clock::time_point> times;
+				const auto writes = projector->Writes();
+				const auto writeTimes = projector->WriteTimes();
+				for (size_t i = 0; i < writes.size(); ++i)
+					if (writes[i].rfind(":LDC", 0) == 0 || writes[i] == ":LDMM1\r")
+					{
+						dim.push_back(writes[i]);
+						times.push_back(writeTimes[i]);
+					}
+				const std::vector<std::string> expected = { ":LDCR60\r", ":LDCG60\r", ":LDCB60\r", ":LDMM1\r",
+					":LDCR55\r", ":LDCG55\r", ":LDCB55\r", ":LDCR50\r", ":LDCG50\r", ":LDCB50\r" };
+				Assert::AreEqual(expected.size(), dim.size());
+				for (size_t i = 0; i < expected.size(); ++i)
+					Assert::AreEqual(expected[i], dim[i], L"Colours take turns, one small step each");
+				for (size_t i = 1; i < times.size(); ++i)
+					Assert::IsTrue(std::chrono::duration<double, std::milli>(times[i] - times[i - 1]).count() >= 95.0,
+						L"One custom-dim command every ftb_step_ms (100 ms)");
+				const size_t lightsWhileDeep = std::count_if(writes.begin(), writes.end(),
+					[](const std::string& w) { return w.rfind(":LPW1", 0) == 0; });
+
+				// Light returns: back up, standard mode, LED commands resume.
+				module.SubmitMeasurement(Frame(120.0));
+				for (int i = 0; i < 300 && module.CustomDimEngaged(); ++i)
+				{
+					render(1);
+					std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				}
+				Assert::IsFalse(module.CustomDimEngaged(), L"The custom dim ends when the picture returns");
+				const auto after = projector->Writes();
+				std::vector<std::string> modes;
+				for (const auto& w : after) if (w.rfind(":LDMM", 0) == 0) modes.push_back(w);
+				Assert::AreEqual(std::string(":LDMM0\r"), modes.back(), L"Standard dim mode at the end");
+				render(30);
+				const auto resumed = projector->Writes();
+				const size_t lightsAfter = std::count_if(resumed.begin(), resumed.end(),
+					[](const std::string& w) { return w.rfind(":LPW1", 0) == 0; });
+				Assert::IsTrue(lightsAfter > lightsWhileDeep, L"LED commands resume after the custom dim");
+			}
+			// Exit: standard dim mode, then full light.
+			const auto final = projector->Writes();
+			Assert::AreEqual(std::string(":LPW1255\r"), final.back());
+			Assert::AreEqual(std::string(":LDMM0\r"), final[final.size() - 2]);
+		}
+
+		TEST_METHOD(ExperimentalFadeToBlackSettingsAreValidated)
+		{
+			std::string error;
+			Assert::IsTrue(Validates("[led_drive.Default]\nftb_custom_dim: turns\nftb_step_ms: 100\n"
+				"ftb_custom_start: 60\nftb_custom_floor: 20\n", error), std::wstring(error.begin(), error.end()).c_str());
+			Assert::IsFalse(Validates("[led_drive.Default]\nftb_custom_dim: sometimes\n", error));
+			Assert::IsFalse(Validates("[led_drive.Default]\nftb_custom_start: 40\nftb_custom_floor: 40\n", error));
+			Assert::IsTrue(error.find("ftb_custom_floor") != std::string::npos);
+			Assert::IsFalse(Validates("[led_drive.Default]\nftb_step_ms: 10\n", error));
+			Assert::IsTrue(LedDriveConfig().ftbCustomDim == FtbCustomDim::Off, L"Off unless chosen");
 		}
 
 		TEST_METHOD(ShippedExampleProfileIsValidAndEqualsTheBuiltInValues)

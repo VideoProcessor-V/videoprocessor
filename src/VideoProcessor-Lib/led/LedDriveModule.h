@@ -72,6 +72,8 @@ namespace LedDrive
 		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted);
 
 		// Diagnostics and tests.
+		// True while the experimental custom-dim fade to black is engaged.
+		bool CustomDimEngaged() const;
 		bool DrivingProjector() const;
 		DriverStatus ProjectorStatus() const;
 		int Ticks() const;
@@ -107,6 +109,7 @@ namespace LedDrive
 		CompensationGain GainLocked() const;
 		FrameStats Corrected(const FrameStats& predicted) const;
 		void StepCompensateLocked(uint64_t sequence, double elapsedMs);
+		void StepFadeToBlackLocked(uint64_t sequence, double timeMs);
 
 		ProjectorConfig projector;
 		LedDriveConfig led;
@@ -164,5 +167,12 @@ namespace LedDrive
 
 		std::string pendingLog;
 		bool pendingLogSent = false;
+
+		// Experimental custom-dim fade to black: Normal, Deep (custom dim on
+		// or going down), Leaving (back up and off). LPW1 commands wait while
+		// it is not Normal.
+		enum class FadeToBlack { Normal, Deep, Leaving };
+		FadeToBlack fadeToBlack = FadeToBlack::Normal;
+		double blackSinceMs = -1.0;
 	};
 }

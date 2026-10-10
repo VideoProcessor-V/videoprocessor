@@ -8853,6 +8853,86 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "Switching the LED drive on or off, or to or from Log only, returns the projector to full light; "
         "other changes carry on from the current level.")));
 
+    // Experimental: deeper fade to black with the projector's custom LED dim.
+    // Off by default; its options stay greyed out until it is switched on.
+    auto* experiment = new QWidget;
+    auto* experimentForm = new QFormLayout(experiment);
+    experimentForm->setContentsMargins(0, 0, 0, 0);
+    experimentForm->setVerticalSpacing(8);
+    auto saveLed = [this, led](const QString& key, const QString& text)
+    {
+        if (!document_) return;
+        const std::string section = led.toStdString();
+        if (!document_->SetKnown(section, key.toStdString().c_str(), text.toLocal8Bit().constData()))
+        {
+            document_->AddSection(section);
+            document_->SetKnown(section, key.toStdString().c_str(), text.toLocal8Bit().constData());
+        }
+        markDirty();
+    };
+    const QString configuredMethod = value(led, QStringLiteral("ftb_custom_dim")).trimmed().toLower();
+    const bool experimentOn = configuredMethod == QStringLiteral("together") ||
+        configuredMethod == QStringLiteral("turns");
+    auto* experimentEnabled = new QCheckBox(QStringLiteral("Experimental: deeper fade to black (custom LED dim)"));
+    experimentEnabled->setObjectName(QStringLiteral("config.led_drive.default.ftb_experimental"));
+    experimentEnabled->setChecked(experimentOn);
+    experimentForm->addRow(QString(), experimentEnabled);
+    auto* method = new QComboBox;
+    method->setObjectName(QStringLiteral("config.led_drive.default.ftb_custom_dim"));
+    method->addItem(QStringLiteral("All three colours together"), QStringLiteral("together"));
+    method->addItem(QStringLiteral("Colours taking turns in small steps"), QStringLiteral("turns"));
+    method->setCurrentIndex(configuredMethod == QStringLiteral("turns") ? 1 : 0);
+    experimentForm->addRow(QStringLiteral("Method"), method);
+    auto numberSetting = [this, led, saveLed](const QString& key, int minimum, int maximum, int fallback,
+        const QString& suffix)
+    {
+        auto* spin = new QSpinBox;
+        spin->setObjectName(controlName(led, key));
+        spin->setRange(minimum, maximum);
+        spin->setMaximumWidth(120);
+        spin->setAlignment(Qt::AlignRight);
+        if (!suffix.isEmpty()) spin->setSuffix(suffix);
+        bool valid = false;
+        const int configured = value(led, key).toInt(&valid);
+        spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) : fallback);
+        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,
+            [saveLed, key](int number) { saveLed(key, QString::number(number)); });
+        return spin;
+    };
+    auto* stepMs = numberSetting(QStringLiteral("ftb_step_ms"), 50, 1000, 100, QStringLiteral(" ms"));
+    experimentForm->addRow(QStringLiteral("Step interval"), stepMs);
+    auto* customStart = numberSetting(QStringLiteral("ftb_custom_start"), 1, 255, 60, QString());
+    experimentForm->addRow(QStringLiteral("Custom level matching 60"), customStart);
+    auto* customFloor = numberSetting(QStringLiteral("ftb_custom_floor"), 0, 254, 30, QString());
+    experimentForm->addRow(QStringLiteral("Deepest custom level"), customFloor);
+    customFloor->setMaximum(customStart->value() - 1);
+    connect(customStart, qOverload<int>(&QSpinBox::valueChanged), customFloor,
+        [customFloor](int start) { customFloor->setMaximum(start - 1); });
+    experimentForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Compensate mode only. When the picture has been black for half a second and the LED is at its "
+        "fade-to-black level, VP switches the projector to its custom LED dim and steps the red, green and "
+        "blue LEDs down, one command per step interval; at the first light it switches back. \"Taking turns\" "
+        "keeps the three colours within one small step of each other, so the black does not change colour. "
+        "The custom level matching 60 must be measured on the projector first (DEPLOY.txt).")));
+    auto syncExperiment = [experimentEnabled, method, stepMs, customStart, customFloor]
+    {
+        const bool on = experimentEnabled->isChecked();
+        for (QWidget* control : std::vector<QWidget*>{ method, stepMs, customStart, customFloor })
+            control->setEnabled(on);
+    };
+    syncExperiment();
+    connect(experimentEnabled, &QCheckBox::toggled, this, [syncExperiment, saveLed, method](bool on)
+    {
+        syncExperiment();
+        saveLed(QStringLiteral("ftb_custom_dim"), on ? method->currentData().toString() : QStringLiteral("off"));
+    });
+    connect(method, qOverload<int>(&QComboBox::currentIndexChanged), this,
+        [experimentEnabled, saveLed, method](int)
+    {
+        if (experimentEnabled->isChecked())
+            saveLed(QStringLiteral("ftb_custom_dim"), method->currentData().toString());
+    });
+
     auto* profile = new QWidget;
     auto* profileLayout = new QVBoxLayout(profile);
     profileLayout->setContentsMargins(0, 0, 0, 0);
@@ -8906,6 +8986,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
 
     cards->addCard(createCard(QStringLiteral("LED drive"),
         QStringLiteral("Dim the projector's LED with the picture, as your beta 22 script did."), drive));
+    cards->addCard(createCard(QStringLiteral("Experimental"),
+        QStringLiteral("Deeper fade to black - test on the projector before relying on it."), experiment));
     cards->addCard(createCard(QStringLiteral("LED profile"),
         QStringLiteral("The detailed behaviour: built-in, or your own file."), profile));
     cards->addCard(createCard(QStringLiteral("Projector connection"),

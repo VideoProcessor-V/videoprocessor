@@ -80,11 +80,30 @@ beside it. 60 is the lowest LPW1 accepts.
   `docs/VP-led-drive-module.md` section 7 (slow fade to black, hard cut dark
   to bright, a static scene for 30 s).
 
-## Open: fade to black below 60
+## Fade to black below 60 (experimental)
 
 LPW1 stops at 60. `SHUT` is out (the FL35 here has no mechanical shutter)
-and `PMUT` only blanks the pixels at the current LED level. The projector
-also has a custom LED dim mode (`LDMM` 1 = custom, with `LDCR` / `LDCG` /
-`LDCB` per colour) that may reach lower but bypasses the automatic colour
-balance. Whether it can refine fades to black is to be measured on the
-projector (see DEPLOY.txt); nothing in VP uses it yet.
+and `PMUT` only blanks the pixels at the current LED level. The projector's
+custom LED dim mode (`LDMM` 1 = custom, `LDCR` / `LDCG` / `LDCB` per
+colour) may reach lower; it bypasses the automatic colour balance, which
+does not matter on black, but the three colours are separate commands, so
+changing them one after another can tint the black for a moment.
+
+The LED drive page has an **Experimental** box for this (off by default;
+its options are greyed out until it is ticked):
+
+| Setting | Key | Default | Meaning |
+|---|---|---|---|
+| Method | `ftb_custom_dim` | off | `together`: all three colours straight to the deepest level (one quick tint); `turns`: the colours take turns in small steps (`ftb_turn_step`, 2), never more than one step apart |
+| Step interval | `ftb_step_ms` | 100 | time between custom-dim commands (like the old script's 100 ms contrast steps) |
+| Custom level matching 60 | `ftb_custom_start` | 60 | the custom value that gives the same light as LPW1 60 - **measure it first** |
+| Deepest custom level | `ftb_custom_floor` | 30 | how low the fade goes |
+| (profile only) | `ftb_black_ms` | 500 | how long the picture must be black first |
+
+Compensate mode only. When the picture has been black for `ftb_black_ms`
+and the LED is at the fade-to-black level, VP sets the three colours to the
+matching value, switches custom mode on and steps down. At the first light
+on screen - or seen coming in the queue - it puts the three colours straight
+back (speed matters more than colour as the picture returns) and switches
+custom mode off; LED commands then resume. On startup and exit VP always
+sets custom mode off when the experiment is configured.

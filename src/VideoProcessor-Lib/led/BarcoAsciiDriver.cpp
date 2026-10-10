@@ -327,11 +327,46 @@ namespace LedDrive
 		wake.notify_one();
 	}
 
+	bool BarcoAsciiDriver::QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs)
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (!opened || shuttingDown) return false;
+		sequence.assign(commands.begin(), commands.end());
+		sequenceStepMs = std::max(1, stepMs);
+		wake.notify_one();
+		return true;
+	}
+
+	bool BarcoAsciiDriver::SendNow(const std::string& mnemonic, int value, int timeoutMs)
+	{
+		using namespace std::chrono;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			if (!opened) return false;
+		}
+		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
+		const auto start = steady_clock::now();
+		if (timeoutMs > 0)
+		{
+			if (!lock.try_lock_for(milliseconds(timeoutMs / 2))) return false;
+		}
+		else
+			lock.lock();
+		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
+			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
+		return timeoutMs > 0 ?
+			Transact(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
+				std::max(1, std::min(left / 2, config.ackTimeoutMs)), left / 2) :
+			Transact(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
+				config.ackTimeoutMs, -1);
+	}
+
 	void BarcoAsciiDriver::BeginShutdown()
 	{
 		std::lock_guard<std::mutex> guard(stateMutex);
 		shuttingDown = true;
 		pendingLight = -1;
+		sequence.clear();
 		wake.notify_all();
 	}
 
@@ -396,7 +431,38 @@ namespace LedDrive
 			int target = -1;
 			{
 				std::unique_lock<std::mutex> lock(stateMutex);
-				wake.wait(lock, [this] { return stopping || pendingLight >= 0; });
+				wake.wait(lock, [this] { return stopping || pendingLight >= 0 || !sequence.empty(); });
+				if (!stopping && !shuttingDown && !sequence.empty())
+				{
+					// Experimental custom dim: its own spacing (ftb_step_ms, like
+					// the old script's 100 ms contrast steps), ahead of targets.
+					while (!stopping && std::chrono::steady_clock::now() < sequenceNextAllowed)
+						wake.wait_until(lock, sequenceNextAllowed);
+					if (stopping) return;
+					if (shuttingDown || sequence.empty()) continue;
+					const std::pair<std::string, int> command = sequence.front();
+					sequence.pop_front();
+					sequenceInFlight = true;
+					nextSendAllowed = std::chrono::steady_clock::now();
+					lock.unlock();
+					{
+						std::lock_guard<std::timed_mutex> guard(portMutex);
+						bool skip = false;
+						{
+							std::lock_guard<std::mutex> stateGuard(stateMutex);
+							skip = shuttingDown;
+						}
+						if (!skip)
+							Transact(Format(command.first.c_str(), std::to_string(command.second)),
+								command.first.c_str(), nullptr, config.ackTimeoutMs, -1, -1, true);
+					}
+					lock.lock();
+					sequenceInFlight = false;
+					sequenceNextAllowed = std::chrono::steady_clock::now() +
+						std::chrono::milliseconds(sequenceStepMs);
+					if (sequence.empty()) ++sequencesDone;
+					continue;
+				}
 				// Wait out the gap or pause here, where Close() can interrupt
 				// it, and keep taking newer targets meanwhile.
 				while (!stopping && std::chrono::steady_clock::now() < nextSendAllowed)
@@ -461,6 +527,8 @@ namespace LedDrive
 		status.lightSends = lightSends;
 		status.lastSentLight = lastSentLight;
 		status.busy = pendingLight >= 0 || transmitting;
+		status.sequenceBusy = !sequence.empty() || sequenceInFlight;
+		status.sequencesDone = sequencesDone;
 		return status;
 	}
 }

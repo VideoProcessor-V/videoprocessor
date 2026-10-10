@@ -88,8 +88,11 @@ namespace LedDrive
 		return std::make_unique<NoneDriver>(config);
 	}
 
-	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling)
+	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode)
 	{
+		if (resetDimMode)
+			DebugLog::Log("LED drive: LED dim mode set to standard%s",
+				driver.SendNow("LDMM", 0, 0) ? "" : " (not confirmed)");
 		const LightRange range = driver.QueryLightRange();
 		const ProjectorState found = driver.ReadState();
 		std::ostringstream summary;
@@ -112,10 +115,12 @@ namespace LedDrive
 		return summary.str();
 	}
 
-	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling)
+	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode)
 	{
 		driver.BeginShutdown();
-		const bool ok = driver.SetLightNow(ledCeiling, 1000);
+		// Within one second in total: standard dim mode first, then full light.
+		if (resetDimMode) driver.SendNow("LDMM", 0, 400);
+		const bool ok = driver.SetLightNow(ledCeiling, resetDimMode ? 600 : 1000);
 		DebugLog::Log("LED drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
 		return ok;
 	}

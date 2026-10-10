@@ -644,6 +644,19 @@ void testLedDrivePageAndLiveSwitches()
     selectData(boost, QStringLiteral("2.4"));
     port->setText(QStringLiteral("COM3"));
     readBack->setChecked(true);
+    // Experimental fade to black: off, its options greyed out until switched on.
+    auto* experiment = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.ftb_experimental"));
+    auto* method = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.ftb_custom_dim"));
+    auto* stepMs = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.ftb_step_ms"));
+    auto* customFloor = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.ftb_custom_floor"));
+    require(!experiment->isChecked() && !method->isEnabled() && !stepMs->isEnabled() && !customFloor->isEnabled(),
+        "The experimental fade-to-black options are not greyed out while it is off");
+    require(stepMs->value() == 100, "The step interval does not default to 100 ms");
+    experiment->setChecked(true);
+    require(method->isEnabled() && stepMs->isEnabled() && customFloor->isEnabled(),
+        "Switching the experiment on did not enable its options");
+    selectData(method, QStringLiteral("turns"));
+    customFloor->setValue(20);
     QCoreApplication::processEvents();
     QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
     require(apply->isEnabled(), "LED drive edits did not enable Apply");
@@ -651,9 +664,15 @@ void testLedDrivePageAndLiveSwitches()
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
-        "port: COM3", "read_back: true", "led_floor: 80" })
+        "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
+    experiment->setChecked(false);
+    require(!method->isEnabled(), "Switching the experiment off did not grey out its options");
+    QCoreApplication::processEvents();
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("ftb_custom_dim: off"), "Switching the experiment off was not saved");
 
     // Live switches: visible buttons next to the shader and zoom lists.
     auto* shaders = requireControl<QListWidget>(window, QStringLiteral("config.shader.standard.items"));
