@@ -118,7 +118,10 @@ baud: 19200
 light_min: auto              # auto = query (?N); or an integer override
 light_max: auto              # auto = query (?M)
 ack_timeout_ms: 300
-min_command_gap_ms: 100      # start conservative; see §5
+min_command_gap_ms: 500      # Barco: >= 500 ms between commands; see §5
+burst_commands: 0            # optional pause after this many commands (Barco: 20); 0 = none
+burst_pause_ms: 5000         # length of that pause (Barco: 5 s)
+read_back: off               # off = send only (the script's way); on = wait for replies
 echo: on                     # protocol must be in ECHO on mode for ACKs
 led_latency_ms: 80           # command + projector response; measured once (answers-2 §B2)
 flux_table:                  # lpw:relative_flux pairs, piecewise linear; absent = linear
@@ -297,14 +300,21 @@ script:
   in the brief.
 - Responses (with `ECHO` on): `%001 MNEM 000nnn\r`. Queries: `:LPW1?`,
   `:CNTR?`; range: `:LPW1 ?N` (min), `:LPW1 ?M` (max).
-- Documented timing: ≥ 500 ms between commands, wait for the response, 5 s
-  pause after 20 commands. The script has run at 200 ms gaps for years, so
-  the projector is more tolerant than documented. **Pace on ACKs:** send,
-  wait for the response (or `ack_timeout_ms`), then honour
-  `min_command_gap_ms`. Log any timeout. Find the real sustainable rate
-  empirically and record it in the brief.
-- At startup: `ECHO` on, query range, read back `LPW1` and `CNTR`, and treat
-  those as the current state (the script assumed 255/50 blindly).
+- Documented timing (Barco RS232 user guide TDE6115, 2.1): ≥ 500 ms between
+  commands, wait for the response, ≥ 2 s before re-sending when none came,
+  5 s pause after 20 commands. The script ran at 400 ms ticks (100 ms
+  contrast steps) for years without the pause. **Owner decision
+  (2026-10-09):** `min_command_gap_ms: 500` is a hard floor for every
+  command (startup included; only the bounded exit restore may cut a wait
+  short, and logs it); the 20/5 s pause is optional (`burst_commands`,
+  default 0 = off); read-backs are a toggle (`read_back`, default off).
+- `read_back: off`: send only - the script's exact bytes (or the configured
+  terminator), no `ECHO`, no queries; contrast is reset to 50 blind at
+  startup and light set to the ceiling, as the script did; the range comes
+  from `led_floor`/`led_ceiling`. `read_back: on`: at startup `ECHO` on,
+  probe the terminator, query range, read back `LPW1` and `CNTR`; wait for
+  each reply up to `ack_timeout_ms`, and 2 s before the next command after a
+  missing reply. Log any timeout.
 - Clamp every outgoing value to the reported range. Never send anything on
   a port that failed to open; the module degrades to `log_only`.
 - The old script configured COM1 by launching Tera Term; the driver sets
@@ -455,8 +465,13 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - Side effect: `active_picture_lookahead_frames: 8` also turns on the
   fork's own look-ahead inspection (crop proofs) for `[queue.Normal]`, so
   it costs some CPU per frame whether or not the LED module is enabled.
-- Serial rate: per-frame targets are coalesced to what the port carries
-  (about 5-10 commands a second), so the real LED moves in coarser steps
-  than the model while the gain moves smoothly (answers-2 B3 accepts
-  this). If a staircase shows in acceptance test 1, the fix is to make the
-  model follow the commands actually sent.
+- Serial rate: with the 500 ms floor the port carries at most 2 LED
+  commands a second (not the 5-10 answers-2 B3 expected). The driver keeps
+  only the newest target, and the modelled LED level follows the levels the
+  driver actually wrote (counted at the write, in the frame it happened),
+  so the gain steps with each real LED step rather than ramping between
+  them. A ramp therefore lands in steps of up to `rate * 0.5 s` levels
+  (60 at `rate_down: 120`); if that shows, lower the rates.
+- Not built: a reserve of commands for cuts. It only matters with the
+  optional pause on (a cut could otherwise wait up to `burst_pause_ms`);
+  add it before enabling `burst_commands`.

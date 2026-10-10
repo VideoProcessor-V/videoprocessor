@@ -100,7 +100,8 @@ namespace LedDrive
 			<< " range="
 			<< (range.known ? std::to_string(range.minimum) + "-" + std::to_string(range.maximum) :
 				std::string("unknown"));
-		const bool light = driver.SetLightNow(ledCeiling, 1000);
+		// Startup is not time-critical: no bound, so the command gap is kept.
+		const bool light = driver.SetLightNow(ledCeiling, 0);
 		summary << "; light set to " << ledCeiling << (light ? "" : " (not confirmed)");
 		if (!found.contrastKnown || found.contrast != 50)
 		{

@@ -59,6 +59,7 @@ namespace
 		config.protocol = "barco_ascii";
 		config.ackTimeoutMs = 60;
 		config.minCommandGapMs = 0;
+		config.readBack = true;
 		return config;
 	}
 }

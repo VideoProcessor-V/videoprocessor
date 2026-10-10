@@ -23,6 +23,7 @@ namespace
 		std::mutex mutex;
 		std::condition_variable changed;
 		std::vector<std::string> writes;
+		std::vector<std::chrono::steady_clock::time_point> writeTimes;
 		std::deque<std::string> replies;
 		std::string acceptedSuffix = "\r";
 		bool silent = false;
@@ -45,6 +46,7 @@ namespace
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			writes.push_back(bytes);
+			writeTimes.push_back(std::chrono::steady_clock::now());
 			changed.notify_all();
 			if (silent || bytes.size() < acceptedSuffix.size() ||
 				bytes.compare(bytes.size() - acceptedSuffix.size(), acceptedSuffix.size(), acceptedSuffix) != 0)
@@ -67,6 +69,12 @@ namespace
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			return writes;
+		}
+
+		std::vector<std::chrono::steady_clock::time_point> WriteTimes()
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			return writeTimes;
 		}
 
 		bool WaitForWrites(size_t count, int timeoutMs = 2000)

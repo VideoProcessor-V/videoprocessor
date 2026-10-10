@@ -186,6 +186,15 @@ namespace LedDrive
 			framePeriodMs = std::max(4.0, std::min(framePeriodMs + (elapsed - framePeriodMs) * 0.1, 100.0));
 		}
 		lastFrameMs = timeMs;
+		// Levels the driver wrote since the last frame: they went out during
+		// that frame.
+		if (compensating && applyGain && driver)
+		{
+			const DriverStatus status = driver->Status();
+			if (status.lightSends != seenSends && status.lastSentLight >= 0)
+				commands.push_back({ frameIndex, status.lastSentLight });
+			seenSends = status.lightSends;
+		}
 		++frameIndex;
 		while (!scheduledGains.empty() && scheduledGains.front().first <= timeMs)
 		{
@@ -243,12 +252,11 @@ namespace LedDrive
 			haveAhead = true;
 		}
 		const ControllerOutput out = compensator.Tick(target, elapsedMs, haveAhead ? &ahead : nullptr);
+		// Queued to the driver's thread, which keeps only the newest and
+		// sends it when the command gap allows; the model follows what it
+		// actually sends (above).
 		if (out.lightCommand >= 0 && applyGain)
-		{
-			// Queued to the driver's thread, which coalesces to the newest.
 			driver->SetLight(out.lightCommand);
-			commands.push_back({ frameIndex, out.lightCommand });
-		}
 		policy = out;
 		gain.knee = out.knee;
 		++ticks;
@@ -337,6 +345,7 @@ namespace LedDrive
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			driver = std::move(opened);
+			seenSends = driver->Status().lightSends;
 			live = driving;
 			compensating = led.mode == Mode::Compensate;
 			// Compensation is applied to the picture only while the projector

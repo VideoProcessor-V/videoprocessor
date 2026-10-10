@@ -8,9 +8,11 @@
 #include <thread>
 
 // Barco F(L)35 ASCII protocol (601-0381-00) over RS232: ":MNEM value" with a
-// carriage return; replies "%001 MNEM 000nnn" while ECHO is on. Commands are
-// paced on replies: send, wait for the reply or ack_timeout_ms, then honour
-// min_command_gap_ms.
+// carriage return; replies "%001 MNEM 000nnn" while ECHO is on. No two
+// commands are ever sent closer than min_command_gap_ms, with an optional
+// burst_pause_ms after every burst_commands (Barco's timing rules: 500 ms,
+// 5 s after 20). read_back: on also waits for each reply (ack_timeout_ms,
+// then 2 s before the next command when none came); off only sends.
 namespace LedDrive
 {
 	class BarcoAsciiDriver : public IProjectorDriver
@@ -44,8 +46,10 @@ namespace LedDrive
 		std::string Format(const char* mnemonic, const std::string& argument) const;
 		// Sends one command and waits for the matching reply. Caller holds
 		// portMutex.
+		// maxGapWaitMs < 0 waits the full gap or pause; sentLight >= 0 records
+		// an LPW1 write.
 		bool Transact(const std::string& command, const char* mnemonic, int* value,
-			int timeoutMs, int maxGapWaitMs);
+			int timeoutMs, int maxGapWaitMs, int sentLight = -1);
 		bool QueryLocked(const char* mnemonic, const std::string& argument, int& value);
 		void SelectFraming();
 		int Clamp(int level) const;
@@ -67,6 +71,11 @@ namespace LedDrive
 		int commands = 0;
 		int timeouts = 0;
 		int lastLight = -1;
+		int lightSends = 0;
+		int lastSentLight = -1;
+		bool transmitting = false;
+		int sinceBurst = 0;
+		// Guarded by stateMutex.
 		std::chrono::steady_clock::time_point nextSendAllowed;
 	};
 }

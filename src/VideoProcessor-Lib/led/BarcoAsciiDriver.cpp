@@ -41,7 +41,7 @@ namespace LedDrive
 	BarcoAsciiDriver::BarcoAsciiDriver(const ProjectorConfig& configIn,
 		std::unique_ptr<ISerialPort> portIn)
 		: config(configIn), port(std::move(portIn)),
-		framing{ "cr", false, "\r", true },
+		framing{ "cr", false, "\r", configIn.readBack },
 		nextSendAllowed(std::chrono::steady_clock::now())
 	{
 	}
@@ -79,19 +79,44 @@ namespace LedDrive
 	}
 
 	bool BarcoAsciiDriver::Transact(const std::string& command, const char* mnemonic,
-		int* value, int timeoutMs, int maxGapWaitMs)
+		int* value, int timeoutMs, int maxGapWaitMs, int sentLight)
 	{
 		using namespace std::chrono;
+		steady_clock::time_point allowed;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			allowed = nextSendAllowed;
+		}
 		const auto now = steady_clock::now();
-		if (nextSendAllowed > now)
-			std::this_thread::sleep_for(std::min<steady_clock::duration>(
-				nextSendAllowed - now, milliseconds(std::max(0, maxGapWaitMs))));
+		if (allowed > now)
+		{
+			auto wait = allowed - now;
+			if (maxGapWaitMs >= 0 && wait > milliseconds(maxGapWaitMs))
+			{
+				// Only the bounded exit restore gets here: full light matters
+				// more than the rest of a pause.
+				DebugLog::Log("LED drive: \"%s\" sent %lld ms before the command gap/pause allowed (exit is bounded)",
+					Printable(command).c_str(),
+					static_cast<long long>(duration_cast<milliseconds>(wait).count() - maxGapWaitMs));
+				wait = milliseconds(maxGapWaitMs);
+			}
+			std::this_thread::sleep_for(wait);
+		}
 		port->DiscardInput();
 		std::string error;
 		const bool written = port->Write(command, error);
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
-			if (written) ++commands;
+			if (written)
+			{
+				++commands;
+				++sinceBurst;
+				if (sentLight >= 0)
+				{
+					++lightSends;
+					lastSentLight = sentLight;
+				}
+			}
 		}
 		bool ok = written && !framing.acknowledged;
 		if (!written)
@@ -128,8 +153,15 @@ namespace LedDrive
 					mnemonic, timeoutMs, Printable(command).c_str());
 			}
 		}
-		const int gap = framing.acknowledged ? config.minCommandGapMs :
-			std::max(config.minCommandGapMs, 200);
+		int gap = config.minCommandGapMs;
+		// Barco: at least 2 s before sending again when no reply came.
+		if (written && framing.acknowledged && !ok) gap = std::max(gap, 2000);
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (config.burstCommands > 0 && sinceBurst >= config.burstCommands)
+		{
+			gap = std::max(gap, config.burstPauseMs);
+			sinceBurst = 0;
+		}
 		nextSendAllowed = steady_clock::now() + milliseconds(gap);
 		return ok;
 	}
@@ -137,8 +169,7 @@ namespace LedDrive
 	bool BarcoAsciiDriver::QueryLocked(const char* mnemonic, const std::string& argument, int& value)
 	{
 		return framing.acknowledged &&
-			Transact(Format(mnemonic, argument), mnemonic, &value,
-				config.ackTimeoutMs, config.ackTimeoutMs);
+			Transact(Format(mnemonic, argument), mnemonic, &value, config.ackTimeoutMs, -1);
 	}
 
 	// Candidate framings, tried in order for terminator: auto. The script's
@@ -150,6 +181,19 @@ namespace LedDrive
 		const Framing cr{ "cr", false, "\r", true };
 		const Framing literalCr{ "literal_cr", false, "cr\r", true };
 		const Framing script{ "script", true, "cr\r\n", false };
+		if (!config.readBack)
+		{
+			// Send-only: no probing, no ECHO, no queries.
+			switch (config.terminator)
+			{
+			case Terminator::Cr: framing = { "cr", false, "\r", false }; break;
+			case Terminator::LiteralCr: framing = { "literal_cr", false, "cr\r", false }; break;
+			default: framing = script; break;
+			}
+			DebugLog::Log("LED drive: read_back off; sending with framing \"%s\" without waiting for replies",
+				framing.name);
+			return;
+		}
 		std::vector<Framing> candidates;
 		switch (config.terminator)
 		{
@@ -162,7 +206,7 @@ namespace LedDrive
 		{
 			framing = candidate;
 			if (config.echo)
-				Transact(Format("ECHO", "1"), "ECHO", nullptr, config.ackTimeoutMs, config.ackTimeoutMs);
+				Transact(Format("ECHO", "1"), "ECHO", nullptr, config.ackTimeoutMs, -1);
 			int light = 0;
 			if (QueryLocked("LPW1", "?", light))
 			{
@@ -286,9 +330,13 @@ namespace LedDrive
 		}
 		std::lock_guard<std::mutex> guard(portMutex);
 		int confirmed = -1;
-		// The whole call, gap wait included, stays within timeoutMs.
-		const bool ok = Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
-			std::min(timeoutMs * 3 / 4, config.ackTimeoutMs), timeoutMs / 4);
+		// Bounded (exit): the whole call, gap wait included, stays within
+		// timeoutMs - half for the gap, half for the reply.
+		const bool ok = timeoutMs > 0 ?
+			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
+				std::min(timeoutMs / 2, config.ackTimeoutMs), timeoutMs / 2, clamped) :
+			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
+				config.ackTimeoutMs, -1, clamped);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
 		if (ok) lastLight = confirmed >= 0 ? confirmed : clamped;
 		return ok;
@@ -300,7 +348,7 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(portMutex);
 		int confirmed = -1;
 		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
-			config.ackTimeoutMs, config.ackTimeoutMs);
+			config.ackTimeoutMs, -1);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
 		if (ok)
 		{
@@ -318,15 +366,22 @@ namespace LedDrive
 			{
 				std::unique_lock<std::mutex> lock(stateMutex);
 				wake.wait(lock, [this] { return stopping || pendingLight >= 0; });
+				// Wait out the gap or pause here, where Close() can interrupt
+				// it, and keep taking newer targets meanwhile.
+				while (!stopping && std::chrono::steady_clock::now() < nextSendAllowed)
+					wake.wait_until(lock, nextSendAllowed);
 				if (stopping) return;
+				if (pendingLight < 0) continue;
 				target = pendingLight;
 				pendingLight = -1;
+				transmitting = true;
 			}
 			std::lock_guard<std::mutex> guard(portMutex);
 			int confirmed = -1;
 			const bool ok = Transact(Format("LPW1", std::to_string(target)), "LPW1", &confirmed,
-				config.ackTimeoutMs, config.minCommandGapMs + 200);
+				config.ackTimeoutMs, -1, target);
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			transmitting = false;
 			if (ok) lastLight = confirmed >= 0 ? confirmed : target;
 		}
 	}
@@ -353,6 +408,9 @@ namespace LedDrive
 		status.commands = commands;
 		status.timeouts = timeouts;
 		status.lastLight = lastLight;
+		status.lightSends = lightSends;
+		status.lastSentLight = lastSentLight;
+		status.busy = pendingLight >= 0 || transmitting;
 		return status;
 	}
 }

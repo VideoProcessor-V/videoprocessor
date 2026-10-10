@@ -30,6 +30,7 @@ namespace
 		config.protocol = "barco_ascii";
 		config.ackTimeoutMs = 60;
 		config.minCommandGapMs = 0;
+		config.readBack = true;
 		return config;
 	}
 
@@ -197,6 +198,81 @@ namespace VideoProcessorTest
 			Assert::AreEqual(130, driver->Status().lastLight);
 		}
 
+		TEST_METHOD(ReadBackOffOnlySendsTheScriptsBytes)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.readBack = false;
+			auto driver = OpenDriver(projector, config);
+			Assert::IsTrue(projector->Writes().empty(), L"No ECHO, no queries when read_back is off");
+			Assert::IsFalse(driver->Status().acknowledged);
+			BringToKnownState(*driver, 255);
+			const auto writes = projector->Writes();
+			Assert::AreEqual(size_t{ 2 }, writes.size());
+			Assert::AreEqual(std::string(":lpw1255cr\r\n"), writes[0], L"The old script's exact bytes");
+			Assert::AreEqual(std::string(":cntr50cr\r\n"), writes[1], L"Contrast reset sent blind, as the script did");
+			Assert::IsFalse(driver->ReadState().lightKnown, L"Never asked");
+			driver->SetLight(120);
+			Assert::IsTrue(projector->WaitForWrites(3));
+			for (const auto& write : projector->Writes())
+				Assert::IsTrue(write.find('?') == std::string::npos);
+			Assert::AreEqual(120, driver->Status().lastSentLight);
+			Assert::AreEqual(2, driver->Status().lightSends);
+		}
+
+		TEST_METHOD(CommandsKeepTheGapAndTheOptionalPause)
+		{
+			auto measure = [](int burst)
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				ProjectorConfig config = FastConfig();
+				config.readBack = false;
+				config.minCommandGapMs = 120;
+				config.burstCommands = burst;
+				config.burstPauseMs = 600;
+				auto driver = OpenDriver(projector, config);
+				// The controller asks every 10 ms; only some targets go out.
+				const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1700);
+				for (int level = 100; std::chrono::steady_clock::now() < end; ++level)
+				{
+					driver->SetLight(100 + level % 100);
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+				driver->Close();
+				return projector->WriteTimes();
+			};
+			auto gapMs = [](const std::vector<std::chrono::steady_clock::time_point>& times, size_t i)
+			{
+				return std::chrono::duration<double, std::milli>(times[i] - times[i - 1]).count();
+			};
+			const auto steady = measure(0);
+			Assert::IsTrue(steady.size() >= 10, std::to_wstring(steady.size()).c_str());
+			for (size_t i = 1; i < steady.size(); ++i)
+				Assert::IsTrue(gapMs(steady, i) >= 118.0, L"Never closer than min_command_gap_ms");
+			const auto paused = measure(3);
+			Assert::IsTrue(paused.size() >= 5);
+			for (size_t i = 1; i < paused.size(); ++i)
+				Assert::IsTrue(gapMs(paused, i) >= (i % 3 == 0 ? 598.0 : 118.0),
+					(L"gap " + std::to_wstring(i) + L" = " + std::to_wstring(gapMs(paused, i))).c_str());
+		}
+
+		TEST_METHOD(ClosingDoesNotWaitOutAPause)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.readBack = false;
+			config.burstCommands = 1;
+			config.burstPauseMs = 5000;
+			auto driver = OpenDriver(projector, config);
+			driver->SetLight(150);
+			Assert::IsTrue(projector->WaitForWrites(1));
+			driver->SetLight(140);
+			const auto start = std::chrono::steady_clock::now();
+			driver->Close();
+			Assert::IsTrue(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));
+			Assert::AreEqual(size_t{ 1 }, projector->Writes().size(), L"140 was still inside the pause");
+		}
+
 		TEST_METHOD(MissingReplyIsCountedAndTheDriverCarriesOn)
 		{
 			auto projector = std::make_shared<FakeProjector>();
@@ -290,6 +366,7 @@ namespace VideoProcessorTest
 
 			TemporaryConfig good("[projector.Default]\nprotocol: barco_ascii\nport: COM3\nbaud: 19200\n"
 				"light_min: auto\nlight_max: 240\nack_timeout_ms: 300\nmin_command_gap_ms: 100\necho: on\n"
+				"read_back: on\nburst_commands: 20\nburst_pause_ms: 5000\n"
 				"terminator: literal_cr\n"
 				"[led_drive.Default]\nenabled: false\nmode: log_only\ntick_ms: 400\nled_floor: 100\n"
 				"led_floor_black: 60\nled_ceiling: 255\ncurve: 0:100, 20:100, 40:200, 70:230, 100:255, 255:255\n"
@@ -307,6 +384,13 @@ namespace VideoProcessorTest
 			Assert::AreEqual(-1, projector.lightMin);
 			Assert::AreEqual(240, projector.lightMax);
 			Assert::IsTrue(projector.terminator == Terminator::LiteralCr);
+			Assert::IsTrue(projector.readBack);
+			Assert::AreEqual(20, projector.burstCommands);
+			Assert::AreEqual(5000, projector.burstPauseMs);
+			const ProjectorConfig projectorDefaults;
+			Assert::AreEqual(500, projectorDefaults.minCommandGapMs, L"Barco: at least 500 ms between commands");
+			Assert::AreEqual(0, projectorDefaults.burstCommands, L"No pause unless asked for");
+			Assert::IsFalse(projectorDefaults.readBack, L"Send-only, like the old script");
 			const LedDriveConfig led = ReadLedDriveConfig(config);
 			Assert::IsTrue(led.mode == Mode::LogOnly);
 			Assert::AreEqual(0.299, led.aplWeights[0], 1e-12);

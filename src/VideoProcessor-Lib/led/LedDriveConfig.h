@@ -57,7 +57,15 @@ namespace LedDrive
 		int lightMin = -1;
 		int lightMax = -1;
 		int ackTimeoutMs = 300;
-		int minCommandGapMs = 100;
+		// Never two commands closer than this (Barco: at least 500 ms).
+		int minCommandGapMs = 500;
+		// Optional pause after every burstCommands commands (Barco: 5 s after
+		// 20); 0 = no pause.
+		int burstCommands = 0;
+		int burstPauseMs = 5000;
+		// Off: send only, never wait for or ask the projector anything (the
+		// old script's way). On: wait for each reply, query range and state.
+		bool readBack = false;
 		bool echo = true;
 		Terminator terminator = Terminator::Auto;
 		// Command transmission plus projector response, as pure dead time: the
@@ -265,6 +273,9 @@ namespace LedDrive
 			Custom("light_max", autoOrLevel, "auto or a level from 0 to 255"),
 			Integer("ack_timeout_ms", 20, 5000),
 			Integer("min_command_gap_ms", 0, 5000),
+			Integer("burst_commands", 0, 1000),
+			Integer("burst_pause_ms", 0, 60000),
+			Boolean("read_back"),
 			Boolean("echo"),
 			Choice("terminator", { "auto", "cr", "literal_cr", "script" }),
 			Integer("led_latency_ms", 0, 2000),
@@ -396,6 +407,9 @@ namespace LedDrive
 			Detail::ParseInt(value, 0, 255, result.lightMax);
 		if (config.TryGetString(section, "ack_timeout_ms", value)) Detail::ParseInt(value, 20, 5000, result.ackTimeoutMs);
 		if (config.TryGetString(section, "min_command_gap_ms", value)) Detail::ParseInt(value, 0, 5000, result.minCommandGapMs);
+		if (config.TryGetString(section, "burst_commands", value)) Detail::ParseInt(value, 0, 1000, result.burstCommands);
+		if (config.TryGetString(section, "burst_pause_ms", value)) Detail::ParseInt(value, 0, 60000, result.burstPauseMs);
+		config.TryGetBool(section, "read_back", result.readBack);
 		config.TryGetBool(section, "echo", result.echo);
 		if (config.TryGetString(section, "terminator", value)) result.terminator = ParseTerminator(value);
 		if (config.TryGetString(section, "led_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.ledLatencyMs);

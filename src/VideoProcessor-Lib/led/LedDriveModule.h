@@ -75,8 +75,10 @@ namespace LedDrive
 		int Ticks() const;
 		const LedDriveConfig& Config() const { return led; }
 		const FluxModel& Flux() const { return flux; }
-		// The LED level the gain is following: the last command that has had
-		// led_latency_ms (whole frames) to land (dead time, no lag).
+		// The LED level the gain is following: the last level the driver
+		// actually wrote to the port that has had led_latency_ms (whole frames)
+		// to land (dead time, no lag). Targets the driver skipped (it keeps to
+		// min_command_gap_ms) never count.
 		double ModelledLight() const;
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
@@ -123,12 +125,14 @@ namespace LedDrive
 		bool holding = false;
 		double heldGain = 1.0;
 
-		// Per-frame clock and the dead-time model: commands by frame number.
+		// Per-frame clock and the dead-time model: levels written to the port,
+		// by the frame during which they were written.
 		uint64_t frameIndex = 0;
 		double lastFrameMs = -1.0;
 		double framePeriodMs = 1000.0 / 60.0;
 		struct Command { uint64_t frame; int level; };
 		std::deque<Command> commands;
+		int seenSends = 0;
 		int modelledLevel;
 		// mode: script: emulated-contrast changes, applied led_latency_ms after
 		// the script made them so they land with its LED commands.

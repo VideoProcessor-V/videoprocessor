@@ -223,6 +223,7 @@ namespace VideoProcessorTest
 			port.protocol = "barco_ascii";
 			port.ackTimeoutMs = 60;
 			port.minCommandGapMs = 0;
+			port.readBack = true;
 			port.ledLatencyMs = 80;
 			{
 				LedDriveModule module(port, config,
@@ -233,7 +234,11 @@ namespace VideoProcessorTest
 				module.SubmitMeasurement(Frame(18.0));
 				CompensationGain gain;
 				for (int frame = 1; frame <= 30; ++frame)
+				{
 					gain = module.BeginFrameAt(0, frame * 1000.0 / 60.0);
+					// Let the driver send before the next frame looks.
+					WaitFor([&] { return !module.ProjectorStatus().busy; });
+				}
 				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }));
 				Assert::IsTrue(gain.active);
 				Assert::IsTrue(gain.domain == GainDomain::Linear);

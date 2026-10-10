@@ -38,6 +38,12 @@ namespace LedDrive
 		// Last level the projector confirmed (or, without acknowledgements,
 		// the last level sent); -1 before any.
 		int lastLight = -1;
+		// LPW1 levels written to the port: how many, and the newest (counted
+		// when written, before any reply).
+		int lightSends = 0;
+		int lastSentLight = -1;
+		// A light target is waiting or being transmitted.
+		bool busy = false;
 	};
 
 	class IProjectorDriver
@@ -54,6 +60,8 @@ namespace LedDrive
 		// previous command completes, only the newest is sent.
 		virtual void SetLight(int level) = 0;
 		// Synchronous, bounded by timeoutMs (used at startup and exit).
+		// timeoutMs > 0 bounds the whole call (exit); 0 waits as long as the
+		// command gap and pause require (startup).
 		virtual bool SetLightNow(int level, int timeoutMs) = 0;
 		// Only the one-off startup correction to 50; CNTR is never driven.
 		virtual bool SetContrast(int value) = 0;

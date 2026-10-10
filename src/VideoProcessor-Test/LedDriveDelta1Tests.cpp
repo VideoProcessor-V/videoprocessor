@@ -70,6 +70,7 @@ namespace
 		port.protocol = "barco_ascii";
 		port.ackTimeoutMs = 60;
 		port.minCommandGapMs = 0;
+		port.readBack = true;
 		port.ledLatencyMs = latencyMs;
 		return port;
 	}
@@ -112,6 +113,8 @@ namespace
 			const CompensationGain gain = module.BeginFrameAt(sequence, sequence * FRAME_MS);
 			levels.push_back(module.ModelledLight());
 			if (gains) gains->push_back(gain.gain);
+			// The driver sends between frames, as it would in real time.
+			WaitFor([&] { return !module.ProjectorStatus().busy; });
 		}
 		return levels;
 	}
@@ -333,6 +336,7 @@ namespace VideoProcessorTest
 			{
 				gains.push_back(module.BeginFrameAt(0, frame * FRAME_MS).gain);
 				levels.push_back(module.ModelledLight());
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
 			}
 			Assert::AreEqual(5, module.LatencyFrames(), L"80 ms at 60 Hz, in whole frames");
 			// The first command (253) went out on frame 1; LED and gain land on 6.
@@ -368,6 +372,43 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(levels[cut] < 255.0, L"Sent 3 frames ahead, the LED lands on the cut frame");
 			Assert::AreEqual(255.0 / levels[cut], gains[cut - 1], 1e-9, L"and so does the gain");
+		}
+
+		TEST_METHOD(TheGainFollowsOnlyTheLevelsActuallySent)
+		{
+			// A 300 ms command gap: most per-frame targets are skipped by the
+			// driver, and the gain must step with the levels it really sent.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.minCommandGapMs = 300;
+			LedDriveModule module(port, Compensate(),
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(18.0));
+			std::vector<int> sentAt;
+			int seen = module.ProjectorStatus().lightSends;
+			const auto started = std::chrono::steady_clock::now();
+			for (uint64_t frame = 1; frame <= 60; ++frame)
+			{
+				const CompensationGain gain = module.BeginFrameAt(0, frame * FRAME_MS);
+				Assert::AreEqual(255.0 / module.ModelledLight(), gain.gain, 1e-9);
+				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+				const DriverStatus status = module.ProjectorStatus();
+				if (status.lightSends != seen) sentAt.push_back(status.lastSentLight);
+				seen = status.lightSends;
+			}
+			// At most one send per 300 ms of real time (plus the first).
+			const double elapsedMs = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - started).count();
+			Assert::IsTrue(sentAt.size() >= 2 && sentAt.size() <= static_cast<size_t>(elapsedMs / 300.0) + 1,
+				(L"sends in ~1.6 s: " + std::to_wstring(sentAt.size())).c_str());
+			// The model holds one of the sent levels, never an unsent target.
+			const double modelled = module.ModelledLight();
+			bool wasSent = modelled == 255.0;
+			for (int level : sentAt) wasSent = wasSent || modelled == level;
+			Assert::IsTrue(wasSent, std::to_wstring(modelled).c_str());
 		}
 
 		TEST_METHOD(EffectiveLookaheadIsClampedToTheFramesActuallyQueued)
