@@ -133,3 +133,64 @@ src/shaders/custom_mpv.c (bundled source).
   for range-0–1 settings whose description starts "0 =/1 =/0 for/1 when"
   (enabled, levels_full, motion_compensation, test_ramp; NLS warp_axis) and
   save `param_<name>: 1/0`. A plain 0–1 strength stays a number (tested).
+
+## Re-audit (e01d38f8, diff ba19ee26..e01d38f8; HEAD a0c364ad is docs only)
+
+Build: OK — full x64 Release /t:Rebuild at a0c364ad, 0 errors, no new warnings.
+Tests: native 2465 passed, 2 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted,
+SameSizeEditWithRestoredWriteTimeInvalidatesCache — both known); the three sigma-delta GPU tests
+pass. VideoProcessorConfigTests 97 passed, 2 failed (the two known RPC tests).
+
+Extra check, outside the repository: I exported e01d38f8 to my scratch folder,
+built the test DLL there and ran it on WARP. The export kept the new tests and
+added one diagnostic test of my own (repository untouched). It compared:
+- the old shader (ba19ee26);
+- the fixed shader (e01d38f8);
+- the stage 2 shader (1dd05504).
+
+Items:
+- Should fix, `motion_compensation 0` not byte-for-byte — **resolved.**
+  Measured with noise 0.15 over 12 refreshes: the fixed shader differs from the
+  stage 2 shader in 0 pixels (still and 5 px/refresh), the old one in 19,668 and
+  494.
+- Should fix, 4-pixel vector steps — **resolved.** Mean error along the motion:
+  old shader 0.25 code (no gain at all) at 5 px, 10 px, diagonal (6,3), and 5 px
+  with noise; fixed 0.011–0.015. The plain gate stays at 0.25.
+- Note, search runs with compensation off — **resolved** (now skipped).
+- Notes, picture edges and LQPREV's single tag — **disputed-and-I-agree.** Left as
+  they are; every carry is still gated, so the worst case stays ≤0.5 code once.
+- Note, untested areas — partly **resolved.** Diagonal motion, 5/10 px and noise
+  0.15 are now tested. Limited range, the 10-bit swapchain, occlusion and 3:2
+  cadence are still untested (stated in the brief); the range code is unchanged
+  from stage 2.
+- Note, cost estimate — still unmeasured. The new refinement compares 25
+  vectors × 256 pixels per block, roughly doubling the search's reads. A
+  revised estimate is 0.5–1.2 ms with compensation on (still to read on the
+  3090, tally item 17). With compensation off the search is now skipped, so
+  it is cheaper than before.
+- Note, Projector gamma moves the gamma boost — **resolved** (recorded in the brief).
+
+Owner checks:
+- (1) **OK.** All five passes run every refresh: none has a `//!WHEN`, and every
+  texture it binds always exists, so libplacebo never skips one. That makes the
+  quantizer's `frame` exactly 5 × the refresh number, and `frame / 5` the
+  refresh count; it matches the stage 2 sequence from the first refresh (5/5 =
+  1). Confirmed byte-for-byte above.
+- (2) **OK.** The search (pass 3) reads PREV_NEXT. Only the quantizer (pass 5)
+  writes it, and that runs after; the state pass (pass 4) only reads it. So
+  PREV_NEXT still holds last refresh's input values, and there is no
+  read/write hazard. The refinement runs only when RESID_NEXT carries the tag.
+  When it runs, confidence comes from the full-resolution match (`full_sad /
+  256` against `match_tolerance`). MV stores whole-pixel vectors and the
+  quantizer uses them unscaled; MVPREV still stores quarter-pixel vectors.
+  Small note: after switching `enabled` off and on again, PREV_NEXT holds the
+  picture from before, so the first refresh's match fails. That just falls
+  back to the plain gate.
+- (3) **OK.** The repository test SigmaDeltaCarriesTheResidualAlongTheMotion
+  fails with the old shader ("5 px/refresh error 0.250244") and passes with the
+  fix. Every new case fails without the fix (all 0.25) and passes with it
+  (≤0.015; noise case carried 0.013 against plain gate 0.248).
+- (4) **OK.** With `motion_compensation 0` the search pass writes a zero vector
+  and returns before any search, and MVPREV is not touched, so the last vector
+  is kept. LQPREV is still refreshed by the state pass, so switching it back on
+  works at once.
