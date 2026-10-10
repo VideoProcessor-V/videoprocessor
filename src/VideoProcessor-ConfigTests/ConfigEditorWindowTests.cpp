@@ -693,6 +693,67 @@ void testLedDrivePageAndLiveSwitches()
         "The active zoom profile is not shown as in use");
 }
 
+void testQueueFrameRateRuleIsAPlainControl()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.First]\nquality: high\n"
+        "[queue.Normal]\nqueue_size: 32\ntarget_frames: 3\n"
+        "[queue.Low_Latency]\nwhen: ${source_rate} > 59\nqueue_size: 1\ntarget_frames: 1\n"
+        "[queue.Hdr]\nwhen: ${eotf} == \"HDR\"\nqueue_size: 8\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(1);
+    auto* profiles = requireControl<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+    auto select = [profiles](const QString& section)
+    {
+        for (int row = 0; row < profiles->count(); ++row)
+            if (profiles->item(row)->data(Qt::UserRole).toString().compare(section, Qt::CaseInsensitive) == 0)
+            {
+                profiles->setCurrentRow(row);
+                QCoreApplication::processEvents();
+                return true;
+            }
+        return false;
+    };
+    auto* rateRule = requireControl<QCheckBox>(window, QStringLiteral("config.queue.rate_rule"));
+    auto* rateFps = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.queue.rate_rule_fps"));
+    auto* rule = requireControl<QPlainTextEdit>(window, QStringLiteral("config.queue.when"));
+
+    require(select(QStringLiteral("queue.low_latency")), "Low_Latency missing");
+    require(rateRule->isChecked() && std::abs(rateFps->value() - 59.0) < 1e-9,
+        "The above-59 rule does not show as the frame-rate switch");
+    rateFps->setValue(50.0);
+    QCoreApplication::processEvents();
+    require(rule->toPlainText() == QStringLiteral("${source_rate} > 50"),
+        "Changing the frame rate did not rewrite the rule");
+
+    require(select(QStringLiteral("queue.normal")), "Normal missing");
+    require(!rateRule->isChecked() && rateRule->isEnabled(), "A queue without a rule shows the switch off");
+
+    require(select(QStringLiteral("queue.hdr")), "Hdr missing");
+    require(!rateRule->isChecked() && !rateRule->isEnabled(),
+        "A custom formula is not left alone by the frame-rate switch");
+    require(requireControl<QLabel>(window, QStringLiteral("config.queue.rate_rule_note"))->isVisibleTo(&window),
+        "A custom formula does not explain why the switch is off");
+
+    QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    apply->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("when: ${source_rate} > 50"), "The new frame-rate rule was not saved");
+    require(saved.contains("when: ${eotf} == \"HDR\""), "The custom rule was changed");
+
+    require(select(QStringLiteral("queue.low_latency")), "Low_Latency missing");
+    rateRule->setChecked(false);
+    QCoreApplication::processEvents();
+    apply->click();
+    QCoreApplication::processEvents();
+    require(!readBytes(path).contains("source_rate"), "Switching the frame-rate rule off did not remove it");
+}
+
 void testShaderSettingsComeFromTheShaderFile()
 {
     QTemporaryDir dir;
@@ -6639,6 +6700,7 @@ int main(int argc, char** argv)
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
+    failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("target dropdown refreshes inline", testTargetDropdownRefreshesInline);
     failures += run("remote target switch keeps window responsive",
         testRemoteTargetSwitchKeepsWindowResponsive);

@@ -4980,6 +4980,67 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto* ruleField = fieldWithHelp(QStringLiteral("When should VP use this profile?"), rule,
         QStringLiteral("Optional source-condition rule. Example: ${width} >= 1920 && ${eotf} == \"HDR\"."));
     detailLayout->addWidget(ruleField);
+    if (sectionPrefix == QStringLiteral("queue"))
+    {
+        // The common queue rule as a plain control: "use this queue above N
+        // fps". It writes the same rule as the formula field and follows it;
+        // any other formula is left alone and the control steps aside.
+        auto* rateRow = new QWidget;
+        auto* rateLayout = new QHBoxLayout(rateRow);
+        rateLayout->setContentsMargins(0, 0, 0, 0);
+        auto* rateRule = new QCheckBox(QStringLiteral("Use this queue for sources above"));
+        rateRule->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule")));
+        auto* rateThreshold = new QDoubleSpinBox;
+        rateThreshold->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_fps")));
+        rateThreshold->setRange(1.0, 1000.0);
+        rateThreshold->setDecimals(2);
+        rateThreshold->setValue(59.0);
+        rateThreshold->setSuffix(QStringLiteral(" fps"));
+        rateThreshold->setMaximumWidth(120);
+        rateLayout->addWidget(rateRule);
+        rateLayout->addWidget(rateThreshold);
+        rateLayout->addStretch();
+        auto* rateNote = helpLabel(QStringLiteral(
+            "This queue has its own rule below; edit it there, or clear it to use the frame-rate switch."));
+        rateNote->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_note")));
+        rateNote->setVisible(false);
+        const int ruleIndex = detailLayout->indexOf(useRule);
+        detailLayout->insertWidget(ruleIndex, rateNote);
+        detailLayout->insertWidget(ruleIndex, rateRow);
+        auto syncFromRule = [rule, useRule, rateRule, rateThreshold, rateNote]
+        {
+            QSignalBlocker blockRule(rateRule);
+            QSignalBlocker blockThreshold(rateThreshold);
+            const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
+            const QRegularExpressionMatch match = QRegularExpression(QStringLiteral(
+                "^\\$\\{source_rate\\}\\s*>\\s*([0-9]+(?:\\.[0-9]+)?)$")).match(text);
+            const bool custom = !text.isEmpty() && !match.hasMatch();
+            rateRule->setChecked(match.hasMatch());
+            if (match.hasMatch()) rateThreshold->setValue(match.captured(1).toDouble());
+            rateRule->setEnabled(!custom && useRule->isEnabled());
+            rateThreshold->setEnabled(!custom && useRule->isEnabled());
+            rateNote->setVisible(custom);
+        };
+        auto applyRateRule = [rule, useRule, rateRule, rateThreshold]
+        {
+            if (rateRule->isChecked())
+            {
+                rule->setPlainText(QStringLiteral("${source_rate} > %1")
+                    .arg(QString::number(rateThreshold->value(), 'g', 6)));
+                useRule->setChecked(true);
+            }
+            else
+            {
+                rule->clear();
+                useRule->setChecked(false);
+            }
+        };
+        connect(rule, &QPlainTextEdit::textChanged, this, syncFromRule);
+        connect(useRule, &QCheckBox::toggled, this, syncFromRule);
+        connect(rateRule, &QCheckBox::toggled, this, applyRateRule);
+        connect(rateThreshold, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [rateRule, applyRateRule](double) { if (rateRule->isChecked()) applyRateRule(); });
+    }
 
     auto* profileFields = new QWidget;
     auto* profileFieldsLayout = new QVBoxLayout(profileFields);
