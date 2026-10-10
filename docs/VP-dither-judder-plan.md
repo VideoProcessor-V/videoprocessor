@@ -393,7 +393,12 @@ Verified on the real libplacebo path (WARP) in VideoProcessor-Test:
 - A scene cut carries nothing.
 
 The GPU time budget (≈1 ms) has not been measured on the 3090. Storage is
-six full-size rgba16f textures, about 200 MB at 2560x1600.
+six full-size rgba16f textures, about 200 MB at 2560x1600. They are full size only because a hook file
+cannot size a texture as a fraction of the output (`{{output_width}}` is the
+only size it gets); if the fork ever offers divided sizes to hooks, the
+previous-luma and previous-vector textures should shrink to 1/4 and 1/16
+(design review 3, N-4). If the GPU time is over budget, the first lever is
+the coarse search range (±64 px), the second the fine ±2 sets (N-5).
 Compute pass before the quantizer: hierarchical block matching on
 gamma-encoded luma at quarter resolution (vector error only misplaces ≤0.5
 code), forward-only from a persistent previous-luma texture; vectors +

@@ -9084,16 +9084,39 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         { QStringLiteral("Off (plain output gamma)"),
           QStringLiteral("2.4 (the look of the old output gamma 2.4)") }));
     // The projector's own display gamma, which Compensate linearises with
-    // (compensation_eotf). 2.2 is the FL35's menu setting; 2.4 is offered
-    // until a light-meter reading settles it (design review 2, SF-1).
-    driveForm->addRow(QStringLiteral("Projector gamma"), bindChoiceField(led,
-        QStringLiteral("compensation_eotf"),
-        { QStringLiteral("2.2"), QStringLiteral("2.4") },
-        { QStringLiteral("2.2 (the projector's gamma setting)"),
-          QStringLiteral("2.4 (if a light meter shows the projector is really 2.4)") }));
+    // (compensation_eotf). A number, because it is whatever a light meter
+    // says (design review 3, SF-1); 2.2 is the FL35's menu setting.
+    auto* projectorGamma = new QDoubleSpinBox;
+    projectorGamma->setObjectName(controlName(led, QStringLiteral("compensation_eotf")));
+    projectorGamma->setAccessibleName(QStringLiteral("Projector gamma"));
+    projectorGamma->setRange(1.8, 3.0);
+    projectorGamma->setDecimals(2);
+    projectorGamma->setSingleStep(0.01);
+    projectorGamma->setMaximumWidth(120);
+    projectorGamma->setAlignment(Qt::AlignRight);
+    {
+        bool valid = false;
+        const double configured = value(led, QStringLiteral("compensation_eotf")).toDouble(&valid);
+        projectorGamma->setValue(valid ? std::max(1.8, std::min(configured, 3.0)) : 2.2);
+    }
+    connect(projectorGamma, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+        [this, led](double exponent)
+    {
+        if (!document_) return;
+        const std::string section = led.toStdString();
+        const std::string text = QString::number(exponent, 'f', 2).toStdString();
+        if (!document_->SetKnown(section, "compensation_eotf", text))
+        {
+            document_->AddSection(section);
+            document_->SetKnown(section, "compensation_eotf", text);
+        }
+        markDirty();
+    });
+    driveForm->addRow(QStringLiteral("Projector gamma"), projectorGamma);
     driveForm->addRow(QString(), helpLabel(QStringLiteral(
         "Projector gamma is how the projector turns the signal into light; Compensate needs it to keep the "
-        "picture's brightness exact while the LED dims. Leave it at 2.2 unless measured otherwise.\n"
+        "picture's brightness exact while the LED dims. Leave it at 2.2 unless a light meter says otherwise "
+        "(for example 2.41).\n"
         "Highlight protection only matters in Compensate. The gamma boost applies even with the LED drive off. "
         "Switching the LED drive on or off, or to or from Log only, returns the projector to full light; "
         "other changes carry on from the current level.")));
