@@ -8983,6 +8983,36 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* port = bindTextField(projector, QStringLiteral("port"), QStringLiteral("COM1"));
     port->setMaximumWidth(140);
     connectionForm->addRow(QStringLiteral("COM port"), port);
+    // How long the projector takes to change the light after a command; the
+    // picture gain is timed to land with it. Tuned by eye on scene changes.
+    auto* latency = new QSpinBox;
+    latency->setObjectName(controlName(projector, QStringLiteral("led_latency_ms")));
+    latency->setRange(0, 500);
+    latency->setSingleStep(10);
+    latency->setSuffix(QStringLiteral(" ms"));
+    latency->setMaximumWidth(120);
+    latency->setAlignment(Qt::AlignRight);
+    {
+        bool valid = false;
+        const int configured = value(projector, QStringLiteral("led_latency_ms")).toInt(&valid);
+        latency->setValue(valid ? std::max(0, std::min(configured, 500)) : 80);
+    }
+    connect(latency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
+    {
+        if (!document_) return;
+        const std::string section = projector.toStdString();
+        if (!document_->SetKnown(section, "led_latency_ms", std::to_string(ms)))
+        {
+            document_->AddSection(section);
+            document_->SetKnown(section, "led_latency_ms", std::to_string(ms));
+        }
+        markDirty();
+    });
+    connectionForm->addRow(QStringLiteral("LED response time"), latency);
+    connectionForm->addRow(QString(), helpLabel(QStringLiteral(
+        "How long the light takes to change after VP sends a command; the picture gain is timed to land with "
+        "it. On a dark-to-bright cut: a glow or lifted blacks just before the cut - lower it; the bright scene "
+        "starts too dark or dips - raise it. Change in steps of 20 ms. Default 80.")));
     auto* readBack = bindCheckField(QStringLiteral("Read the projector's replies"), projector,
         QStringLiteral("read_back"), false);
     connectionForm->addRow(QString(), readBack);

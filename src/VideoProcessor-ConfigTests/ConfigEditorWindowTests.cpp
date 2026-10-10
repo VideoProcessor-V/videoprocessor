@@ -638,6 +638,9 @@ void testLedDrivePageAndLiveSwitches()
     require(floorReactive->value() == 100 && floorReactive->minimum() == 60,
         "The reactive floor does not default to the script's 100");
     floorReactive->setValue(110);
+    auto* latency = requireControl<QSpinBox>(window, QStringLiteral("config.projector.default.led_latency_ms"));
+    require(latency->value() == 80, "LED response time does not default to 80 ms");
+    latency->setValue(100);
     auto* profile = requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.profile_file"));
     require(profile->text().isEmpty(), "A profile file appeared from nowhere");
     profile->setText(QStringLiteral("my-led.cfg"));
@@ -669,7 +672,7 @@ void testLedDrivePageAndLiveSwitches()
     const QByteArray saved = readBytes(path);
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
-        "led_floor_reactive: 110" })
+        "led_floor_reactive: 110", "led_latency_ms: 100" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);
