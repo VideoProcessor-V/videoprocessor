@@ -489,6 +489,33 @@ count and a generic statistics hook, with no reference to the LED module
 by name or purpose.
 
 ### Stage 6 — Low-strength motion-compensated de-judder (cinema profile)
+
+**Design settled (2026-10-10):** see `docs/VP-stage6-dejudder-design.md` and
+the planner's answers in `docs/VP-stage6-dejudder-answers.md`. Those answers
+override the sketch below where they differ.
+
+- **Shape:** warp the *source* frame A by `s·δ·v` (Y and CbCr planes; the
+  chroma horizontal vector is halved for 4:2:2) and hand it to the normal
+  render. Everything downstream applies unchanged.
+- **Presents:** extra presents for the refreshes A already owns, inside the
+  existing render loop (2a). B is never delayed. Drift correction is
+  untouched.
+- **Switch:** one flag, `dejudder_strength` (rendering profile; 0 or absent
+  = off, which is today's path byte-for-byte).
+- **Automatically off:** in `Low_Latency`, for non-film cadence, and at
+  cuts.
+- **Motion:** a half-resolution 8×8 matcher on source luma, refined to half
+  a pixel. Forward/backward consistency within 1 px; a separate
+  match-tolerance key. Failure means a hard hold of A's pixels. Edges clamp.
+- **Occlusion mask:** M1 (mask in the warped frame's alpha, read by the
+  sigma-delta at OUTPUT), proven on the GPU harness first; M3 (accept the
+  bounded error) is the fallback.
+- **LED:** the correction ratio pairs readings by source-frame identity,
+  not present count.
+- **Acceptance criteria:** `s` global per frame, a hard hold on failure, no
+  blend.
+- **Build order:** 6a standalone component with WARP tests → 6b ring,
+  presents, phase, flag, stats, Config → 6c mask.
 Needs the render path to see frame A and next frame B (second texture to a
 hook, or `pl_render_image_mix`). Per refresh, true position t between A and B
 (3:2 at 60 Hz cycles 0, .4, .8, .2, .6); render at
