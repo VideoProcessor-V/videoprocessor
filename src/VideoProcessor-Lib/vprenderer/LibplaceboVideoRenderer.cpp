@@ -44,6 +44,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
+#include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -8525,51 +8526,14 @@ struct LibplaceboVideoRenderer::Impl
 			ParseDouble(configuredStrength->second, strength);
 		strength = std::max(0.0, std::min(1.0, strength));
 
+		// The same centre scales the occlusion mask's NLS map uses (6c-2).
 		double xCenterScale = 1.0;
 		double yCenterScale = 1.0;
 		double requestedBalance = 0.0;
 		double effectiveBalance = 0.0;
 		double maximumCenterZoom = 1.08;
-		const auto configuredBalance = nlsRule.parameters.find("axis_balance");
-		if (configuredBalance != nlsRule.parameters.end())
-		{
-			double balance = 0.5;
-			ParseDouble(configuredBalance->second, balance);
-			balance = std::max(0.0, std::min(1.0, balance));
-			const auto configuredMaximumCenterZoom =
-				nlsRule.parameters.find("max_center_zoom");
-			if (configuredMaximumCenterZoom != nlsRule.parameters.end())
-				ParseDouble(configuredMaximumCenterZoom->second,
-					maximumCenterZoom);
-			maximumCenterZoom = std::max(1.0,
-				std::min(1.25, maximumCenterZoom));
-			requestedBalance = balance * strength;
-			effectiveBalance = requestedBalance;
-			if (decision.stretchRatio > 1.000001)
-			{
-				const double balanceLimit = std::log(maximumCenterZoom) /
-					std::log(decision.stretchRatio);
-				effectiveBalance = std::min(effectiveBalance,
-					std::max(0.0, std::min(1.0, balanceLimit)));
-			}
-			const double q = decision.verticalWarp
-				? 1.0 / decision.stretchRatio : decision.stretchRatio;
-			const double xExponent = decision.verticalWarp
-				? effectiveBalance : 1.0 - effectiveBalance;
-			const double yExponent = decision.verticalWarp
-				? effectiveBalance - 1.0 : -effectiveBalance;
-			xCenterScale = std::pow(q, xExponent);
-			yCenterScale = std::pow(q, yExponent);
-		}
-		else
-		{
-			const double selectedAxisScale =
-				1.0 + (decision.stretchRatio - 1.0) * strength;
-			if (decision.verticalWarp)
-				yCenterScale = selectedAxisScale;
-			else
-				xCenterScale = selectedAxisScale;
-		}
+		NlsMaskMapping::CenterScales(nlsRule.parameters, decision.stretchRatio, decision.verticalWarp,
+			xCenterScale, yCenterScale, &requestedBalance, &effectiveBalance, &maximumCenterZoom);
 
 		std::ostringstream policy;
 		policy << nlsHookSignature << '|' << binding.parameterCount << '|'
@@ -15581,12 +15545,30 @@ struct LibplaceboVideoRenderer::Impl
                     maskSlot = slot;
             bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat &&
                 dejudder->Occlusion(maskSlot);
+            // 6c-2: with NLS the mask follows the NLS shader's own map. Only
+            // the bundled NLS / NLS+ maps are known; any other NLS shader, or
+            // a rule missing a parameter, keeps the mask off (logged once).
+            NlsMaskMapping::Mapping nlsMapping;
             if (install && submittedNls)
             {
-                install = false;
-                if (!dejudderMaskNlsLogged)
-                    DebugLog::Log("De-judder occlusion mask: not used while NLS is active (non-linear output mapping)");
-                dejudderMaskNlsLogged = true;
+                const std::string file = nlsRule.filename;
+                const auto endsWith = [&file](const char* tail)
+                {
+                    const size_t n = std::strlen(tail);
+                    return file.size() >= n && _stricmp(file.c_str() + file.size() - n, tail) == 0;
+                };
+                const bool plus = endsWith("NLSPlus.glsl");
+                if (plus || endsWith("NLS.glsl"))
+                    nlsMapping = NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
+                        nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
+                if (!nlsMapping.valid)
+                {
+                    install = false;
+                    if (!dejudderMaskNlsLogged)
+                        DebugLog::Log("De-judder occlusion mask: not used with NLS shader '%s' (its map is not known)",
+                            file.c_str());
+                    dejudderMaskNlsLogged = true;
+                }
             }
             size_t sigmaIndex = frameHooks.size();
             for (size_t i = 0; i < frameHooks.size(); ++i)
@@ -15601,13 +15583,17 @@ struct LibplaceboVideoRenderer::Impl
                 dejudderMaskNoSigmaLogged = true;
                 dejudderMaskState = "mask off (no sigma-delta)";
             }
-            else if (activeSettings.occlusionMask && maskSlot >= 0 && submittedNls)
-                dejudderMaskState = "mask off (NLS)";
+            else if (activeSettings.occlusionMask && maskSlot >= 0 && submittedNls && !nlsMapping.valid)
+                dejudderMaskState = "mask off (NLS shader not known)";
             // Set only when the parameter was really written as 1 (audit 6b-2b).
             dejudderMaskParamSet = install;
             if (install)
             {
                 occlusionMaskHook.SetFrame(dejudder->Occlusion(maskSlot), renderImage.crop, target.crop);
+                // NLS's coordinates span the source crop (measured: the
+                // MAIN-stage texture libplacebo hooks is the cropped picture).
+                if (submittedNls)
+                    occlusionMaskHook.SetNls(nlsMapping, renderImage.crop);
                 frameHooks.insert(frameHooks.begin() + static_cast<std::ptrdiff_t>(sigmaIndex), occlusionMaskHook.Get());
                 dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
                 dejudderMaskUsedTick = GetTickCount64();

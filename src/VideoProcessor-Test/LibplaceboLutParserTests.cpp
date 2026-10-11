@@ -12,6 +12,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/OcclusionMaskHook.h>
+#include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <NlsGeometryPolicy.h>
@@ -3878,6 +3879,166 @@ namespace VideoProcessorTest
 					Assert::IsFalse(constant(x, y), (L"Carry stopped outside the masked block at x " + std::to_wstring(x)).c_str());
 			}
 			pl_tex_destroy(gpu, &source);
+			pl_tex_destroy(gpu, &target);
+			pl_tex_destroy(gpu, &maskTex);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// Stage 6c-2: with NLS active the mask follows the NLS shader's own map.
+		// A white square at source block (13, 1), off centre where the map is
+		// non-linear, is rendered through the real NLS shader; the mask marks
+		// that block new, so the sigma-delta's carry must stop exactly where the
+		// square appears, in both axes. The owner's three NLS profiles
+		// (standard, protected, NLS+) with a centred and an off-centre source
+		// crop: the NLS coordinates span the crop (the off-centre case tells the
+		// crop from the whole texture by 5 px).
+		TEST_METHOD(OcclusionMaskFollowsTheNlsMap)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			pl_gpu gpu = fixture.Gpu();
+			const int srcW = 256, srcH = 128, outW = 340, outH = 128;
+			std::vector<const pl_hook*> sigmaHooks;
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfigureSigma(chain, outW, outH, sigmaHooks);
+			Assert::AreEqual(size_t{ 1 }, sigmaHooks.size());
+			// A square at source block (13, 1): x 208..223, y 16..31.
+			std::vector<uint16_t> maskValues(16 * 8, 65535);
+			maskValues[1 * 16 + 13] = 0;
+			pl_tex maskTex = MakeMaskTexture(gpu, 16, 8, maskValues);
+			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt targetFormat = nullptr;
+			const auto caps = PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE;
+			for (int i = 0; i < gpu->num_formats; ++i)
+			{
+				pl_fmt f = gpu->formats[i];
+				if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+					f->texel_size == 4 && (f->caps & caps) == caps && f->host_bits[0] == 10)
+				{ targetFormat = f; break; }
+			}
+			Assert::IsNotNull(targetFormat);
+			auto makeSource = [&](bool square)
+			{
+				std::vector<float> texels(static_cast<size_t>(srcW) * srcH * 4);
+				for (int y = 0; y < srcH; ++y)
+					for (int x = 0; x < srcW; ++x)
+					{
+						float* t = &texels[(static_cast<size_t>(y) * srcW + x) * 4];
+						t[0] = t[1] = t[2] = square && x >= 208 && x < 224 && y >= 16 && y < 32 ? 1.0f : 0.5f;
+						t[3] = 1.0f;
+					}
+				pl_tex_params sp{};
+				sp.w = srcW; sp.h = srcH; sp.format = sourceFormat; sp.sampleable = true; sp.initial_data = texels.data();
+				return pl_tex_create(gpu, &sp);
+			};
+			pl_tex squareSource = makeSource(true);
+			pl_tex flatSource = makeSource(false);
+			pl_tex_params tp{};
+			tp.w = outW; tp.h = outH; tp.format = targetFormat; tp.renderable = true; tp.host_readable = true;
+			tp.blit_dst = true;
+			pl_tex target = pl_tex_create(gpu, &tp);
+			const pl_rect2df targetCrop{ 0.0f, 0.0f, static_cast<float>(outW), static_cast<float>(outH) };
+			OcclusionMask::Hook mask;
+
+			// The owner's three NLS profiles (VideoProcessor.cfg), with the
+			// shader loader's defaults filled in as the renderer sees them.
+			struct Profile { const wchar_t* name; const char* file; bool plus; std::map<std::string, std::string> rule; };
+			const Profile profiles[] = {
+				{ L"standard", "NLS.glsl", false, { { "strength", "1" }, { "curve", "2" }, { "geometry", "0" },
+					{ "center_protection", "0.35" } } },
+				{ L"protected", "NLS.glsl", false, { { "strength", "1" }, { "curve", "2" }, { "geometry", "1" },
+					{ "center_protection", "0.35" } } },
+				{ L"plus", "NLSPlus.glsl", true, { { "strength", "1" }, { "curve", "2" }, { "geometry", "1" },
+					{ "axis_balance", "0.25" }, { "max_center_zoom", "1.08" },
+					{ "horizontal_center_protection", "0.35" }, { "vertical_center_protection", "0.25" } } } };
+			for (const Profile& profile : profiles)
+			{
+				std::string source = LoadBundledShader(profile.file);
+				Assert::IsFalse(source.empty());
+				std::map<std::string, std::string> tokens = profile.rule;
+				tokens.emplace("center_protection", "0.35");
+				tokens.emplace("axis_balance", "0");
+				tokens.emplace("max_center_zoom", "1.08");
+				tokens.emplace("horizontal_center_protection", "0.35");
+				tokens.emplace("vertical_center_protection", "0.25");
+				for (const auto& token : tokens)
+					ReplaceShaderToken(source, token.first, token.second);
+				const pl_hook* nls = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				Assert::IsNotNull(nls);
+				BindNlsShader(nls, 1.33f, 0.0f);
+				const NlsMaskMapping::Mapping mapping = NlsMaskMapping::FromParameters(profile.rule, 1.33, false, profile.plus);
+				Assert::IsTrue(mapping.valid, profile.name);
+				for (const pl_rect2df sourceCrop : { pl_rect2df{ 0.0f, 0.0f, 256.0f, 128.0f },
+					pl_rect2df{ 32.0f, 8.0f, 256.0f, 128.0f } })
+				{
+					auto render = [&](pl_tex sourceTex, const std::vector<const pl_hook*>& hooks)
+					{
+						pl_frame image = TargetLutGpuFixture::MakeRgbFrame(sourceTex);
+						image.crop = sourceCrop;
+						pl_frame output = TargetLutGpuFixture::MakeRgbFrame(target);
+						output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+						output.repr.bits.sample_depth = 10;
+						output.repr.bits.color_depth = 8;
+						output.repr.bits.bit_shift = 2;
+						output.crop = targetCrop;
+						pl_render_params params = pl_render_fast_params;
+						params.dither_params = nullptr;
+						params.error_diffusion = nullptr;
+						params.hooks = hooks.data();
+						params.num_hooks = static_cast<int>(hooks.size());
+						Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params));
+						pl_gpu_finish(gpu);
+						std::vector<uint32_t> pixels(static_cast<size_t>(outW) * outH);
+						pl_tex_transfer_params download{};
+						download.tex = target;
+						download.ptr = pixels.data();
+						Assert::IsTrue(pl_tex_download(gpu, &download));
+						return pixels;
+					};
+					struct Box { int x0 = outW, y0 = outH, x1 = -1, y1 = -1; void Add(int x, int y)
+						{ x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y); } };
+					// Where NLS puts the square: red above mid grey (502).
+					const std::vector<uint32_t> square = render(squareSource, { nls });
+					Box seen;
+					for (int y = 0; y < outH; ++y)
+						for (int x = 0; x < outW; ++x)
+							if ((square[static_cast<size_t>(y) * outW + x] & 1023u) > 700)
+								seen.Add(x, y);
+					// Where the mask stops the carry.
+					Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "occlusion_mask", 1.0));
+					mask.SetFrame(maskTex, sourceCrop, targetCrop);
+					mask.SetNls(mapping, sourceCrop);
+					std::vector<std::vector<uint32_t>> frames;
+					for (int frame = 0; frame < 8; ++frame)
+						frames.push_back(render(flatSource, { nls, mask.Get(), sigmaHooks[0] }));
+					Box masked;
+					for (int y = 0; y < outH; ++y)
+						for (int x = 0; x < outW; ++x)
+						{
+							const uint32_t first = frames[0][static_cast<size_t>(y) * outW + x] & 1023u;
+							bool constant = true;
+							for (const auto& f : frames)
+								constant = constant && (f[static_cast<size_t>(y) * outW + x] & 1023u) == first;
+							if (constant)
+								masked.Add(x, y);
+						}
+					const std::wstring where = std::wstring(profile.name) + L", crop " +
+						std::to_wstring(static_cast<int>(sourceCrop.x0)) + L"," + std::to_wstring(static_cast<int>(sourceCrop.y0)) +
+						L": square " + std::to_wstring(seen.x0) + L"," + std::to_wstring(seen.y0) + L".." +
+						std::to_wstring(seen.x1) + L"," + std::to_wstring(seen.y1) + L", mask " +
+						std::to_wstring(masked.x0) + L"," + std::to_wstring(masked.y0) + L".." +
+						std::to_wstring(masked.x1) + L"," + std::to_wstring(masked.y1);
+					Assert::IsTrue(seen.x1 >= 0 && masked.x1 >= 0 &&
+						std::abs(masked.x0 - seen.x0) <= 2 && std::abs(masked.x1 - seen.x1) <= 2 &&
+						std::abs(masked.y0 - seen.y0) <= 2 && std::abs(masked.y1 - seen.y1) <= 2, where.c_str());
+				}
+				pl_mpv_user_shader_destroy(&nls);
+			}
+			pl_tex_destroy(gpu, &squareSource);
+			pl_tex_destroy(gpu, &flatSource);
 			pl_tex_destroy(gpu, &target);
 			pl_tex_destroy(gpu, &maskTex);
 			fixture.CaptureLog(nullptr);

@@ -30,6 +30,7 @@
 #include <UnifiedProfileRuntime.h>
 #include <VideoConversionOverride.h>
 #include <vprenderer/DejudderPolicy.h>
+#include <vprenderer/NlsMaskMapping.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include "CppUnitTest.h"
 
@@ -666,6 +667,50 @@ namespace VideoProcessorTest
             // Ids wrap at 2^32.
             std::deque<uint32_t> wrapped{ 0xFFFFFFFFu, 0u };
             Assert::AreEqual(2u, DejudderPolicy::ExtrasBetween(wrapped, 0xFFFFFFFEu, 1u));
+        }
+
+        TEST_METHOD(NlsMaskMappingMatchesTheShadersCentreScales)
+        {
+            // Classic NLS: the warped axis gets the stretch, the other is 1.
+            std::map<std::string, std::string> classic = {
+                { "strength", "1" }, { "curve", "2" }, { "geometry", "1" }, { "center_protection", "0.35" } };
+            NlsMaskMapping::Mapping m = NlsMaskMapping::FromParameters(classic, 1.33, false, false);
+            Assert::IsTrue(m.valid);
+            Assert::AreEqual(1.33, m.xScale, 1e-9);
+            Assert::AreEqual(1.0, m.yScale, 1e-9);
+            Assert::AreEqual(0.35, m.xProtect, 1e-9);
+            m = NlsMaskMapping::FromParameters(classic, 1.33, true, false);
+            Assert::AreEqual(1.0, m.xScale, 1e-9);
+            Assert::AreEqual(1.33, m.yScale, 1e-9);
+            // NLS+: balance 0.25 x strength 0.8 = 0.2, under the 1.08 zoom limit.
+            std::map<std::string, std::string> plus = {
+                { "strength", "0.8" }, { "curve", "2" }, { "geometry", "1" }, { "axis_balance", "0.25" },
+                { "max_center_zoom", "1.08" }, { "horizontal_center_protection", "0.35" },
+                { "vertical_center_protection", "0.25" } };
+            m = NlsMaskMapping::FromParameters(plus, 1.33, false, true);
+            Assert::IsTrue(m.valid);
+            Assert::AreEqual(std::pow(1.33, 0.8), m.xScale, 1e-9);
+            Assert::AreEqual(std::pow(1.33, -0.2), m.yScale, 1e-9);
+            Assert::AreEqual(0.25, m.yProtect, 1e-9);
+            // A parameter the shader needs is missing: mask off.
+            classic.erase("curve");
+            Assert::IsFalse(NlsMaskMapping::FromParameters(classic, 1.33, false, false).valid);
+            plus.erase("axis_balance");   // NLS+ without its balance: mask off
+            Assert::IsFalse(NlsMaskMapping::FromParameters(plus, 1.33, false, true).valid);
+            // The map keeps the edges and the centre, and is monotonic.
+            for (int geometry : { 0, 1 })
+            {
+                Assert::AreEqual(0.0, NlsMaskMapping::MapCoordinate(0.0, 1.33, 2.0, geometry, 0.35), 1e-9);
+                Assert::AreEqual(0.5, NlsMaskMapping::MapCoordinate(0.5, 1.33, 2.0, geometry, 0.35), 1e-9);
+                Assert::AreEqual(1.0, NlsMaskMapping::MapCoordinate(1.0, 1.33, 2.0, geometry, 0.35), 1e-9);
+                double previous = -1.0;
+                for (int i = 0; i <= 100; ++i)
+                {
+                    const double v = NlsMaskMapping::MapCoordinate(i / 100.0, 1.33, 2.0, geometry, 0.35);
+                    Assert::IsTrue(v >= previous);
+                    previous = v;
+                }
+            }
         }
 
         TEST_METHOD(DejudderLatencyFloorIsTheRecentMinimum)

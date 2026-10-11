@@ -801,6 +801,24 @@ yet on the projector.**
   - Alpha ownership: the mask owns alpha from its OUTPUT hook to the
     sigma-delta; the Stage 10 carry owns it only from RGB to SCALED. They
     never overlap. This is written in both shader headers.
+- **6c-2 (2026-10-11, planner 6b-2b/6c item 2): the mask with NLS.**
+  - The mask hook follows the NLS shader's own per-axis map
+    (`NlsMaskMapping`, shared with the renderer's NLS binding log so they
+    cannot drift).
+  - Classic NLS is the one-axis case. NLS+ is chosen by its file name and
+    uses both axes with the balanced centre scales.
+  - The map's 0..1 coordinates span the **source crop**. Measured: the
+    MAIN-stage texture libplacebo hooks is the cropped picture. An
+    off-centre crop tells the crop from the whole texture by 5 px.
+  - GPU test: the owner's three profiles (standard, protected, NLS+) with
+    a centred and an off-centre crop. A square at source block (13, 1) and
+    the mask's stopped carry agree within 2 px in both axes.
+  - Any other NLS shader, or a rule missing a parameter, keeps the mask off
+    (logged once).
+- **Audit fixes (`stage6b2b-6c-config-stats-mask.md`):** "mask on" only on
+  recent use (otherwise the reason); cadence shown in mask-only mode; the
+  next-frame-late prediction is tied to its frame; mask-only only for
+  sources ≤ 30 fps (`VideoRateMaskOnly`, planner item 3).
 - **Delta 5 note, for that step:** the sigma-delta's `levels_full` and
   `swapchain_bits` are typed into the shader profile, not read from the
   output. Delta 5 should take them from the active output.
