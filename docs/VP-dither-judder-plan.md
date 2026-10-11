@@ -73,8 +73,36 @@ fully before touching source. When a decision changes, change it here.
    listing file destinations and config lines). Victor copies it over and
    backs up first.
 6. **Range chain stays as is:** VP outputs limited (video) levels; GPU set to
-   full so the driver does not remap; projector input level "video". BTB/WTW
-   preserved. The quantizer is written for this.
+   full so the driver does not remap; projector input level "video". The
+   quantizer is written for this.
+
+   BTB/WTW survive VP's own code but **not every libplacebo conversion**.
+   Measured on the GPU harness on 2026-10-11 with libplacebo 7.360.1:
+   10-bit limited YCbCr in, R10G10B10A2 limited out (colour depth 8, bit
+   shift 2), neutral greys at codes 16, 40 (BTB), 64 … 940, 980 and 1019
+   (WTW). Default and fast parameters gave the same results.
+
+   | Conversion | BTB (16, 40) | WTW (980, 1019) |
+   |---|---|---|
+   | none (same transfer and primaries; `sdr_adjust_gamma: passthrough` with rec709 target) | kept | kept |
+   | transfer only (BT.1886→2.2, 2.2→2.4) | clipped to 64 | kept (slightly reshaped) |
+   | primaries BT.709→P3 (owner's `target_primaries: p3_d65`) | clipped to 64 | kept |
+   | primaries BT.2020→P3 | clipped to 64 | **clipped to 940** |
+   | full-range output | clipped to 0 | clipped to 1023 (no room, by definition) |
+
+   - BTB is lost whenever libplacebo linearises, which it does for any
+     transfer or primaries conversion. WTW survives linearisation, but
+     BT.2020→P3 gamut mapping clips it.
+   - In VP's own code:
+     - the sigma-delta quantiser keeps codes 0–255 (BTB/WTW intact);
+     - `OutputEncodingRepair` has no clamp;
+     - the de-judder works on source codes and does not clip.
+   - The LED compensation shader runs whenever `gamma_boost` ≠ off, even
+     with the LED disabled, and does `max(color, 0)`. That clips BTB; it is
+     redundant after any conversion above, but not in the passthrough case.
+     With gain > 1 (compensate mode) the knee also compresses WTW toward
+     white, by design.
+   - HDR sources are tone-mapped, so BTB/WTW do not apply in the same way.
 7. **Survey before designing.** Before starting any stage, read the fork's
    source for mechanisms that already do part of the job, and build on them
    rather than beside them. This has already collapsed the lookahead work
