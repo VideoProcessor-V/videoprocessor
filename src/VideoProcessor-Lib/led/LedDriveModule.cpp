@@ -142,6 +142,7 @@ namespace LedDrive
 			EffectiveProtocol(projector, led) != EffectiveProtocol(projectorIn, ledIn))
 			return false;
 		const bool wasCompensating = led.mode == Mode::Compensate;
+		const bool wasScript = led.mode == Mode::Script;
 		projector = projectorIn;
 		led = ledIn;
 		flux = FluxModel(projector.fluxTable);
@@ -161,6 +162,9 @@ namespace LedDrive
 				smoothing = false;
 				policy = ControllerOutput();
 				holding = false;
+				// From script: compensate starts only once the script thread
+				// has put CNTR back to 50 (it wakes for the new settings).
+				awaitingContrastReset = wasScript;
 			}
 			if (!nowCompensating && wasCompensating)
 			{
@@ -344,7 +348,7 @@ namespace LedDrive
 			gain.domain = GainDomain::Encoded;
 			gain.gain = smoother.Gain(timeMs);
 		}
-		if (compensating && haveStats)
+		if (compensating && haveStats && !awaitingContrastReset)
 		{
 			StepCompensateLocked(sequence, elapsed);
 			StepFadeToBlackLocked(sequence, timeMs);
@@ -484,7 +488,7 @@ namespace LedDrive
 	CompensationGain LedDriveModule::GainLocked() const
 	{
 		CompensationGain current = gain;
-		if (compensating && applyGain)
+		if (compensating && applyGain && !awaitingContrastReset)
 		{
 			// Follow the LED's modelled level every frame, never the target, so
 			// content brightness stays constant while it moves.
@@ -523,6 +527,12 @@ namespace LedDrive
 	{
 		std::unique_lock<std::mutex> lock(mutex);
 		return !wake.wait_until(lock, when, [this] { return stopping; });
+	}
+
+	bool LedDriveModule::WaitUntil(std::chrono::steady_clock::time_point when, uint64_t generation)
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		return !wake.wait_until(lock, when, [this, generation] { return stopping || configGeneration != generation; });
 	}
 
 	void LedDriveModule::Run()
@@ -615,14 +625,22 @@ namespace LedDrive
 				}
 			}
 			auto sendsDone = tickStart;
-			if (current.mode == Mode::Compensate && contrastDriven)
+			// The script's sleep after an LPW1 when no CNTR follows it.
+			auto scriptFloor = tickStart;
+			if (current.mode == Mode::Compensate)
 			{
-				// Leaving script mode for compensate: CNTR back to 50, which
-				// compensate assumes. (log_only and disable restore on exit.)
-				const bool ok = driver->SendScript("CNTR", 50);
-				DebugLog::Log("LED drive: left script mode; contrast set to 50%s", ok ? "" : " (not confirmed)");
-				controller.Reset(controller.Light(), 50);
-				contrastDriven = false;
+				if (contrastDriven)
+				{
+					// Leaving script mode for compensate: CNTR back to 50, which
+					// compensate assumes. (log_only and disable restore on exit.)
+					const bool ok = driver->SendScript("CNTR", 50);
+					DebugLog::Log("LED drive: left script mode; contrast set to 50%s", ok ? "" : " (not confirmed)");
+					controller.Reset(controller.Light(), 50);
+					contrastDriven = false;
+				}
+				// Only now may compensate start (Should fix 6).
+				std::lock_guard<std::mutex> guard(mutex);
+				awaitingContrastReset = false;
 			}
 			setSmoothing(current.mode == Mode::Script && current.scriptSmoothing && applyGain,
 				controller.Contrast());
@@ -673,11 +691,18 @@ namespace LedDrive
 				{
 					driver->SendScript("LPW1", out.lightCommand);
 					sendsDone = std::chrono::steady_clock::now();
+					// The script slept 200 ms after LPW1 even with no CNTR to
+					// follow; keep that with a tick_ms below it (audit note 4).
+					if (out.contrastSchedule.empty())
+						scriptFloor = sendsDone + std::chrono::milliseconds(out.durationMs);
 				}
 				int previousOffset = 0;
 				for (const ContrastStep& step : out.contrastSchedule)
 				{
-					if (!WaitUntil(sendsDone + std::chrono::milliseconds(step.offsetMs - previousOffset))) break;
+					// New settings end the tick at once (Should fix 6): the
+					// rest of a schedule is not sent under the new mode.
+					if (!WaitUntil(sendsDone + std::chrono::milliseconds(step.offsetMs - previousOffset), generation))
+						break;
 					previousOffset = step.offsetMs;
 					driver->SendScript("CNTR", step.contrast);
 					sendsDone = std::chrono::steady_clock::now();
@@ -702,9 +727,11 @@ namespace LedDrive
 				++ticks;
 			}
 			// The next tick: tick_ms after this one started, and never before
-			// this tick's last command went out.
-			if (!WaitUntil(std::max(tickStart + std::chrono::milliseconds(current.tickMs), sendsDone)))
-				break;
+			// this tick's last command went out (or the script's sleep after
+			// an LPW1). New settings end the wait; a stop ends the loop at its
+			// top.
+			WaitUntil(std::max({ tickStart + std::chrono::milliseconds(current.tickMs), sendsDone, scriptFloor }),
+				generation);
 		}
 
 		{

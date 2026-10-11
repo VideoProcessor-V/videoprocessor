@@ -188,6 +188,54 @@ namespace VideoProcessorTest
 			Assert::AreEqual(50, projector->contrast, L"and the contrast to 50");
 		}
 
+		// Audit stage7-step7ab, Should fix 6: a live switch from script to
+		// compensate puts CNTR back to 50 before compensate does anything; the
+		// rest of the script's tick is not sent.
+		TEST_METHOD(SwitchFromScriptToCompensateResetsContrastFirst)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			const ProjectorConfig port = FastProjector();
+			LedDriveModule module(port, FastScript(),
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			for (int frame = 0; frame < 5; ++frame)
+				module.SubmitMeasurement(Uniform(10.0));
+			Assert::IsTrue(WaitFor([&] { return projector->contrast >= 53; }, 5000), L"the script raised CNTR");
+
+			LedDriveConfig compensate = FastScript();
+			compensate.mode = Mode::Compensate;
+			const size_t before = projector->Writes().size();
+			Assert::IsTrue(module.Reconfigure(port, compensate));
+			auto resetSeen = [&]
+			{
+				const auto writes = projector->Writes();
+				return std::find(writes.begin() + static_cast<std::ptrdiff_t>(std::min(before, writes.size())),
+					writes.end(), std::string(":CNTR50\r")) != writes.end();
+			};
+			bool compensated = false;
+			for (uint64_t frame = 1; frame <= 200 && !compensated; ++frame)
+			{
+				module.SubmitMeasurement(Uniform(10.0), frame);
+				const bool reset = resetSeen();
+				const CompensationGain gain = module.BeginFrame(frame);
+				if (!reset)
+					Assert::IsFalse(gain.active, L"compensate touched the picture before CNTR was back at 50");
+				compensated = reset && gain.active;
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+			Assert::IsTrue(compensated, L"compensate starts once CNTR is back at 50");
+			const auto writes = projector->Writes();
+			const auto reset = std::find(writes.begin() + static_cast<std::ptrdiff_t>(before), writes.end(),
+				std::string(":CNTR50\r"));
+			Assert::IsTrue(reset != writes.end());
+			Assert::IsTrue(reset - (writes.begin() + static_cast<std::ptrdiff_t>(before)) <= 1,
+				L"at most the command already in flight goes out before the reset");
+			Assert::AreEqual(50, projector->contrast);
+			module.Stop();
+		}
+
 		TEST_METHOD(ScriptSmoothingBridgesTheRealContrastSteps)
 		{
 			auto projector = std::make_shared<FakeProjector>();

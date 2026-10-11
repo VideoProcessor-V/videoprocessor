@@ -110,6 +110,9 @@ namespace LedDrive
 		std::atomic<double> displayGamma{ 2.2 };
 		void Run();
 		bool WaitUntil(std::chrono::steady_clock::time_point when);
+		// The same, also ending (false) as soon as the settings change from
+		// `generation`, so mode: script stops its tick at once.
+		bool WaitUntil(std::chrono::steady_clock::time_point when, uint64_t generation);
 		double NowMs() const;
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
@@ -165,6 +168,10 @@ namespace LedDrive
 		// thread while it applies.
 		ScriptSmoother smoother;
 		bool smoothing = false;
+		// A live switch from script to compensate: compensate waits (picture
+		// untouched, no LPW1) until the script thread has put CNTR back to 50
+		// (audit stage7-step7ab, Should fix 6).
+		bool awaitingContrastReset = false;
 
 		// Lookahead predictions by source sequence, and the correction.
 		LookaheadObserver lookahead;
