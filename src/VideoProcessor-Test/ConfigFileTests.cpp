@@ -533,20 +533,23 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.interlaced = true; }) == Reason::Interlaced);
             Assert::IsTrue(with([](auto& i) { i.displayHz = 0.0; }) == Reason::UnknownRates);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 0.0; }) == Reason::UnknownRates);
-            // Uneven cadences only (planner 6b-2, item 4): refreshes per source
-            // frame must not be a whole number (+-0.05), and more than ~1.
+            // Uneven film cadences only (planner 6b-2 item 4, 6b-2a): refreshes per
+            // source frame not a whole number (+-0.05), and at least 1.95.
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 23.976; i.displayHz = 59.94; }) == Reason::Active);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 23.976; }) == Reason::Active);    // 2.5025
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; }) == Reason::Active);      // 2.4
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.0; }) == Reason::EvenCadence); // 2:2
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 29.97; }) == Reason::EvenCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; i.displayHz = 50.0; }) == Reason::EvenCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 48.0; }) == Reason::EvenCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 120.0; }) == Reason::EvenCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; }) == Reason::EvenCadence); // 1:1
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; i.displayHz = 50.0; }) == Reason::EvenCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 58.0; }) == Reason::EvenCadence); // ~1, nothing to fill
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::Active);      // 1.2: uneven
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.0; }) == Reason::IneligibleCadence); // 2:2
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 29.97; }) == Reason::IneligibleCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; i.displayHz = 50.0; }) == Reason::IneligibleCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 48.0; }) == Reason::IneligibleCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 120.0; }) == Reason::IneligibleCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; }) == Reason::IneligibleCadence); // 1:1
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; i.displayHz = 50.0; }) == Reason::IneligibleCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 58.0; }) == Reason::IneligibleCadence); // ~1, nothing to fill
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::IneligibleCadence); // 1.2: video
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::IneligibleCadence); // 1.5
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.6; }) == Reason::IneligibleCadence); // 1.96: within 0.05 of 2
+            Assert::IsFalse(DejudderPolicy::IsUnevenCadence(1.94));
             Assert::IsFalse(DejudderPolicy::IsUnevenCadence(2.04));
             Assert::IsTrue(DejudderPolicy::IsUnevenCadence(2.06));
             Assert::IsTrue(with([](auto& i) { i.nativeRgb = true; }) == Reason::NativeRgb);

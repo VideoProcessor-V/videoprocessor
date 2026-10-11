@@ -3809,6 +3809,7 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderExtraStats dejudderExtraStats;
 	DejudderPolicy::LatencyFloor dejudderLatencyFloor;
 	double dejudderCallLatency = 0.0;
+	double dejudderLoggedFloor = 0.0;   // the floor last reported (s)
 	uint64_t dejudderPhaseGeneration = 0;
 	bool dejudderPhaseLogPending = true;
 	CComPtr<IDXGIOutput> dejudderOutput;
@@ -10665,7 +10666,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 			reason == DejudderPolicy::Reason::Interlaced ||
-			reason == DejudderPolicy::Reason::EvenCadence || reason == DejudderPolicy::Reason::NativeRgb)
+			reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb)
 		{
 			if (dejudder || dejudderNextTextures[0])
 				ReleaseDejudder();
@@ -10850,6 +10851,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			dejudderPhaseGeneration = f.frameGeneration;
 			dejudderLatencyFloor.Reset();
+			dejudderLoggedFloor = 0.0;
 			dejudderCallLatency = 0.0;
 			dejudderPhaseLogPending = true;
 		}
@@ -10909,6 +10911,14 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				haveFirstVsync = true;
 				dejudderLatencyFloor.Add(previousVsync - callbackA);
+				// A pipeline hiccup shows as the floor moving by more than a
+				// refresh (planner 6b-2a).
+				const double floor = dejudderLatencyFloor.Floor();
+				if (dejudderLoggedFloor > 0.0 && std::abs(floor - dejudderLoggedFloor) > displayPeriod)
+					DebugLog::Log("De-judder: latency floor moved %.2f -> %.2f ms (more than one refresh)",
+						dejudderLoggedFloor * 1000.0, floor * 1000.0);
+				if (dejudderLoggedFloor <= 0.0 || std::abs(floor - dejudderLoggedFloor) > displayPeriod)
+					dejudderLoggedFloor = floor;
 			}
 			DejudderPolicy::ExtraInput in;
 			in.previousVsync = previousVsync;

@@ -18,7 +18,7 @@ namespace DejudderPolicy
 		LowLatency,       // the Low_Latency queue is active
 		Interlaced,       // an interlaced input mode (field rate unclear)
 		UnknownRates,     // source or display rate not known yet
-		EvenCadence,      // a whole number of refreshes per source frame (or about one or fewer)
+		IneligibleCadence, // a whole number of refreshes per source frame, or under 2 (video)
 		NativeRgb,        // an RGB capture: no YCbCr planes to warp
 		PlaneFormat,      // A's planes cannot be sampled linearly / stored
 		NoNextFrame,      // B not queued or not converted yet
@@ -44,13 +44,14 @@ namespace DejudderPolicy
 		return sourceHz > 0.0 ? displayHz / sourceHz : 0.0;
 	}
 
-	// Extras only fill an uneven cadence (planner 6b-2, item 4): 24p on 60 Hz
-	// (2.5) or 25p on 60 Hz (2.4), never an N:N cadence (25p/50, 30p/60,
-	// 24p/48), whatever the rate. +-0.05 absorbs 23.976/24 and 59.94/60. At
-	// about one refresh per frame or fewer there is nothing to fill.
+	// Extras only fill an uneven film cadence (planner 6b-2 item 4 and 6b-2a):
+	// 24p on 60 Hz (2.5) or 25p on 60 Hz (2.4), never an N:N cadence (25p/50,
+	// 30p/60, 24p/48), and never under 2 refreshes per frame (50p on 60 Hz is
+	// video: its one-in-five extra would be motion smoothing). +-0.05 absorbs
+	// 23.976/24 and 59.94/60.
 	inline bool IsUnevenCadence(double ratio)
 	{
-		if (!(ratio > 1.05))
+		if (!(ratio >= 1.95))
 			return false;
 		return std::abs(ratio - std::round(ratio)) > 0.05;
 	}
@@ -63,7 +64,7 @@ namespace DejudderPolicy
 		if (in.lowLatency) return Reason::LowLatency;
 		if (in.interlaced) return Reason::Interlaced;
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) return Reason::UnknownRates;
-		if (!IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz))) return Reason::EvenCadence;
+		if (!IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz))) return Reason::IneligibleCadence;
 		if (in.nativeRgb) return Reason::NativeRgb;
 		if (!in.planeFormatsUsable) return Reason::PlaneFormat;
 		if (!in.haveNext) return Reason::NoNextFrame;
@@ -80,7 +81,7 @@ namespace DejudderPolicy
 		case Reason::LowLatency: return "low-latency queue";
 		case Reason::Interlaced: return "interlaced input";
 		case Reason::UnknownRates: return "rates not known";
-		case Reason::EvenCadence: return "even cadence";
+		case Reason::IneligibleCadence: return "cadence not eligible (even, or video)";
 		case Reason::NativeRgb: return "RGB capture";
 		case Reason::PlaneFormat: return "plane format unsuitable";
 		case Reason::NoNextFrame: return "next frame not ready";

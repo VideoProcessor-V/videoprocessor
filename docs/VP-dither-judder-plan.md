@@ -663,12 +663,13 @@ were applied.
   - timing unknown;
   - render time > 0.6 of a refresh;
   - no DXGI swapchain or output.
-- **Cadence rule (planner item 4):** extras only for an uneven cadence:
-  refreshes per source frame not within ±0.05 of a whole number, and above
-  1.05. This includes 24p and 23.976p on 60 Hz (2.5) and 25p on 60 Hz
-  (2.4). It excludes 25p/50, 30p/60, 24p/48, 24p/120 and 1:1. Note: it also
-  includes 50p on 60 Hz (1.2), where one frame in five owns two refreshes
-  and gets one extra; that follows the rule as written.
+- **Cadence rule (planner 6b-2 item 4, 6b-2a):** extras run only for an
+  uneven film cadence: refreshes per source frame within neither ±0.05 of
+  a whole number, and at least 1.95.
+  - Included: 24p and 23.976p on 60 Hz (2.5), and 25p on 60 Hz (2.4).
+  - Excluded: 25p/50, 30p/60, 24p/48, 24p/120, 1:1, and 50p on 60 Hz
+    (1.2). 50p is video, often live TV, and an extra there would be motion
+    smoothing.
 - **Frame trust:** a GPU pass counts the trusted blocks. Below
   `dejudder_frame_trust` (default 0.25) the warp holds the whole frame,
   with no read-back. The cut test requires the output to equal A exactly.
@@ -682,8 +683,17 @@ were applied.
     screen) and the last present id. Extras show before B, so the debt
     seen at B is as today.
   - The render thread holds `renderMutex` while it waits, for up to about
-    two refreshes per source frame.
-- **Logging:** the first 200 extras, then 1 in 240, with φ0, δ, shift, ms
+    two refreshes per source frame. B's arrival is not blocked by this:
+    the capture callback (`OnVideoFrame`, the enqueue) and
+    `ConversionLoop` never take `renderMutex`.
+  - Other blocking users of `renderMutex` are on the render thread itself
+    (the cadence bookkeeping, the look-ahead analysis, config application
+    between frames), plus `Reset`, `Retire` and shutdown, which wait at
+    most that long. The status getters for the UI use try-lock and never
+    block.
+- **Logging:** a line whenever L moves by more than one refresh, so a
+  pipeline hiccup is visible (planner 6b-2a). The first 200 extras, then
+  1 in 240, with φ0, δ, shift, ms
   and the Present block time. Holds at most one line per 5 s. One "phase"
   line per queue generation or rate change: the cadence, φ0, L, and the
   first frame's extras and stop reason.
