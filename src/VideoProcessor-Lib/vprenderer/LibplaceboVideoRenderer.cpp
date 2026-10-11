@@ -41,6 +41,8 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/OutputEncodingRepair.h>
+#include <vprenderer/DejudderWarp.h>
+#include <vprenderer/DejudderPolicy.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -88,6 +90,7 @@
 #include <iomanip>
 #include <initializer_list>
 #include <memory>
+#include <tuple>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -827,6 +830,9 @@ namespace
 		bool hasContrastRecovery = false;
 		float contrastRecovery = 0.0f;
 		int saturation = 0;
+		// Stage 6 de-judder: 0 = off (today's path); its own match tolerance.
+		double dejudderStrength = 0.0;
+		double dejudderMatchTolerance = 3.0;
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string debandStrength = "auto";
@@ -954,6 +960,7 @@ namespace
 			<< static_cast<int>(settings.peakDetection) << '|'
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
 			<< settings.saturation << '|'
+			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1876,6 +1883,19 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid saturation '%s'; using 0",
 					rule.section.c_str(), raw.c_str());
+		}
+		for (const auto& numeric : { std::make_tuple("dejudder_strength", 0.0, 1.0, &settings.dejudderStrength),
+			std::make_tuple("dejudder_match_tolerance", 0.5, 16.0, &settings.dejudderMatchTolerance) })
+		{
+			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
+				continue;
+			double parsed = 0.0;
+			if (DisplayRuleExpression::ParseNumber(raw, parsed) &&
+				parsed >= std::get<1>(numeric) && parsed <= std::get<2>(numeric))
+				*std::get<3>(numeric) = parsed;
+			else
+				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
+					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
 		}
 		if (config.TryGetString(rule.section, "contrast_recovery", raw))
 		{
@@ -3743,6 +3763,20 @@ struct LibplaceboVideoRenderer::Impl
 	pl_renderer renderer = nullptr;
 	std::atomic<ULONGLONG> libplaceboRenderStartedTick{ 0 };
 	pl_tex textures[2] = { nullptr, nullptr };
+	// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
+	// Created only while the de-judder is on; freed when it goes off.
+	// (A later optimisation could reuse B's upload when B becomes current.)
+	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
+	std::unique_ptr<Dejudder::MotionWarp> dejudder;
+	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
+	uint64_t dejudderEstimatedSequence = 0;
+	unsigned long long dejudderEstimates = 0;
+	void ReleaseDejudder()
+	{
+		dejudder.reset();
+		for (pl_tex& tex : dejudderNextTextures)
+			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
+	}
 	double sourceUploadCpuLastMs = 0.0;
 	double sourceUploadCpuIntervalTotalMs = 0.0;
 	double sourceUploadCpuIntervalPeakMs = 0.0;
@@ -4600,6 +4634,7 @@ struct LibplaceboVideoRenderer::Impl
 				pl_tex_destroy(d3d11->gpu, &profileOverlayTexture);
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
+				ReleaseDejudder();   // before the device goes
 			}
 			pl_swapchain_destroy(&swapchain);
 			vpOwnedSwapchain.Release();
@@ -7659,6 +7694,8 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.hasContrastRecovery = next.hasContrastRecovery;
 		currentTransport.contrastRecovery = next.contrastRecovery;
 		currentTransport.saturation = next.saturation;
+		currentTransport.dejudderStrength = next.dejudderStrength;
+		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.debandStrength = next.debandStrength;
@@ -7716,6 +7753,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.hasContrastRecovery != next.hasContrastRecovery ||
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
 		changed(current.saturation != next.saturation, "saturation");
+		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
+		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
@@ -10510,10 +10549,119 @@ struct LibplaceboVideoRenderer::Impl
 	// The caller holds renderMutex. Queue-generation validation and rendering
 	// share that lock so a frame removed before a reset cannot cross the reset
 	// boundary while waiting to enter libplacebo.
+	// Stage 6b-1: decide whether the de-judder runs for this source frame and,
+	// if so, upload B (the next frame) and estimate the motion A->B once per
+	// source frame. Nothing is presented differently yet (6b-2). Off: B is
+	// not uploaded, nothing is estimated, and the matcher is freed.
+	void UpdateDejudderEstimate(
+		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& next,
+		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& current,
+		const VideoFrameFormatterOutputContract& contract,
+		int width, int height, size_t rowBytes, int chromaHeight, bool lossless422,
+		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, double sourceHz)
+	{
+		const AlphaPresentationSnapshot telemetry = presentationTelemetry.Snapshot();
+		DejudderPolicy::Input in;
+		in.strength = activeSettings.dejudderStrength;
+		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
+		in.sourceHz = sourceHz;
+		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
+			customHookRefreshHz;
+		in.nativeRgb = nativeRgb;
+		in.haveNext = next != nullptr;
+		in.nextMatches = next && current &&
+			next->pixels.size() == current->pixels.size() &&
+			next->contract.sampleRange == contract.sampleRange &&
+			next->contract.colorDepth == contract.colorDepth &&
+			next->contract.bitShift == contract.bitShift;
+		const auto usable = [](pl_tex tex)
+		{
+			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
+				(tex->params.format->caps & PL_FMT_CAP_STORABLE);
+		};
+		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
+		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
+		if (reason != dejudderReason)
+		{
+			DebugLog::Log("De-judder: %s (strength %.2f, source %.3f Hz, display %.3f Hz, match tolerance %.1f)",
+				DejudderPolicy::Name(reason), in.strength, in.sourceHz, in.displayHz,
+				activeSettings.dejudderMatchTolerance);
+			dejudderReason = reason;
+		}
+		if (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
+			reason == DejudderPolicy::Reason::NotFilmCadence || reason == DejudderPolicy::Reason::NativeRgb)
+		{
+			if (dejudder || dejudderNextTextures[0])
+				ReleaseDejudder();
+			return;
+		}
+		if (reason != DejudderPolicy::Reason::Active || cadenceRepeat ||
+			sourceSequence == dejudderEstimatedSequence)
+			return;
+		// B: the same plane layout as A's upload above.
+		struct pl_plane_data planes[2]{};
+		const BYTE* yPixels = next->pixels.data();
+		const BYTE* uvPixels = yPixels + rowBytes * static_cast<size_t>(height);
+		planes[0].type = PL_FMT_UNORM;
+		planes[0].width = width;
+		planes[0].height = height;
+		planes[0].component_size[0] = 16;
+		planes[0].component_map[0] = PL_CHANNEL_Y;
+		planes[0].pixel_stride = sizeof(uint16_t);
+		planes[0].row_stride = rowBytes;
+		planes[0].pixels = yPixels;
+		planes[1] = planes[0];
+		planes[1].width = (width + 1) / 2;
+		planes[1].height = chromaHeight;
+		planes[1].component_size[1] = 16;
+		planes[1].component_map[0] = PL_CHANNEL_CB;
+		planes[1].component_map[1] = PL_CHANNEL_CR;
+		planes[1].pixel_stride = sizeof(uint16_t) * 2;
+		planes[1].pixels = uvPixels;
+		pl_plane nextPlanes[2]{};
+		for (int plane = 0; plane < 2; ++plane)
+			if (!pl_upload_plane(d3d11->gpu, &nextPlanes[plane], &dejudderNextTextures[plane], &planes[plane]))
+			{
+				DebugLog::Log("De-judder: uploading the next frame failed; off for this frame");
+				return;
+			}
+		(void)flipped;   // A and B share the orientation; the warp keeps it.
+		if (!dejudder)
+		{
+			Dejudder::Settings settings;
+			settings.matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
+			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, settings);
+		}
+		else if (dejudder->GetSettings().matchTolerance != static_cast<float>(activeSettings.dejudderMatchTolerance))
+		{
+			Dejudder::Settings settings = dejudder->GetSettings();
+			settings.matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
+			dejudder->SetSettings(settings);
+		}
+		Dejudder::Planes a, b;
+		a.luma = textures[0];
+		a.chroma = textures[1];
+		a.chromaShiftX = 1;
+		a.chromaShiftY = lossless422 ? 0 : 1;
+		b = a;
+		b.luma = dejudderNextTextures[0];
+		b.chroma = dejudderNextTextures[1];
+		if (!dejudder->Estimate(a, b))
+		{
+			DebugLog::Log("De-judder: motion estimate failed (%s)", dejudder->LastError().c_str());
+			return;
+		}
+		dejudderEstimatedSequence = sourceSequence;
+		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
+			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
+				dejudderEstimates, width, height, lossless422 ? "4:2:2" : "4:2:0");
+	}
+
 	bool RenderLocked(
 		const VideoFrame& videoFrame,
 		VideoStateComPtr& statePtr,
 		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& convertedPayload,
+		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& nextConvertedPayload,
 		uint64_t frameGeneration,
 		uint64_t sourceSequence,
 		const ActivePictureFrameIdentity& activePictureIdentity,
@@ -11470,6 +11618,10 @@ struct LibplaceboVideoRenderer::Impl
 			image.planes[0].shift_x = 0.0f;
 			image.planes[0].shift_y = 0.0f;
 			image.planes[0].flipped = state.invertedVertical;
+			// An RGB capture has no YCbCr planes to warp: the de-judder is off.
+			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
+				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
+				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0);
 			std::string resolvedIngressStatus = nativeRgbLayout.label;
 			if (!analysisSource.IsValid())
 				resolvedIngressStatus += " (analysis unavailable)";
@@ -11515,6 +11667,10 @@ struct LibplaceboVideoRenderer::Impl
 			frameGpuTiming.EndStage();
 			if (!sourceUploaded)
 				return false;
+			UpdateDejudderEstimate(nextConvertedPayload, convertedPayload, formattedContract,
+				width, height, p010RowBytes, chromaHeight, lossless422Upload,
+				state.invertedVertical, sourceSequence, cadenceRepeat, false,
+				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0);
 			if (lossless422Upload)
 			{
 				switch (state.videoFrameEncoding)
@@ -18902,6 +19058,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 		VideoFrame frame;
 		VideoStateComPtr state;
 		std::shared_ptr<const QueuedFrame::ConvertedPayload> convertedPayload;
+		// Stage 6: the next source frame's converted planes (B), when it is
+		// already queued and converted in the same generation.
+		std::shared_ptr<const QueuedFrame::ConvertedPayload> nextConvertedPayload;
 		bool conversionFailed = false;
 		uint64_t frameGeneration = 0;
 		uint64_t sourceSequence = 0;
@@ -19062,6 +19221,14 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_activePictureTimeline.MarkConsumed(
 				m_frameQueue.front().activePictureIdentity);
 			m_frameQueue.pop_front();
+			nextConvertedPayload.reset();
+			if (!m_frameQueue.empty())
+			{
+				const QueuedFrame& next = m_frameQueue.front();
+				if (next.generation == frameGeneration && !next.cadenceRepeat &&
+					next.sourceSequence != sourceSequence && next.converted)
+					nextConvertedPayload = next.converted;
+			}
 
 
 			const size_t remainingDepth = m_frameQueue.size();
@@ -19269,6 +19436,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					frame,
 					state,
 					convertedPayload,
+					nextConvertedPayload,
 					frameGeneration,
 					sourceSequence,
 					activePictureIdentity,

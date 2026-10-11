@@ -592,6 +592,28 @@ WARP GPU tests in `LibplaceboLutParserTests.cpp` cover:
 
 A libplacebo quirk found on the way: a pass that binds the same texture
 twice is rejected only in the log, not as a failed dispatch.
+
+**6b-1 status (2026-10-11): connected, estimate only, picture unchanged.**
+- Input-profile keys `dejudder_strength` (0..1, default 0 = off) and
+  `dejudder_match_tolerance` (0.5..16, default 3). Both are validated,
+  in the fingerprint, and live-applied.
+- RenderLoop hands RenderLocked the next queued source frame's converted
+  planes (B). That happens only when B is in the same generation, is not a
+  cadence repeat, has a different source sequence and is already converted.
+  Nothing new is queued or waited for.
+- `DejudderPolicy::Decide` (pure, unit-tested) gives the reason. The checks
+  run in order: off, Low_Latency queue, rates unknown, not film cadence
+  (source ≥ display/1.5), RGB capture, plane caps (sampleable, LINEAR,
+  STORABLE), no next frame, next frame differs. Each change of reason is
+  logged once.
+- When active, B is uploaded with A's plane layout, and `Estimate(A, B)`
+  runs once per source frame, never on cadence repeats. It is logged on the
+  1st estimate and every 2400th.
+- Off, low-latency, non-film and RGB free the matcher and B's textures.
+  With strength 0, nothing new is uploaded or dispatched.
+- Moved to 6b-2: extra presents, phase, the stats line, the Config box,
+  LED pairing and the GPU time measurement. The Config box and stats line
+  are not needed while nothing visible changes.
 Needs the render path to see frame A and next frame B (second texture to a
 hook, or `pl_render_image_mix`). Per refresh, true position t between A and B
 (3:2 at 60 Hz cycles 0, .4, .8, .2, .6); render at

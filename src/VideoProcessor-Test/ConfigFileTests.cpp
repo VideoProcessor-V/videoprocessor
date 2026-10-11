@@ -29,6 +29,7 @@
 #include <ShaderConfigValidation.h>
 #include <UnifiedProfileRuntime.h>
 #include <VideoConversionOverride.h>
+#include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include "CppUnitTest.h"
 
@@ -489,6 +490,60 @@ namespace VideoProcessorTest
                 Assert::IsTrue(error.find("saturation") != std::string::npos,
                     std::wstring(error.begin(), error.end()).c_str());
             }
+        }
+
+        TEST_METHOD(DejudderSettingsAreInputProfileNumbersWithLimits)
+        {
+            struct Case { const char* key; const char* value; bool valid; };
+            for (const Case& c : {
+                Case{ "dejudder_strength", "0", true }, Case{ "dejudder_strength", "0.25", true },
+                Case{ "dejudder_strength", "1", true }, Case{ "dejudder_strength", "1.01", false },
+                Case{ "dejudder_strength", "-0.1", false }, Case{ "dejudder_strength", "gentle", false },
+                Case{ "dejudder_match_tolerance", "3", true }, Case{ "dejudder_match_tolerance", "0.5", true },
+                Case{ "dejudder_match_tolerance", "16", true }, Case{ "dejudder_match_tolerance", "0.4", false },
+                Case{ "dejudder_match_tolerance", "17", false } })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                    "[vprenderer.input.cinema]\n" << c.key << ": " << c.value << "\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                const bool ok = MainConfigSchema::Validate(config, error) && runtime.Initialize(config, {}, error);
+                Assert::AreEqual(c.valid, ok, std::wstring(error.begin(), error.end()).c_str());
+                if (!c.valid)
+                    Assert::IsTrue(error.find(c.key) != std::string::npos,
+                        std::wstring(error.begin(), error.end()).c_str());
+            }
+        }
+
+        TEST_METHOD(DejudderPolicyRunsOnlyForFilmCadenceWithANextFrame)
+        {
+            using DejudderPolicy::Reason;
+            DejudderPolicy::Input in;
+            in.strength = 0.25; in.sourceHz = 24.0; in.displayHz = 60.0;
+            in.haveNext = true; in.nextMatches = true;
+            Assert::IsTrue(DejudderPolicy::Decide(in) == Reason::Active);
+            auto with = [&](auto change) { DejudderPolicy::Input copy = in; change(copy); return DejudderPolicy::Decide(copy); };
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; }) == Reason::Off);
+            Assert::IsTrue(with([](auto& i) { i.lowLatency = true; }) == Reason::LowLatency);
+            Assert::IsTrue(with([](auto& i) { i.displayHz = 0.0; }) == Reason::UnknownRates);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 0.0; }) == Reason::UnknownRates);
+            // The limit is source >= display / 1.5 (40 on 60): 50 on 60 has
+            // nothing to fill; 24 on 60 and 25 on 50 do.
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::NotFilmCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::NotFilmCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 39.9; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; i.displayHz = 50.0; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.nativeRgb = true; }) == Reason::NativeRgb);
+            Assert::IsTrue(with([](auto& i) { i.planeFormatsUsable = false; }) == Reason::PlaneFormat);
+            Assert::IsTrue(with([](auto& i) { i.haveNext = false; }) == Reason::NoNextFrame);
+            Assert::IsTrue(with([](auto& i) { i.nextMatches = false; }) == Reason::NextFrameDiffers);
+            // The first failing check is the one reported: off beats everything.
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.lowLatency = true; i.haveNext = false; }) == Reason::Off);
+            Assert::AreEqual("active", DejudderPolicy::Name(Reason::Active));
+            Assert::AreEqual("low-latency queue", DejudderPolicy::Name(Reason::LowLatency));
         }
 
         TEST_METHOD(EdgeBlankingRejectsInvalidValues)
