@@ -6775,6 +6775,14 @@ void testNoTargetStartupIsQuiet()
         !requireControl<QPushButton>(window, "okConfiguration")->isEnabled() &&
         QApplication::activeModalWidget() == nullptr,
         "No-target startup opened a prompt or allowed configuration writes");
+    // RC3: with no target only Updates stays clickable (page 21 after the
+    // merge; page 20 is the LED drive).
+    auto* updatesEntry = requireControl<QPushButton>(window, "config.openUpdates");
+    require(updatesEntry->isEnabled(), "Updates is not clickable without a target");
+    for (auto* button : window.findChildren<QPushButton*>())
+        if (button != updatesEntry && button->property("pageIndex").isValid())
+            require(!button->isEnabled(), QStringLiteral("Page %1 is clickable without a target")
+                .arg(button->property("pageIndex").toInt()).toStdString().c_str());
     const QString captures = qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES");
     if (!captures.isEmpty())
     {

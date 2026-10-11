@@ -4400,7 +4400,7 @@ QWidget* ConfigEditorWindow::createShell()
         pages_->addWidget(emptyState);
         pages_->setCurrentWidget(emptyState);
         for (auto* button : navigation_->findChildren<QPushButton*>())
-            button->setEnabled(button->property("pageIndex").toInt() == 20);
+            button->setEnabled(button->property("pageIndex").toInt() == 21);   // Updates (our LED drive is 20)
 	}
     rootLayout->addWidget(center, 1);
 
