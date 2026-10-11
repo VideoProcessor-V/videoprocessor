@@ -210,6 +210,39 @@ This mode exists so the owner can confirm the port before anything new is
 enabled. It also stays as the fallback. CNTR itself is read at startup and
 set to 50 once if it was left elsewhere; after that it is never written.
 
+**Stage 7 step 7b (supersedes the emulation above).** The owner's
+requirement is that `script` mode be the script exactly, so CNTR is now
+real:
+
+- Each tick sends the script's own commands, synchronously, in its own
+  timing: LPW1 at the tick start, then every CNTR in the schedule after
+  the script's sleep (200 ms, fast dumps 100 ms), counted from the end of
+  the previous send (planner's step 7 answer 3). No coalescing: a CNTR that
+  repeats the previous value is sent, as the script did. Script sends skip
+  `min_command_gap_ms` and the burst pause (the script's sleeps space them;
+  `IProjectorDriver::SendScript`). The next tick starts `tick_ms` after the
+  last one started, never before its last command went out.
+- With the built-in curve, the light target is the script's literal
+  formula, including its rounded 0.8333 slope (one level lower at APL 76,
+  82, 88, 94). A custom curve is interpolated as before; compensate always
+  interpolates.
+- Startup sends LPW1 255 and CNTR 50 unconditionally, as the script did.
+  Once script mode has sent a CNTR other than 50, CNTR 50 is restored after
+  the light on exit or disable (within the same one-second budget), and
+  before compensate takes over on a live switch to compensate.
+- A live settings change carries on from the LED's level and the
+  projector's current CNTR (no longer reset to 50).
+- `script_smoothing: off` (default): VP's gain stays 1 — the picture is
+  untouched, exactly the script. `on`: the same commands, plus VP's gain
+  bridging each whole CNTR step (`ScriptSmoother`): the picture
+  (gain x landed CNTR) moves continuously and is never brighter than the
+  projector's own value (gain <= 1). A decrease is ramped down before it
+  lands (at most 200 ms, never before the previous landing), an increase
+  after it lands (over 200 ms). Landings are the sends plus
+  `[projector] cntr_latency_ms` (default 80, a Config control next to the
+  LED response time); planned at the tick start and moved to the real send
+  times as each command goes out.
+
 ### 4.2 `mode: compensate` — the intended form
 
 The projector contrast command is never sent; contrast is left at the

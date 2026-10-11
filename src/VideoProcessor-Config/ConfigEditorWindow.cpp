@@ -9280,6 +9280,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         { QStringLiteral("Log only (watch, never send)"),
           QStringLiteral("Script (your beta 22 script)"),
           QStringLiteral("Compensate (dim the LED, keep the picture)") }));
+    // Step 7b: script mode sends the script's own LPW1 and CNTR; smoothing
+    // adds VP's gain across each whole CNTR step. Off = the script exactly.
+    driveForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth the script's contrast steps"), led,
+        QStringLiteral("script_smoothing"), false));
+    driveForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Script mode only. Off: exactly your script - VP sends its light and contrast commands and leaves the "
+        "picture alone. On: the same commands, and VP eases the picture across each whole contrast step so it "
+        "never visibly jumps (it never makes the picture brighter than the projector's own setting).")));
     driveForm->addRow(QStringLiteral("Highlight protection"), bindChoiceField(led,
         QStringLiteral("highlight_tolerance_stops"),
         { QStringLiteral("0.33"), QStringLiteral("0.15"), QStringLiteral("0.6") },
@@ -9518,6 +9526,36 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "How long the light takes to change after VP sends a command; the picture gain is timed to land with "
         "it. On a dark-to-bright cut: a glow or lifted blacks just before the cut - lower it; the bright scene "
         "starts too dark or dips - raise it. Change in steps of 20 ms. Default 80.")));
+    // The same for the projector's contrast (CNTR): script mode's smoothing
+    // times VP's gain with it.
+    auto* contrastLatency = new QSpinBox;
+    contrastLatency->setObjectName(controlName(projector, QStringLiteral("cntr_latency_ms")));
+    contrastLatency->setRange(0, 500);
+    contrastLatency->setSingleStep(10);
+    contrastLatency->setSuffix(QStringLiteral(" ms"));
+    contrastLatency->setMaximumWidth(120);
+    contrastLatency->setAlignment(Qt::AlignRight);
+    {
+        bool valid = false;
+        const int configured = value(projector, QStringLiteral("cntr_latency_ms")).toInt(&valid);
+        contrastLatency->setValue(valid ? std::max(0, std::min(configured, 500)) : 80);
+    }
+    connect(contrastLatency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
+    {
+        if (!document_) return;
+        const std::string section = projector.toStdString();
+        if (!document_->SetKnown(section, "cntr_latency_ms", std::to_string(ms)))
+        {
+            document_->AddSection(section);
+            document_->SetKnown(section, "cntr_latency_ms", std::to_string(ms));
+        }
+        markDirty();
+    });
+    connectionForm->addRow(QStringLiteral("Contrast response time"), contrastLatency);
+    connectionForm->addRow(QString(), helpLabel(QStringLiteral(
+        "How long the projector's contrast takes to change after a command. Only used when the script's "
+        "contrast steps are smoothed: if the picture briefly dips or brightens at a contrast step, adjust it in "
+        "steps of 20 ms. Default 80.")));
     auto* readBack = bindCheckField(QStringLiteral("Read the projector's replies"), projector,
         QStringLiteral("read_back"), false);
     connectionForm->addRow(QString(), readBack);

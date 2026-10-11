@@ -362,6 +362,80 @@ namespace VideoProcessorTest
 			Assert::AreEqual(255, driver->Status().lastLight);
 		}
 
+		// Step 7b: script mode's commands are synchronous and in the script's
+		// own timing - no min_command_gap_ms or burst pause - and its CNTR
+		// commands really reach the projector.
+		TEST_METHOD(ScriptSendsIgnoreTheCommandGapAndStopAtShutdown)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.minCommandGapMs = 500;
+			config.burstCommands = 2;
+			config.burstPauseMs = 5000;
+			// Send-only, so Open itself sends nothing (its queries would sit
+			// out the gap and pauses); the range comes from light_min.
+			config.readBack = false;
+			config.terminator = Terminator::Cr;
+			config.lightMin = 60;
+			auto driver = OpenDriver(projector, config);
+			const auto start = std::chrono::steady_clock::now();
+			for (const int contrast : { 73, 72, 71, 70 })
+				Assert::IsTrue(driver->SendScript("CNTR", contrast));
+			Assert::IsTrue(driver->SendScript("LPW1", 30)); // clamped to the projector's minimum
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			Assert::IsTrue(elapsed < 400, (L"Script sends waited for the gap: " + std::to_wstring(elapsed)).c_str());
+			Assert::AreEqual(70, projector->contrast);
+			Assert::AreEqual(60, projector->light);
+			Assert::AreEqual(60, driver->Status().lastSentLight);
+			const auto writes = projector->Writes();
+			Assert::AreEqual(std::string(":CNTR73\r"), writes[writes.size() - 5]);
+			Assert::AreEqual(std::string(":LPW160\r"), writes.back());
+			// Repeats are sent, not coalesced.
+			Assert::IsTrue(driver->SendScript("CNTR", 70));
+			Assert::AreEqual(std::string(":CNTR70\r"), projector->Writes().back());
+			driver->BeginShutdown();
+			const size_t before = projector->Writes().size();
+			Assert::IsFalse(driver->SendScript("CNTR", 69));
+			Assert::AreEqual(before, projector->Writes().size(), L"Nothing after the exit restore began");
+			driver->Close();
+		}
+
+		TEST_METHOD(ScriptSendsUseTheScriptsBytes)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->acceptedSuffix = "cr\r\n";
+			ProjectorConfig config = FastConfig();
+			config.readBack = false;
+			config.terminator = Terminator::Script;
+			auto driver = OpenDriver(projector, config);
+			Assert::IsTrue(driver->SendScript("CNTR", 61));
+			Assert::IsTrue(driver->SendScript("LPW1", 230));
+			const auto writes = projector->Writes();
+			Assert::AreEqual(std::string(":cntr61cr\r\n"), writes[writes.size() - 2]);
+			Assert::AreEqual(std::string(":lpw1230cr\r\n"), writes.back());
+			driver->Close();
+		}
+
+		TEST_METHOD(ScriptStartAndExitSetContrastTo50)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			auto driver = OpenDriver(projector);
+			BringToKnownState(*driver, 255);
+			for (const auto& write : projector->Writes())
+				Assert::AreNotEqual(std::string(":CNTR50\r"), write, L"compensate: CNTR left alone at 50");
+			BringToKnownState(*driver, 255, false, true);
+			Assert::AreEqual(std::string(":CNTR50\r"), projector->Writes().back(), L"script: CNTR 50 as the script did");
+			Assert::IsTrue(driver->SendScript("CNTR", 66));
+			Assert::IsTrue(RestoreFullLight(*driver, 255, false, true));
+			const auto writes = projector->Writes();
+			Assert::AreEqual(std::string(":LPW1255\r"), writes[writes.size() - 2], L"Light first");
+			Assert::AreEqual(std::string(":CNTR50\r"), writes.back(), L"then contrast back to 50");
+			Assert::AreEqual(50, projector->contrast);
+			driver->Close();
+		}
+
 		TEST_METHOD(RestoreOnExitNeverBlocksForLong)
 		{
 			auto projector = std::make_shared<FakeProjector>();

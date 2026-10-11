@@ -160,9 +160,11 @@ namespace LedDrive
 		std::deque<Command> commands;
 		int seenSends = 0;
 		int modelledLevel;
-		// mode: script: emulated-contrast changes, applied led_latency_ms after
-		// the script made them so they land with its LED commands.
-		std::deque<std::pair<double, CompensationGain>> scheduledGains;
+		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
+		// the projector's whole CNTR steps; smoothing is set by the script
+		// thread while it applies.
+		ScriptSmoother smoother;
+		bool smoothing = false;
 
 		// Lookahead predictions by source sequence, and the correction.
 		LookaheadObserver lookahead;

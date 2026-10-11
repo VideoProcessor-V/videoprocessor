@@ -98,7 +98,19 @@ namespace LedDrive
 			(void)timeoutMs;
 			return false;
 		}
-		// Only the one-off startup correction to 50; CNTR is never driven.
+		// mode: script (step 7b): one LPW1 or CNTR command, synchronous, in the
+		// script's own timing: no min_command_gap_ms or burst pause (the
+		// script's sleeps space its commands), not coalesced or split. Returns
+		// once the command is written and, with read_back on, its reply came
+		// (or ack_timeout_ms passed). False once shutdown has begun.
+		virtual bool SendScript(const std::string& mnemonic, int value)
+		{
+			(void)mnemonic;
+			(void)value;
+			return false;
+		}
+		// The startup correction to 50 and, after mode: script, the exit
+		// restore. mode: compensate never drives CNTR.
 		virtual bool SetContrast(int value) = 0;
 		virtual void Close() = 0;
 		virtual DriverStatus Status() const = 0;
@@ -117,9 +129,14 @@ namespace LedDrive
 	// resetDimMode: also set the LED dim mode back to standard (LDMM 0) - used
 	// when the experimental custom dim is configured, so a crash cannot leave
 	// the projector in custom mode.
-	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false);
+	// alwaysSetContrast: send CNTR 50 even when the projector reports 50, as
+	// the script did at its start (mode: script, step 7b).
+	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
+		bool alwaysSetContrast = false);
 
 	// Clean exit, disable or switch to log_only: light back to the ceiling,
-	// never blocking for more than a second.
-	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false);
+	// never blocking for more than a second. restoreContrast: CNTR back to 50
+	// as well, after the light (mode: script drove it).
+	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
+		bool restoreContrast = false);
 }

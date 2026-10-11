@@ -54,6 +54,7 @@ full light.
 | `curve` | both | LED level for each picture brightness (APL code : level) | the main shape of the dimming; lower the middle points to dim more in mid-bright scenes |
 | `led_ceiling` | both | maximum LED level | lower to cap brightness |
 | `tick_ms`, `steps_*`, `anti_pump_band`, `script_highlight_code` | script | the script's own stepping and contrast rules | leave as the script had them unless comparing |
+| `script_smoothing` | script | off: the script's real LPW1 and CNTR commands, picture untouched; on: VP also eases the picture across each whole CNTR step (timed with the projector's `cntr_latency_ms`) | leave off to compare with the script; on if the contrast steps are visible |
 | `rate_up`, `rate_down` | compensate | LED speed in levels per second | lower `rate_down` for gentler dimming; raise `rate_up` for faster recovery after a dark-to-bright cut |
 | `deadband` | compensate | ignore tiny target changes while still | raise if the LED "breathes" on a static scene |
 | `early_ramp` | compensate | start before a cut seen in the queue | leave on |

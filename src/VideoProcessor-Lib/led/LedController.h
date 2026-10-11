@@ -40,8 +40,10 @@ namespace LedDrive
 		uint32_t blocks = 0;
 	};
 
-	// One step of the emulated projector contrast, offsetMs after the tick
-	// started (the script's fast dumps step every 100 ms).
+	// One CNTR command of mode: script, offsetMs after the tick started in
+	// the script's own timing (the script's fast dumps step every 100 ms).
+	// Step 7b: sent as a real CNTR; each offset is a sleep counted from the
+	// end of the previous send, as the script's time.sleep did.
 	struct ContrastStep
 	{
 		int offsetMs = 0;
@@ -60,8 +62,9 @@ namespace LedDrive
 		int contrast = 50;
 		// Contrast changes within this tick, in order; empty when unchanged.
 		std::vector<ContrastStep> contrastSchedule;
-		// For the compensation hook. mode: script emulates CNTR as a gain on the
-		// encoded signal: contrast / 50.
+		// contrast / 50: what the projector's CNTR does to the encoded signal
+		// (step 7b sends CNTR itself; VP's gain only bridges its steps when
+		// script_smoothing is on, see ScriptSmoother).
 		double gain = 1.0;
 		GainDomain gainDomain = GainDomain::Encoded;
 		double knee = 0.08;
@@ -108,6 +111,54 @@ namespace LedDrive
 	// beta_22.py ported parameter for parameter. Light: the configured curve
 	// and step tables. Contrast: the script's bands and dynamics, emulated in
 	// VP (never sent to the projector).
+	// beta_22.py's power formulas, literally, including its rounded 0.8333
+	// slope (one level lower than the curve at APL 76, 82, 88 and 94). Not
+	// floored or limited.
+	int ScriptLiteralLevel(int apl);
+	// The curve is the built-in default (the script's breakpoints).
+	bool IsBuiltInCurve(const std::vector<CurvePoint>& curve);
+
+	// mode: script with script_smoothing: on (step 7b). The projector's CNTR
+	// moves the picture in whole steps of 1/50; VP's gain bridges each step
+	// so the picture changes continuously, without ever being brighter than
+	// the projector's own value (gain <= 1): a decrease is ramped down
+	// before it lands, an increase after it lands. One clock in ms
+	// throughout; a command lands cntr_latency_ms after it was sent.
+	class ScriptSmoother
+	{
+	public:
+		explicit ScriptSmoother(double rampMs = 200.0);
+		// The projector's CNTR and the picture both at this value, nothing planned.
+		void Reset(int contrast = 50);
+		// One script tick's CNTR commands at their planned landing times, in
+		// order (added after anything still pending).
+		void Plan(const std::vector<std::pair<double, int>>& landings);
+		// The oldest planned command that had not gone out went out: it lands
+		// at landMs (replacing its planned time).
+		void Sent(double landMs);
+		// VP's gain for a frame shown at timeMs (non-decreasing times).
+		double Gain(double timeMs);
+		int Landed() const { return landed; }
+		double Smooth() const { return smooth; }
+		size_t Pending() const { return pending.size(); }
+
+	private:
+		struct Landing
+		{
+			double timeMs;
+			int value;
+			bool sent;
+		};
+		std::vector<Landing> pending;
+		double rampMs;
+		int landed = 50;
+		double smooth = 50.0;
+		double lastMs = -1.0;
+		double lastLandMs = -1e300;
+		double riseFrom = 50.0;
+		double riseStartMs = -1e300;
+	};
+
 	class ScriptController
 	{
 	public:

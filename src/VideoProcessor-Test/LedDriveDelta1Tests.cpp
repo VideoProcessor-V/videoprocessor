@@ -160,6 +160,26 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0 / 0.55, out.gain, 1e-9, L"Dark scene at the floor: flux ratio, not 255/60");
 		}
 
+		TEST_METHOD(ScriptSmoothingAndContrastLatencyAreRead)
+		{
+			std::string error;
+			const std::string good = "[projector.Default]\ncntr_latency_ms: 120\n"
+				"[led_drive.Default]\nmode: script\nscript_smoothing: on\n";
+			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(good);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const ProjectorConfig projector = ReadProjectorConfig(config);
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::AreEqual(120, projector.cntrLatencyMs);
+			Assert::IsTrue(led.scriptSmoothing);
+			Assert::IsFalse(LedDriveConfig().scriptSmoothing, L"Off by default: script mode is the script");
+			Assert::AreEqual(80, ProjectorConfig().cntrLatencyMs);
+			Assert::IsFalse(Validates("[projector.Default]\ncntr_latency_ms: -1\n", error));
+			Assert::IsFalse(Validates("[led_drive.Default]\nscript_smoothing: maybe\n", error));
+		}
+
 		TEST_METHOD(LatencyMovesToTheProjectorAndOldKeysAreRejected)
 		{
 			std::string error;

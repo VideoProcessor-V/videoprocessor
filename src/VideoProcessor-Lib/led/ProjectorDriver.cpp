@@ -48,6 +48,19 @@ namespace LedDrive
 				return true;
 			}
 
+			bool SendScript(const std::string& mnemonic, int value) override
+			{
+				if (mnemonic == "LPW1")
+					Record(value);
+				else
+				{
+					DebugLog::Log("LED drive: dry run, would set %s %d", mnemonic.c_str(), value);
+					std::lock_guard<std::mutex> guard(mutex);
+					++status.commands;
+				}
+				return true;
+			}
+
 			bool SetContrast(int value) override
 			{
 				DebugLog::Log("LED drive: dry run, would set CNTR %d", value);
@@ -88,7 +101,8 @@ namespace LedDrive
 		return std::make_unique<NoneDriver>(config);
 	}
 
-	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode)
+	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode,
+		bool alwaysSetContrast)
 	{
 		if (resetDimMode)
 			DebugLog::Log("LED drive: LED dim mode set to standard%s",
@@ -106,7 +120,7 @@ namespace LedDrive
 		// Startup is not time-critical: no bound, so the command gap is kept.
 		const bool light = driver.SetLightNow(ledCeiling, 0);
 		summary << "; light set to " << ledCeiling << (light ? "" : " (not confirmed)");
-		if (!found.contrastKnown || found.contrast != 50)
+		if (alwaysSetContrast || !found.contrastKnown || found.contrast != 50)
 		{
 			const bool contrast = driver.SetContrast(50);
 			summary << "; contrast set to 50" << (contrast ? "" : " (not confirmed)");
@@ -115,13 +129,20 @@ namespace LedDrive
 		return summary.str();
 	}
 
-	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode)
+	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode, bool restoreContrast)
 	{
 		driver.BeginShutdown();
-		// Within one second in total: standard dim mode first, then full light.
-		if (resetDimMode) driver.SendNow("LDMM", 0, 400);
-		const bool ok = driver.SetLightNow(ledCeiling, resetDimMode ? 600 : 1000);
+		// Within one second in total: standard dim mode first, then full
+		// light, then (after mode: script) contrast back to 50.
+		const int contrastMs = restoreContrast ? 350 : 0;
+		if (resetDimMode) driver.SendNow("LDMM", 0, restoreContrast ? 300 : 400);
+		const bool ok = driver.SetLightNow(ledCeiling, (resetDimMode ? 600 : 1000) - contrastMs);
 		DebugLog::Log("LED drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
+		if (restoreContrast)
+		{
+			const bool contrast = driver.SendNow("CNTR", 50, contrastMs);
+			DebugLog::Log("LED drive: contrast restored to 50%s", contrast ? "" : " (not confirmed)");
+		}
 		return ok;
 	}
 }

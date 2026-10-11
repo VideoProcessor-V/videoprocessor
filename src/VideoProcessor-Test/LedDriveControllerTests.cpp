@@ -194,7 +194,8 @@ namespace
 			else apl += (static_cast<double>(Next() % 2001) - 1000.0) / 250.0; // drift
 			apl = std::max(0.0, std::min(apl, 160.0));
 			if (Next() % 100 < 8) highlight = Next() % 2 ? 230 : 190;
-			while (RoundedSlopeApl(static_cast<int>(apl))) apl += 1.0;
+			// Step 7b: script mode uses the script's literal 0.8333 formula, so
+			// the oracle covers every APL (76, 82, 88 and 94 included).
 		}
 	};
 }
@@ -215,13 +216,26 @@ namespace VideoProcessorTest
 				else if (apl >= 40) expected = apl - 40 + 200;
 				else if (apl >= 20) expected = (apl - 20) * 5 + 100;
 				else expected = 100;
-				if (RoundedSlopeApl(apl)) ++expected;
 				Assert::AreEqual(expected, controller.LightTargetFor(apl),
 					(L"APL " + std::to_wstring(apl)).c_str());
+				Assert::AreEqual(expected, ScriptLiteralLevel(apl));
 			}
-			// The documented one-level difference against the script's 0.8333.
-			Assert::AreEqual(235, controller.LightTargetFor(76));
-			Assert::AreEqual(234, static_cast<int>(((76 - 70) * 0.8333) + 230));
+			// Step 7b: the script's rounded 0.8333 slope, as the script has it;
+			// the interpolated curve (compensate, custom curves) keeps the exact
+			// 25/30 slope, one level higher at these APLs.
+			const LedDriveConfig defaults;
+			Assert::IsTrue(IsBuiltInCurve(defaults.curve));
+			for (int apl = 0; apl <= 255; ++apl)
+				Assert::AreEqual(ScriptLiteralLevel(apl) + (RoundedSlopeApl(apl) ? 1 : 0), CurveLevel(defaults, apl),
+					(L"APL " + std::to_wstring(apl)).c_str());
+			Assert::AreEqual(234, controller.LightTargetFor(76));
+			Assert::AreEqual(235, CurveLevel(defaults, 76));
+			// A custom curve is interpolated as before, even with the same shape
+			// shifted by one point.
+			LedDriveConfig custom;
+			custom.curve.back().level = 254;
+			Assert::IsFalse(IsBuiltInCurve(custom.curve));
+			Assert::AreEqual(235, ScriptController(custom).LightTargetFor(76));
 		}
 
 		TEST_METHOD(ContrastTargetsFollowTheScriptBands)
@@ -363,6 +377,88 @@ namespace VideoProcessorTest
 			controller.Reset(230, 55);
 			stats.maximum = 180;
 			Assert::AreEqual(54, controller.Tick(stats).contrast, L"Outside the band both directions move");
+		}
+
+		// Step 7b, script_smoothing: on. The projector's CNTR moves in whole
+		// steps; VP's gain bridges them: the picture (gain x landed CNTR)
+		// moves continuously, is never brighter than the projector's own value
+		// and equals it once each step has been bridged.
+		TEST_METHOD(ScriptSmootherBridgesIncreasesAfterTheyLand)
+		{
+			ScriptSmoother smoother;
+			smoother.Reset(50);
+			// LPW1 at 0, CNTR 51 at 200 ms, landing 80 ms later; the next tick's
+			// CNTR 52 at 600 ms, landing at 680.
+			smoother.Plan({ { 280.0, 51 } });
+			double previous = 50.0;
+			for (double t = 0.0; t <= 1200.0; t += 4.0)
+			{
+				if (t == 400.0) smoother.Plan({ { 680.0, 52 } });
+				const double gain = smoother.Gain(t);
+				const double picture = gain * smoother.Landed();
+				Assert::IsTrue(gain <= 1.0 + 1e-12, (L"Brighter than the projector at " + std::to_wstring(t)).c_str());
+				Assert::IsTrue(std::abs(picture - previous) <= 0.025,
+					(L"A visible step at " + std::to_wstring(t)).c_str());
+				if (t < 280.0) Assert::AreEqual(50.0, picture, 1e-12, L"Nothing moves before the step lands");
+				if (t >= 480.0 && t < 680.0) Assert::AreEqual(51.0, picture, 1e-9, L"51 bridged within 200 ms");
+				previous = picture;
+			}
+			Assert::AreEqual(52, smoother.Landed());
+			Assert::AreEqual(1.0, smoother.Gain(1300.0), 1e-12, L"Gain 1 once the steps are bridged");
+		}
+
+		TEST_METHOD(ScriptSmootherRampsFastDumpsDownBeforeTheyLand)
+		{
+			ScriptSmoother smoother;
+			smoother.Reset(74);
+			// The highlight fast dump: 73..60 every 100 ms, then 59 200 ms later.
+			std::vector<std::pair<double, int>> plan;
+			for (int i = 1; i <= 14; ++i) plan.push_back({ 80.0 + 100.0 * i, 74 - i });
+			plan.push_back({ 80.0 + 1600.0, 59 });
+			smoother.Plan(plan);
+			double previous = 74.0;
+			for (double t = 0.0; t <= 2000.0; t += 2.0)
+			{
+				const double gain = smoother.Gain(t);
+				const double picture = gain * smoother.Landed();
+				Assert::IsTrue(gain <= 1.0 + 1e-12, (L"Brighter than the projector at " + std::to_wstring(t)).c_str());
+				Assert::IsTrue(std::abs(picture - previous) <= 0.025,
+					(L"A visible step at " + std::to_wstring(t)).c_str());
+				for (const auto& landing : plan)
+					if (t == landing.first)
+						Assert::AreEqual(static_cast<double>(landing.second), picture, 1e-9,
+							(L"Not at the projector's value as it lands, " + std::to_wstring(t)).c_str());
+				previous = picture;
+			}
+			Assert::AreEqual(59, smoother.Landed());
+			Assert::AreEqual(1.0, smoother.Gain(2100.0), 1e-12);
+			Assert::AreEqual(size_t{ 0 }, smoother.Pending());
+		}
+
+		TEST_METHOD(ScriptSmootherFollowsTheRealSendTimes)
+		{
+			ScriptSmoother smoother;
+			smoother.Reset(60);
+			smoother.Plan({ { 100.0, 59 }, { 200.0, 58 } });
+			smoother.Sent(150.0); // a slow port: the first lands 50 ms late
+			Assert::AreEqual(1.0, smoother.Gain(0.0), 1e-12);
+			smoother.Gain(120.0);
+			Assert::AreEqual(60, smoother.Landed(), L"Not landed at its planned time");
+			Assert::IsTrue(smoother.Smooth() < 60.0, L"Already ramping down to it");
+			smoother.Gain(150.0);
+			Assert::AreEqual(59, smoother.Landed());
+			Assert::AreEqual(59.0, smoother.Smooth(), 1e-9);
+			smoother.Sent(260.0); // and the second later than planned too
+			smoother.Gain(220.0);
+			Assert::AreEqual(59, smoother.Landed());
+			smoother.Gain(260.0);
+			Assert::AreEqual(58, smoother.Landed());
+			Assert::AreEqual(58.0, smoother.Smooth(), 1e-9);
+			// A send can never land before the previous one.
+			smoother.Plan({ { 300.0, 57 }, { 310.0, 56 } });
+			smoother.Sent(400.0);
+			smoother.Gain(350.0);
+			Assert::AreEqual(58, smoother.Landed(), L"56 waits for 57");
 		}
 
 		TEST_METHOD(ContrastIsEmulatedAsAnEncodedGain)

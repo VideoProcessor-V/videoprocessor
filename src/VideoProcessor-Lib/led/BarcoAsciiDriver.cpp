@@ -382,6 +382,38 @@ namespace LedDrive
 				config.ackTimeoutMs, -1);
 	}
 
+	bool BarcoAsciiDriver::SendScript(const std::string& mnemonic, int value)
+	{
+		const bool light = mnemonic == "LPW1";
+		int sent = value;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			if (!opened || shuttingDown) return false;
+			if (light) sent = Clamp(value);
+		}
+		std::lock_guard<std::timed_mutex> lock(portMutex);
+		{
+			// The script's own sleeps space its commands (fast dumps 100 ms
+			// apart): no command gap or burst pause, like the custom-dim
+			// sequence. The exit restore may have begun while this waited.
+			std::lock_guard<std::mutex> guard(stateMutex);
+			if (shuttingDown) return false;
+			nextSendAllowed = std::chrono::steady_clock::now();
+			sinceBurst = 0;
+		}
+		int confirmed = -1;
+		const bool ok = Transact(Format(mnemonic.c_str(), std::to_string(sent)), mnemonic.c_str(), &confirmed,
+			config.ackTimeoutMs, -1, light ? sent : -1, true);
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (ok && light) lastLight = confirmed >= 0 ? confirmed : sent;
+		if (ok && mnemonic == "CNTR")
+		{
+			state.contrastKnown = true;
+			state.contrast = confirmed >= 0 ? confirmed : sent;
+		}
+		return ok;
+	}
+
 	void BarcoAsciiDriver::BeginShutdown()
 	{
 		std::lock_guard<std::mutex> guard(stateMutex);

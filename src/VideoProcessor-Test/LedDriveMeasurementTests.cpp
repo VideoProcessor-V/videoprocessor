@@ -6,6 +6,7 @@
 
 #include "LedDriveTestSupport.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -154,32 +155,66 @@ namespace VideoProcessorTest
 			Assert::IsFalse(stats.fade, L"Below fade_min_step is drift, not a fade");
 		}
 
-		TEST_METHOD(ScriptModeDrivesTheProjectorAndEmulatesContrastAsGain)
+		// Step 7b: script mode is the script - real LPW1 and CNTR, VP's picture
+		// untouched (script_smoothing off), CNTR 50 at start and exit.
+		TEST_METHOD(ScriptModeSendsTheScriptsLightAndContrast)
 		{
 			auto projector = std::make_shared<FakeProjector>();
-			projector->contrast = 74;
+			projector->contrast = 50;
 			{
 				LedDriveModule module(FastProjector(), FastScript(),
 					[projector] { return std::make_unique<FakePort>(projector); });
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
-				Assert::IsTrue(WaitFor([&] { return projector->contrast == 50 && projector->light == 255; }),
-					L"Startup puts the projector in a known state");
-				Assert::IsFalse(module.CurrentGain().active, L"No statistics yet: picture untouched");
+				Assert::IsTrue(WaitFor([&]
+					{
+						const auto writes = projector->Writes();
+						return projector->light == 255 &&
+							std::find(writes.begin(), writes.end(), std::string(":CNTR50\r")) != writes.end();
+					}), L"LPW1 255 and CNTR 50 at start (even though the projector was at 50), as the script did");
 				for (int frame = 0; frame < 5; ++frame)
+				{
 					module.SubmitMeasurement(Uniform(10.0));
+					module.BeginFrame(static_cast<uint64_t>(frame + 1));
+				}
 				Assert::IsTrue(WaitFor([&] { return projector->light < 240; }), L"Dark scene dims the LED");
-				Assert::IsTrue(WaitFor([&] { return module.CurrentGain().gain > 1.0; }),
-					L"Dark scene raises the emulated contrast");
-				const auto gain = module.CurrentGain();
-				Assert::IsTrue(gain.active);
-				Assert::IsTrue(gain.domain == GainDomain::Encoded);
-				Assert::IsTrue(gain.gain <= 74.0 / 50.0 + 1e-9);
-				for (const auto& write : projector->Writes())
-					Assert::IsFalse(write.rfind(":CNTR", 0) == 0 && write != ":CNTR?\r" && write != ":CNTR50\r",
-						L"Contrast is emulated in VP, never sent");
+				Assert::IsTrue(WaitFor([&] { return projector->contrast > 51; }, 5000),
+					L"Dark scene raises the projector's real CNTR");
+				module.BeginFrame(6);
+				Assert::IsFalse(module.CurrentGain().active, L"script_smoothing off: VP's picture untouched");
+				Assert::AreEqual(1.0, module.CurrentGain().gain, 1e-12);
 			}
 			Assert::AreEqual(255, projector->light, L"Stopping restores full light");
+			Assert::AreEqual(50, projector->contrast, L"and the contrast to 50");
+		}
+
+		TEST_METHOD(ScriptSmoothingBridgesTheRealContrastSteps)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveConfig config = FastScript();
+			config.scriptSmoothing = true;
+			{
+				LedDriveModule module(FastProjector(), config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+				module.SubmitMeasurement(Uniform(10.0));
+				bool bridged = false;
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+				for (uint64_t frame = 1; std::chrono::steady_clock::now() < deadline && projector->contrast < 54; ++frame)
+				{
+					module.SubmitMeasurement(Uniform(10.0));
+					const CompensationGain gain = module.BeginFrame(frame);
+					if (!gain.active) continue;
+					Assert::IsTrue(gain.domain == GainDomain::Encoded);
+					Assert::IsTrue(gain.gain <= 1.0 + 1e-12, L"Never brighter than the projector's own CNTR");
+					bridged = bridged || gain.gain < 1.0 - 1e-6;
+					std::this_thread::sleep_for(std::chrono::milliseconds(4));
+				}
+				Assert::IsTrue(projector->contrast >= 54, L"The script raised the real CNTR");
+				Assert::IsTrue(bridged, L"VP's gain bridged the steps");
+			}
+			Assert::AreEqual(50, projector->contrast);
 		}
 
 		TEST_METHOD(LogOnlyNeverOpensAPortOrTouchesThePicture)

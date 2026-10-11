@@ -48,9 +48,106 @@ namespace LedDrive
 		return static_cast<int>(std::floor(level));
 	}
 
+	int ScriptLiteralLevel(int apl)
+	{
+		if (apl >= 100) return 255;
+		if (apl >= 70) return static_cast<int>(((apl - 70) * 0.8333) + 230);
+		if (apl >= 40) return static_cast<int>(((apl - 40) * 1) + 200);
+		if (apl >= 20) return static_cast<int>(((apl - 20) * 5) + 100);
+		return 100;
+	}
+
+	bool IsBuiltInCurve(const std::vector<CurvePoint>& curve)
+	{
+		const std::vector<CurvePoint> builtIn = LedDriveConfig().curve;
+		return curve.size() == builtIn.size() && std::equal(curve.begin(), curve.end(), builtIn.begin(),
+			[](const CurvePoint& a, const CurvePoint& b) { return a.apl == b.apl && a.level == b.level; });
+	}
+
+	// Step 7b: with the built-in curve, script mode uses the script's own
+	// formulas (the owner's "stay as the script has them"); a custom curve is
+	// interpolated as before.
 	int ScriptController::LightTargetFor(int apl) const
 	{
-		return std::max(config.ledFloor, std::min(CurveLevel(config, apl), config.ledCeiling));
+		const int level = IsBuiltInCurve(config.curve) ? ScriptLiteralLevel(apl) : CurveLevel(config, apl);
+		return std::max(config.ledFloor, std::min(level, config.ledCeiling));
+	}
+
+	ScriptSmoother::ScriptSmoother(double rampMsIn) : rampMs(std::max(1.0, rampMsIn))
+	{
+	}
+
+	void ScriptSmoother::Reset(int contrast)
+	{
+		pending.clear();
+		landed = contrast;
+		smooth = contrast;
+		riseFrom = contrast;
+		lastMs = -1.0;
+		lastLandMs = riseStartMs = -1e300;
+	}
+
+	void ScriptSmoother::Plan(const std::vector<std::pair<double, int>>& landings)
+	{
+		for (const auto& landing : landings)
+			pending.push_back({ landing.first, landing.second, false });
+	}
+
+	void ScriptSmoother::Sent(double landMs)
+	{
+		for (Landing& landing : pending)
+			if (!landing.sent)
+			{
+				landing.sent = true;
+				landing.timeMs = landMs;
+				break;
+			}
+		// A late send can land after the next one's planned time: keep order.
+		for (size_t i = 1; i < pending.size(); ++i)
+			pending[i].timeMs = std::max(pending[i].timeMs, pending[i - 1].timeMs);
+	}
+
+	double ScriptSmoother::Gain(double timeMs)
+	{
+		const double previous = lastMs < 0.0 ? timeMs : std::min(lastMs, timeMs);
+		lastMs = std::max(lastMs, timeMs);
+		// Commands that have landed: the projector is at their value now.
+		while (!pending.empty() && pending.front().timeMs <= timeMs)
+		{
+			const Landing landing = pending.front();
+			pending.erase(pending.begin());
+			if (landing.value > landed)
+			{
+				// An increase: the picture rises to it from where it is, over
+				// rampMs from the moment it landed.
+				riseFrom = std::min(smooth, static_cast<double>(landed));
+				riseStartMs = landing.timeMs;
+			}
+			landed = landing.value;
+			lastLandMs = landing.timeMs;
+		}
+		smooth = std::min(smooth, static_cast<double>(landed));
+		const Landing* next = pending.empty() ? nullptr : &pending.front();
+		if (next && next->value < smooth)
+		{
+			// A decrease is coming: the picture goes down to it linearly so it
+			// arrives as the projector does, starting no earlier than rampMs
+			// before it and no earlier than the last landing.
+			const double start = std::max(next->timeMs - rampMs, lastLandMs);
+			const double from = std::max(previous, start);
+			if (timeMs > from && next->timeMs > from)
+				smooth += (next->value - smooth) * std::min(1.0, (timeMs - from) / (next->timeMs - from));
+		}
+		else if (smooth < landed)
+		{
+			// Rise towards the projector's value, but no higher than a
+			// decrease about to land (so it never has to drop at once).
+			double cap = landed;
+			if (next && next->timeMs - timeMs <= rampMs) cap = std::min(cap, static_cast<double>(next->value));
+			const double rise = riseFrom + (landed - riseFrom) * std::min(1.0, (timeMs - riseStartMs) / rampMs);
+			smooth = std::max(smooth, std::min(cap, rise));
+		}
+		return landed > 0 ? std::min(1.0, smooth / landed) : 1.0;
 	}
 
 	// The script's contrast bands, unchanged (50 is unity).

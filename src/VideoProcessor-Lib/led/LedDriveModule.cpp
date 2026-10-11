@@ -158,7 +158,7 @@ namespace LedDrive
 				const DriverStatus status = driver->Status();
 				compensator.Reset(status.lastSentLight >= 0 ? status.lastSentLight : modelledLevel);
 				seenSends = status.lightSends;
-				scheduledGains.clear();
+				smoothing = false;
 				policy = ControllerOutput();
 				holding = false;
 			}
@@ -336,10 +336,13 @@ namespace LedDrive
 			seenSends = status.lightSends;
 		}
 		++frameIndex;
-		while (!scheduledGains.empty() && scheduledGains.front().first <= timeMs)
+		if (smoothing && !compensating)
 		{
-			gain = scheduledGains.front().second;
-			scheduledGains.pop_front();
+			// mode: script with script_smoothing: the bridge across the
+			// projector's CNTR steps, on the encoded signal like CNTR itself.
+			gain.active = true;
+			gain.domain = GainDomain::Encoded;
+			gain.gain = smoother.Gain(timeMs);
 		}
 		if (compensating && haveStats)
 		{
@@ -495,17 +498,7 @@ namespace LedDrive
 	CompensationGain LedDriveModule::CurrentGain() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		CompensationGain current = GainLocked();
-		if (!compensating)
-		{
-			const double now = NowMs();
-			for (const auto& scheduled : scheduledGains)
-			{
-				if (scheduled.first > now) break;
-				current = scheduled.second;
-			}
-		}
-		return current;
+		return GainLocked();
 	}
 
 	bool LedDriveModule::DrivingProjector() const
@@ -545,7 +538,8 @@ namespace LedDrive
 			opened->Open(error);
 			driving = false;
 		}
-		BringToKnownState(*opened, led.ledCeiling, led.ftbCustomDim != FtbCustomDim::Off);
+		BringToKnownState(*opened, led.ledCeiling, led.ftbCustomDim != FtbCustomDim::Off,
+			led.mode == Mode::Script);
 		const LightRange range = opened->QueryLightRange();
 		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f led_latency=%d ms",
 			ModeName(led.mode), driving ? protocol.c_str() : "none (dry run)", led.tickMs, led.gammaBoost,
@@ -573,6 +567,21 @@ namespace LedDrive
 		}
 		ScriptController controller(current);
 		controller.Reset(current.ledCeiling, 50);
+		// Set once script mode has sent a CNTR other than 50: the exit, or a
+		// switch to compensate, puts it back to 50.
+		bool contrastDriven = false;
+		auto setSmoothing = [this](bool on, int contrast)
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			if (on != smoothing) smoother.Reset(contrast);
+			smoothing = on;
+			if (!on && !compensating)
+			{
+				gain.active = false;
+				gain.gain = 1.0;
+			}
+		};
+		setSmoothing(current.mode == Mode::Script && current.scriptSmoothing && applyGain, 50);
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
@@ -586,12 +595,15 @@ namespace LedDrive
 				if (generation != configGeneration)
 				{
 					// New settings: the script controller carries on from the
-					// LED's current level (contrast back to unity).
+					// LED's current level and the projector's current CNTR
+					// (step 7b: CNTR is real, so it is not reset to 50 here).
 					generation = configGeneration;
 					current = led;
 					const DriverStatus status = driver->Status();
+					const int contrastNow = controller.Contrast();
 					controller = ScriptController(current);
-					controller.Reset(status.lastSentLight >= 0 ? status.lastSentLight : current.ledCeiling, 50);
+					controller.Reset(status.lastSentLight >= 0 ? status.lastSentLight : current.ledCeiling,
+						contrastNow);
 				}
 				have = haveStats;
 				if (!compensating)
@@ -602,7 +614,18 @@ namespace LedDrive
 					pendingCut = pendingFade = false;
 				}
 			}
-			int durationMs = 0;
+			auto sendsDone = tickStart;
+			if (current.mode == Mode::Compensate && contrastDriven)
+			{
+				// Leaving script mode for compensate: CNTR back to 50, which
+				// compensate assumes. (log_only and disable restore on exit.)
+				const bool ok = driver->SendScript("CNTR", 50);
+				DebugLog::Log("LED drive: left script mode; contrast set to 50%s", ok ? "" : " (not confirmed)");
+				controller.Reset(controller.Light(), 50);
+				contrastDriven = false;
+			}
+			setSmoothing(current.mode == Mode::Script && current.scriptSmoothing && applyGain,
+				controller.Contrast());
 			if (compensating)
 			{
 				// mode: compensate steps per frame in BeginFrame(); this thread
@@ -625,22 +648,46 @@ namespace LedDrive
 			else if (have)
 			{
 				const ControllerOutput out = controller.Tick(stats);
+				// Step 7b: the script's own commands, sent synchronously in its
+				// own timing - LPW1 at the tick start, then each CNTR after the
+				// script's sleep, counted from the end of the previous send
+				// (the planner's step 7 answer 3). Every scheduled CNTR is sent,
+				// repeats included, as the script did.
+				bool smoothNow = false;
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					smoothNow = smoothing;
+					if (smoothNow && !out.contrastSchedule.empty())
+					{
+						// Planned landings, moved to the real times as each goes out.
+						std::vector<std::pair<double, int>> landings;
+						const double base = NowMs() + projector.cntrLatencyMs;
+						for (const ContrastStep& step : out.contrastSchedule)
+							landings.push_back({ base + step.offsetMs, step.contrast });
+						smoother.Plan(landings);
+					}
+				}
 				// Never LPW1 while the custom dim is on (Reconfigure leaves it
 				// before script mode runs; this only guards the order).
-				if (out.lightCommand >= 0 && !CustomDimEngaged()) driver->SetLight(out.lightCommand);
+				if (out.lightCommand >= 0 && !CustomDimEngaged())
+				{
+					driver->SendScript("LPW1", out.lightCommand);
+					sendsDone = std::chrono::steady_clock::now();
+				}
+				int previousOffset = 0;
 				for (const ContrastStep& step : out.contrastSchedule)
 				{
-					if (!WaitUntil(tickStart + std::chrono::milliseconds(step.offsetMs))) break;
-					std::lock_guard<std::mutex> guard(mutex);
-					// The emulated contrast lands with the LED command the script
-					// sent alongside it: led_latency_ms later.
-					CompensationGain next = gain;
-					next.active = applyGain;
-					next.gain = applyGain ? step.contrast / 50.0 : 1.0;
-					next.domain = out.gainDomain;
-					scheduledGains.push_back({ NowMs() + projector.ledLatencyMs, next });
+					if (!WaitUntil(sendsDone + std::chrono::milliseconds(step.offsetMs - previousOffset))) break;
+					previousOffset = step.offsetMs;
+					driver->SendScript("CNTR", step.contrast);
+					sendsDone = std::chrono::steady_clock::now();
+					if (step.contrast != 50) contrastDriven = true;
+					if (smoothNow)
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						smoother.Sent(NowMs() + projector.cntrLatencyMs);
+					}
 				}
-				durationMs = out.durationMs;
 				const auto now = std::chrono::steady_clock::now();
 				// Log changes, plus a heartbeat every ten seconds.
 				if (out.lightCommand >= 0 || !out.contrastSchedule.empty() ||
@@ -654,7 +701,9 @@ namespace LedDrive
 				std::lock_guard<std::mutex> guard(mutex);
 				++ticks;
 			}
-			if (!WaitUntil(tickStart + std::chrono::milliseconds(std::max(current.tickMs, durationMs))))
+			// The next tick: tick_ms after this one started, and never before
+			// this tick's last command went out.
+			if (!WaitUntil(std::max(tickStart + std::chrono::milliseconds(current.tickMs), sendsDone)))
 				break;
 		}
 
@@ -662,12 +711,12 @@ namespace LedDrive
 			std::lock_guard<std::mutex> guard(mutex);
 			gain.active = false;
 			gain.gain = 1.0;
-			scheduledGains.clear();
+			smoothing = false;
 			compensating = false;
 		}
 		if (driving)
 			RestoreFullLight(*driver, current.ledCeiling,
-				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal);
+				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal, contrastDriven);
 		driver->Close();
 	}
 }

@@ -76,6 +76,9 @@ namespace LedDrive
 		// LED is modelled as reaching a commanded level this long after the
 		// command (whole output frames). Measured once with a camera.
 		int ledLatencyMs = 80;
+		// The same for CNTR: the projector's contrast changes this long after
+		// the command. mode: script's smoothing times VP's gain with it.
+		int cntrLatencyMs = 80;
 		// lpw : relative flux, ascending lpw; empty = flux proportional to lpw.
 		std::vector<std::pair<double, double>> fluxTable;
 	};
@@ -130,6 +133,10 @@ namespace LedDrive
 		// A dark-to-bright cut it has not seen: straight up in one command,
 		// like the old script's contrast dump, instead of ramping.
 		bool brightCutDump = true;
+		// mode: script (step 7b) sends the script's LPW1 and CNTR exactly. On:
+		// VP's gain also bridges each whole CNTR step (never brighter than the
+		// projector's own value), so contrast changes look continuous.
+		bool scriptSmoothing = false;
 		// The projector's light exponent on the final (boosted) code: the
 		// light-meter fit, 2.41 on the FL35 (delta 4). Used once, at the end,
 		// for the gain in linear light and the highlight-linear calculation.
@@ -322,6 +329,7 @@ namespace LedDrive
 			Boolean("echo"),
 			Choice("terminator", { "auto", "cr", "literal_cr", "script" }),
 			Integer("led_latency_ms", 0, 2000),
+			Integer("cntr_latency_ms", 0, 2000),
 			Custom("flux_table", [](const std::string& value)
 				{ std::vector<std::pair<double, double>> t; return ParseFluxTable(value, t); },
 				"ascending lpw:relative_flux pairs, e.g. 60:0.55, 80:0.78, 100:1.00"),
@@ -350,6 +358,7 @@ namespace LedDrive
 			Boolean("early_ramp"),
 			Boolean("cut_jump"),
 			Boolean("bright_cut_dump"),
+			Boolean("script_smoothing"),
 			Integer("led_floor_reactive", 0, 255),
 			Integer("led_floor", 0, 255),
 			Integer("led_floor_black", 0, 255),
@@ -550,6 +559,7 @@ namespace LedDrive
 		config.TryGetBool(section, "echo", result.echo);
 		if (config.TryGetString(section, "terminator", value)) result.terminator = ParseTerminator(value);
 		if (config.TryGetString(section, "led_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.ledLatencyMs);
+		if (config.TryGetString(section, "cntr_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.cntrLatencyMs);
 		if (config.TryGetString(section, "flux_table", value)) ParseFluxTable(value, result.fluxTable);
 		return result;
 	}
@@ -608,6 +618,7 @@ namespace LedDrive
 		config.TryGetBool(section, "early_ramp", result.earlyRamp);
 		config.TryGetBool(section, "cut_jump", result.cutJump);
 		config.TryGetBool(section, "bright_cut_dump", result.brightCutDump);
+		config.TryGetBool(section, "script_smoothing", result.scriptSmoothing);
 		readInt("led_floor_reactive", 0, 255, result.ledFloorReactive);
 		readInt("led_floor", 0, 255, result.ledFloor);
 		readInt("led_floor_black", 0, 255, result.ledFloorBlack);

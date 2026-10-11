@@ -886,6 +886,12 @@ void testLedDrivePageAndLiveSwitches()
     auto* latency = requireControl<QSpinBox>(window, QStringLiteral("config.projector.default.led_latency_ms"));
     require(latency->value() == 80, "LED response time does not default to 80 ms");
     latency->setValue(100);
+    auto* contrastLatency = requireControl<QSpinBox>(window, QStringLiteral("config.projector.default.cntr_latency_ms"));
+    require(contrastLatency->value() == 80, "Contrast response time does not default to 80 ms");
+    contrastLatency->setValue(120);
+    auto* smoothing = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.script_smoothing"));
+    require(!smoothing->isChecked(), "Script smoothing is not off by default (off = the script exactly)");
+    smoothing->setChecked(true);
     auto* profile = requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.profile_file"));
     require(profile->text().isEmpty(), "A profile file appeared from nowhere");
     auto* profileStatus = requireControl<QLabel>(window, QStringLiteral("config.led_drive.default.profile_status"));
@@ -932,7 +938,8 @@ void testLedDrivePageAndLiveSwitches()
     const QByteArray saved = readBytes(path);
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
-        "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35" })
+        "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35",
+        "cntr_latency_ms: 120", "script_smoothing: true" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);
