@@ -3830,6 +3830,7 @@ struct LibplaceboVideoRenderer::Impl
 	unsigned long long dejudderHoldsNotLogged = 0;
 	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
 	uint64_t dejudderPredictedGeneration = 0;
+	uint64_t dejudderPredictedSequence = 0;   // the source frame the prediction is for
 	// Present ids of recent extras and the refresh each main present (A)
 	// showed on, so presentation telemetry sees what it would without extras.
 	std::deque<uint32_t> dejudderExtraIds;
@@ -3864,6 +3865,9 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderMaskParamSet = false;
 	bool dejudderMaskNoSigmaLogged = false;
 	bool dejudderMaskNlsLogged = false;
+	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
+	std::string dejudderMaskState;         // why the mask is not used, for the stats line
+	bool dejudderMaskRateLogged = false;
 	unsigned long long dejudderMaskFrames = 0;
 	OcclusionMask::Hook occlusionMaskHook;
 	// 6b-2b: the stats overlay line, published by the render thread at most
@@ -3892,8 +3896,10 @@ struct LibplaceboVideoRenderer::Impl
 					activeSettings.dejudderStrength, st.cadenceRatio, st.lastExtrasPerFrame, st.lastMs,
 					st.late + st.nextFrameLate, st.swapchainFull, st.holds);
 			text = line;
+			// "mask on" only when the mask was used within the last second.
 			if (activeSettings.occlusionMask)
-				text += dejudderMaskParamSet || dejudderMaskFrames > 0 ? ", mask on" : ", mask waiting";
+				text += dejudderMaskUsedTick != 0 && now - dejudderMaskUsedTick < 1000 ? std::string(", mask on") :
+					", " + (dejudderMaskState.empty() ? std::string("mask waiting") : dejudderMaskState);
 		}
 		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
 		dejudderStatus = std::move(text);
@@ -10742,6 +10748,14 @@ struct LibplaceboVideoRenderer::Impl
 		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
 		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
 		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
+		if (in.sourceHz > 0.0 && in.displayHz > 0.0)
+			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
+		if (reason == DejudderPolicy::Reason::VideoRateMaskOnly && !dejudderMaskRateLogged)
+		{
+			DebugLog::Log("De-judder: occlusion mask alone is for film rates (source %.3f Hz > %.0f Hz); off for this source",
+				in.sourceHz, DejudderPolicy::kMaskOnlyMaxSourceHz);
+			dejudderMaskRateLogged = true;
+		}
 		PublishDejudderStatus(reason != dejudderReason);
 		// A reason that flips (e.g. the queue running low) logs at most one
 		// line per 5 s; once the 5 s pass, the reason then current is logged
@@ -10767,7 +10781,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 		}
 		if (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
-			reason == DejudderPolicy::Reason::Interlaced ||
+			reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
 			reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb)
 		{
 			if (dejudder || dejudderNextTextures[0])
@@ -10871,6 +10885,7 @@ struct LibplaceboVideoRenderer::Impl
 		bool cadenceRepeat = false;
 		uint64_t frameGeneration = 0;
 		uint64_t sourceSequence = 0;
+		uint64_t nextSourceSequence = 0;   // B, if known
 		int64_t callbackQpc = 0;   // A's capture callback
 		int64_t mainCallQpc = 0;   // A's present call
 		double captureRateHz = 0.0;
@@ -10902,7 +10917,10 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		// The prediction is only for the frame straight after (same generation);
 		// every call consumes it, whatever happens below.
-		const double predictedVsync = dejudderPredictedGeneration == f.frameGeneration ? dejudderPredictedVsync : 0.0;
+		// Only for the frame it was made for: a frame dropped by drift
+		// correction in between must not be counted late (audit 6b-2b).
+		const double predictedVsync = dejudderPredictedGeneration == f.frameGeneration &&
+			dejudderPredictedSequence == f.sourceSequence ? dejudderPredictedVsync : 0.0;
 		dejudderPredictedVsync = 0.0;
 		if (dejudderReason != DejudderPolicy::Reason::Active || !dejudder)
 			return false;
@@ -11105,6 +11123,7 @@ struct LibplaceboVideoRenderer::Impl
 				{
 					dejudderPredictedVsync = decision.targetVsync;
 					dejudderPredictedGeneration = f.frameGeneration;
+					dejudderPredictedSequence = f.nextSourceSequence;
 				}
 				break;
 			}
@@ -15574,19 +15593,25 @@ struct LibplaceboVideoRenderer::Impl
                 if (CustomHookChain::SetHookParameter(frameHooks[i], "occlusion_mask", install ? 1.0 : 0.0) &&
                     sigmaIndex == frameHooks.size())
                     sigmaIndex = i;
-            dejudderMaskParamSet = install;
             if (install && sigmaIndex == frameHooks.size())
             {
                 install = false;
                 if (!dejudderMaskNoSigmaLogged)
                     DebugLog::Log("De-judder occlusion mask: on, but no sigma-delta in the shader chain takes it");
                 dejudderMaskNoSigmaLogged = true;
+                dejudderMaskState = "mask off (no sigma-delta)";
             }
+            else if (activeSettings.occlusionMask && maskSlot >= 0 && submittedNls)
+                dejudderMaskState = "mask off (NLS)";
+            // Set only when the parameter was really written as 1 (audit 6b-2b).
+            dejudderMaskParamSet = install;
             if (install)
             {
                 occlusionMaskHook.SetFrame(dejudder->Occlusion(maskSlot), renderImage.crop, target.crop);
                 frameHooks.insert(frameHooks.begin() + static_cast<std::ptrdiff_t>(sigmaIndex), occlusionMaskHook.Get());
                 dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
+                dejudderMaskUsedTick = GetTickCount64();
+                dejudderMaskState.clear();
                 if (++dejudderMaskFrames == 1 || dejudderMaskFrames % 2400 == 0)
                     DebugLog::Log("De-judder occlusion mask: used on %llu source frames (hook applied %llu, failed %llu)",
                         dejudderMaskFrames, occlusionMaskHook.Applied(), occlusionMaskHook.Failed());
@@ -16355,6 +16380,7 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.cadenceRepeat = cadenceRepeat;
 			extrasFrame.frameGeneration = frameGeneration;
 			extrasFrame.sourceSequence = sourceSequence;
+			extrasFrame.nextSourceSequence = nextSourceSequence;
 			extrasFrame.callbackQpc = callbackQpc;
 			extrasFrame.mainCallQpc = swapStartQpc;
 			extrasFrame.captureRateHz = captureRateHz;

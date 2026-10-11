@@ -558,6 +558,12 @@ namespace VideoProcessorTest
             Assert::IsTrue(DejudderPolicy::ExtrasAllowed(in));
             Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.occlusionMask = true; }) == Reason::Active);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.0; i.occlusionMask = true; }) == Reason::Active);
+            // Mask alone is for film rates (<= 30 fps); with extras the mask
+            // rides along on film cadences anyway.
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; i.occlusionMask = true; }) == Reason::VideoRateMaskOnly);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 59.94; i.strength = 0.0; i.occlusionMask = true; }) == Reason::VideoRateMaskOnly);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 23.976; i.strength = 0.0; i.occlusionMask = true; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.occlusionMask = true; }) == Reason::Active);   // 24p with extras
             Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.occlusionMask = true; i.lowLatency = true; }) == Reason::LowLatency);
             {
                 DejudderPolicy::Input maskOnly = in;
