@@ -692,6 +692,10 @@ namespace VideoProcessorTest
             Assert::AreEqual(std::pow(1.33, 0.8), m.xScale, 1e-9);
             Assert::AreEqual(std::pow(1.33, -0.2), m.yScale, 1e-9);
             Assert::AreEqual(0.25, m.yProtect, 1e-9);
+            // geometry as the shaders read it: the fraction is cut off.
+            classic["geometry"] = "0.7";
+            Assert::AreEqual(0, NlsMaskMapping::FromParameters(classic, 1.33, false, false).geometry);
+            classic["geometry"] = "1";
             // A parameter the shader needs is missing: mask off.
             classic.erase("curve");
             Assert::IsFalse(NlsMaskMapping::FromParameters(classic, 1.33, false, false).valid);

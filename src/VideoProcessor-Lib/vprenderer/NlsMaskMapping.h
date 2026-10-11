@@ -86,7 +86,8 @@ namespace NlsMaskMapping
 		if (!Number(p, "curve", m.curve) || !Number(p, "geometry", geometry))
 			return m;
 		m.curve = std::max(1.0, std::min(2.9, m.curve));
-		m.geometry = geometry >= 0.5 ? 1 : 0;
+		// As the shaders: int(clamp(geometry, 0, 1)), the fraction cut off.
+		m.geometry = geometry >= 1.0 ? 1 : 0;
 		const bool plus = nlsPlus;
 		double balance = 0.0;
 		if (plus)

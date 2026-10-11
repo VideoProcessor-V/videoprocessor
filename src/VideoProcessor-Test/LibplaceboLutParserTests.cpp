@@ -3889,8 +3889,8 @@ namespace VideoProcessorTest
 		// A white square at source block (13, 1), off centre where the map is
 		// non-linear, is rendered through the real NLS shader; the mask marks
 		// that block new, so the sigma-delta's carry must stop exactly where the
-		// square appears, in both axes. The owner's three NLS profiles
-		// (standard, protected, NLS+) with a centred and an off-centre source
+		// square appears, in both axes. The owner's four NLS profiles
+		// (standard, protected, NLS+, NLS-V) with a centred and an off-centre source
 		// crop: the NLS coordinates span the crop (the off-centre case tells the
 		// crop from the whole texture by 5 px).
 		TEST_METHOD(OcclusionMaskFollowsTheNlsMap)
@@ -3945,7 +3945,8 @@ namespace VideoProcessorTest
 
 			// The owner's three NLS profiles (VideoProcessor.cfg), with the
 			// shader loader's defaults filled in as the renderer sees them.
-			struct Profile { const wchar_t* name; const char* file; bool plus; std::map<std::string, std::string> rule; };
+			struct Profile { const wchar_t* name; const char* file; bool plus; std::map<std::string, std::string> rule;
+				bool vertical = false; };
 			const Profile profiles[] = {
 				{ L"standard", "NLS.glsl", false, { { "strength", "1" }, { "curve", "2" }, { "geometry", "0" },
 					{ "center_protection", "0.35" } } },
@@ -3953,7 +3954,11 @@ namespace VideoProcessorTest
 					{ "center_protection", "0.35" } } },
 				{ L"plus", "NLSPlus.glsl", true, { { "strength", "1" }, { "curve", "2" }, { "geometry", "1" },
 					{ "axis_balance", "0.25" }, { "max_center_zoom", "1.08" },
-					{ "horizontal_center_protection", "0.35" }, { "vertical_center_protection", "0.25" } } } };
+					{ "horizontal_center_protection", "0.35" }, { "vertical_center_protection", "0.25" } } },
+				// NLS-V (VideoProcessor.cfg [shader.nls.vertical]): NLS.glsl warping
+				// the vertical axis (warp_axis 1).
+				{ L"vertical", "NLS.glsl", false, { { "strength", "1" }, { "curve", "2" }, { "geometry", "1" },
+					{ "center_protection", "0.35" } }, true } };
 			for (const Profile& profile : profiles)
 			{
 				std::string source = LoadBundledShader(profile.file);
@@ -3968,8 +3973,9 @@ namespace VideoProcessorTest
 					ReplaceShaderToken(source, token.first, token.second);
 				const pl_hook* nls = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
 				Assert::IsNotNull(nls);
-				BindNlsShader(nls, 1.33f, 0.0f);
-				const NlsMaskMapping::Mapping mapping = NlsMaskMapping::FromParameters(profile.rule, 1.33, false, profile.plus);
+				BindNlsShader(nls, 1.33f, profile.vertical ? 1.0f : 0.0f);
+				const NlsMaskMapping::Mapping mapping = NlsMaskMapping::FromParameters(profile.rule, 1.33,
+					profile.vertical, profile.plus);
 				Assert::IsTrue(mapping.valid, profile.name);
 				for (const pl_rect2df sourceCrop : { pl_rect2df{ 0.0f, 0.0f, 256.0f, 128.0f },
 					pl_rect2df{ 32.0f, 8.0f, 256.0f, 128.0f } })

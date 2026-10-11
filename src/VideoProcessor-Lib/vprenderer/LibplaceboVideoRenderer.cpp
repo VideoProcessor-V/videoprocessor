@@ -15551,14 +15551,13 @@ struct LibplaceboVideoRenderer::Impl
             NlsMaskMapping::Mapping nlsMapping;
             if (install && submittedNls)
             {
+                // The bundled files by their exact name (a user's MyNLS.glsl
+                // is not the bundled NLS; audit 6c-2).
                 const std::string file = nlsRule.filename;
-                const auto endsWith = [&file](const char* tail)
-                {
-                    const size_t n = std::strlen(tail);
-                    return file.size() >= n && _stricmp(file.c_str() + file.size() - n, tail) == 0;
-                };
-                const bool plus = endsWith("NLSPlus.glsl");
-                if (plus || endsWith("NLS.glsl"))
+                const size_t slash = file.find_last_of("\\/");
+                const std::string name = slash == std::string::npos ? file : file.substr(slash + 1);
+                const bool plus = _stricmp(name.c_str(), "NLSPlus.glsl") == 0;
+                if (plus || _stricmp(name.c_str(), "NLS.glsl") == 0)
                     nlsMapping = NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
                         nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
                 if (!nlsMapping.valid)
@@ -15585,6 +15584,8 @@ struct LibplaceboVideoRenderer::Impl
             }
             else if (activeSettings.occlusionMask && maskSlot >= 0 && submittedNls && !nlsMapping.valid)
                 dejudderMaskState = "mask off (NLS shader not known)";
+            else if (!submittedNls && dejudderMaskState == "mask off (NLS shader not known)")
+                dejudderMaskState.clear();   // NLS is off again (audit 6c-2)
             // Set only when the parameter was really written as 1 (audit 6b-2b).
             dejudderMaskParamSet = install;
             if (install)
