@@ -684,6 +684,39 @@ void testOmittedAndAutoFrameOffsetDisplayNinety()
     }
 }
 
+void testDejudderBoxPresetsAndMask()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\ndejudder_strength: 0.3\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* preset = requireControl<QComboBox>(window, "config.vprenderer.dejudder_preset");
+    auto* strength = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_strength");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(preset->currentData().toString() == "custom", "A saved 0.3 is not shown as Custom");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(preset->currentIndex() == 0, (QByteArray("No strength is not shown as Not set: index ") +
+        QByteArray::number(preset->currentIndex()) + " text '" + strength->text().toUtf8() + "' row " +
+        profiles->currentItem()->text().toUtf8()).constData());
+    selectData(preset, "0.25");
+    require(strength->text() == "0.25", "Gentle did not write 0.25");
+    strength->setText("0.35");
+    require(preset->currentData().toString() == "0.35", "Typing 0.35 did not select Medium");
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.occlusion_mask"), "on");
+    QCoreApplication::processEvents();
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    require(apply->isEnabled(), "De-judder edits did not enable Apply");
+    apply->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    for (const char* expected : { "dejudder_strength: 0.35", "occlusion_mask: on", "dejudder_strength: 0.3" })
+        require(saved.contains(expected), (QByteArray("De-judder setting not saved: ") + expected).constData());
+}
+
 void testLedDrivePageAndLiveSwitches()
 {
     QTemporaryDir dir;
@@ -7118,6 +7151,7 @@ int main(int argc, char** argv)
         testMissingConfigurationCanBeCreatedFromEditor);
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
+    failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);

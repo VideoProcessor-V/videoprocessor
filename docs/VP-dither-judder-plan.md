@@ -754,6 +754,58 @@ were applied.
   - telemetry and the pacing trace see the main present (not an extra) as
     the latest on screen;
   - the phase line waits for 24 frames.
+**6b-2b + 6c status (2026-10-11, one step as the owner asked): built, not
+yet on the projector.**
+- **Config box** (Rendering page, "De-judder (film motion)"):
+  - a preset (Not set / Off / Gentle 0.25 / Medium 0.35 / Custom) bound to
+    `dejudder_strength`, which takes any custom value;
+  - `occlusion_mask` (on/off);
+  - `dejudder_match_tolerance` and `dejudder_frame_trust` (advanced).
+  - The preset follows a loaded value; the default profile's "Auto" counts
+    as not set. Config app test: presets, Custom, save, mask.
+- **Stats line** (Ctrl+I, "De-judder:"). Shown only when the de-judder or
+  the mask is on. It reads:
+  - with extras: s, cadence, extras of the last frame and their ms, late
+    (an extra or the next frame), swapchain full, held;
+  - otherwise: the reason, or "mask only (cadence x)";
+  - plus "mask on" when the mask is set.
+  The renderer publishes it at most twice a second. A new
+  `IVideoRenderer::GetDejudderStatus` raises the plugin API to 25, so the
+  exe and the DLL must come from the same build, as always.
+- **6c, occlusion mask (M1′, proven on the harness, so M3 is not needed):**
+  - `MotionWarp::Estimate(A, B, slot)` also writes **B's** occlusion mask:
+    the backward/forward consistency test from B's side, 1 = seen in A,
+    0 = new or uncovered. It uses two slots, so the mask for the frame now
+    showing survives the next estimate.
+  - `OcclusionMask::Hook` (OUTPUT, after `OutputEncodingRepair`, just before
+    the sigma-delta) copies the picture unchanged and writes the mask into
+    alpha. Each output pixel maps to its source block through the source
+    crop and the destination rectangle; outside the picture it is 1.
+  - The sigma-delta has a new parameter `occlusion_mask` (default 0 = alpha
+    ignored, output unchanged), set by the renderer each refresh. With 1 and
+    alpha 0 it carries no residual into that pixel, and it writes alpha 1.
+  - The mask is used only on the **first refresh** of each source frame:
+    - not on cadence repeats, and never on extras (the extras drop the hook
+      and set the parameter to 0);
+    - not with NLS active (non-linear mapping; logged once);
+    - not when no sigma-delta in the chain takes it (logged once).
+  - **Mask-only mode:** `occlusion_mask: on` with strength 0 runs the
+    estimate on any cadence, with no extras (`DejudderPolicy::ExtrasAllowed`).
+  - GPU tests (harness, 10-bit limited, colour depth 8):
+    - writing alpha leaves the picture unchanged;
+    - mask 1 keeps the carry, mask 0 stops it, alpha out is 1;
+    - parameter 0 ignores alpha;
+    - the mask lands on output x 40..63 for source block x 16..31 at 1.5×
+      with 16 px blanking each side;
+    - the matcher's mask marks the background a square uncovers as new.
+  - Alpha ownership: the mask owns alpha from its OUTPUT hook to the
+    sigma-delta; the Stage 10 carry owns it only from RGB to SCALED. They
+    never overlap. This is written in both shader headers.
+- **Delta 5 note, for that step:** the sigma-delta's `levels_full` and
+  `swapchain_bits` are typed into the shader profile, not read from the
+  output. Delta 5 should take them from the active output.
+- **Tally:** items 32–38 (pan judder, edges, frame timing, log lines,
+  Medium, mask, 4K source).
 - **Order of work after 6b-2a (planner, 2026-10-11):**
   1. 6b-2b (Config box, stats line);
   2. 6c (occlusion mask for the dither);

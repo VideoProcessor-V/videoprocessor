@@ -6144,6 +6144,80 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         saturation->setToolTip(QStringLiteral(
             "Colour saturation offset in percent. 0 is neutral; +5 matches madVR's saturation +5."));
 
+        // Stage 6b-2b: the de-judder (film motion) and its occlusion mask for
+        // the sigma-delta. Off unless set; meant for the cinema profile. The
+        // renderer switches it off by itself in the Low_Latency queue and for
+        // video cadences.
+        form = addCollapsibleSection(QStringLiteral("dejudder"), QStringLiteral("De-judder (film motion)"),
+            QString(), false);
+        auto* dejudderPreset = new QComboBox;
+        dejudderPreset->setObjectName(controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
+        dejudderPreset->setAccessibleName(QStringLiteral("De-judder preset"));
+        dejudderPreset->addItem(QStringLiteral("Not set (off)"), QString());
+        dejudderPreset->addItem(QStringLiteral("Off"), QStringLiteral("0"));
+        dejudderPreset->addItem(QStringLiteral("Gentle"), QStringLiteral("0.25"));
+        dejudderPreset->addItem(QStringLiteral("Medium"), QStringLiteral("0.35"));
+        dejudderPreset->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
+        dejudderPreset->setToolTip(QStringLiteral(
+            "Smooths 24p film motion on a 60 Hz display by filling the repeated refreshes with "
+            "slightly moved pictures. Gentle (0.25) is the recommended start; Medium is 0.35; "
+            "Custom takes the strength typed below. Off below the uneven film cadences, in "
+            "Low_Latency, and for RGB or interlaced input."));
+        form->addRow(QStringLiteral("De-judder"), dejudderPreset);
+        auto* dejudderStrength = addText(QStringLiteral("De-judder strength (0 to 1)"),
+            QStringLiteral("dejudder_strength"));
+        dejudderStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderStrength));
+        dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; Gentle 0.25, Medium 0.35"));
+        // The preset writes the strength; the strength shows which preset it is.
+        connect(dejudderPreset, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [dejudderPreset, dejudderStrength](int index)
+        {
+            const QString value = dejudderPreset->itemData(index).toString();
+            if (value == QStringLiteral("custom"))
+            {
+                dejudderStrength->setFocus();
+                return;
+            }
+            if (dejudderStrength->text() != value)
+                dejudderStrength->setText(value);
+        });
+        connect(dejudderStrength, &QLineEdit::textChanged, this,
+            [dejudderPreset](const QString& text)
+        {
+            QString trimmed = text.trimmed();
+            if (trimmed.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
+                trimmed.clear();   // the default profile shows an unset field as Auto
+            int index = trimmed.isEmpty() ? 0 : dejudderPreset->findData(trimmed);
+            if (index < 0)
+            {
+                bool ok = false;
+                const double value = trimmed.toDouble(&ok);
+                index = trimmed.isEmpty() ? 0 :
+                    ok && value == 0.0 ? 1 : ok && value == 0.25 ? 2 : ok && value == 0.35 ? 3 : 4;
+            }
+            const QSignalBlocker blocker(dejudderPreset);
+            dejudderPreset->setCurrentIndex(index);
+        });
+        auto* occlusionMask = addChoice(QStringLiteral("Occlusion mask for the dither"),
+            QStringLiteral("occlusion_mask"), { QStringLiteral("on"), QStringLiteral("off") });
+        occlusionMask->setToolTip(QStringLiteral(
+            "Tells the temporal sigma-delta where new or uncovered picture content appears, so it "
+            "does not carry its sub-code residual into it. Works with the de-judder off too "
+            "(the motion matcher then runs for the mask alone). Needs the sigma-delta shader."));
+        auto* dejudderTolerance = addText(QStringLiteral("Match tolerance (0.5 to 16)"),
+            QStringLiteral("dejudder_match_tolerance"), QStringLiteral("codes"));
+        dejudderTolerance->setValidator(new QDoubleValidator(0.5, 16.0, 2, dejudderTolerance));
+        dejudderTolerance->setPlaceholderText(QStringLiteral("3"));
+        dejudderTolerance->setToolTip(QStringLiteral(
+            "Mean luma difference (8-bit codes) up to which a block's motion is trusted. "
+            "Lower is stricter (more blocks held still)."));
+        auto* dejudderFrameTrust = addText(QStringLiteral("Cut threshold (0 to 1)"),
+            QStringLiteral("dejudder_frame_trust"));
+        dejudderFrameTrust->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderFrameTrust));
+        dejudderFrameTrust->setPlaceholderText(QStringLiteral("0.25"));
+        dejudderFrameTrust->setToolTip(QStringLiteral(
+            "Below this share of trusted blocks the frame is treated as a cut and held still."));
+
         form = addCollapsibleSection(QStringLiteral("processing"), QStringLiteral("Processing"),
             QString(), false);
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
@@ -7039,6 +7113,27 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
             }
         state->loading = false;
+		// The de-judder preset follows the loaded strength (loading blocks the
+		// strength field's own change signal).
+		if (sectionPrefix == QStringLiteral("vprenderer"))
+		{
+			auto* preset = profileFields->findChild<QComboBox*>(
+				controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
+			auto* strength = profileFields->findChild<QLineEdit*>(
+				controlName(sectionPrefix, QStringLiteral("dejudder_strength")));
+			if (preset && strength)
+			{
+				QString text = strength->text().trimmed();
+				if (text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
+					text.clear();   // the default profile shows an unset field as Auto
+				bool ok = false;
+				const double value = text.toDouble(&ok);
+				const int index = text.isEmpty() ? 0 : !ok ? 4 :
+					value == 0.0 ? 1 : value == 0.25 ? 2 : value == 0.35 ? 3 : 4;
+				const QSignalBlocker blocker(preset);
+				preset->setCurrentIndex(index);
+			}
+		}
 		if (sectionPrefix == QStringLiteral("vprenderer.viewport"))
 		{
 			auto* alignment = profileFields->findChild<QComboBox*>(

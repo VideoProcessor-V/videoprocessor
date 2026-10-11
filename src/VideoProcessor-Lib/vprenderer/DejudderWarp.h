@@ -72,8 +72,11 @@ namespace Dejudder
 		MotionWarp(const MotionWarp&) = delete;
 		MotionWarp& operator=(const MotionWarp&) = delete;
 
-		// Motion between A and B. Call once per source-frame pair.
-		bool Estimate(const Planes& a, const Planes& b);
+		// Motion between A and B. Call once per source-frame pair. With
+		// occlusionSlot 0 or 1 it also writes B's occlusion mask (6c) into
+		// that slot; the caller alternates slots so the mask for the frame
+		// now showing survives the next estimate.
+		bool Estimate(const Planes& a, const Planes& b, int occlusionSlot = -1);
 
 		// A warped by shift x (A->B motion). Call once per extra present.
 		// The returned planes belong to this object and stay valid until the
@@ -86,6 +89,10 @@ namespace Dejudder
 		pl_tex Field() const { return field; }
 		// The share of trusted blocks from the last Estimate (1x1, r).
 		pl_tex FrameTrust() const { return frameTrust; }
+		// B's occlusion mask (6c), one texel per 16x16 source block of B:
+		// r = 1 where B's content was visible in A (consistent both ways and
+		// a good match), 0 where it is new or uncovered.
+		pl_tex Occlusion(int slot) const { return slot == 0 || slot == 1 ? occlusion[slot] : nullptr; }
 		// The raw half-resolution searches (rgba = vector in half-resolution
 		// pixels, match error); for diagnostics.
 		pl_tex Forward() const { return forward; }
@@ -125,6 +132,7 @@ namespace Dejudder
 		pl_tex halfA = nullptr, halfB = nullptr;
 		pl_tex l1A = nullptr, l1B = nullptr, l2A = nullptr, l2B = nullptr;
 		pl_tex forward = nullptr, backward = nullptr, field = nullptr, frameTrust = nullptr;
+		pl_tex occlusion[2] = { nullptr, nullptr };
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
 		bool estimated = false;
 	};

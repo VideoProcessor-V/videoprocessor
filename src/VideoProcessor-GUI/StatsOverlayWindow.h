@@ -80,6 +80,7 @@ struct StatsData
 	double scheduledLatencyMs = 0.0;
 	bool presentationTargetTimingKnown = false;
 	CString presentationTimingStatus;
+	CString dejudderStatus;    // VP Renderer de-judder / occlusion mask line (empty = off)
 	double presentationTargetLeadMs = 0.0;
 	double captureToPresentationTargetMs = 0.0;
 

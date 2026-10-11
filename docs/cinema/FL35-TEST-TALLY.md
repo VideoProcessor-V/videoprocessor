@@ -5,7 +5,7 @@ Every feature is modular and off by default (unless noted), so each can be
 switched on and judged on its own. Update the Result column as each one is
 tried: **OK**, **Problem: …** (and tell Claude), or **Skip**.
 
-Last updated: 2026-10-10. **Test folder: `C:\dev\deploy\VideoProcessor-FL35-rangefix2` (or rangefix
+Last updated: 2026-10-11. **Test folder: `C:\dev\deploy\VideoProcessor-FL35-rangefix2` (or rangefix
 for everything except the dither) or newer.** Earlier folders are not to be used on the projector: from Stage 7
 step 4 up to that build, the picture was output full range whenever the gamma
 boost or LED drive was on (a libplacebo bug, repaired in e7b3cceb). See the
@@ -60,6 +60,17 @@ folder's DEPLOY.txt for the exact steps.
 | 28 | Colours stepped in turns: does the black change colour? | Tera Term, DEPLOY.txt §6 b | not tested |
 | 29 | First VP run with "Read the projector's replies" on | log shows no refused LDC* commands | not tested |
 | 30 | Fade to black in a film | Experimental on, taking turns; log "custom dim on/off" | not tested |
+
+## De-judder and occlusion mask (Stage 6; off by default; needs a build after 2026-10-11)
+| # | Check | How | Result |
+|---|---|---|---|
+| 32 | 24p pan judder, Gentle | Config: Rendering, Cinema, De-judder Gentle (0.25). A slow pan: steadier than off? Compare with Off. | not tested |
+| 33 | Edges and objects during pans | Same pan: no tearing, ghosting or wobbling edges around moving objects; subtitles steady | not tested |
+| 34 | No 4:1 stepping, frame timing | Ctrl+I "De-judder:" line: late 0, full 0. vp.log: "Alpha frame pacing trace … submit_gap" no more often than with it off | not tested |
+| 35 | De-judder log lines | vp.log: "De-judder phase: cadence 2.500", "De-judder extra: … phi0 0.000/0.200, delta 0.4/0.8/0.6" | not tested |
+| 36 | Medium (0.35) | Same pan; more smoothing, any artefacts? | not tested |
+| 37 | Occlusion mask with the sigma-delta | Occlusion mask on (de-judder off or on): dark gradients behind moving objects show no smearing or crawling dither; log "De-judder occlusion mask: used on …" | not tested |
+| 38 | 4K source | Repeat 32 and 34 with a 4K film source (render load) | not tested |
 
 ## Light meter (future maybe, not a blocker)
 | # | Check | How | Result |

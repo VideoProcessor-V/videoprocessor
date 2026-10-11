@@ -16401,6 +16401,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 					stats.captureToPresentationTargetMs);
 			m_videoRenderer->GetPresentationTimingStatus(
 				stats.presentationTimingStatus);
+			m_videoRenderer->GetDejudderStatus(stats.dejudderStatus);
 		}
 		RendererRenderLoad renderLoad;
 		if (m_videoRenderer->GetRenderLoad(renderLoad))

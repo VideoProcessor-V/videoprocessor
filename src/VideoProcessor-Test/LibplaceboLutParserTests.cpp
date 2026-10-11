@@ -11,6 +11,7 @@
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/OutputEncodingRepair.h>
+#include <vprenderer/OcclusionMaskHook.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <NlsGeometryPolicy.h>
@@ -606,7 +607,7 @@ namespace
 		// (R10G10B10A2, colour depth 8, bit shift 2) and returns the 10-bit red
 		// code of one pixel per refresh.
 		std::vector<int> RenderTenBitSequence(const std::vector<const pl_hook*>& hooks,
-			enum pl_color_levels levels, float value, int frames)
+			enum pl_color_levels levels, float value, int frames, std::vector<int>* alphas = nullptr)
 		{
 			pl_gpu gpu = m_d3d11->gpu;
 			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
@@ -663,6 +664,8 @@ namespace
 				download.ptr = pixels;
 				Assert::IsTrue(pl_tex_download(gpu, &download));
 				codes.push_back(static_cast<int>(pixels[0] & 1023u));
+				if (alphas)
+					alphas->push_back(static_cast<int>(pixels[0] >> 30));
 			}
 			pl_tex_destroy(gpu, &source);
 			pl_tex_destroy(gpu, &target);
@@ -3671,6 +3674,216 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 
+		// Stage 6c (M1'): the occlusion mask reaches the OUTPUT-stage sigma-delta
+		// through the alpha channel. Proves, at VP's settings (10-bit limited
+		// target, colour depth 8): writing alpha does not change the picture;
+		// mask 1 keeps the carry, mask 0 stops it; the sigma-delta writes alpha
+		// back to 1.
+		static pl_tex MakeMaskTexture(pl_gpu gpu, int w, int h, const std::vector<uint16_t>& values)
+		{
+			pl_fmt r16 = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(r16);
+			pl_tex_params params{};
+			params.w = w;
+			params.h = h;
+			params.format = r16;
+			params.sampleable = true;
+			params.initial_data = values.data();
+			return pl_tex_create(gpu, &params);
+		}
+
+		static CustomHookChain::Loader SigmaLoader(TargetLutGpuFixture& fixture)
+		{
+			return {
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
+		}
+
+		static void ConfigureSigma(CustomHookChain::Chain& chain, int width, int height,
+			std::vector<const pl_hook*>& hooks)
+		{
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "0" }, { "swapchain_bits", "10" },
+				{ "noise_amplitude", "0" } };
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = width;
+			values.outputHeight = height;
+			chain.Ensure(values);
+			chain.Collect(false, hooks);
+		}
+
+		TEST_METHOD(OcclusionMaskReachesTheSigmaDeltaThroughAlpha)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			pl_gpu gpu = fixture.Gpu();
+			std::vector<const pl_hook*> sigmaHooks;
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfigureSigma(chain, 2, 2, sigmaHooks);
+			Assert::AreEqual(size_t{ 1 }, sigmaHooks.size(), L"libplacebo rejected the sigma-delta");
+			pl_tex seen = MakeMaskTexture(gpu, 1, 1, { 65535 });
+			pl_tex fresh = MakeMaskTexture(gpu, 1, 1, { 0 });
+			OcclusionMask::Hook mask;
+			const pl_rect2df whole{ 0.0f, 0.0f, 2.0f, 2.0f };
+			auto describe = [](const std::vector<int>& codes)
+			{
+				std::wstring text;
+				for (int code : codes) text += std::to_wstring(code) + L" ";
+				return text;
+			};
+
+			// 1. The mask hook alone does not change the picture.
+			const std::vector<int> plain = fixture.RenderTenBitSequence({}, PL_COLOR_LEVELS_LIMITED, 0.5f, 1);
+			mask.SetFrame(fresh, whole, whole);
+			const std::vector<int> masked = fixture.RenderTenBitSequence({ mask.Get() }, PL_COLOR_LEVELS_LIMITED, 0.5f, 1);
+			Assert::AreEqual(plain[0], masked[0], L"Writing the mask into alpha changed the picture");
+			Assert::IsTrue(mask.Applied() > 0, L"The mask hook did not run");
+
+			// 2. Mid grey (8-bit 125.5): the sigma-delta alternates 125/126. Mask 1
+			// keeps that carry; mask 0 stops it (one code every refresh). Alpha out is 1.
+			Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "occlusion_mask", 1.0));
+			mask.SetFrame(seen, whole, whole);
+			std::vector<int> alphas;
+			const std::vector<int> carry = fixture.RenderTenBitSequence({ mask.Get(), sigmaHooks[0] },
+				PL_COLOR_LEVELS_LIMITED, 0.5f, 8, &alphas);
+			Assert::IsTrue(std::find(carry.begin(), carry.end(), 500) != carry.end() &&
+				std::find(carry.begin(), carry.end(), 504) != carry.end(),
+				(L"Mask 1 must keep the carry (125/126): " + describe(carry)).c_str());
+			for (int alpha : alphas)
+				Assert::AreEqual(3, alpha, L"The sigma-delta must write alpha back to 1");
+			mask.SetFrame(fresh, whole, whole);
+			alphas.clear();
+			const std::vector<int> stopped = fixture.RenderTenBitSequence({ mask.Get(), sigmaHooks[0] },
+				PL_COLOR_LEVELS_LIMITED, 0.5f, 8, &alphas);
+			for (int code : stopped)
+				Assert::AreEqual(stopped[0], code, (L"Mask 0 must stop the carry (one code every refresh): " +
+					describe(stopped)).c_str());
+			for (int alpha : alphas)
+				Assert::AreEqual(3, alpha, L"The sigma-delta must write alpha back to 1");
+
+			// 3. Without the parameter the sigma-delta ignores alpha (mask 0 present).
+			Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "occlusion_mask", 0.0));
+			const std::vector<int> ignored = fixture.RenderTenBitSequence({ mask.Get(), sigmaHooks[0] },
+				PL_COLOR_LEVELS_LIMITED, 0.5f, 8);
+			Assert::IsTrue(std::find(ignored.begin(), ignored.end(), 500) != ignored.end(),
+				(L"occlusion_mask 0 must ignore alpha: " + describe(ignored)).c_str());
+			pl_tex_destroy(gpu, &seen);
+			pl_tex_destroy(gpu, &fresh);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// The mask lands on the right output pixels after scaling (1.5x) and
+		// edge blanking (16 px each side): source block column 1 (x 16..31)
+		// is "new", so output x 40..63 (16 + 1.5 * [16, 32)) must stop the
+		// carry while the rest of the picture keeps it.
+		TEST_METHOD(OcclusionMaskAlignsWithThePictureAfterScalingAndBlanking)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			pl_gpu gpu = fixture.Gpu();
+			const int srcW = 64, srcH = 32, outW = 128, outH = 64;
+			std::vector<const pl_hook*> sigmaHooks;
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfigureSigma(chain, outW, outH, sigmaHooks);
+			Assert::AreEqual(size_t{ 1 }, sigmaHooks.size());
+			Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "occlusion_mask", 1.0));
+			// 4 x 2 blocks; column 1 is new content.
+			pl_tex maskTex = MakeMaskTexture(gpu, 4, 2, { 65535, 0, 65535, 65535, 65535, 0, 65535, 65535 });
+			OcclusionMask::Hook mask;
+			const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(srcW), static_cast<float>(srcH) };
+			const pl_rect2df targetCrop{ 16.0f, 0.0f, 112.0f, static_cast<float>(outH) };
+			mask.SetFrame(maskTex, sourceCrop, targetCrop);
+
+			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt targetFormat = nullptr;
+			const auto caps = PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE;
+			for (int i = 0; i < gpu->num_formats; ++i)
+			{
+				pl_fmt f = gpu->formats[i];
+				if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+					f->texel_size == 4 && (f->caps & caps) == caps && f->host_bits[0] == 10)
+				{ targetFormat = f; break; }
+			}
+			Assert::IsNotNull(targetFormat);
+			std::vector<float> texels(static_cast<size_t>(srcW) * srcH * 4);
+			for (size_t i = 0; i < texels.size(); i += 4)
+			{
+				texels[i] = texels[i + 1] = texels[i + 2] = 0.5f;
+				texels[i + 3] = 1.0f;
+			}
+			pl_tex_params sp{};
+			sp.w = srcW; sp.h = srcH; sp.format = sourceFormat; sp.sampleable = true; sp.initial_data = texels.data();
+			pl_tex source = pl_tex_create(gpu, &sp);
+			pl_tex_params tp{};
+			tp.w = outW; tp.h = outH; tp.format = targetFormat; tp.renderable = true; tp.host_readable = true;
+			tp.blit_dst = true;   // libplacebo clears outside the destination rectangle
+			pl_tex target = pl_tex_create(gpu, &tp);
+			pl_frame image = TargetLutGpuFixture::MakeRgbFrame(source);
+			image.crop = sourceCrop;
+			pl_frame output = TargetLutGpuFixture::MakeRgbFrame(target);
+			output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			output.repr.bits.sample_depth = 10;
+			output.repr.bits.color_depth = 8;
+			output.repr.bits.bit_shift = 2;
+			output.crop = targetCrop;
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			const pl_hook* hooks[2] = { mask.Get(), sigmaHooks[0] };
+			params.hooks = hooks;
+			params.num_hooks = 2;
+			const int frames = 8;
+			std::vector<std::vector<uint32_t>> rendered;
+			for (int frame = 0; frame < frames; ++frame)
+			{
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params));
+				pl_gpu_finish(gpu);
+				std::vector<uint32_t> pixels(static_cast<size_t>(outW) * outH);
+				pl_tex_transfer_params download{};
+				download.tex = target;
+				download.ptr = pixels.data();
+				Assert::IsTrue(pl_tex_download(gpu, &download));
+				rendered.push_back(std::move(pixels));
+			}
+			auto constant = [&](int x, int y)
+			{
+				const uint32_t first = rendered[0][static_cast<size_t>(y) * outW + x] & 1023u;
+				for (int frame = 1; frame < frames; ++frame)
+					if ((rendered[frame][static_cast<size_t>(y) * outW + x] & 1023u) != first)
+						return false;
+				return true;
+			};
+			for (int y : { 8, 40 })
+			{
+				for (int x = 42; x < 62; ++x)
+					Assert::IsTrue(constant(x, y), (L"Masked block not at x " + std::to_wstring(x)).c_str());
+				for (int x : { 20, 30, 37, 66, 80, 100, 110 })
+					Assert::IsFalse(constant(x, y), (L"Carry stopped outside the masked block at x " + std::to_wstring(x)).c_str());
+			}
+			pl_tex_destroy(gpu, &source);
+			pl_tex_destroy(gpu, &target);
+			pl_tex_destroy(gpu, &maskTex);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(AllBundledStandardShadersLoadAndUpscalersEngageByHeight)
 		{
 			TargetLutGpuFixture fixture;
@@ -4337,7 +4550,16 @@ namespace VideoProcessorTest
 				UploadDejudderFrame(gpu, a, planesA);
 				UploadDejudderFrame(gpu, b, planesB);
 				Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
-				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes, 1));
+				// 6c: B's occlusion mask. In B the square has moved to x 96..159,
+				// so the background it uncovered (x 80..95, bx 5) is new; the
+				// square's inside and the far background were seen in A.
+				const DejudderField occlusion = DownloadField(gpu, warp, warp.Occlusion(1));
+				auto seen = [&](int bx, int by) { return occlusion.texels[(by * occlusion.blocksX + bx) * 4] > 0.5f; };
+				Assert::IsFalse(seen(5, 3), L"Uncovered background in B must be marked new");
+				Assert::IsTrue(seen(7, 3), L"The square's inside was seen in A");
+				Assert::IsTrue(seen(1, 1) && seen(14, 6), L"The still background was seen in A");
+				Assert::IsNull(warp.Occlusion(2));
 				const DejudderField field = DownloadField(gpu, warp);
 				// Blocks are 16x16 source pixels: the square covers bx 5..8,
 				// by 2..5. bx 9 is about to be covered (leading edge).

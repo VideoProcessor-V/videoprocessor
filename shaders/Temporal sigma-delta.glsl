@@ -40,6 +40,19 @@
  *   still run, cheaply) and the quantizer output is byte-for-byte the stage 2
  *   version's (same noise sequence: see `frame / 5`).
  *
+ * Occlusion mask (stage 6c, `occlusion_mask` = 1, set by the renderer)
+ *   On the first refresh of a new source frame the de-judder's matcher knows
+ *   which blocks show content that was not visible in the previous frame
+ *   (uncovered or new). The renderer's OcclusionMask hook writes that into
+ *   the alpha channel of the OUTPUT texture just before this shader: 1 = seen
+ *   before, 0 = new. Where it is 0 no residual is carried into the pixel (it
+ *   is quantised fresh), and this shader writes alpha back to 1. The renderer
+ *   sets `occlusion_mask` to 1 only on refreshes where it installed the hook;
+ *   with 0 (the default) alpha is ignored and the output is unchanged.
+ *   Alpha ownership: the mask hook and this shader own alpha at OUTPUT; the
+ *   extended-range carry (Stage 10) owns it only from the RGB stage to the
+ *   SCALED stage, so they never overlap.
+ *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and
  *   libplacebo's encode_color (so values are already in the target's code
@@ -121,6 +134,13 @@
 //!MINIMUM 0.1
 //!MAXIMUM 8.0
 1.5
+
+//!PARAM occlusion_mask
+//!DESC Set by the renderer: 1 = read the de-judder occlusion mask from alpha (stage 6c), 0 = ignore alpha
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
 
 //!PARAM test_ramp
 //!DESC 1 = replace the picture with a 10-bit horizontal grey ramp for verification
@@ -563,10 +583,12 @@ void hook()
         ivec2 spos = clamp(pos, ivec2(0), state_size - ivec2(1));
         vec3 r = vec3(0.0);
         bool have = false;
+        // New or uncovered content (occlusion mask 0): nothing to carry from.
+        bool occluded = occlusion_mask > 0.5 && src.a < 0.5;
 
         // Motion-compensated carry: the residual from where this pixel's
         // content was on the previous refresh.
-        if (motion_compensation > 0.5) {
+        if (!occluded && motion_compensation > 0.5) {
             vec4 mv = MV_mul * texelFetch(MV_raw,
                 min(pos / 16, textureSize(MV_raw, 0) - ivec2(1)), 0);
             ivec2 v = ivec2(round(mv.xy));   // full pixels
@@ -576,7 +598,7 @@ void hook()
                 have = carried(from, x, r);
         }
         // Plain motion gate: the same pixel, if it did not change.
-        if (!have)
+        if (!have && !occluded)
             have = carried(spos, x, r);
 
         // First-order sigma-delta: quantise the error-corrected value, carry
@@ -590,6 +612,7 @@ void hook()
         k = clamp(floor(x + d + 0.5), 0.0, 255.0);
     }
 
-    vec4 outc = vec4(k * out_step, src.a);
+    // With the occlusion mask in alpha, alpha goes back to 1 here.
+    vec4 outc = vec4(k * out_step, occlusion_mask > 0.5 ? 1.0 : src.a);
     imageStore(out_image, pos, outc / HOOKED_mul);
 }

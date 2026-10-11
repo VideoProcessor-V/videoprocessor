@@ -740,6 +740,13 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 		DrawText(hdc, line, PADDING, y);
 		y += lineHeight;
 	}
+
+	if (!m_stats.dejudderStatus.IsEmpty())
+	{
+		line.Format(TEXT("De-judder:        %s"), static_cast<LPCTSTR>(m_stats.dejudderStatus));
+		DrawText(hdc, line, PADDING, y);
+		y += lineHeight;
+	}
 	
 	// Conversion Performance (show if available)
 	if (m_stats.hasConversionData)
@@ -1012,6 +1019,8 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 	// The selected rule and shader summary are always visible, followed by one row per active
 	// shader. DrawStats also contains three four-pixel section separators.
 	lineCount += 2 + stats.activeShaders.size();
+	if (!stats.dejudderStatus.IsEmpty())
+		++lineCount;
 	const int lineHeight =
 		stats.isAlphaRenderer ? ALPHA_LINE_HEIGHT : LINE_HEIGHT;
 	return PADDING * 2 + static_cast<int>(lineCount) * lineHeight + 12;

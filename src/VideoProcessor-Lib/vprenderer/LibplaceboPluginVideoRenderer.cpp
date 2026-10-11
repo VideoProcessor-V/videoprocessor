@@ -566,6 +566,12 @@ bool LibplaceboPluginVideoRenderer::GetPresentationTimingStatus(
 	return m_renderer && m_renderer->GetPresentationTimingStatus(status);
 }
 
+bool LibplaceboPluginVideoRenderer::GetDejudderStatus(CString& status) const
+{
+	status.Empty();
+	return m_renderer && m_renderer->GetDejudderStatus(status);
+}
+
 
 bool LibplaceboPluginVideoRenderer::GetConversionPerformance(
 	double& currentUs, double& avg10s, double& max10s) const

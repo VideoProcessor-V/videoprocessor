@@ -43,6 +43,7 @@
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderPolicy.h>
+#include <vprenderer/OcclusionMaskHook.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -850,6 +851,7 @@ namespace
 		double dejudderStrength = 0.0;
 		double dejudderMatchTolerance = 3.0;
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
+		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string debandStrength = "auto";
@@ -978,7 +980,7 @@ namespace
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
-			<< settings.dejudderFrameTrust << '|'
+			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1915,6 +1917,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
 					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
+		}
+		if (config.TryGetString(rule.section, "occlusion_mask", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.occlusionMask = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid occlusion_mask '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.occlusionMask ? "on" : "off");
 		}
 		if (config.TryGetString(rule.section, "contrast_recovery", raw))
 		{
@@ -3846,8 +3856,51 @@ struct LibplaceboVideoRenderer::Impl
 			sample.presentRefreshCount = refresh;
 		}
 	}
+	// 6c: the occlusion mask. Estimate(A, B) writes B's mask into the slot
+	// not holding the mask for the frame now showing; dejudderMaskSequence
+	// says which source frame each slot is for (0 = none/used).
+	uint64_t dejudderMaskSequence[2] = { 0, 0 };
+	bool dejudderExtrasAllowed = false;
+	bool dejudderMaskParamSet = false;
+	bool dejudderMaskNoSigmaLogged = false;
+	bool dejudderMaskNlsLogged = false;
+	unsigned long long dejudderMaskFrames = 0;
+	OcclusionMask::Hook occlusionMaskHook;
+	// 6b-2b: the stats overlay line, published by the render thread at most
+	// twice a second and read by the UI under its own small lock.
+	std::mutex dejudderStatusMutex;
+	std::string dejudderStatus;
+	ULONGLONG dejudderStatusTick = 0;
+	void PublishDejudderStatus(bool force = false)
+	{
+		const ULONGLONG now = GetTickCount64();
+		if (!force && dejudderStatusTick != 0 && now - dejudderStatusTick < 500)
+			return;
+		dejudderStatusTick = now;
+		std::string text;
+		const bool on = activeSettings.dejudderStrength > 0.0 || activeSettings.occlusionMask;
+		if (on)
+		{
+			char line[200];
+			const DejudderExtraStats& st = dejudderExtraStats;
+			if (dejudderReason != DejudderPolicy::Reason::Active)
+				std::snprintf(line, sizeof(line), "%s", DejudderPolicy::Name(dejudderReason));
+			else if (!dejudderExtrasAllowed)
+				std::snprintf(line, sizeof(line), "mask only (cadence %.2f)", st.cadenceRatio);
+			else
+				std::snprintf(line, sizeof(line), "s=%.2f, cadence %.2f, +%d extras %.1f ms, late %llu, full %llu, held %llu",
+					activeSettings.dejudderStrength, st.cadenceRatio, st.lastExtrasPerFrame, st.lastMs,
+					st.late + st.nextFrameLate, st.swapchainFull, st.holds);
+			text = line;
+			if (activeSettings.occlusionMask)
+				text += dejudderMaskParamSet || dejudderMaskFrames > 0 ? ", mask on" : ", mask waiting";
+		}
+		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
+		dejudderStatus = std::move(text);
+	}
 	void ReleaseDejudder()
 	{
+		dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
 		dejudder.reset();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
@@ -7784,6 +7837,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderStrength = next.dejudderStrength;
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
+		currentTransport.occlusionMask = next.occlusionMask;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.debandStrength = next.debandStrength;
@@ -7844,6 +7898,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
+		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
@@ -10648,15 +10703,25 @@ struct LibplaceboVideoRenderer::Impl
 		const VideoFrameFormatterOutputContract& contract,
 		int width, int height, size_t rowBytes, int chromaHeight, bool lossless422,
 		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced,
-		double sourceHz)
+		double sourceHz, uint64_t nextSourceSequence)
 	{
 		// Off and settled: today's path, nothing else is done.
-		if (!(activeSettings.dejudderStrength > 0.0) && dejudderReason == DejudderPolicy::Reason::Off &&
+		if (!(activeSettings.dejudderStrength > 0.0) && !activeSettings.occlusionMask &&
+			dejudderReason == DejudderPolicy::Reason::Off &&
 			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0])
+		{
+			if (dejudderStatusTick != 0)
+			{
+				dejudderStatusTick = 0;
+				std::lock_guard<std::mutex> guard(dejudderStatusMutex);
+				dejudderStatus.clear();
+			}
 			return;
+		}
 		const AlphaPresentationSnapshot telemetry = presentationTelemetry.Snapshot();
 		DejudderPolicy::Input in;
 		in.strength = activeSettings.dejudderStrength;
+		in.occlusionMask = activeSettings.occlusionMask;
 		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
 		in.sourceHz = sourceHz;
 		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
@@ -10676,6 +10741,8 @@ struct LibplaceboVideoRenderer::Impl
 		};
 		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
 		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
+		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
+		PublishDejudderStatus(reason != dejudderReason);
 		// A reason that flips (e.g. the queue running low) logs at most one
 		// line per 5 s; once the 5 s pass, the reason then current is logged
 		// with the number of changes not shown, so the log never ends stale.
@@ -10691,8 +10758,9 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				const std::string skipped = dejudderReasonChangesNotLogged > 1 ?
 					", " + std::to_string(dejudderReasonChangesNotLogged - 1) + " changes not logged" : std::string();
-				DebugLog::Log("De-judder: %s (strength %.2f, source %.3f Hz, display %.3f Hz, match tolerance %.1f%s)",
-					DejudderPolicy::Name(reason), in.strength, in.sourceHz, in.displayHz,
+				DebugLog::Log("De-judder: %s (strength %.2f, extras %s, occlusion mask %s, source %.3f Hz, display %.3f Hz, match tolerance %.1f%s)",
+					DejudderPolicy::Name(reason), in.strength, dejudderExtrasAllowed ? "on" : "off",
+					in.occlusionMask ? "on" : "off", in.sourceHz, in.displayHz,
 					activeSettings.dejudderMatchTolerance, skipped.c_str());
 				dejudderReasonLogTick = now;
 				dejudderReasonChangesNotLogged = 0;
@@ -10764,7 +10832,12 @@ struct LibplaceboVideoRenderer::Impl
 		b = a;
 		b.luma = dejudderNextTextures[0];
 		b.chroma = dejudderNextTextures[1];
-		if (!dejudder->Estimate(a, b))
+		// 6c: B's occlusion mask into the slot not holding the mask for the
+		// frame now showing (A), so A's survives until it is rendered.
+		int maskSlot = -1;
+		if (activeSettings.occlusionMask)
+			maskSlot = dejudderMaskSequence[0] == sourceSequence ? 1 : 0;
+		if (!dejudder->Estimate(a, b, maskSlot))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
@@ -10772,6 +10845,8 @@ struct LibplaceboVideoRenderer::Impl
 			return;
 		}
 		dejudderEstimatedSequence = sourceSequence;
+		if (maskSlot >= 0)
+			dejudderMaskSequence[maskSlot] = nextSourceSequence;
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
 				dejudderEstimates, width, height, lossless422 ? "4:2:2" : "4:2:0");
@@ -10925,8 +11000,15 @@ struct LibplaceboVideoRenderer::Impl
 		a.chromaShiftY = f.lossless422 ? 0 : 1;
 		std::vector<const pl_hook*> hooks;
 		for (int i = 0; i < f.params->num_hooks; ++i)
-			if (f.params->hooks[i] != f.ledMeasurementHook)
+			if (f.params->hooks[i] != f.ledMeasurementHook && f.params->hooks[i] != occlusionMaskHook.Get())
 				hooks.push_back(f.params->hooks[i]);
+		// The mask is for a source frame's first refresh only (6c).
+		if (dejudderMaskParamSet)
+		{
+			for (const pl_hook* hook : hooks)
+				CustomHookChain::SetHookParameter(hook, "occlusion_mask", 0.0);
+			dejudderMaskParamSet = false;
+		}
 		// Without the LED measurement the extras' list may no longer contain a
 		// hook that triggers the PRE_OUTPUT encoding bug; then the repair would
 		// encode a second time (audit 6b-2a).
@@ -11153,6 +11235,7 @@ struct LibplaceboVideoRenderer::Impl
 		VideoStateComPtr& statePtr,
 		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& convertedPayload,
 		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& nextConvertedPayload,
+		uint64_t nextSourceSequence,
 		uint64_t frameGeneration,
 		uint64_t sourceSequence,
 		const ActivePictureFrameIdentity& activePictureIdentity,
@@ -12118,7 +12201,7 @@ struct LibplaceboVideoRenderer::Impl
 			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
 				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
 				state.displayMode && state.displayMode->IsInterlaced(),
-				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0);
+				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0, nextSourceSequence);
 			std::string resolvedIngressStatus = nativeRgbLayout.label;
 			if (!analysisSource.IsValid())
 				resolvedIngressStatus += " (analysis unavailable)";
@@ -12168,7 +12251,7 @@ struct LibplaceboVideoRenderer::Impl
 				width, height, p010RowBytes, chromaHeight, lossless422Upload,
 				state.invertedVertical, sourceSequence, cadenceRepeat, false,
 				state.displayMode && state.displayMode->IsInterlaced(),
-				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0);
+				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0, nextSourceSequence);
 			if (lossless422Upload)
 			{
 				switch (state.videoFrameEncoding)
@@ -15467,6 +15550,48 @@ struct LibplaceboVideoRenderer::Impl
         customHooks.Collect(lowLatencyQueue, frameHooks);
         if (submittedNls)
             frameHooks.push_back(submittedNls);
+        // Stage 6c: the occlusion mask for this source frame's first refresh,
+        // into alpha just before the sigma-delta (which must take it: its
+        // `occlusion_mask` parameter). Not on cadence repeats (the same
+        // picture again) and not with NLS (a non-linear output mapping).
+        if (activeSettings.occlusionMask || dejudderMaskParamSet)
+        {
+            int maskSlot = -1;
+            for (int slot = 0; slot < 2; ++slot)
+                if (dejudderMaskSequence[slot] == sourceSequence && sourceSequence != 0)
+                    maskSlot = slot;
+            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat &&
+                dejudder->Occlusion(maskSlot);
+            if (install && submittedNls)
+            {
+                install = false;
+                if (!dejudderMaskNlsLogged)
+                    DebugLog::Log("De-judder occlusion mask: not used while NLS is active (non-linear output mapping)");
+                dejudderMaskNlsLogged = true;
+            }
+            size_t sigmaIndex = frameHooks.size();
+            for (size_t i = 0; i < frameHooks.size(); ++i)
+                if (CustomHookChain::SetHookParameter(frameHooks[i], "occlusion_mask", install ? 1.0 : 0.0) &&
+                    sigmaIndex == frameHooks.size())
+                    sigmaIndex = i;
+            dejudderMaskParamSet = install;
+            if (install && sigmaIndex == frameHooks.size())
+            {
+                install = false;
+                if (!dejudderMaskNoSigmaLogged)
+                    DebugLog::Log("De-judder occlusion mask: on, but no sigma-delta in the shader chain takes it");
+                dejudderMaskNoSigmaLogged = true;
+            }
+            if (install)
+            {
+                occlusionMaskHook.SetFrame(dejudder->Occlusion(maskSlot), renderImage.crop, target.crop);
+                frameHooks.insert(frameHooks.begin() + static_cast<std::ptrdiff_t>(sigmaIndex), occlusionMaskHook.Get());
+                dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
+                if (++dejudderMaskFrames == 1 || dejudderMaskFrames % 2400 == 0)
+                    DebugLog::Log("De-judder occlusion mask: used on %llu source frames (hook applied %llu, failed %llu)",
+                        dejudderMaskFrames, occlusionMaskHook.Applied(), occlusionMaskHook.Failed());
+            }
+        }
         // libplacebo 7.360.1 drops the output encoding (limited range) after
         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
         // before any OUTPUT-stage shader such as the sigma-delta.
@@ -16218,7 +16343,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		// Stage 6b-2: extra presents, after everything A's own present
 		// records. Off (any reason other than Active) does nothing here.
-		if (rendered && submitted && dejudderReason == DejudderPolicy::Reason::Active)
+		if (rendered && submitted && dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed)
 		{
 			dejudderMainPresented();
 			DejudderExtrasFrame extrasFrame;
@@ -18351,6 +18476,18 @@ bool LibplaceboVideoRenderer::GetPresentationTargetTiming(
 	return m_presentationTargetTimingKnown.load(std::memory_order_acquire);
 }
 
+bool LibplaceboVideoRenderer::GetDejudderStatus(CString& status) const
+{
+	status.Empty();
+	if (!m_impl)
+		return false;
+	std::lock_guard<std::mutex> guard(m_impl->dejudderStatusMutex);
+	if (m_impl->dejudderStatus.empty())
+		return false;
+	status = CString(m_impl->dejudderStatus.c_str());
+	return true;
+}
+
 bool LibplaceboVideoRenderer::GetPresentationTimingStatus(CString& status) const
 {
 	status.Empty();
@@ -19587,6 +19724,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// Stage 6: the next source frame's converted planes (B), when it is
 		// already queued and converted in the same generation.
 		std::shared_ptr<const QueuedFrame::ConvertedPayload> nextConvertedPayload;
+		uint64_t nextSourceSequence = 0;
 		bool conversionFailed = false;
 		uint64_t frameGeneration = 0;
 		uint64_t sourceSequence = 0;
@@ -19748,13 +19886,17 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_frameQueue.front().activePictureIdentity);
 			m_frameQueue.pop_front();
 			nextConvertedPayload.reset();
+			nextSourceSequence = 0;
 			if (!m_frameQueue.empty())
 			{
 				const QueuedFrame& next = m_frameQueue.front();
 				if (next.generation == frameGeneration && !next.cadenceRepeat &&
 					next.sourceSequence != sourceSequence && next.converted &&
 					SameDejudderVideoState(state, next.state))
+				{
 					nextConvertedPayload = next.converted;
+					nextSourceSequence = next.sourceSequence;
+				}
 			}
 
 
@@ -19971,6 +20113,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					state,
 					convertedPayload,
 					nextConvertedPayload,
+					nextSourceSequence,
 					frameGeneration,
 					sourceSequence,
 					activePictureIdentity,

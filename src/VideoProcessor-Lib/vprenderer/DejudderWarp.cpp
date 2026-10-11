@@ -195,6 +195,25 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
+		// Occlusion for the dither (6c): the same consistency test from B's
+		// side. A block of B whose content cannot be found in A, or whose
+		// backward vector is not matched by A's forward vector, is new or
+		// uncovered content: the sigma-delta must not carry a residual into
+		// it on B's first refresh. 1 = seen before (carry allowed), 0 = new.
+		const char* const OCCLUSION_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    vec4 g = texelFetch(bwd, b, 0);
+    vec2 landed = vec2(b * 8) + vec2(4.0) + g.xy;
+    ivec2 ft = clamp(ivec2(floor(landed / 8.0)), ivec2(0), blocks - ivec2(1));
+    vec4 f = texelFetch(fwd, ft, 0);
+    bool consistent = length(g.xy + f.xy) <= consistency;
+    bool good = g.z <= tolerance;
+    imageStore(dst, b, vec4((consistent && good) ? 1.0 : 0.0, 0.0, 0.0, 1.0));
+}
+)GLSL";
+
 		// Frame trust (6b-2): the share of trusted blocks, by one 16x16 group,
 		// into a 1x1 texture. It stays on the GPU: the warp reads it, so a cut
 		// between A and B holds the whole frame without a read-back.
@@ -318,7 +337,7 @@ if (q.x < size.x && q.y < size.y) {
 	MotionWarp::~MotionWarp()
 	{
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &forward, &backward,
-			&field, &frameTrust, &warpedLuma, &warpedChroma })
+			&field, &frameTrust, &occlusion[0], &occlusion[1], &warpedLuma, &warpedChroma })
 			pl_tex_destroy(gpu, tex);
 		pl_dispatch_destroy(&dispatch);
 	}
@@ -359,7 +378,8 @@ if (q.x < size.x && q.y < size.y) {
 			!make(&l1A, l1W, l1H, scalar, readable) || !make(&l1B, l1W, l1H, scalar, readable) ||
 			!make(&l2A, l2W, l2H, scalar, readable) || !make(&l2B, l2W, l2H, scalar, readable) ||
 			!make(&forward, blocksX, blocksY, vec4f, readable) || !make(&backward, blocksX, blocksY, vec4f, readable) ||
-			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable))
+			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable) ||
+			!make(&occlusion[0], blocksX, blocksY, vec4f, readable) || !make(&occlusion[1], blocksX, blocksY, vec4f, readable))
 		{
 			error = "cannot create the motion textures";
 			return false;
@@ -450,7 +470,7 @@ if (q.x < size.x && q.y < size.y) {
 			descriptors, 7, variables, 1, blocksX, blocksY, 8);
 	}
 
-	bool MotionWarp::Estimate(const Planes& a, const Planes& b)
+	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot)
 	{
 		estimated = false;
 		if (!EnsureTextures(a)) return false;
@@ -477,6 +497,15 @@ if (q.x < size.x && q.y < size.y) {
 		if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
 			trustDesc, 2, nullptr, 0, 16, 16, 16))
 			return false;
+		if (occlusionSlot == 0 || occlusionSlot == 1)
+		{
+			const pl_shader_desc occlusionDesc[3] = {
+				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
+				Storage("dst", occlusion[occlusionSlot]) };
+			if (!Dispatch("VideoProcessor de-judder: occlusion for the dither", nullptr, OCCLUSION_BODY,
+				occlusionDesc, 3, variables, 2, blocksX, blocksY, 8))
+				return false;
+		}
 		estimated = true;
 		return true;
 	}

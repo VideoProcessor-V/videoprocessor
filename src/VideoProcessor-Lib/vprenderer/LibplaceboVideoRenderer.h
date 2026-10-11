@@ -124,6 +124,7 @@ public:
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
+	bool GetDejudderStatus(CString& status) const override;
 	bool GetRenderLoad(RendererRenderLoad& load) const override;
 	void SetRenderLoadDisplayRefreshRate(double refreshRateHz) override;
 	bool SupportsNativeStatsOverlay() const override { return true; }

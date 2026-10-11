@@ -413,6 +413,14 @@ public:
 		return false;
 	}
 
+	// Stage 6b-2b: one line for the stats overlay about the VP Renderer's
+	// de-judder and occlusion mask. Empty (false) when both are off.
+	virtual bool GetDejudderStatus(CString& status) const
+	{
+		status.Empty();
+		return false;
+	}
+
 	// Rolling render cost, for judging whether a quality setting fits inside a
 	// frame period on this machine. Renderers without per-frame instrumentation
 	// return false so the OSD does not imply a measurement it does not have.

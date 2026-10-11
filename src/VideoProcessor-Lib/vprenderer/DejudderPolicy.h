@@ -31,6 +31,7 @@ namespace DejudderPolicy
 	struct Input
 	{
 		double strength = 0.0;
+		bool occlusionMask = false;   // 6c: the estimate also runs for the mask alone
 		bool lowLatency = false;
 		bool interlaced = false;
 		double sourceHz = 0.0;
@@ -61,18 +62,29 @@ namespace DejudderPolicy
 
 	// The order is the order of the checks: the first that fails is the
 	// reason reported.
+	// Whether the motion estimate runs. It runs for the de-judder (strength
+	// > 0, uneven film cadence) and, with the occlusion mask on, for the mask
+	// alone on any cadence (mask-only mode: strength 0, no extras).
 	inline Reason Decide(const Input& in)
 	{
-		if (!(in.strength > 0.0)) return Reason::Off;
+		if (!(in.strength > 0.0) && !in.occlusionMask) return Reason::Off;
 		if (in.lowLatency) return Reason::LowLatency;
 		if (in.interlaced) return Reason::Interlaced;
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) return Reason::UnknownRates;
-		if (!IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz))) return Reason::IneligibleCadence;
+		if (!in.occlusionMask && !IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz)))
+			return Reason::IneligibleCadence;
 		if (in.nativeRgb) return Reason::NativeRgb;
 		if (!in.planeFormatsUsable) return Reason::PlaneFormat;
 		if (!in.haveNext) return Reason::NoNextFrame;
 		if (!in.nextMatches) return Reason::NextFrameDiffers;
 		return Reason::Active;
+	}
+
+	// Whether extra presents may run (with Decide() == Active): strength > 0
+	// and an uneven film cadence. False in mask-only mode.
+	inline bool ExtrasAllowed(const Input& in)
+	{
+		return in.strength > 0.0 && IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz));
 	}
 
 	inline const char* Name(Reason reason)

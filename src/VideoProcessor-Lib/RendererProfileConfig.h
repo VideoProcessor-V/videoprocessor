@@ -616,6 +616,9 @@ namespace RendererProfileConfig
 			// 6b-2: below this share of trusted blocks a frame is held whole
 			// (a cut between A and B).
 			if (key == "dejudder_frame_trust") return IsNumberInRange(value, 0.0, 1.0);
+			// 6c: the de-judder's occlusion mask for the sigma-delta (works
+			// with dejudder_strength 0: mask-only mode).
+			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
 			if (key == "sdr_input_transfer") return IsChoice(value, { "auto", "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
 			if (key == "sdr_adjust_gamma") return IsChoice(value, { "auto", "on", "off", "passthrough" });
 			expected = "an input-owned setting"; return false;

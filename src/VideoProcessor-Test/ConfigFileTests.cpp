@@ -503,7 +503,9 @@ namespace VideoProcessorTest
                 Case{ "dejudder_match_tolerance", "16", true }, Case{ "dejudder_match_tolerance", "0.4", false },
                 Case{ "dejudder_match_tolerance", "17", false },
                 Case{ "dejudder_frame_trust", "0.25", true }, Case{ "dejudder_frame_trust", "0", true },
-                Case{ "dejudder_frame_trust", "1.5", false } })
+                Case{ "dejudder_frame_trust", "1.5", false },
+                Case{ "occlusion_mask", "on", true }, Case{ "occlusion_mask", "off", true },
+                Case{ "occlusion_mask", "yes", false } })
             {
                 CachedConfigTestFile file;
                 std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
@@ -550,6 +552,21 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::IneligibleCadence); // 1.5
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.6; }) == Reason::IneligibleCadence); // 1.96: within 0.05 of 2
             Assert::IsFalse(DejudderPolicy::IsUnevenCadence(1.94));
+            // 6c mask-only mode: the estimate runs for the occlusion mask on any
+            // cadence and with strength 0, but extras need strength > 0 and an
+            // uneven film cadence.
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(in));
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.occlusionMask = true; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.0; i.occlusionMask = true; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.occlusionMask = true; i.lowLatency = true; }) == Reason::LowLatency);
+            {
+                DejudderPolicy::Input maskOnly = in;
+                maskOnly.strength = 0.0; maskOnly.occlusionMask = true;
+                Assert::IsFalse(DejudderPolicy::ExtrasAllowed(maskOnly));
+                DejudderPolicy::Input evenWithMask = in;
+                evenWithMask.sourceHz = 30.0; evenWithMask.occlusionMask = true;
+                Assert::IsFalse(DejudderPolicy::ExtrasAllowed(evenWithMask));
+            }
             Assert::IsFalse(DejudderPolicy::IsUnevenCadence(2.04));
             Assert::IsTrue(DejudderPolicy::IsUnevenCadence(2.06));
             Assert::IsTrue(with([](auto& i) { i.nativeRgb = true; }) == Reason::NativeRgb);
@@ -4068,7 +4085,8 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(LibplaceboPluginApiVersionCoversConfigurationSnapshots)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(24),
+			// 25: IVideoRenderer::GetDejudderStatus (stage 6b-2b).
+			Assert::AreEqual(static_cast<uint32_t>(25),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 
