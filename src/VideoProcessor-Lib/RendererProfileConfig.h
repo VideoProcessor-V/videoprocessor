@@ -613,6 +613,9 @@ namespace RendererProfileConfig
 			// its own match tolerance (mean luma difference, 8-bit codes).
 			if (key == "dejudder_strength") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "dejudder_match_tolerance") return IsNumberInRange(value, 0.5, 16.0);
+			// 6b-2: below this share of trusted blocks a frame is held whole
+			// (a cut between A and B).
+			if (key == "dejudder_frame_trust") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "sdr_input_transfer") return IsChoice(value, { "auto", "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
 			if (key == "sdr_adjust_gamma") return IsChoice(value, { "auto", "on", "off", "passthrough" });
 			expected = "an input-owned setting"; return false;

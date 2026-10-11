@@ -7,7 +7,8 @@
 #include <string>
 
 // Stage 6 (6a): the de-judder's motion matcher and warp, as a standalone GPU
-// component. It is not connected to the renderer yet (that is 6b).
+// component. The renderer runs it from Stage 6b (estimate in 6b-1, extra
+// presents in 6b-2).
 //
 // Given two consecutive source frames A and B as planar YCbCr textures (the
 // renderer's upload planes: a Y plane and an interleaved CbCr plane, 4:2:2
@@ -26,7 +27,9 @@
 //      `matchTolerance` and the two directions agree within
 //      `consistencyPixels` (half-resolution pixels) - otherwise it is an
 //      occlusion or a bad match,
-//   3. warps A's planes by `shift` times the A->B motion (shift = s * delta:
+//   3. counts the trusted blocks on the GPU (frame trust): below
+//      `minTrustedShare` the whole frame is held (a cut between A and B),
+//   4. warps A's planes by `shift` times the A->B motion (shift = s * delta:
 //      strength times the refresh's position after A, in source frames).
 //      Untrusted blocks are a hard hold of A's own pixels - never a blend -
 //      and samples that fall outside the picture clamp to its edge.
@@ -53,6 +56,10 @@ namespace Dejudder
 		// Search range at the top of the pyramid, in 1/32-resolution texels
 		// (+-3 = +-96 source pixels per source frame, plus the refinements).
 		int coarseRange = 3;
+		// Frame trust (6b-2): below this share of trusted blocks the whole
+		// frame is held (a cut between A and B). Measured and applied on the
+		// GPU; no read-back.
+		float minTrustedShare = 0.25f;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
 	};
@@ -77,6 +84,8 @@ namespace Dejudder
 		// The block field from the last Estimate: rgba = (vx, vy) in source
 		// pixels, trust (1/0), match error. One texel per 16x16 source block.
 		pl_tex Field() const { return field; }
+		// The share of trusted blocks from the last Estimate (1x1, r).
+		pl_tex FrameTrust() const { return frameTrust; }
 		// The raw half-resolution searches (rgba = vector in half-resolution
 		// pixels, match error); for diagnostics.
 		pl_tex Forward() const { return forward; }
@@ -115,7 +124,7 @@ namespace Dejudder
 		int blocksX = 0, blocksY = 0;
 		pl_tex halfA = nullptr, halfB = nullptr;
 		pl_tex l1A = nullptr, l1B = nullptr, l2A = nullptr, l2B = nullptr;
-		pl_tex forward = nullptr, backward = nullptr, field = nullptr;
+		pl_tex forward = nullptr, backward = nullptr, field = nullptr, frameTrust = nullptr;
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
 		bool estimated = false;
 	};

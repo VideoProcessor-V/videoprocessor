@@ -616,6 +616,95 @@ twice is rejected only in the log, not as a failed dispatch.
 - Moved to 6b-2: extra presents, phase, the stats line, the Config box,
   LED pairing and the GPU time measurement. The Config box and stats line
   are not needed while nothing visible changes.
+
+**6b-2a status (2026-10-11): extra presents built; not yet tried on the
+projector.** Design: `docs/VP-stage6b2-design.md`; the planner's answers
+were applied.
+- **Where:** one block at the end of `RenderLocked`
+  (`PresentDejudderExtras`), after A's present and all of A's telemetry.
+  It runs only when the 6b-1 reason is Active, A rendered and presented,
+  and A's motion was estimated against the current B. It reuses A's
+  `renderImage`, `target` and `frameParams`. Per extra, only the
+  backbuffer, the two source planes (the warp output) and the hook list
+  change: the hooks lose the LED measurement, so there is one exact
+  reading per source frame (LED guide §2).
+- **One at a time (a change from the note's "back to back").** Before each
+  extra, the block:
+  1. waits for vblank (`IDXGIOutput::WaitForVBlank`) until the frame
+     statistics show the previous picture (A or the last extra) on screen,
+     at vsync V_prev;
+  2. asks `DejudderPolicy::PlanExtra` whether V_prev + P_d is still A's;
+  3. if so, warps, renders and presents.
+
+  Nothing is queued ahead, so a wrong guess can never build a queue; a
+  missed extra is just A shown again, as today.
+- **Never delay B:** the extras stop when:
+  - B (or anything newer, a reset or a stop) has arrived in the queue;
+  - B could still make that refresh. B's present call is predicted from the
+    capture clock: A's callback + P_s + A's own (smoothed)
+    callback-to-present time, plus A's render time and 4 ms;
+  - it is too late to render for the refresh;
+  - an extra finishes after its refresh (counted as "late");
+  - the safety cap of 3 is reached.
+- **Phase (a refinement of the note):** A's first vsync is *observed* from
+  the frame statistics, not predicted.
+  - L = the minimum of (first vsync − callback) over the last 120 source
+    frames.
+  - δ = (V − callback_A − L)/P_s. At 24p on 60 Hz, A's first refresh
+    reads 0 or 0.2.
+  - The constant only decides which refresh counts as phase 0.
+- **Holds** (no extras, so A is shown again exactly as today; counted and
+  logged at most once per 5 s with the reason):
+  - no estimate for this A;
+  - a cadence repeat;
+  - a composed source (subtitle moving): a Stage 6 follow-on, "extras with
+    composed subtitles";
+  - not flip presentation;
+  - timing unknown;
+  - render time > 0.6 of a refresh;
+  - no DXGI swapchain or output.
+- **Cadence rule (planner item 4):** extras only for an uneven cadence:
+  refreshes per source frame not within ±0.05 of a whole number, and above
+  1.05. This includes 24p and 23.976p on 60 Hz (2.5) and 25p on 60 Hz
+  (2.4). It excludes 25p/50, 30p/60, 24p/48, 24p/120 and 1:1. Note: it also
+  includes 50p on 60 Hz (1.2), where one frame in five owns two refreshes
+  and gets one extra; that follows the rule as written.
+- **Frame trust:** a GPU pass counts the trusted blocks. Below
+  `dejudder_frame_trust` (default 0.25) the warp holds the whole frame,
+  with no read-back. The cut test requires the output to equal A exactly.
+- **A's records unchanged:**
+  - The extras never touch A's presentation record, drift correction or
+    the pacing traces.
+  - RenderLoop takes A's render cycle, queue ages and capture-to-submit
+    latency at the moment A's own present finished (a callback before the
+    extras). When the extras ran, these read as they would without extras.
+  - Drift correction reads the presentation debt (A records not yet on
+    screen) and the last present id. Extras show before B, so the debt
+    seen at B is as today.
+  - The render thread holds `renderMutex` while it waits, for up to about
+    two refreshes per source frame.
+- **Logging:** the first 200 extras, then 1 in 240, with φ0, δ, shift, ms
+  and the Present block time. Holds at most one line per 5 s. One "phase"
+  line per queue generation or rate change: the cadence, φ0, L, and the
+  first frame's extras and stop reason.
+- **Counters** for the 6b-2b stats line: extras, source frames with extras,
+  holds and the last hold reason, swapchain full (a Present blocking more
+  than half a refresh), late, render failures, last ms, cadence ratio.
+- **libplacebo peak detection:** with `peak_detection` on, extras make the
+  adaptation 2–2.5× faster in wall time at 24p. This is not corrected. The
+  owner's cinema profile uses a static tone map, so it does not arise
+  there.
+- **A's own present stays unwarped.** Warping it by s·φ0 (≤ 0.1 frame) is
+  a possible later refinement, not a plan.
+- **Tests:**
+  - policy: uneven cadence, `PlanExtra` (24p/60 phases 0.4 and 0.8; 0.6
+    from phase 0.2; B near, B arrived, past the next frame, the cap,
+    clamping), `LatencyFloor`;
+  - GPU: frame trust and the cut hold equal to A exactly;
+  - GPU: the extras' render path (warped planes through `pl_render_image`
+    move the picture by shift × motion, and a zero shift renders A
+    exactly);
+  - settings: `dejudder_frame_trust`.
 Needs the render path to see frame A and next frame B (second texture to a
 hook, or `pl_render_image_mix`). Per refresh, true position t between A and B
 (3:2 at 60 Hz cycles 0, .4, .8, .2, .6); render at

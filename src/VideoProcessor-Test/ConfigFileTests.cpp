@@ -501,7 +501,9 @@ namespace VideoProcessorTest
                 Case{ "dejudder_strength", "-0.1", false }, Case{ "dejudder_strength", "gentle", false },
                 Case{ "dejudder_match_tolerance", "3", true }, Case{ "dejudder_match_tolerance", "0.5", true },
                 Case{ "dejudder_match_tolerance", "16", true }, Case{ "dejudder_match_tolerance", "0.4", false },
-                Case{ "dejudder_match_tolerance", "17", false } })
+                Case{ "dejudder_match_tolerance", "17", false },
+                Case{ "dejudder_frame_trust", "0.25", true }, Case{ "dejudder_frame_trust", "0", true },
+                Case{ "dejudder_frame_trust", "1.5", false } })
             {
                 CachedConfigTestFile file;
                 std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
@@ -518,7 +520,7 @@ namespace VideoProcessorTest
             }
         }
 
-        TEST_METHOD(DejudderPolicyRunsOnlyForFilmCadenceWithANextFrame)
+        TEST_METHOD(DejudderPolicyRunsOnlyForUnevenCadenceWithANextFrame)
         {
             using DejudderPolicy::Reason;
             DejudderPolicy::Input in;
@@ -531,12 +533,22 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.interlaced = true; }) == Reason::Interlaced);
             Assert::IsTrue(with([](auto& i) { i.displayHz = 0.0; }) == Reason::UnknownRates);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 0.0; }) == Reason::UnknownRates);
-            // The limit is source >= display / 1.5 (40 on 60): 50 on 60 has
-            // nothing to fill; 24 on 60 and 25 on 50 do.
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::NotFilmCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::NotFilmCadence);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 39.9; }) == Reason::Active);
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; i.displayHz = 50.0; }) == Reason::Active);
+            // Uneven cadences only (planner 6b-2, item 4): refreshes per source
+            // frame must not be a whole number (+-0.05), and more than ~1.
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 23.976; i.displayHz = 59.94; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 23.976; }) == Reason::Active);    // 2.5025
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; }) == Reason::Active);      // 2.4
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.0; }) == Reason::EvenCadence); // 2:2
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 29.97; }) == Reason::EvenCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; i.displayHz = 50.0; }) == Reason::EvenCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 48.0; }) == Reason::EvenCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 120.0; }) == Reason::EvenCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; }) == Reason::EvenCadence); // 1:1
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; i.displayHz = 50.0; }) == Reason::EvenCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 58.0; }) == Reason::EvenCadence); // ~1, nothing to fill
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::Active);      // 1.2: uneven
+            Assert::IsFalse(DejudderPolicy::IsUnevenCadence(2.04));
+            Assert::IsTrue(DejudderPolicy::IsUnevenCadence(2.06));
             Assert::IsTrue(with([](auto& i) { i.nativeRgb = true; }) == Reason::NativeRgb);
             Assert::IsTrue(with([](auto& i) { i.planeFormatsUsable = false; }) == Reason::PlaneFormat);
             Assert::IsTrue(with([](auto& i) { i.haveNext = false; }) == Reason::NoNextFrame);
@@ -545,6 +557,72 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.lowLatency = true; i.haveNext = false; }) == Reason::Off);
             Assert::AreEqual("active", DejudderPolicy::Name(Reason::Active));
             Assert::AreEqual("low-latency queue", DejudderPolicy::Name(Reason::LowLatency));
+        }
+
+        TEST_METHOD(DejudderExtrasFillOnlyTheRefreshesTheFrameOwns)
+        {
+            using DejudderPolicy::Stop;
+            // 24p on 60 Hz, times in ms / 1000. A's callback at 0, display
+            // latency floor 100 ms, A's present call 90 ms after its callback
+            // (so B's call is due at 41.67 + 90 = 131.67), B needs 6 ms.
+            const double pd = 1.0 / 60.0, ps = 1.0 / 24.0;
+            auto input = [&](double previousVsync, int done)
+            {
+                DejudderPolicy::ExtraInput in;
+                in.previousVsync = previousVsync; in.displayPeriod = pd; in.sourcePeriod = ps;
+                in.callbackA = 0.0; in.latencyFloor = 0.100; in.callToCallback = 0.090;
+                in.renderAllowance = 0.006; in.extrasDone = done;
+                return in;
+            };
+            // A first shown at 100 ms (phase 0): extras at 116.7 (0.4) and
+            // 133.3 (0.8)? B can make 133.3 only if 131.67 + 6 < 133.3: no,
+            // so the third refresh is A's too.
+            DejudderPolicy::ExtraDecision d = DejudderPolicy::PlanExtra(input(0.100, 0));
+            Assert::IsTrue(d.present);
+            Assert::AreEqual(0.4, d.delta, 1e-9);
+            d = DejudderPolicy::PlanExtra(input(0.100 + pd, 1));
+            Assert::IsTrue(d.present);
+            Assert::AreEqual(0.8, d.delta, 1e-9);
+            // The next refresh (150 ms) is B's.
+            d = DejudderPolicy::PlanExtra(input(0.100 + 2 * pd, 2));
+            Assert::IsFalse(d.present);
+            Assert::IsTrue(d.stop == Stop::NextFrameNear);
+            // B arriving early, or already queued, ends the extras at once.
+            DejudderPolicy::ExtraInput early = input(0.100, 0);
+            early.callToCallback = 0.065;   // B's call due at 106.7: it makes 116.7
+            Assert::IsTrue(DejudderPolicy::PlanExtra(early).stop == Stop::NextFrameNear);
+            DejudderPolicy::ExtraInput queued = input(0.100, 0);
+            queued.nextFrameArrived = true;
+            Assert::IsTrue(DejudderPolicy::PlanExtra(queued).stop == Stop::NextFrameArrived);
+            // A frame first shown at phase 0.2 (108.3 ms) gets one extra at 0.6.
+            d = DejudderPolicy::PlanExtra(input(0.100 + 0.2 * ps, 0));
+            Assert::IsTrue(d.present);
+            Assert::AreEqual(0.6, d.delta, 1e-9);
+            // Phase past the next frame, or the cap, stops; a negative phase clamps.
+            DejudderPolicy::ExtraInput late = input(0.100, 0);
+            late.latencyFloor = 0.070;
+            late.callToCallback = 0.200;
+            Assert::IsTrue(DejudderPolicy::PlanExtra(late).stop == Stop::PastNextFrame);
+            Assert::IsTrue(DejudderPolicy::PlanExtra(input(0.100, 3)).stop == Stop::MaxExtras);
+            DejudderPolicy::ExtraInput before = input(0.050, 0);
+            before.callToCallback = 0.200;
+            d = DejudderPolicy::PlanExtra(before);
+            Assert::IsTrue(d.present);
+            Assert::AreEqual(0.0, d.delta);
+        }
+
+        TEST_METHOD(DejudderLatencyFloorIsTheRecentMinimum)
+        {
+            DejudderPolicy::LatencyFloor floor;
+            Assert::AreEqual(0.0, floor.Floor());
+            floor.Add(0.108); floor.Add(0.100); floor.Add(0.108);
+            Assert::AreEqual(0.100, floor.Floor());
+            for (size_t i = 0; i < DejudderPolicy::LatencyFloor::Capacity; ++i)
+                floor.Add(0.120);
+            Assert::AreEqual(0.120, floor.Floor(), 0.0, L"Old values leave the window");
+            Assert::AreEqual(DejudderPolicy::LatencyFloor::Capacity, floor.Count());
+            floor.Reset();
+            Assert::AreEqual(size_t{ 0 }, floor.Count());
         }
 
         TEST_METHOD(EdgeBlankingRejectsInvalidValues)

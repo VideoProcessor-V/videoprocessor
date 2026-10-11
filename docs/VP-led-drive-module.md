@@ -79,6 +79,18 @@ queue holds one frame, so the module is reactive.
 Readback to the CPU: one small buffer per frame, asynchronously (never stall
 the render thread on a GPU readback).
 
+**De-judder extra presents (Stage 6b-2): measured once per source frame, on
+purpose.** With the de-judder on, a source frame is presented two or three
+times: A's own present, then extras of A warped by s·δ.
+- The exact measurement hook runs **only on A's own present**. The extras
+  leave it out of their hook list (`PresentDejudderExtras`). So each source
+  frame gives exactly one exact reading, paired with its raw prediction by
+  source identity. This is how the planner required the pairing.
+- The compensation hook stays on every present. Its gain is per source
+  frame already.
+- Do not "fix" the missing measurement on extras. Adding it would give one
+  frame several readings and make the correction ratio drift.
+
 ### Layer 2 — Controller (pure logic, no hardware, unit-testable)
 
 Inputs: the per-frame statistics, the projector's reported light range,

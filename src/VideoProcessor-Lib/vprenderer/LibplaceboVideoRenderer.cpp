@@ -848,6 +848,7 @@ namespace
 		// Stage 6 de-judder: 0 = off (today's path); its own match tolerance.
 		double dejudderStrength = 0.0;
 		double dejudderMatchTolerance = 3.0;
+		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string debandStrength = "auto";
@@ -976,6 +977,7 @@ namespace
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
+			<< settings.dejudderFrameTrust << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1900,7 +1902,8 @@ namespace
 					rule.section.c_str(), raw.c_str());
 		}
 		for (const auto& numeric : { std::make_tuple("dejudder_strength", 0.0, 1.0, &settings.dejudderStrength),
-			std::make_tuple("dejudder_match_tolerance", 0.5, 16.0, &settings.dejudderMatchTolerance) })
+			std::make_tuple("dejudder_match_tolerance", 0.5, 16.0, &settings.dejudderMatchTolerance),
+			std::make_tuple("dejudder_frame_trust", 0.0, 1.0, &settings.dejudderFrameTrust) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -3789,6 +3792,29 @@ struct LibplaceboVideoRenderer::Impl
 	unsigned long long dejudderFailures = 0;
 	ULONGLONG dejudderReasonLogTick = 0;
 	unsigned long long dejudderReasonChangesNotLogged = 0;
+	// 6b-2 extra presents: phase state, the vsync output and the counters.
+	struct DejudderExtraStats
+	{
+		unsigned long long sourceFrames = 0;    // source frames that got at least one extra
+		unsigned long long extras = 0;
+		unsigned long long holds = 0;           // source frames held (no extras) while active
+		unsigned long long swapchainFull = 0;   // an extra's Present blocked > half a refresh
+		unsigned long long late = 0;            // an extra finished after its vsync
+		unsigned long long renderFailures = 0;
+		double lastMs = 0.0;                    // warp + render + present of the last extra
+		int lastExtrasPerFrame = 0;
+		double cadenceRatio = 0.0;
+		std::string lastHold;
+	};
+	DejudderExtraStats dejudderExtraStats;
+	DejudderPolicy::LatencyFloor dejudderLatencyFloor;
+	double dejudderCallLatency = 0.0;
+	uint64_t dejudderPhaseGeneration = 0;
+	bool dejudderPhaseLogPending = true;
+	CComPtr<IDXGIOutput> dejudderOutput;
+	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
+	ULONGLONG dejudderHoldLogTick = 0;
+	unsigned long long dejudderHoldsNotLogged = 0;
 	void ReleaseDejudder()
 	{
 		dejudder.reset();
@@ -4653,6 +4679,8 @@ struct LibplaceboVideoRenderer::Impl
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
 				ReleaseDejudder();   // before the device goes
+				dejudderOutput.Release();
+				dejudderOutputSwapchain = nullptr;
 				if (dejudderReasonChangesNotLogged > 0)
 				{
 					DebugLog::Log("De-judder: %s at teardown (%llu changes not logged)",
@@ -7720,6 +7748,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.saturation = next.saturation;
 		currentTransport.dejudderStrength = next.dejudderStrength;
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
+		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.debandStrength = next.debandStrength;
@@ -7779,6 +7808,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.saturation != next.saturation, "saturation");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
+		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
@@ -10635,7 +10665,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 			reason == DejudderPolicy::Reason::Interlaced ||
-			reason == DejudderPolicy::Reason::NotFilmCadence || reason == DejudderPolicy::Reason::NativeRgb)
+			reason == DejudderPolicy::Reason::EvenCadence || reason == DejudderPolicy::Reason::NativeRgb)
 		{
 			if (dejudder || dejudderNextTextures[0])
 				ReleaseDejudder();
@@ -10674,16 +10704,21 @@ struct LibplaceboVideoRenderer::Impl
 				return;
 			}
 		(void)flipped;   // A and B share the orientation; the warp keeps it.
+		const float matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
+		const float frameTrust = static_cast<float>(activeSettings.dejudderFrameTrust);
 		if (!dejudder)
 		{
 			Dejudder::Settings settings;
-			settings.matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
+			settings.matchTolerance = matchTolerance;
+			settings.minTrustedShare = frameTrust;
 			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, settings);
 		}
-		else if (dejudder->GetSettings().matchTolerance != static_cast<float>(activeSettings.dejudderMatchTolerance))
+		else if (dejudder->GetSettings().matchTolerance != matchTolerance ||
+			dejudder->GetSettings().minTrustedShare != frameTrust)
 		{
 			Dejudder::Settings settings = dejudder->GetSettings();
-			settings.matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
+			settings.matchTolerance = matchTolerance;
+			settings.minTrustedShare = frameTrust;
 			dejudder->SetSettings(settings);
 		}
 		Dejudder::Planes a, b;
@@ -10705,6 +10740,306 @@ struct LibplaceboVideoRenderer::Impl
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
 				dejudderEstimates, width, height, lossless422 ? "4:2:2" : "4:2:0");
+	}
+
+	// Stage 6b-2: extra presents. After A's own present, each further
+	// refresh A owns gets one picture of A warped by s*delta, presented one
+	// at a time: wait until the previous picture is on screen, ask
+	// DejudderPolicy::PlanExtra whether the next refresh is still A's, then
+	// warp, render with A's frame, target and hooks (minus the LED
+	// measurement: one exact reading per source frame, from A's own
+	// present) and present. Nothing here touches A's presentation record,
+	// drift correction or the pacing traces. Returns true when it spent time
+	// (waited or presented), so RenderLoop uses A's own completion time.
+	struct DejudderExtrasFrame
+	{
+		const pl_frame* image = nullptr;           // A as rendered
+		const pl_frame* target = nullptr;          // A's target; the FBO is replaced per extra
+		const pl_render_params* params = nullptr;  // A's parameters and hooks
+		const pl_hook* ledMeasurementHook = nullptr;
+		bool lossless422 = false;
+		bool cadenceRepeat = false;
+		uint64_t frameGeneration = 0;
+		uint64_t sourceSequence = 0;
+		int64_t callbackQpc = 0;   // A's capture callback
+		int64_t mainCallQpc = 0;   // A's present call
+		double captureRateHz = 0.0;
+		double renderMs = 0.0;
+		const std::function<bool()>* nextFrameArrived = nullptr;
+	};
+
+	void DejudderHold(const char* why)
+	{
+		++dejudderExtraStats.holds;
+		dejudderExtraStats.lastHold = why;
+		++dejudderHoldsNotLogged;
+		const ULONGLONG now = GetTickCount64();
+		if (dejudderHoldLogTick == 0 || now - dejudderHoldLogTick >= 5000)
+		{
+			DebugLog::Log("De-judder: hold (%s; %llu holds since the last line, %llu in total)",
+				why, dejudderHoldsNotLogged, dejudderExtraStats.holds);
+			dejudderHoldLogTick = now;
+			dejudderHoldsNotLogged = 0;
+		}
+	}
+
+	bool PresentDejudderExtras(const DejudderExtrasFrame& f)
+	{
+		if (dejudderReason != DejudderPolicy::Reason::Active || !dejudder)
+			return false;
+		if (dejudderEstimatedSequence != f.sourceSequence) { DejudderHold("no motion estimate for this frame"); return false; }
+		if (f.cadenceRepeat) { DejudderHold("cadence repeat"); return false; }
+		if (!f.image || f.image->num_planes != 2 || f.image->planes[0].texture != textures[0] ||
+			f.image->planes[1].texture != textures[1])
+		{
+			DejudderHold("composed source (subtitle moving)");
+			return false;
+		}
+		if (actualOutput.presentationModel != LibplaceboOutput::PresentationModel::FLIP)
+		{
+			DejudderHold("no flip presentation");
+			return false;
+		}
+		LARGE_INTEGER frequency{};
+		QueryPerformanceFrequency(&frequency);
+		const double qpc = static_cast<double>(frequency.QuadPart);
+		const double displayHz = presentationTelemetry.Snapshot().measuredDisplayHz;
+		if (!(f.captureRateHz >= 10.0 && f.captureRateHz <= 240.0) || !(displayHz >= 10.0 && displayHz <= 480.0) ||
+			qpc <= 0.0 || f.callbackQpc <= 0 || f.mainCallQpc <= f.callbackQpc)
+		{
+			DejudderHold("timing not known");
+			return false;
+		}
+		const double sourcePeriod = 1.0 / f.captureRateHz;
+		const double displayPeriod = 1.0 / displayHz;
+		// B must be able to render in the refresh after the last extra.
+		if (f.renderMs > 600.0 * displayPeriod)
+		{
+			DejudderHold("render too slow for extras");
+			return false;
+		}
+		CComPtr<IDXGISwapChain> native;
+		native.Attach(pl_d3d11_swapchain_unwrap(swapchain));
+		if (!native)
+		{
+			DejudderHold("no DXGI swapchain");
+			return false;
+		}
+		if (dejudderOutputSwapchain != native.p || !dejudderOutput)
+		{
+			dejudderOutput.Release();
+			dejudderOutputSwapchain = nullptr;
+			if (FAILED(native->GetContainingOutput(&dejudderOutput)) || !dejudderOutput)
+			{
+				DejudderHold("no output for vsync");
+				return false;
+			}
+			dejudderOutputSwapchain = native.p;
+		}
+		UINT presentId = 0;
+		if (FAILED(native->GetLastPresentCount(&presentId)) || presentId == 0)
+		{
+			DejudderHold("no present id");
+			return false;
+		}
+
+		// Phase state: a new queue generation or source rate starts it again.
+		const double ratio = DejudderPolicy::CadenceRatio(f.captureRateHz, displayHz);
+		if (dejudderPhaseGeneration != f.frameGeneration ||
+			std::abs(ratio - dejudderExtraStats.cadenceRatio) > 0.02)
+		{
+			dejudderPhaseGeneration = f.frameGeneration;
+			dejudderLatencyFloor.Reset();
+			dejudderCallLatency = 0.0;
+			dejudderPhaseLogPending = true;
+		}
+		dejudderExtraStats.cadenceRatio = ratio;
+		const double callLatency = static_cast<double>(f.mainCallQpc - f.callbackQpc) / qpc;
+		dejudderCallLatency = dejudderCallLatency <= 0.0 || std::abs(callLatency - dejudderCallLatency) > 0.05 ?
+			callLatency : dejudderCallLatency + 0.05 * (callLatency - dejudderCallLatency);
+		const double callbackA = static_cast<double>(f.callbackQpc) / qpc;
+		// B needs its render plus a margin to make a vsync after its present call.
+		const double renderAllowance = f.renderMs / 1000.0 + 0.004;
+
+		Dejudder::Planes a;
+		a.luma = textures[0];
+		a.chroma = textures[1];
+		a.chromaShiftX = 1;
+		a.chromaShiftY = f.lossless422 ? 0 : 1;
+		std::vector<const pl_hook*> hooks;
+		for (int i = 0; i < f.params->num_hooks; ++i)
+			if (f.params->hooks[i] != f.ledMeasurementHook)
+				hooks.push_back(f.params->hooks[i]);
+		pl_render_params params = *f.params;
+		params.hooks = hooks.empty() ? nullptr : hooks.data();
+		params.num_hooks = static_cast<int>(hooks.size());
+		const float strength = static_cast<float>(activeSettings.dejudderStrength);
+		const float black[] = { 0.0f, 0.0f, 0.0f };
+
+		bool spent = false;
+		bool haveFirstVsync = false;
+		double phi0 = 0.0;
+		int extras = 0;
+		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
+		const char* failure = nullptr;
+		for (;;)
+		{
+			if ((*f.nextFrameArrived)()) { stop = DejudderPolicy::Stop::NextFrameArrived; break; }
+			// Wait until the previous picture (A or the last extra) is on screen.
+			double previousVsync = 0.0;
+			bool shown = false;
+			for (int wait = 0; wait < 3 && !shown; ++wait)
+			{
+				if (FAILED(dejudderOutput->WaitForVBlank()))
+					break;
+				spent = true;
+				DXGI_FRAME_STATISTICS statistics{};
+				if (FAILED(native->GetFrameStatistics(&statistics)))
+					break;
+				if (statistics.PresentCount >= presentId)
+				{
+					previousVsync = static_cast<double>(statistics.SyncQPCTime.QuadPart) / qpc -
+						static_cast<double>(static_cast<int32_t>(statistics.SyncRefreshCount -
+							statistics.PresentRefreshCount)) * displayPeriod;
+					shown = true;
+				}
+			}
+			if (!shown) { failure = "picture not seen on screen"; break; }
+			if (!haveFirstVsync)
+			{
+				haveFirstVsync = true;
+				dejudderLatencyFloor.Add(previousVsync - callbackA);
+			}
+			DejudderPolicy::ExtraInput in;
+			in.previousVsync = previousVsync;
+			in.displayPeriod = displayPeriod;
+			in.sourcePeriod = sourcePeriod;
+			in.callbackA = callbackA;
+			in.latencyFloor = dejudderLatencyFloor.Floor();
+			in.callToCallback = dejudderCallLatency;
+			in.renderAllowance = renderAllowance;
+			in.nextFrameArrived = (*f.nextFrameArrived)();
+			in.extrasDone = extras;
+			in.maxExtras = 3;
+			if (extras == 0)
+				phi0 = (previousVsync - callbackA - in.latencyFloor) / sourcePeriod;
+			const DejudderPolicy::ExtraDecision decision = DejudderPolicy::PlanExtra(in);
+			if (!decision.present) { stop = decision.stop; break; }
+			// Too late to render for that vsync: B's refresh must stay free.
+			if (static_cast<double>(PerformanceCounterNow()) / qpc + renderAllowance > decision.targetVsync)
+			{
+				failure = "too late for the refresh";
+				break;
+			}
+
+			const auto extraStart = SteadyClock::now();
+			const float shift = strength * static_cast<float>(decision.delta);
+			Dejudder::Planes warped;
+			if (!dejudder->Warp(a, shift, warped, true))
+			{
+				failure = "warp failed";
+				break;
+			}
+			pl_frame image = *f.image;
+			image.planes[0].texture = warped.luma;
+			image.planes[1].texture = warped.chroma;
+			pl_frame target = *f.target;
+			bool rendered = false;
+			bool submitted = false;
+			double blockMs = 0.0;
+			if (vpOwnedSwapchain)
+			{
+				CComPtr<ID3D11Texture2D> backbuffer;
+				if (FAILED(vpOwnedSwapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))) || !backbuffer)
+				{
+					failure = "no backbuffer";
+					break;
+				}
+				struct pl_d3d11_wrap_params wrapParams{};
+				wrapParams.tex = static_cast<ID3D11Resource*>(backbuffer.p);
+				pl_tex fbo = pl_d3d11_wrap(d3d11->gpu, &wrapParams);
+				if (!fbo || !fbo->params.renderable)
+				{
+					pl_tex_destroy(d3d11->gpu, &fbo);
+					failure = "backbuffer not renderable";
+					break;
+				}
+				target.planes[0].texture = fbo;
+				pl_frame_clear(d3d11->gpu, &target, black);
+				rendered = pl_render_image(renderer, &image, &target, &params);
+				pl_gpu_flush(d3d11->gpu);
+				pl_tex_destroy(d3d11->gpu, &fbo);
+				backbuffer.Release();
+				if (rendered)
+				{
+					const int64_t presentStart = PerformanceCounterNow();
+					submitted = SUCCEEDED(vpOwnedSwapchain->Present(1, 0));
+					blockMs = static_cast<double>(PerformanceCounterNow() - presentStart) * 1000.0 / qpc;
+				}
+			}
+			else
+			{
+				struct pl_swapchain_frame frame{};
+				if (!pl_swapchain_start_frame(swapchain, &frame))
+				{
+					failure = "no swapchain frame";
+					break;
+				}
+				target.planes[0].texture = frame.fbo;
+				pl_frame_clear(d3d11->gpu, &target, black);
+				rendered = pl_render_image(renderer, &image, &target, &params);
+				// An acquired frame must be submitted: on a failed extra show A
+				// itself again, never a black or partial picture.
+				if (!rendered)
+				{
+					pl_frame_clear(d3d11->gpu, &target, black);
+					pl_render_image(renderer, f.image, &target, &params);
+				}
+				const int64_t presentStart = PerformanceCounterNow();
+				submitted = pl_swapchain_submit_frame(swapchain);
+				if (submitted)
+					pl_swapchain_swap_buffers(swapchain);
+				blockMs = static_cast<double>(PerformanceCounterNow() - presentStart) * 1000.0 / qpc;
+			}
+			if (!rendered) ++dejudderExtraStats.renderFailures;
+			if (!rendered || !submitted)
+			{
+				failure = rendered ? "extra present failed" : "extra render failed";
+				break;
+			}
+			++extras;
+			++dejudderExtraStats.extras;
+			dejudderExtraStats.lastMs = std::chrono::duration<double, std::milli>(
+				SteadyClock::now() - extraStart).count();
+			if (blockMs > 500.0 * displayPeriod)
+				++dejudderExtraStats.swapchainFull;
+			native->GetLastPresentCount(&presentId);
+			if (dejudderExtraStats.extras <= 200 || dejudderExtraStats.extras % 240 == 0)
+				DebugLog::Log("De-judder extra: source=%llu k=%d phi0=%.3f delta=%.3f shift=%.3f ms=%.2f block_ms=%.2f latency_floor_ms=%.2f extras=%llu",
+					static_cast<unsigned long long>(f.sourceSequence), extras, phi0, decision.delta, shift,
+					dejudderExtraStats.lastMs, blockMs, in.latencyFloor * 1000.0, dejudderExtraStats.extras);
+			if (static_cast<double>(PerformanceCounterNow()) / qpc > decision.targetVsync)
+			{
+				++dejudderExtraStats.late;
+				failure = "extra finished after its refresh";
+				break;
+			}
+		}
+		dejudderExtraStats.lastExtrasPerFrame = extras;
+		if (extras > 0)
+			++dejudderExtraStats.sourceFrames;
+		if (failure)
+			DejudderHold(failure);
+		else if (extras == 0 && stop != DejudderPolicy::Stop::NextFrameArrived)
+			DejudderHold(DejudderPolicy::Name(stop));
+		if (dejudderPhaseLogPending && haveFirstVsync)
+		{
+			dejudderPhaseLogPending = false;
+			DebugLog::Log("De-judder phase: cadence %.3f refreshes per source frame (source %.3f Hz, display %.3f Hz), phi0 %.3f, latency floor %.2f ms, first frame %d extras, stop %s",
+				ratio, f.captureRateHz, displayHz, phi0, dejudderLatencyFloor.Floor() * 1000.0, extras,
+				failure ? failure : DejudderPolicy::Name(stop));
+		}
+		return spent || extras > 0;
 	}
 
 	bool RenderLocked(
@@ -10738,8 +11073,12 @@ struct LibplaceboVideoRenderer::Impl
 		std::atomic<int>& sceneDetectionStatus,
 		AlphaCadenceCorrectionDecision& correctionDecision,
 		bool& presentationTargetTimingKnown,
-		double& presentationTargetLeadMs)
+		double& presentationTargetLeadMs,
+		const std::function<bool()>& dejudderNextFrameArrived,
+		const std::function<void()>& dejudderMainPresented,
+		bool& dejudderExtrasSpentTime)
 	{
+		dejudderExtrasSpentTime = false;
 		// Snapshot once so a hotkey arriving mid-frame takes effect cleanly on
 		// the next frame instead of mixing box and cut/paste modes in one render.
 		const SubtitlePreviewMode subtitlePreviewMode =
@@ -15768,6 +16107,27 @@ struct LibplaceboVideoRenderer::Impl
 			lastRenderedEotf = state.eotf;
 			lastRenderedColorspace = state.colorspace;
 		}
+		// Stage 6b-2: extra presents, after everything A's own present
+		// records. Off (any reason other than Active) does nothing here.
+		if (rendered && submitted && dejudderReason == DejudderPolicy::Reason::Active)
+		{
+			dejudderMainPresented();
+			DejudderExtrasFrame extrasFrame;
+			extrasFrame.image = &renderImage;
+			extrasFrame.target = &target;
+			extrasFrame.params = &frameParams;
+			extrasFrame.ledMeasurementHook = ledMeasurement.Hook();
+			extrasFrame.lossless422 = lossless422Upload;
+			extrasFrame.cadenceRepeat = cadenceRepeat;
+			extrasFrame.frameGeneration = frameGeneration;
+			extrasFrame.sourceSequence = sourceSequence;
+			extrasFrame.callbackQpc = callbackQpc;
+			extrasFrame.mainCallQpc = swapStartQpc;
+			extrasFrame.captureRateHz = captureRateHz;
+			extrasFrame.renderMs = renderMs;
+			extrasFrame.nextFrameArrived = &dejudderNextFrameArrived;
+			dejudderExtrasSpentTime = PresentDejudderExtras(extrasFrame);
+		}
 		return rendered && submitted;
 	}
 
@@ -19383,6 +19743,13 @@ void LibplaceboVideoRenderer::RenderLoop()
 		AlphaCadenceCorrectionDecision correctionDecision;
 		bool presentationTargetTimingKnown = false;
 		double presentationTargetLeadMs = 0.0;
+		// Stage 6b-2: when de-judder extras ran after A's present, the
+		// measurements below use the moment A's own present finished, so A's
+		// render cycle, queue ages and latency read exactly as without extras.
+		bool dejudderExtrasSpentTime = false;
+		SteadyClock::time_point dejudderMainDoneSteady{};
+		int64_t dejudderMainDoneQpc = 0;
+		timingclocktime_t dejudderMainDoneTimingClock{};
 		const double captureRateHz =
 			m_measuredFrameRate.load(std::memory_order_relaxed);
 		const SteadyClock::time_point renderCycleStart = SteadyClock::now();
@@ -19517,10 +19884,27 @@ void LibplaceboVideoRenderer::RenderLoop()
 					m_sceneDetectionStatus,
 					correctionDecision,
 					presentationTargetTimingKnown,
-					presentationTargetLeadMs);
+					presentationTargetLeadMs,
+					// B (or anything newer, a reset or a stop) ends the extras:
+					// the queue has refilled to its dequeue depth.
+					[this, frameGeneration]()
+					{
+						std::lock_guard<std::mutex> queueGuard(m_queueMutex);
+						return m_stopRequested || m_frameQueue.size() >= PrefillTargetLocked() ||
+							(!m_frameQueue.empty() && m_frameQueue.front().generation != frameGeneration);
+					},
+					[&]()
+					{
+						dejudderMainDoneSteady = SteadyClock::now();
+						dejudderMainDoneQpc = PerformanceCounterNow();
+						if (m_timingClock)
+							dejudderMainDoneTimingClock = m_timingClock->TimingClockNow();
+					},
+					dejudderExtrasSpentTime);
 				const double renderCycleMs =
 					std::chrono::duration<double, std::milli>(
-						SteadyClock::now() - renderCycleStart).count();
+						(dejudderExtrasSpentTime ? dejudderMainDoneSteady : SteadyClock::now()) -
+						renderCycleStart).count();
 				if (rendered &&
 					correctionDecision.action != AlphaCadenceAction::Drop)
 				{
@@ -19537,7 +19921,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 						queueBefore = m_frameQueue.size();
 						recoveryTarget = PrefillTargetLocked();
 						LARGE_INTEGER qpcFrequency{};
-						const int64_t nowQpc = PerformanceCounterNow();
+						const int64_t nowQpc = dejudderExtrasSpentTime ?
+							dejudderMainDoneQpc : PerformanceCounterNow();
 						const bool qpcAvailable =
 							nowQpc > 0 && QueryPerformanceFrequency(&qpcFrequency) &&
 							qpcFrequency.QuadPart > 0;
@@ -19988,9 +20373,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 
 		if (m_timingClock)
 		{
+			const timingclocktime_t submittedTimingClock = dejudderExtrasSpentTime ?
+				dejudderMainDoneTimingClock : m_timingClock->TimingClockNow();
 			const double captureToSubmitMs = TimingClockDiffMs(
 				frame.GetTimingTimestamp(),
-				m_timingClock->TimingClockNow(),
+				submittedTimingClock,
 				m_timingClock->TimingClockTicksPerSecond());
 			m_exitLatencyMs.store(captureToSubmitMs,
 				std::memory_order_relaxed);
@@ -20002,7 +20389,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 				// leaving Alpha's immediate FIFO presentation unchanged.
 				const double captureToTargetMs = TimingClockDiffMs(
 					frame.GetCaptureTimingTimestamp(),
-					m_timingClock->TimingClockNow(),
+					dejudderExtrasSpentTime ? dejudderMainDoneTimingClock :
+						m_timingClock->TimingClockNow(),
 					m_timingClock->TimingClockTicksPerSecond()) + presentationTargetLeadMs;
 				m_presentationTargetLeadMs.store(presentationTargetLeadMs,
 					std::memory_order_relaxed);

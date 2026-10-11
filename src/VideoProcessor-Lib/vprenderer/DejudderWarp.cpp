@@ -195,6 +195,31 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
+		// Frame trust (6b-2): the share of trusted blocks, by one 16x16 group,
+		// into a 1x1 texture. It stays on the GPU: the warp reads it, so a cut
+		// between A and B holds the whole frame without a read-back.
+		const char* const FRAME_TRUST_HEADER = R"GLSL(
+shared float partial_[256];
+)GLSL";
+
+		const char* const FRAME_TRUST_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+ivec2 blocks = textureSize(field, 0);
+int count = blocks.x * blocks.y;
+float sum = 0.0;
+for (int k = int(i); k < count; k += 256)
+    sum += texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0).z > 0.5 ? 1.0 : 0.0;
+partial_[i] = sum;
+barrier();
+for (uint stride = 128u; stride > 0u; stride >>= 1) {
+    if (i < stride)
+        partial_[i] += partial_[i + stride];
+    barrier();
+}
+if (i == 0u)
+    imageStore(dst, ivec2(0), vec4(partial_[0] / float(max(count, 1)), 0.0, 0.0, 1.0));
+)GLSL";
+
 		// The vector at a source-luma position: bilinear between the four
 		// nearest block centres, trusted blocks only; the position's own
 		// block decides whether it is warped at all (untrusted: hold).
@@ -204,6 +229,9 @@ bool field_vector(vec2 lp, out vec2 v)
     ivec2 fsize = textureSize(field, 0);
     ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
     v = vec2(0.0);
+    // Too few trusted blocks (a cut between A and B): hold the whole frame.
+    if (texelFetch(frame_trust, ivec2(0), 0).r < min_trusted_share)
+        return false;
     if (texelFetch(field, own, 0).z < 0.5)
         return false;
     vec2 g = lp / 16.0 - vec2(0.5);
@@ -290,7 +318,7 @@ if (q.x < size.x && q.y < size.y) {
 	MotionWarp::~MotionWarp()
 	{
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &forward, &backward,
-			&field, &warpedLuma, &warpedChroma })
+			&field, &frameTrust, &warpedLuma, &warpedChroma })
 			pl_tex_destroy(gpu, tex);
 		pl_dispatch_destroy(&dispatch);
 	}
@@ -331,7 +359,7 @@ if (q.x < size.x && q.y < size.y) {
 			!make(&l1A, l1W, l1H, scalar, readable) || !make(&l1B, l1W, l1H, scalar, readable) ||
 			!make(&l2A, l2W, l2H, scalar, readable) || !make(&l2B, l2W, l2H, scalar, readable) ||
 			!make(&forward, blocksX, blocksY, vec4f, readable) || !make(&backward, blocksX, blocksY, vec4f, readable) ||
-			!make(&field, blocksX, blocksY, vec4f, readable))
+			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable))
 		{
 			error = "cannot create the motion textures";
 			return false;
@@ -445,6 +473,10 @@ if (q.x < size.x && q.y < size.y) {
 		if (!Dispatch("VideoProcessor de-judder: consistency", nullptr, CONSISTENCY_BODY,
 			descriptors, 3, variables, 2, blocksX, blocksY, 8))
 			return false;
+		const pl_shader_desc trustDesc[2] = { Sampled("field", field, false), Storage("dst", frameTrust) };
+		if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
+			trustDesc, 2, nullptr, 0, 16, 16, 16))
+			return false;
 		estimated = true;
 		return true;
 	}
@@ -466,21 +498,26 @@ if (q.x < size.x && q.y < size.y) {
 			return false;
 		}
 		// `src` is linear for the warp; the hold reads it with texelFetch.
-		const pl_shader_desc lumaDesc[3] = {
-			Sampled("src", a.luma, true), Sampled("field", field, false), Storage("dst", warpedLuma) };
-		const pl_shader_var lumaVars[1] = { { pl_var_float("shift"), &shift, true } };
+		const float minShare = settings.minTrustedShare;
+		const pl_shader_desc lumaDesc[4] = {
+			Sampled("src", a.luma, true), Sampled("field", field, false),
+			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedLuma) };
+		const pl_shader_var lumaVars[2] = { { pl_var_float("shift"), &shift, true },
+			{ pl_var_float("min_trusted_share"), &minShare, true } };
 		if (!Dispatch("VideoProcessor de-judder: warp luma", WARP_HEADER, WARP_LUMA_BODY,
-			lumaDesc, 3, lumaVars, 1, width, height, 16))
+			lumaDesc, 4, lumaVars, 2, width, height, 16))
 			return false;
 		const float chromaScale[2] = {
 			static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
-		const pl_shader_desc chromaDesc[3] = {
-			Sampled("src", a.chroma, true), Sampled("field", field, false), Storage("dst", warpedChroma) };
-		const pl_shader_var chromaVars[2] = {
+		const pl_shader_desc chromaDesc[4] = {
+			Sampled("src", a.chroma, true), Sampled("field", field, false),
+			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedChroma) };
+		const pl_shader_var chromaVars[3] = {
 			{ pl_var_float("shift"), &shift, true },
-			{ pl_var_vec2("chroma_scale"), chromaScale, true } };
+			{ pl_var_vec2("chroma_scale"), chromaScale, true },
+			{ pl_var_float("min_trusted_share"), &minShare, true } };
 		if (!Dispatch("VideoProcessor de-judder: warp chroma", WARP_HEADER, WARP_CHROMA_BODY,
-			chromaDesc, 3, chromaVars, 2, a.chroma->params.w, a.chroma->params.h, 16))
+			chromaDesc, 4, chromaVars, 3, a.chroma->params.w, a.chroma->params.h, 16))
 			return false;
 		out.luma = warpedLuma;
 		out.chroma = warpedChroma;

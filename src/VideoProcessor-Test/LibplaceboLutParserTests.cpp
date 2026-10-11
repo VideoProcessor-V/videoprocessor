@@ -508,6 +508,7 @@ namespace
 		}
 
 		pl_log Log() const { return m_log; }
+		pl_renderer Renderer() const { return m_renderer; }
 
 
 		// Routes libplacebo warnings and errors into `sink` (nullptr restores
@@ -1003,7 +1004,6 @@ namespace
 			DestroyWindow(window);
 		}
 
-	private:
 		static pl_frame MakeRgbFrame(pl_tex texture)
 		{
 			pl_frame frame{};
@@ -1021,6 +1021,7 @@ namespace
 			return frame;
 		}
 
+	private:
 		pl_log m_log = nullptr;
 		pl_d3d11 m_d3d11 = nullptr;
 		pl_renderer m_renderer = nullptr;
@@ -4296,14 +4297,22 @@ namespace VideoProcessorTest
 						trusted += field.trusted(bx, by) ? 1 : 0;
 				Assert::IsTrue(trusted * 100 <= field.blocksX * field.blocksY * 2,
 					(L"Trusted blocks across a cut: " + std::to_wstring(trusted)).c_str());
+				// Frame trust (6b-2): the GPU's own count matches, and is below
+				// the 25% whole-frame hold.
+				const float share = DownloadField(gpu, warp, warp.FrameTrust()).texels[0];
+				Assert::IsTrue(std::abs(share - static_cast<float>(trusted) / (field.blocksX * field.blocksY)) < 0.002f,
+					(L"Frame trust " + std::to_wstring(share)).c_str());
+				Assert::IsTrue(share < 0.25f);
 				Dejudder::Planes out;
 				Assert::IsTrue(warp.Warp(planesA.planes, 0.3f, out));
+				Assert::IsTrue(out.luma != planesA.planes.luma, L"The GPU hold still writes the warped planes");
+				// Below the frame trust the whole frame is held: every luma and
+				// chroma sample is exactly A's, including the few blocks the
+				// matcher trusted by chance.
 				const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
-				int held = 0;
-				for (size_t i = 0; i < luma.size(); ++i)
-					held += luma[i] == a.luma[i] ? 1 : 0;
-				Assert::IsTrue(held * 100 >= static_cast<int>(luma.size()) * 97,
-					L"Across a cut the warp must be a hard hold of A (no blend)");
+				const std::vector<uint16_t> cbcr = DownloadPlane(gpu, out.chroma);
+				Assert::IsTrue(luma == a.luma, L"Across a cut the luma must be exactly A");
+				Assert::IsTrue(cbcr == a.chroma, L"Across a cut the chroma must be exactly A");
 				// The caller's own cut flag holds everything.
 				Assert::IsTrue(warp.Warp(planesA.planes, 0.3f, out, false));
 				Assert::IsTrue(out.luma == planesA.planes.luma);
@@ -4337,6 +4346,8 @@ namespace VideoProcessorTest
 					L"The square's inside keeps its motion");
 				Assert::IsTrue(field.trusted(1, 1) && std::abs(field.vx(1, 1)) < 0.6f,
 					L"The still background far away is trusted with no motion");
+				Assert::IsTrue(DownloadField(gpu, warp, warp.FrameTrust()).texels[0] > 0.5f,
+					L"An occlusion is local: the frame stays trusted");
 				Dejudder::Planes out;
 				Assert::IsTrue(warp.Warp(planesA.planes, 0.4f, out));
 				const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
@@ -4346,6 +4357,111 @@ namespace VideoProcessorTest
 						Assert::AreEqual(static_cast<int>(a.luma[y * width + x]),
 							static_cast<int>(luma[y * width + x]), L"Occluded blocks are a hard hold of A");
 			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// Stage 6b-2: an extra present renders A's frame with the warped planes
+		// swapped in, through the normal pl_render_image. The rendered
+		// picture must move by shift x the motion, and a zero shift (the
+		// hold) must render exactly A's own picture.
+		TEST_METHOD(DejudderExtraRenderMovesThePictureBySDelta)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+
+			pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(targetFormat);
+			pl_tex_params targetParams{};
+			targetParams.w = width;
+			targetParams.h = height;
+			targetParams.format = targetFormat;
+			targetParams.renderable = true;
+			targetParams.host_readable = true;
+			pl_tex targetTexture = pl_tex_create(gpu, &targetParams);
+			Assert::IsNotNull(targetTexture);
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			// The renderer's source frame: Y and interleaved CbCr, 4:2:2.
+			auto render = [&](const Dejudder::Planes& planes)
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame target = TargetLutGpuFixture::MakeRgbFrame(targetTexture);
+				target.color.transfer = PL_COLOR_TRC_BT_1886;
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &target, &params));
+				pl_gpu_finish(gpu);
+				std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
+				pl_tex_transfer_params download{};
+				download.tex = targetTexture;
+				download.ptr = output.data();
+				Assert::IsTrue(pl_tex_download(gpu, &download));
+				return output;
+			};
+			const std::vector<RgbaPixel> own = render(planesA.planes);
+
+			// The hold (shift 0) renders A's own picture exactly.
+			Dejudder::Planes held;
+			Assert::IsTrue(warp.Warp(planesA.planes, 0.0f, held));
+			const std::vector<RgbaPixel> heldPixels = render(held);
+			for (size_t i = 0; i < own.size(); ++i)
+				Assert::IsTrue(own[i].r == heldPixels[i].r && own[i].g == heldPixels[i].g &&
+					own[i].b == heldPixels[i].b, L"A zero shift must render A's own picture");
+
+			// shift 0.5: the picture moves (6, 3) px. Find the best whole-pixel
+			// displacement of the rendered output over the interior.
+			Dejudder::Planes warped;
+			Assert::IsTrue(warp.Warp(planesA.planes, 0.5f, warped));
+			const std::vector<RgbaPixel> moved = render(warped);
+			int bestX = 0, bestY = 0;
+			double bestError = 1e30;
+			for (int oy = -2; oy <= 6; ++oy)
+				for (int ox = -2; ox <= 10; ++ox)
+				{
+					double error = 0.0;
+					for (int y = 24; y < height - 24; ++y)
+						for (int x = 32; x < width - 32; ++x)
+						{
+							const RgbaPixel& m = moved[static_cast<size_t>(y) * width + x];
+							const RgbaPixel& o = own[static_cast<size_t>(y - oy) * width + (x - ox)];
+							error += std::abs(m.r - o.r) + std::abs(m.g - o.g) + std::abs(m.b - o.b);
+						}
+					if (error < bestError) { bestError = error; bestX = ox; bestY = oy; }
+				}
+			Assert::IsTrue(bestX == dx / 2 && bestY == dy / 2,
+				(L"The extra moved the picture by (" + std::to_wstring(bestX) + L", " +
+					std::to_wstring(bestY) + L"), expected (6, 3)").c_str());
+			pl_tex_destroy(gpu, &targetTexture);
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
