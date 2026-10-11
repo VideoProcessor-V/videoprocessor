@@ -1,7 +1,7 @@
 # VideoProcessor: temporal dithering, judder reduction, LED drive — project brief
 
 Status: design agreed; Stage 2 blanking keys and hook chain coded (untested on
-the projector); Stage 7 in progress. Revision 14, 2026-10-09, against
+the projector); Stage 7 in progress. Revision 15, 2026-10-11, against
 `billslack2/videoprocessor` tag `1.4-beta-rc1`. **Rebase onto `1.4-beta-rc2`
 (subtitle moving, remote Config) after the current Stage 7 step and before
 Stage 5**, since RC2 touches the viewport/active-picture area Stage 5 builds
@@ -103,6 +103,10 @@ fully before touching source. When a decision changes, change it here.
      With gain > 1 (compensate mode) the knee also compresses WTW toward
      white, by design.
    - HDR sources are tone-mapped, so BTB/WTW do not apply in the same way.
+   - Measured further (`docs/VP-btb-wtw-investigation.md`): SDR upscaling
+     (sigmoid) also clips WTW, and downscaling (linear light) clips BTB.
+     **Stage 10** preserves both for SDR (`preserve_extended_range`);
+     decisions in `docs/VP-btb-wtw-answers.md`.
 7. **Survey before designing.** Before starting any stage, read the fork's
    source for mechanisms that already do part of the job, and build on them
    rather than beside them. This has already collapsed the lookahead work
@@ -130,7 +134,15 @@ fully before touching source. When a decision changes, change it here.
    halving vertical chroma) for the anamorphic stretch. The VP Renderer takes
    v210 4:2:2 natively; `video_conversion` is off in the test config and the
    stretch is done by the viewport/NLS profile.
-10. **Colour chain stays as is:** projector RealColor targets P3 (0.680/0.320,
+10. **Config-adaptable, not setup-specific.** Nothing outside the LED module
+   may assume limited range, 8-bit output, a particular gamma (2.2/2.4),
+   P3, 2560×1600 or a 60 Hz display. Range, bit depth, transfers,
+   primaries and raster come from the active profile or the hook-chain
+   templates, and each stage's tests run in both `output_range` settings.
+   The LED module is the one place the owner's projector numbers live
+   (light-meter fit, CNTR reserve, latencies), by design.
+   (`docs/VP-delta-5-config-adaptable.md`)
+11. **Colour chain stays as is:** projector RealColor targets P3 (0.680/0.320,
    0.265/0.690, 0.150/0.060), VP `target_primaries: p3_d65`. Use the P3 pair
    for BT.2020 sources too (VP gamut-maps 2020→P3 in float); do not switch to
    a 2020 container on an 8-bit link.
@@ -343,6 +355,8 @@ Stage numbers are labels, not sequence. **Build in this order:**
 8. Stage 6 — de-judder (open-ended, skippable).
 9. Stage 8 — adaptive downscale blend on top of the SSIM shader.
 10. Stage 9 — ambient-light switching.
+11. Stage 10 — extended range (BTB/WTW preserved for SDR), after Stage 6
+    and delta 5.
 
 Every step ends with: a commit → a review package per
 `docs/REVIEW-PACKAGE.md` for the design reviewer → the implementer addresses
@@ -732,6 +746,21 @@ were applied.
   adaptation 2–2.5× faster in wall time at 24p. This is not corrected. The
   owner's cinema profile uses a static tone map, so it does not arise
   there.
+- **Audit fixes (2026-10-11, `docs/audit/stage6b2a-dejudder-extras.md`):**
+  - the allowance and the hold use A's whole processing time
+    (pre-render work + RenderLocked to Present), not the render call;
+  - "the frame after extras showed a refresh late" is counted;
+  - `OutputEncodingRepair` is re-evaluated for the extras' hook list;
+  - telemetry and the pacing trace see the main present (not an extra) as
+    the latest on screen;
+  - the phase line waits for 24 frames.
+- **Order of work after 6b-2a (planner, 2026-10-11):**
+  1. 6b-2b (Config box, stats line);
+  2. 6c (occlusion mask for the dither);
+  3. Stage 7 step 7 (LED shader sign fix + deltas 3 and 4,
+     `docs/VP-led-drive-delta-3-answers.md`);
+  4. delta 5 (config-adaptable audit);
+  5. Stage 10 (extended range).
 - **A's own present stays unwarped.** Warping it by s·φ0 (≤ 0.1 frame) is
   a possible later refinement, not a plan.
 - **Tests:**
@@ -917,6 +946,26 @@ mounted facing the ceiling behind the seating so it never sees the screen;
 calibrate lights-off/lights-on readings once; switch with hysteresis.
 `[ambient]` config section; a second `SerialPort` instance with its own
 small driver (the transport is already separated from the Barco driver).
+
+### Stage 10 — Extended range (after Stage 6 and delta 5)
+
+Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
+- 10a: a carry hook at `PL_HOOK_RGB` (the out-of-range offset in alpha) and a
+  restore + VP-owned SDR conversion at `PL_HOOK_SCALED` (sign-preserving
+  pure-power transfers, BT.709 → P3 matrix only), behind
+  `preserve_extended_range: on|off` (off = today's exact path; default off
+  until the cinema check passes). Auto-off with a log line for SDR BT.2020
+  sources and non-power transfers. HDR/LLDV out of scope. No libplacebo fork.
+- 10b: the LED compensation shader sign-preserving fix (planned earlier, with
+  Stage 7 step 7).
+- Alpha ownership: the carry owns alpha from RGB to SCALED; the occlusion mask
+  (M1′) owns it from the native OUTPUT hook to the sigma-delta. They never
+  overlap.
+- Tests: the probe tables in both switch states; in-range bars max 1 code,
+  mean ≤ 0.03 against off at up 1.5 and down 0.5; the auto-off cases.
+- Projector check: a 235→255 ramp (it must continue above white with the
+  switch on) and a PLUGE at 8-bit codes 4/12/16/20 (record whether the FL35
+  shows sub-black at input level video).
 
 ## 7. Test protocol (stage 3)
 
