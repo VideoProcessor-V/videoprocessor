@@ -26,8 +26,12 @@
 namespace OutputEncodingRepair
 {
 	// True when the chain contains a hook that triggers the bug: one that runs
-	// at PRE_OUTPUT with a texture input.
-	bool Needed(const std::vector<const pl_hook*>& hooks);
+	// at PRE_OUTPUT with a texture input and that libplacebo has not disabled
+	// (a disabled hook is skipped before the shader is finished, so it does
+	// not trigger the bug - repairing then would encode twice). False when
+	// the target LUT is a CONVERSION LUT: libplacebo does not encode then.
+	bool Needed(const std::vector<const pl_hook*>& hooks,
+		const pl_render_errors* errors = nullptr, enum pl_lut_type targetLut = PL_LUT_UNKNOWN);
 
 	class Hook
 	{

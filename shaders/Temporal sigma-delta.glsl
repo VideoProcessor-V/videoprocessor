@@ -50,7 +50,7 @@
  *
  * Value domain at the OUTPUT stage (verified against libplacebo 7.360.1
  * renderer.c / colorspace.c):
- *   limited range, 10-bit swapchain : colour = code8 / 256 (black 16/256)
+ *   limited range, 10-bit swapchain : colour = 4k / 1023 = code8 / 255.75
  *   limited range, 8-bit swapchain  : colour = code8 / 255
  *   full range                      : colour = code8 / 255
  *   After the hook the renderer multiplies by 1/scale and stores to the
@@ -189,7 +189,7 @@ void hook()
         return;
     ivec2 full = textureSize(HOOKED_raw, 0);
     // The code-domain scale, as in the quantizer below.
-    float scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 256.0 : 255.0;
+    float scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0;
     float sum = 0.0;
     for (int y = 0; y < 4; y++)
         for (int x = 0; x < 4; x++) {
@@ -406,7 +406,7 @@ void hook()
     // values exist (RESID_NEXT tag).
     ivec2 full = best * 4;
     full_size = textureSize(HOOKED_raw, 0);
-    full_scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 256.0 : 255.0;
+    full_scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0;
     ivec2 corner = block * 16;
     ivec2 tagpos = clamp(corner, ivec2(0), imageSize(RESID_NEXT) - ivec2(1));
     if (abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3) {
@@ -525,14 +525,23 @@ void hook()
     // Code-domain scale of the hooked texture and the output step that
     // reproduces an exact 8-bit code after the renderer's final store.
     // Limited range on a 10-bit swapchain declared as 8-bit colour depth
-    // arrives as code8/256 (4k/1023); on an 8-bit swapchain, and in full
-    // range, as code8/255 (measured on the GPU harness: 8-bit limited white
-    // 235 read as 235/255).
-    float in_scale = (limited && swap10) ? 256.0 : 255.0;
+    // arrives as 4k/1023 = code8/255.75 (colorspace.c: 235/256 x 2^10/1023);
+    // on an 8-bit swapchain, and in full range, as code8/255. Reading the
+    // 10-bit case x256 made white 235 read 235.23 and flicker to 236 about
+    // one refresh in four (measured on a real 10-bit target, stage 6a audit).
+    float in_scale = (limited && swap10) ? 255.75 : 255.0;
     float out_step = (limited && swap10) ? (4.0 / 1023.0) : (1.0 / 255.0);
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
     vec3 x = src.rgb * in_scale;
+    // The OUTPUT texture is rgba16f: above mid grey its step is 1/8 of an
+    // 8-bit code, and a GPU may round or truncate into it, so an exact code
+    // (white 235) can arrive up to 0.125 low and the carried residual would
+    // dip it to 234 every few refreshes (seen on WARP: 940 940 940 940 936).
+    // A value within 0.13 code of a whole code is that code. Real 10-bit
+    // detail comes in steps of 0.25 code and stays further away.
+    vec3 whole = floor(x + 0.5);
+    x = mix(x, whole, vec3(lessThan(abs(x - whole), vec3(0.13))));
 
     if (test_ramp > 0.5) {
         // 10-bit horizontal ramp across the legal range, in 8-bit code units.

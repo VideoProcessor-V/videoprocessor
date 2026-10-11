@@ -670,3 +670,14 @@ code path also blends against the background and drops the alpha
 (4-component images). So the alpha route for the occlusion mask is
 unlikely to survive the LED hooks; M3 is the probable outcome.
 
+Re-audit follow-up (docs/audit/fix-output-encoding.md):
+- **Should fix, encoding twice: fixed.** `Needed()` now ignores hooks
+  libplacebo has disabled (`pl_renderer_get_errors().disabled_hooks`). A
+  disabled hook is skipped before the shader is finished, so it does not
+  trigger the bug. `Needed()` also returns false for a CONVERSION target
+  LUT, mirroring libplacebo's own rule. Both are tested.
+- **Should fix, sigma-delta scale on the 10-bit cinema path: fixed** (see
+  the brief §3). A new GPU test renders into a real R10G10B10A2 target set
+  up like VP's swapchain, with the LED hook, the repair and the quantizer:
+  white 940 and black 64 on every refresh, and mid grey averages exactly.
+

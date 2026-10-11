@@ -159,7 +159,9 @@ Paths under `src/VideoProcessor-Lib/`.
   ±¼ of a 10-bit step; finer below. Accepted precision floor.
 - The **OUTPUT hook runs after `pl_shader_encode_color` and before dither**
   (renderer.c ~2790–2960). At OUTPUT the colour is already in the target code
-  domain: limited = code/256, full = code/255. The renderer then multiplies by
+  domain: limited on the 10-bit swapchain = 4k/1023 = code/255.75 (corrected
+  2026-10-10; it was written as code/256), limited on an 8-bit swapchain and
+  full range = code/255. The renderer then multiplies by
   `1/scale` and stores to the swapchain. Exact 8-bit code k in the top bits of
   the 10-bit surface is produced by emitting limited: 4k/1023, full: k/255
   (8-bit swapchain: k/255 either way).
@@ -168,16 +170,24 @@ Paths under `src/VideoProcessor-Lib/`.
   with `//!TYPE float|int|DEFINE|CONSTANT|DYNAMIC`, uniforms `frame` (int,
   per render) and `random`. Bound textures expose `NAME_raw/_pos/_size/_pt/
   _tex()/_mul`. `pl_hook` exposes `stages` and `parameters`.
-- Possible pre-existing issue: limited range on the 10-bit swapchain encodes
-  code/256 and stores ×1023 → code k lands at round(3.996·k) = 4k−1 for the
-  upper half. If the Barco box truncates, today's output may be one code low
-  above ~128. Settle with the ramp test of the unmodified build (§7).
+- Settled (stage 6a re-audit, measured on a real R10G10B10A2 target): in
+  7.360.1, limited range on the 10-bit swapchain lands code k exactly at 4k
+  (white 940, black 64). The earlier "4k−1" worry does not apply. Only the
+  Barco box's own rounding remains to check (stage 3).
 - At OUTPUT the domain for **limited range depends on the swapchain**:
-  - code/256 on the 10-bit swapchain (the default);
+  - 4k/1023 = code/255.75 on the 10-bit swapchain (the default);
   - code/255 on an 8-bit one (`diagnostic_force_8bit_sdr_swapchain`).
-  The sigma-delta used /256 for both until 2026-10-10; on the 8-bit
-  diagnostic swapchain it read limited white 235 as 236. It was found by the
-  repair's domain-contract test.
+  The sigma-delta read both as code/256 from Stage 2 until 2026-10-10. On
+  the 10-bit cinema path, peak white read 235.23 and flickered to 236 about
+  one refresh in four; on the 8-bit swapchain white read as 236. It is fixed
+  in the quantizer and both luma passes.
+- The rgba16f OUTPUT texture holds values above mid grey only to 1/8 of an
+  8-bit code. It may also truncate (WARP does): white 235 arrived as
+  234.875 and the carried residual dipped it to 234 every fifth refresh. The
+  sigma-delta now treats a value within 0.13 code of a whole code as that
+  code; 10-bit detail (0.25-code steps) is unaffected. Tested on a real
+  10-bit target: white 940 and black 64 on every refresh, and mid grey
+  averages libplacebo's own 10-bit result.
 - **PRE_OUTPUT texture-input hooks make 7.360.1 skip
   `pl_shader_encode_color`** ("Attempted to modify an immutable shader!").
   `pass_output_target()` holds its shader across the hooks, and a

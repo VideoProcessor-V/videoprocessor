@@ -14816,7 +14816,9 @@ struct LibplaceboVideoRenderer::Impl
         // libplacebo 7.360.1 drops the output encoding (limited range) after
         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
         // before any OUTPUT-stage shader such as the sigma-delta.
-        if (OutputEncodingRepair::Needed(frameHooks))
+        const pl_render_errors renderErrors = pl_renderer_get_errors(renderer);
+        if (OutputEncodingRepair::Needed(frameHooks, &renderErrors,
+            target.lut ? target.lut_type : PL_LUT_UNKNOWN))
         {
             outputEncodingRepair.SetTarget(target.repr);
             frameHooks.insert(frameHooks.begin(), outputEncodingRepair.Get());

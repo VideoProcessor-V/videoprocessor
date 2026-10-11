@@ -7,11 +7,22 @@
 
 namespace OutputEncodingRepair
 {
-	bool Needed(const std::vector<const pl_hook*>& hooks)
+	bool Needed(const std::vector<const pl_hook*>& hooks, const pl_render_errors* errors,
+		enum pl_lut_type targetLut)
 	{
+		if (targetLut == PL_LUT_CONVERSION)
+			return false;
 		for (const pl_hook* hook : hooks)
-			if (hook && (hook->stages & PL_HOOK_PRE_OUTPUT) && hook->input == PL_HOOK_SIG_TEX)
+		{
+			if (!hook || !(hook->stages & PL_HOOK_PRE_OUTPUT) || hook->input != PL_HOOK_SIG_TEX)
+				continue;
+			bool disabled = false;
+			if (errors)
+				for (int i = 0; i < errors->num_disabled_hooks; ++i)
+					disabled = disabled || errors->disabled_hooks[i] == hook->signature;
+			if (!disabled)
 				return true;
+		}
 		return false;
 	}
 

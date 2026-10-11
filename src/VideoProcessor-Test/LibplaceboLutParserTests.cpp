@@ -600,6 +600,74 @@ namespace
 			return result;
 		}
 
+		// Renders a constant grey (`value`, 0..1 full-range RGB) for `frames`
+		// refreshes into a 10-bit target set up like VP's default swapchain
+		// (R10G10B10A2, colour depth 8, bit shift 2) and returns the 10-bit red
+		// code of one pixel per refresh.
+		std::vector<int> RenderTenBitSequence(const std::vector<const pl_hook*>& hooks,
+			enum pl_color_levels levels, float value, int frames)
+		{
+			pl_gpu gpu = m_d3d11->gpu;
+			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt targetFormat = nullptr;
+			const auto caps = PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE;
+			for (int i = 0; i < gpu->num_formats; ++i)
+			{
+				pl_fmt f = gpu->formats[i];
+				if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+					f->texel_size == 4 && (f->caps & caps) == caps && f->host_bits[0] == 10)
+				{ targetFormat = f; break; }
+			}
+			Assert::IsNotNull(sourceFormat);
+			Assert::IsNotNull(targetFormat, L"No host-readable RGB10A2 target format");
+			std::vector<float> texels(2 * 2 * 4);
+			for (int i = 0; i < 4; ++i)
+			{
+				texels[i * 4] = texels[i * 4 + 1] = texels[i * 4 + 2] = value;
+				texels[i * 4 + 3] = 1.0f;
+			}
+			pl_tex_params sp{};
+			sp.w = sp.h = 2;
+			sp.format = sourceFormat;
+			sp.sampleable = true;
+			sp.initial_data = texels.data();
+			pl_tex source = pl_tex_create(gpu, &sp);
+			pl_tex_params tp{};
+			tp.w = tp.h = 2;
+			tp.format = targetFormat;
+			tp.renderable = true;
+			tp.host_readable = true;
+			pl_tex target = pl_tex_create(gpu, &tp);
+			Assert::IsNotNull(source);
+			Assert::IsNotNull(target);
+			pl_frame image = MakeRgbFrame(source);
+			pl_frame output = MakeRgbFrame(target);
+			output.repr.levels = levels;
+			output.repr.bits.sample_depth = 10;
+			output.repr.bits.color_depth = 8;
+			output.repr.bits.bit_shift = 2;
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			params.hooks = hooks.empty() ? nullptr : hooks.data();
+			params.num_hooks = static_cast<int>(hooks.size());
+			std::vector<int> codes;
+			for (int frame = 0; frame < frames; ++frame)
+			{
+				Assert::IsTrue(pl_render_image(m_renderer, &image, &output, &params));
+				pl_gpu_finish(gpu);
+				uint32_t pixels[4] = {};
+				pl_tex_transfer_params download{};
+				download.tex = target;
+				download.ptr = pixels;
+				Assert::IsTrue(pl_tex_download(gpu, &download));
+				codes.push_back(static_cast<int>(pixels[0] & 1023u));
+			}
+			pl_tex_destroy(gpu, &source);
+			pl_tex_destroy(gpu, &target);
+			return codes;
+		}
+
 		std::vector<RgbaPixel> RenderCoordinateField(
 			const pl_hook* hook, int width = 64, int height = 64,
 			const LuminanceCase* luminance = nullptr, AnamorphicGpuCase* geometry = nullptr)
@@ -3509,6 +3577,93 @@ namespace VideoProcessorTest
 			// No PRE_OUTPUT texture hook, no repair (an OUTPUT-stage hook alone
 			// does not trigger the bug).
 			Assert::IsFalse(OutputEncodingRepair::Needed({ repair.Get() }));
+			// A hook libplacebo has disabled is skipped before the shader is
+			// finished, so it does not trigger the bug: no repair (it would
+			// encode twice). Nor with a CONVERSION target LUT.
+			LedDrive::MeasurementHook disabledHook;
+			const uint64_t signatures[1] = { disabledHook.Hook()->signature };
+			pl_render_errors errors{};
+			errors.errors = PL_RENDER_ERR_HOOKS;
+			errors.disabled_hooks = signatures;
+			errors.num_disabled_hooks = 1;
+			Assert::IsTrue(OutputEncodingRepair::Needed({ disabledHook.Hook() }));
+			Assert::IsFalse(OutputEncodingRepair::Needed({ disabledHook.Hook() }, &errors),
+				L"A disabled PRE_OUTPUT hook must not bring the repair");
+			Assert::IsTrue(OutputEncodingRepair::Needed({ disabledHook.Hook(), compensation[0] }, &errors),
+				L"Another, active PRE_OUTPUT hook still does");
+			Assert::IsFalse(OutputEncodingRepair::Needed({ compensation[0] }, nullptr, PL_LUT_CONVERSION));
+		}
+
+		// The cinema path (stage 6a re-audit): limited range on a 10-bit
+		// swapchain with colour depth 8. libplacebo hands the OUTPUT stage code
+		// k as 4k/1023 (= k/255.75), and the sigma-delta must read it so: with
+		// the LED hook, the repair and the quantizer, white stays 940 (235) and
+		// black 64 (16) on every refresh, and a 10-bit mid grey averages exactly.
+		TEST_METHOD(SigmaDeltaKeepsCodesExactOnTheTenBitSwapchain)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "0" }, { "swapchain_bits", "10" },
+				{ "noise_amplitude", "0" } };
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 2;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> sigmaHooks;
+			chain.Collect(false, sigmaHooks);
+			Assert::AreEqual(size_t{ 1 }, sigmaHooks.size(), L"libplacebo rejected the sigma-delta");
+			LedDrive::MeasurementHook led;
+			const double weights[3] = { 0.299, 0.587, 0.114 };
+			led.SetFrame({}, weights);
+			OutputEncodingRepair::Hook repair;
+			pl_color_repr limited{};
+			limited.sys = PL_COLOR_SYSTEM_RGB;
+			limited.levels = PL_COLOR_LEVELS_LIMITED;
+			limited.bits.sample_depth = 10;
+			limited.bits.color_depth = 8;
+			limited.bits.bit_shift = 2;
+			repair.SetTarget(limited);
+			const std::vector<const pl_hook*> hooks = { repair.Get(), led.Hook(), sigmaHooks[0] };
+			auto describe = [](const std::vector<int>& codes)
+			{
+				std::wstring text;
+				for (int code : codes) text += std::to_wstring(code) + L" ";
+				return text;
+			};
+			const std::vector<int> white = fixture.RenderTenBitSequence(hooks, PL_COLOR_LEVELS_LIMITED, 1.0f, 8);
+			for (int code : white)
+				Assert::AreEqual(940, code, (L"White on the 10-bit swapchain: " + describe(white)).c_str());
+			const std::vector<int> black = fixture.RenderTenBitSequence(hooks, PL_COLOR_LEVELS_LIMITED, 0.0f, 8);
+			for (int code : black)
+				Assert::AreEqual(64, code, (L"Black on the 10-bit swapchain: " + describe(black)).c_str());
+			// The same grey with no hook is the reference (libplacebo's own
+			// 10-bit result); the sigma-delta's 8-bit codes must average it.
+			const std::vector<int> reference = fixture.RenderTenBitSequence({}, PL_COLOR_LEVELS_LIMITED, 0.5f, 1);
+			const std::vector<int> grey = fixture.RenderTenBitSequence(hooks, PL_COLOR_LEVELS_LIMITED, 0.5f, 8);
+			double mean = 0.0;
+			for (int code : grey) mean += code / 8.0;
+			Assert::AreEqual(static_cast<double>(reference[0]), mean, 0.6,
+				(L"Mid grey: reference " + std::to_wstring(reference[0]) + L", sigma-delta " + describe(grey)).c_str());
+			led.Release();
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 
 		TEST_METHOD(AllBundledStandardShadersLoadAndUpscalersEngageByHeight)

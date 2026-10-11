@@ -151,3 +151,37 @@ design-review-4.md; libplacebo 7.360.1 source (dispatch.c, gpu.c, shaders.c).
   memory). Textures are allocated, and passes dispatched, only inside
   Estimate and a real Warp. So "off" costs nothing if 6b constructs the
   component only when the de-judder or the mask is on.
+
+## Re-audit (143a55ad, diff 5e685c6f..143a55ad)
+
+Build: OK — full x64 Release /t:Rebuild at 143a55ad, 0 errors, no new warnings.
+Tests: native 2470 passed, 1 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted — known);
+all de-judder, LED and bundled-shader GPU tests pass. VideoProcessorConfigTests 97 passed,
+2 failed (the two known RPC tests).
+
+- Should fix, half-pixel test too loose — **resolved.** The tolerance is now ±0.5
+  source px on (7, 3), so a whole-pixel matcher (6 or 8) fails it.
+- Should fix, clean libplacebo log in every GPU test — **resolved** for this
+  component and the hook chain, as design review 4 N-6 asked. Each test
+  captures the log from start to end, and fails on any warning or error: the
+  de-judder tests, sigma-delta runs, the three LED GPU tests, both
+  bundled-shader tests and the NLS GPU test. The LED tests accept only the
+  known PRE_OUTPUT message (see fix-output-encoding.md). Not covered: the
+  fork's own older GPU tests (LUT, subtitle, anamorphic — about 48), and the
+  new PreOutputHooksKeepTheOutputEncodingWithTheRepair. Acceptable; adding
+  them later would be good.
+- Note, chroma layout changing between Estimate and Warp — **resolved.** Warp
+  now refuses a different size or format for either plane.
+- Notes, silent-failure risk / value scale / RGB sources — **carried to 6b**
+  (no 6a code change needed; 6b must check plane caps, take the scale from
+  `repr.bits`, and hold RGB).
+- Notes, no blend and edge clamp — no action needed.
+- Note, GPU cost — unchanged; still to measure in 6b.
+- Note, untested areas (4:2:0, real footage, revealed edge…) — unchanged, as
+  expected for a standalone step.
+
+Also in this commit: the FSRCNNX and ArtCNN header comments no longer spell
+the directive prefix. libplacebo had been reading the old note as an empty
+pass and warning about it, which the new clean-log checks caught. It was
+harmless before, and the rule lines themselves are unchanged (the Stage 2
+addendum test still finds them).
