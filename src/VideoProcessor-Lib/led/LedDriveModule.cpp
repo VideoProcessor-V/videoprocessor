@@ -79,9 +79,11 @@ namespace LedDrive
 	{
 		ledModel.SetSettle(projector.ledSettleMs);
 		contrastModel.SetSettle(projector.cntrSettleMs);
-		pairing.Configure(led.compensationEotf, projector.cntrMaxUsable, led.cntrAssist, led.softwareFirst);
-		compensator.SetContrastHeadroom(led.cntrAssist ?
-			std::pow(std::max(50, projector.cntrMaxUsable) / 50.0, led.compensationEotf) : 1.0);
+		// The assist's ceiling: cntr_assist_max (62 until 7c-2's dump, the
+		// planner's 7c-1 answer 3), never above cntr_max_usable.
+		const int assistMax = std::max(50, std::min(led.cntrAssistMax, projector.cntrMaxUsable));
+		pairing.Configure(led.compensationEotf, assistMax, led.cntrAssist, led.softwareFirst);
+		compensator.SetContrastHeadroom(led.cntrAssist ? std::pow(assistMax / 50.0, led.compensationEotf) : 1.0);
 	}
 
 	double LedDriveModule::LedFractionLocked(double level) const

@@ -62,8 +62,10 @@ its target and settles rather than creeps as it arrives. The VP gain's
 ramp runs per rendered frame with the same law; on a cut it is not
 ramped at all (the dump is instantaneous), and the proportional law then
 governs the recovery. Replace the fixed `rate_up` / `rate_down` with
-`rate_gain`, `rate_min` and `rate_max` per direction; the owner's tuned
-tables give the starting values.
+`rate_gain`, `rate_min` and `rate_max` per direction; the defaults are
+derived from the script's tables (≈10–17 levels/s up at distance 100,
+slower down) because the owner asked to keep his kinetics; a faster
+"compensated" preset is available in config for him to try by eye.
 
 ### 3.3 Bright cut — dump the projector's contrast, keep brightness up in software
 
@@ -214,7 +216,10 @@ flux_table:                  # optional; linear if absent
 
 [led_drive.Default]
 mode: compensate             # compensate | script | log_only
-cntr_assist: on              # off = VP-gain-only compensate (regression)
+cntr_assist: on              # off = no CNTR (feature switch, not a mode)
+cntr_assist_max: 62          # cap until 7c-2's dump exists; then cntr_max_usable
+# regression recipe for "the previous compensate exactly":
+#   cntr_assist: off, led_settle_ms: 0, rate_gain_up/down: 0
 software_first: on
 cut_cntr_dump: on            # off = knee/gain only on cuts, CNTR descends paired
 recovery_bias_pct: 3
@@ -265,7 +270,8 @@ differences stay as the script has them.
   logged. Exit from black with lookahead: CNTR set to the dump point
   before the cut, LED pre-lift never above `black_prelift_max` while the
   frame is black, gain at ceiling on the cut frame.
-- `cntr_assist: off` and `cut_cntr_dump: off` reproduce the earlier
+- The regression recipe (`cntr_assist: off`, `led_settle_ms: 0`,
+  `rate_gain_up/down: 0`) and `cut_cntr_dump: off` reproduce the earlier
   behaviours exactly; `script` mode byte-identical with smoothing off.
 
 ## Owner note (2026-10-11): use the black frames, not only the cut frame

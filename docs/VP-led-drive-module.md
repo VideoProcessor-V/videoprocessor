@@ -273,13 +273,22 @@ real:
 >   headroom ((cntr_max_usable/50)^E), which is where the deeper dimming in
 >   highlight scenes comes from.
 > - **Rate law:** `clamp(rate_gain x |distance|, rate_min, rate_max)` per
->   direction. Defaults: gain 4.0 / 1.2 per second, min 20 / 10, max =
->   `rate_up` / `rate_down` (400 / 120). `rate_gain: 0` = the fixed rates.
+>   direction. Defaults match the script's tables (planner's 7c-1 answer 2;
+>   one step per 400 ms tick): up gain 0.25, min 2.5, max 17.5 levels/s;
+>   down gain 0.15, min 2.5, max 12.5. `rate_preset: compensated` is the
+>   faster set (4.0 / 1.2, min 20 / 10, max 400 / 120) to try by eye;
+>   explicit `rate_*` keys override the preset. `rate_gain: 0` = the fixed
+>   `rate_up` / `rate_down`, whatever `rate_max` says.
 > - **CNTR back to 50:** on exit or disable (after the light), and on a
 >   live switch to script mode.
-> - **The previous build exactly:** `cntr_assist: off`,
->   `led_settle_ms: 0`, `rate_gain_up/down: 0`. The compensate tests
->   written before 7c-1 run with these settings, as the regression proof.
+> - **Regression recipe** (planner's 7c-1 answer 1; the previous
+>   compensate exactly): `cntr_assist: off`, `led_settle_ms: 0`,
+>   `rate_gain_up/down: 0`. `cntr_assist` stays a feature switch (no CNTR),
+>   not a mode. The compensate tests written before 7c-1 run under the
+>   recipe as the regression proof (test helpers `Compensate()` / `Port()`).
+> - **Assist cap** (answer 3): `cntr_assist_max: 62` (about 1.7x light)
+>   until 7c-2's dump exists; the lower of it and `cntr_max_usable` applies.
+>   7c-2 lifts the value to `cntr_max_usable`; the key stays.
 > - Bright and dark cuts, the recovery gain and `max_cut_dip` are 7c-2;
 >   the look-ahead extras and the Config page keys are 7c-3.
 

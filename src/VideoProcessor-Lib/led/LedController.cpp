@@ -412,10 +412,13 @@ namespace LedDrive
 		// Rate law (7c-1): proportional to the distance, between rate_min and
 		// rate_max (rate_gain 0 = the fixed rate_up / rate_down).
 		const double distance = std::abs(target - level);
-		const double maxUp = RampRate(distance, config.rateGainUp, config.rateMinUp,
-			config.rateMaxUp > 0.0 ? config.rateMaxUp : config.rateUp) * elapsed / 1000.0;
-		const double maxDown = RampRate(distance, config.rateGainDown, config.rateMinDown,
-			config.rateMaxDown > 0.0 ? config.rateMaxDown : config.rateDown) * elapsed / 1000.0;
+		// rate_gain 0 is the regression recipe's fixed rate_up / rate_down,
+		// whatever rate_max says.
+		const double maxUp = (config.rateGainUp > 0.0 ? RampRate(distance, config.rateGainUp, config.rateMinUp,
+			config.rateMaxUp > 0.0 ? config.rateMaxUp : config.rateUp) : config.rateUp) * elapsed / 1000.0;
+		const double maxDown = (config.rateGainDown > 0.0 ? RampRate(distance, config.rateGainDown,
+			config.rateMinDown, config.rateMaxDown > 0.0 ? config.rateMaxDown : config.rateDown) :
+			config.rateDown) * elapsed / 1000.0;
 		// A seen cut lands now: jump to the new scene (the cut hides it). An
 		// unseen dark-to-bright cut: straight up, like the script's dump, so
 		// highlights are squashed only for the LED's response time.

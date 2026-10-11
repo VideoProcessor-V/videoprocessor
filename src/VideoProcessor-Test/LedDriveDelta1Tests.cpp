@@ -44,10 +44,10 @@ namespace
 		return raw;
 	}
 
-	// The compensate tests written before 7c-1 run with its new behaviour
-	// switched off (fixed rate_up / rate_down, no CNTR assist; Port() and the
-	// module tests also use led_settle_ms 0): they are the regression proof
-	// that those settings reproduce the previous build.
+	// The regression recipe (planner's 7c-1 answer 1): cntr_assist off,
+	// rate_gain_up/down 0 (the fixed rate_up / rate_down) and, in Port() and
+	// the module tests, led_settle_ms 0. The compensate tests written before
+	// 7c-1 run under it as the proof that it reproduces the previous build.
 	LedDriveConfig Compensate()
 	{
 		LedDriveConfig config;
@@ -176,6 +176,48 @@ namespace VideoProcessorTest
 				out = controller.Tick(builder.Build(Frame(18.0), frame * FRAME_MS), FRAME_MS);
 			Assert::AreEqual(60, out.light);
 			Assert::AreEqual(1.0 / 0.55, out.gain, 1e-9, L"Dark scene at the floor: flux ratio, not 255/60");
+		}
+
+		// Planner's 7c-1 answers 2 and 3: rate_preset (script default,
+		// compensated = the faster set; rate_* keys override) and the
+		// cntr_assist_max cap (62 until 7c-2).
+		TEST_METHOD(RatePresetAndAssistCapAreRead)
+		{
+			std::string error;
+			const std::string good = "[led_drive.Default]\nrate_preset: compensated\nrate_max_up: 300\n"
+				"cntr_assist_max: 70\n";
+			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(good);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::AreEqual(4.0, led.rateGainUp, 1e-12);
+			Assert::AreEqual(1.2, led.rateGainDown, 1e-12);
+			Assert::AreEqual(120.0, led.rateMaxDown, 1e-12);
+			Assert::AreEqual(300.0, led.rateMaxUp, 1e-12, L"an explicit key overrides the preset");
+			Assert::AreEqual(70, led.cntrAssistMax);
+			const LedDriveConfig defaults;
+			Assert::AreEqual(0.25, defaults.rateGainUp, 1e-12, L"default = script-matched");
+			Assert::AreEqual(17.5, defaults.rateMaxUp, 1e-12);
+			Assert::AreEqual(62, defaults.cntrAssistMax, L"capped until 7c-2");
+			Assert::IsFalse(Validates("[led_drive.Default]\nrate_preset: fast\n", error));
+			Assert::IsFalse(Validates("[led_drive.Default]\ncntr_assist_max: 40\n", error));
+		}
+
+		// The regression recipe uses the fixed rates even with the new
+		// rate_max defaults.
+		TEST_METHOD(RegressionRecipeUsesTheFixedRates)
+		{
+			LedDriveConfig config = Compensate();
+			Assert::AreEqual(0.0, config.rateGainDown, 1e-12);
+			StatsBuilder builder(config);
+			CompensateController controller(config);
+			FrameStats stats;
+			for (int frame = 0; frame < 3; ++frame) stats = builder.Build(Frame(18.0), frame * FRAME_MS);
+			controller.Tick(stats, FRAME_MS);
+			Assert::AreEqual(255.0 - config.rateDown * FRAME_MS / 1000.0, controller.Level(), 1e-9,
+				L"rate_gain 0: the fixed rate_down, not rate_max_down");
 		}
 
 		TEST_METHOD(ScriptSmoothingAndContrastLatencyAreRead)

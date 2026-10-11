@@ -36,10 +36,10 @@ namespace
 		return raw;
 	}
 
-	// The compensate tests written before 7c-1 run with its new behaviour
-	// switched off (fixed rate_up / rate_down, no CNTR assist; Port() and the
-	// module tests also use led_settle_ms 0): they are the regression proof
-	// that those settings reproduce the previous build.
+	// The regression recipe (planner's 7c-1 answer 1): cntr_assist off,
+	// rate_gain_up/down 0 (the fixed rate_up / rate_down) and, in Port() and
+	// the module tests, led_settle_ms 0. The compensate tests written before
+	// 7c-1 run under it as the proof that it reproduces the previous build.
 	LedDriveConfig Compensate()
 	{
 		LedDriveConfig config;
@@ -286,6 +286,24 @@ namespace VideoProcessorTest
 			Assert::AreEqual(120.0, RampRate(150, 1.2, 10.0, 120.0), 1e-12);
 			Assert::AreEqual(120.0, RampRate(3, 0.0, 10.0, 120.0), 1e-12, L"rate_gain 0 = the fixed rate");
 
+			// The defaults match the script's tables (planner's 7c-1 answer 2),
+			// per second at one step per 400 ms tick: up between the bright and
+			// dark tables, down within 1.25 levels/s of its table.
+			const LedDriveConfig defaults;
+			const struct { double distance, upBright, upDark, down; } script[] = {
+				{ 25, 5.0, 10.0, 5.0 }, { 50, 10.0, 12.5, 7.5 }, { 100, 17.5, 17.5, 12.5 }, { 150, 17.5, 17.5, 12.5 } };
+			for (const auto& row : script)
+			{
+				const double up = RampRate(row.distance, defaults.rateGainUp, defaults.rateMinUp, defaults.rateMaxUp);
+				const double down = RampRate(row.distance, defaults.rateGainDown, defaults.rateMinDown, defaults.rateMaxDown);
+				Assert::IsTrue(up >= row.upBright - 1e-9 && up <= row.upDark + 1e-9,
+					(L"up at distance " + std::to_wstring(row.distance)).c_str());
+				Assert::IsTrue(std::abs(down - row.down) <= 1.25 + 1e-9,
+					(L"down at distance " + std::to_wstring(row.distance)).c_str());
+			}
+			Assert::AreEqual(2.5, RampRate(5, defaults.rateGainUp, defaults.rateMinUp, defaults.rateMaxUp), 1e-12,
+				L"one level per tick near the target, as the script");
+
 			// A dim from 255 to the floor (60) at 60 Hz: every frame's step is the
 			// law's, the ramp lands exactly on the target and stays there.
 			const LedDriveConfig config = Assisted();
@@ -296,12 +314,12 @@ namespace VideoProcessorTest
 			double previous = controller.Level();
 			bool slowedDown = false;
 			double lastStep = 1e9;
-			for (int tick = 0; tick < 2000 && controller.Level() > 60.0; ++tick)
+			for (int tick = 0; tick < 4000 && controller.Level() > 60.0; ++tick)
 			{
 				controller.Tick(Play(builder, now, frame, Frame(18.0)), frame);
 				const double distance = previous - 60.0;
 				const double expected = std::min(distance, RampRate(distance, config.rateGainDown,
-					config.rateMinDown, config.rateDown) * frame / 1000.0);
+					config.rateMinDown, config.rateMaxDown) * frame / 1000.0);
 				const double step = previous - controller.Level();
 				Assert::AreEqual(expected, step, 1e-9, (L"step at level " + std::to_wstring(previous)).c_str());
 				slowedDown = slowedDown || step < lastStep - 1e-9;
@@ -424,7 +442,8 @@ namespace VideoProcessorTest
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
-			const LedDriveConfig config = Assisted();
+			LedDriveConfig config = Assisted();
+			ApplyRatePreset(config, true); // the faster preset keeps the test short
 			ProjectorConfig port;
 			port.protocol = "barco_ascii";
 			port.ackTimeoutMs = 60;
@@ -447,6 +466,8 @@ namespace VideoProcessorTest
 					WaitFor([&] { return !module.ProjectorStatus().busy; });
 				}
 				Assert::IsTrue(module.AssistContrast() > 50, L"CNTR assists");
+				Assert::IsTrue(module.AssistContrast() <= config.cntrAssistMax,
+					L"never above cntr_assist_max (62 until 7c-2)");
 				Assert::IsTrue(WaitFor([&] { return projector->contrast == module.AssistContrast(); }),
 					L"the projector got the paired CNTR");
 				Assert::AreEqual(std::pow(module.AssistContrast() / 50.0, config.compensationEotf),

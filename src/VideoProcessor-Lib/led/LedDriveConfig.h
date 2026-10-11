@@ -142,19 +142,31 @@ namespace LedDrive
 		// fast while far from its target and settling as it arrives.
 		// rate_gain 0 = the fixed rate_up / rate_down (before 7c-1);
 		// rate_max 0 = rate_up / rate_down.
-		double rateGainUp = 4.0;
-		double rateGainDown = 1.2;
-		double rateMinUp = 20.0;
-		double rateMinDown = 10.0;
-		double rateMaxUp = 0.0;
-		double rateMaxDown = 0.0;
+		// Defaults match the script's step tables (planner's 7c-1 answer 2;
+		// one step per 400 ms tick): up 17.5 levels/s at distance >= 100
+		// (7 per tick), 12.5 at 50, ~6 at 25, 2.5 near the target; down 12.5
+		// at >= 100 (5 per tick), 7.5 at 50, 2.5 near the target.
+		// rate_preset: compensated is the faster set to try by eye once
+		// compensation is on (RatePreset).
+		double rateGainUp = 0.25;
+		double rateGainDown = 0.15;
+		double rateMinUp = 2.5;
+		double rateMinDown = 2.5;
+		double rateMaxUp = 17.5;
+		double rateMaxDown = 12.5;
 		// CNTR assist (control policy 2, 3.1, 3.2; 7c-1): CNTR moves paired
 		// with the LED for the part of the compensation VP's gain cannot do
 		// without compressing highlights beyond highlight_tolerance_stops.
-		// Off = VP-gain-only compensate. software_first off: CNTR takes the
+		// Off = no CNTR (a feature switch; the regression recipe for the
+		// previous compensate is cntr_assist off, led_settle_ms 0 and
+		// rate_gain_up/down 0). software_first off: CNTR takes the
 		// compensation first and VP's gain only the remainder.
 		bool cntrAssist = true;
 		bool softwareFirst = true;
+		// The highest CNTR the assist may use (planner's 7c-1 answer 3): 62
+		// (about 1.7x light) until 7c-2's bright-cut dump exists, then
+		// cntr_max_usable. The lower of the two applies.
+		int cntrAssistMax = 62;
 		bool earlyRamp = true;
 		// A cut the look-ahead has seen: one jump to the new scene's level,
 		// timed to land on the cut frame (both directions; the cut hides it).
@@ -368,6 +380,21 @@ namespace LedDrive
 		};
 	}
 
+	// rate_preset (planner's 7c-1 answer 2): "script" matches the script's
+	// step tables (the defaults); "compensated" is the faster set from the
+	// earlier answers (400 / 120 levels per second at large distances).
+	// Individual rate_* keys override the preset.
+	inline void ApplyRatePreset(LedDriveConfig& config, bool compensated)
+	{
+		const LedDriveConfig script;
+		config.rateGainUp = compensated ? 4.0 : script.rateGainUp;
+		config.rateGainDown = compensated ? 1.2 : script.rateGainDown;
+		config.rateMinUp = compensated ? 20.0 : script.rateMinUp;
+		config.rateMinDown = compensated ? 10.0 : script.rateMinDown;
+		config.rateMaxUp = compensated ? 400.0 : script.rateMaxUp;
+		config.rateMaxDown = compensated ? 120.0 : script.rateMaxDown;
+	}
+
 	inline std::vector<ConfigSchema::KeyRule> LedDriveRules()
 	{
 		using namespace ConfigSchema;
@@ -393,6 +420,8 @@ namespace LedDrive
 			Number("rate_max_up", 0.0, 10000.0),
 			Number("rate_max_down", 0.0, 10000.0),
 			Boolean("cntr_assist"),
+			Integer("cntr_assist_max", 50, 100),
+			Choice("rate_preset", { "script", "compensated" }),
 			Boolean("software_first"),
 			Integer("deadband", 0, 50),
 			Boolean("early_ramp"),
@@ -657,6 +686,8 @@ namespace LedDrive
 		readInt("tick_ms", 50, 5000, result.tickMs);
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
+		if (config.TryGetString(section, "rate_preset", value))
+			ApplyRatePreset(result, ConfigFile::NormalizeName(value) == "compensated");
 		readNumber("rate_gain_up", result.rateGainUp);
 		readNumber("rate_gain_down", result.rateGainDown);
 		readNumber("rate_min_up", result.rateMinUp);
@@ -664,6 +695,7 @@ namespace LedDrive
 		readNumber("rate_max_up", result.rateMaxUp);
 		readNumber("rate_max_down", result.rateMaxDown);
 		config.TryGetBool(section, "cntr_assist", result.cntrAssist);
+		readInt("cntr_assist_max", 50, 100, result.cntrAssistMax);
 		config.TryGetBool(section, "software_first", result.softwareFirst);
 		readInt("deadband", 0, 50, result.deadband);
 		config.TryGetBool(section, "early_ramp", result.earlyRamp);
