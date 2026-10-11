@@ -10,6 +10,7 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
+#include <vprenderer/OutputEncodingRepair.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <NlsGeometryPolicy.h>
@@ -507,6 +508,7 @@ namespace
 		}
 
 		pl_log Log() const { return m_log; }
+
 
 		// Routes libplacebo warnings and errors into `sink` (nullptr restores
 		// silence), so a failing assertion can say why a shader was rejected.
@@ -3139,6 +3141,9 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(),
 				L"Could not create the libplacebo WARP test device");
+			// Every warning or error libplacebo logs fails the test (design review 4, N-6).
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
 			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
 			LedDrive::MeasurementHook hook;
 			const double weights[3] = { 0.299, 0.587, 0.114 };
@@ -3147,6 +3152,8 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(&libplaceboLog);
 			const std::vector<RgbaPixel> pixels = fixture.RenderCoordinateField(hook.Hook());
 			fixture.CaptureLog(nullptr);
+			cleanLog += libplaceboLog;
+			fixture.CaptureLog(&cleanLog);
 			for (size_t i = 0; i < pixels.size(); ++i)
 				Assert::IsTrue(pixels[i].r == baseline[i].r && pixels[i].g == baseline[i].g &&
 					pixels[i].b == baseline[i].b, L"The measurement must never change the picture");
@@ -3205,6 +3212,8 @@ namespace VideoProcessorTest
 				measured.front().blocks;
 			Assert::IsTrue(boostedApl > apl + 2.0, L"The boost lifts the measured APL");
 			hook.Release();
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
 
 		TEST_METHOD(LedRawTransferMatchesTheRenderedOutput)
@@ -3214,6 +3223,9 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(),
 				L"Could not create the libplacebo WARP test device");
+			// Every warning or error libplacebo logs fails the test (design review 4, N-6).
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
 			pl_render_params params = pl_render_default_params;
 			params.dither_params = nullptr;
 			params.error_diffusion = nullptr;
@@ -3257,6 +3269,8 @@ namespace VideoProcessorTest
 				if (worst > 3.0 / 255.0) failures += evidence + L"; ";
 			}
 			Assert::IsTrue(failures.empty(), failures.c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(cleanLog);
 		}
 
 		TEST_METHOD(LedCompensationShaderAppliesGainWithASoftKnee)
@@ -3264,6 +3278,9 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(),
 				L"Could not create the libplacebo WARP test device");
+			// Every warning or error libplacebo logs fails the test (design review 4, N-6).
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
 			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
 			CustomHookChain::Chain chain({
 				[](const std::string& file, std::string& source, std::string& reason)
@@ -3325,6 +3342,122 @@ namespace VideoProcessorTest
 					static_cast<double>(boosted[x].r), 1.5);
 			Assert::AreEqual(static_cast<int>(baseline[63].r), static_cast<int>(boosted[63].r),
 				L"White stays white");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
+
+		// libplacebo 7.360.1: after a texture-input hook at PRE_OUTPUT, the
+		// renderer applies the output encoding (range, alpha) to the shader it
+		// held before the hook, which the hook has already finished
+		// ("Attempted to modify an immutable shader!"), so the picture is drawn
+		// unencoded. VP's limited-range output then shows black at 0 and white
+		// at 255. OutputEncodingRepair re-applies the encoding at OUTPUT.
+		static RgbaPixel RenderWithHooks(TargetLutGpuFixture& fixture, std::vector<const pl_hook*> hooks,
+			enum pl_color_levels levels, RgbaPixel source, std::string& log)
+		{
+			pl_render_params params = pl_render_fast_params;
+			params.hooks = hooks.empty() ? nullptr : hooks.data();
+			params.num_hooks = static_cast<int>(hooks.size());
+			fixture.CaptureLog(&log);
+			const RgbaPixel out = fixture.Render(nullptr, params, levels, PL_LUT_NORMALIZED, source);
+			fixture.CaptureLog(nullptr);
+			return out;
+		}
+
+		TEST_METHOD(PreOutputHooksKeepTheOutputEncodingWithTheRepair)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			LedDrive::MeasurementHook measurement;
+			const double weights[3] = { 0.299, 0.587, 0.114 };
+			measurement.SetFrame({}, weights);
+			OutputEncodingRepair::Hook repair;
+			for (const enum pl_color_levels levels : { PL_COLOR_LEVELS_LIMITED, PL_COLOR_LEVELS_FULL })
+			{
+				pl_color_repr targetRepr{};
+				targetRepr.sys = PL_COLOR_SYSTEM_RGB;
+				targetRepr.levels = levels;
+				repair.SetTarget(targetRepr);
+				for (const RgbaPixel source : { RgbaPixel{ 255, 0, 0, 255 }, RgbaPixel{ 128, 64, 200, 255 } })
+				{
+					std::string log;
+					const RgbaPixel plain = RenderWithHooks(fixture, {}, levels, source, log);
+					std::vector<const pl_hook*> hooks = { measurement.Hook() };
+					Assert::IsTrue(OutputEncodingRepair::Needed(hooks));
+					hooks.insert(hooks.begin(), repair.Get());
+					const RgbaPixel repaired = RenderWithHooks(fixture, hooks, levels, source, log);
+					const std::wstring label = (levels == PL_COLOR_LEVELS_LIMITED ? L"limited" : L"full") +
+						std::wstring(L": plain ") + std::to_wstring(plain.r) + L"/" + std::to_wstring(plain.g) +
+						L"/" + std::to_wstring(plain.b) + L", with the repair " + std::to_wstring(repaired.r) + L"/" +
+						std::to_wstring(repaired.g) + L"/" + std::to_wstring(repaired.b);
+					Assert::IsTrue(std::abs(plain.r - repaired.r) <= 1 && std::abs(plain.g - repaired.g) <= 1 &&
+						std::abs(plain.b - repaired.b) <= 1, label.c_str());
+				}
+			}
+			Assert::IsTrue(repair.Applied() > 0, L"The repair hook never ran");
+
+			// Without the repair libplacebo 7.360.1 still drops the encoding. If
+			// this ever fails, libplacebo has fixed the bug: remove the repair,
+			// or it will encode twice.
+			pl_color_repr limited{};
+			limited.sys = PL_COLOR_SYSTEM_RGB;
+			limited.levels = PL_COLOR_LEVELS_LIMITED;
+			std::string log;
+			const RgbaPixel plain = RenderWithHooks(fixture, {}, PL_COLOR_LEVELS_LIMITED, { 255, 0, 0, 255 }, log);
+			const RgbaPixel broken = RenderWithHooks(fixture, { measurement.Hook() }, PL_COLOR_LEVELS_LIMITED,
+				{ 255, 0, 0, 255 }, log);
+			Assert::AreEqual(235, static_cast<int>(plain.r));
+			Assert::AreEqual(255, static_cast<int>(broken.r),
+				L"libplacebo no longer drops the encoding after a PRE_OUTPUT hook: remove OutputEncodingRepair");
+			measurement.Release();
+
+			// The LED compensation shader (an mpv PRE_OUTPUT hook, active whenever
+			// the gamma boost is on, LED drive or not) with neutral settings:
+			// limited-range output must come out as without it.
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 64;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> compensation;
+			chain.Collect(false, compensation);
+			Assert::AreEqual(size_t{ 1 }, compensation.size(), L"libplacebo rejected LED compensation.glsl");
+			for (const char* name : { "gain", "boost" })
+				Assert::IsTrue(CustomHookChain::SetHookParameter(compensation[0], name, 1.0));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(compensation[0], "gain_domain", 0.0));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(compensation[0], "knee", 0.08));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(compensation[0], "compensation_eotf", 2.2));
+			repair.SetTarget(limited);
+			for (const RgbaPixel source : { RgbaPixel{ 255, 0, 0, 255 }, RgbaPixel{ 128, 64, 200, 255 } })
+			{
+				const RgbaPixel reference = RenderWithHooks(fixture, {}, PL_COLOR_LEVELS_LIMITED, source, log);
+				const RgbaPixel repaired = RenderWithHooks(fixture, { repair.Get(), compensation[0] },
+					PL_COLOR_LEVELS_LIMITED, source, log);
+				Assert::IsTrue(std::abs(reference.r - repaired.r) <= 1 && std::abs(reference.g - repaired.g) <= 1 &&
+					std::abs(reference.b - repaired.b) <= 1,
+					(L"LED compensation, limited: plain " + std::to_wstring(reference.r) + L"/" +
+						std::to_wstring(reference.g) + L"/" + std::to_wstring(reference.b) + L", with the repair " +
+						std::to_wstring(repaired.r) + L"/" + std::to_wstring(repaired.g) + L"/" +
+						std::to_wstring(repaired.b)).c_str());
+			}
+
+			// No PRE_OUTPUT texture hook, no repair (an OUTPUT-stage hook alone
+			// does not trigger the bug).
+			Assert::IsFalse(OutputEncodingRepair::Needed({ repair.Get() }));
 		}
 
 		TEST_METHOD(AllBundledStandardShadersLoadAndUpscalersEngageByHeight)
@@ -3332,6 +3465,9 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(),
 				L"Could not create the libplacebo WARP test device");
+			// Every warning or error libplacebo logs fails the test (design review 4, N-6).
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
 			CustomHookChain::Chain chain({
 				[](const std::string& file, std::string& source, std::string& reason)
 				{
@@ -3369,6 +3505,8 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(&libplaceboLog);
 			chain.Ensure(values);
 			fixture.CaptureLog(nullptr);
+			cleanLog += libplaceboLog;
+			fixture.CaptureLog(&cleanLog);
 			std::vector<const pl_hook*> hooks;
 			chain.Collect(false, hooks);
 			const std::wstring rejected = L"A bundled standard shader did not load: " +
@@ -3392,6 +3530,8 @@ namespace VideoProcessorTest
 			for (const char* file : { "SSimDownscaler.glsl", "SSimSuperRes.glsl" })
 				Assert::IsTrue(LoadBundledShader(file).find("NATIVE_CROPPED.h") != std::string::npos,
 					L"The SSIM pair engages from the live source and output heights");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(cleanLog);
 		}
 
 		TEST_METHOD(BundledCustomHooksParseAndSigmaDeltaRunsOnTheRealGpuPath)
@@ -3399,6 +3539,9 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(),
 				L"Could not create the libplacebo WARP test device");
+			// Every warning or error libplacebo logs fails the test (design review 4, N-6).
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
 			CustomHookChain::Chain chain({
 				[](const std::string& file, std::string& source, std::string& reason)
 				{
@@ -3435,6 +3578,8 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(&libplaceboLog);
 			chain.Ensure(values);
 			fixture.CaptureLog(nullptr);
+			cleanLog += libplaceboLog;
+			fixture.CaptureLog(&cleanLog);
 			std::vector<const pl_hook*> hooks;
 			chain.Collect(false, hooks);
 			const std::wstring rejected = L"libplacebo rejected a bundled custom shader: " +
@@ -3455,6 +3600,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(pixels[row + x].r >= pixels[row + x - 1].r, L"Ramp must be monotonic");
 			Assert::AreEqual(static_cast<int>(pixels[5 * 64 + 20].r),
 				static_cast<int>(pixels[50 * 64 + 20].r), L"Ramp must not depend on the picture");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(cleanLog);
 		}
 
 		// Stage 4: the sigma-delta's carried residual follows the picture's
@@ -3762,6 +3909,17 @@ namespace VideoProcessorTest
 				(L"libplacebo logged a warning or error: " + std::wstring(log.begin(), log.end())).c_str());
 		}
 
+		// The same, but accepting the one message libplacebo 7.360.1 logs for
+		// every texture-input PRE_OUTPUT hook (the dropped output encoding that
+		// OutputEncodingRepair puts back; see PreOutputHooksKeep...Repair).
+		static void AssertCleanLibplaceboLogExceptPreOutputBug(std::string log)
+		{
+			const std::string known = "Attempted to modify an immutable shader!\n";
+			for (size_t at; (at = log.find(known)) != std::string::npos; )
+				log.erase(at, known.size());
+			AssertCleanLibplaceboLog(log);
+		}
+
 		static Dejudder::Settings DejudderTestSettings()
 		{
 			Dejudder::Settings settings;
@@ -3888,11 +4046,13 @@ namespace VideoProcessorTest
 				for (int bx = 2; bx < field.blocksX - 2; ++bx)
 				{
 					++interior;
-					if (std::abs(field.vx(bx, by) - 7.0f) <= 1.0f && std::abs(field.vy(bx, by) - 3.0f) <= 1.0f)
+					// Within half a source pixel: a matcher stopping at whole
+					// half-resolution pixels (6 or 8, 2 or 4) would fail this.
+					if (std::abs(field.vx(bx, by) - 7.0f) <= 0.5f && std::abs(field.vy(bx, by) - 3.0f) <= 0.5f)
 						++good;
 				}
 			Assert::IsTrue(good * 100 >= interior * 90,
-				(L"(7, 3) within one pixel: " + std::to_wstring(good) + L" of " + std::to_wstring(interior)).c_str());
+				(L"(7, 3) within half a pixel: " + std::to_wstring(good) + L" of " + std::to_wstring(interior)).c_str());
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
@@ -3985,6 +4145,9 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(),
 				L"Could not create the libplacebo WARP test device");
+			// Every warning or error libplacebo logs fails the test (design review 4, N-6).
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
 			const std::vector<RgbaPixel> baseline =
 				fixture.RenderCoordinateField(nullptr);
 
@@ -4050,6 +4213,8 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&balanced);
 			pl_mpv_user_shader_destroy(&oneAxisPlus);
 			pl_mpv_user_shader_destroy(&established);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(cleanLog);
 		}
 	};
 }

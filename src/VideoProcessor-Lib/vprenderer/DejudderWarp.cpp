@@ -454,7 +454,13 @@ if (q.x < size.x && q.y < size.y) {
 		out = a;
 		if (!trusted || !estimated || shift == 0.0f)
 			return true;   // hold: A itself
-		if (!warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height)
+		// The warped planes were made for the frame Estimate saw: refuse a
+		// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
+		// write into the old one.
+		if (!warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
+			a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
+			a.chroma->params.format != warpedChroma->params.format ||
+			a.luma->params.format != warpedLuma->params.format)
 		{
 			error = "Warp without a matching Estimate";
 			return false;

@@ -1,10 +1,11 @@
-// VideoProcessor modification (2026-10-09): every //!WHEN below tests the
+// VideoProcessor modification (2026-10-09): every WHEN directive below tests the
 // height ratio only. Upstream requires a 1.3x enlargement on BOTH axes; with
 // the 1.33x anamorphic lens VP compresses the picture horizontally, so a
 // 1080p 16:9 source is enlarged ~1.48x vertically but only ~1.11x
 // horizontally and the upstream rule would never engage. Original rule:
-//   //!WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
-// Nothing else is changed.
+//   WHEN OUTPUT.w LUMA.w / 1.3 > OUTPUT.h LUMA.h / 1.3 > *
+// Nothing else is changed. (These notes never spell the directive prefix:
+// libplacebo starts reading passes at the first one, even in a comment.)
 
 // MIT License
 
