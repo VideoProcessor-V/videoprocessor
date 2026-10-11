@@ -625,3 +625,48 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
    compensation), and `gamma_boost` would be set off. If E is 2.2, the
    boost is real and stays. One measurement settles `compensation_eotf`
    and `gamma_boost` together.
+
+### libplacebo drops the output encoding after PRE_OUTPUT hooks (found 2026-10-10)
+
+**Found.** During the Stage 6a audit fixes, while making the GPU tests
+require a clean libplacebo log.
+
+**The bug.** In libplacebo 7.360.1, `pass_output_target()` takes the image's
+shader before the PRE_OUTPUT hooks run. A texture-input hook there makes
+the renderer finish that shader first (`img_tex`). Afterwards it still
+applies `pl_shader_encode_color(sh, target repr)` to the finished shader,
+which fails with "Attempted to modify an immutable shader!", and the
+picture is drawn **without the output encoding**. That encoding is the
+range conversion, the YCbCr encoding and alpha.
+
+**Hooks affected.** Both the LED measurement hook and `LED compensation.glsl`
+hook PRE_OUTPUT. The compensation shader runs whenever the gamma boost is
+on, even with the LED drive off.
+
+**Effect.** With the test configuration's `output_range: limited`, every
+FL35 build since Stage 7 step 4 would have shown the picture **full range**:
+black at 0 instead of 16, white at 255 instead of 235. A GPU test measured
+it: limited-range red came out 255 instead of 235 with the hook. Nothing
+had been tested on the projector yet. The calibration LUT is not affected:
+VP's is a normalized target LUT, applied earlier in colour management.
+
+**Fix.** `vprenderer/OutputEncodingRepair.h/.cpp`, a native OUTPUT-stage hook.
+- When the frame's chain contains a texture-input PRE_OUTPUT hook, the
+  repair is put first in the chain, so it runs before the sigma-delta.
+- It re-applies exactly `pl_shader_encode_color` with the normalised target
+  representation.
+- The steps it does not repeat are not used by VP: the alpha/background
+  blend (4-component images only), a native target LUT, and rotation.
+- The GPU test `PreOutputHooksKeepTheOutputEncodingWithTheRepair` checks
+  limited and full range, the LED measurement hook and the LED compensation
+  shader. It also asserts that libplacebo *still* has the bug: if a future
+  libplacebo fixes it, the test fails and the repair must be removed, or it
+  will encode twice.
+- `vp.log` gets the libplacebo message once, with an explanation; after
+  that only a count every 100,000 repeats.
+
+**Consequence for 6c (M1).** A source alpha plane is the case where the same
+code path also blends against the background and drops the alpha
+(4-component images). So the alpha route for the occlusion mask is
+unlikely to survive the LED hooks; M3 is the probable outcome.
+

@@ -40,6 +40,7 @@
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
+#include <vprenderer/OutputEncodingRepair.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -605,6 +606,22 @@ namespace
 		default: break;
 		}
 
+		// libplacebo 7.360.1 logs this for every texture-input PRE_OUTPUT hook
+		// (the LED measurement and compensation hooks), every frame: the
+		// output encoding it drops is put back by OutputEncodingRepair. Log it
+		// once with that explanation, then a count now and then.
+		if (std::strcmp(message, "Attempted to modify an immutable shader!") == 0)
+		{
+			static std::atomic<unsigned long long> repeats{ 0 };
+			const unsigned long long count = ++repeats;
+			if (count == 1)
+				DebugLog::Log("libplacebo [%s]: %s (known libplacebo 7.360.1 bug after a PRE_OUTPUT hook; "
+					"the output encoding is repaired at OUTPUT; further repeats are counted)", label, message);
+			else if (count % 100000 == 0)
+				DebugLog::Log("libplacebo [%s]: \"%s\" repeated %llu times (known bug, repaired)",
+					label, message, count);
+			return;
+		}
 		DebugLog::Log("libplacebo [%s]: %s", label, message);
 	}
 
@@ -3897,6 +3914,10 @@ struct LibplaceboVideoRenderer::Impl
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
 	LedDrive::MeasurementHook ledMeasurement;
+	// Re-applies the output encoding libplacebo drops after a texture-input
+	// PRE_OUTPUT hook (the LED measurement and compensation hooks).
+	OutputEncodingRepair::Hook outputEncodingRepair;
+	bool outputEncodingRepairLogged = false;
 	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
 	bool ledCompensationConfigured = false;
 	// [led_drive] gamma_boost applies whether or not the module drives the
@@ -14792,6 +14813,18 @@ struct LibplaceboVideoRenderer::Impl
         customHooks.Collect(lowLatencyQueue, frameHooks);
         if (submittedNls)
             frameHooks.push_back(submittedNls);
+        // libplacebo 7.360.1 drops the output encoding (limited range) after
+        // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
+        // before any OUTPUT-stage shader such as the sigma-delta.
+        if (OutputEncodingRepair::Needed(frameHooks))
+        {
+            outputEncodingRepair.SetTarget(target.repr);
+            frameHooks.insert(frameHooks.begin(), outputEncodingRepair.Get());
+            if (!outputEncodingRepairLogged)
+                DebugLog::Log("libplacebo output encoding repair active (PRE_OUTPUT hook in the chain; target levels=%d)",
+                    static_cast<int>(target.repr.levels));
+            outputEncodingRepairLogged = true;
+        }
         pl_render_params frameParams = renderParams;
         frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
         frameParams.num_hooks = static_cast<int>(frameHooks.size());
