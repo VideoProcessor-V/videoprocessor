@@ -3426,9 +3426,11 @@ namespace VideoProcessorTest
 			pl_render_params params = pl_render_fast_params;
 			params.hooks = hooks.empty() ? nullptr : hooks.data();
 			params.num_hooks = static_cast<int>(hooks.size());
-			fixture.CaptureLog(&log);
+			std::string captured;
+			fixture.CaptureLog(&captured);
 			const RgbaPixel out = fixture.Render(nullptr, params, levels, PL_LUT_NORMALIZED, source);
 			fixture.CaptureLog(nullptr);
+			log += captured;
 			return out;
 		}
 
@@ -3440,6 +3442,7 @@ namespace VideoProcessorTest
 			const double weights[3] = { 0.299, 0.587, 0.114 };
 			measurement.SetFrame({}, weights);
 			OutputEncodingRepair::Hook repair;
+			std::string allLog;   // every render's libplacebo log (clean apart from the known message)
 			for (const enum pl_color_levels levels : { PL_COLOR_LEVELS_LIMITED, PL_COLOR_LEVELS_FULL })
 			{
 				pl_color_repr targetRepr{};
@@ -3448,7 +3451,7 @@ namespace VideoProcessorTest
 				repair.SetTarget(targetRepr);
 				for (const RgbaPixel source : { RgbaPixel{ 255, 0, 0, 255 }, RgbaPixel{ 128, 64, 200, 255 } })
 				{
-					std::string log;
+					std::string& log = allLog;
 					const RgbaPixel plain = RenderWithHooks(fixture, {}, levels, source, log);
 					std::vector<const pl_hook*> hooks = { measurement.Hook() };
 					Assert::IsTrue(OutputEncodingRepair::Needed(hooks));
@@ -3463,6 +3466,7 @@ namespace VideoProcessorTest
 				}
 			}
 			Assert::IsTrue(repair.Applied() > 0, L"The repair hook never ran");
+			AssertCleanLibplaceboLogExceptPreOutputBug(allLog);
 
 			// Without the repair libplacebo 7.360.1 still drops the encoding. If
 			// this ever fails, libplacebo has fixed the bug: remove the repair,

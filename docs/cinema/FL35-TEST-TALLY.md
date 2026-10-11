@@ -36,7 +36,7 @@ folder's DEPLOY.txt for the exact steps.
 | 12 | SSim downscaler (4K sources) | switch on, compare | not tested |
 | 13 | FSRCNNX / ArtCNN / SSimSuperRes (1080p sources) | one at a time | not tested |
 | 14 | Sigma-delta dither: ramp test (stage 3) | Shader settings: test_ramp 1; smooth ramp, no banding; tune noise and motion threshold | not tested |
-| 15 | Sigma-delta on real film, still scenes | compare banding with it off | not tested |
+| 15 | Sigma-delta on real film, still scenes | compare banding with it off; also watch very slow gradients for faint flat strips (values within 0.13 code snap to the whole code, to stop fp16 flicker) | not tested |
 | 16 | Stage 4 motion-compensated dither | Shader settings: motion_compensation 1; slow pans and fades, compare with 0 | not tested |
 | 17 | GPU time with sigma-delta + motion compensation | overlay render time (budget about 1 ms) | not tested |
 

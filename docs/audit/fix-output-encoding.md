@@ -187,3 +187,87 @@ bit shift 2). It records the 10-bit red code over 8 refreshes:
     the OUTPUT FBO's alpha after the repair, M3 as the fallback), with three
     harness proofs required. That is consistent with this audit's note that
     M1 through the source alpha would be lost.
+
+## Re-audit (2c3ef2c1, diff c9914404..2c3ef2c1)
+
+Build: OK — full x64 Release /t:Rebuild at 1c52583d (2c3ef2c1 plus a docs-only
+tally commit), 0 errors, no new warnings.
+Tests: native 2471 passed, 1 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted — known);
+SigmaDeltaKeepsCodesExactOnTheTenBitSwapchain and PreOutputHooksKeepTheOutputEncodingWithTheRepair
+pass. VideoProcessorConfigTests 97 passed, 2 failed (the two known RPC tests).
+The other Claude session was idle throughout.
+
+Earlier items:
+- Should fix, repair can encode twice (disabled measurement hook) — **resolved.**
+  `Needed()` skips hooks whose signature is in libplacebo's disabled list (the
+  renderer passes `pl_renderer_get_errors`); tested.
+- Note, CONVERSION target LUT — **resolved.** `Needed()` returns false for it,
+  and the renderer passes VP's LUT type (NORMALIZED, or UNKNOWN only when
+  there is no LUT).
+- Note, 4-component alpha step not repeated — **disputed-and-I-agree** (left;
+  VP's images are 3-component there).
+- Note, vp.log filter matches the message from any source — **disputed-and-I-agree**
+  (left; first occurrence still logged).
+- Note, cost and fp16 precision of the extra pass — no action needed.
+- Note, M1 likely lost → M1′ — recorded (c9914404).
+- Note, the encoding test itself has no clean-log check — **not resolved**
+  (PreOutputHooksKeep… still does not assert the log). Minor; the new 10-bit
+  test does assert it.
+- Should fix (follow-ups), sigma-delta reads limited 10-bit as ×256 —
+  **resolved.** The quantizer and both luma passes now use ×255.75 there;
+  white and black are exact on a real 10-bit target (new test).
+- Note (follow-ups), domain test only on an 8-bit target — **resolved** by
+  the new 10-bit test.
+- Note (follow-ups), brief's "4k−1" worry — **resolved**: the brief now
+  records the measured exact 4k.
+
+Owner checks:
+- (1) **OK.**
+  - Disabled hooks are matched by signature, and a CONVERSION LUT returns
+    false; the renderer passes both.
+  - A hook libplacebo disables *during* the current frame is in the list
+    VP passes, and still triggers the bug before it fails. So it is
+    repaired, as it should be.
+  - The only remaining way to get a wrong encode is theoretical: a
+    *colour*-input (`PL_HOOK_SIG_COLOR`) PRE_OUTPUT hook that returns a new
+    shader would also make libplacebo drop the encoding, and `Needed()` only
+    looks at texture-input hooks. VP has no such hook (every bundled shader
+    and native hook takes a texture), so it would under-encode, not encode
+    twice, and only if one were added.
+- (2) **OK.**
+  - colorspace.c puts limited white at 235/256 × 2^d/(2^d−1). With d = 10
+    after normalisation that is 4k/1023 = code/255.75; with d = 8 it is
+    code/255.
+  - Full range is code/255 on both swapchains. The output step (4/1023 or
+    1/255) is unchanged.
+- (3) **Justified, with one small caveat.**
+  - Above mid grey rgba16f steps by 1/2048 ≈ 0.125 code, so a truncating
+    GPU (WARP) can deliver an exact code up to 0.125 low; 0.13 covers that.
+  - I checked every 10-bit limited value (64–940) under both truncation and
+    rounding to fp16. No in-between 10-bit value (k+¼, ½, ¾) is ever pulled
+    to a whole code, and every exact code lands within the snap.
+  - Caveat: values that are not on the 10-bit grid (after scaling, colour
+    conversion or tone mapping the picture is continuous) are flattened to
+    the whole code when within ±0.13 of it. A very slow gradient therefore
+    keeps flat strips about a quarter of a code wide, around each code — far
+    below plain rounding's half-code error and very unlikely to be visible,
+    but a small deliberate nonlinearity. Note for the stage 3 judgement on
+    real film (tally item 15).
+  - The ramp test pattern is *not* snapped: the ramp replaces the value after
+    the snap. So the stage 3 ramp photos test the quantizer itself, and
+    cannot show this caveat.
+- (4) **OK.**
+  - The test is built like VP's swapchain: an R10G10B10A2 target, colour
+    depth 8, bit shift 2, limited, with the repair, the LED hook and the
+    quantizer.
+  - White must be 940 and black 64 on all 8 refreshes, and mid grey must
+    average libplacebo's own 10-bit result within 0.6 (10-bit codes). The
+    log must be clean apart from the known PRE_OUTPUT message.
+  - With the old ×256 scale it fails. My earlier measurement of exactly this
+    setup showed white 944 on the 4th refresh, and the snap would not hide
+    it (235.23 is 0.23 away).
+- (5) **Confirmed.** The Stage 3 comparison is sigma-delta on vs off (and
+  against error diffusion) on the same build and chain, so the deliberate
+  scale and snap corrections do not undermine it. The ramp pattern's values
+  are unchanged by this commit. What is no longer true is "byte-for-byte the
+  Stage 2 file" with motion compensation off; that comparison is not needed.
