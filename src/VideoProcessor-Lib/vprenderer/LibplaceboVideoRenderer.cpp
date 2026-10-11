@@ -79,6 +79,7 @@
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <deque>
 #include <array>
 #include <chrono>
 #include <cctype>
@@ -3800,6 +3801,7 @@ struct LibplaceboVideoRenderer::Impl
 		unsigned long long holds = 0;           // source frames held (no extras) while active
 		unsigned long long swapchainFull = 0;   // an extra's Present blocked > half a refresh
 		unsigned long long late = 0;            // an extra finished after its vsync
+		unsigned long long nextFrameLate = 0;   // the frame after extras showed a refresh late
 		unsigned long long renderFailures = 0;
 		double lastMs = 0.0;                    // warp + render + present of the last extra
 		int lastExtrasPerFrame = 0;
@@ -3816,6 +3818,43 @@ struct LibplaceboVideoRenderer::Impl
 	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
 	ULONGLONG dejudderHoldLogTick = 0;
 	unsigned long long dejudderHoldsNotLogged = 0;
+	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
+	// Present ids of recent extras and the refresh each main present (A)
+	// showed on, so presentation telemetry sees what it would without extras.
+	std::deque<UINT> dejudderExtraIds;
+	std::deque<std::pair<UINT, UINT>> dejudderMainRefresh;
+	IDXGISwapChain* dejudderIdsSwapchain = nullptr;   // identity only, not owned
+
+	bool IsDejudderExtraId(UINT id) const
+	{
+		return std::find(dejudderExtraIds.begin(), dejudderExtraIds.end(), id) != dejudderExtraIds.end();
+	}
+
+	// Number of extra presents with ids in (from, to].
+	UINT DejudderExtrasBetween(UINT from, UINT to) const
+	{
+		UINT count = 0;
+		for (UINT id : dejudderExtraIds)
+			if (static_cast<int32_t>(id - from) > 0 && static_cast<int32_t>(to - id) >= 0)
+				++count;
+		return count;
+	}
+
+	// Audit 6b-2a: when the latest picture on screen is an extra, report the
+	// main present before it (and the refresh it showed on) instead, as the
+	// statistics would read without extras. Identity when no extras ran.
+	void AdjustSampleForDejudderExtras(AlphaDxgiPresentationSample& sample, IDXGISwapChain* native) const
+	{
+		if (dejudderExtraIds.empty() || native != dejudderIdsSwapchain || !IsDejudderExtraId(sample.presentCount))
+			return;
+		UINT main = sample.presentCount;
+		while (main > 0 && IsDejudderExtraId(main))
+			--main;
+		sample.presentCount = main;
+		for (const auto& entry : dejudderMainRefresh)
+			if (entry.first == main)
+				sample.presentRefreshCount = entry.second;
+	}
 	void ReleaseDejudder()
 	{
 		dejudder.reset();
@@ -4682,6 +4721,10 @@ struct LibplaceboVideoRenderer::Impl
 				ReleaseDejudder();   // before the device goes
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
+				dejudderExtraIds.clear();
+				dejudderMainRefresh.clear();
+				dejudderIdsSwapchain = nullptr;
+				dejudderPredictedVsync = 0.0;
 				if (dejudderReasonChangesNotLogged > 0)
 				{
 					DebugLog::Log("De-judder: %s at teardown (%llu changes not logged)",
@@ -10765,7 +10808,11 @@ struct LibplaceboVideoRenderer::Impl
 		int64_t callbackQpc = 0;   // A's capture callback
 		int64_t mainCallQpc = 0;   // A's present call
 		double captureRateHz = 0.0;
-		double renderMs = 0.0;
+		// A's whole processing time, without waits: RenderLoop's pre-render
+		// work (look-ahead, conversion wait excluded) plus RenderLocked from
+		// entry to A's Present returning. B needs about as long from the
+		// moment it starts, so this is what must fit in one refresh.
+		double workMs = 0.0;
 		const std::function<bool()>* nextFrameArrived = nullptr;
 	};
 
@@ -10813,10 +10860,11 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		const double sourcePeriod = 1.0 / f.captureRateHz;
 		const double displayPeriod = 1.0 / displayHz;
-		// B must be able to render in the refresh after the last extra.
-		if (f.renderMs > 600.0 * displayPeriod)
+		// The extras end at the last extra's vblank, and only then does B's
+		// whole pipeline start: it must fit in the refresh that follows.
+		if (f.workMs + 4.0 > 1000.0 * displayPeriod)
 		{
-			DejudderHold("render too slow for extras");
+			DejudderHold("frame work too long for extras (the next frame could be late)");
 			return false;
 		}
 		CComPtr<IDXGISwapChain> native;
@@ -10843,6 +10891,14 @@ struct LibplaceboVideoRenderer::Impl
 			DejudderHold("no present id");
 			return false;
 		}
+		const UINT mainPresentId = presentId;   // A's own present
+		if (dejudderIdsSwapchain != native.p)
+		{
+			// Present ids belong to one swapchain.
+			dejudderExtraIds.clear();
+			dejudderMainRefresh.clear();
+			dejudderIdsSwapchain = native.p;
+		}
 
 		// Phase state: a new queue generation or source rate starts it again.
 		const double ratio = DejudderPolicy::CadenceRatio(f.captureRateHz, displayHz);
@@ -10860,8 +10916,8 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderCallLatency = dejudderCallLatency <= 0.0 || std::abs(callLatency - dejudderCallLatency) > 0.05 ?
 			callLatency : dejudderCallLatency + 0.05 * (callLatency - dejudderCallLatency);
 		const double callbackA = static_cast<double>(f.callbackQpc) / qpc;
-		// B needs its render plus a margin to make a vsync after its present call.
-		const double renderAllowance = f.renderMs / 1000.0 + 0.004;
+		// B needs its whole work plus a margin to make a vsync after it starts.
+		const double renderAllowance = f.workMs / 1000.0 + 0.004;
 
 		Dejudder::Planes a;
 		a.luma = textures[0];
@@ -10872,6 +10928,19 @@ struct LibplaceboVideoRenderer::Impl
 		for (int i = 0; i < f.params->num_hooks; ++i)
 			if (f.params->hooks[i] != f.ledMeasurementHook)
 				hooks.push_back(f.params->hooks[i]);
+		// Without the LED measurement the extras' list may no longer contain a
+		// hook that triggers the PRE_OUTPUT encoding bug; then the repair would
+		// encode a second time (audit 6b-2a).
+		const auto repair = std::find(hooks.begin(), hooks.end(), outputEncodingRepair.Get());
+		if (repair != hooks.end())
+		{
+			std::vector<const pl_hook*> withoutRepair(hooks);
+			withoutRepair.erase(withoutRepair.begin() + (repair - hooks.begin()));
+			const pl_render_errors errors = pl_renderer_get_errors(renderer);
+			if (!OutputEncodingRepair::Needed(withoutRepair, &errors,
+				f.target->lut ? f.target->lut_type : PL_LUT_UNKNOWN))
+				hooks = std::move(withoutRepair);
+		}
 		pl_render_params params = *f.params;
 		params.hooks = hooks.empty() ? nullptr : hooks.data();
 		params.num_hooks = static_cast<int>(hooks.size());
@@ -10890,12 +10959,12 @@ struct LibplaceboVideoRenderer::Impl
 			// Wait until the previous picture (A or the last extra) is on screen.
 			double previousVsync = 0.0;
 			bool shown = false;
+			DXGI_FRAME_STATISTICS statistics{};
 			for (int wait = 0; wait < 3 && !shown; ++wait)
 			{
 				if (FAILED(dejudderOutput->WaitForVBlank()))
 					break;
 				spent = true;
-				DXGI_FRAME_STATISTICS statistics{};
 				if (FAILED(native->GetFrameStatistics(&statistics)))
 					break;
 				if (statistics.PresentCount >= presentId)
@@ -10910,6 +10979,21 @@ struct LibplaceboVideoRenderer::Impl
 			if (!haveFirstVsync)
 			{
 				haveFirstVsync = true;
+				// This frame was predicted (by the last frame's extras) to show
+				// at dejudderPredictedVsync; later means the extras cost it a
+				// refresh.
+				if (dejudderPredictedVsync > 0.0 && previousVsync > dejudderPredictedVsync + 0.5 * displayPeriod)
+				{
+					++dejudderExtraStats.nextFrameLate;
+					DejudderHold("the frame after extras showed a refresh late");
+				}
+				dejudderPredictedVsync = 0.0;
+				if (statistics.PresentCount == mainPresentId)
+				{
+					dejudderMainRefresh.emplace_back(mainPresentId, statistics.PresentRefreshCount);
+					if (dejudderMainRefresh.size() > 64)
+						dejudderMainRefresh.pop_front();
+				}
 				dejudderLatencyFloor.Add(previousVsync - callbackA);
 				// A pipeline hiccup shows as the floor moving by more than a
 				// refresh (planner 6b-2a).
@@ -10934,7 +11018,13 @@ struct LibplaceboVideoRenderer::Impl
 			if (extras == 0)
 				phi0 = (previousVsync - callbackA - in.latencyFloor) / sourcePeriod;
 			const DejudderPolicy::ExtraDecision decision = DejudderPolicy::PlanExtra(in);
-			if (!decision.present) { stop = decision.stop; break; }
+			if (!decision.present)
+			{
+				stop = decision.stop;
+				if (stop == DejudderPolicy::Stop::NextFrameNear && extras > 0)
+					dejudderPredictedVsync = decision.targetVsync;
+				break;
+			}
 			// Too late to render for that vsync: B's refresh must stay free.
 			if (static_cast<double>(PerformanceCounterNow()) / qpc + renderAllowance > decision.targetVsync)
 			{
@@ -11024,6 +11114,9 @@ struct LibplaceboVideoRenderer::Impl
 			if (blockMs > 500.0 * displayPeriod)
 				++dejudderExtraStats.swapchainFull;
 			native->GetLastPresentCount(&presentId);
+			dejudderExtraIds.push_back(presentId);
+			if (dejudderExtraIds.size() > 256)
+				dejudderExtraIds.pop_front();
 			if (dejudderExtraStats.extras <= 200 || dejudderExtraStats.extras % 240 == 0)
 				DebugLog::Log("De-judder extra: source=%llu k=%d phi0=%.3f delta=%.3f shift=%.3f ms=%.2f block_ms=%.2f latency_floor_ms=%.2f extras=%llu",
 					static_cast<unsigned long long>(f.sourceSequence), extras, phi0, decision.delta, shift,
@@ -11042,10 +11135,11 @@ struct LibplaceboVideoRenderer::Impl
 			DejudderHold(failure);
 		else if (extras == 0 && stop != DejudderPolicy::Stop::NextFrameArrived)
 			DejudderHold(DejudderPolicy::Name(stop));
-		if (dejudderPhaseLogPending && haveFirstVsync)
+		// After a second of frames, so the latency floor (and phi0) is settled.
+		if (dejudderPhaseLogPending && haveFirstVsync && dejudderLatencyFloor.Count() >= 24)
 		{
 			dejudderPhaseLogPending = false;
-			DebugLog::Log("De-judder phase: cadence %.3f refreshes per source frame (source %.3f Hz, display %.3f Hz), phi0 %.3f, latency floor %.2f ms, first frame %d extras, stop %s",
+			DebugLog::Log("De-judder phase: cadence %.3f refreshes per source frame (source %.3f Hz, display %.3f Hz), phi0 %.3f, latency floor %.2f ms, this frame %d extras, stop %s",
 				ratio, f.captureRateHz, displayHz, phi0, dejudderLatencyFloor.Floor() * 1000.0, extras,
 				failure ? failure : DejudderPolicy::Name(stop));
 		}
@@ -11089,6 +11183,7 @@ struct LibplaceboVideoRenderer::Impl
 		bool& dejudderExtrasSpentTime)
 	{
 		dejudderExtrasSpentTime = false;
+		const int64_t renderLockedStartQpc = PerformanceCounterNow();
 		// Snapshot once so a hotkey arriving mid-frame takes effect cleanly on
 		// the next frame instead of mixing box and cut/paste modes in one render.
 		const SubtitlePreviewMode subtitlePreviewMode =
@@ -15644,6 +15739,7 @@ struct LibplaceboVideoRenderer::Impl
 						statistics.PresentRefreshCount;
 					sample.syncRefreshCount = statistics.SyncRefreshCount;
 					sample.syncQpc = statistics.SyncQPCTime.QuadPart;
+					AdjustSampleForDejudderExtras(sample, nativeSwapchain.p);
 				}
 				else
 				{
@@ -15729,7 +15825,8 @@ struct LibplaceboVideoRenderer::Impl
 			if (sample.available && lastFramePacingStatsAvailable)
 			{
 				statsPresentDelta = sample.presentCount -
-					lastFramePacingStatsPresentCount;
+					lastFramePacingStatsPresentCount -
+					DejudderExtrasBetween(lastFramePacingStatsPresentCount, sample.presentCount);
 				statsRefreshDelta = sample.presentRefreshCount -
 					lastFramePacingStatsPresentRefresh;
 			}
@@ -16134,7 +16231,9 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.callbackQpc = callbackQpc;
 			extrasFrame.mainCallQpc = swapStartQpc;
 			extrasFrame.captureRateHz = captureRateHz;
-			extrasFrame.renderMs = renderMs;
+			extrasFrame.workMs = preRenderTimings.activeMs + (qpcFrequency.QuadPart > 0 ?
+				static_cast<double>(swapEndQpc - renderLockedStartQpc) * 1000.0 /
+					static_cast<double>(qpcFrequency.QuadPart) : 0.0);
 			extrasFrame.nextFrameArrived = &dejudderNextFrameArrived;
 			dejudderExtrasSpentTime = PresentDejudderExtras(extrasFrame);
 		}
