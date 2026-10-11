@@ -172,6 +172,29 @@ Paths under `src/VideoProcessor-Lib/`.
   code/256 and stores ×1023 → code k lands at round(3.996·k) = 4k−1 for the
   upper half. If the Barco box truncates, today's output may be one code low
   above ~128. Settle with the ramp test of the unmodified build (§7).
+- At OUTPUT the domain for **limited range depends on the swapchain**:
+  - code/256 on the 10-bit swapchain (the default);
+  - code/255 on an 8-bit one (`diagnostic_force_8bit_sdr_swapchain`).
+  The sigma-delta used /256 for both until 2026-10-10; on the 8-bit
+  diagnostic swapchain it read limited white 235 as 236. It was found by the
+  repair's domain-contract test.
+- **PRE_OUTPUT texture-input hooks make 7.360.1 skip
+  `pl_shader_encode_color`** ("Attempted to modify an immutable shader!").
+  `pass_output_target()` holds its shader across the hooks, and a
+  texture-input hook finishes it first.
+  - VP repairs this at OUTPUT (`OutputEncodingRepair`, first in the chain,
+    before the sigma-delta).
+  - **Every build from Stage 7 step 4 to e7b3cceb output full range.**
+  - A GPU test asserts that the bug still exists. When a libplacebo update
+    fixes it, that test fails: remove OutputEncodingRepair.
+- **A `//!` anywhere, including inside a comment, starts a pass.** The parser
+  skips leading text only up to the first `//!` in the file. Shader-writing
+  convention for VP: comments never spell the directive prefix.
+- **Some pass failures are only logged.** A texture bound twice in one pass,
+  linear sampling of a non-linear format, or a storage binding of a
+  non-storable texture: `pl_pass_run` logs an error and skips the pass, and
+  the dispatch still returns success. GPU tests therefore require a clean
+  libplacebo log.
 
 ## 4. Verified facts — projector and chain (from menu photos and manuals)
 
@@ -510,6 +533,9 @@ override the sketch below where they differ.
 - **Occlusion mask:** M1 (mask in the warped frame's alpha, read by the
   sigma-delta at OUTPUT), proven on the GPU harness first; M3 (accept the
   bounded error) is the fallback.
+  **6c tries M1′ first** (planner, 2026-10-10): a native OUTPUT-stage hook
+  after `OutputEncodingRepair` writes the mask into the OUTPUT FBO's alpha
+  for the sigma-delta. M3 is the fallback; see the answers file.
   **Mask-only mode is required in 6c:** `occlusion_mask: on|off` beside
   `dejudder_strength`. With strength 0 and the mask on, the matcher runs
   once per source frame and publishes the mask, with no extra presents and

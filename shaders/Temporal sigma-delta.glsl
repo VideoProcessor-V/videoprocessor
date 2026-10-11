@@ -50,8 +50,9 @@
  *
  * Value domain at the OUTPUT stage (verified against libplacebo 7.360.1
  * renderer.c / colorspace.c):
- *   limited range : colour = code8 / 256   (black 16/256, white 235/256)
- *   full range    : colour = code8 / 255
+ *   limited range, 10-bit swapchain : colour = code8 / 256 (black 16/256)
+ *   limited range, 8-bit swapchain  : colour = code8 / 255
+ *   full range                      : colour = code8 / 255
  *   After the hook the renderer multiplies by 1/scale and stores to the
  *   swapchain. For a 10-bit swapchain declared as 8-bit colour depth the
  *   exact code that lands in the top 8 bits is reproduced when this hook
@@ -187,7 +188,8 @@ void hook()
     if (pos.x >= size.x || pos.y >= size.y)
         return;
     ivec2 full = textureSize(HOOKED_raw, 0);
-    float scale = levels_full < 0.5 ? 256.0 : 255.0;
+    // The code-domain scale, as in the quantizer below.
+    float scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 256.0 : 255.0;
     float sum = 0.0;
     for (int y = 0; y < 4; y++)
         for (int x = 0; x < 4; x++) {
@@ -404,7 +406,7 @@ void hook()
     // values exist (RESID_NEXT tag).
     ivec2 full = best * 4;
     full_size = textureSize(HOOKED_raw, 0);
-    full_scale = levels_full < 0.5 ? 256.0 : 255.0;
+    full_scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 256.0 : 255.0;
     ivec2 corner = block * 16;
     ivec2 tagpos = clamp(corner, ivec2(0), imageSize(RESID_NEXT) - ivec2(1));
     if (abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3) {
@@ -522,7 +524,11 @@ void hook()
 
     // Code-domain scale of the hooked texture and the output step that
     // reproduces an exact 8-bit code after the renderer's final store.
-    float in_scale = limited ? 256.0 : 255.0;
+    // Limited range on a 10-bit swapchain declared as 8-bit colour depth
+    // arrives as code8/256 (4k/1023); on an 8-bit swapchain, and in full
+    // range, as code8/255 (measured on the GPU harness: 8-bit limited white
+    // 235 read as 235/255).
+    float in_scale = (limited && swap10) ? 256.0 : 255.0;
     float out_step = (limited && swap10) ? (4.0 / 1023.0) : (1.0 / 255.0);
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);

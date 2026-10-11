@@ -91,6 +91,13 @@ can see what was covered, not only what was wrong)
 3. Tests exercise the behaviour the owner tuned, not merely that code runs.
 4. The `Low_Latency` queue profile is unchanged.
 5. The build is clean and the full suite passes on the auditor's own run.
+6. Every GPU test that renders through hooks or dispatches its own passes
+   requires a **clean libplacebo log** (`AssertCleanLibplaceboLog`), not only
+   successful return values. libplacebo 7.360.1 logs, but does not report,
+   some failed passes. The only accepted exception is the known PRE_OUTPUT
+   message that `OutputEncodingRepair` repairs
+   (`AssertCleanLibplaceboLogExceptPreOutputBug`). This is a standing rule
+   since design review 4 (N-6).
 
 ## 5. Step-specific checks
 

@@ -3455,6 +3455,57 @@ namespace VideoProcessorTest
 						std::to_wstring(repaired.b)).c_str());
 			}
 
+			// Domain contract (planner, 2026-10-10): the sigma-delta assumes the
+			// OUTPUT stage is already encoded (limited = code/256). With the LED
+			// hook, the repair first and the quantizer enabled, white must reach
+			// the target as 235 (limited) or 255 (full), black as 16 or 0.
+			for (const enum pl_color_levels levels : { PL_COLOR_LEVELS_LIMITED, PL_COLOR_LEVELS_FULL })
+			{
+				const bool isLimited = levels == PL_COLOR_LEVELS_LIMITED;
+				CustomHookChain::Chain sigmaChain({
+					[](const std::string& file, std::string& source, std::string& reason)
+					{
+						source = LoadBundledShader(file.c_str());
+						reason = "bundled shader not found";
+						return !source.empty();
+					},
+					[&fixture](const std::string& source) -> const pl_hook*
+					{
+						return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+					},
+					[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+				ConfiguredShaderRule sigma;
+				sigma.name = "sigma_delta";
+				sigma.filename = "Temporal sigma-delta.glsl";
+				sigma.parameters = { { "enabled", "1" }, { "levels_full", isLimited ? "0" : "1" },
+					{ "swapchain_bits", "8" }, { "noise_amplitude", "0" } };
+				sigmaChain.Configure({ sigma });
+				CustomHookChain::TemplateValues sigmaValues;
+				sigmaValues.outputWidth = sigmaValues.outputHeight = 2;
+				sigmaChain.Ensure(sigmaValues);
+				std::vector<const pl_hook*> sigmaHooks;
+				sigmaChain.Collect(false, sigmaHooks);
+				Assert::AreEqual(size_t{ 1 }, sigmaHooks.size(), L"libplacebo rejected the sigma-delta");
+				pl_color_repr repr{};
+				repr.sys = PL_COLOR_SYSTEM_RGB;
+				repr.levels = levels;
+				repair.SetTarget(repr);
+				LedDrive::MeasurementHook led;
+				led.SetFrame({}, weights);
+				std::vector<const pl_hook*> chainHooks = { led.Hook(), sigmaHooks[0] };
+				Assert::IsTrue(OutputEncodingRepair::Needed(chainHooks));
+				chainHooks.insert(chainHooks.begin(), repair.Get());   // as the renderer does
+				const RgbaPixel white = RenderWithHooks(fixture, chainHooks, levels, { 255, 255, 255, 255 }, log);
+				const RgbaPixel black = RenderWithHooks(fixture, chainHooks, levels, { 0, 0, 0, 255 }, log);
+				led.Release();
+				Assert::AreEqual(isLimited ? 235 : 255, static_cast<int>(white.g),
+					isLimited ? L"Limited white with LED hook, repair and sigma-delta" :
+						L"Full white with LED hook, repair and sigma-delta");
+				Assert::AreEqual(isLimited ? 16 : 0, static_cast<int>(black.g),
+					isLimited ? L"Limited black with LED hook, repair and sigma-delta" :
+						L"Full black with LED hook, repair and sigma-delta");
+			}
+
 			// No PRE_OUTPUT texture hook, no repair (an OUTPUT-stage hook alone
 			// does not trigger the bug).
 			Assert::IsFalse(OutputEncodingRepair::Needed({ repair.Get() }));

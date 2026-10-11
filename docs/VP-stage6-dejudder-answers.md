@@ -59,6 +59,28 @@ dither's occlusion refinement must not depend on the de-judder being on.
 - Cinema profile only, as with the rest.
 - If M3 is the outcome, the key still exists and is a documented no-op.
 
+**M1′ (planner, 2026-10-10, after the output-encoding bug): try this
+before M3.** M1 through the *source* alpha is probably dead, because the
+same libplacebo path blends and drops a source alpha plane. M1′ avoids that
+path:
+- A native OUTPUT-stage hook, placed after `OutputEncodingRepair` and before
+  the sigma-delta, samples the de-judder's occlusion mask (app-owned,
+  source-block resolution) over the active-picture rectangle.
+- It writes the mask into the **alpha channel of the OUTPUT-stage FBO**,
+  leaving RGB untouched.
+- The sigma-delta reads `HOOKED.a` as `occlusion_mask` and writes alpha
+  back as 1.0.
+- Mask-only mode works the same way (strength 0 + `occlusion_mask: on`:
+  `Estimate` runs and the hook publishes the mask; no presents, no warp).
+
+Prove on the harness that:
+- the OUTPUT FBO has an alpha channel at our settings;
+- writing alpha there does not change the final RGB store;
+- the mask aligns with the active-picture rectangle after scaling and
+  blanking.
+
+If any of these fail, use M3.
+
 ## Q3 — half-resolution 8×8 matcher on source luma: yes
 
 It suits the budget and the use. Two requirements go beyond Stage 4's
