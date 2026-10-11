@@ -506,11 +506,16 @@ namespace LedDrive
 		// The smallest whole CNTR that supplies it (CNTR never below 50 here).
 		int wanted = 50;
 		while (wanted < maxUsable && Light(wanted) < required - 1e-12) ++wanted;
+		// Down at once to the smallest value that covers the need: CNTR is
+		// never left above what the pairing needs (audit stage7-step7c1: a
+		// stuck 51 is visible on near-black). The anti-chatter margin is on
+		// the way up instead: rise only once the need passes the current
+		// value's light by 2% (VP's gain covers that 2% meanwhile).
 		int next = contrast;
-		if (wanted > contrast)
+		if (wanted < contrast)
 			next = wanted;
-		else
-			while (next > wanted && (next > maxUsable || Light(next - 1) >= need * 1.02)) --next;
+		else if (wanted > contrast && need > Light(contrast) * 1.02)
+			next = wanted;
 		if (next == contrast) return -1;
 		contrast = next;
 		return contrast;

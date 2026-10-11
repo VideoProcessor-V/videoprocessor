@@ -321,9 +321,9 @@ namespace LedDrive
 	// highlights beyond the tolerance (software first), as a whole CNTR
 	// value; VP's gain removes the rest of the integer step. A command is
 	// due only when the paired integer changes (planner's step 7 answer 1):
-	// up as soon as it is needed, down only once one step lower still covers
-	// the need with a 2% margin, so a need hovering at a step boundary never
-	// makes CNTR chatter.
+	// down at once to the smallest value that covers the need (never left
+	// above it), up only once the need passes the current value by 2%, so a
+	// need hovering at a step boundary never makes CNTR chatter.
 	class CntrPairing
 	{
 	public:

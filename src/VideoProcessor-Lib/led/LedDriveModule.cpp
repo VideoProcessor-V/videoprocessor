@@ -92,6 +92,16 @@ namespace LedDrive
 		return ceiling > 0.0 ? flux.Flux(level) / ceiling : 1.0;
 	}
 
+	// Drops a CNTR still waiting for the port and puts the pairing back on
+	// the last value the driver really sent, so model and projector agree.
+	void LedDriveModule::HoldContrastLocked()
+	{
+		if (!driver) return;
+		driver->SetContrastAsync(-1);
+		const DriverStatus status = driver->Status();
+		pairing.Reset(status.lastSentContrast >= 0 ? status.lastSentContrast : 50);
+	}
+
 	int LedDriveModule::LatencyFramesForLocked(int ms) const
 	{
 		return static_cast<int>(std::lround(ms / framePeriodMs));
@@ -198,7 +208,10 @@ namespace LedDrive
 				holding = false;
 				// From script: compensate starts only once the script thread
 				// has put CNTR back to 50 (it wakes for the new settings).
+				// Meanwhile the picture is untouched: no smoothing gain either.
 				awaitingContrastReset = wasScript;
+				gain.active = false;
+				gain.gain = 1.0;
 			}
 			if (!nowCompensating && wasCompensating)
 			{
@@ -487,7 +500,12 @@ namespace LedDrive
 		// commanded), so CNTR rises no later, and falls no earlier, than the
 		// LED needs. Not during a fade's gain hold or the custom dim.
 		int contrastCommand = -1;
-		if (applyGain && fadeToBlack == FadeToBlack::Normal && !out.holdGain)
+		const bool allowed = applyGain && fadeToBlack == FadeToBlack::Normal && !out.holdGain;
+		// A fade's gain hold (or the custom dim) begins: a CNTR still waiting
+		// for the port must not land during it (audit stage7-step7c1).
+		if (assistAllowed && !allowed) HoldContrastLocked();
+		assistAllowed = allowed;
+		if (allowed)
 		{
 			const double ahead = std::min(ledModel.Value(),
 				ledModel.Predict(LedFractionLocked(out.light), projector.cntrLatencyMs));
@@ -539,6 +557,7 @@ namespace LedDrive
 				driver->QueueSequence(CustomDimDown(led), led.ftbStepMs))
 			{
 				fadeToBlack = FadeToBlack::Deep;
+				HoldContrastLocked();
 				pendingLog = led.ftbCustomDim == FtbCustomDim::Turns ?
 					"LED drive: fade to black - custom dim on, colours taking turns" :
 					"LED drive: fade to black - custom dim on, colours together";

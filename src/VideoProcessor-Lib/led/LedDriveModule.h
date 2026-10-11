@@ -183,6 +183,9 @@ namespace LedDrive
 		// Compensate has sent a CNTR other than 50: the exit, or a switch to
 		// another mode, puts it back to 50.
 		bool assistContrastDriven = false;
+		// The pairing was allowed to command CNTR on the previous frame.
+		bool assistAllowed = false;
+		void HoldContrastLocked();
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
 		// the projector's whole CNTR steps; smoothing is set by the script
 		// thread while it applies.

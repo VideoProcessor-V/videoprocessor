@@ -361,16 +361,24 @@ namespace VideoProcessorTest
 			Assert::IsTrue(pairing.Light(67) >= 2.0 && pairing.Light(66) < 2.0);
 			Assert::AreEqual(-1, pairing.Update(4.0, 2.0), L"no command while the value holds");
 
-			// Hovering at a step boundary: one command, then quiet.
+			// Hovering at a step boundary: down to the covering value once, then
+			// quiet (the margin is on the way up).
 			pairing.Reset(50);
 			const double edge = pairing.Light(60);
 			Assert::AreEqual(61, pairing.Update(edge * 1.001, 1.0));
 			int commands = 0;
 			for (int i = 0; i < 100; ++i)
 				commands += pairing.Update(edge * (i % 2 ? 1.001 : 0.999), 1.0) >= 0 ? 1 : 0;
-			Assert::AreEqual(0, commands, L"no chatter at a boundary");
-			Assert::AreEqual(60, pairing.Update(edge / 1.03, 1.0), L"down once a step lower covers it with margin");
-			Assert::AreEqual(50, pairing.Update(1.0, 2.0), L"no need left (VP has room): back to 50");
+			Assert::AreEqual(1, commands, L"one step down to 60, then no chatter at the boundary");
+			Assert::AreEqual(60, pairing.Contrast());
+			Assert::AreEqual(59, pairing.Update(pairing.Light(59) * 0.999, 1.0),
+				L"down at once to the smallest value that covers the need");
+			Assert::AreEqual(-1, pairing.Update(pairing.Light(59) * 1.01, 1.0), L"up only past the 2% margin");
+			Assert::AreEqual(60, pairing.Update(pairing.Light(59) * 1.03, 1.0));
+			// Audit stage7-step7c1: never left above what is needed.
+			pairing.Reset(51);
+			Assert::AreEqual(50, pairing.Update(0.99, 1.0), L"a need of 0.99 at CNTR 51 sends 50");
+			Assert::AreEqual(-1, pairing.Update(1.0, 2.0), L"no need left: stays at 50");
 
 			Assert::AreEqual(74, pairing.Update(100.0, 1.0), L"never above cntr_max_usable");
 			pairing.Configure(2.41, 74, false, true);
@@ -402,7 +410,8 @@ namespace VideoProcessorTest
 					previous = command;
 				}
 				const double vp = (1.0 / led) / pairing.Light(pairing.Contrast());
-				Assert::IsTrue(vp <= headroom + 1e-9, (L"VP gain over its headroom at step " + std::to_wstring(i)).c_str());
+				Assert::IsTrue(vp <= headroom * 1.02 + 1e-9,
+					(L"VP gain over its headroom (plus the 2% up-margin) at step " + std::to_wstring(i)).c_str());
 				Assert::AreEqual(1.0, led * pairing.Light(pairing.Contrast()) * vp, 1e-12);
 			}
 			Assert::IsTrue(previous > 50 && commands <= previous - 50, L"at most one command per whole value");
