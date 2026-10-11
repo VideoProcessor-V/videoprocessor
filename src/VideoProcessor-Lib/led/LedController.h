@@ -3,6 +3,7 @@
 #include "LedDriveConfig.h"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -77,6 +78,10 @@ namespace LedDrive
 		// holdGain is set (fades to black).
 		double highlightCap = 1e9;
 		double capWeight = 0.0;
+		// mode: compensate, 7c-1: the largest VP gain (linear) the scene's
+		// sustained highlights allow within highlight_tolerance_stops; CNTR
+		// assist supplies only what is needed beyond it (software first).
+		double vpHeadroom = 1e9;
 		bool holdGain = false;
 		// This command is a cut jump or a bright-cut dump: send it whole
 		// (not split by max_levels_per_command).
@@ -103,6 +108,8 @@ namespace LedDrive
 		// The lowest whole level in [low, ceiling] giving at least `fraction` of
 		// the ceiling's flux; the ceiling when none does.
 		int LevelFor(double fraction, int low, int ceiling) const;
+		// The (fractional) level whose flux is fluxValue: the inverse of Flux().
+		double LevelOf(double fluxValue) const;
 
 	private:
 		std::vector<std::pair<double, double>> table;
@@ -216,10 +223,16 @@ namespace LedDrive
 		double Level() const { return level; }
 		double Protection() const { return protection; }
 		double Area() const { return area; }
+		// 7c-1: the extra light CNTR assist can add at most
+		// ((cntr_max_usable / 50)^E; 1 = no assist). The highlight floor lets
+		// the LED go that much lower, CNTR making up the difference.
+		void SetContrastHeadroom(double light) { contrastHeadroom = light > 1.0 ? light : 1.0; }
+		double ContrastHeadroom() const { return contrastHeadroom; }
 
 	private:
 		LedDriveConfig config;
 		FluxModel flux;
+		double contrastHeadroom = 1.0;
 		double level;
 		int light;
 		double protection = 0.0;
@@ -239,17 +252,99 @@ namespace LedDrive
 		return LedGain(FluxModel(), ceiling, light);
 	}
 
+	// VP's final linear gain for a frame: the compensation the LED needs
+	// (ledGain = ceiling flux / modelled LED flux), less what the projector's
+	// CNTR already adds (cntrLight = (CNTR / 50)^E, 7c-1), limited by the
+	// controller's highlight cap.
+	inline double CompensationGainForLed(double ledGain, const ControllerOutput& out, double cntrLight = 1.0)
+	{
+		const double vp = cntrLight > 0.0 ? ledGain / cntrLight : ledGain;
+		const double capped = vp < out.highlightCap ? vp : out.highlightCap;
+		return vp * (1.0 - out.capWeight) + capped * out.capWeight;
+	}
+
 	// The final linear gain for a frame from the modelled LED level and the
 	// controller's highlight limit.
-	inline double CompensationGainFor(const FluxModel& flux, int ceiling, double light, const ControllerOutput& out)
+	inline double CompensationGainFor(const FluxModel& flux, int ceiling, double light, const ControllerOutput& out,
+		double cntrLight = 1.0)
 	{
-		const double ledGain = LedGain(flux, ceiling, light);
-		const double capped = ledGain < out.highlightCap ? ledGain : out.highlightCap;
-		return ledGain * (1.0 - out.capWeight) + capped * out.capWeight;
+		return CompensationGainForLed(LedGain(flux, ceiling, light), out, cntrLight);
 	}
 
 	inline double CompensationGainFor(int ceiling, double light, const ControllerOutput& out)
 	{
 		return CompensationGainFor(FluxModel(), ceiling, light, out);
 	}
+
+	// Rate law (control policy 3.2): clamp(rateGain x |distance|, rateMin,
+	// rateMax) per second; rateGain <= 0 = the fixed rateMax.
+	inline double RampRate(double distance, double rateGain, double rateMin, double rateMax)
+	{
+		if (rateGain <= 0.0) return rateMax;
+		const double rate = rateGain * (distance < 0.0 ? -distance : distance);
+		return rate < rateMin ? rateMin : rate > rateMax ? rateMax : rate;
+	}
+
+	// An actuator's response after its dead time (control policy 6): the
+	// value approaches the last landed command as a first-order lag with
+	// time constant settleMs (0 = at once).
+	class SettleModel
+	{
+	public:
+		explicit SettleModel(double settleMsIn = 0.0, double valueIn = 1.0) : settleMs(settleMsIn), value(valueIn), target(valueIn) {}
+		void SetSettle(double ms) { settleMs = ms > 0.0 ? ms : 0.0; if (settleMs == 0.0) value = target; }
+		void Reset(double v) { value = target = v; }
+		// A command lands (its dead time has passed).
+		void Land(double v) { target = v; if (settleMs == 0.0) value = v; }
+		double Step(double elapsedMs)
+		{
+			if (settleMs > 0.0 && elapsedMs > 0.0)
+				value += (target - value) * (1.0 - std::exp(-elapsedMs / settleMs));
+			return value;
+		}
+		// Where it will be aheadMs from now heading for `toward`.
+		double Predict(double toward, double aheadMs) const
+		{
+			return settleMs > 0.0 ? toward + (value - toward) * std::exp(-aheadMs / settleMs) : toward;
+		}
+		double Value() const { return value; }
+		double Target() const { return target; }
+
+	private:
+		double settleMs;
+		double value;
+		double target;
+	};
+
+	// mode: compensate's CNTR assist (control policy 2, 3.1, 3.2; 7c-1). CNTR
+	// supplies only the light VP's gain cannot add without compressing
+	// highlights beyond the tolerance (software first), as a whole CNTR
+	// value; VP's gain removes the rest of the integer step. A command is
+	// due only when the paired integer changes (planner's step 7 answer 1):
+	// up as soon as it is needed, down only once one step lower still covers
+	// the need with a 2% margin, so a need hovering at a step boundary never
+	// makes CNTR chatter.
+	class CntrPairing
+	{
+	public:
+		void Configure(double eotf, int maxUsable, bool enabled, bool softwareFirst);
+		void Reset(int contrast = 50);
+		// compensation: the light factor the LED needs (ceiling flux /
+		// modelled LED flux where the CNTR command will land); vpHeadroom:
+		// the largest VP gain the highlights allow. Returns the CNTR to send,
+		// or -1 when it stays.
+		int Update(double compensation, double vpHeadroom);
+		int Contrast() const { return contrast; }
+		// The light factor CNTR was asked to supply at the last update.
+		double Required() const { return required; }
+		double Light(int value) const;
+
+	private:
+		double eotf = 2.41;
+		int maxUsable = 74;
+		bool enabled = true;
+		bool softwareFirst = true;
+		int contrast = 50;
+		double required = 1.0;
+	};
 }

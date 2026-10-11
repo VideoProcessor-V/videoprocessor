@@ -44,6 +44,9 @@ namespace LedDrive
 		// when written, before any reply).
 		int lightSends = 0;
 		int lastSentLight = -1;
+		// The same for CNTR values (7c-1).
+		int contrastSends = 0;
+		int lastSentContrast = -1;
 		// A light target is waiting or being transmitted.
 		bool busy = false;
 		// A command sequence (experimental custom dim) is waiting or being
@@ -103,6 +106,11 @@ namespace LedDrive
 		// script's sleeps space its commands), not coalesced or split. Returns
 		// once the command is written and, with read_back on, its reply came
 		// (or ack_timeout_ms passed). False once shutdown has begun.
+		// mode: compensate's CNTR assist (7c-1): asynchronous like SetLight,
+		// keeping only the newest value, and taking the next command slot
+		// ahead of a waiting LPW1 (CNTR commands are rare: only on integer
+		// crossings). A negative value drops a waiting one.
+		virtual void SetContrastAsync(int value) { (void)value; }
 		virtual bool SendScript(const std::string& mnemonic, int value)
 		{
 			(void)mnemonic;

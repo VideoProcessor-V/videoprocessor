@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <sstream>
 
 namespace LedDrive
 {
@@ -71,6 +72,27 @@ namespace LedDrive
 		gain.knee = led.knee;
 		gain.eotf = led.compensationEotf;
 		compensator.Reset(led.ledCeiling);
+		ConfigureModelsLocked();
+	}
+
+	void LedDriveModule::ConfigureModelsLocked()
+	{
+		ledModel.SetSettle(projector.ledSettleMs);
+		contrastModel.SetSettle(projector.cntrSettleMs);
+		pairing.Configure(led.compensationEotf, projector.cntrMaxUsable, led.cntrAssist, led.softwareFirst);
+		compensator.SetContrastHeadroom(led.cntrAssist ?
+			std::pow(std::max(50, projector.cntrMaxUsable) / 50.0, led.compensationEotf) : 1.0);
+	}
+
+	double LedDriveModule::LedFractionLocked(double level) const
+	{
+		const double ceiling = flux.Flux(led.ledCeiling);
+		return ceiling > 0.0 ? flux.Flux(level) / ceiling : 1.0;
+	}
+
+	int LedDriveModule::LatencyFramesForLocked(int ms) const
+	{
+		return static_cast<int>(std::lround(ms / framePeriodMs));
 	}
 
 	LedDriveModule::~LedDriveModule()
@@ -148,6 +170,7 @@ namespace LedDrive
 		flux = FluxModel(projector.fluxTable);
 		statsBuilder = StatsBuilder(led);
 		compensator.Reconfigure(led, flux);
+		ConfigureModelsLocked();
 		gain.knee = led.knee;
 		gain.eotf = led.compensationEotf;
 		if (started && driver)
@@ -159,6 +182,15 @@ namespace LedDrive
 				const DriverStatus status = driver->Status();
 				compensator.Reset(status.lastSentLight >= 0 ? status.lastSentLight : modelledLevel);
 				seenSends = status.lightSends;
+				// The models start from the LED's level and CNTR 50 (script
+				// mode puts CNTR back to 50 as it leaves).
+				modelledLevel = status.lastSentLight >= 0 ? status.lastSentLight : modelledLevel;
+				commands.clear();
+				ledModel.Reset(LedFractionLocked(modelledLevel));
+				contrastCommands.clear();
+				seenContrastSends = status.contrastSends;
+				pairing.Reset(50);
+				contrastModel.Reset(1.0);
 				smoothing = false;
 				policy = ControllerOutput();
 				holding = false;
@@ -171,6 +203,9 @@ namespace LedDrive
 				gain.active = false;
 				gain.gain = 1.0;
 				holding = false;
+				// A CNTR still waiting for the port is compensate's; the
+				// script thread puts CNTR back to 50 (7c-1).
+				driver->SetContrastAsync(-1);
 			}
 			compensating = nowCompensating;
 			applyGain = live && led.mode != Mode::LogOnly;
@@ -197,7 +232,21 @@ namespace LedDrive
 	double LedDriveModule::ModelledLight() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		return modelledLevel;
+		// Settled: exactly the landed level (no round trip through the flux).
+		if (ledModel.Value() == ledModel.Target()) return modelledLevel;
+		return flux.LevelOf(ledModel.Value() * flux.Flux(led.ledCeiling));
+	}
+
+	int LedDriveModule::AssistContrast() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return pairing.Contrast();
+	}
+
+	double LedDriveModule::ModelledContrastLight() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return contrastModel.Value();
 	}
 
 	double LedDriveModule::FramePeriodMs() const
@@ -338,6 +387,9 @@ namespace LedDrive
 			if (status.lightSends != seenSends && status.lastSentLight >= 0)
 				commands.push_back({ frameIndex, status.lastSentLight });
 			seenSends = status.lightSends;
+			if (status.contrastSends != seenContrastSends && status.lastSentContrast >= 0)
+				contrastCommands.push_back({ frameIndex, status.lastSentContrast });
+			seenContrastSends = status.contrastSends;
 		}
 		++frameIndex;
 		if (smoothing && !compensating)
@@ -360,11 +412,21 @@ namespace LedDrive
 		{
 			modelledLevel = commands.front().level;
 			commands.pop_front();
+			ledModel.Land(LedFractionLocked(modelledLevel));
 		}
+		// 7c-1: then the LED's light settles (led_settle_ms; 0 = at once).
+		ledModel.Step(elapsed);
+		const int contrastLatency = LatencyFramesForLocked(projector.cntrLatencyMs);
+		while (!contrastCommands.empty() && contrastCommands.front().frame + contrastLatency <= frameIndex)
+		{
+			contrastModel.Land(pairing.Light(contrastCommands.front().value));
+			contrastCommands.pop_front();
+		}
+		contrastModel.Step(elapsed);
 		if (holding && !policy.holdGain) holding = false;
 		if (policy.holdGain && !holding)
 		{
-			heldGain = CompensationGainFor(flux, led.ledCeiling, modelledLevel, policy);
+			heldGain = CompensationGainForLed(1.0 / std::max(1e-6, ledModel.Value()), policy, contrastModel.Value());
 			holding = true;
 		}
 		while (!predictions.empty() && predictions.begin()->first + PREDICTION_HISTORY < sequence)
@@ -416,13 +478,37 @@ namespace LedDrive
 			if (out.jump) driver->SetLightJump(out.lightCommand);
 			else driver->SetLight(out.lightCommand);
 		}
+		// CNTR assist (7c-1): CNTR follows the LED's modelled light for what
+		// VP's gain cannot do within the highlight tolerance, as a command
+		// only when the paired whole value changes. The light used is the
+		// lower of now and cntr_latency_ms ahead (heading for the level just
+		// commanded), so CNTR rises no later, and falls no earlier, than the
+		// LED needs. Not during a fade's gain hold or the custom dim.
+		int contrastCommand = -1;
+		if (applyGain && fadeToBlack == FadeToBlack::Normal && !out.holdGain)
+		{
+			const double ahead = std::min(ledModel.Value(),
+				ledModel.Predict(LedFractionLocked(out.light), projector.cntrLatencyMs));
+			contrastCommand = pairing.Update(1.0 / std::max(1e-6, ahead), out.vpHeadroom);
+			if (contrastCommand >= 0)
+			{
+				driver->SetContrastAsync(contrastCommand);
+				if (contrastCommand != 50) assistContrastDriven = true;
+			}
+		}
 		policy = out;
 		gain.knee = out.knee;
 		++ticks;
-		if (out.lightCommand >= 0 || pendingLog.empty())
+		if (out.lightCommand >= 0 || contrastCommand >= 0 || pendingLog.empty())
 		{
-			pendingLog = out.log;
-			pendingLogSent = out.lightCommand >= 0;
+			// The LED : CNTR command ratio for the owner (planner's step 7
+			// answer 1).
+			const DriverStatus status = driver->Status();
+			std::ostringstream log;
+			log << out.log << " cntr=" << pairing.Contrast() << (contrastCommand >= 0 ? " sent" : "")
+				<< " lpw1:cntr=" << status.lightSends << ":" << status.contrastSends;
+			pendingLog = log.str();
+			pendingLogSent = out.lightCommand >= 0 || contrastCommand >= 0;
 		}
 	}
 
@@ -494,7 +580,8 @@ namespace LedDrive
 			// content brightness stays constant while it moves.
 			current.active = true;
 			current.domain = GainDomain::Linear;
-			current.gain = holding ? heldGain : CompensationGainFor(flux, led.ledCeiling, modelledLevel, policy);
+			current.gain = holding ? heldGain :
+				CompensationGainForLed(1.0 / std::max(1e-6, ledModel.Value()), policy, contrastModel.Value());
 		}
 		return current;
 	}
@@ -580,6 +667,7 @@ namespace LedDrive
 		// Set once script mode has sent a CNTR other than 50: the exit, or a
 		// switch to compensate, puts it back to 50.
 		bool contrastDriven = false;
+		bool restoreAssist = false;
 		auto setSmoothing = [this](bool on, int contrast)
 		{
 			std::lock_guard<std::mutex> guard(mutex);
@@ -614,6 +702,16 @@ namespace LedDrive
 					controller = ScriptController(current);
 					controller.Reset(status.lastSentLight >= 0 ? status.lastSentLight : current.ledCeiling,
 						contrastNow);
+					// From compensate with CNTR assist above 50: back to 50
+					// first (7c-1), which the script controller assumes.
+					if (current.mode != Mode::Compensate && assistContrastDriven)
+					{
+						restoreAssist = true;
+						assistContrastDriven = false;
+						pairing.Reset(50);
+						contrastModel.Reset(1.0);
+						controller.Reset(controller.Light(), 50);
+					}
 				}
 				have = haveStats;
 				if (!compensating)
@@ -627,6 +725,12 @@ namespace LedDrive
 			auto sendsDone = tickStart;
 			// The script's sleep after an LPW1 when no CNTR follows it.
 			auto scriptFloor = tickStart;
+			if (restoreAssist)
+			{
+				restoreAssist = false;
+				const bool ok = driver->SendScript("CNTR", 50);
+				DebugLog::Log("LED drive: left compensate; contrast set to 50%s", ok ? "" : " (not confirmed)");
+			}
 			if (current.mode == Mode::Compensate)
 			{
 				if (contrastDriven)
@@ -740,6 +844,7 @@ namespace LedDrive
 			gain.gain = 1.0;
 			smoothing = false;
 			compensating = false;
+			contrastDriven = contrastDriven || assistContrastDriven;
 		}
 		if (driving)
 			RestoreFullLight(*driver, current.ledCeiling,

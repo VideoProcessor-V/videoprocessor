@@ -277,6 +277,22 @@ namespace LedDrive
 		return actual > 0.0 ? Flux(ceiling) / actual : 1.0;
 	}
 
+	double FluxModel::LevelOf(double fluxValue) const
+	{
+		if (table.empty()) return fluxValue;
+		if (fluxValue <= table.front().second) return table.front().first;
+		if (fluxValue >= table.back().second) return table.back().first;
+		for (size_t i = 1; i < table.size(); ++i)
+			if (fluxValue <= table[i].second)
+			{
+				const auto& a = table[i - 1];
+				const auto& b = table[i];
+				return b.second > a.second ?
+					a.first + (b.first - a.first) * (fluxValue - a.second) / (b.second - a.second) : b.first;
+			}
+		return table.back().first;
+	}
+
 	int FluxModel::LevelFor(double fraction, int low, int ceiling) const
 	{
 		const double needed = fraction * Flux(ceiling);
@@ -354,7 +370,7 @@ namespace LedDrive
 		// scene never raises the floor.
 		const double allowedStops = config.highlightToleranceStops * (1.0 - large);
 		const double highlightFloor = protection *
-			flux.LevelFor(highlightLinear / std::pow(2.0, allowedStops), 0, ceiling);
+			flux.LevelFor(highlightLinear / std::pow(2.0, allowedStops) / contrastHeadroom, 0, ceiling);
 
 		const bool cutToBlack = stats.cut && apl < 20;
 		const bool toBlack = stats.fade || cutToBlack;
@@ -382,7 +398,8 @@ namespace LedDrive
 			else if (aheadTarget < target)
 			{
 				const int currentLimit = std::max(config.ledFloorBlack, flux.LevelFor(
-					linearOf(stats.highlight) / std::pow(2.0, config.highlightToleranceStops), 0, ceiling));
+					linearOf(stats.highlight) / std::pow(2.0, config.highlightToleranceStops) / contrastHeadroom,
+					0, ceiling));
 				const int bounded = std::max(aheadTarget, currentLimit);
 				if (bounded < target)
 				{
@@ -392,8 +409,13 @@ namespace LedDrive
 			}
 		}
 
-		const double maxUp = config.rateUp * elapsed / 1000.0;
-		const double maxDown = config.rateDown * elapsed / 1000.0;
+		// Rate law (7c-1): proportional to the distance, between rate_min and
+		// rate_max (rate_gain 0 = the fixed rate_up / rate_down).
+		const double distance = std::abs(target - level);
+		const double maxUp = RampRate(distance, config.rateGainUp, config.rateMinUp,
+			config.rateMaxUp > 0.0 ? config.rateMaxUp : config.rateUp) * elapsed / 1000.0;
+		const double maxDown = RampRate(distance, config.rateGainDown, config.rateMinDown,
+			config.rateMaxDown > 0.0 ? config.rateMaxDown : config.rateDown) * elapsed / 1000.0;
 		// A seen cut lands now: jump to the new scene (the cut hides it). An
 		// unseen dark-to-bright cut: straight up, like the script's dump, so
 		// highlights are squashed only for the LED's response time.
@@ -435,6 +457,10 @@ namespace LedDrive
 		out.knee = knee;
 		out.highlightCap = highlightLinear > 0.0 ? 1.0 / highlightLinear : 1e9;
 		out.capWeight = protection * large;
+		// Software first: VP's gain may lift the sustained highlight by up to
+		// the allowed stops into the knee; beyond that, CNTR (7c-1).
+		out.vpHeadroom = protection > 0.0 && highlightLinear > 0.0 ?
+			std::pow(2.0, allowedStops) / (highlightLinear * protection) : 1e9;
 		out.holdGain = stats.fade;
 		out.gain = CompensationGainFor(flux, ceiling, light, out);
 		std::ostringstream log;
@@ -446,5 +472,44 @@ namespace LedDrive
 			<< (seenCut ? " cut-jump" : brightDump ? " bright-dump" : "") << (covered ? "" : " reactive");
 		out.log = log.str();
 		return out;
+	}
+
+	void CntrPairing::Configure(double eotfIn, int maxUsableIn, bool enabledIn, bool softwareFirstIn)
+	{
+		eotf = eotfIn;
+		maxUsable = std::max(50, maxUsableIn);
+		enabled = enabledIn;
+		softwareFirst = softwareFirstIn;
+	}
+
+	void CntrPairing::Reset(int contrastIn)
+	{
+		contrast = contrastIn;
+		required = 1.0;
+	}
+
+	double CntrPairing::Light(int value) const
+	{
+		return std::pow(value / 50.0, eotf);
+	}
+
+	int CntrPairing::Update(double compensation, double vpHeadroom)
+	{
+		const double software = softwareFirst ? std::max(1.0, vpHeadroom) : 1.0;
+		// The light CNTR is needed for; below 1 when VP's gain has room to
+		// spare (0 with the assist off), so CNTR can always come back to 50.
+		const double need = enabled ? compensation / software : 0.0;
+		required = std::max(1.0, need);
+		// The smallest whole CNTR that supplies it (CNTR never below 50 here).
+		int wanted = 50;
+		while (wanted < maxUsable && Light(wanted) < required - 1e-12) ++wanted;
+		int next = contrast;
+		if (wanted > contrast)
+			next = wanted;
+		else
+			while (next > wanted && (next > maxUsable || Light(next - 1) >= need * 1.02)) --next;
+		if (next == contrast) return -1;
+		contrast = next;
+		return contrast;
 	}
 }

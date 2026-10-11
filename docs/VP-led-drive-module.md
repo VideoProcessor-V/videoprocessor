@@ -245,6 +245,44 @@ real:
 
 ### 4.2 `mode: compensate` — the intended form
 
+> **Stage 7 step 7c-1 (2026-10-11) changes this section** (control policy
+> 2, 3.1, 3.2, 6; planner's step 7 answers). CNTR is no longer always 50:
+>
+> - **LED model:** dead time (`led_latency_ms`, whole frames, as before),
+>   then a first-order settle (`[projector] led_settle_ms`, default 300,
+>   fast-biased per the planner's Q2; 0 = the old dead-time-only model).
+>   The gain follows the settled light.
+> - **CNTR assist** (`cntr_assist: on`, default): VP's gain does the
+>   compensation up to its headroom, the largest gain that lifts the
+>   sustained highlight by no more than the allowed stops into the knee
+>   (`ControllerOutput::vpHeadroom`). CNTR supplies only the rest, as the
+>   smallest whole value with (CNTR/50)^E covering it, up to
+>   `cntr_max_usable` (74). VP's gain removes the rest of the step:
+>   gain = LED compensation / modelled CNTR light. `software_first: off`
+>   lets CNTR go first.
+> - **Commands only on integer crossings** (planner's answer 1). CNTR goes
+>   up as soon as it is needed, and down only once one step lower still
+>   covers the need with a 2% margin (no chatter). A CNTR command takes the
+>   next serial slot ahead of a waiting LPW1 (`SetContrastAsync`). It is
+>   timed on the lower of the LED's modelled light now and
+>   `cntr_latency_ms` ahead, so it rises no later and falls no earlier than
+>   the LED needs. No CNTR during a fade's gain hold or the custom dim.
+>   The log shows the LPW1 : CNTR command counts.
+> - **CNTR model:** `cntr_latency_ms` (80), `cntr_settle_ms` (0).
+> - **Highlight floor:** with assist, the LED may go lower by CNTR's
+>   headroom ((cntr_max_usable/50)^E), which is where the deeper dimming in
+>   highlight scenes comes from.
+> - **Rate law:** `clamp(rate_gain x |distance|, rate_min, rate_max)` per
+>   direction. Defaults: gain 4.0 / 1.2 per second, min 20 / 10, max =
+>   `rate_up` / `rate_down` (400 / 120). `rate_gain: 0` = the fixed rates.
+> - **CNTR back to 50:** on exit or disable (after the light), and on a
+>   live switch to script mode.
+> - **The previous build exactly:** `cntr_assist: off`,
+>   `led_settle_ms: 0`, `rate_gain_up/down: 0`. The compensate tests
+>   written before 7c-1 run with these settings, as the regression proof.
+> - Bright and dark cuts, the recovery gain and `max_cut_dip` are 7c-2;
+>   the look-ahead extras and the Config page keys are 7c-3.
+
 The projector contrast command is never sent; contrast is left at the
 owner's calibrated 50. Instead the controller outputs a gain that VP applies
 in linear light at `PL_HOOK_PRE_OUTPUT` — after tone map, gamut map and the

@@ -79,7 +79,7 @@ namespace LedDrive
 	}
 
 	bool BarcoAsciiDriver::Transact(const std::string& command, const char* mnemonic,
-		int* value, int timeoutMs, int maxGapWaitMs, int sentLight, bool abortable)
+		int* value, int timeoutMs, int maxGapWaitMs, int sentLight, bool abortable, int sentContrast)
 	{
 		using namespace std::chrono;
 		steady_clock::time_point allowed;
@@ -115,6 +115,11 @@ namespace LedDrive
 				{
 					++lightSends;
 					lastSentLight = sentLight;
+				}
+				if (sentContrast >= 0)
+				{
+					++contrastSends;
+					lastSentContrast = sentContrast;
 				}
 			}
 		}
@@ -271,6 +276,7 @@ namespace LedDrive
 			stopping = false;
 			shuttingDown = false;
 			pendingLight = -1;
+			pendingContrast = -1;
 			opened = true;
 		}
 		worker = std::thread(&BarcoAsciiDriver::Worker, this);
@@ -325,6 +331,14 @@ namespace LedDrive
 		if (!opened) return;
 		pendingLight = Clamp(level);
 		pendingJump = false;
+		wake.notify_one();
+	}
+
+	void BarcoAsciiDriver::SetContrastAsync(int value)
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (!opened || shuttingDown) return;
+		pendingContrast = value;
 		wake.notify_one();
 	}
 
@@ -403,7 +417,7 @@ namespace LedDrive
 		}
 		int confirmed = -1;
 		const bool ok = Transact(Format(mnemonic.c_str(), std::to_string(sent)), mnemonic.c_str(), &confirmed,
-			config.ackTimeoutMs, -1, light ? sent : -1, true);
+			config.ackTimeoutMs, -1, light ? sent : -1, true, mnemonic == "CNTR" ? sent : -1);
 		std::lock_guard<std::mutex> guard(stateMutex);
 		if (ok && light) lastLight = confirmed >= 0 ? confirmed : sent;
 		if (ok && mnemonic == "CNTR")
@@ -419,6 +433,7 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(stateMutex);
 		shuttingDown = true;
 		pendingLight = -1;
+		pendingContrast = -1;
 		sequence.clear();
 		wake.notify_all();
 	}
@@ -467,7 +482,7 @@ namespace LedDrive
 		std::lock_guard<std::timed_mutex> guard(portMutex);
 		int confirmed = -1;
 		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
-			config.ackTimeoutMs, -1);
+			config.ackTimeoutMs, -1, -1, false, value);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
 		if (ok)
 		{
@@ -484,7 +499,8 @@ namespace LedDrive
 			int target = -1;
 			{
 				std::unique_lock<std::mutex> lock(stateMutex);
-				wake.wait(lock, [this] { return stopping || pendingLight >= 0 || !sequence.empty(); });
+				wake.wait(lock, [this]
+					{ return stopping || pendingLight >= 0 || pendingContrast >= 0 || !sequence.empty(); });
 				if (!stopping && !shuttingDown && !sequence.empty())
 				{
 					// Experimental custom dim: its own spacing (ftb_step_ms, like
@@ -521,7 +537,37 @@ namespace LedDrive
 				while (!stopping && std::chrono::steady_clock::now() < nextSendAllowed)
 					wake.wait_until(lock, nextSendAllowed);
 				if (stopping) return;
-				if (shuttingDown || pendingLight < 0) continue;
+				if (shuttingDown) continue;
+				if (pendingContrast >= 0)
+				{
+					// 7c-1: a CNTR crossing takes this slot; a waiting LPW1
+					// keeps its place for the next one.
+					const int contrast = pendingContrast;
+					pendingContrast = -1;
+					transmitting = true;
+					lock.unlock();
+					{
+						std::lock_guard<std::timed_mutex> guard(portMutex);
+						bool skip = false;
+						{
+							std::lock_guard<std::mutex> stateGuard(stateMutex);
+							skip = shuttingDown;
+						}
+						int confirmed = -1;
+						if (!skip &&
+							Transact(Format("CNTR", std::to_string(contrast)), "CNTR", &confirmed,
+								config.ackTimeoutMs, -1, -1, true, contrast))
+						{
+							std::lock_guard<std::mutex> stateGuard(stateMutex);
+							state.contrastKnown = true;
+							state.contrast = confirmed >= 0 ? confirmed : contrast;
+						}
+					}
+					lock.lock();
+					transmitting = false;
+					continue;
+				}
+				if (pendingLight < 0) continue;
 				target = pendingLight;
 				pendingLight = -1;
 				const bool jump = pendingJump;
@@ -564,6 +610,7 @@ namespace LedDrive
 			stopping = true;
 			opened = false;
 			pendingLight = -1;
+			pendingContrast = -1;
 		}
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
@@ -581,7 +628,9 @@ namespace LedDrive
 		status.lastLight = lastLight;
 		status.lightSends = lightSends;
 		status.lastSentLight = lastSentLight;
-		status.busy = pendingLight >= 0 || transmitting;
+		status.contrastSends = contrastSends;
+		status.lastSentContrast = lastSentContrast;
+		status.busy = pendingLight >= 0 || pendingContrast >= 0 || transmitting;
 		status.sequenceBusy = !sequence.empty() || sequenceInFlight;
 		status.sequencesDone = sequencesDone;
 		return status;

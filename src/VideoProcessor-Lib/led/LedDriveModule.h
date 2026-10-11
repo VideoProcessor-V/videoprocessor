@@ -97,9 +97,15 @@ namespace LedDrive
 		double SourceFramePeriodMs() const;
 		// The LED level the gain is following: the last level the driver
 		// actually wrote to the port that has had led_latency_ms (whole frames)
-		// to land (dead time, no lag). Targets the driver skipped (it keeps to
-		// min_command_gap_ms) never count.
+		// to land, then settling with led_settle_ms (7c-1; 0 = dead time only),
+		// as the equivalent (fractional) level. Targets the driver skipped (it
+		// keeps to min_command_gap_ms) never count.
 		double ModelledLight() const;
+		// mode: compensate's CNTR assist (7c-1): the CNTR value it last asked
+		// for, and the modelled CNTR light ((CNTR / 50)^E, after
+		// cntr_latency_ms and cntr_settle_ms) the gain divides by.
+		int AssistContrast() const;
+		double ModelledContrastLight() const;
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
 		size_t LookaheadDepth() const;
@@ -117,6 +123,9 @@ namespace LedDrive
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
 		CompensationGain GainLocked() const;
+		void ConfigureModelsLocked();
+		double LedFractionLocked(double level) const;
+		int LatencyFramesForLocked(int ms) const;
 		FrameStats Corrected(const FrameStats& predicted) const;
 		void StepCompensateLocked(uint64_t sequence, double elapsedMs);
 		void StepFadeToBlackLocked(uint64_t sequence, double timeMs);
@@ -163,6 +172,17 @@ namespace LedDrive
 		std::deque<Command> commands;
 		int seenSends = 0;
 		int modelledLevel;
+		// 7c-1: the LED's light after the dead time, settling (as a fraction
+		// of the ceiling's flux), and the same for CNTR (its light factor).
+		SettleModel ledModel;
+		struct ContrastCommand { uint64_t frame; int value; };
+		std::deque<ContrastCommand> contrastCommands;
+		int seenContrastSends = 0;
+		SettleModel contrastModel;
+		CntrPairing pairing;
+		// Compensate has sent a CNTR other than 50: the exit, or a switch to
+		// another mode, puts it back to 50.
+		bool assistContrastDriven = false;
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
 		// the projector's whole CNTR steps; smoothing is set by the script
 		// thread while it applies.

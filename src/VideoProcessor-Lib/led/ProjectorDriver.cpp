@@ -48,6 +48,16 @@ namespace LedDrive
 				return true;
 			}
 
+			void SetContrastAsync(int value) override
+			{
+				if (value < 0) return;
+				DebugLog::Log("LED drive: dry run, would set CNTR %d", value);
+				std::lock_guard<std::mutex> guard(mutex);
+				++status.commands;
+				++status.contrastSends;
+				status.lastSentContrast = value;
+			}
+
 			bool SendScript(const std::string& mnemonic, int value) override
 			{
 				if (mnemonic == "LPW1")
@@ -57,6 +67,11 @@ namespace LedDrive
 					DebugLog::Log("LED drive: dry run, would set %s %d", mnemonic.c_str(), value);
 					std::lock_guard<std::mutex> guard(mutex);
 					++status.commands;
+					if (mnemonic == "CNTR")
+					{
+						++status.contrastSends;
+						status.lastSentContrast = value;
+					}
 				}
 				return true;
 			}

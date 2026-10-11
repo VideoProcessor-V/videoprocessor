@@ -28,6 +28,7 @@ namespace LedDrive
 		ProjectorState ReadState() override;
 		void SetLight(int level) override;
 		void SetLightJump(int level) override;
+		void SetContrastAsync(int value) override;
 		bool SetLightNow(int level, int timeoutMs) override;
 		void BeginShutdown() override;
 		bool QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
@@ -57,8 +58,10 @@ namespace LedDrive
 		// an LPW1 write.
 		// abortable: the reply wait ends early once BeginShutdown() is called
 		// (the driver thread's commands only).
+		// sentContrast >= 0 records a CNTR write.
 		bool Transact(const std::string& command, const char* mnemonic, int* value,
-			int timeoutMs, int maxGapWaitMs, int sentLight = -1, bool abortable = false);
+			int timeoutMs, int maxGapWaitMs, int sentLight = -1, bool abortable = false,
+			int sentContrast = -1);
 		bool QueryLocked(const char* mnemonic, const std::string& argument, int& value);
 		void SelectFraming();
 		int Clamp(int level) const;
@@ -83,6 +86,9 @@ namespace LedDrive
 		int lastLight = -1;
 		int lightSends = 0;
 		int lastSentLight = -1;
+		int pendingContrast = -1;
+		int contrastSends = 0;
+		int lastSentContrast = -1;
 		bool transmitting = false;
 		bool shuttingDown = false;
 		// Experimental custom dim sequence (guarded by stateMutex).

@@ -76,9 +76,20 @@ namespace LedDrive
 		// LED is modelled as reaching a commanded level this long after the
 		// command (whole output frames). Measured once with a camera.
 		int ledLatencyMs = 80;
+		// After the dead time, the LED's light settles towards the new level
+		// as a first-order lag with this time constant (63% after
+		// led_settle_ms; control policy 6, 7c-1). 0 = dead time only (the
+		// model before 7c-1). Fast-biased until measured: the gain divides by
+		// the modelled light, so a model faster than the real LED errs dark.
+		int ledSettleMs = 300;
 		// The same for CNTR: the projector's contrast changes this long after
-		// the command. mode: script's smoothing times VP's gain with it.
+		// the command. mode: script's smoothing times VP's gain with it, and
+		// mode: compensate models CNTR with it (7c-1).
 		int cntrLatencyMs = 80;
+		int cntrSettleMs = 0;
+		// The highest CNTR that still adds light (light-meter step, control
+		// policy 6): the most mode: compensate's CNTR assist may use.
+		int cntrMaxUsable = 74;
 		// lpw : relative flux, ascending lpw; empty = flux proportional to lpw.
 		std::vector<std::pair<double, double>> fluxTable;
 	};
@@ -126,6 +137,24 @@ namespace LedDrive
 		double rateUp = 400.0;
 		double rateDown = 120.0;
 		int deadband = 3;
+		// Rate law (control policy 3.2, 7c-1): a ramp runs at
+		// clamp(rate_gain x |distance|, rate_min, rate_max) levels per second,
+		// fast while far from its target and settling as it arrives.
+		// rate_gain 0 = the fixed rate_up / rate_down (before 7c-1);
+		// rate_max 0 = rate_up / rate_down.
+		double rateGainUp = 4.0;
+		double rateGainDown = 1.2;
+		double rateMinUp = 20.0;
+		double rateMinDown = 10.0;
+		double rateMaxUp = 0.0;
+		double rateMaxDown = 0.0;
+		// CNTR assist (control policy 2, 3.1, 3.2; 7c-1): CNTR moves paired
+		// with the LED for the part of the compensation VP's gain cannot do
+		// without compressing highlights beyond highlight_tolerance_stops.
+		// Off = VP-gain-only compensate. software_first off: CNTR takes the
+		// compensation first and VP's gain only the remainder.
+		bool cntrAssist = true;
+		bool softwareFirst = true;
 		bool earlyRamp = true;
 		// A cut the look-ahead has seen: one jump to the new scene's level,
 		// timed to land on the cut frame (both directions; the cut hides it).
@@ -329,7 +358,10 @@ namespace LedDrive
 			Boolean("echo"),
 			Choice("terminator", { "auto", "cr", "literal_cr", "script" }),
 			Integer("led_latency_ms", 0, 2000),
+			Integer("led_settle_ms", 0, 5000),
 			Integer("cntr_latency_ms", 0, 2000),
+			Integer("cntr_settle_ms", 0, 5000),
+			Integer("cntr_max_usable", 50, 100),
 			Custom("flux_table", [](const std::string& value)
 				{ std::vector<std::pair<double, double>> t; return ParseFluxTable(value, t); },
 				"ascending lpw:relative_flux pairs, e.g. 60:0.55, 80:0.78, 100:1.00"),
@@ -354,6 +386,14 @@ namespace LedDrive
 			Integer("ftb_black_ms", 100, 10000),
 			Number("rate_up", 1.0, 10000.0),
 			Number("rate_down", 1.0, 10000.0),
+			Number("rate_gain_up", 0.0, 100.0),
+			Number("rate_gain_down", 0.0, 100.0),
+			Number("rate_min_up", 0.0, 10000.0),
+			Number("rate_min_down", 0.0, 10000.0),
+			Number("rate_max_up", 0.0, 10000.0),
+			Number("rate_max_down", 0.0, 10000.0),
+			Boolean("cntr_assist"),
+			Boolean("software_first"),
 			Integer("deadband", 0, 50),
 			Boolean("early_ramp"),
 			Boolean("cut_jump"),
@@ -560,6 +600,9 @@ namespace LedDrive
 		if (config.TryGetString(section, "terminator", value)) result.terminator = ParseTerminator(value);
 		if (config.TryGetString(section, "led_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.ledLatencyMs);
 		if (config.TryGetString(section, "cntr_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.cntrLatencyMs);
+		if (config.TryGetString(section, "led_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.ledSettleMs);
+		if (config.TryGetString(section, "cntr_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.cntrSettleMs);
+		if (config.TryGetString(section, "cntr_max_usable", value)) Detail::ParseInt(value, 50, 100, result.cntrMaxUsable);
 		if (config.TryGetString(section, "flux_table", value)) ParseFluxTable(value, result.fluxTable);
 		return result;
 	}
@@ -614,6 +657,14 @@ namespace LedDrive
 		readInt("tick_ms", 50, 5000, result.tickMs);
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
+		readNumber("rate_gain_up", result.rateGainUp);
+		readNumber("rate_gain_down", result.rateGainDown);
+		readNumber("rate_min_up", result.rateMinUp);
+		readNumber("rate_min_down", result.rateMinDown);
+		readNumber("rate_max_up", result.rateMaxUp);
+		readNumber("rate_max_down", result.rateMaxDown);
+		config.TryGetBool(section, "cntr_assist", result.cntrAssist);
+		config.TryGetBool(section, "software_first", result.softwareFirst);
 		readInt("deadband", 0, 50, result.deadband);
 		config.TryGetBool(section, "early_ramp", result.earlyRamp);
 		config.TryGetBool(section, "cut_jump", result.cutJump);

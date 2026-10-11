@@ -44,6 +44,10 @@ namespace
 		return raw;
 	}
 
+	// The compensate tests written before 7c-1 run with its new behaviour
+	// switched off (fixed rate_up / rate_down, no CNTR assist; Port() and the
+	// module tests also use led_settle_ms 0): they are the regression proof
+	// that those settings reproduce the previous build.
 	LedDriveConfig Compensate()
 	{
 		LedDriveConfig config;
@@ -52,6 +56,19 @@ namespace
 		config.ledFloor = 60;
 		config.ledFloorReactive = 60;
 		ParseCurve("0:60, 20:60, 40:200, 70:230, 100:255, 255:255", config.curve);
+		config.rateGainUp = config.rateGainDown = 0.0;
+		config.cntrAssist = false;
+		return config;
+	}
+
+	// The same scene setup with 7c-1's defaults (rate law, CNTR assist).
+	LedDriveConfig Assisted()
+	{
+		LedDriveConfig config = Compensate();
+		const LedDriveConfig defaults;
+		config.rateGainUp = defaults.rateGainUp;
+		config.rateGainDown = defaults.rateGainDown;
+		config.cntrAssist = true;
 		return config;
 	}
 
@@ -74,6 +91,7 @@ namespace
 		port.minCommandGapMs = 0;
 		port.readBack = true;
 		port.ledLatencyMs = latencyMs;
+		port.ledSettleMs = 0; // the dead-time model these tests were written for
 		return port;
 	}
 
