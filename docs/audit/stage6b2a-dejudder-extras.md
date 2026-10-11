@@ -248,3 +248,122 @@ Then judge by eye.
 - **Note (8), output compared by address:** accepted. The output is a
   counted reference; a monitor move recreates the swapchain through
   `RetireOutput`, which clears it.
+
+## Re-audit (063342f2, diff 8a2c7e2d..063342f2)
+
+Build: OK — full x64 Release /t:Rebuild at cc1c67d3 (063342f2 plus documents), 0 errors,
+no new warnings.
+Tests: native 2475 passed, 2 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted,
+SameSizeEditWithRestoredWriteTimeInvalidatesCache — both known); all 8 de-judder tests pass.
+VideoProcessorConfigTests 97 passed, 2 failed (the two known RPC tests). The implementer
+session was idle; the checkout was clean before and after.
+
+Earlier items:
+- Should fix 1, B delayed — **not resolved; the fix overshoots** (see (1)). The new
+  hold (whole work + 4 ms must fit in a refresh) is the right fix. But the same
+  whole-work figure was also put into PlanExtra's allowance, where it counts
+  B's work twice.
+- Should fix 2, extra encoded twice — **resolved.** The repair is re-evaluated
+  on the extras' own list (see (3)).
+- Should fix (B), A's record and the pacing trace — **resolved** (see (4)).
+- Note (2), late GPU after an in-time Present — **disputed-and-I-agree** (not
+  detectable without GPU queries).
+- Note (3), B's arrival checked only between waits — **disputed-and-I-agree**.
+- Note (4), phase line φ0 — **resolved** (see (5)).
+- Note (1), double render failure — **disputed-and-I-agree** (unreachable in
+  practice).
+- Note (8), output compared by address — **disputed-and-I-agree**.
+
+### Blockers
+- LibplaceboVideoRenderer.cpp `PresentDejudderExtras`: `renderAllowance =
+  workMs + 4 ms`, passed to `PlanExtra` — **extras can now take a refresh
+  that B would have made, systematically, and nothing counts it.**
+  - `PlanExtra` gives the next refresh to B when `nextCall + allowance <
+    target`. `nextCall` is B's predicted *present call*: A's callback + P_s +
+    A's (callback → present call) time. That time already includes A's whole
+    work, so the allowance should only cover what happens after the call
+    (the GPU finishing, plus a margin), as `renderMs` + 4 ms did.
+  - Adding the whole work again makes B look later than it is. A *larger*
+    allowance means *fewer* "next frame due" stops, so an extra is presented
+    in a refresh B could have made. B then shows one refresh after its
+    natural one.
+  - Worked example: work 10 ms, render 2 ms, B's natural present call 8 ms
+    before vsync V. The old rule stops (8 > 6) and B shows at V. The new
+    rule presents an extra at V (8 < 14), and B shows at V + 1.
+  - Which frames this hits depends on where B's present call falls relative
+    to the vsync grid: within (work − render) ms before a vsync. At 24p on
+    60 Hz the call alternates between two positions half a refresh apart.
+    If one of them falls in that window, every other frame loses a refresh,
+    turning 3:2 into 4:1 — the opposite of the stage's purpose.
+  - The new `nextFrameLate` counter compares B with the extras' *own* stop
+    prediction (V + 1 here), so it reads 0.
+  - Fix: keep the new hold (`workMs + 4 ms` ≤ one refresh, which guarantees
+    B fits after the last extra's vblank), and put PlanExtra's allowance
+    back to the after-call time (`renderMs` + 4 ms). Then B can make
+    exactly the refreshes it would make without extras. For the "too late
+    to render this extra" pre-check, the extra's own render time is the
+    right figure.
+  - Please check by eye *and* in vp.log ("Alpha frame pacing trace …
+    submit_gap") before trusting a projector session with this build.
+
+### Should fix
+- `dejudderPredictedVsync` is cleared only inside the wait loop. If the frame
+  after a "next frame due" stop never reaches that loop, the stale prediction
+  is compared with a later frame's first vsync and counted as "next frame
+  late" (with a hold line), although nothing was late. That happens when
+  the frame is:
+  - held early (cadence repeat, no estimate, composed source, timing,
+    "frame work too long", no output/present id);
+  - not Active at all (next frame not ready, a reason change);
+  - in a new generation.
+  Clear it on every early return and whenever the extras block is skipped,
+  or tag it with the source sequence it is for.
+
+### Notes
+- (1) `workMs` (RenderLoop's pre-render active time + RenderLocked entry →
+  `swapEndQpc`) includes A's own Present call. When the swapchain makes
+  that call block, it inflates `workMs`, and the hold can then switch
+  extras off for a frame. That is safe (it errs towards today's behaviour)
+  but could make the effect come and go; worth watching in the hold lines.
+- (3) The disabled-hook list is read once per source frame, before the
+  extras. If libplacebo disables the compensation hook during an extra, the
+  remaining extras of that frame (≤ 2) keep the repair without needing it:
+  one or two refreshes encoded twice, once. Same one-frame window as A has;
+  acceptable.
+- None of the new logic (the telemetry adjustment, the late counter, the
+  repair re-evaluation) is covered by a test. Pure helpers
+  (`DejudderExtrasBetween`, the sample adjustment) could be unit-tested
+  without a display.
+
+### Owner checks
+- (1) `workMs` is the right measure of what B needs *after the last extra's
+  vblank*, so it belongs in the hold (applied as `workMs + 4 > 1000 ×
+  P_d` ms). It is the wrong measure for the allowance (Blocker above).
+  Units are consistent (ms in the hold, seconds in the allowance).
+- (2) It stores the predicted vsync only on a "next frame due" stop after at
+  least one extra, and compares B's first observed vsync with it (late =
+  more than half a refresh after). It can count falsely (Should fix), and
+  it cannot see the Blocker's delay.
+- (3) **OK.** The repair is kept only if a non-disabled PRE_OUTPUT texture
+  hook remains in the extras' list (LUT type passed too). With the LED drive
+  on, the compensation hook is always in the list while it runs, so the
+  extras keep the repair whenever they still need it.
+- (4) **OK.**
+  - Identity when no extras ran: the id list is empty, so the sample is
+    untouched. Ids are only ever added by extras. After switching the
+    de-judder off, old ids never match a new present id, so the adjustment
+    stays an identity in practice.
+  - With extras: a sample whose latest present is an extra is rewritten to
+    the main present before it, with that present's observed refresh.
+    `presentedRefresh`, `lastPresentId` and `lastPresentRefresh` are what
+    they would be without extras.
+  - The pacing trace's present delta subtracts the extras in between, so it
+    is 1 again.
+  - Debt (A records not on screen) and "lastPresentId changed" behave as
+    before, so drift correction is unaffected.
+  - The list is cleared on a swapchain change (and the adjustment ignores a
+    different swapchain) and at teardown. The between-test uses signed
+    32-bit differences, so it survives wrap; the walk-down stops at 0.
+- (5) **OK.** The phase line waits until the latency floor has 24 frames
+  (~1 s at 24p, restarted per generation or rate change), so its φ0 now
+  shows a settled value.

@@ -3819,6 +3819,7 @@ struct LibplaceboVideoRenderer::Impl
 	ULONGLONG dejudderHoldLogTick = 0;
 	unsigned long long dejudderHoldsNotLogged = 0;
 	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
+	uint64_t dejudderPredictedGeneration = 0;
 	// Present ids of recent extras and the refresh each main present (A)
 	// showed on, so presentation telemetry sees what it would without extras.
 	std::deque<UINT> dejudderExtraIds;
@@ -10813,6 +10814,7 @@ struct LibplaceboVideoRenderer::Impl
 		// entry to A's Present returning. B needs about as long from the
 		// moment it starts, so this is what must fit in one refresh.
 		double workMs = 0.0;
+		double renderMs = 0.0;   // A's render call: the after-call allowance for B
 		const std::function<bool()>* nextFrameArrived = nullptr;
 	};
 
@@ -10833,6 +10835,10 @@ struct LibplaceboVideoRenderer::Impl
 
 	bool PresentDejudderExtras(const DejudderExtrasFrame& f)
 	{
+		// The prediction is only for the frame straight after (same generation);
+		// every call consumes it, whatever happens below.
+		const double predictedVsync = dejudderPredictedGeneration == f.frameGeneration ? dejudderPredictedVsync : 0.0;
+		dejudderPredictedVsync = 0.0;
 		if (dejudderReason != DejudderPolicy::Reason::Active || !dejudder)
 			return false;
 		if (dejudderEstimatedSequence != f.sourceSequence) { DejudderHold("no motion estimate for this frame"); return false; }
@@ -10917,7 +10923,10 @@ struct LibplaceboVideoRenderer::Impl
 			callLatency : dejudderCallLatency + 0.05 * (callLatency - dejudderCallLatency);
 		const double callbackA = static_cast<double>(f.callbackQpc) / qpc;
 		// B needs its whole work plus a margin to make a vsync after it starts.
-		const double renderAllowance = f.workMs / 1000.0 + 0.004;
+		// Re-audit 6b-2a: B's predicted present call already contains its whole
+		// work (A's callback-to-call time), so PlanExtra only needs what follows
+		// the call. The whole work is in the hold above.
+		const double renderAllowance = f.renderMs / 1000.0 + 0.004;
 
 		Dejudder::Planes a;
 		a.luma = textures[0];
@@ -10982,12 +10991,11 @@ struct LibplaceboVideoRenderer::Impl
 				// This frame was predicted (by the last frame's extras) to show
 				// at dejudderPredictedVsync; later means the extras cost it a
 				// refresh.
-				if (dejudderPredictedVsync > 0.0 && previousVsync > dejudderPredictedVsync + 0.5 * displayPeriod)
+				if (predictedVsync > 0.0 && previousVsync > predictedVsync + 0.5 * displayPeriod)
 				{
 					++dejudderExtraStats.nextFrameLate;
 					DejudderHold("the frame after extras showed a refresh late");
 				}
-				dejudderPredictedVsync = 0.0;
 				if (statistics.PresentCount == mainPresentId)
 				{
 					dejudderMainRefresh.emplace_back(mainPresentId, statistics.PresentRefreshCount);
@@ -11022,11 +11030,15 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				stop = decision.stop;
 				if (stop == DejudderPolicy::Stop::NextFrameNear && extras > 0)
+				{
 					dejudderPredictedVsync = decision.targetVsync;
+					dejudderPredictedGeneration = f.frameGeneration;
+				}
 				break;
 			}
 			// Too late to render for that vsync: B's refresh must stay free.
-			if (static_cast<double>(PerformanceCounterNow()) / qpc + renderAllowance > decision.targetVsync)
+			if (static_cast<double>(PerformanceCounterNow()) / qpc +
+				std::max(f.renderMs, dejudderExtraStats.lastMs) / 1000.0 + 0.004 > decision.targetVsync)
 			{
 				failure = "too late for the refresh";
 				break;
@@ -16231,12 +16243,15 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.callbackQpc = callbackQpc;
 			extrasFrame.mainCallQpc = swapStartQpc;
 			extrasFrame.captureRateHz = captureRateHz;
+			extrasFrame.renderMs = renderMs;
 			extrasFrame.workMs = preRenderTimings.activeMs + (qpcFrequency.QuadPart > 0 ?
 				static_cast<double>(swapEndQpc - renderLockedStartQpc) * 1000.0 /
 					static_cast<double>(qpcFrequency.QuadPart) : 0.0);
 			extrasFrame.nextFrameArrived = &dejudderNextFrameArrived;
 			dejudderExtrasSpentTime = PresentDejudderExtras(extrasFrame);
 		}
+		else
+			dejudderPredictedVsync = 0.0;   // no stale prediction across a skipped frame
 		return rendered && submitted;
 	}
 
