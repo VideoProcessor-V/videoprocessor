@@ -123,3 +123,65 @@ brief Stage 6 "6b-1 status".
   frees the matcher. Unit-tested. Revisit in 6b-2 only if wanted.
 - **Note — no renderer-path test: agreed.** 6b-2 adds a GPU test with the
   warp.
+
+## Re-audit (7b08b573, diff 6696ed17..HEAD)
+
+Build: OK — full x64 Release /t:Rebuild at 7b08b573, 0 errors, no new warnings.
+Tests: native 2473 passed, 1 failed (ShellStylePlacementWithoutSizingHintsIsNotReverted — known);
+the de-judder policy test (now with Interlaced) passes. VideoProcessorConfigTests 97 passed,
+2 failed (the two known RPC tests). The other Claude session was idle throughout.
+
+Earlier items:
+- Should fix, log at frame rate — **resolved.**
+  - Upload and estimate failures share one counter and are logged on the
+    1st and every 2400th.
+  - Reason changes are limited to one line per 5 s.
+- Note (1), off not strictly today's path — **resolved.** With strength 0,
+  reason Off, nothing allocated and nothing waiting to be logged, the call
+  returns before the telemetry snapshot. Only RenderLoop's pointer copy under
+  its existing lock remains, which is negligible.
+- Note (2), B's video state not compared — **resolved.** RenderLoop takes B only
+  when `SameDejudderVideoState(A, B)` holds.
+- Note (3), 25p/50 and 30p/60 count as film — **disputed-and-I-agree.** It is the
+  planner's rule, and the implementer has raised it with the owner.
+- Note (3), interlaced inputs — **resolved** with the new Interlaced reason.
+- Note, no renderer-path test — **disputed-and-I-agree.** Deferred to 6b-2's
+  GPU test with the warp.
+
+Owner checks:
+- (1) **OK, with one small gap.**
+  - A change is counted, and the line is written on the first call after 5 s
+    have passed since the last one (the very first change is logged at
+    once). It always names the reason current at that moment, with the
+    number of changes skipped, so a flip-flop can never leave an old reason
+    as the last line.
+  - Strength going to 0 while a change is waiting: the early return is
+    blocked while anything is waiting, so the next calls log "off" once the
+    5 s pass, and only then does the early return take over.
+  - Gap: the line is only written from a rendered frame. If rendering stops
+    within 5 s of a change (signal lost, playback stopped, VP closed), the
+    last line stays stale until frames resume. Harmless for diagnosis;
+    flushing it at teardown would close it.
+- (2) **OK.** The early return needs strength ≤ 0, reason Off, nothing waiting
+  to be logged, no matcher and no B texture. Reason Off can only come from
+  strength 0, so it cannot hide a live de-judder.
+- (3) **OK.**
+  - It compares the frame encoding, EOTF, colour space, orientation and the
+    full display mode (size, rate, interlace), plus — in the existing
+    check — byte count, range, colour depth and bit shift.
+  - Ignoring HDR metadata (e.g. MaxCLL) is right for 6b. B is used only to
+    find motion, and A is rendered with its own state. A metadata change
+    does not change what the luma codes mean for matching.
+- (4) **OK.** `Interlaced` is checked right after Low_Latency (before the rate
+  checks), it is unit-tested, it is in the list of reasons that free the
+  matcher and B's textures, and both call sites pass the input mode's
+  interlace flag.
+
+## Implementer response to the re-audit
+
+- (1) gap — **fixed.** At teardown, after the matcher is released, a reason
+  change still waiting to be logged is written as "De-judder: <reason> at
+  teardown (N changes not logged)". Signal loss without a teardown still
+  waits for the next rendered frame. The next frame's line names the
+  reason current then, so nothing is lost.
+- Stage 6b-1 closed.

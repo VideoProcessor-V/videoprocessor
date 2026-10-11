@@ -4653,6 +4653,12 @@ struct LibplaceboVideoRenderer::Impl
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
 				ReleaseDejudder();   // before the device goes
+				if (dejudderReasonChangesNotLogged > 0)
+				{
+					DebugLog::Log("De-judder: %s at teardown (%llu changes not logged)",
+						DejudderPolicy::Name(dejudderReason), dejudderReasonChangesNotLogged);
+					dejudderReasonChangesNotLogged = 0;
+				}
 			}
 			pl_swapchain_destroy(&swapchain);
 			vpOwnedSwapchain.Release();
