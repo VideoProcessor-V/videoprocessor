@@ -104,3 +104,32 @@ exit/disable, as now.
 
 Update the module guide §4.2/§4.3 and the brief's Stage 7 to this law;
 mark answers-1 §1's "never driven" as superseded for `compensate` mode.
+
+## Owner requirements added 2026-10-11 (before implementation)
+
+1. **Fallback that is today's script, exactly.** The owner's script must
+   remain available as a selectable mode. It may add software (VP gain)
+   interpolation to smooth the script's visible steps, but must otherwise
+   behave like the script does today.
+   - Check first whether the existing `script` mode already matches the
+     script exactly. Then add the optional step interpolation as a
+     separate switch, off = byte-identical to the script.
+2. **The lookahead must be adapted** to the hybrid law. Contrast (CNTR)
+   moves timed on cuts, and paired LED/CNTR ramps, must be planned from
+   the queued-frame statistics, not only reactively.
+3. **Refinements so deeper dimming is practical.** Today two things limit
+   how low the LED can go:
+   - **slow recovery**: the LED's `rate_up` back to brightness;
+   - **the large contrast distance**: the bigger the dim, the bigger the
+     CNTR jump needed when a bright scene arrives.
+
+   These need design work before or alongside delta 3's implementation.
+   Bring options to the planner. Candidates, to be evaluated rather than
+   assumed:
+   - use the 200 ms queue to start recovery before a known bright cut;
+   - bound the dimming depth by how far the projector can recover within
+     the lookahead window;
+   - split the CNTR jump across the cut and the next few frames, with VP
+     gain masking the remainder;
+   - measure the real LED/CNTR rate limits rather than taking today's
+     settings as fixed.
