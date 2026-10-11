@@ -5,8 +5,8 @@ Every feature is modular and off by default (unless noted), so each can be
 switched on and judged on its own. Update the Result column as each one is
 tried: **OK**, **Problem: …** (and tell Claude), or **Skip**.
 
-Last updated: 2026-10-10. **Test folder: `C:\dev\deploy\VideoProcessor-FL35-rangefix`
-or newer.** Earlier folders are not to be used on the projector: from Stage 7
+Last updated: 2026-10-10. **Test folder: `C:\dev\deploy\VideoProcessor-FL35-rangefix2` (or rangefix
+for everything except the dither) or newer.** Earlier folders are not to be used on the projector: from Stage 7
 step 4 up to that build, the picture was output full range whenever the gamma
 boost or LED drive was on (a libplacebo bug, repaired in e7b3cceb). See the
 folder's DEPLOY.txt for the exact steps.
