@@ -63,6 +63,7 @@ public:
     ~ConfigEditorWindow() override;
     void selectPage(int index);
     void reveal();
+    void showUpdates();
     void setTargetRefresh(std::function<void()> refresh);
     void setDiscoveredTargets(const QList<Target>& targets);
     bool awaitingTarget() const { return noTarget_; }
@@ -275,6 +276,7 @@ private:
     bool popupActivationTransition_ = false;
     bool returnFocusAfterHide_ = false;
     bool exitRequested_ = false;
+    bool updateExitPending_ = false;
     bool configurationLoaded_ = false;
     bool dirty_ = false;
     bool validationValid_ = true;
@@ -308,6 +310,7 @@ private:
     QWidget* configurationHost_ = nullptr;
     QLabel* shaderCacheStatus_ = nullptr;
     QSystemTrayIcon* tray_ = nullptr;
+    QWidget* updatePanel_ = nullptr;
 	void* revealEvent_ = nullptr;
 	QWinEventNotifier* revealEventNotifier_ = nullptr;
     struct ProfileListBinding

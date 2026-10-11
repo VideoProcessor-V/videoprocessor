@@ -164,6 +164,10 @@ QString VpTheme::StyleSheet()
         }
         QToolButton[targetRefresh="true"]:pressed { background: #0c1824; }
         QToolButton[targetRefresh="true"]:focus { border-color: #3a9de8; }
+        QProgressBar#updatesProgress { background: #0b121b; border: 1px solid #2c4659; border-radius: 4px; color: #dce8f3; text-align: center; height: 16px; }
+        QProgressBar#updatesProgress::chunk { background: #1789c7; border-radius: 3px; }
+        QMenuBar { background: #0b121b; color: #dce8f3; }
+        QMenuBar::item:selected { background: #193044; }
         QProgressBar#configTargetSearchProgress {
             background: #142434;
             border: 0;
@@ -397,6 +401,14 @@ QString VpTheme::StyleSheet()
         QMenu::item { padding: 7px 28px 7px 12px; border-radius: 4px; }
         QMenu::item:selected { background: #173b58; color: #f7fbff; }
         QMenu::separator { height: 1px; background: #2b4258; margin: 5px 4px; }
+        QSlider::groove:horizontal { height: 4px; background: #314a61; }
+        QSlider::sub-page:horizontal { background: #1689d3; }
+        QSlider::handle:horizontal { width: 9px; margin: -5px 0; background: #42aafa; border: 1px solid #65b9f6; }
+        QSlider::handle:horizontal:disabled { background: #456075; border-color: #456075; }
+        QSlider::sub-page:horizontal:disabled { background: #456075; }
+        QToolButton[toneReset="true"] { border: 1px solid #314a61; border-radius: 3px; background: #10202d; padding: 3px; }
+        QToolButton[toneReset="true"]:hover { background: #173b58; border-color: #4daaf1; }
+        QLabel[toneHint="true"] { color: #9fb2c4; font-size: 12px; }
         QToolTip {
             color: #e8f2fa;
             background: #172636;

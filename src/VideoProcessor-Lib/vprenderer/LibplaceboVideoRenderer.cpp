@@ -845,6 +845,7 @@ namespace
 		std::string toneMapping = "auto";
 		std::string gamutMapping = "auto";
 		PeakDetection peakDetection = PeakDetection::Auto;
+		ToneMappingTuning::Overrides toneTuning{};
 		bool hasContrastRecovery = false;
 		float contrastRecovery = 0.0f;
 		int saturation = 0;
@@ -978,6 +979,7 @@ namespace
 			<< static_cast<int>(settings.refreshRateSwitchMode) << '|' << settings.quality << '|'
 			<< settings.toneMapping << '|' << settings.gamutMapping << '|'
 			<< static_cast<int>(settings.peakDetection) << '|'
+			<< ToneMappingTuning::Fingerprint(settings.toneTuning)
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
@@ -1927,13 +1929,16 @@ namespace
 				DebugLog::Log("profile '%s': invalid occlusion_mask '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.occlusionMask ? "on" : "off");
 		}
+        ToneMappingTuning::Read([&](const char* key, std::string& value) {
+            return config.TryGetString(rule.section, key, value);
+        }, settings.toneTuning);
 		if (config.TryGetString(rule.section, "contrast_recovery", raw))
 		{
 			settings.hasContrastRecovery = false;
 			if (ConfigFile::NormalizeName(raw) != "auto")
 			{
 				double value = 0.0;
-				if (ParseDouble(raw, value) && value >= 0.0 && value <= 1.0)
+				if (ParseDouble(raw, value) && value >= 0.0 && value <= 2.0)
 				{
 					settings.hasContrastRecovery = true;
 					settings.contrastRecovery = static_cast<float>(value);
@@ -2605,6 +2610,9 @@ namespace
 			}
 		}
 
+        ToneMappingTuning::Read([&](const char* key, std::string& value) {
+            return TryGetDisplayString(config, key, value);
+        }, settings.toneTuning);
 		if (TryGetDisplayString(config, "contrast_recovery", rawValue) &&
 			ConfigFile::NormalizeName(rawValue) != "auto")
 		{
@@ -5426,6 +5434,7 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.toneMapping = settings.toneMapping;
 		parameterSettings.gamutMapping = settings.gamutMapping;
 		parameterSettings.peakDetection = settings.peakDetection;
+		parameterSettings.toneTuning = settings.toneTuning;
 		parameterSettings.hasContrastRecovery = settings.hasContrastRecovery;
 		parameterSettings.contrastRecovery = settings.contrastRecovery;
 		parameterSettings.saturation = settings.saturation;
@@ -7838,6 +7847,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.toneMapping = next.toneMapping;
 		currentTransport.gamutMapping = next.gamutMapping;
 		currentTransport.peakDetection = next.peakDetection;
+		currentTransport.toneTuning = next.toneTuning;
 		currentTransport.hasContrastRecovery = next.hasContrastRecovery;
 		currentTransport.contrastRecovery = next.contrastRecovery;
 		currentTransport.saturation = next.saturation;
@@ -7899,6 +7909,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.toneMapping != next.toneMapping, "tone_mapping");
 		changed(current.gamutMapping != next.gamutMapping, "gamut_mapping");
 		changed(current.peakDetection != next.peakDetection, "peak_detection");
+		changed(current.toneTuning != next.toneTuning, "tone_mapping_tuning");
 		changed(current.hasContrastRecovery != next.hasContrastRecovery ||
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
 		changed(current.saturation != next.saturation, "saturation");

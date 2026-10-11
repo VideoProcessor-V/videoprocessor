@@ -1,9 +1,10 @@
-﻿#define NOMINMAX
+#define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
 
 #include "ConfigEditorWindow.h"
+#include "../VideoProcessor-Config/UpdatePanel.h"
 #include "ConfigEditorCore.h"
 #include "../VideoProcessor-Config/ProfileListController.h"
 #include "VpTheme.h"
@@ -54,6 +55,7 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSpinBox>
+#include <QSlider>
 #include <QStandardItemModel>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -487,6 +489,130 @@ void testSubtitleCutPasteSurvivesConfigSaveAndReopen()
             }
             require(!preserved,"Legacy subtitle geometry still affects renderer profiles");
             require(readBytes(path).contains(QByteArray::fromStdString(expected.first+": "+expected.second)),"Ignored legacy configuration was not preserved");
+        }
+    }
+}
+
+void testToneSliderDragPerformance()
+{
+    QTemporaryDir directory;
+    const QString path = directory.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "Cannot create multi-profile drag fixture");
+    file.write("[vprenderer.First]\nquality: high\n");
+    for (int i=0;i<8;++i) file.write(QString("[vprenderer.Child%1]\nquality: high\n").arg(i).toUtf8());
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* slider = requireControl<QSlider>(window,"config.vprenderer.smoothing_period.slider");
+    auto* edit = requireControl<QLineEdit>(window,"config.vprenderer.smoothing_period");
+    int commits=0;
+    QObject::connect(edit,&QLineEdit::textChanged,&window,[&] { ++commits; });
+    slider->setSliderDown(true);
+    QElapsedTimer elapsed;elapsed.start();
+    for(int i=1;i<=200;++i) slider->setValue(i*4517);
+    const qint64 dragMs=elapsed.elapsed();
+    const int duringDrag=commits;
+    const QString preview=edit->text();
+    slider->setSliderDown(false);
+    std::cout << "DRAG: 200 updates=" << dragMs << "ms; commits during=" << duringDrag << "; total=" << commits << std::endl;
+    require(duringDrag==0 && commits==1,"Dragging must preview locally and commit exactly once on release");
+    require(dragMs<500,"Slider drag processing exceeded 2.5 ms per update");
+    require(preview=="903" && edit->text()==preview,"Smoothing slider must use whole-frame increments and retain its preview");
+    save(window);
+    require(readBytes(path).contains("smoothing_period: 903"),"Release did not persist the final slider value");
+    auto* low = requireControl<QLineEdit>(window,"config.vprenderer.scene_threshold_low");
+    auto* high = requireControl<QLineEdit>(window,"config.vprenderer.scene_threshold_high");
+    auto* lowSlider = requireControl<QSlider>(window,"config.vprenderer.scene_threshold_low.slider");
+    auto* highSlider = requireControl<QSlider>(window,"config.vprenderer.scene_threshold_high.slider");
+    lowSlider->setValue(1000000);
+    require(low->text()=="2.99" && high->text()=="3", "Low slider crossed the high threshold");
+    highSlider->setValue(0);
+    require(high->text()=="0", "High slider lost the explicit Off detent");
+    low->setText("100");
+    highSlider->setValue(1000000);
+    require(high->text()=="0", "High slider produced an invalid positive threshold above low=100");
+    high->setText("3");
+    lowSlider->setValue(0);
+    lowSlider->setValue(1000000);
+    require(low->text().toDouble()<3,"Slider did not repair an out-of-range typed threshold");
+    high->setText("0.001");
+    lowSlider->setValue(0);
+    lowSlider->setValue(1000000);
+    require(low->text().toDouble()<.001,"Fine typed high threshold produced an invalid low slider range");
+}
+
+void testToneMappingControls()
+{
+    QTemporaryDir directory;
+    const QString path = directory.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "Cannot create tone fixture");
+    file.write("[vprenderer.First]\nquality: high\nknee_adaptation: 0.6\n[vprenderer.Second]\nquality: balanced\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto editor = [&](const char* key) { return requireControl<QLineEdit>(window, QString("config.vprenderer.")+key); };
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    auto* slider = requireControl<QSlider>(window, "config.vprenderer.knee_adaptation.slider");
+    auto* reset = requireControl<QToolButton>(window, "config.vprenderer.knee_adaptation.reset");
+    require(editor("knee_adaptation")->text() == "0.6", "Saved tuning not loaded");
+    require(editor("percentile")->text() == "99.995", "HQ percentile default incorrect");
+    slider->setValue(750000);
+    require(editor("knee_adaptation")->text() == "0.75", "Slider did not update numeric field");
+    editor("knee_adaptation")->setText("0.125");
+    require(slider->value() == 125000, "Numeric field did not update slider");
+    profiles->setCurrentRow(1);
+    require(editor("knee_adaptation")->text() == "0.125", "Named profile did not inherit tuning");
+    require(editor("percentile")->text() == "100", "Balanced percentile default incorrect");
+    reset->click();
+    require(editor("knee_adaptation")->text() == "0.4" && reset->toolTip().contains("0.4"), "Reset did not show built-in value");
+    save(window);
+    const auto saved = readBytes(path);
+    require(saved.contains("knee_adaptation: AUTO"), "Reset did not explicitly override inherited value");
+    require(!saved.contains("percentile:"), "Merely viewing defaults changed configuration");
+    editor("smoothing_period")->setText("1001");
+    require(!apply->isEnabled() && editor("smoothing_period")->text() == "1001", "Invalid typed value was not retained and rejected");
+    editor("smoothing_period")->setText("1000");
+    editor("scene_threshold_low")->setText("5");
+    require(!apply->isEnabled(), "Invalid inherited scene threshold pair accepted");
+    editor("scene_threshold_high")->setText("6");
+    require(apply->isEnabled(), "Valid scene threshold pair rejected");
+    editor("knee_minimum")->setText("0.45");
+    require(editor("knee_default")->text() == "0.45", "Automatic fallback knee did not follow bounds");
+    editor("knee_default")->setText("0.4");
+    require(!apply->isEnabled(), "Explicit fallback below knee minimum accepted");
+    requireControl<QToolButton>(window,"config.vprenderer.knee_default.reset")->click();
+    require(apply->isEnabled(), "Fallback reset did not clear validation");
+    auto* curve = requireControl<QComboBox>(window,"config.vprenderer.tone_mapping");
+    curve->setCurrentIndex(curve->findData("bt2390"));
+    require(!editor("slope_tuning")->isEnabled() && editor("knee_offset")->isEnabled(), "Curve applicability incorrect");
+    auto* peak = requireControl<QComboBox>(window,"config.vprenderer.peak_detection");
+    peak->setCurrentIndex(peak->findData("off"));
+    require(!editor("percentile")->isEnabled(), "Peak Off did not disable tuning controls");
+    save(window);
+    ConfigEditorWindow reloaded(path, 0, true);
+    requireControl<QListWidget>(reloaded,"config.vprenderer.profiles")->setCurrentRow(1);
+    require(requireControl<QLineEdit>(reloaded,"config.vprenderer.knee_adaptation")->text()=="0.4", "Reset did not survive reload");
+    require(requireControl<QLineEdit>(reloaded,"config.vprenderer.scene_threshold_high")->text()=="6", "Peak settings did not survive reload");
+    requireControl<QPushButton>(window,"config.vprenderer.tonePeak.restore_defaults")->click();
+    require(editor("scene_threshold_low")->text()=="1" && editor("scene_threshold_high")->text()=="3" &&
+        editor("smoothing_period")->text()=="20", "Section restore did not restore all defaults");
+    const QString captures = qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES");
+    if (!captures.isEmpty()) {
+        profiles->setCurrentRow(0);
+        window.selectPage(2);
+        window.resize(1120, 1120);
+        window.show();
+        for (const char* id : { "toneSpline", "toneOther", "tonePeak" }) {
+            auto* toggle = requireControl<QToolButton>(window, QString("rendererSection.")+id);
+            toggle->setChecked(true);
+            auto* section = requireControl<QWidget>(window, QString("rendererSection.")+id+".content")->parentWidget();
+            QCoreApplication::processEvents();
+            for (QWidget* parent=section->parentWidget(); parent; parent=parent->parentWidget())
+                if (auto* scroll=qobject_cast<QScrollArea*>(parent)) { scroll->ensureWidgetVisible(section); break; }
+            QCoreApplication::processEvents();
+            require(window.grab().save(QDir(captures).filePath(QString(id)+".png")), "Cannot capture tone controls");
+            toggle->setChecked(false);
         }
     }
 }
@@ -1068,8 +1194,8 @@ void testEveryPageRoundTrips()
 
     QStackedWidget* pages = requireControl<QStackedWidget>(window,
         QStringLiteral("settingsPages"));
-    require(pages->count() == 21,
-        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles and LED drive pages were not added as dedicated settings pages");
+    require(pages->count() == 22,
+        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, LED drive and Updates pages were not added as dedicated settings pages");
     for (QPushButton* button : window.findChildren<QPushButton*>())
         require(!button->property("navChild").toBool(),
             "Grouped settings still expose child entries in the left navigation");
@@ -2506,6 +2632,93 @@ void answerMessageBox(int result)
             }
     });
     timer->start();
+}
+
+void testIntegratedUpdatesRespectLocalPackage()
+{
+    QTemporaryDir directory;
+    QWidget host; host.resize(1000, 700);
+    UpdatePanel panel(directory.path(), &host, false);
+    require(!panel.isWindow(), "Updates opened a separate top-level window");
+    ConfigEditorWindow window(copyFixture(directory), 0, true);
+    auto* entry = window.findChild<QPushButton*>("config.openUpdates");
+    require(entry, "Sidebar has no Updates entry"); window.show(); entry->click(); QApplication::processEvents();
+    auto* pages = window.findChild<QStackedWidget*>("settingsPages");
+    auto* embedded = window.findChild<QWidget*>("config.updates");
+    require(embedded && pages && pages->currentWidget()->isAncestorOf(embedded) && !embedded->isWindow(),
+        "Updates was not part of the Config settings page stack");
+    require(window.findChild<QWidget*>("brandHeader")->isVisible() &&
+        window.findChild<QWidget*>("sidebar")->isVisible(), "Updates hid the standard Config navigation");
+    window.selectPage(0);
+    require(!embedded->isVisible() && pages->currentIndex() == 0, "Settings navigation did not leave Updates");
+    window.showUpdates();
+    QJsonObject state{{"flavor", "config"}, {"version", "test"}, {"mode", "notify"}, {"channel", "beta"},
+        {"status", "No update available"}, {"busy", false}, {"canDownload", false}, {"canInstall", false}};
+    panel.applyState(state);
+    auto* identity = panel.findChild<QLabel*>("updates.identity");
+    require(identity && identity->text().contains("Config only"), "Config-only updates incorrectly require VP");
+    auto* mode = panel.findChild<QComboBox*>("updates.mode");
+    require(mode && mode->currentData() == "notify" && mode->isEnabled(), "Update mode did not reflect helper settings");
+    static_cast<UpdatePanel*>(embedded)->applyState(state);
+    const QString captures = qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES");
+    if (!captures.isEmpty()) { QApplication::processEvents(); window.grab().save(QDir(captures).filePath("updates-settings.png")); }
+    ConfigEditorWindow offline(directory.filePath(QStringLiteral("VideoProcessor.cfg")), 0, true, {}, {}, {}, 41686, {}, true);
+    offline.showUpdates(); QApplication::processEvents();
+    require(offline.findChild<QWidget*>("config.updates")->isVisible(), "Updates unavailable without a VP target");
+    require(!offline.findChild<QPushButton*>("applyConfiguration")->isEnabled(), "Updates enabled offline configuration writes");
+
+    state["flavor"] = "full"; state["busy"] = true; state["status"] = "Downloading"; panel.applyState(state);
+    require(identity->text().contains("VideoProcessor and Config"), "Full package identity was not shown");
+    require(!mode->isEnabled(), "Preferences remained mutable during installation operation");
+    panel.applyState(QJsonObject{{"error", "Update helper unavailable"}});
+    require(panel.findChild<QLabel*>("updates.status")->text().contains("unavailable"), "Helper error was not visible inside Config");
+    panel.applyState(QJsonObject{{"error", "Timed out"}, {"connectionError", true}});
+    require(panel.findChild<QLabel*>("updates.status")->text().contains("Reconnecting") &&
+        !panel.findChild<QLabel*>("updates.status")->text().contains("setup"), "Disconnect incorrectly blamed setup");
+    state["busy"] = false; panel.applyState(state);
+    require(mode->isEnabled(), "Healthy helper response did not recover the page");
+
+}
+
+void testUpdateShutdownDiscardsEditsWithoutPrompt()
+{
+    QTemporaryDir directory;
+    const QString path = copyFixture(directory);
+    const QByteArray original = readBytes(path);
+    const UINT message = RegisterWindowMessageW(L"VideoProcessor.UpdateExit.v1");
+    require(message != 0, "Cannot register updater shutdown request");
+    for (bool dirty : { false, true })
+    {
+        ConfigEditorWindow window(path, 0, true);
+        if (dirty)
+        {
+            auto* field = requireControl<QCheckBox>(window, "config.general.fullscreen");
+            field->setChecked(!field->isChecked());
+        }
+        const HWND handle = reinterpret_cast<HWND>(window.winId());
+        window.hide();
+        bool prompted = false;
+        QTimer dismissUnexpectedPrompt;
+        QObject::connect(&dismissUnexpectedPrompt, &QTimer::timeout, [&prompted]
+        {
+            for (QWidget* widget : QApplication::topLevelWidgets())
+                if (auto* dialog = qobject_cast<QMessageBox*>(widget))
+                {
+                    prompted = true;
+                    dialog->done(QMessageBox::Cancel);
+                }
+        });
+        dismissUnexpectedPrompt.start(10);
+        for (int attempt = 0; attempt < 2; ++attempt)
+            require(SendMessageW(handle, message, 0, 0) == 1,
+                "Updater shutdown was not acknowledged");
+        require(!prompted, "Updater shutdown prompted about unsaved edits");
+        require(window.isHidden(), "Updater shutdown revealed hidden Config");
+        require(readBytes(path) == original, "Updater shutdown saved unsaved edits");
+        require(SendMessageW(handle, message, 1, 0) == 3,
+            "Hidden Config did not report tray-only restart state");
+        // Destroy the fixture before its queued application quit.
+    }
 }
 
 void testLldvStandardProfiles()
@@ -7058,6 +7271,10 @@ int main(int argc, char** argv)
     QApplication::setStyle(VpTheme::CreateStyle());
     application.setStyleSheet(VpTheme::StyleSheet());
     int failures = 0;
+    failures += run("integrated updates respect local package", testIntegratedUpdatesRespectLocalPackage);
+    failures += run("update shutdown discards edits without prompt", testUpdateShutdownDiscardsEditsWithoutPrompt);
+    failures += run("Tone slider drag performance", testToneSliderDragPerformance);
+    failures += run("Tone mapping controls round trip", testToneMappingControls);
     failures += run("subtitle profile tab round trip", testSubtitleProfileTabRoundTrip);
     failures += run("subtitle background shape round trip and visibility", testSubtitleBackgroundShapeRoundTripAndVisibility);
     failures += run("subtitle text size reduction round trip and style visibility", testSubtitleTextSizeReductionRoundTripAndStyleVisibility);
