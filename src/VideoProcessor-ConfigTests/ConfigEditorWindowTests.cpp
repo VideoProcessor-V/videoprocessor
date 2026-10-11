@@ -900,10 +900,10 @@ void testLedDrivePageAndLiveSwitches()
     selectData(mode, QStringLiteral("compensate"));
     selectData(boost, QStringLiteral("2.4"));
     auto* projectorGamma = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.compensation_eotf"));
-    require(std::abs(projectorGamma->value() - 2.2) < 1e-9 && projectorGamma->decimals() == 2 &&
+    require(std::abs(projectorGamma->value() - 2.41) < 1e-9 && projectorGamma->decimals() == 2 &&
         projectorGamma->minimum() <= 1.8 && projectorGamma->maximum() >= 3.0,
-        "Projector gamma is not a 2-decimal number from 1.8 to 3.0 defaulting to 2.2");
-    projectorGamma->setValue(2.41); // a measured value, not a fixed choice
+        "Projector gamma is not a 2-decimal number from 1.8 to 3.0 defaulting to 2.41 (delta 4)");
+    projectorGamma->setValue(2.35); // a measured value, not a fixed choice
     port->setText(QStringLiteral("COM3"));
     readBack->setChecked(true);
     // Experimental fade to black: off, its options greyed out until switched on.
@@ -932,7 +932,7 @@ void testLedDrivePageAndLiveSwitches()
     const QByteArray saved = readBytes(path);
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
-        "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.41" })
+        "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);

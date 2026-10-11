@@ -9289,9 +9289,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         { QStringLiteral("off"), QStringLiteral("2.4") },
         { QStringLiteral("Off (plain output gamma)"),
           QStringLiteral("2.4 (the look of the old output gamma 2.4)") }));
-    // The projector's own display gamma, which Compensate linearises with
-    // (compensation_eotf). A number, because it is whatever a light meter
-    // says (design review 3, SF-1); 2.2 is the FL35's menu setting.
+    // The projector's light exponent on the final code, which Compensate
+    // linearises with (compensation_eotf). A number, because it is whatever a
+    // light meter says (design review 3, SF-1); 2.41 is the FL35's light-meter
+    // fit (delta 4). The gamma boost no longer depends on it.
     auto* projectorGamma = new QDoubleSpinBox;
     projectorGamma->setObjectName(controlName(led, QStringLiteral("compensation_eotf")));
     projectorGamma->setAccessibleName(QStringLiteral("Projector gamma"));
@@ -9303,7 +9304,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     {
         bool valid = false;
         const double configured = value(led, QStringLiteral("compensation_eotf")).toDouble(&valid);
-        projectorGamma->setValue(valid ? std::max(1.8, std::min(configured, 3.0)) : 2.2);
+        projectorGamma->setValue(valid ? std::max(1.8, std::min(configured, 3.0)) : 2.41);
     }
     connect(projectorGamma, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
         [this, led](double exponent)
@@ -9320,9 +9321,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     });
     driveForm->addRow(QStringLiteral("Projector gamma"), projectorGamma);
     driveForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Projector gamma is how the projector turns the signal into light; Compensate needs it to keep the "
-        "picture's brightness exact while the LED dims. Leave it at 2.2 unless a light meter says otherwise "
-        "(for example 2.41).\n"
+        "Projector gamma is how the projector turns the final signal into light; Compensate needs it to keep the "
+        "picture's brightness exact while the LED dims. 2.41 is the FL35's light-meter measurement; change it "
+        "only if a new measurement says otherwise. It does not change the gamma boost.\n"
         "Highlight protection only matters in Compensate. The gamma boost applies even with the LED drive off. "
         "Switching the LED drive on or off, or to or from Log only, returns the projector to full light; "
         "other changes carry on from the current level.")));

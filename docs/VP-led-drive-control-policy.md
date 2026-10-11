@@ -193,7 +193,10 @@ should stay at 60.
 - White field (code 235), LED 255: luminance vs CNTR 74 upward in steps
   of 5 until it stops rising → `cntr_max_usable` (bounds the paired
   compensation within scenes and what a partial dump may retain).
-Until measured: `led_latency_ms 80`, `led_settle_ms 600`,
+Until measured: `led_latency_ms 80`, `led_settle_ms 300` (deliberately
+**fast-biased**: the recovery gain is `ramp / modelled LED light`, so a
+model faster than the real LED errs on the dark side — a slower fade-up —
+while a model slower than reality lets the LED's step show through),
 `cntr_latency_ms 80`, `cntr_settle_ms 0`, `cntr_max_usable 74`. Models are
 dead time + first-order settle; the pairing and the gain use modelled
 light, not the command.
@@ -203,7 +206,7 @@ light, not the command.
 ```
 [projector.Default]
 led_latency_ms: 80
-led_settle_ms: 600
+led_settle_ms: 300           # fast-biased until measured; see §6
 cntr_latency_ms: 80
 cntr_settle_ms: 0
 cntr_max_usable: 74

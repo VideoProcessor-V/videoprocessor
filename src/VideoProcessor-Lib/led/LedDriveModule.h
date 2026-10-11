@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "LedController.h"
 #include "LedDriveConfig.h"
 #include "LedLookahead.h"
@@ -86,6 +88,10 @@ namespace LedDrive
 		// Increases with every Reconfigure().
 		uint64_t ConfigGeneration() const;
 		LedDriveConfig Config() const;
+		// The gamma VP's output is encoded for (the renderer sets it from the
+		// frame's output transfer): the gamma boost's base (delta 4).
+		void SetDisplayGamma(double gamma) { displayGamma.store(gamma, std::memory_order_release); }
+		double DisplayGamma() const { return displayGamma.load(std::memory_order_acquire); }
 		// Real-time length of one source frame (the output frame period when the
 		// source rate is unknown).
 		double SourceFramePeriodMs() const;
@@ -101,6 +107,7 @@ namespace LedDrive
 		double CorrectionRatio() const;
 
 	private:
+		std::atomic<double> displayGamma{ 2.2 };
 		void Run();
 		bool WaitUntil(std::chrono::steady_clock::time_point when);
 		double NowMs() const;

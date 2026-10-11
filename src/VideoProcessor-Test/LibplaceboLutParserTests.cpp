@@ -4051,6 +4051,98 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		// Stage 7 step 7a on the real shader and a 10-bit limited target set up
+		// like VP's swapchain (colour depth 8, bit shift 2), with the
+		// PRE_OUTPUT encoding repair as in VP:
+		// - sign fix (BTB/WTW answers item 5): a below-black grey (code 40)
+		//   keeps its below-black value through the boost and a gain of 1.3;
+		// - delta 4: a mid grey (8-bit 126) at LED 100 with the compensation
+		//   (gain 2.55 in linear light, E = 2.41) gives the same light as at
+		//   LED 255 with no gain, within 1%, with the boost on and off.
+		TEST_METHOD(LedCompensationKeepsBelowBlackAndLightExact)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 2;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> compensation;
+			chain.Collect(false, compensation);
+			Assert::AreEqual(size_t{ 1 }, compensation.size(), L"libplacebo rejected LED compensation.glsl");
+			const pl_hook* hook = compensation[0];
+			OutputEncodingRepair::Hook repair;
+			pl_color_repr limited{};
+			limited.sys = PL_COLOR_SYSTEM_RGB;
+			limited.levels = PL_COLOR_LEVELS_LIMITED;
+			limited.bits.sample_depth = 10;
+			limited.bits.color_depth = 8;
+			limited.bits.bit_shift = 2;
+			repair.SetTarget(limited);
+			const std::vector<const pl_hook*> hooks = { repair.Get(), hook };
+			auto set = [hook](double gain, double boost)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", boost));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", gain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.08));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", 2.41));
+			};
+			// 10-bit limited code k <-> signal (k - 64) / 876 before the encode.
+			auto signal = [](double code) { return (code - 64.0) / 876.0; };
+			auto code = [&fixture, &hooks](double value)
+			{
+				return fixture.RenderTenBitSequence(hooks, PL_COLOR_LEVELS_LIMITED, static_cast<float>(value), 1)[0];
+			};
+			auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
+			const double boost = 2.2 / 2.4;
+
+			// Sign fix: code 40 (24 below black 64) stays below black.
+			set(1.3, boost);
+			const double btb = signal(40.0);
+			const int btbOut = code(btb);
+			const double btbExpected = 64.0 + 876.0 * spow(spow(spow(btb, boost), 2.41) * 1.3, 1.0 / 2.41);
+			Assert::IsTrue(btbOut < 64, (L"Below black was cut to black: " + std::to_wstring(btbOut)).c_str());
+			Assert::AreEqual(btbExpected, static_cast<double>(btbOut), 1.5,
+				(L"Below black, expected " + std::to_wstring(btbExpected)).c_str());
+			// Above white keeps its order against white (the knee rolls it off).
+			const int white = code(signal(940.0));
+			const int wtw = code(signal(1019.0));
+			Assert::IsTrue(wtw >= white && wtw <= 1023, (L"White " + std::to_wstring(white) +
+				L", above white " + std::to_wstring(wtw)).c_str());
+
+			// Delta 4: light constant through LED 255 -> 100 (linear flux, 2.55x).
+			const double grey = (126.0 - 16.0) / 219.0;   // 8-bit 126 as the signal
+			for (const double b : { boost, 1.0 })
+			{
+				set(1.0, b);
+				const double reference = std::pow(signal(code(grey)), 2.41);           // LED 255
+				set(255.0 / 100.0, b);
+				const double compensated = std::pow(signal(code(grey)), 2.41) * 100.0 / 255.0;   // LED 100
+				Assert::AreEqual(1.0, compensated / reference, 0.01,
+					(L"Light at LED 100 vs 255, boost " + std::to_wstring(b)).c_str());
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
+
 		TEST_METHOD(AllBundledStandardShadersLoadAndUpscalersEngageByHeight)
 		{
 			TargetLutGpuFixture fixture;

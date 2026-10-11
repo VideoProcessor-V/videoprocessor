@@ -16,10 +16,17 @@
  *   gain_domain  0 = multiply the encoded signal (mode: script, emulating the
  *                projector's CNTR control); 1 = multiply linear light
  *                (mode: compensate), linearised with compensation_eotf
- *   compensation_eotf  the projector's real display gamma (FL35: film 2.2)
- *   boost        gamma boost exponent, compensation_eotf / gamma_boost
- *                (2.2 / 2.4 for the old output_gamma 2.4 lift); applied first,
- *                always, even when the LED is not being driven. 1 = off
+ *   compensation_eotf  the projector's measured light exponent on the final
+ *                code (FL35 light-meter fit: 2.41, delta 4); used once, at
+ *                the end, for the gain in linear light
+ *   boost        gamma boost exponent, output gamma / gamma_boost (2.2 / 2.4
+ *                for the old output_gamma 2.4 lift on VP's 2.2 output);
+ *                applied first, always, even when the LED is not being
+ *                driven. 1 = off
+ *
+ * Sign-preserving (BTB/WTW answers item 5): every power acts on |v| with v's
+ * sign, so below-black detail (negative values here, before the limited-
+ * range encode) survives the boost and the gain instead of being cut to 0.
  *
  * Above 1 - knee the result rolls off with slope 1 at the knee point and
  * approaches 1.0, so a boosted highlight keeps its gradation instead of
@@ -51,11 +58,11 @@
 0.0
 
 //!PARAM compensation_eotf
-//!DESC Projector display gamma used to linearise
+//!DESC Projector light exponent on the final code (delta 4: 2.41)
 //!TYPE float
 //!MINIMUM 1.0
 //!MAXIMUM 3.0
-2.2
+2.41
 
 //!PARAM boost
 //!DESC Gamma boost exponent (1 = off)
@@ -67,6 +74,12 @@
 //!HOOK PREOUTPUT
 //!BIND HOOKED
 //!DESC VideoProcessor LED drive compensation
+
+// Sign-preserving power: below-black values keep their sign and magnitude.
+vec3 spow(vec3 v, float e)
+{
+    return sign(v) * pow(abs(v), vec3(e));
+}
 
 vec3 soft_knee(vec3 x, float k)
 {
@@ -80,19 +93,20 @@ vec4 hook()
     vec4 color = HOOKED_texOff(0);
     if (gain == 1.0 && boost == 1.0)
         return color;
-    vec3 v = max(color.rgb, vec3(0.0));
+    vec3 v = color.rgb;
     // The gamma boost comes first: the old pipeline boosted VP's output, and
     // the projector's contrast or LED acted on that boosted signal.
     if (boost != 1.0)
-        v = pow(v, vec3(boost));
+        v = spow(v, boost);
     if (gain == 1.0)
         return vec4(v, color.a);
     bool linear = gain_domain > 0.5;
-    vec3 x = linear ? pow(v, vec3(compensation_eotf)) : v;
+    vec3 x = linear ? spow(v, compensation_eotf) : v;
     x *= gain;
-    // Only a boost can push values past white; a reduction never needs the knee.
+    // Only a boost can push values past white; a reduction never needs the
+    // knee. The knee acts on the bright end only; below black is untouched.
     if (gain > 1.0)
         x = knee > 0.0001 ? soft_knee(x, knee) : min(x, vec3(1.0));
-    color.rgb = linear ? pow(x, vec3(1.0 / compensation_eotf)) : x;
+    color.rgb = linear ? spow(x, 1.0 / compensation_eotf) : x;
     return color;
 }

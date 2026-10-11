@@ -137,7 +137,7 @@ namespace VideoProcessorTest
 				previousProtection = controller.Protection();
 			}
 			Assert::AreEqual(1.0, controller.Protection(), 1e-9);
-			const double h = std::pow((230.0 - 16.0) / 219.0, 2.2);
+			const double h = std::pow((230.0 - 16.0) / 219.0, config.compensationEotf);   // the projector exponent (2.41 since delta 4)
 			const int expectedFloor = static_cast<int>(std::ceil(h / std::pow(2.0, config.highlightToleranceStops) * 255));
 			Assert::AreEqual(expectedFloor, out.lightTarget, L"Lowest LED within the tolerance");
 			Assert::AreEqual(expectedFloor, out.light);
@@ -176,7 +176,7 @@ namespace VideoProcessorTest
 			ControllerOutput out;
 			for (int tick = 0; tick < 200; ++tick)
 				out = controller.Tick(Play(builder, now, 100.0, Frame(18.0, 1000, 230)), 100);
-			const double h = std::pow((230.0 - 16.0) / 219.0, 2.2);
+			const double h = std::pow((230.0 - 16.0) / 219.0, config.compensationEotf);   // the projector exponent (2.41 since delta 4)
 			Assert::AreEqual(1.0, out.capWeight, 1e-9);
 			Assert::IsTrue(out.gain <= 1.0 / h + 1e-9, L"The window is not pushed past white");
 			Assert::AreEqual(static_cast<int>(std::ceil(h * 255)), out.lightTarget, L"No compression allowed");
@@ -252,6 +252,25 @@ namespace VideoProcessorTest
 						L"compensate never touches the projector's contrast");
 			}
 			Assert::AreEqual(255, projector->light);
+		}
+
+		// Delta 4: the boost's base is the output gamma VP encodes for, not the
+		// projector's compensation_eotf (now 2.41). Before the fix the exponent
+		// was compensation_eotf / gamma_boost, so 2.41 would have switched the
+		// boost off (2.41 / 2.4 = 1.004).
+		TEST_METHOD(GammaBoostIsIndependentOfTheProjectorExponent)
+		{
+			LedDriveConfig led;
+			Assert::AreEqual(2.41, led.compensationEotf, 1e-12, L"compensation_eotf defaults to the FL35 fit");
+			led.gammaBoost = 2.4;
+			for (const double eotf : { 2.2, 2.41, 2.6 })
+			{
+				led.compensationEotf = eotf;
+				Assert::AreEqual(2.2 / 2.4, BoostExponent(led), 1e-12);
+				Assert::AreEqual(2.2 / 2.4, BoostExponent(led, 2.2), 1e-12);
+			}
+			Assert::AreEqual(1.0, BoostExponent(led, 2.4), 1e-12, L"A 2.4 output needs no boost to look 2.4");
+			Assert::AreEqual(1.0, BoostExponent(0.0, 2.2), 1e-12, L"gamma_boost off");
 		}
 
 		TEST_METHOD(GammaBoostIsConfiguredInTheModule)

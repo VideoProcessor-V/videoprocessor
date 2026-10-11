@@ -105,10 +105,11 @@ namespace LedDrive
 			lastSequence - sourceSequence < 1000)
 			return;
 		const std::shared_ptr<const RawTransfer> current = module.CurrentRawTransfer();
-		if (current != transfer)
+		const double boost = BoostExponent(module.Config(), module.DisplayGamma());
+		if (current != transfer || boost != boostedExponent)
 		{
 			transfer = current;
-			const double boost = BoostExponent(module.Config());
+			boostedExponent = boost;
 			boosted.resize(transfer->size());
 			for (size_t i = 0; i < transfer->size(); ++i)
 				boosted[i] = static_cast<float>(std::pow(std::max(0.0f, (*transfer)[i]), boost));

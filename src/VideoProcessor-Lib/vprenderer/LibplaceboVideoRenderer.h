@@ -318,7 +318,7 @@ private:
 	std::shared_ptr<LedDrive::LedDriveModule> m_ledDrive;
 	std::string m_ledDriveSignature;
 	// gamma_boost (and the hook's knee/EOTF) as last published, for new Impls.
-	double m_ledBoostExponent = 1.0;
+	double m_ledGammaBoost = 0.0;   // the gamma_boost setting (0 = off)
 	double m_ledCompensationEotf = 2.2;
 	double m_ledKnee = 0.08;
 	void UpdateLedDrive(const ConfigFile& configuration);

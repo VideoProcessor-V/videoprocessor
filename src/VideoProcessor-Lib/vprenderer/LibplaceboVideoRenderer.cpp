@@ -4099,7 +4099,26 @@ struct LibplaceboVideoRenderer::Impl
 	bool ledCompensationConfigured = false;
 	// [led_drive] gamma_boost applies whether or not the module drives the
 	// LED; published by the outer renderer from the configuration.
-	std::atomic<double> ledBoostExponent{ 1.0 };
+	std::atomic<double> ledGammaBoost{ 0.0 };   // the gamma_boost setting (0 = off)
+	double lastLoggedBoostExponent = 1.0;
+	// The gamma an SDR output transfer encodes for: the gamma boost's base
+	// (delta 4). Pure powers as given; BT.1886 as 2.4 and sRGB as 2.2; anything
+	// else (HDR) keeps 2.2, the value the boost has always used.
+	static double LedDisplayGamma(enum pl_color_transfer transfer)
+	{
+		switch (transfer)
+		{
+		case PL_COLOR_TRC_GAMMA18: return 1.8;
+		case PL_COLOR_TRC_GAMMA20: return 2.0;
+		case PL_COLOR_TRC_GAMMA22: return 2.2;
+		case PL_COLOR_TRC_GAMMA24: return 2.4;
+		case PL_COLOR_TRC_GAMMA26: return 2.6;
+		case PL_COLOR_TRC_GAMMA28: return 2.8;
+		case PL_COLOR_TRC_BT_1886: return 2.4;
+		case PL_COLOR_TRC_SRGB: return 2.2;
+		default: return 2.2;
+		}
+	}
 	std::atomic<double> ledCompensationEotf{ 2.2 };
 	std::atomic<double> ledKnee{ 0.08 };
 	std::vector<const pl_hook*> frameHooks;
@@ -15475,7 +15494,19 @@ struct LibplaceboVideoRenderer::Impl
         // LED drive, gain in: measurement first (it must see the picture before
         // the gain), then the compensation hook with this frame's parameters.
         const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
-        const double boostExponent = ledBoostExponent.load(std::memory_order_acquire);
+        // The gamma boost's base is the gamma this frame's output is encoded
+        // for (delta 4), not the projector's compensation_eotf.
+        const double displayGamma = LedDisplayGamma(target.color.transfer);
+        if (led)
+            led->SetDisplayGamma(displayGamma);
+        const double boostExponent = LedDrive::BoostExponent(
+            ledGammaBoost.load(std::memory_order_acquire), displayGamma);
+        if (boostExponent != lastLoggedBoostExponent)
+        {
+            lastLoggedBoostExponent = boostExponent;
+            DebugLog::Log("LED drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
+                boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
+        }
         if (led || boostExponent != 1.0)
         {
             if (!ledCompensationConfigured)
@@ -16932,7 +16963,7 @@ void LibplaceboVideoRenderer::Build()
 	if (m_ledDrive && m_ledDrive->WantsPredictions())
 		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
 			m_ledDrive, &m_ledDrive->Lookahead()));
-	m_impl->ledBoostExponent.store(m_ledBoostExponent, std::memory_order_release);
+	m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
 	m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
 	m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
 	m_impl->displayRefreshRate.SetEventSink(
@@ -17197,15 +17228,17 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	// The gamma boost applies even with the module off or in log_only.
 	const LedDrive::LedDriveConfig boostConfig = valid ?
 		LedDrive::ReadLedDriveConfig(configuration) : LedDrive::LedDriveConfig();
-	if (LedDrive::BoostExponent(boostConfig) != m_ledBoostExponent)
-		DebugLog::Log("LED drive: gamma boost %s (exponent %.4f)",
-			boostConfig.gammaBoost > 0.0 ? "on" : "off", LedDrive::BoostExponent(boostConfig));
-	m_ledBoostExponent = LedDrive::BoostExponent(boostConfig);
+	// The exponent is output gamma / gamma_boost, worked out per frame from
+	// the frame's output transfer; the renderer logs it when it changes.
+	if (boostConfig.gammaBoost != m_ledGammaBoost)
+		DebugLog::Log("LED drive: gamma boost setting %s (%.2f)",
+			boostConfig.gammaBoost > 0.0 ? "on" : "off", boostConfig.gammaBoost);
+	m_ledGammaBoost = boostConfig.gammaBoost;
 	m_ledCompensationEotf = boostConfig.compensationEotf;
 	m_ledKnee = boostConfig.knee;
 	if (m_impl)
 	{
-		m_impl->ledBoostExponent.store(m_ledBoostExponent, std::memory_order_release);
+		m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
 		m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
 		m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
 	}

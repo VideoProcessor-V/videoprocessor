@@ -60,5 +60,6 @@ namespace LedDrive
 		uint64_t lastSequence = 0;
 		std::shared_ptr<const RawTransfer> transfer;
 		std::vector<float> boosted;
+		double boostedExponent = 0.0;   // the boost the table was built with
 	};
 }

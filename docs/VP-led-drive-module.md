@@ -351,6 +351,26 @@ sigma-delta OUTPUT hook. Parameters set each frame from the controller via
 `lin = pow(v, eotf); lin *= gain; knee above the headroom limit;
 v' = pow(lin, 1/eotf)`. Encoded path: multiply `v` directly, same knee.
 
+**Stage 7 step 7a (2026-10-11):**
+- **Order (delta 4).** The gamma boost comes first: `v1 = v^boost`, with
+  `boost = output gamma / gamma_boost`. That is 2.2 / 2.4 on VP's 2.2
+  output; the renderer takes the output gamma from the frame's real output
+  transfer. Then the gain is applied in the projector's light domain on
+  `v1`, with `compensation_eotf` = **2.41** (the light-meter fit), used
+  once, at the end.
+  - The boost no longer derives from `compensation_eotf`. The old
+    `compensation_eotf / gamma_boost` would have switched the boost off at
+    2.41.
+  - The measurement statistics and the look-ahead's raw transfer describe
+    the boosted (final) value, so all three use the same E on the same
+    value.
+- **Sign-preserving (BTB/WTW answers item 5).** Every power is
+  `sign(v)·|v|^e`, so below-black values survive the boost and the gain.
+  The knee acts only above its threshold. GPU test:
+  LedCompensationKeepsBelowBlackAndLightExact (code 40 stays below black;
+  a mid grey's light at LED 100 with compensation equals LED 255 within 1%,
+  with the boost on and off).
+
 ## 7. Tests and acceptance
 
 Unit tests (fork style, no hardware):

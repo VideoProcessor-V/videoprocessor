@@ -63,7 +63,7 @@ full light.
 | `apl_persist_ms` | compensate | flash rejection window | raise if lightning or muzzle flashes still move the LED |
 | `cut_threshold`, `fade_frames`, `fade_min_step` | both | scene-change detection | raise `cut_threshold` if ordinary motion is taken for cuts |
 | `apl_weights` | both | how brightness is measured | leave |
-| `compensation_eotf` | compensate | the projector's gamma (2.2); also on the LED drive page as "Projector gamma", which wins | leave |
+| `compensation_eotf` | compensate | the projector's light exponent on the final code (2.41, the FL35 light-meter fit; delta 4); also on the LED drive page as "Projector gamma", which wins. It no longer sets the gamma boost | leave |
 
 The most important everyday setting - how low the LED goes - is not in the
 profile: it is "Lowest LED level" (`led_floor`, 60-255) on the LED drive

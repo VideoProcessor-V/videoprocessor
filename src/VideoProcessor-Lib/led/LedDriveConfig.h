@@ -130,10 +130,15 @@ namespace LedDrive
 		// A dark-to-bright cut it has not seen: straight up in one command,
 		// like the old script's contrast dump, instead of ramping.
 		bool brightCutDump = true;
-		double compensationEotf = 2.2;
-		// "Encode as if for this display gamma" on the projector's
-		// compensation_eotf: the old output_gamma 2.4 on film 2.2 lift, applied
-		// by the module whether or not it drives the LED. 0 = off.
+		// The projector's light exponent on the final (boosted) code: the
+		// light-meter fit, 2.41 on the FL35 (delta 4). Used once, at the end,
+		// for the gain in linear light and the highlight-linear calculation.
+		double compensationEotf = 2.41;
+		// "Encode as if for this display gamma" on VP's output gamma: the old
+		// output_gamma 2.4 lift on VP's 2.2 output, applied by the module
+		// whether or not it drives the LED. 0 = off. Its exponent is
+		// output gamma / gamma_boost (BoostExponent), independent of
+		// compensation_eotf (delta 4).
 		double gammaBoost = 0.0;
 		// mode: compensate's highlight policy: below highlight_area_small the
 		// knee absorbs sustained highlights, above highlight_area_large the
@@ -671,10 +676,19 @@ namespace LedDrive
 	}
 
 	// Exponent the compensation hook (and the measurement) apply to the
-	// encoded signal for gamma_boost: compensation_eotf / gamma_boost. 1 = off.
-	inline double BoostExponent(const LedDriveConfig& led)
+	// encoded signal for gamma_boost: displayGamma / gamma_boost, where
+	// displayGamma is the gamma VP's output is encoded for (output_gamma; the
+	// renderer passes the frame's real output transfer). 1 = off. Before
+	// delta 4 this was compensation_eotf / gamma_boost, which only worked
+	// while compensation_eotf was 2.2.
+	inline double BoostExponent(double gammaBoost, double displayGamma)
 	{
-		return led.gammaBoost > 0.0 ? led.compensationEotf / led.gammaBoost : 1.0;
+		return gammaBoost > 0.0 && displayGamma > 0.0 ? displayGamma / gammaBoost : 1.0;
+	}
+
+	inline double BoostExponent(const LedDriveConfig& led, double displayGamma = 2.2)
+	{
+		return BoostExponent(led.gammaBoost, displayGamma);
 	}
 
 	// The module talks to the projector only when it is enabled and not in
