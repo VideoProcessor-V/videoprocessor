@@ -394,6 +394,13 @@ v' = pow(lin, 1/eotf)`. Encoded path: multiply `v` directly, same knee.
   - The boost no longer derives from `compensation_eotf`. The old
     `compensation_eotf / gamma_boost` would have switched the boost off at
     2.41.
+  - **Do not reintroduce the old base** (planner, 7a answers). The boost's
+    base is the output transfer VP actually encodes for, taken per frame
+    (2.2 normally; BT.1886 counts as 2.4). `compensation_eotf` is used only
+    once, at the end, for the gain in linear light. Any formula that puts
+    `compensation_eotf` into the boost exponent couples the two again,
+    which is exactly what delta 4 removed. The older notes below that give
+    `compensation_eotf / gamma_boost` are superseded.
   - The measurement statistics and the look-ahead's raw transfer describe
     the boosted (final) value, so all three use the same E on the same
     value.
@@ -457,7 +464,8 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - **Gamma boost lives in the module.** `[led_drive] gamma_boost: 2.4`
   ("encode as if for a 2.4 display" on `compensation_eotf` 2.2) replaces the
   old `output_gamma: 2.4` lift; VP's `output_gamma` is set honestly to 2.2.
-  The compensation hook applies `v^(compensation_eotf / gamma_boost)` first,
+  The compensation hook applies `v^(compensation_eotf / gamma_boost)` first
+  (superseded by 7a: the exponent is now output gamma / `gamma_boost`; see §6),
   then the script contrast gain or the compensate linear gain, matching the
   old physical order (VP's boosted signal, then the projector). The boost
   applies whenever it is configured, even with `enabled: false` or in
@@ -549,7 +557,8 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 ### Design review 1 responses (2026-10-09)
 
 - SF-1 (withdrawn; gamma boost stays in the module): the boost exponent
-  depends only on `gamma_boost` and `compensation_eotf`, never on `enabled`
+  depends only on `gamma_boost` and `compensation_eotf` (since 7a: on
+  `gamma_boost` and the output gamma; see §6), never on `enabled`
   or `mode` (tested for every combination), and the renderer runs the
   compensation hook whenever the boost is on. If the hook is configured but
   not running, the log says so once, loudly ("WARNING gamma boost NOT
