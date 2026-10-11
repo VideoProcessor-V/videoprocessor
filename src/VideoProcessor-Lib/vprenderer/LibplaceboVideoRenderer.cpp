@@ -100,6 +100,21 @@
 
 namespace
 {
+	// Stage 6: B (the next source frame) is only usable for the de-judder when
+	// it has the same video format as A. HDR metadata may differ (it does not
+	// change the pixels' meaning for the motion search).
+	bool SameDejudderVideoState(const VideoStateComPtr& a, const VideoStateComPtr& b)
+	{
+		if (!a || !b || !a->valid || !b->valid)
+			return false;
+		if (a->videoFrameEncoding != b->videoFrameEncoding || a->eotf != b->eotf ||
+			a->colorspace != b->colorspace || a->invertedVertical != b->invertedVertical)
+			return false;
+		if (!a->displayMode || !b->displayMode)
+			return a->displayMode == b->displayMode;
+		return *a->displayMode == *b->displayMode;
+	}
+
 	void LogCropExtentWitness(const char* context, uint64_t frameGeneration, uint64_t sourceSequence,
 		const ActivePicturePresentationRetentionEvidence& evidence)
 	{
@@ -3771,6 +3786,9 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
 	uint64_t dejudderEstimatedSequence = 0;
 	unsigned long long dejudderEstimates = 0;
+	unsigned long long dejudderFailures = 0;
+	ULONGLONG dejudderReasonLogTick = 0;
+	unsigned long long dejudderReasonChangesNotLogged = 0;
 	void ReleaseDejudder()
 	{
 		dejudder.reset();
@@ -10558,8 +10576,13 @@ struct LibplaceboVideoRenderer::Impl
 		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& current,
 		const VideoFrameFormatterOutputContract& contract,
 		int width, int height, size_t rowBytes, int chromaHeight, bool lossless422,
-		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, double sourceHz)
+		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced,
+		double sourceHz)
 	{
+		// Off and settled: today's path, nothing else is done.
+		if (!(activeSettings.dejudderStrength > 0.0) && dejudderReason == DejudderPolicy::Reason::Off &&
+			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0])
+			return;
 		const AlphaPresentationSnapshot telemetry = presentationTelemetry.Snapshot();
 		DejudderPolicy::Input in;
 		in.strength = activeSettings.dejudderStrength;
@@ -10567,6 +10590,7 @@ struct LibplaceboVideoRenderer::Impl
 		in.sourceHz = sourceHz;
 		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
 			customHookRefreshHz;
+		in.interlaced = interlaced;
 		in.nativeRgb = nativeRgb;
 		in.haveNext = next != nullptr;
 		in.nextMatches = next && current &&
@@ -10581,14 +10605,30 @@ struct LibplaceboVideoRenderer::Impl
 		};
 		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
 		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
+		// A reason that flips (e.g. the queue running low) logs at most one
+		// line per 5 s; once the 5 s pass, the reason then current is logged
+		// with the number of changes not shown, so the log never ends stale.
 		if (reason != dejudderReason)
 		{
-			DebugLog::Log("De-judder: %s (strength %.2f, source %.3f Hz, display %.3f Hz, match tolerance %.1f)",
-				DejudderPolicy::Name(reason), in.strength, in.sourceHz, in.displayHz,
-				activeSettings.dejudderMatchTolerance);
+			++dejudderReasonChangesNotLogged;
 			dejudderReason = reason;
 		}
+		if (dejudderReasonChangesNotLogged > 0)
+		{
+			const ULONGLONG now = GetTickCount64();
+			if (dejudderReasonLogTick == 0 || now - dejudderReasonLogTick >= 5000)
+			{
+				const std::string skipped = dejudderReasonChangesNotLogged > 1 ?
+					", " + std::to_string(dejudderReasonChangesNotLogged - 1) + " changes not logged" : std::string();
+				DebugLog::Log("De-judder: %s (strength %.2f, source %.3f Hz, display %.3f Hz, match tolerance %.1f%s)",
+					DejudderPolicy::Name(reason), in.strength, in.sourceHz, in.displayHz,
+					activeSettings.dejudderMatchTolerance, skipped.c_str());
+				dejudderReasonLogTick = now;
+				dejudderReasonChangesNotLogged = 0;
+			}
+		}
 		if (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
+			reason == DejudderPolicy::Reason::Interlaced ||
 			reason == DejudderPolicy::Reason::NotFilmCadence || reason == DejudderPolicy::Reason::NativeRgb)
 		{
 			if (dejudder || dejudderNextTextures[0])
@@ -10622,7 +10662,9 @@ struct LibplaceboVideoRenderer::Impl
 		for (int plane = 0; plane < 2; ++plane)
 			if (!pl_upload_plane(d3d11->gpu, &nextPlanes[plane], &dejudderNextTextures[plane], &planes[plane]))
 			{
-				DebugLog::Log("De-judder: uploading the next frame failed; off for this frame");
+				if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
+					DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
+						dejudderFailures);
 				return;
 			}
 		(void)flipped;   // A and B share the orientation; the warp keeps it.
@@ -10648,7 +10690,9 @@ struct LibplaceboVideoRenderer::Impl
 		b.chroma = dejudderNextTextures[1];
 		if (!dejudder->Estimate(a, b))
 		{
-			DebugLog::Log("De-judder: motion estimate failed (%s)", dejudder->LastError().c_str());
+			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
+				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
+					dejudder->LastError().c_str(), dejudderFailures);
 			return;
 		}
 		dejudderEstimatedSequence = sourceSequence;
@@ -11621,6 +11665,7 @@ struct LibplaceboVideoRenderer::Impl
 			// An RGB capture has no YCbCr planes to warp: the de-judder is off.
 			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
 				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
+				state.displayMode && state.displayMode->IsInterlaced(),
 				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0);
 			std::string resolvedIngressStatus = nativeRgbLayout.label;
 			if (!analysisSource.IsValid())
@@ -11670,6 +11715,7 @@ struct LibplaceboVideoRenderer::Impl
 			UpdateDejudderEstimate(nextConvertedPayload, convertedPayload, formattedContract,
 				width, height, p010RowBytes, chromaHeight, lossless422Upload,
 				state.invertedVertical, sourceSequence, cadenceRepeat, false,
+				state.displayMode && state.displayMode->IsInterlaced(),
 				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0);
 			if (lossless422Upload)
 			{
@@ -19226,7 +19272,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			{
 				const QueuedFrame& next = m_frameQueue.front();
 				if (next.generation == frameGeneration && !next.cadenceRepeat &&
-					next.sourceSequence != sourceSequence && next.converted)
+					next.sourceSequence != sourceSequence && next.converted &&
+					SameDejudderVideoState(state, next.state))
 					nextConvertedPayload = next.converted;
 			}
 

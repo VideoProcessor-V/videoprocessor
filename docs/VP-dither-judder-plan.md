@@ -600,12 +600,14 @@ twice is rejected only in the log, not as a failed dispatch.
 - RenderLoop hands RenderLocked the next queued source frame's converted
   planes (B). That happens only when B is in the same generation, is not a
   cadence repeat, has a different source sequence and is already converted.
-  Nothing new is queued or waited for.
+  Nothing new is queued or waited for. B must also have A's video state
+  (encoding, EOTF, colour space, orientation and display mode).
 - `DejudderPolicy::Decide` (pure, unit-tested) gives the reason. The checks
-  run in order: off, Low_Latency queue, rates unknown, not film cadence
+  run in order: off, Low_Latency queue, interlaced input, rates unknown, not film cadence
   (source ≥ display/1.5), RGB capture, plane caps (sampleable, LINEAR,
   STORABLE), no next frame, next frame differs. Each change of reason is
-  logged once.
+  logged, at most one line per 5 s; failures are logged on the 1st and
+  every 2400th.
 - When active, B is uploaded with A's plane layout, and `Estimate(A, B)`
   runs once per source frame, never on cadence repeats. It is logged on the
   1st estimate and every 2400th.

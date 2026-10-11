@@ -11,6 +11,7 @@ namespace DejudderPolicy
 		Active,
 		Off,              // dejudder_strength 0 (or absent)
 		LowLatency,       // the Low_Latency queue is active
+		Interlaced,       // an interlaced input mode (field rate unclear)
 		NotFilmCadence,   // source rate >= display rate / 1.5 (nothing to fill)
 		UnknownRates,     // source or display rate not known yet
 		NativeRgb,        // an RGB capture: no YCbCr planes to warp
@@ -23,6 +24,7 @@ namespace DejudderPolicy
 	{
 		double strength = 0.0;
 		bool lowLatency = false;
+		bool interlaced = false;
 		double sourceHz = 0.0;
 		double displayHz = 0.0;
 		bool nativeRgb = false;
@@ -37,6 +39,7 @@ namespace DejudderPolicy
 	{
 		if (!(in.strength > 0.0)) return Reason::Off;
 		if (in.lowLatency) return Reason::LowLatency;
+		if (in.interlaced) return Reason::Interlaced;
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) return Reason::UnknownRates;
 		if (in.sourceHz >= in.displayHz / 1.5) return Reason::NotFilmCadence;
 		if (in.nativeRgb) return Reason::NativeRgb;
@@ -53,6 +56,7 @@ namespace DejudderPolicy
 		case Reason::Active: return "active";
 		case Reason::Off: return "off";
 		case Reason::LowLatency: return "low-latency queue";
+		case Reason::Interlaced: return "interlaced input";
 		case Reason::NotFilmCadence: return "not film cadence";
 		case Reason::UnknownRates: return "rates not known";
 		case Reason::NativeRgb: return "RGB capture";

@@ -528,6 +528,7 @@ namespace VideoProcessorTest
             auto with = [&](auto change) { DejudderPolicy::Input copy = in; change(copy); return DejudderPolicy::Decide(copy); };
             Assert::IsTrue(with([](auto& i) { i.strength = 0.0; }) == Reason::Off);
             Assert::IsTrue(with([](auto& i) { i.lowLatency = true; }) == Reason::LowLatency);
+            Assert::IsTrue(with([](auto& i) { i.interlaced = true; }) == Reason::Interlaced);
             Assert::IsTrue(with([](auto& i) { i.displayHz = 0.0; }) == Reason::UnknownRates);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 0.0; }) == Reason::UnknownRates);
             // The limit is source >= display / 1.5 (40 on 60): 50 on 60 has
