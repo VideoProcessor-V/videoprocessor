@@ -367,3 +367,34 @@ Earlier items:
 - (5) **OK.** The phase line waits until the latency floor has 24 frames
   (~1 s at 24p, restarted per generation or rate change), so its φ0 now
   shows a settled value.
+
+## Implementer response to the re-audit
+
+- **Blocker — whole work counted twice in PlanExtra: fixed (742607ed).**
+  - PlanExtra's allowance is A's render call + 4 ms again. B's predicted
+    present call already contains its work.
+  - The whole-work hold (work + 4 ms must fit in one refresh) stays, so B
+    still fits after the last extra's vblank.
+  - The "too late for this extra" check uses the extra's own render time:
+    the larger of A's render call and the last extra's warp + render +
+    present.
+  - Agreed on the projector check: watch a pan by eye, and compare the
+    "Alpha frame pacing trace … submit_gap" lines with the de-judder on
+    and off.
+- **Should fix — stale "next frame late" prediction: fixed (742607ed).**
+  Every call of the extras block consumes the prediction first, whatever
+  happens after. It only counts in the same queue generation, and it is
+  cleared when the extras block is skipped (not Active, A not rendered or
+  presented).
+- **Note — no tests for the telemetry helpers: fixed.** `ExtrasBetween` and
+  `MainPresentFor` moved into `DejudderPolicy.h` (pure). The new unit test
+  `DejudderTelemetrySeesTheMainPresentNotTheExtras` covers:
+  - an extra on screen → the main present before it, with its refresh;
+  - a main present untouched;
+  - no extras → identity;
+  - extras between two mains;
+  - id wrap-around.
+- **Note (1), A's own Present blocking inflates the work time:** accepted.
+  It errs towards a hold (today's behaviour); watch the hold lines.
+- **Note (3), a hook disabled during an extra:** accepted (at most two
+  refreshes, once, the same window as A has).

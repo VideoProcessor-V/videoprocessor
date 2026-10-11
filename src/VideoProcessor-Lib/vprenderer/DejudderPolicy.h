@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <utility>
 
 // Stage 6b: when the de-judder may run for a source frame, and (6b-2) whether
 // one more extra present may fill the next refresh. Pure logic, so the
@@ -170,6 +173,41 @@ namespace DejudderPolicy
 		decision.delta = std::max(0.0, decision.delta);
 		decision.present = true;
 		return decision;
+	}
+
+	// --- Presentation telemetry without extras (audit 6b-2a) ---------------
+	// DXGI present ids of recent extras, and the refresh each main present
+	// showed on. Ids are compared with signed 32-bit differences (wrap-safe).
+
+	// Number of extra presents with ids in (from, to].
+	inline uint32_t ExtrasBetween(const std::deque<uint32_t>& extraIds, uint32_t from, uint32_t to)
+	{
+		uint32_t count = 0;
+		for (uint32_t id : extraIds)
+			if (static_cast<int32_t>(id - from) > 0 && static_cast<int32_t>(to - id) >= 0)
+				++count;
+		return count;
+	}
+
+	// When the latest present on screen (presentCount) is an extra, rewrite it
+	// to the main present before it, with that present's refresh when known,
+	// as the frame statistics would read without extras. Returns false (and
+	// leaves the values alone) when presentCount is not an extra.
+	inline bool MainPresentFor(const std::deque<uint32_t>& extraIds,
+		const std::deque<std::pair<uint32_t, uint32_t>>& mainRefresh,
+		uint32_t& presentCount, uint32_t& presentRefresh)
+	{
+		auto isExtra = [&](uint32_t id) { return std::find(extraIds.begin(), extraIds.end(), id) != extraIds.end(); };
+		if (extraIds.empty() || !isExtra(presentCount))
+			return false;
+		uint32_t main = presentCount;
+		while (main > 0 && isExtra(main))
+			--main;
+		presentCount = main;
+		for (const auto& entry : mainRefresh)
+			if (entry.first == main)
+				presentRefresh = entry.second;
+		return true;
 	}
 
 	// The floor of recent (first vsync - callback) values: the constant L.

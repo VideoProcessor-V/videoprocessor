@@ -3822,23 +3822,14 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t dejudderPredictedGeneration = 0;
 	// Present ids of recent extras and the refresh each main present (A)
 	// showed on, so presentation telemetry sees what it would without extras.
-	std::deque<UINT> dejudderExtraIds;
-	std::deque<std::pair<UINT, UINT>> dejudderMainRefresh;
+	std::deque<uint32_t> dejudderExtraIds;
+	std::deque<std::pair<uint32_t, uint32_t>> dejudderMainRefresh;
 	IDXGISwapChain* dejudderIdsSwapchain = nullptr;   // identity only, not owned
-
-	bool IsDejudderExtraId(UINT id) const
-	{
-		return std::find(dejudderExtraIds.begin(), dejudderExtraIds.end(), id) != dejudderExtraIds.end();
-	}
 
 	// Number of extra presents with ids in (from, to].
 	UINT DejudderExtrasBetween(UINT from, UINT to) const
 	{
-		UINT count = 0;
-		for (UINT id : dejudderExtraIds)
-			if (static_cast<int32_t>(id - from) > 0 && static_cast<int32_t>(to - id) >= 0)
-				++count;
-		return count;
+		return DejudderPolicy::ExtrasBetween(dejudderExtraIds, from, to);
 	}
 
 	// Audit 6b-2a: when the latest picture on screen is an extra, report the
@@ -3846,15 +3837,14 @@ struct LibplaceboVideoRenderer::Impl
 	// statistics would read without extras. Identity when no extras ran.
 	void AdjustSampleForDejudderExtras(AlphaDxgiPresentationSample& sample, IDXGISwapChain* native) const
 	{
-		if (dejudderExtraIds.empty() || native != dejudderIdsSwapchain || !IsDejudderExtraId(sample.presentCount))
+		if (native != dejudderIdsSwapchain)
 			return;
-		UINT main = sample.presentCount;
-		while (main > 0 && IsDejudderExtraId(main))
-			--main;
-		sample.presentCount = main;
-		for (const auto& entry : dejudderMainRefresh)
-			if (entry.first == main)
-				sample.presentRefreshCount = entry.second;
+		uint32_t count = sample.presentCount, refresh = sample.presentRefreshCount;
+		if (DejudderPolicy::MainPresentFor(dejudderExtraIds, dejudderMainRefresh, count, refresh))
+		{
+			sample.presentCount = count;
+			sample.presentRefreshCount = refresh;
+		}
 	}
 	void ReleaseDejudder()
 	{

@@ -614,6 +614,37 @@ namespace VideoProcessorTest
             Assert::AreEqual(0.0, d.delta);
         }
 
+        TEST_METHOD(DejudderTelemetrySeesTheMainPresentNotTheExtras)
+        {
+            // A = 100 showed on refresh 500; its extras were 101 and 102.
+            // B = 103; its extra 104.
+            std::deque<uint32_t> extras{ 101, 102, 104 };
+            std::deque<std::pair<uint32_t, uint32_t>> mains{ { 100, 500 }, { 103, 503 } };
+            uint32_t count = 102, refresh = 502;
+            Assert::IsTrue(DejudderPolicy::MainPresentFor(extras, mains, count, refresh));
+            Assert::AreEqual(100u, count);
+            Assert::AreEqual(500u, refresh);
+            count = 103; refresh = 503;   // a main present on screen: untouched
+            Assert::IsFalse(DejudderPolicy::MainPresentFor(extras, mains, count, refresh));
+            Assert::AreEqual(103u, count);
+            count = 104; refresh = 504;
+            Assert::IsTrue(DejudderPolicy::MainPresentFor(extras, mains, count, refresh));
+            Assert::AreEqual(103u, count);
+            Assert::AreEqual(503u, refresh);
+            // No extras ran: always an identity.
+            std::deque<uint32_t> none;
+            count = 102; refresh = 502;
+            Assert::IsFalse(DejudderPolicy::MainPresentFor(none, mains, count, refresh));
+            Assert::AreEqual(102u, count);
+            // Extras between two main presents (for the pacing trace's delta).
+            Assert::AreEqual(2u, DejudderPolicy::ExtrasBetween(extras, 100, 103));
+            Assert::AreEqual(1u, DejudderPolicy::ExtrasBetween(extras, 103, 105));
+            Assert::AreEqual(0u, DejudderPolicy::ExtrasBetween(none, 100, 103));
+            // Ids wrap at 2^32.
+            std::deque<uint32_t> wrapped{ 0xFFFFFFFFu, 0u };
+            Assert::AreEqual(2u, DejudderPolicy::ExtrasBetween(wrapped, 0xFFFFFFFEu, 1u));
+        }
+
         TEST_METHOD(DejudderLatencyFloorIsTheRecentMinimum)
         {
             DejudderPolicy::LatencyFloor floor;
