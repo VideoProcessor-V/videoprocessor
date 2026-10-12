@@ -15,6 +15,7 @@
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/RenderedWarp.h>
+#include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
@@ -5089,6 +5090,54 @@ namespace VideoProcessorTest
 		// brighter: over the default tolerance (3 codes) as limited-range codes,
 		// within it as full-range luma (3.2 x 219 / 255 = 2.75
 		// limited-equivalent codes).
+		// Stage 10: the first frame with the carry after frames without it is
+		// right (scaling, light domain, Mitchell). After the SSIM user shader
+		// too: AdaptiveDownscaleBlendsEdgesTextureAndGrain.
+		TEST_METHOD(ExtendedRangeFirstFrameAfterOtherFrames)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			const std::vector<int> codes = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+			std::string report;
+			auto run = [&](const char* name, Case c)
+			{
+				const Result r = Render(gpu, fixture.Renderer(), Greys(codes, 64), c);
+				Assert::IsTrue(r.ok);
+				const auto got = Columns(r, static_cast<int>(codes.size()), c.scale, 64);
+				report += std::string(name) + ": " + Join(got) + "\n";
+				return got;
+			};
+			Case off;
+			off.on = false;
+			off.scale = 0.5;
+			Case on;
+			on.scale = 0.5;
+			run("off down", off);
+			run("on down (1st)", on);
+			run("on down (2nd)", on);
+			Case offUp = off;
+			offUp.scale = 1.5;
+			run("off up", offUp);
+			run("on down after off up", on);
+			Case gammaOff = off;
+			gammaOff.linear = false;
+			run("off down, gamma light", gammaOff);
+			run("on down after gamma light", on);
+			Case mitchellOff = off;
+			mitchellOff.mitchell = true;
+			run("off down, mitchell", mitchellOff);
+			Case mitchellOn = on;
+			mitchellOn.mitchell = true;
+			run("on down mitchell after off mitchell", mitchellOn);
+			Logger::WriteMessage(report.c_str());
+			for (const std::string& row : { std::string("on down (1st): "), std::string("on down after off up: "),
+				std::string("on down after gamma light: "), std::string("on down mitchell after off mitchell: ") })
+				Assert::IsTrue(report.find(row + "4 16 40 64 100 502 900 940") != std::string::npos,
+					ExtendedRangeGpuProbe::ToWide("a first carry frame is wrong\n" + report).c_str());
+		}
+
 		TEST_METHOD(DejudderToleranceFollowsTheSourceRange)
 		{
 			TargetLutGpuFixture fixture;
@@ -5685,6 +5734,260 @@ namespace VideoProcessorTest
 			Assert::IsTrue(cache.Copies() == 3 && cache.Failed() == 0);
 			cache.Release();
 			Assert::IsNull(cache.Texture(9), L"Release must drop the cached picture");
+		}
+
+		// Stage 8-2: the adaptive downscale blend (SSIM / faithful, luma only)
+		// on a 1.5x downscale. Hard edges come out as the faithful branch,
+		// low-contrast texture as SSIM; the grain term falls to the floor on
+		// noise, recovers smoothly, snaps on a cut; nothing happens on an
+		// upscale; both light domains give the same weight map; and the Stage
+		// 10 carry's BTB/WTW codes survive the measure, SSIM and the blend.
+		TEST_METHOD(AdaptiveDownscaleBlendsEdgesTextureAndGrain)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const pl_hook* ssim = nullptr;
+			{
+				const std::string source = LoadBundledShader("SSimDownscaler.glsl");
+				Assert::IsFalse(source.empty());
+				ssim = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				Assert::IsNotNull(ssim);
+			}
+			static constexpr int sw = 384, sh = 240;
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(srcFmt && dstFmt);
+			auto makeSource = [&](auto code)
+			{
+				std::vector<uint16_t> px(static_cast<size_t>(sw) * sh * 4);
+				for (int y = 0; y < sh; ++y)
+					for (int x = 0; x < sw; ++x)
+					{
+						const double c = std::min(255.0, std::max(0.0, static_cast<double>(code(x, y))));
+						const uint16_t v = static_cast<uint16_t>(std::lround(c * 257.0));
+						uint16_t* p = &px[(static_cast<size_t>(y) * sw + x) * 4];
+						p[0] = p[1] = p[2] = v;
+						p[3] = 65535;
+					}
+				pl_tex_params tp{};
+				tp.w = sw;
+				tp.h = sh;
+				tp.format = srcFmt;
+				tp.sampleable = true;
+				tp.initial_data = px.data();
+				return pl_tex_create(gpu, &tp);
+			};
+			// Hard stripes on the left, low-contrast fine texture on the right.
+			pl_tex scene = makeSource([](int x, int y)
+			{
+				if (x < sw / 2)
+					return ((x / 12) % 2) ? 220.0 : 30.0;
+				return 128.0 + 5.0 * std::sin(x * 1.7) * std::cos(y * 1.3);
+			});
+			uint32_t noiseState = 12345u;
+			auto noise = [&noiseState]()
+			{
+				noiseState = noiseState * 1664525u + 1013904223u;
+				return (static_cast<double>(noiseState >> 8) / 16777216.0 - 0.5) * 2.0;
+			};
+			std::vector<double> noiseField(static_cast<size_t>(sw) * sh);
+			for (double& n : noiseField) n = noise() * 7.0;
+			pl_tex grainy = makeSource([&](int x, int y) { return 128.0 + noiseField[static_cast<size_t>(y) * sw + x]; });
+			pl_tex clean = makeSource([](int, int) { return 128.0; });
+			pl_tex dark = makeSource([](int, int) { return 20.0; });
+			pl_tex brighter = makeSource([&](int x, int y) { return 200.0 + noiseField[static_cast<size_t>(y) * sw + x]; });
+
+			AdaptiveDownscale::Module module;
+			uint64_t sequence = 0;
+			auto render = [&](pl_tex src, int ow, int oh, bool withModule, const AdaptiveDownscale::Settings& st,
+				bool gammaLight, bool advance)
+			{
+				pl_tex_params tp{};
+				tp.w = ow;
+				tp.h = oh;
+				tp.format = dstFmt;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				image.color.transfer = PL_COLOR_TRC_GAMMA22;
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = gammaLight;
+				std::vector<const pl_hook*> hooks;
+				if (advance) ++sequence;
+				if (withModule)
+				{
+					module.SetFrame(st, sequence, 1.0f / 24.0f);
+					hooks.push_back(module.Measure());
+				}
+				hooks.push_back(ssim);
+				if (withModule)
+					hooks.push_back(module.Blend());
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &out, &params));
+				pl_gpu_finish(gpu);
+				std::vector<RgbaPixel> px(static_cast<size_t>(ow) * oh);
+				pl_tex_transfer_params d{};
+				d.tex = target;
+				d.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+			// The stats of the last advancing frame (polled by the next render).
+			auto grainNow = [&](pl_tex src, const AdaptiveDownscale::Settings& st)
+			{
+				render(src, 256, 160, true, st, false, false);
+				render(src, 256, 160, true, st, false, false);
+				return module.LastStats();
+			};
+			std::string report;
+			char line[200];
+
+			// 1. Edges faithful, texture SSIM (grain term held at 1).
+			AdaptiveDownscale::Settings noGrain;
+			noGrain.grainLo = 63.0f;
+			noGrain.grainHi = 64.0f;
+			AdaptiveDownscale::Settings faithfulOnly = noGrain;
+			faithfulOnly.wBase = 0.0f;
+			// With edges switched off (thresholds above any gradient) w is 1
+			// everywhere: the blend must be the SSIM picture (grey content: the
+			// luma blend is the whole picture).
+			AdaptiveDownscale::Settings allSsim = noGrain;
+			allSsim.edgeLo = 254.0f;
+			allSsim.edgeHi = 255.0f;
+			const auto ssimOnly = render(scene, 256, 160, false, noGrain, false, true);
+			const auto faithfulPx = render(scene, 256, 160, true, faithfulOnly, false, true);
+			const auto asSsim = render(scene, 256, 160, true, allSsim, false, true);
+			const auto blended = render(scene, 256, 160, true, noGrain, false, true);
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"The blend did not run on a downscale");
+			int ssimMax = 0, edgeMax = 0, edgeSsimVsFaithful = 0;
+			for (int y = 20; y < 140; ++y)
+				for (int x = 4; x < 252; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * 256 + x;
+					ssimMax = std::max(ssimMax, std::abs(asSsim[i].g - ssimOnly[i].g));
+					const int sx = static_cast<int>((x + 0.5) * 1.5);
+					if (x < 120 && (sx % 12 == 0 || sx % 12 == 11))   // stripe transitions
+					{
+						edgeMax = std::max(edgeMax, std::abs(blended[i].g - faithfulPx[i].g));
+						edgeSsimVsFaithful = std::max(edgeSsimVsFaithful, std::abs(ssimOnly[i].g - faithfulPx[i].g));
+					}
+				}
+			std::snprintf(line, sizeof(line), "w=1 vs SSIM max %d; edges vs faithful max %d (SSIM vs faithful there %d)\n",
+				ssimMax, edgeMax, edgeSsimVsFaithful);
+			report += line;
+			// Edges: the edge map is interpolated between source pixels at a
+			// transition, so up to 2 codes of SSIM remain there.
+			Assert::IsTrue(ssimMax <= 1 && edgeMax <= 2 && edgeSsimVsFaithful >= 4,
+				ExtendedRangeGpuProbe::ToWide(report).c_str());
+
+			// 2. Grain: after a cut (dark -> grey noise) it snaps to the floor;
+			// a clean field of the same mean recovers smoothly; a luma jump
+			// (grey -> bright noise) snaps again.
+			AdaptiveDownscale::Settings grain;
+			render(dark, 256, 160, true, grain, false, true);
+			render(grainy, 256, 160, true, grain, false, true);
+			const auto noisy = grainNow(grainy, grain);
+			render(clean, 256, 160, true, grain, false, true);
+			const auto oneClean = grainNow(clean, grain);
+			for (int i = 0; i < 120; ++i)
+				render(clean, 256, 160, true, grain, false, true);
+			const auto manyClean = grainNow(clean, grain);
+			render(brighter, 256, 160, true, grain, false, true);
+			const auto afterCut = grainNow(brighter, grain);
+			std::snprintf(line, sizeof(line), "grain: noise %.3f (valid %d, luma %.1f, w %.3f), clean 1 frame %.3f, 120 frames %.3f, cut to noise %.3f (luma %.1f)\n",
+				noisy.grainScale, noisy.valid ? 1 : 0, noisy.meanLuma, noisy.meanW, oneClean.grainScale,
+				manyClean.grainScale, afterCut.grainScale, afterCut.meanLuma);
+			report += line;
+			Assert::IsTrue(noisy.valid && noisy.grainScale <= grain.grainFloor + 0.05f, ExtendedRangeGpuProbe::ToWide(report).c_str());
+			Assert::IsTrue(oneClean.grainScale < 0.5f, ExtendedRangeGpuProbe::ToWide("no smoothing: " + report).c_str());
+			Assert::IsTrue(manyClean.grainScale > 0.95f, ExtendedRangeGpuProbe::ToWide("no recovery: " + report).c_str());
+			Assert::IsTrue(afterCut.grainScale <= grain.grainFloor + 0.05f, ExtendedRangeGpuProbe::ToWide("no snap: " + report).c_str());
+
+			// 3. No effect on an upscale (the SSIM shader's own condition).
+			const auto upPlain = render(scene, 576, 360, false, noGrain, false, true);
+			const auto upModule = render(scene, 576, 360, true, noGrain, false, true);
+			Assert::IsFalse(module.Active(), L"The blend ran on an upscale");
+			for (size_t i = 0; i < upPlain.size(); ++i)
+				Assert::IsTrue(upPlain[i].r == upModule[i].r && upPlain[i].g == upModule[i].g, L"An upscale changed");
+
+			// 4. Both light domains, the same weight map (edges from the source).
+			render(scene, 256, 160, true, noGrain, false, true);
+			const auto linearStats = grainNow(scene, noGrain);
+			render(scene, 256, 160, true, noGrain, true, true);
+			render(scene, 256, 160, true, noGrain, true, false);
+			render(scene, 256, 160, true, noGrain, true, false);
+			const auto gammaStats = module.LastStats();
+			std::snprintf(line, sizeof(line), "mean w linear %.4f gamma %.4f\n", linearStats.meanW, gammaStats.meanW);
+			report += line;
+			Assert::IsTrue(std::abs(linearStats.meanW - gammaStats.meanW) < 0.02f, ExtendedRangeGpuProbe::ToWide(report).c_str());
+
+			// 5. The carry through measure, SSIM and blend (BT.709 -> P3, down 0.5).
+			{
+				using namespace ExtendedRangeGpuProbe;
+				const std::vector<int> codes = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+				Case c;
+				c.scale = 0.5;
+				c.mitchell = true;
+				module.SetFrame(noGrain, ++sequence, 1.0f / 24.0f);
+				c.extraHooks = { module.Measure(), ssim, module.Blend() };
+				// With the SSIM downscaler (the owner's 4K chain) every code is
+				// kept, below black too, from the first carry frame on. (The
+				// restore renders its own texture: as an inline colour step it was
+				// disabled after any texture-output hook at POST_KERNEL.)
+				auto check = [&](const std::vector<int>& got, const char* what)
+				{
+					for (size_t i = 0; i < codes.size(); ++i)
+						Assert::IsTrue(std::abs(got[i] - codes[i]) <= (codes[i] > 940 || codes[i] < 64 ? 2 : 1),
+							ToWide(std::string(what) + " changed the picture\n" + report).c_str());
+				};
+				const Result first = Render(gpu, fixture.Renderer(), Greys(codes, 64), c);
+				const auto firstGot = Columns(first, static_cast<int>(codes.size()), 0.5, 64);
+				report += "first carry frame after SSIM without it: " + Join(firstGot) + "\n";
+				check(firstGot, "the first carry frame");
+				{
+					Case plain;
+					plain.scale = 0.5;
+					plain.mitchell = true;
+					plain.extraHooks = { ssim };
+					const auto ssimGot = Columns(Render(gpu, fixture.Renderer(), Greys(codes, 64), plain),
+						static_cast<int>(codes.size()), 0.5, 64);
+					report += "SSIM alone with the carry: " + Join(ssimGot) + "\n";
+					check(ssimGot, "SSIM with the carry");
+				}
+				module.SetFrame(noGrain, ++sequence, 1.0f / 24.0f);
+				const Result r = Render(gpu, fixture.Renderer(), Greys(codes, 64), c);
+				Assert::IsTrue(r.ok);
+				const auto got = Columns(r, static_cast<int>(codes.size()), 0.5, 64);
+				report += "carry through the blend: " + Join(got) + "\n";
+				check(got, "the blend");
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			for (pl_tex* t : { &scene, &grainy, &clean, &dark, &brighter })
+				pl_tex_destroy(gpu, t);
+			module.Release();
+			pl_mpv_user_shader_destroy(&ssim);
+			// Only shader-compiler timing notes may appear (a loaded machine).
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+					remaining += entry + "\n";
+			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)

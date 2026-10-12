@@ -6292,6 +6292,37 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         dejudderFrameTrust->setToolTip(QStringLiteral(
             "Below this share of trusted blocks the frame is treated as a cut and held still."));
 
+        // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
+        form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale (4K)"),
+            QString(), false);
+        auto* adaptiveOn = addChoice(QStringLiteral("SSIM / faithful blend"),
+            QStringLiteral("adaptive_downscale"), { QStringLiteral("on"), QStringLiteral("off") });
+        adaptiveOn->setToolTip(QStringLiteral(
+            "Blends the SSimDownscaler shader with a faithful ewa_lanczossharp downscale, luma only: hard "
+            "edges and grain lean faithful, texture keeps SSIM. Needs the SSimDownscaler shader enabled; "
+            "acts only when the picture is downscaled. Off keeps plain SSIM."));
+        struct AdaptiveField { const char* label; const char* key; double lo, hi; const char* placeholder; const char* tip; };
+        const AdaptiveField adaptiveFields[] = {
+            { "SSIM weight (0 to 1)", "adaptive_w_base", 0.0, 1.0, "1", "How much SSIM where nothing argues against it." },
+            { "Edge start (codes)", "adaptive_edge_lo", 0.0, 255.0, "8", "Gradient (8-bit codes) where hard edges start leaning faithful." },
+            { "Edge full (codes)", "adaptive_edge_hi", 0.0, 255.0, "40", "Gradient where an edge is fully faithful (halo control)." },
+            { "Grain start (codes)", "adaptive_grain_lo", 0.0, 64.0, "2", "Flat-area grain energy where the SSIM weight starts to drop." },
+            { "Grain full (codes)", "adaptive_grain_hi", 0.0, 64.0, "8", "Grain energy at which the SSIM weight reaches the grain floor." },
+            { "Grain floor (0 to 1)", "adaptive_grain_floor", 0.0, 1.0, "0.4", "The SSIM weight left on a heavily grained source." },
+            { "Grain smoothing (ms)", "adaptive_grain_smooth_ms", 0.0, 10000.0, "1000", "Time constant of the per-frame grain measure; a cut snaps it." },
+            { "Shadow bias (0 to 1)", "adaptive_grain_shadow_bias", 0.0, 1.0, "0.5", "Weights grain in the shadows more (the LED compensation lifts them)." } };
+        for (const AdaptiveField& field : adaptiveFields)
+        {
+            auto* edit = addText(QString::fromLatin1(field.label), QString::fromLatin1(field.key));
+            edit->setValidator(new QDoubleValidator(field.lo, field.hi, 3, edit));
+            edit->setPlaceholderText(QString::fromLatin1(field.placeholder));
+            edit->setToolTip(QString::fromLatin1(field.tip));
+        }
+        auto* adaptiveChroma = addChoice(QStringLiteral("Blend chroma too"),
+            QStringLiteral("adaptive_chroma_ssim"), { QStringLiteral("off"), QStringLiteral("on") });
+        adaptiveChroma->setToolTip(QStringLiteral(
+            "Off (recommended): chroma stays faithful; SSIM on chroma can fringe colour at edges."));
+
         auto wrapToneControl = [&](const ToneMappingTuning::Spec& spec, QLineEdit* edit) {
             auto row = form->takeRow(edit);
             if (row.labelItem) { delete row.labelItem->widget(); delete row.labelItem; }

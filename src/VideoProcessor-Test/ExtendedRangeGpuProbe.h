@@ -32,6 +32,12 @@ namespace ExtendedRangeGpuProbe
 		bool ownerScaling = false;
 		// A further hook (e.g. a user shader that writes alpha), after VP's.
 		const pl_hook* extraHook = nullptr;
+		// Further hooks in order (e.g. Stage 8: measure, SSIM, blend).
+		std::vector<const pl_hook*> extraHooks;
+		// Mitchell for libplacebo's downscale (the SSIM shader's base).
+		bool mitchell = false;
+		// A hook placed first in the list (before VP's restore at its stage).
+		const pl_hook* firstHook = nullptr;
 	};
 
 	struct Planes
@@ -174,10 +180,17 @@ namespace ExtendedRangeGpuProbe
 				params.upscaler = &pl_filter_ewa_lanczossharp;
 			ExtendedRange::Hooks hooks;
 			std::vector<const pl_hook*> list;
-			result.decision = ExtendedRange::Decide(c.on, image.color, out.color, false);
-			ExtendedRange::Prepare(result.decision, hooks, image.color, out.color, list);
+			// The other hooks first: Prepare looks at them (the restore's form).
 			if (c.extraHook)
 				list.push_back(c.extraHook);
+			for (const pl_hook* hook : c.extraHooks)
+				list.push_back(hook);
+			result.decision = ExtendedRange::Decide(c.on, image.color, out.color, false);
+			ExtendedRange::Prepare(result.decision, hooks, image.color, out.color, list);
+			if (c.firstHook)
+				list.insert(list.begin(), c.firstHook);
+			if (c.mitchell)
+				params.downscaler = &pl_filter_mitchell;
 			params.hooks = list.empty() ? nullptr : list.data();
 			params.num_hooks = static_cast<int>(list.size());
 			if (pl_render_image(renderer, &image, &out, &params))
@@ -191,6 +204,7 @@ namespace ExtendedRangeGpuProbe
 			else
 				result.error = "pl_render_image";
 			result.restores = hooks.Applied();
+			hooks.Release();
 		}
 		else
 			result.error = "textures";

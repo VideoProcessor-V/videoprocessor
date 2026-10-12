@@ -1133,6 +1133,25 @@ Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
     alpha-writing hook).
   - Equivalence of the gamma re-encode holds while SDR sources carry no
     luminance metadata of their own (libplacebo copies the target's).
+- **Stage 8 finding (2026-10-12): the carry with the SSIM downscaler.**
+  libplacebo hands user shaders premultiplied colour (colour x alpha); with
+  the offset stored as alpha 0 for in-range pixels the SSIM downscaler (the
+  owner's 4K chain) turned the picture black. The offset now rides as
+  a = 1 + o: in-range pixels carry exactly 1, the restore takes o = a - 1
+  with a dead band of 2 10-bit codes (scaler weights that do not sum to 1
+  leave about 1e-3; excursions under 2 codes beyond black/white clip as
+  today) and ignores anything outside ±0.5 (a shader writing its own
+  alpha). Stage 10's own tests unchanged (edges mean ≤ 0.01).
+  - **Resolved: below black through SSIM.** Below-black codes were lost
+    through the SSIM shader, and once the first carry frame after SSIM came
+    out encoded twice. Root cause (measured): any texture-output hook at
+    POST_KERNEL (the SSIM shader, the Stage 8 blend) made libplacebo reject
+    the restore, then an inline colour step at SCALED, as "resizing a
+    non-resizable stage" and disable it for the renderer's life. The restore
+    now renders its own texture (same sampling, libplacebo's own
+    delinearize, same body): every code including below black is kept
+    through SSIM and the blend from the first frame, and no hook is
+    disabled (`AdaptiveDownscaleBlendsEdgesTextureAndGrain`, part 5).
 - **Not covered yet:** NLS with the carry on (NLS warps the picture at RGB
   after the carry, interpolating in the output gamma's encoding instead of
   the source's: a sub-code difference at fine detail, not measured), the

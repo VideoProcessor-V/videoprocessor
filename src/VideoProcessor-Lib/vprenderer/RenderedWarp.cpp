@@ -230,16 +230,9 @@ if (q.x < size.x && q.y < size.y) {
 		valid = armed;
 		armed = 0;
 		++copies;
-		// The picture goes on unchanged: handing the input texture back keeps
-		// libplacebo from appending to the shader it finalised for us.
-		pl_hook_res res{};
-		res.output = PL_HOOK_SIG_TEX;
-		res.tex = params->tex;
-		res.repr = params->repr;
-		res.color = params->color;
-		res.components = params->components;
-		res.rect = params->rect;
-		return res;
+		// The picture goes on unchanged (SIG_NONE: handing a pooled texture
+		// back would count as resizing a non-resizable stage).
+		return none;
 	}
 
 	Warp::Warp(pl_log log, pl_gpu gpuIn)

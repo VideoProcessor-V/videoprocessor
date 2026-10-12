@@ -48,6 +48,7 @@
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/DownscaleLight.h>
+#include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
@@ -876,6 +877,8 @@ namespace
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string downscaleLight = "linear";   // Stage 8-1: linear | gamma
+		bool adaptiveDownscale = false;          // Stage 8-2: the SSIM / faithful blend
+		AdaptiveDownscale::Settings adaptive;
 		std::string debandStrength = "auto";
 		AutoToggle deband = AutoToggle::AUTO;
 		AutoToggle sigmoid = AutoToggle::AUTO;
@@ -1009,6 +1012,10 @@ namespace
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
+			<< settings.adaptiveDownscale << '|' << settings.adaptive.wBase << '|' << settings.adaptive.edgeLo << '|'
+			<< settings.adaptive.edgeHi << '|' << settings.adaptive.grainLo << '|' << settings.adaptive.grainHi << '|'
+			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
+			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
 			<< static_cast<int>(settings.sigmoid) << '|'
@@ -1958,6 +1965,41 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid occlusion_mask '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.occlusionMask ? "on" : "off");
+		}
+		// Stage 8-2: the adaptive downscale (rendering profile).
+		for (const auto& numeric : { std::make_tuple("adaptive_w_base", 0.0, 1.0, &settings.adaptive.wBase),
+			std::make_tuple("adaptive_edge_lo", 0.0, 255.0, &settings.adaptive.edgeLo),
+			std::make_tuple("adaptive_edge_hi", 0.0, 255.0, &settings.adaptive.edgeHi),
+			std::make_tuple("adaptive_grain_lo", 0.0, 64.0, &settings.adaptive.grainLo),
+			std::make_tuple("adaptive_grain_hi", 0.0, 64.0, &settings.adaptive.grainHi),
+			std::make_tuple("adaptive_grain_floor", 0.0, 1.0, &settings.adaptive.grainFloor),
+			std::make_tuple("adaptive_grain_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainSmoothMs),
+			std::make_tuple("adaptive_grain_shadow_bias", 0.0, 1.0, &settings.adaptive.shadowBias) })
+		{
+			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
+				continue;
+			double parsed = 0.0;
+			if (DisplayRuleExpression::ParseNumber(raw, parsed) &&
+				parsed >= std::get<1>(numeric) && parsed <= std::get<2>(numeric))
+				*std::get<3>(numeric) = static_cast<float>(parsed);
+			else
+				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
+					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
+		}
+		if (settings.adaptive.edgeHi <= settings.adaptive.edgeLo)
+			settings.adaptive.edgeHi = settings.adaptive.edgeLo + 1.0f;
+		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
+			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
+		for (const auto& toggle : { std::make_pair("adaptive_downscale", &settings.adaptiveDownscale),
+			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim) })
+		{
+			if (!config.TryGetString(rule.section, toggle.first, raw))
+				continue;
+			if (raw == "on" || raw == "off")
+				*toggle.second = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
+					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
 		}
 		if (config.TryGetString(rule.section, "dejudder_warp_stage", raw))
 		{
@@ -3930,6 +3972,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderExtrasAllowed = false;
 	bool dejudderMaskParamSet = false;
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
+	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
 	bool dejudderMaskNoSigmaLogged = false;
 	bool dejudderMaskNlsLogged = false;
 	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
@@ -3943,6 +3986,10 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderRendered::Geometry dejudderGeometry;
 	int dejudderWarpStageLogged = -1;
 	int downscaleLightLogged = -1;   // Stage 8-1: the last logged light domain
+	// Stage 8-2: the adaptive downscale blend.
+	AdaptiveDownscale::Module adaptiveDownscale;
+	bool adaptiveNoSsimLogged = false;
+	ULONGLONG adaptiveStatsTick = 0;
 	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
 	ExtendedRange::Hooks extendedRangeHooks;
 	int extendedRangeLogged = -1;          // the last logged decision
@@ -4869,6 +4916,8 @@ struct LibplaceboVideoRenderer::Impl
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
 				ReleaseDejudder();   // before the device goes
+				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
+				extendedRangeHooks.Release();   // Stage 10: the restore's texture
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
 				dejudderExtraIds.clear();
@@ -7955,6 +8004,8 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.downscaleLight = next.downscaleLight;
+		currentTransport.adaptiveDownscale = next.adaptiveDownscale;
+		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
 		currentTransport.sigmoid = next.sigmoid;
@@ -8022,6 +8073,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.downscaleLight != next.downscaleLight, "downscale_light");
+		changed(current.adaptiveDownscale != next.adaptiveDownscale ||
+			!(current.adaptive == next.adaptive), "adaptive_downscale");
 		changed(current.debandStrength != next.debandStrength ||
 			current.deband != next.deband, "deband");
 		changed(current.sigmoid != next.sigmoid, "sigmoid");
@@ -8507,8 +8560,23 @@ struct LibplaceboVideoRenderer::Impl
 
 	void PublishCustomShaderStatus()
 	{
-		const auto descriptions = customHooks.ActiveDescriptions(
+		auto descriptions = customHooks.ActiveDescriptions(
 			lowLatencyQueueActive.load(std::memory_order_acquire));
+		// Stage 8-2: the blend's own line (what it is doing on this disc).
+		if (activeSettings.adaptiveDownscale)
+		{
+			char line[160];
+			const AdaptiveDownscale::Stats st = adaptiveDownscale.LastStats();
+			if (adaptiveNoSsimLogged)
+				std::snprintf(line, sizeof(line), "Adaptive downscale: needs SSimDownscaler");
+			else if (!adaptiveDownscale.Active())
+				std::snprintf(line, sizeof(line), "Adaptive downscale: idle (not downscaling)");
+			else if (!st.valid)
+				std::snprintf(line, sizeof(line), "Adaptive downscale: measuring");
+			else
+				std::snprintf(line, sizeof(line), "Adaptive downscale: grain %.2f, w %.2f", st.grainScale, st.meanW);
+			descriptions.push_back(line);
+		}
 		std::lock_guard<std::mutex> guard(shaderStatusMutex);
 		activeCustomShaders = descriptions;
 	}
@@ -15754,6 +15822,30 @@ struct LibplaceboVideoRenderer::Impl
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
+        // Stage 8-2: the blend measures at PREKERNEL and blends after the user
+        // hooks at POSTKERNEL (after the SSIM shader's passes); it needs the
+        // SSIM downscaler in the chain.
+        if (activeSettings.adaptiveDownscale)
+        {
+            if (customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue))
+            {
+                adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
+                    nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : 1.0f / 24.0f);
+                frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
+                frameHooks.push_back(adaptiveDownscale.Blend());
+                adaptiveNoSsimLogged = false;
+            }
+            else if (!adaptiveNoSsimLogged)
+            {
+                adaptiveNoSsimLogged = true;
+                DebugLog::Log("Adaptive downscale: on, but the SSimDownscaler shader is not in the chain; not used");
+            }
+            if (adaptiveStatsTick == 0 || GetTickCount64() - adaptiveStatsTick >= 1000)
+            {
+                adaptiveStatsTick = GetTickCount64();
+                PublishCustomShaderStatus();
+            }
+        }
         // Delta 5 (D5-1): the sigma-delta's code domain comes from this
         // frame's target, never from the shader rule: range, swapchain sample
         // depth and the colour depth it quantises to. A float or 16-bit
@@ -15786,6 +15878,32 @@ struct LibplaceboVideoRenderer::Impl
                 else
                     DebugLog::Log("Sigma-delta: off for this output (%s range, %d-bit swapchain, colour depth %d: not an 8- or 10-bit code domain)",
                         domain.full ? "full" : "limited", domain.sample, domain.color);
+            }
+        }
+        // The dither is the last processing of every picture: if a configured
+        // shader would run after the sigma-delta at the OUTPUT stage, the
+        // sigma-delta is moved to the end (logged once). The occlusion mask
+        // and the encoding repair are placed relative to it below.
+        {
+            std::vector<const pl_hook*> sigmaHooks;
+            bool otherOutputAfterSigma = false;
+            for (const pl_hook* hook : frameHooks)
+            {
+                const bool sigma = CustomHookChain::SetHookParameter(hook, "levels_full",
+                    pl_color_levels_guess(&target.repr) == PL_COLOR_LEVELS_FULL ? 1.0 : 0.0);
+                if (sigma)
+                    sigmaHooks.push_back(hook);
+                else if (!sigmaHooks.empty() && hook && (hook->stages & PL_HOOK_OUTPUT))
+                    otherOutputAfterSigma = true;
+            }
+            if (otherOutputAfterSigma)
+            {
+                for (const pl_hook* hook : sigmaHooks)
+                    frameHooks.erase(std::find(frameHooks.begin(), frameHooks.end(), hook));
+                frameHooks.insert(frameHooks.end(), sigmaHooks.begin(), sigmaHooks.end());
+                if (!sigmaDeltaReorderLogged)
+                    DebugLog::Log("Sigma-delta: another OUTPUT-stage shader was configured after it; the sigma-delta now runs last");
+                sigmaDeltaReorderLogged = true;
             }
         }
         if (submittedNls)

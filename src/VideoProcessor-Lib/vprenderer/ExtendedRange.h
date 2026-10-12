@@ -23,8 +23,8 @@
 //   it uses today, so linear-light and sigmoid scaling are unchanged. Then a
 //   pixel outside 0..1 is shifted into range by its offset o (the lowest
 //   channel if negative, else the highest channel minus 1) and o goes into
-//   alpha, which libplacebo never linearises or clamps. In-range pixels
-//   have o = 0.
+//   alpha as 1 + o, which libplacebo never linearises or clamps (in-range
+//   pixels carry exactly 1, so premultiplied user-shader input is unchanged).
 // - Restore, at PL_HOOK_SCALED (before the LED measurement, the LED
 //   compensation and the PRE_OUTPUT texture hooks): undoes libplacebo's
 //   linear-light state with its own delinearize, adds o back, drops alpha
@@ -90,23 +90,36 @@ namespace ExtendedRange
 
 		void SetFrame(const Decision& decision, const pl_color_space& output);
 		const pl_hook* Carry() const { return &carry; }
-		const pl_hook* Restore() const { return &restore; }
+		// afterTextureHooks: another hook's texture output precedes the restore
+		// (the SSIM downscaler, the Stage 8 blend); see RunRestoreTexture.
+		const pl_hook* Restore(bool afterTextureHooks = false) const
+		{
+			return afterTextureHooks ? &restoreTexture : &restore;
+		}
 		bool Owns(uint64_t signature) const
 		{
-			return signature == carry.signature || signature == restore.signature;
+			return signature == carry.signature || signature == restore.signature ||
+				signature == restoreTexture.signature;
 		}
 		unsigned long long Applied() const { return applied; }
+		// The restore's own texture: before the GPU goes.
+		void Release();
 
 	private:
 		static pl_hook_res RunCarry(void* priv, const pl_hook_params* params);
 		static pl_hook_res RunRestore(void* priv, const pl_hook_params* params);
+		static pl_hook_res RunRestoreTexture(void* priv, const pl_hook_params* params);
+		bool AppendRestore(pl_shader sh, pl_color_space& color) const;
 
 		pl_hook carry{};
 		pl_hook restore{};
+		pl_hook restoreTexture{};
 		Decision decision{};
 		pl_color_space output{};
 		float gammaRatio = 1.0f;
 		unsigned long long applied = 0;
+		pl_gpu restoreGpu = nullptr;
+		pl_tex restoreTex = nullptr;
 	};
 
 	// For an active decision: the source colour space becomes the output's

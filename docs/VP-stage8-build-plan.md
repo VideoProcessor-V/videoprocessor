@@ -108,6 +108,42 @@ From the design §5, plus what this integration adds:
 8-1 and 8-2 share one audit; 8-3 its own (it touches the de-judder's matcher
 and policy).
 
+## Built (2026-10-12)
+
+- **8-1** (ce2e34f7 in the clone, cherry-picked): `downscale_light`
+  (scaling group; Config Scaling "Downscale light"); `DownscaleLight::
+  UseGammaLight` gates gamma light on frames that downscale on either axis.
+- **8-2:** `vprenderer/AdaptiveDownscale.{h,cpp}` as planned, with these
+  findings:
+  - **Gate:** the SSIM shader acts only when the picture is made *shorter*
+    (`NATIVE_CROPPED.h > POSTKERNEL.h`), so the blend uses the same
+    condition (not "either axis").
+  - **Cut snap:** detected by the module itself (the frame's mean luma
+    jumping by more than 20 codes), so it needs neither the matcher nor
+    the LED module and never reads back on the render path.
+  - **Statistics:** written by the grain pass straight into a host-readable
+    storage buffer and polled frames later (the LED measurement's pattern;
+    a texture-to-buffer download did not deliver on D3D11). Shown as an
+    "Adaptive downscale: grain x, w y" entry in the overlay's shader list
+    (no plugin-interface change).
+  - **Alpha:** the blend keeps the faithful branch's alpha (the carry).
+  - Keys in the rendering profile's input group (the Rendering page card,
+    like the de-judder keys): `adaptive_downscale`, `adaptive_w_base`,
+    `adaptive_edge_lo/hi`, `adaptive_grain_lo/hi`, `adaptive_grain_floor`,
+    `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`,
+    `adaptive_chroma_ssim`. The faithful branch's anti-ringing is fixed at
+    0.5 for now.
+  - GPU test `AdaptiveDownscaleBlendsEdgesTextureAndGrain`: w = 1 equals
+    SSIM (max 1); hard edges within 2 codes of faithful where SSIM differs
+    by 8 (the edge map is interpolated at a transition); grain: noise after
+    a cut → floor 0.400, clean field 1 frame 0.424 → 120 frames 0.996, a
+    luma jump snaps to 0.400; no effect on an upscale; the same w in both
+    light domains (0.9167); the carry through measure + SSIM + blend keeps
+    every code, below black and above white within 2, from the first frame;
+    the log is clean and no hook is disabled (the Stage 10 restore now
+    renders its own texture, see the dither/judder plan's Stage 8 finding).
+- **8-3** (vector grain map) not built yet.
+
 ## Projector check (design §6)
 
 SSIM gamma, SSIM linear, blend with scalar, blend with the map, on a 4K film

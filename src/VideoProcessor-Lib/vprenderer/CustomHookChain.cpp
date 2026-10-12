@@ -334,6 +334,21 @@ namespace CustomHookChain
         return changed;
     }
 
+    bool Chain::SubmitsFile(const std::string& fileName, bool lowLatency) const
+    {
+        for (const Entry& entry : entries)
+        {
+            if (!Submitted(entry, lowLatency))
+                continue;
+            const std::string& path = entry.rule.filename;
+            const size_t slash = path.find_last_of("\\/");
+            const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+            if (_stricmp(name.c_str(), fileName.c_str()) == 0)
+                return true;
+        }
+        return false;
+    }
+
     std::vector<std::string> Chain::ActiveDescriptions(bool lowLatency) const
     {
         std::vector<std::string> descriptions;

@@ -95,6 +95,10 @@ namespace CustomHookChain
         // true when at least one entry newly dropped out.
         bool MarkRuntimeFailures(const uint64_t* signatures, int count);
 
+        // True when a submitted rule loads this file (by name, any folder,
+        // case-insensitive). Stage 8 needs the SSIM downscaler in the chain.
+        bool SubmitsFile(const std::string& fileName, bool lowLatency) const;
+
         // One description per submitted hook, for the stats overlay.
         std::vector<std::string> ActiveDescriptions(bool lowLatency) const;
 
