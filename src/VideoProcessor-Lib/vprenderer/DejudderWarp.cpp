@@ -514,6 +514,11 @@ if (q.x < size.x && q.y < size.y) {
 		return true;
 	}
 
+	const char* FieldVectorGlsl()
+	{
+		return WARP_HEADER;
+	}
+
 	bool MotionWarp::Warp(const Planes& a, float shift, Planes& out, bool trusted)
 	{
 		out = a;

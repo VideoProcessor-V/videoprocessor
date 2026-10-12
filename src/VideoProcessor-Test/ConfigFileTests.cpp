@@ -507,6 +507,8 @@ namespace VideoProcessorTest
                 Case{ "dejudder_frame_trust", "1.5", false },
                 Case{ "occlusion_mask", "on", true }, Case{ "occlusion_mask", "off", true },
                 Case{ "occlusion_mask", "yes", false },
+                Case{ "dejudder_warp_stage", "rendered", true }, Case{ "dejudder_warp_stage", "source", true },
+                Case{ "dejudder_warp_stage", "cached", false },
                 Case{ "preserve_extended_range", "on", true }, Case{ "preserve_extended_range", "off", true },
                 Case{ "preserve_extended_range", "auto", false } })
             {

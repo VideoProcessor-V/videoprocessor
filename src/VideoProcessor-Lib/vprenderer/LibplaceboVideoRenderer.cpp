@@ -46,6 +46,7 @@
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
+#include <vprenderer/RenderedWarp.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
@@ -870,6 +871,7 @@ namespace
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
 		bool preserveExtendedRange = false; // Stage 10: BTB/WTW kept through scaling (SDR)
+		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string debandStrength = "auto";
@@ -1003,7 +1005,7 @@ namespace
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
-			<< settings.preserveExtendedRange << '|'
+			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1953,6 +1955,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid occlusion_mask '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.occlusionMask ? "on" : "off");
+		}
+		if (config.TryGetString(rule.section, "dejudder_warp_stage", raw))
+		{
+			if (raw == "rendered" || raw == "source")
+				settings.dejudderWarpRendered = raw == "rendered";
+			else
+				DebugLog::Log("profile '%s': invalid dejudder_warp_stage '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.dejudderWarpRendered ? "rendered" : "source");
 		}
 		if (config.TryGetString(rule.section, "preserve_extended_range", raw))
 		{
@@ -3923,6 +3933,11 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderMaskRateLogged = false;
 	unsigned long long dejudderMaskFrames = 0;
 	OcclusionMask::Hook occlusionMaskHook;
+	// Stage 6d: A's PRE_OUTPUT picture for the extras, and its warp.
+	DejudderRendered::Cache dejudderCache;
+	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
+	DejudderRendered::Geometry dejudderGeometry;
+	int dejudderWarpStageLogged = -1;
 	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
 	ExtendedRange::Hooks extendedRangeHooks;
 	int extendedRangeLogged = -1;          // the last logged decision
@@ -7927,6 +7942,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.occlusionMask = next.occlusionMask;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
+		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.debandStrength = next.debandStrength;
@@ -7992,6 +8008,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
+		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
@@ -11108,7 +11125,8 @@ struct LibplaceboVideoRenderer::Impl
 		a.chromaShiftY = f.lossless422 ? 0 : 1;
 		std::vector<const pl_hook*> hooks;
 		for (int i = 0; i < f.params->num_hooks; ++i)
-			if (f.params->hooks[i] != f.ledMeasurementHook && f.params->hooks[i] != occlusionMaskHook.Get())
+			if (f.params->hooks[i] != f.ledMeasurementHook && f.params->hooks[i] != occlusionMaskHook.Get() &&
+				f.params->hooks[i] != dejudderCache.Hook())
 				hooks.push_back(f.params->hooks[i]);
 		// The mask is for a source frame's first refresh only (6c).
 		if (dejudderMaskParamSet)
@@ -11133,6 +11151,27 @@ struct LibplaceboVideoRenderer::Impl
 		pl_render_params params = *f.params;
 		params.hooks = hooks.empty() ? nullptr : hooks.data();
 		params.num_hooks = static_cast<int>(hooks.size());
+		// 6d: with A's picture cached, the extras render it warped, with
+		// only the OUTPUT-stage hooks (no repair unless still needed).
+		const pl_tex cached = dejudderCache.Texture(f.sourceSequence);
+		std::vector<const pl_hook*> outputHooks;
+		pl_render_params renderedParams = DejudderRendered::OutputOnly(params, hooks, outputHooks);
+		{
+			const auto repairHook = std::find(outputHooks.begin(), outputHooks.end(), outputEncodingRepair.Get());
+			if (repairHook != outputHooks.end())
+			{
+				std::vector<const pl_hook*> withoutRepair(outputHooks);
+				withoutRepair.erase(withoutRepair.begin() + (repairHook - outputHooks.begin()));
+				const pl_render_errors errors = pl_renderer_get_errors(renderer);
+				if (!OutputEncodingRepair::Needed(withoutRepair, &errors,
+					f.target->lut ? f.target->lut_type : PL_LUT_UNKNOWN))
+					outputHooks = std::move(withoutRepair);
+				renderedParams.hooks = outputHooks.empty() ? nullptr : outputHooks.data();
+				renderedParams.num_hooks = static_cast<int>(outputHooks.size());
+			}
+		}
+		if (cached && !dejudderRenderedWarp)
+			dejudderRenderedWarp = std::make_unique<DejudderRendered::Warp>(log, d3d11->gpu);
 		const float strength = static_cast<float>(activeSettings.dejudderStrength);
 		const float black[] = { 0.0f, 0.0f, 0.0f };
 
@@ -11227,15 +11266,31 @@ struct LibplaceboVideoRenderer::Impl
 
 			const auto extraStart = SteadyClock::now();
 			const float shift = strength * static_cast<float>(decision.delta);
-			Dejudder::Planes warped;
-			if (!dejudder->Warp(a, shift, warped, true))
-			{
-				failure = "warp failed";
-				break;
-			}
 			pl_frame image = *f.image;
-			image.planes[0].texture = warped.luma;
-			image.planes[1].texture = warped.chroma;
+			const pl_render_params* extraParams = &params;
+			pl_tex warpedPicture = nullptr;
+			if (cached && dejudderRenderedWarp)
+			{
+				if (!dejudderRenderedWarp->Run(cached, dejudder->Field(), dejudder->FrameTrust(),
+					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture))
+				{
+					failure = "rendered warp failed";
+					break;
+				}
+				image = DejudderRendered::Frame(warpedPicture, dejudderCache.Repr(), dejudderCache.Color());
+				extraParams = &renderedParams;
+			}
+			else
+			{
+				Dejudder::Planes warped;
+				if (!dejudder->Warp(a, shift, warped, true))
+				{
+					failure = "warp failed";
+					break;
+				}
+				image.planes[0].texture = warped.luma;
+				image.planes[1].texture = warped.chroma;
+			}
 			pl_frame target = *f.target;
 			bool rendered = false;
 			bool submitted = false;
@@ -11259,7 +11314,7 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				target.planes[0].texture = fbo;
 				pl_frame_clear(d3d11->gpu, &target, black);
-				rendered = pl_render_image(renderer, &image, &target, &params);
+				rendered = pl_render_image(renderer, &image, &target, extraParams);
 				pl_gpu_flush(d3d11->gpu);
 				pl_tex_destroy(d3d11->gpu, &fbo);
 				backbuffer.Release();
@@ -11280,7 +11335,7 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				target.planes[0].texture = frame.fbo;
 				pl_frame_clear(d3d11->gpu, &target, black);
-				rendered = pl_render_image(renderer, &image, &target, &params);
+				rendered = pl_render_image(renderer, &image, &target, extraParams);
 				// An acquired frame must be submitted: on a failed extra show A
 				// itself again, never a black or partial picture.
 				if (!rendered)
@@ -15811,6 +15866,44 @@ struct LibplaceboVideoRenderer::Impl
                         extended.convertPrimaries ? " (from BT.709)" : " (none)");
                 else
                     DebugLog::Log("Extended range (BTB/WTW): %s", ExtendedRange::ToString(extended.reason));
+            }
+        }
+        // Stage 6d: when this frame may get de-judder extras, keep A's
+        // PRE_OUTPUT picture for them (the hook goes last among the
+        // PRE_OUTPUT hooks, after the LED compensation). With NLS the warp
+        // needs the NLS map; an unknown NLS shader keeps the source path.
+        dejudderCache.Disarm();
+        if (activeSettings.dejudderWarpRendered && dejudderReason == DejudderPolicy::Reason::Active &&
+            dejudder && !cadenceRepeat && sourceSequence != 0)
+        {
+            DejudderRendered::Geometry geometry;
+            geometry.sourceCrop = renderImage.crop;
+            geometry.targetCrop = target.crop;
+            bool mapped = true;
+            if (submittedNls)
+            {
+                const std::string file = nlsRule.filename;
+                const size_t slash = file.find_last_of("\\/");
+                const std::string name = slash == std::string::npos ? file : file.substr(slash + 1);
+                const bool plus = _stricmp(name.c_str(), "NLSPlus.glsl") == 0;
+                if (plus || _stricmp(name.c_str(), "NLS.glsl") == 0)
+                    geometry.nls = NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
+                        nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
+                geometry.nlsDomain = renderImage.crop;
+                mapped = geometry.nls.valid;
+            }
+            if (mapped)
+            {
+                dejudderGeometry = geometry;
+                dejudderCache.Arm(sourceSequence);
+                frameHooks.push_back(dejudderCache.Hook());
+            }
+            const int stage = mapped ? 1 : 0;
+            if (stage != dejudderWarpStageLogged)
+            {
+                dejudderWarpStageLogged = stage;
+                DebugLog::Log(mapped ? "De-judder extras: warping the rendered picture (6d)" :
+                    "De-judder extras: NLS shader map not known; warping the source instead");
             }
         }
         // libplacebo 7.360.1 drops the output encoding (limited range) after

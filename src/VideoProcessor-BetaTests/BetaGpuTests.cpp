@@ -10,6 +10,7 @@
 #include "../VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h"
 #include "../VideoProcessor-Lib/vprenderer/DejudderWarp.h"
 #include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
+#include "../VideoProcessor-Lib/vprenderer/RenderedWarp.h"
 #include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
 
 #include <algorithm>
@@ -528,14 +529,129 @@ void RunBetaFeatureGpuTests()
 					std::abs(toFloat(half[i + 1]) - dy) < 0.6f)
 					++good;
 			}
-		pl_tex_destroy(handle, &a.luma);
-		pl_tex_destroy(handle, &a.chroma);
-		pl_tex_destroy(handle, &b.luma);
-		pl_tex_destroy(handle, &b.chroma);
 		Check(good * 100 >= interior * 90, "de-judder: (12, 6) found in only " + std::to_string(good) + " of " +
 			std::to_string(interior) + " blocks on the Beta");
 		CheckCleanLog(gpu, "de-judder");
 		std::cout << "Beta features: de-judder (12, 6) in " << good << " of " << interior << " blocks\n";
+
+		// Stage 6d on 377, limited 8-bit target (no encoding repair here): the
+		// cache leaves A within a code, the rendered hold is A as shown
+		// exactly, and a rendered extra matches the source-path extra.
+		{
+			pl_tex_params tp{};
+			tp.w = width;
+			tp.h = height;
+			tp.format = pl_find_fmt(handle, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			tp.renderable = true;
+			tp.host_readable = true;
+			Check(tp.format != nullptr, "6d: no RGBA8 target");
+			pl_tex targetTex = pl_tex_create(handle, &tp);
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			auto target = [&]()
+			{
+				pl_frame t = Gpu::Frame(targetTex);
+				t.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				t.repr.bits = pl_bit_encoding{};
+				t.color.primaries = PL_COLOR_PRIM_BT_709;
+				t.color.transfer = PL_COLOR_TRC_BT_1886;
+				return t;
+			};
+			auto readback = [&]()
+			{
+				pl_gpu_finish(handle);
+				std::vector<uint32_t> px(static_cast<size_t>(width) * height);
+				pl_tex_transfer_params d{};
+				d.tex = targetTex;
+				d.ptr = px.data();
+				Check(pl_tex_download(handle, &d), "6d: download failed");
+				return px;
+			};
+			auto source = [&](const Dejudder::Planes& planes, const pl_hook* hook)
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = target();
+				pl_render_params p = params;
+				p.hooks = hook ? &hook : nullptr;
+				p.num_hooks = hook ? 1 : 0;
+				Check(pl_render_image(gpu.RendererHandle(), &image, &t, &p), "6d: source render failed");
+				return readback();
+			};
+			DejudderRendered::Cache cache;
+			DejudderRendered::Warp rendered(gpu.Log(), handle);
+			auto fromCache = [&](float shift)
+			{
+				DejudderRendered::Geometry g;
+				g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+				g.targetCrop = g.sourceCrop;
+				pl_tex out = nullptr;
+				Check(rendered.Run(cache.Texture(3), warp.Field(), warp.FrameTrust(), settings.minTrustedShare,
+					shift, g, out), "6d: rendered warp failed: " + rendered.Error());
+				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+				pl_frame t = target();
+				std::vector<const pl_hook*> kept;
+				const pl_render_params p = DejudderRendered::OutputOnly(params, {}, kept);
+				Check(pl_render_image(gpu.RendererHandle(), &image, &t, &p), "6d: extra render failed");
+				return readback();
+			};
+			auto difference = [](const std::vector<uint32_t>& x, const std::vector<uint32_t>& y, int& maxDiff, double& mean)
+			{
+				maxDiff = 0;
+				double sum = 0.0;
+				for (size_t i = 0; i < x.size(); ++i)
+					for (int ch = 0; ch < 3; ++ch)
+					{
+						const int d = std::abs(static_cast<int>((x[i] >> (8 * ch)) & 255u) -
+							static_cast<int>((y[i] >> (8 * ch)) & 255u));
+						maxDiff = std::max(maxDiff, d);
+						sum += d;
+					}
+				mean = sum / (x.size() * 3.0);
+			};
+			const auto own = source(a, nullptr);
+			cache.Arm(3);
+			const auto shown = source(a, cache.Hook());
+			Check(cache.Texture(3) != nullptr, "6d: the cache hook kept nothing");
+			int maxDiff = 0;
+			double mean = 0.0;
+			difference(own, shown, maxDiff, mean);
+			Check(maxDiff <= 1, "6d: the cache hook changed A by " + std::to_string(maxDiff));
+			const auto held = fromCache(0.0f);
+			int heldMax = 0;
+			difference(shown, held, heldMax, mean);
+			Check(heldMax == 0, "6d: the rendered hold is not A (max " + std::to_string(heldMax) + ")");
+			Dejudder::Planes warpedPlanes;
+			Check(warp.Warp(a, 0.5f, warpedPlanes), "6d: source warp failed");
+			const auto bySource = source(warpedPlanes, nullptr);
+			const auto byRendered = fromCache(0.5f);
+			int extraMax = 0;
+			double extraMean = 0.0;
+			difference(bySource, byRendered, extraMax, extraMean);
+			pl_tex_destroy(handle, &targetTex);
+			Check(extraMean <= 0.6, "6d: rendered extra differs from the source extra (mean " + std::to_string(extraMean) + ")");
+			CheckCleanLog(gpu, "6d");
+			std::cout << "Beta features: 6d cache max " << maxDiff << ", hold max " << heldMax << ", extra vs source mean "
+				<< extraMean << " (max " << extraMax << ", whole frame incl. edges)\n";
+		}
+		pl_tex_destroy(handle, &a.luma);
+		pl_tex_destroy(handle, &a.chroma);
+		pl_tex_destroy(handle, &b.luma);
+		pl_tex_destroy(handle, &b.chroma);
 	}
 }
 

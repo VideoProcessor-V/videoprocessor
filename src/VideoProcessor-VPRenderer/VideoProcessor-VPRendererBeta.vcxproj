@@ -105,6 +105,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />

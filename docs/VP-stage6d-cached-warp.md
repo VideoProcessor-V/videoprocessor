@@ -58,6 +58,50 @@ dither and the de-judder all on; if the per-source-frame total exceeds
 about 60% of the frame period (≈25 ms at 24p), build 6d. Below that,
 defer.
 
+## Built (2026-10-12)
+
+Built ahead of the measurement at the owner's request (2026-10-12: the de-judder
+path is settled first so Stage 8's use of the vectors is built against it).
+`vprenderer/RenderedWarp.{h,cpp}`; key `dejudder_warp_stage: rendered|source`
+(input group, default `rendered`; Config "De-judder" card, "Extra frames
+from").
+- **Survey:** libplacebo's order is scale (SCALED hooks) → colour conversion
+  and tone map → PRE_OUTPUT hooks → output encoding → OUTPUT hooks → target
+  overlays. The PRE_OUTPUT picture is therefore in the target colour space,
+  not yet encoded, with the LED compensation and the Stage 10 restore in it;
+  subtitles and the stats overlay (target overlays) are drawn per present on
+  top, unchanged.
+- **Cache:** a native texture-input PRE_OUTPUT hook, pushed last in A's list
+  (after the LED hooks), armed only when the frame may get extras (reason
+  Active, not a cadence repeat). It copies the picture into an rgba16f
+  texture and hands the texture back unchanged. Effect on A: libplacebo keeps
+  the picture in its 16-bit float intermediate (as the LED measurement hook
+  already makes it do): at most a code of rounding. On 7.360 the hook is a
+  texture-input PRE_OUTPUT hook, so the encoding repair joins A's chain (the
+  known PRE_OUTPUT log line); on 377 nothing changes.
+- **Warp:** shares the source warp's GLSL vector rule
+  (`Dejudder::FieldVectorGlsl`) and the occlusion mask's NLS map
+  (`OcclusionMask::NlsMapGlsl`), so trust, hold and cut decisions are the
+  same; the displacement is divided by the map's local slope per axis.
+  Catmull-Rom (4×4 taps), edge clamp, no value clamp. With an NLS shader whose
+  map is not known, the frame keeps the source path (logged).
+- **Extra render:** the warped picture as an RGB frame in the cached colour
+  space, 1:1 on the target's crop, with only `PL_HOOK_OUTPUT` hooks (the
+  sigma-delta; the repair only if still needed) and deband, colour adjustment
+  (saturation), peak detection, custom LUT, cone and distortion off. A's
+  fallback on a failed extra is unchanged.
+- **Tests:** `DejudderRenderedWarpMatchesTheSourceWarp` (7.360, 1:1 and 2×,
+  full-range target): cache ≤ 1 code; hold and cut = A as shown exactly;
+  both paths move the picture by (6, 3) / (12, 6); interior mean 0.10 / 0.15
+  codes, 0.28% / 0.63% of samples over 2 codes (the source path decides
+  chroma's hold at chroma positions; the kernels differ). Beta (377, limited
+  8-bit target): cache ≤ 1, hold exact, extra vs source mean 0.17.
+- **Not covered yet:** the NLS case on the GPU (the map is the occlusion
+  mask's, tested there), the sharpness comparison and the render-time
+  counters (WARP timings mean nothing; the 3050 Ti on this PC is the same
+  generation as the cinema 3090 and will give an upper bound), the cinema
+  check (slow pan over fine detail, `rendered` vs `source`).
+
 ## Tests
 
 - A warped-cached extra matches a source-warped extra within 1 code on a

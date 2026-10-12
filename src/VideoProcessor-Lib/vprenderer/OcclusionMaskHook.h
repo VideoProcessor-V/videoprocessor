@@ -24,6 +24,11 @@
 // per-axis map over the source crop.
 namespace OcclusionMask
 {
+	// GLSL: `float nls_coordinate(float c, float scale, float protect)`, the
+	// NLS / NLS+ per-axis map (needs the floats nls_geometry and nls_curve).
+	// Shared with Stage 6d's rendered warp.
+	const char* NlsMapGlsl();
+
 	class Hook
 	{
 	public:

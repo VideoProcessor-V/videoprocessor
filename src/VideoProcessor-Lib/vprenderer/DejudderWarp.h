@@ -37,6 +37,13 @@
 // renders the warped planes exactly as it would render A.
 namespace Dejudder
 {
+	// GLSL: `bool field_vector(vec2 source_pos, out vec2 v)`, the warp's
+	// vector rule (bilinear between trusted block centres; the position's own
+	// block decides hold; the whole frame holds below min_trusted_share).
+	// Needs the samplers `field` and `frame_trust` and the float
+	// `min_trusted_share`. Shared with Stage 6d's rendered warp.
+	const char* FieldVectorGlsl();
+
 	struct Planes
 	{
 		pl_tex luma = nullptr;     // Y, one component

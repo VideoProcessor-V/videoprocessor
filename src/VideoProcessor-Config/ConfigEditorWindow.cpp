@@ -6243,6 +6243,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Tells the temporal sigma-delta where new or uncovered picture content appears, so it "
             "does not carry its sub-code residual into it. Works with the de-judder off too "
             "(the motion matcher then runs for the mask alone). Needs the sigma-delta shader."));
+        auto* warpStage = addChoice(QStringLiteral("Extra frames from"),
+            QStringLiteral("dejudder_warp_stage"), { QStringLiteral("rendered"), QStringLiteral("source") });
+        warpStage->setItemText(warpStage->findData(QStringLiteral("rendered")), QStringLiteral("Rendered picture (fast)"));
+        warpStage->setItemText(warpStage->findData(QStringLiteral("source")), QStringLiteral("Source (full re-render)"));
+        warpStage->setToolTip(QStringLiteral(
+            "Rendered picture: each in-between frame warps the finished picture and runs only the final "
+            "dither stage (about a quarter of the GPU time at 4K). Source: each in-between frame re-renders "
+            "the whole chain from a warped source, the earlier path, kept for A/B comparison."));
         auto* dejudderTolerance = addText(QStringLiteral("Match tolerance (0.5 to 16)"),
             QStringLiteral("dejudder_match_tolerance"), QStringLiteral("codes"));
         dejudderTolerance->setValidator(new QDoubleValidator(0.5, 16.0, 2, dejudderTolerance));

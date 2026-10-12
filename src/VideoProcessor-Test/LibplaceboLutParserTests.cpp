@@ -14,6 +14,7 @@
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
+#include <vprenderer/RenderedWarp.h>
 #include "ExtendedRangeGpuProbe.h"
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
@@ -5338,6 +5339,217 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &targetTexture);
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
+		}
+
+		// Stage 6d: an extra made by warping A's cached PRE_OUTPUT picture
+		// against one made by re-rendering a warped source (same vectors): at
+		// 1:1 and 2x the picture moves by the same amount, the hold (shift 0)
+		// and a cut are A exactly, and the interior differs only by the
+		// kernels (bilinear on the source vs Catmull-Rom on the output) and,
+		// on under 1% of samples, by the source path deciding chroma's hold
+		// at chroma positions (measured: mean 0.10 / 0.15 codes, 0.28% /
+		// 0.63% over 2 codes). Full-range target: on 7.360 a limited target
+		// goes through VP's encoding repair for A but not for the extra (no
+		// PRE_OUTPUT hook there), which rounds a code differently; the Beta
+		// test checks the limited target on 377 (no repair).
+		TEST_METHOD(DejudderRenderedWarpMatchesTheSourceWarp)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			const DejudderFrame cut = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y, 99); }, chroma);
+			DejudderGpuPlanes planesA, planesB, planesCut;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			UploadDejudderFrame(gpu, cut, planesCut);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			DejudderRendered::Cache cache;
+			DejudderRendered::Warp rendered(fixture.Log(), gpu);
+			std::string report;
+
+			for (int scale : { 1, 2 })
+			{
+				const int ow = width * scale, oh = height * scale;
+				pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				pl_tex_params targetParams{};
+				targetParams.w = ow;
+				targetParams.h = oh;
+				targetParams.format = targetFormat;
+				targetParams.renderable = true;
+				targetParams.host_readable = true;
+				pl_tex targetTexture = pl_tex_create(gpu, &targetParams);
+				Assert::IsNotNull(targetTexture);
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				auto target = [&]()
+				{
+					pl_frame t = TargetLutGpuFixture::MakeRgbFrame(targetTexture);
+					t.repr.levels = PL_COLOR_LEVELS_FULL;
+					t.color.transfer = PL_COLOR_TRC_BT_1886;
+					return t;
+				};
+				auto download = [&]()
+				{
+					pl_gpu_finish(gpu);
+					std::vector<RgbaPixel> output(static_cast<size_t>(ow) * oh);
+					pl_tex_transfer_params d{};
+					d.tex = targetTexture;
+					d.ptr = output.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					return output;
+				};
+				// The renderer's source frame, with the given hooks.
+				auto renderSource = [&](const Dejudder::Planes& planes, std::vector<const pl_hook*> hooks)
+				{
+					pl_frame image{};
+					image.num_planes = 2;
+					image.planes[0].texture = planes.luma;
+					image.planes[0].components = 1;
+					image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+					image.planes[1].texture = planes.chroma;
+					image.planes[1].components = 2;
+					image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+					image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+					image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+					image.repr.levels = PL_COLOR_LEVELS_FULL;
+					image.color.primaries = PL_COLOR_PRIM_BT_709;
+					image.color.transfer = PL_COLOR_TRC_BT_1886;
+					pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+					pl_frame t = target();
+					// libplacebo 7.360.1's PRE_OUTPUT bug: the renderer adds the
+					// repair when a texture-input PRE_OUTPUT hook is present.
+					OutputEncodingRepair::Hook repair;
+					if (OutputEncodingRepair::Needed(hooks, nullptr, PL_LUT_UNKNOWN))
+					{
+						repair.SetTarget(t.repr);
+						hooks.insert(hooks.begin(), repair.Get());
+					}
+					pl_render_params p = params;
+					p.hooks = hooks.empty() ? nullptr : hooks.data();
+					p.num_hooks = static_cast<int>(hooks.size());
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+					return download();
+				};
+				auto renderCached = [&](float shift, uint64_t sequence)
+				{
+					pl_tex out = nullptr;
+					DejudderRendered::Geometry g;
+					g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+					g.targetCrop = { 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+					Assert::IsTrue(rendered.Run(cache.Texture(sequence), warp.Field(), warp.FrameTrust(),
+						warp.GetSettings().minTrustedShare, shift, g, out), ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
+					pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+					pl_frame t = target();
+					std::vector<const pl_hook*> kept;
+					const pl_render_params p = DejudderRendered::OutputOnly(params, {}, kept);
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+					return download();
+				};
+				auto best = [&](const std::vector<RgbaPixel>& moved, const std::vector<RgbaPixel>& own, int& bx, int& by)
+				{
+					double bestError = 1e30;
+					for (int oy = -2; oy <= 4 * scale; ++oy)
+						for (int ox = -2; ox <= 7 * scale; ++ox)
+						{
+							double error = 0.0;
+							for (int y = 24 * scale; y < oh - 24 * scale; ++y)
+								for (int x = 32 * scale; x < ow - 32 * scale; ++x)
+								{
+									const RgbaPixel& m = moved[static_cast<size_t>(y) * ow + x];
+									const RgbaPixel& o = own[static_cast<size_t>(y - oy) * ow + (x - ox)];
+									error += std::abs(m.r - o.r) + std::abs(m.g - o.g) + std::abs(m.b - o.b);
+								}
+							if (error < bestError) { bestError = error; bx = ox; by = oy; }
+						}
+				};
+
+				// A with the cache armed: the picture is unchanged by the hook.
+				const std::vector<RgbaPixel> own = renderSource(planesA.planes, {});
+				cache.Arm(7);
+				const std::vector<RgbaPixel> cachedOwn = renderSource(planesA.planes, { cache.Hook() });
+				Assert::IsNotNull(cache.Texture(7), L"The cache hook did not keep A's picture");
+				Assert::IsNull(cache.Texture(8));
+				// The hook makes libplacebo keep A's picture in its 16-bit float
+				// intermediate (as the LED measurement hook already does): at
+				// most a code of rounding, and the encoding unchanged.
+				{
+					int maxDiff = 0;
+					for (size_t i = 0; i < own.size(); ++i)
+						maxDiff = std::max({ maxDiff, std::abs(own[i].r - cachedOwn[i].r), std::abs(own[i].g - cachedOwn[i].g),
+							std::abs(own[i].b - cachedOwn[i].b) });
+					report += "scale " + std::to_string(scale) + ": cache hook max " + std::to_string(maxDiff) + "; ";
+					Assert::IsTrue(maxDiff <= 1, ExtendedRangeGpuProbe::ToWide("The cache hook changed A's picture: " + report).c_str());
+				}
+
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				// Hold: A exactly.
+				const std::vector<RgbaPixel> held = renderCached(0.0f, 7);
+				int heldMax = 0;
+				for (size_t i = 0; i < own.size(); ++i)
+					heldMax = std::max({ heldMax, std::abs(cachedOwn[i].r - held[i].r), std::abs(cachedOwn[i].g - held[i].g),
+						std::abs(cachedOwn[i].b - held[i].b) });
+				report += "hold max " + std::to_string(heldMax);
+				Assert::AreEqual(0, heldMax, ExtendedRangeGpuProbe::ToWide("A zero shift must show A exactly\n" + report).c_str());
+
+				// shift 0.5 by both paths.
+				Dejudder::Planes warpedPlanes;
+				Assert::IsTrue(warp.Warp(planesA.planes, 0.5f, warpedPlanes));
+				const std::vector<RgbaPixel> bySource = renderSource(warpedPlanes, {});
+				const std::vector<RgbaPixel> byRendered = renderCached(0.5f, 7);
+				int sx = 0, sy = 0, rx = 0, ry = 0;
+				best(bySource, own, sx, sy);
+				best(byRendered, own, rx, ry);
+				double sum = 0.0;
+				int maxDiff = 0, count = 0, over2 = 0;
+				for (int y = 24 * scale; y < oh - 24 * scale; ++y)
+					for (int x = 32 * scale; x < ow - 32 * scale; ++x)
+					{
+						const RgbaPixel& m = bySource[static_cast<size_t>(y) * ow + x];
+						const RgbaPixel& r = byRendered[static_cast<size_t>(y) * ow + x];
+						for (int d : { std::abs(m.r - r.r), std::abs(m.g - r.g), std::abs(m.b - r.b) })
+						{
+							sum += d;
+							maxDiff = std::max(maxDiff, d);
+							over2 += d > 2 ? 1 : 0;
+							++count;
+						}
+					}
+				char line[200];
+				std::snprintf(line, sizeof(line), "; moved source (%d,%d) rendered (%d,%d); interior diff mean %.3f max %d, %.2f%% over 2 codes\n",
+					sx, sy, rx, ry, sum / count, maxDiff, 100.0 * over2 / count);
+				report += line;
+				Assert::IsTrue(rx == dx * scale / 2 && ry == dy * scale / 2 && sx == rx && sy == ry,
+					ExtendedRangeGpuProbe::ToWide("The rendered extra moved differently\n" + report).c_str());
+				Assert::IsTrue(sum / count <= 0.5 && over2 <= count / 100,
+					ExtendedRangeGpuProbe::ToWide("The rendered extra differs from the source extra: " + report).c_str());
+
+				// A cut (nothing trusted): A exactly.
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesCut.planes));
+				const std::vector<RgbaPixel> atCut = renderCached(0.5f, 7);
+				for (size_t i = 0; i < own.size(); ++i)
+					Assert::IsTrue(cachedOwn[i].r == atCut[i].r && cachedOwn[i].g == atCut[i].g && cachedOwn[i].b == atCut[i].b,
+						L"A cut must show A exactly");
+				pl_tex_destroy(gpu, &targetTexture);
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			// 7.360.1 logs its PRE_OUTPUT encoding bug for the cache hook (a
+			// texture-input PRE_OUTPUT hook); VP's repair is in A's chain.
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+			Assert::IsTrue(cache.Copies() == 2 && cache.Failed() == 0);
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)

@@ -75,6 +75,11 @@ if (p.x < size.x && p.y < size.y) {
 		}
 	}
 
+	const char* NlsMapGlsl()
+	{
+		return MASK_HEADER;
+	}
+
 	Hook::Hook()
 	{
 		hook.stages = PL_HOOK_OUTPUT;

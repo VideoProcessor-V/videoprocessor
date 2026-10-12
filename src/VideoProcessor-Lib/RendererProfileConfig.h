@@ -628,6 +628,8 @@ namespace RendererProfileConfig
 			// 6c: the de-judder's occlusion mask for the sigma-delta (works
 			// with dejudder_strength 0: mask-only mode).
 			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
+			// 6d: the extras warp A's rendered picture, or a warped source.
+			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
 			// Stage 10: BTB/WTW kept through libplacebo's scaling (SDR).
 			if (key == "preserve_extended_range") return IsChoice(value, { "on", "off" });
 			if (key == "sdr_input_transfer") return IsChoice(value, { "auto", "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
