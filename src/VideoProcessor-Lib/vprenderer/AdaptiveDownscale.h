@@ -97,6 +97,28 @@ namespace AdaptiveDownscale
 		float meanLuma = 0.0f;  // the frame's mean luma (8-bit codes; the cut detector)
 	};
 
+	// Stage 8b (docs/VP-stage8b-upscale-blend.md): the same module upscaling a
+	// shorter source (1080p -> 1600p). Luma only, grain only (no edge term):
+	//     w = up_w_base x grain_scale;  out = cnn + (1 - w)(Y_faithful - Y_cnn)
+	// so a clean picture is the CNN branch exactly and chroma stays the CNN
+	// branch's (CfL). The faithful branch is libplacebo's ewa_lanczossharp
+	// (anti-ringing) from the source-resolution picture: PRE_KERNEL itself,
+	// or, when a luma doubler (FSRCNNX / ArtCNN) made it exactly 2x the source
+	// crop, its 2x2 box average (the doubler's own consistency, which
+	// SSimSuperRes relies on too). Other prescale ratios: not applied (the
+	// hooks hand the picture back). The grain term is measured on that same
+	// source-resolution picture; the 8-3 map is shared. With superresAlpha the
+	// blend writes the grain term into alpha for SSimSuperRes's final pass
+	// (its vp_grain_strength), which scales its correction by it and writes
+	// alpha back to 1.
+	struct Upscale
+	{
+		bool on = false;            // this frame is an upscale handled by the module
+		float wBase = 1.0f;
+		bool superresAlpha = false; // SSimSuperRes reads the grain term from alpha
+		float nativeHeight = 0.0f;  // the source crop's height (the doubler test)
+	};
+
 	// Whether the map was used on the last rendered frame (for the stats line).
 	enum class MapState { Off, NoField, Used };
 
@@ -114,6 +136,11 @@ namespace AdaptiveDownscale
 		// The SSIM shader's condition for this frame: the source crop is
 		// taller than the destination rectangle.
 		void SetSourceDownscales(bool value) { sourceDownscales = value; }
+		// Stage 8b: per frame, after SetFrame (off: the downscale module).
+		void SetUpscale(const Upscale& value) { upscale = value; }
+		// The last measured frame's source-resolution base: 1 (PRE_KERNEL),
+		// 2 (a doubler's output averaged), 0 not applied; tests and the log.
+		int LastUpscaleRatio() const { return upscaleRatio; }
 		// 8-3: after SetFrame, the field for this source frame (none: the
 		// scalar). Call every frame; the textures are the matcher's.
 		void SetGrainField(const GrainField& field) { grainField = field; }
@@ -149,6 +176,9 @@ namespace AdaptiveDownscale
 		bool sourceDownscales = true;
 		pl_gpu gpu = nullptr;
 		pl_tex faithful = nullptr;
+		pl_tex lowres = nullptr;          // 8b: a doubler's output at source resolution
+		Upscale upscale{};
+		int upscaleRatio = 0;
 		pl_tex edge = nullptr;
 		pl_tex partial = nullptr;
 		pl_tex state = nullptr;

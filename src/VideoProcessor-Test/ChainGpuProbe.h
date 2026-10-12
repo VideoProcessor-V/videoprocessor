@@ -47,6 +47,7 @@ namespace ChainGpuProbe
 		bool ok = false;
 		std::string failure;
 		std::string report;
+		double signedMean = 0.0;   // RunMatrix: chain minus reference, the last frame
 	};
 
 	inline bool SetParam(const pl_hook* hook, const char* name, double value)
@@ -1273,6 +1274,10 @@ namespace ChainGpuProbe
 		// Every refinement on (D1-D4 in the matcher, S1 in the dither); only
 		// meaningful with the matcher.
 		bool refinements = false;
+		// S2 A/B: the output pass without float32 (patch 0003's flag off);
+		// measureOnly reports the bias without the picture limit.
+		bool outputFloat32 = true;
+		bool measureOnly = false;
 		std::string Name() const
 		{
 			char text[240];
@@ -1411,6 +1416,18 @@ namespace ChainGpuProbe
 				AdaptiveDownscale::Module& module = chain ? adaptive : reference;
 				module.SetFrame(settings, static_cast<uint64_t>(f + 1), 1.0f / 24.0f);
 				module.SetSourceDownscales(sh > oh);
+				// Stage 8b on the "all refinements on" axis when upscaling: the
+				// blend before SSimSuperRes, which takes the grain term in alpha.
+				const bool blend8b = combo.refinements && oh > sh;
+				{
+					AdaptiveDownscale::Upscale up;
+					up.on = blend8b;
+					up.superresAlpha = blend8b && upCnn;
+					up.nativeHeight = static_cast<float>(sh);
+					module.SetUpscale(up);
+				}
+				if (upCnn)
+					SetParam(superRes->hook, "vp_grain_strength", blend8b ? 1.0 : 0.0);
 				module.ClearGrainField();
 				if (combo.matcher)
 				{
@@ -1429,6 +1446,7 @@ namespace ChainGpuProbe
 				c.linear = !combo.gammaLight;
 				c.on = combo.stage10;
 				c.fullRangeOutput = combo.fullRange;
+				c.outputFloat32 = combo.outputFloat32;
 				if (combo.rgbSource)
 					c.image = &rgbFrame;
 				std::vector<const pl_hook*> hooks = { module.Measure(), nls->hook };
@@ -1436,9 +1454,11 @@ namespace ChainGpuProbe
 					hooks.push_back(led->hook);
 				if (combo.cfl && !combo.rgbSource)
 					hooks.push_back(cflShader->hook);
-				if (upCnn) { hooks.push_back(pre->hook); hooks.push_back(superRes->hook); }
+				if (upCnn && blend8b) { hooks.push_back(pre->hook); hooks.push_back(module.Blend()); hooks.push_back(superRes->hook); }
+				else if (upCnn) { hooks.push_back(pre->hook); hooks.push_back(superRes->hook); }
 				if (down) hooks.push_back(ssim->hook);
-				hooks.push_back(module.Blend());
+				if (!(upCnn && blend8b))
+					hooks.push_back(module.Blend());
 				if (chain)
 				{
 					if (combo.matcher)
@@ -1502,7 +1522,8 @@ namespace ChainGpuProbe
 			// error feedback on moving content can exceed one step slightly (5 measured).
 			const int pictureMax = combo.eightBit ? 6 : 2;
 			const double pictureMean = combo.eightBit ? 2.5 : (withRepair ? 0.8 : 0.6);
-			if (maxDiff > pictureMax || (count && sum / count > pictureMean))
+			outcome.signedMean = count ? signedSum / count : 0.0;
+			if (!combo.measureOnly && (maxDiff > pictureMax || (count && sum / count > pictureMean)))
 				return fail("the chain changed the picture");
 			if (pl_renderer_get_errors(renderer).num_disabled_hooks != 0)
 				return fail("a hook was disabled");

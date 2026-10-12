@@ -60,6 +60,9 @@ namespace ExtendedRangeGpuProbe
 		float targetNits = 100.0f;
 		// A full-range (PC levels) output instead of limited.
 		bool fullRangeOutput = false;
+		// S2 A/B (planner 2026-10-12): false renders without patch 0003's
+		// output-pass float32, as an unpatched libplacebo would.
+		bool outputFloat32 = true;
 	};
 
 	struct Planes
@@ -218,7 +221,7 @@ namespace ExtendedRangeGpuProbe
 			params.error_diffusion = nullptr;
 #if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
 			// As the VP Renderer (S2): the output pass in rgba32f.
-			params.output_fbo_float32 = true;
+			params.output_fbo_float32 = c.outputFloat32;
 #endif
 			if (!c.params)
 			{

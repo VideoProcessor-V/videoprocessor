@@ -6114,7 +6114,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+				if (entry.find("(slow!)") == std::string::npos)
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
@@ -6175,7 +6175,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+				if (entry.find("(slow!)") == std::string::npos)
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
@@ -6719,6 +6719,250 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		// Stage 8b (docs/VP-stage8b-upscale-blend.md), with a nearest-neighbour
+		// luma doubler standing in for the CNN (its 2x2 box average is the
+		// source exactly, so the faithful branch must equal libplacebo's own
+		// ewa_lanczossharp render). The grain term is forced by the ramp:
+		// grain_lo 1000 (clean, g = 1) or grain_hi 0.001 (grain, g = floor 0.4).
+		TEST_METHOD(AdaptiveUpscaleBlendsCnnAndFaithfulByGrain)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 128, height = 64;
+			// Neutral grey: the blend is luma-only, so the branches are compared
+			// exactly where R = G = B.
+			auto chroma = [](int, int, int) { return static_cast<uint16_t>(32768); };
+			const DejudderFrame frame = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			DejudderGpuPlanes planes;
+			UploadDejudderFrame(gpu, frame, planes);
+			static const char doubler[] =
+				"//!HOOK LUMA\n"
+				"//!BIND HOOKED\n"
+				"//!WIDTH HOOKED.w 2 *\n"
+				"//!HEIGHT HOOKED.h 2 *\n"
+				"//!WHEN OUTPUT.h HOOKED.h / 1.300 >\n"
+				"//!DESC test nearest luma doubler\n"
+				"vec4 hook() { return HOOKED_tex((floor(HOOKED_pos * HOOKED_size) + 0.5) / HOOKED_size); }\n";
+			const pl_hook* cnn = pl_mpv_user_shader_parse(gpu, doubler, sizeof(doubler) - 1);
+			Assert::IsNotNull(cnn);
+			pl_fmt rgba16 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(rgba16);
+			auto render = [&](int ow, int oh, std::vector<const pl_hook*> hooks, const pl_filter_config* upscaler)
+			{
+				pl_tex_params tp{};
+				tp.w = ow;
+				tp.h = oh;
+				tp.format = rgba16;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target);
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planes.planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planes.planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = TargetLutGpuFixture::MakeRgbFrame(target);
+				t.repr.levels = PL_COLOR_LEVELS_FULL;
+				t.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				// upscale_light gamma for the exact comparisons: with linear light
+				// libplacebo scales a doubler's 2x output DOWN to 1.5x in linear
+				// light but upscales the plain source in gamma light (no linear
+				// upscaling without sigmoid), so the references would differ in
+				// domain; in gamma light every path is gamma.
+				params.sigmoid_params = nullptr;
+				params.disable_linear_scaling = true;
+				params.upscaler = upscaler;
+				params.antiringing_strength = 0.5f;   // as the module's faithful branch
+				params.hooks = hooks.empty() ? nullptr : hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &params));
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> px(static_cast<size_t>(ow) * oh * 4);
+				pl_tex_transfer_params d{};
+				d.tex = target;
+				d.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+			AdaptiveDownscale::Settings settings;
+			settings.grainMap = false;
+			auto withModule = [&](AdaptiveDownscale::Module& module, float grainLo, float grainHi, float wBase,
+				float nativeH, int ow, int oh, std::vector<const pl_hook*> hooks, bool superresAlpha = false,
+				size_t blendAt = static_cast<size_t>(-1))
+			{
+				AdaptiveDownscale::Settings s2 = settings;
+				s2.grainLo = grainLo;
+				s2.grainHi = grainHi;
+				s2.grainSmoothMs = 0.0f;
+				// A new source frame per call: the grain state advances once per frame.
+				static uint64_t sequence = 0;
+				module.SetFrame(s2, ++sequence, 1.0f / 24.0f);
+				AdaptiveDownscale::Upscale up;
+				up.on = true;   // the module's own gate must refuse native and downscaled frames
+				up.wBase = wBase;
+				up.superresAlpha = superresAlpha;
+				up.nativeHeight = nativeH;
+				module.SetUpscale(up);
+				hooks.insert(hooks.begin(), module.Measure());
+				if (blendAt < hooks.size())
+					hooks.insert(hooks.begin() + static_cast<std::ptrdiff_t>(blendAt) + 1, module.Blend());
+				else
+					hooks.push_back(module.Blend());
+				return render(ow, oh, hooks, &pl_filter_ewa_lanczossharp);
+			};
+			auto maxDiff = [](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b)
+			{
+				int m = 0;
+				for (size_t i = 0; i < a.size(); ++i)
+					if (i % 4 != 3)
+						m = std::max(m, std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i])));
+				return m;
+			};
+			const int ow = width * 3 / 2, oh = height * 3 / 2;   // 1.5x: the doubler runs (2x > 1.3x)
+			const std::vector<uint16_t> cnnBranch = render(ow, oh, { cnn }, &pl_filter_ewa_lanczossharp);
+			const std::vector<uint16_t> faithfulRef = render(ow, oh, {}, &pl_filter_ewa_lanczossharp);
+			Assert::IsTrue(maxDiff(cnnBranch, faithfulRef) > 1000, L"the stand-in CNN should differ from the faithful upscale");
+			{
+				// The stand-in at exactly 2x: the nearest-neighbour source (diagnostic).
+				const std::vector<uint16_t> twice = render(width * 2, height * 2, { cnn }, &pl_filter_ewa_lanczossharp);
+				int worst = 0, wx = 0, wy = 0;
+				for (int y = 4; y < height * 2 - 4; ++y)
+					for (int x = 4; x < width * 2 - 4; ++x)
+					{
+						const int d = std::abs(static_cast<int>(twice[(static_cast<size_t>(y) * width * 2 + x) * 4]) -
+							static_cast<int>(frame.luma[static_cast<size_t>(y / 2) * width + x / 2]));
+						if (d > worst) { worst = d; wx = x; wy = y; }
+					}
+				Assert::IsTrue(worst <= 64, ExtendedRangeGpuProbe::ToWide("doubler at 2x vs nearest source: max " + std::to_string(worst) + " at " +
+					std::to_string(wx) + "," + std::to_string(wy) + ": got " +
+					std::to_string(twice[(static_cast<size_t>(wy) * width * 2 + wx) * 4]) + ", source " +
+					std::to_string(frame.luma[static_cast<size_t>(wy / 2) * width + wx / 2]) + ", left " +
+					std::to_string(frame.luma[static_cast<size_t>(wy / 2) * width + wx / 2 - 1]) + ", right " +
+					std::to_string(frame.luma[static_cast<size_t>(wy / 2) * width + wx / 2 + 1])).c_str());
+			}
+
+			// Clean (g = 1, w = 1): exactly the CNN branch, edges included.
+			AdaptiveDownscale::Module module;
+			const std::vector<uint16_t> clean = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh, { cnn });
+			Assert::AreEqual(2, module.LastUpscaleRatio(), L"the doubler's output should be averaged to the source");
+			const int cleanDiff = maxDiff(clean, cnnBranch);
+			// w_base 0: the luma of the faithful branch (chroma: the same scaler in both).
+			const std::vector<uint16_t> faithful = withModule(module, 1000.0f, 2000.0f, 0.0f, static_cast<float>(height), ow, oh, { cnn });
+			const int faithfulDiff = maxDiff(faithful, faithfulRef);
+			std::wstring where;
+			{
+				double sum = 0.0;
+				int mx = 0, at = 0;
+				for (size_t i = 0; i < faithful.size(); i += 4)
+				{
+					const int d = std::abs(static_cast<int>(faithful[i]) - static_cast<int>(faithfulRef[i]));
+					sum += d;
+					if (d > mx) { mx = d; at = static_cast<int>(i / 4); }
+				}
+				where = L" (mean " + std::to_wstring(sum / (faithful.size() / 4)) + L", max at " + std::to_wstring(at % ow) +
+					L"," + std::to_wstring(at / ow) + L": " + std::to_wstring(faithful[static_cast<size_t>(at) * 4]) + L" vs " +
+					std::to_wstring(faithfulRef[static_cast<size_t>(at) * 4]) + L", CNN " + std::to_wstring(cnnBranch[static_cast<size_t>(at) * 4]) + L")";
+			}
+			// Grain (g = 0.4): luma = CNN + 0.6 (faithful - CNN).
+			const std::vector<uint16_t> grainy = withModule(module, 0.0f, 0.001f, 1.0f, static_cast<float>(height), ow, oh, { cnn });
+			int grainDiff = 0;
+			for (size_t i = 0; i < grainy.size(); ++i)
+			{
+				if (i % 4 == 3)
+					continue;
+				const double expected = cnnBranch[i] + 0.6 * (static_cast<double>(faithful[i]) - cnnBranch[i]);
+				grainDiff = std::max(grainDiff, static_cast<int>(std::lround(std::fabs(grainy[i] - expected))));
+			}
+			// Without the doubler the base is the source picture itself.
+			const std::vector<uint16_t> plain = withModule(module, 1000.0f, 2000.0f, 0.0f, static_cast<float>(height), ow, oh, {});
+			const int plainRatio = module.LastUpscaleRatio();
+			const int plainDiff = maxDiff(plain, faithfulRef);
+			// Gate: native size and a downscale are left alone.
+			const std::vector<uint16_t> native = withModule(module, 0.0f, 0.001f, 0.0f, static_cast<float>(height), width, height, { cnn });
+			const std::vector<uint16_t> nativeRef = render(width, height, { cnn }, &pl_filter_ewa_lanczossharp);
+			const std::vector<uint16_t> down = withModule(module, 0.0f, 0.001f, 0.0f, static_cast<float>(height), width / 2, height / 2, { cnn });
+			const std::vector<uint16_t> downRef = render(width / 2, height / 2, { cnn }, &pl_filter_ewa_lanczossharp);
+			const std::wstring message = L"clean vs CNN " + std::to_wstring(cleanDiff) + L", faithful vs ewa " +
+				std::to_wstring(faithfulDiff) + where + L", grain vs CNN + 0.6 (faithful - CNN) " + std::to_wstring(grainDiff) +
+				L", no doubler: ratio " + std::to_wstring(plainRatio) + L" vs ewa " + std::to_wstring(plainDiff) +
+				L" (16-bit codes); log: " + std::wstring(log.begin(), log.end());
+			// The blend's output and the faithful branch are 16-bit float
+			// textures: about 1/2048 of the value (32 of 65535 near white).
+			Assert::IsTrue(cleanDiff <= 32, message.c_str());
+			Assert::IsTrue(faithfulDiff <= 96 && plainDiff <= 96 && plainRatio == 1, message.c_str());
+			Assert::IsTrue(grainDiff <= 96, message.c_str());
+			Assert::AreEqual(0, maxDiff(native, nativeRef), (L"native size must be untouched; " + message).c_str());
+			Assert::AreEqual(0, maxDiff(down, downRef), (L"a downscale must be untouched; " + message).c_str());
+
+			// SuperRes strength follows the grain term (its vp_grain_strength,
+			// alpha from the blend): with g = 0.4 its correction is scaled by 0.4.
+			std::string superSource = LoadBundledShader("SSimSuperRes.glsl");
+			Assert::IsFalse(superSource.empty());
+			const pl_hook* superres = pl_mpv_user_shader_parse(gpu, superSource.data(), superSource.size());
+			Assert::IsNotNull(superres);
+			// On the plain upscale (no doubler), where SuperRes has work to do;
+			// the blend sits before it (both POST_KERNEL).
+			const std::vector<uint16_t> blendOnly = withModule(module, 0.0f, 0.001f, 1.0f, static_cast<float>(height), ow, oh, {});
+			const int superAlone = maxDiff(render(ow, oh, { superres }, &pl_filter_ewa_lanczossharp), faithfulRef);
+			Assert::IsTrue(CustomHookChain::SetHookParameter(superres, "vp_grain_strength", 0.0));
+			const std::vector<uint16_t> fullSuper = withModule(module, 0.0f, 0.001f, 1.0f, static_cast<float>(height), ow, oh,
+				{ superres }, false, 0);
+			Assert::IsTrue(CustomHookChain::SetHookParameter(superres, "vp_grain_strength", 1.0));
+			const std::vector<uint16_t> scaledSuper = withModule(module, 0.0f, 0.001f, 1.0f, static_cast<float>(height), ow, oh,
+				{ superres }, true, 0);
+			double num = 0.0, den = 0.0;
+			for (size_t i = 0; i < blendOnly.size(); ++i)
+			{
+				if (i % 4 == 3)
+					continue;
+				const double full = static_cast<double>(fullSuper[i]) - blendOnly[i];
+				const double scaled = static_cast<double>(scaledSuper[i]) - blendOnly[i];
+				num += full * scaled;
+				den += full * full;
+			}
+			const double ratio = den > 0.0 ? num / den : 0.0;
+			// Clean (g = 1): the scaled SuperRes is the full one.
+			const std::vector<uint16_t> cleanScaled = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh,
+				{ superres }, true, 0);
+			Assert::IsTrue(CustomHookChain::SetHookParameter(superres, "vp_grain_strength", 0.0));
+			const std::vector<uint16_t> cleanFull = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh,
+				{ superres }, false, 0);
+			// SuperRes after a doubler: its correction on these synthetic pictures
+			// is at half-float rounding level (31 of 65535 even after a sharpening
+			// doubler, without the blend), so it cannot be measured here; the order
+			// and the alpha handoff are the ones checked above on the plain upscale,
+			// and the chain matrix runs FSRCNNX + SSimSuperRes with the blend.
+			pl_mpv_user_shader_destroy(&superres);
+			pl_mpv_user_shader_destroy(&cnn);
+			const std::wstring superMessage = L"SuperRes correction with g = 0.4: " + std::to_wstring(ratio) +
+				L" of the full one (correction energy " + std::to_wstring(den) + L"; SuperRes alone changes the plain upscale by " +
+				std::to_wstring(superAlone) + L"); clean scaled vs full " +
+				std::to_wstring(maxDiff(cleanScaled, cleanFull)) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(den > 0.0 && std::fabs(ratio - 0.4) < 0.05, superMessage.c_str());
+			Assert::IsTrue(maxDiff(cleanScaled, cleanFull) <= 1, superMessage.c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(AdaptiveDownscaleGrainMapFromTheVectors)
 		{
 			TargetLutGpuFixture fixture;
@@ -6903,7 +7147,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+				if (entry.find("(slow!)") == std::string::npos)
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
@@ -6926,7 +7170,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+				if (entry.find("(slow!)") == std::string::npos &&
 					entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
@@ -7111,7 +7355,7 @@ namespace VideoProcessorTest
 				std::string remaining;
 				std::istringstream lines(log);
 				for (std::string entry; std::getline(lines, entry);)
-					if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+					if (entry.find("(slow!)") == std::string::npos &&
 						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 						remaining += entry + "\n";
 				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide(combo.Name() + ": libplacebo logged: " + remaining).c_str());
@@ -7136,7 +7380,7 @@ namespace VideoProcessorTest
 				std::string remaining;
 				std::istringstream lines(log);
 				for (std::string entry; std::getline(lines, entry);)
-					if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+					if (entry.find("(slow!)") == std::string::npos &&
 						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 						remaining += entry + "\n";
 				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
@@ -7162,7 +7406,7 @@ namespace VideoProcessorTest
 				std::string remaining;
 				std::istringstream lines(log);
 				for (std::string entry; std::getline(lines, entry);)
-					if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+					if (entry.find("(slow!)") == std::string::npos &&
 						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 						remaining += entry + "\n";
 				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());

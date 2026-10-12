@@ -641,9 +641,13 @@ namespace RendererProfileConfig
 			if (key == "dejudder_motion_scale_hi") return IsNumberInRange(value, 0.0, 32.0);
 			if (key == "dejudder_trust_scale") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "dither_grain_tolerance_scale") return IsNumberInRange(value, 1.0, 8.0);
+			// S2: every FBO in 32-bit float (auto: on, off with Low_Latency).
+			if (key == "fbo_float32") return IsChoice(value, { "auto", "on", "off" });
 			// Stage 8-2: the adaptive downscale blend.
-			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map")
+			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map" ||
+				key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale")
 				return IsChoice(value, { "on", "off" });
+			if (key == "adaptive_upscale_w_base") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")
 				return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "adaptive_edge_lo" || key == "adaptive_edge_hi") return IsNumberInRange(value, 0.0, 255.0);
@@ -673,6 +677,7 @@ namespace RendererProfileConfig
 			if (key == "sigmoid") return IsChoice(value, { "auto", "on", "off" });
 			// Stage 8-1: the light domain of downscaling frames.
 			if (key == "downscale_light") return IsChoice(value, { "linear", "gamma" });
+			if (key == "upscale_light") return IsChoice(value, { "linear", "gamma" });
 			if (key == "dithering") return IsChoice(value, { "auto", "on", "off",
 				"blue_noise", "ordered_lut", "ordered_fixed", "white_noise",
 				"error_diffusion_simple", "error_diffusion_false_fs",

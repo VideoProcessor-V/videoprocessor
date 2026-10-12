@@ -6398,7 +6398,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_occlusion_fill"), { QStringLiteral("on"), QStringLiteral("off") });
         occlusionFill->setToolTip(QStringLiteral(
             "Experiment, default off: picture newly uncovered between two film frames is taken from the "
-            "next frame instead of held. Applies with Extra frames from: Source only so far."));
+            "next frame instead of held. Occlusion fill: source warp path only (Extra frames from: "
+            "Source); with Rendered picture it is ignored (logged once)."));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
@@ -6452,6 +6453,29 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveMapSmooth->setPlaceholderText(QStringLiteral("500"));
         adaptiveMapSmooth->setToolTip(QStringLiteral(
             "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
+
+        // Stage 8b: the upscale blend (1080p and below to the screen).
+        form = addCollapsibleSection(QStringLiteral("adaptiveUpscale"), QStringLiteral("Adaptive upscale (1080p)"),
+            QString(), false);
+        auto* upscaleOn = addChoice(QStringLiteral("CNN / faithful blend"),
+            QStringLiteral("adaptive_upscale"), { QStringLiteral("on"), QStringLiteral("off") });
+        upscaleOn->setToolTip(QStringLiteral(
+            "For sources shorter than the screen: where the grain measure sees film grain, the picture leans from "
+            "the CNN upscaler (FSRCNNX / ArtCNN, which sharpens grain into crisper noise) toward a faithful "
+            "ewa_lanczossharp upscale. Clean pictures and edges stay the CNN's. Uses the grain settings above."));
+        auto* upscaleWBase = addText(QStringLiteral("CNN weight on clean pictures (0 to 1)"),
+            QStringLiteral("adaptive_upscale_w_base"));
+        upscaleWBase->setValidator(new QDoubleValidator(0.0, 1.0, 3, upscaleWBase));
+        upscaleWBase->setPlaceholderText(QStringLiteral("1"));
+        auto* upscaleSuperres = addChoice(QStringLiteral("SuperRes strength follows grain"),
+            QStringLiteral("adaptive_upscale_superres_scale"), { QStringLiteral("on"), QStringLiteral("off") });
+        upscaleSuperres->setToolTip(QStringLiteral(
+            "With SSimSuperRes enabled, its refinement is scaled down where there is grain, so it does not "
+            "refine noise."));
+        auto* upscaleLight = addChoice(QStringLiteral("Upscale light"),
+            QStringLiteral("upscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
+        upscaleLight->setToolTip(QStringLiteral(
+            "The light domain both branches upscale in while the blend is on: linear (default) or gamma, for comparison."));
 
         auto wrapToneControl = [&](const ToneMappingTuning::Spec& spec, QLineEdit* edit) {
             auto row = form->takeRow(edit);
@@ -6618,7 +6642,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         displayBitDepth->setToolTip(QStringLiteral(
             "Dithering precision, clamped to the active surface depth. This does not configure GPU/HDMI bit depth or detect panel precision."));
         addRendererAutoStatus(QStringLiteral("display_bit_depth"), displayBitDepth);
-
+        auto* fboFloat32 = addChoice(QStringLiteral("32-bit float intermediates"),
+            QStringLiteral("fbo_float32"), { QStringLiteral("auto"), QStringLiteral("on"), QStringLiteral("off") });
+        fboFloat32->setToolTip(QStringLiteral(
+            "Every intermediate picture in 32-bit float: exact highlights (half-float rounds values above white "
+            "by up to 0.84 of a 10-bit step) at more GPU memory bandwidth (+2.8 ms per 4K frame on a laptop "
+            "RTX 3050 Ti; check the render time in the stats overlay). Auto: on, off with the Low_Latency "
+            "queue. The final output stage is 32-bit float always."));
 
     }
 

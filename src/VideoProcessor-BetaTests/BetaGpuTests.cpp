@@ -307,14 +307,14 @@ namespace
 		return text;
 	}
 
-	// Shader-compiler timing notes ("translating HLSL to DXBC (slow!)", a
+	// Shader-compiler timing notes ("Spent N ms translating HLSL to DXBC" or "GLSL to SPIR-V (slow!)", a
 	// loaded machine) are not failures; anything else is.
 	void CheckCleanLog(const Gpu& gpu, const char* test)
 	{
 		std::string remaining;
 		std::istringstream lines(gpu.messages);
 		for (std::string entry; std::getline(lines, entry);)
-			if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+			if (entry.find("(slow!)") == std::string::npos)
 				remaining += entry + "\n";
 		Check(remaining.empty(), std::string(test) + ": libplacebo logged: " + remaining);
 	}
@@ -714,7 +714,7 @@ void RunBetaChainGpuTest()
 	std::string remaining;
 	std::istringstream lines(gpu.messages);
 	for (std::string entry; std::getline(lines, entry);)
-		if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+		if (entry.find("(slow!)") == std::string::npos)
 			remaining += entry + "\n";
 	Check(remaining.empty(), "whole chain on 377: libplacebo logged: " + remaining);
 
@@ -731,7 +731,7 @@ void RunBetaChainGpuTest()
 		remaining.clear();
 		std::istringstream movingLines(moving.messages);
 		for (std::string entry; std::getline(movingLines, entry);)
-			if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+			if (entry.find("(slow!)") == std::string::npos)
 				remaining += entry + "\n";
 		Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
 	}
@@ -1068,4 +1068,35 @@ void RunBetaFboTiming()
 	pl_tex_destroy(g, &source);
 	pl_tex_destroy(g, &target);
 #endif
+}
+
+// S2 A/B regression (planner 2026-10-12): the chain bias is the float16
+// round trip at the PRE_OUTPUT texture hooks. With patch 0003's output-pass
+// float32 forced off it returns (0.25-0.6 code low); with it on it is gone.
+// A libplacebo rebuild that loses the patch fails here.
+void RunBetaChainBiasRegression()
+{
+	ChainGpuProbe::Combo combo;
+	combo.scale = 0.5;
+	combo.gammaLight = true;
+	combo.stage10 = false;
+	combo.fullRange = false;
+	combo.matcher = true;
+	combo.measureOnly = true;
+	double means[2] = {};
+	for (int on = 0; on < 2; ++on)
+	{
+		Gpu g;
+		combo.outputFloat32 = on == 1;
+		const ChainGpuProbe::Outcome outcome = ChainGpuProbe::RunMatrix(g.GpuHandle(), g.RendererHandle(),
+			g.LogHandle(), [](const char* file) { return LoadRepoShader(file); }, false, combo);
+		Check(outcome.ok, "bias A/B: " + outcome.failure);
+		CheckCleanLog(g, "bias A/B");
+		means[on] = outcome.signedMean;
+	}
+	std::cout << "Beta S2 A/B: chain minus reference " << means[0] << " code without the output-pass float32, "
+		<< means[1] << " with it\n";
+	Check(means[0] <= -0.2 && means[0] >= -0.7, "bias A/B: without the patch the bias should return (0.25-0.6 low): " +
+		std::to_string(means[0]));
+	Check(std::fabs(means[1]) < 0.1, "bias A/B: with the patch the bias should be gone: " + std::to_string(means[1]));
 }

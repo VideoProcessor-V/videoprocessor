@@ -13,6 +13,8 @@ a new decision.
    answers (option A faithful branch, native profile keys, scalar grain
    first, then the vector grain map with the matcher run for all
    film-rate sources).
+2b. **Stage 8b** adaptive upscale blend (docs/VP-stage8b-upscale-blend.md;
+   added by the owner 2026-10-12).
 3. **Refinements D1–D4 + S1** (one step): global-motion prior,
    motion-scaled and trust-adaptive strength, vector smoothing,
    grain-aware dither carry. **D5** behind its switch, off.

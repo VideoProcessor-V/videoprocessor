@@ -12,6 +12,19 @@
 // 
 // You should have received a copy of the GNU Lesser General Public
 // License along with this library.
+//
+// VideoProcessor change (Stage 8b, docs/VP-stage8b-upscale-blend.md): the
+// parameter vp_grain_strength. At 1 the final pass scales its correction by
+// the grain term VP's adaptive upscale blend writes into alpha (1 = clean,
+// lower = grain) and writes alpha back to 1; at 0 (the default) the shader
+// is unchanged.
+
+//!PARAM vp_grain_strength
+//!DESC Set by VideoProcessor (Stage 8b): 1 = scale the correction by the grain term in alpha, 0 = unchanged
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
 
 //!HOOK POSTKERNEL
 //!BIND HOOKED
@@ -197,7 +210,12 @@ vec4 hook() {
     }
     diff /= weightSum;
 
-    c0.rgb = ((c0.rgb) + diff);
+    if (vp_grain_strength > 0.5) {
+        c0.rgb = c0.rgb + clamp(c0.a, 0.0, 1.0) * diff;
+        c0.a = 1.0;
+    } else {
+        c0.rgb = ((c0.rgb) + diff);
+    }
 
     return c0;
 }

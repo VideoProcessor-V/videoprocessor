@@ -191,6 +191,18 @@ would:
 5. Config/GUI/docs, BUILD-STATUS.
 6. One gate, then one audit, then the deploy folder.
 
+## After the planner's answers (docs/VP-refinements-built-answers.md)
+
+- `fbo_float32` is a rendering-profile key: auto (on; off with the
+  Low_Latency queue, which is a queue profile, so "auto" carries it), on,
+  off. The output pass stays rgba32f unconditionally.
+- The chain-bias A/B is a Beta regression (`RunBetaChainBiasRegression`):
+  flag off, 0.25-0.6 code low expected; flag on, about 0.
+- S1 scales both gates (approved). D5 stays source-warp only: ignored and
+  logged once with the rendered warp; the Config card says so.
+- Stage 8b added to the cut (docs/VP-stage8b-upscale-blend.md); built in the
+  same module as Stage 8.
+
 ## Open gate finding (from the 2026-10-12 gate, before this work)
 - Chain vs reference (same hooks without LED/mask/sigma-delta) is
   systematically LOW by 0.25-0.6 code on every Stage-10-off combination:

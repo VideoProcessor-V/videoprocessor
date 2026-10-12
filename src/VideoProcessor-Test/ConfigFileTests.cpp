@@ -690,6 +690,12 @@ namespace VideoProcessorTest
                 Case{ "dejudder_trust_scale", "0.6", true }, Case{ "dejudder_trust_scale", "1.1", false },
                 Case{ "dither_grain_tolerance_scale", "1", true }, Case{ "dither_grain_tolerance_scale", "3", true },
                 Case{ "dither_grain_tolerance_scale", "0.5", false }, Case{ "dither_grain_tolerance_scale", "9", false },
+                Case{ "fbo_float32", "auto", true }, Case{ "fbo_float32", "off", true },
+                Case{ "fbo_float32", "yes", false },
+                Case{ "adaptive_upscale", "on", true }, Case{ "adaptive_upscale", "auto", false },
+                Case{ "adaptive_upscale_w_base", "0.8", true }, Case{ "adaptive_upscale_w_base", "1.5", false },
+                Case{ "adaptive_upscale_superres_scale", "off", true }, Case{ "upscale_light", "gamma", true },
+                Case{ "upscale_light", "sigmoid", false },
                 Case{ "preserve_extended_range", "on", true }, Case{ "preserve_extended_range", "off", true },
                 Case{ "preserve_extended_range", "auto", false } })
             {

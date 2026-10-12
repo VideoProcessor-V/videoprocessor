@@ -62,6 +62,22 @@ if (li == 0u)
     imageStore(partial_out, ivec2(gl_WorkGroupID.xy), ad_sum[0]);
 )GLSL";
 
+		// 8b: a luma doubler's output (exactly 2x the source crop) back to the
+		// source resolution, 2x2 box in the picture's own light domain.
+		const char* const HALVE_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y) {
+    ivec2 sz = textureSize(src, 0);
+    ivec2 p = ivec2(origin) + q * 2;
+    vec4 s = vec4(0.0);
+    for (int y = 0; y < 2; y++)
+        for (int x = 0; x < 2; x++)
+            s += texelFetch(src, clamp(p + ivec2(x, y), ivec2(0), sz - ivec2(1)), 0);
+    imageStore(dst, q, s * 0.25);
+}
+)GLSL";
+
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
 		// cut snap, into the persistent state (r grain_scale, g mean(1 - edge),
 		// b mean luma, a initialised).
@@ -164,6 +180,18 @@ if (q.x < size.x && q.y < size.y) {
         g = acc;
     }
 #endif
+#ifdef AD_UPSCALE
+    // 8b: grain only; the CNN branch is the base (its chroma stays), luma
+    // pulled toward the faithful branch by 1 - w.
+    float w = clamp(w_base * g, 0.0, 1.0);
+    const vec3 ku = vec3(0.2126, 0.7152, 0.0722);
+    vec4 o = ss;
+    o.rgb = ss.rgb + vec3((1.0 - w) * (dot(fa.rgb, ku) - dot(ss.rgb, ku)));
+#ifdef AD_SUPERRES_ALPHA
+    o.a = g;   // for SSimSuperRes's final pass (vp_grain_strength), which writes 1
+#endif
+    imageStore(dst, q, o);
+#else
     float w = clamp(w_base * (1.0 - e) * g, 0.0, 1.0);
     vec4 o;
     if (chroma_ssim > 0.5) {
@@ -174,6 +202,7 @@ if (q.x < size.x && q.y < size.y) {
         o.a = fa.a;   // passed through (Stage 10b does not use alpha)
     }
     imageStore(dst, q, o);
+#endif
 }
 )GLSL";
 
@@ -286,7 +315,7 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		if (gpu)
 		{
-			for (pl_tex* tex : { &faithful, &edge, &partial, &state, &map[0], &map[1] })
+			for (pl_tex* tex : { &faithful, &lowres, &edge, &partial, &state, &map[0], &map[1] })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
@@ -294,7 +323,8 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (polarLut)
 			pl_shader_obj_destroy(&polarLut);
-		faithful = edge = partial = state = map[0] = map[1] = nullptr;
+		faithful = lowres = edge = partial = state = map[0] = map[1] = nullptr;
+		upscaleRatio = 0;
 		mapIndex = 0;
 		mapReady = false;
 		mapSequence = 0;
@@ -334,7 +364,7 @@ if (q.x < size.x && q.y < size.y) {
 		{
 			stats.valid = true;
 			stats.grainScale = values[0];
-			stats.meanW = settings.wBase * values[1] * values[0];
+			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
 			stats.meanLuma = values[2];
 		}
 		readbackPending = false;
@@ -344,19 +374,59 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		const pl_hook_res unchanged = Unchanged(p);
 		active = false;
+		upscaleRatio = 0;
 		if (!p->tex)
 			return unchanged;
-		const float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1), sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
-		const float sy0 = std::fmin(p->src_rect.y0, p->src_rect.y1), sy1 = std::fmax(p->src_rect.y0, p->src_rect.y1);
+		float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1), sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
+		float sy0 = std::fmin(p->src_rect.y0, p->src_rect.y1), sy1 = std::fmax(p->src_rect.y0, p->src_rect.y1);
 		const int dw = std::abs(p->dst_rect.x1 - p->dst_rect.x0), dh = std::abs(p->dst_rect.y1 - p->dst_rect.y0);
+		if (dw <= 0 || dh <= 0)
+			return unchanged;
+		int ratio = 1;
+		if (upscale.on)
+		{
+			// 8b: the source crop is shorter than the destination (the renderer's
+			// gate); the base is PRE_KERNEL or a doubler's exact 2x.
+			const float nativeH = upscale.nativeHeight;
+			const float rh = nativeH > 0.0f ? (sy1 - sy0) / nativeH : 0.0f;
+			ratio = std::fabs(rh - 1.0f) < 0.01f ? 1 : (std::fabs(rh - 2.0f) < 0.01f ? 2 : 0);
+			if (ratio == 0 || !(nativeH + 0.5f < static_cast<float>(dh)))
+				return unchanged;
+		}
 		// The SSIM shader's own condition: the source is made shorter (the
 		// renderer's NATIVE_CROPPED.h > POSTKERNEL.h); and this picture too.
-		if (!sourceDownscales || dw <= 0 || dh <= 0 || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f))
+		else if (!sourceDownscales || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f))
 			return unchanged;
 		if (gpu && gpu != p->gpu)
 			Release();
 		gpu = p->gpu;
 		PollStats();
+		pl_tex base = p->tex;
+		if (ratio == 2)
+		{
+			const int hx0 = static_cast<int>(std::floor(sx0)), hy0 = static_cast<int>(std::floor(sy0));
+			const int lw = std::max(1, (static_cast<int>(std::ceil(sx1)) - hx0 + 1) / 2);
+			const int lh = std::max(1, (static_cast<int>(std::ceil(sy1)) - hy0 + 1) / 2);
+			if (!Ensure(gpu, lowres, lw, lh, 4, 32, false, true))
+			{
+				++failures;
+				return unchanged;
+			}
+			const float halveOrigin[2] = { static_cast<float>(hx0), static_cast<float>(hy0) };
+			const pl_shader_desc d[2] = { Sampled("src", p->tex, false), Storage("dst", lowres) };
+			const pl_shader_var v[1] = { { pl_var_vec2("origin"), halveOrigin, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: doubler to source resolution", nullptr,
+				HALVE_BODY, d, 2, v, 1, (lw + 15) / 16, (lh + 15) / 16))
+			{
+				++failures;
+				return unchanged;
+			}
+			base = lowres;
+			sx0 = (sx0 - hx0) * 0.5f;
+			sx1 = (sx1 - hx0) * 0.5f;
+			sy0 = (sy0 - hy0) * 0.5f;
+			sy1 = (sy1 - hy0) * 0.5f;
+		}
 		const int ox = static_cast<int>(std::floor(sx0)), oy = static_cast<int>(std::floor(sy0));
 		const int w = std::max(1, static_cast<int>(std::ceil(sx1)) - ox);
 		const int h = std::max(1, static_cast<int>(std::ceil(sy1)) - oy);
@@ -382,7 +452,7 @@ if (q.x < size.x && q.y < size.y) {
 		{
 			pl_shader sh = pl_dispatch_begin(p->dispatch);
 			pl_sample_src src{};
-			src.tex = p->tex;
+			src.tex = base;
 			src.rect = { sx0, sy0, sx1, sy1 };
 			src.new_w = dw;
 			src.new_h = dh;
@@ -408,7 +478,7 @@ if (q.x < size.x && q.y < size.y) {
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
 		{
-			const pl_shader_desc d[3] = { Sampled("src", p->tex, false), Storage("edge_out", edge),
+			const pl_shader_desc d[3] = { Sampled("src", base, false), Storage("edge_out", edge),
 				Storage("partial_out", partial) };
 			const pl_shader_var v[6] = {
 				{ pl_var_float("linear_in"), &linearIn, true },
@@ -479,6 +549,7 @@ if (q.x < size.x && q.y < size.y) {
 		dstRect = p->dst_rect;
 		edgeOrigin[0] = origin[0];
 		edgeOrigin[1] = origin[1];
+		upscaleRatio = upscale.on ? ratio : 0;
 		active = true;
 		return unchanged;
 	}
@@ -591,11 +662,16 @@ if (q.x < size.x && q.y < size.y) {
 			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out),
 			Sampled("grain_map", useMap ? map[mapIndex] : nullptr, false) };
 		static const std::string mapHeader = std::string("#define AD_USE_MAP 1\n") + OcclusionMask::NlsMapGlsl();
+		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
+		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") +
+			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") : std::string();
+		const std::string header = upHeader + (useMap ? mapHeader : std::string());
+		const float wBase = upscale.on ? upscale.wBase : settings.wBase;
 		const pl_shader_var v[12] = {
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
 			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
 			{ pl_var_vec2("edge_origin"), edgeOrigin, true },
-			{ pl_var_float("w_base"), &settings.wBase, true },
+			{ pl_var_float("w_base"), &wBase, true },
 			{ pl_var_float("chroma_ssim"), &chroma, true },
 			{ pl_var_vec2("src_size"), srcSize, true },
 			{ pl_var_vec4("crop"), crop, true },
@@ -604,8 +680,9 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_float("nls_geometry"), &nlsGeometry, true },
 			{ pl_var_vec2("nls_scale"), nlsScale, true },
 			{ pl_var_vec2("nls_protect"), nlsProtect, true } };
-		if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: blend", useMap ? mapHeader.c_str() : nullptr,
-			BLEND_BODY, d, useMap ? 6 : 5, v, useMap ? 12 : 5, (w + 15) / 16, (h + 15) / 16))
+		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
+			header.empty() ? nullptr : header.c_str(), BLEND_BODY, d, useMap ? 6 : 5, v, useMap ? 12 : 5,
+			(w + 15) / 16, (h + 15) / 16))
 		{
 			++failures;
 			return unchanged;

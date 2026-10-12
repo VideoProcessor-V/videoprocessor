@@ -881,12 +881,22 @@ namespace
 		double dejudderTrustScale = 0.6;          // D4: share at full strength (0 = off)
 		bool dejudderOcclusionFill = false;       // D5 (experiment)
 		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
+		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
+		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
+		// rgba32f regardless (LibplaceboRenderParameters).
+		int fboFloat32 = -1;
 		bool preserveExtendedRange = false; // Stage 10: BTB/WTW kept through scaling (SDR)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string downscaleLight = "linear";   // Stage 8-1: linear | gamma
 		bool adaptiveDownscale = false;          // Stage 8-2: the SSIM / faithful blend
+		// Stage 8b: the CNN / faithful upscale blend (grain only), its weight,
+		// SSimSuperRes's strength by the grain term, and the light domain.
+		bool adaptiveUpscale = false;
+		double adaptiveUpscaleWBase = 1.0;
+		bool adaptiveUpscaleSuperresScale = true;
+		std::string upscaleLight = "linear";     // linear | gamma
 		AdaptiveDownscale::Settings adaptive;
 		std::string debandStrength = "auto";
 		AutoToggle deband = AutoToggle::AUTO;
@@ -1022,9 +1032,11 @@ namespace
 			<< settings.dejudderGlobalPrior << '|' << settings.dejudderMotionScaleLo << '|'
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
-			<< settings.ditherGrainToleranceScale << '|'
+			<< settings.ditherGrainToleranceScale << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
+			<< settings.adaptiveUpscale << '|' << settings.adaptiveUpscaleWBase << '|'
+			<< settings.adaptiveUpscaleSuperresScale << '|' << settings.upscaleLight << '|'
 			<< settings.adaptiveDownscale << '|' << settings.adaptive.wBase << '|' << settings.adaptive.edgeLo << '|'
 			<< settings.adaptive.edgeHi << '|' << settings.adaptive.grainLo << '|' << settings.adaptive.grainHi << '|'
 			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
@@ -1867,6 +1879,7 @@ namespace
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
+		readChoice("upscale_light", settings.upscaleLight, { "linear", "gamma" });
 		readToggle("deband", settings.deband);
 		if (config.TryGetString(rule.section, "deband_strength", raw))
 		{
@@ -1976,6 +1989,14 @@ namespace
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
 					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
 		}
+		if (config.TryGetString(rule.section, "fbo_float32", raw))
+		{
+			if (raw == "auto" || raw == "on" || raw == "off")
+				settings.fboFloat32 = raw == "auto" ? -1 : (raw == "on" ? 1 : 0);
+			else
+				DebugLog::Log("profile '%s': invalid fbo_float32 '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
+					settings.fboFloat32 < 0 ? "auto" : (settings.fboFloat32 ? "on" : "off"));
+		}
 		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
 			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
 			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
@@ -2014,9 +2035,20 @@ namespace
 			settings.adaptive.edgeHi = settings.adaptive.edgeLo + 1.0f;
 		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
+		if (config.TryGetString(rule.section, "adaptive_upscale_w_base", raw))
+		{
+			double parsed = 0.0;
+			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= 1.0)
+				settings.adaptiveUpscaleWBase = parsed;
+			else
+				DebugLog::Log("profile '%s': invalid adaptive_upscale_w_base '%s'; keeping %g",
+					rule.section.c_str(), raw.c_str(), settings.adaptiveUpscaleWBase);
+		}
 		for (const auto& toggle : { std::make_pair("adaptive_downscale", &settings.adaptiveDownscale),
 			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
-			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap) })
+			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap),
+			std::make_pair("adaptive_upscale", &settings.adaptiveUpscale),
+			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -2382,6 +2414,7 @@ namespace
 			config, "downscaler", "auto",
 			{ "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		settings.downscaleLight = ReadChoice(config, "downscale_light", "linear", { "linear", "gamma" });
+		settings.upscaleLight = ReadChoice(config, "upscale_light", "linear", { "linear", "gamma" });
 		settings.deband = ReadAutoToggle(config, "deband");
 		if (TryGetDisplayString(config, "deband_strength", rawValue))
 		{
@@ -3996,7 +4029,10 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t dejudderMaskSequence[2] = { 0, 0 };
 	bool dejudderExtrasAllowed = false;
 	bool dejudderMaskParamSet = false;
-	bool grainToleranceParamSet = false;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
+	bool grainToleranceParamSet = false;
+	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
+	bool adaptiveUpscaleThisFrame = false;    // Stage 8b on the frame being built
+	int adaptiveUpscaleRatioLogged = -1;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
 	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
 	bool dejudderMaskNoSigmaLogged = false;
@@ -8036,12 +8072,17 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderTrustScale = next.dejudderTrustScale;
 		currentTransport.dejudderOcclusionFill = next.dejudderOcclusionFill;
 		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
+		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
 		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.downscaleLight = next.downscaleLight;
 		currentTransport.adaptiveDownscale = next.adaptiveDownscale;
+		currentTransport.adaptiveUpscale = next.adaptiveUpscale;
+		currentTransport.adaptiveUpscaleWBase = next.adaptiveUpscaleWBase;
+		currentTransport.adaptiveUpscaleSuperresScale = next.adaptiveUpscaleSuperresScale;
+		currentTransport.upscaleLight = next.upscaleLight;
 		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
@@ -8112,11 +8153,16 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderTrustScale != next.dejudderTrustScale, "dejudder_trust_scale");
 		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
 		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
+		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
 		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.downscaleLight != next.downscaleLight, "downscale_light");
+		changed(current.upscaleLight != next.upscaleLight, "upscale_light");
+		changed(current.adaptiveUpscale != next.adaptiveUpscale ||
+			current.adaptiveUpscaleWBase != next.adaptiveUpscaleWBase ||
+			current.adaptiveUpscaleSuperresScale != next.adaptiveUpscaleSuperresScale, "adaptive_upscale");
 		changed(current.adaptiveDownscale != next.adaptiveDownscale ||
 			!(current.adaptive == next.adaptive), "adaptive_downscale");
 		changed(current.debandStrength != next.debandStrength ||
@@ -11078,9 +11124,16 @@ struct LibplaceboVideoRenderer::Impl
 			settings.motionScaleLo = static_cast<float>(activeSettings.dejudderMotionScaleLo);
 			settings.motionScaleHi = static_cast<float>(activeSettings.dejudderMotionScaleHi);
 			settings.trustScaleFull = static_cast<float>(activeSettings.dejudderTrustScale);
-			settings.occlusionFill = activeSettings.dejudderOcclusionFill;
+			// D5 is source-warp only (planner 2026-10-12): with the rendered
+			// warp it is ignored (logged once) and its pass not run.
+			settings.occlusionFill = activeSettings.dejudderOcclusionFill && !activeSettings.dejudderWarpRendered;
 			return settings;
 		};
+		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
+		{
+			DebugLog::Log("De-judder occlusion fill: source warp path only; ignored with dejudder_warp_stage: rendered");
+			dejudderFillIgnoredLogged = true;
+		}
 		if (!dejudder)
 			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, wanted(Dejudder::Settings()));
 		else
@@ -15900,8 +15953,70 @@ struct LibplaceboVideoRenderer::Impl
         // Stage 8-2: the blend measures at PREKERNEL and blends after the user
         // hooks at POSTKERNEL (after the SSIM shader's passes); it needs the
         // SSIM downscaler in the chain.
-        if (activeSettings.adaptiveDownscale)
+        // Stage 8b: a source shorter than the destination with the upscale
+        // blend on takes the module in its upscale form (no SSIM needed: the
+        // perceptual branch is whatever upscales, CNN + SuperRes when enabled).
+        const float sourceCropH = std::fabs(renderImage.crop.y1 - renderImage.crop.y0);
+        const float targetCropH = std::fabs(target.crop.y1 - target.crop.y0);
+        const bool upscaleBlend = activeSettings.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
+        adaptiveUpscaleThisFrame = upscaleBlend;
+        // SSimSuperRes takes the grain term through alpha only when the blend
+        // runs (its vp_grain_strength; 0 otherwise).
+        const pl_hook* superresHook = nullptr;
+        for (const pl_hook* hook : frameHooks)
+            if (CustomHookChain::SetHookParameter(hook, "vp_grain_strength",
+                upscaleBlend && activeSettings.adaptiveUpscaleSuperresScale ? 1.0 : 0.0))
+                superresHook = hook;
+        const bool superresFound = superresHook != nullptr;
+        if (upscaleBlend)
         {
+            adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
+                nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : 1.0f / 24.0f);
+            AdaptiveDownscale::Upscale up;
+            up.on = true;
+            up.wBase = static_cast<float>(activeSettings.adaptiveUpscaleWBase);
+            up.superresAlpha = activeSettings.adaptiveUpscaleSuperresScale && superresFound;
+            up.nativeHeight = sourceCropH;
+            adaptiveDownscale.SetUpscale(up);
+            adaptiveDownscale.ClearGrainField();
+            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
+                sourceSequence != 0 && dejudder->GrainError())
+            {
+                AdaptiveDownscale::GrainField field;
+                field.error = dejudder->GrainError();
+                field.field = dejudder->Field();
+                field.frameTrust = dejudder->FrameTrust();
+                field.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+                field.sourceCrop = renderImage.crop;
+                bool known = true;
+                if (submittedNls)
+                {
+                    field.nls = KnownNlsMapping();
+                    known = field.nls.valid;
+                }
+                if (known)
+                    adaptiveDownscale.SetGrainField(field);
+            }
+            adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active();
+            frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
+            // The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines
+            // the blended picture with its strength scaled by the grain term.
+            const auto superres = std::find(frameHooks.begin(), frameHooks.end(), superresHook);
+            if (superresHook && superres != frameHooks.end())
+                frameHooks.insert(superres, adaptiveDownscale.Blend());
+            else
+                frameHooks.push_back(adaptiveDownscale.Blend());
+            const int ratio = adaptiveDownscale.LastUpscaleRatio();
+            if (ratio != adaptiveUpscaleRatioLogged)
+            {
+                adaptiveUpscaleRatioLogged = ratio;
+                DebugLog::Log("Adaptive upscale: %s", ratio == 2 ? "faithful branch from the doubler's output at source resolution" :
+                    ratio == 1 ? "faithful branch from the source picture" : "not applied on the last frame (prescale ratio not 1 or 2)");
+            }
+        }
+        else if (activeSettings.adaptiveDownscale)
+        {
+            adaptiveDownscale.SetUpscale(AdaptiveDownscale::Upscale());
             if (customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue))
             {
                 adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
@@ -15959,7 +16074,7 @@ struct LibplaceboVideoRenderer::Impl
                 PublishCustomShaderStatus();
             }
         }
-        if (!activeSettings.adaptiveDownscale)
+        if (!activeSettings.adaptiveDownscale && !upscaleBlend)
             adaptiveGrainMapWanted = false;
         // Delta 5 (D5-1): the sigma-delta's code domain comes from this
         // frame's target, never from the shader rule: range, swapchain sample
@@ -16196,6 +16311,14 @@ struct LibplaceboVideoRenderer::Impl
                 renderImage.crop, target.crop);
             if (gamma)
                 frameParams.disable_linear_scaling = true;
+            // 8b: both branches in one light domain: linear (no sigmoid) or gamma.
+            if (adaptiveUpscaleThisFrame)
+            {
+                if (activeSettings.upscaleLight == "gamma")
+                    frameParams.disable_linear_scaling = true;
+                else
+                    frameParams.sigmoid_params = nullptr;
+            }
             const int logged = activeSettings.downscaleLight == "gamma" ? (gamma ? 2 : 1) : 0;
             if (logged != downscaleLightLogged)
             {
@@ -16206,6 +16329,12 @@ struct LibplaceboVideoRenderer::Impl
         }
         frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
         frameParams.num_hooks = static_cast<int>(frameHooks.size());
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+        // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on,
+        // off with the Low_Latency queue (games do not need the last 1/16 step).
+        frameParams.fbo_float32 = activeSettings.fboFloat32 == 1 ||
+            (activeSettings.fboFloat32 < 0 && !lowLatencyQueue);
+#endif
         if (customHooks.SuppressesDither(lowLatencyQueue))
         {
             frameParams.dither_params = nullptr;
