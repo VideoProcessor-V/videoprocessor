@@ -66,6 +66,7 @@ full light.
 | `dmd_clip_cntr` (`[projector]`) | compensate | the contrast at which white stops getting brighter at full LED; 59 = where your script's dump ended | set from the fixed-LED white sweep |
 | `cut_cntr_level` | compensate | the contrast a cut to a brighter scene goes to (default = `dmd_clip_cntr`) | lower by taste if highlights crush after a cut |
 | `recovery_rate_*` | compensate | how fast the picture fades up for what the LED and contrast cannot yet supply | leave |
+| `black_prelift_max` | compensate | coming out of black: how far the LED may lift while the screen is still black (the contrast goes to the cut level then too) | 120; lower if the black visibly lifts before a cut, 60 = never |
 | `led_settle_ms`, `cntr_latency_ms`, `cntr_settle_ms`, `cntr_max_usable` (`[projector]`) | compensate | how fast the LED and contrast respond, and the highest useful contrast | from the camera / light-meter measurement; until then 300 / 80 / 0 / 74 |
 | `early_ramp` | compensate | start before a cut seen in the queue | leave on |
 | `cut_jump` | compensate | a seen cut: one jump timed to land on the cut frame | leave on; off ramps instead |

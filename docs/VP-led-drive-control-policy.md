@@ -178,6 +178,12 @@ rate law. CNTR must never rise ahead of the LED's actual dimming.
   contains the rest; the fade-up is shortened by whatever the LED climbed
   early. A fade-in from
   black needs no bound: picture and LED rise together.
+- **As built (7c-3):** the exit-from-black pre-positioning applies while
+  the frame the LED lands on is black or very dark (APL < 20); the LED gets
+  one command to at most `black_prelift_max` and CNTR one command to
+  `cut_cntr_level` (held until the cut). In other scenes the head start is
+  the early ramp at the scene rate plus the seen cut's single LED command
+  landing on the cut frame. `black_prelift_max: 255` = before 7c-3.
 - **Exact dump** (restated for §3.3): the incoming scene's statistics size
   the CNTR dump to the tolerance, not to a fixed stopping point.
 

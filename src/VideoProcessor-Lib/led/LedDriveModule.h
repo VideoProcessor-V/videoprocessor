@@ -197,6 +197,7 @@ namespace LedDrive
 		double recoveryLimit = 1e9;
 		uint64_t lastBrightCutSequence = 0;
 		int DmdClipLocked() const;
+		int CutLevelLocked() const;
 		void HoldContrastLocked();
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
 		// the projector's whole CNTR steps; smoothing is set by the script

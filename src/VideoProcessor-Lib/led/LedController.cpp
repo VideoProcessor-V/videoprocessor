@@ -390,6 +390,7 @@ namespace LedDrive
 		// where the current scene's highlights would pass the tolerance.
 		int target = out.lightTarget;
 		bool early = false;
+		bool preposition = false;
 		if (ahead && config.earlyRamp &&
 			(ahead->cutAhead || std::abs(ahead->stats.apl - stats.apl) >= config.cutThreshold))
 		{
@@ -398,7 +399,18 @@ namespace LedDrive
 				config.ledFloorBlack : std::max(CurveLevel(config, aheadApl), floor)));
 			if (aheadTarget > target)
 			{
-				target = aheadTarget;
+				// 7c-3 (policy 3.5; the owner's black-frames note and correction):
+				// on black or a very dark picture the LED goes at once to at most
+				// black_prelift_max, never further while the picture is still
+				// dark; the full jump comes with the cut. 255 = before 7c-3.
+				if (config.blackPreliftMax < 255 && !stats.cut && stats.apl < 20.0)
+				{
+					preposition = true;
+					target = std::max(target, std::min(aheadTarget,
+						std::max(config.blackPreliftMax, static_cast<int>(std::lround(level)))));
+				}
+				else
+					target = aheadTarget;
 				early = true;
 			}
 			else if (aheadTarget < target)
@@ -431,6 +443,7 @@ namespace LedDrive
 		const bool seenCut = predicted && stats.cut && config.cutJump;
 		const bool brightDump = !predicted && stats.cut && config.brightCutDump && out.lightTarget > level;
 		// 7c-2: a cut to a brighter or darker target (policy 3.3 / 3.4).
+		out.preposition = preposition;
 		out.brightCut = stats.cut && out.lightTarget > level + 0.5;
 		out.darkCut = stats.cut && out.lightTarget < level - 0.5;
 		if (out.brightCut)
@@ -444,6 +457,16 @@ namespace LedDrive
 			level = seenCut ? out.lightTarget : std::max(static_cast<double>(target), static_cast<double>(out.lightTarget));
 			ramping = false;
 			out.jump = true;
+		}
+		else if (preposition)
+		{
+			// One command, no rate law on black (only the LED's own settle).
+			if (target > level)
+			{
+				level = target;
+				out.jump = true;
+			}
+			ramping = false;
 		}
 		else if (stats.fade && level > target)
 		{
@@ -578,10 +601,11 @@ namespace LedDrive
 		// value's light by 2% (VP's gain covers that 2% meanwhile).
 		if (ceiling >= 50) wanted = std::min(wanted, ceiling);
 		if (limit >= 50) wanted = std::min(wanted, limit);
+		if (hold >= 50) wanted = std::max(wanted, hold);
 		int next = contrast;
 		if (wanted < contrast)
 			next = wanted;
-		else if (wanted > contrast && need > Light(contrast) * 1.02)
+		else if (wanted > contrast && (need > Light(contrast) * 1.02 || wanted <= hold))
 			next = wanted;
 		if (next == contrast) return -1;
 		contrast = next;

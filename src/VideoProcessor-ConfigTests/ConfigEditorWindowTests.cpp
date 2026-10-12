@@ -892,6 +892,39 @@ void testLedDrivePageAndLiveSwitches()
     auto* smoothing = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.script_smoothing"));
     require(!smoothing->isChecked(), "Script smoothing is not off by default (off = the script exactly)");
     smoothing->setChecked(true);
+    // Stage 7 step 7c: every new LED setting has a control.
+    auto* cutLevel = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.cut_cntr_level"));
+    require(cutLevel->value() == cutLevel->minimum() && cutLevel->specialValueText().contains(QStringLiteral("auto")),
+        "Contrast on a bright cut does not default to auto (the white clip)");
+    cutLevel->setValue(57);
+    auto* dip = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.max_cut_dip"));
+    require(std::abs(dip->value() - 0.5) < 1e-9, "Darkest start of a fade-up does not default to 0.5");
+    dip->setValue(0.4);
+    auto* lift = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.black_prelift_max"));
+    require(lift->value() == 120, "The LED lift while black does not default to 120");
+    lift->setValue(110);
+    auto* rateMaxUp = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.rate_max_up"));
+    require(rateMaxUp->value() == rateMaxUp->minimum(), "An unset speed does not show \"preset\"");
+    rateMaxUp->setValue(20.0);
+    selectData(requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.rate_preset")),
+        QStringLiteral("compensated"));
+    auto* settle = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.projector.default.led_settle_ms"));
+    require(std::abs(settle->value() - 300.0) < 1e-9, "LED settle time does not default to 300 ms");
+    settle->setValue(250);
+    auto* clip = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.projector.default.dmd_clip_cntr"));
+    require(std::abs(clip->value() - 59.0) < 1e-9, "White clip does not default to 59");
+    clip->setValue(61);
+    for (const char* name : { "config.led_drive.default.cntr_assist", "config.led_drive.default.software_first",
+        "config.led_drive.default.cut_cntr_dump", "config.led_drive.default.shaped_recovery" })
+        require(requireControl<QCheckBox>(window, QString::fromLatin1(name))->isChecked(),
+            QStringLiteral("%1 is not on by default").arg(QString::fromLatin1(name)).toStdString().c_str());
+    for (const char* name : { "config.led_drive.default.cntr_assist_max", "config.led_drive.default.recovery_bias_pct",
+        "config.led_drive.default.rate_gain_up", "config.led_drive.default.rate_min_up",
+        "config.led_drive.default.rate_gain_down", "config.led_drive.default.rate_min_down",
+        "config.led_drive.default.rate_max_down", "config.led_drive.default.recovery_rate_gain",
+        "config.led_drive.default.recovery_rate_min", "config.led_drive.default.recovery_rate_max",
+        "config.projector.default.cntr_settle_ms", "config.projector.default.cntr_max_usable" })
+        requireControl<QDoubleSpinBox>(window, QString::fromLatin1(name));
     auto* profile = requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.profile_file"));
     require(profile->text().isEmpty(), "A profile file appeared from nowhere");
     auto* profileStatus = requireControl<QLabel>(window, QStringLiteral("config.led_drive.default.profile_status"));
@@ -939,7 +972,9 @@ void testLedDrivePageAndLiveSwitches()
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
         "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35",
-        "cntr_latency_ms: 120", "script_smoothing: true" })
+        "cntr_latency_ms: 120", "script_smoothing: true", "cut_cntr_level: 57", "max_cut_dip: 0.40",
+        "black_prelift_max: 110", "rate_max_up: 20.0", "rate_preset: compensated", "led_settle_ms: 250",
+        "dmd_clip_cntr: 61" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);

@@ -196,6 +196,12 @@ namespace LedDrive
 		// absolute light; only CNTR's headroom can while the LED is low). -1 =
 		// dmd_clip_cntr (59: where the script's highlight dump ends).
 		int cutCntrLevel = -1;
+		// Exit from black (7c-3; policy 3.5 and the owner's black-frames
+		// note): while the picture is black or very dark and the look-ahead
+		// shows a bright scene, the LED goes at once to at most this level
+		// (the black given up for a shorter fade-up), CNTR to cut_cntr_level.
+		// 60 = no pre-lift; 255 = no cap and no pre-positioning (before 7c-3).
+		int blackPreliftMax = 120;
 		// The fade-up's displayed-light ramp for the shortfall LED x CNTR x
 		// gain cannot yet reach: fast, bounded by the modelled light (the
 		// paired LED / CNTR move itself keeps the script-matched rates).
@@ -468,6 +474,7 @@ namespace LedDrive
 			Number("max_cut_dip", 0.0, 1.0),
 			Number("recovery_bias_pct", 0.0, 20.0),
 			Integer("cut_cntr_level", 50, 100),
+			Integer("black_prelift_max", 0, 255),
 			Number("recovery_rate_gain", 0.0, 100.0),
 			Number("recovery_rate_min", 0.0, 10000.0),
 			Number("recovery_rate_max", 1.0, 10000.0),
@@ -752,6 +759,7 @@ namespace LedDrive
 		readNumber("max_cut_dip", result.maxCutDip);
 		readNumber("recovery_bias_pct", result.recoveryBiasPct);
 		readInt("cut_cntr_level", 50, 100, result.cutCntrLevel);
+		readInt("black_prelift_max", 0, 255, result.blackPreliftMax);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
 		readNumber("recovery_rate_min", result.recoveryRateMin);
 		readNumber("recovery_rate_max", result.recoveryRateMax);

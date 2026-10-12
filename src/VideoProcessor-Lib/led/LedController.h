@@ -92,6 +92,10 @@ namespace LedDrive
 		// 2^tolerance / highlight (the gain ceiling of the fade-up).
 		bool brightCut = false;
 		bool darkCut = false;
+		// 7c-3: the picture is black or very dark and the look-ahead shows a
+		// bright scene: the LED is pre-lifted (capped at black_prelift_max)
+		// and CNTR is to be held at cut_cntr_level until the cut.
+		bool preposition = false;
 		double cutHighlight = 0.0;
 		double cutCeiling = 1e9;
 		std::string log;
@@ -343,6 +347,10 @@ namespace LedDrive
 		void SetCeiling(int value) { ceiling = value; }
 		int Ceiling() const { return ceiling; }
 		void SetBias(double value) { bias = value; }
+		// 7c-3, exit from black: CNTR held at least at `value` until the cut
+		// (-1 = none); raised to it at once, ignoring the up-margin.
+		void SetHold(int value) { hold = value; }
+		int Hold() const { return hold; }
 		// The bright cut's CNTR (owner correction, 2026-10-11): cutLevel, or
 		// higher if that is needed to keep the fade-up's start, ledFraction x
 		// Light(c) x gainCeiling, at maxCutDip; never above the current value.
@@ -367,6 +375,7 @@ namespace LedDrive
 		int contrast = 50;
 		double required = 1.0;
 		int ceiling = -1;
+		int hold = -1;
 		double bias = 0.0;
 	};
 

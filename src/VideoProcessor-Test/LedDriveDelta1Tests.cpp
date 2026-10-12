@@ -46,8 +46,8 @@ namespace
 
 	// The regression recipe (planner's 7c-1 answer 1, extended by 7c-2):
 	// cntr_assist off, rate_gain_up/down 0 (the fixed rate_up / rate_down),
-	// max_cut_dip 0, shaped_recovery off and, in Port() and the module tests,
-	// led_settle_ms 0. The compensate tests written before 7c-1 run under it
+	// max_cut_dip 0, shaped_recovery off, black_prelift_max 255 (7c-3) and,
+	// in Port() and the module tests, led_settle_ms 0. The compensate tests written before 7c-1 run under it
 	// as the proof that it reproduces the previous build.
 	LedDriveConfig Compensate()
 	{
@@ -61,6 +61,7 @@ namespace
 		config.cntrAssist = false;
 		config.maxCutDip = 0.0;
 		config.shapedRecovery = false;
+		config.blackPreliftMax = 255;
 		return config;
 	}
 
@@ -1082,6 +1083,51 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1000.0 / 24.0, module.SourceFramePeriodMs(), 1e-9);
 			Assert::IsTrue(landedAt >= cut - 1 && landedAt <= cut,
 				(L"the LED landed on source frame " + std::to_wstring(landedAt)).c_str());
+		}
+
+		// 7c-3, the module: black on screen, a bright scene coming in the
+		// look-ahead. Before the cut the LED never goes above black_prelift_max
+		// and CNTR goes to cut_cntr_level (59); after the cut the LED goes to
+		// the scene's level and CNTR descends paired.
+		TEST_METHOD(ExitFromBlackPrepositionsContrastAndCapsTheLed)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Assisted();
+			ApplyRatePreset(config, true); // reach the black floor quickly
+			config.blackPreliftMax = 120;
+			config.ledFloorBlack = 60;
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SetLookaheadDepth(8);
+			const uint64_t cut = 400;
+			StatsBuilder builder(module.Config());
+			for (uint64_t sequence = 1; sequence < cut + 60; ++sequence)
+				module.SubmitPrediction(sequence, builder.Build(Frame(sequence < cut ? 16.0 : 120.0),
+					sequence * FRAME_MS));
+			bool contrastBeforeCut = false;
+			for (uint64_t sequence = 1; sequence < cut + 60; ++sequence)
+			{
+				module.SubmitMeasurement(Frame(sequence < cut ? 16.0 : 120.0), sequence);
+				module.BeginFrameAt(sequence, sequence * FRAME_MS);
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				// Once at the black floor, until the cut's own jump goes out
+				// (latency frames ahead of the cut).
+				if (sequence > 300 && sequence + 5 < cut)
+					Assert::IsTrue(projector->light <= 120,
+						(L"the LED above black_prelift_max while black, sequence " + std::to_wstring(sequence)).c_str());
+				if (sequence < cut && projector->contrast == 59) contrastBeforeCut = true;
+			}
+			Assert::IsTrue(contrastBeforeCut, L"CNTR pre-positioned to cut_cntr_level before the cut");
+			Assert::AreEqual(255, projector->light, L"the scene's level after the cut");
+			Assert::IsTrue(WaitFor([&] { return module.AssistContrast() == 50; }) || module.AssistContrast() <= 59,
+				L"CNTR descends paired after the cut");
+			module.Stop();
+			Assert::AreEqual(50, projector->contrast);
 		}
 
 		TEST_METHOD(EffectiveLookaheadIsClampedToTheFramesActuallyQueued)

@@ -38,8 +38,8 @@ namespace
 
 	// The regression recipe (planner's 7c-1 answer 1, extended by 7c-2):
 	// cntr_assist off, rate_gain_up/down 0 (the fixed rate_up / rate_down),
-	// max_cut_dip 0, shaped_recovery off and, in Port() and the module tests,
-	// led_settle_ms 0. The compensate tests written before 7c-1 run under it
+	// max_cut_dip 0, shaped_recovery off, black_prelift_max 255 (7c-3) and,
+	// in Port() and the module tests, led_settle_ms 0. The compensate tests written before 7c-1 run under it
 	// as the proof that it reproduces the previous build.
 	LedDriveConfig Compensate()
 	{
@@ -53,6 +53,7 @@ namespace
 		config.cntrAssist = false;
 		config.maxCutDip = 0.0;
 		config.shapedRecovery = false;
+		config.blackPreliftMax = 255;
 		return config;
 	}
 
@@ -715,6 +716,62 @@ namespace VideoProcessorTest
 				Assert::AreEqual(50, module.AssistContrast(), L"back to 50 in the bright scene");
 				module.Stop();
 			}
+		}
+
+		// 7c-3 (policy 3.5; owner's black-frames note): on black with a bright
+		// scene in the look-ahead the LED goes at once to black_prelift_max
+		// (never further while black) and the controller asks for CNTR to be
+		// pre-positioned; the cut then jumps to the scene's level. 255 = the
+		// behaviour before 7c-3 (early ramp at the scene rate, no prelift).
+		TEST_METHOD(ExitFromBlackPreliftsCappedThenJumpsOnTheCut)
+		{
+			for (const int cap : { 120, 255 })
+			{
+				LedDriveConfig config = Compensate();
+				config.blackPreliftMax = cap;
+				config.ledFloorBlack = 60;
+				StatsBuilder black(config), bright(config);
+				CompensateController controller(config);
+				controller.Reset(60);
+				double now = 0.0, ahead = 0.0;
+				Lookahead look;
+				look.stats = Play(bright, ahead, 100.0, Frame(120.0));
+				look.cutAhead = true;
+				look.framesAhead = 4;
+				ControllerOutput out = controller.Tick(Play(black, now, 1000.0 / 60.0, Frame(16.0)), 1000.0 / 60.0,
+					&look, true, true);
+				if (cap == 120)
+				{
+					Assert::IsTrue(out.preposition, L"bright scene ahead on black: pre-position");
+					Assert::AreEqual(120, out.lightCommand, L"one command to black_prelift_max");
+					Assert::IsTrue(out.jump);
+					for (int tick = 0; tick < 10; ++tick)
+						out = controller.Tick(Play(black, now, 1000.0 / 60.0, Frame(16.0)), 1000.0 / 60.0, &look, true, true);
+					Assert::AreEqual(120, controller.Light(), L"no further while the picture is still black");
+				}
+				else
+				{
+					Assert::IsFalse(out.preposition, L"255: no pre-positioning (before 7c-3)");
+					Assert::IsTrue(out.lightCommand < 120 && !out.jump, L"255: the early ramp at the scene rate");
+				}
+				// The cut reaches the frame the LED lands on: the full jump.
+				FrameStats cut = Play(black, now, 1000.0 / 60.0, Frame(120.0));
+				Assert::IsTrue(cut.cut);
+				out = controller.Tick(cut, 1000.0 / 60.0, &look, true, true);
+				Assert::AreEqual(255, controller.Light(), L"the cut jumps to the scene's level");
+				Assert::IsTrue(out.brightCut && !out.preposition);
+			}
+		}
+
+		TEST_METHOD(CntrHoldRaisesAtOnceUntilReleased)
+		{
+			CntrPairing pairing;
+			pairing.Configure(2.41, 74, true, true);
+			pairing.SetHold(59);
+			Assert::AreEqual(59, pairing.Update(1.0, 1e9), L"raised to the hold at once (no up-margin)");
+			Assert::AreEqual(-1, pairing.Update(0.5, 1e9), L"held while the need is nil");
+			pairing.SetHold(-1);
+			Assert::AreEqual(50, pairing.Update(0.5, 1e9), L"released: back to what the pairing needs");
 		}
 
 		// Delta 4: the boost's base is the output gamma VP encodes for, not the

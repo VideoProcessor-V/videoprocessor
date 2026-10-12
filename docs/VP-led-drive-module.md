@@ -308,8 +308,30 @@ real:
 >     never to 50 because of the cut; the fade-up's shortfall ramp uses the
 >     fast `recovery_rate_*`; with highlights CNTR stops at `dmd_clip_cntr`.
 >   - Regression recipe now also `max_cut_dip: 0`, `shaped_recovery: off`.
-> - The look-ahead extras (black-frame pre-positioning, head start, exit
->   from black) and the Config page keys are 7c-3.
+> - **7c-3 (look-ahead extras, Config page):**
+>   - **Exit from black / a very dark scene** (owner's black-frames note,
+>     policy 3.5): while the frame the LED lands on is black or very dark
+>     (APL < 20) and the look-ahead shows a bright scene, the controller
+>     sends one LED command to at most `black_prelift_max` (120; never
+>     further while still dark) and asks for CNTR to be pre-positioned. The
+>     module raises CNTR to `cut_cntr_level` in one command and holds it
+>     there (`CntrPairing::SetHold`) until the cut, also while the custom
+>     dim is leaving. VP's gain needs no special step: it divides by the
+>     modelled LED and CNTR light, and on black gain x black = black. The
+>     cut then jumps the LED to the scene's level and the bright-cut logic
+>     takes over (CNTR already at the cut level).
+>   - **Custom-dim exit** jumps to the controller's level, which is now the
+>     capped pre-lift while the picture is still black.
+>   - **Head start in other scenes:** the existing early ramp (at the scene
+>     rate) brightens ahead of a seen bright cut, and the seen cut's one LED
+>     command lands on the cut frame. **Hold before a known cut:** the
+>     early ramp already aims at the post-cut target, so no drift that would
+>     need reversing is started.
+>   - `black_prelift_max: 255` = before 7c-3 (no cap, no pre-positioning);
+>     the regression recipe adds it.
+>   - **Config page:** cards "Contrast and cuts", "LED speeds" (both rate
+>     families; a speed set to "preset" is removed so `rate_preset`
+>     applies) and "Projector response": a control for every 7c key.
 
 The projector contrast command is never sent; contrast is left at the
 owner's calibrated 50. Instead the controller outputs a gain that VP applies

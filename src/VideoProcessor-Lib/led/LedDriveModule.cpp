@@ -90,6 +90,11 @@ namespace LedDrive
 		recovery.Configure(led, flux);
 	}
 
+	int LedDriveModule::CutLevelLocked() const
+	{
+		return led.cutCntrLevel >= 50 ? led.cutCntrLevel : DmdClipLocked();
+	}
+
 	int LedDriveModule::DmdClipLocked() const
 	{
 		return projector.dmdClipCntr >= 50 ? projector.dmdClipCntr : std::max(50, projector.cntrMaxUsable);
@@ -565,7 +570,7 @@ namespace LedDrive
 		{
 			lastBrightCutSequence = cutSequence;
 			const double dmd = pairing.Light(DmdClipLocked());
-			const int cutLevel = led.cutCntrLevel >= 50 ? led.cutCntrLevel : DmdClipLocked();
+			const int cutLevel = CutLevelLocked();
 			if (allowed && led.cutCntrDump && pairing.Contrast() > cutLevel)
 			{
 				const int dump = pairing.DumpTarget(ledModel.Value(), out.cutCeiling, led.maxCutDip, cutLevel);
@@ -596,6 +601,23 @@ namespace LedDrive
 			pairing.SetCeiling(-1);
 			pairing.SetBias(0.0);
 		}
+		// 7c-3, exit from black: while the picture is black or very dark and a
+		// bright scene is coming, CNTR goes to cut_cntr_level and is held
+		// there until the cut (invisible on black; VP's gain divides by the
+		// modelled CNTR light anyway). Also while the custom dim is leaving.
+		if (out.preposition && led.cntrAssist && applyGain && fadeToBlack != FadeToBlack::Deep && !out.holdGain)
+		{
+			const int level = CutLevelLocked();
+			pairing.SetHold(level);
+			if (contrastCommand < 0 && pairing.Contrast() < level)
+			{
+				pairing.Reset(level);
+				driver->SetContrastAsync(level);
+				contrastCommand = level;
+			}
+		}
+		else
+			pairing.SetHold(-1);
 		if (allowed && contrastCommand < 0)
 		{
 			// CNTR is paired with the LED's modelled light now: never above the

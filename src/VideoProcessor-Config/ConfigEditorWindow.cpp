@@ -9563,14 +9563,156 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "Off: send only, exactly like the old script. On: wait for each reply, ask the projector its range and "
         "log lost commands. 19200 baud, 8 data bits, no parity, 1 stop bit, no flow control.")));
 
+    // Stage 7 step 7c (control policy; the owner's correction): compensate's
+    // contrast assist, cuts, speeds and the projector's response. Every
+    // setting has a control; a speed set to "preset" is removed from the
+    // file so rate_preset applies.
+    auto numberControl = [this](const QString& section, const QString& key, double minimum, double maximum,
+        int decimals, double step, double fallback, const QString& special)
+    {
+        auto* spin = new QDoubleSpinBox;
+        spin->setObjectName(controlName(section, key));
+        spin->setAccessibleName(accessibleSettingName(key));
+        spin->setDecimals(decimals);
+        spin->setSingleStep(step);
+        spin->setRange(special.isEmpty() ? minimum : minimum - step, maximum);
+        if (!special.isEmpty()) spin->setSpecialValueText(special);
+        spin->setMaximumWidth(120);
+        spin->setAlignment(Qt::AlignRight);
+        bool valid = false;
+        const double configured = value(section, key).toDouble(&valid);
+        spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) :
+            (special.isEmpty() ? fallback : spin->minimum()));
+        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [this, section, key, spin, decimals](double number)
+        {
+            if (!document_) return;
+            const std::string name = section.toStdString();
+            if (!spin->specialValueText().isEmpty() && number <= spin->minimum())
+                document_->RemoveKnown(name, key.toStdString().c_str());
+            else
+            {
+                const std::string text = QString::number(number, 'f', decimals).toStdString();
+                if (!document_->SetKnown(name, key.toStdString().c_str(), text))
+                {
+                    document_->AddSection(name);
+                    document_->SetKnown(name, key.toStdString().c_str(), text);
+                }
+            }
+            markDirty();
+        });
+        return spin;
+    };
+
+    auto* assist = new QWidget;
+    auto* assistForm = new QFormLayout(assist);
+    assistForm->setContentsMargins(0, 0, 0, 0);
+    assistForm->setVerticalSpacing(8);
+    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Use the projector's contrast to help"), led,
+        QStringLiteral("cntr_assist"), true));
+    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Software first"), led,
+        QStringLiteral("software_first"), true));
+    assistForm->addRow(QStringLiteral("Highest contrast for the assist"),
+        numberControl(led, QStringLiteral("cntr_assist_max"), 50, 100, 0, 1, 100, QString()));
+    assistForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Compensate only. The contrast adds the light VP's gain cannot add without crushing highlights, so the "
+        "LED can dim further in scenes with highlights. Software first: VP's gain does what it can before the "
+        "contrast moves. 100 = no limit beyond the projector's usable contrast.")));
+    assistForm->addRow(QString(), bindCheckField(QStringLiteral("On a cut to a brighter scene, set the contrast to the cut level"),
+        led, QStringLiteral("cut_cntr_dump"), true));
+    assistForm->addRow(QStringLiteral("Contrast on a bright cut"),
+        numberControl(led, QStringLiteral("cut_cntr_level"), 50, 100, 0, 1, 59, QStringLiteral("auto (white clip)")));
+    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth fade-up after a bright cut"), led,
+        QStringLiteral("shaped_recovery"), true));
+    assistForm->addRow(QStringLiteral("Darkest start of a fade-up"),
+        numberControl(led, QStringLiteral("max_cut_dip"), 0.0, 1.0, 2, 0.05, 0.5, QString()));
+    assistForm->addRow(QStringLiteral("Contrast kept bright-side (%)"),
+        numberControl(led, QStringLiteral("recovery_bias_pct"), 0.0, 20.0, 1, 0.5, 3.0, QString()));
+    auto* prelift = levelControl(QStringLiteral("black_prelift_max"), 120);
+    assistForm->addRow(QStringLiteral("LED lift allowed while still black"), prelift);
+    assistForm->addRow(QString(), helpLabel(QStringLiteral(
+        "On a cut to a brighter scene the contrast goes to the cut level (auto = where white starts to clip, 59 "
+        "until measured; never 50), VP's gain to its maximum and the knee rolls off highlights; then the picture "
+        "fades up with the LED. The darkest start (0.5 = half brightness) also sets the LED floor in every scene. "
+        "Coming out of black with the look-ahead, the contrast is set and the LED may lift to the level above "
+        "while the screen is still black (60 = keep the black absolutely; 255 = the old behaviour).")));
+
+    auto* speeds = new QWidget;
+    auto* speedsForm = new QFormLayout(speeds);
+    speedsForm->setContentsMargins(0, 0, 0, 0);
+    speedsForm->setVerticalSpacing(8);
+    speedsForm->addRow(QStringLiteral("LED speeds"), bindChoiceField(led, QStringLiteral("rate_preset"),
+        { QStringLiteral("script"), QStringLiteral("compensated") },
+        { QStringLiteral("Script (your beta 22 speeds)"), QStringLiteral("Compensated (faster)") }));
+    const QString preset = QStringLiteral("preset");
+    speedsForm->addRow(QStringLiteral("Brightening: gain / min / max"), [&]
+    {
+        auto* row = new QWidget;
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(numberControl(led, QStringLiteral("rate_gain_up"), 0.0, 100.0, 2, 0.05, 0.25, preset));
+        layout->addWidget(numberControl(led, QStringLiteral("rate_min_up"), 0.0, 1000.0, 1, 0.5, 2.5, preset));
+        layout->addWidget(numberControl(led, QStringLiteral("rate_max_up"), 1.0, 1000.0, 1, 0.5, 17.5, preset));
+        return row;
+    }());
+    speedsForm->addRow(QStringLiteral("Dimming: gain / min / max"), [&]
+    {
+        auto* row = new QWidget;
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(numberControl(led, QStringLiteral("rate_gain_down"), 0.0, 100.0, 2, 0.05, 0.15, preset));
+        layout->addWidget(numberControl(led, QStringLiteral("rate_min_down"), 0.0, 1000.0, 1, 0.5, 2.5, preset));
+        layout->addWidget(numberControl(led, QStringLiteral("rate_max_down"), 1.0, 1000.0, 1, 0.5, 12.5, preset));
+        return row;
+    }());
+    speedsForm->addRow(QStringLiteral("Fade-up after a cut: gain / min / max"), [&]
+    {
+        auto* row = new QWidget;
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(numberControl(led, QStringLiteral("recovery_rate_gain"), 0.0, 100.0, 2, 0.05, 4.0, preset));
+        layout->addWidget(numberControl(led, QStringLiteral("recovery_rate_min"), 0.0, 1000.0, 1, 0.5, 20.0, preset));
+        layout->addWidget(numberControl(led, QStringLiteral("recovery_rate_max"), 1.0, 1000.0, 1, 0.5, 400.0, preset));
+        return row;
+    }());
+    speedsForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Levels per second: gain x distance, kept between min and max, so the LED is fast while far from its "
+        "target and eases in. The LED within a scene, and the LED and contrast moving together after a cut, "
+        "use the brightening / dimming speeds; only the fade-up for what they cannot yet supply uses the "
+        "fade-up speeds. \"preset\" = the LED speeds choice above.")));
+
+    auto* response = new QWidget;
+    auto* responseForm = new QFormLayout(response);
+    responseForm->setContentsMargins(0, 0, 0, 0);
+    responseForm->setVerticalSpacing(8);
+    responseForm->addRow(QStringLiteral("LED settle time (ms)"),
+        numberControl(projector, QStringLiteral("led_settle_ms"), 0, 5000, 0, 10, 300, QString()));
+    responseForm->addRow(QStringLiteral("Contrast settle time (ms)"),
+        numberControl(projector, QStringLiteral("cntr_settle_ms"), 0, 5000, 0, 10, 0, QString()));
+    responseForm->addRow(QStringLiteral("Highest useful contrast"),
+        numberControl(projector, QStringLiteral("cntr_max_usable"), 50, 100, 0, 1, 74, QString()));
+    responseForm->addRow(QStringLiteral("Contrast where white clips"),
+        numberControl(projector, QStringLiteral("dmd_clip_cntr"), 50, 100, 0, 1, 59, QString()));
+    responseForm->addRow(QString(), helpLabel(QStringLiteral(
+        "From the camera and light-meter measurements; leave the defaults until then. Settle time: how long "
+        "the light takes to arrive after the response time (300 ms is deliberately fast). White clips: the "
+        "contrast at which a white field stops getting brighter at full LED (59 = where your script's dump "
+        "ended).")));
+
     cards->addCard(createCard(QStringLiteral("LED drive"),
         QStringLiteral("Dim the projector's LED with the picture, as your beta 22 script did."), drive));
     cards->addCard(createCard(QStringLiteral("Experimental"),
         QStringLiteral("Deeper fade to black - test on the projector before relying on it."), experiment));
     cards->addCard(createCard(QStringLiteral("LED profile"),
         QStringLiteral("The detailed behaviour: built-in, or your own file."), profile));
+    cards->addCard(createCard(QStringLiteral("Contrast and cuts"),
+        QStringLiteral("Compensate: the projector's contrast, bright cuts and coming out of black."), assist));
+    cards->addCard(createCard(QStringLiteral("LED speeds"),
+        QStringLiteral("Compensate: how fast the LED and the fade-up move."), speeds));
     cards->addCard(createCard(QStringLiteral("Projector connection"),
         QStringLiteral("The serial link to the projector."), connection));
+    cards->addCard(createCard(QStringLiteral("Projector response"),
+        QStringLiteral("Measured timings and contrast limits."), response));
     return createPage(QStringLiteral("LED drive"),
         QStringLiteral("Projector LED dimming and the gamma boost."), cards);
 }
