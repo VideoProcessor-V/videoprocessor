@@ -4958,6 +4958,39 @@ namespace VideoProcessorTest
 						ToWide("2.2->2.4 grey " + std::to_string(codes[i]) + " expected " + std::to_string(ideal) + "\n" + report).c_str());
 				}
 			}
+			// Audit stage10-6d: a user MAIN shader that writes alpha 1 must not
+			// add +1 to every channel (a white picture). The carried offset is
+			// lost there (out-of-range codes clip as without the switch); the
+			// in-range picture is unchanged.
+			{
+				// A hook at the RGB stage after the carry that writes alpha 1,
+				// as a user shader returning vec4(rgb, 1.0) would.
+				pl_hook writer{};
+				writer.stages = PL_HOOK_RGB;
+				writer.input = PL_HOOK_SIG_COLOR;
+				writer.hook = [](void*, const pl_hook_params* hp)
+				{
+					pl_custom_shader custom{};
+					custom.description = "test: user shader writing alpha";
+					custom.input = PL_SHADER_SIG_COLOR;
+					custom.output = PL_SHADER_SIG_COLOR;
+					custom.body = "color.a = 1.0;\n";
+					pl_hook_res res{};
+					res.failed = !pl_shader_custom(hp->sh, &custom);
+					res.output = PL_HOOK_SIG_COLOR;
+					res.sh = hp->sh;
+					res.repr = hp->repr;
+					res.color = hp->color;
+					res.components = 4;
+					res.rect = hp->rect;
+					return res;
+				};
+				Case c;
+				c.extraHook = &writer;
+				const auto got = Columns(run("on 1:1, alpha-writing hook", c), static_cast<int>(codes.size()), 1.0);
+				for (size_t i = 3; i <= 7; ++i)   // 64 .. 940: in range
+					Assert::IsTrue(std::abs(got[i] - codes[i]) <= 1, ToWide("alpha writer changed the picture\n" + report).c_str());
+			}
 			fixture.CaptureLog(nullptr);
 			Logger::WriteMessage(report.c_str());
 			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
@@ -5544,12 +5577,114 @@ namespace VideoProcessorTest
 						L"A cut must show A exactly");
 				pl_tex_destroy(gpu, &targetTexture);
 			}
+			// Audit stage10-6d item 2: a fractional destination rectangle.
+			// libplacebo renders onto it rounded; the extra uses the same
+			// rounding, so a hold is still A exactly (not a resample).
+			{
+				const auto r = DejudderRendered::Rounded({ 0.0f, 0.0f, 256.0f, 128.0f },
+					{ 10.4f, 5.6f, 250.3f, 120.5f }, 256.0f, 128.0f);
+				Assert::IsTrue(r.target.x0 == 10.0f && r.target.y0 == 6.0f && r.target.x1 == 250.0f && r.target.y1 == 121.0f);
+				Assert::AreEqual(-0.4f * 256.0f / 239.9f, r.source.x0, 1e-4f);
+				pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				pl_tex_params tp{};
+				tp.w = width;
+				tp.h = height;
+				tp.format = targetFormat;
+				tp.renderable = true;
+				tp.host_readable = true;
+				tp.blit_dst = true;
+				pl_tex targetTexture = pl_tex_create(gpu, &tp);
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				const pl_rect2df fractional = { 10.4f, 5.6f, 250.3f, 120.5f };
+				auto frameTarget = [&](const pl_rect2df& crop)
+				{
+					pl_frame t = TargetLutGpuFixture::MakeRgbFrame(targetTexture);
+					t.color.transfer = PL_COLOR_TRC_BT_1886;
+					t.crop = crop;
+					return t;
+				};
+				auto download = [&]()
+				{
+					pl_gpu_finish(gpu);
+					std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
+					pl_tex_transfer_params d{};
+					d.tex = targetTexture;
+					d.ptr = output.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					return output;
+				};
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planesA.planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planesA.planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				std::vector<const pl_hook*> hooks = { cache.Hook() };
+				OutputEncodingRepair::Hook repair;
+				pl_frame t = frameTarget(fractional);
+				if (OutputEncodingRepair::Needed(hooks, nullptr, PL_LUT_UNKNOWN))
+				{
+					repair.SetTarget(t.repr);
+					hooks.insert(hooks.begin(), repair.Get());
+				}
+				pl_render_params p = params;
+				p.hooks = hooks.data();
+				p.num_hooks = static_cast<int>(hooks.size());
+				const float black[] = { 0.0f, 0.0f, 0.0f };
+				pl_frame_clear(gpu, &t, black);
+				cache.Arm(9);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+				const std::vector<RgbaPixel> shown = download();
+				Assert::IsNotNull(cache.Texture(9));
+				Assert::IsTrue(cache.Texture(9)->params.w == 240 && cache.Texture(9)->params.h == 115,
+					L"The cache is not libplacebo's rounded rectangle");
+				const auto rounded = DejudderRendered::Rounded(image.crop.x1 > 0 ? image.crop :
+					pl_rect2df{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) }, fractional,
+					static_cast<float>(width), static_cast<float>(height));
+				DejudderRendered::Geometry g;
+				g.sourceCrop = rounded.source;
+				g.targetCrop = rounded.target;
+				pl_tex out = nullptr;
+				Assert::IsTrue(rendered.Run(cache.Texture(9), warp.Field(), warp.FrameTrust(),
+					warp.GetSettings().minTrustedShare, 0.0f, g, out));
+				pl_frame held = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+				pl_frame ht = frameTarget(rounded.target);
+				std::vector<const pl_hook*> kept;
+				const pl_render_params hp = DejudderRendered::OutputOnly(params, {}, kept);
+				pl_frame_clear(gpu, &ht, black);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &held, &ht, &hp));
+				const std::vector<RgbaPixel> heldPixels = download();
+				int maxDiff = 0;
+				for (int y = 6; y < 121; ++y)
+					for (int x = 10; x < 250; ++x)
+					{
+						const RgbaPixel& a1 = shown[static_cast<size_t>(y) * width + x];
+						const RgbaPixel& b1 = heldPixels[static_cast<size_t>(y) * width + x];
+						maxDiff = std::max({ maxDiff, std::abs(a1.r - b1.r), std::abs(a1.g - b1.g), std::abs(a1.b - b1.b) });
+					}
+				report += "fractional crop: hold max " + std::to_string(maxDiff) + "\n";
+				Assert::AreEqual(0, maxDiff, ExtendedRangeGpuProbe::ToWide("A fractional crop resampled the extra: " + report).c_str());
+				pl_tex_destroy(gpu, &targetTexture);
+			}
 			fixture.CaptureLog(nullptr);
 			Logger::WriteMessage(report.c_str());
 			// 7.360.1 logs its PRE_OUTPUT encoding bug for the cache hook (a
 			// texture-input PRE_OUTPUT hook); VP's repair is in A's chain.
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
-			Assert::IsTrue(cache.Copies() == 2 && cache.Failed() == 0);
+			Assert::IsTrue(cache.Copies() == 3 && cache.Failed() == 0);
+			cache.Release();
+			Assert::IsNull(cache.Texture(9), L"Release must drop the cached picture");
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)

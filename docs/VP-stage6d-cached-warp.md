@@ -96,6 +96,17 @@ from").
   codes, 0.28% / 0.63% of samples over 2 codes (the source path decides
   chroma's hold at chroma positions; the kernels differ). Beta (377, limited
   8-bit target): cache ≤ 1, hold exact, extra vs source mean 0.17.
+- **Audit `stage10-6d.md` fixes:**
+  - Blocker: the cache texture and the warp (texture and dispatch) are
+    released with the de-judder in `ReleaseDejudder()`, before the device
+    is destroyed (they were freed after it, on every renderer teardown).
+  - The extra renders onto libplacebo's rounded destination rectangle and
+    the warp uses the matching source rectangle (`DejudderRendered::Rounded`),
+    so a fractional crop (aspect fits, blanking) stays exactly 1:1: test
+    with crop 10.4,5.6–250.3,120.5, hold max 0.
+  - The cache is armed only when extras may follow (`dejudderExtrasAllowed`;
+    not in mask-only mode).
+  - The Config tooltip's GPU-time figure is marked as an estimate.
 - **Not covered yet:** the NLS case on the GPU (the map is the occlusion
   mask's, tested there), the sharpness comparison and the render-time
   counters (WARP timings mean nothing; the 3050 Ti on this PC is the same

@@ -6249,7 +6249,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         warpStage->setItemText(warpStage->findData(QStringLiteral("source")), QStringLiteral("Source (full re-render)"));
         warpStage->setToolTip(QStringLiteral(
             "Rendered picture: each in-between frame warps the finished picture and runs only the final "
-            "dither stage (about a quarter of the GPU time at 4K). Source: each in-between frame re-renders "
+            "dither stage (estimated at about a quarter of the GPU time at 4K; not yet measured). Source: each in-between frame re-renders "
             "the whole chain from a warped source, the earlier path, kept for A/B comparison."));
         auto* dejudderTolerance = addText(QStringLiteral("Match tolerance (0.5 to 16)"),
             QStringLiteral("dejudder_match_tolerance"), QStringLiteral("codes"));

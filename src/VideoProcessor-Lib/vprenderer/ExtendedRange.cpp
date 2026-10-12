@@ -11,8 +11,9 @@ namespace ExtendedRange
 {
 	namespace
 	{
-		// The carried offset goes into alpha as it is (o in -1..1; beyond +-1
-		// the excess is clipped by libplacebo as without the switch).
+		// The carried offset goes into alpha as it is (o in -0.5..0.5, about
+		// 440 10-bit codes beyond the legal range; anything further is
+		// clipped by libplacebo as without the switch).
 		// libplacebo's intermediate textures are 16-bit float, and it never
 		// sigmoidises, linearises or clamps alpha. In-range pixels carry
 		// exactly 0, which any scaler keeps exactly 0 (its weights need not
@@ -23,13 +24,16 @@ if (er_convert_gamma > 0.5)
     color.rgb = sign(color.rgb) * pow(abs(color.rgb), vec3(er_gamma_ratio));
 float er_lo = min(min(color.r, color.g), color.b);
 float er_hi = max(max(color.r, color.g), color.b);
-float er_o = er_lo < 0.0 ? max(er_lo, -1.0) : (er_hi > 1.0 ? min(er_hi - 1.0, 1.0) : 0.0);
+float er_o = er_lo < 0.0 ? max(er_lo, -0.5) : (er_hi > 1.0 ? min(er_hi - 1.0, 0.5) : 0.0);
 color.rgb -= vec3(er_o);
 color.a = er_o;
 )GLSL";
 
+		// Guard (audit stage10-6d): a user shader between RGB and SCALED that
+		// writes alpha (e.g. vec4(rgb, 1.0)) leaves a value outside the
+		// carried range; it is ignored rather than added to every channel.
 		const char* const RESTORE_BODY = R"GLSL(
-color.rgb += vec3(color.a);
+color.rgb += vec3(abs(color.a) <= 0.5009 ? color.a : 0.0);
 color.a = 1.0;
 if (er_convert_primaries > 0.5) {
     vec3 er_l = sign(color.rgb) * pow(abs(color.rgb), vec3(er_output_gamma));

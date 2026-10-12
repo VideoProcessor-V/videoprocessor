@@ -30,6 +30,8 @@ namespace ExtendedRangeGpuProbe
 		bool linear = true;
 		// The owner's upscaler (ewa_lanczossharp); contrast recovery is HDR-only.
 		bool ownerScaling = false;
+		// A further hook (e.g. a user shader that writes alpha), after VP's.
+		const pl_hook* extraHook = nullptr;
 	};
 
 	struct Planes
@@ -174,6 +176,8 @@ namespace ExtendedRangeGpuProbe
 			std::vector<const pl_hook*> list;
 			result.decision = ExtendedRange::Decide(c.on, image.color, out.color, false);
 			ExtendedRange::Prepare(result.decision, hooks, image.color, out.color, list);
+			if (c.extraHook)
+				list.push_back(c.extraHook);
 			params.hooks = list.empty() ? nullptr : list.data();
 			params.num_hooks = static_cast<int>(list.size());
 			if (pl_render_image(renderer, &image, &out, &params))

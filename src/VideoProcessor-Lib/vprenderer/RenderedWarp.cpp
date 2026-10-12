@@ -164,8 +164,36 @@ if (q.x < size.x && q.y < size.y) {
 
 	Cache::~Cache()
 	{
+		Release();
+	}
+
+	void Cache::Release()
+	{
 		if (gpu && tex)
 			pl_tex_destroy(gpu, &tex);
+		tex = nullptr;
+		gpu = nullptr;
+		armed = 0;
+		valid = 0;
+	}
+
+	Rects Rounded(const pl_rect2df& source, const pl_rect2df& target, float framebufferW, float framebufferH)
+	{
+		Rects r;
+		const float w = framebufferW > 0.0f ? framebufferW : 1e9f;
+		const float h = framebufferH > 0.0f ? framebufferH : 1e9f;
+		const float x0 = std::fmin(target.x0, target.x1), x1 = std::fmax(target.x0, target.x1);
+		const float y0 = std::fmin(target.y0, target.y1), y1 = std::fmax(target.y0, target.y1);
+		const float rx0 = std::roundf(std::fmin(std::fmax(x0, 0.0f), w));
+		const float ry0 = std::roundf(std::fmin(std::fmax(y0, 0.0f), h));
+		const float rx1 = std::roundf(std::fmin(std::fmax(x1, 0.0f), w));
+		const float ry1 = std::roundf(std::fmin(std::fmax(y1, 0.0f), h));
+		const float scaleX = x1 > x0 ? (source.x1 - source.x0) / (x1 - x0) : 1.0f;
+		const float scaleY = y1 > y0 ? (source.y1 - source.y0) / (y1 - y0) : 1.0f;
+		r.source = { source.x0 + (rx0 - x0) * scaleX, source.y0 + (ry0 - y0) * scaleY,
+			source.x0 + (rx1 - x0) * scaleX, source.y0 + (ry1 - y0) * scaleY };
+		r.target = { rx0, ry0, rx1, ry1 };
+		return r;
 	}
 
 	pl_hook_res Cache::Run(void* priv, const pl_hook_params* params)

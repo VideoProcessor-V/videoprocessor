@@ -53,6 +53,9 @@ namespace DejudderRendered
 		// Arm before A's render: the hook then copies A's PRE_OUTPUT picture.
 		void Arm(uint64_t sequence) { armed = sequence; valid = 0; }
 		void Disarm() { armed = 0; }
+		// Frees the texture while its device still exists (audit stage10-6d
+		// blocker 1: before the renderer destroys the device).
+		void Release();
 		const pl_hook* Hook() const { return &hook; }
 		// The cached picture of this source frame, or nullptr.
 		pl_tex Texture(uint64_t sequence) const { return sequence != 0 && valid == sequence ? tex : nullptr; }
@@ -97,8 +100,21 @@ namespace DejudderRendered
 		std::string error;
 	};
 
-	// A frame showing `tex` (the warped picture) 1:1 on the target's crop, in
-	// the colour space the cache recorded (the target's: no conversion).
+	// libplacebo renders onto the destination rectangle rounded to whole
+	// pixels (clipped to the framebuffer) and moves the source rectangle with
+	// it (renderer.c, the dst_rect rounding). The cache is that rounded
+	// rectangle, so the warp's map and the extra's target crop use the same
+	// rounding: the extra is then exactly 1:1 (audit stage10-6d item 2).
+	struct Rects
+	{
+		pl_rect2df source{};
+		pl_rect2df target{};
+	};
+	Rects Rounded(const pl_rect2df& source, const pl_rect2df& target, float framebufferW, float framebufferH);
+
+	// A frame showing `tex` (the warped picture) 1:1 on the rounded target
+	// crop, in the colour space the cache recorded (the target's: no
+	// conversion).
 	pl_frame Frame(pl_tex tex, const pl_color_repr& repr, const pl_color_space& color);
 
 	// A's parameters for an extra: only hooks that act at PL_HOOK_OUTPUT,

@@ -3980,6 +3980,10 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
 		dejudder.reset();
+		// 6d: the cache and the rendered warp hold textures (and a dispatch)
+		// of this device (audit stage10-6d blocker 1).
+		dejudderCache.Release();
+		dejudderRenderedWarp.reset();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 	}
@@ -11268,6 +11272,7 @@ struct LibplaceboVideoRenderer::Impl
 			const float shift = strength * static_cast<float>(decision.delta);
 			pl_frame image = *f.image;
 			const pl_render_params* extraParams = &params;
+			bool renderedCrop = false;
 			pl_tex warpedPicture = nullptr;
 			if (cached && dejudderRenderedWarp)
 			{
@@ -11279,6 +11284,7 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				image = DejudderRendered::Frame(warpedPicture, dejudderCache.Repr(), dejudderCache.Color());
 				extraParams = &renderedParams;
+				renderedCrop = true;
 			}
 			else
 			{
@@ -11292,6 +11298,8 @@ struct LibplaceboVideoRenderer::Impl
 				image.planes[1].texture = warped.chroma;
 			}
 			pl_frame target = *f.target;
+			if (renderedCrop)
+				target.crop = dejudderGeometry.targetCrop;   // the cache's rounded rectangle: 1:1
 			bool rendered = false;
 			bool submitted = false;
 			double blockMs = 0.0;
@@ -15873,12 +15881,18 @@ struct LibplaceboVideoRenderer::Impl
         // PRE_OUTPUT hooks, after the LED compensation). With NLS the warp
         // needs the NLS map; an unknown NLS shader keeps the source path.
         dejudderCache.Disarm();
+        // Only when extras may follow (not in mask-only mode; audit
+        // stage10-6d item 3).
         if (activeSettings.dejudderWarpRendered && dejudderReason == DejudderPolicy::Reason::Active &&
-            dejudder && !cadenceRepeat && sourceSequence != 0)
+            dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0)
         {
             DejudderRendered::Geometry geometry;
-            geometry.sourceCrop = renderImage.crop;
-            geometry.targetCrop = target.crop;
+            const pl_tex framebuffer = target.planes[0].texture;
+            const DejudderRendered::Rects rounded = DejudderRendered::Rounded(renderImage.crop, target.crop,
+                framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f,
+                framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f);
+            geometry.sourceCrop = rounded.source;
+            geometry.targetCrop = rounded.target;
             bool mapped = true;
             if (submittedNls)
             {

@@ -1118,6 +1118,21 @@ Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
     differently), bounded at 0.05;
   - in-gamut BT.709 colours into P3, 2.2 and 2.4 out: identical to off;
   - decision cases and hook order (`ExtendedRangeDecision`).
+- **Planner (2026-10-12):** both design changes approved (the RGB-stage
+  gamma re-encode; the raw offset in alpha).
+- **Audit `stage10-6d.md` notes:**
+  - Applying the matrix after scaling equals today's picture for
+    linear-light scaling only. With sigmoid upscaling or gamma-light scaling
+    a coloured edge differs slightly from today (the matrix follows a
+    non-linear filter); the tests compare flat colour patches. Accepted:
+    BT.709 → P3 is close to identity on colour edges at 1.5×.
+  - Guard: the carry is limited to ±0.5 (≈440 10-bit codes beyond the legal
+    range) and the restore ignores an alpha outside it, so a user shader
+    between RGB and SCALED that writes alpha (vec4(rgb, 1.0)) loses the carry
+    for that frame instead of adding +1 to every channel (GPU test with an
+    alpha-writing hook).
+  - Equivalence of the gamma re-encode holds while SDR sources carry no
+    luminance metadata of their own (libplacebo copies the target's).
 - **Not covered yet:** NLS with the carry on (NLS warps the picture at RGB
   after the carry, interpolating in the output gamma's encoding instead of
   the source's: a sub-code difference at fine detail, not measured), the
