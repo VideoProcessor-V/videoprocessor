@@ -403,7 +403,11 @@ namespace LedDrive
 				// on black or a very dark picture the LED goes at once to at most
 				// black_prelift_max, never further while the picture is still
 				// dark; the full jump comes with the cut. 255 = before 7c-3.
-				if (config.blackPreliftMax < 255 && !stats.cut && stats.apl < 20.0)
+				// Not during a fade's gain hold unless the picture is truly
+				// black: the held gain would not compensate the LED's rise
+				// (audit stage7-step7c, Should fix 2).
+				if (config.blackPreliftMax < 255 && !stats.cut && stats.apl < 20.0 &&
+					(!stats.fade || (stats.apl < 17.0 && stats.highlight < 20.0)))
 				{
 					preposition = true;
 					target = std::max(target, std::min(aheadTarget,

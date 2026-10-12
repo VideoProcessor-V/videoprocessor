@@ -538,20 +538,11 @@ namespace LedDrive
 		const ControllerOutput out = compensator.Tick(target, elapsedMs, haveAhead ? &ahead : nullptr,
 			predicted, covered);
 		lookaheadCovers = covered;
-		// Queued to the driver's thread, which keeps only the newest and
-		// sends it when the command gap allows; the model follows what it
-		// actually sends (above).
-		if (out.lightCommand >= 0 && applyGain && fadeToBlack != FadeToBlack::Deep)
-		{
-			if (out.jump) driver->SetLightJump(out.lightCommand);
-			else driver->SetLight(out.lightCommand);
-		}
 		// CNTR assist (7c-1): CNTR follows the LED's modelled light for what
 		// VP's gain cannot do within the highlight tolerance, as a command
-		// only when the paired whole value changes. The light used is the
-		// lower of now and cntr_latency_ms ahead (heading for the level just
-		// commanded), so CNTR rises no later, and falls no earlier, than the
-		// LED needs. Not during a fade's gain hold or the custom dim.
+		// only when the paired whole value changes, on the modelled light now
+		// (never ahead of the LED; policy 3.4). Not during a fade's gain hold
+		// or the custom dim.
 		int contrastCommand = -1;
 		const bool allowed = applyGain && fadeToBlack == FadeToBlack::Normal && !out.holdGain;
 		// A fade's gain hold (or the custom dim) begins: a CNTR still waiting
@@ -618,6 +609,18 @@ namespace LedDrive
 		}
 		else
 			pairing.SetHold(-1);
+		// The LED command, after a cut's or a pre-position's CNTR (audit
+		// stage7-step7c, Should fix 1): queued first, the CNTR takes the next
+		// slot and the LPW1 follows a command gap later, so the CNTR lands with
+		// the cut. Queued to the driver's thread, which keeps only the newest
+		// and sends it when the command gap allows; the model follows what it
+		// actually sends. Within a scene the pairing's CNTR (below) comes
+		// after the LPW1 (dark direction: LPW1 before CNTR).
+		if (out.lightCommand >= 0 && applyGain && fadeToBlack != FadeToBlack::Deep)
+		{
+			if (out.jump) driver->SetLightJump(out.lightCommand);
+			else driver->SetLight(out.lightCommand);
+		}
 		if (allowed && contrastCommand < 0)
 		{
 			// CNTR is paired with the LED's modelled light now: never above the

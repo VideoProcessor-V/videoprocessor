@@ -710,7 +710,18 @@ namespace VideoProcessorTest
 				for (size_t i = 1; i < after.size(); ++i)
 					Assert::IsTrue(after[i] <= after[i - 1], L"CNTR never rises during the fade-up");
 				if (dump)
+				{
 					Assert::AreEqual(55, after.front(), L"one command to cut_cntr_level, never to 50 because of the cut");
+					// Audit stage7-step7c: the cut's CNTR goes out before the LED's jump.
+					size_t firstContrast = writes.size(), firstLight = writes.size();
+					for (size_t i = writesBefore; i < writes.size(); ++i)
+					{
+						if (firstContrast == writes.size() && writes[i] == ":CNTR55\r") firstContrast = i;
+						if (firstLight == writes.size() && writes[i].rfind(":LPW1", 0) == 0 && writes[i] != ":LPW1?\r")
+							firstLight = i;
+					}
+					Assert::IsTrue(firstContrast < firstLight, L"CNTR first, then the LPW1 a command gap later");
+				}
 				else
 					Assert::IsTrue(after.front() > 55 && after.size() > 1, L"held through the cut, descending paired");
 				Assert::AreEqual(50, module.AssistContrast(), L"back to 50 in the bright scene");
@@ -761,6 +772,34 @@ namespace VideoProcessorTest
 				Assert::AreEqual(255, controller.Light(), L"the cut jumps to the scene's level");
 				Assert::IsTrue(out.brightCut && !out.preposition);
 			}
+		}
+
+		// Audit stage7-step7c, Should fix 2: no pre-lift during a fade's gain
+		// hold unless the picture is truly black.
+		TEST_METHOD(NoPreliftWhileAFadeHoldsTheGainUnlessBlack)
+		{
+			LedDriveConfig config = Compensate();
+			config.blackPreliftMax = 120;
+			StatsBuilder bright(config);
+			double ahead = 0.0;
+			Lookahead look;
+			look.stats = Play(bright, ahead, 100.0, Frame(120.0));
+			look.cutAhead = true;
+			FrameStats fading;
+			fading.apl = fading.sustainedApl = 18.0;
+			fading.highlight = fading.sustainedHighlight = fading.maximum = 25.0;
+			fading.fade = true;
+			CompensateController dark(config);
+			dark.Reset(60);
+			Assert::IsFalse(dark.Tick(fading, 16.7, &look, true, true).preposition,
+				L"a dark, not black, picture still fading: no pre-lift (the gain is held)");
+			FrameStats black = fading;
+			black.apl = black.sustainedApl = 16.0;
+			black.highlight = black.sustainedHighlight = black.maximum = 16.0;
+			CompensateController blackController(config);
+			blackController.Reset(60);
+			Assert::IsTrue(blackController.Tick(black, 16.7, &look, true, true).preposition,
+				L"truly black: gain x black = black, so the pre-lift is invisible");
 		}
 
 		TEST_METHOD(CntrHoldRaisesAtOnceUntilReleased)
