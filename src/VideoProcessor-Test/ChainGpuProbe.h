@@ -1209,4 +1209,258 @@ namespace ChainGpuProbe
 		outcome.ok = true;
 		return outcome;
 	}
+
+	// ---- The combination matrix -------------------------------------------
+	// Every hook at once over a grid of the settings that change the render
+	// path: scale (downscale with SSIM and the blend, none, upscale with the
+	// prescaler and SSimSuperRes), NLS idle / active, linear / gamma light,
+	// Stage 10 on / off, limited / full-range output, the de-judder matcher
+	// running (grain map and mask) or not. Three moving frames each. Checked:
+	// it renders with nothing disabled; the moving texture matches the
+	// picture-shaping hooks with the same settings; the ramp is what the mode
+	// must give (Stage 10: BTB / WTW kept; off: clipped to 64 / 940; full
+	// range: mapped, nothing below 0 / above 1023); with NLS active (the
+	// ramp moves) BTB and WTW are present when Stage 10 keeps them.
+	struct Combo
+	{
+		double scale = 0.5;
+		bool nlsActive = false;
+		bool gammaLight = false;
+		bool stage10 = true;
+		bool fullRange = false;
+		bool matcher = true;
+		std::string Name() const
+		{
+			char text[160];
+			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s", scale,
+				nlsActive ? "on" : "off", gammaLight ? "gamma" : "linear", stage10 ? "on" : "off",
+				fullRange ? "full" : "limited", matcher ? "on" : "off");
+			return text;
+		}
+	};
+
+	inline Outcome RunMatrix(pl_gpu gpu, pl_renderer renderer, pl_log log, const ShaderSource& source, bool withRepair,
+		const Combo& combo)
+	{
+		using namespace ExtendedRangeGpuProbe;
+		Outcome outcome;
+		auto fail = [&outcome, &combo](const std::string& why) { outcome.failure = combo.Name() + ": " + why + "\n" + outcome.report; return outcome; };
+		const std::vector<int> ramp = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+		const int sw = 640, sh = 96;
+		const int ow = static_cast<int>(sw * combo.scale), oh = static_cast<int>(sh * combo.scale);
+		const bool down = oh < sh, upCnn = oh > sh * 1.3;
+		std::string error;
+		auto nls = Load(gpu, source, "NLS.glsl", ow, oh, { { "stretch_ratio", combo.nlsActive ? 1.32 : 1.0 } }, error);
+		auto led = nls ? Load(gpu, source, "LED compensation.glsl", ow, oh, { { "gain", 1.0 }, { "boost", 1.0 },
+			{ "gain_domain", 1.0 }, { "knee", 0.08 }, { "compensation_eotf", 2.41 } }, error) : nullptr;
+		auto ssim = led ? Load(gpu, source, "SSimDownscaler.glsl", ow, oh, {}, error) : nullptr;
+		auto pre = ssim ? Load(gpu, source, "FSRCNNX_x2_16-0-4-1.glsl", ow, oh, {}, error) : nullptr;
+		auto superRes = pre ? Load(gpu, source, "SSimSuperRes.glsl", ow, oh, {}, error) : nullptr;
+		auto sigma = superRes ? Load(gpu, source, "Temporal sigma-delta.glsl", ow, oh, { { "levels_full", combo.fullRange ? 1.0 : 0.0 },
+			{ "swapchain_bits", 10.0 }, { "color_bits", 10.0 }, { "occlusion_mask", combo.matcher ? 1.0 : 0.0 },
+			{ "motion_compensation", 1.0 } }, error) : nullptr;
+		if (!sigma)
+			return fail(error);
+		const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
+		pl_fmt r16 = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16, caps);
+		pl_fmt rg16 = pl_find_fmt(gpu, PL_FMT_UNORM, 2, 16, 16, caps);
+		if (!r16 || !rg16)
+			return fail("no storable 16-bit plane formats");
+		struct GpuPlanes
+		{
+			pl_gpu gpu = nullptr;
+			Dejudder::Planes planes;
+			~GpuPlanes() { pl_tex_destroy(gpu, &planes.luma); pl_tex_destroy(gpu, &planes.chroma); }
+		};
+		auto upload = [&](const Planes& p, GpuPlanes& out)
+		{
+			out.gpu = gpu;
+			pl_tex_params lp{}; lp.w = p.width; lp.h = p.height; lp.format = r16; lp.sampleable = true; lp.storable = true;
+			lp.initial_data = p.luma.data();
+			pl_tex_params cp = lp; cp.w = p.width / 2; cp.format = rg16; cp.initial_data = p.chroma.data();
+			out.planes.luma = pl_tex_create(gpu, &lp);
+			out.planes.chroma = pl_tex_create(gpu, &cp);
+			out.planes.chromaShiftX = 1;
+			out.planes.chromaShiftY = 0;
+			return out.planes.luma && out.planes.chroma;
+		};
+		Dejudder::MotionWarp warp(log, gpu);
+		AdaptiveDownscale::Module adaptive, reference;
+		AdaptiveDownscale::Settings settings;
+		OcclusionMask::Hook mask;
+		OutputEncodingRepair::Hook repair;
+		const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+		const pl_rect2df targetCrop{ 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+		NlsMaskMapping::Mapping nlsMapping;
+		if (combo.nlsActive)
+		{
+			// The bundled NLS map with the probe's fixed parameters (Load's tokens).
+			const std::map<std::string, std::string> fixed = { { "strength", "1.0" }, { "curve", "2.0" }, { "geometry", "1" },
+				{ "center_protection", "0.35" } };
+			nlsMapping = NlsMaskMapping::FromParameters(fixed, 1.32, false, false);
+		}
+		for (int f = 0; f < 3; ++f)
+		{
+			const Planes a = MovingFrame(8 * f, ramp), b = MovingFrame(8 * (f + 1), ramp);
+			GpuPlanes ga, gb;
+			if (!upload(a, ga) || !upload(b, gb))
+				return fail("plane upload failed");
+			const int slot = f % 2;
+			if (combo.matcher && !warp.Estimate(ga.planes, gb.planes, slot, true))
+				return fail("estimate failed: " + warp.LastError());
+			auto renderOne = [&](bool chain) -> Result
+			{
+				AdaptiveDownscale::Module& module = chain ? adaptive : reference;
+				module.SetFrame(settings, static_cast<uint64_t>(f + 1), 1.0f / 24.0f);
+				module.SetSourceDownscales(sh > oh);
+				module.ClearGrainField();
+				if (combo.matcher)
+				{
+					AdaptiveDownscale::GrainField field;
+					field.error = warp.GrainError();
+					field.field = warp.Field();
+					field.frameTrust = warp.FrameTrust();
+					field.minTrustedShare = warp.GetSettings().minTrustedShare;
+					field.sourceCrop = sourceCrop;
+					field.nls = nlsMapping;
+					module.SetGrainField(field);
+				}
+				Case c;
+				c.scale = combo.scale;
+				c.mitchell = true;
+				c.linear = !combo.gammaLight;
+				c.on = combo.stage10;
+				c.fullRangeOutput = combo.fullRange;
+				std::vector<const pl_hook*> hooks = { module.Measure(), nls->hook };
+				if (chain)
+					hooks.push_back(led->hook);
+				if (upCnn) { hooks.push_back(pre->hook); hooks.push_back(superRes->hook); }
+				if (down) hooks.push_back(ssim->hook);
+				hooks.push_back(module.Blend());
+				if (chain)
+				{
+					if (combo.matcher)
+					{
+						mask.SetFrame(warp.Occlusion(slot), sourceCrop, targetCrop);
+						if (combo.nlsActive)
+							mask.SetNls(nlsMapping, sourceCrop);
+						hooks.push_back(mask.Get());
+					}
+					hooks.push_back(sigma->hook);
+					if (withRepair)
+					{
+						pl_color_repr target{};
+						target.sys = PL_COLOR_SYSTEM_RGB;
+						target.levels = combo.fullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+						target.bits.sample_depth = 10;
+						target.bits.color_depth = 10;
+						repair.SetTarget(target);
+						c.firstHook = repair.Get();
+					}
+				}
+				c.extraHooks = hooks;
+				return Render(gpu, renderer, a, c);
+			};
+			const Result r = renderOne(true);
+			const Result ref = renderOne(false);
+			if (!r.ok || !ref.ok)
+				return fail("render failed: " + r.error + ref.error);
+			int maxDiff = 0;
+			double sum = 0.0, signedSum = 0.0;
+			int count = 0;
+			const int y0 = static_cast<int>(4 * combo.scale), y1 = static_cast<int>(52 * combo.scale);
+			for (int y = y0; y < y1; ++y)
+				for (int x = static_cast<int>(12 * combo.scale); x < ow - static_cast<int>(12 * combo.scale); ++x)
+				{
+					const int signedD = r.Channel(x, y, 1) - ref.Channel(x, y, 1);
+					const int d = std::abs(signedD);
+					maxDiff = d > maxDiff ? d : maxDiff;
+					sum += d;
+					signedSum += signedD;
+					++count;
+				}
+			std::string line = combo.Name() + " frame " + std::to_string(f) + ": vs shaping max " + std::to_string(maxDiff) +
+				" mean " + std::to_string(count ? sum / count : 0.0).substr(0, 5) + " (signed " +
+				std::to_string(count ? signedSum / count : 0.0).substr(0, 6) + "), ramp:";
+			const int rampY = static_cast<int>(80 * combo.scale);
+			std::vector<int> got, refGot;
+			for (size_t k = 0; k < ramp.size(); ++k)
+			{
+				got.push_back(r.Channel(static_cast<int>((k * 64 + 32) * combo.scale), rampY, 1));
+				refGot.push_back(ref.Channel(static_cast<int>((k * 64 + 32) * combo.scale), rampY, 1));
+				line += " " + std::to_string(got.back());
+			}
+			outcome.report += line + "\n";
+			// On 7.360 the encoding repair (any PRE_OUTPUT texture hook: the LED
+			// shader) re-encodes about 0.42 code low on average (measured on WARP
+			// and a GeForce; at most 1 code); the Beta needs no repair.
+			if (maxDiff > 2 || (count && sum / count > (withRepair ? 0.8 : 0.6)))
+				return fail("the chain changed the picture");
+			if (pl_renderer_get_errors(renderer).num_disabled_hooks != 0)
+				return fail("a hook was disabled");
+			if (combo.stage10 && r.restores == 0)
+				return fail("the Stage 10 restore did not run");
+			if (!combo.nlsActive)
+			{
+				for (size_t k = 0; k < ramp.size(); ++k)
+				{
+					// Stage 10 on: every code kept (full range: mapped, within 0..1023);
+					// off: what plain libplacebo gives (it clips below black, and
+					// above white only on some paths), as the reference shows.
+					int want = ramp[k];
+					if (!combo.stage10)
+						want = refGot[k];
+					else if (combo.fullRange)
+						want = (std::min)(1023, (std::max)(0, static_cast<int>(std::lround((ramp[k] - 64) * 1023.0 / 876.0))));
+					// Above white through the upscale shaders (SSimSuperRes on the
+					// clipped white, plus 7.360's repair bias): up to 3 codes low.
+					const int tolerance = (upCnn && ramp[k] > 940) ? 3 : 2;
+					if (std::abs(got[k] - want) > tolerance)
+						return fail("ramp code " + std::to_string(ramp[k]) + " came out " + std::to_string(got[k]) +
+							" (expected " + std::to_string(want) + ")");
+				}
+			}
+			else if (combo.stage10 && !combo.fullRange)
+			{
+				int lowest = 1023, highest = 0;
+				for (int x = 0; x < ow; ++x)
+				{
+					lowest = (std::min)(lowest, r.Channel(x, rampY, 1));
+					highest = (std::max)(highest, r.Channel(x, rampY, 1));
+				}
+				if (lowest >= 60 || highest <= 944)
+					return fail("with NLS active BTB / WTW were not kept (lowest " + std::to_string(lowest) + ", highest " +
+						std::to_string(highest) + ")");
+			}
+		}
+		adaptive.Release();
+		reference.Release();
+		outcome.ok = true;
+		return outcome;
+	}
+
+	// The grid: all of it, or (quick) a spread covering every value of every axis.
+	inline std::vector<Combo> MatrixCombos(bool full)
+	{
+		std::vector<Combo> combos;
+		const double scales[] = { 0.5, 0.75, 1.0, 1.5, 2.0 };
+		for (double scale : scales)
+			for (int bits = 0; bits < 32; ++bits)
+			{
+				Combo c;
+				c.scale = scale;
+				c.nlsActive = (bits & 1) != 0;
+				c.gammaLight = (bits & 2) != 0;
+				c.stage10 = (bits & 4) == 0;
+				c.fullRange = (bits & 8) != 0;
+				c.matcher = (bits & 16) == 0;
+				combos.push_back(c);
+			}
+		if (full)
+			return combos;
+		std::vector<Combo> quick;
+		for (size_t i = 0; i < combos.size(); i += 7)   // 23 of 160, every value of every axis
+			quick.push_back(combos[i]);
+		return quick;
+	}
 }

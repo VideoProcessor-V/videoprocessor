@@ -58,6 +58,8 @@ namespace ExtendedRangeGpuProbe
 		// SDR target of targetNits (the projector).
 		bool hdrSource = false;
 		float targetNits = 100.0f;
+		// A full-range (PC levels) output instead of limited.
+		bool fullRangeOutput = false;
 	};
 
 	struct Planes
@@ -200,7 +202,7 @@ namespace ExtendedRangeGpuProbe
 			out.planes[0].components = 3;
 			for (int i = 0; i < 3; ++i) out.planes[0].component_mapping[i] = i;
 			out.repr.sys = PL_COLOR_SYSTEM_RGB;
-			out.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			out.repr.levels = c.fullRangeOutput ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
 			out.repr.bits.sample_depth = 10; out.repr.bits.color_depth = 10;
 			out.color.primaries = c.outputPrimaries;
 			out.color.transfer = c.outputTransfer;

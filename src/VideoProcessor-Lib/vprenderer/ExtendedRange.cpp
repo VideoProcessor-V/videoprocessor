@@ -13,35 +13,49 @@ namespace ExtendedRange
 {
 	namespace
 	{
-		// The carried offset rides in alpha as a = 1 + o (o in -0.5..0.5,
-		// about 440 10-bit codes beyond the legal range; anything further is
-		// clipped by libplacebo as without the switch). In-range pixels carry
-		// exactly 1: libplacebo hands user shaders (the SSIM downscaler, NLS)
-		// premultiplied colour, colour x alpha, which a stored 0 turned black
-		// (Stage 8 test: SSIM with the carry); x 1 changes nothing. libplacebo
-		// never sigmoidises, linearises or clamps alpha. A scaler whose weights
-		// do not sum to exactly 1 leaves a +- 1e-3 or so: offsets under 2 of
-		// 10-bit codes (2 / 876) are taken as none (clipped as today). Outside the carried
-		// range (a user shader writing its own alpha) nothing is added.
+		// The carry: the source gamma re-encoded to the output's, the primaries
+		// converted here, before scaling, where libplacebo converts without the
+		// switch (a non-linear shader such as SSIM then sees the same values;
+		// converting after scaling differed by up to 40 codes on saturated
+		// colours, measured); then either the picture clipped to 0..1 or the
+		// remainder value - clipped (ER_REMAINDER), per channel.
 		const char* const CARRY_BODY = R"GLSL(
 if (er_convert_gamma > 0.5)
     color.rgb = sign(color.rgb) * pow(abs(color.rgb), vec3(er_gamma_ratio));
-float er_lo = min(min(color.r, color.g), color.b);
-float er_hi = max(max(color.r, color.g), color.b);
-float er_o = er_lo < 0.0 ? max(er_lo, -0.5) : (er_hi > 1.0 ? min(er_hi - 1.0, 0.5) : 0.0);
-color.rgb -= vec3(er_o);
-color.a = 1.0 + er_o;
-)GLSL";
-
-		const char* const RESTORE_BODY = R"GLSL(
-float er_o = color.a - 1.0;
-color.rgb += vec3(abs(er_o) < 0.0023 || abs(er_o) > 0.5009 ? 0.0 : er_o);
-color.a = 1.0;
 if (er_convert_primaries > 0.5) {
     vec3 er_l = sign(color.rgb) * pow(abs(color.rgb), vec3(er_output_gamma));
     er_l = er_matrix * er_l;
     color.rgb = sign(er_l) * pow(abs(er_l), vec3(1.0 / er_output_gamma));
 }
+vec3 er_clipped = clamp(color.rgb, 0.0, 1.0);
+#ifdef ER_REMAINDER
+color = vec4(color.rgb - er_clipped, 1.0);
+#else
+color.rgb = er_clipped;
+#endif
+)GLSL";
+
+		// The restore: the remainder at the output pixel's position in the
+		// carry's rectangle, averaged over the pixel's footprint (4x4 bilinear
+		// taps, at least one source pixel wide), added back.
+		const char* const RESTORE_HEADER = R"GLSL(
+vec3 er_remainder_at(vec2 q)
+{
+    vec2 u = (q - er_out_rect.xy) / er_out_rect.zw;
+    vec2 s = er_carry_rect.xy + u * er_carry_rect.zw;
+    vec2 fp = max(er_carry_rect.zw / er_out_rect.zw, vec2(1.0));
+    vec2 size = vec2(textureSize(er_remainder, 0));
+    vec3 sum = vec3(0.0);
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++)
+            sum += texture(er_remainder, (s + ((vec2(i, j) + 0.5) / 4.0 - 0.5) * fp) / size).rgb;
+    return sum / 16.0;
+}
+)GLSL";
+
+		const char* const RESTORE_BODY = R"GLSL(
+color.rgb += er_remainder_at(gl_FragCoord.xy);
+color.a = 1.0;
 )GLSL";
 
 		bool ContainsBt709(enum pl_color_primaries primaries)
@@ -127,19 +141,15 @@ if (er_convert_primaries > 0.5) {
 	Hooks::Hooks()
 	{
 		carry.stages = PL_HOOK_RGB;
-		carry.input = PL_HOOK_SIG_COLOR;
+		carry.input = PL_HOOK_SIG_TEX;
 		carry.priv = this;
 		carry.hook = &Hooks::RunCarry;
-		carry.signature = 0x5650585243415259ull;   // "VPXRCARY"
+		carry.signature = 0x5650585253504C54ull;   // "VPXRSPLT"
 		restore.stages = PL_HOOK_SCALED;
 		restore.input = PL_HOOK_SIG_COLOR;
 		restore.priv = this;
 		restore.hook = &Hooks::RunRestore;
 		restore.signature = 0x5650585252535452ull;   // "VPXRRSTR"
-		carryTexture = carry;
-		carryTexture.input = PL_HOOK_SIG_TEX;
-		carryTexture.hook = &Hooks::RunCarryTexture;
-		carryTexture.signature = 0x5650585243415254ull;   // "VPXRCART"
 		restoreTexture = restore;
 		restoreTexture.input = PL_HOOK_SIG_TEX;
 		restoreTexture.hook = &Hooks::RunRestoreTexture;
@@ -151,22 +161,6 @@ if (er_convert_primaries > 0.5) {
 		decision = decisionIn;
 		output = outputIn;
 		gammaRatio = decision.outputGamma > 0.0f ? decision.sourceGamma / decision.outputGamma : 1.0f;
-	}
-
-	bool Hooks::AppendCarry(pl_shader sh) const
-	{
-		const float convertGamma = decision.convertGamma ? 1.0f : 0.0f;
-		const pl_shader_var variables[2] = {
-			{ pl_var_float("er_convert_gamma"), &convertGamma, true },
-			{ pl_var_float("er_gamma_ratio"), &gammaRatio, true } };
-		pl_custom_shader custom{};
-		custom.description = "VP extended range: carry";
-		custom.input = PL_SHADER_SIG_COLOR;
-		custom.output = PL_SHADER_SIG_COLOR;
-		custom.variables = variables;
-		custom.num_variables = 2;
-		custom.body = CARRY_BODY;
-		return pl_shader_custom(sh, &custom);
 	}
 
 	bool Hooks::EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h)
@@ -193,66 +187,71 @@ if (er_convert_primaries > 0.5) {
 		return true;
 	}
 
+	// The split: two passes over the RGB-stage texture into VP's own float
+	// textures (the clipped picture, handed on; the remainder, kept).
 	pl_hook_res Hooks::RunCarry(void* priv, const pl_hook_params* params)
-	{
-		Hooks* self = static_cast<Hooks*>(priv);
-		if (!self->AppendCarry(params->sh))
-			return Failure();
-		pl_hook_res res{};
-		res.output = PL_HOOK_SIG_COLOR;
-		res.sh = params->sh;
-		res.repr = params->repr;
-		res.repr.alpha = PL_ALPHA_INDEPENDENT;
-		res.color = params->color;
-		res.components = 4;
-		res.rect = params->rect;
-		return res;
-	}
-
-	// For a single-plane RGB source (the subtitle move's composed picture, an
-	// RGB capture), or after a hook on the planes before RGB (CfL chroma
-	// prediction, a LUMA prescaler): libplacebo asserts (renderer.c:457,
-	// "w && h") on the render after an inline colour hook at PL_HOOK_RGB
-	// there, measured with an RGB source and with CfL; a texture-input hook
-	// (NLS) is fine. So the carry renders its own full-float texture: same
-	// body, alpha = 1 + offset.
-	pl_hook_res Hooks::RunCarryTexture(void* priv, const pl_hook_params* params)
 	{
 		Hooks* self = static_cast<Hooks*>(priv);
 		if (!params->tex)
 			return Failure();
 		const int w = params->tex->params.w, h = params->tex->params.h;
-		if (!EnsureFloat(params->gpu, self->carryGpu, self->carryTex, w, h))
+		if (self->gpu && self->gpu != params->gpu)
+			self->Release();
+		pl_gpu ownerA = self->gpu, ownerB = self->gpu;
+		if (!EnsureFloat(params->gpu, ownerA, self->clipped, w, h) ||
+			!EnsureFloat(params->gpu, ownerB, self->remainder, w, h))
 			return Failure();
-		pl_shader sh = pl_dispatch_begin(params->dispatch);
-		pl_sample_src src{};
-		src.tex = params->tex;
-		src.components = 4;
-		if (!pl_shader_sample_direct(sh, &src) || !self->AppendCarry(sh))
+		self->gpu = params->gpu;
+		const float convertGamma = self->decision.convertGamma ? 1.0f : 0.0f;
+		const float convertPrimaries = self->decision.convertPrimaries ? 1.0f : 0.0f;
+		for (int pass = 0; pass < 2; ++pass)
 		{
-			pl_dispatch_abort(params->dispatch, &sh);
-			return Failure();
+			pl_shader sh = pl_dispatch_begin(params->dispatch);
+			pl_sample_src src{};
+			src.tex = params->tex;
+			src.components = 4;
+			const pl_shader_var variables[5] = {
+				{ pl_var_float("er_convert_gamma"), &convertGamma, true },
+				{ pl_var_float("er_gamma_ratio"), &self->gammaRatio, true },
+				{ pl_var_float("er_convert_primaries"), &convertPrimaries, true },
+				{ pl_var_float("er_output_gamma"), &self->decision.outputGamma, true },
+				{ pl_var_mat3("er_matrix"), self->decision.matrix, true } };
+			pl_custom_shader custom{};
+			custom.description = pass == 0 ? "VP extended range: remainder" : "VP extended range: clipped picture";
+			custom.header = pass == 0 ? "#define ER_REMAINDER 1\n" : nullptr;
+			custom.input = PL_SHADER_SIG_COLOR;
+			custom.output = PL_SHADER_SIG_COLOR;
+			custom.variables = variables;
+			custom.num_variables = 5;
+			custom.body = CARRY_BODY;
+			if (!pl_shader_sample_direct(sh, &src) || !pl_shader_custom(sh, &custom))
+			{
+				pl_dispatch_abort(params->dispatch, &sh);
+				return Failure();
+			}
+			pl_dispatch_params dp{};
+			dp.shader = &sh;
+			dp.target = pass == 0 ? self->remainder : self->clipped;
+			if (!pl_dispatch_finish(params->dispatch, &dp))
+				return Failure();
 		}
-		pl_dispatch_params dp{};
-		dp.shader = &sh;
-		dp.target = self->carryTex;
-		if (!pl_dispatch_finish(params->dispatch, &dp))
-			return Failure();
+		self->carryRect = params->rect;
 		pl_hook_res res{};
 		res.output = PL_HOOK_SIG_TEX;
-		res.tex = self->carryTex;
+		res.tex = self->clipped;
 		res.repr = params->repr;
-		res.repr.alpha = PL_ALPHA_INDEPENDENT;
 		res.color = params->color;
-		res.components = 4;
+		res.components = params->components;
 		res.rect = params->rect;
 		return res;
 	}
 
 	// The restore on a shader: libplacebo's own delinearize when the stage
 	// is linear, then the offset back and the primaries matrix.
-	bool Hooks::AppendRestore(pl_shader sh, pl_color_space& color) const
+	bool Hooks::AppendRestore(pl_shader sh, pl_color_space& color, const pl_rect2df& rect) const
 	{
+		if (!remainder)
+			return false;
 		// After linear-light (or sigmoid) scaling libplacebo hands this stage
 		// linear values: back to the output transfer it was told, with its
 		// own exact inverse (including its SDR black handling).
@@ -261,17 +260,26 @@ if (er_convert_primaries > 0.5) {
 			color.transfer = output.transfer;
 			pl_shader_delinearize(sh, &color);
 		}
-		const float convertPrimaries = decision.convertPrimaries ? 1.0f : 0.0f;
-		const pl_shader_var variables[3] = {
-			{ pl_var_float("er_convert_primaries"), &convertPrimaries, true },
-			{ pl_var_float("er_output_gamma"), &decision.outputGamma, true },
-			{ pl_var_mat3("er_matrix"), decision.matrix, true } };
+		const float outRect[4] = { rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0 };
+		const float carry[4] = { carryRect.x0, carryRect.y0, carryRect.x1 - carryRect.x0, carryRect.y1 - carryRect.y0 };
+		const pl_shader_var variables[2] = {
+			{ pl_var_vec4("er_out_rect"), outRect, true },
+			{ pl_var_vec4("er_carry_rect"), carry, true } };
+		pl_shader_desc remainderDesc{};
+		remainderDesc.desc.name = "er_remainder";
+		remainderDesc.desc.type = PL_DESC_SAMPLED_TEX;
+		remainderDesc.binding.object = remainder;
+		remainderDesc.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+		remainderDesc.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
 		pl_custom_shader custom{};
 		custom.description = "VP extended range: restore";
+		custom.header = RESTORE_HEADER;
 		custom.input = PL_SHADER_SIG_COLOR;
 		custom.output = PL_SHADER_SIG_COLOR;
+		custom.descriptors = &remainderDesc;
+		custom.num_descriptors = 1;
 		custom.variables = variables;
-		custom.num_variables = 3;
+		custom.num_variables = 2;
 		custom.body = RESTORE_BODY;
 		return pl_shader_custom(sh, &custom);
 	}
@@ -281,7 +289,7 @@ if (er_convert_primaries > 0.5) {
 	{
 		Hooks* self = static_cast<Hooks*>(priv);
 		pl_color_space color = params->color;
-		if (!self->AppendRestore(params->sh, color))
+		if (!self->AppendRestore(params->sh, color, params->rect))
 			return Failure();
 		++self->applied;
 		pl_hook_res res{};
@@ -297,14 +305,11 @@ if (er_convert_primaries > 0.5) {
 
 	void Hooks::Release()
 	{
-		if (restoreGpu)
-			pl_tex_destroy(restoreGpu, &restoreTex);
-		restoreGpu = nullptr;
-		restoreTex = nullptr;
-		if (carryGpu)
-			pl_tex_destroy(carryGpu, &carryTex);
-		carryGpu = nullptr;
-		carryTex = nullptr;
+		if (gpu)
+			for (pl_tex* tex : { &clipped, &remainder, &restoreTex })
+				pl_tex_destroy(gpu, tex);
+		gpu = nullptr;
+		clipped = remainder = restoreTex = nullptr;
 	}
 
 	// After another hook's texture output at PRE_KERNEL / POST_KERNEL (the
@@ -322,14 +327,16 @@ if (er_convert_primaries > 0.5) {
 		// Only its own texture is resized: the carry's may be this frame's
 		// current image (Release() would free both).
 		const int w = params->tex->params.w, h = params->tex->params.h;
-		if (!EnsureFloat(params->gpu, self->restoreGpu, self->restoreTex, w, h))
+		pl_gpu owner = self->gpu;
+		if (!EnsureFloat(params->gpu, owner, self->restoreTex, w, h))
 			return Failure();
+		self->gpu = params->gpu;
 		pl_shader sh = pl_dispatch_begin(params->dispatch);
 		pl_sample_src src{};
 		src.tex = params->tex;
 		src.components = 4;
 		pl_color_space color = params->color;
-		if (!pl_shader_sample_direct(sh, &src) || !self->AppendRestore(sh, color))
+		if (!pl_shader_sample_direct(sh, &src) || !self->AppendRestore(sh, color, params->rect))
 		{
 			pl_dispatch_abort(params->dispatch, &sh);
 			return Failure();
@@ -358,23 +365,12 @@ if (er_convert_primaries > 0.5) {
 			return;
 		hooks.SetFrame(decision, output);
 		sourceColor = output;
-		bool afterTextureHooks = false, beforeRgbHooks = false;
-		const auto planeStages = static_cast<enum pl_hook_stage>(PL_HOOK_RGB_INPUT | PL_HOOK_LUMA_INPUT |
-			PL_HOOK_CHROMA_INPUT | PL_HOOK_ALPHA_INPUT | PL_HOOK_XYZ_INPUT | PL_HOOK_CHROMA_SCALED |
-			PL_HOOK_ALPHA_SCALED | PL_HOOK_NATIVE);
-		for (const pl_hook* hook : list)
-		{
-			if (hook && (hook->stages & (PL_HOOK_PRE_KERNEL | PL_HOOK_POST_KERNEL)))
-				afterTextureHooks = true;
-			// A hook on the planes before RGB (CfL chroma prediction, a LUMA
-			// prescaler): libplacebo 7.360 also asserted after the inline carry
-			// with CfL (measured); the texture form is used then.
-			if (hook && (hook->stages & planeStages))
-				beforeRgbHooks = true;
-		}
-		// A texture carry also needs the texture restore: libplacebo disabled the
-		// inline restore after it (FSRCNNX alone, measured).
-		const bool textureCarry = singlePlaneRgb || beforeRgbHooks;
-		list.insert(list.begin(), { hooks.Carry(textureCarry), hooks.Restore(afterTextureHooks || textureCarry) });
+		// The restore renders its own texture: after the carry's texture output
+		// libplacebo rejects an inline hook at SCALED (measured; 10a found the
+		// same after any texture-output hook at PRE/POST_KERNEL).
+		(void)singlePlaneRgb;
+		const bool textureRestore = true;
+		list.insert(list.begin(), hooks.Restore(textureRestore));
+		list.push_back(hooks.Carry());
 	}
 }

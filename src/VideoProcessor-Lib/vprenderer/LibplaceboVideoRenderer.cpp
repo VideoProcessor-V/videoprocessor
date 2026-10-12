@@ -4924,7 +4924,7 @@ struct LibplaceboVideoRenderer::Impl
 					pl_tex_destroy(d3d11->gpu, &texture);
 				ReleaseDejudder();   // before the device goes
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
-				extendedRangeHooks.Release();   // Stage 10: the restore's texture
+				extendedRangeHooks.Release();   // Stage 10: its textures
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
 				dejudderExtraIds.clear();
