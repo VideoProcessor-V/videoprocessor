@@ -3866,6 +3866,53 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		// Delta 5 (D5-4): the occlusion mask with full-range output. Mid grey
+		// is 8-bit 127.5 there (10-bit 508/512): mask 1 keeps the carry, mask 0
+		// stops it, and alpha goes back to 1.
+		TEST_METHOD(OcclusionMaskWorksWithFullRangeOutput)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			pl_gpu gpu = fixture.Gpu();
+			std::vector<const pl_hook*> sigmaHooks;
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfigureSigma(chain, 2, 2, sigmaHooks);
+			Assert::AreEqual(size_t{ 1 }, sigmaHooks.size(), L"libplacebo rejected the sigma-delta");
+			Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "levels_full", 1.0));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "occlusion_mask", 1.0));
+			pl_tex seen = MakeMaskTexture(gpu, 1, 1, { 65535 });
+			pl_tex fresh = MakeMaskTexture(gpu, 1, 1, { 0 });
+			OcclusionMask::Hook mask;
+			const pl_rect2df whole{ 0.0f, 0.0f, 2.0f, 2.0f };
+			auto describe = [](const std::vector<int>& codes)
+			{
+				std::wstring text;
+				for (int code : codes) text += std::to_wstring(code) + L" ";
+				return text;
+			};
+			mask.SetFrame(seen, whole, whole);
+			std::vector<int> alphas;
+			const std::vector<int> carry = fixture.RenderTenBitSequence({ mask.Get(), sigmaHooks[0] },
+				PL_COLOR_LEVELS_FULL, 0.5f, 8, &alphas);
+			Assert::IsTrue(std::find(carry.begin(), carry.end(), 508) != carry.end() &&
+				std::find(carry.begin(), carry.end(), 512) != carry.end(),
+				(L"Full range, mask 1 must keep the carry (127/128): " + describe(carry)).c_str());
+			for (int alpha : alphas)
+				Assert::AreEqual(3, alpha, L"The sigma-delta must write alpha back to 1");
+			mask.SetFrame(fresh, whole, whole);
+			const std::vector<int> stopped = fixture.RenderTenBitSequence({ mask.Get(), sigmaHooks[0] },
+				PL_COLOR_LEVELS_FULL, 0.5f, 8);
+			for (int code : stopped)
+				Assert::AreEqual(stopped[0], code, (L"Full range, mask 0 must stop the carry: " +
+					describe(stopped)).c_str());
+			pl_tex_destroy(gpu, &seen);
+			pl_tex_destroy(gpu, &fresh);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		// The mask lands on the right output pixels after scaling (1.5x) and
 		// edge blanking (16 px each side): source block column 1 (x 16..31)
 		// is "new", so output x 40..63 (16 + 1.5 * [16, 32)) must stop the
