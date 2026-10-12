@@ -90,11 +90,14 @@ namespace LedDrive
 		// The highest CNTR that still adds light (light-meter step, control
 		// policy 6): the most mode: compensate's CNTR assist may use.
 		int cntrMaxUsable = 74;
-		// The CNTR at which code 235 reaches the DMD's maximum (planner's
-		// 7c-2 answer 1; white-field sweep, policy 6). -1 = cntr_max_usable
-		// (no clipping below the reserve limit, policy 1). Above it CNTR
-		// counts against the highlight tolerance like VP's gain.
-		int dmdClipCntr = -1;
+		// The CNTR at which code 235 reaches the DMD's maximum at full LED.
+		// 59 until the fixed-LED white sweep measures it (owner correction:
+		// the script's crush above about 60; the equal-white light-meter table
+		// does not establish the clip point). Above it more CNTR adds no
+		// highlight light: the highlight floor and the assist (when the scene
+		// has highlights) stop there, and the fade-up's ceiling shrinks.
+		// -1 = cntr_max_usable.
+		int dmdClipCntr = 59;
 		// lpw : relative flux, ascending lpw; empty = flux proportional to lpw.
 		std::vector<std::pair<double, double>> fluxTable;
 	};
@@ -188,6 +191,17 @@ namespace LedDrive
 		// A partial dump's residual CNTR descends paired, biased this much to
 		// the bright side (VP's gain trims the excess).
 		double recoveryBiasPct = 3.0;
+		// Owner correction (2026-10-11): on a bright cut CNTR goes to this
+		// level, never to 50 because of the cut (VP's gain cannot add
+		// absolute light; only CNTR's headroom can while the LED is low). -1 =
+		// dmd_clip_cntr (59: where the script's highlight dump ends).
+		int cutCntrLevel = -1;
+		// The fade-up's displayed-light ramp for the shortfall LED x CNTR x
+		// gain cannot yet reach: fast, bounded by the modelled light (the
+		// paired LED / CNTR move itself keeps the script-matched rates).
+		double recoveryRateGain = 4.0;
+		double recoveryRateMin = 20.0;
+		double recoveryRateMax = 400.0;
 		bool earlyRamp = true;
 		// A cut the look-ahead has seen: one jump to the new scene's level,
 		// timed to land on the cut frame (both directions; the cut hides it).
@@ -447,6 +461,10 @@ namespace LedDrive
 			Boolean("shaped_recovery"),
 			Number("max_cut_dip", 0.0, 1.0),
 			Number("recovery_bias_pct", 0.0, 20.0),
+			Integer("cut_cntr_level", 50, 100),
+			Number("recovery_rate_gain", 0.0, 100.0),
+			Number("recovery_rate_min", 0.0, 10000.0),
+			Number("recovery_rate_max", 1.0, 10000.0),
 			Choice("rate_preset", { "script", "compensated" }),
 			Boolean("software_first"),
 			Integer("deadband", 0, 50),
@@ -727,6 +745,10 @@ namespace LedDrive
 		config.TryGetBool(section, "shaped_recovery", result.shapedRecovery);
 		readNumber("max_cut_dip", result.maxCutDip);
 		readNumber("recovery_bias_pct", result.recoveryBiasPct);
+		readInt("cut_cntr_level", 50, 100, result.cutCntrLevel);
+		readNumber("recovery_rate_gain", result.recoveryRateGain);
+		readNumber("recovery_rate_min", result.recoveryRateMin);
+		readNumber("recovery_rate_max", result.recoveryRateMax);
 		config.TryGetBool(section, "software_first", result.softwareFirst);
 		readInt("deadband", 0, 50, result.deadband);
 		config.TryGetBool(section, "early_ramp", result.earlyRamp);

@@ -303,6 +303,10 @@ real:
 >   - `dmd_clip_cntr` (`[projector]`, default `cntr_max_usable`): above it
 >     CNTR counts against the highlight tolerance. No effect at the default.
 >   - `cntr_assist_max` lifted to 100 (no cap beyond `cntr_max_usable`).
+>   - **Owner correction** (docs/VP-stage7-cut-correction-answers.md): the
+>     cut takes CNTR to `cut_cntr_level` (default = `dmd_clip_cntr`, 59),
+>     never to 50 because of the cut; the fade-up's shortfall ramp uses the
+>     fast `recovery_rate_*`; with highlights CNTR stops at `dmd_clip_cntr`.
 >   - Regression recipe now also `max_cut_dip: 0`, `shaped_recovery: off`.
 > - The look-ahead extras (black-frame pre-positioning, head start, exit
 >   from black) and the Config page keys are 7c-3.

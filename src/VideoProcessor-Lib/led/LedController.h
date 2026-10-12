@@ -343,16 +343,17 @@ namespace LedDrive
 		void SetCeiling(int value) { ceiling = value; }
 		int Ceiling() const { return ceiling; }
 		void SetBias(double value) { bias = value; }
-		// The dump point (control policy 3.3; planner's 7c-2 answer 1): 50,
-		// or the smallest whole value that keeps the fade-up's start,
-		// ledFraction x Light(c) x gainCeiling, at maxCutDip or above; never
-		// above the current value.
-		int DumpTarget(double ledFraction, double gainCeiling, double maxCutDip) const;
+		// The bright cut's CNTR (owner correction, 2026-10-11): cutLevel, or
+		// higher if that is needed to keep the fade-up's start, ledFraction x
+		// Light(c) x gainCeiling, at maxCutDip; never above the current value.
+		int DumpTarget(double ledFraction, double gainCeiling, double maxCutDip, int cutLevel = 50) const;
 		// compensation: the light factor the LED needs (ceiling flux /
 		// modelled LED flux where the CNTR command will land); vpHeadroom:
 		// the largest VP gain the highlights allow. Returns the CNTR to send,
 		// or -1 when it stays.
-		int Update(double compensation, double vpHeadroom);
+		// limit >= 50: no higher than this now (dmd_clip_cntr while the
+		// scene has highlights: above it CNTR adds no highlight light).
+		int Update(double compensation, double vpHeadroom, int limit = -1);
 		int Contrast() const { return contrast; }
 		// The light factor CNTR was asked to supply at the last update.
 		double Required() const { return required; }

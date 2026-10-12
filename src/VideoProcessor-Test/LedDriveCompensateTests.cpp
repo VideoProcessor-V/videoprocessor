@@ -577,6 +577,14 @@ namespace VideoProcessorTest
 			Assert::AreEqual(50, pairing.DumpTarget(0.1, 1.26, 0.0), L"max_cut_dip 0: always full");
 			pairing.Reset(52);
 			Assert::AreEqual(52, pairing.DumpTarget(0.1, 1.26, 0.5), L"never above the current value");
+			// Owner correction: the cut goes to cut_cntr_level (59), not 50.
+			pairing.Reset(70);
+			Assert::AreEqual(59, pairing.DumpTarget(0.5, 1.26, 0.5, 59), L"to the owner's level, not 50");
+			const int held = pairing.DumpTarget(0.25, 1.26, 0.5, 59);
+			Assert::IsTrue(held > 59 && 0.25 * pairing.Light(held) * 1.26 >= 0.5,
+				L"higher than the level only to hold max_cut_dip");
+			pairing.Reset(55);
+			Assert::AreEqual(55, pairing.DumpTarget(0.5, 1.26, 0.5, 59), L"already below the level: kept");
 			// During the fade-up CNTR never rises, and the need carries the bias.
 			pairing.Reset(56);
 			pairing.SetCeiling(56);
@@ -594,10 +602,16 @@ namespace VideoProcessorTest
 		// - and the gain never exceeds the ceiling; it lands on 1.
 		TEST_METHOD(CutRecoveryFollowsTheRampUnderTheLed)
 		{
-			for (const bool compensated : { false, true })
+			for (const bool slow : { false, true })
 			{
 				LedDriveConfig config;
-				ApplyRatePreset(config, compensated);
+				if (slow)
+				{
+					// As slow as the script's LED, to check the shape holds.
+					config.recoveryRateGain = 0.25;
+					config.recoveryRateMin = 2.5;
+					config.recoveryRateMax = 17.5;
+				}
 				CutRecovery recovery;
 				recovery.Configure(config, FluxModel());
 				SettleModel led(300.0, 0.4);
@@ -640,9 +654,10 @@ namespace VideoProcessorTest
 				projector->contrast = 50;
 				LedDriveConfig config = Assisted();
 				ApplyRatePreset(config, true);
-				config.maxCutDip = 0.5;
+				config.maxCutDip = 0.3;
 				config.shapedRecovery = true;
 				config.cutCntrDump = dump;
+				config.cutCntrLevel = 55; // below where the dim scene's CNTR sits, so a dump shows
 				ProjectorConfig port;
 				port.protocol = "barco_ascii";
 				port.ackTimeoutMs = 60;
@@ -661,24 +676,22 @@ namespace VideoProcessorTest
 					WaitFor([&] { return !module.ProjectorStatus().busy; });
 					return gain;
 				};
-				for (int frame = 0; frame < 600; ++frame) render(Frame(18.0, 100, 230));
+				for (int frame = 0; frame < 600; ++frame) render(Frame(18.0, 100, 200));
 				const int before = module.AssistContrast();
 				Assert::IsTrue(before > 50, L"the dark scene raised CNTR");
 				Assert::IsTrue(WaitFor([&] { return projector->contrast == before; }));
 				const size_t writesBefore = projector->Writes().size();
 
-				// The cut: a bright scene with the same highlight.
-				const double ceiling = std::pow(2.0, config.highlightToleranceStops) /
-					std::pow((230.0 - 16.0) / 219.0, config.compensationEotf);
-				CompensationGain gain = render(Frame(120.0, 100, 230));
-				// With the dump the scene starts darker and fades up; held CNTR
-				// (dump off) can show it fully at once, needing no fade-up.
-				if (dump) Assert::IsTrue(module.Recovering(), L"the fade-up starts on the cut");
+				Assert::IsTrue(before <= 59, L"with highlights CNTR stops at dmd_clip_cntr (59)");
+				// The cut: a bright scene with highlights at white (ceiling 2^tolerance).
+				const double ceiling = std::pow(2.0, config.highlightToleranceStops);
+				CompensationGain gain = render(Frame(120.0, 100, 235));
+				Assert::IsTrue(module.Recovering(), L"the fade-up starts on the cut");
 				Assert::IsTrue(gain.gain <= ceiling + 1e-6, L"the gain goes no higher than the new scene's ceiling");
 				double previousDisplayed = module.RecoveryDisplayed();
 				for (int frame = 0; frame < 900 && module.Recovering(); ++frame)
 				{
-					gain = render(Frame(120.0, 100, 230));
+					gain = render(Frame(120.0, 100, 235));
 					Assert::IsTrue(gain.gain <= ceiling + 1e-6);
 					Assert::IsTrue(module.RecoveryDisplayed() >= previousDisplayed - 1e-9, L"the fade-up only climbs");
 					previousDisplayed = module.RecoveryDisplayed();
@@ -686,7 +699,7 @@ namespace VideoProcessorTest
 				Assert::IsFalse(module.Recovering(), L"the fade-up ends");
 				// Let a held CNTR finish its paired descent.
 				for (int frame = 0; frame < 300 && module.AssistContrast() > 50; ++frame)
-					render(Frame(120.0, 100, 230));
+					render(Frame(120.0, 100, 235));
 				std::vector<int> after;
 				const auto writes = projector->Writes();
 				for (size_t i = writesBefore; i < writes.size(); ++i)
@@ -696,9 +709,9 @@ namespace VideoProcessorTest
 				for (size_t i = 1; i < after.size(); ++i)
 					Assert::IsTrue(after[i] <= after[i - 1], L"CNTR never rises during the fade-up");
 				if (dump)
-					Assert::AreEqual(50, after.front(), L"one dump straight to 50 (the floor holds max_cut_dip)");
+					Assert::AreEqual(55, after.front(), L"one command to cut_cntr_level, never to 50 because of the cut");
 				else
-					Assert::IsTrue(after.front() > 50 && after.size() > 1, L"held through the cut, descending paired");
+					Assert::IsTrue(after.front() > 55 && after.size() > 1, L"held through the cut, descending paired");
 				Assert::AreEqual(50, module.AssistContrast(), L"back to 50 in the bright scene");
 				module.Stop();
 			}

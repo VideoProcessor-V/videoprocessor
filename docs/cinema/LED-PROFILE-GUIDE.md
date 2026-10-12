@@ -63,7 +63,9 @@ full light.
 | `cut_cntr_dump`, `shaped_recovery` | compensate | on a cut to a brighter scene: contrast drops to 50 and the picture fades up smoothly with the LED | leave on; compare with `cut_cntr_dump: false` (contrast held) by eye |
 | `max_cut_dip` | compensate | the darkest start of that fade-up you accept; sets the LED floor (about 102 at 0.5) | lower for deeper dimming and darker fade-ups |
 | `recovery_bias_pct` | compensate | a contrast left above 50 comes down this much on the bright side | leave |
-| `dmd_clip_cntr` (`[projector]`) | compensate | the contrast at which white stops getting brighter (white-field measurement) | leave until measured |
+| `dmd_clip_cntr` (`[projector]`) | compensate | the contrast at which white stops getting brighter at full LED; 59 = where your script's dump ended | set from the fixed-LED white sweep |
+| `cut_cntr_level` | compensate | the contrast a cut to a brighter scene goes to (default = `dmd_clip_cntr`) | lower by taste if highlights crush after a cut |
+| `recovery_rate_*` | compensate | how fast the picture fades up for what the LED and contrast cannot yet supply | leave |
 | `led_settle_ms`, `cntr_latency_ms`, `cntr_settle_ms`, `cntr_max_usable` (`[projector]`) | compensate | how fast the LED and contrast respond, and the highest useful contrast | from the camera / light-meter measurement; until then 300 / 80 / 0 / 74 |
 | `early_ramp` | compensate | start before a cut seen in the queue | leave on |
 | `cut_jump` | compensate | a seen cut: one jump timed to land on the cut frame | leave on; off ramps instead |

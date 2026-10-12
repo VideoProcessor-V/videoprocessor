@@ -210,6 +210,35 @@ namespace VideoProcessorTest
 
 		// The regression recipe uses the fixed rates even with the new
 		// rate_max defaults.
+		// Owner correction (2026-10-11): cut_cntr_level (default =
+		// dmd_clip_cntr, 59), dmd_clip_cntr 59 until the fixed-LED white
+		// sweep, fast recovery_rate_* for the fade-up's shortfall.
+		TEST_METHOD(CutLevelClipAndRecoveryRatesAreRead)
+		{
+			Assert::AreEqual(59, ProjectorConfig().dmdClipCntr);
+			const LedDriveConfig defaults;
+			Assert::AreEqual(-1, defaults.cutCntrLevel, L"follows dmd_clip_cntr");
+			Assert::AreEqual(4.0, defaults.recoveryRateGain, 1e-12);
+			Assert::AreEqual(400.0, defaults.recoveryRateMax, 1e-12);
+			std::string error;
+			const std::string good = "[projector.Default]\ndmd_clip_cntr: 63\n"
+				"[led_drive.Default]\ncut_cntr_level: 57\nrecovery_rate_gain: 2\nrecovery_rate_min: 10\n"
+				"recovery_rate_max: 200\n";
+			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(good);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const ProjectorConfig projector = ReadProjectorConfig(config);
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::AreEqual(63, projector.dmdClipCntr);
+			Assert::AreEqual(57, led.cutCntrLevel);
+			Assert::AreEqual(2.0, led.recoveryRateGain, 1e-12);
+			Assert::AreEqual(10.0, led.recoveryRateMin, 1e-12);
+			Assert::AreEqual(200.0, led.recoveryRateMax, 1e-12);
+			Assert::IsFalse(Validates("[led_drive.Default]\ncut_cntr_level: 40\n", error));
+		}
+
 		TEST_METHOD(RegressionRecipeUsesTheFixedRates)
 		{
 			LedDriveConfig config = Compensate();

@@ -69,6 +69,30 @@ slower down) because the owner asked to keep his kinetics; a faster
 
 ### 3.3 Bright cut — dump the projector's contrast, keep brightness up in software
 
+> **Owner correction (2026-10-11, confirmed by the planner; supersedes the
+> "dump to 50 / partial dump" text below).** VP's gain cannot add absolute
+> light: a white code can only go to the top of the code range (≈ +20–30%).
+> While the LED is low, only CNTR's light headroom supplies real light, so
+> dumping CNTR to 50 on a bright cut throws away brightness software cannot
+> recover. Therefore:
+> 1. **Bright cut:** CNTR goes to `cut_cntr_level` (default 59 =
+>    `dmd_clip_cntr`, where the script's highlight dump ends), never to 50
+>    because of the cut; if already below it, kept as it is; higher only to
+>    hold `max_cut_dip`. "The dump" below means this.
+> 2. **Exit from black / a very dark scene cutting to bright** (§3.5): CNTR
+>    raised to `cut_cntr_level` during the black, the LED started early
+>    (capped at `black_prelift_max` while black), VP's gain prepared — none
+>    of it visible on black.
+> 3. **At the cut:** LED × CNTR at `cut_cntr_level`; VP's gain to its
+>    maximum; the knee rolls off what would clip within
+>    `highlight_tolerance_stops`.
+> 4. **After the cut:** LED and CNTR paired at the script-matched rates,
+>    CNTR descending from `cut_cntr_level` as the LED rises, VP's gain
+>    interpolating the integer steps. The displayed-light ramp covers only
+>    the remaining shortfall, at the fast `recovery_rate_*`, bounded by the
+>    modelled light. The LED command on a cut is still one command to the
+>    scene's level.
+
 Lowering CNTR and lowering VP gain do the *same* thing to mid-tones and to
 headroom (both scale the code that reaches the DMD). So there is no reason
 to keep CNTR high through a bright cut, and every reason not to: a high
@@ -133,7 +157,7 @@ rate law. CNTR must never rise ahead of the LED's actual dimming.
   frames that would have to be reversed.
 - **Exit from black (special case):** when the queue shows a bright scene
   coming while the screen is black, pre-position everything at once —
-  CNTR to the post-cut dump point for that scene (on black it has no
+  CNTR to `cut_cntr_level` (owner correction, §3.3) (on black it has no
   visible effect, so this is free), and the LED commanded straight to
   `black_prelift_max` in one command — the rate law does not apply on
   black, only the LED's own settle time does. `black_prelift_max` is the
@@ -198,6 +222,12 @@ should stay at 60.
 - White field (code 235), LED 255: luminance vs CNTR 74 upward in steps
   of 5 until it stops rising → `cntr_max_usable` (bounds the paired
   compensation within scenes and what a partial dump may retain).
+- **Fixed-LED white sweep** (owner correction): white field (code 235) at
+  LED 255 fixed, CNTR 50 upward until white stops rising → `dmd_clip_cntr`.
+  The light-meter table was taken at equal white (LED turned down as CNTR
+  went up), so it establishes E and the pre-gamma gain but not where white
+  clips at full LED; the script's crush above CNTR ≈ 60 is the evidence
+  until this sweep is done.
 Until measured: `led_latency_ms 80`, `led_settle_ms 300` (deliberately
 **fast-biased**: the recovery gain is `ramp / modelled LED light`, so a
 model faster than the real LED errs on the dark side — a slower fade-up —
@@ -215,14 +245,17 @@ led_settle_ms: 300           # fast-biased until measured; see §6
 cntr_latency_ms: 80
 cntr_settle_ms: 0
 cntr_max_usable: 74
-dmd_clip_cntr: 74            # CNTR at which code 235 reaches the DMD max; = cntr_max_usable until the
-                             # white-field sweep says otherwise. Knee threshold = min(VP headroom, DMD headroom)
+dmd_clip_cntr: 59            # CNTR at which code 235 reaches the DMD max at full LED: the script's crush
+                             # point until the fixed-LED white sweep (§6); the equal-white table does not
+                             # establish it. Knee threshold = min(VP headroom, DMD headroom)
 flux_table:                  # optional; linear if absent
 
 [led_drive.Default]
 mode: compensate             # compensate | script | log_only
 cntr_assist: on              # off = no CNTR (feature switch, not a mode)
-cntr_assist_max: 62          # cap until 7c-2's dump exists; then cntr_max_usable
+cntr_assist_max: 100         # 7c-2: no cap beyond cntr_max_usable (was 62 until the dump existed)
+cut_cntr_level: 59           # bright cut / exit from black; default = dmd_clip_cntr
+recovery_rate_gain / recovery_rate_min / recovery_rate_max   # fast ramp for the fade-up's shortfall
 # regression recipe for "the previous compensate exactly":
 #   cntr_assist: off, led_settle_ms: 0, rate_gain_up/down: 0
 software_first: on

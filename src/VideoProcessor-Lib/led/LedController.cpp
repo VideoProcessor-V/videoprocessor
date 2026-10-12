@@ -511,9 +511,9 @@ namespace LedDrive
 		return std::pow(value / 50.0, eotf);
 	}
 
-	int CntrPairing::DumpTarget(double ledFraction, double gainCeiling, double maxCutDip) const
+	int CntrPairing::DumpTarget(double ledFraction, double gainCeiling, double maxCutDip, int cutLevel) const
 	{
-		int value = 50;
+		int value = std::max(50, cutLevel);
 		if (maxCutDip > 0.0)
 			while (value < contrast && ledFraction * Light(value) * gainCeiling < maxCutDip) ++value;
 		return std::min(value, contrast);
@@ -544,8 +544,10 @@ namespace LedDrive
 		if (!active) return 1e9;
 		const double ceiling = config.ledCeiling;
 		const double distance = ceiling - rampLevel;
-		const double rate = config.rateGainUp > 0.0 ? RampRate(distance, config.rateGainUp, config.rateMinUp,
-			config.rateMaxUp > 0.0 ? config.rateMaxUp : config.rateUp) : config.rateUp;
+		// The fast recovery rates (owner correction): the paired LED / CNTR
+		// keep the script-matched rates; this ramp only covers the shortfall.
+		const double rate = RampRate(distance, config.recoveryRateGain, config.recoveryRateMin,
+			config.recoveryRateMax);
 		rampLevel = std::min(ceiling, rampLevel + rate * std::max(0.0, elapsedMs) / 1000.0);
 		const double light = std::max(1e-6, ledFraction * contrastLight);
 		const double displayed = Displayed();
@@ -559,7 +561,7 @@ namespace LedDrive
 		return std::min(gainCeiling, displayed / light);
 	}
 
-	int CntrPairing::Update(double compensation, double vpHeadroom)
+	int CntrPairing::Update(double compensation, double vpHeadroom, int limit)
 	{
 		const double software = softwareFirst ? std::max(1.0, vpHeadroom) : 1.0;
 		// The light CNTR is needed for; below 1 when VP's gain has room to
@@ -575,6 +577,7 @@ namespace LedDrive
 		// the way up instead: rise only once the need passes the current
 		// value's light by 2% (VP's gain covers that 2% meanwhile).
 		if (ceiling >= 50) wanted = std::min(wanted, ceiling);
+		if (limit >= 50) wanted = std::min(wanted, limit);
 		int next = contrast;
 		if (wanted < contrast)
 			next = wanted;

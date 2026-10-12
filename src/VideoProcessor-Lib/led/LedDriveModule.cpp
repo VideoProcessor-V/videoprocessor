@@ -553,21 +553,22 @@ namespace LedDrive
 		// for the port must not land during it (audit stage7-step7c1).
 		if (assistAllowed && !allowed) HoldContrastLocked();
 		assistAllowed = allowed;
-		// 7c-2, bright cut (control policy 3.3; planner's 7c-2 answers):
-		// once per cut, CNTR dumps to 50 (partially only to keep the fade-up's
-		// start at max_cut_dip), sent now so it lands with the LED's jump on
-		// the cut frame (CNTR takes the slot ahead of the LPW1, which follows
-		// after the command gap). During the fade-up CNTR never rises; a
-		// residual descends paired with recovery_bias_pct.
+		// 7c-2, bright cut (control policy 3.3 as corrected by the owner,
+		// 2026-10-11): once per cut, CNTR goes to cut_cntr_level (59 by
+		// default; higher only to keep the fade-up's start at max_cut_dip;
+		// never above where it is), never to 50 because of the cut: VP's gain
+		// cannot add absolute light. Sent now so it lands with the LED's jump
+		// on the cut frame (CNTR takes the slot ahead of the LPW1). During the
+		// fade-up CNTR never rises; it descends paired as the LED rises, with
+		// recovery_bias_pct.
 		if (out.brightCut && (cutSequence == 0 || cutSequence != lastBrightCutSequence))
 		{
 			lastBrightCutSequence = cutSequence;
 			const double dmd = pairing.Light(DmdClipLocked());
-			if (allowed && led.cutCntrDump && pairing.Contrast() > 50)
+			const int cutLevel = led.cutCntrLevel >= 50 ? led.cutCntrLevel : DmdClipLocked();
+			if (allowed && led.cutCntrDump && pairing.Contrast() > cutLevel)
 			{
-				const double ceilingAtDump = out.cutHighlight > 0.0 ?
-					std::min(out.cutCeiling, dmd / out.cutHighlight) : out.cutCeiling;
-				const int dump = pairing.DumpTarget(ledModel.Value(), ceilingAtDump, led.maxCutDip);
+				const int dump = pairing.DumpTarget(ledModel.Value(), out.cutCeiling, led.maxCutDip, cutLevel);
 				if (dump < pairing.Contrast())
 				{
 					pairing.Reset(dump);
@@ -581,11 +582,10 @@ namespace LedDrive
 			{
 				pendingRecovery = true;
 				pendingRecoverySequence = cutSequence;
-				// The new scene's headroom, and never past where white clips on
-				// the DMD at the CNTR it will have (dmd_clip_cntr).
-				pendingRecoveryCeiling = out.cutHighlight > 0.0 ?
-					std::min(out.cutCeiling, dmd / (out.cutHighlight * pairing.Light(pairing.Contrast()))) :
-					out.cutCeiling;
+				// The new scene's headroom (the knee's tolerance), shrunk in
+				// proportion when CNTR is above where white clips on the DMD.
+				pendingRecoveryCeiling = out.cutCeiling *
+					std::min(1.0, dmd / pairing.Light(pairing.Contrast()));
 			}
 		}
 		else if (out.darkCut)
@@ -600,14 +600,13 @@ namespace LedDrive
 		{
 			// CNTR is paired with the LED's modelled light now: never above the
 			// paired value for the modelled LED (policy 3.4; planner's 7c-2
-			// answer 4). Above dmd_clip_cntr, CNTR counts against the highlight
-			// tolerance like VP's gain (planner's 7c-2 answer 1).
-			double headroom = out.vpHeadroom;
-			const double highlight = out.highlightCap < 1e8 ? 1.0 / out.highlightCap : 0.0;
-			if (highlight > 0.0)
-				headroom = std::min(headroom,
-					pairing.Light(DmdClipLocked()) / (highlight * pairing.Light(pairing.Contrast())));
-			contrastCommand = pairing.Update(1.0 / std::max(1e-6, ledModel.Value()), headroom);
+			// answer 4). While the scene has highlights (VP's headroom is
+			// limited), CNTR stops at dmd_clip_cntr: above it more CNTR adds no
+			// highlight light (the highlight floor keeps the LED where that
+			// suffices). Feeding the clip into the headroom instead would make
+			// each CNTR step ask for the next.
+			const int limit = out.vpHeadroom < 1e8 ? DmdClipLocked() : -1;
+			contrastCommand = pairing.Update(1.0 / std::max(1e-6, ledModel.Value()), out.vpHeadroom, limit);
 			if (contrastCommand >= 0) driver->SetContrastAsync(contrastCommand);
 		}
 		if (contrastCommand > 50) assistContrastDriven = true;
