@@ -651,6 +651,8 @@ namespace RendererProfileConfig
 					"none", "ewa_lanczos" });
 			}
 			if (key == "sigmoid") return IsChoice(value, { "auto", "on", "off" });
+			// Stage 8-1: the light domain of downscaling frames.
+			if (key == "downscale_light") return IsChoice(value, { "linear", "gamma" });
 			if (key == "dithering") return IsChoice(value, { "auto", "on", "off",
 				"blue_noise", "ordered_lut", "ordered_fixed", "white_noise",
 				"error_diffusion_simple", "error_diffusion_false_fs",
@@ -1936,7 +1938,7 @@ namespace RendererProfileConfig
 				"switch_refresh_rate",
 				"quality", "tone_mapping", "gamut_mapping", "peak_detection",
 				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "downscaler", "deband",
-				"deband_strength", "sigmoid", "dithering", "display_bit_depth", "output_presentation",
+				"deband_strength", "sigmoid", "downscale_light", "dithering", "display_bit_depth", "output_presentation",
 				"output_range", "output_gamma", "output_path_profile",
 				"target_primaries", "sdr_target_primaries", "report_bt2020_to_display",
 				"sdr_input_transfer", "sdr_adjust_gamma", "output_diagnostics",

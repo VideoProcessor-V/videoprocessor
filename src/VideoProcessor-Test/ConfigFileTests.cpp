@@ -30,6 +30,7 @@
 #include <UnifiedProfileRuntime.h>
 #include <VideoConversionOverride.h>
 #include <vprenderer/DejudderPolicy.h>
+#include <vprenderer/DownscaleLight.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include "CppUnitTest.h"
@@ -583,6 +584,35 @@ namespace VideoProcessorTest
                 Assert::IsTrue(error.find("saturation") != std::string::npos,
                     std::wstring(error.begin(), error.end()).c_str());
             }
+        }
+
+        // Stage 8-1: downscale_light is a scaling-profile choice, and gamma
+        // light applies to downscaling frames only.
+        TEST_METHOD(DownscaleLightIsAScalingChoiceForDownscalingFrames)
+        {
+            struct Case { const char* value; bool valid; };
+            for (const Case c : { Case{ "linear", true }, Case{ "gamma", true }, Case{ "auto", false } })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                    "[vprenderer.scaling.cinema]\ndownscale_light: " << c.value << "\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                const bool ok = MainConfigSchema::Validate(config, error) && runtime.Initialize(config, {}, error);
+                Assert::AreEqual(c.valid, ok, std::wstring(error.begin(), error.end()).c_str());
+            }
+            const pl_rect2df uhd = { 0.0f, 0.0f, 3840.0f, 2160.0f };
+            const pl_rect2df hd = { 0.0f, 0.0f, 1920.0f, 1080.0f };
+            const pl_rect2df scope = { 0.0f, 200.0f, 2560.0f, 1400.0f };
+            const pl_rect2df full = { 0.0f, 0.0f, 2560.0f, 1600.0f };
+            Assert::IsTrue(DownscaleLight::UseGammaLight("gamma", uhd, full));
+            Assert::IsTrue(DownscaleLight::UseGammaLight("gamma", pl_rect2df{ 0.0f, 0.0f, 2560.0f, 2160.0f }, full), L"One axis downscaled counts");
+            Assert::IsFalse(DownscaleLight::UseGammaLight("gamma", hd, scope), L"1080p into a scope rectangle is an upscale");
+            Assert::IsFalse(DownscaleLight::UseGammaLight("gamma", hd, full), L"Upscaling keeps linear light");
+            Assert::IsFalse(DownscaleLight::UseGammaLight("linear", uhd, full));
+            Assert::IsFalse(DownscaleLight::UseGammaLight("gamma", full, full), L"1:1 is not a downscale");
         }
 
         TEST_METHOD(DejudderSettingsAreInputProfileNumbersWithLimits)

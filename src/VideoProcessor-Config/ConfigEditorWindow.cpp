@@ -6491,6 +6491,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		antiRinging->setToolTip(QStringLiteral(
 			"Optional sigmoidization before upscaling. It reduces ringing artifacts; Auto uses the scaling-quality preset."));
 		addRendererAutoStatus(QStringLiteral("sigmoid"), antiRinging);
+		auto* downscaleLight = addChoice(QStringLiteral("Downscale light"),
+			QStringLiteral("downscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
+		downscaleLight->setToolTip(QStringLiteral(
+			"Light domain for frames that are downscaled (4K to 1600 lines). Linear is libplacebo's "
+			"default; gamma matches madVR's SSIM look. Upscaled frames always use linear light."));
 	}
     else if (sectionPrefix == QStringLiteral("vprenderer.subtitles"))
     {

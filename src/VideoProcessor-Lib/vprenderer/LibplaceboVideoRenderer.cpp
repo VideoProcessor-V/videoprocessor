@@ -47,6 +47,7 @@
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/RenderedWarp.h>
+#include <vprenderer/DownscaleLight.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
@@ -874,6 +875,7 @@ namespace
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
+		std::string downscaleLight = "linear";   // Stage 8-1: linear | gamma
 		std::string debandStrength = "auto";
 		AutoToggle deband = AutoToggle::AUTO;
 		AutoToggle sigmoid = AutoToggle::AUTO;
@@ -1006,7 +1008,7 @@ namespace
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
-			<< settings.upscaler << '|' << settings.downscaler << '|'
+			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
 			<< static_cast<int>(settings.sigmoid) << '|'
@@ -1843,6 +1845,7 @@ namespace
 		readPeakDetection(settings.peakDetection);
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
+		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
 		readToggle("deband", settings.deband);
 		if (config.TryGetString(rule.section, "deband_strength", raw))
 		{
@@ -2311,6 +2314,7 @@ namespace
 		settings.downscaler = ReadChoice(
 			config, "downscaler", "auto",
 			{ "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
+		settings.downscaleLight = ReadChoice(config, "downscale_light", "linear", { "linear", "gamma" });
 		settings.deband = ReadAutoToggle(config, "deband");
 		if (TryGetDisplayString(config, "deband_strength", rawValue))
 		{
@@ -3938,6 +3942,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
 	DejudderRendered::Geometry dejudderGeometry;
 	int dejudderWarpStageLogged = -1;
+	int downscaleLightLogged = -1;   // Stage 8-1: the last logged light domain
 	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
 	ExtendedRange::Hooks extendedRangeHooks;
 	int extendedRangeLogged = -1;          // the last logged decision
@@ -7949,6 +7954,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
+		currentTransport.downscaleLight = next.downscaleLight;
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
 		currentTransport.sigmoid = next.sigmoid;
@@ -8015,6 +8021,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
+		changed(current.downscaleLight != next.downscaleLight, "downscale_light");
 		changed(current.debandStrength != next.debandStrength ||
 			current.deband != next.deband, "deband");
 		changed(current.sigmoid != next.sigmoid, "sigmoid");
@@ -15935,6 +15942,21 @@ struct LibplaceboVideoRenderer::Impl
             outputEncodingRepairLogged = true;
         }
         pl_render_params frameParams = renderParams;
+        // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
+        // judder extras reuse these parameters).
+        {
+            const bool gamma = DownscaleLight::UseGammaLight(activeSettings.downscaleLight,
+                renderImage.crop, target.crop);
+            if (gamma)
+                frameParams.disable_linear_scaling = true;
+            const int logged = activeSettings.downscaleLight == "gamma" ? (gamma ? 2 : 1) : 0;
+            if (logged != downscaleLightLogged)
+            {
+                downscaleLightLogged = logged;
+                DebugLog::Log("Downscale light: %s", logged == 2 ? "gamma (downscaling frame)" :
+                    logged == 1 ? "gamma chosen; linear on this frame (not downscaling)" : "linear");
+            }
+        }
         frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
         frameParams.num_hooks = static_cast<int>(frameHooks.size());
         if (customHooks.SuppressesDither(lowLatencyQueue))
