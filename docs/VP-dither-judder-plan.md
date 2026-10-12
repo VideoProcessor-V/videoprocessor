@@ -1,11 +1,16 @@
 # VideoProcessor: temporal dithering, judder reduction, LED drive — project brief
 
-Status: design agreed; Stage 2 blanking keys and hook chain coded (untested on
-the projector); Stage 7 in progress. Revision 15, 2026-10-11, against
-`billslack2/videoprocessor` tag `1.4-beta-rc1`. **Rebase onto `1.4-beta-rc2`
-(subtitle moving, remote Config) after the current Stage 7 step and before
-Stage 5**, since RC2 touches the viewport/active-picture area Stage 5 builds
-on; re-check the lookahead path and the sample config after rebasing.
+Status (2026-10-12, brief delta 7): Stages 2 (blanking, hook chain,
+shaders), 3's prerequisites, 4 (motion-carried dither), 5 (time-based queue),
+6 (de-judder with NLS-mapped occlusion mask, M1′), 7 (LED drive through step
+7c-3) and delta 5 built and audited, and merged onto RC4 with its beta
+libplacebo 377 (FL35 output-clamp patches; the 7.360 PRE_OUTPUT encoding bug
+is fixed there). Stage 10 (BTB/WTW carry) built and tested on 7.360 and 377,
+audit pending. The projector has not yet seen any of it: the ramp test
+(Stage 3) and the first LED session remain the two results everything
+downstream waits on. Next: delta 6 (settings first), then Stage 8, then 6d if
+measurement says so. The Rev 15 note on rebasing is history: RC2, RC3 and RC4
+were merged in turn.
 
 This is the handoff to a Claude Code session and the project's record. Read it
 fully before touching source. When a decision changes, change it here.
@@ -146,6 +151,12 @@ fully before touching source. When a decision changes, change it here.
    0.265/0.690, 0.150/0.060), VP `target_primaries: p3_d65`. Use the P3 pair
    for BT.2020 sources too (VP gamut-maps 2020→P3 in float); do not switch to
    a 2020 container on an 8-bit link.
+12. **Settings are the primary control; keys are backup only.** Every
+    feature's normal operation is governed by saved settings (Config
+    app, per profile where natural). Keyboard shortcuts exist only as a
+    backup for A/B in the cinema, override until restart or profile
+    change, and are shown on the overlay when active. No behaviour may
+    be reachable only by a key. (`docs/VP-delta-6-settings-first.md`.)
 
 ## 2. Verified facts — the fork (read from source)
 
@@ -363,6 +374,15 @@ Every step ends with: a commit → a review package per
 design findings → then the Code-session audit per `docs/audit/README.md`.
 Design review comes first so an implementation change does not invalidate a
 code audit already done.
+
+**GPU budget, 4K cinema profile, everything on (estimates; the stats
+line reports the real numbers):** ≈10 ms per render of A (libplacebo
+scale/tone map ≈3–4, CfL 1–3, SSIM + blend ≈2, motion-carried dither
+≈1.5, LED measurement/compensation <1, carry/repair <0.5). De-judder
+extras: ≈10 ms each as built (full re-render), ≈2.5 ms each with 6d.
+At 24p on 60 Hz: ≈25–35 ms per 41.7 ms today, ≈15–16 ms with 6d.
+Levers if tight: grain map off, CfL → ewa_lanczossharp chroma, SSIM
+off. 1080p sources are a quarter of this.
 
 The fork's viewport profiles already cover the madVR screen-config feature
 set: `anamorphic_scale` (set 4:3 for the ISCO III, matching madVR's 4/3), `mode: normal|scope`,
@@ -876,6 +896,13 @@ delivering anything to the hook needs the app-provided texture input
 above, which is also how the de-judder receives frame B. Build it once,
 here.
 
+**6d — cached-warp extras (optimisation, gated on measurement).** Each
+extra today re-renders the whole chain on a warped source (≈10 ms at
+4K). 6d caches A at PRE_OUTPUT and warps *that* in output space with a
+4-tap kernel, running only the OUTPUT stage per extra (≈2.5 ms). Build
+if the stats line shows the 4K total with everything on above ≈60% of
+the frame period. Spec: `docs/VP-stage6d-cached-warp.md`.
+
 ### Stage 7 — LED drive module (native; replaces `beta_22.py`)
 Built right after stage 3 in reactive form (lead 0); lookahead arrives with
 stage 5 automatically, because the statistics ride on the fork's existing
@@ -993,16 +1020,23 @@ the picture is identical to `output_gamma: 2.4`. Stepping the boost toward
 2.2 or `off` is the config knob described above; `contrast_recovery` is
 unchanged.
 
-### Stage 8 — Adaptive downscale blend (4K → 1600p, anisotropic)
-Plain SSIM downscaling (igv's shader, unmodified) is installed in stage 2;
-this stage is the blend on top of it.
-Faithful branch: libplacebo ewa_lanczossharp, linear light, anti-ring.
-Perceptual branch: SSIM (igv's `SSimDownscaler.glsl`, POSTKERNEL pattern) or
-DPID. Per-pixel soft blend: edge strength → faithful; per-frame global grain
-estimate (taken on the source) → reduce SSIM weight; mask temporally
-stabilised with stage-4 vectors. **Scale factors differ per axis** because of
-the anamorphic stretch — separate horizontal/vertical radii; vertical may be
-≈1:1. Run both branches in linear light. Smallest payoff; last.
+### Stage 8 — Adaptive downscale (4K → 1600p, anisotropic)
+A blend between the faithful kernel (`ewa_lanczossharp`, linear light,
+anti-ring) and igv's SSIM downscaler, luma only, per pixel:
+`w = w_base × (1 − edge) × grain_scale`. The edge term is from the
+source (Sobel, soft ramp) and sends hard edges to the faithful kernel
+(halo control). The grain term is built in two steps: a per-frame
+scalar (fallback), then a **per-pixel map from the de-judder's trusted
+motion vectors** — the motion-compensated temporal difference separates
+grain from texture where spatial measures cannot — so the SSIM weight
+drops exactly where grain is and holds on texture, without flicker.
+Shadow-biased, snapped on cuts, both branches in one light domain
+(`downscale_light`, default linear; gamma matches the owner's madVR
+look). Gated on source height > output height. Disabled by default;
+SSIM alone stays the baseline. Spec: `docs/VP-stage8-downscale-design.md`.
+Needs the de-judder's matcher running (`dejudder_strength > 0` or
+`occlusion_mask: on`) for the vector map; falls back to the scalar
+otherwise.
 
 ### Stage 9 — Ambient-light profile switching (after stage 7)
 Room light raises the visible black; the correct response is to tone-map to
@@ -1158,6 +1192,10 @@ ewa_lanczossharp), sigma-delta. No frame mixing in the first deploy (see
   601-0381-00 — serial protocol.
 - No prior art to port for the sigma-delta, the strength-scaled de-judder
   with hard-hold fallback, or the hook-chain change.
+- Project specs: `docs/VP-stage6d-cached-warp.md`,
+  `docs/VP-stage8-downscale-design.md`, `docs/VP-delta-6-settings-first.md`,
+  `docs/VP-led-drive-control-policy.md` (the LED policy, superseding deltas
+  3/3b for behaviour).
 
 ## 10. Open questions
 

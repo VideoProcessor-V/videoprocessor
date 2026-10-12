@@ -98,6 +98,9 @@ can see what was covered, not only what was wrong)
    message that `OutputEncodingRepair` repairs
    (`AssertCleanLibplaceboLogExceptPreOutputBug`). This is a standing rule
    since design review 4 (N-6).
+7. No key-only behaviour: every setting a key can change is also a saved
+   config key, and key overrides are shown on the overlay (constraint 12,
+   `docs/VP-delta-6-settings-first.md`).
 
 ## 5. Step-specific checks
 
