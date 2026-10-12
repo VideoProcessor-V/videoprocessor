@@ -25,6 +25,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -984,5 +985,87 @@ void RunBetaOutputFloat32Tests()
 		Check(std::abs(all[i] - codes[i]) < 1.0 / 16.0, "S2: extended code " + std::to_string(codes[i]) +
 			" changed: " + std::to_string(all[i]));
 	CheckCleanLog(gpu, "S2");
+#endif
+}
+
+// The cost of float32 FBOs (owner question 2026-10-12): 4K to 2560x1600,
+// Mitchell in linear light plus a texture-input PRE_OUTPUT hook (as the LED
+// hook), wall-clock per frame with the GPU drained, for normal FBOs, the
+// output pass in rgba32f (S2 as built) and every FBO in rgba32f. Report
+// only; run with VP_TEST_TIMING=1 (meaningful with VP_TEST_GPU=hardware).
+void RunBetaFboTiming()
+{
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int sw = 3840, sh = 2160, ow = 2560, oh = 1600;
+	std::vector<uint16_t> texels(static_cast<size_t>(sw) * sh * 4);
+	for (int y = 0; y < sh; ++y)
+		for (int x = 0; x < sw; ++x)
+		{
+			const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u);
+			uint16_t* t = &texels[(static_cast<size_t>(y) * sw + x) * 4];
+			t[0] = static_cast<uint16_t>(16384 + (h % 32768u));
+			t[1] = static_cast<uint16_t>(16384 + ((h >> 8) % 32768u));
+			t[2] = static_cast<uint16_t>(16384 + ((h >> 16) % 32768u));
+			t[3] = 65535;
+		}
+	pl_tex_params sp{};
+	sp.w = sw;
+	sp.h = sh;
+	sp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 16, 16, PL_FMT_CAP_SAMPLEABLE);
+	sp.sampleable = true;
+	sp.initial_data = texels.data();
+	pl_tex source = sp.format ? pl_tex_create(g, &sp) : nullptr;
+	pl_tex_params tp{};
+	tp.w = ow;
+	tp.h = oh;
+	tp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 10, 0, PL_FMT_CAP_RENDERABLE);
+	tp.renderable = true;
+	pl_tex target = tp.format ? pl_tex_create(g, &tp) : nullptr;
+	Check(source && target, "timing: texture creation failed");
+	static const char probe[] =
+		"//!HOOK PREOUTPUT\n"
+		"//!BIND HOOKED\n"
+		"//!DESC VP timing PRE_OUTPUT texture hook\n"
+		"vec4 hook() { return HOOKED_tex(HOOKED_pos); }\n";
+	const pl_hook* hook = pl_mpv_user_shader_parse(g, probe, sizeof(probe) - 1);
+	Check(hook != nullptr, "timing: the probe shader did not parse");
+	const char* names[3] = { "normal FBOs", "output pass rgba32f (S2)", "every FBO rgba32f" };
+	std::cout << "Beta timing (" << sw << "x" << sh << " -> " << ow << "x" << oh << "):";
+	for (int mode = 0; mode < 3; ++mode)
+	{
+		pl_frame image = Gpu::Frame(source);
+		image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+		image.color.transfer = PL_COLOR_TRC_BT_1886;
+		pl_frame output = Gpu::Frame(target);
+		output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+		output.repr.bits.sample_depth = 10;
+		output.repr.bits.color_depth = 10;
+		output.color.primaries = PL_COLOR_PRIM_DCI_P3;
+		output.color.transfer = PL_COLOR_TRC_GAMMA22;
+		pl_render_params params = pl_render_default_params;
+		params.downscaler = &pl_filter_mitchell;
+		params.hooks = &hook;
+		params.num_hooks = 1;
+		params.output_fbo_float32 = mode >= 1;
+		params.fbo_float32 = mode == 2;
+		for (int i = 0; i < 5; ++i)
+			Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "timing: render failed");
+		pl_gpu_finish(g);
+		const int frames = 30;
+		const auto start = std::chrono::steady_clock::now();
+		for (int i = 0; i < frames; ++i)
+		{
+			Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "timing: render failed");
+			pl_gpu_finish(g);
+		}
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / frames;
+		std::cout << " " << names[mode] << " " << ms << " ms;";
+	}
+	std::cout << std::endl;
+	pl_mpv_user_shader_destroy(&hook);
+	pl_tex_destroy(g, &source);
+	pl_tex_destroy(g, &target);
 #endif
 }

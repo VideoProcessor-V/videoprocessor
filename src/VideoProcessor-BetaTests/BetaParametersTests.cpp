@@ -5,6 +5,7 @@
 using namespace LibplaceboRenderParameters;
 void RunBetaGpuTests(); // BetaGpuTests.cpp
 void RunBetaOutputFloat32Tests(); // BetaGpuTests.cpp
+void RunBetaFboTiming(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
 void RunBetaChainGpuTest(); // BetaGpuTests.cpp
@@ -49,6 +50,14 @@ int main() {
         RunBetaGpuTests();
         std::cout << "PASS Beta GPU: output clamp keeps footroom/headroom; encoding correct after PREOUTPUT hooks without the repair\n";
         RunBetaOutputFloat32Tests();
+        {
+            char* value = nullptr;
+            size_t length = 0;
+            const bool timing = _dupenv_s(&value, &length, "VP_TEST_TIMING") == 0 && value && std::string(value) == "1";
+            std::free(value);
+            if (timing)
+                RunBetaFboTiming();
+        }
         std::cout << "PASS Beta S2: output pass in rgba32f, highlights within 1/16 step, extended codes kept\n";
         RunBetaFeatureGpuTests();
         std::cout << "PASS Beta features: sigma-delta (8-in-10, true 10-bit), LED compensation, occlusion mask, de-judder\n";

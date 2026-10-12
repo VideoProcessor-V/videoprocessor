@@ -233,5 +233,7 @@ would:
   its restore already outputs rgba32f. 7.360 (unpatched) keeps its limit.
 - VP sets `output_fbo_float32` unconditionally (as answered).
 - **Question:** set `fbo_float32` too? It is the only route to the 1/16
-  step target; cost is double intermediate bandwidth at source/scaled
-  resolution (to be timed on the GeForce in the gate). Currently not set.
+  step target. Measured on the GeForce (RTX 3050 Ti Laptop; 4K to
+  2560x1600, Mitchell linear, one PRE_OUTPUT texture hook): normal 3.89 ms,
+  output pass rgba32f 4.61 ms (+0.73 ms: S2 as built is not free), every
+  FBO rgba32f 6.69 ms (+2.8 ms). Currently not set.
