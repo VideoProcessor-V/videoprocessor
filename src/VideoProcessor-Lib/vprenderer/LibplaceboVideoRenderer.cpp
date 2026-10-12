@@ -872,6 +872,15 @@ namespace
 		double dejudderMatchTolerance = 3.0;
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
+		// Refinements (docs/VP-build-plan-refinements.md); inert while the
+		// de-judder and the grain map are off.
+		bool dejudderGlobalPrior = true;          // D1
+		double dejudderMotionScaleLo = 0.25;      // D2, source px per source frame
+		double dejudderMotionScaleHi = 1.5;       // D2 (0 = off)
+		bool dejudderVectorSmooth = true;         // D3
+		double dejudderTrustScale = 0.6;          // D4: share at full strength (0 = off)
+		bool dejudderOcclusionFill = false;       // D5 (experiment)
+		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
 		bool preserveExtendedRange = false; // Stage 10: BTB/WTW kept through scaling (SDR)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
@@ -1010,6 +1019,10 @@ namespace
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
+			<< settings.dejudderGlobalPrior << '|' << settings.dejudderMotionScaleLo << '|'
+			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
+			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
+			<< settings.ditherGrainToleranceScale << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
 			<< settings.adaptiveDownscale << '|' << settings.adaptive.wBase << '|' << settings.adaptive.edgeLo << '|'
@@ -1947,7 +1960,11 @@ namespace
 		}
 		for (const auto& numeric : { std::make_tuple("dejudder_strength", 0.0, 1.0, &settings.dejudderStrength),
 			std::make_tuple("dejudder_match_tolerance", 0.5, 16.0, &settings.dejudderMatchTolerance),
-			std::make_tuple("dejudder_frame_trust", 0.0, 1.0, &settings.dejudderFrameTrust) })
+			std::make_tuple("dejudder_frame_trust", 0.0, 1.0, &settings.dejudderFrameTrust),
+			std::make_tuple("dejudder_motion_scale_lo", 0.0, 16.0, &settings.dejudderMotionScaleLo),
+			std::make_tuple("dejudder_motion_scale_hi", 0.0, 32.0, &settings.dejudderMotionScaleHi),
+			std::make_tuple("dejudder_trust_scale", 0.0, 1.0, &settings.dejudderTrustScale),
+			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -1959,13 +1976,18 @@ namespace
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
 					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
 		}
-		if (config.TryGetString(rule.section, "occlusion_mask", raw))
+		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
+			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
+			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
+			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill) })
 		{
+			if (!config.TryGetString(rule.section, toggle.first, raw))
+				continue;
 			if (raw == "on" || raw == "off")
-				settings.occlusionMask = raw == "on";
+				*toggle.second = raw == "on";
 			else
-				DebugLog::Log("profile '%s': invalid occlusion_mask '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.occlusionMask ? "on" : "off");
+				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
+					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
 		}
 		// Stage 8-2: the adaptive downscale (rendering profile).
 		for (const auto& numeric : { std::make_tuple("adaptive_w_base", 0.0, 1.0, &settings.adaptive.wBase),
@@ -3974,6 +3996,7 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t dejudderMaskSequence[2] = { 0, 0 };
 	bool dejudderExtrasAllowed = false;
 	bool dejudderMaskParamSet = false;
+	bool grainToleranceParamSet = false;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
 	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
 	bool dejudderMaskNoSigmaLogged = false;
@@ -8006,6 +8029,13 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.occlusionMask = next.occlusionMask;
+		currentTransport.dejudderGlobalPrior = next.dejudderGlobalPrior;
+		currentTransport.dejudderMotionScaleLo = next.dejudderMotionScaleLo;
+		currentTransport.dejudderMotionScaleHi = next.dejudderMotionScaleHi;
+		currentTransport.dejudderVectorSmooth = next.dejudderVectorSmooth;
+		currentTransport.dejudderTrustScale = next.dejudderTrustScale;
+		currentTransport.dejudderOcclusionFill = next.dejudderOcclusionFill;
+		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
 		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
@@ -8075,6 +8105,13 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
+		changed(current.dejudderGlobalPrior != next.dejudderGlobalPrior, "dejudder_global_prior");
+		changed(current.dejudderMotionScaleLo != next.dejudderMotionScaleLo, "dejudder_motion_scale_lo");
+		changed(current.dejudderMotionScaleHi != next.dejudderMotionScaleHi, "dejudder_motion_scale_hi");
+		changed(current.dejudderVectorSmooth != next.dejudderVectorSmooth, "dejudder_vector_smooth");
+		changed(current.dejudderTrustScale != next.dejudderTrustScale, "dejudder_trust_scale");
+		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
+		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
 		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
@@ -11031,22 +11068,30 @@ struct LibplaceboVideoRenderer::Impl
 				return;
 			}
 		(void)flipped;   // A and B share the orientation; the warp keeps it.
-		const float matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
-		const float frameTrust = static_cast<float>(activeSettings.dejudderFrameTrust);
+		// The matcher's settings from the profile, refinements included.
+		auto wanted = [&](Dejudder::Settings settings)
+		{
+			settings.matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
+			settings.minTrustedShare = static_cast<float>(activeSettings.dejudderFrameTrust);
+			settings.globalPrior = activeSettings.dejudderGlobalPrior;
+			settings.vectorSmooth = activeSettings.dejudderVectorSmooth;
+			settings.motionScaleLo = static_cast<float>(activeSettings.dejudderMotionScaleLo);
+			settings.motionScaleHi = static_cast<float>(activeSettings.dejudderMotionScaleHi);
+			settings.trustScaleFull = static_cast<float>(activeSettings.dejudderTrustScale);
+			settings.occlusionFill = activeSettings.dejudderOcclusionFill;
+			return settings;
+		};
 		if (!dejudder)
+			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, wanted(Dejudder::Settings()));
+		else
 		{
-			Dejudder::Settings settings;
-			settings.matchTolerance = matchTolerance;
-			settings.minTrustedShare = frameTrust;
-			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, settings);
-		}
-		else if (dejudder->GetSettings().matchTolerance != matchTolerance ||
-			dejudder->GetSettings().minTrustedShare != frameTrust)
-		{
-			Dejudder::Settings settings = dejudder->GetSettings();
-			settings.matchTolerance = matchTolerance;
-			settings.minTrustedShare = frameTrust;
-			dejudder->SetSettings(settings);
+			const Dejudder::Settings current = dejudder->GetSettings();
+			const Dejudder::Settings next = wanted(current);
+			if (current.matchTolerance != next.matchTolerance || current.minTrustedShare != next.minTrustedShare ||
+				current.globalPrior != next.globalPrior || current.vectorSmooth != next.vectorSmooth ||
+				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
+				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill)
+				dejudder->SetSettings(next);
 		}
 		Dejudder::Planes a, b;
 		a.luma = textures[0];
@@ -11228,8 +11273,13 @@ struct LibplaceboVideoRenderer::Impl
 		a.chromaShiftX = 1;
 		a.chromaShiftY = f.lossless422 ? 0 : 1;
 		std::vector<const pl_hook*> hooks;
+		// S1 covers every present: with the grain in alpha the hook stays for
+		// the extras, without the mask (first refresh only).
+		if (grainToleranceParamSet)
+			occlusionMaskHook.DropMask();
 		for (int i = 0; i < f.params->num_hooks; ++i)
-			if (f.params->hooks[i] != f.ledMeasurementHook && f.params->hooks[i] != occlusionMaskHook.Get() &&
+			if (f.params->hooks[i] != f.ledMeasurementHook &&
+				(f.params->hooks[i] != occlusionMaskHook.Get() || grainToleranceParamSet) &&
 				f.params->hooks[i] != dejudderCache.Hook())
 				hooks.push_back(f.params->hooks[i]);
 		// The mask is for a source frame's first refresh only (6c).
@@ -15977,7 +16027,12 @@ struct LibplaceboVideoRenderer::Impl
         // into alpha just before the sigma-delta (which must take it: its
         // `occlusion_mask` parameter). Not on cadence repeats (the same
         // picture again) and not with NLS (a non-linear output mapping).
-        if (activeSettings.occlusionMask || dejudderMaskParamSet)
+        // S1: the grain map (Stage 8, the previous source frame's: this
+        // render's map pass writes the other buffer) for the sigma-delta's
+        // tolerance, on every present while the map is in use.
+        pl_tex grainMap = activeSettings.ditherGrainToleranceScale > 1.0 && adaptiveDownscale.Active() &&
+            adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ? adaptiveDownscale.GrainMap() : nullptr;
+        if (activeSettings.occlusionMask || dejudderMaskParamSet || grainMap || grainToleranceParamSet)
         {
             int maskSlot = -1;
             for (int slot = 0; slot < 2; ++slot)
@@ -15985,20 +16040,23 @@ struct LibplaceboVideoRenderer::Impl
                     maskSlot = slot;
             bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat &&
                 dejudder->Occlusion(maskSlot);
+            bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
             // the bundled NLS / NLS+ maps are known; any other NLS shader, or
             // a rule missing a parameter, keeps the mask off (logged once).
             NlsMaskMapping::Mapping nlsMapping;
-            if (install && submittedNls)
+            if ((install || grainInstall) && submittedNls)
             {
                 nlsMapping = KnownNlsMapping();
                 if (!nlsMapping.valid)
                 {
-                    install = false;
-                    if (!dejudderMaskNlsLogged)
+                    if (install && !dejudderMaskNlsLogged)
                         DebugLog::Log("De-judder occlusion mask: not used with NLS shader '%s' (its map is not known)",
                             nlsRule.filename.c_str());
-                    dejudderMaskNlsLogged = true;
+                    if (install)
+                        dejudderMaskNlsLogged = true;
+                    install = false;
+                    grainInstall = false;
                 }
             }
             size_t sigmaIndex = frameHooks.size();
@@ -16006,6 +16064,12 @@ struct LibplaceboVideoRenderer::Impl
                 if (CustomHookChain::SetHookParameter(frameHooks[i], "occlusion_mask", install ? 1.0 : 0.0) &&
                     sigmaIndex == frameHooks.size())
                     sigmaIndex = i;
+            for (size_t i = 0; i < frameHooks.size(); ++i)
+                CustomHookChain::SetHookParameter(frameHooks[i], "grain_tolerance_scale",
+                    grainInstall && sigmaIndex < frameHooks.size() ? activeSettings.ditherGrainToleranceScale : 1.0);
+            if (sigmaIndex == frameHooks.size())
+                grainInstall = false;
+            grainToleranceParamSet = grainInstall;
             if (install && sigmaIndex == frameHooks.size())
             {
                 install = false;
@@ -16020,14 +16084,19 @@ struct LibplaceboVideoRenderer::Impl
                 dejudderMaskState.clear();   // NLS is off again (audit 6c-2)
             // Set only when the parameter was really written as 1 (audit 6b-2b).
             dejudderMaskParamSet = install;
-            if (install)
+            if (install || grainInstall)
             {
-                occlusionMaskHook.SetFrame(dejudder->Occlusion(maskSlot), renderImage.crop, target.crop);
+                occlusionMaskHook.SetFrame(install ? dejudder->Occlusion(maskSlot) : nullptr, renderImage.crop, target.crop);
+                occlusionMaskHook.SetGrain(grainInstall ? grainMap : nullptr,
+                    static_cast<float>(activeSettings.adaptive.grainFloor));
                 // NLS's coordinates span the source crop (measured: the
                 // MAIN-stage texture libplacebo hooks is the cropped picture).
                 if (submittedNls)
                     occlusionMaskHook.SetNls(nlsMapping, renderImage.crop);
                 frameHooks.insert(frameHooks.begin() + static_cast<std::ptrdiff_t>(sigmaIndex), occlusionMaskHook.Get());
+            }
+            if (install)
+            {
                 dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
                 dejudderMaskUsedTick = GetTickCount64();
                 dejudderMaskState.clear();

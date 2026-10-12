@@ -557,6 +557,13 @@ namespace
 		std::vector<std::vector<int>> RenderSequence(const pl_hook* hook,
 			int width, int height, int frames, Code code)
 		{
+			return RenderSequence(std::vector<const pl_hook*>{ hook }, width, height, frames, code);
+		}
+
+		template <typename Code>
+		std::vector<std::vector<int>> RenderSequence(const std::vector<const pl_hook*>& hooks,
+			int width, int height, int frames, Code code)
+		{
 			pl_gpu gpu = m_d3d11->gpu;
 			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
 			pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
@@ -574,8 +581,8 @@ namespace
 			pl_render_params params = pl_render_fast_params;
 			params.dither_params = nullptr;
 			params.error_diffusion = nullptr;
-			params.hooks = &hook;
-			params.num_hooks = 1;
+			params.hooks = hooks.data();
+			params.num_hooks = static_cast<int>(hooks.size());
 			std::vector<std::vector<int>> result;
 			std::vector<float> input(static_cast<size_t>(width) * height * 4);
 			std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
@@ -4568,6 +4575,113 @@ namespace VideoProcessorTest
 				(L"Still picture error " + std::to_wstring(still.meanError)).c_str());
 		}
 
+		TEST_METHOD(SigmaDeltaGrainAwareCarry)
+		{
+			// S1: a moving texture with integer film grain (+-2 codes, new every
+			// frame). With match_tolerance 1 the grain fails the block match and
+			// the per-pixel gate, so the quarter code is rounded away (the
+			// time-average along the motion is 0.25 low); with the grain map in
+			// alpha (g = 1) and grain_tolerance_scale 4 the residual survives and
+			// the average holds. Scale 1, or a map with no grain, changes nothing.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int speed = 4, frames = 9, width = 128 + speed * 8, height = 64;
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.stageOrder = 90;
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" }, { "swapchain_bits", "8" },
+				{ "noise_amplitude", "0" }, { "motion_threshold", "1" }, { "match_tolerance", "1" },
+				{ "motion_compensation", "1" } };
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.sourceWidth = width;
+			values.outputHeight = values.sourceHeight = height;
+			values.refreshHz = values.sourceFps = 60.0;
+			auto grain = [](int frame, int x, int y)
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u) ^
+					(static_cast<unsigned>(frame) * 83492791u);
+				return static_cast<int>((h * 2654435761u >> 24) % 5u) - 2;
+			};
+			auto code = [&](int frame, int x, int y)
+			{
+				return SigmaDeltaTexture(x - speed * frame, y) + grain(frame, x, y);
+			};
+			// A grain map of one block: r = the floor (g = 1) or 1 (g = 0), trusted.
+			auto makeMap = [&](float r)
+			{
+				const float texel[4] = { r, 1.0f, 0.0f, 1.0f };
+				pl_tex_params mp{};
+				mp.w = mp.h = 1;
+				mp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				mp.sampleable = true;
+				mp.initial_data = texel;
+				return mp.format ? pl_tex_create(gpu, &mp) : nullptr;
+			};
+			pl_tex grainy = makeMap(0.4f), clean = makeMap(1.0f);
+			Assert::IsTrue(grainy && clean);
+			OcclusionMask::Hook hook;
+			const pl_rect2df whole{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+			// A fresh sigma-delta per run: its residual state lives in its textures.
+			auto run = [&](pl_tex map, double scale, bool withHook)
+			{
+				CustomHookChain::Chain chain(SigmaLoader(fixture));
+				chain.Configure({ sigma });
+				chain.Ensure(values);
+				std::vector<const pl_hook*> sigmaHooks;
+				chain.Collect(false, sigmaHooks);
+				Assert::AreEqual(size_t{ 1 }, sigmaHooks.size(), (L"libplacebo rejected the sigma-delta: " +
+					std::wstring(log.begin(), log.end())).c_str());
+				Assert::IsTrue(CustomHookChain::SetHookParameter(sigmaHooks[0], "grain_tolerance_scale", scale));
+				hook.SetFrame(nullptr, whole, whole);
+				hook.SetGrain(map, 0.4f);
+				std::vector<const pl_hook*> hooks;
+				if (withHook)
+					hooks.push_back(hook.Get());
+				hooks.push_back(sigmaHooks[0]);
+				return fixture.RenderSequence(hooks, width, height, frames, code);
+			};
+			// The time-average along the motion over frames 1..8 against the
+			// noise-free value plus the grain that was really there.
+			auto meanError = [&](const std::vector<std::vector<int>>& out)
+			{
+				double error = 0.0;
+				int count = 0;
+				for (int y0 = 16; y0 < height - 16; ++y0)
+					for (int x0 = 16; x0 < width - 16 - speed * 8; ++x0)
+					{
+						double sum = 0.0, expected = 0.0;
+						for (int frame = 1; frame <= 8; ++frame)
+						{
+							const int x = x0 + speed * frame;
+							sum += out[frame][y0 * width + x];
+							expected += code(frame, x, y0);
+						}
+						error += std::abs((sum - expected) / 8.0);
+						++count;
+					}
+				return error / count;
+			};
+			const auto today = run(nullptr, 1.0, false);
+			const auto scaleOne = run(grainy, 1.0, true);
+			const auto noGrain = run(clean, 4.0, true);
+			const auto grainAware = run(grainy, 4.0, true);
+			pl_tex_destroy(gpu, &grainy);
+			pl_tex_destroy(gpu, &clean);
+			const double todayError = meanError(today), awareError = meanError(grainAware);
+			const std::wstring message = L"along-motion error: today " + std::to_wstring(todayError) +
+				L", grain-aware " + std::to_wstring(awareError) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(scaleOne == today, (L"scale 1 must not change the output; " + message).c_str());
+			Assert::IsTrue(noGrain == today, (L"a map without grain must not change the output; " + message).c_str());
+			Assert::IsTrue(todayError > 0.15, (L"the grain should defeat today's carry; " + message).c_str());
+			Assert::IsTrue(awareError < 0.08, (L"the grain-aware carry should hold the average; " + message).c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(SigmaDeltaDropsTheResidualAtASceneCut)
 		{
 			// After a cut to an unrelated picture no residual is carried: every
@@ -7031,22 +7145,28 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(WholeHookChainHandlesMotionAndTheLookAheads)
 		{
-			TargetLutGpuFixture fixture;
-			Assert::IsTrue(fixture.Create());
-			std::string log;
-			fixture.CaptureLog(&log);
-			const ChainGpuProbe::Outcome outcome = ChainGpuProbe::RunMotion(fixture.Gpu(), fixture.Renderer(), fixture.Log(),
-				[](const char* file) { return LoadBundledShader(file); }, true);
-			fixture.CaptureLog(nullptr);
-			Logger::WriteMessage(outcome.report.c_str());
-			Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
-			std::string remaining;
-			std::istringstream lines(log);
-			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
-					entry.find("Attempted to modify an immutable shader!") == std::string::npos)
-					remaining += entry + "\n";
-			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			// Twice: as built, and with every refinement on (D1-D4, S1).
+			for (bool refinements : { false, true })
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create());
+				std::string log;
+				fixture.CaptureLog(&log);
+				const ChainGpuProbe::Outcome outcome = ChainGpuProbe::RunMotion(fixture.Gpu(), fixture.Renderer(), fixture.Log(),
+					[](const char* file) { return LoadBundledShader(file); }, true, 63u, refinements);
+				fixture.CaptureLog(nullptr);
+				Logger::WriteMessage((refinements ? "-- refinements on\n" : "-- refinements off\n"));
+				Logger::WriteMessage(outcome.report.c_str());
+				Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide((refinements ? "refinements on: " : "") +
+					outcome.failure).c_str());
+				std::string remaining;
+				std::istringstream lines(log);
+				for (std::string entry; std::getline(lines, entry);)
+					if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
+						remaining += entry + "\n";
+				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			}
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)

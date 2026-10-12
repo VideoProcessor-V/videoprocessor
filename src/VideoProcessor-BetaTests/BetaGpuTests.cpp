@@ -657,8 +657,35 @@ void RunBetaFeatureGpuTests()
 			int extraMax = 0;
 			double extraMean = 0.0;
 			difference(bySource, byRendered, extraMax, extraMean);
+			// Every refinement on (D1-D4; planner addendum: both warp paths): the
+			// paths still agree, and the extra is no farther from the true
+			// halfway picture than without them (on this pan the scale is 1;
+			// vector smoothing promotes held blocks whose own match is good, so
+			// a little more of the frame moves).
+			warp.SetSettings(ChainGpuProbe::Refined(settings));
+			Check(warp.Estimate(a, b), "6d: Estimate with the refinements failed: " + warp.LastError());
+			Dejudder::Planes refinedPlanes;
+			Check(warp.Warp(a, 0.5f, refinedPlanes), "6d: source warp with the refinements failed");
+			const auto refinedSource = source(refinedPlanes, nullptr);
+			const auto refinedRendered = fromCache(0.5f);
+			Dejudder::Planes middle;
+			frame(dx / 2, dy / 2, middle);
+			const auto ideal = source(middle, nullptr);
+			pl_tex_destroy(handle, &middle.luma);
+			pl_tex_destroy(handle, &middle.chroma);
+			int refinedMax = 0, plainIdealMax = 0, refinedIdealMax = 0;
+			double refinedMean = 0.0, plainIdeal = 0.0, refinedIdeal = 0.0;
+			difference(refinedSource, refinedRendered, refinedMax, refinedMean);
+			difference(ideal, bySource, plainIdealMax, plainIdeal);
+			difference(ideal, refinedSource, refinedIdealMax, refinedIdeal);
 			pl_tex_destroy(handle, &targetTex);
 			Check(extraMean <= 0.6, "6d: rendered extra differs from the source extra (mean " + std::to_string(extraMean) + ")");
+			Check(refinedMean <= 0.6, "6d with the refinements: rendered extra differs from the source extra (mean " +
+				std::to_string(refinedMean) + ")");
+			Check(refinedIdeal <= plainIdeal + 0.05, "6d: the refinements moved the extra away from the halfway picture (mean " +
+				std::to_string(refinedIdeal) + " vs " + std::to_string(plainIdeal) + " without them)");
+			std::cout << "Beta features: 6d with the refinements: rendered vs source mean " << refinedMean
+				<< "; vs the halfway picture " << refinedIdeal << " (without them " << plainIdeal << ")\n";
 			CheckCleanLog(gpu, "6d");
 			std::cout << "Beta features: 6d cache max " << maxDiff << ", hold max " << heldMax << ", extra vs source mean "
 				<< extraMean << " (max " << extraMax << ", whole frame incl. edges)\n";
@@ -690,18 +717,23 @@ void RunBetaChainGpuTest()
 			remaining += entry + "\n";
 	Check(remaining.empty(), "whole chain on 377: libplacebo logged: " + remaining);
 
-	// Motion, a de-judder extra and the LED drive's gain sequence.
-	Gpu moving;
-	const ChainGpuProbe::Outcome motion = ChainGpuProbe::RunMotion(moving.GpuHandle(), moving.RendererHandle(),
-		moving.LogHandle(), [](const char* file) { return LoadRepoShader(file); }, false);
-	std::cout << motion.report;
-	Check(motion.ok, "whole chain with motion on 377: " + motion.failure);
-	remaining.clear();
-	std::istringstream movingLines(moving.messages);
-	for (std::string entry; std::getline(movingLines, entry);)
-		if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
-			remaining += entry + "\n";
-	Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
+	// Motion, a de-judder extra and the LED drive's gain sequence; as built
+	// and with every refinement on (D1-D4, S1).
+	for (bool refinements : { false, true })
+	{
+		Gpu moving;
+		const ChainGpuProbe::Outcome motion = ChainGpuProbe::RunMotion(moving.GpuHandle(), moving.RendererHandle(),
+			moving.LogHandle(), [](const char* file) { return LoadRepoShader(file); }, false, 63u, refinements);
+		std::cout << (refinements ? "-- refinements on\n" : "") << motion.report;
+		Check(motion.ok, std::string("whole chain with motion on 377") + (refinements ? " (refinements on)" : "") +
+			": " + motion.failure);
+		remaining.clear();
+		std::istringstream movingLines(moving.messages);
+		for (std::string entry; std::getline(movingLines, entry);)
+			if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+				remaining += entry + "\n";
+		Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
+	}
 
 	// The combination matrix on the deployed libplacebo (planner 2026-10-12:
 	// 377 first): a spread by default, all of it with VP_TEST_MATRIX=full.

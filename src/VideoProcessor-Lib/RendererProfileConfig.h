@@ -630,6 +630,17 @@ namespace RendererProfileConfig
 			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
 			// 6d: the extras warp A's rendered picture, or a warped source.
 			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
+			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
+			// D3 vector smoothing, D5 occlusion fill; D2 motion-scaled strength
+			// (source px per source frame, hi 0 = off); D4 trust-adaptive
+			// strength (share at full strength, 0 = off); S1 the sigma-delta's
+			// tolerance on grain (1 = off).
+			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill")
+				return IsChoice(value, { "on", "off" });
+			if (key == "dejudder_motion_scale_lo") return IsNumberInRange(value, 0.0, 16.0);
+			if (key == "dejudder_motion_scale_hi") return IsNumberInRange(value, 0.0, 32.0);
+			if (key == "dejudder_trust_scale") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "dither_grain_tolerance_scale") return IsNumberInRange(value, 1.0, 8.0);
 			// Stage 8-2: the adaptive downscale blend.
 			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map")
 				return IsChoice(value, { "on", "off" });

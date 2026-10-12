@@ -5,6 +5,7 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <cmath>
+#include <string>
 
 namespace OcclusionMask
 {
@@ -52,6 +53,7 @@ if (p.x < size.x && p.y < size.y) {
     vec4 c = texelFetch(hooked, p, 0);
     vec2 o = vec2(p) + vec2(0.5);
     float m = 1.0;
+    float g = 0.0;
     if (all(greaterThanEqual(o, dst_rect.xy)) && all(lessThan(o, dst_rect.zw))) {
         vec2 s = src_origin + (o - dst_rect.xy) * src_per_dst;
         if (nls_active > 0.5) {
@@ -60,10 +62,21 @@ if (p.x < size.x && p.y < size.y) {
                            nls_coordinate(u.y, nls_scale.y, nls_protect.y)), vec2(0.0), vec2(1.0));
             s = nls_domain.xy + u * nls_domain.zw;
         }
+#ifdef MASK
         ivec2 blk = clamp(ivec2(floor(s / 16.0)), ivec2(0), textureSize(mask, 0) - ivec2(1));
         m = texelFetch(mask, blk, 0).r > 0.5 ? 1.0 : 0.0;
+#endif
+#ifdef GRAIN
+        ivec2 gb = clamp(ivec2(floor(s / 16.0)), ivec2(0), textureSize(grain, 0) - ivec2(1));
+        vec4 gm = texelFetch(grain, gb, 0);
+        g = gm.g > 0.5 ? clamp((1.0 - gm.r) / max(1.0 - grain_floor, 1e-3), 0.0, 1.0) : 0.0;
+#endif
     }
+#ifdef GRAIN
+    imageStore(dst, p, vec4(c.rgb, m > 0.5 ? 1.0 - 0.49 * g : 0.49 * g));
+#else
     imageStore(dst, p, vec4(c.rgb, m));
+#endif
 }
 )GLSL";
 
@@ -112,7 +125,7 @@ if (p.x < size.x && p.y < size.y) {
 	{
 		pl_hook_res none{};
 		none.output = PL_HOOK_SIG_NONE;
-		if (!params->tex || !mask)
+		if (!params->tex || (!mask && !grain))
 			return none;
 		const int w = params->tex->params.w, h = params->tex->params.h;
 		pl_tex out = params->get_tex(params->priv, w, h);
@@ -134,19 +147,26 @@ if (p.x < size.x && p.y < size.y) {
 			targetW > 0.0f ? (source.x1 - source.x0) / targetW : 1.0f,
 			targetH > 0.0f ? (source.y1 - source.y0) / targetH : 1.0f };
 
-		pl_shader_desc descriptors[3]{};
-		descriptors[0].desc.name = "hooked";
-		descriptors[0].desc.type = PL_DESC_SAMPLED_TEX;
-		descriptors[0].binding.object = params->tex;
-		descriptors[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
-		descriptors[1].desc.name = "mask";
-		descriptors[1].desc.type = PL_DESC_SAMPLED_TEX;
-		descriptors[1].binding.object = mask;
-		descriptors[1].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
-		descriptors[2].desc.name = "dst";
-		descriptors[2].desc.type = PL_DESC_STORAGE_IMG;
-		descriptors[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
-		descriptors[2].binding.object = out;
+		pl_shader_desc descriptors[4]{};
+		int numDescriptors = 0;
+		auto sampled = [&](const char* name, pl_tex tex)
+		{
+			pl_shader_desc& d = descriptors[numDescriptors++];
+			d.desc.name = name;
+			d.desc.type = PL_DESC_SAMPLED_TEX;
+			d.binding.object = tex;
+			d.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+		};
+		sampled("hooked", params->tex);
+		if (mask)
+			sampled("mask", mask);
+		if (grain)
+			sampled("grain", grain);
+		pl_shader_desc& dst = descriptors[numDescriptors++];
+		dst.desc.name = "dst";
+		dst.desc.type = PL_DESC_STORAGE_IMG;
+		dst.desc.access = PL_DESC_ACCESS_WRITEONLY;
+		dst.binding.object = out;
 		const float nlsActive = nls.valid ? 1.0f : 0.0f;
 		const float nlsCurve = static_cast<float>(nls.curve);
 		const float nlsGeometry = static_cast<float>(nls.geometry);
@@ -155,7 +175,8 @@ if (p.x < size.x && p.y < size.y) {
 		const float domain[4] = { nlsDomain.x0, nlsDomain.y0,
 			std::fabs(nlsDomain.x1 - nlsDomain.x0) > 0.0f ? nlsDomain.x1 - nlsDomain.x0 : 1.0f,
 			std::fabs(nlsDomain.y1 - nlsDomain.y0) > 0.0f ? nlsDomain.y1 - nlsDomain.y0 : 1.0f };
-		const pl_shader_var variables[9] = {
+		const float grainFloor = grainFloorValue;
+		const pl_shader_var variables[10] = {
 			{ pl_var_vec4("dst_rect"), dstRect, true },
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
 			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
@@ -164,18 +185,22 @@ if (p.x < size.x && p.y < size.y) {
 			{ pl_var_float("nls_geometry"), &nlsGeometry, true },
 			{ pl_var_vec2("nls_scale"), nlsScale, true },
 			{ pl_var_vec2("nls_protect"), nlsProtect, true },
-			{ pl_var_vec4("nls_domain"), domain, true } };
+			{ pl_var_vec4("nls_domain"), domain, true },
+			{ pl_var_float("grain_floor"), &grainFloor, true } };
 
+		const std::string header = std::string(mask ? "#define MASK\n" : "") + (grain ? "#define GRAIN\n" : "") +
+			MASK_HEADER;
 		pl_custom_shader custom{};
-		custom.description = "VideoProcessor occlusion mask for the sigma-delta";
-		custom.header = MASK_HEADER;
+		custom.description = grain ? "VideoProcessor occlusion mask and grain for the sigma-delta" :
+			"VideoProcessor occlusion mask for the sigma-delta";
+		custom.header = header.c_str();
 		custom.body = MASK_BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
 		custom.descriptors = descriptors;
-		custom.num_descriptors = 3;
+		custom.num_descriptors = numDescriptors;
 		custom.variables = variables;
-		custom.num_variables = 9;
+		custom.num_variables = grain ? 10 : 9;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;

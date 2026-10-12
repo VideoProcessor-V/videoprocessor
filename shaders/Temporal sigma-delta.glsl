@@ -52,6 +52,14 @@
  *   Alpha ownership: the mask hook and this shader own alpha at OUTPUT;
  *   nothing else uses it (Stage 10b keeps its remainder in its own texture).
  *
+ * Grain-aware carry (S1, `grain_tolerance_scale` > 1, set by the renderer)
+ *   With the Stage 8 grain map the same hook also writes the block's grain
+ *   amount g (0..1) into alpha: seen 1 - 0.49 g, new 0.49 g (the `< 0.5`
+ *   test above is unchanged). The block match tolerance and the per-pixel
+ *   motion gate are both multiplied by mix(1, grain_tolerance_scale, g), so
+ *   the residual survives film grain. The carried payload stays within
+ *   +-0.5 code. At 1 (the default) nothing reads the grain.
+ *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and
  *   libplacebo's encode_color (so values are already in the target's code
@@ -159,6 +167,13 @@
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
+
+//!PARAM grain_tolerance_scale
+//!DESC Set by the renderer (S1): match_tolerance x this where the grain map in alpha sees film grain; 1 = off
+//!TYPE float
+//!MINIMUM 1.0
+//!MAXIMUM 8.0
+1.0
 
 //!PARAM test_ramp
 //!DESC 1 = replace the picture with a 10-bit horizontal grey ramp for verification
@@ -434,9 +449,24 @@ void hook()
             }
     }
 
+    // S1: more tolerant where the grain map (alpha, from VP's mask hook:
+    // seen 1 - 0.49 g, new 0.49 g) sees film grain, so the residual survives
+    // the grain; exactly match_tolerance at scale 1.
+    float tolerance = match_tolerance;
+    if (grain_tolerance_scale > 1.0) {
+        ivec2 hs = textureSize(HOOKED_raw, 0);
+        float gsum = 0.0;
+        for (int y = 2; y < 16; y += 4)
+            for (int x = 2; x < 16; x += 4) {
+                float a = (HOOKED_mul * texelFetch(HOOKED_raw, clamp(block * 16 + ivec2(x, y), ivec2(0), hs - ivec2(1)), 0)).a;
+                gsum += clamp(a < 0.5 ? a / 0.49 : (1.0 - a) / 0.49, 0.0, 1.0);
+            }
+        tolerance *= mix(1.0, grain_tolerance_scale, gsum / 16.0);
+    }
+
     float samples = float((WIN1 - WIN0) * (WIN1 - WIN0));
     float error = best_sad / samples;
-    float confidence = error <= match_tolerance ? 1.0 : 0.0;
+    float confidence = error <= tolerance ? 1.0 : 0.0;
 
     // Final refinement to whole pixels (audit, stage 4): the quarter level
     // moves in 4-pixel steps, so every full-pixel vector within +-2 of it is
@@ -464,7 +494,7 @@ void hook()
         // Trust comes from the full-resolution match: at 4-pixel steps a
         // motion between them matches only roughly at quarter resolution.
         error = full_sad / 256.0;
-        confidence = error <= match_tolerance ? 1.0 : 0.0;
+        confidence = error <= tolerance ? 1.0 : 0.0;
     }
     // MV holds the vector in full pixels (MVPREV keeps quarter pixels).
     imageStore(out_image, block, vec4(vec2(full), confidence, error));
@@ -551,7 +581,7 @@ vec3 exact_half(vec3 v)
     return vec3(unpackHalf2x16(packHalf2x16(v.rg)), unpackHalf2x16(packHalf2x16(vec2(v.b, 0.0))).x);
 }
 
-bool carried(ivec2 from, vec3 x, out vec3 r)
+bool carried(ivec2 from, vec3 x, float gate_scale, out vec3 r)
 {
     r = vec3(0.0);
     vec4 rs = imageLoad(RESID, from);
@@ -560,7 +590,7 @@ bool carried(ivec2 from, vec3 x, out vec3 r)
         return false;
     // motion_threshold is in 8-bit codes; x is in output codes.
     float units = color_bits > 9.0 ? 4.0 : 1.0;
-    if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units))))
+    if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
         return false;
     r = clamp(rs.rgb, -0.5, 0.5);
     return true;
@@ -630,6 +660,13 @@ void hook()
         bool have = false;
         // New or uncovered content (occlusion mask 0): nothing to carry from.
         bool occluded = occlusion_mask > 0.5 && src.a < 0.5;
+        // S1: on film grain (alpha, see the block search) the per-pixel gate
+        // is as much more tolerant as the block match: grain changes pixels
+        // by more than motion_threshold on every frame. 1 = off.
+        float gate_scale = 1.0;
+        if (grain_tolerance_scale > 1.0)
+            gate_scale = mix(1.0, grain_tolerance_scale,
+                clamp(src.a < 0.5 ? src.a / 0.49 : (1.0 - src.a) / 0.49, 0.0, 1.0));
 
         // Motion-compensated carry: the residual from where this pixel's
         // content was on the previous refresh.
@@ -640,11 +677,11 @@ void hook()
             ivec2 from = pos - v;
             if (mv.z > 0.5 && v != ivec2(0) &&
                 all(greaterThanEqual(from, ivec2(0))) && all(lessThan(from, state_size)))
-                have = carried(from, x, r);
+                have = carried(from, x, gate_scale, r);
         }
         // Plain motion gate: the same pixel, if it did not change.
         if (!have && !occluded)
-            have = carried(spos, x, r);
+            have = carried(spos, x, gate_scale, r);
 
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
@@ -657,8 +694,9 @@ void hook()
         k = clamp(floor(x + d + 0.5), 0.0, max_code);
     }
 
-    // With the occlusion mask in alpha, alpha goes back to 1 here.
-    vec4 outc = vec4(k * out_step, occlusion_mask > 0.5 ? 1.0 : src.a);
+    // With the occlusion mask or the grain (S1) in alpha, alpha goes back to
+    // 1 here.
+    vec4 outc = vec4(k * out_step, occlusion_mask > 0.5 || grain_tolerance_scale > 1.0 ? 1.0 : src.a);
     vec4 stored = outc / HOOKED_mul;
     if (ten)
         stored.rgb = exact_half(stored.rgb);

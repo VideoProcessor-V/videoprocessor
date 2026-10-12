@@ -681,6 +681,15 @@ namespace VideoProcessorTest
                 Case{ "occlusion_mask", "yes", false },
                 Case{ "dejudder_warp_stage", "rendered", true }, Case{ "dejudder_warp_stage", "source", true },
                 Case{ "dejudder_warp_stage", "cached", false },
+                Case{ "dejudder_global_prior", "on", true }, Case{ "dejudder_global_prior", "yes", false },
+                Case{ "dejudder_vector_smooth", "off", true }, Case{ "dejudder_vector_smooth", "1", false },
+                Case{ "dejudder_occlusion_fill", "off", true }, Case{ "dejudder_occlusion_fill", "auto", false },
+                Case{ "dejudder_motion_scale_lo", "0.25", true }, Case{ "dejudder_motion_scale_lo", "17", false },
+                Case{ "dejudder_motion_scale_hi", "0", true }, Case{ "dejudder_motion_scale_hi", "1.5", true },
+                Case{ "dejudder_motion_scale_hi", "-1", false },
+                Case{ "dejudder_trust_scale", "0.6", true }, Case{ "dejudder_trust_scale", "1.1", false },
+                Case{ "dither_grain_tolerance_scale", "1", true }, Case{ "dither_grain_tolerance_scale", "3", true },
+                Case{ "dither_grain_tolerance_scale", "0.5", false }, Case{ "dither_grain_tolerance_scale", "9", false },
                 Case{ "preserve_extended_range", "on", true }, Case{ "preserve_extended_range", "off", true },
                 Case{ "preserve_extended_range", "auto", false } })
             {

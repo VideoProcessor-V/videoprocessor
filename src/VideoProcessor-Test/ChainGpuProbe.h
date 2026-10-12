@@ -344,10 +344,24 @@ namespace ChainGpuProbe
 		return sign ? -value : value;
 	}
 
+	// "All refinements on" (docs/VP-build-plan-refinements.md): D1-D4 at the
+	// renderer's defaults (D5 is an experiment, off); S1 at its default 3.
+	inline Dejudder::Settings Refined(Dejudder::Settings s)
+	{
+		s.globalPrior = true;
+		s.vectorSmooth = true;
+		s.motionScaleLo = 0.25f;
+		s.motionScaleHi = 1.5f;
+		s.trustScaleFull = 0.6f;
+		return s;
+	}
+	constexpr double kRefinedGrainTolerance = 3.0;
+
 	// extras (diagnostics): 1 carry/restore, 2 LED, 4 mask, 8 sigma-delta, 16 its motion compensation,
 	// 32 the adaptive downscale; 64 only the subtitle phase; 128 only phases 7-8.
+	// refinements: the matcher and the dither with every refinement on.
 	inline Outcome RunMotion(pl_gpu gpu, pl_renderer renderer, pl_log log, const ShaderSource& source, bool withRepair,
-		unsigned extras = 63u)
+		unsigned extras = 63u, bool refinements = false)
 	{
 		using namespace ExtendedRangeGpuProbe;
 		Outcome outcome;
@@ -362,7 +376,8 @@ namespace ChainGpuProbe
 		auto ssim = led ? Load(gpu, source, "SSimDownscaler.glsl", ow, oh, {}, error) : nullptr;
 		auto sigma = ssim ? Load(gpu, source, "Temporal sigma-delta.glsl", ow, oh, { { "levels_full", 0.0 },
 			{ "swapchain_bits", 10.0 }, { "color_bits", 10.0 }, { "occlusion_mask", 1.0 },
-			{ "motion_compensation", (extras & 16u) ? 1.0 : 0.0 } }, error) : nullptr;
+			{ "motion_compensation", (extras & 16u) ? 1.0 : 0.0 },
+			{ "grain_tolerance_scale", refinements ? kRefinedGrainTolerance : 1.0 } }, error) : nullptr;
 		if (!sigma)
 			return fail(error);
 		const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
@@ -390,6 +405,8 @@ namespace ChainGpuProbe
 		};
 		Dejudder::Settings matcherSettings;
 		matcherSettings.hostReadable = true;   // the frame trust and the warped planes are read back
+		if (refinements)
+			matcherSettings = Refined(matcherSettings);
 		Dejudder::MotionWarp warp(log, gpu, matcherSettings);
 		AdaptiveDownscale::Module adaptive, reference;
 		AdaptiveDownscale::Settings settings;
@@ -447,6 +464,9 @@ namespace ChainGpuProbe
 				const pl_rect2df lit{ static_cast<float>(blank[0]), static_cast<float>(blank[1]),
 					static_cast<float>(ow - blank[2]), static_cast<float>(oh - blank[3]) };
 				mask.SetFrame(warp.Occlusion(slot), frameCrop, lit);
+				// S1: the grain map in alpha too (the previous source frame's, as
+				// the renderer hands it).
+				mask.SetGrain(refinements ? module.GrainMap() : nullptr, settings.grainFloor);
 				if (withRepair)
 				{
 					pl_color_repr target{};
@@ -1250,13 +1270,16 @@ namespace ChainGpuProbe
 		// The owner's 8-bit link: the sigma-delta quantises to 8-bit codes on
 		// the 10-bit target (8-in-10; audit stage8-3-9-10b note).
 		bool eightBit = false;
+		// Every refinement on (D1-D4 in the matcher, S1 in the dither); only
+		// meaningful with the matcher.
+		bool refinements = false;
 		std::string Name() const
 		{
-			char text[220];
-			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s, %s%s%s", scale,
+			char text[240];
+			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s, %s%s%s%s", scale,
 				nlsActive ? "on" : "off", gammaLight ? "gamma" : "linear", stage10 ? "on" : "off",
 				fullRange ? "full" : "limited", matcher ? "on" : "off", eightBit ? "8-in-10" : "10-bit",
-				rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "");
+				rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "", refinements ? ", refinements" : "");
 			return text;
 		}
 	};
@@ -1327,7 +1350,8 @@ namespace ChainGpuProbe
 		auto cflShader = superRes ? Load(gpu, source, "CfL_Prediction.glsl", ow, oh, {}, error) : nullptr;
 		auto sigma = cflShader ? Load(gpu, source, "Temporal sigma-delta.glsl", ow, oh, { { "levels_full", combo.fullRange ? 1.0 : 0.0 },
 			{ "swapchain_bits", 10.0 }, { "color_bits", combo.eightBit ? 8.0 : 10.0 }, { "occlusion_mask", combo.matcher ? 1.0 : 0.0 },
-			{ "motion_compensation", 1.0 } }, error) : nullptr;
+			{ "motion_compensation", 1.0 },
+			{ "grain_tolerance_scale", combo.refinements ? kRefinedGrainTolerance : 1.0 } }, error) : nullptr;
 		if (!sigma)
 			return fail(error);
 		const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
@@ -1353,7 +1377,7 @@ namespace ChainGpuProbe
 			out.planes.chromaShiftY = 0;
 			return out.planes.luma && out.planes.chroma;
 		};
-		Dejudder::MotionWarp warp(log, gpu);
+		Dejudder::MotionWarp warp(log, gpu, combo.refinements ? Refined(Dejudder::Settings()) : Dejudder::Settings());
 		AdaptiveDownscale::Module adaptive, reference;
 		AdaptiveDownscale::Settings settings;
 		OcclusionMask::Hook mask;
@@ -1420,6 +1444,7 @@ namespace ChainGpuProbe
 					if (combo.matcher)
 					{
 						mask.SetFrame(warp.Occlusion(slot), sourceCrop, targetCrop);
+						mask.SetGrain(combo.refinements ? adaptive.GrainMap() : nullptr, settings.grainFloor);
 						if (combo.nlsActive)
 							mask.SetNls(nlsMapping, sourceCrop);
 						hooks.push_back(mask.Get());
@@ -1539,6 +1564,12 @@ namespace ChainGpuProbe
 				c.matcher = (bits & 16) == 0;
 				c.eightBit = (bits & 32) != 0;
 				combos.push_back(c);
+				// The "all refinements on" axis, where the matcher runs.
+				if (c.matcher)
+				{
+					c.refinements = true;
+					combos.push_back(c);
+				}
 			}
 		// The named regressions, in both lists: an RGB source and CfL, with
 		// Stage 10 on, at a downscale and an upscale, NLS idle and active.
@@ -1560,7 +1591,7 @@ namespace ChainGpuProbe
 			return combos;
 		}
 		std::vector<Combo> quick;
-		for (size_t i = 0; i < combos.size(); i += 7)   // 46 of 320, every value of every axis
+		for (size_t i = 0; i < combos.size(); i += 7)   // 69 of 480, every value of every axis
 			quick.push_back(combos[i]);
 		quick.insert(quick.end(), named.begin(), named.end());
 		return quick;

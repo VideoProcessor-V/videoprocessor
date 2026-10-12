@@ -6362,6 +6362,51 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         dejudderFrameTrust->setPlaceholderText(QStringLiteral("0.25"));
         dejudderFrameTrust->setToolTip(QStringLiteral(
             "Below this share of trusted blocks the frame is treated as a cut and held still."));
+        // Refinements (docs/VP-build-plan-refinements.md).
+        auto* globalPrior = addChoice(QStringLiteral("Global-motion prior"),
+            QStringLiteral("dejudder_global_prior"), { QStringLiteral("on"), QStringLiteral("off") });
+        globalPrior->setToolTip(QStringLiteral(
+            "Estimates the whole picture's movement first and starts every block's search there, so "
+            "fast pans (beyond about 120 source pixels per frame) are still followed. Default on."));
+        auto* vectorSmooth = addChoice(QStringLiteral("Vector smoothing"),
+            QStringLiteral("dejudder_vector_smooth"), { QStringLiteral("on"), QStringLiteral("off") });
+        vectorSmooth->setToolTip(QStringLiteral(
+            "Replaces a block's motion that disagrees with all its neighbours by theirs, and lets a "
+            "held block move with agreeing neighbours when its own picture matches there. Default on."));
+        auto* motionLo = addText(QStringLiteral("Motion scale from (pixels/frame)"),
+            QStringLiteral("dejudder_motion_scale_lo"));
+        motionLo->setValidator(new QDoubleValidator(0.0, 16.0, 2, motionLo));
+        motionLo->setPlaceholderText(QStringLiteral("0.25"));
+        motionLo->setToolTip(QStringLiteral(
+            "Below this average movement (source pixels per film frame) the de-judder does nothing: "
+            "near-still scenes have no judder to fix."));
+        auto* motionHi = addText(QStringLiteral("Full strength at (pixels/frame)"),
+            QStringLiteral("dejudder_motion_scale_hi"));
+        motionHi->setValidator(new QDoubleValidator(0.0, 32.0, 2, motionHi));
+        motionHi->setPlaceholderText(QStringLiteral("1.5"));
+        motionHi->setToolTip(QStringLiteral(
+            "The average movement from which the full strength applies; in between it ramps up. "
+            "Lower it if slow pans still hitch. 0 turns the motion scaling off."));
+        auto* trustScale = addText(QStringLiteral("Full strength at trusted share (0 to 1)"),
+            QStringLiteral("dejudder_trust_scale"));
+        trustScale->setValidator(new QDoubleValidator(0.0, 1.0, 3, trustScale));
+        trustScale->setPlaceholderText(QStringLiteral("0.6"));
+        trustScale->setToolTip(QStringLiteral(
+            "When fewer blocks than this share are trusted, the strength eases down for that frame "
+            "instead of holding more of it. 0 turns it off."));
+        auto* occlusionFill = addChoice(QStringLiteral("Fill uncovered areas (experiment)"),
+            QStringLiteral("dejudder_occlusion_fill"), { QStringLiteral("on"), QStringLiteral("off") });
+        occlusionFill->setToolTip(QStringLiteral(
+            "Experiment, default off: picture newly uncovered between two film frames is taken from the "
+            "next frame instead of held. Applies with Extra frames from: Source only so far."));
+        auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
+            QStringLiteral("dither_grain_tolerance_scale"));
+        grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
+        grainTolerance->setPlaceholderText(QStringLiteral("3"));
+        grainTolerance->setToolTip(QStringLiteral(
+            "Where the adaptive downscale's grain map sees film grain, the temporal sigma-delta's "
+            "motion match is this many times more tolerant, so its 10-bit averaging survives the grain. "
+            "Needs the grain map and the sigma-delta. 1 turns it off."));
 
         // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
         form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale (4K)"),

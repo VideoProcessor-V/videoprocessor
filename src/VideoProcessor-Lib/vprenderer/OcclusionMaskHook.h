@@ -19,6 +19,13 @@
 // when the sigma-delta takes the mask
 // (its `occlusion_mask` parameter), so alpha never reaches the display.
 //
+// S1 (refinements): with a grain map (SetGrain) alpha also carries the grain
+// amount g (0..1) of the block, for the sigma-delta's tolerance:
+//   seen (carry allowed): a = 1 - 0.49 g;  new: a = 0.49 g.
+// The sigma-delta's `a < 0.5` (new) test is unchanged; with no grain map
+// alpha stays exactly 1 / 0. The hook runs with a mask, a grain map, or
+// both (grain only: every block "seen").
+//
 // The output-to-source mapping is the source crop scaled onto the
 // destination rectangle and, with NLS active (6c-2), the NLS shader's own
 // per-axis map over the source crop.
@@ -46,6 +53,13 @@ namespace OcclusionMask
 		// picture; GPU test OcclusionMaskFollowsTheNlsMap, off-centre crop).
 		// Call after SetFrame, which clears it.
 		void SetNls(const NlsMaskMapping::Mapping& mapping, const pl_rect2df& hookedRect);
+		// S1: the Stage 8 grain map of this source frame (one texel per 16x16
+		// source block: r = grain scale grain_floor..1, lower = more grain;
+		// g = 1 trusted), or nullptr. Call every frame; SetFrame keeps it.
+		void SetGrain(pl_tex map, float grainFloor) { grain = map; grainFloorValue = grainFloor; }
+		// The de-judder's extra presents: the mask is for a source frame's
+		// first refresh only, the grain stays (same geometry).
+		void DropMask() { mask = nullptr; }
 		const pl_hook* Get() const { return &hook; }
 		unsigned long long Applied() const { return applied; }
 		unsigned long long Failed() const { return failed; }
@@ -56,6 +70,8 @@ namespace OcclusionMask
 
 		pl_hook hook{};
 		pl_tex mask = nullptr;
+		pl_tex grain = nullptr;
+		float grainFloorValue = 0.4f;
 		pl_rect2df source{};
 		pl_rect2df target{};
 		NlsMaskMapping::Mapping nls{};
