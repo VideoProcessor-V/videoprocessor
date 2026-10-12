@@ -384,6 +384,12 @@ namespace LibplaceboRenderParameters
         if (settings.toneTuning[ToneMappingTuning::MasteringClip])
             projection.colorMapParams.mastering_clip = static_cast<float>(*settings.toneTuning[ToneMappingTuning::MasteringClip]);
 #endif
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+        // S2 (planner 2026-10-12): the output pass in rgba32f (patch 0003 of
+        // the FL35 libplacebo): no float16 rounding before the encode, nothing
+        // clipped. Always on for the VP Renderer.
+        projection.renderParams.output_fbo_float32 = true;
+#endif
         auto& constants = projection.colorMapParams.tone_constants;
         float* toneFields[] = { &constants.knee_adaptation, &constants.knee_minimum,
             &constants.knee_maximum, &constants.knee_default, &constants.slope_tuning,

@@ -1,0 +1,100 @@
+From: Victor McPherson <vmcpherson2012@gmail.com>
+Date: Mon, 12 Oct 2026 17:50:00 -0400
+Subject: [PATCH 3/3] renderer: optional rgba32f FBOs (output pass, or all)
+
+Fork-only pl_render_params fields, both default false (upstream behaviour):
+ output_fbo_float32: pass_output_target (colour management, PRE_OUTPUT,
+   OUTPUT, dither input) uses a renderable rgba32f FBO format.
+ fbo_float32: every intermediate FBO prefers rgba32f.
+VideoProcessor S2 (docs/VP-build-plan-refinements-answers.md).
+---
+--- a/src/include/libplacebo/renderer.h	2026-10-12 17:43:49.538757700 -0400
++++ b/src/include/libplacebo/renderer.h	2026-10-12 17:50:09.231217400 -0400
+@@ -365,7 +365,22 @@
+     PL_DEPRECATED_IN(v6.335) float polar_cutoff; // hard-coded as 1e-3
+     PL_DEPRECATED_IN(v7.346) bool skip_target_clearing; // `border = PL_CLEAR_SKIP`
+     PL_DEPRECATED_IN(v7.346) bool blend_against_tiles; // `background = PL_CLEAR_TILES`
++
++    // VP fork (VideoProcessor S2): render the output pass -- the PRE_OUTPUT
++    // image, the OUTPUT-stage hook FBOs and the dither input, i.e. everything
++    // from colour management onward -- into 32-bit float FBOs when the GPU
++    // has a renderable rgba32f format; earlier stages keep the normal FBO
++    // format. Float32 clips nothing (extended range survives) and removes the
++    // float16 rounding (about half a 10-bit step near 0.9) before the output
++    // encode. Default false: upstream behaviour.
++    bool output_fbo_float32;
++
++    // VP fork: prefer 32-bit float for every intermediate FBO (all stages,
++    // implies the above). Doubles intermediate bandwidth; exact to 2^-24.
++    bool fbo_float32;
+ };
++#define PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32 1
++#define PL_RENDER_PARAMS_FBO_FLOAT32 1
+ 
+ // Bare minimum parameters, with no features enabled. This is the fastest
+ // possible configuration, and should therefore be fine on any system.
+--- a/src/renderer.c	2026-10-12 17:43:49.508965100 -0400
++++ b/src/renderer.c	2026-10-12 17:50:09.233223400 -0400
+@@ -398,6 +398,10 @@
+         int depth;
+         enum pl_fmt_caps caps;
+     } configs[] = {
++        // VP fork: `fbo_float32` tries 32-bit float first
++        {PL_FMT_FLOAT, 32, PL_FMT_CAP_LINEAR},
++        {PL_FMT_FLOAT, 32, PL_FMT_CAP_SAMPLEABLE},
++
+         // Prefer floating point formats first
+         {PL_FMT_FLOAT, 16, PL_FMT_CAP_LINEAR},
+         {PL_FMT_FLOAT, 16, PL_FMT_CAP_SAMPLEABLE},
+@@ -417,6 +421,8 @@
+     for (int i = 0; i < PL_ARRAY_SIZE(configs); i++) {
+         if (params->force_low_bit_depth_fbos && configs[i].depth > 8)
+             continue;
++        if (configs[i].depth == 32 && !params->fbo_float32)
++            continue;
+ 
+         fmt = pl_find_fmt(rr->gpu, configs[i].type, 4, configs[i].depth, 0,
+                           PL_FMT_CAP_RENDERABLE | configs[i].caps);
+@@ -2743,9 +2749,42 @@
+     pl_color_delinearize(csp, out_color);
+ }
+ 
++// VP fork: `output_fbo_float32` gives the output pass its own FBO format
++// (rgba32f, same channel fallbacks and storable requirement as the normal
++// choice); the normal formats are restored afterwards.
++static bool pass_output_target_fbos(struct pass_state *pass);
++
+ static bool pass_output_target(struct pass_state *pass)
+ {
+     const struct pl_render_params *params = pass->params;
++    pl_fmt saved[5];
++    memcpy(saved, pass->fbofmt, sizeof(saved));
++    if (params->output_fbo_float32 && saved[4]) {
++        const enum pl_fmt_caps storable = saved[4]->caps & PL_FMT_CAP_STORABLE;
++        static const enum pl_fmt_caps sampling[] = {
++            PL_FMT_CAP_LINEAR, PL_FMT_CAP_SAMPLEABLE,
++        };
++        for (int i = 0; i < PL_ARRAY_SIZE(sampling); i++) {
++            pl_fmt fmt = pl_find_fmt(pass->rr->gpu, PL_FMT_FLOAT, 4, 32, 0,
++                                     PL_FMT_CAP_RENDERABLE | storable | sampling[i]);
++            if (!fmt || fmt->component_depth[0] < 32)
++                continue;
++            pass->fbofmt[4] = fmt;
++            for (int c = 3; c >= 1; c--) {
++                pass->fbofmt[c] = pl_find_fmt(pass->rr->gpu, PL_FMT_FLOAT, c, 32, 0, fmt->caps);
++                pass->fbofmt[c] = PL_DEF(pass->fbofmt[c], pass->fbofmt[c+1]);
++            }
++            break;
++        }
++    }
++    const bool ok = pass_output_target_fbos(pass);
++    memcpy(pass->fbofmt, saved, sizeof(saved));
++    return ok;
++}
++
++static bool pass_output_target_fbos(struct pass_state *pass)
++{
++    const struct pl_render_params *params = pass->params;
+     const struct pl_frame *image = &pass->image;
+     const struct pl_frame *target = &pass->target;
+     const struct pl_plane *ref = &target->planes[pass->dst_ref];

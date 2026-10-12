@@ -216,6 +216,10 @@ namespace ExtendedRangeGpuProbe
 			// libplacebo's dither for those frames).
 			params.dither_params = nullptr;
 			params.error_diffusion = nullptr;
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+			// As the VP Renderer (S2): the output pass in rgba32f.
+			params.output_fbo_float32 = true;
+#endif
 			if (!c.params)
 			{
 				params.sigmoid_params = c.sigmoid ? &pl_sigmoid_default_params : nullptr;

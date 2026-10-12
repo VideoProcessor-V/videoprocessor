@@ -804,3 +804,153 @@ void RunBetaExtendedRangeGpuTests()
 	CheckCleanLog(gpu, "extended range");
 	std::cout << report;
 }
+
+// S2 (planner 2026-10-12, patch 0003): with output_fbo_float32 the output
+// pass (PRE_OUTPUT and OUTPUT hook textures) is rgba32f, earlier stages keep
+// the normal format; highlights reach a 16-bit target within 1/16 of a
+// 10-bit step; extended codes survive the output pass.
+void RunBetaOutputFloat32Tests()
+{
+#if !defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+	Check(false, "S2: this libplacebo has no output_fbo_float32 (patch 0003 missing)");
+#else
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	// Records the texture format each texture-input hook stage sees.
+	struct Seen { std::map<int, pl_fmt> formats; };
+	Seen seen;
+	pl_hook recorder{};
+	recorder.stages = static_cast<pl_hook_stage>(PL_HOOK_PRE_OUTPUT | PL_HOOK_OUTPUT | PL_HOOK_SCALED);
+	recorder.input = PL_HOOK_SIG_TEX;
+	recorder.priv = &seen;
+	recorder.hook = [](void* priv, const struct pl_hook_params* params) -> pl_hook_res
+	{
+		static_cast<Seen*>(priv)->formats[static_cast<int>(params->stage)] = params->tex->params.format;
+		return pl_hook_res{};
+	};
+	const pl_hook* hooks[] = { &recorder };
+
+	pl_fmt sourceFormat = pl_find_fmt(g, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+	pl_fmt targetFormat = nullptr;
+	const auto caps = PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE;
+	for (int i = 0; i < g->num_formats && !targetFormat; ++i)
+	{
+		pl_fmt f = g->formats[i];
+		if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 16 &&
+			f->host_bits[0] == 16 && (f->caps & caps) == caps)
+			targetFormat = f;
+	}
+	Check(sourceFormat && targetFormat, "S2: no float source / RGBA16 target format");
+
+	// Codes 900..1019 and a few extended codes, one per column; 10-bit
+	// limited-range signal on a float source, 2x upscaled so a scaled
+	// texture exists before the output pass.
+	std::vector<double> codes;
+	for (int c = 900; c <= 1019; ++c) codes.push_back(c);
+	for (int c : { 4, 16, 40, 64, 980 }) codes.push_back(c);
+	const int n = static_cast<int>(codes.size());
+	std::vector<float> texels(static_cast<size_t>(n) * 4);
+	for (int i = 0; i < n; ++i)
+	{
+		const float v = static_cast<float>((codes[i] - 64.0) / 876.0);
+		texels[i * 4] = texels[i * 4 + 1] = texels[i * 4 + 2] = v;
+		texels[i * 4 + 3] = 1.0f;
+	}
+	pl_tex_params sp{};
+	sp.w = n;
+	sp.h = 1;
+	sp.format = sourceFormat;
+	sp.sampleable = true;
+	sp.initial_data = texels.data();
+	pl_tex source = pl_tex_create(g, &sp);
+	pl_tex_params tp{};
+	tp.w = n * 2;
+	tp.h = 2;
+	tp.format = targetFormat;
+	tp.renderable = true;
+	tp.host_readable = true;
+	pl_tex target = pl_tex_create(g, &tp);
+	Check(source && target, "S2: texture creation failed");
+
+	// mode 0: normal FBOs; 1: output pass rgba32f; 2: every FBO rgba32f.
+	auto render = [&](int mode, std::vector<double>& got)
+	{
+		seen.formats.clear();
+		pl_frame image = Gpu::Frame(source);
+		pl_frame output = Gpu::Frame(target);
+		output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+		output.repr.bits.sample_depth = 16;
+		output.repr.bits.color_depth = 16;
+		pl_render_params params = pl_render_fast_params;
+		params.upscaler = &pl_filter_nearest;
+		params.dither_params = nullptr;
+		params.error_diffusion = nullptr;
+		params.hooks = hooks;
+		params.num_hooks = 1;
+		params.output_fbo_float32 = mode >= 1;
+		params.fbo_float32 = mode == 2;
+		Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "S2: pl_render_image failed");
+		pl_gpu_finish(g);
+		std::vector<uint16_t> pixels(static_cast<size_t>(tp.w) * tp.h * 4);
+		pl_tex_transfer_params download{};
+		download.tex = target;
+		download.ptr = pixels.data();
+		Check(pl_tex_download(g, &download), "S2: download failed");
+		got.clear();
+		for (int i = 0; i < n; ++i)   // green, row 1, left texel of each column pair
+			got.push_back(pixels[(static_cast<size_t>(tp.w) + i * 2) * 4 + 1] / 64.0);   // 10-bit code c is 16-bit c x 64
+	};
+	std::vector<double> on, off, all;
+	render(1, on);
+	const std::map<int, pl_fmt> formatsOn = seen.formats;
+	render(0, off);
+	const std::map<int, pl_fmt> formatsOff = seen.formats;
+	render(2, all);
+	const std::map<int, pl_fmt> formatsAll = seen.formats;
+	pl_tex_destroy(g, &source);
+	pl_tex_destroy(g, &target);
+
+	auto name = [](const std::map<int, pl_fmt>& m, pl_hook_stage stage) -> std::string
+	{
+		const auto it = m.find(static_cast<int>(stage));
+		return it == m.end() ? std::string("(not run)") : std::string(it->second->name);
+	};
+	auto isFloat32 = [](const std::map<int, pl_fmt>& m, pl_hook_stage stage)
+	{
+		const auto it = m.find(static_cast<int>(stage));
+		return it != m.end() && it->second->type == PL_FMT_FLOAT && it->second->component_depth[0] == 32;
+	};
+	std::cout << "Beta S2: flag on: SCALED " << name(formatsOn, PL_HOOK_SCALED) << ", PRE_OUTPUT "
+		<< name(formatsOn, PL_HOOK_PRE_OUTPUT) << ", OUTPUT " << name(formatsOn, PL_HOOK_OUTPUT)
+		<< "; flag off: PRE_OUTPUT " << name(formatsOff, PL_HOOK_PRE_OUTPUT) << "; all: SCALED "
+		<< name(formatsAll, PL_HOOK_SCALED) << "\n";
+	Check(isFloat32(formatsAll, PL_HOOK_SCALED) && isFloat32(formatsAll, PL_HOOK_PRE_OUTPUT),
+		"S2: fbo_float32 did not make every FBO rgba32f");
+	Check(isFloat32(formatsOn, PL_HOOK_PRE_OUTPUT) && isFloat32(formatsOn, PL_HOOK_OUTPUT),
+		"S2: the output pass is not rgba32f with the flag");
+	Check(!isFloat32(formatsOn, PL_HOOK_SCALED), "S2: a stage before the output pass changed format");
+	Check(!isFloat32(formatsOff, PL_HOOK_PRE_OUTPUT) && !isFloat32(formatsOff, PL_HOOK_OUTPUT),
+		"S2: the output pass is rgba32f without the flag");
+
+	double maxOn = 0.0, maxOff = 0.0, maxAll = 0.0;
+	for (int i = 0; i < 120; ++i)
+	{
+		maxOn = (std::max)(maxOn, std::abs(on[i] - codes[i]));
+		maxOff = (std::max)(maxOff, std::abs(off[i] - codes[i]));
+		maxAll = (std::max)(maxAll, std::abs(all[i] - codes[i]));
+	}
+	std::cout << "Beta S2: codes 900-1019 max error " << maxAll << " (all rgba32f), " << maxOn
+		<< " (output pass rgba32f), " << maxOff << " (normal FBOs) of a 10-bit step; extended (all):";
+	for (int i = 120; i < n; ++i)
+		std::cout << " " << codes[i] << "->" << std::round(all[i] * 100.0) / 100.0;
+	std::cout << "\n";
+	// The main pass's float16 FBOs (SCALED) set the floor before the output
+	// pass (above white a float16 step is 0.86 code), so only every-FBO
+	// float32 reaches 1/16 of a step.
+	Check(maxAll < 1.0 / 16.0, "S2: highlight error " + std::to_string(maxAll) + " is not below 1/16 of a step");
+	for (int i = 120; i < n; ++i)
+		Check(std::abs(all[i] - codes[i]) < 1.0 / 16.0, "S2: extended code " + std::to_string(codes[i]) +
+			" changed: " + std::to_string(all[i]));
+	CheckCleanLog(gpu, "S2");
+#endif
+}

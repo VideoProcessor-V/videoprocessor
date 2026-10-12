@@ -213,3 +213,25 @@ would:
 3. D2/D4 rate limit ±0.25 per source frame: OK?
 4. D3: should an untrusted block surrounded by agreeing neighbours be
    promoted to trusted? Planned yes, limited to ≥7 of 8 agreeing.
+
+## S2 as built (2026-10-12) — measurements and a question for the planner
+- Patch 0003 (3rdparty/libplacebo-beta/source/fl35-patches) adds two
+  fork-only fields, both default false: `output_fbo_float32` (the output
+  pass in rgba32f, as answered) and `fbo_float32` (every FBO rgba32f).
+  The output pass's format IS separable in 377 (a swap around
+  `pass_output_target`).
+- Beta S2 test (16-bit target, codes 900-1019 from a float source, 2x
+  upscale): max error **1.02** step with normal FBOs, **0.84** with the
+  output pass in rgba32f, **0** with every FBO rgba32f. The floor is set
+  before the output pass: the main scaler's FBO (SCALED) is rgba16hf, and
+  above white a float16 step is 0.86 code. Extended codes 4/16/40/980 are
+  exact with float32.
+- **The open gate finding is named:** with the output pass in rgba32f the
+  Beta matrix combination that failed (0.602) passes, and the whole Beta
+  suite passes. The Stage-10-off chain bias was the float16 round trip at
+  the PRE_OUTPUT texture hooks (the LED hook); Stage 10 on was ~0 because
+  its restore already outputs rgba32f. 7.360 (unpatched) keeps its limit.
+- VP sets `output_fbo_float32` unconditionally (as answered).
+- **Question:** set `fbo_float32` too? It is the only route to the 1/16
+  step target; cost is double intermediate bandwidth at source/scaled
+  resolution (to be timed on the GeForce in the gate). Currently not set.

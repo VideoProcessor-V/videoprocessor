@@ -365,7 +365,22 @@ struct pl_render_params {
     PL_DEPRECATED_IN(v6.335) float polar_cutoff; // hard-coded as 1e-3
     PL_DEPRECATED_IN(v7.346) bool skip_target_clearing; // `border = PL_CLEAR_SKIP`
     PL_DEPRECATED_IN(v7.346) bool blend_against_tiles; // `background = PL_CLEAR_TILES`
+
+    // VP fork (VideoProcessor S2): render the output pass -- the PRE_OUTPUT
+    // image, the OUTPUT-stage hook FBOs and the dither input, i.e. everything
+    // from colour management onward -- into 32-bit float FBOs when the GPU
+    // has a renderable rgba32f format; earlier stages keep the normal FBO
+    // format. Float32 clips nothing (extended range survives) and removes the
+    // float16 rounding (about half a 10-bit step near 0.9) before the output
+    // encode. Default false: upstream behaviour.
+    bool output_fbo_float32;
+
+    // VP fork: prefer 32-bit float for every intermediate FBO (all stages,
+    // implies the above). Doubles intermediate bandwidth; exact to 2^-24.
+    bool fbo_float32;
 };
+#define PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32 1
+#define PL_RENDER_PARAMS_FBO_FLOAT32 1
 
 // Bare minimum parameters, with no features enabled. This is the fastest
 // possible configuration, and should therefore be fine on any system.

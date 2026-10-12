@@ -66,3 +66,14 @@ Tests:
 - Run the exact-code check (flat fields at known codes, chain and reference
   each against the expected code) in the final gate.
 - Fix what it names, and only then decide the limit.
+
+## Addendum — both warp paths (planner, 2026-10-12)
+
+Every refinement applies under both `dejudder_warp_stage` settings
+(`source` and `rendered`). D1/D3 are in the shared matcher; D2/D4's scale
+is consumed in both `DejudderWarp` and `RenderedWarp` bodies; **D5 is
+wired into `RenderedWarp` as well as `DejudderWarp`** (the cached path is
+the one that runs at 4K), its extra bindings installed only when on; S1 is
+at OUTPUT and covers every present. Tests run each refinement under both
+paths; the "all refinements on" matrix axis crosses with
+`dejudder_warp_stage`.
