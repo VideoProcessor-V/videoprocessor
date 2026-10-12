@@ -3278,7 +3278,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual("scope",
 				selected.snapshot->viewport.profile.c_str());
 
-			writeConfiguration("2.40:1");
+			writeConfiguration("2.4:1");   // a different size: same-size rewrites hit the ConfigFile cache weakness (SameSizeEdit... test)
 			ConfigFile editedConfig;
 			Assert::IsTrue(editedConfig.Load(path));
 			UnifiedProfileRuntime::RefreshResult reloaded;
