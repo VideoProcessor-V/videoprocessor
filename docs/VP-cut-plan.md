@@ -25,6 +25,10 @@ a new decision.
 - Stage 9 ambient-light switching (needs the sensor hardware; the
   rendering-profile key `sdr_black_nits` already allows a manual
   lights-on profile).
+  *Implementer note (owner, 2026-10-12): Stage 9 was already built at the
+  owner's earlier request (`[ambient]`, the Arduino sensor reader); it
+  stays in the build, `mode: off` by default, untouched by the first
+  session.*
 - S3 (STBN / second-order shaping) — only if the flat-field test shows a
   pattern.
 - The SVP-class estimator — not planned.
