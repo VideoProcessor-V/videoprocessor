@@ -71,7 +71,7 @@ mastering_clip: AUTO
 Stable uses `vprenderer/VideoProcessorVPRenderer.dll` with `libplacebo-360.dll`.
 Beta uses `vprenderer-beta/VideoProcessorVPRendererBeta.dll` with
 `libplacebo-377.dll`. Headers, import libraries, object directories, exported
-parameter reads and persistent shader caches are separate. Plugin API 25 also
+parameter reads and persistent shader caches are separate. Plugin API 26 also
 checks a renderer-flavor export, rejecting a plugin placed under the wrong name.
 All eight shared transitive runtime DLLs are currently byte-identical. This is
 required because Windows can reuse loaded DLLs by basename across directories.
