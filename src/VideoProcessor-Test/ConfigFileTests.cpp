@@ -5502,7 +5502,15 @@ namespace VideoProcessorTest
 			std::ostringstream shippedText;
 			shippedText << shippedFile.rdbuf();
 			const std::string shipped = shippedText.str();
-			Assert::IsTrue(shipped.find("\nwhen:") == std::string::npos);
+			// The sample ships one rule only: HDR debanding off (planner
+			// 2026-10-12, ShippedConfigurationsTurnDebandingOffForHdr).
+			const std::string hdrRule = "\n[vprenderer.HDR]\nwhen: $eotf==\"pq\" || $eotf==\"hlg\"\n";
+			std::string normalized = shipped;
+			normalized.erase(std::remove(normalized.begin(), normalized.end(), '\r'), normalized.end());
+			const size_t hdrAt = normalized.find(hdrRule);
+			Assert::IsTrue(hdrAt != std::string::npos);
+			normalized.erase(hdrAt, hdrRule.size());
+			Assert::IsTrue(normalized.find("\nwhen:") == std::string::npos);
 			Assert::IsTrue(shipped.find("[actions.") == std::string::npos);
 			Assert::IsTrue(shipped.find("[event_actions.") == std::string::npos);
 			Assert::IsTrue(shipped.find("[display_rules.") == std::string::npos);

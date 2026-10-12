@@ -20,6 +20,10 @@ a new decision.
 5. **BUILD-STATUS.md**: every stage, its setting(s), default, and the
    first thing to check; the regression recipes; the key-override list.
 
+*Owner decision (2026-10-12, later): items 3-5 are built together first,
+then ONE full gate and ONE audit, not one per step. Plan:
+docs/VP-build-plan-refinements.md.*
+
 ## Not before the cut (recorded, not built)
 
 - Stage 9 ambient-light switching (needs the sensor hardware; the
