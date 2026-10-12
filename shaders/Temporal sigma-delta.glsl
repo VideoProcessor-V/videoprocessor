@@ -71,6 +71,18 @@
  *   exact code that lands in the top 8 bits is reproduced when this hook
  *   emits   limited: 4k/1023      full: k/255
  *   and for an 8-bit swapchain in either range  k/255.
+ *   With a true 10-bit output (colour depth 10, delta 5) both ranges arrive
+ *   as code10/1023 and the quantizer works in 10-bit codes, emitting k/1023.
+ *   The tolerances (motion_threshold, match_tolerance) stay in 8-bit codes,
+ *   as perceptual units: the luma passes work in 8-bit units, and the
+ *   quantizer scales motion_threshold by 4. The OUTPUT texture is rgba16f,
+ *   which near white resolves only half a 10-bit code, so at 10 bits the
+ *   exact-code snap follows the rgba16f step at the value's brightness
+ *   (half a code near white, finer below), and the final store writes an
+ *   exactly representable half.
+ *   All three parameters (levels_full, swapchain_bits, color_bits) are set by
+ *   the renderer every frame from the target; a value in the shader rule is
+ *   overwritten.
  *
  * State
  *   Persistent storage textures sized to the output surface through the
@@ -94,21 +106,28 @@
 1.0
 
 //!PARAM levels_full
-//!DESC 0 = limited-range output (VP output_range: limited), 1 = full-range
+//!DESC Set by the renderer from the frame's target (delta 5): 0 = limited range, 1 = full range
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM swapchain_bits
-//!DESC Swapchain surface depth: 10 (default R10G10B10A2) or 8 (diagnostic_force_8bit_sdr_swapchain)
+//!DESC Set by the renderer from the frame's target (delta 5): swapchain sample depth, 10 or 8
 //!TYPE float
 //!MINIMUM 8.0
 //!MAXIMUM 10.0
 10.0
 
+//!PARAM color_bits
+//!DESC Set by the renderer from the frame's target (delta 5): the colour depth it quantises to, 8 or 10
+//!TYPE float
+//!MINIMUM 8.0
+//!MAXIMUM 10.0
+8.0
+
 //!PARAM noise_amplitude
-//!DESC Decorrelation dither amplitude in 8-bit codes (breaks sigma-delta limit cycles)
+//!DESC Decorrelation dither amplitude, in output codes (breaks sigma-delta limit cycles)
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
@@ -209,7 +228,9 @@ void hook()
         return;
     ivec2 full = textureSize(HOOKED_raw, 0);
     // The code-domain scale, as in the quantizer below.
-    float scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0;
+    // 8-bit units: a true 10-bit output (color_bits 10) arrives as /1023.
+    float scale = color_bits > 9.0 ? 1023.0 / 4.0 :
+        ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
     float sum = 0.0;
     for (int y = 0; y < 4; y++)
         for (int x = 0; x < 4; x++) {
@@ -426,7 +447,8 @@ void hook()
     // values exist (RESID_NEXT tag).
     ivec2 full = best * 4;
     full_size = textureSize(HOOKED_raw, 0);
-    full_scale = (levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0;
+    full_scale = color_bits > 9.0 ? 1023.0 / 4.0 :
+        ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
     ivec2 corner = block * 16;
     ivec2 tagpos = clamp(corner, ivec2(0), imageSize(RESID_NEXT) - ivec2(1));
     if (abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3) {
@@ -519,6 +541,17 @@ float ign(vec2 p, int f)
 
 // The residual carried from texel `from`, if that texel is initialised and
 // its last value is within the motion gate of the value now.
+// The OUTPUT texture is rgba16f. Near white it holds only values about
+// half a 10-bit code apart, and a GPU may truncate rather than round when
+// storing into it (WARP does): a 10-bit code k/1023 stored as is can come out
+// one code low (940 -> 939). An exactly representable half is stored as is,
+// whatever the rounding mode, and the one packHalf2x16 gives lies within a
+// quarter code of k/1023, so the final store still lands on k (delta 5).
+vec3 exact_half(vec3 v)
+{
+    return vec3(unpackHalf2x16(packHalf2x16(v.rg)), unpackHalf2x16(packHalf2x16(vec2(v.b, 0.0))).x);
+}
+
 bool carried(ivec2 from, vec3 x, out vec3 r)
 {
     r = vec3(0.0);
@@ -526,7 +559,9 @@ bool carried(ivec2 from, vec3 x, out vec3 r)
     vec4 ps = imageLoad(PREV, from);
     if (abs(rs.a - VALID_TAG) >= 1e-3 || any(isnan(rs.rgb)) || any(isnan(ps.rgb)))
         return false;
-    if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold))))
+    // motion_threshold is in 8-bit codes; x is in output codes.
+    float units = color_bits > 9.0 ? 4.0 : 1.0;
+    if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units))))
         return false;
     r = clamp(rs.rgb, -0.5, 0.5);
     return true;
@@ -549,8 +584,12 @@ void hook()
     // on an 8-bit swapchain, and in full range, as code8/255. Reading the
     // 10-bit case x256 made white 235 read 235.23 and flicker to 236 about
     // one refresh in four (measured on a real 10-bit target, stage 6a audit).
-    float in_scale = (limited && swap10) ? 255.75 : 255.0;
-    float out_step = (limited && swap10) ? (4.0 / 1023.0) : (1.0 / 255.0);
+    // Delta 5: a true 10-bit output quantises to 10-bit codes.
+    bool ten = color_bits > 9.0;
+    float in_scale = ten ? 1023.0 : ((limited && swap10) ? 255.75 : 255.0);
+    float out_step = ten ? (1.0 / 1023.0) : ((limited && swap10) ? (4.0 / 1023.0) : (1.0 / 255.0));
+    float max_code = ten ? 1023.0 : 255.0;
+    // 8-bit codes: 0.13 (one rgba16f step near white is 1/8 code).
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
     vec3 x = src.rgb * in_scale;
@@ -561,14 +600,21 @@ void hook()
     // A value within 0.13 code of a whole code is that code. Real 10-bit
     // detail comes in steps of 0.25 code and stays further away.
     vec3 whole = floor(x + 0.5);
-    x = mix(x, whole, vec3(lessThan(abs(x - whole), vec3(0.13))));
+    // At 10 bits one rgba16f step is half a code near white (a quarter below
+    // mid grey, and so on down): within one step of a whole code there is no
+    // finer information to carry, so the snap follows the step at the value's
+    // own brightness (WARP truncates libplacebo's 940 to 939.55 when storing).
+    vec3 snap = vec3(0.13);
+    if (ten)
+        snap = max(vec3(0.13), exp2(floor(log2(max(src.rgb, vec3(1e-6)))) - 10.0) * in_scale * 1.04);
+    x = mix(x, whole, vec3(lessThan(abs(x - whole), snap)));
 
     if (test_ramp > 0.5) {
         // 10-bit horizontal ramp across the legal range, in 8-bit code units.
         float t = float(pos.x) / max(float(out_size.x - 1), 1.0);
         float ramp = limited ? (16.0 + 219.0 * t) : (255.0 * t);
         ramp = floor(ramp * 4.0 + 0.5) * 0.25;   // quantise to 10-bit grid
-        x = vec3(ramp);
+        x = vec3(ten ? ramp * 4.0 : ramp);
     }
 
     vec3 k;
@@ -603,16 +649,19 @@ void hook()
 
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
-        k = clamp(floor(x + r + d + 0.5), 0.0, 255.0);
+        k = clamp(floor(x + r + d + 0.5), 0.0, max_code);
         vec3 r_next = clamp(x + r - k, -0.5, 0.5);
 
         imageStore(RESID_NEXT, spos, vec4(r_next, VALID_TAG));
         imageStore(PREV_NEXT, spos, vec4(x, 1.0));
     } else {
-        k = clamp(floor(x + d + 0.5), 0.0, 255.0);
+        k = clamp(floor(x + d + 0.5), 0.0, max_code);
     }
 
     // With the occlusion mask in alpha, alpha goes back to 1 here.
     vec4 outc = vec4(k * out_step, occlusion_mask > 0.5 ? 1.0 : src.a);
-    imageStore(out_image, pos, outc / HOOKED_mul);
+    vec4 stored = outc / HOOKED_mul;
+    if (ten)
+        stored.rgb = exact_half(stored.rgb);
+    imageStore(out_image, pos, stored);
 }

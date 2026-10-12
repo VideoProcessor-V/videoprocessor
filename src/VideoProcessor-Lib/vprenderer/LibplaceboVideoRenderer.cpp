@@ -3903,6 +3903,7 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t dejudderMaskSequence[2] = { 0, 0 };
 	bool dejudderExtrasAllowed = false;
 	bool dejudderMaskParamSet = false;
+	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
 	bool dejudderMaskNoSigmaLogged = false;
 	bool dejudderMaskNlsLogged = false;
 	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
@@ -10913,6 +10914,7 @@ struct LibplaceboVideoRenderer::Impl
 		a.chroma = textures[1];
 		a.chromaShiftX = 1;
 		a.chromaShiftY = lossless422 ? 0 : 1;
+		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;   // delta 5, D5-3
 		b = a;
 		b.luma = dejudderNextTextures[0];
 		b.chroma = dejudderNextTextures[1];
@@ -15664,6 +15666,29 @@ struct LibplaceboVideoRenderer::Impl
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
+        // Delta 5 (D5-1): the sigma-delta's code domain comes from this
+        // frame's target, never from the shader rule: range, swapchain sample
+        // depth and the colour depth it quantises to.
+        {
+            const bool full = pl_color_levels_guess(&target.repr) == PL_COLOR_LEVELS_FULL;
+            const int sample = target.repr.bits.sample_depth > 0 ? target.repr.bits.sample_depth : 8;
+            const int color = target.repr.bits.color_depth > 0 ? target.repr.bits.color_depth : sample;
+            bool any = false;
+            for (const pl_hook* hook : frameHooks)
+            {
+                const bool set = CustomHookChain::SetHookParameter(hook, "levels_full", full ? 1.0 : 0.0);
+                CustomHookChain::SetHookParameter(hook, "swapchain_bits", static_cast<double>(sample));
+                CustomHookChain::SetHookParameter(hook, "color_bits", static_cast<double>(color));
+                any = any || set;
+            }
+            const int domain = (full ? 1 : 0) | (sample << 1) | (color << 8);
+            if (any && domain != sigmaDeltaDomainLogged)
+            {
+                sigmaDeltaDomainLogged = domain;
+                DebugLog::Log("Sigma-delta code domain from the target: %s range, %d-bit swapchain, %d-bit codes",
+                    full ? "full" : "limited", sample, color);
+            }
+        }
         if (submittedNls)
             frameHooks.push_back(submittedNls);
         // Stage 6c: the occlusion mask for this source frame's first refresh,

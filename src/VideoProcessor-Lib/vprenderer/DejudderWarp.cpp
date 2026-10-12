@@ -9,7 +9,9 @@ namespace Dejudder
 {
 	namespace
 	{
-		// Half-resolution luma in 8-bit code units (2x2 average of Y).
+		// Half-resolution luma in 8-bit code units (2x2 average of Y): `codes`
+		// per unit, 255 for limited-range sources (the stored codes) and 219
+		// for full range (limited-equivalent codes; delta 5, D5-3).
 		const char* const DOWNSAMPLE_BODY = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
@@ -19,7 +21,7 @@ if (p.x < size.x && p.y < size.y) {
     for (int y = 0; y < 2; y++)
         for (int x = 0; x < 2; x++)
             sum += texelFetch(src, min(p * 2 + ivec2(x, y), full - ivec2(1)), 0).r;
-    imageStore(dst, p, vec4(sum * 0.25 * 255.0, 0.0, 0.0, 1.0));
+    imageStore(dst, p, vec4(sum * 0.25 * codes, 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -440,13 +442,15 @@ if (q.x < size.x && q.y < size.y) {
 		return true;
 	}
 
-	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2)
+	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange)
 	{
+		const float codes = fullRange ? 219.0f : 255.0f;
+		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
 		const pl_shader_desc first[2] = { Sampled("src", luma, false), Storage("dst", half) };
 		const pl_shader_desc second[2] = { Sampled("src", half, false), Storage("dst", l1) };
 		const pl_shader_desc third[2] = { Sampled("src", l1, false), Storage("dst", l2) };
 		return Dispatch("VideoProcessor de-judder: half-resolution luma", nullptr, DOWNSAMPLE_BODY,
-				first, 2, nullptr, 0, halfW, halfH, 16) &&
+				first, 2, variables, 1, halfW, halfH, 16) &&
 			Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
 				second, 2, nullptr, 0, l1W, l1H, 8) &&
 			Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
@@ -479,7 +483,7 @@ if (q.x < size.x && q.y < size.y) {
 			error = "A and B differ in size";
 			return false;
 		}
-		if (!Downsample(a.luma, halfA, l1A, l2A) || !Downsample(b.luma, halfB, l1B, l2B) ||
+		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange) || !Downsample(b.luma, halfB, l1B, l2B, b.fullRange) ||
 			!Search(halfA, halfB, l1A, l1B, l2A, l2B, forward) ||
 			!Search(halfB, halfA, l1B, l1A, l2B, l2A, backward))
 			return false;

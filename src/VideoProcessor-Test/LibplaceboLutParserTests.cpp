@@ -607,8 +607,11 @@ namespace
 		// refreshes into a 10-bit target set up like VP's default swapchain
 		// (R10G10B10A2, colour depth 8, bit shift 2) and returns the 10-bit red
 		// code of one pixel per refresh.
+		// colorDepth 8 = VP's swapchain set-up (8-bit precision in 10 bits);
+		// 10 = a true 10-bit output (delta 5).
 		std::vector<int> RenderTenBitSequence(const std::vector<const pl_hook*>& hooks,
-			enum pl_color_levels levels, float value, int frames, std::vector<int>* alphas = nullptr)
+			enum pl_color_levels levels, float value, int frames, std::vector<int>* alphas = nullptr,
+			int colorDepth = 8)
 		{
 			pl_gpu gpu = m_d3d11->gpu;
 			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
@@ -647,8 +650,8 @@ namespace
 			pl_frame output = MakeRgbFrame(target);
 			output.repr.levels = levels;
 			output.repr.bits.sample_depth = 10;
-			output.repr.bits.color_depth = 8;
-			output.repr.bits.bit_shift = 2;
+			output.repr.bits.color_depth = colorDepth;
+			output.repr.bits.bit_shift = 10 - colorDepth;
 			pl_render_params params = pl_render_fast_params;
 			params.dither_params = nullptr;
 			params.error_diffusion = nullptr;
@@ -3608,6 +3611,81 @@ namespace VideoProcessorTest
 		// k as 4k/1023 (= k/255.75), and the sigma-delta must read it so: with
 		// the LED hook, the repair and the quantizer, white stays 940 (235) and
 		// black 64 (16) on every refresh, and a 10-bit mid grey averages exactly.
+		// Delta 5 (D5-2): with a true 10-bit output (colour depth 10) the
+		// sigma-delta quantises to 10-bit codes, in both ranges: white and
+		// black exact on every refresh, and a grey whose 10-bit code is not a
+		// multiple of 4 held exactly (an 8-bit quantiser would alternate the
+		// neighbouring multiples of 4).
+		TEST_METHOD(SigmaDeltaKeepsCodesExactOnATrueTenBitOutput)
+		{
+			for (const bool full : { false, true })
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+				std::string log;
+				fixture.CaptureLog(&log);
+				CustomHookChain::Chain chain({
+					[](const std::string& file, std::string& source, std::string& reason)
+					{
+						source = LoadBundledShader(file.c_str());
+						reason = "bundled shader not found";
+						return !source.empty();
+					},
+					[&fixture](const std::string& source) -> const pl_hook*
+					{
+						return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+					},
+					[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+				ConfiguredShaderRule sigma;
+				sigma.name = "sigma_delta";
+				sigma.filename = "Temporal sigma-delta.glsl";
+				sigma.parameters = { { "enabled", "1" }, { "levels_full", full ? "1" : "0" },
+					{ "swapchain_bits", "10" }, { "color_bits", "10" }, { "noise_amplitude", "0" } };
+				chain.Configure({ sigma });
+				CustomHookChain::TemplateValues values;
+				values.outputWidth = values.outputHeight = 2;
+				chain.Ensure(values);
+				std::vector<const pl_hook*> hooks;
+				chain.Collect(false, hooks);
+				Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected the sigma-delta");
+				const pl_color_levels levels = full ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+				auto describe = [](const std::vector<int>& codes)
+				{
+					std::wstring text;
+					for (int code : codes) text += std::to_wstring(code) + L" ";
+					return text;
+				};
+				const int whiteCode = full ? 1023 : 940, blackCode = full ? 0 : 64;
+				const int libplaceboWhite = fixture.RenderTenBitSequence({}, levels, 1.0f, 1, nullptr, 10)[0];
+				const int libplaceboBlack = fixture.RenderTenBitSequence({}, levels, 0.0f, 1, nullptr, 10)[0];
+				for (int code : fixture.RenderTenBitSequence(hooks, levels, 1.0f, 8, nullptr, 10))
+					Assert::AreEqual(whiteCode, code, (L"White on a true 10-bit output (libplacebo alone: " +
+						std::to_wstring(libplaceboWhite) + L", black " + std::to_wstring(libplaceboBlack) + L")").c_str());
+				for (int code : fixture.RenderTenBitSequence(hooks, levels, 0.0f, 8, nullptr, 10))
+					Assert::AreEqual(blackCode, code, L"Black on a true 10-bit output");
+				// A grey with a 10-bit code that is not a multiple of 4.
+				float grey = 0.0f;
+				int reference = 0;
+				for (int target = 501; target <= 507 && grey == 0.0f; ++target)
+				{
+					const float candidate = full ? target / 1023.0f : (target - 64) / 876.0f;
+					const int code = fixture.RenderTenBitSequence({}, levels, candidate, 1, nullptr, 10)[0];
+					if (code % 4 != 0)
+					{
+						grey = candidate;
+						reference = code;
+					}
+				}
+				Assert::IsTrue(grey > 0.0f, L"no reference grey off the 8-bit grid");
+				const std::vector<int> codes = fixture.RenderTenBitSequence(hooks, levels, grey, 8, nullptr, 10);
+				for (int code : codes)
+					Assert::AreEqual(reference, code,
+						(L"10-bit grey " + std::to_wstring(reference) + L": " + describe(codes)).c_str());
+				fixture.CaptureLog(nullptr);
+				AssertCleanLibplaceboLog(log);
+			}
+		}
+
 		TEST_METHOD(SigmaDeltaKeepsCodesExactOnTheTenBitSwapchain)
 		{
 			TargetLutGpuFixture fixture;
@@ -4700,6 +4778,54 @@ namespace VideoProcessorTest
 			// shift 0 (the refresh A starts on) is A itself.
 			Assert::IsTrue(warp.Warp(planesA.planes, 0.0f, out));
 			Assert::IsTrue(out.luma == planesA.planes.luma && out.chroma == planesA.planes.chroma);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// Delta 5 (D5-3): the match tolerance means the same for full-range
+		// sources. B is A moved by (8, 4) (whole pixels at the matcher's half
+		// resolution, so no interpolation error) with every luma sample 3.2 8-bit codes
+		// brighter: over the default tolerance (3 codes) as limited-range codes,
+		// within it as full-range luma (3.2 x 219 / 255 = 2.75
+		// limited-equivalent codes).
+		TEST_METHOD(DejudderToleranceFollowsTheSourceRange)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y)
+				{
+					return static_cast<uint16_t>(std::min(65535, DejudderTexture(x - 8, y - 4) + 822));   // 3.2 x 257
+				}, chroma);
+			auto trustedShare = [&](bool fullRange)
+			{
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, a, planesA);
+				UploadDejudderFrame(gpu, b, planesB);
+				planesA.planes.fullRange = planesB.planes.fullRange = fullRange;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				const DejudderField field = DownloadField(gpu, warp);
+				int interior = 0, trusted = 0;
+				for (int by = 2; by < field.blocksY - 2; ++by)
+					for (int bx = 2; bx < field.blocksX - 2; ++bx)
+					{
+						++interior;
+						trusted += field.trusted(bx, by) ? 1 : 0;
+					}
+				return interior > 0 ? static_cast<double>(trusted) / interior : 0.0;
+			};
+			const double limited = trustedShare(false);
+			const double full = trustedShare(true);
+			Assert::IsTrue(limited <= 0.1, (L"limited range: 3.2 codes trusted in " + std::to_wstring(limited)).c_str());
+			Assert::IsTrue(full >= 0.9, (L"full range: 2.75 codes trusted in " + std::to_wstring(full)).c_str());
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}

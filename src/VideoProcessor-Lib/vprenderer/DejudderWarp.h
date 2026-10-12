@@ -43,6 +43,10 @@ namespace Dejudder
 		pl_tex chroma = nullptr;   // CbCr interleaved, two components
 		int chromaShiftX = 1;      // log2 horizontal subsampling (1 for 4:2:x)
 		int chromaShiftY = 0;      // log2 vertical subsampling (0 for 4:2:2, 1 for 4:2:0)
+		// The source's luma range (delta 5, D5-3): full-range luma is
+		// measured in limited-range-equivalent codes (219 per unit, not
+		// 255), so matchTolerance means the same for both.
+		bool fullRange = false;
 	};
 
 	struct Settings
@@ -114,7 +118,7 @@ namespace Dejudder
 			const struct pl_shader_desc* descriptors, int numDescriptors,
 			const struct pl_shader_var* variables, int numVariables,
 			int width, int height, int group);
-		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2);
+		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange);
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 			pl_tex fromL2, pl_tex toL2, pl_tex out);
 
