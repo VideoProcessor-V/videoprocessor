@@ -86,6 +86,14 @@ namespace LedDrive
 		// This command is a cut jump or a bright-cut dump: send it whole
 		// (not split by max_levels_per_command).
 		bool jump = false;
+		// 7c-2: this frame's statistics carry a cut to a brighter / darker
+		// LED target (control policy 3.3 / 3.4), and for a bright cut the
+		// incoming scene's highlight (linear) and VP's headroom for it,
+		// 2^tolerance / highlight (the gain ceiling of the fade-up).
+		bool brightCut = false;
+		bool darkCut = false;
+		double cutHighlight = 0.0;
+		double cutCeiling = 1e9;
 		std::string log;
 	};
 
@@ -329,6 +337,17 @@ namespace LedDrive
 	public:
 		void Configure(double eotf, int maxUsable, bool enabled, bool softwareFirst);
 		void Reset(int contrast = 50);
+		// 7c-2, during a bright cut's fade-up: CNTR never above `value` (the
+		// dump point; -1 = no limit), and the need raised by `bias` (0.03 =
+		// 3%) so a residual descends on the bright side.
+		void SetCeiling(int value) { ceiling = value; }
+		int Ceiling() const { return ceiling; }
+		void SetBias(double value) { bias = value; }
+		// The dump point (control policy 3.3; planner's 7c-2 answer 1): 50,
+		// or the smallest whole value that keeps the fade-up's start,
+		// ledFraction x Light(c) x gainCeiling, at maxCutDip or above; never
+		// above the current value.
+		int DumpTarget(double ledFraction, double gainCeiling, double maxCutDip) const;
 		// compensation: the light factor the LED needs (ceiling flux /
 		// modelled LED flux where the CNTR command will land); vpHeadroom:
 		// the largest VP gain the highlights allow. Returns the CNTR to send,
@@ -346,5 +365,35 @@ namespace LedDrive
 		bool softwareFirst = true;
 		int contrast = 50;
 		double required = 1.0;
+		int ceiling = -1;
+		double bias = 0.0;
+	};
+
+	// The gain-shaped fade-up after a bright cut (control policy 3.3 step 3;
+	// planner's 7c-2 answer 2). The displayed light R (a fraction of full)
+	// climbs as its equivalent LED level under the up rate law, from the cut
+	// frame's R0 = LED x CNTR x gain ceiling to 1; VP's gain is limited to
+	// min(gain ceiling, R / (LED x CNTR light)), so the eye sees the ramp and
+	// never the LED's step response. It ends once R is 1 and the LED is
+	// close enough that full compensation fits under the ceiling.
+	class CutRecovery
+	{
+	public:
+		void Configure(const LedDriveConfig& config, const FluxModel& flux);
+		void Start(double ledFraction, double contrastLight, double gainCeiling);
+		void Stop() { active = false; }
+		bool Active() const { return active; }
+		// Advances by elapsedMs; returns the gain limit for this frame (1e9
+		// when not active).
+		double Step(double elapsedMs, double ledFraction, double contrastLight);
+		double Displayed() const;
+		double GainCeiling() const { return gainCeiling; }
+
+	private:
+		LedDriveConfig config;
+		FluxModel flux;
+		bool active = false;
+		double rampLevel = 0.0;
+		double gainCeiling = 1.0;
 	};
 }

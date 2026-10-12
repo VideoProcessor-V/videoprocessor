@@ -59,7 +59,11 @@ full light.
 | `deadband` | compensate | ignore tiny target changes while still | raise if the LED "breathes" on a static scene |
 | `rate_preset` | compensate | `script` (default) matches the script's LED speeds; `compensated` is faster | try `compensated` by eye once compensation is on |
 | `rate_gain_*`, `rate_min_*`, `rate_max_*` | compensate | rate law: speed proportional to the distance, between min and max; overrides the preset | leave; `rate_gain` 0 restores the fixed `rate_up` / `rate_down` |
-| `cntr_assist`, `software_first`, `cntr_assist_max` | compensate | the projector's contrast helps only where VP's gain would compress highlights; lets the LED dim further in highlight scenes; capped at 62 until step 7c-2 | leave on; off = no contrast |
+| `cntr_assist`, `software_first`, `cntr_assist_max` | compensate | the projector's contrast helps only where VP's gain would compress highlights; lets the LED dim further in highlight scenes | leave on; off = no contrast |
+| `cut_cntr_dump`, `shaped_recovery` | compensate | on a cut to a brighter scene: contrast drops to 50 and the picture fades up smoothly with the LED | leave on; compare with `cut_cntr_dump: false` (contrast held) by eye |
+| `max_cut_dip` | compensate | the darkest start of that fade-up you accept; sets the LED floor (about 102 at 0.5) | lower for deeper dimming and darker fade-ups |
+| `recovery_bias_pct` | compensate | a contrast left above 50 comes down this much on the bright side | leave |
+| `dmd_clip_cntr` (`[projector]`) | compensate | the contrast at which white stops getting brighter (white-field measurement) | leave until measured |
 | `led_settle_ms`, `cntr_latency_ms`, `cntr_settle_ms`, `cntr_max_usable` (`[projector]`) | compensate | how fast the LED and contrast respond, and the highest useful contrast | from the camera / light-meter measurement; until then 300 / 80 / 0 / 74 |
 | `early_ramp` | compensate | start before a cut seen in the queue | leave on |
 | `cut_jump` | compensate | a seen cut: one jump timed to land on the cut frame | leave on; off ramps instead |

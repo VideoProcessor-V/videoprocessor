@@ -83,7 +83,28 @@ namespace LedDrive
 		// planner's 7c-1 answer 3), never above cntr_max_usable.
 		const int assistMax = std::max(50, std::min(led.cntrAssistMax, projector.cntrMaxUsable));
 		pairing.Configure(led.compensationEotf, assistMax, led.cntrAssist, led.softwareFirst);
-		compensator.SetContrastHeadroom(led.cntrAssist ? std::pow(assistMax / 50.0, led.compensationEotf) : 1.0);
+		// The highlight floor may use CNTR's headroom only up to where white
+		// still fits on the DMD (dmd_clip_cntr; 7c-2).
+		compensator.SetContrastHeadroom(led.cntrAssist ?
+			std::pow(std::min(assistMax, DmdClipLocked()) / 50.0, led.compensationEotf) : 1.0);
+		recovery.Configure(led, flux);
+	}
+
+	int LedDriveModule::DmdClipLocked() const
+	{
+		return projector.dmdClipCntr >= 50 ? projector.dmdClipCntr : std::max(50, projector.cntrMaxUsable);
+	}
+
+	bool LedDriveModule::Recovering() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return recovery.Active() || pendingRecovery;
+	}
+
+	double LedDriveModule::RecoveryDisplayed() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return recovery.Active() ? recovery.Displayed() : 1.0;
 	}
 
 	double LedDriveModule::LedFractionLocked(double level) const
@@ -202,7 +223,12 @@ namespace LedDrive
 				contrastCommands.clear();
 				seenContrastSends = status.contrastSends;
 				pairing.Reset(50);
+				pairing.SetCeiling(-1);
+				pairing.SetBias(0.0);
 				contrastModel.Reset(1.0);
+				recovery.Stop();
+				pendingRecovery = false;
+				recoveryLimit = 1e9;
 				smoothing = false;
 				policy = ControllerOutput();
 				holding = false;
@@ -438,6 +464,23 @@ namespace LedDrive
 			contrastCommands.pop_front();
 		}
 		contrastModel.Step(elapsed);
+		// 7c-2: the fade-up starts on the cut frame itself (a seen cut is
+		// known latency frames ahead) and limits VP's gain while it runs.
+		if (pendingRecovery && compensating &&
+			(pendingRecoverySequence == 0 || sequence == 0 || sequence >= pendingRecoverySequence))
+		{
+			pendingRecovery = false;
+			// From the CNTR just sent, not the modelled one: before the dump
+			// lands the limit simply trims the extra, so nothing steps down.
+			recovery.Start(ledModel.Value(), pairing.Light(pairing.Contrast()), pendingRecoveryCeiling);
+		}
+		recoveryLimit = compensating ? recovery.Step(elapsed, ledModel.Value(), contrastModel.Value()) : 1e9;
+		if (!recovery.Active() && !pendingRecovery && pairing.Ceiling() >= 0)
+		{
+			// The fade-up is over: CNTR pairs normally again.
+			pairing.SetCeiling(-1);
+			pairing.SetBias(0.0);
+		}
 		if (holding && !policy.holdGain) holding = false;
 		if (policy.holdGain && !holding)
 		{
@@ -464,10 +507,15 @@ namespace LedDrive
 		const bool predicted = sequence != 0 && first != forCommand;
 		// The look-ahead reaches the frame the LED will land on.
 		const bool covered = predicted && std::prev(forCommand)->first >= sequence + static_cast<uint64_t>(latency);
+		uint64_t cutSequence = 0;
 		if (predicted)
 		{
 			target = Corrected(std::prev(forCommand)->second);
-			for (auto it = first; it != forCommand; ++it) target.cut = target.cut || it->second.cut;
+			for (auto it = first; it != forCommand; ++it)
+			{
+				if (it->second.cut && cutSequence == 0) cutSequence = it->first;
+				target.cut = target.cut || it->second.cut;
+			}
 		}
 		pendingCut = pendingFade = false;
 		// The furthest queued frame, for early ramps.
@@ -505,17 +553,64 @@ namespace LedDrive
 		// for the port must not land during it (audit stage7-step7c1).
 		if (assistAllowed && !allowed) HoldContrastLocked();
 		assistAllowed = allowed;
-		if (allowed)
+		// 7c-2, bright cut (control policy 3.3; planner's 7c-2 answers):
+		// once per cut, CNTR dumps to 50 (partially only to keep the fade-up's
+		// start at max_cut_dip), sent now so it lands with the LED's jump on
+		// the cut frame (CNTR takes the slot ahead of the LPW1, which follows
+		// after the command gap). During the fade-up CNTR never rises; a
+		// residual descends paired with recovery_bias_pct.
+		if (out.brightCut && (cutSequence == 0 || cutSequence != lastBrightCutSequence))
 		{
-			const double ahead = std::min(ledModel.Value(),
-				ledModel.Predict(LedFractionLocked(out.light), projector.cntrLatencyMs));
-			contrastCommand = pairing.Update(1.0 / std::max(1e-6, ahead), out.vpHeadroom);
-			if (contrastCommand >= 0)
+			lastBrightCutSequence = cutSequence;
+			const double dmd = pairing.Light(DmdClipLocked());
+			if (allowed && led.cutCntrDump && pairing.Contrast() > 50)
 			{
-				driver->SetContrastAsync(contrastCommand);
-				if (contrastCommand != 50) assistContrastDriven = true;
+				const double ceilingAtDump = out.cutHighlight > 0.0 ?
+					std::min(out.cutCeiling, dmd / out.cutHighlight) : out.cutCeiling;
+				const int dump = pairing.DumpTarget(ledModel.Value(), ceilingAtDump, led.maxCutDip);
+				if (dump < pairing.Contrast())
+				{
+					pairing.Reset(dump);
+					driver->SetContrastAsync(dump);
+					contrastCommand = dump;
+				}
+			}
+			pairing.SetCeiling(pairing.Contrast());
+			pairing.SetBias(led.recoveryBiasPct / 100.0);
+			if (led.shapedRecovery)
+			{
+				pendingRecovery = true;
+				pendingRecoverySequence = cutSequence;
+				// The new scene's headroom, and never past where white clips on
+				// the DMD at the CNTR it will have (dmd_clip_cntr).
+				pendingRecoveryCeiling = out.cutHighlight > 0.0 ?
+					std::min(out.cutCeiling, dmd / (out.cutHighlight * pairing.Light(pairing.Contrast()))) :
+					out.cutCeiling;
 			}
 		}
+		else if (out.darkCut)
+		{
+			// Policy 3.4: no fade-up; CNTR pairs normally.
+			recovery.Stop();
+			pendingRecovery = false;
+			pairing.SetCeiling(-1);
+			pairing.SetBias(0.0);
+		}
+		if (allowed && contrastCommand < 0)
+		{
+			// CNTR is paired with the LED's modelled light now: never above the
+			// paired value for the modelled LED (policy 3.4; planner's 7c-2
+			// answer 4). Above dmd_clip_cntr, CNTR counts against the highlight
+			// tolerance like VP's gain (planner's 7c-2 answer 1).
+			double headroom = out.vpHeadroom;
+			const double highlight = out.highlightCap < 1e8 ? 1.0 / out.highlightCap : 0.0;
+			if (highlight > 0.0)
+				headroom = std::min(headroom,
+					pairing.Light(DmdClipLocked()) / (highlight * pairing.Light(pairing.Contrast())));
+			contrastCommand = pairing.Update(1.0 / std::max(1e-6, ledModel.Value()), headroom);
+			if (contrastCommand >= 0) driver->SetContrastAsync(contrastCommand);
+		}
+		if (contrastCommand > 50) assistContrastDriven = true;
 		policy = out;
 		gain.knee = out.knee;
 		++ticks;
@@ -601,8 +696,8 @@ namespace LedDrive
 			// content brightness stays constant while it moves.
 			current.active = true;
 			current.domain = GainDomain::Linear;
-			current.gain = holding ? heldGain :
-				CompensationGainForLed(1.0 / std::max(1e-6, ledModel.Value()), policy, contrastModel.Value());
+			current.gain = holding ? heldGain : std::min(recoveryLimit,
+				CompensationGainForLed(1.0 / std::max(1e-6, ledModel.Value()), policy, contrastModel.Value()));
 		}
 		return current;
 	}

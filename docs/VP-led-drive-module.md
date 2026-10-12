@@ -289,8 +289,23 @@ real:
 > - **Assist cap** (answer 3): `cntr_assist_max: 62` (about 1.7x light)
 >   until 7c-2's dump exists; the lower of it and `cntr_max_usable` applies.
 >   7c-2 lifts the value to `cntr_max_usable`; the key stays.
-> - Bright and dark cuts, the recovery gain and `max_cut_dip` are 7c-2;
->   the look-ahead extras and the Config page keys are 7c-3.
+> - **7c-2 (bright / dark cuts; docs/VP-stage7-7c2-answers.md):**
+>   - Bright cut (target above the current level): once per cut, CNTR
+>     dumps to 50 (`cut_cntr_dump`; partially only to keep the fade-up's
+>     start at `max_cut_dip`), landing with the LED's jump on the cut frame.
+>   - Fade-up (`shaped_recovery`, `CutRecovery`): displayed light R climbs
+>     under the up rate law from LED x CNTR x ceiling; VP gain = min(the new
+>     scene's headroom, R / (LED x CNTR light)). During it CNTR never rises;
+>     a residual descends paired with `recovery_bias_pct`.
+>   - Dark cut: no fade-up; CNTR paired on the modelled LED light now.
+>   - Scene floor: the higher of `led_floor` and the `max_cut_dip` floor
+>     (102 at 0.5).
+>   - `dmd_clip_cntr` (`[projector]`, default `cntr_max_usable`): above it
+>     CNTR counts against the highlight tolerance. No effect at the default.
+>   - `cntr_assist_max` lifted to 100 (no cap beyond `cntr_max_usable`).
+>   - Regression recipe now also `max_cut_dip: 0`, `shaped_recovery: off`.
+> - The look-ahead extras (black-frame pre-positioning, head start, exit
+>   from black) and the Config page keys are 7c-3.
 
 The projector contrast command is never sent; contrast is left at the
 owner's calibrated 50. Instead the controller outputs a gain that VP applies

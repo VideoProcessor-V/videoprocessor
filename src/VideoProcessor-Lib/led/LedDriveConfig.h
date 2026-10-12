@@ -90,6 +90,11 @@ namespace LedDrive
 		// The highest CNTR that still adds light (light-meter step, control
 		// policy 6): the most mode: compensate's CNTR assist may use.
 		int cntrMaxUsable = 74;
+		// The CNTR at which code 235 reaches the DMD's maximum (planner's
+		// 7c-2 answer 1; white-field sweep, policy 6). -1 = cntr_max_usable
+		// (no clipping below the reserve limit, policy 1). Above it CNTR
+		// counts against the highlight tolerance like VP's gain.
+		int dmdClipCntr = -1;
 		// lpw : relative flux, ascending lpw; empty = flux proportional to lpw.
 		std::vector<std::pair<double, double>> fluxTable;
 	};
@@ -163,10 +168,26 @@ namespace LedDrive
 		// compensation first and VP's gain only the remainder.
 		bool cntrAssist = true;
 		bool softwareFirst = true;
-		// The highest CNTR the assist may use (planner's 7c-1 answer 3): 62
-		// (about 1.7x light) until 7c-2's bright-cut dump exists, then
-		// cntr_max_usable. The lower of the two applies.
-		int cntrAssistMax = 62;
+		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
+		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
+		// 100 = no cap beyond cntr_max_usable. The lower of the two applies.
+		int cntrAssistMax = 100;
+		// Bright cut (control policy 3.3, 7c-2): CNTR dumps to 50 on the cut
+		// (partially only when a full dump would start the fade-up below
+		// max_cut_dip); off = CNTR held through the cut, descending paired.
+		bool cutCntrDump = true;
+		// The fade-up after a bright cut follows the rate law in displayed
+		// light under the LED's climb: VP's gain = min(the new scene's
+		// headroom, ramp / (LED x CNTR light)). Off = full compensation at
+		// once, the knee containing the rest (before 7c-2).
+		bool shapedRecovery = true;
+		// The darkest start of a fade-up after a bright cut the owner accepts
+		// (policy 4): sets a scene floor, the higher of it and led_floor
+		// applies. 0 = no floor from it.
+		double maxCutDip = 0.5;
+		// A partial dump's residual CNTR descends paired, biased this much to
+		// the bright side (VP's gain trims the excess).
+		double recoveryBiasPct = 3.0;
 		bool earlyRamp = true;
 		// A cut the look-ahead has seen: one jump to the new scene's level,
 		// timed to land on the cut frame (both directions; the cut hides it).
@@ -374,6 +395,7 @@ namespace LedDrive
 			Integer("cntr_latency_ms", 0, 2000),
 			Integer("cntr_settle_ms", 0, 5000),
 			Integer("cntr_max_usable", 50, 100),
+			Integer("dmd_clip_cntr", 50, 100),
 			Custom("flux_table", [](const std::string& value)
 				{ std::vector<std::pair<double, double>> t; return ParseFluxTable(value, t); },
 				"ascending lpw:relative_flux pairs, e.g. 60:0.55, 80:0.78, 100:1.00"),
@@ -421,6 +443,10 @@ namespace LedDrive
 			Number("rate_max_down", 0.0, 10000.0),
 			Boolean("cntr_assist"),
 			Integer("cntr_assist_max", 50, 100),
+			Boolean("cut_cntr_dump"),
+			Boolean("shaped_recovery"),
+			Number("max_cut_dip", 0.0, 1.0),
+			Number("recovery_bias_pct", 0.0, 20.0),
 			Choice("rate_preset", { "script", "compensated" }),
 			Boolean("software_first"),
 			Integer("deadband", 0, 50),
@@ -632,6 +658,7 @@ namespace LedDrive
 		if (config.TryGetString(section, "led_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.ledSettleMs);
 		if (config.TryGetString(section, "cntr_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.cntrSettleMs);
 		if (config.TryGetString(section, "cntr_max_usable", value)) Detail::ParseInt(value, 50, 100, result.cntrMaxUsable);
+		if (config.TryGetString(section, "dmd_clip_cntr", value)) Detail::ParseInt(value, 50, 100, result.dmdClipCntr);
 		if (config.TryGetString(section, "flux_table", value)) ParseFluxTable(value, result.fluxTable);
 		return result;
 	}
@@ -696,6 +723,10 @@ namespace LedDrive
 		readNumber("rate_max_down", result.rateMaxDown);
 		config.TryGetBool(section, "cntr_assist", result.cntrAssist);
 		readInt("cntr_assist_max", 50, 100, result.cntrAssistMax);
+		config.TryGetBool(section, "cut_cntr_dump", result.cutCntrDump);
+		config.TryGetBool(section, "shaped_recovery", result.shapedRecovery);
+		readNumber("max_cut_dip", result.maxCutDip);
+		readNumber("recovery_bias_pct", result.recoveryBiasPct);
 		config.TryGetBool(section, "software_first", result.softwareFirst);
 		readInt("deadband", 0, 50, result.deadband);
 		config.TryGetBool(section, "early_ramp", result.earlyRamp);

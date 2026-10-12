@@ -106,6 +106,9 @@ namespace LedDrive
 		// cntr_latency_ms and cntr_settle_ms) the gain divides by.
 		int AssistContrast() const;
 		double ModelledContrastLight() const;
+		// 7c-2: the bright cut's fade-up is running, and its displayed light.
+		bool Recovering() const;
+		double RecoveryDisplayed() const;
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
 		size_t LookaheadDepth() const;
@@ -185,6 +188,15 @@ namespace LedDrive
 		bool assistContrastDriven = false;
 		// The pairing was allowed to command CNTR on the previous frame.
 		bool assistAllowed = false;
+		// 7c-2: the gain-shaped fade-up after a bright cut, its start (the
+		// cut frame's source sequence; 0 = at once) and this frame's limit.
+		CutRecovery recovery;
+		bool pendingRecovery = false;
+		uint64_t pendingRecoverySequence = 0;
+		double pendingRecoveryCeiling = 1.0;
+		double recoveryLimit = 1e9;
+		uint64_t lastBrightCutSequence = 0;
+		int DmdClipLocked() const;
 		void HoldContrastLocked();
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
 		// the projector's whole CNTR steps; smoothing is set by the script

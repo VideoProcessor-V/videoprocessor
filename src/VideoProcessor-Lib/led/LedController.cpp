@@ -326,7 +326,13 @@ namespace LedDrive
 		bool predicted, bool covered)
 	{
 		// Without look-ahead covering the LED's response the floor is higher.
-		const int floor = covered ? config.ledFloor : std::max(config.ledFloor, config.ledFloorReactive);
+		// 7c-2: the scene floor is also kept where a full dump would start a
+		// fade-up no darker than max_cut_dip: f x 2^tolerance (white
+		// highlights) >= max_cut_dip (planner's 7c-2 answer 3).
+		const int dipFloor = config.maxCutDip > 0.0 ? flux.LevelFor(
+			config.maxCutDip / std::pow(2.0, config.highlightToleranceStops), 0, config.ledCeiling) : 0;
+		const int floor = std::max(dipFloor,
+			covered ? config.ledFloor : std::max(config.ledFloor, config.ledFloorReactive));
 		ControllerOutput out;
 		const int ceiling = config.ledCeiling;
 		const double eotf = config.compensationEotf;
@@ -424,6 +430,15 @@ namespace LedDrive
 		// highlights are squashed only for the LED's response time.
 		const bool seenCut = predicted && stats.cut && config.cutJump;
 		const bool brightDump = !predicted && stats.cut && config.brightCutDump && out.lightTarget > level;
+		// 7c-2: a cut to a brighter or darker target (policy 3.3 / 3.4).
+		out.brightCut = stats.cut && out.lightTarget > level + 0.5;
+		out.darkCut = stats.cut && out.lightTarget < level - 0.5;
+		if (out.brightCut)
+		{
+			out.cutHighlight = linearOf(stats.highlight);
+			out.cutCeiling = out.cutHighlight > 0.0 ?
+				std::max(1.0, std::pow(2.0, config.highlightToleranceStops) / out.cutHighlight) : 1e9;
+		}
 		if (seenCut || brightDump)
 		{
 			level = seenCut ? out.lightTarget : std::max(static_cast<double>(target), static_cast<double>(out.lightTarget));
@@ -496,12 +511,60 @@ namespace LedDrive
 		return std::pow(value / 50.0, eotf);
 	}
 
+	int CntrPairing::DumpTarget(double ledFraction, double gainCeiling, double maxCutDip) const
+	{
+		int value = 50;
+		if (maxCutDip > 0.0)
+			while (value < contrast && ledFraction * Light(value) * gainCeiling < maxCutDip) ++value;
+		return std::min(value, contrast);
+	}
+
+	void CutRecovery::Configure(const LedDriveConfig& configIn, const FluxModel& fluxIn)
+	{
+		config = configIn;
+		flux = fluxIn;
+	}
+
+	void CutRecovery::Start(double ledFraction, double contrastLight, double gainCeilingIn)
+	{
+		gainCeiling = std::max(1.0, gainCeilingIn);
+		const double start = std::max(0.0, std::min(1.0, ledFraction * contrastLight * gainCeiling));
+		rampLevel = flux.LevelOf(start * flux.Flux(config.ledCeiling));
+		active = start < 1.0;
+	}
+
+	double CutRecovery::Displayed() const
+	{
+		const double full = flux.Flux(config.ledCeiling);
+		return full > 0.0 ? std::min(1.0, flux.Flux(rampLevel) / full) : 1.0;
+	}
+
+	double CutRecovery::Step(double elapsedMs, double ledFraction, double contrastLight)
+	{
+		if (!active) return 1e9;
+		const double ceiling = config.ledCeiling;
+		const double distance = ceiling - rampLevel;
+		const double rate = config.rateGainUp > 0.0 ? RampRate(distance, config.rateGainUp, config.rateMinUp,
+			config.rateMaxUp > 0.0 ? config.rateMaxUp : config.rateUp) : config.rateUp;
+		rampLevel = std::min(ceiling, rampLevel + rate * std::max(0.0, elapsedMs) / 1000.0);
+		const double light = std::max(1e-6, ledFraction * contrastLight);
+		const double displayed = Displayed();
+		// Done once the ramp is at full and full compensation fits under the
+		// ceiling: the limit then equals the normal gain, so nothing jumps.
+		if (displayed >= 1.0 - 1e-9 && 1.0 / light <= gainCeiling + 1e-9)
+		{
+			active = false;
+			return 1e9;
+		}
+		return std::min(gainCeiling, displayed / light);
+	}
+
 	int CntrPairing::Update(double compensation, double vpHeadroom)
 	{
 		const double software = softwareFirst ? std::max(1.0, vpHeadroom) : 1.0;
 		// The light CNTR is needed for; below 1 when VP's gain has room to
 		// spare (0 with the assist off), so CNTR can always come back to 50.
-		const double need = enabled ? compensation / software : 0.0;
+		const double need = enabled ? compensation / software * (1.0 + bias) : 0.0;
 		required = std::max(1.0, need);
 		// The smallest whole CNTR that supplies it (CNTR never below 50 here).
 		int wanted = 50;
@@ -511,6 +574,7 @@ namespace LedDrive
 		// stuck 51 is visible on near-black). The anti-chatter margin is on
 		// the way up instead: rise only once the need passes the current
 		// value's light by 2% (VP's gain covers that 2% meanwhile).
+		if (ceiling >= 50) wanted = std::min(wanted, ceiling);
 		int next = contrast;
 		if (wanted < contrast)
 			next = wanted;

@@ -44,10 +44,11 @@ namespace
 		return raw;
 	}
 
-	// The regression recipe (planner's 7c-1 answer 1): cntr_assist off,
-	// rate_gain_up/down 0 (the fixed rate_up / rate_down) and, in Port() and
-	// the module tests, led_settle_ms 0. The compensate tests written before
-	// 7c-1 run under it as the proof that it reproduces the previous build.
+	// The regression recipe (planner's 7c-1 answer 1, extended by 7c-2):
+	// cntr_assist off, rate_gain_up/down 0 (the fixed rate_up / rate_down),
+	// max_cut_dip 0, shaped_recovery off and, in Port() and the module tests,
+	// led_settle_ms 0. The compensate tests written before 7c-1 run under it
+	// as the proof that it reproduces the previous build.
 	LedDriveConfig Compensate()
 	{
 		LedDriveConfig config;
@@ -58,6 +59,8 @@ namespace
 		ParseCurve("0:60, 20:60, 40:200, 70:230, 100:255, 255:255", config.curve);
 		config.rateGainUp = config.rateGainDown = 0.0;
 		config.cntrAssist = false;
+		config.maxCutDip = 0.0;
+		config.shapedRecovery = false;
 		return config;
 	}
 
@@ -200,7 +203,7 @@ namespace VideoProcessorTest
 			const LedDriveConfig defaults;
 			Assert::AreEqual(0.25, defaults.rateGainUp, 1e-12, L"default = script-matched");
 			Assert::AreEqual(17.5, defaults.rateMaxUp, 1e-12);
-			Assert::AreEqual(62, defaults.cntrAssistMax, L"capped until 7c-2");
+			Assert::AreEqual(100, defaults.cntrAssistMax, L"7c-2 lifts the cap: cntr_max_usable governs");
 			Assert::IsFalse(Validates("[led_drive.Default]\nrate_preset: fast\n", error));
 			Assert::IsFalse(Validates("[led_drive.Default]\ncntr_assist_max: 40\n", error));
 		}

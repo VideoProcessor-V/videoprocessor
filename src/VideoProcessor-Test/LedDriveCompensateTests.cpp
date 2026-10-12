@@ -36,10 +36,11 @@ namespace
 		return raw;
 	}
 
-	// The regression recipe (planner's 7c-1 answer 1): cntr_assist off,
-	// rate_gain_up/down 0 (the fixed rate_up / rate_down) and, in Port() and
-	// the module tests, led_settle_ms 0. The compensate tests written before
-	// 7c-1 run under it as the proof that it reproduces the previous build.
+	// The regression recipe (planner's 7c-1 answer 1, extended by 7c-2):
+	// cntr_assist off, rate_gain_up/down 0 (the fixed rate_up / rate_down),
+	// max_cut_dip 0, shaped_recovery off and, in Port() and the module tests,
+	// led_settle_ms 0. The compensate tests written before 7c-1 run under it
+	// as the proof that it reproduces the previous build.
 	LedDriveConfig Compensate()
 	{
 		LedDriveConfig config;
@@ -50,6 +51,8 @@ namespace
 		ParseCurve("0:60, 20:60, 40:200, 70:230, 100:255, 255:255", config.curve);
 		config.rateGainUp = config.rateGainDown = 0.0;
 		config.cntrAssist = false;
+		config.maxCutDip = 0.0;
+		config.shapedRecovery = false;
 		return config;
 	}
 
@@ -530,6 +533,175 @@ namespace VideoProcessorTest
 			for (const auto& write : projector->Writes())
 				Assert::IsFalse(write.rfind(":CNTR", 0) == 0 && write != ":CNTR?\r",
 					L"cntr_assist off never touches the projector's contrast");
+		}
+
+		// 7c-2 (planner's answer 3): the scene floor keeps a full dump's
+		// fade-up start, f x 2^tolerance, at max_cut_dip; the higher of it
+		// and led_floor applies.
+		TEST_METHOD(MaxCutDipSetsTheSceneFloor)
+		{
+			auto settle = [](double dip, int ledFloor)
+			{
+				LedDriveConfig config = Compensate();
+				config.maxCutDip = dip;
+				config.ledFloor = config.ledFloorReactive = ledFloor;
+				StatsBuilder builder(config);
+				CompensateController controller(config);
+				double now = 0.0;
+				ControllerOutput out;
+				for (int tick = 0; tick < 30; ++tick)
+					out = controller.Tick(Play(builder, now, 100.0, Frame(18.0)), 100.0, nullptr, true, true);
+				return out.lightTarget;
+			};
+			const int half = settle(0.5, 60);
+			Assert::AreEqual(102, half, L"0.5 -> about 0.40 of the ceiling's flux, level 102");
+			const double start = half / 255.0 * std::pow(2.0, LedDriveConfig().highlightToleranceStops);
+			Assert::IsTrue(start >= 0.5, L"a full dump from that floor starts at max_cut_dip or above");
+			Assert::IsTrue(settle(0.3, 60) < half, L"a lower max_cut_dip lowers the floor");
+			Assert::AreEqual(120, settle(0.5, 120), L"led_floor above it still applies");
+			Assert::AreEqual(60, settle(0.0, 60), L"0 = no floor from it");
+		}
+
+		// 7c-2 (planner's answer 1): the dump is to 50, or just enough CNTR to
+		// keep the fade-up's start at max_cut_dip; never above the current.
+		TEST_METHOD(CntrDumpIsFullOrJustEnough)
+		{
+			CntrPairing pairing;
+			pairing.Configure(2.41, 74, true, true);
+			pairing.Reset(70);
+			Assert::AreEqual(50, pairing.DumpTarget(0.5, 1.26, 0.5), L"0.5 x 1.26 >= 0.5: full dump");
+			const int partial = pairing.DumpTarget(0.3, 1.26, 0.5);
+			Assert::IsTrue(partial > 50 && partial < 70, L"a full dump would start too dark: partial");
+			Assert::IsTrue(0.3 * pairing.Light(partial) * 1.26 >= 0.5 &&
+				0.3 * pairing.Light(partial - 1) * 1.26 < 0.5, L"the smallest value that holds max_cut_dip");
+			Assert::AreEqual(50, pairing.DumpTarget(0.1, 1.26, 0.0), L"max_cut_dip 0: always full");
+			pairing.Reset(52);
+			Assert::AreEqual(52, pairing.DumpTarget(0.1, 1.26, 0.5), L"never above the current value");
+			// During the fade-up CNTR never rises, and the need carries the bias.
+			pairing.Reset(56);
+			pairing.SetCeiling(56);
+			Assert::AreEqual(-1, pairing.Update(10.0, 1.0), L"no rise above the dump point");
+			pairing.SetBias(0.03);
+			const double light55 = pairing.Light(55);
+			Assert::AreEqual(-1, pairing.Update(light55 / 1.02, 1.0),
+				L"the bias keeps the residual a step higher (bright side)");
+			Assert::AreEqual(55, pairing.Update(light55 / 1.04, 1.0));
+		}
+
+		// 7c-2 (planner's answer 2, policy 9 "gain-shaped recovery"): with a
+		// modelled LED step response, the displayed brightness follows the
+		// rate-law ramp - monotonic, never above the ramp or the LED x ceiling
+		// - and the gain never exceeds the ceiling; it lands on 1.
+		TEST_METHOD(CutRecoveryFollowsTheRampUnderTheLed)
+		{
+			for (const bool compensated : { false, true })
+			{
+				LedDriveConfig config;
+				ApplyRatePreset(config, compensated);
+				CutRecovery recovery;
+				recovery.Configure(config, FluxModel());
+				SettleModel led(300.0, 0.4);
+				const double ceiling = 1.26;
+				recovery.Start(led.Value(), 1.0, ceiling);
+				Assert::IsTrue(recovery.Active());
+				Assert::AreEqual(0.4 * ceiling, recovery.Displayed(), 0.005, L"starts at LED x ceiling");
+				const double frame = 1000.0 / 60.0;
+				double previous = 0.0;
+				bool landed = false;
+				for (int i = 0; i < 60 * 40 && recovery.Active(); ++i)
+				{
+					if (i == 5) led.Land(1.0); // the LED's jump lands after its dead time
+					led.Step(frame);
+					const double limit = recovery.Step(frame, led.Value(), 1.0);
+					const double gain = std::min(1.0 / led.Value(), limit);
+					const double displayed = led.Value() * gain;
+					Assert::IsTrue(gain <= ceiling + 1e-9, L"never above the gain ceiling");
+					Assert::IsTrue(displayed >= previous - 1e-9, L"the fade-up never goes backwards");
+					Assert::IsTrue(displayed <= recovery.Displayed() + 1e-9 || !recovery.Active(),
+						L"never above the ramp: the LED's step never shows");
+					if (led.Value() * ceiling >= recovery.Displayed() + 1e-9 && recovery.Active())
+						Assert::AreEqual(recovery.Displayed(), displayed, 1e-9, L"follows the ramp exactly");
+					previous = displayed;
+					landed = !recovery.Active();
+				}
+				Assert::IsTrue(landed, L"the fade-up ends");
+				Assert::AreEqual(1e9, recovery.Step(frame, led.Value(), 1.0), 1.0, L"no limit once over");
+			}
+		}
+
+		// The module: a bright cut after a CNTR-assisted dark scene dumps CNTR
+		// once, the fade-up limits the gain to the new scene's ceiling, CNTR
+		// never rises during it, and it ends with the gain back to normal.
+		TEST_METHOD(ModuleBrightCutDumpsContrastAndFadesUp)
+		{
+			for (const bool dump : { true, false })
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->contrast = 50;
+				LedDriveConfig config = Assisted();
+				ApplyRatePreset(config, true);
+				config.maxCutDip = 0.5;
+				config.shapedRecovery = true;
+				config.cutCntrDump = dump;
+				ProjectorConfig port;
+				port.protocol = "barco_ascii";
+				port.ackTimeoutMs = 60;
+				port.minCommandGapMs = 0;
+				port.readBack = true;
+				LedDriveModule module(port, config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+				double time = 0.0;
+				auto render = [&](const RawMeasurement& raw)
+				{
+					time += 1000.0 / 60.0;
+					module.SubmitMeasurement(raw);
+					const CompensationGain gain = module.BeginFrameAt(0, time);
+					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					return gain;
+				};
+				for (int frame = 0; frame < 600; ++frame) render(Frame(18.0, 100, 230));
+				const int before = module.AssistContrast();
+				Assert::IsTrue(before > 50, L"the dark scene raised CNTR");
+				Assert::IsTrue(WaitFor([&] { return projector->contrast == before; }));
+				const size_t writesBefore = projector->Writes().size();
+
+				// The cut: a bright scene with the same highlight.
+				const double ceiling = std::pow(2.0, config.highlightToleranceStops) /
+					std::pow((230.0 - 16.0) / 219.0, config.compensationEotf);
+				CompensationGain gain = render(Frame(120.0, 100, 230));
+				// With the dump the scene starts darker and fades up; held CNTR
+				// (dump off) can show it fully at once, needing no fade-up.
+				if (dump) Assert::IsTrue(module.Recovering(), L"the fade-up starts on the cut");
+				Assert::IsTrue(gain.gain <= ceiling + 1e-6, L"the gain goes no higher than the new scene's ceiling");
+				double previousDisplayed = module.RecoveryDisplayed();
+				for (int frame = 0; frame < 900 && module.Recovering(); ++frame)
+				{
+					gain = render(Frame(120.0, 100, 230));
+					Assert::IsTrue(gain.gain <= ceiling + 1e-6);
+					Assert::IsTrue(module.RecoveryDisplayed() >= previousDisplayed - 1e-9, L"the fade-up only climbs");
+					previousDisplayed = module.RecoveryDisplayed();
+				}
+				Assert::IsFalse(module.Recovering(), L"the fade-up ends");
+				// Let a held CNTR finish its paired descent.
+				for (int frame = 0; frame < 300 && module.AssistContrast() > 50; ++frame)
+					render(Frame(120.0, 100, 230));
+				std::vector<int> after;
+				const auto writes = projector->Writes();
+				for (size_t i = writesBefore; i < writes.size(); ++i)
+					if (writes[i].rfind(":CNTR", 0) == 0 && writes[i] != ":CNTR?\r")
+						after.push_back(std::stoi(writes[i].substr(5)));
+				Assert::IsFalse(after.empty());
+				for (size_t i = 1; i < after.size(); ++i)
+					Assert::IsTrue(after[i] <= after[i - 1], L"CNTR never rises during the fade-up");
+				if (dump)
+					Assert::AreEqual(50, after.front(), L"one dump straight to 50 (the floor holds max_cut_dip)");
+				else
+					Assert::IsTrue(after.front() > 50 && after.size() > 1, L"held through the cut, descending paired");
+				Assert::AreEqual(50, module.AssistContrast(), L"back to 50 in the bright scene");
+				module.Stop();
+			}
 		}
 
 		// Delta 4: the boost's base is the output gamma VP encodes for, not the

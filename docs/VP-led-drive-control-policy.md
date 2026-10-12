@@ -165,9 +165,12 @@ only through the part of it the tolerance lets a partial dump keep.
 One taste parameter governs the trade: `max_cut_dip` — the darkest
 start of a fade-up the owner accepts after a bright cut (0.5 = the scene
 may start at half brightness). The controller derives the scene floor
-from it (with gain ceiling 1.2 and no retained CNTR, `max_cut_dip: 0.5`
-gives a floor near 106). Replaces `floor_recovery_policy`. The script's
-floor of 100 corresponds to a dip of ≈0.47.
+from it as the lowest LED level whose start after a full dump
+(`f_floor × g_ceiling_white`, ≈1.26 for white highlights) is at least
+`max_cut_dip` — with 0.5 that is ≈0.40 of ceiling flux, about level 102.
+The effective scene floor is `max(led_floor, that value)`, so `led_floor`
+may be set low and `max_cut_dip` left to govern. The script's floor of
+100 corresponds to a dip of ≈0.47.
 
 `led_floor_black` is separate and may stay deep (60, or custom dim); §5.
 
@@ -212,6 +215,8 @@ led_settle_ms: 300           # fast-biased until measured; see §6
 cntr_latency_ms: 80
 cntr_settle_ms: 0
 cntr_max_usable: 74
+dmd_clip_cntr: 74            # CNTR at which code 235 reaches the DMD max; = cntr_max_usable until the
+                             # white-field sweep says otherwise. Knee threshold = min(VP headroom, DMD headroom)
 flux_table:                  # optional; linear if absent
 
 [led_drive.Default]
