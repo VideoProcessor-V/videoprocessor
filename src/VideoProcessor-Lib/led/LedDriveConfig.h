@@ -419,10 +419,16 @@ namespace LedDrive
 	// rate_preset (planner's 7c-1 answer 2): "script" matches the script's
 	// step tables (the defaults); "compensated" is the faster set from the
 	// earlier answers (400 / 120 levels per second at large distances).
-	// Individual rate_* keys override the preset.
+	// It sets both rate families (recovery-rate answers): the within-scene
+	// rate_* as above, and recovery_rate_* to its fast defaults in either
+	// preset (the fade-up after a cut is always fast). Individual rate_* and
+	// recovery_rate_* keys override the preset.
 	inline void ApplyRatePreset(LedDriveConfig& config, bool compensated)
 	{
 		const LedDriveConfig script;
+		config.recoveryRateGain = script.recoveryRateGain;
+		config.recoveryRateMin = script.recoveryRateMin;
+		config.recoveryRateMax = script.recoveryRateMax;
 		config.rateGainUp = compensated ? 4.0 : script.rateGainUp;
 		config.rateGainDown = compensated ? 1.2 : script.rateGainDown;
 		config.rateMinUp = compensated ? 20.0 : script.rateMinUp;

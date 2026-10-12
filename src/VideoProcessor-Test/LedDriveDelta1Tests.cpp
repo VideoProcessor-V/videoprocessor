@@ -199,6 +199,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.2, led.rateGainDown, 1e-12);
 			Assert::AreEqual(120.0, led.rateMaxDown, 1e-12);
 			Assert::AreEqual(300.0, led.rateMaxUp, 1e-12, L"an explicit key overrides the preset");
+			Assert::AreEqual(4.0, led.recoveryRateGain, 1e-12, L"the preset keeps the fade-up fast");
 			Assert::AreEqual(70, led.cntrAssistMax);
 			const LedDriveConfig defaults;
 			Assert::AreEqual(0.25, defaults.rateGainUp, 1e-12, L"default = script-matched");

@@ -50,6 +50,15 @@ costs almost nothing) **before** spending CNTR. Pair CNTR with the LED only
 for the remainder. This keeps CNTR's reserve unspent for the bright cut.
 
 ### 3.2 Within a scene — nothing abrupt, and rates scale with distance
+
+> **Two rate families** (recovery-rate answers, 2026-10-11): the rate law
+> below (`rate_*`, script-matched) is the law **within a scene**, and also
+> for the paired LED/CNTR move after a cut in either direction (content is
+> constant during a paired move, so slow is invisible). The displayed-light
+> ramp for the remaining shortfall after a bright cut (and after the exit
+> from black) runs under the fast `recovery_rate_*` (§3.3). The LED command
+> on a cut is one command to the scene's level, not rate-limited.
+> `rate_preset` sets both families.
 LED and CNTR move only as a pair, CNTR following the LED's *measured*
 light curve so content is constant and only the floor moves. No CNTR step
 ever happens within a scene; that is where steps were visible.
@@ -247,7 +256,13 @@ cntr_settle_ms: 0
 cntr_max_usable: 74
 dmd_clip_cntr: 59            # CNTR at which code 235 reaches the DMD max at full LED: the script's crush
                              # point until the fixed-LED white sweep (§6); the equal-white table does not
-                             # establish it. Knee threshold = min(VP headroom, DMD headroom)
+                             # establish it. Knee threshold = min(VP headroom, DMD headroom).
+                             # Do NOT put the clip into the CNTR need: above it more CNTR adds no highlight
+                             # light (h x F is the same however VP gain and CNTR share it), so each CNTR step
+                             # would ask for the next. Instead: while the scene has highlights CNTR stops at
+                             # dmd_clip_cntr; the highlight floor uses CNTR only up to it; the fade-up
+                             # ceiling shrinks in proportion above it; without highlights the assist may go
+                             # to cntr_max_usable.
 flux_table:                  # optional; linear if absent
 
 [led_drive.Default]

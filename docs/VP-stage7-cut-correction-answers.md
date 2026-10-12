@@ -40,6 +40,10 @@ the session):
   - the fade-up's gain ceiling shrinks in proportion when CNTR is above the
     clip;
   - without highlights the assist may still go to `cntr_max_usable`.
-- **`recovery_rate_*` defaults:** gain 4.0, min 20, max 400 levels/s (the
-  "compensated" preset's up values). The planner referred to an earlier
-  answer introducing it; confirm the defaults.
+- **`recovery_rate_*` defaults:** gain 4.0, min 20, max 400 levels/s,
+  confirmed in docs/VP-recovery-rate-answers.md (which also restores the
+  missing reply, docs/VP-stage7-7c2-built-answers.md). `rate_preset` sets
+  both families: either preset puts `recovery_rate_*` back to these fast
+  defaults; explicit keys override. Dark cuts: the paired move after the cut
+  stays at the scene rates (the earlier remark that it could use the
+  recovery law is withdrawn) - nothing in the code used it.
