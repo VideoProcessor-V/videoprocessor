@@ -44,6 +44,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
+#include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
@@ -15668,25 +15669,36 @@ struct LibplaceboVideoRenderer::Impl
         customHooks.Collect(lowLatencyQueue, frameHooks);
         // Delta 5 (D5-1): the sigma-delta's code domain comes from this
         // frame's target, never from the shader rule: range, swapchain sample
-        // depth and the colour depth it quantises to.
+        // depth and the colour depth it quantises to. A float or 16-bit
+        // target is not an 8/10-bit code domain: the sigma-delta is left out
+        // of that frame (audit delta5-beta.md).
         {
-            const bool full = pl_color_levels_guess(&target.repr) == PL_COLOR_LEVELS_FULL;
-            const int sample = target.repr.bits.sample_depth > 0 ? target.repr.bits.sample_depth : 8;
-            const int color = target.repr.bits.color_depth > 0 ? target.repr.bits.color_depth : sample;
+            const SigmaDeltaDomain::Domain domain = SigmaDeltaDomain::FromTarget(target.repr);
             bool any = false;
-            for (const pl_hook* hook : frameHooks)
+            for (size_t i = 0; i < frameHooks.size();)
             {
-                const bool set = CustomHookChain::SetHookParameter(hook, "levels_full", full ? 1.0 : 0.0);
-                CustomHookChain::SetHookParameter(hook, "swapchain_bits", static_cast<double>(sample));
-                CustomHookChain::SetHookParameter(hook, "color_bits", static_cast<double>(color));
-                any = any || set;
+                const pl_hook* hook = frameHooks[i];
+                const bool sigma = CustomHookChain::SetHookParameter(hook, "levels_full", domain.full ? 1.0 : 0.0);
+                any = any || sigma;
+                if (sigma && !domain.supported)
+                {
+                    frameHooks.erase(frameHooks.begin() + static_cast<std::ptrdiff_t>(i));
+                    continue;
+                }
+                CustomHookChain::SetHookParameter(hook, "swapchain_bits", static_cast<double>(domain.sample));
+                CustomHookChain::SetHookParameter(hook, "color_bits", static_cast<double>(domain.color));
+                ++i;
             }
-            const int domain = (full ? 1 : 0) | (sample << 1) | (color << 8);
-            if (any && domain != sigmaDeltaDomainLogged)
+            const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
+            if (any && signature != sigmaDeltaDomainLogged)
             {
-                sigmaDeltaDomainLogged = domain;
-                DebugLog::Log("Sigma-delta code domain from the target: %s range, %d-bit swapchain, %d-bit codes",
-                    full ? "full" : "limited", sample, color);
+                sigmaDeltaDomainLogged = signature;
+                if (domain.supported)
+                    DebugLog::Log("Sigma-delta code domain from the target: %s range, %d-bit swapchain, %d-bit codes",
+                        domain.full ? "full" : "limited", domain.sample, domain.color);
+                else
+                    DebugLog::Log("Sigma-delta: off for this output (%s range, %d-bit swapchain, colour depth %d: not an 8- or 10-bit code domain)",
+                        domain.full ? "full" : "limited", domain.sample, domain.color);
             }
         }
         if (submittedNls)

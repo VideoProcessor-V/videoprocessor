@@ -12,6 +12,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/OcclusionMaskHook.h>
+#include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -4835,6 +4836,29 @@ namespace VideoProcessorTest
 		// brighter: over the default tolerance (3 codes) as limited-range codes,
 		// within it as full-range luma (3.2 x 219 / 255 = 2.75
 		// limited-equivalent codes).
+		// D5-1 (audit delta5-beta.md): the sigma-delta's domain from the
+		// target; float / 16-bit targets are not a code domain it serves.
+		TEST_METHOD(SigmaDeltaDomainFollowsTheTarget)
+		{
+			auto repr = [](enum pl_color_levels levels, int sample, int color)
+			{
+				pl_color_repr r{};
+				r.sys = PL_COLOR_SYSTEM_RGB;
+				r.levels = levels;
+				r.bits.sample_depth = sample;
+				r.bits.color_depth = color;
+				return r;
+			};
+			const auto fl35 = SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_LIMITED, 10, 8));
+			Assert::IsTrue(fl35.supported && !fl35.full && fl35.sample == 10 && fl35.color == 8);
+			const auto ten = SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_FULL, 10, 10));
+			Assert::IsTrue(ten.supported && ten.full && ten.color == 10);
+			const auto eight = SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_UNKNOWN, 0, 0));
+			Assert::IsTrue(eight.supported && eight.full && eight.sample == 8 && eight.color == 8);
+			Assert::IsFalse(SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_FULL, 16, 16)).supported);
+			Assert::IsFalse(SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_FULL, 16, 0)).supported);
+		}
+
 		TEST_METHOD(DejudderToleranceFollowsTheSourceRange)
 		{
 			TargetLutGpuFixture fixture;

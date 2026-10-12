@@ -26,6 +26,20 @@ Stage 10 (carry/restore) is not built yet and will be built to the rule.
 - **LED module:** excluded by the rule (the owner's projector numbers live there by design). The LED's output-gamma helper (`LedDisplayGamma`) does read the frame's transfer.
 - **Not ours:** rc4's subtitle measurement falls back to 60 fps only when the display mode is unknown.
 
+## Built (2026-10-12) and audit follow-ups
+
+- Built as proposed (88680958, 847f6a55). Audit `docs/audit/delta5-beta.md`:
+  no blockers.
+- **Float or 16-bit targets:** the sigma-delta is left out of the frame
+  (logged once with the real domain), instead of quantising a float output
+  to 10-bit codes. `SigmaDeltaDomain::FromTarget` is unit-tested, including
+  the float case.
+- **`noise_amplitude` is in output codes** (the shader's documented unit),
+  not 8-bit codes: at 10 bits the decorrelation dither is a quarter of its
+  8-bit size, matched to the quantiser step it breaks limit cycles on. The
+  other tolerances (`motion_threshold`, `match_tolerance`) stay in 8-bit
+  units as stated above.
+
 ## Proposed order
 
 D5-1 and D5-2 together (one shader and renderer change, with the GPU tests),
