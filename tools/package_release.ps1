@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess = $true)]
+﻿[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$BuildRoot,
     [string]$StageRoot,
@@ -45,6 +45,7 @@ $sourceRoots = @{
     build = $BuildRoot
     repository = $repositoryRoot
     libplacebo = Join-Path $repositoryRoot '3rdparty\libplacebo'
+    libplaceboBeta = Join-Path $repositoryRoot '3rdparty\libplacebo-beta'
     nvapi = Join-Path $repositoryRoot '3rdparty\nvapi'
     vcRedist = Split-Path -Parent $VcRedistPath
 }
@@ -115,6 +116,12 @@ foreach ($name in $privateDlls) {
     }
     if (-not $expected.Contains("vprenderer\$name")) {
         throw "Plugin-private dependency is missing from the canonical plugin directory: $name"
+    }
+}
+foreach ($name in $privateDlls) {
+    $betaName = $name.Replace('libplacebo-360.dll', 'libplacebo-377.dll')
+    if ($expected.Contains($betaName) -or -not $expected.Contains("vprenderer-beta\$betaName")) {
+        throw "Beta renderer private dependency is missing or incorrectly staged: $betaName"
     }
 }
 if ($expected.Contains('config\platforms\qoffscreen.dll')) {
@@ -200,6 +207,8 @@ Get-ChildItem -LiteralPath $StageRoot -Recurse -File | ForEach-Object {
     [void]$actual.Add($relative)
     $licenseText = $relative.StartsWith(
         'vprenderer\third_party_licenses\',
+        [StringComparison]::OrdinalIgnoreCase) -or $relative.StartsWith(
+        'vprenderer-beta\third_party_licenses\',
         [StringComparison]::OrdinalIgnoreCase)
     if ((-not $licenseText -and
             $_.Extension -in @('.pdb', '.lib', '.exp', '.ilk', '.bak')) -or

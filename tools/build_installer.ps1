@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$')][string]$CoreVersion,
     [Parameter(Mandatory=$true)][string]$VcRedistPath,
@@ -34,7 +34,7 @@ try {
         if (-not $MSBuildPath) { throw 'Install Visual Studio C++ build tools and Qt as documented.' }
         & $MSBuildPath VideoProcessor.sln /t:Rebuild /m /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal /fl "/flp:logfile=$artifactRoot\installer-build.log;verbosity=normal"
         if ($LASTEXITCODE -ne 0) { throw 'x64 Release solution rebuild failed. No installer was generated.' }
-        $binaries = @(foreach ($relative in @('VideoProcessor-GUI.exe','VideoProcessorConfig.exe','VideoProcessorConfigDiscovery.dll','vprenderer/VideoProcessorVPRenderer.dll')) {
+        $binaries = @(foreach ($relative in @('VideoProcessor-GUI.exe','VideoProcessorConfig.exe','VideoProcessorConfigDiscovery.dll','vprenderer/VideoProcessorVPRenderer.dll','vprenderer-beta/VideoProcessorVPRendererBeta.dll')) {
             $file = Join-Path $root "x64\Release\$relative"
             [ordered]@{ path=$relative; sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash }
         })
@@ -43,7 +43,7 @@ try {
     }
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     if (-not $receipt.PSObject.Properties['sourceFingerprint'] -or $receipt.sourceFingerprint -ne $identity.fingerprint -or
-        $receipt.dirty -ne $identity.dirty -or $receipt.commit -ne $commit -or $receipt.configuration -ne 'Release' -or $receipt.architecture -ne 'x64' -or $receipt.binaries.Count -ne 4) {
+        $receipt.dirty -ne $identity.dirty -or $receipt.commit -ne $commit -or $receipt.configuration -ne 'Release' -or $receipt.architecture -ne 'x64' -or $receipt.binaries.Count -ne 5) {
         throw 'No successful x64 Release solution build for these exact sources. Rerun without -SkipBuild.'
     }
     foreach ($binary in $receipt.binaries) {

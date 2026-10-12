@@ -3278,7 +3278,14 @@ QComboBox* ConfigEditorWindow::bindChoiceField(const QString& section, const QSt
         fallback = value(QStringLiteral("general"), key);
     const QString raw = value(section, key);
     const bool inherited = backendInputSetting && raw.isEmpty();
-    const QString configured = inherited ? fallback : value(section, key, fallback);
+    const QString configuredValue = inherited ? fallback : value(section, key, fallback);
+    const QString subtitleSectionPrefix = QStringLiteral("vprenderer.subtitles");
+    const bool subtitleScriptField = key.compare(QStringLiteral("subtitle_script_hint"), Qt::CaseInsensitive) == 0 &&
+        (section.compare(subtitleSectionPrefix, Qt::CaseInsensitive) == 0 ||
+            section.startsWith(subtitleSectionPrefix + QStringLiteral("."), Qt::CaseInsensitive));
+    const QString configured = subtitleScriptField &&
+        configuredValue.compare(QStringLiteral("general"), Qt::CaseInsensitive) == 0
+        ? QStringLiteral("latin") : configuredValue;
     if (inherited)
     {
         const QString inheritedLabel = inheritedSharedInputLabel(key);
@@ -3553,7 +3560,7 @@ QStringList ConfigEditorWindow::validationErrors(QStringList& fields,
     // must not make every unrelated profile edit unsavable. When it returns a
     // real list we remain strict; otherwise accept VP's built-in choices.
     const QStringList acceptedRenderers = allRenderers_.isEmpty() ?
-        QStringList{ QStringLiteral("VP Renderer"),
+        QStringList{ QStringLiteral("VP Renderer"), QStringLiteral("VP Renderer (Beta)"),
             QStringLiteral("DirectShow - madVR") } : allRenderers_;
 	if (!renderer.isEmpty() &&
 		!discoveredContains(acceptedRenderers, renderer))
@@ -4713,6 +4720,8 @@ QWidget* ConfigEditorWindow::createStartupPage()
         rendererChoice_->setItemData(index,
             rendererChoice_->itemData(index).toString(), kRendererNameRole);
     sourceForm->addRow(QStringLiteral("Renderer"), rendererChoice_);
+    connect(rendererChoice_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+        [this] { refreshShaderCacheStatus(); });
     auto* hideLegacyRenderers = configuredCheck(
         QStringLiteral("Hide legacy renderers"), value(QStringLiteral("general"),
             QStringLiteral("hide_legacy_renderers")), true);
@@ -5068,7 +5077,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     rule->setMinimumHeight(72);
     rule->setMaximumHeight(96);
     auto* ruleField = fieldWithHelp(QStringLiteral("When should VP use this profile?"), rule,
-        QStringLiteral("Optional source-condition rule. Example: ${width} >= 1920 && ${eotf} == \"HDR\"."));
+        QStringLiteral("Optional source-condition rule. Example: ${renderer} ~= \"VP Renderer\" && ${source_rate} <= 30. ~= matches a literal substring (case-insensitive for renderer names). Use one non-empty quoted string with a text variable, not a number, Boolean, or ${key}. Parentheses group conditions; ! negates, then && binds before ||. Active profiles can still be selected manually when their rule is false."));
     detailLayout->addWidget(ruleField);
     if (sectionPrefix == QStringLiteral("queue"))
     {
@@ -6259,6 +6268,27 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // General retains its existing Auto status; the new controls show their
         // resolved defaults numerically without creating configuration entries.
         std::array<ToneMappingControl*, ToneMappingTuning::Count> toneControls{};
+        form = addCollapsibleSection(QStringLiteral("toneHighlightBeta"),
+            QStringLiteral("Tone Mapping: Highlight Response (Beta)"),
+            QStringLiteral("Available with VP Renderer (Beta). Saved values are retained with other renderers."), false);
+        QWidget* betaFields = form->parentWidget();
+        auto* customToneMapping = addBoolean(QStringLiteral("Gamut overflow correction (Experimental)"), QStringLiteral("custom_tone_mapping"));
+        customToneMapping->setToolTip(QStringLiteral("Off: original tone/gamut mapping. On: smoothly compresses colors near or beyond the target gamut or brightness limits after the selected gamut mapping during HDR tone mapping. May reduce brightness or saturation. Default: Off. Apply to compare."));
+        auto* dynamicTarget = addBoolean(QStringLiteral("Dynamic target nits"), QStringLiteral("dynamic_target"));
+        dynamicTarget->setToolTip(QStringLiteral("Automatically trades some scene brightness for highlight headroom. Target nits remains the physical display peak. Default: On. Requires scene-average metadata; peak detection supplies it when available."));
+        for (int i = ToneMappingTuning::FilmStrength; i < ToneMappingTuning::Count; ++i) {
+            const auto& spec = ToneMappingTuning::Specs()[i];
+            toneControls[i] = wrapToneControl(spec, addText(QString::fromUtf8(spec.label), QString::fromUtf8(spec.key)));
+        }
+        auto* restoreBeta = new QPushButton(QStringLiteral("Restore defaults"));
+        restoreBeta->setObjectName(QStringLiteral("config.vprenderer.toneHighlightBeta.restore_defaults"));
+        form->addRow(restoreBeta);
+        connect(restoreBeta, &QPushButton::clicked, betaFields, [toneControls, dynamicTarget, customToneMapping] {
+            customToneMapping->setChecked(false);
+            dynamicTarget->setChecked(true);
+            toneControls[ToneMappingTuning::FilmStrength]->restoreDefault();
+            toneControls[ToneMappingTuning::MasteringClip]->restoreDefault();
+        });
         const char* ids[] = { "toneSpline", "toneOther", "tonePeak" };
         const char* headings[] = { "Tone Mapping: Spline Curve", "Tone Mapping: Other Curves", "Tone Mapping: Peak Detection" };
         const char* descriptions[] = {
@@ -6266,7 +6296,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Controls apply only to their named tone-mapping curve.",
             "Controls apply while peak detection is enabled. Defaults follow the selected peak-detection mode." };
         const int starts[] = { 0, ToneMappingTuning::KneeOffset, ToneMappingTuning::Percentile };
-        const int ends[] = { ToneMappingTuning::KneeOffset, ToneMappingTuning::Percentile, ToneMappingTuning::Count };
+        const int ends[] = { ToneMappingTuning::KneeOffset, ToneMappingTuning::Percentile, ToneMappingTuning::FilmStrength };
         for (int section = 0; section < 3; ++section) {
             form = addCollapsibleSection(QString::fromUtf8(ids[section]), QString::fromUtf8(headings[section]),
                 QString::fromUtf8(descriptions[section]), false);
@@ -6286,8 +6316,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int i = start; i < end; ++i) toneControls[i]->restoreDefault();
             });
         }
-        updateToneControls = [toneControls, toneMapping, peakDetection, renderingQuality, state] {
+        updateToneControls = [this, toneControls, toneMapping, peakDetection, renderingQuality, state, betaFields] {
             if (state->loading) return;
+            const bool beta = rendererChoice_ && effectiveChoiceValue(rendererChoice_).compare(
+                QStringLiteral("VP Renderer (Beta)"), Qt::CaseInsensitive) == 0;
+            betaFields->setEnabled(beta);
             QString curve = effectiveChoiceValue(toneMapping);
             if (curve.isEmpty() || curve == "auto") curve = "spline";
             QString peak = effectiveChoiceValue(peakDetection);
@@ -6297,7 +6330,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 const bool enabled = i < ToneMappingTuning::SlopeTuning ? (curve == "spline" || curve == "st2094-40") :
                     i < ToneMappingTuning::KneeOffset ? curve == "spline" :
                     i == ToneMappingTuning::KneeOffset ? curve == "bt2390" :
-                    i == ToneMappingTuning::ReinhardContrast ? curve == "reinhard" : peak != "off";
+                    i == ToneMappingTuning::ReinhardContrast ? curve == "reinhard" :
+                    i < ToneMappingTuning::FilmStrength ? peak != "off" : beta;
                 toneControls[i]->setEnabled(enabled);
                 toneControls[i]->refresh();
             }
@@ -6322,6 +6356,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 return toneControls[ToneMappingTuning::Find(name)]->configuredValue().toStdString();
             }, error, key)) toneControls[ToneMappingTuning::Find(key)]->setError(QString::fromStdString(error));
         };
+        if (rendererChoice_)
+            connect(rendererChoice_, qOverload<int>(&QComboBox::currentIndexChanged), betaFields,
+                [updateToneControls] { updateToneControls(); });
+        connect(customToneMapping, &QCheckBox::toggled, this, [updateToneControls] { updateToneControls(); });
         for (auto* control : toneControls)
             connect(control->editor(), &QLineEdit::textChanged, this, [updateToneControls] { updateToneControls(); });
         for (auto* combo : { toneMapping, peakDetection, renderingQuality })
@@ -6420,6 +6458,21 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         type->setItemText(1, QStringLiteral("Classic"));
         type->setItemText(2, QStringLiteral("Move / Reconstruction (Beta)"));
         type->setItemText(3, QStringLiteral("Move / Solid Background (Beta)"));
+        auto* scriptHint = addChoice(QStringLiteral("Subtitle script hint"),
+            QStringLiteral("subtitle_script_hint"),
+            { QStringLiteral("latin"), QStringLiteral("cjk"),
+              QStringLiteral("arabic"), QStringLiteral("thai") });
+        scriptHint->setItemText(scriptHint->findData(QStringLiteral("latin")),
+            QStringLiteral("Latin"));
+        scriptHint->setItemText(scriptHint->findData(QStringLiteral("cjk")),
+            QStringLiteral("CJK (Chinese / Japanese / Korean)"));
+        scriptHint->setItemText(scriptHint->findData(QStringLiteral("arabic")),
+            QStringLiteral("Arabic"));
+        scriptHint->setItemText(scriptHint->findData(QStringLiteral("thai")),
+            QStringLiteral("Thai"));
+        scriptHint->setToolTip(QStringLiteral(
+            "Guides Alpha's pixel-based grouping of subtitle rows, marks, and spacing. "
+            "This does not recognize text or select Windows OCR languages."));
         auto* offset = addText(QStringLiteral("Inward offset / Classic padding"), QStringLiteral("offset_pixels"), QStringLiteral("source pixels"));
         offset->setValidator(new QIntValidator(0,500,offset));
         offset->setToolTip(QStringLiteral("Offsets the whole moved subtitle box: bottom subtitles move higher and top subtitles move lower. Text stays centered within the box; extension to the black bar does not count toward centering. In Classic, this is the original subtitle padding."));
@@ -6868,6 +6921,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     return legacySubtitleHdrValue(key);
                 }
                 if(key == QStringLiteral("type")) return QStringLiteral("classic");
+                if(key == QStringLiteral("subtitle_script_hint")) return QStringLiteral("latin");
                 if(key == QStringLiteral("offset_pixels")) return value(section,QStringLiteral("type"))==QStringLiteral("classic") || value(section,QStringLiteral("type")).isEmpty() ? QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_PADDING_PIXELS) : QStringLiteral("0");
                 if(key == QStringLiteral("subtitle_hold_seconds")) return QStringLiteral("2");
                 if(key == QStringLiteral("subtitle_engage_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_ENGAGE_DRIFT_MS);
@@ -6912,6 +6966,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             if (sectionPrefix == QStringLiteral("vprenderer"))
             {
+                if (key == QStringLiteral("dynamic_target")) return QStringLiteral("true");
+                if (key == QStringLiteral("custom_tone_mapping")) return QStringLiteral("false");
                 if (key == QStringLiteral("quality")) return QStringLiteral("high");
                 if (key == QStringLiteral("output_path_profile")) return QStringLiteral("legacy");
                 if (key == QStringLiteral("target_primaries")) return QStringLiteral("REC709");
@@ -7025,6 +7081,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				configured = QStringLiteral("0");
 			if (!requiresExplicitValue && configured.isEmpty())
 				configured = fallback(field.key);
+            // Display the accepted legacy alias as Latin without rewriting the
+            // stored profile value; edits persist only after the user changes it.
+            if (sectionPrefix == QStringLiteral("vprenderer.subtitles") &&
+                field.key == QStringLiteral("subtitle_script_hint") &&
+                configured.compare(QStringLiteral("general"), Qt::CaseInsensitive) == 0)
+                configured = QStringLiteral("latin");
             if (defaultOnlyField && !defaultProfile && list->count() > 0)
                 configured = value(list->item(0)->data(Qt::UserRole).toString(), field.key, fallback(field.key));
             field.widget->setEnabled((!defaultOnlyField || defaultProfile) &&
@@ -7670,8 +7732,10 @@ void ConfigEditorWindow::refreshShaderCacheStatus()
 			QStringLiteral("Remote cache status is unavailable."));
 		return;
 	}
+    const bool beta = value(QStringLiteral("general"), QStringLiteral("renderer")).compare(
+        QStringLiteral("VP Renderer (Beta)"), Qt::CaseInsensitive) == 0;
     const QDir rendererDirectory(QFileInfo(configPath_).absoluteDir().filePath(
-        QStringLiteral("vprenderer")));
+        beta ? QStringLiteral("vprenderer-beta") : QStringLiteral("vprenderer")));
     const QFileInfo cache(rendererDirectory.filePath(
         QStringLiteral("VideoProcessorShaderCache.bin")));
     if (shaderCacheStatus_)
@@ -8295,8 +8359,10 @@ QWidget* ConfigEditorWindow::createShadersSetupPage()
     connect(clearCache, &QPushButton::clicked, this, [this]
     {
         const QDir configurationDirectory = QFileInfo(configPath_).absoluteDir();
+        const bool beta = value(QStringLiteral("general"), QStringLiteral("renderer")).compare(
+            QStringLiteral("VP Renderer (Beta)"), Qt::CaseInsensitive) == 0;
         const QString rendererDirectory = configurationDirectory.filePath(
-            QStringLiteral("vprenderer"));
+            beta ? QStringLiteral("vprenderer-beta") : QStringLiteral("vprenderer"));
         if (!QDir().mkpath(rendererDirectory))
         {
             setStatus(QStringLiteral("Could not access the VP Renderer cache folder."), true);

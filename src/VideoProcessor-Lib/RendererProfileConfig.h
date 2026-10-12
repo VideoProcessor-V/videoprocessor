@@ -574,6 +574,7 @@ namespace RendererProfileConfig
 	{
         if (group == "subtitles") {
             if (key == "type") return IsChoice(value, { "off", "classic", "generated_gray", "black" });
+            if (key == "subtitle_script_hint") return IsChoice(value, { "general", "latin", "cjk", "arabic", "thai" });
             if (key == "hdr_peak_analysis_picture_only" || key == "hdr_peak_analysis_motion_compensation") return IsBoolean(value);
             if (key == "hdr_peak_analysis_height_percent") { int n=0; return ParseInteger(value,MIN_HDR_PEAK_ANALYSIS_HEIGHT_PERCENT,MAX_HDR_PEAK_ANALYSIS_HEIGHT_PERCENT,n); }
             if (key == "hdr_peak_analysis_position") return IsChoice(value,{"top","center","bottom"});
@@ -611,6 +612,7 @@ namespace RendererProfileConfig
 			if (key == "tone_mapping") return IsChoice(value, { "auto", "spline", "bt2390", "st2094-40", "reinhard" });
 			if (key == "gamut_mapping") return IsChoice(value, { "auto", "perceptual", "softclip", "relative", "desaturate" });
 			if (key == "peak_detection") return IsChoice(value, { "auto", "off", "default", "high_quality", "on" });
+			if (key == "dynamic_target" || key == "custom_tone_mapping") return IsBoolean(value);
 			if (key == "contrast_recovery") return IsChoice(value, { "auto" }) || IsNumberInRange(value, 0.0, 2.0);
 			if (key == "saturation")
 			{
@@ -1929,7 +1931,7 @@ namespace RendererProfileConfig
                 "subtitle_detection_optimization", "subtitle_near_bar_px", "subtitle_hold_ms", "subtitle_box_padding_sides", "subtitle_box_padding_top", "subtitle_box_padding_bottom", "subtitle_move_inset",
 				"switch_refresh_rate",
 				"quality", "tone_mapping", "gamut_mapping", "peak_detection",
-				"contrast_recovery", "upscaler", "downscaler", "deband",
+				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "downscaler", "deband",
 				"deband_strength", "sigmoid", "dithering", "display_bit_depth", "output_presentation",
 				"output_range", "output_gamma", "output_path_profile",
 				"target_primaries", "sdr_target_primaries", "report_bt2020_to_display",
