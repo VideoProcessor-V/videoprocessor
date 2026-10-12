@@ -15831,6 +15831,11 @@ struct LibplaceboVideoRenderer::Impl
             {
                 adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
                     nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : 1.0f / 24.0f);
+                // SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source
+                // crop against the destination, not the (prescaled) PRE_KERNEL
+                // picture (audit stage8-rs232 item 3).
+                adaptiveDownscale.SetSourceDownscales(std::fabs(renderImage.crop.y1 - renderImage.crop.y0) >
+                    std::fabs(target.crop.y1 - target.crop.y0) + 0.5f);
                 frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
                 frameHooks.push_back(adaptiveDownscale.Blend());
                 adaptiveNoSsimLogged = false;
@@ -19003,14 +19008,35 @@ bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
 
 void LibplaceboVideoRenderer::ResumeLedDriveAfterTest()
 {
+	// A renderer created during the test (a restart, a new signal) started
+	// its own LED drive while the test held the port: that drive found the
+	// port busy and runs as a dry run. Restart it too (audit stage8-rs232
+	// item 1); the dialog calls this after every test.
+	std::shared_ptr<LedDrive::LedDriveModule> stale;
+	{
+		std::unique_lock<std::mutex> guard(m_stateMutex);
+		if (!m_ledDriveSuspended && m_ledDrive)
+		{
+			stale = m_ledDrive;
+			m_ledDrive.reset();
+			m_ledDriveSignature.clear();
+			if (m_impl)
+			{
+				std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+				std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
+			}
+		}
+	}
+	if (stale)
+		stale->Stop();   // closes the port before the new drive opens it
 	std::unique_lock<std::mutex> guard(m_stateMutex);
-	if (!m_ledDriveSuspended)
-		return;
+	const bool wasSuspended = m_ledDriveSuspended;
 	m_ledDriveSuspended = false;
-	if (m_ledDriveConfiguration)
+	if ((wasSuspended || stale) && m_ledDriveConfiguration)
 	{
 		UpdateLedDrive(*m_ledDriveConfiguration);
-		DebugLog::Log("LED drive: restarted after the RS-232 connection test");
+		DebugLog::Log(wasSuspended ? "LED drive: restarted after the RS-232 connection test" :
+			"LED drive: restarted after the RS-232 connection test (renderer created during the test)");
 	}
 }
 

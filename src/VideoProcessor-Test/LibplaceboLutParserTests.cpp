@@ -5922,6 +5922,13 @@ namespace VideoProcessorTest
 			Assert::IsFalse(module.Active(), L"The blend ran on an upscale");
 			for (size_t i = 0; i < upPlain.size(); ++i)
 				Assert::IsTrue(upPlain[i].r == upModule[i].r && upPlain[i].g == upModule[i].g, L"An upscale changed");
+			// 3b. The source's own height decides, as SSIM's `NATIVE_CROPPED.h >
+			// POSTKERNEL.h`: a picture a prescaler made taller than the output,
+			// from a source that is not, is left alone (audit stage8-rs232 item 3).
+			module.SetSourceDownscales(false);
+			render(scene, 256, 160, true, noGrain, false, true);
+			Assert::IsFalse(module.Active(), L"The blend ran although the source is not downscaled");
+			module.SetSourceDownscales(true);
 
 			// 4. Both light domains, the same weight map (edges from the source).
 			render(scene, 256, 160, true, noGrain, false, true);
@@ -5987,6 +5994,67 @@ namespace VideoProcessorTest
 				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Audit stage8-rs232 note: the owner's chain NLS (scope profile) +
+		// Stage 10 + SSIM. NLS hooks the picture at RGB after the carry (so it
+		// warps the offset in alpha with the picture), SSIM at POST_KERNEL (the
+		// texture restore). With the carry on, the same chain keeps in-range
+		// codes as with it off and keeps below black / above white; no hook is
+		// disabled, on the first frame and after.
+		TEST_METHOD(ExtendedRangeKeepsBtbThroughNlsAndSsim)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const pl_hook* nls = ParseBundledNlsShader(gpu, "NLS.glsl", 0.0);
+			BindNlsShader(nls, 1.32f, 0.0f);
+			const std::string source = LoadBundledShader("SSimDownscaler.glsl");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+			Assert::IsNotNull(ssim);
+			const std::vector<int> codes = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+			Case c;
+			c.scale = 0.5;
+			c.mitchell = true;
+			c.extraHooks = { nls, ssim };
+			Case off = c;
+			off.on = false;
+			std::string report;
+			for (int frame = 0; frame < 2; ++frame)
+			{
+				const Result on = Render(gpu, fixture.Renderer(), Greys(codes, 64), c);
+				const Result plain = Render(gpu, fixture.Renderer(), Greys(codes, 64), off);
+				Assert::IsTrue(on.ok && plain.ok);
+				const auto got = Columns(on, static_cast<int>(codes.size()), 0.5, 64);
+				const auto ref = Columns(plain, static_cast<int>(codes.size()), 0.5, 64);
+				report += "frame " + std::to_string(frame) + " on:  " + Join(got) + "\n";
+				report += "frame " + std::to_string(frame) + " off: " + Join(ref) + "\n";
+				for (size_t i = 0; i < codes.size(); ++i)
+				{
+					if (codes[i] >= 64 && codes[i] <= 940)
+						Assert::IsTrue(std::abs(got[i] - ref[i]) <= 2, ToWide("in-range changed\n" + report).c_str());
+					else if (codes[i] < 64)
+						Assert::IsTrue(got[i] <= ref[i] - 8, ToWide("below black lost\n" + report).c_str());
+					else
+						// Kept (the plain chain keeps it here too: NLS's float texture).
+						Assert::IsTrue(got[i] > 940 && got[i] >= ref[i] - 2, ToWide("above white lost\n" + report).c_str());
+				}
+				Assert::IsTrue(on.restores > 0, ToWide("the restore did not run\n" + report).c_str());
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			pl_mpv_user_shader_destroy(&ssim);
+			pl_mpv_user_shader_destroy(&nls);
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+					remaining += entry + "\n";
+			Assert::IsTrue(remaining.empty(), ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 

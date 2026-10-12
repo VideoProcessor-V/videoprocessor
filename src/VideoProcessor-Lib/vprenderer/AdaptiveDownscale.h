@@ -25,8 +25,11 @@
 //   with the same weight as luma, so it follows the picture it belongs to.
 //
 // Both hooks do nothing unless the frame downscales vertically, which is the
-// SSIM shader's own condition (NATIVE_CROPPED.h > POSTKERNEL.h). The SSIM
-// shader (unchanged, on Mitchell) must be in the chain: the renderer checks.
+// SSIM shader's own condition (NATIVE_CROPPED.h > POSTKERNEL.h): the source
+// crop's own height against the destination's, given per frame by the
+// renderer, since a LUMA prescaler can make the PRE_KERNEL picture taller
+// than the source (audit stage8-rs232 item 3). The SSIM shader (unchanged,
+// on Mitchell) must be in the chain: the renderer checks.
 // The grain state advances once per source frame (de-judder extras on the
 // source path re-run the hooks without advancing it).
 namespace AdaptiveDownscale
@@ -69,6 +72,9 @@ namespace AdaptiveDownscale
 		// Per render: settings, the source frame it shows and its duration.
 		// The grain state advances only on a new source sequence.
 		void SetFrame(const Settings& settings, uint64_t sourceSequence, float frameSeconds);
+		// The SSIM shader's condition for this frame: the source crop is
+		// taller than the destination rectangle.
+		void SetSourceDownscales(bool value) { sourceDownscales = value; }
 		const pl_hook* Measure() const { return &measure; }
 		const pl_hook* Blend() const { return &blend; }
 		// True when the last measured frame downscaled (the blend ran on it).
@@ -92,6 +98,7 @@ namespace AdaptiveDownscale
 		uint64_t sequence = 0;
 		uint64_t advancedSequence = 0;
 		float frameSeconds = 1.0f / 24.0f;
+		bool sourceDownscales = true;
 		pl_gpu gpu = nullptr;
 		pl_tex faithful = nullptr;
 		pl_tex edge = nullptr;

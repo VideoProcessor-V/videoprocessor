@@ -3260,7 +3260,9 @@ void CVideoProcessorDlg::StartProjectorTest(
 
 LRESULT CVideoProcessorDlg::OnProjectorTestDone(WPARAM, LPARAM)
 {
-	if (m_projectorTestSuspendedRenderer && m_videoRenderer)
+	// Also when the renderer was created during the test (audit stage8-rs232
+	// item 1): its LED drive could not open the port the test held.
+	if (m_videoRenderer)
 		m_videoRenderer->ResumeLedDriveAfterTest();
 	m_projectorTestSuspendedRenderer = false;
 	const auto pending = std::move(m_projectorTestPending);

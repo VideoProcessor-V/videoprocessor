@@ -1,6 +1,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
 #include <shellapi.h>
 #include <objbase.h>
 
@@ -112,6 +113,22 @@
 
 namespace
 {
+// RS-232 connection test: whether VideoProcessor.exe runs on this computer
+// (then the test goes through it, never around it).
+bool LocalVideoProcessorRunning()
+{
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE)
+		return true;   // unknown: do not open the port behind VP's back
+	PROCESSENTRY32W entry{};
+	entry.dwSize = sizeof(entry);
+	bool found = false;
+	for (BOOL more = Process32FirstW(snapshot, &entry); more && !found; more = Process32NextW(snapshot, &entry))
+		found = _wcsicmp(entry.szExeFile, L"VideoProcessor.exe") == 0;
+	CloseHandle(snapshot);
+	return found;
+}
+
 class TargetComboBox final : public QComboBox
 {
 protected:
@@ -9748,12 +9765,15 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 outcome->details = QString::fromStdString(rpc.details);
                 return;
             }
-            if (remote)
+            // Config opens the port itself only when no VP runs on this
+            // computer. A VP that runs but does not answer (busy, a test
+            // already running, its RPC off) keeps the port and its playback
+            // refusal: show its error (audit stage8-rs232 item 2).
+            if (remote || LocalVideoProcessorRunning())
             {
                 outcome->summary = QStringLiteral("FAIL: ") + QString::fromStdString(error);
                 return;
             }
-            // No VP on this computer: Config opens the port itself.
             ConfigFile config;
             if (configPath.empty() || !config.Load(configPath))
             {

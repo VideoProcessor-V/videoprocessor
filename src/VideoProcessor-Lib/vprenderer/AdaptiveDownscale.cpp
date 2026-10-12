@@ -284,8 +284,9 @@ if (q.x < size.x && q.y < size.y) {
 		const float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1), sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
 		const float sy0 = std::fmin(p->src_rect.y0, p->src_rect.y1), sy1 = std::fmax(p->src_rect.y0, p->src_rect.y1);
 		const int dw = std::abs(p->dst_rect.x1 - p->dst_rect.x0), dh = std::abs(p->dst_rect.y1 - p->dst_rect.y0);
-		// The SSIM shader's own condition: the picture is made shorter.
-		if (dw <= 0 || dh <= 0 || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f))
+		// The SSIM shader's own condition: the source is made shorter (the
+		// renderer's NATIVE_CROPPED.h > POSTKERNEL.h); and this picture too.
+		if (!sourceDownscales || dw <= 0 || dh <= 0 || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f))
 			return unchanged;
 		if (gpu && gpu != p->gpu)
 			Release();
