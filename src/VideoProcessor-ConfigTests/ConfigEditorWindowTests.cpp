@@ -899,13 +899,15 @@ void testDejudderBoxPresetsAndMask()
     strength->setText("0.35");
     require(preset->currentData().toString() == "0.35", "Typing 0.35 did not select Medium");
     selectData(requireControl<QComboBox>(window, "config.vprenderer.occlusion_mask"), "on");
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.preserve_extended_range"), "on");
     QCoreApplication::processEvents();
     auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
     require(apply->isEnabled(), "De-judder edits did not enable Apply");
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    for (const char* expected : { "dejudder_strength: 0.35", "occlusion_mask: on", "dejudder_strength: 0.3" })
+    for (const char* expected : { "dejudder_strength: 0.35", "occlusion_mask: on", "preserve_extended_range: on",
+        "dejudder_strength: 0.3" })
         require(saved.contains(expected), (QByteArray("De-judder setting not saved: ") + expected).constData());
 }
 

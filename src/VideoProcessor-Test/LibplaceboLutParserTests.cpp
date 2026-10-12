@@ -13,6 +13,8 @@
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
+#include <vprenderer/ExtendedRange.h>
+#include "ExtendedRangeGpuProbe.h"
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -4830,12 +4832,6 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
-		// Delta 5 (D5-3): the match tolerance means the same for full-range
-		// sources. B is A moved by (8, 4) (whole pixels at the matcher's half
-		// resolution, so no interpolation error) with every luma sample 3.2 8-bit codes
-		// brighter: over the default tolerance (3 codes) as limited-range codes,
-		// within it as full-range luma (3.2 x 219 / 255 = 2.75
-		// limited-equivalent codes).
 		// D5-1 (audit delta5-beta.md): the sigma-delta's domain from the
 		// target; float / 16-bit targets are not a code domain it serves.
 		TEST_METHOD(SigmaDeltaDomainFollowsTheTarget)
@@ -4859,6 +4855,206 @@ namespace VideoProcessorTest
 			Assert::IsFalse(SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_FULL, 16, 0)).supported);
 		}
 
+		// Stage 10: when preserve_extended_range is active, and why not.
+		TEST_METHOD(ExtendedRangeDecision)
+		{
+			using namespace ExtendedRange;
+			auto space = [](enum pl_color_primaries p, enum pl_color_transfer t)
+			{
+				pl_color_space c{};
+				c.primaries = p;
+				c.transfer = t;
+				return c;
+			};
+			const pl_color_space source = space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22);
+			const pl_color_space p3 = space(PL_COLOR_PRIM_DISPLAY_P3, PL_COLOR_TRC_GAMMA24);
+			Assert::IsTrue(Decide(false, source, p3, false).reason == Reason::Off);
+			const Decision on = Decide(true, source, p3, false);
+			Assert::IsTrue(on.Active());
+			Assert::IsTrue(on.convertGamma && on.convertPrimaries);
+			Assert::AreEqual(2.2f, on.sourceGamma);
+			Assert::AreEqual(2.4f, on.outputGamma);
+			// White stays white: each row of the BT.709 -> P3 matrix sums to 1.
+			for (int row = 0; row < 3; ++row)
+				Assert::AreEqual(1.0, static_cast<double>(on.matrix[row] + on.matrix[3 + row] + on.matrix[6 + row]), 1e-5);
+			Assert::IsTrue(on.matrix[0] < 1.0f && on.matrix[0] > 0.7f);   // red: 0.8225
+			const Decision same = Decide(true, source, space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22), false);
+			Assert::IsTrue(same.Active() && !same.convertGamma && !same.convertPrimaries);
+			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA22),
+				space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA24), false).Active());
+			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ), p3, false).reason == Reason::HdrSource);
+			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ), false).reason == Reason::HdrOutput);
+			Assert::IsTrue(Decide(true, source, p3, true).reason == Reason::CalibrationLut);
+			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886), p3, false).reason == Reason::SourceTransfer);
+			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_DISPLAY_P3, PL_COLOR_TRC_SRGB), false).reason == Reason::OutputTransfer);
+			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA22), p3, false).reason == Reason::SourcePrimaries);
+			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_DCI_P3, PL_COLOR_TRC_GAMMA24), false).reason == Reason::OutputPrimaries);
+			// Prepare: nothing for an inactive decision; for an active one the
+			// source is declared in the output's space and the hooks go first.
+			Hooks hooks;
+			std::vector<const pl_hook*> list = { nullptr };
+			pl_color_space declared = source;
+			Prepare(Decide(false, source, p3, false), hooks, declared, p3, list);
+			Assert::AreEqual(size_t(1), list.size());
+			Assert::IsTrue(declared.primaries == PL_COLOR_PRIM_BT_709);
+			Prepare(on, hooks, declared, p3, list);
+			Assert::AreEqual(size_t(3), list.size());
+			Assert::IsTrue(list[0] == hooks.Carry() && list[1] == hooks.Restore());
+			Assert::IsTrue(hooks.Carry()->stages == PL_HOOK_RGB && hooks.Restore()->stages == PL_HOOK_SCALED);
+			Assert::IsTrue(declared.primaries == PL_COLOR_PRIM_DISPLAY_P3 && declared.transfer == PL_COLOR_TRC_GAMMA24);
+			Assert::IsTrue(hooks.Owns(hooks.Carry()->signature) && !hooks.Owns(1));
+		}
+
+		// Stage 10 (probe tables, docs/VP-btb-wtw-investigation.md): BTB and
+		// WTW greys survive 1:1, sigmoid upscaling and linear-light
+		// downscaling with the switch on; off is libplacebo's own path.
+		TEST_METHOD(ExtendedRangeKeepsBtbAndWtwThroughScaling)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log;
+			fixture.CaptureLog(&log);
+			const std::vector<int> codes = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+			const Planes greys = Greys(codes);
+			std::string report;
+			auto run = [&](const char* name, Case c)
+			{
+				const Result r = Render(fixture.Gpu(), fixture.Renderer(), greys, c);
+				Assert::IsTrue(r.ok, ToWide(std::string(name) + ": " + r.error).c_str());
+				report += std::string(name) + ": " + Join(Columns(r, static_cast<int>(codes.size()), c.scale)) + "\n";
+				return r;
+			};
+			{ Case c; c.on = false; c.scale = 1.5; run("off up 1.5", c); }
+			for (double scale : { 1.0, 1.5, 0.5 })
+				for (bool owner : { false, true })
+				{
+					if (owner && scale != 1.5) continue;
+					Case c;
+					c.scale = scale;
+					c.ownerScaling = owner;
+					const Result r = run(owner ? "on up 1.5 ewa_lanczossharp" : scale == 1.0 ? "on 1:1" : scale > 1.0 ? "on up 1.5" : "on down 0.5", c);
+					Assert::IsTrue(r.decision.Active() && r.restores > 0, ToWide("the hooks did not run\n" + report).c_str());
+					for (size_t i = 0; i < codes.size(); ++i)
+					{
+						const int x = static_cast<int>((i * 32 + 16) * scale);
+						for (int ch = 0; ch < 3; ++ch)
+							Assert::IsTrue(std::abs(r.Channel(x, r.height / 2, ch) - codes[i]) <= 1,
+								ToWide("709->P3 grey " + std::to_string(codes[i]) + " not kept\n" + report).c_str());
+					}
+				}
+			for (double scale : { 1.0, 1.5 })
+			{
+				Case c;
+				c.scale = scale;
+				c.outputTransfer = PL_COLOR_TRC_GAMMA24;
+				const auto got = Columns(run(scale == 1.0 ? "on 2.2->2.4 1:1" : "on 2.2->2.4 up 1.5", c),
+					static_cast<int>(codes.size()), scale);
+				for (size_t i = 0; i < codes.size(); ++i)
+				{
+					const int ideal = Ideal(codes[i], 2.2, 2.4);
+					Assert::IsTrue(ideal < 4 ? got[i] <= 4 : std::abs(got[i] - ideal) <= 1,
+						ToWide("2.2->2.4 grey " + std::to_string(codes[i]) + " expected " + std::to_string(ideal) + "\n" + report).c_str());
+				}
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// Stage 10: in-range content is scaled as without the switch (planner:
+		// max 1 code, mean <= 0.03 at up 1.5 and down 0.5; measured <= 0.01),
+		// also with a gamma change, and in-gamut BT.709 colours come out as
+		// libplacebo's own conversion. With ewa_lanczossharp the polar
+		// sampler's four-channel path rounds differently (max 1 code, mean
+		// 0.034 measured): bounded at 0.05.
+		TEST_METHOD(ExtendedRangeKeepsTodaysScalingAndColours)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string report;
+			const Planes edges = Edges();
+			auto compare = [&](const char* name, Case c)
+			{
+				Case off = c;
+				off.on = false;
+				const Result a = Render(fixture.Gpu(), fixture.Renderer(), edges, off);
+				const Result b = Render(fixture.Gpu(), fixture.Renderer(), edges, c);
+				Assert::IsTrue(a.ok && b.ok, ToWide(std::string(name) + ": render failed").c_str());
+				const Difference d = Compare(a, b);
+				char line[160];
+				std::snprintf(line, sizeof(line), "%s: max %d, mean %.4f\n", name, d.max, d.mean);
+				report += line;
+				return d;
+			};
+			bool fail = false;
+			for (enum pl_color_primaries prim : { PL_COLOR_PRIM_BT_709, PL_COLOR_PRIM_DISPLAY_P3 })
+			for (double scale : { 1.5, 0.5, 0.75 })
+			{
+				Case c;
+				c.scale = scale;
+				c.outputPrimaries = prim;
+				const Difference d = compare((std::string(prim == PL_COLOR_PRIM_BT_709 ? "709 " : "P3 ") +
+					(scale == 1.5 ? "edges up 1.5" : scale == 0.5 ? "edges down 0.5" : "edges down 0.75")).c_str(), c);
+				fail |= !(d.max <= 1 && d.mean <= 0.03);
+			}
+			{
+				Case c;
+				c.scale = 1.5;
+				c.ownerScaling = true;
+				const Difference d = compare("edges up 1.5 ewa_lanczossharp", c);
+				fail |= !(d.max <= 1 && d.mean <= 0.05);
+			}
+			// A gamma change: the carry re-encodes to the output gamma, so
+			// libplacebo's linear light is the same as without the switch.
+			for (double scale : { 1.5, 0.5 })
+			{
+				Case c;
+				c.scale = scale;
+				c.outputTransfer = PL_COLOR_TRC_GAMMA24;
+				const Difference d = compare(scale == 1.5 ? "edges up 1.5, 2.2->2.4" : "edges down 0.5, 2.2->2.4", c);
+				fail |= !(d.max <= 1 && d.mean <= 0.03);
+			}
+			// In-gamut BT.709 colours, 1:1 into P3 with a gamma change.
+			const std::vector<Patch> patches = { { 502, 512, 512 }, { 560, 440, 600 }, { 400, 450, 700 },
+				{ 600, 350, 450 }, { 300, 700, 480 }, { 700, 560, 380 }, { 250, 560, 560 } };
+			const Planes colours = Patches(patches);
+			for (enum pl_color_transfer output : { PL_COLOR_TRC_GAMMA22, PL_COLOR_TRC_GAMMA24 })
+			{
+				Case c;
+				c.outputTransfer = output;
+				Case off = c;
+				off.on = false;
+				const Result a = Render(fixture.Gpu(), fixture.Renderer(), colours, off);
+				const Result b = Render(fixture.Gpu(), fixture.Renderer(), colours, c);
+				Assert::IsTrue(a.ok && b.ok);
+				int worst = 0;
+				for (size_t i = 0; i < patches.size(); ++i)
+				{
+					const int x = static_cast<int>(i * 32 + 16), y = a.height / 2;
+					report += "colour " + std::to_string(i) + (output == PL_COLOR_TRC_GAMMA22 ? " 2.2" : " 2.4") + ": off ";
+					for (int ch = 0; ch < 3; ++ch) report += std::to_string(a.Channel(x, y, ch)) + (ch < 2 ? "," : "");
+					report += " on ";
+					for (int ch = 0; ch < 3; ++ch)
+					{
+						report += std::to_string(b.Channel(x, y, ch)) + (ch < 2 ? "," : "");
+						worst = std::max(worst, std::abs(a.Channel(x, y, ch) - b.Channel(x, y, ch)));
+					}
+					report += "\n";
+				}
+				fail |= worst > 2;
+			}
+			Assert::IsFalse(fail, ToWide(report).c_str());
+			Logger::WriteMessage(report.c_str());
+		}
+
+		// Delta 5 (D5-3): the match tolerance means the same for full-range
+		// sources. B is A moved by (8, 4) (whole pixels at the matcher's half
+		// resolution, so no interpolation error) with every luma sample 3.2 8-bit codes
+		// brighter: over the default tolerance (3 codes) as limited-range codes,
+		// within it as full-range luma (3.2 x 219 / 255 = 2.75
+		// limited-equivalent codes).
 		TEST_METHOD(DejudderToleranceFollowsTheSourceRange)
 		{
 			TargetLutGpuFixture fixture;

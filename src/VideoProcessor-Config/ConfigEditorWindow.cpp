@@ -6370,6 +6370,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
         debanding->setItemText(debanding->findData(QStringLiteral("default")), QStringLiteral("Standard"));
         addRendererAutoStatus(QStringLiteral("deband_strength"), debanding);
+        auto* extendedRange = addChoice(QStringLiteral("Keep below-black and above-white (SDR)"),
+            QStringLiteral("preserve_extended_range"), { QStringLiteral("on"), QStringLiteral("off") });
+        extendedRange->setToolTip(QStringLiteral(
+            "Keeps SDR picture detail below video black and above video white through scaling and "
+            "the colour conversion, which otherwise clip it. Needs pure-power gammas (1.8 to 2.8) on "
+            "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
+            "otherwise and for HDR. Off is the standard path."));
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { QStringLiteral("AUTO"), QStringLiteral("blue_noise"),
                 QStringLiteral("ordered_lut"), QStringLiteral("ordered_fixed"),

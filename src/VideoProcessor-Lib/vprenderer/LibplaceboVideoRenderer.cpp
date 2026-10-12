@@ -45,6 +45,7 @@
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
+#include <vprenderer/ExtendedRange.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurementHook.h>
@@ -868,6 +869,7 @@ namespace
 		double dejudderMatchTolerance = 3.0;
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
+		bool preserveExtendedRange = false; // Stage 10: BTB/WTW kept through scaling (SDR)
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
 		std::string debandStrength = "auto";
@@ -1001,6 +1003,7 @@ namespace
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
+			<< settings.preserveExtendedRange << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1950,6 +1953,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid occlusion_mask '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.occlusionMask ? "on" : "off");
+		}
+		if (config.TryGetString(rule.section, "preserve_extended_range", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.preserveExtendedRange = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid preserve_extended_range '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.preserveExtendedRange ? "on" : "off");
 		}
         ToneMappingTuning::Read([&](const char* key, std::string& value) {
             return config.TryGetString(rule.section, key, value);
@@ -3912,6 +3923,10 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderMaskRateLogged = false;
 	unsigned long long dejudderMaskFrames = 0;
 	OcclusionMask::Hook occlusionMaskHook;
+	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
+	ExtendedRange::Hooks extendedRangeHooks;
+	int extendedRangeLogged = -1;          // the last logged decision
+	bool extendedRangeHookFailed = false;  // libplacebo disabled a hook: off until restart
 	// 6b-2b: the stats overlay line, published by the render thread at most
 	// twice a second and read by the UI under its own small lock.
 	std::mutex dejudderStatusMutex;
@@ -7911,6 +7926,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.occlusionMask = next.occlusionMask;
+		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.debandStrength = next.debandStrength;
@@ -7975,6 +7991,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
+		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
@@ -15774,6 +15791,28 @@ struct LibplaceboVideoRenderer::Impl
                         dejudderMaskFrames, occlusionMaskHook.Applied(), occlusionMaskHook.Failed());
             }
         }
+        // Stage 10: BTB/WTW through libplacebo for SDR. Decided on this
+        // frame's source and target; libplacebo is then told the source is in
+        // the target's colour space and VP's hooks do the conversion.
+        {
+            ExtendedRange::Decision extended = ExtendedRange::Decide(
+                activeSettings.preserveExtendedRange, renderImage.color, target.color, target.lut != nullptr);
+            if (extended.Active() && extendedRangeHookFailed)
+                extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
+            ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks);
+            const int logged = static_cast<int>(extended.reason);
+            if (logged != extendedRangeLogged && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
+            {
+                extendedRangeLogged = logged;
+                if (extended.Active())
+                    DebugLog::Log("Extended range (BTB/WTW): active, gamma %.2f -> %.2f%s, primaries %s%s",
+                        extended.sourceGamma, extended.outputGamma, extended.convertGamma ? "" : " (none)",
+                        pl_color_primaries_name(target.color.primaries),
+                        extended.convertPrimaries ? " (from BT.709)" : " (none)");
+                else
+                    DebugLog::Log("Extended range (BTB/WTW): %s", ExtendedRange::ToString(extended.reason));
+            }
+        }
         // libplacebo 7.360.1 drops the output encoding (limited range) after
         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
         // before any OUTPUT-stage shader such as the sigma-delta.
@@ -15824,6 +15863,12 @@ struct LibplaceboVideoRenderer::Impl
                 PublishCustomShaderStatus();
             ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks);
+            for (int i = 0; !extendedRangeHookFailed && i < hookErrors.num_disabled_hooks; ++i)
+                if (extendedRangeHooks.Owns(hookErrors.disabled_hooks[i]))
+                {
+                    extendedRangeHookFailed = true;
+                    DebugLog::Log("Extended range (BTB/WTW): WARNING libplacebo disabled its hook; off until VP restarts (today's path)");
+                }
             for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
                 if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
                 {

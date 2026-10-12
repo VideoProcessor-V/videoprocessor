@@ -1037,6 +1037,59 @@ Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
   switch on) and a PLUGE at 8-bit codes 4/12/16/20 (record whether the FL35
   shows sub-black at input level video).
 
+**Built (10a, 2026-10-12).** `vprenderer/ExtendedRange.{h,cpp}`; profile key
+`preserve_extended_range: on|off` (input group, default off; Config page
+"Processing" card).
+- **Survey:** libplacebo always converts from the frame's *declared* colour
+  space to the target (`pass_convert_colors` uses `image->color`, not the
+  hooked image's), so a hook cannot relabel the picture. Declaring the
+  source with the target's colour space is the only no-conversion path that
+  leaves the render target (and so overlays and subtitles) untouched.
+- **Gamma change (the cinema chain is 2.4 in, 2.2 out):** the carry first
+  re-encodes source → output gamma, sign-preserving, at `PL_HOOK_RGB`.
+  libplacebo then linearises with the output gamma and gets exactly the
+  linear light it scales in today. Declaring only the transfer as the
+  output's, without this, changed the scaling look (edges mean 5.7 codes,
+  max 54). The BT.709 → P3 matrix is applied at the restore: linear, so after
+  scaling is the same picture.
+- **The carried offset is stored in alpha as it is** (o in −1..1), so
+  in-range pixels carry exactly 0. An offset encoding such as
+  0.25 + 0.25·o failed the edge limit (mean 0.05–0.12): libplacebo's
+  scaler weights do not sum to exactly 1, so a constant non-zero alpha came
+  back close to a code off. libplacebo never sigmoidises, linearises or
+  clamps alpha (`pl_shader_sigmoidize` is `color.rgb` only).
+- **Order:** both hooks go first in the frame's list (the carry before NLS
+  at RGB; the restore before any SCALED hook, the LED measurement, the LED
+  compensation and the PRE_OUTPUT texture hooks). The decision is made after
+  the LED lookahead's raw transfer (which keeps the true source colour space)
+  and before `OutputEncodingRepair::Needed`. The de-judder extras render
+  from the same image and hook list.
+- **Auto-off (logged once per change):** HDR source or output, a
+  calibration LUT, a non-power source or output transfer, SDR source
+  primaries other than BT.709 (unless equal to the output's), output
+  primaries that do not contain BT.709 (DCI-P3's white point). If
+  libplacebo disables either hook, the switch is off until VP restarts.
+- **10b** (LED compensation sign-preserving) landed with step 7a
+  (`spow`, GPU test LedCompensationKeepsBelowBlackAndLightExact).
+- **Tests** (libplacebo 7.360 native and 377 Beta, the same probe
+  `src/VideoProcessor-Test/ExtendedRangeGpuProbe.h`):
+  - greys 4 16 40 64 100 502 900 940 980 1019, BT.709 → P3, kept exactly at
+    1:1, up 1.5 (sigmoid, and ewa_lanczossharp) and down 0.5 (linear light);
+    off shows today's clipping (up 1.5: 64 … 940);
+  - 2.2 → 2.4 within 1 code of the ideal sign-preserving curve (−11 lands on
+    the output floor: 0 on 7.360, 4 on the patched 377);
+  - in-range hard edges against off: max 1 code, mean ≤ 0.01 (default
+    scaler, with and without a gamma change, both primaries); with
+    ewa_lanczossharp mean 0.034 (the polar sampler's four-channel path rounds
+    differently), bounded at 0.05;
+  - in-gamut BT.709 colours into P3, 2.2 and 2.4 out: identical to off;
+  - decision cases and hook order (`ExtendedRangeDecision`).
+- **Not covered yet:** NLS with the carry on (NLS warps the picture at RGB
+  after the carry, interpolating in the output gamma's encoding instead of
+  the source's: a sub-code difference at fine detail, not measured), the
+  sigma-delta/LED hooks after the restore (their own tests are unchanged;
+  the restore hands them the same values), the projector check.
+
 ## 7. Test protocol (stage 3)
 
 1. Unmodified build, `dithering: off`, 10-bit grey ramp: photograph. Then

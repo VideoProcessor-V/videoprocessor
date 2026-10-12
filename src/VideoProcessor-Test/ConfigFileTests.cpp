@@ -506,7 +506,9 @@ namespace VideoProcessorTest
                 Case{ "dejudder_frame_trust", "0.25", true }, Case{ "dejudder_frame_trust", "0", true },
                 Case{ "dejudder_frame_trust", "1.5", false },
                 Case{ "occlusion_mask", "on", true }, Case{ "occlusion_mask", "off", true },
-                Case{ "occlusion_mask", "yes", false } })
+                Case{ "occlusion_mask", "yes", false },
+                Case{ "preserve_extended_range", "on", true }, Case{ "preserve_extended_range", "off", true },
+                Case{ "preserve_extended_range", "auto", false } })
             {
                 CachedConfigTestFile file;
                 std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"

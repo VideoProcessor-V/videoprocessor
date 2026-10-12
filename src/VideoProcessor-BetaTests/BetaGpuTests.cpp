@@ -10,6 +10,7 @@
 #include "../VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h"
 #include "../VideoProcessor-Lib/vprenderer/DejudderWarp.h"
 #include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
+#include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
 
 #include <algorithm>
 #include <fstream>
@@ -144,6 +145,7 @@ namespace
 		}
 
 		pl_gpu GpuHandle() const { return d3d11->gpu; }
+		pl_renderer RendererHandle() const { return renderer; }
 		pl_log Log() const { return log; }
 
 		// A run of refreshes of one grey (the sigma-delta's state persists in
@@ -535,4 +537,76 @@ void RunBetaFeatureGpuTests()
 		CheckCleanLog(gpu, "de-judder");
 		std::cout << "Beta features: de-judder (12, 6) in " << good << " of " << interior << " blocks\n";
 	}
+}
+
+// Stage 10 on libplacebo 377: BTB/WTW greys survive 1:1, upscaling and
+// downscaling with preserve_extended_range on (the FL35 clamp patch keeps the
+// legal 4-1019 at the output); in-range edges and in-gamut colours are as
+// without the switch (the native tests' limits).
+void RunBetaExtendedRangeGpuTests()
+{
+	using namespace ExtendedRangeGpuProbe;
+	Gpu gpu;
+	const std::vector<int> codes = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+	const Planes greys = Greys(codes);
+	std::string report;
+	for (double scale : { 1.0, 1.5, 0.5 })
+		for (bool owner : { false, true })
+		{
+			if (owner && scale != 1.5) continue;
+			Case c;
+			c.scale = scale;
+			c.ownerScaling = owner;
+			const Result r = Render(gpu.GpuHandle(), gpu.RendererHandle(), greys, c);
+			Check(r.ok && r.decision.Active() && r.restores > 0, "extended range: render failed " + r.error);
+			report += Join(Columns(r, static_cast<int>(codes.size()), scale)) + "\n";
+			for (size_t i = 0; i < codes.size(); ++i)
+				for (int ch = 0; ch < 3; ++ch)
+					Check(std::abs(r.Channel(static_cast<int>((i * 32 + 16) * scale), r.height / 2, ch) - codes[i]) <= 1,
+						"extended range: grey " + std::to_string(codes[i]) + " not kept on 377\n" + report);
+		}
+	{
+		Case c;
+		c.scale = 1.5;
+		c.outputTransfer = PL_COLOR_TRC_GAMMA24;
+		const Result r = Render(gpu.GpuHandle(), gpu.RendererHandle(), greys, c);
+		Check(r.ok, "extended range: 2.2->2.4 render failed");
+		const auto got = Columns(r, static_cast<int>(codes.size()), c.scale);
+		report += Join(got) + " (2.2->2.4 up 1.5)\n";
+		for (size_t i = 0; i < codes.size(); ++i)
+		{
+			const int ideal = Ideal(codes[i], 2.2, 2.4);
+			Check(ideal < 4 ? got[i] == 4 : std::abs(got[i] - ideal) <= 1,
+				"extended range: 2.2->2.4 grey " + std::to_string(codes[i]) + " on 377\n" + report);
+		}
+	}
+	const Planes edges = Edges();
+	for (double scale : { 1.5, 0.5 })
+		for (bool owner : { false, true })
+		{
+			if (owner && scale != 1.5) continue;
+			Case on;
+			on.scale = scale;
+			on.ownerScaling = owner;
+			Case off = on;
+			off.on = false;
+			const Difference d = Compare(Render(gpu.GpuHandle(), gpu.RendererHandle(), edges, off),
+				Render(gpu.GpuHandle(), gpu.RendererHandle(), edges, on));
+			report += "edges " + std::to_string(scale) + (owner ? " ewa" : "") + ": max " + std::to_string(d.max) +
+				", mean " + std::to_string(d.mean) + "\n";
+			Check(d.max <= 1 && d.mean <= (owner ? 0.05 : 0.03), "extended range: edges differ on 377\n" + report);
+		}
+	const Planes colours = Patches({ { 502, 512, 512 }, { 560, 440, 600 }, { 400, 450, 700 },
+		{ 600, 350, 450 }, { 300, 700, 480 }, { 700, 560, 380 }, { 250, 560, 560 } });
+	{
+		Case on;
+		on.outputTransfer = PL_COLOR_TRC_GAMMA24;
+		Case off = on;
+		off.on = false;
+		const Difference d = Compare(Render(gpu.GpuHandle(), gpu.RendererHandle(), colours, off),
+			Render(gpu.GpuHandle(), gpu.RendererHandle(), colours, on));
+		Check(d.max <= 2, "extended range: in-gamut colours differ on 377 (max " + std::to_string(d.max) + ")");
+	}
+	CheckCleanLog(gpu, "extended range");
+	std::cout << report;
 }
