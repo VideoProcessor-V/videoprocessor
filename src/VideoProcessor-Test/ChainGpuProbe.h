@@ -1229,15 +1229,66 @@ namespace ChainGpuProbe
 		bool stage10 = true;
 		bool fullRange = false;
 		bool matcher = true;
+		// Named regressions (planner 2026-10-12): a one-plane RGB source (what
+		// the subtitle move's composition hands the main render; 10a crashed
+		// libplacebo there) and CfL chroma prediction (the same crash).
+		bool rgbSource = false;
+		bool cfl = false;
 		std::string Name() const
 		{
-			char text[160];
-			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s", scale,
+			char text[200];
+			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s%s%s", scale,
 				nlsActive ? "on" : "off", gammaLight ? "gamma" : "linear", stage10 ? "on" : "off",
-				fullRange ? "full" : "limited", matcher ? "on" : "off");
+				fullRange ? "full" : "limited", matcher ? "on" : "off", rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "");
 			return text;
 		}
 	};
+
+	// The YCbCr frame rendered to a one-plane float RGB picture at its own
+	// size, as ComposeSubtitleBeforeCrop does (full range, the source's
+	// colour space), for the RGB-source regression.
+	inline bool RgbSourceFrame(pl_gpu gpu, pl_renderer renderer, const Dejudder::Planes& planes, pl_tex* surface,
+		pl_frame& rgb)
+	{
+		pl_frame source{};
+		source.num_planes = 2;
+		source.planes[0].texture = planes.luma; source.planes[0].components = 1;
+		source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+		source.planes[1].texture = planes.chroma; source.planes[1].components = 2;
+		source.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+		source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+		source.repr.sys = PL_COLOR_SYSTEM_BT_709;
+		source.repr.levels = PL_COLOR_LEVELS_LIMITED;
+		source.repr.bits.sample_depth = 16; source.repr.bits.color_depth = 10; source.repr.bits.bit_shift = 6;
+		source.color.primaries = PL_COLOR_PRIM_BT_709;
+		source.color.transfer = PL_COLOR_TRC_GAMMA22;
+		pl_frame_set_chroma_location(&source, PL_CHROMA_LEFT);
+		pl_tex_params storage{};
+		storage.w = planes.luma->params.w;
+		storage.h = planes.luma->params.h;
+		storage.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 0,
+			static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE));
+		storage.sampleable = true;
+		storage.renderable = true;
+		if (!storage.format || !pl_tex_recreate(gpu, surface, &storage))
+			return false;
+		pl_frame target{};
+		target.num_planes = 1;
+		target.planes[0].texture = *surface;
+		target.planes[0].components = 4;
+		for (int i = 0; i < 4; ++i) target.planes[0].component_mapping[i] = i;
+		target.repr.sys = PL_COLOR_SYSTEM_RGB;
+		target.repr.levels = PL_COLOR_LEVELS_FULL;
+		target.repr.alpha = PL_ALPHA_NONE;
+		target.color = source.color;
+		pl_render_params params = pl_render_fast_params;
+		params.dither_params = nullptr;
+		params.peak_detect_params = nullptr;
+		if (!pl_render_image(renderer, &source, &target, &params))
+			return false;
+		rgb = target;
+		return true;
+	}
 
 	inline Outcome RunMatrix(pl_gpu gpu, pl_renderer renderer, pl_log log, const ShaderSource& source, bool withRepair,
 		const Combo& combo)
@@ -1256,7 +1307,8 @@ namespace ChainGpuProbe
 		auto ssim = led ? Load(gpu, source, "SSimDownscaler.glsl", ow, oh, {}, error) : nullptr;
 		auto pre = ssim ? Load(gpu, source, "FSRCNNX_x2_16-0-4-1.glsl", ow, oh, {}, error) : nullptr;
 		auto superRes = pre ? Load(gpu, source, "SSimSuperRes.glsl", ow, oh, {}, error) : nullptr;
-		auto sigma = superRes ? Load(gpu, source, "Temporal sigma-delta.glsl", ow, oh, { { "levels_full", combo.fullRange ? 1.0 : 0.0 },
+		auto cflShader = superRes ? Load(gpu, source, "CfL_Prediction.glsl", ow, oh, {}, error) : nullptr;
+		auto sigma = cflShader ? Load(gpu, source, "Temporal sigma-delta.glsl", ow, oh, { { "levels_full", combo.fullRange ? 1.0 : 0.0 },
 			{ "swapchain_bits", 10.0 }, { "color_bits", 10.0 }, { "occlusion_mask", combo.matcher ? 1.0 : 0.0 },
 			{ "motion_compensation", 1.0 } }, error) : nullptr;
 		if (!sigma)
@@ -1291,6 +1343,8 @@ namespace ChainGpuProbe
 		OutputEncodingRepair::Hook repair;
 		const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
 		const pl_rect2df targetCrop{ 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+		pl_tex rgbSurface = nullptr;
+		struct SurfaceOwner { pl_gpu g; pl_tex* t; ~SurfaceOwner() { pl_tex_destroy(g, t); } } surfaceOwner{ gpu, &rgbSurface };
 		NlsMaskMapping::Mapping nlsMapping;
 		if (combo.nlsActive)
 		{
@@ -1308,6 +1362,9 @@ namespace ChainGpuProbe
 			const int slot = f % 2;
 			if (combo.matcher && !warp.Estimate(ga.planes, gb.planes, slot, true))
 				return fail("estimate failed: " + warp.LastError());
+			pl_frame rgbFrame{};
+			if (combo.rgbSource && !RgbSourceFrame(gpu, renderer, ga.planes, &rgbSurface, rgbFrame))
+				return fail("the RGB source frame failed");
 			auto renderOne = [&](bool chain) -> Result
 			{
 				AdaptiveDownscale::Module& module = chain ? adaptive : reference;
@@ -1331,9 +1388,13 @@ namespace ChainGpuProbe
 				c.linear = !combo.gammaLight;
 				c.on = combo.stage10;
 				c.fullRangeOutput = combo.fullRange;
+				if (combo.rgbSource)
+					c.image = &rgbFrame;
 				std::vector<const pl_hook*> hooks = { module.Measure(), nls->hook };
 				if (chain)
 					hooks.push_back(led->hook);
+				if (combo.cfl && !combo.rgbSource)
+					hooks.push_back(cflShader->hook);
 				if (upCnn) { hooks.push_back(pre->hook); hooks.push_back(superRes->hook); }
 				if (down) hooks.push_back(ssim->hook);
 				hooks.push_back(module.Blend());
@@ -1456,11 +1517,29 @@ namespace ChainGpuProbe
 				c.matcher = (bits & 16) == 0;
 				combos.push_back(c);
 			}
+		// The named regressions, in both lists: an RGB source and CfL, with
+		// Stage 10 on, at a downscale and an upscale, NLS idle and active.
+		std::vector<Combo> named;
+		for (double scale : { 0.5, 2.0 })
+			for (bool nls : { false, true })
+				for (int kind = 0; kind < 2; ++kind)
+				{
+					Combo c;
+					c.scale = scale;
+					c.nlsActive = nls;
+					c.rgbSource = kind == 0;
+					c.cfl = kind == 1;
+					named.push_back(c);
+				}
 		if (full)
+		{
+			combos.insert(combos.end(), named.begin(), named.end());
 			return combos;
+		}
 		std::vector<Combo> quick;
 		for (size_t i = 0; i < combos.size(); i += 7)   // 23 of 160, every value of every axis
 			quick.push_back(combos[i]);
+		quick.insert(quick.end(), named.begin(), named.end());
 		return quick;
 	}
 }

@@ -101,6 +101,18 @@ can see what was covered, not only what was wrong)
 7. No key-only behaviour: every setting a key can change is also a saved
    config key, and key overrides are shown on the overlay (constraint 12,
    `docs/VP-delta-6-settings-first.md`).
+8. **The whole-chain gate** (planner 2026-10-12): the auditor runs the chain
+   probe on the deployed libplacebo (377, `VideoProcessorBetaTests.exe`,
+   "Beta whole chain") first and on 7.360 second (native
+   `WholeHookChain*` tests, the combination matrix in full:
+   `VP_TEST_MATRIX=full`), and reports pass / fail per phase in the audit
+   file (still + cut, motion, de-judder extra, LED gain sequence, blanking,
+   bar detection + lens, subtitle move, HDR, saturation, upscale, matrix
+   with its named regressions). A step is not done until the matrix passes.
+9. **Before every deploy folder**, the same on the GeForce
+   (`VP_TEST_GPU=hardware`): the Beta suite and the native GPU tests. It is
+   the hardware family the projector sees; 1-code WARP-vs-GPU rounding
+   differences are expected.
 
 ## 5. Step-specific checks
 

@@ -155,6 +155,54 @@ namespace VideoProcessorTest
             Assert::IsTrue(madvr.front().none);
         }
 
+        // Planner 2026-10-12: libplacebo's debanding is off for HDR in every
+        // shipped configuration (its HDR path turns ~1 bright pixel in 10^4
+        // black per frame); SDR keeps it available.
+        TEST_METHOD(ShippedConfigurationsTurnDebandingOffForHdr)
+        {
+            std::string repository = __FILE__;
+            for (int level = 0; level < 3; ++level)
+                repository.resize(repository.find_last_of("\\/"));
+            for (const char* relative : { "\\VideoProcessor.cfg", "\\docs\\cinema\\VideoProcessor-test.cfg" })
+            {
+                std::ifstream shipped(repository + relative, std::ios::binary);
+                const std::string contents((std::istreambuf_iterator<char>(shipped)), std::istreambuf_iterator<char>());
+                Assert::IsFalse(contents.empty(), (std::wstring(L"not found: ") + std::wstring(relative, relative + strlen(relative))).c_str());
+                CachedConfigTestFile file;
+                std::ofstream(file.path, std::ios::binary) << contents;
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path, ConfigFile::ReadPolicy::Fresh));
+                std::string error;
+                RendererProfileConfig::Model model;
+                Assert::IsTrue(RendererProfileConfig::Read(config, model, error), std::wstring(error.begin(), error.end()).c_str());
+                auto debandFor = [&](const char* eotf)
+                {
+                    std::vector<RendererProfileConfig::AutomaticSelection> automatic;
+                    std::string selectError;
+                    Assert::IsTrue(RendererProfileConfig::SelectAutomatic(model,
+                        [eotf](const std::string& name, std::string& value)
+                        {
+                            if (name != "eotf") return false;
+                            value = eotf;
+                            return true;
+                        }, automatic, selectError));
+                    for (const auto& selection : automatic)
+                        if (selection.group == "display")
+                        {
+                            const auto profile = model.profiles.find("display." + selection.profiles.front());
+                            Assert::IsTrue(profile != model.profiles.end());
+                            const auto deband = profile->second.settings.find("deband");
+                            return deband == profile->second.settings.end() ? std::string("auto") : deband->second;
+                        }
+                    return std::string("none");
+                };
+                const std::wstring which(relative, relative + strlen(relative));
+                Assert::AreEqual(std::string("off"), debandFor("pq"), (which + L": PQ").c_str());
+                Assert::AreEqual(std::string("off"), debandFor("hlg"), (which + L": HLG").c_str());
+                Assert::AreNotEqual(std::string("off"), debandFor("sdr"), (which + L": SDR keeps debanding").c_str());
+            }
+        }
+
         TEST_METHOD(CinemaTestConfigurationStartsWithShadersDisabledAndEnablesThemOneAtATime)
         {
             std::string repository = __FILE__;

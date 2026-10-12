@@ -251,6 +251,17 @@ Paths under `src/VideoProcessor-Lib/`.
 - **A `//!` anywhere, including inside a comment, starts a pass.** The parser
   skips leading text only up to the first `//!` in the file. Shader-writing
   convention for VP: comments never spell the directive prefix.
+- **7.360 behaviours not seen on the deployed Beta (377), logged so they are
+  not rediscovered (chain tests, 2026-10-12):** the matte outside
+  `target.crop` comes out at code 0 (377: 64); the output can reach codes
+  0-3 and 1023 (377 clamps to 4..1019); the encoding repair re-encodes about
+  0.42 code low on average (max 1) whenever a PRE_OUTPUT texture hook runs.
+  The Beta suite is the acceptance gate; 7.360 is secondary.
+- **libplacebo's debanding in the HDR path** (both versions, WARP and a
+  GeForce): about 1 bright pixel in 10^4 per frame comes out black. Shipped
+  configurations turn debanding off for HDR (`[vprenderer.HDR]`, test
+  `ShippedConfigurationsTurnDebandingOffForHdr`); upstream repro drafted in
+  docs/libplacebo-hdr-deband-repro.md (not yet sent).
 - **Some pass failures are only logged.** A texture bound twice in one pass,
   linear sampling of a non-linear format, or a storage binding of a
   non-storable texture: `pl_pass_run` logs an error and skips the pass, and
@@ -1133,6 +1144,21 @@ Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
     alpha-writing hook).
   - Equivalence of the gamma re-encode holds while SDR sources carry no
     luminance metadata of their own (libplacebo copies the target's).
+- **Stage 10b (2026-10-12, planner-approved; docs/VP-stage10b-side-texture.md).**
+  The whole-chain tests found 10a's limits: its one-offset alpha carry and
+  converting the primaries after scaling made a non-linear shader (SSIM,
+  SSimSuperRes) see other values than without the switch (up to 46 codes on
+  saturated colours), and the inline carry crashed libplacebo for a one-plane
+  RGB source and after CfL. 10b: the carry (last RGB hook, after NLS)
+  converts the primaries before scaling and splits the picture into the
+  clipped picture (to libplacebo) and a per-channel remainder texture; the
+  restore (first SCALED hook) adds the remainder back. Away from out-of-range
+  content Stage 10 on = off within 1 code (3 with SSIM on P3).
+  - **Precision floor (accepted by the planner):** in-range edges vs off,
+    max 1 code, mean 0.03-0.083: libplacebo's half-float store of the scaled
+    picture before the texture-form restore (about 1/4 code; an inline
+    restore is rejected after the carry's texture). Below the sigma-delta's
+    own decorrelation (+-0.15 code). Test criterion: mean <= 0.1, max <= 1.
 - **Stage 8 finding (2026-10-12): the carry with the SSIM downscaler.**
   libplacebo hands user shaders premultiplied colour (colour x alpha); with
   the offset stored as alpha 0 for in-range pixels the SSIM downscaler (the
