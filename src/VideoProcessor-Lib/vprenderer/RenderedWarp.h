@@ -82,7 +82,8 @@ namespace DejudderRendered
 	class Warp
 	{
 	public:
-		Warp(pl_log log, pl_gpu gpu);
+		// hostReadable: the warped picture can be downloaded (tests only).
+		Warp(pl_log log, pl_gpu gpu, bool hostReadable = false);
 		Warp(const Warp&) = delete;
 		Warp& operator=(const Warp&) = delete;
 		~Warp();
@@ -97,6 +98,7 @@ namespace DejudderRendered
 		pl_gpu gpu = nullptr;
 		pl_dispatch dispatch = nullptr;
 		pl_tex warped = nullptr;
+		bool hostReadable = false;
 		std::string error;
 	};
 

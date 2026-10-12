@@ -71,6 +71,30 @@ namespace Dejudder
 		// frame is held (a cut between A and B). Measured and applied on the
 		// GPU; no read-back.
 		float minTrustedShare = 0.25f;
+		// Refinements (docs/VP-build-plan-refinements.md). The defaults here
+		// are off (the matcher as before); the renderer's keys default on.
+		// D1: a whole-frame translation (1/32 then 1/8 resolution) becomes an
+		// extra search start for every block when it is confident.
+		bool globalPrior = false;
+		// D3: a trusted block more than 1 source pixel from the median of the
+		// trusted vectors around it takes the median; an untrusted block whose
+		// 7+ trusted neighbours agree (within 0.5 px) takes their median when
+		// its own match there is within matchTolerance.
+		bool vectorSmooth = false;
+		// D2: strength x ramp(mean trusted |v|, lo, hi) source px per source
+		// frame (hi 0 = off). D4: x ramp(trusted share, minTrustedShare,
+		// trustScaleFull) (0 = off). The product changes by at most
+		// strengthRate per source frame; a cut (share below minTrustedShare)
+		// still holds at once and restarts the ramp from 0. Applied on the GPU
+		// (FrameTrust().g), by both warps.
+		float motionScaleLo = 0.25f;
+		float motionScaleHi = 0.0f;
+		float trustScaleFull = 0.0f;
+		float strengthRate = 0.25f;
+		// D5 (experiment, source warp only): a held position whose block of B
+		// is new content (uncovered) is taken from B along B's own motion
+		// instead of held.
+		bool occlusionFill = false;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
 	};
@@ -96,11 +120,23 @@ namespace Dejudder
 		// no estimate): `out` is A's planes.
 		bool Warp(const Planes& a, float shift, Planes& out, bool trusted = true);
 
+		// D3 on a raw field (one texel per block, as Field()) into Field(),
+		// with the last Estimate's half-resolution planes for the promotion
+		// check. Estimate runs it itself when vectorSmooth is on; public so the
+		// rule can be tested on a constructed field.
+		bool Smooth(pl_tex raw);
+
 		// The block field from the last Estimate: rgba = (vx, vy) in source
 		// pixels, trust (1/0), match error. One texel per 16x16 source block.
 		pl_tex Field() const { return field; }
-		// The share of trusted blocks from the last Estimate (1x1, r).
+		// From the last Estimate (1x1): r = the share of trusted blocks,
+		// g = the strength scale (D2/D4; 1 when both are off), b = the mean
+		// trusted |v| in source pixels.
 		pl_tex FrameTrust() const { return frameTrust; }
+		// D1: the global vector of the last forward search (1x1): xy in 1/8
+		// resolution texels (source pixels / 8), z = best / second-best match
+		// (the prior is used below 0.9), w = 1 once written.
+		pl_tex GlobalVector() const { return globalVector[0]; }
 		// B's occlusion mask (6c), one texel per 16x16 source block of B:
 		// r = 1 where B's content was visible in A (consistent both ways and
 		// a good match), 0 where it is new or uncovered.
@@ -135,7 +171,8 @@ namespace Dejudder
 			int width, int height, int group);
 		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange);
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
-			pl_tex fromL2, pl_tex toL2, pl_tex out);
+			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex out);
+		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out);
 
 		pl_log log = nullptr;
 		pl_gpu gpu = nullptr;
@@ -151,6 +188,12 @@ namespace Dejudder
 		pl_tex halfA = nullptr, halfB = nullptr;
 		pl_tex l1A = nullptr, l1B = nullptr, l2A = nullptr, l2B = nullptr;
 		pl_tex forward = nullptr, backward = nullptr, field = nullptr, frameTrust = nullptr;
+		pl_tex rawField = nullptr;                          // D3: before smoothing
+		pl_tex globalVector[2] = { nullptr, nullptr };      // D1: forward, backward
+		pl_tex strengthState = nullptr;                     // D2/D4: last scale (rgba32f)
+		pl_tex fillOcclusion = nullptr;                     // D5: B's occlusion
+		Planes lastB;                                       // D5: B of the last Estimate
+		bool fillReady = false;
 		pl_tex occlusion[2] = { nullptr, nullptr };
 		pl_tex grainError = nullptr;
 		bool grainErrorValid = false;

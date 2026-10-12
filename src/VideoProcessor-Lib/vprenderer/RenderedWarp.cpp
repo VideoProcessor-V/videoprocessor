@@ -70,7 +70,7 @@ if (q.x < size.x && q.y < size.y) {
         // The source displacement in output pixels: the map's local slope
         // per axis (the maps are separable).
         vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
-        o = rw_cubic(p - shift * v / slope);
+        o = rw_cubic(p - shift * strength_scale() * v / slope);
     } else {
         o = texelFetch(cached, q, 0);   // hard hold of A
     }
@@ -84,7 +84,7 @@ if (q.x < size.x && q.y < size.y) {
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_STORABLE | PL_FMT_CAP_SAMPLEABLE));
 		}
 
-		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h)
+		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, bool hostReadable = false)
 		{
 			if (tex && tex->params.w == w && tex->params.h == h)
 				return true;
@@ -97,6 +97,7 @@ if (q.x < size.x && q.y < size.y) {
 			params.format = fmt;
 			params.sampleable = true;
 			params.storable = true;
+			params.host_readable = hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
 			return pl_tex_recreate(gpu, &tex, &params);
 		}
 
@@ -235,8 +236,8 @@ if (q.x < size.x && q.y < size.y) {
 		return none;
 	}
 
-	Warp::Warp(pl_log log, pl_gpu gpuIn)
-		: gpu(gpuIn)
+	Warp::Warp(pl_log log, pl_gpu gpuIn, bool hostReadableIn)
+		: gpu(gpuIn), hostReadable(hostReadableIn)
 	{
 		dispatch = pl_dispatch_create(log, gpu);
 	}
@@ -259,7 +260,7 @@ if (q.x < size.x && q.y < size.y) {
 			return false;
 		}
 		const int w = cached->params.w, h = cached->params.h;
-		if (!Ensure(gpu, warped, w, h))
+		if (!Ensure(gpu, warped, w, h, hostReadable))
 		{
 			error = "no storable rgba16f texture";
 			return false;

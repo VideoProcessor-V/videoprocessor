@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "CppUnitTest.h"
 
+#include <array>
 #include <vprenderer/LibplaceboDisplayLut.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
 #include <vprenderer/LibplaceboCalibrationLutPolicy.h>
@@ -6093,6 +6094,467 @@ namespace VideoProcessorTest
 					return static_cast<uint16_t>(std::min(65535, std::max(0, v)));
 				},
 				[](int, int, int) { return static_cast<uint16_t>(32768); });
+		}
+
+		// ---- Refinements D1-D5 (docs/VP-build-plan-refinements.md and the
+		// planner's answers): each is checked under both warp paths
+		// (`dejudder_warp_stage` source and rendered).
+
+		static float HalfBits(uint16_t h)
+		{
+			const int sign = (h >> 15) & 1, exponent = (h >> 10) & 31, mantissa = h & 1023;
+			const float value = exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -24) :
+				exponent == 31 ? (mantissa ? NAN : INFINITY) : std::ldexp(static_cast<float>(mantissa | 1024), exponent - 25);
+			return sign ? -value : value;
+		}
+
+		// FrameTrust() as (share, strength scale, mean |v|).
+		static std::array<float, 3> DownloadFrameTrust(pl_gpu gpu, const Dejudder::MotionWarp& warp)
+		{
+			uint16_t texel[4] = {};
+			pl_tex_transfer_params download{};
+			download.tex = warp.FrameTrust();
+			download.ptr = texel;
+			Assert::IsTrue(pl_tex_download(gpu, &download), L"FrameTrust is not host-readable");
+			return { HalfBits(texel[0]), HalfBits(texel[1]), HalfBits(texel[2]) };
+		}
+
+		// A's luma warped by `shift` through both paths, in 16-bit codes: the
+		// source warp (Warp) and the rendered warp (6d) of A's luma as the
+		// cached picture, 1:1.
+		struct BothPaths
+		{
+			std::vector<float> source, rendered;
+		};
+
+		static BothPaths WarpBothPaths(TargetLutGpuFixture& fixture, Dejudder::MotionWarp& warp,
+			const DejudderFrame& a, const Dejudder::Planes& planesA, float shift)
+		{
+			pl_gpu gpu = fixture.Gpu();
+			BothPaths result;
+			Dejudder::Planes out;
+			Assert::IsTrue(warp.Warp(planesA, shift, out), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+			result.source.assign(luma.begin(), luma.end());
+
+			std::vector<float> texels(a.luma.size() * 4);
+			for (size_t i = 0; i < a.luma.size(); ++i)
+			{
+				const float v = a.luma[i] / 65535.0f;
+				texels[i * 4] = texels[i * 4 + 1] = texels[i * 4 + 2] = v;
+				texels[i * 4 + 3] = 1.0f;
+			}
+			pl_tex_params cp{};
+			cp.w = a.width;
+			cp.h = a.height;
+			cp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			cp.sampleable = true;
+			cp.initial_data = texels.data();
+			pl_tex cached = cp.format ? pl_tex_create(gpu, &cp) : nullptr;
+			Assert::IsNotNull(cached);
+			DejudderRendered::Warp rendered(fixture.Log(), gpu, true);
+			DejudderRendered::Geometry g;
+			g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(a.width), static_cast<float>(a.height) };
+			g.targetCrop = g.sourceCrop;
+			pl_tex warped = nullptr;
+			const bool ran = rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare,
+				shift, g, warped);
+			if (!ran)
+				pl_tex_destroy(gpu, &cached);
+			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
+			pl_gpu_finish(gpu);
+			std::vector<uint16_t> half(a.luma.size() * 4);
+			pl_tex_transfer_params download{};
+			download.tex = warped;
+			download.ptr = half.data();
+			const bool downloaded = pl_tex_download(gpu, &download);
+			pl_tex_destroy(gpu, &cached);
+			Assert::IsTrue(downloaded, L"the rendered warp is not host-readable");
+			result.rendered.resize(a.luma.size());
+			for (size_t i = 0; i < a.luma.size(); ++i)
+				result.rendered[i] = HalfBits(half[i * 4]) * 65535.0f;
+			return result;
+		}
+
+		// Percentage of the region [x0, x1) x [y0, y1) within `tolerance`
+		// codes of expected(x, y).
+		template <typename Expected>
+		static double MatchingPercent(const std::vector<float>& image, int width, int x0, int y0, int x1, int y1,
+			Expected expected, float tolerance)
+		{
+			int total = 0, good = 0;
+			for (int y = y0; y < y1; ++y)
+				for (int x = x0; x < x1; ++x)
+				{
+					++total;
+					if (std::fabs(image[static_cast<size_t>(y) * width + x] - static_cast<float>(expected(x, y))) <= tolerance)
+						++good;
+				}
+			return total ? 100.0 * good / total : 0.0;
+		}
+
+		// The rendered path stores rgba16f: about 1/2048 of the value.
+		static constexpr float kSourceTolerance = 2.0f, kRenderedTolerance = 48.0f;
+
+		TEST_METHOD(DejudderGlobalPriorFindsAPanBeyondTheCoarseRange)
+		{
+			// D1: a pan of (140, -20) source px per frame is beyond the coarse
+			// search (about +-126 px with the refinements): without the prior the
+			// blocks miss it; with it they are within half a pixel, and both warps
+			// move the picture by shift x the pan.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			static constexpr int dx = 140, dy = -20;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			// Blocks whose content stays in the picture in both frames.
+			std::wstring misses;
+			auto countRight = [&](const DejudderField& field)
+			{
+				int total = 0, right = 0;
+				misses.clear();
+				for (int by = 3; by < field.blocksY - 3; ++by)
+					for (int bx = 1; bx * 16 + 16 + dx < width - 16; ++bx)
+					{
+						++total;
+						const bool ok = field.trusted(bx, by) && std::fabs(field.vx(bx, by) - dx) <= 0.5f &&
+							std::fabs(field.vy(bx, by) - dy) <= 0.5f;
+						right += ok ? 1 : 0;
+						if (!ok && misses.size() < 600)
+							misses += L" (" + std::to_wstring(bx) + L"," + std::to_wstring(by) + L": " +
+								std::to_wstring(field.vx(bx, by)) + L"," + std::to_wstring(field.vy(bx, by)) +
+								(field.trusted(bx, by) ? L" t)" : L" u)");
+					}
+				return std::make_pair(right, total);
+			};
+			Dejudder::Settings settings = DejudderTestSettings();
+			Dejudder::MotionWarp without(fixture.Log(), gpu, settings);
+			Assert::IsTrue(without.Estimate(planesA.planes, planesB.planes));
+			const auto off = countRight(DownloadField(gpu, without));
+			settings.globalPrior = true;
+			Dejudder::MotionWarp with(fixture.Log(), gpu, settings);
+			Assert::IsTrue(with.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(with.LastError()).c_str());
+			const auto on = countRight(DownloadField(gpu, with));
+			const DejudderField global = DownloadField(gpu, with, with.GlobalVector());
+			const std::wstring message = L"right blocks without the prior " + std::to_wstring(off.first) + L", with " +
+				std::to_wstring(on.first) + L" of " + std::to_wstring(on.second) + L"; global (1/8 texels) " +
+				std::to_wstring(global.texels[0]) + L", " + std::to_wstring(global.texels[1]) + L" ratio " +
+				std::to_wstring(global.texels[2]) + L"; misses:" + misses + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(off.first * 100 < off.second * 20, (L"the pan should be beyond the plain search: " + message).c_str());
+			Assert::IsTrue(on.first * 100 >= on.second * 95, message.c_str());
+			Assert::IsTrue(std::fabs(global.texels[0] - dx / 8.0f) <= 0.5f && std::fabs(global.texels[1] - dy / 8.0f) <= 0.5f &&
+				global.texels[2] < 0.9f, message.c_str());
+
+			// shift 0.5: (70, -10), both paths, on blocks whose content stays in the
+			// picture (from x 352 on it leaves at 140 px per frame: those hold).
+			const BothPaths warped = WarpBothPaths(fixture, with, a, planesA.planes, 0.5f);
+			auto expected = [](int x, int y) { return DejudderTexture(x - 70, y + 10); };
+			const double sourceOk = MatchingPercent(warped.source, width, 96, 40, 340, height - 40, expected, kSourceTolerance);
+			const double renderedOk = MatchingPercent(warped.rendered, width, 96, 40, 340, height - 40, expected, kRenderedTolerance);
+			Assert::IsTrue(sourceOk >= 90.0 && renderedOk >= 90.0, (L"warped by (70, -10): source " +
+				std::to_wstring(sourceOk) + L"%, rendered " + std::to_wstring(renderedOk) + L"%; " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderMotionScaledStrength)
+		{
+			// D2: a static scene gives scale 0; a pan of 8 px with lo 0 / hi 16
+			// gives 0.5, and both warps then move the picture by shift x 0.5 x 8.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame pan = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - 8, y); },
+				[](int x, int y, int c) { return DejudderTexture((x - 4) * 2, y, 7 + c); });
+			DejudderGpuPlanes planesA, planesPan;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, pan, planesPan);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.motionScaleLo = 0.0f;
+			settings.motionScaleHi = 16.0f;
+			settings.strengthRate = 1.0f;   // the rate limit has its own test
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesA.planes));
+				const auto trust = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(trust[0] > 0.9f && trust[1] == 0.0f,
+					(L"static: share " + std::to_wstring(trust[0]) + L", scale " + std::to_wstring(trust[1])).c_str());
+			}
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesPan.planes));
+			const auto trust = DownloadFrameTrust(gpu, warp);
+			Assert::IsTrue(std::fabs(trust[2] - 8.0f) < 0.3f && std::fabs(trust[1] - 0.5f) < 0.02f,
+				(L"pan 8: mean |v| " + std::to_wstring(trust[2]) + L", scale " + std::to_wstring(trust[1])).c_str());
+			// shift = 0.5 / scale: the warps apply the GPU's scale, so the picture
+			// lands exactly 4 px on (8 px if the scale were ignored).
+			const BothPaths warped = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f / trust[1]);
+			auto expected = [](int x, int y) { return DejudderTexture(x - 4, y); };
+			const double sourceOk = MatchingPercent(warped.source, width, 24, 24, width - 24, height - 24, expected, kSourceTolerance);
+			const double renderedOk = MatchingPercent(warped.rendered, width, 24, 24, width - 24, height - 24, expected, kRenderedTolerance);
+			auto unscaled = [](int x, int y) { return DejudderTexture(x - 8, y); };
+			const double sourceUnscaled = MatchingPercent(warped.source, width, 24, 24, width - 24, height - 24, unscaled, kSourceTolerance);
+			Assert::IsTrue(sourceOk >= 90.0 && renderedOk >= 90.0 && sourceUnscaled < 50.0, (L"shift x scale 0.5 = 4 px: source " +
+				std::to_wstring(sourceOk) + L"%, rendered " + std::to_wstring(renderedOk) + L"% (unscaled 8 px " +
+				std::to_wstring(sourceUnscaled) + L"%)").c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderTrustAdaptiveStrengthAndRateLimit)
+		{
+			// D4: half the picture cut (salt-99) gives a share between the hold
+			// and full strength, so the scale is between 0 and 1 and both warps
+			// move the trusted half by shift x scale; a full cut holds (share
+			// below the minimum, scale 0). Then the rate limit: static -> pan
+			// with D2 ramps by 0.25 per source frame.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame half = MakeDejudderFrame(width, height,
+				[](int x, int y) { return x < 128 ? DejudderTexture(x, y, 99) : DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return x < 64 ? DejudderTexture(x * 2, y, 99 + c) : DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			const DejudderFrame cut = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y, 99); }, chroma);
+			DejudderGpuPlanes planesA, planesHalf, planesCut;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, half, planesHalf);
+			UploadDejudderFrame(gpu, cut, planesCut);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.trustScaleFull = 0.9f;
+			settings.strengthRate = 1.0f;
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesHalf.planes));
+				const auto trust = DownloadFrameTrust(gpu, warp);
+				const float expectedScale = (trust[0] - 0.25f) / (0.9f - 0.25f);
+				Assert::IsTrue(trust[0] > 0.3f && trust[0] < 0.6f && std::fabs(trust[1] - expectedScale) < 0.01f &&
+					trust[1] > 0.05f && trust[1] < 0.95f,
+					(L"half cut: share " + std::to_wstring(trust[0]) + L", scale " + std::to_wstring(trust[1])).c_str());
+				// The trusted (right) half moves by shift x scale x (12, 6): with
+				// shift = 1 / scale it lands at the full motion.
+				const BothPaths warped = WarpBothPaths(fixture, warp, a, planesA.planes, 1.0f / trust[1]);
+				auto expected = [](int x, int y) { return DejudderTexture(x - dx, y - dy); };
+				const double sourceOk = MatchingPercent(warped.source, width, 160, 24, width - 24, height - 24, expected, kSourceTolerance);
+				const double renderedOk = MatchingPercent(warped.rendered, width, 160, 24, width - 24, height - 24, expected, kRenderedTolerance);
+				Assert::IsTrue(sourceOk >= 85.0 && renderedOk >= 85.0, (L"half cut, trusted half: source " +
+					std::to_wstring(sourceOk) + L"%, rendered " + std::to_wstring(renderedOk) + L"%").c_str());
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesCut.planes));
+				const auto cutTrust = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(cutTrust[0] < 0.25f && cutTrust[1] == 0.0f,
+					(L"full cut: share " + std::to_wstring(cutTrust[0]) + L", scale " + std::to_wstring(cutTrust[1])).c_str());
+				const BothPaths held = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+				auto own = [](int x, int y) { return DejudderTexture(x, y); };
+				Assert::IsTrue(MatchingPercent(held.source, width, 0, 0, width, height, own, kSourceTolerance) == 100.0 &&
+					MatchingPercent(held.rendered, width, 0, 0, width, height, own, kRenderedTolerance) == 100.0,
+					L"a full cut holds A in both paths");
+			}
+			// The rate limit (D2 on: static, then three pan frames).
+			Dejudder::Settings ramp = DejudderTestSettings();
+			ramp.motionScaleLo = 0.25f;
+			ramp.motionScaleHi = 1.5f;
+			ramp.strengthRate = 0.25f;
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesB;
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, ramp);
+			std::wstring sequence;
+			float scales[4] = {};
+			for (int frame = 0; frame < 4; ++frame)
+			{
+				Assert::IsTrue(warp.Estimate(planesA.planes, frame == 0 ? planesA.planes : planesB.planes));
+				scales[frame] = DownloadFrameTrust(gpu, warp)[1];
+				sequence += std::to_wstring(scales[frame]) + L" ";
+			}
+			Assert::IsTrue(scales[0] == 0.0f && std::fabs(scales[1] - 0.25f) < 0.01f && std::fabs(scales[2] - 0.5f) < 0.01f &&
+				std::fabs(scales[3] - 0.75f) < 0.01f, (L"static then pan: " + sequence).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		static uint16_t FloatToHalf(float f)
+		{
+			if (f == 0.0f)
+				return 0;
+			int exponent;
+			const float mantissa = std::frexp(std::fabs(f), &exponent);   // [0.5, 1)
+			int e = exponent + 14;
+			const uint16_t sign = f < 0.0f ? 0x8000 : 0;
+			if (e <= 0)
+				return sign;
+			int m = static_cast<int>(std::lround((mantissa * 2.0f - 1.0f) * 1024.0f));
+			if (m == 1024) { m = 0; ++e; }
+			return static_cast<uint16_t>(sign | (e << 10) | m);
+		}
+
+		TEST_METHOD(DejudderVectorSmoothing)
+		{
+			// D3 on constructed fields over real planes (A: a pan of (12, 6)
+			// with a 48x48 object that is gone in B). A trusted isolated outlier
+			// cannot be made from real frames (the search window's margin breaks
+			// its neighbours' trust too), so the raw field is built from the
+			// real one and passed to Smooth():
+			// - block (2, 2) set to a trusted (20, 6): replaced by the median (12, 6);
+			// - block (12, 5) set untrusted; its content matches at (12, 6): promoted;
+			// - the object's centre block (7, 3) untrusted with its 8 neighbours
+			//   set to a trusted (12, 6): its own content (the object) does not
+			//   match there (planner answer 4), so it stays held.
+			// Then the whole Estimate with D3 on keeps the pan, and both warps
+			// move the former outlier with the pan.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, ox = 96, oy = 32;
+			auto inA = [](int x, int y) { return x >= ox && x < ox + 48 && y >= oy && y < oy + 48; };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inA(x, y) ? DejudderTexture(x, y, 55) : DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::Settings settings = DejudderTestSettings();
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+			const DejudderField real = DownloadField(gpu, warp);
+			Assert::IsTrue(real.trusted(2, 2) && real.trusted(12, 5) && !real.trusted(7, 3),
+				L"the real field: (2, 2) and (12, 5) trusted, the object's centre held");
+
+			std::vector<float> texels = real.texels;
+			auto set = [&](int bx, int by, float vx, float vy, float trust)
+			{
+				float* t = &texels[(by * real.blocksX + bx) * 4];
+				t[0] = vx; t[1] = vy; t[2] = trust;
+			};
+			set(2, 2, 20.0f, 6.0f, 1.0f);
+			set(12, 5, 0.0f, 0.0f, 0.0f);
+			for (int by = 2; by <= 4; ++by)
+				for (int bx = 6; bx <= 8; ++bx)
+					if (bx != 7 || by != 3)
+						set(bx, by, static_cast<float>(dx), static_cast<float>(dy), 1.0f);
+			std::vector<uint16_t> halfs(texels.size());
+			for (size_t i = 0; i < texels.size(); ++i)
+				halfs[i] = FloatToHalf(texels[i]);
+			pl_tex_params rp{};
+			rp.w = real.blocksX;
+			rp.h = real.blocksY;
+			rp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, PL_FMT_CAP_SAMPLEABLE);
+			rp.sampleable = true;
+			rp.initial_data = halfs.data();
+			pl_tex raw = rp.format ? pl_tex_create(gpu, &rp) : nullptr;
+			Assert::IsNotNull(raw);
+			const bool smoothed = warp.Smooth(raw);
+			pl_tex_destroy(gpu, &raw);
+			Assert::IsTrue(smoothed, ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			const DejudderField after = DownloadField(gpu, warp);
+			auto describe = [&](int bx, int by)
+			{
+				return L"(" + std::to_wstring(after.vx(bx, by)) + L", " + std::to_wstring(after.vy(bx, by)) +
+					(after.trusted(bx, by) ? L", trusted)" : L", held)");
+			};
+			const std::wstring message = L"outlier " + describe(2, 2) + L"; promoted " + describe(12, 5) +
+				L"; object centre " + describe(7, 3);
+			auto isPan = [&](int bx, int by)
+			{
+				return after.trusted(bx, by) && std::fabs(after.vx(bx, by) - dx) < 0.6f && std::fabs(after.vy(bx, by) - dy) < 0.6f;
+			};
+			Assert::IsTrue(isPan(2, 2), (L"the outlier takes the median: " + message).c_str());
+			Assert::IsTrue(isPan(12, 5), (L"a matching block is promoted: " + message).c_str());
+			Assert::IsFalse(after.trusted(7, 3), (L"new content is not promoted: " + message).c_str());
+
+			// Both warps move the former outlier block with the pan (shift 0.5).
+			const BothPaths warped = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+			auto expected = [](int x, int y) { return DejudderTexture(x - 6, y - 3); };
+			const double sourceOk = MatchingPercent(warped.source, width, 40, 38, 52, 50, expected, kSourceTolerance);
+			const double renderedOk = MatchingPercent(warped.rendered, width, 40, 38, 52, 50, expected, kRenderedTolerance);
+			Assert::IsTrue(sourceOk >= 90.0 && renderedOk >= 90.0, (L"the former outlier warped with the pan: source " +
+				std::to_wstring(sourceOk) + L"%, rendered " + std::to_wstring(renderedOk) + L"%").c_str());
+
+			// The whole Estimate with D3 on: the pan unchanged away from the object.
+			settings.vectorSmooth = true;
+			Dejudder::MotionWarp smooth(fixture.Log(), gpu, settings);
+			Assert::IsTrue(smooth.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(smooth.LastError()).c_str());
+			const DejudderField full = DownloadField(gpu, smooth);
+			int interior = 0, right = 0;
+			for (int by = 2; by < full.blocksY - 2; ++by)
+				for (int bx = 2; bx < full.blocksX - 2; ++bx)
+				{
+					if (bx >= 5 && bx <= 9 && by >= 1 && by <= 5)
+						continue;   // the object and its margin
+					++interior;
+					right += (full.trusted(bx, by) && std::fabs(full.vx(bx, by) - dx) < 0.6f && std::fabs(full.vy(bx, by) - dy) < 0.6f) ? 1 : 0;
+				}
+			Assert::IsTrue(right * 100 >= interior * 95, (L"the pan with D3 on: " + std::to_wstring(right) + L" of " +
+				std::to_wstring(interior)).c_str());
+			Assert::IsFalse(full.trusted(7, 3), L"the object's centre stays held with D3 on");
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderOcclusionFillFromB)
+		{
+			// D5 (source warp): an object in A that is gone in B leaves its
+			// place as new content in B. With the fill on, the held place shows
+			// B there; off (and in the rendered path, not wired yet) it holds A.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, ox = 96, oy = 32;
+			auto inA = [](int x, int y) { return x >= ox && x < ox + 48 && y >= oy && y < oy + 48; };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inA(x, y) ? DejudderTexture(x, y, 55) : DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			auto inner = [&](const std::vector<float>& image, bool fromB)
+			{
+				// The object's interior, away from its edges (blocks of 16).
+				return MatchingPercent(image, width, ox + 16, oy + 16, ox + 32, oy + 32,
+					[&](int x, int y) { return fromB ? b.luma[y * width + x] : a.luma[y * width + x]; },
+					kSourceTolerance + 1.0f);
+			};
+			Dejudder::Settings settings = DejudderTestSettings();
+			Dejudder::MotionWarp off(fixture.Log(), gpu, settings);
+			Assert::IsTrue(off.Estimate(planesA.planes, planesB.planes));
+			const BothPaths held = WarpBothPaths(fixture, off, a, planesA.planes, 0.5f);
+			settings.occlusionFill = true;
+			Dejudder::MotionWarp on(fixture.Log(), gpu, settings);
+			Assert::IsTrue(on.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(on.LastError()).c_str());
+			const BothPaths filled = WarpBothPaths(fixture, on, a, planesA.planes, 0.5f);
+			const double heldA = inner(held.source, false), filledB = inner(filled.source, true);
+			Assert::IsTrue(heldA >= 95.0 && filledB >= 95.0, (L"object place: off holds A " + std::to_wstring(heldA) +
+				L"%, on shows B " + std::to_wstring(filledB) + L"%").c_str());
+			AssertCleanLibplaceboLog(log);
 		}
 
 		TEST_METHOD(DejudderGrainErrorSeparatesNoiseFromTexture)
