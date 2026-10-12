@@ -78,6 +78,27 @@ The grain keys are shared with Stage 8 (`adaptive_grain_*`); the
 - Stage 10: alpha untouched, extended codes kept through both branches.
 - Both warp paths and the matrix's "all refinements on" axis include it.
 
+## As built (d1837c6d; planner answers 2026-10-12, night)
+
+- **Faithful branch behind a CNN doubler.** FSRCNNX / ArtCNN hook LUMA, so
+  PRE_KERNEL is already the doubled picture. When it is exactly 2x the
+  source crop, VP averages it 2x2 back to source resolution in the same
+  light domain (the doubler's own consistency, which SSimSuperRes relies
+  on too), then ewa_lanczossharp (anti-ringing) to the output: the kernel
+  from a consistent estimate of the source. No CNN: PRE_KERNEL itself.
+  Other prescale ratios: skipped and logged.
+- **upscale_light.** linear = libplacebo's linear light where it scales
+  down (2x to 1.48x after a doubler), sigmoid off (sigmoid clips WTW on
+  upscales); a plain upscale without a CNN is in gamma light. gamma = gamma
+  light everywhere. Config card: "linear (downscale after a doubler)" /
+  "gamma (all)".
+- **SuperRes.** Bundled SSimSuperRes gains `vp_grain_strength` (default 0,
+  unchanged); the blend runs just before it and hands the grain term over
+  in alpha; SuperRes scales its correction by it and writes alpha 1. The
+  doubler case is covered by the chain matrix (unmeasurable in the unit
+  test: rounding-level correction on synthetic pictures).
+- **Warp paths.** 8b runs in the main render; nothing path-specific.
+
 ## Cinema check (1080p source with grain, in the first session if time)
 
 CNN alone → blend on, on a grainy sky over a sharp foreground: grain

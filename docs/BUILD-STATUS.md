@@ -104,6 +104,13 @@ is the previous `libplacebo-377.dll`.
 - 8b's faithful branch averages a doubler's 2x output back to the source
   resolution (prescale ratios other than 1 and 2: 8b skips the frame and
   logs it).
+- 8b `upscale_light`: linear = libplacebo's linear light where it scales
+  down (2x to 1.48x after a doubler), sigmoid off; without a CNN the plain
+  upscale is in gamma light. gamma = gamma light everywhere (madVR's habit).
+  Both branches always share the domain. First A/B: the two settings.
+- Stage 8 and 8b and the two de-judder warp paths: both stages run in the
+  main render, so the source warp's extras re-run them and the rendered warp
+  warps their result; nothing is path-specific (no separate tests).
 
 ## Build notes
 

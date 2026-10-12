@@ -64,6 +64,7 @@ docs/VP-build-plan-refinements.md.*
    and 0.35.
 4. **Grainy sky over sharp foreground** (Stage 8): grain calmer, texture
    intact, no halos on a horizon or text; compare the four A/B states.
+   1080p source with grain: CNN alone → adaptive upscale on.
 5. **Extended range** (Stage 10): a 235→255 ramp continues above white
    with the switch on; a PLUGE at codes 4/12/16/20 shows whether the
    FL35 reveals sub-black at all (record either way).

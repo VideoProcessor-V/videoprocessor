@@ -314,7 +314,7 @@ namespace
 		std::string remaining;
 		std::istringstream lines(gpu.messages);
 		for (std::string entry; std::getline(lines, entry);)
-			if (entry.find("(slow!)") == std::string::npos)
+			if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
 				remaining += entry + "\n";
 		Check(remaining.empty(), std::string(test) + ": libplacebo logged: " + remaining);
 	}
@@ -714,7 +714,7 @@ void RunBetaChainGpuTest()
 	std::string remaining;
 	std::istringstream lines(gpu.messages);
 	for (std::string entry; std::getline(lines, entry);)
-		if (entry.find("(slow!)") == std::string::npos)
+		if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
 			remaining += entry + "\n";
 	Check(remaining.empty(), "whole chain on 377: libplacebo logged: " + remaining);
 
@@ -731,7 +731,7 @@ void RunBetaChainGpuTest()
 		remaining.clear();
 		std::istringstream movingLines(moving.messages);
 		for (std::string entry; std::getline(movingLines, entry);)
-			if (entry.find("(slow!)") == std::string::npos)
+			if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
 				remaining += entry + "\n";
 		Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
 	}

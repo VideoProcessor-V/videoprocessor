@@ -6474,8 +6474,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "refine noise."));
         auto* upscaleLight = addChoice(QStringLiteral("Upscale light"),
             QStringLiteral("upscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
+        upscaleLight->setItemText(upscaleLight->findData(QStringLiteral("linear")),
+            QStringLiteral("linear (downscale after a doubler)"));
+        upscaleLight->setItemText(upscaleLight->findData(QStringLiteral("gamma")), QStringLiteral("gamma (all)"));
         upscaleLight->setToolTip(QStringLiteral(
-            "The light domain both branches upscale in while the blend is on: linear (default) or gamma, for comparison."));
+            "The light domain while the blend is on (both branches always share it). Linear: after a CNN doubler "
+            "the picture is scaled down from 2x in linear light; without a CNN the plain upscale is in gamma light "
+            "(libplacebo upscales in linear light only through sigmoid, which is kept off because it clips "
+            "above-white). Gamma: gamma light everywhere, like madVR."));
 
         auto wrapToneControl = [&](const ToneMappingTuning::Spec& spec, QLineEdit* edit) {
             auto row = form->takeRow(edit);

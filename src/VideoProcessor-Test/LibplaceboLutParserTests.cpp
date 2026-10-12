@@ -6114,7 +6114,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("(slow!)") == std::string::npos)
+				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
@@ -6175,7 +6175,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("(slow!)") == std::string::npos)
+				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
@@ -6946,11 +6946,13 @@ namespace VideoProcessorTest
 			Assert::IsTrue(CustomHookChain::SetHookParameter(superres, "vp_grain_strength", 0.0));
 			const std::vector<uint16_t> cleanFull = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh,
 				{ superres }, false, 0);
-			// SuperRes after a doubler: its correction on these synthetic pictures
-			// is at half-float rounding level (31 of 65535 even after a sharpening
-			// doubler, without the blend), so it cannot be measured here; the order
-			// and the alpha handoff are the ones checked above on the plain upscale,
-			// and the chain matrix runs FSRCNNX + SSimSuperRes with the blend.
+			// SuperRes after a doubler is covered by the chain matrix, not here
+			// (planner 2026-10-12, not a gap): on these synthetic pictures its
+			// correction after a doubler is at half-float rounding level (31 of
+			// 65535 even after a sharpening doubler, without the blend), so it
+			// cannot be measured; the order and the alpha handoff are checked
+			// above on the plain upscale, and the matrix's refinements axis runs
+			// real FSRCNNX + SSimSuperRes with the blend at the upscale scales.
 			pl_mpv_user_shader_destroy(&superres);
 			pl_mpv_user_shader_destroy(&cnn);
 			const std::wstring superMessage = L"SuperRes correction with g = 0.4: " + std::to_wstring(ratio) +
@@ -7147,7 +7149,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("(slow!)") == std::string::npos)
+				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
@@ -7170,7 +7172,7 @@ namespace VideoProcessorTest
 			std::string remaining;
 			std::istringstream lines(log);
 			for (std::string entry; std::getline(lines, entry);)
-				if (entry.find("(slow!)") == std::string::npos &&
+				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
 					entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
@@ -7355,7 +7357,7 @@ namespace VideoProcessorTest
 				std::string remaining;
 				std::istringstream lines(log);
 				for (std::string entry; std::getline(lines, entry);)
-					if (entry.find("(slow!)") == std::string::npos &&
+					if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
 						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 						remaining += entry + "\n";
 				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide(combo.Name() + ": libplacebo logged: " + remaining).c_str());
@@ -7380,7 +7382,7 @@ namespace VideoProcessorTest
 				std::string remaining;
 				std::istringstream lines(log);
 				for (std::string entry; std::getline(lines, entry);)
-					if (entry.find("(slow!)") == std::string::npos &&
+					if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
 						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 						remaining += entry + "\n";
 				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
@@ -7406,7 +7408,7 @@ namespace VideoProcessorTest
 				std::string remaining;
 				std::istringstream lines(log);
 				for (std::string entry; std::getline(lines, entry);)
-					if (entry.find("(slow!)") == std::string::npos &&
+					if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
 						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
 						remaining += entry + "\n";
 				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
