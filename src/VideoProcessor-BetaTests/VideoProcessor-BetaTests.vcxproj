@@ -7,9 +7,9 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup><OutDir>$(ProjectDir)..\..\x64\Release\vprenderer-beta\</OutDir><IntDir>$(ProjectDir)..\..\x64\Release\obj\BetaTests\</IntDir><TargetName>VideoProcessorBetaTests</TargetName></PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><PreprocessorDefinitions>VP_LIBPLACEBO_BETA;NOMINMAX;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><LanguageStandard>stdcpp17</LanguageStandard></ClCompile>
+    <ClCompile><PreprocessorDefinitions>VP_LIBPLACEBO_BETA;NOMINMAX;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);..\VideoProcessor-Lib;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><LanguageStandard>stdcpp17</LanguageStandard></ClCompile>
     <Link><AdditionalLibraryDirectories>..\..\3rdparty\libplacebo-beta\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>libplacebo-377.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="BetaParametersTests.cpp"/><ClCompile Include="BetaGpuTests.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp"/></ItemGroup>
+  <ItemGroup><ClCompile Include="BetaParametersTests.cpp"/><ClCompile Include="BetaGpuTests.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp"/></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

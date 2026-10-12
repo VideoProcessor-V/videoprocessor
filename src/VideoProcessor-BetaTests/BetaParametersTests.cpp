@@ -4,6 +4,7 @@
 #include <stdexcept>
 using namespace LibplaceboRenderParameters;
 void RunBetaGpuTests(); // BetaGpuTests.cpp
+void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
 int main() {
     try {
@@ -44,6 +45,8 @@ int main() {
         std::cout << "PASS Beta defaults, residual correction/gamut independence, overrides, peak independence and luminance projection\n";
         RunBetaGpuTests();
         std::cout << "PASS Beta GPU: output clamp keeps footroom/headroom; encoding correct after PREOUTPUT hooks without the repair\n";
+        RunBetaFeatureGpuTests();
+        std::cout << "PASS Beta features: sigma-delta (8-in-10, true 10-bit), LED compensation, occlusion mask, de-judder\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
 }
