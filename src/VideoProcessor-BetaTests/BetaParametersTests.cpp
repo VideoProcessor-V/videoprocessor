@@ -3,6 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 using namespace LibplaceboRenderParameters;
+void RunBetaGpuTests(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
 int main() {
     try {
@@ -41,6 +42,8 @@ int main() {
         check(target.hdr.max_luma == 150.f, "Physical target nits invariant");
         check(MakeSwapchainColorHint(target).transfer == target.transfer, "SDR transfer hint invariant");
         std::cout << "PASS Beta defaults, residual correction/gamut independence, overrides, peak independence and luminance projection\n";
+        RunBetaGpuTests();
+        std::cout << "PASS Beta GPU: output clamp keeps footroom/headroom; encoding correct after PREOUTPUT hooks without the repair\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
 }

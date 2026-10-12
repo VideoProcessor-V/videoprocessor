@@ -5,7 +5,8 @@
 
 #include <vector>
 
-// Works around a libplacebo 7.360.1 renderer bug.
+// Works around a libplacebo 7.360.1 renderer bug. Fixed in the VP Renderer
+// Beta's libplacebo (master, API 377): there Needed() is always false.
 //
 // pass_output_target() takes the image's shader (`sh = img_sh(...)`) before
 // the PRE_OUTPUT hooks run. A hook with a texture input (every mpv user

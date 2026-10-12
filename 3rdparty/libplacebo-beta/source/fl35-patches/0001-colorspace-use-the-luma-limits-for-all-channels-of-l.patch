@@ -1,0 +1,53 @@
+From 207ee031ac30a5f12276d815bdffe26c176309d7 Mon Sep 17 00:00:00 2001
+From: Victor McPherson <vmcpherson2012@gmail.com>
+Date: Sun, 11 Oct 2026 18:24:30 -0400
+Subject: [PATCH 1/2] colorspace: use the luma limits for all channels of
+ limited range RGB
+
+pl_color_repr_limits() gave components 1 and 2 the YCbCr chroma limit
+(240) for every color system. For a limited range RGB signal that lets
+G and B exceed reference white by 5 codes (8-bit) while R is clamped at
+235, so the output clamp from e2972fdd tints super-whites cyan. RGB
+channels share the 16-235 range.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/colorspace.c       | 4 +++-
+ src/tests/colorspace.c | 6 ++++++
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/colorspace.c b/src/colorspace.c
+index edd69ed..9afc876 100644
+--- a/src/colorspace.c
++++ b/src/colorspace.c
+@@ -235,7 +235,9 @@ void pl_color_repr_limits(const struct pl_color_repr *repr,
+         const int shift = col_bits + bits->bit_shift - 8;
+         ymin = cmin = 16 << shift;
+         ymax = 235 << shift;
+-        cmax = 240 << shift;
++        // Only YCbCr chroma has the wider 240 limit; the G and B channels of
++        // a limited range RGB signal share the 16-235 range of R
++        cmax = repr->sys == PL_COLOR_SYSTEM_RGB ? ymax : 240 << shift;
+     } else {
+         ymin = cmin = 0;
+         ymax = cmax = max_value;
+diff --git a/src/tests/colorspace.c b/src/tests/colorspace.c
+index a696b19..cdd8dc3 100644
+--- a/src/tests/colorspace.c
++++ b/src/tests/colorspace.c
+@@ -198,6 +198,12 @@ int main()
+             .repr.bits = { .color_depth = 16 },
+             .min  = BITVALUES(16,  4096,  4096,  4096,     0),
+             .max  = BITVALUES(16, 60160, 61440, 61440, 65535),
++        }, {
++            .repr.sys    = PL_COLOR_SYSTEM_RGB,
++            .repr.levels = PL_COLOR_LEVELS_LIMITED,
++            .repr.bits = { .color_depth = 10, .sample_depth = 10 },
++            .min  = BITVALUES(10,  64,  64,  64,    0),
++            .max  = BITVALUES(10, 940, 940, 940, 1023),
+         }, {
+             .repr.levels = PL_COLOR_LEVELS_FULL,
+             .repr.bits = { .color_depth = 10, .sample_depth = 16 },
+-- 
+2.56.0.windows.2
+

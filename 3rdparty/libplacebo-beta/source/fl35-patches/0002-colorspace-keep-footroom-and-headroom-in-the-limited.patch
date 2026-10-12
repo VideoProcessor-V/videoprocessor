@@ -1,0 +1,123 @@
+From a9be18d4a9a28dd42f089f99a4cefbb5152e3fc9 Mon Sep 17 00:00:00 2001
+From: Victor McPherson <vmcpherson2012@gmail.com>
+Date: Sun, 11 Oct 2026 18:26:11 -0400
+Subject: [PATCH 2/2] colorspace: keep footroom and headroom in the limited
+ range output clamp
+
+Since e2972fdd the renderer clamps every integer output to
+pl_color_repr_limits(), which returned the nominal range (16-235/240).
+That removes legal below-black and above-white content (BTB/WTW) at the
+very end of the pipeline, after all user hooks, for every limited range
+output, including RGB outputs to displays that use the headroom.
+
+BT.709 and BT.2100 reserve only the timing reference codes (8-bit 0 and
+255, 10-bit 0-3 and 1020-1023); footroom and headroom are permissible.
+Clamp to that range instead, identically on all channels. This still
+prevents the undefined values the clamp was added for (reserved codes,
+ringing past the code range) while keeping the signal intact.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/colorspace.c       | 16 ++++++++++------
+ src/tests/colorspace.c | 27 +++++++++++++++++----------
+ src/tests/gpu_tests.c  |  6 +++---
+ 3 files changed, 30 insertions(+), 19 deletions(-)
+
+diff --git a/src/colorspace.c b/src/colorspace.c
+index 9afc876..7e46b2d 100644
+--- a/src/colorspace.c
++++ b/src/colorspace.c
+@@ -232,12 +232,16 @@ void pl_color_repr_limits(const struct pl_color_repr *repr,
+     const float max_value = ((1LL << col_bits) - 1) << bits->bit_shift;
+     float ymin, ymax, cmin, cmax;
+     if (pl_color_levels_guess(repr) == PL_COLOR_LEVELS_LIMITED) {
+-        const int shift = col_bits + bits->bit_shift - 8;
+-        ymin = cmin = 16 << shift;
+-        ymax = 235 << shift;
+-        // Only YCbCr chroma has the wider 240 limit; the G and B channels of
+-        // a limited range RGB signal share the 16-235 range of R
+-        cmax = repr->sys == PL_COLOR_SYSTEM_RGB ? ymax : 240 << shift;
++        // The permissible range of a limited range signal is every code
++        // except the reserved timing references (8-bit 0 and 255, 10-bit
++        // 0-3 and 1020-1023; ITU-R BT.709, BT.2100). The footroom below
++        // nominal black (16) and the headroom above nominal white (235/240)
++        // are legal and carry real below-black and above-white content, so
++        // they are kept, identically on all three channels.
++        const int cshift = PL_MAX(col_bits - 8, 0);
++        const long long top = PL_MIN((255LL << cshift) - 1, (1LL << col_bits) - 1);
++        ymin = cmin = (1LL << cshift) << bits->bit_shift;
++        ymax = cmax = top << bits->bit_shift;
+     } else {
+         ymin = cmin = 0;
+         ymax = cmax = max_value;
+diff --git a/src/tests/colorspace.c b/src/tests/colorspace.c
+index cdd8dc3..781a6e6 100644
+--- a/src/tests/colorspace.c
++++ b/src/tests/colorspace.c
+@@ -181,29 +181,36 @@ int main()
+     } limit_tests[] = {
+         {
+             .repr.levels = PL_COLOR_LEVELS_LIMITED,
+-            .min  = BITVALUES(8,  16,  16,  16,   0),
+-            .max  = BITVALUES(8, 235, 240, 240, 255),
++            .min  = BITVALUES(8,   1,   1,   1,   0),
++            .max  = BITVALUES(8, 254, 254, 254, 255),
+         }, {
+             .repr.levels = PL_COLOR_LEVELS_LIMITED,
+             .repr.bits = { .color_depth = 10, .sample_depth = 16 },
+-            .min  = BITVALUES(16,  64,  64,  64,    0),
+-            .max  = BITVALUES(16, 940, 960, 960, 1023),
++            .min  = BITVALUES(16,    4,    4,    4,    0),
++            .max  = BITVALUES(16, 1019, 1019, 1019, 1023),
+         }, {
+             .repr.levels = PL_COLOR_LEVELS_LIMITED,
+             .repr.bits = { .color_depth = 10, .sample_depth = 16, .bit_shift = 6 },
+-            .min  = BITVALUES(16,  4096,  4096,  4096,     0),
+-            .max  = BITVALUES(16, 60160, 61440, 61440, 65472),
++            .min  = BITVALUES(16,   256,   256,   256,     0),
++            .max  = BITVALUES(16, 65216, 65216, 65216, 65472),
+         }, {
+             .repr.levels = PL_COLOR_LEVELS_LIMITED,
+             .repr.bits = { .color_depth = 16 },
+-            .min  = BITVALUES(16,  4096,  4096,  4096,     0),
+-            .max  = BITVALUES(16, 60160, 61440, 61440, 65535),
++            .min  = BITVALUES(16,   256,   256,   256,     0),
++            .max  = BITVALUES(16, 65279, 65279, 65279, 65535),
+         }, {
+             .repr.sys    = PL_COLOR_SYSTEM_RGB,
+             .repr.levels = PL_COLOR_LEVELS_LIMITED,
+             .repr.bits = { .color_depth = 10, .sample_depth = 10 },
+-            .min  = BITVALUES(10,  64,  64,  64,    0),
+-            .max  = BITVALUES(10, 940, 940, 940, 1023),
++            .min  = BITVALUES(10,    4,    4,    4,    0),
++            .max  = BITVALUES(10, 1019, 1019, 1019, 1023),
++        }, {
++            // 8-bit precision in a 10-bit sample (MSB-aligned)
++            .repr.sys    = PL_COLOR_SYSTEM_RGB,
++            .repr.levels = PL_COLOR_LEVELS_LIMITED,
++            .repr.bits = { .color_depth = 8, .sample_depth = 10, .bit_shift = 2 },
++            .min  = BITVALUES(10,    4,    4,    4,    0),
++            .max  = BITVALUES(10, 1016, 1016, 1016, 1020),
+         }, {
+             .repr.levels = PL_COLOR_LEVELS_FULL,
+             .repr.bits = { .color_depth = 10, .sample_depth = 16 },
+diff --git a/src/tests/gpu_tests.c b/src/tests/gpu_tests.c
+index 905ae82..e3fbb1e 100644
+--- a/src/tests/gpu_tests.c
++++ b/src/tests/gpu_tests.c
+@@ -2092,9 +2092,9 @@ static void pl_ycbcr_tests(pl_gpu gpu)
+                 uint16_t *src_pixel = (uint16_t *) &src_buffer[i][off];
+                 uint16_t *dst_pixel = (uint16_t *) &dst_buffer[off];
+                 // Test that the dst_pixel is correctly clamped to the
+-                // legal signal range
+-                const uint16_t min_val = 16 << (depth - 8);
+-                const uint16_t max_val = (i ? 240 : 235) << (depth - 8);
++                // legal signal range (footroom and headroom included)
++                const uint16_t min_val = 1 << (depth - 8);
++                const uint16_t max_val = (255 << (depth - 8)) - 1;
+                 uint16_t src_clamped = PL_CLAMP(*src_pixel, min_val, max_val);
+                 int diff = abs((int) src_clamped - (int) *dst_pixel);
+                 REQUIRE_CMP(diff, <=, 150, "d"); // a little over 0.2%
+-- 
+2.56.0.windows.2
+

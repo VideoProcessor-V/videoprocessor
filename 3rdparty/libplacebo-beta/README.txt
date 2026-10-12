@@ -22,3 +22,23 @@ Stable and Beta have distinct DLL names, import libraries, headers and shader ca
 Gamut overflow correction (Experimental) defaults Off. It follows the original
 gamut mapper and replaces the old fixed-Y/IPT LUT experiment. It may reduce
 brightness or saturation. Uses the existing bool API and no environment switch.
+
+FL35 build (2026-10-11): the libplacebo-377.dll in bin is NOT Bill's binary.
+It is the same source (8bccd657, the archive above) with the two FL35
+output-clamp patches in source/fl35-patches:
+ 0001 colorspace: use the luma limits for all channels of limited range RGB
+ 0002 colorspace: keep footroom and headroom in the limited range output clamp
+Limited range is clamped to the legal codes (8-bit 1-254, 10-bit 4-1019),
+identically on R, G and B, instead of 16-235/240 (which cut below-black and
+above-white and tinted super-whites cyan).
+Build: MSYS2 mingw64 GCC 16.2.0; Meson 1.12.1; options as in VP-FORK.md.
+All 13 library tests passed. Exports (514) and imports are identical to
+Bill's binary; every runtime symbol it needs is in the bundled runtime DLLs,
+which are unchanged.
+Binary SHA256: 8f63be99b2d8d65e1e08436178e9ae8fd0bd9a55a2dde9b6985a5f8f10c5e653
+Complete patched source: source/libplacebo-7.377.0-vp-fl35-source.zip
+Source archive SHA256: 92ffa9c053508d1fda4e613b7a328a240b31417c2c75bc62e48195cbd33ad5ea
+GPU check: src/VideoProcessor-BetaTests (BetaGpuTests.cpp): code 40 -> 40 and
+980 -> 980 on a 10-bit limited target (Bill's binary: 64 and 940/960/960).
+This libplacebo applies the output encoding after PRE_OUTPUT hooks itself, so
+VP's OutputEncodingRepair is off for the Beta (PL_API_VER >= 377).

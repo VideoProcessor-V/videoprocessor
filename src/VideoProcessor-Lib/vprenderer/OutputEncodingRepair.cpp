@@ -12,6 +12,16 @@ namespace OutputEncodingRepair
 	{
 		if (targetLut == PL_LUT_CONVERSION)
 			return false;
+#if PL_API_VER >= 377
+		// The VP Renderer Beta's libplacebo (master, API 377) applies the
+		// output encoding after PRE_OUTPUT hooks itself: the repair would
+		// encode twice (BetaGpuTests: a x0.25 PREOUTPUT probe gives 283 alone,
+		// 306 with the repair). 7.360.1 still has the bug (the stable GPU test
+		// PreOutputHooksKeepTheOutputEncodingWithTheRepair asserts it).
+		(void)hooks;
+		(void)errors;
+		return false;
+#else
 		for (const pl_hook* hook : hooks)
 		{
 			if (!hook || !(hook->stages & PL_HOOK_PRE_OUTPUT) || hook->input != PL_HOOK_SIG_TEX)
@@ -24,6 +34,7 @@ namespace OutputEncodingRepair
 				return true;
 		}
 		return false;
+#endif
 	}
 
 	Hook::Hook()
