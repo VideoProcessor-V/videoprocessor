@@ -52,7 +52,7 @@ int main() {
         RunBetaExtendedRangeGpuTests();
         std::cout << "PASS Beta extended range: BTB/WTW kept through scaling, in-range edges and colours as without the switch\n";
         RunBetaChainGpuTest();
-        std::cout << "PASS Beta whole chain: every hook at once (still, cut, motion, de-judder extra, LED gain sequence), BTB/WTW and in-range kept, nothing disabled\n";
+        std::cout << "PASS Beta whole chain: every hook at once (still, cut, motion, de-judder extra, LED gain sequence, upscale, matrix), BTB/WTW and in-range kept, nothing disabled\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
 }

@@ -23,8 +23,8 @@
 //   one-pole smoothing (grain_smooth_ms) and a snap on a cut (the frame's mean
 //   luma jumping by more than 20 codes). No read-back on the render path.
 // - Blend hook, PL_HOOK_POST_KERNEL, after the user hooks (the SSIM shader's
-//   passes): the blend above. The Stage 10 carry's offset in alpha is blended
-//   with the same weight as luma, so it follows the picture it belongs to.
+//   passes): the blend above. Alpha is passed through (Stage 10b keeps its
+//   out-of-range remainder in its own texture, not in alpha).
 //
 // Both hooks do nothing unless the frame downscales vertically, which is the
 // SSIM shader's own condition (NATIVE_CROPPED.h > POSTKERNEL.h): the source

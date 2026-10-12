@@ -49,9 +49,8 @@
  *   is quantised fresh), and this shader writes alpha back to 1. The renderer
  *   sets `occlusion_mask` to 1 only on refreshes where it installed the hook;
  *   with 0 (the default) alpha is ignored and the output is unchanged.
- *   Alpha ownership: the mask hook and this shader own alpha at OUTPUT; the
- *   extended-range carry (Stage 10) owns it only from the RGB stage to the
- *   SCALED stage, so they never overlap.
+ *   Alpha ownership: the mask hook and this shader own alpha at OUTPUT;
+ *   nothing else uses it (Stage 10b keeps its remainder in its own texture).
  *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and

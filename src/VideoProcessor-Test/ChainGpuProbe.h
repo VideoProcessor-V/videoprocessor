@@ -67,6 +67,16 @@ namespace ChainGpuProbe
 		return false;
 	}
 
+	// The 7.360 encoding repair goes in only when the renderer would add it
+	// (OutputEncodingRepair::Needed: a texture-input PRE_OUTPUT hook in the
+	// chain), so a run without the LED hook gets no repair (audit
+	// stage8-3-9-10b note).
+	inline void RepairAsTheRenderer(ExtendedRangeGpuProbe::Case& c)
+	{
+		if (c.firstHook && !OutputEncodingRepair::Needed(c.extraHooks))
+			c.firstHook = nullptr;
+	}
+
 	struct Shader
 	{
 		const pl_hook* hook = nullptr;
@@ -216,6 +226,7 @@ namespace ChainGpuProbe
 			for (int h = 0; h < 7; ++h)
 				if (include & (1u << h))
 					c.extraHooks.push_back(all[h]);
+			RepairAsTheRenderer(c);
 			const Result r = Render(gpu, renderer, cutDone ? after : before, c);
 			if (!r.ok)
 				return fail("render failed: " + r.error);
@@ -456,6 +467,7 @@ namespace ChainGpuProbe
 			}
 			else
 				c.extraHooks = { module.Measure(), nls->hook, ssim->hook, module.Blend() };
+			RepairAsTheRenderer(c);
 			return Render(gpu, renderer, picture, c);
 		};
 		auto checkRamp = [&](const Result& r, const std::vector<double>& expected, const std::string& what) -> bool
@@ -1159,6 +1171,7 @@ namespace ChainGpuProbe
 				}
 				else
 					c.extraHooks = { nls->hook, pre->hook, cfl->hook, superRes->hook };   // the picture-shaping hooks
+				RepairAsTheRenderer(c);
 				return Render(gpu, renderer, a, c);
 			};
 			const Result r = renderOne(true);
@@ -1234,12 +1247,16 @@ namespace ChainGpuProbe
 		// libplacebo there) and CfL chroma prediction (the same crash).
 		bool rgbSource = false;
 		bool cfl = false;
+		// The owner's 8-bit link: the sigma-delta quantises to 8-bit codes on
+		// the 10-bit target (8-in-10; audit stage8-3-9-10b note).
+		bool eightBit = false;
 		std::string Name() const
 		{
-			char text[200];
-			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s%s%s", scale,
+			char text[220];
+			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s, %s%s%s", scale,
 				nlsActive ? "on" : "off", gammaLight ? "gamma" : "linear", stage10 ? "on" : "off",
-				fullRange ? "full" : "limited", matcher ? "on" : "off", rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "");
+				fullRange ? "full" : "limited", matcher ? "on" : "off", eightBit ? "8-in-10" : "10-bit",
+				rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "");
 			return text;
 		}
 	};
@@ -1309,7 +1326,7 @@ namespace ChainGpuProbe
 		auto superRes = pre ? Load(gpu, source, "SSimSuperRes.glsl", ow, oh, {}, error) : nullptr;
 		auto cflShader = superRes ? Load(gpu, source, "CfL_Prediction.glsl", ow, oh, {}, error) : nullptr;
 		auto sigma = cflShader ? Load(gpu, source, "Temporal sigma-delta.glsl", ow, oh, { { "levels_full", combo.fullRange ? 1.0 : 0.0 },
-			{ "swapchain_bits", 10.0 }, { "color_bits", 10.0 }, { "occlusion_mask", combo.matcher ? 1.0 : 0.0 },
+			{ "swapchain_bits", 10.0 }, { "color_bits", combo.eightBit ? 8.0 : 10.0 }, { "occlusion_mask", combo.matcher ? 1.0 : 0.0 },
 			{ "motion_compensation", 1.0 } }, error) : nullptr;
 		if (!sigma)
 			return fail(error);
@@ -1420,6 +1437,7 @@ namespace ChainGpuProbe
 					}
 				}
 				c.extraHooks = hooks;
+				RepairAsTheRenderer(c);
 				return Render(gpu, renderer, a, c);
 			};
 			const Result r = renderOne(true);
@@ -1455,7 +1473,11 @@ namespace ChainGpuProbe
 			// On 7.360 the encoding repair (any PRE_OUTPUT texture hook: the LED
 			// shader) re-encodes about 0.42 code low on average (measured on WARP
 			// and a GeForce; at most 1 code); the Beta needs no repair.
-			if (maxDiff > 2 || (count && sum / count > (withRepair ? 0.8 : 0.6)))
+			// 8-in-10: the sigma-delta's codes step by 4 on the 10-bit target, and its
+			// error feedback on moving content can exceed one step slightly (5 measured).
+			const int pictureMax = combo.eightBit ? 6 : 2;
+			const double pictureMean = combo.eightBit ? 2.5 : (withRepair ? 0.8 : 0.6);
+			if (maxDiff > pictureMax || (count && sum / count > pictureMean))
 				return fail("the chain changed the picture");
 			if (pl_renderer_get_errors(renderer).num_disabled_hooks != 0)
 				return fail("a hook was disabled");
@@ -1475,7 +1497,7 @@ namespace ChainGpuProbe
 						want = (std::min)(1023, (std::max)(0, static_cast<int>(std::lround((ramp[k] - 64) * 1023.0 / 876.0))));
 					// Above white through the upscale shaders (SSimSuperRes on the
 					// clipped white, plus 7.360's repair bias): up to 3 codes low.
-					const int tolerance = (upCnn && ramp[k] > 940) ? 3 : 2;
+					const int tolerance = combo.eightBit ? 4 : ((upCnn && ramp[k] > 940) ? 3 : 2);
 					if (std::abs(got[k] - want) > tolerance)
 						return fail("ramp code " + std::to_string(ramp[k]) + " came out " + std::to_string(got[k]) +
 							" (expected " + std::to_string(want) + ")");
@@ -1506,7 +1528,7 @@ namespace ChainGpuProbe
 		std::vector<Combo> combos;
 		const double scales[] = { 0.5, 0.75, 1.0, 1.5, 2.0 };
 		for (double scale : scales)
-			for (int bits = 0; bits < 32; ++bits)
+			for (int bits = 0; bits < 64; ++bits)
 			{
 				Combo c;
 				c.scale = scale;
@@ -1515,6 +1537,7 @@ namespace ChainGpuProbe
 				c.stage10 = (bits & 4) == 0;
 				c.fullRange = (bits & 8) != 0;
 				c.matcher = (bits & 16) == 0;
+				c.eightBit = (bits & 32) != 0;
 				combos.push_back(c);
 			}
 		// The named regressions, in both lists: an RGB source and CfL, with
@@ -1537,7 +1560,7 @@ namespace ChainGpuProbe
 			return combos;
 		}
 		std::vector<Combo> quick;
-		for (size_t i = 0; i < combos.size(); i += 7)   // 23 of 160, every value of every axis
+		for (size_t i = 0; i < combos.size(); i += 7)   // 46 of 320, every value of every axis
 			quick.push_back(combos[i]);
 		quick.insert(quick.end(), named.begin(), named.end());
 		return quick;

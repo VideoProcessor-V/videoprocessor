@@ -171,7 +171,7 @@ if (q.x < size.x && q.y < size.y) {
     } else {
         const vec3 k = vec3(0.2126, 0.7152, 0.0722);
         o.rgb = fa.rgb + vec3(w * (dot(ss.rgb, k) - dot(fa.rgb, k)));
-        o.a = fa.a;   // the carry's offset (VP re-injects its own at SCALED anyway)
+        o.a = fa.a;   // passed through (Stage 10b does not use alpha)
     }
     imageStore(dst, q, o);
 }

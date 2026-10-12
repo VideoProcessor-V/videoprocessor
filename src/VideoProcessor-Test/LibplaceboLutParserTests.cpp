@@ -4966,9 +4966,8 @@ namespace VideoProcessorTest
 				}
 			}
 			// Audit stage10-6d: a user MAIN shader that writes alpha 1 must not
-			// add +1 to every channel (a white picture). The carried offset is
-			// lost there (out-of-range codes clip as without the switch); the
-			// in-range picture is unchanged.
+			// change the picture. Since 10b alpha carries nothing: every code,
+			// below black and above white included, is kept.
 			{
 				// A hook at the RGB stage after the carry that writes alpha 1,
 				// as a user shader returning vec4(rgb, 1.0) would.
@@ -4995,8 +4994,8 @@ namespace VideoProcessorTest
 				Case c;
 				c.extraHook = &writer;
 				const auto got = Columns(run("on 1:1, alpha-writing hook", c), static_cast<int>(codes.size()), 1.0);
-				for (size_t i = 3; i <= 7; ++i)   // 64 .. 940: in range
-					Assert::IsTrue(std::abs(got[i] - codes[i]) <= 1, ToWide("alpha writer changed the picture\n" + report).c_str());
+				for (size_t i = 0; i < codes.size(); ++i)
+					Assert::IsTrue(std::abs(got[i] - codes[i]) <= 2, ToWide("alpha writer changed the picture\n" + report).c_str());
 			}
 			fixture.CaptureLog(nullptr);
 			Logger::WriteMessage(report.c_str());
@@ -5007,7 +5006,7 @@ namespace VideoProcessorTest
 		// max 1 code, mean <= 0.03 at up 1.5 and down 0.5; 10a measured <= 0.01.
 		// 10b: max 1 code kept, mean up to 0.083 measured - libplacebo stores the
 		// scaled picture in its half-float texture before the texture-form
-		// restore, about 1/4 code; pending the planner's acceptance),
+		// restore, about 1/4 code; accepted by the planner 2026-10-12),
 		// also with a gamma change, and in-gamut BT.709 colours come out as
 		// libplacebo's own conversion. With ewa_lanczossharp the polar
 		// sampler's four-channel path rounds differently (max 1 code, mean
@@ -6512,8 +6511,8 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// The combination matrix (ChainGpuProbe::RunMatrix): a spread of 23
-		// combinations by default, all 160 with VP_TEST_MATRIX=full.
+		// The combination matrix (ChainGpuProbe::RunMatrix): a spread of 54
+		// combinations by default, all 336 with VP_TEST_MATRIX=full.
 		TEST_METHOD(WholeHookChainCombinationMatrix)
 		{
 			char* value = nullptr;

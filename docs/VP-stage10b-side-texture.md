@@ -56,7 +56,7 @@ Measured with the whole-chain tests:
   texture before a texture-form restore (about 1/4 code); after the carry's
   texture output libplacebo rejects an inline restore (measured), so 10b
   always pays it (10a paid it only with SSIM / the blend). Limits recorded at
-  mean <= 0.1 pending the planner's acceptance; max 1 is enforced.
+  mean <= 0.1, accepted by the planner 2026-10-12; max 1 is enforced.
 
 ## Not covered
 

@@ -61,12 +61,20 @@ namespace Ambient
 		{
 			if (value == settings)
 				return;
-			// A new configuration starts the sensor over from the saved room:
-			// the next reading decides at once.
+			// A different detector (mode, port, speed) starts over from the
+			// saved room: its next reading decides at once. New thresholds, a
+			// new hold or a new saved room keep what was sensed (audit
+			// stage8-3-9-10b item 1: a Config Apply switched the profiles to
+			// the saved room and back a second later).
+			const bool detectorChanged = value.mode != settings.mode || value.port != settings.port ||
+				value.baud != settings.baud;
 			settings = value;
-			sensorRoom = settings.room;
-			sensed = false;
 			candidateSince = -1.0;
+			if (detectorChanged || !sensed)
+			{
+				sensorRoom = settings.room;
+				sensed = false;
+			}
 		}
 
 		// A detector reading (lux). Returns true when the sensed room changed.

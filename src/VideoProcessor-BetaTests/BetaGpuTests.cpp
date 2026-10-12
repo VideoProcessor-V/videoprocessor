@@ -703,6 +703,26 @@ void RunBetaChainGpuTest()
 			remaining += entry + "\n";
 	Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
 
+	// The combination matrix on the deployed libplacebo (planner 2026-10-12:
+	// 377 first): a spread by default, all of it with VP_TEST_MATRIX=full.
+	{
+		char* value = nullptr;
+		size_t length = 0;
+		const bool full = _dupenv_s(&value, &length, "VP_TEST_MATRIX") == 0 && value && std::string(value) == "full";
+		std::free(value);
+		int passed = 0;
+		for (const ChainGpuProbe::Combo& combo : ChainGpuProbe::MatrixCombos(full))
+		{
+			Gpu g;
+			const ChainGpuProbe::Outcome outcome = ChainGpuProbe::RunMatrix(g.GpuHandle(), g.RendererHandle(),
+				g.LogHandle(), [](const char* file) { return LoadRepoShader(file); }, false, combo);
+			Check(outcome.ok, "matrix on 377: " + outcome.failure);
+			CheckCleanLog(g, "matrix");
+			++passed;
+		}
+		std::cout << "Beta matrix: " << passed << " combinations passed" << std::endl;
+	}
+
 	// Upscaling with every hook, FSRCNNX and ArtCNN.
 	for (const char* prescaler : { "FSRCNNX_x2_16-0-4-1.glsl", "ArtCNN_C4F16.glsl" })
 	{
@@ -767,7 +787,7 @@ void RunBetaExtendedRangeGpuTests()
 			report += "edges " + std::to_string(scale) + (owner ? " ewa" : "") + ": max " + std::to_string(d.max) +
 				", mean " + std::to_string(d.mean) + "\n";
 			// 10b: max 1 code; the mean includes libplacebo's half-float store
-			// before the texture-form restore (pending the planner's acceptance).
+			// before the texture-form restore (accepted by the planner 2026-10-12).
 			Check(d.max <= 1 && d.mean <= 0.1, "extended range: edges differ on 377\n" + report);
 		}
 	const Planes colours = Patches({ { 502, 512, 512 }, { 560, 440, 600 }, { 400, 450, 700 },

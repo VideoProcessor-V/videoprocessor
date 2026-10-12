@@ -14,9 +14,9 @@
 // or uncovered content. Outside the picture (bars, blanking) alpha is 1.
 //
 // Alpha ownership: this hook owns alpha from here to the sigma-delta, which
-// reads it as the mask and writes alpha 1. The Stage 10 range carry owns
-// alpha only between PL_HOOK_RGB and PL_HOOK_SCALED, so the two never
-// overlap. The hook is only installed when the sigma-delta takes the mask
+// reads it as the mask and writes alpha 1. Nothing else uses alpha (Stage
+// 10b keeps its remainder in its own texture). The hook is only installed
+// when the sigma-delta takes the mask
 // (its `occlusion_mask` parameter), so alpha never reaches the display.
 //
 // The output-to-source mapping is the source crop scaled onto the

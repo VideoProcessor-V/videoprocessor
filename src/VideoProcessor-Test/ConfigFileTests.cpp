@@ -1072,6 +1072,23 @@ namespace VideoProcessorTest
             Assert::IsFalse(state.AddReading(60.0, 11.0));
             Assert::IsFalse(state.AddReading(60.0, 15.9));
             Assert::IsTrue(state.AddReading(60.0, 16.0));
+            // New thresholds or hold keep what was sensed (audit stage8-3-9-10b
+            // item 1); a different detector (port) starts over.
+            {
+                Settings tuned = settings;
+                tuned.luxLit = 25.0;
+                tuned.holdSeconds = 3.0;
+                state.Configure(tuned);
+                Assert::IsTrue(state.Current(16.5, room) && room == Room::Lit, L"a threshold change kept the sensed room");
+                Settings other = tuned;
+                other.port = "COM9";
+                Ambient::State fresh;
+                fresh.Configure(tuned);
+                Assert::IsTrue(fresh.AddReading(60.0, 1.0));
+                fresh.Configure(other);
+                Assert::IsTrue(fresh.Current(1.5, room) && room == Room::Dark, L"a new port starts over from the saved room");
+                state.Configure(settings);
+            }
             // A lost detector (no reading for 10 s) falls back to the saved room.
             Assert::IsTrue(state.Current(26.0, room) && room == Room::Lit);
             Assert::IsTrue(state.DetectorLost(26.1));
