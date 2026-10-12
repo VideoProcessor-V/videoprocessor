@@ -216,6 +216,41 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
+		// Stage 8-3: the temporal grain measure per block of A, at the block's
+		// own A->B vector (the field, in source pixels; half resolution here):
+		// the differences over the block's 8x8, their mean removed (a fade, a
+		// lighting change), then the mean absolute residual. Temporal noise
+		// survives the motion compensation; static texture does not.
+		const char* const GRAIN_ERROR_HEADER = R"GLSL(
+ivec2 half_size_;
+float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
+float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
+)GLSL";
+
+		const char* const GRAIN_ERROR_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    half_size_ = textureSize(from_half, 0);
+    vec2 v = texelFetch(field, b, 0).xy * 0.5;
+    ivec2 o = b * 8;
+    float d[64];
+    float mean_d = 0.0, mean_y = 0.0;
+    for (int i = 0; i < 64; i++) {
+        ivec2 p = o + ivec2(i % 8, i / 8);
+        float a = from_at(p);
+        d[i] = a - to_lin(vec2(p) + v);
+        mean_d += d[i];
+        mean_y += a;
+    }
+    mean_d /= 64.0;
+    float e = 0.0;
+    for (int i = 0; i < 64; i++)
+        e += abs(d[i] - mean_d);
+    imageStore(dst, b, vec4(e / 64.0, mean_y / 64.0, 0.0, 1.0));
+}
+)GLSL";
+
 		// Frame trust (6b-2): the share of trusted blocks, by one 16x16 group,
 		// into a 1x1 texture. It stays on the GPU: the warp reads it, so a cut
 		// between A and B holds the whole frame without a read-back.
@@ -339,7 +374,7 @@ if (q.x < size.x && q.y < size.y) {
 	MotionWarp::~MotionWarp()
 	{
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &forward, &backward,
-			&field, &frameTrust, &occlusion[0], &occlusion[1], &warpedLuma, &warpedChroma })
+			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma })
 			pl_tex_destroy(gpu, tex);
 		pl_dispatch_destroy(&dispatch);
 	}
@@ -474,9 +509,10 @@ if (q.x < size.x && q.y < size.y) {
 			descriptors, 7, variables, 1, blocksX, blocksY, 8);
 	}
 
-	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot)
+	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot, bool wantGrainError)
 	{
 		estimated = false;
+		grainErrorValid = false;
 		if (!EnsureTextures(a)) return false;
 		if (!b.luma || b.luma->params.w != width || b.luma->params.h != height)
 		{
@@ -509,6 +545,34 @@ if (q.x < size.x && q.y < size.y) {
 			if (!Dispatch("VideoProcessor de-judder: occlusion for the dither", nullptr, OCCLUSION_BODY,
 				occlusionDesc, 3, variables, 2, blocksX, blocksY, 8))
 				return false;
+		}
+		if (wantGrainError)
+		{
+			// Created on first use: the de-judder alone never pays for it.
+			if (!grainError || grainError->params.w != blocksX || grainError->params.h != blocksY)
+			{
+				pl_fmt vec4f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16,
+					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+				pl_tex_params params{};
+				params.w = blocksX;
+				params.h = blocksY;
+				params.format = vec4f;
+				params.sampleable = true;
+				params.storable = true;
+				params.host_readable = settings.hostReadable && vec4f && (vec4f->caps & PL_FMT_CAP_HOST_READABLE);
+				if (!vec4f || !pl_tex_recreate(gpu, &grainError, &params))
+				{
+					error = "cannot create the grain error texture";
+					return false;
+				}
+			}
+			const pl_shader_desc grainDesc[4] = {
+				Sampled("from_half", halfA, false), Sampled("to_half", halfB, true),
+				Sampled("field", field, false), Storage("dst", grainError) };
+			if (!Dispatch("VideoProcessor de-judder: grain error (adaptive downscale)", GRAIN_ERROR_HEADER,
+				GRAIN_ERROR_BODY, grainDesc, 4, nullptr, 0, blocksX, blocksY, 8))
+				return false;
+			grainErrorValid = true;
 		}
 		estimated = true;
 		return true;

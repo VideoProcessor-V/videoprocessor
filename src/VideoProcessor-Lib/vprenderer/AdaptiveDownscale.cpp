@@ -6,6 +6,8 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
+#include <vprenderer/OcclusionMaskHook.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -89,12 +91,49 @@ if (li == 0u && advance > 0.5) {
     vec4 prev = imageLoad(state_io, ivec2(0));
     bool cut = prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0;
     float scale = cut ? target : mix(prev.r, target, smooth_alpha);
-    imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, 1.0));
+    // a: 1 initialised, 2 = a cut on this frame (the grain map resets too).
+    imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, cut ? 2.0 : 1.0));
     if (write_stats > 0.5)
         ad_out = vec4(scale, free_mean, luma_mean, 1.0);
 }
 )GLSL";
 
+		// 8-3: the per-block map, once per source frame. Each block of A takes
+		// the ramp of its temporal error (shadow-weighted like the scalar) and
+		// smooths it with the value the previous map held where this content
+		// was (the block centre minus its vector); untrusted blocks keep their
+		// value and are marked untrusted; a cut (the scalar's, or too few
+		// trusted blocks) starts over.
+		const char* const MAP_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(map_out);
+if (b.x < blocks.x && b.y < blocks.y) {
+    vec4 f = texelFetch(field, b, 0);
+    vec4 ge = texelFetch(grain_error, b, 0);
+    bool frame_ok = texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share;
+    bool reset = texelFetch(state, ivec2(0), 0).a > 1.5 || first_map > 0.5;
+    bool trusted = frame_ok && f.z > 0.5;
+    vec2 c = (vec2(b) + vec2(0.5)) * 16.0;
+    vec2 pc = trusted ? c - f.xy : c;
+    ivec2 pb = clamp(ivec2(floor(pc / 16.0)), ivec2(0), blocks - ivec2(1));
+    vec4 prev = texelFetch(map_in, pb, 0);
+    float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(ge.g / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
+    float energy = ge.r * temporal_to_spatial * wgt;
+    float target = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, energy));
+    vec4 o;
+    if (!trusted)
+        o = vec4(reset ? 1.0 : texelFetch(map_in, b, 0).r, 0.0, 0.0, 1.0);
+    else if (reset || prev.a < 0.5)
+        o = vec4(target, 1.0, 0.0, 1.0);
+    else
+        o = vec4(mix(prev.r, target, smooth_alpha), 1.0, 0.0, 1.0);
+    imageStore(map_out, b, o);
+}
+)GLSL";
+
+		// The blend. With the map (AD_USE_MAP), the grain term at the source
+		// position the output pixel shows: bilinear between the four nearest
+		// block centres, an untrusted block contributing the scalar.
 		const char* const BLEND_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
@@ -104,6 +143,27 @@ if (q.x < size.x && q.y < size.y) {
     vec2 s = src_origin + (vec2(q) + vec2(0.5)) * src_per_dst;
     float e = texture(edge, (s - edge_origin) / vec2(textureSize(edge, 0))).r;
     float g = texelFetch(state, ivec2(0), 0).r;
+#ifdef AD_USE_MAP
+    {
+        vec2 u = (s - src_origin) / src_size;   // 0..1 over the source crop
+        if (nls_active > 0.5)
+            u = clamp(vec2(nls_coordinate(u.x, nls_scale.x, nls_protect.x),
+                           nls_coordinate(u.y, nls_scale.y, nls_protect.y)), vec2(0.0), vec2(1.0));
+        vec2 sp = crop.xy + u * crop.zw;          // source pixels of the whole frame
+        ivec2 msize = textureSize(grain_map, 0);
+        vec2 gpos = sp / 16.0 - vec2(0.5);
+        ivec2 g0 = ivec2(floor(gpos));
+        vec2 t = gpos - vec2(g0);
+        float acc = 0.0;
+        for (int y = 0; y <= 1; y++)
+            for (int x = 0; x <= 1; x++) {
+                vec4 m = texelFetch(grain_map, clamp(g0 + ivec2(x, y), ivec2(0), msize - ivec2(1)), 0);
+                float wt = (x == 1 ? t.x : 1.0 - t.x) * (y == 1 ? t.y : 1.0 - t.y);
+                acc += wt * (m.g > 0.5 ? m.r : g);
+            }
+        g = acc;
+    }
+#endif
     float w = clamp(w_base * (1.0 - e) * g, 0.0, 1.0);
     vec4 o;
     if (chroma_ssim > 0.5) {
@@ -226,7 +286,7 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		if (gpu)
 		{
-			for (pl_tex* tex : { &faithful, &edge, &partial, &state })
+			for (pl_tex* tex : { &faithful, &edge, &partial, &state, &map[0], &map[1] })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
@@ -234,7 +294,12 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (polarLut)
 			pl_shader_obj_destroy(&polarLut);
-		faithful = edge = partial = state = nullptr;
+		faithful = edge = partial = state = map[0] = map[1] = nullptr;
+		mapIndex = 0;
+		mapReady = false;
+		mapSequence = 0;
+		mapState = MapState::Off;
+		grainField = GrainField();
 		readback = nullptr;
 		readbackPending = false;
 		gpu = nullptr;
@@ -405,6 +470,9 @@ if (q.x < size.x && q.y < size.y) {
 				if (writeStats)
 					readbackPending = true;
 			}
+			// 4. 8-3: the map, after the scalar (it reads the cut flag).
+			if (!UpdateMap(p->dispatch, advance > 0.5f))
+				++failures;
 		}
 
 		srcRect = { sx0, sy0, sx1, sy1 };
@@ -413,6 +481,75 @@ if (q.x < size.x && q.y < size.y) {
 		edgeOrigin[1] = origin[1];
 		active = true;
 		return unchanged;
+	}
+
+	bool Module::UpdateMap(pl_dispatch dispatch, bool advance)
+	{
+		const GrainField& gf = grainField;
+		const bool fieldPresent = settings.grainMap && gf.error && gf.field && gf.frameTrust &&
+			gf.error->params.w == gf.field->params.w && gf.error->params.h == gf.field->params.h;
+		if (!settings.grainMap)
+		{
+			mapReady = false;
+			mapState = MapState::Off;
+			return true;
+		}
+		if (!fieldPresent)
+		{
+			// Frames without a field use the scalar; the map starts over when
+			// the field comes back (it no longer follows the content).
+			if (advance)
+			{
+				mapReady = false;
+				mapSequence = 0;
+			}
+			mapState = mapReady && mapSequence == sequence ? MapState::Used : MapState::NoField;
+			return true;
+		}
+		if (!advance)
+		{
+			// A repeat or an extra of the same source frame: the map stands.
+			mapState = mapReady && mapSequence == sequence ? MapState::Used : MapState::NoField;
+			return true;
+		}
+		const int bw = gf.field->params.w, bh = gf.field->params.h;
+		const bool resized = !map[0] || map[0]->params.w != bw || map[0]->params.h != bh;
+		if (!Ensure(gpu, map[0], bw, bh, 4, 32, false, false, hostReadableMap) ||
+			!Ensure(gpu, map[1], bw, bh, 4, 32, false, false, hostReadableMap))
+		{
+			mapReady = false;
+			mapState = MapState::NoField;
+			return false;
+		}
+		const bool first = resized || mapSequence == 0;
+		const int next = 1 - mapIndex;
+		const float firstF = first ? 1.0f : 0.0f;
+		const float alpha = settings.grainMapSmoothMs > 0.0f ?
+			1.0f - std::exp(-frameSeconds * 1000.0f / settings.grainMapSmoothMs) : 1.0f;
+		const pl_shader_desc d[6] = { Sampled("field", gf.field, false), Sampled("grain_error", gf.error, false),
+			Sampled("frame_trust", gf.frameTrust, false), Sampled("state", state, false),
+			Sampled("map_in", map[mapIndex], false), Storage("map_out", map[next]) };
+		const pl_shader_var v[8] = {
+			{ pl_var_float("min_trusted_share"), &gf.minTrustedShare, true },
+			{ pl_var_float("first_map"), &firstF, true },
+			{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
+			{ pl_var_float("temporal_to_spatial"), &kTemporalToSpatial, true },
+			{ pl_var_float("grain_lo"), &settings.grainLo, true },
+			{ pl_var_float("grain_hi"), &settings.grainHi, true },
+			{ pl_var_float("grain_floor"), &settings.grainFloor, true },
+			{ pl_var_float("smooth_alpha"), &alpha, true } };
+		if (!Compute(dispatch, "VideoProcessor adaptive downscale: grain map", nullptr, MAP_BODY, d, 6, v, 8,
+			(bw + 15) / 16, (bh + 15) / 16))
+		{
+			mapReady = false;
+			mapState = MapState::NoField;
+			return false;
+		}
+		mapIndex = next;
+		mapReady = true;
+		mapSequence = sequence;
+		mapState = MapState::Used;
+		return true;
 	}
 
 	pl_hook_res Module::Blending(const pl_hook_params* p)
@@ -436,16 +573,39 @@ if (q.x < size.x && q.y < size.y) {
 		const float srcPerDst[2] = { dw > 0.0f ? (srcRect.x1 - srcRect.x0) / dw : 1.0f,
 			dh > 0.0f ? (srcRect.y1 - srcRect.y0) / dh : 1.0f };
 		const float chroma = settings.chromaSsim ? 1.0f : 0.0f;
-		const pl_shader_desc d[5] = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
-			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out) };
-		const pl_shader_var v[5] = {
+		// 8-3: the map for this source frame (else the scalar; the binding
+		// then repeats the state texture, never read).
+		const bool useMap = mapState == MapState::Used && mapReady && mapSequence == sequence;
+		const float srcSize[2] = { srcRect.x1 - srcRect.x0, srcRect.y1 - srcRect.y0 };
+		const pl_rect2df& sc = grainField.sourceCrop;
+		const float crop[4] = { sc.x0, sc.y0, sc.x1 - sc.x0, sc.y1 - sc.y0 };
+		const NlsMaskMapping::Mapping& nls = grainField.nls;
+		const float nlsActive = useMap && nls.valid ? 1.0f : 0.0f;
+		const float nlsCurve = static_cast<float>(nls.curve);
+		const float nlsGeometry = static_cast<float>(nls.geometry);
+		const float nlsScale[2] = { static_cast<float>(nls.xScale), static_cast<float>(nls.yScale) };
+		const float nlsProtect[2] = { static_cast<float>(nls.xProtect), static_cast<float>(nls.yProtect) };
+		// Without the map the pass has no `grain_map` binding and no map code
+		// (a texture may be bound only once per pass).
+		const pl_shader_desc d[6] = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
+			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out),
+			Sampled("grain_map", useMap ? map[mapIndex] : nullptr, false) };
+		static const std::string mapHeader = std::string("#define AD_USE_MAP 1\n") + OcclusionMask::NlsMapGlsl();
+		const pl_shader_var v[12] = {
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
 			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
 			{ pl_var_vec2("edge_origin"), edgeOrigin, true },
 			{ pl_var_float("w_base"), &settings.wBase, true },
-			{ pl_var_float("chroma_ssim"), &chroma, true } };
-		if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: blend", nullptr, BLEND_BODY, d, 5, v, 5,
-			(w + 15) / 16, (h + 15) / 16))
+			{ pl_var_float("chroma_ssim"), &chroma, true },
+			{ pl_var_vec2("src_size"), srcSize, true },
+			{ pl_var_vec4("crop"), crop, true },
+			{ pl_var_float("nls_active"), &nlsActive, true },
+			{ pl_var_float("nls_curve"), &nlsCurve, true },
+			{ pl_var_float("nls_geometry"), &nlsGeometry, true },
+			{ pl_var_vec2("nls_scale"), nlsScale, true },
+			{ pl_var_vec2("nls_protect"), nlsProtect, true } };
+		if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: blend", useMap ? mapHeader.c_str() : nullptr,
+			BLEND_BODY, d, useMap ? 6 : 5, v, useMap ? 12 : 5, (w + 15) / 16, (h + 15) / 16))
 		{
 			++failures;
 			return unchanged;

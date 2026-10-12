@@ -86,8 +86,9 @@ namespace Dejudder
 		// Motion between A and B. Call once per source-frame pair. With
 		// occlusionSlot 0 or 1 it also writes B's occlusion mask (6c) into
 		// that slot; the caller alternates slots so the mask for the frame
-		// now showing survives the next estimate.
-		bool Estimate(const Planes& a, const Planes& b, int occlusionSlot = -1);
+		// now showing survives the next estimate. With grainError it also
+		// writes the high-passed temporal error per block (Stage 8-3).
+		bool Estimate(const Planes& a, const Planes& b, int occlusionSlot = -1, bool grainError = false);
 
 		// A warped by shift x (A->B motion). Call once per extra present.
 		// The returned planes belong to this object and stay valid until the
@@ -104,6 +105,13 @@ namespace Dejudder
 		// r = 1 where B's content was visible in A (consistent both ways and
 		// a good match), 0 where it is new or uncovered.
 		pl_tex Occlusion(int slot) const { return slot == 0 || slot == 1 ? occlusion[slot] : nullptr; }
+		// Stage 8-3, the grain map's input (from an Estimate with grainError):
+		// one texel per 16x16 source block of A; r = the mean absolute
+		// motion-compensated difference A - B after removing the block's mean
+		// difference (a fade or lighting change is not grain), g = the block's
+		// mean luma, both in 8-bit codes of half-resolution luma. Only
+		// meaningful where Field() trusts the block; null before.
+		pl_tex GrainError() const { return grainErrorValid ? grainError : nullptr; }
 		// The raw half-resolution searches (rgba = vector in half-resolution
 		// pixels, match error); for diagnostics.
 		pl_tex Forward() const { return forward; }
@@ -144,6 +152,8 @@ namespace Dejudder
 		pl_tex l1A = nullptr, l1B = nullptr, l2A = nullptr, l2B = nullptr;
 		pl_tex forward = nullptr, backward = nullptr, field = nullptr, frameTrust = nullptr;
 		pl_tex occlusion[2] = { nullptr, nullptr };
+		pl_tex grainError = nullptr;
+		bool grainErrorValid = false;
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
 		bool estimated = false;
 	};

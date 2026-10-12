@@ -6058,6 +6058,273 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 
+		// Stage 8-3: the matcher's high-passed temporal error and the grain map.
+		// A textured picture panned (8, 4) source pixels per frame; on the right
+		// half of the screen every frame adds fresh noise (grain, sigma 3
+		// codes). The error is low on the clean texture and ~0.56 sigma on the
+		// noise; a small brightness change (a fade) does not count as grain.
+		// The map then leans faithful on the noise (the grain floor) and keeps
+		// SSIM on the texture, and falls back to the scalar without a field.
+		static uint16_t GrainNoise(int x, int y, unsigned frame)
+		{
+			unsigned h = static_cast<unsigned>(x) * 73856093u ^ static_cast<unsigned>(y) * 19349663u ^ (frame + 1u) * 83492791u;
+			h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+			// Uniform +-5.2 codes (sigma 3), in 16-bit units.
+			const double u = (static_cast<double>(h & 0xFFFFu) / 65535.0 - 0.5) * 2.0;
+			return static_cast<uint16_t>(std::lround(32768.0 + u * 5.2 * 257.0));
+		}
+
+		static DejudderFrame GrainFrame(int width, int height, int frame, int dx, int dy, int fade)
+		{
+			return MakeDejudderFrame(width, height,
+				[=](int x, int y)
+				{
+					int v = DejudderTexture(x - frame * dx, y - frame * dy) + fade * 257;
+					if (x >= width / 2)
+						v += static_cast<int>(GrainNoise(x, y, static_cast<unsigned>(frame))) - 32768;
+					return static_cast<uint16_t>(std::min(65535, std::max(0, v)));
+				},
+				[](int, int, int) { return static_cast<uint16_t>(32768); });
+		}
+
+		TEST_METHOD(DejudderGrainErrorSeparatesNoiseFromTexture)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			std::string log;
+			fixture.CaptureLog(&log);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			std::string report;
+			for (int fade = 0; fade <= 2; fade += 2)
+			{
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, GrainFrame(width, height, 0, 8, 4, 0), planesA);
+				UploadDejudderFrame(gpu, GrainFrame(width, height, 1, 8, 4, fade), planesB);
+				Assert::IsNull(warp.GrainError(), L"no grain error before an estimate asks for it");
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes, -1, true),
+					std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+				const DejudderField field = DownloadField(gpu, warp);
+				const DejudderField grain = DownloadField(gpu, warp, warp.GrainError());
+				double clean = 0.0, noisy = 0.0;
+				int nClean = 0, nNoisy = 0, untrusted = 0;
+				for (int by = 1; by < field.blocksY - 1; ++by)
+					for (int bx = 1; bx < field.blocksX - 1; ++bx)
+					{
+						if (bx == field.blocksX / 2 - 1 || bx == field.blocksX / 2)
+							continue;   // the boundary blocks see both
+						if (!field.trusted(bx, by)) { ++untrusted; continue; }
+						const float e = grain.texels[(by * grain.blocksX + bx) * 4];
+						if (bx < field.blocksX / 2) { clean += e; ++nClean; }
+						else { noisy += e; ++nNoisy; }
+					}
+				Assert::IsTrue(nClean > 10 && nNoisy > 10, L"too few trusted blocks");
+				clean /= nClean;
+				noisy /= nNoisy;
+				char line[200];
+				std::snprintf(line, sizeof(line), "fade %d: clean %.3f noisy %.3f (expected ~%.2f) untrusted %d\n",
+					fade, clean, noisy, 0.564 * 3.0, untrusted);
+				report += line;
+				Assert::IsTrue(clean < 0.35 && noisy > 1.2 && noisy < 2.2, ExtendedRangeGpuProbe::ToWide(report).c_str());
+				// Without asking, the next estimate drops it.
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				Assert::IsNull(warp.GrainError());
+			}
+			Logger::WriteMessage(report.c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(AdaptiveDownscaleGrainMapFromTheVectors)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const pl_hook* ssim = nullptr;
+			{
+				const std::string source = LoadBundledShader("SSimDownscaler.glsl");
+				ssim = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				Assert::IsNotNull(ssim);
+			}
+			static constexpr int width = 256, height = 128, dx = 8, dy = 4;
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(srcFmt && dstFmt);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			AdaptiveDownscale::Module module;
+			module.hostReadableMap = true;
+			AdaptiveDownscale::Settings st;
+			st.grainSmoothMs = 0.0f;       // the scalar follows each frame
+			st.grainMapSmoothMs = 100.0f;  // the map settles in a few frames
+			// The picture as RGB (grey from the luma), the render's source.
+			auto rgbOf = [&](const DejudderFrame& f)
+			{
+				std::vector<uint16_t> px(static_cast<size_t>(width) * height * 4);
+				for (size_t i = 0; i < f.luma.size(); ++i)
+				{
+					px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = f.luma[i];
+					px[i * 4 + 3] = 65535;
+				}
+				pl_tex_params tp{};
+				tp.w = width; tp.h = height; tp.format = srcFmt; tp.sampleable = true; tp.initial_data = px.data();
+				return pl_tex_create(gpu, &tp);
+			};
+			auto render = [&](pl_tex src, uint64_t sequence, bool withField, int mode = 1)
+			{
+				// mode 1: measure + SSIM + blend; 0: SSIM alone.
+				module.SetFrame(st, sequence, 1.0f / 24.0f);
+				module.ClearGrainField();
+				if (withField)
+				{
+					AdaptiveDownscale::GrainField gf;
+					gf.error = warp.GrainError();
+					gf.field = warp.Field();
+					gf.frameTrust = warp.FrameTrust();
+					gf.minTrustedShare = warp.GetSettings().minTrustedShare;
+					gf.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+					module.SetGrainField(gf);
+				}
+				pl_tex_params tp{};
+				tp.w = width / 2; tp.h = height / 2; tp.format = dstFmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				const pl_hook* ssimOnly[1] = { ssim };
+				params.hooks = mode == 1 ? hooks : ssimOnly;
+				params.num_hooks = mode == 1 ? 3 : 1;
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &out, &params));
+				pl_gpu_finish(gpu);
+				std::vector<RgbaPixel> px(static_cast<size_t>(width / 2) * (height / 2));
+				pl_tex_transfer_params dl{};
+				dl.tex = target;
+				dl.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+			std::string report;
+			// Frames 0..7; each pair (f, f+1) estimated, frame f rendered with its field.
+			for (int f = 0; f < 8; ++f)
+			{
+				const DejudderFrame a = GrainFrame(width, height, f, dx, dy, 0);
+				const DejudderFrame b = GrainFrame(width, height, f + 1, dx, dy, 0);
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, a, planesA);
+				UploadDejudderFrame(gpu, b, planesB);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes, -1, true));
+				pl_tex src = rgbOf(a);
+				render(src, static_cast<uint64_t>(f + 1), true);
+				render(src, static_cast<uint64_t>(f + 1), true);   // a repeat: the map stands
+				pl_tex_destroy(gpu, &src);
+			}
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"the blend did not run");
+			Assert::IsTrue(module.LastMapState() == AdaptiveDownscale::MapState::Used, L"the map was not used");
+			pl_tex map = module.GrainMap();
+			Assert::IsNotNull(map);
+			std::vector<float> texels(static_cast<size_t>(map->params.w) * map->params.h * 4);
+			pl_tex_transfer_params d{};
+			d.tex = map;
+			d.ptr = texels.data();
+			Assert::IsTrue(pl_tex_download(gpu, &d), L"map not readable");
+			double clean = 0.0, noisy = 0.0;
+			int nClean = 0, nNoisy = 0;
+			const int bw = map->params.w, bh = map->params.h;
+			for (int by = 1; by < bh - 1; ++by)
+				for (int bx = 1; bx < bw - 1; ++bx)
+				{
+					if (bx == bw / 2 - 1 || bx == bw / 2)
+						continue;
+					const float* t = &texels[(static_cast<size_t>(by) * bw + bx) * 4];
+					if (t[1] < 0.5f)
+						continue;   // untrusted
+					if (bx < bw / 2) { clean += t[0]; ++nClean; }
+					else { noisy += t[0]; ++nNoisy; }
+				}
+			Assert::IsTrue(nClean > 10 && nNoisy > 10, L"too few trusted blocks in the map");
+			clean /= nClean;
+			noisy /= nNoisy;
+			char line[200];
+			std::snprintf(line, sizeof(line), "map: texture %.3f (%d blocks), noise %.3f (%d blocks), floor %.2f\n",
+				clean, nClean, noisy, nNoisy, st.grainFloor);
+			report += line;
+			Assert::IsTrue(clean > 0.9 && noisy < st.grainFloor + 0.1, ExtendedRangeGpuProbe::ToWide(report).c_str());
+			// The blend follows the map where the output shows it: on the
+			// texture half (map 1) it is SSIM except at edges; on the noise
+			// half (map at the floor) it moves towards faithful. Faithful is the
+			// blend with w_base 0. Measured as the mean distance to SSIM per
+			// half, against the scalar-only blend of the same frame.
+			{
+				const DejudderFrame a = GrainFrame(width, height, 7, dx, dy, 0);
+				pl_tex src = rgbOf(a);
+				const auto withMap = render(src, 8, true);          // the map stands for frame 8
+				const auto ssimPx = render(src, 8, true, 0);
+				AdaptiveDownscale::Settings saved = st;
+				st.grainMap = false;
+				const auto scalarPx = render(src, 8, true);
+				st = saved;
+				pl_tex_destroy(gpu, &src);
+				double mapTex = 0.0, scalarTex = 0.0, mapNoise = 0.0, scalarNoise = 0.0;
+				int nTex = 0, nNoise = 0;
+				const int ow = width / 2, oh = height / 2;
+				for (int y = 8; y < oh - 8; ++y)
+					for (int x = 8; x < ow - 8; ++x)
+					{
+						if (x >= ow / 2 - 12 && x < ow / 2 + 12)
+							continue;   // the boundary (bilinear between blocks)
+						const size_t i = static_cast<size_t>(y) * ow + x;
+						const double m = std::abs(withMap[i].g - ssimPx[i].g), sc = std::abs(scalarPx[i].g - ssimPx[i].g);
+						if (x < ow / 2) { mapTex += m; scalarTex += sc; ++nTex; }
+						else { mapNoise += m; scalarNoise += sc; ++nNoise; }
+					}
+				mapTex /= nTex; scalarTex /= nTex; mapNoise /= nNoise; scalarNoise /= nNoise;
+				std::snprintf(line, sizeof(line), "blend vs SSIM: texture map %.3f scalar %.3f; noise map %.3f scalar %.3f (scalar g %.3f)\n",
+					mapTex, scalarTex, mapNoise, scalarNoise, module.LastStats().grainScale);
+				report += line;
+				// Texture: the map keeps SSIM at least as much as the scalar;
+				// noise: it leans away from SSIM at least as much; and the two
+				// halves differ (the map is not one number).
+				Assert::IsTrue(mapTex <= scalarTex + 0.05 && mapNoise >= scalarNoise - 0.05 && mapNoise > mapTex + 0.2,
+					ExtendedRangeGpuProbe::ToWide(report).c_str());
+			}
+			// No field for the next source frame: the scalar.
+			{
+				const DejudderFrame a = GrainFrame(width, height, 8, dx, dy, 0);
+				pl_tex src = rgbOf(a);
+				render(src, 9, false);
+				pl_tex_destroy(gpu, &src);
+				Assert::IsTrue(module.LastMapState() == AdaptiveDownscale::MapState::NoField, L"no field: not the scalar");
+			}
+			// Map off: the scalar, nothing else.
+			st.grainMap = false;
+			{
+				const DejudderFrame a = GrainFrame(width, height, 9, dx, dy, 0);
+				pl_tex src = rgbOf(a);
+				render(src, 10, true);
+				pl_tex_destroy(gpu, &src);
+				Assert::IsTrue(module.LastMapState() == AdaptiveDownscale::MapState::Off);
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			module.Release();
+			pl_mpv_user_shader_destroy(&ssim);
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+					remaining += entry + "\n";
+			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)
 		{
 			TargetLutGpuFixture fixture;

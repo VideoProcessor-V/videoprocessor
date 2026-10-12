@@ -142,7 +142,47 @@ and policy).
     every code, below black and above white within 2, from the first frame;
     the log is clean and no hook is disabled (the Stage 10 restore now
     renders its own texture, see the dither/judder plan's Stage 8 finding).
-- **8-3** (vector grain map) not built yet.
+- **8-3** the vector grain map:
+  - **Policy:** `DejudderPolicy::Input::grainMap` runs the estimate alone
+    like the occlusion mask (film rates <= 30.5 Hz, any cadence, a next
+    frame queued, never Low_Latency, no extras). The renderer asks for it
+    when `adaptive_grain_map` is on and the last measured frame downscaled
+    with the SSIM shader in the chain (`adaptiveGrainMapWanted`).
+  - **Matcher:** `MotionWarp::Estimate(..., grainError)` adds one pass after
+    the consistency pass: per block of A, at its A->B vector, the 8x8
+    half-resolution differences with their mean removed, then the mean
+    absolute residual (r) and the block's mean luma (g). The texture is
+    created on first use, so the de-judder alone never pays for it.
+    Measured (WARP): clean panned texture 0.000-0.001, sigma-3 noise 1.692
+    against the model's 0.564 x sigma = 1.69; a 2-code fade changes neither.
+  - **Map:** `AdaptiveDownscale` keeps a per-block map (two rgba32f
+    textures, ping-pong), updated once per source frame after the scalar:
+    the residual x 6.33 (`kTemporalToSpatial`: white noise of one code
+    gives the same value as the scalar's Laplacian energy) through the
+    same ramp and shadow weight as the scalar, smoothed over
+    `adaptive_grain_map_smooth_ms` with the previous map sampled where the
+    content was (block centre minus its vector: the map follows a pan); an
+    untrusted block keeps its value and is marked untrusted; the scalar's
+    cut (state alpha 2) resets it; frames without a field use the scalar and
+    restart the map when the field returns.
+  - **Blend:** the grain term at the output pixel's source position,
+    through NLS's own map when NLS is on (bundled NLS / NLS+ only, the
+    occlusion mask's code; otherwise the scalar, logged once), bilinear
+    between block centres with untrusted blocks contributing the scalar. A
+    pass without the map has no map binding or code (`AD_USE_MAP`).
+  - Keys: `adaptive_grain_map` (on), `adaptive_grain_map_smooth_ms` (500);
+    Config card rows "Grain map from motion", "Grain map smoothing (ms)".
+    Stats line: ", grain map" when used, ", no vectors (per-frame grain)"
+    when on but no field.
+  - GPU tests: `DejudderGrainErrorSeparatesNoiseFromTexture` (above);
+    `AdaptiveDownscaleGrainMapFromTheVectors`: a panned texture with fresh
+    noise on the right half, 8 frames: map 1.000 on the texture, 0.401 on
+    the noise (floor 0.40); the blend follows it (mean distance to SSIM:
+    texture 0.680 with the map vs 1.109 scalar, noise 1.191 vs 1.102); no
+    field -> scalar; map off -> scalar; clean log, no hook disabled.
+    Policy cases in `DejudderPolicyRunsOnlyForUnevenCadenceWithANextFrame`.
+  - Not covered by a test: the NLS path of the map lookup (the occlusion
+    mask's tested mapping, reused) and the renderer wiring (real capture).
 
 ## Projector check (design §6)
 

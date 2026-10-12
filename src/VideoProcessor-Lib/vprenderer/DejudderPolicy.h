@@ -22,7 +22,7 @@ namespace DejudderPolicy
 		Interlaced,       // an interlaced input mode (field rate unclear)
 		UnknownRates,     // source or display rate not known yet
 		IneligibleCadence, // a whole number of refreshes per source frame, or under 2 (video)
-		VideoRateMaskOnly, // occlusion mask alone, source above film rates (planner 6c)
+		VideoRateMaskOnly, // mask / grain map alone, source above film rates (planner 6c, 8-3)
 		NativeRgb,        // an RGB capture: no YCbCr planes to warp
 		PlaneFormat,      // A's planes cannot be sampled linearly / stored
 		NoNextFrame,      // B not queued or not converted yet
@@ -33,6 +33,7 @@ namespace DejudderPolicy
 	{
 		double strength = 0.0;
 		bool occlusionMask = false;   // 6c: the estimate also runs for the mask alone
+		bool grainMap = false;        // 8-3: and for the adaptive downscale's grain map alone
 		bool lowLatency = false;
 		bool interlaced = false;
 		double sourceHz = 0.0;
@@ -67,18 +68,20 @@ namespace DejudderPolicy
 	constexpr double kMaskOnlyMaxSourceHz = 30.5;
 
 	// Whether the motion estimate runs. It runs for the de-judder (strength
-	// > 0, uneven film cadence) and, with the occlusion mask on, for the mask
-	// alone on any cadence (mask-only mode: strength 0, no extras).
+	// > 0, uneven film cadence) and, with the occlusion mask or the grain
+	// map (8-3) wanting it, alone on any film-rate cadence (strength 0, no
+	// extras).
 	inline Reason Decide(const Input& in)
 	{
-		if (!(in.strength > 0.0) && !in.occlusionMask) return Reason::Off;
+		const bool alone = in.occlusionMask || in.grainMap;
+		if (!(in.strength > 0.0) && !alone) return Reason::Off;
 		if (in.lowLatency) return Reason::LowLatency;
 		if (in.interlaced) return Reason::Interlaced;
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) return Reason::UnknownRates;
 		const bool extras = in.strength > 0.0 && IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz));
-		if (!extras && !in.occlusionMask)
+		if (!extras && !alone)
 			return Reason::IneligibleCadence;
-		// Without extras the estimate runs for the mask alone: film rates only.
+		// Without extras the estimate runs for the mask / map alone: film rates only.
 		if (!extras && in.sourceHz > kMaskOnlyMaxSourceHz)
 			return Reason::VideoRateMaskOnly;
 		if (in.nativeRgb) return Reason::NativeRgb;
@@ -105,7 +108,7 @@ namespace DejudderPolicy
 		case Reason::Interlaced: return "interlaced input";
 		case Reason::UnknownRates: return "rates not known";
 		case Reason::IneligibleCadence: return "cadence not eligible (even, or video)";
-		case Reason::VideoRateMaskOnly: return "mask only above film rates";
+		case Reason::VideoRateMaskOnly: return "mask / grain map only above film rates";
 		case Reason::NativeRgb: return "RGB capture";
 		case Reason::PlaneFormat: return "plane format unsuitable";
 		case Reason::NoNextFrame: return "next frame not ready";

@@ -6342,6 +6342,20 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("adaptive_chroma_ssim"), { QStringLiteral("off"), QStringLiteral("on") });
         adaptiveChroma->setToolTip(QStringLiteral(
             "Off (recommended): chroma stays faithful; SSIM on chroma can fringe colour at edges."));
+        // Stage 8-3: the per-block grain map from the de-judder's vectors.
+        auto* adaptiveMap = addChoice(QStringLiteral("Grain map from motion"),
+            QStringLiteral("adaptive_grain_map"), { QStringLiteral("on"), QStringLiteral("off") });
+        adaptiveMap->setToolTip(QStringLiteral(
+            "On: grain is measured per block from frame-to-frame noise along the motion vectors, so grainy "
+            "areas lean faithful while clean texture keeps SSIM. Film rates (30 fps or less) with a next frame "
+            "queued; runs the motion matcher even with de-judder off. Elsewhere (Low_Latency, 50/60p) the "
+            "per-frame measure is used. Off: the per-frame measure only."));
+        auto* adaptiveMapSmooth = addText(QStringLiteral("Grain map smoothing (ms)"),
+            QStringLiteral("adaptive_grain_map_smooth_ms"));
+        adaptiveMapSmooth->setValidator(new QDoubleValidator(0.0, 10000.0, 3, adaptiveMapSmooth));
+        adaptiveMapSmooth->setPlaceholderText(QStringLiteral("500"));
+        adaptiveMapSmooth->setToolTip(QStringLiteral(
+            "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
 
         auto wrapToneControl = [&](const ToneMappingTuning::Spec& spec, QLineEdit* edit) {
             auto row = form->takeRow(edit);

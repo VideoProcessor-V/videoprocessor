@@ -1016,6 +1016,7 @@ namespace
 			<< settings.adaptive.edgeHi << '|' << settings.adaptive.grainLo << '|' << settings.adaptive.grainHi << '|'
 			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
 			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|'
+			<< settings.adaptive.grainMap << '|' << settings.adaptive.grainMapSmoothMs << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
 			<< static_cast<int>(settings.sigmoid) << '|'
@@ -1974,6 +1975,7 @@ namespace
 			std::make_tuple("adaptive_grain_hi", 0.0, 64.0, &settings.adaptive.grainHi),
 			std::make_tuple("adaptive_grain_floor", 0.0, 1.0, &settings.adaptive.grainFloor),
 			std::make_tuple("adaptive_grain_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainSmoothMs),
+			std::make_tuple("adaptive_grain_map_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainMapSmoothMs),
 			std::make_tuple("adaptive_grain_shadow_bias", 0.0, 1.0, &settings.adaptive.shadowBias) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
@@ -1991,7 +1993,8 @@ namespace
 		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
 		for (const auto& toggle : { std::make_pair("adaptive_downscale", &settings.adaptiveDownscale),
-			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim) })
+			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
+			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -3975,6 +3978,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
 	bool dejudderMaskNoSigmaLogged = false;
 	bool dejudderMaskNlsLogged = false;
+	bool adaptiveMapNlsLogged = false;   // 8-3
 	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
 	std::string dejudderMaskState;         // why the mask is not used, for the stats line
 	bool dejudderMaskRateLogged = false;
@@ -3989,6 +3993,9 @@ struct LibplaceboVideoRenderer::Impl
 	// Stage 8-2: the adaptive downscale blend.
 	AdaptiveDownscale::Module adaptiveDownscale;
 	bool adaptiveNoSsimLogged = false;
+	// 8-3: the grain map wants the matcher (set where the hooks are chosen,
+	// read by the next source frame's estimate: the blend ran on a downscale).
+	bool adaptiveGrainMapWanted = false;
 	ULONGLONG adaptiveStatsTick = 0;
 	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
 	ExtendedRange::Hooks extendedRangeHooks;
@@ -8574,11 +8581,28 @@ struct LibplaceboVideoRenderer::Impl
 			else if (!st.valid)
 				std::snprintf(line, sizeof(line), "Adaptive downscale: measuring");
 			else
-				std::snprintf(line, sizeof(line), "Adaptive downscale: grain %.2f, w %.2f", st.grainScale, st.meanW);
+				std::snprintf(line, sizeof(line), "Adaptive downscale: grain %.2f, w %.2f%s", st.grainScale, st.meanW,
+					adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ? ", grain map" :
+					activeSettings.adaptive.grainMap ? ", no vectors (per-frame grain)" : "");
 			descriptions.push_back(line);
 		}
 		std::lock_guard<std::mutex> guard(shaderStatusMutex);
 		activeCustomShaders = descriptions;
+	}
+
+	// 6c-2 / 8-3: the NLS map of the submitted NLS rule, when it is one of the
+	// bundled files by its exact name (a user's MyNLS.glsl is not the bundled
+	// NLS; audit 6c-2); otherwise invalid.
+	NlsMaskMapping::Mapping KnownNlsMapping() const
+	{
+		const std::string file = nlsRule.filename;
+		const size_t slash = file.find_last_of("\\/");
+		const std::string name = slash == std::string::npos ? file : file.substr(slash + 1);
+		const bool plus = _stricmp(name.c_str(), "NLSPlus.glsl") == 0;
+		if (!plus && _stricmp(name.c_str(), "NLS.glsl") != 0)
+			return NlsMaskMapping::Mapping();
+		return NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
+			nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
 	}
 
 	static std::map<std::string, std::string> FixedNlsParameters(
@@ -10897,7 +10921,7 @@ struct LibplaceboVideoRenderer::Impl
 		double sourceHz, uint64_t nextSourceSequence)
 	{
 		// Off and settled: today's path, nothing else is done.
-		if (!(activeSettings.dejudderStrength > 0.0) && !activeSettings.occlusionMask &&
+		if (!(activeSettings.dejudderStrength > 0.0) && !activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
 			dejudderReason == DejudderPolicy::Reason::Off &&
 			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0])
 		{
@@ -10913,6 +10937,7 @@ struct LibplaceboVideoRenderer::Impl
 		DejudderPolicy::Input in;
 		in.strength = activeSettings.dejudderStrength;
 		in.occlusionMask = activeSettings.occlusionMask;
+		in.grainMap = adaptiveGrainMapWanted;
 		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
 		in.sourceHz = sourceHz;
 		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
@@ -10937,7 +10962,7 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
 		if (reason == DejudderPolicy::Reason::VideoRateMaskOnly && !dejudderMaskRateLogged)
 		{
-			DebugLog::Log("De-judder: occlusion mask alone is for film rates (source %.3f Hz > %.0f Hz); off for this source",
+			DebugLog::Log("De-judder: the occlusion mask / grain map alone is for film rates (source %.3f Hz > %.0f Hz); off for this source",
 				in.sourceHz, DejudderPolicy::kMaskOnlyMaxSourceHz);
 			dejudderMaskRateLogged = true;
 		}
@@ -11037,7 +11062,7 @@ struct LibplaceboVideoRenderer::Impl
 		int maskSlot = -1;
 		if (activeSettings.occlusionMask)
 			maskSlot = dejudderMaskSequence[0] == sourceSequence ? 1 : 0;
-		if (!dejudder->Estimate(a, b, maskSlot))
+		if (!dejudder->Estimate(a, b, maskSlot, adaptiveGrainMapWanted))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
@@ -15836,12 +15861,45 @@ struct LibplaceboVideoRenderer::Impl
                 // picture (audit stage8-rs232 item 3).
                 adaptiveDownscale.SetSourceDownscales(std::fabs(renderImage.crop.y1 - renderImage.crop.y0) >
                     std::fabs(target.crop.y1 - target.crop.y0) + 0.5f);
+                // 8-3: the matcher's field for this source frame, when it ran
+                // for it (A->B, estimated at upload); the map follows NLS's
+                // own map (bundled NLS / NLS+ only; otherwise the scalar).
+                adaptiveDownscale.ClearGrainField();
+                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
+                    sourceSequence != 0 && dejudder->GrainError())
+                {
+                    AdaptiveDownscale::GrainField field;
+                    field.error = dejudder->GrainError();
+                    field.field = dejudder->Field();
+                    field.frameTrust = dejudder->FrameTrust();
+                    field.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+                    field.sourceCrop = renderImage.crop;
+                    bool known = true;
+                    if (submittedNls)
+                    {
+                        field.nls = KnownNlsMapping();
+                        known = field.nls.valid;
+                    }
+                    if (known)
+                        adaptiveDownscale.SetGrainField(field);
+                    else if (!adaptiveMapNlsLogged)
+                    {
+                        adaptiveMapNlsLogged = true;
+                        DebugLog::Log("Adaptive downscale: grain map not used with NLS shader '%s' (its map is not known); per-frame grain",
+                            nlsRule.filename.c_str());
+                    }
+                }
+                // The next source frame's estimate runs for the map when the
+                // blend acts on this picture (a downscale; Active() is the
+                // last measured frame's).
+                adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active();
                 frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
                 frameHooks.push_back(adaptiveDownscale.Blend());
                 adaptiveNoSsimLogged = false;
             }
             else if (!adaptiveNoSsimLogged)
             {
+                adaptiveGrainMapWanted = false;
                 adaptiveNoSsimLogged = true;
                 DebugLog::Log("Adaptive downscale: on, but the SSimDownscaler shader is not in the chain; not used");
             }
@@ -15851,6 +15909,8 @@ struct LibplaceboVideoRenderer::Impl
                 PublishCustomShaderStatus();
             }
         }
+        if (!activeSettings.adaptiveDownscale)
+            adaptiveGrainMapWanted = false;
         // Delta 5 (D5-1): the sigma-delta's code domain comes from this
         // frame's target, never from the shader rule: range, swapchain sample
         // depth and the colour depth it quantises to. A float or 16-bit
@@ -15931,21 +15991,13 @@ struct LibplaceboVideoRenderer::Impl
             NlsMaskMapping::Mapping nlsMapping;
             if (install && submittedNls)
             {
-                // The bundled files by their exact name (a user's MyNLS.glsl
-                // is not the bundled NLS; audit 6c-2).
-                const std::string file = nlsRule.filename;
-                const size_t slash = file.find_last_of("\\/");
-                const std::string name = slash == std::string::npos ? file : file.substr(slash + 1);
-                const bool plus = _stricmp(name.c_str(), "NLSPlus.glsl") == 0;
-                if (plus || _stricmp(name.c_str(), "NLS.glsl") == 0)
-                    nlsMapping = NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
-                        nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
+                nlsMapping = KnownNlsMapping();
                 if (!nlsMapping.valid)
                 {
                     install = false;
                     if (!dejudderMaskNlsLogged)
                         DebugLog::Log("De-judder occlusion mask: not used with NLS shader '%s' (its map is not known)",
-                            file.c_str());
+                            nlsRule.filename.c_str());
                     dejudderMaskNlsLogged = true;
                 }
             }
