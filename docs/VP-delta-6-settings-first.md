@@ -85,3 +85,19 @@ Not changed (survey items left as they are): the main window's other controls
 (scene correction, frame offset, DirectShow colour boxes, renderer / capture
 device boxes) already have config keys and behave as session edits, like the
 keys; the Space key of the output sweep (diagnostic, command-line feature).
+
+## Audit `delta6.md` fixes (2026-10-12)
+
+- A Config Apply that changes `use_frame_queue` restarts the renderer, as the
+  main window's check box does (it only ticked the box before).
+- "Key override" shows only overrides still in force: fullscreen and video
+  only end when toggled back; the automatic display-rule key ends the manual
+  display rule. (The legacy shader-rule entry still lasts until restart.)
+- Release per group: a live key override ends only when the rules' result
+  for *its* group changes (a Shift+Q queue choice survives an HDR -> SDR
+  change that moves only the rendering group).
+- `persist_profile_selection: true` is exactly the earlier behaviour again:
+  live key overrides stay in force across rules changes (test added).
+- Deploy note: the default flip means an installed config without
+  `persist_profile_selection` no longer keeps key choices across restarts;
+  set it to true to keep the earlier behaviour.

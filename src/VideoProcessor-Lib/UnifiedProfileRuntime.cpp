@@ -276,7 +276,7 @@ namespace UnifiedProfileRuntime
 			return false;
 
 		m_sessionOverrideGroups.clear();
-		m_lastAutomaticSignature.clear();
+		m_lastAutomaticByGroup.clear();
 		std::shared_ptr<const Snapshot> initial;
 		if (!BuildSnapshot(restored, {}, sourceValues, 1, initial, error))
 			return false;
@@ -668,23 +668,37 @@ namespace UnifiedProfileRuntime
 			result.snapshot = current;
 			return true;
 		}
-		// Delta 6: a change in what the rules select (a new source, a profile
-		// change) releases the live key overrides; the same rules result
-		// (the same source re-detected) keeps them.
-		const std::string automatic = AutomaticSignature(sourceValues);
+		// Delta 6: a change in what the rules select for a group (a new
+		// source, a profile change) releases that group's live key override;
+		// the same rules result (the same source re-detected) keeps it. With
+		// persistence on, live overrides stay (the earlier behaviour).
+		bool resolved = false;
+		const std::map<std::string, std::string> automatic = AutomaticByGroup(sourceValues, resolved);
 		RendererProfileConfig::Selections manual = current->manualSelections;
 		std::set<std::string> sessionOverrides = m_sessionOverrideGroups;
-		if (!m_lastAutomaticSignature.empty() && automatic != m_lastAutomaticSignature &&
-			!sessionOverrides.empty())
+		if (resolved && !m_model.persistSelection && !m_lastAutomaticByGroup.empty())
 		{
-			for (const std::string& group : sessionOverrides)
-				if (!m_model.persistSelection)
-					manual.erase(group);
-			DebugLog::Log("unified profile: rules changed for the source; %zu key override(s) released",
-				sessionOverrides.size());
-			sessionOverrides.clear();
+			size_t released = 0;
+			for (auto group = sessionOverrides.begin(); group != sessionOverrides.end();)
+			{
+				const auto now = automatic.find(*group);
+				const auto before = m_lastAutomaticByGroup.find(*group);
+				const std::string nowText = now == automatic.end() ? std::string() : now->second;
+				const std::string beforeText = before == m_lastAutomaticByGroup.end() ? std::string() : before->second;
+				if (nowText != beforeText)
+				{
+					manual.erase(*group);
+					group = sessionOverrides.erase(group);
+					++released;
+				}
+				else
+					++group;
+			}
+			if (released)
+				DebugLog::Log("unified profile: rules changed for the source; %zu key override(s) released", released);
 		}
-		m_lastAutomaticSignature = automatic;
+		if (resolved)
+			m_lastAutomaticByGroup = automatic;
 		std::shared_ptr<const Snapshot> candidate;
 		if (!BuildSnapshot(manual,
 			sessionOverrides, sourceValues,
@@ -780,26 +794,29 @@ namespace UnifiedProfileRuntime
 		return std::vector<std::string>(m_sessionOverrideGroups.begin(), m_sessionOverrideGroups.end());
 	}
 
-	// What the rules alone select for these source values (group = profiles),
-	// configured defaults included; empty if the rules cannot be resolved.
-	std::string Runtime::AutomaticSignature(const DisplayRuleExpression::ValueLookup& sourceValues) const
+	// What the rules alone select for these source values, per group
+	// (profiles, configured defaults marked).
+	std::map<std::string, std::string> Runtime::AutomaticByGroup(
+		const DisplayRuleExpression::ValueLookup& sourceValues, bool& resolved) const
 	{
 		const DisplayRuleExpression::ValueLookup values = sourceValues ?
 			sourceValues :
 			[](const std::string&, std::string&) { return false; };
 		std::vector<RendererProfileConfig::AutomaticSelection> automatic;
 		std::string ignored;
-		if (!RendererProfileConfig::SelectAutomatic(m_model, values, automatic, ignored))
-			return std::string();
-		std::string signature = "|";
+		std::map<std::string, std::string> byGroup;
+		resolved = RendererProfileConfig::SelectAutomatic(m_model, values, automatic, ignored);
+		if (!resolved)
+			return byGroup;
 		for (const RendererProfileConfig::AutomaticSelection& selection : automatic)
 		{
-			signature += selection.group + "=";
+			std::string text;
 			for (const std::string& profile : selection.profiles)
-				signature += profile + ",";
-			signature += selection.configuredDefault ? "d|" : "r|";
+				text += profile + ",";
+			text += selection.configuredDefault ? "d" : "r";
+			byGroup[selection.group] = text;
 		}
-		return signature;
+		return byGroup;
 	}
 
 

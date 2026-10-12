@@ -4755,8 +4755,15 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 	if (m_stagedRuntimeSettings.useFrameQueue != m_useFrameQueueConfigured)
 	{
 		m_useFrameQueueConfigured = m_stagedRuntimeSettings.useFrameQueue;
-		if (m_rendererVideoFrameUseQeueueCheck.GetSafeHwnd())
+		if (m_rendererVideoFrameUseQeueueCheck.GetSafeHwnd() &&
+			(m_rendererVideoFrameUseQeueueCheck.GetCheck() == BST_CHECKED) != m_useFrameQueueConfigured)
+		{
 			m_rendererVideoFrameUseQeueueCheck.SetCheck(m_useFrameQueueConfigured ? BST_CHECKED : BST_UNCHECKED);
+			// As the check box's own handler: the renderer takes the queue mode
+			// when it restarts (audit delta6 item 1).
+			m_wantToRestartRenderer = true;
+			UpdateState();
+		}
 	}
 	if (m_stagedRuntimeSettings.queueAutoReset != m_queueAutoResetConfigured)
 	{
@@ -7627,6 +7634,17 @@ void CVideoProcessorDlg::NoteKeyOverride(const char* what, const CString& value)
 	m_keyOverrides[what] = value;
 }
 
+// A two-state toggle: the second press restores the state before the first,
+// so it ends the override instead of recording it again (audit delta6).
+void CVideoProcessorDlg::ToggleKeyOverride(const char* what, const CString& value)
+{
+	const auto found = m_keyOverrides.find(what);
+	if (found != m_keyOverrides.end())
+		m_keyOverrides.erase(found);
+	else
+		m_keyOverrides[what] = value;
+}
+
 // Delta 6: the overlay's "Key override" line: what a key changed this session
 // (until restart, a profile change or Config applying that setting), and the
 // profile groups a key holds against their rules.
@@ -7663,7 +7681,7 @@ void CVideoProcessorDlg::OnCommandFullScreenToggle()
 {
 	const bool requested =
 		m_rendererFullscreenCheck.GetCheck() == BST_CHECKED;
-	NoteKeyOverride("fullscreen", requested ? TEXT("off") : TEXT("on"));
+	ToggleKeyOverride("fullscreen", requested ? TEXT("off") : TEXT("on"));
 	const bool active = m_fullScreenVideoWindow &&
 		IsWindow(m_fullScreenVideoWindow->GetHWND()) &&
 		::IsWindowVisible(m_fullScreenVideoWindow->GetHWND());
@@ -7741,6 +7759,7 @@ void CVideoProcessorDlg::OnCommandDisplayRuleAuto()
 		DEBUGLOG("Automatic display-rule selection ignored: selected renderer does not support display rules");
 		return;
 	}
+	m_keyOverrides.erase("display rule (DirectShow)");
 
 	DEBUGLOG("Automatic display-rule selection requested: %s", activeRule.GetString());
 	if (rendererRestartRequired)
@@ -8075,7 +8094,7 @@ void CVideoProcessorDlg::OnCommandToggleNoUi()
 		m_hideUI = true;
 		ApplyNoUiLayout();
 	}
-	NoteKeyOverride("video only", m_hideUI ? TEXT("on") : TEXT("off"));
+	ToggleKeyOverride("video only", m_hideUI ? TEXT("on") : TEXT("off"));
 
 	// Do not restart the low-level shortcut observer during the Ctrl+U command
 	// that it dispatched. Restarting clears its pressed-key set before Ctrl+U is

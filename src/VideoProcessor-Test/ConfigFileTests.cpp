@@ -377,6 +377,28 @@ namespace VideoProcessorTest
             Assert::IsTrue(runtime.Refresh(source("23.976"), refreshed, error));
             Assert::AreEqual(std::string("normal"), queue(runtime.GetSnapshot()),
                 L"The released key choice must not come back (not persisted)");
+
+            // persist_profile_selection: true is the earlier behaviour: a live
+            // key override stays in force across a rules change (audit delta6).
+            std::string persisted = contents;
+            const size_t general = persisted.find("[general]");
+            Assert::IsTrue(general != std::string::npos);
+            persisted.insert(persisted.find('\n', general) + 1, "persist_profile_selection: true\n");
+            CachedConfigTestFile persistedFile;
+            std::ofstream(persistedFile.path, std::ios::binary) << persisted;
+            ConfigFile persistedConfig;
+            Assert::IsTrue(persistedConfig.Load(persistedFile.path));
+            UnifiedProfileRuntime::Runtime keeping;
+            Assert::IsTrue(keeping.Initialize(persistedConfig, source("23.976"), error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::IsTrue(keeping.Refresh(source("23.976"), refreshed, error));
+            Assert::IsTrue(keeping.SelectKey("Shift+L", source("23.976"), selected, error));
+            Assert::IsTrue(keeping.Refresh(source("59.94"), refreshed, error));
+            Assert::IsTrue(keeping.Refresh(source("23.976"), refreshed, error));
+            Assert::AreEqual(std::string("low_latency"), queue(keeping.GetSnapshot()),
+                L"With persistence on, the key override stays across a rules change");
+            Assert::AreEqual(size_t{ 1 }, keeping.SessionOverrideGroups().size());
+            DeleteFileA(keeping.StatePath().c_str());
         }
 
         TEST_METHOD(QueueTargetLatencyBecomesWholeSourceFrames)

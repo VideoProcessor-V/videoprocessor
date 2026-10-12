@@ -487,6 +487,7 @@ protected:
 	// settings, by name; shown on the stats overlay ("Key override").
 	std::map<std::string, CString> m_keyOverrides;
 	void NoteKeyOverride(const char* what, const CString& value);
+	void ToggleKeyOverride(const char* what, const CString& value);
 	CString KeyOverrideSummary() const;
 	bool m_configurationEditorModal = false;
 	bool m_configurationEditorActivationPending = false;

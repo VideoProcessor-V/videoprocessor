@@ -98,10 +98,11 @@ namespace UnifiedProfileRuntime
 
 		// Re-resolves automatic profiles after source state changes. Persisted
 		// choices are fallbacks. A live shortcut remains a session override
-		// until the rules pick a different profile for the new source (delta
-		// 6: a key overrides until restart or a profile change); then every
-		// session override is released, and without persistence its choice
-		// too.
+		// until the rules pick a different profile *for its group* for the
+		// new source (delta 6: a key overrides until restart or a profile
+		// change); then that group's override and choice are released. With
+		// persist_profile_selection: true live overrides stay in force, the
+		// earlier behaviour.
 		bool Refresh(const DisplayRuleExpression::ValueLookup& sourceValues,
 			RefreshResult& result, std::string& error);
 		bool Refresh(const DisplayRuleExpression::ValueLookup& sourceValues,
@@ -139,8 +140,9 @@ namespace UnifiedProfileRuntime
 		bool LoadPersistedSelections(
 			RendererProfileConfig::Selections& selections,
 			std::string& error) const;
-		std::string AutomaticSignature(
-			const DisplayRuleExpression::ValueLookup& sourceValues) const;
+		// What the rules alone select per group (empty if unresolved).
+		std::map<std::string, std::string> AutomaticByGroup(
+			const DisplayRuleExpression::ValueLookup& sourceValues, bool& resolved) const;
 		bool PersistSelections(
 			const RendererProfileConfig::Selections& selections,
 			std::string& error) const;
@@ -176,7 +178,7 @@ namespace UnifiedProfileRuntime
 		// passed across the separately deployed VP Renderer DLL boundary.
 		std::set<std::string> m_sessionOverrideGroups;
 		// Delta 6: what the rules selected at the last refresh.
-		std::string m_lastAutomaticSignature;
+		std::map<std::string, std::string> m_lastAutomaticByGroup;
 		std::shared_ptr<const Snapshot> m_snapshot;
 	};
 }
