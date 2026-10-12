@@ -37,6 +37,16 @@ public:
 	bool SelectProfile(const std::string& group, const std::string& profile,
 		bool enabled, std::string& error) const;
 	bool RunAction(const std::string& action, std::string& error) const;
+	// RS-232 connection test on the VP side (about 8 s). False with error when
+	// VP could not be asked; otherwise the test's own pass/refused/summary.
+	struct ProjectorTestResult
+	{
+		bool pass = false;
+		bool refused = false;
+		std::string summary;
+		std::string details;
+	};
+	bool RunProjectorTest(ProjectorTestResult& result, std::string& error) const;
 	bool ApplyConfig(const std::string& baseline,
 		const std::string& candidate, ApplyResult& result,
 		std::string& error) const;

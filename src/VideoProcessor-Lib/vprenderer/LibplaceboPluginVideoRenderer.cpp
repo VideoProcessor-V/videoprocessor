@@ -583,6 +583,18 @@ bool LibplaceboPluginVideoRenderer::GetDejudderStatus(CString& status) const
 	return m_renderer && m_renderer->GetDejudderStatus(status);
 }
 
+bool LibplaceboPluginVideoRenderer::SuspendLedDriveForTest(CString& reason)
+{
+	reason.Empty();
+	return !m_renderer || m_renderer->SuspendLedDriveForTest(reason);
+}
+
+void LibplaceboPluginVideoRenderer::ResumeLedDriveAfterTest()
+{
+	if (m_renderer)
+		m_renderer->ResumeLedDriveAfterTest();
+}
+
 
 bool LibplaceboPluginVideoRenderer::GetConversionPerformance(
 	double& currentUs, double& avg10s, double& max10s) const

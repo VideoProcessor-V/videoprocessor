@@ -77,6 +77,9 @@ namespace LedDrive
 		// True while the experimental custom-dim fade to black is engaged.
 		bool CustomDimEngaged() const;
 		bool DrivingProjector() const;
+		// Milliseconds since the last BeginFrame (a video frame); very large
+		// before the first. The RS-232 test is refused while video plays.
+		double MsSinceLastFrame() const;
 		DriverStatus ProjectorStatus() const;
 		int Ticks() const;
 		// Settings changed while running: applies them to the running module

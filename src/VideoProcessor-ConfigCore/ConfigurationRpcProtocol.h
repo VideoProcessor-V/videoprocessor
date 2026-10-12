@@ -29,7 +29,10 @@ namespace ConfigurationRpcProtocol
 		DiscoveryReply = 5,
 		GetActiveProfileStatus = 6,
 		SelectProfile = 7,
-		RunAction = 8
+		RunAction = 8,
+		// RS-232 connection test (LED drive page). Response: pass byte,
+		// refused byte, summary string, details string.
+		ProjectorTest = 9
 	};
 
 	struct Frame
@@ -77,6 +80,7 @@ namespace ConfigurationRpcProtocol
 		case static_cast<uint16_t>(Operation::GetActiveProfileStatus):
 		case static_cast<uint16_t>(Operation::SelectProfile):
 		case static_cast<uint16_t>(Operation::RunAction):
+		case static_cast<uint16_t>(Operation::ProjectorTest):
 			return true;
 		default:
 			return false;

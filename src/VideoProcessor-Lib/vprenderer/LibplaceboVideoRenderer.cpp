@@ -17789,7 +17789,11 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 			ConfigFile::NormalizeName(snapshot.queue.profile) == "low_latency",
 			std::memory_order_release);
 	if (snapshot.configuration)
-		UpdateLedDrive(*snapshot.configuration);
+	{
+		m_ledDriveConfiguration = snapshot.configuration;
+		if (!m_ledDriveSuspended)
+			UpdateLedDrive(*snapshot.configuration);
+	}
 	VideoStateComPtr state = m_videoState;
 	auto candidateConfiguration = m_rendererConfiguration;
 	if (!candidateConfiguration || snapshot.configuration != m_applicationConfiguration)
@@ -18955,6 +18959,59 @@ bool LibplaceboVideoRenderer::GetPresentationTargetTiming(
 	captureToTargetMs = m_captureToPresentationTargetMs.load(
 		std::memory_order_relaxed);
 	return m_presentationTargetTimingKnown.load(std::memory_order_acquire);
+}
+
+// RS-232 connection test: stop the LED drive (it restores full light and
+// closes the port), unless video is playing; ResumeLedDriveAfterTest starts it
+// again from the saved settings.
+bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
+{
+	reason.Empty();
+	std::shared_ptr<LedDrive::LedDriveModule> module;
+	{
+		std::unique_lock<std::mutex> guard(m_stateMutex);
+		bool playing = false;
+		if (m_ledDrive)
+			playing = m_ledDrive->MsSinceLastFrame() < 2000.0;
+		else if (m_impl)
+		{
+			const ULONGLONG last = m_impl->libplaceboRenderStartedTick.load(std::memory_order_acquire);
+			playing = last != 0 && GetTickCount64() - last < 2000;
+		}
+		if (playing)
+		{
+			reason = TEXT("Not run: video is playing. Stop playback and try again.");
+			return false;
+		}
+		module = m_ledDrive;
+		m_ledDrive.reset();
+		m_ledDriveSignature.clear();
+		m_ledDriveSuspended = true;
+		if (m_impl)
+		{
+			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+			std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
+		}
+	}
+	if (module)
+	{
+		module->Stop();
+		DebugLog::Log("LED drive: stopped for the RS-232 connection test");
+	}
+	return true;
+}
+
+void LibplaceboVideoRenderer::ResumeLedDriveAfterTest()
+{
+	std::unique_lock<std::mutex> guard(m_stateMutex);
+	if (!m_ledDriveSuspended)
+		return;
+	m_ledDriveSuspended = false;
+	if (m_ledDriveConfiguration)
+	{
+		UpdateLedDrive(*m_ledDriveConfiguration);
+		DebugLog::Log("LED drive: restarted after the RS-232 connection test");
+	}
 }
 
 bool LibplaceboVideoRenderer::GetDejudderStatus(CString& status) const

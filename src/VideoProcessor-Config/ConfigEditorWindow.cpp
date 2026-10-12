@@ -5,6 +5,9 @@
 #include <objbase.h>
 
 #include "ConfigEditorWindow.h"
+#include <led/ConnectionTest.h>
+#include <led/LedDriveConfig.h>
+#include <led/SerialPort.h>
 #include "UpdatePanel.h"
 #include "ColorOutputProfileMigration.h"
 #include "ProfileListController.h"
@@ -9706,6 +9709,77 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     connectionForm->addRow(QString(), helpLabel(QStringLiteral(
         "Off: send only, exactly like the old script. On: wait for each reply, ask the projector its range and "
         "log lost commands. 19200 baud, 8 data bits, no parity, 1 stop bit, no flow control.")));
+    // RS-232 connection test: LED 60, read back, 5 s, LED 255, read back.
+    auto* testButton = new QPushButton(QStringLiteral("Test RS-232 connection"));
+    testButton->setObjectName(controlName(projector, QStringLiteral("connection_test")));
+    testButton->setToolTip(QStringLiteral(
+        "Sets the LED to 60, reads it back, waits 5 seconds, sets 255 and reads it back (about 8 s). Uses the "
+        "saved settings (Apply first). With VideoProcessor running it pauses the LED drive for the test; it is "
+        "refused while video is playing. Without VideoProcessor, Config opens the port itself."));
+    auto* testResult = new QLabel;
+    testResult->setObjectName(controlName(projector, QStringLiteral("connection_test.result")));
+    testResult->setWordWrap(true);
+    testResult->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    connectionForm->addRow(testButton, testResult);
+    connect(testButton, &QPushButton::clicked, this, [this, testButton, testResult]
+    {
+        if (noTarget_) return;
+        const bool remote = remoteClient_ != nullptr;
+        const QString host = remote ? remoteHost_ : QStringLiteral("127.0.0.1");
+        const quint16 rpcPort = remote ? remotePort_ : 41686;
+        const std::string configPath = configPath_.toStdString();
+        testButton->setEnabled(false);
+        testResult->setStyleSheet(QString());
+        testResult->setText(dirty_ ?
+            QStringLiteral("Testing with the saved settings (unapplied changes are not used)… about 8 s") :
+            QStringLiteral("Testing… about 8 s"));
+        struct Outcome { bool pass = false; bool refused = false; QString summary, details; };
+        const auto outcome = std::make_shared<Outcome>();
+        QThread* worker = QThread::create([outcome, host, rpcPort, remote, configPath]
+        {
+            ConfigurationRpcClient client(host.toStdString(), rpcPort);
+            ConfigurationRpcClient::ProjectorTestResult rpc;
+            std::string error;
+            if (client.RunProjectorTest(rpc, error))
+            {
+                outcome->pass = rpc.pass;
+                outcome->refused = rpc.refused;
+                outcome->summary = QString::fromStdString(rpc.summary);
+                outcome->details = QString::fromStdString(rpc.details);
+                return;
+            }
+            if (remote)
+            {
+                outcome->summary = QStringLiteral("FAIL: ") + QString::fromStdString(error);
+                return;
+            }
+            // No VP on this computer: Config opens the port itself.
+            ConfigFile config;
+            if (configPath.empty() || !config.Load(configPath))
+            {
+                outcome->summary = QStringLiteral("FAIL: could not read the configuration");
+                return;
+            }
+            const LedDrive::ConnectionTestResult result = LedDrive::RunConnectionTestOnNewConnection(
+                LedDrive::ReadProjectorConfig(config), [] { return LedDrive::CreateWin32SerialPort(); });
+            outcome->pass = result.pass;
+            outcome->summary = QString::fromStdString(result.summary) +
+                QStringLiteral(" (tested by Config; VideoProcessor is not running)");
+            for (const std::string& line : result.lines)
+                outcome->details += QString::fromStdString(line) + QLatin1Char('\n');
+        });
+        worker->setParent(this);
+        connect(worker, &QThread::finished, this, [worker, outcome, testButton, testResult]
+        {
+            worker->deleteLater();
+            testButton->setEnabled(true);
+            testResult->setText(outcome->summary);
+            testResult->setToolTip(outcome->details.trimmed());
+            testResult->setStyleSheet(outcome->pass ? QStringLiteral("color: #2e7d32;") :
+                outcome->refused ? QString() : QStringLiteral("color: #c62828;"));
+        });
+        worker->start();
+    });
 
     // Stage 7 step 7c (control policy; the owner's correction): compensate's
     // contrast assist, cuts, speeds and the projector's response. Every

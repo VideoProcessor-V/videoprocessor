@@ -125,6 +125,8 @@ public:
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
 	bool GetDejudderStatus(CString& status) const override;
+	bool SuspendLedDriveForTest(CString& reason) override;
+	void ResumeLedDriveAfterTest() override;
 	bool GetRenderLoad(RendererRenderLoad& load) const override;
 	void SetRenderLoadDisplayRefreshRate(double refreshRateHz) override;
 	bool SupportsNativeStatsOverlay() const override { return true; }
@@ -317,6 +319,10 @@ private:
 	// full light. Recreated only when its configuration sections change.
 	std::shared_ptr<LedDrive::LedDriveModule> m_ledDrive;
 	std::string m_ledDriveSignature;
+	// RS-232 connection test: the configuration the LED drive is restarted
+	// from, and whether it is stopped for a test.
+	std::shared_ptr<const ConfigFile> m_ledDriveConfiguration;
+	bool m_ledDriveSuspended = false;
 	// gamma_boost (and the hook's knee/EOTF) as last published, for new Impls.
 	double m_ledGammaBoost = 0.0;   // the gamma_boost setting (0 = off)
 	double m_ledCompensationEotf = 2.2;

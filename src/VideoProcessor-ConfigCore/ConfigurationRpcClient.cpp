@@ -153,7 +153,8 @@ bool ConfigurationRpcClient::Request(uint16_t operation,
 	}
 	const int timeout = operation == static_cast<uint16_t>(Operation::ApplyConfig) ||
 		operation == static_cast<uint16_t>(Operation::SelectProfile) ||
-		operation == static_cast<uint16_t>(Operation::RunAction) ?
+		operation == static_cast<uint16_t>(Operation::RunAction) ||
+		operation == static_cast<uint16_t>(Operation::ProjectorTest) ?
 		50000 : operation == static_cast<uint16_t>(Operation::GetActiveProfileStatus) ?
 		1500 : 10000;
 	setsockopt(socket.value, SOL_SOCKET, SO_RCVTIMEO,
@@ -333,6 +334,25 @@ bool ConfigurationRpcClient::RunAction(const std::string& action,
 		error = "VP returned an invalid action response.";
 		return false;
 	}
+	return true;
+}
+
+bool ConfigurationRpcClient::RunProjectorTest(ProjectorTestResult& result,
+	std::string& error) const
+{
+	result = ProjectorTestResult();
+	std::vector<uint8_t> response;
+	if (!Request(static_cast<uint16_t>(Operation::ProjectorTest), {}, response, error))
+		return false;
+	size_t cursor = 2;
+	if (response.size() < 2 || !ReadString(response, cursor, result.summary) ||
+		!ReadString(response, cursor, result.details) || cursor != response.size())
+	{
+		error = "VP returned an invalid projector test response.";
+		return false;
+	}
+	result.pass = response[0] != 0;
+	result.refused = response[1] != 0;
 	return true;
 }
 

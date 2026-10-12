@@ -705,6 +705,12 @@ namespace LedDrive
 		}
 	}
 
+	double LedDriveModule::MsSinceLastFrame() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return lastFrameMs < 0.0 ? 1e12 : NowMs() - lastFrameMs;
+	}
+
 	bool LedDriveModule::CustomDimEngaged() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);

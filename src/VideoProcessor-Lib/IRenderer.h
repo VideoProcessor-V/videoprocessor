@@ -421,6 +421,18 @@ public:
 		return false;
 	}
 
+	// RS-232 connection test (Config, LED drive page): the renderer frees the
+	// projector's COM port for the test. False (with reason) when it will not,
+	// e.g. while video is playing. Renderers without an LED drive hold no port.
+	virtual bool SuspendLedDriveForTest(CString& reason)
+	{
+		reason.Empty();
+		return true;
+	}
+
+	// After the test: the LED drive starts again with the saved settings.
+	virtual void ResumeLedDriveAfterTest() {}
+
 	// Rolling render cost, for judging whether a quality setting fits inside a
 	// frame period on this machine. Renderers without per-frame instrumentation
 	// return false so the OSD does not imply a measurement it does not have.

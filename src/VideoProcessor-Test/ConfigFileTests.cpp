@@ -4311,8 +4311,9 @@ namespace VideoProcessorTest
 		TEST_METHOD(LibplaceboPluginApiVersionCoversConfigurationSnapshots)
 		{
 			// 25: IVideoRenderer::GetDejudderStatus (stage 6b-2b) or rc4's Beta
-			// flavor export; 26: both (rc4 merge).
-			Assert::AreEqual(static_cast<uint32_t>(26),
+			// flavor export; 26: both (rc4 merge); 27: the LED drive's
+			// projector connection test (Suspend/ResumeLedDriveForTest).
+			Assert::AreEqual(static_cast<uint32_t>(27),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

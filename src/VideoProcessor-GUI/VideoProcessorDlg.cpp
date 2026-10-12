@@ -35,6 +35,9 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <led/ConnectionTest.h>
+#include <led/LedDriveConfig.h>
+#include <led/SerialPort.h>
 #include <vector>
 #include <regex>
 
@@ -2132,6 +2135,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_MESSAGE(WM_MESSAGE_RENDERER_RESTART_REQUIRED, &CVideoProcessorDlg::OnMessageRendererRestartRequired)
 	ON_MESSAGE(WM_MESSAGE_RENDERER_QUEUE_CONTRACT_CHANGED, &CVideoProcessorDlg::OnMessageRendererQueueContractChanged)
 	ON_MESSAGE(WM_MESSAGE_CONFIGURATION_RPC_REQUEST, &CVideoProcessorDlg::OnConfigurationRpcRequest)
+	ON_MESSAGE(WM_MESSAGE_PROJECTOR_TEST_DONE, &CVideoProcessorDlg::OnProjectorTestDone)
 	ON_MESSAGE(WM_MODERN_OPERATOR_ACTION, &CVideoProcessorDlg::OnMessageModernOperatorAction)
 
 	// Command handlers (from accelerator)
@@ -3176,8 +3180,98 @@ LRESULT CVideoProcessorDlg::OnConfigurationRpcRequest(WPARAM id, LPARAM)
 	const auto pending = m_configurationRpcServer.TakePending(
 		static_cast<uint64_t>(id));
 	if (!pending) return 0;
+	if (pending->request.operation ==
+		static_cast<uint16_t>(ConfigurationRpcProtocol::Operation::ProjectorTest))
+	{
+		StartProjectorTest(pending);   // completes later, from the worker's result
+		return 0;
+	}
 	pending->response = HandleConfigurationRpc(pending->request);
 	m_configurationRpcServer.Complete(pending);
+	return 0;
+}
+
+namespace
+{
+	ConfigurationRpcProtocol::Frame ProjectorTestResponse(bool pass, bool refused,
+		const std::string& summary, const std::string& details)
+	{
+		using namespace ConfigurationRpcProtocol;
+		Frame response;
+		response.operation = static_cast<uint16_t>(
+			static_cast<uint16_t>(Operation::ProjectorTest) | ResponseFlag);
+		response.payload.push_back(pass ? 1 : 0);
+		response.payload.push_back(refused ? 1 : 0);
+		WriteString(response.payload, summary.substr(0, 400));
+		WriteString(response.payload, details.substr(0, 4000));
+		return response;
+	}
+}
+
+// UI thread: the renderer frees the port (refused while video plays), then a
+// worker runs the test on a read-back connection; OnProjectorTestDone
+// restarts the LED drive and answers Config.
+void CVideoProcessorDlg::StartProjectorTest(
+	const std::shared_ptr<ConfigurationRpcServer::Pending>& pending)
+{
+	using namespace ConfigurationRpcProtocol;
+	if (m_projectorTestPending)
+	{
+		pending->response = ConfigurationRpcError(pending->request.operation,
+			"A projector test is already running.");
+		m_configurationRpcServer.Complete(pending);
+		return;
+	}
+	CString reason;
+	if (m_videoRenderer && !m_videoRenderer->SuspendLedDriveForTest(reason))
+	{
+		DebugLog::Log("RS-232 connection test refused: %S", static_cast<LPCTSTR>(reason));
+		pending->response = ProjectorTestResponse(false, true, std::string(CStringA(reason)), std::string());
+		m_configurationRpcServer.Complete(pending);
+		return;
+	}
+	m_projectorTestSuspendedRenderer = m_videoRenderer != nullptr;
+	m_projectorTestPending = pending;
+	const HWND window = GetSafeHwnd();
+	// The result goes through a shared object, never through `this`, so VP
+	// closing during the test cannot leave the worker writing a destroyed window.
+	auto shared = std::make_shared<ProjectorTestShared>();
+	m_projectorTestShared = shared;
+	std::thread([shared, window]()
+	{
+		ConfigFile config;
+		LedDrive::ConnectionTestResult result;
+		if (!config.Load(ConfigFile::DEFAULT_FILENAME, ConfigFile::ReadPolicy::Fresh))
+			result.summary = "FAIL: VideoProcessor could not read its configuration";
+		else
+			result = LedDrive::RunConnectionTestOnNewConnection(LedDrive::ReadProjectorConfig(config),
+				[] { return LedDrive::CreateWin32SerialPort(); });
+		std::string details;
+		for (const std::string& line : result.lines)
+			details += line + "\n";
+		DebugLog::Log("RS-232 connection test: %s", result.summary.c_str());
+		{
+			std::lock_guard<std::mutex> guard(shared->mutex);
+			shared->response = ProjectorTestResponse(result.pass, false, result.summary, details);
+		}
+		::PostMessageW(window, WM_MESSAGE_PROJECTOR_TEST_DONE, 0, 0);
+	}).detach();
+}
+
+LRESULT CVideoProcessorDlg::OnProjectorTestDone(WPARAM, LPARAM)
+{
+	if (m_projectorTestSuspendedRenderer && m_videoRenderer)
+		m_videoRenderer->ResumeLedDriveAfterTest();
+	m_projectorTestSuspendedRenderer = false;
+	const auto pending = std::move(m_projectorTestPending);
+	m_projectorTestPending.reset();
+	const auto shared = std::move(m_projectorTestShared);
+	if (pending && shared)
+	{
+		std::lock_guard<std::mutex> guard(shared->mutex);
+		pending->response = shared->response;
+		m_configurationRpcServer.Complete(pending);
+	}
 	return 0;
 }
 

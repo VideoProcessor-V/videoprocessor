@@ -94,6 +94,18 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
     <ClCompile Include="..\VideoProcessor-Lib\ConfigFile.cpp">
       <ObjectFileName>$(IntDir)ConfigFileStandalone.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\led\SerialPort.cpp">
+      <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\led\BarcoAsciiDriver.cpp">
+      <ObjectFileName>$(IntDir)LedBarcoAsciiDriverStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\led\ProjectorDriver.cpp">
+      <ObjectFileName>$(IntDir)LedProjectorDriverStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\led\ConnectionTest.cpp">
+      <ObjectFileName>$(IntDir)LedConnectionTestStandalone.obj</ObjectFileName>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ToneMappingControl.h" />

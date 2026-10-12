@@ -460,6 +460,27 @@ script:
   the port parameters itself with the Win32 serial API (`CreateFile` on
   `\\.\COMn`, `SetCommState`, `SetCommTimeouts`).
 
+### 5a. RS-232 connection test (Config, LED drive page; 2026-10-12)
+
+A button under the projector connection settings: LED 60, read back
+(`LPW1 ?`), wait 5 s, LED 255 (or the projector's reported maximum when
+lower), read back; PASS when both read-backs match, otherwise FAIL with the
+step that failed (not sent, no reply, or the level the projector reports).
+`led/ConnectionTest.{h,cpp}`; unit-tested against the fake FL35.
+
+- **Always a read-back connection:** with `read_back: off` (the old script's
+  way) the driver never listens, so the test opens its own connection with
+  read-back on (framing probe, ECHO). The saved setting is not changed.
+- **Route (owner):** Config asks the running VP (RPC operation 9,
+  `ProjectorTest`; local `127.0.0.1` or the remote target). VP's renderer
+  stops its LED drive (full light, port closed: `SuspendLedDriveForTest`,
+  plugin API 27), a worker thread runs the test, then the LED drive restarts
+  from the saved settings (`ResumeLedDriveAfterTest`). Refused while video is
+  playing (a frame within the last 2 s; owner's choice). Without a VP on this
+  computer, Config opens the port itself (it compiles the serial / Barco /
+  test sources); a remote target without VP reports the connection error.
+- Uses the saved settings (Config says so when there are unapplied changes).
+
 ## 6. Compensation hook
 
 A libplacebo custom hook at `PL_HOOK_PRE_OUTPUT` (verify the value domain in

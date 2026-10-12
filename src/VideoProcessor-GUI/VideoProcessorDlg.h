@@ -87,6 +87,7 @@
 #define WM_MESSAGE_RENDERER_ACTION_EVENT                 (WM_APP + 20)
 #define WM_MESSAGE_RENDERER_QUEUE_CONTRACT_CHANGED       (WM_APP + 21)
 #define WM_MESSAGE_CONFIGURATION_RPC_REQUEST             (WM_APP + 22)
+#define WM_MESSAGE_PROJECTOR_TEST_DONE                   (WM_APP + 23)
 
 static_assert(WM_MESSAGE_DIRECTSHOW_NOTIFICATION !=
 	WM_MESSAGE_DIRECTSHOW_OWNER_COMPLETION,
@@ -1182,6 +1183,18 @@ protected:
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg LRESULT OnConfigurationEditorHotkey(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnConfigurationRpcRequest(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnProjectorTestDone(WPARAM wParam, LPARAM lParam);
+	// RS-232 connection test (Config's LED drive page): the RPC waiting for it
+	// and its result, handed from the worker thread to the UI thread.
+	void StartProjectorTest(const std::shared_ptr<ConfigurationRpcServer::Pending>& pending);
+	std::shared_ptr<ConfigurationRpcServer::Pending> m_projectorTestPending;
+	struct ProjectorTestShared
+	{
+		std::mutex mutex;
+		ConfigurationRpcProtocol::Frame response;
+	};
+	std::shared_ptr<ProjectorTestShared> m_projectorTestShared;
+	bool m_projectorTestSuspendedRenderer = false;
 	afx_msg LRESULT OnConfigurationEditorAssociation(WPARAM wParam,
 		LPARAM lParam);
 	afx_msg LRESULT OnConfigurationEditorPresentationTargetAcknowledgement(

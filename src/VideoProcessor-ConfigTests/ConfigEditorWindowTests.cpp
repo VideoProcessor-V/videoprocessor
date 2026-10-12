@@ -938,6 +938,12 @@ void testLedDrivePageAndLiveSwitches()
     auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
     require(port->text() == QStringLiteral("COM1"), "COM port did not load");
     auto* readBack = requireControl<QCheckBox>(window, QStringLiteral("config.projector.default.read_back"));
+    // RS-232 connection test button (LED drive page), idle until pressed.
+    auto* connectionTest = requireControl<QPushButton>(window,
+        QStringLiteral("config.projector.default.connection_test"));
+    require(connectionTest->isEnabled(), "The RS-232 connection test button is disabled");
+    require(requireControl<QLabel>(window, QStringLiteral("config.projector.default.connection_test.result"))->text().isEmpty(),
+        "The RS-232 test result is not empty before a test");
     require(!readBack->isChecked(), "Read-back did not default to off");
     auto* floor = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"));
     auto* floorBlack = requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor_black"));

@@ -6,6 +6,7 @@
 #include <led/BarcoAsciiDriver.h>
 #include <led/LedDriveConfig.h>
 #include <led/ProjectorDriver.h>
+#include <led/ConnectionTest.h>
 
 #include "LedDriveTestSupport.h"
 
@@ -74,6 +75,78 @@ namespace VideoProcessorTest
 {
 	TEST_CLASS(LedDriveProtocolTests)
 	{
+		// RS-232 connection test (LED drive page): LED 60, read back, wait,
+		// LED 255 (or the projector's maximum), read back, pass/fail.
+		TEST_METHOD(ConnectionTestPassesFailsAndExplains)
+		{
+			ConnectionTestPlan plan;
+			plan.holdMs = 20;
+			plan.commandTimeoutMs = 500;
+			auto run = [&](std::shared_ptr<FakeProjector> projector, ProjectorConfig config)
+			{
+				return RunConnectionTestOnNewConnection(config,
+					[projector] { return std::make_unique<FakePort>(projector); }, plan);
+			};
+			ProjectorConfig config = FastConfig();
+			config.readBack = false;   // the saved setting; the test turns it on itself
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				const ConnectionTestResult result = run(projector, config);
+				Assert::IsTrue(result.pass, std::wstring(result.summary.begin(), result.summary.end()).c_str());
+				Assert::IsTrue(result.summary.rfind("PASS", 0) == 0);
+				const auto lights = LightCommands(projector->Writes());
+				Assert::IsTrue(lights.size() >= 2);
+				Assert::IsTrue(lights.front().rfind(":LPW160", 0) == 0 && lights.back().rfind(":LPW1255", 0) == 0);
+				Assert::AreEqual(255, projector->light, L"The light must end at 255");
+			}
+			{
+				// A projector whose maximum is below 255: the test ends there.
+				auto projector = std::make_shared<FakeProjector>();
+				projector->maximum = 200;
+				const ConnectionTestResult result = run(projector, config);
+				Assert::IsTrue(result.pass && projector->light == 200,
+					std::wstring(result.summary.begin(), result.summary.end()).c_str());
+			}
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->silent = true;
+				const ConnectionTestResult result = run(projector, config);
+				Assert::IsFalse(result.pass);
+				Assert::IsTrue(result.summary.find("did not answer") != std::string::npos,
+					std::wstring(result.summary.begin(), result.summary.end()).c_str());
+			}
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->openFails = true;
+				const ConnectionTestResult result = run(projector, config);
+				Assert::IsFalse(result.pass);
+				Assert::IsTrue(result.summary.find("could not open") != std::string::npos,
+					std::wstring(result.summary.begin(), result.summary.end()).c_str());
+			}
+			{
+				// A projector that acknowledges but reports another level.
+				struct Stubborn : IProjectorDriver
+				{
+					int light = 150;
+					const char* Protocol() const override { return "test"; }
+					bool Open(std::string&) override { return true; }
+					LightRange QueryLightRange() override { return {}; }
+					ProjectorState ReadState() override { ProjectorState st; st.lightKnown = true; st.light = light; return st; }
+					void SetLight(int) override {}
+					bool SetLightNow(int, int) override { return true; }
+					bool SetContrast(int) override { return true; }
+					void Close() override {}
+					DriverStatus Status() const override { return {}; }
+				} stubborn;
+				int slept = 0;
+				const ConnectionTestResult result = RunConnectionTest(stubborn, [&](int ms) { slept += ms; }, plan);
+				Assert::IsFalse(result.pass);
+				Assert::IsTrue(result.summary.find("reports 150") != std::string::npos,
+					std::wstring(result.summary.begin(), result.summary.end()).c_str());
+				Assert::AreEqual(0, slept, L"No wait after a failed first step");
+			}
+		}
+
 	public:
 		TEST_METHOD(ReplyParserAcceptsOnlyBarcoReplies)
 		{

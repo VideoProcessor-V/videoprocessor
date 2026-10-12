@@ -12,8 +12,9 @@
 // or shared snapshot layout changes. The executable and optional renderer DLL are deployed separately,
 // so this is the fail-closed ABI boundary for a mismatched pair.
 // 25: GetDejudderStatus (stage 6b-2b, FL35) and, separately, Bill's rc4 Beta
-// flavor export; 26: both together (rc4 merge).
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 26;
+// flavor export; 26: both together (rc4 merge); 27: Suspend/ResumeLedDrive
+// for the RS-232 connection test (FL35).
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 27;
 static constexpr const char* VP_LIBPLACEBO_FLAVOR_EXPORT = "VideoProcessorLibplaceboIsBeta";
 static constexpr const char* VP_LIBPLACEBO_VERSION_EXPORT =
 	"VideoProcessorLibplaceboGetApiVersion";
