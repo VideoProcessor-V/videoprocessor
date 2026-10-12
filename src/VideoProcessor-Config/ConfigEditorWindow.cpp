@@ -3974,7 +3974,9 @@ bool ConfigEditorWindow::saveChanges()
                 const bool isShortcut =
                     (root == QStringLiteral("shortcuts") &&
                         ConfigFile::NormalizeName(setting.first) !=
-                            "foreground_only") ||
+                            "foreground_only" &&
+                        ConfigFile::NormalizeName(setting.first) !=
+                            "global_hotkeys") ||
                     ConfigFile::NormalizeName(setting.first) == "shortcut";
                 if (!isShortcut || ConfigFile::Trim(setting.second).empty()) continue;
                 std::string canonical;
@@ -4693,6 +4695,31 @@ QWidget* ConfigEditorWindow::createStartupPage()
         configuredBooleanValue(value(QStringLiteral("general"),
             QStringLiteral("no_ui")), false)));
     behaviorLayout->addWidget(bindCheckField(QStringLiteral("Start minimized"), QStringLiteral("general"), QStringLiteral("startminimized")));
+    // Delta 6 (settings first): the saved state of what a key or a main-window
+    // control can change.
+    auto* statsOverlay = bindCheckField(QStringLiteral("Show statistics overlay"),
+        QStringLiteral("general"), QStringLiteral("stats_overlay"), false);
+    statsOverlay->setToolTip(QStringLiteral(
+        "Shows the statistics overlay at start. The statistics key toggles it until restart."));
+    behaviorLayout->addWidget(statsOverlay);
+    auto* useQueue = bindCheckField(QStringLiteral("Use the frame queue"),
+        QStringLiteral("general"), QStringLiteral("use_frame_queue"), true);
+    useQueue->setToolTip(QStringLiteral(
+        "The renderer's frame queue (the main window's \"use queue\" check). On is the normal setting."));
+    behaviorLayout->addWidget(useQueue);
+    auto* autoReset = bindCheckField(QStringLiteral("Reset the queue automatically"),
+        QStringLiteral("general"), QStringLiteral("queue_auto_reset"), true);
+    autoReset->setToolTip(QStringLiteral(
+        "Resets an over-full queue by itself (the main window's \"auto reset\" check), at the "
+        "queue recovery threshold."));
+    behaviorLayout->addWidget(autoReset);
+    auto* persistSelection = bindCheckField(QStringLiteral("Keep key-selected profiles after restart"),
+        QStringLiteral("general"), QStringLiteral("persist_profile_selection"), false);
+    persistSelection->setToolTip(QStringLiteral(
+        "Off (default): a profile chosen with a key lasts until restart or until the rules select a "
+        "different profile. On: the earlier behaviour, choices are saved to VideoProcessor.state and "
+        "kept across restarts as fallbacks."));
+    behaviorLayout->addWidget(persistSelection);
     // Scene detection is the sole supported choice here. It is deliberately
     // opt-in: an absent value means off, and clearing the checkbox writes the
     // explicit false value. The basic correction and feature-disable switches
@@ -9921,8 +9948,8 @@ QWidget* ConfigEditorWindow::createShortcutsPage()
         { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
         { "Re-apply rules", "reapply_rules", "" },
         { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
-        { "Automatic transfer", "auto_set", "Ctrl+Shift+A" },
-        { "PQ transfer", "pq_set", "Ctrl+Shift+P" }
+        { "Automatic transfer (DirectShow only)", "auto_set", "Ctrl+Shift+A" },
+        { "PQ transfer (DirectShow only)", "pq_set", "Ctrl+Shift+P" }
     };
     const ShortcutField captureFields[] = {
         { "Restart renderer", "renderer_restart", "Shift+R" },
@@ -10111,6 +10138,22 @@ QWidget* ConfigEditorWindow::createShortcutsSetupPage()
     help->setWordWrap(true);
     help->setObjectName(QStringLiteral("fieldHelp"));
     handlingLayout->addWidget(help);
+    auto* globalHotkeys = bindCheckField(
+        QStringLiteral("Single keys work while another application has focus"),
+        QStringLiteral("shortcuts"), QStringLiteral("global_hotkeys"), false);
+    globalHotkeys->setToolTip(QStringLiteral(
+        "Off (recommended): keys without Ctrl or Alt, and Shift+letter, act only while VideoProcessor "
+        "has focus, so typing in another application never changes VideoProcessor. Ctrl, Alt and "
+        "function-key shortcuts stay global for a remote keyboard. On: every shortcut is global."));
+    handlingLayout->addWidget(globalHotkeys);
+    auto* abHelp = new QLabel(QStringLiteral(
+        "Settings are the primary control; shortcuts are a backup for A/B comparison. A key's change "
+        "lasts until restart, a profile change, or applying that setting here, and the statistics "
+        "overlay shows it on its \"Key override\" line. Keys marked DirectShow only do nothing with "
+        "VP Renderer."));
+    abHelp->setWordWrap(true);
+    abHelp->setObjectName(QStringLiteral("fieldHelp"));
+    handlingLayout->addWidget(abHelp);
     layout->addWidget(createCard(QStringLiteral("Keyboard handling"),
         QStringLiteral("Choose whether shortcuts remain global or require VideoProcessor focus."),
         handling));

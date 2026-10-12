@@ -475,6 +475,19 @@ protected:
 	HACCEL m_accelerator = nullptr;
 	std::vector<ACCEL> m_configuredAccelerators;
 	bool m_shortcutsForegroundOnly = false;
+	// Delta 6: [shortcuts] global_hotkeys (default off: only Ctrl/Alt/F-key
+	// shortcuts act while another application has focus).
+	bool m_shortcutsGlobalHotkeys = false;
+	// Delta 6: saved startup state for the stats overlay and the two queue
+	// checks ([general] stats_overlay, use_frame_queue, queue_auto_reset).
+	bool m_statsOverlayConfigured = false;
+	bool m_useFrameQueueConfigured = true;
+	bool m_queueAutoResetConfigured = true;
+	// Delta 6: what a key changed this session that differs from the saved
+	// settings, by name; shown on the stats overlay ("Key override").
+	std::map<std::string, CString> m_keyOverrides;
+	void NoteKeyOverride(const char* what, const CString& value);
+	CString KeyOverrideSummary() const;
 	bool m_configurationEditorModal = false;
 	bool m_configurationEditorActivationPending = false;
 	bool m_configurationEditorFallbackLaunched = false;
@@ -502,6 +515,10 @@ protected:
 	struct StagedRuntimeSettings
 	{
 		bool shortcutsForegroundOnly = false;
+		bool shortcutsGlobalHotkeys = false;
+		bool statsOverlay = false;
+		bool useFrameQueue = true;
+		bool queueAutoReset = true;
 		bool hasCaptureDevice = false;
 		CString captureDevice;
 		bool hasCaptureInput = false;

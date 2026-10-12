@@ -29,6 +29,7 @@ struct StatsData
 	CString colorspace;        // e.g., "BT.2020"
 	CString pixelFormat;       // e.g., "P010"
 	CString viewport;          // e.g., "cinema (2.35:1)"
+	CString keyOverrides;      // delta 6: what a key changed against the saved settings
 	CString rendererName;      // selected presentation backend
 	CString surfaceMode;       // actual presentation host: fullscreen or windowed
 

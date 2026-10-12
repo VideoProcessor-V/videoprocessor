@@ -276,6 +276,7 @@ namespace UnifiedProfileRuntime
 			return false;
 
 		m_sessionOverrideGroups.clear();
+		m_lastAutomaticSignature.clear();
 		std::shared_ptr<const Snapshot> initial;
 		if (!BuildSnapshot(restored, {}, sourceValues, 1, initial, error))
 			return false;
@@ -334,8 +335,12 @@ namespace UnifiedProfileRuntime
 				{
 					return candidate.name == selection->first;
 				});
+			// Delta 6: a live key override survives a configuration reload
+			// while its profile still exists (until restart or a profile
+			// change); other manual selections need persistence.
+			const bool live = sessionOverrides.count(selection->first) != 0;
 			const bool valid = group != m_model.groups.end() &&
-				IsPersistedSelectionValid(selection->first, selection->second);
+				IsPersistedSelectionValid(selection->first, selection->second, !live);
 			if (!valid)
 			{
 				sessionOverrides.erase(selection->first);
@@ -663,12 +668,31 @@ namespace UnifiedProfileRuntime
 			result.snapshot = current;
 			return true;
 		}
+		// Delta 6: a change in what the rules select (a new source, a profile
+		// change) releases the live key overrides; the same rules result
+		// (the same source re-detected) keeps them.
+		const std::string automatic = AutomaticSignature(sourceValues);
+		RendererProfileConfig::Selections manual = current->manualSelections;
+		std::set<std::string> sessionOverrides = m_sessionOverrideGroups;
+		if (!m_lastAutomaticSignature.empty() && automatic != m_lastAutomaticSignature &&
+			!sessionOverrides.empty())
+		{
+			for (const std::string& group : sessionOverrides)
+				if (!m_model.persistSelection)
+					manual.erase(group);
+			DebugLog::Log("unified profile: rules changed for the source; %zu key override(s) released",
+				sessionOverrides.size());
+			sessionOverrides.clear();
+		}
+		m_lastAutomaticSignature = automatic;
 		std::shared_ptr<const Snapshot> candidate;
-		if (!BuildSnapshot(current->manualSelections,
-			m_sessionOverrideGroups, sourceValues,
+		if (!BuildSnapshot(manual,
+			sessionOverrides, sourceValues,
 			m_generation + 1, candidate, error))
 			return false;
-		if (SameEffectiveState(*current, *candidate))
+		const bool overridesReleased = sessionOverrides != m_sessionOverrideGroups;
+		m_sessionOverrideGroups = std::move(sessionOverrides);
+		if (SameEffectiveState(*current, *candidate) && !overridesReleased)
 		{
 			result.snapshot = current;
 			return true;
@@ -748,6 +772,34 @@ namespace UnifiedProfileRuntime
 	std::shared_ptr<const Snapshot> Runtime::GetSnapshot() const
 	{
 		return std::atomic_load(&m_snapshot);
+	}
+
+	std::vector<std::string> Runtime::SessionOverrideGroups() const
+	{
+		std::lock_guard<std::mutex> guard(m_mutex);
+		return std::vector<std::string>(m_sessionOverrideGroups.begin(), m_sessionOverrideGroups.end());
+	}
+
+	// What the rules alone select for these source values (group = profiles),
+	// configured defaults included; empty if the rules cannot be resolved.
+	std::string Runtime::AutomaticSignature(const DisplayRuleExpression::ValueLookup& sourceValues) const
+	{
+		const DisplayRuleExpression::ValueLookup values = sourceValues ?
+			sourceValues :
+			[](const std::string&, std::string&) { return false; };
+		std::vector<RendererProfileConfig::AutomaticSelection> automatic;
+		std::string ignored;
+		if (!RendererProfileConfig::SelectAutomatic(m_model, values, automatic, ignored))
+			return std::string();
+		std::string signature = "|";
+		for (const RendererProfileConfig::AutomaticSelection& selection : automatic)
+		{
+			signature += selection.group + "=";
+			for (const std::string& profile : selection.profiles)
+				signature += profile + ",";
+			signature += selection.configuredDefault ? "d|" : "r|";
+		}
+		return signature;
 	}
 
 
@@ -1224,11 +1276,12 @@ namespace UnifiedProfileRuntime
 
 	bool Runtime::IsPersistedSelectionValid(
 		const std::string& groupName,
-		const RendererProfileConfig::Selection& profiles) const
+		const RendererProfileConfig::Selection& profiles,
+		bool requirePersistence) const
 	{
 		for (const RendererProfileConfig::Group& group : m_model.groups)
 		{
-			if (group.name != groupName || !group.persistSelection)
+			if (group.name != groupName || (requirePersistence && !group.persistSelection))
 				continue;
 			if (profiles.empty() || (!group.multiSelection && profiles.size() != 1))
 				return false;

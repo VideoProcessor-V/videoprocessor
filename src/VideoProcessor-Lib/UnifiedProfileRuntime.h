@@ -97,7 +97,11 @@ namespace UnifiedProfileRuntime
 			SelectionResult& result, std::string& error);
 
 		// Re-resolves automatic profiles after source state changes. Persisted
-		// choices are fallbacks; a live shortcut remains a session override.
+		// choices are fallbacks. A live shortcut remains a session override
+		// until the rules pick a different profile for the new source (delta
+		// 6: a key overrides until restart or a profile change); then every
+		// session override is released, and without persistence its choice
+		// too.
 		bool Refresh(const DisplayRuleExpression::ValueLookup& sourceValues,
 			RefreshResult& result, std::string& error);
 		bool Refresh(const DisplayRuleExpression::ValueLookup& sourceValues,
@@ -124,6 +128,9 @@ namespace UnifiedProfileRuntime
 			const EventActionLauncher::ActionValueLookup& eventValues = {}) const;
 
 		std::shared_ptr<const Snapshot> GetSnapshot() const;
+		// Delta 6: the groups a key currently holds against their rules (for
+		// the overlay's "Key override" line).
+		std::vector<std::string> SessionOverrideGroups() const;
 		bool IsInitialized() const;
 		std::string StatePath() const;
 		std::string ConfigPath() const;
@@ -132,6 +139,8 @@ namespace UnifiedProfileRuntime
 		bool LoadPersistedSelections(
 			RendererProfileConfig::Selections& selections,
 			std::string& error) const;
+		std::string AutomaticSignature(
+			const DisplayRuleExpression::ValueLookup& sourceValues) const;
 		bool PersistSelections(
 			const RendererProfileConfig::Selections& selections,
 			std::string& error) const;
@@ -153,7 +162,8 @@ namespace UnifiedProfileRuntime
 			std::vector<ActionInvocation>& actions, std::string& error,
 			const EventActionLauncher::ActionValueLookup& eventValues = {}) const;
 		bool IsPersistedSelectionValid(const std::string& group,
-			const RendererProfileConfig::Selection& profiles) const;
+			const RendererProfileConfig::Selection& profiles,
+		bool requirePersistence = true) const;
 
 		mutable std::mutex m_mutex;
 		RendererProfileConfig::Model m_model;
@@ -165,6 +175,8 @@ namespace UnifiedProfileRuntime
 		// Runtime-only origin state. Keep it outside Snapshot because Snapshot is
 		// passed across the separately deployed VP Renderer DLL boundary.
 		std::set<std::string> m_sessionOverrideGroups;
+		// Delta 6: what the rules selected at the last refresh.
+		std::string m_lastAutomaticSignature;
 		std::shared_ptr<const Snapshot> m_snapshot;
 	};
 }

@@ -197,6 +197,20 @@ namespace ConfigurationLiveApply
 		return true;
 	}
 
+	// Delta 6 (planner, global_hotkeys): with [shortcuts] global_hotkeys off
+	// (the default) only chords that cannot be ordinary typing act while
+	// another application has focus: Ctrl or Alt combinations and the
+	// function keys. A bare key or Shift+key (a capital letter) acts only
+	// while VP has focus. On, every configured key is global (the old rule).
+	inline bool IsGlobalSafeShortcut(bool control, bool alt, bool shift,
+		unsigned int virtualKey)
+	{
+		(void)shift;
+		if (control || alt)
+			return true;
+		return virtualKey >= 0x70 && virtualKey <= 0x87;   // VK_F1..VK_F24
+	}
+
 	inline bool MayDispatchInjectedShortcut(bool injected,
 		uint32_t videoProcessorProcessId, uint32_t foregroundProcessId)
 	{

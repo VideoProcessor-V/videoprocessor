@@ -727,6 +727,14 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 	DrawText(hdc, line, PADDING, y);
 	y += lineHeight;
 
+	// Delta 6: a key's change against the saved settings is always shown.
+	if (!m_stats.keyOverrides.IsEmpty())
+	{
+		line.Format(TEXT("Key override:     %-s"), static_cast<LPCTSTR>(m_stats.keyOverrides));
+		DrawText(hdc, line, PADDING, y);
+		y += lineHeight;
+	}
+
 	if (m_stats.activeShaders.empty())
 		line.Format(TEXT("Shaders:          None"));
 	else
@@ -1019,6 +1027,8 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 	// The selected rule and shader summary are always visible, followed by one row per active
 	// shader. DrawStats also contains three four-pixel section separators.
 	lineCount += 2 + stats.activeShaders.size();
+	if (!stats.keyOverrides.IsEmpty())
+		++lineCount;
 	if (!stats.dejudderStatus.IsEmpty())
 		++lineCount;
 	const int lineHeight =

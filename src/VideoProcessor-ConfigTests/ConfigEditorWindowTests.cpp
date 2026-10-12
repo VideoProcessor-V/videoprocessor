@@ -1397,6 +1397,14 @@ void testEveryPageRoundTrips()
         QStringLiteral("VideoProcessor Renderer (Alpha)"));
     requireControl<QCheckBox>(window, QStringLiteral("config.general.fullscreen"))->setChecked(false);
     requireControl<QCheckBox>(window, QStringLiteral("config.general.startminimized"))->setChecked(false);
+    // Delta 6: saved start state for what keys / window controls change.
+    require(!requireControl<QCheckBox>(window, QStringLiteral("config.general.stats_overlay"))->isChecked(),
+        "The statistics overlay did not default to hidden");
+    require(requireControl<QCheckBox>(window, QStringLiteral("config.general.use_frame_queue"))->isChecked() &&
+        requireControl<QCheckBox>(window, QStringLiteral("config.general.queue_auto_reset"))->isChecked(),
+        "The queue checks did not default to on");
+    require(!requireControl<QCheckBox>(window, QStringLiteral("config.general.persist_profile_selection"))->isChecked(),
+        "Key-selected profiles did not default to session-only");
     requireControl<QCheckBox>(window, QStringLiteral("config.general.scene_detect"))->setChecked(false);
     selectData(requireControl<QComboBox>(window,
         QStringLiteral("config.general.fullscreen_monitor_name")),
@@ -1514,6 +1522,9 @@ void testEveryPageRoundTrips()
     require(!foregroundOnly->isChecked(),
         "Foreground-only shortcut processing did not default to disabled");
     foregroundOnly->setChecked(true);
+    // Delta 6: bare keys stay local by default; DirectShow-only keys are marked.
+    require(!requireControl<QCheckBox>(window, QStringLiteral("config.shortcuts.global_hotkeys"))->isChecked(),
+        "Global single-key shortcuts did not default to off");
 
     window.selectPage(10);
     require(requireControl<QCheckBox>(window, QStringLiteral("config.logging.enabled"))->isChecked(),

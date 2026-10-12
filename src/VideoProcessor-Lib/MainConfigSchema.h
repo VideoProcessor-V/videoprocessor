@@ -118,7 +118,12 @@ namespace MainConfigSchema
 			ConfigSchema::Choice("switch_refresh_rate",
 				{ "true", "false", "never", "fullscreen_only", "full_screen_only", "always" }),
 			ConfigSchema::Boolean("persist_profile_selection"),
-			ConfigSchema::Integer("profile_change_display_seconds", 0, 60)
+			ConfigSchema::Integer("profile_change_display_seconds", 0, 60),
+			// Delta 6: saved startup state for what keys / window controls
+			// change (settings first).
+			ConfigSchema::Boolean("stats_overlay"),
+			ConfigSchema::Boolean("use_frame_queue"),
+			ConfigSchema::Boolean("queue_auto_reset")
 		};
 		if (!ConfigSchema::ValidateSection(
 			config, "command_line", commandLineRules, error))
@@ -211,6 +216,13 @@ namespace MainConfigSchema
 			!ConfigSchema::Boolean("foreground_only").validator(foregroundOnly))
 		{
 			error = "[shortcuts] key 'foreground_only' must be a Boolean";
+			return false;
+		}
+		std::string globalHotkeys;
+		if (config.TryGetString("shortcuts", "global_hotkeys", globalHotkeys) &&
+			!ConfigSchema::Boolean("global_hotkeys").validator(globalHotkeys))
+		{
+			error = "[shortcuts] key 'global_hotkeys' must be a Boolean";
 			return false;
 		}
 		const std::vector<ConfigSchema::KeyRule> conversionRules = {

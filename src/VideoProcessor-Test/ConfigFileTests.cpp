@@ -309,6 +309,76 @@ namespace VideoProcessorTest
             }
         }
 
+        // Delta 6 (settings first): a key's profile choice is a session
+        // override until the rules select a different profile for the source;
+        // nothing is persisted unless persist_profile_selection is true.
+        TEST_METHOD(KeyProfileChoiceLastsUntilTheRulesChange)
+        {
+            std::string repository = __FILE__;
+            for (int level = 0; level < 3; ++level)
+                repository.resize(repository.find_last_of("\\/"));
+            std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
+                std::ios::binary);
+            const std::string contents((std::istreambuf_iterator<char>(shipped)),
+                std::istreambuf_iterator<char>());
+            Assert::IsFalse(contents.empty());
+            Assert::IsTrue(contents.find("persist_profile_selection") == std::string::npos,
+                L"The cinema config must rely on the default");
+            CachedConfigTestFile file;
+            std::ofstream(file.path, std::ios::binary) << contents;
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            auto source = [](const char* rate)
+            {
+                const double exact = std::stod(rate);
+                return [exact](const std::string& variable, std::string& value)
+                {
+                    std::ostringstream text;
+                    text.imbue(std::locale::classic());
+                    text.precision(17);
+                    if (variable == "source_rate")
+                        text << static_cast<int>(std::floor(exact));
+                    else if (variable == "cadence")
+                        text << exact;
+                    else
+                        return false;
+                    value = text.str();
+                    return true;
+                };
+            };
+            auto queue = [](const std::shared_ptr<const UnifiedProfileRuntime::Snapshot>& snapshot)
+            {
+                return RendererProfileConfig::FormatSelection(snapshot->effectiveSelections.at("queue"));
+            };
+            UnifiedProfileRuntime::Runtime runtime;
+            std::string error;
+            Assert::IsTrue(runtime.Initialize(config, source("23.976"), error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::IsTrue(runtime.StatePath().empty(), L"No state file without persist_profile_selection: true");
+            UnifiedProfileRuntime::RefreshResult refreshed;
+            Assert::IsTrue(runtime.Refresh(source("23.976"), refreshed, error));
+            Assert::AreEqual(std::string("normal"), queue(runtime.GetSnapshot()));
+
+            UnifiedProfileRuntime::SelectionResult selected;
+            Assert::IsTrue(runtime.SelectKey("Shift+L", source("23.976"), selected, error),
+                std::wstring(error.begin(), error.end()).c_str());
+            Assert::AreEqual(std::string("low_latency"), queue(runtime.GetSnapshot()), L"The key selects Low_Latency");
+            Assert::AreEqual(size_t{ 1 }, runtime.SessionOverrideGroups().size());
+
+            // The same source again: the key's choice stays.
+            Assert::IsTrue(runtime.Refresh(source("23.976"), refreshed, error));
+            Assert::AreEqual(std::string("low_latency"), queue(runtime.GetSnapshot()), L"Same source: the key's choice stays");
+            Assert::AreEqual(size_t{ 1 }, runtime.SessionOverrideGroups().size());
+
+            // A 60p source: the rules pick another profile, the override ends.
+            Assert::IsTrue(runtime.Refresh(source("59.94"), refreshed, error));
+            Assert::IsTrue(runtime.SessionOverrideGroups().empty(), L"A rules change releases the key override");
+            // Back to film: the rules' choice, not the key's.
+            Assert::IsTrue(runtime.Refresh(source("23.976"), refreshed, error));
+            Assert::AreEqual(std::string("normal"), queue(runtime.GetSnapshot()),
+                L"The released key choice must not come back (not persisted)");
+        }
+
         TEST_METHOD(QueueTargetLatencyBecomesWholeSourceFrames)
         {
             using QueueLatency::FramesForLatency;
@@ -1354,6 +1424,15 @@ namespace VideoProcessorTest
 			Assert::IsTrue(
 				ConfigurationLiveApply::MayDispatchBackgroundAccelerator(
 					false, false, true));
+			// Delta 6, global_hotkeys off: only chords that cannot be typing
+			// act while another application has focus.
+			Assert::IsTrue(ConfigurationLiveApply::IsGlobalSafeShortcut(true, false, false, 'I'));
+			Assert::IsTrue(ConfigurationLiveApply::IsGlobalSafeShortcut(false, true, false, 0x0D));
+			Assert::IsTrue(ConfigurationLiveApply::IsGlobalSafeShortcut(false, false, false, 0x74));   // F5
+			Assert::IsTrue(ConfigurationLiveApply::IsGlobalSafeShortcut(false, false, true, 0x71));    // Shift+F2
+			Assert::IsFalse(ConfigurationLiveApply::IsGlobalSafeShortcut(false, false, false, 'R'));
+			Assert::IsFalse(ConfigurationLiveApply::IsGlobalSafeShortcut(false, false, true, 'L'));    // a capital L
+			Assert::IsFalse(ConfigurationLiveApply::IsGlobalSafeShortcut(false, false, false, 0x1B));  // Esc
 			Assert::IsTrue(ConfigurationLiveApply::ShortcutModifiersMatch(
 				true, false, true, true, false, true));
 			Assert::IsFalse(ConfigurationLiveApply::ShortcutModifiersMatch(
@@ -2829,7 +2908,7 @@ namespace VideoProcessorTest
 			DeleteFileA((statePath + ".tmp").c_str());
 			{
 				std::ofstream file(path, std::ios::out | std::ios::trunc);
-				file << "[general]\n"
+				file << "[general]\npersist_profile_selection: true\n"
 					"renderer: VideoProcessor Renderer (Alpha)\n"
 					"fullscreen: true\n"
 					"[renderer_alias]\nvp: 1\nmadvr: 2\n"
@@ -4746,7 +4825,7 @@ namespace VideoProcessorTest
 			DeleteFileA(statePath.c_str());
 			{
 				std::ofstream file(path, std::ios::out | std::ios::trunc);
-				file << "[queue.base]\nqueue_size: 16\n"
+				file << "[general]\npersist_profile_selection: true\n[queue.base]\nqueue_size: 16\n"
 					"[queue.madvr_queue]\nwhen: ${renderer}==\"DirectShow - madVR\"\nqueue_size: 3\n"
 					"[queue.vp_60]\nwhen: ${renderer}==\"VP Renderer\" && ${source_rate}>30\nqueue_size: 32\n"
 					"[queue.vp_24]\nwhen: ${renderer}==\"VP Renderer\" && ${source_rate}<=30\nqueue_size: 8\n";
@@ -4829,7 +4908,7 @@ namespace VideoProcessorTest
 			DeleteFileA(statePath.c_str());
 			{
 				std::ofstream file(path, std::ios::out | std::ios::trunc);
-				file << "[queue.base]\nqueue_size: 16\n"
+				file << "[general]\npersist_profile_selection: true\n[queue.base]\nqueue_size: 16\n"
 					"[queue.vp_24]\nwhen: ${renderer}==\"VP Renderer\" && ${source_rate}<=30\nqueue_size: 8\n"
 					"[queue.vp_60]\nwhen: ${renderer}==\"VP Renderer\" && ${source_rate}>30\nqueue_size: 32\n"
 					"[queue.low_latency]\nshortcut: Shift+L\nqueue_size: 1\n";
@@ -5160,7 +5239,7 @@ namespace VideoProcessorTest
 			RendererProfileConfig::Model model;
 			Assert::IsTrue(RendererProfileConfig::Read(config, model, error),
 				std::wstring(error.begin(), error.end()).c_str());
-			Assert::IsTrue(model.persistSelection);
+			Assert::IsFalse(model.persistSelection, L"Delta 6: key choices last until restart by default");
 			// The shipped sample must not invoke machine-local commands.
 			Assert::AreEqual(static_cast<size_t>(0), model.actions.size());
 
@@ -5262,7 +5341,7 @@ namespace VideoProcessorTest
 			DeleteFileA(statePath.c_str());
 			{
 				std::ofstream file(path, std::ios::out | std::ios::trunc);
-				file << "[shader.nls]\n"
+				file << "[general]\npersist_profile_selection: true\n[shader.nls]\n"
 					"label: Default NLS\n"
 					"shader_type: nls\n"
 					"strength: 0.4\n"

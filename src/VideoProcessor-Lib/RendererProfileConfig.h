@@ -156,12 +156,12 @@ namespace RendererProfileConfig
 		bool multiSelection = false;
 		std::string resetWhen;
 		DisplayRuleExpression::Expression resetExpression;
-		bool persistSelection = true;
+		bool persistSelection = false;   // delta 6: opt-in
 	};
 
 	struct Model
 	{
-		bool persistSelection = true;
+		bool persistSelection = false;   // delta 6: opt-in
 		std::vector<std::string> warnings;
 		std::vector<Group> groups;
 		std::map<std::string, Profile> profiles;
@@ -1265,11 +1265,11 @@ namespace RendererProfileConfig
 			!ValidateCanonicalRendererSections(config, error))
 			return false;
 
-		// Target-profile configurations use the same durable profile-selection
-		// contract as the generic unified format.  They remain opt-out so an
-		// installation that intentionally wants a fresh default at every start
-		// can set [general] persist_profile_selection: false.
-		bool persist = true;
+		// Delta 6 (settings first): a key's profile choice lasts until restart
+		// or a profile change, so persistence is opt-in. [general]
+		// persist_profile_selection: true restores the earlier behaviour
+		// (choices saved to VideoProcessor.state and kept across restarts).
+		bool persist = false;
 		std::string persistText;
 		if (config.TryGetString("general", "persist_profile_selection",
 			persistText) &&
@@ -1911,7 +1911,7 @@ namespace RendererProfileConfig
 		};
 		if (!ConfigSchema::ValidateSection(config, "general", generalRules, error))
 			return false;
-		bool persist = true;
+		bool persist = false;   // delta 6: opt-in (see the target-profile reader)
 		config.TryGetBool("general", "persist_profile_selection", persist);
 		model.persistSelection = persist;
 		if (config.TryGetString("general", "event_action_delay_seconds", value))

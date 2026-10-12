@@ -18,6 +18,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 
 #include <atlstr.h>
 #include <algorithm>
+#include <tuple>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <WindowsDisplayDiagnostics.h>
@@ -161,6 +162,35 @@ bool ReadShortcutsForegroundOnly(const ConfigFile& config, bool& enabled,
 	if (config.TryGetBool("shortcuts", "foreground_only", enabled))
 		return true;
 	error = "unsupported value for shortcuts.foreground_only: " + raw;
+	return false;
+}
+
+bool ReadShortcutsGlobalHotkeys(const ConfigFile& config, bool& enabled,
+	std::string& error)
+{
+	enabled = false;
+	std::string raw;
+	if (!config.TryGetString("shortcuts", "global_hotkeys", raw))
+		return true;
+	if (config.TryGetBool("shortcuts", "global_hotkeys", enabled))
+		return true;
+	error = "unsupported value for shortcuts.global_hotkeys: " + raw;
+	return false;
+}
+
+// Delta 6: a [general] Boolean with a default; an invalid value keeps the
+// default (logged by the caller through error).
+bool ReadGeneralBoolean(const ConfigFile& config, const char* key, bool fallback,
+	bool& value, std::string& error)
+{
+	value = fallback;
+	std::string raw;
+	if (!config.TryGetString("general", key, raw))
+		return true;
+	if (config.TryGetBool("general", key, value))
+		return true;
+	value = fallback;
+	error = std::string("unsupported value for general.") + key + ": " + raw;
 	return false;
 }
 
@@ -2293,6 +2323,19 @@ CVideoProcessorDlg::CVideoProcessorDlg():
 			DebugLog::Log("Shortcut focus policy retained default: %s",
 				shortcutPolicyError.c_str());
 		}
+		std::string delta6Error;
+		if (!ReadShortcutsGlobalHotkeys(profileConfig, m_shortcutsGlobalHotkeys, delta6Error))
+			DebugLog::Log("Shortcut global policy retained default: %s", delta6Error.c_str());
+		for (const auto& entry : { std::make_tuple("stats_overlay", false, &m_statsOverlayConfigured),
+			std::make_tuple("use_frame_queue", true, &m_useFrameQueueConfigured),
+			std::make_tuple("queue_auto_reset", true, &m_queueAutoResetConfigured) })
+		{
+			delta6Error.clear();
+			if (!ReadGeneralBoolean(profileConfig, std::get<0>(entry), std::get<1>(entry),
+				*std::get<2>(entry), delta6Error))
+				DebugLog::Log("Startup setting retained default: %s", delta6Error.c_str());
+		}
+		m_statsOverlayRequestedVisible = m_statsOverlayConfigured;
 		std::string profileError;
 		if (!m_profileRuntime.Initialize(profileConfig,
 			GetUnifiedProfileSourceLookup(), profileError))
@@ -2431,6 +2474,20 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
 		m_interfaceMode == ApplicationInterface::Mode::Modern, m_hideUI,
 		m_shortcutsForegroundOnly);
 	std::vector<ACCEL> observedAccelerators = m_configuredAccelerators;
+	if (!m_shortcutsGlobalHotkeys)
+	{
+		const size_t before = observedAccelerators.size();
+		observedAccelerators.erase(std::remove_if(observedAccelerators.begin(),
+			observedAccelerators.end(), [](const ACCEL& accelerator)
+			{
+				return !ConfigurationLiveApply::IsGlobalSafeShortcut(
+					(accelerator.fVirt & FCONTROL) != 0, (accelerator.fVirt & FALT) != 0,
+					(accelerator.fVirt & FSHIFT) != 0, accelerator.key);
+			}), observedAccelerators.end());
+		if (observedAccelerators.size() != before)
+			DebugLog::Log("Background shortcuts: %zu bare or Shift-only keys act only while VP has focus (global_hotkeys off)",
+				before - observedAccelerators.size());
+	}
 	const bool sameProcessOnly = !enableAllBackgroundShortcuts &&
 		m_shortcutsForegroundOnly;
 	if (sameProcessOnly)
@@ -4408,6 +4465,13 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 	if (!ReadShortcutsForegroundOnly(config,
 		m_stagedRuntimeSettings.shortcutsForegroundOnly, error))
 		return false;
+	if (!ReadShortcutsGlobalHotkeys(config,
+		m_stagedRuntimeSettings.shortcutsGlobalHotkeys, error))
+		return false;
+	if (!ReadGeneralBoolean(config, "stats_overlay", false, m_stagedRuntimeSettings.statsOverlay, error) ||
+		!ReadGeneralBoolean(config, "use_frame_queue", true, m_stagedRuntimeSettings.useFrameQueue, error) ||
+		!ReadGeneralBoolean(config, "queue_auto_reset", true, m_stagedRuntimeSettings.queueAutoReset, error))
+		return false;
 	if (getApplicationValue("capture_device", value))
 	{
 		m_stagedRuntimeSettings.hasCaptureDevice = true;
@@ -4679,6 +4743,31 @@ void CVideoProcessorDlg::PublishStagedFullscreenMonitorSelection()
 
 void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 {
+	// Delta 6: a saved value that changed takes effect now and ends any key
+	// override of it; an unchanged one leaves a live key override alone.
+	if (m_stagedRuntimeSettings.statsOverlay != m_statsOverlayConfigured)
+	{
+		m_statsOverlayConfigured = m_stagedRuntimeSettings.statsOverlay;
+		if (m_statsOverlay && m_statsOverlayRequestedVisible != m_statsOverlayConfigured)
+			OnCommandToggleStatsOverlay();
+		m_keyOverrides.erase("stats overlay");
+	}
+	if (m_stagedRuntimeSettings.useFrameQueue != m_useFrameQueueConfigured)
+	{
+		m_useFrameQueueConfigured = m_stagedRuntimeSettings.useFrameQueue;
+		if (m_rendererVideoFrameUseQeueueCheck.GetSafeHwnd())
+			m_rendererVideoFrameUseQeueueCheck.SetCheck(m_useFrameQueueConfigured ? BST_CHECKED : BST_UNCHECKED);
+	}
+	if (m_stagedRuntimeSettings.queueAutoReset != m_queueAutoResetConfigured)
+	{
+		m_queueAutoResetConfigured = m_stagedRuntimeSettings.queueAutoReset;
+		if (m_rendererResetAutoCheck.GetSafeHwnd())
+			m_rendererResetAutoCheck.SetCheck(m_queueAutoResetConfigured ? BST_CHECKED : BST_UNCHECKED);
+	}
+	// Applying settings replaces these session choices (survey: video
+	// conversion, the DirectShow transfer box and the capture device).
+	for (const char* replaced : { "video conversion", "transfer (DirectShow)", "capture device" })
+		m_keyOverrides.erase(replaced);
 	const auto sessionPresentation =
 		ConfigurationLiveApply::PreserveSessionPresentation(
 			m_hideUI,
@@ -4919,6 +5008,8 @@ bool CVideoProcessorDlg::ReplaceStagedAccelerators()
 		std::move(m_stagedConfiguredAccelerators);
 	m_shortcutsForegroundOnly =
 		m_stagedRuntimeSettings.shortcutsForegroundOnly;
+	m_shortcutsGlobalHotkeys =
+		m_stagedRuntimeSettings.shortcutsGlobalHotkeys;
 	if (previous)
 		DestroyAcceleratorTable(previous);
 	StartGlobalShortcutObserver();
@@ -5408,6 +5499,7 @@ void CVideoProcessorDlg::SetVideoConversionOff()
 	else
 		m_directShowVideoConversionOverride = VideoConversionOverride::VIDEOCONVERSION_NONE;
 	DEBUGLOG("Video conversion command applied: owner=%s value=NONE", vpRenderer ? "vprenderer" : "directshow");
+	NoteKeyOverride("video conversion", TEXT("off"));
 	if (m_rendererVideoConversionCombo.GetCurSel() != 0) {
 
 		m_rendererVideoConversionCombo.SetCurSel(0);
@@ -5423,6 +5515,7 @@ void CVideoProcessorDlg::SetVideoConversionP010()
 	else
 		m_directShowVideoConversionOverride = VideoConversionOverride::VIDEOCONVERSION_V210_TO_P010;
 	DEBUGLOG("Video conversion command applied: owner=%s value=V210_TO_P010", vpRenderer ? "vprenderer" : "directshow");
+	NoteKeyOverride("video conversion", TEXT("P010"));
 	if (m_rendererVideoConversionCombo.GetCurSel() != 1) {
 		m_rendererVideoConversionCombo.SetCurSel(1);
 		OnBnClickedCaptureRestart();
@@ -7529,10 +7622,48 @@ LRESULT CVideoProcessorDlg::OnMessageFullscreenHostResized(
 //
 
 
+void CVideoProcessorDlg::NoteKeyOverride(const char* what, const CString& value)
+{
+	m_keyOverrides[what] = value;
+}
+
+// Delta 6: the overlay's "Key override" line: what a key changed this session
+// (until restart, a profile change or Config applying that setting), and the
+// profile groups a key holds against their rules.
+CString CVideoProcessorDlg::KeyOverrideSummary() const
+{
+	CString summary;
+	auto add = [&summary](const CString& item)
+	{
+		if (!summary.IsEmpty())
+			summary += TEXT(", ");
+		summary += item;
+	};
+	if (m_profileRuntime.IsInitialized())
+	{
+		const auto snapshot = m_profileRuntime.GetSnapshot();
+		for (const std::string& group : m_profileRuntime.SessionOverrideGroups())
+		{
+			CString item(group.c_str());
+			if (snapshot)
+			{
+				const auto selected = snapshot->manualSelections.find(group);
+				if (selected != snapshot->manualSelections.end() && !selected->second.empty())
+					item += CString(TEXT(" ")) + CString(selected->second.front().c_str());
+			}
+			add(item);
+		}
+	}
+	for (const auto& entry : m_keyOverrides)
+		add(CString(entry.first.c_str()) + TEXT(" ") + entry.second);
+	return summary;
+}
+
 void CVideoProcessorDlg::OnCommandFullScreenToggle()
 {
 	const bool requested =
 		m_rendererFullscreenCheck.GetCheck() == BST_CHECKED;
+	NoteKeyOverride("fullscreen", requested ? TEXT("off") : TEXT("on"));
 	const bool active = m_fullScreenVideoWindow &&
 		IsWindow(m_fullScreenVideoWindow->GetHWND()) &&
 		::IsWindowVisible(m_fullScreenVideoWindow->GetHWND());
@@ -7626,6 +7757,7 @@ void CVideoProcessorDlg::OnCommandShaderRule(UINT commandId)
 	const auto rule = m_shaderShortcutRules.find(static_cast<WORD>(commandId));
 	if (rule == m_shaderShortcutRules.end())
 		return;
+	NoteKeyOverride("shader rule", TEXT("manual"));
 
 	CString replacedSelector;
 	if (m_shaderShortcutDebounce.HasPending())
@@ -7842,6 +7974,7 @@ void CVideoProcessorDlg::OnCommandDisplayRule(UINT commandId)
 
 	DEBUGLOG("Manual display rule selected: %S",
 		static_cast<LPCTSTR>(activeRule));
+	NoteKeyOverride("display rule (DirectShow)", activeRule);
 	if (rendererRestartRequired)
 	{
 		m_postRendererStartRequiresGraph = false;
@@ -7887,6 +8020,7 @@ void CVideoProcessorDlg::SelectRendererFromShortcut(unsigned int oneBasedIndex)
 	}
 
 	m_rendererCombo.SetCurSel(comboIndex);
+	NoteKeyOverride("renderer", rendererName);
 	EstablishSessionRendererOverrideFromSelection("renderer-shortcut");
 	DEBUGLOG("Renderer shortcut render.%u selected: %s",
 		oneBasedIndex,
@@ -7900,6 +8034,7 @@ void CVideoProcessorDlg::SelectRendererFromShortcut(unsigned int oneBasedIndex)
 
 void CVideoProcessorDlg::OnCommandPQSet()
 {
+	NoteKeyOverride("transfer (DirectShow)", TEXT("PQ"));
 	m_rendererTransferFunctionCombo.SetCurSel(1);
 	OnBnClickedRendererRestart();
 }
@@ -7907,6 +8042,7 @@ void CVideoProcessorDlg::OnCommandPQSet()
 
 void CVideoProcessorDlg::OnCommandAutoSet()
 {
+	NoteKeyOverride("transfer (DirectShow)", TEXT("Auto"));
 	m_rendererTransferFunctionCombo.SetCurSel(0);
 	OnBnClickedRendererRestart();
 }
@@ -7939,6 +8075,7 @@ void CVideoProcessorDlg::OnCommandToggleNoUi()
 		m_hideUI = true;
 		ApplyNoUiLayout();
 	}
+	NoteKeyOverride("video only", m_hideUI ? TEXT("on") : TEXT("off"));
 
 	// Do not restart the low-level shortcut observer during the Ctrl+U command
 	// that it dispatched. Restarting clears its pressed-key set before Ctrl+U is
@@ -8145,6 +8282,10 @@ void CVideoProcessorDlg::OnCommandToggleStatsOverlay()
 		return;
 	}
 	m_statsOverlayRequestedVisible = !m_statsOverlayRequestedVisible;
+	if (m_statsOverlayRequestedVisible != m_statsOverlayConfigured)
+		NoteKeyOverride("stats overlay", m_statsOverlayRequestedVisible ? TEXT("on") : TEXT("off"));
+	else
+		m_keyOverrides.erase("stats overlay");
 	if (m_statsOverlayRequestedVisible)
 		SetTimer(ASPECT_OSD_TIMER_ID, 150, nullptr);
 	else
@@ -8836,6 +8977,9 @@ int CVideoProcessorDlg::CalculateAutoFrameOffset() {
 void CVideoProcessorDlg::OnSelectCaptureDevice(UINT nID)
 {
 	int deviceIndex = nID - ID_COMMAND_CAPTURE_1 + 1; // Convert ID to device number
+	CString deviceLabel;
+	deviceLabel.Format(TEXT("DeckLink (%d)"), deviceIndex);
+	NoteKeyOverride("capture device", deviceLabel);
 	SelectCaptureDevice(deviceIndex);
 }
 
@@ -13573,10 +13717,12 @@ BOOL CVideoProcessorDlg::OnInitDialog()
 
 	m_rendererVideoFrameQueueSizeMaxEdit.SetWindowText(m_defaultQueueSize);
 	m_timingClockFrameOffsetEdit.SetWindowText(m_defaultFrameOffset);
-	m_rendererVideoFrameUseQeueueCheck.SetCheck(true);
+	m_rendererVideoFrameUseQeueueCheck.SetCheck(m_useFrameQueueConfigured ? BST_CHECKED : BST_UNCHECKED);
 	UpdateSceneCorrectionModeUi();
 	UpdateRendererBackendUi();
-	m_rendererResetAutoCheck.SetCheck(true);
+	m_rendererResetAutoCheck.SetCheck(m_queueAutoResetConfigured ? BST_CHECKED : BST_UNCHECKED);
+	if (m_statsOverlayRequestedVisible)
+		SetTimer(ASPECT_OSD_TIMER_ID, 150, nullptr);   // delta 6: stats_overlay: true
 	m_rendererFullscreenCheck.SetCheck(m_hideUI ? BST_UNCHECKED : m_rendererFullScreenStart);
 
 	m_timingClockFrameOffsetAutoCheck.SetCheck(m_frameOffsetAutoStart);
@@ -16505,6 +16651,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 				stats.sceneLastCorrectionSecondsFromDeadline,
 				stats.sceneLastCorrectionTick);
 		stats.activeShaderRule = m_videoRenderer->ActiveShaderRule();
+		stats.keyOverrides = KeyOverrideSummary();
 		stats.activeShaders = m_videoRenderer->ActiveShaders();
 	}
 	// A graph reset can briefly make the renderer non-rendering while the same
