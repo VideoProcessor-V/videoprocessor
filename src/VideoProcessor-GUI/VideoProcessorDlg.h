@@ -8,6 +8,8 @@
 
 #pragma once
 #include <ConfigurationLiveApply.h>
+#include <AmbientState.h>
+#include <AmbientSensor.h>
 
 
 
@@ -276,6 +278,7 @@ public:
 	void OnCommandRendererReset();
 	void OnCommandRendererRestart();
 	void OnCommandReapplyRules();
+	void OnCommandRoomLights();
 	void OnCommandShowProfiles();
 	void OnCommandDisplayRuleAuto();
 	afx_msg void OnCommandShaderRule(UINT commandId);
@@ -521,6 +524,7 @@ protected:
 		bool statsOverlay = false;
 		bool useFrameQueue = true;
 		bool queueAutoReset = true;
+		Ambient::Settings ambient;      // Stage 9: [ambient]
 		bool hasCaptureDevice = false;
 		CString captureDevice;
 		bool hasCaptureInput = false;
@@ -575,6 +579,20 @@ protected:
 			ProfileChangeOverlay::DefaultDisplaySeconds;
 	};
 	StagedRuntimeSettings m_stagedRuntimeSettings;
+	// Stage 9: room lights for the rules' `ambient` variable.
+	Ambient::Settings m_ambientConfigured;
+	Ambient::State m_ambientState;
+	bool m_ambientOverride = false;              // the room_lights key
+	Ambient::Room m_ambientOverrideRoom = Ambient::Room::Dark;
+	std::string m_ambientValue;                  // as the rules last saw it
+	bool m_ambientKeyOffLogged = false;
+	Ambient::SensorReader m_ambientSensor;       // 9b: its own COM port and thread
+	uint64_t m_ambientSensorSequence = 0;
+	std::string CurrentAmbientValue() const;
+	void UpdateAmbient(const char* reason);
+	void ConfigureAmbientSensor();
+	void PollAmbientSensor();
+	CString AmbientOverlayLine() const;
 	std::unique_ptr<ConfigFile> m_stagedConfiguration;
 	ConfigurationApplyPolicy::Action m_stagedConfigurationAction =
 		ConfigurationApplyPolicy::Action::SaveOnly;

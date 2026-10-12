@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ConfigSchema.h"
+#include "AmbientConfig.h"
 #include "QueueConfiguration.h"
 #include "led/LedDriveConfig.h"
 
@@ -41,6 +42,7 @@ namespace MainConfigSchema
 			section == "logging" ||
 			section == "decklink" ||
 			section == "shortcuts" ||
+			section == "ambient" ||
 			section == "p010_conversion" ||
 			section == "ppm_correction" ||
 			section == "display_refresh_rate_override" ||
@@ -203,6 +205,10 @@ namespace MainConfigSchema
 		// [vprenderer.input_processing] may independently override any of its fields, so overlap
 		// is deliberate and resolved by the runtime rather than rejected here.
 
+		// Stage 9: room lights.
+		if (!ConfigSchema::ValidateSection(config, "ambient", Ambient::SchemaRules(), error) ||
+			Ambient::PortClashesWithProjector(config, error))
+			return false;
 		const std::vector<ConfigSchema::KeyRule> deckLinkRules = {
 			ConfigSchema::Choice("rgb_8bit_packing", { "AUTO", "ARGB", "BGRA" }),
 			ConfigSchema::Choice("rgb_10bit_packing", { "AUTO", "R210", "R10B", "R10L" }),

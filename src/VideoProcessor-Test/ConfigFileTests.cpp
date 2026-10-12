@@ -15,6 +15,8 @@
 #include <DisplayTopologySession.h>
 #include <EventActionLauncher.h>
 #include <MainConfigSchema.h>
+#include <AmbientConfig.h>
+#include <AmbientSensor.h>
 #include <QueueConfiguration.h>
 #include <QueueLatency.h>
 #include <QueueProfileRestartPolicy.h>
@@ -982,6 +984,223 @@ namespace VideoProcessorTest
 	TEST_CLASS(ConfigFileTests)
 	{
 	public:
+
+        // Stage 9a (docs/VP-stage9-ambient.md): room lights. The state with
+        // simulated readings (hysteresis, hold, a lost detector), the
+        // [ambient] section, and a profile chosen by `$ambient`.
+        TEST_METHOD(AmbientRoomLightsSwitchAndSelectProfiles)
+        {
+            using namespace Ambient;
+            State state;
+            Settings settings;
+            Room room = Room::Dark;
+            Assert::IsFalse(state.Current(0.0, room), L"off: no room for the rules");
+            settings.mode = Mode::Manual;
+            settings.room = Room::Lit;
+            state.Configure(settings);
+            Assert::IsTrue(state.Current(0.0, room) && room == Room::Lit);
+            Assert::IsFalse(state.AddReading(1.0, 0.0), L"readings do nothing in manual mode");
+            Assert::IsTrue(state.Current(0.0, room) && room == Room::Lit);
+
+            settings = Settings();
+            settings.mode = Mode::Sensor;
+            settings.room = Room::Dark;
+            settings.luxLit = 20.0;
+            settings.luxDark = 8.0;
+            settings.holdSeconds = 5.0;
+            state.Configure(settings);
+            Assert::IsTrue(state.Current(0.0, room) && room == Room::Dark, L"no reading yet: the saved room");
+            Assert::IsTrue(state.AddReading(50.0, 1.0), L"the first reading decides at once");
+            Assert::IsTrue(state.Current(1.0, room) && room == Room::Lit);
+            Assert::IsFalse(state.AddReading(12.0, 2.0), L"between the thresholds: unchanged");
+            Assert::IsFalse(state.AddReading(3.0, 3.0));
+            Assert::IsFalse(state.AddReading(3.0, 7.9), L"held for less than 5 s");
+            Assert::IsTrue(state.Current(7.9, room) && room == Room::Lit);
+            Assert::IsTrue(state.AddReading(3.0, 8.0), L"held 5 s: dark");
+            Assert::IsTrue(state.Current(8.0, room) && room == Room::Dark);
+            // A brief excursion (a door, someone at the sensor) does not switch.
+            Assert::IsFalse(state.AddReading(60.0, 9.0));
+            Assert::IsFalse(state.AddReading(5.0, 10.0));
+            Assert::IsFalse(state.AddReading(60.0, 11.0));
+            Assert::IsFalse(state.AddReading(60.0, 15.9));
+            Assert::IsTrue(state.AddReading(60.0, 16.0));
+            // A lost detector (no reading for 10 s) falls back to the saved room.
+            Assert::IsTrue(state.Current(26.0, room) && room == Room::Lit);
+            Assert::IsTrue(state.DetectorLost(26.1));
+            Assert::IsTrue(state.Current(26.1, room) && room == Room::Dark);
+
+            CachedConfigTestFile file;
+            {
+                std::ofstream out(file.path, std::ios::trunc);
+                out << "[ambient]\nmode: sensor\nroom: lit\nlux_lit: 30\nlux_dark: 10\nhold_s: 2\n";
+            }
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Settings read;
+            Assert::IsTrue(Read(config, read, error), std::wstring(error.begin(), error.end()).c_str());
+            Assert::IsTrue(read.mode == Mode::Sensor && read.room == Room::Lit && read.luxLit == 30.0 &&
+                read.luxDark == 10.0 && read.holdSeconds == 2.0);
+            Assert::IsTrue(MainConfigSchema::Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+            {
+                std::ofstream out(file.path, std::ios::trunc);
+                out << "[ambient]\nmode: dim\n";
+            }
+            ConfigFile invalid;
+            Assert::IsTrue(invalid.Load(file.path, ConfigFile::ReadPolicy::Fresh));
+            error.clear();
+            Assert::IsFalse(Read(invalid, read, error));
+            Assert::IsTrue(read.mode == Mode::Off, L"an invalid mode keeps the default");
+            error.clear();
+            Assert::IsFalse(MainConfigSchema::Validate(invalid, error));
+            Assert::IsTrue(error.find("mode") != std::string::npos, std::wstring(error.begin(), error.end()).c_str());
+
+            // A rendering profile chosen by the room.
+            {
+                std::ofstream out(file.path, std::ios::trunc);
+                out << "[general]\nrenderer: VideoProcessor Renderer (Alpha)\n"
+                    "[ambient]\nmode: manual\nroom: lit\n"
+                    "[vprenderer.dark_room]\nquality: high\n"
+                    "[vprenderer.lit_room]\nwhen: $ambient==\"lit\"\nsdr_black_nits: 0.05\n";
+            }
+            ConfigFile rules;
+            Assert::IsTrue(rules.Load(file.path, ConfigFile::ReadPolicy::Fresh));
+            error.clear();
+            Assert::IsTrue(MainConfigSchema::Validate(rules, error), std::wstring(error.begin(), error.end()).c_str());
+            RendererProfileConfig::Model model;
+            Assert::IsTrue(RendererProfileConfig::Read(rules, model, error), std::wstring(error.begin(), error.end()).c_str());
+            auto pick = [&](const char* ambient)
+            {
+                std::vector<RendererProfileConfig::AutomaticSelection> automatic;
+                std::string selectError;
+                Assert::IsTrue(RendererProfileConfig::SelectAutomatic(model,
+                    [ambient](const std::string& name, std::string& value)
+                    {
+                        if (name != "ambient" || !ambient) return false;
+                        value = ambient;
+                        return true;
+                    }, automatic, selectError));
+                Assert::AreEqual(static_cast<size_t>(1), automatic.size());
+                return automatic.front().profiles.front();
+            };
+            Assert::AreEqual("lit_room", pick("lit").c_str());
+            Assert::AreEqual("dark_room", pick("dark").c_str());
+            Assert::AreEqual("dark_room", pick(nullptr).c_str(), L"ambient off: the rule does not match");
+        }
+
+        // Stage 9b: the sensor's lines, the reader on a simulated port (a
+        // failed open retried, a banner ignored, readings kept), and the
+        // sensor never sharing the projector's port.
+        TEST_METHOD(AmbientSensorReadsLuxLinesFromItsOwnPort)
+        {
+            double lux = -1.0;
+            Assert::IsTrue(Ambient::ParseLuxLine("12.5", lux) && lux == 12.5);
+            Assert::IsTrue(Ambient::ParseLuxLine("lux=3.25", lux) && lux == 3.25);
+            Assert::IsTrue(Ambient::ParseLuxLine(" LUX: 40 ", lux) && lux == 40.0);
+            Assert::IsTrue(Ambient::ParseLuxLine("7 lux", lux) && lux == 7.0);
+            Assert::IsTrue(Ambient::ParseLuxLine("0.8lx", lux) && lux == 0.8);
+            Assert::IsFalse(Ambient::ParseLuxLine("# VP light sensor ready", lux));
+            Assert::IsFalse(Ambient::ParseLuxLine("", lux));
+            Assert::IsFalse(Ambient::ParseLuxLine("-3", lux));
+            Assert::IsFalse(Ambient::ParseLuxLine("12 volts", lux));
+            Assert::IsFalse(Ambient::ParseLuxLine("lux 12", lux));
+
+            struct Script
+            {
+                std::mutex mutex;
+                int opens = 0;
+                std::vector<std::string> lines = { "# VP light sensor ready", "lux=5.5", "garbage", "lux=60" };
+                size_t next = 0;
+            };
+            auto script = std::make_shared<Script>();
+            class FakePort : public LedDrive::ISerialPort
+            {
+            public:
+                explicit FakePort(std::shared_ptr<Script> s) : script(std::move(s)) {}
+                bool Open(const std::string& port, int baud, std::string& error) override
+                {
+                    std::lock_guard<std::mutex> guard(script->mutex);
+                    if (++script->opens == 1) { error = "busy"; return false; }   // first try fails
+                    open = port == "COM7" && baud == 115200;
+                    return open;
+                }
+                void Close() override { open = false; }
+                bool IsOpen() const override { return open; }
+                void DiscardInput() override {}
+                bool Write(const std::string&, std::string&) override { return true; }
+                bool ReadLine(int timeoutMs, std::string& line) override
+                {
+                    {
+                        std::lock_guard<std::mutex> guard(script->mutex);
+                        if (script->next < script->lines.size())
+                        {
+                            line = script->lines[script->next++];
+                            return true;
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(std::min(timeoutMs, 20)));
+                    return false;
+                }
+            private:
+                std::shared_ptr<Script> script;
+                bool open = false;
+            };
+            Ambient::SensorReader reader;
+            Ambient::SensorReader::Timing timing;
+            timing.readTimeoutMs = 20;
+            timing.retryMs = 30;
+            timing.silenceReopenMs = 100000;
+            reader.Start("COM7", 115200, [script] { return std::unique_ptr<LedDrive::ISerialPort>(new FakePort(script)); }, timing);
+            uint64_t sequence = 0;
+            double newest = 0.0;
+            for (int i = 0; i < 200 && newest != 60.0; ++i)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                reader.Newest(sequence, newest);
+            }
+            Assert::AreEqual(60.0, newest, L"the newest reading");
+            Assert::IsTrue(sequence >= 1);
+            Assert::IsFalse(reader.Newest(sequence, newest), L"nothing newer");
+            Assert::IsTrue(reader.Status().find("reading") != std::string::npos,
+                std::wstring(reader.Status().begin(), reader.Status().end()).c_str());
+            {
+                std::lock_guard<std::mutex> guard(script->mutex);
+                Assert::IsTrue(script->opens >= 2, L"the failed open was retried");
+            }
+            reader.Stop();
+            Assert::IsFalse(reader.Running());
+
+            // The projector's port cannot be the sensor's.
+            CachedConfigTestFile file;
+            {
+                std::ofstream out(file.path, std::ios::trunc);
+                out << "[ambient]\nmode: sensor\nport: com3\nbaud: 115200\n[projector.default]\nport: COM3\n";
+            }
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Assert::IsFalse(MainConfigSchema::Validate(config, error));
+            Assert::IsTrue(error.find("projector") != std::string::npos, std::wstring(error.begin(), error.end()).c_str());
+            {
+                std::ofstream out(file.path, std::ios::trunc);
+                out << "[ambient]\nmode: sensor\nport: COM5\nbaud: 115200\n[projector.default]\nport: COM3\n";
+            }
+            ConfigFile separate;
+            Assert::IsTrue(separate.Load(file.path, ConfigFile::ReadPolicy::Fresh));
+            error.clear();
+            Assert::IsTrue(MainConfigSchema::Validate(separate, error), std::wstring(error.begin(), error.end()).c_str());
+            Ambient::Settings settings;
+            Assert::IsTrue(Ambient::Read(separate, settings, error));
+            Assert::IsTrue(settings.port == "COM5" && settings.baud == 115200);
+            {
+                std::ofstream out(file.path, std::ios::trunc);
+                out << "[ambient]\nport: LPT1\n";
+            }
+            ConfigFile badPort;
+            Assert::IsTrue(badPort.Load(file.path, ConfigFile::ReadPolicy::Fresh));
+            error.clear();
+            Assert::IsFalse(MainConfigSchema::Validate(badPort, error));
+        }
 
         TEST_METHOD(SubstringRuleRuntimeRefreshAndManualSelection)
         {

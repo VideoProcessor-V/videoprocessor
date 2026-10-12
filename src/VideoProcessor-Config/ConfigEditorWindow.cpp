@@ -4851,6 +4851,55 @@ QWidget* ConfigEditorWindow::createStartupPage()
         { QStringLiteral("FOLLOW_INPUT"), QStringLiteral("FOLLOW_INPUT_LLDV"), QStringLiteral("HDR_LUMINANCE_USER") },
         { QStringLiteral("Follow input"), QStringLiteral("Follow input (LLDV)"), QStringLiteral("User values") }));
 
+    // Stage 9: room lights (the profile rules' `ambient` variable).
+    auto* ambient = new QWidget;
+    auto* ambientForm = new QFormLayout(ambient);
+    ambientForm->setContentsMargins(0, 0, 0, 0);
+    ambientForm->setVerticalSpacing(8);
+    auto* ambientMode = bindChoiceField(QStringLiteral("ambient"), QStringLiteral("mode"),
+        { QStringLiteral("off"), QStringLiteral("manual"), QStringLiteral("sensor") },
+        { QStringLiteral("Off"), QStringLiteral("Manual"), QStringLiteral("Light sensor") });
+    ambientMode->setToolTip(QStringLiteral(
+        "Off: rules see no room state. Manual: the room is as set below. Light sensor: a light sensor "
+        "decides (an ESP32 / Arduino with a VEML7700 or TSL2591 on its own USB port; the bundled sketch is "
+        "tools/light-sensor/vp_light_sensor.ino). Without readings the room below is used."));
+    ambientForm->addRow(QStringLiteral("Room lights"), ambientMode);
+    auto* ambientRoom = bindChoiceField(QStringLiteral("ambient"), QStringLiteral("room"),
+        { QStringLiteral("dark"), QStringLiteral("lit") }, { QStringLiteral("Dark"), QStringLiteral("Lit") });
+    ambientRoom->setToolTip(QStringLiteral(
+        "The room in Manual mode, and the fallback when the light sensor is not reporting. The Room "
+        "lights key flips it until restart."));
+    ambientForm->addRow(QStringLiteral("Room"), ambientRoom);
+    struct AmbientNumber { const char* label; const char* key; double hi; const char* placeholder; const char* tip; };
+    const AmbientNumber ambientNumbers[] = {
+        { "Lit above (lux)", "lux_lit", 100000.0, "20", "Light sensor: above this the room is lit." },
+        { "Dark below (lux)", "lux_dark", 100000.0, "8", "Light sensor: below this the room is dark; in between it stays as it was." },
+        { "Hold (seconds)", "hold_s", 600.0, "5", "Light sensor: a change must last this long (a door, someone passing)." } };
+    for (const AmbientNumber& number : ambientNumbers)
+    {
+        auto* edit = bindTextField(QStringLiteral("ambient"), QString::fromLatin1(number.key));
+        edit->setValidator(new QDoubleValidator(0.0, number.hi, 3, edit));
+        edit->setPlaceholderText(QString::fromLatin1(number.placeholder));
+        edit->setToolTip(QString::fromLatin1(number.tip));
+        ambientForm->addRow(QString::fromLatin1(number.label), edit);
+    }
+    auto* ambientPort = bindTextField(QStringLiteral("ambient"), QStringLiteral("port"));
+    ambientPort->setPlaceholderText(QStringLiteral("COM5"));
+    ambientPort->setToolTip(QStringLiteral(
+        "Light sensor: its own USB serial port (Device Manager, Ports). Never the projector's RS-232 port: "
+        "a port opens for one user at a time, so Apply refuses the same port."));
+    ambientForm->addRow(QStringLiteral("Sensor port"), ambientPort);
+    auto* ambientBaud = bindTextField(QStringLiteral("ambient"), QStringLiteral("baud"));
+    ambientBaud->setValidator(new QIntValidator(1200, 921600, ambientBaud));
+    ambientBaud->setPlaceholderText(QStringLiteral("115200"));
+    ambientBaud->setToolTip(QStringLiteral("Light sensor: the serial speed its sketch uses (the bundled sketch: 115200)."));
+    ambientForm->addRow(QStringLiteral("Sensor speed (baud)"), ambientBaud);
+    auto* ambientNote = new QLabel(QStringLiteral(
+        "Profiles choose by it: a rendering profile with <b>when: $ambient==\"lit\"</b> and a raised SDR "
+        "black level renders to the lit room's black."));
+    ambientNote->setWordWrap(true);
+    ambientForm->addRow(ambientNote);
+
     cards->addCard(createCard(QStringLiteral("Hardware"),
         QStringLiteral("Capture selection used when VP starts."), hardware));
     cards->addCard(createCard(QStringLiteral("General behavior"),
@@ -4859,6 +4908,8 @@ QWidget* ConfigEditorWindow::createStartupPage()
         QStringLiteral("Monitor targeting and refresh-rate behavior. Refresh switching currently applies to VP Renderer."), source));
     cards->addCard(createCard(QStringLiteral("Input processing"),
         QStringLiteral("Shared source conversion and metadata defaults. Apply restarts the renderer; renderer pages may override each value."), input));
+    cards->addCard(createCard(QStringLiteral("Room lights"),
+        QStringLiteral("Dark or lit room, for profiles that render to the room's black."), ambient));
     return createPage(QStringLiteral("General"), QStringLiteral("Choose how VideoProcessor starts and which hardware it uses."), cards);
 }
 
@@ -10091,6 +10142,7 @@ QWidget* ConfigEditorWindow::createShortcutsPage()
         { "Toggle statistics", "toggle_stats_overlay", "Ctrl+I" },
         { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
         { "Re-apply rules", "reapply_rules", "" },
+        { "Room lights (dark / lit)", "room_lights", "" },
         { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
         { "Automatic transfer (DirectShow only)", "auto_set", "Ctrl+Shift+A" },
         { "PQ transfer (DirectShow only)", "pq_set", "Ctrl+Shift+P" }

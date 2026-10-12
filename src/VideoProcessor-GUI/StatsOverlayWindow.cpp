@@ -734,6 +734,12 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 		DrawText(hdc, line, PADDING, y);
 		y += lineHeight;
 	}
+	if (!m_stats.room.IsEmpty())
+	{
+		line.Format(TEXT("Room:             %-s"), static_cast<LPCTSTR>(m_stats.room));
+		DrawText(hdc, line, PADDING, y);
+		y += lineHeight;
+	}
 
 	if (m_stats.activeShaders.empty())
 		line.Format(TEXT("Shaders:          None"));
@@ -1028,6 +1034,8 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 	// shader. DrawStats also contains three four-pixel section separators.
 	lineCount += 2 + stats.activeShaders.size();
 	if (!stats.keyOverrides.IsEmpty())
+		++lineCount;
+	if (!stats.room.IsEmpty())
 		++lineCount;
 	if (!stats.dejudderStatus.IsEmpty())
 		++lineCount;

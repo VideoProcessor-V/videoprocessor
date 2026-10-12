@@ -36,6 +36,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <sstream>
 #include <thread>
 #include <led/ConnectionTest.h>
+#include <AmbientConfig.h>
 #include <led/LedDriveConfig.h>
 #include <led/SerialPort.h>
 #include <vector>
@@ -585,6 +586,7 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
 	{ "toggle_stats_overlay",  ID_COMMAND_TOGGLE_STATS_OVERLAY,   'I',       FCONTROL },
 	{ "capture_rendered_output", ID_COMMAND_CAPTURE_RENDERED_OUTPUT, 'S',     FCONTROL | FALT },
 	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES,            0,         0 },
+	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS,              0,         0 },
 	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES,           'I',       FCONTROL | FALT },
 	{ "pq_set",                ID_COMMAND_PQ_SET,                 'P',       FCONTROL | FSHIFT },
 	{ "renderer_restart",      ID_COMMAND_RENDERER_RESTART,       'R',       FSHIFT },
@@ -2144,6 +2146,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_COMMAND(ID_COMMAND_RENDERER_RESET, &CVideoProcessorDlg::OnCommandRendererReset)
 	ON_COMMAND(ID_COMMAND_RENDERER_RESTART, &CVideoProcessorDlg::OnCommandRendererRestart)
 	ON_COMMAND(ID_COMMAND_REAPPLY_RULES, &CVideoProcessorDlg::OnCommandReapplyRules)
+	ON_COMMAND(ID_COMMAND_ROOM_LIGHTS, &CVideoProcessorDlg::OnCommandRoomLights)
 	ON_COMMAND(ID_COMMAND_SHOW_PROFILES, &CVideoProcessorDlg::OnCommandShowProfiles)
 
 	ON_COMMAND(ID_COMMAND_PQ_SET, &CVideoProcessorDlg::OnCommandPQSet)
@@ -2340,6 +2343,16 @@ CVideoProcessorDlg::CVideoProcessorDlg():
 				DebugLog::Log("Startup setting retained default: %s", delta6Error.c_str());
 		}
 		m_statsOverlayRequestedVisible = m_statsOverlayConfigured;
+		{
+			std::string ambientError;
+			if (!Ambient::Read(profileConfig, m_ambientConfigured, ambientError))
+				DebugLog::Log("Room lights retained defaults: %s", ambientError.c_str());
+			m_ambientState.Configure(m_ambientConfigured);
+			ConfigureAmbientSensor();
+			m_ambientValue = CurrentAmbientValue();
+			if (m_ambientConfigured.mode != Ambient::Mode::Off)
+				DebugLog::Log("Room lights: %s (%s)", m_ambientValue.c_str(), Ambient::Name(m_ambientConfigured.mode));
+		}
 		std::string profileError;
 		if (!m_profileRuntime.Initialize(profileConfig,
 			GetUnifiedProfileSourceLookup(), profileError))
@@ -4568,6 +4581,8 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 		!ReadGeneralBoolean(config, "use_frame_queue", true, m_stagedRuntimeSettings.useFrameQueue, error) ||
 		!ReadGeneralBoolean(config, "queue_auto_reset", true, m_stagedRuntimeSettings.queueAutoReset, error))
 		return false;
+	if (!Ambient::Read(config, m_stagedRuntimeSettings.ambient, error))
+		return false;
 	if (getApplicationValue("capture_device", value))
 	{
 		m_stagedRuntimeSettings.hasCaptureDevice = true;
@@ -4860,6 +4875,17 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 			m_wantToRestartRenderer = true;
 			UpdateState();
 		}
+	}
+	// Stage 9: a changed [ambient] takes effect now and ends the room_lights
+	// key override.
+	if (!(m_stagedRuntimeSettings.ambient == m_ambientConfigured))
+	{
+		m_ambientConfigured = m_stagedRuntimeSettings.ambient;
+		m_ambientState.Configure(m_ambientConfigured);
+		ConfigureAmbientSensor();
+		m_ambientOverride = false;
+		m_keyOverrides.erase("room lights");
+		UpdateAmbient("ambient-settings");
 	}
 	if (m_stagedRuntimeSettings.queueAutoReset != m_queueAutoResetConfigured)
 	{
@@ -12317,9 +12343,16 @@ CVideoProcessorDlg::GetUnifiedProfileSourceLookup()
 	}
 	const double actualRefreshRate = GetActiveTargetRefreshRate(displayWindow);
 	const std::string renderer = CStringA(rendererName).GetString();
-	return [sourceValues, renderer, actualRefreshRate](const std::string& name,
+	const std::string ambient = CurrentAmbientValue();   // Stage 9; empty when off
+	return [sourceValues, renderer, actualRefreshRate, ambient](const std::string& name,
 		std::string& value)
 	{
+		if (name == "ambient")
+		{
+			if (ambient.empty()) return false;
+			value = ambient;
+			return true;
+		}
 		if (name == "renderer")
 		{
 			if (renderer.empty()) return false;
@@ -13152,6 +13185,112 @@ void CVideoProcessorDlg::DispatchQueuedQueueProfileReset()
 	}
 }
 
+
+// Stage 9: the room as the rules' `ambient` variable ("" when off).
+std::string CVideoProcessorDlg::CurrentAmbientValue() const
+{
+	if (m_ambientConfigured.mode == Ambient::Mode::Off)
+		return std::string();
+	if (m_ambientOverride)
+		return Ambient::Name(m_ambientOverrideRoom);
+	Ambient::Room room = Ambient::Room::Dark;
+	if (!m_ambientState.Current(static_cast<double>(GetTickCount64()) / 1000.0, room))
+		return std::string();
+	return Ambient::Name(room);
+}
+
+// Re-evaluates the profile rules when the room changed (deferred by the
+// runtime while there is no capture signal, as for every rules change).
+void CVideoProcessorDlg::UpdateAmbient(const char* reason)
+{
+	const std::string value = CurrentAmbientValue();
+	if (value == m_ambientValue)
+		return;
+	DebugLog::Log("Room lights: %s -> %s (%s)", m_ambientValue.empty() ? "off" : m_ambientValue.c_str(),
+		value.empty() ? "off" : value.c_str(), reason);
+	m_ambientValue = value;
+	RefreshUnifiedProfilesForRuleContext(reason);
+}
+
+// 9b: the sensor reader runs while mode is sensor and a port is set; it is
+// restarted when the port or speed changes.
+void CVideoProcessorDlg::ConfigureAmbientSensor()
+{
+	const Ambient::Settings& s = m_ambientConfigured;
+	if (s.mode != Ambient::Mode::Sensor || s.port.empty())
+	{
+		if (m_ambientSensor.Running())
+		{
+			m_ambientSensor.Stop();
+			DebugLog::Log("Room light sensor: stopped");
+		}
+		return;
+	}
+	if (m_ambientSensor.Running() && m_ambientSensor.Port() == s.port && m_ambientSensor.Baud() == s.baud)
+		return;
+	m_ambientSensorSequence = 0;
+	m_ambientSensor.Start(s.port, s.baud, [] { return LedDrive::CreateWin32SerialPort(); });
+}
+
+// Once a second: the newest reading into the state; a detector that went
+// quiet falls back to the saved room, and its next reading decides at once.
+void CVideoProcessorDlg::PollAmbientSensor()
+{
+	const double now = static_cast<double>(GetTickCount64()) / 1000.0;
+	double lux = 0.0;
+	if (m_ambientSensor.Newest(m_ambientSensorSequence, lux))
+		m_ambientState.AddReading(lux, now);
+	else if (m_ambientState.Sensed() && m_ambientState.DetectorLost(now))
+	{
+		DebugLog::Log("Room light sensor: no reading for %.0f s; using the saved room (%s)",
+			m_ambientConfigured.lostSeconds, Ambient::Name(m_ambientConfigured.room));
+		m_ambientState.ResetSensor();
+	}
+}
+
+CString CVideoProcessorDlg::AmbientOverlayLine() const
+{
+	if (m_ambientConfigured.mode == Ambient::Mode::Off)
+		return CString();
+	CString line(CurrentAmbientValue().c_str());
+	if (m_ambientOverride)
+		line += TEXT(" (key)");
+	else if (m_ambientConfigured.mode == Ambient::Mode::Manual)
+		line += TEXT(" (manual)");
+	else if (m_ambientConfigured.port.empty())
+		line += TEXT(" (sensor: no port set; saved room)");
+	else if (m_ambientState.Sensed())
+	{
+		CString reading;
+		reading.Format(TEXT(" (sensor %.1f lux)"), m_ambientState.LastLux());
+		line += reading;
+	}
+	else
+		line += TEXT(" (sensor not reporting; saved room)");
+	return line;
+}
+
+// Backup key (settings first): flips dark / lit until restart or a Config
+// change of [ambient]; a second press ends the override.
+void CVideoProcessorDlg::OnCommandRoomLights()
+{
+	if (m_ambientConfigured.mode == Ambient::Mode::Off)
+	{
+		if (!m_ambientKeyOffLogged)
+			DebugLog::Log("Room lights key ignored: [ambient] mode is off");
+		m_ambientKeyOffLogged = true;
+		return;
+	}
+	if (m_ambientOverride)
+		m_ambientOverride = false;
+	else
+	{
+		m_ambientOverrideRoom = CurrentAmbientValue() == "lit" ? Ambient::Room::Dark : Ambient::Room::Lit;
+		m_ambientOverride = true;
+	}
+	ToggleKeyOverride("room lights", CString(Ambient::Name(m_ambientOverrideRoom)));
+	UpdateAmbient("ambient-key");
+}
 
 void CVideoProcessorDlg::OnCommandReapplyRules()
 {
@@ -15399,6 +15538,12 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 	{
 		if (m_failedRendererRetirement)
 			UpdateState();
+		// Stage 9: a lost detector falls back to the saved room.
+		if (m_ambientConfigured.mode == Ambient::Mode::Sensor)
+		{
+			PollAmbientSensor();
+			UpdateAmbient("ambient-sensor");
+		}
 		UpdateActiveOutputSweep(uiNow);
 
 		// A source can publish its BT.2020/SDR state only once at startup.
@@ -16767,6 +16912,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 				stats.sceneLastCorrectionTick);
 		stats.activeShaderRule = m_videoRenderer->ActiveShaderRule();
 		stats.keyOverrides = KeyOverrideSummary();
+		stats.room = AmbientOverlayLine();
 		stats.activeShaders = m_videoRenderer->ActiveShaders();
 	}
 	// A graph reset can briefly make the renderer non-rendering while the same

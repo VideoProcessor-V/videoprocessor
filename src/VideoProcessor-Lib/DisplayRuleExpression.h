@@ -53,6 +53,7 @@ namespace DisplayRuleExpression
 			name == "screen_config" || name == "zoom_config" ||
 			name == "viewport_profile" || name == "zoom_profile" ||
 			name == "vertical_alignment" ||
+			name == "ambient" ||   // Stage 9: dark | lit (empty when off)
 			IsProfileVariable(name, "profile."))
 		{
 			type = ValueType::Text;

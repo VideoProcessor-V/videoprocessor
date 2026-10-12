@@ -192,6 +192,9 @@
     <ClInclude Include="ColorSpace.h" />
     <ClInclude Include="ConfigFile.h" />
     <ClInclude Include="led\LedDriveConfig.h" />
+    <ClInclude Include="AmbientState.h" />
+    <ClInclude Include="AmbientConfig.h" />
+    <ClInclude Include="AmbientSensor.h" />
     <ClInclude Include="led\SerialPort.h" />
     <ClInclude Include="led\ProjectorDriver.h" />
     <ClInclude Include="led\BarcoAsciiDriver.h" />
@@ -383,6 +386,7 @@
 	<ClCompile Include="RationalLiveOutputSequencer.cpp" />
     <ClCompile Include="ConfigFile.cpp" />
     <ClCompile Include="led\SerialPort.cpp" />
+    <ClCompile Include="AmbientSensor.cpp" />
     <ClCompile Include="led\ProjectorDriver.cpp" />
     <ClCompile Include="led\BarcoAsciiDriver.cpp" />
     <ClCompile Include="led\LedController.cpp" />
