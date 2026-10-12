@@ -136,6 +136,10 @@ if (er_convert_primaries > 0.5) {
 		restore.priv = this;
 		restore.hook = &Hooks::RunRestore;
 		restore.signature = 0x5650585252535452ull;   // "VPXRRSTR"
+		carryTexture = carry;
+		carryTexture.input = PL_HOOK_SIG_TEX;
+		carryTexture.hook = &Hooks::RunCarryTexture;
+		carryTexture.signature = 0x5650585243415254ull;   // "VPXRCART"
 		restoreTexture = restore;
 		restoreTexture.input = PL_HOOK_SIG_TEX;
 		restoreTexture.hook = &Hooks::RunRestoreTexture;
@@ -149,13 +153,12 @@ if (er_convert_primaries > 0.5) {
 		gammaRatio = decision.outputGamma > 0.0f ? decision.sourceGamma / decision.outputGamma : 1.0f;
 	}
 
-	pl_hook_res Hooks::RunCarry(void* priv, const pl_hook_params* params)
+	bool Hooks::AppendCarry(pl_shader sh) const
 	{
-		Hooks* self = static_cast<Hooks*>(priv);
-		const float convertGamma = self->decision.convertGamma ? 1.0f : 0.0f;
+		const float convertGamma = decision.convertGamma ? 1.0f : 0.0f;
 		const pl_shader_var variables[2] = {
 			{ pl_var_float("er_convert_gamma"), &convertGamma, true },
-			{ pl_var_float("er_gamma_ratio"), &self->gammaRatio, true } };
+			{ pl_var_float("er_gamma_ratio"), &gammaRatio, true } };
 		pl_custom_shader custom{};
 		custom.description = "VP extended range: carry";
 		custom.input = PL_SHADER_SIG_COLOR;
@@ -163,11 +166,81 @@ if (er_convert_primaries > 0.5) {
 		custom.variables = variables;
 		custom.num_variables = 2;
 		custom.body = CARRY_BODY;
-		if (!pl_shader_custom(params->sh, &custom))
+		return pl_shader_custom(sh, &custom);
+	}
+
+	bool Hooks::EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h)
+	{
+		if (tex && owner == gpu && tex->params.w == w && tex->params.h == h)
+			return true;
+		if (owner)
+			pl_tex_destroy(owner, &tex);
+		owner = nullptr;
+		const pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR));
+		if (!fmt)
+			return false;
+		pl_tex_params tp{};
+		tp.w = w;
+		tp.h = h;
+		tp.format = fmt;
+		tp.sampleable = true;
+		tp.renderable = true;
+		tex = pl_tex_create(gpu, &tp);
+		if (!tex)
+			return false;
+		owner = gpu;
+		return true;
+	}
+
+	pl_hook_res Hooks::RunCarry(void* priv, const pl_hook_params* params)
+	{
+		Hooks* self = static_cast<Hooks*>(priv);
+		if (!self->AppendCarry(params->sh))
 			return Failure();
 		pl_hook_res res{};
 		res.output = PL_HOOK_SIG_COLOR;
 		res.sh = params->sh;
+		res.repr = params->repr;
+		res.repr.alpha = PL_ALPHA_INDEPENDENT;
+		res.color = params->color;
+		res.components = 4;
+		res.rect = params->rect;
+		return res;
+	}
+
+	// For a single-plane RGB source (the subtitle move's composed picture, an
+	// RGB capture), or after a hook on the planes before RGB (CfL chroma
+	// prediction, a LUMA prescaler): libplacebo asserts (renderer.c:457,
+	// "w && h") on the render after an inline colour hook at PL_HOOK_RGB
+	// there, measured with an RGB source and with CfL; a texture-input hook
+	// (NLS) is fine. So the carry renders its own full-float texture: same
+	// body, alpha = 1 + offset.
+	pl_hook_res Hooks::RunCarryTexture(void* priv, const pl_hook_params* params)
+	{
+		Hooks* self = static_cast<Hooks*>(priv);
+		if (!params->tex)
+			return Failure();
+		const int w = params->tex->params.w, h = params->tex->params.h;
+		if (!EnsureFloat(params->gpu, self->carryGpu, self->carryTex, w, h))
+			return Failure();
+		pl_shader sh = pl_dispatch_begin(params->dispatch);
+		pl_sample_src src{};
+		src.tex = params->tex;
+		src.components = 4;
+		if (!pl_shader_sample_direct(sh, &src) || !self->AppendCarry(sh))
+		{
+			pl_dispatch_abort(params->dispatch, &sh);
+			return Failure();
+		}
+		pl_dispatch_params dp{};
+		dp.shader = &sh;
+		dp.target = self->carryTex;
+		if (!pl_dispatch_finish(params->dispatch, &dp))
+			return Failure();
+		pl_hook_res res{};
+		res.output = PL_HOOK_SIG_TEX;
+		res.tex = self->carryTex;
 		res.repr = params->repr;
 		res.repr.alpha = PL_ALPHA_INDEPENDENT;
 		res.color = params->color;
@@ -228,6 +301,10 @@ if (er_convert_primaries > 0.5) {
 			pl_tex_destroy(restoreGpu, &restoreTex);
 		restoreGpu = nullptr;
 		restoreTex = nullptr;
+		if (carryGpu)
+			pl_tex_destroy(carryGpu, &carryTex);
+		carryGpu = nullptr;
+		carryTex = nullptr;
 	}
 
 	// After another hook's texture output at PRE_KERNEL / POST_KERNEL (the
@@ -242,25 +319,11 @@ if (er_convert_primaries > 0.5) {
 		Hooks* self = static_cast<Hooks*>(priv);
 		if (!params->tex)
 			return Failure();
+		// Only its own texture is resized: the carry's may be this frame's
+		// current image (Release() would free both).
 		const int w = params->tex->params.w, h = params->tex->params.h;
-		if (!self->restoreTex || self->restoreTex->params.w != w || self->restoreTex->params.h != h)
-		{
-			self->Release();
-			const pl_fmt fmt = pl_find_fmt(params->gpu, PL_FMT_FLOAT, 4, 32, 32,
-				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR));
-			if (!fmt)
-				return Failure();
-			pl_tex_params tp{};
-			tp.w = w;
-			tp.h = h;
-			tp.format = fmt;
-			tp.sampleable = true;
-			tp.renderable = true;
-			self->restoreTex = pl_tex_create(params->gpu, &tp);
-			if (!self->restoreTex)
-				return Failure();
-			self->restoreGpu = params->gpu;
-		}
+		if (!EnsureFloat(params->gpu, self->restoreGpu, self->restoreTex, w, h))
+			return Failure();
 		pl_shader sh = pl_dispatch_begin(params->dispatch);
 		pl_sample_src src{};
 		src.tex = params->tex;
@@ -289,16 +352,29 @@ if (er_convert_primaries > 0.5) {
 	}
 
 	void Prepare(const Decision& decision, Hooks& hooks, pl_color_space& sourceColor,
-		const pl_color_space& output, std::vector<const pl_hook*>& list)
+		const pl_color_space& output, std::vector<const pl_hook*>& list, bool singlePlaneRgb)
 	{
 		if (!decision.Active())
 			return;
 		hooks.SetFrame(decision, output);
 		sourceColor = output;
-		bool afterTextureHooks = false;
+		bool afterTextureHooks = false, beforeRgbHooks = false;
+		const auto planeStages = static_cast<enum pl_hook_stage>(PL_HOOK_RGB_INPUT | PL_HOOK_LUMA_INPUT |
+			PL_HOOK_CHROMA_INPUT | PL_HOOK_ALPHA_INPUT | PL_HOOK_XYZ_INPUT | PL_HOOK_CHROMA_SCALED |
+			PL_HOOK_ALPHA_SCALED | PL_HOOK_NATIVE);
 		for (const pl_hook* hook : list)
+		{
 			if (hook && (hook->stages & (PL_HOOK_PRE_KERNEL | PL_HOOK_POST_KERNEL)))
 				afterTextureHooks = true;
-		list.insert(list.begin(), { hooks.Carry(), hooks.Restore(afterTextureHooks) });
+			// A hook on the planes before RGB (CfL chroma prediction, a LUMA
+			// prescaler): libplacebo 7.360 also asserted after the inline carry
+			// with CfL (measured); the texture form is used then.
+			if (hook && (hook->stages & planeStages))
+				beforeRgbHooks = true;
+		}
+		// A texture carry also needs the texture restore: libplacebo disabled the
+		// inline restore after it (FSRCNNX alone, measured).
+		const bool textureCarry = singlePlaneRgb || beforeRgbHooks;
+		list.insert(list.begin(), { hooks.Carry(textureCarry), hooks.Restore(afterTextureHooks || textureCarry) });
 	}
 }

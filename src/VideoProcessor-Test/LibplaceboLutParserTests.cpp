@@ -17,6 +17,7 @@
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
+#include "ChainGpuProbe.h"
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -355,9 +356,13 @@ namespace
 			if (!m_log)
 				return false;
 
-			pl_d3d11_params deviceParams{};
-			deviceParams.force_software = true;
-			deviceParams.allow_software = true;
+			// WARP unless VP_TEST_GPU=hardware (ExtendedRangeGpuProbe::TestDeviceParams).
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			static bool reported = false;
+			if (!reported)
+				Logger::WriteMessage(("GPU tests on: " + device + "\n").c_str());
+			reported = true;
 			m_d3d11 = pl_d3d11_create(m_log, &deviceParams);
 			if (!m_d3d11)
 				return false;
@@ -6323,6 +6328,190 @@ namespace VideoProcessorTest
 					remaining += entry + "\n";
 			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Every hook at once, in the renderer's order, over frames with a cut
+		// (ChainGpuProbe.h): libplacebo 7.360 with the encoding repair.
+		TEST_METHOD(WholeHookChainKeepsThePictureOnEveryFrame)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log;
+			fixture.CaptureLog(&log);
+			const ChainGpuProbe::Outcome outcome = ChainGpuProbe::Run(fixture.Gpu(), fixture.Renderer(), fixture.Log(),
+				[](const char* file) { return LoadBundledShader(file); }, true);
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(outcome.report.c_str());
+			Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
+			// The 7.360 PRE_OUTPUT note (repaired) and shader-compiler timing notes only.
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+					entry.find("Attempted to modify an immutable shader!") == std::string::npos)
+					remaining += entry + "\n";
+			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+		}
+
+		// The whole chain with motion (the matcher's look-ahead vectors, the
+		// grain map following them, the occlusion mask, the sigma-delta's motion
+		// compensation), a de-judder extra, and the LED drive's gain sequence
+		// (ChainGpuProbe::RunMotion).
+		// The Stage 10 carry on a single-plane RGB source (the subtitle move's
+		// composed picture, an RGB capture): libplacebo 7.360 asserted
+		// (renderer.c:457) after the inline colour carry; the carry's texture form
+		// renders, with and without NLS / SSIM, cropped or not, 3 or 4 components.
+		TEST_METHOD(ExtendedRangeOnASinglePlaneRgbSource)
+		{
+			for (unsigned mode : { 0u, 1u, 2u, 3u, 4u, 8u })
+			{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			pl_fmt f16 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 0, static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE));
+			std::vector<uint16_t> px(static_cast<size_t>(640) * 96 * 4, 0x3800);   // 0.5
+			pl_tex_params tp{}; tp.w = 640; tp.h = 96; tp.format = f16; tp.sampleable = true; tp.renderable = true; tp.initial_data = px.data();
+			pl_tex tex = pl_tex_create(gpu, &tp);
+			pl_frame rgb{};
+			rgb.num_planes = 1; rgb.planes[0].texture = tex; rgb.planes[0].components = 4;
+			for (int i = 0; i < 4; ++i) rgb.planes[0].component_mapping[i] = i;
+			rgb.repr.sys = PL_COLOR_SYSTEM_RGB; rgb.repr.levels = PL_COLOR_LEVELS_FULL; rgb.repr.alpha = PL_ALPHA_NONE;
+			rgb.color.primaries = PL_COLOR_PRIM_BT_709; rgb.color.transfer = PL_COLOR_TRC_GAMMA22;
+			rgb.crop = { 0.0f, 16.0f, 640.0f, 80.0f };
+			const std::string nlsText = LoadBundledShader("SSimDownscaler.glsl");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, nlsText.data(), nlsText.size());
+			const pl_hook* nls = ParseBundledNlsShader(gpu, "NLS.glsl", 0.0);
+			BindNlsShader(nls, 1.0f, 0.0f);
+			Case c; c.scale = 0.5; c.mitchell = true; c.on = true; c.image = &rgb;
+			c.sourceCrop[0] = 0; c.sourceCrop[1] = 16; c.sourceCrop[2] = 640; c.sourceCrop[3] = 80;
+			if (mode & 1u) c.extraHooks.push_back(nls);
+			if (mode & 2u) c.extraHooks.push_back(ssim);
+			if (mode & 4u) { c.sourceCrop[1] = 0; c.sourceCrop[3] = 96; rgb.crop = { 0.0f, 0.0f, 640.0f, 96.0f }; }
+			if (mode & 8u) rgb.planes[0].components = 3;
+			Planes size; size.width = 640; size.height = 96;
+			const Result r = Render(gpu, fixture.Renderer(), size, c);
+			pl_tex_destroy(gpu, &tex);
+			pl_mpv_user_shader_destroy(&ssim);
+			pl_mpv_user_shader_destroy(&nls);
+			Assert::IsTrue(r.ok && r.restores > 0, (L"mode " + std::to_wstring(mode)).c_str());
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks);
+			}
+		}
+
+		// Upscaling with every hook (ChainGpuProbe::RunUpscale), FSRCNNX and ArtCNN.
+		// The Stage 10 carry after hooks on the planes before RGB: libplacebo 7.360
+		// asserted (renderer.c:457) after the inline carry with CfL chroma
+		// prediction; Prepare picks the carry's texture form then. CfL, the LUMA
+		// prescaler and SSimSuperRes, alone and together, on a 2x upscale.
+		// Open design item (measured, reported to the planner): the Stage 10
+		// carry shifts a pixel by one offset when a channel leaves the legal
+		// range; on saturated colours neighbours get different shifts, and a
+		// non-linear user shader (SSIM here; SSimSuperRes alike) enhances those
+		// steps. Plain scaling differs by 8 (its overshoot kept vs clipped); with SSIM
+		// the colour edges differ by tens of codes. This test records the size so
+		// a change in either direction is seen; it does not approve it.
+		TEST_METHOD(ExtendedRangeWithSsimOnSaturatedColour)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			const std::vector<int> ramp = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+			Planes a = ChainGpuProbe::MovingFrame(0, ramp);
+			ChainGpuProbe::Colourise(a, 0, 64);
+			const std::string ssimText = LoadBundledShader("SSimDownscaler.glsl");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(fixture.Gpu(), ssimText.data(), ssimText.size());
+			Assert::IsNotNull(ssim);
+			auto difference = [&](bool withSsim)
+			{
+				Case on; on.scale = 0.5; on.mitchell = true;
+				if (withSsim) on.extraHooks.push_back(ssim);
+				Case off = on; off.on = false;
+				const Result r = Render(fixture.Gpu(), fixture.Renderer(), a, on);
+				const Result o = Render(fixture.Gpu(), fixture.Renderer(), a, off);
+				int m = 0;
+				for (int y = 2; y < r.height * 60 / 96; ++y) for (int x = 2; x < r.width - 2; ++x) for (int ch = 0; ch < 3; ++ch)
+					m = (std::max)(m, std::abs(r.Channel(x, y, ch) - o.Channel(x, y, ch)));
+				return m;
+			};
+			const int linear = difference(false), withSsim = difference(true);
+			pl_mpv_user_shader_destroy(&ssim);
+			const std::string report = "Stage 10 on vs off on saturated colour, down 0.5: plain " + std::to_string(linear) +
+				", with SSIM " + std::to_string(withSsim) + " codes";
+			Logger::WriteMessage((report + "\n").c_str());
+			Assert::IsTrue(linear <= 10, ToWide(report).c_str());   // measured 8: scaler overshoot kept vs clipped
+			Assert::IsTrue(withSsim <= 64, ToWide("larger than measured: " + report).c_str());
+		}
+
+		TEST_METHOD(ExtendedRangeAfterPlaneHooks)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			for (unsigned mode : { 1u, 2u, 3u, 7u })
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create());
+				pl_gpu gpu = fixture.Gpu();
+				std::string error;
+				auto src = [](const char* file) { return LoadBundledShader(file); };
+				auto pre = ChainGpuProbe::Load(gpu, src, "FSRCNNX_x2_16-0-4-1.glsl", 1280, 192, {}, error);
+				auto cfl = ChainGpuProbe::Load(gpu, src, "CfL_Prediction.glsl", 1280, 192, {}, error);
+				auto sr = ChainGpuProbe::Load(gpu, src, "SSimSuperRes.glsl", 1280, 192, {}, error);
+				Assert::IsTrue(pre && cfl && sr, ToWide(error).c_str());
+				const std::vector<int> ramp = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+				Planes a = ChainGpuProbe::MovingFrame(0, ramp);
+				ChainGpuProbe::Colourise(a, 0, 64);
+				Case c;
+				c.scale = 2.0;
+				if (mode & 1u) c.extraHooks.push_back(pre->hook);
+				if (mode & 2u) c.extraHooks.push_back(cfl->hook);
+				if (mode & 4u) c.extraHooks.push_back(sr->hook);
+				const Result r = Render(gpu, fixture.Renderer(), a, c);
+				Assert::IsTrue(r.ok && r.restores > 0, (L"mode " + std::to_wstring(mode)).c_str());
+				{ const pl_render_errors e = pl_renderer_get_errors(fixture.Renderer()); Assert::AreEqual(0, e.num_disabled_hooks, (L"mode " + std::to_wstring(mode) + L" disabled " + (e.num_disabled_hooks ? std::to_wstring(e.disabled_hooks[0]) : L"")).c_str()); }
+			}
+		}
+
+		TEST_METHOD(WholeHookChainUpscales)
+		{
+			for (const char* prescaler : { "FSRCNNX_x2_16-0-4-1.glsl", "ArtCNN_C4F16.glsl" })
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create());
+				std::string log;
+				fixture.CaptureLog(&log);
+				const ChainGpuProbe::Outcome outcome = ChainGpuProbe::RunUpscale(fixture.Gpu(), fixture.Renderer(), fixture.Log(),
+					[](const char* file) { return LoadBundledShader(file); }, true, prescaler);
+				fixture.CaptureLog(nullptr);
+				Logger::WriteMessage(outcome.report.c_str());
+				Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
+				std::string remaining;
+				std::istringstream lines(log);
+				for (std::string entry; std::getline(lines, entry);)
+					if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
+						remaining += entry + "\n";
+				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			}
+		}
+
+		TEST_METHOD(WholeHookChainHandlesMotionAndTheLookAheads)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log;
+			fixture.CaptureLog(&log);
+			const ChainGpuProbe::Outcome outcome = ChainGpuProbe::RunMotion(fixture.Gpu(), fixture.Renderer(), fixture.Log(),
+				[](const char* file) { return LoadBundledShader(file); }, true);
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(outcome.report.c_str());
+			Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos &&
+					entry.find("Attempted to modify an immutable shader!") == std::string::npos)
+					remaining += entry + "\n";
+			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
 		}
 
 		TEST_METHOD(BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath)

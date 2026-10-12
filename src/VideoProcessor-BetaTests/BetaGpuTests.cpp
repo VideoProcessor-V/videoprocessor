@@ -12,6 +12,7 @@
 #include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
 #include "../VideoProcessor-Lib/vprenderer/RenderedWarp.h"
 #include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
+#include "../VideoProcessor-Test/ChainGpuProbe.h"
 
 #include <algorithm>
 #include <fstream>
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -53,12 +55,17 @@ namespace
 			};
 			logParams.log_priv = &messages;
 			log = pl_log_create(PL_API_VER, &logParams);
-			pl_d3d11_params deviceParams{};
-			deviceParams.force_software = true;
-			deviceParams.allow_software = true;
+			// WARP unless VP_TEST_GPU=hardware (the NVIDIA adapter when present).
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			const bool hardware = ExtendedRangeGpuProbe::OnHardwareGpu();
+			static bool reported = false;
+			if (!reported)
+				std::cout << "GPU tests on: " << device << "\n";
+			reported = true;
 			d3d11 = log ? pl_d3d11_create(log, &deviceParams) : nullptr;
 			renderer = d3d11 ? pl_renderer_create(log, d3d11->gpu) : nullptr;
-			Check(renderer != nullptr, "no libplacebo WARP device");
+			Check(renderer != nullptr, hardware ? "no libplacebo hardware device" : "no libplacebo WARP device");
 		}
 
 		~Gpu()
@@ -146,6 +153,7 @@ namespace
 		}
 
 		pl_gpu GpuHandle() const { return d3d11->gpu; }
+		pl_log LogHandle() const { return log; }
 		pl_renderer RendererHandle() const { return renderer; }
 		pl_log Log() const { return log; }
 
@@ -298,9 +306,16 @@ namespace
 		return text;
 	}
 
+	// Shader-compiler timing notes ("translating HLSL to DXBC (slow!)", a
+	// loaded machine) are not failures; anything else is.
 	void CheckCleanLog(const Gpu& gpu, const char* test)
 	{
-		Check(gpu.messages.empty(), std::string(test) + ": libplacebo logged: " + gpu.messages);
+		std::string remaining;
+		std::istringstream lines(gpu.messages);
+		for (std::string entry; std::getline(lines, entry);)
+			if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+				remaining += entry + "\n";
+		Check(remaining.empty(), std::string(test) + ": libplacebo logged: " + remaining);
 	}
 
 	// Aperiodic texture (the stable GPU tests' DejudderTexture), 16-bit codes.
@@ -659,6 +674,47 @@ void RunBetaFeatureGpuTests()
 // downscaling with preserve_extended_range on (the FL35 clamp patch keeps the
 // legal 4-1019 at the output); in-range edges and in-gamut colours are as
 // without the switch (the native tests' limits).
+// Every hook at once on the deployed libplacebo (377, no encoding repair),
+// in the renderer's order, over frames with a cut (ChainGpuProbe.h).
+void RunBetaChainGpuTest()
+{
+	Gpu gpu;
+	const ChainGpuProbe::Outcome outcome = ChainGpuProbe::Run(gpu.GpuHandle(), gpu.RendererHandle(), gpu.LogHandle(),
+		[](const char* file) { return LoadRepoShader(file); }, false);
+	std::cout << outcome.report;
+	Check(outcome.ok, "whole chain on 377: " + outcome.failure);
+	std::string remaining;
+	std::istringstream lines(gpu.messages);
+	for (std::string entry; std::getline(lines, entry);)
+		if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+			remaining += entry + "\n";
+	Check(remaining.empty(), "whole chain on 377: libplacebo logged: " + remaining);
+
+	// Motion, a de-judder extra and the LED drive's gain sequence.
+	Gpu moving;
+	const ChainGpuProbe::Outcome motion = ChainGpuProbe::RunMotion(moving.GpuHandle(), moving.RendererHandle(),
+		moving.LogHandle(), [](const char* file) { return LoadRepoShader(file); }, false);
+	std::cout << motion.report;
+	Check(motion.ok, "whole chain with motion on 377: " + motion.failure);
+	remaining.clear();
+	std::istringstream movingLines(moving.messages);
+	for (std::string entry; std::getline(movingLines, entry);)
+		if (entry.find("translating HLSL to DXBC (slow!)") == std::string::npos)
+			remaining += entry + "\n";
+	Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
+
+	// Upscaling with every hook, FSRCNNX and ArtCNN.
+	for (const char* prescaler : { "FSRCNNX_x2_16-0-4-1.glsl", "ArtCNN_C4F16.glsl" })
+	{
+		Gpu up;
+		const ChainGpuProbe::Outcome upscale = ChainGpuProbe::RunUpscale(up.GpuHandle(), up.RendererHandle(),
+			up.LogHandle(), [](const char* file) { return LoadRepoShader(file); }, false, prescaler);
+		std::cout << upscale.report;
+		Check(upscale.ok, std::string("whole chain upscaling on 377: ") + upscale.failure);
+		CheckCleanLog(up, "whole chain upscaling");
+	}
+}
+
 void RunBetaExtendedRangeGpuTests()
 {
 	using namespace ExtendedRangeGpuProbe;

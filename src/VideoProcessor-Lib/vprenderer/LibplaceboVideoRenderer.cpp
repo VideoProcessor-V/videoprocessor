@@ -16044,7 +16044,10 @@ struct LibplaceboVideoRenderer::Impl
                 activeSettings.preserveExtendedRange, renderImage.color, target.color, target.lut != nullptr);
             if (extended.Active() && extendedRangeHookFailed)
                 extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
-            ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks);
+            // A one-plane RGB source (the subtitle move's composed picture, an
+            // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
+            ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
+                renderImage.num_planes == 1);
             const int logged = static_cast<int>(extended.reason);
             if (logged != extendedRangeLogged && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
             {

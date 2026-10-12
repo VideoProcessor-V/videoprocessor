@@ -89,7 +89,9 @@ namespace ExtendedRange
 		Hooks& operator=(const Hooks&) = delete;
 
 		void SetFrame(const Decision& decision, const pl_color_space& output);
-		const pl_hook* Carry() const { return &carry; }
+		// singlePlaneRgb: the source is one RGB plane (the subtitle move's
+		// composed picture, an RGB capture); see RunCarryTexture.
+		const pl_hook* Carry(bool singlePlaneRgb = false) const { return singlePlaneRgb ? &carryTexture : &carry; }
 		// afterTextureHooks: another hook's texture output precedes the restore
 		// (the SSIM downscaler, the Stage 8 blend); see RunRestoreTexture.
 		const pl_hook* Restore(bool afterTextureHooks = false) const
@@ -98,20 +100,24 @@ namespace ExtendedRange
 		}
 		bool Owns(uint64_t signature) const
 		{
-			return signature == carry.signature || signature == restore.signature ||
-				signature == restoreTexture.signature;
+			return signature == carry.signature || signature == carryTexture.signature ||
+				signature == restore.signature || signature == restoreTexture.signature;
 		}
 		unsigned long long Applied() const { return applied; }
-		// The restore's own texture: before the GPU goes.
+		// The carry's and the restore's own textures: before the GPU goes.
 		void Release();
 
 	private:
 		static pl_hook_res RunCarry(void* priv, const pl_hook_params* params);
+		static pl_hook_res RunCarryTexture(void* priv, const pl_hook_params* params);
+		bool AppendCarry(pl_shader sh) const;
+		static bool EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h);
 		static pl_hook_res RunRestore(void* priv, const pl_hook_params* params);
 		static pl_hook_res RunRestoreTexture(void* priv, const pl_hook_params* params);
 		bool AppendRestore(pl_shader sh, pl_color_space& color) const;
 
 		pl_hook carry{};
+		pl_hook carryTexture{};
 		pl_hook restore{};
 		pl_hook restoreTexture{};
 		Decision decision{};
@@ -120,12 +126,15 @@ namespace ExtendedRange
 		unsigned long long applied = 0;
 		pl_gpu restoreGpu = nullptr;
 		pl_tex restoreTex = nullptr;
+		pl_gpu carryGpu = nullptr;
+		pl_tex carryTex = nullptr;
 	};
 
 	// For an active decision: the source colour space becomes the output's
 	// (libplacebo converts nothing) and the two hooks go first in the list,
 	// so each runs ahead of any other hook of its stage (the carry before
 	// NLS). Nothing happens for an inactive decision.
+	// singlePlaneRgb: the source frame is one RGB plane (Hooks::Carry).
 	void Prepare(const Decision& decision, Hooks& hooks, pl_color_space& sourceColor,
-		const pl_color_space& output, std::vector<const pl_hook*>& list);
+		const pl_color_space& output, std::vector<const pl_hook*>& list, bool singlePlaneRgb = false);
 }

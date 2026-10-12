@@ -8,11 +8,15 @@
 // No test framework here; the callers assert.
 
 #include <vprenderer/ExtendedRange.h>
+#include <vprenderer/LibplaceboRenderParameters.h>
+#include <libplacebo/d3d11.h>
+#include <dxgi.h>
 
 #include <libplacebo/renderer.h>
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -38,6 +42,22 @@ namespace ExtendedRangeGpuProbe
 		bool mitchell = false;
 		// A hook placed first in the list (before VP's restore at its stage).
 		const pl_hook* firstHook = nullptr;
+		// Edge blanking (the renderer shrinks target.crop by it; the strips
+		// outside are the cleared surface): left, top, right, bottom pixels.
+		int blank[4] = { 0, 0, 0, 0 };
+		// The source crop (black bar detection's active picture): x0, y0, x1,
+		// y1 in source pixels; all 0 = the whole frame.
+		float sourceCrop[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		// A frame to render instead of the planes (e.g. the subtitle move's
+		// composed picture); the planes still give the size.
+		const pl_frame* image = nullptr;
+		// VP's own libplacebo parameters (LibplaceboRenderParameters::Build:
+		// tone mapping, saturation, scalers); null: libplacebo's defaults.
+		const pl_render_params* params = nullptr;
+		// An HDR source: PQ BT.2020 with 1000-nit metadata, tone-mapped to an
+		// SDR target of targetNits (the projector).
+		bool hdrSource = false;
+		float targetNits = 100.0f;
 	};
 
 	struct Planes
@@ -145,6 +165,7 @@ namespace ExtendedRangeGpuProbe
 		result.height = static_cast<int>(planes.height * c.scale);
 		pl_tex_params tp{}; tp.w = result.width; tp.h = result.height; tp.format = t10; tp.renderable = true;
 		tp.host_readable = true;
+		tp.blit_dst = (t10->caps & PL_FMT_CAP_BLITTABLE) != 0;   // cleared first, as the renderer does
 		pl_tex lt = pl_tex_create(gpu, &lp), ct = pl_tex_create(gpu, &cp), tt = pl_tex_create(gpu, &tp);
 		if (lt && ct && tt)
 		{
@@ -161,6 +182,18 @@ namespace ExtendedRangeGpuProbe
 			image.color.primaries = c.sourcePrimaries;
 			image.color.transfer = c.sourceTransfer;
 			pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+			if (c.hdrSource)
+			{
+				image.repr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+				image.color.primaries = PL_COLOR_PRIM_BT_2020;
+				image.color.transfer = PL_COLOR_TRC_PQ;
+				image.color.hdr.min_luma = 0.005f;
+				image.color.hdr.max_luma = 1000.0f;
+			}
+			if (c.image)
+				image = *c.image;
+			if (c.sourceCrop[2] > c.sourceCrop[0] && c.sourceCrop[3] > c.sourceCrop[1])
+				image.crop = { c.sourceCrop[0], c.sourceCrop[1], c.sourceCrop[2], c.sourceCrop[3] };
 			pl_frame out{};
 			out.num_planes = 1;
 			out.planes[0].texture = tt;
@@ -171,11 +204,21 @@ namespace ExtendedRangeGpuProbe
 			out.repr.bits.sample_depth = 10; out.repr.bits.color_depth = 10;
 			out.color.primaries = c.outputPrimaries;
 			out.color.transfer = c.outputTransfer;
-			pl_render_params params = pl_render_default_params;
+			if (c.hdrSource)
+				LibplaceboRenderParameters::ApplyTargetLuminance(false, c.targetNits, 0.0f, out.color);
+			if (c.blank[0] || c.blank[1] || c.blank[2] || c.blank[3])
+				out.crop = { static_cast<float>(c.blank[0]), static_cast<float>(c.blank[1]),
+					static_cast<float>(result.width - c.blank[2]), static_cast<float>(result.height - c.blank[3]) };
+			pl_render_params params = c.params ? *c.params : pl_render_default_params;
+			// The sigma-delta dithers in VP's chain (the renderer clears
+			// libplacebo's dither for those frames).
 			params.dither_params = nullptr;
 			params.error_diffusion = nullptr;
-			params.sigmoid_params = c.sigmoid ? &pl_sigmoid_default_params : nullptr;
-			params.disable_linear_scaling = !c.linear;
+			if (!c.params)
+			{
+				params.sigmoid_params = c.sigmoid ? &pl_sigmoid_default_params : nullptr;
+				params.disable_linear_scaling = !c.linear;
+			}
 			if (c.ownerScaling)
 				params.upscaler = &pl_filter_ewa_lanczossharp;
 			ExtendedRange::Hooks hooks;
@@ -186,13 +229,17 @@ namespace ExtendedRangeGpuProbe
 			for (const pl_hook* hook : c.extraHooks)
 				list.push_back(hook);
 			result.decision = ExtendedRange::Decide(c.on, image.color, out.color, false);
-			ExtendedRange::Prepare(result.decision, hooks, image.color, out.color, list);
+			ExtendedRange::Prepare(result.decision, hooks, image.color, out.color, list, image.num_planes == 1);
 			if (c.firstHook)
 				list.insert(list.begin(), c.firstHook);
 			if (c.mitchell)
 				params.downscaler = &pl_filter_mitchell;
 			params.hooks = list.empty() ? nullptr : list.data();
 			params.num_hooks = static_cast<int>(list.size());
+			// As the renderer: the whole surface cleared to black first (the
+			// matte outside target.crop), then the render.
+			const float black[3] = { 0.0f, 0.0f, 0.0f };
+			pl_frame_clear(gpu, &out, black);
 			if (pl_render_image(renderer, &image, &out, &params))
 			{
 				pl_gpu_finish(gpu);
@@ -251,6 +298,67 @@ namespace ExtendedRangeGpuProbe
 	}
 
 	inline std::wstring ToWide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+	// The GPU tests run on WARP (Windows' software rasterizer: exact and the
+	// same everywhere). VP_TEST_GPU=hardware runs them on the machine's GPU
+	// instead (its driver and shader compiler, e.g. the GeForce family the
+	// cinema's 3090 belongs to). Some WARP-specific expectations may then
+	// differ: that is what the mode is for.
+	inline bool OnHardwareGpu()
+	{
+		char* value = nullptr;
+		size_t length = 0;
+		if (_dupenv_s(&value, &length, "VP_TEST_GPU") != 0 || !value)
+			return false;
+		const bool hardware = std::string(value) == "hardware";
+		std::free(value);
+		return hardware;
+	}
+
+	// The device parameters for the GPU tests: WARP, or with
+	// VP_TEST_GPU=hardware the NVIDIA adapter when there is one (a laptop's
+	// GeForce rather than its integrated GPU; the cinema has a GeForce), else
+	// Windows' default hardware adapter. `name` says which.
+	inline pl_d3d11_params TestDeviceParams(std::string* name = nullptr)
+	{
+		pl_d3d11_params params{};
+		if (!OnHardwareGpu())
+		{
+			params.force_software = true;
+			params.allow_software = true;
+			if (name) *name = "WARP (software)";
+			return params;
+		}
+		if (name) *name = "default hardware adapter";
+		using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
+		HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+		const auto create = dxgi ? reinterpret_cast<CreateFactory>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+		IDXGIFactory1* factory = nullptr;
+		if (create && SUCCEEDED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+		{
+			IDXGIAdapter1* adapter = nullptr;
+			for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i)
+			{
+				DXGI_ADAPTER_DESC1 desc{};
+				const bool nvidia = SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == 0x10DE &&
+					!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
+				adapter->Release();
+				if (nvidia)
+				{
+					params.adapter_luid = desc.AdapterLuid;
+					if (name)
+					{
+						char text[128] = {};
+						WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, text, sizeof(text) - 1, nullptr, nullptr);
+						*name = text;
+					}
+					break;
+				}
+			}
+			factory->Release();
+		}
+		return params;
+	}
 
 	inline std::string Join(const std::vector<int>& codes)
 	{
