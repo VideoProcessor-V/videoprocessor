@@ -6723,6 +6723,32 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
             "otherwise and for HDR. Off is the standard path."));
         MarkGpuCost(form, extendedRange, 1);
+        // Delta 13: the SDR tone shape and headroom.
+        auto* sdrShape = addChoice(QStringLiteral("SDR tone shape"), QStringLiteral("sdr_tone_shape"),
+            { QStringLiteral("off"), QStringLiteral("knee") });
+        sdrShape->setToolTip(QStringLiteral(
+            "SDR sources only. Knee: highlights roll off softly toward peak, the shape tone-mapped HDR has, "
+            "with no inverse tone map. Nothing is created above the master's white. Off is the standard path."));
+        MarkGpuCost(form, sdrShape, 1);
+        auto* sdrHeadroom = addText(QStringLiteral("SDR white headroom (0 to 0.5)"), QStringLiteral("sdr_white_headroom"));
+        sdrHeadroom->setValidator(new QDoubleValidator(0.0, 0.5, 3, sdrHeadroom));
+        sdrHeadroom->setPlaceholderText(QStringLiteral("0"));
+        sdrHeadroom->setToolTip(QStringLiteral(
+            "Places reference white below the projector's peak: 0.15 puts it at 85% of peak (in light), leaving room "
+            "above it for above-white detail and the knee. 0 = today."));
+        auto* sdrKneeStart = addText(QStringLiteral("SDR knee start (0.5 to 0.99 of peak)"), QStringLiteral("sdr_knee_start"));
+        sdrKneeStart->setValidator(new QDoubleValidator(0.5, 0.99, 3, sdrKneeStart));
+        sdrKneeStart->setPlaceholderText(QStringLiteral("0.80"));
+        auto* sdrKneeStrength = addText(QStringLiteral("SDR knee strength (0 to 1)"), QStringLiteral("sdr_knee_strength"));
+        sdrKneeStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, sdrKneeStrength));
+        sdrKneeStrength->setPlaceholderText(QStringLiteral("0.5"));
+        auto* sdrRecovery = addText(QStringLiteral("SDR contrast recovery (auto, off, 0 to 2)"),
+            QStringLiteral("sdr_contrast_recovery"));
+        sdrRecovery->setPlaceholderText(QStringLiteral("auto"));
+        sdrRecovery->setToolTip(QStringLiteral(
+            "With the knee: returns the local detail the knee flattens in the highlights. Auto uses the contrast "
+            "recovery above (libplacebo's own when that is Auto); off = none."));
+        MarkGpuCost(form, sdrRecovery, 1);
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { QStringLiteral("AUTO"), QStringLiteral("blue_noise"),
                 QStringLiteral("ordered_lut"), QStringLiteral("ordered_fixed"),

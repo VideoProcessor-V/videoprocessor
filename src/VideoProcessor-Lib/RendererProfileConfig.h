@@ -670,6 +670,12 @@ namespace RendererProfileConfig
 				return IsNumberInRange(value, 0.0, 10000.0);
 			// Stage 10: BTB/WTW kept through libplacebo's scaling (SDR).
 			if (key == "preserve_extended_range") return IsChoice(value, { "on", "off" });
+			// Delta 13: the SDR tone shape and headroom.
+			if (key == "sdr_tone_shape") return IsChoice(value, { "off", "knee" });
+			if (key == "sdr_white_headroom") return IsNumberInRange(value, 0.0, 0.5);
+			if (key == "sdr_knee_start") return IsNumberInRange(value, 0.5, 0.99);
+			if (key == "sdr_knee_strength") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "sdr_contrast_recovery") return IsChoice(value, { "auto", "off" }) || IsNumberInRange(value, 0.0, 2.0);
 			if (key == "sdr_input_transfer") return IsChoice(value, { "auto", "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
 			if (key == "sdr_adjust_gamma") return IsChoice(value, { "auto", "on", "off", "passthrough" });
 			expected = "an input-owned setting"; return false;

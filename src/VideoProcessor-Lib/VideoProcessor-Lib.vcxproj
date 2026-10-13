@@ -562,6 +562,10 @@
       <Link>shaders\LED compensation.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\shaders\SDR tone shape.glsl">
+      <Link>shaders\SDR tone shape.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="..\..\shaders\CfL_Prediction-LICENSE.txt">
       <Link>shaders\CfL_Prediction-LICENSE.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

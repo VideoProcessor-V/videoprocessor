@@ -46,6 +46,7 @@
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
+#include <vprenderer/SdrToneShape.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/AdaptiveDownscale.h>
@@ -901,6 +902,7 @@ namespace
 		// rgba32f regardless (LibplaceboRenderParameters).
 		int fboFloat32 = -1;
 		bool preserveExtendedRange = false; // Stage 10: BTB/WTW kept through scaling (SDR)
+		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
 		std::string downscaler = "auto";
@@ -1055,6 +1057,8 @@ namespace
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
+			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
+			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
 			<< settings.adaptiveUpscale << '|' << settings.adaptiveUpscaleWBase << '|'
 			<< settings.adaptiveUpscaleSuperresScale << '|' << settings.upscaleLight << '|'
@@ -2121,6 +2125,44 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid preserve_extended_range '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.preserveExtendedRange ? "on" : "off");
+		}
+		// Delta 13: the SDR tone shape and headroom.
+		if (config.TryGetString(rule.section, "sdr_tone_shape", raw))
+		{
+			if (raw == "off" || raw == "knee")
+				settings.sdrTone.knee = raw == "knee";
+			else
+				DebugLog::Log("profile '%s': invalid sdr_tone_shape '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sdrTone.knee ? "knee" : "off");
+		}
+		{
+			const auto readTone = [&](const char* key, double minimum, double maximum, double& target)
+			{
+				std::string text;
+				if (!config.TryGetString(rule.section, key, text))
+					return;
+				double value = 0.0;
+				if (ParseDouble(text, value) && value >= minimum && value <= maximum)
+					target = value;
+				else
+					DebugLog::Log("profile '%s': invalid %s '%s'; keeping %.3f", rule.section.c_str(), key, text.c_str(), target);
+			};
+			readTone("sdr_white_headroom", 0.0, 0.5, settings.sdrTone.headroom);
+			readTone("sdr_knee_start", 0.5, 0.99, settings.sdrTone.kneeStart);
+			readTone("sdr_knee_strength", 0.0, 1.0, settings.sdrTone.kneeStrength);
+		}
+		if (config.TryGetString(rule.section, "sdr_contrast_recovery", raw))
+		{
+			const std::string normalized = ConfigFile::NormalizeName(raw);
+			double value = 0.0;
+			if (normalized == "auto")
+				settings.sdrTone.recovery = -1.0;
+			else if (normalized == "off")
+				settings.sdrTone.recovery = 0.0;
+			else if (ParseDouble(raw, value) && value >= 0.0 && value <= 2.0)
+				settings.sdrTone.recovery = value;
+			else
+				DebugLog::Log("profile '%s': invalid sdr_contrast_recovery '%s'; keeping it", rule.section.c_str(), raw.c_str());
 		}
         ToneMappingTuning::Read([&](const char* key, std::string& value) {
             return config.TryGetString(rule.section, key, value);
@@ -4332,6 +4374,9 @@ struct LibplaceboVideoRenderer::Impl
 	OutputEncodingRepair::Hook outputEncodingRepair;
 	bool outputEncodingRepairLogged = false;
 	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
+	CustomHookChain::Chain sdrToneShape{ GlslHookLoader() };   // delta 13
+	bool sdrToneShapeConfigured = false;
+	int sdrToneShapeLogged = -1;
 	bool ledCompensationConfigured = false;
 	// [led_drive] gamma_boost applies whether or not the module drives the
 	// LED; published by the outer renderer from the configuration.
@@ -5021,6 +5066,8 @@ struct LibplaceboVideoRenderer::Impl
 			customHooks.Clear();
 			ledMeasurement.Release();
 			ledCompensation.Clear();
+			sdrToneShape.Clear();
+			sdrToneShapeConfigured = false;
 			ledCompensationConfigured = false;
             pl_mpv_user_shader_destroy(&subtitleCutPasteHook);
             subtitleCutPasteHookFailed = false;
@@ -8141,6 +8188,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
 		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
+		currentTransport.sdrTone = next.sdrTone;
 		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.downscaler = next.downscaler;
@@ -8232,6 +8280,9 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
 		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
+		changed(current.sdrTone.knee != next.sdrTone.knee || current.sdrTone.headroom != next.sdrTone.headroom ||
+			current.sdrTone.kneeStart != next.sdrTone.kneeStart || current.sdrTone.kneeStrength != next.sdrTone.kneeStrength ||
+			current.sdrTone.recovery != next.sdrTone.recovery, "sdr_tone_shape");
 		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
@@ -15969,6 +16020,50 @@ struct LibplaceboVideoRenderer::Impl
             PublishCustomShaderStatus();
         }
         frameHooks.clear();
+        // Delta 13: the SDR tone shape and headroom, first at PRE_OUTPUT
+        // (before the LED measurement and compensation). SDR source and
+        // output only; off installs nothing.
+        {
+            const bool sdr = !pl_color_space_is_hdr(&renderImage.color) && !pl_color_space_is_hdr(&target.color);
+            const bool wanted = SdrToneShape::Active(activeSettings.sdrTone);
+            int state = !wanted ? 0 : sdr ? 1 : 2;
+            if (state == 1)
+            {
+                if (!sdrToneShapeConfigured)
+                {
+                    ConfiguredShaderRule rule;
+                    rule.name = "sdr_tone_shape";
+                    rule.filename = "SDR tone shape.glsl";
+                    sdrToneShape.Configure({ rule });
+                    sdrToneShapeConfigured = true;
+                }
+                sdrToneShape.Ensure(hookTemplates);
+                const size_t start = frameHooks.size();
+                sdrToneShape.Collect(false, frameHooks);
+                const pl_color_map_params* colorMap = renderParams.color_map_params ?
+                    renderParams.color_map_params : &pl_color_map_default_params;
+                for (size_t i = start; i < frameHooks.size(); ++i)
+                {
+                    CustomHookChain::SetHookParameter(frameHooks[i], "headroom", activeSettings.sdrTone.headroom);
+                    CustomHookChain::SetHookParameter(frameHooks[i], "knee_start", activeSettings.sdrTone.kneeStart);
+                    CustomHookChain::SetHookParameter(frameHooks[i], "strength", SdrToneShape::EffectiveStrength(activeSettings.sdrTone));
+                    CustomHookChain::SetHookParameter(frameHooks[i], "eotf", LedDisplayGamma(target.color.transfer));
+                    CustomHookChain::SetHookParameter(frameHooks[i], "recovery",
+                        SdrToneShape::EffectiveRecovery(activeSettings.sdrTone, colorMap->contrast_recovery));
+                }
+                if (frameHooks.size() == start)
+                    state = 3;
+            }
+            if (state != sdrToneShapeLogged)
+            {
+                sdrToneShapeLogged = state;
+                static const char* const names[] = { "off", "active", "off for HDR", "NOT applied (shaders\\SDR tone shape.glsl did not load)" };
+                DebugLog::Log("SDR tone shape: %s (shape %s, headroom %.2f, knee start %.2f, strength %.2f, recovery %s)",
+                    names[state], activeSettings.sdrTone.knee ? "knee" : "off", activeSettings.sdrTone.headroom,
+                    activeSettings.sdrTone.kneeStart, activeSettings.sdrTone.kneeStrength,
+                    activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
+            }
+        }
         // LED drive, gain in: measurement first (it must see the picture before
         // the gain), then the compensation hook with this frame's parameters.
         const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);

@@ -16,6 +16,7 @@
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
+#include <vprenderer/SdrToneShape.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
@@ -3534,6 +3535,136 @@ namespace VideoProcessorTest
 			Assert::IsTrue(failures.empty(), failures.c_str());
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(cleanLog);
+		}
+
+		// Delta 13: the SDR tone shape's reference curve.
+		TEST_METHOD(SdrToneShapeReferencePlacesWhiteAndRollsOffIntoTheHeadroom)
+		{
+			const double g = 2.2;
+			auto code = [](double c) { return (c - 16.0) / 219.0; };   // limited-range code -> signal
+			// Off: identity (no hook is installed either).
+			SdrToneShape::Settings off;
+			Assert::IsFalse(SdrToneShape::Active(off));
+			for (double c : { 16.0, 100.0, 235.0, 255.0 })
+				Assert::AreEqual(code(c), SdrToneShape::Map(code(c), g, 0.0, 0.8, 0.0), 1e-12);
+			// Headroom 0.15, no knee: code 235 at 85% of peak in light, 255
+			// above it, monotonic, below-black kept (sign-preserving).
+			const double white = SdrToneShape::Map(code(235.0), g, 0.15, 0.8, 0.0);
+			Assert::AreEqual(0.85, std::pow(white, g), 1e-9);
+			const double over = SdrToneShape::Map(code(255.0), g, 0.15, 0.8, 0.0);
+			Assert::IsTrue(over > white);
+			Assert::IsTrue(SdrToneShape::Map(code(4.0), g, 0.15, 0.8, 0.0) < 0.0, L"below-black kept");
+			double last = -1.0;
+			for (int c = 0; c <= 255; ++c)
+			{
+				const double v = SdrToneShape::Map(code(c), g, 0.15, 0.8, 0.0);
+				Assert::IsTrue(v > last, L"monotonic");
+				last = v;
+			}
+			// The knee (strength 0.5, headroom 0.15): a 200 -> 255 ramp is smooth
+			// (no step larger than its neighbours'), monotonic, and nothing clips:
+			// 235 and 255 both stay below peak.
+			std::vector<double> ramp;
+			for (int c = 200; c <= 255; ++c)
+				ramp.push_back(SdrToneShape::Map(code(c), g, 0.15, 0.8, 0.5));
+			for (size_t i = 1; i < ramp.size(); ++i)
+			{
+				Assert::IsTrue(ramp[i] > ramp[i - 1], L"knee monotonic");
+				if (i >= 2)
+					Assert::IsTrue(ramp[i] - ramp[i - 1] <= (ramp[i - 1] - ramp[i - 2]) * 1.05 + 1e-9,
+						L"the knee's steps only shrink (no kink, no clip)");
+			}
+			Assert::IsTrue(ramp.back() < 1.0, L"code 255 below peak with the knee");
+			Assert::IsTrue(SdrToneShape::Map(code(235.0), g, 0.15, 0.8, 0.5) < white, L"the knee lowers white a little");
+			// Slope 1 at the knee start: continuous with the straight line.
+			double slope = 0.0;
+			SdrToneShape::Knee(0.8, 0.8, 0.5, &slope);
+			Assert::AreEqual(1.0, slope, 1e-12);
+			SdrToneShape::Knee(0.8 + 1e-6, 0.8, 0.5, &slope);
+			Assert::AreEqual(1.0, slope, 1e-5);
+			// Strength and recovery as the renderer passes them.
+			SdrToneShape::Settings knee;
+			knee.knee = true;
+			knee.kneeStrength = 0.5;
+			Assert::IsTrue(SdrToneShape::Active(knee));
+			Assert::AreEqual(0.5, SdrToneShape::EffectiveStrength(knee), 1e-12);
+			SdrToneShape::Settings headroomOnly;
+			headroomOnly.headroom = 0.15;
+			Assert::IsTrue(SdrToneShape::Active(headroomOnly));
+			Assert::AreEqual(0.0, SdrToneShape::EffectiveStrength(headroomOnly), 1e-12);
+			Assert::AreEqual(0.3, SdrToneShape::EffectiveRecovery(knee, 0.3), 1e-12, L"auto follows the profile");
+			knee.recovery = 0.0;
+			Assert::AreEqual(0.0, SdrToneShape::EffectiveRecovery(knee, 0.3), 1e-12, L"off");
+		}
+
+		// Delta 13: the shader matches its reference on the GPU.
+		TEST_METHOD(SdrToneShapeShaderMatchesItsReference)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "sdr_tone_shape";
+			rule.filename = "SDR tone shape.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 64;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected SDR tone shape.glsl");
+			Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
+			const pl_hook* hook = hooks[0];
+			auto set = [hook](double headroom, double strength, double recovery = 0.0)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "headroom", headroom));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee_start", 0.8));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "strength", strength));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "eotf", 2.2));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "recovery", recovery));
+			};
+			set(0.0, 0.0);
+			const auto unity = fixture.RenderCoordinateField(hook);
+			for (size_t i = 0; i < unity.size(); ++i)
+				Assert::AreEqual(static_cast<int>(baseline[i].r), static_cast<int>(unity[i].r), L"neutral = untouched");
+			for (const double strength : { 0.0, 0.5, 1.0 })
+			{
+				set(0.15, strength);
+				const auto shaped = fixture.RenderCoordinateField(hook);
+				for (size_t x = 0; x < shaped.size(); ++x)
+				{
+					const double expected = 255.0 * SdrToneShape::Map(baseline[x].r / 255.0, 2.2, 0.15, 0.8, strength);
+					Assert::AreEqual(expected, static_cast<double>(shaped[x].r), 1.5,
+						(L"x " + std::to_wstring(x) + L" strength " + std::to_wstring(strength)).c_str());
+					if (x % 64 != 0)
+						Assert::IsTrue(shaped[x].r >= shaped[x - 1].r, L"monotonic");
+				}
+			}
+			// Contrast recovery on a smooth ramp: almost no local detail, so the
+			// picture stays within a code of the knee alone.
+			set(0.15, 0.5, 2.0);
+			const auto recovered = fixture.RenderCoordinateField(hook);
+			set(0.15, 0.5, 0.0);
+			const auto plain = fixture.RenderCoordinateField(hook);
+			for (size_t x = 2; x + 2 < plain.size(); ++x)
+				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].r) - static_cast<int>(plain[x].r)) <= 1,
+					L"recovery adds nothing on a smooth ramp");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
 
 		TEST_METHOD(LedCompensationShaderAppliesGainWithASoftKnee)

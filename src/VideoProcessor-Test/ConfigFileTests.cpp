@@ -708,7 +708,13 @@ namespace VideoProcessorTest
                 Case{ "adaptive_upscale_w_base", "0.8", true }, Case{ "adaptive_upscale_w_base", "1.5", false },
                 Case{ "adaptive_upscale_superres_scale", "off", true },
                 Case{ "preserve_extended_range", "on", true }, Case{ "preserve_extended_range", "off", true },
-                Case{ "preserve_extended_range", "auto", false } })
+                Case{ "preserve_extended_range", "auto", false },
+                Case{ "sdr_tone_shape", "knee", true }, Case{ "sdr_tone_shape", "on", false },
+                Case{ "sdr_white_headroom", "0.15", true }, Case{ "sdr_white_headroom", "0.6", false },
+                Case{ "sdr_knee_start", "0.8", true }, Case{ "sdr_knee_start", "0.3", false },
+                Case{ "sdr_knee_strength", "1", true }, Case{ "sdr_knee_strength", "1.5", false },
+                Case{ "sdr_contrast_recovery", "auto", true }, Case{ "sdr_contrast_recovery", "off", true },
+                Case{ "sdr_contrast_recovery", "0.3", true }, Case{ "sdr_contrast_recovery", "3", false } })
             {
                 CachedConfigTestFile file;
                 std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
