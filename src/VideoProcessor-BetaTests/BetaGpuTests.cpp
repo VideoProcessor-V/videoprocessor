@@ -2631,6 +2631,10 @@ void RunBetaScenarioTiming()
 	const bool chromaLanczos = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n, "VP_TEST_CHROMA") == 0 && v &&
 		std::string(v) != ""; std::free(v); return on; }();
 	const bool adaptiveOrtho = envOn("VP_TEST_ADAPTIVE_ORTHO");
+	// VP_TEST_AHEAD=1: VP's estimate-ahead order (owner 2026-10-13): the new
+	// frame's slot only its render; the matcher right after the first extra,
+	// in that extra's slot. The same GPU work as without, in that order.
+	const bool aheadOrder = envOn("VP_TEST_AHEAD");
 	// The synthetic sequence at 4K and 1080p.
 	const std::vector<Segment> segments = {
 		{ "still", 12, 0, 0, 0, false, 0, 1 },
@@ -2813,6 +2817,9 @@ void RunBetaScenarioTiming()
 		// The critical refresh (the matcher and the new frame's render run back
 		// to back on the GPU) and everything one source frame costs.
 		Stats newWithMatcher, perSourceFrame;
+		// Per refresh slot (the GPU work it holds) and the slots over a refresh.
+		Stats extraWithMatcher, anySlot;
+		int slotsOver = 0;
 		std::map<std::string, Stats> perSegment;
 		// Per refresh type: each pass's GPU time summed, and the refreshes.
 		std::map<std::string, std::pair<std::map<std::string, double>, int>> perKind;
@@ -2839,11 +2846,19 @@ void RunBetaScenarioTiming()
 			a.chromaShiftY = b.chromaShiftY = 1;
 			if (f == 0)
 				continue;   // the first frame only fills the pair
-			// The matcher (A = the previous frame, B = this one).
+			// The matcher (A = the previous frame, B = this one); ahead, after
+			// the first extra instead (the first frame before, as VP).
+			const bool deferMatcher = aheadOrder && extras && f > 1;
 			auto start = std::chrono::steady_clock::now();
-			Check(warp.Estimate(a, b, f % 2, true), "scenario: estimate: " + warp.LastError());
-			pl_gpu_finish(g);
-			const double estimateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			double estimateMs = 0.0;
+			if (!deferMatcher)
+			{
+				Check(warp.Estimate(a, b, f % 2, true), "scenario: estimate: " + warp.LastError());
+				pl_gpu_finish(g);
+				estimateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			}
+			double aheadMs = 0.0;
+			bool aheadDone = !deferMatcher;
 			if (f >= warmup)
 			{
 				matcherMs.Add(estimateMs);
@@ -2998,6 +3013,26 @@ void RunBetaScenarioTiming()
 					pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", nullptr);
 				}
 				SetParam(sigma->hook, "static_refresh", 0.0);
+				// Ahead: the matcher after the first extra, in its slot.
+				double slotMs = r == 0 ? estimateMs + ms : ms;
+				if (!aheadDone && isExtra)
+				{
+					pl_gpu_finish(g);
+					const auto aheadStart = std::chrono::steady_clock::now();
+					Check(warp.Estimate(a, b, f % 2, true), "scenario: estimate ahead: " + warp.LastError());
+					pl_gpu_finish(g);
+					aheadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - aheadStart).count();
+					aheadDone = true;
+					slotMs += aheadMs;
+					frameTotal += aheadMs;
+					if (f >= warmup)
+						extraWithMatcher.Add(slotMs);
+				}
+				if (f >= warmup)
+				{
+					anySlot.Add(slotMs);
+					slotsOver += slotMs > 1000.0 / displayRate ? 1 : 0;
+				}
 				frameTotal += ms;
 				if (f >= warmup && r == 0)
 				{
@@ -3017,6 +3052,12 @@ void RunBetaScenarioTiming()
 					++totals.second;
 				}
 			}
+			if (!aheadDone)
+			{
+				// No extra this frame (none planned): the matcher before the next.
+				Check(warp.Estimate(a, b, f % 2, true), "scenario: estimate: " + warp.LastError());
+				pl_gpu_finish(g);
+			}
 			if (f >= warmup)
 			{
 				perSourceFrame.Add(frameTotal);
@@ -3032,7 +3073,10 @@ void RunBetaScenarioTiming()
 			<< "  refresh, cadence repeat: " << repeat.Text() << "\n"
 			<< "  sigma-delta search (new frame, GPU): " << sigmaSearch.Text() << "\n"
 			<< "  new frame with the matcher (critical refresh): " << newWithMatcher.Text() << "\n"
-			<< "  one source frame (matcher + its refreshes): " << perSourceFrame.Text() << "\n";
+			<< "  one source frame (matcher + its refreshes): " << perSourceFrame.Text() << "\n"
+			<< "  matcher order: " << (aheadOrder && extras ? "ahead (after the first extra)" : "before the new frame") << "\n"
+			<< "  extra slot holding the matcher: " << extraWithMatcher.Text() << "\n"
+			<< "  any refresh slot: " << anySlot.Text() << ", over " << (1000.0 / displayRate) << " ms: " << slotsOver << "\n";
 		for (const auto& entry : perSegment)
 			std::cout << "    " << entry.first << ": " << entry.second.Text() << "\n";
 		if (matcherPasses)
