@@ -6461,7 +6461,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         estCandidates->setToolTip(QStringLiteral(
             "A second search pass also tries the neighbours' motion and last frame's, and prefers motion that agrees "
             "with the neighbours unless another match is clearly better: fewer wrong vectors on repeating texture."));
-        auto* estLambda = addText(QStringLiteral("Neighbour agreement weight"), QStringLiteral("dejudder_est_lambda"));
+        auto* estLambda = addText(QStringLiteral("Neighbour agreement weight (0 to 8)"), QStringLiteral("dejudder_est_lambda"));
         estLambda->setValidator(new QDoubleValidator(0.0, 8.0, 2, estLambda));
         estLambda->setPlaceholderText(QStringLiteral("0.5"));
         estLambda->setToolTip(QStringLiteral(
@@ -6469,7 +6469,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* estQpel = addChoice(QStringLiteral("Quarter-pixel refinement"),
             QStringLiteral("dejudder_est_qpel"), { QStringLiteral("on"), QStringLiteral("off") });
         estQpel->setToolTip(QStringLiteral(
-            "Refines trusted motion to half a source pixel: sharper in-between frames on slow pans."));
+            "Refines trusted motion to a quarter of a source pixel: sharper in-between frames on slow pans, "
+            "no stepping."));
         auto* estGate = addChoice(QStringLiteral("Skip the search on still scenes"),
             QStringLiteral("dejudder_est_gate"), { QStringLiteral("on"), QStringLiteral("off") });
         estGate->setToolTip(QStringLiteral(
@@ -6483,6 +6484,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_est_split_sad"));
         estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));
         estSplitSad->setPlaceholderText(QStringLiteral("0"));
+        estSplitSad->setToolTip(QStringLiteral(
+            "How poorly a block must match (mean luma difference, 8-bit codes) before it is split. Lower splits "
+            "more blocks (more GPU time). 0 = the match tolerance above."));
         // Delta 9, synthesis-lite.
         auto* feather = addText(QStringLiteral("Soften held-block edges (px, 0 = off)"),
             QStringLiteral("dejudder_hold_feather_px"));
@@ -6497,7 +6501,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         hysteresis->setPlaceholderText(QStringLiteral("2"));
         hysteresis->setToolTip(QStringLiteral(
             "A block switches between moved and held only after this many film frames in a row say so, so it does "
-            "not flicker between the two. A cut holds everything at once."));
+            "not flicker between the two. A cut holds everything at once, and the first film frame after a start "
+            "or a cut stays held while the blocks earn their trust."));
         auto* taper = addChoice(QStringLiteral("Taper marginal blocks (experiment)"),
             QStringLiteral("dejudder_block_taper"), { QStringLiteral("on"), QStringLiteral("off") });
         taper->setToolTip(QStringLiteral(
@@ -6507,6 +6512,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_taper_sad"));
         taperSad->setValidator(new QDoubleValidator(0.0, 32.0, 2, taperSad));
         taperSad->setPlaceholderText(QStringLiteral("0"));
+        taperSad->setToolTip(QStringLiteral(
+            "With the taper on: the match error (8-bit codes) at which a marginal block's strength reaches zero; "
+            "between the tolerance and this it ramps down. 0 = twice the match tolerance."));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
@@ -6747,9 +6755,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* sdrKneeStart = addText(QStringLiteral("SDR knee start (0.5 to 0.99 of peak)"), QStringLiteral("sdr_knee_start"));
         sdrKneeStart->setValidator(new QDoubleValidator(0.5, 0.99, 3, sdrKneeStart));
         sdrKneeStart->setPlaceholderText(QStringLiteral("0.80"));
+        sdrKneeStart->setToolTip(QStringLiteral(
+            "With the knee: where the highlights start to roll off, as a share of the projector's peak light. "
+            "Lower starts the roll-off earlier (softer highlights)."));
         auto* sdrKneeStrength = addText(QStringLiteral("SDR knee strength (0 to 1)"), QStringLiteral("sdr_knee_strength"));
         sdrKneeStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, sdrKneeStrength));
         sdrKneeStrength->setPlaceholderText(QStringLiteral("0.5"));
+        sdrKneeStrength->setToolTip(QStringLiteral(
+            "With the knee: 0 = a straight line (headroom only), 1 = the full roll-off. 0.5 keeps most of the "
+            "highlight contrast and still avoids clipping with headroom 0.15."));
         auto* sdrRecovery = addText(QStringLiteral("SDR contrast recovery (auto, off, 0 to 2)"),
             QStringLiteral("sdr_contrast_recovery"));
         sdrRecovery->setPlaceholderText(QStringLiteral("auto"));
@@ -9744,10 +9758,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate"), QStringLiteral("picture_only"),
           QStringLiteral("listen") },
         { QStringLiteral("Log only (watch, never send)"),
-          QStringLiteral("Script (your beta 22 script)"),
+          QStringLiteral("Script (VP runs its copy of your dimming script)"),
           QStringLiteral("Compensate (dim the LED, keep the picture)"),
-          QStringLiteral("Picture only (shadow lift and boost toe; the RS-232 port is not used)"),
-          QStringLiteral("Listen (your script drives the projector; VP follows its commands)") }));
+          QStringLiteral("Picture only (VP's picture adjustments only; the RS-232 port is left free)"),
+          QStringLiteral("Listen (your script drives the projector; VP follows it; the script needs its VP lines)") }));
     // Step 7b: script mode sends the script's own LPW1 and CNTR; smoothing
     // adds VP's gain across each whole CNTR step. Off = the script exactly.
     driveForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth the script's contrast steps"), led,
@@ -10154,7 +10168,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "everywhere (as before)."));
     driveForm->addRow(QStringLiteral("Boost spares the darks below"), boostKnee);
     auto* boostKneeWidth = numberControl(led, QStringLiteral("gamma_boost_knee_width"), 0.0, 0.5, 2, 0.01, 0.05, QString());
-    boostKneeWidth->setToolTip(QStringLiteral("How gradually the boost comes in above that point."));
+    boostKneeWidth->setToolTip(QStringLiteral(
+        "How gradually the boost comes in above that point (part of the signal; 0 = a hard switch). "
+        "Only matters when the setting above is not 0."));
     driveForm->addRow(QStringLiteral("Boost blend width"), boostKneeWidth);
     auto* shadowLift = numberControl(led, QStringLiteral("shadow_lift_ansi"), 0.0, 1.0, 2, 0.05, 0.0, QString());
     shadowLift->setToolTip(QStringLiteral(
@@ -10167,6 +10183,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "The highlight amount (brightness x area) where the lift starts; it is full at the next value."));
     driveForm->addRow(QStringLiteral("Lift starts at highlight amount"), liftRampLo);
     auto* liftRampHi = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_hi"), 0.0, 1.0, 3, 0.005, 0.10, QString());
+    liftRampHi->setToolTip(QStringLiteral(
+        "The highlight amount at which the lift reaches its full strength. Keep it above the start value."));
     driveForm->addRow(QStringLiteral("Lift full at highlight amount"), liftRampHi);
     // mode: listen's monitor (owner 2026-10-13): the script's latest commands
     // and measurement next to VP's, from logs\led-listen.csv beside vp.log
