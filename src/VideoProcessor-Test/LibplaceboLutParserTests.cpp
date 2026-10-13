@@ -13,6 +13,12 @@
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderAhead.h>
+#include <vprenderer/GpuCaptureUnpack.h>
+#include <libplacebo/utils/upload.h>
+#include <video_frame_formatter/CV210toP210VideoFrameFormatter.h>
+#include <video_frame_formatter/CUYVYtoP210VideoFrameFormatter.h>
+#include <VideoFrame.h>
+#include <VideoState.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -7420,6 +7426,162 @@ namespace VideoProcessorTest
 			Assert::IsTrue(off.warped.source == on.warped.source, L"source warp");
 			Assert::IsTrue(off.warped.rendered == on.warped.rendered, L"rendered warp");
 			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(GpuCaptureUnpackMatchesTheCpuFormatters)
+		{
+			std::string where = "setup";
+			try {
+			// capture_path: gpu (owner 2026-10-13): the GPU unpack of raw
+			// DeckLink V210 / UYVY / HDYC equals the CPU formatters' P210 sample
+			// for sample, at every V210 packing phase (widths 96, 98, 100 end a
+			// line on pack phase 0, 2, 4: widths 120, 122, 124) and at 1920, with random bytes
+			// (padding included). Then the GPU pass and the CPU conversion it
+			// replaces are timed at 3840x2160 (report).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			where = "unpack object";
+			GpuCaptureUnpack unpack(fixture.Log(), gpu);
+			unpack.SetHostReadableForTest(true);
+			where = "loop";
+			pl_tex planes[2] = { nullptr, nullptr };
+			uint32_t seed = 0x2545f491u;
+			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+			auto makeState = [](VideoFrameEncoding encoding, int width, int height)
+			{
+				VideoStateComPtr state = new VideoState();
+				state->valid = true;
+				state->displayMode = std::make_shared<DisplayMode>(width, height, false, 60000, 1001);
+				state->videoFrameEncoding = encoding;
+				state->colorspace = ColorSpace::REC_709;
+				return state;
+			};
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> samples(static_cast<size_t>(tex->params.w) * tex->params.h *
+					tex->params.format->num_components);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = samples.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"plane not host-readable");
+				return samples;
+			};
+			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::V210, VideoFrameEncoding::UYVY, VideoFrameEncoding::HDYC })
+				for (const int width : { 120, 122, 124, 1920 })
+				{
+					const int height = 100;
+					std::wstring stage = L"state";
+					try {
+					VideoStateComPtr state = makeState(encoding, width, height);
+					const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
+					std::vector<BYTE> source(static_cast<size_t>(state->BytesPerFrame()));
+					for (BYTE& b : source) b = static_cast<BYTE>(next());
+					std::unique_ptr<IVideoFrameFormatter> cpu;
+					if (encoding == VideoFrameEncoding::V210) cpu = std::make_unique<CV210toP210VideoFrameFormatter>();
+					else cpu = std::make_unique<CUYVYtoP210VideoFrameFormatter>();
+					cpu->OnVideoState(state);
+					std::vector<BYTE> expected(static_cast<size_t>(cpu->GetOutFrameSize()));
+					const VideoFrame frame(source.data(), 1, 0, nullptr);
+					Assert::IsTrue(cpu->FormatVideoFrame(frame, expected.data()));
+					const std::wstring name = (encoding == VideoFrameEncoding::V210 ? L"V210 " :
+						encoding == VideoFrameEncoding::UYVY ? L"UYVY " : L"HDYC ") + std::to_wstring(width);
+					Assert::IsTrue(unpack.Unpack(encoding, source.data(), rowBytes, width, height, planes),
+						(name + L": " + std::wstring(unpack.Error().begin(), unpack.Error().end()) + L"; log: " +
+							std::wstring(log.begin(), log.end())).c_str());
+					const auto contract = cpu->GetOutputContract(), gpuContract = GpuCaptureUnpack::Contract(encoding);
+					Assert::IsTrue(contract.sampleRange == gpuContract.sampleRange && contract.colorDepth == gpuContract.colorDepth &&
+						contract.bitShift == gpuContract.bitShift, (name + L": the contract").c_str());
+					const std::vector<uint16_t> y = download(planes[0]), uv = download(planes[1]);
+					const uint16_t* cpuY = reinterpret_cast<const uint16_t*>(expected.data());
+					const uint16_t* cpuUv = cpuY + static_cast<size_t>(width) * height;
+					size_t yDiff = 0, uvDiff = 0, first = SIZE_MAX;
+					for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i)
+						if (y[i] != cpuY[i]) { ++yDiff; first = std::min(first, i); }
+					for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i)
+						if (uv[i] != cpuUv[i]) { ++uvDiff; first = std::min(first, i); }
+					Assert::IsTrue(yDiff == 0 && uvDiff == 0, (name + L": " + std::to_wstring(yDiff) + L" luma and " +
+						std::to_wstring(uvDiff) + L" chroma samples differ (first at " + std::to_wstring(first) + L")").c_str());
+					} catch (const std::exception& e) {
+						const std::string what = e.what();
+						Assert::Fail((L"width " + std::to_wstring(width) + L" encoding " + std::to_wstring(static_cast<int>(encoding)) +
+							L": " + std::wstring(what.begin(), what.end())).c_str());
+					}
+				}
+			// Efficiency (report): 3840x2160, the GPU pass (timer) and the CPU
+			// conversion it replaces.
+			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::V210, VideoFrameEncoding::UYVY })
+			{
+				const int width = 3840, height = 2160;
+				VideoStateComPtr state = makeState(encoding, width, height);
+				std::vector<BYTE> source(static_cast<size_t>(state->BytesPerFrame()));
+				for (BYTE& b : source) b = static_cast<BYTE>(next());
+				std::unique_ptr<IVideoFrameFormatter> cpu;
+				if (encoding == VideoFrameEncoding::V210) cpu = std::make_unique<CV210toP210VideoFrameFormatter>();
+				else cpu = std::make_unique<CUYVYtoP210VideoFrameFormatter>();
+				cpu->OnVideoState(state);
+				std::vector<BYTE> out(static_cast<size_t>(cpu->GetOutFrameSize()));
+				const VideoFrame frame(source.data(), 1, 0, nullptr);
+				double cpuMs = 1e30, uploadAndPassMs = 1e30, passMs = 1e30, standardUploadMs = 1e30;
+				pl_tex standard[2] = { nullptr, nullptr };
+				pl_timer timer = pl_timer_create(gpu);
+				unpack.SetTimerForTest(timer);
+				for (int run = 0; run < 8; ++run)
+				{
+					auto t0 = std::chrono::steady_clock::now();
+					cpu->FormatVideoFrame(frame, out.data());
+					cpuMs = std::min(cpuMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					// Today's path after the conversion: the P210 planes' upload (as RenderLocked).
+					{
+						pl_plane_data planesData[2]{};
+						planesData[0].type = PL_FMT_UNORM;
+						planesData[0].width = width;
+						planesData[0].height = height;
+						planesData[0].component_size[0] = 16;
+						planesData[0].component_map[0] = PL_CHANNEL_Y;
+						planesData[0].pixel_stride = sizeof(uint16_t);
+						planesData[0].row_stride = static_cast<size_t>(width) * 2;
+						planesData[0].pixels = out.data();
+						planesData[1] = planesData[0];
+						planesData[1].width = width / 2;
+						planesData[1].component_size[1] = 16;
+						planesData[1].component_map[0] = PL_CHANNEL_CB;
+						planesData[1].component_map[1] = PL_CHANNEL_CR;
+						planesData[1].pixel_stride = sizeof(uint16_t) * 2;
+						planesData[1].pixels = out.data() + static_cast<size_t>(width) * height * 2;
+						pl_gpu_finish(gpu);
+						const auto u0 = std::chrono::steady_clock::now();
+						pl_plane uploaded[2]{};
+						for (int i = 0; i < 2; ++i)
+							Assert::IsTrue(pl_upload_plane(gpu, &uploaded[i], &standard[i], &planesData[i]));
+						pl_gpu_finish(gpu);
+						standardUploadMs = std::min(standardUploadMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - u0).count());
+					}
+					pl_gpu_finish(gpu);
+					t0 = std::chrono::steady_clock::now();
+					Assert::IsTrue(unpack.Unpack(encoding, source.data(), static_cast<size_t>(state->BytesPerRow()), width, height, planes));
+					pl_gpu_finish(gpu);
+					uploadAndPassMs = std::min(uploadAndPassMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					for (uint64_t ns = pl_timer_query(gpu, timer); ns; ns = pl_timer_query(gpu, timer))
+						passMs = std::min(passMs, ns / 1e6);
+				}
+				unpack.SetTimerForTest(nullptr);
+				pl_timer_destroy(gpu, &timer);
+				pl_tex_destroy(gpu, &standard[0]);
+				pl_tex_destroy(gpu, &standard[1]);
+				char line[320];
+				std::snprintf(line, sizeof(line), "GPU capture unpack %s 3840x2160: standard = CPU conversion %.2f + P210 upload %.2f = %.2f ms; "
+					"gpu = raw upload + pass %.2f ms (pass alone %.3f ms)",
+					encoding == VideoFrameEncoding::V210 ? "V210" : "UYVY", cpuMs, standardUploadMs, cpuMs + standardUploadMs,
+					uploadAndPassMs, passMs < 1e29 ? passMs : -1.0);
+				Logger::WriteMessage(line);
+			}
+			pl_tex_destroy(gpu, &planes[0]);
+			pl_tex_destroy(gpu, &planes[1]);
+			} catch (const std::exception& e) { const std::string w = where + ": " + e.what(); Assert::Fail(std::wstring(w.begin(), w.end()).c_str()); }
+			catch (...) { Assert::Fail(L"non-std exception"); }
 		}
 
 		TEST_METHOD(DejudderEstimateAheadFallsBackForEachReason)
