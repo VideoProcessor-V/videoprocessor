@@ -133,6 +133,7 @@ namespace
 	{
 		bool created = false, presented = false;
 		std::vector<std::string> log;
+		std::string dejudderStatus, presentationStatus;   // the stats lines at the end
 		bool Logged(const std::string& text) const
 		{
 			for (const std::string& line : log)
@@ -150,7 +151,7 @@ namespace
 	// The renderer from its DLL, a profile with capture_path, frames for
 	// `seconds`, then stopped and destroyed.
 	RunResult Run(VideoFrameEncoding encoding, const std::string& capturePath, double seconds,
-		bool film = false, const std::string& extra = std::string())
+		bool film = false, const std::string& extra = std::string(), bool onScreen = false)
 	{
 		RunResult result;
 		{
@@ -181,8 +182,12 @@ namespace
 		wc.hInstance = GetModuleHandleA(nullptr);
 		wc.lpszClassName = "VpCaptureHarness";
 		RegisterClassA(&wc);
-		HWND hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "VP capture harness", WS_POPUP,
-			-4000, -4000, 640, 360, nullptr, nullptr, wc.hInstance, nullptr);
+		// Off the screen, or (onScreen) in the primary screen's bottom-right
+		// corner so the swapchain gets real refresh statistics.
+		const int screenW = GetSystemMetrics(SM_CXSCREEN), screenH = GetSystemMetrics(SM_CYSCREEN);
+		HWND hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (onScreen ? WS_EX_TOPMOST : 0), wc.lpszClassName,
+			"VP capture harness", WS_POPUP, onScreen ? screenW - 660 : -4000, onScreen ? screenH - 420 : -4000, 640, 360,
+			nullptr, nullptr, wc.hInstance, nullptr);
 		Assert::IsNotNull(hwnd);
 		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 		Callback callback;
@@ -223,6 +228,10 @@ namespace
 				std::this_thread::sleep_until(start + period * (n + 1));
 			}
 			result.presented = renderer->HasPresentedLiveFrame();
+			CString status;
+			if (renderer->GetDejudderStatus(status)) result.dejudderStatus = CStringA(status).GetString();
+			status.Empty();
+			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
 			renderer->Stop();
 			destroy(renderer);
 		}
@@ -240,6 +249,61 @@ namespace Tests
 	TEST_CLASS(RendererCaptureHarnessTests)
 	{
 	public:
+		TEST_METHOD(OnScreenLiveExtrasAndEstimateAhead)
+		{
+			// Overnight only (owner 2026-10-13): VP_TEST_HARNESS_ONSCREEN=1 with
+			// VP_TEST_GPU=hardware. A small window on the screen gets real
+			// refresh statistics, so VP's live extras planner and estimate ahead
+			// run: 23.976p with the de-judder (standard and gpu, ahead on and
+			// off) and 59.94p (standard and gpu). A report: the de-judder and
+			// presentation lines and the log's de-judder summary per run.
+			char* v = nullptr;
+			size_t n = 0;
+			const bool on = _dupenv_s(&v, &n, "VP_TEST_HARNESS_ONSCREEN") == 0 && v && std::string(v) == "1";
+			std::free(v);
+			if (!on || !OnHardware())
+			{
+				Logger::WriteMessage(L"on-screen harness: VP_TEST_HARNESS_ONSCREEN=1 and VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			char* sv = nullptr;
+			const double seconds = _dupenv_s(&sv, &n, "VP_TEST_HARNESS_SECONDS") == 0 && sv ? std::atof(sv) : 60.0;
+			std::free(sv);
+			struct Case { const char* name; const char* path; bool film; const char* extra; };
+			const Case cases[] = {
+				{ "23.976p standard, ahead on", "standard", true, "dejudder_strength: 0.25@occlusion_mask: on@" },
+				{ "23.976p gpu, ahead on", "gpu", true, "dejudder_strength: 0.25@occlusion_mask: on@" },
+				{ "23.976p standard, ahead off", "standard", true, "dejudder_strength: 0.25@occlusion_mask: on@dejudder_estimate_ahead: off@" },
+				{ "23.976p gpu, ahead off", "gpu", true, "dejudder_strength: 0.25@occlusion_mask: on@dejudder_estimate_ahead: off@" },
+				{ "59.94p standard", "standard", false, "" },
+				{ "59.94p gpu", "gpu", false, "" } };
+			int failures = 0;
+			for (const Case& c : cases)
+			{
+				std::string extra = c.extra;
+				for (char& ch : extra) if (ch == '@') ch = '\n';
+				const RunResult r = Run(VideoFrameEncoding::V210, c.path, seconds > 5.0 ? seconds : 60.0, c.film, extra, true);
+				Logger::WriteMessage((std::string("== ") + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
+				Logger::WriteMessage(("   de-judder: " + r.dejudderStatus).c_str());
+				Logger::WriteMessage(("   presentation: " + r.presentationStatus).c_str());
+				std::string lastAhead, lastHold, phase;
+				int extrasLines = 0;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("De-judder estimate ahead:") != std::string::npos) lastAhead = line;
+					if (line.find("De-judder: hold") != std::string::npos) lastHold = line;
+					if (line.find("De-judder phase:") != std::string::npos) phase = line;
+					if (line.find("De-judder extra:") != std::string::npos) ++extrasLines;
+				}
+				Logger::WriteMessage(("   " + phase).c_str());
+				Logger::WriteMessage(("   " + lastAhead).c_str());
+				Logger::WriteMessage(("   " + lastHold).c_str());
+				Logger::WriteMessage(("   extras logged: " + std::to_string(extrasLines)).c_str());
+				failures += r.presented ? 0 : 1;
+			}
+			Assert::AreEqual(0, failures, L"every on-screen run presented frames");
+		}
+
 		TEST_METHOD(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)
 		{
 			if (!OnHardware())
