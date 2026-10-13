@@ -197,6 +197,13 @@
 //!MAXIMUM 16777216.0
 0.0
 
+//!PARAM static_refresh
+//!DESC Set by the renderer: 1 = this refresh repeats the previous picture (a cadence repeat), so the motion is zero and the search is skipped
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
 //!PARAM vector_source
 //!DESC Set by the renderer (delta 8 R1): 1 = take this refresh's block vectors from VPVEC, 0 = own search
 //!TYPE float
@@ -468,7 +475,11 @@ void hook()
     // the renderer's vectors for this refresh (exact on a de-judder extra);
     // no search, MVPREV keeps the last real search result. The previous
     // refresh's luma is valid once this shader has stored it.
-    bool searching = motion_compensation >= 0.5 && vector_source <= 0.5;
+    // A cadence repeat (static_refresh) shows the previous picture again:
+    // the motion is zero, so the search is skipped (it would find zero, the
+    // quantizer's plain path either way); MVPREV keeps the last real vector,
+    // as the search does on a repeat.
+    bool searching = motion_compensation >= 0.5 && vector_source <= 0.5 && static_refresh <= 0.5;
     vec4 tag = imageLoad(LQPREV, ivec2(0));
     prev_valid = abs(tag.g - VALID_TAG) < 1e-3 && !isnan(tag.r);
     bool run_search = inside && searching && prev_valid;
@@ -479,6 +490,8 @@ void hook()
             vec4 e = texelFetch(VPVEC, min(block, textureSize(VPVEC, 0) - ivec2(1)), 0);
             bool usable = !any(isnan(e.xyz));
             imageStore(out_image, block, usable ? vec4(round(e.xy), e.z > 0.5 ? 1.0 : 0.0, 0.0) : vec4(0.0));
+        } else if (static_refresh > 0.5) {
+            imageStore(out_image, block, vec4(0.0));
         } else {
             imageStore(out_image, block, vec4(0.0));
             imageStore(MVPREV, block, vec4(0.0, 0.0, 0.0, VALID_TAG));

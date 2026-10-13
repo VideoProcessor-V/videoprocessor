@@ -16297,6 +16297,10 @@ struct LibplaceboVideoRenderer::Impl
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
+        // A cadence repeat shows the previous picture again: the sigma-delta
+        // skips its motion search (zero motion; owner 2026-10-13 efficiency).
+        for (const pl_hook* hook : frameHooks)
+            CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
         // Stage 8-2: the blend measures at PREKERNEL and blends after the user
         // hooks at POSTKERNEL (after the SSIM shader's passes); it needs the
         // SSIM downscaler in the chain.

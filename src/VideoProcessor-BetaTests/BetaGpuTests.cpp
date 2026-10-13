@@ -943,6 +943,23 @@ void RunBetaDitherVectorsTests()
 			<< serial.size() << " refreshes\n";
 	}
 	own.erase(own.begin());   // the comparisons below are per extra
+	// A cadence repeat (the same picture again) with the search skipped
+	// (static_refresh) gives exactly what the search gives.
+	{
+		auto searched = loadSigma();
+		renderA({ searched->hook });
+		const auto withSearch = renderA({ searched->hook });
+		auto skipped = loadSigma();
+		renderA({ skipped->hook });
+		Check(SetParam(skipped->hook, "static_refresh", 1.0), "no static_refresh parameter");
+		const auto withoutSearch = renderA({ skipped->hook });
+		int maxDiff = 0;
+		double mean = 0.0;
+		difference(withSearch, withoutSearch, maxDiff, mean);
+		Check(maxDiff == 0, "static_refresh: a repeat without the search differs from the searched repeat (max " +
+			std::to_string(maxDiff) + ")");
+		std::cout << "Beta sigma-delta: a cadence repeat without the search is identical to the searched repeat\n";
+	}
 	// External vectors: the step since the previous present, bound as VPVEC.
 	std::vector<std::vector<uint32_t>> external;
 	{
@@ -1541,6 +1558,24 @@ void RunBetaPassTiming()
 		const double perFrame = ms * entry.second.second / 31.0;
 		sorted.emplace_back(perFrame, entry.first);
 		total += perFrame;
+	}
+	// A cadence repeat: the search skipped (static_refresh).
+	{
+		PassTimes repeatTimes;
+		params.info_priv = &repeatTimes;
+		SetParam(sigma->hook, "static_refresh", 1.0);
+		for (int i = 0; i < 10; ++i)
+			Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "pass timing: render failed");
+		pl_gpu_finish(g);
+		repeatTimes.byName.clear();
+		for (int i = 0; i < 20; ++i)
+			Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "pass timing: render failed");
+		pl_gpu_finish(g);
+		SetParam(sigma->hook, "static_refresh", 0.0);
+		params.info_priv = &times;
+		const auto found = repeatTimes.byName.find("VideoProcessor sigma-delta: block motion search");
+		if (found != repeatTimes.byName.end() && found->second.second > 0)
+			std::cout << "  sigma-delta search on a cadence repeat: " << found->second.first / found->second.second / 1e6 << " ms\n";
 	}
 	std::sort(sorted.rbegin(), sorted.rend());
 	std::cout << "Beta pass timing (" << sw << "x" << sh << " -> " << ow << "x" << oh << ", output pass rgba32f): frame "
