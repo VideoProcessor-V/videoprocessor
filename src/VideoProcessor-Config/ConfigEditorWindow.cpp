@@ -6490,6 +6490,31 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         estSplit->setToolTip(QStringLiteral(
             "A block that matches poorly (often a small object on a moving background) is searched as four "
             "quarter blocks, so the object and its surround each get their own motion."));
+        // Delta 14: two rules against the soap-opera look.
+        auto* rolloff = addChoice(QStringLiteral("Keep fast motion's strobing"),
+            QStringLiteral("dejudder_motion_rolloff"), { QStringLiteral("on"), QStringLiteral("off") });
+        rolloff->setToolTip(QStringLiteral(
+            "Slow and medium pans get the full de-judder; above a fast pan the strength falls back (to the floor below), "
+            "so fast action keeps the strobing film is expected to have. Off = the strength only rises with motion."));
+        auto* rollLo = addText(QStringLiteral("Fall from (source pixels per frame)"), QStringLiteral("dejudder_roll_lo"));
+        rollLo->setValidator(new QDoubleValidator(0.0, 200.0, 1, rollLo));
+        rollLo->setPlaceholderText(QStringLiteral("8"));
+        rollLo->setToolTip(QStringLiteral("The camera speed where the strength starts to fall (8 at 4K is about a brisk pan)."));
+        auto* rollHi = addText(QStringLiteral("Down to the floor at"), QStringLiteral("dejudder_roll_hi"));
+        rollHi->setValidator(new QDoubleValidator(0.0, 400.0, 1, rollHi));
+        rollHi->setPlaceholderText(QStringLiteral("24"));
+        rollHi->setToolTip(QStringLiteral("The camera speed where the strength reaches the floor (24 at 4K is about a whip pan)."));
+        auto* rollFloor = addText(QStringLiteral("Floor (share of the strength)"), QStringLiteral("dejudder_roll_floor"));
+        rollFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, rollFloor));
+        rollFloor->setPlaceholderText(QStringLiteral("0.25"));
+        rollFloor->setToolTip(QStringLiteral("What is left of the strength on the fastest motion (0.25 = a quarter)."));
+        auto* objectStrength = addText(QStringLiteral("Smoothing of motion within the frame"), QStringLiteral("dejudder_object_strength"));
+        objectStrength->setValidator(new QDoubleValidator(0.0, 1.0, 2, objectStrength));
+        objectStrength->setPlaceholderText(QStringLiteral("1 (off)"));
+        objectStrength->setToolTip(QStringLiteral(
+            "The camera's motion (pans, tracking) is always smoothed fully; this scales the smoothing of things moving "
+            "within the frame. 1 = everything smoothed alike (off); 0.5 = people and objects smoothed half as much, which "
+            "reads less like video; 0 = the camera only."));
         auto* lowRes = addChoice(QStringLiteral("Motion estimation size (4K)"),
             QStringLiteral("dejudder_low_res"), { QStringLiteral("all"), QStringLiteral("search"), QStringLiteral("off") });
         lowRes->setItemText(lowRes->findData(QStringLiteral("all")), QStringLiteral("Half size, every step (recommended)"));

@@ -893,6 +893,13 @@ namespace
 		bool dejudderEstGate = true;              // E4
 		bool dejudderEstSplit = true;             // E2
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
+		// Delta 14 (docs/VP-delta-14-soe-rules.md): R-A the strength's roll-off
+		// above a fast pan, R-B the camera/object split (1 = off).
+		bool dejudderMotionRolloff = false;
+		double dejudderRollLo = 8.0;
+		double dejudderRollHi = 24.0;
+		double dejudderRollFloor = 0.25;
+		double dejudderObjectStrength = 1.0;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
 		// wide (off | search = the searches only | all = every pass).
 		std::string dejudderLowRes = "all";
@@ -1066,7 +1073,8 @@ namespace
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
-			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|'
+			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|' << settings.dejudderMotionRolloff << '|' << settings.dejudderRollLo << '|'
+			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2030,6 +2038,10 @@ namespace
 			std::make_tuple("dejudder_trust_scale", 0.0, 1.0, &settings.dejudderTrustScale),
 			std::make_tuple("dejudder_est_lambda", 0.0, 8.0, &settings.dejudderEstLambda),
 			std::make_tuple("dejudder_est_split_sad", 0.0, 16.0, &settings.dejudderEstSplitSad),
+			std::make_tuple("dejudder_roll_lo", 0.0, 200.0, &settings.dejudderRollLo),
+			std::make_tuple("dejudder_roll_hi", 0.0, 400.0, &settings.dejudderRollHi),
+			std::make_tuple("dejudder_roll_floor", 0.0, 1.0, &settings.dejudderRollFloor),
+			std::make_tuple("dejudder_object_strength", 0.0, 1.0, &settings.dejudderObjectStrength),
 			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
 			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
@@ -2078,7 +2090,8 @@ namespace
 			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
 			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
 			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
-			std::make_pair("dejudder_estimate_ahead", &settings.dejudderEstimateAhead) })
+			std::make_pair("dejudder_estimate_ahead", &settings.dejudderEstimateAhead),
+			std::make_pair("dejudder_motion_rolloff", &settings.dejudderMotionRolloff) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8340,6 +8353,11 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
+		currentTransport.dejudderMotionRolloff = next.dejudderMotionRolloff;
+		currentTransport.dejudderRollLo = next.dejudderRollLo;
+		currentTransport.dejudderRollHi = next.dejudderRollHi;
+		currentTransport.dejudderRollFloor = next.dejudderRollFloor;
+		currentTransport.dejudderObjectStrength = next.dejudderObjectStrength;
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
 		currentTransport.capturePath = next.capturePath;
@@ -8440,6 +8458,10 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
 		changed(current.dejudderEstimateAhead != next.dejudderEstimateAhead, "dejudder_estimate_ahead");
 		changed(current.capturePath != next.capturePath, "capture_path");
+		changed(current.dejudderMotionRolloff != next.dejudderMotionRolloff || current.dejudderRollLo != next.dejudderRollLo ||
+			current.dejudderRollHi != next.dejudderRollHi || current.dejudderRollFloor != next.dejudderRollFloor,
+			"dejudder_motion_rolloff");
+		changed(current.dejudderObjectStrength != next.dejudderObjectStrength, "dejudder_object_strength");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -11512,6 +11534,11 @@ struct LibplaceboVideoRenderer::Impl
 			settings.estGate = activeSettings.dejudderEstGate;
 			settings.estSplit = activeSettings.dejudderEstSplit;
 			settings.estSplitSad = static_cast<float>(activeSettings.dejudderEstSplitSad);
+			settings.motionRolloff = activeSettings.dejudderMotionRolloff;
+			settings.rollLo = static_cast<float>(activeSettings.dejudderRollLo);
+			settings.rollHi = static_cast<float>(activeSettings.dejudderRollHi);
+			settings.rollFloor = static_cast<float>(activeSettings.dejudderRollFloor);
+			settings.objectStrength = static_cast<float>(activeSettings.dejudderObjectStrength);
 			settings.lowRes = activeSettings.dejudderLowRes != "off";
 			settings.lowResAll = activeSettings.dejudderLowRes == "all";
 			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);
@@ -11540,7 +11567,10 @@ struct LibplaceboVideoRenderer::Impl
 				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
 				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
 				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
-				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad)
+				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad ||
+				current.motionRolloff != next.motionRolloff || current.rollLo != next.rollLo ||
+				current.rollHi != next.rollHi || current.rollFloor != next.rollFloor ||
+				current.objectStrength != next.objectStrength)
 				dejudder->SetSettings(next);
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
@@ -11830,6 +11860,7 @@ struct LibplaceboVideoRenderer::Impl
 		// What the warps read: the matcher's own until (B, C) is estimated
 		// ahead, then the copy of (A, B)'s.
 		pl_tex warpField = dejudder->Field(), warpTrust = dejudder->FrameTrust(), warpSub = dejudder->SubField();
+		pl_tex warpCamera = dejudder->Camera();   // delta 14 R-B
 		bool aheadTried = false;
 		float previousShift = 0.0f;   // A, shown at shift 0 (delta 8 R1)
 		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
@@ -11928,7 +11959,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				if (!dejudderRenderedWarp->Run(cached, warpField, warpTrust,
 					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, warpSub,
-					&dejudder->GetSettings()))
+					&dejudder->GetSettings(), warpCamera))
 				{
 					failure = "rendered warp failed";
 					break;
@@ -11979,7 +12010,7 @@ struct LibplaceboVideoRenderer::Impl
 						dejudderVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
 					if (!dejudderVectorField->Run(warpField, warpTrust,
 						dejudder->GetSettings().minTrustedShare, shift - previousShift, dejudderGeometry, w, h, vectors,
-						warpSub, &dejudder->GetSettings()))
+						warpSub, &dejudder->GetSettings(), warpCamera))
 						vectors = nullptr;
 				}
 				const pl_render_params& listParams = *extraParams;
@@ -12117,6 +12148,7 @@ struct LibplaceboVideoRenderer::Impl
 					warpField = dejudder->SnapField();
 					warpTrust = dejudder->SnapFrameTrust();
 					warpSub = dejudder->SnapSubField();
+					if (warpCamera) warpCamera = dejudder->SnapCamera();
 				}
 			}
 		}

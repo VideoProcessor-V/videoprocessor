@@ -135,6 +135,20 @@ namespace Dejudder
 		int holdHysteresis = 1;
 		bool blockTaper = false;
 		float taperSad = 0.0f;
+		// Delta 14 (docs/VP-delta-14-soe-rules.md), against the soap-opera
+		// look; off = D2 exactly. R-A: the strength also falls above a fast
+		// pan, from 1 at rollLo to rollFloor at rollHi (source px per source
+		// frame of the frame's motion: D1's global vector when reliable, else
+		// the trusted blocks' mean), with D2's rate limit and cut hold. R-B:
+		// the warps apply v_global + objectStrength x (v - v_global), the camera
+		// smoothed fully and motion within the frame by objectStrength
+		// (1 = off; without a reliable global vector the whole vector is
+		// scaled). The occlusion mask and the grain map read the true field.
+		bool motionRolloff = false;
+		float rollLo = 8.0f;
+		float rollHi = 24.0f;
+		float rollFloor = 0.25f;
+		float objectStrength = 1.0f;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
 		// Owner 2026-10-13 efficiency (dejudder_low_res: off | search | all, all
@@ -155,7 +169,8 @@ namespace Dejudder
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
 	// front of the field-vector rule; the variables feather_px, taper_tol and
 	// taper_sad are needed when FEATHER / TAPER are on.
-	std::string WarpHeader(const Settings& settings, bool split);
+	// camera: the warp binds `camera` (MotionWarp::Camera()) for R-B.
+	std::string WarpHeader(const Settings& settings, bool split, bool camera = false);
 
 	class MotionWarp
 	{
@@ -225,6 +240,11 @@ namespace Dejudder
 		pl_tex SnapField() const { return snapField; }
 		pl_tex SnapFrameTrust() const { return snapTrust; }
 		pl_tex SnapSubField() const { return snapSubValid ? snapSub : nullptr; }
+		pl_tex SnapCamera() const { return snapCamera; }
+		// Delta 14 R-B: the camera's motion (1x1: x, y source px, reliable 1/0,
+		// 1): the mean of the trusted blocks within 6 px of D1's global vector
+		// (D1 alone is in 4-px steps). nullptr unless objectStrength < 1 with D1.
+		pl_tex Camera() const { return settings.objectStrength < 1.0f && settings.globalPrior ? camera : nullptr; }
 		// The same passes by the GPU's timestamp queries (no drain overhead).
 		const std::map<std::string, double>& PassGpuMs() const { return passGpuMs; }
 		pl_tex SubField() const { return settings.estSplit && estimated ? subField : nullptr; }
@@ -327,7 +347,8 @@ namespace Dejudder
 		// (already in code units; searches only, no warp planes).
 		std::unique_ptr<MotionWarp> inner;
 		bool searchOnly = false;
-		pl_tex snapField = nullptr, snapTrust = nullptr, snapSub = nullptr;
+		pl_tex snapField = nullptr, snapTrust = nullptr, snapSub = nullptr, snapCamera = nullptr;
+		pl_tex camera = nullptr;
 		bool snapSubValid = false;
 		bool innerOfLowRes = false;   // no warp planes
 		// Tests only: re-score the scaled-back searches per 16-pixel block (on

@@ -101,9 +101,11 @@ namespace DejudderRendered
 		// subField: DejudderWarp::SubField() (11a E2), or nullptr. matcher:
 		// the matcher's settings, for delta 9's feather (output pixels here)
 		// and taper; nullptr = neither.
+		// camera: D1's global vector (MotionWarp::GlobalVector()) for delta
+		// 14 R-B when the matcher's objectStrength < 1 (nullptr: no camera).
 		bool Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
 			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr,
-			const Dejudder::Settings* matcher = nullptr);
+			const Dejudder::Settings* matcher = nullptr, pl_tex camera = nullptr);
 		const std::string& Error() const { return error; }
 
 	private:
@@ -132,7 +134,8 @@ namespace DejudderRendered
 		~VectorField();
 
 		bool Run(pl_tex field, pl_tex frameTrust, float minTrustedShare, float shiftStep, const Geometry& geometry,
-			int w, int h, pl_tex& out, pl_tex subField = nullptr, const Dejudder::Settings* matcher = nullptr);
+			int w, int h, pl_tex& out, pl_tex subField = nullptr, const Dejudder::Settings* matcher = nullptr,
+			pl_tex camera = nullptr);
 		const std::string& Error() const { return error; }
 		static int Blocks(int pixels) { return (pixels + 15) / 16; }
 

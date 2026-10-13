@@ -1183,6 +1183,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const char* const FRAME_TRUST_HEADER = R"GLSL(
 shared float partial_[256];
 shared float partial_v_[256];
+#ifdef CAMERA_OUT
+shared vec3 partial_c_[256];
+#endif
 )GLSL";
 
 		const char* const FRAME_TRUST_BODY = R"GLSL(
@@ -1208,10 +1211,25 @@ if (i == 0u) {
     float share = partial_[0] / float(max(count, 1));
     float mean_v = partial_[0] > 0.0 ? partial_v_[0] / partial_[0] : 0.0;
     float scale = 1.0;
-    if (motion_hi > 0.0 || trust_full > 0.0) {
+#ifdef ROLLOFF
+    const bool rolloff = true;
+#else
+    const bool rolloff = false;
+#endif
+    if (motion_hi > 0.0 || trust_full > 0.0 || rolloff) {
         float m = 1.0;
         if (motion_hi > 0.0)
             m *= clamp((mean_v - motion_lo) / max(motion_hi - motion_lo, 1e-3), 0.0, 1.0);
+#ifdef ROLLOFF
+        // Delta 14 R-A: the fall above a fast pan, on the frame's motion.
+        float frame_v = mean_v;
+#ifdef ROLLOFF_GLOBAL
+        vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+        if (gv.w > 0.5 && gv.z < 0.9)
+            frame_v = length(gv.xy) * 8.0;
+#endif
+        m *= mix(1.0, roll_floor, smoothstep(roll_lo, max(roll_hi, roll_lo + 1e-3), frame_v));
+#endif
         if (trust_full > 0.0)
             m *= clamp((share - min_share) / max(trust_full - min_share, 1e-3), 0.0, 1.0);
         vec4 prev = imageLoad(state_io, ivec2(0));
@@ -1221,12 +1239,40 @@ if (i == 0u) {
     }
     imageStore(dst, ivec2(0), vec4(share, scale, mean_v, 1.0));
 }
+#ifdef CAMERA_OUT
+// Delta 14 R-B: the camera, refined from D1's global vector (4-px steps) to
+// the mean of the trusted blocks near it.
+{
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    bool reliable = gv.w > 0.5 && gv.z < 0.9;
+    vec2 gpx = gv.xy * 8.0;
+    vec3 c = vec3(0.0);
+    for (int k = int(i); k < count; k += 256) {
+        vec4 f = texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0);
+        if (reliable && f.z > 0.5 && length(f.xy - gpx) < 6.0) c += vec3(f.xy, 1.0);
+    }
+    partial_c_[i] = c;
+}
+barrier();
+for (uint stride = 128u; stride > 0u; stride >>= 1) {
+    if (i < stride)
+        partial_c_[i] += partial_c_[i + stride];
+    barrier();
+}
+if (i == 0u) {
+    vec3 c = partial_c_[0];
+    imageStore(camera_out, ivec2(0), c.z > 0.0 ? vec4(c.xy / c.z, 1.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0));
+}
+#endif
 )GLSL";
 
 		// The vector at a source-luma position: bilinear between the four
 		// nearest block centres, trusted blocks only; the position's own
 		// block decides whether it is warped at all (untrusted: hold).
 		const char* const WARP_HEADER = R"GLSL(
+#ifdef OBJECT
+#define field_vector field_vector_raw
+#endif
 bool field_vector(vec2 lp, out vec2 v)
 {
     ivec2 fsize = textureSize(field, 0);
@@ -1279,6 +1325,25 @@ bool field_vector(vec2 lp, out vec2 v)
     v /= wsum;
     return true;
 }
+#ifdef OBJECT
+#undef field_vector
+// Delta 14 R-B: the camera (MotionWarp::Camera(), source px) applied fully,
+// the motion within the frame by object_strength.
+bool field_vector(vec2 lp, out vec2 v)
+{
+    bool ok = field_vector_raw(lp, v);
+    if (ok) {
+        vec2 vg = vec2(0.0);
+#ifdef CAMERA
+        vec4 g = texelFetch(camera, ivec2(0), 0);
+        if (g.z > 0.5)
+            vg = g.xy;
+#endif
+        v = vg + object_strength * (v - vg);
+    }
+    return ok;
+}
+#endif
 
 // D2/D4: the strength scale of this source frame (1 when both are off).
 float strength_scale() { return texelFetch(frame_trust, ivec2(0), 0).g; }
@@ -1516,7 +1581,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -1943,6 +2008,9 @@ if (q.x < size.x && q.y < size.y) {
 				return false;
 			snapSubValid = true;
 		}
+		// Delta 14 R-B's camera.
+		if (Camera() && !copy(camera, &snapCamera))
+			return false;
 		return true;
 	}
 
@@ -2017,6 +2085,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		innerSettings.lowResAll = false;
 		innerSettings.motionScaleLo *= 0.5f;
 		innerSettings.motionScaleHi *= 0.5f;
+		innerSettings.rollLo *= 0.5f;   // delta 14 R-A, in the inner's pixels
+		innerSettings.rollHi *= 0.5f;
 		innerSettings.holdFeatherPx *= 0.5f;
 		innerSettings.occlusionFill = false;
 		if (!all)
@@ -2088,6 +2158,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (!Dispatch("VideoProcessor de-judder: frame trust to the source (lowRes)", nullptr, TRUST_SCALE_BODY,
 					d, 2, v, 1, 1, 1, 1))
 				return false;
+			// Delta 14 R-B: the inner's camera, in this one's pixels.
+			if (inner->Camera())
+			{
+				pl_tex_params params = inner->Camera()->params;
+				params.host_readable = settings.hostReadable && (params.format->caps & PL_FMT_CAP_HOST_READABLE);
+				if (!pl_tex_recreate(gpu, &camera, &params) || !up(inner->Camera(), camera))
+					return false;
+			}
 		}
 		return true;
 	}
@@ -2213,9 +2291,45 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			stateDesc.desc.type = PL_DESC_STORAGE_IMG;
 			stateDesc.desc.access = PL_DESC_ACCESS_READWRITE;
 			stateDesc.binding.object = strengthState;
-			const pl_shader_desc trustDesc[3] = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
-			if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
-				trustDesc, 3, trustVars, 5, 16, 16, 16))
+			// Delta 14 R-A: the roll-off (on D1's global vector when it runs).
+			const bool rolloffGlobal = settings.motionRolloff && settings.globalPrior && globalVector[0];
+			// Delta 14 R-B: the camera, refined here.
+			const bool cameraOut = settings.objectStrength < 1.0f && settings.globalPrior && globalVector[0];
+			if (cameraOut && !camera)
+			{
+				pl_fmt vec4f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16,
+					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+				pl_tex_params params{};
+				params.w = params.h = 1;
+				params.format = vec4f;
+				params.sampleable = true;
+				params.storable = true;
+				params.host_readable = settings.hostReadable && vec4f && (vec4f->caps & PL_FMT_CAP_HOST_READABLE);
+				if (!vec4f || !pl_tex_recreate(gpu, &camera, &params))
+				{
+					error = "cannot create the camera texture";
+					return false;
+				}
+			}
+			std::vector<pl_shader_desc> trustDescs = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
+			if (rolloffGlobal || cameraOut)
+				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
+			if (cameraOut)
+				trustDescs.push_back(Storage("camera_out", camera));
+			const float rollLo = settings.rollLo, rollHi = settings.rollHi, rollFloor = std::min(1.0f, std::max(0.0f, settings.rollFloor));
+			std::vector<pl_shader_var> trustVarList(trustVars, trustVars + 5);
+			if (settings.motionRolloff)
+			{
+				trustVarList.push_back({ pl_var_float("roll_lo"), &rollLo, true });
+				trustVarList.push_back({ pl_var_float("roll_hi"), &rollHi, true });
+				trustVarList.push_back({ pl_var_float("roll_floor"), &rollFloor, true });
+			}
+			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
+				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
+				FRAME_TRUST_HEADER;
+			const pl_shader_desc* trustDesc = trustDescs.data();
+			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FRAME_TRUST_BODY,
+				trustDesc, static_cast<int>(trustDescs.size()), trustVarList.data(), static_cast<int>(trustVarList.size()), 16, 16, 16))
 				return false;
 			if (settings.holdHysteresis > 1)
 			{
@@ -2315,9 +2429,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return WARP_HEADER;
 	}
 
-	std::string WarpHeader(const Settings& settings, bool split)
+	std::string WarpHeader(const Settings& settings, bool split, bool camera)
 	{
 		std::string h;
+		if (settings.objectStrength < 1.0f)
+		{
+			h += "#define OBJECT 1\n";
+			if (camera) h += "#define CAMERA 1\n";
+		}
 		if (split) h += "#define SPLIT 1\n";
 		if (settings.holdFeatherPx > 0.0f) h += "#define FEATHER 1\n";
 		if (settings.blockTaper) h += "#define TAPER 1\n";
@@ -2353,8 +2472,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma;
 		// 11a E2: the sub-field bound (and read) only while the split is on.
 		const bool split = settings.estSplit && subField;
-		const std::string header = std::string(fill ? "#define FILL\n" : "") + WarpHeader(settings, split) +
+		// Delta 14 R-B: the camera from D1 (when it runs).
+		const bool withCamera = Camera() != nullptr;
+		const std::string header = std::string(fill ? "#define FILL\n" : "") + WarpHeader(settings, split, withCamera) +
 			(fill ? FILL_HEADER : "");
+		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
 		const float featherPx = settings.holdFeatherPx;
 		const float taperTol = settings.matchTolerance;
@@ -2370,6 +2492,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		if (split)
 			lumaDesc.push_back(Sampled("sub_field", subField, false));
+		if (withCamera)
+			lumaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
 			{ pl_var_float("min_trusted_share"), &minShare, true } };
 		if (fill) lumaVars.push_back({ pl_var_float("fill_tolerance"), &tolerance, true });
@@ -2379,6 +2503,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			lumaVars.push_back({ pl_var_float("taper_tol"), &taperTol, true });
 			lumaVars.push_back({ pl_var_float("taper_sad"), &taperSadW, true });
 		}
+		if (settings.objectStrength < 1.0f) lumaVars.push_back({ pl_var_float("object_strength"), &objectStrength, true });
 		if (!Dispatch("VideoProcessor de-judder: warp luma", header.c_str(), WARP_LUMA_BODY,
 			lumaDesc.data(), static_cast<int>(lumaDesc.size()), lumaVars.data(), static_cast<int>(lumaVars.size()),
 			width, height, 16))
@@ -2396,6 +2521,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		if (split)
 			chromaDesc.push_back(Sampled("sub_field", subField, false));
+		if (withCamera)
+			chromaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> chromaVars = {
 			{ pl_var_float("shift"), &shift, true },
 			{ pl_var_vec2("chroma_scale"), chromaScale, true },
@@ -2407,6 +2534,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			chromaVars.push_back({ pl_var_float("taper_tol"), &taperTol, true });
 			chromaVars.push_back({ pl_var_float("taper_sad"), &taperSadW, true });
 		}
+		if (settings.objectStrength < 1.0f) chromaVars.push_back({ pl_var_float("object_strength"), &objectStrength, true });
 		if (!Dispatch("VideoProcessor de-judder: warp chroma", header.c_str(), WARP_CHROMA_BODY,
 			chromaDesc.data(), static_cast<int>(chromaDesc.size()), chromaVars.data(), static_cast<int>(chromaVars.size()),
 			a.chroma->params.w, a.chroma->params.h, 16))

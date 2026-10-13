@@ -6742,7 +6742,8 @@ namespace VideoProcessorTest
 			g.targetCrop = g.sourceCrop;
 			pl_tex warped = nullptr;
 			const bool ran = rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare,
-				shift, g, warped, warp.SubField(), &warp.GetSettings());
+				shift, g, warped, warp.SubField(), &warp.GetSettings(),
+				warp.Camera());   // delta 14 R-B's camera, as the renderer
 			if (!ran)
 				pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
@@ -7582,6 +7583,155 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &planes[1]);
 			} catch (const std::exception& e) { const std::string w = where + ": " + e.what(); Assert::Fail(std::wstring(w.begin(), w.end()).c_str()); }
 			catch (...) { Assert::Fail(L"non-std exception"); }
+		}
+
+		TEST_METHOD(DejudderMotionRolloffKeepsFastMotionsStrobing)
+		{
+			// Delta 14 R-A: pans at 2, 12 and 30 source px per frame give the
+			// strength 0 (below D2's rise), full, and the floor (above the
+			// roll-off); off, the fast pan keeps full strength (D2 alone).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			DejudderGpuPlanes planesA;
+			UploadDejudderFrame(gpu, a, planesA);
+			auto scaleFor = [&](int dx, bool rolloff)
+			{
+				const DejudderFrame b = MakeDejudderFrame(width, height, [dx](int x, int y) { return DejudderTexture(x - dx, y); },
+					[dx](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y, 7 + c); });
+				DejudderGpuPlanes planesB;
+				UploadDejudderFrame(gpu, b, planesB);
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.motionScaleLo = 3.0f;
+				settings.motionScaleHi = 6.0f;
+				settings.trustScaleFull = 0.0f;
+				settings.motionRolloff = rolloff;
+				settings.rollLo = 16.0f;
+				settings.rollHi = 26.0f;
+				settings.rollFloor = 0.25f;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				// The first frame starts at its own value; more settle within D2's rate.
+				for (int i = 0; i < 6; ++i)
+					Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				const auto trust = DownloadFrameTrust(gpu, warp);
+				return std::make_pair(trust[1], trust[2]);
+			};
+			const auto slow = scaleFor(2, true), medium = scaleFor(12, true), fast = scaleFor(30, true), fastOff = scaleFor(30, false);
+			const std::wstring report = L"scale (mean |v|): 2 px " + std::to_wstring(slow.first) + L" (" + std::to_wstring(slow.second) +
+				L"), 12 px " + std::to_wstring(medium.first) + L" (" + std::to_wstring(medium.second) + L"), 30 px " +
+				std::to_wstring(fast.first) + L" (" + std::to_wstring(fast.second) + L"), 30 px off " + std::to_wstring(fastOff.first);
+			Assert::IsTrue(slow.first < 0.02f, (L"a slow pan: below D2's rise; " + report).c_str());
+			Assert::IsTrue(medium.first > 0.98f, (L"a medium pan: full; " + report).c_str());
+			Assert::IsTrue(std::fabs(fast.first - 0.25f) < 0.03f, (L"a fast pan: the floor; " + report).c_str());
+			Assert::IsTrue(fastOff.first > 0.98f, (L"off: D2 alone, full; " + report).c_str());
+		}
+
+		TEST_METHOD(DejudderObjectStrengthSplitsTheCameraFromObjects)
+		{
+			// Delta 14 R-B: a pan of (12, 6) with an object moving (-10, 0)
+			// against it. At object_strength 0.5 the background moves by the
+			// full s x pan and the object by s x (pan + 0.5 x (object - pan)),
+			// in the dither's vectors and in both warps; 1.0 is today exactly.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, ox = 96, oy = 40, ow = 64, oh = 48, odx = -10;
+			auto inA = [](int x, int y) { return x >= ox && x < ox + ow && y >= oy && y < oy + oh; };
+			auto inB = [](int x, int y) { return x >= ox + odx && x < ox + odx + ow && y >= oy && y < oy + oh; };
+			auto object = [](int x, int y) { return DejudderTexture(x, y, 41); };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inA(x, y) ? object(x - ox, y - oy) : DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inB(x, y) ? object(x - ox - odx, y - oy) : DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			struct Run { std::vector<float> vectors; BothPaths paths; float camX = 0, camY = 0; };
+			auto run = [&](float objectStrength)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.objectStrength = objectStrength;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes) && warp.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				Run r;
+				// The dither's vectors (output px per block, 1:1), shift 0.5.
+				DejudderRendered::VectorField field(fixture.Log(), gpu, true);
+				DejudderRendered::Geometry g;
+				g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+				g.targetCrop = g.sourceCrop;
+				pl_tex vectors = nullptr;
+				Assert::IsTrue(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, g, width, height,
+					vectors, warp.SubField(), &warp.GetSettings(), warp.Camera()), ExtendedRangeGpuProbe::ToWide(field.Error()).c_str());
+				std::vector<uint16_t> half(static_cast<size_t>(vectors->params.w) * vectors->params.h * 4);
+				pl_tex_transfer_params d{};
+				d.tex = vectors;
+				d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (uint16_t h : half) r.vectors.push_back(HalfBits(h));
+				uint16_t gv[4] = {};
+				d.tex = warp.Camera() ? warp.Camera() : warp.GlobalVector();
+				d.ptr = gv;
+				const float unit = warp.Camera() ? 1.0f : 8.0f;
+				if (pl_tex_download(gpu, &d)) { r.camX = HalfBits(gv[0]) * unit; r.camY = HalfBits(gv[1]) * unit; }
+				r.paths = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+				return r;
+			};
+			const Run split = run(0.5f), today = run(1.0f);
+			const int bw = (width + 15) / 16;
+			auto vectorAt = [&](const Run& r, int x, int y)
+			{
+				const size_t i = (static_cast<size_t>(y / 16) * bw + x / 16) * 4;
+				return std::make_pair(r.vectors[i], r.vectors[i + 1]);
+			};
+			const auto bgSplit = vectorAt(split, 24, 104), objSplit = vectorAt(split, ox + 32, oy + 24);
+			const auto bgToday = vectorAt(today, 24, 104), objToday = vectorAt(today, ox + 32, oy + 24);
+			auto text = [](std::pair<float, float> v) { return L"(" + std::to_wstring(v.first) + L", " + std::to_wstring(v.second) + L")"; };
+			const std::wstring report = L"camera (" + std::to_wstring(split.camX) + L", " + std::to_wstring(split.camY) +
+				L"); 0.5: background " + text(bgSplit) + L", object " + text(objSplit) + L"; 1.0: background " + text(bgToday) +
+				L", object " + text(objToday);
+			// Today: the object at s x its own motion; the background at s x pan.
+			Assert::IsTrue(std::fabs(objToday.first - 0.5f * odx) < 0.75f && std::fabs(bgToday.first - 0.5f * dx) < 0.75f &&
+				std::fabs(bgToday.second - 0.5f * dy) < 0.75f, (L"today; " + report).c_str());
+			// Split: the background unchanged, the object half-way to the camera.
+			const float expectX = 0.5f * (dx + 0.5f * (odx - dx)), expectY = 0.5f * (dy + 0.5f * (0 - dy));
+			Assert::IsTrue(std::fabs(bgSplit.first - bgToday.first) < 0.05f && std::fabs(bgSplit.second - bgToday.second) < 0.05f,
+				(L"0.5: the camera smoothed fully; " + report).c_str());
+			Assert::IsTrue(std::fabs(objSplit.first - expectX) < 0.75f && std::fabs(objSplit.second - expectY) < 0.75f,
+				(L"0.5: the object at s x (pan + 0.5 x (object - pan)); " + report).c_str());
+			// Both warps: the object's interior moves differently, the far
+			// background not at all; the two paths agree with each other.
+			auto region = [&](const std::vector<float>& image, int x0, int y0, int x1, int y1, const std::vector<float>& other)
+			{
+				double sum = 0.0;
+				int n = 0;
+				for (int y = y0; y < y1; ++y)
+					for (int x = x0; x < x1; ++x)
+					{
+						sum += std::fabs(image[static_cast<size_t>(y) * width + x] - other[static_cast<size_t>(y) * width + x]);
+						++n;
+					}
+				return sum / n / 256.0;   // 8-bit codes
+			};
+			for (int path = 0; path < 2; ++path)
+			{
+				const std::vector<float>& s05 = path == 0 ? split.paths.source : split.paths.rendered;
+				const std::vector<float>& s10 = path == 0 ? today.paths.source : today.paths.rendered;
+				const wchar_t* name = path == 0 ? L"source warp" : L"rendered warp";
+				Assert::IsTrue(region(s05, ox + 16, oy + 12, ox + ow - 16, oy + oh - 12, s10) > 2.0,
+					(std::wstring(name) + L": the object's interior moves by the split; " + report).c_str());
+				Assert::IsTrue(region(s05, 8, 100, 72, 120, s10) < 0.05, (std::wstring(name) + L": the far background as today; " + report).c_str());
+			}
+			Assert::IsTrue(region(split.paths.source, ox + 16, oy + 12, ox + ow - 16, oy + oh - 12, split.paths.rendered) < 2.0,
+				(L"the two paths agree on the split object; " + report).c_str());
 		}
 
 		TEST_METHOD(DejudderEstimateAheadFallsBackForEachReason)

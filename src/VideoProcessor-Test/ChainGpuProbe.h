@@ -1288,6 +1288,8 @@ namespace ChainGpuProbe
 		// Every refinement on (D1-D4 in the matcher, S1 in the dither); only
 		// meaningful with the matcher.
 		bool refinements = false;
+		// Delta 14 on the refinements axis: R-A's roll-off on, R-B at 0.5.
+		bool soeRules = false;
 		// S2 A/B: the output pass without float32 (patch 0003's flag off);
 		// measureOnly reports the bias without the picture limit.
 		bool outputFloat32 = true;
@@ -1295,10 +1297,11 @@ namespace ChainGpuProbe
 		std::string Name() const
 		{
 			char text[240];
-			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s, %s%s%s%s", scale,
+			std::snprintf(text, sizeof(text), "scale %.2f, NLS %s, %s light, Stage 10 %s, %s range, matcher %s, %s%s%s%s%s", scale,
 				nlsActive ? "on" : "off", gammaLight ? "gamma" : "linear", stage10 ? "on" : "off",
 				fullRange ? "full" : "limited", matcher ? "on" : "off", eightBit ? "8-in-10" : "10-bit",
-				rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "", refinements ? ", refinements" : "");
+				rgbSource ? ", RGB source" : "", cfl ? ", CfL" : "", refinements ? ", refinements" : "",
+				soeRules ? ", delta 14 (roll-off, object 0.5)" : "");
 			return text;
 		}
 	};
@@ -1396,7 +1399,13 @@ namespace ChainGpuProbe
 			out.planes.chromaShiftY = 0;
 			return out.planes.luma && out.planes.chroma;
 		};
-		Dejudder::MotionWarp warp(log, gpu, combo.refinements ? Refined(Dejudder::Settings()) : Dejudder::Settings());
+		Dejudder::Settings comboSettings = combo.refinements ? Refined(Dejudder::Settings()) : Dejudder::Settings();
+		if (combo.soeRules)
+		{
+			comboSettings.motionRolloff = true;
+			comboSettings.objectStrength = 0.5f;
+		}
+		Dejudder::MotionWarp warp(log, gpu, comboSettings);
 		AdaptiveDownscale::Module adaptive, reference;
 		AdaptiveDownscale::Settings settings;
 		OcclusionMask::Hook mask;
@@ -1604,6 +1613,12 @@ namespace ChainGpuProbe
 				{
 					c.refinements = true;
 					combos.push_back(c);
+					// Delta 14 (R-A on, R-B 0.5) on a subset of it.
+					if ((bits & 7) == 0)
+					{
+						c.soeRules = true;
+						combos.push_back(c);
+					}
 				}
 			}
 		// The named regressions, in both lists: an RGB source and CfL, with

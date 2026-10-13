@@ -298,7 +298,7 @@ if (b.x < size.x && b.y < size.y) {
 	}
 
 	bool Warp::Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
-		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher)
+		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera)
 	{
 		out = nullptr;
 		if (!dispatch || !cached || !field || !frameTrust)
@@ -361,7 +361,7 @@ if (b.x < size.x && b.y < size.y) {
 			{ pl_var_float("taper_tol"), &taperTol, true },
 			{ pl_var_float("taper_sad"), &taperSad, true } };
 		// The variables in use, in order (feather, then taper).
-		pl_shader_var used[18];
+		pl_shader_var used[19];
 		int n = 0;
 		for (int i = 0; i < 11; ++i) used[n++] = variables[i];
 		if (ms.holdFeatherPx > 0.0f) used[n++] = variables[11];
@@ -373,13 +373,18 @@ if (b.x < size.x && b.y < size.y) {
 			used[n++] = { pl_var_vec4("hold2"), holds[2], true };
 			used[n++] = { pl_var_vec4("hold3"), holds[3], true };
 		}
-		const pl_shader_desc descriptors[5] = {
-			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust),
-			Storage(warped), Sampled("sub_field", subField) };
+		// Delta 14 R-B: object_strength, and the camera when given.
+		const float objectStrength = ms.objectStrength;
+		const bool object = ms.objectStrength < 1.0f;
+		if (object) used[n++] = { pl_var_float("object_strength"), &objectStrength, true };
+		std::vector<pl_shader_desc> descriptors = {
+			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(warped) };
+		if (subField) descriptors.push_back(Sampled("sub_field", subField));
+		if (object && camera) descriptors.push_back(Sampled("camera", camera));
 		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
-			Dejudder::WarpHeader(ms, subField != nullptr) + (g.numHolds > 0 ? HOLDS_GLSL : "") + WARP_FUNCTIONS;
+			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,
-			descriptors, subField ? 5 : 4, used, n, w, h))
+			descriptors.data(), static_cast<int>(descriptors.size()), used, n, w, h))
 		{
 			error = "rendered warp rejected or failed";
 			return false;
@@ -403,7 +408,7 @@ if (b.x < size.x && b.y < size.y) {
 	}
 
 	bool VectorField::Run(pl_tex field, pl_tex frameTrust, float minTrustedShare, float shiftStep, const Geometry& g,
-		int w, int h, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher)
+		int w, int h, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera)
 	{
 		out = nullptr;
 		if (!dispatch || !field || !frameTrust || w <= 0 || h <= 0)
@@ -456,7 +461,7 @@ if (b.x < size.x && b.y < size.y) {
 			holds[i][2] = std::max(r.x0, r.x1);
 			holds[i][3] = std::max(r.y0, r.y1);
 		}
-		pl_shader_var used[19];
+		pl_shader_var used[20];
 		int n = 0;
 		used[n++] = { pl_var_vec2("dst_origin"), dstOrigin, true };
 		used[n++] = { pl_var_vec2("src_origin"), srcOrigin, true };
@@ -483,13 +488,20 @@ if (b.x < size.x && b.y < size.y) {
 			used[n++] = { pl_var_vec4("hold2"), holds[2], true };
 			used[n++] = { pl_var_vec4("hold3"), holds[3], true };
 		}
-		const pl_shader_desc descriptors[4] = {
-			Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(vectors), Sampled("sub_field", subField) };
+		// Delta 14 R-B: the extra's picture moved by the split vector, so its
+		// motion for the sigma-delta is the split vector too.
+		const float objectStrength = fieldSettings.objectStrength;
+		const bool object = fieldSettings.objectStrength < 1.0f;
+		if (object) used[n++] = { pl_var_float("object_strength"), &objectStrength, true };
+		std::vector<pl_shader_desc> descriptors = {
+			Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(vectors) };
+		if (subField) descriptors.push_back(Sampled("sub_field", subField));
+		if (object && camera) descriptors.push_back(Sampled("camera", camera));
 		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
-			Dejudder::WarpHeader(fieldSettings, subField != nullptr) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
+			Dejudder::WarpHeader(fieldSettings, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
 			WARP_FUNCTIONS_SOURCE_ONLY;
 		if (!Compute(dispatch, "VideoProcessor sigma-delta vectors from the de-judder field (delta 8 R1)", header,
-			FIELD_BODY, descriptors, subField ? 4 : 3, used, n, bw, bh))
+			FIELD_BODY, descriptors.data(), static_cast<int>(descriptors.size()), used, n, bw, bh))
 		{
 			error = "vector field rejected or failed";
 			return false;
