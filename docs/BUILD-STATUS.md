@@ -22,6 +22,16 @@ this fork is **off by default**: with no new keys, VP renders as Bill's VP
 | D3 Vector smoothing | Isolated wrong vectors take their neighbours' median; held blocks move with agreeing neighbours when their own picture matches | `dejudder_vector_smooth` | on* | on* | Fewer held patches on pans; a lone small object moving against a pan may be moved with the pan | `DejudderVectorSmoothing` |
 | D4 Trust-adaptive strength | Fewer trusted blocks than `trust_scale` eases strength down instead of holding more | `dejudder_trust_scale` 0.6 (0 = off) | on* | on* | Busy scenes: smooth retreat, not patchy judder | `DejudderTrustAdaptiveStrengthAndRateLimit` |
 | D2/D4 rate limit | The strength scale changes by at most 0.25 per film frame; a cut holds at once | (fixed) | - | - | No pumping at a pan's start or end | same |
+| 11a E1 Candidate sweep | A second matcher sweep that also tries the neighbours' vectors, with a smoothness penalty, so a block follows its neighbours unless its own match is clearly better | `dejudder_est_candidates`, `dejudder_est_lambda` 0.5 | on* | on* | Fewer odd single blocks on pans | `EstimatorNeighbourCandidatesBeatATextureOutlier` |
+| 11a E3 Quarter-pel step | Trusted blocks refine their vector to a quarter source pixel | `dejudder_est_qpel` | on* | on* | Slow pans: no stepping | `EstimatorQuarterPelRefinesASubPixelPan` |
+| 11a E4 Static gate | Blocks that did not change skip the search (GPU-side) | `dejudder_est_gate` | on* | on* | Nothing visible; less matcher time on still scenes | `EstimatorGateKeepsTheFieldOnStillScenes` |
+| 11a E2 Block split | A block that matches badly is split into 8x8-source-pixel sub-blocks with their own vectors (a sub-field read by both warps, the occlusion mask and the grain map) | `dejudder_est_split`, `dejudder_est_split_sad` 0 (= the match tolerance) | on* | on* | Object edges on pans: fewer held squares | `EstimatorSplitFollowsASmallObject`, `EstimatorSplitOffStateLeavesEveryConsumerAlone` |
+| 9 H1 Feathered hold | A warped block blends into a held neighbour over this many source pixels instead of a hard edge | `dejudder_hold_feather_px` 4 (0 = off) | on* | on* | Edges of held patches soft, not blocky | `HoldFeatherSoftensTheHeldBoundary` (both warp paths) |
+| 9 H2 Hold hysteresis | A block must be trusted for N source frames running before it warps, and untrusted for N before it holds (no flicker between the two). The first frame after a start or a cut holds | `dejudder_hold_hysteresis` 2 (1 = off) | on* | on* | No blocks blinking between moving and held | `HoldHysteresisNeedsTwoFrames` |
+| 9 H3 Block taper | Experiment: marginal blocks move at reduced strength instead of holding | `dejudder_block_taper`, `dejudder_taper_sad` 0 | off | off | Only as an A/B | `BlockTaperWarpsMarginalBlocksAtARampedStrength` |
+| 10 Even-cadence strength | De-judder on 2:2 cadences (30 / 25 fps film-like): one extra at the exact midpoint | `dejudder_strength_even` (0 = off), `dejudder_even_rates` 30 \| 30_and_29.97 | 0 (off) | off (judge 24p first) | 30p pan: smoother, no doubled edges | `DejudderEvenCadenceStrength` |
+| R1 Dither on the de-judder's vectors | On de-judder extras the sigma-delta takes the motion since the previous present from the de-judder's field (exact there) and skips its own search (Beta libplacebo, fork patch 0004); every other refresh, and 7.360, search as before | `dither_vectors` auto / own | auto* | auto* | Nothing new to see; per-present time in the stats overlay | `Beta R1`, `DitherVectorsAutoFallsBackWithoutThePatch` |
+| 13 SDR tone shape | SDR only: reference white placed below peak (headroom) and a soft knee into it, the shape tone-mapped HDR has, no inverse tone map; contrast recovery returns the detail the knee flattens | `sdr_tone_shape` off / knee, `sdr_white_headroom` 0, `sdr_knee_start` 0.80, `sdr_knee_strength` 0.5, `sdr_contrast_recovery` auto | off | off (the cinema check: headroom, then + knee, then + recovery, against the HDR version) | 200-255 ramp: smooth into white, no clip at 235 | `SdrToneShapeReferencePlacesWhiteAndRollsOffIntoTheHeadroom`, `SdrToneShapeShaderMatchesItsReference` |
 | D5 Occlusion fill | Experiment: uncovered picture is taken from the next frame instead of held. **Source warp only** (`dejudder_warp_stage: source`); with `rendered` it is ignored and logged once (planner: B-early caching is a post-cut item) | `dejudder_occlusion_fill` | off | off | Only as an A/B with `source` | `DejudderOcclusionFillFromB` |
 | 8 Adaptive downscale | 4K to 1600: SSIM where there is edge detail, faithful where there is grain | `adaptive_downscale`, `adaptive_w_base` 1, `adaptive_edge_lo/hi` 8/40, `adaptive_grain_lo/hi` 2/8, `adaptive_grain_floor` 0.4, `adaptive_chroma_ssim` off, `downscale_light` linear | off | on | Grainy sky over a sharp foreground: grain calmer, no halos on horizons or text | `AdaptiveDownscaleBlendsEdgesTextureAndGrain` |
 | 8-3 Grain map | The grain measure per 16x16 block from the motion vectors (the matcher runs for it) | `adaptive_grain_map`, `adaptive_grain_map_smooth_ms` 500 | on (with Stage 8) | on | As Stage 8 | `AdaptiveDownscaleGrainMapFromTheVectors`, `DejudderGrainErrorSeparatesNoiseFromTexture` |
@@ -31,7 +41,11 @@ this fork is **off by default**: with no new keys, VP renders as Bill's VP
 | S2 Float32 output pass | libplacebo's output pass (PRE_OUTPUT to the dither) in rgba32f: no half-float rounding before the encode, nothing clipped (patch 0003, Beta libplacebo). A correctness fix: it removed a 0.25-0.6 code darkening | always (VP Renderer, Beta libplacebo) | always | always | Nothing to see | `Beta S2`, `Beta S2 A/B` (the bias returns with the flag off) |
 | S2 Float32 everywhere | Every libplacebo intermediate in rgba32f: exact highlights (half-float rounds above white by up to 0.84 of a 10-bit step) | `fbo_float32` auto / on / off | auto (on; off with the Low_Latency queue) | auto | Render time in the stats overlay (Ctrl+I) on the 3090; turn off if it shows pressure | `Beta S2` |
 | HDR deband off | libplacebo's debanding off for PQ/HLG (its HDR grain turns ~1 pixel in 10^4 black) | `[vprenderer.HDR]` `when: $eotf=="pq" \|\| $eotf=="hlg"`, `deband: off` | in the shipped sample | on | HDR film: no black specks in bright areas | `ShippedConfigurationsTurnDebandingOffForHdr` |
-| LED drive | Projector LED / CNTR control from the picture over RS-232 | `[led_drive.Default]` `enabled`, `mode` off / log_only / script / compensate; `[projector.Default]` port, baud | disabled | `log_only` for the first minutes, then `compensate` | Log first; then fade to black, hard cut dark to bright, static mid-APL, 5-10% grey | `Led*`, `ReplyParserAcceptsOnlyBarcoReplies` and the RS-232 connection test |
+| LED drive | Projector LED / CNTR control from the picture over RS-232 | `[led_drive.Default]` `enabled`, `mode` off / log_only / script / compensate / picture_only / listen; `[projector.Default]` port, baud | disabled | `log_only` for the first minutes, then `compensate` | Log first; then fade to black, hard cut dark to bright, static mid-APL, 5-10% grey | `Led*`, `ReplyParserAcceptsOnlyBarcoReplies` and the RS-232 connection test |
+| LED R2 Grain-suppressed highlights | A grainy block's highlight statistic leans toward its neighbours' mean, so grain does not read as highlights (APL and the script's block maximum unchanged) | `led_highlight_grain_suppress` | on (with the LED drive) | on | Grainy bright sky: LED not pumping on grain | `LedHighlightStatisticIgnoresGrain` |
+| LED delta 11 Boost toe, ANSI lift | The gamma boost fades out below `gamma_boost_knee` (shadows keep their gradation); the ANSI branch lifts the darks next to large highlights by `shadow_lift_ansi` (scene-adaptive, slewed 1/s, reset on a cut) | `gamma_boost_knee` 0, `gamma_boost_knee_width` 0, `shadow_lift_ansi` 0, `shadow_lift_ansi_ramp_lo/hi` 0.01/0.10 | off | off (the dark-hair test) | Dark hair against a bright window: texture kept | `LedBoostToeAndShadowLift` |
+| LED picture_only | VP's picture compensation only, gain exactly 1: statistics, veil and shadow lift as in compensate; **the RS-232 port is never opened** (the original Python script can use it) | `mode: picture_only` | - | - | Port free: the script connects | `PictureOnlyNeverOpensThePortAndKeepsGainOne` |
+| LED listen | The original script (`docs/reference/main_vp.py`: main.py plus a UDP addendum) drives COM1 and tells VP each command; VP eases each heard contrast step as if it had sent it, compares its own copy of the script's rules, and never opens the port. Config LED page: the listen monitor (heard commands, VP's measurement, agreement) | `mode: listen`, `listen_port` 47811, `listen_log` off (on: `logs\led-listen.csv`, every message with VP's measurement) | - | - | Monitor shows "Receiving"; agreement figures | `ListenModeFollowsTheScriptWithoutThePort`, `ListenLogOffWritesNoCsv` |
 | 9 Room lights | Dark / lit room from a lux sensor on its own COM port; profiles select on `${ambient}` | `[ambient]` `mode` off / sensor, `port`, `baud` | off | off (sensor hardware not chosen) | - | `AmbientRoomLightsSwitchAndSelectProfiles`, `AmbientSensorReadsLuxLinesFromItsOwnPort` |
 | Edge blanking | Light-engine edges blanked; picture scaled into the rest | `[vprenderer.viewport.cinema]` `blank_left` 10, `blank_right` 15 | none | 10 / 15 | Edges black; picture present | chain tests (blanking phase) |
 
@@ -51,6 +65,8 @@ preserve_extended_range: off
 dither_grain_tolerance_scale: 1
 adaptive_upscale: off
 fbo_float32: off
+sdr_tone_shape: off
+sdr_white_headroom: 0
 # Standard shaders: Temporal sigma-delta disabled
 # [led_drive.Default]
 enabled: false
@@ -61,7 +77,11 @@ mode: off
 The refinements individually (for A/B with the de-judder on):
 `dejudder_global_prior: off`, `dejudder_vector_smooth: off`,
 `dejudder_motion_scale_hi: 0`, `dejudder_trust_scale: 0`,
-`dejudder_occlusion_fill: off`, `dither_grain_tolerance_scale: 1`.
+`dejudder_occlusion_fill: off`, `dither_grain_tolerance_scale: 1`,
+`dejudder_est_candidates: off`, `dejudder_est_qpel: off`,
+`dejudder_est_gate: off`, `dejudder_est_split: off`,
+`dejudder_hold_feather_px: 0`, `dejudder_hold_hysteresis: 1`,
+`dither_vectors: own`.
 
 The output-pass float32 has no key (a correctness fix): the only way back
 is the previous `libplacebo-377.dll`.
@@ -101,6 +121,26 @@ is the previous `libplacebo-377.dll`.
   per-pixel motion gate) by the grain term: with the per-pixel gate alone at
   one code, grain would reset the carry anyway.
 - D5 is source-warp only (ignored with the rendered warp, logged once).
+- H2: with `dejudder_hold_hysteresis` 2 the first source frame after a
+  start or a cut holds every block (none has been trusted twice yet); the
+  extras start on the next frame. Intended (the spec's N consecutive
+  frames).
+- R1 gives the sigma-delta external vectors only on de-judder extras (the
+  motion since the previous present is the shift step there, exactly); the
+  first present of each source frame, cadence repeats and every frame
+  without extras search as before. A held block is a trusted zero vector.
+  The external vectors are whole pixels (the quantizer's), from each 16x16
+  block's centre; the per-pixel gate checks every pixel as before.
+- 13: the SDR tone shape runs first at PRE_OUTPUT, so the LED measurement
+  sees the shaped picture (what is shown). Its curve is per channel, in the
+  output gamma; the knee is in linear light, as a fraction of peak.
+- picture_only: switching from compensate rebuilds the module (the port
+  closes; full light is restored by the rebuild, not by a command).
+- Listen: the agreement figures compare the script's own measurement
+  (screenshot, mean2/max) with VP's (the picture before the encode); a
+  steady offset is expected (different picture, different scaling).
+  VP's monitor file `logs\led-listen-now.txt` is written whether or not
+  `listen_log` is on.
 - 8b's faithful branch averages a doubler's 2x output back to the source
   resolution (prescale ratios other than 1 and 2: 8b skips the frame and
   logs it).
@@ -148,7 +188,13 @@ clean-log checks ignore it. VP keeps libplacebo's compiled-shader cache.
 ### The Beta libplacebo (377) is VP's own build
 
 `3rdparty/libplacebo-beta/bin/libplacebo-377.dll` is Bill's Beta source
-with three VP patches (`source/fl35-patches`): 0001/0002 the limited-range
-output clamp, 0003 the optional rgba32f FBOs. Rebuild with MSYS2 MINGW64:
+with four VP patches (`source/fl35-patches`): 0001/0002 the limited-range
+output clamp, 0003 the optional rgba32f FBOs, 0004
+`pl_mpv_user_shader_set_texture` (R1: a user shader's own `//!TEXTURE`
+pointed at a VP texture, restored before destroy; one new export). Any
+libplacebo rebuild must carry all four. Rebuild with MSYS2 MINGW64:
 `C:\dev\libplacebo-build\build.sh` (it runs libplacebo's own tests), then
-copy the DLL and `include/libplacebo/renderer.h`.
+copy the DLL, `include/libplacebo/renderer.h` and
+`include/libplacebo/shaders/custom.h`, add any new export to
+`lib/libplacebo-377.def` and regenerate the import library
+(`lib.exe /def:libplacebo-377.def /machine:x64 /out:libplacebo-377.lib`).
