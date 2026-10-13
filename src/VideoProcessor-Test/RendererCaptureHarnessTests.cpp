@@ -149,7 +149,8 @@ namespace
 
 	// The renderer from its DLL, a profile with capture_path, frames for
 	// `seconds`, then stopped and destroyed.
-	RunResult Run(VideoFrameEncoding encoding, const std::string& capturePath, double seconds)
+	RunResult Run(VideoFrameEncoding encoding, const std::string& capturePath, double seconds,
+		bool film = false, const std::string& extra = std::string())
 	{
 		RunResult result;
 		{
@@ -171,7 +172,8 @@ namespace
 		{
 			std::ofstream config(configPath, std::ios::trunc);
 			config << "[general]\npersist_profile_selection: false\n"
-				"[vprenderer.input.low_latency]\nwhen: $source_rate > 59\ncapture_path: " << capturePath << "\n";
+				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
+				<< extra;
 		}
 		// A small window off the screen.
 		WNDCLASSA wc{};
@@ -193,20 +195,21 @@ namespace
 			const int width = 1920, height = 1080;
 			VideoStateComPtr state = new VideoState();
 			state->valid = true;
-			state->displayMode = std::make_shared<DisplayMode>(width, height, false, 60000, 1001);
+			state->displayMode = film ? std::make_shared<DisplayMode>(width, height, false, 24000, 1001) :
+				std::make_shared<DisplayMode>(width, height, false, 60000, 1001);
 			state->videoFrameEncoding = encoding;
 			state->colorspace = ColorSpace::REC_709;
 			state->eotf = EOTF::SDR;
 			renderer->OnVideoState(state);
 			renderer->Build();
-			renderer->SetQueueFramePolicy(2, 3, true);
+			renderer->SetQueueFramePolicy(2, film ? 4 : 3, true);
 			renderer->Start();
 			// A ring of frames that outlives anything the queue holds.
 			const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
 			std::vector<std::vector<BYTE>> ring(24, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
 			std::vector<SourceBuffer> buffers(ring.size());
 			const auto start = std::chrono::steady_clock::now();
-			const auto period = std::chrono::microseconds(16683);
+			const auto period = std::chrono::microseconds(film ? 41708 : 16683);
 			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
 			{
 				std::vector<BYTE>& buffer = ring[n % ring.size()];
@@ -266,6 +269,21 @@ namespace Tests
 				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 2.0);
 				Assert::IsFalse(r.Logged(gpuLine), (L"standard: no GPU path\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (L"standard: frames presented\n" + r.Tail()).c_str());
+			}
+			// 23.976p with the de-judder (and estimate ahead, a queue of 4):
+			// its next and ahead frames come from raw payloads, unpacked on the
+			// GPU too.
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, true,
+					"dejudder_strength: 0.25\nocclusion_mask: on\n");
+				Assert::IsTrue(r.Logged("Capture path gpu: V210 unpacked on the GPU"), (L"film gpu: the GPU path ran\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("De-judder: motion estimated"), (L"film gpu: the de-judder estimated from GPU planes\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("uploading the next frame failed"), (L"film gpu: the next frames unpacked\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged(failed), (L"film gpu: no fallback\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"film gpu: frames presented\n" + r.Tail()).c_str());
+				for (const std::string& line : r.log)
+					if (line.find("De-judder") != std::string::npos || line.find("Capture path") != std::string::npos)
+						Logger::WriteMessage(line.c_str());
 			}
 			// gpu with the unpack forced to fail: the fallback, logged once, and
 			// the CPU formatters keep the picture going.
