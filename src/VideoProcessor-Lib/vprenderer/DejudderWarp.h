@@ -95,6 +95,19 @@ namespace Dejudder
 		// is new content (uncovered) is taken from B along B's own motion
 		// instead of held.
 		bool occlusionFill = false;
+		// Stage 11a, estimator-lite (docs/VP-stage11a-estimator-lite.md):
+		// E1 a second fine sweep scoring the block's own result, its eight
+		// neighbours' (from the first sweep), its previous-frame vector and
+		// the global vector by SAD + estLambda x |v - median(neighbours)|
+		// (codes per source pixel), then half-pel; the first sweep also tries
+		// the previous-frame vector. E3 one quarter-pel step on trusted blocks.
+		// E4 (with the global prior): when the global vector and the previous
+		// frame's mean trusted |v| are both below motionScaleLo, both sweeps
+		// keep the previous frame's vectors (decided on the GPU, no read-back).
+		bool estCandidates = false;
+		float estLambda = 0.5f;
+		bool estQpel = false;
+		bool estGate = false;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
 	};
@@ -125,6 +138,16 @@ namespace Dejudder
 		// check. Estimate runs it itself when vectorSmooth is on; public so the
 		// rule can be tested on a constructed field.
 		bool Smooth(pl_tex raw);
+
+		// 11a E1's second sweep on a given first-sweep result (forward
+		// direction, half-resolution vectors as Forward()) into Forward(), with
+		// the last Estimate's planes, global vector and previous searches.
+		// Estimate runs it itself when estCandidates is on; public so the
+		// penalty can be tested on a constructed first sweep.
+		bool SecondSweep(pl_tex firstSweep)
+		{
+			return Refine(halfA, halfB, firstSweep, previousSearch[0], globalVector[0], forward);
+		}
 
 		// The block field from the last Estimate: rgba = (vx, vy) in source
 		// pixels, trust (1/0), match error. One texel per 16x16 source block.
@@ -171,8 +194,10 @@ namespace Dejudder
 			int width, int height, int group);
 		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange);
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
-			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex out);
+			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out);
 		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out);
+		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out);
+		bool Copy(pl_tex src, pl_tex dst);
 
 		pl_log log = nullptr;
 		pl_gpu gpu = nullptr;
@@ -192,6 +217,10 @@ namespace Dejudder
 		pl_tex globalVector[2] = { nullptr, nullptr };      // D1: forward, backward
 		pl_tex strengthState = nullptr;                     // D2/D4: last scale (rgba32f)
 		pl_tex fillOcclusion = nullptr;                     // D5: B's occlusion
+		pl_tex sweep[2] = { nullptr, nullptr };             // 11a E1: the first sweep (fwd, bwd)
+		pl_tex previousSearch[2] = { nullptr, nullptr };    // 11a: last frame's searches
+		bool previousValid = false;
+		pl_tex qpelField = nullptr;                         // 11a E3: before D3
 		Planes lastB;                                       // D5: B of the last Estimate
 		bool fillReady = false;
 		pl_tex occlusion[2] = { nullptr, nullptr };

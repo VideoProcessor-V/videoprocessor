@@ -635,8 +635,11 @@ namespace RendererProfileConfig
 			// (source px per source frame, hi 0 = off); D4 trust-adaptive
 			// strength (share at full strength, 0 = off); S1 the sigma-delta's
 			// tolerance on grain (1 = off).
-			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill")
+			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
+				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate")
 				return IsChoice(value, { "on", "off" });
+			// Stage 11a E1: the smoothness penalty (codes per source pixel).
+			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
 			if (key == "dejudder_motion_scale_lo") return IsNumberInRange(value, 0.0, 16.0);
 			if (key == "dejudder_motion_scale_hi") return IsNumberInRange(value, 0.0, 32.0);
 			if (key == "dejudder_trust_scale") return IsNumberInRange(value, 0.0, 1.0);

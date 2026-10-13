@@ -880,6 +880,11 @@ namespace
 		bool dejudderVectorSmooth = true;         // D3
 		double dejudderTrustScale = 0.6;          // D4: share at full strength (0 = off)
 		bool dejudderOcclusionFill = false;       // D5 (experiment)
+		// Stage 11a estimator-lite (docs/VP-stage11a-estimator-lite.md).
+		bool dejudderEstCandidates = true;        // E1
+		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
+		bool dejudderEstQpel = true;              // E3
+		bool dejudderEstGate = true;              // E4
 		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
 		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
 		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
@@ -1032,6 +1037,8 @@ namespace
 			<< settings.dejudderGlobalPrior << '|' << settings.dejudderMotionScaleLo << '|'
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
+			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
+			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -1977,6 +1984,7 @@ namespace
 			std::make_tuple("dejudder_motion_scale_lo", 0.0, 16.0, &settings.dejudderMotionScaleLo),
 			std::make_tuple("dejudder_motion_scale_hi", 0.0, 32.0, &settings.dejudderMotionScaleHi),
 			std::make_tuple("dejudder_trust_scale", 0.0, 1.0, &settings.dejudderTrustScale),
+			std::make_tuple("dejudder_est_lambda", 0.0, 8.0, &settings.dejudderEstLambda),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
@@ -2000,7 +2008,10 @@ namespace
 		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
 			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
 			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
-			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill) })
+			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
+			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
+			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
+			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8071,6 +8082,10 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderVectorSmooth = next.dejudderVectorSmooth;
 		currentTransport.dejudderTrustScale = next.dejudderTrustScale;
 		currentTransport.dejudderOcclusionFill = next.dejudderOcclusionFill;
+		currentTransport.dejudderEstCandidates = next.dejudderEstCandidates;
+		currentTransport.dejudderEstLambda = next.dejudderEstLambda;
+		currentTransport.dejudderEstQpel = next.dejudderEstQpel;
+		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
 		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
@@ -8152,6 +8167,9 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderVectorSmooth != next.dejudderVectorSmooth, "dejudder_vector_smooth");
 		changed(current.dejudderTrustScale != next.dejudderTrustScale, "dejudder_trust_scale");
 		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
+		changed(current.dejudderEstCandidates != next.dejudderEstCandidates ||
+			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
+			current.dejudderEstGate != next.dejudderEstGate, "dejudder_est");
 		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
 		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
@@ -11127,6 +11145,10 @@ struct LibplaceboVideoRenderer::Impl
 			// D5 is source-warp only (planner 2026-10-12): with the rendered
 			// warp it is ignored (logged once) and its pass not run.
 			settings.occlusionFill = activeSettings.dejudderOcclusionFill && !activeSettings.dejudderWarpRendered;
+			settings.estCandidates = activeSettings.dejudderEstCandidates;
+			settings.estLambda = static_cast<float>(activeSettings.dejudderEstLambda);
+			settings.estQpel = activeSettings.dejudderEstQpel;
+			settings.estGate = activeSettings.dejudderEstGate;
 			return settings;
 		};
 		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
@@ -11143,7 +11165,9 @@ struct LibplaceboVideoRenderer::Impl
 			if (current.matchTolerance != next.matchTolerance || current.minTrustedShare != next.minTrustedShare ||
 				current.globalPrior != next.globalPrior || current.vectorSmooth != next.vectorSmooth ||
 				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
-				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill)
+				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
+				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
+				current.estQpel != next.estQpel || current.estGate != next.estGate)
 				dejudder->SetSettings(next);
 		}
 		Dejudder::Planes a, b;

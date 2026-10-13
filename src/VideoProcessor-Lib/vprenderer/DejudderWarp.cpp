@@ -54,6 +54,17 @@ float l1to(vec2 p) { return texture(to_l1, (p + vec2(0.5)) / vec2(l1_size_)).r; 
 float l2from(ivec2 p) { return texelFetch(from_l2, clamp(p, ivec2(0), l2_size_ - ivec2(1)), 0).r; }
 float l2to(ivec2 p) { return texelFetch(to_l2, clamp(p, ivec2(0), l2_size_ - ivec2(1)), 0).r; }
 
+// 11a E4: nothing moves (the global vector and the previous frame's mean
+// trusted |v| below motion_lo, the global vector confident).
+bool static_scene()
+{
+    if (use_gate == 0)
+        return false;
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    float prev_mean = texelFetch(prev_trust, ivec2(0), 0).b;
+    return gv.w > 0.5 && gv.z < 0.9 && length(gv.xy) * 8.0 < motion_lo && prev_mean < motion_lo;
+}
+
 // The block's own 8x8 plus a 2-pixel margin.
 float sad(ivec2 o, ivec2 v)
 {
@@ -107,6 +118,11 @@ float sad_l2(ivec2 c, ivec2 v)
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 blocks = imageSize(dst);
 if (b.x < blocks.x && b.y < blocks.y) {
+    // 11a E4: a static scene keeps the previous frame's vectors.
+    if (static_scene()) {
+        imageStore(dst, b, texelFetch(previous, b, 0));
+        return;
+    }
     half_size_ = textureSize(from_half, 0);
     l1_size_ = textureSize(from_l1, 0);
     l2_size_ = textureSize(from_l2, 0);
@@ -169,14 +185,19 @@ if (b.x < blocks.x && b.y < blocks.y) {
     // most of a texel on fine texture; the global vector is exact on a pan).
     ivec2 best = ivec2(0);
     float best_sad = sad(o, best);
-    for (int c = 0; c < 4; c++) {
+    // 11a E1: the previous frame's vector of this block (half-resolution
+    // pixels) as one more start.
+    vec2 vpt = use_temporal != 0 ? texelFetch(previous, b, 0).xy * 0.25 : vec2(0.0);
+    for (int c = 0; c < 5; c++) {
         if (c == 1 && v1c == v1z)
             continue;
         if (c == 2 && (!have_g || v1g == v1z || v1g == v1c))
             continue;
         if (c == 3 && (!have_g || vgf == v1g || vgf == v1z || vgf == v1c))
             continue;
-        ivec2 centre = ivec2(round((c == 0 ? v1z : (c == 1 ? v1c : (c == 2 ? v1g : vgf))) * 4.0));
+        if (c == 4 && (use_temporal == 0 || vpt == v1z || vpt == v1c))
+            continue;
+        ivec2 centre = ivec2(round((c == 0 ? v1z : (c == 1 ? v1c : (c == 2 ? v1g : (c == 3 ? vgf : vpt)))) * 4.0));
         for (int dy = -3; dy <= 3; dy++)
             for (int dx = -3; dx <= 3; dx++) {
                 ivec2 v = centre + ivec2(dx, dy);
@@ -203,6 +224,139 @@ if (b.x < blocks.x && b.y < blocks.y) {
         }
     imageStore(dst, b, vec4(fbest, best_sad / 144.0, 1.0));
 }
+)GLSL";
+
+		// 11a: sub-pixel SAD on half-resolution luma (the search header's).
+		const char* const SUBPEL_HEADER = R"GLSL(
+ivec2 half_size_;
+float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
+float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
+float sad_sub(ivec2 o, vec2 v)
+{
+    float s = 0.0;
+    for (int y = -2; y < 10; y++)
+        for (int x = -2; x < 10; x++) {
+            ivec2 p = o + ivec2(x, y);
+            s += abs(from_at(p) - to_lin(vec2(p) + v));
+        }
+    return s;
+}
+)GLSL";
+
+		// 11a E4, as in the search header.
+		const char* const GATE_GLSL = R"GLSL(
+bool static_scene()
+{
+    if (use_gate == 0)
+        return false;
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    float prev_mean = texelFetch(prev_trust, ivec2(0), 0).b;
+    return gv.w > 0.5 && gv.z < 0.9 && length(gv.xy) * 8.0 < motion_lo && prev_mean < motion_lo;
+}
+)GLSL";
+
+		const char* const MEDIAN_GLSL = R"GLSL(
+float median_(float a[9], int n)
+{
+    for (int i = 1; i < 9; i++) {
+        if (i >= n) break;
+        float x = a[i];
+        int j = i - 1;
+        while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; }
+        a[j + 1] = x;
+    }
+    return a[n / 2];
+}
+)GLSL";
+
+		// 11a E1: the second sweep. Candidates in half-resolution pixels: the
+		// block's own first-sweep result, its eight neighbours', its previous-
+		// frame vector, the global vector; score SAD per sample + lambda x the
+		// distance (source pixels) from the neighbours' median. Then half-pel.
+		const char* const REFINE_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    if (static_scene()) {
+        imageStore(dst, b, texelFetch(previous, b, 0));
+        return;
+    }
+    half_size_ = textureSize(from_half, 0);
+    ivec2 o = b * 8;
+    vec2 cand[11];
+    float xs[9];
+    float ys[9];
+    int nc = 0, nn = 0;
+    cand[nc++] = texelFetch(sweep, b, 0).xy;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 c = b + ivec2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= blocks.x || c.y >= blocks.y) continue;
+            vec2 v = texelFetch(sweep, c, 0).xy;
+            cand[nc++] = v;
+            xs[nn] = v.x;
+            ys[nn] = v.y;
+            nn++;
+        }
+    if (use_temporal != 0)
+        cand[nc++] = texelFetch(previous, b, 0).xy;
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
+        cand[nc++] = gv.xy * 4.0;
+    vec2 med = nn > 0 ? vec2(median_(xs, nn), median_(ys, nn)) : cand[0];
+    vec2 best = cand[0];
+    float best_sad = sad_sub(o, best);
+    float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
+    for (int k = 1; k < 11; k++) {
+        if (k >= nc) break;
+        float s = sad_sub(o, cand[k]);
+        float score = s / 144.0 + lambda * 2.0 * length(cand[k] - med);
+        if (score < best_score) { best_score = score; best_sad = s; best = cand[k]; }
+    }
+    vec2 fbest = best;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            vec2 v = best + 0.5 * vec2(dx, dy);
+            float s = sad_sub(o, v);
+            if (s < best_sad) { best_sad = s; fbest = v; }
+        }
+    imageStore(dst, b, vec4(fbest, best_sad / 144.0, 1.0));
+}
+)GLSL";
+
+		// 11a E3: one quarter-pel step (half-resolution 0.25 = half a source
+		// pixel) on trusted blocks of the field (source pixels).
+		const char* const QPEL_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    vec4 f = texelFetch(raw, b, 0);
+    if (f.z > 0.5) {
+        half_size_ = textureSize(from_half, 0);
+        ivec2 o = b * 8;
+        vec2 v0 = f.xy * 0.5;
+        vec2 best = v0;
+        float best_sad = sad_sub(o, v0);
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                vec2 v = v0 + 0.25 * vec2(dx, dy);
+                float s = sad_sub(o, v);
+                if (s < best_sad) { best_sad = s; best = v; }
+            }
+        f.xy = best * 2.0;
+    }
+    imageStore(dst, b, f);
+}
+)GLSL";
+
+		const char* const COPY_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (b.x < size.x && b.y < size.y)
+    imageStore(dst, b, texelFetch(src, b, 0));
 )GLSL";
 
 		// D1: the whole frame's translation, by one 16x16 group. Every vector
@@ -644,7 +798,8 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
-			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion })
+			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
+			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField })
 			pl_tex_destroy(gpu, tex);
 		pl_dispatch_destroy(&dispatch);
 	}
@@ -688,11 +843,23 @@ if (q.x < size.x && q.y < size.y) {
 			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable) ||
 			!make(&occlusion[0], blocksX, blocksY, vec4f, readable) || !make(&occlusion[1], blocksX, blocksY, vec4f, readable) ||
 			!make(&rawField, blocksX, blocksY, vec4f, readable) || !make(&fillOcclusion, blocksX, blocksY, vec4f, readable) ||
-			!make(&globalVector[0], 1, 1, vec4f, readable) || !make(&globalVector[1], 1, 1, vec4f, readable))
+			!make(&globalVector[0], 1, 1, vec4f, readable) || !make(&globalVector[1], 1, 1, vec4f, readable) ||
+			!make(&sweep[0], blocksX, blocksY, vec4f, readable) || !make(&sweep[1], blocksX, blocksY, vec4f, readable) ||
+			!make(&qpelField, blocksX, blocksY, vec4f, readable))
 		{
 			error = "cannot create the motion textures";
 			return false;
 		}
+		const bool previousResized = !previousSearch[0] || previousSearch[0]->params.w != blocksX ||
+			previousSearch[0]->params.h != blocksY;
+		if (!make(&previousSearch[0], blocksX, blocksY, vec4f, readable) ||
+			!make(&previousSearch[1], blocksX, blocksY, vec4f, readable))
+		{
+			error = "cannot create the motion textures";
+			return false;
+		}
+		if (previousResized)
+			previousValid = false;
 		// D2/D4's last scale: read-write, so rgba32f (as Stage 8's state);
 		// zero at creation = no history.
 		if (!strengthState)
@@ -794,22 +961,59 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	bool MotionWarp::Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
-		pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex out)
+		pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out)
 	{
-		const pl_shader_desc descriptors[8] = {
+		const pl_shader_desc descriptors[10] = {
 			// One binding per texture (libplacebo rejects the same texture bound
 			// twice in a pass): `to_half` is linear for the half-pixel samples;
 			// texelFetch ignores the filter.
 			Sampled("from_half", fromHalf, false), Sampled("to_half", toHalf, true),
 			Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
 			Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false),
-			Sampled("global_vec", global, false), Storage("dst", out) };
+			Sampled("global_vec", global, false), Storage("dst", out),
+			Sampled("previous", previous, false), Sampled("prev_trust", frameTrust, false) };
 		const int range = std::max(0, std::min(settings.coarseRange, 16));
 		const int useGlobal = settings.globalPrior ? 1 : 0;
-		const pl_shader_var variables[2] = { { pl_var_int("coarse_range"), &range, false },
-			{ pl_var_int("use_global"), &useGlobal, false } };
+		const int useTemporal = settings.estCandidates && previousValid ? 1 : 0;
+		const int useGate = settings.estGate && settings.globalPrior && previousValid ? 1 : 0;
+		const float motionLo = settings.motionScaleLo;
+		const pl_shader_var variables[5] = { { pl_var_int("coarse_range"), &range, false },
+			{ pl_var_int("use_global"), &useGlobal, false },
+			{ pl_var_int("use_temporal"), &useTemporal, false },
+			{ pl_var_int("use_gate"), &useGate, false },
+			{ pl_var_float("motion_lo"), &motionLo, true } };
 		return Dispatch("VideoProcessor de-judder: block search", SEARCH_HEADER, SEARCH_BODY,
-			descriptors, 8, variables, 2, blocksX, blocksY, 8);
+			descriptors, 10, variables, 5, blocksX, blocksY, 8);
+	}
+
+	bool MotionWarp::Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn, pl_tex previous, pl_tex global, pl_tex out)
+	{
+		const pl_shader_desc descriptors[7] = {
+			Sampled("from_half", fromHalf, false), Sampled("to_half", toHalf, true),
+			Sampled("sweep", sweepIn, false), Sampled("previous", previous, false),
+			Sampled("global_vec", global, false), Sampled("prev_trust", frameTrust, false),
+			Storage("dst", out) };
+		const int useGlobal = settings.globalPrior ? 1 : 0;
+		const int useTemporal = previousValid ? 1 : 0;
+		const int useGate = settings.estGate && settings.globalPrior && previousValid ? 1 : 0;
+		const float motionLo = settings.motionScaleLo;
+		const float lambda = std::max(0.0f, settings.estLambda);
+		const pl_shader_var variables[5] = {
+			{ pl_var_int("use_global"), &useGlobal, false },
+			{ pl_var_int("use_temporal"), &useTemporal, false },
+			{ pl_var_int("use_gate"), &useGate, false },
+			{ pl_var_float("motion_lo"), &motionLo, true },
+			{ pl_var_float("lambda"), &lambda, true } };
+		const std::string header = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL;
+		return Dispatch("VideoProcessor de-judder: second sweep (11a E1)", header.c_str(), REFINE_BODY,
+			descriptors, 7, variables, 5, blocksX, blocksY, 8);
+	}
+
+	bool MotionWarp::Copy(pl_tex src, pl_tex dst)
+	{
+		const pl_shader_desc descriptors[2] = { Sampled("src", src, false), Storage("dst", dst) };
+		return Dispatch("VideoProcessor de-judder: keep the searches (11a)", nullptr, COPY_BODY,
+			descriptors, 2, nullptr, 0, dst->params.w, dst->params.h, 8);
 	}
 
 	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot, bool wantGrainError)
@@ -828,14 +1032,29 @@ if (q.x < size.x && q.y < size.y) {
 		if (settings.globalPrior &&
 			(!Global(l1A, l1B, l2A, l2B, globalVector[0]) || !Global(l1B, l1A, l2B, l2A, globalVector[1])))
 			return false;
-		if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], forward) ||
-			!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], backward))
+		// 11a E1: the first sweep into `sweep`, the second into the searches.
+		const bool twoSweeps = settings.estCandidates;
+		if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward) ||
+			!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward))
 			return false;
-		// D3 smooths a raw field into `field`; without it the consistency pass
-		// writes `field` directly.
+		if (twoSweeps &&
+			(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward) ||
+			 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward)))
+			return false;
+		if (settings.estCandidates || settings.estGate)
+		{
+			if (!Copy(forward, previousSearch[0]) || !Copy(backward, previousSearch[1]))
+				return false;
+			previousValid = true;
+		}
+		else
+			previousValid = false;
+		// The consistency pass writes `field` directly, or a raw field that
+		// E3 (quarter-pel) and D3 (smoothing) refine into `field`.
+		const bool refined = settings.vectorSmooth || settings.estQpel;
 		const pl_shader_desc descriptors[3] = {
 			Sampled("fwd", forward, false), Sampled("bwd", backward, false),
-			Storage("dst", settings.vectorSmooth ? rawField : field) };
+			Storage("dst", refined ? rawField : field) };
 		const float tolerance = settings.matchTolerance;
 		const float consistency = settings.consistencyPixels;
 		const pl_shader_var variables[2] = {
@@ -844,7 +1063,16 @@ if (q.x < size.x && q.y < size.y) {
 		if (!Dispatch("VideoProcessor de-judder: consistency", nullptr, CONSISTENCY_BODY,
 			descriptors, 3, variables, 2, blocksX, blocksY, 8))
 			return false;
-		if (settings.vectorSmooth && !Smooth(rawField))
+		if (settings.estQpel)
+		{
+			const pl_shader_desc qpelDesc[4] = {
+				Sampled("raw", rawField, false), Sampled("from_half", halfA, false),
+				Sampled("to_half", halfB, true), Storage("dst", settings.vectorSmooth ? qpelField : field) };
+			if (!Dispatch("VideoProcessor de-judder: quarter-pel (11a E3)", SUBPEL_HEADER, QPEL_BODY,
+				qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8))
+				return false;
+		}
+		if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
 			return false;
 		const float motionLo = settings.motionScaleLo;
 		const float motionHi = std::max(0.0f, settings.motionScaleHi);

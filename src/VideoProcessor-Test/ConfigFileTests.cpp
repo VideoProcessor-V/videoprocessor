@@ -641,11 +641,13 @@ namespace VideoProcessorTest
         TEST_METHOD(DownscaleLightIsAScalingChoiceForDownscalingFrames)
         {
             struct Case { const char* value; bool valid; };
+            // Stage 8b's upscale_light is the same kind of scaling choice.
+            for (const char* key : { "downscale_light", "upscale_light" })
             for (const Case c : { Case{ "linear", true }, Case{ "gamma", true }, Case{ "auto", false } })
             {
                 CachedConfigTestFile file;
                 std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
-                    "[vprenderer.scaling.cinema]\ndownscale_light: " << c.value << "\n";
+                    "[vprenderer.scaling.cinema]\n" << key << ": " << c.value << "\n";
                 ConfigFile config;
                 Assert::IsTrue(config.Load(file.path));
                 std::string error;
@@ -692,10 +694,12 @@ namespace VideoProcessorTest
                 Case{ "dither_grain_tolerance_scale", "0.5", false }, Case{ "dither_grain_tolerance_scale", "9", false },
                 Case{ "fbo_float32", "auto", true }, Case{ "fbo_float32", "off", true },
                 Case{ "fbo_float32", "yes", false },
+                Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },
+                Case{ "dejudder_est_gate", "maybe", false }, Case{ "dejudder_est_lambda", "0.5", true },
+                Case{ "dejudder_est_lambda", "9", false },
                 Case{ "adaptive_upscale", "on", true }, Case{ "adaptive_upscale", "auto", false },
                 Case{ "adaptive_upscale_w_base", "0.8", true }, Case{ "adaptive_upscale_w_base", "1.5", false },
-                Case{ "adaptive_upscale_superres_scale", "off", true }, Case{ "upscale_light", "gamma", true },
-                Case{ "upscale_light", "sigmoid", false },
+                Case{ "adaptive_upscale_superres_scale", "off", true },
                 Case{ "preserve_extended_range", "on", true }, Case{ "preserve_extended_range", "off", true },
                 Case{ "preserve_extended_range", "auto", false } })
             {

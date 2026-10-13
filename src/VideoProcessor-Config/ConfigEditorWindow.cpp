@@ -6400,6 +6400,25 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Experiment, default off: picture newly uncovered between two film frames is taken from the "
             "next frame instead of held. Occlusion fill: source warp path only (Extra frames from: "
             "Source); with Rendered picture it is ignored (logged once)."));
+        // Stage 11a, estimator-lite.
+        auto* estCandidates = addChoice(QStringLiteral("Neighbour and temporal candidates"),
+            QStringLiteral("dejudder_est_candidates"), { QStringLiteral("on"), QStringLiteral("off") });
+        estCandidates->setToolTip(QStringLiteral(
+            "A second search pass also tries the neighbours' motion and last frame's, and prefers motion that agrees "
+            "with the neighbours unless another match is clearly better: fewer wrong vectors on repeating texture."));
+        auto* estLambda = addText(QStringLiteral("Neighbour agreement weight"), QStringLiteral("dejudder_est_lambda"));
+        estLambda->setValidator(new QDoubleValidator(0.0, 8.0, 2, estLambda));
+        estLambda->setPlaceholderText(QStringLiteral("0.5"));
+        estLambda->setToolTip(QStringLiteral(
+            "How much a match must beat the neighbours' motion to win (codes per source pixel of disagreement). 0 = best match only."));
+        auto* estQpel = addChoice(QStringLiteral("Quarter-pixel refinement"),
+            QStringLiteral("dejudder_est_qpel"), { QStringLiteral("on"), QStringLiteral("off") });
+        estQpel->setToolTip(QStringLiteral(
+            "Refines trusted motion to half a source pixel: sharper in-between frames on slow pans."));
+        auto* estGate = addChoice(QStringLiteral("Skip the search on still scenes"),
+            QStringLiteral("dejudder_est_gate"), { QStringLiteral("on"), QStringLiteral("off") });
+        estGate->setToolTip(QStringLiteral(
+            "When nothing moves (needs the global-motion prior), last frame's motion is kept instead of searching again."));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
