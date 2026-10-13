@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectSubType>NativeUnitTestProject</ProjectSubType><ProjectGuid>{5B1C2E0A-7D3F-4A62-9E41-3C8F0B7A2D15}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>DynamicLibrary</ConfigurationType><PlatformToolset>v142</PlatformToolset><UseDebugLibraries>false</UseDebugLibraries></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(ProjectDir)..\..\x64\Release\vprenderer-beta\</OutDir><IntDir>$(ProjectDir)..\..\x64\Release\obj\BetaTestsHost\</IntDir><TargetName>VideoProcessorBetaTestsHost</TargetName></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><PreprocessorDefinitions>VP_BETA_TEST_DLL;VP_LIBPLACEBO_BETA;NOMINMAX;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);..\VideoProcessor-Lib;..\..\3rdparty\libplacebo-beta\include;$(VCInstallDir)UnitTest\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><LanguageStandard>stdcpp17</LanguageStandard></ClCompile>
+    <Link><AdditionalLibraryDirectories>..\..\3rdparty\libplacebo-beta\lib;$(VCInstallDir)UnitTest\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>libplacebo-377.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="BetaTestHost.cpp"/><ClCompile Include="BetaParametersTests.cpp"/><ClCompile Include="BetaGpuTests.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp"/></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

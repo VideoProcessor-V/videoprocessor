@@ -636,6 +636,25 @@ namespace VideoProcessorTest
             }
         }
 
+        // Owner 2026-10-13: chroma_upscaler is a scaling-profile choice.
+        TEST_METHOD(ChromaUpscalerIsAScalingChoice)
+        {
+            struct Case { const char* value; bool valid; };
+            for (const Case c : { Case{ "auto", true }, Case{ "lanczos", true }, Case{ "catmull_rom", true },
+                Case{ "ewa_lanczossharp", true }, Case{ "bilinear", true }, Case{ "nearest", false }, Case{ "polar", false } })
+            {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                    "[vprenderer.scaling.cinema]\nchroma_upscaler: " << c.value << "\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                const bool ok = MainConfigSchema::Validate(config, error) && runtime.Initialize(config, {}, error);
+                Assert::AreEqual(c.valid, ok, std::wstring(error.begin(), error.end()).c_str());
+            }
+        }
+
         // Stage 8-1: downscale_light is a scaling-profile choice, and gamma
         // light applies to downscaling frames only.
         TEST_METHOD(DownscaleLightIsAScalingChoiceForDownscalingFrames)
@@ -696,6 +715,8 @@ namespace VideoProcessorTest
                 Case{ "fbo_float32", "yes", false },
                 Case{ "dither_vectors", "auto", true }, Case{ "dither_vectors", "own", true },
                 Case{ "dither_vectors", "external", false },
+                Case{ "adaptive_faithful", "ortho", true }, Case{ "adaptive_faithful", "polar", true },
+                Case{ "adaptive_faithful", "auto", false },
                 Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },
                 Case{ "dejudder_est_gate", "maybe", false }, Case{ "dejudder_est_lambda", "0.5", true },
                 Case{ "dejudder_est_lambda", "9", false },

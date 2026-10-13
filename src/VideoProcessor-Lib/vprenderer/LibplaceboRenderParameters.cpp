@@ -421,6 +421,20 @@ namespace LibplaceboRenderParameters
 				projection.renderParams.upscaler = nullptr;
 		}
 
+		// Chroma's own upscaler (owner 2026-10-13): the planes' upscale to the
+		// luma size; auto leaves plane_upscaler unset (libplacebo then uses the
+		// upscaler, as before).
+		if (settings.chromaUpscaler != "auto")
+		{
+			const char* exportName = settings.chromaUpscaler == "ewa_lanczossharp" ? "pl_filter_ewa_lanczossharp" :
+				Upscaler(settings.chromaUpscaler);
+			if (exportName)
+			{
+				projection.renderParams.plane_upscaler = ReadLibplaceboData<pl_filter_config>(exportName, error);
+				if (!projection.renderParams.plane_upscaler) return false;
+			}
+		}
+
 		if (settings.downscaler != "auto")
 		{
 			if (settings.downscaler == "gpu")

@@ -7,13 +7,23 @@ void RunBetaGpuTests(); // BetaGpuTests.cpp
 void RunBetaOutputFloat32Tests(); // BetaGpuTests.cpp
 void RunBetaFboTiming(); // BetaGpuTests.cpp
 void RunBetaPassTiming(); // BetaGpuTests.cpp
+void RunBetaScenarioTiming(); // BetaGpuTests.cpp
+void RunBetaOptionQuality(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
 void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
 void RunBetaChainGpuTest(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
+// The suite's entry: the program's main, or (VP_BETA_TEST_DLL) a function the
+// native test host calls - Smart App Control on the development laptop blocks
+// new builds of this program but not test DLLs loaded by Microsoft's signed
+// test host (owner 2026-10-13).
+#ifdef VP_BETA_TEST_DLL
+int RunBetaTestMain() {
+#else
 int main() {
+#endif
     try {
         Settings settings; Projection p; std::string error;
         for (const char* quality : {"fast", "balanced", "high"}) {
@@ -62,6 +72,27 @@ int main() {
             {
                 RunBetaFboTiming();
                 RunBetaPassTiming();
+            }
+            char* scenario = nullptr;
+            size_t scenarioLength = 0;
+            const bool runScenario = _dupenv_s(&scenario, &scenarioLength, "VP_TEST_SCENARIO") == 0 && scenario &&
+                std::string(scenario) == "1";
+            std::free(scenario);
+            char* quality = nullptr;
+            size_t qualityLength = 0;
+            const bool runQuality = _dupenv_s(&quality, &qualityLength, "VP_TEST_QUALITY") == 0 && quality &&
+                std::string(quality) == "1";
+            std::free(quality);
+            if (runQuality)
+            {
+                RunBetaOptionQuality();
+                return 0;
+            }
+            if (runScenario)
+            {
+                // Report only, then stop (the rest of the suite is the gate's).
+                RunBetaScenarioTiming();
+                return 0;
             }
         }
         RunBetaChainBiasRegression();

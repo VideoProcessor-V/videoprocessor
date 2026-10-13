@@ -51,6 +51,7 @@ namespace LibplaceboRenderParameters
 		// colour adjustment unset; +5 matches madVR's "saturation +5".
 		int saturation = 0;
 		std::string upscaler = "auto";
+		std::string chromaUpscaler = "auto";   // plane_upscaler; auto = the upscaler
 		std::string downscaler = "auto";
 		// Canonical setting for new configuration. "Auto" preserves the
 		// quality preset, "off" disables it, and the other values select an

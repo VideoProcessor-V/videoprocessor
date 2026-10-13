@@ -315,7 +315,7 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		if (gpu)
 		{
-			for (pl_tex* tex : { &faithful, &lowres, &edge, &partial, &state, &map[0], &map[1] })
+			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1] })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
@@ -323,7 +323,10 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (polarLut)
 			pl_shader_obj_destroy(&polarLut);
-		faithful = lowres = edge = partial = state = map[0] = map[1] = nullptr;
+		for (pl_shader_obj& lut : orthoLut)
+			if (lut)
+				pl_shader_obj_destroy(&lut);
+		faithful = faithfulMid = lowres = edge = partial = state = map[0] = map[1] = nullptr;
 		upscaleRatio = 0;
 		mapIndex = 0;
 		mapReady = false;
@@ -448,7 +451,52 @@ if (q.x < size.x && q.y < size.y) {
 			readback = pl_buf_create(gpu, &bp);
 		}
 
-		// 1. The faithful branch: libplacebo's polar ewa_lanczossharp.
+		// 1. The faithful branch: libplacebo's polar ewa_lanczossharp, or
+		// (adaptive_faithful ortho) two separable Lanczos passes.
+		if (settings.faithfulOrtho)
+		{
+			if (!Ensure(gpu, faithfulMid, w, dh, 4, 16, true, true))
+			{
+				++failures;
+				return unchanged;
+			}
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				pl_shader sh = pl_dispatch_begin(p->dispatch);
+				pl_sample_src src{};
+				src.components = 4;
+				if (pass == 0)
+				{
+					// Vertical: whole source columns ox..ox+w, rows to dh.
+					src.tex = base;
+					src.rect = { static_cast<float>(ox), sy0, static_cast<float>(ox + w), sy1 };
+					src.new_w = w;
+					src.new_h = dh;
+				}
+				else
+				{
+					src.tex = faithfulMid;
+					src.rect = { sx0 - ox, 0.0f, sx1 - ox, static_cast<float>(dh) };
+					src.new_w = dw;
+					src.new_h = dh;
+				}
+				pl_sample_filter_params filter{};
+				filter.filter = pl_filter_lanczos;
+				filter.antiring = settings.antiring;
+				filter.lut = &orthoLut[pass];
+				pl_dispatch_params dp{};
+				dp.shader = &sh;
+				dp.target = pass == 0 ? faithfulMid : faithful;
+				if (!pl_shader_sample_ortho2(sh, &src, &filter) || !pl_dispatch_finish(p->dispatch, &dp))
+				{
+					if (sh)
+						pl_dispatch_abort(p->dispatch, &sh);
+					++failures;
+					return unchanged;
+				}
+			}
+		}
+		else
 		{
 			pl_shader sh = pl_dispatch_begin(p->dispatch);
 			pl_sample_src src{};

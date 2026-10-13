@@ -1661,6 +1661,786 @@ void RunBetaPassTiming()
 		pl_tex_destroy(g, t);
 }
 
+// Representative timing (owner 2026-10-13: "sufficient variation to be
+// representative"): VP's chain on a moving sequence, as the renderer runs it -
+// per new source frame the matcher, then the full render with the owner's
+// first-session hooks (adaptive downscale + grain map, SSIM, extended range,
+// LED compensation, occlusion mask, sigma-delta with motion carry, the 6d
+// cache); per in-between refresh a de-judder extra (rendered warp + the R1
+// vectors) or a cadence repeat (search skipped). Sources: a synthetic 24p
+// sequence (texture at three scales, edges, fresh grain; still, slow / medium
+// / whip pans, an object against a pan, a cut, a fade, a dark scene) at 4K
+// and 1080p, and, with VP_TEST_CLIP=<dir of seg_*.yuv, yuv420p10le 4K>, a real
+// clip. Only times are reported; frames are uploaded and discarded. Report
+// only: VP_TEST_SCENARIO=1 with VP_TEST_GPU=hardware.
+namespace
+{
+	struct Stats
+	{
+		std::vector<double> v;
+		void Add(double x) { v.push_back(x); }
+		std::string Text() const
+		{
+			if (v.empty()) return "-";
+			std::vector<double> s(v);
+			std::sort(s.begin(), s.end());
+			double mean = 0.0;
+			for (double x : s) mean += x;
+			mean /= s.size();
+			const double p95 = s[std::min(s.size() - 1, static_cast<size_t>(s.size() * 0.95))];
+			char text[96];
+			std::snprintf(text, sizeof(text), "mean %.2f, p95 %.2f, max %.2f ms (n %zu)", mean, p95, s.back(), s.size());
+			return text;
+		}
+	};
+
+	struct Segment
+	{
+		const char* name;
+		int frames;
+		float panX, panY;     // source pixels per frame
+		float object;         // an object's own speed against the pan (0 = none)
+		bool cut;             // jump to another part of the canvas at the start
+		float fade;           // 0 = none; else brightness falls to 0 and back over the segment
+		float level;          // brightness (dark scene < 1)
+	};
+
+	// A detailed canvas (16-bit luma, 4:2:0 chroma) the frames are cut from.
+	struct Canvas
+	{
+		int w = 0, h = 0;
+		std::vector<uint16_t> luma, cb, cr;
+		void Build(int width, int height)
+		{
+			w = width; h = height;
+			luma.resize(static_cast<size_t>(w) * h);
+			cb.resize(static_cast<size_t>(w / 2) * (h / 2));
+			cr.resize(cb.size());
+			auto hash = [](int x, int y, unsigned salt)
+			{
+				unsigned v = static_cast<unsigned>(x) * 73856093u ^ static_cast<unsigned>(y) * 19349663u ^ salt * 83492791u;
+				v ^= v >> 13; v *= 0x5bd1e995u; v ^= v >> 15;
+				return (v & 0xFFFFu) / 65535.0f;
+			};
+			auto value = [&](float x, float y, float cell, unsigned salt)
+			{
+				const float fx = x / cell, fy = y / cell;
+				const int ix = static_cast<int>(std::floor(fx)), iy = static_cast<int>(std::floor(fy));
+				const float tx = fx - ix, ty = fy - iy;
+				const float a = hash(ix, iy, salt), b = hash(ix + 1, iy, salt), c = hash(ix, iy + 1, salt), d = hash(ix + 1, iy + 1, salt);
+				return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
+			};
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					float l = 0.45f * value(x, y, 96.0f, 1) + 0.3f * value(x, y, 20.0f, 2) + 0.15f * value(x, y, 4.0f, 3);
+					l += 0.1f * static_cast<float>(y) / h;                       // a gradient
+					if (((x / 211) + (y / 157)) % 5 == 0) l = 0.9f * l + 0.1f;   // edges: brighter tiles
+					if (x % 397 < 3 || y % 283 < 3) l = 0.05f;                   // thin dark lines
+					luma[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(std::min(1.0f, std::max(0.0f, l)) * 60000.0f + 2000.0f);
+				}
+			for (int y = 0; y < h / 2; ++y)
+				for (int x = 0; x < w / 2; ++x)
+				{
+					cb[static_cast<size_t>(y) * (w / 2) + x] = static_cast<uint16_t>(28000 + 9000 * value(x, y, 60.0f, 4));
+					cr[static_cast<size_t>(y) * (w / 2) + x] = static_cast<uint16_t>(28000 + 9000 * value(x, y, 70.0f, 5));
+				}
+		}
+	};
+}
+
+// The efficiency options' quality (owner 2026-10-13: keep 90-95% of each
+// feature's own benefit). On frames of the clip (VP_TEST_CLIP), rendered to a
+// 16-bit target without the dither or the LED stage so only scaling differs:
+//   reference  plain polar ewa_lanczossharp downscale (no SSIM): the grain as shot
+//   ssim       the SSIM downscaler alone
+//   polar      adaptive blend, faithful branch polar (today)
+//   ortho      adaptive blend, faithful branch separable Lanczos
+//   chroma     as polar with chroma_upscaler lanczos
+// Faithful benefit = (SSIM's error - the blend's error) against the reference
+// in grainy low-edge blocks; ortho's share of polar's. Edges: the same in
+// high-edge blocks. Chroma: |chroma - polar| in 10-bit codes. Report only:
+// VP_TEST_QUALITY=1.
+void RunBetaOptionQuality()
+{
+	char* dir = nullptr;
+	size_t length = 0;
+	if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") != 0 || !dir || !*dir)
+	{
+		std::free(dir);
+		std::cout << "Beta option quality: VP_TEST_CLIP not set\n";
+		return;
+	}
+	const std::string folder(dir);
+	std::free(dir);
+	std::vector<std::string> files;
+	WIN32_FIND_DATAA fd{};
+	HANDLE find = FindFirstFileA((folder + "\\seg_*.yuv").c_str(), &fd);
+	if (find != INVALID_HANDLE_VALUE)
+	{
+		do files.push_back(folder + "\\" + fd.cFileName); while (FindNextFileA(find, &fd));
+		FindClose(find);
+	}
+	std::sort(files.begin(), files.end());
+	Check(!files.empty(), "quality: no clip files");
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int w = 3840, h = 2160, ow = 2560, oh = 1600;
+	const size_t frameBytes = static_cast<size_t>(w) * h * 3;
+	auto plane = [&](int pw, int ph, int comps)
+	{
+		pl_tex_params p{};
+		p.w = pw; p.h = ph;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+		p.sampleable = true; p.host_writable = true;
+		return pl_tex_create(g, &p);
+	};
+	pl_tex luma = plane(w, h, 1), chroma = plane(w / 2, h / 2, 2);
+	pl_tex_params tp{};
+	tp.w = ow; tp.h = oh;
+	tp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+	tp.renderable = true; tp.host_readable = true;
+	pl_tex target = pl_tex_create(g, &tp);
+	Check(luma && chroma && target, "quality: textures");
+	auto ssim = Load(g, "SSimDownscaler.glsl", {}, ow, oh);
+	AdaptiveDownscale::Module modules[2];
+	AdaptiveDownscale::Settings settings[2];
+	settings[1].faithfulOrtho = true;
+	for (auto& s : settings) s.grainMap = false;   // the scalar grain measure (no matcher here)
+	const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+	enum Variant { Reference, Ssim, Polar, Ortho, Chroma, Count };
+	const char* names[Count] = { "reference", "ssim", "polar", "ortho", "chroma" };
+	double grainErr[Count] = {}, edgeErr[Count] = {};
+	// The feature's own measure: the grain's fine-detail (Laplacian) energy
+	// in grainy blocks - SSIM sharpens grain, the blend calms it.
+	double grainEnergy[Count] = {};
+	int chromaOver8 = 0;
+	double chromaMax = 0.0;
+	int chromaMaxX = 0, chromaMaxY = 0, chromaMaxFrame = 0;
+	double chromaSum = 0.0, chromaCount = 0.0;
+	std::vector<double> chromaDiffs;
+	int grainBlocks = 0, edgeBlocks = 0, frames = 0;
+	std::vector<uint16_t> raw(frameBytes / 2), lumaData(static_cast<size_t>(w) * h), chromaData(static_cast<size_t>(w / 2) * (h / 2) * 2);
+	std::vector<std::vector<uint16_t>> outs(Count, std::vector<uint16_t>(static_cast<size_t>(ow) * oh * 4));
+	const int perFile = 15;   // frames sampled from each 150-frame piece
+	for (const auto& file : files)
+	{
+		std::ifstream in(file, std::ios::binary);
+		for (int k = 0; k < perFile; ++k)
+		{
+			in.seekg(static_cast<std::streamoff>(frameBytes) * (k * 10));
+			if (!in.read(reinterpret_cast<char*>(raw.data()), frameBytes))
+				break;
+			for (size_t i = 0; i < lumaData.size(); ++i) lumaData[i] = static_cast<uint16_t>(raw[i] << 6);
+			const uint16_t* u = raw.data() + lumaData.size();
+			const uint16_t* v = u + lumaData.size() / 4;
+			for (size_t i = 0; i < lumaData.size() / 4; ++i)
+			{
+				chromaData[i * 2] = static_cast<uint16_t>(u[i] << 6);
+				chromaData[i * 2 + 1] = static_cast<uint16_t>(v[i] << 6);
+			}
+			pl_tex_transfer_params up{};
+			up.tex = luma; up.ptr = lumaData.data();
+			Check(pl_tex_upload(g, &up), "quality: upload");
+			up.tex = chroma; up.ptr = chromaData.data();
+			Check(pl_tex_upload(g, &up), "quality: upload");
+			++frames;
+			for (int var = 0; var < Count; ++var)
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = luma; image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = chroma; image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_GAMMA24;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame out = Gpu::Frame(target);
+				out.repr.levels = PL_COLOR_LEVELS_FULL;
+				out.color.primaries = PL_COLOR_PRIM_BT_709;
+				out.color.transfer = PL_COLOR_TRC_GAMMA24;
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.deband_params = nullptr;
+				params.upscaler = &pl_filter_ewa_lanczossharp;
+				params.downscaler = var == Reference ? &pl_filter_ewa_lanczossharp : &pl_filter_mitchell;
+				if (var == Chroma)
+					params.plane_upscaler = &pl_filter_lanczos;
+				std::vector<const pl_hook*> hooks;
+				if (var == Polar || var == Ortho || var == Chroma)
+				{
+					AdaptiveDownscale::Module& m = modules[var == Ortho ? 1 : 0];
+					m.SetFrame(settings[var == Ortho ? 1 : 0], static_cast<uint64_t>(frames), 1.0f / 30.0f);
+					m.SetSourceDownscales(true);
+					hooks = { m.Measure(), ssim->hook, m.Blend() };
+				}
+				else if (var == Ssim)
+					hooks = { ssim->hook };
+				params.hooks = hooks.empty() ? nullptr : hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Check(pl_render_image(gpu.RendererHandle(), &image, &out, &params), "quality: render");
+				pl_tex_transfer_params d{};
+				d.tex = target; d.ptr = outs[var].data();
+				Check(pl_tex_download(g, &d), "quality: download");
+			}
+			// Blocks of the reference: edge strength (gradient) and grain
+			// (Laplacian energy) on its luma.
+			auto lum = [&](const std::vector<uint16_t>& o, int x, int y)
+			{
+				const uint16_t* px = &o[(static_cast<size_t>(y) * ow + x) * 4];
+				return (0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]) / 64.0;   // 10-bit codes
+			};
+			const std::vector<uint16_t>& ref = outs[Reference];
+			std::vector<std::pair<double, double>> blockStats;
+			for (int by = 1; by < oh / 16 - 1; ++by)
+				for (int bx = 1; bx < ow / 16 - 1; ++bx)
+				{
+					double grad = 0.0, lap = 0.0;
+					for (int y = by * 16; y < by * 16 + 16; ++y)
+						for (int x = bx * 16; x < bx * 16 + 16; ++x)
+						{
+							const double c = lum(ref, x, y);
+							grad += std::fabs(lum(ref, x + 1, y) - c) + std::fabs(lum(ref, x, y + 1) - c);
+							lap += std::fabs(4 * c - lum(ref, x - 1, y) - lum(ref, x + 1, y) - lum(ref, x, y - 1) - lum(ref, x, y + 1));
+						}
+					blockStats.emplace_back(grad / 256.0, lap / 256.0);
+				}
+			std::vector<double> grads, laps;
+			for (const auto& b : blockStats) { grads.push_back(b.first); laps.push_back(b.second); }
+			std::vector<double> sg(grads), sl(laps);
+			std::sort(sg.begin(), sg.end());
+			std::sort(sl.begin(), sl.end());
+			const double gradLow = sg[sg.size() / 3], gradHigh = sg[sg.size() * 9 / 10], lapMid = sl[sl.size() / 2];
+			size_t idx = 0;
+			for (int by = 1; by < oh / 16 - 1; ++by)
+				for (int bx = 1; bx < ow / 16 - 1; ++bx, ++idx)
+				{
+					const bool grainy = grads[idx] <= gradLow && laps[idx] >= lapMid * 0.5;
+					const bool edgy = grads[idx] >= gradHigh;
+					if (!grainy && !edgy) continue;
+					if (grainy) ++grainBlocks; else ++edgeBlocks;
+					if (grainy)
+						for (int var = Reference; var < Count; ++var)
+						{
+							double e = 0.0;
+							for (int y = by * 16; y < by * 16 + 16; ++y)
+								for (int x = bx * 16; x < bx * 16 + 16; ++x)
+									e += std::fabs(4 * lum(outs[var], x, y) - lum(outs[var], x - 1, y) - lum(outs[var], x + 1, y) -
+										lum(outs[var], x, y - 1) - lum(outs[var], x, y + 1));
+							grainEnergy[var] += e / 256.0;
+						}
+					for (int var = Ssim; var < Count; ++var)
+					{
+						double e = 0.0;
+						for (int y = by * 16; y < by * 16 + 16; ++y)
+							for (int x = bx * 16; x < bx * 16 + 16; ++x)
+								e += std::fabs(lum(outs[var], x, y) - lum(ref, x, y));
+						(grainy ? grainErr : edgeErr)[var] += e / 256.0;
+					}
+				}
+			// Chroma: Lanczos chroma against today's polar chroma (same blend).
+			for (size_t i = 0; i < outs[Polar].size(); i += 4 * 7)
+				for (int ch = 0; ch < 3; ++ch)
+				{
+					const double dlt = std::fabs(static_cast<double>(outs[Chroma][i + ch]) - outs[Polar][i + ch]) / 64.0;
+					if (dlt > 8.0) ++chromaOver8;
+					if (dlt > chromaMax)
+					{
+						chromaMax = dlt;
+						chromaMaxX = static_cast<int>((i / 4) % ow);
+						chromaMaxY = static_cast<int>((i / 4) / ow);
+						chromaMaxFrame = frames;
+					}
+					chromaSum += dlt;
+					chromaCount += 1.0;
+					chromaDiffs.push_back(dlt);
+				}
+		}
+	}
+	std::sort(chromaDiffs.begin(), chromaDiffs.end());
+	auto mean = [](double sum, int n) { return n > 0 ? sum / n : 0.0; };
+	const double gs = mean(grainErr[Ssim], grainBlocks), gp = mean(grainErr[Polar], grainBlocks), go = mean(grainErr[Ortho], grainBlocks);
+	const double es = mean(edgeErr[Ssim], edgeBlocks), ep = mean(edgeErr[Polar], edgeBlocks), eo = mean(edgeErr[Ortho], edgeBlocks);
+	const double ls = mean(grainEnergy[Ssim], grainBlocks), lp = mean(grainEnergy[Polar], grainBlocks),
+		lo = mean(grainEnergy[Ortho], grainBlocks), lr = mean(grainEnergy[Reference], grainBlocks);
+	std::cout << "Beta option quality, grain calming (Laplacian energy in grainy blocks, 10-bit codes): plain polar "
+		<< lr << ", SSIM alone " << ls << ", blend polar " << lp << ", blend ortho " << lo
+		<< "; calming kept by ortho: " << (ls - lp > 1e-9 ? 100.0 * (ls - lo) / (ls - lp) : 0.0) << "%\n"
+		<< "  chroma outliers: " << chromaOver8 << " samples over 8 codes of " << static_cast<long long>(chromaCount)
+		<< "; worst " << chromaMax << " at (" << chromaMaxX << ", " << chromaMaxY << ") in sampled frame " << chromaMaxFrame
+		<< ", p99.9 " << (chromaDiffs.empty() ? 0.0 : chromaDiffs[chromaDiffs.size() * 999 / 1000]) << "\n";
+	std::cout << "Beta option quality (" << frames << " clip frames, 3840x2160 -> 2560x1600, error vs the plain polar downscale in 10-bit codes):\n"
+		<< "  grainy low-edge blocks (" << grainBlocks << "): SSIM alone " << gs << ", blend polar " << gp << ", blend ortho " << go << "\n"
+		<< "    faithful benefit kept by ortho: " << (gs - gp > 1e-9 ? 100.0 * (gs - go) / (gs - gp) : 0.0) << "%\n"
+		<< "  high-edge blocks (" << edgeBlocks << "): SSIM alone " << es << ", blend polar " << ep << ", blend ortho " << eo << "\n"
+		<< "  chroma lanczos vs polar (same blend): mean " << (chromaCount > 0 ? chromaSum / chromaCount : 0.0)
+		<< ", p99 " << (chromaDiffs.empty() ? 0.0 : chromaDiffs[chromaDiffs.size() * 99 / 100])
+		<< ", max " << (chromaDiffs.empty() ? 0.0 : chromaDiffs.back()) << " codes\n";
+	pl_tex_destroy(g, &luma);
+	pl_tex_destroy(g, &chroma);
+	pl_tex_destroy(g, &target);
+}
+
+void RunBetaScenarioTiming()
+{
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int ow = 2560, oh = 1600;
+	auto plane = [&](int w, int h, int comps)
+	{
+		pl_tex_params p{};
+		p.w = w; p.h = h;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR));
+		p.sampleable = true; p.storable = true; p.host_writable = true;
+		return pl_tex_create(g, &p);
+	};
+	pl_tex_params tp{};
+	tp.w = ow; tp.h = oh;
+	tp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 10, 0, PL_FMT_CAP_RENDERABLE);
+	tp.renderable = true;
+	pl_tex targetTex = pl_tex_create(g, &tp);
+	Check(targetTex != nullptr, "scenario: no target");
+
+	struct Source
+	{
+		const char* label;
+		int w, h;
+		double sourceRate;   // frames per second
+		std::function<bool(int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)> next;
+		int frames;
+		bool hdr = false;
+	};
+	std::vector<Source> sources;
+	auto envOn = [](const char* name)
+	{
+		char* value = nullptr;
+		size_t length = 0;
+		const bool on = _dupenv_s(&value, &length, name) == 0 && value && std::string(value) == "1";
+		std::free(value);
+		return on;
+	};
+	// VP_TEST_CLIP_HDR=1: the clip is PQ / BT.2020 (tone-mapped to the target).
+	const bool clipHdr = envOn("VP_TEST_CLIP_HDR");
+	const bool clipOnly = envOn("VP_TEST_SCENARIO_CLIP_ONLY");
+	// VP_TEST_MATCHER_PASSES=1: the matcher's passes timed (each drained).
+	const bool matcherPasses = envOn("VP_TEST_MATCHER_PASSES");
+	// The efficiency options under test: VP_TEST_CHROMA=lanczos (chroma_upscaler)
+	// and VP_TEST_ADAPTIVE_ORTHO=1 (adaptive_faithful ortho).
+	const bool chromaLanczos = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n, "VP_TEST_CHROMA") == 0 && v &&
+		std::string(v) == "lanczos"; std::free(v); return on; }();
+	const bool adaptiveOrtho = envOn("VP_TEST_ADAPTIVE_ORTHO");
+	// The synthetic sequence at 4K and 1080p.
+	const std::vector<Segment> segments = {
+		{ "still", 12, 0, 0, 0, false, 0, 1 },
+		{ "slow pan (1 px)", 24, 1, 0, 0, false, 0, 1 },
+		{ "medium pan (6 px)", 24, 6, 1, 0, false, 0, 1 },
+		{ "whip pan (40 px)", 12, 40, 0, 0, false, 0, 1 },
+		{ "object against a pan", 24, 3, 0, -10, false, 0, 1 },
+		{ "cut", 6, 2, 0, 0, true, 0, 1 },
+		{ "fade out and in", 24, 1, 0, 0, false, 1, 1 },
+		{ "dark scene", 12, 2, 1, 0, false, 0, 0.12f },
+	};
+	int total = 0;
+	for (const auto& s : segments) total += s.frames;
+	auto canvas = std::make_shared<Canvas>();
+	for (int big = 1; big >= 0 && !clipOnly; --big)
+	{
+		const int w = big ? 3840 : 1920, h = big ? 2160 : 1080;
+		Source src;
+		src.label = big ? "synthetic 23.976p, 3840x2160" : "synthetic 23.976p, 1920x1080";
+		src.w = w; src.h = h; src.sourceRate = 24000.0 / 1001.0; src.frames = total;
+		src.next = [segments, canvas, w, h](int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)
+		{
+			if (canvas->w != w + 1200)
+				canvas->Build(w + 1200, h + 200);
+			// Position: the sum of the pans so far; a cut jumps.
+			int seg = 0, k = index;
+			double px = 0.0, py = 0.0;
+			for (int i = 0; i < static_cast<int>(segments.size()); ++i)
+			{
+				const int n = std::min(k, segments[i].frames);
+				if (segments[i].cut && k > 0) { px += 300; py += 60; }
+				px += segments[i].panX * n; py += segments[i].panY * n;
+				if (k < segments[i].frames) { seg = i; break; }
+				k -= segments[i].frames;
+			}
+			const Segment& s = segments[seg];
+			segment = s.name;
+			const int ox = static_cast<int>(px) % 1100, oy = static_cast<int>(py) % 180;
+			float gain = s.level;
+			if (s.fade > 0.0f)
+				gain *= std::fabs(1.0f - 2.0f * k / std::max(1, s.frames - 1));
+			luma.resize(static_cast<size_t>(w) * h);
+			chroma.resize(static_cast<size_t>(w / 2) * (h / 2) * 2);
+			const int objX = s.object != 0.0f ? static_cast<int>(w / 2 + s.object * k) : -100000;
+			for (int y = 0; y < h; ++y)
+			{
+				const uint16_t* row = &canvas->luma[static_cast<size_t>(y + oy) * canvas->w + ox];
+				uint16_t* out = &luma[static_cast<size_t>(y) * w];
+				for (int x = 0; x < w; ++x)
+				{
+					int v = row[x];
+					// The object: a 256x256 patch from elsewhere, moving on its own.
+					if (x >= objX && x < objX + 256 && y >= h / 2 - 128 && y < h / 2 + 128)
+						v = canvas->luma[static_cast<size_t>(y + 40) * canvas->w + (x - objX + 600)];
+					// Film grain, new every frame.
+					unsigned hsh = static_cast<unsigned>(x) * 2654435761u ^ static_cast<unsigned>(y) * 40503u ^ static_cast<unsigned>(index) * 97u;
+					hsh ^= hsh >> 15;
+					v += static_cast<int>(hsh % 1537u) - 768;
+					v = static_cast<int>(4096 + (v - 4096) * gain);
+					out[x] = static_cast<uint16_t>(std::min(65535, std::max(0, v)));
+				}
+			}
+			for (int y = 0; y < h / 2; ++y)
+				for (int x = 0; x < w / 2; ++x)
+				{
+					const size_t c = static_cast<size_t>(y + oy / 2) * (canvas->w / 2) + (x + ox / 2);
+					chroma[(static_cast<size_t>(y) * (w / 2) + x) * 2] = canvas->cb[c];
+					chroma[(static_cast<size_t>(y) * (w / 2) + x) * 2 + 1] = canvas->cr[c];
+				}
+			return true;
+		};
+		sources.push_back(src);
+	}
+	// A real clip (yuv420p10le, 3840x2160, seg_*.yuv in VP_TEST_CLIP).
+	{
+		char* dir = nullptr;
+		size_t length = 0;
+		if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") == 0 && dir && *dir)
+		{
+			const std::string folder(dir);
+			std::vector<std::string> files;
+			WIN32_FIND_DATAA fd{};
+			HANDLE find = FindFirstFileA((folder + "\\seg_*.yuv").c_str(), &fd);
+			if (find != INVALID_HANDLE_VALUE)
+			{
+				do files.push_back(folder + "\\" + fd.cFileName); while (FindNextFileA(find, &fd));
+				FindClose(find);
+			}
+			std::sort(files.begin(), files.end());
+			const int w = 3840, h = 2160;
+			const size_t frameBytes = static_cast<size_t>(w) * h * 3;   // yuv420p10le: 1.5 samples x 2 bytes
+			int frames = 0;
+			for (const auto& f : files)
+			{
+				WIN32_FILE_ATTRIBUTE_DATA a{};
+				if (GetFileAttributesExA(f.c_str(), GetFileExInfoStandard, &a))
+					frames += static_cast<int>((static_cast<uint64_t>(a.nFileSizeHigh) << 32 | a.nFileSizeLow) / frameBytes);
+			}
+			if (frames > 0)
+			{
+				Source src;
+				src.label = clipHdr ? "clip 29.97p, 3840x2160, pseudo-HDR (PQ, BT.2020)" : "clip 29.97p, 3840x2160";
+				src.hdr = clipHdr;
+				src.w = w; src.h = h; src.sourceRate = 30000.0 / 1001.0; src.frames = frames;
+				auto stream = std::make_shared<std::ifstream>();
+				auto fileIndex = std::make_shared<size_t>(0);
+				src.next = [files, stream, fileIndex, w, h, frameBytes](int, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)
+				{
+					std::vector<uint16_t> raw(frameBytes / 2);
+					for (;;)
+					{
+						if (!stream->is_open())
+						{
+							if (*fileIndex >= files.size()) return false;
+							stream->open(files[*fileIndex], std::ios::binary);
+						}
+						if (stream->read(reinterpret_cast<char*>(raw.data()), frameBytes)) break;
+						stream->close();
+						stream->clear();
+						++*fileIndex;
+					}
+					segment = "clip part " + std::to_string(*fileIndex + 1);
+					luma.resize(static_cast<size_t>(w) * h);
+					chroma.resize(static_cast<size_t>(w / 2) * (h / 2) * 2);
+					for (size_t i = 0; i < luma.size(); ++i) luma[i] = static_cast<uint16_t>(raw[i] << 6);
+					const uint16_t* u = raw.data() + luma.size();
+					const uint16_t* v = u + luma.size() / 4;
+					for (size_t i = 0; i < luma.size() / 4; ++i)
+					{
+						chroma[i * 2] = static_cast<uint16_t>(u[i] << 6);
+						chroma[i * 2 + 1] = static_cast<uint16_t>(v[i] << 6);
+					}
+					return true;
+				};
+				sources.push_back(src);
+			}
+		}
+		std::free(dir);
+	}
+
+	const double displayRate = 60000.0 / 1001.0;
+	for (Source& src : sources)
+	{
+		const int w = src.w, h = src.h;
+		const bool down = w > ow;
+		pl_tex luma[2] = { plane(w, h, 1), plane(w, h, 1) }, chroma[2] = { plane(w / 2, h / 2, 2), plane(w / 2, h / 2, 2) };
+		Check(luma[0] && luma[1] && chroma[0] && chroma[1], "scenario: planes");
+		Dejudder::MotionWarp warp(gpu.Log(), g, ChainGpuProbe::Refined(Dejudder::Settings{}));
+		warp.SetPassTiming(matcherPasses);
+		AdaptiveDownscale::Module adaptive;
+		AdaptiveDownscale::Settings adaptiveSettings;
+		adaptiveSettings.faithfulOrtho = adaptiveOrtho;
+		OcclusionMask::Hook mask;
+		DejudderRendered::Cache cache;
+		DejudderRendered::Warp rendered(gpu.Log(), g);
+		DejudderRendered::VectorField field(gpu.Log(), g);
+		auto ssim = Load(g, "SSimDownscaler.glsl", {}, ow, oh);
+		auto led = Load(g, "LED compensation.glsl", { { "gain", 1.05 }, { "gain_domain", 1.0 }, { "compensation_eotf", 2.41 },
+			{ "boost", 2.2 / 2.4 } }, ow, oh);
+		auto sigma = Load(g, "Temporal sigma-delta.glsl", { { "enabled", 1 }, { "levels_full", 0 }, { "swapchain_bits", 10 },
+			{ "color_bits", 10 }, { "motion_compensation", 1 }, { "occlusion_mask", 1 }, { "grain_tolerance_scale", 3 } }, ow, oh);
+		const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+		const pl_rect2df targetCrop{ 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+		Stats matcherMs, newFrame, extra, repeat, sigmaSearch;
+		std::map<std::string, Stats> perSegment;
+		// Per refresh type: each pass's GPU time summed, and the refreshes.
+		std::map<std::string, std::pair<std::map<std::string, double>, int>> perKind;
+		const int warmup = 6;   // shader compilation on the first frames
+		std::vector<uint16_t> lumaData, chromaData;
+		std::string segment;
+		const double cadence = displayRate / src.sourceRate;   // 2.5 (3:2) or 2.0 (2:2)
+		const bool extras = cadence > 2.01;   // de-judder 0.25 on 24p; 2:2 off by default
+		double phase = 0.0;
+		for (int f = 0; f < src.frames; ++f)
+		{
+			if (!src.next(f, lumaData, chromaData, segment))
+				break;
+			const int cur = f % 2, prev = 1 - cur;
+			pl_tex_transfer_params up{};
+			up.tex = luma[cur]; up.ptr = lumaData.data();
+			Check(pl_tex_upload(g, &up), "scenario: upload");
+			up.tex = chroma[cur]; up.ptr = chromaData.data();
+			Check(pl_tex_upload(g, &up), "scenario: upload");
+			pl_gpu_finish(g);
+			Dejudder::Planes a, b;
+			a.luma = luma[prev]; a.chroma = chroma[prev]; b.luma = luma[cur]; b.chroma = chroma[cur];
+			a.chromaShiftX = b.chromaShiftX = 1;
+			a.chromaShiftY = b.chromaShiftY = 1;
+			if (f == 0)
+				continue;   // the first frame only fills the pair
+			// The matcher (A = the previous frame, B = this one).
+			auto start = std::chrono::steady_clock::now();
+			Check(warp.Estimate(a, b, f % 2, true), "scenario: estimate: " + warp.LastError());
+			pl_gpu_finish(g);
+			const double estimateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			if (f >= warmup)
+			{
+				matcherMs.Add(estimateMs);
+				perSegment[std::string(segment) + ": matcher"].Add(estimateMs);
+			}
+			adaptive.SetFrame(adaptiveSettings, static_cast<uint64_t>(f), 1.0f / 24.0f);
+			adaptive.SetSourceDownscales(down);
+			AdaptiveDownscale::GrainField grain;
+			grain.error = warp.GrainError();
+			grain.field = warp.Field();
+			grain.frameTrust = warp.FrameTrust();
+			grain.minTrustedShare = warp.GetSettings().minTrustedShare;
+			grain.sourceCrop = sourceCrop;
+			adaptive.SetGrainField(grain);
+			mask.SetFrame(warp.Occlusion(f % 2), sourceCrop, targetCrop);
+
+			// The refreshes this source frame owns (3:2 or 2:2).
+			phase += cadence;
+			const int refreshes = static_cast<int>(std::floor(phase + 1e-9));
+			phase -= refreshes;
+			float previousShift = 0.0f;
+			for (int r = 0; r < refreshes; ++r)
+			{
+				pl_frame image{};
+				pl_frame out{};
+				out.num_planes = 1;
+				out.planes[0].texture = targetTex;
+				out.planes[0].components = 3;
+				for (int i = 0; i < 3; ++i) out.planes[0].component_mapping[i] = i;
+				out.repr.sys = PL_COLOR_SYSTEM_RGB;
+				out.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				out.repr.bits.sample_depth = 10; out.repr.bits.color_depth = 10;
+				out.color.primaries = PL_COLOR_PRIM_DCI_P3;
+				out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				if (src.hdr)
+					LibplaceboRenderParameters::ApplyTargetLuminance(false, 100.0f, 0.0f, out.color);
+				pl_render_params params = pl_render_default_params;
+				// The owner's Beta settings for HDR: peak detection off.
+				if (src.hdr)
+					params.peak_detect_params = nullptr;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.upscaler = &pl_filter_ewa_lanczossharp;
+				if (chromaLanczos)
+					params.plane_upscaler = &pl_filter_lanczos;
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+				params.output_fbo_float32 = true;
+#endif
+				PassTimes times;
+				params.info_callback = CollectPass;
+				params.info_priv = &times;
+				std::vector<const pl_hook*> list;
+				ExtendedRange::Hooks extended;
+				const char* kind = "new frame";
+				const bool isExtra = r > 0 && extras && cache.Texture(static_cast<uint64_t>(f)) != nullptr;
+				pl_tex vectors = nullptr;
+				std::vector<const pl_hook*> kept;
+				if (r == 0)
+				{
+					image.num_planes = 2;
+					image.planes[0].texture = b.luma; image.planes[0].components = 1;
+					image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+					image.planes[1].texture = b.chroma; image.planes[1].components = 2;
+					image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+					image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+					image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+					image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+					image.color.primaries = PL_COLOR_PRIM_BT_709;
+					image.color.transfer = PL_COLOR_TRC_GAMMA24;
+					if (src.hdr)
+					{
+						image.repr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+						image.color.primaries = PL_COLOR_PRIM_BT_2020;
+						image.color.transfer = PL_COLOR_TRC_PQ;
+						image.color.hdr.min_luma = 0.005f;
+						image.color.hdr.max_luma = 400.0f;
+					}
+					pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+					if (down) list.push_back(adaptive.Measure());
+					list.push_back(led->hook);
+					if (down) { list.push_back(ssim->hook); list.push_back(adaptive.Blend()); }
+					list.push_back(mask.Get());
+					list.push_back(sigma->hook);
+					const ExtendedRange::Decision decision = ExtendedRange::Decide(true, image.color, out.color, false);
+					ExtendedRange::Prepare(decision, extended, image.color, out.color, list, false);
+					cache.Arm(static_cast<uint64_t>(f));
+					list.push_back(cache.Hook());
+					SetParam(sigma->hook, "static_refresh", 0.0);
+					params.hooks = list.data();
+					params.num_hooks = static_cast<int>(list.size());
+				}
+				else if (isExtra)
+				{
+					kind = "de-judder extra";
+					const float shift = 0.25f * static_cast<float>(r) / static_cast<float>(cadence);
+					pl_tex warped = nullptr;
+					Check(rendered.Run(cache.Texture(static_cast<uint64_t>(f)), warp.Field(), warp.FrameTrust(),
+						warp.GetSettings().minTrustedShare, shift, { sourceCrop, targetCrop, {}, {} }, warped, warp.SubField(),
+						&warp.GetSettings()), "scenario: warp");
+					Check(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, shift - previousShift,
+						{ sourceCrop, targetCrop, {}, {} }, ow, oh, vectors, warp.SubField(), &warp.GetSettings()), "scenario: field");
+					previousShift = shift;
+					pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", vectors);
+					SetParam(sigma->hook, "vector_source", 1.0);
+					image = DejudderRendered::Frame(warped, cache.Repr(), cache.Color());
+					params = DejudderRendered::OutputOnly(params, { sigma->hook }, kept);
+					params.info_callback = CollectPass;
+					params.info_priv = &times;
+				}
+				else
+				{
+					kind = "cadence repeat";
+					image.num_planes = 2;
+					image.planes[0].texture = b.luma; image.planes[0].components = 1;
+					image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+					image.planes[1].texture = b.chroma; image.planes[1].components = 2;
+					image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+					image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+					image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+					image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+					image.color.primaries = PL_COLOR_PRIM_BT_709;
+					image.color.transfer = PL_COLOR_TRC_GAMMA24;
+					if (src.hdr)
+					{
+						image.repr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+						image.color.primaries = PL_COLOR_PRIM_BT_2020;
+						image.color.transfer = PL_COLOR_TRC_PQ;
+						image.color.hdr.min_luma = 0.005f;
+						image.color.hdr.max_luma = 400.0f;
+					}
+					pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+					if (down) list.push_back(adaptive.Measure());
+					list.push_back(led->hook);
+					if (down) { list.push_back(ssim->hook); list.push_back(adaptive.Blend()); }
+					list.push_back(sigma->hook);
+					const ExtendedRange::Decision decision = ExtendedRange::Decide(true, image.color, out.color, false);
+					ExtendedRange::Prepare(decision, extended, image.color, out.color, list, false);
+					SetParam(sigma->hook, "static_refresh", 1.0);
+					params.hooks = list.data();
+					params.num_hooks = static_cast<int>(list.size());
+				}
+				pl_gpu_finish(g);
+				start = std::chrono::steady_clock::now();
+				Check(pl_render_image(gpu.RendererHandle(), &image, &out, &params), std::string("scenario: render (") + kind + ")");
+				pl_gpu_finish(g);
+				const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+				if (isExtra)
+				{
+					SetParam(sigma->hook, "vector_source", 0.0);
+					pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", nullptr);
+				}
+				SetParam(sigma->hook, "static_refresh", 0.0);
+				if (f >= warmup)
+				{
+					(r == 0 ? newFrame : (isExtra ? extra : repeat)).Add(ms);
+					perSegment[std::string(segment) + ": " + kind].Add(ms);
+					const auto search = times.byName.find("VideoProcessor sigma-delta: block motion search");
+					if (r == 0 && search != times.byName.end())
+						sigmaSearch.Add(search->second.first / 1e6);
+					auto& totals = perKind[kind];
+					for (const auto& pass : times.byName)
+						totals.first[pass.first] += pass.second.first / 1e6;
+					++totals.second;
+				}
+			}
+		}
+		std::cout << "Beta scenario timing, " << src.label << (chromaLanczos ? ", chroma lanczos" : "") <<
+			(adaptiveOrtho ? ", faithful ortho" : "") << " -> " << ow << "x" << oh << " (" << (extras ? "3:2 with de-judder extras" : "2:2, repeats") << "):\n"
+			<< "  matcher per source frame: " << matcherMs.Text() << "\n"
+			<< "  refresh, new frame:      " << newFrame.Text() << "\n"
+			<< "  refresh, de-judder extra:" << extra.Text() << "\n"
+			<< "  refresh, cadence repeat: " << repeat.Text() << "\n"
+			<< "  sigma-delta search (new frame, GPU): " << sigmaSearch.Text() << "\n";
+		for (const auto& entry : perSegment)
+			std::cout << "    " << entry.first << ": " << entry.second.Text() << "\n";
+		if (matcherPasses)
+		{
+			std::vector<std::pair<double, std::string>> passes;
+			for (const auto& entry : warp.PassMs())
+				passes.emplace_back(entry.second / std::max(1, src.frames - 1), entry.first);
+			std::sort(passes.rbegin(), passes.rend());
+			std::cout << "  matcher passes per source frame (each drained):\n";
+			for (const auto& entry : passes)
+				if (entry.first >= 0.05)
+					std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
+		}
+		// Where each refresh type's GPU time goes (libplacebo's pass timers
+		// report the latest finished measurement, so neighbouring refreshes
+		// can share a value; averaged over the run).
+		for (const auto& kind : perKind)
+		{
+			std::vector<std::pair<double, std::string>> passes;
+			double sum = 0.0;
+			for (const auto& pass : kind.second.first)
+			{
+				passes.emplace_back(pass.second / kind.second.second, pass.first);
+				sum += pass.second / kind.second.second;
+			}
+			std::sort(passes.rbegin(), passes.rend());
+			std::cout << "  passes per " << kind.first << " (GPU, mean " << sum << " ms):\n";
+			for (size_t i = 0; i < passes.size() && i < 14; ++i)
+				if (passes[i].first >= 0.05)
+					std::cout << "    " << passes[i].first << " ms  " << passes[i].second << "\n";
+		}
+		for (pl_tex* t : { &luma[0], &luma[1], &chroma[0], &chroma[1] })
+			pl_tex_destroy(g, t);
+	}
+	pl_tex_destroy(g, &targetTex);
+}
+
 // S2 A/B regression (planner 2026-10-12): the chain bias is the float16
 // round trip at the PRE_OUTPUT texture hooks. With patch 0003's output-pass
 // float32 forced off it returns (0.25-0.6 code low); with it on it is gone.

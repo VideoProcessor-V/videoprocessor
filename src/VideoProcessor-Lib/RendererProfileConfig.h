@@ -663,6 +663,7 @@ namespace RendererProfileConfig
 				key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale")
 				return IsChoice(value, { "on", "off" });
 			if (key == "adaptive_upscale_w_base") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "adaptive_faithful") return IsChoice(value, { "polar", "ortho" });
 			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")
 				return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "adaptive_edge_lo" || key == "adaptive_edge_hi") return IsNumberInRange(value, 0.0, 255.0);
@@ -685,6 +686,9 @@ namespace RendererProfileConfig
 		{
 			if (key == "quality") return IsChoice(value, { "fast", "balanced", "high" });
 			if (key == "upscaler") return IsChoice(value, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
+			// Owner 2026-10-13 efficiency: chroma's own upscaler (4:2:0 / 4:2:2
+			// planes to the luma size); auto = the upscaler (today).
+			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 			if (key == "downscaler")
 			{
 				// Accept the two removed spellings only as legacy input so an old
@@ -1983,7 +1987,7 @@ namespace RendererProfileConfig
                 "subtitle_detection_optimization", "subtitle_near_bar_px", "subtitle_hold_ms", "subtitle_box_padding_sides", "subtitle_box_padding_top", "subtitle_box_padding_bottom", "subtitle_move_inset",
 				"switch_refresh_rate",
 				"quality", "tone_mapping", "gamut_mapping", "peak_detection",
-				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "downscaler", "deband",
+				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "chroma_upscaler", "downscaler", "deband",
 				"deband_strength", "sigmoid", "downscale_light", "dithering", "display_bit_depth", "output_presentation",
 				"output_range", "output_gamma", "output_path_profile",
 				"target_primaries", "sdr_target_primaries", "report_bt2020_to_display",

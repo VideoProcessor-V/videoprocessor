@@ -906,6 +906,7 @@ namespace
 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
+		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = the upscaler)
 		std::string downscaler = "auto";
 		std::string downscaleLight = "linear";   // Stage 8-1: linear | gamma
 		bool adaptiveDownscale = false;          // Stage 8-2: the SSIM / faithful blend
@@ -1060,13 +1061,13 @@ namespace
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
-			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
+			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
 			<< settings.adaptiveUpscale << '|' << settings.adaptiveUpscaleWBase << '|'
 			<< settings.adaptiveUpscaleSuperresScale << '|' << settings.upscaleLight << '|'
 			<< settings.adaptiveDownscale << '|' << settings.adaptive.wBase << '|' << settings.adaptive.edgeLo << '|'
 			<< settings.adaptive.edgeHi << '|' << settings.adaptive.grainLo << '|' << settings.adaptive.grainHi << '|'
 			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
-			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|'
+			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|' << settings.adaptive.faithfulOrtho << '|'
 			<< settings.adaptive.grainMap << '|' << settings.adaptive.grainMapSmoothMs << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -1903,6 +1904,7 @@ namespace
 		readChoice("gamut_mapping", settings.gamutMapping, { "auto", "perceptual", "softclip", "relative", "desaturate" });
 		readPeakDetection(settings.peakDetection);
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
+		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
 		readChoice("upscale_light", settings.upscaleLight, { "linear", "gamma" });
@@ -2096,6 +2098,14 @@ namespace
 			settings.adaptive.edgeHi = settings.adaptive.edgeLo + 1.0f;
 		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
+		if (config.TryGetString(rule.section, "adaptive_faithful", raw))
+		{
+			if (raw == "polar" || raw == "ortho")
+				settings.adaptive.faithfulOrtho = raw == "ortho";
+			else
+				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
+					settings.adaptive.faithfulOrtho ? "ortho" : "polar");
+		}
 		if (config.TryGetString(rule.section, "adaptive_upscale_w_base", raw))
 		{
 			double parsed = 0.0;
@@ -2509,6 +2519,7 @@ namespace
 		settings.upscaler = ReadChoice(
 			config, "upscaler", "auto",
 			{ "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
+		settings.chromaUpscaler = ReadChoice(config, "chroma_upscaler", "auto", { "auto", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		settings.downscaler = ReadChoice(
 			config, "downscaler", "auto",
 			{ "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
@@ -5813,6 +5824,7 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.contrastRecovery = settings.contrastRecovery;
 		parameterSettings.saturation = settings.saturation;
 		parameterSettings.upscaler = settings.upscaler;
+		parameterSettings.chromaUpscaler = settings.chromaUpscaler;
 		parameterSettings.downscaler = settings.downscaler;
 		parameterSettings.debandStrength = settings.debandStrength;
 		parameterSettings.deband =
@@ -8256,6 +8268,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.sdrTone = next.sdrTone;
 		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
+		currentTransport.chromaUpscaler = next.chromaUpscaler;
 		currentTransport.downscaler = next.downscaler;
 		currentTransport.downscaleLight = next.downscaleLight;
 		currentTransport.adaptiveDownscale = next.adaptiveDownscale;
@@ -8351,6 +8364,7 @@ struct LibplaceboVideoRenderer::Impl
 			current.sdrTone.recovery != next.sdrTone.recovery, "sdr_tone_shape");
 		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
+		changed(current.chromaUpscaler != next.chromaUpscaler, "chroma_upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.downscaleLight != next.downscaleLight, "downscale_light");
 		changed(current.upscaleLight != next.upscaleLight, "upscale_light");

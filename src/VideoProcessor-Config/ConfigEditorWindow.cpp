@@ -6571,6 +6571,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("adaptive_chroma_ssim"), { QStringLiteral("off"), QStringLiteral("on") });
         adaptiveChroma->setToolTip(QStringLiteral(
             "Off (recommended): chroma stays faithful; SSIM on chroma can fringe colour at edges."));
+        auto* adaptiveFaithful = addChoice(QStringLiteral("Faithful branch filter"),
+            QStringLiteral("adaptive_faithful"), { QStringLiteral("polar"), QStringLiteral("ortho") });
+        adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("polar")),
+            QStringLiteral("Polar EWA Lanczos sharp (most accurate)"));
+        adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("ortho")),
+            QStringLiteral("Separable Lanczos (faster)"));
+        adaptiveFaithful->setToolTip(QStringLiteral(
+            "The filter of the plain, grain-true downscale the blend leans to on grainy areas. Separable "
+            "Lanczos keeps the grain's character at about a quarter of the polar filter's GPU time."));
+        MarkGpuCost(form, adaptiveFaithful, 2);
         // Stage 8-3: the per-block grain map from the de-judder's vectors.
         auto* adaptiveMap = addChoice(QStringLiteral("Grain map from motion"),
             QStringLiteral("adaptive_grain_map"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -6842,6 +6852,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		upscaler->setItemText(upscaler->findData(QStringLiteral("none")),
 			QStringLiteral("Built-in GPU sampling"));
 		addRendererAutoStatus(QStringLiteral("upscaler"), upscaler);
+		auto* chromaUpscaler = addChoice(QStringLiteral("Chroma upscaler"),
+			QStringLiteral("chroma_upscaler"), { QStringLiteral("AUTO"),
+			QStringLiteral("ewa_lanczossharp"), QStringLiteral("lanczos"), QStringLiteral("catmull_rom"),
+			QStringLiteral("bicubic"), QStringLiteral("bilinear") });
+		chromaUpscaler->setToolTip(QStringLiteral(
+			"How the colour planes of 4:2:0 / 4:2:2 video are brought up to the picture's size before the "
+			"main scaling. Auto uses the upscaler above (EWA Lanczos sharp with High quality, the costliest "
+			"filter). Colour detail is half resolution and the eye resolves less of it, so a separable "
+			"Lanczos usually looks the same at a fraction of the GPU time."));
+		MarkGpuCost(form, chromaUpscaler, 2);
 		auto* downscaler = addChoice(QStringLiteral("Downscaler"),
 			QStringLiteral("downscaler"), { QStringLiteral("AUTO"),
 			QStringLiteral("lanczos"), QStringLiteral("mitchell"),

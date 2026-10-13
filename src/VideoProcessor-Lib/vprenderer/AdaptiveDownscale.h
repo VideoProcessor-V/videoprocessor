@@ -58,6 +58,9 @@ namespace AdaptiveDownscale
 		float antiring = 0.5f;                     // the faithful branch's anti-ringing
 		bool grainMap = true;                      // 8-3: per-block map from the vectors where available
 		float grainMapSmoothMs = 500.0f;
+		// Owner 2026-10-13 efficiency: the faithful branch as two separable
+		// Lanczos passes instead of the polar ewa_lanczossharp.
+		bool faithfulOrtho = false;
 	};
 
 	inline bool operator==(const Settings& a, const Settings& b)
@@ -65,7 +68,7 @@ namespace AdaptiveDownscale
 		return a.wBase == b.wBase && a.edgeLo == b.edgeLo && a.edgeHi == b.edgeHi && a.grainLo == b.grainLo &&
 			a.grainHi == b.grainHi && a.grainFloor == b.grainFloor && a.grainSmoothMs == b.grainSmoothMs &&
 			a.shadowBias == b.shadowBias && a.chromaSsim == b.chromaSsim && a.antiring == b.antiring &&
-			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs;
+			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho;
 	}
 
 	// 8-3: the de-judder's field for the source frame being rendered.
@@ -176,6 +179,7 @@ namespace AdaptiveDownscale
 		bool sourceDownscales = true;
 		pl_gpu gpu = nullptr;
 		pl_tex faithful = nullptr;
+		pl_tex faithfulMid = nullptr;   // the ortho branch's vertical pass
 		pl_tex lowres = nullptr;          // 8b: a doubler's output at source resolution
 		Upscale upscale{};
 		int upscaleRatio = 0;
@@ -191,6 +195,7 @@ namespace AdaptiveDownscale
 		pl_buf readback = nullptr;
 		bool readbackPending = false;
 		pl_shader_obj polarLut = nullptr;
+		pl_shader_obj orthoLut[2] = { nullptr, nullptr };
 		bool active = false;
 		pl_rect2df srcRect{};
 		pl_rect2d dstRect{};

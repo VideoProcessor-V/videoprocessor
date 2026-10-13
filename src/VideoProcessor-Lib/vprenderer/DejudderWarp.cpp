@@ -247,6 +247,11 @@ shared float l1_sads_g[169];
 shared float from_win[144];
 shared float half_sads[272];
 shared ivec2 half_vecs[272];
+// The start each candidate belongs to (1..5, 0 = the zero vector, 6 = the
+// +-2 around zero) and the starts' centres: a candidate inside an earlier
+// start's window repeats an earlier one (owner 2026-10-13, shaky camera).
+shared int half_starts[272];
+shared ivec2 s_centres[6];
 
 shared float sub_sads[9];
 shared ivec2 s_v2;
@@ -369,6 +374,8 @@ if (run && lead) {
     // +-2 around zero.
     vec2 vpt = use_temporal != 0 ? texelFetch(previous, b, 0).xy * 0.25 : vec2(0.0);
     int n = 0;
+    int nstarts = 0;
+    half_starts[n] = 0;
     half_vecs[n++] = ivec2(0);
     for (int c = 0; c < 5; c++) {
         if (c == 1 && v1c == v1z)
@@ -380,13 +387,19 @@ if (run && lead) {
         if (c == 4 && (use_temporal == 0 || vpt == v1z || vpt == v1c))
             continue;
         ivec2 centre = ivec2(round((c == 0 ? v1z : (c == 1 ? v1c : (c == 2 ? v1g : (c == 3 ? vgf : vpt)))) * 4.0));
+        s_centres[++nstarts] = centre;
         for (int dy = -3; dy <= 3; dy++)
-            for (int dx = -3; dx <= 3; dx++)
+            for (int dx = -3; dx <= 3; dx++) {
+                half_starts[n] = nstarts;
                 half_vecs[n++] = centre + ivec2(dx, dy);
+            }
     }
     for (int dy = -2; dy <= 2; dy++)
-        for (int dx = -2; dx <= 2; dx++)
+        for (int dx = -2; dx <= 2; dx++) {
+            half_starts[n] = 6;
             half_vecs[n++] = ivec2(dx, dy);
+        }
+    s_centres[0] = ivec2(nstarts, 0);   // the number of starts
     s_half_count = n;
 }
 if (run && li < 144)
@@ -394,8 +407,18 @@ if (run && li < 144)
 sync_group();
 int nh = s_half_count;
 if (run)
-    for (int i = li; i < nh; i += NT)
-        half_sads[i] = sad_win(o, half_vecs[i]);
+    for (int i = li; i < nh; i += NT) {
+        // A repeat of an earlier candidate scores the same and comes later,
+        // so with the strict comparison it never wins: not scored (each
+        // thread checks its own; exactly the serial result).
+        ivec2 v = half_vecs[i];
+        int start = half_starts[i];
+        bool repeat = i > 0 && v == ivec2(0);
+        int earlier = start == 6 ? s_centres[0].x : start - 1;
+        for (int k = 1; k <= earlier; k++)
+            repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
+        half_sads[i] = repeat ? 3.0e38 : sad_win(o, v);
+    }
 sync_group();
 float best_sad = 0.0;
 ivec2 best = ivec2(0);
