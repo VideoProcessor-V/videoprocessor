@@ -14,7 +14,8 @@ namespace LedDrive
 	{
 		const char* ModeName(Mode mode)
 		{
-			return mode == Mode::Compensate ? "compensate" : mode == Mode::Script ? "script" : "log_only";
+			return mode == Mode::Compensate ? "compensate" : mode == Mode::Script ? "script" :
+				mode == Mode::PictureOnly ? "picture_only" : "log_only";
 		}
 
 		// Predictions are kept this many frames behind the current one, long
@@ -254,7 +255,8 @@ namespace LedDrive
 				driver->SetContrastAsync(-1);
 			}
 			compensating = nowCompensating;
-			applyGain = live && led.mode != Mode::LogOnly;
+			// picture_only (delta 12): the gain stays exactly 1.
+			applyGain = live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
 			// Only the compensate step leaves the custom dim, so a switch away
 			// from it (or the experiment switched off) leaves here: LDMM 0 jumps
 			// the driver's queue, ahead of any LPW1 the new mode sends.
@@ -817,7 +819,7 @@ namespace LedDrive
 			compensating = led.mode == Mode::Compensate;
 			// Compensation is applied to the picture only while the projector
 			// is really being driven; a dry run never changes the picture.
-			applyGain = driving && led.mode != Mode::LogOnly;
+			applyGain = driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
 		}
 
 		LedDriveConfig current;
@@ -896,6 +898,7 @@ namespace LedDrive
 				const bool ok = driver->SendScript("CNTR", 50);
 				DebugLog::Log("LED drive: left compensate; contrast set to 50%s", ok ? "" : " (not confirmed)");
 			}
+
 			if (current.mode == Mode::Compensate)
 			{
 				if (contrastDriven)
@@ -929,6 +932,22 @@ namespace LedDrive
 				if (!log.empty() && (sent || now - lastLogTime >= std::chrono::seconds(10)))
 				{
 					DebugLog::Log("%s%s", log.c_str(), applyGain ? "" : " (dry run)");
+					lastLogTime = now;
+				}
+			}
+			else if (current.mode == Mode::PictureOnly)
+			{
+				// Delta 12: no port, no controller; the statistics feed the
+				// picture terms in BeginFrame(). A heartbeat in the log only.
+				const auto now = std::chrono::steady_clock::now();
+				if (now - lastLogTime >= std::chrono::seconds(10))
+				{
+					double veil = 0.0;
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						veil = gain.veil;
+					}
+					DebugLog::Log("LED drive: picture only (RS-232 port not opened; veil %.2f)", veil);
 					lastLogTime = now;
 				}
 			}

@@ -44,7 +44,13 @@ namespace LedDrive
 		double level = 0.0;
 	};
 
-	enum class Mode { Compensate, Script, LogOnly };
+	// PictureOnly (delta 12): the statistics and the picture-side terms
+	// (shadow lift, boost toe) as in compensate, the compensation gain exactly
+	// 1, and the RS-232 port never opened (owner 2026-10-13: the port stays
+	// free for the original Python script). Like log_only it runs on the
+	// dry-run driver; leaving compensate for it rebuilds the module, whose
+	// exit restores full light before the port is released.
+	enum class Mode { Compensate, Script, LogOnly, PictureOnly };
 
 	enum class Terminator { Auto, Cr, LiteralCr, Script };
 
@@ -465,7 +471,7 @@ namespace LedDrive
 		auto table = [](const std::string& value) { StepTable t; return ParseStepTable(value, t); };
 		return {
 			Boolean("enabled"),
-			Choice("mode", { "compensate", "script", "log_only" }),
+			Choice("mode", { "compensate", "script", "log_only", "picture_only" }),
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
@@ -761,7 +767,7 @@ namespace LedDrive
 		{
 			const std::string mode = ConfigFile::NormalizeName(value);
 			result.mode = mode == "compensate" ? Mode::Compensate :
-				mode == "script" ? Mode::Script : Mode::LogOnly;
+				mode == "script" ? Mode::Script : mode == "picture_only" ? Mode::PictureOnly : Mode::LogOnly;
 		}
 		readInt("tick_ms", 50, 5000, result.tickMs);
 		readNumber("rate_up", result.rateUp);
@@ -885,7 +891,7 @@ namespace LedDrive
 	inline std::string EffectiveProtocol(const ProjectorConfig& projector,
 		const LedDriveConfig& led)
 	{
-		if (!led.enabled || led.mode == Mode::LogOnly) return "none";
+		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly) return "none";
 		return projector.protocol;
 	}
 }

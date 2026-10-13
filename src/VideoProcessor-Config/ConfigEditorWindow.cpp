@@ -9707,10 +9707,11 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     connect(floor, qOverload<int>(&QSpinBox::valueChanged), floorBlack,
         [floorBlack](int level) { floorBlack->setMaximum(level); });
     driveForm->addRow(QStringLiteral("Mode"), bindChoiceField(led, QStringLiteral("mode"),
-        { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate") },
+        { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate"), QStringLiteral("picture_only") },
         { QStringLiteral("Log only (watch, never send)"),
           QStringLiteral("Script (your beta 22 script)"),
-          QStringLiteral("Compensate (dim the LED, keep the picture)") }));
+          QStringLiteral("Compensate (dim the LED, keep the picture)"),
+          QStringLiteral("Picture only (shadow lift and boost toe; the RS-232 port is not used)") }));
     // Step 7b: script mode sends the script's own LPW1 and CNTR; smoothing
     // adds VP's gain across each whole CNTR step. Off = the script exactly.
     driveForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth the script's contrast steps"), led,

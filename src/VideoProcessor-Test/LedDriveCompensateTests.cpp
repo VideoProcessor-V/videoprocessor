@@ -273,6 +273,94 @@ namespace VideoProcessorTest
 				std::to_wstring(atCut)).c_str());
 		}
 
+		TEST_METHOD(PictureOnlyNeverOpensThePortAndKeepsGainOne)
+		{
+			// Delta 12 (owner: the port stays free for the Python script):
+			// picture_only never opens the RS-232 port and writes nothing under
+			// any statistic (dark, bright, cuts); the gain is exactly 1 and the
+			// veil estimate still follows the highlights (the picture terms).
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::PictureOnly;
+			config.shadowLiftAnsi = 0.3;
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			Assert::AreEqual(std::string("none"), EffectiveProtocol(port, config));
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			double time = 0.0;
+			double veil = 0.0;
+			for (int frame = 0; frame < 120; ++frame)
+			{
+				const RawMeasurement raw = frame < 40 ? Frame(18.0) : frame < 80 ? Frame(30.0, 2000, 235) : Frame(200.0 - frame, 3000, 250);
+				module.SubmitMeasurement(raw);
+				time += 1000.0 / 60.0;
+				const CompensationGain gain = module.BeginFrameAt(0, time);
+				Assert::IsFalse(gain.active, L"picture_only never applies a gain");
+				Assert::AreEqual(1.0, gain.gain, 1e-12);
+				veil = std::max(veil, gain.veil);
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(600));   // ticks of the module's thread
+			module.Stop();
+			Assert::AreEqual(0, projector->opens, L"picture_only must not open the port");
+			Assert::IsTrue(projector->Writes().empty(), L"picture_only must not write to the port");
+			Assert::IsFalse(module.DrivingProjector());
+			Assert::IsTrue(veil > 0.1, (L"the veil estimate follows the highlights: " + std::to_wstring(veil)).c_str());
+		}
+
+		TEST_METHOD(PictureOnlySwitchFromCompensateRestoresAndReleasesThePort)
+		{
+			// Delta 12: compensate dims the LED; a switch to picture_only is not
+			// applied live (the protocol changes to none), so the renderer
+			// rebuilds the module: the compensate module's exit restores full
+			// light and closes the port, and the picture_only module never
+			// opens it.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			port.ackTimeoutMs = 60;
+			port.minCommandGapMs = 0;
+			port.readBack = true;
+			port.ledLatencyMs = 80;
+			port.ledSettleMs = 0;
+			LedDriveConfig picture = config;
+			picture.mode = Mode::PictureOnly;
+			{
+				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }), L"compensate started");
+				double time = 0.0;
+				for (int frame = 0; frame < 60; ++frame)
+				{
+					module.SubmitMeasurement(Frame(18.0));
+					time += 1000.0 / 60.0;
+					module.BeginFrameAt(0, time);
+					WaitFor([&] { return !module.ProjectorStatus().busy; });
+				}
+				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }), L"compensate dimmed the LED");
+				Assert::IsFalse(module.Reconfigure(port, picture), L"picture_only needs a new module (no port)");
+			}
+			Assert::AreEqual(255, projector->light, L"the compensate module's exit restored full light");
+			const int opens = projector->opens;
+			const size_t writes = projector->Writes().size();
+			{
+				LedDriveModule module(port, picture, [projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				double time = 0.0;
+				for (int frame = 0; frame < 60; ++frame)
+				{
+					module.SubmitMeasurement(Frame(frame % 2 ? 18.0 : 200.0, 2000, 240));
+					time += 1000.0 / 60.0;
+					Assert::IsFalse(module.BeginFrameAt(0, time).active);
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(400));
+			}
+			Assert::AreEqual(opens, projector->opens, L"picture_only did not open the port");
+			Assert::AreEqual(writes, projector->Writes().size(), L"picture_only wrote nothing");
+		}
+
 		TEST_METHOD(ModuleCompensatesAlongTheModelledLedLevel)
 		{
 			auto projector = std::make_shared<FakeProjector>();
