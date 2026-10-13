@@ -42,6 +42,7 @@
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/DejudderWarp.h>
+#include <vprenderer/DejudderAhead.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -4124,7 +4125,8 @@ struct LibplaceboVideoRenderer::Impl
 	std::shared_ptr<const QueuedFrame::ConvertedPayload> dejudderAheadPayload;
 	uint64_t dejudderAheadPayloadSequence = 0;
 	pl_tex dejudderAheadTextures[2] = { nullptr, nullptr };
-	uint64_t dejudderAheadFor = 0, dejudderAheadNext = 0;
+	Dejudder::AheadSchedule dejudderAhead;
+	ULONGLONG dejudderAheadLogTick = 0;
 	struct DejudderUploadLayout
 	{
 		bool valid = false;
@@ -4133,7 +4135,6 @@ struct LibplaceboVideoRenderer::Impl
 		bool lossless422 = false, fullRange = false;
 		VideoFrameFormatterOutputContract contract{};
 	} dejudderLayout;
-	unsigned long long dejudderAheadUsed = 0, dejudderSequentialEstimates = 0;
 	std::unique_ptr<Dejudder::MotionWarp> dejudder;
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
 	uint64_t dejudderEstimatedSequence = 0;
@@ -4282,11 +4283,14 @@ struct LibplaceboVideoRenderer::Impl
 			text = line;
 			// Estimate ahead: the share of the matcher runs done in an extra's
 			// spare time instead of before the frame's own render.
-			if (activeSettings.dejudderEstimateAhead && dejudderAheadUsed + dejudderSequentialEstimates > 0)
+			if (activeSettings.dejudderEstimateAhead && dejudderAhead.Hits() + dejudderAhead.Sequential() > 0)
 			{
-				char ahead[64];
-				std::snprintf(ahead, sizeof(ahead), ", ahead %.0f%%", 100.0 * static_cast<double>(dejudderAheadUsed) /
-					static_cast<double>(dejudderAheadUsed + dejudderSequentialEstimates));
+				char ahead[128];
+				std::snprintf(ahead, sizeof(ahead), ", ahead %.0f%%%s%s", 100.0 * static_cast<double>(dejudderAhead.Hits()) /
+					static_cast<double>(dejudderAhead.Hits() + dejudderAhead.Sequential()),
+					dejudderAhead.LastReason() != Dejudder::AheadSchedule::Reason::Ahead ? " (last: " : "",
+					dejudderAhead.LastReason() != Dejudder::AheadSchedule::Reason::Ahead ?
+						(std::string(Dejudder::AheadSchedule::Name(dejudderAhead.LastReason())) + ")").c_str() : "");
 				text += ahead;
 			}
 			// "mask on" only when the mask was used within the last second.
@@ -4310,7 +4314,7 @@ struct LibplaceboVideoRenderer::Impl
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		for (pl_tex& tex : dejudderAheadTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
-		dejudderAheadFor = dejudderAheadNext = 0;
+		dejudderAhead.Reset();
 		dejudderAheadPayload.reset();
 		dejudderAheadPayloadSequence = 0;
 		dejudderLayout.valid = false;
@@ -11358,18 +11362,15 @@ struct LibplaceboVideoRenderer::Impl
 		// Owner 2026-10-13 (estimate ahead): this pair (A, B) was estimated in
 		// the last frame's extras, with B the same frame: the field, the trust,
 		// A's mask and the grain are ready, and B's planes are the ahead ones.
-		if (nextSourceSequence != 0 && dejudderAheadFor == sourceSequence && dejudderAheadNext == nextSourceSequence)
+		if (dejudderAhead.Consume(sourceSequence, nextSourceSequence))
 		{
 			std::swap(dejudderNextTextures[0], dejudderAheadTextures[0]);
 			std::swap(dejudderNextTextures[1], dejudderAheadTextures[1]);
-			dejudderAheadFor = dejudderAheadNext = 0;
 			dejudderEstimatedSequence = sourceSequence;
-			if (++dejudderAheadUsed == 1 || dejudderAheadUsed % 2400 == 0)
-				DebugLog::Log("De-judder: motion estimated ahead for %llu source frames, before the frame for %llu",
-					dejudderAheadUsed, dejudderSequentialEstimates);
+			LogDejudderAhead();
 			return;
 		}
-		dejudderAheadFor = dejudderAheadNext = 0;   // none, or for another B: estimate now
+		LogDejudderAhead();
 		// B: the same plane layout as A's upload above.
 		if (!UploadDejudderPlanes(*next, dejudderNextTextures))
 		{
@@ -11389,10 +11390,29 @@ struct LibplaceboVideoRenderer::Impl
 		b.luma = dejudderNextTextures[0];
 		b.chroma = dejudderNextTextures[1];
 		if (RunDejudderEstimate(a, b, sourceSequence, nextSourceSequence))
-		{
 			dejudderEstimatedSequence = sourceSequence;
-			++dejudderSequentialEstimates;
-		}
+	}
+
+	// Estimate ahead: at most one line per 5 s, with the paths so far and the
+	// last reason a frame was not estimated ahead.
+	void LogDejudderAhead()
+	{
+		if (!activeSettings.dejudderEstimateAhead)
+			return;
+		const ULONGLONG now = GetTickCount64();
+		if (dejudderAheadLogTick != 0 && now - dejudderAheadLogTick < 5000)
+			return;
+		dejudderAheadLogTick = now;
+		using Reason = Dejudder::AheadSchedule::Reason;
+		DebugLog::Log("De-judder estimate ahead: %llu frames ahead, %llu before the frame (%llu estimated ahead for a "
+			"pair that did not come); not ahead: no frame after next %llu, source warp %llu, other %llu; last: %s",
+			dejudderAhead.Hits(), dejudderAhead.Sequential(), dejudderAhead.Misses(),
+			dejudderAhead.Count(Reason::NoAfter), dejudderAhead.Count(Reason::SourceWarp),
+			dejudderAhead.Count(Reason::AfterNotNew) + dejudderAhead.Count(Reason::NotEstimated) +
+				dejudderAhead.Count(Reason::Layout) + dejudderAhead.Count(Reason::SnapshotFailed) +
+				dejudderAhead.Count(Reason::UploadFailed) + dejudderAhead.Count(Reason::EstimateFailed) +
+				dejudderAhead.Count(Reason::NoNext) + dejudderAhead.Count(Reason::NotActive),
+			Dejudder::AheadSchedule::Name(dejudderAhead.LastReason()));
 	}
 
 	// The next frames' planes (B, or C ahead) in B's layout.
@@ -11510,35 +11530,37 @@ struct LibplaceboVideoRenderer::Impl
 	// with anything not matching, B is estimated before its render as before.
 	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence)
 	{
-		if (!activeSettings.dejudderEstimateAhead || !activeSettings.dejudderWarpRendered || !dejudder ||
-			dejudderReason != DejudderPolicy::Reason::Active || nextSourceSequence == 0 ||
-			dejudderEstimatedSequence != sourceSequence || !dejudderAheadPayload ||
-			dejudderAheadPayloadSequence == 0 || dejudderAheadPayloadSequence == nextSourceSequence ||
-			!dejudderLayout.valid || dejudderAheadPayload->pixels.size() != dejudderLayout.pixelBytes ||
-			dejudderAheadPayload->contract.sampleRange != dejudderLayout.contract.sampleRange ||
-			dejudderAheadPayload->contract.colorDepth != dejudderLayout.contract.colorDepth ||
-			dejudderAheadPayload->contract.bitShift != dejudderLayout.contract.bitShift ||
-			!dejudderNextTextures[0] || !dejudderNextTextures[1])
-			return false;
-		if (!dejudder->SnapshotForWarp())
-			return false;
-		if (!UploadDejudderPlanes(*dejudderAheadPayload, dejudderAheadTextures))
-			return true;   // the copy is A's own field: the extras go on with it
-		Dejudder::Planes b, c;
-		b.luma = dejudderNextTextures[0];
-		b.chroma = dejudderNextTextures[1];
-		b.chromaShiftX = 1;
-		b.chromaShiftY = dejudderLayout.lossless422 ? 0 : 1;
-		b.fullRange = dejudderLayout.fullRange;
-		c = b;
-		c.luma = dejudderAheadTextures[0];
-		c.chroma = dejudderAheadTextures[1];
-		if (RunDejudderEstimate(b, c, nextSourceSequence, dejudderAheadPayloadSequence))
+		Dejudder::AheadSchedule::Conditions c;
+		c.enabled = activeSettings.dejudderEstimateAhead;
+		c.renderedWarp = activeSettings.dejudderWarpRendered;
+		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
+			dejudderNextTextures[0] && dejudderNextTextures[1];
+		c.source = sourceSequence;
+		c.next = nextSourceSequence;
+		c.after = dejudderAheadPayload ? dejudderAheadPayloadSequence : 0;
+		c.estimated = dejudderEstimatedSequence;
+		c.layoutMatches = dejudderAheadPayload && dejudderLayout.valid &&
+			dejudderAheadPayload->pixels.size() == dejudderLayout.pixelBytes &&
+			dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
+			dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
+			dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;
+		Dejudder::AheadSchedule::Steps steps;
+		steps.snapshot = [this]() { return dejudder->SnapshotForWarp(); };
+		steps.uploadAfter = [this]() { return UploadDejudderPlanes(*dejudderAheadPayload, dejudderAheadTextures); };
+		steps.estimate = [this](uint64_t bSequence, uint64_t cSequence)
 		{
-			dejudderAheadFor = nextSourceSequence;
-			dejudderAheadNext = dejudderAheadPayloadSequence;
-		}
-		return true;
+			Dejudder::Planes b, c;
+			b.luma = dejudderNextTextures[0];
+			b.chroma = dejudderNextTextures[1];
+			b.chromaShiftX = 1;
+			b.chromaShiftY = dejudderLayout.lossless422 ? 0 : 1;
+			b.fullRange = dejudderLayout.fullRange;
+			c = b;
+			c.luma = dejudderAheadTextures[0];
+			c.chroma = dejudderAheadTextures[1];
+			return RunDejudderEstimate(b, c, bSequence, cSequence);
+		};
+		return dejudderAhead.TryAhead(c, steps);
 	}
 
 	// Stage 6b-2: extra presents. After A's own present, each further

@@ -12,6 +12,7 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
+#include <vprenderer/DejudderAhead.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -7419,6 +7420,202 @@ namespace VideoProcessorTest
 			Assert::IsTrue(off.warped.source == on.warped.source, L"source warp");
 			Assert::IsTrue(off.warped.rendered == on.warped.rendered, L"rendered warp");
 			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderEstimateAheadFallsBackForEachReason)
+		{
+			// Estimate ahead (owner 2026-10-13): every reason not to estimate
+			// ahead falls back to the estimate before the frame (Consume false),
+			// and none of them runs the matcher early.
+			using Schedule = Dejudder::AheadSchedule;
+			using Reason = Schedule::Reason;
+			int estimates = 0, snapshots = 0, uploads = 0;
+			Schedule::Steps steps;
+			steps.snapshot = [&]() { ++snapshots; return true; };
+			steps.uploadAfter = [&]() { ++uploads; return true; };
+			steps.estimate = [&](uint64_t, uint64_t) { ++estimates; return true; };
+			auto ok = []() { Schedule::Conditions c; c.source = 10; c.next = 11; c.after = 12; c.estimated = 10; return c; };
+			struct Case { const wchar_t* name; Schedule::Conditions c; Reason expected; };
+			std::vector<Case> cases;
+			{ auto c = ok(); c.enabled = false; cases.push_back({ L"off", c, Reason::Off }); }
+			{ auto c = ok(); c.renderedWarp = false; cases.push_back({ L"source warp", c, Reason::SourceWarp }); }
+			{ auto c = ok(); c.active = false; cases.push_back({ L"not active", c, Reason::NotActive }); }
+			{ auto c = ok(); c.next = 0; cases.push_back({ L"no next", c, Reason::NoNext }); }
+			{ auto c = ok(); c.after = 0; cases.push_back({ L"frame after next not supplied", c, Reason::NoAfter }); }
+			{ auto c = ok(); c.after = 11; cases.push_back({ L"after = next", c, Reason::AfterNotNew }); }
+			{ auto c = ok(); c.estimated = 9; cases.push_back({ L"pair not estimated", c, Reason::NotEstimated }); }
+			{ auto c = ok(); c.layoutMatches = false; cases.push_back({ L"layout", c, Reason::Layout }); }
+			for (const Case& k : cases)
+			{
+				Schedule schedule;
+				Assert::IsFalse(schedule.TryAhead(k.c, steps), k.name);
+				Assert::IsTrue(schedule.LastReason() == k.expected, k.name);
+				Assert::IsFalse(schedule.Consume(11, 12), k.name);   // B's frame: estimated now
+				Assert::AreEqual(1ull, schedule.Sequential(), k.name);
+			}
+			Assert::AreEqual(0, estimates + snapshots + uploads, L"no reason to skip ran any step");
+			// Failed steps: a failed copy leaves the extras on the matcher's
+			// own field; a failed upload or estimate keeps the copy in use and
+			// estimates at B's frame.
+			{
+				Schedule schedule;
+				Schedule::Steps failing = steps;
+				failing.snapshot = []() { return false; };
+				Assert::IsFalse(schedule.TryAhead(ok(), failing));
+				Assert::IsTrue(schedule.LastReason() == Reason::SnapshotFailed);
+				Assert::IsFalse(schedule.Consume(11, 12));
+			}
+			for (int which = 0; which < 2; ++which)
+			{
+				Schedule schedule;
+				Schedule::Steps failing = steps;
+				if (which == 0) failing.uploadAfter = []() { return false; };
+				else failing.estimate = [](uint64_t, uint64_t) { return false; };
+				Assert::IsTrue(schedule.TryAhead(ok(), failing), L"the copy stays in use");
+				Assert::IsTrue(schedule.LastReason() == (which == 0 ? Reason::UploadFailed : Reason::EstimateFailed));
+				Assert::IsFalse(schedule.Consume(11, 12), L"nothing estimated ahead: estimated now");
+			}
+			// The path that works: estimated ahead, then taken at B's frame once.
+			{
+				Schedule schedule;
+				estimates = 0;
+				Assert::IsTrue(schedule.TryAhead(ok(), steps));
+				Assert::IsTrue(schedule.LastReason() == Reason::Ahead);
+				Assert::AreEqual(1, estimates);
+				Assert::IsTrue(schedule.Consume(11, 12), L"B's frame takes the estimate made ahead");
+				Assert::IsFalse(schedule.Consume(11, 12), L"only once");
+				Assert::AreEqual(1ull, schedule.Hits());
+			}
+			// Estimated ahead for a C that did not come next: re-estimated.
+			{
+				Schedule schedule;
+				Assert::IsTrue(schedule.TryAhead(ok(), steps));
+				Assert::IsFalse(schedule.Consume(11, 13), L"another next frame: estimated now");
+				Assert::AreEqual(1ull, schedule.Misses());
+			}
+		}
+
+		TEST_METHOD(DejudderEstimateAheadMatchesTheSequentialPath)
+		{
+			// Estimate ahead (owner 2026-10-13), driven by the renderer's own
+			// schedule over a seven-frame sequence with changing motion. The
+			// frame after next is withheld at frame 2's extras (the fallback is
+			// forced) and replaced by another frame at frame 4's (estimated ahead
+			// for a pair that does not come). Every frame's path is recorded and
+			// checked; up to the replaced frame every output (field, trust,
+			// sub-field, the dither's mask, the grain) equals the sequential
+			// estimate byte for byte, and the extras' copy equals the outputs they
+			// replace.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128, frames = 7;
+			static const int panX[frames] = { 0, 6, 13, 18, 22, 29, 33 };
+			static const int panY[frames] = { 0, 2, 3, 6, 9, 10, 12 };
+			std::vector<DejudderGpuPlanes> planes(frames);
+			for (int f = 0; f < frames; ++f)
+			{
+				const int px = panX[f], py = panY[f];
+				const DejudderFrame frame = MakeDejudderFrame(width, height,
+					[px, py](int x, int y) { return DejudderTexture(x - px, y - py); },
+					[px, py](int x, int y, int c) { return DejudderTexture((x - px / 2) * 2, y - py, 7 + c); });
+				UploadDejudderFrame(gpu, frame, planes[f]);
+			}
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.estSplit = true;
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> half;
+				if (!tex) return half;
+				half.resize(static_cast<size_t>(tex->params.w) * tex->params.h * 4);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"not host-readable");
+				return half;
+			};
+			struct Outputs { std::vector<uint16_t> field, trust, sub, mask, grain; };
+			auto outputs = [&](Dejudder::MotionWarp& w, int slot)
+			{
+				return Outputs{ download(w.Field()), download(w.FrameTrust()), download(w.SubField()),
+					download(w.Occlusion(slot)), download(w.GrainError()) };
+			};
+			auto same = [](const Outputs& a, const Outputs& b)
+			{
+				return a.field == b.field && a.trust == b.trust && a.sub == b.sub && a.mask == b.mask && a.grain == b.grain;
+			};
+			// The pair (n, n+1) writes its mask into slot n % 2 on both paths.
+			auto estimate = [&](Dejudder::MotionWarp& w, int a, int b)
+			{
+				return w.Estimate(planes[a].planes, planes[b].planes, a % 2, true);
+			};
+			// Sequential: every frame estimated before its render.
+			Dejudder::MotionWarp sequential(fixture.Log(), gpu, settings);
+			std::vector<Outputs> expected;
+			for (int n = 0; n + 1 < frames; ++n)
+			{
+				Assert::IsTrue(estimate(sequential, n, n + 1), ExtendedRangeGpuProbe::ToWide(sequential.LastError()).c_str());
+				expected.push_back(outputs(sequential, n % 2));
+			}
+			// Estimate ahead through the schedule. Frame ids are the frame
+			// indices + 1 (0 = none); frame 99 is the replacement.
+			Dejudder::MotionWarp ahead(fixture.Log(), gpu, settings);
+			Dejudder::AheadSchedule schedule;
+			std::wstring paths;
+			int estimated = -1;
+			int replacedAt = -1;
+			for (int n = 0; n + 1 < frames; ++n)
+			{
+				// Frame n: its estimate, or the one made ahead.
+				const uint64_t idA = n + 1, idB = n + 2;
+				if (schedule.Consume(idA, idB))
+					paths += L"ahead ";
+				else
+				{
+					Assert::IsTrue(estimate(ahead, n, n + 1), ExtendedRangeGpuProbe::ToWide(ahead.LastError()).c_str());
+					paths += L"before ";
+				}
+				estimated = n;
+				const Outputs got = outputs(ahead, n % 2);
+				if (replacedAt < 0 || n < replacedAt + 1)
+					Assert::IsTrue(same(got, expected[n]),
+						(L"frame " + std::to_wstring(n) + L" differs from the sequential estimate; paths: " + paths).c_str());
+				// Frame n's first extra: the next pair, ahead when C is supplied.
+				if (n + 2 >= frames)
+					continue;
+				Dejudder::AheadSchedule::Conditions c;
+				c.source = idA;
+				c.next = idB;
+				c.after = n == 2 ? 0 : (n == 4 ? 99 : static_cast<uint64_t>(n + 3));
+				c.estimated = static_cast<uint64_t>(estimated + 1);
+				Dejudder::AheadSchedule::Steps steps;
+				steps.snapshot = [&]() { return ahead.SnapshotForWarp(); };
+				steps.uploadAfter = []() { return true; };
+				steps.estimate = [&](uint64_t b, uint64_t after)
+				{
+					const int bi = static_cast<int>(b) - 1;
+					const int ci = after == 99 ? 0 : static_cast<int>(after) - 1;   // the replacement: another picture
+					return ahead.Estimate(planes[bi].planes, planes[ci].planes, bi % 2, true);
+				};
+				const bool copy = schedule.TryAhead(c, steps);
+				if (n == 4)
+					replacedAt = n;
+				Assert::IsTrue(copy == (n != 2), (L"frame " + std::to_wstring(n) + L": the copy is used exactly when C is supplied").c_str());
+				if (copy)
+				{
+					// The extras read the copy: frame n's own outputs.
+					Assert::IsTrue(download(ahead.SnapField()) == got.field && download(ahead.SnapFrameTrust()) == got.trust &&
+						download(ahead.SnapSubField()) == got.sub,
+						(L"frame " + std::to_wstring(n) + L": the extras' copy is the frame's own field").c_str());
+				}
+			}
+			// 0 before (the start), 1 2 ahead, 3 before (C withheld at 2), 4
+			// ahead, 5 before (C replaced at 4: estimated again).
+			Assert::AreEqual(std::wstring(L"before ahead ahead before ahead before "), paths, paths.c_str());
+			Assert::AreEqual(3ull, schedule.Hits());
+			Assert::AreEqual(3ull, schedule.Sequential());
+			Assert::AreEqual(1ull, schedule.Misses());
+			Assert::AreEqual(1ull, schedule.Count(Dejudder::AheadSchedule::Reason::NoAfter));
 		}
 
 		TEST_METHOD(DejudderSnapshotKeepsTheWarpInputsWhileTheNextPairIsEstimated)
