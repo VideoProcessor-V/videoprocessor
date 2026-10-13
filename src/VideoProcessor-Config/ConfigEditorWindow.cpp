@@ -1064,6 +1064,42 @@ QRect ConfigEditorPlacement::ClampFrameToWorkArea(const QRect& frame,
     return QRect(x, y, frame.width(), frame.height());
 }
 
+namespace
+{
+    // GPU cost marker for a Config row (owner 2026-10-13): "+", "++" or "+++"
+    // in green, amber or red after the row's label, and the same words at
+    // the front of the control's tooltip and accessible description (the
+    // label text itself stays plain: it is the control's accessible name).
+    // The ratings are estimates; the stats overlay shows the real render time.
+    void MarkGpuCost(QFormLayout* form, QWidget* control, int cost)
+    {
+        if (!form || !control || cost < 1 || cost > 3)
+            return;
+        static const char* const marks[] = { "", "+", "++", "+++" };
+        static const char* const words[] = { "", "small", "moderate", "large" };
+        static const char* const colours[] = { "", "#2e7d32", "#b26a00", "#c62828" };
+        QLabel* label = qobject_cast<QLabel*>(form->labelForField(control));
+        if (!label && control->parentWidget())
+            label = qobject_cast<QLabel*>(form->labelForField(control->parentWidget()));
+        if (label && !label->property("gpuCost").isValid())
+        {
+            label->setProperty("gpuCost", cost);
+            label->setTextFormat(Qt::RichText);
+            label->setText(label->text().toHtmlEscaped() +
+                QStringLiteral(" <span style=\"color:%1; font-weight:600\">%2</span>")
+                    .arg(QString::fromLatin1(colours[cost]), QString::fromLatin1(marks[cost])));
+        }
+        const QString note = QStringLiteral("GPU cost: %1 (%2, estimated).")
+            .arg(QString::fromLatin1(marks[cost]), QString::fromLatin1(words[cost]));
+        control->setToolTip(control->toolTip().isEmpty() ? note : note + QStringLiteral("\n") + control->toolTip());
+        control->setAccessibleDescription(control->accessibleDescription().isEmpty() ? note :
+            note + QStringLiteral(" ") + control->accessibleDescription());
+    }
+
+    const char* const kGpuCostLegend =
+        "GPU cost: + small, ++ moderate, +++ large (estimated per frame; the stats overlay, Ctrl+I, shows the real render time).";
+}
+
 ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     bool testMode, const QStringList& testFilteredRenderers,
     const QStringList& testAllRenderers, const QString& remoteHost,
@@ -6286,7 +6322,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // renderer switches it off by itself in the Low_Latency queue and for
         // video cadences.
         form = addCollapsibleSection(QStringLiteral("dejudder"), QStringLiteral("De-judder (film motion)"),
-            QString(), false);
+            QString::fromLatin1(kGpuCostLegend), false);
         auto* dejudderPreset = new QComboBox;
         dejudderPreset->setObjectName(controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
         dejudderPreset->setAccessibleName(QStringLiteral("De-judder preset"));
@@ -6460,10 +6496,19 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Where the adaptive downscale's grain map sees film grain, the temporal sigma-delta's "
             "motion match is this many times more tolerant, so its 10-bit averaging survives the grain. "
             "Needs the grain map and the sigma-delta. 1 turns it off."));
+        // GPU cost markers (after the tooltips, which they prefix).
+        MarkGpuCost(form, dejudderPreset, 2);
+        MarkGpuCost(form, occlusionMask, 1);
+        MarkGpuCost(form, globalPrior, 1);
+        MarkGpuCost(form, vectorSmooth, 1);
+        MarkGpuCost(form, occlusionFill, 1);
+        MarkGpuCost(form, estCandidates, 1);
+        MarkGpuCost(form, estQpel, 1);
+        MarkGpuCost(form, estSplit, 1);
 
         // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
         form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale (4K)"),
-            QString(), false);
+            QString::fromLatin1(kGpuCostLegend), false);
         auto* adaptiveOn = addChoice(QStringLiteral("SSIM / faithful blend"),
             QStringLiteral("adaptive_downscale"), { QStringLiteral("on"), QStringLiteral("off") });
         adaptiveOn->setToolTip(QStringLiteral(
@@ -6505,10 +6550,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveMapSmooth->setPlaceholderText(QStringLiteral("500"));
         adaptiveMapSmooth->setToolTip(QStringLiteral(
             "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
+        MarkGpuCost(form, adaptiveOn, 2);
+        MarkGpuCost(form, adaptiveMap, 1);
 
         // Stage 8b: the upscale blend (1080p and below to the screen).
         form = addCollapsibleSection(QStringLiteral("adaptiveUpscale"), QStringLiteral("Adaptive upscale (1080p)"),
-            QString(), false);
+            QString::fromLatin1(kGpuCostLegend), false);
         auto* upscaleOn = addChoice(QStringLiteral("CNN / faithful blend"),
             QStringLiteral("adaptive_upscale"), { QStringLiteral("on"), QStringLiteral("off") });
         upscaleOn->setToolTip(QStringLiteral(
@@ -6534,6 +6581,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "the picture is scaled down from 2x in linear light; without a CNN the plain upscale is in gamma light "
             "(libplacebo upscales in linear light only through sigmoid, which is kept off because it clips "
             "above-white). Gamma: gamma light everywhere, like madVR."));
+        MarkGpuCost(form, upscaleOn, 2);
 
         auto wrapToneControl = [&](const ToneMappingTuning::Spec& spec, QLineEdit* edit) {
             auto row = form->takeRow(edit);
@@ -6655,6 +6703,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "the colour conversion, which otherwise clip it. Needs pure-power gammas (1.8 to 2.8) on "
             "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
             "otherwise and for HDR. Off is the standard path."));
+        MarkGpuCost(form, extendedRange, 1);
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { QStringLiteral("AUTO"), QStringLiteral("blue_noise"),
                 QStringLiteral("ordered_lut"), QStringLiteral("ordered_fixed"),
@@ -6707,6 +6756,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "by up to 0.84 of a 10-bit step) at more GPU memory bandwidth (+2.8 ms per 4K frame on a laptop "
             "RTX 3050 Ti; check the render time in the stats overlay). Auto: on, off with the Low_Latency "
             "queue. The final output stage is 32-bit float always."));
+        MarkGpuCost(form, fboFloat32, 2);
 
     }
 
