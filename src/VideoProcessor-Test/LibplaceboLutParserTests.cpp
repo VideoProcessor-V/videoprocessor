@@ -7271,6 +7271,52 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		TEST_METHOD(DejudderSnapshotKeepsTheWarpInputsWhileTheNextPairIsEstimated)
+		{
+			// Estimate ahead (owner 2026-10-13): the copy of (A, B)'s field,
+			// trust and sub-field is exact, and survives the estimate of (B, C)
+			// (a different pan) that overwrites the matcher's own.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x - 12, y - 6); },
+				[](int x, int y, int c) { return DejudderTexture((x - 6) * 2, y - 6, 7 + c); });
+			const DejudderFrame c = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x - 4, y - 10); },
+				[](int x, int y, int c) { return DejudderTexture((x - 2) * 2, y - 10, 7 + c); });
+			DejudderGpuPlanes planesA, planesB, planesC;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			UploadDejudderFrame(gpu, c, planesC);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.estSplit = true;
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			auto download = [&](pl_tex tex)
+			{
+				Assert::IsNotNull(tex);
+				std::vector<uint16_t> half(static_cast<size_t>(tex->params.w) * tex->params.h * 4);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"not host-readable");
+				return half;
+			};
+			// Twice, so the hysteresis lets the pan's blocks warp.
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes) && warp.Estimate(planesA.planes, planesB.planes),
+				ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			const std::vector<uint16_t> field = download(warp.Field()), trust = download(warp.FrameTrust()),
+				sub = download(warp.SubField());
+			Assert::IsTrue(warp.SnapshotForWarp(), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			Assert::IsTrue(download(warp.SnapField()) == field && download(warp.SnapFrameTrust()) == trust &&
+				download(warp.SnapSubField()) == sub, L"the copy is exact");
+			Assert::IsTrue(warp.Estimate(planesB.planes, planesC.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			Assert::IsTrue(download(warp.Field()) != field, L"the next pair's field differs (a different pan)");
+			Assert::IsTrue(download(warp.SnapField()) == field && download(warp.SnapFrameTrust()) == trust &&
+				download(warp.SnapSubField()) == sub, L"the copy survives the next estimate");
+		}
+
 		TEST_METHOD(EstimatorSplitFollowsASmallObject)
 		{
 			// E2: an 8x8 object moving (14, 6) inside a pan of (12, 6) fills one

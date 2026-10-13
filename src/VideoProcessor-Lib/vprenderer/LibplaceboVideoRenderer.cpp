@@ -894,6 +894,9 @@ namespace
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
 		// wide (off | search = the searches only | all = every pass).
 		std::string dejudderLowRes = "all";
+		// Owner 2026-10-13: the next pair estimated in an extra's spare refresh
+		// when the frame after next is queued (else before the frame, as before).
+		bool dejudderEstimateAhead = true;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1057,7 +1060,7 @@ namespace
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
-			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|'
+			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2067,7 +2070,8 @@ namespace
 			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
 			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
 			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
-			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper) })
+			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
+			std::make_pair("dejudder_estimate_ahead", &settings.dejudderEstimateAhead) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -4114,6 +4118,22 @@ struct LibplaceboVideoRenderer::Impl
 	// Created only while the de-judder is on; freed when it goes off.
 	// (A later optimisation could reuse B's upload when B becomes current.)
 	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
+	// Owner 2026-10-13 (estimate ahead): C, the frame after B, when queued
+	// and converted; its planes; the pair estimated ahead (B, C) during A's
+	// extras; B's upload layout (C must match it).
+	std::shared_ptr<const QueuedFrame::ConvertedPayload> dejudderAheadPayload;
+	uint64_t dejudderAheadPayloadSequence = 0;
+	pl_tex dejudderAheadTextures[2] = { nullptr, nullptr };
+	uint64_t dejudderAheadFor = 0, dejudderAheadNext = 0;
+	struct DejudderUploadLayout
+	{
+		bool valid = false;
+		int width = 0, height = 0, chromaHeight = 0;
+		size_t rowBytes = 0, pixelBytes = 0;
+		bool lossless422 = false, fullRange = false;
+		VideoFrameFormatterOutputContract contract{};
+	} dejudderLayout;
+	unsigned long long dejudderAheadUsed = 0, dejudderSequentialEstimates = 0;
 	std::unique_ptr<Dejudder::MotionWarp> dejudder;
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
 	uint64_t dejudderEstimatedSequence = 0;
@@ -4257,6 +4277,15 @@ struct LibplaceboVideoRenderer::Impl
 					activeSettings.dejudderStrength, st.cadenceRatio, st.lastExtrasPerFrame, st.lastMs,
 					st.late + st.nextFrameLate, st.swapchainFull, st.holds, dither);
 			text = line;
+			// Estimate ahead: the share of the matcher runs done in an extra's
+			// spare time instead of before the frame's own render.
+			if (activeSettings.dejudderEstimateAhead && dejudderAheadUsed + dejudderSequentialEstimates > 0)
+			{
+				char ahead[64];
+				std::snprintf(ahead, sizeof(ahead), ", ahead %.0f%%", 100.0 * static_cast<double>(dejudderAheadUsed) /
+					static_cast<double>(dejudderAheadUsed + dejudderSequentialEstimates));
+				text += ahead;
+			}
 			// "mask on" only when the mask was used within the last second.
 			if (activeSettings.occlusionMask)
 				text += dejudderMaskUsedTick != 0 && now - dejudderMaskUsedTick < 1000 ? std::string(", mask on") :
@@ -4276,6 +4305,12 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderVectorField.reset();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
+		for (pl_tex& tex : dejudderAheadTextures)
+			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
+		dejudderAheadFor = dejudderAheadNext = 0;
+		dejudderAheadPayload.reset();
+		dejudderAheadPayloadSequence = 0;
+		dejudderLayout.valid = false;
 	}
 	double sourceUploadCpuLastMs = 0.0;
 	double sourceUploadCpuIntervalTotalMs = 0.0;
@@ -8262,6 +8297,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
+		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
 		currentTransport.dejudderHoldFeatherPx = next.dejudderHoldFeatherPx;
 		currentTransport.dejudderHoldHysteresis = next.dejudderHoldHysteresis;
 		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
@@ -8357,6 +8393,7 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
+		changed(current.dejudderEstimateAhead != next.dejudderEstimateAhead, "dejudder_estimate_ahead");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -11305,36 +11342,92 @@ struct LibplaceboVideoRenderer::Impl
 		if (reason != DejudderPolicy::Reason::Active || cadenceRepeat ||
 			sourceSequence == dejudderEstimatedSequence)
 			return;
+		// B's layout, for C (estimate ahead) to match.
+		dejudderLayout.valid = true;
+		dejudderLayout.width = width;
+		dejudderLayout.height = height;
+		dejudderLayout.chromaHeight = chromaHeight;
+		dejudderLayout.rowBytes = rowBytes;
+		dejudderLayout.pixelBytes = next->pixels.size();
+		dejudderLayout.lossless422 = lossless422;
+		dejudderLayout.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
+		dejudderLayout.contract = contract;
+		// Owner 2026-10-13 (estimate ahead): this pair (A, B) was estimated in
+		// the last frame's extras, with B the same frame: the field, the trust,
+		// A's mask and the grain are ready, and B's planes are the ahead ones.
+		if (nextSourceSequence != 0 && dejudderAheadFor == sourceSequence && dejudderAheadNext == nextSourceSequence)
+		{
+			std::swap(dejudderNextTextures[0], dejudderAheadTextures[0]);
+			std::swap(dejudderNextTextures[1], dejudderAheadTextures[1]);
+			dejudderAheadFor = dejudderAheadNext = 0;
+			dejudderEstimatedSequence = sourceSequence;
+			if (++dejudderAheadUsed == 1 || dejudderAheadUsed % 2400 == 0)
+				DebugLog::Log("De-judder: motion estimated ahead for %llu source frames, before the frame for %llu",
+					dejudderAheadUsed, dejudderSequentialEstimates);
+			return;
+		}
+		dejudderAheadFor = dejudderAheadNext = 0;   // none, or for another B: estimate now
 		// B: the same plane layout as A's upload above.
+		if (!UploadDejudderPlanes(*next, dejudderNextTextures))
+		{
+			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
+				DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
+					dejudderFailures);
+			return;
+		}
+		(void)flipped;   // A and B share the orientation; the warp keeps it.
+		Dejudder::Planes a, b;
+		a.luma = textures[0];
+		a.chroma = textures[1];
+		a.chromaShiftX = 1;
+		a.chromaShiftY = lossless422 ? 0 : 1;
+		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;   // delta 5, D5-3
+		b = a;
+		b.luma = dejudderNextTextures[0];
+		b.chroma = dejudderNextTextures[1];
+		if (RunDejudderEstimate(a, b, sourceSequence, nextSourceSequence))
+		{
+			dejudderEstimatedSequence = sourceSequence;
+			++dejudderSequentialEstimates;
+		}
+	}
+
+	// The next frames' planes (B, or C ahead) in B's layout.
+	bool UploadDejudderPlanes(const QueuedFrame::ConvertedPayload& payload, pl_tex (&dst)[2])
+	{
+		const DejudderUploadLayout& l = dejudderLayout;
+		if (!l.valid || payload.pixels.size() != l.pixelBytes)
+			return false;
 		struct pl_plane_data planes[2]{};
-		const BYTE* yPixels = next->pixels.data();
-		const BYTE* uvPixels = yPixels + rowBytes * static_cast<size_t>(height);
+		const BYTE* yPixels = payload.pixels.data();
+		const BYTE* uvPixels = yPixels + l.rowBytes * static_cast<size_t>(l.height);
 		planes[0].type = PL_FMT_UNORM;
-		planes[0].width = width;
-		planes[0].height = height;
+		planes[0].width = l.width;
+		planes[0].height = l.height;
 		planes[0].component_size[0] = 16;
 		planes[0].component_map[0] = PL_CHANNEL_Y;
 		planes[0].pixel_stride = sizeof(uint16_t);
-		planes[0].row_stride = rowBytes;
+		planes[0].row_stride = l.rowBytes;
 		planes[0].pixels = yPixels;
 		planes[1] = planes[0];
-		planes[1].width = (width + 1) / 2;
-		planes[1].height = chromaHeight;
+		planes[1].width = (l.width + 1) / 2;
+		planes[1].height = l.chromaHeight;
 		planes[1].component_size[1] = 16;
 		planes[1].component_map[0] = PL_CHANNEL_CB;
 		planes[1].component_map[1] = PL_CHANNEL_CR;
 		planes[1].pixel_stride = sizeof(uint16_t) * 2;
 		planes[1].pixels = uvPixels;
-		pl_plane nextPlanes[2]{};
+		pl_plane uploaded[2]{};
 		for (int plane = 0; plane < 2; ++plane)
-			if (!pl_upload_plane(d3d11->gpu, &nextPlanes[plane], &dejudderNextTextures[plane], &planes[plane]))
-			{
-				if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
-					DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
-						dejudderFailures);
-				return;
-			}
-		(void)flipped;   // A and B share the orientation; the warp keeps it.
+			if (!pl_upload_plane(d3d11->gpu, &uploaded[plane], &dst[plane], &planes[plane]))
+				return false;
+		return true;
+	}
+
+	// The matcher on (a, b): its settings from the profile, b's occlusion mask
+	// into the slot not holding a's.
+	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
+	{
 		// The matcher's settings from the profile, refinements included.
 		auto wanted = [&](Dejudder::Settings settings)
 		{
@@ -11385,33 +11478,64 @@ struct LibplaceboVideoRenderer::Impl
 				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad)
 				dejudder->SetSettings(next);
 		}
-		Dejudder::Planes a, b;
-		a.luma = textures[0];
-		a.chroma = textures[1];
-		a.chromaShiftX = 1;
-		a.chromaShiftY = lossless422 ? 0 : 1;
-		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;   // delta 5, D5-3
-		b = a;
-		b.luma = dejudderNextTextures[0];
-		b.chroma = dejudderNextTextures[1];
 		// 6c: B's occlusion mask into the slot not holding the mask for the
-		// frame now showing (A), so A's survives until it is rendered.
+		// frame A (now showing, or B itself ahead), so A's survives until it
+		// is rendered.
 		int maskSlot = -1;
 		if (activeSettings.occlusionMask)
-			maskSlot = dejudderMaskSequence[0] == sourceSequence ? 1 : 0;
+			maskSlot = dejudderMaskSequence[0] == aSequence ? 1 : 0;
 		if (!dejudder->Estimate(a, b, maskSlot, adaptiveGrainMapWanted))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
 					dejudder->LastError().c_str(), dejudderFailures);
-			return;
+			return false;
 		}
-		dejudderEstimatedSequence = sourceSequence;
 		if (maskSlot >= 0)
-			dejudderMaskSequence[maskSlot] = nextSourceSequence;
+			dejudderMaskSequence[maskSlot] = bSequence;
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
-				dejudderEstimates, width, height, lossless422 ? "4:2:2" : "4:2:0");
+				dejudderEstimates, dejudderLayout.width, dejudderLayout.height,
+				dejudderLayout.lossless422 ? "4:2:2" : "4:2:0");
+		return true;
+	}
+
+	// Owner 2026-10-13 (estimate ahead): after an extra of A, with C (the
+	// frame after B) already queued, the next pair (B, C) is estimated in
+	// that extra's spare refresh, so B's own refresh holds only its render.
+	// The extras still to come read a copy of (A, B)'s field. Without C, or
+	// with anything not matching, B is estimated before its render as before.
+	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence)
+	{
+		if (!activeSettings.dejudderEstimateAhead || !activeSettings.dejudderWarpRendered || !dejudder ||
+			dejudderReason != DejudderPolicy::Reason::Active || nextSourceSequence == 0 ||
+			dejudderEstimatedSequence != sourceSequence || !dejudderAheadPayload ||
+			dejudderAheadPayloadSequence == 0 || dejudderAheadPayloadSequence == nextSourceSequence ||
+			!dejudderLayout.valid || dejudderAheadPayload->pixels.size() != dejudderLayout.pixelBytes ||
+			dejudderAheadPayload->contract.sampleRange != dejudderLayout.contract.sampleRange ||
+			dejudderAheadPayload->contract.colorDepth != dejudderLayout.contract.colorDepth ||
+			dejudderAheadPayload->contract.bitShift != dejudderLayout.contract.bitShift ||
+			!dejudderNextTextures[0] || !dejudderNextTextures[1])
+			return false;
+		if (!dejudder->SnapshotForWarp())
+			return false;
+		if (!UploadDejudderPlanes(*dejudderAheadPayload, dejudderAheadTextures))
+			return true;   // the copy is A's own field: the extras go on with it
+		Dejudder::Planes b, c;
+		b.luma = dejudderNextTextures[0];
+		b.chroma = dejudderNextTextures[1];
+		b.chromaShiftX = 1;
+		b.chromaShiftY = dejudderLayout.lossless422 ? 0 : 1;
+		b.fullRange = dejudderLayout.fullRange;
+		c = b;
+		c.luma = dejudderAheadTextures[0];
+		c.chroma = dejudderAheadTextures[1];
+		if (RunDejudderEstimate(b, c, nextSourceSequence, dejudderAheadPayloadSequence))
+		{
+			dejudderAheadFor = nextSourceSequence;
+			dejudderAheadNext = dejudderAheadPayloadSequence;
+		}
+		return true;
 	}
 
 	// Stage 6b-2: extra presents. After A's own present, each further
@@ -11625,6 +11749,10 @@ struct LibplaceboVideoRenderer::Impl
 		bool haveFirstVsync = false;
 		double phi0 = 0.0;
 		int extras = 0;
+		// What the warps read: the matcher's own until (B, C) is estimated
+		// ahead, then the copy of (A, B)'s.
+		pl_tex warpField = dejudder->Field(), warpTrust = dejudder->FrameTrust(), warpSub = dejudder->SubField();
+		bool aheadTried = false;
 		float previousShift = 0.0f;   // A, shown at shift 0 (delta 8 R1)
 		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
 		const char* failure = nullptr;
@@ -11720,8 +11848,8 @@ struct LibplaceboVideoRenderer::Impl
 			pl_tex warpedPicture = nullptr;
 			if (cached && dejudderRenderedWarp)
 			{
-				if (!dejudderRenderedWarp->Run(cached, dejudder->Field(), dejudder->FrameTrust(),
-					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, dejudder->SubField(),
+				if (!dejudderRenderedWarp->Run(cached, warpField, warpTrust,
+					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, warpSub,
 					&dejudder->GetSettings()))
 				{
 					failure = "rendered warp failed";
@@ -11761,7 +11889,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				const bool patch = SigmaDeltaVectorsSupported();
 				const bool use = DejudderRendered::UseExternalVectors(activeSettings.ditherVectorsOwn, patch,
-					dejudder->Field() != nullptr, dejudderGeometryValid);
+					warpField != nullptr, dejudderGeometryValid);
 				pl_tex vectors = nullptr;
 				if (use)
 				{
@@ -11771,9 +11899,9 @@ struct LibplaceboVideoRenderer::Impl
 						static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.y1 - dejudderGeometry.targetCrop.y0)));
 					if (!dejudderVectorField)
 						dejudderVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
-					if (!dejudderVectorField->Run(dejudder->Field(), dejudder->FrameTrust(),
+					if (!dejudderVectorField->Run(warpField, warpTrust,
 						dejudder->GetSettings().minTrustedShare, shift - previousShift, dejudderGeometry, w, h, vectors,
-						dejudder->SubField(), &dejudder->GetSettings()))
+						warpSub, &dejudder->GetSettings()))
 						vectors = nullptr;
 				}
 				const pl_render_params& listParams = *extraParams;
@@ -11901,6 +12029,18 @@ struct LibplaceboVideoRenderer::Impl
 				failure = "extra finished after its refresh";
 				break;
 			}
+			// Estimate ahead in this extra's spare refresh (the next loop
+			// waits for its vblank first).
+			if (!aheadTried)
+			{
+				aheadTried = true;
+				if (EstimateAhead(f.sourceSequence, f.nextSourceSequence))
+				{
+					warpField = dejudder->SnapField();
+					warpTrust = dejudder->SnapFrameTrust();
+					warpSub = dejudder->SnapSubField();
+				}
+			}
 		}
 		dejudderExtraStats.lastExtrasPerFrame = extras;
 		if (extras > 0)
@@ -11926,6 +12066,8 @@ struct LibplaceboVideoRenderer::Impl
 		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& convertedPayload,
 		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& nextConvertedPayload,
 		uint64_t nextSourceSequence,
+		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& aheadConvertedPayload,
+		uint64_t aheadSourceSequence,
 		uint64_t frameGeneration,
 		uint64_t sourceSequence,
 		const ActivePictureFrameIdentity& activePictureIdentity,
@@ -11958,6 +12100,8 @@ struct LibplaceboVideoRenderer::Impl
 		bool& dejudderExtrasSpentTime)
 	{
 		dejudderExtrasSpentTime = false;
+		dejudderAheadPayload = aheadConvertedPayload;   // C for this frame's extras (estimate ahead)
+		dejudderAheadPayloadSequence = aheadConvertedPayload ? aheadSourceSequence : 0;
 		const int64_t renderLockedStartQpc = PerformanceCounterNow();
 		// Snapshot once so a hotkey arriving mid-frame takes effect cleanly on
 		// the next frame instead of mixing box and cut/paste modes in one render.
@@ -20936,6 +21080,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// already queued and converted in the same generation.
 		std::shared_ptr<const QueuedFrame::ConvertedPayload> nextConvertedPayload;
 		uint64_t nextSourceSequence = 0;
+		// Estimate ahead (owner 2026-10-13): the frame after B (C), likewise.
+		std::shared_ptr<const QueuedFrame::ConvertedPayload> aheadConvertedPayload;
+		uint64_t aheadSourceSequence = 0;
 		bool conversionFailed = false;
 		uint64_t frameGeneration = 0;
 		uint64_t sourceSequence = 0;
@@ -21107,6 +21254,19 @@ void LibplaceboVideoRenderer::RenderLoop()
 				{
 					nextConvertedPayload = next.converted;
 					nextSourceSequence = next.sourceSequence;
+				}
+			}
+			aheadConvertedPayload.reset();
+			aheadSourceSequence = 0;
+			if (nextConvertedPayload && m_frameQueue.size() >= 2)
+			{
+				const QueuedFrame& after = m_frameQueue[1];
+				if (after.generation == frameGeneration && !after.cadenceRepeat &&
+					after.sourceSequence != nextSourceSequence && after.sourceSequence != sourceSequence &&
+					after.converted && SameDejudderVideoState(state, after.state))
+				{
+					aheadConvertedPayload = after.converted;
+					aheadSourceSequence = after.sourceSequence;
 				}
 			}
 
@@ -21333,6 +21493,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					convertedPayload,
 					nextConvertedPayload,
 					nextSourceSequence,
+					aheadConvertedPayload,
+					aheadSourceSequence,
 					frameGeneration,
 					sourceSequence,
 					activePictureIdentity,

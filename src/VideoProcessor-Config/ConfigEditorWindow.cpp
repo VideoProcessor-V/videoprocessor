@@ -6491,6 +6491,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "half the GPU time, with the dither unchanged. Half-size search with full-size refinement keeps quarter-"
             "pixel precision and 8-pixel splits (95% of the benefit). The occlusion-fill experiment is skipped at half "
             "size. Sources up to 1920 wide always use full size."));
+        auto* estimateAhead = addChoice(QStringLiteral("Estimate motion ahead"),
+            QStringLiteral("dejudder_estimate_ahead"), { QStringLiteral("on"), QStringLiteral("off") });
+        estimateAhead->setToolTip(QStringLiteral(
+            "When the frame after next is already queued, the motion for the next frame is worked out in the "
+            "spare time after a de-judder extra, so the next frame's own refresh only has its render to do. "
+            "Without that frame (a short queue) it is worked out before the frame, as before. Needs a queue "
+            "target of 3 frames or more to take effect; the stats line shows the share done ahead."));
         auto* estSplitSad = addText(QStringLiteral("Split above (codes, 0 = match tolerance)"),
             QStringLiteral("dejudder_est_split_sad"));
         estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));

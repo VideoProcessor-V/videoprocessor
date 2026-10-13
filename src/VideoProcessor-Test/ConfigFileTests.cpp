@@ -724,6 +724,8 @@ namespace VideoProcessorTest
                 Case{ "dejudder_est_split_sad", "20", false },
                 Case{ "dejudder_low_res", "all", true }, Case{ "dejudder_low_res", "search", true },
                 Case{ "dejudder_low_res", "off", true }, Case{ "dejudder_low_res", "on", false },
+                Case{ "dejudder_estimate_ahead", "on", true }, Case{ "dejudder_estimate_ahead", "off", true },
+                Case{ "dejudder_estimate_ahead", "auto", false },
                 Case{ "dejudder_hold_feather_px", "4", true }, Case{ "dejudder_hold_feather_px", "17", false },
                 Case{ "dejudder_strength_even", "1", true }, Case{ "dejudder_strength_even", "1.2", false },
                 Case{ "dejudder_even_rates", "30_and_29.97", true }, Case{ "dejudder_even_rates", "29.97", false },

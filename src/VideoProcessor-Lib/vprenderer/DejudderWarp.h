@@ -218,6 +218,13 @@ namespace Dejudder
 		// Tests only: lowRes without re-scoring the scaled-back searches.
 		void SetLowResRescoreForTest(bool on) { rescoreForTest = on; }
 		const std::map<std::string, double>& PassMs() const { return passMs; }
+		// Owner 2026-10-13 (estimate ahead): a copy of what the warps read (the
+		// field, the frame trust, the sub-field) for the extras still to come,
+		// taken before the next pair is estimated over them.
+		bool SnapshotForWarp();
+		pl_tex SnapField() const { return snapField; }
+		pl_tex SnapFrameTrust() const { return snapTrust; }
+		pl_tex SnapSubField() const { return snapSubValid ? snapSub : nullptr; }
 		// The same passes by the GPU's timestamp queries (no drain overhead).
 		const std::map<std::string, double>& PassGpuMs() const { return passGpuMs; }
 		pl_tex SubField() const { return settings.estSplit && estimated ? subField : nullptr; }
@@ -320,6 +327,8 @@ namespace Dejudder
 		// (already in code units; searches only, no warp planes).
 		std::unique_ptr<MotionWarp> inner;
 		bool searchOnly = false;
+		pl_tex snapField = nullptr, snapTrust = nullptr, snapSub = nullptr;
+		bool snapSubValid = false;
 		bool innerOfLowRes = false;   // no warp planes
 		// Tests only: re-score the scaled-back searches per 16-pixel block (on
 		// the owner's clip the grain made good matches look worse: 83% of the

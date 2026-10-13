@@ -1516,7 +1516,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -1914,6 +1914,36 @@ if (q.x < size.x && q.y < size.y) {
 		static const std::string parallel = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER;
 		return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)", parallel.c_str(), REFINE_BODY,
 			descriptors, 7, variables, 5, blocksX, blocksY, 8, 4);
+	}
+
+	bool MotionWarp::SnapshotForWarp()
+	{
+		snapSubValid = false;
+		if (!estimated || !field || !frameTrust)
+		{
+			error = "snapshot without an estimate";
+			return false;
+		}
+		auto copy = [this](pl_tex src, pl_tex* dst) -> bool
+		{
+			pl_tex_params params{};
+			params.w = src->params.w;
+			params.h = src->params.h;
+			params.format = src->params.format;
+			params.sampleable = true;
+			params.storable = true;
+			params.host_readable = settings.hostReadable && (src->params.format->caps & PL_FMT_CAP_HOST_READABLE);
+			return pl_tex_recreate(gpu, dst, &params) && Copy(src, *dst);
+		};
+		if (!copy(field, &snapField) || !copy(frameTrust, &snapTrust))
+			return false;
+		if (pl_tex sub = SubField())
+		{
+			if (!copy(sub, &snapSub))
+				return false;
+			snapSubValid = true;
+		}
+		return true;
 	}
 
 	bool MotionWarp::Copy(pl_tex src, pl_tex dst)

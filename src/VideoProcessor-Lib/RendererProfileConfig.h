@@ -640,7 +640,7 @@ namespace RendererProfileConfig
 			// tolerance on grain (1 = off).
 			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
 				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate" ||
-				key == "dejudder_est_split" || key == "dejudder_block_taper")
+				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead")
 				return IsChoice(value, { "on", "off" });
 			// Stage 11a E1: the smoothness penalty (codes per source pixel).
 			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
