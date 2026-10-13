@@ -107,6 +107,47 @@ namespace DejudderRendered
 		std::string error;
 	};
 
+	// Delta 8 R1: the sigma-delta's vectors for a de-judder extra. Per 16x16
+	// block of the OUTPUT-stage picture (w x h, the size of the cache; the
+	// rounded destination rectangle on the source path): the displacement in
+	// output pixels since the previous present, shiftStep x the de-judder's
+	// A->B field mapped as the warps map it (rg, full pixels), and trust (b):
+	// 1 where the vector is exact for the warp - a moved block, a held block
+	// (no motion) or outside the picture - 0 where the field is unusable.
+	// The texture is the sigma-delta's VPVEC (rgba16f, block resolution).
+	class VectorField
+	{
+	public:
+		// hostReadable: the field can be downloaded (tests only).
+		VectorField(pl_log log, pl_gpu gpu, bool hostReadable = false);
+		VectorField(const VectorField&) = delete;
+		VectorField& operator=(const VectorField&) = delete;
+		~VectorField();
+
+		bool Run(pl_tex field, pl_tex frameTrust, float minTrustedShare, float shiftStep, const Geometry& geometry,
+			int w, int h, pl_tex& out, pl_tex subField = nullptr, const Dejudder::Settings* matcher = nullptr);
+		const std::string& Error() const { return error; }
+		static int Blocks(int pixels) { return (pixels + 15) / 16; }
+
+	private:
+		pl_gpu gpu = nullptr;
+		pl_dispatch dispatch = nullptr;
+		pl_tex vectors = nullptr;
+		bool hostReadable = false;
+		std::string error;
+	};
+
+	// Delta 8 R1: whether an extra's sigma-delta takes VP's vectors.
+	// own: dither_vectors own. patch: libplacebo has
+	// pl_mpv_user_shader_set_texture (377 with fork patch 0004). field: the
+	// de-judder's field exists this frame. sameFrame: the previous present
+	// showed the same source frame (A or an earlier extra), so the motion
+	// since then is the shift step exactly.
+	inline bool UseExternalVectors(bool own, bool patch, bool field, bool sameFrame)
+	{
+		return !own && patch && field && sameFrame;
+	}
+
 	// libplacebo renders onto the destination rectangle rounded to whole
 	// pixels (clipped to the framebuffer) and moves the source rectangle with
 	// it (renderer.c, the dst_rect rounding). The cache is that rounded

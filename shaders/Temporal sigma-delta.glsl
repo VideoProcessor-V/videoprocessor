@@ -60,6 +60,17 @@
  *   the residual survives film grain. The carried payload stays within
  *   +-0.5 code. At 1 (the default) nothing reads the grain.
  *
+ * External vectors (delta 8 R1, `vector_source` = 1, set by the renderer)
+ *   On a de-judder extra the renderer knows the motion since the previous
+ *   present exactly: the de-judder's field times the shift step, mapped into
+ *   output pixels. It writes that per 16x16 output block into VPVEC (vector
+ *   in full pixels in rg, trust in b; libplacebo 377 with VP's fork patch
+ *   0004, pl_mpv_user_shader_set_texture) and sets vector_source to 1 for that
+ *   render only. The search pass then copies VPVEC into MV and skips its own
+ *   search; the quantizer and its per-pixel gate are unchanged. VPVEC is a
+ *   1x1 r8 placeholder (zero: untrusted) when nothing is bound; at 0 (the
+ *   default) it is never read and the output is byte-identical.
+ *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and
  *   libplacebo's encode_color (so values are already in the target's code
@@ -175,12 +186,26 @@
 //!MAXIMUM 8.0
 1.0
 
+//!PARAM vector_source
+//!DESC Set by the renderer (delta 8 R1): 1 = take this refresh's block vectors from VPVEC, 0 = own search
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
 //!PARAM test_ramp
 //!DESC 1 = replace the picture with a 10-bit horizontal grey ramp for verification
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
+
+//!TEXTURE VPVEC
+//!SIZE 1 1
+//!FORMAT r8
+//!FILTER NEAREST
+//!BORDER CLAMP
+00
 
 //!TEXTURE RESID
 //!SIZE {{output_width}} {{output_height}}
@@ -288,6 +313,7 @@ void hook()
 //!BIND MVPREV
 //!BIND RESID_NEXT
 //!BIND PREV_NEXT
+//!BIND VPVEC
 //!SAVE MV
 //!WIDTH HOOKED.w 7.5 + 16 /
 //!HEIGHT HOOKED.h 7.5 + 16 /
@@ -400,6 +426,15 @@ void hook()
     // last real vector is kept for when it is switched on again.
     if (motion_compensation < 0.5) {
         imageStore(out_image, block, vec4(0.0));
+        return;
+    }
+
+    // Delta 8 R1: the renderer's vectors for this refresh (exact on a
+    // de-judder extra); no search. MVPREV keeps the last real search result.
+    if (vector_source > 0.5) {
+        vec4 e = texelFetch(VPVEC, min(block, textureSize(VPVEC, 0) - ivec2(1)), 0);
+        bool usable = !any(isnan(e.xyz));
+        imageStore(out_image, block, usable ? vec4(round(e.xy), e.z > 0.5 ? 1.0 : 0.0, 0.0) : vec4(0.0));
         return;
     }
 

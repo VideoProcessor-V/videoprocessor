@@ -42,3 +42,12 @@ GPU check: src/VideoProcessor-BetaTests (BetaGpuTests.cpp): code 40 -> 40 and
 980 -> 980 on a 10-bit limited target (Bill's binary: 64 and 940/960/960).
 This libplacebo applies the output encoding after PRE_OUTPUT hooks itself, so
 VP's OutputEncodingRepair is off for the Beta (PL_API_VER >= 377).
+
+Fork-only additions since (source/fl35-patches; any libplacebo rebuild must carry 0001-0004):
+ 0003 renderer: optional rgba32f FBOs (output_fbo_float32, fbo_float32; VP S2)
+ 0004 custom_mpv: pl_mpv_user_shader_set_texture (2026-10-12; VP delta 8 R1): a
+      user shader's own //!TEXTURE is pointed at a caller texture (the sigma-delta's
+      VPVEC vector field) and restored before destroy. One new export (515).
+Build (0004): MSYS2 mingw64, options as in VP-FORK.md; all 13 library tests passed.
+lib/libplacebo-377.lib regenerated from lib/libplacebo-377.def (MSVC lib.exe /def).
+Binary SHA256 (with 0001-0004): 15809853816eb8be355435504a531a7f73b92f4b68387d09419513cb5b509220

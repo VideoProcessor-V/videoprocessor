@@ -3537,6 +3537,19 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(cleanLog);
 		}
 
+		// Delta 8 R1: the extras' sigma-delta takes VP's vectors only with
+		// dither_vectors auto, the fork patch, a field and the same source frame.
+		TEST_METHOD(DitherVectorsAutoFallsBackWithoutThePatch)
+		{
+			Assert::IsTrue(DejudderRendered::UseExternalVectors(false, true, true, true));
+			Assert::IsFalse(DejudderRendered::UseExternalVectors(true, true, true, true), L"own");
+			Assert::IsFalse(DejudderRendered::UseExternalVectors(false, false, true, true), L"7.360: no patch 0004");
+			Assert::IsFalse(DejudderRendered::UseExternalVectors(false, true, false, true), L"no matcher field");
+			Assert::IsFalse(DejudderRendered::UseExternalVectors(false, true, true, false), L"another source frame");
+			Assert::AreEqual(16, DejudderRendered::VectorField::Blocks(256));
+			Assert::AreEqual(68, DejudderRendered::VectorField::Blocks(1080));
+		}
+
 		// Delta 13: the SDR tone shape's reference curve.
 		TEST_METHOD(SdrToneShapeReferencePlacesWhiteAndRollsOffIntoTheHeadroom)
 		{

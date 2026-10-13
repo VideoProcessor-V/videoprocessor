@@ -1,0 +1,97 @@
+From: Victor McPherson <vmcpherson2012@gmail.com>
+Date: Mon, 12 Oct 2026 23:20:00 -0400
+Subject: [PATCH 4/4] custom_mpv: caller textures for declared textures
+
+Fork-only pl_mpv_user_shader_set_texture(hook, name, tex): points a texture
+the user shader declares itself (//!TEXTURE NAME, sampled) at a texture the
+caller owns, for every pass that binds NAME; NULL restores the shader's own.
+The shader's own texture is restored before pl_mpv_user_shader_destroy,
+which never destroys the caller's. Header define
+PL_VP_MPV_USER_SHADER_SET_TEXTURE. VideoProcessor delta 8 R1 (the sigma-delta
+reads the de-judder's vector field as VPVEC).
+---
+--- a/src/include/libplacebo/shaders/custom.h	2026-10-12 23:21:22.856127500 -0400
++++ b/src/include/libplacebo/shaders/custom.h	2026-10-12 23:21:42.146786100 -0400
+@@ -336,6 +336,17 @@
+ 
+ PL_API void pl_mpv_user_shader_destroy(const struct pl_hook **hook);
+ 
++// VP fork (VideoProcessor delta 8 R1): point a texture the shader declares
++// itself (`//!TEXTURE NAME`, sampled, not `//!STORAGE`) at a texture owned by
++// the caller, e.g. a per-frame vector field, for every pass that binds NAME.
++// `tex` must be sampleable and outlive its use; NULL restores the shader's
++// own texture. The shader's own texture is kept and restored before
++// `pl_mpv_user_shader_destroy`, which never destroys a caller's texture.
++// Returns false if the shader declares no such sampled texture.
++#define PL_VP_MPV_USER_SHADER_SET_TEXTURE 1
++PL_API bool pl_mpv_user_shader_set_texture(const struct pl_hook *hook,
++                                           const char *name, pl_tex tex);
++
+ PL_API_END
+ 
+ #endif // LIBPLACEBO_SHADERS_CUSTOM_H_
+--- a/src/shaders/custom_mpv.c	2026-10-12 23:21:22.825129900 -0400
++++ b/src/shaders/custom_mpv.c	2026-10-12 23:21:42.147785600 -0400
+@@ -927,6 +927,9 @@
+ 
+     // Fixed (for shader-local resources)
+     PL_ARRAY(struct pl_shader_desc) descriptors;
++    // VP fork: the shader's own texture for each descriptor a caller has
++    // replaced (pl_mpv_user_shader_set_texture), NULL where not replaced.
++    PL_ARRAY(pl_tex) vp_own_tex;
+ 
+     // Dynamic per pass
+     enum pl_hook_stage save_stages;
+@@ -1731,6 +1734,38 @@
+     return NULL;
+ }
+ 
++bool pl_mpv_user_shader_set_texture(const struct pl_hook *hook,
++                                    const char *name, pl_tex tex)
++{
++    if (!hook || !name)
++        return false;
++
++    struct hook_priv *p = PL_PRIV(hook);
++    for (int i = 0; i < p->descriptors.num; i++) {
++        struct pl_shader_desc *sd = &p->descriptors.elem[i];
++        if (sd->desc.type != PL_DESC_SAMPLED_TEX || strcmp(sd->desc.name, name) != 0)
++            continue;
++        if (tex && !tex->params.sampleable) {
++            PL_ERR(p, "Texture for '%s' is not sampleable", name);
++            return false;
++        }
++        while (p->vp_own_tex.num < p->descriptors.num)
++            PL_ARRAY_APPEND(p->alloc, p->vp_own_tex, NULL);
++        pl_tex *own = &p->vp_own_tex.elem[i];
++        if (tex) {
++            if (!*own)
++                *own = sd->binding.object;
++            sd->binding.object = tex;
++        } else if (*own) {
++            sd->binding.object = *own;
++            *own = NULL;
++        }
++        return true;
++    }
++
++    return false;
++}
++
+ void pl_mpv_user_shader_destroy(const struct pl_hook **hookp)
+ {
+     const struct pl_hook *hook = *hookp;
+@@ -1738,6 +1773,13 @@
+         return;
+ 
+     struct hook_priv *p = PL_PRIV(hook);
++    // VP fork: a caller's texture is never destroyed here.
++    for (int i = 0; i < p->vp_own_tex.num && i < p->descriptors.num; i++) {
++        if (p->vp_own_tex.elem[i]) {
++            p->descriptors.elem[i].binding.object = p->vp_own_tex.elem[i];
++            p->vp_own_tex.elem[i] = NULL;
++        }
++    }
+     for (int i = 0; i < p->descriptors.num; i++) {
+         switch (p->descriptors.elem[i].desc.type) {
+             case PL_DESC_BUF_UNIFORM:

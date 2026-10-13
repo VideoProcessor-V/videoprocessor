@@ -274,6 +274,7 @@ pl_matrix3x3_rmul
 pl_matrix3x3_scale
 pl_mpv_user_shader_destroy
 pl_mpv_user_shader_parse
+pl_mpv_user_shader_set_texture
 pl_needs_film_grain
 pl_num_error_diffusion_kernels
 pl_num_filter_configs

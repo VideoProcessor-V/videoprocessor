@@ -694,6 +694,8 @@ namespace VideoProcessorTest
                 Case{ "dither_grain_tolerance_scale", "0.5", false }, Case{ "dither_grain_tolerance_scale", "9", false },
                 Case{ "fbo_float32", "auto", true }, Case{ "fbo_float32", "off", true },
                 Case{ "fbo_float32", "yes", false },
+                Case{ "dither_vectors", "auto", true }, Case{ "dither_vectors", "own", true },
+                Case{ "dither_vectors", "external", false },
                 Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },
                 Case{ "dejudder_est_gate", "maybe", false }, Case{ "dejudder_est_lambda", "0.5", true },
                 Case{ "dejudder_est_lambda", "9", false },

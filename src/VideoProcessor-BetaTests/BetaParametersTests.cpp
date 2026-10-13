@@ -8,6 +8,7 @@ void RunBetaOutputFloat32Tests(); // BetaGpuTests.cpp
 void RunBetaFboTiming(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
+void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
 void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
 void RunBetaChainGpuTest(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
@@ -62,6 +63,7 @@ int main() {
         RunBetaChainBiasRegression();
         std::cout << "PASS Beta S2: output pass in rgba32f, highlights within 1/16 step, extended codes kept, the chain bias A/B\n";
         RunBetaFeatureGpuTests();
+        RunBetaDitherVectorsTests();
         std::cout << "PASS Beta features: sigma-delta (8-in-10, true 10-bit), LED compensation, occlusion mask, de-judder\n";
         RunBetaExtendedRangeGpuTests();
         std::cout << "PASS Beta extended range: BTB/WTW kept through scaling, in-range edges and colours as without the switch\n";

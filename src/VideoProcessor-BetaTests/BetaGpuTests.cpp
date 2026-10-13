@@ -283,13 +283,14 @@ namespace
 		~Shader() { if (hook) pl_mpv_user_shader_destroy(&hook); }
 	};
 
-	std::unique_ptr<Shader> Load(pl_gpu gpu, const char* file, const std::map<std::string, double>& parameters)
+	std::unique_ptr<Shader> Load(pl_gpu gpu, const char* file, const std::map<std::string, double>& parameters,
+		int outputWidth = 2, int outputHeight = 2)
 	{
 		std::string source = LoadRepoShader(file);
 		Check(!source.empty(), std::string("bundled shader not found: ") + file);
-		for (const char* token : { "{{output_width}}", "{{output_height}}" })
-			for (size_t at; (at = source.find(token)) != std::string::npos;)
-				source.replace(at, std::string(token).size(), "2");
+		for (const auto& token : { std::make_pair("{{output_width}}", outputWidth), std::make_pair("{{output_height}}", outputHeight) })
+			for (size_t at; (at = source.find(token.first)) != std::string::npos;)
+				source.replace(at, std::string(token.first).size(), std::to_string(token.second));
 		auto shader = std::make_unique<Shader>();
 		shader->gpu = gpu;
 		shader->hook = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
@@ -665,6 +666,9 @@ void RunBetaFeatureGpuTests()
 			// a little more of the frame moves).
 			warp.SetSettings(ChainGpuProbe::Refined(settings));
 			Check(warp.Estimate(a, b), "6d: Estimate with the refinements failed: " + warp.LastError());
+			// Delta 9 H2 (hold_hysteresis 2): a block warps only after two trusted
+			// source frames running, so the pan is estimated a second time.
+			Check(warp.Estimate(a, b), "6d: second Estimate with the refinements failed: " + warp.LastError());
 			Dejudder::Planes refinedPlanes;
 			Check(warp.Warp(a, 0.5f, refinedPlanes), "6d: source warp with the refinements failed");
 			const auto refinedSource = source(refinedPlanes, nullptr);
@@ -696,6 +700,281 @@ void RunBetaFeatureGpuTests()
 		pl_tex_destroy(handle, &b.luma);
 		pl_tex_destroy(handle, &b.chroma);
 	}
+}
+
+// Delta 8 R1 on libplacebo 377 with fork patch 0004: the sigma-delta takes the
+// de-judder's vectors on the extras (VPVEC), along a (12, 6) pan, 6d path.
+void RunBetaDitherVectorsTests()
+{
+	Gpu gpu;
+	pl_gpu handle = gpu.GpuHandle();
+	const int width = 256, height = 128, dx = 12, dy = 6;
+	auto upload = [handle](int w, int h, int comps, const std::vector<uint16_t>& data)
+	{
+		const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(
+			PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE);
+		pl_tex_params params{};
+		params.w = w;
+		params.h = h;
+		params.format = pl_find_fmt(handle, PL_FMT_UNORM, comps, 16, 16, caps);
+		params.sampleable = true;
+		params.host_readable = true;
+		params.initial_data = data.data();
+		return pl_tex_create(handle, &params);
+	};
+	auto frame = [&](int shiftX, int shiftY, Dejudder::Planes& planes)
+	{
+		std::vector<uint16_t> luma(static_cast<size_t>(width) * height), chroma(static_cast<size_t>(width / 2) * height * 2);
+		for (int y = 0; y < height; ++y)
+			for (int x = 0; x < width; ++x)
+				luma[static_cast<size_t>(y) * width + x] = Texture(x - shiftX, y - shiftY);
+		for (int y = 0; y < height; ++y)
+			for (int x = 0; x < width / 2; ++x)
+				for (int c = 0; c < 2; ++c)
+					chroma[(static_cast<size_t>(y) * (width / 2) + x) * 2 + c] = Texture((x - shiftX / 2) * 2, y - shiftY, 7 + c);
+		planes.luma = upload(width, height, 1, luma);
+		planes.chroma = upload(width / 2, height, 2, chroma);
+		planes.chromaShiftX = 1;
+		planes.chromaShiftY = 0;
+	};
+	Dejudder::Planes a, b;
+	frame(0, 0, a);
+	frame(dx, dy, b);
+	Dejudder::Settings settings;
+	settings.hostReadable = true;
+	gpu.messages.clear();
+	Dejudder::MotionWarp warp(gpu.Log(), handle, settings);
+	Check(warp.Estimate(a, b), "R1: Estimate failed: " + warp.LastError());
+
+	pl_tex_params tp{};
+	tp.w = width;
+	tp.h = height;
+	tp.format = pl_find_fmt(handle, PL_FMT_UNORM, 4, 8, 8,
+		static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+	tp.renderable = true;
+	tp.host_readable = true;
+	pl_tex targetTex = pl_tex_create(handle, &tp);
+	Check(targetTex != nullptr, "R1: no RGBA8 target");
+	pl_render_params params = pl_render_fast_params;
+	params.dither_params = nullptr;
+	params.error_diffusion = nullptr;
+	auto target = [&]()
+	{
+		pl_frame t = Gpu::Frame(targetTex);
+		t.repr.levels = PL_COLOR_LEVELS_LIMITED;
+		t.repr.bits = pl_bit_encoding{};
+		t.color.primaries = PL_COLOR_PRIM_BT_709;
+		t.color.transfer = PL_COLOR_TRC_BT_1886;
+		return t;
+	};
+	auto readback = [&]()
+	{
+		pl_gpu_finish(handle);
+		std::vector<uint32_t> px(static_cast<size_t>(width) * height);
+		pl_tex_transfer_params d{};
+		d.tex = targetTex;
+		d.ptr = px.data();
+		Check(pl_tex_download(handle, &d), "R1: download failed");
+		return px;
+	};
+	DejudderRendered::Cache cache;
+	auto renderA = [&](const std::vector<const pl_hook*>& extraHooks)
+	{
+		pl_frame image{};
+		image.num_planes = 2;
+		image.planes[0].texture = a.luma;
+		image.planes[0].components = 1;
+		image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+		image.planes[1].texture = a.chroma;
+		image.planes[1].components = 2;
+		image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+		image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+		image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+		image.repr.levels = PL_COLOR_LEVELS_FULL;
+		image.color.primaries = PL_COLOR_PRIM_BT_709;
+		image.color.transfer = PL_COLOR_TRC_BT_1886;
+		pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+		std::vector<const pl_hook*> hooks = extraHooks;
+		cache.Arm(3);
+		hooks.push_back(cache.Hook());
+		pl_frame t = target();
+		pl_render_params p = params;
+		p.hooks = hooks.data();
+		p.num_hooks = static_cast<int>(hooks.size());
+		Check(pl_render_image(gpu.RendererHandle(), &image, &t, &p), "R1: A render failed");
+		return readback();
+	};
+	DejudderRendered::Geometry g;
+	g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+	g.targetCrop = g.sourceCrop;
+	DejudderRendered::Warp rendered(gpu.Log(), handle);
+	auto extra = [&](float shift, const pl_hook* sigma)
+	{
+		pl_tex out = nullptr;
+		Check(rendered.Run(cache.Texture(3), warp.Field(), warp.FrameTrust(), settings.minTrustedShare,
+			shift, g, out, warp.SubField(), &warp.GetSettings()), "R1: rendered warp failed: " + rendered.Error());
+		pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+		pl_frame t = target();
+		std::vector<const pl_hook*> kept;
+		const pl_render_params p = DejudderRendered::OutputOnly(params, { sigma }, kept);
+		Check(pl_render_image(gpu.RendererHandle(), &image, &t, &p), "R1: extra render failed");
+		return readback();
+	};
+	const std::map<std::string, double> sigmaParams = { { "enabled", 1 }, { "levels_full", 0 }, { "swapchain_bits", 8 },
+		{ "color_bits", 8 }, { "noise_amplitude", 0 }, { "motion_compensation", 1 } };
+	auto loadSigma = [&]() { return Load(handle, "Temporal sigma-delta.glsl", sigmaParams, width, height); };
+	DejudderRendered::VectorField field(gpu.Log(), handle, true);
+	const float shifts[3] = { 0.25f, 0.5f, 0.75f };
+
+	// The field itself: interior blocks move by the step x (12, 6), trusted.
+	{
+		pl_tex vectors = nullptr;
+		Check(field.Run(warp.Field(), warp.FrameTrust(), settings.minTrustedShare, 0.5f, g, width, height, vectors,
+			warp.SubField(), &warp.GetSettings()), "R1: vector field failed: " + field.Error());
+		const int bw = DejudderRendered::VectorField::Blocks(width), bh = DejudderRendered::VectorField::Blocks(height);
+		Check(vectors && vectors->params.w == bw && vectors->params.h == bh, "R1: vector field size");
+		std::vector<uint16_t> half(static_cast<size_t>(bw) * bh * 4);
+		pl_tex_transfer_params d{};
+		d.tex = vectors;
+		d.ptr = half.data();
+		Check(pl_tex_download(handle, &d), "R1: vector field not readable");
+		auto toFloat = [](uint16_t h)
+		{
+			const int sign = (h >> 15) & 1, exponent = (h >> 10) & 31, mantissa = h & 1023;
+			float value = exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -24) :
+				exponent == 31 ? NAN : std::ldexp(static_cast<float>(mantissa | 1024), exponent - 25);
+			return sign ? -value : value;
+		};
+		int interior = 0, good = 0;
+		for (int by = 2; by < bh - 2; ++by)
+			for (int bx = 2; bx < bw - 2; ++bx)
+			{
+				const size_t i = (static_cast<size_t>(by) * bw + bx) * 4;
+				++interior;
+				if (toFloat(half[i + 2]) > 0.5f && std::abs(toFloat(half[i]) - 0.5f * dx) < 0.6f &&
+					std::abs(toFloat(half[i + 1]) - 0.5f * dy) < 0.6f)
+					++good;
+			}
+		Check(good * 100 >= interior * 90, "R1: the field has (6, 3) in only " + std::to_string(good) + " of " +
+			std::to_string(interior) + " blocks");
+		std::cout << "Beta R1: vector field (6, 3) at step 0.5 in " << good << " of " << interior << " blocks\n";
+	}
+
+	auto difference = [](const std::vector<uint32_t>& x, const std::vector<uint32_t>& y, int& maxDiff, double& mean)
+	{
+		maxDiff = 0;
+		double sum = 0.0;
+		for (size_t i = 0; i < x.size(); ++i)
+			for (int ch = 0; ch < 3; ++ch)
+			{
+				const int d = std::abs(static_cast<int>((x[i] >> (8 * ch)) & 255u) - static_cast<int>((y[i] >> (8 * ch)) & 255u));
+				maxDiff = std::max(maxDiff, d);
+				sum += d;
+			}
+		mean = sum / (x.size() * 3.0);
+	};
+
+	// Own search (today) along A and three extras.
+	std::vector<std::vector<uint32_t>> own;
+	{
+		auto sigma = loadSigma();
+		renderA({ sigma->hook });
+		for (float s : shifts)
+			own.push_back(extra(s, sigma->hook));
+	}
+	// External vectors: the step since the previous present, bound as VPVEC.
+	std::vector<std::vector<uint32_t>> external;
+	{
+		auto sigma = loadSigma();
+		renderA({ sigma->hook });
+		float previous = 0.0f;
+		for (float s : shifts)
+		{
+			pl_tex vectors = nullptr;
+			Check(field.Run(warp.Field(), warp.FrameTrust(), settings.minTrustedShare, s - previous, g, width, height,
+				vectors, warp.SubField(), &warp.GetSettings()), "R1: vector field failed: " + field.Error());
+			Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", vectors), "R1: VPVEC not accepted");
+			Check(SetParam(sigma->hook, "vector_source", 1.0), "R1: no vector_source parameter");
+			external.push_back(extra(s, sigma->hook));
+			SetParam(sigma->hook, "vector_source", 0.0);
+			Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", nullptr), "R1: VPVEC not restored");
+			previous = s;
+		}
+	}
+	for (size_t i = 0; i < own.size(); ++i)
+	{
+		int maxDiff = 0;
+		double mean = 0.0;
+		difference(own[i], external[i], maxDiff, mean);
+		// Both quantise the same picture; the carried residual (at most half
+		// a code) may differ where the two vectors differ.
+		Check(maxDiff <= 1, "R1: the external carry differs from the own carry by " + std::to_string(maxDiff) +
+			" codes on extra " + std::to_string(i));
+		std::cout << "Beta R1: extra " << i << " (shift " << shifts[i] << ") external vs own: max " << maxDiff
+			<< ", mean " << mean << "\n";
+	}
+	// vector_source 0 with VPVEC bound is the own search exactly (own =
+	// today's output byte for byte).
+	{
+		auto sigma = loadSigma();
+		renderA({ sigma->hook });
+		pl_tex vectors = nullptr;
+		Check(field.Run(warp.Field(), warp.FrameTrust(), settings.minTrustedShare, shifts[0], g, width, height, vectors,
+			warp.SubField(), &warp.GetSettings()), "R1: vector field failed");
+		Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", vectors), "R1: VPVEC not accepted");
+		const auto bound = extra(shifts[0], sigma->hook);
+		int maxDiff = 0;
+		double mean = 0.0;
+		difference(own[0], bound, maxDiff, mean);
+		Check(maxDiff == 0, "R1: vector_source 0 is not the own search (max " + std::to_string(maxDiff) + ")");
+		// The texture bound at destroy: libplacebo restores its own and leaves
+		// VP's alive (no dangling reference).
+		const int bw = vectors->params.w;
+		sigma.reset();
+		std::vector<uint16_t> half(static_cast<size_t>(vectors->params.w) * vectors->params.h * 4);
+		pl_tex_transfer_params d{};
+		d.tex = vectors;
+		d.ptr = half.data();
+		Check(vectors->params.w == bw && pl_tex_download(handle, &d),
+			"R1: VP's texture did not survive the hook's destruction");
+	}
+	// The search is not used: an all-untrusted field gives exactly the output
+	// of the sigma-delta without motion compensation.
+	{
+		std::vector<uint16_t> zeros(static_cast<size_t>(DejudderRendered::VectorField::Blocks(width)) *
+			DejudderRendered::VectorField::Blocks(height) * 4, 0);
+		pl_tex_params zp{};
+		zp.w = DejudderRendered::VectorField::Blocks(width);
+		zp.h = DejudderRendered::VectorField::Blocks(height);
+		zp.format = pl_find_fmt(handle, PL_FMT_FLOAT, 4, 16, 16, PL_FMT_CAP_SAMPLEABLE);
+		zp.sampleable = true;
+		zp.initial_data = zeros.data();
+		pl_tex untrusted = pl_tex_create(handle, &zp);
+		Check(untrusted != nullptr, "R1: no rgba16f texture");
+		auto sigma = loadSigma();
+		renderA({ sigma->hook });
+		Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", untrusted), "R1: VPVEC not accepted");
+		Check(!pl_mpv_user_shader_set_texture(sigma->hook, "NO_SUCH_TEXTURE", untrusted), "R1: an unknown name was accepted");
+		SetParam(sigma->hook, "vector_source", 1.0);
+		const auto skipped = extra(shifts[0], sigma->hook);
+		auto plain = loadSigma();
+		SetParam(plain->hook, "motion_compensation", 0.0);
+		renderA({ plain->hook });
+		const auto noSearch = extra(shifts[0], plain->hook);
+		int maxDiff = 0;
+		double mean = 0.0;
+		difference(skipped, noSearch, maxDiff, mean);
+		Check(maxDiff == 0, "R1: with external vectors the own search still acted (max " + std::to_string(maxDiff) + ")");
+		sigma.reset();
+		pl_tex_destroy(handle, &untrusted);
+	}
+	pl_tex_destroy(handle, &targetTex);
+	pl_tex_destroy(handle, &a.luma);
+	pl_tex_destroy(handle, &a.chroma);
+	pl_tex_destroy(handle, &b.luma);
+	pl_tex_destroy(handle, &b.chroma);
+	CheckCleanLog(gpu, "R1");
+	std::cout << "Beta R1: own search byte-identical with VPVEC bound; no dangling texture; untrusted field = no search\n";
 }
 
 // Stage 10 on libplacebo 377: BTB/WTW greys survive 1:1, upscaling and

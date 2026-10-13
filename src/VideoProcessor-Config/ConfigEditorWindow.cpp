@@ -6515,6 +6515,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Where the adaptive downscale's grain map sees film grain, the temporal sigma-delta's "
             "motion match is this many times more tolerant, so its 10-bit averaging survives the grain. "
             "Needs the grain map and the sigma-delta. 1 turns it off."));
+        auto* ditherVectors = addChoice(QStringLiteral("Dither carry motion on extras"), QStringLiteral("dither_vectors"),
+            { QStringLiteral("auto"), QStringLiteral("own") });
+        ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("auto")), QStringLiteral("De-judder's (auto)"));
+        ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("own")), QStringLiteral("Sigma-delta's own search"));
+        ditherVectors->setToolTip(QStringLiteral(
+            "On de-judder extras the temporal sigma-delta can take the motion from the de-judder (exact there, and "
+            "it skips its own search, about 1 ms less per extra) instead of searching itself. Needs the VP Renderer "
+            "Beta (libplacebo 377); otherwise, and on every other refresh, it searches itself."));
         // GPU cost markers (after the tooltips, which they prefix).
         MarkGpuCost(form, dejudderPreset, 2);
         MarkGpuCost(form, occlusionMask, 1);

@@ -897,6 +897,7 @@ namespace
 		bool dejudderBlockTaper = false;          // H3 (experiment)
 		double dejudderTaperSad = 0.0;            // H3 (0 = 2 x match tolerance)
 		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
+		bool ditherVectorsOwn = false;   // delta 8 R1: dither_vectors own (auto = the de-judder's on extras)
 		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
 		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
 		// rgba32f regardless (LibplaceboRenderParameters).
@@ -1055,7 +1056,7 @@ namespace
 			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
-			<< settings.ditherGrainToleranceScale << '|' << settings.fboFloat32 << '|'
+			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2035,6 +2036,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid dejudder_hold_hysteresis '%s'; keeping %d",
 					rule.section.c_str(), raw.c_str(), settings.dejudderHoldHysteresis);
+		}
+		if (config.TryGetString(rule.section, "dither_vectors", raw))
+		{
+			if (raw == "auto" || raw == "own")
+				settings.ditherVectorsOwn = raw == "own";
+			else
+				DebugLog::Log("profile '%s': invalid dither_vectors '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
+					settings.ditherVectorsOwn ? "own" : "auto");
 		}
 		if (config.TryGetString(rule.section, "fbo_float32", raw))
 		{
@@ -3957,6 +3966,28 @@ enum class AlphaGpuTimingSampleMode
 };
 
 
+// Delta 8 R1: the sigma-delta's VPVEC texture (libplacebo 377 with VP's fork
+// patch 0004; 7.360 has no such call and the sigma-delta searches itself).
+static bool SigmaDeltaVectorsSupported()
+{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+	return true;
+#else
+	return false;
+#endif
+}
+
+static bool SetSigmaDeltaVectors(const pl_hook* hook, pl_tex vectors)
+{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+	return hook && pl_mpv_user_shader_set_texture(hook, "VPVEC", vectors);
+#else
+	(void)hook;
+	(void)vectors;
+	return false;
+#endif
+}
+
 static void AlphaOriginalPrRenderLoadInfoCallback(
 	void* privateData, const struct pl_render_info* info)
 {
@@ -4139,6 +4170,11 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderRendered::Cache dejudderCache;
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
 	DejudderRendered::Geometry dejudderGeometry;
+	bool dejudderGeometryValid = false;   // this frame's geometry (both warp paths; delta 8 R1)
+	// Delta 8 R1: the sigma-delta's vectors on the extras (VPVEC).
+	std::unique_ptr<DejudderRendered::VectorField> dejudderVectorField;
+	unsigned long long ditherVectorsExternal = 0;
+	int ditherVectorsLogged = -1;
 	int dejudderWarpStageLogged = -1;
 	int downscaleLightLogged = -1;   // Stage 8-1: the last logged light domain
 	// Stage 8-2: the adaptive downscale blend.
@@ -4195,6 +4231,7 @@ struct LibplaceboVideoRenderer::Impl
 		// of this device (audit stage10-6d blocker 1).
 		dejudderCache.Release();
 		dejudderRenderedWarp.reset();
+		dejudderVectorField.reset();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 	}
@@ -8186,6 +8223,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
 		currentTransport.dejudderTaperSad = next.dejudderTaperSad;
 		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
+		currentTransport.ditherVectorsOwn = next.ditherVectorsOwn;
 		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
 		currentTransport.sdrTone = next.sdrTone;
@@ -8278,6 +8316,7 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
 			"dejudder_hold");
 		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
+		changed(current.ditherVectorsOwn != next.ditherVectorsOwn, "dither_vectors");
 		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
 		changed(current.sdrTone.knee != next.sdrTone.knee || current.sdrTone.headroom != next.sdrTone.headroom ||
@@ -11536,6 +11575,7 @@ struct LibplaceboVideoRenderer::Impl
 		bool haveFirstVsync = false;
 		double phi0 = 0.0;
 		int extras = 0;
+		float previousShift = 0.0f;   // A, shown at shift 0 (delta 8 R1)
 		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
 		const char* failure = nullptr;
 		for (;;)
@@ -11652,6 +11692,65 @@ struct LibplaceboVideoRenderer::Impl
 				image.planes[0].texture = warped.luma;
 				image.planes[1].texture = warped.chroma;
 			}
+			// Delta 8 R1: the sigma-delta takes the motion since the previous
+			// present (A or the last extra: the shift step) from the de-judder's
+			// field instead of searching. The guard restores the hooks (own
+			// search, VPVEC unbound) on every way out of this extra.
+			struct VectorGuard
+			{
+				std::vector<const pl_hook*> hooks;
+				~VectorGuard()
+				{
+					for (const pl_hook* hook : hooks)
+					{
+						CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
+						SetSigmaDeltaVectors(hook, nullptr);
+					}
+				}
+			} vectorGuard;
+			{
+				const bool patch = SigmaDeltaVectorsSupported();
+				const bool use = DejudderRendered::UseExternalVectors(activeSettings.ditherVectorsOwn, patch,
+					dejudder->Field() != nullptr, dejudderGeometryValid);
+				pl_tex vectors = nullptr;
+				if (use)
+				{
+					const int w = cached ? cached->params.w :
+						static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.x1 - dejudderGeometry.targetCrop.x0)));
+					const int h = cached ? cached->params.h :
+						static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.y1 - dejudderGeometry.targetCrop.y0)));
+					if (!dejudderVectorField)
+						dejudderVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
+					if (!dejudderVectorField->Run(dejudder->Field(), dejudder->FrameTrust(),
+						dejudder->GetSettings().minTrustedShare, shift - previousShift, dejudderGeometry, w, h, vectors,
+						dejudder->SubField(), &dejudder->GetSettings()))
+						vectors = nullptr;
+				}
+				const pl_render_params& listParams = *extraParams;
+				for (int i = 0; vectors && i < listParams.num_hooks; ++i)
+				{
+					const pl_hook* hook = listParams.hooks[i];
+					if (CustomHookChain::SetHookParameter(hook, "vector_source", 1.0))
+					{
+						vectorGuard.hooks.push_back(hook);
+						if (!SetSigmaDeltaVectors(hook, vectors))
+							CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
+					}
+				}
+				const int state = !use ? (activeSettings.ditherVectorsOwn ? 0 : patch ? 1 : 2) :
+					(vectors && !vectorGuard.hooks.empty() ? 3 : 4);
+				if (state == 3)
+					++ditherVectorsExternal;
+				if (state != ditherVectorsLogged && (state == 3 || state == 2 || state == 4))
+				{
+					ditherVectorsLogged = state;
+					static const char* const names[] = { "own (dither_vectors own)", "own", "own (this libplacebo has no fork patch 0004)",
+						"de-judder vectors on the extras", "own (vector field or the sigma-delta hook not available)" };
+					DebugLog::Log("Sigma-delta vectors on de-judder extras: %s (%llu extras so far)", names[state],
+						ditherVectorsExternal);
+				}
+			}
+			previousShift = shift;
 			pl_frame target = *f.target;
 			if (renderedCrop)
 				target.crop = dejudderGeometry.targetCrop;   // the cache's rounded rectangle: 1:1
@@ -16457,9 +16556,11 @@ struct LibplaceboVideoRenderer::Impl
         // PRE_OUTPUT hooks, after the LED compensation). With NLS the warp
         // needs the NLS map; an unknown NLS shader keeps the source path.
         dejudderCache.Disarm();
+        dejudderGeometryValid = false;
         // Only when extras may follow (not in mask-only mode; audit
-        // stage10-6d item 3).
-        if (activeSettings.dejudderWarpRendered && dejudderReason == DejudderPolicy::Reason::Active &&
+        // stage10-6d item 3). The geometry is kept on the source path too:
+        // the sigma-delta's vectors on the extras need it (delta 8 R1).
+        if (dejudderReason == DejudderPolicy::Reason::Active &&
             dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0)
         {
             DejudderRendered::Geometry geometry;
@@ -16485,11 +16586,15 @@ struct LibplaceboVideoRenderer::Impl
             if (mapped)
             {
                 dejudderGeometry = geometry;
+                dejudderGeometryValid = true;
+            }
+            if (mapped && activeSettings.dejudderWarpRendered)
+            {
                 dejudderCache.Arm(sourceSequence);
                 frameHooks.push_back(dejudderCache.Hook());
             }
             const int stage = mapped ? 1 : 0;
-            if (stage != dejudderWarpStageLogged)
+            if (activeSettings.dejudderWarpRendered && stage != dejudderWarpStageLogged)
             {
                 dejudderWarpStageLogged = stage;
                 DebugLog::Log(mapped ? "De-judder extras: warping the rendered picture (6d)" :

@@ -22,7 +22,7 @@ if (q.x < imageSize(dst).x && q.y < imageSize(dst).y)
 		// The source position an output (cache) pixel shows, and a 4-tap
 		// Catmull-Rom sample of the cached picture (edge clamp, no value
 		// clamp).
-		const char* const WARP_FUNCTIONS = R"GLSL(
+#define RW_SOURCE_GLSL R"GLSL(
 vec2 rw_source(vec2 p)
 {
     vec2 s = src_origin + (p - dst_origin) * src_per_dst;
@@ -34,7 +34,9 @@ vec2 rw_source(vec2 p)
     }
     return s;
 }
-
+)GLSL"
+		const char* const WARP_FUNCTIONS_SOURCE_ONLY = RW_SOURCE_GLSL;
+		const char* const WARP_FUNCTIONS = RW_SOURCE_GLSL R"GLSL(
 vec4 rw_cubic(vec2 pos)
 {
     ivec2 size = textureSize(cached, 0);
@@ -80,6 +82,26 @@ if (q.x < size.x && q.y < size.y) {
         o = texelFetch(cached, q, 0);   // hard hold of A
     }
     imageStore(dst, q, o);
+}
+)GLSL";
+
+		// Delta 8 R1: one invocation per 16x16 output block (VectorField).
+		const char* const FIELD_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (b.x < size.x && b.y < size.y) {
+    vec2 p = vec2(b * 16) + vec2(8.0);
+    vec4 o = vec4(0.0, 0.0, 1.0, 0.0);   // held or outside the picture: no motion
+    if (all(greaterThanEqual(p, crop_min)) && all(lessThan(p, crop_max))) {
+        vec2 v;
+        if (shift != 0.0 && field_vector(rw_source(p), v)) {
+            vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
+            o.xy = shift * strength_scale() * block_strength(rw_source(p)) * v / slope;
+        }
+    }
+    if (any(isnan(o.xy)) || any(isinf(o.xy)))
+        o = vec4(0.0);
+    imageStore(dst, b, o);
 }
 )GLSL";
 
@@ -328,6 +350,99 @@ if (q.x < size.x && q.y < size.y) {
 			return false;
 		}
 		out = warped;
+		return true;
+	}
+
+	VectorField::VectorField(pl_log log, pl_gpu gpuIn, bool hostReadableIn)
+		: gpu(gpuIn), hostReadable(hostReadableIn)
+	{
+		dispatch = pl_dispatch_create(log, gpu);
+	}
+
+	VectorField::~VectorField()
+	{
+		if (vectors)
+			pl_tex_destroy(gpu, &vectors);
+		if (dispatch)
+			pl_dispatch_destroy(&dispatch);
+	}
+
+	bool VectorField::Run(pl_tex field, pl_tex frameTrust, float minTrustedShare, float shiftStep, const Geometry& g,
+		int w, int h, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher)
+	{
+		out = nullptr;
+		if (!dispatch || !field || !frameTrust || w <= 0 || h <= 0)
+		{
+			error = "no motion field";
+			return false;
+		}
+		const int bw = Blocks(w), bh = Blocks(h);
+		if (!Ensure(gpu, vectors, bw, bh, hostReadable))
+		{
+			error = "no storable rgba16f texture";
+			return false;
+		}
+		// The OUTPUT picture is the cache's size: the destination rectangle
+		// itself or the whole target (as in Warp::Run).
+		const float targetW = std::fabs(g.targetCrop.x1 - g.targetCrop.x0);
+		const float targetH = std::fabs(g.targetCrop.y1 - g.targetCrop.y0);
+		const bool cropSized = std::fabs(targetW - static_cast<float>(w)) < 1.0f &&
+			std::fabs(targetH - static_cast<float>(h)) < 1.0f;
+		const float dstOrigin[2] = { cropSized ? 0.0f : g.targetCrop.x0, cropSized ? 0.0f : g.targetCrop.y0 };
+		const float cropMin[2] = { dstOrigin[0], dstOrigin[1] };
+		const float cropMax[2] = { dstOrigin[0] + targetW, dstOrigin[1] + targetH };
+		const float srcOrigin[2] = { g.sourceCrop.x0, g.sourceCrop.y0 };
+		const float srcPerDst[2] = {
+			targetW > 0.0f ? (g.sourceCrop.x1 - g.sourceCrop.x0) / targetW : 1.0f,
+			targetH > 0.0f ? (g.sourceCrop.y1 - g.sourceCrop.y0) / targetH : 1.0f };
+		const float nlsActive = g.nls.valid ? 1.0f : 0.0f;
+		const float nlsCurve = static_cast<float>(g.nls.curve);
+		const float nlsGeometry = static_cast<float>(g.nls.geometry);
+		const float nlsScale[2] = { static_cast<float>(g.nls.xScale), static_cast<float>(g.nls.yScale) };
+		const float nlsProtect[2] = { static_cast<float>(g.nls.xProtect), static_cast<float>(g.nls.yProtect) };
+		const float domain[4] = { g.nlsDomain.x0, g.nlsDomain.y0,
+			std::fabs(g.nlsDomain.x1 - g.nlsDomain.x0) > 0.0f ? g.nlsDomain.x1 - g.nlsDomain.x0 : 1.0f,
+			std::fabs(g.nlsDomain.y1 - g.nlsDomain.y0) > 0.0f ? g.nlsDomain.y1 - g.nlsDomain.y0 : 1.0f };
+		const Dejudder::Settings none;
+		const Dejudder::Settings& ms = matcher ? *matcher : none;
+		const float taperTol = ms.matchTolerance;
+		const float taperSad = ms.taperSad > 0.0f ? ms.taperSad : 2.0f * ms.matchTolerance;
+		// The feather is the warp's blend toward A; the field uses each
+		// block's own vector (the per-pixel gate checks the rest), so it
+		// is left out (no FEATHER define).
+		Dejudder::Settings fieldSettings = ms;
+		fieldSettings.holdFeatherPx = 0.0f;
+		pl_shader_var used[15];
+		int n = 0;
+		used[n++] = { pl_var_vec2("dst_origin"), dstOrigin, true };
+		used[n++] = { pl_var_vec2("src_origin"), srcOrigin, true };
+		used[n++] = { pl_var_vec2("src_per_dst"), srcPerDst, true };
+		used[n++] = { pl_var_float("nls_active"), &nlsActive, true };
+		used[n++] = { pl_var_float("nls_curve"), &nlsCurve, true };
+		used[n++] = { pl_var_float("nls_geometry"), &nlsGeometry, true };
+		used[n++] = { pl_var_vec2("nls_scale"), nlsScale, true };
+		used[n++] = { pl_var_vec2("nls_protect"), nlsProtect, true };
+		used[n++] = { pl_var_vec4("nls_domain"), domain, true };
+		used[n++] = { pl_var_float("shift"), &shiftStep, true };
+		used[n++] = { pl_var_float("min_trusted_share"), &minTrustedShare, true };
+		used[n++] = { pl_var_vec2("crop_min"), cropMin, true };
+		used[n++] = { pl_var_vec2("crop_max"), cropMax, true };
+		if (fieldSettings.blockTaper)
+		{
+			used[n++] = { pl_var_float("taper_tol"), &taperTol, true };
+			used[n++] = { pl_var_float("taper_sad"), &taperSad, true };
+		}
+		const pl_shader_desc descriptors[4] = {
+			Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(vectors), Sampled("sub_field", subField) };
+		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
+			Dejudder::WarpHeader(fieldSettings, subField != nullptr) + WARP_FUNCTIONS_SOURCE_ONLY;
+		if (!Compute(dispatch, "VideoProcessor sigma-delta vectors from the de-judder field (delta 8 R1)", header,
+			FIELD_BODY, descriptors, subField ? 4 : 3, used, n, bw, bh))
+		{
+			error = "vector field rejected or failed";
+			return false;
+		}
+		out = vectors;
 		return true;
 	}
 

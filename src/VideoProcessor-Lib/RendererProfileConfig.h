@@ -655,6 +655,7 @@ namespace RendererProfileConfig
 			if (key == "dejudder_motion_scale_hi") return IsNumberInRange(value, 0.0, 32.0);
 			if (key == "dejudder_trust_scale") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "dither_grain_tolerance_scale") return IsNumberInRange(value, 1.0, 8.0);
+			if (key == "dither_vectors") return IsChoice(value, { "auto", "own" });   // delta 8 R1
 			// S2: every FBO in 32-bit float (auto: on, off with Low_Latency).
 			if (key == "fbo_float32") return IsChoice(value, { "auto", "on", "off" });
 			// Stage 8-2: the adaptive downscale blend.
