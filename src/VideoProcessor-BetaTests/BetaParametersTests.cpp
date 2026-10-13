@@ -6,6 +6,7 @@ using namespace LibplaceboRenderParameters;
 void RunBetaGpuTests(); // BetaGpuTests.cpp
 void RunBetaOutputFloat32Tests(); // BetaGpuTests.cpp
 void RunBetaFboTiming(); // BetaGpuTests.cpp
+void RunBetaPassTiming(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
@@ -58,7 +59,10 @@ int main() {
             const bool timing = _dupenv_s(&value, &length, "VP_TEST_TIMING") == 0 && value && std::string(value) == "1";
             std::free(value);
             if (timing)
+            {
                 RunBetaFboTiming();
+                RunBetaPassTiming();
+            }
         }
         RunBetaChainBiasRegression();
         std::cout << "PASS Beta S2: output pass in rgba32f, highlights within 1/16 step, extended codes kept, the chain bias A/B\n";

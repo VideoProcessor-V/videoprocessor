@@ -284,10 +284,19 @@ namespace
 		~Shader() { if (hook) pl_mpv_user_shader_destroy(&hook); }
 	};
 
-	std::unique_ptr<Shader> Load(pl_gpu gpu, const char* file, const std::map<std::string, double>& parameters,
-		int outputWidth = 2, int outputHeight = 2)
+	// A test fixture beside the native tests (src/VideoProcessor-Test/fixtures).
+	std::string LoadFixtureShader(const char* fileName)
 	{
-		std::string source = LoadRepoShader(file);
+		std::string path = __FILE__;
+		for (int level = 0; level < 2; ++level) path.resize(path.find_last_of("\\/"));
+		std::ifstream input(path + "\\VideoProcessor-Test\\fixtures\\" + fileName, std::ios::binary);
+		return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+	}
+
+	std::unique_ptr<Shader> Load(pl_gpu gpu, const char* file, const std::map<std::string, double>& parameters,
+		int outputWidth = 2, int outputHeight = 2, bool fixture = false)
+	{
+		std::string source = fixture ? LoadFixtureShader(file) : LoadRepoShader(file);
 		Check(!source.empty(), std::string("bundled shader not found: ") + file);
 		for (const auto& token : { std::make_pair("{{output_width}}", outputWidth), std::make_pair("{{output_height}}", outputHeight) })
 			for (size_t at; (at = source.find(token.first)) != std::string::npos;)
@@ -747,6 +756,36 @@ void RunBetaDitherVectorsTests()
 	gpu.messages.clear();
 	Dejudder::MotionWarp warp(gpu.Log(), handle, settings);
 	Check(warp.Estimate(a, b), "R1: Estimate failed: " + warp.LastError());
+	// The parallel block search (one work group per block) against the
+	// serial search it replaced: the same field, byte for byte, with the
+	// default settings and with every refinement (two estimates each, so E1's
+	// previous-vector start and E4's gate take part).
+	{
+		auto download = [&](pl_tex tex)
+		{
+			std::vector<uint16_t> half(static_cast<size_t>(tex->params.w) * tex->params.h * 4);
+			pl_tex_transfer_params d{};
+			d.tex = tex;
+			d.ptr = half.data();
+			Check(pl_tex_download(handle, &d), "parallel search: field not readable");
+			return half;
+		};
+		for (int refined = 0; refined < 2; ++refined)
+		{
+			Dejudder::Settings s = refined ? ChainGpuProbe::Refined(settings) : settings;
+			s.hostReadable = true;
+			Dejudder::MotionWarp parallel(gpu.Log(), handle, s), serial(gpu.Log(), handle, s);
+			serial.SetSerialSearchForTest(true);
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				Check(parallel.Estimate(a, b) && serial.Estimate(a, b), "parallel search: estimate failed");
+				Check(download(parallel.Field()) == download(serial.Field()),
+					std::string("parallel block search differs from the serial search (") +
+						(refined ? "refined" : "defaults") + ", estimate " + std::to_string(pass + 1) + ")");
+			}
+		}
+		std::cout << "Beta de-judder: parallel block search byte-identical to the serial search (defaults, refined)\n";
+	}
 
 	pl_tex_params tp{};
 	tp.w = width;
@@ -880,10 +919,30 @@ void RunBetaDitherVectorsTests()
 	std::vector<std::vector<uint32_t>> own;
 	{
 		auto sigma = loadSigma();
-		renderA({ sigma->hook });
+		own.push_back(renderA({ sigma->hook }));
 		for (float s : shifts)
 			own.push_back(extra(s, sigma->hook));
 	}
+	// The parallel motion search (one work group per block) against the
+	// serial reference it replaced: byte-identical on every refresh.
+	{
+		auto reference = Load(handle, "Temporal sigma-delta (serial reference).glsl", sigmaParams, width, height, true);
+		std::vector<std::vector<uint32_t>> serial;
+		serial.push_back(renderA({ reference->hook }));
+		for (float s : shifts)
+			serial.push_back(extra(s, reference->hook));
+		for (size_t i = 0; i < serial.size(); ++i)
+		{
+			int maxDiff = 0;
+			double mean = 0.0;
+			difference(serial[i], own[i], maxDiff, mean);
+			Check(maxDiff == 0, "parallel motion search differs from the serial reference on refresh " + std::to_string(i) +
+				" (max " + std::to_string(maxDiff) + ")");
+		}
+		std::cout << "Beta sigma-delta: parallel motion search byte-identical to the serial reference on "
+			<< serial.size() << " refreshes\n";
+	}
+	own.erase(own.begin());   // the comparisons below are per extra
 	// External vectors: the step since the previous present, bound as VPVEC.
 	std::vector<std::vector<uint32_t>> external;
 	{
@@ -1366,6 +1425,205 @@ void RunBetaFboTiming()
 	pl_tex_destroy(g, &source);
 	pl_tex_destroy(g, &target);
 #endif
+}
+
+// Per-pass GPU cost at the cinema's size (owner 2026-10-13: "are the shaders
+// efficient?"): 4K source to 2560x1600 with the hooks VP runs - SSIM
+// downscaler, SDR tone shape (knee + recovery), LED compensation (gain on),
+// temporal sigma-delta (motion carry, 10-bit) - each pass's GPU time from
+// libplacebo's pass timers, sorted; then the de-judder matcher on 4K planes
+// (all refinements), the rendered warp and the R1 vector field, wall-clock
+// with the GPU drained. Report only; VP_TEST_TIMING=1 with VP_TEST_GPU=hardware.
+namespace
+{
+	struct PassTimes
+	{
+		std::map<std::string, std::pair<double, int>> byName;   // ns sum, samples
+	};
+
+	void CollectPass(void* priv, const struct pl_render_info* info)
+	{
+		if (!priv || !info || !info->pass || !info->pass->shader || info->pass->last == 0)
+			return;
+		const char* d = info->pass->shader->description;
+		auto& slot = static_cast<PassTimes*>(priv)->byName[d ? d : "(unnamed)"];
+		slot.first += static_cast<double>(info->pass->last);
+		++slot.second;
+	}
+
+	double DrainedMs(pl_gpu g, int reps, const std::function<void()>& work)
+	{
+		work();
+		pl_gpu_finish(g);
+		const auto start = std::chrono::steady_clock::now();
+		for (int i = 0; i < reps; ++i)
+		{
+			work();
+			pl_gpu_finish(g);
+		}
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / reps;
+	}
+}
+
+void RunBetaPassTiming()
+{
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int sw = 3840, sh = 2160, ow = 2560, oh = 1600;
+	auto noise = [](int x, int y, unsigned salt)
+	{
+		const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u) ^ (salt * 83492791u);
+		return static_cast<uint16_t>(16384 + (h % 32768u));
+	};
+	std::vector<uint16_t> texels(static_cast<size_t>(sw) * sh * 4);
+	for (int y = 0; y < sh; ++y)
+		for (int x = 0; x < sw; ++x)
+		{
+			uint16_t* t = &texels[(static_cast<size_t>(y) * sw + x) * 4];
+			t[0] = noise(x / 8, y / 8, 1);
+			t[1] = noise(x / 8, y / 8, 2);
+			t[2] = noise(x / 8, y / 8, 3);
+			t[3] = 65535;
+		}
+	pl_tex_params sp{};
+	sp.w = sw;
+	sp.h = sh;
+	sp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 16, 16, PL_FMT_CAP_SAMPLEABLE);
+	sp.sampleable = true;
+	sp.initial_data = texels.data();
+	pl_tex source = sp.format ? pl_tex_create(g, &sp) : nullptr;
+	pl_tex_params tp{};
+	tp.w = ow;
+	tp.h = oh;
+	tp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 10, 0, PL_FMT_CAP_RENDERABLE);
+	tp.renderable = true;
+	pl_tex target = tp.format ? pl_tex_create(g, &tp) : nullptr;
+	Check(source && target, "pass timing: texture creation failed");
+	auto ssim = Load(g, "SSimDownscaler.glsl", {}, ow, oh);
+	auto tone = Load(g, "SDR tone shape.glsl", { { "headroom", 0.15 }, { "strength", 0.5 }, { "recovery", 0.3 } }, ow, oh);
+	auto led = Load(g, "LED compensation.glsl", { { "gain", 1.1 }, { "gain_domain", 1.0 }, { "compensation_eotf", 2.41 } }, ow, oh);
+	auto sigma = Load(g, "Temporal sigma-delta.glsl", { { "enabled", 1 }, { "levels_full", 0 }, { "swapchain_bits", 10 },
+		{ "color_bits", 10 }, { "motion_compensation", 1 } }, ow, oh);
+	const pl_hook* hooks[4] = { ssim->hook, tone->hook, led->hook, sigma->hook };
+	pl_frame image = Gpu::Frame(source);
+	image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+	image.color.transfer = PL_COLOR_TRC_BT_1886;
+	pl_frame output = Gpu::Frame(target);
+	output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+	output.repr.bits.sample_depth = 10;
+	output.repr.bits.color_depth = 10;
+	output.color.primaries = PL_COLOR_PRIM_DCI_P3;
+	output.color.transfer = PL_COLOR_TRC_GAMMA22;
+	pl_render_params params = pl_render_default_params;
+	params.downscaler = &pl_filter_mitchell;
+	params.hooks = hooks;
+	params.num_hooks = 4;
+	params.dither_params = nullptr;
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+	params.output_fbo_float32 = true;
+#endif
+	PassTimes times;
+	params.info_callback = CollectPass;
+	params.info_priv = &times;
+	for (int i = 0; i < 10; ++i)
+		Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "pass timing: render failed");
+	pl_gpu_finish(g);
+	times.byName.clear();
+	const double frameMs = DrainedMs(g, 30, [&] {
+		Check(pl_render_image(gpu.RendererHandle(), &image, &output, &params), "pass timing: render failed"); });
+	std::vector<std::pair<double, std::string>> sorted;
+	double total = 0.0;
+	for (const auto& entry : times.byName)
+	{
+		const double ms = entry.second.first / entry.second.second / 1e6;
+		// Passes that run several times per frame (e.g. SSIM's) are summed by
+		// their per-frame count.
+		const double perFrame = ms * entry.second.second / 31.0;
+		sorted.emplace_back(perFrame, entry.first);
+		total += perFrame;
+	}
+	std::sort(sorted.rbegin(), sorted.rend());
+	std::cout << "Beta pass timing (" << sw << "x" << sh << " -> " << ow << "x" << oh << ", output pass rgba32f): frame "
+		<< frameMs << " ms wall-clock, passes " << total << " ms GPU\n";
+	for (const auto& entry : sorted)
+		if (entry.first >= 0.01)
+			std::cout << "  " << entry.first << " ms  " << entry.second << "\n";
+
+	// The de-judder matcher on 4K planes (every refinement), the rendered
+	// warp and the R1 field at the output size.
+	const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
+	auto plane = [&](int w, int h, int comps, int shift)
+	{
+		std::vector<uint16_t> data(static_cast<size_t>(w) * h * comps);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				for (int c = 0; c < comps; ++c)
+					data[(static_cast<size_t>(y) * w + x) * comps + c] = noise((x - shift) / 4, y / 4, 7 + c);
+		pl_tex_params p{};
+		p.w = w;
+		p.h = h;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16, caps);
+		p.sampleable = true;
+		p.storable = true;
+		p.initial_data = data.data();
+		return pl_tex_create(g, &p);
+	};
+	Dejudder::Planes a, b;
+	a.luma = plane(sw, sh, 1, 0);
+	a.chroma = plane(sw / 2, sh, 2, 0);
+	b.luma = plane(sw, sh, 1, 6);
+	b.chroma = plane(sw / 2, sh, 2, 3);
+	a.chromaShiftX = b.chromaShiftX = 1;
+	a.chromaShiftY = b.chromaShiftY = 0;
+	Check(a.luma && a.chroma && b.luma && b.chroma, "pass timing: plane upload failed");
+	Dejudder::MotionWarp warp(gpu.Log(), g, ChainGpuProbe::Refined(Dejudder::Settings{}));
+	int slot = 0;
+	const double matcherMs = DrainedMs(g, 10, [&] { Check(warp.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
+	{
+		// Where the matcher's time goes (each pass drained; per estimate).
+		warp.SetPassTiming(true);
+		const int reps = 5;
+		for (int i = 0; i < reps; ++i)
+		{
+			Check(warp.Estimate(a, b, slot, true), "pass timing: estimate failed");
+			slot ^= 1;
+		}
+		std::vector<std::pair<double, std::string>> passes;
+		for (const auto& entry : warp.PassMs())
+			passes.emplace_back(entry.second / reps, entry.first);
+		warp.SetPassTiming(false);
+		std::sort(passes.rbegin(), passes.rend());
+		std::cout << "  de-judder matcher passes (4K, every refinement, drained each):\n";
+		for (const auto& entry : passes)
+			if (entry.first >= 0.05)
+				std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
+		Dejudder::MotionWarp plain(gpu.Log(), g);
+		const double plainMs = DrainedMs(g, 10, [&] { Check(plain.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
+		std::cout << "  de-judder matcher with default settings " << plainMs << " ms\n";
+	}
+	pl_tex_params cp{};
+	cp.w = ow;
+	cp.h = oh;
+	cp.format = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+	cp.sampleable = true;
+	cp.storable = true;
+	pl_tex cached = pl_tex_create(g, &cp);
+	DejudderRendered::Geometry geometry;
+	geometry.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+	geometry.targetCrop = { 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+	DejudderRendered::Warp rendered(gpu.Log(), g);
+	DejudderRendered::VectorField field(gpu.Log(), g);
+	pl_tex out = nullptr;
+	const double warpMs = DrainedMs(g, 20, [&] {
+		Check(rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, geometry, out,
+			warp.SubField(), &warp.GetSettings()), "pass timing: warp failed"); });
+	const double fieldMs = DrainedMs(g, 20, [&] {
+		Check(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, geometry, ow, oh, out,
+			warp.SubField(), &warp.GetSettings()), "pass timing: field failed"); });
+	std::cout << "  de-judder matcher (4K, every refinement) " << matcherMs << " ms; rendered warp " << warpMs
+		<< " ms; R1 vector field " << fieldMs << " ms (wall-clock, GPU drained)\n";
+	for (pl_tex* t : { &a.luma, &a.chroma, &b.luma, &b.chroma, &cached, &source, &target })
+		pl_tex_destroy(g, t);
 }
 
 // S2 A/B regression (planner 2026-10-12): the chain bias is the float16

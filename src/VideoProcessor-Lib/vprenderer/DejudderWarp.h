@@ -4,6 +4,7 @@
 #include <libplacebo/log.h>
 #include <libplacebo/dispatch.h>
 
+#include <map>
 #include <string>
 
 // Stage 6 (6a): the de-judder's motion matcher and warp, as a standalone GPU
@@ -193,6 +194,11 @@ namespace Dejudder
 		// 11a E2: two texels per block each way (8x8 source pixels): rgba =
 		// (vx, vy) source pixels, trust (1/0), split flag (1 = the parent block
 		// split; 0 = a copy of the parent). nullptr while estSplit is off.
+		// Tests only: time each pass with the GPU drained (slow; never in VP).
+		void SetPassTiming(bool on) { passTiming = on; passMs.clear(); }
+		// Tests only: the serial block search the parallel one must reproduce.
+		void SetSerialSearchForTest(bool on) { serialSearchForTest = on; }
+		const std::map<std::string, double>& PassMs() const { return passMs; }
 		pl_tex SubField() const { return settings.estSplit && estimated ? subField : nullptr; }
 		// B's occlusion mask (6c), one texel per 16x16 source block of B:
 		// r = 1 where B's content was visible in A (consistent both ways and
@@ -222,6 +228,12 @@ namespace Dejudder
 
 	private:
 		bool EnsureTextures(const Planes& a);
+		bool passTiming = false;
+		bool serialSearchForTest = false;
+		bool DispatchPerBlock(const char* description, const char* header, const char* body,
+			const pl_shader_desc* descriptors, int numDescriptors,
+			const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY);
+		std::map<std::string, double> passMs;
 		bool Dispatch(const char* description, const char* header, const char* body,
 			const struct pl_shader_desc* descriptors, int numDescriptors,
 			const struct pl_shader_var* variables, int numVariables,

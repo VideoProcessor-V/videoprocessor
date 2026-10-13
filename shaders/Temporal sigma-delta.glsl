@@ -24,7 +24,8 @@
  * Passes (all on the OUTPUT hook, in this order)
  *   1. LUMAQ  quarter-resolution luma of this refresh (code units)
  *   2. LUMAC  coarse (1/16 resolution) luma, the top of the hierarchy
- *   3. MV     per 16x16 block: vector (quarter pixels), confidence, match
+ *   3. MV     per 16x16 block (one 256-thread work group each, the
+ *             candidates in parallel): vector (quarter pixels), confidence, match
  *             error. Hierarchical: a full search within +-4 coarse texels
  *             (+-64 full pixels), then a full search within +-2 quarter
  *             pixels of zero and of the coarse result, and +-1 of the
@@ -328,7 +329,7 @@ void hook()
 //!WIDTH HOOKED.w 7.5 + 16 /
 //!HEIGHT HOOKED.h 7.5 + 16 /
 //!DESC VideoProcessor sigma-delta: block motion search
-//!COMPUTE 8 8
+//!COMPUTE 1 1 16 16
 
 // The validity tag of this hook's state: one of 64 values (exact in rgba16f,
 // 1/128 apart against the 1e-3 test) chosen by instance_tag.
@@ -425,82 +426,126 @@ float sad(ivec2 origin, ivec2 v)
     return s;
 }
 
+// One work group of 256 threads per 16x16 block (owner 2026-10-13, the pass
+// was 36 ms per frame at 2560x1600 on an RTX 3050 Ti with one thread per
+// block). The candidates of each level are evaluated in parallel; every
+// candidate's sum runs in the original order and thread 0 picks the winner in
+// the original scan order with the original strict comparison, so the
+// vectors are exactly the serial search's (test: the serial reference in
+// src/VideoProcessor-Test/fixtures).
+shared float coarse_sads[81];
+shared float fine_sads[64];
+shared ivec2 fine_vectors[64];
+shared float cur_luma[256];
+shared float prev_luma[400];
+shared float full_sads[25];
+shared ivec2 shared_coarse;
+shared int fine_count;
+
+void sync_group()
+{
+    memoryBarrierShared();
+    barrier();
+}
+
+// Every barrier is at the top level of hook() and reached by all threads:
+// D3D11's HLSL compiler rejects a barrier after a conditional return or
+// inside a branch (X3663), even a group-uniform one. The early cases are
+// flags instead of returns.
 void hook()
 {
-    ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 block = ivec2(gl_WorkGroupID.xy);
     ivec2 blocks = imageSize(out_image);
-    if (block.x >= blocks.x || block.y >= blocks.y)
-        return;
+    int li = int(gl_LocalInvocationIndex);
+    bool lead = li == 0;
+    bool inside = block.x < blocks.x && block.y < blocks.y;
     lq_size = textureSize(LUMAQ_raw, 0);
+    lc_size = textureSize(LUMAC_raw, 0);
     ivec2 origin = block * 4;
 
     // Motion compensation off: no search (saves its GPU time); the block's
-    // last real vector is kept for when it is switched on again.
-    if (motion_compensation < 0.5) {
-        imageStore(out_image, block, vec4(0.0));
-        return;
-    }
-
-    // Delta 8 R1: the renderer's vectors for this refresh (exact on a
-    // de-judder extra); no search. MVPREV keeps the last real search result.
-    if (vector_source > 0.5) {
-        vec4 e = texelFetch(VPVEC, min(block, textureSize(VPVEC, 0) - ivec2(1)), 0);
-        bool usable = !any(isnan(e.xyz));
-        imageStore(out_image, block, usable ? vec4(round(e.xy), e.z > 0.5 ? 1.0 : 0.0, 0.0) : vec4(0.0));
-        return;
-    }
-
-    // The previous refresh's luma is valid once this shader has stored it.
+    // last real vector is kept for when it is switched on again. Delta 8 R1:
+    // the renderer's vectors for this refresh (exact on a de-judder extra);
+    // no search, MVPREV keeps the last real search result. The previous
+    // refresh's luma is valid once this shader has stored it.
+    bool searching = motion_compensation >= 0.5 && vector_source <= 0.5;
     vec4 tag = imageLoad(LQPREV, ivec2(0));
     prev_valid = abs(tag.g - VALID_TAG) < 1e-3 && !isnan(tag.r);
-    if (!prev_valid) {
-        imageStore(out_image, block, vec4(0.0));
-        imageStore(MVPREV, block, vec4(0.0, 0.0, 0.0, VALID_TAG));
-        return;
+    bool run_search = inside && searching && prev_valid;
+    if (lead && inside && !run_search) {
+        if (motion_compensation < 0.5) {
+            imageStore(out_image, block, vec4(0.0));
+        } else if (vector_source > 0.5) {
+            vec4 e = texelFetch(VPVEC, min(block, textureSize(VPVEC, 0) - ivec2(1)), 0);
+            bool usable = !any(isnan(e.xyz));
+            imageStore(out_image, block, usable ? vec4(round(e.xy), e.z > 0.5 ? 1.0 : 0.0, 0.0) : vec4(0.0));
+        } else {
+            imageStore(out_image, block, vec4(0.0));
+            imageStore(MVPREV, block, vec4(0.0, 0.0, 0.0, VALID_TAG));
+        }
     }
 
-    lc_size = textureSize(LUMAC_raw, 0);
-
     // Hierarchical block matching. Coarse level (1/16 resolution, one texel
-    // per block): every vector within +-4 coarse texels (+-64 full pixels).
-    ivec2 coarse = ivec2(0);
-    float coarse_sad = sad_coarse(block, coarse);
-    for (int dy = -4; dy <= 4; dy++)
-        for (int dx = -4; dx <= 4; dx++) {
-            if (dx == 0 && dy == 0)
-                continue;
-            float s = sad_coarse(block, ivec2(dx, dy));
-            if (s < coarse_sad) { coarse_sad = s; coarse = ivec2(dx, dy); }
-        }
+    // per block): every vector within +-4 coarse texels (+-64 full pixels),
+    // one thread per candidate.
+    if (run_search && li < 81)
+        coarse_sads[li] = sad_coarse(block, ivec2(li % 9 - 4, li / 9 - 4));
+    sync_group();
+    if (run_search && lead) {
+        ivec2 c = ivec2(0);
+        float c_sad = coarse_sads[40];
+        for (int dy = -4; dy <= 4; dy++)
+            for (int dx = -4; dx <= 4; dx++) {
+                if (dx == 0 && dy == 0)
+                    continue;
+                float s = coarse_sads[(dy + 4) * 9 + dx + 4];
+                if (s < c_sad) { c_sad = s; c = ivec2(dx, dy); }
+            }
+        shared_coarse = c;
+    }
+    sync_group();
+    ivec2 coarse = shared_coarse;
 
     // Fine level (quarter resolution): every vector within +-2 quarter
     // pixels of zero and of the coarse result, and +-1 of this block's last
-    // real motion (kept through repeated film frames).
+    // real motion (kept through repeated film frames). The candidate list is
+    // the serial search's order (zero first), one thread per candidate.
     vec4 mp = imageLoad(MVPREV, block);
     bool have_prev = abs(mp.a - VALID_TAG) < 1e-3 && !any(isnan(mp.xy));
     ivec2 pv = have_prev ? ivec2(round(mp.xy)) : ivec2(0);
+    if (run_search && lead) {
+        int n = 0;
+        fine_vectors[n++] = ivec2(0);
+        ivec2 centres[3] = ivec2[3](ivec2(0), coarse * 4, pv);
+        int radii[3] = int[3](2, 2, 1);
+        for (int c = 0; c < 3; c++) {
+            if (c > 0 && centres[c] == ivec2(0))
+                continue;
+            if (c == 2 && pv == coarse * 4)
+                continue;
+            for (int dy = -radii[c]; dy <= radii[c]; dy++)
+                for (int dx = -radii[c]; dx <= radii[c]; dx++)
+                    fine_vectors[n++] = centres[c] + ivec2(dx, dy);
+        }
+        fine_count = n;
+    }
+    sync_group();
+    if (run_search && li < fine_count)
+        fine_sads[li] = sad(origin, fine_vectors[li]);
+    sync_group();
     ivec2 best = ivec2(0);
-    float best_sad = sad(origin, best);
-    ivec2 centres[3] = ivec2[3](ivec2(0), coarse * 4, pv);
-    int radii[3] = int[3](2, 2, 1);
-    for (int c = 0; c < 3; c++) {
-        if (c > 0 && centres[c] == ivec2(0))
-            continue;
-        if (c == 2 && pv == coarse * 4)
-            continue;
-        for (int dy = -radii[c]; dy <= radii[c]; dy++)
-            for (int dx = -radii[c]; dx <= radii[c]; dx++) {
-                ivec2 v = centres[c] + ivec2(dx, dy);
-                float s = sad(origin, v);
-                if (s < best_sad) { best_sad = s; best = v; }
-            }
+    float best_sad = 0.0;
+    if (run_search) {
+        best_sad = fine_sads[0];
+        for (int k = 1; k < fine_count; k++)
+            if (fine_sads[k] < best_sad) { best_sad = fine_sads[k]; best = fine_vectors[k]; }
     }
 
     // S1: more tolerant where the grain map (alpha, from VP's mask hook:
     // seen 1 - 0.49 g, new 0.49 g) sees film grain, so the residual survives
     // the grain; exactly match_tolerance at scale 1.
     float tolerance = match_tolerance;
-    if (grain_tolerance_scale > 1.0) {
+    if (run_search && lead && grain_tolerance_scale > 1.0) {
         ivec2 hs = textureSize(HOOKED_raw, 0);
         float gsum = 0.0;
         for (int y = 2; y < 16; y += 4)
@@ -520,35 +565,54 @@ void hook()
     // compared on the full-resolution block. Without it a pan that is not a
     // multiple of 4 px per refresh carries from beside the true source and
     // mostly fails the per-pixel gate. Skipped until the previous refresh's
-    // values exist (RESID_NEXT tag).
+    // values exist (RESID_NEXT tag). The block's luma and the previous
+    // refresh's 20x20 window around it are loaded once into shared memory.
     ivec2 full = best * 4;
     full_size = textureSize(HOOKED_raw, 0);
     full_scale = color_bits > 9.0 ? 1023.0 / 4.0 :
         ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
     ivec2 corner = block * 16;
     ivec2 tagpos = clamp(corner, ivec2(0), imageSize(RESID_NEXT) - ivec2(1));
-    if (abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3) {
-        ivec2 centre = full;
-        float full_sad = sad_full(corner, centre);
+    bool refine = run_search && abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3;
+    ivec2 centre = full;
+    if (refine) {
+        cur_luma[li] = luma_cur(corner + ivec2(li % 16, li / 16));
+        ivec2 window = corner - centre - ivec2(2);
+        for (int i = li; i < 400; i += 256)
+            prev_luma[i] = luma_prev(window + ivec2(i % 20, i / 20));
+    }
+    sync_group();
+    if (refine && li < 25) {
+        int dx = li % 5 - 2, dy = li / 5 - 2;
+        float s = 0.0;
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+                s += abs(cur_luma[y * 16 + x] - prev_luma[(y - dy + 2) * 20 + (x - dx + 2)]);
+        full_sads[li] = s;
+    }
+    sync_group();
+    if (refine && lead) {
+        float full_sad = full_sads[12];
         for (int dy = -2; dy <= 2; dy++)
             for (int dx = -2; dx <= 2; dx++) {
                 if (dx == 0 && dy == 0)
                     continue;
-                ivec2 v = centre + ivec2(dx, dy);
-                float s = sad_full(corner, v);
-                if (s < full_sad) { full_sad = s; full = v; }
+                float s = full_sads[(dy + 2) * 5 + dx + 2];
+                if (s < full_sad) { full_sad = s; full = centre + ivec2(dx, dy); }
             }
         // Trust comes from the full-resolution match: at 4-pixel steps a
         // motion between them matches only roughly at quarter resolution.
         error = full_sad / 256.0;
         confidence = error <= tolerance ? 1.0 : 0.0;
     }
-    // MV holds the vector in full pixels (MVPREV keeps quarter pixels).
-    imageStore(out_image, block, vec4(vec2(full), confidence, error));
-    // A repeated film frame (no motion this refresh) keeps the last real
-    // vector as the next starting point.
-    if (best != ivec2(0) || !have_prev)
-        imageStore(MVPREV, block, vec4(vec2(best), confidence, VALID_TAG));
+    if (run_search && lead) {
+        // MV holds the vector in full pixels (MVPREV keeps quarter pixels).
+        imageStore(out_image, block, vec4(vec2(full), confidence, error));
+        // A repeated film frame (no motion this refresh) keeps the last real
+        // vector as the next starting point.
+        if (best != ivec2(0) || !have_prev)
+            imageStore(MVPREV, block, vec4(vec2(best), confidence, VALID_TAG));
+    }
 }
 
 //!HOOK OUTPUT
