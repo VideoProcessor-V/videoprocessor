@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "CppUnitTest.h"
 
+#include <algorithm>
 #include <array>
 #include <vprenderer/LibplaceboDisplayLut.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
@@ -6341,7 +6342,7 @@ namespace VideoProcessorTest
 			g.targetCrop = g.sourceCrop;
 			pl_tex warped = nullptr;
 			const bool ran = rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare,
-				shift, g, warped, warp.SubField());
+				shift, g, warped, warp.SubField(), &warp.GetSettings());
 			if (!ran)
 				pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
@@ -7114,6 +7115,214 @@ namespace VideoProcessorTest
 			Assert::IsTrue(sSplit < sPlain && rSplit < rPlain, (L"inside the object's sub-block, error vs A moved by (7, 3): source " +
 				std::to_wstring(sPlain) + L" -> " + std::to_wstring(sSplit) + L", rendered " + std::to_wstring(rPlain) + L" -> " +
 				std::to_wstring(rSplit) + L"; " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// ---- Delta 9, synthesis-lite (docs/VP-delta-8-9-10.md).
+
+		TEST_METHOD(HoldFeatherSoftensTheHeldBoundary)
+		{
+			// H1: an object in A gone in B leaves held blocks inside a pan.
+			// With a 4 px feather, every pixel of a warped block is
+			// A + smoothstep(distance to a held neighbour block) x (the
+			// unfeathered warp - A), in both warp paths; off is the hard edge.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, ox = 96, oy = 32;
+			auto inA = [](int x, int y) { return x >= ox && x < ox + 48 && y >= oy && y < oy + 48; };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inA(x, y) ? DejudderTexture(x, y, 55) : DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			auto run = [&](float feather, DejudderField& field)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.holdFeatherPx = feather;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				field = DownloadField(gpu, warp);
+				return WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+			};
+			DejudderField field, fieldOn;
+			const BothPaths hard = run(0.0f, field);
+			const BothPaths soft = run(4.0f, fieldOn);
+			Assert::IsTrue(field.texels == fieldOn.texels, L"the feather does not change the field");
+			int held = 0;
+			for (int by = 0; by < field.blocksY; ++by)
+				for (int bx = 0; bx < field.blocksX; ++bx)
+					held += field.trusted(bx, by) ? 0 : 1;
+			Assert::IsTrue(held > 0, L"some blocks should be held");
+			auto clampd = [](double v, double lo, double hi) { return std::min(std::max(v, lo), hi); };
+			auto smooth = [&](double e, double x) { const double t = clampd(x / e, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); };
+			double worstSource = 0.0, worstRendered = 0.0;
+			int banded = 0;
+			for (int y = 8; y < height - 8; ++y)
+				for (int x = 8; x < width - 8; ++x)
+				{
+					const int bx = x / 16, by = y / 16;
+					if (!field.trusted(bx, by))
+						continue;
+					double d = 1e9;
+					for (int ny = -1; ny <= 1; ++ny)
+						for (int nx = -1; nx <= 1; ++nx)
+						{
+							const int cx = bx + nx, cy = by + ny;
+							if ((nx == 0 && ny == 0) || cx < 0 || cy < 0 || cx >= field.blocksX || cy >= field.blocksY ||
+								field.trusted(cx, cy))
+								continue;
+							const double px = x + 0.5, py = y + 0.5;
+							const double qx = clampd(px, cx * 16.0, cx * 16.0 + 16.0), qy = clampd(py, cy * 16.0, cy * 16.0 + 16.0);
+							d = std::min(d, std::hypot(px - qx, py - qy));
+						}
+					const double w = smooth(4.0, d);
+					if (w < 1.0) ++banded;
+					const size_t i = static_cast<size_t>(y) * width + x;
+					const double av = a.luma[i];
+					worstSource = std::max(worstSource, std::fabs(soft.source[i] - (av + w * (hard.source[i] - av))));
+					worstRendered = std::max(worstRendered, std::fabs(soft.rendered[i] - (av + w * (hard.rendered[i] - av))));
+				}
+			const std::wstring message = L"pixels in the band " + std::to_wstring(banded) + L"; worst deviation from the feather: source " +
+				std::to_wstring(worstSource) + L", rendered " + std::to_wstring(worstRendered) + L" (16-bit codes); log: " +
+				std::wstring(log.begin(), log.end());
+			Assert::IsTrue(banded > 50, message.c_str());
+			Assert::IsTrue(worstSource <= 2.0 && worstRendered <= 96.0, message.c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(HoldHysteresisNeedsTwoFrames)
+		{
+			// H2 (2 frames): block (5, 3) is matchable in P and not in Q (its
+			// landing in B replaced). P, P: it warps. Q, P, Q, P: it stays
+			// warping. Q, Q: it holds after the second. P then a cut: every
+			// block holds at once.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, bx = 5, by = 3;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			auto landing = [](int x, int y)
+			{
+				return x >= bx * 16 + dx - 4 && x < bx * 16 + dx + 20 && y >= by * 16 + dy - 4 && y < by * 16 + dy + 20;
+			};
+			const DejudderFrame p = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			const DejudderFrame q = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return landing(x, y) ? DejudderTexture(x, y, 33) : DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			const DejudderFrame cut = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y, 99); }, chroma);
+			DejudderGpuPlanes pa, pp, pq, pc;
+			UploadDejudderFrame(gpu, a, pa);
+			UploadDejudderFrame(gpu, p, pp);
+			UploadDejudderFrame(gpu, q, pq);
+			UploadDejudderFrame(gpu, cut, pc);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.holdHysteresis = 2;
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			std::wstring sequence;
+			auto step = [&](const Dejudder::Planes& b, const wchar_t* name)
+			{
+				Assert::IsTrue(warp.Estimate(pa.planes, b), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				const DejudderField f = DownloadField(gpu, warp);
+				int trustedOthers = 0;
+				for (int y = 2; y < f.blocksY - 2; ++y)
+					for (int x = 2; x < f.blocksX - 3; ++x)
+						if ((x != bx || y != by) && std::abs(x - bx) > 1 && std::abs(y - by) > 1)
+							trustedOthers += f.trusted(x, y) ? 1 : 0;
+				sequence += std::wstring(name) + (f.trusted(bx, by) ? L"=warp " : L"=hold ");
+				return std::make_pair(f.trusted(bx, by), trustedOthers);
+			};
+			const bool first = step(pp.planes, L"P").first;
+			const bool second = step(pp.planes, L"P").first;
+			bool alternating = true;
+			for (int i = 0; i < 2; ++i)
+			{
+				alternating = step(pq.planes, L"Q").first && alternating;
+				alternating = step(pp.planes, L"P").first && alternating;
+			}
+			const bool q1 = step(pq.planes, L"Q").first;
+			const bool q2 = step(pq.planes, L"Q").first;
+			const int othersBefore = step(pp.planes, L"P").second;
+			const auto afterCut = step(pc.planes, L"cut");
+			const std::wstring message = sequence + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(!first && second, (L"warps after two trusted frames: " + message).c_str());
+			Assert::IsTrue(alternating, (L"an alternating block keeps warping: " + message).c_str());
+			Assert::IsTrue(q1 && !q2, (L"holds after two untrusted frames: " + message).c_str());
+			Assert::IsTrue(othersBefore > 0 && afterCut.second == 0 && !afterCut.first, (L"a cut holds at once: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(BlockTaperWarpsMarginalBlocksAtARampedStrength)
+		{
+			// H3: block (5, 3)'s landing in B carries noise. With the tolerance
+			// at 0.8 x its SAD and the taper's end at 1.2 x, it is held without
+			// the taper and warps at half strength with it (the ramp's middle):
+			// at shift 1 it moves by (6, 3), not (12, 6), in both warp paths.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, bx = 5, by = 3;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			DejudderFrame b = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			for (int y = by * 16 - 4 + dy; y < by * 16 + 20 + dy; ++y)
+				for (int x = bx * 16 - 4 + dx; x < bx * 16 + 20 + dx; ++x)
+					b.luma[static_cast<size_t>(y) * width + x] = static_cast<uint16_t>(
+						b.luma[static_cast<size_t>(y) * width + x] + NoiseCode(x, y, 5, 1500));
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			float sad = 0.0f;
+			{
+				Dejudder::MotionWarp probe(fixture.Log(), gpu, DejudderTestSettings());
+				Assert::IsTrue(probe.Estimate(planesA.planes, planesB.planes));
+				const DejudderField f = DownloadField(gpu, probe, probe.Forward());
+				sad = f.texels[(by * f.blocksX + bx) * 4 + 2];
+			}
+			Assert::IsTrue(sad > 0.5f, (L"the noise should cost the block's match: SAD " + std::to_wstring(sad)).c_str());
+			auto run = [&](bool taper, bool& trusted)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.matchTolerance = 0.8f * sad;
+				settings.blockTaper = taper;
+				settings.taperSad = 1.2f * sad;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes));
+				trusted = DownloadField(gpu, warp).trusted(bx, by);
+				return WarpBothPaths(fixture, warp, a, planesA.planes, 1.0f);
+			};
+			bool heldTrusted = true, taperTrusted = false;
+			const BothPaths held = run(false, heldTrusted);
+			const BothPaths tapered = run(true, taperTrusted);
+			auto inBlock = [&](const std::vector<float>& image, int sx, int sy, float tolerance)
+			{
+				return MatchingPercent(image, width, bx * 16 + 3, by * 16 + 3, bx * 16 + 13, by * 16 + 13,
+					[&](int x, int y) { return a.luma[static_cast<size_t>(y - sy) * width + x - sx]; }, tolerance);
+			};
+			const double heldSource = inBlock(held.source, 0, 0, kSourceTolerance), heldRendered = inBlock(held.rendered, 0, 0, kRenderedTolerance);
+			const double halfSource = inBlock(tapered.source, 6, 3, kSourceTolerance), halfRendered = inBlock(tapered.rendered, 6, 3, kRenderedTolerance);
+			const std::wstring message = L"SAD " + std::to_wstring(sad) + L"; off: trusted " + std::to_wstring(heldTrusted) +
+				L", held " + std::to_wstring(heldSource) + L"% / " + std::to_wstring(heldRendered) + L"%; on: trusted " +
+				std::to_wstring(taperTrusted) + L", moved (6, 3) " + std::to_wstring(halfSource) + L"% / " +
+				std::to_wstring(halfRendered) + L"%; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(!heldTrusted && heldSource >= 95.0 && heldRendered >= 95.0, (L"off: held; " + message).c_str());
+			Assert::IsTrue(taperTrusted && halfSource >= 90.0 && halfRendered >= 90.0, (L"on: half strength; " + message).c_str());
 			AssertCleanLibplaceboLog(log);
 		}
 

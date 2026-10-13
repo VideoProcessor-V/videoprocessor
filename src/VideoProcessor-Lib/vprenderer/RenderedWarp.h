@@ -4,6 +4,7 @@
 #include <libplacebo/renderer.h>
 
 #include <vprenderer/NlsMaskMapping.h>
+#include <vprenderer/DejudderWarp.h>
 
 #include <string>
 #include <vector>
@@ -90,9 +91,12 @@ namespace DejudderRendered
 
 		// The cached picture warped by shift x the de-judder's A->B field.
 		// field / frameTrust: DejudderWarp::Field() / FrameTrust().
-		// subField: DejudderWarp::SubField() (11a E2), or nullptr.
+		// subField: DejudderWarp::SubField() (11a E2), or nullptr. matcher:
+		// the matcher's settings, for delta 9's feather (output pixels here)
+		// and taper; nullptr = neither.
 		bool Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
-			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr);
+			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr,
+			const Dejudder::Settings* matcher = nullptr);
 		const std::string& Error() const { return error; }
 
 	private:

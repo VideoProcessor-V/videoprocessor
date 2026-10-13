@@ -47,6 +47,7 @@ namespace Dejudder
 	// the split flag marks a block split; parent blocks as before.
 	const char* FieldVectorGlslSplit();
 
+
 	struct Planes
 	{
 		pl_tex luma = nullptr;     // Y, one component
@@ -120,9 +121,26 @@ namespace Dejudder
 		// is set. Off: nothing allocated or bound; every consumer as before.
 		bool estSplit = false;
 		float estSplitSad = 0.0f;
+		// Delta 9 (docs/VP-delta-8-9-10.md), synthesis-lite; off here, the
+		// renderer's keys set them. H1: where a warped block meets a held one,
+		// the warp fades to the unwarped A over this many output pixels on the
+		// warped side (0 = a hard edge). H2: a block changes between warp and
+		// hold only after this many consecutive source frames say so; a cut
+		// holds everything at once (1 = off). H3: blocks whose match lies
+		// between matchTolerance and taperSad (0 = 2 x tolerance) warp at a
+		// strength ramped down by their SAD instead of holding (experiment).
+		float holdFeatherPx = 0.0f;
+		int holdHysteresis = 1;
+		bool blockTaper = false;
+		float taperSad = 0.0f;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
 	};
+
+	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
+	// front of the field-vector rule; the variables feather_px, taper_tol and
+	// taper_sad are needed when FEATHER / TAPER are on.
+	std::string WarpHeader(const Settings& settings, bool split);
 
 	class MotionWarp
 	{
@@ -239,6 +257,10 @@ namespace Dejudder
 		pl_tex qpelField = nullptr;                         // 11a E3: before D3
 		pl_tex subField = nullptr;                          // 11a E2
 		pl_tex subSearch[2] = { nullptr, nullptr };         // 11a E2: the split searches
+		pl_tex holdState[2] = { nullptr, nullptr };         // delta 9 H2 (ping-pong)
+		pl_tex subHoldState[2] = { nullptr, nullptr };
+		pl_tex hystField = nullptr, hystSub = nullptr;
+		int holdIndex = 0;
 		Planes lastB;                                       // D5: B of the last Estimate
 		bool fillReady = false;
 		pl_tex occlusion[2] = { nullptr, nullptr };

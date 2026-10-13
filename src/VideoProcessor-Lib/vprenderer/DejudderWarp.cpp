@@ -354,6 +354,31 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
+		// Delta 9 H2: hold hysteresis per block (or sub-block). State: r the
+		// effective trust, g frames the raw trust has disagreed, ba the last
+		// trusted vector (a block still warping through its hysteresis keeps
+		// it). A cut (frame trust below the minimum) holds everything at once.
+		const char* const HYST_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (b.x < size.x && b.y < size.y) {
+    vec4 f = texelFetch(src_field, b, 0);
+    vec4 st = texelFetch(state_in, b, 0);
+    bool cut = texelFetch(frame_trust, ivec2(0), 0).r < min_share;
+    float raw = f.z > 0.5 ? 1.0 : 0.0;
+    float eff = st.r, count = st.g;
+    vec2 last = raw > 0.5 ? f.xy : st.ba;
+    if (cut) { eff = 0.0; count = 0.0; }
+    else if (raw == eff) count = 0.0;
+    else {
+        count += 1.0;
+        if (count >= hysteresis) { eff = raw; count = 0.0; }
+    }
+    imageStore(state_out, b, vec4(eff, count, last));
+    imageStore(dst, b, vec4(eff > 0.5 && raw < 0.5 ? st.ba : f.xy, eff, f.w));
+}
+)GLSL";
+
 		const char* const COPY_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
@@ -557,7 +582,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
     ivec2 bt = clamp(ivec2(floor(landed / 8.0)), ivec2(0), blocks - ivec2(1));
     vec4 g = texelFetch(bwd, bt, 0);
     bool consistent = length(f.xy + g.xy) <= consistency;
+#ifdef TAPER
+    bool good = f.z <= taper_sad;   // delta 9 H3: marginal blocks warp, tapered
+#else
     bool good = f.z <= tolerance;
+#endif
     float trust = (consistent && good) ? 1.0 : 0.0;
     imageStore(dst, b, vec4(f.xy * 2.0, trust, f.z));
 }
@@ -744,6 +773,40 @@ bool field_vector(vec2 lp, out vec2 v)
 
 // D2/D4: the strength scale of this source frame (1 when both are off).
 float strength_scale() { return texelFetch(frame_trust, ivec2(0), 0).g; }
+
+// Delta 9 H3: a marginal block's strength, ramped down by its SAD.
+#ifdef TAPER
+float block_strength(vec2 lp)
+{
+    ivec2 fsize = textureSize(field, 0);
+    float sad = texelFetch(field, clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1)), 0).w;
+    return sad <= taper_tol ? 1.0 : 1.0 - smoothstep(taper_tol, taper_sad, sad);
+}
+#else
+float block_strength(vec2 lp) { return 1.0; }
+#endif
+
+// Delta 9 H1: 0 at the edge of a held neighbour block, 1 from `feather`
+// source pixels away (smoothstep), on the warped side.
+#ifdef FEATHER
+float hold_weight(vec2 lp, float feather)
+{
+    ivec2 fsize = textureSize(field, 0);
+    ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+    float d = 1e9;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 c = own + ivec2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= fsize.x || c.y >= fsize.y) continue;
+            if (texelFetch(field, c, 0).z < 0.5) {
+                vec2 lo = vec2(c) * 16.0;
+                d = min(d, length(lp - clamp(lp, lo, lo + vec2(16.0))));
+            }
+        }
+    return smoothstep(0.0, max(feather, 1e-3), d);
+}
+#endif
 )GLSL";
 
 		// 11a E2: the split, both directions. A block whose best search SAD
@@ -865,7 +928,10 @@ if (q.x < size.x && q.y < size.y) {
     vec4 outv;
     if (field_vector(c, v)) {
         // Edges clamp (the sampler's address mode): never black.
-        outv = texture(src, (c - shift * strength_scale() * v) / vec2(size));
+        outv = texture(src, (c - shift * strength_scale() * block_strength(c) * v) / vec2(size));
+#ifdef FEATHER
+        outv = mix(texelFetch(src, q, 0), outv, hold_weight(c, feather_px));
+#endif
     } else {
 #ifdef FILL
         vec2 pb;
@@ -889,7 +955,10 @@ if (q.x < size.x && q.y < size.y) {
     vec2 v;
     vec4 outv;
     if (field_vector(c * chroma_scale, v)) {
-        outv = texture(src, (c - shift * strength_scale() * v / chroma_scale) / vec2(size));
+        outv = texture(src, (c - shift * strength_scale() * block_strength(c * chroma_scale) * v / chroma_scale) / vec2(size));
+#ifdef FEATHER
+        outv = mix(texelFetch(src, q, 0), outv, hold_weight(c * chroma_scale, feather_px));
+#endif
     } else {
 #ifdef FILL
         vec2 pb;
@@ -937,7 +1006,8 @@ if (q.x < size.x && q.y < size.y) {
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
-			&subSearch[0], &subSearch[1] })
+			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
+			&hystField, &hystSub })
 			pl_tex_destroy(gpu, tex);
 		pl_dispatch_destroy(&dispatch);
 	}
@@ -999,6 +1069,43 @@ if (q.x < size.x && q.y < size.y) {
 		if (previousResized)
 			previousValid = false;
 		// 11a E2: allocated only while the split is on.
+		// Delta 9 H2: the hysteresis state (zero = held, no history) and the
+		// output it swaps with the field.
+		if (settings.holdHysteresis > 1)
+		{
+			const bool fresh = !holdState[0] || holdState[0]->params.w != blocksX || holdState[0]->params.h != blocksY;
+			for (int i = 0; i < 2; ++i)
+				if (fresh)
+				{
+					pl_tex_destroy(gpu, &holdState[i]);
+					pl_tex_destroy(gpu, &subHoldState[i]);
+				}
+			auto state = [&](pl_tex* tex, int w, int h) -> bool
+			{
+				if (*tex)
+					return true;
+				std::vector<uint16_t> zero(static_cast<size_t>(w) * h * 4, 0);
+				pl_tex_params tp{};
+				tp.w = w;
+				tp.h = h;
+				tp.format = vec4f;
+				tp.sampleable = true;
+				tp.storable = true;
+				tp.host_readable = readable && (vec4f->caps & PL_FMT_CAP_HOST_READABLE);
+				tp.initial_data = zero.data();
+				*tex = pl_tex_create(gpu, &tp);
+				return *tex != nullptr;
+			};
+			if (!state(&holdState[0], blocksX, blocksY) || !state(&holdState[1], blocksX, blocksY) ||
+				!make(&hystField, blocksX, blocksY, vec4f, readable) ||
+				(settings.estSplit && (!state(&subHoldState[0], blocksX * 2, blocksY * 2) ||
+					!state(&subHoldState[1], blocksX * 2, blocksY * 2) ||
+					!make(&hystSub, blocksX * 2, blocksY * 2, vec4f, readable))))
+			{
+				error = "cannot create the hold hysteresis state";
+				return false;
+			}
+		}
 		if (settings.estSplit && (!make(&subField, blocksX * 2, blocksY * 2, vec4f, readable) ||
 			!make(&subSearch[0], blocksX * 2, blocksY * 2, vec4f, readable) ||
 			!make(&subSearch[1], blocksX * 2, blocksY * 2, vec4f, readable)))
@@ -1206,8 +1313,12 @@ if (q.x < size.x && q.y < size.y) {
 		const pl_shader_var variables[2] = {
 			{ pl_var_float("tolerance"), &tolerance, true },
 			{ pl_var_float("consistency"), &consistency, true } };
-		if (!Dispatch("VideoProcessor de-judder: consistency", nullptr, CONSISTENCY_BODY,
-			descriptors, 3, variables, 2, blocksX, blocksY, 8))
+		// Delta 9 H3: marginal blocks (up to taper_sad) pass the consistency
+		// check as trusted; the warp tapers them.
+		const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
+		const pl_shader_var consistencyVars[3] = { variables[0], variables[1], { pl_var_float("taper_sad"), &taperSad, true } };
+		if (!Dispatch("VideoProcessor de-judder: consistency", settings.blockTaper ? "#define TAPER 1\n" : nullptr,
+			CONSISTENCY_BODY, descriptors, 3, consistencyVars, settings.blockTaper ? 3 : 2, blocksX, blocksY, 8))
 			return false;
 		if (settings.estQpel)
 		{
@@ -1265,6 +1376,31 @@ if (q.x < size.x && q.y < size.y) {
 		if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
 			trustDesc, 3, trustVars, 5, 16, 16, 16))
 			return false;
+		if (settings.holdHysteresis > 1)
+		{
+			// Delta 9 H2, after the frame trust (the cut flag); the result
+			// becomes the field (and the sub-field) by swapping.
+			const float hysteresis = static_cast<float>(settings.holdHysteresis);
+			const pl_shader_var hystVars[2] = { { pl_var_float("hysteresis"), &hysteresis, true },
+				{ pl_var_float("min_share"), &minShare, true } };
+			const int next = 1 - holdIndex;
+			const pl_shader_desc hystDesc[5] = { Sampled("src_field", field, false), Sampled("state_in", holdState[holdIndex], false),
+				Sampled("frame_trust", frameTrust, false), Storage("state_out", holdState[next]), Storage("dst", hystField) };
+			if (!Dispatch("VideoProcessor de-judder: hold hysteresis (delta 9 H2)", nullptr, HYST_BODY,
+				hystDesc, 5, hystVars, 2, blocksX, blocksY, 8))
+				return false;
+			std::swap(field, hystField);
+			if (settings.estSplit)
+			{
+				const pl_shader_desc subDesc[5] = { Sampled("src_field", subField, false), Sampled("state_in", subHoldState[holdIndex], false),
+					Sampled("frame_trust", frameTrust, false), Storage("state_out", subHoldState[next]), Storage("dst", hystSub) };
+				if (!Dispatch("VideoProcessor de-judder: sub-block hysteresis (delta 9 H2)", nullptr, HYST_BODY,
+					subDesc, 5, hystVars, 2, blocksX * 2, blocksY * 2, 8))
+					return false;
+				std::swap(subField, hystSub);
+			}
+			holdIndex = next;
+		}
 		if (settings.occlusionFill)
 		{
 			const pl_shader_desc fillDesc[4] = {
@@ -1337,6 +1473,15 @@ if (q.x < size.x && q.y < size.y) {
 		return WARP_HEADER;
 	}
 
+	std::string WarpHeader(const Settings& settings, bool split)
+	{
+		std::string h;
+		if (split) h += "#define SPLIT 1\n";
+		if (settings.holdFeatherPx > 0.0f) h += "#define FEATHER 1\n";
+		if (settings.blockTaper) h += "#define TAPER 1\n";
+		return h + WARP_HEADER;
+	}
+
 	const char* FieldVectorGlslSplit()
 	{
 		static const std::string header = std::string("#define SPLIT 1\n") + WARP_HEADER;
@@ -1366,8 +1511,12 @@ if (q.x < size.x && q.y < size.y) {
 		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma;
 		// 11a E2: the sub-field bound (and read) only while the split is on.
 		const bool split = settings.estSplit && subField;
-		const std::string header = std::string(split ? "#define SPLIT 1\n" : "") + (fill ? "#define FILL\n" : "") +
-			WARP_HEADER + (fill ? FILL_HEADER : "");
+		const std::string header = std::string(fill ? "#define FILL\n" : "") + WarpHeader(settings, split) +
+			(fill ? FILL_HEADER : "");
+		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
+		const float featherPx = settings.holdFeatherPx;
+		const float taperTol = settings.matchTolerance;
+		const float taperSadW = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
 		std::vector<pl_shader_desc> lumaDesc = {
 			Sampled("src", a.luma, true), Sampled("field", field, false),
 			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedLuma) };
@@ -1379,11 +1528,18 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (split)
 			lumaDesc.push_back(Sampled("sub_field", subField, false));
-		const pl_shader_var lumaVars[3] = { { pl_var_float("shift"), &shift, true },
-			{ pl_var_float("min_trusted_share"), &minShare, true },
-			{ pl_var_float("fill_tolerance"), &tolerance, true } };
+		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
+			{ pl_var_float("min_trusted_share"), &minShare, true } };
+		if (fill) lumaVars.push_back({ pl_var_float("fill_tolerance"), &tolerance, true });
+		if (settings.holdFeatherPx > 0.0f) lumaVars.push_back({ pl_var_float("feather_px"), &featherPx, true });
+		if (settings.blockTaper)
+		{
+			lumaVars.push_back({ pl_var_float("taper_tol"), &taperTol, true });
+			lumaVars.push_back({ pl_var_float("taper_sad"), &taperSadW, true });
+		}
 		if (!Dispatch("VideoProcessor de-judder: warp luma", header.c_str(), WARP_LUMA_BODY,
-			lumaDesc.data(), static_cast<int>(lumaDesc.size()), lumaVars, fill ? 3 : 2, width, height, 16))
+			lumaDesc.data(), static_cast<int>(lumaDesc.size()), lumaVars.data(), static_cast<int>(lumaVars.size()),
+			width, height, 16))
 			return false;
 		const float chromaScale[2] = {
 			static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
@@ -1398,13 +1554,19 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (split)
 			chromaDesc.push_back(Sampled("sub_field", subField, false));
-		const pl_shader_var chromaVars[4] = {
+		std::vector<pl_shader_var> chromaVars = {
 			{ pl_var_float("shift"), &shift, true },
 			{ pl_var_vec2("chroma_scale"), chromaScale, true },
-			{ pl_var_float("min_trusted_share"), &minShare, true },
-			{ pl_var_float("fill_tolerance"), &tolerance, true } };
+			{ pl_var_float("min_trusted_share"), &minShare, true } };
+		if (fill) chromaVars.push_back({ pl_var_float("fill_tolerance"), &tolerance, true });
+		if (settings.holdFeatherPx > 0.0f) chromaVars.push_back({ pl_var_float("feather_px"), &featherPx, true });
+		if (settings.blockTaper)
+		{
+			chromaVars.push_back({ pl_var_float("taper_tol"), &taperTol, true });
+			chromaVars.push_back({ pl_var_float("taper_sad"), &taperSadW, true });
+		}
 		if (!Dispatch("VideoProcessor de-judder: warp chroma", header.c_str(), WARP_CHROMA_BODY,
-			chromaDesc.data(), static_cast<int>(chromaDesc.size()), chromaVars, fill ? 4 : 3,
+			chromaDesc.data(), static_cast<int>(chromaDesc.size()), chromaVars.data(), static_cast<int>(chromaVars.size()),
 			a.chroma->params.w, a.chroma->params.h, 16))
 			return false;
 		out.luma = warpedLuma;

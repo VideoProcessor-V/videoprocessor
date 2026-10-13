@@ -6428,6 +6428,30 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_est_split_sad"));
         estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));
         estSplitSad->setPlaceholderText(QStringLiteral("0"));
+        // Delta 9, synthesis-lite.
+        auto* feather = addText(QStringLiteral("Soften held-block edges (px, 0 = off)"),
+            QStringLiteral("dejudder_hold_feather_px"));
+        feather->setValidator(new QDoubleValidator(0.0, 16.0, 1, feather));
+        feather->setPlaceholderText(QStringLiteral("4"));
+        feather->setToolTip(QStringLiteral(
+            "Where a moved block meets a held one, the moved picture fades to the unmoved one over this many pixels, "
+            "so the hold leaves no visible line. Not frame blending: both sides are the same frame."));
+        auto* hysteresis = addText(QStringLiteral("Frames before a block changes (1 = off)"),
+            QStringLiteral("dejudder_hold_hysteresis"));
+        hysteresis->setValidator(new QIntValidator(1, 8, hysteresis));
+        hysteresis->setPlaceholderText(QStringLiteral("2"));
+        hysteresis->setToolTip(QStringLiteral(
+            "A block switches between moved and held only after this many film frames in a row say so, so it does "
+            "not flicker between the two. A cut holds everything at once."));
+        auto* taper = addChoice(QStringLiteral("Taper marginal blocks (experiment)"),
+            QStringLiteral("dejudder_block_taper"), { QStringLiteral("on"), QStringLiteral("off") });
+        taper->setToolTip(QStringLiteral(
+            "Experiment, default off: blocks that match only marginally move at a reduced strength instead of "
+            "holding. Fewer judder patches, at the risk of a regional, floaty look."));
+        auto* taperSad = addText(QStringLiteral("Taper ends at (codes, 0 = twice the tolerance)"),
+            QStringLiteral("dejudder_taper_sad"));
+        taperSad->setValidator(new QDoubleValidator(0.0, 32.0, 2, taperSad));
+        taperSad->setPlaceholderText(QStringLiteral("0"));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));

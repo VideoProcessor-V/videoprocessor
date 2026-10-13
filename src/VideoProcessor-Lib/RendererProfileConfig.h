@@ -637,12 +637,17 @@ namespace RendererProfileConfig
 			// tolerance on grain (1 = off).
 			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
 				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate" ||
-				key == "dejudder_est_split")
+				key == "dejudder_est_split" || key == "dejudder_block_taper")
 				return IsChoice(value, { "on", "off" });
 			// Stage 11a E1: the smoothness penalty (codes per source pixel).
 			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
+			// Delta 9: H1 feather (output px, 0 = off), H2 hysteresis (source
+			// frames, 1 = off), H3 taper end (codes, 0 = 2 x match tolerance).
+			if (key == "dejudder_hold_feather_px") return IsNumberInRange(value, 0.0, 16.0);
+			if (key == "dejudder_hold_hysteresis") { int n = 0; return ParseInteger(value, 1, 8, n); }
+			if (key == "dejudder_taper_sad") return IsNumberInRange(value, 0.0, 32.0);
 			if (key == "dejudder_motion_scale_lo") return IsNumberInRange(value, 0.0, 16.0);
 			if (key == "dejudder_motion_scale_hi") return IsNumberInRange(value, 0.0, 32.0);
 			if (key == "dejudder_trust_scale") return IsNumberInRange(value, 0.0, 1.0);

@@ -70,7 +70,12 @@ if (q.x < size.x && q.y < size.y) {
         // The source displacement in output pixels: the map's local slope
         // per axis (the maps are separable).
         vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
-        o = rw_cubic(p - shift * strength_scale() * v / slope);
+        vec2 sp = rw_source(p);
+        o = rw_cubic(p - shift * strength_scale() * block_strength(sp) * v / slope);
+#ifdef FEATHER
+        // Delta 9 H1: the feather is in output pixels, the field in source.
+        o = mix(texelFetch(cached, q, 0), o, hold_weight(sp, feather_px * max(slope.x, slope.y)));
+#endif
     } else {
         o = texelFetch(cached, q, 0);   // hard hold of A
     }
@@ -251,7 +256,7 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	bool Warp::Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
-		float shift, const Geometry& g, pl_tex& out, pl_tex subField)
+		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher)
 	{
 		out = nullptr;
 		if (!dispatch || !cached || !field || !frameTrust)
@@ -284,7 +289,12 @@ if (q.x < size.x && q.y < size.y) {
 		const float domain[4] = { g.nlsDomain.x0, g.nlsDomain.y0,
 			std::fabs(g.nlsDomain.x1 - g.nlsDomain.x0) > 0.0f ? g.nlsDomain.x1 - g.nlsDomain.x0 : 1.0f,
 			std::fabs(g.nlsDomain.y1 - g.nlsDomain.y0) > 0.0f ? g.nlsDomain.y1 - g.nlsDomain.y0 : 1.0f };
-		const pl_shader_var variables[11] = {
+		const Dejudder::Settings none;
+		const Dejudder::Settings& ms = matcher ? *matcher : none;
+		const float featherPx = ms.holdFeatherPx;
+		const float taperTol = ms.matchTolerance;
+		const float taperSad = ms.taperSad > 0.0f ? ms.taperSad : 2.0f * ms.matchTolerance;
+		const pl_shader_var variables[14] = {
 			{ pl_var_vec2("dst_origin"), dstOrigin, true },
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
 			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
@@ -295,14 +305,24 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_vec2("nls_protect"), nlsProtect, true },
 			{ pl_var_vec4("nls_domain"), domain, true },
 			{ pl_var_float("shift"), &shift, true },
-			{ pl_var_float("min_trusted_share"), &minTrustedShare, true } };
+			{ pl_var_float("min_trusted_share"), &minTrustedShare, true },
+			{ pl_var_float("feather_px"), &featherPx, true },
+			{ pl_var_float("taper_tol"), &taperTol, true },
+			{ pl_var_float("taper_sad"), &taperSad, true } };
+		const int numVariables = 11 + (ms.holdFeatherPx > 0.0f ? 1 : 0) + (ms.blockTaper ? 2 : 0);
+		// The variables in use, in order (feather, then taper).
+		pl_shader_var used[14];
+		int n = 0;
+		for (int i = 0; i < 11; ++i) used[n++] = variables[i];
+		if (ms.holdFeatherPx > 0.0f) used[n++] = variables[11];
+		if (ms.blockTaper) { used[n++] = variables[12]; used[n++] = variables[13]; }
 		const pl_shader_desc descriptors[5] = {
 			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust),
 			Storage(warped), Sampled("sub_field", subField) };
 		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
-			(subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + WARP_FUNCTIONS;
+			Dejudder::WarpHeader(ms, subField != nullptr) + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,
-			descriptors, subField ? 5 : 4, variables, 11, w, h))
+			descriptors, subField ? 5 : 4, used, numVariables, w, h))
 		{
 			error = "rendered warp rejected or failed";
 			return false;

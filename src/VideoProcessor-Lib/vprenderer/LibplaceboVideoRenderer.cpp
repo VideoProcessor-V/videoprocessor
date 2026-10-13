@@ -887,6 +887,11 @@ namespace
 		bool dejudderEstGate = true;              // E4
 		bool dejudderEstSplit = true;             // E2
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
+		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
+		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
+		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
+		bool dejudderBlockTaper = false;          // H3 (experiment)
+		double dejudderTaperSad = 0.0;            // H3 (0 = 2 x match tolerance)
 		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
 		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
 		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
@@ -1042,6 +1047,8 @@ namespace
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
 			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|'
+			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
+			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -1989,6 +1996,8 @@ namespace
 			std::make_tuple("dejudder_trust_scale", 0.0, 1.0, &settings.dejudderTrustScale),
 			std::make_tuple("dejudder_est_lambda", 0.0, 8.0, &settings.dejudderEstLambda),
 			std::make_tuple("dejudder_est_split_sad", 0.0, 16.0, &settings.dejudderEstSplitSad),
+			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
+			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
@@ -2000,6 +2009,15 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
 					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
+		}
+		if (config.TryGetString(rule.section, "dejudder_hold_hysteresis", raw))
+		{
+			int parsed = 0;
+			if (ParseInteger(raw, 1, 8, parsed))
+				settings.dejudderHoldHysteresis = parsed;
+			else
+				DebugLog::Log("profile '%s': invalid dejudder_hold_hysteresis '%s'; keeping %d",
+					rule.section.c_str(), raw.c_str(), settings.dejudderHoldHysteresis);
 		}
 		if (config.TryGetString(rule.section, "fbo_float32", raw))
 		{
@@ -2016,7 +2034,8 @@ namespace
 			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
 			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
 			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
-			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit) })
+			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
+			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8093,6 +8112,10 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
+		currentTransport.dejudderHoldFeatherPx = next.dejudderHoldFeatherPx;
+		currentTransport.dejudderHoldHysteresis = next.dejudderHoldHysteresis;
+		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
+		currentTransport.dejudderTaperSad = next.dejudderTaperSad;
 		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
 		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
@@ -8178,6 +8201,10 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
 			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
+		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
+			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
+			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
+			"dejudder_hold");
 		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
 		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
@@ -11159,6 +11186,10 @@ struct LibplaceboVideoRenderer::Impl
 			settings.estGate = activeSettings.dejudderEstGate;
 			settings.estSplit = activeSettings.dejudderEstSplit;
 			settings.estSplitSad = static_cast<float>(activeSettings.dejudderEstSplitSad);
+			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);
+			settings.holdHysteresis = activeSettings.dejudderHoldHysteresis;
+			settings.blockTaper = activeSettings.dejudderBlockTaper;
+			settings.taperSad = static_cast<float>(activeSettings.dejudderTaperSad);
 			return settings;
 		};
 		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
@@ -11178,7 +11209,9 @@ struct LibplaceboVideoRenderer::Impl
 				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
 				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
 				current.estQpel != next.estQpel || current.estGate != next.estGate ||
-				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad)
+				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
+				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
+				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad)
 				dejudder->SetSettings(next);
 		}
 		Dejudder::Planes a, b;
@@ -11515,7 +11548,8 @@ struct LibplaceboVideoRenderer::Impl
 			if (cached && dejudderRenderedWarp)
 			{
 				if (!dejudderRenderedWarp->Run(cached, dejudder->Field(), dejudder->FrameTrust(),
-					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, dejudder->SubField()))
+					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, dejudder->SubField(),
+					&dejudder->GetSettings()))
 				{
 					failure = "rendered warp failed";
 					break;

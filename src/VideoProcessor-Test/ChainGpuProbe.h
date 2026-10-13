@@ -360,6 +360,9 @@ namespace ChainGpuProbe
 		s.estQpel = true;
 		s.estGate = true;
 		s.estSplit = true;   // E2
+		// Delta 9: H1 feather and H2 hysteresis on, H3 taper off (planner).
+		s.holdFeatherPx = 4.0f;
+		s.holdHysteresis = 2;
 		return s;
 	}
 	constexpr double kRefinedGrainTolerance = 3.0;
