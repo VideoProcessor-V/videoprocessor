@@ -201,6 +201,7 @@
     <ClInclude Include="led\LedController.h" />
     <ClInclude Include="led\LedMeasurement.h" />
     <ClInclude Include="led\LedDriveModule.h" />
+    <ClInclude Include="led\ScriptListener.h" />
     <ClInclude Include="led\LedMeasurementHook.h" />
     <ClInclude Include="led\LedLookahead.h" />
     <ClInclude Include="led\LedRawTransfer.h" />
@@ -392,6 +393,7 @@
     <ClCompile Include="led\LedController.cpp" />
     <ClCompile Include="led\LedMeasurement.cpp" />
     <ClCompile Include="led\LedDriveModule.cpp" />
+    <ClCompile Include="led\ScriptListener.cpp" />
     <ClCompile Include="led\ConnectionTest.cpp" />
     <ClCompile Include="led\LedLookahead.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />

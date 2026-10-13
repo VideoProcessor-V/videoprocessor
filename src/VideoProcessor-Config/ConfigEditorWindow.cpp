@@ -9707,11 +9707,13 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     connect(floor, qOverload<int>(&QSpinBox::valueChanged), floorBlack,
         [floorBlack](int level) { floorBlack->setMaximum(level); });
     driveForm->addRow(QStringLiteral("Mode"), bindChoiceField(led, QStringLiteral("mode"),
-        { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate"), QStringLiteral("picture_only") },
+        { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate"), QStringLiteral("picture_only"),
+          QStringLiteral("listen") },
         { QStringLiteral("Log only (watch, never send)"),
           QStringLiteral("Script (your beta 22 script)"),
           QStringLiteral("Compensate (dim the LED, keep the picture)"),
-          QStringLiteral("Picture only (shadow lift and boost toe; the RS-232 port is not used)") }));
+          QStringLiteral("Picture only (shadow lift and boost toe; the RS-232 port is not used)"),
+          QStringLiteral("Listen (your script drives the projector; VP follows its commands)") }));
     // Step 7b: script mode sends the script's own LPW1 and CNTR; smoothing
     // adds VP's gain across each whole CNTR step. Off = the script exactly.
     driveForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth the script's contrast steps"), led,
@@ -10132,6 +10134,106 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     driveForm->addRow(QStringLiteral("Lift starts at highlight amount"), liftRampLo);
     auto* liftRampHi = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_hi"), 0.0, 1.0, 3, 0.005, 0.10, QString());
     driveForm->addRow(QStringLiteral("Lift full at highlight amount"), liftRampHi);
+    // mode: listen's monitor (owner 2026-10-13): the script's latest commands
+    // and measurement next to VP's, from logs\led-listen.csv beside vp.log
+    // (VP writes one row per script message), and the session's agreement.
+    auto* listenBox = new QGroupBox(QStringLiteral("Listen monitor (Mode: Listen)"));
+    listenBox->setObjectName(controlName(led, QStringLiteral("listen_monitor")));
+    auto* listenLayout = new QVBoxLayout(listenBox);
+    auto* listenStatus = new QLabel(QStringLiteral("No listen data yet: set Mode to Listen and run main_vp.py."));
+    auto* listenScript = new QLabel;
+    auto* listenVp = new QLabel;
+    auto* listenAgree = new QLabel;
+    for (QLabel* label : { listenStatus, listenScript, listenVp, listenAgree })
+    {
+        label->setWordWrap(true);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        listenLayout->addWidget(label);
+    }
+    listenLayout->addWidget(helpLabel(QStringLiteral(
+        "With logging on, every script message is kept with VP's own measurement in logs\\led-listen.csv "
+        "(beside vp.log), for adapting VP's copy of the script. The script needs its VP addendum lines "
+        "(docs\\reference\\main_vp.py).")));
+    driveForm->addRow(listenBox);
+    auto* listenTimer = new QTimer(listenBox);
+    // VP's one-line summary, overwritten on each script message (the timer
+    // keeps its own copy of the path: no window members in the callback).
+    const QString listenNowPath = QFileInfo(configPath_).absolutePath() + QStringLiteral("/logs/led-listen-now.txt");
+    connect(listenTimer, &QTimer::timeout, listenBox, [listenNowPath, listenStatus, listenScript, listenVp, listenAgree]()
+    {
+        const QString& path = listenNowPath;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly))
+        {
+            listenStatus->setText(QStringLiteral("No listen data yet: set Mode to Listen and run main_vp.py."));
+            return;
+        }
+        QHash<QString, QString> v;
+        for (const QString& pair : QString::fromLatin1(file.readAll()).simplified().split(QLatin1Char(' ')))
+        {
+            const int equals = pair.indexOf(QLatin1Char('='));
+            if (equals > 0)
+                v.insert(pair.left(equals), pair.mid(equals + 1));
+        }
+        const qint64 quietMs = QFileInfo(path).lastModified().msecsTo(QDateTime::currentDateTime());
+        listenStatus->setText((quietMs > 5000 ?
+            QStringLiteral("Not receiving (last message %1 s ago).").arg(quietMs / 1000) :
+            QStringLiteral("Receiving from the script.")) +
+            (v.value(QStringLiteral("log")) == QStringLiteral("1") ? QStringLiteral(" Logging to led-listen.csv.") :
+                QStringLiteral(" Not logging.")));
+        auto dash = [&](const char* key)
+        {
+            const QString value = v.value(QString::fromLatin1(key));
+            return value.isEmpty() || value.toDouble() < 0.0 ? QStringLiteral("-") : value;
+        };
+        auto yes = [&](const char* key)
+        {
+            const QString value = v.value(QString::fromLatin1(key));
+            return value == QStringLiteral("1") ? QStringLiteral("yes") : value == QStringLiteral("0") ? QStringLiteral("no") :
+                QStringLiteral("-");
+        };
+        listenScript->setText(QStringLiteral("Script: LED %1, contrast %2  |  mean2 %3, max %4, highlight %5  |  targets LED %6, contrast %7")
+            .arg(dash("light"), dash("contrast"), dash("mean"), dash("max"), yes("hl"), dash("tp"), dash("tc")));
+        listenVp->setText(QStringLiteral("VP: APL %1, brightest block %2, highlight %3  |  targets LED %4, contrast %5  |  picture gain %6")
+            .arg(QString::number(v.value(QStringLiteral("vp_apl")).toDouble(), 'f', 1), dash("vp_max"), yes("vp_hl"),
+                dash("vp_tp"), dash("vp_tc"), QString::number(v.value(QStringLiteral("gain"), QStringLiteral("1")).toDouble(), 'f', 3)));
+        const int ticks = v.value(QStringLiteral("ticks")).toInt();
+        listenAgree->setText(ticks <= 0 ? QString() :
+            QStringLiteral("Agreement over %1 script loops: mean2 within %2, max within %3, highlight same %4%, "
+                "LED target within %5, contrast target within %6 (average differences)")
+                .arg(ticks).arg(v.value(QStringLiteral("d_mean")).toDouble(), 0, 'f', 1)
+                .arg(v.value(QStringLiteral("d_max")).toDouble(), 0, 'f', 1)
+                .arg(100.0 * v.value(QStringLiteral("agree")).toDouble(), 0, 'f', 0)
+                .arg(v.value(QStringLiteral("d_tp")).toDouble(), 0, 'f', 1)
+                .arg(v.value(QStringLiteral("d_tc")).toDouble(), 0, 'f', 1));
+    });
+    listenTimer->start(250);
+    {
+        // The UDP port the script's addendum sends to.
+        auto* listenPort = new QSpinBox;
+        listenPort->setObjectName(controlName(led, QStringLiteral("listen_port")));
+        listenPort->setAccessibleName(QStringLiteral("Listen port"));
+        listenPort->setRange(1024, 65535);
+        bool valid = false;
+        const int configured = value(led, QStringLiteral("listen_port")).toInt(&valid);
+        listenPort->setValue(valid ? configured : 47811);
+        listenPort->setToolTip(QStringLiteral(
+            "Mode Listen: the port on this PC the script's VP addendum sends to (47811 in main_vp.py)."));
+        connect(listenPort, qOverload<int>(&QSpinBox::valueChanged), this, [this, led](int port)
+        {
+            const std::string section = led.toStdString();
+            const std::string text = std::to_string(port);
+            if (!document_->SetKnown(section, "listen_port", text))
+            {
+                document_->AddSection(section);
+                document_->SetKnown(section, "listen_port", text);
+            }
+            markDirty();
+        });
+        driveForm->addRow(QStringLiteral("Listen port"), listenPort);
+        driveForm->addRow(QString(), bindCheckField(QStringLiteral("Log the script's commands with VP's measurement (logs\\led-listen.csv)"),
+            led, QStringLiteral("listen_log"), false));
+    }
     auto* assist = new QWidget;
     auto* assistForm = new QFormLayout(assist);
     assistForm->setContentsMargins(0, 0, 0, 0);

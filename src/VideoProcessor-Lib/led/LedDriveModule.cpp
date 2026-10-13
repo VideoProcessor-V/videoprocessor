@@ -1,9 +1,13 @@
 #include <pch.h>
 #include "LedDriveModule.h"
+#include "ScriptListener.h"
+
+#include <fstream>
 
 #include "../DebugLog.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iterator>
 #include <sstream>
@@ -15,7 +19,7 @@ namespace LedDrive
 		const char* ModeName(Mode mode)
 		{
 			return mode == Mode::Compensate ? "compensate" : mode == Mode::Script ? "script" :
-				mode == Mode::PictureOnly ? "picture_only" : "log_only";
+				mode == Mode::PictureOnly ? "picture_only" : mode == Mode::Listen ? "listen" : "log_only";
 		}
 
 		// Predictions are kept this many frames behind the current one, long
@@ -255,8 +259,10 @@ namespace LedDrive
 				driver->SetContrastAsync(-1);
 			}
 			compensating = nowCompensating;
-			// picture_only (delta 12): the gain stays exactly 1.
-			applyGain = live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
+			// picture_only (delta 12): the gain stays exactly 1. listen: the
+			// script drives the projector, so VP's smoothing gain applies
+			// although VP itself drives nothing.
+			applyGain = (live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen;
 			// Only the compensate step leaves the custom dim, so a switch away
 			// from it (or the experiment switched off) leaves here: LDMM 0 jumps
 			// the driver's queue, ahead of any LPW1 the new mode sends.
@@ -819,7 +825,7 @@ namespace LedDrive
 			compensating = led.mode == Mode::Compensate;
 			// Compensation is applied to the picture only while the projector
 			// is really being driven; a dry run never changes the picture.
-			applyGain = driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
+			applyGain = (driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen;
 		}
 
 		LedDriveConfig current;
@@ -846,7 +852,23 @@ namespace LedDrive
 				gain.gain = 1.0;
 			}
 		};
-		setSmoothing(current.mode == Mode::Script && current.scriptSmoothing && applyGain, 50);
+		auto smoothingWanted = [&] {
+			return (current.mode == Mode::Script || current.mode == Mode::Listen) && current.scriptSmoothing && applyGain;
+		};
+		setSmoothing(smoothingWanted(), 50);
+		// mode: listen: the script's messages, VP's copy of its rules, and the
+		// running sums for ListenAccuracy.
+		ScriptListener listener;
+		ScriptController shadow(current);
+		std::ofstream listenCsv;
+		const double listenStartMs = NowMs();
+		ScriptMessage lastTick;
+		std::array<int, 5> lastVp = { -1, -1, -1, -1, -1 };
+		double lastVpApl = -1.0;
+		int listenLight = -1;
+		int listenContrast = 50;
+		double sumMean = 0.0, sumMaximum = 0.0, sumLight = 0.0, sumContrast = 0.0;
+		int agree = 0;
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
@@ -914,8 +936,7 @@ namespace LedDrive
 				std::lock_guard<std::mutex> guard(mutex);
 				awaitingContrastReset = false;
 			}
-			setSmoothing(current.mode == Mode::Script && current.scriptSmoothing && applyGain,
-				controller.Contrast());
+			setSmoothing(smoothingWanted(), current.mode == Mode::Listen ? listenContrast : controller.Contrast());
 			if (compensating)
 			{
 				// mode: compensate steps per frame in BeginFrame(); this thread
@@ -934,6 +955,148 @@ namespace LedDrive
 					DebugLog::Log("%s%s", log.c_str(), applyGain ? "" : " (dry run)");
 					lastLogTime = now;
 				}
+			}
+			else if (current.mode == Mode::Listen)
+			{
+				// The listener follows the mode and the port.
+				if (!listener.IsOpen() || listener.Port() != current.listenPort)
+				{
+					std::string error;
+					const bool ok = listener.Open(current.listenPort, error);
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						listenAccuracy.listening = ok;
+					}
+					DebugLog::Log(ok ? "LED drive: listen - waiting for the script on 127.0.0.1:%d (RS-232 port not opened)" :
+						"LED drive: listen - cannot listen on 127.0.0.1:%d: %s", current.listenPort, error.c_str());
+					shadow = ScriptController(current);
+					// The data log: rotate past 20 MB, a header when new, a
+					// session line every time.
+					if (!listenCsv.is_open() && current.listenLog)
+					{
+						const std::string path = ListenCsvPath(current.listenLogDirectory);
+						const size_t slash = path.find_last_of("\\/");
+						if (slash != std::string::npos)
+							CreateDirectoryA(path.substr(0, slash).c_str(), nullptr);   // logs\ (exists in a deployment)
+						DebugLog::Log("LED drive: listen - logging to %s", path.c_str());
+						WIN32_FILE_ATTRIBUTE_DATA info{};
+						if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &info) &&
+							(info.nFileSizeHigh > 0 || info.nFileSizeLow > 20u * 1024u * 1024u))
+							MoveFileExA(path.c_str(), (path.substr(0, path.size() - 4) + ".prev.csv").c_str(), MOVEFILE_REPLACE_EXISTING);
+						const bool fresh = GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES;
+						listenCsv.open(path, std::ios::out | std::ios::app);
+						if (listenCsv)
+						{
+							if (fresh)
+								listenCsv << kListenCsvHeader << "\n";
+							listenCsv << "# session, port " << current.listenPort << "\n";
+							listenCsv.flush();
+						}
+					}
+				}
+				if (listenCsv.is_open() && !current.listenLog)
+					listenCsv.close();   // logging switched off
+				const std::vector<ScriptMessage> messages = listener.Receive(std::max(10, current.tickMs));
+				for (const ScriptMessage& message : messages)
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					// The data log row: the script's message next to VP's own
+					// measurement and its copy of the rules.
+					if (listenCsv)
+					{
+						const FrameStats& s = latest;
+						const ControllerOutput rules = haveStats ? ScriptController(current).Tick(s) : ControllerOutput();
+						listenCsv << static_cast<long long>(NowMs() - listenStartMs) << ',' << message.kind << ',' << message.value
+							<< ',' << message.mean << ',' << message.maximum << ',' << message.highlight << ','
+							<< message.targetPower << ',' << message.targetContrast << ',';
+						if (haveStats)
+							listenCsv << s.apl << ',' << s.maximum << ',' << s.highlight << ',' << s.highlightArea << ','
+								<< (s.maximum >= current.scriptHighlightCode ? 1 : 0) << ',' << rules.lightTarget << ','
+								<< rules.contrastTarget;
+						else
+							listenCsv << ",,,,,,";
+						listenCsv << ',' << (message.kind == "CNTR" ? message.value : listenContrast) << ',' << gain.gain << "\n";
+						listenCsv.flush();
+					}
+					if (message.kind == "CNTR" && message.value > 0)
+					{
+						// As if VP had sent it: the step lands after the
+						// projector's CNTR latency; the smoother eases the picture.
+						listenContrast = message.value;
+						listenAccuracy.lastContrast = message.value;
+						++listenAccuracy.contrastCommands;
+						if (smoothing)
+						{
+							const double land = NowMs() + projector.cntrLatencyMs;
+							smoother.Plan({ { land, message.value } });
+							smoother.Sent(land);
+						}
+					}
+					else if (message.kind == "LPW1")
+					{
+						++listenAccuracy.lightCommands;
+						listenLight = message.value;
+					}
+					else if (message.kind == "TICK" && haveStats && message.mean >= 0)
+					{
+						// VP's copy of the rules on VP's latest measurement.
+						const ControllerOutput mine = shadow.Tick(latest);
+						const int vpMean = std::max(0, static_cast<int>(latest.apl));
+						const int vpMax = static_cast<int>(latest.maximum);
+						const int vpHighlight = latest.maximum >= current.scriptHighlightCode ? 1 : 0;
+						++listenAccuracy.ticks;
+						sumMean += std::abs(message.mean - vpMean);
+						sumMaximum += std::abs(message.maximum - vpMax);
+						agree += message.highlight == vpHighlight ? 1 : 0;
+						if (message.targetPower >= 0) sumLight += std::abs(message.targetPower - mine.lightTarget);
+						if (message.targetContrast >= 0) sumContrast += std::abs(message.targetContrast - mine.contrastTarget);
+						const double n = listenAccuracy.ticks;
+						listenAccuracy.meanDifference = sumMean / n;
+						listenAccuracy.maximumDifference = sumMaximum / n;
+						listenAccuracy.highlightAgreement = agree / n;
+						listenAccuracy.lightTargetDifference = sumLight / n;
+						listenAccuracy.contrastTargetDifference = sumContrast / n;
+						lastTick = message;
+						lastVp = { vpMean, vpMax, vpHighlight, mine.lightTarget, mine.contrastTarget };
+						lastVpApl = latest.apl;
+					}
+				}
+				if (!messages.empty())
+				{
+					// The Config monitor's one line (written whether or not the
+					// full log is on).
+					ListenAccuracy a;
+					double g = 1.0;
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						a = listenAccuracy;
+						g = gain.active ? gain.gain : 1.0;
+					}
+					std::ofstream now(ListenNowPath(current.listenLogDirectory), std::ios::out | std::ios::trunc);
+					if (now)
+						now << "light=" << listenLight << " contrast=" << listenContrast << " mean=" << lastTick.mean
+							<< " max=" << lastTick.maximum << " hl=" << lastTick.highlight << " tp=" << lastTick.targetPower
+							<< " tc=" << lastTick.targetContrast << " vp_apl=" << lastVpApl << " vp_max=" << lastVp[1]
+							<< " vp_hl=" << lastVp[2] << " vp_tp=" << lastVp[3] << " vp_tc=" << lastVp[4] << " gain=" << g
+							<< " ticks=" << a.ticks << " d_mean=" << a.meanDifference << " d_max=" << a.maximumDifference
+							<< " agree=" << a.highlightAgreement << " d_tp=" << a.lightTargetDifference
+							<< " d_tc=" << a.contrastTargetDifference << " log=" << (listenCsv.is_open() ? 1 : 0) << "\n";
+				}
+				const auto now = std::chrono::steady_clock::now();
+				if (now - lastLogTime >= std::chrono::seconds(10))
+				{
+					ListenAccuracy a;
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						a = listenAccuracy;
+					}
+					DebugLog::Log("LED drive: listen - %d script ticks; VP vs script: mean2 %.1f, max %.1f, highlight agree %.0f%%, "
+						"light target %.1f, contrast target %.1f; heard LPW1 %d, CNTR %d (last %d)", a.ticks, a.meanDifference,
+						a.maximumDifference, a.highlightAgreement * 100.0, a.lightTargetDifference, a.contrastTargetDifference,
+						a.lightCommands, a.contrastCommands, a.lastContrast);
+					lastLogTime = now;
+				}
+				continue;   // the listener's wait is this tick's wait
 			}
 			else if (current.mode == Mode::PictureOnly)
 			{

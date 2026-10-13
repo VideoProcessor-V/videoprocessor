@@ -50,7 +50,12 @@ namespace LedDrive
 	// free for the original Python script). Like log_only it runs on the
 	// dry-run driver; leaving compensate for it rebuilds the module, whose
 	// exit restores full light before the port is released.
-	enum class Mode { Compensate, Script, LogOnly, PictureOnly };
+	// Listen (owner 2026-10-13): the original beta 22 script drives COM1 and
+	// tells VP each command over UDP (its VP addendum, ScriptListener.h). VP
+	// never opens the port; it eases the picture across each CNTR step as if
+	// it had sent it (script_smoothing) and measures how closely its own copy
+	// of the script's rules agrees with the script.
+	enum class Mode { Compensate, Script, LogOnly, PictureOnly, Listen };
 
 	enum class Terminator { Auto, Cr, LiteralCr, Script };
 
@@ -182,6 +187,14 @@ namespace LedDrive
 		// (grain averages out, a real highlight survives). APL and the block
 		// maximum (script mode) unchanged. Off = the plain statistics.
 		bool highlightGrainSuppress = true;
+		// mode: listen: the UDP port (127.0.0.1) the script's addendum sends to;
+		// listen_log on keeps logs\led-listen.csv (every script message with
+		// VP's measurement; off by default). The Config monitor reads
+		// led-listen-now.txt, written either way. listenLogDirectory: tests
+		// (empty = beside vp.log).
+		int listenPort = 47811;
+		bool listenLog = false;
+		std::string listenLogDirectory;
 		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
 		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
 		// 100 = no cap beyond cntr_max_usable. The lower of the two applies.
@@ -471,7 +484,9 @@ namespace LedDrive
 		auto table = [](const std::string& value) { StepTable t; return ParseStepTable(value, t); };
 		return {
 			Boolean("enabled"),
-			Choice("mode", { "compensate", "script", "log_only", "picture_only" }),
+			Choice("mode", { "compensate", "script", "log_only", "picture_only", "listen" }),
+			Integer("listen_port", 1024, 65535),
+			Boolean("listen_log"),
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
@@ -767,9 +782,12 @@ namespace LedDrive
 		{
 			const std::string mode = ConfigFile::NormalizeName(value);
 			result.mode = mode == "compensate" ? Mode::Compensate :
-				mode == "script" ? Mode::Script : mode == "picture_only" ? Mode::PictureOnly : Mode::LogOnly;
+				mode == "script" ? Mode::Script : mode == "picture_only" ? Mode::PictureOnly :
+				mode == "listen" ? Mode::Listen : Mode::LogOnly;
 		}
 		readInt("tick_ms", 50, 5000, result.tickMs);
+		readInt("listen_port", 1024, 65535, result.listenPort);
+		config.TryGetBool(section, "listen_log", result.listenLog);
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
 		if (config.TryGetString(section, "rate_preset", value))
@@ -891,7 +909,8 @@ namespace LedDrive
 	inline std::string EffectiveProtocol(const ProjectorConfig& projector,
 		const LedDriveConfig& led)
 	{
-		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly) return "none";
+		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly || led.mode == Mode::Listen)
+			return "none";
 		return projector.protocol;
 	}
 }

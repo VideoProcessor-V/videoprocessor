@@ -5,6 +5,7 @@
 #include <led/LedController.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurement.h>
+#include <led/ScriptListener.h>
 
 #include "LedDriveTestSupport.h"
 
@@ -359,6 +360,127 @@ namespace VideoProcessorTest
 			}
 			Assert::AreEqual(opens, projector->opens, L"picture_only did not open the port");
 			Assert::AreEqual(writes, projector->Writes().size(), L"picture_only wrote nothing");
+		}
+
+		TEST_METHOD(ListenMessagesParse)
+		{
+			ScriptMessage m;
+			Assert::IsTrue(ParseScriptMessage("VP1 TICK -1 t=12.5 mean=41 max=230 hl=1 tp=210 tc=58", m));
+			Assert::AreEqual(std::string("TICK"), m.kind);
+			Assert::AreEqual(41, m.mean);
+			Assert::AreEqual(230, m.maximum);
+			Assert::AreEqual(1, m.highlight);
+			Assert::AreEqual(210, m.targetPower);
+			Assert::AreEqual(58, m.targetContrast);
+			Assert::IsTrue(ParseScriptMessage("VP1 CNTR 55 t=1.0 mean=-1 max=-1 hl=-1 tp=-1 tc=-1", m));
+			Assert::AreEqual(55, m.value);
+			Assert::IsFalse(ParseScriptMessage("VP2 CNTR 55", m));
+			Assert::IsFalse(ParseScriptMessage("VP1 LDMM 0", m));
+			Assert::IsFalse(ParseScriptMessage("garbage", m));
+		}
+
+		TEST_METHOD(ListenModeFollowsTheScriptWithoutThePort)
+		{
+			// mode: listen (owner 2026-10-13): the script drives COM1 and tells
+			// VP over UDP. VP never opens the port; a heard CNTR step is eased
+			// in the picture as if VP had sent it (the script smoothing); a TICK
+			// is compared with VP's own copy of the rules; both are logged.
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Listen;
+			config.scriptSmoothing = true;
+			config.listenPort = 47923;
+			config.listenLog = true;
+			// Beside the test binary (writable wherever the tests build).
+			char here[MAX_PATH] = {};
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
+			GetModuleFileNameA(self, here, MAX_PATH);
+			const std::string binary(here);
+			config.listenLogDirectory = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-listen-test";
+			DeleteFileA(ListenCsvPath(config.listenLogDirectory).c_str());
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			port.cntrLatencyMs = 100;
+			Assert::AreEqual(std::string("none"), EffectiveProtocol(port, config));
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.Listening().listening; }), L"the UDP port is bound");
+			module.SubmitMeasurement(Frame(40.0, 100, 230));
+			module.BeginFrame(0);
+			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 TICK -1 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 200 t=1.1 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+			Assert::IsTrue(WaitFor([&] { return module.Listening().ticks == 1 && module.Listening().lightCommands == 1; }));
+			const ListenAccuracy heard = module.Listening();
+			Assert::IsTrue(heard.meanDifference <= 2.0, (L"mean2 vs VP's APL: " + std::to_wstring(heard.meanDifference)).c_str());
+			Assert::AreEqual(1.0, heard.highlightAgreement, 1e-9);
+			// A heard CNTR step: the picture gain moves off 1 around the step
+			// and comes back (the smoother eases the projector's step).
+			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 56 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+			Assert::IsTrue(WaitFor([&] { return module.Listening().contrastCommands == 1; }));
+			double furthest = 0.0, last = 1.0;
+			const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+			while (std::chrono::steady_clock::now() < until)
+			{
+				const CompensationGain gain = module.BeginFrame(0);
+				const double g = gain.active ? gain.gain : 1.0;
+				furthest = std::max(furthest, std::fabs(g - 1.0));
+				last = g;
+				std::this_thread::sleep_for(std::chrono::milliseconds(8));
+			}
+			Assert::AreEqual(56, module.Listening().lastContrast);
+			Assert::IsTrue(furthest > 0.005, (L"the step was eased: furthest gain " + std::to_wstring(furthest)).c_str());
+			Assert::AreEqual(1.0, last, 0.002, L"and the gain is back at 1 after the step");
+			module.Stop();
+			Assert::AreEqual(0, projector->opens, L"listen must not open the port");
+			Assert::IsTrue(projector->Writes().empty(), L"listen must not write to the port");
+			// The data log has the TICK row with VP's measurement next to it.
+			std::ifstream csv(ListenCsvPath(config.listenLogDirectory));
+			std::string line, tick;
+			while (std::getline(csv, line))
+				if (line.find(",TICK,") != std::string::npos)
+					tick = line;
+			Assert::IsFalse(tick.empty(), L"the TICK row is logged");
+			Assert::IsTrue(tick.find(",40,230,1,") != std::string::npos, std::wstring(tick.begin(), tick.end()).c_str());
+			// The monitor's line: the heard commands and the agreement.
+			std::ifstream nowFile(ListenNowPath(config.listenLogDirectory));
+			std::string now;
+			std::getline(nowFile, now);
+			Assert::IsTrue(now.find("light=200") != std::string::npos && now.find("contrast=56") != std::string::npos &&
+				now.find("ticks=1") != std::string::npos, std::wstring(now.begin(), now.end()).c_str());
+		}
+
+		TEST_METHOD(ListenLogOffWritesNoCsv)
+		{
+			// listen_log off (the default): the monitor's line only, no data log.
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Listen;
+			config.listenPort = 47924;
+			config.listenLog = false;
+			char here[MAX_PATH] = {};
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
+			GetModuleFileNameA(self, here, MAX_PATH);
+			const std::string binary(here);
+			config.listenLogDirectory = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-listen-off-test";
+			CreateDirectoryA(config.listenLogDirectory.c_str(), nullptr);
+			DeleteFileA(ListenCsvPath(config.listenLogDirectory).c_str());
+			DeleteFileA(ListenNowPath(config.listenLogDirectory).c_str());
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.Listening().listening; }), L"the UDP port is bound");
+			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 210 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+			Assert::IsTrue(WaitFor([&] { return module.Listening().lightCommands == 1; }));
+			Assert::IsTrue(WaitFor([&] { return GetFileAttributesA(ListenNowPath(config.listenLogDirectory).c_str()) != INVALID_FILE_ATTRIBUTES; }),
+				L"the monitor's line is written");
+			module.Stop();
+			Assert::AreEqual(static_cast<DWORD>(INVALID_FILE_ATTRIBUTES), GetFileAttributesA(ListenCsvPath(config.listenLogDirectory).c_str()),
+				L"no data log with listen_log off");
 		}
 
 		TEST_METHOD(ModuleCompensatesAlongTheModelledLedLevel)
