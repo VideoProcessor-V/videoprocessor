@@ -32,6 +32,10 @@ namespace DejudderPolicy
 	struct Input
 	{
 		double strength = 0.0;
+		// Delta 10 (docs/VP-delta-8-9-10.md): the strength for even (2:2)
+		// cadences, 0 = off; and whether 29.97 takes it besides 30.00.
+		double strengthEven = 0.0;
+		bool evenIncludes2997 = false;
 		bool occlusionMask = false;   // 6c: the estimate also runs for the mask alone
 		bool grainMap = false;        // 8-3: and for the adaptive downscale's grain map alone
 		bool lowLatency = false;
@@ -62,6 +66,32 @@ namespace DejudderPolicy
 		return std::abs(ratio - std::round(ratio)) > 0.05;
 	}
 
+	// Delta 10: a 2:2 cadence (30p on 60 Hz, 25p on 50 Hz, 24p on 48 Hz).
+	inline bool IsEvenCadence(double ratio)
+	{
+		return std::abs(ratio - 2.0) <= 0.05;
+	}
+
+	// Delta 10: the source rates the even strength applies to: exact 30.00
+	// (+-0.01), and 29.97 (+-0.01) when chosen. Other 2:2 sources (25p on
+	// 50 Hz, 24p on 48 Hz) keep today's behaviour.
+	inline bool EvenRateSelected(double sourceHz, bool includes2997)
+	{
+		return std::abs(sourceHz - 30.0) <= 0.01 || (includes2997 && std::abs(sourceHz - 29.97) <= 0.01);
+	}
+
+	// The strength the extras run at: dejudder_strength on an uneven film
+	// cadence, dejudder_strength_even on a selected 2:2 cadence, else 0.
+	inline double EffectiveStrength(const Input& in)
+	{
+		const double ratio = CadenceRatio(in.sourceHz, in.displayHz);
+		if (IsUnevenCadence(ratio))
+			return in.strength;
+		if (IsEvenCadence(ratio) && EvenRateSelected(in.sourceHz, in.evenIncludes2997))
+			return in.strengthEven;
+		return 0.0;
+	}
+
 	// The order is the order of the checks: the first that fails is the
 	// reason reported.
 	// Mask-only mode is for film rates (planner 6b-2b/6c, item 3).
@@ -74,11 +104,11 @@ namespace DejudderPolicy
 	inline Reason Decide(const Input& in)
 	{
 		const bool alone = in.occlusionMask || in.grainMap;
-		if (!(in.strength > 0.0) && !alone) return Reason::Off;
+		if (!(in.strength > 0.0) && !(in.strengthEven > 0.0) && !alone) return Reason::Off;
 		if (in.lowLatency) return Reason::LowLatency;
 		if (in.interlaced) return Reason::Interlaced;
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) return Reason::UnknownRates;
-		const bool extras = in.strength > 0.0 && IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz));
+		const bool extras = EffectiveStrength(in) > 0.0;
 		if (!extras && !alone)
 			return Reason::IneligibleCadence;
 		// Without extras the estimate runs for the mask / map alone: film rates only.
@@ -95,7 +125,7 @@ namespace DejudderPolicy
 	// and an uneven film cadence. False in mask-only mode.
 	inline bool ExtrasAllowed(const Input& in)
 	{
-		return in.strength > 0.0 && IsUnevenCadence(CadenceRatio(in.sourceHz, in.displayHz));
+		return EffectiveStrength(in) > 0.0;
 	}
 
 	inline const char* Name(Reason reason)
@@ -107,7 +137,7 @@ namespace DejudderPolicy
 		case Reason::LowLatency: return "low-latency queue";
 		case Reason::Interlaced: return "interlaced input";
 		case Reason::UnknownRates: return "rates not known";
-		case Reason::IneligibleCadence: return "cadence not eligible (even, or video)";
+		case Reason::IneligibleCadence: return "cadence not eligible (even without its strength, or video)";
 		case Reason::VideoRateMaskOnly: return "mask / grain map only above film rates";
 		case Reason::NativeRgb: return "RGB capture";
 		case Reason::PlaneFormat: return "plane format unsuitable";

@@ -621,6 +621,9 @@ namespace RendererProfileConfig
 			// Stage 6: motion-compensated de-judder (0 = off, today's path) and
 			// its own match tolerance (mean luma difference, 8-bit codes).
 			if (key == "dejudder_strength") return IsNumberInRange(value, 0.0, 1.0);
+			// Delta 10: even (2:2) cadences, and which rates take it.
+			if (key == "dejudder_strength_even") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "dejudder_even_rates") return IsChoice(value, { "30", "30_and_29.97" });
 			if (key == "dejudder_match_tolerance") return IsNumberInRange(value, 0.5, 16.0);
 			// 6b-2: below this share of trusted blocks a frame is held whole
 			// (a cut between A and B).

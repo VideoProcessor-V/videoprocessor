@@ -700,6 +700,8 @@ namespace VideoProcessorTest
                 Case{ "dejudder_est_split", "on", true }, Case{ "dejudder_est_split_sad", "0", true },
                 Case{ "dejudder_est_split_sad", "20", false },
                 Case{ "dejudder_hold_feather_px", "4", true }, Case{ "dejudder_hold_feather_px", "17", false },
+                Case{ "dejudder_strength_even", "1", true }, Case{ "dejudder_strength_even", "1.2", false },
+                Case{ "dejudder_even_rates", "30_and_29.97", true }, Case{ "dejudder_even_rates", "29.97", false },
                 Case{ "dejudder_hold_hysteresis", "2", true }, Case{ "dejudder_hold_hysteresis", "0", false },
                 Case{ "dejudder_block_taper", "on", true }, Case{ "dejudder_taper_sad", "6", true },
                 Case{ "adaptive_upscale", "on", true }, Case{ "adaptive_upscale", "auto", false },
@@ -721,6 +723,45 @@ namespace VideoProcessorTest
                     Assert::IsTrue(error.find(c.key) != std::string::npos,
                         std::wstring(error.begin(), error.end()).c_str());
             }
+        }
+
+        // Delta 10: the even (2:2) strength. 30.00 takes it; 29.97 only when
+        // chosen; 24p keeps dejudder_strength; 50p on 60 Hz stays excluded.
+        TEST_METHOD(DejudderEvenCadenceStrength)
+        {
+            using DejudderPolicy::Reason;
+            DejudderPolicy::Input in;
+            in.strength = 0.25; in.sourceHz = 30.0; in.displayHz = 60.0;
+            in.haveNext = true; in.nextMatches = true;
+            auto with = [&](auto change) { DejudderPolicy::Input copy = in; change(copy); return copy; };
+            // Even strength 0: today (no extras, cadence not eligible).
+            Assert::IsTrue(DejudderPolicy::Decide(in) == Reason::IneligibleCadence);
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(in));
+            // Even strength 1.0 on 30.00: extras at 1.0.
+            const DejudderPolicy::Input on = with([](auto& i) { i.strengthEven = 1.0; });
+            Assert::IsTrue(DejudderPolicy::Decide(on) == Reason::Active);
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(on));
+            Assert::AreEqual(1.0, DejudderPolicy::EffectiveStrength(on));
+            Assert::IsTrue(DejudderPolicy::IsEvenCadence(DejudderPolicy::CadenceRatio(on.sourceHz, on.displayHz)));
+            // Only the even strength set (the uneven one 0): still active on 30p.
+            Assert::IsTrue(DejudderPolicy::Decide(with([](auto& i) { i.strength = 0.0; i.strengthEven = 1.0; })) == Reason::Active);
+            // 29.97: only with 30_and_29.97.
+            const DejudderPolicy::Input ntsc = with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 29.97; i.displayHz = 59.94; });
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(ntsc));
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i)
+                { i.strengthEven = 1.0; i.sourceHz = 29.97; i.displayHz = 59.94; i.evenIncludes2997 = true; })));
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i)
+                { i.strengthEven = 1.0; i.evenIncludes2997 = true; })), L"30.00 takes it with both choices");
+            // 24p on 60 Hz: the uneven strength, whatever the even key says.
+            const DejudderPolicy::Input film = with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 24.0; });
+            Assert::AreEqual(0.25, DejudderPolicy::EffectiveStrength(film));
+            // 25p on 60 Hz is uneven (2.4): the normal strength.
+            Assert::AreEqual(0.25, DejudderPolicy::EffectiveStrength(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 25.0; })));
+            // 50p on 60 Hz (1.2) stays excluded; Low_Latency stays off.
+            Assert::IsTrue(DejudderPolicy::Decide(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 50.0; })) == Reason::IneligibleCadence);
+            Assert::IsTrue(DejudderPolicy::Decide(with([](auto& i) { i.strengthEven = 1.0; i.lowLatency = true; })) == Reason::LowLatency);
+            // Other 2:2 sources (25p on 50 Hz) keep today's behaviour.
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 25.0; i.displayHz = 50.0; })));
         }
 
         TEST_METHOD(DejudderPolicyRunsOnlyForUnevenCadenceWithANextFrame)

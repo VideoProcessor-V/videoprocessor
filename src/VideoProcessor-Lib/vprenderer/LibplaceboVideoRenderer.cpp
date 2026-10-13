@@ -869,6 +869,9 @@ namespace
 		int saturation = 0;
 		// Stage 6 de-judder: 0 = off (today's path); its own match tolerance.
 		double dejudderStrength = 0.0;
+		// Delta 10: even (2:2) cadences, 0 = off; 29.97 included or not.
+		double dejudderStrengthEven = 0.0;
+		bool dejudderEvenIncludes2997 = false;
 		double dejudderMatchTolerance = 3.0;
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
@@ -1039,7 +1042,8 @@ namespace
 			<< ToneMappingTuning::Fingerprint(settings.toneTuning)
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
 			<< settings.saturation << '|'
-			<< settings.dejudderStrength << '|' << settings.dejudderMatchTolerance << '|'
+			<< settings.dejudderStrength << '|' << settings.dejudderStrengthEven << '|'
+			<< settings.dejudderEvenIncludes2997 << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
 			<< settings.dejudderGlobalPrior << '|' << settings.dejudderMotionScaleLo << '|'
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
@@ -1988,7 +1992,16 @@ namespace
 				DebugLog::Log("profile '%s': invalid saturation '%s'; using 0",
 					rule.section.c_str(), raw.c_str());
 		}
+		if (config.TryGetString(rule.section, "dejudder_even_rates", raw))
+		{
+			if (raw == "30" || raw == "30_and_29.97")
+				settings.dejudderEvenIncludes2997 = raw == "30_and_29.97";
+			else
+				DebugLog::Log("profile '%s': invalid dejudder_even_rates '%s'; keeping %s", rule.section.c_str(),
+					raw.c_str(), settings.dejudderEvenIncludes2997 ? "30_and_29.97" : "30");
+		}
 		for (const auto& numeric : { std::make_tuple("dejudder_strength", 0.0, 1.0, &settings.dejudderStrength),
+			std::make_tuple("dejudder_strength_even", 0.0, 1.0, &settings.dejudderStrengthEven),
 			std::make_tuple("dejudder_match_tolerance", 0.5, 16.0, &settings.dejudderMatchTolerance),
 			std::make_tuple("dejudder_frame_trust", 0.0, 1.0, &settings.dejudderFrameTrust),
 			std::make_tuple("dejudder_motion_scale_lo", 0.0, 16.0, &settings.dejudderMotionScaleLo),
@@ -4066,6 +4079,8 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderMaskParamSet = false;
 	bool grainToleranceParamSet = false;
 	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
+	float dejudderEffectiveStrength = 0.0f;   // delta 10: uneven or even strength for this source
+	bool dejudderEvenCadence = false;
 	bool adaptiveUpscaleThisFrame = false;    // Stage 8b on the frame being built
 	int adaptiveUpscaleRatioLogged = -1;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
@@ -4107,7 +4122,8 @@ struct LibplaceboVideoRenderer::Impl
 			return;
 		dejudderStatusTick = now;
 		std::string text;
-		const bool on = activeSettings.dejudderStrength > 0.0 || activeSettings.occlusionMask;
+		const bool on = activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0 ||
+			activeSettings.occlusionMask;
 		if (on)
 		{
 			char line[200];
@@ -8097,6 +8113,8 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.contrastRecovery = next.contrastRecovery;
 		currentTransport.saturation = next.saturation;
 		currentTransport.dejudderStrength = next.dejudderStrength;
+		currentTransport.dejudderStrengthEven = next.dejudderStrengthEven;
+		currentTransport.dejudderEvenIncludes2997 = next.dejudderEvenIncludes2997;
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.occlusionMask = next.occlusionMask;
@@ -8188,6 +8206,8 @@ struct LibplaceboVideoRenderer::Impl
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
 		changed(current.saturation != next.saturation, "saturation");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
+		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
+			current.dejudderEvenIncludes2997 != next.dejudderEvenIncludes2997, "dejudder_strength_even");
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
@@ -11057,7 +11077,8 @@ struct LibplaceboVideoRenderer::Impl
 		double sourceHz, uint64_t nextSourceSequence)
 	{
 		// Off and settled: today's path, nothing else is done.
-		if (!(activeSettings.dejudderStrength > 0.0) && !activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
+		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
+			!activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
 			dejudderReason == DejudderPolicy::Reason::Off &&
 			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0])
 		{
@@ -11072,6 +11093,8 @@ struct LibplaceboVideoRenderer::Impl
 		const AlphaPresentationSnapshot telemetry = presentationTelemetry.Snapshot();
 		DejudderPolicy::Input in;
 		in.strength = activeSettings.dejudderStrength;
+		in.strengthEven = activeSettings.dejudderStrengthEven;
+		in.evenIncludes2997 = activeSettings.dejudderEvenIncludes2997;
 		in.occlusionMask = activeSettings.occlusionMask;
 		in.grainMap = adaptiveGrainMapWanted;
 		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
@@ -11094,6 +11117,10 @@ struct LibplaceboVideoRenderer::Impl
 		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
 		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
 		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
+		// Delta 10: the strength the extras run at, and whether this is an
+		// even (2:2) cadence (its one extra at the exact midpoint).
+		dejudderEffectiveStrength = static_cast<float>(DejudderPolicy::EffectiveStrength(in));
+		dejudderEvenCadence = DejudderPolicy::IsEvenCadence(DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz));
 		if (in.sourceHz > 0.0 && in.displayHz > 0.0)
 			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
 		if (reason == DejudderPolicy::Reason::VideoRateMaskOnly && !dejudderMaskRateLogged)
@@ -11447,7 +11474,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (cached && !dejudderRenderedWarp)
 			dejudderRenderedWarp = std::make_unique<DejudderRendered::Warp>(log, d3d11->gpu);
-		const float strength = static_cast<float>(activeSettings.dejudderStrength);
+		const float strength = dejudderEffectiveStrength;
 		const float black[] = { 0.0f, 0.0f, 0.0f };
 
 		bool spent = false;
@@ -11540,7 +11567,8 @@ struct LibplaceboVideoRenderer::Impl
 			}
 
 			const auto extraStart = SteadyClock::now();
-			const float shift = strength * static_cast<float>(decision.delta);
+			// Delta 10: on a 2:2 cadence the one extra is the exact midpoint.
+			const float shift = strength * static_cast<float>(dejudderEvenCadence ? 0.5 : decision.delta);
 			pl_frame image = *f.image;
 			const pl_render_params* extraParams = &params;
 			bool renderedCrop = false;

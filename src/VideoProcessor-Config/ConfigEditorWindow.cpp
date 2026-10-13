@@ -6337,7 +6337,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Custom takes the strength typed below. Off below the uneven film cadences, in "
             "Low_Latency, and for RGB or interlaced input."));
         form->addRow(QStringLiteral("De-judder"), dejudderPreset);
-        auto* dejudderStrength = addText(QStringLiteral("De-judder strength (0 to 1)"),
+        auto* dejudderStrength = addText(QStringLiteral("Strength, 24p/25p on 60 Hz (0 to 1)"),
             QStringLiteral("dejudder_strength"));
         dejudderStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderStrength));
         dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; Gentle 0.25, Medium 0.35"));
@@ -6371,6 +6371,25 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             const QSignalBlocker blocker(dejudderPreset);
             dejudderPreset->setCurrentIndex(index);
         });
+        // Delta 10: even (2:2) cadences, e.g. 30p nature documentaries on 60 Hz.
+        auto* strengthEven = addText(QStringLiteral("Strength, 30p on 60 Hz (0 to 1)"),
+            QStringLiteral("dejudder_strength_even"));
+        strengthEven->setValidator(new QDoubleValidator(0.0, 1.0, 3, strengthEven));
+        strengthEven->setPlaceholderText(QStringLiteral("0 = off"));
+        strengthEven->setToolTip(QStringLiteral(
+            "For 30p material (documentaries shot to look real), where the 30 Hz strobing on slow pans is "
+            "what shows: one in-between picture per film frame at the exact midpoint. 1.0 is true frame-rate "
+            "doubling. Its quality rides on the motion estimate: held regions stay at 30 Hz inside a smooth "
+            "picture; landscapes do well, fast foreground action holds more. 0 = off (24p is set above)."));
+        auto* evenRates = addChoice(QStringLiteral("30p strength applies to"),
+            QStringLiteral("dejudder_even_rates"), { QStringLiteral("30"), QStringLiteral("30_and_29.97") });
+        evenRates->setItemText(evenRates->findData(QStringLiteral("30")), QStringLiteral("30.00 only"));
+        evenRates->setItemText(evenRates->findData(QStringLiteral("30_and_29.97")),
+            QStringLiteral("30.00 and 29.97 (broadcast TV)"));
+        evenRates->setToolTip(QStringLiteral(
+            "Exact 30.00 is mostly documentary and streaming material; 29.97 is broadcast television (sitcoms, "
+            "news, sport), largely video-look already, where smoothing is purely taste."));
+        MarkGpuCost(form, strengthEven, 2);
         auto* occlusionMask = addChoice(QStringLiteral("Occlusion mask for the dither"),
             QStringLiteral("occlusion_mask"), { QStringLiteral("on"), QStringLiteral("off") });
         occlusionMask->setToolTip(QStringLiteral(

@@ -124,3 +124,36 @@ resort only.
   frame: lift proportional to the ramp.
 - Slewed, and reset on a cut.
 - Sign and WTW preserved.
+
+## Delta 12 — `mode: picture_only` for the LED module (2026-10-13)
+
+`[led_drive]` gains `mode: picture_only` beside compensate / script /
+log_only. It lets the owner run the scene-adaptive picture terms without
+driving the projector.
+
+- **Measurement.** The measurement and statistics run as in compensate:
+  APL, highlights, cut/fade, the grain-suppressed highlights and the veil
+  estimate.
+- **Static projector.** The controller treats the projector as static: LED at
+  `led_ceiling`, CNTR 50.
+  - No LPW1 or CNTR command is ever sent (the log_only guarantee).
+  - On entering the mode, the startup/exit restore brings the projector to
+    that state once.
+- **Picture terms.**
+  - The compensation gain is exactly 1, and the highlight knee's headroom
+    term is the plain code headroom.
+  - The shadow lift and the boost toe stay active.
+- **Stats line.** It says "picture only" and shows the veil estimate.
+- **log_only is unchanged:** it observes the controller, with the picture
+  terms off.
+
+**Tests.**
+
+- picture_only:
+  - no byte on the port under any statistic;
+  - gain 1;
+  - the lift and the toe respond as in compensate;
+  - script paths untouched.
+- Switching compensate ↔ picture_only restores the projector to ceiling /
+  50 once and never leaves it dimmed.
+- log_only unchanged.
