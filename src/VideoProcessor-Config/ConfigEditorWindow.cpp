@@ -10257,13 +10257,36 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // VP's one-line summary, overwritten on each script message (the timer
     // keeps its own copy of the path: no window members in the callback).
     const QString listenNowPath = QFileInfo(configPath_).absolutePath() + QStringLiteral("/logs/led-listen-now.txt");
-    connect(listenTimer, &QTimer::timeout, listenBox, [listenNowPath, listenStatus, listenScript, listenVp, listenAgree]()
+    const QString scriptNowPath = QFileInfo(configPath_).absolutePath() + QStringLiteral("/logs/led-script-now.txt");
+    connect(listenTimer, &QTimer::timeout, listenBox, [listenNowPath, scriptNowPath, listenStatus, listenScript, listenVp, listenAgree]()
     {
+        // When VP runs the script: its state (ScriptHost).
+        QString hosted;
+        {
+            QFile scriptFile(scriptNowPath);
+            if (scriptFile.open(QIODevice::ReadOnly))
+            {
+                QHash<QString, QString> sv;
+                for (const QString& pair : QString::fromLatin1(scriptFile.readAll()).simplified().split(QLatin1Char(' ')))
+                {
+                    const int equals = pair.indexOf(QLatin1Char('='));
+                    if (equals > 0)
+                        sv.insert(pair.left(equals), pair.mid(equals + 1));
+                }
+                const QString state = sv.value(QStringLiteral("state"));
+                const QString last = sv.value(QStringLiteral("last")).replace(QLatin1Char('_'), QLatin1Char(' '));
+                hosted = state == QStringLiteral("running") ?
+                    QStringLiteral(" VP runs the script (pid %1).").arg(sv.value(QStringLiteral("pid"))) :
+                    state == QStringLiteral("waiting") ?
+                    QStringLiteral(" VP restarts the script in %1 s (%2).").arg(sv.value(QStringLiteral("restart_s")), last) :
+                    QString();
+            }
+        }
         const QString& path = listenNowPath;
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly))
         {
-            listenStatus->setText(QStringLiteral("No listen data yet: set Mode to Listen and run main_vp.py."));
+            listenStatus->setText(QStringLiteral("No listen data yet: set Mode to Listen and run main_vp.py (or let VP run it).") + hosted);
             return;
         }
         QHash<QString, QString> v;
@@ -10278,7 +10301,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             QStringLiteral("Not receiving (last message %1 s ago).").arg(quietMs / 1000) :
             QStringLiteral("Receiving from the script.")) +
             (v.value(QStringLiteral("log")) == QStringLiteral("1") ? QStringLiteral(" Logging to led-listen.csv.") :
-                QStringLiteral(" Not logging.")));
+                QStringLiteral(" Not logging.")) + hosted);
         auto dash = [&](const char* key)
         {
             const QString value = v.value(QString::fromLatin1(key));
@@ -10331,6 +10354,19 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         driveForm->addRow(QStringLiteral("Listen port"), listenPort);
         driveForm->addRow(QString(), bindCheckField(QStringLiteral("Log the script's commands with VP's measurement (logs\\led-listen.csv)"),
             led, QStringLiteral("listen_log"), false));
+        // Owner 2026-10-13: VP starts and supervises the script itself.
+        auto* scriptPath = bindTextField(led, QStringLiteral("listen_script"));
+        scriptPath->setPlaceholderText(QStringLiteral("empty = you start the script yourself"));
+        scriptPath->setToolTip(QStringLiteral(
+            "Mode Listen: the script VP starts (e.g. main_vp.py; next to this configuration, or a full path). VP runs it "
+            "without a window, restarts it if it stops (after 2, 4, 8 ... 60 s), ends it when the mode changes or VP "
+            "closes, and keeps its output in logs\\led-script.log. The script still drives the projector itself."));
+        driveForm->addRow(QStringLiteral("Script VP runs"), scriptPath);
+        auto* pythonPath = bindTextField(led, QStringLiteral("python"));
+        pythonPath->setPlaceholderText(QStringLiteral("python"));
+        pythonPath->setToolTip(QStringLiteral(
+            "The Python that runs the script: empty = python on the PATH, or the full path of python.exe."));
+        driveForm->addRow(QStringLiteral("Python"), pythonPath);
     }
     auto* assist = new QWidget;
     auto* assistForm = new QFormLayout(assist);

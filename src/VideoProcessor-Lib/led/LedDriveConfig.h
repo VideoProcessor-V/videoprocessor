@@ -194,6 +194,11 @@ namespace LedDrive
 		// (empty = beside vp.log).
 		int listenPort = 47811;
 		bool listenLog = false;
+		// Owner 2026-10-13 (docs/VP-led-listen-script-host-plan.md): VP starts
+		// and supervises the script itself (ScriptHost.h). listen_script empty =
+		// the owner starts it; python empty = "python" on PATH.
+		std::string listenScript;
+		std::string python;
 		std::string listenLogDirectory;
 		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
 		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
@@ -488,6 +493,10 @@ namespace LedDrive
 			Choice("mode", { "compensate", "script", "log_only", "picture_only", "listen" }),
 			Integer("listen_port", 1024, 65535),
 			Boolean("listen_log"),
+			Custom("listen_script", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
+				"the path of the script VP starts in mode listen (e.g. main_vp.py; relative to this configuration file, or absolute)"),
+			Custom("python", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
+				"the Python interpreter for listen_script (python.exe or its full path)"),
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
@@ -790,6 +799,25 @@ namespace LedDrive
 		readInt("tick_ms", 50, 5000, result.tickMs);
 		readInt("listen_port", 1024, 65535, result.listenPort);
 		config.TryGetBool(section, "listen_log", result.listenLog);
+		{
+			// listen_script relative to the configuration that names it; quotes dropped.
+			auto unquote = [](std::string text)
+			{
+				text = ConfigFile::Trim(text);
+				if (text.size() >= 2 && text.front() == '"' && text.back() == '"') text = text.substr(1, text.size() - 2);
+				return text;
+			};
+			if (config.TryGetString(section, "listen_script", value))
+			{
+				std::string path = unquote(value);
+				const bool absolute = path.empty() || (path.size() > 1 && path[1] == ':') || path[0] == '\\' || path[0] == '/';
+				const std::string& owner = config.GetLoadedPath();
+				const size_t slash = owner.find_last_of("\\/");
+				result.listenScript = absolute || slash == std::string::npos ? path : owner.substr(0, slash + 1) + path;
+			}
+			if (config.TryGetString(section, "python", value))
+				result.python = unquote(value);
+		}
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
 		if (config.TryGetString(section, "rate_preset", value))

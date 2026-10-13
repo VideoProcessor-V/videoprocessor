@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "LedDriveModule.h"
 #include "ScriptListener.h"
+#include "ScriptHost.h"
 
 #include <fstream>
 
@@ -859,6 +860,9 @@ namespace LedDrive
 		// mode: listen: the script's messages, VP's copy of its rules, and the
 		// running sums for ListenAccuracy.
 		ScriptListener listener;
+		// mode: listen with listen_script: VP runs the script (ScriptHost.h);
+		// it ends when the mode leaves listen or this thread stops.
+		ScriptHost scriptHost;
 		ScriptController shadow(current);
 		std::ofstream listenCsv;
 		const double listenStartMs = NowMs();
@@ -937,6 +941,8 @@ namespace LedDrive
 				awaitingContrastReset = false;
 			}
 			setSmoothing(smoothingWanted(), current.mode == Mode::Listen ? listenContrast : controller.Contrast());
+			if (current.mode != Mode::Listen)
+				scriptHost.Stop();   // the mode left listen
 			if (compensating)
 			{
 				// mode: compensate steps per frame in BeginFrame(); this thread
@@ -958,6 +964,8 @@ namespace LedDrive
 			}
 			else if (current.mode == Mode::Listen)
 			{
+				// The script, when VP runs it: started, watched, restarted.
+				scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory);
 				// The listener follows the mode and the port.
 				if (!listener.IsOpen() || listener.Port() != current.listenPort)
 				{

@@ -6,6 +6,7 @@
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurement.h>
 #include <led/ScriptListener.h>
+#include <led/ScriptHost.h>
 
 #include "LedDriveTestSupport.h"
 
@@ -449,6 +450,111 @@ namespace VideoProcessorTest
 			std::getline(nowFile, now);
 			Assert::IsTrue(now.find("light=200") != std::string::npos && now.find("contrast=56") != std::string::npos &&
 				now.find("ticks=1") != std::string::npos, std::wstring(now.begin(), now.end()).c_str());
+		}
+
+		TEST_METHOD(ScriptHostRunsWatchesRestartsAndStopsTheScript)
+		{
+			// Owner 2026-10-13: VP starts the listen script itself. A dummy
+			// script (its folder's mode.txt: "hang" prints and waits, "exit"
+			// prints and exits with code 3) under the real Python.
+			wchar_t python[MAX_PATH] = {};
+			if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr) == 0)
+			{
+				Logger::WriteMessage(L"ScriptHost test: no python.exe on PATH; not run");
+				return;
+			}
+			char here[MAX_PATH] = {};
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
+			GetModuleFileNameA(self, here, MAX_PATH);
+			const std::string binary(here);
+			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-script-host-test";
+			const std::string logs = folder + "\\logs";
+			CreateDirectoryA(folder.c_str(), nullptr);
+			CreateDirectoryA(logs.c_str(), nullptr);
+			const std::string script = folder + "\\dummy.py";
+			{
+				std::ofstream out(script, std::ios::trunc);
+				out << "import sys, time\n"
+					"mode = open('mode.txt').read().strip()\n"
+					"print('hello from the dummy script, mode ' + mode)\n"
+					"if mode == 'exit':\n"
+					"    sys.exit(3)\n"
+					"while True:\n"
+					"    time.sleep(0.2)\n";
+			}
+			auto setMode = [&](const char* mode) { std::ofstream(folder + "\\mode.txt", std::ios::trunc) << mode << "\n"; };
+			const std::string logPath = logs + "\\led-script.log", nowPath = logs + "\\led-script-now.txt";
+			DeleteFileA(logPath.c_str());
+			auto read = [](const std::string& path)
+			{
+				std::ifstream in(path);
+				return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			};
+			auto alive = [](DWORD pid)
+			{
+				HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+				if (!h) return false;
+				const bool running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+				CloseHandle(h);
+				return running;
+			};
+			char pythonPath[MAX_PATH] = {};
+			WideCharToMultiByte(CP_UTF8, 0, python, -1, pythonPath, MAX_PATH, nullptr, nullptr);
+			// The test's logs folder stands for "beside vp.log": ListenNowPath(directory).
+			const std::string directory = logs + "\\";
+			DWORD last = 0;
+			{
+				ScriptHost host;
+				// No script: nothing runs.
+				host.Update("", pythonPath, directory);
+				Assert::IsTrue(host.GetState() == ScriptHost::State::Off && host.Pid() == 0, L"no listen_script: off");
+				// Runs; its output reaches the log; the monitor's file says so.
+				setMode("hang");
+				host.Update(script, pythonPath, directory);
+				Assert::IsTrue(host.GetState() == ScriptHost::State::Running && host.Pid() != 0,
+					(L"started: " + std::wstring(host.LastError().begin(), host.LastError().end())).c_str());
+				const DWORD first = host.Pid();
+				Assert::IsTrue(WaitFor([&] { return read(logPath).find("hello from the dummy script, mode hang") != std::string::npos; }),
+					L"the script's output is in logs\\led-script.log");
+				Assert::IsTrue(read(nowPath).find("state=running pid=" + std::to_string(first)) != std::string::npos,
+					L"led-script-now.txt: running with its pid");
+				// Watched: still running a moment later, not restarted.
+				Sleep(500);
+				host.Update(script, pythonPath, directory);
+				Assert::IsTrue(host.Pid() == first && host.Starts() == 1, L"a running script is left alone");
+				// Stop (the mode left listen): the process ends.
+				host.Stop();
+				Assert::IsTrue(host.GetState() == ScriptHost::State::Off);
+				Assert::IsTrue(WaitFor([&] { return !alive(first); }), L"stopped: the process ended");
+				Assert::IsTrue(read(nowPath).find("state=stopped") != std::string::npos, L"led-script-now.txt: stopped");
+				// A script that exits: restarted after 2 s, then 4 s.
+				setMode("exit");
+				host.Update(script + "", pythonPath + std::string(), directory);   // same values: a start
+				const int startsBefore = host.Starts();
+				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.GetState() == ScriptHost::State::Waiting; }),
+					L"the exit is seen");
+				Assert::IsTrue(host.LastError() == "exited with code 3", std::wstring(host.LastError().begin(), host.LastError().end()).c_str());
+				Assert::IsTrue(host.SecondsToRestart() >= 1 && host.SecondsToRestart() <= 2, L"restart in 2 s");
+				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.Starts() == startsBefore + 1; }, 4000),
+					L"started again after 2 s");
+				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.GetState() == ScriptHost::State::Waiting; }),
+					L"the second exit is seen");
+				Assert::IsTrue(host.SecondsToRestart() >= 3 && host.SecondsToRestart() <= 4, L"then in 4 s (the back-off doubles)");
+				// A missing script: waiting, with the reason.
+				host.Update(folder + "\\missing.py", pythonPath, directory);
+				Assert::IsTrue(host.GetState() == ScriptHost::State::Waiting && host.LastError().find("script not found") == 0,
+					L"a missing script waits with the reason");
+				// Destroyed while running (VP exits): no orphan.
+				setMode("hang");
+				host.Update(script, pythonPath, directory);
+				Assert::IsTrue(host.GetState() == ScriptHost::State::Running);
+				last = host.Pid();
+				Assert::IsTrue(alive(last));
+			}
+			// The host is gone: its script is too.
+			Assert::IsTrue(WaitFor([&] { return !alive(last); }), L"no orphan after the host is destroyed");
 		}
 
 		TEST_METHOD(ListenLogOffWritesNoCsv)
