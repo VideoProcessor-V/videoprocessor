@@ -2,6 +2,7 @@
 #include "CustomHookChain.h"
 
 #include <DebugLog.h>
+#include <vprenderer/HookInstanceTag.h>
 
 #include <algorithm>
 #include <cmath>
@@ -278,6 +279,9 @@ namespace CustomHookChain
             }
             changed = true;
             const auto applied = ApplyHookParameters(entry.hook, entry.rule.parameters);
+            // A stateful shader's own validity tag (HookInstanceTag.h); no-op
+            // for shaders without the parameter.
+            SetHookParameter(entry.hook, "instance_tag", NextHookInstanceTag());
             std::string unused;
             for (const auto& parameter : entry.rule.parameters)
                 if (std::find(applied.begin(), applied.end(), parameter.first) == applied.end() &&

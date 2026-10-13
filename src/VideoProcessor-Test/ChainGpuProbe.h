@@ -22,6 +22,7 @@
 
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/DejudderWarp.h>
+#include <vprenderer/HookInstanceTag.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <SubtitleCutPasteShader.h>
@@ -117,6 +118,10 @@ namespace ChainGpuProbe
 		}
 		auto shader = std::make_unique<Shader>();
 		shader->hook = pl_mpv_user_shader_parse(gpu, text.data(), text.size());
+		if (shader->hook)
+			for (int i = 0; i < shader->hook->num_parameters; ++i)
+				if (std::string(shader->hook->parameters[i].name) == "instance_tag")
+					shader->hook->parameters[i].data->f = static_cast<float>(NextHookInstanceTag());   // as the hook chain
 		if (!shader->hook) { error = std::string("libplacebo rejected ") + file; return nullptr; }
 		for (const auto& parameter : parameters)
 			if (!SetParam(shader->hook, parameter.first.c_str(), parameter.second))

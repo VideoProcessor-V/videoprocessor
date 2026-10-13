@@ -272,7 +272,11 @@ dmd_clip_cntr: 59            # CNTR at which code 235 reaches the DMD max at ful
 flux_table:                  # optional; linear if absent
 
 [led_drive.Default]
-mode: compensate             # compensate | script | log_only
+mode: compensate             # compensate | script | log_only | picture_only | listen
+                             # picture_only and listen NEVER open the RS-232 port (planner 2026-10-13):
+                             # the owner's Python script keeps COM1. picture_only = VP's picture terms,
+                             # gain exactly 1; listen = the script drives, VP hears it over UDP
+                             # (listen_port, listen_log) and eases each CNTR step.
 cntr_assist: on              # off = no CNTR (feature switch, not a mode)
 cntr_assist_max: 100         # 7c-2: no cap beyond cntr_max_usable (was 62 until the dump existed)
 cut_cntr_level: 59           # bright cut / exit from black; default = dmd_clip_cntr

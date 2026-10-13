@@ -36,10 +36,10 @@ namespace LedDrive
 		double eotf = 2.2;
 		// Delta 11: the scatter-veil estimate of the latest statistics (0-1;
 		// the highlight level x area through shadow_lift_ansi's ramp, slewed
-		// at kVeilRatePerSecond, reset on a cut). Independent of `active`.
+		// at shadow_lift_ansi_rate per second, reset on a cut). Independent of
+		// `active`.
 		double veil = 0.0;
 	};
-	constexpr double kVeilRatePerSecond = 1.0;
 
 	// mode: listen: how closely VP's copy of the script's rules, on VP's own
 	// measurement, agrees with what the script measured and decided (each

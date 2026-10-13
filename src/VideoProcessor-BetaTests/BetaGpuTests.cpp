@@ -11,6 +11,7 @@
 #include "../VideoProcessor-Lib/vprenderer/DejudderWarp.h"
 #include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
 #include "../VideoProcessor-Lib/vprenderer/RenderedWarp.h"
+#include "../VideoProcessor-Lib/vprenderer/HookInstanceTag.h"
 #include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
 #include "../VideoProcessor-Test/ChainGpuProbe.h"
 
@@ -295,6 +296,7 @@ namespace
 		shader->gpu = gpu;
 		shader->hook = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
 		Check(shader->hook != nullptr, std::string("libplacebo 377 rejected ") + file);
+		SetParam(shader->hook, "instance_tag", NextHookInstanceTag());   // as the hook chain (item 7)
 		for (const auto& parameter : parameters)
 			Check(SetParam(shader->hook, parameter.first.c_str(), parameter.second),
 				std::string(file) + ": no parameter " + parameter.first);
@@ -923,6 +925,10 @@ void RunBetaDitherVectorsTests()
 		double repeatMean = 0.0;
 		difference(own[0], again, repeatMax, repeatMean);
 		std::cout << "Beta R1: own search repeated with a fresh hook: max " << repeatMax << ", mean " << repeatMean << "\n";
+		// Item 7: with per-instance tags a fresh hook never trusts a freed
+		// hook's state, so two identical runs agree exactly on every GPU.
+		Check(repeatMax == 0, "item 7: two fresh sigma-delta hooks disagree on identical input (max " +
+			std::to_string(repeatMax) + ")");
 	}
 	// vector_source 0 with VPVEC bound is the own search exactly (own =
 	// today's output byte for byte).
@@ -937,12 +943,7 @@ void RunBetaDitherVectorsTests()
 		int maxDiff = 0;
 		double mean = 0.0;
 		difference(own[0], bound, maxDiff, mean);
-		// Exact on WARP. On a hardware GPU two identical runs with fresh hooks
-		// already differ by up to 1 code (the repeat above: a new hook's
-		// uninitialised state textures can hold a freed hook's state; pre-R1, open
-		// finding, gate 2026-10-13), so the tolerance there is the repeat's.
-		const int allowed = ExtendedRangeGpuProbe::OnHardwareGpu() ? std::max(1, repeatMax) : 0;
-		Check(maxDiff <= allowed, "R1: vector_source 0 is not the own search (max " + std::to_string(maxDiff) + ")");
+		Check(maxDiff == 0, "R1: vector_source 0 is not the own search (max " + std::to_string(maxDiff) + ")");
 		std::cout << "Beta R1: vector_source 0 with VPVEC bound vs own: max " << maxDiff << ", mean " << mean << "\n";
 		// The texture bound at destroy: libplacebo restores its own and leaves
 		// VP's alive (no dangling reference).
@@ -981,8 +982,7 @@ void RunBetaDitherVectorsTests()
 		int maxDiff = 0;
 		double mean = 0.0;
 		difference(skipped, noSearch, maxDiff, mean);
-		Check(maxDiff <= (ExtendedRangeGpuProbe::OnHardwareGpu() ? 1 : 0),
-			"R1: with external vectors the own search still acted (max " + std::to_string(maxDiff) + ")");
+		Check(maxDiff == 0, "R1: with external vectors the own search still acted (max " + std::to_string(maxDiff) + ")");
 		std::cout << "Beta R1: untrusted external field vs no motion compensation: max " << maxDiff << ", mean " << mean << "\n";
 		sigma.reset();
 		pl_tex_destroy(handle, &untrusted);
@@ -993,7 +993,7 @@ void RunBetaDitherVectorsTests()
 	pl_tex_destroy(handle, &b.luma);
 	pl_tex_destroy(handle, &b.chroma);
 	CheckCleanLog(gpu, "R1");
-	std::cout << "Beta R1: own search unchanged with VPVEC bound (exact on WARP); no dangling texture; untrusted field = no search\n";
+	std::cout << "Beta R1: fresh hooks agree exactly; own search unchanged with VPVEC bound; no dangling texture; untrusted field = no search\n";
 }
 
 // Stage 10 on libplacebo 377: BTB/WTW greys survive 1:1, upscaling and

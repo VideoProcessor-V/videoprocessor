@@ -264,6 +264,7 @@ namespace LedDrive
 		double shadowLiftAnsi = 0.0;
 		double shadowLiftAnsiRampLo = 0.01;
 		double shadowLiftAnsiRampHi = 0.10;
+		double shadowLiftAnsiRate = 1.0;   // the veil's slew, per second (a cut resets at once)
 		// mode: compensate's highlight policy: below highlight_area_small the
 		// knee absorbs sustained highlights, above highlight_area_large the
 		// global gain makes room; blended in between. Protection relaxes over
@@ -550,6 +551,7 @@ namespace LedDrive
 			Number("shadow_lift_ansi", 0.0, 1.0),
 			Number("shadow_lift_ansi_ramp_lo", 0.0, 1.0),
 			Number("shadow_lift_ansi_ramp_hi", 0.0, 1.0),
+			Number("shadow_lift_ansi_rate", 0.1, 10.0),
 			Custom("gamma_boost", [](const std::string& value)
 				{
 					double gamma = 0.0;
@@ -839,6 +841,7 @@ namespace LedDrive
 		readNumber("shadow_lift_ansi", result.shadowLiftAnsi);
 		readNumber("shadow_lift_ansi_ramp_lo", result.shadowLiftAnsiRampLo);
 		readNumber("shadow_lift_ansi_ramp_hi", result.shadowLiftAnsiRampHi);
+		readNumber("shadow_lift_ansi_rate", result.shadowLiftAnsiRate);
 		if (config.TryGetString(section, "gamma_boost", value))
 			result.gammaBoost = ConfigFile::NormalizeName(value) == "off" ? 0.0 :
 				(Detail::ParseNumber(value, result.gammaBoost) ? result.gammaBoost : 0.0);

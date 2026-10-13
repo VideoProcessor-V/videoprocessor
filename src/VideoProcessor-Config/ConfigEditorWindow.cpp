@@ -6768,8 +6768,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("sdr_contrast_recovery"));
         sdrRecovery->setPlaceholderText(QStringLiteral("auto"));
         sdrRecovery->setToolTip(QStringLiteral(
-            "With the knee: returns the local detail the knee flattens in the highlights. Auto uses the contrast "
-            "recovery above (libplacebo's own when that is Auto); off = none."));
+            "With the knee: returns the local detail the knee flattens in the highlights. VP's own: libplacebo's "
+            "contrast recovery applies only to HDR. Auto uses the contrast recovery value above (libplacebo's "
+            "default when that is Auto); off = none."));
         MarkGpuCost(form, sdrRecovery, 1);
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { QStringLiteral("AUTO"), QStringLiteral("blue_noise"),
@@ -10186,6 +10187,11 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     liftRampHi->setToolTip(QStringLiteral(
         "The highlight amount at which the lift reaches its full strength. Keep it above the start value."));
     driveForm->addRow(QStringLiteral("Lift full at highlight amount"), liftRampHi);
+    auto* liftRate = numberControl(led, QStringLiteral("shadow_lift_ansi_rate"), 0.1, 10.0, 2, 0.1, 1.0, QString());
+    liftRate->setToolTip(QStringLiteral(
+        "How fast the lift follows a change in the highlights (full range per second; 1 = about a second). "
+        "A cut always takes the new value at once. Lower if a flash makes the darks pump."));
+    driveForm->addRow(QStringLiteral("Lift follows within (per second)"), liftRate);
     // mode: listen's monitor (owner 2026-10-13): the script's latest commands
     // and measurement next to VP's, from logs\led-listen.csv beside vp.log
     // (VP writes one row per script message), and the session's agreement.

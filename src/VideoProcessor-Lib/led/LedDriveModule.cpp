@@ -516,7 +516,7 @@ namespace LedDrive
 				gain.veil = target;
 			else
 			{
-				const double step = kVeilRatePerSecond * elapsed / 1000.0;
+				const double step = std::max(0.1, std::min(led.shadowLiftAnsiRate, 10.0)) * elapsed / 1000.0;
 				gain.veil += std::max(-step, std::min(target - gain.veil, step));
 			}
 			veilValid = true;

@@ -43,7 +43,7 @@ this fork is **off by default**: with no new keys, VP renders as Bill's VP
 | HDR deband off | libplacebo's debanding off for PQ/HLG (its HDR grain turns ~1 pixel in 10^4 black) | `[vprenderer.HDR]` `when: $eotf=="pq" \|\| $eotf=="hlg"`, `deband: off` | in the shipped sample | on | HDR film: no black specks in bright areas | `ShippedConfigurationsTurnDebandingOffForHdr` |
 | LED drive | Projector LED / CNTR control from the picture over RS-232 | `[led_drive.Default]` `enabled`, `mode` off / log_only / script / compensate / picture_only / listen; `[projector.Default]` port, baud | disabled | `log_only` for the first minutes, then `compensate` | Log first; then fade to black, hard cut dark to bright, static mid-APL, 5-10% grey | `Led*`, `ReplyParserAcceptsOnlyBarcoReplies` and the RS-232 connection test |
 | LED R2 Grain-suppressed highlights | A grainy block's highlight statistic leans toward its neighbours' mean, so grain does not read as highlights (APL and the script's block maximum unchanged) | `led_highlight_grain_suppress` | on (with the LED drive) | on | Grainy bright sky: LED not pumping on grain | `LedHighlightStatisticIgnoresGrain` |
-| LED delta 11 Boost toe, ANSI lift | The gamma boost fades out below `gamma_boost_knee` (shadows keep their gradation); the ANSI branch lifts the darks next to large highlights by `shadow_lift_ansi` (scene-adaptive, slewed 1/s, reset on a cut) | `gamma_boost_knee` 0, `gamma_boost_knee_width` 0, `shadow_lift_ansi` 0, `shadow_lift_ansi_ramp_lo/hi` 0.01/0.10 | off | off (the dark-hair test) | Dark hair against a bright window: texture kept | `LedBoostToeAndShadowLift` |
+| LED delta 11 Boost toe, ANSI lift | The gamma boost fades out below `gamma_boost_knee` (shadows keep their gradation); the ANSI branch lifts the darks next to large highlights by `shadow_lift_ansi` (scene-adaptive, slewed at `shadow_lift_ansi_rate`, reset on a cut) | `gamma_boost_knee` 0, `gamma_boost_knee_width` 0, `shadow_lift_ansi` 0, `shadow_lift_ansi_ramp_lo/hi` 0.01/0.10, `shadow_lift_ansi_rate` 1 per s | off | off (the dark-hair test) | Dark hair against a bright window: texture kept | `LedBoostToeAndShadowLift` |
 | LED picture_only | VP's picture compensation only, gain exactly 1: statistics, veil and shadow lift as in compensate; **the RS-232 port is never opened** (the original Python script can use it) | `mode: picture_only` | - | - | Port free: the script connects | `PictureOnlyNeverOpensThePortAndKeepsGainOne` |
 | LED listen | The original script (`docs/reference/main_vp.py`: main.py plus a UDP addendum) drives COM1 and tells VP each command; VP eases each heard contrast step as if it had sent it, compares its own copy of the script's rules, and never opens the port. Config LED page: the listen monitor (heard commands, VP's measurement, agreement) | `mode: listen`, `listen_port` 47811, `listen_log` off (on: `logs\led-listen.csv`, every message with VP's measurement) | - | - | Monitor shows "Receiving"; agreement figures | `ListenModeFollowsTheScriptWithoutThePort`, `ListenLogOffWritesNoCsv` |
 | 9 Room lights | Dark / lit room from a lux sensor on its own COM port; profiles select on `${ambient}` | `[ambient]` `mode` off / sensor, `port`, `baud` | off | off (sensor hardware not chosen) | - | `AmbientRoomLightsSwitchAndSelectProfiles`, `AmbientSensorReadsLuxLinesFromItsOwnPort` |
@@ -125,6 +125,17 @@ is the previous `libplacebo-377.dll`.
   start or a cut holds every block (none has been trusted twice yet); the
   extras start on the next frame. Intended (the spec's N consecutive
   frames).
+- The refinement round improved the synthesis (Beta 6d check, (12, 6) pan,
+  extra at s 0.5 against the true halfway picture, mean code difference):
+  9.68 with every refinement on (D1-D4, E1-E4, H1-H2) vs 13.33 without; 12.52
+  before delta 9.
+- R1's cost is measured on the stats line (Ctrl+I, de-judder line): the
+  sigma-delta's GPU time per extra, "dither X ms (de-judder vectors)" or
+  "(own search)"; switch `dither_vectors` to compare.
+- Sigma-delta state tags are per hook instance (`instance_tag`, set by the hook
+  chain on creation): a new hook never trusts a freed hook's leftover state (the
+  2026-10-13 GeForce finding). libplacebo offers no way to clear an mpv
+  shader's //!STORAGE textures, so the tag is the whole fix.
 - R1 gives the sigma-delta external vectors only on de-judder extras (the
   motion since the previous present is the shift step there, exactly); the
   first present of each source frame, cadence repeats and every frame

@@ -50,4 +50,8 @@ Fork-only additions since (source/fl35-patches; any libplacebo rebuild must carr
       VPVEC vector field) and restored before destroy. One new export (515).
 Build (0004): MSYS2 mingw64, options as in VP-FORK.md; all 13 library tests passed.
 lib/libplacebo-377.lib regenerated from lib/libplacebo-377.def (MSVC lib.exe /def).
+On every rebuild: add each fork export (0004: pl_mpv_user_shader_set_texture) to
+lib/libplacebo-377.def and regenerate the import library with
+  lib.exe /nologo /def:libplacebo-377.def /machine:x64 /out:libplacebo-377.lib
+or VP's Beta renderer will not link (the export would be missing from the .lib).
 Binary SHA256 (with 0001-0004): 15809853816eb8be355435504a531a7f73b92f4b68387d09419513cb5b509220

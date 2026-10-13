@@ -3988,6 +3988,22 @@ static bool SetSigmaDeltaVectors(const pl_hook* hook, pl_tex vectors)
 #endif
 }
 
+// Delta 8 R1 timing (planner 2026-10-13): the GPU time of an extra's
+// sigma-delta passes (libplacebo's per-pass timers; `last` is the most recent
+// completed measurement of that pass).
+struct DitherExtraPassTotals
+{
+	double sigmaNs = 0.0;
+};
+
+static void DitherExtraPassCallback(void* privateData, const struct pl_render_info* info)
+{
+	if (!privateData || !info || !info->pass || !info->pass->shader || !info->pass->shader->description)
+		return;
+	if (std::strstr(info->pass->shader->description, "sigma-delta"))
+		static_cast<DitherExtraPassTotals*>(privateData)->sigmaNs += static_cast<double>(info->pass->last);
+}
+
 static void AlphaOriginalPrRenderLoadInfoCallback(
 	void* privateData, const struct pl_render_info* info)
 {
@@ -4101,6 +4117,11 @@ struct LibplaceboVideoRenderer::Impl
 		unsigned long long nextFrameLate = 0;   // the frame after extras showed a refresh late
 		unsigned long long renderFailures = 0;
 		double lastMs = 0.0;                    // warp + render + present of the last extra
+		// Delta 8 R1: the sigma-delta's GPU time per extra (running averages),
+		// with the de-judder's vectors and with its own search.
+		double ditherMsExternal = 0.0;
+		double ditherMsOwn = 0.0;
+		bool ditherLastExternal = false;
 		int lastExtrasPerFrame = 0;
 		double cadenceRatio = 0.0;
 		std::string lastHold;
@@ -4204,16 +4225,22 @@ struct LibplaceboVideoRenderer::Impl
 			activeSettings.occlusionMask;
 		if (on)
 		{
-			char line[200];
+			char line[260];
 			const DejudderExtraStats& st = dejudderExtraStats;
+			// R1: the sigma-delta's GPU time per extra, in the mode in use.
+			char dither[64] = "";
+			if (st.ditherMsExternal > 0.0 || st.ditherMsOwn > 0.0)
+				std::snprintf(dither, sizeof(dither), ", dither %.2f ms (%s)",
+					st.ditherLastExternal ? st.ditherMsExternal : st.ditherMsOwn,
+					st.ditherLastExternal ? "de-judder vectors" : "own search");
 			if (dejudderReason != DejudderPolicy::Reason::Active)
 				std::snprintf(line, sizeof(line), "%s", DejudderPolicy::Name(dejudderReason));
 			else if (!dejudderExtrasAllowed)
 				std::snprintf(line, sizeof(line), "mask only (cadence %.2f)", st.cadenceRatio);
 			else
-				std::snprintf(line, sizeof(line), "s=%.2f, cadence %.2f, +%d extras %.1f ms, late %llu, full %llu, held %llu",
+				std::snprintf(line, sizeof(line), "s=%.2f, cadence %.2f, +%d extras %.1f ms, late %llu, full %llu, held %llu%s",
 					activeSettings.dejudderStrength, st.cadenceRatio, st.lastExtrasPerFrame, st.lastMs,
-					st.late + st.nextFrameLate, st.swapchainFull, st.holds);
+					st.late + st.nextFrameLate, st.swapchainFull, st.holds, dither);
 			text = line;
 			// "mask on" only when the mask was used within the last second.
 			if (activeSettings.occlusionMask)
@@ -11751,6 +11778,13 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			}
 			previousShift = shift;
+			const bool externalThisExtra = !vectorGuard.hooks.empty();
+			// R1 timing: this extra's sigma-delta GPU time.
+			DitherExtraPassTotals ditherTotals;
+			pl_render_params timedParams = *extraParams;
+			timedParams.info_callback = DitherExtraPassCallback;
+			timedParams.info_priv = &ditherTotals;
+			extraParams = &timedParams;
 			pl_frame target = *f.target;
 			if (renderedCrop)
 				target.crop = dejudderGeometry.targetCrop;   // the cache's rounded rectangle: 1:1
@@ -11819,6 +11853,13 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			++extras;
 			++dejudderExtraStats.extras;
+			if (ditherTotals.sigmaNs > 0.0)
+			{
+				double& average = externalThisExtra ? dejudderExtraStats.ditherMsExternal : dejudderExtraStats.ditherMsOwn;
+				const double ms = ditherTotals.sigmaNs / 1e6;
+				average = average > 0.0 ? average + 0.1 * (ms - average) : ms;
+				dejudderExtraStats.ditherLastExternal = externalThisExtra;
+			}
 			dejudderExtraStats.lastMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - extraStart).count();
 			if (blockMs > 500.0 * displayPeriod)

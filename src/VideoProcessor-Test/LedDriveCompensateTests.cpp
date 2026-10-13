@@ -242,7 +242,7 @@ namespace VideoProcessorTest
 		{
 			// Delta 11: the veil estimate is 0 on a dark frame without
 			// highlights; a bright patch (20% of the blocks at 235) moves it up
-			// at kVeilRatePerSecond, not at once; a cut sets it at once.
+			// at shadow_lift_ansi_rate (1/s), not at once; a cut sets it at once.
 			LedDriveConfig config = Compensate();
 			config.mode = Mode::LogOnly;
 			config.shadowLiftAnsi = 0.3;

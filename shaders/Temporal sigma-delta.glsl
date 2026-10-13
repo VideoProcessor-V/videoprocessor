@@ -110,7 +110,10 @@
  *   input value for the motion gate; RESID_NEXT/PREV_NEXT are the staging
  *   copies the quantizer writes. LQPREV and MVPREV use only their top-left
  *   quarter / sixteenth. Storage textures start uninitialised, so every
- *   read is guarded by a tag.
+ *   read is guarded by a tag. The tag is per hook instance (`instance_tag`,
+ *   set by the renderer when it creates the hook): on a hardware GPU a new
+ *   hook can be given a freed hook's memory, and a constant tag made it
+ *   trust that stale state on its first refresh (gate 2026-10-13).
  *
  * Copyright (C) 2026 Victor McPherson
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -185,6 +188,13 @@
 //!MINIMUM 1.0
 //!MAXIMUM 8.0
 1.0
+
+//!PARAM instance_tag
+//!DESC Set by the renderer when it creates the hook: this instance's state tag (stale state from a freed hook never matches)
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 16777216.0
+0.0
 
 //!PARAM vector_source
 //!DESC Set by the renderer (delta 8 R1): 1 = take this refresh's block vectors from VPVEC, 0 = own search
@@ -320,7 +330,9 @@ void hook()
 //!DESC VideoProcessor sigma-delta: block motion search
 //!COMPUTE 8 8
 
-const float VALID_TAG = 0.618;
+// The validity tag of this hook's state: one of 64 values (exact in rgba16f,
+// 1/128 apart against the 1e-3 test) chosen by instance_tag.
+#define VALID_TAG (0.25 + 0.0078125 * mod(floor(instance_tag), 64.0))
 // Window of quarter-resolution texels compared per block: the block's own
 // 4x4 plus a 2-texel margin, so a block that is only partly textured still
 // locks on.
@@ -553,7 +565,9 @@ void hook()
 //!DESC VideoProcessor sigma-delta: carry state to this refresh
 //!COMPUTE 16 16
 
-const float VALID_TAG = 0.618;
+// The validity tag of this hook's state: one of 64 values (exact in rgba16f,
+// 1/128 apart against the 1e-3 test) chosen by instance_tag.
+#define VALID_TAG (0.25 + 0.0078125 * mod(floor(instance_tag), 64.0))
 
 void hook()
 {
@@ -593,7 +607,9 @@ void hook()
 //!COMPUTE 16 16
 
 // Tag stored in RESID.a to mark a texel as initialised by this shader.
-const float VALID_TAG = 0.618;
+// The validity tag of this hook's state: one of 64 values (exact in rgba16f,
+// 1/128 apart against the 1e-3 test) chosen by instance_tag.
+#define VALID_TAG (0.25 + 0.0078125 * mod(floor(instance_tag), 64.0))
 
 // Interleaved gradient noise (Jimenez 2014) with a golden-ratio temporal
 // shift: cheap, spatially well distributed, decorrelated frame to frame.
