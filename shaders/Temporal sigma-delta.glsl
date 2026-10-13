@@ -441,6 +441,8 @@ float sad(ivec2 origin, ivec2 v)
 // vectors are exactly the serial search's (test: the serial reference in
 // src/VideoProcessor-Test/fixtures).
 shared float coarse_sads[81];
+shared float coarse_cur[25];     // the block's 5x5 coarse window
+shared float coarse_prev[169];   // the previous refresh's 13x13 around it
 shared float fine_sads[64];
 shared ivec2 fine_vectors[64];
 shared float cur_luma[256];
@@ -500,9 +502,22 @@ void hook()
 
     // Hierarchical block matching. Coarse level (1/16 resolution, one texel
     // per block): every vector within +-4 coarse texels (+-64 full pixels),
-    // one thread per candidate.
-    if (run_search && li < 81)
-        coarse_sads[li] = sad_coarse(block, ivec2(li % 9 - 4, li / 9 - 4));
+    // one thread per candidate, from the two windows in shared memory (the
+    // same values as lc_cur / lc_prev, the sum in sad_coarse's order).
+    if (run_search && li < 169) {
+        if (li < 25)
+            coarse_cur[li] = lc_cur(block + ivec2(li % 5 - 2, li / 5 - 2));
+        coarse_prev[li] = lc_prev(block + ivec2(li % 13 - 6, li / 13 - 6));
+    }
+    sync_group();
+    if (run_search && li < 81) {
+        int dx = li % 9 - 4, dy = li / 9 - 4;
+        float s = 0.0;
+        for (int y = -2; y <= 2; y++)
+            for (int x = -2; x <= 2; x++)
+                s += abs(coarse_cur[(y + 2) * 5 + x + 2] - coarse_prev[(y - dy + 6) * 13 + (x - dx + 6)]);
+        coarse_sads[li] = s;
+    }
     sync_group();
     if (run_search && lead) {
         ivec2 c = ivec2(0);
