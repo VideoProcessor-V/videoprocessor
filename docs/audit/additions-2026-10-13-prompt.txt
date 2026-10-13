@@ -1,0 +1,76 @@
+Audit request: everything built since the refinements plan - one audit for the whole set (owner rule: build all, one gate, one audit)
+Repo C:\dev\videoprocessor, branch stage7-rc2. Range 6f29497d..HEAD (HEAD = the commit that adds this prompt's results; see `git log 6f29497d..HEAD`).
+Please write findings to C:\dev\videoprocessor\docs\audit\additions-2026-10-13.md (save the file).
+Context for decisions: docs/BUILD-STATUS.md (every feature, key, default, known behaviours),
+C:\dev\handoff\planner-2026-10-12-refinements-built.txt and
+C:\dev\handoff\planner-2026-10-13-additions-built.txt (choices sent to the planner).
+
+Commits (oldest first)
+ c8d37325 plan docs + schema-test fix            14594db1 S2: Beta patch 0003 (rgba32f output pass; fbo_float32)
+ 67b44824 D1-D5 matcher refinements              f2520a9e keys, S1 grain-aware dither, probe axis
+ c0829d07 BUILD-STATUS                           d1837c6d / 48ffd8cb planner answers + Stage 8b adaptive upscale
+ 77f74227 delta 8 R2 LED grain-suppressed highlights
+ ed34eb47 / 96c00532 Stage 11a E1-E4 (E2 split + sub-field read by every consumer)
+ 9acb28dd delta 9 H1 feather, H2 hysteresis, H3 taper
+ ac1576c7 Config GPU cost markers                28361215 delta 10 even-cadence strength
+ b06e3bb3 delta 11 boost toe + ANSI shadow lift  705a6a5d delta 12 picture_only (never opens RS-232)
+ b579f162 LED mode listen (UDP from the owner's script; listen_log; Config monitor; docs/reference/main_vp.py)
+ 119d82e2 delta 13 SDR tone shape and headroom   4b4fa73a delta 8 R1 (Beta patch 0004, VectorField, VPVEC)
+ 390ead2e BUILD-STATUS                           58674379 Config wording/tooltips
+ (last)   R1 Beta test tolerance on hardware GPUs + this prompt's results
+
+Results (x64 Release, full /t:Rebuild at 390ead2e; gate 2026-10-13 00:00-01:23)
+- Native (WARP): 2576 tests, 2574 pass; failures ShellStylePlacementWithoutSizingHintsIsNotReverted and
+  SameSizeEditWithRestoredWriteTimeInvalidatesCache (both known from earlier gates).
+- Config: 101 pass + 4 remote-connection failures (remote target switch, remote-only client,
+  unavailable RPC, remembered target), the same four as the 2026-10-12 gate. After the wording
+  commit 58674379: the same (one interim failure caught an underscored token in a new label; fixed).
+- Beta 377 (WARP, VP_TEST_MATRIX=full): all groups PASS, matrix 488 of 488.
+- Native 7.360 full matrix: 488 of 488 (24 min).
+- Beta on the GeForce RTX 3050 Ti: see "Hardware-GPU finding" below; after the test change all PASS
+  (rerun 02:00: GeForce and WARP all groups PASS; repeat diagnostic max 1 / mean 0.079 on the GeForce, 0 on WARP).
+- Native GPU class on the GeForce: 124 of 125; SigmaDeltaGrainAwareCarry fails ("a map without grain
+  must not change the output"). It fails identically with the pre-R1 shader (119d82e2's) swapped in:
+  pre-existing, see below.
+- Timing (GeForce, 4K -> 2560x1600): normal FBOs 3.90 ms, output pass rgba32f 4.65 ms, every FBO
+  rgba32f 6.75 ms. The R1 per-present saving is not measured by any test yet.
+
+Hardware-GPU finding (pre-existing, please judge)
+On the GeForce, two runs of the sigma-delta with freshly created hooks on identical input differ by
+up to 1 code (Beta R1 diagnostic: max 1, mean 0.079; exact on WARP). The first hook created differs
+from every later one, which agree exactly with each other. Hypothesis: the shader's //!STORAGE
+textures start uninitialised and a new hook gets the freed memory of the previous one, including its
+VALID_TAG (0.618), so it trusts a stale residual/previous value on its first refresh(es). Effect:
+at most half a code on the first refreshes after the hook is recreated (renderer reset, resolution
+change). SigmaDeltaGrainAwareCarry (exact-equality assertions across separately created hooks) fails
+on the GeForce for the same reason. Possible fix (not made): invalidate the tags on the hook's first
+frame (the mpv `frame` counter is 0 for a new hook), or a per-instance random tag. The R1 Beta checks
+now allow the measured repeat difference on hardware GPUs (exact on WARP).
+
+Please check in particular
+1. R1 (4b4fa73a):
+   - Patch 0004 (3rdparty/libplacebo-beta/source/fl35-patches/0004-...patch): the swap/restore
+     logic, the vp_own_tex array growth (PL_ARRAY_APPEND into p->alloc), destroy never freeing a
+     caller texture, behaviour if the hook is re-parsed while bound; the regenerated import library
+     (lib/libplacebo-377.def gains pl_mpv_user_shader_set_texture).
+   - The renderer's VectorGuard: vector_source back to 0 and VPVEC unbound on every path out of an
+     extra (including the `break` failure paths after the guard is built); the hooks touched are
+     exactly the sigma-delta(s) in the extra's list.
+   - VectorField geometry: block centres in the OUTPUT picture's coordinates (cache-sized or whole
+     target; the source path's rounded destination size), crop test, NLS mapping and slope, holds as
+     trusted zero; shift step = shift - previous shift with previous = 0 for A.
+   - The shader's VPVEC branch (after the motion_compensation check; MVPREV left alone), the r8
+     placeholder, NaN handling.
+2. Listen mode (b579f162): socket lifetime and thread shutdown; parsing robustness (any datagram on
+   127.0.0.1:47811); the CSV/now-file writes (rotation, directory creation, listen_log on/off at run
+   time); that the RS-232 port is never opened in listen and picture_only (EffectiveProtocol "none");
+   the Config monitor's timer (it captures no window members: an earlier version crashed at teardown).
+3. Delta 13 (119d82e2): reference/shader identity (SdrToneShape::Map vs SDR tone shape.glsl), sign
+   handling below black, SDR-only gating (source and target), off = no hook, the recovery term.
+4. Delta 11/12: veil slew and cut reset; picture_only's gain exactly 1 and the rebuild on a switch
+   from compensate.
+5. Stage 11a / delta 9: the sub-field consumers (both warps, consistency, occlusion mask, grain map),
+   H2 hysteresis state across cuts and resets (first frame after start/cut holds by design).
+6. Config: every new key has a control, labels and ranges match the schema, the cost markers.
+
+Deployment: not done (only on the owner's request). Updater stays out of FL35 deploys.
