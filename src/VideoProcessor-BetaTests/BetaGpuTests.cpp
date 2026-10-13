@@ -2582,6 +2582,16 @@ void RunBetaDitherCompare()
 	}
 }
 
+// Owner 2026-10-13: the timing gate collects each scenario run here.
+struct ScenarioTimingRecord
+{
+	std::string label;
+	bool extras = false;
+	std::map<std::string, std::vector<double>> series;   // matcher, new_frame, extra, repeat, critical, ...
+	std::map<std::string, double> passPerSourceFrame;     // GPU ms per source frame, all its refreshes
+};
+static std::vector<ScenarioTimingRecord>* g_scenarioSink = nullptr;
+
 void RunBetaScenarioTiming()
 {
 	Gpu gpu;
@@ -2635,6 +2645,9 @@ void RunBetaScenarioTiming()
 	// frame's slot only its render; the matcher right after the first extra,
 	// in that extra's slot. The same GPU work as without, in that order.
 	const bool aheadOrder = envOn("VP_TEST_AHEAD");
+	// VP_TEST_SCENARIO_HDR=1: the synthetic sequences as PQ / BT.2020 (the
+	// tone-mapping cost; the pictures are not graded PQ).
+	const bool syntheticHdr = envOn("VP_TEST_SCENARIO_HDR");
 	// The synthetic sequence at 4K and 1080p.
 	const std::vector<Segment> segments = {
 		{ "still", 12, 0, 0, 0, false, 0, 1 },
@@ -2655,6 +2668,7 @@ void RunBetaScenarioTiming()
 		Source src;
 		src.label = big ? "synthetic 23.976p, 3840x2160" : "synthetic 23.976p, 1920x1080";
 		src.w = w; src.h = h; src.sourceRate = 24000.0 / 1001.0; src.frames = total;
+		src.hdr = syntheticHdr;
 		src.next = [segments, canvas, w, h](int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)
 		{
 			if (canvas->w != w + 1200)
@@ -3108,10 +3122,240 @@ void RunBetaScenarioTiming()
 				if (passes[i].first >= 0.05)
 					std::cout << "    " << passes[i].first << " ms  " << passes[i].second << "\n";
 		}
+		if (g_scenarioSink)
+		{
+			ScenarioTimingRecord record;
+			record.label = src.label;
+			record.extras = extras;
+			record.series["matcher"] = aheadOrder && extras ? std::vector<double>() : matcherMs.v;
+			record.series["new_frame"] = newFrame.v;
+			record.series["extra"] = extra.v;
+			record.series["repeat"] = repeat.v;
+			record.series["critical"] = newWithMatcher.v;
+			record.series["extra_with_matcher"] = extraWithMatcher.v;
+			record.series["any_slot"] = anySlot.v;
+			record.series["source_frame"] = perSourceFrame.v;
+			int sourceFrames = 0;
+			for (const auto& kind : perKind)
+				if (kind.first == "new frame")
+					sourceFrames = kind.second.second;
+			for (const auto& kind : perKind)
+				for (const auto& pass : kind.second.first)
+					record.passPerSourceFrame[pass.first] += pass.second / std::max(1, sourceFrames);
+			g_scenarioSink->push_back(std::move(record));
+		}
 		for (pl_tex* t : { &luma[0], &luma[1], &chroma[0], &chroma[1] })
 			pl_tex_destroy(g, t);
 	}
 	pl_tex_destroy(g, &targetTex);
+}
+
+// The timing gate (owner 2026-10-13): every component and combination
+// within its budget on this GPU, so no option or pairing of options brings a
+// hiccup. Runs the scenario over the combinations (SDR / HDR, matcher size
+// all / off, estimate ahead on / off, chroma Catmull-Rom / the upscaler) on
+// the synthetic 4K and 1080p sequences, and the real clip (VP_TEST_CLIP,
+// with VP_TEST_CLIP_PQ for its HDR copy) as 23.976p ahead on / off. Budgets:
+// tools/timing-budgets.cfg (or VP_TEST_BUDGETS), the section whose name is
+// part of this GPU's name; a GPU without one is reported only.
+// VP_TEST_TIMING_GATE=1 with VP_TEST_GPU=hardware.
+void RunBetaTimingGate()
+{
+	std::string device;
+	ExtendedRangeGpuProbe::TestDeviceParams(&device);
+	if (!ExtendedRangeGpuProbe::OnHardwareGpu())
+	{
+		std::cout << "Beta timing gate: needs VP_TEST_GPU=hardware (WARP times mean nothing); skipped\n";
+		return;
+	}
+	// The budgets file.
+	auto envValue = [](const char* name)
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		std::string value;
+		if (_dupenv_s(&v, &n, name) == 0 && v) value = v;
+		std::free(v);
+		return value;
+	};
+	std::string budgetPath = envValue("VP_TEST_BUDGETS");
+	if (budgetPath.empty())
+	{
+		char module[MAX_PATH] = {};
+		HMODULE self = nullptr;
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCSTR>(&RunBetaTimingGate), &self);
+		GetModuleFileNameA(self, module, MAX_PATH);
+		std::string dir(module);
+		for (int up = 0; up < 6 && budgetPath.empty(); ++up)
+		{
+			const size_t slash = dir.find_last_of("\\/");
+			if (slash == std::string::npos) break;
+			dir = dir.substr(0, slash);
+			const std::string candidate = dir + "\\tools\\timing-budgets.cfg";
+			if (GetFileAttributesA(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+				budgetPath = candidate;
+		}
+	}
+	auto lower = [](std::string t) { for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return t; };
+	std::map<std::string, double> budgets;
+	std::string section;
+	{
+		std::ifstream in(budgetPath);
+		std::string line, current;
+		bool matched = false;
+		while (std::getline(in, line))
+		{
+			if (!line.empty() && line.back() == '\r') line.pop_back();
+			const size_t hash = line.find('#');
+			if (hash != std::string::npos) line = line.substr(0, hash);
+			while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+			size_t start = 0;
+			while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start]))) ++start;
+			line = line.substr(start);
+			if (line.empty()) continue;
+			if (line.front() == '[' && line.back() == ']')
+			{
+				current = line.substr(1, line.size() - 2);
+				matched = !matched && lower(device).find(lower(current)) != std::string::npos;
+				if (matched) section = current;
+				continue;
+			}
+			if (!matched || current != section) continue;
+			const size_t eq = line.find('=');
+			if (eq == std::string::npos) continue;
+			std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+			while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) key.pop_back();
+			budgets[key] = std::atof(value.c_str());
+		}
+	}
+	std::cout << "Beta timing gate on " << device << ": budgets " << (section.empty() ? std::string("none for this GPU (report only)") :
+		"[" + section + "] from " + budgetPath + " (" + std::to_string(budgets.size()) + " limits)") << "\n";
+
+	struct Combo { std::string name; bool hdr; std::string lowRes; bool ahead; std::string chroma; bool clip; };
+	std::vector<Combo> combos;
+	for (int hdr = 0; hdr < 2; ++hdr)
+		for (const char* lowRes : { "all", "off" })
+			for (int ahead = 0; ahead < 2; ++ahead)
+				for (const char* chroma : { "catmull_rom", "" })
+				{
+					Combo c{ std::string(hdr ? "HDR" : "SDR") + ", matcher " + lowRes + ", ahead " + (ahead ? "on" : "off") +
+						", chroma " + (*chroma ? chroma : "upscaler"), hdr != 0, lowRes, ahead != 0, chroma, false };
+					combos.push_back(c);
+				}
+	const std::string clip = envValue("VP_TEST_CLIP"), clipPq = envValue("VP_TEST_CLIP_PQ");
+	for (int hdr = 0; hdr < 2; ++hdr)
+		for (int ahead = 0; ahead < 2; ++ahead)
+			if (!(hdr ? clipPq : clip).empty())
+				combos.push_back({ std::string("clip as 23.976p, ") + (hdr ? "HDR" : "SDR") + ", defaults, ahead " + (ahead ? "on" : "off"),
+					hdr != 0, "all", ahead != 0, "catmull_rom", true });
+
+	struct Result { std::string name, scope; ScenarioTimingRecord record; };
+	std::vector<Result> results;
+	for (const Combo& c : combos)
+	{
+		std::vector<ScenarioTimingRecord> sink;
+		g_scenarioSink = &sink;
+		_putenv_s("VP_TEST_LOWRES", c.lowRes.c_str());
+		_putenv_s("VP_TEST_AHEAD", c.ahead ? "1" : "0");
+		_putenv_s("VP_TEST_CHROMA", c.chroma.empty() ? "" : c.chroma.c_str());
+		_putenv_s("VP_TEST_SCENARIO_HDR", c.hdr && !c.clip ? "1" : "0");
+		_putenv_s("VP_TEST_SCENARIO_CLIP_ONLY", c.clip ? "1" : "0");
+		_putenv_s("VP_TEST_CLIP_24P", c.clip ? "1" : "0");
+		_putenv_s("VP_TEST_CLIP_HDR", c.clip && c.hdr ? "1" : "0");
+		_putenv_s("VP_TEST_CLIP", c.clip ? (c.hdr ? clipPq : clip).c_str() : "");
+		std::cout << "== timing gate: " << c.name << "\n";
+		RunBetaScenarioTiming();
+		g_scenarioSink = nullptr;
+		for (ScenarioTimingRecord& r : sink)
+			results.push_back({ c.name, c.lowRes == "off" ? "full" : "half", std::move(r) });
+	}
+	_putenv_s("VP_TEST_CLIP", clip.c_str());
+
+	// The checks: "[half:|full:]<series>.<p99|max|mean> = ms" and
+	// "[half:|full:]pass:<name part>.mean = ms" (GPU per source frame, all its
+	// refreshes). The scope is the matcher size of the run (half = all or
+	// search, full = off); a key without one applies to every run.
+	auto stat = [](std::vector<double> v, const std::string& which) -> double
+	{
+		if (v.empty()) return -1.0;
+		std::sort(v.begin(), v.end());
+		if (which == "max") return v.back();
+		if (which == "mean") { double m = 0.0; for (double x : v) m += x; return m / v.size(); }
+		return v[std::min(v.size() - 1, static_cast<size_t>(v.size() * 0.99))];
+	};
+	auto budgetFor = [&](const std::string& scope, const std::string& key) -> const double*
+	{
+		auto found = budgets.find(scope + ":" + key);
+		if (found == budgets.end()) found = budgets.find(key);
+		return found == budgets.end() ? nullptr : &found->second;
+	};
+	int checked = 0, over = 0;
+	std::map<std::string, std::pair<double, std::string>> worst;   // scope:key -> worst value and where
+	auto check = [&](const Result& r, const std::string& key, double value)
+	{
+		const std::string where = r.name + " | " + r.record.label;
+		auto& w = worst[r.scope + ":" + key];
+		if (value > w.first) w = { value, where };
+		if (const double* budget = budgetFor(r.scope, key))
+		{
+			++checked;
+			if (value > *budget)
+			{
+				++over;
+				std::cout << "FAIL timing " << r.scope << ":" << key << " " << value << " ms > " << *budget << " ms: " << where << "\n";
+			}
+		}
+	};
+	for (const Result& r : results)
+	{
+		for (const auto& series : r.record.series)
+			for (const char* which : { "p99", "max", "mean" })
+			{
+				const double value = stat(series.second, which);
+				if (value >= 0.0)
+					check(r, series.first + "." + which, value);
+			}
+		// Passes: each named in a budget (summed over the passes it names),
+		// and every pass of 0.3 ms or more in the report.
+		std::map<std::string, double> named;
+		for (const auto& budget : budgets)
+		{
+			const size_t colon = budget.first.find(':');
+			std::string key = budget.first;
+			if (colon != std::string::npos && budget.first.compare(0, 5, "pass:") != 0)
+			{
+				if (budget.first.substr(0, colon) != r.scope) continue;
+				key = budget.first.substr(colon + 1);
+			}
+			if (key.compare(0, 5, "pass:") != 0 || key.size() <= 10) continue;
+			const std::string part = key.substr(5, key.size() - 10);   // drop "pass:" and ".mean"
+			double value = 0.0;
+			for (const auto& pass : r.record.passPerSourceFrame)
+				if (pass.first.find(part) != std::string::npos)
+					value += pass.second;
+			named[key] = value;
+		}
+		for (const auto& n : named)
+			check(r, n.first, n.second);
+		for (const auto& pass : r.record.passPerSourceFrame)
+			if (pass.second >= 0.3 && !named.count("pass:" + pass.first + ".mean"))
+			{
+				auto& w = worst[r.scope + ":pass:" + pass.first + ".mean"];
+				if (pass.second > w.first) w = { pass.second, r.name + " | " + r.record.label };
+			}
+	}
+	std::cout << "Beta timing gate: worst over " << results.size() << " runs (" << combos.size() << " combinations):\n";
+	for (const auto& w : worst)
+	{
+		const size_t colon = w.first.find(':');
+		const double* budget = budgetFor(w.first.substr(0, colon), w.first.substr(colon + 1));
+		std::cout << "  " << w.first << " " << w.second.first << " ms" <<
+			(budget ? " (budget " + std::to_string(*budget) + ")" : std::string()) << "  at " << w.second.second << "\n";
+	}
+	std::cout << (over == 0 ? "PASS" : "FAIL") << " Beta timing gate: " << checked << " checks, " << over << " over budget" <<
+		(section.empty() ? " (no budgets for this GPU: report only)" : "") << "\n";
+	Check(over == 0, "timing gate: " + std::to_string(over) + " checks over budget");
 }
 
 // S2 A/B regression (planner 2026-10-12): the chain bias is the float16

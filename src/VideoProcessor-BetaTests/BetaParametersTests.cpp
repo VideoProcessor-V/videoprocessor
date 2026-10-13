@@ -11,6 +11,7 @@ void RunBetaScenarioTiming(); // BetaGpuTests.cpp
 void RunBetaOptionQuality(); // BetaGpuTests.cpp
 void RunBetaDejudderQuality(); // BetaGpuTests.cpp
 void RunBetaDitherCompare(); // BetaGpuTests.cpp
+void RunBetaTimingGate(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
@@ -103,6 +104,16 @@ int main() {
             if (runDitherCompare)
             {
                 RunBetaDitherCompare();
+                return 0;
+            }
+            char* tg = nullptr;
+            size_t tgLength = 0;
+            const bool runTimingGate = _dupenv_s(&tg, &tgLength, "VP_TEST_TIMING_GATE") == 0 && tg &&
+                std::string(tg) == "1";
+            std::free(tg);
+            if (runTimingGate)
+            {
+                RunBetaTimingGate();
                 return 0;
             }
             if (runQuality)
