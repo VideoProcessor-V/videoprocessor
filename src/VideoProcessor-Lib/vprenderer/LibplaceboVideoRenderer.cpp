@@ -4357,6 +4357,10 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	std::atomic<double> ledCompensationEotf{ 2.2 };
 	std::atomic<double> ledKnee{ 0.08 };
+	// Delta 11: the boost toe and the ANSI lift's strength (module or not).
+	std::atomic<double> ledBoostKnee{ 0.0 };
+	std::atomic<double> ledBoostKneeWidth{ 0.05 };
+	std::atomic<double> ledShadowLift{ 0.0 };
 	std::vector<const pl_hook*> frameHooks;
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
@@ -15981,7 +15985,7 @@ struct LibplaceboVideoRenderer::Impl
             DebugLog::Log("LED drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
                 boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
         }
-        if (led || boostExponent != 1.0)
+        if (led || boostExponent != 1.0 || ledShadowLift.load(std::memory_order_acquire) > 0.0)
         {
             if (!ledCompensationConfigured)
             {
@@ -16050,6 +16054,11 @@ struct LibplaceboVideoRenderer::Impl
                     compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0);
                 CustomHookChain::SetHookParameter(frameHooks[i], "compensation_eotf", compensation.eotf);
                 CustomHookChain::SetHookParameter(frameHooks[i], "boost", boostExponent);
+                CustomHookChain::SetHookParameter(frameHooks[i], "boost_knee", ledBoostKnee.load(std::memory_order_acquire));
+                CustomHookChain::SetHookParameter(frameHooks[i], "boost_knee_width",
+                    ledBoostKneeWidth.load(std::memory_order_acquire));
+                CustomHookChain::SetHookParameter(frameHooks[i], "shadow_lift", ledShadowLift.load(std::memory_order_acquire));
+                CustomHookChain::SetHookParameter(frameHooks[i], "veil", compensation.veil);
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
@@ -17751,6 +17760,9 @@ void LibplaceboVideoRenderer::Build()
 	m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
 	m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
 	m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
+	m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
+	m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
+	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
 	m_impl->displayRefreshRate.SetEventSink(
 		[this](const std::string& event, double actualRefreshRate,
 			double requestedRefreshRate, double previousRefreshRate)
@@ -18021,11 +18033,17 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	m_ledGammaBoost = boostConfig.gammaBoost;
 	m_ledCompensationEotf = boostConfig.compensationEotf;
 	m_ledKnee = boostConfig.knee;
+	m_ledBoostKnee = boostConfig.gammaBoostKnee;
+	m_ledBoostKneeWidth = boostConfig.gammaBoostKneeWidth;
+	m_ledShadowLift = boostConfig.shadowLiftAnsi;
 	if (m_impl)
 	{
 		m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
 		m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
 		m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
+		m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
+		m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
+		m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
 	}
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
 		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))

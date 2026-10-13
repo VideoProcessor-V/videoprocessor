@@ -237,6 +237,42 @@ namespace VideoProcessorTest
 			Assert::IsTrue(out.light < 120, L"The LED follows the fade faster than the scene drift would");
 		}
 
+		TEST_METHOD(ModuleVeilEstimateFollowsHighlightsSlewedAndResetsOnACut)
+		{
+			// Delta 11: the veil estimate is 0 on a dark frame without
+			// highlights; a bright patch (20% of the blocks at 235) moves it up
+			// at kVeilRatePerSecond, not at once; a cut sets it at once.
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::LogOnly;
+			config.shadowLiftAnsi = 0.3;
+			ProjectorConfig port;
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			double time = 0.0;
+			auto frames = [&](const RawMeasurement& raw, int count)
+			{
+				for (int i = 0; i < count; ++i)
+				{
+					module.SubmitMeasurement(raw);
+					time += 1000.0 / 60.0;
+					module.BeginFrameAt(0, time);
+				}
+				return module.Veil();
+			};
+			const double dark = frames(Frame(30.0), 30);
+			Assert::AreEqual(0.0, dark, 1e-9, L"no highlight: no veil");
+			const double early = frames(Frame(30.0, 2000, 235), 6);
+			const double late = frames(Frame(30.0, 2000, 235), 120);
+			Assert::IsTrue(early < 0.2, (L"slewed: after 0.1 s " + std::to_wstring(early)).c_str());
+			Assert::IsTrue(late > 0.95, (L"after 2 s " + std::to_wstring(late)).c_str());
+			// Back to dark, then a cut to a bright scene: the cut sets it at once.
+			frames(Frame(30.0), 120);
+			const double before = module.Veil();
+			const double atCut = frames(Frame(200.0, 2000, 235), 1);
+			Assert::IsTrue(before < 0.05 && atCut > 0.9, (L"a cut resets: " + std::to_wstring(before) + L" -> " +
+				std::to_wstring(atCut)).c_str());
+		}
+
 		TEST_METHOD(ModuleCompensatesAlongTheModelledLedLevel)
 		{
 			auto projector = std::make_shared<FakeProjector>();

@@ -3231,6 +3231,105 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&hook);
 		}
 
+		TEST_METHOD(LedBoostToeAndShadowLift)
+		{
+			// Delta 11. The boost toe: knee 0 is today's boost; knee 0.10 is the
+			// identity below the knee, today's boost above knee + width,
+			// monotonic; below black untouched; the gain path unchanged. The
+			// ANSI shadow lift: none without a veil; with veil 1 and strength
+			// 0.3 the darks rise by 0.3 x 0.1 x 1.6875 x u(1 - u)^2.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 2;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected LED compensation.glsl");
+			const pl_hook* hook = hooks[0];
+			const double boost = 2.2 / 2.4;
+			auto set = [&](double gain, double knee, double lift, double veil)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", boost));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", gain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.08));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", 2.2));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost_knee", knee));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost_knee_width", 0.05));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "shadow_lift", lift));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "veil", veil));
+			};
+			// 7.360 drops the output encoding after a PRE_OUTPUT hook; the
+			// renderer then puts VP's repair first, as here.
+			OutputEncodingRepair::Hook repair;
+			auto code = [&](double v, enum pl_color_levels levels = PL_COLOR_LEVELS_FULL)
+			{
+				pl_color_repr target{};
+				target.sys = PL_COLOR_SYSTEM_RGB;
+				target.levels = levels;
+				target.bits.sample_depth = 10;
+				target.bits.color_depth = 10;
+				repair.SetTarget(target);
+				std::vector<const pl_hook*> list = { hook };
+				if (OutputEncodingRepair::Needed(list))
+					list.insert(list.begin(), repair.Get());
+				return fixture.RenderTenBitSequence(list, levels, static_cast<float>(v), 1, nullptr, 10)[0];
+			};
+			std::wstring problems;
+			// Knee 0 = today's global boost.
+			set(1.0, 0.0, 0.0, 0.0);
+			for (double v : { 0.03, 0.12, 0.5, 0.9 })
+				if (std::abs(code(v) - std::lround(1023.0 * std::pow(v, boost))) > 1)
+					problems += L"knee 0 at " + std::to_wstring(v) + L"; ";
+			// Knee 0.10: identity below, the boost above 0.15, monotonic.
+			std::vector<int> toe;
+			set(1.0, 0.10, 0.0, 0.0);
+			for (int i = 0; i <= 200; ++i)
+				toe.push_back(code(i * 0.005));
+			for (int i = 0; i <= 200; ++i)
+			{
+				const double v = i * 0.005;
+				if (v < 0.0999 && std::abs(toe[i] - std::lround(1023.0 * v)) > 1)
+					problems += L"toe not identity at " + std::to_wstring(v) + L"; ";
+				if (v > 0.1501 && std::abs(toe[i] - std::lround(1023.0 * std::pow(v, boost))) > 1)
+					problems += L"toe not the boost at " + std::to_wstring(v) + L"; ";
+				if (i > 0 && toe[i] < toe[i - 1])
+					problems += L"toe not monotonic at " + std::to_wstring(v) + L"; ";
+			}
+			// Below black untouched (limited range code 40).
+			const int btb = code((40.0 - 64.0) / 876.0, PL_COLOR_LEVELS_LIMITED);
+			if (btb != 40)
+				problems += L"code 40 became " + std::to_wstring(btb) + L"; ";
+			// The gain path unchanged with the toe on (above the toe).
+			set(2.0, 0.0, 0.0, 0.0);
+			const int gainPlain = code(0.4);
+			set(2.0, 0.10, 0.0, 0.0);
+			if (code(0.4) != gainPlain)
+				problems += L"the gain changed with the toe on; ";
+			// Shadow lift.
+			set(1.0, 0.10, 0.3, 0.0);
+			if (code(0.0333) != toe[7] && std::abs(code(0.0333) - std::lround(1023.0 * 0.0333)) > 1)
+				problems += L"a lift without a veil; ";
+			set(1.0, 0.10, 0.3, 1.0);
+			const double u = 0.0333 / 0.10;
+			const double expectedLift = 0.3 * 0.10 * 1.6875 * u * (1.0 - u) * (1.0 - u);
+			const int lifted = code(0.0333);
+			if (std::abs(lifted - 1023.0 * (0.0333 + expectedLift)) > 1.5)
+				problems += L"lift at 0.0333: " + std::to_wstring(lifted) + L" for " + std::to_wstring(1023.0 * (0.0333 + expectedLift)) + L"; ";
+			if (code(0.0) != 0 || std::abs(code(0.5) - std::lround(1023.0 * std::pow(0.5, boost))) > 1)
+				problems += L"the lift reached black or the mid-tones; ";
+			fixture.CaptureLog(nullptr);
+			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
+		}
+
 		TEST_METHOD(LedHighlightStatisticIgnoresGrain)
 		{
 			// Delta 8 R2: with the grain map (g = 1 everywhere), grain on a flat

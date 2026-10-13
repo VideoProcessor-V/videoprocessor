@@ -327,5 +327,8 @@ private:
 	double m_ledGammaBoost = 0.0;   // the gamma_boost setting (0 = off)
 	double m_ledCompensationEotf = 2.2;
 	double m_ledKnee = 0.08;
+	double m_ledBoostKnee = 0.0;        // delta 11
+	double m_ledBoostKneeWidth = 0.05;
+	double m_ledShadowLift = 0.0;
 	void UpdateLedDrive(const ConfigFile& configuration);
 };

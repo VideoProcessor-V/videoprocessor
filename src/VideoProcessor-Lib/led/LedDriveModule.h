@@ -34,7 +34,12 @@ namespace LedDrive
 		GainDomain domain = GainDomain::Encoded;
 		double knee = 0.08;
 		double eotf = 2.2;
+		// Delta 11: the scatter-veil estimate of the latest statistics (0-1;
+		// the highlight level x area through shadow_lift_ansi's ramp, slewed
+		// at kVeilRatePerSecond, reset on a cut). Independent of `active`.
+		double veil = 0.0;
 	};
+	constexpr double kVeilRatePerSecond = 1.0;
 
 	class LedDriveModule
 	{
@@ -60,6 +65,8 @@ namespace LedDrive
 		// Render thread, after a frame: the GPU pass's counts for a frame
 		// (sequence 0 when unknown).
 		void SubmitMeasurement(const RawMeasurement& raw, uint64_t sequence = 0);
+		// Delta 11 (tests): the veil estimate without a frame step.
+		double Veil() const { std::lock_guard<std::mutex> guard(mutex); return gain.veil; }
 		// The gain BeginFrame last returned, without stepping anything.
 		CompensationGain CurrentGain() const;
 
@@ -152,6 +159,7 @@ namespace LedDrive
 		uint64_t lastMeasuredSequence = 0;
 		bool haveStats = false;
 		FrameStats latest;
+		bool veilValid = false;   // delta 11: the veil estimate has a value
 		bool pendingCut = false;
 		bool pendingFade = false;
 

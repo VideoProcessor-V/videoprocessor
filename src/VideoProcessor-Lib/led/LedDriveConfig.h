@@ -234,6 +234,17 @@ namespace LedDrive
 		// output gamma / gamma_boost (BoostExponent), independent of
 		// compensation_eotf (delta 4).
 		double gammaBoost = 0.0;
+		// Delta 11 (docs/VP-delta-11-shadow-boost.md): the boost's toe (below
+		// gamma_boost_knee of the encoded range the boost blends into the
+		// identity over gamma_boost_knee_width; 0 = the global boost), and the
+		// ANSI branch: a scene-adaptive lift of the darks, shadow_lift_ansi x
+		// the veil estimate (the highlight level x area through the ramp
+		// shadow_lift_ansi_ramp_lo..hi, slewed, reset on a cut). 0 = off.
+		double gammaBoostKnee = 0.0;
+		double gammaBoostKneeWidth = 0.05;
+		double shadowLiftAnsi = 0.0;
+		double shadowLiftAnsiRampLo = 0.01;
+		double shadowLiftAnsiRampHi = 0.10;
 		// mode: compensate's highlight policy: below highlight_area_small the
 		// knee absorbs sustained highlights, above highlight_area_large the
 		// global gain makes room; blended in between. Protection relaxes over
@@ -513,6 +524,11 @@ namespace LedDrive
 			Integer("anti_pump_band", 0, 50),
 			Integer("script_highlight_code", 16, 255),
 			Number("compensation_eotf", 1.0, 3.0),
+			Number("gamma_boost_knee", 0.0, 0.5),
+			Number("gamma_boost_knee_width", 0.0, 0.5),
+			Number("shadow_lift_ansi", 0.0, 1.0),
+			Number("shadow_lift_ansi_ramp_lo", 0.0, 1.0),
+			Number("shadow_lift_ansi_ramp_hi", 0.0, 1.0),
 			Custom("gamma_boost", [](const std::string& value)
 				{
 					double gamma = 0.0;
@@ -794,6 +810,11 @@ namespace LedDrive
 		readInt("anti_pump_band", 0, 50, result.antiPumpBand);
 		readInt("script_highlight_code", 16, 255, result.scriptHighlightCode);
 		readNumber("compensation_eotf", result.compensationEotf);
+		readNumber("gamma_boost_knee", result.gammaBoostKnee);
+		readNumber("gamma_boost_knee_width", result.gammaBoostKneeWidth);
+		readNumber("shadow_lift_ansi", result.shadowLiftAnsi);
+		readNumber("shadow_lift_ansi_ramp_lo", result.shadowLiftAnsiRampLo);
+		readNumber("shadow_lift_ansi_ramp_hi", result.shadowLiftAnsiRampHi);
 		if (config.TryGetString(section, "gamma_boost", value))
 			result.gammaBoost = ConfigFile::NormalizeName(value) == "off" ? 0.0 :
 				(Detail::ParseNumber(value, result.gammaBoost) ? result.gammaBoost : 0.0);

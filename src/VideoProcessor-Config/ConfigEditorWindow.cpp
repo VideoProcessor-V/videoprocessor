@@ -10109,6 +10109,28 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         return spin;
     };
 
+    // Delta 11: the boost's toe and the scene-adaptive shadow lift.
+    auto* boostKnee = numberControl(led, QStringLiteral("gamma_boost_knee"), 0.0, 0.5, 2, 0.01, 0.0, QString());
+    boostKnee->setToolTip(QStringLiteral(
+        "Keep the darkest tones out of the gamma boost: below this part of the signal (0.10 = the bottom tenth) "
+        "the picture keeps its native contrast, so dark hair and shadows are not lifted flat. 0 = the boost "
+        "everywhere (as before)."));
+    driveForm->addRow(QStringLiteral("Boost spares the darks below"), boostKnee);
+    auto* boostKneeWidth = numberControl(led, QStringLiteral("gamma_boost_knee_width"), 0.0, 0.5, 2, 0.01, 0.05, QString());
+    boostKneeWidth->setToolTip(QStringLiteral("How gradually the boost comes in above that point."));
+    driveForm->addRow(QStringLiteral("Boost blend width"), boostKneeWidth);
+    auto* shadowLift = numberControl(led, QStringLiteral("shadow_lift_ansi"), 0.0, 1.0, 2, 0.05, 0.0, QString());
+    shadowLift->setToolTip(QStringLiteral(
+        "When something bright shares a dark frame, the lens scatters a veil of light over the darks. This lifts "
+        "the darks in proportion to that veil so their texture stays visible; a dark frame with nothing bright "
+        "is left alone. Try 0.3 after the dark-hair test. 0 = off."));
+    driveForm->addRow(QStringLiteral("Shadow lift next to highlights"), shadowLift);
+    auto* liftRampLo = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_lo"), 0.0, 1.0, 3, 0.005, 0.01, QString());
+    liftRampLo->setToolTip(QStringLiteral(
+        "The highlight amount (brightness x area) where the lift starts; it is full at the next value."));
+    driveForm->addRow(QStringLiteral("Lift starts at highlight amount"), liftRampLo);
+    auto* liftRampHi = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_hi"), 0.0, 1.0, 3, 0.005, 0.10, QString());
+    driveForm->addRow(QStringLiteral("Lift full at highlight amount"), liftRampHi);
     auto* assist = new QWidget;
     auto* assistForm = new QFormLayout(assist);
     assistForm->setContentsMargins(0, 0, 0, 0);

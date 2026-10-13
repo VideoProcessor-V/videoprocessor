@@ -157,3 +157,35 @@ driving the projector.
 - Switching compensate ↔ picture_only restores the projector to ceiling /
   50 once and never leaves it dimmed.
 - log_only unchanged.
+
+## Delta 13 — SDR tone shape and headroom (2026-10-13)
+
+The owner's observation: tone-mapped HDR looks better than native SDR
+because of the curve shape, not the round trip. SDR rendering profiles get
+the same shape directly, with no inverse tone map. Keys:
+
+- `sdr_tone_shape: off | knee`.
+- `sdr_white_headroom: 0.0` (0 = today; 0.15 = reference white at 85% of
+  peak). This is a placement: a scale in linear light before the encode, not
+  a stretch of the content.
+- `sdr_knee_start: 0.80` and `sdr_knee_strength: 0.5`. A soft roll-off into
+  the headroom, in the compensation knee's form; nothing is created above
+  the master's white.
+- `sdr_contrast_recovery: auto`: libplacebo's contrast recovery exposed for
+  SDR.
+
+**Scope.**
+
+- SDR sources only.
+- Applied after the Stage 10 restore, before the encode.
+- Off / headroom 0 is byte-identical to today.
+
+**Tests.**
+
+- Headroom 0.15 puts code 235 at 85% of peak and code 255 above it,
+  monotonic.
+- The knee: a 200→255 ramp is smooth, with no clip at 235.
+- HDR is unaffected; the Stage 10 probe is unchanged.
+
+**Cinema check.** Native SDR → headroom → + knee → + contrast recovery,
+against the HDR version if there is one.

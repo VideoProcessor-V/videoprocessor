@@ -494,6 +494,25 @@ namespace LedDrive
 		}
 		while (!predictions.empty() && predictions.begin()->first + PREDICTION_HISTORY < sequence)
 			predictions.erase(predictions.begin());
+		// Delta 11: the veil estimate from the latest statistics.
+		if (haveStats)
+		{
+			// The frame's own highlight percentile (the slew below keeps a
+			// flash from pumping it).
+			const double level = std::max(0.0, std::min((latest.highlight - 16.0) / 219.0, 1.0));
+			const double statistic = level * latest.highlightArea;
+			const double lo = led.shadowLiftAnsiRampLo, hi = std::max(lo + 1e-6, led.shadowLiftAnsiRampHi);
+			const double t = std::max(0.0, std::min((statistic - lo) / (hi - lo), 1.0));
+			const double target = t * t * (3.0 - 2.0 * t);
+			if (latest.cut || !veilValid)
+				gain.veil = target;
+			else
+			{
+				const double step = kVeilRatePerSecond * elapsed / 1000.0;
+				gain.veil += std::max(-step, std::min(target - gain.veil, step));
+			}
+			veilValid = true;
+		}
 		return GainLocked();
 	}
 
