@@ -6,6 +6,7 @@
 #include <vprenderer/NlsMaskMapping.h>
 #include <vprenderer/DejudderWarp.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,12 @@ namespace DejudderRendered
 		pl_rect2df targetCrop{};   // ...this destination rectangle (target pixels)
 		NlsMaskMapping::Mapping nls{};   // valid = NLS active this frame
 		pl_rect2df nlsDomain{};    // the source rectangle NLS's 0..1 spans
+		// Owner 2026-10-13: source rectangles the extras hold still (a moved
+		// subtitle: where it was, its fill, where it is shown). A pixel in one,
+		// or sampling from one, keeps A's picture; the dither's vectors are
+		// zero there. None = the shaders as before.
+		std::array<pl_rect2df, 4> holds{};
+		int numHolds = 0;
 	};
 
 	class Cache

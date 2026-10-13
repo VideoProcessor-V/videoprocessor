@@ -36,6 +36,12 @@ vec2 rw_source(vec2 p)
 }
 )GLSL"
 		const char* const WARP_FUNCTIONS_SOURCE_ONLY = RW_SOURCE_GLSL;
+		// The held rectangles (Geometry::holds), source pixels (x0, y0, x1, y1).
+		const char* const HOLDS_GLSL = R"GLSL(
+#define HOLDS 1
+bool rw_in(vec2 s, vec4 r) { return r.x < r.z && s.x >= r.x && s.y >= r.y && s.x < r.z && s.y < r.w; }
+bool rw_held(vec2 s) { return rw_in(s, hold0) || rw_in(s, hold1) || rw_in(s, hold2) || rw_in(s, hold3); }
+)GLSL";
 		const char* const WARP_FUNCTIONS = RW_SOURCE_GLSL R"GLSL(
 vec4 rw_cubic(vec2 pos)
 {
@@ -73,11 +79,21 @@ if (q.x < size.x && q.y < size.y) {
         // per axis (the maps are separable).
         vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
         vec2 sp = rw_source(p);
-        o = rw_cubic(p - shift * strength_scale() * block_strength(sp) * v / slope);
-#ifdef FEATHER
-        // Delta 9 H1: the feather is in output pixels, the field in source.
-        o = mix(texelFetch(cached, q, 0), o, hold_weight(sp, feather_px * max(slope.x, slope.y)));
+        vec2 d = shift * strength_scale() * block_strength(sp) * v;
+#ifdef HOLDS
+        // A moved subtitle (and its fill) stays still, and nothing around it
+        // samples from it.
+        if (rw_held(sp) || rw_held(sp - d)) {
+            o = texelFetch(cached, q, 0);
+        } else
 #endif
+        {
+            o = rw_cubic(p - d / slope);
+#ifdef FEATHER
+            // Delta 9 H1: the feather is in output pixels, the field in source.
+            o = mix(texelFetch(cached, q, 0), o, hold_weight(sp, feather_px * max(slope.x, slope.y)));
+#endif
+        }
     } else {
         o = texelFetch(cached, q, 0);   // hard hold of A
     }
@@ -94,7 +110,11 @@ if (b.x < size.x && b.y < size.y) {
     vec4 o = vec4(0.0, 0.0, 1.0, 0.0);   // held or outside the picture: no motion
     if (all(greaterThanEqual(p, crop_min)) && all(lessThan(p, crop_max))) {
         vec2 v;
-        if (shift != 0.0 && field_vector(rw_source(p), v)) {
+        bool held = false;
+#ifdef HOLDS
+        held = rw_held(rw_source(p));
+#endif
+        if (!held && shift != 0.0 && field_vector(rw_source(p), v)) {
             vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
             o.xy = shift * strength_scale() * block_strength(rw_source(p)) * v / slope;
         }
@@ -316,6 +336,15 @@ if (b.x < size.x && b.y < size.y) {
 		const float featherPx = ms.holdFeatherPx;
 		const float taperTol = ms.matchTolerance;
 		const float taperSad = ms.taperSad > 0.0f ? ms.taperSad : 2.0f * ms.matchTolerance;
+		float holds[4][4] = {};
+		for (int i = 0; i < 4 && i < g.numHolds; ++i)
+		{
+			const pl_rect2df& r = g.holds[i];
+			holds[i][0] = std::min(r.x0, r.x1);
+			holds[i][1] = std::min(r.y0, r.y1);
+			holds[i][2] = std::max(r.x0, r.x1);
+			holds[i][3] = std::max(r.y0, r.y1);
+		}
 		const pl_shader_var variables[14] = {
 			{ pl_var_vec2("dst_origin"), dstOrigin, true },
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
@@ -331,20 +360,26 @@ if (b.x < size.x && b.y < size.y) {
 			{ pl_var_float("feather_px"), &featherPx, true },
 			{ pl_var_float("taper_tol"), &taperTol, true },
 			{ pl_var_float("taper_sad"), &taperSad, true } };
-		const int numVariables = 11 + (ms.holdFeatherPx > 0.0f ? 1 : 0) + (ms.blockTaper ? 2 : 0);
 		// The variables in use, in order (feather, then taper).
-		pl_shader_var used[14];
+		pl_shader_var used[18];
 		int n = 0;
 		for (int i = 0; i < 11; ++i) used[n++] = variables[i];
 		if (ms.holdFeatherPx > 0.0f) used[n++] = variables[11];
 		if (ms.blockTaper) { used[n++] = variables[12]; used[n++] = variables[13]; }
+		if (g.numHolds > 0)
+		{
+			used[n++] = { pl_var_vec4("hold0"), holds[0], true };
+			used[n++] = { pl_var_vec4("hold1"), holds[1], true };
+			used[n++] = { pl_var_vec4("hold2"), holds[2], true };
+			used[n++] = { pl_var_vec4("hold3"), holds[3], true };
+		}
 		const pl_shader_desc descriptors[5] = {
 			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust),
 			Storage(warped), Sampled("sub_field", subField) };
 		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
-			Dejudder::WarpHeader(ms, subField != nullptr) + WARP_FUNCTIONS;
+			Dejudder::WarpHeader(ms, subField != nullptr) + (g.numHolds > 0 ? HOLDS_GLSL : "") + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,
-			descriptors, subField ? 5 : 4, used, numVariables, w, h))
+			descriptors, subField ? 5 : 4, used, n, w, h))
 		{
 			error = "rendered warp rejected or failed";
 			return false;
@@ -412,7 +447,16 @@ if (b.x < size.x && b.y < size.y) {
 		// is left out (no FEATHER define).
 		Dejudder::Settings fieldSettings = ms;
 		fieldSettings.holdFeatherPx = 0.0f;
-		pl_shader_var used[15];
+		float holds[4][4] = {};
+		for (int i = 0; i < 4 && i < g.numHolds; ++i)
+		{
+			const pl_rect2df& r = g.holds[i];
+			holds[i][0] = std::min(r.x0, r.x1);
+			holds[i][1] = std::min(r.y0, r.y1);
+			holds[i][2] = std::max(r.x0, r.x1);
+			holds[i][3] = std::max(r.y0, r.y1);
+		}
+		pl_shader_var used[19];
 		int n = 0;
 		used[n++] = { pl_var_vec2("dst_origin"), dstOrigin, true };
 		used[n++] = { pl_var_vec2("src_origin"), srcOrigin, true };
@@ -432,10 +476,18 @@ if (b.x < size.x && b.y < size.y) {
 			used[n++] = { pl_var_float("taper_tol"), &taperTol, true };
 			used[n++] = { pl_var_float("taper_sad"), &taperSad, true };
 		}
+		if (g.numHolds > 0)
+		{
+			used[n++] = { pl_var_vec4("hold0"), holds[0], true };
+			used[n++] = { pl_var_vec4("hold1"), holds[1], true };
+			used[n++] = { pl_var_vec4("hold2"), holds[2], true };
+			used[n++] = { pl_var_vec4("hold3"), holds[3], true };
+		}
 		const pl_shader_desc descriptors[4] = {
 			Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(vectors), Sampled("sub_field", subField) };
 		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
-			Dejudder::WarpHeader(fieldSettings, subField != nullptr) + WARP_FUNCTIONS_SOURCE_ONLY;
+			Dejudder::WarpHeader(fieldSettings, subField != nullptr) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
+			WARP_FUNCTIONS_SOURCE_ONLY;
 		if (!Compute(dispatch, "VideoProcessor sigma-delta vectors from the de-judder field (delta 8 R1)", header,
 			FIELD_BODY, descriptors, subField ? 4 : 3, used, n, bw, bh))
 		{

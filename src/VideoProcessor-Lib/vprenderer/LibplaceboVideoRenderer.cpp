@@ -4227,6 +4227,9 @@ struct LibplaceboVideoRenderer::Impl
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
 	DejudderRendered::Geometry dejudderGeometry;
 	bool dejudderGeometryValid = false;   // this frame's geometry (both warp paths; delta 8 R1)
+	// Owner 2026-10-13: this frame's picture has a moved subtitle (cut/paste);
+	// the rendered warp's extras run, holding its rectangles still.
+	bool dejudderSubtitleComposed = false;
 	// Delta 8 R1: the sigma-delta's vectors on the extras (VPVEC).
 	std::unique_ptr<DejudderRendered::VectorField> dejudderVectorField;
 	unsigned long long ditherVectorsExternal = 0;
@@ -11598,8 +11601,12 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		if (dejudderEstimatedSequence != f.sourceSequence) { DejudderHold("no motion estimate for this frame"); return false; }
 		if (f.cadenceRepeat) { DejudderHold("cadence repeat"); return false; }
-		if (!f.image || f.image->num_planes != 2 || f.image->planes[0].texture != textures[0] ||
-			f.image->planes[1].texture != textures[1])
+		// A moved subtitle's composed picture: the rendered warp holds its
+		// rectangles still (owner 2026-10-13); the source warp cannot.
+		const bool sourcePlanes = f.image && f.image->num_planes == 2 && f.image->planes[0].texture == textures[0] &&
+			f.image->planes[1].texture == textures[1];
+		if (!f.image || (!sourcePlanes && !(dejudderSubtitleComposed && activeSettings.dejudderWarpRendered &&
+			dejudderGeometryValid && dejudderGeometry.numHolds > 0)))
 		{
 			DejudderHold("composed source (subtitle moving)");
 			return false;
@@ -11724,6 +11731,13 @@ struct LibplaceboVideoRenderer::Impl
 		// 6d: with A's picture cached, the extras render it warped, with
 		// only the OUTPUT-stage hooks (no repair unless still needed).
 		const pl_tex cached = dejudderCache.Texture(f.sourceSequence);
+		// The composed picture exists only as the cache: without it the source
+		// warp would show the subtitle where it was.
+		if (!sourcePlanes && !cached)
+		{
+			DejudderHold("composed source without the cached picture");
+			return false;
+		}
 		std::vector<const pl_hook*> outputHooks;
 		pl_render_params renderedParams = DejudderRendered::OutputOnly(params, hooks, outputHooks);
 		{
@@ -16769,6 +16783,7 @@ struct LibplaceboVideoRenderer::Impl
         // needs the NLS map; an unknown NLS shader keeps the source path.
         dejudderCache.Disarm();
         dejudderGeometryValid = false;
+        dejudderSubtitleComposed = subtitleCompositionSucceeded;
         // Only when extras may follow (not in mask-only mode; audit
         // stage10-6d item 3). The geometry is kept on the source path too:
         // the sigma-delta's vectors on the extras need it (delta 8 R1).
@@ -16795,6 +16810,14 @@ struct LibplaceboVideoRenderer::Impl
                 geometry.nlsDomain = renderImage.crop;
                 mapped = geometry.nls.valid;
             }
+            // A moved subtitle: where it was, its fill and where it is shown
+            // stay still in the extras (2 source pixels of margin).
+            if (subtitleCompositionSucceeded)
+                for (const SubtitleBoxRect& r : { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
+                    relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage })
+                    if (r.Valid() && geometry.numHolds < static_cast<int>(geometry.holds.size()))
+                        geometry.holds[geometry.numHolds++] = { static_cast<float>(r.left - 2), static_cast<float>(r.top - 2),
+                            static_cast<float>(r.right + 2), static_cast<float>(r.bottom + 2) };
             if (mapped)
             {
                 dejudderGeometry = geometry;

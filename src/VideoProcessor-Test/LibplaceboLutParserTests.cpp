@@ -5870,6 +5870,156 @@ namespace VideoProcessorTest
 		// goes through VP's encoding repair for A but not for the extra (no
 		// PRE_OUTPUT hook there), which rounds a code differently; the Beta
 		// test checks the limited target on 377 (no repair).
+		TEST_METHOD(DejudderRenderedWarpHoldsAMovedSubtitleStill)
+		{
+			// Owner 2026-10-13: with a moved subtitle the extras still run; its
+			// rectangles (Geometry::holds, source pixels) show A exactly while
+			// the rest of the picture moves, and the dither's vectors are zero
+			// there.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			DejudderRendered::Cache cache;
+			DejudderRendered::Warp rendered(fixture.Log(), gpu);
+			DejudderRendered::VectorField field(fixture.Log(), gpu);
+			pl_tex_params targetParams{};
+			targetParams.w = width;
+			targetParams.h = height;
+			targetParams.format = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			targetParams.renderable = true;
+			targetParams.host_readable = true;
+			pl_tex targetTexture = pl_tex_create(gpu, &targetParams);
+			Assert::IsNotNull(targetTexture);
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			auto target = [&]()
+			{
+				pl_frame t = TargetLutGpuFixture::MakeRgbFrame(targetTexture);
+				t.repr.levels = PL_COLOR_LEVELS_FULL;
+				t.color.transfer = PL_COLOR_TRC_BT_1886;
+				return t;
+			};
+			auto download = [&]()
+			{
+				pl_gpu_finish(gpu);
+				std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
+				pl_tex_transfer_params d{};
+				d.tex = targetTexture;
+				d.ptr = output.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				return output;
+			};
+			// A rendered with the cache armed.
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planesA.planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planesA.planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = target();
+				std::vector<const pl_hook*> hooks = { cache.Hook() };
+				OutputEncodingRepair::Hook repair;
+				if (OutputEncodingRepair::Needed(hooks, nullptr, PL_LUT_UNKNOWN))
+				{
+					repair.SetTarget(t.repr);
+					hooks.insert(hooks.begin(), repair.Get());
+				}
+				pl_render_params p = params;
+				p.hooks = hooks.data();
+				p.num_hooks = static_cast<int>(hooks.size());
+				cache.Arm(7);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+			}
+			const std::vector<RgbaPixel> own = download();
+			Assert::IsNotNull(cache.Texture(7));
+			// Twice, so the hysteresis lets the pan's blocks warp.
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes) && warp.Estimate(planesA.planes, planesB.planes));
+			DejudderRendered::Geometry g;
+			g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+			g.targetCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+			// The subtitle's two rectangles: where it was and where it is shown.
+			g.holds[0] = { 64.0f, 32.0f, 160.0f, 56.0f };
+			g.holds[1] = { 48.0f, 96.0f, 208.0f, 120.0f };
+			g.numHolds = 2;
+			auto extra = [&](const DejudderRendered::Geometry& geometry)
+			{
+				pl_tex out = nullptr;
+				Assert::IsTrue(rendered.Run(cache.Texture(7), warp.Field(), warp.FrameTrust(),
+					warp.GetSettings().minTrustedShare, 0.5f, geometry, out), ExtendedRangeGpuProbe::ToWide(rendered.Error() + "; log: " + log).c_str());
+				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+				pl_frame t = target();
+				std::vector<const pl_hook*> kept;
+				const pl_render_params p = DejudderRendered::OutputOnly(params, {}, kept);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+				return download();
+			};
+			const std::vector<RgbaPixel> withHolds = extra(g);
+			const std::vector<RgbaPixel> without = extra(DejudderRendered::Geometry{ g.sourceCrop, g.targetCrop });
+			auto inside = [&](int x, int y, int i)
+			{
+				const pl_rect2df& r = g.holds[i];
+				return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1;
+			};
+			int heldDiff = 0;
+			long long movedOutside = 0, sameAsWithout = 0, outside = 0;
+			for (int y = 8; y < height - 8; ++y)
+				for (int x = 8; x < width - 8; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * width + x;
+					auto diff = [](const RgbaPixel& p, const RgbaPixel& q)
+					{
+						return std::max({ std::abs(p.r - q.r), std::abs(p.g - q.g), std::abs(p.b - q.b) });
+					};
+					if (inside(x, y, 0) || inside(x, y, 1))
+						heldDiff = std::max(heldDiff, diff(withHolds[i], own[i]));
+					else
+					{
+						// Away from the rectangles by more than the motion: as without holds.
+						bool closeBy = false;
+						for (int k = 0; k < 2; ++k)
+						{
+							const pl_rect2df& r = g.holds[k];
+							closeBy = closeBy || (x >= r.x0 - 16 && x < r.x1 + 16 && y >= r.y0 - 16 && y < r.y1 + 16);
+						}
+						if (closeBy) continue;
+						++outside;
+						movedOutside += diff(withHolds[i], own[i]) > 2 ? 1 : 0;
+						sameAsWithout += diff(withHolds[i], without[i]) == 0 ? 1 : 0;
+					}
+				}
+			Assert::AreEqual(0, heldDiff, L"inside the held rectangles the extra shows A exactly");
+			Assert::IsTrue(movedOutside > outside / 2, L"elsewhere the picture moves");
+			Assert::AreEqual(outside, sameAsWithout, L"away from the rectangles the extra is as without holds");
+			// The dither's vectors: zero in the blocks inside a rectangle.
+			pl_tex vectors = nullptr;
+			Assert::IsTrue(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, g,
+				width, height, vectors), ExtendedRangeGpuProbe::ToWide(field.Error()).c_str());
+			Assert::IsNotNull(vectors);
+		}
+
 		TEST_METHOD(DejudderRenderedWarpMatchesTheSourceWarp)
 		{
 			TargetLutGpuFixture fixture;
