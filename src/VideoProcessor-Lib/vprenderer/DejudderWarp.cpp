@@ -4,6 +4,8 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
 namespace Dejudder
 {
@@ -574,6 +576,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
     vec2 landed = vec2(b * 8) + vec2(4.0) + g.xy;
     ivec2 ft = clamp(ivec2(floor(landed / 8.0)), ivec2(0), blocks - ivec2(1));
     vec4 f = texelFetch(fwd, ft, 0);
+#ifdef SPLIT
+    // 11a E2: a split block of A answers with the sub-block it landed in.
+    {
+        ivec2 st = clamp(ivec2(floor(landed / 4.0)), ivec2(0), blocks * 2 - ivec2(1));
+        vec4 sf = texelFetch(sub_field, st, 0);
+        if (sf.w > 0.5)
+            f.xy = sf.xy * 0.5;
+    }
+#endif
     bool consistent = length(g.xy + f.xy) <= consistency;
     bool good = g.z <= tolerance;
     imageStore(dst, b, vec4((consistent && good) ? 1.0 : 0.0, 0.0, 0.0, 1.0));
@@ -598,11 +609,22 @@ if (b.x < blocks.x && b.y < blocks.y) {
     half_size_ = textureSize(from_half, 0);
     vec2 v = texelFetch(field, b, 0).xy * 0.5;
     ivec2 o = b * 8;
+#ifdef SPLIT
+    // 11a E2: a split block's quadrants at their own sub-block vectors.
+    vec2 vq[4];
+    for (int k = 0; k < 4; k++) {
+        vec4 sf = texelFetch(sub_field, b * 2 + ivec2(k % 2, k / 2), 0);
+        vq[k] = sf.w > 0.5 ? sf.xy * 0.5 : v;
+    }
+#endif
     float d[64];
     float mean_d = 0.0, mean_y = 0.0;
     for (int i = 0; i < 64; i++) {
         ivec2 p = o + ivec2(i % 8, i / 8);
         float a = from_at(p);
+#ifdef SPLIT
+        v = vq[(i % 8) / 4 + 2 * ((i / 8) / 4)];
+#endif
         d[i] = a - to_lin(vec2(p) + v);
         mean_d += d[i];
         mean_y += a;
@@ -675,6 +697,32 @@ bool field_vector(vec2 lp, out vec2 v)
     // Too few trusted blocks (a cut between A and B): hold the whole frame.
     if (texelFetch(frame_trust, ivec2(0), 0).r < min_trusted_share)
         return false;
+#ifdef SPLIT
+    // 11a E2: inside a split block, the sub-block decides the hold and the
+    // vector is bilinear between the trusted sub-block centres (8 px).
+    {
+        ivec2 ssize = textureSize(sub_field, 0);
+        vec4 sown = texelFetch(sub_field, clamp(ivec2(floor(lp / 8.0)), ivec2(0), ssize - ivec2(1)), 0);
+        if (sown.w > 0.5) {
+            if (sown.z < 0.5)
+                return false;
+            vec2 sg = lp / 8.0 - vec2(0.5);
+            ivec2 s0 = ivec2(floor(sg));
+            vec2 st = sg - vec2(s0);
+            float swsum = 0.0;
+            for (int y = 0; y <= 1; y++)
+                for (int x = 0; x <= 1; x++) {
+                    vec4 sf = texelFetch(sub_field, clamp(s0 + ivec2(x, y), ivec2(0), ssize - ivec2(1)), 0);
+                    float w = (x == 1 ? st.x : 1.0 - st.x) * (y == 1 ? st.y : 1.0 - st.y);
+                    if (sf.z > 0.5) { v += w * sf.xy; swsum += w; }
+                }
+            if (swsum <= 0.0)
+                return false;
+            v /= swsum;
+            return true;
+        }
+    }
+#endif
     if (texelFetch(field, own, 0).z < 0.5)
         return false;
     vec2 g = lp / 16.0 - vec2(0.5);
@@ -696,6 +744,95 @@ bool field_vector(vec2 lp, out vec2 v)
 
 // D2/D4: the strength scale of this source frame (1 when both are off).
 float strength_scale() { return texelFetch(frame_trust, ivec2(0), 0).g; }
+)GLSL";
+
+		// 11a E2: the split, both directions. A block whose best search SAD
+		// (per sample) exceeds split_sad is searched as four 8x8-source-pixel
+		// sub-blocks on their own 4x4 half-resolution window (no margin: it
+		// would reach into the neighbour the split exists to separate):
+		// starts at the parent's search vector and its eight neighbours',
+		// then whole half-resolution pixels +-1 (= +-2 source px) and half a
+		// pixel. Output per sub-block: (vector, SAD per sample, 1); other
+		// blocks repeat the parent search (vector, SAD, 0).
+		const char* const SPLIT_SEARCH_BODY = R"GLSL(
+float sad_q(ivec2 o, vec2 v)
+{
+    float s = 0.0;
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++) {
+            ivec2 p = o + ivec2(x, y);
+            s += abs(from_at(p) - to_lin(vec2(p) + v));
+        }
+    return s;
+}
+
+void main_split()
+{
+    ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 blocks = textureSize(search, 0);
+    if (b.x >= blocks.x || b.y >= blocks.y)
+        return;
+    vec4 fs = texelFetch(search, b, 0);
+    bool split = fs.z > split_sad;
+    half_size_ = textureSize(from_half, 0);
+    for (int q = 0; q < 4; q++) {
+        ivec2 sb = b * 2 + ivec2(q % 2, q / 2);
+        if (!split) {
+            imageStore(dst, sb, vec4(fs.xyz, 0.0));
+            continue;
+        }
+        ivec2 o = b * 8 + ivec2(q % 2, q / 2) * 4;
+        vec2 best = fs.xy;
+        float best_sad = sad_q(o, best);
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                ivec2 c = clamp(b + ivec2(dx, dy), ivec2(0), blocks - ivec2(1));
+                vec2 v = texelFetch(search, c, 0).xy;
+                float s = sad_q(o, v);
+                if (s < best_sad) { best_sad = s; best = v; }
+            }
+        vec2 centre = round(best);
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                vec2 v = centre + vec2(dx, dy);
+                float s = sad_q(o, v);
+                if (s < best_sad) { best_sad = s; best = v; }
+            }
+        vec2 fbest = best;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                vec2 v = best + 0.5 * vec2(dx, dy);
+                float s = sad_q(o, v);
+                if (s < best_sad) { best_sad = s; fbest = v; }
+            }
+        imageStore(dst, sb, vec4(fbest, best_sad / 16.0, 1.0));
+    }
+}
+)GLSL";
+
+		// 11a E2: the sub-field. A split sub-block of A is trusted when its
+		// match is good and B's sub-block where it lands points back (B's own
+		// split sub-search, or its parent search repeated); unsplit blocks copy
+		// the parent's final vector and trust with flag 0. Source pixels.
+		const char* const SUB_TRUST_BODY = R"GLSL(
+ivec2 sb = ivec2(gl_GlobalInvocationID.xy);
+ivec2 subs = imageSize(dst);
+if (sb.x < subs.x && sb.y < subs.y) {
+    vec4 s = texelFetch(sub_fwd, sb, 0);
+    if (s.w < 0.5) {
+        vec4 pf = texelFetch(field, sb / 2, 0);
+        imageStore(dst, sb, vec4(pf.xyz, 0.0));
+    } else {
+        vec2 landed = vec2(sb * 4) + vec2(2.0) + s.xy;
+        ivec2 st = clamp(ivec2(floor(landed / 4.0)), ivec2(0), subs - ivec2(1));
+        vec2 g = texelFetch(sub_bwd, st, 0).xy;
+        bool consistent = length(s.xy + g) <= consistency;
+        bool good = s.z <= tolerance;
+        imageStore(dst, sb, vec4(s.xy * 2.0, (consistent && good) ? 1.0 : 0.0, 1.0));
+    }
+}
 )GLSL";
 
 		// D5: where a held position's block of B is new content, the position
@@ -799,7 +936,8 @@ if (q.x < size.x && q.y < size.y) {
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
-			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField })
+			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
+			&subSearch[0], &subSearch[1] })
 			pl_tex_destroy(gpu, tex);
 		pl_dispatch_destroy(&dispatch);
 	}
@@ -860,6 +998,14 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (previousResized)
 			previousValid = false;
+		// 11a E2: allocated only while the split is on.
+		if (settings.estSplit && (!make(&subField, blocksX * 2, blocksY * 2, vec4f, readable) ||
+			!make(&subSearch[0], blocksX * 2, blocksY * 2, vec4f, readable) ||
+			!make(&subSearch[1], blocksX * 2, blocksY * 2, vec4f, readable)))
+		{
+			error = "cannot create the sub-field";
+			return false;
+		}
 		// D2/D4's last scale: read-write, so rgba32f (as Stage 8's state);
 		// zero at creation = no history.
 		if (!strengthState)
@@ -1074,6 +1220,30 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
 			return false;
+		if (settings.estSplit)
+		{
+			// Both directions split (the sub-search, as a function: four
+			// texels per block), then A's sub-blocks are checked against B's.
+			const float splitSad = settings.estSplitSad > 0.0f ? settings.estSplitSad : settings.matchTolerance;
+			const pl_shader_var splitVars[1] = { { pl_var_float("split_sad"), &splitSad, true } };
+			const std::string header = std::string(SUBPEL_HEADER) + SPLIT_SEARCH_BODY;
+			for (int dir = 0; dir < 2; ++dir)
+			{
+				const pl_shader_desc splitDesc[4] = {
+					Sampled("search", dir == 0 ? forward : backward, false),
+					Sampled("from_half", dir == 0 ? halfA : halfB, false), Sampled("to_half", dir == 0 ? halfB : halfA, true),
+					Storage("dst", subSearch[dir]) };
+				if (!Dispatch("VideoProcessor de-judder: block split (11a E2)", header.c_str(), "main_split();",
+					splitDesc, 4, splitVars, 1, blocksX, blocksY, 8))
+					return false;
+			}
+			const pl_shader_desc trustDesc2[4] = {
+				Sampled("sub_fwd", subSearch[0], false), Sampled("sub_bwd", subSearch[1], false),
+				Sampled("field", field, false), Storage("dst", subField) };
+			if (!Dispatch("VideoProcessor de-judder: sub-block trust (11a E2)", nullptr, SUB_TRUST_BODY,
+				trustDesc2, 4, variables, 2, blocksX * 2, blocksY * 2, 8))
+				return false;
+		}
 		const float motionLo = settings.motionScaleLo;
 		const float motionHi = std::max(0.0f, settings.motionScaleHi);
 		const float trustFull = std::max(0.0f, settings.trustScaleFull);
@@ -1090,16 +1260,18 @@ if (q.x < size.x && q.y < size.y) {
 		stateDesc.desc.type = PL_DESC_STORAGE_IMG;
 		stateDesc.desc.access = PL_DESC_ACCESS_READWRITE;
 		stateDesc.binding.object = strengthState;
+		const char* splitDefine = settings.estSplit ? "#define SPLIT 1\n" : nullptr;
 		const pl_shader_desc trustDesc[3] = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
 		if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
 			trustDesc, 3, trustVars, 5, 16, 16, 16))
 			return false;
 		if (settings.occlusionFill)
 		{
-			const pl_shader_desc fillDesc[3] = {
-				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion) };
-			if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", nullptr, OCCLUSION_BODY,
-				fillDesc, 3, variables, 2, blocksX, blocksY, 8))
+			const pl_shader_desc fillDesc[4] = {
+				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
+				Sampled("sub_field", subField, false) };
+			if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", splitDefine, OCCLUSION_BODY,
+				fillDesc, settings.estSplit ? 4 : 3, variables, 2, blocksX, blocksY, 8))
 				return false;
 			lastB = b;
 			fillReady = b.chroma && b.chroma->params.w == a.chroma->params.w &&
@@ -1107,11 +1279,11 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (occlusionSlot == 0 || occlusionSlot == 1)
 		{
-			const pl_shader_desc occlusionDesc[3] = {
+			const pl_shader_desc occlusionDesc[4] = {
 				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
-				Storage("dst", occlusion[occlusionSlot]) };
-			if (!Dispatch("VideoProcessor de-judder: occlusion for the dither", nullptr, OCCLUSION_BODY,
-				occlusionDesc, 3, variables, 2, blocksX, blocksY, 8))
+				Storage("dst", occlusion[occlusionSlot]), Sampled("sub_field", subField, false) };
+			if (!Dispatch("VideoProcessor de-judder: occlusion for the dither", splitDefine, OCCLUSION_BODY,
+				occlusionDesc, settings.estSplit ? 4 : 3, variables, 2, blocksX, blocksY, 8))
 				return false;
 		}
 		if (wantGrainError)
@@ -1134,11 +1306,13 @@ if (q.x < size.x && q.y < size.y) {
 					return false;
 				}
 			}
-			const pl_shader_desc grainDesc[4] = {
+			const pl_shader_desc grainDesc[5] = {
 				Sampled("from_half", halfA, false), Sampled("to_half", halfB, true),
-				Sampled("field", field, false), Storage("dst", grainError) };
-			if (!Dispatch("VideoProcessor de-judder: grain error (adaptive downscale)", GRAIN_ERROR_HEADER,
-				GRAIN_ERROR_BODY, grainDesc, 4, nullptr, 0, blocksX, blocksY, 8))
+				Sampled("field", field, false), Storage("dst", grainError), Sampled("sub_field", subField, false) };
+			static const std::string grainSplitHeader = std::string("#define SPLIT 1\n") + GRAIN_ERROR_HEADER;
+			if (!Dispatch("VideoProcessor de-judder: grain error (adaptive downscale)",
+				settings.estSplit ? grainSplitHeader.c_str() : GRAIN_ERROR_HEADER,
+				GRAIN_ERROR_BODY, grainDesc, settings.estSplit ? 5 : 4, nullptr, 0, blocksX, blocksY, 8))
 				return false;
 			grainErrorValid = true;
 		}
@@ -1163,6 +1337,12 @@ if (q.x < size.x && q.y < size.y) {
 		return WARP_HEADER;
 	}
 
+	const char* FieldVectorGlslSplit()
+	{
+		static const std::string header = std::string("#define SPLIT 1\n") + WARP_HEADER;
+		return header.c_str();
+	}
+
 	bool MotionWarp::Warp(const Planes& a, float shift, Planes& out, bool trusted)
 	{
 		out = a;
@@ -1184,33 +1364,48 @@ if (q.x < size.x && q.y < size.y) {
 		const float tolerance = settings.matchTolerance;
 		// D5: B, its backward vectors and its occlusion bound only when on.
 		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma;
-		const std::string fillHeader = std::string("#define FILL\n") + WARP_HEADER + FILL_HEADER;
-		const char* header = fill ? fillHeader.c_str() : WARP_HEADER;
-		const pl_shader_desc lumaDesc[7] = {
+		// 11a E2: the sub-field bound (and read) only while the split is on.
+		const bool split = settings.estSplit && subField;
+		const std::string header = std::string(split ? "#define SPLIT 1\n" : "") + (fill ? "#define FILL\n" : "") +
+			WARP_HEADER + (fill ? FILL_HEADER : "");
+		std::vector<pl_shader_desc> lumaDesc = {
 			Sampled("src", a.luma, true), Sampled("field", field, false),
-			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedLuma),
-			Sampled("src_b", lastB.luma, true), Sampled("fill_bwd", backward, false),
-			Sampled("fill_occ", fillOcclusion, false) };
+			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedLuma) };
+		if (fill)
+		{
+			lumaDesc.push_back(Sampled("src_b", lastB.luma, true));
+			lumaDesc.push_back(Sampled("fill_bwd", backward, false));
+			lumaDesc.push_back(Sampled("fill_occ", fillOcclusion, false));
+		}
+		if (split)
+			lumaDesc.push_back(Sampled("sub_field", subField, false));
 		const pl_shader_var lumaVars[3] = { { pl_var_float("shift"), &shift, true },
 			{ pl_var_float("min_trusted_share"), &minShare, true },
 			{ pl_var_float("fill_tolerance"), &tolerance, true } };
-		if (!Dispatch("VideoProcessor de-judder: warp luma", header, WARP_LUMA_BODY,
-			lumaDesc, fill ? 7 : 4, lumaVars, fill ? 3 : 2, width, height, 16))
+		if (!Dispatch("VideoProcessor de-judder: warp luma", header.c_str(), WARP_LUMA_BODY,
+			lumaDesc.data(), static_cast<int>(lumaDesc.size()), lumaVars, fill ? 3 : 2, width, height, 16))
 			return false;
 		const float chromaScale[2] = {
 			static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
-		const pl_shader_desc chromaDesc[7] = {
+		std::vector<pl_shader_desc> chromaDesc = {
 			Sampled("src", a.chroma, true), Sampled("field", field, false),
-			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedChroma),
-			Sampled("src_b", lastB.chroma, true), Sampled("fill_bwd", backward, false),
-			Sampled("fill_occ", fillOcclusion, false) };
+			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedChroma) };
+		if (fill)
+		{
+			chromaDesc.push_back(Sampled("src_b", lastB.chroma, true));
+			chromaDesc.push_back(Sampled("fill_bwd", backward, false));
+			chromaDesc.push_back(Sampled("fill_occ", fillOcclusion, false));
+		}
+		if (split)
+			chromaDesc.push_back(Sampled("sub_field", subField, false));
 		const pl_shader_var chromaVars[4] = {
 			{ pl_var_float("shift"), &shift, true },
 			{ pl_var_vec2("chroma_scale"), chromaScale, true },
 			{ pl_var_float("min_trusted_share"), &minShare, true },
 			{ pl_var_float("fill_tolerance"), &tolerance, true } };
-		if (!Dispatch("VideoProcessor de-judder: warp chroma", header, WARP_CHROMA_BODY,
-			chromaDesc, fill ? 7 : 4, chromaVars, fill ? 4 : 3, a.chroma->params.w, a.chroma->params.h, 16))
+		if (!Dispatch("VideoProcessor de-judder: warp chroma", header.c_str(), WARP_CHROMA_BODY,
+			chromaDesc.data(), static_cast<int>(chromaDesc.size()), chromaVars, fill ? 4 : 3,
+			a.chroma->params.w, a.chroma->params.h, 16))
 			return false;
 		out.luma = warpedLuma;
 		out.chroma = warpedChroma;

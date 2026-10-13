@@ -6341,7 +6341,7 @@ namespace VideoProcessorTest
 			g.targetCrop = g.sourceCrop;
 			pl_tex warped = nullptr;
 			const bool ran = rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare,
-				shift, g, warped);
+				shift, g, warped, warp.SubField());
 			if (!ran)
 				pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
@@ -6975,6 +6975,145 @@ namespace VideoProcessorTest
 				Assert::IsTrue(warp.Estimate(pc0.planes, pd0.planes));
 				Assert::IsFalse(sads(warp) == armed, L"a cut should be searched");
 			}
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(EstimatorSplitOffStateLeavesEveryConsumerAlone)
+		{
+			// E2 off-state (planner 2026-10-13): with a threshold nothing reaches,
+			// the split on leaves every consumer of the field reading the parent
+			// exactly as with it off: the field, the occlusion mask, the grain
+			// error and both warps, byte for byte; off allocates no sub-field.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			struct Seen { std::vector<float> field, occlusion, grain; BothPaths warped; };
+			auto run = [&](bool split, bool& subFieldPresent)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.estSplit = split;
+				settings.estSplitSad = 1e9f;   // nothing splits (the edge blocks of a pan would)
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes, 0, true), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				subFieldPresent = warp.SubField() != nullptr;
+				Seen seen;
+				seen.field = DownloadField(gpu, warp).texels;
+				seen.occlusion = DownloadField(gpu, warp, warp.Occlusion(0)).texels;
+				seen.grain = DownloadField(gpu, warp, warp.GrainError()).texels;
+				seen.warped = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+				return seen;
+			};
+			bool offPresent = true, onPresent = false;
+			const Seen off = run(false, offPresent), on = run(true, onPresent);
+			Assert::IsFalse(offPresent, L"split off: no sub-field");
+			Assert::IsTrue(onPresent, L"split on: a sub-field");
+			Assert::IsTrue(off.field == on.field, L"field");
+			Assert::IsTrue(off.occlusion == on.occlusion, L"occlusion mask");
+			Assert::IsTrue(off.grain == on.grain, L"grain error");
+			Assert::IsTrue(off.warped.source == on.warped.source, L"source warp");
+			Assert::IsTrue(off.warped.rendered == on.warped.rendered, L"rendered warp");
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(EstimatorSplitFollowsASmallObject)
+		{
+			// E2: an 8x8 object moving (14, 6) inside a pan of (12, 6) fills one
+			// quarter of block (6, 3). The block matches poorly as a whole; split,
+			// the object's quarter takes (14, 6), trusted, and the others the
+			// pan; both warps then move the object by half its motion.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6, ox = 104, oy = 56, odx = 14;
+			auto inA = [](int x, int y) { return x >= ox && x < ox + 8 && y >= oy && y < oy + 8; };
+			auto inB = [](int x, int y) { return x >= ox + odx && x < ox + odx + 8 && y >= oy + dy && y < oy + dy + 8; };
+			// Per-pixel detail: a 2 px shift of the object does not match itself.
+			auto object = [](int x, int y) { return static_cast<uint16_t>(32000 + NoiseCode(x, y, 77, 24000)); };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inA(x, y) ? object(x - ox, y - oy) : DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return inB(x, y) ? object(x - ox - odx, y - oy - dy) : DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.estSplit = true;
+			settings.estSplitSad = 1.0f;   // the pan matches at ~0; the object's block does not
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			// The sub-field: two texels per block each way.
+			DejudderField sub;
+			{
+				Assert::IsNotNull(warp.SubField());
+				const int sw = warp.SubField()->params.w, sh = warp.SubField()->params.h;
+				std::vector<uint16_t> half(static_cast<size_t>(sw) * sh * 4);
+				pl_tex_transfer_params d{};
+				d.tex = warp.SubField();
+				d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"the sub-field is not host-readable");
+				sub.blocksX = sw;
+				sub.blocksY = sh;
+				for (uint16_t h : half)
+					sub.texels.push_back(HalfBits(h));
+			}
+			auto describe = [&](int sx, int sy)
+			{
+				const float* t = &sub.texels[(static_cast<size_t>(sy) * sub.blocksX + sx) * 4];
+				return L"(" + std::to_wstring(t[0]) + L", " + std::to_wstring(t[1]) + L") trust " + std::to_wstring(t[2]) +
+					L" split " + std::to_wstring(t[3]);
+			};
+			const int sx = ox / 8, sy = oy / 8;   // the object's sub-block
+			const float* objectSub = &sub.texels[(static_cast<size_t>(sy) * sub.blocksX + sx) * 4];
+			const float* panSub = &sub.texels[(static_cast<size_t>(sy) * sub.blocksX + sx - 1) * 4];
+			const std::wstring message = L"object sub-block " + describe(sx, sy) + L"; its neighbour " + describe(sx - 1, sy) +
+				L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(objectSub[3] > 0.5f && objectSub[2] > 0.5f && std::fabs(objectSub[0] - odx) <= 0.6f &&
+				std::fabs(objectSub[1] - dy) <= 0.6f, (L"the object's sub-block follows the object; " + message).c_str());
+			Assert::IsTrue(panSub[3] > 0.5f && std::fabs(panSub[0] - dx) <= 0.6f, (L"the surround follows the pan; " + message).c_str());
+			// Both warps (backward: each output pixel takes A at its own position
+			// minus its own vector) use the object's vector inside its sub-block:
+			// there the split output is closer to A moved by (7, 3) than the
+			// output without the split.
+			const BothPaths split = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+			Dejudder::Settings plainSettings = DejudderTestSettings();
+			Dejudder::MotionWarp plain(fixture.Log(), gpu, plainSettings);
+			Assert::IsTrue(plain.Estimate(planesA.planes, planesB.planes));
+			const BothPaths unsplit = WarpBothPaths(fixture, plain, a, planesA.planes, 0.5f);
+			auto errorIn = [&](const std::vector<float>& image)
+			{
+				double e = 0.0;
+				int n = 0;
+				for (int y = oy + 1; y < oy + 7; ++y)
+					for (int x = ox + 1; x < ox + 7; ++x)
+					{
+						e += std::fabs(image[static_cast<size_t>(y) * width + x] -
+							static_cast<float>(a.luma[static_cast<size_t>(y - 3) * width + x - 7]));
+						++n;
+					}
+				return e / n;
+			};
+			const double sSplit = errorIn(split.source), sPlain = errorIn(unsplit.source);
+			const double rSplit = errorIn(split.rendered), rPlain = errorIn(unsplit.rendered);
+			Assert::IsTrue(sSplit < sPlain && rSplit < rPlain, (L"inside the object's sub-block, error vs A moved by (7, 3): source " +
+				std::to_wstring(sPlain) + L" -> " + std::to_wstring(sSplit) + L", rendered " + std::to_wstring(rPlain) + L" -> " +
+				std::to_wstring(rSplit) + L"; " + message).c_str());
 			AssertCleanLibplaceboLog(log);
 		}
 

@@ -885,6 +885,8 @@ namespace
 		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
 		bool dejudderEstQpel = true;              // E3
 		bool dejudderEstGate = true;              // E4
+		bool dejudderEstSplit = true;             // E2
+		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
 		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
 		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
 		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
@@ -1039,6 +1041,7 @@ namespace
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
+			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
 			<< settings.upscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -1985,6 +1988,7 @@ namespace
 			std::make_tuple("dejudder_motion_scale_hi", 0.0, 32.0, &settings.dejudderMotionScaleHi),
 			std::make_tuple("dejudder_trust_scale", 0.0, 1.0, &settings.dejudderTrustScale),
 			std::make_tuple("dejudder_est_lambda", 0.0, 8.0, &settings.dejudderEstLambda),
+			std::make_tuple("dejudder_est_split_sad", 0.0, 16.0, &settings.dejudderEstSplitSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
@@ -2011,7 +2015,8 @@ namespace
 			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
 			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
 			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
-			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate) })
+			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
+			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8086,6 +8091,8 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstLambda = next.dejudderEstLambda;
 		currentTransport.dejudderEstQpel = next.dejudderEstQpel;
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
+		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
+		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
 		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
 		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
@@ -8169,7 +8176,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
 		changed(current.dejudderEstCandidates != next.dejudderEstCandidates ||
 			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
-			current.dejudderEstGate != next.dejudderEstGate, "dejudder_est");
+			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
+			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
 		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
 		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
@@ -11149,6 +11157,8 @@ struct LibplaceboVideoRenderer::Impl
 			settings.estLambda = static_cast<float>(activeSettings.dejudderEstLambda);
 			settings.estQpel = activeSettings.dejudderEstQpel;
 			settings.estGate = activeSettings.dejudderEstGate;
+			settings.estSplit = activeSettings.dejudderEstSplit;
+			settings.estSplitSad = static_cast<float>(activeSettings.dejudderEstSplitSad);
 			return settings;
 		};
 		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
@@ -11167,7 +11177,8 @@ struct LibplaceboVideoRenderer::Impl
 				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
 				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
 				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
-				current.estQpel != next.estQpel || current.estGate != next.estGate)
+				current.estQpel != next.estQpel || current.estGate != next.estGate ||
+				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad)
 				dejudder->SetSettings(next);
 		}
 		Dejudder::Planes a, b;
@@ -11504,7 +11515,7 @@ struct LibplaceboVideoRenderer::Impl
 			if (cached && dejudderRenderedWarp)
 			{
 				if (!dejudderRenderedWarp->Run(cached, dejudder->Field(), dejudder->FrameTrust(),
-					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture))
+					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, dejudder->SubField()))
 				{
 					failure = "rendered warp failed";
 					break;

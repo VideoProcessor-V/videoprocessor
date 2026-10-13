@@ -90,8 +90,9 @@ namespace DejudderRendered
 
 		// The cached picture warped by shift x the de-judder's A->B field.
 		// field / frameTrust: DejudderWarp::Field() / FrameTrust().
+		// subField: DejudderWarp::SubField() (11a E2), or nullptr.
 		bool Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
-			float shift, const Geometry& geometry, pl_tex& out);
+			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr);
 		const std::string& Error() const { return error; }
 
 	private:

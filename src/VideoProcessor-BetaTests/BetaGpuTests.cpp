@@ -617,7 +617,7 @@ void RunBetaFeatureGpuTests()
 				g.targetCrop = g.sourceCrop;
 				pl_tex out = nullptr;
 				Check(rendered.Run(cache.Texture(3), warp.Field(), warp.FrameTrust(), settings.minTrustedShare,
-					shift, g, out), "6d: rendered warp failed: " + rendered.Error());
+					shift, g, out, warp.SubField()), "6d: rendered warp failed: " + rendered.Error());
 				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
 				pl_frame t = target();
 				std::vector<const pl_hook*> kept;

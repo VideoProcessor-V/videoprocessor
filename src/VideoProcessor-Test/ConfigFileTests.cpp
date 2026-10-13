@@ -697,6 +697,8 @@ namespace VideoProcessorTest
                 Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },
                 Case{ "dejudder_est_gate", "maybe", false }, Case{ "dejudder_est_lambda", "0.5", true },
                 Case{ "dejudder_est_lambda", "9", false },
+                Case{ "dejudder_est_split", "on", true }, Case{ "dejudder_est_split_sad", "0", true },
+                Case{ "dejudder_est_split_sad", "20", false },
                 Case{ "adaptive_upscale", "on", true }, Case{ "adaptive_upscale", "auto", false },
                 Case{ "adaptive_upscale_w_base", "0.8", true }, Case{ "adaptive_upscale_w_base", "1.5", false },
                 Case{ "adaptive_upscale_superres_scale", "off", true },

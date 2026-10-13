@@ -354,11 +354,12 @@ namespace ChainGpuProbe
 		s.motionScaleLo = 0.25f;
 		s.motionScaleHi = 1.5f;
 		s.trustScaleFull = 0.6f;
-		// Stage 11a estimator-lite (E1, E3, E4) at its defaults.
+		// Stage 11a estimator-lite (E1-E4) at its defaults.
 		s.estCandidates = true;
 		s.estLambda = 0.5f;
 		s.estQpel = true;
 		s.estGate = true;
+		s.estSplit = true;   // E2
 		return s;
 	}
 	constexpr double kRefinedGrainTolerance = 3.0;

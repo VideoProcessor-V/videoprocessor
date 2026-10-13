@@ -43,6 +43,9 @@ namespace Dejudder
 	// Needs the samplers `field` and `frame_trust` and the float
 	// `min_trusted_share`. Shared with Stage 6d's rendered warp.
 	const char* FieldVectorGlsl();
+	// 11a E2: the same rule reading the sub-field (`sub_field` sampler) where
+	// the split flag marks a block split; parent blocks as before.
+	const char* FieldVectorGlslSplit();
 
 	struct Planes
 	{
@@ -108,6 +111,15 @@ namespace Dejudder
 		float estLambda = 0.5f;
 		bool estQpel = false;
 		bool estGate = false;
+		// E2: blocks whose best search SAD (per sample) exceeds estSplitSad
+		// (0 = matchTolerance) split into four 8x8-source-pixel sub-blocks,
+		// each searched (parent and neighbour starts, +-2 px, half-pel) with
+		// its own consistency trust, into SubField(). The split flag there
+		// (w = 1) is the single source of granularity: the warps, the
+		// occlusion pass and the grain-error pass read the sub-field where it
+		// is set. Off: nothing allocated or bound; every consumer as before.
+		bool estSplit = false;
+		float estSplitSad = 0.0f;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
 	};
@@ -160,6 +172,10 @@ namespace Dejudder
 		// resolution texels (source pixels / 8), z = best / second-best match
 		// (the prior is used below 0.9), w = 1 once written.
 		pl_tex GlobalVector() const { return globalVector[0]; }
+		// 11a E2: two texels per block each way (8x8 source pixels): rgba =
+		// (vx, vy) source pixels, trust (1/0), split flag (1 = the parent block
+		// split; 0 = a copy of the parent). nullptr while estSplit is off.
+		pl_tex SubField() const { return settings.estSplit && estimated ? subField : nullptr; }
 		// B's occlusion mask (6c), one texel per 16x16 source block of B:
 		// r = 1 where B's content was visible in A (consistent both ways and
 		// a good match), 0 where it is new or uncovered.
@@ -221,6 +237,8 @@ namespace Dejudder
 		pl_tex previousSearch[2] = { nullptr, nullptr };    // 11a: last frame's searches
 		bool previousValid = false;
 		pl_tex qpelField = nullptr;                         // 11a E3: before D3
+		pl_tex subField = nullptr;                          // 11a E2
+		pl_tex subSearch[2] = { nullptr, nullptr };         // 11a E2: the split searches
 		Planes lastB;                                       // D5: B of the last Estimate
 		bool fillReady = false;
 		pl_tex occlusion[2] = { nullptr, nullptr };

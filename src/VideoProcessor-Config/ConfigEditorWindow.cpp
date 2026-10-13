@@ -6419,6 +6419,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_est_gate"), { QStringLiteral("on"), QStringLiteral("off") });
         estGate->setToolTip(QStringLiteral(
             "When nothing moves (needs the global-motion prior), last frame's motion is kept instead of searching again."));
+        auto* estSplit = addChoice(QStringLiteral("Split poorly matched blocks"),
+            QStringLiteral("dejudder_est_split"), { QStringLiteral("on"), QStringLiteral("off") });
+        estSplit->setToolTip(QStringLiteral(
+            "A block that matches poorly (often a small object on a moving background) is searched as four "
+            "quarter blocks, so the object and its surround each get their own motion."));
+        auto* estSplitSad = addText(QStringLiteral("Split above (codes, 0 = match tolerance)"),
+            QStringLiteral("dejudder_est_split_sad"));
+        estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));
+        estSplitSad->setPlaceholderText(QStringLiteral("0"));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));

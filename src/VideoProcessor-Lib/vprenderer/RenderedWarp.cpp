@@ -251,7 +251,7 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	bool Warp::Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
-		float shift, const Geometry& g, pl_tex& out)
+		float shift, const Geometry& g, pl_tex& out, pl_tex subField)
 	{
 		out = nullptr;
 		if (!dispatch || !cached || !field || !frameTrust)
@@ -296,13 +296,13 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_vec4("nls_domain"), domain, true },
 			{ pl_var_float("shift"), &shift, true },
 			{ pl_var_float("min_trusted_share"), &minTrustedShare, true } };
-		const pl_shader_desc descriptors[4] = {
+		const pl_shader_desc descriptors[5] = {
 			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust),
-			Storage(warped) };
-		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) + Dejudder::FieldVectorGlsl() +
-			WARP_FUNCTIONS;
+			Storage(warped), Sampled("sub_field", subField) };
+		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
+			(subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,
-			descriptors, 4, variables, 11, w, h))
+			descriptors, subField ? 5 : 4, variables, 11, w, h))
 		{
 			error = "rendered warp rejected or failed";
 			return false;
