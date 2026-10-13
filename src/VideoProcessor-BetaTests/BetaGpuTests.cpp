@@ -1749,6 +1749,23 @@ namespace
 	};
 }
 
+// VP_TEST_CHROMA: the chroma upscaler under test (lanczos, catmull_rom,
+// bicubic, bilinear); nullptr = unset.
+static const pl_filter_config* TestChromaFilter()
+{
+	char* v = nullptr;
+	size_t n = 0;
+	std::string name;
+	if (_dupenv_s(&v, &n, "VP_TEST_CHROMA") == 0 && v)
+		name = v;
+	std::free(v);
+	if (name == "lanczos") return &pl_filter_lanczos;
+	if (name == "catmull_rom") return &pl_filter_catmull_rom;
+	if (name == "bicubic") return &pl_filter_bicubic;
+	if (name == "bilinear") return &pl_filter_bilinear;
+	return nullptr;
+}
+
 // The efficiency options' quality (owner 2026-10-13: keep 90-95% of each
 // feature's own benefit). On frames of the clip (VP_TEST_CLIP), rendered to a
 // 16-bit target without the dither or the LED stage so only scaling differs:
@@ -1815,6 +1832,20 @@ void RunBetaOptionQuality()
 	// in grainy blocks - SSIM sharpens grain, the blend calms it.
 	double grainEnergy[Count] = {};
 	int chromaOver8 = 0;
+	// Where the larger chroma differences are: samples over 5 codes on strong
+	// colour edges (top 10% of the polar output's colour gradient) or not.
+	long long over5Edge = 0, over5Flat = 0;
+	// VP_TEST_CROPS_DIR: side-by-side crops (polar | chroma filter | 4x the
+	// difference) around the frames' worst spots, as PPM files.
+	std::string cropsDir;
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		if (_dupenv_s(&v, &n, "VP_TEST_CROPS_DIR") == 0 && v)
+			cropsDir = v;
+		std::free(v);
+	}
+	int cropsWritten = 0;
 	double chromaMax = 0.0;
 	int chromaMaxX = 0, chromaMaxY = 0, chromaMaxFrame = 0;
 	double chromaSum = 0.0, chromaCount = 0.0;
@@ -1870,7 +1901,7 @@ void RunBetaOptionQuality()
 				params.upscaler = &pl_filter_ewa_lanczossharp;
 				params.downscaler = var == Reference ? &pl_filter_ewa_lanczossharp : &pl_filter_mitchell;
 				if (var == Chroma)
-					params.plane_upscaler = &pl_filter_lanczos;
+					params.plane_upscaler = TestChromaFilter() ? TestChromaFilter() : &pl_filter_lanczos;
 				std::vector<const pl_hook*> hooks;
 				if (var == Polar || var == Ortho || var == Chroma)
 				{
@@ -1943,6 +1974,64 @@ void RunBetaOptionQuality()
 						(grainy ? grainErr : edgeErr)[var] += e / 256.0;
 					}
 				}
+			// Colour edges of the polar output: the gradient of R-G and B-G.
+			{
+				std::vector<float> grad(static_cast<size_t>(ow) * oh, 0.0f);
+				auto cd = [&](int x, int y, int c)
+				{
+					const uint16_t* px = &outs[Polar][(static_cast<size_t>(y) * ow + x) * 4];
+					return (static_cast<float>(px[c]) - px[1]) / 64.0f;
+				};
+				for (int y = 1; y < oh - 1; ++y)
+					for (int x = 1; x < ow - 1; ++x)
+						grad[static_cast<size_t>(y) * ow + x] =
+							std::fabs(cd(x + 1, y, 0) - cd(x - 1, y, 0)) + std::fabs(cd(x, y + 1, 0) - cd(x, y - 1, 0)) +
+							std::fabs(cd(x + 1, y, 2) - cd(x - 1, y, 2)) + std::fabs(cd(x, y + 1, 2) - cd(x, y - 1, 2));
+				std::vector<float> sorted;
+				for (size_t i = 0; i < grad.size(); i += 13) sorted.push_back(grad[i]);
+				std::sort(sorted.begin(), sorted.end());
+				const float edgeLimit = sorted[sorted.size() * 9 / 10];
+				int worstX = 0, worstY = 0;
+				double worst = 0.0;
+				for (int y = 1; y < oh - 1; ++y)
+					for (int x = 1; x < ow - 1; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * ow + x) * 4;
+						double d = 0.0;
+						for (int ch = 0; ch < 3; ++ch)
+							d = std::max(d, std::fabs(static_cast<double>(outs[Chroma][i + ch]) - outs[Polar][i + ch]) / 64.0);
+						if (d > 5.0)
+							(grad[static_cast<size_t>(y) * ow + x] >= edgeLimit ? over5Edge : over5Flat)++;
+						if (d > worst) { worst = d; worstX = x; worstY = y; }
+					}
+				if (!cropsDir.empty() && cropsWritten < 3 && worst > 20.0)
+				{
+					const int cw = 96, ch = 96, scale = 3;
+					const int x0 = std::min(std::max(0, worstX - cw / 2), ow - cw), y0 = std::min(std::max(0, worstY - ch / 2), oh - ch);
+					const int W = cw * 3 * scale, H = ch * scale;
+					std::vector<unsigned char> img(static_cast<size_t>(W) * H * 3);
+					for (int y = 0; y < H; ++y)
+						for (int x = 0; x < W; ++x)
+						{
+							const int panel = x / (cw * scale), sx = x0 + (x % (cw * scale)) / scale, sy = y0 + y / scale;
+							const size_t i = (static_cast<size_t>(sy) * ow + sx) * 4;
+							for (int c = 0; c < 3; ++c)
+							{
+								double v;
+								if (panel == 0) v = outs[Polar][i + c] / 257.0;
+								else if (panel == 1) v = outs[Chroma][i + c] / 257.0;
+								else v = 128.0 + 4.0 * (static_cast<double>(outs[Chroma][i + c]) - outs[Polar][i + c]) / 257.0;
+								img[(static_cast<size_t>(y) * W + x) * 3 + c] = static_cast<unsigned char>(std::min(255.0, std::max(0.0, v)));
+							}
+						}
+					const std::string name = cropsDir + "\\chroma-crop-" + std::to_string(++cropsWritten) + ".ppm";
+					std::ofstream ppm(name, std::ios::binary);
+					ppm << "P6\n" << W << " " << H << "\n255\n";
+					ppm.write(reinterpret_cast<const char*>(img.data()), static_cast<std::streamsize>(img.size()));
+					std::cout << "  crop " << cropsWritten << ": worst " << worst << " codes at (" << worstX << ", " << worstY
+						<< ") in sampled frame " << frames << " -> " << name << "\n";
+				}
+			}
 			// Chroma: Lanczos chroma against today's polar chroma (same blend).
 			for (size_t i = 0; i < outs[Polar].size(); i += 4 * 7)
 				for (int ch = 0; ch < 3; ++ch)
@@ -1973,7 +2062,9 @@ void RunBetaOptionQuality()
 		<< "; calming kept by ortho: " << (ls - lp > 1e-9 ? 100.0 * (ls - lo) / (ls - lp) : 0.0) << "%\n"
 		<< "  chroma outliers: " << chromaOver8 << " samples over 8 codes of " << static_cast<long long>(chromaCount)
 		<< "; worst " << chromaMax << " at (" << chromaMaxX << ", " << chromaMaxY << ") in sampled frame " << chromaMaxFrame
-		<< ", p99.9 " << (chromaDiffs.empty() ? 0.0 : chromaDiffs[chromaDiffs.size() * 999 / 1000]) << "\n";
+		<< ", p99.9 " << (chromaDiffs.empty() ? 0.0 : chromaDiffs[chromaDiffs.size() * 999 / 1000]) << "\n"
+		<< "  pixels over 5 codes: " << over5Edge << " on strong colour edges, " << over5Flat << " elsewhere ("
+		<< (over5Edge + over5Flat > 0 ? 100.0 * over5Edge / (over5Edge + over5Flat) : 0.0) << "% on edges)\n";
 	std::cout << "Beta option quality (" << frames << " clip frames, 3840x2160 -> 2560x1600, error vs the plain polar downscale in 10-bit codes):\n"
 		<< "  grainy low-edge blocks (" << grainBlocks << "): SSIM alone " << gs << ", blend polar " << gp << ", blend ortho " << go << "\n"
 		<< "    faithful benefit kept by ortho: " << (gs - gp > 1e-9 ? 100.0 * (gs - go) / (gs - gp) : 0.0) << "%\n"
@@ -1984,6 +2075,140 @@ void RunBetaOptionQuality()
 	pl_tex_destroy(g, &luma);
 	pl_tex_destroy(g, &chroma);
 	pl_tex_destroy(g, &target);
+}
+
+// The de-judder's benefit on real footage (owner 2026-10-13, for judging a
+// compromise against 90-95% of the feature's own benefit): in the 29.97p clip
+// (VP_TEST_CLIP), frame n+1 is the true halfway picture between n and n+2.
+// Per pair (n, n+2), consecutive so the hysteresis and the temporal start
+// work as in playback: estimate, warp n by 0.5 (source warp, strength 1) and
+// compare its luma with n+1; holding n is the baseline. Benefit = hold error
+// - warp error (10-bit codes, interior). Variants: today's refined matcher,
+// and with estScreen. Report only: VP_TEST_DEJUDDER_QUALITY=1.
+void RunBetaDejudderQuality()
+{
+	char* dir = nullptr;
+	size_t length = 0;
+	if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") != 0 || !dir || !*dir)
+	{
+		std::free(dir);
+		std::cout << "Beta de-judder quality: VP_TEST_CLIP not set\n";
+		return;
+	}
+	const std::string folder(dir);
+	std::free(dir);
+	std::vector<std::string> files;
+	WIN32_FIND_DATAA fd{};
+	HANDLE find = FindFirstFileA((folder + "\\seg_*.yuv").c_str(), &fd);
+	if (find != INVALID_HANDLE_VALUE)
+	{
+		do files.push_back(folder + "\\" + fd.cFileName); while (FindNextFileA(find, &fd));
+		FindClose(find);
+	}
+	std::sort(files.begin(), files.end());
+	Check(!files.empty(), "de-judder quality: no clip files");
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int w = 3840, h = 2160;
+	const size_t frameBytes = static_cast<size_t>(w) * h * 3;
+	auto plane = [&](int pw, int ph, int comps)
+	{
+		pl_tex_params p{};
+		p.w = pw; p.h = ph;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE));
+		p.sampleable = true; p.storable = true; p.host_writable = true; p.host_readable = true;
+		return pl_tex_create(g, &p);
+	};
+	struct Variant { const char* name; bool screen; double hold = 0, warp = 0; int pairs = 0; double searchMs = 0; };
+	std::vector<Variant> variants = { { "refined (today)", false } };
+	std::vector<uint16_t> raw(frameBytes / 2);
+	auto load = [&](std::ifstream& in, int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma)
+	{
+		in.clear();
+		in.seekg(static_cast<std::streamoff>(frameBytes) * index);
+		if (!in.read(reinterpret_cast<char*>(raw.data()), frameBytes)) return false;
+		luma.resize(static_cast<size_t>(w) * h);
+		chroma.resize(static_cast<size_t>(w / 2) * (h / 2) * 2);
+		for (size_t i = 0; i < luma.size(); ++i) luma[i] = static_cast<uint16_t>(raw[i] << 6);
+		const uint16_t* u = raw.data() + luma.size();
+		const uint16_t* v = u + luma.size() / 4;
+		for (size_t i = 0; i < luma.size() / 4; ++i)
+		{
+			chroma[i * 2] = static_cast<uint16_t>(u[i] << 6);
+			chroma[i * 2 + 1] = static_cast<uint16_t>(v[i] << 6);
+		}
+		return true;
+	};
+	for (Variant& var : variants)
+	{
+		Dejudder::Settings settings = ChainGpuProbe::Refined(Dejudder::Settings{});
+		settings.hostReadable = true;
+		Dejudder::MotionWarp warp(gpu.Log(), g, settings);
+		warp.SetPassTiming(true);
+		pl_tex lumaT[2] = { plane(w, h, 1), plane(w, h, 1) }, chromaT[2] = { plane(w / 2, h / 2, 2), plane(w / 2, h / 2, 2) };
+		std::vector<uint16_t> la, ca, lb, cb, lt, ct, warped(static_cast<size_t>(w) * h);
+		for (const auto& file : files)
+		{
+			std::ifstream in(file, std::ios::binary);
+			int slot = 0;
+			if (!load(in, 0, la, ca)) continue;
+			pl_tex_transfer_params up{};
+			up.tex = lumaT[slot]; up.ptr = la.data(); Check(pl_tex_upload(g, &up), "upload");
+			up.tex = chromaT[slot]; up.ptr = ca.data(); Check(pl_tex_upload(g, &up), "upload");
+			for (int n = 0; n + 2 < 150; n += 2)
+			{
+				if (!load(in, n + 1, lt, ct) || !load(in, n + 2, lb, cb)) break;
+				const int next = 1 - slot;
+				up.tex = lumaT[next]; up.ptr = lb.data(); Check(pl_tex_upload(g, &up), "upload");
+				up.tex = chromaT[next]; up.ptr = cb.data(); Check(pl_tex_upload(g, &up), "upload");
+				Dejudder::Planes a, b, out;
+				a.luma = lumaT[slot]; a.chroma = chromaT[slot]; b.luma = lumaT[next]; b.chroma = chromaT[next];
+				a.chromaShiftX = b.chromaShiftX = 1;
+				a.chromaShiftY = b.chromaShiftY = 1;
+				Check(warp.Estimate(a, b), "de-judder quality: estimate: " + warp.LastError());
+				Check(warp.Warp(a, 0.5f, out, true), "de-judder quality: warp");
+				pl_tex_transfer_params d{};
+				d.tex = out.luma; d.ptr = warped.data();
+				Check(pl_tex_download(g, &d), "de-judder quality: download");
+				// The previous frame's luma for the hold baseline is `la`
+				// (frame n); the truth is lt (n+1).
+				if (n >= 6)   // the hysteresis and the temporal start settled
+				{
+					double hold = 0.0, wr = 0.0;
+					long long count = 0;
+					for (int y = 64; y < h - 64; y += 2)
+						for (int x = 64; x < w - 64; x += 2)
+						{
+							const size_t i = static_cast<size_t>(y) * w + x;
+							hold += std::abs(static_cast<int>(la[i]) - static_cast<int>(lt[i]));
+							wr += std::abs(static_cast<int>(warped[i]) - static_cast<int>(lt[i]));
+							++count;
+						}
+					var.hold += hold / count / 64.0;
+					var.warp += wr / count / 64.0;
+					++var.pairs;
+				}
+				la.swap(lb);
+				ca.swap(cb);
+				slot = next;
+			}
+		}
+		const auto found = warp.PassMs().find("VideoProcessor de-judder: block search");
+		var.searchMs = found != warp.PassMs().end() ? found->second : 0.0;
+		for (pl_tex* t : { &lumaT[0], &lumaT[1], &chromaT[0], &chromaT[1] })
+			pl_tex_destroy(g, t);
+	}
+	std::cout << "Beta de-judder quality (real clip, warp of n by 0.5 against the true n+1, luma, 10-bit codes):\n";
+	const double baseBenefit = variants[0].pairs ? (variants[0].hold - variants[0].warp) / variants[0].pairs : 0.0;
+	for (const Variant& var : variants)
+	{
+		const double hold = var.pairs ? var.hold / var.pairs : 0.0, wr = var.pairs ? var.warp / var.pairs : 0.0;
+		const double benefit = hold - wr;
+		std::cout << "  " << var.name << ": hold " << hold << ", warp " << wr << ", benefit " << benefit
+			<< " (" << (baseBenefit > 1e-9 ? 100.0 * benefit / baseBenefit : 0.0) << "% of today's), block search "
+			<< (var.pairs ? var.searchMs / (var.pairs + 3.0 * files.size()) : 0.0) << " ms per pair (drained)\n";
+	}
 }
 
 void RunBetaScenarioTiming()
@@ -2033,7 +2258,7 @@ void RunBetaScenarioTiming()
 	// The efficiency options under test: VP_TEST_CHROMA=lanczos (chroma_upscaler)
 	// and VP_TEST_ADAPTIVE_ORTHO=1 (adaptive_faithful ortho).
 	const bool chromaLanczos = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n, "VP_TEST_CHROMA") == 0 && v &&
-		std::string(v) == "lanczos"; std::free(v); return on; }();
+		std::string(v) != ""; std::free(v); return on; }();
 	const bool adaptiveOrtho = envOn("VP_TEST_ADAPTIVE_ORTHO");
 	// The synthetic sequence at 4K and 1080p.
 	const std::vector<Segment> segments = {
@@ -2275,7 +2500,7 @@ void RunBetaScenarioTiming()
 				params.downscaler = &pl_filter_mitchell;
 				params.upscaler = &pl_filter_ewa_lanczossharp;
 				if (chromaLanczos)
-					params.plane_upscaler = &pl_filter_lanczos;
+					params.plane_upscaler = TestChromaFilter();
 #if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
 				params.output_fbo_float32 = true;
 #endif

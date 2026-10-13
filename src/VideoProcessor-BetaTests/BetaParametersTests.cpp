@@ -9,6 +9,7 @@ void RunBetaFboTiming(); // BetaGpuTests.cpp
 void RunBetaPassTiming(); // BetaGpuTests.cpp
 void RunBetaScenarioTiming(); // BetaGpuTests.cpp
 void RunBetaOptionQuality(); // BetaGpuTests.cpp
+void RunBetaDejudderQuality(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
@@ -83,6 +84,16 @@ int main() {
             const bool runQuality = _dupenv_s(&quality, &qualityLength, "VP_TEST_QUALITY") == 0 && quality &&
                 std::string(quality) == "1";
             std::free(quality);
+            char* djq = nullptr;
+            size_t djqLength = 0;
+            const bool runDejudderQuality = _dupenv_s(&djq, &djqLength, "VP_TEST_DEJUDDER_QUALITY") == 0 && djq &&
+                std::string(djq) == "1";
+            std::free(djq);
+            if (runDejudderQuality)
+            {
+                RunBetaDejudderQuality();
+                return 0;
+            }
             if (runQuality)
             {
                 RunBetaOptionQuality();
