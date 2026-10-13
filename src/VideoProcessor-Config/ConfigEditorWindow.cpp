@@ -9996,6 +9996,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         QStringLiteral("cntr_assist"), true));
     assistForm->addRow(QString(), bindCheckField(QStringLiteral("Software first"), led,
         QStringLiteral("software_first"), true));
+    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Ignore film grain in the highlight measure"), led,
+        QStringLiteral("led_highlight_grain_suppress"), true));
     assistForm->addRow(QStringLiteral("Highest contrast for the assist"),
         numberControl(led, QStringLiteral("cntr_assist_max"), 50, 100, 0, 1, 100, QString()));
     assistForm->addRow(QString(), helpLabel(QStringLiteral(

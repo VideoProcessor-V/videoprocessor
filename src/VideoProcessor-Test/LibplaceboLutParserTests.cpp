@@ -3230,6 +3230,75 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&hook);
 		}
 
+		TEST_METHOD(LedHighlightStatisticIgnoresGrain)
+		{
+			// Delta 8 R2: with the grain map (g = 1 everywhere), grain on a flat
+			// field no longer raises the highlight percentile, a real highlight
+			// patch in the same grain still does, and the APL and the block
+			// maximum (script mode, SF-4) are exactly as without the map.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int size = 192;
+			auto grainOf = [](int x, int y)
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u);
+				return static_cast<int>((h * 2654435761u >> 24) % 61u) - 30;
+			};
+			auto flat = [&](int, int x, int y) { return static_cast<double>(100 + grainOf(x, y)); };
+			auto patch = [&](int, int x, int y)
+			{
+				const bool in = x >= 60 && x < 132 && y >= 60 && y < 132;
+				return static_cast<double>(std::min(255, (in ? 225 : 100) + grainOf(x, y)));
+			};
+			const float texel[4] = { 0.4f, 1.0f, 0.0f, 1.0f };   // r = the floor: g = 1
+			pl_tex_params mp{};
+			mp.w = mp.h = 1;
+			mp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			mp.sampleable = true;
+			mp.initial_data = texel;
+			pl_tex map = mp.format ? pl_tex_create(gpu, &mp) : nullptr;
+			Assert::IsNotNull(map);
+			const double weights[3] = { 0.299, 0.587, 0.114 };
+			const pl_rect2df crop{ 0.0f, 0.0f, static_cast<float>(size), static_cast<float>(size) };
+			auto measure = [&](auto code, bool withGrain)
+			{
+				LedDrive::MeasurementHook hook;
+				hook.SetFrame({}, weights);
+				hook.SetGrain(withGrain ? map : nullptr, 0.4f, crop);
+				fixture.RenderSequence(std::vector<const pl_hook*>{ hook.Hook() }, size, size, 1, code);
+				std::vector<LedDrive::RawMeasurement> measured;
+				Assert::AreEqual(1, hook.Collect(measured, 5000), L"No measurement came back");
+				hook.Release();
+				return measured.front();
+			};
+			auto p99 = [](const LedDrive::RawMeasurement& r)
+			{
+				return LedDrive::HistogramPercentile(r.histogram, r.blocks, 99.0);
+			};
+			const LedDrive::RawMeasurement flatOff = measure(flat, false), flatOn = measure(flat, true);
+			const LedDrive::RawMeasurement patchOff = measure(patch, false), patchOn = measure(patch, true);
+			pl_tex_destroy(gpu, &map);
+			const std::wstring message = L"flat grain p99 " + std::to_wstring(p99(flatOff)) + L" -> " +
+				std::to_wstring(p99(flatOn)) + L"; highlight patch p99 " + std::to_wstring(p99(patchOff)) + L" -> " +
+				std::to_wstring(p99(patchOn)) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(p99(flatOn) < p99(flatOff) - 5.0, message.c_str());
+			// The highlight survives at its own level (8-bit 225 = limited code
+			// 209.2); the plain statistic's extra was the grain riding on it.
+			Assert::IsTrue(std::fabs(p99(patchOn) - (16.0 + 219.0 * 225.0 / 255.0)) <= 3.0 &&
+				p99(patchOn) > p99(flatOn) + 50.0, message.c_str());
+			for (const auto& pair : { std::make_pair(&flatOff, &flatOn), std::make_pair(&patchOff, &patchOn) })
+			{
+				Assert::AreEqual(pair.first->sum, pair.second->sum, (L"the APL must not change; " + message).c_str());
+				Assert::AreEqual(pair.first->maximum, pair.second->maximum, (L"the block maximum must not change; " + message).c_str());
+				Assert::AreEqual(pair.first->blocks, pair.second->blocks);
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
+
 		TEST_METHOD(LedMeasurementHookMeasuresWithoutTouchingThePicture)
 		{
 			TargetLutGpuFixture fixture;

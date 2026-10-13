@@ -171,6 +171,11 @@ namespace LedDrive
 		// compensation first and VP's gain only the remainder.
 		bool cntrAssist = true;
 		bool softwareFirst = true;
+		// Delta 8 R2: where the Stage 8 grain map exists, grainy blocks enter
+		// the highlight percentile as the mean of the 3x3 blocks around them
+		// (grain averages out, a real highlight survives). APL and the block
+		// maximum (script mode) unchanged. Off = the plain statistics.
+		bool highlightGrainSuppress = true;
 		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
 		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
 		// 100 = no cap beyond cntr_max_usable. The lower of the two applies.
@@ -468,6 +473,7 @@ namespace LedDrive
 			Number("rate_max_up", 0.0, 10000.0),
 			Number("rate_max_down", 0.0, 10000.0),
 			Boolean("cntr_assist"),
+			Boolean("led_highlight_grain_suppress"),
 			Integer("cntr_assist_max", 50, 100),
 			Boolean("cut_cntr_dump"),
 			Boolean("shaped_recovery"),
@@ -753,6 +759,7 @@ namespace LedDrive
 		readNumber("rate_max_up", result.rateMaxUp);
 		readNumber("rate_max_down", result.rateMaxDown);
 		config.TryGetBool(section, "cntr_assist", result.cntrAssist);
+		config.TryGetBool(section, "led_highlight_grain_suppress", result.highlightGrainSuppress);
 		readInt("cntr_assist_max", 50, 100, result.cntrAssistMax);
 		config.TryGetBool(section, "cut_cntr_dump", result.cutCntrDump);
 		config.TryGetBool(section, "shaped_recovery", result.shapedRecovery);

@@ -15921,6 +15921,12 @@ struct LibplaceboVideoRenderer::Impl
                     hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
                     renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent,
                     sourceSequence);
+                // Delta 8 R2: the grain map (the previous source frame's, as
+                // for S1) for grain-suppressed highlight statistics.
+                ledMeasurement.SetGrain(led->Config().highlightGrainSuppress && adaptiveDownscale.Active() &&
+                    adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ?
+                    adaptiveDownscale.GrainMap() : nullptr, static_cast<float>(activeSettings.adaptive.grainFloor),
+                    renderImage.crop);
                 frameHooks.push_back(ledMeasurement.Hook());
             }
             const size_t compensationStart = frameHooks.size();

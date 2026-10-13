@@ -36,6 +36,19 @@ namespace LedDrive
 		// the frame's source sequence, handed back with its measurement.
 		void SetFrame(const MeasurementRect& rect, const double weights[3], double boost = 1.0,
 			uint64_t sequence = 0);
+		// Delta 8 R2: the Stage 8 grain map (one texel per 16x16 source block;
+		// r = grain scale grain_floor..1, g = trusted) and the source crop the
+		// picture shows, or nullptr. A grainy block's histogram entry (the
+		// highlight percentile) leans, by its grain amount, to the mean of the
+		// 3x3 blocks around it, so grain averages out while a real highlight,
+		// which spans a region, survives. The APL sums and the block maximum
+		// (script mode, SF-4) are unchanged. Call every frame.
+		void SetGrain(pl_tex map, float grainFloor, const pl_rect2df& sourceCrop)
+		{
+			grain = map;
+			grainFloorValue = grainFloor;
+			crop = sourceCrop;
+		}
 		// After rendering: finished measurements in frame order, and their
 		// sequences when asked. wait > 0 blocks up to that many milliseconds
 		// for the oldest (tests only).
@@ -61,6 +74,9 @@ namespace LedDrive
 		MeasurementRect rect;
 		float weights[3] = { 0.114f, 0.587f, 0.299f };
 		float boost = 1.0f;
+		pl_tex grain = nullptr;
+		float grainFloorValue = 0.4f;
+		pl_rect2df crop{};
 		int dropped = 0;
 		int measured = 0;
 	};

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <string>
 #include <thread>
 
 namespace LedDrive
@@ -16,6 +17,29 @@ namespace LedDrive
 	{
 		// "VPLEDMSR"
 		constexpr uint64_t HOOK_SIGNATURE = 0x56504C45444D5352ull;
+
+		// R2 (GRAIN): the 3x3 mean of one block, and the grain amount at it.
+		const char* const GRAIN_HEADER = R"GLSL(
+float block_mean(ivec2 b, ivec2 lo, ivec2 hi)
+{
+    ivec2 bb = clamp(b, ivec2(0), ivec2(blocks) - ivec2(1));
+    ivec2 origin = ivec2(rect_px.xy + vec2(bb) * block_step);
+    float acc = 0.0;
+    for (int dy = 0; dy < 3; dy++)
+        for (int dx = 0; dx < 3; dx++) {
+            ivec2 p = clamp(origin + ivec2(dx, dy), lo, hi);
+            acc += dot(pow(clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0)), vec3(boost)), weights);
+        }
+    return acc / 9.0;
+}
+float grain_at(vec2 picture_px)
+{
+    vec2 s = src_crop.xy + (picture_px - pic_rect.xy) * src_crop.zw / pic_rect.zw;
+    ivec2 gs = textureSize(grain_map, 0);
+    vec4 m = texelFetch(grain_map, clamp(ivec2(floor(s / 16.0)), ivec2(0), gs - ivec2(1)), 0);
+    return m.g > 0.5 ? clamp((1.0 - m.r) / max(1.0 - grain_floor, 1e-3), 0.0, 1.0) : 0.0;
+}
+)GLSL";
 
 		const char* const BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
@@ -31,7 +55,20 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
         }
     float code = 16.0 + 219.0 * clamp(acc / 9.0, 0.0, 1.0);
     uint scaled = uint(code * 16.0 + 0.5);
-    atomicAdd(hist[min(int(code), 255)], 1u);
+    float hist_code = code;
+#ifdef GRAIN
+    // Grain averages out over the 3x3 blocks around; a real highlight spans
+    // them. Weighted by the grain amount, not darkened by it.
+    float g = grain_at(vec2(origin) + vec2(1.5));
+    if (g > 0.0) {
+        float wide = 0.0;
+        for (int ny = -1; ny <= 1; ny++)
+            for (int nx = -1; nx <= 1; nx++)
+                wide += block_mean(b + ivec2(nx, ny), lo, hi);
+        hist_code = 16.0 + 219.0 * clamp(mix(acc / 9.0, wide / 9.0, g), 0.0, 1.0);
+    }
+#endif
+    atomicAdd(hist[min(int(hist_code), 255)], 1u);
     atomicAdd(total_sum, scaled);
     atomicAdd(total_blocks, 1u);
     atomicMax(max_block, scaled);
@@ -147,7 +184,7 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 			return failed;
 		}
 
-		pl_shader_desc descriptors[2] = {};
+		pl_shader_desc descriptors[3] = {};
 		descriptors[0].desc.name = "src";
 		descriptors[0].desc.type = PL_DESC_SAMPLED_TEX;
 		descriptors[0].binding.object = params->tex;
@@ -160,23 +197,41 @@ if (b.x < int(blocks.x) && b.y < int(blocks.y)) {
 		descriptors[1].buffer_vars = bufferVars;
 		descriptors[1].num_buffer_vars = 6;
 		descriptors[1].memory = PL_MEMORY_COHERENT;
+		// R2: the grain map, when handed over and the source crop is known.
+		const bool useGrain = grain && crop.x1 > crop.x0 && crop.y1 > crop.y0 && rw > 0.0f && rh > 0.0f;
+		if (useGrain)
+		{
+			descriptors[2].desc.name = "grain_map";
+			descriptors[2].desc.type = PL_DESC_SAMPLED_TEX;
+			descriptors[2].binding.object = grain;
+			descriptors[2].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+			descriptors[2].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+		}
+		const float srcCrop[4] = { crop.x0, crop.y0, crop.x1 - crop.x0, crop.y1 - crop.y0 };
+		const float picRect[4] = { r.x0, r.y0, rw, rh };
 
-		const pl_shader_var variables[5] = {
+		const pl_shader_var variables[8] = {
 			{ pl_var_vec4("rect_px"), rectPx, true },
 			{ pl_var_vec2("blocks"), blocks, true },
 			{ pl_var_vec2("block_step"), step, true },
 			{ pl_var_vec3("weights"), weights, true },
-			{ pl_var_float("boost"), &boost, true } };
+			{ pl_var_float("boost"), &boost, true },
+			{ pl_var_vec4("src_crop"), srcCrop, true },
+			{ pl_var_vec4("pic_rect"), picRect, true },
+			{ pl_var_float("grain_floor"), &grainFloorValue, true } };
 
+		static const std::string grainHeader = std::string("#define GRAIN 1\n") + GRAIN_HEADER;
 		pl_custom_shader custom{};
-		custom.description = "VideoProcessor LED drive measurement";
+		custom.description = useGrain ? "VideoProcessor LED drive measurement (grain-suppressed highlights)" :
+			"VideoProcessor LED drive measurement";
+		custom.header = useGrain ? grainHeader.c_str() : nullptr;
 		custom.body = BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
 		custom.descriptors = descriptors;
-		custom.num_descriptors = 2;
+		custom.num_descriptors = useGrain ? 3 : 2;
 		custom.variables = variables;
-		custom.num_variables = 5;
+		custom.num_variables = useGrain ? 8 : 5;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;
