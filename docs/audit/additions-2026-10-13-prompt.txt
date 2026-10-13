@@ -17,7 +17,11 @@ Commits (oldest first)
  b579f162 LED mode listen (UDP from the owner's script; listen_log; Config monitor; docs/reference/main_vp.py)
  119d82e2 delta 13 SDR tone shape and headroom   4b4fa73a delta 8 R1 (Beta patch 0004, VectorField, VPVEC)
  390ead2e BUILD-STATUS                           58674379 Config wording/tooltips
- (last)   R1 Beta test tolerance on hardware GPUs + this prompt's results
+ 9e53a687 R1 Beta test tolerance on hardware GPUs + this prompt
+ 41109033 planner answers: sigma-delta per-instance state tag (item 7 fix), R1 timing on the stats line,
+          shadow_lift_ansi_rate key, delta 13 recovery tooltip, policy/BUILD-STATUS/README records
+ 050e89dc docs: GPU capture plan for a low-latency mode (owner; not built, not for this audit)
+ (last)   this prompt's final results
 
 Results (x64 Release, full /t:Rebuild at 390ead2e; gate 2026-10-13 00:00-01:23)
 - Native (WARP): 2576 tests, 2574 pass; failures ShellStylePlacementWithoutSizingHintsIsNotReverted and
@@ -32,20 +36,22 @@ Results (x64 Release, full /t:Rebuild at 390ead2e; gate 2026-10-13 00:00-01:23)
 - Native GPU class on the GeForce: 124 of 125; SigmaDeltaGrainAwareCarry fails ("a map without grain
   must not change the output"). It fails identically with the pre-R1 shader (119d82e2's) swapped in:
   pre-existing, see below.
+- After 41109033 (full rebuild): GeForce and WARP Beta all PASS with exact R1 checks; native
+  SigmaDelta* 8/8 on WARP and on the GeForce; LED 184/184; config-file 161/161; Config 102 + 3 of
+  the 4 known remote-connection failures (the fourth passed: flaky). Native full suite: 2574/2576 (the two known failures).
 - Timing (GeForce, 4K -> 2560x1600): normal FBOs 3.90 ms, output pass rgba32f 4.65 ms, every FBO
   rgba32f 6.75 ms. The R1 per-present saving is not measured by any test yet.
 
-Hardware-GPU finding (pre-existing, please judge)
-On the GeForce, two runs of the sigma-delta with freshly created hooks on identical input differ by
-up to 1 code (Beta R1 diagnostic: max 1, mean 0.079; exact on WARP). The first hook created differs
-from every later one, which agree exactly with each other. Hypothesis: the shader's //!STORAGE
-textures start uninitialised and a new hook gets the freed memory of the previous one, including its
-VALID_TAG (0.618), so it trusts a stale residual/previous value on its first refresh(es). Effect:
-at most half a code on the first refreshes after the hook is recreated (renderer reset, resolution
-change). SigmaDeltaGrainAwareCarry (exact-equality assertions across separately created hooks) fails
-on the GeForce for the same reason. Possible fix (not made): invalidate the tags on the hook's first
-frame (the mpv `frame` counter is 0 for a new hook), or a per-instance random tag. The R1 Beta checks
-now allow the measured repeat difference on hardware GPUs (exact on WARP).
+Hardware-GPU finding (pre-existing) - FIXED in 41109033 (planner item 7)
+On the GeForce two sigma-delta runs with freshly created hooks on identical input differed by up to
+1 code (max 1, mean 0.079; exact on WARP): //!STORAGE textures start uninitialised and a new hook got
+the freed hook's memory with the constant VALID_TAG 0.618, so it trusted stale state on its first
+refresh(es). Fix: //!PARAM instance_tag; VALID_TAG = 0.25 + mod(floor(instance_tag), 64)/128 (exact
+in rgba16f, 1/128 apart vs the 1e-3 test); CustomHookChain sets NextHookInstanceTag() on every parse
+(HookInstanceTag.h, one counter per program; the test loaders - ChainGpuProbe, Beta Load - do the
+same). libplacebo has no way to clear an mpv shader's storage textures, so the tag is the whole fix.
+After it, on the GeForce: fresh-hook repeat max 0 (now a hard check), SigmaDeltaGrainAwareCarry
+passes, the R1 path checks are exact again on both GPUs.
 
 Please check in particular
 1. R1 (4b4fa73a):
@@ -61,6 +67,10 @@ Please check in particular
      trusted zero; shift step = shift - previous shift with previous = 0 for A.
    - The shader's VPVEC branch (after the motion_compensation check; MVPREV left alone), the r8
      placeholder, NaN handling.
+   - The R1 timing (41109033): info_callback on the extra's params copy only, sigma-delta passes
+     matched by description, running averages per mode.
+   - The instance tag: the 64-value wrap, every tag write/compare uses the macro, the counter
+     reaching hooks re-created by CustomHookChain::Ensure.
 2. Listen mode (b579f162): socket lifetime and thread shutdown; parsing robustness (any datagram on
    127.0.0.1:47811); the CSV/now-file writes (rotation, directory creation, listen_log on/off at run
    time); that the RS-232 port is never opened in listen and picture_only (EffectiveProtocol "none");
