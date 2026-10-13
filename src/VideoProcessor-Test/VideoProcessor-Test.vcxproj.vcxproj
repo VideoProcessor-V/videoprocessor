@@ -276,6 +276,7 @@
     <ClCompile Include="LedDriveControllerTests.cpp" />
     <ClCompile Include="LedDriveMeasurementTests.cpp" />
     <ClCompile Include="LedDriveCompensateTests.cpp" />
+    <ClCompile Include="RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="LedDriveDelta1Tests.cpp" />
     <ClCompile Include="ConfigEditorCoreTests.cpp" />
     <ClCompile Include="ConfigurationRpcServerTests.cpp">

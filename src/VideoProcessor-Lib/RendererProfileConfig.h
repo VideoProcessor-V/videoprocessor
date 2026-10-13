@@ -646,6 +646,8 @@ namespace RendererProfileConfig
 			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
 			// Owner 2026-10-13: the de-judder matcher one level coarser (4K).
 			if (key == "dejudder_low_res") return IsChoice(value, { "off", "search", "all" });
+			// Owner 2026-10-13: the capture path (gpu = the low-latency GPU unpack).
+			if (key == "capture_path") return IsChoice(value, { "standard", "gpu" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 9: H1 feather (output px, 0 = off), H2 hysteresis (source

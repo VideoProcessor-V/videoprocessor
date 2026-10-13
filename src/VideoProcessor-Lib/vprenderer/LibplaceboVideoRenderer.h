@@ -149,6 +149,15 @@ private:
 			VideoFrameFormatterOutputContract contract;
 			double conversionCpuMs = 0.0;
 			int64_t completedQpc = 0;
+			// capture_path: gpu (owner 2026-10-13): the raw DeckLink frame
+			// itself (kept alive here), unpacked on the GPU (GpuCaptureUnpack);
+			// pixels stays empty. contract = the planes the unpack writes.
+			std::shared_ptr<VideoFrame> rawFrame;
+			size_t rawRowBytes = 0;
+			size_t rawBytes = 0;
+			VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
+			bool Raw() const { return rawFrame != nullptr; }
+			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};
 		VideoFrame frame;
 		VideoStateComPtr state;

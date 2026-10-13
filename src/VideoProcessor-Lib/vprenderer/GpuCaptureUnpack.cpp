@@ -3,6 +3,8 @@
 
 #include <libplacebo/shaders/custom.h>
 
+#include <cstdlib>
+
 namespace
 {
 	// The raw frame is uploaded as rgba8: one texel per 4 source bytes
@@ -113,6 +115,10 @@ bool GpuCaptureUnpack::Unpack(VideoFrameEncoding encoding, const void* data, siz
 	pl_tex (&planes)[2])
 {
 	error.clear();
+	// Tests: VP_TEST_CAPTURE_UNPACK_FAIL=1 forces the fallback (renderer harness).
+	const bool forceFail = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n,
+		"VP_TEST_CAPTURE_UNPACK_FAIL") == 0 && v && v[0] == '1'; std::free(v); return on; }();
+	if (forceFail) { error = "forced by VP_TEST_CAPTURE_UNPACK_FAIL"; return false; }
 	if (!gpu || !dispatch) { error = "no GPU"; return false; }
 	if (!Supports(encoding)) { error = "unsupported encoding"; return false; }
 	if (!data || width <= 0 || height <= 0 || (width & 1) || rowBytes % 4 != 0)

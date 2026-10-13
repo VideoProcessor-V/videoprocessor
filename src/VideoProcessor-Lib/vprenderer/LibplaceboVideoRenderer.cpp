@@ -43,6 +43,7 @@
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderAhead.h>
+#include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -898,6 +899,10 @@ namespace
 		// Owner 2026-10-13: the next pair estimated in an extra's spare refresh
 		// when the frame after next is queued (else before the frame, as before).
 		bool dejudderEstimateAhead = true;
+		// Owner 2026-10-13 (docs/VP-gpu-capture-low-latency-plan.md): standard
+		// = the CPU formatters (the proven path); gpu = V210 / UYVY / HDYC
+		// unpacked on the GPU from the raw frame (others stay standard).
+		std::string capturePath = "standard";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1061,7 +1066,7 @@ namespace
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
-			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|'
+			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -1912,6 +1917,7 @@ namespace
 		readPeakDetection(settings.peakDetection);
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
+		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
@@ -4119,6 +4125,35 @@ struct LibplaceboVideoRenderer::Impl
 	// Created only while the de-judder is on; freed when it goes off.
 	// (A later optimisation could reuse B's upload when B becomes current.)
 	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
+	// capture_path: gpu. The conversion thread reads the two flags; a failed
+	// unpack turns the session back to the CPU formatters (logged once).
+	std::atomic<bool> captureGpuWanted{ false };
+	std::atomic<bool> captureGpuFailed{ false };
+	std::unique_ptr<GpuCaptureUnpack> captureUnpack;
+	bool captureGpuLogged = false;
+	// The planes of a raw payload: the GPU unpack, or false (and the session
+	// back to the CPU path) when it fails.
+	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2])
+	{
+		if (!payload.Raw() || !d3d11)
+			return false;
+		if (!captureUnpack)
+			captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
+		if (captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes))
+		{
+			if (!captureGpuLogged)
+			{
+				DebugLog::Log("Capture path gpu: %s unpacked on the GPU (%dx%d, no CPU conversion)",
+					payload.rawEncoding == VideoFrameEncoding::V210 ? "V210" : "UYVY/HDYC", width, height);
+				captureGpuLogged = true;
+			}
+			return true;
+		}
+		if (!captureGpuFailed.exchange(true))
+			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
+				captureUnpack->Error().c_str());
+		return false;
+	}
 	// Owner 2026-10-13 (estimate ahead): C, the frame after B, when queued
 	// and converted; its planes; the pair estimated ahead (B, C) during A's
 	// extras; B's upload layout (C must match it).
@@ -5204,6 +5239,7 @@ struct LibplaceboVideoRenderer::Impl
 				pl_tex_destroy(d3d11->gpu, &profileOverlayTexture);
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
+				captureUnpack.reset();   // its textures and dispatch, before the device
 				ReleaseDejudder();   // before the device goes
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
 				extendedRangeHooks.Release();   // Stage 10: its textures
@@ -7838,6 +7874,7 @@ struct LibplaceboVideoRenderer::Impl
 		const RendererSettings settings = LoadRendererSettings(
 			config, *state, activeDisplayRule, manualRule, manualUnifiedProfiles);
 		activeSettings = settings;
+		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		PublishSettingsState(settings);
@@ -8305,6 +8342,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
+		currentTransport.capturePath = next.capturePath;
 		currentTransport.dejudderHoldFeatherPx = next.dejudderHoldFeatherPx;
 		currentTransport.dejudderHoldHysteresis = next.dejudderHoldHysteresis;
 		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
@@ -8401,6 +8439,7 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
 		changed(current.dejudderEstimateAhead != next.dejudderEstimateAhead, "dejudder_estimate_ahead");
+		changed(current.capturePath != next.capturePath, "capture_path");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -8730,6 +8769,7 @@ struct LibplaceboVideoRenderer::Impl
 		const auto contract = LibplaceboOutput::MakeSdrOutputContract(
 			requestedTransport, target, settings.reportBt2020ToDisplay);
 		activeSettings = settings;
+		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
@@ -11290,7 +11330,7 @@ struct LibplaceboVideoRenderer::Impl
 		in.nativeRgb = nativeRgb;
 		in.haveNext = next != nullptr;
 		in.nextMatches = next && current &&
-			next->pixels.size() == current->pixels.size() &&
+			next->Bytes() == current->Bytes() && next->Raw() == current->Raw() &&
 			next->contract.sampleRange == contract.sampleRange &&
 			next->contract.colorDepth == contract.colorDepth &&
 			next->contract.bitShift == contract.bitShift;
@@ -11355,7 +11395,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderLayout.height = height;
 		dejudderLayout.chromaHeight = chromaHeight;
 		dejudderLayout.rowBytes = rowBytes;
-		dejudderLayout.pixelBytes = next->pixels.size();
+		dejudderLayout.pixelBytes = next->Bytes();
 		dejudderLayout.lossless422 = lossless422;
 		dejudderLayout.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
 		dejudderLayout.contract = contract;
@@ -11419,8 +11459,10 @@ struct LibplaceboVideoRenderer::Impl
 	bool UploadDejudderPlanes(const QueuedFrame::ConvertedPayload& payload, pl_tex (&dst)[2])
 	{
 		const DejudderUploadLayout& l = dejudderLayout;
-		if (!l.valid || payload.pixels.size() != l.pixelBytes)
+		if (!l.valid || payload.Bytes() != l.pixelBytes)
 			return false;
+		if (payload.Raw())
+			return UnpackRawPayload(payload, l.width, l.height, dst);   // capture_path: gpu
 		struct pl_plane_data planes[2]{};
 		const BYTE* yPixels = payload.pixels.data();
 		const BYTE* uvPixels = yPixels + l.rowBytes * static_cast<size_t>(l.height);
@@ -11540,7 +11582,7 @@ struct LibplaceboVideoRenderer::Impl
 		c.after = dejudderAheadPayload ? dejudderAheadPayloadSequence : 0;
 		c.estimated = dejudderEstimatedSequence;
 		c.layoutMatches = dejudderAheadPayload && dejudderLayout.valid &&
-			dejudderAheadPayload->pixels.size() == dejudderLayout.pixelBytes &&
+			dejudderAheadPayload->Bytes() == dejudderLayout.pixelBytes &&
 			dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
 			dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
 			dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;
@@ -12306,7 +12348,7 @@ struct LibplaceboVideoRenderer::Impl
 			convertedPayload->conversionCpuMs : 0.0;
 		if (!nativeRgbUpload)
 		{
-			if (!convertedPayload || convertedPayload->pixels.empty())
+			if (!convertedPayload || (convertedPayload->pixels.empty() && !convertedPayload->Raw()))
 				return false;
 			formattedContract = convertedPayload->contract;
 			if (!formattedContract.IsValid())
@@ -12328,9 +12370,12 @@ struct LibplaceboVideoRenderer::Impl
 				formatterContractLogged = true;
 				lastRenderedFormatterColorspace = state.colorspace;
 			}
-			yPixels = convertedPayload->pixels.data();
-			uvPixels = yPixels + p010RowBytes * static_cast<size_t>(height);
-			if (logFormatterContract && outputDiagnostics)
+			if (!convertedPayload->Raw())
+			{
+				yPixels = convertedPayload->pixels.data();
+				uvPixels = yPixels + p010RowBytes * static_cast<size_t>(height);
+			}
+			if (logFormatterContract && outputDiagnostics && yPixels)
 			{
 				LogFormatterInputDiagnostics(
 					reinterpret_cast<const uint16_t*>(yPixels),
@@ -12345,6 +12390,17 @@ struct LibplaceboVideoRenderer::Impl
 				static_cast<size_t>(state.BytesPerFrame()), width, height,
 				static_cast<size_t>(state.BytesPerRow()), 0,
 				AnalysisLumaFormat::NativeRgb, state.videoFrameEncoding,
+				state.colorspace, frameGeneration
+			};
+		}
+		else if (convertedPayload->Raw())
+		{
+			// capture_path: gpu: the analysis reads the raw frame, as the queue's
+			// look-ahead already does.
+			analysisSource = {
+				reinterpret_cast<const uint8_t*>(convertedPayload->rawFrame->GetData()),
+				convertedPayload->rawBytes, width, height, convertedPayload->rawRowBytes, 0,
+				AnalysisLumaFormat::NativeYuv422, state.videoFrameEncoding,
 				state.colorspace, frameGeneration
 			};
 		}
@@ -13104,16 +13160,37 @@ struct LibplaceboVideoRenderer::Impl
 			frameGpuTiming.BeginStage(
 				AlphaD3D11FrameGpuTimer::Stage::SourceUpload);
 			bool sourceUploaded = true;
-			for (int plane = 0; plane < 2; ++plane)
+			if (convertedPayload->Raw())
 			{
-				sourceUploaded = pl_upload_plane(d3d11->gpu,
-					&image.planes[plane], &textures[plane], &planes[plane]);
-				if (!sourceUploaded)
-					break;
-				image.planes[plane].shift_x = 0.0f;
-				image.planes[plane].shift_y = 0.0f;
-				image.planes[plane].flipped = state.invertedVertical;
+				// capture_path: gpu: the raw frame up as it is, unpacked into
+				// the same two planes.
+				sourceUploaded = UnpackRawPayload(*convertedPayload, width, height, textures);
+				if (sourceUploaded)
+				{
+					image.planes[0] = pl_plane{};
+					image.planes[0].texture = textures[0];
+					image.planes[0].components = 1;
+					image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+					image.planes[1] = pl_plane{};
+					image.planes[1].texture = textures[1];
+					image.planes[1].components = 2;
+					image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+					image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+					for (int plane = 0; plane < 2; ++plane)
+						image.planes[plane].flipped = state.invertedVertical;
+				}
 			}
+			else
+				for (int plane = 0; plane < 2; ++plane)
+				{
+					sourceUploaded = pl_upload_plane(d3d11->gpu,
+						&image.planes[plane], &textures[plane], &planes[plane]);
+					if (!sourceUploaded)
+						break;
+					image.planes[plane].shift_x = 0.0f;
+					image.planes[plane].shift_y = 0.0f;
+					image.planes[plane].flipped = state.invertedVertical;
+				}
 			frameGpuTiming.EndStage();
 			if (!sourceUploaded)
 				return false;
@@ -20970,8 +21047,31 @@ void LibplaceboVideoRenderer::ConversionLoop()
 		{
 			if (!state || !m_impl->formatter)
 				throw std::runtime_error("formatter or frame state unavailable");
-			converted = AcquireConversionPayload();
 			const auto started = SteadyClock::now();
+			// capture_path: gpu (owner 2026-10-13): V210 / UYVY / HDYC go on raw
+			// (the render unpacks them on the GPU); anything else, an override,
+			// or a failed unpack earlier this session: the CPU formatter.
+			if (m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
+				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
+				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
+				GpuCaptureUnpack::Supports(state->videoFrameEncoding))
+			{
+				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
+				frame.SourceBufferAddRef();   // released with the payload
+				raw->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [](VideoFrame* f)
+				{
+					f->SourceBufferRelease();
+					delete f;
+				});
+				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
+				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
+				raw->rawEncoding = state->videoFrameEncoding;
+				raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
+				converted = raw;
+			}
+			else
+			{
+			converted = AcquireConversionPayload();
 			{
 				std::lock_guard<std::mutex> formatterGuard(m_impl->formatterMutex);
 				if (!m_impl->formatterState ||
@@ -20988,6 +21088,7 @@ void LibplaceboVideoRenderer::ConversionLoop()
 					converted->pixels.data()))
 					throw std::runtime_error("frame conversion failed");
 				converted->contract = m_impl->formatter->GetOutputContract();
+			}
 			}
 			converted->conversionCpuMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - started).count();
