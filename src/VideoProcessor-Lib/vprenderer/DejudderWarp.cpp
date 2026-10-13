@@ -858,6 +858,155 @@ if (i == 0u) {
 }
 )GLSL";
 
+		// D1 in parallel (owner 2026-10-13 efficiency): the serial body above
+		// ran on one work group. Here one work group per candidate sums its
+		// frame SAD (256 threads, a shared reduction), and single-group passes
+		// pick exactly as the serial body does (lowest SAD, lowest index on a
+		// tie). The sums' order differs from the serial loop (float rounding
+		// only).
+		const char* const GLOBAL_SUM_HEADER = R"GLSL(
+shared float gs_s_[256];
+shared float gs_n_[256];
+)GLSL";
+
+		const char* const GLOBAL_L2_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+ivec2 l2s = textureSize(from_l2, 0);
+int stride2 = max(1, int(ceil(sqrt(float(l2s.x * l2s.y) / 2048.0))));
+ivec2 v = ivec2(gl_WorkGroupID.xy) - ivec2(8);
+int cols = (l2s.x + stride2 - 1) / stride2;
+int total = cols * ((l2s.y + stride2 - 1) / stride2);
+float s = 0.0, n = 0.0;
+for (int k = int(i); k < total; k += 256) {
+    ivec2 p = ivec2(k % cols, k / cols) * stride2;
+    ivec2 q = p + v;
+    if (q.x < 0 || q.y < 0 || q.x >= l2s.x || q.y >= l2s.y)
+        continue;
+    s += abs(texelFetch(from_l2, p, 0).r - texelFetch(to_l2, q, 0).r);
+    n += 1.0;
+}
+gs_s_[i] = s;
+gs_n_[i] = n;
+barrier();
+for (uint st = 128u; st > 0u; st >>= 1) {
+    if (i < st) {
+        gs_s_[i] += gs_s_[i + st];
+        gs_n_[i] += gs_n_[i + st];
+    }
+    barrier();
+}
+if (i == 0u) {
+    float r = gs_n_[0] * 4.0 >= float(total) && gs_n_[0] > 0.0 ? gs_s_[0] / gs_n_[0] : 1e30;
+    imageStore(dst, ivec2(gl_WorkGroupID.xy), vec4(r, 0.0, 0.0, 1.0));
+}
+)GLSL";
+
+		const char* const GLOBAL_PICK_HEADER = R"GLSL(
+shared float g_sad_[256];
+shared int g_idx_[256];
+void argmin_(uint i)
+{
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (i < stride && g_sad_[i + stride] < g_sad_[i]) {
+            g_sad_[i] = g_sad_[i + stride];
+            g_idx_[i] = g_idx_[i + stride];
+        }
+        barrier();
+    }
+}
+)GLSL";
+
+		// The 1/32 winner and the second best away from it (as the serial body).
+		const char* const GLOBAL_PICK2_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+float mine[2] = float[2](1e30, 1e30);
+int mk[2] = int[2](-1, -1);
+for (int j = 0; j < 2; j++) {
+    int k = int(i) + j * 256;
+    if (k < 289) {
+        mk[j] = k;
+        mine[j] = texelFetch(sad2, ivec2(k % 17, k / 17), 0).r;
+    }
+}
+g_sad_[i] = mine[1] < mine[0] ? mine[1] : mine[0];
+g_idx_[i] = mine[1] < mine[0] ? mk[1] : mk[0];
+barrier();
+argmin_(i);
+int kb = g_idx_[0];
+float best = g_sad_[0];
+barrier();
+ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
+float second = 1e30;
+for (int j = 0; j < 2; j++) {
+    if (mk[j] < 0) continue;
+    ivec2 v = ivec2(mk[j] % 17 - 8, mk[j] / 17 - 8);
+    if (max(abs(v.x - vb.x), abs(v.y - vb.y)) <= 1) continue;
+    second = min(second, mine[j]);
+}
+g_sad_[i] = second;
+g_idx_[i] = 0;
+barrier();
+argmin_(i);
+if (i == 0u)
+    imageStore(dst, ivec2(0), vec4(float(kb), best, g_sad_[0], 1.0));
+)GLSL";
+
+		// The 1/8 candidates around the winner, one work group each.
+		const char* const GLOBAL_L1_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+ivec2 l1s = textureSize(from_l1, 0);
+int stride1 = max(1, int(ceil(sqrt(float(l1s.x * l1s.y) / 4096.0))));
+vec4 pick = texelFetch(global_pick, ivec2(0), 0);
+int kb = int(pick.x);
+ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
+vec2 v = vec2(vb * 4) + 0.5 * vec2(ivec2(gl_WorkGroupID.xy) - ivec2(4));
+int cols = (l1s.x + stride1 - 1) / stride1;
+int total = cols * ((l1s.y + stride1 - 1) / stride1);
+float s = 0.0, n = 0.0;
+for (int k = int(i); k < total; k += 256) {
+    ivec2 p = ivec2(k % cols, k / cols) * stride1;
+    vec2 q = vec2(p) + v;
+    if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
+        continue;
+    s += abs(texelFetch(from_l1, p, 0).r - texture(to_l1, (q + vec2(0.5)) / vec2(l1s)).r);
+    n += 1.0;
+}
+gs_s_[i] = s;
+gs_n_[i] = n;
+barrier();
+for (uint st = 128u; st > 0u; st >>= 1) {
+    if (i < st) {
+        gs_s_[i] += gs_s_[i + st];
+        gs_n_[i] += gs_n_[i + st];
+    }
+    barrier();
+}
+if (i == 0u) {
+    float r = kb >= 0 && gs_n_[0] * 4.0 >= float(total) && gs_n_[0] > 0.0 ? gs_s_[0] / gs_n_[0] : 1e30;
+    imageStore(dst, ivec2(gl_WorkGroupID.xy), vec4(r, 0.0, 0.0, 1.0));
+}
+)GLSL";
+
+		// The 1/8 winner and the global vector (as the serial body).
+		const char* const GLOBAL_PICK1_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+vec4 pick = texelFetch(global_pick, ivec2(0), 0);
+int kb = int(pick.x);
+float best = pick.y, second = pick.z;
+ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
+g_sad_[i] = i < 81u && kb >= 0 ? texelFetch(sad1, ivec2(int(i) % 9, int(i) / 9), 0).r : 1e30;
+g_idx_[i] = int(i);
+barrier();
+argmin_(i);
+if (i == 0u) {
+    int k1 = g_idx_[0];
+    vec2 v = vec2(vb * 4) + 0.5 * vec2(k1 % 9 - 4, k1 / 9 - 4);
+    bool ok = kb >= 0 && best < 1e29;
+    float ratio = ok ? (best + 0.05) / (min(second, 1e6) + 0.05) : 1.0;
+    imageStore(dst, ivec2(0), vec4(ok ? v : vec2(0.0), ratio, 1.0));
+}
+)GLSL";
+
 		// D3: median smoothing of the trusted field (see Settings).
 		const char* const SMOOTH_HEADER = R"GLSL(
 ivec2 half_size_;
@@ -1367,8 +1516,11 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick })
 			pl_tex_destroy(gpu, tex);
+		inner.reset();   // its textures before the dispatch and the device
+		for (auto& entry : passTimers)
+			pl_timer_destroy(gpu, &entry.second);
 		pl_dispatch_destroy(&dispatch);
 	}
 
@@ -1493,6 +1645,8 @@ if (q.x < size.x && q.y < size.y) {
 				return false;
 			}
 		}
+		if (innerOfLowRes)
+			return true;   // the lowRes inner never warps
 		// The warped planes keep A's formats, so the render sees the same
 		// representation.
 		for (const auto& plane : { std::make_pair(a.luma, &warpedLuma), std::make_pair(a.chroma, &warpedChroma) })
@@ -1542,23 +1696,62 @@ if (q.x < size.x && q.y < size.y) {
 		compute.dispatch_size[1] = (h + group - 1) / group;
 		compute.dispatch_size[2] = 1;
 		// Tests only (SetPassTiming): each pass timed with the GPU drained.
+		bool ok = false;
+		TimedDispatch(description, compute, ok);
+		return ok;
+	}
+
+	void MotionWarp::TimedDispatch(const char* description, pl_dispatch_compute_params& compute, bool& ok)
+	{
+		// Tests only (SetPassTiming): each pass timed with the GPU drained, and
+		// by a GPU timer (the pass alone, without the drain's overhead).
 		std::chrono::steady_clock::time_point start;
 		if (passTiming)
 		{
-			pl_gpu_finish(gpu);
-			start = std::chrono::steady_clock::now();
+			pl_timer& timer = passTimers[description];
+			if (!timer)
+				timer = pl_timer_create(gpu);
+			compute.timer = timer;
+			if (passDrain)
+			{
+				pl_gpu_finish(gpu);
+				start = std::chrono::steady_clock::now();
+			}
 		}
-		if (!pl_dispatch_compute(dispatch, &compute))
+		ok = pl_dispatch_compute(dispatch, &compute);
+		if (!ok)
 		{
 			error = std::string("dispatch failed: ") + description;
-			return false;
+			return;
 		}
 		if (passTiming)
 		{
-			pl_gpu_finish(gpu);
-			passMs[description] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			if (passDrain)
+			{
+				pl_gpu_finish(gpu);
+				MotionWarp& sink = timingParent ? *timingParent : *this;
+				sink.passMs[timingParent ? std::string(description) + " (half size)" : std::string(description)] +=
+					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+			}
+			CollectTimer(description, compute.timer);
 		}
-		return true;
+	}
+
+	void MotionWarp::CollectTimer(const std::string& description, pl_timer timer)
+	{
+		MotionWarp& sink = timingParent ? *timingParent : *this;
+		const std::string key = timingParent ? description + " (half size)" : description;
+		for (uint64_t ns = pl_timer_query(gpu, timer); ns; ns = pl_timer_query(gpu, timer))
+			sink.passGpuMs[key] += ns / 1e6;
+	}
+
+	void MotionWarp::FlushPassTimers()
+	{
+		pl_gpu_finish(gpu);
+		for (const auto& entry : passTimers)
+			CollectTimer(entry.first, entry.second);
+		if (inner)
+			inner->FlushPassTimers();
 	}
 
 	bool MotionWarp::DispatchPerBlock(const char* description, const char* header, const char* body,
@@ -1590,28 +1783,14 @@ if (q.x < size.x && q.y < size.y) {
 		compute.dispatch_size[0] = w;   // one work group per block
 		compute.dispatch_size[1] = h;
 		compute.dispatch_size[2] = 1;
-		std::chrono::steady_clock::time_point start;
-		if (passTiming)
-		{
-			pl_gpu_finish(gpu);
-			start = std::chrono::steady_clock::now();
-		}
-		if (!pl_dispatch_compute(dispatch, &compute))
-		{
-			error = std::string("dispatch failed: ") + description;
-			return false;
-		}
-		if (passTiming)
-		{
-			pl_gpu_finish(gpu);
-			passMs[description] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-		}
-		return true;
+		bool ok = false;
+		TimedDispatch(description, compute, ok);
+		return ok;
 	}
 
 	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange)
 	{
-		const float codes = fullRange ? 219.0f : 255.0f;
+		const float codes = lumaInCodes ? 1.0f : fullRange ? 219.0f : 255.0f;
 		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
 		const pl_shader_desc first[2] = { Sampled("src", luma, false), Storage("dst", half) };
 		const pl_shader_desc second[2] = { Sampled("src", half, false), Storage("dst", l1) };
@@ -1626,11 +1805,58 @@ if (q.x < size.x && q.y < size.y) {
 
 	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out)
 	{
-		const pl_shader_desc descriptors[5] = {
+		if (serialSearchForTest)
+		{
+			const pl_shader_desc descriptors[5] = {
+				Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
+				Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", out) };
+			return Dispatch("VideoProcessor de-judder: global motion (D1, serial reference)", GLOBAL_HEADER, GLOBAL_BODY,
+				descriptors, 5, nullptr, 0, 16, 16, 16);
+		}
+		// Parallel: candidate SADs, the pick, the 1/8 candidates, the vector.
+		if (!globalSad2)
+		{
+			const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
+			pl_fmt r32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, caps);
+			pl_fmt rgba32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
+			if (!r32 || !rgba32)
+			{
+				error = "global motion: no 32-bit float storage format";
+				return false;
+			}
+			auto make = [this](pl_tex* tex, int w, int h, pl_fmt fmt) -> bool
+			{
+				pl_tex_params params{};
+				params.w = w;
+				params.h = h;
+				params.format = fmt;
+				params.sampleable = true;
+				params.storable = true;
+				return pl_tex_recreate(gpu, tex, &params);
+			};
+			if (!make(&globalSad2, 17, 17, r32) || !make(&globalSad1, 9, 9, r32) || !make(&globalPick, 1, 1, rgba32))
+			{
+				error = "global motion: cannot create the candidate textures";
+				return false;
+			}
+		}
+		static const std::string pickHeader = std::string(GLOBAL_PICK_HEADER);
+		const pl_shader_desc l2Desc[3] = {
+			Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", globalSad2) };
+		const pl_shader_desc pick2Desc[2] = { Sampled("sad2", globalSad2, false), Storage("dst", globalPick) };
+		const pl_shader_desc l1Desc[4] = {
 			Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
-			Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", out) };
-		return Dispatch("VideoProcessor de-judder: global motion (D1)", GLOBAL_HEADER, GLOBAL_BODY,
-			descriptors, 5, nullptr, 0, 16, 16, 16);
+			Sampled("global_pick", globalPick, false), Storage("dst", globalSad1) };
+		const pl_shader_desc pick1Desc[3] = {
+			Sampled("sad1", globalSad1, false), Sampled("global_pick", globalPick, false), Storage("dst", out) };
+		return DispatchPerBlock("VideoProcessor de-judder: global motion (D1)", GLOBAL_SUM_HEADER, GLOBAL_L2_BODY,
+				l2Desc, 3, nullptr, 0, 17, 17, 16, 16) &&
+			DispatchPerBlock("VideoProcessor de-judder: global motion pick (D1)", pickHeader.c_str(), GLOBAL_PICK2_BODY,
+				pick2Desc, 2, nullptr, 0, 1, 1, 16, 16) &&
+			DispatchPerBlock("VideoProcessor de-judder: global motion 1/8 (D1)", GLOBAL_SUM_HEADER, GLOBAL_L1_BODY,
+				l1Desc, 4, nullptr, 0, 9, 9, 16, 16) &&
+			DispatchPerBlock("VideoProcessor de-judder: global motion vector (D1)", pickHeader.c_str(), GLOBAL_PICK1_BODY,
+				pick1Desc, 3, nullptr, 0, 1, 1, 16, 16);
 	}
 
 	bool MotionWarp::Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
@@ -1697,6 +1923,145 @@ if (q.x < size.x && q.y < size.y) {
 			descriptors, 2, nullptr, 0, dst->params.w, dst->params.h, 8);
 	}
 
+	namespace
+	{
+		// lowRes: an inner search texture (or the 1x1 global vector) at the
+		// source's grid; xy times 2 (inner half-resolution pixels are two of
+		// this one's), the rest as is.
+		const char* const GRID_UP_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 s = imageSize(dst);
+if (q.x < s.x && q.y < s.y) {
+    vec4 v = texelFetch(src, min(q / 2, textureSize(src, 0) - ivec2(1)), 0);
+    v.xy *= 2.0;
+    imageStore(dst, q, v);
+}
+)GLSL";
+
+		// lowRes: the previous frame trust for the inner's E4 gate (b = mean
+		// |v| in source pixels; the inner's pixels are two of them).
+		const char* const TRUST_SCALE_BODY = R"GLSL(
+if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) {
+    vec4 t = texelFetch(src, ivec2(0), 0);
+    t.b *= trust_scale;
+    imageStore(dst, ivec2(0), t);
+}
+)GLSL";
+
+		// lowRes: an inner search scaled back to this grid and re-scored per
+		// block (the search's 12x12 window at half resolution), so the
+		// consistency test, the dither's occlusion and the split judge each
+		// 16-pixel block by its own match.
+		const char* const RESCORE_HEADER = R"GLSL(
+ivec2 half_size_;
+float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
+float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
+)GLSL";
+
+		const char* const RESCORE_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    half_size_ = textureSize(from_half, 0);
+    vec4 f = texelFetch(src, min(b / 2, textureSize(src, 0) - ivec2(1)), 0);
+    f.xy *= 2.0;
+    float s = 0.0;
+    for (int y = -2; y < 10; y++)
+        for (int x = -2; x < 10; x++) {
+            ivec2 p = b * 8 + ivec2(x, y);
+            s += abs(from_at(p) - to_lin(vec2(p) + f.xy));
+        }
+    f.z = s / 144.0;
+    imageStore(dst, b, f);
+}
+)GLSL";
+	}
+
+	bool MotionWarp::LowResSearch(const Planes& a, const Planes& b)
+	{
+		// The inner matcher: the same settings, the source-pixel ones halved;
+		// it stops after the searches unless every pass is coarse (lowResAll).
+		const bool all = settings.lowResAll;
+		Settings innerSettings = settings;
+		innerSettings.lowRes = false;
+		innerSettings.lowResAll = false;
+		innerSettings.motionScaleLo *= 0.5f;
+		innerSettings.motionScaleHi *= 0.5f;
+		innerSettings.holdFeatherPx *= 0.5f;
+		innerSettings.occlusionFill = false;
+		if (!all)
+		{
+			innerSettings.estQpel = false;
+			innerSettings.vectorSmooth = false;
+			innerSettings.estSplit = false;
+			innerSettings.holdHysteresis = 1;
+		}
+		if (!inner)
+			inner = std::make_unique<MotionWarp>(log, gpu, innerSettings);
+		else
+			inner->SetSettings(innerSettings);
+		inner->rescoreForTest = rescoreForTest;
+		inner->searchOnly = !all;
+		inner->innerOfLowRes = true;
+		inner->lumaInCodes = true;
+		inner->timingParent = this;
+		if (inner->passTiming != passTiming || inner->passDrain != passDrain)
+			inner->SetPassTiming(passTiming, passDrain);
+		// The inner never runs its frame trust: its E4 gate reads this one's
+		// (the previous frame's, as on the full-resolution path).
+		if (!all && inner->previousValid && inner->frameTrust && frameTrust)
+		{
+			const float half = 0.5f;
+			const pl_shader_var v[1] = { { pl_var_float("trust_scale"), &half, true } };
+			const pl_shader_desc d[2] = { Sampled("src", frameTrust, false), Storage("dst", inner->frameTrust) };
+			if (!Dispatch("VideoProcessor de-judder: previous trust to the half size (lowRes)", nullptr, TRUST_SCALE_BODY,
+					d, 2, v, 1, 1, 1, 1))
+				return false;
+		}
+		Planes la = a, lb = b;
+		la.luma = halfA;
+		lb.luma = halfB;
+		if (!inner->Estimate(la, lb, -1, false))
+		{
+			error = "lowRes: " + inner->LastError();
+			return false;
+		}
+		auto up = [&](pl_tex src, pl_tex dst) -> bool
+		{
+			const pl_shader_desc d[2] = { Sampled("src", src, false), Storage("dst", dst) };
+			return Dispatch("VideoProcessor de-judder: searches to the source grid (lowRes)", nullptr, GRID_UP_BODY,
+				d, 2, nullptr, 0, dst->params.w, dst->params.h, 8);
+		};
+		auto rescore = [&](pl_tex src, pl_tex from, pl_tex to, pl_tex dst) -> bool
+		{
+			const pl_shader_desc d[4] = { Sampled("src", src, false), Sampled("from_half", from, false),
+				Sampled("to_half", to, true), Storage("dst", dst) };
+			return Dispatch("VideoProcessor de-judder: searches re-scored per block (lowRes)", RESCORE_HEADER, RESCORE_BODY,
+				d, 4, nullptr, 0, dst->params.w, dst->params.h, 8);
+		};
+		if (rescoreForTest ?
+				(!rescore(inner->forward, halfA, halfB, forward) || !rescore(inner->backward, halfB, halfA, backward)) :
+				(!up(inner->forward, forward) || !up(inner->backward, backward)))
+			return false;
+		if (settings.globalPrior && (!up(inner->globalVector[0], globalVector[0]) || !up(inner->globalVector[1], globalVector[1])))
+			return false;
+		if (all)
+		{
+			// The inner's field, sub-field and trust at this grid.
+			if (!up(inner->Field(), field))
+				return false;
+			if (settings.estSplit && inner->subField && subField && !up(inner->subField, subField))
+				return false;
+			const float twice = 2.0f;
+			const pl_shader_var v[1] = { { pl_var_float("trust_scale"), &twice, true } };
+			const pl_shader_desc d[2] = { Sampled("src", inner->frameTrust, false), Storage("dst", frameTrust) };
+			if (!Dispatch("VideoProcessor de-judder: frame trust to the source (lowRes)", nullptr, TRUST_SCALE_BODY,
+					d, 2, v, 1, 1, 1, 1))
+				return false;
+		}
+		return true;
+	}
+
 	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot, bool wantGrainError)
 	{
 		estimated = false;
@@ -1710,140 +2075,155 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange) || !Downsample(b.luma, halfB, l1B, l2B, b.fullRange))
 			return false;
-		if (settings.globalPrior &&
-			(!Global(l1A, l1B, l2A, l2B, globalVector[0]) || !Global(l1B, l1A, l2B, l2A, globalVector[1])))
-			return false;
-		// 11a E1: the first sweep into `sweep`, the second into the searches.
-		const bool twoSweeps = settings.estCandidates;
-		if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward) ||
-			!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward))
-			return false;
-		if (twoSweeps &&
-			(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward) ||
-			 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward)))
-			return false;
-		if (settings.estCandidates || settings.estGate)
+		if (settings.lowRes && !searchOnly && width > 1920)
 		{
-			if (!Copy(forward, previousSearch[0]) || !Copy(backward, previousSearch[1]))
+			if (!LowResSearch(a, b))
 				return false;
-			previousValid = true;
+			previousValid = false;   // the full-resolution searches' history is stale
 		}
 		else
-			previousValid = false;
-		// The consistency pass writes `field` directly, or a raw field that
-		// E3 (quarter-pel) and D3 (smoothing) refine into `field`.
-		const bool refined = settings.vectorSmooth || settings.estQpel;
-		const pl_shader_desc descriptors[3] = {
-			Sampled("fwd", forward, false), Sampled("bwd", backward, false),
-			Storage("dst", refined ? rawField : field) };
+		{
+			if (settings.globalPrior &&
+				(!Global(l1A, l1B, l2A, l2B, globalVector[0]) || !Global(l1B, l1A, l2B, l2A, globalVector[1])))
+				return false;
+			// 11a E1: the first sweep into `sweep`, the second into the searches.
+			const bool twoSweeps = settings.estCandidates;
+			if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward) ||
+				!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward))
+				return false;
+			if (twoSweeps &&
+				(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward) ||
+				 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward)))
+				return false;
+			if (settings.estCandidates || settings.estGate)
+			{
+				if (!Copy(forward, previousSearch[0]) || !Copy(backward, previousSearch[1]))
+					return false;
+				previousValid = true;
+			}
+			else
+				previousValid = false;
+		}
+		if (searchOnly)
+			return true;   // lowRes inner: the outer refines (estimated stays false)
 		const float tolerance = settings.matchTolerance;
 		const float consistency = settings.consistencyPixels;
 		const pl_shader_var variables[2] = {
 			{ pl_var_float("tolerance"), &tolerance, true },
 			{ pl_var_float("consistency"), &consistency, true } };
-		// Delta 9 H3: marginal blocks (up to taper_sad) pass the consistency
-		// check as trusted; the warp tapers them.
-		const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
-		const pl_shader_var consistencyVars[3] = { variables[0], variables[1], { pl_var_float("taper_sad"), &taperSad, true } };
-		if (!Dispatch("VideoProcessor de-judder: consistency", settings.blockTaper ? "#define TAPER 1\n" : nullptr,
-			CONSISTENCY_BODY, descriptors, 3, consistencyVars, settings.blockTaper ? 3 : 2, blocksX, blocksY, 8))
-			return false;
-		if (settings.estQpel)
+		const char* splitDefine = settings.estSplit ? "#define SPLIT 1\n" : nullptr;
+		// lowResAll: the inner made the field, the sub-field and the trust.
+		if (!(settings.lowRes && settings.lowResAll && !searchOnly && width > 1920))
 		{
-			const pl_shader_desc qpelDesc[4] = {
-				Sampled("raw", rawField, false), Sampled("from_half", halfA, false),
-				Sampled("to_half", halfB, true), Storage("dst", settings.vectorSmooth ? qpelField : field) };
-			static const std::string qpelHeader = std::string(SUBPEL_HEADER) + PERBLOCK_HEADER;
-			if (serialSearchForTest ?
-				!Dispatch("VideoProcessor de-judder: quarter-pel (11a E3, serial reference)", SUBPEL_HEADER,
-					QPEL_BODY_SERIAL, qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8) :
-				!DispatchPerBlock("VideoProcessor de-judder: quarter-pel (11a E3)", qpelHeader.c_str(), QPEL_BODY,
-					qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8, 4))
+			// The consistency pass writes `field` directly, or a raw field that
+			// E3 (quarter-pel) and D3 (smoothing) refine into `field`.
+			const bool refined = settings.vectorSmooth || settings.estQpel;
+			const pl_shader_desc descriptors[3] = {
+				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
+				Storage("dst", refined ? rawField : field) };
+			// Delta 9 H3: marginal blocks (up to taper_sad) pass the consistency
+			// check as trusted; the warp tapers them.
+			const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
+			const pl_shader_var consistencyVars[3] = { variables[0], variables[1], { pl_var_float("taper_sad"), &taperSad, true } };
+			if (!Dispatch("VideoProcessor de-judder: consistency", settings.blockTaper ? "#define TAPER 1\n" : nullptr,
+				CONSISTENCY_BODY, descriptors, 3, consistencyVars, settings.blockTaper ? 3 : 2, blocksX, blocksY, 8))
 				return false;
-		}
-		if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
-			return false;
-		if (settings.estSplit)
-		{
-			// Both directions split (the sub-search, as a function: four
-			// texels per block), then A's sub-blocks are checked against B's.
-			const float splitSad = settings.estSplitSad > 0.0f ? settings.estSplitSad : settings.matchTolerance;
-			const pl_shader_var splitVars[1] = { { pl_var_float("split_sad"), &splitSad, true } };
-			const std::string header = std::string(SUBPEL_HEADER) + SPLIT_SEARCH_BODY;
-			for (int dir = 0; dir < 2; ++dir)
+			if (settings.estQpel)
 			{
-				const pl_shader_desc splitDesc[4] = {
-					Sampled("search", dir == 0 ? forward : backward, false),
-					Sampled("from_half", dir == 0 ? halfA : halfB, false), Sampled("to_half", dir == 0 ? halfB : halfA, true),
-					Storage("dst", subSearch[dir]) };
-				if (!Dispatch("VideoProcessor de-judder: block split (11a E2)", header.c_str(), "main_split();",
-					splitDesc, 4, splitVars, 1, blocksX, blocksY, 8))
+				const pl_shader_desc qpelDesc[4] = {
+					Sampled("raw", rawField, false), Sampled("from_half", halfA, false),
+					Sampled("to_half", halfB, true), Storage("dst", settings.vectorSmooth ? qpelField : field) };
+				static const std::string qpelHeader = std::string(SUBPEL_HEADER) + PERBLOCK_HEADER;
+				if (serialSearchForTest ?
+					!Dispatch("VideoProcessor de-judder: quarter-pel (11a E3, serial reference)", SUBPEL_HEADER,
+						QPEL_BODY_SERIAL, qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8) :
+					!DispatchPerBlock("VideoProcessor de-judder: quarter-pel (11a E3)", qpelHeader.c_str(), QPEL_BODY,
+						qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8, 4))
 					return false;
 			}
-			const pl_shader_desc trustDesc2[4] = {
-				Sampled("sub_fwd", subSearch[0], false), Sampled("sub_bwd", subSearch[1], false),
-				Sampled("field", field, false), Storage("dst", subField) };
-			if (!Dispatch("VideoProcessor de-judder: sub-block trust (11a E2)", nullptr, SUB_TRUST_BODY,
-				trustDesc2, 4, variables, 2, blocksX * 2, blocksY * 2, 8))
+			if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
 				return false;
-		}
-		const float motionLo = settings.motionScaleLo;
-		const float motionHi = std::max(0.0f, settings.motionScaleHi);
-		const float trustFull = std::max(0.0f, settings.trustScaleFull);
-		const float minShare = settings.minTrustedShare;
-		const float rate = std::max(0.0f, settings.strengthRate);
-		const pl_shader_var trustVars[5] = {
-			{ pl_var_float("motion_lo"), &motionLo, true },
-			{ pl_var_float("motion_hi"), &motionHi, true },
-			{ pl_var_float("trust_full"), &trustFull, true },
-			{ pl_var_float("min_share"), &minShare, true },
-			{ pl_var_float("rate"), &rate, true } };
-		pl_shader_desc stateDesc{};
-		stateDesc.desc.name = "state_io";
-		stateDesc.desc.type = PL_DESC_STORAGE_IMG;
-		stateDesc.desc.access = PL_DESC_ACCESS_READWRITE;
-		stateDesc.binding.object = strengthState;
-		const char* splitDefine = settings.estSplit ? "#define SPLIT 1\n" : nullptr;
-		const pl_shader_desc trustDesc[3] = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
-		if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
-			trustDesc, 3, trustVars, 5, 16, 16, 16))
-			return false;
-		if (settings.holdHysteresis > 1)
-		{
-			// Delta 9 H2, after the frame trust (the cut flag); the result
-			// becomes the field (and the sub-field) by swapping.
-			const float hysteresis = static_cast<float>(settings.holdHysteresis);
-			const pl_shader_var hystVars[2] = { { pl_var_float("hysteresis"), &hysteresis, true },
-				{ pl_var_float("min_share"), &minShare, true } };
-			const int next = 1 - holdIndex;
-			const pl_shader_desc hystDesc[5] = { Sampled("src_field", field, false), Sampled("state_in", holdState[holdIndex], false),
-				Sampled("frame_trust", frameTrust, false), Storage("state_out", holdState[next]), Storage("dst", hystField) };
-			if (!Dispatch("VideoProcessor de-judder: hold hysteresis (delta 9 H2)", nullptr, HYST_BODY,
-				hystDesc, 5, hystVars, 2, blocksX, blocksY, 8))
-				return false;
-			std::swap(field, hystField);
 			if (settings.estSplit)
 			{
-				const pl_shader_desc subDesc[5] = { Sampled("src_field", subField, false), Sampled("state_in", subHoldState[holdIndex], false),
-					Sampled("frame_trust", frameTrust, false), Storage("state_out", subHoldState[next]), Storage("dst", hystSub) };
-				if (!Dispatch("VideoProcessor de-judder: sub-block hysteresis (delta 9 H2)", nullptr, HYST_BODY,
-					subDesc, 5, hystVars, 2, blocksX * 2, blocksY * 2, 8))
+				// Both directions split (the sub-search, as a function: four
+				// texels per block), then A's sub-blocks are checked against B's.
+				const float splitSad = settings.estSplitSad > 0.0f ? settings.estSplitSad : settings.matchTolerance;
+				const pl_shader_var splitVars[1] = { { pl_var_float("split_sad"), &splitSad, true } };
+				const std::string header = std::string(SUBPEL_HEADER) + SPLIT_SEARCH_BODY;
+				for (int dir = 0; dir < 2; ++dir)
+				{
+					const pl_shader_desc splitDesc[4] = {
+						Sampled("search", dir == 0 ? forward : backward, false),
+						Sampled("from_half", dir == 0 ? halfA : halfB, false), Sampled("to_half", dir == 0 ? halfB : halfA, true),
+						Storage("dst", subSearch[dir]) };
+					if (!Dispatch("VideoProcessor de-judder: block split (11a E2)", header.c_str(), "main_split();",
+						splitDesc, 4, splitVars, 1, blocksX, blocksY, 8))
+						return false;
+				}
+				const pl_shader_desc trustDesc2[4] = {
+					Sampled("sub_fwd", subSearch[0], false), Sampled("sub_bwd", subSearch[1], false),
+					Sampled("field", field, false), Storage("dst", subField) };
+				if (!Dispatch("VideoProcessor de-judder: sub-block trust (11a E2)", nullptr, SUB_TRUST_BODY,
+					trustDesc2, 4, variables, 2, blocksX * 2, blocksY * 2, 8))
 					return false;
-				std::swap(subField, hystSub);
 			}
-			holdIndex = next;
-		}
-		if (settings.occlusionFill)
-		{
-			const pl_shader_desc fillDesc[4] = {
-				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
-				Sampled("sub_field", subField, false) };
-			if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", splitDefine, OCCLUSION_BODY,
-				fillDesc, settings.estSplit ? 4 : 3, variables, 2, blocksX, blocksY, 8))
+			const float motionLo = settings.motionScaleLo;
+			const float motionHi = std::max(0.0f, settings.motionScaleHi);
+			const float trustFull = std::max(0.0f, settings.trustScaleFull);
+			const float minShare = settings.minTrustedShare;
+			const float rate = std::max(0.0f, settings.strengthRate);
+			const pl_shader_var trustVars[5] = {
+				{ pl_var_float("motion_lo"), &motionLo, true },
+				{ pl_var_float("motion_hi"), &motionHi, true },
+				{ pl_var_float("trust_full"), &trustFull, true },
+				{ pl_var_float("min_share"), &minShare, true },
+				{ pl_var_float("rate"), &rate, true } };
+			pl_shader_desc stateDesc{};
+			stateDesc.desc.name = "state_io";
+			stateDesc.desc.type = PL_DESC_STORAGE_IMG;
+			stateDesc.desc.access = PL_DESC_ACCESS_READWRITE;
+			stateDesc.binding.object = strengthState;
+			const pl_shader_desc trustDesc[3] = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
+			if (!Dispatch("VideoProcessor de-judder: frame trust", FRAME_TRUST_HEADER, FRAME_TRUST_BODY,
+				trustDesc, 3, trustVars, 5, 16, 16, 16))
 				return false;
-			lastB = b;
-			fillReady = b.chroma && b.chroma->params.w == a.chroma->params.w &&
-				b.chroma->params.h == a.chroma->params.h;
+			if (settings.holdHysteresis > 1)
+			{
+				// Delta 9 H2, after the frame trust (the cut flag); the result
+				// becomes the field (and the sub-field) by swapping.
+				const float hysteresis = static_cast<float>(settings.holdHysteresis);
+				const pl_shader_var hystVars[2] = { { pl_var_float("hysteresis"), &hysteresis, true },
+					{ pl_var_float("min_share"), &minShare, true } };
+				const int next = 1 - holdIndex;
+				const pl_shader_desc hystDesc[5] = { Sampled("src_field", field, false), Sampled("state_in", holdState[holdIndex], false),
+					Sampled("frame_trust", frameTrust, false), Storage("state_out", holdState[next]), Storage("dst", hystField) };
+				if (!Dispatch("VideoProcessor de-judder: hold hysteresis (delta 9 H2)", nullptr, HYST_BODY,
+					hystDesc, 5, hystVars, 2, blocksX, blocksY, 8))
+					return false;
+				std::swap(field, hystField);
+				if (settings.estSplit)
+				{
+					const pl_shader_desc subDesc[5] = { Sampled("src_field", subField, false), Sampled("state_in", subHoldState[holdIndex], false),
+						Sampled("frame_trust", frameTrust, false), Storage("state_out", subHoldState[next]), Storage("dst", hystSub) };
+					if (!Dispatch("VideoProcessor de-judder: sub-block hysteresis (delta 9 H2)", nullptr, HYST_BODY,
+						subDesc, 5, hystVars, 2, blocksX * 2, blocksY * 2, 8))
+						return false;
+					std::swap(subField, hystSub);
+				}
+				holdIndex = next;
+			}
+			if (settings.occlusionFill)
+			{
+				const pl_shader_desc fillDesc[4] = {
+					Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
+					Sampled("sub_field", subField, false) };
+				if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", splitDefine, OCCLUSION_BODY,
+					fillDesc, settings.estSplit ? 4 : 3, variables, 2, blocksX, blocksY, 8))
+					return false;
+				lastB = b;
+				fillReady = b.chroma && b.chroma->params.w == a.chroma->params.w &&
+					b.chroma->params.h == a.chroma->params.h;
+			}
 		}
 		if (occlusionSlot == 0 || occlusionSlot == 1)
 		{

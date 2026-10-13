@@ -7,7 +7,9 @@ profile keys (`[vprenderer.*]` sections) unless a section is named.
 
 "Default" is what VP does when the key is absent. Every feature built in
 this fork is **off by default**: with no new keys, VP renders as Bill's VP
-(apart from the always-on parts marked "always", which change no picture).
+(apart from the always-on parts marked "always", which change no picture),
+with one exception agreed by the owner (2026-10-13): the chroma upscaler
+defaults to Catmull-Rom (`chroma_upscaler: upscaler` gives Bill's).
 
 ## The stages
 
@@ -26,6 +28,7 @@ this fork is **off by default**: with no new keys, VP renders as Bill's VP
 | 11a E3 Quarter-pel step | Trusted blocks refine their vector to a quarter source pixel | `dejudder_est_qpel` | on* | on* | Slow pans: no stepping | `EstimatorQuarterPelRefinesASubPixelPan` |
 | 11a E4 Static gate | Blocks that did not change skip the search (GPU-side) | `dejudder_est_gate` | on* | on* | Nothing visible; less matcher time on still scenes | `EstimatorGateKeepsTheFieldOnStillScenes` |
 | 11a E2 Block split | A block that matches badly is split into 8x8-source-pixel sub-blocks with their own vectors (a sub-field read by both warps, the occlusion mask and the grain map) | `dejudder_est_split`, `dejudder_est_split_sad` 0 (= the match tolerance) | on* | on* | Object edges on pans: fewer held squares | `EstimatorSplitFollowsASmallObject`, `EstimatorSplitOffStateLeavesEveryConsumerAlone` |
+| Eff Matcher size (4K) | Owner 2026-10-13 efficiency: above 1920 wide the matcher runs one level coarser (a half-size copy) and its field, sub-field and trust are scaled back; the dither's occlusion mask and the grain map stay on the 16-pixel grid. On the owner's 4K clip: 108% of the full-size de-judder benefit (the coarser copy averages grain away), matcher + warp about 19 ms instead of 37-44 ms on an RTX 3050 Ti, the dither's error unchanged (0.0435 vs 0.0431 of a code). `search`: only the searches coarse, refinements at full size (95%) | `dejudder_low_res` all / search / off | all* | all* | Pans as smooth as before; matcher time | `Beta de-judder quality`, `Beta dither compare` (reports), `DejudderSettingsAreInputProfileNumbersWithLimits` |
 | 9 H1 Feathered hold | A warped block blends into a held neighbour over this many source pixels instead of a hard edge | `dejudder_hold_feather_px` 4 (0 = off) | on* | on* | Edges of held patches soft, not blocky | `HoldFeatherSoftensTheHeldBoundary` (both warp paths) |
 | 9 H2 Hold hysteresis | A block must be trusted for N source frames running before it warps, and untrusted for N before it holds (no flicker between the two). The first frame after a start or a cut holds | `dejudder_hold_hysteresis` 2 (1 = off) | on* | on* | No blocks blinking between moving and held | `HoldHysteresisNeedsTwoFrames` |
 | 9 H3 Block taper | Experiment: marginal blocks move at reduced strength instead of holding | `dejudder_block_taper`, `dejudder_taper_sad` 0 | off | off | Only as an A/B | `BlockTaperWarpsMarginalBlocksAtARampedStrength` |
@@ -35,9 +38,12 @@ this fork is **off by default**: with no new keys, VP renders as Bill's VP
 | D5 Occlusion fill | Experiment: uncovered picture is taken from the next frame instead of held. **Source warp only** (`dejudder_warp_stage: source`); with `rendered` it is ignored and logged once (planner: B-early caching is a post-cut item) | `dejudder_occlusion_fill` | off | off | Only as an A/B with `source` | `DejudderOcclusionFillFromB` |
 | 8 Adaptive downscale | 4K to 1600: SSIM where there is edge detail, faithful where there is grain | `adaptive_downscale`, `adaptive_w_base` 1, `adaptive_edge_lo/hi` 8/40, `adaptive_grain_lo/hi` 2/8, `adaptive_grain_floor` 0.4, `adaptive_chroma_ssim` off, `downscale_light` linear | off | on | Grainy sky over a sharp foreground: grain calmer, no halos on horizons or text | `AdaptiveDownscaleBlendsEdgesTextureAndGrain` |
 | 8-3 Grain map | The grain measure per 16x16 block from the motion vectors (the matcher runs for it) | `adaptive_grain_map`, `adaptive_grain_map_smooth_ms` 500 | on (with Stage 8) | on | As Stage 8 | `AdaptiveDownscaleGrainMapFromTheVectors`, `DejudderGrainErrorSeparatesNoiseFromTexture` |
+| Eff Chroma upscaler | The colour planes' upscale (4:2:0 / 4:2:2) before the main scaling. Owner 2026-10-13: Catmull-Rom looked identical to the polar filter on 4K footage (mean 0.33 of 1023 codes) at about a seventh of the cost (about 4.5 ms per refresh on the laptop) | scaling profile `chroma_upscaler` auto (Catmull-Rom) / upscaler (Bill's: the main upscaler) / ewa_lanczossharp / lanczos / catmull_rom / bicubic / bilinear | auto | auto | Coloured edges and text: no fringing | `ChromaUpscalerIsAScalingChoice` |
+| Eff Faithful branch | The adaptive downscale's faithful branch: polar (today) or ortho (about 2.4 ms cheaper, keeps 82% of the blend's effect, so not the default) | `adaptive_faithful` polar / ortho | polar | polar | As Stage 8 | `Beta option quality` (report) |
 | 8b Adaptive upscale | 1080p and below to 1600: where the grain measure sees grain, luma leans from the CNN upscaler (FSRCNNX / ArtCNN) toward a faithful ewa_lanczossharp upscale; no edge term; SSimSuperRes's refinement scaled by the same grain term. Faithful branch from the source picture, or a doubler's exact 2x averaged back to source resolution | `adaptive_upscale`, `adaptive_upscale_w_base` 1, `adaptive_upscale_superres_scale` on, `upscale_light` linear; grain keys shared with Stage 8 | off | listed, off (the cinema check turns it on) | 1080p grainy sky over a sharp foreground: CNN alone vs blend: grain calmer, edges unchanged, no shimmer; if not better, leave off | `AdaptiveUpscaleBlendsCnnAndFaithfulByGrain`, matrix refinements axis |
 | S1 Grain-aware dither carry | Where the grain map sees grain, the sigma-delta's block match and per-pixel gate are this many times more tolerant, so its 10-bit average survives grain | `dither_grain_tolerance_scale` 3 (1 = off) | on* | on* | Grainy flat areas (night sky): smooth, not dithered-noisy | `SigmaDeltaGrainAwareCarry` |
 | 10 Extended range | BTB / WTW kept through scaling and colour conversion (SDR) | `preserve_extended_range` | off | on | 235-255 ramp continues above white; PLUGE 4/12/16/20 (record either way) | `ExtendedRange*` |
+| Eff Parallel searches | The de-judder block search, second sweep and quarter-pel, the global motion and the sigma-delta's motion search run one work group per block / candidate: byte-identical results (the global motion's match ratio up to float rounding; the same vector); the sigma-delta skips its search on cadence repeats | always | always | always | Nothing to see; matcher and dither time | `Beta de-judder: parallel block search byte-identical`, `Beta sigma-delta: parallel motion search byte-identical` |
 | S2 Float32 output pass | libplacebo's output pass (PRE_OUTPUT to the dither) in rgba32f: no half-float rounding before the encode, nothing clipped (patch 0003, Beta libplacebo). A correctness fix: it removed a 0.25-0.6 code darkening | always (VP Renderer, Beta libplacebo) | always | always | Nothing to see | `Beta S2`, `Beta S2 A/B` (the bias returns with the flag off) |
 | S2 Float32 everywhere | Every libplacebo intermediate in rgba32f: exact highlights (half-float rounds above white by up to 0.84 of a 10-bit step) | `fbo_float32` auto / on / off | auto (on; off with the Low_Latency queue) | auto | Render time in the stats overlay (Ctrl+I) on the 3090; turn off if it shows pressure | `Beta S2` |
 | HDR deband off | libplacebo's debanding off for PQ/HLG (its HDR grain turns ~1 pixel in 10^4 black) | `[vprenderer.HDR]` `when: $eotf=="pq" \|\| $eotf=="hlg"`, `deband: off` | in the shipped sample | on | HDR film: no black specks in bright areas | `ShippedConfigurationsTurnDebandingOffForHdr` |
@@ -67,6 +73,9 @@ adaptive_upscale: off
 fbo_float32: off
 sdr_tone_shape: off
 sdr_white_headroom: 0
+dejudder_low_res: off
+# scaling profile (e.g. [vprenderer.scaling.cinema])
+chroma_upscaler: upscaler
 # Standard shaders: Temporal sigma-delta disabled
 # [led_drive.Default]
 enabled: false

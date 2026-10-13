@@ -891,6 +891,9 @@ namespace
 		bool dejudderEstGate = true;              // E4
 		bool dejudderEstSplit = true;             // E2
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
+		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
+		// wide (off | search = the searches only | all = every pass).
+		std::string dejudderLowRes = "all";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -906,7 +909,7 @@ namespace
 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
-		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = the upscaler)
+		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = Catmull-Rom, upscaler = the upscaler)
 		std::string downscaler = "auto";
 		std::string downscaleLight = "linear";   // Stage 8-1: linear | gamma
 		bool adaptiveDownscale = false;          // Stage 8-2: the SSIM / faithful blend
@@ -1054,7 +1057,7 @@ namespace
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
-			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|'
+			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -1904,7 +1907,8 @@ namespace
 		readChoice("gamut_mapping", settings.gamutMapping, { "auto", "perceptual", "softclip", "relative", "desaturate" });
 		readPeakDetection(settings.peakDetection);
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
-		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
+		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
+		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
 		readChoice("upscale_light", settings.upscaleLight, { "linear", "gamma" });
@@ -2519,7 +2523,7 @@ namespace
 		settings.upscaler = ReadChoice(
 			config, "upscaler", "auto",
 			{ "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
-		settings.chromaUpscaler = ReadChoice(config, "chroma_upscaler", "auto", { "auto", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
+		settings.chromaUpscaler = ReadChoice(config, "chroma_upscaler", "auto", { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		settings.downscaler = ReadChoice(
 			config, "downscaler", "auto",
 			{ "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
@@ -8257,6 +8261,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
+		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderHoldFeatherPx = next.dejudderHoldFeatherPx;
 		currentTransport.dejudderHoldHysteresis = next.dejudderHoldHysteresis;
 		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
@@ -8351,6 +8356,7 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
 			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
+		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -11348,6 +11354,8 @@ struct LibplaceboVideoRenderer::Impl
 			settings.estGate = activeSettings.dejudderEstGate;
 			settings.estSplit = activeSettings.dejudderEstSplit;
 			settings.estSplitSad = static_cast<float>(activeSettings.dejudderEstSplitSad);
+			settings.lowRes = activeSettings.dejudderLowRes != "off";
+			settings.lowResAll = activeSettings.dejudderLowRes == "all";
 			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);
 			settings.holdHysteresis = activeSettings.dejudderHoldHysteresis;
 			settings.blockTaper = activeSettings.dejudderBlockTaper;
@@ -11372,6 +11380,7 @@ struct LibplaceboVideoRenderer::Impl
 				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
 				current.estQpel != next.estQpel || current.estGate != next.estGate ||
 				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
+				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
 				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
 				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad)
 				dejudder->SetSettings(next);

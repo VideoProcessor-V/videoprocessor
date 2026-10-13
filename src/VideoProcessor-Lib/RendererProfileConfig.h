@@ -644,6 +644,8 @@ namespace RendererProfileConfig
 				return IsChoice(value, { "on", "off" });
 			// Stage 11a E1: the smoothness penalty (codes per source pixel).
 			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
+			// Owner 2026-10-13: the de-judder matcher one level coarser (4K).
+			if (key == "dejudder_low_res") return IsChoice(value, { "off", "search", "all" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 9: H1 feather (output px, 0 = off), H2 hysteresis (source
@@ -687,8 +689,10 @@ namespace RendererProfileConfig
 			if (key == "quality") return IsChoice(value, { "fast", "balanced", "high" });
 			if (key == "upscaler") return IsChoice(value, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
 			// Owner 2026-10-13 efficiency: chroma's own upscaler (4:2:0 / 4:2:2
-			// planes to the luma size); auto = the upscaler (today).
-			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
+			// planes to the luma size). auto = Catmull-Rom (owner: visually identical
+			// to the polar filter on his clip, about 1/7 of its cost); upscaler = the
+			// main upscaler (Bill's VP).
+			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 			if (key == "downscaler")
 			{
 				// Accept the two removed spellings only as legacy input so an old

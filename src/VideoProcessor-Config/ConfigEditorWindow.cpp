@@ -6480,6 +6480,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         estSplit->setToolTip(QStringLiteral(
             "A block that matches poorly (often a small object on a moving background) is searched as four "
             "quarter blocks, so the object and its surround each get their own motion."));
+        auto* lowRes = addChoice(QStringLiteral("Motion estimation size (4K)"),
+            QStringLiteral("dejudder_low_res"), { QStringLiteral("all"), QStringLiteral("search"), QStringLiteral("off") });
+        lowRes->setItemText(lowRes->findData(QStringLiteral("all")), QStringLiteral("Half size, every step (recommended)"));
+        lowRes->setItemText(lowRes->findData(QStringLiteral("search")), QStringLiteral("Half size search, full-size refinement"));
+        lowRes->setItemText(lowRes->findData(QStringLiteral("off")), QStringLiteral("Full size"));
+        lowRes->setToolTip(QStringLiteral(
+            "For sources wider than 1920, how finely motion is estimated. On real 4K footage, half size for every "
+            "step kept more de-judder benefit than full size (108%; averaging the grain helps the matching) at about "
+            "half the GPU time, with the dither unchanged. Half-size search with full-size refinement keeps quarter-"
+            "pixel precision and 8-pixel splits (95% of the benefit). The occlusion-fill experiment is skipped at half "
+            "size. Sources up to 1920 wide always use full size."));
         auto* estSplitSad = addText(QStringLiteral("Split above (codes, 0 = match tolerance)"),
             QStringLiteral("dejudder_est_split_sad"));
         estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));
@@ -6854,13 +6865,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		addRendererAutoStatus(QStringLiteral("upscaler"), upscaler);
 		auto* chromaUpscaler = addChoice(QStringLiteral("Chroma upscaler"),
 			QStringLiteral("chroma_upscaler"), { QStringLiteral("AUTO"),
-			QStringLiteral("ewa_lanczossharp"), QStringLiteral("lanczos"), QStringLiteral("catmull_rom"),
-			QStringLiteral("bicubic"), QStringLiteral("bilinear") });
+			QStringLiteral("catmull_rom"), QStringLiteral("lanczos"), QStringLiteral("ewa_lanczossharp"),
+			QStringLiteral("upscaler"), QStringLiteral("bicubic"), QStringLiteral("bilinear") });
+		chromaUpscaler->setItemText(chromaUpscaler->findData(QStringLiteral("upscaler")),
+			QStringLiteral("Same as the upscaler (Bill's VP)"));
 		chromaUpscaler->setToolTip(QStringLiteral(
 			"How the colour planes of 4:2:0 / 4:2:2 video are brought up to the picture's size before the "
-			"main scaling. Auto uses the upscaler above (EWA Lanczos sharp with High quality, the costliest "
-			"filter). Colour detail is half resolution and the eye resolves less of it, so a separable "
-			"Lanczos usually looks the same at a fraction of the GPU time."));
+			"main scaling. Auto = Catmull-Rom: on real 4K footage it looked identical to the polar EWA Lanczos "
+			"filter (mean difference 0.3 of 1023 codes) at about a seventh of its GPU time. 'Same as the "
+			"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest)."));
 		MarkGpuCost(form, chromaUpscaler, 2);
 		auto* downscaler = addChoice(QStringLiteral("Downscaler"),
 			QStringLiteral("downscaler"), { QStringLiteral("AUTO"),

@@ -1,4 +1,4 @@
-// GPU checks of the Beta renderer's libplacebo (master, API 377) on D3D11
+﻿// GPU checks of the Beta renderer's libplacebo (master, API 377) on D3D11
 // WARP, independent of the rest of VP:
 // 1. The output clamp (upstream e2972fdd) keeps limited-range footroom and
 //    headroom (FL35 patches 0001/0002: legal codes 4-1019, identical on R, G
@@ -779,12 +779,35 @@ void RunBetaDitherVectorsTests()
 			for (int pass = 0; pass < 2; ++pass)
 			{
 				Check(parallel.Estimate(a, b) && serial.Estimate(a, b), "parallel search: estimate failed");
+				// D1 in parallel: the same global vector; its match ratio up
+				// to the sums' float order.
+				{
+					std::vector<float> gp(4), gs(4);
+					auto global = [&](pl_tex tex, std::vector<float>& out)
+					{
+						std::vector<uint16_t> h = download(tex);
+						for (int c = 0; c < 4; ++c)
+						{
+							const uint16_t v = h[c];
+							const int e = (v >> 10) & 31, m = v & 1023;
+							const float mag = e == 0 ? std::ldexp(static_cast<float>(m), -24) :
+								std::ldexp(1.0f + m / 1024.0f, e - 15);
+							out[c] = (v & 0x8000) ? -mag : mag;
+						}
+					};
+					global(parallel.GlobalVector(), gp);
+					global(serial.GlobalVector(), gs);
+					Check(gp[0] == gs[0] && gp[1] == gs[1] && std::abs(gp[2] - gs[2]) <= 0.002f * std::max(1.0f, gs[2]),
+						"parallel global motion differs from the serial body: (" + std::to_string(gp[0]) + ", " +
+							std::to_string(gp[1]) + ", " + std::to_string(gp[2]) + ") vs (" + std::to_string(gs[0]) + ", " +
+							std::to_string(gs[1]) + ", " + std::to_string(gs[2]) + ")");
+				}
 				Check(download(parallel.Field()) == download(serial.Field()),
 					std::string("parallel block search differs from the serial search (") +
 						(refined ? "refined" : "defaults") + ", estimate " + std::to_string(pass + 1) + ")");
 			}
 		}
-		std::cout << "Beta de-judder: parallel block search byte-identical to the serial search (defaults, refined)\n";
+		std::cout << "Beta de-judder: parallel block search byte-identical to the serial search, parallel global motion the same vector (defaults, refined)\n";
 	}
 
 	pl_tex_params tp{};
@@ -1688,8 +1711,9 @@ namespace
 			for (double x : s) mean += x;
 			mean /= s.size();
 			const double p95 = s[std::min(s.size() - 1, static_cast<size_t>(s.size() * 0.95))];
-			char text[96];
-			std::snprintf(text, sizeof(text), "mean %.2f, p95 %.2f, max %.2f ms (n %zu)", mean, p95, s.back(), s.size());
+			const double p99 = s[std::min(s.size() - 1, static_cast<size_t>(s.size() * 0.99))];
+			char text[128];
+			std::snprintf(text, sizeof(text), "mean %.2f, p95 %.2f, p99 %.2f, max %.2f ms (n %zu)", mean, p95, p99, s.back(), s.size());
 			return text;
 		}
 	};
@@ -2120,8 +2144,14 @@ void RunBetaDejudderQuality()
 		p.sampleable = true; p.storable = true; p.host_writable = true; p.host_readable = true;
 		return pl_tex_create(g, &p);
 	};
-	struct Variant { const char* name; bool screen; double hold = 0, warp = 0; int pairs = 0; double searchMs = 0; };
-	std::vector<Variant> variants = { { "refined (today)", false } };
+	// mode: 0 = full resolution (today), 1 = the searches at half size,
+	// 2 = every pass at half size; rescore: the scaled-back searches re-scored.
+	struct Variant { const char* name; int mode; bool rescore; double hold = 0, warp = 0; int pairs = 0; double searchMs = 0;
+		double matcherMs = 0; double newShare = 0; int maskSamples = 0; };
+	std::vector<Variant> variants = { { "full resolution (today)", 0, false },
+		{ "searches at half size", 1, false }, { "every pass at half size", 2, false } };
+	if (std::getenv("VP_TEST_ALTERNATE"))   // clock drift check: today first and last
+		variants.push_back({ "full resolution (today) again", 0, false });
 	std::vector<uint16_t> raw(frameBytes / 2);
 	auto load = [&](std::ifstream& in, int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma)
 	{
@@ -2144,8 +2174,17 @@ void RunBetaDejudderQuality()
 	{
 		Dejudder::Settings settings = ChainGpuProbe::Refined(Dejudder::Settings{});
 		settings.hostReadable = true;
+		settings.lowRes = var.mode > 0;
+		settings.lowResAll = var.mode == 2;
 		Dejudder::MotionWarp warp(gpu.Log(), g, settings);
-		warp.SetPassTiming(true);
+		warp.SetLowResRescoreForTest(var.rescore);
+		// Timing on its own matcher, four estimates back to back per sampled
+		// pair with GPU timers and no drains (the GPU kept busy, as in VP).
+		Dejudder::MotionWarp timing(gpu.Log(), g, settings);
+		timing.SetLowResRescoreForTest(var.rescore);
+		timing.SetPassTiming(true, false);
+		int timedEstimates = 0;
+		double timedWallMs = 0.0;
 		pl_tex lumaT[2] = { plane(w, h, 1), plane(w, h, 1) }, chromaT[2] = { plane(w / 2, h / 2, 2), plane(w / 2, h / 2, 2) };
 		std::vector<uint16_t> la, ca, lb, cb, lt, ct, warped(static_cast<size_t>(w) * h);
 		for (const auto& file : files)
@@ -2166,8 +2205,39 @@ void RunBetaDejudderQuality()
 				a.luma = lumaT[slot]; a.chroma = chromaT[slot]; b.luma = lumaT[next]; b.chroma = chromaT[next];
 				a.chromaShiftX = b.chromaShiftX = 1;
 				a.chromaShiftY = b.chromaShiftY = 1;
-				Check(warp.Estimate(a, b), "de-judder quality: estimate: " + warp.LastError());
+				const int maskSlot = (n / 2) % 2;
+				Check(warp.Estimate(a, b, maskSlot, true), "de-judder quality: estimate: " + warp.LastError());
+				// The dither mask: the share of blocks marked new or uncovered.
+				if (n >= 6 && warp.Occlusion(maskSlot))
+				{
+					pl_tex m = warp.Occlusion(maskSlot);
+					std::vector<uint16_t> mask(static_cast<size_t>(m->params.w) * m->params.h * 4);
+					pl_tex_transfer_params md{};
+					md.tex = m; md.ptr = mask.data();
+					if (pl_tex_download(g, &md))
+					{
+						int fresh = 0;
+						for (size_t i = 0; i < mask.size(); i += 4)
+							fresh += mask[i] < 0x3800 ? 1 : 0;   // half-float r < 0.5
+						var.newShare += static_cast<double>(fresh) / (mask.size() / 4);
+						++var.maskSamples;
+					}
+				}
 				Check(warp.Warp(a, 0.5f, out, true), "de-judder quality: warp");
+				if (n >= 6 && n % 8 == 0)
+				{
+					pl_gpu_finish(g);
+					const auto t0 = std::chrono::steady_clock::now();
+					for (int r = 0; r < 4; ++r)
+					{
+						Check(timing.Estimate(a, b, r % 2, true), "de-judder quality: timing estimate");
+						Dejudder::Planes timedOut;
+						Check(timing.Warp(a, 0.5f, timedOut, true), "de-judder quality: timing warp");
+					}
+					pl_gpu_finish(g);
+					timedWallMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+					timedEstimates += 4;
+				}
 				pl_tex_transfer_params d{};
 				d.tex = out.luma; d.ptr = warped.data();
 				Check(pl_tex_download(g, &d), "de-judder quality: download");
@@ -2194,8 +2264,15 @@ void RunBetaDejudderQuality()
 				slot = next;
 			}
 		}
-		const auto found = warp.PassMs().find("VideoProcessor de-judder: block search");
-		var.searchMs = found != warp.PassMs().end() ? found->second : 0.0;
+		timing.FlushPassTimers();
+		const double perEstimate = timedEstimates ? 1.0 / timedEstimates : 0.0;
+		var.matcherMs = timedWallMs * perEstimate;   // estimate + warp, busy GPU, wall clock
+		for (const auto& entry : timing.PassGpuMs())
+		{
+			if (entry.first.find("block search") != std::string::npos)
+				var.searchMs += entry.second * perEstimate;
+			std::cout << "  [" << var.name << "] " << entry.first << ": " << entry.second * perEstimate << " ms GPU\n";
+		}
 		for (pl_tex* t : { &lumaT[0], &lumaT[1], &chromaT[0], &chromaT[1] })
 			pl_tex_destroy(g, t);
 	}
@@ -2207,7 +2284,301 @@ void RunBetaDejudderQuality()
 		const double benefit = hold - wr;
 		std::cout << "  " << var.name << ": hold " << hold << ", warp " << wr << ", benefit " << benefit
 			<< " (" << (baseBenefit > 1e-9 ? 100.0 * benefit / baseBenefit : 0.0) << "% of today's), block search "
-			<< (var.pairs ? var.searchMs / (var.pairs + 3.0 * files.size()) : 0.0) << " ms per pair (drained)\n";
+			<< var.searchMs << " ms GPU, estimate + warp " << var.matcherMs << " ms (busy GPU, wall); dither mask marks "
+			<< (var.maskSamples ? 100.0 * var.newShare / var.maskSamples : 0.0) << "% of blocks new\n";
+	}
+}
+
+// The dither with each matcher mode (owner 2026-10-13: how much of the
+// motion's help to the sigma-delta survives the low-resolution matcher).
+// The real clip as 23.976p at 59.94 (3:2 with de-judder extras, VPVEC),
+// 4K -> 2560x1600, the occlusion mask and the sigma-delta only. Each refresh
+// is rendered twice from the same input: with the sigma-delta (16-bit target)
+// and without it (32-bit float, the exact value). The visible error is the
+// dither error averaged over each source frame's refreshes (what the eye
+// integrates) and over 4x4 pixels; "off" = motion compensation and the mask
+// off. Report only: VP_TEST_DITHER_COMPARE=1 (VP_TEST_DITHER_FRAMES per
+// segment, default 48).
+void RunBetaDitherCompare()
+{
+	char* dir = nullptr;
+	size_t length = 0;
+	if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") != 0 || !dir || !*dir)
+	{
+		std::free(dir);
+		std::cout << "Beta dither compare: VP_TEST_CLIP not set\n";
+		return;
+	}
+	const std::string folder(dir);
+	std::free(dir);
+	int perSegment = 48;
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		if (_dupenv_s(&v, &n, "VP_TEST_DITHER_FRAMES") == 0 && v && *v)
+			perSegment = std::max(8, std::atoi(v));
+		std::free(v);
+	}
+	std::vector<std::string> files;
+	WIN32_FIND_DATAA fd{};
+	HANDLE find = FindFirstFileA((folder + "\\seg_*.yuv").c_str(), &fd);
+	if (find != INVALID_HANDLE_VALUE)
+	{
+		do files.push_back(folder + "\\" + fd.cFileName); while (FindNextFileA(find, &fd));
+		FindClose(find);
+	}
+	std::sort(files.begin(), files.end());
+	Check(!files.empty(), "dither compare: no clip files");
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int w = 3840, h = 2160, ow = 2560, oh = 1600;
+	const size_t frameBytes = static_cast<size_t>(w) * h * 3;
+	auto plane = [&](int pw, int ph, int comps)
+	{
+		pl_tex_params tp{};
+		tp.w = pw; tp.h = ph;
+		tp.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR));
+		tp.sampleable = true; tp.storable = true; tp.host_writable = true;
+		return pl_tex_create(g, &tp);
+	};
+	auto target = [&](enum pl_fmt_type type, int depth)
+	{
+		pl_tex_params tp{};
+		tp.w = ow; tp.h = oh;
+		tp.format = pl_find_fmt(g, type, 4, depth, depth,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+		tp.renderable = true; tp.host_readable = true;
+		return pl_tex_create(g, &tp);
+	};
+	pl_tex dithered = target(PL_FMT_UNORM, 16), exact = target(PL_FMT_FLOAT, 32);
+	Check(dithered && exact, "dither compare: no targets");
+	std::vector<uint16_t> raw(frameBytes / 2), lumaData, chromaData;
+	auto load = [&](std::ifstream& in, int index)
+	{
+		in.clear();
+		in.seekg(static_cast<std::streamoff>(frameBytes) * index);
+		if (!in.read(reinterpret_cast<char*>(raw.data()), frameBytes)) return false;
+		lumaData.resize(static_cast<size_t>(w) * h);
+		chromaData.resize(static_cast<size_t>(w / 2) * (h / 2) * 2);
+		for (size_t i = 0; i < lumaData.size(); ++i) lumaData[i] = static_cast<uint16_t>(raw[i] << 6);
+		const uint16_t* u = raw.data() + lumaData.size();
+		const uint16_t* v = u + lumaData.size() / 4;
+		for (size_t i = 0; i < lumaData.size() / 4; ++i)
+		{
+			chromaData[i * 2] = static_cast<uint16_t>(u[i] << 6);
+			chromaData[i * 2 + 1] = static_cast<uint16_t>(v[i] << 6);
+		}
+		return true;
+	};
+	struct Mode { const char* name; int lowRes; bool motion; bool rescore; double visible = 0, temporal = 0, rms = 0; int groups = 0, refreshes = 0; };
+	std::vector<Mode> modes = { { "full-resolution motion (today)", 0, true, false }, { "searches at half size", 1, true, false },
+		{ "every pass at half size", 2, true, false }, { "every pass at half size, mask re-scored", 2, true, true },
+		{ "motion compensation and mask off", 0, false, false } };
+	const size_t pixels = static_cast<size_t>(ow) * oh;
+	std::vector<uint16_t> outPx(pixels * 4);
+	std::vector<float> exactPx(pixels * 4), groupSum(pixels * 3);
+	for (Mode& mode : modes)
+	{
+		pl_tex luma[2] = { plane(w, h, 1), plane(w, h, 1) }, chroma[2] = { plane(w / 2, h / 2, 2), plane(w / 2, h / 2, 2) };
+		Dejudder::Settings settings = ChainGpuProbe::Refined(Dejudder::Settings{});
+		settings.lowRes = mode.lowRes > 0;
+		settings.lowResAll = mode.lowRes == 2;
+		Dejudder::MotionWarp warp(gpu.Log(), g, settings);
+		warp.SetLowResRescoreForTest(mode.rescore);
+		OcclusionMask::Hook mask;
+		DejudderRendered::Cache cache;
+		DejudderRendered::Warp rendered(gpu.Log(), g);
+		DejudderRendered::VectorField field(gpu.Log(), g);
+		auto sigma = Load(g, "Temporal sigma-delta.glsl", { { "enabled", 1 }, { "levels_full", 0 }, { "swapchain_bits", 10 },
+			{ "color_bits", 10 }, { "motion_compensation", mode.motion ? 1.0 : 0.0 }, { "occlusion_mask", mode.motion ? 1.0 : 0.0 },
+			{ "grain_tolerance_scale", 3 } }, ow, oh);
+		const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+		const pl_rect2df targetCrop{ 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+		uint64_t sequence = 0;
+		for (const auto& file : files)
+		{
+			std::ifstream in(file, std::ios::binary);
+			double phase = 0.0;
+			for (int f = 0; f < perSegment; ++f)
+			{
+				if (!load(in, f))
+					break;
+				const int cur = f % 2, prev = 1 - cur;
+				pl_tex_transfer_params up{};
+				up.tex = luma[cur]; up.ptr = lumaData.data();
+				Check(pl_tex_upload(g, &up), "dither compare: upload");
+				up.tex = chroma[cur]; up.ptr = chromaData.data();
+				Check(pl_tex_upload(g, &up), "dither compare: upload");
+				if (f == 0)
+					continue;
+				++sequence;
+				Dejudder::Planes a, b;
+				a.luma = luma[prev]; a.chroma = chroma[prev]; b.luma = luma[cur]; b.chroma = chroma[cur];
+				a.chromaShiftX = b.chromaShiftX = 1;
+				a.chromaShiftY = b.chromaShiftY = 1;
+				Check(warp.Estimate(a, b, f % 2, false), "dither compare: estimate: " + warp.LastError());
+				mask.SetFrame(mode.motion ? warp.Occlusion(f % 2) : nullptr, sourceCrop, targetCrop);
+				phase += 2.5;
+				const int refreshes = static_cast<int>(std::floor(phase + 1e-9));
+				phase -= refreshes;
+				std::fill(groupSum.begin(), groupSum.end(), 0.0f);
+				float previousShift = 0.0f;
+				for (int r = 0; r < refreshes; ++r)
+				{
+					pl_frame image{};
+					auto source = [&]()
+					{
+						image = pl_frame{};
+						image.num_planes = 2;
+						image.planes[0].texture = b.luma; image.planes[0].components = 1;
+						image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+						image.planes[1].texture = b.chroma; image.planes[1].components = 2;
+						image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+						image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+						image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+						image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+						image.color.primaries = PL_COLOR_PRIM_BT_709;
+						image.color.transfer = PL_COLOR_TRC_GAMMA24;
+						pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+					};
+					auto out = [&](pl_tex tex)
+					{
+						pl_frame o{};
+						o.num_planes = 1;
+						o.planes[0].texture = tex;
+						o.planes[0].components = 3;
+						for (int i = 0; i < 3; ++i) o.planes[0].component_mapping[i] = i;
+						o.repr.sys = PL_COLOR_SYSTEM_RGB;
+						o.repr.levels = PL_COLOR_LEVELS_LIMITED;
+						o.repr.bits.sample_depth = 10; o.repr.bits.color_depth = 10;
+						o.color.primaries = PL_COLOR_PRIM_DCI_P3;
+						o.color.transfer = PL_COLOR_TRC_GAMMA22;
+						return o;
+					};
+					pl_render_params params = pl_render_default_params;
+					params.dither_params = nullptr;
+					params.error_diffusion = nullptr;
+					params.downscaler = &pl_filter_mitchell;
+					params.upscaler = &pl_filter_ewa_lanczossharp;
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+					params.output_fbo_float32 = true;
+#endif
+					std::vector<const pl_hook*> list, kept, keptExact;
+					pl_render_params exactParams = params;
+					pl_tex vectors = nullptr;
+					const bool isExtra = r > 0 && cache.Texture(sequence) != nullptr;
+					if (r == 0)
+					{
+						source();
+						list.push_back(mask.Get());
+						list.push_back(sigma->hook);
+						cache.Arm(sequence);
+						list.push_back(cache.Hook());
+						SetParam(sigma->hook, "static_refresh", 0.0);
+						params.hooks = list.data();
+						params.num_hooks = static_cast<int>(list.size());
+						exactParams.hooks = nullptr;
+						exactParams.num_hooks = 0;
+					}
+					else if (isExtra)
+					{
+						const float shift = 0.25f * static_cast<float>(r) / 2.5f;
+						pl_tex warped = nullptr;
+						Check(rendered.Run(cache.Texture(sequence), warp.Field(), warp.FrameTrust(),
+							warp.GetSettings().minTrustedShare, shift, { sourceCrop, targetCrop, {}, {} }, warped, warp.SubField(),
+							&warp.GetSettings()), "dither compare: warp");
+						if (mode.motion)
+						{
+							Check(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, shift - previousShift,
+								{ sourceCrop, targetCrop, {}, {} }, ow, oh, vectors, warp.SubField(), &warp.GetSettings()), "dither compare: field");
+							pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", vectors);
+							SetParam(sigma->hook, "vector_source", 1.0);
+						}
+						previousShift = shift;
+						image = DejudderRendered::Frame(warped, cache.Repr(), cache.Color());
+						const pl_render_params base = params;
+						params = DejudderRendered::OutputOnly(base, { sigma->hook }, kept);
+						exactParams = DejudderRendered::OutputOnly(base, {}, keptExact);
+					}
+					else
+					{
+						source();
+						list.push_back(sigma->hook);
+						SetParam(sigma->hook, "static_refresh", 1.0);
+						params.hooks = list.data();
+						params.num_hooks = static_cast<int>(list.size());
+						exactParams.hooks = nullptr;
+						exactParams.num_hooks = 0;
+					}
+					pl_frame o = out(dithered);
+					Check(pl_render_image(gpu.RendererHandle(), &image, &o, &params), "dither compare: render");
+					if (isExtra && mode.motion)
+					{
+						SetParam(sigma->hook, "vector_source", 0.0);
+						pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", nullptr);
+					}
+					SetParam(sigma->hook, "static_refresh", 0.0);
+					pl_frame e = out(exact);
+					Check(pl_render_image(gpu.RendererHandle(), &image, &e, &exactParams), "dither compare: exact render");
+					pl_tex_transfer_params d{};
+					d.tex = dithered; d.ptr = outPx.data();
+					Check(pl_tex_download(g, &d), "dither compare: download");
+					d.tex = exact; d.ptr = exactPx.data();
+					Check(pl_tex_download(g, &d), "dither compare: download");
+					if (f < 6)
+						continue;   // the sigma-delta and the hysteresis settled
+					double square = 0.0;
+					for (size_t i = 0; i < pixels; ++i)
+						for (int c = 0; c < 3; ++c)
+						{
+							const float err = outPx[i * 4 + c] * (1023.0f / 65535.0f) - exactPx[i * 4 + c] * 1023.0f;
+							groupSum[i * 3 + c] += err;
+							square += static_cast<double>(err) * err;
+						}
+					mode.rms += square / (pixels * 3.0);
+					++mode.refreshes;
+				}
+				if (f < 6)
+					continue;
+				// The eye's integration: the group mean per pixel, then 4x4.
+				double temporal = 0.0, visible = 0.0;
+				for (size_t i = 0; i < pixels * 3; ++i)
+				{
+					const double m = groupSum[i] / refreshes;
+					temporal += m * m;
+				}
+				for (int y = 0; y + 4 <= oh; y += 4)
+					for (int x = 0; x + 4 <= ow; x += 4)
+						for (int c = 0; c < 3; ++c)
+						{
+							double sum = 0.0;
+							for (int yy = 0; yy < 4; ++yy)
+								for (int xx = 0; xx < 4; ++xx)
+									sum += groupSum[(static_cast<size_t>(y + yy) * ow + x + xx) * 3 + c];
+							const double m = sum / (16.0 * refreshes);
+							visible += m * m;
+						}
+				mode.temporal += temporal / (pixels * 3.0);
+				mode.visible += visible / ((ow / 4) * (oh / 4) * 3.0);
+				++mode.groups;
+			}
+		}
+		for (pl_tex* t : { &luma[0], &luma[1], &chroma[0], &chroma[1] })
+			pl_tex_destroy(g, t);
+	}
+	std::cout << "Beta dither compare (real clip as 3:2 with extras, 2560x1600, 10-bit codes; RMS of the dither error):\n";
+	const double full = modes[0].groups ? std::sqrt(modes[0].visible / modes[0].groups) : 0.0;
+	const double off = modes.back().groups ? std::sqrt(modes.back().visible / modes.back().groups) : 0.0;
+	for (const Mode& mode : modes)
+	{
+		const double visible = mode.groups ? std::sqrt(mode.visible / mode.groups) : 0.0;
+		const double temporal = mode.groups ? std::sqrt(mode.temporal / mode.groups) : 0.0;
+		const double rms = mode.refreshes ? std::sqrt(mode.rms / mode.refreshes) : 0.0;
+		std::cout << "  " << mode.name << ": per refresh " << rms << ", per source frame " << temporal << ", visible (4x4) " << visible;
+		if (off - full > 1e-6 && mode.motion)
+			std::cout << " (motion's help kept: " << 100.0 * (off - visible) / (off - full) << "%)";
+		std::cout << "\n";
 	}
 }
 
@@ -2361,9 +2732,13 @@ void RunBetaScenarioTiming()
 			if (frames > 0)
 			{
 				Source src;
-				src.label = clipHdr ? "clip 29.97p, 3840x2160, pseudo-HDR (PQ, BT.2020)" : "clip 29.97p, 3840x2160";
+				// VP_TEST_CLIP_24P=1: the clip played as 23.976p (3:2 with the
+				// de-judder extras, the cinema case).
+				const bool as24 = envOn("VP_TEST_CLIP_24P");
+				src.label = clipHdr ? (as24 ? "clip as 23.976p, 3840x2160, pseudo-HDR (PQ, BT.2020)" : "clip 29.97p, 3840x2160, pseudo-HDR (PQ, BT.2020)") :
+					(as24 ? "clip as 23.976p, 3840x2160" : "clip 29.97p, 3840x2160");
 				src.hdr = clipHdr;
-				src.w = w; src.h = h; src.sourceRate = 30000.0 / 1001.0; src.frames = frames;
+				src.w = w; src.h = h; src.sourceRate = as24 ? 24000.0 / 1001.0 : 30000.0 / 1001.0; src.frames = frames;
 				auto stream = std::make_shared<std::ifstream>();
 				auto fileIndex = std::make_shared<size_t>(0);
 				src.next = [files, stream, fileIndex, w, h, frameBytes](int, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)
@@ -2407,7 +2782,18 @@ void RunBetaScenarioTiming()
 		const bool down = w > ow;
 		pl_tex luma[2] = { plane(w, h, 1), plane(w, h, 1) }, chroma[2] = { plane(w / 2, h / 2, 2), plane(w / 2, h / 2, 2) };
 		Check(luma[0] && luma[1] && chroma[0] && chroma[1], "scenario: planes");
-		Dejudder::MotionWarp warp(gpu.Log(), g, ChainGpuProbe::Refined(Dejudder::Settings{}));
+		// The matcher as VP's default (dejudder_low_res: all); VP_TEST_LOWRES=
+		// off | search | all.
+		Dejudder::Settings matcherSettings = ChainGpuProbe::Refined(Dejudder::Settings{});
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			const std::string mode = _dupenv_s(&v, &n, "VP_TEST_LOWRES") == 0 && v && *v ? std::string(v) : std::string("all");
+			std::free(v);
+			matcherSettings.lowRes = mode != "off";
+			matcherSettings.lowResAll = mode == "all";
+		}
+		Dejudder::MotionWarp warp(gpu.Log(), g, matcherSettings);
 		warp.SetPassTiming(matcherPasses);
 		AdaptiveDownscale::Module adaptive;
 		AdaptiveDownscale::Settings adaptiveSettings;
@@ -2424,6 +2810,9 @@ void RunBetaScenarioTiming()
 		const pl_rect2df sourceCrop{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
 		const pl_rect2df targetCrop{ 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
 		Stats matcherMs, newFrame, extra, repeat, sigmaSearch;
+		// The critical refresh (the matcher and the new frame's render run back
+		// to back on the GPU) and everything one source frame costs.
+		Stats newWithMatcher, perSourceFrame;
 		std::map<std::string, Stats> perSegment;
 		// Per refresh type: each pass's GPU time summed, and the refreshes.
 		std::map<std::string, std::pair<std::map<std::string, double>, int>> perKind;
@@ -2476,6 +2865,7 @@ void RunBetaScenarioTiming()
 			const int refreshes = static_cast<int>(std::floor(phase + 1e-9));
 			phase -= refreshes;
 			float previousShift = 0.0f;
+			double frameTotal = estimateMs;
 			for (int r = 0; r < refreshes; ++r)
 			{
 				pl_frame image{};
@@ -2608,6 +2998,12 @@ void RunBetaScenarioTiming()
 					pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", nullptr);
 				}
 				SetParam(sigma->hook, "static_refresh", 0.0);
+				frameTotal += ms;
+				if (f >= warmup && r == 0)
+				{
+					newWithMatcher.Add(estimateMs + ms);
+					perSegment[std::string(segment) + ": new frame with the matcher"].Add(estimateMs + ms);
+				}
 				if (f >= warmup)
 				{
 					(r == 0 ? newFrame : (isExtra ? extra : repeat)).Add(ms);
@@ -2621,14 +3017,22 @@ void RunBetaScenarioTiming()
 					++totals.second;
 				}
 			}
+			if (f >= warmup)
+			{
+				perSourceFrame.Add(frameTotal);
+				perSegment[std::string(segment) + ": one source frame"].Add(frameTotal);
+			}
 		}
-		std::cout << "Beta scenario timing, " << src.label << (chromaLanczos ? ", chroma lanczos" : "") <<
+		std::cout << "Beta scenario timing (matcher " << (matcherSettings.lowRes ? (matcherSettings.lowResAll ? "half size, every pass" : "half size searches") : "full size")
+			<< "), " << src.label << (chromaLanczos ? ", chroma lanczos" : "") <<
 			(adaptiveOrtho ? ", faithful ortho" : "") << " -> " << ow << "x" << oh << " (" << (extras ? "3:2 with de-judder extras" : "2:2, repeats") << "):\n"
 			<< "  matcher per source frame: " << matcherMs.Text() << "\n"
 			<< "  refresh, new frame:      " << newFrame.Text() << "\n"
 			<< "  refresh, de-judder extra:" << extra.Text() << "\n"
 			<< "  refresh, cadence repeat: " << repeat.Text() << "\n"
-			<< "  sigma-delta search (new frame, GPU): " << sigmaSearch.Text() << "\n";
+			<< "  sigma-delta search (new frame, GPU): " << sigmaSearch.Text() << "\n"
+			<< "  new frame with the matcher (critical refresh): " << newWithMatcher.Text() << "\n"
+			<< "  one source frame (matcher + its refreshes): " << perSourceFrame.Text() << "\n";
 		for (const auto& entry : perSegment)
 			std::cout << "    " << entry.first << ": " << entry.second.Text() << "\n";
 		if (matcherPasses)

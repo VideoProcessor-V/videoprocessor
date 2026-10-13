@@ -5,6 +5,7 @@
 #include <libplacebo/dispatch.h>
 
 #include <map>
+#include <memory>
 #include <string>
 
 // Stage 6 (6a): the de-judder's motion matcher and warp, as a standalone GPU
@@ -136,6 +137,19 @@ namespace Dejudder
 		float taperSad = 0.0f;
 		// Allocate host-readable outputs (tests only).
 		bool hostReadable = false;
+		// Owner 2026-10-13 efficiency (dejudder_low_res: off | search | all, all
+		// by default in the renderer): for sources wider than 1920 the costly searches (global
+		// motion, the block search, the second sweep) run one level coarser,
+		// on the half-resolution luma, and their vectors are scaled back to the
+		// source's 16-pixel block grid; consistency, quarter-pel, smoothing,
+		// split, trust, hysteresis, occlusion and grain run at full resolution
+		// as before. Every consumer reads the same accessors.
+		// lowResAll: every pass at the coarser level (the trust, the field and
+		// the sub-field scaled back); the dither's occlusion and the grain
+		// measure are still made per 16 source pixels from the scaled-back
+		// searches.
+		bool lowRes = false;
+		bool lowResAll = false;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -195,10 +209,17 @@ namespace Dejudder
 		// (vx, vy) source pixels, trust (1/0), split flag (1 = the parent block
 		// split; 0 = a copy of the parent). nullptr while estSplit is off.
 		// Tests only: time each pass with the GPU drained (slow; never in VP).
-		void SetPassTiming(bool on) { passTiming = on; passMs.clear(); }
+		// drain = false: GPU timers only, the GPU kept busy (a laptop GPU drops
+		// its clock in the drained gaps); FlushPassTimers collects the last.
+		void SetPassTiming(bool on, bool drain = true) { passTiming = on; passDrain = drain; passMs.clear(); passGpuMs.clear(); }
+		void FlushPassTimers();
 		// Tests only: the serial block search the parallel one must reproduce.
 		void SetSerialSearchForTest(bool on) { serialSearchForTest = on; }
+		// Tests only: lowRes without re-scoring the scaled-back searches.
+		void SetLowResRescoreForTest(bool on) { rescoreForTest = on; }
 		const std::map<std::string, double>& PassMs() const { return passMs; }
+		// The same passes by the GPU's timestamp queries (no drain overhead).
+		const std::map<std::string, double>& PassGpuMs() const { return passGpuMs; }
 		pl_tex SubField() const { return settings.estSplit && estimated ? subField : nullptr; }
 		// B's occlusion mask (6c), one texel per 16x16 source block of B:
 		// r = 1 where B's content was visible in A (consistent both ways and
@@ -224,7 +245,16 @@ namespace Dejudder
 		int BlocksY() const { return blocksY; }
 		const std::string& LastError() const { return error; }
 		const Settings& GetSettings() const { return settings; }
-		void SetSettings(const Settings& value) { settings = value; }
+		void SetSettings(const Settings& value)
+		{
+			// lowRes switched: the other path's temporal state is stale.
+			if (value.lowRes != settings.lowRes || value.lowResAll != settings.lowResAll)
+			{
+				inner.reset();
+				previousValid = false;
+			}
+			settings = value;
+		}
 
 	private:
 		bool EnsureTextures(const Planes& a);
@@ -234,6 +264,12 @@ namespace Dejudder
 			const pl_shader_desc* descriptors, int numDescriptors,
 			const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY);
 		std::map<std::string, double> passMs;
+		std::map<std::string, double> passGpuMs;
+		std::map<std::string, pl_timer> passTimers;
+		void TimedDispatch(const char* description, pl_dispatch_compute_params& compute, bool& ok);
+		void CollectTimer(const std::string& description, pl_timer timer);
+		bool passDrain = true;
+		MotionWarp* timingParent = nullptr;   // lowRes inner: its passes counted in the outer's maps
 		bool Dispatch(const char* description, const char* header, const char* body,
 			const struct pl_shader_desc* descriptors, int numDescriptors,
 			const struct pl_shader_var* variables, int numVariables,
@@ -280,5 +316,18 @@ namespace Dejudder
 		bool grainErrorValid = false;
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
 		bool estimated = false;
+		// lowRes: the inner matcher searching this one's half-resolution luma
+		// (already in code units; searches only, no warp planes).
+		std::unique_ptr<MotionWarp> inner;
+		bool searchOnly = false;
+		bool innerOfLowRes = false;   // no warp planes
+		// Tests only: re-score the scaled-back searches per 16-pixel block (on
+		// the owner's clip the grain made good matches look worse: 83% of the
+		// benefit with the searches at half size, so off).
+		bool rescoreForTest = false;
+		// D1 in parallel: per-candidate frame SADs (1/32, 1/8) and the pick.
+		pl_tex globalSad2 = nullptr, globalSad1 = nullptr, globalPick = nullptr;
+		bool lumaInCodes = false;
+		bool LowResSearch(const Planes& a, const Planes& b);
 	};
 }

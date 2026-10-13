@@ -640,7 +640,7 @@ namespace VideoProcessorTest
         TEST_METHOD(ChromaUpscalerIsAScalingChoice)
         {
             struct Case { const char* value; bool valid; };
-            for (const Case c : { Case{ "auto", true }, Case{ "lanczos", true }, Case{ "catmull_rom", true },
+            for (const Case c : { Case{ "auto", true }, Case{ "upscaler", true }, Case{ "lanczos", true }, Case{ "catmull_rom", true },
                 Case{ "ewa_lanczossharp", true }, Case{ "bilinear", true }, Case{ "nearest", false }, Case{ "polar", false } })
             {
                 CachedConfigTestFile file;
@@ -722,6 +722,8 @@ namespace VideoProcessorTest
                 Case{ "dejudder_est_lambda", "9", false },
                 Case{ "dejudder_est_split", "on", true }, Case{ "dejudder_est_split_sad", "0", true },
                 Case{ "dejudder_est_split_sad", "20", false },
+                Case{ "dejudder_low_res", "all", true }, Case{ "dejudder_low_res", "search", true },
+                Case{ "dejudder_low_res", "off", true }, Case{ "dejudder_low_res", "on", false },
                 Case{ "dejudder_hold_feather_px", "4", true }, Case{ "dejudder_hold_feather_px", "17", false },
                 Case{ "dejudder_strength_even", "1", true }, Case{ "dejudder_strength_even", "1.2", false },
                 Case{ "dejudder_even_rates", "30_and_29.97", true }, Case{ "dejudder_even_rates", "29.97", false },

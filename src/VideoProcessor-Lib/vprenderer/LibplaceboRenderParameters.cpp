@@ -422,12 +422,12 @@ namespace LibplaceboRenderParameters
 		}
 
 		// Chroma's own upscaler (owner 2026-10-13): the planes' upscale to the
-		// luma size; auto leaves plane_upscaler unset (libplacebo then uses the
-		// upscaler, as before).
-		if (settings.chromaUpscaler != "auto")
+		// luma size. auto = Catmull-Rom (the owner's default); upscaler leaves
+		// plane_upscaler unset (libplacebo then uses the upscaler, Bill's VP).
+		if (settings.chromaUpscaler != "upscaler")
 		{
-			const char* exportName = settings.chromaUpscaler == "ewa_lanczossharp" ? "pl_filter_ewa_lanczossharp" :
-				Upscaler(settings.chromaUpscaler);
+			const std::string chroma = settings.chromaUpscaler == "auto" ? std::string("catmull_rom") : settings.chromaUpscaler;
+			const char* exportName = chroma == "ewa_lanczossharp" ? "pl_filter_ewa_lanczossharp" : Upscaler(chroma);
 			if (exportName)
 			{
 				projection.renderParams.plane_upscaler = ReadLibplaceboData<pl_filter_config>(exportName, error);
