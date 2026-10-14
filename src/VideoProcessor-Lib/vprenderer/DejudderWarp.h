@@ -219,6 +219,12 @@ namespace Dejudder
 		// (stricter) instead; 0 = the same as the trusted blocks'.
 		float pixelTrustLoUntrusted = 0.0f;
 		float pixelTrustHiUntrusted = 0.0f;
+		// The landing check (owner 2026-10-14; with pixelTrust, both warps):
+		// a looked-up source pixel counts only if its own motion carries it
+		// back to the output position within this many source pixels; 0 = off.
+		// Real clips: damaged tiles to a third for about half a point of the
+		// judder removed (docs/VP-stage11b-learned-candidates.md).
+		float landingCheck = 0.0f;
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The

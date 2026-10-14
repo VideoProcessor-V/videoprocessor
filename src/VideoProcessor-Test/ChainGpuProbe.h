@@ -379,6 +379,7 @@ namespace ChainGpuProbe
 		s.pixelTrust = true;
 		s.pixelTrustLo = 3.0f;
 		s.pixelTrustHi = 8.0f;
+		s.landingCheck = 1.5f;   // owner 2026-10-14 (the renderer's default)
 		// Tests only: VP_TEST_REFINED_DROP=<name>[,<name>] turns those back
 		// to their earlier values (to find which one moves a result).
 		char* drop = nullptr;
@@ -396,6 +397,7 @@ namespace ChainGpuProbe
 			if (has("fade")) s.fadeMatch = false;
 			if (has("pixel")) s.pixelTrust = false;
 			if (has("split")) s.estSplit = true;
+			if (has("landing")) s.landingCheck = 0.0f;
 		}
 		std::free(drop);
 		return s;

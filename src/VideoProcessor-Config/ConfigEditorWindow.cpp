@@ -6580,6 +6580,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         pixelHi->setToolTip(QStringLiteral(
             "From this many times the match tolerance a pixel holds still; in between it moves partly. Keep it above "
             "the value before."));
+        auto* landing = addChoice(QStringLiteral("Check each moved pixel lands where it is drawn"),
+            QStringLiteral("dejudder_landing_check"), { QStringLiteral("on"), QStringLiteral("off") });
+        landing->setToolTip(QStringLiteral(
+            "With pixel-by-pixel decisions: a pixel taken from the film frame is used only if its own motion really "
+            "carries it to where it is being drawn. Where something moves in front of something else, the matched "
+            "pixel can be a valid one that is not the one visible there; it then stays still. On real footage this "
+            "cut the damaged patches to a third for about half a point less judder removed. Default on."));
         auto* verify = addChoice(QStringLiteral("Check matches pixel by pixel"),
             QStringLiteral("dejudder_verify"), { QStringLiteral("on"), QStringLiteral("off") });
         verify->setToolTip(QStringLiteral(
@@ -6726,6 +6733,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 showIn(dejudderEstimationForm, cutHistogram, isOn(regional, true));
                 showIn(dejudderEstimationForm, pixelLo, isOn(pixelTrust, true));
                 showIn(dejudderEstimationForm, pixelHi, isOn(pixelTrust, true));
+                showIn(dejudderEstimationForm, landing, isOn(pixelTrust, true));
                 showIn(dejudderEstimationForm, verifyShare, isOn(verify, false));
                 showIn(dejudderExperimentsForm, taperSad, isOn(taper, false));
                 // Filling uncovered areas works on the source path only.
@@ -7725,6 +7733,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
+                    { "dejudder_landing_check", "on" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },

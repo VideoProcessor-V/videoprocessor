@@ -638,7 +638,8 @@ void testEveryNewRendererControlReachesVp()
         { "dejudder_texture_tolerance", "0.5", false }, { "dejudder_consistency_px", "3", false },
         { "dejudder_cut_histogram", "0.4", false }, { "dejudder_regional_hold", "off", true },
         { "dejudder_pixel_trust_lo", "2", false }, { "dejudder_pixel_trust_hi", "7", false },
-        { "dejudder_pixel_trust", "off", true }, { "dejudder_verify_share", "0.3", false },
+        { "dejudder_landing_check", "off", true }, { "dejudder_pixel_trust", "off", true },
+        { "dejudder_verify_share", "0.3", false },
         { "dejudder_verify", "on", true }, { "dejudder_low_res", "search", true },
         { "dejudder_estimate_ahead", "off", true }, { "dejudder_hold_feather_px", "3", false },
         { "dejudder_hold_hysteresis", "3", false }, { "dejudder_taper_sad", "9", false },
@@ -743,7 +744,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         "dejudder_trust_scale: 0.5\ndejudder_est_lambda: 1\ndejudder_est_candidates: off\ndejudder_est_qpel: off\n"
         "dejudder_est_split_sad: 6\ndejudder_est_split: on\ndejudder_search_range: 6\ndejudder_global_two: off\n"
         "dejudder_texture_tolerance: 0.5\ndejudder_consistency_px: 3\ndejudder_cut_histogram: 0.4\n"
-        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\n"
+        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\ndejudder_landing_check: off\n"
         "dejudder_verify_share: 0.3\ndejudder_verify: on\ndejudder_low_res: search\ndejudder_estimate_ahead: off\n"
         "dejudder_hold_feather_px: 3\ndejudder_hold_hysteresis: 3\ndejudder_taper_sad: 9\ndejudder_block_taper: on\n"
         "dejudder_warp_stage: source\ndejudder_occlusion_fill: on\nocclusion_mask: on\n"
@@ -767,7 +768,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         { "matcher.cutHistogram", "0.4" }, { "matcher.coarseRange", "6" }, { "matcher.consistencyPixels", "3" },
         { "matcher.fadeMatch", "0" }, { "matcher.fadeFloor", "0.2" }, { "matcher.verifyPixels", "1" },
         { "matcher.verifyShare", "0.3" }, { "matcher.pixelTrust", "0" }, { "matcher.pixelTrustLo", "2" },
-        { "matcher.pixelTrustHi", "7" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
+        { "matcher.pixelTrustHi", "7" }, { "matcher.landingCheck", "0" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
         { "matcher.holdFeatherPx", "3" }, { "matcher.holdHysteresis", "3" }, { "matcher.blockTaper", "1" },
         { "matcher.taperSad", "9" } };
     for (const auto& entry : expected)
@@ -781,7 +782,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     const std::map<std::string, std::string> unset = read("");
     const std::pair<const char*, const char*> defaults[] = {
         { "capture_path", "standard" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
-        { "matcher.pixelTrust", "1" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
+        { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
         { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
         { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },
         { "sdr_knee", "0" }, { "adaptive_downscale", "0" }, { "occlusion_mask", "0" } };

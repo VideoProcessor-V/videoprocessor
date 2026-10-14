@@ -127,3 +127,24 @@ ramp when on, with D2 as the fallback and reference.
 Corpus → failure map on the current estimator → auto-fit of 11a's
 parameters → only then the model, if the failure map shows design
 limits worth it. Each step its own package and audit.
+
+## 2026-10-14 afternoon: D3 measured, the landing check (owner)
+
+Real HFR clips, D2/D4 off, 32x32 tiles damaged when the warp is 6 codes worse than the hold:
+
+| Variant | All removed | All damaged | Film-like removed | Film-like damaged | Extreme damaged |
+|---|---|---|---|---|---|
+| Defaults (M6) | 41.9% | 0.97% | 31.7% | 0.39% | 1.99% |
+| **M6 + landing check (1.5 px; new default)** | **41.3%** | **0.30%** | **31.3%** | **0.13%** | **0.61%** |
+| D3 blend | 50.2% | 2.29% | 40.8% | 0.78% | 4.92% |
+| D3 + landing check A and B | 49.8% | 1.74% | 40.3% | 0.59% | 3.75% |
+
+- The landing check: a source pixel M6 looks up counts only if its own motion carries it back to the output position
+  (within 1.5 source px; 3 px measures the same). Backward warping otherwise takes valid pixels that are not the ones
+  visible at an occlusion. Synthetic set unchanged (1472). Key `dejudder_landing_check` (default on), both warps.
+- D3 stays off (test-only). Its damage persisted through four gates (sample agreement, motion agreement, fill only, B's
+  own blocks only). RAFT comparison on the worst frames: B's trusted motion agrees with RAFT to about 1 px; A's trusted
+  motion is the confidently wrong one (Jockey: 73% of A's trusted blocks in the damaged tiles off by more than 4 px).
+- RAFT ceiling confirmed: full precision changes nothing (50.4 / 55.8%); quarter vs half size on the same frames
+  53.3 / 57.4% vs 53.5 / 57.8% (4K does not fit: 62 GB correlation volume).
+- Next candidate (A alone): a match-certainty test (a flat error curve around the best offset = not trusted).

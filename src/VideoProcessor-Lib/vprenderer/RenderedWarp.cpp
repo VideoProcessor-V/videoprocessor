@@ -103,6 +103,17 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         {
             float m = texture(pix_mask, (sp - d) / vec2(textureSize(pix_mask, 0) * 2)).r;
+#ifdef LAND_A
+            {
+                // The landing check (as the source warp): the pixel taken
+                // must be carried back here by its own motion.
+                vec2 vl = field_vector_all(sp - d);
+#ifdef OBJECT
+                vl = object_scale(vl);
+#endif
+                if (length(sc * vl - d) > LAND_A) m = 0.0;
+            }
+#endif
 #ifdef PIXEL_MOTION
             moved = m * d / slope;
             o = rw_cubic(p - moved);   // the weight's share of the motion
@@ -462,7 +473,9 @@ if (b.x < size.x && b.y < size.y) {
 		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") + (writeDisp ? "#define WRITE_DISP 1\n" : "") +
 			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
 			(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
-			(pixel && ms.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") + OcclusionMask::NlsMapGlsl() +
+			(pixel && ms.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
+			(pixel && ms.landingCheck > 0.0f ? "#define LAND_A " + std::to_string(ms.landingCheck) + "\n" : std::string()) +
+			OcclusionMask::NlsMapGlsl() +
 			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
 			(pixel ? Dejudder::FieldAllGlsl() : "") + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,

@@ -1709,6 +1709,18 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         vec2 from = c - sc * va;
         float m = texture(pix_mask, from / vec2(size)).r;
+#ifdef LAND_A
+        {
+            // The landing check (owner 2026-10-14): the source pixel counts
+            // only if its own motion carries it back here (else it is a valid
+            // pixel that is not the one visible here - an occlusion).
+            vec2 vl = field_vector_all(from);
+#ifdef OBJECT
+            vl = object_scale(vl);
+#endif
+            if (length(from + sc * vl - c) > LAND_A) m = 0.0;
+        }
+#endif
 #ifdef BLEND
         // D3: B moved back by (1 - sc) of its own motion, weighted with A.
         vec2 vb = field_vector_all_b(c);
@@ -1776,6 +1788,15 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         vec2 from = c - sc * va / chroma_scale;
         float m = texture(pix_mask, from * chroma_scale / vec2(textureSize(pix_mask, 0) * 2)).r;
+#ifdef LAND_A
+        {
+            vec2 vl = field_vector_all(from * chroma_scale);
+#ifdef OBJECT
+            vl = object_scale(vl);
+#endif
+            if (length(from * chroma_scale + sc * vl - c * chroma_scale) > LAND_A) m = 0.0;
+        }
+#endif
 #ifdef BLEND
         vec2 vb = field_vector_all_b(c * chroma_scale);
         vb = field_vector_all_b(c * chroma_scale - (1.0 - sc) * vb);
@@ -3130,6 +3151,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
 			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
 			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") + (blend ? "#define BLEND 1\n" : "") +
+			(pixel && settings.landingCheck > 0.0f ? "#define LAND_A " + std::to_string(settings.landingCheck) + "\n" : std::string()) +
 			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "") + fieldAllB;
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.

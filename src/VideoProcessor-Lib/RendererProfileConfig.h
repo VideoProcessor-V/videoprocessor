@@ -642,7 +642,8 @@ namespace RendererProfileConfig
 				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate" ||
 				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
 				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
-				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust")
+				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
+				key == "dejudder_landing_check")
 				return IsChoice(value, { "on", "off" });
 			// Motion fixes (owner 2026-10-13 night): M1 texture tolerance, M3's
 			// cut test, the coarse search range, the forward/backward agreement.

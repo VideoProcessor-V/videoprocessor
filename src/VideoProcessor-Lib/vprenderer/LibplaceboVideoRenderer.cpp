@@ -927,6 +927,8 @@ namespace
 		// M6: per-pixel trust on trusted blocks' vectors (multiples of the
 		// match tolerance where a pixel's weight starts to fall and reaches 0).
 		bool dejudderPixelTrust = true;
+		// The landing check (owner 2026-10-14, on: damage to a third).
+		bool dejudderLandingCheck = true;
 		double dejudderPixelTrustLo = 3.0;
 		double dejudderPixelTrustHi = 8.0;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
@@ -1109,6 +1111,7 @@ namespace
 			<< settings.dejudderFadeMatch << '|' << settings.dejudderFadeFloor << '|'
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
+			<< settings.dejudderLandingCheck << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2146,7 +2149,8 @@ namespace
 			std::make_pair("dejudder_regional_hold", &settings.dejudderRegionalHold),
 			std::make_pair("dejudder_fade_match", &settings.dejudderFadeMatch),
 			std::make_pair("dejudder_verify", &settings.dejudderVerify),
-			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust) })
+			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust),
+			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -2547,6 +2551,7 @@ namespace
 		settings.pixelTrust = profile.dejudderPixelTrust;
 		settings.pixelTrustLo = static_cast<float>(profile.dejudderPixelTrustLo);
 		settings.pixelTrustHi = static_cast<float>(profile.dejudderPixelTrustHi);
+		settings.landingCheck = profile.dejudderLandingCheck ? 1.5f : 0.0f;
 		settings.pixelTrustedVectors = true;
 		settings.lowRes = profile.dejudderLowRes != "off";
 		settings.lowResAll = profile.dejudderLowRes == "all";
@@ -8597,7 +8602,8 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderFadeMatch != next.dejudderFadeMatch || current.dejudderFadeFloor != next.dejudderFadeFloor ||
 			current.dejudderVerify != next.dejudderVerify || current.dejudderVerifyShare != next.dejudderVerifyShare ||
 			current.dejudderPixelTrust != next.dejudderPixelTrust || current.dejudderPixelTrustLo != next.dejudderPixelTrustLo ||
-			current.dejudderPixelTrustHi != next.dejudderPixelTrustHi,
+			current.dejudderPixelTrustHi != next.dejudderPixelTrustHi ||
+			current.dejudderLandingCheck != next.dejudderLandingCheck,
 			"dejudder_motion_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
@@ -11685,7 +11691,8 @@ struct LibplaceboVideoRenderer::Impl
 				current.fadeMatch != next.fadeMatch || current.fadeFloor != next.fadeFloor ||
 				current.verifyPixels != next.verifyPixels || current.verifyShare != next.verifyShare ||
 				current.pixelTrust != next.pixelTrust || current.pixelTrustLo != next.pixelTrustLo ||
-				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors)
+				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
+				current.landingCheck != next.landingCheck)
 				dejudder->SetSettings(next);
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
@@ -22556,6 +22563,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.pixelTrust=" << m.pixelTrust << "\n"
 		<< "matcher.pixelTrustLo=" << m.pixelTrustLo << "\n"
 		<< "matcher.pixelTrustHi=" << m.pixelTrustHi << "\n"
+		<< "matcher.landingCheck=" << m.landingCheck << "\n"
 		<< "matcher.lowRes=" << m.lowRes << "\n"
 		<< "matcher.lowResAll=" << m.lowResAll << "\n"
 		<< "matcher.holdFeatherPx=" << m.holdFeatherPx << "\n"
