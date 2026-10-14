@@ -243,6 +243,13 @@ namespace Dejudder
 		// fast content must predict B more exactly to move.
 		float pixelFastFrom = 0.0f;
 		float pixelFastFloor = 0.4f;
+		// D3 (owner 2026-10-14: built now, off by default): with M6, the source
+		// warp blends A moved forward with B moved backward (B's own trusted
+		// field from the backward search and B's own pixel weights), weighted
+		// (1 - s) x A's weight and s x B's: what A hides (uncovered content) B
+		// shows, so nothing is dragged into it. Source warp only here; the
+		// rendered warp's version renders B a refresh early.
+		bool blendFrames = false;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -448,6 +455,9 @@ namespace Dejudder
 		bool snapMaskValid = false;
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights
+		pl_tex fieldB = nullptr;        // D3: B's trusted field (B -> A, source px)
+		pl_tex pixelMaskB = nullptr;    // D3: B's pixel weights
+		bool blendReady = false;
 		pl_tex vectorOk = nullptr;      // M6: blocks whose vector M6 may use (r = 1)
 		bool pixelMaskReady = false;
 		pl_tex camera = nullptr;

@@ -2908,6 +2908,7 @@ namespace Corpus
 		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
 		bool taste = false;   // D2 / D4 / R-A as deployed; scored where the picture is actually shown
 		float fastFrom = 0.0f, fastFloor = 0.4f;
+		bool blend = false;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2942,6 +2943,25 @@ namespace Corpus
 			add("M6 on, D2/D4, no R-A", true, false, 24.0f, 0.25f);
 			add("M6 on, R-A floor 0.1", true, true, 24.0f, 0.1f);
 			add("M6 on, R-A hi 16", true, true, 16.0f, 0.25f);
+			return variants;
+		}
+		if (which == "blend")
+		{
+			// D3: the source warp's blend of A forward and B backward (accuracy:
+			// D2/D4 off), against the defaults and the RAFT ceiling's 55.8%.
+			auto add = [&](const char* name, bool blend, float lo, float hi)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = lo; v.pixHi = hi; v.blend = blend;
+				variants.push_back(v);
+			};
+			Variant today{ "today (before 2026-10-13)", 3.0f, 0.5f, true };
+			variants.push_back(today);
+			add("defaults (M6)", false, 3.0f, 8.0f);
+			add("defaults + D3 blend", true, 3.0f, 8.0f);
+			add("defaults + D3 blend, pixel 2-6", true, 2.0f, 6.0f);
+			add("defaults + D3 blend, pixel 4-10", true, 4.0f, 10.0f);
 			return variants;
 		}
 		if (which == "fast")
@@ -3313,6 +3333,7 @@ namespace Corpus
 		s.pixelTrustMotion = !v.crossfade;
 		s.pixelFastFrom = v.fastFrom;
 		s.pixelFastFloor = v.fastFloor;
+		s.blendFrames = v.blend;
 		s.pixelOwnError = v.ownError;
 		if (v.rolloff)
 		{

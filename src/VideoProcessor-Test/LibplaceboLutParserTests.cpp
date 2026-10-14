@@ -8034,6 +8034,72 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		TEST_METHOD(DejudderBlendFillsUncoveredContentFromB)
+		{
+			// D3: an object (a 96x64 patch) moves 32 px right over a still
+			// background. At the halfway point the strip it uncovers (behind its
+			// trailing edge) is background that only B shows: with the blend it
+			// is taken from B and lands closer to the true halfway picture than
+			// moving A alone; elsewhere (the background, the object's inside)
+			// the blend is as good as A alone.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			static constexpr int ox = 160, oy = 96, ow = 96, oh = 64, odx = 32;
+			auto picture = [&](int shift)
+			{
+				return MakeDejudderFrame(width, height, [=](int x, int y) {
+					const bool inside = x >= ox + shift && x < ox + shift + ow && y >= oy && y < oy + oh;
+					return inside ? DejudderTexture(x - shift, y, 41) : DejudderTexture(x, y, 3); },
+					[](int x, int y, int c) { return static_cast<uint16_t>(32768 + c); });
+			};
+			const DejudderFrame a = picture(0), b = picture(odx), half = picture(odx / 2);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			auto run = [&](bool blend)
+			{
+				Dejudder::Settings settings = ChainGpuProbe::Refined(DejudderTestSettings());
+				settings.hostReadable = true;
+				settings.blendFrames = blend;
+				settings.motionScaleHi = 0.0f;   // accuracy: full strength
+				settings.trustScaleFull = 0.0f;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				for (int i = 0; i < 3; ++i)
+				{
+					const bool estimated = warp.Estimate(planesA.planes, planesB.planes);
+					Assert::IsTrue(estimated, ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				}
+				Dejudder::Planes out;
+				const bool warped = warp.Warp(planesA.planes, 0.5f, out, true);
+				Assert::IsTrue(warped, ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				return DownloadPlane(gpu, out.luma);
+			};
+			auto error = [&](const std::vector<uint16_t>& img, int x0, int y0, int x1, int y1)
+			{
+				double e = 0.0;
+				int n = 0;
+				for (int y = y0; y < y1; ++y)
+					for (int x = x0; x < x1; ++x, ++n)
+						e += std::abs(static_cast<int>(img[static_cast<size_t>(y) * width + x]) - static_cast<int>(half.luma[static_cast<size_t>(y) * width + x]));
+				return e / std::max(n, 1) / 64.0;   // codes of 1023
+			};
+			const auto plain = run(false), blended = run(true);
+			// The uncovered strip at the halfway point: x in [ox, ox + 16).
+			const double plainStrip = error(plain, ox + 2, oy + 4, ox + odx / 2 - 2, oy + oh - 4);
+			const double blendStrip = error(blended, ox + 2, oy + 4, ox + odx / 2 - 2, oy + oh - 4);
+			const double plainBack = error(plain, 16, 16, width - 16, oy - 24);
+			const double blendBack = error(blended, 16, 16, width - 16, oy - 24);
+			const std::wstring message = L"uncovered strip: A alone " + std::to_wstring(plainStrip) + L", blend " + std::to_wstring(blendStrip) +
+				L"; background: A alone " + std::to_wstring(plainBack) + L", blend " + std::to_wstring(blendBack) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(blendStrip < plainStrip * 0.7, (L"the blend fills the uncovered strip from B: " + message).c_str());
+			Assert::IsTrue(blendBack <= plainBack + 0.5, (L"the still background stays as good: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(DejudderMotionRolloffKeepsFastMotionsStrobing)
 		{
 			// Delta 14 R-A: pans at 2, 12 and 30 source px per frame give the

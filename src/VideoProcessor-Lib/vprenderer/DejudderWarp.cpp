@@ -1681,6 +1681,21 @@ if (q.x < size.x && q.y < size.y) {
         va = field_vector_all(c - sc * va);
         vec2 from = c - sc * va;
         float m = texture(pix_mask, from / vec2(size)).r;
+#ifdef BLEND
+        // D3: B moved back by (1 - sc) of its own motion, weighted with A.
+        vec2 vb = field_vector_all_b(c);
+        vb = field_vector_all_b(c - (1.0 - sc) * vb);
+        vb = field_vector_all_b(c - (1.0 - sc) * vb);
+        vec2 fromB = c - (1.0 - sc) * vb;
+        float mb = texture(pix_mask_b, fromB / vec2(size)).r;
+        float wa = (1.0 - sc) * m, wb = sc * mb;
+        if (wa + wb > 1e-3)
+            outv = (wa * texture(src, from / vec2(size)) + wb * texture(src_b, fromB / vec2(size))) / (wa + wb);
+        else
+            outv = texelFetch(src, q, 0);
+        imageStore(dst, q, outv);
+        return;
+#endif
 #ifdef PIXEL_MOTION
         outv = texture(src, (c - m * sc * va) / vec2(size));   // the weight's share of the motion
 #else
@@ -1727,6 +1742,20 @@ if (q.x < size.x && q.y < size.y) {
         va = field_vector_all(c * chroma_scale - sc * va);
         vec2 from = c - sc * va / chroma_scale;
         float m = texture(pix_mask, from * chroma_scale / vec2(textureSize(pix_mask, 0) * 2)).r;
+#ifdef BLEND
+        vec2 vb = field_vector_all_b(c * chroma_scale);
+        vb = field_vector_all_b(c * chroma_scale - (1.0 - sc) * vb);
+        vb = field_vector_all_b(c * chroma_scale - (1.0 - sc) * vb);
+        vec2 fromB = c - (1.0 - sc) * vb / chroma_scale;
+        float mb = texture(pix_mask_b, fromB * chroma_scale / vec2(textureSize(pix_mask_b, 0) * 2)).r;
+        float wa = (1.0 - sc) * m, wb = sc * mb;
+        if (wa + wb > 1e-3)
+            outv = (wa * texture(src, from / vec2(size)) + wb * texture(src_b, fromB / vec2(size))) / (wa + wb);
+        else
+            outv = texelFetch(src, q, 0);
+        imageStore(dst, q, outv);
+        return;
+#endif
 #ifdef PIXEL_MOTION
         outv = texture(src, (c - m * sc * va / chroma_scale) / vec2(size));
 #else
@@ -1790,7 +1819,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &fieldB, &pixelMaskB })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -2897,6 +2926,38 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				return false;
 			pixelMaskReady = true;
 		}
+		// D3: B's own trusted field (the consistency test from B's side) and
+		// B's pixel weights (B predicting A with it).
+		blendReady = false;
+		if (settings.blendFrames && pixelMaskReady)
+		{
+			pl_tex_params fp = field->params;
+			fp.host_readable = settings.hostReadable && (fp.format->caps & PL_FMT_CAP_HOST_READABLE);
+			pl_tex_params mp = pixelMask->params;
+			if (!pl_tex_recreate(gpu, &fieldB, &fp) || !pl_tex_recreate(gpu, &pixelMaskB, &mp))
+			{
+				error = "cannot create B's field";
+				return false;
+			}
+			const float tolB = settings.matchTolerance, consB = settings.consistencyPixels;
+			const pl_shader_var consVars[2] = { { pl_var_float("tolerance"), &tolB, true }, { pl_var_float("consistency"), &consB, true } };
+			const pl_shader_desc consDesc[3] = { Sampled("fwd", backward, false), Sampled("bwd", forward, false), Storage("dst", fieldB) };
+			if (!Dispatch("VideoProcessor de-judder: B's field (D3)", nullptr, CONSISTENCY_BODY, consDesc, 3, consVars, 2, blocksX, blocksY, 8))
+				return false;
+			const float lo = settings.pixelTrustLo * settings.matchTolerance, hi = std::max(lo + 0.01f, settings.pixelTrustHi * settings.matchTolerance);
+			const float zero = 0.0f;
+			const pl_shader_var maskVars[6] = { { pl_var_float("mask_lo"), &lo, true }, { pl_var_float("mask_hi"), &hi, true },
+				{ pl_var_float("mask_lo_u"), &lo, true }, { pl_var_float("mask_hi_u"), &hi, true },
+				{ pl_var_float("fast_from"), &zero, true }, { pl_var_float("fast_floor"), &zero, true } };
+			const pl_shader_desc maskDesc[4] = { Sampled("field", fieldB, false), Sampled("from_half", halfB, false),
+				Sampled("to_half", halfA, true), Storage("dst", pixelMaskB) };
+			const std::string maskHeader = std::string("#define PIXEL_TRUSTED_VECTORS 1\n") + FIELD_ALL_GLSL;
+			if (!Dispatch("VideoProcessor de-judder: B's pixel trust (D3)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDesc, 4,
+					maskVars, 4, halfW, halfH, 16))
+				return false;
+			lastB = b;
+			blendReady = b.chroma && b.chroma->params.w == a.chroma->params.w && b.chroma->params.h == a.chroma->params.h;
+		}
 		if (occlusionSlot == 0 || occlusionSlot == 1)
 		{
 			const pl_shader_desc occlusionDesc[4] = {
@@ -3004,11 +3065,27 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool withCamera = Camera() != nullptr;
 		// M6: the pixel weights (source warp).
 		const bool pixel = settings.pixelTrust && pixelMaskReady && pixelMask;
+		// D3: the blend with B (exclusive with D5's fill).
+		const bool blend = pixel && settings.blendFrames && blendReady && lastB.luma && lastB.chroma;
+		std::string fieldAllB;
+		if (blend)
+		{
+			fieldAllB = FIELD_ALL_GLSL;
+			auto replaceAll = [&](const std::string& from, const std::string& to)
+			{
+				for (size_t at = 0; (at = fieldAllB.find(from, at)) != std::string::npos; at += to.size())
+					fieldAllB.replace(at, from.size(), to);
+			};
+			replaceAll("field_vector_all", "field_vector_all_b");
+			replaceAll("(field,", "(field_b,");
+			replaceAll("textureSize(field,", "textureSize(field_b,");
+			replaceAll("PIXEL_OWN_VECTORS", "PIXEL_OWN_VECTORS_NOT_FOR_B");
+		}
 		const std::string header = std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
 			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
 			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
-			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
-			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "");
+			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") + (blend ? "#define BLEND 1\n" : "") +
+			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "") + fieldAllB;
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
 		const float featherPx = settings.holdFeatherPx;
@@ -3029,6 +3106,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			lumaDesc.push_back(Sampled("pix_mask", pixelMask, true));
 		if (pixel && PixelOwnVectors())
 			lumaDesc.push_back(Sampled("vector_ok", vectorOk, false));
+		if (blend)
+		{
+			lumaDesc.push_back(Sampled("field_b", fieldB, false));
+			lumaDesc.push_back(Sampled("pix_mask_b", pixelMaskB, true));
+			if (!fill)
+				lumaDesc.push_back(Sampled("src_b", lastB.luma, true));
+		}
 		if (withCamera)
 			lumaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
@@ -3062,6 +3146,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			chromaDesc.push_back(Sampled("pix_mask", pixelMask, true));
 		if (pixel && PixelOwnVectors())
 			chromaDesc.push_back(Sampled("vector_ok", vectorOk, false));
+		if (blend)
+		{
+			chromaDesc.push_back(Sampled("field_b", fieldB, false));
+			chromaDesc.push_back(Sampled("pix_mask_b", pixelMaskB, true));
+			if (!fill)
+				chromaDesc.push_back(Sampled("src_b", lastB.chroma, true));
+		}
 		if (withCamera)
 			chromaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> chromaVars = {
