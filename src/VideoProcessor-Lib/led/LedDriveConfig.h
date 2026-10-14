@@ -225,6 +225,7 @@ namespace LedDrive
 		// The Python script decides from its own screenshots, so it has none.
 		std::string commandSource;
 		int adaptiveGammaSetting = -1;   // adaptive_gamma as read: -1 not named
+		bool modeNamed = false;          // the file names `mode` (an older file)
 		bool pythonDrivesPort = false;
 		bool adaptiveGamma = true;
 		bool lookahead = true;
@@ -823,6 +824,7 @@ namespace LedDrive
 		config.TryGetBool(section, "enabled", result.enabled);
 		if (config.TryGetString(section, "mode", value))
 		{
+			result.modeNamed = true;
 			const std::string mode = ConfigFile::NormalizeName(value);
 			result.mode = mode == "compensate" ? Mode::Compensate :
 				mode == "script" ? Mode::Script : mode == "picture_only" ? Mode::PictureOnly :
@@ -941,7 +943,10 @@ namespace LedDrive
 		{
 			// An older mode-only file behaves as before: mode: listen leaves
 			// COM1 to the script (audit 2026-10-14b).
+			// A file naming neither source nor mode is new: adaptive gamma off
+			// unless named (audit 2026-10-14c).
 			if (led.adaptiveGammaSetting >= 0) led.adaptiveGamma = led.adaptiveGammaSetting == 1;
+			else if (!led.modeNamed) led.adaptiveGamma = false;
 			led.listenRelay = false;
 			return;
 		}

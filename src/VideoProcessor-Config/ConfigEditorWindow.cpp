@@ -9884,18 +9884,29 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // and logs, fed by a chosen command source, with two switches. Older
     // configurations name only `mode`; the source shown is read from it, and
     // choosing a source writes command_source (and the matching mode).
+    QComboBox* ledSource = nullptr;
+    QCheckBox* ledAdaptive = nullptr;
+    QLabel* compensateWarning = nullptr;
+    QWidget* aheadRow = nullptr;
+    QWidget* aheadHelp = nullptr;
+    QWidget* pythonPortRow = nullptr;
+    QWidget* pythonPortHelp = nullptr;
     {
         const QStringList sources = { QStringLiteral("python"), QStringLiteral("internal_script"),
             QStringLiteral("compensate"), QStringLiteral("none") };
         auto* source = new QComboBox;
+        ledSource = source;
         source->setObjectName(controlName(led, QStringLiteral("command_source")));
         source->setAccessibleName(QStringLiteral("Command source"));
         source->addItem(QStringLiteral("Your Python script (VP sends its commands exactly as written)"), sources[0]);
         source->addItem(QStringLiteral("VP's copy of your script"), sources[1]);
         source->addItem(QStringLiteral("Compensate (VP's own controller)"), sources[2]);
-        source->addItem(QStringLiteral("None (no LED commands)"), sources[3]);
+        source->addItem(QStringLiteral("No LED commands"), sources[3]);
         const QString legacyMode = value(led, QStringLiteral("mode")).trimmed().toLower();
         QString configuredSource = value(led, QStringLiteral("command_source")).trimmed().toLower();
+        // An older file names `mode` and no command_source; a new file names
+        // neither (audit 2026-10-14c: only the former keeps the old switches).
+        const bool olderFile = configuredSource.isEmpty() && !legacyMode.isEmpty();
         if (configuredSource.isEmpty())
             configuredSource = legacyMode == QStringLiteral("listen") ? sources[0] :
                 legacyMode == QStringLiteral("script") ? sources[1] :
@@ -9904,60 +9915,61 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         driveForm->addRow(QStringLiteral("Command source"), source);
         driveForm->addRow(QString(), helpLabel(QStringLiteral(
             "Where the LED and contrast commands come from. VP holds the RS-232 port, sends them and logs them. "
-            "Your Python script: VP runs it (Script VP runs, below) and sends each command exactly as the script "
-            "wrote it, nothing of its own - not while Python is starting, not on exit. None with adaptive gamma "
-            "on: only VP's picture adjustments, the port left free (the old Picture only).")));
-        // Adaptive gamma: shown as the configuration behaves - named, or off
-        // with a command source, or on for an older mode-only file (where VP
-        // always adapted; audit 2026-10-14b), so a change of source keeps it.
+            "Your Python script: VP runs it (the Python script card) and sends each command exactly as the script "
+            "wrote it, nothing of its own - not while Python is starting, not on exit. No LED commands with "
+            "adaptive gamma on: only VP's picture adjustments, the port left free.")));
+        // Adaptive gamma, shown as the file behaves: named; off for a new
+        // file; for an older mode-only file, on where the picture adapted
+        // there (compensate, picture only, script smoothing or a shadow lift).
         const QString adaptiveText = value(led, QStringLiteral("adaptive_gamma")).trimmed().toLower();
+        const bool shadowLiftOn = value(led, QStringLiteral("shadow_lift_ansi")).toDouble() > 0.0;
+        const bool smoothingOn = value(led, QStringLiteral("script_smoothing")).trimmed().toLower() == QStringLiteral("true");
         const bool adaptiveNow = !adaptiveText.isEmpty() ?
             (adaptiveText == QStringLiteral("true") || adaptiveText == QStringLiteral("on") || adaptiveText == QStringLiteral("1")) :
-            value(led, QStringLiteral("command_source")).trimmed().isEmpty();
+            olderFile && (legacyMode == QStringLiteral("compensate") || legacyMode == QStringLiteral("picture_only") ||
+                ((legacyMode == QStringLiteral("script") || legacyMode == QStringLiteral("listen")) && smoothingOn) || shadowLiftOn);
         auto* adaptive = configuredCheck(QStringLiteral("Adaptive gamma"), QString(), adaptiveNow);
+        ledAdaptive = adaptive;
         adaptive->setObjectName(controlName(led, QStringLiteral("adaptive_gamma")));
         adaptive->setEnabled(true);
-        connect(adaptive, &QCheckBox::toggled, this, [this, led](bool checked)
-        {
-            if (!document_) return;
-            document_->SetKnown(led.toStdString(), "adaptive_gamma", checked ? "true" : "false");
-            markDirty();
-        });
         driveForm->addRow(QString(), adaptive);
         driveForm->addRow(QString(), helpLabel(QStringLiteral(
-            "Off (the default for now): VP leaves the picture alone - exactly the projector's own steps. On: VP "
-            "eases the picture across each light and contrast step, and lifts the darks next to large highlights "
-            "(the shadow lift's strength, below).")));
+            "Off (the default): VP leaves the picture alone - exactly the projector's own steps. On: VP eases the "
+            "picture across each light and contrast step, and lifts the darks next to large highlights (the shadow "
+            "lift's strength, below).")));
+        compensateWarning = helpLabel(QStringLiteral(
+            "Compensate with adaptive gamma off: the LED still dims in dark scenes, but VP does not brighten the "
+            "picture to make up for it, so dark scenes look darker. Tick adaptive gamma for Compensate's normal "
+            "behaviour."));
+        compensateWarning->setObjectName(controlName(led, QStringLiteral("compensate_warning")));
+        driveForm->addRow(QString(), compensateWarning);
         auto* ahead = bindCheckField(QStringLiteral("Look-ahead"), led, QStringLiteral("lookahead"), true);
+        aheadRow = ahead;
         driveForm->addRow(QString(), ahead);
-        driveForm->addRow(QString(), helpLabel(QStringLiteral(
-            "VP's own sources only: they see the coming frames and time each change for when the LED gets there. "
-            "Off: they react to the frame on screen. Your Python script decides from its own screenshots.")));
+        aheadHelp = helpLabel(QStringLiteral(
+            "VP sees the coming frames and times each change for when the LED gets there. Off: it reacts to the "
+            "frame on screen."));
+        driveForm->addRow(QString(), aheadHelp);
         // Shown as the file behaves: an older `mode: listen` file leaves the
         // port to the script (audit 2026-10-14b).
         const QString drivesText = value(led, QStringLiteral("python_drives_port")).trimmed().toLower();
         const bool drivesNow = !drivesText.isEmpty() ?
             (drivesText == QStringLiteral("true") || drivesText == QStringLiteral("on") || drivesText == QStringLiteral("1")) :
-            value(led, QStringLiteral("command_source")).trimmed().isEmpty() && legacyMode == QStringLiteral("listen");
-        auto* pythonPort = configuredCheck(QStringLiteral("Fallback: the Python script writes the port itself"), QString(), drivesNow);
+            olderFile && legacyMode == QStringLiteral("listen");
+        auto* pythonPort = configuredCheck(QStringLiteral("Fallback: the script writes the port itself"), QString(), drivesNow);
+        pythonPortRow = pythonPort;
         pythonPort->setObjectName(controlName(led, QStringLiteral("python_drives_port")));
-        connect(pythonPort, &QCheckBox::toggled, this, [this, led](bool checked)
-        {
-            if (!document_) return;
-            document_->SetKnown(led.toStdString(), "python_drives_port", checked ? "true" : "false");
-            markDirty();
-        });
+        pythonPort->setEnabled(true);
         driveForm->addRow(QString(), pythonPort);
-        driveForm->addRow(QString(), helpLabel(QStringLiteral(
-            "The original listen: the script drives COM1 as it always did and VP only follows and logs. Also used "
-            "automatically when VP does not run the script or cannot open the port.")));
-        auto follow = [ahead, pythonPort](const QString& chosen)
-        {
-            ahead->setEnabled(chosen == QStringLiteral("internal_script") || chosen == QStringLiteral("compensate"));
-            pythonPort->setEnabled(chosen == QStringLiteral("python"));
-        };
-        follow(configuredSource);
-        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, led, source, adaptive, pythonPort, follow](int)
+        pythonPortHelp = helpLabel(QStringLiteral(
+            "Off (normal): VP sends the script's commands to the projector. On: the script writes the COM port "
+            "itself, as it did before VP, and VP only follows it and logs. VP also does this by itself when it "
+            "does not run the script or cannot open the port."));
+        driveForm->addRow(QString(), pythonPortHelp);
+        // What every source change writes: the source, the matching mode for
+        // older builds (no LED commands: picture only when adaptive gamma is
+        // on), and both boxes as shown, so nothing changes behind them.
+        auto writeSource = [this, led, source, adaptive, pythonPort]()
         {
             if (!document_) return;
             const QString chosen = source->currentData().toString();
@@ -9967,19 +9979,44 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 document_->AddSection(section);
                 document_->SetKnown(section, "command_source", chosen.toStdString());
             }
-            // The matching mode, for older builds reading this file.
             const char* mode = chosen == QStringLiteral("python") ? "listen" :
                 chosen == QStringLiteral("internal_script") ? "script" :
-                chosen == QStringLiteral("compensate") ? "compensate" : "log_only";
+                chosen == QStringLiteral("compensate") ? "compensate" :
+                adaptive->isChecked() ? "picture_only" : "log_only";
             document_->SetKnown(section, "mode", mode);
-            // With a command source, an unnamed adaptive_gamma means off:
-            // write what the box shows so nothing changes behind it.
-            if (value(led, QStringLiteral("adaptive_gamma")).trimmed().isEmpty())
-                document_->SetKnown(section, "adaptive_gamma", adaptive->isChecked() ? "true" : "false");
-            if (value(led, QStringLiteral("python_drives_port")).trimmed().isEmpty())
-                document_->SetKnown(section, "python_drives_port", pythonPort->isChecked() ? "true" : "false");
-            follow(chosen);
+            document_->SetKnown(section, "adaptive_gamma", adaptive->isChecked() ? "true" : "false");
+            document_->SetKnown(section, "python_drives_port", pythonPort->isChecked() ? "true" : "false");
             markDirty();
+        };
+        // A pick writes even when it is the source already shown (an older
+        // file is converted; "No LED commands" can be chosen on a new file).
+        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [writeSource](int) { writeSource(); });
+        connect(source, qOverload<int>(&QComboBox::activated), this, [writeSource](int) { writeSource(); });
+        connect(adaptive, &QCheckBox::toggled, this, [this, led, source, writeSource](bool checked)
+        {
+            if (!document_) return;
+            if (value(led, QStringLiteral("command_source")).trimmed().isEmpty())
+            {
+                // An older file without a source: the box alone.
+                document_->SetKnown(led.toStdString(), "adaptive_gamma", checked ? "true" : "false");
+                markDirty();
+            }
+            else
+                writeSource();   // keeps the matching mode (picture only / log only)
+            (void)source;
+        });
+        connect(pythonPort, &QCheckBox::toggled, this, [this, led, writeSource](bool checked)
+        {
+            if (!document_) return;
+            // Without command_source VP ignores python_drives_port: a change
+            // here converts the file to the Python source.
+            if (value(led, QStringLiteral("command_source")).trimmed().isEmpty())
+                writeSource();
+            else
+            {
+                document_->SetKnown(led.toStdString(), "python_drives_port", checked ? "true" : "false");
+                markDirty();
+            }
         });
     }
     // Compensate's own settings: shown only when it is the command source
@@ -10024,7 +10061,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* projectorGamma = new QDoubleSpinBox;
     projectorGamma->setObjectName(controlName(led, QStringLiteral("compensation_eotf")));
     projectorGamma->setAccessibleName(QStringLiteral("Projector gamma"));
-    projectorGamma->setRange(1.8, 3.0);
+    projectorGamma->setRange(1.0, 3.0);
     projectorGamma->setDecimals(2);
     projectorGamma->setSingleStep(0.01);
     projectorGamma->setMaximumWidth(120);
@@ -10052,9 +10089,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "Projector gamma is how the projector turns the final signal into light; Compensate needs it to keep the "
         "picture's brightness exact while the LED dims. 2.41 is the FL35's light-meter measurement; change it "
         "only if a new measurement says otherwise. It does not change the gamma boost.\n"
-        "Highlight protection only matters in Compensate. The gamma boost applies even with the LED drive off. "
-        "Switching the LED drive on or off, or to or from Log only, returns the projector to full light; "
-        "other changes carry on from the current level.")));
+        "The gamma boost applies even with the LED drive off. Switching the LED drive on or off returns the "
+        "projector to full light; other changes carry on from the current level.")));
 
     // Experimental: deeper fade to black with the projector's custom LED dim.
     // Off by default; its options stay greyed out until it is switched on.
@@ -10118,7 +10154,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     connect(customStart, qOverload<int>(&QSpinBox::valueChanged), customFloor,
         [customFloor](int start) { customFloor->setMaximum(start - 1); });
     experimentForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Compensate mode only. When the picture has been black for half a second and the LED is at its "
+        "When the picture has been black for half a second and the LED is at its "
         "fade-to-black level, VP switches the projector to its custom LED dim and steps the red, green and "
         "blue LEDs down, one command per step interval; at the first light it switches back. \"Taking turns\" "
         "keeps the three colours within one small step of each other, so the black does not change colour. "
@@ -10152,7 +10188,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     profileLayout->setSpacing(8);
     auto* profileRow = new QHBoxLayout;
     auto* profilePath = bindTextField(led, QStringLiteral("profile_file"));
-    profilePath->setPlaceholderText(QStringLiteral("Built-in (your beta 22 script)"));
+    profilePath->setPlaceholderText(QStringLiteral("Built-in (your dimming script's values)"));
     auto* browse = new QPushButton(QStringLiteral("Browse…"));
     browse->setObjectName(QStringLiteral("config.led_drive.default.profile_browse"));
     auto* builtIn = new QPushButton(QStringLiteral("Use built-in"));
@@ -10210,9 +10246,13 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* connectionForm = new QFormLayout(connection);
     connectionForm->setContentsMargins(0, 0, 0, 0);
     connectionForm->setVerticalSpacing(8);
-    connectionForm->addRow(QStringLiteral("Protocol"), bindChoiceField(projector, QStringLiteral("protocol"),
-        { QStringLiteral("barco_ascii"), QStringLiteral("none") },
-        { QStringLiteral("Barco serial (RS232)"), QStringLiteral("None (never open a port)") }));
+    // VP's default is no projector (audit 2026-10-14c: an unset protocol
+    // showed Barco while VP opened nothing); picking a source that drives
+    // the projector switches it to Barco (below).
+    auto* protocolChoice = bindChoiceField(projector, QStringLiteral("protocol"),
+        { QStringLiteral("none"), QStringLiteral("barco_ascii") },
+        { QStringLiteral("No projector (never open a port)"), QStringLiteral("Barco serial (RS232)") });
+    connectionForm->addRow(QStringLiteral("Protocol"), protocolChoice);
     auto* port = bindTextField(projector, QStringLiteral("port"), QStringLiteral("COM1"));
     port->setMaximumWidth(140);
     connectionForm->addRow(QStringLiteral("COM port"), port);
@@ -10220,7 +10260,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // picture gain is timed to land with it. Tuned by eye on scene changes.
     auto* latency = new QSpinBox;
     latency->setObjectName(controlName(projector, QStringLiteral("led_latency_ms")));
-    latency->setRange(0, 500);
+    latency->setRange(0, 2000);
     latency->setSingleStep(10);
     latency->setSuffix(QStringLiteral(" ms"));
     latency->setMaximumWidth(120);
@@ -10228,7 +10268,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     {
         bool valid = false;
         const int configured = value(projector, QStringLiteral("led_latency_ms")).toInt(&valid);
-        latency->setValue(valid ? std::max(0, std::min(configured, 500)) : 80);
+        latency->setValue(valid ? std::max(0, std::min(configured, 2000)) : 80);
     }
     connect(latency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
     {
@@ -10250,7 +10290,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // times VP's gain with it.
     auto* contrastLatency = new QSpinBox;
     contrastLatency->setObjectName(controlName(projector, QStringLiteral("cntr_latency_ms")));
-    contrastLatency->setRange(0, 500);
+    contrastLatency->setRange(0, 2000);
     contrastLatency->setSingleStep(10);
     contrastLatency->setSuffix(QStringLiteral(" ms"));
     contrastLatency->setMaximumWidth(120);
@@ -10273,9 +10313,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     });
     connectionForm->addRow(QStringLiteral("Contrast response time"), contrastLatency);
     connectionForm->addRow(QString(), helpLabel(QStringLiteral(
-        "How long the projector's contrast takes to change after a command. Only used when the script's "
-        "contrast steps are smoothed: if the picture briefly dips or brightens at a contrast step, adjust it in "
-        "steps of 20 ms. Default 80.")));
+        "How long the projector's contrast takes to change after a command. Used to time VP's picture "
+        "adjustment with each contrast step (adaptive gamma, and Compensate): if the picture briefly dips or "
+        "brightens at a contrast step, adjust it in steps of 20 ms. Default 80.")));
     auto* readBack = bindCheckField(QStringLiteral("Read the projector's replies"), projector,
         QStringLiteral("read_back"), false);
     connectionForm->addRow(QString(), readBack);
@@ -10414,11 +10454,12 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     shadowLift->setToolTip(QStringLiteral(
         "When something bright shares a dark frame, the lens scatters a veil of light over the darks. This lifts "
         "the darks in proportion to that veil so their texture stays visible; a dark frame with nothing bright "
-        "is left alone. Try 0.3 after the dark-hair test. 0 = off."));
+        "is left alone. 0 = off; 0.3 is a moderate lift. Needs adaptive gamma."));
     driveForm->addRow(QStringLiteral("Shadow lift next to highlights"), shadowLift);
     auto* liftRampLo = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_lo"), 0.0, 1.0, 3, 0.005, 0.01, QString());
     liftRampLo->setToolTip(QStringLiteral(
-        "The highlight amount (brightness x area) where the lift starts; it is full at the next value."));
+        "How much highlight it takes before the lift starts: brightness x share of the picture, so 0.01 is a "
+        "full-white area covering 1% of the frame. The lift is full at the next value."));
     driveForm->addRow(QStringLiteral("Lift starts at highlight amount"), liftRampLo);
     auto* liftRampHi = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_hi"), 0.0, 1.0, 3, 0.005, 0.10, QString());
     liftRampHi->setToolTip(QStringLiteral(
@@ -10442,7 +10483,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* listenBox = new QGroupBox(QStringLiteral("What the script is doing"));
     listenBox->setObjectName(controlName(led, QStringLiteral("listen_monitor")));
     auto* listenLayout = new QVBoxLayout(listenBox);
-    auto* listenStatus = new QLabel(QStringLiteral("No listen data yet: set the command source to your Python script and run main_vp.py."));
+    auto* listenStatus = new QLabel(QStringLiteral("Nothing from the script yet."));
     auto* listenScript = new QLabel;
     auto* listenVp = new QLabel;
     auto* listenAgree = new QLabel;
@@ -10454,8 +10495,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     }
     listenLayout->addWidget(helpLabel(QStringLiteral(
         "With logging on, every script message is kept with VP's own measurement in logs\\led-listen.csv "
-        "(beside vp.log), for adapting VP's copy of the script. The script needs its VP addendum lines; "
-        "VP ships it with them as scripts\\main_vp.py, and sets the serial port up itself before starting it.")));
+        "(beside vp.log), for adapting VP's copy of the script. The script needs the few lines that tell VP "
+        "what it sends; VP ships it with them as scripts\\main_vp.py.")));
     auto* listenTimer = new QTimer(listenBox);
     // VP's one-line summary, overwritten on each script message (the timer
     // keeps its own copy of the path: no window members in the callback).
@@ -10498,7 +10539,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly))
         {
-            listenStatus->setText(QStringLiteral("No listen data yet: set the command source to your Python script and run main_vp.py (or let VP run it).") + hosted);
+            listenStatus->setText(QStringLiteral("Nothing from the script yet: choose your Python script as the command source and give its file above.") + hosted);
             return;
         }
         QHash<QString, QString> v;
@@ -10525,14 +10566,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             return value == QStringLiteral("1") ? QStringLiteral("yes") : value == QStringLiteral("0") ? QStringLiteral("no") :
                 QStringLiteral("-");
         };
-        listenScript->setText(QStringLiteral("Script: LED %1, contrast %2  |  mean2 %3, max %4, highlight %5  |  targets LED %6, contrast %7")
+        listenScript->setText(QStringLiteral("Script: LED %1, contrast %2  |  average brightness %3, brightest %4, highlight %5  |  aims for LED %6, contrast %7")
             .arg(dash("light"), dash("contrast"), dash("mean"), dash("max"), yes("hl"), dash("tp"), dash("tc")));
-        listenVp->setText(QStringLiteral("VP: APL %1, brightest block %2, highlight %3  |  targets LED %4, contrast %5  |  picture gain %6")
+        listenVp->setText(QStringLiteral("VP's copy: average brightness %1, brightest %2, highlight %3  |  aims for LED %4, contrast %5  |  picture gain %6")
             .arg(QString::number(v.value(QStringLiteral("vp_apl")).toDouble(), 'f', 1), dash("vp_max"), yes("vp_hl"),
                 dash("vp_tp"), dash("vp_tc"), QString::number(v.value(QStringLiteral("gain"), QStringLiteral("1")).toDouble(), 'f', 3)));
         const int ticks = v.value(QStringLiteral("ticks")).toInt();
         listenAgree->setText(ticks <= 0 ? QString() :
-            QStringLiteral("Agreement over %1 script loops: mean2 within %2, max within %3, highlight same %4%, "
+            QStringLiteral("Agreement over %1 script loops: average brightness within %2, brightest within %3, highlight same %4%, "
                 "LED target within %5, contrast target within %6 (average differences)")
                 .arg(ticks).arg(v.value(QStringLiteral("d_mean")).toDouble(), 0, 'f', 1)
                 .arg(v.value(QStringLiteral("d_max")).toDouble(), 0, 'f', 1)
@@ -10555,6 +10596,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             "with the script."));
         connect(listenPort, qOverload<int>(&QSpinBox::valueChanged), this, [this, led](int port)
         {
+            if (!document_) return;
             const std::string section = led.toStdString();
             const std::string text = std::to_string(port);
             if (!document_->SetKnown(section, "listen_port", text))
@@ -10671,63 +10713,163 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         numberControl(projector, QStringLiteral("led_settle_ms"), 0, 5000, 0, 10, 300, QString()));
     responseForm->addRow(QStringLiteral("Contrast settle time (ms)"),
         numberControl(projector, QStringLiteral("cntr_settle_ms"), 0, 5000, 0, 10, 0, QString()));
-    responseForm->addRow(QStringLiteral("Highest useful contrast"),
-        numberControl(projector, QStringLiteral("cntr_max_usable"), 50, 100, 0, 1, 74, QString()));
-    responseForm->addRow(QStringLiteral("Contrast where white clips"),
-        numberControl(projector, QStringLiteral("dmd_clip_cntr"), 50, 100, 0, 1, 59, QString()));
+    auto* maxUsable = numberControl(projector, QStringLiteral("cntr_max_usable"), 50, 100, 0, 1, 74, QString());
+    responseForm->addRow(QStringLiteral("Highest useful contrast"), maxUsable);
+    auto* whiteClips = numberControl(projector, QStringLiteral("dmd_clip_cntr"), 50, 100, 0, 1, 59, QString());
+    responseForm->addRow(QStringLiteral("Contrast where white clips"), whiteClips);
     responseForm->addRow(QString(), helpLabel(QStringLiteral(
         "From the camera and light-meter measurements; leave the defaults until then. Settle time: how long "
         "the light takes to arrive after the response time (300 ms is deliberately fast). White clips: the "
         "contrast at which a white field stops getting brighter at full LED (59 = where your script's dump "
         "ended).")));
 
+    // Settings VP reads that only a hand edit could set before (audit
+    // 2026-10-14c: every setting has a Config control): collapsed, expert.
+    auto* advancedProjector = new QWidget;
+    auto* advancedForm = new QFormLayout(advancedProjector);
+    advancedForm->setContentsMargins(0, 0, 0, 0);
+    advancedForm->setVerticalSpacing(8);
+    advancedForm->addRow(QString(), helpLabel(QStringLiteral(
+        "Only for a projector other than the FL35, or when the projector's replies say something is wrong. "
+        "The defaults match the FL35.")));
+    advancedForm->addRow(QStringLiteral("Baud rate"),
+        numberControl(projector, QStringLiteral("baud"), 1200, 921600, 0, 1, 19200, QString()));
+    advancedForm->addRow(QStringLiteral("Lowest LED level the projector accepts"),
+        numberControl(projector, QStringLiteral("light_min"), 0, 255, 0, 1, 0, QStringLiteral("Ask the projector")));
+    advancedForm->addRow(QStringLiteral("Highest LED level the projector accepts"),
+        numberControl(projector, QStringLiteral("light_max"), 0, 255, 0, 1, 0, QStringLiteral("Ask the projector")));
+    advancedForm->addRow(QStringLiteral("Wait for a reply (ms)"),
+        numberControl(projector, QStringLiteral("ack_timeout_ms"), 20, 5000, 0, 10, 300, QString()));
+    advancedForm->addRow(QStringLiteral("Gap between commands (ms)"),
+        numberControl(projector, QStringLiteral("min_command_gap_ms"), 0, 5000, 0, 10, 200, QString()));
+    advancedForm->addRow(QStringLiteral("Largest LED step per command"),
+        numberControl(projector, QStringLiteral("max_levels_per_command"), 0, 255, 0, 1, 12, QString()));
+    advancedForm->addRow(QStringLiteral("Commands before a pause (0 = no pause)"),
+        numberControl(projector, QStringLiteral("burst_commands"), 0, 1000, 0, 1, 0, QString()));
+    advancedForm->addRow(QStringLiteral("Pause length (ms)"),
+        numberControl(projector, QStringLiteral("burst_pause_ms"), 0, 60000, 0, 100, 5000, QString()));
+    advancedForm->addRow(QString(), bindCheckField(QStringLiteral("Ask the projector to echo commands"), projector,
+        QStringLiteral("echo"), true));
+    advancedForm->addRow(QStringLiteral("Line ending"), bindChoiceField(projector, QStringLiteral("terminator"),
+        { QStringLiteral("auto"), QStringLiteral("cr"), QStringLiteral("literal_cr"), QStringLiteral("script") },
+        { QStringLiteral("Automatic (try the projector)"), QStringLiteral("Carriage return"),
+          QStringLiteral("The letters \"cr\" then a carriage return"), QStringLiteral("Exactly as your script sent it") }));
+    auto* fluxTable = bindTextField(projector, QStringLiteral("flux_table"));
+    fluxTable->setPlaceholderText(QStringLiteral("empty = light proportional to the LED level"));
+    fluxTable->setToolTip(QStringLiteral(
+        "Light-meter readings as LED level:relative light pairs, e.g. 60:0.21,128:0.49,255:1. Compensate uses "
+        "them to know how much light each LED level really gives."));
+    advancedForm->addRow(QStringLiteral("Measured light per LED level"), fluxTable);
+
+    // In setup order (audit 2026-10-14c): what to choose, then the source's
+    // own card, the connection, and the rest; Experimental last. Each card
+    // shows only when the chosen source uses it.
     cards->addCard(createCard(QStringLiteral("LED drive"),
-        QStringLiteral("Dim the projector's LED with the picture, as your beta 22 script did."), drive));
+        QStringLiteral("Dim the projector's LED with the picture, as your dimming script does."), drive));
     QWidget* pythonBox = createCard(QStringLiteral("Python script"),
         QStringLiteral("Your script, run by VP: its file, Python, and what it is doing."), pythonCard);
     cards->addCard(pythonBox);
-    QWidget* experimentBox = createCard(QStringLiteral("Experimental"),
-        QStringLiteral("Compensate: deeper fade to black - test on the projector before relying on it."), experiment);
-    cards->addCard(experimentBox);
-    cards->addCard(createCard(QStringLiteral("LED profile"),
-        QStringLiteral("The detailed behaviour: built-in, or your own file."), profile));
+    QWidget* connectionBox = createCard(QStringLiteral("Projector connection"),
+        QStringLiteral("The serial link to the projector."), connection);
+    cards->addCard(connectionBox);
+    QWidget* responseBox = createCard(QStringLiteral("Projector response"),
+        QStringLiteral("Measured timings and contrast limits."), response);
+    cards->addCard(responseBox);
+    QWidget* profileBox = createCard(QStringLiteral("LED profile"),
+        QStringLiteral("The detailed behaviour of VP's own sources: built-in, or your own file."), profile);
+    cards->addCard(profileBox);
     QWidget* assistBox = createCard(QStringLiteral("Contrast and cuts"),
         QStringLiteral("Compensate: the projector's contrast, bright cuts and coming out of black."), assist);
     cards->addCard(assistBox);
     QWidget* speedsBox = createCard(QStringLiteral("LED speeds"),
         QStringLiteral("Compensate: how fast the LED and the fade-up move."), speeds);
     cards->addCard(speedsBox);
+    // Collapsed until asked for.
+    auto* advancedHolder = new QWidget;
+    auto* advancedLayout = new QVBoxLayout(advancedHolder);
+    advancedLayout->setContentsMargins(0, 0, 0, 0);
+    auto* advancedToggle = new QToolButton;
+    advancedToggle->setObjectName(controlName(projector, QStringLiteral("advanced_toggle")));
+    advancedToggle->setText(QStringLiteral("Show the advanced settings"));
+    advancedToggle->setCheckable(true);
+    advancedToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    advancedToggle->setArrowType(Qt::RightArrow);
+    advancedLayout->addWidget(advancedToggle);
+    advancedLayout->addWidget(advancedProjector);
+    advancedProjector->setVisible(false);
+    connect(advancedToggle, &QToolButton::toggled, this, [advancedToggle, advancedProjector](bool open)
+    {
+        advancedProjector->setVisible(open);
+        advancedToggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        advancedToggle->setText(open ? QStringLiteral("Hide the advanced settings") : QStringLiteral("Show the advanced settings"));
+    });
+    QWidget* advancedBox = createCard(QStringLiteral("Advanced projector"),
+        QStringLiteral("Serial details for other projectors; the defaults match the FL35."), advancedHolder);
+    cards->addCard(advancedBox);
+    QWidget* experimentBox = createCard(QStringLiteral("Experimental"),
+        QStringLiteral("Compensate: deeper fade to black - test on the projector before relying on it."), experiment);
+    cards->addCard(experimentBox);
     {
         // Show only what the chosen source uses; grey the shadow lift while
-        // adaptive gamma is off (audit 2026-10-14b).
-        auto* source = drive->findChild<QComboBox*>(controlName(led, QStringLiteral("command_source")));
-        auto* adaptive = drive->findChild<QCheckBox*>(controlName(led, QStringLiteral("adaptive_gamma")));
-        auto show = [driveForm, compensateRows, pythonBox, experimentBox, assistBox, speedsBox, source]()
+        // adaptive gamma is off and everything while the LED drive is off
+        // (audits 2026-10-14b/c).
+        QComboBox* source = ledSource;
+        QCheckBox* adaptive = ledAdaptive;
+        // The Python fallback belongs on the Python card.
+        for (QWidget* row : { pythonPortHelp, pythonPortRow })
+        {
+            const QFormLayout::TakeRowResult taken = driveForm->takeRow(row);
+            delete taken.labelItem;
+            delete taken.fieldItem;   // the item only; the widget moves
+            pythonForm->insertRow(0, QString(), row);
+        }
+        auto show = [driveForm, responseForm, compensateRows, pythonBox, experimentBox, assistBox, speedsBox,
+            profileBox, source, adaptive, compensateWarning, aheadRow, aheadHelp, maxUsable, whiteClips]()
         {
             const QString chosen = source ? source->currentData().toString() : QString();
             const bool compensate = chosen == QStringLiteral("compensate");
+            const bool own = compensate || chosen == QStringLiteral("internal_script");
             for (QWidget* row : compensateRows)
                 driveForm->setRowVisible(row, compensate);
             for (QWidget* box : { experimentBox, assistBox, speedsBox })
                 box->setVisible(compensate);
+            for (QWidget* row : { maxUsable, whiteClips })
+                responseForm->setRowVisible(row, compensate);
+            profileBox->setVisible(own);
             pythonBox->setVisible(chosen == QStringLiteral("python"));
+            driveForm->setRowVisible(aheadRow, own);
+            driveForm->setRowVisible(aheadHelp, own);
+            driveForm->setRowVisible(compensateWarning, compensate && adaptive && !adaptive->isChecked());
         };
         auto grey = [shadowLiftRows, adaptive]()
         {
             for (QWidget* row : shadowLiftRows)
                 row->setEnabled(!adaptive || adaptive->isChecked());
         };
+        // A source that drives the projector needs the projector protocol.
+        auto needPort = [source, protocolChoice]()
+        {
+            const QString chosen = source ? source->currentData().toString() : QString();
+            if (chosen != QStringLiteral("none") && protocolChoice->currentData().toString() == QStringLiteral("none"))
+                protocolChoice->setCurrentIndex(protocolChoice->findData(QStringLiteral("barco_ascii")));
+        };
+        auto onOff = [enabled, source, adaptive, pythonBox, connectionBox, responseBox, profileBox, assistBox,
+            speedsBox, advancedBox, experimentBox, aheadRow]()
+        {
+            const bool on = enabled->isChecked();
+            for (QWidget* w : { static_cast<QWidget*>(source), static_cast<QWidget*>(adaptive), aheadRow, pythonBox,
+                connectionBox, responseBox, profileBox, assistBox, speedsBox, advancedBox, experimentBox })
+                if (w) w->setEnabled(on);
+        };
         show();
         grey();
-        if (source)
-            connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [show](int) { show(); });
-        if (adaptive)
-            connect(adaptive, &QCheckBox::toggled, this, [grey](bool) { grey(); });
+        onOff();
+        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [show](int) { show(); });
+        connect(source, qOverload<int>(&QComboBox::activated), this, [needPort](int) { needPort(); });
+        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [needPort](int) { needPort(); });
+        connect(adaptive, &QCheckBox::toggled, this, [grey, show](bool) { grey(); show(); });
+        connect(enabled, &QCheckBox::toggled, this, [onOff](bool) { onOff(); });
     }
-    cards->addCard(createCard(QStringLiteral("Projector connection"),
-        QStringLiteral("The serial link to the projector."), connection));
-    cards->addCard(createCard(QStringLiteral("Projector response"),
-        QStringLiteral("Measured timings and contrast limits."), response));
     return createPage(QStringLiteral("LED drive"),
         QStringLiteral("Projector LED dimming and the gamma boost."), cards);
 }
