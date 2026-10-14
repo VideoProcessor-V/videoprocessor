@@ -4,6 +4,12 @@ Repo C:\dev\videoprocessor, branch stage7-rc2. Range 460744bb..HEAD (`git log --
 206506b5 brings in 18775573 and e2f0bb90 from the work-1014 branch). The previous audit, stage7-2026-10-14.md, covered
 everything up to 460744bb.
 Please write the findings to C:\dev\videoprocessor\docs\audit\stage7-2026-10-14b.md (save the file).
+
+GPU IN USE: the build agent is running the full gate on this PC's GPU (the GeForce and WARP Beta suites, the timing gate)
+for the next few hours. Please do not run anything that uses the GPU (no Beta tests, no GPU or hardware runs, no corpus or
+timing runs, nothing with VP_TEST_GPU). Do the code review and any CPU-only checks now. Report those findings first and
+save them to the findings file. Then stop and list the GPU checks you would still run, with the commands, and hold them
+until the owner says the GPU is free.
 Context: docs/VP-led-core-sources.md (the LED core and relay design), docs/VP-led-listen-script-host-plan.md,
 docs/audit/stage7-2026-10-14.md (the findings that 5b2c4470 fixes), docs/VP-review-2026-10-14-overnight-answers.md (planner
 D1-D4), docs/BUILD-STATUS.md.
