@@ -409,6 +409,94 @@ void save(ConfigEditorWindow& window)
     require(!button->isEnabled(), "Apply did not complete successfully");
 }
 
+void testRendererCardsShowDefaultsAndRoundTrip()
+{
+    // Audit 2026-10-14c: unset settings show the renderer's real defaults,
+    // only what applies is shown, and Apply / reopen keeps every edit while
+    // the rest of the file stays as it was.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    const QByteArray original = "# a comment that stays\n[vprenderer.Cinema]\nquality: high # kept\n";
+    {
+        QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+        file.write(original);
+    }
+    auto rowShown = [](QWidget* field)
+    {
+        auto* layout = field->parentWidget() ? qobject_cast<QFormLayout*>(field->parentWidget()->layout()) : nullptr;
+        return layout && layout->isRowVisible(field);
+    };
+    {
+        ConfigEditorWindow window(path, 0, true);
+        requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+        QCoreApplication::processEvents();
+        auto* tolerance = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_match_tolerance");
+        require(tolerance->text().isEmpty() && tolerance->placeholderText() == "4.5",
+            ("An unset match tolerance does not show its default 4.5: '" + tolerance->text().toStdString() + "'").c_str());
+        auto* fade = requireControl<QComboBox>(window, "config.vprenderer.dejudder_fade_match");
+        require(fade->currentIndex() == 0 && fade->itemText(0).contains("On", Qt::CaseInsensitive),
+            ("An unset fade match does not say its default (on): " + fade->itemText(0).toStdString()).c_str());
+        auto* capture = requireControl<QComboBox>(window, "config.vprenderer.capture_path");
+        require(capture->itemText(0).contains("Standard", Qt::CaseInsensitive),
+            ("An unset capture path does not say Standard: " + capture->itemText(0).toStdString()).c_str());
+        // The de-judder: with no strength only the strengths show.
+        auto* strength = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_strength");
+        auto* rolloff = requireControl<QComboBox>(window, "config.vprenderer.dejudder_motion_rolloff");
+        auto* rollLo = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_roll_lo");
+        require(!rowShown(rolloff), "Strength shaping shows with the de-judder off");
+        strength->setText("0.25");
+        require(rowShown(rolloff) && !rowShown(rollLo), "With a strength: the strobing switch, not its values (it is off)");
+        selectData(rolloff, "on");
+        require(rowShown(rollLo), "The strobing values do not show with the switch on");
+        // Dependent rows of the measured section.
+        require(!rowShown(requireControl<QLineEdit>(window, "config.vprenderer.dejudder_est_split_sad")),
+            "The split threshold shows with splitting off (the default)");
+        // A "from" above its "to" is flagged.
+        requireControl<QLineEdit>(window, "config.vprenderer.dejudder_motion_scale_lo")->setText("2");
+        auto* motionHi = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_motion_scale_hi");
+        motionHi->setText("1");
+        require(motionHi->property("pairWarning").toBool(), "A motion scale 'to' below its 'from' is not flagged");
+        motionHi->setText("");
+        requireControl<QLineEdit>(window, "config.vprenderer.dejudder_motion_scale_lo")->setText("");
+        // SDR: the knee's own rows only with the knee.
+        auto* shape = requireControl<QComboBox>(window, "config.vprenderer.sdr_tone_shape");
+        auto* kneeStart = requireControl<QLineEdit>(window, "config.vprenderer.sdr_knee_start");
+        require(!kneeStart->isEnabled(), "The knee start is offered with the SDR shape off");
+        selectData(shape, "knee");
+        require(kneeStart->isEnabled(), "The knee start is not offered with the knee");
+        selectData(capture, "gpu");
+        selectData(fade, "off");
+        save(window);
+    }
+    {
+        ConfigEditorWindow window(path, 0, true);
+        requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+        QCoreApplication::processEvents();
+        require(requireControl<QLineEdit>(window, "config.vprenderer.dejudder_strength")->text() == "0.25",
+            "The strength did not survive Apply and reopen");
+        require(requireControl<QComboBox>(window, "config.vprenderer.capture_path")->currentData().toString() == "gpu",
+            "The capture path did not survive Apply and reopen");
+        require(requireControl<QComboBox>(window, "config.vprenderer.sdr_tone_shape")->currentData().toString() == "knee",
+            "The SDR shape did not survive Apply and reopen");
+        require(requireControl<QComboBox>(window, "config.vprenderer.dejudder_fade_match")->currentData().toString() == "off",
+            "The fade match did not survive Apply and reopen");
+        require(requireControl<QComboBox>(window, "config.vprenderer.dejudder_motion_rolloff")->currentData().toString() == "on",
+            "The strobing switch did not survive Apply and reopen");
+    }
+    const QByteArray saved = readBytes(path);
+    for (const char* kept : { "# a comment that stays", "quality: high # kept" })
+        require(saved.contains(kept), (QByteArray("A line outside the edits changed: ") + kept).constData());
+    for (const char* edited : { "dejudder_strength: 0.25", "dejudder_motion_rolloff: on", "sdr_tone_shape: knee",
+            "capture_path: gpu", "dejudder_fade_match: off" })
+        require(saved.contains(edited), (QByteArray("An edit was not saved: ") + edited).constData());
+    // Only the edited renderer keys were written (no unset default saved).
+    int rendererKeys = 0;
+    for (const QByteArray& line : saved.split('\n'))
+        if (line.startsWith("dejudder_") || line.startsWith("sdr_") || line.startsWith("capture_") ||
+                line.startsWith("adaptive_") || line.startsWith("dither_") || line.startsWith("occlusion_"))
+            ++rendererKeys;
+    require(rendererKeys == 5, ("Renderer keys other than the five edits were written:\n" + saved).constData());
+}
+
 void testSubtitleDiagnosticSurvivesConfigSaveAndReopen()
 {
     QTemporaryDir directory;
@@ -7548,6 +7636,7 @@ int main(int argc, char** argv)
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
+    failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);

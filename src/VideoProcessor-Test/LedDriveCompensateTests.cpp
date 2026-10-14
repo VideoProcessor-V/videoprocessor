@@ -659,6 +659,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(legacy.mode == Mode::Compensate && legacy.adaptiveGamma && legacy.lookahead,
 				L"an older mode-only configuration behaves as before");
 			Assert::IsFalse(read("mode: compensate\nadaptive_gamma: false\n").adaptiveGamma);
+			Assert::IsFalse(read("").adaptiveGamma, L"a new file (no source, no mode): adaptive gamma off (audit 2026-10-14c)");
 			Assert::IsFalse(ListenRelays(read("mode: listen\nlisten_script: main_vp.py\n")),
 				L"an older mode: listen file leaves COM1 to the script, as before (audit 2026-10-14b)");
 		}

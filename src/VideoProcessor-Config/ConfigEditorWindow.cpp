@@ -5213,15 +5213,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto* ruleField = fieldWithHelp(QStringLiteral("When should VP use this profile?"), rule,
         QStringLiteral("Optional source-condition rule. Example: ${renderer} ~= \"VP Renderer\" && ${source_rate} <= 30. ~= matches a literal substring (case-insensitive for renderer names). Use one non-empty quoted string with a text variable, not a number, Boolean, or ${key}. Parentheses group conditions; ! negates, then && binds before ||. Active profiles can still be selected manually when their rule is false."));
     detailLayout->addWidget(ruleField);
-    if (sectionPrefix == QStringLiteral("queue"))
+    if (sectionPrefix == QStringLiteral("queue") || sectionPrefix == QStringLiteral("vprenderer"))
     {
         // The common queue rule as a plain control: "use this queue above N
-        // fps". It writes the same rule as the formula field and follows it;
+        // fps"; also for rendering profiles, e.g. a low-latency profile
+        // (audit 2026-10-14c: no hand-written rule). It writes the same rule as the formula field and follows it;
         // any other formula is left alone and the control steps aside.
         auto* rateRow = new QWidget;
         auto* rateLayout = new QHBoxLayout(rateRow);
         rateLayout->setContentsMargins(0, 0, 0, 0);
-        auto* rateRule = new QCheckBox(QStringLiteral("Use this queue for sources above"));
+        auto* rateRule = new QCheckBox(sectionPrefix == QStringLiteral("queue") ?
+            QStringLiteral("Use this queue for sources above") : QStringLiteral("Use this profile for sources above"));
         rateRule->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule")));
         auto* rateThreshold = new QDoubleSpinBox;
         rateThreshold->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_fps")));
@@ -5234,7 +5236,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         rateLayout->addWidget(rateThreshold);
         rateLayout->addStretch();
         auto* rateNote = helpLabel(QStringLiteral(
-            "This queue has its own rule below; edit it there, or clear it to use the frame-rate switch."));
+            "This profile has its own rule below; edit it there, or clear it to use the frame-rate switch."));
         rateNote->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_note")));
         rateNote->setVisible(false);
         const int ruleIndex = detailLayout->indexOf(useRule);
@@ -6317,16 +6319,19 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         saturation->setToolTip(QStringLiteral(
             "Colour saturation offset in percent. 0 is neutral; +5 matches madVR's saturation +5."));
         // Owner 2026-10-13: the low-latency capture path (rule-selected, e.g.
-        // for sources above 59 Hz). Experimental, off by default (2026-10-14).
+        // for sources above 59 Hz). Experimental, off by default (2026-10-14);
+        // its own section, not inside Tone Mapping (audit 2026-10-14c).
+        form = addCollapsibleSection(QStringLiteral("lowLatency"), QStringLiteral("Low latency (experimental)"),
+            QStringLiteral("For gaming and live TV. Off by default; the standard path is the proven one."), false);
         auto* capturePath = addChoice(QStringLiteral("Capture conversion"), QStringLiteral("capture_path"),
             { QStringLiteral("standard"), QStringLiteral("gpu") });
         capturePath->setItemText(capturePath->findData(QStringLiteral("standard")), QStringLiteral("Standard (CPU, the proven path)"));
         capturePath->setItemText(capturePath->findData(QStringLiteral("gpu")), QStringLiteral("GPU (low latency, experimental)"));
         capturePath->setToolTip(QStringLiteral(
             "How DeckLink V210 / UYVY frames are converted for the renderer. GPU: the raw frame is uploaded and unpacked on "
-            "the GPU (the same picture, no CPU conversion; about half the time per 4K frame on a laptop RTX 3050 Ti). Meant "
-            "for a low-latency profile chosen by a rule (e.g. sources above 59 Hz); other formats stay on the standard path. "
-            "Experimental and off by default (owner 2026-10-14): Standard is the proven path."));
+            "the GPU - the same picture with no CPU conversion, about half the conversion time. Meant for a low-latency "
+            "profile (for example for sources above 59 fps). It does nothing for other capture formats, which stay on the "
+            "standard path. Experimental and off by default: Standard is the proven path."));
 
         // Stage 6b-2b: the de-judder (film motion). Meant for the cinema
         // profile; the renderer switches it off by itself in the low-latency
@@ -6341,7 +6346,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* dejudderPreset = new QComboBox;
         dejudderPreset->setObjectName(controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
         dejudderPreset->setAccessibleName(QStringLiteral("De-judder preset"));
-        dejudderPreset->addItem(QStringLiteral("Not set (off)"), QString());
+        dejudderPreset->addItem(QStringLiteral("Not set (the default profile's, or off)"), QString());
         dejudderPreset->addItem(QStringLiteral("Off"), QStringLiteral("0"));
         dejudderPreset->addItem(QStringLiteral("Gentle"), QStringLiteral("0.25"));
         dejudderPreset->addItem(QStringLiteral("Medium"), QStringLiteral("0.35"));
@@ -6349,8 +6354,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         dejudderPreset->setToolTip(QStringLiteral(
             "Smooths 24p film motion on a 60 Hz display by filling the repeated refreshes with "
             "slightly moved pictures. Gentle (0.25) is the recommended start; Medium is 0.35; "
-            "Custom takes the strength typed below. Off below the uneven film cadences, in "
-            "Low_Latency, and for RGB or interlaced input."));
+            "Custom takes the strength typed below. Only for 24p/25p film; off in the low-latency queue "
+            "and for RGB or interlaced input."));
         form->addRow(QStringLiteral("De-judder"), dejudderPreset);
         auto* dejudderStrength = addText(QStringLiteral("Strength, 24p/25p on 60 Hz (0 to 1)"),
             QStringLiteral("dejudder_strength"));
@@ -6415,7 +6420,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         rollLo->setValidator(new QDoubleValidator(0.0, 200.0, 1, rollLo));
         rollLo->setPlaceholderText(QStringLiteral("8"));
         rollLo->setToolTip(QStringLiteral("The camera speed where the strength starts to fall (8 at 4K is about a brisk pan)."));
-        auto* rollHi = addText(QStringLiteral("Down to the floor at"), QStringLiteral("dejudder_roll_hi"));
+        auto* rollHi = addText(QStringLiteral("Floor reached at (source px/frame)"), QStringLiteral("dejudder_roll_hi"));
         rollHi->setValidator(new QDoubleValidator(0.0, 400.0, 1, rollHi));
         rollHi->setPlaceholderText(QStringLiteral("24"));
         rollHi->setToolTip(QStringLiteral("The camera speed where the strength reaches the floor (24 at 4K is about a whip pan)."));
@@ -6567,15 +6572,20 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* pixelLo = addText(QStringLiteral("Pixel decision: full from (x tolerance)"), QStringLiteral("dejudder_pixel_trust_lo"));
         pixelLo->setValidator(new QDoubleValidator(0.25, 16.0, 2, pixelLo));
         pixelLo->setPlaceholderText(QStringLiteral("3"));
+        pixelLo->setToolTip(QStringLiteral(
+            "A pixel whose predicted next frame is within this many times the match tolerance moves fully."));
         auto* pixelHi = addText(QStringLiteral("Pixel decision: held from (x tolerance)"), QStringLiteral("dejudder_pixel_trust_hi"));
         pixelHi->setValidator(new QDoubleValidator(0.5, 32.0, 2, pixelHi));
         pixelHi->setPlaceholderText(QStringLiteral("8"));
+        pixelHi->setToolTip(QStringLiteral(
+            "From this many times the match tolerance a pixel holds still; in between it moves partly. Keep it above "
+            "the value before."));
         auto* verify = addChoice(QStringLiteral("Check matches pixel by pixel"),
             QStringLiteral("dejudder_verify"), { QStringLiteral("on"), QStringLiteral("off") });
         verify->setToolTip(QStringLiteral(
             "Each matched block predicts the next frame pixel by pixel with the motion the de-judder will use; a block "
             "whose pixels do not follow (an edge, something uncovered) holds instead, so looser matching stays safe."));
-        auto* verifyShare = addText(QStringLiteral("Pixel check: share allowed off"), QStringLiteral("dejudder_verify_share"));
+        auto* verifyShare = addText(QStringLiteral("Pixel check: hold above this share wrong"), QStringLiteral("dejudder_verify_share"));
         verifyShare->setValidator(new QDoubleValidator(0.02, 1.0, 2, verifyShare));
         verifyShare->setPlaceholderText(QStringLiteral("0.2"));
         verifyShare->setToolTip(QStringLiteral("A block holds when more than this share of its pixels mispredict (0.2 = a fifth)."));
@@ -6632,7 +6642,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         warpStage->setItemText(warpStage->findData(QStringLiteral("source")), QStringLiteral("Source (full re-render)"));
         warpStage->setToolTip(QStringLiteral(
             "Rendered picture: each in-between frame warps the finished picture and runs only the final "
-            "dither stage (estimated at about a quarter of the GPU time at 4K; not yet measured). Source: each in-between frame re-renders "
+            "dither stage (a fraction of the GPU time of a full render). Source: each in-between frame re-renders "
             "the whole chain from a warped source, the earlier path, kept for A/B comparison."));
         auto* occlusionFill = addChoice(QStringLiteral("Fill uncovered areas (experiment)"),
             QStringLiteral("dejudder_occlusion_fill"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -6672,7 +6682,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Where the adaptive downscale's grain map sees film grain, the temporal sigma-delta's "
             "motion match is this many times more tolerant, so its 10-bit averaging survives the grain. "
             "Needs the grain map and the sigma-delta. 1 turns it off."));
-        auto* ditherVectors = addChoice(QStringLiteral("Dither carry motion on extras"), QStringLiteral("dither_vectors"),
+        auto* ditherVectors = addChoice(QStringLiteral("Dither reuses the de-judder's motion"), QStringLiteral("dither_vectors"),
             { QStringLiteral("auto"), QStringLiteral("own") });
         ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("auto")), QStringLiteral("De-judder's (auto)"));
         ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("own")), QStringLiteral("Sigma-delta's own search"));
@@ -6720,17 +6730,49 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 showIn(dejudderExperimentsForm, taperSad, isOn(taper, false));
                 // Filling uncovered areas works on the source path only.
                 const bool sourcePath = warpStage->currentData().toString() == QStringLiteral("source");
+                occlusionFill->setProperty("greyedOff", !sourcePath);
                 occlusionFill->setEnabled(sourcePath);
                 // Estimation and experiments matter only with a strength.
                 if (estimationSection) estimationSection->setEnabled(active);
                 if (experimentsSection) experimentsSection->setEnabled(active);
+                // A "from" at or above its "to" is flagged as it is typed
+                // (audit 2026-10-14c); empty fields use the defaults.
+                auto pairCheck = [](QLineEdit* lo, QLineEdit* hi, double loDefault, double hiDefault)
+                {
+                    bool okLo = false, okHi = false;
+                    const double a = lo->text().trimmed().toDouble(&okLo), b = hi->text().trimmed().toDouble(&okHi);
+                    const bool wrong = (okLo || okHi) && (okLo ? a : loDefault) >= (okHi ? b : hiDefault) &&
+                        (okHi ? b : hiDefault) > 0.0;
+                    hi->setStyleSheet(wrong ? QStringLiteral("color: #ff8a8a;") : QString());
+                    hi->setProperty("pairWarning", wrong);
+                    if (wrong)
+                        hi->setToolTip(hi->property("settingHelp").toString() +
+                            QStringLiteral("\nThis must be above the value before it."));
+                };
+                pairCheck(motionLo, motionHi, 0.25, 1.5);
+                pairCheck(rollLo, rollHi, 8.0, 24.0);
+                pairCheck(pixelLo, pixelHi, 3.0, 8.0);
             };
+            for (QLineEdit* edit : { motionLo, motionHi, rollLo, rollHi, pixelLo, pixelHi })
+                connect(edit, &QLineEdit::textChanged, this, [update](const QString&) { update(); });
             for (QLineEdit* edit : { dejudderStrength, strengthEven })
                 connect(edit, &QLineEdit::textChanged, this, [update](const QString&) { update(); });
             for (QComboBox* combo : { rolloff, fadeMatch, estSplit, estCandidates, globalPrior, regional, pixelTrust,
                     verify, taper, warpStage })
                 connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [update](int) { update(); });
             update();
+            // Every switch says its default (audit 2026-10-14c).
+            const std::pair<QComboBox*, const char*> switchDefaults[] = {
+                { rolloff, "Default off." }, { fadeMatch, "Default on." }, { estCandidates, "Default on." },
+                { estQpel, "Default on." }, { estGate, "Default on." },
+                { estSplit, "Default off: with the 4.5 match tolerance and pixel-by-pixel decisions, splitting cost "
+                    "de-judder benefit on real footage." },
+                { globalTwo, "Default on." }, { regional, "Default on." }, { pixelTrust, "Default on." },
+                { verify, "Default off." }, { estimateAhead, "Default on." }, { taper, "Default off." },
+                { lowRes, "Default: half size, every step." }, { warpStage, "Default: rendered picture." } };
+            for (const auto& entry : switchDefaults)
+                if (!entry.first->toolTip().contains(QStringLiteral("Default")))
+                    entry.first->setToolTip(entry.first->toolTip() + QStringLiteral("\n") + QString::fromLatin1(entry.second));
             occlusionFill->setToolTip(occlusionFill->toolTip() +
                 QStringLiteral("\nAvailable only with Extra frames from: Source (in this section)."));
         }
@@ -6754,9 +6796,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             { "Grain floor (0 to 1)", "adaptive_grain_floor", 0.0, 1.0, "0.4", "The SSIM weight left on a heavily grained source." },
             { "Grain smoothing (ms)", "adaptive_grain_smooth_ms", 0.0, 10000.0, "1000", "Time constant of the per-frame grain measure; a cut snaps it." },
             { "Shadow bias (0 to 1)", "adaptive_grain_shadow_bias", 0.0, 1.0, "0.5", "Weights grain in the shadows more (the LED compensation lifts them)." } };
+        std::vector<QWidget*> adaptiveRows;
         for (const AdaptiveField& field : adaptiveFields)
         {
             auto* edit = addText(QString::fromLatin1(field.label), QString::fromLatin1(field.key));
+            adaptiveRows.push_back(edit);
             edit->setValidator(new QDoubleValidator(field.lo, field.hi, 3, edit));
             edit->setPlaceholderText(QString::fromLatin1(field.placeholder));
             edit->setToolTip(QString::fromLatin1(field.tip));
@@ -6765,7 +6809,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("adaptive_chroma_ssim"), { QStringLiteral("off"), QStringLiteral("on") });
         adaptiveChroma->setToolTip(QStringLiteral(
             "Off (recommended): chroma stays faithful; SSIM on chroma can fringe colour at edges."));
-        auto* adaptiveFaithful = addChoice(QStringLiteral("Faithful branch filter"),
+        auto* adaptiveFaithful = addChoice(QStringLiteral("Grain-true downscale filter"),
             QStringLiteral("adaptive_faithful"), { QStringLiteral("polar"), QStringLiteral("ortho") });
         adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("polar")),
             QStringLiteral("Polar EWA Lanczos sharp (most accurate)"));
@@ -6781,7 +6825,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveMap->setToolTip(QStringLiteral(
             "On: grain is measured per block from frame-to-frame noise along the motion vectors, so grainy "
             "areas lean faithful while clean texture keeps SSIM. Film rates (30 fps or less) with a next frame "
-            "queued; runs the motion matcher even with de-judder off. Elsewhere (Low_Latency, 50/60p) the "
+            "queued; runs the motion matcher even with de-judder off. Elsewhere (the low-latency queue, 50/60p) the "
             "per-frame measure is used. Off: the per-frame measure only."));
         auto* adaptiveMapSmooth = addText(QStringLiteral("Grain map smoothing (ms)"),
             QStringLiteral("adaptive_grain_map_smooth_ms"));
@@ -6791,6 +6835,24 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
         MarkGpuCost(form, adaptiveOn, 2);
         MarkGpuCost(form, adaptiveMap, 1);
+        {
+            // Greyed while they do nothing (audit 2026-10-14c).
+            adaptiveRows.push_back(adaptiveChroma);
+            adaptiveRows.push_back(adaptiveFaithful);
+            adaptiveRows.push_back(adaptiveMap);
+            auto greyAdaptive = [adaptiveOn, adaptiveMap, adaptiveRows, adaptiveMapSmooth]()
+            {
+                const bool on = adaptiveOn->currentData().toString() == QStringLiteral("on");
+                const QString map = adaptiveMap->currentData().toString();
+                for (QWidget* row : adaptiveRows) { row->setProperty("greyedOff", !on); row->setEnabled(on); }
+                const bool smooth = on && map != QStringLiteral("off");
+                adaptiveMapSmooth->setProperty("greyedOff", !smooth);
+                adaptiveMapSmooth->setEnabled(smooth);
+            };
+            for (QComboBox* combo : { adaptiveOn, adaptiveMap })
+                connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [greyAdaptive](int) { greyAdaptive(); });
+            greyAdaptive();
+        }
 
         // Stage 8b: the upscale blend (1080p and below to the screen).
         form = addCollapsibleSection(QStringLiteral("adaptiveUpscale"), QStringLiteral("Adaptive upscale (1080p)"),
@@ -6805,6 +6867,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("adaptive_upscale_w_base"));
         upscaleWBase->setValidator(new QDoubleValidator(0.0, 1.0, 3, upscaleWBase));
         upscaleWBase->setPlaceholderText(QStringLiteral("1"));
+        upscaleWBase->setToolTip(QStringLiteral(
+            "How much of the CNN upscaler's picture is kept where there is no grain (1 = all of it; lower mixes in "
+            "the plain upscale everywhere)."));
         auto* upscaleSuperres = addChoice(QStringLiteral("SuperRes strength follows grain"),
             QStringLiteral("adaptive_upscale_superres_scale"), { QStringLiteral("on"), QStringLiteral("off") });
         upscaleSuperres->setToolTip(QStringLiteral(
@@ -6821,6 +6886,20 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "(libplacebo upscales in linear light only through sigmoid, which is kept off because it clips "
             "above-white). Gamma: gamma light everywhere, like madVR."));
         MarkGpuCost(form, upscaleOn, 2);
+        {
+            auto greyUpscale = [upscaleOn, upscaleWBase, upscaleSuperres, upscaleLight]()
+            {
+                const bool on = upscaleOn->currentData().toString() == QStringLiteral("on");
+                for (QWidget* row : { static_cast<QWidget*>(upscaleWBase), static_cast<QWidget*>(upscaleSuperres),
+                        static_cast<QWidget*>(upscaleLight) })
+                {
+                    row->setProperty("greyedOff", !on);
+                    row->setEnabled(on);
+                }
+            };
+            connect(upscaleOn, qOverload<int>(&QComboBox::currentIndexChanged), this, [greyUpscale](int) { greyUpscale(); });
+            greyUpscale();
+        }
 
         auto wrapToneControl = [&](const ToneMappingTuning::Spec& spec, QLineEdit* edit) {
             auto row = form->takeRow(edit);
@@ -6932,6 +7011,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 
         form = addCollapsibleSection(QStringLiteral("processing"), QStringLiteral("Processing"),
             QString(), false);
+        QFormLayout* processingForm = form;
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
         debanding->setItemText(debanding->findData(QStringLiteral("default")), QStringLiteral("Standard"));
         addRendererAutoStatus(QStringLiteral("deband_strength"), debanding);
@@ -6943,19 +7023,23 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
             "otherwise and for HDR. Off is the standard path."));
         MarkGpuCost(form, extendedRange, 1);
-        // Delta 13: the SDR tone shape and headroom.
+        // Delta 13: the SDR tone shape and headroom, in their own section
+        // (audit 2026-10-14c).
+        form = addCollapsibleSection(QStringLiteral("sdrHighlights"), QStringLiteral("SDR highlights"),
+            QStringLiteral("How SDR highlights are shaped on an SDR output. Off by default."), false);
         auto* sdrShape = addChoice(QStringLiteral("SDR tone shape"), QStringLiteral("sdr_tone_shape"),
             { QStringLiteral("off"), QStringLiteral("knee") });
+        sdrShape->setItemText(sdrShape->findData(QStringLiteral("knee")), QStringLiteral("Knee (soft highlight roll-off)"));
         sdrShape->setToolTip(QStringLiteral(
-            "SDR sources only. Knee: highlights roll off softly toward peak, the shape tone-mapped HDR has, "
+            "SDR sources shown on an SDR output only. Knee: highlights roll off softly toward peak, the shape tone-mapped HDR has, "
             "with no inverse tone map. Nothing is created above the master's white. Off is the standard path."));
         MarkGpuCost(form, sdrShape, 1);
-        auto* sdrHeadroom = addText(QStringLiteral("SDR white headroom (0 to 0.5)"), QStringLiteral("sdr_white_headroom"));
+        auto* sdrHeadroom = addText(QStringLiteral("SDR white headroom (share of peak, 0 to 0.5)"), QStringLiteral("sdr_white_headroom"));
         sdrHeadroom->setValidator(new QDoubleValidator(0.0, 0.5, 3, sdrHeadroom));
         sdrHeadroom->setPlaceholderText(QStringLiteral("0"));
         sdrHeadroom->setToolTip(QStringLiteral(
             "Places reference white below the projector's peak: 0.15 puts it at 85% of peak (in light), leaving room "
-            "above it for above-white detail and the knee. 0 = today."));
+            "above it for above-white detail and the knee. 0 = reference white at peak (off)."));
         auto* sdrKneeStart = addText(QStringLiteral("SDR knee start (0.5 to 0.99 of peak)"), QStringLiteral("sdr_knee_start"));
         sdrKneeStart->setValidator(new QDoubleValidator(0.5, 0.99, 3, sdrKneeStart));
         sdrKneeStart->setPlaceholderText(QStringLiteral("0.80"));
@@ -6972,10 +7056,27 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("sdr_contrast_recovery"));
         sdrRecovery->setPlaceholderText(QStringLiteral("auto"));
         sdrRecovery->setToolTip(QStringLiteral(
-            "With the knee: returns the local detail the knee flattens in the highlights. VP's own: libplacebo's "
-            "contrast recovery applies only to HDR. Auto uses the contrast recovery value above (libplacebo's "
-            "default when that is Auto); off = none."));
+            "With the knee: returns the local detail the knee flattens in the highlights (libplacebo's own contrast "
+            "recovery works only on HDR). Auto = follow Tone Mapping > Contrast recovery; off = none; or a strength "
+            "from 0 to 2."));
+        sdrRecovery->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^(|[Aa][Uu][Tt][Oo]|[Oo][Ff][Ff]|[01](\\.\\d{0,3})?|2(\\.0{0,3})?)$")),
+            sdrRecovery));
         MarkGpuCost(form, sdrRecovery, 1);
+        {
+            auto greySdr = [sdrShape, sdrKneeStart, sdrKneeStrength, sdrRecovery]()
+            {
+                const bool knee = sdrShape->currentData().toString() == QStringLiteral("knee");
+                for (QWidget* row : { sdrKneeStart, sdrKneeStrength, sdrRecovery })
+                {
+                    row->setProperty("greyedOff", !knee);
+                    row->setEnabled(knee);
+                }
+            };
+            connect(sdrShape, qOverload<int>(&QComboBox::currentIndexChanged), this, [greySdr](int) { greySdr(); });
+            greySdr();
+        }
+        form = processingForm;
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { QStringLiteral("AUTO"), QStringLiteral("blue_noise"),
                 QStringLiteral("ordered_lut"), QStringLiteral("ordered_fixed"),
@@ -7025,9 +7126,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("fbo_float32"), { QStringLiteral("auto"), QStringLiteral("on"), QStringLiteral("off") });
         fboFloat32->setToolTip(QStringLiteral(
             "Every intermediate picture in 32-bit float: exact highlights (half-float rounds values above white "
-            "by up to 0.84 of a 10-bit step) at more GPU memory bandwidth (+2.8 ms per 4K frame on a laptop "
-            "RTX 3050 Ti; check the render time in the stats overlay). Auto: on, off with the Low_Latency "
-            "queue. The final output stage is 32-bit float always."));
+            "a little) at more GPU memory bandwidth (a few ms per 4K frame; check the render time in the stats "
+            "overlay). Auto: on, except in the queue named Low_Latency (renaming that queue changes Auto). The final "
+            "output stage is 32-bit float always."));
         MarkGpuCost(form, fboFloat32, 2);
 
     }
@@ -7051,11 +7152,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			QStringLiteral("catmull_rom"), QStringLiteral("lanczos"), QStringLiteral("ewa_lanczossharp"),
 			QStringLiteral("upscaler"), QStringLiteral("bicubic"), QStringLiteral("bilinear") });
 		chromaUpscaler->setItemText(chromaUpscaler->findData(QStringLiteral("upscaler")),
-			QStringLiteral("Same as the upscaler (Bill's VP)"));
+			QStringLiteral("Same as the upscaler (the earlier behaviour)"));
 		chromaUpscaler->setToolTip(QStringLiteral(
 			"How the colour planes of 4:2:0 / 4:2:2 video are brought up to the picture's size before the "
 			"main scaling. Auto = Catmull-Rom: on real 4K footage it looked identical to the polar EWA Lanczos "
-			"filter (mean difference 0.3 of 1023 codes) at about a seventh of its GPU time. 'Same as the "
+			"filter at about a seventh of its GPU time. 'Same as the "
 			"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest)."));
 		MarkGpuCost(form, chromaUpscaler, 2);
 		auto* downscaler = addChoice(QStringLiteral("Downscaler"),
@@ -7743,8 +7844,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 configured = QStringLiteral("latin");
             if (defaultOnlyField && !defaultProfile && list->count() > 0)
                 configured = value(list->item(0)->data(Qt::UserRole).toString(), field.key, fallback(field.key));
+            // greyedOff: a setting that does nothing in the current state
+            // (its switch is off) stays greyed (audit 2026-10-14c).
             field.widget->setEnabled((!defaultOnlyField || defaultProfile) &&
-                !field.widget->property("derivedSetting").toBool());
+                !field.widget->property("derivedSetting").toBool() && !field.widget->property("greyedOff").toBool());
             field.widget->setProperty("profileSection", section);
 			if (field.widget->property("requiresHdrFixedMode").toBool())
 			{
@@ -10549,6 +10652,19 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "How gradually the boost comes in above that point (part of the signal; 0 = a hard switch). "
         "Only matters when the setting above is not 0."));
     driveForm->addRow(QStringLiteral("Boost blend width"), boostKneeWidth);
+    if (auto* boostChoice = drive->findChild<QComboBox*>(controlName(led, QStringLiteral("gamma_boost"))))
+    {
+        // The toe rows do nothing without the boost (audit 2026-10-14c).
+        auto greyBoost = [boostChoice, boostKnee, boostKneeWidth]()
+        {
+            const QString chosen = boostChoice->currentData().toString();
+            const bool on = !chosen.isEmpty() && chosen != QStringLiteral("off");
+            boostKnee->setEnabled(on);
+            boostKneeWidth->setEnabled(on);
+        };
+        connect(boostChoice, qOverload<int>(&QComboBox::currentIndexChanged), this, [greyBoost](int) { greyBoost(); });
+        greyBoost();
+    }
     auto* shadowLift = numberControl(led, QStringLiteral("shadow_lift_ansi"), 0.0, 1.0, 2, 0.05, 0.0, QString());
     shadowLift->setToolTip(QStringLiteral(
         "When something bright shares a dark frame, the lens scatters a veil of light over the darks. This lifts "
