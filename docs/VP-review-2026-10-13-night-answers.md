@@ -147,7 +147,7 @@ audit, and the owner's request.
 | Q1 | Default unchanged (all); E4-gate bug recorded in BUILD-STATUS |
 | Q2 | The source sample `[queue.Normal]` already has `target_frames: 3`. The owner's deployed config lives on the cinema PC: check it at deploy time, change only with his OK (user data) |
 | Q3 | No change (hard edge already) |
-| Q4 | Owner's decision: copy the Beta test program to the cinema PC for the 3090 numbers |
+| Q4 | Owner: no Beta test visit to the cinema PC. The 3090 budgets stay requirements; checked after the deploy from VP's own stats line and timing log during the projector sessions |
 | Q5 | Built: `port=applied|skipped|failed` in led-script-now.txt, shown in the Config monitor; test |
 | Q6 | Recorded in BUILD-STATUS |
 | Q7 | To build with the matcher fixes (tomorrow), with the accelerating-pan test |
