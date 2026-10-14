@@ -1,0 +1,74 @@
+Audit request: the new starting point (owner 2026-10-14). The LED core with selectable command sources, D2/D3 from the
+separate repo, and a check of the earlier audit's fixes.
+Repo C:\dev\videoprocessor, branch stage7-rc2. Range 460744bb..HEAD (`git log --first-parent 460744bb..HEAD`; the merge
+206506b5 brings in 18775573 and e2f0bb90 from the work-1014 branch). The previous audit, stage7-2026-10-14.md, covered
+everything up to 460744bb.
+Please write the findings to C:\dev\videoprocessor\docs\audit\stage7-2026-10-14b.md (save the file).
+Context: docs/VP-led-core-sources.md (the LED core and relay design), docs/VP-led-listen-script-host-plan.md,
+docs/audit/stage7-2026-10-14.md (the findings that 5b2c4470 fixes), docs/VP-review-2026-10-14-overnight-answers.md (planner
+D1-D4), docs/BUILD-STATUS.md.
+
+Groups (oldest first)
+ A. Earlier audit fixes: 5b2c4470. Please verify each fix against stage7-2026-10-14.md: listen retry and CSV, whole-number
+    parsing, the 50 ms receive slices, R1 restore before the fallback render, R-B in M6, live motion-fix keys, estimate
+    ahead only with the rendered path, the 4K fade correction for M6's mask, H2 reset on a live change, split blocks.
+    cf955086 commits the findings file only.
+ B. LED core (bb461843; owner 2026-10-14):
+    - Source and switches: led/LedDriveConfig.h (command_source, python_drives_port, adaptive_gamma, lookahead,
+      ApplyCommandSource, ListenRelays, EffectiveProtocol).
+    - Gating: led/LedDriveModule.cpp (applyGain && adaptiveGamma; look-ahead off = predicted false and depth 0).
+    - Shadow lift: LibplaceboVideoRenderer.cpp (the lift is gated by adaptive_gamma).
+    - Relay: led/LedDriveModule.cpp (Run: script framing, no BringToKnownState, no RestoreFullLight; the listen branch:
+      SendRelay outside the lock, only while ScriptHost is Running, refused otherwise), led/BarcoAsciiDriver.* (SendRelay,
+      RelayBytes), led/ProjectorDriver.h, led/ScriptHost.* (VP_LED_RELAY in the child environment, restart when relay
+      changes), packaging/listen-script/main_vp.py (_vp_com1).
+    - Bounded log: led/ScriptListener.* (OpenListenCsv, kListenCsvCapBytes, header check), the TICK-on-change rows and the
+      10 s summary.
+    - Config: ConfigEditorWindow.cpp (the Command source picker and its three switches replace the Mode list and the
+      script smoothing box) and its test.
+ C. D2 (18775573): RenderedWarp WRITE_DISP / STORE_DISP and the displacement texture, the sigma-delta's VPPIX (r8
+    placeholder) and vector_pixel, SetSigmaDeltaPixelVectors and the guard reset; the D1 measurement set and pixel_fast
+    (test-only settings, off).
+ D. D3 step 1 (e2f0bb90 plus the merge fix in 206506b5): blendFrames (test-only, off): B's field from the consistency pass
+    with the searches swapped, B's pixel mask, the BLEND branches in WARP_LUMA_BODY / WARP_CHROMA_BODY, field_vector_all_b.
+    The merge fix applies R-B (object_scale) to B's motion as well.
+
+Results
+- LED and listen tests 105/105, including the new CommandSourceSetsTheModeAndSwitches,
+  RelaySendsTheScriptsBytesAndNothingElse and ListenLogStaysUnderItsCap. Config 103 pass plus the 2 long-known RPC failures.
+- Full gate on the merged tree: see the end of this file (added when it finishes).
+- Measurements (clone, real HFR clips; R-A and D2/D4 on, scored where shown): M6 on 35.0% removed (film-like 26.3%), damaged
+  tiles 0.58% (film-like 0.35%, extreme clips 1.24%); M6 off 29.0% (0.35%). The pixel_fast thresholds lower damage and
+  removal about equally (best: extreme 1.09% damaged, 45.3% removed), so they stay off. The D3 gain has not been measured
+  yet (the run was stopped when the owner left).
+
+Please check in particular
+1. Relay correctness and safety:
+   - Can VP send anything the script did not send? Check startup, Reconfigure (a live switch between relay and script
+     mode on the same port restarts the module), exit, a script restart, a lost or reordered datagram, and messages from
+     another local program while the script is running (accepted: a known limit of the UDP design; is the risk stated?).
+   - Is the byte format exactly cmd's `echo :x cr > com1` output?
+   - Thread safety: SendRelay runs on the LED worker without the module lock, and the driver's worker thread and portMutex
+     also touch the port.
+   - The fallback when the port cannot be opened, and an older main_vp.py copy without _vp_com1 (its writes fail while VP
+     holds the port).
+2. The startup window: nothing is sent while Python loads. Does any path in Open, SelectFraming, QueryLightRange or the
+   driver worker write before the first relayed command with read_back on or off?
+3. The log bound over several hours: the size counter vs the real file (append mode, other writers), the rotation while
+   open, the summary and TICK-on-change rules (can a flapping agreement write every tick?), and led-listen-now.txt being
+   rewritten for every batch of messages (disk wear and cost?).
+4. Config: is the LED page straightforward and simple to use? (Owner: "make sure it audits for the config function too
+   and ensures it's straightforward and simplistic to use".) Please judge it as a non-developer setting up the projector:
+   - The order and wording of the controls.
+   - What each source shows or greys out.
+   - Whether the adaptive gamma box reflects what the file actually does: an older mode-only file shows it on for
+     compensate or with script smoothing; the first change of source writes adaptive_gamma from the box.
+   - Whether settings that no longer matter for the chosen source are still shown (listen port, Python path, the many
+     compensate tunings) and should be hidden or grouped.
+   - Whether a first-time setup of "my Python script, relayed" needs only the source, the script path and the port.
+   Apply/OK/reopen must round-trip every new key. Please list concrete simplifications.
+5. Older configurations: a file with only `mode:` must behave exactly as before. A file with command_source and an old
+   `mode:` line takes command_source. Validation must accept and reject the new keys correctly.
+6. D2/D3 shaders: coordinate systems (half-resolution masks, chroma_scale), the r8 placeholder's binding, texture lifetimes
+   and destroy lists for fieldB / pixelMaskB / the displacement texture, and that blendFrames off and pixel_fast 0 leave
+   the shaders and results byte-identical to before.
