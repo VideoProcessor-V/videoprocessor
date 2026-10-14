@@ -2360,6 +2360,13 @@ if (p.x < hs.x && p.y < hs.y) {
     ivec2 fs = textureSize(field, 0);
     bool trusted = texelFetch(field, clamp(p / 8, ivec2(0), fs - ivec2(1)), 0).z > 0.5;
     float lo = trusted ? mask_lo : mask_lo_u, hi = trusted ? mask_hi : mask_hi_u;
+#ifdef PIXEL_FAST
+    // Fast motion must predict B more exactly (v in half-resolution pixels).
+    float speed = length(v) * 2.0;
+    float fast = mix(1.0, fast_floor, clamp((speed - fast_from) / max(3.0 * fast_from, 1.0), 0.0, 1.0));
+    lo *= fast;
+    hi *= fast;
+#endif
     imageStore(dst, p, vec4(1.0 - smoothstep(lo, hi, e), 0.0, 0.0, 1.0));
 }
 )GLSL";
@@ -2857,8 +2864,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const bool tiers = settings.pixelTrustHiUntrusted > 0.0f;
 			const float loU = tiers ? settings.pixelTrustLoUntrusted * settings.matchTolerance : lo;
 			const float hiU = tiers ? std::max(loU + 0.01f, settings.pixelTrustHiUntrusted * settings.matchTolerance) : hi;
-			const pl_shader_var maskVars[4] = { { pl_var_float("mask_lo"), &lo, true }, { pl_var_float("mask_hi"), &hi, true },
-				{ pl_var_float("mask_lo_u"), &loU, true }, { pl_var_float("mask_hi_u"), &hiU, true } };
+			const bool fast = settings.pixelFastFrom > 0.0f;
+			const float fastFrom = settings.pixelFastFrom, fastFloor = std::min(1.0f, std::max(0.05f, settings.pixelFastFloor));
+			const pl_shader_var maskVars[6] = { { pl_var_float("mask_lo"), &lo, true }, { pl_var_float("mask_hi"), &hi, true },
+				{ pl_var_float("mask_lo_u"), &loU, true }, { pl_var_float("mask_hi_u"), &hiU, true },
+				{ pl_var_float("fast_from"), &fastFrom, true }, { pl_var_float("fast_floor"), &fastFloor, true } };
 			const pl_shader_desc maskDesc[4] = { Sampled("field", field, false), Sampled("from_half", halfA, false),
 				Sampled("to_half", halfB, true), Storage("dst", pixelMask) };
 			const bool own = settings.pixelTrustedVectors && settings.pixelOwnTexture > 0.0f;
@@ -2881,9 +2891,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (own)
 				maskDescs.push_back(Sampled("vector_ok", vectorOk, false));
 			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + FIELD_ALL_GLSL;
+				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + FIELD_ALL_GLSL;
 			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDescs.data(),
-					static_cast<int>(maskDescs.size()), maskVars, 4, halfW, halfH, 16))
+					static_cast<int>(maskDescs.size()), maskVars, fast ? 6 : 4, halfW, halfH, 16))
 				return false;
 			pixelMaskReady = true;
 		}

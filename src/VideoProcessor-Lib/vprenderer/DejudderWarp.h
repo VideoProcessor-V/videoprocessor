@@ -236,6 +236,13 @@ namespace Dejudder
 		// its motion (no double image; the same in both warps); false = a
 		// crossfade of the moved and the held pixel.
 		bool pixelTrustMotion = true;
+		// Planner D1 (2026-10-14): the damage left with R-A on sits in fast
+		// motion, where a partial move to a slightly wrong place still shows.
+		// Above pixelFastFrom source px per source frame the pixel weights'
+		// thresholds shrink, to pixelFastFloor x at pixelFastFrom x 4 (0 = off):
+		// fast content must predict B more exactly to move.
+		float pixelFastFrom = 0.0f;
+		float pixelFastFloor = 0.4f;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in

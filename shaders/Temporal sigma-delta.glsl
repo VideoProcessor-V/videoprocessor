@@ -72,6 +72,16 @@
  *   1x1 r8 placeholder (zero: untrusted) when nothing is bound; at 0 (the
  *   default) it is never read and the output is byte-identical.
  *
+ * Per-pixel external vectors (planner D2, `vector_pixel` = 1, with
+ *   vector_source = 1): the de-judder's warp writes the displacement it
+ *   applied to every output pixel since the previous present into VPPIX
+ *   (rgba16f, output size; rg full pixels, b = 1 moved / 0 held), so the
+ *   residual is carried along exactly the per-pixel motion of the picture
+ *   (with per-pixel trust the picture no longer moves in 16x16 blocks). The
+ *   quantizer reads VPPIX instead of MV; the search pass still fills MV
+ *   from VPVEC. A 1x1 r8 placeholder when nothing is bound (as VPVEC: an
+ *   rgba16f TEXTURE's data is sized as 16 bytes on D3D11); never read at 0.
+ *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and
  *   libplacebo's encode_color (so values are already in the target's code
@@ -211,6 +221,13 @@
 //!MAXIMUM 1.0
 0.0
 
+//!PARAM vector_pixel
+//!DESC Set by the renderer (planner D2): 1 = the quantizer takes this refresh's per-pixel displacement from VPPIX
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
 //!PARAM test_ramp
 //!DESC 1 = replace the picture with a 10-bit horizontal grey ramp for verification
 //!TYPE float
@@ -219,6 +236,13 @@
 0.0
 
 //!TEXTURE VPVEC
+//!SIZE 1 1
+//!FORMAT r8
+//!FILTER NEAREST
+//!BORDER CLAMP
+00
+
+//!TEXTURE VPPIX
 //!SIZE 1 1
 //!FORMAT r8
 //!FILTER NEAREST
@@ -695,6 +719,7 @@ void hook()
 //!BIND PREV
 //!BIND RESID_NEXT
 //!BIND PREV_NEXT
+//!BIND VPPIX
 //!DESC VideoProcessor temporal sigma-delta quantizer
 //!COMPUTE 16 16
 
@@ -816,6 +841,11 @@ void hook()
         if (!occluded && motion_compensation > 0.5) {
             vec4 mv = MV_mul * texelFetch(MV_raw,
                 min(pos / 16, textureSize(MV_raw, 0) - ivec2(1)), 0);
+            // Planner D2: this pixel's own displacement from the warp.
+            if (vector_pixel > 0.5 && vector_source > 0.5) {
+                vec4 e = texelFetch(VPPIX, min(pos, textureSize(VPPIX, 0) - ivec2(1)), 0);
+                mv = any(isnan(e.xyz)) ? vec4(0.0) : vec4(e.xy, e.z > 0.5 ? 1.0 : 0.0, 0.0);
+            }
             ivec2 v = ivec2(round(mv.xy));   // full pixels
             ivec2 from = pos - v;
             if (mv.z > 0.5 && v != ivec2(0) &&

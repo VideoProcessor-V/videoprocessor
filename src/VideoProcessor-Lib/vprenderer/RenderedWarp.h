@@ -108,13 +108,19 @@ namespace DejudderRendered
 		bool Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
 			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr,
 			const Dejudder::Settings* matcher = nullptr, pl_tex camera = nullptr, pl_tex pixelMask = nullptr,
-			pl_tex vectorOk = nullptr);
+			pl_tex vectorOk = nullptr, pl_tex* displacementOut = nullptr, float stepFraction = 1.0f);
+		// displacementOut (planner D2): when given, also the displacement each
+		// output pixel's content was moved by, times stepFraction (the share of
+		// this extra's shift since the previous present): rgba16f at the
+		// cache's size, rg output pixels, b = 1 where moved, 0 held. The
+		// sigma-delta reads it per pixel (VPPIX).
 		const std::string& Error() const { return error; }
 
 	private:
 		pl_gpu gpu = nullptr;
 		pl_dispatch dispatch = nullptr;
 		pl_tex warped = nullptr;
+		pl_tex displacement = nullptr;
 		bool hostReadable = false;
 		std::string error;
 	};
