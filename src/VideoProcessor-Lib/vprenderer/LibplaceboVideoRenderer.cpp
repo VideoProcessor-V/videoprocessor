@@ -875,7 +875,7 @@ namespace
 		// Delta 10: even (2:2) cadences, 0 = off; 29.97 included or not.
 		double dejudderStrengthEven = 0.0;
 		bool dejudderEvenIncludes2997 = false;
-		double dejudderMatchTolerance = 3.0;
+		double dejudderMatchTolerance = 4.5;   // owner 2026-10-14: with the fade match (planner Q8's condition met)
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
 		// Refinements (docs/VP-build-plan-refinements.md); inert while the
@@ -891,7 +891,7 @@ namespace
 		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
 		bool dejudderEstQpel = true;              // E3
 		bool dejudderEstGate = true;              // E4
-		bool dejudderEstSplit = true;             // E2
+		bool dejudderEstSplit = false;            // E2 (off from 2026-10-14: with the 4.5 tolerance and M6 it costs benefit)
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
 		// Delta 14 (docs/VP-delta-14-soe-rules.md): R-A the strength's roll-off
 		// above a fast pan, R-B the camera/object split (1 = off).
@@ -904,10 +904,14 @@ namespace
 		// texture-scaled tolerance (0 = off), M2 two global candidates, M3
 		// regional hold with its cut test, the coarse search range (1/32
 		// texels) and the forward/backward agreement (half-resolution px).
-		// Defaults: the set that adds no wrongly trusted blocks on the motion
-		// corpus (real clips 22.8 -> 27.3% of the judder removed); the texture
-		// allowance and a 4.5 tolerance are the "more trust" A/B (34.5%).
-		double dejudderTextureTolerance = 0.0;
+		// Defaults (owner 2026-10-14, the night's measurements): with the 4.5
+		// tolerance, texture 0.25, the fade match, the split off and M6's
+		// per-pixel trust, the 7 real HFR clips go from 22.8% to 42.1% of the
+		// judder removed (film-like motion 14.4 -> 31.8%), damaged 32x32 tiles
+		// 0.4 -> 0.9% (film-like 0.19 -> 0.36%), the synthetic corpus 833 ->
+		// 942, wrongly trusted at most 1.9%. "More": dejudder_match_tolerance 8
+		// with dejudder_pixel_trust_lo 1.7 / hi 4.5 (45.1%).
+		double dejudderTextureTolerance = 0.25;
 		bool dejudderGlobalTwo = true;
 		bool dejudderRegionalHold = true;
 		double dejudderCutHistogram = 0.3;
@@ -915,14 +919,14 @@ namespace
 		double dejudderConsistencyPx = 2.0;
 		// M4 (planner Q11): smooth fades matched after a global gain, at most
 		// at the floor strength (off by default until measured on the projector).
-		bool dejudderFadeMatch = false;
+		bool dejudderFadeMatch = true;
 		double dejudderFadeFloor = 0.25;
 		// M5: the pixel verification of trusted blocks (share of off pixels).
 		bool dejudderVerify = false;
 		double dejudderVerifyShare = 0.2;
 		// M6: per-pixel trust on trusted blocks' vectors (multiples of the
 		// match tolerance where a pixel's weight starts to fall and reaches 0).
-		bool dejudderPixelTrust = false;
+		bool dejudderPixelTrust = true;
 		double dejudderPixelTrustLo = 3.0;
 		double dejudderPixelTrustHi = 8.0;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
@@ -11948,6 +11952,7 @@ struct LibplaceboVideoRenderer::Impl
 		pl_tex warpField = dejudder->Field(), warpTrust = dejudder->FrameTrust(), warpSub = dejudder->SubField();
 		pl_tex warpCamera = dejudder->Camera();   // delta 14 R-B
 		pl_tex warpMask = dejudder->PixelMask();   // M6 (nullptr: the block decision)
+		pl_tex warpVectorOk = dejudder->VectorOk();
 		bool aheadTried = false;
 		float previousShift = 0.0f;   // A, shown at shift 0 (delta 8 R1)
 		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
@@ -12046,7 +12051,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				if (!dejudderRenderedWarp->Run(cached, warpField, warpTrust,
 					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, warpSub,
-					&dejudder->GetSettings(), warpCamera, warpMask))
+					&dejudder->GetSettings(), warpCamera, warpMask, warpVectorOk))
 				{
 					failure = "rendered warp failed";
 					break;
@@ -12239,6 +12244,7 @@ struct LibplaceboVideoRenderer::Impl
 					warpSub = dejudder->SnapSubField();
 					if (warpCamera) warpCamera = dejudder->SnapCamera();
 					if (warpMask) warpMask = dejudder->SnapPixelMask();
+					if (warpVectorOk) warpVectorOk = dejudder->SnapVectorOk();
 				}
 			}
 		}

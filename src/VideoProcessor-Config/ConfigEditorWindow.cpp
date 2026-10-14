@@ -6417,7 +6417,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* dejudderTolerance = addText(QStringLiteral("Match tolerance (0.5 to 16)"),
             QStringLiteral("dejudder_match_tolerance"), QStringLiteral("codes"));
         dejudderTolerance->setValidator(new QDoubleValidator(0.5, 16.0, 2, dejudderTolerance));
-        dejudderTolerance->setPlaceholderText(QStringLiteral("3"));
+        dejudderTolerance->setPlaceholderText(QStringLiteral("4.5"));
         dejudderTolerance->setToolTip(QStringLiteral(
             "Mean luma difference (8-bit codes) up to which a block's motion is trusted. "
             "Lower is stricter (more blocks held still)."));
@@ -6530,7 +6530,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "background), even when neither is certain; each block's own match decides."));
         auto* textureTol = addText(QStringLiteral("Texture allowance"), QStringLiteral("dejudder_texture_tolerance"));
         textureTol->setValidator(new QDoubleValidator(0.0, 4.0, 2, textureTol));
-        textureTol->setPlaceholderText(QStringLiteral("0 (off)"));
+        textureTol->setPlaceholderText(QStringLiteral("0.25"));
         textureTol->setToolTip(QStringLiteral(
             "Fine detail, grain and water make even a correct match differ a little; this lets a block's allowed "
             "difference grow with its detail (0 = the fixed match tolerance only)."));

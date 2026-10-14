@@ -324,7 +324,7 @@ if (b.x < size.x && b.y < size.y) {
 
 	bool Warp::Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
 		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera,
-		pl_tex pixelMask)
+		pl_tex pixelMask, pl_tex vectorOk)
 	{
 		out = nullptr;
 		if (!dispatch || !cached || !field || !frameTrust)
@@ -414,9 +414,12 @@ if (b.x < size.x && b.y < size.y) {
 			pl_shader_desc mask = Sampled("pix_mask", pixelMask);
 			mask.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
 			descriptors.push_back(mask);
+			if (vectorOk)
+				descriptors.push_back(Sampled("vector_ok", vectorOk));
 		}
 		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") +
-			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") + OcclusionMask::NlsMapGlsl() +
+			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+			(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") + OcclusionMask::NlsMapGlsl() +
 			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
 			(pixel ? Dejudder::FieldAllGlsl() : "") + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,

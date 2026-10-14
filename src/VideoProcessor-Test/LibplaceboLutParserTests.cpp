@@ -6743,7 +6743,7 @@ namespace VideoProcessorTest
 			pl_tex warped = nullptr;
 			const bool ran = rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare,
 				shift, g, warped, warp.SubField(), &warp.GetSettings(),
-				warp.Camera(), warp.PixelMask());   // delta 14 R-B's camera and M6's weights, as the renderer
+				warp.Camera(), warp.PixelMask(), warp.VectorOk());   // delta 14 R-B's camera and M6's weights, as the renderer
 			if (!ran)
 				pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());

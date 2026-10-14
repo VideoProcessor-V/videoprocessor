@@ -364,15 +364,21 @@ namespace ChainGpuProbe
 		s.estLambda = 0.5f;
 		s.estQpel = true;
 		s.estGate = true;
-		s.estSplit = true;   // E2
+		s.estSplit = false;   // E2 (off by default from 2026-10-14)
 		// Delta 9: H1 feather and H2 hysteresis on, H3 taper off (planner).
 		s.holdFeatherPx = 4.0f;
 		s.holdHysteresis = 2;
-		// Motion fixes (owner 2026-10-13 night): the renderer's defaults.
+		// Motion fixes (owner 2026-10-13 night / 2026-10-14): the renderer's defaults.
 		s.globalTwo = true;
 		s.regionalHold = true;
 		s.coarseRange = 8;
 		s.consistencyPixels = 2.0f;
+		s.matchTolerance = 4.5f;
+		s.textureTolerance = 0.25f;
+		s.fadeMatch = true;
+		s.pixelTrust = true;
+		s.pixelTrustLo = 3.0f;
+		s.pixelTrustHi = 8.0f;
 		return s;
 	}
 	constexpr double kRefinedGrainTolerance = 3.0;

@@ -2808,6 +2808,7 @@ namespace Corpus
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
+		float ownTexture = 0.0f, ownError = 3.0f;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2820,6 +2821,67 @@ namespace Corpus
 		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
 		std::free(set);
 		const bool fixes = which == "fixes";
+		if (which == "final")
+		{
+			// The comparison for the defaults: today (before tonight), the
+			// first set of motion-fix defaults, the proposed defaults, and the
+			// proposed defaults with failed blocks' own vectors where detailed.
+			Variant today{ "today (before tonight)", 3.0f, 0.5f, true };
+			variants.push_back(today);
+			Variant safe{ "first motion-fix defaults", 3.0f, 0.5f, true };
+			safe.globalTwo = true; safe.regional = true; safe.coarseRange = 8; safe.consistency = 2.0f;
+			variants.push_back(safe);
+			Variant proposed = safe;
+			proposed.name = "proposed defaults";
+			proposed.tolerance = 4.5f; proposed.textureTol = 0.25f; proposed.fade = true; proposed.split = false;
+			proposed.pixel = true; proposed.pixLo = 3.0f; proposed.pixHi = 8.0f;
+			variants.push_back(proposed);
+			Variant more = proposed;
+			more.name = "more: proposed with tolerance 8";
+			more.tolerance = 8.0f; more.pixLo = 1.7f; more.pixHi = 4.5f;
+			variants.push_back(more);
+			Variant own = proposed;
+			own.name = "proposed + own vectors (detail 10, error 4x)";
+			own.ownTexture = 10.0f; own.ownError = 4.0f;
+			variants.push_back(own);
+			return variants;
+		}
+		if (which == "pixloose")
+		{
+			// M6 (trusted vectors) with a looser block test: the pixel weights
+			// filter what the block test lets through.
+			auto add = [&](const char* name, float tol, float consistency, float tex, float lo, float hi)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = consistency;
+				v.textureTol = tex; v.fade = true; v.split = false; v.pixel = true; v.pixLo = lo; v.pixHi = hi;
+				variants.push_back(v);
+			};
+			add("pixel, tol 4.5 (candidate)", 4.5f, 2.0f, 0.25f, 3.0f, 8.0f);
+			add("pixel, tol 6", 6.0f, 2.0f, 0.25f, 2.25f, 6.0f);
+			add("pixel, tol 8", 8.0f, 2.0f, 0.25f, 1.7f, 4.5f);
+			add("pixel, tol 6, agreement 3", 6.0f, 3.0f, 0.25f, 2.25f, 6.0f);
+			add("pixel, tol 8, agreement 3", 8.0f, 3.0f, 0.25f, 1.7f, 4.5f);
+			return variants;
+		}
+		if (which == "pixown")
+		{
+			// M6: failed blocks' own vectors where detailed with a fair match.
+			auto add = [&](const char* name, float tex, float err)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true;
+				v.pixLo = 3.0f; v.pixHi = 8.0f; v.ownTexture = tex; v.ownError = err;
+				variants.push_back(v);
+			};
+			add("pixel trusted vectors", 0.0f, 3.0f);
+			add("+ own where detail 3, error 3x", 3.0f, 3.0f);
+			add("+ own where detail 6, error 3x", 6.0f, 3.0f);
+			add("+ own where detail 6, error 2x", 6.0f, 2.0f);
+			add("+ own where detail 10, error 4x", 10.0f, 4.0f);
+			return variants;
+		}
 		if (which == "pixtrusted")
 		{
 			// M6 with trusted blocks' vectors only (a failed block follows its
@@ -3070,7 +3132,7 @@ namespace Corpus
 		s.taperSad = v.taperSad;
 		s.estSplitSad = v.splitSad;
 		s.fadeMatch = v.fade;
-		s.estSplit = s.estSplit && v.split;
+		s.estSplit = v.split;   // the variant decides (the renderer default is off)
 		s.verifyPixels = v.verify;
 		s.verifyShare = v.verifyShare;
 		s.occlusionFill = v.fill;
@@ -3081,6 +3143,8 @@ namespace Corpus
 		s.pixelTrustLoUntrusted = v.pixLoU;
 		s.pixelTrustHiUntrusted = v.pixHiU;
 		s.pixelTrustedVectors = !v.pixAll;
+		s.pixelOwnTexture = v.ownTexture;
+		s.pixelOwnError = v.ownError;
 		if (v.rolloff)
 		{
 			s.motionRolloff = true;
@@ -3535,8 +3599,11 @@ void RunBetaRealFootage()
 			cand.coarseRange = 8; cand.consistencyPixels = 2.0f; cand.fadeMatch = true; cand.estSplit = false;
 			cases.push_back({ "candidate", cand });
 			Dejudder::Settings pix = cand;
-			pix.pixelTrust = true; pix.pixelTrustLo = 3.0f; pix.pixelTrustHi = 8.0f; pix.pixelTrustLoUntrusted = 1.5f; pix.pixelTrustHiUntrusted = 4.0f;
+			pix.pixelTrust = true; pix.pixelTrustLo = 3.0f; pix.pixelTrustHi = 8.0f; pix.pixelTrustedVectors = true;
 			cases.push_back({ "pixel trust", pix });
+			Dejudder::Settings own = pix;
+			own.pixelOwnTexture = 6.0f; own.pixelOwnError = 3.0f;
+			cases.push_back({ "pixel own vectors", own });
 			// VP_TEST_REAL_TIMING=1: the matcher's GPU time per pair, today vs
 			// the motion fixes together (undrained GPU timers, 30 estimates).
 			if (envValue("VP_TEST_REAL_TIMING") == "1")

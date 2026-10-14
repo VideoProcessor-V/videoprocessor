@@ -225,6 +225,13 @@ namespace Dejudder
 		// latter drags content from far away where a failed match's vector is
 		// junk and the picture is smooth (seen on fast motion).
 		bool pixelTrustedVectors = true;
+		// With trusted vectors: a failed block's own vector is also used when
+		// the block is detailed (mean absolute neighbour difference of A's
+		// half-resolution luma at least pixelOwnTexture codes: there the pixel
+		// check can tell a wrong vector) and its match error is at most
+		// pixelOwnError x matchTolerance (0 = off: trusted blocks only).
+		float pixelOwnTexture = 0.0f;
+		float pixelOwnError = 3.0f;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -305,6 +312,11 @@ namespace Dejudder
 		// M6: A's pixel weights (half resolution), nullptr unless pixelTrust.
 		pl_tex PixelMask() const { return settings.pixelTrust && pixelMaskReady ? pixelMask : nullptr; }
 		pl_tex SnapPixelMask() const { return settings.pixelTrust && snapMaskValid ? snapMask : nullptr; }
+		// The blocks whose vectors M6 uses, when failed blocks may use their own
+		// (nullptr: trusted blocks only, the field's trust).
+		bool PixelOwnVectors() const { return settings.pixelTrust && settings.pixelTrustedVectors && settings.pixelOwnTexture > 0.0f && vectorOk; }
+		pl_tex VectorOk() const { return PixelOwnVectors() ? vectorOk : nullptr; }
+		pl_tex SnapVectorOk() const { return PixelOwnVectors() && snapMaskValid ? snapVectorOk : nullptr; }
 		// Planner Q7 (with R-A): after the next pair is estimated ahead, the
 		// snapshot's frame trust with its strength lowered to the next pair's
 		// when that is lower (the roll-off starts on a fast pan's first frame;
@@ -421,9 +433,11 @@ namespace Dejudder
 		pl_tex snapField = nullptr, snapTrust = nullptr, snapSub = nullptr, snapCamera = nullptr;
 		pl_tex aheadTrust = nullptr;
 		pl_tex snapMask = nullptr;
+		pl_tex snapVectorOk = nullptr;
 		bool snapMaskValid = false;
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights
+		pl_tex vectorOk = nullptr;      // M6: blocks whose vector M6 may use (r = 1)
 		bool pixelMaskReady = false;
 		pl_tex camera = nullptr;
 		bool snapSubValid = false;

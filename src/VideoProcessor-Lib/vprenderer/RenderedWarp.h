@@ -107,7 +107,8 @@ namespace DejudderRendered
 		// or nullptr (the block decision).
 		bool Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
 			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr,
-			const Dejudder::Settings* matcher = nullptr, pl_tex camera = nullptr, pl_tex pixelMask = nullptr);
+			const Dejudder::Settings* matcher = nullptr, pl_tex camera = nullptr, pl_tex pixelMask = nullptr,
+			pl_tex vectorOk = nullptr);
 		const std::string& Error() const { return error; }
 
 	private:

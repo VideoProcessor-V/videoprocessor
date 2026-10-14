@@ -1775,7 +1775,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -2211,11 +2211,13 @@ if (q.x < size.x && q.y < size.y) {
 		// Delta 14 R-B's camera.
 		if (Camera() && !copy(camera, &snapCamera))
 			return false;
-		// M6's pixel weights.
+		// M6's pixel weights (and its vector flags).
 		snapMaskValid = false;
 		if (pl_tex mask = PixelMask())
 		{
 			if (!copy(mask, &snapMask))
+				return false;
+			if (PixelOwnVectors() && !copy(vectorOk, &snapVectorOk))
 				return false;
 			snapMaskValid = true;
 		}
@@ -2276,7 +2278,11 @@ vec2 field_vector_all(vec2 lp)
 #ifdef PIXEL_TRUSTED_VECTORS
             // Only trusted blocks' vectors (a failed block follows its
             // trusted neighbours); none among the four: the 4x4 around.
+#ifdef PIXEL_OWN_VECTORS
+            if (texelFetch(vector_ok, clamp(g0 + ivec2(x, y), ivec2(0), fsize - ivec2(1)), 0).r < 0.5) w = 0.0;
+#else
             if (f.z < 0.5) w = 0.0;
+#endif
 #endif
             v += w * f.xy;
             ws += w;
@@ -2286,6 +2292,9 @@ vec2 field_vector_all(vec2 lp)
         for (int y = -1; y <= 2; y++)
             for (int x = -1; x <= 2; x++) {
                 vec4 f = texelFetch(field, clamp(g0 + ivec2(x, y), ivec2(0), fsize - ivec2(1)), 0);
+#ifdef PIXEL_OWN_VECTORS
+                f.z = texelFetch(vector_ok, clamp(g0 + ivec2(x, y), ivec2(0), fsize - ivec2(1)), 0).r;
+#endif
                 if (f.z > 0.5) { v += f.xy; ws += 1.0; }
             }
     }
@@ -2293,6 +2302,29 @@ vec2 field_vector_all(vec2 lp)
 #else
     return v;
 #endif
+}
+)GLSL";
+
+		// M6: which blocks' vectors may be used: trusted, or detailed with a
+		// fair match.
+		const char* const VECTOR_OK_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    vec4 f = texelFetch(field, b, 0);
+    float ok = f.z > 0.5 ? 1.0 : 0.0;
+    if (ok < 0.5 && f.w <= own_error) {
+        ivec2 hs = textureSize(from_half, 0);
+        float t = 0.0;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) {
+                ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs - ivec2(2));
+                float c0 = texelFetch(from_half, p, 0).r;
+                t += abs(texelFetch(from_half, p + ivec2(1, 0), 0).r - c0) + abs(texelFetch(from_half, p + ivec2(0, 1), 0).r - c0);
+            }
+        ok = t / 128.0 >= own_texture ? 1.0 : 0.0;
+    }
+    imageStore(dst, b, vec4(ok, 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -2814,8 +2846,29 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				{ pl_var_float("mask_lo_u"), &loU, true }, { pl_var_float("mask_hi_u"), &hiU, true } };
 			const pl_shader_desc maskDesc[4] = { Sampled("field", field, false), Sampled("from_half", halfA, false),
 				Sampled("to_half", halfB, true), Storage("dst", pixelMask) };
-			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") + FIELD_ALL_GLSL;
-			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDesc, 4, maskVars, 4, halfW, halfH, 16))
+			const bool own = settings.pixelTrustedVectors && settings.pixelOwnTexture > 0.0f;
+			if (own)
+			{
+				pl_tex_params okParams = field->params;
+				okParams.host_readable = settings.hostReadable && (okParams.format->caps & PL_FMT_CAP_HOST_READABLE);
+				if (!pl_tex_recreate(gpu, &vectorOk, &okParams))
+				{
+					error = "cannot create the vector flags";
+					return false;
+				}
+				const float ownError = settings.pixelOwnError * settings.matchTolerance, ownTexture = settings.pixelOwnTexture;
+				const pl_shader_var okVars[2] = { { pl_var_float("own_error"), &ownError, true }, { pl_var_float("own_texture"), &ownTexture, true } };
+				const pl_shader_desc okDesc[3] = { Sampled("field", field, false), Sampled("from_half", halfA, false), Storage("dst", vectorOk) };
+				if (!Dispatch("VideoProcessor de-judder: pixel trust vectors (M6)", nullptr, VECTOR_OK_BODY, okDesc, 3, okVars, 2, blocksX, blocksY, 8))
+					return false;
+			}
+			std::vector<pl_shader_desc> maskDescs(maskDesc, maskDesc + 4);
+			if (own)
+				maskDescs.push_back(Sampled("vector_ok", vectorOk, false));
+			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + FIELD_ALL_GLSL;
+			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDescs.data(),
+					static_cast<int>(maskDescs.size()), maskVars, 4, halfW, halfH, 16))
 				return false;
 			pixelMaskReady = true;
 		}
@@ -2928,6 +2981,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool pixel = settings.pixelTrust && pixelMaskReady && pixelMask;
 		const std::string header = std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
 			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
 			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "");
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
@@ -2947,6 +3001,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			lumaDesc.push_back(Sampled("sub_field", subField, false));
 		if (pixel)
 			lumaDesc.push_back(Sampled("pix_mask", pixelMask, true));
+		if (pixel && PixelOwnVectors())
+			lumaDesc.push_back(Sampled("vector_ok", vectorOk, false));
 		if (withCamera)
 			lumaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
@@ -2978,6 +3034,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			chromaDesc.push_back(Sampled("sub_field", subField, false));
 		if (pixel)
 			chromaDesc.push_back(Sampled("pix_mask", pixelMask, true));
+		if (pixel && PixelOwnVectors())
+			chromaDesc.push_back(Sampled("vector_ok", vectorOk, false));
 		if (withCamera)
 			chromaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> chromaVars = {
