@@ -6328,12 +6328,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "for a low-latency profile chosen by a rule (e.g. sources above 59 Hz); other formats stay on the standard path. "
             "Experimental and off by default (owner 2026-10-14): Standard is the proven path."));
 
-        // Stage 6b-2b: the de-judder (film motion) and its occlusion mask for
-        // the sigma-delta. Off unless set; meant for the cinema profile. The
-        // renderer switches it off by itself in the Low_Latency queue and for
-        // video cadences.
+        // Stage 6b-2b: the de-judder (film motion). Meant for the cinema
+        // profile; the renderer switches it off by itself in the low-latency
+        // queue and for video cadences. Audit 2026-10-14c (owner: 46 settings
+        // is far too many): the taste settings first, shown only as they
+        // apply; the measured motion estimation and the experiments in their
+        // own collapsed sections; the dither's rows in a card of their own.
         form = addCollapsibleSection(QStringLiteral("dejudder"), QStringLiteral("De-judder (film motion)"),
+            QStringLiteral("Taste settings, set by eye: nothing here is measured or fitted. ") +
             QString::fromLatin1(kGpuCostLegend), false);
+        QFormLayout* dejudderTasteForm = form;
         auto* dejudderPreset = new QComboBox;
         dejudderPreset->setObjectName(controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
         dejudderPreset->setAccessibleName(QStringLiteral("De-judder preset"));
@@ -6401,20 +6405,47 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Exact 30.00 is mostly documentary and streaming material; 29.97 is broadcast television (sitcoms, "
             "news, sport), largely video-look already, where smoothing is purely taste."));
         MarkGpuCost(form, strengthEven, 2);
-        auto* occlusionMask = addChoice(QStringLiteral("Occlusion mask for the dither"),
-            QStringLiteral("occlusion_mask"), { QStringLiteral("on"), QStringLiteral("off") });
-        occlusionMask->setToolTip(QStringLiteral(
-            "Tells the temporal sigma-delta where new or uncovered picture content appears, so it "
-            "does not carry its sub-code residual into it. Works with the de-judder off too "
-            "(the motion matcher then runs for the mask alone). Needs the sigma-delta shader."));
-        auto* warpStage = addChoice(QStringLiteral("Extra frames from"),
-            QStringLiteral("dejudder_warp_stage"), { QStringLiteral("rendered"), QStringLiteral("source") });
-        warpStage->setItemText(warpStage->findData(QStringLiteral("rendered")), QStringLiteral("Rendered picture (fast)"));
-        warpStage->setItemText(warpStage->findData(QStringLiteral("source")), QStringLiteral("Source (full re-render)"));
-        warpStage->setToolTip(QStringLiteral(
-            "Rendered picture: each in-between frame warps the finished picture and runs only the final "
-            "dither stage (estimated at about a quarter of the GPU time at 4K; not yet measured). Source: each in-between frame re-renders "
-            "the whole chain from a warped source, the earlier path, kept for A/B comparison."));
+        // Delta 14: two rules against the soap-opera look.
+        auto* rolloff = addChoice(QStringLiteral("Keep fast motion's strobing"),
+            QStringLiteral("dejudder_motion_rolloff"), { QStringLiteral("on"), QStringLiteral("off") });
+        rolloff->setToolTip(QStringLiteral(
+            "Slow and medium pans get the full de-judder; above a fast pan the strength falls back (to the floor below), "
+            "so fast action keeps the strobing film is expected to have. Off = the strength only rises with motion."));
+        auto* rollLo = addText(QStringLiteral("Fall from (source pixels per frame)"), QStringLiteral("dejudder_roll_lo"));
+        rollLo->setValidator(new QDoubleValidator(0.0, 200.0, 1, rollLo));
+        rollLo->setPlaceholderText(QStringLiteral("8"));
+        rollLo->setToolTip(QStringLiteral("The camera speed where the strength starts to fall (8 at 4K is about a brisk pan)."));
+        auto* rollHi = addText(QStringLiteral("Down to the floor at"), QStringLiteral("dejudder_roll_hi"));
+        rollHi->setValidator(new QDoubleValidator(0.0, 400.0, 1, rollHi));
+        rollHi->setPlaceholderText(QStringLiteral("24"));
+        rollHi->setToolTip(QStringLiteral("The camera speed where the strength reaches the floor (24 at 4K is about a whip pan)."));
+        auto* rollFloor = addText(QStringLiteral("Floor (share of the strength)"), QStringLiteral("dejudder_roll_floor"));
+        rollFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, rollFloor));
+        rollFloor->setPlaceholderText(QStringLiteral("0.25"));
+        rollFloor->setToolTip(QStringLiteral("What is left of the strength on the fastest motion (0.25 = a quarter)."));
+        auto* objectStrength = addText(QStringLiteral("Smoothing of motion within the frame"), QStringLiteral("dejudder_object_strength"));
+        objectStrength->setValidator(new QDoubleValidator(0.0, 1.0, 2, objectStrength));
+        objectStrength->setPlaceholderText(QStringLiteral("1 (off)"));
+        objectStrength->setToolTip(QStringLiteral(
+            "The camera's motion (pans, tracking) is always smoothed fully; this scales the smoothing of things moving "
+            "within the frame. 1 = everything smoothed alike (off); 0.5 = people and objects smoothed half as much, which "
+            "reads less like video; 0 = the camera only."));
+        auto* fadeMatch = addChoice(QStringLiteral("Follow motion through fades"),
+            QStringLiteral("dejudder_fade_match"), { QStringLiteral("on"), QStringLiteral("off") });
+        fadeMatch->setToolTip(QStringLiteral(
+            "During a smooth fade (the whole picture brightening or darkening steadily) motion is matched despite the "
+            "brightness change, and the de-judder runs at the fade floor below. A flash or a cut still holds."));
+        auto* fadeFloor = addText(QStringLiteral("Fade floor (share of the strength)"), QStringLiteral("dejudder_fade_floor"));
+        fadeFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, fadeFloor));
+        fadeFloor->setPlaceholderText(QStringLiteral("0.25"));
+        fadeFloor->setToolTip(QStringLiteral("The most de-judder a fading scene gets (0.25 = a quarter)."));
+        MarkGpuCost(form, dejudderPreset, 2);
+
+        form = addCollapsibleSection(QStringLiteral("dejudderEstimation"),
+            QStringLiteral("De-judder: motion estimation (measured - leave alone)"),
+            QStringLiteral("How the de-judder finds and checks motion. The defaults come from the measurements on real "
+                "footage; change them only to compare. ") + QString::fromLatin1(kGpuCostLegend), false);
+        QFormLayout* dejudderEstimationForm = form;
         auto* dejudderTolerance = addText(QStringLiteral("Match tolerance (0.5 to 16)"),
             QStringLiteral("dejudder_match_tolerance"), QStringLiteral("codes"));
         dejudderTolerance->setValidator(new QDoubleValidator(0.5, 16.0, 2, dejudderTolerance));
@@ -6434,6 +6465,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         globalPrior->setToolTip(QStringLiteral(
             "Estimates the whole picture's movement first and starts every block's search there, so "
             "fast pans (beyond about 120 source pixels per frame) are still followed. Default on."));
+        auto* estGate = addChoice(QStringLiteral("Skip the search on still scenes"),
+            QStringLiteral("dejudder_est_gate"), { QStringLiteral("on"), QStringLiteral("off") });
+        estGate->setToolTip(QStringLiteral(
+            "When nothing moves (needs the global-motion prior), last frame's motion is kept instead of searching again."));
         auto* vectorSmooth = addChoice(QStringLiteral("Vector smoothing"),
             QStringLiteral("dejudder_vector_smooth"), { QStringLiteral("on"), QStringLiteral("off") });
         vectorSmooth->setToolTip(QStringLiteral(
@@ -6460,12 +6495,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         trustScale->setToolTip(QStringLiteral(
             "When fewer blocks than this share are trusted, the strength eases down for that frame "
             "instead of holding more of it. 0 turns it off."));
-        auto* occlusionFill = addChoice(QStringLiteral("Fill uncovered areas (experiment)"),
-            QStringLiteral("dejudder_occlusion_fill"), { QStringLiteral("on"), QStringLiteral("off") });
-        occlusionFill->setToolTip(QStringLiteral(
-            "Experiment, default off: picture newly uncovered between two film frames is taken from the "
-            "next frame instead of held. Occlusion fill: source warp path only (Extra frames from: "
-            "Source); with Rendered picture it is ignored (logged once)."));
         // Stage 11a, estimator-lite.
         auto* estCandidates = addChoice(QStringLiteral("Neighbour and temporal candidates"),
             QStringLiteral("dejudder_est_candidates"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -6482,40 +6511,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         estQpel->setToolTip(QStringLiteral(
             "Refines trusted motion to a quarter of a source pixel: sharper in-between frames on slow pans, "
             "no stepping."));
-        auto* estGate = addChoice(QStringLiteral("Skip the search on still scenes"),
-            QStringLiteral("dejudder_est_gate"), { QStringLiteral("on"), QStringLiteral("off") });
-        estGate->setToolTip(QStringLiteral(
-            "When nothing moves (needs the global-motion prior), last frame's motion is kept instead of searching again."));
         auto* estSplit = addChoice(QStringLiteral("Split poorly matched blocks"),
             QStringLiteral("dejudder_est_split"), { QStringLiteral("on"), QStringLiteral("off") });
         estSplit->setToolTip(QStringLiteral(
             "A block that matches poorly (often a small object on a moving background) is searched as four "
             "quarter blocks, so the object and its surround each get their own motion."));
-        // Delta 14: two rules against the soap-opera look.
-        auto* rolloff = addChoice(QStringLiteral("Keep fast motion's strobing"),
-            QStringLiteral("dejudder_motion_rolloff"), { QStringLiteral("on"), QStringLiteral("off") });
-        rolloff->setToolTip(QStringLiteral(
-            "Slow and medium pans get the full de-judder; above a fast pan the strength falls back (to the floor below), "
-            "so fast action keeps the strobing film is expected to have. Off = the strength only rises with motion."));
-        auto* rollLo = addText(QStringLiteral("Fall from (source pixels per frame)"), QStringLiteral("dejudder_roll_lo"));
-        rollLo->setValidator(new QDoubleValidator(0.0, 200.0, 1, rollLo));
-        rollLo->setPlaceholderText(QStringLiteral("8"));
-        rollLo->setToolTip(QStringLiteral("The camera speed where the strength starts to fall (8 at 4K is about a brisk pan)."));
-        auto* rollHi = addText(QStringLiteral("Down to the floor at"), QStringLiteral("dejudder_roll_hi"));
-        rollHi->setValidator(new QDoubleValidator(0.0, 400.0, 1, rollHi));
-        rollHi->setPlaceholderText(QStringLiteral("24"));
-        rollHi->setToolTip(QStringLiteral("The camera speed where the strength reaches the floor (24 at 4K is about a whip pan)."));
-        auto* rollFloor = addText(QStringLiteral("Floor (share of the strength)"), QStringLiteral("dejudder_roll_floor"));
-        rollFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, rollFloor));
-        rollFloor->setPlaceholderText(QStringLiteral("0.25"));
-        rollFloor->setToolTip(QStringLiteral("What is left of the strength on the fastest motion (0.25 = a quarter)."));
-        auto* objectStrength = addText(QStringLiteral("Smoothing of motion within the frame"), QStringLiteral("dejudder_object_strength"));
-        objectStrength->setValidator(new QDoubleValidator(0.0, 1.0, 2, objectStrength));
-        objectStrength->setPlaceholderText(QStringLiteral("1 (off)"));
-        objectStrength->setToolTip(QStringLiteral(
-            "The camera's motion (pans, tracking) is always smoothed fully; this scales the smoothing of things moving "
-            "within the frame. 1 = everything smoothed alike (off); 0.5 = people and objects smoothed half as much, which "
-            "reads less like video; 0 = the camera only."));
+        auto* estSplitSad = addText(QStringLiteral("Split above (codes, 0 = match tolerance)"),
+            QStringLiteral("dejudder_est_split_sad"));
+        estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));
+        estSplitSad->setPlaceholderText(QStringLiteral("0"));
+        estSplitSad->setToolTip(QStringLiteral(
+            "How poorly a block must match (mean luma difference, 8-bit codes) before it is split. Lower splits "
+            "more blocks (more GPU time). 0 = the match tolerance above."));
         // Motion fixes (owner 2026-10-13 night): how hard the matcher looks
         // and what it accepts.
         auto* searchRange = addText(QStringLiteral("Motion search reach"), QStringLiteral("dejudder_search_range"));
@@ -6545,6 +6552,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         regional->setToolTip(QStringLiteral(
             "When few blocks match but the picture has not changed (hard motion, not a cut), the matched areas still move "
             "and the rest holds. A cut still holds the whole frame."));
+        auto* cutHistogram = addText(QStringLiteral("Cut test (picture change)"), QStringLiteral("dejudder_cut_histogram"));
+        cutHistogram->setValidator(new QDoubleValidator(0.0, 2.0, 2, cutHistogram));
+        cutHistogram->setPlaceholderText(QStringLiteral("0.3"));
+        cutHistogram->setToolTip(QStringLiteral(
+            "With the regional hold: how much the picture's brightness distribution must change for a frame to count as a "
+            "cut (0 to 2)."));
         auto* pixelTrust = addChoice(QStringLiteral("Decide pixel by pixel"),
             QStringLiteral("dejudder_pixel_trust"), { QStringLiteral("on"), QStringLiteral("off") });
         pixelTrust->setToolTip(QStringLiteral(
@@ -6566,21 +6579,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         verifyShare->setValidator(new QDoubleValidator(0.02, 1.0, 2, verifyShare));
         verifyShare->setPlaceholderText(QStringLiteral("0.2"));
         verifyShare->setToolTip(QStringLiteral("A block holds when more than this share of its pixels mispredict (0.2 = a fifth)."));
-        auto* fadeMatch = addChoice(QStringLiteral("Follow motion through fades"),
-            QStringLiteral("dejudder_fade_match"), { QStringLiteral("on"), QStringLiteral("off") });
-        fadeMatch->setToolTip(QStringLiteral(
-            "During a smooth fade (the whole picture brightening or darkening steadily) motion is matched despite the "
-            "brightness change, and the de-judder runs at the fade floor below. A flash or a cut still holds."));
-        auto* fadeFloor = addText(QStringLiteral("Fade floor (share of the strength)"), QStringLiteral("dejudder_fade_floor"));
-        fadeFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, fadeFloor));
-        fadeFloor->setPlaceholderText(QStringLiteral("0.25"));
-        fadeFloor->setToolTip(QStringLiteral("The most de-judder a fading scene gets (0.25 = a quarter)."));
-        auto* cutHistogram = addText(QStringLiteral("Cut test (picture change)"), QStringLiteral("dejudder_cut_histogram"));
-        cutHistogram->setValidator(new QDoubleValidator(0.0, 2.0, 2, cutHistogram));
-        cutHistogram->setPlaceholderText(QStringLiteral("0.3"));
-        cutHistogram->setToolTip(QStringLiteral(
-            "With the regional hold: how much the picture's brightness distribution must change for a frame to count as a "
-            "cut (0 to 2)."));
         auto* lowRes = addChoice(QStringLiteral("Motion estimation size (4K)"),
             QStringLiteral("dejudder_low_res"), { QStringLiteral("all"), QStringLiteral("search"), QStringLiteral("off") });
         lowRes->setItemText(lowRes->findData(QStringLiteral("all")), QStringLiteral("Half size, every step (recommended)"));
@@ -6599,13 +6597,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "spare time after a de-judder extra, so the next frame's own refresh only has its render to do. "
             "Without that frame (a short queue) it is worked out before the frame, as before. Needs a queue "
             "target of 3 frames or more to take effect; the stats line shows the share done ahead."));
-        auto* estSplitSad = addText(QStringLiteral("Split above (codes, 0 = match tolerance)"),
-            QStringLiteral("dejudder_est_split_sad"));
-        estSplitSad->setValidator(new QDoubleValidator(0.0, 16.0, 2, estSplitSad));
-        estSplitSad->setPlaceholderText(QStringLiteral("0"));
-        estSplitSad->setToolTip(QStringLiteral(
-            "How poorly a block must match (mean luma difference, 8-bit codes) before it is split. Lower splits "
-            "more blocks (more GPU time). 0 = the match tolerance above."));
         // Delta 9, synthesis-lite.
         auto* feather = addText(QStringLiteral("Soften held-block edges (px, 0 = off)"),
             QStringLiteral("dejudder_hold_feather_px"));
@@ -6622,6 +6613,33 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "A block switches between moved and held only after this many film frames in a row say so, so it does "
             "not flicker between the two. A cut holds everything at once, and the first film frame after a start "
             "or a cut stays held while the blocks earn their trust."));
+        MarkGpuCost(form, globalPrior, 1);
+        MarkGpuCost(form, vectorSmooth, 1);
+        MarkGpuCost(form, estCandidates, 1);
+        MarkGpuCost(form, estQpel, 1);
+        MarkGpuCost(form, estSplit, 1);
+        MarkGpuCost(form, searchRange, 1);
+        MarkGpuCost(form, globalTwo, 1);
+        MarkGpuCost(form, pixelTrust, 1);
+        MarkGpuCost(form, verify, 1);
+
+        form = addCollapsibleSection(QStringLiteral("dejudderExperiments"), QStringLiteral("De-judder: experiments"),
+            QStringLiteral("Off by default; for comparisons only. ") + QString::fromLatin1(kGpuCostLegend), false);
+        QFormLayout* dejudderExperimentsForm = form;
+        auto* warpStage = addChoice(QStringLiteral("Extra frames from"),
+            QStringLiteral("dejudder_warp_stage"), { QStringLiteral("rendered"), QStringLiteral("source") });
+        warpStage->setItemText(warpStage->findData(QStringLiteral("rendered")), QStringLiteral("Rendered picture (fast)"));
+        warpStage->setItemText(warpStage->findData(QStringLiteral("source")), QStringLiteral("Source (full re-render)"));
+        warpStage->setToolTip(QStringLiteral(
+            "Rendered picture: each in-between frame warps the finished picture and runs only the final "
+            "dither stage (estimated at about a quarter of the GPU time at 4K; not yet measured). Source: each in-between frame re-renders "
+            "the whole chain from a warped source, the earlier path, kept for A/B comparison."));
+        auto* occlusionFill = addChoice(QStringLiteral("Fill uncovered areas (experiment)"),
+            QStringLiteral("dejudder_occlusion_fill"), { QStringLiteral("on"), QStringLiteral("off") });
+        occlusionFill->setToolTip(QStringLiteral(
+            "Experiment, default off: picture newly uncovered between two film frames is taken from the "
+            "next frame instead of held. Occlusion fill: source warp path only (Extra frames from: "
+            "Source); with Rendered picture it is ignored (logged once)."));
         auto* taper = addChoice(QStringLiteral("Taper marginal blocks (experiment)"),
             QStringLiteral("dejudder_block_taper"), { QStringLiteral("on"), QStringLiteral("off") });
         taper->setToolTip(QStringLiteral(
@@ -6634,6 +6652,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         taperSad->setToolTip(QStringLiteral(
             "With the taper on: the match error (8-bit codes) at which a marginal block's strength reaches zero; "
             "between the tolerance and this it ramps down. 0 = twice the match tolerance."));
+        MarkGpuCost(form, warpStage, 3);
+        MarkGpuCost(form, occlusionFill, 1);
+
+        form = addCollapsibleSection(QStringLiteral("temporalDither"), QStringLiteral("Temporal dither"),
+            QStringLiteral("The temporal sigma-delta shader's use of the de-judder's motion (needs that shader). ") +
+            QString::fromLatin1(kGpuCostLegend), false);
+        auto* occlusionMask = addChoice(QStringLiteral("Occlusion mask for the dither"),
+            QStringLiteral("occlusion_mask"), { QStringLiteral("on"), QStringLiteral("off") });
+        occlusionMask->setToolTip(QStringLiteral(
+            "Tells the temporal sigma-delta where new or uncovered picture content appears, so it "
+            "does not carry its sub-code residual into it. Works with the de-judder off too "
+            "(the motion matcher then runs for the mask alone). Needs the sigma-delta shader."));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
@@ -6650,15 +6680,60 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "On de-judder extras the temporal sigma-delta can take the motion from the de-judder (exact there, and "
             "it skips its own search, about 1 ms less per extra) instead of searching itself. Needs the VP Renderer "
             "Beta (libplacebo 377); otherwise, and on every other refresh, it searches itself."));
-        // GPU cost markers (after the tooltips, which they prefix).
-        MarkGpuCost(form, dejudderPreset, 2);
         MarkGpuCost(form, occlusionMask, 1);
-        MarkGpuCost(form, globalPrior, 1);
-        MarkGpuCost(form, vectorSmooth, 1);
-        MarkGpuCost(form, occlusionFill, 1);
-        MarkGpuCost(form, estCandidates, 1);
-        MarkGpuCost(form, estQpel, 1);
-        MarkGpuCost(form, estSplit, 1);
+        {
+            // Show only what applies (audit 2026-10-14c): a setting's own
+            // values only while it is on; the de-judder's shaping and its
+            // sections only with a strength set. Unset = the renderer default.
+            auto isOn = [](QComboBox* combo, bool byDefault)
+            {
+                const QString chosen = combo->currentData().toString().trimmed().toLower();
+                return chosen == QStringLiteral("on") ? true : chosen == QStringLiteral("off") ? false : byDefault;
+            };
+            auto number = [](QLineEdit* edit)
+            {
+                bool ok = false;
+                const double parsed = edit->text().trimmed().toDouble(&ok);
+                return ok ? parsed : 0.0;
+            };
+            QWidget* estimationSection = dejudderEstimationForm->parentWidget();
+            QWidget* experimentsSection = dejudderExperimentsForm->parentWidget();
+            auto update = [=]()
+            {
+                const bool active = number(dejudderStrength) > 0.0 || number(strengthEven) > 0.0;
+                auto showIn = [](QFormLayout* layout, QWidget* row, bool visible) { layout->setRowVisible(row, visible); };
+                showIn(dejudderTasteForm, evenRates, number(strengthEven) > 0.0);
+                for (QWidget* row : { static_cast<QWidget*>(rolloff), static_cast<QWidget*>(objectStrength),
+                        static_cast<QWidget*>(fadeMatch) })
+                    showIn(dejudderTasteForm, row, active);
+                const bool roll = active && isOn(rolloff, false);
+                for (QWidget* row : { rollLo, rollHi, rollFloor })
+                    showIn(dejudderTasteForm, row, roll);
+                showIn(dejudderTasteForm, fadeFloor, active && isOn(fadeMatch, true));
+                showIn(dejudderEstimationForm, estSplitSad, isOn(estSplit, false));
+                showIn(dejudderEstimationForm, estLambda, isOn(estCandidates, true));
+                showIn(dejudderEstimationForm, estGate, isOn(globalPrior, true));
+                showIn(dejudderEstimationForm, cutHistogram, isOn(regional, true));
+                showIn(dejudderEstimationForm, pixelLo, isOn(pixelTrust, true));
+                showIn(dejudderEstimationForm, pixelHi, isOn(pixelTrust, true));
+                showIn(dejudderEstimationForm, verifyShare, isOn(verify, false));
+                showIn(dejudderExperimentsForm, taperSad, isOn(taper, false));
+                // Filling uncovered areas works on the source path only.
+                const bool sourcePath = warpStage->currentData().toString() == QStringLiteral("source");
+                occlusionFill->setEnabled(sourcePath);
+                // Estimation and experiments matter only with a strength.
+                if (estimationSection) estimationSection->setEnabled(active);
+                if (experimentsSection) experimentsSection->setEnabled(active);
+            };
+            for (QLineEdit* edit : { dejudderStrength, strengthEven })
+                connect(edit, &QLineEdit::textChanged, this, [update](const QString&) { update(); });
+            for (QComboBox* combo : { rolloff, fadeMatch, estSplit, estCandidates, globalPrior, regional, pixelTrust,
+                    verify, taper, warpStage })
+                connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [update](int) { update(); });
+            update();
+            occlusionFill->setToolTip(occlusionFill->toolTip() +
+                QStringLiteral("\nAvailable only with Extra frames from: Source (in this section)."));
+        }
 
         // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
         form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale (4K)"),
@@ -7539,6 +7614,30 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     key == QStringLiteral("diagnostic_allow_limited_g22") ||
                     key == QStringLiteral("diagnostic_allow_full_g22") ||
                     key == QStringLiteral("diagnostic_vp_owned_dxgi_presenter")) return QStringLiteral("false");
+                // The renderer's own defaults (LibplaceboVideoRenderer.cpp's
+                // settings, AdaptiveDownscale.h), so an unset choice says what
+                // it really is (audit 2026-10-14c: these all showed "Auto").
+                static const std::pair<const char*, const char*> choiceDefaults[] = {
+                    { "capture_path", "standard" }, { "dejudder_even_rates", "30" }, { "occlusion_mask", "off" },
+                    { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
+                    { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
+                    { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
+                    { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
+                    { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
+                    { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
+                    { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
+                    { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },
+                    { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
+                    { "downscale_light", "linear" }, { "preserve_extended_range", "off" }, { "sdr_tone_shape", "off" } };
+                for (const auto& entry : choiceDefaults)
+                    if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
+                // Numbers with a placeholder showing their default: empty, so
+                // the placeholder (not "Auto") is what an unset field shows.
+                if ((key.startsWith(QStringLiteral("dejudder_")) || key.startsWith(QStringLiteral("dither_")) ||
+                        key.startsWith(QStringLiteral("adaptive_")) || key == QStringLiteral("sdr_white_headroom") ||
+                        key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength")) &&
+                    key != QStringLiteral("dejudder_preset"))
+                    return QString();
                 return QStringLiteral("AUTO");
             }
             return {};
