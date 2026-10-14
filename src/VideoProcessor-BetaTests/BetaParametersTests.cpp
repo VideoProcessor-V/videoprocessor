@@ -12,6 +12,8 @@ void RunBetaOptionQuality(); // BetaGpuTests.cpp
 void RunBetaDejudderQuality(); // BetaGpuTests.cpp
 void RunBetaDitherCompare(); // BetaGpuTests.cpp
 void RunBetaTimingGate(); // BetaGpuTests.cpp
+void RunBetaMotionCorpus(); // BetaGpuTests.cpp
+void RunBetaRealFootage(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
@@ -114,6 +116,24 @@ int main() {
             if (runTimingGate)
             {
                 RunBetaTimingGate();
+                return 0;
+            }
+            char* mc = nullptr;
+            size_t mcLength = 0;
+            const bool runCorpus = _dupenv_s(&mc, &mcLength, "VP_TEST_MOTION_CORPUS") == 0 && mc && std::string(mc) == "1";
+            std::free(mc);
+            if (runCorpus)
+            {
+                RunBetaMotionCorpus();
+                return 0;
+            }
+            char* rf = nullptr;
+            size_t rfLength = 0;
+            const bool runReal = _dupenv_s(&rf, &rfLength, "VP_TEST_REAL_FOOTAGE") == 0 && rf && *rf;
+            std::free(rf);
+            if (runReal)
+            {
+                RunBetaRealFootage();
                 return 0;
             }
             if (runQuality)

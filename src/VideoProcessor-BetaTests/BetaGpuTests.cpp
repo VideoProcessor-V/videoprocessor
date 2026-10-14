@@ -27,6 +27,9 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <chrono>
+#include <cstring>
+#include <functional>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -2591,6 +2594,736 @@ struct ScenarioTimingRecord
 	std::map<std::string, double> passPerSourceFrame;     // GPU ms per source frame, all its refreshes
 };
 static std::vector<ScenarioTimingRecord>* g_scenarioSink = nullptr;
+
+// The motion corpus and its failure map (owner 2026-10-13; docs/VP-stage11b-
+// learned-candidates.md section 2, synthetic part): scenes rendered from an
+// exact camera / object model at 3840x2160 (the default half-size matcher),
+// so each pixel's true motion and the true midpoint picture are known. Per
+// scene: six frames estimated in order (warm-up as in VP), the last pair
+// scored: the warp at 0.5 against the true midpoint (and the hold), the
+// trusted blocks' vector error, the share trusted, the trusted blocks that
+// are wrong (> 2 px). Accuracy only: D2/D4 off (the strength is taste). Today's
+// settings and 17 neighbours (match tolerance x E1 lambda x matcher size) give
+// the headroom: today, the best single setting, the best per scene. Report
+// only: VP_TEST_MOTION_CORPUS=1 (VP_TEST_GPU=hardware); results CSV and worst
+// crops in VP_TEST_CORPUS_DIR.
+namespace Corpus
+{
+	struct Obj
+	{
+		int kind = 0;          // 0 a patch of the canvas, 1 a thin bright bar
+		float x0 = 0, y0 = 0, vx = 0, vy = 0, w = 0, h = 0, srcX = 0, srcY = 0;
+	};
+	struct Scene
+	{
+		std::string cls, name;
+		float panX = 0, panY = 0, zoom = 0, rot = 0, fade = 0, grain = 0, level = 1, fencePeriod = 0;
+		bool cut = false, blur = false, subtitle = false;
+		std::vector<Obj> objects;
+	};
+
+	const int W = 3840, H = 2160;
+	const float CX = W / 2.0f, CY = H / 2.0f;
+	const float OX = 1280.0f, OY = 720.0f;   // the frame's place on the canvas at t = 0
+
+	float Sample(const std::vector<uint16_t>& plane, int pw, int ph, float x, float y)
+	{
+		x = std::min(std::max(x, 0.0f), pw - 1.001f);
+		y = std::min(std::max(y, 0.0f), ph - 1.001f);
+		const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+		const float tx = x - ix, ty = y - iy;
+		const uint16_t* r0 = &plane[static_cast<size_t>(iy) * pw + ix];
+		const uint16_t* r1 = r0 + pw;
+		return (r0[0] * (1 - tx) + r0[1] * tx) * (1 - ty) + (r1[0] * (1 - tx) + r1[1] * tx) * ty;
+	}
+
+	// Screen to canvas (the camera at time t) and back.
+	void ToWorld(const Scene& s, float px, float py, float t, float& wx, float& wy)
+	{
+		const float scale = std::pow(1.0f + s.zoom, t);
+		const float a = -s.rot * t * 3.14159265f / 180.0f;
+		const float dx = (px - CX) / scale, dy = (py - CY) / scale;
+		wx = dx * std::cos(a) - dy * std::sin(a) + CX + OX - s.panX * t;
+		wy = dx * std::sin(a) + dy * std::cos(a) + CY + OY - s.panY * t;
+	}
+	void ToScreen(const Scene& s, float wx, float wy, float t, float& px, float& py)
+	{
+		const float scale = std::pow(1.0f + s.zoom, t);
+		const float a = s.rot * t * 3.14159265f / 180.0f;
+		const float dx = wx - CX - OX + s.panX * t, dy = wy - CY - OY + s.panY * t;
+		px = (dx * std::cos(a) - dy * std::sin(a)) * scale + CX;
+		py = (dx * std::sin(a) + dy * std::cos(a)) * scale + CY;
+	}
+	int ObjectAt(const Scene& s, float px, float py, float t)
+	{
+		for (int k = static_cast<int>(s.objects.size()) - 1; k >= 0; --k)
+		{
+			const Obj& o = s.objects[k];
+			const float x = o.x0 + o.vx * t, y = o.y0 + o.vy * t;
+			if (px >= x && px < x + o.w && py >= y && py < y + o.h)
+				return k;
+		}
+		return -1;
+	}
+	uint32_t Hash(uint32_t x, uint32_t y, uint32_t z)
+	{
+		uint32_t v = x * 73856093u ^ y * 19349663u ^ z * 83492791u;
+		v ^= v >> 13; v *= 0x5bd1e995u; v ^= v >> 15;
+		return v;
+	}
+
+	// One frame at time t (grain seeded by `seed`): 16-bit luma, interleaved CbCr.
+	void Render(const Scene& s, const Canvas& c, float t, uint32_t seed, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma)
+	{
+		luma.assign(static_cast<size_t>(W) * H, 0);
+		chroma.assign(static_cast<size_t>(W / 2) * (H / 2) * 2, 0);
+		const float sceneT = s.cut && t >= 4.75f ? t + 37.0f : t;   // a cut: another place on the canvas
+		const float offsetX = s.cut && t >= 4.75f ? 900.0f : 0.0f;
+		auto pixel = [&](float px, float py, float tt, float& l, float& cb, float& cr)
+		{
+			const int k = ObjectAt(s, px, py, tt);
+			if (k >= 0)
+			{
+				const Obj& o = s.objects[k];
+				const float u = px - (o.x0 + o.vx * tt), v = py - (o.y0 + o.vy * tt);
+				if (o.kind == 1) { l = 56000.0f + 2000.0f * ((static_cast<int>(v) / 6) % 2); cb = cr = 32768.0f; return; }
+				l = Sample(c.luma, c.w, c.h, o.srcX + u, o.srcY + v);
+				cb = Sample(c.cb, c.w / 2, c.h / 2, (o.srcX + u) / 2, (o.srcY + v) / 2);
+				cr = Sample(c.cr, c.w / 2, c.h / 2, (o.srcX + u) / 2, (o.srcY + v) / 2);
+				return;
+			}
+			float wx, wy;
+			ToWorld(s, px, py, s.cut ? sceneT : tt, wx, wy);
+			wx += offsetX;
+			if (s.fencePeriod > 0)
+			{
+				const float phase = std::fmod(wx, s.fencePeriod);
+				const bool bar = (phase < 0 ? phase + s.fencePeriod : phase) < s.fencePeriod * 0.45f;
+				l = (bar ? 50000.0f : 9000.0f) + 0.08f * Sample(c.luma, c.w, c.h, wx, wy);
+				cb = cr = 32768.0f;
+				return;
+			}
+			l = Sample(c.luma, c.w, c.h, wx, wy);
+			cb = Sample(c.cb, c.w / 2, c.h / 2, wx / 2, wy / 2);
+			cr = Sample(c.cr, c.w / 2, c.h / 2, wx / 2, wy / 2);
+		};
+		const float level = s.level * (1.0f - s.fade * t);
+		auto shade = [&](float px, float py, float& l, float& cb, float& cr)
+		{
+			if (s.blur)
+			{
+				float sl = 0, scb = 0, scr = 0;
+				for (float d : { -0.1875f, -0.0625f, 0.0625f, 0.1875f })
+				{
+					float a, b2, c2;
+					pixel(px, py, t + d, a, b2, c2);
+					sl += a; scb += b2; scr += c2;
+				}
+				l = sl / 4; cb = scb / 4; cr = scr / 4;
+			}
+			else
+				pixel(px, py, t, l, cb, cr);
+			l = 4096.0f + (l - 4096.0f) * level;
+			cb = 32768.0f + (cb - 32768.0f) * level;
+			cr = 32768.0f + (cr - 32768.0f) * level;
+		};
+		const int threads = std::max(2u, std::thread::hardware_concurrency());
+		std::vector<std::thread> pool;
+		for (int th = 0; th < threads; ++th)
+			pool.emplace_back([&, th]()
+			{
+				for (int y = th; y < H; y += threads)
+					for (int x = 0; x < W; ++x)
+					{
+						float l, cb, cr;
+						shade(x + 0.5f, y + 0.5f, l, cb, cr);
+						if (s.subtitle && y >= 1880 && y < 2000 && x >= 1120 && x < 2720)
+						{
+							// White strokes with a black edge, fixed on the screen.
+							const int gx = (x - 1120) / 6, gy = (y - 1880) / 8;
+							const bool stroke = (Hash(gx / 5, gy / 3, 7) % 3) == 0 && ((x - 1120) % 30) < 24 && ((y - 1880) % 120) > 16 && ((y - 1880) % 120) < 104;
+							if (stroke) l = 60000.0f;
+						}
+						if (s.grain > 0)
+							l += (static_cast<float>(Hash(x, y, seed) & 0xFFFF) / 65535.0f - 0.5f) * 2.0f * s.grain;
+						luma[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(std::min(65535.0f, std::max(0.0f, l)));
+						if ((x & 1) == 0 && (y & 1) == 0)
+						{
+							const size_t ci = (static_cast<size_t>(y / 2) * (W / 2) + x / 2) * 2;
+							chroma[ci] = static_cast<uint16_t>(std::min(65535.0f, std::max(0.0f, cb)));
+							chroma[ci + 1] = static_cast<uint16_t>(std::min(65535.0f, std::max(0.0f, cr)));
+						}
+					}
+			});
+		for (auto& t2 : pool) t2.join();
+	}
+
+	// The true motion from t to t + 1, per 16x16 block (the field's grid),
+	// from a 4x4 sample of each block; NaN where the block is cut.
+	std::vector<float> TrueField(const Scene& s, float t, int blocksX, int blocksY)
+	{
+		std::vector<float> v(static_cast<size_t>(blocksX) * blocksY * 2, 0.0f);
+		for (int by = 0; by < blocksY; ++by)
+			for (int bx = 0; bx < blocksX; ++bx)
+			{
+				float sx = 0, sy = 0;
+				for (int j = 0; j < 4; ++j)
+					for (int i = 0; i < 4; ++i)
+					{
+						const float px = bx * 16 + 2 + i * 4, py = by * 16 + 2 + j * 4;
+						const int k = ObjectAt(s, px, py, t);
+						if (k >= 0) { sx += s.objects[k].vx; sy += s.objects[k].vy; continue; }
+						float wx, wy, qx, qy;
+						ToWorld(s, px, py, t, wx, wy);
+						ToScreen(s, wx, wy, t + 1, qx, qy);
+						sx += qx - px; sy += qy - py;
+					}
+				v[(static_cast<size_t>(by) * blocksX + bx) * 2] = s.cut ? NAN : sx / 16;
+				v[(static_cast<size_t>(by) * blocksX + bx) * 2 + 1] = s.cut ? NAN : sy / 16;
+			}
+		return v;
+	}
+
+	// The settings: today (renderer defaults, accuracy only) and neighbours.
+	// "half size": dejudder_low_res all (today); "half-size search": the
+	// search at half size, the rest at full size (dejudder_low_res search).
+	struct Variant { std::string name; float tolerance, lambda; bool lowResAll; };
+	std::vector<Variant> Variants()
+	{
+		std::vector<Variant> variants;
+		for (bool all : { true, false })
+			for (float tol : { 3.0f, 2.0f, 4.5f })
+				for (float lam : { 0.5f, 0.25f, 1.0f })
+				{
+					char text[96];
+					std::snprintf(text, sizeof(text), "tolerance %.1f, lambda %.2f, matcher %s", tol, lam, all ? "half size" : "half-size search");
+					variants.push_back({ text, tol, lam, all });
+				}
+		return variants;
+	}
+	Dejudder::Settings SettingsFor(const Variant& v)
+	{
+		Dejudder::Settings s = ChainGpuProbe::Refined(Dejudder::Settings{});
+		s.matchTolerance = v.tolerance;
+		s.minTrustedShare = 0.25f;
+		s.estLambda = v.lambda;
+		s.lowRes = true;
+		s.lowResAll = v.lowResAll;
+		s.motionScaleHi = 0.0f;   // accuracy only: D2 and D4 off
+		s.trustScaleFull = 0.0f;
+		s.hostReadable = true;
+		return s;
+	}
+
+	std::vector<Scene> Scenes()
+	{
+		std::vector<Scene> list;
+		auto add = [&](const char* cls, const char* name, std::function<void(Scene&)> set)
+		{
+			Scene s; s.cls = cls; s.name = name; set(s); list.push_back(s);
+		};
+		add("static", "still", [](Scene&) {});
+		add("static", "still, grain", [](Scene& s) { s.grain = 900; });
+		add("slow pan", "1 px", [](Scene& s) { s.panX = 1; });
+		add("slow pan", "2.5 px", [](Scene& s) { s.panX = 2.5f; s.panY = 0.5f; });
+		add("medium pan", "6 px", [](Scene& s) { s.panX = 6; s.panY = 1; });
+		add("medium pan", "12 px", [](Scene& s) { s.panX = 12; });
+		add("fast pan", "20 px", [](Scene& s) { s.panX = 20; s.panY = 3; });
+		add("fast pan", "32 px", [](Scene& s) { s.panX = -32; });
+		add("whip pan", "48 px", [](Scene& s) { s.panX = 48; });
+		add("whip pan", "80 px", [](Scene& s) { s.panX = -80; s.panY = 6; });
+		add("diagonal / vertical", "8, 8", [](Scene& s) { s.panX = 8; s.panY = 8; });
+		add("diagonal / vertical", "0, 10", [](Scene& s) { s.panY = 10; });
+		add("zoom", "in 1%", [](Scene& s) { s.zoom = 0.01f; });
+		add("zoom", "out 1.5%", [](Scene& s) { s.zoom = -0.015f; });
+		add("rotation", "0.4 deg", [](Scene& s) { s.rot = 0.4f; });
+		add("rotation", "-0.8 deg", [](Scene& s) { s.rot = -0.8f; });
+		add("object, still background", "12 px", [](Scene& s) { s.objects.push_back({ 0, 1400, 700, 12, 0, 420, 360, 200, 2600 }); });
+		add("object, still background", "30 px", [](Scene& s) { s.objects.push_back({ 0, 900, 800, -30, 4, 360, 300, 4000, 300 }); });
+		add("object against a pan", "pan 10, object -15", [](Scene& s) { s.panX = 10; s.objects.push_back({ 0, 1700, 700, -15, 0, 420, 420, 200, 2600 }); });
+		add("object against a pan", "pan 6, object +20", [](Scene& s) { s.panX = 6; s.objects.push_back({ 0, 1000, 900, 20, -2, 300, 500, 4200, 2400 }); });
+		add("thin objects", "bars over still", [](Scene& s) { for (int i = 0; i < 6; ++i) s.objects.push_back({ 1, 600.0f + i * 420, 200, 10, 0, 4, 1500, 0, 0 }); });
+		add("thin objects", "bars over a pan", [](Scene& s) { s.panX = 8; for (int i = 0; i < 6; ++i) s.objects.push_back({ 1, 600.0f + i * 420, 300, -6, 0, 5, 1400, 0, 0 }); });
+		add("repetitive texture", "fence 24, pan 7", [](Scene& s) { s.fencePeriod = 24; s.panX = 7; });
+		add("repetitive texture", "fence 16, pan 12", [](Scene& s) { s.fencePeriod = 16; s.panX = 12; });
+		add("occlusion", "large object crossing", [](Scene& s) { s.panX = 5; s.objects.push_back({ 0, 1000, 200, 25, 0, 1200, 1600, 4300, 1000 }); });
+		add("lighting change", "fade 3% a frame", [](Scene& s) { s.panX = 6; s.fade = 0.03f; });
+		add("heavy grain", "pan 6", [](Scene& s) { s.panX = 6; s.grain = 3000; });
+		add("heavy grain", "pan 15", [](Scene& s) { s.panX = 15; s.grain = 3000; });
+		add("dark, low contrast", "pan 6", [](Scene& s) { s.panX = 6; s.level = 0.15f; });
+		add("subtitles over motion", "pan 8", [](Scene& s) { s.panX = 8; s.subtitle = true; });
+		add("subtitles over motion", "pan 20", [](Scene& s) { s.panX = 20; s.subtitle = true; });
+		add("cut", "cut on the last pair", [](Scene& s) { s.panX = 6; s.cut = true; });
+		add("motion blur", "pan 12", [](Scene& s) { s.panX = 12; s.blur = true; });
+		add("motion blur", "pan 30", [](Scene& s) { s.panX = 30; s.blur = true; });
+		return list;
+	}
+}
+
+void RunBetaMotionCorpus()
+{
+	using namespace Corpus;
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	auto envValue = [](const char* name)
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		std::string value;
+		if (_dupenv_s(&v, &n, name) == 0 && v) value = v;
+		std::free(v);
+		return value;
+	};
+	const std::string outDir = envValue("VP_TEST_CORPUS_DIR");
+	std::cout << "Beta motion corpus: building the canvas\n" << std::flush;
+	Canvas canvas;
+	canvas.Build(6400, 3600);
+	auto plane = [&](int pw, int ph, int comps)
+	{
+		pl_tex_params p{};
+		p.w = pw; p.h = ph;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE));
+		p.sampleable = true; p.storable = true; p.host_writable = true; p.host_readable = true;
+		return pl_tex_create(g, &p);
+	};
+	const int frames = 6;
+	std::vector<pl_tex> lumaT(frames), chromaT(frames);
+	for (int f = 0; f < frames; ++f) { lumaT[f] = plane(W, H, 1); chromaT[f] = plane(W / 2, H / 2, 2); }
+	const std::vector<Variant> variants = Variants();
+	struct Result { double hold = 0, warp = 0, epe = 0, bad = 0, trusted = 0; bool scored = false; };
+	const std::vector<Scene> scenes = Scenes();
+	std::vector<std::vector<Result>> results(scenes.size(), std::vector<Result>(variants.size()));
+	std::ofstream csv;
+	if (!outDir.empty())
+	{
+		CreateDirectoryA(outDir.c_str(), nullptr);
+		csv.open(outDir + "\\corpus.csv", std::ios::trunc);
+		csv << "class,scene,variant,hold,warp,benefit,epe_trusted,bad_trusted_share,trusted_share\n";
+	}
+	std::vector<uint16_t> luma, chroma, truth, truthChroma, warped(static_cast<size_t>(W) * H), aLuma;
+	const int blocksX = ((W + 1) / 2 + 7) / 8, blocksY = ((H + 1) / 2 + 7) / 8;
+	auto halfToFloat = [](uint16_t h)
+	{
+		const int e = (h >> 10) & 31, m = h & 1023;
+		const float mag = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(1.0f + m / 1024.0f, e - 15);
+		return (h & 0x8000) ? -mag : mag;
+	};
+	for (size_t si = 0; si < scenes.size(); ++si)
+	{
+		const Scene& scene = scenes[si];
+		const auto renderStart = std::chrono::steady_clock::now();
+		for (int f = 0; f < frames; ++f)
+		{
+			Render(scene, canvas, static_cast<float>(f), 1000u + f, luma, chroma);
+			if (f == frames - 2) aLuma = luma;
+			pl_tex_transfer_params up{};
+			up.tex = lumaT[f]; up.ptr = luma.data();
+			Check(pl_tex_upload(g, &up), "corpus: upload");
+			up.tex = chromaT[f]; up.ptr = chroma.data();
+			Check(pl_tex_upload(g, &up), "corpus: upload");
+		}
+		Render(scene, canvas, frames - 1.5f, 999u, truth, truthChroma);   // the true midpoint of the last pair
+		const std::vector<float> trueField = TrueField(scene, frames - 2.0f, blocksX, blocksY);
+		const double renderSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - renderStart).count();
+		for (size_t vi = 0; vi < variants.size(); ++vi)
+		{
+			Dejudder::MotionWarp warp(gpu.Log(), g, SettingsFor(variants[vi]));
+			Dejudder::Planes last;
+			for (int f = 0; f + 1 < frames; ++f)
+			{
+				Dejudder::Planes a, b;
+				a.luma = lumaT[f]; a.chroma = chromaT[f]; b.luma = lumaT[f + 1]; b.chroma = chromaT[f + 1];
+				a.chromaShiftX = b.chromaShiftX = 1;
+				a.chromaShiftY = b.chromaShiftY = 1;
+				Check(warp.Estimate(a, b), "corpus: estimate: " + warp.LastError());
+				last = a;
+			}
+			Dejudder::Planes out;
+			Check(warp.Warp(last, 0.5f, out, true), "corpus: warp: " + warp.LastError());
+			pl_tex_transfer_params d{};
+			d.tex = out.luma; d.ptr = warped.data();
+			Check(pl_tex_download(g, &d), "corpus: download");
+			Result r;
+			double hold = 0, wr = 0;
+			long long n = 0;
+			for (int y = 64; y < H - 64; y += 2)
+				for (int x = 64; x < W - 64; x += 2)
+				{
+					const size_t i = static_cast<size_t>(y) * W + x;
+					hold += std::abs(static_cast<int>(aLuma[i]) - static_cast<int>(truth[i]));
+					wr += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+					++n;
+				}
+			r.hold = hold / n / 64.0;
+			r.warp = wr / n / 64.0;
+			// The field: trusted blocks' error against the truth.
+			std::vector<uint16_t> fieldHalf(static_cast<size_t>(blocksX) * blocksY * 4);
+			d.tex = warp.Field(); d.ptr = fieldHalf.data();
+			Check(pl_tex_download(g, &d), "corpus: field download");
+			double epe = 0; long long trusted = 0, bad = 0, all = 0;
+			for (int by = 2; by < blocksY - 2; ++by)
+				for (int bx = 2; bx < blocksX - 2; ++bx)
+				{
+					const size_t i = static_cast<size_t>(by) * blocksX + bx;
+					++all;
+					if (halfToFloat(fieldHalf[i * 4 + 2]) < 0.5f) continue;
+					++trusted;
+					const float tx = trueField[i * 2], ty = trueField[i * 2 + 1];
+					if (std::isnan(tx)) { ++bad; continue; }
+					const float e = std::hypot(halfToFloat(fieldHalf[i * 4]) - tx, halfToFloat(fieldHalf[i * 4 + 1]) - ty);
+					epe += e;
+					bad += e > 2.0f ? 1 : 0;
+				}
+			r.trusted = all ? static_cast<double>(trusted) / all : 0.0;
+			r.epe = trusted ? epe / trusted : 0.0;
+			r.bad = trusted ? static_cast<double>(bad) / trusted : 0.0;
+			r.scored = true;
+			results[si][vi] = r;
+			if (csv)
+				csv << "\"" << scene.cls << "\",\"" << scene.name << "\",\"" << variants[vi].name << "\"," << r.hold << "," << r.warp << ","
+					<< (r.hold - r.warp) << "," << r.epe << "," << r.bad << "," << r.trusted << "\n";
+			// The worst places of today's warp, for the eye.
+			if (vi == 0 && !outDir.empty())
+			{
+				double worst = -1; int wx = 0, wy = 0;
+				for (int ty = 0; ty + 256 <= H; ty += 128)
+					for (int tx = 0; tx + 384 <= W; tx += 128)
+					{
+						double e = 0;
+						for (int y = ty; y < ty + 256; y += 4)
+							for (int x = tx; x < tx + 384; x += 4)
+							{
+								const size_t i = static_cast<size_t>(y) * W + x;
+								e += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+							}
+						if (e > worst) { worst = e; wx = tx; wy = ty; }
+					}
+				std::string file = outDir + "\\crop-" + std::to_string(si) + ".ppm";
+				std::ofstream ppm(file, std::ios::binary | std::ios::trunc);
+				ppm << "P6\n" << 384 * 3 << " 256\n255\n";
+				for (int y = wy; y < wy + 256; ++y)
+					for (int part = 0; part < 3; ++part)
+						for (int x = wx; x < wx + 384; ++x)
+						{
+							const size_t i = static_cast<size_t>(y) * W + x;
+							int v = part == 0 ? truth[i] >> 8 : part == 1 ? warped[i] >> 8 :
+								std::min(255, std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i])) >> 5);
+							const unsigned char px[3] = { static_cast<unsigned char>(v), static_cast<unsigned char>(v), static_cast<unsigned char>(v) };
+							ppm.write(reinterpret_cast<const char*>(px), 3);
+						}
+			}
+		}
+		const Result& today = results[si][0];
+		char line[320];
+		std::snprintf(line, sizeof(line), "  %-26s %-22s hold %6.2f  warp %6.2f  benefit %6.2f  trusted %5.1f%%  vector error %5.2f px  wrong trusted %5.1f%%  (render %.1f s)",
+			scene.cls.c_str(), scene.name.c_str(), today.hold, today.warp, today.hold - today.warp, 100.0 * today.trusted, today.epe,
+			100.0 * today.bad, renderSeconds);
+		std::cout << line << "\n" << std::flush;
+	}
+	// Per class (today), and the headroom.
+	std::cout << "Beta motion corpus: per class, today's settings (codes of 1023; vectors in source px):\n";
+	std::map<std::string, std::vector<size_t>> byClass;
+	for (size_t si = 0; si < scenes.size(); ++si) byClass[scenes[si].cls].push_back(si);
+	for (const auto& cls : byClass)
+	{
+		double hold = 0, wr = 0, epe = 0, bad = 0, trusted = 0;
+		for (size_t si : cls.second) { const Result& r = results[si][0]; hold += r.hold; wr += r.warp; epe += r.epe; bad += r.bad; trusted += r.trusted; }
+		const double n = static_cast<double>(cls.second.size());
+		char line[256];
+		std::snprintf(line, sizeof(line), "  %-26s benefit %6.2f of hold %6.2f (%5.1f%% removed)  trusted %5.1f%%  vector error %5.2f  wrong trusted %5.1f%%",
+			cls.first.c_str(), (hold - wr) / n, hold / n, hold > 0 ? 100.0 * (hold - wr) / hold : 0.0, 100.0 * trusted / n, epe / n, 100.0 * bad / n);
+		std::cout << line << "\n";
+	}
+	double todayBenefit = 0, oracleBenefit = 0;
+	std::vector<double> perVariant(variants.size(), 0.0);
+	for (size_t si = 0; si < scenes.size(); ++si)
+	{
+		if (scenes[si].cut) continue;   // nothing to gain or lose but the hold
+		double best = -1e30;
+		for (size_t vi = 0; vi < variants.size(); ++vi)
+		{
+			const double b = results[si][vi].hold - results[si][vi].warp;
+			perVariant[vi] += b;
+			best = std::max(best, b);
+		}
+		todayBenefit += results[si][0].hold - results[si][0].warp;
+		oracleBenefit += best;
+	}
+	size_t bestVariant = 0;
+	for (size_t vi = 1; vi < variants.size(); ++vi) if (perVariant[vi] > perVariant[bestVariant]) bestVariant = vi;
+	char line[400];
+	std::snprintf(line, sizeof(line), "Beta motion corpus headroom (benefit summed over the scenes, cut excluded): today %.2f; best single setting %.2f (%s, %+.1f%%); best per scene %.2f (%+.1f%%)",
+		todayBenefit, perVariant[bestVariant], variants[bestVariant].name.c_str(),
+		todayBenefit > 0 ? 100.0 * (perVariant[bestVariant] - todayBenefit) / todayBenefit : 0.0, oracleBenefit,
+		todayBenefit > 0 ? 100.0 * (oracleBenefit - todayBenefit) / todayBenefit : 0.0);
+	std::cout << line << "\n";
+	const Result& cutResult = results[scenes.size() - 3][0];
+	std::cout << "  the cut: trusted " << 100.0 * cutResult.trusted << "% of blocks (should hold: near 0)\n";
+	for (size_t f = 0; f < lumaT.size(); ++f) { pl_tex_destroy(g, &lumaT[f]); pl_tex_destroy(g, &chromaT[f]); }
+}
+
+// The failure map's real part (owner 2026-10-13): high-frame-rate clips give
+// the true in-between pictures. UVG 120 fps (3840x2160 yuv420p10le .yuv):
+// frames n and n+5 are a 24p pair, n+1 .. n+4 the truth at 0.2 .. 0.8. Xiph
+// 50p (.y4m, 8-bit 4:2:0): n and n+2, n+1 the truth at 0.5. Warm-up as in VP
+// (three earlier pairs at the same spacing). Per clip six places; per place
+// the warp against the truth and the hold (frame n, what is shown without
+// the de-judder), with the settings of the synthetic corpus. Report only:
+// VP_TEST_REAL_FOOTAGE=<folder of the clips>; CSV (and, with
+// VP_TEST_REAL_LPIPS=<folder>, 8-bit PGMs of truth / warp / hold at 0.4 or
+// 0.5 for LPIPS) in VP_TEST_CORPUS_DIR.
+void RunBetaRealFootage()
+{
+	using namespace Corpus;
+	auto envValue = [](const char* name)
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		std::string value;
+		if (_dupenv_s(&v, &n, name) == 0 && v) value = v;
+		std::free(v);
+		return value;
+	};
+	const std::string folder = envValue("VP_TEST_REAL_FOOTAGE"), outDir = envValue("VP_TEST_CORPUS_DIR"),
+		lpipsDir = envValue("VP_TEST_REAL_LPIPS");
+	struct Clip { std::string name, path; bool y4m; int spacing; long long frames; long long headerBytes; };
+	std::vector<Clip> clips;
+	WIN32_FIND_DATAA found{};
+	HANDLE search = FindFirstFileA((folder + "\\*").c_str(), &found);
+	const long long yuvFrame = 3840LL * 2160 * 3;          // 10-bit in 16-bit words, 4:2:0
+	const long long y4mFrame = 3840LL * 2160 * 3 / 2 + 6;  // "FRAME\n" + 8-bit 4:2:0
+	if (search != INVALID_HANDLE_VALUE)
+	{
+		do
+		{
+			const std::string name = found.cFileName;
+			const long long size = (static_cast<long long>(found.nFileSizeHigh) << 32) | found.nFileSizeLow;
+			const bool yuv = name.size() > 4 && name.compare(name.size() - 4, 4, ".yuv") == 0 && name.find("3840x2160") != std::string::npos;
+			const bool y4m = name.size() > 4 && name.compare(name.size() - 4, 4, ".y4m") == 0 && name.find("2160p50") != std::string::npos;
+			if (yuv)
+				clips.push_back({ name.substr(0, name.find('_')), folder + "\\" + name, false, 5, size / yuvFrame, 0 });
+			else if (y4m)
+			{
+				std::ifstream in(folder + "\\" + name, std::ios::binary);
+				std::string header;
+				std::getline(in, header);
+				const long long headerBytes = static_cast<long long>(header.size()) + 1;
+				if (header.find("W3840") != std::string::npos && header.find("H2160") != std::string::npos &&
+					(header.find(" C") == std::string::npos || header.find(" C420") != std::string::npos))
+					clips.push_back({ name.substr(0, name.find("_2160")), folder + "\\" + name, true, 2, (size - headerBytes) / y4mFrame, headerBytes });
+			}
+		} while (FindNextFileA(search, &found));
+		FindClose(search);
+	}
+	if (clips.empty())
+	{
+		std::cout << "Beta real footage: no 3840x2160 .yuv (120 fps, 10-bit) or 2160p50 .y4m in " << folder << "\n";
+		return;
+	}
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	auto plane = [&](int pw, int ph, int comps)
+	{
+		pl_tex_params p{};
+		p.w = pw; p.h = ph;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16,
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE));
+		p.sampleable = true; p.storable = true; p.host_writable = true; p.host_readable = true;
+		return pl_tex_create(g, &p);
+	};
+	// One frame: 16-bit luma, interleaved 16-bit CbCr at half size.
+	auto readFrame = [&](const Clip& clip, long long index, std::vector<uint16_t>& luma, std::vector<uint16_t>* chroma)
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, clip.path.c_str(), "rb") != 0 || !f) return false;
+		const size_t lumaCount = static_cast<size_t>(W) * H, chromaCount = lumaCount / 4;
+		luma.resize(lumaCount);
+		bool ok = true;
+		if (!clip.y4m)
+		{
+			std::vector<uint16_t> buffer(lumaCount + 2 * chromaCount);
+			_fseeki64(f, index * yuvFrame, SEEK_SET);
+			ok = fread(buffer.data(), 2, buffer.size(), f) == buffer.size();
+			for (size_t i = 0; i < lumaCount; ++i) luma[i] = static_cast<uint16_t>(std::min(1023, static_cast<int>(buffer[i])) * 64);
+			if (chroma)
+			{
+				chroma->resize(chromaCount * 2);
+				for (size_t i = 0; i < chromaCount; ++i)
+				{
+					(*chroma)[i * 2] = static_cast<uint16_t>(std::min(1023, static_cast<int>(buffer[lumaCount + i])) * 64);
+					(*chroma)[i * 2 + 1] = static_cast<uint16_t>(std::min(1023, static_cast<int>(buffer[lumaCount + chromaCount + i])) * 64);
+				}
+			}
+		}
+		else
+		{
+			std::vector<uint8_t> buffer(static_cast<size_t>(y4mFrame));
+			_fseeki64(f, clip.headerBytes + index * y4mFrame, SEEK_SET);
+			ok = fread(buffer.data(), 1, buffer.size(), f) == buffer.size() && std::memcmp(buffer.data(), "FRAME", 5) == 0;
+			const uint8_t* y = buffer.data() + 6;
+			for (size_t i = 0; i < lumaCount; ++i) luma[i] = static_cast<uint16_t>(y[i] * 256);
+			if (chroma)
+			{
+				chroma->resize(chromaCount * 2);
+				for (size_t i = 0; i < chromaCount; ++i)
+				{
+					(*chroma)[i * 2] = static_cast<uint16_t>(y[lumaCount + i] * 256);
+					(*chroma)[i * 2 + 1] = static_cast<uint16_t>(y[lumaCount + chromaCount + i] * 256);
+				}
+			}
+		}
+		fclose(f);
+		return ok;
+	};
+	auto writePgm = [](const std::string& file, const std::vector<uint16_t>& luma)
+	{
+		std::ofstream out(file, std::ios::binary | std::ios::trunc);
+		out << "P5\n" << W << " " << H << "\n255\n";
+		std::vector<unsigned char> row(W);
+		for (int y = 0; y < H; ++y)
+		{
+			for (int x = 0; x < W; ++x) row[x] = static_cast<unsigned char>(luma[static_cast<size_t>(y) * W + x] >> 8);
+			out.write(reinterpret_cast<const char*>(row.data()), W);
+		}
+	};
+	const std::vector<Variant> variants = Variants();
+	const int sources = 5;   // three warm-up pairs and the scored pair
+	std::vector<pl_tex> lumaT(sources), chromaT(sources);
+	for (int f = 0; f < sources; ++f) { lumaT[f] = plane(W, H, 1); chromaT[f] = plane(W / 2, H / 2, 2); }
+	std::ofstream csv;
+	if (!outDir.empty())
+	{
+		CreateDirectoryA(outDir.c_str(), nullptr);
+		csv.open(outDir + "\\real.csv", std::ios::trunc);
+		csv << "clip,frame,shift,variant,hold,warp,benefit,trusted_share\n";
+	}
+	if (!lpipsDir.empty()) CreateDirectoryA(lpipsDir.c_str(), nullptr);
+	struct Sum { double hold = 0, warp = 0; int n = 0; };
+	std::vector<Sum> perVariant(variants.size());
+	std::map<std::string, std::vector<Sum>> perClip;
+	double oracle = 0.0;
+	std::vector<uint16_t> luma, chroma, aLuma, warped(static_cast<size_t>(W) * H);
+	std::vector<std::vector<uint16_t>> truths;
+	for (const Clip& clip : clips)
+	{
+		perClip[clip.name].assign(variants.size(), Sum());
+		const int places = 6;
+		const long long first = 3LL * clip.spacing + 2, last = clip.frames - clip.spacing - 2;
+		if (last <= first) continue;
+		for (int place = 0; place < places; ++place)
+		{
+			const long long n = first + (last - first) * place / (places - 1);
+			bool ok = true;
+			for (int f = 0; f < sources && ok; ++f)
+			{
+				ok = readFrame(clip, n + (f - 3LL) * clip.spacing, luma, &chroma);
+				if (f == 3) aLuma = luma;
+				pl_tex_transfer_params up{};
+				up.tex = lumaT[f]; up.ptr = luma.data();
+				Check(pl_tex_upload(g, &up), "real: upload");
+				up.tex = chromaT[f]; up.ptr = chroma.data();
+				Check(pl_tex_upload(g, &up), "real: upload");
+			}
+			truths.assign(clip.spacing - 1, std::vector<uint16_t>());
+			for (int k = 1; k < clip.spacing && ok; ++k)
+				ok = readFrame(clip, n + k, truths[k - 1], nullptr);
+			if (!ok)
+			{
+				std::cout << "  " << clip.name << " frame " << n << ": read failed\n";
+				continue;
+			}
+			// Per variant: the mean over the in-between pictures.
+			std::vector<double> benefit(variants.size(), 0.0);
+			double todayHold = 0, todayWarp = 0, todayTrusted = 0;
+			for (size_t vi = 0; vi < variants.size(); ++vi)
+			{
+				Dejudder::MotionWarp warp(gpu.Log(), g, SettingsFor(variants[vi]));
+				Dejudder::Planes a;
+				for (int f = 0; f + 1 < sources; ++f)
+				{
+					Dejudder::Planes pa, pb;
+					pa.luma = lumaT[f]; pa.chroma = chromaT[f]; pb.luma = lumaT[f + 1]; pb.chroma = chromaT[f + 1];
+					pa.chromaShiftX = pb.chromaShiftX = 1;
+					pa.chromaShiftY = pb.chromaShiftY = 1;
+					Check(warp.Estimate(pa, pb), "real: estimate: " + warp.LastError());
+					a = pa;
+				}
+				// The trusted share, from the field.
+				const int blocksX = ((W + 1) / 2 + 7) / 8, blocksY = ((H + 1) / 2 + 7) / 8;
+				std::vector<uint16_t> fieldHalf(static_cast<size_t>(blocksX) * blocksY * 4);
+				pl_tex_transfer_params d{};
+				d.tex = warp.Field(); d.ptr = fieldHalf.data();
+				Check(pl_tex_download(g, &d), "real: field download");
+				long long trusted = 0;
+				for (size_t i = 0; i < static_cast<size_t>(blocksX) * blocksY; ++i)
+					trusted += (fieldHalf[i * 4 + 2] & 0x7FFF) >= 0x3800 ? 1 : 0;   // half float >= 0.5
+				const double trustedShare = static_cast<double>(trusted) / (static_cast<double>(blocksX) * blocksY);
+				for (int k = 1; k < clip.spacing; ++k)
+				{
+					const float shift = static_cast<float>(k) / clip.spacing;
+					Dejudder::Planes out;
+					Check(warp.Warp(a, shift, out, true), "real: warp: " + warp.LastError());
+					d.tex = out.luma; d.ptr = warped.data();
+					Check(pl_tex_download(g, &d), "real: download");
+					const std::vector<uint16_t>& truth = truths[k - 1];
+					double hold = 0, wr = 0;
+					long long count = 0;
+					for (int y = 64; y < H - 64; y += 2)
+						for (int x = 64; x < W - 64; x += 2)
+						{
+							const size_t i = static_cast<size_t>(y) * W + x;
+							hold += std::abs(static_cast<int>(aLuma[i]) - static_cast<int>(truth[i]));
+							wr += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+							++count;
+						}
+					hold /= count * 64.0;
+					wr /= count * 64.0;
+					benefit[vi] += (hold - wr) / (clip.spacing - 1);
+					perVariant[vi].hold += hold; perVariant[vi].warp += wr; ++perVariant[vi].n;
+					perClip[clip.name][vi].hold += hold; perClip[clip.name][vi].warp += wr; ++perClip[clip.name][vi].n;
+					if (vi == 0) { todayHold += hold / (clip.spacing - 1); todayWarp += wr / (clip.spacing - 1); todayTrusted = trustedShare; }
+					if (csv)
+						csv << "\"" << clip.name << "\"," << n << "," << shift << ",\"" << variants[vi].name << "\"," << hold << "," << wr << ","
+							<< (hold - wr) << "," << trustedShare << "\n";
+					if (vi == 0 && !lpipsDir.empty() && k == clip.spacing / 2)
+					{
+						const std::string base = lpipsDir + "\\" + clip.name + "-" + std::to_string(n);
+						writePgm(base + "-truth.pgm", truth);
+						writePgm(base + "-warp.pgm", warped);
+						writePgm(base + "-hold.pgm", aLuma);
+					}
+				}
+			}
+			oracle += *std::max_element(benefit.begin(), benefit.end()) * (clip.spacing - 1);
+			char line[256];
+			std::snprintf(line, sizeof(line), "  %-12s frame %5lld  hold %6.2f  warp %6.2f  benefit %6.2f (%5.1f%% removed)  trusted %5.1f%%",
+				clip.name.c_str(), n, todayHold, todayWarp, todayHold - todayWarp,
+				todayHold > 0 ? 100.0 * (todayHold - todayWarp) / todayHold : 0.0, 100.0 * todayTrusted);
+			std::cout << line << "\n" << std::flush;
+		}
+	}
+	std::cout << "Beta real footage: per clip, today's settings (codes of 1023, mean over the in-between pictures):\n";
+	for (const auto& c : perClip)
+	{
+		const Sum& t = c.second[0];
+		if (t.n == 0) continue;
+		char line[200];
+		std::snprintf(line, sizeof(line), "  %-12s hold %6.2f  warp %6.2f  (%5.1f%% removed)", c.first.c_str(), t.hold / t.n, t.warp / t.n,
+			t.hold > 0 ? 100.0 * (t.hold - t.warp) / t.hold : 0.0);
+		std::cout << line << "\n";
+	}
+	size_t best = 0;
+	for (size_t vi = 1; vi < variants.size(); ++vi)
+		if (perVariant[vi].hold - perVariant[vi].warp > perVariant[best].hold - perVariant[best].warp) best = vi;
+	const double today = perVariant[0].hold - perVariant[0].warp, bestBenefit = perVariant[best].hold - perVariant[best].warp;
+	char line[400];
+	std::snprintf(line, sizeof(line), "Beta real footage headroom (benefit summed): today %.2f; best single setting %.2f (%s, %+.1f%%); best per place %.2f (%+.1f%%)",
+		today, bestBenefit, variants[best].name.c_str(), today > 0 ? 100.0 * (bestBenefit - today) / today : 0.0, oracle,
+		today > 0 ? 100.0 * (oracle - today) / today : 0.0);
+	std::cout << line << "\n";
+	for (int f = 0; f < sources; ++f) { pl_tex_destroy(g, &lumaT[f]); pl_tex_destroy(g, &chromaT[f]); }
+}
 
 void RunBetaScenarioTiming()
 {
