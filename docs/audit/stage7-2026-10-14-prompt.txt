@@ -1,8 +1,14 @@
 Audit request, part 2: everything built 2026-10-13 day to 2026-10-14 morning (owner: one audit for the set)
 Repo C:\dev\videoprocessor, branch stage7-rc2. Range 9f1d3552..460744bb (31 commits; `git log 9f1d3552..460744bb`).
-Part 1 (6f29497d..9f1d3552, prompt C:\dev\handoff\audit-additions-2026-10-13-prompt.txt) has not been audited
-yet either: please do part 1 first, then this range. A small part 3 will follow for D2 (per-pixel dither
-vectors) and D3 (two-frame blend, off by default), which are being built now.
+Coverage (everything since the last completed audit, stage8-3-9-10b.md, which ended at 9002d72c):
+ Part 0: 9002d72c..6f29497d - not in any prompt so far. Code: 9644143c (planner answers: HDR debanding off in the
+   shipped configs, named matrix regressions) and 5f683bdb (the fixes for stage8-3-9-10b.md's findings: ambient keeps the
+   sensed room on a threshold change, alpha-carry notes, chain probe repair; never re-verified). Docs only: a04b7164,
+   76a72653, 6f29497d. Please verify the 5f683bdb fixes against stage8-3-9-10b.md.
+ Part 1: 6f29497d..9f1d3552, prompt C:\dev\handoff\audit-additions-2026-10-13-prompt.txt (not audited yet).
+ Part 2: this prompt, 9f1d3552..460744bb (ee50cc4f adds only this prompt).
+ Part 3 (to follow): D2 and D3, built after 460744bb.
+Please do them in order (0, 1, 2); one findings file for 0-2 is fine.
 Please write findings to C:\dev\videoprocessor\docs\audit\stage7-2026-10-14.md (save the file).
 Context: docs/BUILD-STATUS.md (rows: Eff Matcher size, estimate ahead, timing gate, LED listen, low-latency capture,
 delta 14, Motion fixes, Motion fixes (2026-10-14 defaults)); planner answers docs/VP-review-2026-10-13-night-answers.md and
