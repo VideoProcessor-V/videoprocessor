@@ -920,6 +920,11 @@ namespace
 		// M5: the pixel verification of trusted blocks (share of off pixels).
 		bool dejudderVerify = false;
 		double dejudderVerifyShare = 0.2;
+		// M6: per-pixel trust on trusted blocks' vectors (multiples of the
+		// match tolerance where a pixel's weight starts to fall and reaches 0).
+		bool dejudderPixelTrust = false;
+		double dejudderPixelTrustLo = 3.0;
+		double dejudderPixelTrustHi = 8.0;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
 		// wide (off | search = the searches only | all = every pass).
 		std::string dejudderLowRes = "all";
@@ -1099,6 +1104,7 @@ namespace
 			<< settings.dejudderCutHistogram << '|' << settings.dejudderSearchRange << '|' << settings.dejudderConsistencyPx << '|'
 			<< settings.dejudderFadeMatch << '|' << settings.dejudderFadeFloor << '|'
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
+			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2071,6 +2077,8 @@ namespace
 			std::make_tuple("dejudder_consistency_px", 0.5, 8.0, &settings.dejudderConsistencyPx),
 			std::make_tuple("dejudder_fade_floor", 0.0, 1.0, &settings.dejudderFadeFloor),
 			std::make_tuple("dejudder_verify_share", 0.02, 1.0, &settings.dejudderVerifyShare),
+			std::make_tuple("dejudder_pixel_trust_lo", 0.25, 16.0, &settings.dejudderPixelTrustLo),
+			std::make_tuple("dejudder_pixel_trust_hi", 0.5, 32.0, &settings.dejudderPixelTrustHi),
 			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
 			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
@@ -2133,7 +2141,8 @@ namespace
 			std::make_pair("dejudder_global_two", &settings.dejudderGlobalTwo),
 			std::make_pair("dejudder_regional_hold", &settings.dejudderRegionalHold),
 			std::make_pair("dejudder_fade_match", &settings.dejudderFadeMatch),
-			std::make_pair("dejudder_verify", &settings.dejudderVerify) })
+			std::make_pair("dejudder_verify", &settings.dejudderVerify),
+			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8410,6 +8419,9 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderFadeFloor = next.dejudderFadeFloor;
 		currentTransport.dejudderVerify = next.dejudderVerify;
 		currentTransport.dejudderVerifyShare = next.dejudderVerifyShare;
+		currentTransport.dejudderPixelTrust = next.dejudderPixelTrust;
+		currentTransport.dejudderPixelTrustLo = next.dejudderPixelTrustLo;
+		currentTransport.dejudderPixelTrustHi = next.dejudderPixelTrustHi;
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
 		currentTransport.capturePath = next.capturePath;
@@ -8518,7 +8530,9 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderRegionalHold != next.dejudderRegionalHold || current.dejudderCutHistogram != next.dejudderCutHistogram ||
 			current.dejudderSearchRange != next.dejudderSearchRange || current.dejudderConsistencyPx != next.dejudderConsistencyPx ||
 			current.dejudderFadeMatch != next.dejudderFadeMatch || current.dejudderFadeFloor != next.dejudderFadeFloor ||
-			current.dejudderVerify != next.dejudderVerify || current.dejudderVerifyShare != next.dejudderVerifyShare,
+			current.dejudderVerify != next.dejudderVerify || current.dejudderVerifyShare != next.dejudderVerifyShare ||
+			current.dejudderPixelTrust != next.dejudderPixelTrust || current.dejudderPixelTrustLo != next.dejudderPixelTrustLo ||
+			current.dejudderPixelTrustHi != next.dejudderPixelTrustHi,
 			"dejudder_motion_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
@@ -11607,6 +11621,10 @@ struct LibplaceboVideoRenderer::Impl
 			settings.fadeFloor = static_cast<float>(activeSettings.dejudderFadeFloor);
 			settings.verifyPixels = activeSettings.dejudderVerify;
 			settings.verifyShare = static_cast<float>(activeSettings.dejudderVerifyShare);
+			settings.pixelTrust = activeSettings.dejudderPixelTrust;
+			settings.pixelTrustLo = static_cast<float>(activeSettings.dejudderPixelTrustLo);
+			settings.pixelTrustHi = static_cast<float>(activeSettings.dejudderPixelTrustHi);
+			settings.pixelTrustedVectors = true;
 			settings.lowRes = activeSettings.dejudderLowRes != "off";
 			settings.lowResAll = activeSettings.dejudderLowRes == "all";
 			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);
@@ -11929,6 +11947,7 @@ struct LibplaceboVideoRenderer::Impl
 		// ahead, then the copy of (A, B)'s.
 		pl_tex warpField = dejudder->Field(), warpTrust = dejudder->FrameTrust(), warpSub = dejudder->SubField();
 		pl_tex warpCamera = dejudder->Camera();   // delta 14 R-B
+		pl_tex warpMask = dejudder->PixelMask();   // M6 (nullptr: the block decision)
 		bool aheadTried = false;
 		float previousShift = 0.0f;   // A, shown at shift 0 (delta 8 R1)
 		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
@@ -12027,7 +12046,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				if (!dejudderRenderedWarp->Run(cached, warpField, warpTrust,
 					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, warpSub,
-					&dejudder->GetSettings(), warpCamera))
+					&dejudder->GetSettings(), warpCamera, warpMask))
 				{
 					failure = "rendered warp failed";
 					break;
@@ -12219,6 +12238,7 @@ struct LibplaceboVideoRenderer::Impl
 					warpTrust = dejudder->LookAheadTrust();
 					warpSub = dejudder->SnapSubField();
 					if (warpCamera) warpCamera = dejudder->SnapCamera();
+					if (warpMask) warpMask = dejudder->SnapPixelMask();
 				}
 			}
 		}

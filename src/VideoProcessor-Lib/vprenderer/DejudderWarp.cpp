@@ -1663,6 +1663,23 @@ if (q.x < size.x && q.y < size.y) {
     vec2 c = vec2(q) + vec2(0.5);
     vec2 v;
     vec4 outv;
+#ifdef PIXEL_TRUST
+    // M6: every block's vector, blended with the hold by A's pixel weight.
+    if (texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share) {
+        // The vector where the pixel comes from (two fixed-point steps: at a
+        // moving edge the output position's own vector is the wrong one).
+        float sc = shift * strength_scale();
+        vec2 va = field_vector_all(c);
+        va = field_vector_all(c - sc * va);
+        va = field_vector_all(c - sc * va);
+        vec2 from = c - sc * va;
+        float m = texture(pix_mask, from / vec2(size)).r;
+        outv = mix(texelFetch(src, q, 0), texture(src, from / vec2(size)), m);
+    } else
+        outv = texelFetch(src, q, 0);
+    imageStore(dst, q, outv);
+    return;
+#endif
     if (field_vector(c, v)) {
         // Edges clamp (the sampler's address mode): never black.
         outv = texture(src, (c - shift * strength_scale() * block_strength(c) * v) / vec2(size));
@@ -1691,6 +1708,20 @@ if (q.x < size.x && q.y < size.y) {
     vec2 c = vec2(q) + vec2(0.5);
     vec2 v;
     vec4 outv;
+#ifdef PIXEL_TRUST
+    if (texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share) {
+        float sc = shift * strength_scale();
+        vec2 va = field_vector_all(c * chroma_scale);
+        va = field_vector_all(c * chroma_scale - sc * va);
+        va = field_vector_all(c * chroma_scale - sc * va);
+        vec2 from = c - sc * va / chroma_scale;
+        float m = texture(pix_mask, from * chroma_scale / vec2(textureSize(pix_mask, 0) * 2)).r;
+        outv = mix(texelFetch(src, q, 0), texture(src, from / vec2(size)), m);
+    } else
+        outv = texelFetch(src, q, 0);
+    imageStore(dst, q, outv);
+    return;
+#endif
     if (field_vector(c * chroma_scale, v)) {
         outv = texture(src, (c - shift * strength_scale() * block_strength(c * chroma_scale) * v / chroma_scale) / vec2(size));
 #ifdef FEATHER
@@ -1744,7 +1775,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -2180,6 +2211,14 @@ if (q.x < size.x && q.y < size.y) {
 		// Delta 14 R-B's camera.
 		if (Camera() && !copy(camera, &snapCamera))
 			return false;
+		// M6's pixel weights.
+		snapMaskValid = false;
+		if (pl_tex mask = PixelMask())
+		{
+			if (!copy(mask, &snapMask))
+				return false;
+			snapMaskValid = true;
+		}
 		return true;
 	}
 
@@ -2220,6 +2259,64 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
+		// M6: every block's vector at a source position (no trust gating).
+		const char* const FIELD_ALL_GLSL = R"GLSL(
+vec2 field_vector_all(vec2 lp)
+{
+    ivec2 fsize = textureSize(field, 0);
+    vec2 g = lp / 16.0 - vec2(0.5);
+    ivec2 g0 = ivec2(floor(g));
+    vec2 t = g - vec2(g0);
+    vec2 v = vec2(0.0);
+    float ws = 0.0;
+    for (int y = 0; y <= 1; y++)
+        for (int x = 0; x <= 1; x++) {
+            vec4 f = texelFetch(field, clamp(g0 + ivec2(x, y), ivec2(0), fsize - ivec2(1)), 0);
+            float w = (x == 1 ? t.x : 1.0 - t.x) * (y == 1 ? t.y : 1.0 - t.y);
+#ifdef PIXEL_TRUSTED_VECTORS
+            // Only trusted blocks' vectors (a failed block follows its
+            // trusted neighbours); none among the four: the 4x4 around.
+            if (f.z < 0.5) w = 0.0;
+#endif
+            v += w * f.xy;
+            ws += w;
+        }
+#ifdef PIXEL_TRUSTED_VECTORS
+    if (ws <= 0.0) {
+        for (int y = -1; y <= 2; y++)
+            for (int x = -1; x <= 2; x++) {
+                vec4 f = texelFetch(field, clamp(g0 + ivec2(x, y), ivec2(0), fsize - ivec2(1)), 0);
+                if (f.z > 0.5) { v += f.xy; ws += 1.0; }
+            }
+    }
+    return ws > 0.0 ? v / ws : vec2(0.0);
+#else
+    return v;
+#endif
+}
+)GLSL";
+
+		// M6: the weight of each half-resolution pixel of A.
+		const char* const PIXEL_MASK_BODY = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+ivec2 hs = imageSize(dst);
+if (p.x < hs.x && p.y < hs.y) {
+    vec2 v = field_vector_all((vec2(p) + vec2(0.5)) * 2.0) * 0.5;
+    float e = 0.0;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++) {
+            ivec2 q = clamp(p + ivec2(x, y), ivec2(0), hs - ivec2(1));
+            e += abs(texelFetch(from_half, q, 0).r - texture(to_half, (vec2(q) + v + vec2(0.5)) / vec2(hs)).r);
+        }
+    e /= 9.0;
+    // Two tiers: the pixel's own block passed the block test or not.
+    ivec2 fs = textureSize(field, 0);
+    bool trusted = texelFetch(field, clamp(p / 8, ivec2(0), fs - ivec2(1)), 0).z > 0.5;
+    float lo = trusted ? mask_lo : mask_lo_u, hi = trusted ? mask_hi : mask_hi_u;
+    imageStore(dst, p, vec4(1.0 - smoothstep(lo, hi, e), 0.0, 0.0, 1.0));
+}
+)GLSL";
+
 		const char* const LOOKAHEAD_TRUST_BODY = R"GLSL(
 if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) {
     vec4 s = texelFetch(snap, ivec2(0), 0);
@@ -2230,6 +2327,8 @@ if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) {
 }
 )GLSL";
 	}
+
+	const char* FieldAllGlsl() { return FIELD_ALL_GLSL; }
 
 	pl_tex MotionWarp::LookAheadTrust()
 	{
@@ -2675,18 +2774,50 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				}
 				holdIndex = next;
 			}
-			if (settings.occlusionFill)
+		}
+		// D5's occlusion (also with the half-size matcher: its searches are at
+		// this grid by now).
+		if (settings.occlusionFill)
+		{
+			const bool subOk = settings.estSplit && subField;
+			const pl_shader_desc fillDesc[4] = {
+				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
+				Sampled("sub_field", subField, false) };
+			if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", subOk ? splitDefine : nullptr, OCCLUSION_BODY,
+				fillDesc, subOk ? 4 : 3, variables, 2, blocksX, blocksY, 8))
+				return false;
+			lastB = b;
+			fillReady = b.chroma && b.chroma->params.w == a.chroma->params.w &&
+				b.chroma->params.h == a.chroma->params.h;
+		}
+		pixelMaskReady = false;
+		if (settings.pixelTrust)
+		{
+			pl_fmt scalar = halfA->params.format;
+			pl_tex_params params{};
+			params.w = halfW;
+			params.h = halfH;
+			params.format = scalar;
+			params.sampleable = true;
+			params.storable = true;
+			params.host_readable = settings.hostReadable && (scalar->caps & PL_FMT_CAP_HOST_READABLE);
+			if (!pl_tex_recreate(gpu, &pixelMask, &params))
 			{
-				const pl_shader_desc fillDesc[4] = {
-					Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
-					Sampled("sub_field", subField, false) };
-				if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", splitDefine, OCCLUSION_BODY,
-					fillDesc, settings.estSplit ? 4 : 3, variables, 2, blocksX, blocksY, 8))
-					return false;
-				lastB = b;
-				fillReady = b.chroma && b.chroma->params.w == a.chroma->params.w &&
-					b.chroma->params.h == a.chroma->params.h;
+				error = "cannot create the pixel mask";
+				return false;
 			}
+			const float lo = settings.pixelTrustLo * settings.matchTolerance, hi = std::max(lo + 0.01f, settings.pixelTrustHi * settings.matchTolerance);
+			const bool tiers = settings.pixelTrustHiUntrusted > 0.0f;
+			const float loU = tiers ? settings.pixelTrustLoUntrusted * settings.matchTolerance : lo;
+			const float hiU = tiers ? std::max(loU + 0.01f, settings.pixelTrustHiUntrusted * settings.matchTolerance) : hi;
+			const pl_shader_var maskVars[4] = { { pl_var_float("mask_lo"), &lo, true }, { pl_var_float("mask_hi"), &hi, true },
+				{ pl_var_float("mask_lo_u"), &loU, true }, { pl_var_float("mask_hi_u"), &hiU, true } };
+			const pl_shader_desc maskDesc[4] = { Sampled("field", field, false), Sampled("from_half", halfA, false),
+				Sampled("to_half", halfB, true), Storage("dst", pixelMask) };
+			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") + FIELD_ALL_GLSL;
+			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDesc, 4, maskVars, 4, halfW, halfH, 16))
+				return false;
+			pixelMaskReady = true;
 		}
 		if (occlusionSlot == 0 || occlusionSlot == 1)
 		{
@@ -2793,8 +2924,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool split = settings.estSplit && subField;
 		// Delta 14 R-B: the camera from D1 (when it runs).
 		const bool withCamera = Camera() != nullptr;
-		const std::string header = std::string(fill ? "#define FILL\n" : "") + WarpHeader(settings, split, withCamera) +
-			(fill ? FILL_HEADER : "");
+		// M6: the pixel weights (source warp).
+		const bool pixel = settings.pixelTrust && pixelMaskReady && pixelMask;
+		const std::string header = std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
+			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "");
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
 		const float featherPx = settings.holdFeatherPx;
@@ -2811,6 +2945,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		if (split)
 			lumaDesc.push_back(Sampled("sub_field", subField, false));
+		if (pixel)
+			lumaDesc.push_back(Sampled("pix_mask", pixelMask, true));
 		if (withCamera)
 			lumaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
@@ -2840,6 +2976,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		if (split)
 			chromaDesc.push_back(Sampled("sub_field", subField, false));
+		if (pixel)
+			chromaDesc.push_back(Sampled("pix_mask", pixelMask, true));
 		if (withCamera)
 			chromaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> chromaVars = {

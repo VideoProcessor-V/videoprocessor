@@ -48,6 +48,10 @@ namespace Dejudder
 	// 11a E2: the same rule reading the sub-field (`sub_field` sampler) where
 	// the split flag marks a block split; parent blocks as before.
 	const char* FieldVectorGlslSplit();
+	// M6: `vec2 field_vector_all(vec2 source_pos)` (sampler `field`): every
+	// block's vector, or with PIXEL_TRUSTED_VECTORS defined only trusted
+	// blocks' (a failed block follows its trusted neighbours).
+	const char* FieldAllGlsl();
 
 
 	struct Planes
@@ -200,6 +204,27 @@ namespace Dejudder
 		bool verifyPixels = false;
 		float verifyShare = 0.2f;
 		float verifyFactor = 3.0f;
+		// M6 pixel trust (owner 2026-10-13 night, after the RAFT ceiling: the
+		// block-level yes/no is the gap): every block's vector is used
+		// (bilinear between all block centres) and each half-resolution pixel
+		// of A gets a weight from how well it predicts B with that vector (the
+		// 3x3 mean absolute error: 1 up to pixelTrustLo x matchTolerance, 0
+		// from pixelTrustHi x); the source warp blends the moved pixel with the
+		// hold by that weight. A cut still holds the whole frame. Source warp
+		// only (the rendered warp keeps the block decision).
+		bool pixelTrust = false;
+		float pixelTrustLo = 1.0f;
+		float pixelTrustHi = 2.5f;
+		// Two tiers: pixels of blocks that failed the block test use these
+		// (stricter) instead; 0 = the same as the trusted blocks'.
+		float pixelTrustLoUntrusted = 0.0f;
+		float pixelTrustHiUntrusted = 0.0f;
+		// The vectors M6 uses: true = only trusted blocks' (bilinear between
+		// trusted centres; a failed block can only follow its trusted
+		// neighbours, never its own vector); false = every block's. The
+		// latter drags content from far away where a failed match's vector is
+		// junk and the picture is smooth (seen on fast motion).
+		bool pixelTrustedVectors = true;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -277,6 +302,9 @@ namespace Dejudder
 		pl_tex SnapFrameTrust() const { return snapTrust; }
 		pl_tex SnapSubField() const { return snapSubValid ? snapSub : nullptr; }
 		pl_tex SnapCamera() const { return snapCamera; }
+		// M6: A's pixel weights (half resolution), nullptr unless pixelTrust.
+		pl_tex PixelMask() const { return settings.pixelTrust && pixelMaskReady ? pixelMask : nullptr; }
+		pl_tex SnapPixelMask() const { return settings.pixelTrust && snapMaskValid ? snapMask : nullptr; }
 		// Planner Q7 (with R-A): after the next pair is estimated ahead, the
 		// snapshot's frame trust with its strength lowered to the next pair's
 		// when that is lower (the roll-off starts on a fast pan's first frame;
@@ -392,7 +420,11 @@ namespace Dejudder
 		bool searchOnly = false;
 		pl_tex snapField = nullptr, snapTrust = nullptr, snapSub = nullptr, snapCamera = nullptr;
 		pl_tex aheadTrust = nullptr;
+		pl_tex snapMask = nullptr;
+		bool snapMaskValid = false;
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
+		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights
+		bool pixelMaskReady = false;
 		pl_tex camera = nullptr;
 		bool snapSubValid = false;
 		bool innerOfLowRes = false;   // no warp planes

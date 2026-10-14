@@ -103,9 +103,11 @@ namespace DejudderRendered
 		// and taper; nullptr = neither.
 		// camera: D1's global vector (MotionWarp::GlobalVector()) for delta
 		// 14 R-B when the matcher's objectStrength < 1 (nullptr: no camera).
+		// pixelMask: MotionWarp::PixelMask() for M6 (matcher->pixelTrust),
+		// or nullptr (the block decision).
 		bool Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
 			float shift, const Geometry& geometry, pl_tex& out, pl_tex subField = nullptr,
-			const Dejudder::Settings* matcher = nullptr, pl_tex camera = nullptr);
+			const Dejudder::Settings* matcher = nullptr, pl_tex camera = nullptr, pl_tex pixelMask = nullptr);
 		const std::string& Error() const { return error; }
 
 	private:

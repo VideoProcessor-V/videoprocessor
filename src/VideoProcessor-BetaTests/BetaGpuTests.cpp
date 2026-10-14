@@ -2805,6 +2805,9 @@ namespace Corpus
 		float textureTol = 0.0f; bool globalTwo = false, regional = false; int coarseRange = 3; float consistency = 1.0f;
 		bool taper = false; float taperSad = 0.0f, splitSad = 0.0f;
 		bool fade = false, split = true, verify = false; float verifyShare = 0.2f;
+		bool fill = false; float minShare = 0.25f;
+		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
+		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2817,6 +2820,124 @@ namespace Corpus
 		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
 		std::free(set);
 		const bool fixes = which == "fixes";
+		if (which == "pixtrusted")
+		{
+			// M6 with trusted blocks' vectors only (a failed block follows its
+			// trusted neighbours) against every block's.
+			auto add = [&](const char* name, float lo, float hi, float loU, float hiU, bool all)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true;
+				v.pixLo = lo; v.pixHi = hi; v.pixLoU = loU; v.pixHiU = hiU; v.pixAll = all;
+				variants.push_back(v);
+			};
+			Variant cand{ "candidate", 4.5f, 0.5f, true };
+			cand.globalTwo = true; cand.regional = true; cand.coarseRange = 8; cand.consistency = 2.0f;
+			cand.textureTol = 0.25f; cand.fade = true; cand.split = false;
+			variants.push_back(cand);
+			add("pixel 3-8/1.5-4, every block's vectors", 3.0f, 8.0f, 1.5f, 4.0f, true);
+			add("pixel 3-8/1.5-4, trusted vectors", 3.0f, 8.0f, 1.5f, 4.0f, false);
+			add("pixel 3-8/3-8, trusted vectors", 3.0f, 8.0f, 0.0f, 0.0f, false);
+			add("pixel 2-6/1-2.5, trusted vectors", 2.0f, 6.0f, 1.0f, 2.5f, false);
+			return variants;
+		}
+		if (which == "tier")
+		{
+			// M6 in two tiers: lenient inside blocks that passed, strict outside.
+			auto add = [&](const char* name, float lo, float hi, float loU, float hiU)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true;
+				v.pixLo = lo; v.pixHi = hi; v.pixLoU = loU; v.pixHiU = hiU;
+				variants.push_back(v);
+			};
+			Variant cand{ "candidate", 4.5f, 0.5f, true };
+			cand.globalTwo = true; cand.regional = true; cand.coarseRange = 8; cand.consistency = 2.0f;
+			cand.textureTol = 0.25f; cand.fade = true; cand.split = false;
+			variants.push_back(cand);
+			add("pixel 2-6", 2.0f, 6.0f, 0.0f, 0.0f);
+			add("pixel 2-6 / untrusted 1-2.5", 2.0f, 6.0f, 1.0f, 2.5f);
+			add("pixel 2-6 / untrusted 0.75-2", 2.0f, 6.0f, 0.75f, 2.0f);
+			add("pixel 3-8 / untrusted 1-2.5", 3.0f, 8.0f, 1.0f, 2.5f);
+			add("pixel 3-8 / untrusted 1.5-4", 3.0f, 8.0f, 1.5f, 4.0f);
+			return variants;
+		}
+		if (which == "pixel2")
+		{
+			// M6 with the fixed-point lookup, and with R-A as deployed (a
+			// fast pan at a quarter of the strength).
+			auto add = [&](const char* name, float tol, bool pixel, float lo, float hi, bool rolloff)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = pixel; v.pixLo = lo; v.pixHi = hi; v.rolloff = rolloff;
+				variants.push_back(v);
+			};
+			add("candidate", 4.5f, false, 1.0f, 2.5f, false);
+			add("candidate + R-A", 4.5f, false, 1.0f, 2.5f, true);
+			add("pixel trust 1.5-4", 4.5f, true, 1.5f, 4.0f, false);
+			add("pixel trust 2-6", 4.5f, true, 2.0f, 6.0f, false);
+			add("pixel trust 1.5-4 + R-A", 4.5f, true, 1.5f, 4.0f, true);
+			add("pixel trust 2-6 + R-A", 4.5f, true, 2.0f, 6.0f, true);
+			return variants;
+		}
+		if (which == "pixel")
+		{
+			// M6: per-pixel trust on every block's vector.
+			auto add = [&](const char* name, float tol, bool pixel, float lo, float hi)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = pixel; v.pixLo = lo; v.pixHi = hi;
+				variants.push_back(v);
+			};
+			add("candidate", 4.5f, false, 1.0f, 2.5f);
+			add("candidate + pixel trust 1-2.5", 4.5f, true, 1.0f, 2.5f);
+			add("candidate + pixel trust 0.5-1.5", 4.5f, true, 0.5f, 1.5f);
+			add("candidate + pixel trust 1.5-4", 4.5f, true, 1.5f, 4.0f);
+			add("candidate + pixel trust 2-6", 4.5f, true, 2.0f, 6.0f);
+			add("tol 3 + pixel trust 1.5-4", 3.0f, true, 1.5f, 4.0f);
+			Variant none{ "no trust test (every block warps)", 255.0f, 0.5f, true };
+			none.globalTwo = true; none.regional = true; none.coarseRange = 8; none.consistency = 1000.0f;
+			none.textureTol = 0.25f; none.fade = true; none.split = false; none.minShare = 0.0f;
+			variants.push_back(none);
+			return variants;
+		}
+		if (which == "bound")
+		{
+			// How good the block vectors are apart from the trust decision:
+			// looser and looser trust, up to none (every block warps).
+			auto add = [&](const char* name, float tol, float consistency, float minShare)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = consistency;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.minShare = minShare;
+				variants.push_back(v);
+			};
+			add("candidate", 4.5f, 2.0f, 0.25f);
+			add("tol 12, agreement 4", 12.0f, 4.0f, 0.25f);
+			add("tol 24, agreement 8", 24.0f, 8.0f, 0.0f);
+			add("no trust test (every block warps)", 255.0f, 1000.0f, 0.0f);
+			return variants;
+		}
+		if (which == "fill")
+		{
+			// D5: B where A's content is uncovered (source warp), on the candidate.
+			auto add = [&](const char* name, float tol, bool verify, bool fill)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.verify = verify; v.fill = fill;
+				variants.push_back(v);
+			};
+			add("candidate", 4.5f, false, false);
+			add("candidate + D5 fill", 4.5f, false, true);
+			add("candidate + verify + D5 fill", 4.5f, true, true);
+			add("tol 6 + verify + D5 fill", 6.0f, true, true);
+			return variants;
+		}
 		if (which == "verify")
 		{
 			// M5: the pixel verification on the candidate defaults and on a
@@ -2952,6 +3073,21 @@ namespace Corpus
 		s.estSplit = s.estSplit && v.split;
 		s.verifyPixels = v.verify;
 		s.verifyShare = v.verifyShare;
+		s.occlusionFill = v.fill;
+		s.minTrustedShare = v.minShare;
+		s.pixelTrust = v.pixel;
+		s.pixelTrustLo = v.pixLo;
+		s.pixelTrustHi = v.pixHi;
+		s.pixelTrustLoUntrusted = v.pixLoU;
+		s.pixelTrustHiUntrusted = v.pixHiU;
+		s.pixelTrustedVectors = !v.pixAll;
+		if (v.rolloff)
+		{
+			s.motionRolloff = true;
+			s.rollLo = 8.0f;
+			s.rollHi = 24.0f;
+			s.rollFloor = 0.25f;
+		}
 		s.fadeFloor = 1.0f;
 		s.motionScaleHi = 0.0f;   // accuracy only: D2 and D4 off
 		s.trustScaleFull = 0.0f;
@@ -3342,7 +3478,7 @@ void RunBetaRealFootage()
 	{
 		CreateDirectoryA(outDir.c_str(), nullptr);
 		csv.open(outDir + "\\real.csv", std::ios::trunc);
-		csv << "clip,frame,shift,variant,hold,warp,benefit,trusted_share\n";
+		csv << "clip,frame,shift,variant,hold,warp,benefit,trusted_share,harm\n";
 	}
 	if (!lpipsDir.empty()) CreateDirectoryA(lpipsDir.c_str(), nullptr);
 	struct Sum { double hold = 0, warp = 0; int n = 0; };
@@ -3394,6 +3530,13 @@ void RunBetaRealFootage()
 			Dejudder::Settings m1 = today; m1.textureTolerance = 0.5f; cases.push_back({ "M1 texture 0.5", m1 });
 			Dejudder::Settings m2 = today; m2.globalTwo = true; cases.push_back({ "M2 two global", m2 });
 			Dejudder::Settings m3 = today; m3.regionalHold = true; cases.push_back({ "M3 regional hold", m3 });
+			Dejudder::Settings cand = today;
+			cand.matchTolerance = 4.5f; cand.textureTolerance = 0.25f; cand.globalTwo = true; cand.regionalHold = true;
+			cand.coarseRange = 8; cand.consistencyPixels = 2.0f; cand.fadeMatch = true; cand.estSplit = false;
+			cases.push_back({ "candidate", cand });
+			Dejudder::Settings pix = cand;
+			pix.pixelTrust = true; pix.pixelTrustLo = 3.0f; pix.pixelTrustHi = 8.0f; pix.pixelTrustLoUntrusted = 1.5f; pix.pixelTrustHiUntrusted = 4.0f;
+			cases.push_back({ "pixel trust", pix });
 			// VP_TEST_REAL_TIMING=1: the matcher's GPU time per pair, today vs
 			// the motion fixes together (undrained GPU timers, 30 estimates).
 			if (envValue("VP_TEST_REAL_TIMING") == "1")
@@ -3401,10 +3544,18 @@ void RunBetaRealFootage()
 				Dejudder::Settings all = today;
 				all.matchTolerance = 4.5f; all.textureTolerance = 0.5f; all.globalTwo = true; all.regionalHold = true;
 				all.coarseRange = 8; all.consistencyPixels = 2.0f;
-				Dejudder::Settings live[2] = { today, all };
-				for (Dejudder::Settings& t : live) { t.estCandidates = true; t.estQpel = true; t.estSplit = true; t.vectorSmooth = true; t.estGate = true; t.holdHysteresis = 2; }
-				const char* names[2] = { "today", "all fixes" };
-				for (int k = 0; k < 2; ++k)
+				// The candidate (tolerance 4.5, texture 0.25, fade, split off) and
+				// with M6's pixel trust (two tiers).
+				Dejudder::Settings cand = today;
+				cand.matchTolerance = 4.5f; cand.textureTolerance = 0.25f; cand.globalTwo = true; cand.regionalHold = true;
+				cand.coarseRange = 8; cand.consistencyPixels = 2.0f; cand.fadeMatch = true;
+				Dejudder::Settings pix = cand;
+				pix.pixelTrust = true; pix.pixelTrustLo = 3.0f; pix.pixelTrustHi = 8.0f; pix.pixelTrustLoUntrusted = 1.0f; pix.pixelTrustHiUntrusted = 2.5f;
+				Dejudder::Settings live[4] = { today, all, cand, pix };
+				for (Dejudder::Settings& t : live) { t.estCandidates = true; t.estQpel = true; t.vectorSmooth = true; t.estGate = true; t.holdHysteresis = 2; }
+				live[0].estSplit = live[1].estSplit = true;
+				const char* names[4] = { "today", "all fixes", "candidate", "candidate + pixel trust" };
+				for (int k = 0; k < 4; ++k)
 				{
 					Dejudder::MotionWarp warp(gpu.Log(), g, live[k]);
 					warp.SetPassTiming(true, false);
@@ -3416,6 +3567,10 @@ void RunBetaRealFootage()
 						pa.chromaShiftX = pb.chromaShiftX = 1; pa.chromaShiftY = pb.chromaShiftY = 1;
 						if (r == 4) warp.SetPassTiming(true, false);   // after the warm-up
 						Check(warp.Estimate(pa, pb), "timing: estimate");
+						// Two extras' warps per pair (source warp), as at 24p on 60 Hz.
+						Dejudder::Planes out;
+						Check(warp.Warp(pa, 0.4f, out, true), "timing: warp");
+						Check(warp.Warp(pa, 0.8f, out, true), "timing: warp");
 					}
 					warp.FlushPassTimers();
 					double total = 0;
@@ -3423,8 +3578,8 @@ void RunBetaRealFootage()
 					for (const auto& e : warp.PassGpuMs())
 					{
 						total += e.second;
-						if (e.first.find("search") != std::string::npos || e.first.find("global") != std::string::npos ||
-							e.first.find("consistency") != std::string::npos || e.first.find("frame trust") != std::string::npos)
+						if (e.first.find("search") != std::string::npos || e.first.find("pixel") != std::string::npos ||
+							e.first.find("warp") != std::string::npos || e.first.find("frame trust") != std::string::npos)
 						{
 							char part[160];
 							std::snprintf(part, sizeof(part), "; %s %.2f", e.first.c_str() + (e.first.find(": ") != std::string::npos ? e.first.find(": ") + 2 : 0), e.second / 30.0);
@@ -3432,7 +3587,7 @@ void RunBetaRealFootage()
 						}
 					}
 					char line[1200];
-					std::snprintf(line, sizeof(line), "timing %s %s: matcher %.2f ms per pair%s", clip.name.c_str(), names[k], total / 30.0, detail.c_str());
+					std::snprintf(line, sizeof(line), "timing %s %s: matcher + two warps %.2f ms per pair%s", clip.name.c_str(), names[k], total / 30.0, detail.c_str());
 					std::cout << line << "\n" << std::flush;
 				}
 			}
@@ -3550,6 +3705,38 @@ void RunBetaRealFootage()
 					for (char& ch : tag) if (ch == ' ') ch = '-';
 					writePgm(outDir + "\\diag-trust-" + tag + ".pgm", trustMap);
 					writePgm(outDir + "\\diag-error-" + tag + ".pgm", errMap);
+					// The three most damaged 32x32 tiles (warp worse than hold),
+					// as 256x256 crops: truth | hold | warp, 8-bit.
+					std::vector<std::pair<double, int>> damage;
+					for (int ty = 2; ty + 2 < H / 32; ++ty)
+						for (int tx = 2; tx + 2 < W / 32; ++tx)
+						{
+							double dh = 0, dw = 0;
+							for (int y = ty * 32; y < ty * 32 + 32; y += 2)
+								for (int x = tx * 32; x < tx * 32 + 32; x += 2)
+								{
+									const size_t i = static_cast<size_t>(y) * W + x;
+									dh += std::abs(static_cast<int>(aLuma[i]) - static_cast<int>(truth[i]));
+									dw += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+								}
+							damage.push_back({ dw - dh, ty * 1000 + tx });
+						}
+					std::sort(damage.rbegin(), damage.rend());
+					for (int k = 0; k < 3 && k < static_cast<int>(damage.size()); ++k)
+					{
+						const int cy = std::min(std::max((damage[k].second / 1000) * 32 + 16 - 128, 0), H - 256);
+						const int cx = std::min(std::max((damage[k].second % 1000) * 32 + 16 - 128, 0), W - 256);
+						std::ofstream ppm(outDir + "\\crop-" + tag + "-" + std::to_string(k) + ".pgm", std::ios::binary | std::ios::trunc);
+						ppm << "P5\n" << 768 << " 256\n255\n";
+						for (int y = cy; y < cy + 256; ++y)
+							for (int part = 0; part < 3; ++part)
+								for (int x = cx; x < cx + 256; ++x)
+								{
+									const size_t i = static_cast<size_t>(y) * W + x;
+									const unsigned char v = static_cast<unsigned char>((part == 0 ? truth[i] : part == 1 ? aLuma[i] : warped[i]) >> 8);
+									ppm.write(reinterpret_cast<const char*>(&v), 1);
+								}
+					}
 				}
 			}
 		}
@@ -3622,6 +3809,10 @@ void RunBetaRealFootage()
 					double hold = 0, wr = 0;
 					long long count = 0;
 					Split& split = splits[clip.name][vi];
+					// Local damage: 32x32 tiles where the warp is visibly worse
+					// than the hold (mean more than 6 codes of 1023 worse).
+					const int tilesX = W / 32, tilesY = H / 32;
+					std::vector<double> tileHold(static_cast<size_t>(tilesX) * tilesY, 0.0), tileWarp(tileHold.size(), 0.0);
 					for (int y = 64; y < H - 64; y += 2)
 						for (int x = 64; x < W - 64; x += 2)
 						{
@@ -3631,6 +3822,8 @@ void RunBetaRealFootage()
 							hold += h;
 							wr += w;
 							++count;
+							const size_t t = static_cast<size_t>(y / 32) * tilesX + x / 32;
+							tileHold[t] += h; tileWarp[t] += w;
 							// Where the remaining difference is: pixels the warp moved,
 							// or pixels left as A (held, or not moving).
 							const int part = warped[i] == aLuma[i] ? 1 : 0;
@@ -3638,13 +3831,21 @@ void RunBetaRealFootage()
 						}
 					hold /= count * 64.0;
 					wr /= count * 64.0;
+					int harmed = 0, tiles = 0;
+					for (size_t t = 0; t < tileHold.size(); ++t)
+					{
+						if (tileHold[t] == 0 && tileWarp[t] == 0) continue;
+						++tiles;
+						harmed += (tileWarp[t] - tileHold[t]) / (256.0 * 64.0) > 6.0 ? 1 : 0;   // 256 samples a tile
+					}
+					const double harm = tiles ? static_cast<double>(harmed) / tiles : 0.0;
 					benefit[vi] += (hold - wr) / (clip.spacing - 1);
 					perVariant[vi].hold += hold; perVariant[vi].warp += wr; ++perVariant[vi].n;
 					perClip[clip.name][vi].hold += hold; perClip[clip.name][vi].warp += wr; ++perClip[clip.name][vi].n;
 					if (vi == 0) { todayHold += hold / (clip.spacing - 1); todayWarp += wr / (clip.spacing - 1); todayTrusted = trustedShare; }
 					if (csv)
 						csv << "\"" << clip.name << "\"," << n << "," << shift << ",\"" << variants[vi].name << "\"," << hold << "," << wr << ","
-							<< (hold - wr) << "," << trustedShare << "\n";
+							<< (hold - wr) << "," << trustedShare << "," << harm << "\n";
 					if (vi == 0 && !lpipsDir.empty() && k == clip.spacing / 2)
 					{
 						const std::string base = lpipsDir + "\\" + clip.name + "-" + std::to_string(n);

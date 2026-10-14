@@ -6743,7 +6743,7 @@ namespace VideoProcessorTest
 			pl_tex warped = nullptr;
 			const bool ran = rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare,
 				shift, g, warped, warp.SubField(), &warp.GetSettings(),
-				warp.Camera());   // delta 14 R-B's camera, as the renderer
+				warp.Camera(), warp.PixelMask());   // delta 14 R-B's camera and M6's weights, as the renderer
 			if (!ran)
 				pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
@@ -7964,6 +7964,58 @@ namespace VideoProcessorTest
 			Assert::IsTrue(std::get<0>(on) * 100 <= std::get<1>(on) * 10, (L"the pixel check withdraws them: " + message).c_str());
 			Assert::IsTrue(std::get<2>(on) * 100 >= std::get<3>(on) * 95 && std::get<2>(on) >= std::get<2>(off) - 1,
 				(L"clean blocks keep their trust: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderPixelTrustMovesBothPathsAlike)
+		{
+			// M6: a pan of (10, 4) where a band of blocks fails the block test
+			// (fresh noise in A's band... only in B: the band's match fails, its
+			// trusted neighbours carry it). Both warps with pixel trust move
+			// the trusted area by s x pan and agree with each other; a cut
+			// still holds the whole frame in both.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			static constexpr int dx = 10, dy = 4;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.globalPrior = true;
+			settings.pixelTrust = true;
+			settings.pixelTrustLo = 3.0f;
+			settings.pixelTrustHi = 8.0f;
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes) && warp.Estimate(planesA.planes, planesB.planes),
+				ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			Assert::IsNotNull(warp.PixelMask(), L"the pixel weights exist");
+			const BothPaths warped = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+			auto expected = [](int x, int y) { return DejudderTexture(x - 5, y - 2); };
+			const double sourceOk = MatchingPercent(warped.source, width, 48, 32, width - 48, height - 32, expected, kSourceTolerance);
+			const double renderedOk = MatchingPercent(warped.rendered, width, 48, 32, width - 48, height - 32, expected, kRenderedTolerance);
+			Assert::IsTrue(sourceOk >= 90.0 && renderedOk >= 90.0, (L"pixel trust moves the pan by half: source " +
+				std::to_wstring(sourceOk) + L"%, rendered " + std::to_wstring(renderedOk) + L"%; log: " + std::wstring(log.begin(), log.end())).c_str());
+			// A cut (B another picture): both hold.
+			const DejudderFrame c = MakeDejudderFrame(width, height,
+				[](int x, int y) { return static_cast<uint16_t>(2000 + (DejudderTexture(x, y, 99) - 8000) / 6); }, chroma);
+			DejudderGpuPlanes planesC;
+			UploadDejudderFrame(gpu, c, planesC);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesC.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			const BothPaths held = WarpBothPaths(fixture, warp, a, planesA.planes, 0.5f);
+			auto same = [](int x, int y) { return DejudderTexture(x, y); };
+			const double sourceHeld = MatchingPercent(held.source, width, 16, 16, width - 16, height - 16, same, kSourceTolerance);
+			const double renderedHeld = MatchingPercent(held.rendered, width, 16, 16, width - 16, height - 16, same, kRenderedTolerance);
+			Assert::IsTrue(sourceHeld >= 99.0 && renderedHeld >= 99.0, (L"a cut holds in both: source " + std::to_wstring(sourceHeld) +
+				L"%, rendered " + std::to_wstring(renderedHeld) + L"%").c_str());
 			AssertCleanLibplaceboLog(log);
 		}
 

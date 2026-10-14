@@ -74,6 +74,31 @@ if (q.x < size.x && q.y < size.y) {
     vec2 p = vec2(q) + vec2(0.5);
     vec2 v;
     vec4 o;
+#ifdef PIXEL_TRUST
+    // M6: the vector where the pixel comes from (two fixed-point steps),
+    // blended with the hold by A's pixel weight there; a cut holds.
+    if (shift != 0.0 && texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share) {
+        vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
+        vec2 sp = rw_source(p);
+        float sc = shift * strength_scale();
+        vec2 va = field_vector_all(sp);
+        va = field_vector_all(sp - sc * va);
+        va = field_vector_all(sp - sc * va);
+        vec2 d = sc * va;
+#ifdef HOLDS
+        if (rw_held(sp) || rw_held(sp - d))
+            o = texelFetch(cached, q, 0);
+        else
+#endif
+        {
+            float m = texture(pix_mask, (sp - d) / vec2(textureSize(pix_mask, 0) * 2)).r;
+            o = mix(texelFetch(cached, q, 0), rw_cubic(p - d / slope), m);
+        }
+    } else
+        o = texelFetch(cached, q, 0);
+    imageStore(dst, q, o);
+    return;
+#endif
     if (shift != 0.0 && field_vector(rw_source(p), v)) {
         // The source displacement in output pixels: the map's local slope
         // per axis (the maps are separable).
@@ -298,7 +323,8 @@ if (b.x < size.x && b.y < size.y) {
 	}
 
 	bool Warp::Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
-		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera)
+		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera,
+		pl_tex pixelMask)
 	{
 		out = nullptr;
 		if (!dispatch || !cached || !field || !frameTrust)
@@ -381,8 +407,18 @@ if (b.x < size.x && b.y < size.y) {
 			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(warped) };
 		if (subField) descriptors.push_back(Sampled("sub_field", subField));
 		if (object && camera) descriptors.push_back(Sampled("camera", camera));
-		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
-			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") + WARP_FUNCTIONS;
+		// M6: the pixel weights (bilinear).
+		const bool pixel = ms.pixelTrust && pixelMask;
+		if (pixel)
+		{
+			pl_shader_desc mask = Sampled("pix_mask", pixelMask);
+			mask.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
+			descriptors.push_back(mask);
+		}
+		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") +
+			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") + OcclusionMask::NlsMapGlsl() +
+			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
+			(pixel ? Dejudder::FieldAllGlsl() : "") + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,
 			descriptors.data(), static_cast<int>(descriptors.size()), used, n, w, h))
 		{
