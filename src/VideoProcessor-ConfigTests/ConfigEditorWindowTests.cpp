@@ -13,6 +13,8 @@
 #include <ConfigurationIdentity.h>
 #include <ConfigurationRpcProtocol.h>
 #include <RendererProfileConfig.h>
+#include <ConfigFile.h>
+#include <led/LedDriveConfig.h>
 #include <RendererConfigView.h>
 
 #include <QApplication>
@@ -495,6 +497,196 @@ void testRendererCardsShowDefaultsAndRoundTrip()
                 line.startsWith("adaptive_") || line.startsWith("dither_") || line.startsWith("occlusion_"))
             ++rendererKeys;
     require(rendererKeys == 5, ("Renderer keys other than the five edits were written:\n" + saved).constData());
+}
+
+// Saves the window's current page as a PNG in %VP_TEST_SHOTS% (when set),
+// for a person to look at the layout.
+void shoot(ConfigEditorWindow& window, const char* name)
+{
+    const QString folder = qEnvironmentVariable("VP_TEST_SHOTS");
+    if (folder.isEmpty()) return;
+    for (int pass = 0; pass < 5; ++pass)   // let opened sections lay out
+    {
+        QCoreApplication::processEvents();
+        QThread::msleep(20);
+    }
+    window.grab().save(QDir(folder).filePath(QString::fromLatin1(name) + QStringLiteral(".png")));
+}
+
+void testEveryNewLedControlReachesVp()
+{
+    // Owner 2026-10-14: every new Config control does what it says - set it,
+    // Apply, and VP's own reader gets the value.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    {
+        QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+        file.write("[led_drive.Default]\nenabled: false\n[projector.Default]\nport: COM1\n");
+    }
+    {
+        ConfigEditorWindow window(path, 0, true);
+        window.resize(1500, 1150);
+        window.show();
+        window.selectPage(20);
+        shoot(window, "led-new-file");
+        auto* enabled = requireControl<QCheckBox>(window, "config.led_drive.default.enabled");
+        enabled->setChecked(true);
+        auto* source = requireControl<QComboBox>(window, "config.led_drive.default.command_source");
+        auto* protocol = requireControl<QComboBox>(window, "config.projector.default.protocol");
+        require(protocol->currentData().toString() == "none", "A new file's protocol does not show no projector");
+        selectData(source, "python");
+        require(protocol->currentData().toString() == "barco_ascii", "Picking the Python source did not switch to Barco");
+        requireControl<QLineEdit>(window, "config.led_drive.default.listen_script")->setText("scripts\\main_vp.py");
+        requireControl<QLineEdit>(window, "config.led_drive.default.python")->setText("C:\\Python\\python.exe");
+        requireControl<QCheckBox>(window, "config.led_drive.default.listen_log")->setChecked(true);
+        requireControl<QSpinBox>(window, "config.led_drive.default.listen_port")->setValue(47900);
+        requireControl<QCheckBox>(window, "config.led_drive.default.python_drives_port")->setChecked(true);
+        shoot(window, "led-python-source");
+        requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->setChecked(true);
+        selectData(source, "compensate");
+        requireControl<QCheckBox>(window, "config.led_drive.default.lookahead")->setChecked(false);
+        auto setNumber = [&](const char* name, double value)
+        {
+            requireControl<QDoubleSpinBox>(window, name)->setValue(value);
+        };
+        requireControl<QToolButton>(window, "config.projector.default.advanced_toggle")->setChecked(true);
+        setNumber("config.projector.default.baud", 38400);
+        setNumber("config.projector.default.light_min", 60);
+        setNumber("config.projector.default.light_max", 250);
+        setNumber("config.projector.default.ack_timeout_ms", 400);
+        setNumber("config.projector.default.min_command_gap_ms", 150);
+        setNumber("config.projector.default.max_levels_per_command", 10);
+        setNumber("config.projector.default.burst_commands", 5);
+        setNumber("config.projector.default.burst_pause_ms", 3000);
+        requireControl<QCheckBox>(window, "config.projector.default.echo")->setChecked(false);
+        selectData(requireControl<QComboBox>(window, "config.projector.default.terminator"), "literal_cr");
+        requireControl<QLineEdit>(window, "config.projector.default.flux_table")->setText("60:0.21,255:1");
+        requireControl<QSpinBox>(window, "config.projector.default.led_latency_ms")->setValue(1200);
+        shoot(window, "led-compensate");
+        save(window);
+    }
+    ConfigFile config;
+    require(config.Load(path.toStdString()), "The saved LED file did not load");
+    std::string error;
+    require(LedDrive::Validate(config, error), ("VP rejects the saved LED settings: " + error).c_str());
+    const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(config);
+    const LedDrive::ProjectorConfig projector = LedDrive::ReadProjectorConfig(config);
+    require(led.enabled && led.mode == LedDrive::Mode::Compensate && led.commandSource == "compensate",
+        "VP does not read Compensate as the source");
+    require(led.adaptiveGamma && !led.lookahead && led.pythonDrivesPort && led.listenLog && led.listenPort == 47900,
+        "VP does not read adaptive gamma / look-ahead / fallback / log / port as set");
+    require(led.listenScript.find("main_vp.py") != std::string::npos && led.python == "C:\\Python\\python.exe",
+        ("VP does not read the script and Python: " + led.listenScript + " / " + led.python).c_str());
+    require(projector.protocol == "barco_ascii" && projector.baud == 38400 && projector.lightMin == 60 &&
+        projector.lightMax == 250 && projector.ackTimeoutMs == 400 && projector.minCommandGapMs == 150 &&
+        projector.maxLevelsPerCommand == 10 && projector.burstCommands == 5 && projector.burstPauseMs == 3000 &&
+        !projector.echo && projector.terminator == LedDrive::Terminator::LiteralCr && projector.fluxTable.size() == 2 &&
+        projector.ledLatencyMs == 1200, "VP does not read every projector setting as set");
+    {
+        // Reopened: each control shows what was saved.
+        ConfigEditorWindow window(path, 0, true);
+        window.selectPage(20);
+        require(requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() == "compensate" &&
+            requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->isChecked() &&
+            !requireControl<QCheckBox>(window, "config.led_drive.default.lookahead")->isChecked() &&
+            requireControl<QCheckBox>(window, "config.led_drive.default.python_drives_port")->isChecked() &&
+            requireControl<QDoubleSpinBox>(window, "config.projector.default.baud")->value() == 38400 &&
+            requireControl<QDoubleSpinBox>(window, "config.projector.default.light_min")->value() == 60 &&
+            !requireControl<QCheckBox>(window, "config.projector.default.echo")->isChecked() &&
+            requireControl<QComboBox>(window, "config.projector.default.terminator")->currentData().toString() == "literal_cr" &&
+            requireControl<QSpinBox>(window, "config.projector.default.led_latency_ms")->value() == 1200,
+            "A reopened Config does not show the saved LED settings");
+    }
+    // "Ask the projector" removes the key again (VP's default).
+    {
+        ConfigEditorWindow window(path, 0, true);
+        window.selectPage(20);
+        auto* lightMin = requireControl<QDoubleSpinBox>(window, "config.projector.default.light_min");
+        lightMin->setValue(lightMin->minimum());
+        save(window);
+    }
+    require(!readBytes(path).contains("light_min"), "Ask the projector did not remove light_min");
+}
+
+void testEveryNewRendererControlReachesVp()
+{
+    // Owner 2026-10-14: every new or moved renderer control writes the key
+    // and value VP reads.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    {
+        QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+        file.write("[vprenderer.Cinema]\nquality: high\n");
+    }
+    struct Edit { const char* key; const char* value; bool choice; };
+    const Edit edits[] = {
+        { "capture_path", "gpu", true }, { "dejudder_strength", "0.25", false }, { "dejudder_strength_even", "0.5", false },
+        { "dejudder_even_rates", "30_and_29.97", true }, { "dejudder_motion_rolloff", "on", true },
+        { "dejudder_roll_lo", "6", false }, { "dejudder_roll_hi", "20", false }, { "dejudder_roll_floor", "0.3", false },
+        { "dejudder_object_strength", "0.5", false }, { "dejudder_fade_floor", "0.2", false },
+        { "dejudder_fade_match", "off", true }, { "dejudder_match_tolerance", "5", false },
+        { "dejudder_frame_trust", "0.3", false }, { "dejudder_est_gate", "off", true },
+        { "dejudder_global_prior", "off", true }, { "dejudder_vector_smooth", "off", true },
+        { "dejudder_motion_scale_lo", "0.5", false }, { "dejudder_motion_scale_hi", "2", false },
+        { "dejudder_trust_scale", "0.5", false }, { "dejudder_est_lambda", "1", false },
+        { "dejudder_est_candidates", "off", true }, { "dejudder_est_qpel", "off", true },
+        { "dejudder_est_split_sad", "6", false }, { "dejudder_est_split", "on", true },
+        { "dejudder_search_range", "6", false }, { "dejudder_global_two", "off", true },
+        { "dejudder_texture_tolerance", "0.5", false }, { "dejudder_consistency_px", "3", false },
+        { "dejudder_cut_histogram", "0.4", false }, { "dejudder_regional_hold", "off", true },
+        { "dejudder_pixel_trust_lo", "2", false }, { "dejudder_pixel_trust_hi", "7", false },
+        { "dejudder_pixel_trust", "off", true }, { "dejudder_verify_share", "0.3", false },
+        { "dejudder_verify", "on", true }, { "dejudder_low_res", "search", true },
+        { "dejudder_estimate_ahead", "off", true }, { "dejudder_hold_feather_px", "3", false },
+        { "dejudder_hold_hysteresis", "3", false }, { "dejudder_taper_sad", "9", false },
+        { "dejudder_block_taper", "on", true }, { "dejudder_warp_stage", "source", true },
+        { "dejudder_occlusion_fill", "on", true }, { "occlusion_mask", "on", true },
+        { "dither_grain_tolerance_scale", "2", false }, { "dither_vectors", "own", true },
+        { "sdr_tone_shape", "knee", true }, { "sdr_white_headroom", "0.1", false }, { "sdr_knee_start", "0.7", false },
+        { "sdr_knee_strength", "0.6", false }, { "sdr_contrast_recovery", "1.2", false },
+        { "adaptive_downscale", "on", true }, { "adaptive_upscale", "on", true }, { "upscale_light", "gamma", true },
+        { "fbo_float32", "on", true } };
+    {
+        ConfigEditorWindow window(path, 0, true);
+        window.resize(1500, 1600);
+        window.show();
+        window.selectPage(2);
+        requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+        QCoreApplication::processEvents();
+        for (const char* section : { "rendererSection.dejudder", "rendererSection.dejudderEstimation" })
+            if (auto* toggle = window.findChild<QToolButton*>(QString::fromLatin1(section))) toggle->setChecked(true);
+        shoot(window, "dejudder-off");
+        for (const Edit& edit : edits)
+        {
+            const QString name = QStringLiteral("config.vprenderer.") + QString::fromLatin1(edit.key);
+            if (edit.choice) selectData(requireControl<QComboBox>(window, name), QString::fromLatin1(edit.value));
+            else requireControl<QLineEdit>(window, name)->setText(QString::fromLatin1(edit.value));
+        }
+        shoot(window, "dejudder-set");
+        // The frame-rate rule on a rendering profile.
+        requireControl<QDoubleSpinBox>(window, "config.vprenderer.rate_rule_fps")->setValue(59.0);
+        requireControl<QCheckBox>(window, "config.vprenderer.rate_rule")->setChecked(true);
+        save(window);
+    }
+    ConfigFile config;
+    require(config.Load(path.toStdString()), "The saved renderer file did not load");
+    RendererProfileConfig::Model model;
+    std::string error;
+    require(RendererProfileConfig::Read(config, model, error), ("VP rejects the saved renderer settings: " + error).c_str());
+    const RendererProfileConfig::Profile* cinema = nullptr;
+    std::string names;
+    for (const auto& entry : model.profiles)
+    {
+        names += entry.first + " ";
+        if (entry.second.settings.count("quality")) cinema = &entry.second;
+    }
+    require(cinema != nullptr, ("The Cinema profile is missing after the save; profiles: " + names).c_str());
+    for (const Edit& edit : edits)
+    {
+        const auto found = cinema->settings.find(edit.key);
+        require(found != cinema->settings.end() && found->second == edit.value,
+            (std::string("VP does not read ") + edit.key + " = " + edit.value + " (got '" +
+                (found == cinema->settings.end() ? std::string("unset") : found->second) + "')").c_str());
+    }
+    require(cinema->when == "${cadence} > 59", ("The frame-rate rule is not the profile's: " + cinema->when).c_str());
 }
 
 void testSubtitleDiagnosticSurvivesConfigSaveAndReopen()
@@ -7637,6 +7829,8 @@ int main(int argc, char** argv)
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
+    failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
+    failures += run("every new renderer control reaches VP", testEveryNewRendererControlReachesVp);
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);
