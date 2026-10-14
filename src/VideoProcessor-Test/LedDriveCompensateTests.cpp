@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <ConfigFile.h>
+#include <led/BarcoAsciiDriver.h>
 #include <led/LedController.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurement.h>
@@ -583,6 +584,188 @@ namespace VideoProcessorTest
 			}
 			// The host is gone: its script is too.
 			Assert::IsTrue(WaitFor([&] { return !alive(last); }), L"no orphan after the host is destroyed");
+		}
+
+		TEST_METHOD(CommandSourceSetsTheModeAndSwitches)
+		{
+			// The LED core (owner 2026-10-14): command_source picks the mode;
+			// adaptive_gamma is off unless named; older `mode` files unchanged.
+			auto read = [](const std::string& body)
+			{
+				char directory[MAX_PATH]{}, file[MAX_PATH]{};
+				GetTempPathA(MAX_PATH, directory);
+				GetTempFileNameA(directory, "vps", 0, file);
+				std::ofstream(file, std::ios::trunc) << "[led_drive.Default]\nenabled: true\n" << body;
+				ConfigFile config;
+				Assert::IsTrue(config.Load(file));
+				std::string error;
+				Assert::IsTrue(Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+				const LedDriveConfig result = ReadLedDriveConfig(config);
+				DeleteFileA(file);
+				return result;
+			};
+			LedDriveConfig python = read("command_source: python\nlisten_script: C:\\scripts\\main_vp.py\nshadow_lift_ansi: 0.3\n");
+			Assert::IsTrue(python.mode == Mode::Listen && python.listenRelay && !python.adaptiveGamma && !python.scriptSmoothing,
+				L"python: listen, relayed, adaptive gamma off by default");
+			Assert::IsTrue(ListenRelays(python));
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			Assert::AreEqual(std::string("barco_ascii"), EffectiveProtocol(port, python), L"relay opens the port");
+			const LedDriveConfig fallback = read("command_source: python\nlisten_script: main_vp.py\npython_drives_port: true\n");
+			Assert::IsTrue(fallback.mode == Mode::Listen && !ListenRelays(fallback), L"the fallback: the script writes the port");
+			Assert::AreEqual(std::string("none"), EffectiveProtocol(port, fallback));
+			const LedDriveConfig byHand = read("command_source: python\n");
+			Assert::IsFalse(ListenRelays(byHand), L"no script of VP's: nothing to relay (the script writes the port)");
+			const LedDriveConfig internal = read("command_source: internal_script\nadaptive_gamma: true\nlookahead: false\n");
+			Assert::IsTrue(internal.mode == Mode::Script && internal.adaptiveGamma && internal.scriptSmoothing && !internal.lookahead,
+				L"internal script with adaptive gamma: the steps are eased");
+			Assert::IsTrue(read("command_source: compensate\n").mode == Mode::Compensate);
+			Assert::IsTrue(read("command_source: none\n").mode == Mode::LogOnly);
+			Assert::IsTrue(read("command_source: none\nadaptive_gamma: true\n").mode == Mode::PictureOnly,
+				L"no LED commands with adaptive gamma: the picture terms only");
+			const LedDriveConfig legacy = read("mode: compensate\n");
+			Assert::IsTrue(legacy.mode == Mode::Compensate && legacy.adaptiveGamma && legacy.lookahead,
+				L"an older mode-only configuration behaves as before");
+			Assert::IsFalse(read("mode: compensate\nadaptive_gamma: false\n").adaptiveGamma);
+		}
+
+		TEST_METHOD(RelaySendsTheScriptsBytesAndNothingElse)
+		{
+			// Relay (owner 2026-10-14): VP holds the port, the script VP runs
+			// leaves COM1 alone (VP_LED_RELAY=1) and VP sends each command it
+			// hears exactly as the script's `echo :<cmd><value>cr > com1`
+			// wrote it - nothing at the start (Python loading), nothing out of
+			// range, nothing on exit.
+			Assert::AreEqual(std::string(":cntr50cr \r\n"), BarcoAsciiDriver::RelayBytes("CNTR", 50));
+			Assert::AreEqual(std::string(":lpw1255cr \r\n"), BarcoAsciiDriver::RelayBytes("LPW1", 255));
+			wchar_t python[MAX_PATH] = {};
+			if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr) == 0)
+			{
+				Logger::WriteMessage(L"Relay test: no python.exe on PATH; the module part not run");
+				return;
+			}
+			char pythonPath[MAX_PATH] = {};
+			WideCharToMultiByte(CP_UTF8, 0, python, -1, pythonPath, MAX_PATH, nullptr, nullptr);
+			char here[MAX_PATH] = {};
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
+			GetModuleFileNameA(self, here, MAX_PATH);
+			const std::string binary(here);
+			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-relay-test";
+			const std::string logs = folder + "\\logs\\";
+			CreateDirectoryA(folder.c_str(), nullptr);
+			CreateDirectoryA(logs.c_str(), nullptr);
+			const std::string script = folder + "\\relay.py";
+			const std::string seen = folder + "\\relay.txt";
+			DeleteFileA(seen.c_str());
+			DeleteFileA(ListenCsvPath(logs).c_str());
+			{
+				// Stands for main_vp.py: notes what VP told it, then waits.
+				std::ofstream out(script, std::ios::trunc);
+				out << "import os, time\n"
+					"open('relay.txt', 'w').write(os.environ.get('VP_LED_RELAY', 'unset'))\n"
+					"while True:\n"
+					"    time.sleep(0.2)\n";
+			}
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Listen;
+			config.listenRelay = true;
+			config.listenScript = script;
+			config.python = pythonPath;
+			config.listenPort = 47925;
+			config.listenLog = true;
+			config.listenLogDirectory = logs;
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			port.readBack = true;   // even so: no ECHO, no queries
+			Assert::AreEqual(std::string("barco_ascii"), EffectiveProtocol(port, config));
+			{
+				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.Listening().relaying; }, 10000), L"the script VP runs is running");
+				Assert::AreEqual(1, projector->opens, L"relay opens the port");
+				Assert::IsTrue(WaitFor([&] { std::ifstream in(seen); std::string text; std::getline(in, text); return text == "1"; }, 10000),
+					L"the script was told VP_LED_RELAY=1");
+				Sleep(300);
+				Assert::IsTrue(projector->Writes().empty(), L"nothing is sent before the script's first command");
+				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 TICK -1 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 200 t=1.1 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 150 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 55.5 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 56 t=1.3 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+				Assert::IsTrue(WaitFor([&] { return module.Listening().relayed == 2; }), L"both commands relayed");
+				const ListenAccuracy heard = module.Listening();
+				Assert::AreEqual(1, heard.relayRefused, L"CNTR 150 refused (out of range); 55.5 is not a message");
+				Assert::AreEqual(0, heard.relayFailed);
+				const std::vector<std::string> writes = projector->Writes();
+				Assert::AreEqual(size_t(2), writes.size());
+				Assert::AreEqual(std::string(":lpw1200cr \r\n"), writes[0]);
+				Assert::AreEqual(std::string(":cntr56cr \r\n"), writes[1]);
+				module.Stop();
+			}
+			Assert::AreEqual(size_t(2), projector->Writes().size(), L"nothing of VP's own on exit");
+			// The data log: both commands with relay_sent 1; the TICK row.
+			std::ifstream csv(ListenCsvPath(logs));
+			std::string line, header;
+			std::getline(csv, header);
+			Assert::AreEqual(std::string(kListenCsvHeader), header);
+			int sentRows = 0;
+			bool tick = false;
+			while (std::getline(csv, line))
+			{
+				if ((line.find(",LPW1,200,") != std::string::npos || line.find(",CNTR,56,") != std::string::npos) &&
+					line.find(",1,", line.size() > 12 ? line.size() - 12 : 0) != std::string::npos)
+					++sentRows;
+				tick = tick || line.find(",TICK,") != std::string::npos;
+			}
+			Assert::AreEqual(2, sentRows, L"each relayed command is logged as sent");
+			Assert::IsTrue(tick, L"the first TICK is logged");
+		}
+
+		TEST_METHOD(ListenLogStaysUnderItsCap)
+		{
+			// Sized for hours (owner 2026-10-14): an over-cap file, or one with
+			// an older header, is moved to .prev and a new one starts.
+			char here[MAX_PATH] = {};
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
+			GetModuleFileNameA(self, here, MAX_PATH);
+			const std::string binary(here);
+			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-listen-cap-test\\";
+			CreateDirectoryA(folder.c_str(), nullptr);
+			const std::string path = ListenCsvPath(folder), previous = folder + "led-listen.prev.csv";
+			DeleteFileA(previous.c_str());
+			std::ofstream(path, std::ios::trunc) << "time_ms,kind,value\n1,TICK,-1\n";   // an older header
+			std::ofstream csv;
+			long long size = OpenListenCsv(csv, path, "# session");
+			csv.close();
+			Assert::IsTrue(GetFileAttributesA(previous.c_str()) != INVALID_FILE_ATTRIBUTES, L"the older file moved aside");
+			{
+				std::ifstream in(path);
+				std::string first;
+				std::getline(in, first);
+				Assert::AreEqual(std::string(kListenCsvHeader), first);
+			}
+			Assert::IsTrue(size > 0 && size < 400);
+			{
+				// Past the cap: rotated on the next open.
+				std::ofstream big(path, std::ios::app | std::ios::binary);
+				const std::string row(1023, 'x');
+				for (long long written = 0; written <= kListenCsvCapBytes; written += 1024)
+					big << row << "\n";
+			}
+			size = OpenListenCsv(csv, path, "# session");
+			csv.close();
+			Assert::IsTrue(size < 400, L"a new file after the cap");
+			WIN32_FILE_ATTRIBUTE_DATA info{};
+			Assert::IsTrue(GetFileAttributesExA(previous.c_str(), GetFileExInfoStandard, &info) != 0);
+			Assert::IsTrue(((static_cast<long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow) > kListenCsvCapBytes,
+				L"the full file is the previous one (one kept: at most twice the cap on disk)");
+			DeleteFileA(previous.c_str());
+			DeleteFileA(path.c_str());
 		}
 
 		TEST_METHOD(ListenLogOffWritesNoCsv)

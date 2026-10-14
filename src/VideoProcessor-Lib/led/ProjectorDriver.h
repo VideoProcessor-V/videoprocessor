@@ -117,6 +117,11 @@ namespace LedDrive
 			(void)value;
 			return false;
 		}
+		// mode: listen, relay (owner 2026-10-14): the script's own command,
+		// exactly as its `echo :<cmd><value>cr > com1` wrote it - the same
+		// bytes (":cntr50cr \r\n"), no clamp, gap, pause or reply wait.
+		// Returns once written. The dry run reports it as SendScript does.
+		virtual bool SendRelay(const std::string& mnemonic, int value) { return SendScript(mnemonic, value); }
 		// The startup correction to 50 and, after mode: script, the exit
 		// restore. mode: compensate never drives CNTR.
 		virtual bool SetContrast(int value) = 0;

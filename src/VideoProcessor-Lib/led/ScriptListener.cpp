@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
+#include <windows.h>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -168,6 +169,31 @@ namespace LedDrive
 	std::string ListenNowPath(const std::string& directory)
 	{
 		return ListenDirectory(directory) + "led-listen-now.txt";
+	}
+
+	long long OpenListenCsv(std::ofstream& csv, const std::string& path, const std::string& first)
+	{
+		std::string header;
+		{
+			std::ifstream existing(path);
+			std::getline(existing, header);
+		}
+		WIN32_FILE_ATTRIBUTE_DATA info{};
+		const bool exists = GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &info) != 0;
+		const long long size = exists ? (static_cast<long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow : 0;
+		if (exists && (size > kListenCsvCapBytes || header != kListenCsvHeader))
+			MoveFileExA(path.c_str(), (path.substr(0, path.size() - 4) + ".prev.csv").c_str(), MOVEFILE_REPLACE_EXISTING);
+		const bool fresh = GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES;
+		csv.open(path, std::ios::out | std::ios::app);
+		if (!csv)
+			return 0;
+		if (fresh)
+			csv << kListenCsvHeader << "\n";
+		csv << first << "\n";
+		csv.flush();
+		if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &info))
+			return 0;
+		return (static_cast<long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
 	}
 
 	bool SendScriptMessageForTest(int port, const std::string& text)

@@ -56,6 +56,13 @@ namespace LedDrive
 		int lightCommands = 0;
 		int contrastCommands = 0;
 		int lastContrast = 50;
+		// Relay (owner 2026-10-14): VP holds the port and the script VP runs
+		// is running; commands sent, failed to write, and refused (out of
+		// range, or no script of VP's running).
+		bool relaying = false;
+		int relayed = 0;
+		int relayFailed = 0;
+		int relayRefused = 0;
 	};
 
 	class LedDriveModule

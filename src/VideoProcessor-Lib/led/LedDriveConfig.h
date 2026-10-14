@@ -200,6 +200,34 @@ namespace LedDrive
 		std::string listenScript;
 		std::string python;
 		std::string listenLogDirectory;
+		// Relay (owner 2026-10-14; on unless python_drives_port, used only when
+		// VP runs the script): VP opens the RS-232 port and sends each
+		// LPW1/CNTR the script tells it exactly as the script sent it (the
+		// same bytes, no clamp, gap or reshaping); the script, told by
+		// VP_LED_RELAY=1, skips its own COM1 writes. VP sends nothing of its
+		// own: not at the start (Python loading is silence), not on exit. Off,
+		// or the port cannot be opened: the original listen - the script
+		// drives COM1 itself.
+		bool listenRelay = true;
+		// The LED core (owner 2026-10-14): one place that holds the port,
+		// sends and logs, fed by a selectable command source -
+		// command_source: python (the owner's script; relay, or with
+		// python_drives_port the original listen), internal_script (VP's copy
+		// of the script's rules), compensate (VP's own controller), none (no
+		// LED commands). It sets `mode` (which older configurations still
+		// name directly). Two switches on the core:
+		// adaptive_gamma (default off with command_source; older `mode`
+		// configurations keep it on): VP's picture adapts to the LED - the
+		// gain across each step (script smoothing for the script sources, the
+		// compensation gain for compensate) and the ANSI shadow lift (its
+		// strength still shadow_lift_ansi). lookahead (default on): the
+		// queued-frame look-ahead of VP's internal sources; off = reactive.
+		// The Python script decides from its own screenshots, so it has none.
+		std::string commandSource;
+		int adaptiveGammaSetting = -1;   // adaptive_gamma as read: -1 not named
+		bool pythonDrivesPort = false;
+		bool adaptiveGamma = true;
+		bool lookahead = true;
 		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
 		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
 		// 100 = no cap beyond cntr_max_usable. The lower of the two applies.
@@ -493,6 +521,10 @@ namespace LedDrive
 			Choice("mode", { "compensate", "script", "log_only", "picture_only", "listen" }),
 			Integer("listen_port", 1024, 65535),
 			Boolean("listen_log"),
+			Choice("command_source", { "python", "internal_script", "compensate", "none" }),
+			Boolean("python_drives_port"),
+			Boolean("adaptive_gamma"),
+			Boolean("lookahead"),
 			Custom("listen_script", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of the script VP starts in mode listen (e.g. main_vp.py; relative to this configuration file, or absolute)"),
 			Custom("python", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
@@ -799,6 +831,15 @@ namespace LedDrive
 		readInt("tick_ms", 50, 5000, result.tickMs);
 		readInt("listen_port", 1024, 65535, result.listenPort);
 		config.TryGetBool(section, "listen_log", result.listenLog);
+		if (config.TryGetString(section, "command_source", value))
+			result.commandSource = ConfigFile::NormalizeName(value);
+		config.TryGetBool(section, "python_drives_port", result.pythonDrivesPort);
+		{
+			bool adaptive = false;
+			if (config.TryGetBool(section, "adaptive_gamma", adaptive))
+				result.adaptiveGammaSetting = adaptive ? 1 : 0;
+		}
+		config.TryGetBool(section, "lookahead", result.lookahead);
 		{
 			// listen_script relative to the configuration that names it; quotes dropped.
 			auto unquote = [](std::string text)
@@ -892,6 +933,24 @@ namespace LedDrive
 		readInt("ftb_black_ms", 100, 10000, result.ftbBlackMs);
 	}
 
+	// command_source and its switches onto the mode and settings the module
+	// runs (see commandSource). Without command_source nothing changes.
+	inline void ApplyCommandSource(LedDriveConfig& led)
+	{
+		if (led.commandSource.empty())
+		{
+			if (led.adaptiveGammaSetting >= 0) led.adaptiveGamma = led.adaptiveGammaSetting == 1;
+			return;
+		}
+		led.adaptiveGamma = led.adaptiveGammaSetting == 1;
+		led.mode = led.commandSource == "python" ? Mode::Listen :
+			led.commandSource == "internal_script" ? Mode::Script :
+			led.commandSource == "compensate" ? Mode::Compensate :
+			led.adaptiveGamma ? Mode::PictureOnly : Mode::LogOnly;
+		led.listenRelay = !led.pythonDrivesPort;
+		led.scriptSmoothing = led.adaptiveGamma;
+	}
+
 	// Built-in defaults (the beta_22 script's curve and tables), then the LED
 	// profile file if one is named, then the configuration's own
 	// [led_drive.Default] - so the Config app's core settings always win.
@@ -909,6 +968,7 @@ namespace LedDrive
 			}
 		}
 		ApplyLedDriveSection(config, LED_DRIVE_SECTION, result);
+		ApplyCommandSource(result);
 		return result;
 	}
 
@@ -935,12 +995,21 @@ namespace LedDrive
 		return BoostExponent(led.gammaBoost, displayGamma);
 	}
 
+	// mode: listen relays the script's commands (listen_relay) only when VP
+	// runs the script, so the script can be told to leave COM1 alone.
+	inline bool ListenRelays(const LedDriveConfig& led)
+	{
+		return led.enabled && led.mode == Mode::Listen && led.listenRelay && !led.listenScript.empty();
+	}
+
 	// The module talks to the projector only when it is enabled and not in
-	// log_only mode; otherwise it uses the dry-run "none" driver.
+	// log_only mode; otherwise it uses the dry-run "none" driver. listen
+	// opens the port only to relay.
 	inline std::string EffectiveProtocol(const ProjectorConfig& projector,
 		const LedDriveConfig& led)
 	{
-		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly || led.mode == Mode::Listen)
+		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly ||
+			(led.mode == Mode::Listen && !ListenRelays(led)))
 			return "none";
 		return projector.protocol;
 	}

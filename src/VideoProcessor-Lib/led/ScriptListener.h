@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -57,14 +58,23 @@ namespace LedDrive
 	};
 
 	// mode: listen's data log (owner 2026-10-13): logs\led-listen.csv beside
-	// vp.log, one row per script message with the script's measurement and
-	// targets next to VP's own, for adapting VP's copy of the script. A new
-	// session appends a "# session" line; past 20 MB the file is rotated to
-	// led-listen.prev.csv. The Config app's listen monitor reads it.
+	// vp.log, the script's measurement and targets next to VP's own, for
+	// adapting VP's copy of the script. Sized for sessions of hours (owner
+	// 2026-10-14): a row for every LPW1/CNTR (relay: sent 1/0 and how long
+	// the write took), a TICK row only when VP's copy starts or stops
+	// agreeing (or the disagreement changes), and a "# summary" line every
+	// 10 s. A new session appends a "# session" line; past
+	// kListenCsvCapBytes the file becomes led-listen.prev.csv, so at most
+	// twice the cap is kept. A file with an older header is moved aside.
 	constexpr const char* kListenCsvHeader =
 		"time_ms,kind,value,script_mean,script_max,script_highlight,script_target_light,script_target_contrast,"
 		"vp_apl,vp_max,vp_highlight_percentile,vp_highlight_area,vp_highlight,vp_target_light,vp_target_contrast,"
-		"last_contrast_heard,vp_gain";
+		"last_contrast_heard,vp_gain,relay_sent,relay_write_ms";
+	constexpr long long kListenCsvCapBytes = 8ll * 1024 * 1024;
+	// Opens `path` for appending (rotated first when past the cap or written
+	// with another header), writes the header when new and then `first`;
+	// returns the file's size.
+	long long OpenListenCsv(std::ofstream& csv, const std::string& path, const std::string& first);
 	// In `directory`, or beside the VP log when it is empty.
 	std::string ListenCsvPath(const std::string& directory = std::string());
 	// The monitor's file: one line of key=value pairs, overwritten on each

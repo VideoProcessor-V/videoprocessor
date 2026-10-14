@@ -2,21 +2,23 @@
 # with the VideoProcessor listening addendum (2026-10-13).
 #
 # VideoProcessor's copy (scripts\main_vp.py): set
-#   [led_drive.Default]  mode: listen  and  listen_script: scripts\main_vp.py
+#   [led_drive.Default]  command_source: python  and  listen_script: scripts\main_vp.py
 # and VP starts, watches and restarts it. Installed only when absent: an
 # edited copy is never replaced by an update.
 #
 # The only changes from main.py are marked "VP addendum". After every
 # command the script sends to COM1 it also tells VideoProcessor, on this PC
 # only (UDP to 127.0.0.1:47811), what it sent, and once per loop what it
-# measured. VideoProcessor's LED mode "listen" then:
-#   - eases the picture across each contrast step exactly as if VP had sent
-#     the command itself (the script-mode smoothing), and
+# measured. With command_source: python, VideoProcessor then:
+#   - relays each command to the projector exactly as this script wrote it
+#     (VP holds COM1 and the script echoes to nul; see _vp_com1 below), or,
+#     with python_drives_port, leaves COM1 to this script as before,
+#   - with adaptive_gamma on, eases the picture across each contrast step
+#     (the script-mode smoothing), and
 #   - runs its own copy of this script's rules on its own measurement and
 #     logs how closely they agree (the accuracy of VP's approximation).
-# If VideoProcessor is not running, or not in listen mode, the messages go
-# nowhere: the script works exactly as before. VP never opens COM1 in listen
-# mode, so the port stays this script's.
+# Started by hand, or with VideoProcessor closed, the messages go nowhere and
+# the script writes COM1 itself: it works exactly as before.
 import time
 import numpy as np
 import pyautogui
@@ -38,17 +40,22 @@ def vp_notify(kind, value=-1):
         _vp_socket.sendto(message.encode("ascii"), ("127.0.0.1", 47811))
     except Exception:
         pass
+# Relay (VP 2026-10-14): when VideoProcessor starts this script with
+# VP_LED_RELAY=1, VP holds COM1 and sends each command itself, exactly as
+# this script would have written it. The script then echoes to nul instead
+# of com1: the same cmd call, so its timing is unchanged.
+_vp_com1 = "nul" if os.environ.get("VP_LED_RELAY") == "1" else "com1"
 # --- end VP addendum ------------------------------------------------------
 #subprocess.call(('echo :lpw1{}cr' .format(mean2)), shell=True)
 # VP copy: the Tera Term start that set COM1's line settings is removed;
 # VideoProcessor sets the port ([projector.Default] port / baud, 8N1) before
-# it starts this script, and never holds the port itself.
+# it starts this script (in relay VP holds the port itself instead).
 #LED Power
-subprocess.call('echo :lpw1255cr > com1', shell=True)
+subprocess.call('echo :lpw1255cr > ' + _vp_com1, shell=True)   # VP addendum: _vp_com1
 vp_notify('LPW1', 255)   # VP addendum
 current_contrast = 255
 #Contrast
-subprocess.call('echo :cntr50cr > com1', shell=True)
+subprocess.call('echo :cntr50cr > ' + _vp_com1, shell=True)   # VP addendum: _vp_com1
 vp_notify('CNTR', 50)   # VP addendum
 current_con = 50
 
@@ -226,7 +233,7 @@ while(True):
             if target_power < current_contrast:
                 set_power = (current_contrast - 1)
                 current_contrast = set_power
-        subprocess.call(('echo :lpw1{}cr > com1'.format(set_power)), shell=True)
+        subprocess.call(('echo :lpw1{}cr > {}'.format(set_power, _vp_com1)), shell=True)   # VP addendum: _vp_com1
         vp_notify('LPW1', set_power)   # VP addendum
         subprocess.call(('echo :lpw1{}cr'.format(set_power)), shell=True)
         time.sleep(200/1000)
@@ -248,7 +255,7 @@ while(True):
                             set_contrast = (current_con - 1)
                             current_con = set_contrast
                             time.sleep(100 / 1000)
-                            subprocess.call(('echo :cntr{}cr > com1'.format(set_contrast)), shell=True)
+                            subprocess.call(('echo :cntr{}cr > {}'.format(set_contrast, _vp_com1)), shell=True)   # VP addendum: _vp_com1
                             vp_notify('CNTR', set_contrast)   # VP addendum
                             difference2 = abs(target_contrast - current_con)
                         if difference2 == 10:
@@ -267,7 +274,7 @@ while(True):
                         set_contrast = (current_con - 1)
                         current_con = set_contrast
                         time.sleep(100 / 1000)
-                        subprocess.call(('echo :cntr{}cr > com1'.format(set_contrast)), shell=True)
+                        subprocess.call(('echo :cntr{}cr > {}'.format(set_contrast, _vp_com1)), shell=True)   # VP addendum: _vp_com1
                         vp_notify('CNTR', set_contrast)   # VP addendum
                         difference2 = abs(target_contrast - current_con)
                     #if highlightdetect == 1:
@@ -346,7 +353,7 @@ while(True):
 #        if max_val >200 and 55 < current_con > 50:
 #            current_con = set_contrast
         time.sleep(200/1000)
-        subprocess.call(('echo :cntr{}cr > com1'.format(set_contrast)), shell=True)
+        subprocess.call(('echo :cntr{}cr > {}'.format(set_contrast, _vp_com1)), shell=True)   # VP addendum: _vp_com1
         vp_notify('CNTR', set_contrast)   # VP addendum
 
 

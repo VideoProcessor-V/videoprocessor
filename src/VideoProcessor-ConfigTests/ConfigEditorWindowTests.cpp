@@ -932,8 +932,13 @@ void testLedDrivePageAndLiveSwitches()
     window.selectPage(20);
     auto* enabled = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.enabled"));
     require(!enabled->isChecked(), "LED drive did not load as off");
-    auto* mode = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.mode"));
-    require(mode->currentData().toString() == QStringLiteral("log_only"), "LED mode did not load");
+    // The LED core (owner 2026-10-14): the command source is read from an
+    // older configuration's mode (log_only = no LED commands).
+    auto* mode = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.command_source"));
+    require(mode->currentData().toString() == QStringLiteral("none"), "The LED command source did not load from mode");
+    require(!requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isEnabled() &&
+        !requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.python_drives_port"))->isEnabled(),
+        "Look-ahead or the Python fallback is offered with no command source");
     auto* boost = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.gamma_boost"));
     auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
     require(port->text() == QStringLiteral("COM1"), "COM port did not load");
@@ -963,8 +968,8 @@ void testLedDrivePageAndLiveSwitches()
     auto* contrastLatency = requireControl<QSpinBox>(window, QStringLiteral("config.projector.default.cntr_latency_ms"));
     require(contrastLatency->value() == 80, "Contrast response time does not default to 80 ms");
     contrastLatency->setValue(120);
-    auto* smoothing = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.script_smoothing"));
-    require(!smoothing->isChecked(), "Script smoothing is not off by default (off = the script exactly)");
+    auto* smoothing = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.adaptive_gamma"));
+    require(!smoothing->isChecked() && smoothing->isEnabled(), "Adaptive gamma is not off by default (off = the projector's steps exactly)");
     smoothing->setChecked(true);
     // Stage 7 step 7c: every new LED setting has a control.
     auto* cutLevel = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.cut_cntr_level"));
@@ -1046,7 +1051,7 @@ void testLedDrivePageAndLiveSwitches()
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
         "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35",
-        "cntr_latency_ms: 120", "script_smoothing: true", "cut_cntr_level: 57", "max_cut_dip: 0.40",
+        "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "cut_cntr_level: 57", "max_cut_dip: 0.40",
         "black_prelift_max: 110", "rate_max_up: 20.0", "rate_preset: compensated", "led_settle_ms: 250",
         "dmd_clip_cntr: 61" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")

@@ -18717,7 +18717,8 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	m_ledKnee = boostConfig.knee;
 	m_ledBoostKnee = boostConfig.gammaBoostKnee;
 	m_ledBoostKneeWidth = boostConfig.gammaBoostKneeWidth;
-	m_ledShadowLift = boostConfig.shadowLiftAnsi;
+	// The shadow lift is part of adaptive gamma (owner 2026-10-14).
+	m_ledShadowLift = boostConfig.adaptiveGamma ? boostConfig.shadowLiftAnsi : 0.0;
 	if (m_impl)
 	{
 		m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);

@@ -95,15 +95,16 @@ namespace LedDrive
 	}
 
 	void ScriptHost::Update(const std::string& script, const std::string& python, const std::string& logDirectory,
-		const std::string& port, int baud)
+		const std::string& port, int baud, bool relay)
 	{
 		nowPath = LogFolder(logDirectory) + "\\led-script-now.txt";
-		// A new script or interpreter: start again now.
-		if (script != configuredScript || python != configuredPython)
+		// A new script or interpreter, or relay switched: start again now.
+		if (script != configuredScript || python != configuredPython || relay != configuredRelay)
 		{
 			Stop();
 			configuredScript = script;
 			configuredPython = python;
+			configuredRelay = relay;
 			backoffSeconds = 2;
 			restartAt = std::chrono::steady_clock::now();
 		}
@@ -178,9 +179,22 @@ namespace LedDrive
 		const std::string interpreter = python.empty() ? std::string("python") : python;
 		std::wstring command = L"\"" + Wide(interpreter) + L"\" -u \"" + Wide(script) + L"\"";
 		const std::wstring directory = Wide(Folder(script));
+		// VP's environment, with VP_LED_RELAY=1 when VP relays (and never
+		// otherwise, even if VP itself was started with it).
+		std::wstring environment;
+		if (const LPWCH block = GetEnvironmentStringsW())
+		{
+			for (const wchar_t* entry = block; *entry; entry += wcslen(entry) + 1)
+				if (_wcsnicmp(entry, L"VP_LED_RELAY=", 13) != 0)
+					environment.append(entry).push_back(L'\0');
+			FreeEnvironmentStringsW(block);
+		}
+		if (configuredRelay)
+			environment.append(L"VP_LED_RELAY=1").push_back(L'\0');
+		environment.push_back(L'\0');
 		PROCESS_INFORMATION started{};
 		const BOOL ok = CreateProcessW(nullptr, &command[0], nullptr, nullptr, TRUE,
-			CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP, nullptr,
+			CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT, &environment[0],
 			directory.empty() ? nullptr : directory.c_str(), &startup, &started);
 		const DWORD createError = ok ? 0 : GetLastError();
 		CloseHandle(outputWrite);

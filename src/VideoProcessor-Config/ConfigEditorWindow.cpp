@@ -9895,22 +9895,95 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     floorBlack->setMaximum(floor->value());
     connect(floor, qOverload<int>(&QSpinBox::valueChanged), floorBlack,
         [floorBlack](int level) { floorBlack->setMaximum(level); });
-    driveForm->addRow(QStringLiteral("Mode"), bindChoiceField(led, QStringLiteral("mode"),
-        { QStringLiteral("log_only"), QStringLiteral("script"), QStringLiteral("compensate"), QStringLiteral("picture_only"),
-          QStringLiteral("listen") },
-        { QStringLiteral("Log only (watch, never send)"),
-          QStringLiteral("Script (VP runs its copy of your dimming script)"),
-          QStringLiteral("Compensate (dim the LED, keep the picture)"),
-          QStringLiteral("Picture only (VP's picture adjustments only; the RS-232 port is left free)"),
-          QStringLiteral("Listen (your script drives the projector; VP follows it; the script needs its VP lines)") }));
-    // Step 7b: script mode sends the script's own LPW1 and CNTR; smoothing
-    // adds VP's gain across each whole CNTR step. Off = the script exactly.
-    driveForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth the script's contrast steps"), led,
-        QStringLiteral("script_smoothing"), false));
-    driveForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Script mode only. Off: exactly your script - VP sends its light and contrast commands and leaves the "
-        "picture alone. On: the same commands, and VP eases the picture across each whole contrast step so it "
-        "never visibly jumps (it never makes the picture brighter than the projector's own setting).")));
+    // The LED core (owner 2026-10-14): one place that holds the port, sends
+    // and logs, fed by a chosen command source, with two switches. Older
+    // configurations name only `mode`; the source shown is read from it, and
+    // choosing a source writes command_source (and the matching mode).
+    {
+        const QStringList sources = { QStringLiteral("python"), QStringLiteral("internal_script"),
+            QStringLiteral("compensate"), QStringLiteral("none") };
+        auto* source = new QComboBox;
+        source->setObjectName(controlName(led, QStringLiteral("command_source")));
+        source->setAccessibleName(QStringLiteral("Command source"));
+        source->addItem(QStringLiteral("Your Python script (VP sends its commands exactly as written)"), sources[0]);
+        source->addItem(QStringLiteral("VP's copy of your script"), sources[1]);
+        source->addItem(QStringLiteral("Compensate (VP's own controller)"), sources[2]);
+        source->addItem(QStringLiteral("None (no LED commands)"), sources[3]);
+        const QString legacyMode = value(led, QStringLiteral("mode")).trimmed().toLower();
+        QString configuredSource = value(led, QStringLiteral("command_source")).trimmed().toLower();
+        if (configuredSource.isEmpty())
+            configuredSource = legacyMode == QStringLiteral("listen") ? sources[0] :
+                legacyMode == QStringLiteral("script") ? sources[1] :
+                legacyMode == QStringLiteral("compensate") ? sources[2] : sources[3];
+        source->setCurrentIndex(std::max(0, static_cast<int>(sources.indexOf(configuredSource))));
+        driveForm->addRow(QStringLiteral("Command source"), source);
+        driveForm->addRow(QString(), helpLabel(QStringLiteral(
+            "Where the LED and contrast commands come from. VP holds the RS-232 port, sends them and logs them. "
+            "Your Python script: VP runs it (Script VP runs, below) and sends each command exactly as the script "
+            "wrote it, nothing of its own - not while Python is starting, not on exit.")));
+        // Adaptive gamma: shown as the configuration behaves - named, or off
+        // with a command source, or (older `mode` configurations) on where
+        // the picture already adapted.
+        const QString adaptiveText = value(led, QStringLiteral("adaptive_gamma")).trimmed().toLower();
+        const bool adaptiveNow = !adaptiveText.isEmpty() ?
+            (adaptiveText == QStringLiteral("true") || adaptiveText == QStringLiteral("on") || adaptiveText == QStringLiteral("1")) :
+            value(led, QStringLiteral("command_source")).trimmed().isEmpty() &&
+                (legacyMode == QStringLiteral("compensate") ||
+                 value(led, QStringLiteral("script_smoothing")).trimmed().toLower() == QStringLiteral("true"));
+        auto* adaptive = configuredCheck(QStringLiteral("Adaptive gamma"), QString(), adaptiveNow);
+        adaptive->setObjectName(controlName(led, QStringLiteral("adaptive_gamma")));
+        adaptive->setEnabled(true);
+        connect(adaptive, &QCheckBox::toggled, this, [this, led](bool checked)
+        {
+            if (!document_) return;
+            document_->SetKnown(led.toStdString(), "adaptive_gamma", checked ? "true" : "false");
+            markDirty();
+        });
+        driveForm->addRow(QString(), adaptive);
+        driveForm->addRow(QString(), helpLabel(QStringLiteral(
+            "Off (the default for now): VP leaves the picture alone - exactly the projector's own steps. On: VP "
+            "eases the picture across each light and contrast step, and lifts the darks next to large highlights "
+            "(the shadow lift's strength, below).")));
+        auto* ahead = bindCheckField(QStringLiteral("Look-ahead"), led, QStringLiteral("lookahead"), true);
+        driveForm->addRow(QString(), ahead);
+        driveForm->addRow(QString(), helpLabel(QStringLiteral(
+            "VP's own sources only: they see the coming frames and time each change for when the LED gets there. "
+            "Off: they react to the frame on screen. Your Python script decides from its own screenshots.")));
+        auto* pythonPort = bindCheckField(QStringLiteral("Fallback: the Python script writes the port itself"), led,
+            QStringLiteral("python_drives_port"), false);
+        driveForm->addRow(QString(), pythonPort);
+        driveForm->addRow(QString(), helpLabel(QStringLiteral(
+            "The original listen: the script drives COM1 as it always did and VP only follows and logs. Also used "
+            "automatically when VP does not run the script or cannot open the port.")));
+        auto follow = [ahead, pythonPort](const QString& chosen)
+        {
+            ahead->setEnabled(chosen == QStringLiteral("internal_script") || chosen == QStringLiteral("compensate"));
+            pythonPort->setEnabled(chosen == QStringLiteral("python"));
+        };
+        follow(configuredSource);
+        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, led, source, adaptive, follow](int)
+        {
+            if (!document_) return;
+            const QString chosen = source->currentData().toString();
+            const std::string section = led.toStdString();
+            if (!document_->SetKnown(section, "command_source", chosen.toStdString()))
+            {
+                document_->AddSection(section);
+                document_->SetKnown(section, "command_source", chosen.toStdString());
+            }
+            // The matching mode, for older builds reading this file.
+            const char* mode = chosen == QStringLiteral("python") ? "listen" :
+                chosen == QStringLiteral("internal_script") ? "script" :
+                chosen == QStringLiteral("compensate") ? "compensate" : "log_only";
+            document_->SetKnown(section, "mode", mode);
+            // With a command source, an unnamed adaptive_gamma means off:
+            // write what the box shows so nothing changes behind it.
+            if (value(led, QStringLiteral("adaptive_gamma")).trimmed().isEmpty())
+                document_->SetKnown(section, "adaptive_gamma", adaptive->isChecked() ? "true" : "false");
+            follow(chosen);
+            markDirty();
+        });
+    }
     driveForm->addRow(QStringLiteral("Highlight protection"), bindChoiceField(led,
         QStringLiteral("highlight_tolerance_stops"),
         { QStringLiteral("0.33"), QStringLiteral("0.15"), QStringLiteral("0.6") },
@@ -10338,7 +10411,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* listenBox = new QGroupBox(QStringLiteral("Listen monitor (Mode: Listen)"));
     listenBox->setObjectName(controlName(led, QStringLiteral("listen_monitor")));
     auto* listenLayout = new QVBoxLayout(listenBox);
-    auto* listenStatus = new QLabel(QStringLiteral("No listen data yet: set Mode to Listen and run main_vp.py."));
+    auto* listenStatus = new QLabel(QStringLiteral("No listen data yet: set the command source to your Python script and run main_vp.py."));
     auto* listenScript = new QLabel;
     auto* listenVp = new QLabel;
     auto* listenAgree = new QLabel;
@@ -10395,7 +10468,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly))
         {
-            listenStatus->setText(QStringLiteral("No listen data yet: set Mode to Listen and run main_vp.py (or let VP run it).") + hosted);
+            listenStatus->setText(QStringLiteral("No listen data yet: set the command source to your Python script and run main_vp.py (or let VP run it).") + hosted);
             return;
         }
         QHash<QString, QString> v;
@@ -10448,7 +10521,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         const int configured = value(led, QStringLiteral("listen_port")).toInt(&valid);
         listenPort->setValue(valid ? configured : 47811);
         listenPort->setToolTip(QStringLiteral(
-            "Mode Listen: the port on this PC the script's VP addendum sends to (47811 in main_vp.py)."));
+            "Python source: the port on this PC the script's VP addendum sends to (47811 in main_vp.py)."));
         connect(listenPort, qOverload<int>(&QSpinBox::valueChanged), this, [this, led](int port)
         {
             const std::string section = led.toStdString();
@@ -10465,11 +10538,12 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             led, QStringLiteral("listen_log"), false));
         // Owner 2026-10-13: VP starts and supervises the script itself.
         auto* scriptPath = bindTextField(led, QStringLiteral("listen_script"));
-        scriptPath->setPlaceholderText(QStringLiteral("empty = you start the script yourself"));
+        scriptPath->setPlaceholderText(QStringLiteral("empty = you start the script yourself (it then writes the port itself)"));
         scriptPath->setToolTip(QStringLiteral(
-            "Mode Listen: the script VP starts (e.g. main_vp.py; next to this configuration, or a full path). VP runs it "
-            "without a window, restarts it if it stops (after 2, 4, 8 ... 60 s), ends it when the mode changes or VP "
-            "closes, and keeps its output in logs\\led-script.log. The script still drives the projector itself."));
+            "Python source: the script VP starts (e.g. main_vp.py; next to this configuration, or a full path). VP runs it "
+            "without a window, restarts it if it stops (after 2, 4, 8 ... 60 s), ends it when the source changes or VP "
+            "closes, and keeps its output in logs\\led-script.log. VP sends its commands to the projector (unless the "
+            "fallback above is on)."));
         driveForm->addRow(QStringLiteral("Script VP runs"), scriptPath);
         auto* pythonPath = bindTextField(led, QStringLiteral("python"));
         pythonPath->setPlaceholderText(QStringLiteral("python"));
