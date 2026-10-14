@@ -43,6 +43,20 @@ regression reference.
   (with 11a) to get the failure map: which classes are parameter
   problems (fit them automatically against the corpus) and which are
   design limits (the ones 11b exists for).
+- **Outcome, 2026-10-13 (first failure map; 1ccfd7d1, d63186ba):**
+  34 synthetic scenes x 18 settings (match tolerance x E1 lambda x matcher
+  size), D2/D4 off. Wrongly trusted blocks <= 1.6% everywhere. Headroom
+  (fence and cut excluded): best single fixed setting +8.2% (match
+  tolerance 4.5), best per scene +8.7%. **Step 9 (a motion-adaptive or
+  learned controller of the existing settings) is ruled out: about 0.5%
+  over the best fixed setting.** The fixed-settings A/B (step 7) is the
+  lever. Design limits found: search range (UVG Jockey, 300-800 px per
+  film frame, whole-frame hold), whole-frame hold on hard motion,
+  periodic texture, brightness fades. They go to VP's own matcher first
+  (wider top-level search, more global candidates, regional hold, fence
+  disambiguation, fade-gated mean-removed matching; planner answers
+  docs/VP-review-2026-10-13-night-answers.md Q8-Q11). The learned
+  candidate finder (step 10) stays open pending those fixes.
 
 ## 3. The model
 

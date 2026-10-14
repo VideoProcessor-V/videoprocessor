@@ -551,6 +551,13 @@ namespace VideoProcessorTest
 				Assert::IsTrue(host.PortError().find("cannot open COM250") == 0,
 					std::wstring(host.PortError().begin(), host.PortError().end()).c_str());
 				Assert::IsTrue(read(nowPath).find("port_error=cannot_open_COM250") != std::string::npos, L"led-script-now.txt: the port error");
+				Assert::IsTrue(host.GetPortSetup() == ScriptHost::PortSetup::Failed && read(nowPath).find("port=failed") != std::string::npos,
+					L"the port set-up reported as failed");
+				host.Stop();
+				host.Update("", pythonPath, directory);
+				host.Update(script, pythonPath, directory);   // no port configured
+				Assert::IsTrue(host.GetPortSetup() == ScriptHost::PortSetup::Skipped && read(nowPath).find("port=skipped") != std::string::npos,
+					L"no port: reported as skipped");
 				host.Stop();
 				setMode("exit");
 				// A missing script: waiting, with the reason.

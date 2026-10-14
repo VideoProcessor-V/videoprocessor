@@ -119,12 +119,19 @@ namespace LedDrive
 			// The port's line settings first (the script's `echo ... > com1`
 			// uses whatever the port was left at).
 			portError.clear();
+			portSetup = PortSetup::Skipped;
 			if (!port.empty())
 			{
 				if (ConfigurePort(port, baud, portError))
+				{
+					portSetup = PortSetup::Applied;
 					DebugLog::Log("LED drive: listen script: %s set to %d 8N1", port.c_str(), baud);
+				}
 				else
+				{
+					portSetup = PortSetup::Failed;
 					DebugLog::Log("LED drive: listen script: %s not set (%s); starting the script anyway", port.c_str(), portError.c_str());
+				}
 			}
 			if (!Start(script, python, logDirectory))
 			{
@@ -302,6 +309,8 @@ namespace LedDrive
 			std::replace(error.begin(), error.end(), ' ', '_');
 			text += " last=" + error;
 		}
+		if (portSetup != PortSetup::None)
+			text += std::string(" port=") + (portSetup == PortSetup::Applied ? "applied" : portSetup == PortSetup::Skipped ? "skipped" : "failed");
 		if (!portError.empty())
 		{
 			std::string error = portError;

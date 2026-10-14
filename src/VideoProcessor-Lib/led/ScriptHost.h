@@ -49,6 +49,10 @@ namespace LedDrive
 		const std::string& LastError() const { return lastError; }
 		// The last port set-up's failure (empty: set, or not asked).
 		const std::string& PortError() const { return portError; }
+		// The last start's port set-up (planner Q5): Applied, Skipped (no
+		// port configured), Failed; None before the first start.
+		enum class PortSetup { None, Applied, Skipped, Failed };
+		PortSetup GetPortSetup() const { return portSetup; }
 		// Opens `port`, sets baud and 8N1 (no flow control), closes it.
 		static bool ConfigurePort(const std::string& port, int baud, std::string& error);
 
@@ -70,6 +74,7 @@ namespace LedDrive
 		std::string configuredScript, configuredPython;
 		std::string lastError;
 		std::string portError;
+		PortSetup portSetup = PortSetup::None;
 		std::string nowPath;
 		std::string writtenNow;
 	};

@@ -10316,8 +10316,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                     state == QStringLiteral("waiting") ?
                     QStringLiteral(" VP restarts the script in %1 s (%2).").arg(sv.value(QStringLiteral("restart_s")), last) :
                     QString();
-                if (!portError.isEmpty() && !hosted.isEmpty())
-                    hosted += QStringLiteral(" Serial port not set up: %1.").arg(portError);
+                // Planner Q5: which port case the owner is in.
+                const QString port = sv.value(QStringLiteral("port"));
+                if (!hosted.isEmpty() && port == QStringLiteral("applied"))
+                    hosted += QStringLiteral(" Port settings applied by VP.");
+                else if (!hosted.isEmpty() && port == QStringLiteral("skipped"))
+                    hosted += QStringLiteral(" Port settings skipped (no projector port set).");
+                else if (!hosted.isEmpty() && port == QStringLiteral("failed"))
+                    hosted += QStringLiteral(" Port settings failed: %1.").arg(portError);
             }
         }
         const QString& path = listenNowPath;
