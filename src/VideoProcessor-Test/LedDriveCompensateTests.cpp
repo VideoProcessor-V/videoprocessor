@@ -311,6 +311,38 @@ namespace VideoProcessorTest
 			Assert::IsTrue(veil > 0.1, (L"the veil estimate follows the highlights: " + std::to_wstring(veil)).c_str());
 		}
 
+		TEST_METHOD(CompensateDrivesTheLedWithAdaptiveGammaOff)
+		{
+			// Audit 2026-10-14b blocker 2: adaptive gamma off keeps the picture's
+			// gain at 1 but compensate still dims the LED.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.adaptiveGamma = false;
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			port.ackTimeoutMs = 60;
+			port.minCommandGapMs = 0;
+			port.readBack = true;
+			port.ledLatencyMs = 80;
+			port.ledSettleMs = 0;
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }), L"compensate started");
+			double time = 0.0;
+			bool anyGain = false;
+			for (int frame = 0; frame < 60; ++frame)
+			{
+				module.SubmitMeasurement(Frame(18.0));
+				time += 1000.0 / 60.0;
+				const CompensationGain gain = module.BeginFrameAt(0, time);
+				anyGain = anyGain || (gain.active && std::fabs(gain.gain - 1.0) > 1e-9);
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+			}
+			Assert::IsTrue(WaitFor([&] { return projector->light < 255; }), L"the LED is dimmed with adaptive gamma off");
+			Assert::IsFalse(anyGain, L"the picture's gain stays at 1 with adaptive gamma off");
+		}
+
 		TEST_METHOD(PictureOnlySwitchFromCompensateRestoresAndReleasesThePort)
 		{
 			// Delta 12: compensate dims the LED; a switch to picture_only is not
@@ -627,6 +659,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(legacy.mode == Mode::Compensate && legacy.adaptiveGamma && legacy.lookahead,
 				L"an older mode-only configuration behaves as before");
 			Assert::IsFalse(read("mode: compensate\nadaptive_gamma: false\n").adaptiveGamma);
+			Assert::IsFalse(ListenRelays(read("mode: listen\nlisten_script: main_vp.py\n")),
+				L"an older mode: listen file leaves COM1 to the script, as before (audit 2026-10-14b)");
 		}
 
 		TEST_METHOD(RelaySendsTheScriptsBytesAndNothingElse)
@@ -660,11 +694,21 @@ namespace VideoProcessorTest
 			const std::string seen = folder + "\\relay.txt";
 			DeleteFileA(seen.c_str());
 			DeleteFileA(ListenCsvPath(logs).c_str());
+			const std::string go = folder + "\\go.txt";
+			DeleteFileA(go.c_str());
 			{
-				// Stands for main_vp.py: notes what VP told it, then waits.
+				// Stands for main_vp.py: notes what VP told it, then sends the
+				// lines of go.txt (once it appears) from its own socket.
 				std::ofstream out(script, std::ios::trunc);
-				out << "import os, time\n"
+				out << "import os, socket, time\n"
 					"open('relay.txt', 'w').write(os.environ.get('VP_LED_RELAY', 'unset'))\n"
+					"s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+					"while not os.path.exists('go.txt'):\n"
+					"    time.sleep(0.05)\n"
+					"time.sleep(0.1)\n"
+					"for line in open('go.txt').read().splitlines():\n"
+					"    s.sendto(line.encode('ascii'), ('127.0.0.1', 47925))\n"
+					"    time.sleep(0.05)\n"
 					"while True:\n"
 					"    time.sleep(0.2)\n";
 			}
@@ -690,14 +734,23 @@ namespace VideoProcessorTest
 					L"the script was told VP_LED_RELAY=1");
 				Sleep(300);
 				Assert::IsTrue(projector->Writes().empty(), L"nothing is sent before the script's first command");
-				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 TICK -1 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 200 t=1.1 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 150 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 55.5 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 56 t=1.3 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-				Assert::IsTrue(WaitFor([&] { return module.Listening().relayed == 2; }), L"both commands relayed");
+				// Another program on this PC: never relayed (audit 2026-10-14b).
+				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 90 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
+				Assert::IsTrue(WaitFor([&] { return module.Listening().relayRefused == 1; }), L"a stranger's command is refused");
+				Assert::IsTrue(projector->Writes().empty(), L"a stranger's command is not sent");
+				std::ofstream(go, std::ios::trunc) <<
+					"VP1 TICK -1 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
+					"VP1 LPW1 200 t=1.1 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
+					"VP1 CNTR 150 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
+					"VP1 CNTR 55.5 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
+					"VP1 CNTR 56 t=1.3 mean=40 max=230 hl=1 tp=-1 tc=-1\n";
+				const bool bothRelayed = WaitFor([&] { return module.Listening().relayed == 2; }, 10000);
+				const ListenAccuracy after = module.Listening();
+				Assert::IsTrue(bothRelayed, (L"both commands relayed; relayed " + std::to_wstring(after.relayed) + L", refused " +
+					std::to_wstring(after.relayRefused) + L", last from process " + std::to_wstring(after.refusedOwner) +
+					L", the script is " + std::to_wstring(after.scriptPid)).c_str());
 				const ListenAccuracy heard = module.Listening();
-				Assert::AreEqual(1, heard.relayRefused, L"CNTR 150 refused (out of range); 55.5 is not a message");
+				Assert::AreEqual(2, heard.relayRefused, L"the stranger's, and CNTR 150 (out of range); 55.5 is not a message");
 				Assert::AreEqual(0, heard.relayFailed);
 				const std::vector<std::string> writes = projector->Writes();
 				Assert::AreEqual(size_t(2), writes.size());

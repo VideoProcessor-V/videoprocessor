@@ -1,0 +1,41 @@
+Audit add-on: Config ease of use across every component added since the last full review (owner 2026-10-14)
+Repo C:\dev\videoprocessor, branch stage7-rc2, at HEAD. This is the LED page review from stage7-2026-10-14b.md (item 4),
+applied to every other new component and to the shaders.
+Owner: "make sure it audits for the config function too and ensures it's straightforward and simplistic to use".
+Please write the findings to C:\dev\videoprocessor\docs\audit\stage7-2026-10-14c-config.md (save the file).
+
+Ground rules
+- Code and UI review. Do not build: the build agent rebuilds and runs the gate after this review, and a build would
+  overwrite the shared x64\Release outputs. Running x64\Release\VideoProcessorConfigTests.exe (CPU only) is fine if it
+  helps. No GPU use.
+- The LED page itself was just reorganised after your 14b findings. Please re-check it briefly against your list there
+  (source first, show only what the source uses, the Python card, None + adaptive gamma, shadow-lift greying, older files).
+
+Judge it as a non-developer setting up a projector and a picture, not as a developer
+For each page and card below, please judge:
+1. The first impression: can the owner find the one or two controls that matter? Are defaults safe, and is it clear
+   which settings are taste (dejudder strength, R-A/R-B - never fitted) and which are measured or technical?
+2. Grouping and order: related controls together, the most-used first, experimental or expert settings grouped and
+   collapsed or marked, nothing duplicated across pages.
+3. Show only what applies: controls that do nothing in the current state (a feature switched off, a mode not chosen)
+   hidden or greyed, with the reason stated.
+4. Wording: labels in plain words. No internal names (M1-M6, D1-D5, R-A/R-B, H1-H3, E1-E4, delta numbers, planner
+   items) without a plain label. Tooltips and help that say what changes on screen, what it costs (the GPU cost
+   markers) and when to touch it. Stale text that still refers to removed modes or keys.
+5. Ranges and units: sensible limits, units shown, the special values (0 = off, auto) explained.
+6. Round trip: every control saves, Apply/OK/reopen keeps it, unknown keys and comments are preserved, older files
+   load as they behave.
+7. Concrete simplifications: please list them, most valuable first, so they can be built directly.
+
+Scope: the controls added or changed since 9002d72c (`git log 9002d72c..HEAD -- src/VideoProcessor-Config`)
+- Shaders page and the shader cards: the temporal sigma-delta (dither_vectors auto|own, the per-instance state), the
+  de-judder (strength, even-cadence strength and rates, matcher size dejudder_low_res, the estimator E1-E4 and block
+  split E2, synthesis-lite H1-H3, delta 14 R-A/R-B, the motion fixes M1-M6 with the 2026-10-14 defaults, estimate
+  ahead), the refinements card (D1-D5, S1), the adaptive upscale blend (Stage 8b), the GPU cost markers and legend.
+- Color / Output: SDR tone shape and headroom (delta 13), chroma_upscaler.
+- Input / capture: capture_path standard | gpu (low latency) and the rule that selects it.
+- LED drive: the reorganised page (above).
+- Anything else the range touches.
+
+Please also note where a setting exists in the renderer or the LED code (the source keys) but has no Config control,
+or has a control that the runtime ignores.

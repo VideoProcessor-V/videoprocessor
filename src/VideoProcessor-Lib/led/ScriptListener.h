@@ -26,7 +26,13 @@ namespace LedDrive
 		int highlight = -1;
 		int targetPower = -1;
 		int targetContrast = -1;
+		// The sender's UDP port on 127.0.0.1 (0 = unknown): relay sends only
+		// what the script VP runs sent (audit 2026-10-14b).
+		unsigned short senderPort = 0;
 	};
+
+	// The process that owns 127.0.0.1:port (UDP), or 0.
+	unsigned long UdpPortOwner(unsigned short port);
 
 	// Parses one datagram; false for anything that is not a VP1 message.
 	bool ParseScriptMessage(const std::string& text, ScriptMessage& out);

@@ -12150,11 +12150,14 @@ struct LibplaceboVideoRenderer::Impl
 						// Counted (and restored by the guard) only when VPVEC was
 						// accepted (audit 2026-10-14).
 						if (SetSigmaDeltaVectors(hook, vectors))
+						{
 							vectorGuard.hooks.push_back(hook);
+							// D2: the per-pixel displacement the rendered warp applied.
+							if (warpedDisplacement && SetSigmaDeltaPixelVectors(hook, warpedDisplacement))
+								CustomHookChain::SetHookParameter(hook, "vector_pixel", 1.0);
+						}
 						else
 							CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
-						else if (warpedDisplacement && SetSigmaDeltaPixelVectors(hook, warpedDisplacement))
-							CustomHookChain::SetHookParameter(hook, "vector_pixel", 1.0);
 					}
 				}
 				const int state = !use ? (activeSettings.ditherVectorsOwn ? 0 : patch ? 1 : 2) :

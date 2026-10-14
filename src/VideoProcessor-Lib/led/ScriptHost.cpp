@@ -1,6 +1,9 @@
 #include <pch.h>
 
 #include "ScriptHost.h"
+
+#include <tlhelp32.h>
+#include <vector>
 #include "ScriptListener.h"
 #include "../DebugLog.h"
 
@@ -143,6 +146,44 @@ namespace LedDrive
 			}
 		}
 		WriteNow(logDirectory);
+	}
+
+	bool ScriptHost::Owns(DWORD processId) const
+	{
+		if (state != State::Running || processId == 0) return false;
+		if (processId == pid) return true;
+		if (!job) return false;
+		HANDLE other = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+		if (!other) return false;
+		BOOL inside = FALSE;
+		const bool ok = IsProcessInJob(other, job, &inside) != 0;
+		CloseHandle(other);
+		if (ok && inside)
+			return true;
+		// A launcher (the Python install manager's python.exe) starts the
+		// real interpreter as its child, which may sit in a job of its own:
+		// accept the script's descendants, a few generations up.
+		const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+		if (snapshot == INVALID_HANDLE_VALUE)
+			return false;
+		std::vector<std::pair<DWORD, DWORD>> parents;   // pid, parent pid
+		PROCESSENTRY32W entry{ sizeof(entry) };
+		for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry))
+			parents.push_back({ entry.th32ProcessID, entry.th32ParentProcessID });
+		CloseHandle(snapshot);
+		DWORD current = processId;
+		for (int generation = 0; generation < 4; ++generation)
+		{
+			DWORD parent = 0;
+			for (const auto& p : parents)
+				if (p.first == current) { parent = p.second; break; }
+			if (parent == 0 || parent == current)
+				return false;
+			if (parent == pid)
+				return true;
+			current = parent;
+		}
+		return false;
 	}
 
 	bool ScriptHost::Start(const std::string& script, const std::string& python, const std::string& logDirectory)

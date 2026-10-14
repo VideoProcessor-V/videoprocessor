@@ -939,6 +939,20 @@ void testLedDrivePageAndLiveSwitches()
     require(!requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isEnabled() &&
         !requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.python_drives_port"))->isEnabled(),
         "Look-ahead or the Python fallback is offered with no command source");
+    // Only what the chosen source uses (audit 2026-10-14b): with no source,
+    // neither compensate's settings nor the Python script's card show.
+    require(!requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"))->isVisibleTo(&window) &&
+        !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.highlight_tolerance_stops"))->isVisibleTo(&window),
+        "Compensate's settings show with no command source");
+    require(!requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.listen_script"))->isVisibleTo(&window),
+        "The Python script's card shows with no command source");
+    selectData(mode, QStringLiteral("python"));
+    require(requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.listen_script"))->isVisibleTo(&window) &&
+        requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.python_drives_port"))->isEnabled() &&
+        !requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isEnabled(),
+        "The Python source does not show its script card and fallback (look-ahead greyed)");
+    require(!requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"))->isVisibleTo(&window),
+        "Compensate's settings show for the Python source");
     auto* boost = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.gamma_boost"));
     auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
     require(port->text() == QStringLiteral("COM1"), "COM port did not load");
@@ -969,7 +983,8 @@ void testLedDrivePageAndLiveSwitches()
     require(contrastLatency->value() == 80, "Contrast response time does not default to 80 ms");
     contrastLatency->setValue(120);
     auto* smoothing = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.adaptive_gamma"));
-    require(!smoothing->isChecked() && smoothing->isEnabled(), "Adaptive gamma is not off by default (off = the projector's steps exactly)");
+    // An older mode-only file: VP always adapted, so the box shows on (audit 2026-10-14b).
+    require(smoothing->isChecked() && smoothing->isEnabled(), "An older mode-only file does not show adaptive gamma on, as it behaves");
     smoothing->setChecked(true);
     // Stage 7 step 7c: every new LED setting has a control.
     auto* cutLevel = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.cut_cntr_level"));
@@ -1016,6 +1031,19 @@ void testLedDrivePageAndLiveSwitches()
     require(profileStatus->isHidden(), "The profile status stays after Use built-in");
     enabled->setChecked(true);
     selectData(mode, QStringLiteral("compensate"));
+    require(floor->isVisibleTo(&window) && requireControl<QComboBox>(window,
+        QStringLiteral("config.led_drive.default.highlight_tolerance_stops"))->isVisibleTo(&window) &&
+        !requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.listen_script"))->isVisibleTo(&window),
+        "Compensate does not show its own settings (or still shows the Python card)");
+    auto* lookahead = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"));
+    require(lookahead->isEnabled() && lookahead->isChecked(), "Look-ahead is not offered (on) for Compensate");
+    lookahead->setChecked(false);
+    // The shadow lift does nothing without adaptive gamma: greyed then.
+    auto* shadowLiftBox = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.shadow_lift_ansi"));
+    require(shadowLiftBox->isEnabled(), "The shadow lift is greyed with adaptive gamma on");
+    smoothing->setChecked(false);
+    require(!shadowLiftBox->isEnabled(), "The shadow lift is not greyed with adaptive gamma off");
+    smoothing->setChecked(true);
     selectData(boost, QStringLiteral("2.4"));
     auto* projectorGamma = requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.compensation_eotf"));
     require(std::abs(projectorGamma->value() - 2.41) < 1e-9 && projectorGamma->decimals() == 2 &&
@@ -1051,7 +1079,7 @@ void testLedDrivePageAndLiveSwitches()
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
         "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35",
-        "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "cut_cntr_level: 57", "max_cut_dip: 0.40",
+        "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "lookahead: false", "python_drives_port: false", "cut_cntr_level: 57", "max_cut_dip: 0.40",
         "black_prelift_max: 110", "rate_max_up: 20.0", "rate_preset: compensated", "led_settle_ms: 250",
         "dmd_clip_cntr: 61" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")

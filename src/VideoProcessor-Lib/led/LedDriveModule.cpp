@@ -265,8 +265,21 @@ namespace LedDrive
 			// picture_only (delta 12): the gain stays exactly 1. listen: the
 			// script drives the projector, so VP's smoothing gain applies
 			// although VP itself drives nothing.
-			applyGain = ((live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen) &&
-				led.adaptiveGamma;
+			applyGain = (live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen;
+			// The smoothing gain ends with the settings that wanted it, not at
+			// the worker's next pass (audit 2026-10-14b: picture_only must be
+			// exactly 1 from the switch).
+			const bool smoothNow = (led.mode == Mode::Script || led.mode == Mode::Listen) && led.scriptSmoothing &&
+				applyGain && led.adaptiveGamma;
+			if (smoothing && !smoothNow)
+			{
+				smoothing = false;
+				if (!compensating)
+				{
+					gain.active = false;
+					gain.gain = 1.0;
+				}
+			}
 			// Only the compensate step leaves the custom dim, so a switch away
 			// from it (or the experiment switched off) leaves here: LDMM 0 jumps
 			// the driver's queue, ahead of any LPW1 the new mode sends.
@@ -754,7 +767,9 @@ namespace LedDrive
 	CompensationGain LedDriveModule::GainLocked() const
 	{
 		CompensationGain current = gain;
-		if (compensating && applyGain && !awaitingContrastReset)
+		// adaptive_gamma off (owner 2026-10-14): compensate still drives the
+		// LED and CNTR; only the picture's gain stays at 1 (audit 2026-10-14b).
+		if (compensating && applyGain && led.adaptiveGamma && !awaitingContrastReset)
 		{
 			// Follow the LED's modelled level every frame, never the target, so
 			// content brightness stays constant while it moves.
@@ -846,8 +861,7 @@ namespace LedDrive
 			compensating = led.mode == Mode::Compensate;
 			// Compensation is applied to the picture only while the projector
 			// is really being driven; a dry run never changes the picture.
-			applyGain = ((driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen) &&
-				led.adaptiveGamma;
+			applyGain = (driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen;
 		}
 
 		LedDriveConfig current;
@@ -875,7 +889,8 @@ namespace LedDrive
 			}
 		};
 		auto smoothingWanted = [&] {
-			return (current.mode == Mode::Script || current.mode == Mode::Listen) && current.scriptSmoothing && applyGain;
+			return (current.mode == Mode::Script || current.mode == Mode::Listen) && current.scriptSmoothing && applyGain &&
+				current.adaptiveGamma;
 		};
 		setSmoothing(smoothingWanted(), 50);
 		// mode: listen: the script's messages, VP's copy of its rules, and the
@@ -908,7 +923,11 @@ namespace LedDrive
 		// command, a TICK only when VP's copy changes its (dis)agreement, a
 		// summary line every 10 s, and a cap with one previous file kept.
 		long long listenCsvBytes = 0;
+		auto listenCsvPausedUntil = std::chrono::steady_clock::now();
 		std::string lastTickKey;
+		unsigned short relaySenderPort = 0;   // the script's socket, once checked
+		int relayPortWarned = 0;
+		auto relayRefusedLogAt = std::chrono::steady_clock::now();
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
@@ -1002,24 +1021,6 @@ namespace LedDrive
 			}
 			else if (current.mode == Mode::Listen)
 			{
-				// The script, when VP runs it: started, watched, restarted. In
-				// relay VP holds the port, so it is not set up for the script.
-				const bool relay = ListenRelays(current) && driving;
-				if (relay != relayed)
-				{
-					relayed = relay;
-					relayHeard = false;
-					relayWaitFromMs = NowMs();
-				}
-				scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory,
-					relay ? std::string() : scriptPort, scriptBaud, relay);
-				{
-					std::lock_guard<std::mutex> guard(mutex);
-					listenAccuracy.relaying = relay && scriptHost.GetState() == ScriptHost::State::Running;
-					listenAccuracy.relayed = relaySent;
-					listenAccuracy.relayFailed = relayFailed;
-					listenAccuracy.relayRefused = relayRefused;
-				}
 				// The listener follows the mode and the port. A failed open is
 				// retried every 5 s and logged once (audit 2026-10-14: it spun).
 				if ((!listener.IsOpen() || listener.Port() != current.listenPort) &&
@@ -1032,12 +1033,43 @@ namespace LedDrive
 						listenAccuracy.listening = ok;
 					}
 					if (ok || error != listenLastError || listenRetryPort != current.listenPort)
-						DebugLog::Log(ok ? "LED drive: listen - waiting for the script on 127.0.0.1:%d (RS-232 port not opened)" :
+						DebugLog::Log(ok ? "LED drive: listen - waiting for the script on 127.0.0.1:%d" :
 							"LED drive: listen - cannot listen on 127.0.0.1:%d: %s (retrying every 5 s)", current.listenPort, error.c_str());
 					listenLastError = ok ? std::string() : error;
 					listenRetryPort = current.listenPort;
 					listenRetryAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
 					shadow = ScriptController(current);
+				}
+				// The script, when VP runs it: started, watched, restarted. In
+				// relay VP holds the port, so it is not set up for the script,
+				// and the script (which then leaves COM1 alone) is started only
+				// once VP is listening: never blind (audit 2026-10-14b).
+				const bool relayWanted = ListenRelays(current) && driving;
+				const bool relay = relayWanted && listener.IsOpen() && listener.Port() == current.listenPort;
+				if (relay != relayed)
+				{
+					relayed = relay;
+					relayHeard = false;
+					relayWaitFromMs = NowMs();
+					relaySenderPort = 0;
+				}
+				if (relayWanted && !relay)
+					scriptHost.Stop();
+				else
+					scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory,
+						relay ? std::string() : scriptPort, scriptBaud, relay);
+				if (relay && current.listenPort != 47811 && relayPortWarned != current.listenPort)
+				{
+					DebugLog::Log("LED drive: listen - relay on port %d, but main_vp.py sends to 47811: change the script's "
+						"port too, or VP hears nothing", current.listenPort);
+					relayPortWarned = current.listenPort;
+				}
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					listenAccuracy.relaying = relay && scriptHost.GetState() == ScriptHost::State::Running;
+					listenAccuracy.relayed = relaySent;
+					listenAccuracy.relayFailed = relayFailed;
+					listenAccuracy.relayRefused = relayRefused;
 				}
 				{
 					// The data log (sized for hours, ScriptListener.h): a header
@@ -1045,7 +1077,7 @@ namespace LedDrive
 					// is switched on while running (audit 2026-10-14). Past the
 					// cap, checked as it is written, it moves to .prev and goes on.
 					const std::string path = ListenCsvPath(current.listenLogDirectory);
-					if (!listenCsv.is_open() && current.listenLog)
+					if (!listenCsv.is_open() && current.listenLog && std::chrono::steady_clock::now() >= listenCsvPausedUntil)
 					{
 						const size_t slash = path.find_last_of("\\/");
 						if (slash != std::string::npos)
@@ -1058,8 +1090,16 @@ namespace LedDrive
 					else if (listenCsv.is_open() && listenCsvBytes > kListenCsvCapBytes)
 					{
 						listenCsv.close();
-						MoveFileExA(path.c_str(), (path.substr(0, path.size() - 4) + ".prev.csv").c_str(), MOVEFILE_REPLACE_EXISTING);
-						listenCsvBytes = OpenListenCsv(listenCsv, path, "# continued; the earlier rows are in led-listen.prev.csv");
+						if (MoveFileExA(path.c_str(), (path.substr(0, path.size() - 4) + ".prev.csv").c_str(), MOVEFILE_REPLACE_EXISTING))
+							listenCsvBytes = OpenListenCsv(listenCsv, path, "# continued; the earlier rows are in led-listen.prev.csv");
+						else
+						{
+							// Held by another program (audit 2026-10-14b): never past
+							// the cap; paused, tried again in a minute.
+							DebugLog::Log("LED drive: listen - %s is full and cannot be rotated (error %lu, open elsewhere?); "
+								"logging paused for 60 s", path.c_str(), GetLastError());
+							listenCsvPausedUntil = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+						}
 					}
 				}
 				if (listenCsv.is_open() && !current.listenLog)
@@ -1088,6 +1128,35 @@ namespace LedDrive
 					// outside the module lock: the write may wait for the port.
 					int sent = -1;
 					double writeMs = -1.0;
+					if (relay)
+					{
+						// The sender must be the script VP runs (audit 2026-10-14b:
+						// any local program could send here). Its socket's port is
+						// checked once, again when it changes.
+						unsigned long owner = 0;
+						if (message.senderPort == 0 || message.senderPort != relaySenderPort)
+						{
+							owner = message.senderPort ? UdpPortOwner(message.senderPort) : 0;
+							relaySenderPort = scriptHost.Owns(owner) ? message.senderPort : 0;
+						}
+						if (relaySenderPort == 0 || message.senderPort != relaySenderPort)
+						{
+							++relayRefused;
+							const auto now = std::chrono::steady_clock::now();
+							if (now >= relayRefusedLogAt)
+							{
+								DebugLog::Log("LED drive: listen - relay: ignored %s %d from another program (UDP port %u, process %lu; "
+									"the script VP runs is %lu; %d ignored so far)", message.kind.c_str(), message.value,
+									static_cast<unsigned>(message.senderPort), owner, static_cast<unsigned long>(scriptHost.Pid()), relayRefused);
+								relayRefusedLogAt = now + std::chrono::seconds(10);
+							}
+							std::lock_guard<std::mutex> guard(mutex);
+							listenAccuracy.relayRefused = relayRefused;
+							if (message.senderPort != 0) listenAccuracy.refusedOwner = owner != 0 ? owner : 1000000 + message.senderPort;
+							listenAccuracy.scriptPid = scriptHost.Pid();
+							continue;
+						}
+					}
 					if (relay && (message.kind == "CNTR" || message.kind == "LPW1"))
 					{
 						if (command && scriptHost.GetState() == ScriptHost::State::Running)
@@ -1107,8 +1176,13 @@ namespace LedDrive
 						{
 							sent = 0;
 							++relayRefused;
-							DebugLog::Log("LED drive: listen - relay: %s %d not sent (%s)", message.kind.c_str(), message.value,
-								command ? "the script VP runs is not running" : "out of range");
+							const auto now = std::chrono::steady_clock::now();
+							if (now >= relayRefusedLogAt)
+							{
+								DebugLog::Log("LED drive: listen - relay: %s %d not sent (%s; %d refused so far)", message.kind.c_str(),
+									message.value, command ? "the script VP runs is not running" : "out of range", relayRefused);
+								relayRefusedLogAt = now + std::chrono::seconds(10);
+							}
 						}
 					}
 					std::lock_guard<std::mutex> guard(mutex);
@@ -1160,10 +1234,12 @@ namespace LedDrive
 						lastVpApl = latest.apl;
 						// A TICK row only when the (dis)agreement changes: the
 						// highlight call and each target, the script's vs VP's.
+						// Keyed on the differences (audit 2026-10-14b): moving content
+						// that VP's copy follows writes nothing.
 						std::ostringstream key;
 						key << (message.highlight == vpHighlight ? "=" : message.highlight ? "s" : "v");
-						if (message.targetPower >= 0) key << ',' << message.targetPower << '/' << mine.lightTarget;
-						if (message.targetContrast >= 0) key << ',' << message.targetContrast << '/' << mine.contrastTarget;
+						if (message.targetPower >= 0) key << ',' << message.targetPower - mine.lightTarget;
+						if (message.targetContrast >= 0) key << ',' << message.targetContrast - mine.contrastTarget;
 						rowWanted = key.str() != lastTickKey;
 						lastTickKey = key.str();
 					}

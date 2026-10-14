@@ -939,7 +939,10 @@ namespace LedDrive
 	{
 		if (led.commandSource.empty())
 		{
+			// An older mode-only file behaves as before: mode: listen leaves
+			// COM1 to the script (audit 2026-10-14b).
 			if (led.adaptiveGammaSetting >= 0) led.adaptiveGamma = led.adaptiveGammaSetting == 1;
+			led.listenRelay = false;
 			return;
 		}
 		led.adaptiveGamma = led.adaptiveGammaSetting == 1;

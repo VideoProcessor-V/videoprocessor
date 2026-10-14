@@ -63,6 +63,8 @@ namespace LedDrive
 		int relayed = 0;
 		int relayFailed = 0;
 		int relayRefused = 0;
+		unsigned long refusedOwner = 0;   // the last refused sender's process (diagnosis)
+		unsigned long scriptPid = 0;
 	};
 
 	class LedDriveModule

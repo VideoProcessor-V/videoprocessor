@@ -17,7 +17,8 @@
 // Its output goes to logs\led-script.log (the previous run's kept past
 // 10 MB as led-script.prev.log); logs\led-script-now.txt holds its state for
 // the Config monitor. The script drives the serial port and tells VP over UDP
-// as before. Its line settings (the beta 22 script opened Tera Term for them)
+// as before (relay, docs/VP-led-core-sources.md: VP holds the port and the
+// script, run with VP_LED_RELAY=1, leaves it alone). Its line settings (the beta 22 script opened Tera Term for them)
 // VP sets before each start from [projector.Default] port / baud, 8N1: the
 // port is opened, set and closed at once (VP never holds it); a failure is
 // logged and shown, and the script starts anyway.
@@ -46,6 +47,9 @@ namespace LedDrive
 
 		State GetState() const { return state; }
 		DWORD Pid() const { return pid; }
+		// True when `processId` is the running script or a process it started
+		// (its job object): relay's sender check (audit 2026-10-14b).
+		bool Owns(DWORD processId) const;
 		int Starts() const { return starts; }
 		// Seconds until the next start while Waiting.
 		int SecondsToRestart() const;

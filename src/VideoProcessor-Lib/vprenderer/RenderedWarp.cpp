@@ -340,6 +340,8 @@ if (b.x < size.x && b.y < size.y) {
 	{
 		if (warped)
 			pl_tex_destroy(gpu, &warped);
+		if (displacement)
+			pl_tex_destroy(gpu, &displacement);   // D2 (audit 2026-10-14b: leaked)
 		if (dispatch)
 			pl_dispatch_destroy(&dispatch);
 	}

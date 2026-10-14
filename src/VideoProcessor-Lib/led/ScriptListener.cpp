@@ -1,6 +1,7 @@
 #include <pch.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 #include "ScriptListener.h"
 #include "../DebugLog.h"
@@ -12,6 +13,7 @@
 #include <windows.h>
 
 #pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "Iphlpapi.lib")
 
 namespace LedDrive
 {
@@ -137,16 +139,47 @@ namespace LedDrive
 				continue;
 			}
 			char buffer[512];
-			const int received = recv(s, buffer, sizeof(buffer) - 1, 0);
+			sockaddr_in from{};
+			int fromLength = sizeof(from);
+			const int received = recvfrom(s, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&from), &fromLength);
 			if (received <= 0)
 				break;
 			buffer[received] = '\0';
 			ScriptMessage message;
 			if (ParseScriptMessage(buffer, message))
+			{
+				message.senderPort = ntohs(from.sin_port);
 				messages.push_back(message);
+			}
 			timeoutMs = 0;   // drain what is already there, then return
 		}
 		return messages;
+	}
+
+	unsigned long UdpPortOwner(unsigned short port)
+	{
+		ULONG size = 0;
+		GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+		for (int attempt = 0; attempt < 3 && size > 0; ++attempt)
+		{
+			std::vector<unsigned char> table(size);
+			const DWORD result = GetExtendedUdpTable(table.data(), &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0);
+			if (result == ERROR_INSUFFICIENT_BUFFER)
+				continue;
+			if (result != NO_ERROR)
+				return 0;
+			const auto* rows = reinterpret_cast<const MIB_UDPTABLE_OWNER_PID*>(table.data());
+			for (DWORD i = 0; i < rows->dwNumEntries; ++i)
+			{
+				const MIB_UDPROW_OWNER_PID& row = rows->table[i];
+				const unsigned long address = ntohl(row.dwLocalAddr);
+				if (ntohs(static_cast<u_short>(row.dwLocalPort)) == port &&
+					(address == INADDR_LOOPBACK || address == INADDR_ANY))
+					return row.dwOwningPid;
+			}
+			return 0;
+		}
+		return 0;
 	}
 
 	namespace

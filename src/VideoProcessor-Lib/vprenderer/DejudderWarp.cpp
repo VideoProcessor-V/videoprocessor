@@ -1715,7 +1715,7 @@ if (q.x < size.x && q.y < size.y) {
         vb = field_vector_all_b(c - (1.0 - sc) * vb);
         vb = field_vector_all_b(c - (1.0 - sc) * vb);
 #ifdef OBJECT
-        vb = object_scale(vb);   // R-B for B's motion too
+        vb = -object_scale(-vb);   // R-B for B's motion: B->A is about -A->B (the camera is A->B)
 #endif
         vec2 fromB = c - (1.0 - sc) * vb;
         float mb = texture(pix_mask_b, fromB / vec2(size)).r;
@@ -1781,7 +1781,7 @@ if (q.x < size.x && q.y < size.y) {
         vb = field_vector_all_b(c * chroma_scale - (1.0 - sc) * vb);
         vb = field_vector_all_b(c * chroma_scale - (1.0 - sc) * vb);
 #ifdef OBJECT
-        vb = object_scale(vb);   // R-B for B's motion too
+        vb = -object_scale(-vb);   // R-B for B's motion: B->A is about -A->B (the camera is A->B)
 #endif
         vec2 fromB = c - (1.0 - sc) * vb / chroma_scale;
         float mb = texture(pix_mask_b, fromB * chroma_scale / vec2(textureSize(pix_mask_b, 0) * 2)).r;
