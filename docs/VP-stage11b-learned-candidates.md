@@ -57,6 +57,15 @@ regression reference.
   disambiguation, fade-gated mean-removed matching; planner answers
   docs/VP-review-2026-10-13-night-answers.md Q8-Q11). The learned
   candidate finder (step 10) stays open pending those fixes.
+- **Not to reopen (planner D4, 2026-10-14):** fence period detection is
+  dropped. The only remaining fence case after M1-M6 is a one-period alias
+  (a fence moved by exactly one bar spacing), which renders identically to the
+  true motion, so there is nothing visible to fix.
+- **Fade test fix (2026-10-14, baeb5e13):** a fade must scale the picture
+  about a plausible black level (B ~ black + g x (A - black), g = the spread
+  ratio); a pan moves the mean as content enters and leaves but keeps g ~ 1,
+  and fails. Found by the Beta 6d check (the defaults were 18.8 from the
+  halfway picture against 13.3 without refinements; 2.88 after the fix).
 
 ## 3. The model
 

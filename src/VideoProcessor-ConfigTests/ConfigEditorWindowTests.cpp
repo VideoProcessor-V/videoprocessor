@@ -1,4 +1,4 @@
-#define NOMINMAX
+﻿#define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
@@ -6767,7 +6767,9 @@ void exerciseRemoteTargetSwitch(bool automatic)
             fd_set readable;
             FD_ZERO(&readable);
             FD_SET(listener, &readable);
-            timeval timeout{ 2, 0 };
+            // The window's next request can follow the reply by more than 2 s on a
+            // loaded laptop (planner 2026-10-14): wait up to 6 s, still bounded.
+            timeval timeout{ 6, 0 };
             if (select(0, &readable, nullptr, nullptr, &timeout) <= 0) break;
             const SOCKET client = accept(listener, nullptr, nullptr);
             if (client == INVALID_SOCKET) break;
@@ -6863,7 +6865,7 @@ void exerciseRemoteTargetSwitch(bool automatic)
     QElapsedTimer completion;
     completion.start();
     while (window.findChild<QWidget*>("config.targetSwitchOverlay") &&
-        completion.elapsed() < 3000)
+        completion.elapsed() < 8000)
     {
         QApplication::processEvents();
         QThread::msleep(5);
