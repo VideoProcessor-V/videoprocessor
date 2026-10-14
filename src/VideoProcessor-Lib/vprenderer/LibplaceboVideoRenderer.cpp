@@ -913,6 +913,13 @@ namespace
 		double dejudderCutHistogram = 0.3;
 		int dejudderSearchRange = 8;
 		double dejudderConsistencyPx = 2.0;
+		// M4 (planner Q11): smooth fades matched after a global gain, at most
+		// at the floor strength (off by default until measured on the projector).
+		bool dejudderFadeMatch = false;
+		double dejudderFadeFloor = 0.25;
+		// M5: the pixel verification of trusted blocks (share of off pixels).
+		bool dejudderVerify = false;
+		double dejudderVerifyShare = 0.2;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
 		// wide (off | search = the searches only | all = every pass).
 		std::string dejudderLowRes = "all";
@@ -1090,6 +1097,8 @@ namespace
 			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
 			<< settings.dejudderTextureTolerance << '|' << settings.dejudderGlobalTwo << '|' << settings.dejudderRegionalHold << '|'
 			<< settings.dejudderCutHistogram << '|' << settings.dejudderSearchRange << '|' << settings.dejudderConsistencyPx << '|'
+			<< settings.dejudderFadeMatch << '|' << settings.dejudderFadeFloor << '|'
+			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2060,6 +2069,8 @@ namespace
 			std::make_tuple("dejudder_texture_tolerance", 0.0, 4.0, &settings.dejudderTextureTolerance),
 			std::make_tuple("dejudder_cut_histogram", 0.0, 2.0, &settings.dejudderCutHistogram),
 			std::make_tuple("dejudder_consistency_px", 0.5, 8.0, &settings.dejudderConsistencyPx),
+			std::make_tuple("dejudder_fade_floor", 0.0, 1.0, &settings.dejudderFadeFloor),
+			std::make_tuple("dejudder_verify_share", 0.02, 1.0, &settings.dejudderVerifyShare),
 			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
 			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
@@ -2120,7 +2131,9 @@ namespace
 			std::make_pair("dejudder_estimate_ahead", &settings.dejudderEstimateAhead),
 			std::make_pair("dejudder_motion_rolloff", &settings.dejudderMotionRolloff),
 			std::make_pair("dejudder_global_two", &settings.dejudderGlobalTwo),
-			std::make_pair("dejudder_regional_hold", &settings.dejudderRegionalHold) })
+			std::make_pair("dejudder_regional_hold", &settings.dejudderRegionalHold),
+			std::make_pair("dejudder_fade_match", &settings.dejudderFadeMatch),
+			std::make_pair("dejudder_verify", &settings.dejudderVerify) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8393,6 +8406,10 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderCutHistogram = next.dejudderCutHistogram;
 		currentTransport.dejudderSearchRange = next.dejudderSearchRange;
 		currentTransport.dejudderConsistencyPx = next.dejudderConsistencyPx;
+		currentTransport.dejudderFadeMatch = next.dejudderFadeMatch;
+		currentTransport.dejudderFadeFloor = next.dejudderFadeFloor;
+		currentTransport.dejudderVerify = next.dejudderVerify;
+		currentTransport.dejudderVerifyShare = next.dejudderVerifyShare;
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
 		currentTransport.capturePath = next.capturePath;
@@ -8499,7 +8516,9 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderObjectStrength != next.dejudderObjectStrength, "dejudder_object_strength");
 		changed(current.dejudderTextureTolerance != next.dejudderTextureTolerance || current.dejudderGlobalTwo != next.dejudderGlobalTwo ||
 			current.dejudderRegionalHold != next.dejudderRegionalHold || current.dejudderCutHistogram != next.dejudderCutHistogram ||
-			current.dejudderSearchRange != next.dejudderSearchRange || current.dejudderConsistencyPx != next.dejudderConsistencyPx,
+			current.dejudderSearchRange != next.dejudderSearchRange || current.dejudderConsistencyPx != next.dejudderConsistencyPx ||
+			current.dejudderFadeMatch != next.dejudderFadeMatch || current.dejudderFadeFloor != next.dejudderFadeFloor ||
+			current.dejudderVerify != next.dejudderVerify || current.dejudderVerifyShare != next.dejudderVerifyShare,
 			"dejudder_motion_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
@@ -11584,6 +11603,10 @@ struct LibplaceboVideoRenderer::Impl
 			settings.cutHistogram = static_cast<float>(activeSettings.dejudderCutHistogram);
 			settings.coarseRange = activeSettings.dejudderSearchRange;
 			settings.consistencyPixels = static_cast<float>(activeSettings.dejudderConsistencyPx);
+			settings.fadeMatch = activeSettings.dejudderFadeMatch;
+			settings.fadeFloor = static_cast<float>(activeSettings.dejudderFadeFloor);
+			settings.verifyPixels = activeSettings.dejudderVerify;
+			settings.verifyShare = static_cast<float>(activeSettings.dejudderVerifyShare);
 			settings.lowRes = activeSettings.dejudderLowRes != "off";
 			settings.lowResAll = activeSettings.dejudderLowRes == "all";
 			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);
@@ -12191,7 +12214,9 @@ struct LibplaceboVideoRenderer::Impl
 				if (EstimateAhead(f.sourceSequence, f.nextSourceSequence))
 				{
 					warpField = dejudder->SnapField();
-					warpTrust = dejudder->SnapFrameTrust();
+					// Planner Q7: with R-A, the roll-off starts on a fast pan's
+					// first frame (the next pair's strength, rate-limited).
+					warpTrust = dejudder->LookAheadTrust();
 					warpSub = dejudder->SnapSubField();
 					if (warpCamera) warpCamera = dejudder->SnapCamera();
 				}

@@ -2803,6 +2803,8 @@ namespace Corpus
 	{
 		std::string name; float tolerance, lambda; bool lowResAll;
 		float textureTol = 0.0f; bool globalTwo = false, regional = false; int coarseRange = 3; float consistency = 1.0f;
+		bool taper = false; float taperSad = 0.0f, splitSad = 0.0f;
+		bool fade = false, split = true, verify = false; float verifyShare = 0.2f;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2815,6 +2817,73 @@ namespace Corpus
 		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
 		std::free(set);
 		const bool fixes = which == "fixes";
+		if (which == "verify")
+		{
+			// M5: the pixel verification on the candidate defaults and on a
+			// looser tolerance.
+			auto add = [&](const char* name, float tol, bool verify, float share)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.verify = verify; v.verifyShare = share;
+				variants.push_back(v);
+			};
+			Variant today{ "today", 3.0f, 0.5f, true };
+			variants.push_back(today);
+			add("candidate (tol 4.5, M1 0.25, fade, split off)", 4.5f, false, 0.2f);
+			add("candidate + verify 0.2", 4.5f, true, 0.2f);
+			add("candidate + verify 0.1", 4.5f, true, 0.1f);
+			add("tol 6, M1 0.25, fade, split off", 6.0f, false, 0.2f);
+			add("tol 6 ... + verify 0.2", 6.0f, true, 0.2f);
+			add("tol 6 ... + verify 0.1", 6.0f, true, 0.1f);
+			add("tol 8 ... + verify 0.2", 8.0f, true, 0.2f);
+			return variants;
+		}
+		if (which == "fade")
+		{
+			// M4: the fade match (floor 1 here: accuracy, not taste).
+			auto add = [&](const char* name, float tol, float tex, bool fade)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = tex; v.fade = fade;
+				variants.push_back(v);
+			};
+			add("defaults", 3.0f, 0.0f, false);
+			add("defaults + fade match", 3.0f, 0.0f, true);
+			add("more trust", 4.5f, 0.25f, false);
+			add("more trust + fade match", 4.5f, 0.25f, true);
+			add("tolerance 6 + M1 0.25 + fade match", 6.0f, 0.25f, true);
+			add("more trust + fade match, split off", 4.5f, 0.25f, true);
+			variants.back().split = false;
+			add("defaults, split off", 3.0f, 0.0f, false);
+			variants.back().split = false;
+			return variants;
+		}
+		if (which == "held")
+		{
+			// After the defaults: what the held areas allow (owner 2026-10-13
+			// night): H3 marginal blocks warped at a strength ramped by their
+			// match, a lower split threshold (smaller blocks for shapes that
+			// change), and the "more trust" A/B with them.
+			auto add = [&](const char* name, float tol, float tex, bool taper, float taperSad, float splitSad)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = tex; v.taper = taper; v.taperSad = taperSad; v.splitSad = splitSad;
+				variants.push_back(v);
+			};
+			add("defaults", 3.0f, 0.0f, false, 0.0f, 0.0f);
+			add("+ taper to 2x tolerance", 3.0f, 0.0f, true, 0.0f, 0.0f);
+			add("+ taper to 3x tolerance", 3.0f, 0.0f, true, 9.0f, 0.0f);
+			add("+ split at 2", 3.0f, 0.0f, false, 0.0f, 2.0f);
+			add("+ split at 1.5", 3.0f, 0.0f, false, 0.0f, 1.5f);
+			add("more trust", 4.5f, 0.25f, false, 0.0f, 0.0f);
+			add("more trust + taper 2x", 4.5f, 0.25f, true, 0.0f, 0.0f);
+			add("more trust + split at 2", 4.5f, 0.25f, false, 0.0f, 2.0f);
+			add("more trust + taper 2x + split at 2", 4.5f, 0.25f, true, 0.0f, 2.0f);
+			return variants;
+		}
 		if (which == "defaults")
 		{
 			// The candidates for the defaults: the fixes that add no wrongly
@@ -2876,6 +2945,14 @@ namespace Corpus
 		s.regionalHold = v.regional;
 		s.coarseRange = v.coarseRange;
 		s.consistencyPixels = v.consistency;
+		s.blockTaper = v.taper;
+		s.taperSad = v.taperSad;
+		s.estSplitSad = v.splitSad;
+		s.fadeMatch = v.fade;
+		s.estSplit = s.estSplit && v.split;
+		s.verifyPixels = v.verify;
+		s.verifyShare = v.verifyShare;
+		s.fadeFloor = 1.0f;
 		s.motionScaleHi = 0.0f;   // accuracy only: D2 and D4 off
 		s.trustScaleFull = 0.0f;
 		s.hostReadable = true;

@@ -6544,6 +6544,24 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         regional->setToolTip(QStringLiteral(
             "When few blocks match but the picture has not changed (hard motion, not a cut), the matched areas still move "
             "and the rest holds. A cut still holds the whole frame."));
+        auto* verify = addChoice(QStringLiteral("Check matches pixel by pixel"),
+            QStringLiteral("dejudder_verify"), { QStringLiteral("on"), QStringLiteral("off") });
+        verify->setToolTip(QStringLiteral(
+            "Each matched block predicts the next frame pixel by pixel with the motion the de-judder will use; a block "
+            "whose pixels do not follow (an edge, something uncovered) holds instead, so looser matching stays safe."));
+        auto* verifyShare = addText(QStringLiteral("Pixel check: share allowed off"), QStringLiteral("dejudder_verify_share"));
+        verifyShare->setValidator(new QDoubleValidator(0.02, 1.0, 2, verifyShare));
+        verifyShare->setPlaceholderText(QStringLiteral("0.2"));
+        verifyShare->setToolTip(QStringLiteral("A block holds when more than this share of its pixels mispredict (0.2 = a fifth)."));
+        auto* fadeMatch = addChoice(QStringLiteral("Follow motion through fades"),
+            QStringLiteral("dejudder_fade_match"), { QStringLiteral("on"), QStringLiteral("off") });
+        fadeMatch->setToolTip(QStringLiteral(
+            "During a smooth fade (the whole picture brightening or darkening steadily) motion is matched despite the "
+            "brightness change, and the de-judder runs at the fade floor below. A flash or a cut still holds."));
+        auto* fadeFloor = addText(QStringLiteral("Fade floor (share of the strength)"), QStringLiteral("dejudder_fade_floor"));
+        fadeFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, fadeFloor));
+        fadeFloor->setPlaceholderText(QStringLiteral("0.25"));
+        fadeFloor->setToolTip(QStringLiteral("The most de-judder a fading scene gets (0.25 = a quarter)."));
         auto* cutHistogram = addText(QStringLiteral("Cut test (picture change)"), QStringLiteral("dejudder_cut_histogram"));
         cutHistogram->setValidator(new QDoubleValidator(0.0, 2.0, 2, cutHistogram));
         cutHistogram->setPlaceholderText(QStringLiteral("0.3"));

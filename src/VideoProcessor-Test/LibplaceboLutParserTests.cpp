@@ -7769,6 +7769,204 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		TEST_METHOD(DejudderFadeMatchFollowsASmoothFadeAndHoldsAFlash)
+		{
+			// M4 (planner Q11): a pan of 6 px while the picture darkens 6% a
+			// frame. Without the fade match the blocks do not match (held).
+			// With it, from the second pair of the fade on, the blocks match with
+			// the right vector and the strength is the floor; a one-frame flash
+			// (a bright frame between two normal ones) is not a smooth fade and
+			// holds.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			auto frame = [&](int shift, double level)
+			{
+				return MakeDejudderFrame(width, height, [=](int x, int y) {
+					return static_cast<uint16_t>(4096 + (DejudderTexture(x - shift, y, 13) - 4096) * level); },
+					[](int x, int y, int c) { return static_cast<uint16_t>(32768 + c); });
+			};
+			std::vector<DejudderFrame> fade;
+			for (int f = 0; f < 4; ++f) fade.push_back(frame(6 * f, 1.0 - 0.06 * f));
+			std::vector<std::unique_ptr<DejudderGpuPlanes>> up;
+			for (const DejudderFrame& f : fade) { up.push_back(std::make_unique<DejudderGpuPlanes>()); UploadDejudderFrame(gpu, f, *up.back()); }
+			struct Result { int right = 0, total = 0; float scale = 0; };
+			auto run = [&](bool fadeMatch, const std::vector<Dejudder::Planes>& seq)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.fadeMatch = fadeMatch;
+				settings.fadeFloor = 0.25f;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				for (size_t k = 0; k + 1 < seq.size(); ++k)
+				{
+					const bool estimated = warp.Estimate(seq[k], seq[k + 1]);
+					Assert::IsTrue(estimated, (L"estimate " + std::to_wstring(k) + (fadeMatch ? L" (fade match): " : L": ") +
+						ExtendedRangeGpuProbe::ToWide(warp.LastError()) + L"; log: " + std::wstring(log.begin(), log.end())).c_str());
+				}
+				const DejudderField field = DownloadField(gpu, warp);
+				Result r;
+				for (int by = 1; by < field.blocksY - 1; ++by)
+					for (int bx = 1; bx < field.blocksX - 2; ++bx)
+					{
+						++r.total;
+						r.right += field.trusted(bx, by) && std::fabs(field.vx(bx, by) - 6.0f) <= 0.5f ? 1 : 0;
+					}
+				r.scale = DownloadFrameTrust(gpu, warp)[1];
+				return r;
+			};
+			std::vector<Dejudder::Planes> seq;
+			for (auto& p : up) seq.push_back(p->planes);
+			const Result off = run(false, seq), on = run(true, seq);
+			// A flash: normal, bright (x1.4), normal again; the last pair is
+			// bright -> normal after normal -> bright: not the same direction.
+			const DejudderFrame bright = frame(6, 1.4), normal2 = frame(12, 1.0);
+			DejudderGpuPlanes pBright, pNormal2;
+			UploadDejudderFrame(gpu, bright, pBright);
+			UploadDejudderFrame(gpu, normal2, pNormal2);
+			const Result flash = run(true, { up[0]->planes, pBright.planes, pNormal2.planes });
+			const std::wstring message = L"right / blocks (strength): off " + std::to_wstring(off.right) + L"/" + std::to_wstring(off.total) +
+				L" (" + std::to_wstring(off.scale) + L"), fade match " + std::to_wstring(on.right) + L"/" + std::to_wstring(on.total) + L" (" +
+				std::to_wstring(on.scale) + L"), flash " + std::to_wstring(flash.right) + L"/" + std::to_wstring(flash.total) + L" (" +
+				std::to_wstring(flash.scale) + L"); log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(off.right * 100 < off.total * 30, (L"a fade: the plain match fails: " + message).c_str());
+			Assert::IsTrue(on.right * 100 >= on.total * 80, (L"the fade match follows the pan: " + message).c_str());
+			Assert::IsTrue(std::fabs(on.scale - 0.25f) < 0.02f, (L"at the floor strength: " + message).c_str());
+			Assert::IsTrue(flash.right * 100 < flash.total * 30, (L"a flash holds: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderRolloffStartsOneFrameEarlierWithTheEstimateAhead)
+		{
+			// Planner Q7: a pan that accelerates past roll_lo (6 px, then 30 px).
+			// After the fast pair is estimated ahead, the slow pair's extras use
+			// the lower strength (the roll-off starts one frame earlier), at most
+			// one rate step below the slow pair's; without R-A the snapshot is
+			// returned as is. Both stay rate-limited.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 256, height = 128;
+			auto at = [&](int shift)
+			{
+				return MakeDejudderFrame(width, height, [shift](int x, int y) { return DejudderTexture(x - shift, y); },
+					[shift](int x, int y, int c) { return DejudderTexture((x - shift / 2) * 2, y, 7 + c); });
+			};
+			const DejudderFrame f0 = at(0), f1 = at(6), f2 = at(36);
+			DejudderGpuPlanes p0, p1, p2;
+			UploadDejudderFrame(gpu, f0, p0);
+			UploadDejudderFrame(gpu, f1, p1);
+			UploadDejudderFrame(gpu, f2, p2);
+			auto read = [&](pl_tex t)
+			{
+				std::array<float, 4> out{};
+				std::vector<uint16_t> half(4);
+				pl_tex_transfer_params d{};
+				d.tex = t;
+				d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (int k = 0; k < 4; ++k)
+				{
+					const uint16_t h = half[k];
+					const int e = (h >> 10) & 31, m = h & 1023;
+					out[k] = (e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(1.0f + m / 1024.0f, e - 15)) * ((h & 0x8000) ? -1.0f : 1.0f);
+				}
+				return out;
+			};
+			auto run = [&](bool rolloff)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.motionRolloff = rolloff;
+				settings.rollLo = 8.0f;
+				settings.rollHi = 24.0f;
+				settings.rollFloor = 0.25f;
+				settings.strengthRate = 0.25f;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				for (int i = 0; i < 4; ++i)   // the slow pair settles
+					Assert::IsTrue(warp.Estimate(p0.planes, p1.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				Assert::IsTrue(warp.SnapshotForWarp());
+				const float slow = read(warp.SnapFrameTrust())[1];
+				Assert::IsTrue(warp.Estimate(p1.planes, p2.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				const float next = read(warp.FrameTrust())[1];
+				const float ahead = read(warp.LookAheadTrust())[1];
+				return std::make_tuple(slow, next, ahead);
+			};
+			const auto on = run(true), off = run(false);
+			const std::wstring message = L"R-A on: slow " + std::to_wstring(std::get<0>(on)) + L", next " + std::to_wstring(std::get<1>(on)) +
+				L", ahead " + std::to_wstring(std::get<2>(on)) + L"; off: slow " + std::to_wstring(std::get<0>(off)) + L", ahead " +
+				std::to_wstring(std::get<2>(off)) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(std::get<0>(on) > 0.95f, (L"the slow pan: full strength: " + message).c_str());
+			Assert::IsTrue(std::get<2>(on) < std::get<0>(on) - 0.1f, (L"the roll-off starts with the estimate ahead: " + message).c_str());
+			Assert::IsTrue(std::get<0>(on) - std::get<2>(on) <= 0.25f + 1e-3f, (L"one rate step at most: " + message).c_str());
+			Assert::IsTrue(std::fabs(std::get<2>(off) - std::get<0>(off)) < 1e-3f, (L"R-A off: the snapshot as is: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderVerifyWithdrawsTrustFromBlocksWhosePixelsDoNotFollow)
+		{
+			// M5: a pan of 8 px with small static patches (8x8 source px, +30
+			// codes) in some blocks: at a loose tolerance (8) those blocks match
+			// on average and are trusted; their patch pixels mispredict, so the
+			// pixel check withdraws their trust; blocks without a patch stay.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			static constexpr int dx = 8;
+			auto patch = [](int x, int y) { return (x / 16) % 4 == 2 && (y / 16) % 3 == 1 && x % 16 < 8 && y % 16 < 8; };
+			auto smooth = [](int x, int y) { return static_cast<int>(DejudderTexture(x, y, 21)) / 2 + 12000; };
+			auto chroma = [](int x, int y, int c) { return static_cast<uint16_t>(32768 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return static_cast<uint16_t>(smooth(x, y) + (patch(x, y) ? 10280 : 0)); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return static_cast<uint16_t>(smooth(x - dx, y) + (patch(x, y) ? 10280 : 0)); }, chroma);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			auto run = [&](bool verify)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.matchTolerance = 8.0f;
+				settings.consistencyPixels = 2.0f;
+				settings.minTrustedShare = 0.0f;
+				settings.verifyPixels = verify;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				const bool estimated = warp.Estimate(planesA.planes, planesB.planes);
+				Assert::IsTrue(estimated, ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				const DejudderField field = DownloadField(gpu, warp);
+				int patchTrusted = 0, patchTotal = 0, cleanTrusted = 0, cleanTotal = 0;
+				for (int by = 1; by < field.blocksY - 1; ++by)
+					for (int bx = 1; bx < field.blocksX - 2; ++bx)
+					{
+						const bool hasPatch = patch(bx * 16, by * 16);
+						// Clean: neither a patch nor one landing in it from a neighbour.
+						const bool clean = !hasPatch && !patch(bx * 16 + 16, by * 16) && !patch(bx * 16 - 16, by * 16);
+						if (hasPatch) { ++patchTotal; patchTrusted += field.trusted(bx, by) ? 1 : 0; }
+						if (clean) { ++cleanTotal; cleanTrusted += field.trusted(bx, by) ? 1 : 0; }
+					}
+				return std::make_tuple(patchTrusted, patchTotal, cleanTrusted, cleanTotal);
+			};
+			const auto off = run(false), on = run(true);
+			const std::wstring message = L"patch blocks trusted: off " + std::to_wstring(std::get<0>(off)) + L"/" + std::to_wstring(std::get<1>(off)) +
+				L", verify " + std::to_wstring(std::get<0>(on)) + L"/" + std::to_wstring(std::get<1>(on)) + L"; clean blocks trusted: off " +
+				std::to_wstring(std::get<2>(off)) + L"/" + std::to_wstring(std::get<3>(off)) + L", verify " + std::to_wstring(std::get<2>(on)) +
+				L"/" + std::to_wstring(std::get<3>(on)) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(std::get<0>(off) * 100 >= std::get<1>(off) * 60, (L"loose tolerance: the patch blocks pass on average: " + message).c_str());
+			Assert::IsTrue(std::get<0>(on) * 100 <= std::get<1>(on) * 10, (L"the pixel check withdraws them: " + message).c_str());
+			Assert::IsTrue(std::get<2>(on) * 100 >= std::get<3>(on) * 95 && std::get<2>(on) >= std::get<2>(off) - 1,
+				(L"clean blocks keep their trust: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(DejudderMotionRolloffKeepsFastMotionsStrobing)
 		{
 			// Delta 14 R-A: pans at 2, 12 and 30 source px per frame give the

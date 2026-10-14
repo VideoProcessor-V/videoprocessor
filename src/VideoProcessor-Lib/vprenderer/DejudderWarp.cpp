@@ -1,4 +1,4 @@
-#include <pch.h>
+﻿#include <pch.h>
 #include "DejudderWarp.h"
 
 #include <chrono>
@@ -25,7 +25,51 @@ if (p.x < size.x && p.y < size.y) {
     for (int y = 0; y < 2; y++)
         for (int x = 0; x < 2; x++)
             sum += texelFetch(src, min(p * 2 + ivec2(x, y), full - ivec2(1)), 0).r;
-    imageStore(dst, p, vec4(sum * 0.25 * codes, 0.0, 0.0, 1.0));
+    float v = sum * 0.25 * codes;
+#ifdef FADE_APPLY
+    // M4: B after the fade's global gain and offset (when active).
+    vec4 fs = texelFetch(fade_state, ivec2(0), 0);
+    if (fs.z > 0.5)
+        v = v * fs.x + fs.y;
+#endif
+    imageStore(dst, p, vec4(v, 0.0, 0.0, 1.0));
+}
+)GLSL";
+
+		// M4: the fade test on the 1/32 pyramids (one work group): A's and B's
+		// mean and spread; active when the mean moves smoothly (the same
+		// direction as the last pair's, 0.75 to 24 codes) with both spreads
+		// above a code. state_io: gain, offset, active, this pair's change.
+		const char* const FADE_HEADER = R"GLSL(
+shared vec4 fm_[256];
+)GLSL";
+
+		const char* const FADE_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+ivec2 ls = textureSize(l2_a, 0);
+int lc = ls.x * ls.y;
+vec4 acc = vec4(0.0);
+for (int k = int(i); k < lc; k += 256) {
+    ivec2 p = ivec2(k % ls.x, k / ls.x);
+    float a = texelFetch(l2_a, p, 0).r, b = texelFetch(l2_b, p, 0).r;
+    acc += vec4(a, b, a * a, b * b);
+}
+fm_[i] = acc;
+barrier();
+for (uint st = 128u; st > 0u; st >>= 1) {
+    if (i < st)
+        fm_[i] += fm_[i + st];
+    barrier();
+}
+if (i == 0u) {
+    float n = float(max(lc, 1));
+    float ma = fm_[0].x / n, mb = fm_[0].y / n;
+    float sa = sqrt(max(fm_[0].z / n - ma * ma, 0.0)), sb = sqrt(max(fm_[0].w / n - mb * mb, 0.0));
+    vec4 prev = imageLoad(state_io, ivec2(0));
+    float d = mb - ma;
+    bool fade_on = abs(d) > 0.75 && abs(d) < 24.0 && abs(prev.w) > 0.75 && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
+    float gain = clamp(sa / max(sb, 1e-3), 0.5, 2.0);
+    imageStore(state_io, ivec2(0), vec4(gain, ma - gain * mb, fade_on ? 1.0 : 0.0, d));
 }
 )GLSL";
 
@@ -1324,8 +1368,17 @@ if (i == 0u) {
 #else
     const bool rolloff = false;
 #endif
-    if (motion_hi > 0.0 || trust_full > 0.0 || rolloff) {
+#ifdef FADE
+    bool fading = texelFetch(fade_state, ivec2(0), 0).z > 0.5;
+#else
+    const bool fading = false;
+#endif
+    if (motion_hi > 0.0 || trust_full > 0.0 || rolloff || fading) {
         float m = 1.0;
+#ifdef FADE
+        if (fading)
+            m *= fade_floor;   // M4: a fade warps at most at the floor
+#endif
         if (motion_hi > 0.0)
             m *= clamp((mean_v - motion_lo) / max(motion_hi - motion_lo, 1e-3), 0.0, 1.0);
 #ifdef ROLLOFF
@@ -1691,7 +1744,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1] })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -1964,15 +2017,15 @@ if (q.x < size.x && q.y < size.y) {
 		return ok;
 	}
 
-	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange)
+	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade)
 	{
 		const float codes = lumaInCodes ? 1.0f : fullRange ? 219.0f : 255.0f;
 		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
-		const pl_shader_desc first[2] = { Sampled("src", luma, false), Storage("dst", half) };
+		const pl_shader_desc first[3] = { Sampled("src", luma, false), Storage("dst", half), Sampled("fade_state", fade, false) };
 		const pl_shader_desc second[2] = { Sampled("src", half, false), Storage("dst", l1) };
 		const pl_shader_desc third[2] = { Sampled("src", l1, false), Storage("dst", l2) };
-		return Dispatch("VideoProcessor de-judder: half-resolution luma", nullptr, DOWNSAMPLE_BODY,
-				first, 2, variables, 1, halfW, halfH, 16) &&
+		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
+				fade ? "#define FADE_APPLY 1\n" : nullptr, DOWNSAMPLE_BODY, first, fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
 			Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
 				second, 2, nullptr, 0, l1W, l1H, 8) &&
 			Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
@@ -2128,6 +2181,71 @@ if (q.x < size.x && q.y < size.y) {
 		if (Camera() && !copy(camera, &snapCamera))
 			return false;
 		return true;
+	}
+
+	namespace
+	{
+		// M5: the pixel check of each trusted block (see Settings).
+		const char* const VERIFY_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    vec4 f = texelFetch(src_field, b, 0);
+    if (f.z > 0.5) {
+        ivec2 hs = textureSize(from_half, 0);
+        float bad = 0.0;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) {
+                ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs - ivec2(1));
+                vec2 lp = (vec2(p) + vec2(0.5)) * 2.0;
+                vec2 g = lp / 16.0 - vec2(0.5);
+                ivec2 g0 = ivec2(floor(g));
+                vec2 t = g - vec2(g0);
+                vec2 v = vec2(0.0);
+                float ws = 0.0;
+                for (int yy = 0; yy <= 1; yy++)
+                    for (int xx = 0; xx <= 1; xx++) {
+                        vec4 n = texelFetch(src_field, clamp(g0 + ivec2(xx, yy), ivec2(0), blocks - ivec2(1)), 0);
+                        float w = (xx == 1 ? t.x : 1.0 - t.x) * (yy == 1 ? t.y : 1.0 - t.y);
+                        if (n.z > 0.5) { v += w * n.xy; ws += w; }
+                    }
+                v = ws > 0.0 ? v / ws : f.xy;
+                float e = abs(texelFetch(from_half, p, 0).r - texture(to_half, (vec2(p) + v * 0.5 + vec2(0.5)) / vec2(hs)).r);
+                bad += e > verify_codes ? 1.0 : 0.0;
+            }
+        if (bad / 64.0 > verify_share)
+            f.z = 0.0;
+    }
+    imageStore(dst, b, f);
+}
+)GLSL";
+
+		const char* const LOOKAHEAD_TRUST_BODY = R"GLSL(
+if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) {
+    vec4 s = texelFetch(snap, ivec2(0), 0);
+    vec4 n = texelFetch(next_trust, ivec2(0), 0);
+    if (n.r >= min_share)
+        s.g = min(s.g, n.g);
+    imageStore(dst, ivec2(0), s);
+}
+)GLSL";
+	}
+
+	pl_tex MotionWarp::LookAheadTrust()
+	{
+		if (!settings.motionRolloff || !snapTrust || !frameTrust || !estimated)
+			return snapTrust;
+		pl_tex_params params = snapTrust->params;
+		params.sampleable = true;
+		params.storable = true;
+		params.host_readable = settings.hostReadable && (params.format->caps & PL_FMT_CAP_HOST_READABLE);
+		if (!pl_tex_recreate(gpu, &aheadTrust, &params))
+			return snapTrust;
+		const float minShare = settings.minTrustedShare;
+		const pl_shader_var v[1] = { { pl_var_float("min_share"), &minShare, true } };
+		const pl_shader_desc d[3] = { Sampled("snap", snapTrust, false), Sampled("next_trust", frameTrust, false), Storage("dst", aheadTrust) };
+		return Dispatch("VideoProcessor de-judder: the roll-off ahead (Q7)", nullptr, LOOKAHEAD_TRUST_BODY, d, 3, v, 1, 1, 1, 1) ?
+			aheadTrust : snapTrust;
 	}
 
 	bool MotionWarp::Copy(pl_tex src, pl_tex dst)
@@ -2286,6 +2404,39 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
+	bool MotionWarp::FadeMatch(const Planes& b)
+	{
+		if (!fadeState)
+		{
+			pl_fmt state = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+			const float zero[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+			pl_tex_params params{};
+			params.w = params.h = 1;
+			params.format = state;
+			params.sampleable = true;
+			params.storable = true;
+			params.host_readable = settings.hostReadable && state && (state->caps & PL_FMT_CAP_HOST_READABLE);
+			params.initial_data = zero;
+			fadeState = state ? pl_tex_create(gpu, &params) : nullptr;
+			if (!fadeState)
+			{
+				error = "cannot create the fade state";
+				return false;
+			}
+		}
+		pl_shader_desc stateDesc{};
+		stateDesc.desc.name = "state_io";
+		stateDesc.desc.type = PL_DESC_STORAGE_IMG;
+		stateDesc.desc.access = PL_DESC_ACCESS_READWRITE;
+		stateDesc.binding.object = fadeState;
+		const pl_shader_desc d[3] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), stateDesc };
+		// The test, then B's pyramid again with the gain applied (unchanged
+		// when the test fails).
+		return Dispatch("VideoProcessor de-judder: fade test (M4)", FADE_HEADER, FADE_BODY, d, 3, nullptr, 0, 16, 16, 16) &&
+			Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeState);
+	}
+
 	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot, bool wantGrainError)
 	{
 		estimated = false;
@@ -2298,6 +2449,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			return false;
 		}
 		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange) || !Downsample(b.luma, halfB, l1B, l2B, b.fullRange))
+			return false;
+		// M4: in the lowRes outer the inner matches (and tests the fade) itself.
+		const bool outerOfLowRes = settings.lowRes && !searchOnly && width > 1920;
+		if (settings.fadeMatch && !outerOfLowRes && !FadeMatch(b))
 			return false;
 		if (settings.lowRes && !searchOnly && width > 1920)
 		{
@@ -2381,6 +2536,26 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
 				return false;
+			if (settings.verifyPixels)
+			{
+				// M5: before the split and the frame trust, so both see it.
+				pl_tex_params params = field->params;
+				if (!pl_tex_recreate(gpu, &verifyField, &params))
+				{
+					error = "cannot create the verification field";
+					return false;
+				}
+				const float verifyCodes = settings.verifyFactor * settings.matchTolerance;
+				const float verifyShare = settings.verifyShare;
+				const pl_shader_var verifyVars[2] = { { pl_var_float("verify_codes"), &verifyCodes, true },
+					{ pl_var_float("verify_share"), &verifyShare, true } };
+				const pl_shader_desc verifyDesc[4] = { Sampled("src_field", field, false), Sampled("from_half", halfA, false),
+					Sampled("to_half", halfB, true), Storage("dst", verifyField) };
+				if (!Dispatch("VideoProcessor de-judder: pixel verification (M5)", nullptr, VERIFY_BODY, verifyDesc, 4, verifyVars, 2,
+						blocksX, blocksY, 8))
+					return false;
+				std::swap(field, verifyField);
+			}
 			if (settings.estSplit)
 			{
 				// Both directions split (the sub-search, as a function: four
@@ -2447,6 +2622,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustDescs.push_back(Sampled("hist_a", l2A, false));
 				trustDescs.push_back(Sampled("hist_b", l2B, false));
 			}
+			const bool fadeOn = settings.fadeMatch && fadeState;
+			if (fadeOn)
+				trustDescs.push_back(Sampled("fade_state", fadeState, false));
 			if (rolloffGlobal || cameraOut)
 				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
 			if (cameraOut)
@@ -2456,6 +2634,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const float cutHist = settings.cutHistogram;
 			if (settings.regionalHold)
 				trustVarList.push_back({ pl_var_float("cut_hist"), &cutHist, true });
+			const float fadeFloor = std::min(1.0f, std::max(0.0f, settings.fadeFloor));
+			if (fadeOn)
+				trustVarList.push_back({ pl_var_float("fade_floor"), &fadeFloor, true });
 			if (settings.motionRolloff)
 			{
 				trustVarList.push_back({ pl_var_float("roll_lo"), &rollLo, true });
@@ -2464,7 +2645,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
 				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
-				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + FRAME_TRUST_HEADER;
+				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") + FRAME_TRUST_HEADER;
 			const pl_shader_desc* trustDesc = trustDescs.data();
 			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FRAME_TRUST_BODY,
 				trustDesc, static_cast<int>(trustDescs.size()), trustVarList.data(), static_cast<int>(trustVarList.size()), 16, 16, 16))

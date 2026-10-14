@@ -182,6 +182,24 @@ namespace Dejudder
 		// D4 ramps from 0. FrameTrust().r is then the share the holds use.
 		bool regionalHold = false;
 		float cutHistogram = 0.3f;
+		// M4 fades (planner Q11): when the frame's brightness changes smoothly
+		// and globally (the 1/32 mean moves at least 0.75 code in the same
+		// direction as the last pair's, less than 24: not a jump or a flash),
+		// B's pyramid is matched after a global gain and offset (A's mean and
+		// spread), and the strength is at most fadeFloor (a fading scene is not
+		// where judder is noticed). A one-frame flash fails the test and holds.
+		bool fadeMatch = false;
+		float fadeFloor = 0.25f;
+		// M5 verification (owner 2026-10-13 night: "if we over trust, back
+		// track"): each trusted block predicts B from A pixel by pixel with the
+		// vectors the warp will use (bilinear between trusted block centres);
+		// more than verifyShare of its pixels off by more than verifyFactor x
+		// matchTolerance (codes) withdraws its trust. Catches a block whose
+		// average passed but whose pixels do not move together (an edge, an
+		// uncovering, a partial wrong match).
+		bool verifyPixels = false;
+		float verifyShare = 0.2f;
+		float verifyFactor = 3.0f;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -259,6 +277,13 @@ namespace Dejudder
 		pl_tex SnapFrameTrust() const { return snapTrust; }
 		pl_tex SnapSubField() const { return snapSubValid ? snapSub : nullptr; }
 		pl_tex SnapCamera() const { return snapCamera; }
+		// Planner Q7 (with R-A): after the next pair is estimated ahead, the
+		// snapshot's frame trust with its strength lowered to the next pair's
+		// when that is lower (the roll-off starts on a fast pan's first frame;
+		// the next pair's strength is already rate-limited against this one, so
+		// no step; a cut in the next pair does not touch this one). Returns
+		// SnapFrameTrust() when R-A is off or the copy fails.
+		pl_tex LookAheadTrust();
 		// Delta 14 R-B: the camera's motion (1x1: x, y source px, reliable 1/0,
 		// 1): the mean of the trusted blocks within 6 px of D1's global vector
 		// (D1 alone is in 4-px steps). nullptr unless objectStrength < 1 with D1.
@@ -319,7 +344,7 @@ namespace Dejudder
 			const struct pl_shader_desc* descriptors, int numDescriptors,
 			const struct pl_shader_var* variables, int numVariables,
 			int width, int height, int group);
-		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange);
+		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade = nullptr);
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr);
 		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);
@@ -366,6 +391,8 @@ namespace Dejudder
 		std::unique_ptr<MotionWarp> inner;
 		bool searchOnly = false;
 		pl_tex snapField = nullptr, snapTrust = nullptr, snapSub = nullptr, snapCamera = nullptr;
+		pl_tex aheadTrust = nullptr;
+		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
 		pl_tex camera = nullptr;
 		bool snapSubValid = false;
 		bool innerOfLowRes = false;   // no warp planes
@@ -376,6 +403,8 @@ namespace Dejudder
 		// D1 in parallel: per-candidate frame SADs (1/32, 1/8) and the pick.
 		pl_tex globalSad2 = nullptr, globalSad1 = nullptr, globalPick = nullptr;
 		pl_tex globalSecond[2] = { nullptr, nullptr };   // M2: D1's second candidate (l1 texels, -, -, valid)
+		pl_tex fadeState = nullptr;   // M4: gain, offset, active, the last mean change (rgba32f, persists)
+		bool FadeMatch(const Planes& b);
 		bool lumaInCodes = false;
 		bool LowResSearch(const Planes& a, const Planes& b);
 	};
