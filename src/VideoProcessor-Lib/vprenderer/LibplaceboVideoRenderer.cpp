@@ -900,6 +900,19 @@ namespace
 		double dejudderRollHi = 24.0;
 		double dejudderRollFloor = 0.25;
 		double dejudderObjectStrength = 1.0;
+		// Motion fixes (owner 2026-10-13 night; DejudderWarp.h M1-M3): M1 the
+		// texture-scaled tolerance (0 = off), M2 two global candidates, M3
+		// regional hold with its cut test, the coarse search range (1/32
+		// texels) and the forward/backward agreement (half-resolution px).
+		// Defaults: the set that adds no wrongly trusted blocks on the motion
+		// corpus (real clips 22.8 -> 27.3% of the judder removed); the texture
+		// allowance and a 4.5 tolerance are the "more trust" A/B (34.5%).
+		double dejudderTextureTolerance = 0.0;
+		bool dejudderGlobalTwo = true;
+		bool dejudderRegionalHold = true;
+		double dejudderCutHistogram = 0.3;
+		int dejudderSearchRange = 8;
+		double dejudderConsistencyPx = 2.0;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
 		// wide (off | search = the searches only | all = every pass).
 		std::string dejudderLowRes = "all";
@@ -1075,6 +1088,8 @@ namespace
 			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
 			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|' << settings.dejudderMotionRolloff << '|' << settings.dejudderRollLo << '|'
 			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
+			<< settings.dejudderTextureTolerance << '|' << settings.dejudderGlobalTwo << '|' << settings.dejudderRegionalHold << '|'
+			<< settings.dejudderCutHistogram << '|' << settings.dejudderSearchRange << '|' << settings.dejudderConsistencyPx << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2042,6 +2057,9 @@ namespace
 			std::make_tuple("dejudder_roll_hi", 0.0, 400.0, &settings.dejudderRollHi),
 			std::make_tuple("dejudder_roll_floor", 0.0, 1.0, &settings.dejudderRollFloor),
 			std::make_tuple("dejudder_object_strength", 0.0, 1.0, &settings.dejudderObjectStrength),
+			std::make_tuple("dejudder_texture_tolerance", 0.0, 4.0, &settings.dejudderTextureTolerance),
+			std::make_tuple("dejudder_cut_histogram", 0.0, 2.0, &settings.dejudderCutHistogram),
+			std::make_tuple("dejudder_consistency_px", 0.5, 8.0, &settings.dejudderConsistencyPx),
 			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
 			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
@@ -2055,6 +2073,15 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
 					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
+		}
+		if (config.TryGetString(rule.section, "dejudder_search_range", raw))
+		{
+			int parsed = 0;
+			if (ParseInteger(raw, 1, 16, parsed))
+				settings.dejudderSearchRange = parsed;
+			else
+				DebugLog::Log("profile '%s': invalid dejudder_search_range '%s'; keeping %d",
+					rule.section.c_str(), raw.c_str(), settings.dejudderSearchRange);
 		}
 		if (config.TryGetString(rule.section, "dejudder_hold_hysteresis", raw))
 		{
@@ -2091,7 +2118,9 @@ namespace
 			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
 			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
 			std::make_pair("dejudder_estimate_ahead", &settings.dejudderEstimateAhead),
-			std::make_pair("dejudder_motion_rolloff", &settings.dejudderMotionRolloff) })
+			std::make_pair("dejudder_motion_rolloff", &settings.dejudderMotionRolloff),
+			std::make_pair("dejudder_global_two", &settings.dejudderGlobalTwo),
+			std::make_pair("dejudder_regional_hold", &settings.dejudderRegionalHold) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8358,6 +8387,12 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderRollHi = next.dejudderRollHi;
 		currentTransport.dejudderRollFloor = next.dejudderRollFloor;
 		currentTransport.dejudderObjectStrength = next.dejudderObjectStrength;
+		currentTransport.dejudderTextureTolerance = next.dejudderTextureTolerance;
+		currentTransport.dejudderGlobalTwo = next.dejudderGlobalTwo;
+		currentTransport.dejudderRegionalHold = next.dejudderRegionalHold;
+		currentTransport.dejudderCutHistogram = next.dejudderCutHistogram;
+		currentTransport.dejudderSearchRange = next.dejudderSearchRange;
+		currentTransport.dejudderConsistencyPx = next.dejudderConsistencyPx;
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
 		currentTransport.capturePath = next.capturePath;
@@ -8462,6 +8497,10 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderRollHi != next.dejudderRollHi || current.dejudderRollFloor != next.dejudderRollFloor,
 			"dejudder_motion_rolloff");
 		changed(current.dejudderObjectStrength != next.dejudderObjectStrength, "dejudder_object_strength");
+		changed(current.dejudderTextureTolerance != next.dejudderTextureTolerance || current.dejudderGlobalTwo != next.dejudderGlobalTwo ||
+			current.dejudderRegionalHold != next.dejudderRegionalHold || current.dejudderCutHistogram != next.dejudderCutHistogram ||
+			current.dejudderSearchRange != next.dejudderSearchRange || current.dejudderConsistencyPx != next.dejudderConsistencyPx,
+			"dejudder_motion_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -11539,6 +11578,12 @@ struct LibplaceboVideoRenderer::Impl
 			settings.rollHi = static_cast<float>(activeSettings.dejudderRollHi);
 			settings.rollFloor = static_cast<float>(activeSettings.dejudderRollFloor);
 			settings.objectStrength = static_cast<float>(activeSettings.dejudderObjectStrength);
+			settings.textureTolerance = static_cast<float>(activeSettings.dejudderTextureTolerance);
+			settings.globalTwo = activeSettings.dejudderGlobalTwo;
+			settings.regionalHold = activeSettings.dejudderRegionalHold;
+			settings.cutHistogram = static_cast<float>(activeSettings.dejudderCutHistogram);
+			settings.coarseRange = activeSettings.dejudderSearchRange;
+			settings.consistencyPixels = static_cast<float>(activeSettings.dejudderConsistencyPx);
 			settings.lowRes = activeSettings.dejudderLowRes != "off";
 			settings.lowResAll = activeSettings.dejudderLowRes == "all";
 			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);

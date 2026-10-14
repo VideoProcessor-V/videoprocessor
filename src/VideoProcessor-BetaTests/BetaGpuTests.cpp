@@ -2799,10 +2799,60 @@ namespace Corpus
 	// The settings: today (renderer defaults, accuracy only) and neighbours.
 	// "half size": dejudder_low_res all (today); "half-size search": the
 	// search at half size, the rest at full size (dejudder_low_res search).
-	struct Variant { std::string name; float tolerance, lambda; bool lowResAll; };
+	struct Variant
+	{
+		std::string name; float tolerance, lambda; bool lowResAll;
+		float textureTol = 0.0f; bool globalTwo = false, regional = false; int coarseRange = 3; float consistency = 1.0f;
+	};
+	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
+	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
+	// search), alone and together; otherwise the settings grid.
 	std::vector<Variant> Variants()
 	{
 		std::vector<Variant> variants;
+		char* set = nullptr;
+		size_t n = 0;
+		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
+		std::free(set);
+		const bool fixes = which == "fixes";
+		if (which == "defaults")
+		{
+			// The candidates for the defaults: the fixes that add no wrongly
+			// trusted blocks, then with the tolerance / texture allowance.
+			auto add = [&](const char* name, float tol, float tex)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.textureTol = tex; v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				variants.push_back(v);
+			};
+			Variant today{ "today", 3.0f, 0.5f, true };
+			variants.push_back(today);
+			add("safe set (M2 + M3 + range 8 + consistency 2)", 3.0f, 0.0f);
+			add("safe set + M1 0.25", 3.0f, 0.25f);
+			add("safe set + tolerance 4.5", 4.5f, 0.0f);
+			add("safe set + tolerance 4.5 + M1 0.25", 4.5f, 0.25f);
+			return variants;
+		}
+		if (fixes)
+		{
+			auto add = [&](const char* name, float tol, float tex, bool two, bool regional, int range, float consistency)
+			{
+				Variant v{ name, tol, 0.5f, true };
+				v.textureTol = tex; v.globalTwo = two; v.regional = regional; v.coarseRange = range; v.consistency = consistency;
+				variants.push_back(v);
+			};
+			add("today", 3.0f, 0.0f, false, false, 3, 1.0f);
+			add("tolerance 4.5", 4.5f, 0.0f, false, false, 3, 1.0f);
+			add("M1 texture 0.25", 3.0f, 0.25f, false, false, 3, 1.0f);
+			add("M1 texture 0.5", 3.0f, 0.5f, false, false, 3, 1.0f);
+			add("M2 two global", 3.0f, 0.0f, true, false, 3, 1.0f);
+			add("M3 regional hold", 3.0f, 0.0f, false, true, 3, 1.0f);
+			add("coarse range 8", 3.0f, 0.0f, false, false, 8, 1.0f);
+			add("consistency 2", 3.0f, 0.0f, false, false, 3, 2.0f);
+			add("M1 0.5 + M2 + M3 + range 8 + consistency 2", 3.0f, 0.5f, true, true, 8, 2.0f);
+			add("tol 4.5 + M1 0.5 + M2 + M3 + range 8 + consistency 2", 4.5f, 0.5f, true, true, 8, 2.0f);
+			return variants;
+		}
 		for (bool all : { true, false })
 			for (float tol : { 3.0f, 2.0f, 4.5f })
 				for (float lam : { 0.5f, 0.25f, 1.0f })
@@ -2821,6 +2871,11 @@ namespace Corpus
 		s.estLambda = v.lambda;
 		s.lowRes = true;
 		s.lowResAll = v.lowResAll;
+		s.textureTolerance = v.textureTol;
+		s.globalTwo = v.globalTwo;
+		s.regionalHold = v.regional;
+		s.coarseRange = v.coarseRange;
+		s.consistencyPixels = v.consistency;
 		s.motionScaleHi = 0.0f;   // accuracy only: D2 and D4 off
 		s.trustScaleFull = 0.0f;
 		s.hostReadable = true;
@@ -3215,13 +3270,219 @@ void RunBetaRealFootage()
 	if (!lpipsDir.empty()) CreateDirectoryA(lpipsDir.c_str(), nullptr);
 	struct Sum { double hold = 0, warp = 0; int n = 0; };
 	std::vector<Sum> perVariant(variants.size());
+	struct Split { double hold[2] = { 0, 0 }, warp[2] = { 0, 0 }; long long n[2] = { 0, 0 }; };
+	std::map<std::string, std::vector<Split>> splits;
 	std::map<std::string, std::vector<Sum>> perClip;
 	double oracle = 0.0;
 	std::vector<uint16_t> luma, chroma, aLuma, warped(static_cast<size_t>(W) * H);
 	std::vector<std::vector<uint16_t>> truths;
+	// VP_TEST_REAL_DIAG=<clip>:<frame>: why a place holds. Today's settings
+	// and variants (full-size matcher, wider coarse search, looser
+	// tolerance): the global vectors, the frame trust, per block whether the
+	// match error or the forward/backward agreement failed; trust and error
+	// maps as PGMs in VP_TEST_CORPUS_DIR.
+	const std::string diag = envValue("VP_TEST_REAL_DIAG");
+	if (!diag.empty())
+	{
+		const std::string clipName = diag.substr(0, diag.find(':'));
+		const long long n = std::atoll(diag.substr(diag.find(':') + 1).c_str());
+		for (const Clip& clip : clips)
+		{
+			if (clip.name != clipName) continue;
+			bool ok = true;
+			for (int f = 0; f < sources && ok; ++f)
+			{
+				ok = readFrame(clip, n + (f - 3LL) * clip.spacing, luma, &chroma);
+				if (f == 3) aLuma = luma;
+				pl_tex_transfer_params up{};
+				up.tex = lumaT[f]; up.ptr = luma.data();
+				Check(pl_tex_upload(g, &up), "diag: upload");
+				up.tex = chromaT[f]; up.ptr = chroma.data();
+				Check(pl_tex_upload(g, &up), "diag: upload");
+			}
+			Check(ok, "diag: read");
+			std::vector<uint16_t> truth;
+			Check(readFrame(clip, n + clip.spacing / 2, truth, nullptr), "diag: truth");
+			if (!outDir.empty()) { CreateDirectoryA(outDir.c_str(), nullptr); writePgm(outDir + "\\diag-a.pgm", aLuma); }
+			struct Case { const char* name; Dejudder::Settings s; };
+			std::vector<Case> cases;
+			Dejudder::Settings today = SettingsFor(variants[0]);
+			cases.push_back({ "today", today });
+			Dejudder::Settings full = today; full.lowRes = false; cases.push_back({ "full-size matcher", full });
+			Dejudder::Settings search = today; search.lowResAll = false; cases.push_back({ "half-size search", search });
+			Dejudder::Settings wide = today; wide.coarseRange = 10; cases.push_back({ "coarse range 10", wide });
+			Dejudder::Settings loose = today; loose.matchTolerance = 6.0f; cases.push_back({ "tolerance 6", loose });
+			Dejudder::Settings agree = today; agree.consistencyPixels = 3.0f; cases.push_back({ "consistency 3 px", agree });
+			Dejudder::Settings noGate = today; noGate.minTrustedShare = 0.0f; cases.push_back({ "no frame gate", noGate });
+			Dejudder::Settings m1 = today; m1.textureTolerance = 0.5f; cases.push_back({ "M1 texture 0.5", m1 });
+			Dejudder::Settings m2 = today; m2.globalTwo = true; cases.push_back({ "M2 two global", m2 });
+			Dejudder::Settings m3 = today; m3.regionalHold = true; cases.push_back({ "M3 regional hold", m3 });
+			// VP_TEST_REAL_TIMING=1: the matcher's GPU time per pair, today vs
+			// the motion fixes together (undrained GPU timers, 30 estimates).
+			if (envValue("VP_TEST_REAL_TIMING") == "1")
+			{
+				Dejudder::Settings all = today;
+				all.matchTolerance = 4.5f; all.textureTolerance = 0.5f; all.globalTwo = true; all.regionalHold = true;
+				all.coarseRange = 8; all.consistencyPixels = 2.0f;
+				Dejudder::Settings live[2] = { today, all };
+				for (Dejudder::Settings& t : live) { t.estCandidates = true; t.estQpel = true; t.estSplit = true; t.vectorSmooth = true; t.estGate = true; t.holdHysteresis = 2; }
+				const char* names[2] = { "today", "all fixes" };
+				for (int k = 0; k < 2; ++k)
+				{
+					Dejudder::MotionWarp warp(gpu.Log(), g, live[k]);
+					warp.SetPassTiming(true, false);
+					for (int r = 0; r < 34; ++r)
+					{
+						Dejudder::Planes pa, pb;
+						const int f = r % (sources - 1);
+						pa.luma = lumaT[f]; pa.chroma = chromaT[f]; pb.luma = lumaT[f + 1]; pb.chroma = chromaT[f + 1];
+						pa.chromaShiftX = pb.chromaShiftX = 1; pa.chromaShiftY = pb.chromaShiftY = 1;
+						if (r == 4) warp.SetPassTiming(true, false);   // after the warm-up
+						Check(warp.Estimate(pa, pb), "timing: estimate");
+					}
+					warp.FlushPassTimers();
+					double total = 0;
+					std::string detail;
+					for (const auto& e : warp.PassGpuMs())
+					{
+						total += e.second;
+						if (e.first.find("search") != std::string::npos || e.first.find("global") != std::string::npos ||
+							e.first.find("consistency") != std::string::npos || e.first.find("frame trust") != std::string::npos)
+						{
+							char part[160];
+							std::snprintf(part, sizeof(part), "; %s %.2f", e.first.c_str() + (e.first.find(": ") != std::string::npos ? e.first.find(": ") + 2 : 0), e.second / 30.0);
+							detail += part;
+						}
+					}
+					char line[1200];
+					std::snprintf(line, sizeof(line), "timing %s %s: matcher %.2f ms per pair%s", clip.name.c_str(), names[k], total / 30.0, detail.c_str());
+					std::cout << line << "\n" << std::flush;
+				}
+			}
+			for (const Case& c : cases)
+			{
+				Dejudder::MotionWarp warp(gpu.Log(), g, c.s);
+				Dejudder::Planes a;
+				for (int f = 0; f + 1 < sources; ++f)
+				{
+					Dejudder::Planes pa, pb;
+					pa.luma = lumaT[f]; pa.chroma = chromaT[f]; pb.luma = lumaT[f + 1]; pb.chroma = chromaT[f + 1];
+					pa.chromaShiftX = pb.chromaShiftX = 1;
+					pa.chromaShiftY = pb.chromaShiftY = 1;
+					Check(warp.Estimate(pa, pb), "diag: estimate: " + warp.LastError());
+					a = pa;
+				}
+				auto half = [](uint16_t h)
+				{
+					const int e = (h >> 10) & 31, m = h & 1023;
+					const float mag = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(1.0f + m / 1024.0f, e - 15);
+					return (h & 0x8000) ? -mag : mag;
+				};
+				auto download = [&](pl_tex t, std::vector<float>& out)
+				{
+					out.clear();
+					if (!t) return;
+					const size_t count = static_cast<size_t>(t->params.w) * t->params.h * t->params.format->num_components;
+					pl_tex_transfer_params d{};
+					d.tex = t;
+					if (t->params.format->component_depth[0] == 32)
+					{
+						out.resize(count);
+						d.ptr = out.data();
+						Check(pl_tex_download(g, &d), "diag: download");
+					}
+					else
+					{
+						std::vector<uint16_t> raw(count);
+						d.ptr = raw.data();
+						Check(pl_tex_download(g, &d), "diag: download");
+						for (uint16_t v : raw) out.push_back(half(v));
+					}
+				};
+				std::vector<float> field, trust, gv, fwd, bwd;
+				download(warp.Field(), field);
+				download(warp.FrameTrust(), trust);
+				download(warp.GlobalVector(), gv);
+				download(warp.Forward(), fwd);
+				download(warp.Backward(), bwd);
+				const int bx = warp.BlocksX(), by = warp.BlocksY();
+				long long trusted = 0, badMatch = 0, disagree = 0, all = 0;
+				double meanErr = 0;
+				std::vector<uint16_t> trustMap(static_cast<size_t>(W) * H), errMap(static_cast<size_t>(W) * H);
+				const int fwW = warp.Forward() ? warp.Forward()->params.w : 0;
+				for (int y = 0; y < by; ++y)
+					for (int x = 0; x < bx; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * bx + x) * 4;
+						++all;
+						const bool t = field[i + 2] > 0.5f;
+						trusted += t ? 1 : 0;
+						const float err = field[i + 3];
+						meanErr += err;
+						if (!t) { if (err > c.s.matchTolerance) ++badMatch; else ++disagree; }
+						for (int yy = 0; yy < 16; ++yy)
+							for (int xx = 0; xx < 16; ++xx)
+							{
+								const int px = x * 16 + xx, py = y * 16 + yy;
+								if (px >= W || py >= H) continue;
+								trustMap[static_cast<size_t>(py) * W + px] = t ? 65535 : 0;
+								errMap[static_cast<size_t>(py) * W + px] = static_cast<uint16_t>(std::min(65535.0f, err * 4096.0f));
+							}
+					}
+				(void)fwW;
+				// The dominant field vector among the trusted blocks.
+				std::map<std::pair<int, int>, int> votes;
+				for (int y = 0; y < by; ++y)
+					for (int x = 0; x < bx; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * bx + x) * 4;
+						if (field[i + 2] > 0.5f) ++votes[{ static_cast<int>(std::lround(field[i] / 8)) * 8, static_cast<int>(std::lround(field[i + 1] / 8)) * 8 }];
+					}
+				std::string top;
+				std::vector<std::pair<int, std::pair<int, int>>> ranked;
+				for (const auto& v : votes) ranked.push_back({ v.second, v.first });
+				std::sort(ranked.rbegin(), ranked.rend());
+				for (size_t k = 0; k < ranked.size() && k < 3; ++k)
+					top += " (" + std::to_string(ranked[k].second.first) + "," + std::to_string(ranked[k].second.second) + ")x" + std::to_string(ranked[k].first);
+				// The warp's own result against the truth.
+				Dejudder::Planes out;
+				Check(warp.Warp(a, 0.5f * 2 * (clip.spacing / 2) / clip.spacing, out, true), "diag: warp");
+				pl_tex_transfer_params d{};
+				d.tex = out.luma; d.ptr = warped.data();
+				Check(pl_tex_download(g, &d), "diag: download");
+				double hold = 0, wr = 0; long long cnt = 0;
+				for (int y = 64; y < H - 64; y += 2)
+					for (int x = 64; x < W - 64; x += 2)
+					{
+						const size_t i = static_cast<size_t>(y) * W + x;
+						hold += std::abs(static_cast<int>(aLuma[i]) - static_cast<int>(truth[i]));
+						wr += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+						++cnt;
+					}
+				char line[600];
+				std::snprintf(line, sizeof(line),
+					"diag %s %lld [%s]: frame trust share %.3f scale %.2f mean|v| %.1f; global (%.1f, %.1f) px ratio %.2f set %.0f; blocks %lld trusted %.1f%%, untrusted by match error %.1f%%, by disagreement %.1f%%; mean error %.2f; top trusted vectors%s; hold %.2f warp %.2f",
+					clip.name.c_str(), n, c.name, trust.size() > 0 ? trust[0] : -1.0f, trust.size() > 1 ? trust[1] : -1.0f, trust.size() > 2 ? trust[2] : -1.0f,
+					gv.size() > 1 ? gv[0] * 8 : 0.0f, gv.size() > 1 ? gv[1] * 8 : 0.0f, gv.size() > 2 ? gv[2] : -1.0f, gv.size() > 3 ? gv[3] : -1.0f,
+					all, 100.0 * trusted / all, 100.0 * badMatch / all, 100.0 * disagree / all, meanErr / all, top.c_str(),
+					hold / cnt / 64.0, wr / cnt / 64.0);
+				std::cout << line << "\n" << std::flush;
+				if (!outDir.empty())
+				{
+					std::string tag = c.name;
+					for (char& ch : tag) if (ch == ' ') ch = '-';
+					writePgm(outDir + "\\diag-trust-" + tag + ".pgm", trustMap);
+					writePgm(outDir + "\\diag-error-" + tag + ".pgm", errMap);
+				}
+			}
+		}
+		for (int f = 0; f < sources; ++f) { pl_tex_destroy(g, &lumaT[f]); pl_tex_destroy(g, &chromaT[f]); }
+		return;
+	}
 	for (const Clip& clip : clips)
 	{
 		perClip[clip.name].assign(variants.size(), Sum());
+		splits[clip.name].assign(variants.size(), Split());
 		const int places = 6;
 		const long long first = 3LL * clip.spacing + 2, last = clip.frames - clip.spacing - 2;
 		if (last <= first) continue;
@@ -3283,13 +3544,20 @@ void RunBetaRealFootage()
 					const std::vector<uint16_t>& truth = truths[k - 1];
 					double hold = 0, wr = 0;
 					long long count = 0;
+					Split& split = splits[clip.name][vi];
 					for (int y = 64; y < H - 64; y += 2)
 						for (int x = 64; x < W - 64; x += 2)
 						{
 							const size_t i = static_cast<size_t>(y) * W + x;
-							hold += std::abs(static_cast<int>(aLuma[i]) - static_cast<int>(truth[i]));
-							wr += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+							const int h = std::abs(static_cast<int>(aLuma[i]) - static_cast<int>(truth[i]));
+							const int w = std::abs(static_cast<int>(warped[i]) - static_cast<int>(truth[i]));
+							hold += h;
+							wr += w;
 							++count;
+							// Where the remaining difference is: pixels the warp moved,
+							// or pixels left as A (held, or not moving).
+							const int part = warped[i] == aLuma[i] ? 1 : 0;
+							split.hold[part] += h; split.warp[part] += w; split.n[part] += 1;
 						}
 					hold /= count * 64.0;
 					wr /= count * 64.0;
@@ -3330,6 +3598,23 @@ void RunBetaRealFootage()
 	size_t best = 0;
 	for (size_t vi = 1; vi < variants.size(); ++vi)
 		if (perVariant[vi].hold - perVariant[vi].warp > perVariant[best].hold - perVariant[best].warp) best = vi;
+	// Where the difference left over lies (today and the best setting): in
+	// the pixels the warp moved, or in those left as A (held or still). The
+	// first is mostly grain, blur and resampling; the second is what a better
+	// matcher could still take.
+	std::cout << "Beta real footage: the difference left (share of the hold's), moved pixels / pixels left as A (share of the picture):\n";
+	for (const auto& c : splits)
+		for (size_t vi : { static_cast<size_t>(0), best })
+		{
+			const Split& sp = c.second[vi];
+			const double total = sp.hold[0] + sp.hold[1];
+			if (total <= 0) continue;
+			char line[400];
+			std::snprintf(line, sizeof(line), "  %-12s %-34.34s moved: %5.1f%% of the picture, left %5.1f%%; left as A: %5.1f%% of the picture, left %5.1f%%",
+				c.first.c_str(), variants[vi].name.c_str(), 100.0 * sp.n[0] / std::max(1LL, sp.n[0] + sp.n[1]), 100.0 * sp.warp[0] / total,
+				100.0 * sp.n[1] / std::max(1LL, sp.n[0] + sp.n[1]), 100.0 * sp.warp[1] / total);
+			std::cout << line << "\n";
+		}
 	const double today = perVariant[0].hold - perVariant[0].warp, bestBenefit = perVariant[best].hold - perVariant[best].warp;
 	char line[400];
 	std::snprintf(line, sizeof(line), "Beta real footage headroom (benefit summed): today %.2f; best single setting %.2f (%s, %+.1f%%); best per place %.2f (%+.1f%%)",

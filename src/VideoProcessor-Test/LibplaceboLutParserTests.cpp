@@ -7585,6 +7585,190 @@ namespace VideoProcessorTest
 			catch (...) { Assert::Fail(L"non-std exception"); }
 		}
 
+		TEST_METHOD(DejudderGlobalTwoFindsTwoMotionsBeyondTheCoarseRange)
+		{
+			// M2 (owner 2026-10-13 night): the top half pans +140 px and the
+			// bottom half -140 px, both beyond the coarse search; D1 alone is not
+			// confident (two equal candidates) so neither half is found. With
+			// the second candidate both halves are within half a pixel.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			static constexpr int dx = 140;
+			auto lumaA = [](int x, int y) { return y < 128 ? DejudderTexture(x, y, 3) : DejudderTexture(x, y, 9); };
+			auto lumaB = [](int x, int y) { return y < 128 ? DejudderTexture(x - dx, y, 3) : DejudderTexture(x + dx, y, 9); };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, lumaA, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height, lumaB,
+				[](int x, int y, int c) { return DejudderTexture((x - (y < 128 ? dx : -dx) / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			auto count = [&](const DejudderField& field, bool top)
+			{
+				int total = 0, right = 0;
+				const int want = top ? dx : -dx;
+				for (int by = top ? 2 : 10; by < (top ? 6 : field.blocksY - 2); ++by)
+					for (int bx = 1; bx < field.blocksX - 1; ++bx)
+					{
+						const int x0 = bx * 16;
+						if (top ? x0 + 16 + dx >= width - 16 : x0 - dx < 16) continue;   // leaves the picture
+						++total;
+						right += field.trusted(bx, by) && std::fabs(field.vx(bx, by) - want) <= 0.5f && std::fabs(field.vy(bx, by)) <= 0.5f ? 1 : 0;
+					}
+				return std::make_pair(right, total);
+			};
+			auto run = [&](bool two)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.globalTwo = two;
+				settings.minTrustedShare = 0.0f;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				const DejudderField field = DownloadField(gpu, warp);
+				return std::make_pair(count(field, true), count(field, false));
+			};
+			const auto one = run(false), two = run(true);
+			const std::wstring message = L"right blocks, one candidate: top " + std::to_wstring(one.first.first) + L"/" +
+				std::to_wstring(one.first.second) + L", bottom " + std::to_wstring(one.second.first) + L"/" + std::to_wstring(one.second.second) +
+				L"; two: top " + std::to_wstring(two.first.first) + L"/" + std::to_wstring(two.first.second) + L", bottom " +
+				std::to_wstring(two.second.first) + L"/" + std::to_wstring(two.second.second) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(one.first.first * 100 < one.first.second * 50 || one.second.first * 100 < one.second.second * 50,
+				(L"one candidate should miss a half: " + message).c_str());
+			Assert::IsTrue(two.first.first * 100 >= two.first.second * 90 && two.second.first * 100 >= two.second.second * 90, message.c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderRegionalHoldWarpsTheMatchedAreaUnlessACut)
+		{
+			// M3 (planner Q9): a band pans 8 px while the rest of the picture is
+			// new noise every frame (hard motion: few blocks match, the picture's
+			// brightness distribution unchanged). Off: the whole frame holds. On:
+			// the band's blocks warp (FrameTrust().r at least min_share, the
+			// band trusted) - and no cut. A real cut (new, darker content) still
+			// holds the whole frame with the regional hold on.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 512;
+			static constexpr int dx = 8;
+			auto noise = [](int x, int y, unsigned seed)
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u) ^ (seed * 83492791u);
+				return static_cast<uint16_t>(8000 + ((h * 2654435761u) >> 16) % 40000u);
+			};
+			auto band = [](int y) { return y >= 192 && y < 288; };   // 6 block rows of 16 (under a quarter)
+			auto chroma = [](int x, int y, int c) { return static_cast<uint16_t>(32768 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return band(y) ? DejudderTexture(x, y, 5) : noise(x, y, 1); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return band(y) ? DejudderTexture(x - dx, y, 5) : noise(x, y, 2); }, chroma);
+			const DejudderFrame cut = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return static_cast<uint16_t>(2000 + (DejudderTexture(x, y, 77) - 8000) / 8); }, chroma);
+			DejudderGpuPlanes planesA, planesB, planesCut;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			UploadDejudderFrame(gpu, cut, planesCut);
+			struct Result { float r = 0, share = 0; int bandTrusted = 0, bandTotal = 0; };
+			auto run = [&](bool regional, const Dejudder::Planes& second)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.regionalHold = regional;
+				settings.minTrustedShare = 0.25f;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, second), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				Result result;
+				result.r = DownloadFrameTrust(gpu, warp)[0];
+				const DejudderField field = DownloadField(gpu, warp);
+				int trusted = 0;
+				for (int by = 0; by < field.blocksY; ++by)
+					for (int bx = 0; bx < field.blocksX; ++bx)
+					{
+						trusted += field.trusted(bx, by) ? 1 : 0;
+						if (by >= 13 && by < 17 && bx >= 1 && bx < field.blocksX - 2)
+						{
+							++result.bandTotal;
+							result.bandTrusted += field.trusted(bx, by) && std::fabs(field.vx(bx, by) - dx) <= 0.5f ? 1 : 0;
+						}
+					}
+				result.share = static_cast<float>(trusted) / (field.blocksX * field.blocksY);
+				return result;
+			};
+			const Result off = run(false, planesB.planes), on = run(true, planesB.planes), cutOn = run(true, planesCut.planes);
+			const std::wstring message = L"off: r " + std::to_wstring(off.r) + L" share " + std::to_wstring(off.share) + L"; on: r " +
+				std::to_wstring(on.r) + L" share " + std::to_wstring(on.share) + L" band " + std::to_wstring(on.bandTrusted) + L"/" +
+				std::to_wstring(on.bandTotal) + L"; cut (on): r " + std::to_wstring(cutOn.r) + L" share " + std::to_wstring(cutOn.share) +
+				L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(off.share < 0.25f && off.r < 0.25f, (L"hard motion: few blocks match, off holds the frame: " + message).c_str());
+			Assert::IsTrue(on.r >= 0.25f, (L"on: not a cut, the holds stay per block: " + message).c_str());
+			Assert::IsTrue(on.bandTrusted * 100 >= on.bandTotal * 80, (L"on: the band is trusted: " + message).c_str());
+			Assert::IsTrue(cutOn.r < 0.25f, (L"a real cut still holds the whole frame: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderTextureToleranceTrustsGrainyTextureWithoutFlatFalseMatches)
+		{
+			// M1: a pan of 6 px with fresh grain on a detailed texture: the
+			// correct match differs by more than the fixed tolerance, so few
+			// blocks are trusted; with the texture allowance most are, with the
+			// right vector. Off is today exactly (the same field).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 512, height = 256;
+			static constexpr int dx = 6;
+			auto grain = [](int x, int y, unsigned seed)
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u) ^ (seed * 83492791u);
+				return static_cast<int>(((h * 2654435761u) >> 16) % 8000u) - 4000;
+			};
+			auto chroma = [](int x, int y, int c) { return static_cast<uint16_t>(32768 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return static_cast<uint16_t>(DejudderTexture(x, y, 11) + grain(x, y, 1)); }, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[&](int x, int y) { return static_cast<uint16_t>(DejudderTexture(x - dx, y, 11) + grain(x, y, 2)); }, chroma);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			auto run = [&](float textureTolerance)
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.globalPrior = true;
+				settings.matchTolerance = 3.0f;
+				settings.textureTolerance = textureTolerance;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				const DejudderField field = DownloadField(gpu, warp);
+				int trusted = 0, right = 0, total = 0;
+				for (int by = 1; by < field.blocksY - 1; ++by)
+					for (int bx = 1; bx < field.blocksX - 2; ++bx)
+					{
+						++total;
+						trusted += field.trusted(bx, by) ? 1 : 0;
+						right += field.trusted(bx, by) && std::fabs(field.vx(bx, by) - dx) <= 0.5f && std::fabs(field.vy(bx, by)) <= 0.5f ? 1 : 0;
+					}
+				return std::make_tuple(trusted, right, total);
+			};
+			const auto off = run(0.0f), on = run(0.5f);
+			const std::wstring message = L"trusted / right / blocks: off " + std::to_wstring(std::get<0>(off)) + L"/" +
+				std::to_wstring(std::get<1>(off)) + L"/" + std::to_wstring(std::get<2>(off)) + L", allowance 0.5 " +
+				std::to_wstring(std::get<0>(on)) + L"/" + std::to_wstring(std::get<1>(on)) + L"/" + std::to_wstring(std::get<2>(on)) +
+				L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::IsTrue(std::get<0>(off) * 100 < std::get<2>(off) * 50, (L"grain: the fixed tolerance trusts few: " + message).c_str());
+			Assert::IsTrue(std::get<1>(on) * 100 >= std::get<2>(on) * 80, (L"the allowance trusts most, rightly: " + message).c_str());
+			Assert::IsTrue(std::get<0>(on) - std::get<1>(on) <= std::get<2>(on) / 50, (L"and no wrong trusted vectors: " + message).c_str());
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(DejudderMotionRolloffKeepsFastMotionsStrobing)
 		{
 			// Delta 14 R-A: pans at 2, 12 and 30 source px per frame give the

@@ -164,6 +164,24 @@ namespace Dejudder
 		// searches.
 		bool lowRes = false;
 		bool lowResAll = false;
+		// Motion fixes (owner 2026-10-13 night, after the failure map; planner
+		// answers docs/VP-review-2026-10-13-night-answers.md); all off here.
+		// M1 texture tolerance: a block's match is good up to matchTolerance +
+		// textureTolerance x its texture (the mean absolute neighbour
+		// difference of A's half-resolution luma over the block, codes): fine
+		// texture, grain and water raise the error of a correct match (0 = off).
+		float textureTolerance = 0.0f;
+		// M2 two global candidates: D1's best and the best away from it (the
+		// background and the subject) both start every block's search, used
+		// whether or not D1 is confident (the block's own match decides).
+		bool globalTwo = false;
+		// M3 regional hold: below minTrustedShare a frame is held whole only
+		// when it is a cut (its 1/32 luma histogram changed by more than
+		// cutHistogram, L1 of the normalised histograms, 0..2, or under 5%
+		// trusted); otherwise its trusted blocks warp and the rest hold, and
+		// D4 ramps from 0. FrameTrust().r is then the share the holds use.
+		bool regionalHold = false;
+		float cutHistogram = 0.3f;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -303,8 +321,8 @@ namespace Dejudder
 			int width, int height, int group);
 		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange);
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
-			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out);
-		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out);
+			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr);
+		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);
 		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out);
 		bool Copy(pl_tex src, pl_tex dst);
 
@@ -357,6 +375,7 @@ namespace Dejudder
 		bool rescoreForTest = false;
 		// D1 in parallel: per-candidate frame SADs (1/32, 1/8) and the pick.
 		pl_tex globalSad2 = nullptr, globalSad1 = nullptr, globalPick = nullptr;
+		pl_tex globalSecond[2] = { nullptr, nullptr };   // M2: D1's second candidate (l1 texels, -, -, valid)
 		bool lumaInCodes = false;
 		bool LowResSearch(const Planes& a, const Planes& b);
 	};

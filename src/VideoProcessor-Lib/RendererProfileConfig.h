@@ -641,8 +641,14 @@ namespace RendererProfileConfig
 			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
 				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate" ||
 				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
-				key == "dejudder_motion_rolloff")
+				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold")
 				return IsChoice(value, { "on", "off" });
+			// Motion fixes (owner 2026-10-13 night): M1 texture tolerance, M3's
+			// cut test, the coarse search range, the forward/backward agreement.
+			if (key == "dejudder_texture_tolerance") return IsNumberInRange(value, 0.0, 4.0);
+			if (key == "dejudder_cut_histogram") return IsNumberInRange(value, 0.0, 2.0);
+			if (key == "dejudder_search_range") { int n = 0; return ParseInteger(value, 1, 16, n); }
+			if (key == "dejudder_consistency_px") return IsNumberInRange(value, 0.5, 8.0);
 			// Stage 11a E1: the smoothness penalty (codes per source pixel).
 			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
 			// Owner 2026-10-13: the de-judder matcher one level coarser (4K).

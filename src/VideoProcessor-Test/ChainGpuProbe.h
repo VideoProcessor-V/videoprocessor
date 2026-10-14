@@ -368,6 +368,11 @@ namespace ChainGpuProbe
 		// Delta 9: H1 feather and H2 hysteresis on, H3 taper off (planner).
 		s.holdFeatherPx = 4.0f;
 		s.holdHysteresis = 2;
+		// Motion fixes (owner 2026-10-13 night): the renderer's defaults.
+		s.globalTwo = true;
+		s.regionalHold = true;
+		s.coarseRange = 8;
+		s.consistencyPixels = 2.0f;
 		return s;
 	}
 	constexpr double kRefinedGrainTolerance = 3.0;

@@ -245,13 +245,23 @@ shared float l1_sads_z[169];
 shared float l1_sads_c[169];
 shared float l1_sads_g[169];
 shared float from_win[144];
-shared float half_sads[272];
-shared ivec2 half_vecs[272];
-// The start each candidate belongs to (1..5, 0 = the zero vector, 6 = the
-// +-2 around zero) and the starts' centres: a candidate inside an earlier
+// The start each candidate belongs to (1..5, 0 = the zero vector, ZGROUP =
+// the +-2 around zero) and the starts' centres: a candidate inside an earlier
 // start's window repeats an earlier one (owner 2026-10-13, shaky camera).
-shared int half_starts[272];
-shared ivec2 s_centres[6];
+#ifdef GLOBAL_TWO
+// M2: a sixth start, D1's second candidate.
+#define ZGROUP 7
+#define NHALF 321
+shared float l1_sads_g2[169];
+shared vec2 s_v1g2;
+#else
+#define ZGROUP 6
+#define NHALF 272
+#endif
+shared float half_sads[NHALF];
+shared ivec2 half_vecs[NHALF];
+shared int half_starts[NHALF];
+shared ivec2 s_centres[ZGROUP];
 
 shared float sub_sads[9];
 shared ivec2 s_v2;
@@ -336,17 +346,36 @@ bool have_g = false;
 vec2 vgf = vec2(0.0);
 if (use_global != 0) {
     vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+#ifdef GLOBAL_TWO
+    if (gv.w > 0.5) {   // M2: a start whether or not D1 is confident
+#else
     if (gv.w > 0.5 && gv.z < 0.9) {
+#endif
         have_g = true;
         vgf = gv.xy;
     }
 }
+#ifdef GLOBAL_TWO
+bool have_g2 = false;
+vec2 vg2 = vec2(0.0);
+{
+    vec4 g2 = texelFetch(global_two, ivec2(0), 0);
+    if (g2.w > 0.5 && !(have_g && g2.xy == vgf)) {
+        have_g2 = true;
+        vg2 = g2.xy;
+    }
+}
+#endif
 if (run && li < 169) {
     vec2 h = 0.5 * vec2(li % 13 - 6, li / 13 - 6);
     l1_sads_z[li] = sad_l1(b * 2, h);
     l1_sads_c[li] = sad_l1(b * 2, vec2(v2 * 4) + h);
     if (have_g)
         l1_sads_g[li] = sad_l1(b * 2, vgf + h);
+#ifdef GLOBAL_TWO
+    if (have_g2)
+        l1_sads_g2[li] = sad_l1(b * 2, vg2 + h);
+#endif
 }
 sync_group();
 if (run && lead) {
@@ -356,6 +385,10 @@ if (run && lead) {
     float best1c = l1_sads_c[84];
     vec2 v1g = vgf;
     float best1g = have_g ? l1_sads_g[84] : 0.0;
+#ifdef GLOBAL_TWO
+    vec2 v1g2 = vg2;
+    float best1g2 = have_g2 ? l1_sads_g2[84] : 0.0;
+#endif
     for (int dy = -6; dy <= 6; dy++)
         for (int dx = -6; dx <= 6; dx++) {
             int i = (dy + 6) * 13 + dx + 6;
@@ -363,6 +396,9 @@ if (run && lead) {
             if (l1_sads_z[i] < best1z) { best1z = l1_sads_z[i]; v1z = h; }
             if (l1_sads_c[i] < best1c) { best1c = l1_sads_c[i]; v1c = vec2(v2 * 4) + h; }
             if (have_g && l1_sads_g[i] < best1g) { best1g = l1_sads_g[i]; v1g = vgf + h; }
+#ifdef GLOBAL_TWO
+            if (have_g2 && l1_sads_g2[i] < best1g2) { best1g2 = l1_sads_g2[i]; v1g2 = vg2 + h; }
+#endif
         }
     s_v1z = v1z;
     s_v1c = v1c;
@@ -394,9 +430,20 @@ if (run && lead) {
                 half_vecs[n++] = centre + ivec2(dx, dy);
             }
     }
+#ifdef GLOBAL_TWO
+    if (have_g2 && v1g2 != v1z && v1g2 != v1c && !(have_g && (v1g2 == v1g || v1g2 == vgf))) {
+        ivec2 centre = ivec2(round(v1g2 * 4.0));
+        s_centres[++nstarts] = centre;
+        for (int dy = -3; dy <= 3; dy++)
+            for (int dx = -3; dx <= 3; dx++) {
+                half_starts[n] = nstarts;
+                half_vecs[n++] = centre + ivec2(dx, dy);
+            }
+    }
+#endif
     for (int dy = -2; dy <= 2; dy++)
         for (int dx = -2; dx <= 2; dx++) {
-            half_starts[n] = 6;
+            half_starts[n] = ZGROUP;
             half_vecs[n++] = ivec2(dx, dy);
         }
     s_centres[0] = ivec2(nstarts, 0);   // the number of starts
@@ -414,7 +461,7 @@ if (run)
         ivec2 v = half_vecs[i];
         int start = half_starts[i];
         bool repeat = i > 0 && v == ivec2(0);
-        int earlier = start == 6 ? s_centres[0].x : start - 1;
+        int earlier = start == ZGROUP ? s_centres[0].x : start - 1;
         for (int k = 1; k <= earlier; k++)
             repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
         half_sads[i] = repeat ? 3.0e38 : sad_win(o, v);
@@ -937,18 +984,20 @@ float best = g_sad_[0];
 barrier();
 ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
 float second = 1e30;
+int ks = -1;
 for (int j = 0; j < 2; j++) {
     if (mk[j] < 0) continue;
     ivec2 v = ivec2(mk[j] % 17 - 8, mk[j] / 17 - 8);
     if (max(abs(v.x - vb.x), abs(v.y - vb.y)) <= 1) continue;
-    second = min(second, mine[j]);
+    if (mine[j] < second) { second = mine[j]; ks = mk[j]; }
 }
 g_sad_[i] = second;
-g_idx_[i] = 0;
+g_idx_[i] = ks;
 barrier();
 argmin_(i);
+// w: 1 + the second's index (M2; 0 = none), >= 1 once written.
 if (i == 0u)
-    imageStore(dst, ivec2(0), vec4(float(kb), best, g_sad_[0], 1.0));
+    imageStore(dst, ivec2(0), vec4(float(kb), best, g_sad_[0], 1.0 + float(max(g_idx_[0], -1) + 1)));
 )GLSL";
 
 		// The 1/8 candidates around the winner, one work group each.
@@ -1004,6 +1053,14 @@ if (i == 0u) {
     bool ok = kb >= 0 && best < 1e29;
     float ratio = ok ? (best + 0.05) / (min(second, 1e6) + 0.05) : 1.0;
     imageStore(dst, ivec2(0), vec4(ok ? v : vec2(0.0), ratio, 1.0));
+#ifdef GLOBAL_TWO
+    // M2: the second candidate at 1/32 precision (in 1/8 texels); the
+    // block search refines it as it refines the first.
+    int k2 = int(pick.w + 0.5) - 2;
+    bool ok2 = ok && k2 >= 0 && second < 1e29;
+    vec2 v2nd = ok2 ? vec2(ivec2(k2 % 17 - 8, k2 / 17 - 8) * 4) : vec2(0.0);
+    imageStore(second_out, ivec2(0), vec4(v2nd, 0.0, ok2 ? 1.0 : 0.0));
+#endif
 }
 )GLSL";
 
@@ -1091,10 +1148,25 @@ if (b.x < blocks.x && b.y < blocks.y) {
     ivec2 bt = clamp(ivec2(floor(landed / 8.0)), ivec2(0), blocks - ivec2(1));
     vec4 g = texelFetch(bwd, bt, 0);
     bool consistent = length(f.xy + g.xy) <= consistency;
-#ifdef TAPER
-    bool good = f.z <= taper_sad;   // delta 9 H3: marginal blocks warp, tapered
+#ifdef TEXTURE_TOL
+    // M1: the block's texture (mean absolute neighbour difference of A's
+    // half-resolution luma) raises the error a correct match may have.
+    ivec2 hs_ = textureSize(from_half, 0);
+    float tex_ = 0.0;
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) {
+            ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs_ - ivec2(2));
+            float c0 = texelFetch(from_half, p, 0).r;
+            tex_ += abs(texelFetch(from_half, p + ivec2(1, 0), 0).r - c0) + abs(texelFetch(from_half, p + ivec2(0, 1), 0).r - c0);
+        }
+    float extra_ = texture_tol * tex_ / 128.0;
 #else
-    bool good = f.z <= tolerance;
+    float extra_ = 0.0;
+#endif
+#ifdef TAPER
+    bool good = f.z <= taper_sad + extra_;   // delta 9 H3: marginal blocks warp, tapered
+#else
+    bool good = f.z <= tolerance + extra_;
 #endif
     float trust = (consistent && good) ? 1.0 : 0.0;
     imageStore(dst, b, vec4(f.xy * 2.0, trust, f.z));
@@ -1183,6 +1255,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const char* const FRAME_TRUST_HEADER = R"GLSL(
 shared float partial_[256];
 shared float partial_v_[256];
+#ifdef REGIONAL
+shared float partial_h_[256];
+#endif
 #ifdef CAMERA_OUT
 shared vec3 partial_c_[256];
 #endif
@@ -1207,8 +1282,41 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
     }
     barrier();
 }
+#ifdef REGIONAL
+// M3: the change of the 1/32 luma histograms (16 bins of 16 codes), L1 of
+// the normalised histograms (0..2): a cut changes it, a hard pan does not.
+float hist_d = 0.0;
+ivec2 ls_ = textureSize(hist_a, 0);
+int lc_ = ls_.x * ls_.y;
+for (int j = 0; j < 16; j++) {
+    float h = 0.0;
+    for (int k = int(i); k < lc_; k += 256) {
+        ivec2 p = ivec2(k % ls_.x, k / ls_.x);
+        h += (clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15) == j ? 1.0 : 0.0) -
+             (clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15) == j ? 1.0 : 0.0);
+    }
+    partial_h_[i] = h;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (i < stride)
+            partial_h_[i] += partial_h_[i + stride];
+        barrier();
+    }
+    if (i == 0u)
+        hist_d += abs(partial_h_[0]);
+    barrier();
+}
+hist_d /= float(max(lc_, 1));
+#endif
 if (i == 0u) {
     float share = partial_[0] / float(max(count, 1));
+#ifdef REGIONAL
+    bool cut = share < min_share && (hist_d > cut_hist || share < 0.05);
+    float ramp_lo = 0.0;
+#else
+    bool cut = share < min_share;
+    float ramp_lo = min_share;
+#endif
     float mean_v = partial_[0] > 0.0 ? partial_v_[0] / partial_[0] : 0.0;
     float scale = 1.0;
 #ifdef ROLLOFF
@@ -1231,13 +1339,15 @@ if (i == 0u) {
         m *= mix(1.0, roll_floor, smoothstep(roll_lo, max(roll_hi, roll_lo + 1e-3), frame_v));
 #endif
         if (trust_full > 0.0)
-            m *= clamp((share - min_share) / max(trust_full - min_share, 1e-3), 0.0, 1.0);
+            m *= clamp((share - ramp_lo) / max(trust_full - ramp_lo, 1e-3), 0.0, 1.0);
         vec4 prev = imageLoad(state_io, ivec2(0));
         float p = prev.w > 0.5 ? prev.x : m;   // no history yet: start where the frame is
-        scale = share < min_share ? 0.0 : clamp(m, p - rate, p + rate);
+        scale = cut ? 0.0 : clamp(m, p - rate, p + rate);
         imageStore(state_io, ivec2(0), vec4(scale, mean_v, share, 1.0));
     }
-    imageStore(dst, ivec2(0), vec4(share, scale, mean_v, 1.0));
+    // M3: a hard-motion frame that is not a cut reports at least min_share,
+    // so the holds (warps, hysteresis, adaptive downscale) stay per block.
+    imageStore(dst, ivec2(0), vec4(cut ? share : max(share, min_share), scale, mean_v, 1.0));
 }
 #ifdef CAMERA_OUT
 // Delta 14 R-B: the camera, refined from D1's global vector (4-px steps) to
@@ -1581,7 +1691,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1] })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -1629,6 +1739,7 @@ if (q.x < size.x && q.y < size.y) {
 			!make(&occlusion[0], blocksX, blocksY, vec4f, readable) || !make(&occlusion[1], blocksX, blocksY, vec4f, readable) ||
 			!make(&rawField, blocksX, blocksY, vec4f, readable) || !make(&fillOcclusion, blocksX, blocksY, vec4f, readable) ||
 			!make(&globalVector[0], 1, 1, vec4f, readable) || !make(&globalVector[1], 1, 1, vec4f, readable) ||
+			!make(&globalSecond[0], 1, 1, vec4f, readable) || !make(&globalSecond[1], 1, 1, vec4f, readable) ||
 			!make(&sweep[0], blocksX, blocksY, vec4f, readable) || !make(&sweep[1], blocksX, blocksY, vec4f, readable) ||
 			!make(&qpelField, blocksX, blocksY, vec4f, readable))
 		{
@@ -1868,7 +1979,7 @@ if (q.x < size.x && q.y < size.y) {
 				third, 2, nullptr, 0, l2W, l2H, 8);
 	}
 
-	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out)
+	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second)
 	{
 		if (serialSearchForTest)
 		{
@@ -1906,28 +2017,30 @@ if (q.x < size.x && q.y < size.y) {
 			}
 		}
 		static const std::string pickHeader = std::string(GLOBAL_PICK_HEADER);
+		static const std::string pickTwoHeader = std::string("#define GLOBAL_TWO 1\n") + GLOBAL_PICK_HEADER;
 		const pl_shader_desc l2Desc[3] = {
 			Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", globalSad2) };
 		const pl_shader_desc pick2Desc[2] = { Sampled("sad2", globalSad2, false), Storage("dst", globalPick) };
 		const pl_shader_desc l1Desc[4] = {
 			Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
 			Sampled("global_pick", globalPick, false), Storage("dst", globalSad1) };
-		const pl_shader_desc pick1Desc[3] = {
-			Sampled("sad1", globalSad1, false), Sampled("global_pick", globalPick, false), Storage("dst", out) };
+		const pl_shader_desc pick1Desc[4] = {
+			Sampled("sad1", globalSad1, false), Sampled("global_pick", globalPick, false), Storage("dst", out),
+			Storage("second_out", second) };
 		return DispatchPerBlock("VideoProcessor de-judder: global motion (D1)", GLOBAL_SUM_HEADER, GLOBAL_L2_BODY,
 				l2Desc, 3, nullptr, 0, 17, 17, 16, 16) &&
 			DispatchPerBlock("VideoProcessor de-judder: global motion pick (D1)", pickHeader.c_str(), GLOBAL_PICK2_BODY,
 				pick2Desc, 2, nullptr, 0, 1, 1, 16, 16) &&
 			DispatchPerBlock("VideoProcessor de-judder: global motion 1/8 (D1)", GLOBAL_SUM_HEADER, GLOBAL_L1_BODY,
 				l1Desc, 4, nullptr, 0, 9, 9, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion vector (D1)", pickHeader.c_str(), GLOBAL_PICK1_BODY,
-				pick1Desc, 3, nullptr, 0, 1, 1, 16, 16);
+			DispatchPerBlock("VideoProcessor de-judder: global motion vector (D1)", second ? pickTwoHeader.c_str() : pickHeader.c_str(),
+				GLOBAL_PICK1_BODY, pick1Desc, second ? 4 : 3, nullptr, 0, 1, 1, 16, 16);
 	}
 
 	bool MotionWarp::Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
-		pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out)
+		pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo)
 	{
-		const pl_shader_desc descriptors[10] = {
+		const pl_shader_desc descriptors[11] = {
 			// One binding per texture (libplacebo rejects the same texture bound
 			// twice in a pass): `to_half` is linear for the half-pixel samples;
 			// texelFetch ignores the filter.
@@ -1935,7 +2048,8 @@ if (q.x < size.x && q.y < size.y) {
 			Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
 			Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false),
 			Sampled("global_vec", global, false), Storage("dst", out),
-			Sampled("previous", previous, false), Sampled("prev_trust", frameTrust, false) };
+			Sampled("previous", previous, false), Sampled("prev_trust", frameTrust, false),
+			Sampled("global_two", globalTwo, false) };
 		const int range = std::max(0, std::min(settings.coarseRange, 16));
 		const int useGlobal = settings.globalPrior ? 1 : 0;
 		const int useTemporal = settings.estCandidates && previousValid ? 1 : 0;
@@ -1950,8 +2064,10 @@ if (q.x < size.x && q.y < size.y) {
 			return Dispatch("VideoProcessor de-judder: block search (serial reference)", SEARCH_HEADER,
 				SEARCH_BODY_SERIAL, descriptors, 10, variables, 5, blocksX, blocksY, 8);
 		static const std::string header = std::string(SEARCH_HEADER) + SEARCH_PARALLEL_HEADER;
-		return DispatchPerBlock("VideoProcessor de-judder: block search", header.c_str(), SEARCH_BODY,
-			descriptors, 10, variables, 5, blocksX, blocksY, 16, 16);
+		static const std::string twoHeader = std::string("#define GLOBAL_TWO 1\n") + SEARCH_HEADER + SEARCH_PARALLEL_HEADER;
+		const bool two = globalTwo && settings.globalPrior;
+		return DispatchPerBlock("VideoProcessor de-judder: block search", two ? twoHeader.c_str() : header.c_str(), SEARCH_BODY,
+			descriptors, two ? 11 : 10, variables, 5, blocksX, blocksY, 16, 16);
 	}
 
 	bool MotionWarp::Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn, pl_tex previous, pl_tex global, pl_tex out)
@@ -2191,13 +2307,18 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		else
 		{
+			// M2 (parallel search only; the serial reference has one candidate).
+			const bool two = settings.globalTwo && settings.globalPrior && !serialSearchForTest;
 			if (settings.globalPrior &&
-				(!Global(l1A, l1B, l2A, l2B, globalVector[0]) || !Global(l1B, l1A, l2B, l2A, globalVector[1])))
+				(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
+				 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)))
 				return false;
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
 			const bool twoSweeps = settings.estCandidates;
-			if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward) ||
-				!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward))
+			if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward,
+					two ? globalSecond[0] : nullptr) ||
+				!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward,
+					two ? globalSecond[1] : nullptr))
 				return false;
 			if (twoSweeps &&
 				(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward) ||
@@ -2226,15 +2347,24 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The consistency pass writes `field` directly, or a raw field that
 			// E3 (quarter-pel) and D3 (smoothing) refine into `field`.
 			const bool refined = settings.vectorSmooth || settings.estQpel;
-			const pl_shader_desc descriptors[3] = {
+			const pl_shader_desc descriptors[4] = {
 				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
-				Storage("dst", refined ? rawField : field) };
+				Storage("dst", refined ? rawField : field), Sampled("from_half", halfA, false) };
 			// Delta 9 H3: marginal blocks (up to taper_sad) pass the consistency
 			// check as trusted; the warp tapers them.
 			const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
-			const pl_shader_var consistencyVars[3] = { variables[0], variables[1], { pl_var_float("taper_sad"), &taperSad, true } };
-			if (!Dispatch("VideoProcessor de-judder: consistency", settings.blockTaper ? "#define TAPER 1\n" : nullptr,
-				CONSISTENCY_BODY, descriptors, 3, consistencyVars, settings.blockTaper ? 3 : 2, blocksX, blocksY, 8))
+			const bool textureTol = settings.textureTolerance > 0.0f;
+			const float textureTolValue = settings.textureTolerance;
+			std::vector<pl_shader_var> consistencyVars = { variables[0], variables[1] };
+			if (settings.blockTaper)
+				consistencyVars.push_back({ pl_var_float("taper_sad"), &taperSad, true });
+			if (textureTol)
+				consistencyVars.push_back({ pl_var_float("texture_tol"), &textureTolValue, true });
+			const std::string consistencyHeader = std::string(settings.blockTaper ? "#define TAPER 1\n" : "") +
+				(textureTol ? "#define TEXTURE_TOL 1\n" : "");
+			if (!Dispatch("VideoProcessor de-judder: consistency", consistencyHeader.empty() ? nullptr : consistencyHeader.c_str(),
+				CONSISTENCY_BODY, descriptors, textureTol ? 4 : 3, consistencyVars.data(), static_cast<int>(consistencyVars.size()),
+				blocksX, blocksY, 8))
 				return false;
 			if (settings.estQpel)
 			{
@@ -2312,12 +2442,20 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				}
 			}
 			std::vector<pl_shader_desc> trustDescs = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
+			if (settings.regionalHold)
+			{
+				trustDescs.push_back(Sampled("hist_a", l2A, false));
+				trustDescs.push_back(Sampled("hist_b", l2B, false));
+			}
 			if (rolloffGlobal || cameraOut)
 				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
 			if (cameraOut)
 				trustDescs.push_back(Storage("camera_out", camera));
 			const float rollLo = settings.rollLo, rollHi = settings.rollHi, rollFloor = std::min(1.0f, std::max(0.0f, settings.rollFloor));
 			std::vector<pl_shader_var> trustVarList(trustVars, trustVars + 5);
+			const float cutHist = settings.cutHistogram;
+			if (settings.regionalHold)
+				trustVarList.push_back({ pl_var_float("cut_hist"), &cutHist, true });
 			if (settings.motionRolloff)
 			{
 				trustVarList.push_back({ pl_var_float("roll_lo"), &rollLo, true });
@@ -2326,7 +2464,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
 				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
-				FRAME_TRUST_HEADER;
+				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + FRAME_TRUST_HEADER;
 			const pl_shader_desc* trustDesc = trustDescs.data();
 			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FRAME_TRUST_BODY,
 				trustDesc, static_cast<int>(trustDescs.size()), trustVarList.data(), static_cast<int>(trustVarList.size()), 16, 16, 16))

@@ -6515,6 +6515,41 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "The camera's motion (pans, tracking) is always smoothed fully; this scales the smoothing of things moving "
             "within the frame. 1 = everything smoothed alike (off); 0.5 = people and objects smoothed half as much, which "
             "reads less like video; 0 = the camera only."));
+        // Motion fixes (owner 2026-10-13 night): how hard the matcher looks
+        // and what it accepts.
+        auto* searchRange = addText(QStringLiteral("Motion search reach"), QStringLiteral("dejudder_search_range"));
+        searchRange->setValidator(new QIntValidator(1, 16, searchRange));
+        searchRange->setPlaceholderText(QStringLiteral("8"));
+        searchRange->setToolTip(QStringLiteral(
+            "How far each block's coarse search looks (8, the default, is about 500 source pixels per frame with the "
+            "half-size estimate: fast pans; 3 was the earlier reach). Higher costs a little more time."));
+        auto* globalTwo = addChoice(QStringLiteral("Two whole-picture motions"),
+            QStringLiteral("dejudder_global_two"), { QStringLiteral("on"), QStringLiteral("off") });
+        globalTwo->setToolTip(QStringLiteral(
+            "Every block also tries the second strongest whole-picture motion (for example a tracked subject and a fast "
+            "background), even when neither is certain; each block's own match decides."));
+        auto* textureTol = addText(QStringLiteral("Texture allowance"), QStringLiteral("dejudder_texture_tolerance"));
+        textureTol->setValidator(new QDoubleValidator(0.0, 4.0, 2, textureTol));
+        textureTol->setPlaceholderText(QStringLiteral("0 (off)"));
+        textureTol->setToolTip(QStringLiteral(
+            "Fine detail, grain and water make even a correct match differ a little; this lets a block's allowed "
+            "difference grow with its detail (0 = the fixed match tolerance only)."));
+        auto* consistency = addText(QStringLiteral("Forward/backward agreement (pixels)"), QStringLiteral("dejudder_consistency_px"));
+        consistency->setValidator(new QDoubleValidator(0.5, 8.0, 1, consistency));
+        consistency->setPlaceholderText(QStringLiteral("2"));
+        consistency->setToolTip(QStringLiteral(
+            "A block is trusted only when its motion found forwards and backwards agree within this (half-size pixels)."));
+        auto* regional = addChoice(QStringLiteral("Hold only the unmatched areas on hard motion"),
+            QStringLiteral("dejudder_regional_hold"), { QStringLiteral("on"), QStringLiteral("off") });
+        regional->setToolTip(QStringLiteral(
+            "When few blocks match but the picture has not changed (hard motion, not a cut), the matched areas still move "
+            "and the rest holds. A cut still holds the whole frame."));
+        auto* cutHistogram = addText(QStringLiteral("Cut test (picture change)"), QStringLiteral("dejudder_cut_histogram"));
+        cutHistogram->setValidator(new QDoubleValidator(0.0, 2.0, 2, cutHistogram));
+        cutHistogram->setPlaceholderText(QStringLiteral("0.3"));
+        cutHistogram->setToolTip(QStringLiteral(
+            "With the regional hold: how much the picture's brightness distribution must change for a frame to count as a "
+            "cut (0 to 2)."));
         auto* lowRes = addChoice(QStringLiteral("Motion estimation size (4K)"),
             QStringLiteral("dejudder_low_res"), { QStringLiteral("all"), QStringLiteral("search"), QStringLiteral("off") });
         lowRes->setItemText(lowRes->findData(QStringLiteral("all")), QStringLiteral("Half size, every step (recommended)"));
