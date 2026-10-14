@@ -2909,6 +2909,13 @@ namespace Corpus
 		bool taste = false;   // D2 / D4 / R-A as deployed; scored where the picture is actually shown
 		float fastFrom = 0.0f, fastFloor = 0.4f;
 		bool blend = false;
+		float blendAgree = 0.0f;
+		float blendVecAgree = 0.0f;
+		bool blendFill = false;
+		bool blendOwn = false;
+		float landA = 0.0f, landB = 0.0f;
+		bool bOnly = false;
+		float certainty = 0.0f;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2943,6 +2950,131 @@ namespace Corpus
 			add("M6 on, D2/D4, no R-A", true, false, 24.0f, 0.25f);
 			add("M6 on, R-A floor 0.1", true, true, 24.0f, 0.1f);
 			add("M6 on, R-A hi 16", true, true, 16.0f, 0.25f);
+			return variants;
+		}
+		if (which == "certain")
+		{
+			// Match certainty on A alone (the new defaults with the landing
+			// check): blocks with a flat error surface are not trusted.
+			auto add = [&](const char* name, float margin)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.landA = 1.5f; v.certainty = margin;
+				variants.push_back(v);
+			};
+			add("defaults + landing (new default)", 0.0f);
+			add("+ certainty 0.1 codes", 0.1f);
+			add("+ certainty 0.25 codes", 0.25f);
+			return variants;
+		}
+		if (which == "balone")
+		{
+			// B alone (moved back only) against A alone and the blend, all with
+			// the landing check.
+			auto add = [&](const char* name, bool blend, bool bOnly, float landA, float landB)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.blend = blend; v.bOnly = bOnly; v.landA = landA; v.landB = landB;
+				variants.push_back(v);
+			};
+			add("A alone + landing (new default)", false, false, 1.5f, 0.0f);
+			add("B alone + landing", true, true, 0.0f, 1.5f);
+			add("A and B blend + landing", true, false, 1.5f, 1.5f);
+			return variants;
+		}
+		if (which == "land")
+		{
+			// The landing check: a source pixel counts only if its own motion
+			// carries it back to the output position (A alone, and D3).
+			auto add = [&](const char* name, bool blend, bool fill, float landA, float landB)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.blend = blend; v.blendFill = fill; v.landA = landA; v.landB = landB;
+				variants.push_back(v);
+			};
+			add("defaults (M6)", false, false, 0.0f, 0.0f);
+			add("M6 + landing check A 1.5 px", false, false, 1.5f, 0.0f);
+			add("M6 + landing check A 3 px", false, false, 3.0f, 0.0f);
+			add("D3 blend", true, false, 0.0f, 0.0f);
+			add("D3 + landing check B 1.5 px", true, false, 0.0f, 1.5f);
+			add("D3 + landing check A and B 1.5 px", true, false, 1.5f, 1.5f);
+			add("D3 fill + landing check A and B 1.5 px", true, true, 1.5f, 1.5f);
+			return variants;
+		}
+		if (which == "ownb")
+		{
+			// D3 with B's own trusted blocks only (no borrowed motion).
+			auto add = [&](const char* name, bool blend, bool fill, bool own)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.blend = blend; v.blendFill = fill; v.blendOwn = own;
+				variants.push_back(v);
+			};
+			add("defaults (M6)", false, false, false);
+			add("D3 blend, B own blocks", true, false, true);
+			add("D3 fill only, B own blocks", true, true, true);
+			return variants;
+		}
+		if (which == "d3fill")
+		{
+			// D3 as a fill: B only where A's own pixel is not trusted.
+			auto add = [&](const char* name, bool blend, bool fill, float px)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.blend = blend; v.blendFill = fill; v.blendVecAgree = px;
+				variants.push_back(v);
+			};
+			add("defaults (M6)", false, false, 0.0f);
+			add("D3 blend", true, false, 0.0f);
+			add("D3 fill only", true, true, 0.0f);
+			add("D3 fill only, motions agree 2 px", true, true, 2.0f);
+			return variants;
+		}
+		if (which == "vagree")
+		{
+			// D3 only where A's forward and B's backward motion agree.
+			auto add = [&](const char* name, bool blend, float px)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.blend = blend; v.blendVecAgree = px;
+				variants.push_back(v);
+			};
+			add("defaults (M6)", false, 0.0f);
+			add("D3 blend", true, 0.0f);
+			add("D3, motions agree 1 px", true, 1.0f);
+			add("D3, motions agree 2 px", true, 2.0f);
+			add("D3, motions agree 4 px", true, 4.0f);
+			return variants;
+		}
+		if (which == "agree")
+		{
+			// D3 with the agreement gate: blend only where A forward and B back
+			// agree within N codes; elsewhere the better-trusted frame alone.
+			auto add = [&](const char* name, bool blend, float agree)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.blend = blend; v.blendAgree = agree;
+				variants.push_back(v);
+			};
+			add("defaults (M6)", false, 0.0f);
+			add("D3 blend", true, 0.0f);
+			add("D3 blend, agree 6 codes", true, 6.0f);
+			add("D3 blend, agree 12 codes", true, 12.0f);
+			add("D3 blend, agree 24 codes", true, 24.0f);
 			return variants;
 		}
 		if (which == "blend")
@@ -3334,6 +3466,14 @@ namespace Corpus
 		s.pixelFastFrom = v.fastFrom;
 		s.pixelFastFloor = v.fastFloor;
 		s.blendFrames = v.blend;
+		s.blendAgreeCodes = v.blendAgree;
+		s.blendVectorAgreePx = v.blendVecAgree;
+		s.blendFillOnly = v.blendFill;
+		s.blendOwnBlocks = v.blendOwn;
+		s.landCheckA = v.landA;
+		s.landCheckB = v.landB;
+		s.blendBOnly = v.bOnly;
+		s.certaintyMargin = v.certainty;
 		s.pixelOwnError = v.ownError;
 		if (v.rolloff)
 		{
@@ -3646,7 +3786,9 @@ void RunBetaRealFootage()
 			const bool yuv = name.size() > 4 && name.compare(name.size() - 4, 4, ".yuv") == 0 && name.find("3840x2160") != std::string::npos;
 			const bool y4m = name.size() > 4 && name.compare(name.size() - 4, 4, ".y4m") == 0 && name.find("2160p50") != std::string::npos;
 			if (yuv)
-				clips.push_back({ name.substr(0, name.find('_')), folder + "\\" + name, false, 5, size / yuvFrame, 0 });
+				// VP_TEST_30P=1: the 120 fps clips at 30p (every 4th frame), the
+				// even cadence's exact midpoint only (nature documentaries).
+				clips.push_back({ name.substr(0, name.find('_')), folder + "\\" + name, false, envValue("VP_TEST_30P") == "1" ? 4 : 5, size / yuvFrame, 0 });
 			else if (y4m)
 			{
 				std::ifstream in(folder + "\\" + name, std::ios::binary);
@@ -3735,6 +3877,14 @@ void RunBetaRealFootage()
 	const int sources = 5;   // three warm-up pairs and the scored pair
 	std::vector<pl_tex> lumaT(sources), chromaT(sources);
 	for (int f = 0; f < sources; ++f) { lumaT[f] = plane(W, H, 1); chromaT[f] = plane(W / 2, H / 2, 2); }
+	const std::string damageDir = envValue("VP_TEST_DAMAGE_DIR");
+	const std::string damageFrames = envValue("VP_TEST_DAMAGE_FRAMES");
+	std::vector<uint16_t> damageB;
+	if (!damageDir.empty())
+	{
+		CreateDirectoryA(damageDir.c_str(), nullptr);
+		std::ofstream(damageDir + "\\damage.csv", std::ios::app) << "clip,frame,variant,x,y,hold,warp\n";
+	}
 	std::ofstream csv;
 	if (!outDir.empty())
 	{
@@ -3816,10 +3966,16 @@ void RunBetaRealFootage()
 				cand.coarseRange = 8; cand.consistencyPixels = 2.0f; cand.fadeMatch = true;
 				Dejudder::Settings pix = cand;
 				pix.pixelTrust = true; pix.pixelTrustLo = 3.0f; pix.pixelTrustHi = 8.0f; pix.pixelTrustLoUntrusted = 1.0f; pix.pixelTrustHiUntrusted = 2.5f;
-				Dejudder::Settings live[4] = { today, all, cand, pix };
+				// 2026-10-14 evening: the defaults (M6), with the landing check, and
+				// D3 with and without it (what each costs).
+				Dejudder::Settings def = cand;
+				def.pixelTrust = true; def.pixelTrustLo = 3.0f; def.pixelTrustHi = 8.0f; def.pixelTrustedVectors = true;
+				Dejudder::Settings land = def; land.landCheckA = 1.5f;
+				Dejudder::Settings d3 = def; d3.blendFrames = true;
+				Dejudder::Settings d3land = d3; d3land.landCheckA = 1.5f; d3land.landCheckB = 1.5f;
+				Dejudder::Settings live[4] = { def, land, d3, d3land };
 				for (Dejudder::Settings& t : live) { t.estCandidates = true; t.estQpel = true; t.vectorSmooth = true; t.estGate = true; t.holdHysteresis = 2; }
-				live[0].estSplit = live[1].estSplit = true;
-				const char* names[4] = { "today", "all fixes", "candidate", "candidate + pixel trust" };
+				const char* names[4] = { "defaults (M6)", "defaults + landing check", "D3 blend", "D3 blend + landing check" };
 				for (int k = 0; k < 4; ++k)
 				{
 					Dejudder::MotionWarp warp(gpu.Log(), g, live[k]);
@@ -4023,6 +4179,7 @@ void RunBetaRealFootage()
 			{
 				ok = readFrame(clip, n + (f - 3LL) * clip.spacing, luma, &chroma);
 				if (f == 3) aLuma = luma;
+				if (f == 4) damageB = luma;   // B, for the damage dump
 				pl_tex_transfer_params up{};
 				up.tex = lumaT[f]; up.ptr = luma.data();
 				Check(pl_tex_upload(g, &up), "real: upload");
@@ -4076,6 +4233,8 @@ void RunBetaRealFootage()
 				}
 				for (int k = 1; k < clip.spacing; ++k)
 				{
+					if (envValue("VP_TEST_30P") == "1" && 2 * k != clip.spacing)
+						continue;   // 30p: the midpoint only
 					float shift = static_cast<float>(k) / clip.spacing;
 					if (variants[vi].taste)
 					{
@@ -4123,6 +4282,62 @@ void RunBetaRealFootage()
 						harmed += (tileWarp[t] - tileHold[t]) / (256.0 * 64.0) > 6.0 ? 1 : 0;   // 256 samples a tile
 					}
 					const double harm = tiles ? static_cast<double>(harmed) / tiles : 0.0;
+					// The damage dump (VP_TEST_DAMAGE_DIR): every harmed tile at the
+					// midpoint, per variant; for VP_TEST_DAMAGE_FRAMES (clip:frame;...)
+					// the whole pictures as PGMs (truth, A, B, each variant's warp).
+					if (!damageDir.empty() && k == clip.spacing / 2)
+					{
+						std::ofstream tilesCsv(damageDir + "\\damage.csv", std::ios::app);
+						for (size_t t = 0; t < tileHold.size(); ++t)
+							if (tileHold[t] != 0 || tileWarp[t] != 0)
+							{
+								const double worse = (tileWarp[t] - tileHold[t]) / (256.0 * 64.0);
+								if (worse > 6.0)
+									tilesCsv << "\"" << clip.name << "\"," << n << "," << vi << "," << (t % tilesX) * 32 << ","
+										<< (t / tilesX) * 32 << "," << tileHold[t] / (256.0 * 64.0) << "," << tileWarp[t] / (256.0 * 64.0) << "\n";
+							}
+						const std::string key = clip.name + ":" + std::to_string(n);
+						if ((";" + damageFrames + ";").find(";" + key + ";") != std::string::npos)
+						{
+							const std::string base = damageDir + "\\" + clip.name + "-" + std::to_string(n);
+							if (vi == 0)
+							{
+								writePgm(base + "-truth.pgm", truth);
+								writePgm(base + "-a.pgm", aLuma);
+								writePgm(base + "-b.pgm", damageB);
+							}
+							writePgm(base + "-warp" + std::to_string(vi) + ".pgm", warped);
+							// D3's two fields, per block: A's (A->B) and B's (B->A).
+							if (variants[vi].blend && warp.FieldB())
+							{
+								auto dump = [&](pl_tex tex, std::vector<uint16_t>& halfs)
+								{
+									halfs.assign(static_cast<size_t>(tex->params.w) * tex->params.h * 4, 0);
+									pl_tex_transfer_params t{}; t.tex = tex; t.ptr = halfs.data();
+									Check(pl_tex_download(g, &t), "damage: field download");
+								};
+								auto half = [](uint16_t h)
+								{
+									const int e = (h >> 10) & 31, m = h & 1023;
+									const float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(1.0f + m / 1024.0f, e - 15);
+									return (h & 0x8000) ? -v : v;
+								};
+								std::vector<uint16_t> fa, fb;
+								dump(warp.Field(), fa);
+								dump(warp.FieldB(), fb);
+								const int fw = warp.Field()->params.w, fh = warp.Field()->params.h;
+								std::ofstream fields(base + "-fields-v" + std::to_string(vi) + ".csv", std::ios::trunc);
+								fields << "bx,by,block_px,a_vx,a_vy,a_trust,b_vx,b_vy,b_trust\n";
+								for (int y = 0; y < fh; ++y)
+									for (int x = 0; x < fw; ++x)
+									{
+										const size_t i = (static_cast<size_t>(y) * fw + x) * 4;
+										fields << x << "," << y << "," << W / fw << "," << half(fa[i]) << "," << half(fa[i + 1]) << "," << half(fa[i + 2])
+											<< "," << half(fb[i]) << "," << half(fb[i + 1]) << "," << half(fb[i + 2]) << "\n";
+									}
+							}
+						}
+					}
 					benefit[vi] += (hold - wr) / (clip.spacing - 1);
 					perVariant[vi].hold += hold; perVariant[vi].warp += wr; ++perVariant[vi].n;
 					perClip[clip.name][vi].hold += hold; perClip[clip.name][vi].warp += wr; ++perClip[clip.name][vi].n;

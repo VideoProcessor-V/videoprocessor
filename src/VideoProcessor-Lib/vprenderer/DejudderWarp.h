@@ -250,6 +250,37 @@ namespace Dejudder
 		// shows, so nothing is dragged into it. Source warp only here; the
 		// rendered warp's version renders B a refresh early.
 		bool blendFrames = false;
+		// D3 agreement gate (test-only, 0 = off): where A moved forward and B
+		// moved back differ by more than this many codes, no average (a
+		// ghost): the better-trusted frame's sample alone.
+		float blendAgreeCodes = 0.0f;
+		// D3 motion agreement (test-only, 0 = off): blend only where B's motion
+		// back is the reverse of A's forward within this many source pixels;
+		// elsewhere A alone, as M6 does.
+		float blendVectorAgreePx = 0.0f;
+		// D3 fill only (test-only): B's weight x (1 - A's), so B contributes
+		// only where A's own pixel is not trusted - where A is, the picture is
+		// exactly M6's; B fills what M6 would hold.
+		bool blendFillOnly = false;
+		// D3 (test-only): B's pixels use only B's own trusted blocks' motion
+		// (no borrowing from the 4x4 around when none of the four is trusted).
+		bool blendOwnBlocks = false;
+		// Landing check (test-only, 0 = off): a looked-up source pixel counts
+		// only if its own motion carries it back to the output position within
+		// this many source pixels (backward-warp occlusion: the source pixel
+		// is valid but is not the one visible here). A: M6's own lookup (an
+		// A-alone option); B: D3's lookup in B.
+		float landCheckA = 0.0f;
+		float landCheckB = 0.0f;
+		// D3 (test-only): B alone - the in-between from B moved back only (A's
+		// weight 0); where B gives nothing, A held.
+		bool blendBOnly = false;
+		// Match certainty (test-only, 0 = off): a trusted block keeps its
+		// trust only if the match error 2 half-size pixels away (8 directions)
+		// is at least this many codes worse than at its vector - a flat error
+		// surface (blur, smooth areas) means many motions fit and the found one
+		// is a guess.
+		float certaintyMargin = 0.0f;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -298,6 +329,9 @@ namespace Dejudder
 		// The block field from the last Estimate: rgba = (vx, vy) in source
 		// pixels, trust (1/0), match error. One texel per 16x16 source block.
 		pl_tex Field() const { return field; }
+		// D3 (tests): B's own field and pixel weights.
+		pl_tex FieldB() const { return fieldB; }
+		pl_tex PixelMaskB() const { return pixelMaskB; }
 		// From the last Estimate (1x1): r = the share of trusted blocks,
 		// g = the strength scale (D2/D4; 1 when both are off), b = the mean
 		// trusted |v| in source pixels.
@@ -457,6 +491,7 @@ namespace Dejudder
 		pl_tex snapVectorOk = nullptr;
 		bool snapMaskValid = false;
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
+		pl_tex certaintyField = nullptr;   // the certainty test's output, swapped with the field
 		bool holdResetPending = false;  // H2's state cleared at the next Estimate
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights
 		pl_tex fieldB = nullptr;        // D3: B's trusted field (B -> A, source px)

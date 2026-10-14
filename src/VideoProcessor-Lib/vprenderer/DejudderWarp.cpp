@@ -1709,6 +1709,15 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         vec2 from = c - sc * va;
         float m = texture(pix_mask, from / vec2(size)).r;
+#ifdef LAND_A
+        {
+            vec2 vl = field_vector_all(from);
+#ifdef OBJECT
+            vl = object_scale(vl);
+#endif
+            if (length(from + sc * vl - c) > LAND_A) m = 0.0;
+        }
+#endif
 #ifdef BLEND
         // D3: B moved back by (1 - sc) of its own motion, weighted with A.
         vec2 vb = field_vector_all_b(c);
@@ -1717,15 +1726,46 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef OBJECT
         vb = -object_scale(-vb);   // R-B for B's motion: B->A is about -A->B (the camera is A->B)
 #endif
+#ifdef BLEND_VEC_AGREE
+        if (length(va + vb) <= BLEND_VEC_AGREE)
+#endif
+        {
         vec2 fromB = c - (1.0 - sc) * vb;
         float mb = texture(pix_mask_b, fromB / vec2(size)).r;
+#ifdef LAND_B
+        {
+            vec2 vl = field_vector_all_b(fromB);
+#ifdef OBJECT
+            vl = -object_scale(-vl);
+#endif
+            if (length(fromB + (1.0 - sc) * vl - c) > LAND_B) mb = 0.0;
+        }
+#endif
         float wa = (1.0 - sc) * m, wb = sc * mb;
+#ifdef BLEND_B_ONLY
+        wa = 0.0;
+#endif
+#ifdef BLEND_FILL
+        wb *= 1.0 - m;
+        if (m > 0.999)
+            wa = 1.0;   // A fully trusted: M6's own picture
+#endif
         if (wa + wb > 1e-3)
-            outv = (wa * texture(src, from / vec2(size)) + wb * texture(src_b, fromB / vec2(size))) / (wa + wb);
+        {
+            vec4 sa = texture(src, from / vec2(size)), sb = texture(src_b, fromB / vec2(size));
+#ifdef BLEND_AGREE
+            vec4 dd = abs(sa - sb);
+            if (max(dd.r, max(dd.g, dd.b)) > BLEND_AGREE)
+                outv = wa >= wb ? sa : sb;
+            else
+#endif
+            outv = (wa * sa + wb * sb) / (wa + wb);
+        }
         else
             outv = texelFetch(src, q, 0);
         imageStore(dst, q, outv);
         return;
+        }
 #endif
 #ifdef PIXEL_MOTION
         outv = texture(src, (c - m * sc * va) / vec2(size));   // the weight's share of the motion
@@ -1776,6 +1816,15 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         vec2 from = c - sc * va / chroma_scale;
         float m = texture(pix_mask, from * chroma_scale / vec2(textureSize(pix_mask, 0) * 2)).r;
+#ifdef LAND_A
+        {
+            vec2 vl = field_vector_all(from * chroma_scale);
+#ifdef OBJECT
+            vl = object_scale(vl);
+#endif
+            if (length(from * chroma_scale + sc * vl - c * chroma_scale) > LAND_A) m = 0.0;
+        }
+#endif
 #ifdef BLEND
         vec2 vb = field_vector_all_b(c * chroma_scale);
         vb = field_vector_all_b(c * chroma_scale - (1.0 - sc) * vb);
@@ -1783,15 +1832,46 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef OBJECT
         vb = -object_scale(-vb);   // R-B for B's motion: B->A is about -A->B (the camera is A->B)
 #endif
+#ifdef BLEND_VEC_AGREE
+        if (length(va + vb) <= BLEND_VEC_AGREE)
+#endif
+        {
         vec2 fromB = c - (1.0 - sc) * vb / chroma_scale;
         float mb = texture(pix_mask_b, fromB * chroma_scale / vec2(textureSize(pix_mask_b, 0) * 2)).r;
+#ifdef LAND_B
+        {
+            vec2 vl = field_vector_all_b(fromB * chroma_scale);
+#ifdef OBJECT
+            vl = -object_scale(-vl);
+#endif
+            if (length(fromB * chroma_scale + (1.0 - sc) * vl - c * chroma_scale) > LAND_B) mb = 0.0;
+        }
+#endif
         float wa = (1.0 - sc) * m, wb = sc * mb;
+#ifdef BLEND_B_ONLY
+        wa = 0.0;
+#endif
+#ifdef BLEND_FILL
+        wb *= 1.0 - m;
+        if (m > 0.999)
+            wa = 1.0;   // A fully trusted: M6's own picture
+#endif
         if (wa + wb > 1e-3)
-            outv = (wa * texture(src, from / vec2(size)) + wb * texture(src_b, fromB / vec2(size))) / (wa + wb);
+        {
+            vec4 sa = texture(src, from / vec2(size)), sb = texture(src_b, fromB / vec2(size));
+#ifdef BLEND_AGREE
+            vec4 dd = abs(sa - sb);
+            if (max(dd.r, max(dd.g, dd.b)) > BLEND_AGREE)
+                outv = wa >= wb ? sa : sb;
+            else
+#endif
+            outv = (wa * sa + wb * sb) / (wa + wb);
+        }
         else
             outv = texelFetch(src, q, 0);
         imageStore(dst, q, outv);
         return;
+        }
 #endif
 #ifdef PIXEL_MOTION
         outv = texture(src, (c - m * sc * va / chroma_scale) / vec2(size));
@@ -1856,7 +1936,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &fieldB, &pixelMaskB })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &fieldB, &pixelMaskB, &certaintyField })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -2343,6 +2423,37 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
+		// Match certainty: a trusted block whose match error is about as low a
+		// little away from its vector (a flat error surface) is not trusted.
+		const char* const CERTAINTY_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    vec4 f = texelFetch(src_field, b, 0);
+    if (f.z > 0.5) {
+        ivec2 hs = textureSize(from_half, 0);
+        float s[9];
+        for (int k = 0; k < 9; k++) s[k] = 0.0;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) {
+                ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs - ivec2(1));
+                float a = texelFetch(from_half, p, 0).r;
+                vec2 at = vec2(p) + f.xy * 0.5 + vec2(0.5);
+                for (int k = 0; k < 9; k++) {
+                    vec2 d = k == 0 ? vec2(0.0) : 2.0 * vec2(float(k == 1 || k == 5 || k == 6) - float(k == 2 || k == 7 || k == 8),
+                        float(k == 3 || k == 5 || k == 7) - float(k == 4 || k == 6 || k == 8));
+                    s[k] += abs(a - texture(to_half, (at + d) / vec2(hs)).r);
+                }
+            }
+        float around = s[1];
+        for (int k = 2; k < 9; k++) around = min(around, s[k]);
+        if ((around - s[0]) / 64.0 < certainty_codes)
+            f.z = 0.0;
+    }
+    imageStore(dst, b, f);
+}
+)GLSL";
+
 		// M6: every block's vector at a source position (no trust gating).
 		const char* const FIELD_ALL_GLSL = R"GLSL(
 vec2 field_vector_all(vec2 lp)
@@ -2783,6 +2894,24 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					return false;
 				std::swap(field, verifyField);
 			}
+			if (settings.certaintyMargin > 0.0f)
+			{
+				// Match certainty: after M5, before the split and the frame trust.
+				pl_tex_params params = field->params;
+				if (!pl_tex_recreate(gpu, &certaintyField, &params))
+				{
+					error = "cannot create the certainty field";
+					return false;
+				}
+				const float margin = settings.certaintyMargin;
+				const pl_shader_var certaintyVars[1] = { { pl_var_float("certainty_codes"), &margin, true } };
+				const pl_shader_desc certaintyDesc[4] = { Sampled("src_field", field, false), Sampled("from_half", halfA, false),
+					Sampled("to_half", halfB, true), Storage("dst", certaintyField) };
+				if (!Dispatch("VideoProcessor de-judder: match certainty", nullptr, CERTAINTY_BODY, certaintyDesc, 4, certaintyVars, 1,
+						blocksX, blocksY, 8))
+					return false;
+				std::swap(field, certaintyField);
+			}
 			if (settings.estSplit)
 			{
 				// Both directions split (the sub-search, as a function: four
@@ -2996,7 +3125,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				{ pl_var_float("fast_from"), &zero, true }, { pl_var_float("fast_floor"), &zero, true } };
 			const pl_shader_desc maskDesc[4] = { Sampled("field", fieldB, false), Sampled("from_half", halfB, false),
 				Sampled("to_half", halfA, true), Storage("dst", pixelMaskB) };
-			const std::string maskHeader = std::string("#define PIXEL_TRUSTED_VECTORS 1\n") + FIELD_ALL_GLSL;
+			std::string fieldForB = FIELD_ALL_GLSL;
+			if (settings.blendOwnBlocks)
+			{
+				const size_t at = fieldForB.find("if (ws <= 0.0) {");
+				if (at != std::string::npos) fieldForB.replace(at, 16, "if (false) {");
+			}
+			const std::string maskHeader = std::string("#define PIXEL_TRUSTED_VECTORS 1\n") + fieldForB;
 			if (!Dispatch("VideoProcessor de-judder: B's pixel trust (D3)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDesc, 4,
 					maskVars, 4, halfW, halfH, 16))
 				return false;
@@ -3125,11 +3260,19 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			replaceAll("(field,", "(field_b,");
 			replaceAll("textureSize(field,", "textureSize(field_b,");
 			replaceAll("PIXEL_OWN_VECTORS", "PIXEL_OWN_VECTORS_NOT_FOR_B");
+			if (settings.blendOwnBlocks)
+				replaceAll("if (ws <= 0.0) {", "if (false) {");
 		}
 		const std::string header = std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
 			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
 			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
 			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") + (blend ? "#define BLEND 1\n" : "") +
+			(blend && settings.blendAgreeCodes > 0.0f ? "#define BLEND_AGREE " + std::to_string(settings.blendAgreeCodes / 255.0f) + "\n" : std::string()) +
+			(blend && settings.blendVectorAgreePx > 0.0f ? "#define BLEND_VEC_AGREE " + std::to_string(settings.blendVectorAgreePx) + "\n" : std::string()) +
+			(blend && settings.blendFillOnly ? "#define BLEND_FILL 1\n" : "") +
+			(blend && settings.blendBOnly ? "#define BLEND_B_ONLY 1\n" : "") +
+			(pixel && settings.landCheckA > 0.0f ? "#define LAND_A " + std::to_string(settings.landCheckA) + "\n" : std::string()) +
+			(blend && settings.landCheckB > 0.0f ? "#define LAND_B " + std::to_string(settings.landCheckB) + "\n" : std::string()) +
 			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "") + fieldAllB;
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
