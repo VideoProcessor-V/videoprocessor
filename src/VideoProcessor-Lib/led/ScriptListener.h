@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -43,8 +44,10 @@ namespace LedDrive
 		bool IsOpen() const { return socketHandle != invalidSocket; }
 		int Port() const { return boundPort; }
 		// Every message that arrives within waitMs (returns as soon as at least
-		// one has arrived and the socket is drained, or at the timeout).
-		std::vector<ScriptMessage> Receive(int waitMs);
+		// one has arrived and the socket is drained, or at the timeout). The
+		// wait is in 50 ms slices; `interrupted` (when given) ends it early
+		// (audit 2026-10-14: a stop or a new setting must not wait a whole tick).
+		std::vector<ScriptMessage> Receive(int waitMs, const std::function<bool()>& interrupted = {});
 
 	private:
 		static constexpr uintptr_t invalidSocket = ~static_cast<uintptr_t>(0);

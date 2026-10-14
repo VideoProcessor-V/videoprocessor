@@ -1051,7 +1051,8 @@ namespace ChainGpuProbe
 					const int x = static_cast<int>((k * 64 + 32) * scale);
 					const int got = r.Channel(x, 40, 1), want = ref.Channel(x, 40, 1);
 					line += " " + std::to_string(got);
-					rampOk = rampOk && std::abs(got - want) <= 2 && got >= previous - fallAllowed;
+					// The dip is at the top step only (audit 2026-10-14).
+					rampOk = rampOk && std::abs(got - want) <= 2 && got >= previous - (k == 7 ? fallAllowed : 0);
 					previous = got;
 				}
 				outcome.report += line + "\n";

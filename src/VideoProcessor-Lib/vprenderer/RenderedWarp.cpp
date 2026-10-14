@@ -84,6 +84,9 @@ if (q.x < size.x && q.y < size.y) {
         vec2 va = field_vector_all(sp);
         va = field_vector_all(sp - sc * va);
         va = field_vector_all(sp - sc * va);
+#ifdef OBJECT
+        va = object_scale(va);   // delta 14 R-B (audit 2026-10-14)
+#endif
         vec2 d = sc * va;
 #ifdef HOLDS
         if (rw_held(sp) || rw_held(sp - d))

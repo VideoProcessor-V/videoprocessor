@@ -1498,19 +1498,23 @@ bool field_vector(vec2 lp, out vec2 v)
 #ifdef OBJECT
 #undef field_vector
 // Delta 14 R-B: the camera (MotionWarp::Camera(), source px) applied fully,
-// the motion within the frame by object_strength.
+// the motion within the frame by object_strength. object_scale() is the same
+// rule for M6's vectors (audit 2026-10-14: M6 ignored R-B).
+vec2 object_scale(vec2 v)
+{
+    vec2 vg = vec2(0.0);
+#ifdef CAMERA
+    vec4 g = texelFetch(camera, ivec2(0), 0);
+    if (g.z > 0.5)
+        vg = g.xy;
+#endif
+    return vg + object_strength * (v - vg);
+}
 bool field_vector(vec2 lp, out vec2 v)
 {
     bool ok = field_vector_raw(lp, v);
-    if (ok) {
-        vec2 vg = vec2(0.0);
-#ifdef CAMERA
-        vec4 g = texelFetch(camera, ivec2(0), 0);
-        if (g.z > 0.5)
-            vg = g.xy;
-#endif
-        v = vg + object_strength * (v - vg);
-    }
+    if (ok)
+        v = object_scale(v);
     return ok;
 }
 #endif
@@ -1523,6 +1527,14 @@ float strength_scale() { return texelFetch(frame_trust, ivec2(0), 0).g; }
 float block_strength(vec2 lp)
 {
     ivec2 fsize = textureSize(field, 0);
+#ifdef SPLIT
+    // A split block's sub-vectors are its own trust decision: not tapered.
+    {
+        ivec2 ssize = textureSize(sub_field, 0);
+        if (texelFetch(sub_field, clamp(ivec2(floor(lp / 8.0)), ivec2(0), ssize - ivec2(1)), 0).w > 0.5)
+            return 1.0;
+    }
+#endif
     float sad = texelFetch(field, clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1)), 0).w;
     return sad <= taper_tol ? 1.0 : 1.0 - smoothstep(taper_tol, taper_sad, sad);
 }
@@ -1543,7 +1555,20 @@ float hold_weight(vec2 lp, float feather)
             if (dx == 0 && dy == 0) continue;
             ivec2 c = own + ivec2(dx, dy);
             if (c.x < 0 || c.y < 0 || c.x >= fsize.x || c.y >= fsize.y) continue;
-            if (texelFetch(field, c, 0).z < 0.5) {
+            bool held = texelFetch(field, c, 0).z < 0.5;
+#ifdef SPLIT
+            // A split block's parent is untrusted by construction; it is held
+            // only where its own sub-blocks are (audit 2026-10-14).
+            if (held && texelFetch(sub_field, c * 2, 0).w > 0.5) {
+                held = false;
+                for (int k = 0; k < 4; k++)
+                    if (texelFetch(sub_field, c * 2 + ivec2(k % 2, k / 2), 0).z < 0.5) {
+                        vec2 slo = vec2(c * 2 + ivec2(k % 2, k / 2)) * 8.0;
+                        d = min(d, length(lp - clamp(lp, slo, slo + vec2(8.0))));
+                    }
+            }
+#endif
+            if (held) {
                 vec2 lo = vec2(c) * 16.0;
                 d = min(d, length(lp - clamp(lp, lo, lo + vec2(16.0))));
             }
@@ -1679,6 +1704,9 @@ if (q.x < size.x && q.y < size.y) {
         vec2 va = field_vector_all(c);
         va = field_vector_all(c - sc * va);
         va = field_vector_all(c - sc * va);
+#ifdef OBJECT
+        va = object_scale(va);
+#endif
         vec2 from = c - sc * va;
         float m = texture(pix_mask, from / vec2(size)).r;
 #ifdef PIXEL_MOTION
@@ -1725,6 +1753,9 @@ if (q.x < size.x && q.y < size.y) {
         vec2 va = field_vector_all(c * chroma_scale);
         va = field_vector_all(c * chroma_scale - sc * va);
         va = field_vector_all(c * chroma_scale - sc * va);
+#ifdef OBJECT
+        va = object_scale(va);
+#endif
         vec2 from = c - sc * va / chroma_scale;
         float m = texture(pix_mask, from * chroma_scale / vec2(textureSize(pix_mask, 0) * 2)).r;
 #ifdef PIXEL_MOTION
@@ -1860,7 +1891,8 @@ if (q.x < size.x && q.y < size.y) {
 		// output it swaps with the field.
 		if (settings.holdHysteresis > 1)
 		{
-			const bool fresh = !holdState[0] || holdState[0]->params.w != blocksX || holdState[0]->params.h != blocksY;
+			const bool fresh = holdResetPending || !holdState[0] || holdState[0]->params.w != blocksX || holdState[0]->params.h != blocksY;
+			holdResetPending = false;
 			for (int i = 0; i < 2; ++i)
 				if (fresh)
 				{
@@ -2469,6 +2501,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		innerSettings.rollHi *= 0.5f;
 		innerSettings.holdFeatherPx *= 0.5f;
 		innerSettings.occlusionFill = false;
+		innerSettings.pixelTrust = false;    // the outer makes M6's mask (audit 2026-10-14: wasted work)
 		if (!all)
 		{
 			innerSettings.estQpel = false;
@@ -2605,6 +2638,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (!LowResSearch(a, b))
 				return false;
 			previousValid = false;   // the full-resolution searches' history is stale
+			// The inner tested the fade on these planes: B here gets the same
+			// gain and offset, so M6's mask and the grain map see it (audit
+			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
+			if (settings.fadeMatch && inner && inner->fadeState &&
+				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->fadeState))
+				return false;
 		}
 		else
 		{

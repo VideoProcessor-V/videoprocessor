@@ -5,6 +5,7 @@
 #include "ScriptListener.h"
 #include "../DebugLog.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -16,10 +17,19 @@ namespace LedDrive
 	bool ParseScriptMessage(const std::string& text, ScriptMessage& out)
 	{
 		std::istringstream in(text);
-		std::string tag;
+		std::string tag, valueText;
 		ScriptMessage message;
-		if (!(in >> tag) || tag != "VP1" || !(in >> message.kind) || !(in >> message.value))
+		if (!(in >> tag) || tag != "VP1" || !(in >> message.kind) || !(in >> valueText))
 			return false;
+		// LED power and contrast are whole numbers (owner 2026-10-14): the
+		// value must be an integer token ("55.5" or "55x" is not a message).
+		{
+			char* end = nullptr;
+			const long parsed = std::strtol(valueText.c_str(), &end, 10);
+			if (end == valueText.c_str() || *end != '\0' || parsed < -1000000 || parsed > 1000000)
+				return false;
+			message.value = static_cast<int>(parsed);
+		}
 		if (message.kind != "LPW1" && message.kind != "CNTR" && message.kind != "TICK")
 			return false;
 		for (std::string field; in >> field;)
@@ -31,7 +41,13 @@ namespace LedDrive
 			const std::string value = field.substr(equals + 1);
 			char* end = nullptr;
 			const double number = std::strtod(value.c_str(), &end);
-			if (end == value.c_str())
+			// Any program on this PC can send here (audit 2026-10-14): nothing
+			// non-finite or out of int range reaches a cast.
+			if (end == value.c_str() || !std::isfinite(number) || std::fabs(number) > 1.0e6)
+				continue;
+			// The integer fields (means, codes, targets) must be whole numbers;
+			// only the script's clock (t) may have a fraction.
+			if (key != "t" && (*end != '\0' || number != std::floor(number)))
 				continue;
 			if (key == "t") message.scriptSeconds = number;
 			else if (key == "mean") message.mean = static_cast<int>(number);
@@ -93,7 +109,7 @@ namespace LedDrive
 		winsockStarted = false;
 	}
 
-	std::vector<ScriptMessage> ScriptListener::Receive(int waitMs)
+	std::vector<ScriptMessage> ScriptListener::Receive(int waitMs, const std::function<bool()>& interrupted)
 	{
 		std::vector<ScriptMessage> messages;
 		if (socketHandle == invalidSocket)
@@ -105,9 +121,20 @@ namespace LedDrive
 			fd_set readable;
 			FD_ZERO(&readable);
 			FD_SET(s, &readable);
-			timeval timeout{ timeoutMs / 1000, (timeoutMs % 1000) * 1000 };
-			if (select(0, &readable, nullptr, nullptr, &timeout) <= 0)
+			const int sliceMs = messages.empty() ? (timeoutMs < 50 ? timeoutMs : 50) : 0;
+			timeval timeout{ sliceMs / 1000, (sliceMs % 1000) * 1000 };
+			const int ready = select(0, &readable, nullptr, nullptr, &timeout);
+			if (ready < 0)
 				break;
+			if (ready == 0)
+			{
+				// Nothing yet: the next slice, unless the wait is over, the
+				// drain is done, or the caller wants out.
+				timeoutMs -= sliceMs;
+				if (!messages.empty() || timeoutMs <= 0 || (interrupted && interrupted()))
+					break;
+				continue;
+			}
 			char buffer[512];
 			const int received = recv(s, buffer, sizeof(buffer) - 1, 0);
 			if (received <= 0)

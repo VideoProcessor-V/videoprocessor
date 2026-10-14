@@ -11660,7 +11660,15 @@ struct LibplaceboVideoRenderer::Impl
 				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad ||
 				current.motionRolloff != next.motionRolloff || current.rollLo != next.rollLo ||
 				current.rollHi != next.rollHi || current.rollFloor != next.rollFloor ||
-				current.objectStrength != next.objectStrength)
+				current.objectStrength != next.objectStrength ||
+				// The motion fixes (audit 2026-10-14: these never reached a live matcher).
+				current.textureTolerance != next.textureTolerance || current.globalTwo != next.globalTwo ||
+				current.regionalHold != next.regionalHold || current.cutHistogram != next.cutHistogram ||
+				current.coarseRange != next.coarseRange || current.consistencyPixels != next.consistencyPixels ||
+				current.fadeMatch != next.fadeMatch || current.fadeFloor != next.fadeFloor ||
+				current.verifyPixels != next.verifyPixels || current.verifyShare != next.verifyShare ||
+				current.pixelTrust != next.pixelTrust || current.pixelTrustLo != next.pixelTrustLo ||
+				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors)
 				dejudder->SetSettings(next);
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
@@ -11690,11 +11698,14 @@ struct LibplaceboVideoRenderer::Impl
 	// that extra's spare refresh, so B's own refresh holds only its render.
 	// The extras still to come read a copy of (A, B)'s field. Without C, or
 	// with anything not matching, B is estimated before its render as before.
-	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence)
+	// renderedPath: the extras of this frame really use the rendered warp (the
+	// cache exists). With the source warp they read the matcher's live field,
+	// which an ahead estimate would replace (audit 2026-10-14).
+	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath)
 	{
 		Dejudder::AheadSchedule::Conditions c;
 		c.enabled = activeSettings.dejudderEstimateAhead;
-		c.renderedWarp = activeSettings.dejudderWarpRendered;
+		c.renderedWarp = activeSettings.dejudderWarpRendered && renderedPath;
 		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
 			dejudderNextTextures[0] && dejudderNextTextures[1];
 		c.source = sourceSequence;
@@ -12078,14 +12089,18 @@ struct LibplaceboVideoRenderer::Impl
 			struct VectorGuard
 			{
 				std::vector<const pl_hook*> hooks;
-				~VectorGuard()
+				// Back to the own search (also before the fallback render of A
+				// after a failed extra: audit 2026-10-14).
+				void Release()
 				{
 					for (const pl_hook* hook : hooks)
 					{
 						CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
 						SetSigmaDeltaVectors(hook, nullptr);
 					}
+					hooks.clear();
 				}
+				~VectorGuard() { Release(); }
 			} vectorGuard;
 			{
 				const bool patch = SigmaDeltaVectorsSupported();
@@ -12111,8 +12126,11 @@ struct LibplaceboVideoRenderer::Impl
 					const pl_hook* hook = listParams.hooks[i];
 					if (CustomHookChain::SetHookParameter(hook, "vector_source", 1.0))
 					{
-						vectorGuard.hooks.push_back(hook);
-						if (!SetSigmaDeltaVectors(hook, vectors))
+						// Counted (and restored by the guard) only when VPVEC was
+						// accepted (audit 2026-10-14).
+						if (SetSigmaDeltaVectors(hook, vectors))
+							vectorGuard.hooks.push_back(hook);
+						else
 							CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
 					}
 				}
@@ -12185,9 +12203,11 @@ struct LibplaceboVideoRenderer::Impl
 				pl_frame_clear(d3d11->gpu, &target, black);
 				rendered = pl_render_image(renderer, &image, &target, extraParams);
 				// An acquired frame must be submitted: on a failed extra show A
-				// itself again, never a black or partial picture.
+				// itself again, never a black or partial picture - with the
+				// sigma-delta's own search (A did not move: no extra's vectors).
 				if (!rendered)
 				{
+					vectorGuard.Release();
 					pl_frame_clear(d3d11->gpu, &target, black);
 					pl_render_image(renderer, f.image, &target, &params);
 				}
@@ -12235,7 +12255,7 @@ struct LibplaceboVideoRenderer::Impl
 			if (!aheadTried)
 			{
 				aheadTried = true;
-				if (EstimateAhead(f.sourceSequence, f.nextSourceSequence))
+				if (EstimateAhead(f.sourceSequence, f.nextSourceSequence, cached != nullptr && dejudderRenderedWarp != nullptr))
 				{
 					warpField = dejudder->SnapField();
 					// Planner Q7: with R-A, the roll-off starts on a fast pan's

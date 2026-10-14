@@ -367,6 +367,9 @@ namespace Dejudder
 				inner.reset();
 				previousValid = false;
 			}
+			// H2's state belongs to the old settings (audit 2026-10-14).
+			if (value.holdHysteresis != settings.holdHysteresis || value.estSplit != settings.estSplit)
+				holdResetPending = true;
 			settings = value;
 		}
 
@@ -440,6 +443,7 @@ namespace Dejudder
 		pl_tex snapVectorOk = nullptr;
 		bool snapMaskValid = false;
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
+		bool holdResetPending = false;  // H2's state cleared at the next Estimate
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights
 		pl_tex vectorOk = nullptr;      // M6: blocks whose vector M6 may use (r = 1)
 		bool pixelMaskReady = false;

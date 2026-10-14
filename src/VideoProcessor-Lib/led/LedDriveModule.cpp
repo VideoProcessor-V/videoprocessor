@@ -863,6 +863,9 @@ namespace LedDrive
 		// mode: listen with listen_script: VP runs the script (ScriptHost.h);
 		// it ends when the mode leaves listen or this thread stops.
 		ScriptHost scriptHost;
+		int listenRetryPort = -1;
+		auto listenRetryAt = std::chrono::steady_clock::now();
+		std::string listenLastError;
 		std::string scriptPort = projector.port;   // the line settings it gets (copied under the lock)
 		int scriptBaud = projector.baud;
 		ScriptController shadow(current);
@@ -970,8 +973,10 @@ namespace LedDrive
 			{
 				// The script, when VP runs it: started, watched, restarted.
 				scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory, scriptPort, scriptBaud);
-				// The listener follows the mode and the port.
-				if (!listener.IsOpen() || listener.Port() != current.listenPort)
+				// The listener follows the mode and the port. A failed open is
+				// retried every 5 s and logged once (audit 2026-10-14: it spun).
+				if ((!listener.IsOpen() || listener.Port() != current.listenPort) &&
+					(listenRetryPort != current.listenPort || std::chrono::steady_clock::now() >= listenRetryAt))
 				{
 					std::string error;
 					const bool ok = listener.Open(current.listenPort, error);
@@ -979,11 +984,18 @@ namespace LedDrive
 						std::lock_guard<std::mutex> guard(mutex);
 						listenAccuracy.listening = ok;
 					}
-					DebugLog::Log(ok ? "LED drive: listen - waiting for the script on 127.0.0.1:%d (RS-232 port not opened)" :
-						"LED drive: listen - cannot listen on 127.0.0.1:%d: %s", current.listenPort, error.c_str());
+					if (ok || error != listenLastError || listenRetryPort != current.listenPort)
+						DebugLog::Log(ok ? "LED drive: listen - waiting for the script on 127.0.0.1:%d (RS-232 port not opened)" :
+							"LED drive: listen - cannot listen on 127.0.0.1:%d: %s (retrying every 5 s)", current.listenPort, error.c_str());
+					listenLastError = ok ? std::string() : error;
+					listenRetryPort = current.listenPort;
+					listenRetryAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
 					shadow = ScriptController(current);
+				}
+				{
 					// The data log: rotate past 20 MB, a header when new, a
-					// session line every time.
+					// session line every time; also when listen_log is switched
+					// on while running (audit 2026-10-14).
 					if (!listenCsv.is_open() && current.listenLog)
 					{
 						const std::string path = ListenCsvPath(current.listenLogDirectory);
@@ -1008,7 +1020,17 @@ namespace LedDrive
 				}
 				if (listenCsv.is_open() && !current.listenLog)
 					listenCsv.close();   // logging switched off
-				const std::vector<ScriptMessage> messages = listener.Receive(std::max(10, current.tickMs));
+				if (!listener.IsOpen())
+				{
+					// Nothing to receive: wait the tick (a stop or new settings end it).
+					WaitUntil(std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(10, current.tickMs)), generation);
+					continue;
+				}
+				const std::vector<ScriptMessage> messages = listener.Receive(std::max(10, current.tickMs), [this, generation]()
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					return stopping || configGeneration != generation;
+				});
 				for (const ScriptMessage& message : messages)
 				{
 					std::lock_guard<std::mutex> guard(mutex);
@@ -1030,7 +1052,9 @@ namespace LedDrive
 						listenCsv << ',' << (message.kind == "CNTR" ? message.value : listenContrast) << ',' << gain.gain << "\n";
 						listenCsv.flush();
 					}
-					if (message.kind == "CNTR" && message.value > 0)
+					// The projector's CNTR range only (audit 2026-10-14: any local
+					// sender reaches this port).
+					if (message.kind == "CNTR" && message.value > 0 && message.value <= 100)
 					{
 						// As if VP had sent it: the step lands after the
 						// projector's CNTR latency; the smoother eases the picture.
@@ -1044,7 +1068,7 @@ namespace LedDrive
 							smoother.Sent(land);
 						}
 					}
-					else if (message.kind == "LPW1")
+					else if (message.kind == "LPW1" && message.value >= 0 && message.value <= 255)
 					{
 						++listenAccuracy.lightCommands;
 						listenLight = message.value;

@@ -378,6 +378,16 @@ namespace VideoProcessorTest
 			Assert::IsFalse(ParseScriptMessage("VP2 CNTR 55", m));
 			Assert::IsFalse(ParseScriptMessage("VP1 LDMM 0", m));
 			Assert::IsFalse(ParseScriptMessage("garbage", m));
+			// Audit 2026-10-14 / owner: LED power and contrast are whole numbers;
+			// nothing non-finite or fractional reaches a value.
+			Assert::IsFalse(ParseScriptMessage("VP1 CNTR 55.5", m), L"a fractional contrast is not a message");
+			Assert::IsFalse(ParseScriptMessage("VP1 LPW1 200x", m), L"a malformed value is not a message");
+			Assert::IsTrue(ParseScriptMessage("VP1 TICK -1 t=3.25 mean=41.5 max=1e30 hl=nan tp=210 tc=58", m));
+			Assert::AreEqual(-1, m.mean, L"a fractional mean is ignored");
+			Assert::AreEqual(-1, m.maximum, L"an out-of-range max is ignored");
+			Assert::AreEqual(-1, m.highlight, L"nan is ignored");
+			Assert::AreEqual(210, m.targetPower);
+			Assert::AreEqual(58, m.targetContrast);
 		}
 
 		TEST_METHOD(ListenModeFollowsTheScriptWithoutThePort)

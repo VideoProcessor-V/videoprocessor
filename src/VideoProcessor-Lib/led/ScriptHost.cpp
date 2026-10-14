@@ -199,7 +199,15 @@ namespace LedDrive
 			JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
 			limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 			SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
-			AssignProcessToJobObject(job, started.hProcess);
+			if (!AssignProcessToJobObject(job, started.hProcess))
+			{
+				// Without the job only the process itself can be ended (audit
+				// 2026-10-14): Stop() and Reap() then terminate it directly.
+				DebugLog::Log("LED drive: listen script not in a job object (error %lu); it is ended directly",
+					static_cast<unsigned long>(GetLastError()));
+				CloseHandle(job);
+				job = nullptr;
+			}
 		}
 		ResumeThread(started.hThread);
 		CloseHandle(started.hThread);
