@@ -15,6 +15,11 @@
 #include <RendererProfileConfig.h>
 #include <ConfigFile.h>
 #include <led/LedDriveConfig.h>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <vector>
+#include <cstring>
 #include <RendererConfigView.h>
 
 #include <QApplication>
@@ -688,6 +693,108 @@ void testEveryNewRendererControlReachesVp()
     }
     require(cinema->when == "${cadence} > 59", ("The frame-rate rule is not the profile's: " + cinema->when).c_str());
 }
+
+void testConfigKeysActivateTheRendererAndMatcherSettings()
+{
+    // Owner 2026-10-14: every Config key reaches the setting the
+    // renderer and the de-judder matcher actually use - through the
+    // renderer DLL's own loader and the same profile-to-matcher
+    // mapping RunDejudderEstimate uses (no GPU needed).
+    const std::string folder = QDir::toNativeSeparators(QCoreApplication::applicationDirPath()).toStdString() + "\\";
+    // The VP renderer, or its Beta build (the same source and settings code)
+    // when Windows refuses to load a fresh build of the first.
+    std::string dllPath = folder + "vprenderer\\VideoProcessorVPRenderer.dll";
+    HMODULE dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!dll)
+    {
+        std::cout << "  " << dllPath << " not loadable (error " << GetLastError() << "); trying the Beta build\n";
+        dllPath = folder + "vprenderer-beta\\VideoProcessorVPRendererBeta.dll";
+        dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    }
+    require(dll != nullptr, ("cannot load " + dllPath).c_str());
+    std::cout << "  settings described by " << dllPath << "\n";
+    using Describe = int(__cdecl*)(const char*, char*, int);
+    const auto describe = reinterpret_cast<Describe>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+    require(describe != nullptr, "the renderer DLL has no settings description");
+    auto read = [&](const std::string& body)
+    {
+        const std::string path = folder + "vp-settings-activation.cfg";
+        // The base rendering profile (every real configuration has it; a file
+        // with only a named profile selects none).
+        std::ofstream(path, std::ios::trunc) << "[vprenderer]\nquality: high\n" << body;
+        std::vector<char> text(16384);
+        require(describe(path.c_str(), text.data(), static_cast<int>(text.size())) > 0, "the renderer could not describe the settings");
+        std::map<std::string, std::string> values;
+        std::istringstream in(text.data());
+        for (std::string line; std::getline(in, line);)
+        {
+            const size_t equals = line.find('=');
+            if (equals != std::string::npos) values[line.substr(0, equals)] = line.substr(equals + 1);
+        }
+        return values;
+    };
+    // Every key set away from its default (as the Config test does).
+    const std::map<std::string, std::string> set = read(
+        "capture_path: gpu\ndejudder_strength: 0.25\ndejudder_strength_even: 0.5\ndejudder_even_rates: 30_and_29.97\n"
+        "dejudder_motion_rolloff: on\ndejudder_roll_lo: 6\ndejudder_roll_hi: 20\ndejudder_roll_floor: 0.3\n"
+        "dejudder_object_strength: 0.5\ndejudder_fade_floor: 0.2\ndejudder_fade_match: off\n"
+        "dejudder_match_tolerance: 5\ndejudder_frame_trust: 0.3\ndejudder_est_gate: off\ndejudder_global_prior: off\n"
+        "dejudder_vector_smooth: off\ndejudder_motion_scale_lo: 0.5\ndejudder_motion_scale_hi: 2\n"
+        "dejudder_trust_scale: 0.5\ndejudder_est_lambda: 1\ndejudder_est_candidates: off\ndejudder_est_qpel: off\n"
+        "dejudder_est_split_sad: 6\ndejudder_est_split: on\ndejudder_search_range: 6\ndejudder_global_two: off\n"
+        "dejudder_texture_tolerance: 0.5\ndejudder_consistency_px: 3\ndejudder_cut_histogram: 0.4\n"
+        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\n"
+        "dejudder_verify_share: 0.3\ndejudder_verify: on\ndejudder_low_res: search\ndejudder_estimate_ahead: off\n"
+        "dejudder_hold_feather_px: 3\ndejudder_hold_hysteresis: 3\ndejudder_taper_sad: 9\ndejudder_block_taper: on\n"
+        "dejudder_warp_stage: source\ndejudder_occlusion_fill: on\nocclusion_mask: on\n"
+        "dither_grain_tolerance_scale: 2\ndither_vectors: own\nsdr_tone_shape: knee\nsdr_white_headroom: 0.1\n"
+        "sdr_knee_start: 0.7\nsdr_knee_strength: 0.6\nsdr_contrast_recovery: 1.2\nadaptive_downscale: on\n"
+        "adaptive_upscale: on\nupscale_light: gamma\nfbo_float32: on\n");
+    const std::pair<const char*, const char*> expected[] = {
+        { "capture_path", "gpu" }, { "dejudder_strength", "0.25" }, { "dejudder_strength_even", "0.5" },
+        { "dejudder_even_includes_2997", "1" }, { "dejudder_warp_rendered", "0" }, { "dejudder_estimate_ahead", "0" },
+        { "occlusion_mask", "1" }, { "dither_vectors_own", "1" }, { "dither_grain_tolerance_scale", "2" },
+        { "sdr_knee", "1" }, { "sdr_headroom", "0.1" }, { "sdr_knee_start", "0.7" }, { "sdr_knee_strength", "0.6" },
+        { "sdr_recovery", "1.2" }, { "adaptive_downscale", "1" }, { "adaptive_upscale", "1" },
+        { "upscale_light", "gamma" }, { "fbo_float32", "1" },
+        { "matcher.matchTolerance", "5" }, { "matcher.minTrustedShare", "0.3" }, { "matcher.globalPrior", "0" },
+        { "matcher.vectorSmooth", "0" }, { "matcher.motionScaleLo", "0.5" }, { "matcher.motionScaleHi", "2" },
+        { "matcher.trustScaleFull", "0.5" }, { "matcher.occlusionFill", "1" }, { "matcher.estCandidates", "0" },
+        { "matcher.estLambda", "1" }, { "matcher.estQpel", "0" }, { "matcher.estGate", "0" }, { "matcher.estSplit", "1" },
+        { "matcher.estSplitSad", "6" }, { "matcher.motionRolloff", "1" }, { "matcher.rollLo", "6" },
+        { "matcher.rollHi", "20" }, { "matcher.rollFloor", "0.3" }, { "matcher.objectStrength", "0.5" },
+        { "matcher.textureTolerance", "0.5" }, { "matcher.globalTwo", "0" }, { "matcher.regionalHold", "0" },
+        { "matcher.cutHistogram", "0.4" }, { "matcher.coarseRange", "6" }, { "matcher.consistencyPixels", "3" },
+        { "matcher.fadeMatch", "0" }, { "matcher.fadeFloor", "0.2" }, { "matcher.verifyPixels", "1" },
+        { "matcher.verifyShare", "0.3" }, { "matcher.pixelTrust", "0" }, { "matcher.pixelTrustLo", "2" },
+        { "matcher.pixelTrustHi", "7" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
+        { "matcher.holdFeatherPx", "3" }, { "matcher.holdHysteresis", "3" }, { "matcher.blockTaper", "1" },
+        { "matcher.taperSad", "9" } };
+    for (const auto& entry : expected)
+    {
+        const auto found = set.find(entry.first);
+        const std::string got = found == set.end() ? std::string("(missing)") : found->second;
+        require(got == entry.second, (std::string("configured ") + entry.first + " not active: got " + got + ", want " + entry.second).c_str());
+    }
+    // Unset: the defaults Config now shows (rendered path, fade match
+    // and pixel trust on, split off, half size every step, standard).
+    const std::map<std::string, std::string> unset = read("");
+    const std::pair<const char*, const char*> defaults[] = {
+        { "capture_path", "standard" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
+        { "matcher.pixelTrust", "1" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
+        { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
+        { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },
+        { "sdr_knee", "0" }, { "adaptive_downscale", "0" }, { "occlusion_mask", "0" } };
+    for (const auto& entry : defaults)
+    {
+        const auto found = unset.find(entry.first);
+        { const std::string got = found == unset.end() ? std::string("(missing)") : found->second; require(got == entry.second, (std::string("the default of ") + entry.first + " differs from what Config shows: " + got).c_str()); }
+    }
+    // Occlusion fill is ignored with the rendered warp (as Config greys it).
+    require(read("dejudder_occlusion_fill: on\n")["matcher.occlusionFill"] == "0",
+        "occlusion fill reaches the matcher with the rendered warp");
+    FreeLibrary(dll);
+        }
 
 void testSubtitleDiagnosticSurvivesConfigSaveAndReopen()
 {
@@ -7831,6 +7938,7 @@ int main(int argc, char** argv)
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
     failures += run("every new renderer control reaches VP", testEveryNewRendererControlReachesVp);
+    failures += run("config keys activate the renderer and matcher settings", testConfigKeysActivateTheRendererAndMatcherSettings);
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);

@@ -2508,6 +2508,55 @@ namespace
 		}
 	}
 
+	// The matcher's settings from a profile (refinements included): what
+	// RunDejudderEstimate gives the matcher, and what the settings test
+	// checks against (VideoProcessorLibplaceboDescribeSettingsForTest).
+	Dejudder::Settings DejudderMatcherSettings(const RendererSettings& profile, Dejudder::Settings settings)
+	{
+		settings.matchTolerance = static_cast<float>(profile.dejudderMatchTolerance);
+		settings.minTrustedShare = static_cast<float>(profile.dejudderFrameTrust);
+		settings.globalPrior = profile.dejudderGlobalPrior;
+		settings.vectorSmooth = profile.dejudderVectorSmooth;
+		settings.motionScaleLo = static_cast<float>(profile.dejudderMotionScaleLo);
+		settings.motionScaleHi = static_cast<float>(profile.dejudderMotionScaleHi);
+		settings.trustScaleFull = static_cast<float>(profile.dejudderTrustScale);
+		// D5 is source-warp only (planner 2026-10-12): with the rendered
+		// warp it is ignored (logged once) and its pass not run.
+		settings.occlusionFill = profile.dejudderOcclusionFill && !profile.dejudderWarpRendered;
+		settings.estCandidates = profile.dejudderEstCandidates;
+		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
+		settings.estQpel = profile.dejudderEstQpel;
+		settings.estGate = profile.dejudderEstGate;
+		settings.estSplit = profile.dejudderEstSplit;
+		settings.estSplitSad = static_cast<float>(profile.dejudderEstSplitSad);
+		settings.motionRolloff = profile.dejudderMotionRolloff;
+		settings.rollLo = static_cast<float>(profile.dejudderRollLo);
+		settings.rollHi = static_cast<float>(profile.dejudderRollHi);
+		settings.rollFloor = static_cast<float>(profile.dejudderRollFloor);
+		settings.objectStrength = static_cast<float>(profile.dejudderObjectStrength);
+		settings.textureTolerance = static_cast<float>(profile.dejudderTextureTolerance);
+		settings.globalTwo = profile.dejudderGlobalTwo;
+		settings.regionalHold = profile.dejudderRegionalHold;
+		settings.cutHistogram = static_cast<float>(profile.dejudderCutHistogram);
+		settings.coarseRange = profile.dejudderSearchRange;
+		settings.consistencyPixels = static_cast<float>(profile.dejudderConsistencyPx);
+		settings.fadeMatch = profile.dejudderFadeMatch;
+		settings.fadeFloor = static_cast<float>(profile.dejudderFadeFloor);
+		settings.verifyPixels = profile.dejudderVerify;
+		settings.verifyShare = static_cast<float>(profile.dejudderVerifyShare);
+		settings.pixelTrust = profile.dejudderPixelTrust;
+		settings.pixelTrustLo = static_cast<float>(profile.dejudderPixelTrustLo);
+		settings.pixelTrustHi = static_cast<float>(profile.dejudderPixelTrustHi);
+		settings.pixelTrustedVectors = true;
+		settings.lowRes = profile.dejudderLowRes != "off";
+		settings.lowResAll = profile.dejudderLowRes == "all";
+		settings.holdFeatherPx = static_cast<float>(profile.dejudderHoldFeatherPx);
+		settings.holdHysteresis = profile.dejudderHoldHysteresis;
+		settings.blockTaper = profile.dejudderBlockTaper;
+		settings.taperSad = static_cast<float>(profile.dejudderTaperSad);
+		return settings;
+	}
+
 	RendererSettings LoadRendererSettings(const ConfigFile& config,
 		const VideoState& state, std::string& activeRule,
 		const std::string& manualRule = "",
@@ -11604,51 +11653,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
 	{
 		// The matcher's settings from the profile, refinements included.
-		auto wanted = [&](Dejudder::Settings settings)
-		{
-			settings.matchTolerance = static_cast<float>(activeSettings.dejudderMatchTolerance);
-			settings.minTrustedShare = static_cast<float>(activeSettings.dejudderFrameTrust);
-			settings.globalPrior = activeSettings.dejudderGlobalPrior;
-			settings.vectorSmooth = activeSettings.dejudderVectorSmooth;
-			settings.motionScaleLo = static_cast<float>(activeSettings.dejudderMotionScaleLo);
-			settings.motionScaleHi = static_cast<float>(activeSettings.dejudderMotionScaleHi);
-			settings.trustScaleFull = static_cast<float>(activeSettings.dejudderTrustScale);
-			// D5 is source-warp only (planner 2026-10-12): with the rendered
-			// warp it is ignored (logged once) and its pass not run.
-			settings.occlusionFill = activeSettings.dejudderOcclusionFill && !activeSettings.dejudderWarpRendered;
-			settings.estCandidates = activeSettings.dejudderEstCandidates;
-			settings.estLambda = static_cast<float>(activeSettings.dejudderEstLambda);
-			settings.estQpel = activeSettings.dejudderEstQpel;
-			settings.estGate = activeSettings.dejudderEstGate;
-			settings.estSplit = activeSettings.dejudderEstSplit;
-			settings.estSplitSad = static_cast<float>(activeSettings.dejudderEstSplitSad);
-			settings.motionRolloff = activeSettings.dejudderMotionRolloff;
-			settings.rollLo = static_cast<float>(activeSettings.dejudderRollLo);
-			settings.rollHi = static_cast<float>(activeSettings.dejudderRollHi);
-			settings.rollFloor = static_cast<float>(activeSettings.dejudderRollFloor);
-			settings.objectStrength = static_cast<float>(activeSettings.dejudderObjectStrength);
-			settings.textureTolerance = static_cast<float>(activeSettings.dejudderTextureTolerance);
-			settings.globalTwo = activeSettings.dejudderGlobalTwo;
-			settings.regionalHold = activeSettings.dejudderRegionalHold;
-			settings.cutHistogram = static_cast<float>(activeSettings.dejudderCutHistogram);
-			settings.coarseRange = activeSettings.dejudderSearchRange;
-			settings.consistencyPixels = static_cast<float>(activeSettings.dejudderConsistencyPx);
-			settings.fadeMatch = activeSettings.dejudderFadeMatch;
-			settings.fadeFloor = static_cast<float>(activeSettings.dejudderFadeFloor);
-			settings.verifyPixels = activeSettings.dejudderVerify;
-			settings.verifyShare = static_cast<float>(activeSettings.dejudderVerifyShare);
-			settings.pixelTrust = activeSettings.dejudderPixelTrust;
-			settings.pixelTrustLo = static_cast<float>(activeSettings.dejudderPixelTrustLo);
-			settings.pixelTrustHi = static_cast<float>(activeSettings.dejudderPixelTrustHi);
-			settings.pixelTrustedVectors = true;
-			settings.lowRes = activeSettings.dejudderLowRes != "off";
-			settings.lowResAll = activeSettings.dejudderLowRes == "all";
-			settings.holdFeatherPx = static_cast<float>(activeSettings.dejudderHoldFeatherPx);
-			settings.holdHysteresis = activeSettings.dejudderHoldHysteresis;
-			settings.blockTaper = activeSettings.dejudderBlockTaper;
-			settings.taperSad = static_cast<float>(activeSettings.dejudderTaperSad);
-			return settings;
-		};
+		auto wanted = [&](Dejudder::Settings settings) { return DejudderMatcherSettings(activeSettings, settings); };
 		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
 		{
 			DebugLog::Log("De-judder occlusion fill: source warp path only; ignored with dejudder_warp_stage: rendered");
@@ -22482,4 +22487,87 @@ void LibplaceboVideoRenderer::SetState(RendererState state)
 {
 	m_state.store(state, std::memory_order_release);
 	m_callback.OnRendererState(state, m_callbackGeneration);
+}
+
+// Tests (owner 2026-10-14: the settings a configuration really activates):
+// loads `configPath` through the renderer's own loader for an unknown source
+// (the first profile applies) and writes key=value lines of the resulting
+// settings - the renderer's and the de-judder matcher's (matcher.*), as
+// RunDejudderEstimate passes them. Returns the length, or -1.
+extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSettingsForTest(
+	const char* configPath, char* out, int outSize)
+{
+	ConfigFile config;
+	if (!configPath || !config.Load(configPath))
+		return -1;
+	VideoState state;
+	std::string rule;
+	const RendererSettings s = LoadRendererSettings(config, state, rule);
+	const Dejudder::Settings m = DejudderMatcherSettings(s, Dejudder::Settings());
+	std::ostringstream o;
+	o << "rule=" << rule << "\n"
+		<< "capture_path=" << s.capturePath << "\n"
+		<< "dejudder_strength=" << s.dejudderStrength << "\n"
+		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
+		<< "dejudder_even_includes_2997=" << s.dejudderEvenIncludes2997 << "\n"
+		<< "dejudder_warp_rendered=" << s.dejudderWarpRendered << "\n"
+		<< "dejudder_estimate_ahead=" << s.dejudderEstimateAhead << "\n"
+		<< "occlusion_mask=" << s.occlusionMask << "\n"
+		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
+		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"
+		<< "sdr_knee=" << s.sdrTone.knee << "\n"
+		<< "sdr_headroom=" << s.sdrTone.headroom << "\n"
+		<< "sdr_knee_start=" << s.sdrTone.kneeStart << "\n"
+		<< "sdr_knee_strength=" << s.sdrTone.kneeStrength << "\n"
+		<< "sdr_recovery=" << s.sdrTone.recovery << "\n"
+		<< "adaptive_downscale=" << s.adaptiveDownscale << "\n"
+		<< "adaptive_upscale=" << s.adaptiveUpscale << "\n"
+		<< "upscale_light=" << s.upscaleLight << "\n"
+		<< "fbo_float32=" << s.fboFloat32 << "\n"
+		<< "matcher.matchTolerance=" << m.matchTolerance << "\n"
+		<< "matcher.minTrustedShare=" << m.minTrustedShare << "\n"
+		<< "matcher.globalPrior=" << m.globalPrior << "\n"
+		<< "matcher.vectorSmooth=" << m.vectorSmooth << "\n"
+		<< "matcher.motionScaleLo=" << m.motionScaleLo << "\n"
+		<< "matcher.motionScaleHi=" << m.motionScaleHi << "\n"
+		<< "matcher.trustScaleFull=" << m.trustScaleFull << "\n"
+		<< "matcher.occlusionFill=" << m.occlusionFill << "\n"
+		<< "matcher.estCandidates=" << m.estCandidates << "\n"
+		<< "matcher.estLambda=" << m.estLambda << "\n"
+		<< "matcher.estQpel=" << m.estQpel << "\n"
+		<< "matcher.estGate=" << m.estGate << "\n"
+		<< "matcher.estSplit=" << m.estSplit << "\n"
+		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"
+		<< "matcher.motionRolloff=" << m.motionRolloff << "\n"
+		<< "matcher.rollLo=" << m.rollLo << "\n"
+		<< "matcher.rollHi=" << m.rollHi << "\n"
+		<< "matcher.rollFloor=" << m.rollFloor << "\n"
+		<< "matcher.objectStrength=" << m.objectStrength << "\n"
+		<< "matcher.textureTolerance=" << m.textureTolerance << "\n"
+		<< "matcher.globalTwo=" << m.globalTwo << "\n"
+		<< "matcher.regionalHold=" << m.regionalHold << "\n"
+		<< "matcher.cutHistogram=" << m.cutHistogram << "\n"
+		<< "matcher.coarseRange=" << m.coarseRange << "\n"
+		<< "matcher.consistencyPixels=" << m.consistencyPixels << "\n"
+		<< "matcher.fadeMatch=" << m.fadeMatch << "\n"
+		<< "matcher.fadeFloor=" << m.fadeFloor << "\n"
+		<< "matcher.verifyPixels=" << m.verifyPixels << "\n"
+		<< "matcher.verifyShare=" << m.verifyShare << "\n"
+		<< "matcher.pixelTrust=" << m.pixelTrust << "\n"
+		<< "matcher.pixelTrustLo=" << m.pixelTrustLo << "\n"
+		<< "matcher.pixelTrustHi=" << m.pixelTrustHi << "\n"
+		<< "matcher.lowRes=" << m.lowRes << "\n"
+		<< "matcher.lowResAll=" << m.lowResAll << "\n"
+		<< "matcher.holdFeatherPx=" << m.holdFeatherPx << "\n"
+		<< "matcher.holdHysteresis=" << m.holdHysteresis << "\n"
+		<< "matcher.blockTaper=" << m.blockTaper << "\n"
+		<< "matcher.taperSad=" << m.taperSad << "\n";
+	const std::string text = o.str();
+	if (out && outSize > 0)
+	{
+		const size_t n = std::min(text.size(), static_cast<size_t>(outSize - 1));
+		memcpy(out, text.data(), n);
+		out[n] = '\0';
+	}
+	return static_cast<int>(text.size());
 }

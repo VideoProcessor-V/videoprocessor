@@ -488,6 +488,40 @@ namespace VideoProcessorTest
 					L"Script mode never sends custom-dim commands");
 		}
 
+		TEST_METHOD(LookaheadOffIgnoresTheQueuedFrames)
+		{
+			// Owner 2026-10-14 (lookahead: off): VP reacts to the frame on
+			// screen. The same queued black frames that engage the custom dim
+			// with the look-ahead (above) are ignored, so it never engages.
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			config.ftbCustomDim = FtbCustomDim::Together;
+			config.ftbStepMs = 100;
+			config.ftbBlackMs = 200;
+			config.lookahead = false;
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SetLookaheadDepth(3);
+			StatsBuilder builder(module.Config());
+			for (uint64_t s = 1; s < 400; ++s)
+				module.SubmitPrediction(s, builder.Build(Frame(16.0), s * FRAME_MS));
+			module.SubmitMeasurement(Frame(16.0));
+			uint64_t sequence = 0;
+			for (int i = 0; i < 300; ++i)
+			{
+				++sequence;
+				module.BeginFrameAt(sequence, sequence * FRAME_MS);
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+			}
+			Assert::IsFalse(module.CustomDimEngaged(), L"look-ahead off: the queued frames are not used");
+			Assert::IsTrue(projector->light < 255, L"but the LED still dims on the frame on screen");
+		}
+
 		TEST_METHOD(ScriptModeWithTheExperimentConfiguredSendsNoCustomDim)
 		{
 			auto projector = std::make_shared<FakeProjector>();

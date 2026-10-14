@@ -11,6 +11,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <cstring>
+#include <sstream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
