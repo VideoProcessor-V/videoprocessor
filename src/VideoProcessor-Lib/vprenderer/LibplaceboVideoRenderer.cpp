@@ -4071,6 +4071,18 @@ static bool SigmaDeltaVectorsSupported()
 #endif
 }
 
+// Planner D2: the per-pixel displacement (VPPIX), the same fork call.
+static bool SetSigmaDeltaPixelVectors(const pl_hook* hook, pl_tex displacement)
+{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+	return hook && pl_mpv_user_shader_set_texture(hook, "VPPIX", displacement);
+#else
+	(void)hook;
+	(void)displacement;
+	return false;
+#endif
+}
+
 static bool SetSigmaDeltaVectors(const pl_hook* hook, pl_tex vectors)
 {
 #ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
@@ -12058,11 +12070,18 @@ struct LibplaceboVideoRenderer::Impl
 			const pl_render_params* extraParams = &params;
 			bool renderedCrop = false;
 			pl_tex warpedPicture = nullptr;
+			pl_tex warpedDisplacement = nullptr;   // planner D2: per pixel, for the sigma-delta
+			// With M6 the picture moves per pixel: the sigma-delta follows the
+			// warp's own per-pixel displacement (the step since the previous
+			// present) instead of block vectors.
+			const bool pixelVectors = warpMask != nullptr && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
+				shift > 0.0f;
 			if (cached && dejudderRenderedWarp)
 			{
 				if (!dejudderRenderedWarp->Run(cached, warpField, warpTrust,
 					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, warpSub,
-					&dejudder->GetSettings(), warpCamera, warpMask, warpVectorOk))
+					&dejudder->GetSettings(), warpCamera, warpMask, warpVectorOk,
+					pixelVectors ? &warpedDisplacement : nullptr, pixelVectors ? (shift - previousShift) / shift : 1.0f))
 				{
 					failure = "rendered warp failed";
 					break;
@@ -12096,7 +12115,9 @@ struct LibplaceboVideoRenderer::Impl
 					for (const pl_hook* hook : hooks)
 					{
 						CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
+						CustomHookChain::SetHookParameter(hook, "vector_pixel", 0.0);
 						SetSigmaDeltaVectors(hook, nullptr);
+						SetSigmaDeltaPixelVectors(hook, nullptr);
 					}
 					hooks.clear();
 				}
@@ -12132,6 +12153,8 @@ struct LibplaceboVideoRenderer::Impl
 							vectorGuard.hooks.push_back(hook);
 						else
 							CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
+						else if (warpedDisplacement && SetSigmaDeltaPixelVectors(hook, warpedDisplacement))
+							CustomHookChain::SetHookParameter(hook, "vector_pixel", 1.0);
 					}
 				}
 				const int state = !use ? (activeSettings.ditherVectorsOwn ? 0 : patch ? 1 : 2) :

@@ -74,6 +74,14 @@ if (q.x < size.x && q.y < size.y) {
     vec2 p = vec2(q) + vec2(0.5);
     vec2 v;
     vec4 o;
+    // Planner D2: the displacement this pixel's content was moved by (output
+    // pixels from A), for the sigma-delta's per-pixel carry; zero = held.
+    vec2 moved = vec2(0.0);
+#ifdef WRITE_DISP
+#define STORE_DISP() imageStore(disp, q, vec4(moved * step_fraction, any(notEqual(moved, vec2(0.0))) ? 1.0 : 0.0, 0.0))
+#else
+#define STORE_DISP()
+#endif
 #ifdef PIXEL_TRUST
     // M6: the vector where the pixel comes from (two fixed-point steps),
     // blended with the hold by A's pixel weight there; a cut holds.
@@ -96,14 +104,17 @@ if (q.x < size.x && q.y < size.y) {
         {
             float m = texture(pix_mask, (sp - d) / vec2(textureSize(pix_mask, 0) * 2)).r;
 #ifdef PIXEL_MOTION
-            o = rw_cubic(p - m * d / slope);   // the weight's share of the motion
+            moved = m * d / slope;
+            o = rw_cubic(p - moved);   // the weight's share of the motion
 #else
             o = mix(texelFetch(cached, q, 0), rw_cubic(p - d / slope), m);
+            moved = m > 0.5 ? d / slope : vec2(0.0);   // a crossfade: the dominant part
 #endif
         }
     } else
         o = texelFetch(cached, q, 0);
     imageStore(dst, q, o);
+    STORE_DISP();
     return;
 #endif
     if (shift != 0.0 && field_vector(rw_source(p), v)) {
@@ -121,15 +132,19 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         {
             o = rw_cubic(p - d / slope);
+            moved = d / slope;
 #ifdef FEATHER
             // Delta 9 H1: the feather is in output pixels, the field in source.
-            o = mix(texelFetch(cached, q, 0), o, hold_weight(sp, feather_px * max(slope.x, slope.y)));
+            float hw = hold_weight(sp, feather_px * max(slope.x, slope.y));
+            o = mix(texelFetch(cached, q, 0), o, hw);
+            moved = hw > 0.5 ? moved : vec2(0.0);   // a crossfade: the dominant part
 #endif
         }
     } else {
         o = texelFetch(cached, q, 0);   // hard hold of A
     }
     imageStore(dst, q, o);
+    STORE_DISP();
 }
 )GLSL";
 
@@ -331,7 +346,7 @@ if (b.x < size.x && b.y < size.y) {
 
 	bool Warp::Run(pl_tex cached, pl_tex field, pl_tex frameTrust, float minTrustedShare,
 		float shift, const Geometry& g, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera,
-		pl_tex pixelMask, pl_tex vectorOk)
+		pl_tex pixelMask, pl_tex vectorOk, pl_tex* displacementOut, float stepFraction)
 	{
 		out = nullptr;
 		if (!dispatch || !cached || !field || !frameTrust)
@@ -394,7 +409,7 @@ if (b.x < size.x && b.y < size.y) {
 			{ pl_var_float("taper_tol"), &taperTol, true },
 			{ pl_var_float("taper_sad"), &taperSad, true } };
 		// The variables in use, in order (feather, then taper).
-		pl_shader_var used[19];
+		pl_shader_var used[24];   // 11 + feather 1 + taper 2 + holds 4 + object 1 + step 1
 		int n = 0;
 		for (int i = 0; i < 11; ++i) used[n++] = variables[i];
 		if (ms.holdFeatherPx > 0.0f) used[n++] = variables[11];
@@ -424,7 +439,25 @@ if (b.x < size.x && b.y < size.y) {
 			if (vectorOk)
 				descriptors.push_back(Sampled("vector_ok", vectorOk));
 		}
-		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") +
+		// Planner D2: the per-pixel displacement (rgba16f, the cache's size).
+		const bool writeDisp = displacementOut != nullptr;
+		if (writeDisp)
+		{
+			*displacementOut = nullptr;
+			if (!Ensure(gpu, displacement, w, h, hostReadable))
+			{
+				error = "no storable rgba16f texture for the displacement";
+				return false;
+			}
+			pl_shader_desc d{};
+			d.desc.name = "disp";
+			d.desc.type = PL_DESC_STORAGE_IMG;
+			d.desc.access = PL_DESC_ACCESS_WRITEONLY;
+			d.binding.object = displacement;
+			descriptors.push_back(d);
+			used[n++] = { pl_var_float("step_fraction"), &stepFraction, true };
+		}
+		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") + (writeDisp ? "#define WRITE_DISP 1\n" : "") +
 			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
 			(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
 			(pixel && ms.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") + OcclusionMask::NlsMapGlsl() +
@@ -437,6 +470,8 @@ if (b.x < size.x && b.y < size.y) {
 			return false;
 		}
 		out = warped;
+		if (writeDisp)
+			*displacementOut = displacement;
 		return true;
 	}
 

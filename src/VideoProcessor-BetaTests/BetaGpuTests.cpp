@@ -1021,6 +1021,98 @@ void RunBetaDitherVectorsTests()
 		std::cout << "Beta R1: extra " << i << " (shift " << shifts[i] << ") external vs own: max " << maxDiff
 			<< ", mean " << mean << "\n";
 	}
+	// Planner D2: with M6 (the renderer's defaults) the warp's own per-pixel
+	// displacement (VPPIX, the step since the previous present) instead of
+	// block vectors. On the same M6 pictures: the own search, the block
+	// vectors (VPVEC) and the per-pixel displacement; per-pixel stays within
+	// 1 code of the own carry and no farther on average than block vectors.
+	{
+		Dejudder::Settings m6 = ChainGpuProbe::Refined(settings);
+		m6.hostReadable = true;
+		Dejudder::MotionWarp warpReal(gpu.Log(), handle, m6);
+		// Every pixel weight 1 (thresholds far above any error): the picture
+		// moves as whole blocks, so per-pixel must equal block vectors exactly.
+		Dejudder::Settings full = m6;
+		full.pixelTrustLo = 1000.0f;
+		full.pixelTrustHi = 2000.0f;
+		Dejudder::MotionWarp warpFull(gpu.Log(), handle, full);
+		for (Dejudder::MotionWarp* w : { &warpReal, &warpFull })
+			Check(w->Estimate(a, b) && w->Estimate(a, b), "D2: Estimate failed: " + w->LastError());
+		Check(warpReal.PixelMask() != nullptr, "D2: the defaults have no pixel weights");
+		Dejudder::MotionWarp* current = &warpReal;
+		auto sequence = [&](int mode)   // 0 own search, 1 block vectors, 2 per-pixel
+		{
+			Dejudder::MotionWarp& warpM6 = *current;
+			auto sigma = loadSigma();
+			renderA({ sigma->hook });
+			std::vector<std::vector<uint32_t>> result;
+			float previous = 0.0f;
+			for (float s : shifts)
+			{
+				pl_tex out = nullptr, disp = nullptr, vectors = nullptr;
+				Check(rendered.Run(cache.Texture(3), warpM6.Field(), warpM6.FrameTrust(), m6.minTrustedShare,
+					s, g, out, warpM6.SubField(), &warpM6.GetSettings(), warpM6.Camera(), warpM6.PixelMask(), warpM6.VectorOk(),
+					mode == 2 ? &disp : nullptr, (s - previous) / s), "D2: rendered warp failed: " + rendered.Error());
+				if (mode >= 1)
+				{
+					Check(field.Run(warpM6.Field(), warpM6.FrameTrust(), m6.minTrustedShare, s - previous, g, width, height,
+						vectors, warpM6.SubField(), &warpM6.GetSettings()), "D2: vector field failed: " + field.Error());
+					Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", vectors), "D2: VPVEC not accepted");
+					Check(SetParam(sigma->hook, "vector_source", 1.0), "D2: no vector_source parameter");
+				}
+				if (mode == 2)
+				{
+					Check(disp != nullptr, "D2: no displacement texture");
+					Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPPIX", disp), "D2: VPPIX not accepted");
+					Check(SetParam(sigma->hook, "vector_pixel", 1.0), "D2: no vector_pixel parameter");
+				}
+				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+				pl_frame t = target();
+				std::vector<const pl_hook*> kept;
+				const pl_render_params pr = DejudderRendered::OutputOnly(params, { sigma->hook }, kept);
+				Check(pl_render_image(gpu.RendererHandle(), &image, &t, &pr), "D2: extra render failed");
+				result.push_back(readback());
+				SetParam(sigma->hook, "vector_source", 0.0);
+				SetParam(sigma->hook, "vector_pixel", 0.0);
+				Check(pl_mpv_user_shader_set_texture(sigma->hook, "VPVEC", nullptr) &&
+					pl_mpv_user_shader_set_texture(sigma->hook, "VPPIX", nullptr), "D2: textures not restored");
+				previous = s;
+			}
+			return result;
+		};
+		current = &warpFull;
+		const auto blockFull = sequence(1), pixelFull = sequence(2);
+		for (size_t i = 0; i < blockFull.size(); ++i)
+		{
+			int maxDiff = 0;
+			double mean = 0.0;
+			difference(blockFull[i], pixelFull[i], maxDiff, mean);
+			// Not byte-exact: the block field holds one vector per 16x16 block,
+			// the warp's interpolates within it (a vector near a half pixel
+			// rounds either way across a block).
+			Check(maxDiff <= 1 && mean <= 0.03, "D2: with every pixel weight 1 the per-pixel carry differs from the block vectors (max " +
+				std::to_string(maxDiff) + ", mean " + std::to_string(mean) + ", extra " + std::to_string(i) + ")");
+			std::cout << "Beta D2: extra " << i << ", every pixel weight 1: per-pixel vs block vectors max " << maxDiff << ", mean " << mean << "\n";
+		}
+		current = &warpReal;
+		const auto ownM6 = sequence(0), blockM6 = sequence(1), pixelM6 = sequence(2);
+		for (size_t i = 0; i < ownM6.size(); ++i)
+		{
+			int maxPixel = 0, maxBlock = 0;
+			double meanPixel = 0.0, meanBlock = 0.0;
+			difference(ownM6[i], pixelM6[i], maxPixel, meanPixel);
+			difference(ownM6[i], blockM6[i], maxBlock, meanBlock);
+			Check(maxPixel <= 1, "D2: the per-pixel carry differs from the own carry by " + std::to_string(maxPixel) +
+				" codes on extra " + std::to_string(i));
+			// The own search and block vectors assume whole 16x16 blocks moved;
+			// with M6 a partially weighted pixel moved less, which the per-pixel
+			// displacement follows: slightly farther from the own search there.
+			Check(meanPixel <= meanBlock + 0.03, "D2: the per-pixel carry is farther from the own carry (mean " +
+				std::to_string(meanPixel) + ") than the block vectors (" + std::to_string(meanBlock) + ") on extra " + std::to_string(i));
+			std::cout << "Beta D2: extra " << i << " (shift " << shifts[i] << ", M6) per-pixel vs own: max " << maxPixel
+				<< ", mean " << meanPixel << "; block vectors vs own: max " << maxBlock << ", mean " << meanBlock << "\n";
+		}
+	}
 	// The own search run again with a fresh hook: how far two identical runs
 	// agree on this GPU (the reference for the two path comparisons below).
 	int repeatMax = 0;
@@ -2812,7 +2904,11 @@ namespace Corpus
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
+		float rollHi = 24.0f, rollFloor = 0.25f;
 		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
+		bool taste = false;   // D2 / D4 / R-A as deployed; scored where the picture is actually shown
+		float fastFrom = 0.0f, fastFloor = 0.4f;
+		bool blend = false;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2825,6 +2921,72 @@ namespace Corpus
 		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
 		std::free(set);
 		const bool fixes = which == "fixes";
+		if (which == "d1")
+		{
+			// Planner D1: the damage with R-A and D2/D4 on (as deployed). Each
+			// in-between picture is scored where it is shown: the warp's
+			// effective shift (shift x the strength) against the true frame at
+			// that position; positions never shown are skipped.
+			auto add = [&](const char* name, bool pixel, bool rolloff, float rollHi, float rollFloor)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = pixel; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.taste = true; v.rolloff = rolloff; v.rollHi = rollHi; v.rollFloor = rollFloor;
+				variants.push_back(v);
+			};
+			Variant today{ "today (before 2026-10-13), D2/D4/R-A", 3.0f, 0.5f, true };
+			today.taste = true; today.rolloff = true;
+			variants.push_back(today);
+			add("M6 off (block decision), D2/D4/R-A", false, true, 24.0f, 0.25f);
+			add("M6 on (defaults), D2/D4/R-A", true, true, 24.0f, 0.25f);
+			add("M6 on, D2/D4, no R-A", true, false, 24.0f, 0.25f);
+			add("M6 on, R-A floor 0.1", true, true, 24.0f, 0.1f);
+			add("M6 on, R-A hi 16", true, true, 16.0f, 0.25f);
+			return variants;
+		}
+		if (which == "blend")
+		{
+			// D3: the source warp's blend of A forward and B backward (accuracy:
+			// D2/D4 off), against the defaults and the RAFT ceiling's 55.8%.
+			auto add = [&](const char* name, bool blend, float lo, float hi)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = lo; v.pixHi = hi; v.blend = blend;
+				variants.push_back(v);
+			};
+			Variant today{ "today (before 2026-10-13)", 3.0f, 0.5f, true };
+			variants.push_back(today);
+			add("defaults (M6)", false, 3.0f, 8.0f);
+			add("defaults + D3 blend", true, 3.0f, 8.0f);
+			add("defaults + D3 blend, pixel 2-6", true, 2.0f, 6.0f);
+			add("defaults + D3 blend, pixel 4-10", true, 4.0f, 10.0f);
+			return variants;
+		}
+		if (which == "fast")
+		{
+			// D1 follow-up: M6's thresholds shrink with the motion (deployed
+			// taste: D2 / D4 / R-A on; scored where shown).
+			auto add = [&](const char* name, bool pixel, float from, float floor)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = pixel; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.taste = true; v.rolloff = true; v.fastFrom = from; v.fastFloor = floor;
+				variants.push_back(v);
+			};
+			Variant today{ "today (before 2026-10-13), D2/D4/R-A", 3.0f, 0.5f, true };
+			today.taste = true; today.rolloff = true;
+			variants.push_back(today);
+			add("M6 off (block decision)", false, 0.0f, 0.4f);
+			add("M6 on", true, 0.0f, 0.4f);
+			add("M6, fast from 24 px to 0.4", true, 24.0f, 0.4f);
+			add("M6, fast from 16 px to 0.3", true, 16.0f, 0.3f);
+			add("M6, fast from 32 px to 0.25", true, 32.0f, 0.25f);
+			add("M6, fast from 12 px to 0.2", true, 12.0f, 0.2f);
+			return variants;
+		}
 		if (which == "pixmotion")
 		{
 			// M6: a partial weight as a share of the motion (the default) or as
@@ -3169,13 +3331,24 @@ namespace Corpus
 		s.pixelTrustedVectors = !v.pixAll;
 		s.pixelOwnTexture = v.ownTexture;
 		s.pixelTrustMotion = !v.crossfade;
+		s.pixelFastFrom = v.fastFrom;
+		s.pixelFastFloor = v.fastFloor;
+		s.blendFrames = v.blend;
 		s.pixelOwnError = v.ownError;
 		if (v.rolloff)
 		{
 			s.motionRolloff = true;
 			s.rollLo = 8.0f;
-			s.rollHi = 24.0f;
-			s.rollFloor = 0.25f;
+			s.rollHi = v.rollHi;
+			s.rollFloor = v.rollFloor;
+		}
+		if (v.taste)
+		{
+			// The renderer's D2 / D4 and the fade floor (taste, as deployed).
+			s.motionScaleLo = 0.25f;
+			s.motionScaleHi = 1.5f;
+			s.trustScaleFull = 0.6f;
+			s.fadeFloor = 0.25f;
 		}
 		s.fadeFloor = 1.0f;
 		s.motionScaleHi = 0.0f;   // accuracy only: D2 and D4 off
@@ -3890,9 +4063,28 @@ void RunBetaRealFootage()
 				for (size_t i = 0; i < static_cast<size_t>(blocksX) * blocksY; ++i)
 					trusted += (fieldHalf[i * 4 + 2] & 0x7FFF) >= 0x3800 ? 1 : 0;   // half float >= 0.5
 				const double trustedShare = static_cast<double>(trusted) / (static_cast<double>(blocksX) * blocksY);
+				// D1 (taste on): the strength this pair is shown at.
+				float strength = 1.0f;
+				if (variants[vi].taste)
+				{
+					std::vector<uint16_t> ft(4);
+					d.tex = warp.FrameTrust(); d.ptr = ft.data();
+					Check(pl_tex_download(g, &d), "real: frame trust download");
+					const uint16_t h = ft[1];
+					const int e = (h >> 10) & 31, m = h & 1023;
+					strength = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(1.0f + m / 1024.0f, e - 15);
+				}
 				for (int k = 1; k < clip.spacing; ++k)
 				{
-					const float shift = static_cast<float>(k) / clip.spacing;
+					float shift = static_cast<float>(k) / clip.spacing;
+					if (variants[vi].taste)
+					{
+						// Shown at shift x strength: the true frame k is that
+						// picture when the refresh's shift is k/spacing / strength.
+						if (strength < 1e-3f || shift / strength > 1.0f)
+							continue;   // never shown at this position
+						shift /= strength;
+					}
 					Dejudder::Planes out;
 					Check(warp.Warp(a, shift, out, true), "real: warp: " + warp.LastError());
 					d.tex = out.luma; d.ptr = warped.data();

@@ -236,6 +236,20 @@ namespace Dejudder
 		// its motion (no double image; the same in both warps); false = a
 		// crossfade of the moved and the held pixel.
 		bool pixelTrustMotion = true;
+		// Planner D1 (2026-10-14): the damage left with R-A on sits in fast
+		// motion, where a partial move to a slightly wrong place still shows.
+		// Above pixelFastFrom source px per source frame the pixel weights'
+		// thresholds shrink, to pixelFastFloor x at pixelFastFrom x 4 (0 = off):
+		// fast content must predict B more exactly to move.
+		float pixelFastFrom = 0.0f;
+		float pixelFastFloor = 0.4f;
+		// D3 (owner 2026-10-14: built now, off by default): with M6, the source
+		// warp blends A moved forward with B moved backward (B's own trusted
+		// field from the backward search and B's own pixel weights), weighted
+		// (1 - s) x A's weight and s x B's: what A hides (uncovered content) B
+		// shows, so nothing is dragged into it. Source warp only here; the
+		// rendered warp's version renders B a refresh early.
+		bool blendFrames = false;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in
@@ -445,6 +459,9 @@ namespace Dejudder
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
 		bool holdResetPending = false;  // H2's state cleared at the next Estimate
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights
+		pl_tex fieldB = nullptr;        // D3: B's trusted field (B -> A, source px)
+		pl_tex pixelMaskB = nullptr;    // D3: B's pixel weights
+		bool blendReady = false;
 		pl_tex vectorOk = nullptr;      // M6: blocks whose vector M6 may use (r = 1)
 		bool pixelMaskReady = false;
 		pl_tex camera = nullptr;
