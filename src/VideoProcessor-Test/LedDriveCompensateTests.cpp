@@ -542,6 +542,17 @@ namespace VideoProcessorTest
 				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.GetState() == ScriptHost::State::Waiting; }),
 					L"the second exit is seen");
 				Assert::IsTrue(host.SecondsToRestart() >= 3 && host.SecondsToRestart() <= 4, L"then in 4 s (the back-off doubles)");
+				// The port set-up: a port that is not there is reported and the
+				// script starts anyway (VP never holds the port).
+				setMode("hang");
+				host.Update("", pythonPath, directory);   // a new script value: start at once
+				host.Update(script, pythonPath, directory, "COM250", 19200);
+				Assert::IsTrue(host.GetState() == ScriptHost::State::Running, L"a port that cannot be set up: the script still starts");
+				Assert::IsTrue(host.PortError().find("cannot open COM250") == 0,
+					std::wstring(host.PortError().begin(), host.PortError().end()).c_str());
+				Assert::IsTrue(read(nowPath).find("port_error=cannot_open_COM250") != std::string::npos, L"led-script-now.txt: the port error");
+				host.Stop();
+				setMode("exit");
 				// A missing script: waiting, with the reason.
 				host.Update(folder + "\\missing.py", pythonPath, directory);
 				Assert::IsTrue(host.GetState() == ScriptHost::State::Waiting && host.LastError().find("script not found") == 0,

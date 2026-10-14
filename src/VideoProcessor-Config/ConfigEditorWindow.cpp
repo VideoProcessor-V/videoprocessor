@@ -10285,8 +10285,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     }
     listenLayout->addWidget(helpLabel(QStringLiteral(
         "With logging on, every script message is kept with VP's own measurement in logs\\led-listen.csv "
-        "(beside vp.log), for adapting VP's copy of the script. The script needs its VP addendum lines "
-        "(docs\\reference\\main_vp.py).")));
+        "(beside vp.log), for adapting VP's copy of the script. The script needs its VP addendum lines; "
+        "VP ships it with them as scripts\\main_vp.py, and sets the serial port up itself before starting it.")));
     driveForm->addRow(listenBox);
     auto* listenTimer = new QTimer(listenBox);
     // VP's one-line summary, overwritten on each script message (the timer
@@ -10310,11 +10310,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 }
                 const QString state = sv.value(QStringLiteral("state"));
                 const QString last = sv.value(QStringLiteral("last")).replace(QLatin1Char('_'), QLatin1Char(' '));
+                const QString portError = sv.value(QStringLiteral("port_error")).replace(QLatin1Char('_'), QLatin1Char(' '));
                 hosted = state == QStringLiteral("running") ?
                     QStringLiteral(" VP runs the script (pid %1).").arg(sv.value(QStringLiteral("pid"))) :
                     state == QStringLiteral("waiting") ?
                     QStringLiteral(" VP restarts the script in %1 s (%2).").arg(sv.value(QStringLiteral("restart_s")), last) :
                     QString();
+                if (!portError.isEmpty() && !hosted.isEmpty())
+                    hosted += QStringLiteral(" Serial port not set up: %1.").arg(portError);
             }
         }
         const QString& path = listenNowPath;

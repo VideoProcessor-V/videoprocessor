@@ -82,7 +82,7 @@ try {
             return
         }
         if ($Flavor -eq 'config' -and $portablePath -notmatch '^(config/|licenses/|LICENSE\.txt$|CONFIGURATION\.html$|VideoProcessorUpdate\.exe$)') { return }
-        $policy = if ($relative -match '^shaders\\|^VideoProcessor\.cfg$') { 'seed' } else { 'managed' }
+        $policy = if ($relative -match '^shaders\\|^VideoProcessor\.cfg$|^scripts\\main_vp\.py$') { 'seed' } else { 'managed' }
         [ordered]@{ path=$relative.Replace('\','/'); policy=$policy; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
     })
     if ($Flavor -eq 'config') { $localRuntime.files = @($localRuntime.files | Where-Object { $_.path -like 'config/*' }) }

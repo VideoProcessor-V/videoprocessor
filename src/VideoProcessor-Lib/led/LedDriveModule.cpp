@@ -863,6 +863,8 @@ namespace LedDrive
 		// mode: listen with listen_script: VP runs the script (ScriptHost.h);
 		// it ends when the mode leaves listen or this thread stops.
 		ScriptHost scriptHost;
+		std::string scriptPort = projector.port;   // the line settings it gets (copied under the lock)
+		int scriptBaud = projector.baud;
 		ScriptController shadow(current);
 		std::ofstream listenCsv;
 		const double listenStartMs = NowMs();
@@ -890,6 +892,8 @@ namespace LedDrive
 					// (step 7b: CNTR is real, so it is not reset to 50 here).
 					generation = configGeneration;
 					current = led;
+					scriptPort = projector.port;
+					scriptBaud = projector.baud;
 					const DriverStatus status = driver->Status();
 					const int contrastNow = controller.Contrast();
 					controller = ScriptController(current);
@@ -965,7 +969,7 @@ namespace LedDrive
 			else if (current.mode == Mode::Listen)
 			{
 				// The script, when VP runs it: started, watched, restarted.
-				scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory);
+				scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory, scriptPort, scriptBaud);
 				// The listener follows the mode and the port.
 				if (!listener.IsOpen() || listener.Port() != current.listenPort)
 				{

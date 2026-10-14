@@ -16,8 +16,11 @@
 // is started again after 2, 4, 8 ... 60 s (2 s again once it ran a minute).
 // Its output goes to logs\led-script.log (the previous run's kept past
 // 10 MB as led-script.prev.log); logs\led-script-now.txt holds its state for
-// the Config monitor. The script is unchanged and VP still never opens the
-// serial port: the script drives it and tells VP over UDP as before.
+// the Config monitor. The script drives the serial port and tells VP over UDP
+// as before. Its line settings (the beta 22 script opened Tera Term for them)
+// VP sets before each start from [projector.Default] port / baud, 8N1: the
+// port is opened, set and closed at once (VP never holds it); a failure is
+// logged and shown, and the script starts anyway.
 namespace LedDrive
 {
 	class ScriptHost
@@ -32,7 +35,9 @@ namespace LedDrive
 
 		// script empty = Off (the owner starts the script); python empty =
 		// "python" on PATH. logDirectory empty = beside vp.log (tests: a folder).
-		void Update(const std::string& script, const std::string& python, const std::string& logDirectory);
+		// port empty = the line settings are left alone.
+		void Update(const std::string& script, const std::string& python, const std::string& logDirectory,
+			const std::string& port = std::string(), int baud = 0);
 		// Ends the script (the mode left listen, or VP stops).
 		void Stop();
 
@@ -42,6 +47,10 @@ namespace LedDrive
 		// Seconds until the next start while Waiting.
 		int SecondsToRestart() const;
 		const std::string& LastError() const { return lastError; }
+		// The last port set-up's failure (empty: set, or not asked).
+		const std::string& PortError() const { return portError; }
+		// Opens `port`, sets baud and 8N1 (no flow control), closes it.
+		static bool ConfigurePort(const std::string& port, int baud, std::string& error);
 
 	private:
 		bool Start(const std::string& script, const std::string& python, const std::string& logDirectory);
@@ -60,6 +69,7 @@ namespace LedDrive
 		std::chrono::steady_clock::time_point restartAt{};
 		std::string configuredScript, configuredPython;
 		std::string lastError;
+		std::string portError;
 		std::string nowPath;
 		std::string writtenNow;
 	};

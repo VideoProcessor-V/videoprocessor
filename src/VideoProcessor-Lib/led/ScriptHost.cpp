@@ -58,7 +58,44 @@ namespace LedDrive
 		return static_cast<int>(std::max<long long>(0, left));
 	}
 
-	void ScriptHost::Update(const std::string& script, const std::string& python, const std::string& logDirectory)
+	bool ScriptHost::ConfigurePort(const std::string& port, int baud, std::string& error)
+	{
+		const std::string path = "\\\\.\\" + port;
+		HANDLE opened = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+		if (opened == INVALID_HANDLE_VALUE)
+		{
+			error = "cannot open " + port + " (Windows error " + std::to_string(GetLastError()) + ")";
+			return false;
+		}
+		DCB dcb{};
+		dcb.DCBlength = sizeof(dcb);
+		bool ok = GetCommState(opened, &dcb) != FALSE;
+		if (ok)
+		{
+			// As Win32SerialPort (the projector driver) and Tera Term's setup.
+			dcb.BaudRate = static_cast<DWORD>(baud);
+			dcb.ByteSize = 8;
+			dcb.Parity = NOPARITY;
+			dcb.StopBits = ONESTOPBIT;
+			dcb.fBinary = TRUE;
+			dcb.fParity = FALSE;
+			dcb.fOutxCtsFlow = FALSE;
+			dcb.fOutxDsrFlow = FALSE;
+			dcb.fDsrSensitivity = FALSE;
+			dcb.fOutX = FALSE;
+			dcb.fInX = FALSE;
+			dcb.fDtrControl = DTR_CONTROL_ENABLE;
+			dcb.fRtsControl = RTS_CONTROL_ENABLE;
+			ok = SetCommState(opened, &dcb) != FALSE;
+		}
+		if (!ok)
+			error = "cannot set " + port + " (Windows error " + std::to_string(GetLastError()) + ")";
+		CloseHandle(opened);
+		return ok;
+	}
+
+	void ScriptHost::Update(const std::string& script, const std::string& python, const std::string& logDirectory,
+		const std::string& port, int baud)
 	{
 		nowPath = LogFolder(logDirectory) + "\\led-script-now.txt";
 		// A new script or interpreter: start again now.
@@ -78,6 +115,17 @@ namespace LedDrive
 		if (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0)
 			Reap();
 		if (!process && std::chrono::steady_clock::now() >= restartAt)
+		{
+			// The port's line settings first (the script's `echo ... > com1`
+			// uses whatever the port was left at).
+			portError.clear();
+			if (!port.empty())
+			{
+				if (ConfigurePort(port, baud, portError))
+					DebugLog::Log("LED drive: listen script: %s set to %d 8N1", port.c_str(), baud);
+				else
+					DebugLog::Log("LED drive: listen script: %s not set (%s); starting the script anyway", port.c_str(), portError.c_str());
+			}
 			if (!Start(script, python, logDirectory))
 			{
 				state = State::Waiting;
@@ -85,6 +133,7 @@ namespace LedDrive
 				DebugLog::Log("LED drive: listen script not started (%s); again in %d s", lastError.c_str(), backoffSeconds);
 				backoffSeconds = std::min(60, backoffSeconds * 2);
 			}
+		}
 		WriteNow(logDirectory);
 	}
 
@@ -252,6 +301,12 @@ namespace LedDrive
 			std::string error = lastError;
 			std::replace(error.begin(), error.end(), ' ', '_');
 			text += " last=" + error;
+		}
+		if (!portError.empty())
+		{
+			std::string error = portError;
+			std::replace(error.begin(), error.end(), ' ', '_');
+			text += " port_error=" + error;
 		}
 		if (text == writtenNow) return;
 		std::ofstream now(Wide(nowPath), std::ios::out | std::ios::trunc);
