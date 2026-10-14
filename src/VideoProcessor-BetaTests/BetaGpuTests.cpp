@@ -2611,7 +2611,7 @@ namespace Corpus
 {
 	struct Obj
 	{
-		int kind = 0;          // 0 a patch of the canvas, 1 a thin bright bar
+		int kind = 0;          // 0 a patch of the canvas, 1 a thin bright bar, 2 a fence (bars every srcX px)
 		float x0 = 0, y0 = 0, vx = 0, vy = 0, w = 0, h = 0, srcX = 0, srcY = 0;
 	};
 	struct Scene
@@ -2687,6 +2687,18 @@ namespace Corpus
 				const Obj& o = s.objects[k];
 				const float u = px - (o.x0 + o.vx * tt), v = py - (o.y0 + o.vy * tt);
 				if (o.kind == 1) { l = 56000.0f + 2000.0f * ((static_cast<int>(v) / 6) % 2); cb = cr = 32768.0f; return; }
+				if (o.kind == 2)
+				{
+					// Bars 45% of the period wide; between them the scene behind.
+					const float phase = std::fmod(u, o.srcX);
+					if ((phase < 0 ? phase + o.srcX : phase) < o.srcX * 0.45f) { l = 50000.0f + 0.05f * v; cb = cr = 32768.0f; return; }
+					float wx, wy;
+					ToWorld(s, px, py, tt, wx, wy);
+					l = Sample(c.luma, c.w, c.h, wx, wy);
+					cb = Sample(c.cb, c.w / 2, c.h / 2, wx / 2, wy / 2);
+					cr = Sample(c.cr, c.w / 2, c.h / 2, wx / 2, wy / 2);
+					return;
+				}
 				l = Sample(c.luma, c.w, c.h, o.srcX + u, o.srcY + v);
 				cb = Sample(c.cb, c.w / 2, c.h / 2, (o.srcX + u) / 2, (o.srcY + v) / 2);
 				cr = Sample(c.cr, c.w / 2, c.h / 2, (o.srcX + u) / 2, (o.srcY + v) / 2);
@@ -2846,6 +2858,8 @@ namespace Corpus
 		add("thin objects", "bars over a pan", [](Scene& s) { s.panX = 8; for (int i = 0; i < 6; ++i) s.objects.push_back({ 1, 600.0f + i * 420, 300, -6, 0, 5, 1400, 0, 0 }); });
 		add("repetitive texture", "fence 24, pan 7", [](Scene& s) { s.fencePeriod = 24; s.panX = 7; });
 		add("repetitive texture", "fence 16, pan 12", [](Scene& s) { s.fencePeriod = 16; s.panX = 12; });
+		add("repetitive texture", "fence 24 in a panned scene, pan 7", [](Scene& s) { s.panX = 7; s.objects.push_back({ 2, 1200, 500, 7, 0, 1400, 1000, 24, 0 }); });
+		add("repetitive texture", "fence 24 moving 7 over a still scene", [](Scene& s) { s.objects.push_back({ 2, 1200, 500, 7, 0, 1400, 1000, 24, 0 }); });
 		add("occlusion", "large object crossing", [](Scene& s) { s.panX = 5; s.objects.push_back({ 0, 1000, 200, 25, 0, 1200, 1600, 4300, 1000 }); });
 		add("lighting change", "fade 3% a frame", [](Scene& s) { s.panX = 6; s.fade = 0.03f; });
 		add("heavy grain", "pan 6", [](Scene& s) { s.panX = 6; s.grain = 3000; });
