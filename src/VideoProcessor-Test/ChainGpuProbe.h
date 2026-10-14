@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // The whole hook chain in one render, in the renderer's order, over several
 // source frames with a cut: what the per-feature GPU tests do not show
@@ -379,6 +379,25 @@ namespace ChainGpuProbe
 		s.pixelTrust = true;
 		s.pixelTrustLo = 3.0f;
 		s.pixelTrustHi = 8.0f;
+		// Tests only: VP_TEST_REFINED_DROP=<name>[,<name>] turns those back
+		// to their earlier values (to find which one moves a result).
+		char* drop = nullptr;
+		size_t dropLength = 0;
+		if (_dupenv_s(&drop, &dropLength, "VP_TEST_REFINED_DROP") == 0 && drop)
+		{
+			const std::string list = std::string(",") + drop + ",";
+			auto has = [&](const char* name) { return list.find(std::string(",") + name + ",") != std::string::npos; };
+			if (has("two")) s.globalTwo = false;
+			if (has("regional")) s.regionalHold = false;
+			if (has("range")) s.coarseRange = 3;
+			if (has("consistency")) s.consistencyPixels = 1.0f;
+			if (has("tolerance")) s.matchTolerance = 3.0f;
+			if (has("texture")) s.textureTolerance = 0.0f;
+			if (has("fade")) s.fadeMatch = false;
+			if (has("pixel")) s.pixelTrust = false;
+			if (has("split")) s.estSplit = true;
+		}
+		std::free(drop);
 		return s;
 	}
 	constexpr double kRefinedGrainTolerance = 3.0;

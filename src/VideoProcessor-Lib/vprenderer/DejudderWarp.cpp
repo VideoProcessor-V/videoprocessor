@@ -67,7 +67,14 @@ if (i == 0u) {
     float sa = sqrt(max(fm_[0].z / n - ma * ma, 0.0)), sb = sqrt(max(fm_[0].w / n - mb * mb, 0.0));
     vec4 prev = imageLoad(state_io, ivec2(0));
     float d = mb - ma;
-    bool fade_on = abs(d) > 0.75 && abs(d) < 24.0 && abs(prev.w) > 0.75 && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
+    // A fade scales the picture about its black level: B ~ black + g x (A -
+    // black), with g = B's spread over A's. A pan moves the mean with the
+    // content entering and leaving while the spread stays (g ~ 1), which puts
+    // the implied black level far outside the plausible range.
+    float g = sb / max(sa, 1e-3);
+    float black = abs(1.0 - g) > 0.01 ? (mb - g * ma) / (1.0 - g) : 1e9;
+    bool scaled = abs(1.0 - g) > 0.01 && black > -12.0 && black < 48.0;
+    bool fade_on = scaled && abs(d) > 0.75 && abs(d) < 24.0 && abs(prev.w) > 0.75 && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
     float gain = clamp(sa / max(sb, 1e-3), 0.5, 2.0);
     imageStore(state_io, ivec2(0), vec4(gain, ma - gain * mb, fade_on ? 1.0 : 0.0, d));
 }
@@ -1674,7 +1681,11 @@ if (q.x < size.x && q.y < size.y) {
         va = field_vector_all(c - sc * va);
         vec2 from = c - sc * va;
         float m = texture(pix_mask, from / vec2(size)).r;
+#ifdef PIXEL_MOTION
+        outv = texture(src, (c - m * sc * va) / vec2(size));   // the weight's share of the motion
+#else
         outv = mix(texelFetch(src, q, 0), texture(src, from / vec2(size)), m);
+#endif
     } else
         outv = texelFetch(src, q, 0);
     imageStore(dst, q, outv);
@@ -1716,7 +1727,11 @@ if (q.x < size.x && q.y < size.y) {
         va = field_vector_all(c * chroma_scale - sc * va);
         vec2 from = c - sc * va / chroma_scale;
         float m = texture(pix_mask, from * chroma_scale / vec2(textureSize(pix_mask, 0) * 2)).r;
+#ifdef PIXEL_MOTION
+        outv = texture(src, (c - m * sc * va / chroma_scale) / vec2(size));
+#else
         outv = mix(texelFetch(src, q, 0), texture(src, from / vec2(size)), m);
+#endif
     } else
         outv = texelFetch(src, q, 0);
     imageStore(dst, q, outv);
@@ -2982,6 +2997,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const std::string header = std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
 			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
 			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
+			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
 			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "");
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.

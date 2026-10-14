@@ -632,7 +632,7 @@ void RunBetaFeatureGpuTests()
 				g.targetCrop = g.sourceCrop;
 				pl_tex out = nullptr;
 				Check(rendered.Run(cache.Texture(3), warp.Field(), warp.FrameTrust(), settings.minTrustedShare,
-					shift, g, out, warp.SubField(), &warp.GetSettings()), "6d: rendered warp failed: " + rendered.Error());
+					shift, g, out, warp.SubField(), &warp.GetSettings(), warp.Camera(), warp.PixelMask(), warp.VectorOk()), "6d: rendered warp failed: " + rendered.Error());
 				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
 				pl_frame t = target();
 				std::vector<const pl_hook*> kept;
@@ -699,8 +699,12 @@ void RunBetaFeatureGpuTests()
 			difference(ideal, refinedSource, refinedIdealMax, refinedIdeal);
 			pl_tex_destroy(handle, &targetTex);
 			Check(extraMean <= 0.6, "6d: rendered extra differs from the source extra (mean " + std::to_string(extraMean) + ")");
+			int renderedIdealMax = 0;
+			double renderedIdeal = 0.0;
+			difference(ideal, refinedRendered, renderedIdealMax, renderedIdeal);
 			Check(refinedMean <= 0.6, "6d with the refinements: rendered extra differs from the source extra (mean " +
-				std::to_string(refinedMean) + ")");
+				std::to_string(refinedMean) + ", max " + std::to_string(refinedMax) + "; from the halfway picture: source " +
+				std::to_string(refinedIdeal) + ", rendered " + std::to_string(renderedIdeal) + ", plain source " + std::to_string(plainIdeal) + ")");
 			Check(refinedIdeal <= plainIdeal + 0.05, "6d: the refinements moved the extra away from the halfway picture (mean " +
 				std::to_string(refinedIdeal) + " vs " + std::to_string(plainIdeal) + " without them)");
 			std::cout << "Beta features: 6d with the refinements: rendered vs source mean " << refinedMean
@@ -879,7 +883,7 @@ void RunBetaDitherVectorsTests()
 	{
 		pl_tex out = nullptr;
 		Check(rendered.Run(cache.Texture(3), warp.Field(), warp.FrameTrust(), settings.minTrustedShare,
-			shift, g, out, warp.SubField(), &warp.GetSettings()), "R1: rendered warp failed: " + rendered.Error());
+			shift, g, out, warp.SubField(), &warp.GetSettings(), warp.Camera(), warp.PixelMask(), warp.VectorOk()), "R1: rendered warp failed: " + rendered.Error());
 		pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
 		pl_frame t = target();
 		std::vector<const pl_hook*> kept;
@@ -1677,7 +1681,7 @@ void RunBetaPassTiming()
 	pl_tex out = nullptr;
 	const double warpMs = DrainedMs(g, 20, [&] {
 		Check(rendered.Run(cached, warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, geometry, out,
-			warp.SubField(), &warp.GetSettings()), "pass timing: warp failed"); });
+			warp.SubField(), &warp.GetSettings(), warp.Camera(), warp.PixelMask(), warp.VectorOk()), "pass timing: warp failed"); });
 	const double fieldMs = DrainedMs(g, 20, [&] {
 		Check(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, geometry, ow, oh, out,
 			warp.SubField(), &warp.GetSettings()), "pass timing: field failed"); });
@@ -2490,7 +2494,7 @@ void RunBetaDitherCompare()
 						pl_tex warped = nullptr;
 						Check(rendered.Run(cache.Texture(sequence), warp.Field(), warp.FrameTrust(),
 							warp.GetSettings().minTrustedShare, shift, { sourceCrop, targetCrop, {}, {} }, warped, warp.SubField(),
-							&warp.GetSettings()), "dither compare: warp");
+							&warp.GetSettings(), warp.Camera(), warp.PixelMask(), warp.VectorOk()), "dither compare: warp");
 						if (mode.motion)
 						{
 							Check(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, shift - previousShift,
@@ -2808,7 +2812,7 @@ namespace Corpus
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
-		float ownTexture = 0.0f, ownError = 3.0f;
+		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
 	};
 	// VP_TEST_CORPUS_SET=fixes: today and the motion fixes (M1 texture
 	// tolerance, M2 two global candidates, M3 regional hold, a wider coarse
@@ -2821,6 +2825,26 @@ namespace Corpus
 		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
 		std::free(set);
 		const bool fixes = which == "fixes";
+		if (which == "pixmotion")
+		{
+			// M6: a partial weight as a share of the motion (the default) or as
+			// a crossfade with the held pixel.
+			Variant today{ "today (before tonight)", 3.0f, 0.5f, true };
+			variants.push_back(today);
+			Variant proposed{ "defaults, partial = motion share", 4.5f, 0.5f, true };
+			proposed.globalTwo = true; proposed.regional = true; proposed.coarseRange = 8; proposed.consistency = 2.0f;
+			proposed.textureTol = 0.25f; proposed.fade = true; proposed.split = false; proposed.pixel = true; proposed.pixLo = 3.0f; proposed.pixHi = 8.0f;
+			variants.push_back(proposed);
+			Variant cross = proposed;
+			cross.name = "defaults, partial = crossfade";
+			cross.crossfade = true;
+			variants.push_back(cross);
+			Variant more = proposed;
+			more.name = "more (tolerance 8), motion share";
+			more.tolerance = 8.0f; more.pixLo = 1.7f; more.pixHi = 4.5f;
+			variants.push_back(more);
+			return variants;
+		}
 		if (which == "final")
 		{
 			// The comparison for the defaults: today (before tonight), the
@@ -3144,6 +3168,7 @@ namespace Corpus
 		s.pixelTrustHiUntrusted = v.pixHiU;
 		s.pixelTrustedVectors = !v.pixAll;
 		s.pixelOwnTexture = v.ownTexture;
+		s.pixelTrustMotion = !v.crossfade;
 		s.pixelOwnError = v.ownError;
 		if (v.rolloff)
 		{
@@ -4350,7 +4375,7 @@ void RunBetaScenarioTiming()
 					pl_tex warped = nullptr;
 					Check(rendered.Run(cache.Texture(static_cast<uint64_t>(f)), warp.Field(), warp.FrameTrust(),
 						warp.GetSettings().minTrustedShare, shift, { sourceCrop, targetCrop, {}, {} }, warped, warp.SubField(),
-						&warp.GetSettings()), "scenario: warp");
+						&warp.GetSettings(), warp.Camera(), warp.PixelMask(), warp.VectorOk()), "scenario: warp");
 					Check(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, shift - previousShift,
 						{ sourceCrop, targetCrop, {}, {} }, ow, oh, vectors, warp.SubField(), &warp.GetSettings()), "scenario: field");
 					previousShift = shift;

@@ -92,7 +92,11 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         {
             float m = texture(pix_mask, (sp - d) / vec2(textureSize(pix_mask, 0) * 2)).r;
+#ifdef PIXEL_MOTION
+            o = rw_cubic(p - m * d / slope);   // the weight's share of the motion
+#else
             o = mix(texelFetch(cached, q, 0), rw_cubic(p - d / slope), m);
+#endif
         }
     } else
         o = texelFetch(cached, q, 0);
@@ -419,7 +423,8 @@ if (b.x < size.x && b.y < size.y) {
 		}
 		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") +
 			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-			(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") + OcclusionMask::NlsMapGlsl() +
+			(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
+			(pixel && ms.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") + OcclusionMask::NlsMapGlsl() +
 			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
 			(pixel ? Dejudder::FieldAllGlsl() : "") + WARP_FUNCTIONS;
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,

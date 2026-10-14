@@ -232,6 +232,10 @@ namespace Dejudder
 		// pixelOwnError x matchTolerance (0 = off: trusted blocks only).
 		float pixelOwnTexture = 0.0f;
 		float pixelOwnError = 3.0f;
+		// How a partial weight applies: true = the pixel moves that share of
+		// its motion (no double image; the same in both warps); false = a
+		// crossfade of the moved and the held pixel.
+		bool pixelTrustMotion = true;
 	};
 
 	// The warp-side defines for the given settings (SPLIT, FEATHER, TAPER) in

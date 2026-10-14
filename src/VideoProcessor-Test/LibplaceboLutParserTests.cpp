@@ -7836,6 +7836,21 @@ namespace VideoProcessorTest
 			Assert::IsTrue(on.right * 100 >= on.total * 80, (L"the fade match follows the pan: " + message).c_str());
 			Assert::IsTrue(std::fabs(on.scale - 0.25f) < 0.02f, (L"at the floor strength: " + message).c_str());
 			Assert::IsTrue(flash.right * 100 < flash.total * 30, (L"a flash holds: " + message).c_str());
+			// A pan whose mean brightness changes as brighter content enters (a
+			// vertical gradient panned 8 px a frame) is not a fade: full strength.
+			std::vector<std::unique_ptr<DejudderGpuPlanes>> pan;
+			std::vector<Dejudder::Planes> panSeq;
+			for (int f = 0; f < 5; ++f)
+			{
+				const DejudderFrame frame = MakeDejudderFrame(width, height, [f](int x, int y) {
+					return static_cast<uint16_t>(std::min(65535, 2000 + (DejudderTexture(x, y - 8 * f, 13) - 8000) / 2 + (y - 8 * f + 64) * 150)); },
+					[](int x, int y, int c) { return static_cast<uint16_t>(32768 + c); });
+				pan.push_back(std::make_unique<DejudderGpuPlanes>());
+				UploadDejudderFrame(gpu, frame, *pan.back());
+				panSeq.push_back(pan.back()->planes);
+			}
+			const Result panned = run(true, panSeq);
+			Assert::IsTrue(panned.scale > 0.99f, (L"a pan that changes the mean is not a fade (strength " + std::to_wstring(panned.scale) + L")").c_str());
 			AssertCleanLibplaceboLog(log);
 		}
 
