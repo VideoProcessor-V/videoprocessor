@@ -4,6 +4,12 @@ applied to every other new component and to the shaders.
 Owner: "make sure it audits for the config function too and ensures it's straightforward and simplistic to use".
 Please write the findings to C:\dev\videoprocessor\docs\audit\stage7-2026-10-14c-config.md (save the file).
 
+GPU IN USE: the build agent is running motion measurements on this PC's GPU, from the separate repo
+C:\dev\vp-investigate. Please do not run anything that uses the GPU: no Beta tests, no GPU or hardware runs, no
+corpus or timing runs, nothing with VP_TEST_GPU, and no VP or renderer launches. Do not build in either repo, and do
+not touch C:\dev\vp-investigate. If a check would need the GPU, list it with its command at the end and hold it until
+the owner says the GPU is free.
+
 Ground rules
 - Code and UI review. Do not build: the build agent rebuilds and runs the gate after this review, and a build would
   overwrite the shared x64\Release outputs. Running x64\Release\VideoProcessorConfigTests.exe (CPU only) is fine if it
