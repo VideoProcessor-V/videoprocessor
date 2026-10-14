@@ -6317,15 +6317,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         saturation->setToolTip(QStringLiteral(
             "Colour saturation offset in percent. 0 is neutral; +5 matches madVR's saturation +5."));
         // Owner 2026-10-13: the low-latency capture path (rule-selected, e.g.
-        // for sources above 59 Hz).
+        // for sources above 59 Hz). Experimental, off by default (2026-10-14).
         auto* capturePath = addChoice(QStringLiteral("Capture conversion"), QStringLiteral("capture_path"),
             { QStringLiteral("standard"), QStringLiteral("gpu") });
         capturePath->setItemText(capturePath->findData(QStringLiteral("standard")), QStringLiteral("Standard (CPU, the proven path)"));
-        capturePath->setItemText(capturePath->findData(QStringLiteral("gpu")), QStringLiteral("GPU (low latency)"));
+        capturePath->setItemText(capturePath->findData(QStringLiteral("gpu")), QStringLiteral("GPU (low latency, experimental)"));
         capturePath->setToolTip(QStringLiteral(
             "How DeckLink V210 / UYVY frames are converted for the renderer. GPU: the raw frame is uploaded and unpacked on "
             "the GPU (the same picture, no CPU conversion; about half the time per 4K frame on a laptop RTX 3050 Ti). Meant "
-            "for a low-latency profile chosen by a rule (e.g. sources above 59 Hz); other formats stay on the standard path."));
+            "for a low-latency profile chosen by a rule (e.g. sources above 59 Hz); other formats stay on the standard path. "
+            "Experimental and off by default (owner 2026-10-14): Standard is the proven path."));
 
         // Stage 6b-2b: the de-judder (film motion) and its occlusion mask for
         // the sigma-delta. Off unless set; meant for the cinema profile. The
