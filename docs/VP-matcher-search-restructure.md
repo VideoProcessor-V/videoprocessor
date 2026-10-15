@@ -70,4 +70,18 @@ output. On the RTX 3090 the matcher is already ~1-2 ms; the gain matters most fo
 1. De-judder on RGB input (12-bit RGB 4:4:4; DeckLink has no 12-bit YCbCr 4:2:2): a luma-from-RGB pass for the
    matcher and the rendered warp allowed on RGB (it warps the RGB output picture anyway); the source warp's RGB
    planes only if wanted.
-2. A verified true 12-bit output path (16-bit float swapchain, the driver's 12 bpc).
+2. 12-bit output: make sure VP's own code allows it (no forced 10-bit formats, clamps or depth assumptions in its
+   transports and the dither's depth handling); not chasing libplacebo's output stages (owner).
+
+## Result of the flat-pass version (2026-10-15)
+
+Built and measured (laptop 3050 Ti, 4K, live settings): byte-identical to the work-group search and the serial
+search (Beta), but the block search took ~13.8 ms in total against 7.2 ms - half-size SADs 6.8 ms (each thread
+reads its 144 samples of `from` and `to` from textures; the work-group search shares the block's `from` window
+in shared memory), the 1/8 SADs 2.5 ms, and the one-thread-per-block passes (starts, final pick with the
+half-pel refinement) ~2 ms each (8,000 threads cannot fill the GPU). Not kept; the work-group search stays.
+
+Next: profile the work-group search's remaining fixed cost in finer steps (the half-pel refinement - 8 threads x
+144 bilinear samples while 248 wait - the from-window load, the lead's scans) and target those inside the
+existing shape. A non-exact option (partial sums in a different float order, so picks could differ on exact
+ties) is measured and listed for the owner, not enabled.
