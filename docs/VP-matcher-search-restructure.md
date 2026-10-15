@@ -129,3 +129,5 @@ Zero-added-delay de-judder: an experimental optional setting (off by default) th
 the live n-1->n vectors instead of holding a frame for n+1. Measured and listed (forward prediction is wrong
 on motion changes and occlusions, with no next frame to fall back on); the one-frame hold stays the default for
 film. Live motion-smoothing options for 50/60 Hz sources to be discussed with the owner.
+
+Owner choice (2026-10-15) for 50/60 Hz live smoothing, also item 6: interpolation for rate mismatches at the same refresh (50p on a 60 Hz output, 25/30p cadences inside 50/60 Hz streams, found by the pulldown detector) and filling dropped or repeated frames in live streams from the vectors. A higher output refresh (100/120 Hz) is not pursued for now.
