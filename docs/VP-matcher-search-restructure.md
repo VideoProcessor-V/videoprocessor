@@ -147,3 +147,10 @@ the outer's levels are read only by the picture area (A's 1/8) and, when the out
 about 0.4 ms GPU less in the live settings (outer 1/8 0.36 -> 0.15 ms, 1/32 0.28 -> 0). Exact: every Beta
 output line identical to the previous run (6d 0.161845), Beta passes; main tests 2606/2608 with the two known
 unrelated failures (window placement, config read cache) seen in the earlier gates.
+
+## Second sweep: spread texture reads (2026-10-15, not kept)
+
+Every thread of the 32-thread group computed absolute differences into shared memory (11 x 144 floats), one
+thread per candidate summed its 144 in the serial order (exact; Beta identical, 6d 0.161845). Slower: second
+sweep 2.62 ms against 1.18 ms (6.3 KB of shared memory per 32-thread group cuts the groups per SM; the texture
+reads were already well hidden by many resident groups). Reverted.
