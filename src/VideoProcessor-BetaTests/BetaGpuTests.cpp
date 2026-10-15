@@ -1757,6 +1757,39 @@ void RunBetaPassTiming()
 		Dejudder::MotionWarp plain(gpu.Log(), g);
 		const double plainMs = DrainedMs(g, 10, [&] { Check(plain.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
 		std::cout << "  de-judder matcher with default settings " << plainMs << " ms\n";
+		// The live configuration (owner 2026-10-15): the refined settings with
+		// the half-size matcher for every pass (dejudder_low_res all), M6's
+		// pixel trust and the landing check, as the renderer runs it; wall
+		// clock (GPU drained) and each pass drained.
+		Dejudder::Settings liveSettings = ChainGpuProbe::Refined(Dejudder::Settings{});
+		liveSettings.lowRes = true;
+		liveSettings.lowResAll = true;
+		liveSettings.pixelTrust = true;
+		liveSettings.pixelTrustLo = 3.0f;
+		liveSettings.pixelTrustHi = 8.0f;
+		liveSettings.landingCheck = 1.5f;
+		Dejudder::MotionWarp live(gpu.Log(), g, liveSettings);
+		const double liveMs = DrainedMs(g, 10, [&] { Check(live.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
+		live.SetPassTiming(true);
+		for (int i = 0; i < reps; ++i)
+		{
+			Check(live.Estimate(a, b, slot, true), "pass timing: estimate failed");
+			slot ^= 1;
+		}
+		std::vector<std::pair<double, std::string>> livePasses;
+		double liveSum = 0.0;
+		for (const auto& entry : live.PassMs())
+		{
+			livePasses.emplace_back(entry.second / reps, entry.first);
+			liveSum += entry.second / reps;
+		}
+		live.SetPassTiming(false);
+		std::sort(livePasses.rbegin(), livePasses.rend());
+		std::cout << "  de-judder matcher, live settings (half size for every pass, M6, landing check): " << liveMs
+			<< " ms wall-clock; passes " << liveSum << " ms GPU over " << livePasses.size() << " passes:\n";
+		for (const auto& entry : livePasses)
+			if (entry.first >= 0.02)
+				std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
 	}
 	pl_tex_params cp{};
 	cp.w = ow;
