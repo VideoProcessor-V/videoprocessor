@@ -198,6 +198,17 @@ namespace LedDrive
 		int contrast;
 	};
 
+	// script_pacing: script - one tick of the internal script copy in the
+	// script's own timing: the sends, in order, relative to the tick start
+	// (the frame it decides on), and the tick's length (the next starts then).
+	struct ScriptSend
+	{
+		int offsetMs = 0;
+		bool light = false;   // LPW1, else CNTR
+		int value = 0;
+	};
+	int PaceScriptTick(const ControllerOutput& out, int measureMs, int echoMs, std::vector<ScriptSend>& sends);
+
 	// A queued frame further ahead than the one a command is for: lets
 	// mode: compensate start a ramp early (docs/VP-led-drive-delta-1.md 4).
 	struct Lookahead

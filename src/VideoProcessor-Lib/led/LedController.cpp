@@ -160,6 +160,27 @@ namespace LedDrive
 		return 74;
 	}
 
+	int PaceScriptTick(const ControllerOutput& out, int measureMs, int echoMs, std::vector<ScriptSend>& sends)
+	{
+		// The script's loop: the screenshot, then LPW1 (an echo to the port and
+		// one to its console) and its sleep, then each CNTR after its sleep
+		// (the schedule's offsets are those sleeps), each echo taking its time.
+		sends.clear();
+		int t = measureMs;
+		if (out.lightCommand >= 0)
+		{
+			sends.push_back({ t, true, out.lightCommand });
+			t += 2 * echoMs;
+		}
+		int echoes = 0;
+		for (const ContrastStep& step : out.contrastSchedule)
+		{
+			sends.push_back({ t + step.offsetMs + echoes * echoMs, false, step.contrast });
+			++echoes;
+		}
+		return t + out.durationMs + echoes * echoMs;
+	}
+
 	ControllerOutput ScriptController::Tick(const FrameStats& stats)
 	{
 		ControllerOutput out;

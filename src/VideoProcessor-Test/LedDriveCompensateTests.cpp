@@ -6,8 +6,6 @@
 #include <led/LedController.h>
 #include <led/LedDriveModule.h>
 #include <led/LedMeasurement.h>
-#include <led/ScriptListener.h>
-#include <led/ScriptHost.h>
 
 #include "LedDriveTestSupport.h"
 
@@ -397,228 +395,6 @@ namespace VideoProcessorTest
 			Assert::AreEqual(writes, projector->Writes().size(), L"picture_only wrote nothing");
 		}
 
-		TEST_METHOD(ListenMessagesParse)
-		{
-			ScriptMessage m;
-			Assert::IsTrue(ParseScriptMessage("VP1 TICK -1 t=12.5 mean=41 max=230 hl=1 tp=210 tc=58", m));
-			Assert::AreEqual(std::string("TICK"), m.kind);
-			Assert::AreEqual(41, m.mean);
-			Assert::AreEqual(230, m.maximum);
-			Assert::AreEqual(1, m.highlight);
-			Assert::AreEqual(210, m.targetPower);
-			Assert::AreEqual(58, m.targetContrast);
-			Assert::IsTrue(ParseScriptMessage("VP1 CNTR 55 t=1.0 mean=-1 max=-1 hl=-1 tp=-1 tc=-1", m));
-			Assert::AreEqual(55, m.value);
-			Assert::IsFalse(ParseScriptMessage("VP2 CNTR 55", m));
-			Assert::IsFalse(ParseScriptMessage("VP1 LDMM 0", m));
-			Assert::IsFalse(ParseScriptMessage("garbage", m));
-			// Audit 2026-10-14 / owner: LED power and contrast are whole numbers;
-			// nothing non-finite or fractional reaches a value.
-			Assert::IsFalse(ParseScriptMessage("VP1 CNTR 55.5", m), L"a fractional contrast is not a message");
-			Assert::IsFalse(ParseScriptMessage("VP1 LPW1 200x", m), L"a malformed value is not a message");
-			Assert::IsTrue(ParseScriptMessage("VP1 TICK -1 t=3.25 mean=41.5 max=1e30 hl=nan tp=210 tc=58", m));
-			Assert::AreEqual(-1, m.mean, L"a fractional mean is ignored");
-			Assert::AreEqual(-1, m.maximum, L"an out-of-range max is ignored");
-			Assert::AreEqual(-1, m.highlight, L"nan is ignored");
-			Assert::AreEqual(210, m.targetPower);
-			Assert::AreEqual(58, m.targetContrast);
-		}
-
-		TEST_METHOD(ListenModeFollowsTheScriptWithoutThePort)
-		{
-			// mode: listen (owner 2026-10-13): the script drives COM1 and tells
-			// VP over UDP. VP never opens the port; a heard CNTR step is eased
-			// in the picture as if VP had sent it (the script smoothing); a TICK
-			// is compared with VP's own copy of the rules; both are logged.
-			auto projector = std::make_shared<FakeProjector>();
-			LedDriveConfig config = Compensate();
-			config.mode = Mode::Listen;
-			config.scriptSmoothing = true;
-			config.listenPort = 47923;
-			config.listenLog = true;
-			// Beside the test binary (writable wherever the tests build).
-			char here[MAX_PATH] = {};
-			HMODULE self = nullptr;
-			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
-			GetModuleFileNameA(self, here, MAX_PATH);
-			const std::string binary(here);
-			config.listenLogDirectory = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-listen-test";
-			DeleteFileA(ListenCsvPath(config.listenLogDirectory).c_str());
-			ProjectorConfig port;
-			port.protocol = "barco_ascii";
-			port.cntrLatencyMs = 100;
-			Assert::AreEqual(std::string("none"), EffectiveProtocol(port, config));
-			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
-			module.Start();
-			Assert::IsTrue(WaitFor([&] { return module.Listening().listening; }), L"the UDP port is bound");
-			module.SubmitMeasurement(Frame(40.0, 100, 230));
-			module.BeginFrame(0);
-			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 TICK -1 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 200 t=1.1 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-			Assert::IsTrue(WaitFor([&] { return module.Listening().ticks == 1 && module.Listening().lightCommands == 1; }));
-			const ListenAccuracy heard = module.Listening();
-			Assert::IsTrue(heard.meanDifference <= 2.0, (L"mean2 vs VP's APL: " + std::to_wstring(heard.meanDifference)).c_str());
-			Assert::AreEqual(1.0, heard.highlightAgreement, 1e-9);
-			// A heard CNTR step: the picture gain moves off 1 around the step
-			// and comes back (the smoother eases the projector's step).
-			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 CNTR 56 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-			Assert::IsTrue(WaitFor([&] { return module.Listening().contrastCommands == 1; }));
-			double furthest = 0.0, last = 1.0;
-			const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-			while (std::chrono::steady_clock::now() < until)
-			{
-				const CompensationGain gain = module.BeginFrame(0);
-				const double g = gain.active ? gain.gain : 1.0;
-				furthest = std::max(furthest, std::fabs(g - 1.0));
-				last = g;
-				std::this_thread::sleep_for(std::chrono::milliseconds(8));
-			}
-			Assert::AreEqual(56, module.Listening().lastContrast);
-			Assert::IsTrue(furthest > 0.005, (L"the step was eased: furthest gain " + std::to_wstring(furthest)).c_str());
-			Assert::AreEqual(1.0, last, 0.002, L"and the gain is back at 1 after the step");
-			module.Stop();
-			Assert::AreEqual(0, projector->opens, L"listen must not open the port");
-			Assert::IsTrue(projector->Writes().empty(), L"listen must not write to the port");
-			// The data log has the TICK row with VP's measurement next to it.
-			std::ifstream csv(ListenCsvPath(config.listenLogDirectory));
-			std::string line, tick;
-			while (std::getline(csv, line))
-				if (line.find(",TICK,") != std::string::npos)
-					tick = line;
-			Assert::IsFalse(tick.empty(), L"the TICK row is logged");
-			Assert::IsTrue(tick.find(",40,230,1,") != std::string::npos, std::wstring(tick.begin(), tick.end()).c_str());
-			// The monitor's line: the heard commands and the agreement.
-			std::ifstream nowFile(ListenNowPath(config.listenLogDirectory));
-			std::string now;
-			std::getline(nowFile, now);
-			Assert::IsTrue(now.find("light=200") != std::string::npos && now.find("contrast=56") != std::string::npos &&
-				now.find("ticks=1") != std::string::npos, std::wstring(now.begin(), now.end()).c_str());
-		}
-
-		TEST_METHOD(ScriptHostRunsWatchesRestartsAndStopsTheScript)
-		{
-			// Owner 2026-10-13: VP starts the listen script itself. A dummy
-			// script (its folder's mode.txt: "hang" prints and waits, "exit"
-			// prints and exits with code 3) under the real Python.
-			wchar_t python[MAX_PATH] = {};
-			if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr) == 0)
-			{
-				Logger::WriteMessage(L"ScriptHost test: no python.exe on PATH; not run");
-				return;
-			}
-			char here[MAX_PATH] = {};
-			HMODULE self = nullptr;
-			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
-			GetModuleFileNameA(self, here, MAX_PATH);
-			const std::string binary(here);
-			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-script-host-test";
-			const std::string logs = folder + "\\logs";
-			CreateDirectoryA(folder.c_str(), nullptr);
-			CreateDirectoryA(logs.c_str(), nullptr);
-			const std::string script = folder + "\\dummy.py";
-			{
-				std::ofstream out(script, std::ios::trunc);
-				out << "import sys, time\n"
-					"mode = open('mode.txt').read().strip()\n"
-					"print('hello from the dummy script, mode ' + mode)\n"
-					"if mode == 'exit':\n"
-					"    sys.exit(3)\n"
-					"while True:\n"
-					"    time.sleep(0.2)\n";
-			}
-			auto setMode = [&](const char* mode) { std::ofstream(folder + "\\mode.txt", std::ios::trunc) << mode << "\n"; };
-			const std::string logPath = logs + "\\led-script.log", nowPath = logs + "\\led-script-now.txt";
-			DeleteFileA(logPath.c_str());
-			auto read = [](const std::string& path)
-			{
-				std::ifstream in(path);
-				return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-			};
-			auto alive = [](DWORD pid)
-			{
-				HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-				if (!h) return false;
-				const bool running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-				CloseHandle(h);
-				return running;
-			};
-			char pythonPath[MAX_PATH] = {};
-			WideCharToMultiByte(CP_UTF8, 0, python, -1, pythonPath, MAX_PATH, nullptr, nullptr);
-			// The test's logs folder stands for "beside vp.log": ListenNowPath(directory).
-			const std::string directory = logs + "\\";
-			DWORD last = 0;
-			{
-				ScriptHost host;
-				// No script: nothing runs.
-				host.Update("", pythonPath, directory);
-				Assert::IsTrue(host.GetState() == ScriptHost::State::Off && host.Pid() == 0, L"no listen_script: off");
-				// Runs; its output reaches the log; the monitor's file says so.
-				setMode("hang");
-				host.Update(script, pythonPath, directory);
-				Assert::IsTrue(host.GetState() == ScriptHost::State::Running && host.Pid() != 0,
-					(L"started: " + std::wstring(host.LastError().begin(), host.LastError().end())).c_str());
-				const DWORD first = host.Pid();
-				Assert::IsTrue(WaitFor([&] { return read(logPath).find("hello from the dummy script, mode hang") != std::string::npos; }),
-					L"the script's output is in logs\\led-script.log");
-				Assert::IsTrue(read(nowPath).find("state=running pid=" + std::to_string(first)) != std::string::npos,
-					L"led-script-now.txt: running with its pid");
-				// Watched: still running a moment later, not restarted.
-				Sleep(500);
-				host.Update(script, pythonPath, directory);
-				Assert::IsTrue(host.Pid() == first && host.Starts() == 1, L"a running script is left alone");
-				// Stop (the mode left listen): the process ends.
-				host.Stop();
-				Assert::IsTrue(host.GetState() == ScriptHost::State::Off);
-				Assert::IsTrue(WaitFor([&] { return !alive(first); }), L"stopped: the process ended");
-				Assert::IsTrue(read(nowPath).find("state=stopped") != std::string::npos, L"led-script-now.txt: stopped");
-				// A script that exits: restarted after 2 s, then 4 s.
-				setMode("exit");
-				host.Update(script + "", pythonPath + std::string(), directory);   // same values: a start
-				const int startsBefore = host.Starts();
-				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.GetState() == ScriptHost::State::Waiting; }),
-					L"the exit is seen");
-				Assert::IsTrue(host.LastError() == "exited with code 3", std::wstring(host.LastError().begin(), host.LastError().end()).c_str());
-				Assert::IsTrue(host.SecondsToRestart() >= 1 && host.SecondsToRestart() <= 2, L"restart in 2 s");
-				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.Starts() == startsBefore + 1; }, 4000),
-					L"started again after 2 s");
-				Assert::IsTrue(WaitFor([&] { host.Update(script, pythonPath, directory); return host.GetState() == ScriptHost::State::Waiting; }),
-					L"the second exit is seen");
-				Assert::IsTrue(host.SecondsToRestart() >= 3 && host.SecondsToRestart() <= 4, L"then in 4 s (the back-off doubles)");
-				// The port set-up: a port that is not there is reported and the
-				// script starts anyway (VP never holds the port).
-				setMode("hang");
-				host.Update("", pythonPath, directory);   // a new script value: start at once
-				host.Update(script, pythonPath, directory, "COM250", 19200);
-				Assert::IsTrue(host.GetState() == ScriptHost::State::Running, L"a port that cannot be set up: the script still starts");
-				Assert::IsTrue(host.PortError().find("cannot open COM250") == 0,
-					std::wstring(host.PortError().begin(), host.PortError().end()).c_str());
-				Assert::IsTrue(read(nowPath).find("port_error=cannot_open_COM250") != std::string::npos, L"led-script-now.txt: the port error");
-				Assert::IsTrue(host.GetPortSetup() == ScriptHost::PortSetup::Failed && read(nowPath).find("port=failed") != std::string::npos,
-					L"the port set-up reported as failed");
-				host.Stop();
-				host.Update("", pythonPath, directory);
-				host.Update(script, pythonPath, directory);   // no port configured
-				Assert::IsTrue(host.GetPortSetup() == ScriptHost::PortSetup::Skipped && read(nowPath).find("port=skipped") != std::string::npos,
-					L"no port: reported as skipped");
-				host.Stop();
-				setMode("exit");
-				// A missing script: waiting, with the reason.
-				host.Update(folder + "\\missing.py", pythonPath, directory);
-				Assert::IsTrue(host.GetState() == ScriptHost::State::Waiting && host.LastError().find("script not found") == 0,
-					L"a missing script waits with the reason");
-				// Destroyed while running (VP exits): no orphan.
-				setMode("hang");
-				host.Update(script, pythonPath, directory);
-				Assert::IsTrue(host.GetState() == ScriptHost::State::Running);
-				last = host.Pid();
-				Assert::IsTrue(alive(last));
-			}
-			// The host is gone: its script is too.
-			Assert::IsTrue(WaitFor([&] { return !alive(last); }), L"no orphan after the host is destroyed");
-		}
-
 		TEST_METHOD(CommandSourceSetsTheModeAndSwitches)
 		{
 			// The LED core (owner 2026-10-14): command_source picks the mode;
@@ -637,21 +413,41 @@ namespace VideoProcessorTest
 				DeleteFileA(file);
 				return result;
 			};
-			LedDriveConfig python = read("command_source: python\nlisten_script: C:\\scripts\\main_vp.py\nshadow_lift_ansi: 0.3\n");
-			Assert::IsTrue(python.mode == Mode::Listen && python.listenRelay && !python.adaptiveGamma && !python.scriptSmoothing,
-				L"python: listen, relayed, adaptive gamma off by default");
-			Assert::IsTrue(ListenRelays(python));
-			Assert::IsTrue(python.pythonFeed, L"python_feed on by default (owner 2026-10-15)");
-			Assert::IsFalse(read("command_source: python\nlisten_script: main_vp.py\npython_feed: false\n").pythonFeed,
-				L"python_feed: false is read");
+			// The Python source was removed (owner 2026-10-15): an older file naming
+			// it runs VP's copy of the script, its retired keys accepted and ignored.
+			const LedDriveConfig python = read("command_source: python\nlisten_script: C:\\scripts\\main_vp.py\npython: python.exe\n"
+				"listen_port: 47811\nlisten_log: true\npython_drives_port: false\npython_feed: true\nshadow_lift_ansi: 0.3\n");
+			Assert::IsTrue(python.mode == Mode::Script && python.pythonSourceRetired && !python.adaptiveGamma,
+				L"command_source: python runs internal_script");
+			const LedDriveConfig listen = read("mode: listen\nlisten_script: main_vp.py\n");
+			Assert::IsTrue(listen.mode == Mode::Script && listen.pythonSourceRetired, L"mode: listen runs mode: script");
 			ProjectorConfig port;
 			port.protocol = "barco_ascii";
-			Assert::AreEqual(std::string("barco_ascii"), EffectiveProtocol(port, python), L"relay opens the port");
-			const LedDriveConfig fallback = read("command_source: python\nlisten_script: main_vp.py\npython_drives_port: true\n");
-			Assert::IsTrue(fallback.mode == Mode::Listen && !ListenRelays(fallback), L"the fallback: the script writes the port");
-			Assert::AreEqual(std::string("none"), EffectiveProtocol(port, fallback));
-			const LedDriveConfig byHand = read("command_source: python\n");
-			Assert::IsFalse(ListenRelays(byHand), L"no script of VP's: nothing to relay (the script writes the port)");
+			Assert::AreEqual(std::string("barco_ascii"), EffectiveProtocol(port, python), L"VP drives the port itself");
+			Assert::IsFalse(read("command_source: internal_script\n").pythonSourceRetired);
+			{
+				// script_pacing (owner 2026-10-15): the default; read with its two times.
+				Assert::IsTrue(python.scriptPacing && python.scriptMeasureMs == 150 && python.scriptEchoMs == 30);
+				Assert::IsFalse(read("command_source: internal_script\nscript_pacing: tick\n").scriptPacing);
+				const LedDriveConfig paced = read("command_source: internal_script\nscript_pacing: script\n"
+					"script_measure_ms: 120\nscript_echo_ms: 25\n");
+				Assert::IsTrue(paced.scriptPacing && paced.scriptMeasureMs == 120 && paced.scriptEchoMs == 25);
+				// One tick in the script's timing: screenshot 120, LPW1, two echoes, its 200 ms
+				// sleep, a fast step after 100 ms more, the last CNTR after 200 more.
+				ControllerOutput out;
+				out.lightCommand = 200;
+				out.contrastSchedule = { { 300, 57 }, { 500, 56 } };
+				out.durationMs = 500;
+				std::vector<ScriptSend> sends;
+				const int length = PaceScriptTick(out, 120, 25, sends);
+				Assert::AreEqual(size_t(3), sends.size());
+				Assert::IsTrue(sends[0].light && sends[0].offsetMs == 120 && sends[0].value == 200);
+				Assert::IsTrue(!sends[1].light && sends[1].offsetMs == 120 + 50 + 300 && sends[1].value == 57);
+				Assert::IsTrue(!sends[2].light && sends[2].offsetMs == 120 + 50 + 500 + 25 && sends[2].value == 56);
+				Assert::AreEqual(120 + 50 + 500 + 50, length, L"the next loop starts after the last echo");
+				Assert::AreEqual(120, PaceScriptTick(ControllerOutput{}, 120, 25, sends), L"a quiet loop: its screenshot only");
+				Assert::IsTrue(sends.empty());
+			}
 			const LedDriveConfig internal = read("command_source: internal_script\nadaptive_gamma: true\nlookahead: false\n");
 			Assert::IsTrue(internal.mode == Mode::Script && internal.adaptiveGamma && internal.scriptSmoothing && !internal.lookahead,
 				L"internal script with adaptive gamma: the steps are eased");
@@ -664,304 +460,6 @@ namespace VideoProcessorTest
 				L"an older mode-only configuration behaves as before");
 			Assert::IsFalse(read("mode: compensate\nadaptive_gamma: false\n").adaptiveGamma);
 			Assert::IsFalse(read("").adaptiveGamma, L"a new file (no source, no mode): adaptive gamma off (audit 2026-10-14c)");
-			Assert::IsFalse(ListenRelays(read("mode: listen\nlisten_script: main_vp.py\n")),
-				L"an older mode: listen file leaves COM1 to the script, as before (audit 2026-10-14b)");
-		}
-
-		TEST_METHOD(RelaySendsTheScriptsBytesAndNothingElse)
-		{
-			// Relay (owner 2026-10-14): VP holds the port, the script VP runs
-			// leaves COM1 alone (VP_LED_RELAY=1) and VP sends each command it
-			// hears exactly as the script's `echo :<cmd><value>cr > com1`
-			// wrote it - nothing at the start (Python loading), nothing out of
-			// range, nothing on exit.
-			Assert::AreEqual(std::string(":cntr50cr \r\n"), BarcoAsciiDriver::RelayBytes("CNTR", 50));
-			Assert::AreEqual(std::string(":lpw1255cr \r\n"), BarcoAsciiDriver::RelayBytes("LPW1", 255));
-			wchar_t python[MAX_PATH] = {};
-			if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr) == 0)
-			{
-				Logger::WriteMessage(L"Relay test: no python.exe on PATH; the module part not run");
-				return;
-			}
-			char pythonPath[MAX_PATH] = {};
-			WideCharToMultiByte(CP_UTF8, 0, python, -1, pythonPath, MAX_PATH, nullptr, nullptr);
-			char here[MAX_PATH] = {};
-			HMODULE self = nullptr;
-			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
-			GetModuleFileNameA(self, here, MAX_PATH);
-			const std::string binary(here);
-			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-relay-test";
-			const std::string logs = folder + "\\logs\\";
-			CreateDirectoryA(folder.c_str(), nullptr);
-			CreateDirectoryA(logs.c_str(), nullptr);
-			const std::string script = folder + "\\relay.py";
-			const std::string seen = folder + "\\relay.txt";
-			DeleteFileA(seen.c_str());
-			DeleteFileA(ListenCsvPath(logs).c_str());
-			const std::string go = folder + "\\go.txt";
-			DeleteFileA(go.c_str());
-			{
-				// Stands for main_vp.py: notes what VP told it, then sends the
-				// lines of go.txt (once it appears) from its own socket.
-				std::ofstream out(script, std::ios::trunc);
-				out << "import os, socket, time\n"
-					"open('relay.txt', 'w').write(os.environ.get('VP_LED_RELAY', 'unset'))\n"
-					"s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
-					"while not os.path.exists('go.txt'):\n"
-					"    time.sleep(0.05)\n"
-					"time.sleep(0.1)\n"
-					"for line in open('go.txt').read().splitlines():\n"
-					"    s.sendto(line.encode('ascii'), ('127.0.0.1', 47925))\n"
-					"    time.sleep(0.05)\n"
-					"while True:\n"
-					"    time.sleep(0.2)\n";
-			}
-			auto projector = std::make_shared<FakeProjector>();
-			LedDriveConfig config = Compensate();
-			config.mode = Mode::Listen;
-			config.listenRelay = true;
-			config.listenScript = script;
-			config.python = pythonPath;
-			config.listenPort = 47925;
-			config.listenLog = true;
-			config.listenLogDirectory = logs;
-			ProjectorConfig port;
-			port.protocol = "barco_ascii";
-			port.readBack = true;   // even so: no ECHO, no queries
-			Assert::AreEqual(std::string("barco_ascii"), EffectiveProtocol(port, config));
-			{
-				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
-				module.Start();
-				Assert::IsTrue(WaitFor([&] { return module.Listening().relaying; }, 10000), L"the script VP runs is running");
-				Assert::AreEqual(1, projector->opens, L"relay opens the port");
-				Assert::IsTrue(WaitFor([&] { std::ifstream in(seen); std::string text; std::getline(in, text); return text == "1"; }, 10000),
-					L"the script was told VP_LED_RELAY=1");
-				Sleep(300);
-				Assert::IsTrue(projector->Writes().empty(), L"nothing is sent before the script's first command");
-				// Another program on this PC: never relayed (audit 2026-10-14b).
-				Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 90 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-				Assert::IsTrue(WaitFor([&] { return module.Listening().relayRefused == 1; }), L"a stranger's command is refused");
-				Assert::IsTrue(projector->Writes().empty(), L"a stranger's command is not sent");
-				std::ofstream(go, std::ios::trunc) <<
-					"VP1 TICK -1 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
-					"VP1 LPW1 200 t=1.1 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
-					"VP1 CNTR 150 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
-					"VP1 CNTR 55.5 t=1.2 mean=40 max=230 hl=1 tp=-1 tc=-1\n"
-					"VP1 CNTR 56 t=1.3 mean=40 max=230 hl=1 tp=-1 tc=-1\n";
-				const bool bothRelayed = WaitFor([&] { return module.Listening().relayed == 2; }, 10000);
-				const ListenAccuracy after = module.Listening();
-				Assert::IsTrue(bothRelayed, (L"both commands relayed; relayed " + std::to_wstring(after.relayed) + L", refused " +
-					std::to_wstring(after.relayRefused) + L", last from process " + std::to_wstring(after.refusedOwner) +
-					L", the script is " + std::to_wstring(after.scriptPid)).c_str());
-				const ListenAccuracy heard = module.Listening();
-				Assert::AreEqual(2, heard.relayRefused, L"the stranger's, and CNTR 150 (out of range); 55.5 is not a message");
-				Assert::AreEqual(0, heard.relayFailed);
-				const std::vector<std::string> writes = projector->Writes();
-				Assert::AreEqual(size_t(2), writes.size());
-				Assert::AreEqual(std::string(":lpw1200cr \r\n"), writes[0]);
-				Assert::AreEqual(std::string(":cntr56cr \r\n"), writes[1]);
-				module.Stop();
-			}
-			Assert::AreEqual(size_t(2), projector->Writes().size(), L"nothing of VP's own on exit");
-			// The data log: both commands with relay_sent 1; the TICK row.
-			std::ifstream csv(ListenCsvPath(logs));
-			std::string line, header;
-			std::getline(csv, header);
-			Assert::AreEqual(std::string(kListenCsvHeader), header);
-			int sentRows = 0;
-			bool tick = false;
-			while (std::getline(csv, line))
-			{
-				if ((line.find(",LPW1,200,") != std::string::npos || line.find(",CNTR,56,") != std::string::npos) &&
-					line.find(",1,", line.size() > 12 ? line.size() - 12 : 0) != std::string::npos)
-					++sentRows;
-				tick = tick || line.find(",TICK,") != std::string::npos;
-			}
-			Assert::AreEqual(2, sentRows, L"each relayed command is logged as sent");
-			Assert::IsTrue(tick, L"the first TICK is logged");
-		}
-
-		TEST_METHOD(FeedAnswersTheScriptWithTheFrameOnScreen)
-		{
-			// python_feed (owner 2026-10-15): the script VP runs (told
-			// VP_LED_FEED=1) asks for VP's measurement instead of taking a
-			// screenshot; VP answers with its exact measurement of the frame on
-			// screen (never an upcoming one); "none" before any frame;
-			// strangers refused.
-			wchar_t python[MAX_PATH] = {};
-			if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr) == 0)
-			{
-				Logger::WriteMessage(L"Feed test: no python.exe on PATH; not run");
-				return;
-			}
-			char pythonPath[MAX_PATH] = {};
-			WideCharToMultiByte(CP_UTF8, 0, python, -1, pythonPath, MAX_PATH, nullptr, nullptr);
-			char here[MAX_PATH] = {};
-			HMODULE self = nullptr;
-			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
-			GetModuleFileNameA(self, here, MAX_PATH);
-			const std::string binary(here);
-			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-feed-test";
-			const std::string logs = folder + "\\logs\\";
-			CreateDirectoryA(folder.c_str(), nullptr);
-			CreateDirectoryA(logs.c_str(), nullptr);
-			const std::string script = folder + "\\feed.py";
-			const std::string answer = folder + "\\answer.txt";
-			DeleteFileA(answer.c_str());
-			{
-				// Stands for main_vp.py's vp_feed: a request every 50 ms from
-				// its own socket; the environment and the latest answer to
-				// answer.txt.
-				std::ofstream out(script, std::ios::trunc);
-				out << "import os, socket, time\n"
-					"s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
-					"s.settimeout(0.2)\n"
-					"n = 0\n"
-					"while True:\n"
-					"    n += 1\n"
-					"    s.sendto(('VP1 REQ %d t=%.3f' % (n, time.time())).encode('ascii'), ('127.0.0.1', 47926))\n"
-					"    try:\n"
-					"        data = s.recvfrom(512)[0].decode('ascii')\n"
-					"        tmp = 'answer.tmp'\n"
-					"        open(tmp, 'w').write(os.environ.get('VP_LED_FEED', 'unset') + ' ' + data)\n"
-					"        os.replace(tmp, 'answer.txt')\n"
-					"    except socket.timeout:\n"
-					"        pass\n"
-					"    time.sleep(0.05)\n";
-			}
-			auto latestAnswer = [&]() { std::ifstream in(answer); std::string text; std::getline(in, text); return text; };
-			auto gotText = [&]() { const std::string text = latestAnswer(); return std::wstring(text.begin(), text.end()); };
-			auto projector = std::make_shared<FakeProjector>();
-			LedDriveConfig config = Compensate();
-			config.mode = Mode::Listen;
-			config.listenRelay = true;
-			config.listenScript = script;
-			config.python = pythonPath;
-			config.listenPort = 47926;
-			config.listenLogDirectory = logs;
-			config.pythonFeed = true;
-			config.lookahead = true;
-			ProjectorConfig port;
-			port.protocol = "barco_ascii";
-			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
-			module.Start();
-			Assert::IsTrue(WaitFor([&] { return latestAnswer().find(" none") != std::string::npos; }, 10000),
-				L"before any frame: none (the script takes its screenshot)");
-			Assert::AreEqual(std::string("1"), latestAnswer().substr(0, 1), L"the script was told VP_LED_FEED=1");
-			Assert::IsTrue(module.Listening().feedNone > 0);
-
-			// On screen: source frame 10 at APL 40, max 100. Queued frames 11..14,
-			// brighter, are never what the script gets (faithful to its
-			// screenshot), with lookahead on or off.
-			auto withMax = [](RawMeasurement raw, int maximum) { raw.maximum = static_cast<uint32_t>(maximum * SUM_SCALE); return raw; };
-			module.BeginFrame(10, 24.0);
-			module.SubmitMeasurement(withMax(Frame(40.0), 100), 10);
-			StatsBuilder builder(config);
-			for (uint64_t s = 11; s <= 14; ++s)
-				module.SubmitPrediction(s, builder.Build(withMax(Frame(30.0 * static_cast<double>(s - 9)), 230), s * 41.7));
-			StatsBuilder onScreen(config);
-			const FrameStats now = onScreen.Build(withMax(Frame(40.0), 100));
-			const std::string expectNow = "mean=" + std::to_string(static_cast<int>(now.apl)) + " max=" +
-				std::to_string(static_cast<int>(now.maximum)) + " hl=0 seq=10";
-			Assert::IsTrue(WaitFor([&] { return latestAnswer().find(expectNow) != std::string::npos; }, 5000),
-				(L"the frame on screen; got " + gotText()).c_str());
-			Assert::IsFalse(module.WantsPredictions(), L"the feed does not need the queued-frame walk");
-
-			// A stranger: refused.
-			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 REQ 7 t=1.0"));
-			Assert::IsTrue(WaitFor([&] { return module.Listening().feedRefused == 1; }), L"a stranger's request is refused");
-
-			// lookahead off changes nothing for the script; a new frame on screen follows.
-			LedDriveConfig reactive = config;
-			reactive.lookahead = false;
-			Assert::IsTrue(module.Reconfigure(port, reactive));
-			module.BeginFrame(11, 24.0);
-			module.SubmitMeasurement(withMax(Frame(90.0), 230), 11);
-			const FrameStats next = onScreen.Build(withMax(Frame(90.0), 230));
-			const std::string expectNext = "mean=" + std::to_string(static_cast<int>(next.apl)) + " max=" +
-				std::to_string(static_cast<int>(next.maximum)) + " hl=" +
-				std::to_string(next.maximum >= config.scriptHighlightCode ? 1 : 0) + " seq=11";
-			Assert::IsTrue(WaitFor([&] { return latestAnswer().find(expectNext) != std::string::npos; }, 5000),
-				(L"the next frame on screen; got " + gotText()).c_str());
-			module.Stop();
-		}
-
-		TEST_METHOD(ListenLogStaysUnderItsCap)
-		{
-			// Sized for hours (owner 2026-10-14): an over-cap file, or one with
-			// an older header, is moved to .prev and a new one starts.
-			char here[MAX_PATH] = {};
-			HMODULE self = nullptr;
-			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
-			GetModuleFileNameA(self, here, MAX_PATH);
-			const std::string binary(here);
-			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-listen-cap-test\\";
-			CreateDirectoryA(folder.c_str(), nullptr);
-			const std::string path = ListenCsvPath(folder), previous = folder + "led-listen.prev.csv";
-			DeleteFileA(previous.c_str());
-			std::ofstream(path, std::ios::trunc) << "time_ms,kind,value\n1,TICK,-1\n";   // an older header
-			std::ofstream csv;
-			long long size = OpenListenCsv(csv, path, "# session");
-			csv.close();
-			Assert::IsTrue(GetFileAttributesA(previous.c_str()) != INVALID_FILE_ATTRIBUTES, L"the older file moved aside");
-			{
-				std::ifstream in(path);
-				std::string first;
-				std::getline(in, first);
-				Assert::AreEqual(std::string(kListenCsvHeader), first);
-			}
-			Assert::IsTrue(size > 0 && size < 400);
-			{
-				// Past the cap: rotated on the next open.
-				std::ofstream big(path, std::ios::app | std::ios::binary);
-				const std::string row(1023, 'x');
-				for (long long written = 0; written <= kListenCsvCapBytes; written += 1024)
-					big << row << "\n";
-			}
-			size = OpenListenCsv(csv, path, "# session");
-			csv.close();
-			Assert::IsTrue(size < 400, L"a new file after the cap");
-			WIN32_FILE_ATTRIBUTE_DATA info{};
-			Assert::IsTrue(GetFileAttributesExA(previous.c_str(), GetFileExInfoStandard, &info) != 0);
-			Assert::IsTrue(((static_cast<long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow) > kListenCsvCapBytes,
-				L"the full file is the previous one (one kept: at most twice the cap on disk)");
-			DeleteFileA(previous.c_str());
-			DeleteFileA(path.c_str());
-		}
-
-		TEST_METHOD(ListenLogOffWritesNoCsv)
-		{
-			// listen_log off (the default): the monitor's line only, no data log.
-			auto projector = std::make_shared<FakeProjector>();
-			LedDriveConfig config = Compensate();
-			config.mode = Mode::Listen;
-			config.listenPort = 47924;
-			config.listenLog = false;
-			char here[MAX_PATH] = {};
-			HMODULE self = nullptr;
-			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
-			GetModuleFileNameA(self, here, MAX_PATH);
-			const std::string binary(here);
-			config.listenLogDirectory = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-listen-off-test";
-			CreateDirectoryA(config.listenLogDirectory.c_str(), nullptr);
-			DeleteFileA(ListenCsvPath(config.listenLogDirectory).c_str());
-			DeleteFileA(ListenNowPath(config.listenLogDirectory).c_str());
-			ProjectorConfig port;
-			port.protocol = "barco_ascii";
-			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
-			module.Start();
-			Assert::IsTrue(WaitFor([&] { return module.Listening().listening; }), L"the UDP port is bound");
-			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 LPW1 210 t=1.0 mean=40 max=230 hl=1 tp=-1 tc=-1"));
-			Assert::IsTrue(WaitFor([&] { return module.Listening().lightCommands == 1; }));
-			Assert::IsTrue(WaitFor([&] { return GetFileAttributesA(ListenNowPath(config.listenLogDirectory).c_str()) != INVALID_FILE_ATTRIBUTES; }),
-				L"the monitor's line is written");
-			module.Stop();
-			Assert::AreEqual(static_cast<DWORD>(INVALID_FILE_ATTRIBUTES), GetFileAttributesA(ListenCsvPath(config.listenLogDirectory).c_str()),
-				L"no data log with listen_log off");
 		}
 
 		TEST_METHOD(ModuleCompensatesAlongTheModelledLedLevel)

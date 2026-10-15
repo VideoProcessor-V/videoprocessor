@@ -396,48 +396,6 @@ namespace LedDrive
 				config.ackTimeoutMs, -1);
 	}
 
-	std::string BarcoAsciiDriver::RelayBytes(const std::string& mnemonic, int value)
-	{
-		std::string name(mnemonic);
-		std::transform(name.begin(), name.end(), name.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		// cmd's echo keeps the space before ">" and ends the line with CR LF.
-		return ":" + name + std::to_string(value) + "cr \r\n";
-	}
-
-	bool BarcoAsciiDriver::SendRelay(const std::string& mnemonic, int value)
-	{
-		{
-			std::lock_guard<std::mutex> guard(stateMutex);
-			if (!opened || shuttingDown) return false;
-		}
-		std::lock_guard<std::timed_mutex> lock(portMutex);
-		const std::string bytes = RelayBytes(mnemonic, value);
-		std::string error;
-		const bool written = port->Write(bytes, error);
-		std::lock_guard<std::mutex> guard(stateMutex);
-		if (!written)
-		{
-			DebugLog::Log("LED drive: relay - projector write of \"%s\" failed: %s", Printable(bytes).c_str(), error.c_str());
-			return false;
-		}
-		++commands;
-		if (mnemonic == "LPW1")
-		{
-			++lightSends;
-			lastSentLight = value;
-			lastLight = value;
-		}
-		else if (mnemonic == "CNTR")
-		{
-			++contrastSends;
-			lastSentContrast = value;
-			state.contrastKnown = true;
-			state.contrast = value;
-		}
-		return true;
-	}
-
 	bool BarcoAsciiDriver::SendScript(const std::string& mnemonic, int value)
 	{
 		const bool light = mnemonic == "LPW1";

@@ -443,8 +443,9 @@ void testRendererCardsShowDefaultsAndRoundTrip()
         require(fade->currentIndex() == 0 && fade->itemText(0).contains("On", Qt::CaseInsensitive),
             ("An unset fade match does not say its default (on): " + fade->itemText(0).toStdString()).c_str());
         auto* capture = requireControl<QComboBox>(window, "config.vprenderer.capture_path");
-        require(capture->itemText(0).contains("Standard", Qt::CaseInsensitive),
-            ("An unset capture path does not say Standard: " + capture->itemText(0).toStdString()).c_str());
+        // GPU unpack is the default on both paths (owner 2026-10-15).
+        require(capture->itemText(0).contains("gpu", Qt::CaseInsensitive),
+            ("An unset capture path does not say its default (gpu): " + capture->itemText(0).toStdString()).c_str());
         // The de-judder: with no strength only the strengths show.
         auto* strength = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_strength");
         auto* rolloff = requireControl<QComboBox>(window, "config.vprenderer.dejudder_motion_rolloff");
@@ -538,14 +539,14 @@ void testEveryNewLedControlReachesVp()
         auto* source = requireControl<QComboBox>(window, "config.led_drive.default.command_source");
         auto* protocol = requireControl<QComboBox>(window, "config.projector.default.protocol");
         require(protocol->currentData().toString() == "none", "A new file's protocol does not show no projector");
-        selectData(source, "python");
-        require(protocol->currentData().toString() == "barco_ascii", "Picking the Python source did not switch to Barco");
-        requireControl<QLineEdit>(window, "config.led_drive.default.listen_script")->setText("scripts\\main_vp.py");
-        requireControl<QLineEdit>(window, "config.led_drive.default.python")->setText("C:\\Python\\python.exe");
-        requireControl<QCheckBox>(window, "config.led_drive.default.listen_log")->setChecked(true);
-        requireControl<QSpinBox>(window, "config.led_drive.default.listen_port")->setValue(47900);
-        requireControl<QCheckBox>(window, "config.led_drive.default.python_drives_port")->setChecked(true);
-        shoot(window, "led-python-source");
+        selectData(source, "internal_script");
+        require(protocol->currentData().toString() == "barco_ascii", "Picking VP's copy of the script did not switch to Barco");
+        // Script pacing (owner 2026-10-15): the script's rhythm by default, with its two times.
+        require(requireControl<QComboBox>(window, "config.led_drive.default.script_pacing")->currentData().toString() == "script",
+            "Script pacing does not show the script's rhythm as the default");
+        requireControl<QSpinBox>(window, "config.led_drive.default.script_measure_ms")->setValue(120);
+        requireControl<QSpinBox>(window, "config.led_drive.default.script_echo_ms")->setValue(40);
+        shoot(window, "led-internal-script");
         requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->setChecked(true);
         selectData(source, "compensate");
         requireControl<QCheckBox>(window, "config.led_drive.default.lookahead")->setChecked(false);
@@ -577,10 +578,8 @@ void testEveryNewLedControlReachesVp()
     const LedDrive::ProjectorConfig projector = LedDrive::ReadProjectorConfig(config);
     require(led.enabled && led.mode == LedDrive::Mode::Compensate && led.commandSource == "compensate",
         "VP does not read Compensate as the source");
-    require(led.adaptiveGamma && !led.lookahead && led.pythonDrivesPort && led.listenLog && led.listenPort == 47900,
-        "VP does not read adaptive gamma / look-ahead / fallback / log / port as set");
-    require(led.listenScript.find("main_vp.py") != std::string::npos && led.python == "C:\\Python\\python.exe",
-        ("VP does not read the script and Python: " + led.listenScript + " / " + led.python).c_str());
+    require(led.adaptiveGamma && !led.lookahead && led.scriptPacing && led.scriptMeasureMs == 120 && led.scriptEchoMs == 40,
+        "VP does not read adaptive gamma / look-ahead / script pacing as set");
     require(projector.protocol == "barco_ascii" && projector.baud == 38400 && projector.lightMin == 60 &&
         projector.lightMax == 250 && projector.ackTimeoutMs == 400 && projector.minCommandGapMs == 150 &&
         projector.maxLevelsPerCommand == 10 && projector.burstCommands == 5 && projector.burstPauseMs == 3000 &&
@@ -593,7 +592,7 @@ void testEveryNewLedControlReachesVp()
         require(requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() == "compensate" &&
             requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->isChecked() &&
             !requireControl<QCheckBox>(window, "config.led_drive.default.lookahead")->isChecked() &&
-            requireControl<QCheckBox>(window, "config.led_drive.default.python_drives_port")->isChecked() &&
+            requireControl<QSpinBox>(window, "config.led_drive.default.script_measure_ms")->value() == 120 &&
             requireControl<QDoubleSpinBox>(window, "config.projector.default.baud")->value() == 38400 &&
             requireControl<QDoubleSpinBox>(window, "config.projector.default.light_min")->value() == 60 &&
             !requireControl<QCheckBox>(window, "config.projector.default.echo")->isChecked() &&
@@ -783,7 +782,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     // and pixel trust on, split off, half size every step, standard).
     const std::map<std::string, std::string> unset = read("");
     const std::pair<const char*, const char*> defaults[] = {
-        { "capture_path", "standard" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
+        { "capture_path", "gpu" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
         { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.pictureArea", "1" }, { "dejudder_pulldown", "0" }, { "fix_scene_cooldown", "1" }, { "dither_vectors_new_frame", "1" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
         { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
         { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },
@@ -1331,22 +1330,19 @@ void testLedDrivePageAndLiveSwitches()
     enabled->setChecked(true);
     require(mode->isEnabled(), "Switching the LED drive on did not offer the command source");
     require(!requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isVisibleTo(&window) &&
-        !requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.python_drives_port"))->isVisibleTo(&window),
-        "Look-ahead or the Python fallback is shown with no command source");
+        !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.script_pacing"))->isVisibleTo(&window),
+        "Look-ahead or script pacing is shown with no command source");
     // Only what the chosen source uses (audit 2026-10-14b): with no source,
-    // neither compensate's settings nor the Python script's card show.
+    // neither compensate's settings nor the script copy's pacing show.
     require(!requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"))->isVisibleTo(&window) &&
         !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.highlight_tolerance_stops"))->isVisibleTo(&window),
         "Compensate's settings show with no command source");
-    require(!requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.listen_script"))->isVisibleTo(&window),
-        "The Python script's card shows with no command source");
-    selectData(mode, QStringLiteral("python"));
-    require(requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.listen_script"))->isVisibleTo(&window) &&
-        requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.python_drives_port"))->isVisibleTo(&window) &&
-        !requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isVisibleTo(&window),
-        "The Python source does not show its script card with the fallback (look-ahead hidden)");
+    selectData(mode, QStringLiteral("internal_script"));
+    require(requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.script_pacing"))->isVisibleTo(&window) &&
+        requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.script_measure_ms"))->isVisibleTo(&window),
+        "VP's copy of the script does not show its pacing");
     require(!requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"))->isVisibleTo(&window),
-        "Compensate's settings show for the Python source");
+        "Compensate's settings show for VP's copy of the script");
     auto* boost = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.gamma_boost"));
     auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
     require(port->text() == QStringLiteral("COM1"), "COM port did not load");
@@ -1427,8 +1423,8 @@ void testLedDrivePageAndLiveSwitches()
     selectData(mode, QStringLiteral("compensate"));
     require(floor->isVisibleTo(&window) && requireControl<QComboBox>(window,
         QStringLiteral("config.led_drive.default.highlight_tolerance_stops"))->isVisibleTo(&window) &&
-        !requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.listen_script"))->isVisibleTo(&window),
-        "Compensate does not show its own settings (or still shows the Python card)");
+        !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.script_pacing"))->isVisibleTo(&window),
+        "Compensate does not show its own settings (or still shows the script pacing)");
     auto* lookahead = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"));
     require(lookahead->isVisibleTo(&window) && lookahead->isEnabled() && lookahead->isChecked(),
         "Look-ahead is not offered (on) for Compensate");
@@ -1477,7 +1473,7 @@ void testLedDrivePageAndLiveSwitches()
     for (const char* expected : { "enabled: true", "mode: compensate", "gamma_boost: 2.4",
         "port: COM3", "read_back: true", "led_floor: 80", "ftb_custom_dim: turns", "ftb_custom_floor: 20",
         "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35",
-        "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "lookahead: false", "python_drives_port: false", "cut_cntr_level: 57", "max_cut_dip: 0.40",
+        "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "lookahead: false", "cut_cntr_level: 57", "max_cut_dip: 0.40",
         "black_prelift_max: 110", "rate_max_up: 20.0", "rate_preset: compensated", "led_settle_ms: 250",
         "dmd_clip_cntr: 61" })
         require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")

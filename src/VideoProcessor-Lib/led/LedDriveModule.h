@@ -41,39 +41,6 @@ namespace LedDrive
 		double veil = 0.0;
 	};
 
-	// mode: listen: how closely VP's copy of the script's rules, on VP's own
-	// measurement, agrees with what the script measured and decided (each
-	// TICK against VP's latest statistics), and the commands heard.
-	struct ListenAccuracy
-	{
-		bool listening = false;     // the UDP port is bound
-		int ticks = 0;
-		double meanDifference = 0.0;     // |script mean2 - VP's int(APL)|, averaged
-		double maximumDifference = 0.0;  // |script max_val - VP's brightest block|
-		double highlightAgreement = 1.0; // share of ticks with the same highlight flag
-		double lightTargetDifference = 0.0;
-		double contrastTargetDifference = 0.0;
-		int lightCommands = 0;
-		int contrastCommands = 0;
-		int lastContrast = 50;
-		// Relay (owner 2026-10-14): VP holds the port and the script VP runs
-		// is running; commands sent, failed to write, and refused (out of
-		// range, or no script of VP's running).
-		bool relaying = false;
-		int relayed = 0;
-		int relayFailed = 0;
-		int relayRefused = 0;
-		unsigned long refusedOwner = 0;   // the last refused sender's process (diagnosis)
-		unsigned long scriptPid = 0;
-		// python_feed (owner 2026-10-15): the script's requests answered with
-		// VP's measurement of the frame on screen, answered "none" (no frame
-		// measured yet: the script took its screenshot), and refused (not from
-		// the script VP runs).
-		int feedAnswers = 0;
-		int feedNone = 0;
-		int feedRefused = 0;
-	};
-
 	class LedDriveModule
 	{
 	public:
@@ -100,8 +67,6 @@ namespace LedDrive
 		void SubmitMeasurement(const RawMeasurement& raw, uint64_t sequence = 0);
 		// Delta 11 (tests): the veil estimate without a frame step.
 		double Veil() const { std::lock_guard<std::mutex> guard(mutex); return gain.veil; }
-		// mode: listen (tests, the log).
-		ListenAccuracy Listening() const { std::lock_guard<std::mutex> guard(mutex); return listenAccuracy; }
 		// The gain BeginFrame last returned, without stepping anything.
 		CompensationGain CurrentGain() const;
 
@@ -170,12 +135,6 @@ namespace LedDrive
 		double NowMs() const;
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
-		// python_feed: the answer to the script's request `id` - VP's exact
-		// measurement of the frame on screen. Counts it in listenAccuracy.
-		std::string FeedReplyLocked(int id);
-		// The frame the last answer gave the script, for its TICK's comparison.
-		FrameStats fedStats{};
-		bool fedPending = false;
 		CompensationGain GainLocked() const;
 		void ConfigureModelsLocked();
 		double LedFractionLocked(double level) const;
@@ -201,7 +160,6 @@ namespace LedDrive
 		bool haveStats = false;
 		FrameStats latest;
 		bool veilValid = false;   // delta 11: the veil estimate has a value
-		ListenAccuracy listenAccuracy;   // mode: listen
 		bool pendingCut = false;
 		bool pendingFade = false;
 

@@ -52,6 +52,10 @@ namespace
 		config.enabled = true;
 		config.mode = Mode::Script;
 		config.tickMs = 50;
+		// script_pacing (the default) with near-zero screenshot and echo
+		// times: the paced loop runs, quiet loops in 10 ms.
+		config.scriptMeasureMs = 10;
+		config.scriptEchoMs = 0;
 		return config;
 	}
 

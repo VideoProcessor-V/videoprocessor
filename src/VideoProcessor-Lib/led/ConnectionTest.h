@@ -8,9 +8,10 @@
 
 // RS-232 connection test (LED drive page): LED to 60, read back, wait 5 s,
 // LED to 255 (or the projector's reported maximum when lower), read back,
-// pass/fail. The same routine runs on the running LED drive's own connection
-// (through VP) or on a connection opened just for the test (Config, when no
-// VP holds the port).
+// pass/fail. Always on the LED module's own driver and serial code (the
+// barco_ascii driver with the saved projector settings, read-back on), on a
+// connection opened for the test: by Config when no VP holds the port, or by
+// VP, which pauses its LED drive for the test and resumes it after.
 namespace LedDrive
 {
 	struct ConnectionTestResult

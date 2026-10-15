@@ -312,7 +312,7 @@ namespace VideoProcessorTest
 			std::string repo = __FILE__;
 			for (int up = 0; up < 3; ++up) repo = repo.substr(0, repo.find_last_of("\\/"));
 			const std::string simulator = repo + "\\tools\\led_script_sim.py";
-			const std::string script = repo + "\\packaging\\listen-script\\main_vp.py";
+			const std::string script = repo + "\\tools\\led-reference\\main_vp.py";
 			char python[MAX_PATH] = {};
 			Assert::IsTrue(SearchPathA(nullptr, "python.exe", nullptr, MAX_PATH, python, nullptr) != 0, L"python.exe on PATH");
 
@@ -469,6 +469,24 @@ namespace VideoProcessorTest
 				t = std::max({ t + config.tickMs, sendsDone, floor });
 			}
 
+			// B': the same with script_pacing: script, at the simulator's costs.
+			const int shotMs = Env("VP_TEST_LED_SHOT").empty() ? 150 : static_cast<int>(std::lround(std::stod(Env("VP_TEST_LED_SHOT")) * 1000.0));
+			const int echoMs = Env("VP_TEST_LED_CMD").empty() ? 30 : static_cast<int>(std::lround(std::stod(Env("VP_TEST_LED_CMD")) * 1000.0));
+			ScriptController paced(config);
+			paced.Reset(255, 50);
+			std::vector<Command> pacedCommands = { { 0.0, "LPW1", 255 }, { 0.0, "CNTR", 50 } };
+			std::vector<ScriptSend> sends;
+			// The script's start: LPW1 255 and CNTR 50, one echo each, then its loop.
+			for (double t = 2.0 * echoMs; t < endMs;)
+			{
+				const int frame = std::min(static_cast<int>(t / frameMs), static_cast<int>(stats.size()) - 1);
+				const ControllerOutput out = paced.Tick(stats[frame]);
+				const int length = PaceScriptTick(out, shotMs, echoMs, sends);
+				for (const ScriptSend& send : sends)
+					pacedCommands.push_back({ t + send.offsetMs, send.light ? "LPW1" : "CNTR", send.value });
+				t += std::max(length, 1);
+			}
+			const LevelDifference pacedVsScript = Compare(pacedCommands, scriptCommands, endMs);
 			const LevelDifference internalVsScript = Compare(vpCommands, scriptCommands, endMs);
 			const LevelDifference fedVsShots = Compare(scriptCommands, shotCommands, endMs);
 			std::ostringstream report;
@@ -479,6 +497,8 @@ namespace VideoProcessorTest
 				<< commandsDiffer << "\n   " << (firstDivergence.empty() ? std::string("no divergence") : firstDivergence) << "\n"
 				<< "B  VP internal script mode (tick_ms " << config.tickMs << ") vs the script: " << Describe(internalVsScript)
 				<< "; commands " << vpCommands.size() << " vs " << scriptCommands.size() << "\n"
+				<< "B' with script_pacing: script (screenshot " << shotMs << " ms, echo " << echoMs << " ms): "
+				<< Describe(pacedVsScript) << "; commands " << pacedCommands.size() << " vs " << scriptCommands.size() << "\n"
 				<< "C  the script fed vs with screenshots: " << Describe(fedVsShots) << "; commands " << scriptCommands.size()
 				<< " vs " << shotCommands.size() << "\n";
 			std::ofstream(outDir + "led-correlation.txt", std::ios::trunc) << report.str();

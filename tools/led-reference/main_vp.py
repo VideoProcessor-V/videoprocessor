@@ -1,27 +1,14 @@
 # main.py (the current dimming revision; its rules are identical to beta_22.py)
 # with the VideoProcessor listening addendum (2026-10-13).
 #
-# VideoProcessor's copy (scripts\main_vp.py): set
-#   [led_drive.Default]  command_source: python  and  listen_script: scripts\main_vp.py
-# and VP starts, watches and restarts it. Installed only when absent: an
-# edited copy is never replaced by an update.
-#
-# The only changes from main.py are marked "VP addendum". After every
-# command the script sends to COM1 it also tells VideoProcessor, on this PC
-# only (UDP to 127.0.0.1:47811), what it sent, and once per loop what it
-# measured. With command_source: python, VideoProcessor then:
-#   - relays each command to the projector exactly as this script wrote it
-#     (VP holds COM1 and the script echoes to nul; see _vp_com1 below), or,
-#     with python_drives_port, leaves COM1 to this script as before,
-#   - with adaptive_gamma on, eases the picture across each contrast step
-#     (the script-mode smoothing), and
-#   - runs its own copy of this script's rules on its own measurement and
-#     logs how closely they agree (the accuracy of VP's approximation), and
-#   - with python_feed (the default), answers this script's request for the
-#     mean and max of the frame on screen (its own measurement), so the script skips its
-#     screenshot (see vp_feed below; the loop keeps its pace).
-# Started by hand, or with VideoProcessor closed, the messages go nowhere and
-# the script writes COM1 itself: it works exactly as before.
+# REFERENCE ONLY (2026-10-15): VideoProcessor neither runs nor ships this
+# script. It is the reference VP's own copy of the rules (command_source:
+# internal_script, script_pacing: script) is checked against:
+# tools\led_script_sim.py runs it unchanged on a virtual clock in
+# LedScriptCorrelationTests, through the hooks marked "VP addendum" (the
+# echoes to nul under VP_LED_RELAY=1, the measurement asked for under
+# VP_LED_FEED=1, the UDP messages). Without those variables it behaves as
+# main.py: run by hand it screenshots and writes COM1 itself.
 import time
 import numpy as np
 import pyautogui
@@ -37,9 +24,12 @@ _vp_state = {"mean": -1, "max": -1, "hl": -1, "tp": -1, "tc": -1}
 def vp_notify(kind, value=-1):
     # One line per message; never blocks and never raises (VP may be closed).
     try:
-        message = "VP1 %s %d t=%.3f mean=%d max=%d hl=%d tp=%d tc=%d" % (
+        # shot: this script's measured screenshot + resize time in ms (-1 until
+        # timed), so VP can pace its own copy of these rules like this script.
+        shot = globals().get("_vp_shot_seconds")
+        message = "VP1 %s %d t=%.3f mean=%d max=%d hl=%d tp=%d tc=%d shot=%d" % (
             kind, int(value), time.time(), _vp_state["mean"], _vp_state["max"],
-            _vp_state["hl"], _vp_state["tp"], _vp_state["tc"])
+            _vp_state["hl"], _vp_state["tp"], _vp_state["tc"], -1 if shot is None else int(shot * 1000))
         _vp_socket.sendto(message.encode("ascii"), ("127.0.0.1", 47811))
     except Exception:
         pass

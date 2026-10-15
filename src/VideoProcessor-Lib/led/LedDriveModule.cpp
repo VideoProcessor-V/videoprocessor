@@ -1,7 +1,5 @@
 #include <pch.h>
 #include "LedDriveModule.h"
-#include "ScriptListener.h"
-#include "ScriptHost.h"
 
 #include <fstream>
 
@@ -20,7 +18,7 @@ namespace LedDrive
 		const char* ModeName(Mode mode)
 		{
 			return mode == Mode::Compensate ? "compensate" : mode == Mode::Script ? "script" :
-				mode == Mode::PictureOnly ? "picture_only" : mode == Mode::Listen ? "listen" : "log_only";
+				mode == Mode::PictureOnly ? "picture_only" : "log_only";
 		}
 
 		// Predictions are kept this many frames behind the current one, long
@@ -204,10 +202,8 @@ namespace LedDrive
 	bool LedDriveModule::Reconfigure(const ProjectorConfig& projectorIn, const LedDriveConfig& ledIn)
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		// Relay opens the port its own way (Run), so switching it restarts.
 		if (!ledIn.enabled || !SameConnection(projector, projectorIn) ||
-			EffectiveProtocol(projector, led) != EffectiveProtocol(projectorIn, ledIn) ||
-			ListenRelays(led) != ListenRelays(ledIn))
+			EffectiveProtocol(projector, led) != EffectiveProtocol(projectorIn, ledIn))
 			return false;
 		const bool wasCompensating = led.mode == Mode::Compensate;
 		const bool wasScript = led.mode == Mode::Script;
@@ -262,14 +258,12 @@ namespace LedDrive
 				driver->SetContrastAsync(-1);
 			}
 			compensating = nowCompensating;
-			// picture_only (delta 12): the gain stays exactly 1. listen: the
-			// script drives the projector, so VP's smoothing gain applies
-			// although VP itself drives nothing.
-			applyGain = (live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen;
+			// picture_only (delta 12): the gain stays exactly 1.
+			applyGain = live && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
 			// The smoothing gain ends with the settings that wanted it, not at
 			// the worker's next pass (audit 2026-10-14b: picture_only must be
 			// exactly 1 from the switch).
-			const bool smoothNow = (led.mode == Mode::Script || led.mode == Mode::Listen) && led.scriptSmoothing &&
+			const bool smoothNow = led.mode == Mode::Script && led.scriptSmoothing &&
 				applyGain && led.adaptiveGamma;
 			if (smoothing && !smoothNow)
 			{
@@ -432,31 +426,6 @@ namespace LedDrive
 		for (int code = 0; code < HISTOGRAM_BINS; ++code)
 			stats.histogram[static_cast<int>(Scaled(code, correction))] += predicted.histogram[code];
 		return stats;
-	}
-
-	std::string LedDriveModule::FeedReplyLocked(int id)
-	{
-		std::ostringstream reply;
-		reply << "VPS1 id=" << id;
-		if (!haveStats)
-		{
-			++listenAccuracy.feedNone;
-			reply << " none";
-			return reply.str();
-		}
-		// The frame on screen, as the screenshot saw it (owner 2026-10-15:
-		// faithful to the original - not an upcoming frame): VP's exact
-		// measurement of the latest rendered frame, the script's integers
-		// exactly as the listen comparison reads VP's.
-		const int mean = std::max(0, static_cast<int>(latest.apl));
-		const int maximum = static_cast<int>(latest.maximum);
-		const int highlight = latest.maximum >= led.scriptHighlightCode ? 1 : 0;
-		reply << " mean=" << mean << " max=" << maximum << " hl=" << highlight << " seq=" << lastMeasuredSequence;
-		++listenAccuracy.feedAnswers;
-		// The loop's TICK is compared with exactly this frame.
-		fedStats = latest;
-		fedPending = true;
-		return reply.str();
 	}
 
 	CompensationGain LedDriveModule::BeginFrame(uint64_t sequence, double sourceFpsIn)
@@ -845,13 +814,12 @@ namespace LedDrive
 	void LedDriveModule::Run()
 	{
 		const std::string protocol = EffectiveProtocol(projector, led);
-		// Relay writes the script's bytes and never asks the projector
-		// anything: the script's framing, so opening the port sends nothing
-		// (no ECHO, no queries) - the script's first command is the first byte.
-		ProjectorConfig connection = projector;
-		if (ListenRelays(led))
-			connection.terminator = Terminator::Script;
-		std::unique_ptr<IProjectorDriver> opened = CreateProjectorDriver(protocol, connection, portFactory);
+		// Retired source (owner 2026-10-15): an older file naming it runs
+		// VP's own copy of the script.
+		if (led.pythonSourceRetired)
+			DebugLog::Log("LED drive: command_source: python / mode: listen is retired; this configuration runs VP's "
+				"copy of the script (internal_script), which drives the port itself");
+		std::unique_ptr<IProjectorDriver> opened = CreateProjectorDriver(protocol, projector, portFactory);
 		std::string error;
 		bool driving = protocol != "none";
 		if (!opened->Open(error))
@@ -861,16 +829,8 @@ namespace LedDrive
 			opened->Open(error);
 			driving = false;
 		}
-		// Relay sends nothing of its own (owner 2026-10-14): the script's
-		// first command is the first thing the projector hears.
-		if (!ListenRelays(led))
-			BringToKnownState(*opened, led.ledCeiling, led.ftbCustomDim != FtbCustomDim::Off,
-				led.mode == Mode::Script);
-		else if (driving)
-			DebugLog::Log("LED drive: listen - relay: %s open; nothing is sent until the script's first command",
-				projector.port.c_str());
-		else
-			DebugLog::Log("LED drive: listen - relay not possible (the port did not open); the script drives COM1 itself");
+		BringToKnownState(*opened, led.ledCeiling, led.ftbCustomDim != FtbCustomDim::Off,
+			led.mode == Mode::Script);
 		const LightRange range = opened->QueryLightRange();
 		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f led_latency=%d ms",
 			ModeName(led.mode), driving ? protocol.c_str() : "none (dry run)", led.tickMs, led.gammaBoost,
@@ -886,7 +846,7 @@ namespace LedDrive
 			compensating = led.mode == Mode::Compensate;
 			// Compensation is applied to the picture only while the projector
 			// is really being driven; a dry run never changes the picture.
-			applyGain = (driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly) || led.mode == Mode::Listen;
+			applyGain = driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
 		}
 
 		LedDriveConfig current;
@@ -914,46 +874,10 @@ namespace LedDrive
 			}
 		};
 		auto smoothingWanted = [&] {
-			return (current.mode == Mode::Script || current.mode == Mode::Listen) && current.scriptSmoothing && applyGain &&
+			return current.mode == Mode::Script && current.scriptSmoothing && applyGain &&
 				current.adaptiveGamma;
 		};
 		setSmoothing(smoothingWanted(), 50);
-		// mode: listen: the script's messages, VP's copy of its rules, and the
-		// running sums for ListenAccuracy.
-		ScriptListener listener;
-		// mode: listen with listen_script: VP runs the script (ScriptHost.h);
-		// it ends when the mode leaves listen or this thread stops.
-		ScriptHost scriptHost;
-		int listenRetryPort = -1;
-		auto listenRetryAt = std::chrono::steady_clock::now();
-		std::string listenLastError;
-		std::string scriptPort = projector.port;   // the line settings it gets (copied under the lock)
-		int scriptBaud = projector.baud;
-		ScriptController shadow(current);
-		std::ofstream listenCsv;
-		const double listenStartMs = NowMs();
-		ScriptMessage lastTick;
-		std::array<int, 5> lastVp = { -1, -1, -1, -1, -1 };
-		double lastVpApl = -1.0;
-		int listenLight = -1;
-		int listenContrast = 50;
-		double sumMean = 0.0, sumMaximum = 0.0, sumLight = 0.0, sumContrast = 0.0;
-		int agree = 0;
-		// Relay: VP holds the port and the script tells it what to send.
-		bool relayed = false;            // relaying on the previous tick
-		bool relayHeard = false;         // the script's first command came
-		double relayWaitFromMs = NowMs();
-		int relaySent = 0, relayFailed = 0, relayRefused = 0;
-		// The data log stays small over hours (owner 2026-10-14): every
-		// command, a TICK only when VP's copy changes its (dis)agreement, a
-		// summary line every 10 s, and a cap with one previous file kept.
-		long long listenCsvBytes = 0;
-		auto listenCsvPausedUntil = std::chrono::steady_clock::now();
-		std::string lastTickKey;
-		unsigned short relaySenderPort = 0;   // the script's socket, once checked
-		unsigned short feedSenderPort = 0;    // python_feed's, the same check
-		int relayPortWarned = 0;
-		auto relayRefusedLogAt = std::chrono::steady_clock::now();
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
@@ -971,8 +895,6 @@ namespace LedDrive
 					// (step 7b: CNTR is real, so it is not reset to 50 here).
 					generation = configGeneration;
 					current = led;
-					scriptPort = projector.port;
-					scriptBaud = projector.baud;
 					const DriverStatus status = driver->Status();
 					const int contrastNow = controller.Contrast();
 					controller = ScriptController(current);
@@ -1023,9 +945,7 @@ namespace LedDrive
 				std::lock_guard<std::mutex> guard(mutex);
 				awaitingContrastReset = false;
 			}
-			setSmoothing(smoothingWanted(), current.mode == Mode::Listen ? listenContrast : controller.Contrast());
-			if (current.mode != Mode::Listen)
-				scriptHost.Stop();   // the mode left listen
+			setSmoothing(smoothingWanted(), controller.Contrast());
 			if (compensating)
 			{
 				// mode: compensate steps per frame in BeginFrame(); this thread
@@ -1044,353 +964,6 @@ namespace LedDrive
 					DebugLog::Log("%s%s", log.c_str(), applyGain ? "" : " (dry run)");
 					lastLogTime = now;
 				}
-			}
-			else if (current.mode == Mode::Listen)
-			{
-				// The listener follows the mode and the port. A failed open is
-				// retried every 5 s and logged once (audit 2026-10-14: it spun).
-				if ((!listener.IsOpen() || listener.Port() != current.listenPort) &&
-					(listenRetryPort != current.listenPort || std::chrono::steady_clock::now() >= listenRetryAt))
-				{
-					std::string error;
-					const bool ok = listener.Open(current.listenPort, error);
-					{
-						std::lock_guard<std::mutex> guard(mutex);
-						listenAccuracy.listening = ok;
-					}
-					if (ok || error != listenLastError || listenRetryPort != current.listenPort)
-						DebugLog::Log(ok ? "LED drive: listen - waiting for the script on 127.0.0.1:%d" :
-							"LED drive: listen - cannot listen on 127.0.0.1:%d: %s (retrying every 5 s)", current.listenPort, error.c_str());
-					listenLastError = ok ? std::string() : error;
-					listenRetryPort = current.listenPort;
-					listenRetryAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-					shadow = ScriptController(current);
-				}
-				// The script, when VP runs it: started, watched, restarted. In
-				// relay VP holds the port, so it is not set up for the script,
-				// and the script (which then leaves COM1 alone) is started only
-				// once VP is listening: never blind (audit 2026-10-14b).
-				const bool relayWanted = ListenRelays(current) && driving;
-				const bool relay = relayWanted && listener.IsOpen() && listener.Port() == current.listenPort;
-				if (relay != relayed)
-				{
-					relayed = relay;
-					relayHeard = false;
-					relayWaitFromMs = NowMs();
-					relaySenderPort = 0;
-				}
-				if (relayWanted && !relay)
-					scriptHost.Stop();
-				else
-					scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory,
-						relay ? std::string() : scriptPort, scriptBaud, relay, current.pythonFeed);
-				if (relay && current.listenPort != 47811 && relayPortWarned != current.listenPort)
-				{
-					DebugLog::Log("LED drive: listen - relay on port %d, but main_vp.py sends to 47811: change the script's "
-						"port too, or VP hears nothing", current.listenPort);
-					relayPortWarned = current.listenPort;
-				}
-				{
-					std::lock_guard<std::mutex> guard(mutex);
-					listenAccuracy.relaying = relay && scriptHost.GetState() == ScriptHost::State::Running;
-					listenAccuracy.relayed = relaySent;
-					listenAccuracy.relayFailed = relayFailed;
-					listenAccuracy.relayRefused = relayRefused;
-				}
-				{
-					// The data log (sized for hours, ScriptListener.h): a header
-					// when new, a session line every time; also when listen_log
-					// is switched on while running (audit 2026-10-14). Past the
-					// cap, checked as it is written, it moves to .prev and goes on.
-					const std::string path = ListenCsvPath(current.listenLogDirectory);
-					if (!listenCsv.is_open() && current.listenLog && std::chrono::steady_clock::now() >= listenCsvPausedUntil)
-					{
-						const size_t slash = path.find_last_of("\\/");
-						if (slash != std::string::npos)
-							CreateDirectoryA(path.substr(0, slash).c_str(), nullptr);   // logs\ (exists in a deployment)
-						DebugLog::Log("LED drive: listen - logging to %s", path.c_str());
-						listenCsvBytes = OpenListenCsv(listenCsv, path,
-							"# session, port " + std::to_string(current.listenPort) + (relay ? ", relay" : ", listen"));
-						lastTickKey.clear();
-					}
-					else if (listenCsv.is_open() && listenCsvBytes > kListenCsvCapBytes)
-					{
-						listenCsv.close();
-						if (MoveFileExA(path.c_str(), (path.substr(0, path.size() - 4) + ".prev.csv").c_str(), MOVEFILE_REPLACE_EXISTING))
-							listenCsvBytes = OpenListenCsv(listenCsv, path, "# continued; the earlier rows are in led-listen.prev.csv");
-						else
-						{
-							// Held by another program (audit 2026-10-14b): never past
-							// the cap; paused, tried again in a minute.
-							DebugLog::Log("LED drive: listen - %s is full and cannot be rotated (error %lu, open elsewhere?); "
-								"logging paused for 60 s", path.c_str(), GetLastError());
-							listenCsvPausedUntil = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-						}
-					}
-				}
-				if (listenCsv.is_open() && !current.listenLog)
-					listenCsv.close();   // logging switched off
-				if (!listener.IsOpen())
-				{
-					// Nothing to receive: wait the tick (a stop or new settings end it).
-					WaitUntil(std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(10, current.tickMs)), generation);
-					continue;
-				}
-				// Silence is normal while Python loads and the script starts:
-				// nothing is sent meanwhile and nothing times out.
-				const std::vector<ScriptMessage> messages = listener.Receive(std::max(10, current.tickMs), [this, generation]()
-				{
-					std::lock_guard<std::mutex> guard(mutex);
-					return stopping || configGeneration != generation;
-				});
-				for (const ScriptMessage& message : messages)
-				{
-					if (message.kind == "REQ")
-					{
-						// python_feed: VP's measurement in place of the script's
-						// screenshot, answered only to the script VP runs (any
-						// local program can send here); its socket is checked
-						// once, again when it changes.
-						if (!current.pythonFeed || message.senderPort == 0)
-							continue;
-						if (message.senderPort != feedSenderPort)
-							feedSenderPort = scriptHost.Owns(UdpPortOwner(message.senderPort)) ? message.senderPort : 0;
-						std::string reply;
-						{
-							std::lock_guard<std::mutex> guard(mutex);
-							if (feedSenderPort != message.senderPort)
-								++listenAccuracy.feedRefused;
-							else
-								reply = FeedReplyLocked(message.value);
-						}
-						if (!reply.empty())
-							listener.Reply(message.senderPort, reply);
-						continue;
-					}
-					// The projector's ranges only, whole numbers (audit 2026-10-14:
-					// any local sender reaches this port).
-					const bool command = (message.kind == "CNTR" && message.value > 0 && message.value <= 100) ||
-						(message.kind == "LPW1" && message.value >= 0 && message.value <= 255);
-					// Relay: exactly what the script sent, as it arrives, and only
-					// from the script VP is running (owner 2026-10-14). Sent
-					// outside the module lock: the write may wait for the port.
-					int sent = -1;
-					double writeMs = -1.0;
-					if (relay)
-					{
-						// The sender must be the script VP runs (audit 2026-10-14b:
-						// any local program could send here). Its socket's port is
-						// checked once, again when it changes.
-						unsigned long owner = 0;
-						if (message.senderPort == 0 || message.senderPort != relaySenderPort)
-						{
-							owner = message.senderPort ? UdpPortOwner(message.senderPort) : 0;
-							relaySenderPort = scriptHost.Owns(owner) ? message.senderPort : 0;
-						}
-						if (relaySenderPort == 0 || message.senderPort != relaySenderPort)
-						{
-							++relayRefused;
-							const auto now = std::chrono::steady_clock::now();
-							if (now >= relayRefusedLogAt)
-							{
-								DebugLog::Log("LED drive: listen - relay: ignored %s %d from another program (UDP port %u, process %lu; "
-									"the script VP runs is %lu; %d ignored so far)", message.kind.c_str(), message.value,
-									static_cast<unsigned>(message.senderPort), owner, static_cast<unsigned long>(scriptHost.Pid()), relayRefused);
-								relayRefusedLogAt = now + std::chrono::seconds(10);
-							}
-							std::lock_guard<std::mutex> guard(mutex);
-							listenAccuracy.relayRefused = relayRefused;
-							if (message.senderPort != 0) listenAccuracy.refusedOwner = owner != 0 ? owner : 1000000 + message.senderPort;
-							listenAccuracy.scriptPid = scriptHost.Pid();
-							continue;
-						}
-					}
-					if (relay && (message.kind == "CNTR" || message.kind == "LPW1"))
-					{
-						if (command && scriptHost.GetState() == ScriptHost::State::Running)
-						{
-							const double before = NowMs();
-							sent = driver->SendRelay(message.kind, message.value) ? 1 : 0;
-							writeMs = NowMs() - before;
-							++(sent ? relaySent : relayFailed);
-							if (!relayHeard)
-							{
-								relayHeard = true;
-								DebugLog::Log("LED drive: listen - relay: the script's first command %s %d, %.1f s after the port opened",
-									message.kind.c_str(), message.value, (NowMs() - relayWaitFromMs) / 1000.0);
-							}
-						}
-						else
-						{
-							sent = 0;
-							++relayRefused;
-							const auto now = std::chrono::steady_clock::now();
-							if (now >= relayRefusedLogAt)
-							{
-								DebugLog::Log("LED drive: listen - relay: %s %d not sent (%s; %d refused so far)", message.kind.c_str(),
-									message.value, command ? "the script VP runs is not running" : "out of range", relayRefused);
-								relayRefusedLogAt = now + std::chrono::seconds(10);
-							}
-						}
-					}
-					std::lock_guard<std::mutex> guard(mutex);
-					listenAccuracy.relayed = relaySent;
-					listenAccuracy.relayFailed = relayFailed;
-					listenAccuracy.relayRefused = relayRefused;
-					if (command && message.kind == "CNTR")
-					{
-						// As if VP had sent it: the step lands after the
-						// projector's CNTR latency; the smoother eases the picture.
-						listenContrast = message.value;
-						listenAccuracy.lastContrast = message.value;
-						++listenAccuracy.contrastCommands;
-						if (smoothing)
-						{
-							const double land = NowMs() + projector.cntrLatencyMs;
-							smoother.Plan({ { land, message.value } });
-							smoother.Sent(land);
-						}
-					}
-					else if (command && message.kind == "LPW1")
-					{
-						++listenAccuracy.lightCommands;
-						listenLight = message.value;
-					}
-					ControllerOutput mine;
-					bool rowWanted = message.kind != "TICK";
-					if (message.kind == "TICK" && haveStats && message.mean >= 0)
-					{
-						// VP's copy of the rules on the frame on screen: the one VP
-						// fed this loop (python_feed: the script decided on exactly
-						// it, so only the rules can differ), else VP's latest.
-						const FrameStats seen = fedPending ? fedStats : latest;
-						fedPending = false;
-						mine = shadow.Tick(seen);
-						const int vpMean = std::max(0, static_cast<int>(seen.apl));
-						const int vpMax = static_cast<int>(seen.maximum);
-						const int vpHighlight = seen.maximum >= current.scriptHighlightCode ? 1 : 0;
-						++listenAccuracy.ticks;
-						sumMean += std::abs(message.mean - vpMean);
-						sumMaximum += std::abs(message.maximum - vpMax);
-						agree += message.highlight == vpHighlight ? 1 : 0;
-						if (message.targetPower >= 0) sumLight += std::abs(message.targetPower - mine.lightTarget);
-						if (message.targetContrast >= 0) sumContrast += std::abs(message.targetContrast - mine.contrastTarget);
-						const double n = listenAccuracy.ticks;
-						listenAccuracy.meanDifference = sumMean / n;
-						listenAccuracy.maximumDifference = sumMaximum / n;
-						listenAccuracy.highlightAgreement = agree / n;
-						listenAccuracy.lightTargetDifference = sumLight / n;
-						listenAccuracy.contrastTargetDifference = sumContrast / n;
-						lastTick = message;
-						lastVp = { vpMean, vpMax, vpHighlight, mine.lightTarget, mine.contrastTarget };
-						lastVpApl = seen.apl;
-						// A TICK row only when the (dis)agreement changes: the
-						// highlight call and each target, the script's vs VP's.
-						// Keyed on the differences (audit 2026-10-14b): moving content
-						// that VP's copy follows writes nothing.
-						std::ostringstream key;
-						key << (message.highlight == vpHighlight ? "=" : message.highlight ? "s" : "v");
-						if (message.targetPower >= 0) key << ',' << message.targetPower - mine.lightTarget;
-						if (message.targetContrast >= 0) key << ',' << message.targetContrast - mine.contrastTarget;
-						rowWanted = key.str() != lastTickKey;
-						lastTickKey = key.str();
-					}
-					else if (message.kind == "TICK")
-					{
-						// No measurement of VP's yet: the first such TICK only.
-						rowWanted = lastTickKey != "-";
-						lastTickKey = "-";
-					}
-					if (listenCsv && rowWanted)
-					{
-						// The script's message next to VP's own measurement and
-						// its copy of the rules.
-						std::ostringstream row;
-						const FrameStats& s = latest;
-						if (message.kind != "TICK" && haveStats)
-							mine = ScriptController(current).Tick(s);
-						row << static_cast<long long>(NowMs() - listenStartMs) << ',' << message.kind << ',' << message.value
-							<< ',' << message.mean << ',' << message.maximum << ',' << message.highlight << ','
-							<< message.targetPower << ',' << message.targetContrast << ',';
-						if (haveStats)
-							row << s.apl << ',' << s.maximum << ',' << s.highlight << ',' << s.highlightArea << ','
-								<< (s.maximum >= current.scriptHighlightCode ? 1 : 0) << ',' << mine.lightTarget << ','
-								<< mine.contrastTarget;
-						else
-							row << ",,,,,,";
-						row << ',' << listenContrast << ',' << gain.gain << ',';
-						if (sent >= 0) row << sent << ',' << writeMs;
-						else row << ',';
-						row << "\n";
-						const std::string text = row.str();
-						listenCsv << text;
-						listenCsvBytes += static_cast<long long>(text.size());
-					}
-				}
-				if (listenCsv && !messages.empty())
-					listenCsv.flush();
-				if (!messages.empty())
-				{
-					// The Config monitor's one line (written whether or not the
-					// full log is on).
-					ListenAccuracy a;
-					double g = 1.0;
-					{
-						std::lock_guard<std::mutex> guard(mutex);
-						a = listenAccuracy;
-						g = gain.active ? gain.gain : 1.0;
-					}
-					std::ofstream now(ListenNowPath(current.listenLogDirectory), std::ios::out | std::ios::trunc);
-					if (now)
-						now << "light=" << listenLight << " contrast=" << listenContrast << " mean=" << lastTick.mean
-							<< " max=" << lastTick.maximum << " hl=" << lastTick.highlight << " tp=" << lastTick.targetPower
-							<< " tc=" << lastTick.targetContrast << " vp_apl=" << lastVpApl << " vp_max=" << lastVp[1]
-							<< " vp_hl=" << lastVp[2] << " vp_tp=" << lastVp[3] << " vp_tc=" << lastVp[4] << " gain=" << g
-							<< " ticks=" << a.ticks << " d_mean=" << a.meanDifference << " d_max=" << a.maximumDifference
-							<< " agree=" << a.highlightAgreement << " d_tp=" << a.lightTargetDifference
-							<< " d_tc=" << a.contrastTargetDifference << " log=" << (listenCsv.is_open() ? 1 : 0)
-							<< " relay=" << (relay ? 1 : 0) << " relayed=" << relaySent << " failed=" << relayFailed
-							<< " refused=" << relayRefused << "\n";
-				}
-				const auto now = std::chrono::steady_clock::now();
-				if (now - lastLogTime >= std::chrono::seconds(10))
-				{
-					ListenAccuracy a;
-					{
-						std::lock_guard<std::mutex> guard(mutex);
-						a = listenAccuracy;
-					}
-					if (relay && !relayHeard)
-						DebugLog::Log("LED drive: listen - relay: waiting for the script's first command (%.0f s; Python may still be loading)",
-							(NowMs() - relayWaitFromMs) / 1000.0);
-					else
-						DebugLog::Log("LED drive: listen - %d script ticks; VP vs script: mean2 %.1f, max %.1f, highlight agree %.0f%%, "
-							"light target %.1f, contrast target %.1f; heard LPW1 %d, CNTR %d (last %d)%s", a.ticks, a.meanDifference,
-							a.maximumDifference, a.highlightAgreement * 100.0, a.lightTargetDifference, a.contrastTargetDifference,
-							a.lightCommands, a.contrastCommands, a.lastContrast,
-							relay ? (", relayed " + std::to_string(relaySent) + ", failed " + std::to_string(relayFailed) +
-								", refused " + std::to_string(relayRefused)).c_str() : "");
-					if (listenCsv)
-					{
-						// The data log's summary line.
-						std::ostringstream line;
-						line << "# summary " << static_cast<long long>(NowMs() - listenStartMs) << " ms: ticks=" << a.ticks
-							<< " d_mean=" << a.meanDifference << " d_max=" << a.maximumDifference << " agree=" << a.highlightAgreement
-							<< " d_tp=" << a.lightTargetDifference << " d_tc=" << a.contrastTargetDifference
-							<< " lpw1=" << a.lightCommands << " cntr=" << a.contrastCommands;
-						if (relay)
-							line << " relayed=" << relaySent << " failed=" << relayFailed << " refused=" << relayRefused;
-						if (a.feedAnswers || a.feedNone || a.feedRefused)
-							line << " fed=" << a.feedAnswers << " fed_none=" << a.feedNone << " fed_refused=" << a.feedRefused;
-						line << "\n";
-						const std::string text = line.str();
-						listenCsv << text;
-						listenCsv.flush();
-						listenCsvBytes += static_cast<long long>(text.size());
-					}
-					lastLogTime = now;
-				}
-				continue;   // the listener's wait is this tick's wait
 			}
 			else if (current.mode == Mode::PictureOnly)
 			{
@@ -1411,6 +984,67 @@ namespace LedDrive
 			else if (have)
 			{
 				const ControllerOutput out = controller.Tick(stats);
+				if (current.scriptPacing)
+				{
+					// script_pacing: script (fix under test, owner 2026-10-15): the
+					// script's own rhythm - its screenshot time before acting,
+					// each echo's time, its sleeps, and the next loop at once.
+					std::vector<ScriptSend> sends;
+					const int lengthMs = PaceScriptTick(out, current.scriptMeasureMs, current.scriptEchoMs, sends);
+					const double tickStartMs = NowMs() -
+						std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
+					bool smoothNow = false;
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						smoothNow = smoothing;
+						if (smoothNow && !out.contrastSchedule.empty())
+						{
+							std::vector<std::pair<double, int>> landings;
+							for (const ScriptSend& send : sends)
+								if (!send.light)
+									landings.push_back({ tickStartMs + send.offsetMs + projector.cntrLatencyMs, send.value });
+							smoother.Plan(landings);
+						}
+					}
+					for (const ScriptSend& send : sends)
+					{
+						if (!WaitUntil(std::max(sendsDone, tickStart + std::chrono::milliseconds(send.offsetMs)), generation))
+							break;
+						if (send.light)
+						{
+							if (CustomDimEngaged()) continue;
+							driver->SendScript("LPW1", send.value);
+						}
+						else
+						{
+							driver->SendScript("CNTR", send.value);
+							if (send.value != 50) contrastDriven = true;
+							if (smoothNow)
+							{
+								std::lock_guard<std::mutex> guard(mutex);
+								smoother.Sent(NowMs() + projector.cntrLatencyMs);
+							}
+						}
+						sendsDone = std::chrono::steady_clock::now();
+					}
+					scriptFloor = tickStart + std::chrono::milliseconds(std::max(lengthMs, 10));   // never a spin
+					const auto now = std::chrono::steady_clock::now();
+					if (out.lightCommand >= 0 || !out.contrastSchedule.empty() ||
+						now - lastLogTime >= std::chrono::seconds(10))
+					{
+						if (out.log != lastLog || now - lastLogTime >= std::chrono::seconds(10))
+							DebugLog::Log("%s (script pacing)%s", out.log.c_str(), applyGain ? "" : " (dry run)");
+						lastLog = out.log;
+						lastLogTime = now;
+					}
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						++ticks;
+					}
+					// No tick_ms floor: the script starts its next loop at once.
+					WaitUntil(std::max(sendsDone, scriptFloor), generation);
+					continue;
+				}
 				// Step 7b: the script's own commands, sent synchronously in its
 				// own timing - LPW1 at the tick start, then each CNTR after the
 				// script's sleep, counted from the end of the previous send
@@ -1487,10 +1121,7 @@ namespace LedDrive
 			compensating = false;
 			contrastDriven = contrastDriven || assistContrastDriven;
 		}
-		// Relay sends only the script's commands, on exit too (the script
-		// ends with VP and leaves the projector where it put it, as it
-		// always did).
-		if (driving && !(current.mode == Mode::Listen && ListenRelays(current)))
+		if (driving)
 			RestoreFullLight(*driver, current.ledCeiling,
 				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal, contrastDriven);
 		driver->Close();

@@ -35,9 +35,6 @@ namespace LedDrive
 		bool QueueSequenceNow(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
 		bool SendNow(const std::string& mnemonic, int value, int timeoutMs) override;
 		bool SendScript(const std::string& mnemonic, int value) override;
-		bool SendRelay(const std::string& mnemonic, int value) override;
-		// The bytes the script's `echo :<cmd><value>cr > com1` writes.
-		static std::string RelayBytes(const std::string& mnemonic, int value);
 		bool SetContrast(int value) override;
 		void Close() override;
 		DriverStatus Status() const override;

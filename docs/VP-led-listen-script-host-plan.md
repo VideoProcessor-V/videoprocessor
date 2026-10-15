@@ -1,5 +1,7 @@
 # LED listen: VP runs the owner's script itself (plan, not built)
 
+> **Retired 2026-10-15:** VP no longer runs the Python script; see docs/VP-led-core-sources.md. Kept as history.
+
 Owner, 2026-10-13: "is there the possibility of directly running the native
 python script from inside VP instead of running it externally and
 listening. Would be easier for you to track and follow."

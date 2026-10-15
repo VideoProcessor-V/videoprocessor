@@ -47,15 +47,14 @@ namespace LedDrive
 	// PictureOnly (delta 12): the statistics and the picture-side terms
 	// (shadow lift, boost toe) as in compensate, the compensation gain exactly
 	// 1, and the RS-232 port never opened (owner 2026-10-13: the port stays
-	// free for the original Python script). Like log_only it runs on the
+	// free). Like log_only it runs on the
 	// dry-run driver; leaving compensate for it rebuilds the module, whose
 	// exit restores full light before the port is released.
-	// Listen (owner 2026-10-13): the original beta 22 script drives COM1 and
-	// tells VP each command over UDP (its VP addendum, ScriptListener.h). VP
-	// never opens the port; it eases the picture across each CNTR step as if
-	// it had sent it (script_smoothing) and measures how closely its own copy
-	// of the script's rules agrees with the script.
-	enum class Mode { Compensate, Script, LogOnly, PictureOnly, Listen };
+	// The Python script source (mode: listen, command_source: python) was
+	// removed (owner 2026-10-15): it was only ever a validator of VP's copy,
+	// which now matches it (tools\led_script_sim.py, LedScriptCorrelationTests).
+	// Older files naming it run mode: script.
+	enum class Mode { Compensate, Script, LogOnly, PictureOnly };
 
 	enum class Terminator { Auto, Cr, LiteralCr, Script };
 
@@ -150,6 +149,18 @@ namespace LedDrive
 		int antiPumpBand = 3;
 		// mode: script's highlightdetect (the script used max >= 215).
 		int scriptHighlightCode = 215;
+		// Fix under test (owner 2026-10-15): script_pacing: script - the
+		// internal script copy keeps the script's own rhythm instead of a
+		// tick_ms loop: each loop takes script_measure_ms (the script's
+		// screenshot) before it acts, each command costs script_echo_ms (its
+		// cmd echo; an LPW1 two, the second to its console), its sleeps as
+		// modelled, and the next loop starts at once (the script has no loop
+		// floor). The correlation harness (LedScriptCorrelationTests) measures
+		// it against the real script. Default (owner 2026-10-15); tick = the
+		// tick_ms loop.
+		bool scriptPacing = true;
+		int scriptMeasureMs = 150;
+		int scriptEchoMs = 30;
 		// mode: compensate ramps: levels per second, and no movement while
 		// |target - current| <= deadband. early_ramp lets the ramp start ahead
 		// of a cut the lookahead has seen.
@@ -187,34 +198,11 @@ namespace LedDrive
 		// (grain averages out, a real highlight survives). APL and the block
 		// maximum (script mode) unchanged. Off = the plain statistics.
 		bool highlightGrainSuppress = true;
-		// mode: listen: the UDP port (127.0.0.1) the script's addendum sends to;
-		// listen_log on keeps logs\led-listen.csv (every script message with
-		// VP's measurement; off by default). The Config monitor reads
-		// led-listen-now.txt, written either way. listenLogDirectory: tests
-		// (empty = beside vp.log).
-		int listenPort = 47811;
-		bool listenLog = false;
-		// Owner 2026-10-13 (docs/VP-led-listen-script-host-plan.md): VP starts
-		// and supervises the script itself (ScriptHost.h). listen_script empty =
-		// the owner starts it; python empty = "python" on PATH.
-		std::string listenScript;
-		std::string python;
-		std::string listenLogDirectory;
-		// Relay (owner 2026-10-14; on unless python_drives_port, used only when
-		// VP runs the script): VP opens the RS-232 port and sends each
-		// LPW1/CNTR the script tells it exactly as the script sent it (the
-		// same bytes, no clamp, gap or reshaping); the script, told by
-		// VP_LED_RELAY=1, skips its own COM1 writes. VP sends nothing of its
-		// own: not at the start (Python loading is silence), not on exit. Off,
-		// or the port cannot be opened: the original listen - the script
-		// drives COM1 itself.
-		bool listenRelay = true;
 		// The LED core (owner 2026-10-14): one place that holds the port,
 		// sends and logs, fed by a selectable command source -
-		// command_source: python (the owner's script; relay, or with
-		// python_drives_port the original listen), internal_script (VP's copy
-		// of the script's rules), compensate (VP's own controller), none (no
-		// LED commands). It sets `mode` (which older configurations still
+		// command_source: internal_script (VP's copy of the script's rules),
+		// compensate (VP's own controller), none (no LED commands); python
+		// (retired 2026-10-15) runs internal_script. It sets `mode` (which older configurations still
 		// name directly). Two switches on the core:
 		// adaptive_gamma (default off with command_source; older `mode`
 		// configurations keep it on): VP's picture adapts to the LED - the
@@ -222,22 +210,14 @@ namespace LedDrive
 		// compensation gain for compensate) and the ANSI shadow lift (its
 		// strength still shadow_lift_ansi). lookahead (default on): the
 		// queued-frame look-ahead of VP's internal sources; off = reactive.
-		// The Python script decides from the frame on screen (its screenshots,
-		// or with python_feed VP's measurement of it), so it has none.
 		std::string commandSource;
 		int adaptiveGammaSetting = -1;   // adaptive_gamma as read: -1 not named
 		bool modeNamed = false;          // the file names `mode` (an older file)
-		bool pythonDrivesPort = false;
 		bool adaptiveGamma = true;
 		bool lookahead = true;
-		// python_feed (owner 2026-10-15, docs/VP-led-python-feed-plan.md): the
-		// script VP runs asks VP for its measurement instead of taking a
-		// screenshot (main_vp.py, told by VP_LED_FEED=1; it pads the loop to
-		// its screenshot's time, so its timing is unchanged). VP answers with
-		// its exact measurement of the frame on screen - what the screenshot
-		// saw, never an upcoming frame (owner: faithful to the original). No
-		// answer: the script takes its screenshot.
-		bool pythonFeed = true;
+		// The file named the retired Python source (command_source: python or
+		// mode: listen): it runs internal_script, logged once.
+		bool pythonSourceRetired = false;
 		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
 		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
 		// 100 = no cap beyond cntr_max_usable. The lower of the two applies.
@@ -534,17 +514,16 @@ namespace LedDrive
 		return {
 			Boolean("enabled"),
 			Choice("mode", { "compensate", "script", "log_only", "picture_only", "listen" }),
-			Integer("listen_port", 1024, 65535),
-			Boolean("listen_log"),
+			// Retired with the Python source (2026-10-15): accepted, ignored.
+			Custom("listen_port", [](const std::string&) { return true; }, "retired (ignored)"),
+			Custom("listen_log", [](const std::string&) { return true; }, "retired (ignored)"),
+			Custom("python_drives_port", [](const std::string&) { return true; }, "retired (ignored)"),
+			Custom("python_feed", [](const std::string&) { return true; }, "retired (ignored)"),
+			Custom("listen_script", [](const std::string&) { return true; }, "retired (ignored)"),
+			Custom("python", [](const std::string&) { return true; }, "retired (ignored)"),
 			Choice("command_source", { "python", "internal_script", "compensate", "none" }),
-			Boolean("python_drives_port"),
 			Boolean("adaptive_gamma"),
 			Boolean("lookahead"),
-			Boolean("python_feed"),
-			Custom("listen_script", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
-				"the path of the script VP starts in mode listen (e.g. main_vp.py; relative to this configuration file, or absolute)"),
-			Custom("python", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
-				"the Python interpreter for listen_script (python.exe or its full path)"),
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
@@ -602,6 +581,9 @@ namespace LedDrive
 			Number("knee", 0.0, 0.5),
 			Integer("anti_pump_band", 0, 50),
 			Integer("script_highlight_code", 16, 255),
+			Choice("script_pacing", { "tick", "script" }),
+			Integer("script_measure_ms", 0, 2000),
+			Integer("script_echo_ms", 0, 1000),
 			Number("compensation_eotf", 1.0, 3.0),
 			Number("gamma_boost_knee", 0.0, 0.5),
 			Number("gamma_boost_knee_width", 0.0, 0.5),
@@ -845,40 +827,18 @@ namespace LedDrive
 			const std::string mode = ConfigFile::NormalizeName(value);
 			result.mode = mode == "compensate" ? Mode::Compensate :
 				mode == "script" ? Mode::Script : mode == "picture_only" ? Mode::PictureOnly :
-				mode == "listen" ? Mode::Listen : Mode::LogOnly;
+				mode == "listen" ? Mode::Script : Mode::LogOnly;
+			if (mode == "listen") result.pythonSourceRetired = true;
 		}
 		readInt("tick_ms", 50, 5000, result.tickMs);
-		readInt("listen_port", 1024, 65535, result.listenPort);
-		config.TryGetBool(section, "listen_log", result.listenLog);
 		if (config.TryGetString(section, "command_source", value))
 			result.commandSource = ConfigFile::NormalizeName(value);
-		config.TryGetBool(section, "python_drives_port", result.pythonDrivesPort);
 		{
 			bool adaptive = false;
 			if (config.TryGetBool(section, "adaptive_gamma", adaptive))
 				result.adaptiveGammaSetting = adaptive ? 1 : 0;
 		}
 		config.TryGetBool(section, "lookahead", result.lookahead);
-		config.TryGetBool(section, "python_feed", result.pythonFeed);
-		{
-			// listen_script relative to the configuration that names it; quotes dropped.
-			auto unquote = [](std::string text)
-			{
-				text = ConfigFile::Trim(text);
-				if (text.size() >= 2 && text.front() == '"' && text.back() == '"') text = text.substr(1, text.size() - 2);
-				return text;
-			};
-			if (config.TryGetString(section, "listen_script", value))
-			{
-				std::string path = unquote(value);
-				const bool absolute = path.empty() || (path.size() > 1 && path[1] == ':') || path[0] == '\\' || path[0] == '/';
-				const std::string& owner = config.GetLoadedPath();
-				const size_t slash = owner.find_last_of("\\/");
-				result.listenScript = absolute || slash == std::string::npos ? path : owner.substr(0, slash + 1) + path;
-			}
-			if (config.TryGetString(section, "python", value))
-				result.python = unquote(value);
-		}
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
 		if (config.TryGetString(section, "rate_preset", value))
@@ -924,6 +884,10 @@ namespace LedDrive
 		readNumber("knee", result.knee);
 		readInt("anti_pump_band", 0, 50, result.antiPumpBand);
 		readInt("script_highlight_code", 16, 255, result.scriptHighlightCode);
+		if (config.TryGetString(section, "script_pacing", value))
+			result.scriptPacing = ConfigFile::NormalizeName(value) == "script";
+		readInt("script_measure_ms", 0, 2000, result.scriptMeasureMs);
+		readInt("script_echo_ms", 0, 1000, result.scriptEchoMs);
 		readNumber("compensation_eotf", result.compensationEotf);
 		readNumber("gamma_boost_knee", result.gammaBoostKnee);
 		readNumber("gamma_boost_knee_width", result.gammaBoostKneeWidth);
@@ -971,21 +935,18 @@ namespace LedDrive
 	{
 		if (led.commandSource.empty())
 		{
-			// An older mode-only file behaves as before: mode: listen leaves
-			// COM1 to the script (audit 2026-10-14b).
 			// A file naming neither source nor mode is new: adaptive gamma off
 			// unless named (audit 2026-10-14c).
 			if (led.adaptiveGammaSetting >= 0) led.adaptiveGamma = led.adaptiveGammaSetting == 1;
 			else if (!led.modeNamed) led.adaptiveGamma = false;
-			led.listenRelay = false;
 			return;
 		}
 		led.adaptiveGamma = led.adaptiveGammaSetting == 1;
-		led.mode = led.commandSource == "python" ? Mode::Listen :
-			led.commandSource == "internal_script" ? Mode::Script :
+		// python: retired (2026-10-15) - VP's copy of the script.
+		if (led.commandSource == "python") led.pythonSourceRetired = true;
+		led.mode = led.commandSource == "python" || led.commandSource == "internal_script" ? Mode::Script :
 			led.commandSource == "compensate" ? Mode::Compensate :
 			led.adaptiveGamma ? Mode::PictureOnly : Mode::LogOnly;
-		led.listenRelay = !led.pythonDrivesPort;
 		led.scriptSmoothing = led.adaptiveGamma;
 	}
 
@@ -1033,21 +994,12 @@ namespace LedDrive
 		return BoostExponent(led.gammaBoost, displayGamma);
 	}
 
-	// mode: listen relays the script's commands (listen_relay) only when VP
-	// runs the script, so the script can be told to leave COM1 alone.
-	inline bool ListenRelays(const LedDriveConfig& led)
-	{
-		return led.enabled && led.mode == Mode::Listen && led.listenRelay && !led.listenScript.empty();
-	}
-
 	// The module talks to the projector only when it is enabled and not in
-	// log_only mode; otherwise it uses the dry-run "none" driver. listen
-	// opens the port only to relay.
+	// log_only mode; otherwise it uses the dry-run "none" driver.
 	inline std::string EffectiveProtocol(const ProjectorConfig& projector,
 		const LedDriveConfig& led)
 	{
-		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly ||
-			(led.mode == Mode::Listen && !ListenRelays(led)))
+		if (!led.enabled || led.mode == Mode::LogOnly || led.mode == Mode::PictureOnly)
 			return "none";
 		return projector.protocol;
 	}

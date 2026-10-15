@@ -10146,36 +10146,35 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     QLabel* compensateWarning = nullptr;
     QWidget* aheadRow = nullptr;
     QWidget* aheadHelp = nullptr;
-    QWidget* pythonPortRow = nullptr;
-    QWidget* pythonPortHelp = nullptr;
-    QCheckBox* pythonFeedRow = nullptr;
+    std::vector<QWidget*> pacingRows;
     {
-        const QStringList sources = { QStringLiteral("python"), QStringLiteral("internal_script"),
-            QStringLiteral("compensate"), QStringLiteral("none") };
+        // An older file's retired source (command_source: python, mode:
+        // listen) shows, and runs, VP's copy of the script (owner 2026-10-15).
+        const QStringList sources = { QStringLiteral("internal_script"), QStringLiteral("compensate"),
+            QStringLiteral("none") };
         auto* source = new QComboBox;
         ledSource = source;
         source->setObjectName(controlName(led, QStringLiteral("command_source")));
         source->setAccessibleName(QStringLiteral("Command source"));
-        source->addItem(QStringLiteral("Your Python script (VP sends its commands exactly as written)"), sources[0]);
-        source->addItem(QStringLiteral("VP's copy of your script"), sources[1]);
-        source->addItem(QStringLiteral("Compensate (VP's own controller)"), sources[2]);
-        source->addItem(QStringLiteral("No LED commands"), sources[3]);
+        source->addItem(QStringLiteral("VP's copy of your script"), sources[0]);
+        source->addItem(QStringLiteral("Compensate (VP's own controller)"), sources[1]);
+        source->addItem(QStringLiteral("No LED commands"), sources[2]);
         const QString legacyMode = value(led, QStringLiteral("mode")).trimmed().toLower();
         QString configuredSource = value(led, QStringLiteral("command_source")).trimmed().toLower();
         // An older file names `mode` and no command_source; a new file names
         // neither (audit 2026-10-14c: only the former keeps the old switches).
         const bool olderFile = configuredSource.isEmpty() && !legacyMode.isEmpty();
         if (configuredSource.isEmpty())
-            configuredSource = legacyMode == QStringLiteral("listen") ? sources[0] :
-                legacyMode == QStringLiteral("script") ? sources[1] :
-                legacyMode == QStringLiteral("compensate") ? sources[2] : sources[3];
+            configuredSource = legacyMode == QStringLiteral("listen") || legacyMode == QStringLiteral("script") ? sources[0] :
+                legacyMode == QStringLiteral("compensate") ? sources[1] : sources[2];
+        if (configuredSource == QStringLiteral("python"))
+            configuredSource = sources[0];
         source->setCurrentIndex(std::max(0, static_cast<int>(sources.indexOf(configuredSource))));
         driveForm->addRow(QStringLiteral("Command source"), source);
         driveForm->addRow(QString(), helpLabel(QStringLiteral(
             "Where the LED and contrast commands come from. VP holds the RS-232 port, sends them and logs them. "
-            "Your Python script: VP runs it (the Python script card) and sends each command exactly as the script "
-            "wrote it, nothing of its own - not while Python is starting, not on exit. No LED commands with "
-            "adaptive gamma on: only VP's picture adjustments, the port left free.")));
+            "VP's copy of your dimming script makes the script's decisions, in its rhythm. No LED "
+            "commands with adaptive gamma on: only VP's picture adjustments, the port left free.")));
         // Adaptive gamma, shown as the file behaves: named; off for a new
         // file; for an older mode-only file, on where the picture adapted
         // there (compensate, picture only, script smoothing or a shadow lift).
@@ -10208,26 +10207,55 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             "VP sees the coming frames and times each change for when the LED gets there. Off: it reacts to the "
             "frame on screen."));
         driveForm->addRow(QString(), aheadHelp);
-        // Shown as the file behaves: an older `mode: listen` file leaves the
-        // port to the script (audit 2026-10-14b).
-        const QString drivesText = value(led, QStringLiteral("python_drives_port")).trimmed().toLower();
-        const bool drivesNow = !drivesText.isEmpty() ?
-            (drivesText == QStringLiteral("true") || drivesText == QStringLiteral("on") || drivesText == QStringLiteral("1")) :
-            olderFile && legacyMode == QStringLiteral("listen");
-        auto* pythonPort = configuredCheck(QStringLiteral("Fallback: the script writes the port itself"), QString(), drivesNow);
-        pythonPortRow = pythonPort;
-        pythonPort->setObjectName(controlName(led, QStringLiteral("python_drives_port")));
-        pythonPort->setEnabled(true);
-        driveForm->addRow(QString(), pythonPort);
-        pythonPortHelp = helpLabel(QStringLiteral(
-            "Off (normal): VP sends the script's commands to the projector. On: the script writes the COM port "
-            "itself, as it did before VP, and VP only follows it and logs. VP also does this by itself when it "
-            "does not run the script or cannot open the port."));
-        driveForm->addRow(QString(), pythonPortHelp);
+        // Owner 2026-10-15: the script copy in the original script's own
+        // rhythm (the default) or a fixed loop.
+        auto* pacing = bindChoiceField(led, QStringLiteral("script_pacing"),
+            { QStringLiteral("script"), QStringLiteral("tick") },
+            { QStringLiteral("The script's own rhythm"), QStringLiteral("Fixed loop") });
+        pacing->setToolTip(QStringLiteral(
+            "How often VP's copy of the script decides. The script's own rhythm (the default): its measuring "
+            "time, then its commands with their pauses, then the next loop at once - the same commands at the "
+            "same moments as your original script. Fixed loop: every 400 ms."));
+        driveForm->addRow(QStringLiteral("Script pacing"), pacing);
+        pacingRows.push_back(pacing);
+        auto pacingSpin = [this, led, driveForm](const char* key, int maximum, int fallback, const QString& label,
+            const QString& tip)
+        {
+            auto* spin = new QSpinBox;
+            spin->setObjectName(controlName(led, QString::fromLatin1(key)));
+            spin->setRange(0, maximum);
+            spin->setSingleStep(10);
+            spin->setSuffix(QStringLiteral(" ms"));
+            spin->setMaximumWidth(120);
+            spin->setAlignment(Qt::AlignRight);
+            spin->setToolTip(tip);
+            bool valid = false;
+            const int configured = value(led, QString::fromLatin1(key)).toInt(&valid);
+            spin->setValue(valid ? std::max(0, std::min(configured, maximum)) : fallback);
+            const std::string name = key;
+            connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, name](int ms)
+            {
+                if (!document_) return;
+                const std::string section = led.toStdString();
+                if (!document_->SetKnown(section, name.c_str(), std::to_string(ms)))
+                {
+                    document_->AddSection(section);
+                    document_->SetKnown(section, name.c_str(), std::to_string(ms));
+                }
+                markDirty();
+            });
+            driveForm->addRow(label, spin);
+            return spin;
+        };
+        pacingRows.push_back(pacingSpin("script_measure_ms", 2000, 150, QStringLiteral("Script's measuring time"),
+            QStringLiteral("How long your original script took to measure the picture (its screenshot): part of its rhythm. "
+                "Default 150.")));
+        pacingRows.push_back(pacingSpin("script_echo_ms", 1000, 30, QStringLiteral("Script's command time"),
+            QStringLiteral("How long each of the script's commands took to send (its echo to the port). Default 30.")));
         // What every source change writes: the source, the matching mode for
         // older builds (no LED commands: picture only when adaptive gamma is
-        // on), and both boxes as shown, so nothing changes behind them.
-        auto writeSource = [this, led, source, adaptive, pythonPort]()
+        // on), and adaptive gamma as shown, so nothing changes behind it.
+        auto writeSource = [this, led, source, adaptive]()
         {
             if (!document_) return;
             const QString chosen = source->currentData().toString();
@@ -10237,13 +10265,11 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 document_->AddSection(section);
                 document_->SetKnown(section, "command_source", chosen.toStdString());
             }
-            const char* mode = chosen == QStringLiteral("python") ? "listen" :
-                chosen == QStringLiteral("internal_script") ? "script" :
+            const char* mode = chosen == QStringLiteral("internal_script") ? "script" :
                 chosen == QStringLiteral("compensate") ? "compensate" :
                 adaptive->isChecked() ? "picture_only" : "log_only";
             document_->SetKnown(section, "mode", mode);
             document_->SetKnown(section, "adaptive_gamma", adaptive->isChecked() ? "true" : "false");
-            document_->SetKnown(section, "python_drives_port", pythonPort->isChecked() ? "true" : "false");
             markDirty();
         };
         // A pick writes even when it is the source already shown (an older
@@ -10262,19 +10288,6 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             else
                 writeSource();   // keeps the matching mode (picture only / log only)
             (void)source;
-        });
-        connect(pythonPort, &QCheckBox::toggled, this, [this, led, writeSource](bool checked)
-        {
-            if (!document_) return;
-            // Without command_source VP ignores python_drives_port: a change
-            // here converts the file to the Python source.
-            if (value(led, QStringLiteral("command_source")).trimmed().isEmpty())
-                writeSource();
-            else
-            {
-                document_->SetKnown(led.toStdString(), "python_drives_port", checked ? "true" : "false");
-                markDirty();
-            }
         });
     }
     // Compensate's own settings: shown only when it is the command source
@@ -10742,169 +10755,6 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "A cut always takes the new value at once. Lower if a flash makes the darks pump."));
     driveForm->addRow(QStringLiteral("Lift follows within (per second)"), liftRate);
     const std::vector<QWidget*> shadowLiftRows = { shadowLift, liftRampLo, liftRampHi, liftRate };
-    // The Python script's card (audit 2026-10-14b): its file, Python, the
-    // log and the live monitor together, shown for that source only.
-    auto* pythonCard = new QWidget;
-    auto* pythonForm = new QFormLayout(pythonCard);
-    pythonForm->setContentsMargins(0, 0, 0, 0);
-    pythonForm->setVerticalSpacing(8);
-    // mode: listen's monitor (owner 2026-10-13): the script's latest commands
-    // and measurement next to VP's, from logs\led-listen.csv beside vp.log
-    // (VP writes one row per script message), and the session's agreement.
-    auto* listenBox = new QGroupBox(QStringLiteral("What the script is doing"));
-    listenBox->setObjectName(controlName(led, QStringLiteral("listen_monitor")));
-    auto* listenLayout = new QVBoxLayout(listenBox);
-    auto* listenStatus = new QLabel(QStringLiteral("Nothing from the script yet."));
-    auto* listenScript = new QLabel;
-    auto* listenVp = new QLabel;
-    auto* listenAgree = new QLabel;
-    for (QLabel* label : { listenStatus, listenScript, listenVp, listenAgree })
-    {
-        label->setWordWrap(true);
-        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        listenLayout->addWidget(label);
-    }
-    listenLayout->addWidget(helpLabel(QStringLiteral(
-        "With logging on, every script message is kept with VP's own measurement in logs\\led-listen.csv "
-        "(beside vp.log), for adapting VP's copy of the script. The script needs the few lines that tell VP "
-        "what it sends; VP ships it with them as scripts\\main_vp.py.")));
-    auto* listenTimer = new QTimer(listenBox);
-    // VP's one-line summary, overwritten on each script message (the timer
-    // keeps its own copy of the path: no window members in the callback).
-    const QString listenNowPath = QFileInfo(configPath_).absolutePath() + QStringLiteral("/logs/led-listen-now.txt");
-    const QString scriptNowPath = QFileInfo(configPath_).absolutePath() + QStringLiteral("/logs/led-script-now.txt");
-    connect(listenTimer, &QTimer::timeout, listenBox, [listenNowPath, scriptNowPath, listenStatus, listenScript, listenVp, listenAgree]()
-    {
-        // When VP runs the script: its state (ScriptHost).
-        QString hosted;
-        {
-            QFile scriptFile(scriptNowPath);
-            if (scriptFile.open(QIODevice::ReadOnly))
-            {
-                QHash<QString, QString> sv;
-                for (const QString& pair : QString::fromLatin1(scriptFile.readAll()).simplified().split(QLatin1Char(' ')))
-                {
-                    const int equals = pair.indexOf(QLatin1Char('='));
-                    if (equals > 0)
-                        sv.insert(pair.left(equals), pair.mid(equals + 1));
-                }
-                const QString state = sv.value(QStringLiteral("state"));
-                const QString last = sv.value(QStringLiteral("last")).replace(QLatin1Char('_'), QLatin1Char(' '));
-                const QString portError = sv.value(QStringLiteral("port_error")).replace(QLatin1Char('_'), QLatin1Char(' '));
-                hosted = state == QStringLiteral("running") ?
-                    QStringLiteral(" VP runs the script (pid %1).").arg(sv.value(QStringLiteral("pid"))) :
-                    state == QStringLiteral("waiting") ?
-                    QStringLiteral(" VP restarts the script in %1 s (%2).").arg(sv.value(QStringLiteral("restart_s")), last) :
-                    QString();
-                // Planner Q5: which port case the owner is in.
-                const QString port = sv.value(QStringLiteral("port"));
-                if (!hosted.isEmpty() && port == QStringLiteral("applied"))
-                    hosted += QStringLiteral(" Port settings applied by VP.");
-                else if (!hosted.isEmpty() && port == QStringLiteral("skipped"))
-                    hosted += QStringLiteral(" Port settings skipped (no projector port set).");
-                else if (!hosted.isEmpty() && port == QStringLiteral("failed"))
-                    hosted += QStringLiteral(" Port settings failed: %1.").arg(portError);
-            }
-        }
-        const QString& path = listenNowPath;
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly))
-        {
-            listenStatus->setText(QStringLiteral("Nothing from the script yet: choose your Python script as the command source and give its file above.") + hosted);
-            return;
-        }
-        QHash<QString, QString> v;
-        for (const QString& pair : QString::fromLatin1(file.readAll()).simplified().split(QLatin1Char(' ')))
-        {
-            const int equals = pair.indexOf(QLatin1Char('='));
-            if (equals > 0)
-                v.insert(pair.left(equals), pair.mid(equals + 1));
-        }
-        const qint64 quietMs = QFileInfo(path).lastModified().msecsTo(QDateTime::currentDateTime());
-        listenStatus->setText((quietMs > 5000 ?
-            QStringLiteral("Not receiving (last message %1 s ago).").arg(quietMs / 1000) :
-            QStringLiteral("Receiving from the script.")) +
-            (v.value(QStringLiteral("log")) == QStringLiteral("1") ? QStringLiteral(" Logging to led-listen.csv.") :
-                QStringLiteral(" Not logging.")) + hosted);
-        auto dash = [&](const char* key)
-        {
-            const QString value = v.value(QString::fromLatin1(key));
-            return value.isEmpty() || value.toDouble() < 0.0 ? QStringLiteral("-") : value;
-        };
-        auto yes = [&](const char* key)
-        {
-            const QString value = v.value(QString::fromLatin1(key));
-            return value == QStringLiteral("1") ? QStringLiteral("yes") : value == QStringLiteral("0") ? QStringLiteral("no") :
-                QStringLiteral("-");
-        };
-        listenScript->setText(QStringLiteral("Script: LED %1, contrast %2  |  average brightness %3, brightest %4, highlight %5  |  aims for LED %6, contrast %7")
-            .arg(dash("light"), dash("contrast"), dash("mean"), dash("max"), yes("hl"), dash("tp"), dash("tc")));
-        listenVp->setText(QStringLiteral("VP's copy: average brightness %1, brightest %2, highlight %3  |  aims for LED %4, contrast %5  |  picture gain %6")
-            .arg(QString::number(v.value(QStringLiteral("vp_apl")).toDouble(), 'f', 1), dash("vp_max"), yes("vp_hl"),
-                dash("vp_tp"), dash("vp_tc"), QString::number(v.value(QStringLiteral("gain"), QStringLiteral("1")).toDouble(), 'f', 3)));
-        const int ticks = v.value(QStringLiteral("ticks")).toInt();
-        listenAgree->setText(ticks <= 0 ? QString() :
-            QStringLiteral("Agreement over %1 script loops: average brightness within %2, brightest within %3, highlight same %4%, "
-                "LED target within %5, contrast target within %6 (average differences)")
-                .arg(ticks).arg(v.value(QStringLiteral("d_mean")).toDouble(), 0, 'f', 1)
-                .arg(v.value(QStringLiteral("d_max")).toDouble(), 0, 'f', 1)
-                .arg(100.0 * v.value(QStringLiteral("agree")).toDouble(), 0, 'f', 0)
-                .arg(v.value(QStringLiteral("d_tp")).toDouble(), 0, 'f', 1)
-                .arg(v.value(QStringLiteral("d_tc")).toDouble(), 0, 'f', 1));
-    });
-    listenTimer->start(250);
-    {
-        // The UDP port the script's addendum sends to.
-        auto* listenPort = new QSpinBox;
-        listenPort->setObjectName(controlName(led, QStringLiteral("listen_port")));
-        listenPort->setAccessibleName(QStringLiteral("Listen port"));
-        listenPort->setRange(1024, 65535);
-        bool valid = false;
-        const int configured = value(led, QStringLiteral("listen_port")).toInt(&valid);
-        listenPort->setValue(valid ? configured : 47811);
-        listenPort->setToolTip(QStringLiteral(
-            "The port on this PC the script's VP addendum sends to. main_vp.py uses 47811: change it only together "
-            "with the script."));
-        connect(listenPort, qOverload<int>(&QSpinBox::valueChanged), this, [this, led](int port)
-        {
-            if (!document_) return;
-            const std::string section = led.toStdString();
-            const std::string text = std::to_string(port);
-            if (!document_->SetKnown(section, "listen_port", text))
-            {
-                document_->AddSection(section);
-                document_->SetKnown(section, "listen_port", text);
-            }
-            markDirty();
-        });
-        // Owner 2026-10-13: VP starts and supervises the script itself.
-        auto* scriptPath = bindTextField(led, QStringLiteral("listen_script"));
-        scriptPath->setPlaceholderText(QStringLiteral("empty = you start the script yourself (it then writes the port itself)"));
-        scriptPath->setToolTip(QStringLiteral(
-            "Python source: the script VP starts (e.g. main_vp.py; next to this configuration, or a full path). VP runs it "
-            "without a window, restarts it if it stops (after 2, 4, 8 ... 60 s), ends it when the source changes or VP "
-            "closes, and keeps its output in logs\\led-script.log. VP sends its commands to the projector (unless the "
-            "fallback on the LED drive card is on)."));
-        pythonForm->addRow(QStringLiteral("Script VP runs"), scriptPath);
-        auto* pythonPath = bindTextField(led, QStringLiteral("python"));
-        pythonPath->setPlaceholderText(QStringLiteral("python"));
-        pythonPath->setToolTip(QStringLiteral(
-            "The Python that runs the script: empty = python on the PATH, or the full path of python.exe."));
-        pythonForm->addRow(QStringLiteral("Python"), pythonPath);
-        pythonFeedRow = bindCheckField(QStringLiteral("Feed the script VP's measurement (no screenshots)"),
-            led, QStringLiteral("python_feed"), true);
-        pythonFeedRow->setToolTip(QStringLiteral(
-            "On (the default): the script asks VP for the brightness of the frame on screen instead of taking a "
-            "screenshot - the same frame the screenshot saw, measured by VP. The script keeps its own pace (it waits "
-            "as long as its screenshot took). If VP does not answer, "
-            "the script takes its screenshot as before. Needs the main_vp.py that came with this VP."));
-        pythonForm->addRow(QString(), pythonFeedRow);
-        pythonForm->addRow(QString(), bindCheckField(QStringLiteral("Log the script's commands with VP's measurement (logs\\led-listen.csv)"),
-            led, QStringLiteral("listen_log"), false));
-        // Advanced: main_vp.py sends to 47811; change both or neither.
-        pythonForm->addRow(QStringLiteral("Listen port (advanced)"), listenPort);
-        pythonForm->addRow(listenBox);
-    }
     auto* assist = new QWidget;
     auto* assistForm = new QFormLayout(assist);
     assistForm->setContentsMargins(0, 0, 0, 0);
@@ -11045,9 +10895,6 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // shows only when the chosen source uses it.
     cards->addCard(createCard(QStringLiteral("LED drive"),
         QStringLiteral("Dim the projector's LED with the picture, as your dimming script does."), drive));
-    QWidget* pythonBox = createCard(QStringLiteral("Python script"),
-        QStringLiteral("Your script, run by VP: its file, Python, and what it is doing."), pythonCard);
-    cards->addCard(pythonBox);
     QWidget* connectionBox = createCard(QStringLiteral("Projector connection"),
         QStringLiteral("The serial link to the projector."), connection);
     cards->addCard(connectionBox);
@@ -11094,16 +10941,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         // (audits 2026-10-14b/c).
         QComboBox* source = ledSource;
         QCheckBox* adaptive = ledAdaptive;
-        // The Python fallback belongs on the Python card.
-        for (QWidget* row : { pythonPortHelp, pythonPortRow })
-        {
-            const QFormLayout::TakeRowResult taken = driveForm->takeRow(row);
-            delete taken.labelItem;
-            delete taken.fieldItem;   // the item only; the widget moves
-            pythonForm->insertRow(0, QString(), row);
-        }
-        auto show = [driveForm, responseForm, compensateRows, pythonBox, experimentBox, assistBox, speedsBox,
-            profileBox, source, adaptive, compensateWarning, aheadRow, aheadHelp, maxUsable, whiteClips]()
+        auto show = [driveForm, responseForm, compensateRows, experimentBox, assistBox, speedsBox,
+            profileBox, source, adaptive, compensateWarning, aheadRow, aheadHelp, maxUsable, whiteClips, pacingRows]()
         {
             const QString chosen = source ? source->currentData().toString() : QString();
             const bool compensate = chosen == QStringLiteral("compensate");
@@ -11115,9 +10954,12 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             for (QWidget* row : { maxUsable, whiteClips })
                 responseForm->setRowVisible(row, compensate);
             profileBox->setVisible(own);
-            pythonBox->setVisible(chosen == QStringLiteral("python"));
-            driveForm->setRowVisible(aheadRow, own);
-            driveForm->setRowVisible(aheadHelp, own);
+            // The script copy decides on the frame on screen, as the script did
+            // (look-ahead is compensate's).
+            driveForm->setRowVisible(aheadRow, compensate);
+            driveForm->setRowVisible(aheadHelp, compensate);
+            for (QWidget* row : pacingRows)
+                driveForm->setRowVisible(row, chosen == QStringLiteral("internal_script"));
             driveForm->setRowVisible(compensateWarning, compensate && adaptive && !adaptive->isChecked());
         };
         auto grey = [shadowLiftRows, adaptive]()
@@ -11132,11 +10974,12 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             if (chosen != QStringLiteral("none") && protocolChoice->currentData().toString() == QStringLiteral("none"))
                 protocolChoice->setCurrentIndex(protocolChoice->findData(QStringLiteral("barco_ascii")));
         };
-        auto onOff = [enabled, source, adaptive, pythonBox, connectionBox, responseBox, profileBox, assistBox,
-            speedsBox, advancedBox, experimentBox, aheadRow]()
+        auto onOff = [enabled, source, adaptive, connectionBox, responseBox, profileBox, assistBox,
+            speedsBox, advancedBox, experimentBox, aheadRow, pacingRows]()
         {
             const bool on = enabled->isChecked();
-            for (QWidget* w : { static_cast<QWidget*>(source), static_cast<QWidget*>(adaptive), aheadRow, pythonBox,
+            for (QWidget* row : pacingRows) row->setEnabled(on);
+            for (QWidget* w : { static_cast<QWidget*>(source), static_cast<QWidget*>(adaptive), aheadRow,
                 connectionBox, responseBox, profileBox, assistBox, speedsBox, advancedBox, experimentBox })
                 if (w) w->setEnabled(on);
         };

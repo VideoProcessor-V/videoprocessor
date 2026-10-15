@@ -1,5 +1,7 @@
 # LED Python source: VP feeds the script its measurement (python_feed)
 
+> **Retired 2026-10-15:** VP no longer runs the Python script; see docs/VP-led-core-sources.md. Kept as history.
+
 Owner 2026-10-15: the Python script (command_source: python) takes the
 brightness values it needs from VP instead of a screenshot - more
 efficient, and VP's measurement path is exercised from the start.
