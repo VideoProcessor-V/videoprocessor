@@ -122,3 +122,10 @@ not reliable). Kept only if faster.
 
 Target unchanged: block search ~2.5-3 ms on the laptop, identical output. Non-exact options (different float
 summation order) stay measured-and-listed only.
+
+## Added to roadmap item 6 (owner 2026-10-15)
+
+Zero-added-delay de-judder: an experimental optional setting (off by default) that projects frame n forward with
+the live n-1->n vectors instead of holding a frame for n+1. Measured and listed (forward prediction is wrong
+on motion changes and occlusions, with no next frame to fall back on); the one-frame hold stays the default for
+film. Live motion-smoothing options for 50/60 Hz sources to be discussed with the owner.
