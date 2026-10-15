@@ -64,3 +64,10 @@ output. On the RTX 3090 the matcher is already ~1-2 ms; the gain matters most fo
   0.161845), the full Beta suite and matrix.
 - Pass timing (live settings) before/after; the real-clip corpus unchanged (41.3% / 0.30%).
 - Daytime runs about 5 minutes; the corpus and the gate overnight.
+
+## After this (owner 2026-10-15)
+
+1. De-judder on RGB input (12-bit RGB 4:4:4; DeckLink has no 12-bit YCbCr 4:2:2): a luma-from-RGB pass for the
+   matcher and the rendered warp allowed on RGB (it warps the RGB output picture anyway); the source warp's RGB
+   planes only if wanted.
+2. A verified true 12-bit output path (16-bit float swapchain, the driver's 12 bpc).
