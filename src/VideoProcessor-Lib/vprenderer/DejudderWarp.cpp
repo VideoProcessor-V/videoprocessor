@@ -1387,7 +1387,7 @@ float picture_texels_(ivec2 ls, float scale)
 #endif
 }
 #ifdef REGIONAL
-shared float partial_h_[256];
+shared uint hist_bins_[32];   // M3: A's 16 bins, then B's (integer counts)
 #endif
 #ifdef CAMERA_OUT
 shared vec3 partial_c_[256];
@@ -1426,27 +1426,24 @@ float hist_d = 0.0;
 ivec2 ls_ = textureSize(hist_a, 0);
 int lc_ = ls_.x * ls_.y;
 float hist_n = picture_texels_(ls_, 32.0);   // 1/32 texels inside the picture
-for (int j = 0; j < 16; j++) {
-    float h = 0.0;
-    for (int k = int(i); k < lc_; k += 256) {
-        ivec2 p = ivec2(k % ls_.x, k / ls_.x);
-        if (!in_picture_((vec2(p) + vec2(0.5)) * 32.0))
-            continue;
-        h += (clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15) == j ? 1.0 : 0.0) -
-             (clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15) == j ? 1.0 : 0.0);
-    }
-    partial_h_[i] = h;
-    barrier();
-    for (uint stride = 128u; stride > 0u; stride >>= 1) {
-        if (i < stride)
-            partial_h_[i] += partial_h_[i + stride];
-        barrier();
-    }
-    if (i == 0u)
-        hist_d += abs(partial_h_[0]);
-    barrier();
+// One sweep into shared integer bins (efficiency, owner 2026-10-14: was 16
+// sweeps with a reduction each); the counts and so the result are the same.
+if (i < 32u)
+    hist_bins_[i] = 0u;
+barrier();
+for (int k = int(i); k < lc_; k += 256) {
+    ivec2 p = ivec2(k % ls_.x, k / ls_.x);
+    if (!in_picture_((vec2(p) + vec2(0.5)) * 32.0))
+        continue;
+    atomicAdd(hist_bins_[clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15)], 1u);
+    atomicAdd(hist_bins_[16 + clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15)], 1u);
 }
-hist_d /= max(hist_n, 1.0);
+barrier();
+if (i == 0u) {
+    for (int j = 0; j < 16; j++)
+        hist_d += abs(float(hist_bins_[j]) - float(hist_bins_[16 + j]));
+    hist_d /= max(hist_n, 1.0);
+}
 #endif
 if (i == 0u) {
     float share = partial_[0] / max(partial_n_[0], 1.0);
