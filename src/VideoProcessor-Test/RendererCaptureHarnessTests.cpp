@@ -207,11 +207,22 @@ namespace
 		// Off the screen, or (onScreen) in the primary screen's bottom-right
 		// corner so the swapchain gets real refresh statistics.
 		const int screenW = GetSystemMetrics(SM_CXSCREEN), screenH = GetSystemMetrics(SM_CYSCREEN);
-		HWND hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (onScreen ? WS_EX_TOPMOST : 0), wc.lpszClassName,
-			"VP capture harness", WS_POPUP, onScreen ? screenW - 660 : -4000, onScreen ? screenH - 420 : -4000, 640, 360,
-			nullptr, nullptr, wc.hInstance, nullptr);
+		// VP_TEST_HARNESS_FULLSCREEN=1 (owner allows overnight): the whole
+		// primary screen, so the swapchain gets display statistics and the
+		// live extras planner runs.
+		char* fs = nullptr;
+		size_t fsn = 0;
+		const bool fullscreen = onScreen && _dupenv_s(&fs, &fsn, "VP_TEST_HARNESS_FULLSCREEN") == 0 && fs && std::string(fs) == "1";
+		std::free(fs);
+		// Fullscreen: an ordinary activated window (foreground, covering the
+		// screen) so presentation can bypass composition and report statistics.
+		HWND hwnd = CreateWindowExA(fullscreen ? WS_EX_TOPMOST : (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (onScreen ? WS_EX_TOPMOST : 0)), wc.lpszClassName,
+			"VP capture harness", WS_POPUP, fullscreen ? 0 : onScreen ? screenW - 660 : -4000, fullscreen ? 0 : onScreen ? screenH - 420 : -4000,
+			fullscreen ? screenW : 640, fullscreen ? screenH : 360, nullptr, nullptr, wc.hInstance, nullptr);
 		Assert::IsNotNull(hwnd);
-		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+		ShowWindow(hwnd, fullscreen ? SW_SHOW : SW_SHOWNOACTIVATE);
+		if (fullscreen)
+			SetForegroundWindow(hwnd);
 		Callback callback;
 		Clock clock;
 		IVideoRenderer* renderer = create(&callback, 1, hwnd, &clock, true, 8,
@@ -342,6 +353,18 @@ namespace Tests
 				Logger::WriteMessage(("   " + lastAhead).c_str());
 				Logger::WriteMessage(("   " + lastHold).c_str());
 				Logger::WriteMessage(("   extras logged: " + std::to_string(extrasLines)).c_str());
+				// The GPU used, the dither's vector source and every hold reason.
+				std::map<std::string, int> holds;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("VP_TEST_ADAPTER") != std::string::npos || line.find("Sigma-delta vectors") != std::string::npos)
+						Logger::WriteMessage(("   " + line).c_str());
+					const size_t at = line.find("De-judder: hold (");
+					if (at != std::string::npos)
+						++holds[line.substr(at + 17, line.find(';', at) - at - 17)];
+				}
+				for (const auto& hold : holds)
+					Logger::WriteMessage(("   hold: " + hold.first + " x" + std::to_string(hold.second)).c_str());
 				failures += r.presented ? 0 : 1;
 			}
 			Assert::AreEqual(0, failures, L"every on-screen run presented frames");

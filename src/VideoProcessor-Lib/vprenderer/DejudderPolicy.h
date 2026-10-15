@@ -40,7 +40,10 @@ namespace DejudderPolicy
 		double strengthEven = 0.0;
 		bool evenIncludes1001 = false;
 		bool occlusionMask = false;   // 6c: the estimate also runs for the mask alone
-		bool grainMap = false;        // 8-3: and for the adaptive downscale's grain map alone
+		// 8-3: the adaptive downscale wants the grain map. It never starts the
+		// estimate on its own (owner 2026-10-14: vector users take the motion
+		// when it is there and fall back otherwise); kept for the reason text.
+		bool grainMap = false;
 		bool lowLatency = false;
 		bool interlaced = false;
 		double sourceHz = 0.0;
@@ -148,7 +151,7 @@ namespace DejudderPolicy
 	// extras).
 	inline Reason Decide(const Input& in)
 	{
-		const bool alone = in.occlusionMask || in.grainMap;
+		const bool alone = in.occlusionMask;   // the grain map never starts it alone
 		if (!(in.strength > 0.0) && !(in.strengthEven > 0.0) && !alone) return Reason::Off;
 		if (in.lowLatency) return Reason::LowLatency;
 		if (in.interlaced) return Reason::Interlaced;

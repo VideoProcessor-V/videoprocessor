@@ -142,9 +142,12 @@ namespace DejudderRendered
 		VectorField& operator=(const VectorField&) = delete;
 		~VectorField();
 
+		// toNext (efficiency, owner 2026-10-14): the motion from the last
+		// picture shown of A (at shiftStep) to B's own first present - B is
+		// at the full vector - for the sigma-delta on B's refresh.
 		bool Run(pl_tex field, pl_tex frameTrust, float minTrustedShare, float shiftStep, const Geometry& geometry,
 			int w, int h, pl_tex& out, pl_tex subField = nullptr, const Dejudder::Settings* matcher = nullptr,
-			pl_tex camera = nullptr);
+			pl_tex camera = nullptr, bool toNext = false);
 		const std::string& Error() const { return error; }
 		static int Blocks(int pixels) { return (pixels + 15) / 16; }
 

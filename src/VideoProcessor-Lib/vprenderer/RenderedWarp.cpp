@@ -194,10 +194,19 @@ if (b.x < size.x && b.y < size.y) {
 #ifdef HOLDS
         held = rw_held(rw_source(p));
 #endif
+#ifdef TO_NEXT
+        // B's first present: B is at the full vector, the last picture of A
+        // was at shift x the strength scale.
+        if (!held && field_vector(rw_source(p), v)) {
+            vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
+            o.xy = rw_moved(p, slope, (1.0 - shift * strength_scale() * block_strength(rw_source(p))) * v);
+        }
+#else
         if (!held && shift != 0.0 && field_vector(rw_source(p), v)) {
             vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
             o.xy = rw_moved(p, slope, shift * strength_scale() * block_strength(rw_source(p)) * v);
         }
+#endif
     }
     if (any(isnan(o.xy)) || any(isinf(o.xy)))
         o = vec4(0.0);
@@ -527,7 +536,7 @@ if (b.x < size.x && b.y < size.y) {
 	}
 
 	bool VectorField::Run(pl_tex field, pl_tex frameTrust, float minTrustedShare, float shiftStep, const Geometry& g,
-		int w, int h, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera)
+		int w, int h, pl_tex& out, pl_tex subField, const Dejudder::Settings* matcher, pl_tex camera, bool toNext)
 	{
 		out = nullptr;
 		if (!dispatch || !field || !frameTrust || w <= 0 || h <= 0)
@@ -616,10 +625,11 @@ if (b.x < size.x && b.y < size.y) {
 			Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(vectors) };
 		if (subField) descriptors.push_back(Sampled("sub_field", subField));
 		if (object && camera) descriptors.push_back(Sampled("camera", camera));
-		const std::string header = std::string(OcclusionMask::NlsMapGlsl()) +
+		const std::string header = std::string(toNext ? "#define TO_NEXT 1\n" : "") + OcclusionMask::NlsMapGlsl() +
 			Dejudder::WarpHeader(fieldSettings, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
 			WARP_FUNCTIONS_SOURCE_ONLY;
-		if (!Compute(dispatch, "VideoProcessor sigma-delta vectors from the de-judder field (delta 8 R1)", header,
+		if (!Compute(dispatch, toNext ? "VideoProcessor sigma-delta vectors to the next frame (de-judder field)" :
+			"VideoProcessor sigma-delta vectors from the de-judder field (delta 8 R1)", header,
 			FIELD_BODY, descriptors.data(), static_cast<int>(descriptors.size()), used, n, bw, bh))
 		{
 			error = "vector field rejected or failed";

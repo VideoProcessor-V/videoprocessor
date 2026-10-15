@@ -938,6 +938,9 @@ namespace
 		// display-mode units, which always hit the 300-frame cap (12.5 s at
 		// 24p, 5 s at 60p).
 		bool fixSceneCooldown = true;
+		// Efficiency under test (owner 2026-10-14): B's own first present
+		// takes the sigma-delta vectors from A's field (own search skipped).
+		bool ditherVectorsNewFrame = true;
 		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
 		// signal by repeated frames is found and shown at its film rate.
 		bool dejudderPulldown = false;
@@ -1124,7 +1127,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2170,7 +2173,8 @@ namespace
 			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck),
 			std::make_pair("dejudder_pulldown", &settings.dejudderPulldown),
 			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea),
-			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown) })
+			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown),
+			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -4486,6 +4490,15 @@ struct LibplaceboVideoRenderer::Impl
 					dejudderAhead.LastReason() != Dejudder::AheadSchedule::Reason::Ahead ?
 						(std::string(Dejudder::AheadSchedule::Name(dejudderAhead.LastReason())) + ")").c_str() : "");
 				text += ahead;
+			}
+			// Efficiency: new frames whose sigma-delta took the de-judder's
+			// vectors (its own search skipped).
+			if (ditherVectorsNextUsed > 0)
+			{
+				char next[64];
+				std::snprintf(next, sizeof(next), ", dither new-frame vectors %llu",
+					static_cast<unsigned long long>(ditherVectorsNextUsed));
+				text += next;
 			}
 			if (activeSettings.dejudderPulldown)
 			{
@@ -8067,6 +8080,35 @@ struct LibplaceboVideoRenderer::Impl
 		deviceParams.min_feature_level = D3D_FEATURE_LEVEL_10_0;
 		deviceParams.max_frame_latency = 2;
 		deviceParams.no_compute = settings.diagnosticDisableCompute;
+		// Tests: VP_TEST_ADAPTER=<text> picks the GPU whose name contains it
+		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
+		// unset = libplacebo's choice, as always.
+		CComPtr<IDXGIAdapter1> testAdapter;
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			if (_dupenv_s(&v, &n, "VP_TEST_ADAPTER") == 0 && v && v[0])
+			{
+				const std::wstring want(v, v + std::strlen(v));
+				CComPtr<IDXGIFactory1> factory;
+				if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+					for (UINT i = 0; !testAdapter; ++i)
+					{
+						CComPtr<IDXGIAdapter1> candidate;
+						if (factory->EnumAdapters1(i, &candidate) == DXGI_ERROR_NOT_FOUND)
+							break;
+						DXGI_ADAPTER_DESC1 desc{};
+						if (SUCCEEDED(candidate->GetDesc1(&desc)) && std::wstring(desc.Description).find(want) != std::wstring::npos)
+						{
+							testAdapter = candidate;
+							DebugLog::Log("libplacebo: VP_TEST_ADAPTER selects %ls", desc.Description);
+						}
+					}
+			}
+			std::free(v);
+		}
+		if (testAdapter)
+			deviceParams.adapter = testAdapter;
 		d3d11 = pl_d3d11_create(log, &deviceParams);
 		if (!d3d11)
 			throw std::runtime_error("Failed to create libplacebo D3D11 device");
@@ -8645,6 +8687,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderPulldown != next.dejudderPulldown, "dejudder_pulldown");
 		changed(current.dejudderPictureArea != next.dejudderPictureArea, "dejudder_picture_area");
 		changed(current.fixSceneCooldown != next.fixSceneCooldown, "fix_scene_cooldown");
+		changed(current.ditherVectorsNewFrame != next.ditherVectorsNewFrame, "dither_vectors_new_frame");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -9511,6 +9554,36 @@ struct LibplaceboVideoRenderer::Impl
 	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
 	// The content rate the matcher's per-frame settings are converted to.
 	double dejudderSourceHz = 0.0;
+	// Efficiency (owner 2026-10-14): the sigma-delta's vectors for B's own
+	// first present, made from A's field as A's extras end (the motion from
+	// A's last picture to B), so B's refresh skips the sigma-delta's own
+	// search (~6 ms on the laptop). For this sequence and geometry only.
+	std::unique_ptr<DejudderRendered::VectorField> dejudderNextVectorField;
+	pl_tex dejudderNextVectors = nullptr;
+	uint64_t dejudderNextVectorsSequence = 0;
+	DejudderRendered::Geometry dejudderNextVectorsGeometry;
+	int dejudderNextVectorsW = 0, dejudderNextVectorsH = 0;
+	uint64_t ditherVectorsNextUsed = 0;
+	bool ditherVectorsNextLogged = false;
+	static bool SameGeometry(const DejudderRendered::Geometry& a, const DejudderRendered::Geometry& b)
+	{
+		auto same = [](const pl_rect2df& x, const pl_rect2df& y)
+		{
+			return std::fabs(x.x0 - y.x0) < 0.01f && std::fabs(x.y0 - y.y0) < 0.01f &&
+				std::fabs(x.x1 - y.x1) < 0.01f && std::fabs(x.y1 - y.y1) < 0.01f;
+		};
+		if (!same(a.sourceCrop, b.sourceCrop) || !same(a.targetCrop, b.targetCrop) || a.nls.valid != b.nls.valid ||
+			a.numHolds != b.numHolds)
+			return false;
+		if (a.nls.valid && (!same(a.nlsDomain, b.nlsDomain) || a.nls.curve != b.nls.curve || a.nls.geometry != b.nls.geometry ||
+			a.nls.xScale != b.nls.xScale || a.nls.yScale != b.nls.yScale || a.nls.xProtect != b.nls.xProtect ||
+			a.nls.yProtect != b.nls.yProtect))
+			return false;
+		for (int i = 0; i < a.numHolds && i < 4; ++i)
+			if (!same(a.holds[i], b.holds[i]))
+				return false;
+		return true;
+	}
 	// When the source rate is not known: one display refresh (general; the
 	// last resort is a film frame).
 	float AdaptiveFallbackFramePeriod() const
@@ -11996,10 +12069,14 @@ struct LibplaceboVideoRenderer::Impl
 		QueryPerformanceFrequency(&frequency);
 		const double qpc = static_cast<double>(frequency.QuadPart);
 		const double displayHz = presentationTelemetry.Snapshot().measuredDisplayHz;
-		if (!(f.captureRateHz >= 10.0 && f.captureRateHz <= 240.0) || !(displayHz >= 10.0 && displayHz <= 480.0) ||
-			qpc <= 0.0 || f.callbackQpc <= 0 || f.mainCallQpc <= f.callbackQpc)
+		// Which timing is missing, for the log (the same checks as before).
+		const char* timingMissing = !(f.captureRateHz >= 10.0 && f.captureRateHz <= 240.0) ? "timing not known: source rate" :
+			!(displayHz >= 10.0 && displayHz <= 480.0) ? "timing not known: display rate" :
+			qpc <= 0.0 || f.callbackQpc <= 0 ? "timing not known: frame arrival" :
+			f.mainCallQpc <= f.callbackQpc ? "timing not known: present before arrival" : nullptr;
+		if (timingMissing)
 		{
-			DejudderHold("timing not known");
+			DejudderHold(timingMissing);
 			return false;
 		}
 		const double sourcePeriod = 1.0 / f.captureRateHz;
@@ -12464,6 +12541,30 @@ struct LibplaceboVideoRenderer::Impl
 					if (warpMask) warpMask = dejudder->SnapPixelMask();
 					if (warpVectorOk) warpVectorOk = dejudder->SnapVectorOk();
 				}
+			}
+		}
+		// B's own first present: the sigma-delta's vectors from A's field
+		// (from A's last picture, at previousShift, to B at the full vector).
+		dejudderNextVectorsSequence = 0;
+		if (activeSettings.ditherVectorsNewFrame && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
+			warpField && warpTrust &&
+			dejudderGeometryValid && f.nextSourceSequence != 0)
+		{
+			const int w = cached ? cached->params.w :
+				static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.x1 - dejudderGeometry.targetCrop.x0)));
+			const int h = cached ? cached->params.h :
+				static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.y1 - dejudderGeometry.targetCrop.y0)));
+			if (!dejudderNextVectorField)
+				dejudderNextVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
+			pl_tex next = nullptr;
+			if (dejudderNextVectorField->Run(warpField, warpTrust, dejudder->GetSettings().minTrustedShare, previousShift,
+					dejudderGeometry, w, h, next, warpSub, &renderedWarpSettings, warpCamera, true) && next)
+			{
+				dejudderNextVectors = next;
+				dejudderNextVectorsSequence = f.nextSourceSequence;
+				dejudderNextVectorsGeometry = dejudderGeometry;
+				dejudderNextVectorsW = w;
+				dejudderNextVectorsH = h;
 			}
 		}
 		dejudderExtraStats.lastExtrasPerFrame = extras;
@@ -17328,6 +17429,48 @@ struct LibplaceboVideoRenderer::Impl
         }
         frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
         frameParams.num_hooks = static_cast<int>(frameHooks.size());
+        // Efficiency (owner 2026-10-14): B's own first present takes the
+        // sigma-delta's vectors made from A's field at the end of A's extras
+        // (same sequence and geometry only); its per-pixel gate checks every
+        // carried value, so a cut or a wrong vector falls back to the plain
+        // gate. Restored after this render.
+        struct NextVectorGuard
+        {
+            std::vector<const pl_hook*> hooks;
+            ~NextVectorGuard()
+            {
+                for (const pl_hook* hook : hooks)
+                {
+                    CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
+                    SetSigmaDeltaVectors(hook, nullptr);
+                }
+            }
+        } nextVectorGuard;
+        if (dejudderNextVectorsSequence != 0 && dejudderNextVectorsSequence == sourceSequence && !cadenceRepeat &&
+            dejudderNextVectors && dejudderGeometryValid && SameGeometry(dejudderGeometry, dejudderNextVectorsGeometry))
+        {
+            for (int i = 0; i < frameParams.num_hooks; ++i)
+            {
+                const pl_hook* hook = frameParams.hooks[i];
+                if (CustomHookChain::SetHookParameter(hook, "vector_source", 1.0))
+                {
+                    if (SetSigmaDeltaVectors(hook, dejudderNextVectors))
+                        nextVectorGuard.hooks.push_back(hook);
+                    else
+                        CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
+                }
+            }
+            if (!nextVectorGuard.hooks.empty())
+            {
+                ++ditherVectorsNextUsed;
+                if (!ditherVectorsNextLogged)
+                {
+                    ditherVectorsNextLogged = true;
+                    DebugLog::Log("Sigma-delta vectors on the new frame's present: the de-judder's (own search skipped)");
+                }
+            }
+        }
+        dejudderNextVectorsSequence = 0;   // used (or not) once
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
         // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on,
         // off with the Low_Latency queue (games do not need the last 1/16 step).
@@ -22870,6 +23013,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dejudder_estimate_ahead=" << s.dejudderEstimateAhead << "\n"
 		<< "dejudder_pulldown=" << s.dejudderPulldown << "\n"
 		<< "fix_scene_cooldown=" << s.fixSceneCooldown << "\n"
+		<< "dither_vectors_new_frame=" << s.ditherVectorsNewFrame << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"

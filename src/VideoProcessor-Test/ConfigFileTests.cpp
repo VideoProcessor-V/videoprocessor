@@ -924,16 +924,13 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 23.976; i.strength = 0.0; i.occlusionMask = true; }) == Reason::Active);
             Assert::IsTrue(with([](auto& i) { i.occlusionMask = true; }) == Reason::Active);   // 24p with extras
             Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.occlusionMask = true; i.lowLatency = true; }) == Reason::LowLatency);
-            // 8-3: the adaptive downscale's grain map runs the estimate alone,
-            // like the mask: film rates, any cadence, never in Low_Latency, no
-            // extras.
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; }) == Reason::Active);
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.sourceHz = 30.0; }) == Reason::Active);
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.sourceHz = 23.976; i.displayHz = 47.952; }) == Reason::Active);
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.sourceHz = 50.0; }) == Reason::VideoRateMaskOnly);
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.sourceHz = 59.94; }) == Reason::VideoRateMaskOnly);
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.lowLatency = true; }) == Reason::LowLatency);
-            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.haveNext = false; }) == Reason::NoNextFrame);
+            // 8-3 (owner 2026-10-14): the grain map never starts the estimate
+            // on its own - it uses the motion when the de-judder or the mask
+            // runs it, and falls back otherwise.
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; }) == Reason::Off);
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.sourceHz = 30.0; }) == Reason::Off);
+            Assert::IsTrue(with([](auto& i) { i.grainMap = true; }) == Reason::Active);   // with the de-judder
+            Assert::IsTrue(with([](auto& i) { i.strength = 0.0; i.grainMap = true; i.occlusionMask = true; }) == Reason::Active);
             {
                 DejudderPolicy::Input mapOnly = in;
                 mapOnly.strength = 0.0; mapOnly.grainMap = true;

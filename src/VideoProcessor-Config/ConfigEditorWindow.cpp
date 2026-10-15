@@ -6669,6 +6669,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         sceneCooldown->setToolTip(QStringLiteral(
             "After a cut, the next cut that may change the crop or NLS counts again after 2 seconds, as intended. "
             "Off = the old behaviour: 12.5 s on 24p film, 5 s at 60p."));
+        auto* ditherNext = addChoice(QStringLiteral("Dither reuses de-judder motion on new frames"),
+            QStringLiteral("dither_vectors_new_frame"), { QStringLiteral("on"), QStringLiteral("off") });
+        ditherNext->setToolTip(QStringLiteral(
+            "With the de-judder running, each new film frame's temporal dither takes the motion the de-judder already "
+            "measured instead of searching again (about 5 ms less per new frame on the laptop). Off = its own search."));
 
         form = addCollapsibleSection(QStringLiteral("dejudderExperiments"), QStringLiteral("De-judder: experiments"),
             QStringLiteral("Off by default; for comparisons only. ") + QString::fromLatin1(kGpuCostLegend), false);
@@ -7763,7 +7768,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },
