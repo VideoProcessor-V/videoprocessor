@@ -154,3 +154,11 @@ Every thread of the 32-thread group computed absolute differences into shared me
 thread per candidate summed its 144 in the serial order (exact; Beta identical, 6d 0.161845). Slower: second
 sweep 2.62 ms against 1.18 ms (6.3 KB of shared memory per 32-thread group cuts the groups per SM; the texture
 reads were already well hidden by many resident groups). Reverted.
+
+## Second sweep: two blocks per 32-thread group (2026-10-15, kept)
+
+Threads 0-15 work on one block and 16-31 on its right-hand neighbour, so 22 of 32 threads compute candidate
+SADs instead of 11 (16 of 32 for half-pel instead of 8); each block's work, order and picks unchanged.
+Byte-identical (Beta passes, 6d 0.161845). One timing on a slow GPU run: second sweep 1.13 ms (earlier
+1.18 ms) while the block search read 6.88 ms instead of ~5.4 ms, so likely ~20-25% faster; kept on that
+evidence (owner 2026-10-15: take it, confirm the timing on the next run).

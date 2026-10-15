@@ -879,10 +879,32 @@ void pb_load_from(ivec2 o, int li, bool run)
 }
 )GLSL";
 
+		// Two blocks per 32-thread group (2026-10-15): threads 0-15 the left
+		// block, 16-31 the right; each block's candidates, sums and picks as
+		// before (the serial results exactly).
+		const char* const REFINE_PAIR_HEADER = R"GLSL(
+shared float rf_from[288];
+shared float rf_sads[32];
+shared vec2 rf_best[2];
+shared float rf_best_sad[2];
+
+float rf_sad_sub(int sub, ivec2 o, vec2 v)
+{
+    float s = 0.0;
+    for (int y = -2; y < 10; y++)
+        for (int x = -2; x < 10; x++) {
+            ivec2 p = o + ivec2(x, y);
+            s += abs(rf_from[sub * 144 + (y + 2) * 12 + x + 2] - to_lin(vec2(p) + v));
+        }
+    return s;
+}
+)GLSL";
+
 		const char* const REFINE_BODY = R"GLSL(
-ivec2 b = ivec2(gl_WorkGroupID.xy);
+int sub = int(gl_LocalInvocationIndex) / 16;
+int li = int(gl_LocalInvocationIndex) % 16;
+ivec2 b = ivec2(int(gl_WorkGroupID.x) * 2 + sub, int(gl_WorkGroupID.y));
 ivec2 blocks = imageSize(dst);
-int li = int(gl_LocalInvocationIndex);
 bool lead = li == 0;
 bool inside = b.x < blocks.x && b.y < blocks.y;
 bool keep = static_scene();
@@ -892,12 +914,12 @@ if (lead && inside && keep)
 half_size_ = textureSize(from_half, 0);
 ivec2 o = b * 8;
 // The candidate list and the neighbours' median, as the serial sweep (every
-// thread builds the same list).
+// thread of the block builds the same list).
 vec2 cand[11];
 float xs[9];
 float ys[9];
 int nc = 0, nn = 0;
-cand[nc++] = texelFetch(sweep, b, 0).xy;
+cand[nc++] = inside ? texelFetch(sweep, b, 0).xy : vec2(0.0);
 for (int dy = -1; dy <= 1; dy++)
     for (int dx = -1; dx <= 1; dx++) {
         if (dx == 0 && dy == 0) continue;
@@ -914,37 +936,39 @@ if (use_temporal != 0)
 vec4 gv = texelFetch(global_vec, ivec2(0), 0);
 if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
     cand[nc++] = gv.xy * 4.0;
-pb_load_from(o, li, run);
+if (run)
+    for (int i = li; i < 144; i += 16)
+        rf_from[sub * 144 + i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
 pb_sync();
 if (run && li < nc)
-    pb_sads[li] = pb_sad_sub(o, cand[li]);
+    rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, cand[li]);
 pb_sync();
 if (run && lead) {
     vec2 med = nn > 0 ? vec2(median_(xs, nn), median_(ys, nn)) : cand[0];
     vec2 best = cand[0];
-    float best_sad = pb_sads[0];
+    float best_sad = rf_sads[sub * 16];
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
     for (int k = 1; k < 11; k++) {
         if (k >= nc) break;
-        float s = pb_sads[k];
+        float s = rf_sads[sub * 16 + k];
         float score = s / 144.0 + lambda * 2.0 * length(cand[k] - med);
         if (score < best_score) { best_score = score; best_sad = s; best = cand[k]; }
     }
-    pb_best = best;
-    pb_best_sad = best_sad;
+    rf_best[sub] = best;
+    rf_best_sad[sub] = best_sad;
 }
 pb_sync();
-vec2 best = pb_best;
+vec2 best = rf_best[sub];
 if (run && li < 9 && li != 4)
-    pb_sads[li] = pb_sad_sub(o, best + 0.5 * vec2(li % 3 - 1, li / 3 - 1));
+    rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, best + 0.5 * vec2(li % 3 - 1, li / 3 - 1));
 pb_sync();
 if (run && lead) {
-    float best_sad = pb_best_sad;
+    float best_sad = rf_best_sad[sub];
     vec2 fbest = best;
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float s = pb_sads[(dy + 1) * 3 + dx + 1];
+            float s = rf_sads[sub * 16 + (dy + 1) * 3 + dx + 1];
             if (s < best_sad) { best_sad = s; fbest = best + 0.5 * vec2(dx, dy); }
         }
     imageStore(dst, b, vec4(fbest, best_sad / 144.0, 1.0));
@@ -2483,9 +2507,9 @@ if (q.x < size.x && q.y < size.y) {
 		if (serialSearchForTest)
 			return Dispatch("VideoProcessor de-judder: second sweep (11a E1, serial reference)", header.c_str(),
 				REFINE_BODY_SERIAL, descriptors, 7, variables, 5, blocksX, blocksY, 8);
-		static const std::string parallel = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER;
+		static const std::string parallel = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER + REFINE_PAIR_HEADER;
 		return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)", parallel.c_str(), REFINE_BODY,
-			descriptors, 7, variables, 5, blocksX, blocksY, 8, 4);
+			descriptors, 7, variables, 5, (blocksX + 1) / 2, blocksY, 16, 2);
 	}
 
 	bool MotionWarp::SnapshotForWarp()
