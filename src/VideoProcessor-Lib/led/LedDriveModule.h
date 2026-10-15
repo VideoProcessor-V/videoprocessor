@@ -65,6 +65,13 @@ namespace LedDrive
 		int relayRefused = 0;
 		unsigned long refusedOwner = 0;   // the last refused sender's process (diagnosis)
 		unsigned long scriptPid = 0;
+		// python_feed (owner 2026-10-15): the script's requests answered with
+		// VP's measurement of the frame on screen, answered "none" (no frame
+		// measured yet: the script took its screenshot), and refused (not from
+		// the script VP runs).
+		int feedAnswers = 0;
+		int feedNone = 0;
+		int feedRefused = 0;
 	};
 
 	class LedDriveModule
@@ -163,6 +170,12 @@ namespace LedDrive
 		double NowMs() const;
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
+		// python_feed: the answer to the script's request `id` - VP's exact
+		// measurement of the frame on screen. Counts it in listenAccuracy.
+		std::string FeedReplyLocked(int id);
+		// The frame the last answer gave the script, for its TICK's comparison.
+		FrameStats fedStats{};
+		bool fedPending = false;
 		CompensationGain GainLocked() const;
 		void ConfigureModelsLocked();
 		double LedFractionLocked(double level) const;

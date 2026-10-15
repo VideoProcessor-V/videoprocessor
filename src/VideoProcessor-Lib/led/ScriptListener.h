@@ -12,7 +12,13 @@
 // datagram per message to 127.0.0.1:listen_port:
 //   VP1 <KIND> <value> t=<seconds> mean=<mean2> max=<max_val> hl=<0|1> tp=<target power> tc=<target contrast>
 // KIND is LPW1, CNTR (a command sent, its value) or TICK (one script loop's
-// measurement and targets; value -1). VP never opens the serial port in this
+// measurement and targets; value -1), or REQ (python_feed, owner 2026-10-15:
+// the script asks for VP's measurement in place of its screenshot; value =
+// its request number). VP answers the sender's port:
+//   VPS1 id=<n> mean=<apl> max=<brightest block> hl=<0|1> seq=<source frame>
+// for the frame on screen (VP's exact measurement, as the screenshot saw it),
+// or "VPS1 id=<n> none" before VP has measured a frame (the script then
+// takes its screenshot). VP never opens the serial port in this
 // mode; the listener binds the loopback address only.
 namespace LedDrive
 {
@@ -55,6 +61,8 @@ namespace LedDrive
 		// wait is in 50 ms slices; `interrupted` (when given) ends it early
 		// (audit 2026-10-14: a stop or a new setting must not wait a whole tick).
 		std::vector<ScriptMessage> Receive(int waitMs, const std::function<bool()>& interrupted = {});
+		// One datagram from the bound socket to 127.0.0.1:port (python_feed's answer).
+		bool Reply(unsigned short port, const std::string& text);
 
 	private:
 		static constexpr uintptr_t invalidSocket = ~static_cast<uintptr_t>(0);

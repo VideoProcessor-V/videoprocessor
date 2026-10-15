@@ -641,6 +641,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(python.mode == Mode::Listen && python.listenRelay && !python.adaptiveGamma && !python.scriptSmoothing,
 				L"python: listen, relayed, adaptive gamma off by default");
 			Assert::IsTrue(ListenRelays(python));
+			Assert::IsTrue(python.pythonFeed, L"python_feed on by default (owner 2026-10-15)");
+			Assert::IsFalse(read("command_source: python\nlisten_script: main_vp.py\npython_feed: false\n").pythonFeed,
+				L"python_feed: false is read");
 			ProjectorConfig port;
 			port.protocol = "barco_ascii";
 			Assert::AreEqual(std::string("barco_ascii"), EffectiveProtocol(port, python), L"relay opens the port");
@@ -777,6 +780,112 @@ namespace VideoProcessorTest
 			}
 			Assert::AreEqual(2, sentRows, L"each relayed command is logged as sent");
 			Assert::IsTrue(tick, L"the first TICK is logged");
+		}
+
+		TEST_METHOD(FeedAnswersTheScriptWithTheFrameOnScreen)
+		{
+			// python_feed (owner 2026-10-15): the script VP runs (told
+			// VP_LED_FEED=1) asks for VP's measurement instead of taking a
+			// screenshot; VP answers with its exact measurement of the frame on
+			// screen (never an upcoming one); "none" before any frame;
+			// strangers refused.
+			wchar_t python[MAX_PATH] = {};
+			if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, python, nullptr) == 0)
+			{
+				Logger::WriteMessage(L"Feed test: no python.exe on PATH; not run");
+				return;
+			}
+			char pythonPath[MAX_PATH] = {};
+			WideCharToMultiByte(CP_UTF8, 0, python, -1, pythonPath, MAX_PATH, nullptr, nullptr);
+			char here[MAX_PATH] = {};
+			HMODULE self = nullptr;
+			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(&ParseScriptMessage), &self);
+			GetModuleFileNameA(self, here, MAX_PATH);
+			const std::string binary(here);
+			const std::string folder = binary.substr(0, binary.find_last_of("\\/") + 1) + "vp-feed-test";
+			const std::string logs = folder + "\\logs\\";
+			CreateDirectoryA(folder.c_str(), nullptr);
+			CreateDirectoryA(logs.c_str(), nullptr);
+			const std::string script = folder + "\\feed.py";
+			const std::string answer = folder + "\\answer.txt";
+			DeleteFileA(answer.c_str());
+			{
+				// Stands for main_vp.py's vp_feed: a request every 50 ms from
+				// its own socket; the environment and the latest answer to
+				// answer.txt.
+				std::ofstream out(script, std::ios::trunc);
+				out << "import os, socket, time\n"
+					"s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+					"s.settimeout(0.2)\n"
+					"n = 0\n"
+					"while True:\n"
+					"    n += 1\n"
+					"    s.sendto(('VP1 REQ %d t=%.3f' % (n, time.time())).encode('ascii'), ('127.0.0.1', 47926))\n"
+					"    try:\n"
+					"        data = s.recvfrom(512)[0].decode('ascii')\n"
+					"        tmp = 'answer.tmp'\n"
+					"        open(tmp, 'w').write(os.environ.get('VP_LED_FEED', 'unset') + ' ' + data)\n"
+					"        os.replace(tmp, 'answer.txt')\n"
+					"    except socket.timeout:\n"
+					"        pass\n"
+					"    time.sleep(0.05)\n";
+			}
+			auto latestAnswer = [&]() { std::ifstream in(answer); std::string text; std::getline(in, text); return text; };
+			auto gotText = [&]() { const std::string text = latestAnswer(); return std::wstring(text.begin(), text.end()); };
+			auto projector = std::make_shared<FakeProjector>();
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Listen;
+			config.listenRelay = true;
+			config.listenScript = script;
+			config.python = pythonPath;
+			config.listenPort = 47926;
+			config.listenLogDirectory = logs;
+			config.pythonFeed = true;
+			config.lookahead = true;
+			ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return latestAnswer().find(" none") != std::string::npos; }, 10000),
+				L"before any frame: none (the script takes its screenshot)");
+			Assert::AreEqual(std::string("1"), latestAnswer().substr(0, 1), L"the script was told VP_LED_FEED=1");
+			Assert::IsTrue(module.Listening().feedNone > 0);
+
+			// On screen: source frame 10 at APL 40, max 100. Queued frames 11..14,
+			// brighter, are never what the script gets (faithful to its
+			// screenshot), with lookahead on or off.
+			auto withMax = [](RawMeasurement raw, int maximum) { raw.maximum = static_cast<uint32_t>(maximum * SUM_SCALE); return raw; };
+			module.BeginFrame(10, 24.0);
+			module.SubmitMeasurement(withMax(Frame(40.0), 100), 10);
+			StatsBuilder builder(config);
+			for (uint64_t s = 11; s <= 14; ++s)
+				module.SubmitPrediction(s, builder.Build(withMax(Frame(30.0 * static_cast<double>(s - 9)), 230), s * 41.7));
+			StatsBuilder onScreen(config);
+			const FrameStats now = onScreen.Build(withMax(Frame(40.0), 100));
+			const std::string expectNow = "mean=" + std::to_string(static_cast<int>(now.apl)) + " max=" +
+				std::to_string(static_cast<int>(now.maximum)) + " hl=0 seq=10";
+			Assert::IsTrue(WaitFor([&] { return latestAnswer().find(expectNow) != std::string::npos; }, 5000),
+				(L"the frame on screen; got " + gotText()).c_str());
+			Assert::IsFalse(module.WantsPredictions(), L"the feed does not need the queued-frame walk");
+
+			// A stranger: refused.
+			Assert::IsTrue(SendScriptMessageForTest(config.listenPort, "VP1 REQ 7 t=1.0"));
+			Assert::IsTrue(WaitFor([&] { return module.Listening().feedRefused == 1; }), L"a stranger's request is refused");
+
+			// lookahead off changes nothing for the script; a new frame on screen follows.
+			LedDriveConfig reactive = config;
+			reactive.lookahead = false;
+			Assert::IsTrue(module.Reconfigure(port, reactive));
+			module.BeginFrame(11, 24.0);
+			module.SubmitMeasurement(withMax(Frame(90.0), 230), 11);
+			const FrameStats next = onScreen.Build(withMax(Frame(90.0), 230));
+			const std::string expectNext = "mean=" + std::to_string(static_cast<int>(next.apl)) + " max=" +
+				std::to_string(static_cast<int>(next.maximum)) + " hl=" +
+				std::to_string(next.maximum >= config.scriptHighlightCode ? 1 : 0) + " seq=11";
+			Assert::IsTrue(WaitFor([&] { return latestAnswer().find(expectNext) != std::string::npos; }, 5000),
+				(L"the next frame on screen; got " + gotText()).c_str());
+			module.Stop();
 		}
 
 		TEST_METHOD(ListenLogStaysUnderItsCap)

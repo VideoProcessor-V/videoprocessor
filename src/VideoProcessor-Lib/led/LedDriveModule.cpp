@@ -434,6 +434,31 @@ namespace LedDrive
 		return stats;
 	}
 
+	std::string LedDriveModule::FeedReplyLocked(int id)
+	{
+		std::ostringstream reply;
+		reply << "VPS1 id=" << id;
+		if (!haveStats)
+		{
+			++listenAccuracy.feedNone;
+			reply << " none";
+			return reply.str();
+		}
+		// The frame on screen, as the screenshot saw it (owner 2026-10-15:
+		// faithful to the original - not an upcoming frame): VP's exact
+		// measurement of the latest rendered frame, the script's integers
+		// exactly as the listen comparison reads VP's.
+		const int mean = std::max(0, static_cast<int>(latest.apl));
+		const int maximum = static_cast<int>(latest.maximum);
+		const int highlight = latest.maximum >= led.scriptHighlightCode ? 1 : 0;
+		reply << " mean=" << mean << " max=" << maximum << " hl=" << highlight << " seq=" << lastMeasuredSequence;
+		++listenAccuracy.feedAnswers;
+		// The loop's TICK is compared with exactly this frame.
+		fedStats = latest;
+		fedPending = true;
+		return reply.str();
+	}
+
 	CompensationGain LedDriveModule::BeginFrame(uint64_t sequence, double sourceFpsIn)
 	{
 		return BeginFrameAt(sequence, NowMs(), sourceFpsIn);
@@ -926,6 +951,7 @@ namespace LedDrive
 		auto listenCsvPausedUntil = std::chrono::steady_clock::now();
 		std::string lastTickKey;
 		unsigned short relaySenderPort = 0;   // the script's socket, once checked
+		unsigned short feedSenderPort = 0;    // python_feed's, the same check
 		int relayPortWarned = 0;
 		auto relayRefusedLogAt = std::chrono::steady_clock::now();
 		std::string lastLog;
@@ -1057,7 +1083,7 @@ namespace LedDrive
 					scriptHost.Stop();
 				else
 					scriptHost.Update(current.listenScript, current.python, current.listenLogDirectory,
-						relay ? std::string() : scriptPort, scriptBaud, relay);
+						relay ? std::string() : scriptPort, scriptBaud, relay, current.pythonFeed);
 				if (relay && current.listenPort != 47811 && relayPortWarned != current.listenPort)
 				{
 					DebugLog::Log("LED drive: listen - relay on port %d, but main_vp.py sends to 47811: change the script's "
@@ -1119,6 +1145,28 @@ namespace LedDrive
 				});
 				for (const ScriptMessage& message : messages)
 				{
+					if (message.kind == "REQ")
+					{
+						// python_feed: VP's measurement in place of the script's
+						// screenshot, answered only to the script VP runs (any
+						// local program can send here); its socket is checked
+						// once, again when it changes.
+						if (!current.pythonFeed || message.senderPort == 0)
+							continue;
+						if (message.senderPort != feedSenderPort)
+							feedSenderPort = scriptHost.Owns(UdpPortOwner(message.senderPort)) ? message.senderPort : 0;
+						std::string reply;
+						{
+							std::lock_guard<std::mutex> guard(mutex);
+							if (feedSenderPort != message.senderPort)
+								++listenAccuracy.feedRefused;
+							else
+								reply = FeedReplyLocked(message.value);
+						}
+						if (!reply.empty())
+							listener.Reply(message.senderPort, reply);
+						continue;
+					}
 					// The projector's ranges only, whole numbers (audit 2026-10-14:
 					// any local sender reaches this port).
 					const bool command = (message.kind == "CNTR" && message.value > 0 && message.value <= 100) ||
@@ -1212,11 +1260,15 @@ namespace LedDrive
 					bool rowWanted = message.kind != "TICK";
 					if (message.kind == "TICK" && haveStats && message.mean >= 0)
 					{
-						// VP's copy of the rules on VP's latest measurement.
-						mine = shadow.Tick(latest);
-						const int vpMean = std::max(0, static_cast<int>(latest.apl));
-						const int vpMax = static_cast<int>(latest.maximum);
-						const int vpHighlight = latest.maximum >= current.scriptHighlightCode ? 1 : 0;
+						// VP's copy of the rules on the frame on screen: the one VP
+						// fed this loop (python_feed: the script decided on exactly
+						// it, so only the rules can differ), else VP's latest.
+						const FrameStats seen = fedPending ? fedStats : latest;
+						fedPending = false;
+						mine = shadow.Tick(seen);
+						const int vpMean = std::max(0, static_cast<int>(seen.apl));
+						const int vpMax = static_cast<int>(seen.maximum);
+						const int vpHighlight = seen.maximum >= current.scriptHighlightCode ? 1 : 0;
 						++listenAccuracy.ticks;
 						sumMean += std::abs(message.mean - vpMean);
 						sumMaximum += std::abs(message.maximum - vpMax);
@@ -1231,7 +1283,7 @@ namespace LedDrive
 						listenAccuracy.contrastTargetDifference = sumContrast / n;
 						lastTick = message;
 						lastVp = { vpMean, vpMax, vpHighlight, mine.lightTarget, mine.contrastTarget };
-						lastVpApl = latest.apl;
+						lastVpApl = seen.apl;
 						// A TICK row only when the (dis)agreement changes: the
 						// highlight call and each target, the script's vs VP's.
 						// Keyed on the differences (audit 2026-10-14b): moving content
@@ -1328,6 +1380,8 @@ namespace LedDrive
 							<< " lpw1=" << a.lightCommands << " cntr=" << a.contrastCommands;
 						if (relay)
 							line << " relayed=" << relaySent << " failed=" << relayFailed << " refused=" << relayRefused;
+						if (a.feedAnswers || a.feedNone || a.feedRefused)
+							line << " fed=" << a.feedAnswers << " fed_none=" << a.feedNone << " fed_refused=" << a.feedRefused;
 						line << "\n";
 						const std::string text = line.str();
 						listenCsv << text;

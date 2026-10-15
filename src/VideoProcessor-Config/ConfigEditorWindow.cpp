@@ -10148,6 +10148,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     QWidget* aheadHelp = nullptr;
     QWidget* pythonPortRow = nullptr;
     QWidget* pythonPortHelp = nullptr;
+    QCheckBox* pythonFeedRow = nullptr;
     {
         const QStringList sources = { QStringLiteral("python"), QStringLiteral("internal_script"),
             QStringLiteral("compensate"), QStringLiteral("none") };
@@ -10890,6 +10891,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         pythonPath->setToolTip(QStringLiteral(
             "The Python that runs the script: empty = python on the PATH, or the full path of python.exe."));
         pythonForm->addRow(QStringLiteral("Python"), pythonPath);
+        pythonFeedRow = bindCheckField(QStringLiteral("Feed the script VP's measurement (no screenshots)"),
+            led, QStringLiteral("python_feed"), true);
+        pythonFeedRow->setToolTip(QStringLiteral(
+            "On (the default): the script asks VP for the brightness of the frame on screen instead of taking a "
+            "screenshot - the same frame the screenshot saw, measured by VP. The script keeps its own pace (it waits "
+            "as long as its screenshot took). If VP does not answer, "
+            "the script takes its screenshot as before. Needs the main_vp.py that came with this VP."));
+        pythonForm->addRow(QString(), pythonFeedRow);
         pythonForm->addRow(QString(), bindCheckField(QStringLiteral("Log the script's commands with VP's measurement (logs\\led-listen.csv)"),
             led, QStringLiteral("listen_log"), false));
         // Advanced: main_vp.py sends to 47811; change both or neither.

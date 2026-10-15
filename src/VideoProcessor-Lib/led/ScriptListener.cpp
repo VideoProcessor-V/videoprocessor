@@ -33,7 +33,7 @@ namespace LedDrive
 				return false;
 			message.value = static_cast<int>(parsed);
 		}
-		if (message.kind != "LPW1" && message.kind != "CNTR" && message.kind != "TICK")
+		if (message.kind != "LPW1" && message.kind != "CNTR" && message.kind != "TICK" && message.kind != "REQ")
 			return false;
 		for (std::string field; in >> field;)
 		{
@@ -227,6 +227,18 @@ namespace LedDrive
 		if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &info))
 			return 0;
 		return (static_cast<long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+	}
+
+	bool ScriptListener::Reply(unsigned short port, const std::string& text)
+	{
+		if (socketHandle == invalidSocket || port == 0)
+			return false;
+		sockaddr_in address{};
+		address.sin_family = AF_INET;
+		address.sin_port = htons(port);
+		address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		return sendto(static_cast<SOCKET>(socketHandle), text.c_str(), static_cast<int>(text.size()), 0,
+			reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == static_cast<int>(text.size());
 	}
 
 	bool SendScriptMessageForTest(int port, const std::string& text)

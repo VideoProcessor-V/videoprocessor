@@ -38,10 +38,12 @@ namespace LedDrive
 		// "python" on PATH. logDirectory empty = beside vp.log (tests: a folder).
 		// port empty = the line settings are left alone. relay (listen_relay,
 		// VP holds the port): the script runs with VP_LED_RELAY=1 and leaves
-		// COM1 to VP; a change restarts it.
+		// COM1 to VP; a change restarts it. feed (python_feed): the script runs
+		// with VP_LED_FEED=1 and asks VP for its measurement; a change restarts it.
 		void Update(const std::string& script, const std::string& python, const std::string& logDirectory,
-			const std::string& port = std::string(), int baud = 0, bool relay = false);
+			const std::string& port = std::string(), int baud = 0, bool relay = false, bool feed = false);
 		bool Relaying() const { return configuredRelay; }
+		bool Feeding() const { return configuredFeed; }
 		// Ends the script (the mode left listen, or VP stops).
 		void Stop();
 
@@ -80,6 +82,7 @@ namespace LedDrive
 		std::chrono::steady_clock::time_point restartAt{};
 		std::string configuredScript, configuredPython;
 		bool configuredRelay = false;
+		bool configuredFeed = false;
 		std::string lastError;
 		std::string portError;
 		PortSetup portSetup = PortSetup::None;

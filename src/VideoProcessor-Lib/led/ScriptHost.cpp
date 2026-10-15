@@ -98,16 +98,17 @@ namespace LedDrive
 	}
 
 	void ScriptHost::Update(const std::string& script, const std::string& python, const std::string& logDirectory,
-		const std::string& port, int baud, bool relay)
+		const std::string& port, int baud, bool relay, bool feed)
 	{
 		nowPath = LogFolder(logDirectory) + "\\led-script-now.txt";
-		// A new script or interpreter, or relay switched: start again now.
-		if (script != configuredScript || python != configuredPython || relay != configuredRelay)
+		// A new script or interpreter, or relay or the feed switched: start again now.
+		if (script != configuredScript || python != configuredPython || relay != configuredRelay || feed != configuredFeed)
 		{
 			Stop();
 			configuredScript = script;
 			configuredPython = python;
 			configuredRelay = relay;
+			configuredFeed = feed;
 			backoffSeconds = 2;
 			restartAt = std::chrono::steady_clock::now();
 		}
@@ -220,18 +221,21 @@ namespace LedDrive
 		const std::string interpreter = python.empty() ? std::string("python") : python;
 		std::wstring command = L"\"" + Wide(interpreter) + L"\" -u \"" + Wide(script) + L"\"";
 		const std::wstring directory = Wide(Folder(script));
-		// VP's environment, with VP_LED_RELAY=1 when VP relays (and never
-		// otherwise, even if VP itself was started with it).
+		// VP's environment, with VP_LED_RELAY=1 when VP relays and VP_LED_FEED=1
+		// when it feeds the script (and never otherwise, even if VP itself was
+		// started with them).
 		std::wstring environment;
 		if (const LPWCH block = GetEnvironmentStringsW())
 		{
 			for (const wchar_t* entry = block; *entry; entry += wcslen(entry) + 1)
-				if (_wcsnicmp(entry, L"VP_LED_RELAY=", 13) != 0)
+				if (_wcsnicmp(entry, L"VP_LED_RELAY=", 13) != 0 && _wcsnicmp(entry, L"VP_LED_FEED=", 12) != 0)
 					environment.append(entry).push_back(L'\0');
 			FreeEnvironmentStringsW(block);
 		}
 		if (configuredRelay)
 			environment.append(L"VP_LED_RELAY=1").push_back(L'\0');
+		if (configuredFeed)
+			environment.append(L"VP_LED_FEED=1").push_back(L'\0');
 		environment.push_back(L'\0');
 		PROCESS_INFORMATION started{};
 		const BOOL ok = CreateProcessW(nullptr, &command[0], nullptr, nullptr, TRUE,

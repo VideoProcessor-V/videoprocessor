@@ -222,13 +222,22 @@ namespace LedDrive
 		// compensation gain for compensate) and the ANSI shadow lift (its
 		// strength still shadow_lift_ansi). lookahead (default on): the
 		// queued-frame look-ahead of VP's internal sources; off = reactive.
-		// The Python script decides from its own screenshots, so it has none.
+		// The Python script decides from the frame on screen (its screenshots,
+		// or with python_feed VP's measurement of it), so it has none.
 		std::string commandSource;
 		int adaptiveGammaSetting = -1;   // adaptive_gamma as read: -1 not named
 		bool modeNamed = false;          // the file names `mode` (an older file)
 		bool pythonDrivesPort = false;
 		bool adaptiveGamma = true;
 		bool lookahead = true;
+		// python_feed (owner 2026-10-15, docs/VP-led-python-feed-plan.md): the
+		// script VP runs asks VP for its measurement instead of taking a
+		// screenshot (main_vp.py, told by VP_LED_FEED=1; it pads the loop to
+		// its screenshot's time, so its timing is unchanged). VP answers with
+		// its exact measurement of the frame on screen - what the screenshot
+		// saw, never an upcoming frame (owner: faithful to the original). No
+		// answer: the script takes its screenshot.
+		bool pythonFeed = true;
 		// The highest CNTR the assist may use. 7c-1 capped it at 62 until the
 		// bright-cut dump existed; 7c-2 lifts it (planner's 7c-1 answer 3):
 		// 100 = no cap beyond cntr_max_usable. The lower of the two applies.
@@ -531,6 +540,7 @@ namespace LedDrive
 			Boolean("python_drives_port"),
 			Boolean("adaptive_gamma"),
 			Boolean("lookahead"),
+			Boolean("python_feed"),
 			Custom("listen_script", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of the script VP starts in mode listen (e.g. main_vp.py; relative to this configuration file, or absolute)"),
 			Custom("python", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
@@ -849,6 +859,7 @@ namespace LedDrive
 				result.adaptiveGammaSetting = adaptive ? 1 : 0;
 		}
 		config.TryGetBool(section, "lookahead", result.lookahead);
+		config.TryGetBool(section, "python_feed", result.pythonFeed);
 		{
 			// listen_script relative to the configuration that names it; quotes dropped.
 			auto unquote = [](std::string text)

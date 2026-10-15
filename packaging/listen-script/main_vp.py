@@ -16,7 +16,10 @@
 #   - with adaptive_gamma on, eases the picture across each contrast step
 #     (the script-mode smoothing), and
 #   - runs its own copy of this script's rules on its own measurement and
-#     logs how closely they agree (the accuracy of VP's approximation).
+#     logs how closely they agree (the accuracy of VP's approximation), and
+#   - with python_feed (the default), answers this script's request for the
+#     mean and max of the frame on screen (its own measurement), so the script skips its
+#     screenshot (see vp_feed below; the loop keeps its pace).
 # Started by hand, or with VideoProcessor closed, the messages go nowhere and
 # the script writes COM1 itself: it works exactly as before.
 import time
@@ -45,6 +48,52 @@ def vp_notify(kind, value=-1):
 # this script would have written it. The script then echoes to nul instead
 # of com1: the same cmd call, so its timing is unchanged.
 _vp_com1 = "nul" if os.environ.get("VP_LED_RELAY") == "1" else "com1"
+# Feed (VP 2026-10-15): when VideoProcessor starts this script with
+# VP_LED_FEED=1, each loop asks VP for the picture's mean and max instead of
+# taking a screenshot - VP's measurement of the frame on screen, the same
+# frame the screenshot would have seen. The loop then waits as long as the screenshot took (measured on real
+# screenshots), so the script's pace and ramps are unchanged. No answer from
+# VP: that loop takes its screenshot as before.
+_vp_feed = os.environ.get("VP_LED_FEED") == "1"
+_vp_shot_seconds = None   # the screenshot + resize time, smoothed
+_vp_request = 0
+
+def vp_feed():
+    # (mean2, max_val, highlightdetect) from VP, or None. Waits at most 0.15 s.
+    global _vp_request
+    if not _vp_feed:
+        return None
+    _vp_request += 1
+    try:
+        vp_notify('REQ', _vp_request)
+        deadline = time.time() + 0.15
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                return None
+            _vp_socket.settimeout(left)
+            data, _ = _vp_socket.recvfrom(512)
+            words = data.decode("ascii", "replace").split()
+            if not words or words[0] != "VPS1":
+                continue
+            fields = dict(w.split("=", 1) for w in words[1:] if "=" in w)
+            if fields.get("id") != str(_vp_request):
+                continue   # a late answer to an earlier request
+            if "none" in words[1:]:
+                return None
+            return int(fields["mean"]), int(fields["max"]), int(fields["hl"])
+    except Exception:
+        return None
+    finally:
+        try:
+            _vp_socket.settimeout(None)
+        except Exception:
+            pass
+
+def vp_shot_time(seconds):
+    # The screenshot path's duration, for the feed's pause.
+    global _vp_shot_seconds
+    _vp_shot_seconds = seconds if _vp_shot_seconds is None else _vp_shot_seconds + (seconds - _vp_shot_seconds) * 0.2
 # --- end VP addendum ------------------------------------------------------
 #subprocess.call(('echo :lpw1{}cr' .format(mean2)), shell=True)
 # VP copy: the Tera Term start that set COM1's line settings is removed;
@@ -62,34 +111,53 @@ current_con = 50
 #sudden flag
 sudden_flag = 0
 
+_vp_shots = 0   # VP addendum: screenshots timed so far
+
 while(True):
-    #take screenshot
-    image = pyautogui.screenshot()
-    #convert to grayscale
-    image = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
-    #resize image
-    width = 854
-    height = 480
-    dim = (width, height)
-    resized = cv2.resize(image, dim, interpolation=cv2.INTER_AREA)
-    # get image max value
-    min_val, max_val, min_indx, max_indx = cv2.minMaxLoc(resized)
-    print(max_val)
-    if max_val >= 215:
-        highlightdetect = 1
-    if max_val <215:
-        highlightdetect = 0
-    #crop image
-    y=57
-    x=0
-    h=366
-    w=854
-    cropped = resized[y:y+h, x:x+w]
-    #take image mean
-    mean = np.mean(cropped)
-    print(mean)
-    mean2 = int(mean)
-    print(mean2)
+    # VP addendum: VP's measurement instead of the screenshot (VP_LED_FEED=1),
+    # once three real screenshots have been timed for the pause.
+    _vp_start = time.time()
+    _vp_fed = vp_feed() if _vp_shots >= 3 else None
+    if _vp_fed is not None:   # VP addendum
+        mean2, max_val, highlightdetect = _vp_fed
+        mean = mean2
+        print(max_val)
+        print(mean2)
+        # The screenshot's time, so the loop keeps its pace.
+        _vp_left = _vp_shot_seconds - (time.time() - _vp_start)
+        if _vp_left > 0:
+            time.sleep(_vp_left)
+    else:   # VP addendum: the original screenshot measurement, indented
+        _vp_start = time.time()   # VP addendum: time the screenshot alone
+        #take screenshot
+        image = pyautogui.screenshot()
+        #convert to grayscale
+        image = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
+        #resize image
+        width = 854
+        height = 480
+        dim = (width, height)
+        resized = cv2.resize(image, dim, interpolation=cv2.INTER_AREA)
+        # get image max value
+        min_val, max_val, min_indx, max_indx = cv2.minMaxLoc(resized)
+        print(max_val)
+        if max_val >= 215:
+            highlightdetect = 1
+        if max_val <215:
+            highlightdetect = 0
+        #crop image
+        y=57
+        x=0
+        h=366
+        w=854
+        cropped = resized[y:y+h, x:x+w]
+        #take image mean
+        mean = np.mean(cropped)
+        print(mean)
+        mean2 = int(mean)
+        print(mean2)
+        vp_shot_time(time.time() - _vp_start)   # VP addendum
+        _vp_shots += 1                          # VP addendum
 
     #Set power target based upon mean2:
     if mean2 >= 125:
