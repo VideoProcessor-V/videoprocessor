@@ -163,6 +163,9 @@ namespace
 		}
 	};
 
+	// The harness's frame size (1080p unless a test sets it; the 4K stress run).
+	int g_harnessWidth = 1920, g_harnessHeight = 1080;
+
 	// Stream faults (owner 2026-10-14): what each captured frame does. The
 	// default plan is the plain stream at the run's rate.
 	struct FrameStep
@@ -241,7 +244,7 @@ namespace
 		result.created = renderer != nullptr;
 		if (renderer)
 		{
-			const int width = 1920, height = 1080;
+			const int width = g_harnessWidth, height = g_harnessHeight;
 			VideoStateComPtr state = new VideoState();
 			state->valid = true;
 			const int rateNumerator = plan && plan->rateNumerator > 0 ? plan->rateNumerator : film ? 24000 : 60000;
@@ -659,6 +662,41 @@ namespace Tests
 				Assert::IsTrue(r.Logged("(4 new of 5)"), (L"locks on the film\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Pulldown: lost"), (L"loses the lock on video\n" + r.Tail()).c_str());
 			}
+		}
+
+		TEST_METHOD(Stress4K60Rgb12EarlyUpload)
+		{
+			// The maximum stress case (owner 2026-10-15): 3840x2160 12-bit RGB (R12B,
+			// the largest capture frame, 37 MB) at 59.94 Hz through the renderer, with
+			// early upload on and off. Checked: frames presented, no unpack failures;
+			// reported: frames read early, no-free-slot counts, the most frames held
+			// at once and the presentation stats (drops) of both runs. Whether the
+			// whole chain holds 4K60 in real time is the RTX 3090's to show; the
+			// laptop shows the upload pipeline under the heaviest load.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			for (const bool early : { true, false })
+			{
+				const RunResult r = Run(VideoFrameEncoding::R12B, "gpu", 6.0, false, early ? "capture_upload: early\n" : "");
+				const std::wstring name = early ? L"4K60 R12B early" : L"4K60 R12B render upload";
+				Logger::WriteMessage((std::string(early ? "[early] " : "[render] ") + "presentation: " + r.presentationStatus + "\n").c_str());
+				for (const std::string& line : r.log)
+					if (line.find("Early upload:") != std::string::npos || line.find("Capture raw route") != std::string::npos ||
+						line.find("Native RGB ingest") != std::string::npos || line.find("VP_TEST_ADAPTER selects") != std::string::npos ||
+						line.find("libplacebo initialized") != std::string::npos)
+						Logger::WriteMessage(line.c_str());
+				Assert::IsTrue(r.created, (name + L": renderer not created\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("GPU unpack failed"), (name + L": no unpack failure\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Early upload: not available"), (name + L": the pool opened\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+			}
+			g_harnessWidth = 1920;
+			g_harnessHeight = 1080;
 		}
 
 		TEST_METHOD(EarlyUploadRunsThroughTheRenderer)

@@ -8503,15 +8503,32 @@ struct LibplaceboVideoRenderer::Impl
 		LoadDisplayLut(settings);
 		ConfigureRenderParams(settings, "renderer initialization");
 
+		// The upload route as the frames will actually take it, and the GPU the
+		// render runs on (owner 2026-10-15: always named, not only when chosen).
+		const VideoFrameEncoding e = state->videoFrameEncoding;
+		const bool overridden = videoConversionOverride != VideoConversionOverride::VIDEOCONVERSION_NONE;
+		const bool r12 = e == VideoFrameEncoding::R12B || e == VideoFrameEncoding::R12L;
+		const bool rgbUnpack = !overridden && settings.nativeRgbIngest && GpuRgbUnpack::Supports(e) &&
+			(!r12 || (state->displayMode && state->displayMode->FrameWidth() % 8 == 0));
+		const bool yuv422 = e == VideoFrameEncoding::V210 || e == VideoFrameEncoding::UYVY || e == VideoFrameEncoding::HDYC;
+		std::string route = overridden ? "P010 (forced, CPU)" :
+			rgbUnpack ? "native RGB 4:4:4 (GPU unpack)" :
+			IsNativeRgbUpload(e, videoConversionOverride) ? "native RGB (libplacebo upload)" :
+			yuv422 ? (settings.capturePath == "gpu" ? "lossless P210 (GPU unpack)" : "lossless P210 (CPU)") : "P010 (CPU)";
+		if ((rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)) && settings.captureUpload == "early")
+			route += ", uploaded early";
+		std::string gpuName = "unknown GPU";
+		{
+			CComPtr<IDXGIDevice> dxgiDevice;
+			CComPtr<IDXGIAdapter> adapter;
+			DXGI_ADAPTER_DESC desc{};
+			if (d3d11 && d3d11->device && SUCCEEDED(d3d11->device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) &&
+				SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&desc)))
+				gpuName = CStringA(desc.Description).GetString();
+		}
 		DebugLog::Log(
-			"libplacebo initialized: D3D11, %s upload, SDR target request=%s %.1f nits",
-			IsNativeRgbUpload(state->videoFrameEncoding, videoConversionOverride) ?
-				"native RGB" :
-			((state->videoFrameEncoding == VideoFrameEncoding::V210 ||
-				state->videoFrameEncoding == VideoFrameEncoding::UYVY ||
-				state->videoFrameEncoding == VideoFrameEncoding::HDYC) &&
-				videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE ?
-					"lossless P210" : "P010"),
+			"libplacebo initialized: D3D11 on %s, upload: %s, SDR target request=%s %.1f nits",
+			gpuName.c_str(), route.c_str(),
 			TargetPrimariesName(),
 			sdrTargetNits);
 	}
