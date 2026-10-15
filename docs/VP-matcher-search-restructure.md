@@ -101,12 +101,14 @@ pick's first candidate, rank -1, then to the lowest index - a total order, so an
 serial pick exactly); 16 threads reduce 16 partials each, thread 0 the last 16. One extra barrier per pick
 (the earlier tree reduction added ~9 and was slower). `l2_sads[1089]` and `half_sads[NHALF]` are no longer
 needed (~5.4 KB less shared memory per group). Applied to the 1/32 and half-size picks; Beta suite passes and
-the parallel search is byte-identical to the serial one. Timing waits for mains power (battery timings are
-not reliable). Kept only if faster.
+the parallel search is byte-identical to the serial one. Timed on mains, interleaved (the laptop GPU drifted up
+to 2x between runs): step A 6.65 / 11.4 / 7.15 / 9.98 ms against the old picks 12.8 / 8.18 ms (block search;
+step A won 2 of 3 adjacent pairs and has both lowest readings). Kept (owner 2026-10-15: consistently better).
+Later timings use an in-process alternating A/B to cancel the drift.
 
 ## Next steps, in order (each: Beta byte-identity, then timing on mains; kept only if faster)
 
-1. Time step A against 7.2 ms.
+1. Done: step A kept.
 2. If it helps: the four 1/8 picks the same way (13 threads, one row of 13 each, for all four lists; thread 0
    the 13 row winners).
 3. Candidate-list build in parallel: each start's 7x7 window is a fixed-size slot (start k at offset

@@ -381,7 +381,6 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// search's (test: SetSerialSearchForTest). Every barrier is at the top
 		// level and reached by all threads (D3D11's HLSL compiler, X3663).
 		const char* const SEARCH_PARALLEL_HEADER = R"GLSL(
-shared float l2_sads[1089];
 shared float l1_sads_z[169];
 shared float l1_sads_c[169];
 shared float l1_sads_g[169];
@@ -399,7 +398,6 @@ shared vec2 s_v1g2;
 #define ZGROUP 6
 #define NHALF 272
 #endif
-shared float half_sads[NHALF];
 shared ivec2 half_vecs[NHALF];
 shared int half_starts[NHALF];
 shared ivec2 s_centres[ZGROUP];
@@ -416,6 +414,49 @@ void sync_group()
 {
     memoryBarrierShared();
     barrier();
+}
+
+// Picks without one thread scanning every SAD: each thread keeps the best of
+// its own candidates, 16 threads reduce 16 of those each, thread 0 the last
+// 16. The serial pick (strictly smaller, in order, from a given first
+// candidate) is the minimum SAD with ties to the first candidate, then to the
+// lowest index; rank -1 marks the first candidate. That order is total, so
+// the result is exactly the serial pick in any reduction order.
+#define PK_EMPTY 0x7fffffff
+shared float pk_s[256];
+shared int pk_r[256];
+shared float pk2_s[16];
+shared int pk2_r[16];
+
+bool pk_better(float s, int r, float bs, int br)
+{
+    return r != PK_EMPTY && (br == PK_EMPTY || s < bs || (s == bs && r < br));
+}
+
+// After pk_s/pk_r are written and the group synced: 16 partial picks.
+void pk_reduce16(int li)
+{
+    if (li < 16) {
+        float bs = 0.0;
+        int br = PK_EMPTY;
+        for (int k = 0; k < 16; k++) {
+            int j = li * 16 + k;
+            if (pk_better(pk_s[j], pk_r[j], bs, br)) { bs = pk_s[j]; br = pk_r[j]; }
+        }
+        pk2_s[li] = bs;
+        pk2_r[li] = br;
+    }
+}
+
+// After pk_reduce16 and a sync (thread 0): the winner's rank and SAD.
+int pk_final(out float best)
+{
+    float bs = 0.0;
+    int br = PK_EMPTY;
+    for (int k = 0; k < 16; k++)
+        if (pk_better(pk2_s[k], pk2_r[k], bs, br)) { bs = pk2_s[k]; br = pk2_r[k]; }
+    best = bs;
+    return br;
 }
 
 // The block's 12x12 window of `from`, from shared memory (the same values
@@ -463,19 +504,27 @@ ivec2 o = b * 8;
 // Level 2 (1/32 source): every vector within +-range texels.
 int side = 2 * coarse_range + 1;
 int n2 = side * side;
-if (run)
-    for (int i = li; i < n2; i += NT)
-        l2_sads[i] = sad_l2(b / 2, ivec2(i % side - coarse_range, i / side - coarse_range));
+{
+    // The serial pick starts from the zero vector (rank -1).
+    int centre = coarse_range * side + coarse_range;
+    float bs = 0.0;
+    int br = PK_EMPTY;
+    if (run)
+        for (int i = li; i < n2; i += NT) {
+            float s = sad_l2(b / 2, ivec2(i % side - coarse_range, i / side - coarse_range));
+            int r = i == centre ? -1 : i;
+            if (pk_better(s, r, bs, br)) { bs = s; br = r; }
+        }
+    pk_s[li] = bs;
+    pk_r[li] = br;
+}
+sync_group();
+pk_reduce16(li);
 sync_group();
 if (run && lead) {
-    ivec2 v2 = ivec2(0);
-    float best2 = l2_sads[coarse_range * side + coarse_range];
-    for (int dy = -coarse_range; dy <= coarse_range; dy++)
-        for (int dx = -coarse_range; dx <= coarse_range; dx++) {
-            float s = l2_sads[(dy + coarse_range) * side + dx + coarse_range];
-            if (s < best2) { best2 = s; v2 = ivec2(dx, dy); }
-        }
-    s_v2 = v2;
+    float best2;
+    int r = pk_final(best2);
+    s_v2 = r < 0 ? ivec2(0) : ivec2(r % side - coarse_range, r / side - coarse_range);
 }
 sync_group();
 ivec2 v2 = s_v2;
@@ -594,6 +643,9 @@ if (run && li < 144)
     from_win[li] = from_at(o + ivec2(li % 12 - 2, li / 12 - 2));
 sync_group();
 int nh = s_half_count;
+{
+float bs = 0.0;
+int br = PK_EMPTY;
 if (run)
     for (int i = li; i < nh; i += NT) {
         // A repeat of an earlier candidate scores the same and comes later,
@@ -605,15 +657,20 @@ if (run)
         int earlier = start == ZGROUP ? s_centres[0].x : start - 1;
         for (int k = 1; k <= earlier; k++)
             repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
-        half_sads[i] = repeat ? 3.0e38 : sad_win(o, v);
+        float s = repeat ? 3.0e38 : sad_win(o, v);
+        if (pk_better(s, i, bs, br)) { bs = s; br = i; }
     }
+pk_s[li] = bs;
+pk_r[li] = br;
+}
+sync_group();
+pk_reduce16(li);
 sync_group();
 float best_sad = 0.0;
 ivec2 best = ivec2(0);
 if (run && lead) {
-    best_sad = half_sads[0];
-    for (int k = 1; k < nh; k++)
-        if (half_sads[k] < best_sad) { best_sad = half_sads[k]; best = half_vecs[k]; }
+    int r = pk_final(best_sad);
+    best = half_vecs[r];
     s_best = best;
 }
 sync_group();
