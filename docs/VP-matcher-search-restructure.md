@@ -85,3 +85,40 @@ Next: profile the work-group search's remaining fixed cost in finer steps (the h
 144 bilinear samples while 248 wait - the from-window load, the lead's scans) and target those inside the
 existing shape. A non-exact option (partial sums in a different float order, so picks could differ on exact
 ties) is measured and listed for the owner, not enabled.
+
+## Finer profile of the work-group search (2026-10-15, laptop 3050 Ti, 4K, live settings)
+
+Block search 7.2 ms. Half-pel refinement replaced by a constant: 7.95 ms (no saving - not the cost). Every
+SAD stage replaced by a constant (1/32, 1/8, half size, half-pel): 5.7 ms left. So about 80% of the search is
+not SAD arithmetic: it is the thread-0 scans (1/32 pick over up to 1089 entries, four 1/8 picks over 169, the
+candidate-list build, the half-size pick over up to 321) while 255 threads wait, plus the barriers and the
+shared-memory footprint (~13 KB per group limits groups per SM).
+
+## Step A - picks folded into the SAD loops (built, byte-identical, not yet timed)
+
+Each thread keeps the best of its own candidates while it computes them (minimum SAD; ties to the serial
+pick's first candidate, rank -1, then to the lowest index - a total order, so any reduction order gives the
+serial pick exactly); 16 threads reduce 16 partials each, thread 0 the last 16. One extra barrier per pick
+(the earlier tree reduction added ~9 and was slower). `l2_sads[1089]` and `half_sads[NHALF]` are no longer
+needed (~5.4 KB less shared memory per group). Applied to the 1/32 and half-size picks; Beta suite passes and
+the parallel search is byte-identical to the serial one. Timing waits for mains power (battery timings are
+not reliable). Kept only if faster.
+
+## Next steps, in order (each: Beta byte-identity, then timing on mains; kept only if faster)
+
+1. Time step A against 7.2 ms.
+2. If it helps: the four 1/8 picks the same way (13 threads, one row of 13 each, for all four lists; thread 0
+   the 13 row winners).
+3. Candidate-list build in parallel: each start's 7x7 window is a fixed-size slot (start k at offset
+   1 + 49 x (k - skipped)), so thread t can write its own entry once the skip flags (thread 0, a few
+   compares) are known; removes ~300 serial shared writes.
+4. Shared-memory diet for occupancy: `half_vecs`/`half_starts` derived from (slot, index) instead of stored;
+   `l1_sads_*` as one array; measure groups per SM before/after.
+5. Barrier count: merge the from-window load into the 1/32 phase (it does not depend on the picks), and
+   drop barriers whose only purpose was the removed scans.
+6. Work-group size: with the scans gone, try 128 threads (more groups per SM; the half-size candidates
+   still fit in 3 strides) - exact by construction, timing decides.
+7. Second sweep and quarter-pel (1.1 ms + small): same pick method if their thread-0 scans show up.
+
+Target unchanged: block search ~2.5-3 ms on the laptop, identical output. Non-exact options (different float
+summation order) stay measured-and-listed only.
