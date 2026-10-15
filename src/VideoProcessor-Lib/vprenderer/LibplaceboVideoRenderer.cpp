@@ -4320,7 +4320,8 @@ struct LibplaceboVideoRenderer::Impl
 				const VideoFrameEncoding e = payload.rawEncoding;
 				DebugLog::Log("Native RGB ingest: %s unpacked on the GPU to RGB 4:4:4 (%dx%d, no CPU conversion)",
 					e == VideoFrameEncoding::R210 ? "r210" : e == VideoFrameEncoding::R12B ? "R12B" :
-					e == VideoFrameEncoding::R12L ? "R12L" : e == VideoFrameEncoding::R10b ? "R10b" : "R10l", width, height);
+					e == VideoFrameEncoding::R12L ? "R12L" : e == VideoFrameEncoding::R10b ? "R10b" :
+					e == VideoFrameEncoding::R10l ? "R10l" : e == VideoFrameEncoding::ARGB_8BIT ? "ARGB" : "BGRA", width, height);
 				rgbGpuLogged = true;
 			}
 			return true;
@@ -8377,7 +8378,11 @@ struct LibplaceboVideoRenderer::Impl
 		if (!renderer)
 			throw std::runtime_error("Failed to create libplacebo renderer");
 
-		if (!IsNativeRgbUpload(state->videoFrameEncoding, videoConversionOverride))
+		// native_rgb_ingest: ARGB / BGRA may go raw (GpuRgbUnpack), so their
+		// formatter exists too (the conversion thread checks for one; it does
+		// not run it for frames on libplacebo's native upload).
+		if (!IsNativeRgbUpload(state->videoFrameEncoding, videoConversionOverride) ||
+			GpuRgbUnpack::Supports(state->videoFrameEncoding))
 		{
 			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
 			formatter = CreateAlphaFormatter(state->videoFrameEncoding,
@@ -12821,7 +12826,9 @@ struct LibplaceboVideoRenderer::Impl
 		const int width = static_cast<int>(state.displayMode->FrameWidth());
 		const int height = static_cast<int>(state.displayMode->FrameHeight());
 		AlphaNativeRgbLayout nativeRgbLayout;
-		const bool nativeRgbUpload =
+		const bool rgbRawFrame = convertedPayload && convertedPayload->Raw() &&
+			GpuRgbUnpack::Supports(convertedPayload->rawEncoding);
+		const bool nativeRgbUpload = !rgbRawFrame &&
 			videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
 			AlphaCanUseNativeRgbUpload(state.videoFrameEncoding) &&
 			GetAlphaNativeRgbLayout(state.videoFrameEncoding, nativeRgbLayout);
@@ -13663,7 +13670,9 @@ struct LibplaceboVideoRenderer::Impl
 			const VideoFrameEncoding e = convertedPayload->rawEncoding;
 			setIngressStatus(std::string(e == VideoFrameEncoding::R210 ? "Native r210 -> RGB 4:4:4" :
 				e == VideoFrameEncoding::R12B ? "Native R12B -> RGB 4:4:4" : e == VideoFrameEncoding::R12L ?
-				"Native R12L -> RGB 4:4:4" : e == VideoFrameEncoding::R10b ? "Native R10b -> RGB 4:4:4" : "Native R10l -> RGB 4:4:4") +
+				"Native R12L -> RGB 4:4:4" : e == VideoFrameEncoding::R10b ? "Native R10b -> RGB 4:4:4" :
+				e == VideoFrameEncoding::R10l ? "Native R10l -> RGB 4:4:4" : e == VideoFrameEncoding::ARGB_8BIT ?
+				"Native ARGB -> RGB 4:4:4" : "Native BGRA -> RGB 4:4:4") +
 				" (GPU unpack)" + (analysisSource.IsValid() ? "" : " (analysis unavailable)"));
 		}
 		else
@@ -21802,7 +21811,18 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
 				((state->videoFrameEncoding != VideoFrameEncoding::R12B && state->videoFrameEncoding != VideoFrameEncoding::R12L) ||
 					state->displayMode->FrameWidth() % 8 == 0);
-			if (rgbRaw ||
+			// libplacebo's native upload (ARGB / BGRA with native_rgb_ingest off):
+			// no conversion. The frame is marked prepared with an empty payload
+			// (the queue waits for one now that these encodings have a
+			// formatter; the native upload reads the frame itself).
+			if (!rgbRaw && IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride))
+			{
+				converted = std::make_shared<QueuedFrame::ConvertedPayload>();
+				converted->contract.sampleRange = VideoFrameSampleRange::FULL;
+				converted->contract.colorDepth = 8;
+				converted->contract.bitShift = 0;
+			}
+			else if (rgbRaw ||
 				(m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
 				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
 				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&

@@ -678,7 +678,9 @@ namespace Tests
 				Case{ VideoFrameEncoding::R12L, "gpu", "Native RGB ingest: R12L unpacked on the GPU" },
 				Case{ VideoFrameEncoding::R210, "standard", "Native RGB ingest: r210 unpacked on the GPU" },
 				Case{ VideoFrameEncoding::R10b, "standard", "Native RGB ingest: R10b unpacked on the GPU" },
-				Case{ VideoFrameEncoding::R10l, "gpu", "Native RGB ingest: R10l unpacked on the GPU" } })
+				Case{ VideoFrameEncoding::R10l, "gpu", "Native RGB ingest: R10l unpacked on the GPU" },
+				Case{ VideoFrameEncoding::ARGB_8BIT, "standard", "Native RGB ingest: ARGB unpacked on the GPU" },
+				Case{ VideoFrameEncoding::BGRA_8BIT, "standard", "Native RGB ingest: BGRA unpacked on the GPU" } })
 			{
 				const RunResult r = Run(c.encoding, c.path, 2.0);
 				const std::wstring name = std::wstring(c.line, c.line + strlen(c.line));
@@ -688,18 +690,25 @@ namespace Tests
 				Assert::IsFalse(r.Logged("Alpha conversion failed"), (name + L": no conversion failure\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
 			}
-			// The RGB formats already native (Bill's path, unchanged): 8-bit ARGB
-			// (e.g. a receiver's 8-bit RGB 4:4:4) and BGRA, 10-bit R10b / R10l.
+			// native_rgb_ingest: off: 8-bit ARGB (e.g. a receiver's 8-bit RGB
+			// 4:4:4) and BGRA on libplacebo's native upload (Bill's path, unchanged).
 			struct Existing { VideoFrameEncoding encoding; const char* label; };
 			std::string existingFailures;
 			for (const Existing& c : { Existing{ VideoFrameEncoding::ARGB_8BIT, "ingress=Native ARGB -> RGB" },
 				Existing{ VideoFrameEncoding::BGRA_8BIT, "ingress=Native BGRA -> RGB" } })
 			{
 				// Every format tried; the failures listed together.
-				const RunResult r = Run(c.encoding, "standard", 2.0);
-				const bool ok = r.presented && !r.Logged("Alpha conversion failed") &&
+				const RunResult r = Run(c.encoding, "standard", 2.0, false, "native_rgb_ingest: off\n");
+				const bool ok = r.presented && r.Logged(c.label) && !r.Logged("Native RGB ingest:") && !r.Logged("Alpha conversion failed") &&
 					!r.Logged("Failed picking any compatible texture format");
-				Logger::WriteMessage((std::string("existing native RGB ") + c.label + ": " + (ok ? "presented" : "NOT presented") + "\n").c_str());
+				Logger::WriteMessage((std::string("existing native RGB ") + c.label + ": " + (ok ? "presented" : "NOT presented") +
+					" (presented " + std::to_string(r.presented) + ", native label " + std::to_string(r.Logged(c.label)) +
+					", new unpack " + std::to_string(r.Logged("Native RGB ingest:")) + ")\n").c_str());
+				if (!ok)
+					for (const std::string& line : r.log)
+						if (line.find("RGB") != std::string::npos || line.find("onversion") != std::string::npos ||
+							line.find("profile") != std::string::npos)
+							Logger::WriteMessage(("    " + line).c_str());
 				if (!ok)
 					existingFailures += std::string(c.label) + "; ";
 			}

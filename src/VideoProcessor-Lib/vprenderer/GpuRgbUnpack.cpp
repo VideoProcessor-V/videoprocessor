@@ -67,6 +67,21 @@ if (g.x < frame_width && g.y < frame_height) {
 }
 )GLSL";
 
+	// ARGB / BGRA (big_endian 1 = ARGB's [A R G B] bytes, 0 = BGRA's
+	// [B G R A]): the 8-bit value << 8; the luma as CARGBtoP010's (8 to 10
+	// bits, both endpoints exact, then the Q16 full-range Y).
+	const char* const RGB8_BODY = R"GLSL(
+ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+if (g.x < frame_width && g.y < frame_height) {
+    uint b0 = ru_byte(4 * g.x, g.y), b1 = ru_byte(4 * g.x + 1, g.y), b2 = ru_byte(4 * g.x + 2, g.y), b3 = ru_byte(4 * g.x + 3, g.y);
+    uvec3 v = big_endian != 0 ? uvec3(b1, b2, b3) : uvec3(b2, b1, b0);
+    imageStore(dst_rgb, g, vec4(ru_u16(v.x << 8), ru_u16(v.y << 8), ru_u16(v.z << 8), 1.0));
+    ivec3 t = ivec3((v * 1023u + 127u) / 255u);
+    int y10 = ru_clamp10((cy.x * t.x + cy.y * t.y + cy.z * t.z + 32768) >> 16);
+    imageStore(dst_luma, g, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
+}
+)GLSL";
+
 	// R210: one invocation per pixel ([00 R10 G10 B10], big-endian word).
 	const char* const R210_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
@@ -125,7 +140,7 @@ bool GpuRgbUnpack::Supports(VideoFrameEncoding encoding)
 {
 	return encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ||
 		encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
-		encoding == VideoFrameEncoding::R10l;
+		encoding == VideoFrameEncoding::R10l || Is8Bit(encoding);
 }
 
 bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* data, size_t rowBytes, int width, int height,
@@ -136,6 +151,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	if (!Supports(encoding)) { error = "unsupported encoding"; return false; }
 	const bool r12 = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L;
 	const bool r10 = encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l;
+	const bool rgb8 = Is8Bit(encoding);
 	if (!data || width <= 0 || height <= 0 || (width & 1) || (r12 && width % 8 != 0) || rowBytes % 4 != 0)
 	{
 		error = "bad frame geometry";
@@ -180,7 +196,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	// The CPU formatter's luma coefficients (CDeckLinkRGBToP010VideoFrameFormatter.Common.h):
 	// Q16 full range for R12, Q20 limited (r210's 64-960 span) for R210.
 	int cy[3];
-	if (r12)
+	if (r12 || rgb8)
 	{
 		const int bt709[3] = { 13933, 46871, 4732 }, rec2020[3] = { 17218, 44444, 3886 };
 		for (int k = 0; k < 3; ++k) cy[k] = bt2020 ? rec2020[k] : bt709[k];
@@ -197,7 +213,8 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 		for (int k = 0; k < 3; ++k) cy[k] = bt2020 ? rec2020[k] : bt709[k];
 	}
 	const int pairs = width / 2;
-	const int bigEndian = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R10b ? 1 : 0;
+	const int bigEndian = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R10b ||
+		encoding == VideoFrameEncoding::ARGB_8BIT ? 1 : 0;
 	const pl_shader_desc descriptors[3] = { Sampled("raw", raw), Storage("dst_rgb", rgb), Storage("dst_luma", luma) };
 	pl_shader_var variables[5] = {
 		{ pl_var_int("pairs"), &pairs, false },
@@ -207,9 +224,9 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 		{ pl_var_ivec3("cy"), cy, false } };
 	pl_custom_shader custom{};
 	custom.description = r12 ? "VideoProcessor capture: R12 to RGB (GPU)" : r10 ? "VideoProcessor capture: R10 to RGB (GPU)" :
-		"VideoProcessor capture: r210 to RGB (GPU)";
+		rgb8 ? "VideoProcessor capture: 8-bit RGB (GPU)" : "VideoProcessor capture: r210 to RGB (GPU)";
 	custom.header = RGB_UNPACK_HEADER;
-	custom.body = r12 ? R12_BODY : r10 ? R10_BODY : R210_BODY;
+	custom.body = r12 ? R12_BODY : r10 ? R10_BODY : rgb8 ? RGB8_BODY : R210_BODY;
 	custom.input = PL_SHADER_SIG_NONE;
 	custom.output = PL_SHADER_SIG_NONE;
 	custom.descriptors = descriptors;
