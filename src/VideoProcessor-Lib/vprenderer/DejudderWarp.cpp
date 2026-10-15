@@ -373,7 +373,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
-		// One work group of 256 threads per block (owner 2026-10-13: the serial
+		// One work group of 128 threads (SEARCH_NT) per block (owner 2026-10-13: the serial
 		// search was 95 ms per 4K frame on an RTX 3050 Ti). Each level's
 		// candidates are evaluated in parallel; every sum runs in the serial
 		// order and thread 0 picks each winner in the serial scan order with
@@ -441,8 +441,8 @@ void sync_group()
 // lowest index; rank -1 marks the first candidate. That order is total, so
 // the result is exactly the serial pick in any reduction order.
 #define PK_EMPTY 0x7fffffff
-shared float pk_s[256];
-shared int pk_r[256];
+shared float pk_s[SEARCH_NT];
+shared int pk_r[SEARCH_NT];
 shared float pk2_s[16];
 shared int pk2_r[16];
 
@@ -457,8 +457,8 @@ void pk_reduce16(int li)
     if (li < 16) {
         float bs = 0.0;
         int br = PK_EMPTY;
-        for (int k = 0; k < 16; k++) {
-            int j = li * 16 + k;
+        for (int k = 0; k < SEARCH_NT / 16; k++) {
+            int j = li * (SEARCH_NT / 16) + k;
             if (pk_better(pk_s[j], pk_r[j], bs, br)) { bs = pk_s[j]; br = pk_r[j]; }
         }
         pk2_s[li] = bs;
@@ -506,7 +506,7 @@ float sad_sub_win(ivec2 o, vec2 v)
 ivec2 b = ivec2(gl_WorkGroupID.xy);
 ivec2 blocks = imageSize(dst);
 int li = int(gl_LocalInvocationIndex);
-const int NT = 256;
+const int NT = SEARCH_NT;
 bool lead = li == 0;
 bool inside = b.x < blocks.x && b.y < blocks.y;
 // 11a E4: a static scene keeps the previous frame's vectors.
@@ -574,17 +574,18 @@ vec2 vg2 = vec2(0.0);
     }
 }
 #endif
-if (run && li < 169) {
-    vec2 h = 0.5 * vec2(li % 13 - 6, li / 13 - 6);
-    l1_sads_z[li] = sad_l1(b * 2, h);
-    l1_sads_c[li] = sad_l1(b * 2, vec2(v2 * 4) + h);
-    if (have_g)
-        l1_sads_g[li] = sad_l1(b * 2, vgf + h);
+if (run)
+    for (int i = li; i < 169; i += NT) {
+        vec2 h = 0.5 * vec2(i % 13 - 6, i / 13 - 6);
+        l1_sads_z[i] = sad_l1(b * 2, h);
+        l1_sads_c[i] = sad_l1(b * 2, vec2(v2 * 4) + h);
+        if (have_g)
+            l1_sads_g[i] = sad_l1(b * 2, vgf + h);
 #ifdef GLOBAL_TWO
-    if (have_g2)
-        l1_sads_g2[li] = sad_l1(b * 2, vg2 + h);
+        if (have_g2)
+            l1_sads_g2[i] = sad_l1(b * 2, vg2 + h);
 #endif
-}
+    }
 sync_group();
 if (run && li < 13) {
     float bz = 0.0, bc = 0.0, bg = 0.0;
@@ -660,8 +661,9 @@ if (run && lead) {
     s_centres[0] = ivec2(nstarts, 0);   // the number of starts
     s_half_count = 1 + 49 * nstarts + 25;
 }
-if (run && li < 144)
-    from_win[li] = from_at(o + ivec2(li % 12 - 2, li / 12 - 2));
+if (run)
+    for (int i = li; i < 144; i += NT)
+        from_win[i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
 sync_group();
 int nh = s_half_count;
 {
@@ -2449,11 +2451,14 @@ if (q.x < size.x && q.y < size.y) {
 		if (serialSearchForTest)
 			return Dispatch("VideoProcessor de-judder: block search (serial reference)", SEARCH_HEADER,
 				SEARCH_BODY_SERIAL, descriptors, 10, variables, 5, blocksX, blocksY, 8);
-		static const std::string header = std::string(SEARCH_HEADER) + SEARCH_PARALLEL_HEADER;
-		static const std::string twoHeader = std::string("#define GLOBAL_TWO 1\n") + SEARCH_HEADER + SEARCH_PARALLEL_HEADER;
+		// 128 threads per block (2026-10-15, laptop 3050 Ti 4K, alternating runs: block search 5.36/6.31/5.43 ms
+		// against 5.86/5.84/5.96 ms with 256 and 6.02 ms with 64; matcher 8.3-8.8 against 9.1-9.2 ms).
+		const int nt = 128;
+		static const std::string header = std::string("#define SEARCH_NT 128\n") + SEARCH_HEADER + SEARCH_PARALLEL_HEADER;
+		static const std::string twoHeader = std::string("#define SEARCH_NT 128\n#define GLOBAL_TWO 1\n") + SEARCH_HEADER + SEARCH_PARALLEL_HEADER;
 		const bool two = globalTwo && settings.globalPrior;
 		return DispatchPerBlock("VideoProcessor de-judder: block search", two ? twoHeader.c_str() : header.c_str(), SEARCH_BODY,
-			descriptors, two ? 11 : 10, variables, 5, blocksX, blocksY, 16, 16);
+			descriptors, two ? 11 : 10, variables, 5, blocksX, blocksY, 16, nt / 16);
 	}
 
 	bool MotionWarp::Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn, pl_tex previous, pl_tex global, pl_tex out)
