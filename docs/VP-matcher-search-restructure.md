@@ -186,3 +186,17 @@ consecutive frames with plane reuse: 9.71 ms GPU (-0.75 ms), 8.02 ms wall-clock 
 search 5.29 (7.2), second sweep 0.89 (1.18; the paired groups confirmed), global motion 0.38 for all four (~0.77),
 grid 0.17 (0.40), keep the searches 0.09 (0.22). 18 small passes (under 0.15 ms each) total 1.88 ms - the floor
 a larger GPU will not shrink much; candidates to merge next.
+
+## Block search: comparison-stage profile and two table/row trials (2026-10-15)
+
+Fast rotated timing (VP_TEST_MATCHER_TIMING, medians): skipping the half-size SADs removes about half of the
+block search, the 1/32 + 1/8 SADs about a third, all SADs leaves about a quarter (fixed overhead) - the SAD work
+now dominates. Each global-motion start adds 49 candidates per block: without M2's second start the block search
+was ~20% shorter (a quality-for-speed trade; listed, not enabled). Feature-off totals include knock-on effects
+(fewer starts, gate, copies); each pass's own cost is in the per-pass breakdown.
+
+- 1/8 candidates from a per-start 19x19 table of bilinear samples (kept, ed0f67d7): exact, ~3-5% on the block
+  search (order-balanced runs on a warm GPU).
+- Half-size candidates four to a thread sharing each `to` row (not kept): exact, block search GPU time 4.86 vs
+  4.95 ms, but the whole matcher's wall-clock (passes back to back) was 16-21 ms against 7.7 ms in two of three
+  runs, with no shader recompiles - the longer per-thread work interacts badly with scheduling. Reverted.

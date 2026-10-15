@@ -1827,7 +1827,11 @@ void RunBetaMatcherTiming()
 				slot ^= 1;
 			};
 			next();   // the shaders compiled outside the timing
+			auto compiles = [&] { size_t c = 0, at = 0; while ((at = gpu.messages.find("(slow!)", at)) != std::string::npos) { ++c; ++at; } return c; };
+			const size_t before = compiles();
 			results[vi].wall.push_back(DrainedMs(g, reps, next));
+			if (compiles() != before)
+				std::cout << "  [" << variants[vi] << "] shader compiles during the timed estimates: " << (compiles() - before) << "\n";
 			m.SetPassTiming(true);
 			for (int i = 0; i < reps; ++i)
 				next();
