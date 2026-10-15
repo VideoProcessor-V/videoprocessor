@@ -1831,14 +1831,14 @@ void RunBetaPassTiming()
 	Check(a.luma && a.chroma && b.luma && b.chroma, "pass timing: plane upload failed");
 	Dejudder::MotionWarp warp(gpu.Log(), g, ChainGpuProbe::Refined(Dejudder::Settings{}));
 	int slot = 0;
-	const double matcherMs = DrainedMs(g, 10, [&] { Check(warp.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
+	const double matcherMs = DrainedMs(g, 10, [&] { { const bool ok_ = warp.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + warp.LastError() + " | " + gpu.messages.substr(gpu.messages.find("rror") == std::string::npos ? 0 : (gpu.messages.find("rror") > 1500 ? gpu.messages.find("rror") - 1500 : 0), 3000)); } slot ^= 1; });
 	{
 		// Where the matcher's time goes (each pass drained; per estimate).
 		warp.SetPassTiming(true);
 		const int reps = 5;
 		for (int i = 0; i < reps; ++i)
 		{
-			Check(warp.Estimate(a, b, slot, true), "pass timing: estimate failed");
+			{ const bool ok_ = warp.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + warp.LastError()); }
 			slot ^= 1;
 		}
 		std::vector<std::pair<double, std::string>> passes;
@@ -1851,7 +1851,7 @@ void RunBetaPassTiming()
 			if (entry.first >= 0.05)
 				std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
 		Dejudder::MotionWarp plain(gpu.Log(), g);
-		const double plainMs = DrainedMs(g, 10, [&] { Check(plain.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
+		const double plainMs = DrainedMs(g, 10, [&] { { const bool ok_ = plain.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + plain.LastError()); } slot ^= 1; });
 		std::cout << "  de-judder matcher with default settings " << plainMs << " ms\n";
 		// The live configuration (owner 2026-10-15): the refined settings with
 		// the half-size matcher for every pass (dejudder_low_res all), M6's
@@ -1865,11 +1865,11 @@ void RunBetaPassTiming()
 		liveSettings.pixelTrustHi = 8.0f;
 		liveSettings.landingCheck = 1.5f;
 		Dejudder::MotionWarp live(gpu.Log(), g, liveSettings);
-		const double liveMs = DrainedMs(g, 10, [&] { Check(live.Estimate(a, b, slot, true), "pass timing: estimate failed"); slot ^= 1; });
+		const double liveMs = DrainedMs(g, 10, [&] { { const bool ok_ = live.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + live.LastError()); } slot ^= 1; });
 		live.SetPassTiming(true);
 		for (int i = 0; i < reps; ++i)
 		{
-			Check(live.Estimate(a, b, slot, true), "pass timing: estimate failed");
+			{ const bool ok_ = live.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + live.LastError()); }
 			slot ^= 1;
 		}
 		std::vector<std::pair<double, std::string>> livePasses;
@@ -1886,6 +1886,51 @@ void RunBetaPassTiming()
 		for (const auto& entry : livePasses)
 			if (entry.first >= 0.02)
 				std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
+		// The live settings on consecutive frames as the renderer runs them
+		// ((A, B), (B, A'), ... with frame numbers): each pair's A is the last
+		// pair's B, so its planes are reused (2026-10-15). Plus the small
+		// passes' share (under 0.15 ms each: mostly one work group, little to
+		// gain from a larger GPU).
+		{
+			Dejudder::MotionWarp chain(gpu.Log(), g, liveSettings);
+			uint64_t seq = 0;
+			auto next = [&]
+			{
+				Dejudder::Planes pa = (seq % 2) ? b : a, pb = (seq % 2) ? a : b;
+				pa.sequence = seq + 1;
+				pb.sequence = seq + 2;
+				++seq;
+				Check(chain.Estimate(pa, pb, slot, true), "pass timing: consecutive estimate failed");
+				slot ^= 1;
+			};
+			next();
+			const double chainMs = DrainedMs(g, 10, next);
+			chain.SetPassTiming(true);
+			for (int i = 0; i < reps; ++i)
+				next();
+			double chainSum = 0.0, smallSum = 0.0;
+			int smallCount = 0;
+			std::vector<std::pair<double, std::string>> chainPasses;
+			for (const auto& entry : chain.PassMs())
+			{
+				const double ms = entry.second / reps;
+				chainPasses.emplace_back(ms, entry.first);
+				chainSum += ms;
+				if (ms < 0.15)
+				{
+					smallSum += ms;
+					++smallCount;
+				}
+			}
+			chain.SetPassTiming(false);
+			std::sort(chainPasses.rbegin(), chainPasses.rend());
+			std::cout << "  de-judder matcher, live settings on consecutive frames (planes reused " << chain.ReusedPlanesForTest()
+				<< "): " << chainMs << " ms wall-clock; passes " << chainSum << " ms GPU over " << chainPasses.size()
+				<< " passes; " << smallCount << " small passes " << smallSum << " ms:\n";
+			for (const auto& entry : chainPasses)
+				if (entry.first >= 0.02)
+					std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
+		}
 		// The serial reference search (one thread per block, no work-group
 		// barriers) on the same live settings, for the restructure plan.
 		Dejudder::MotionWarp serialLive(gpu.Log(), g, liveSettings);

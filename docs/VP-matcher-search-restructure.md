@@ -173,3 +173,16 @@ instead of downsampling the full picture again (the same stored value). Exact: B
 planes byte-identical to rebuilt ones" (full size, lowRes, lowResAll; a pan and a still fade with the
 correction on in 6 pairs). Saves A's half-size luma and pyramid on both matcher sizes (roughly 0.4-0.7 ms
 on the laptop at 4K; the live timing test passes no frame numbers, so it does not show it).
+
+## Merged small passes and the batch timing (2026-10-15)
+
+Exact merges, each direction's work and order unchanged: global motion D1 for both directions in four dispatches
+instead of eight (both 1/8 samples taken, then chosen: D3D11 rejects an implicit-LOD sample in a branch); the two
+kept searches in one copy; the two searches and two global vectors to the source grid in one dispatch. Beta
+passes (parallel vs serial identical, 6d 0.161845, reused planes identical).
+
+Live settings, laptop 4K, one run: matcher 7.85 ms wall-clock (start of day ~10 ms); passes 10.46 ms GPU. On
+consecutive frames with plane reuse: 9.71 ms GPU (-0.75 ms), 8.02 ms wall-clock (run noise). Per pass: block
+search 5.29 (7.2), second sweep 0.89 (1.18; the paired groups confirmed), global motion 0.38 for all four (~0.77),
+grid 0.17 (0.40), keep the searches 0.09 (0.22). 18 small passes (under 0.15 ms each) total 1.88 ms - the floor
+a larger GPU will not shrink much; candidates to merge next.

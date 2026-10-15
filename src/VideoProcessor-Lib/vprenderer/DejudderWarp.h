@@ -498,6 +498,12 @@ namespace Dejudder
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr);
 		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);
+		// Both directions (A to B into out[0], B to A into out[1]) in the same
+		// four dispatches instead of eight (2026-10-15; each direction's sums,
+		// order and picks as Global's).
+		bool GlobalBoth(pl_tex l1A, pl_tex l1B, pl_tex l2A, pl_tex l2B, pl_tex out[2], pl_tex second[2]);
+		// Two same-size copies in one dispatch (2026-10-15).
+		bool CopyPair(pl_tex src0, pl_tex dst0, pl_tex src1, pl_tex dst1);
 		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out);
 		bool Copy(pl_tex src, pl_tex dst);
 
@@ -560,6 +566,7 @@ namespace Dejudder
 		bool rescoreForTest = false;
 		// D1 in parallel: per-candidate frame SADs (1/32, 1/8) and the pick.
 		pl_tex globalSad2 = nullptr, globalSad1 = nullptr, globalPick = nullptr;
+		pl_tex globalBothSad2 = nullptr, globalBothSad1 = nullptr, globalBothPick = nullptr;
 		pl_tex globalSecond[2] = { nullptr, nullptr };   // M2: D1's second candidate (l1 texels, -, -, valid)
 		pl_tex fadeState = nullptr;   // M4: gain, offset, active, the last mean change (rgba32f, persists)
 		bool FadeMatch(const Planes& b);
