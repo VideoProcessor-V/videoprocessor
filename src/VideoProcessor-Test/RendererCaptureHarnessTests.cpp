@@ -727,13 +727,30 @@ namespace Tests
 				Assert::IsFalse(r.Logged("Native RGB ingest:"), (L"off: no native path\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (L"off: frames presented\n" + r.Tail()).c_str());
 			}
-			// 23.976p with the de-judder on: it holds on RGB (its luma path is
-			// the next step) without breaking the GPU capture of other formats.
+			// 23.976p with the de-judder on (roadmap item 2): on RGB the matcher runs
+			// on the unpack's luma, its next and ahead frames unpacked luma-only,
+			// with the rendered warp (the default) - 12-bit RGB and 8-bit ARGB (a
+			// receiver's RGB 4:4:4). With the source warp it holds (RGB capture).
+			for (const VideoFrameEncoding e : { VideoFrameEncoding::R12B, VideoFrameEncoding::ARGB_8BIT })
 			{
-				const RunResult r = Run(VideoFrameEncoding::R12B, "standard", 3.0, true, "dejudder_strength: 0.25\n");
-				Assert::IsTrue(r.Logged("Native RGB ingest: R12B unpacked on the GPU"), (L"film: the native path ran\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("Capture path gpu: the GPU unpack failed"), (L"film: the V210/UYVY unpack untouched\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.presented, (L"film: frames presented\n" + r.Tail()).c_str());
+				const std::wstring name = e == VideoFrameEncoding::R12B ? L"film R12B" : L"film ARGB";
+				const RunResult r = Run(e, "standard", 5.0, true, "dejudder_strength: 0.25\n");
+				Assert::IsTrue(r.Logged("Native RGB ingest:"), (name + L": the native path ran\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("De-judder: motion estimated"), (name + L": the de-judder estimated on RGB\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("uploading the next frame failed"), (name + L": the next frames unpacked\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("de-judder frame's GPU unpack failed"), (name + L": no next-frame unpack failure\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Capture path gpu: the GPU unpack failed"), (name + L": the V210/UYVY unpack untouched\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+				for (const std::string& line : r.log)
+					if (line.find("De-judder") != std::string::npos)
+						Logger::WriteMessage(line.c_str());
+			}
+			{
+				const RunResult r = Run(VideoFrameEncoding::R12B, "standard", 3.0, true,
+					"dejudder_strength: 0.25\ndejudder_warp_stage: source\n");
+				Assert::IsTrue(r.Logged("De-judder: RGB capture"), (L"film R12B, source warp: holds (RGB capture)\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"film R12B, source warp: no estimate\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"film R12B, source warp: frames presented\n" + r.Tail()).c_str());
 			}
 		}
 

@@ -61,8 +61,10 @@ public:
 	// data: the raw frame, rowBytes per row, width x height pixels (even
 	// width; R12 widths a multiple of 8). bt2020 picks the luma matrix.
 	// rgb and luma are created or recreated here.
+	// lumaOnly: the matcher's luma alone (rgb untouched; the de-judder's next
+	// and ahead frames, which need no picture).
 	bool Unpack(VideoFrameEncoding encoding, bool bt2020, const void* data, size_t rowBytes, int width, int height,
-		pl_tex& rgb, pl_tex& luma);
+		pl_tex& rgb, pl_tex& luma, bool lumaOnly = false);
 	const std::string& Error() const { return error; }
 	void SetHostReadableForTest(bool on) { hostReadable = on; }
 	void SetTimerForTest(pl_timer t) { timer = t; }

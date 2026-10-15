@@ -4310,6 +4310,12 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
 	pl_tex rgbIngestLuma = nullptr;
+	// De-judder on RGB (roadmap item 2): this frame's matcher luma when it came
+	// through GpuRgbUnpack (no chroma planes: the rendered warp only), and the
+	// scratch picture the next / ahead frames' luma unpack writes beside it.
+	pl_tex dejudderRgbLuma = nullptr;
+	bool dejudderRgbBt2020 = false;
+	pl_tex dejudderRgbScratch = nullptr;
 	bool rgbGpuLogged = false;
 	bool UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
 	{
@@ -4382,6 +4388,7 @@ struct LibplaceboVideoRenderer::Impl
 		size_t rowBytes = 0, pixelBytes = 0;
 		bool lossless422 = false, fullRange = false;
 		bool raw = false;   // the raw (GPU unpack) route, with its encoding
+		bool rgb = false, bt2020 = false;   // an RGB raw route: luma only, its matrix
 		VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
 		VideoFrameFormatterOutputContract contract{};
 	} dejudderLayout;
@@ -4585,6 +4592,7 @@ struct LibplaceboVideoRenderer::Impl
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		for (pl_tex& tex : dejudderAheadTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
+		if (dejudderRgbScratch && d3d11) pl_tex_destroy(d3d11->gpu, &dejudderRgbScratch);
 		dejudderAhead.Reset();
 		dejudderAheadPayload.reset();
 		dejudderAheadPayloadSequence = 0;
@@ -11770,7 +11778,8 @@ struct LibplaceboVideoRenderer::Impl
 			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
 				(tex->params.format->caps & PL_FMT_CAP_STORABLE);
 		};
-		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
+		in.planeFormatsUsable = nativeRgb || (dejudderRgbLuma ? usable(dejudderRgbLuma) :
+			(usable(textures[0]) && usable(textures[1])));
 		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
 		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
 		// Delta 10 (general): the strength the extras run at, and on an even
@@ -11829,6 +11838,8 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderLayout.pixelBytes = next->Bytes();
 		dejudderLayout.raw = next->Raw();
 		dejudderLayout.rawEncoding = next->Raw() ? next->rawEncoding : VideoFrameEncoding::UNKNOWN;
+		dejudderLayout.rgb = dejudderRgbLuma != nullptr;
+		dejudderLayout.bt2020 = dejudderRgbBt2020;
 		dejudderLayout.lossless422 = lossless422;
 		dejudderLayout.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
 		dejudderLayout.contract = contract;
@@ -11854,14 +11865,14 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		(void)flipped;   // A and B share the orientation; the warp keeps it.
 		Dejudder::Planes a, b;
-		a.luma = textures[0];
-		a.chroma = textures[1];
+		a.luma = dejudderRgbLuma ? dejudderRgbLuma : textures[0];
+		a.chroma = dejudderRgbLuma ? nullptr : textures[1];
 		a.chromaShiftX = 1;
 		a.chromaShiftY = lossless422 ? 0 : 1;
 		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;   // delta 5, D5-3
 		b = a;
 		b.luma = dejudderNextTextures[0];
-		b.chroma = dejudderNextTextures[1];
+		b.chroma = dejudderRgbLuma ? nullptr : dejudderNextTextures[1];
 		if (RunDejudderEstimate(a, b, sourceSequence, nextSourceSequence))
 			dejudderEstimatedSequence = sourceSequence;
 	}
@@ -11894,10 +11905,21 @@ struct LibplaceboVideoRenderer::Impl
 		const DejudderUploadLayout& l = dejudderLayout;
 		if (!l.valid || payload.Bytes() != l.pixelBytes)
 			return false;
-		// native_rgb_ingest: an RGB raw frame has no YCbCr planes (the de-judder
-		// holds on it until its luma path is in).
+		// native_rgb_ingest: an RGB raw frame gives the matcher its luma only
+		// (dst[0]; dst[1] untouched), unpacked as the frame A was.
 		if (payload.Raw() && GpuRgbUnpack::Supports(payload.rawEncoding))
+		{
+			if (!l.raw || !l.rgb || payload.rawEncoding != l.rawEncoding || !d3d11)
+				return false;
+			if (!rgbUnpack)
+				rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
+			if (rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
+				l.width, l.height, dejudderRgbScratch, dst[0], true))
+				return true;
+			DebugLog::Log("Native RGB ingest: a de-judder frame's GPU unpack failed (%s); that frame skipped",
+				rgbUnpack->Error().c_str());
 			return false;
+		}
 		if (payload.Raw())
 		{
 			// capture_path: gpu; the route and format must be B's (A's layout).
@@ -12015,7 +12037,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
 				dejudderEstimates, dejudderLayout.width, dejudderLayout.height,
-				dejudderLayout.lossless422 ? "4:2:2" : "4:2:0");
+				dejudderLayout.rgb ? "RGB, luma from the unpack" : dejudderLayout.lossless422 ? "4:2:2" : "4:2:0");
 		return true;
 	}
 
@@ -12033,7 +12055,7 @@ struct LibplaceboVideoRenderer::Impl
 		c.enabled = activeSettings.dejudderEstimateAhead;
 		c.renderedWarp = activeSettings.dejudderWarpRendered && renderedPath;
 		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
-			dejudderNextTextures[0] && dejudderNextTextures[1];
+			dejudderNextTextures[0] && (dejudderNextTextures[1] || dejudderLayout.rgb);
 		c.source = sourceSequence;
 		c.next = nextSourceSequence;
 		c.after = dejudderAheadPayload ? dejudderAheadPayloadSequence : 0;
@@ -12052,13 +12074,13 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			Dejudder::Planes b, c;
 			b.luma = dejudderNextTextures[0];
-			b.chroma = dejudderNextTextures[1];
+			b.chroma = dejudderLayout.rgb ? nullptr : dejudderNextTextures[1];
 			b.chromaShiftX = 1;
 			b.chromaShiftY = dejudderLayout.lossless422 ? 0 : 1;
 			b.fullRange = dejudderLayout.fullRange;
 			c = b;
 			c.luma = dejudderAheadTextures[0];
-			c.chroma = dejudderAheadTextures[1];
+			c.chroma = dejudderLayout.rgb ? nullptr : dejudderAheadTextures[1];
 			return RunDejudderEstimate(b, c, bSequence, cSequence);
 		};
 		return dejudderAhead.TryAhead(c, steps);
@@ -12132,7 +12154,9 @@ struct LibplaceboVideoRenderer::Impl
 		// rectangles still (owner 2026-10-13); the source warp cannot.
 		const bool sourcePlanes = f.image && f.image->num_planes == 2 && f.image->planes[0].texture == textures[0] &&
 			f.image->planes[1].texture == textures[1];
-		if (!f.image || (!sourcePlanes && !(dejudderSubtitleComposed && activeSettings.dejudderWarpRendered &&
+		// An RGB source (no YCbCr planes): the rendered warp only, checked below.
+		const bool rgbSource = dejudderLayout.valid && dejudderLayout.rgb;
+		if (!f.image || (!sourcePlanes && !rgbSource && !(dejudderSubtitleComposed && activeSettings.dejudderWarpRendered &&
 			dejudderGeometryValid && dejudderGeometry.numHolds > 0)))
 		{
 			DejudderHold("composed source (subtitle moving)");
@@ -12267,7 +12291,8 @@ struct LibplaceboVideoRenderer::Impl
 		// warp would show the subtitle where it was.
 		if (!sourcePlanes && !cached)
 		{
-			DejudderHold("composed source without the cached picture");
+			DejudderHold(rgbSource ? "RGB source without the rendered picture (the rendered warp only)" :
+				"composed source without the cached picture");
 			return false;
 		}
 		std::vector<const pl_hook*> outputHooks;
@@ -13660,7 +13685,9 @@ struct LibplaceboVideoRenderer::Impl
 			image.planes[0].shift_x = 0.0f;
 			image.planes[0].shift_y = 0.0f;
 			image.planes[0].flipped = state.invertedVertical;
-			// An RGB capture has no YCbCr planes to warp: the de-judder is off.
+			// libplacebo's native RGB upload (native_rgb_ingest off): no matcher
+			// luma, the de-judder holds (RGB capture).
+			dejudderRgbLuma = nullptr;
 			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
 				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
 				state.displayMode && state.displayMode->IsInterlaced(),
@@ -13687,9 +13714,13 @@ struct LibplaceboVideoRenderer::Impl
 			image.planes[0].component_mapping[2] = PL_CHANNEL_B;
 			image.planes[0].flipped = state.invertedVertical;
 			image.num_planes = 1;
-			// The de-judder holds on RGB until its luma path is in.
-			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
-				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
+			// De-judder on RGB (roadmap item 2): the matcher on the unpack's luma
+			// (the CPU formatter's Y exactly); the rendered warp only, so without
+			// it the de-judder holds (RGB capture).
+			dejudderRgbLuma = rgbIngestLuma;
+			dejudderRgbBt2020 = state.colorspace == ColorSpace::BT_2020;
+			UpdateDejudderEstimate(nextConvertedPayload, convertedPayload, convertedPayload->contract, width, height, 0, 0,
+				false, state.invertedVertical, sourceSequence, cadenceRepeat, !activeSettings.dejudderWarpRendered,
 				state.displayMode && state.displayMode->IsInterlaced(),
 				SourceRateHz(state), nextSourceSequence);
 			const VideoFrameEncoding e = convertedPayload->rawEncoding;
@@ -13761,6 +13792,7 @@ struct LibplaceboVideoRenderer::Impl
 			frameGpuTiming.EndStage();
 			if (!sourceUploaded)
 				return false;
+			dejudderRgbLuma = nullptr;
 			UpdateDejudderEstimate(nextConvertedPayload, convertedPayload, formattedContract,
 				width, height, p010RowBytes, chromaHeight, lossless422Upload,
 				state.invertedVertical, sourceSequence, cadenceRepeat, false,

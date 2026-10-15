@@ -2331,7 +2331,9 @@ if (q.x < size.x && q.y < size.y) {
 	bool MotionWarp::EnsureTextures(const Planes& a)
 	{
 		if (!dispatch) { error = "no dispatch"; return false; }
-		if (!a.luma || !a.chroma) { error = "missing planes"; return false; }
+		// a.chroma may be missing: an RGB source gives the matcher its luma
+		// only (roadmap item 2); then there is no source warp (Warp refuses).
+		if (!a.luma) { error = "missing planes"; return false; }
 		width = a.luma->params.w;
 		height = a.luma->params.h;
 		halfW = (width + 1) / 2;
@@ -2453,8 +2455,8 @@ if (q.x < size.x && q.y < size.y) {
 				return false;
 			}
 		}
-		if (innerOfLowRes)
-			return true;   // the lowRes inner never warps
+		if (innerOfLowRes || !a.chroma)
+			return true;   // the lowRes inner never warps; a luma-only source has no source warp
 		// The warped planes keep A's formats, so the render sees the same
 		// representation.
 		for (const auto& plane : { std::make_pair(a.luma, &warpedLuma), std::make_pair(a.chroma, &warpedChroma) })
@@ -3681,7 +3683,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				fillDesc, subOk ? 4 : 3, variables, 2, blocksX, blocksY, 8))
 				return false;
 			lastB = b;
-			fillReady = b.chroma && b.chroma->params.w == a.chroma->params.w &&
+			fillReady = b.chroma && a.chroma && b.chroma->params.w == a.chroma->params.w &&
 				b.chroma->params.h == a.chroma->params.h;
 		}
 		pixelMaskReady = false;
@@ -3825,7 +3827,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// The warped planes were made for the frame Estimate saw: refuse a
 		// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
 		// write into the old one.
-		if (!warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
+		if (!a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
 			a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
 			a.chroma->params.format != warpedChroma->params.format ||
 			a.luma->params.format != warpedLuma->params.format)

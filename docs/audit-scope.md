@@ -51,12 +51,21 @@ search", sigma-delta serial reference, "reused half-size planes byte-identical",
 - `[decklink] ycbcr_12bit_capture` (rgb12 default / v210 / off): a signal the driver reports as 12-bit
   YCbCr 4:2:2 was refused; now 12-bit RGB from the card when offered for the mode, else 10-bit 4:2:2.
   Test: DeckLinkYCbCr12CaptureChoice. **No Config control yet (options audit).**
-- In progress (uncommitted at the time of writing): `capture_path` default `gpu` on both pathways
-  (moved from "Low latency (experimental)" to Fixes under test); de-judder next/ahead-frame unpack
-  failures no longer turn the session to the CPU; route and format parity in the de-judder layout
-  checks; "GPU unpack" in the ingress status; a log of the most capture buffers held at once; the
-  12-bit unpack's byte order unrolled. Audit of CPU consumers on the raw route: none breaks
-  (analysis reads the raw frame); SubtitleBoxDetector falls back to per-sample decode on raw V210.
+- f9369400: `capture_path` default `gpu` on both pathways (moved from "Low latency (experimental)" to
+  Fixes under test); de-judder next/ahead-frame unpack failures skip that frame instead of turning the
+  session to the CPU; route and encoding parity in the de-judder layout checks; "GPU unpack" in the
+  ingress status; a log of the most capture buffers held at once; the 12-bit unpack reads each block
+  once. Audit of CPU consumers on the raw route: none breaks (analysis reads the raw frame);
+  SubtitleBoxDetector falls back to per-sample decode on raw V210 (optional fast path). Full suite
+  2610/2611.
+- De-judder on RGB (roadmap item 2): the matcher accepts luma-only planes (no source warp for them);
+  the renderer feeds it the unpack's luma (the CPU formatter's Y exactly), unpacks the next / ahead
+  frames luma-only (GpuRgbUnpack lumaOnly), runs it with the rendered warp and holds ("RGB capture")
+  with the source warp, or ("RGB source without the rendered picture") when the picture is not
+  cached. Tests: NativeRgbIngestRunsThroughTheRenderer (24p R12B and ARGB estimate; source warp
+  holds), luma-only luma identical in GpuRgbUnpackMatchesTheCpuDecode; Beta byte-identity; quick tier.
+- 61668ab0: test DLL built without whole-program optimisation (LNK1103 corrupt intermediates);
+  quick test tier (heavy tests excluded) for routine runs, the full suite at milestones.
 
 ## Known test notes
 

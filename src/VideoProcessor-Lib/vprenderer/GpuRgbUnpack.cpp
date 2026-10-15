@@ -51,7 +51,9 @@ if (g.x < pairs / 4 && g.y < frame_height) {
         for (int k = 0; k < 2; k++) {
             uvec3 p = k == 0 ? p0 : p1;
             ivec2 at = ivec2(8 * g.x + 2 * j + k, g.y);
+    #ifndef LUMA_ONLY
             imageStore(dst_rgb, at, vec4(ru_u16(p.x << 4), ru_u16(p.y << 4), ru_u16(p.z << 4), 1.0));
+#endif
             // The matcher's luma: the CPU formatter's 12-to-10 scale and Q16
             // full-range Y (10-bit code << 6).
             ivec3 t = ivec3((p * 1023u + 2047u) / 4095u);
@@ -70,7 +72,9 @@ if (g.x < frame_width && g.y < frame_height) {
     uint b0 = ru_byte(4 * g.x, g.y), b1 = ru_byte(4 * g.x + 1, g.y), b2 = ru_byte(4 * g.x + 2, g.y), b3 = ru_byte(4 * g.x + 3, g.y);
     uint w = big_endian != 0 ? (b0 << 24) | (b1 << 16) | (b2 << 8) | b3 : (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
     ivec3 v = ivec3(int((w >> 22) & 1023u), int((w >> 12) & 1023u), int((w >> 2) & 1023u));
+#ifndef LUMA_ONLY
     imageStore(dst_rgb, g, vec4(ru_u16(uint(v.x) << 6), ru_u16(uint(v.y) << 6), ru_u16(uint(v.z) << 6), 1.0));
+#endif
     ivec3 o = v - 64;
     int y10 = ru_clamp10(64 + ru_round_q20(cy.x * o.x + cy.y * o.y + cy.z * o.z));
     imageStore(dst_luma, g, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
@@ -85,7 +89,9 @@ ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 if (g.x < frame_width && g.y < frame_height) {
     uint b0 = ru_byte(4 * g.x, g.y), b1 = ru_byte(4 * g.x + 1, g.y), b2 = ru_byte(4 * g.x + 2, g.y), b3 = ru_byte(4 * g.x + 3, g.y);
     uvec3 v = big_endian != 0 ? uvec3(b1, b2, b3) : uvec3(b2, b1, b0);
+#ifndef LUMA_ONLY
     imageStore(dst_rgb, g, vec4(ru_u16(v.x << 8), ru_u16(v.y << 8), ru_u16(v.z << 8), 1.0));
+#endif
     ivec3 t = ivec3((v * 1023u + 127u) / 255u);
     int y10 = ru_clamp10((cy.x * t.x + cy.y * t.y + cy.z * t.z + 32768) >> 16);
     imageStore(dst_luma, g, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
@@ -103,7 +109,9 @@ if (g.x < frame_width && g.y < frame_height) {
     // (never a tie: n/7 has no half), below-black and above-white kept.
     ivec3 n = 4096 * 7 + (v - 64) * 438;
     uvec3 q = uvec3((n + 3) / 7);
+#ifndef LUMA_ONLY
     imageStore(dst_rgb, g, vec4(ru_u16(q.x), ru_u16(q.y), ru_u16(q.z), 1.0));
+#endif
     // The matcher's luma: the CPU formatter's Q20 limited matrix.
     ivec3 o = v - 64;
     int y10 = ru_clamp10(64 + ru_round_q20(cy.x * o.x + cy.y * o.y + cy.z * o.z));
@@ -154,7 +162,7 @@ bool GpuRgbUnpack::Supports(VideoFrameEncoding encoding)
 }
 
 bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* data, size_t rowBytes, int width, int height,
-	pl_tex& rgb, pl_tex& luma)
+	pl_tex& rgb, pl_tex& luma, bool lumaOnly)
 {
 	error.clear();
 	if (!gpu || !dispatch) { error = "no GPU"; return false; }
@@ -198,7 +206,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 		params.host_readable = hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
 		return pl_tex_recreate(gpu, tex, &params);
 	};
-	if (!plane(&rgb, rgba16, width, height) || !plane(&luma, r16, width, height))
+	if ((!lumaOnly && !plane(&rgb, rgba16, width, height)) || !plane(&luma, r16, width, height))
 	{
 		error = "cannot create the output planes";
 		return false;
@@ -225,7 +233,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	const int pairs = width / 2;
 	const int bigEndian = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R10b ||
 		encoding == VideoFrameEncoding::ARGB_8BIT ? 1 : 0;
-	const pl_shader_desc descriptors[3] = { Sampled("raw", raw), Storage("dst_rgb", rgb), Storage("dst_luma", luma) };
+	const pl_shader_desc descriptors[3] = { Sampled("raw", raw), Storage("dst_luma", luma), Storage("dst_rgb", rgb) };
 	pl_shader_var variables[5] = {
 		{ pl_var_int("pairs"), &pairs, false },
 		{ pl_var_int("frame_width"), &width, false },
@@ -235,12 +243,13 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	pl_custom_shader custom{};
 	custom.description = r12 ? "VideoProcessor capture: R12 to RGB (GPU)" : r10 ? "VideoProcessor capture: R10 to RGB (GPU)" :
 		rgb8 ? "VideoProcessor capture: 8-bit RGB (GPU)" : "VideoProcessor capture: r210 to RGB (GPU)";
-	custom.header = RGB_UNPACK_HEADER;
+	static const std::string lumaOnlyHeader = std::string("#define LUMA_ONLY 1\n") + RGB_UNPACK_HEADER;
+	custom.header = lumaOnly ? lumaOnlyHeader.c_str() : RGB_UNPACK_HEADER;
 	custom.body = r12 ? R12_BODY : r10 ? R10_BODY : rgb8 ? RGB8_BODY : R210_BODY;
 	custom.input = PL_SHADER_SIG_NONE;
 	custom.output = PL_SHADER_SIG_NONE;
 	custom.descriptors = descriptors;
-	custom.num_descriptors = 3;
+	custom.num_descriptors = lumaOnly ? 2 : 3;
 	custom.variables = variables;
 	custom.num_variables = 5;
 	custom.compute = true;

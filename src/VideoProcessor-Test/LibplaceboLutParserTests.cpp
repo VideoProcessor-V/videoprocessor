@@ -7542,6 +7542,16 @@ namespace VideoProcessorTest
 						Assert::IsTrue(unpack.Unpack(encoding, space == ColorSpace::BT_2020, source.data(), rowBytes, width, height, rgb, luma),
 							(name + L": " + ExtendedRangeGpuProbe::ToWide(unpack.Error())).c_str());
 						const std::vector<uint16_t> gotLuma = download(luma), gotRgb = download(rgb);
+						// The luma-only mode (the de-judder's next / ahead frames): the
+						// same luma, the picture untouched.
+						{
+							pl_tex lumaOnly = nullptr, untouched = nullptr;
+							Assert::IsTrue(unpack.Unpack(encoding, space == ColorSpace::BT_2020, source.data(), rowBytes, width, height,
+								untouched, lumaOnly, true), (name + L": luma-only unpack").c_str());
+							Assert::IsTrue(untouched == nullptr, (name + L": luma-only made no picture").c_str());
+							Assert::IsTrue(download(lumaOnly) == gotLuma, (name + L": luma-only luma differs").c_str());
+							pl_tex_destroy(gpu, &lumaOnly);
+						}
 						const uint16_t* wantLuma = reinterpret_cast<const uint16_t*>(expected.data());
 						for (int y = 0; y < height; ++y)
 							for (int x = 0; x < width; ++x)
