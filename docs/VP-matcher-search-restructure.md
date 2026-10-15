@@ -120,7 +120,8 @@ Later timings use an in-process alternating A/B to cancel the drift.
    `l1_sads_*` as one array; measure groups per SM before/after.
 5. Barrier count: merge the from-window load into the 1/32 phase (it does not depend on the picks), and
    drop barriers whose only purpose was the removed scans.
-6. Work-group size: with the scans gone, try 128 threads (more groups per SM; the half-size candidates
+6. Work-group size (note 2026-10-15: the 1/8 phase uses one thread per candidate, li < 169, and the pick
+   reduction assumes 256 partials - both need a stride loop / 8-per-thread reduction first): with the scans gone, try 128 threads (more groups per SM; the half-size candidates
    still fit in 3 strides) - exact by construction, timing decides.
 7. Second sweep and quarter-pel (1.1 ms + small): same pick method if their thread-0 scans show up.
 
