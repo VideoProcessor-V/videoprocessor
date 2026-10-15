@@ -112,7 +112,8 @@ Later timings use an in-process alternating A/B to cancel the drift.
 2. Done (2026-10-15): byte-identical, Beta passes; block search 6.08 ms on a first (cool) run against step A's
    first runs 6.65 / 7.15 ms, matcher 9.1 ms. Kept. The four 1/8 picks the same way (13 threads, one row of 13 each, for all four lists; thread 0
    the 13 row winners).
-3. Candidate-list build in parallel: each start's 7x7 window is a fixed-size slot (start k at offset
+3. Done (2026-10-15): candidates derived from their index (half_vecs/half_starts removed, ~3.9 KB less shared
+   memory); byte-identical, Beta passes; block search 5.96 ms, matcher 9.4 ms. Kept. Was: candidate-list build in parallel: each start's 7x7 window is a fixed-size slot (start k at offset
    1 + 49 x (k - skipped)), so thread t can write its own entry once the skip flags (thread 0, a few
    compares) are known; removes ~300 serial shared writes.
 4. Shared-memory diet for occupancy: `half_vecs`/`half_starts` derived from (slot, index) instead of stored;

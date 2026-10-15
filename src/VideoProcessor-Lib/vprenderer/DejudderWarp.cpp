@@ -398,9 +398,27 @@ shared vec2 s_v1g2;
 #define ZGROUP 6
 #define NHALF 272
 #endif
-shared ivec2 half_vecs[NHALF];
-shared int half_starts[NHALF];
 shared ivec2 s_centres[ZGROUP];
+
+// Candidate i of the half-size list in the serial order: zero, the 7x7
+// around each start (dy outer, dx inner), then the 5x5 around zero.
+void half_cand(int i, out ivec2 v, out int start)
+{
+    int ns = s_centres[0].x;
+    int j = i - 1;
+    if (i == 0) {
+        v = ivec2(0);
+        start = 0;
+    } else if (j < 49 * ns) {
+        start = j / 49 + 1;
+        int d = j % 49;
+        v = s_centres[start] + ivec2(d % 7 - 3, d / 7 - 3);
+    } else {
+        j -= 49 * ns;
+        start = ZGROUP;
+        v = ivec2(j % 5 - 2, j / 5 - 2);
+    }
+}
 
 shared float sub_sads[9];
 shared ivec2 s_v2;
@@ -620,10 +638,7 @@ if (run && lead) {
     // global refinement, global vector, 11a E1's previous vector), then
     // +-2 around zero.
     vec2 vpt = use_temporal != 0 ? texelFetch(previous, b, 0).xy * 0.25 : vec2(0.0);
-    int n = 0;
     int nstarts = 0;
-    half_starts[n] = 0;
-    half_vecs[n++] = ivec2(0);
     for (int c = 0; c < 5; c++) {
         if (c == 1 && v1c == v1z)
             continue;
@@ -635,30 +650,15 @@ if (run && lead) {
             continue;
         ivec2 centre = ivec2(round((c == 0 ? v1z : (c == 1 ? v1c : (c == 2 ? v1g : (c == 3 ? vgf : vpt)))) * 4.0));
         s_centres[++nstarts] = centre;
-        for (int dy = -3; dy <= 3; dy++)
-            for (int dx = -3; dx <= 3; dx++) {
-                half_starts[n] = nstarts;
-                half_vecs[n++] = centre + ivec2(dx, dy);
-            }
     }
 #ifdef GLOBAL_TWO
     if (have_g2 && v1g2 != v1z && v1g2 != v1c && !(have_g && (v1g2 == v1g || v1g2 == vgf))) {
         ivec2 centre = ivec2(round(v1g2 * 4.0));
         s_centres[++nstarts] = centre;
-        for (int dy = -3; dy <= 3; dy++)
-            for (int dx = -3; dx <= 3; dx++) {
-                half_starts[n] = nstarts;
-                half_vecs[n++] = centre + ivec2(dx, dy);
-            }
     }
 #endif
-    for (int dy = -2; dy <= 2; dy++)
-        for (int dx = -2; dx <= 2; dx++) {
-            half_starts[n] = ZGROUP;
-            half_vecs[n++] = ivec2(dx, dy);
-        }
     s_centres[0] = ivec2(nstarts, 0);   // the number of starts
-    s_half_count = n;
+    s_half_count = 1 + 49 * nstarts + 25;
 }
 if (run && li < 144)
     from_win[li] = from_at(o + ivec2(li % 12 - 2, li / 12 - 2));
@@ -672,8 +672,9 @@ if (run)
         // A repeat of an earlier candidate scores the same and comes later,
         // so with the strict comparison it never wins: not scored (each
         // thread checks its own; exactly the serial result).
-        ivec2 v = half_vecs[i];
-        int start = half_starts[i];
+        ivec2 v;
+        int start;
+        half_cand(i, v, start);
         bool repeat = i > 0 && v == ivec2(0);
         int earlier = start == ZGROUP ? s_centres[0].x : start - 1;
         for (int k = 1; k <= earlier; k++)
@@ -691,7 +692,8 @@ float best_sad = 0.0;
 ivec2 best = ivec2(0);
 if (run && lead) {
     int r = pk_final(best_sad);
-    best = half_vecs[r];
+    int start;
+    half_cand(r, best, start);
     s_best = best;
 }
 sync_group();
