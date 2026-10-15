@@ -6600,11 +6600,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "carries it to where it is being drawn. Where something moves in front of something else, the matched "
             "pixel can be a valid one that is not the one visible there; it then stays still. On real footage this "
             "cut the damaged patches to a third for about half a point less judder removed. Default on."));
-        auto* pictureArea = addChoice(QStringLiteral("Ignore black bars when matching"),
-            QStringLiteral("dejudder_picture_area"), { QStringLiteral("on"), QStringLiteral("off") });
-        pictureArea->setToolTip(QStringLiteral(
-            "Letterbox and pillarbox bars are left out of the motion statistics (cut detection, fades) and "
-            "stay still. Default on."));
         auto* verify = addChoice(QStringLiteral("Check matches pixel by pixel"),
             QStringLiteral("dejudder_verify"), { QStringLiteral("on"), QStringLiteral("off") });
         verify->setToolTip(QStringLiteral(
@@ -6658,6 +6653,22 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         MarkGpuCost(form, globalTwo, 1);
         MarkGpuCost(form, pixelTrust, 1);
         MarkGpuCost(form, verify, 1);
+
+        // Owner 2026-10-14: fixes that change existing behaviour, each on by
+        // default and switchable back while they are proven on the projector.
+        form = addCollapsibleSection(QStringLiteral("fixesUnderTest"), QStringLiteral("Fixes under test"),
+            QStringLiteral("Recent fixes, on by default. Switch one off to get the old behaviour back if something "
+                "looks wrong."), false);
+        auto* pictureArea = addChoice(QStringLiteral("Ignore black bars when matching"),
+            QStringLiteral("dejudder_picture_area"), { QStringLiteral("on"), QStringLiteral("off") });
+        pictureArea->setToolTip(QStringLiteral(
+            "De-judder: letterbox and pillarbox bars are left out of the motion statistics (cut detection, fades) "
+            "and stay still. Off = the bars count as picture (cuts in letterboxed film can be missed)."));
+        auto* sceneCooldown = addChoice(QStringLiteral("Scene-cut cooldown 2 s"),
+            QStringLiteral("fix_scene_cooldown"), { QStringLiteral("on"), QStringLiteral("off") });
+        sceneCooldown->setToolTip(QStringLiteral(
+            "After a cut, the next cut that may change the crop or NLS counts again after 2 seconds, as intended. "
+            "Off = the old behaviour: 12.5 s on 24p film, 5 s at 60p."));
 
         form = addCollapsibleSection(QStringLiteral("dejudderExperiments"), QStringLiteral("De-judder: experiments"),
             QStringLiteral("Off by default; for comparisons only. ") + QString::fromLatin1(kGpuCostLegend), false);
@@ -7752,7 +7763,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },

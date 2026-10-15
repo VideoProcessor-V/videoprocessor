@@ -932,6 +932,12 @@ namespace
 		// Black bars (owner 2026-10-14, on): matcher statistics over the
 		// picture only; bar blocks untrusted.
 		bool dejudderPictureArea = true;
+		// Fixes under test (owner 2026-10-14; each on, off = the old
+		// behaviour). The scene detector's cut cooldown: 2 s as written (its
+		// frame duration in 100 ns units at the content rate); off = the old
+		// display-mode units, which always hit the 300-frame cap (12.5 s at
+		// 24p, 5 s at 60p).
+		bool fixSceneCooldown = true;
 		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
 		// signal by repeated frames is found and shown at its film rate.
 		bool dejudderPulldown = false;
@@ -1118,7 +1124,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2163,7 +2169,8 @@ namespace
 			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust),
 			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck),
 			std::make_pair("dejudder_pulldown", &settings.dejudderPulldown),
-			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea) })
+			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea),
+			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -8637,6 +8644,7 @@ struct LibplaceboVideoRenderer::Impl
 			"dejudder_motion_fixes");
 		changed(current.dejudderPulldown != next.dejudderPulldown, "dejudder_pulldown");
 		changed(current.dejudderPictureArea != next.dejudderPictureArea, "dejudder_picture_area");
+		changed(current.fixSceneCooldown != next.fixSceneCooldown, "fix_scene_cooldown");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -12825,7 +12833,12 @@ struct LibplaceboVideoRenderer::Impl
 				reinterpret_cast<const uint16_t*>(yPixels),
 				static_cast<size_t>(width), static_cast<size_t>(height), p010RowBytes,
 				sourceSequence, videoFrame.GetTimingTimestamp(),
-				sceneDetectorGeneration, state.displayMode->FrameDuration(),
+				sceneDetectorGeneration,
+				// Fix under test: the frame duration in the 100 ns units the
+				// detector's 2 s cooldown is written in, at the content rate.
+				activeSettings.fixSceneCooldown && SourceRateHz(state) > 0.0 ?
+					static_cast<uint64_t>(std::llround(1.0e7 / SourceRateHz(state))) :
+					static_cast<uint64_t>(state.displayMode->FrameDuration()),
 				sceneDetectionEnabled || automaticSourceCrop, &analysisSource });
 		}
 		if (!cadenceRepeat && analysisSource.IsValid() &&
@@ -22856,6 +22869,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dejudder_warp_rendered=" << s.dejudderWarpRendered << "\n"
 		<< "dejudder_estimate_ahead=" << s.dejudderEstimateAhead << "\n"
 		<< "dejudder_pulldown=" << s.dejudderPulldown << "\n"
+		<< "fix_scene_cooldown=" << s.fixSceneCooldown << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"
