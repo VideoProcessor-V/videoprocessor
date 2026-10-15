@@ -225,6 +225,28 @@ namespace Dejudder
 		// Real clips: damaged tiles to a third for about half a point of the
 		// judder removed (docs/VP-stage11b-learned-candidates.md).
 		float landingCheck = 0.0f;
+		// General scaling (owner 2026-10-14: nothing tied to a resolution or a
+		// rate). referenceHeight > 0: the pixel-valued settings (the D2 motion
+		// scale, the roll-off, the landing check, the source warp's feather)
+		// are given for a picture of that many lines and scaled to the input's
+		// height, and the coarse search range is given for a 1080-line working
+		// picture and scaled to the height the search runs at. < 0: the search
+		// range only (a low-resolution inner, whose pixel values the outer has
+		// scaled). 0: everything as given (direct use, the tests).
+		float referenceHeight = 0.0f;
+		// sourceHz > 0: strengthRate, holdHysteresis and the fade window are
+		// given per frame at referenceRateHz and converted to this rate.
+		double sourceHz = 0.0;
+		double referenceRateHz = 24000.0 / 1001.0;
+		// Black bars (owner 2026-10-14): only blocks inside the picture count.
+		// Blocks outside it (letterbox / pillarbox bars) are untrusted (they
+		// stay still and the warp interpolates only between picture blocks),
+		// and the frame trust share, the cut histogram and the fade test are
+		// taken over the picture alone - otherwise flat bars, trusted with
+		// zero motion, keep the share above the cut threshold. The picture is
+		// the renderer's detected active picture when known (SetPictureArea),
+		// else the near-black full rows and columns at the frame's edges.
+		bool pictureArea = true;
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The
@@ -271,6 +293,14 @@ namespace Dejudder
 		// now showing survives the next estimate. With grainError it also
 		// writes the high-passed temporal error per block (Stage 8-3).
 		bool Estimate(const Planes& a, const Planes& b, int occlusionSlot = -1, bool grainError = false);
+		// The active picture in this matcher's input pixels (right and bottom
+		// exclusive) for the next Estimate; an empty rectangle = not known
+		// (the bars are then found from the picture itself).
+		void SetPictureArea(int left, int top, int right, int bottom)
+		{
+			pictureGiven[0] = left; pictureGiven[1] = top; pictureGiven[2] = right; pictureGiven[3] = bottom;
+		}
+		pl_tex PictureAreaTexture() const { return picture; }
 
 		// A warped by shift x (A->B motion). Call once per extra present.
 		// The returned planes belong to this object and stay valid until the
@@ -371,8 +401,33 @@ namespace Dejudder
 		int BlocksX() const { return blocksX; }
 		int BlocksY() const { return blocksY; }
 		const std::string& LastError() const { return error; }
-		const Settings& GetSettings() const { return settings; }
-		void SetSettings(const Settings& value)
+		// The settings as given (the renderer compares these), and as in use
+		// for the current input (scaled for its height and source rate).
+		const Settings& GetSettings() const { return base; }
+		const Settings& EffectiveSettings() const { return settings; }
+		// Stream robustness (owner 2026-10-14): after a discontinuity (resync,
+		// a frame gap, a queue flush) the temporal history belongs to other
+		// content - the previous searches, the hold hysteresis and the fade
+		// state start over at the next Estimate.
+		void ForgetHistory()
+		{
+			previousValid = false;
+			holdResetPending = true;
+			if (fadeState)
+				pl_tex_destroy(gpu, &fadeState);
+			if (inner)
+				inner->ForgetHistory();
+		}
+		void SetSettings(const Settings& given)
+		{
+			base = given;
+			ApplyScaled(Scaled(given, height));
+		}
+
+	private:
+		// The settings in use for an input of `inputHeight` lines.
+		static Settings Scaled(const Settings& given, int inputHeight);
+		void ApplyScaled(const Settings& value)
 		{
 			// lowRes switched: the other path's temporal state is stale.
 			if (value.lowRes != settings.lowRes || value.lowResAll != settings.lowResAll)
@@ -385,8 +440,15 @@ namespace Dejudder
 				holdResetPending = true;
 			settings = value;
 		}
-
-	private:
+		// Whether this matcher searches on a half-size copy (lowRes): for
+		// inputs of about 1530 lines and taller (sqrt 2 x 1080), so the search
+		// always runs on a picture of about 760 to 1530 lines; an 8K input is
+		// halved twice (owner 2026-10-14: was "wider than 1920", once).
+		bool HalvesForSearch() const
+		{
+			return settings.lowRes && static_cast<long long>(height) * height >= 2LL * 1080 * 1080;
+		}
+		pl_tex FadeStateTexture() const { return fadeState ? fadeState : inner ? inner->FadeStateTexture() : nullptr; }
 		bool EnsureTextures(const Planes& a);
 		bool passTiming = false;
 		bool serialSearchForTest = false;
@@ -414,7 +476,8 @@ namespace Dejudder
 		pl_log log = nullptr;
 		pl_gpu gpu = nullptr;
 		pl_dispatch dispatch = nullptr;
-		Settings settings;
+		Settings settings;   // in use (scaled)
+		Settings base;       // as given
 		std::string error;
 
 		int width = 0, height = 0;          // source luma size
@@ -472,6 +535,12 @@ namespace Dejudder
 		pl_tex globalSecond[2] = { nullptr, nullptr };   // M2: D1's second candidate (l1 texels, -, -, valid)
 		pl_tex fadeState = nullptr;   // M4: gain, offset, active, the last mean change (rgba32f, persists)
 		bool FadeMatch(const Planes& b);
+		// Black bars: the picture rectangle (x0, y0, x1, y1 in input pixels,
+		// rgba32f), written each Estimate.
+		pl_tex picture = nullptr;
+		int pictureGiven[4] = { 0, 0, 0, 0 };
+		bool pictureFullRange = false;
+		bool PictureArea();
 		bool lumaInCodes = false;
 		bool LowResSearch(const Planes& a, const Planes& b);
 	};

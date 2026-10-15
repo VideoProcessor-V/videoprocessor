@@ -222,13 +222,14 @@ namespace VideoProcessorTest
 			while (apl > 20.0)
 			{
 				FrameStats stats;
+				// 24p frames, 45 APL per second (the fade is in time: fade_ms).
 				for (int frame = 0; frame < 6; ++frame)
 				{
-					apl -= 1.5;
+					apl -= 1.875;
 					stats = builder.Build(Frame(apl), now);
-					now += 1000.0 / 60.0;
+					now += 1000.0 / 24.0;
 				}
-				out = controller.Tick(stats, 100);
+				out = controller.Tick(stats, 250);   // six 24p frames
 				if (stats.fade)
 				{
 					++fadeTicks;

@@ -62,7 +62,7 @@ namespace LedDrive
 	private:
 		LedDriveConfig config;
 		std::vector<double> previousCells;
-		std::deque<double> aplHistory;
+		std::deque<Sample> aplHistory;   // (time, APL) over the fade window
 		std::deque<Sample> highlightHistory;
 		std::deque<Sample> sustainHistory;
 		double lastDifference = 0.0;

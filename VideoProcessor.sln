@@ -32,6 +32,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-VPRendererBe
         {C72197B6-AFB1-4BF2-ABEA-6B63DE71389E} = {C72197B6-AFB1-4BF2-ABEA-6B63DE71389E}
     EndProjectSection
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-StreamRecorder", "src\VideoProcessor-StreamRecorder\VideoProcessor-StreamRecorder.vcxproj", "{8D2A41C6-5E3B-4F7A-9C61-2B7E0D4F9A13}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -250,6 +252,11 @@ Global
 		{D4AB7E36-6A11-4DCA-8CA0-9C7F55376E10}.Release - PGO Optimize|x64.Build.0 = Release|x64
 		{D4AB7E36-6A11-4DCA-8CA0-9C7F55376E10}.Release|x64.ActiveCfg = Release|x64
 		{D4AB7E36-6A11-4DCA-8CA0-9C7F55376E10}.Release|x64.Build.0 = Release|x64
+		{8D2A41C6-5E3B-4F7A-9C61-2B7E0D4F9A13}.Debug|x64.ActiveCfg = Release|x64
+		{8D2A41C6-5E3B-4F7A-9C61-2B7E0D4F9A13}.Debug|x86.ActiveCfg = Release|x64
+		{8D2A41C6-5E3B-4F7A-9C61-2B7E0D4F9A13}.Release|x64.ActiveCfg = Release|x64
+		{8D2A41C6-5E3B-4F7A-9C61-2B7E0D4F9A13}.Release|x64.Build.0 = Release|x64
+		{8D2A41C6-5E3B-4F7A-9C61-2B7E0D4F9A13}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

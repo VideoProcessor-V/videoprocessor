@@ -624,7 +624,7 @@ void testEveryNewRendererControlReachesVp()
     struct Edit { const char* key; const char* value; bool choice; };
     const Edit edits[] = {
         { "capture_path", "gpu", true }, { "dejudder_strength", "0.25", false }, { "dejudder_strength_even", "0.5", false },
-        { "dejudder_even_rates", "30_and_29.97", true }, { "dejudder_motion_rolloff", "on", true },
+        { "dejudder_even_rates", "whole_and_1001", true }, { "dejudder_motion_rolloff", "on", true },
         { "dejudder_roll_lo", "6", false }, { "dejudder_roll_hi", "20", false }, { "dejudder_roll_floor", "0.3", false },
         { "dejudder_object_strength", "0.5", false }, { "dejudder_fade_floor", "0.2", false },
         { "dejudder_fade_match", "off", true }, { "dejudder_match_tolerance", "5", false },
@@ -639,6 +639,7 @@ void testEveryNewRendererControlReachesVp()
         { "dejudder_cut_histogram", "0.4", false }, { "dejudder_regional_hold", "off", true },
         { "dejudder_pixel_trust_lo", "2", false }, { "dejudder_pixel_trust_hi", "7", false },
         { "dejudder_landing_check", "off", true }, { "dejudder_pixel_trust", "off", true },
+        { "dejudder_picture_area", "off", true }, { "dejudder_pulldown", "on", true },
         { "dejudder_verify_share", "0.3", false },
         { "dejudder_verify", "on", true }, { "dejudder_low_res", "search", true },
         { "dejudder_estimate_ahead", "off", true }, { "dejudder_hold_feather_px", "3", false },
@@ -736,7 +737,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     };
     // Every key set away from its default (as the Config test does).
     const std::map<std::string, std::string> set = read(
-        "capture_path: gpu\ndejudder_strength: 0.25\ndejudder_strength_even: 0.5\ndejudder_even_rates: 30_and_29.97\n"
+        "capture_path: gpu\ndejudder_strength: 0.25\ndejudder_strength_even: 0.5\ndejudder_even_rates: whole_and_1001\n"
         "dejudder_motion_rolloff: on\ndejudder_roll_lo: 6\ndejudder_roll_hi: 20\ndejudder_roll_floor: 0.3\n"
         "dejudder_object_strength: 0.5\ndejudder_fade_floor: 0.2\ndejudder_fade_match: off\n"
         "dejudder_match_tolerance: 5\ndejudder_frame_trust: 0.3\ndejudder_est_gate: off\ndejudder_global_prior: off\n"
@@ -744,7 +745,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         "dejudder_trust_scale: 0.5\ndejudder_est_lambda: 1\ndejudder_est_candidates: off\ndejudder_est_qpel: off\n"
         "dejudder_est_split_sad: 6\ndejudder_est_split: on\ndejudder_search_range: 6\ndejudder_global_two: off\n"
         "dejudder_texture_tolerance: 0.5\ndejudder_consistency_px: 3\ndejudder_cut_histogram: 0.4\n"
-        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\ndejudder_landing_check: off\n"
+        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\ndejudder_landing_check: off\ndejudder_picture_area: off\ndejudder_pulldown: on\n"
         "dejudder_verify_share: 0.3\ndejudder_verify: on\ndejudder_low_res: search\ndejudder_estimate_ahead: off\n"
         "dejudder_hold_feather_px: 3\ndejudder_hold_hysteresis: 3\ndejudder_taper_sad: 9\ndejudder_block_taper: on\n"
         "dejudder_warp_stage: source\ndejudder_occlusion_fill: on\nocclusion_mask: on\n"
@@ -753,7 +754,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         "adaptive_upscale: on\nupscale_light: gamma\nfbo_float32: on\n");
     const std::pair<const char*, const char*> expected[] = {
         { "capture_path", "gpu" }, { "dejudder_strength", "0.25" }, { "dejudder_strength_even", "0.5" },
-        { "dejudder_even_includes_2997", "1" }, { "dejudder_warp_rendered", "0" }, { "dejudder_estimate_ahead", "0" },
+        { "dejudder_even_includes_1001", "1" }, { "dejudder_warp_rendered", "0" }, { "dejudder_estimate_ahead", "0" },
         { "occlusion_mask", "1" }, { "dither_vectors_own", "1" }, { "dither_grain_tolerance_scale", "2" },
         { "sdr_knee", "1" }, { "sdr_headroom", "0.1" }, { "sdr_knee_start", "0.7" }, { "sdr_knee_strength", "0.6" },
         { "sdr_recovery", "1.2" }, { "adaptive_downscale", "1" }, { "adaptive_upscale", "1" },
@@ -768,7 +769,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         { "matcher.cutHistogram", "0.4" }, { "matcher.coarseRange", "6" }, { "matcher.consistencyPixels", "3" },
         { "matcher.fadeMatch", "0" }, { "matcher.fadeFloor", "0.2" }, { "matcher.verifyPixels", "1" },
         { "matcher.verifyShare", "0.3" }, { "matcher.pixelTrust", "0" }, { "matcher.pixelTrustLo", "2" },
-        { "matcher.pixelTrustHi", "7" }, { "matcher.landingCheck", "0" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
+        { "matcher.pixelTrustHi", "7" }, { "matcher.landingCheck", "0" }, { "matcher.pictureArea", "0" }, { "dejudder_pulldown", "1" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
         { "matcher.holdFeatherPx", "3" }, { "matcher.holdHysteresis", "3" }, { "matcher.blockTaper", "1" },
         { "matcher.taperSad", "9" } };
     for (const auto& entry : expected)
@@ -782,7 +783,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     const std::map<std::string, std::string> unset = read("");
     const std::pair<const char*, const char*> defaults[] = {
         { "capture_path", "standard" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
-        { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
+        { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.pictureArea", "1" }, { "dejudder_pulldown", "0" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
         { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
         { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },
         { "sdr_knee", "0" }, { "adaptive_downscale", "0" }, { "occlusion_mask", "0" } };

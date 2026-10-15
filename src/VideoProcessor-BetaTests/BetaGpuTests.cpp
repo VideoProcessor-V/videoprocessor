@@ -2681,11 +2681,46 @@ void RunBetaDitherCompare()
 	}
 }
 
+// The timing scenario's rates (owner rule: nothing tied to one refresh rate,
+// frame rate or resolution), set in this one place: the display refresh and
+// the film-like source rate (the synthetic sequences and the clip "as film").
+// VP_TEST_DISPLAY_RATE and VP_TEST_FILM_RATE (frames per second, "50" or
+// "60000/1001") override the defaults, 59.94 Hz and 23.976p. The timing
+// gate's budgets are relative to the rates each run used (display_period,
+// source_period in tools/timing-budgets.cfg).
+static double ScenarioRate(const char* name, double fallback)
+{
+	char* v = nullptr;
+	size_t n = 0;
+	double rate = fallback;
+	if (_dupenv_s(&v, &n, name) == 0 && v && *v)
+	{
+		const std::string text(v);
+		const size_t slash = text.find('/');
+		const double num = std::atof(text.substr(0, slash).c_str());
+		const double den = slash == std::string::npos ? 1.0 : std::atof(text.substr(slash + 1).c_str());
+		if (num > 0.0 && den > 0.0) rate = num / den;
+	}
+	std::free(v);
+	return rate;
+}
+static double ScenarioDisplayRate() { return ScenarioRate("VP_TEST_DISPLAY_RATE", 60000.0 / 1001.0); }
+static double ScenarioFilmRate() { return ScenarioRate("VP_TEST_FILM_RATE", 24000.0 / 1001.0); }
+static std::string RateText(double rate)   // 23.976, 59.94, 24, 50
+{
+	std::ostringstream s;
+	s.precision(5);
+	s << rate;
+	return s.str();
+}
+
 // Owner 2026-10-13: the timing gate collects each scenario run here.
 struct ScenarioTimingRecord
 {
 	std::string label;
 	bool extras = false;
+	double displayRate = 0.0;   // the run's refresh (Hz) and source rate (fps):
+	double sourceRate = 0.0;    // the gate's relative budgets are computed from them
 	std::map<std::string, std::vector<double>> series;   // matcher, new_frame, extra, repeat, critical, ...
 	std::map<std::string, double> passPerSourceFrame;     // GPU ms per source frame, all its refreshes
 };
@@ -4188,7 +4223,7 @@ void RunBetaScenarioTiming()
 
 	struct Source
 	{
-		const char* label;
+		std::string label;
 		int w, h;
 		double sourceRate;   // frames per second
 		std::function<bool(int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)> next;
@@ -4196,6 +4231,7 @@ void RunBetaScenarioTiming()
 		bool hdr = false;
 	};
 	std::vector<Source> sources;
+	const double displayRate = ScenarioDisplayRate(), filmRate = ScenarioFilmRate();
 	auto envOn = [](const char* name)
 	{
 		char* value = nullptr;
@@ -4239,8 +4275,8 @@ void RunBetaScenarioTiming()
 	{
 		const int w = big ? 3840 : 1920, h = big ? 2160 : 1080;
 		Source src;
-		src.label = big ? "synthetic 23.976p, 3840x2160" : "synthetic 23.976p, 1920x1080";
-		src.w = w; src.h = h; src.sourceRate = 24000.0 / 1001.0; src.frames = total;
+		src.label = "synthetic " + RateText(filmRate) + "p, " + std::to_string(w) + "x" + std::to_string(h);
+		src.w = w; src.h = h; src.sourceRate = filmRate; src.frames = total;
 		src.hdr = syntheticHdr;
 		src.next = [segments, canvas, w, h](int index, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)
 		{
@@ -4326,10 +4362,10 @@ void RunBetaScenarioTiming()
 				// VP_TEST_CLIP_24P=1: the clip played as 23.976p (3:2 with the
 				// de-judder extras, the cinema case).
 				const bool as24 = envOn("VP_TEST_CLIP_24P");
-				src.label = clipHdr ? (as24 ? "clip as 23.976p, 3840x2160, pseudo-HDR (PQ, BT.2020)" : "clip 29.97p, 3840x2160, pseudo-HDR (PQ, BT.2020)") :
-					(as24 ? "clip as 23.976p, 3840x2160" : "clip 29.97p, 3840x2160");
+				src.label = (as24 ? "clip as " + RateText(filmRate) + "p, 3840x2160" : std::string("clip 29.97p, 3840x2160")) +
+					(clipHdr ? ", pseudo-HDR (PQ, BT.2020)" : "");
 				src.hdr = clipHdr;
-				src.w = w; src.h = h; src.sourceRate = as24 ? 24000.0 / 1001.0 : 30000.0 / 1001.0; src.frames = frames;
+				src.w = w; src.h = h; src.sourceRate = as24 ? filmRate : 30000.0 / 1001.0; src.frames = frames;
 				auto stream = std::make_shared<std::ifstream>();
 				auto fileIndex = std::make_shared<size_t>(0);
 				src.next = [files, stream, fileIndex, w, h, frameBytes](int, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma, std::string& segment)
@@ -4366,7 +4402,6 @@ void RunBetaScenarioTiming()
 		std::free(dir);
 	}
 
-	const double displayRate = 60000.0 / 1001.0;
 	for (Source& src : sources)
 	{
 		const int w = src.w, h = src.h;
@@ -4700,6 +4735,8 @@ void RunBetaScenarioTiming()
 			ScenarioTimingRecord record;
 			record.label = src.label;
 			record.extras = extras;
+			record.displayRate = displayRate;
+			record.sourceRate = src.sourceRate;
 			record.series["matcher"] = aheadOrder && extras ? std::vector<double>() : matcherMs.v;
 			record.series["new_frame"] = newFrame.v;
 			record.series["extra"] = extra.v;
@@ -4728,9 +4765,12 @@ void RunBetaScenarioTiming()
 // hiccup. Runs the scenario over the combinations (SDR / HDR, matcher size
 // all / off, estimate ahead on / off, chroma Catmull-Rom / the upscaler) on
 // the synthetic 4K and 1080p sequences, and the real clip (VP_TEST_CLIP,
-// with VP_TEST_CLIP_PQ for its HDR copy) as 23.976p ahead on / off. Budgets:
+// with VP_TEST_CLIP_PQ for its HDR copy) as film ahead on / off, at the
+// scenario's rates (ScenarioDisplayRate / ScenarioFilmRate: 59.94 Hz and
+// 23.976p unless VP_TEST_DISPLAY_RATE / VP_TEST_FILM_RATE). Budgets:
 // tools/timing-budgets.cfg (or VP_TEST_BUDGETS), the section whose name is
-// part of this GPU's name; a GPU without one is reported only.
+// part of this GPU's name; a GPU without one is reported only. A budget is
+// ms, or relative to the run's rates (display_period - 2.0, source_period).
 // VP_TEST_TIMING_GATE=1 with VP_TEST_GPU=hardware.
 void RunBetaTimingGate()
 {
@@ -4771,8 +4811,63 @@ void RunBetaTimingGate()
 		}
 	}
 	auto lower = [](std::string t) { for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return t; };
-	std::map<std::string, double> budgets;
+	// A budget: ms = constant + display x display_period + source x
+	// source_period, the periods (ms) of the rates the run used. "14.6" is
+	// absolute; "display_period - 2.0" is one refresh with a 2 ms margin;
+	// "source_period" one source frame; a factor is written "2*display_period".
+	struct Budget
+	{
+		double constant = 0.0, display = 0.0, source = 0.0;
+		std::string text;
+		double Ms(const ScenarioTimingRecord& r) const
+		{
+			return constant + (display != 0.0 ? display * 1000.0 / r.displayRate : 0.0) +
+				(source != 0.0 ? source * 1000.0 / r.sourceRate : 0.0);
+		}
+	};
+	auto parseBudget = [](const std::string& text, Budget& b) -> bool
+	{
+		b = Budget{};
+		const size_t first = text.find_first_not_of(" \t"), last = text.find_last_not_of(" \t");
+		b.text = first == std::string::npos ? std::string() : text.substr(first, last - first + 1);
+		size_t i = 0;
+		auto skip = [&] { while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i; };
+		bool any = false;
+		for (;;)
+		{
+			skip();
+			if (i >= text.size()) return any;
+			double sign = 1.0;
+			if (text[i] == '+' || text[i] == '-')
+			{
+				sign = text[i] == '-' ? -1.0 : 1.0;
+				++i;
+				skip();
+			}
+			else if (any)
+				return false;   // terms are joined by + or -
+			double factor = 1.0;
+			if (i < text.size() && (std::isdigit(static_cast<unsigned char>(text[i])) || text[i] == '.'))
+			{
+				char* end = nullptr;
+				factor = std::strtod(text.c_str() + i, &end);
+				i = static_cast<size_t>(end - text.c_str());
+				skip();
+				if (i < text.size() && text[i] == '*') { ++i; skip(); }
+				else { b.constant += sign * factor; any = true; continue; }   // a plain number: ms
+			}
+			const size_t start = i;
+			while (i < text.size() && (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_')) ++i;
+			const std::string name = text.substr(start, i - start);
+			if (name == "display_period") b.display += sign * factor;
+			else if (name == "source_period") b.source += sign * factor;
+			else return false;
+			any = true;
+		}
+	};
+	std::map<std::string, Budget> budgets;
 	std::string section;
+	int unreadable = 0;
 	{
 		std::ifstream in(budgetPath);
 		std::string line, current;
@@ -4799,11 +4894,22 @@ void RunBetaTimingGate()
 			if (eq == std::string::npos) continue;
 			std::string key = line.substr(0, eq), value = line.substr(eq + 1);
 			while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) key.pop_back();
-			budgets[key] = std::atof(value.c_str());
+			Budget b;
+			if (parseBudget(value, b))
+				budgets[key] = b;
+			else
+			{
+				++unreadable;
+				std::cout << "FAIL timing budget not understood: " << key << " =" << value <<
+					" (ms, or display_period / source_period with + - and a factor, e.g. display_period - 2.0)\n";
+			}
 		}
 	}
 	std::cout << "Beta timing gate on " << device << ": budgets " << (section.empty() ? std::string("none for this GPU (report only)") :
-		"[" + section + "] from " + budgetPath + " (" + std::to_string(budgets.size()) + " limits)") << "\n";
+		"[" + section + "] from " + budgetPath + " (" + std::to_string(budgets.size()) + " limits)") << "; display " <<
+		RateText(ScenarioDisplayRate()) << " Hz (period " << 1000.0 / ScenarioDisplayRate() << " ms), film source " <<
+		RateText(ScenarioFilmRate()) << "p (period " << 1000.0 / ScenarioFilmRate() << " ms)\n";
+	Check(unreadable == 0, "timing gate: " + std::to_string(unreadable) + " budgets not understood");
 
 	struct Combo { std::string name; bool hdr; std::string lowRes; bool ahead; std::string chroma; bool clip; };
 	std::vector<Combo> combos;
@@ -4820,7 +4926,7 @@ void RunBetaTimingGate()
 	for (int hdr = 0; hdr < 2; ++hdr)
 		for (int ahead = 0; ahead < 2; ++ahead)
 			if (!(hdr ? clipPq : clip).empty())
-				combos.push_back({ std::string("clip as 23.976p, ") + (hdr ? "HDR" : "SDR") + ", defaults, ahead " + (ahead ? "on" : "off"),
+				combos.push_back({ "clip as " + RateText(ScenarioFilmRate()) + "p, " + (hdr ? "HDR" : "SDR") + ", defaults, ahead " + (ahead ? "on" : "off"),
 					hdr != 0, "all", ahead != 0, "catmull_rom", true });
 
 	struct Result { std::string name, scope; ScenarioTimingRecord record; };
@@ -4847,7 +4953,7 @@ void RunBetaTimingGate()
 
 	// The checks: "[half:|full:]<series>.<p99|max|mean> = ms" and
 	// "[half:|full:]pass:<name part>.mean = ms" (GPU per source frame, all its
-	// refreshes). The scope is the matcher size of the run (half = all or
+	// refreshes); a relative budget is computed from each run's own rates. The scope is the matcher size of the run (half = all or
 	// search, full = off); a key without one applies to every run.
 	auto stat = [](std::vector<double> v, const std::string& which) -> double
 	{
@@ -4857,26 +4963,29 @@ void RunBetaTimingGate()
 		if (which == "mean") { double m = 0.0; for (double x : v) m += x; return m / v.size(); }
 		return v[std::min(v.size() - 1, static_cast<size_t>(v.size() * 0.99))];
 	};
-	auto budgetFor = [&](const std::string& scope, const std::string& key) -> const double*
+	auto budgetFor = [&](const std::string& scope, const std::string& key) -> const Budget*
 	{
 		auto found = budgets.find(scope + ":" + key);
 		if (found == budgets.end()) found = budgets.find(key);
 		return found == budgets.end() ? nullptr : &found->second;
 	};
 	int checked = 0, over = 0;
-	std::map<std::string, std::pair<double, std::string>> worst;   // scope:key -> worst value and where
+	struct Worst { double value = 0.0; std::string where; const ScenarioTimingRecord* record = nullptr; };
+	std::map<std::string, Worst> worst;   // scope:key -> worst value, where, and that run (its rates)
 	auto check = [&](const Result& r, const std::string& key, double value)
 	{
 		const std::string where = r.name + " | " + r.record.label;
 		auto& w = worst[r.scope + ":" + key];
-		if (value > w.first) w = { value, where };
-		if (const double* budget = budgetFor(r.scope, key))
+		if (value > w.value) w = { value, where, &r.record };
+		if (const Budget* budget = budgetFor(r.scope, key))
 		{
 			++checked;
-			if (value > *budget)
+			const double limit = budget->Ms(r.record);
+			if (value > limit)
 			{
 				++over;
-				std::cout << "FAIL timing " << r.scope << ":" << key << " " << value << " ms > " << *budget << " ms: " << where << "\n";
+				std::cout << "FAIL timing " << r.scope << ":" << key << " " << value << " ms > " << limit << " ms (" <<
+					budget->text << " at " << RateText(r.record.sourceRate) << "p, " << RateText(r.record.displayRate) << " Hz): " << where << "\n";
 			}
 		}
 	};
@@ -4915,16 +5024,18 @@ void RunBetaTimingGate()
 			if (pass.second >= 0.3 && !named.count("pass:" + pass.first + ".mean"))
 			{
 				auto& w = worst[r.scope + ":pass:" + pass.first + ".mean"];
-				if (pass.second > w.first) w = { pass.second, r.name + " | " + r.record.label };
+				if (pass.second > w.value) w = { pass.second, r.name + " | " + r.record.label, &r.record };
 			}
 	}
 	std::cout << "Beta timing gate: worst over " << results.size() << " runs (" << combos.size() << " combinations):\n";
 	for (const auto& w : worst)
 	{
 		const size_t colon = w.first.find(':');
-		const double* budget = budgetFor(w.first.substr(0, colon), w.first.substr(colon + 1));
-		std::cout << "  " << w.first << " " << w.second.first << " ms" <<
-			(budget ? " (budget " + std::to_string(*budget) + ")" : std::string()) << "  at " << w.second.second << "\n";
+		const Budget* budget = budgetFor(w.first.substr(0, colon), w.first.substr(colon + 1));
+		std::string limit;
+		if (budget && w.second.record)
+			limit = " (budget " + std::to_string(budget->Ms(*w.second.record)) + " = " + budget->text + ")";
+		std::cout << "  " << w.first << " " << w.second.value << " ms" << limit << "  at " << w.second.where << "\n";
 	}
 	std::cout << (over == 0 ? "PASS" : "FAIL") << " Beta timing gate: " << checked << " checks, " << over << " over budget" <<
 		(section.empty() ? " (no budgets for this GPU: report only)" : "") << "\n";

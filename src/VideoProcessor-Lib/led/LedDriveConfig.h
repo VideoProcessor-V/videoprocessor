@@ -306,8 +306,13 @@ namespace LedDrive
 		double highlightAreaSmall = 0.005;
 		double highlightAreaLarge = 0.05;
 		int highlightReleaseMs = 2000;
-		int fadeFrames = 6;
-		double fadeMinStep = 0.5;
+		// Fade to black (general, owner 2026-10-14: in time, not frames): APL
+		// falling for at least fade_ms at no less than fade_min_slope APL
+		// codes per second. The defaults are the earlier 6 frames x 0.5 code
+		// at 24p, so a 24p cinema setup behaves as before at any rate. The
+		// earlier fade_frames / fade_min_step are read as frames at 24p.
+		int fadeMs = 250;
+		double fadeMinSlope = 12.0;
 		double cutThreshold = 24.0;
 		// Experimental (owner 2026-10-10): once the picture has been black for
 		// ftb_black_ms with the LED at led_floor_black, switch to the custom
@@ -603,6 +608,8 @@ namespace LedDrive
 			Number("highlight_area_small", 0.0, 1.0),
 			Number("highlight_area_large", 0.0, 1.0),
 			Integer("highlight_release_ms", 0, 60000),
+			Integer("fade_ms", 20, 5000),
+			Number("fade_min_slope", 0.0, 1200.0),
 			Integer("fade_frames", 2, 120),
 			Number("fade_min_step", 0.0, 50.0),
 			Number("cut_threshold", 1.0, 255.0),
@@ -919,8 +926,20 @@ namespace LedDrive
 		readNumber("highlight_area_small", result.highlightAreaSmall);
 		readNumber("highlight_area_large", result.highlightAreaLarge);
 		readInt("highlight_release_ms", 0, 60000, result.highlightReleaseMs);
-		readInt("fade_frames", 2, 120, result.fadeFrames);
-		readNumber("fade_min_step", result.fadeMinStep);
+		{
+			// The earlier frame-based keys, as frames at 24p; the time-based
+			// keys win when both are present.
+			int fadeFrames = 0;
+			double fadeMinStep = -1.0;
+			readInt("fade_frames", 2, 120, fadeFrames);
+			readNumber("fade_min_step", fadeMinStep);
+			if (fadeFrames > 0)
+				result.fadeMs = static_cast<int>(std::lround(fadeFrames * 1000.0 / 24.0));
+			if (fadeMinStep >= 0.0)
+				result.fadeMinSlope = fadeMinStep * 24.0;
+		}
+		readInt("fade_ms", 20, 5000, result.fadeMs);
+		readNumber("fade_min_slope", result.fadeMinSlope);
 		readNumber("cut_threshold", result.cutThreshold);
 		if (config.TryGetString(section, "ftb_custom_dim", value))
 		{

@@ -55,6 +55,23 @@ There is no single "vectors valid" state; each consumer checks its own key.
    then a replay of real DeckLink recordings (a recorder for the cinema PC).
 6. **Later (post-deploy)**: pulldown detection (a content-rate source for both rates).
 
+## Done (2026-10-14, after be7df24f)
+
+- **Fix 1**: a timestamp gap of 2 to 8 whole periods counts the missed frames (logged, `m_captureMissedFrames`) and
+  keeps the rate estimate. Until the rate is measured (start, resync, Reset) the planner takes the signal's nominal
+  rate, so there is no 5 s hold; the phase is re-anchored to every frame, so the ppm difference does not matter.
+- **Fix 3**: each queued frame carries its hardware arrival on the QPC clock (the capture clock and QPC read back to back
+  give the frame's age at the callback); the extras' phase uses it in place of the callback time. The latency floor is
+  the 5th percentile of the window (the minimum below 20 samples), so one early outlier no longer biases it.
+- **Fixes 2 and 4**: frames after a loss carry `gapBefore` (capture missed frames, an overflow drop, a backlog flush).
+  The pairing never takes a frame after a gap as B, and when such a frame is shown the render thread forgets the motion
+  history (the matcher's previous search, hold hysteresis and fade state, the ahead estimate, the occlusion mask slots,
+  the estimated sequence and the grain map). Reset (every resync) releases the de-judder entirely. Requests come from
+  any thread and are applied before the next estimate, as the presentation reset is; every consumer then stays on its
+  no-vector path until a fresh contiguous pair is estimated. Scene cuts were already handled by the matcher.
+- **Recorder**: `src/VideoProcessor-StreamRecorder` (see its README) records real DeckLink input on the cinema PC
+  for fix 5's replay tests.
+
 ## Untested today
 
 The de-judder with dropped, gapped or repeated source frames, pulldown, resync or Reset, jitter or drift in PlanExtra,

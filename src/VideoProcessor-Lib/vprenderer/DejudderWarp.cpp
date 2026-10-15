@@ -6,6 +6,7 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,7 @@ if (p.x < size.x && p.y < size.y) {
 		// above a code. state_io: gain, offset, active, this pair's change.
 		const char* const FADE_HEADER = R"GLSL(
 shared vec4 fm_[256];
+shared float fn_[256];
 )GLSL";
 
 		const char* const FADE_BODY = R"GLSL(
@@ -49,20 +51,34 @@ uint i = gl_LocalInvocationIndex;
 ivec2 ls = textureSize(l2_a, 0);
 int lc = ls.x * ls.y;
 vec4 acc = vec4(0.0);
+float an = 0.0;
+#ifdef PICTURE
+vec4 pa_r = texelFetch(picture, ivec2(0), 0);
+#endif
 for (int k = int(i); k < lc; k += 256) {
     ivec2 p = ivec2(k % ls.x, k / ls.x);
+#ifdef PICTURE
+    // Black bars: the picture's mean and spread only.
+    vec2 c_ = (vec2(p) + vec2(0.5)) * 32.0;
+    if (c_.x < pa_r.x || c_.y < pa_r.y || c_.x >= pa_r.z || c_.y >= pa_r.w)
+        continue;
+#endif
     float a = texelFetch(l2_a, p, 0).r, b = texelFetch(l2_b, p, 0).r;
     acc += vec4(a, b, a * a, b * b);
+    an += 1.0;
 }
 fm_[i] = acc;
+fn_[i] = an;
 barrier();
 for (uint st = 128u; st > 0u; st >>= 1) {
-    if (i < st)
+    if (i < st) {
         fm_[i] += fm_[i + st];
+        fn_[i] += fn_[i + st];
+    }
     barrier();
 }
 if (i == 0u) {
-    float n = float(max(lc, 1));
+    float n = max(fn_[0], 1.0);
     float ma = fm_[0].x / n, mb = fm_[0].y / n;
     float sa = sqrt(max(fm_[0].z / n - ma * ma, 0.0)), sb = sqrt(max(fm_[0].w / n - mb * mb, 0.0));
     vec4 prev = imageLoad(state_io, ivec2(0));
@@ -74,9 +90,48 @@ if (i == 0u) {
     float g = sb / max(sa, 1e-3);
     float black = abs(1.0 - g) > 0.01 ? (mb - g * ma) / (1.0 - g) : 1e9;
     bool scaled = abs(1.0 - g) > 0.01 && black > -12.0 && black < 48.0;
-    bool fade_on = scaled && abs(d) > 0.75 && abs(d) < 24.0 && abs(prev.w) > 0.75 && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
+    bool fade_on = scaled && abs(d) > fade_lo && abs(d) < fade_hi && abs(prev.w) > fade_lo && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
     float gain = clamp(sa / max(sb, 1e-3), 0.5, 2.0);
     imageStore(state_io, ivec2(0), vec4(gain, ma - gain * mb, fade_on ? 1.0 : 0.0, d));
+}
+)GLSL";
+
+		// Black bars (owner 2026-10-14): the picture rectangle in input pixels.
+		// The renderer's active picture when given; else, on the 1/8 luma, the
+		// first and last rows and columns brighter than black + bar_codes (a
+		// frame with none, a fade to black, is all picture). One work group.
+		const char* const PICTURE_HEADER = R"GLSL(
+shared int pa_[4];
+)GLSL";
+
+		const char* const PICTURE_BODY = R"GLSL(
+uint i = gl_LocalInvocationIndex;
+if (i == 0u) { pa_[0] = 1 << 30; pa_[1] = -1; pa_[2] = 1 << 30; pa_[3] = -1; }
+barrier();
+ivec2 s = textureSize(l1, 0);
+if (given.z <= given.x || given.w <= given.y) {
+    for (int y = int(i); y < s.y; y += 256) {
+        float m = 0.0;
+        for (int x = 0; x < s.x; x++)
+            m = max(m, texelFetch(l1, ivec2(x, y), 0).r);
+        if (m > black + bar_codes) { atomicMin(pa_[0], y); atomicMax(pa_[1], y); }
+    }
+    for (int x = int(i); x < s.x; x += 256) {
+        float m = 0.0;
+        for (int y = 0; y < s.y; y++)
+            m = max(m, texelFetch(l1, ivec2(x, y), 0).r);
+        if (m > black + bar_codes) { atomicMin(pa_[2], x); atomicMax(pa_[3], x); }
+    }
+}
+barrier();
+if (i == 0u) {
+    vec4 r = vec4(0.0, 0.0, frame_size);
+    if (given.z > given.x && given.w > given.y)
+        r = clamp(given, vec4(0.0), vec4(frame_size, frame_size));
+    else if (pa_[1] >= pa_[0] && pa_[3] >= pa_[2])
+        r = vec4(float(pa_[2]) * 8.0, float(pa_[0]) * 8.0,
+                 min(float(pa_[3] + 1) * 8.0, frame_size.x), min(float(pa_[1] + 1) * 8.0, frame_size.y));
+    imageStore(dst, ivec2(0), r);
 }
 )GLSL";
 
@@ -1220,6 +1275,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
     bool good = f.z <= tolerance + extra_;
 #endif
     float trust = (consistent && good) ? 1.0 : 0.0;
+#ifdef PICTURE
+    // Black bars: a block whose centre is outside the picture is untrusted.
+    vec4 pa_r = texelFetch(picture, ivec2(0), 0);
+    vec2 bc_ = vec2(b * 16) + vec2(8.0);
+    if (bc_.x < pa_r.x || bc_.y < pa_r.y || bc_.x >= pa_r.z || bc_.y >= pa_r.w)
+        trust = 0.0;
+#endif
     imageStore(dst, b, vec4(f.xy * 2.0, trust, f.z));
 }
 )GLSL";
@@ -1306,6 +1368,24 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const char* const FRAME_TRUST_HEADER = R"GLSL(
 shared float partial_[256];
 shared float partial_v_[256];
+shared float partial_n_[256];
+#ifdef PICTURE
+bool in_picture_(vec2 c) { vec4 r = texelFetch(picture, ivec2(0), 0); return c.x >= r.x && c.y >= r.y && c.x < r.z && c.y < r.w; }
+#else
+bool in_picture_(vec2 c) { return true; }
+#endif
+// Texels of a 1/scale level whose centres are inside the picture.
+float picture_texels_(ivec2 ls, float scale)
+{
+#ifdef PICTURE
+    vec4 r = texelFetch(picture, ivec2(0), 0);
+    vec2 lo = clamp(ceil(r.xy / scale - vec2(0.5)), vec2(0.0), vec2(ls));
+    vec2 hi = clamp(ceil(r.zw / scale - vec2(0.5)), vec2(0.0), vec2(ls));
+    return max(hi.x - lo.x, 0.0) * max(hi.y - lo.y, 0.0);
+#else
+    return float(ls.x * ls.y);
+#endif
+}
 #ifdef REGIONAL
 shared float partial_h_[256];
 #endif
@@ -1318,18 +1398,24 @@ shared vec3 partial_c_[256];
 uint i = gl_LocalInvocationIndex;
 ivec2 blocks = textureSize(field, 0);
 int count = blocks.x * blocks.y;
-float sum = 0.0, sum_v = 0.0;
+float sum = 0.0, sum_v = 0.0, sum_n = 0.0;
 for (int k = int(i); k < count; k += 256) {
-    vec4 f = texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0);
+    ivec2 bk = ivec2(k % blocks.x, k / blocks.x);
+    if (!in_picture_(vec2(bk * 16) + vec2(8.0)))
+        continue;
+    sum_n += 1.0;
+    vec4 f = texelFetch(field, bk, 0);
     if (f.z > 0.5) { sum += 1.0; sum_v += length(f.xy); }
 }
 partial_[i] = sum;
 partial_v_[i] = sum_v;
+partial_n_[i] = sum_n;
 barrier();
 for (uint stride = 128u; stride > 0u; stride >>= 1) {
     if (i < stride) {
         partial_[i] += partial_[i + stride];
         partial_v_[i] += partial_v_[i + stride];
+        partial_n_[i] += partial_n_[i + stride];
     }
     barrier();
 }
@@ -1339,10 +1425,13 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
 float hist_d = 0.0;
 ivec2 ls_ = textureSize(hist_a, 0);
 int lc_ = ls_.x * ls_.y;
+float hist_n = picture_texels_(ls_, 32.0);   // 1/32 texels inside the picture
 for (int j = 0; j < 16; j++) {
     float h = 0.0;
     for (int k = int(i); k < lc_; k += 256) {
         ivec2 p = ivec2(k % ls_.x, k / ls_.x);
+        if (!in_picture_((vec2(p) + vec2(0.5)) * 32.0))
+            continue;
         h += (clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15) == j ? 1.0 : 0.0) -
              (clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15) == j ? 1.0 : 0.0);
     }
@@ -1357,10 +1446,10 @@ for (int j = 0; j < 16; j++) {
         hist_d += abs(partial_h_[0]);
     barrier();
 }
-hist_d /= float(max(lc_, 1));
+hist_d /= max(hist_n, 1.0);
 #endif
 if (i == 0u) {
-    float share = partial_[0] / float(max(count, 1));
+    float share = partial_[0] / max(partial_n_[0], 1.0);
 #ifdef REGIONAL
     bool cut = share < min_share && (hist_d > cut_hist || share < 0.05);
     float ramp_lo = 0.0;
@@ -1830,9 +1919,38 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	MotionWarp::MotionWarp(pl_log logIn, pl_gpu gpuIn, const Settings& settingsIn)
-		: log(logIn), gpu(gpuIn), settings(settingsIn)
+		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn)
 	{
 		dispatch = pl_dispatch_create(log, gpu);
+	}
+
+	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)
+	{
+		Settings s = given;
+		if (inputHeight > 0 && given.referenceHeight > 0.0f)
+		{
+			const float k = static_cast<float>(inputHeight) / given.referenceHeight;
+			s.motionScaleLo *= k;
+			s.motionScaleHi *= k;
+			s.rollLo *= k;
+			s.rollHi *= k;
+			s.holdFeatherPx *= k;
+			if (s.landingCheck > 0.0f)
+				s.landingCheck = std::max(0.75f, s.landingCheck * k);
+		}
+		// The rates: converted once, by the outermost matcher (an inner, with
+		// referenceHeight < 0, receives them converted; it keeps sourceHz for
+		// its fade test).
+		if (given.sourceHz > 0.0 && given.referenceRateHz > 0.0 && given.referenceHeight >= 0.0f)
+		{
+			// Per frame at the reference rate -> per frame at this rate.
+			const double r = given.referenceRateHz / given.sourceHz;
+			if (s.strengthRate > 0.0f && s.strengthRate < 1.0f)
+				s.strengthRate = static_cast<float>(1.0 - std::pow(1.0 - s.strengthRate, r));
+			if (s.holdHysteresis > 1)
+				s.holdHysteresis = std::max(1, static_cast<int>(std::lround(s.holdHysteresis / r)));
+		}
+		return s;
 	}
 
 	MotionWarp::~MotionWarp()
@@ -1842,7 +1960,7 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -2202,7 +2320,10 @@ if (q.x < size.x && q.y < size.y) {
 			Sampled("global_vec", global, false), Storage("dst", out),
 			Sampled("previous", previous, false), Sampled("prev_trust", frameTrust, false),
 			Sampled("global_two", globalTwo, false) };
-		const int range = std::max(0, std::min(settings.coarseRange, 16));
+		// General: the range is given for a 1080-line working picture.
+		const int scaledRange = settings.referenceHeight != 0.0f && height > 0 ?
+			static_cast<int>(std::lround(settings.coarseRange * height / 1080.0)) : settings.coarseRange;
+		const int range = std::max(0, std::min(scaledRange, 16));
 		const int useGlobal = settings.globalPrior ? 1 : 0;
 		const int useTemporal = settings.estCandidates && previousValid ? 1 : 0;
 		const int useGate = settings.estGate && settings.globalPrior && previousValid ? 1 : 0;
@@ -2521,8 +2642,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// it stops after the searches unless every pass is coarse (lowResAll).
 		const bool all = settings.lowResAll;
 		Settings innerSettings = settings;
-		innerSettings.lowRes = false;
-		innerSettings.lowResAll = false;
+		// It halves again when still tall (8K); its pixel values come from
+		// this one's (scaled here, halved below), its search range from its
+		// own working height.
+		innerSettings.referenceHeight = -1.0f;
 		innerSettings.motionScaleLo *= 0.5f;
 		innerSettings.motionScaleHi *= 0.5f;
 		innerSettings.rollLo *= 0.5f;   // delta 14 R-A, in the inner's pixels
@@ -2543,6 +2666,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			inner->SetSettings(innerSettings);
 		inner->rescoreForTest = rescoreForTest;
 		inner->searchOnly = !all;
+		inner->SetPictureArea(pictureGiven[0] / 2, pictureGiven[1] / 2, (pictureGiven[2] + 1) / 2, (pictureGiven[3] + 1) / 2);
 		inner->innerOfLowRes = true;
 		inner->lumaInCodes = true;
 		inner->timingParent = this;
@@ -2611,6 +2735,38 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
+	bool MotionWarp::PictureArea()
+	{
+		if (!picture)
+		{
+			pl_fmt rgba32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+			pl_tex_params params{};
+			params.w = params.h = 1;
+			params.format = rgba32;
+			params.sampleable = true;
+			params.storable = true;
+			params.host_readable = settings.hostReadable && rgba32 && (rgba32->caps & PL_FMT_CAP_HOST_READABLE);
+			picture = rgba32 ? pl_tex_create(gpu, &params) : nullptr;
+			if (!picture)
+			{
+				error = "cannot create the picture area";
+				return false;
+			}
+		}
+		// Black in this matcher's luma codes (limited 16, full range 0) and
+		// the margin a bar's 1/8 average may have above it.
+		const float black = pictureFullRange ? 0.0f : 16.0f;
+		const float barCodes = 4.0f;
+		const float given[4] = { static_cast<float>(pictureGiven[0]), static_cast<float>(pictureGiven[1]),
+			static_cast<float>(pictureGiven[2]), static_cast<float>(pictureGiven[3]) };
+		const float frameSize[2] = { static_cast<float>(width), static_cast<float>(height) };
+		const pl_shader_var v[4] = { { pl_var_vec4("given"), given, true }, { pl_var_vec2("frame_size"), frameSize, true },
+			{ pl_var_float("black"), &black, true }, { pl_var_float("bar_codes"), &barCodes, true } };
+		const pl_shader_desc d[2] = { Sampled("l1", l1A, false), Storage("dst", picture) };
+		return Dispatch("VideoProcessor de-judder: picture area (black bars)", PICTURE_HEADER, PICTURE_BODY, d, 2, v, 4, 16, 16, 16);
+	}
+
 	bool MotionWarp::FadeMatch(const Planes& b)
 	{
 		if (!fadeState)
@@ -2637,10 +2793,19 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		stateDesc.desc.type = PL_DESC_STORAGE_IMG;
 		stateDesc.desc.access = PL_DESC_ACCESS_READWRITE;
 		stateDesc.binding.object = fadeState;
-		const pl_shader_desc d[3] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), stateDesc };
+		const bool withPicture = settings.pictureArea && picture;
+		const pl_shader_desc d[4] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), stateDesc,
+			Sampled("picture", picture, false) };
+		const std::string header = std::string(withPicture ? "#define PICTURE 1\n" : "") + FADE_HEADER;
 		// The test, then B's pyramid again with the gain applied (unchanged
 		// when the test fails).
-		return Dispatch("VideoProcessor de-judder: fade test (M4)", FADE_HEADER, FADE_BODY, d, 3, nullptr, 0, 16, 16, 16) &&
+		// The window per frame: 0.75 to 24 codes per frame at the reference
+		// rate, scaled to this source rate (general, owner 2026-10-14).
+		const float perFrame = settings.sourceHz > 0.0 && settings.referenceRateHz > 0.0 ?
+			static_cast<float>(settings.referenceRateHz / settings.sourceHz) : 1.0f;
+		const float fadeLo = 0.75f * perFrame, fadeHi = 24.0f * perFrame;
+		const pl_shader_var fadeVars[2] = { { pl_var_float("fade_lo"), &fadeLo, true }, { pl_var_float("fade_hi"), &fadeHi, true } };
+		return Dispatch("VideoProcessor de-judder: fade test (M4)", header.c_str(), FADE_BODY, d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16) &&
 			Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeState);
 	}
 
@@ -2658,10 +2823,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange) || !Downsample(b.luma, halfB, l1B, l2B, b.fullRange))
 			return false;
 		// M4: in the lowRes outer the inner matches (and tests the fade) itself.
-		const bool outerOfLowRes = settings.lowRes && !searchOnly && width > 1920;
+		ApplyScaled(Scaled(base, height));
+		const bool outerOfLowRes = HalvesForSearch();
+		pictureFullRange = a.fullRange;
+		if (settings.pictureArea && !PictureArea())
+			return false;
 		if (settings.fadeMatch && !outerOfLowRes && !FadeMatch(b))
 			return false;
-		if (settings.lowRes && !searchOnly && width > 1920)
+		if (HalvesForSearch())
 		{
 			if (!LowResSearch(a, b))
 				return false;
@@ -2669,8 +2838,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The inner tested the fade on these planes: B here gets the same
 			// gain and offset, so M6's mask and the grain map see it (audit
 			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
-			if (settings.fadeMatch && inner && inner->fadeState &&
-				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->fadeState))
+			if (settings.fadeMatch && inner && inner->FadeStateTexture() &&
+				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->FadeStateTexture()))
 				return false;
 		}
 		else
@@ -2710,14 +2879,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			{ pl_var_float("consistency"), &consistency, true } };
 		const char* splitDefine = settings.estSplit ? "#define SPLIT 1\n" : nullptr;
 		// lowResAll: the inner made the field, the sub-field and the trust.
-		if (!(settings.lowRes && settings.lowResAll && !searchOnly && width > 1920))
+		if (!(settings.lowResAll && HalvesForSearch()))
 		{
 			// The consistency pass writes `field` directly, or a raw field that
 			// E3 (quarter-pel) and D3 (smoothing) refine into `field`.
 			const bool refined = settings.vectorSmooth || settings.estQpel;
-			const pl_shader_desc descriptors[4] = {
+			std::vector<pl_shader_desc> descriptors = {
 				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
-				Storage("dst", refined ? rawField : field), Sampled("from_half", halfA, false) };
+				Storage("dst", refined ? rawField : field) };
 			// Delta 9 H3: marginal blocks (up to taper_sad) pass the consistency
 			// check as trusted; the warp tapers them.
 			const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
@@ -2728,11 +2897,16 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				consistencyVars.push_back({ pl_var_float("taper_sad"), &taperSad, true });
 			if (textureTol)
 				consistencyVars.push_back({ pl_var_float("texture_tol"), &textureTolValue, true });
+			if (textureTol)
+				descriptors.push_back(Sampled("from_half", halfA, false));
+			const bool withPicture = settings.pictureArea && picture;
+			if (withPicture)
+				descriptors.push_back(Sampled("picture", picture, false));
 			const std::string consistencyHeader = std::string(settings.blockTaper ? "#define TAPER 1\n" : "") +
-				(textureTol ? "#define TEXTURE_TOL 1\n" : "");
+				(textureTol ? "#define TEXTURE_TOL 1\n" : "") + (withPicture ? "#define PICTURE 1\n" : "");
 			if (!Dispatch("VideoProcessor de-judder: consistency", consistencyHeader.empty() ? nullptr : consistencyHeader.c_str(),
-				CONSISTENCY_BODY, descriptors, textureTol ? 4 : 3, consistencyVars.data(), static_cast<int>(consistencyVars.size()),
-				blocksX, blocksY, 8))
+				CONSISTENCY_BODY, descriptors.data(), static_cast<int>(descriptors.size()), consistencyVars.data(),
+				static_cast<int>(consistencyVars.size()), blocksX, blocksY, 8))
 				return false;
 			if (settings.estQpel)
 			{
@@ -2842,6 +3016,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
 			if (cameraOut)
 				trustDescs.push_back(Storage("camera_out", camera));
+			const bool trustPicture = settings.pictureArea && picture;
+			if (trustPicture)
+				trustDescs.push_back(Sampled("picture", picture, false));
 			const float rollLo = settings.rollLo, rollHi = settings.rollHi, rollFloor = std::min(1.0f, std::max(0.0f, settings.rollFloor));
 			std::vector<pl_shader_var> trustVarList(trustVars, trustVars + 5);
 			const float cutHist = settings.cutHistogram;
@@ -2858,7 +3035,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
 				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
-				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") + FRAME_TRUST_HEADER;
+				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") +
+				(trustPicture ? "#define PICTURE 1\n" : "") + FRAME_TRUST_HEADER;
 			const pl_shader_desc* trustDesc = trustDescs.data();
 			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FRAME_TRUST_BODY,
 				trustDesc, static_cast<int>(trustDescs.size()), trustVarList.data(), static_cast<int>(trustVarList.size()), 16, 16, 16))

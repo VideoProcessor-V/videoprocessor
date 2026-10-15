@@ -874,7 +874,7 @@ namespace
 		double dejudderStrength = 0.0;
 		// Delta 10: even (2:2) cadences, 0 = off; 29.97 included or not.
 		double dejudderStrengthEven = 0.0;
-		bool dejudderEvenIncludes2997 = false;
+		bool dejudderEvenIncludes1001 = false;
 		double dejudderMatchTolerance = 4.5;   // owner 2026-10-14: with the fade match (planner Q8's condition met)
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
@@ -929,6 +929,12 @@ namespace
 		bool dejudderPixelTrust = true;
 		// The landing check (owner 2026-10-14, on: damage to a third).
 		bool dejudderLandingCheck = true;
+		// Black bars (owner 2026-10-14, on): matcher statistics over the
+		// picture only; bar blocks untrusted.
+		bool dejudderPictureArea = true;
+		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
+		// signal by repeated frames is found and shown at its film rate.
+		bool dejudderPulldown = false;
 		double dejudderPixelTrustLo = 3.0;
 		double dejudderPixelTrustHi = 8.0;
 		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
@@ -1097,7 +1103,7 @@ namespace
 			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
 			<< settings.saturation << '|'
 			<< settings.dejudderStrength << '|' << settings.dejudderStrengthEven << '|'
-			<< settings.dejudderEvenIncludes2997 << '|' << settings.dejudderMatchTolerance << '|'
+			<< settings.dejudderEvenIncludes1001 << '|' << settings.dejudderMatchTolerance << '|'
 			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
 			<< settings.dejudderGlobalPrior << '|' << settings.dejudderMotionScaleLo << '|'
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
@@ -1112,6 +1118,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2060,11 +2067,15 @@ namespace
 		}
 		if (config.TryGetString(rule.section, "dejudder_even_rates", raw))
 		{
-			if (raw == "30" || raw == "30_and_29.97")
-				settings.dejudderEvenIncludes2997 = raw == "30_and_29.97";
+			// General (owner 2026-10-14): whole-number source rates, or also the
+			// 1000/1001 rates; "30" / "30_and_29.97" are the earlier names.
+			if (raw == "whole" || raw == "30")
+				settings.dejudderEvenIncludes1001 = false;
+			else if (raw == "whole_and_1001" || raw == "30_and_29.97")
+				settings.dejudderEvenIncludes1001 = true;
 			else
 				DebugLog::Log("profile '%s': invalid dejudder_even_rates '%s'; keeping %s", rule.section.c_str(),
-					raw.c_str(), settings.dejudderEvenIncludes2997 ? "30_and_29.97" : "30");
+					raw.c_str(), settings.dejudderEvenIncludes1001 ? "whole_and_1001" : "whole");
 		}
 		for (const auto& numeric : { std::make_tuple("dejudder_strength", 0.0, 1.0, &settings.dejudderStrength),
 			std::make_tuple("dejudder_strength_even", 0.0, 1.0, &settings.dejudderStrengthEven),
@@ -2150,7 +2161,9 @@ namespace
 			std::make_pair("dejudder_fade_match", &settings.dejudderFadeMatch),
 			std::make_pair("dejudder_verify", &settings.dejudderVerify),
 			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust),
-			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck) })
+			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck),
+			std::make_pair("dejudder_pulldown", &settings.dejudderPulldown),
+			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -2552,6 +2565,11 @@ namespace
 		settings.pixelTrustLo = static_cast<float>(profile.dejudderPixelTrustLo);
 		settings.pixelTrustHi = static_cast<float>(profile.dejudderPixelTrustHi);
 		settings.landingCheck = profile.dejudderLandingCheck ? 1.5f : 0.0f;
+		settings.pictureArea = profile.dejudderPictureArea;
+		// General (owner 2026-10-14): pixel values for a 2160-line picture,
+		// per-frame values at 23.976p; the matcher scales them to the source.
+		settings.referenceHeight = 2160.0f;
+		settings.referenceRateHz = 24000.0 / 1001.0;
 		settings.pixelTrustedVectors = true;
 		settings.lowRes = profile.dejudderLowRes != "off";
 		settings.lowResAll = profile.dejudderLowRes == "all";
@@ -4379,7 +4397,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool grainToleranceParamSet = false;
 	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
 	float dejudderEffectiveStrength = 0.0f;   // delta 10: uneven or even strength for this source
-	bool dejudderEvenCadence = false;
+	int dejudderEvenCycle = 0;   // refreshes per film frame on an even cadence, 0 = uneven
 	bool adaptiveUpscaleThisFrame = false;    // Stage 8b on the frame being built
 	int adaptiveUpscaleRatioLogged = -1;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
@@ -4461,6 +4479,18 @@ struct LibplaceboVideoRenderer::Impl
 					dejudderAhead.LastReason() != Dejudder::AheadSchedule::Reason::Ahead ?
 						(std::string(Dejudder::AheadSchedule::Name(dejudderAhead.LastReason())) + ")").c_str() : "");
 				text += ahead;
+			}
+			if (activeSettings.dejudderPulldown)
+			{
+				char pulldown[128];
+				const int cycle = pulldownCadence >> 16, unique = pulldownCadence & 0xffff;
+				if (pulldownCadence != 0 && unique > 0 && pulldownFilmHz > 0.0)
+					std::snprintf(pulldown, sizeof(pulldown), ", pulldown %s, %llu repeats skipped",
+						Pulldown::Describe(pulldownFilmHz, pulldownFilmHz * cycle / unique, unique, cycle).c_str(),
+						static_cast<unsigned long long>(pulldownSkipped));
+				else
+					std::snprintf(pulldown, sizeof(pulldown), ", pulldown: none found");
+				text += pulldown;
 			}
 			// "mask on" only when the mask was used within the last second.
 			if (activeSettings.occlusionMask)
@@ -8458,7 +8488,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.saturation = next.saturation;
 		currentTransport.dejudderStrength = next.dejudderStrength;
 		currentTransport.dejudderStrengthEven = next.dejudderStrengthEven;
-		currentTransport.dejudderEvenIncludes2997 = next.dejudderEvenIncludes2997;
+		currentTransport.dejudderEvenIncludes1001 = next.dejudderEvenIncludes1001;
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.occlusionMask = next.occlusionMask;
@@ -8575,7 +8605,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.saturation != next.saturation, "saturation");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
-			current.dejudderEvenIncludes2997 != next.dejudderEvenIncludes2997, "dejudder_strength_even");
+			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
@@ -8605,6 +8635,8 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderPixelTrustHi != next.dejudderPixelTrustHi ||
 			current.dejudderLandingCheck != next.dejudderLandingCheck,
 			"dejudder_motion_fixes");
+		changed(current.dejudderPulldown != next.dejudderPulldown, "dejudder_pulldown");
+		changed(current.dejudderPictureArea != next.dejudderPictureArea, "dejudder_picture_area");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -9454,6 +9486,97 @@ struct LibplaceboVideoRenderer::Impl
 	void RequestPresentationStateReset()
 	{
 		presentationResetEpoch.Request();
+	}
+
+	// Stream robustness (owner 2026-10-14): the motion vectors and every
+	// temporal state built on them belong to the frames before a
+	// discontinuity. Requested from any thread (1 = forget the history, 2 =
+	// release the de-judder: a resync), applied on the render thread before
+	// the next estimate; until a fresh contiguous pair is estimated every
+	// consumer (the extras, the dither's VPVEC/VPPIX, the occlusion mask, the
+	// grain map) takes its no-vector path, as their sequence checks require.
+	// Pulldown (owner 2026-10-14): the film rate of the frame being rendered
+	// (0 = none), its cadence and the repeats skipped, set by the render loop.
+	double pulldownFilmHz = 0.0;
+	int pulldownCadence = 0;   // (cycle << 16) | new frames per cycle
+	// Black bars: the latest trusted active picture, for the matcher.
+	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
+	// The content rate the matcher's per-frame settings are converted to.
+	double dejudderSourceHz = 0.0;
+	// When the source rate is not known: one display refresh (general; the
+	// last resort is a film frame).
+	float AdaptiveFallbackFramePeriod() const
+	{
+		return customHookRefreshHz > 0.0 ? static_cast<float>(1.0 / customHookRefreshHz) : 1.0f / 24.0f;
+	}
+	// The rendered warp's matcher settings: the scaled ones, with the feather
+	// (output pixels there) scaled by the output height (general).
+	Dejudder::Settings RenderedWarpSettings(int outputHeight) const
+	{
+		Dejudder::Settings s = dejudder->EffectiveSettings();
+		s.holdFeatherPx = dejudder->GetSettings().holdFeatherPx *
+			(outputHeight > 0 ? static_cast<float>(outputHeight) / 2160.0f : 1.0f);
+		return s;
+	}
+	uint64_t pulldownSkipped = 0;
+	double SourceRateHz(const VideoState& state) const
+	{
+		if (pulldownFilmHz > 0.0)
+			return pulldownFilmHz;
+		return state.displayMode ? state.displayMode->RefreshRateHz() : 0.0;
+	}
+
+	std::atomic<int> motionInvalidate{0};
+	uint64_t motionInvalidations = 0;
+	ULONGLONG motionInvalidateLogTick = 0;
+	bool motionRecoveryLogPending = false;   // log the first estimate after a logged invalidation
+	std::atomic<const char*> motionInvalidateCause{nullptr};
+	const char* motionInvalidateLoggedCause = nullptr;
+	// cause: a static string naming the discontinuity, for the log.
+	void RequestMotionInvalidate(bool release, const char* cause = nullptr)
+	{
+		const int want = release ? 2 : 1;
+		// A pending resync keeps its cause (a weaker request does not replace it).
+		if (release || motionInvalidate.load(std::memory_order_acquire) < 2)
+			motionInvalidateCause.store(cause ? cause : release ? "resync" : "frame gap", std::memory_order_release);
+		int current = motionInvalidate.load(std::memory_order_acquire);
+		while (current < want && !motionInvalidate.compare_exchange_weak(current, want, std::memory_order_acq_rel))
+		{
+		}
+	}
+	void ApplyMotionInvalidate()
+	{
+		const int request = motionInvalidate.exchange(0, std::memory_order_acq_rel);
+		if (request == 0)
+			return;
+		++motionInvalidations;
+		if (request == 2)
+			ReleaseDejudder();
+		else
+		{
+			if (dejudder)
+				dejudder->ForgetHistory();
+			dejudderAhead.Reset();
+			dejudderAheadPayload.reset();
+			dejudderAheadPayloadSequence = 0;
+			dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
+		}
+		dejudderEstimatedSequence = 0;
+		adaptiveDownscale.ForgetMap();
+		const char* cause = motionInvalidateCause.load(std::memory_order_acquire);
+		if (!cause)
+			cause = request == 2 ? "resync" : "frame gap";
+		const ULONGLONG now = GetTickCount64();
+		// The first 50 are all logged; then at most one line per 5 s, but a
+		// new cause is always logged.
+		if (motionInvalidations <= 50 || now - motionInvalidateLogTick >= 5000 || cause != motionInvalidateLoggedCause)
+		{
+			DebugLog::Log("De-judder: motion invalidated (%s; %llu in total); the vectors' users fall back until a fresh pair",
+				cause, static_cast<unsigned long long>(motionInvalidations));
+			motionInvalidateLogTick = now;
+			motionInvalidateLoggedCause = cause;
+			motionRecoveryLogPending = true;
+		}
 	}
 
 	// Consumed after RenderLocked returns, so this frame's geometry references
@@ -11466,6 +11589,8 @@ struct LibplaceboVideoRenderer::Impl
 		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced,
 		double sourceHz, uint64_t nextSourceSequence)
 	{
+		ApplyMotionInvalidate();
+		dejudderSourceHz = sourceHz;
 		// Off and settled: today's path, nothing else is done.
 		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
 			!activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
@@ -11484,7 +11609,7 @@ struct LibplaceboVideoRenderer::Impl
 		DejudderPolicy::Input in;
 		in.strength = activeSettings.dejudderStrength;
 		in.strengthEven = activeSettings.dejudderStrengthEven;
-		in.evenIncludes2997 = activeSettings.dejudderEvenIncludes2997;
+		in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
 		in.occlusionMask = activeSettings.occlusionMask;
 		in.grainMap = adaptiveGrainMapWanted;
 		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
@@ -11507,16 +11632,16 @@ struct LibplaceboVideoRenderer::Impl
 		in.planeFormatsUsable = nativeRgb || (usable(textures[0]) && usable(textures[1]));
 		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
 		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
-		// Delta 10: the strength the extras run at, and whether this is an
-		// even (2:2) cadence (its one extra at the exact midpoint).
+		// Delta 10 (general): the strength the extras run at, and on an even
+		// cadence its cycle N (extras at the exact phases k/N).
 		dejudderEffectiveStrength = static_cast<float>(DejudderPolicy::EffectiveStrength(in));
-		dejudderEvenCadence = DejudderPolicy::IsEvenCadence(DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz));
+		dejudderEvenCycle = DejudderPolicy::EvenCycle(DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz));
 		if (in.sourceHz > 0.0 && in.displayHz > 0.0)
 			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
 		if (reason == DejudderPolicy::Reason::VideoRateMaskOnly && !dejudderMaskRateLogged)
 		{
-			DebugLog::Log("De-judder: the occlusion mask / grain map alone is for film rates (source %.3f Hz > %.0f Hz); off for this source",
-				in.sourceHz, DejudderPolicy::kMaskOnlyMaxSourceHz);
+			DebugLog::Log("De-judder: the occlusion mask / grain map alone is for film-like sources (source %.3f Hz is video); off for this source",
+				in.sourceHz);
 			dejudderMaskRateLogged = true;
 		}
 		PublishDejudderStatus(reason != dejudderReason);
@@ -11659,7 +11784,12 @@ struct LibplaceboVideoRenderer::Impl
 	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
 	{
 		// The matcher's settings from the profile, refinements included.
-		auto wanted = [&](Dejudder::Settings settings) { return DejudderMatcherSettings(activeSettings, settings); };
+		auto wanted = [&](Dejudder::Settings settings)
+		{
+			Dejudder::Settings result = DejudderMatcherSettings(activeSettings, settings);
+			result.sourceHz = dejudderSourceHz;   // the content rate (the film rate with pulldown)
+			return result;
+		};
 		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
 		{
 			DebugLog::Log("De-judder occlusion fill: source warp path only; ignored with dejudder_warp_stage: rendered");
@@ -11692,7 +11822,9 @@ struct LibplaceboVideoRenderer::Impl
 				current.verifyPixels != next.verifyPixels || current.verifyShare != next.verifyShare ||
 				current.pixelTrust != next.pixelTrust || current.pixelTrustLo != next.pixelTrustLo ||
 				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
-				current.landingCheck != next.landingCheck)
+				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
+				current.referenceHeight != next.referenceHeight || current.sourceHz != next.sourceHz ||
+				current.referenceRateHz != next.referenceRateHz)
 				dejudder->SetSettings(next);
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
@@ -11701,6 +11833,14 @@ struct LibplaceboVideoRenderer::Impl
 		int maskSlot = -1;
 		if (activeSettings.occlusionMask)
 			maskSlot = dejudderMaskSequence[0] == aSequence ? 1 : 0;
+		// Black bars: the latest trusted active picture when it is this
+		// raster's (else the matcher finds the bars itself).
+		const int width = a.luma ? a.luma->params.w : 0, height = a.luma ? a.luma->params.h : 0;
+		if (dejudderPicture.available && dejudderPicture.rasterWidth == width && dejudderPicture.rasterHeight == height &&
+			dejudderPicture.right > dejudderPicture.left && dejudderPicture.bottom > dejudderPicture.top)
+			dejudder->SetPictureArea(dejudderPicture.left, dejudderPicture.top, dejudderPicture.right, dejudderPicture.bottom);
+		else
+			dejudder->SetPictureArea(0, 0, 0, 0);
 		if (!dejudder->Estimate(a, b, maskSlot, adaptiveGrainMapWanted))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
@@ -11710,6 +11850,11 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (maskSlot >= 0)
 			dejudderMaskSequence[maskSlot] = bSequence;
+		if (motionRecoveryLogPending)
+		{
+			DebugLog::Log("De-judder: estimating again on a fresh contiguous pair");
+			motionRecoveryLogPending = false;
+		}
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
 				dejudderEstimates, dejudderLayout.width, dejudderLayout.height,
@@ -11819,6 +11964,10 @@ struct LibplaceboVideoRenderer::Impl
 		if (dejudderReason != DejudderPolicy::Reason::Active || !dejudder)
 			return false;
 		if (dejudderEstimatedSequence != f.sourceSequence) { DejudderHold("no motion estimate for this frame"); return false; }
+		// The rendered warp's settings for this output (general scaling).
+		const int outputHeight = f.target && f.target->num_planes > 0 && f.target->planes[0].texture ?
+			f.target->planes[0].texture->params.h : 0;
+		const Dejudder::Settings renderedWarpSettings = RenderedWarpSettings(outputHeight);
 		if (f.cadenceRepeat) { DejudderHold("cadence repeat"); return false; }
 		// A moved subtitle's composed picture: the rendered warp holds its
 		// rectangles still (owner 2026-10-13); the source warp cannot.
@@ -11894,6 +12043,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			dejudderPhaseGeneration = f.frameGeneration;
 			dejudderLatencyFloor.Reset();
+			dejudderLatencyFloor.SetSourceRate(f.captureRateHz);
 			dejudderLoggedFloor = 0.0;
 			dejudderCallLatency = 0.0;
 			dejudderPhaseLogPending = true;
@@ -12052,7 +12202,7 @@ struct LibplaceboVideoRenderer::Impl
 			in.renderAllowance = renderAllowance;
 			in.nextFrameArrived = (*f.nextFrameArrived)();
 			in.extrasDone = extras;
-			in.maxExtras = 3;
+			in.maxExtras = DejudderPolicy::MaxExtras(ratio);
 			if (extras == 0)
 				phi0 = (previousVsync - callbackA - in.latencyFloor) / sourcePeriod;
 			const DejudderPolicy::ExtraDecision decision = DejudderPolicy::PlanExtra(in);
@@ -12076,8 +12226,10 @@ struct LibplaceboVideoRenderer::Impl
 			}
 
 			const auto extraStart = SteadyClock::now();
-			// Delta 10: on a 2:2 cadence the one extra is the exact midpoint.
-			const float shift = strength * static_cast<float>(dejudderEvenCadence ? 0.5 : decision.delta);
+			// Delta 10 (general): on an even cadence of N refreshes the k-th
+			// extra is at exactly k/N.
+			const float shift = strength * static_cast<float>(dejudderEvenCycle > 0 ?
+				static_cast<double>(extras + 1) / dejudderEvenCycle : decision.delta);
 			pl_frame image = *f.image;
 			const pl_render_params* extraParams = &params;
 			bool renderedCrop = false;
@@ -12092,7 +12244,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				if (!dejudderRenderedWarp->Run(cached, warpField, warpTrust,
 					dejudder->GetSettings().minTrustedShare, shift, dejudderGeometry, warpedPicture, warpSub,
-					&dejudder->GetSettings(), warpCamera, warpMask, warpVectorOk,
+					&renderedWarpSettings, warpCamera, warpMask, warpVectorOk,
 					pixelVectors ? &warpedDisplacement : nullptr, pixelVectors ? (shift - previousShift) / shift : 1.0f))
 				{
 					failure = "rendered warp failed";
@@ -12150,7 +12302,7 @@ struct LibplaceboVideoRenderer::Impl
 						dejudderVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
 					if (!dejudderVectorField->Run(warpField, warpTrust,
 						dejudder->GetSettings().minTrustedShare, shift - previousShift, dejudderGeometry, w, h, vectors,
-						warpSub, &dejudder->GetSettings(), warpCamera))
+						warpSub, &renderedWarpSettings, warpCamera))
 						vectors = nullptr;
 				}
 				const pl_render_params& listParams = *extraParams;
@@ -12340,6 +12492,7 @@ struct LibplaceboVideoRenderer::Impl
 		const AlphaSourceCrop::BufferedPictureExpansionProof* bufferedExpansion,
         const GuardedRememberedEdgeReturnCertificate* guardedReturn,
 		int64_t callbackQpc,
+		int64_t arrivalQpc,
 		int64_t enqueueQpc,
 		int64_t dequeueQpc,
 		size_t queueDepthAfterDequeue,
@@ -12745,7 +12898,7 @@ struct LibplaceboVideoRenderer::Impl
 				!cadenceRepeat && sceneResult.safeBoundary, cadenceRepeat);
 			UpdateNlsForFrame(analysisSource, sourceSequence,
 				currentActivePictureIdentity,
-				state.displayMode->RefreshRateHz(),
+				SourceRateHz(state),
 				configuredScreenActive, sceneHold,
 				(!cadenceRepeat && sceneResult.safeBoundary) ||
 					verifyRetainedProfileGeometryThisFrame,
@@ -13313,7 +13466,7 @@ struct LibplaceboVideoRenderer::Impl
 			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
 				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
 				state.displayMode && state.displayMode->IsInterlaced(),
-				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0, nextSourceSequence);
+				SourceRateHz(state), nextSourceSequence);
 			std::string resolvedIngressStatus = nativeRgbLayout.label;
 			if (!analysisSource.IsValid())
 				resolvedIngressStatus += " (analysis unavailable)";
@@ -13384,7 +13537,7 @@ struct LibplaceboVideoRenderer::Impl
 				width, height, p010RowBytes, chromaHeight, lossless422Upload,
 				state.invertedVertical, sourceSequence, cadenceRepeat, false,
 				state.displayMode && state.displayMode->IsInterlaced(),
-				state.displayMode ? state.displayMode->RefreshRateHz() : 0.0, nextSourceSequence);
+				SourceRateHz(state), nextSourceSequence);
 			if (lossless422Upload)
 			{
 				switch (state.videoFrameEncoding)
@@ -14003,7 +14156,7 @@ struct LibplaceboVideoRenderer::Impl
 
 		AnamorphicPresentation::Screen frameScreen;
 		pl_rect2df linearFallbackCrop{};
-		const double nominalSourceRateHz = state.displayMode->RefreshRateHz();
+		const double nominalSourceRateHz = SourceRateHz(state);
 		auto configureViewport =
 			[this, &image, &subtitleComposedImage, &relocatedSubtitle, subtitleCompositionSucceeded, &analysisSource, width, height, frameGeneration, sourceSequence,
 			 viewportRequestSerial, captureRateHz, nominalSourceRateHz, sceneDetectionEnabled, retainFullRasterAtDarknessBoundary,
@@ -16162,6 +16315,7 @@ struct LibplaceboVideoRenderer::Impl
 			subtitleShiftSourcePixels,
 			&trustedActivePicture,
 			&hdrTrustedPicture);
+		dejudderPicture = hdrTrustedPicture;
 
         if(hdrPeakAnalysisMotionCompensation && !hdrPeakAnalysisPictureOnly && subtitleCompositionSucceeded)
             hdrPeakAnalysisMotionProtectionPixels=SubtitleHdrProtectionPixels(relocatedSubtitle,true,
@@ -16788,7 +16942,7 @@ struct LibplaceboVideoRenderer::Impl
         if (upscaleBlend)
         {
             adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
-                nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : 1.0f / 24.0f);
+                nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : AdaptiveFallbackFramePeriod());
             AdaptiveDownscale::Upscale up;
             up.on = true;
             up.wBase = static_cast<float>(activeSettings.adaptiveUpscaleWBase);
@@ -16837,7 +16991,7 @@ struct LibplaceboVideoRenderer::Impl
             if (customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue))
             {
                 adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
-                    nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : 1.0f / 24.0f);
+                    nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : AdaptiveFallbackFramePeriod());
                 // SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source
                 // crop against the destination, not the (prescaled) PRE_KERNEL
                 // picture (audit stage8-rs232 item 3).
@@ -17920,7 +18074,11 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.frameGeneration = frameGeneration;
 			extrasFrame.sourceSequence = sourceSequence;
 			extrasFrame.nextSourceSequence = nextSourceSequence;
-			extrasFrame.callbackQpc = callbackQpc;
+			// The hardware arrival when known (no callback jitter in the phase).
+			// With pulldown locked it is the even film time, which may be after
+			// the callback (no frame is timed before it arrived).
+			extrasFrame.callbackQpc = arrivalQpc > 0 && (pulldownFilmHz > 0.0 || arrivalQpc <= callbackQpc) ?
+				arrivalQpc : callbackQpc;
 			extrasFrame.mainCallQpc = swapStartQpc;
 			extrasFrame.captureRateHz = captureRateHz;
 			extrasFrame.renderMs = renderMs;
@@ -18188,6 +18346,31 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	const int64_t callbackQpc = PerformanceCounterNow();
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
+	// The frame's hardware arrival on the QPC clock: the capture clock and
+	// QPC read back to back give the frame's age at this moment.
+	int64_t arrivalQpc = 0;
+	{
+		const timingclocktime_t frameTicks = videoFrame.GetTimingTimestamp();
+		if (m_timingClock && frameTicks > 0)
+		{
+			try
+			{
+				const timingclocktime_t nowTicks = m_timingClock->TimingClockNow();
+				const int64_t nowQpc = PerformanceCounterNow();
+				const timingclocktime_t ticksPerSecond = m_timingClock->TimingClockTicksPerSecond();
+				LARGE_INTEGER frequency{};
+				QueryPerformanceFrequency(&frequency);
+				const timingclocktime_t age = nowTicks - frameTicks;
+				if (ticksPerSecond > 0 && frequency.QuadPart > 0 && age >= 0 && age < ticksPerSecond / 2)
+					arrivalQpc = nowQpc - static_cast<int64_t>(static_cast<double>(age) *
+						static_cast<double>(frequency.QuadPart) / static_cast<double>(ticksPerSecond));
+			}
+			catch (const std::exception&)
+			{
+				arrivalQpc = 0;   // the callback time is used
+			}
+		}
+	}
 
 	uint64_t enqueueGeneration = 0;
 	{
@@ -18198,7 +18381,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	}
 
 	const uint64_t counter = m_frameCounter.fetch_add(1, std::memory_order_relaxed);
+	const uint64_t missedBefore = m_captureMissedFrames.load(std::memory_order_relaxed);
 	UpdateFrameRateAndPPM(videoFrame.GetTimingTimestamp());
+	bool gapBefore = m_captureMissedFrames.load(std::memory_order_relaxed) != missedBefore;
+	const char* gapCause = gapBefore ? "missed frames" : nullptr;
 	if (m_timingClock && counter % 20 == 0)
 	{
 		m_entryLatencyMs.store(
@@ -18231,6 +18417,86 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				static_cast<unsigned long long>(droppedTotal));
 		}
 		return;
+	}
+
+	// Pulldown detection (owner 2026-10-14; off by default): a frame that
+	// repeats the previous one where the locked cadence has a repeat is not
+	// queued; the unique frames get the film rate and an even film clock.
+	double filmHz = 0.0;
+	bool filmUpdate = false;
+	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
+	{
+		if (m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel))
+		{
+			m_pulldown.Reset();
+			m_pulldownClock.Reset();
+			m_pulldownSignature = 0;
+			m_pulldownFilmQpc = 0;
+		}
+		const uint64_t signature = Pulldown::Signature(videoFrame.GetData(),
+			static_cast<size_t>(frameState->BytesPerRow()),
+			static_cast<size_t>(frameState->displayMode->FrameHeight()));
+		const bool repeat = signature != 0 && signature == m_pulldownSignature;
+		m_pulldownSignature = signature;
+		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
+		const double signalHz = measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz();
+		const bool wasLocked = m_pulldown.Locked();
+		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
+		const Pulldown::Decision decision = m_pulldown.Next(repeat, gapBefore, signalHz);
+		if (decision.locked != wasLocked || decision.relocked)
+		{
+			// The frame timing changes here: no pair across it.
+			if (!gapBefore)
+				gapCause = "pulldown lock change";
+			gapBefore = true;
+			m_pulldownClock.Reset();
+			// Not rate-limited: a lock needs two seconds, so changes are rare.
+			const std::string lockText = decision.locked ?
+				Pulldown::Describe(decision.filmHz, signalHz, decision.unique, decision.cycle) : std::string("lost");
+			const std::string before = wasLocked && previousUnique > 0 ?
+				Pulldown::Describe(signalHz * previousUnique / previousCycle, signalHz, previousUnique, previousCycle) :
+				std::string("none");
+			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
+		}
+		m_pulldownCadence.store(decision.locked ? (decision.cycle << 16) | decision.unique : 0, std::memory_order_relaxed);
+		if (decision.drop)
+		{
+			m_pulldownSkipped.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		if (decision.locked)
+		{
+			filmHz = decision.filmHz;
+			if (decision.update && m_pulldownFilmQpc > 0)
+			{
+				// Option b: the same film frame, updated - at its time.
+				filmUpdate = true;
+				arrivalQpc = m_pulldownFilmQpc;
+			}
+			else
+			{
+				LARGE_INTEGER frequency{};
+				QueryPerformanceFrequency(&frequency);
+				const double qpcPerSecond = static_cast<double>(frequency.QuadPart);
+				const int64_t arrived = arrivalQpc > 0 ? arrivalQpc : callbackQpc;
+				arrivalQpc = static_cast<int64_t>(m_pulldownClock.Time(decision.filmIndex,
+					static_cast<double>(arrived) / qpcPerSecond, filmHz) * qpcPerSecond);
+				m_pulldownFilmQpc = arrivalQpc;
+			}
+		}
+		else
+			m_pulldownFilmQpc = 0;
+	}
+	else if (m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked())
+	{
+		m_pulldown.Reset();
+		m_pulldownClock.Reset();
+		m_pulldownSignature = 0;
+		m_pulldownFilmQpc = 0;
+		m_pulldownCadence.store(0, std::memory_order_relaxed);
+		if (!gapBefore)
+			gapCause = "pulldown off";
+		gapBefore = true;
 	}
 
 	{
@@ -18276,7 +18542,17 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				dropCandidate->activePictureIdentity,
 				dropCandidate->frame.GetCounter());
 			dropCandidate->frame.SourceBufferRelease();
-			m_frameQueue.erase(dropCandidate);
+			const auto afterDropped = m_frameQueue.erase(dropCandidate);
+			if (afterDropped != m_frameQueue.end())
+			{
+				afterDropped->gapBefore = true;
+				afterDropped->gapCause = "queue overflow drop";
+			}
+			else
+			{
+				gapBefore = true;
+				gapCause = "queue overflow drop";
+			}
 			m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
 		}
 		videoFrame.SourceBufferAddRef();
@@ -18316,6 +18592,11 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			queuedFrame.sourceSequence = sourceSequence;
 			queuedFrame.activePictureIdentity = activePictureIdentity;
 			queuedFrame.callbackQpc = callbackQpc;
+			queuedFrame.arrivalQpc = arrivalQpc;
+			queuedFrame.gapBefore = gapBefore;
+			queuedFrame.gapCause = gapCause;
+			queuedFrame.filmHz = filmHz;
+			queuedFrame.filmUpdate = filmUpdate;
 			queuedFrame.enqueueQpc = PerformanceCounterNow();
 			m_frameQueue.push_back(std::move(queuedFrame));
 		}
@@ -18348,7 +18629,26 @@ void LibplaceboVideoRenderer::UpdateFrameRateAndPPM(
 	if (previousTimestamp > 0 && expectedFrameTicks > 0)
 	{
 		const timingclocktime_t observedTicks = frameTimestamp - previousTimestamp;
-		if (observedTicks <= 0 || observedTicks > expectedFrameTicks * 3 / 2 ||
+		// Stream robustness (owner 2026-10-14): a gap of a whole number of
+		// frame periods (2 to 8) is frames the capture missed, not a new
+		// clock. They are counted (the estimate stays valid, so the
+		// de-judder does not hold for seconds) and recorded for the gap check.
+		const long long periods = observedTicks > 0 ?
+			(observedTicks + expectedFrameTicks / 2) / expectedFrameTicks : 0;
+		const timingclocktime_t remainder = observedTicks - static_cast<timingclocktime_t>(periods) * expectedFrameTicks;
+		if (periods >= 2 && periods <= 8 && remainder < expectedFrameTicks / 4 && remainder > -expectedFrameTicks / 4)
+		{
+			m_ppmFrameCount.fetch_add(static_cast<uint64_t>(periods - 1), std::memory_order_relaxed);
+			m_captureMissedFrames.fetch_add(static_cast<uint64_t>(periods - 1), std::memory_order_relaxed);
+			const ULONGLONG now = GetTickCount64();
+			if (now - m_captureMissedLogTick.load(std::memory_order_relaxed) >= 5000)
+			{
+				m_captureMissedLogTick.store(now, std::memory_order_relaxed);
+				DebugLog::Log("libplacebo: capture missed %lld frame(s) (gap of %lld periods); cadence estimate kept (%llu missed in total)",
+					periods - 1, periods, static_cast<unsigned long long>(m_captureMissedFrames.load(std::memory_order_relaxed)));
+			}
+		}
+		else if (observedTicks <= 0 || observedTicks > expectedFrameTicks * 3 / 2 ||
 			observedTicks < expectedFrameTicks / 2)
 		{
 			DebugLog::Log(
@@ -19249,7 +19549,9 @@ void LibplaceboVideoRenderer::Reset()
 		// opening the new generation, so its first admitted frame cannot present
 		// with geometry from the discarded generation.
 		m_impl->RequestPresentationStateReset();
+		m_impl->RequestMotionInvalidate(true);
 	}
+	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("renderer reset");
 	if (m_impl)
 	{
@@ -19284,7 +19586,12 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 	// It nevertheless discards source frames, so the next generation must not
 	// reuse source-derived crop/presentation authority from the old queue.
 	if (m_impl)
+	{
 		m_impl->RequestPresentationStateReset();
+		// The discarded frames break the sequence: no pair or history across it.
+		m_impl->RequestMotionInvalidate(false, "live queue reset");
+	}
+	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("live queue reset");
 	m_sceneDetectorGeneration.fetch_add(1, std::memory_order_acq_rel);
 }
@@ -20616,7 +20923,8 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
 				preview.nearBlack = globalNearBlack.nearBlack;
 			}
 		}
-		preview.framesPerSecond = state.displayMode->RefreshRateHz();
+		// The content rate: with pulldown locked, the film rate (owner 2026-10-14).
+		preview.framesPerSecond = queued.filmHz > 0.0 ? queued.filmHz : state.displayMode->RefreshRateHz();
         auto sample = AlphaSourceCrop::MakeBufferedPictureSample(
             queued.activePictureIdentity, observedEvidence, preview.framesPerSecond,
             preview.nearBlackEvaluated, preview.nearBlack);
@@ -21434,6 +21742,8 @@ void LibplaceboVideoRenderer::RenderLoop()
         bool guardedReturnCurrent = false;
 		int64_t enqueueQpc = 0;
 		int64_t callbackQpc = 0;
+		int64_t arrivalQpc = 0;
+		double frameFilmHz = 0.0;
 		int64_t dequeueQpc = 0;
 		size_t queueDepthAfterDequeue = 0;
 		size_t desiredQueueDepth = 1;
@@ -21559,6 +21869,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			bufferedExpansion = m_frameQueue.front().bufferedPictureExpansion;
             guardedReturn = m_frameQueue.front().guardedRememberedReturn;
 			callbackQpc = m_frameQueue.front().callbackQpc;
+			arrivalQpc = m_frameQueue.front().arrivalQpc;
+			frameFilmHz = m_frameQueue.front().filmHz;
 			enqueueQpc = m_frameQueue.front().enqueueQpc;
 			cadenceRepeat = m_frameQueue.front().cadenceRepeat;
 			cadenceActionId =
@@ -21575,13 +21887,15 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_frameQueue.front().cadenceDeadlineSeconds;
 			m_activePictureTimeline.MarkConsumed(
 				m_frameQueue.front().activePictureIdentity);
+			if (m_frameQueue.front().gapBefore && m_impl)
+				m_impl->RequestMotionInvalidate(false, m_frameQueue.front().gapCause);
 			m_frameQueue.pop_front();
 			nextConvertedPayload.reset();
 			nextSourceSequence = 0;
 			if (!m_frameQueue.empty())
 			{
 				const QueuedFrame& next = m_frameQueue.front();
-				if (next.generation == frameGeneration && !next.cadenceRepeat &&
+				if (next.generation == frameGeneration && !next.cadenceRepeat && !next.gapBefore && !next.filmUpdate &&
 					next.sourceSequence != sourceSequence && next.converted &&
 					SameDejudderVideoState(state, next.state))
 				{
@@ -21594,7 +21908,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (nextConvertedPayload && m_frameQueue.size() >= 2)
 			{
 				const QueuedFrame& after = m_frameQueue[1];
-				if (after.generation == frameGeneration && !after.cadenceRepeat &&
+				if (after.generation == frameGeneration && !after.cadenceRepeat && !after.gapBefore && !after.filmUpdate &&
 					after.sourceSequence != nextSourceSequence && after.sourceSequence != sourceSequence &&
 					after.converted && SameDejudderVideoState(state, after.state))
 				{
@@ -21710,8 +22024,22 @@ void LibplaceboVideoRenderer::RenderLoop()
 		SteadyClock::time_point dejudderMainDoneSteady{};
 		int64_t dejudderMainDoneQpc = 0;
 		timingclocktime_t dejudderMainDoneTimingClock{};
-		const double captureRateHz =
-			m_measuredFrameRate.load(std::memory_order_relaxed);
+		// The measured capture rate, or (stream robustness, owner 2026-10-14)
+		// the signal's nominal rate until it is measured - after a start, a
+		// resync or a reset - so the de-judder does not hold for seconds; its
+		// phase is re-anchored to each frame's arrival, so the ppm difference
+		// does not matter.
+		// With pulldown locked, the frame's film rate.
+		const double measuredCaptureRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
+		const double captureRateHz = frameFilmHz > 0.0 ? frameFilmHz : measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
+			(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0);
+		if (m_impl)
+		{
+			m_pulldownDetection.store(m_impl->activeSettings.dejudderPulldown, std::memory_order_relaxed);
+			m_impl->pulldownFilmHz = frameFilmHz;
+			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
+			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
+		}
 		const SteadyClock::time_point renderCycleStart = SteadyClock::now();
 		if (conversionFailed)
 		{
@@ -21837,6 +22165,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					bufferedExpansionCurrent ? &bufferedExpansion : nullptr,
                     guardedReturnCurrent ? &guardedReturn : nullptr,
 					callbackQpc,
+					arrivalQpc,
 					enqueueQpc,
 					dequeueQpc,
 					queueDepthAfterDequeue,
@@ -21924,6 +22253,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 								m_frameQueue.front().frame.SourceBufferRelease();
 								m_frameQueue.pop_front();
 								++droppedFrames;
+							}
+							if (droppedFrames > 0 && !m_frameQueue.empty())
+							{
+								m_frameQueue.front().gapBefore = true;
+								m_frameQueue.front().gapCause = "backlog flush";
 							}
 							queueAfter = m_frameQueue.size();
 							if (!m_frameQueue.empty())
@@ -22273,6 +22607,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 						repeatFrame.sourceSequence = sourceSequence;
 						repeatFrame.activePictureIdentity = activePictureIdentity;
 						repeatFrame.callbackQpc = callbackQpc;
+						repeatFrame.arrivalQpc = arrivalQpc;
+						repeatFrame.filmHz = frameFilmHz;
                         repeatFrame.subtitleBoxPreview = subtitlePreview;
                         repeatFrame.subtitleBoxPreview.newScanMs = 0.0;
                         repeatFrame.subtitleBoxPreview.newScanFrames = 0;
@@ -22516,9 +22852,10 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "capture_path=" << s.capturePath << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
-		<< "dejudder_even_includes_2997=" << s.dejudderEvenIncludes2997 << "\n"
+		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"
 		<< "dejudder_warp_rendered=" << s.dejudderWarpRendered << "\n"
 		<< "dejudder_estimate_ahead=" << s.dejudderEstimateAhead << "\n"
+		<< "dejudder_pulldown=" << s.dejudderPulldown << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"
@@ -22564,6 +22901,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.pixelTrustLo=" << m.pixelTrustLo << "\n"
 		<< "matcher.pixelTrustHi=" << m.pixelTrustHi << "\n"
 		<< "matcher.landingCheck=" << m.landingCheck << "\n"
+		<< "matcher.pictureArea=" << m.pictureArea << "\n"
 		<< "matcher.lowRes=" << m.lowRes << "\n"
 		<< "matcher.lowResAll=" << m.lowResAll << "\n"
 		<< "matcher.holdFeatherPx=" << m.holdFeatherPx << "\n"

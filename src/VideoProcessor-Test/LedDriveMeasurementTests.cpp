@@ -131,28 +131,34 @@ namespace VideoProcessorTest
 			Assert::IsTrue(builder.Build(Uniform(30.0)).cut, L"80 codes is a cut");
 			Assert::AreEqual(80.0, builder.LastDifference(), 1e-9);
 
-			StatsBuilder fading(config);
-			double apl = 120.0;
-			FrameStats stats;
-			for (int frame = 0; frame < config.fadeFrames; ++frame)
+			// The fade is in time (general): the same at 24p and 60p.
+			for (double fps : { 24.0, 60.0 })
 			{
-				stats = fading.Build(Uniform(apl));
-				Assert::IsFalse(stats.fade, L"Needs fade_frames declines");
-				apl -= 2.0;
-			}
-			stats = fading.Build(Uniform(apl));
-			Assert::IsTrue(stats.fade);
-			stats = fading.Build(Uniform(apl));
-			Assert::IsFalse(stats.fade, L"A held frame ends the fade");
+				const double step = 1000.0 / fps;
+				const int frames = static_cast<int>(std::ceil(config.fadeMs / step - 1e-9));
+				StatsBuilder fading(config);
+				double apl = 120.0;
+				FrameStats stats;
+				for (int frame = 0; frame < frames; ++frame)
+				{
+					stats = fading.Build(Uniform(apl), frame * step);
+					Assert::IsFalse(stats.fade, L"Needs fade_ms of declines");
+					apl -= 2.0 * 24.0 / fps;   // 48 APL per second
+				}
+				stats = fading.Build(Uniform(apl), frames * step);
+				Assert::IsTrue(stats.fade, L"A fade after fade_ms");
+				stats = fading.Build(Uniform(apl), (frames + 1) * step);
+				Assert::IsFalse(stats.fade, L"A held frame ends the fade");
 
-			StatsBuilder slow(config);
-			apl = 120.0;
-			for (int frame = 0; frame <= config.fadeFrames + 2; ++frame)
-			{
-				stats = slow.Build(Uniform(apl));
-				apl -= 0.25;
+				StatsBuilder slow(config);
+				apl = 120.0;
+				for (int frame = 0; frame <= frames + 2; ++frame)
+				{
+					stats = slow.Build(Uniform(apl), frame * step);
+					apl -= 6.0 / fps;   // 6 APL per second: under fade_min_slope
+				}
+				Assert::IsFalse(stats.fade, L"Below fade_min_slope is drift, not a fade");
 			}
-			Assert::IsFalse(stats.fade, L"Below fade_min_step is drift, not a fade");
 		}
 
 		// Step 7b: script mode is the script - real LPW1 and CNTR, VP's picture

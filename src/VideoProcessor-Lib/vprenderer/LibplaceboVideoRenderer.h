@@ -9,6 +9,7 @@
 #include <RememberedEdgeReturn.h>
 #include <vprenderer/BufferedPictureExpansion.h>
 #include <vprenderer/AlphaConversionTimingWindow.h>
+#include <vprenderer/PulldownDetector.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <atomic>
@@ -175,6 +176,22 @@ private:
 		AlphaSourceCrop::BufferedPictureExpansionProof bufferedPictureExpansion;
         GuardedRememberedEdgeReturnCertificate guardedRememberedReturn;
 		int64_t callbackQpc = 0;
+		// The capture hardware's arrival time on the QPC clock (0 = unknown):
+		// the de-judder's phase, free of callback scheduling jitter (stream
+		// robustness, owner 2026-10-14).
+		int64_t arrivalQpc = 0;
+		// Frames were lost just before this one (capture missed frames, an
+		// overflow drop or a backlog flush): the frame before it is not paired
+		// with it, and the motion history starts over (owner 2026-10-14).
+		bool gapBefore = false;
+		const char* gapCause = nullptr;   // why (a static string), for the log
+		// Pulldown locked (owner 2026-10-14): the film rate of this unique
+		// frame (0 = the signal's rate); arrivalQpc is then its even film time.
+		double filmHz = 0.0;
+		// Pulldown option b: a new picture on a repeat slot (e.g. a subtitle
+		// drawn by the source): the same film frame updated - shown at once,
+		// at that film frame's time, never paired for motion.
+		bool filmUpdate = false;
 		int64_t enqueueQpc = 0;
 		std::shared_ptr<const ConvertedPayload> converted;
 		bool conversionInProgress = false;
@@ -307,6 +324,22 @@ private:
 	std::atomic<timingclocktime_t> m_expectedPpmFrameTicks{0};
 	std::atomic<uint64_t> m_ppmFrameCount{0};
 	std::atomic<double> m_measuredFrameRate{0.0};
+	// Frames the capture missed (whole-period timestamp gaps), and the last
+	// time that was logged (stream robustness, owner 2026-10-14).
+	std::atomic<uint64_t> m_captureMissedFrames{0};
+	// Pulldown detection (owner 2026-10-14; dejudder_pulldown, off by
+	// default). The detector runs on the capture thread only; the switch is
+	// refreshed from the active settings by the render loop; Reset asks for a
+	// fresh start.
+	std::atomic<bool> m_pulldownDetection{false};
+	std::atomic<bool> m_pulldownResetRequested{false};
+	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
+	std::atomic<uint64_t> m_pulldownSkipped{0};
+	Pulldown::Detector m_pulldown;
+	Pulldown::FilmClock m_pulldownClock;
+	uint64_t m_pulldownSignature = 0;
+	int64_t m_pulldownFilmQpc = 0;   // the last film frame's even time (QPC)
+	std::atomic<ULONGLONG> m_captureMissedLogTick{0};
 	std::atomic<int> m_ppmDeviation{0};
 	std::atomic_bool m_hasPpmData{false};
 	std::atomic<bool> m_configuredScreenActive{false};

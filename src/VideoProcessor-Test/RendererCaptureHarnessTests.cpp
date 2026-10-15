@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <cstring>
 #include <sstream>
 #include <map>
@@ -151,10 +152,28 @@ namespace
 		}
 	};
 
+	// Stream faults (owner 2026-10-14): what each captured frame does. The
+	// default plan is the plain stream at the run's rate.
+	struct FrameStep
+	{
+		bool send = true;                // false = the capture missed this frame
+		int content = 0;                 // the picture: equal content = a bit-exact repeat
+		int64_t timestampOffsetUs = 0;   // <= 0: the hardware timestamp earlier (jitter)
+	};
+	struct FramePlan
+	{
+		int rateNumerator = 0;           // the signal's rate (0 = the run's own)
+		int rateDenominator = 1001;
+		double paceScale = 1.0;          // < 1: the source clock runs fast (drift)
+		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
+		std::function<FrameStep(int)> step;
+	};
+
 	// The renderer from its DLL, a profile with capture_path, frames for
 	// `seconds`, then stopped and destroyed.
 	RunResult Run(VideoFrameEncoding encoding, const std::string& capturePath, double seconds,
-		bool film = false, const std::string& extra = std::string(), bool onScreen = false)
+		bool film = false, const std::string& extra = std::string(), bool onScreen = false,
+		const FramePlan* plan = nullptr)
 	{
 		RunResult result;
 		{
@@ -176,7 +195,7 @@ namespace
 		{
 			std::ofstream config(configPath, std::ios::trunc);
 			config << "[general]\npersist_profile_selection: false\n"
-				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
+				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film || plan ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
 				<< extra;
 		}
 		// A small window off the screen.
@@ -203,8 +222,9 @@ namespace
 			const int width = 1920, height = 1080;
 			VideoStateComPtr state = new VideoState();
 			state->valid = true;
-			state->displayMode = film ? std::make_shared<DisplayMode>(width, height, false, 24000, 1001) :
-				std::make_shared<DisplayMode>(width, height, false, 60000, 1001);
+			const int rateNumerator = plan && plan->rateNumerator > 0 ? plan->rateNumerator : film ? 24000 : 60000;
+			const int rateDenominator = plan && plan->rateNumerator > 0 ? plan->rateDenominator : 1001;
+			state->displayMode = std::make_shared<DisplayMode>(width, height, false, rateNumerator, rateDenominator);
 			state->videoFrameEncoding = encoding;
 			state->colorspace = ColorSpace::REC_709;
 			state->eotf = EOTF::SDR;
@@ -217,15 +237,35 @@ namespace
 			std::vector<std::vector<BYTE>> ring(24, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
 			std::vector<SourceBuffer> buffers(ring.size());
 			const auto start = std::chrono::steady_clock::now();
-			const auto period = std::chrono::microseconds(film ? 41708 : 16683);
+			const auto period = std::chrono::microseconds(static_cast<int64_t>(
+				1e6 * rateDenominator / rateNumerator * (plan ? plan->paceScale : 1.0)));
+			const double ticksPerUs = static_cast<double>(clock.TimingClockTicksPerSecond()) / 1e6;
+			bool resetDone = false;
+			const timingclocktime_t startTicks = clock.TimingClockNow();
 			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
 			{
-				std::vector<BYTE>& buffer = ring[n % ring.size()];
-				if (encoding == VideoFrameEncoding::V210) FillV210(buffer, width, height, rowBytes, n);
-				else FillUyvy(buffer, width, height, rowBytes, n);
-				VideoFrame frame(buffer.data(), static_cast<uint64_t>(n + 1), clock.TimingClockNow(), &buffers[n % ring.size()],
-					clock.TimingClockNow());
-				renderer->OnVideoFrame(frame);
+				const FrameStep step = plan && plan->step ? plan->step(n) : FrameStep{ true, n, 0 };
+				if (plan && !resetDone && plan->resetAtSeconds >= 0.0 &&
+					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->resetAtSeconds))
+				{
+					// The player's HDMI re-sync: Reset, then the (same) signal again.
+					renderer->Reset();
+					renderer->OnVideoState(state);
+					resetDone = true;
+				}
+				if (step.send)
+				{
+					std::vector<BYTE>& buffer = ring[n % ring.size()];
+					if (encoding == VideoFrameEncoding::V210) FillV210(buffer, width, height, rowBytes, step.content);
+					else FillUyvy(buffer, width, height, rowBytes, step.content);
+					// The hardware timestamp: the frame's scheduled time, as a
+					// capture card stamps it, not when this (busy) loop sent it.
+					const timingclocktime_t stamp = startTicks +
+						static_cast<timingclocktime_t>(static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+							period * n).count() + step.timestampOffsetUs) * ticksPerUs);
+					VideoFrame frame(buffer.data(), static_cast<uint64_t>(n + 1), stamp, &buffers[n % ring.size()], stamp);
+					renderer->OnVideoFrame(frame);
+				}
 				MSG msg;
 				while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
 				std::this_thread::sleep_until(start + period * (n + 1));
@@ -305,6 +345,156 @@ namespace Tests
 				failures += r.presented ? 0 : 1;
 			}
 			Assert::AreEqual(0, failures, L"every on-screen run presented frames");
+		}
+
+		TEST_METHOD(StreamFaultsKeepTheDejudderSafeAndRecovering)
+		{
+			// Stream robustness and pulldown (owner 2026-10-14): each fault
+			// class injected into a 23.976p de-judder run, plus the pulldown
+			// cadences, through the real renderer. Hardware only.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"stream faults: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const std::string dejudder = "dejudder_strength: 0.25\n";
+			auto after = [](const RunResult& r, const std::string& marker, const std::string& text)
+			{
+				bool seen = false;
+				for (const std::string& line : r.log)
+				{
+					if (line.find(marker) != std::string::npos) seen = true;
+					else if (seen && line.find(text) != std::string::npos) return true;
+				}
+				return false;
+			};
+			auto report = [](const char* name, const RunResult& r)
+			{
+				Logger::WriteMessage((std::string("== ") + name + ": " + r.dejudderStatus).c_str());
+				for (const std::string& line : r.log)
+					if (line.find("missed") != std::string::npos || line.find("discontinuity") != std::string::npos ||
+						line.find("motion invalidated") != std::string::npos || line.find("Pulldown") != std::string::npos)
+						Logger::WriteMessage(("   " + line).c_str());
+			};
+			// Missed frames: two, then three, lost mid-stream. Counted (no rate
+			// reset), the motion history forgotten, and the de-judder estimates again.
+			{
+				FramePlan plan;
+				plan.step = [](int n) { FrameStep f; f.content = n; f.send = !(n == 60 || n == 61 || (n >= 90 && n <= 92)); return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 5.0, true, dejudder, false, &plan);
+				report("missed frames", r);
+				Assert::IsTrue(r.Logged("capture missed"), (L"missed: counted\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("capture timestamp discontinuity"), (L"missed: no rate reset\n" + r.Tail()).c_str());
+				// The history is forgotten after the gap (the cause may read
+				// "backlog flush" when an off-screen stall flushes the queue then).
+				Assert::IsTrue(after(r, "capture missed", "motion invalidated"),(L"missed: history forgotten\n" + r.Tail()).c_str());
+				Assert::IsTrue(after(r, "motion invalidated", "De-judder: estimating again"), (L"missed: recovers\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented);
+			}
+			// A duplicated picture (same content, on time): not a gap.
+			{
+				FramePlan plan;
+				plan.step = [](int n) { FrameStep f; f.content = n == 50 ? 49 : n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 4.0, true, dejudder, false, &plan);
+				report("duplicate", r);
+				Assert::IsFalse(r.Logged("capture missed"), (L"duplicate: not a gap\n" + r.Tail()).c_str());
+				// (An off-screen run may flush a backlog while shaders compile;
+				// only a duplicate-caused invalidation would be wrong.)
+				Assert::IsFalse(r.Logged("motion invalidated (missed frames") || r.Logged("motion invalidated (frame gap"),
+					(L"duplicate: no invalidation from it\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("De-judder: motion estimated"));
+				Assert::IsTrue(r.presented);
+			}
+			// Timestamp jitter up to 3 ms: no gap, no rate reset.
+			{
+				FramePlan plan;
+				plan.step = [](int n) { FrameStep f; f.content = n; f.timestampOffsetUs = -static_cast<int64_t>((n * 7919) % 3000); return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 4.0, true, dejudder, false, &plan);
+				report("jitter", r);
+				Assert::IsFalse(r.Logged("capture missed"), (L"jitter: not a gap\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("capture timestamp discontinuity"), (L"jitter: no rate reset\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("motion invalidated (missed frames") || r.Logged("motion invalidated (frame gap"),
+					(L"jitter: no invalidation from it\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("De-judder: motion estimated"));
+			}
+			// Clock drift: the source 0.1% fast (far beyond real ppm).
+			{
+				FramePlan plan;
+				plan.paceScale = 0.999;
+				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 4.0, true, dejudder, false, &plan);
+				report("drift", r);
+				Assert::IsFalse(r.Logged("capture missed"), (L"drift: not a gap\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("motion invalidated (missed frames") || r.Logged("motion invalidated (frame gap"),
+					(L"drift: no invalidation from it\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("De-judder: motion estimated"));
+			}
+			// A mid-stream HDMI re-sync: the de-judder released, then back.
+			{
+				FramePlan plan;
+				plan.resetAtSeconds = 2.0;
+				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 5.0, true, dejudder, false, &plan);
+				report("resync", r);
+				Assert::IsTrue(r.Logged("motion invalidated (resync"), (L"resync: released\n" + r.Tail()).c_str());
+				Assert::IsTrue(after(r, "motion invalidated (resync", "De-judder: estimating again"), (L"resync: recovers\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented);
+			}
+			// Pulldown: 24p carried in 29.97 (one repeat in five), in 59.94 (2:3)
+			// and 30p in 59.94 (2:2): locked, the repeats skipped, the de-judder
+			// on the film frames.
+			struct Cadence { const char* name; int rate; const char* pattern; const char* lockText; const char* cycleText; const char* extra; };
+			const Cadence cadences[] = {
+				{ "24p in 29.97", 30000, "NNNNR", "p film in 29.9", "(4 new of 5)", "dejudder_strength: 0.25\n" },
+				{ "24p in 59.94", 60000, "NRNRR", "p film in 59.9", "(2 new of 5)", "dejudder_strength: 0.25\n" },
+				{ "30p in 59.94", 60000, "NR", "p film in 59.9", "(1 new of 2)", "dejudder_strength: 0.25\ndejudder_strength_even: 0.5\ndejudder_even_rates: 30_and_29.97\n" } };
+			for (const Cadence& c : cadences)
+			{
+				FramePlan plan;
+				plan.rateNumerator = c.rate;
+				const std::string pattern = c.pattern;
+				plan.step = [pattern](int n)
+				{
+					// The film frame index: advances on each 'N' slot.
+					FrameStep f;
+					int film = 0;
+					for (int i = 1; i <= n; ++i) film += pattern[i % pattern.size()] == 'N' ? 1 : 0;
+					f.content = film;
+					return f;
+				};
+				const RunResult on = Run(VideoFrameEncoding::V210, "standard", 5.0, false,
+					std::string(c.extra) + "dejudder_pulldown: on\n", false, &plan);
+				report(c.name, on);
+				Assert::IsTrue(on.Logged(c.lockText) && on.Logged(c.cycleText), (std::wstring(L"pulldown locks: ") +
+					std::wstring(c.name, c.name + std::strlen(c.name)) + L"\n" + on.Tail()).c_str());
+				Assert::IsTrue(on.dejudderStatus.find("repeats skipped") != std::string::npos,
+					(L"pulldown on the stats line\n" + on.Tail()).c_str());
+				Assert::IsTrue(after(on, "Pulldown: ", "De-judder: motion estimated"),
+					(L"the de-judder runs on the film frames\n" + on.Tail()).c_str());
+				Assert::IsTrue(on.presented);
+				// Off (the default): nothing is detected or skipped.
+				const RunResult off = Run(VideoFrameEncoding::V210, "standard", 3.0, false, c.extra, false, &plan);
+				Assert::IsFalse(off.Logged("Pulldown:"), (L"pulldown off by default\n" + off.Tail()).c_str());
+			}
+			// Film then video: the lock is lost and no new picture is skipped.
+			{
+				FramePlan plan;
+				plan.rateNumerator = 30000;
+				plan.step = [](int n)
+				{
+					FrameStep f;
+					const int switchAt = 90;   // 3 s of 24-in-30, then 30p video
+					int film = 0;
+					for (int i = 1; i <= (n < switchAt ? n : switchAt); ++i) film += i % 5 != 4 ? 1 : 0;
+					f.content = n < switchAt ? film : film + (n - switchAt) + 1;
+					return f;
+				};
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 5.0, false,
+					dejudder + "dejudder_pulldown: on\n", false, &plan);
+				report("film then video", r);
+				Assert::IsTrue(r.Logged("(4 new of 5)"), (L"locks on the film\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Pulldown: lost"), (L"loses the lock on video\n" + r.Tail()).c_str());
+			}
 		}
 
 		TEST_METHOD(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)

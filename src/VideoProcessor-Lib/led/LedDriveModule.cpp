@@ -447,7 +447,7 @@ namespace LedDrive
 		if (lastFrameMs >= 0.0)
 		{
 			elapsed = std::max(1.0, std::min(timeMs - lastFrameMs, 250.0));
-			framePeriodMs = std::max(4.0, std::min(framePeriodMs + (elapsed - framePeriodMs) * 0.1, 100.0));
+			framePeriodMs = std::max(1.0, std::min(framePeriodMs + (elapsed - framePeriodMs) * 0.1, 100.0));   // 10 to 1000 frames per second
 		}
 		lastFrameMs = timeMs;
 		// Levels the driver wrote since the last frame: they went out during

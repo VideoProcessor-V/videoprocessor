@@ -623,7 +623,7 @@ namespace RendererProfileConfig
 			if (key == "dejudder_strength") return IsNumberInRange(value, 0.0, 1.0);
 			// Delta 10: even (2:2) cadences, and which rates take it.
 			if (key == "dejudder_strength_even") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "dejudder_even_rates") return IsChoice(value, { "30", "30_and_29.97" });
+			if (key == "dejudder_even_rates") return IsChoice(value, { "whole", "whole_and_1001", "30", "30_and_29.97" });
 			if (key == "dejudder_match_tolerance") return IsNumberInRange(value, 0.5, 16.0);
 			// 6b-2: below this share of trusted blocks a frame is held whole
 			// (a cut between A and B).
@@ -643,7 +643,7 @@ namespace RendererProfileConfig
 				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
 				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
 				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
-				key == "dejudder_landing_check")
+				key == "dejudder_landing_check" || key == "dejudder_pulldown" || key == "dejudder_picture_area")
 				return IsChoice(value, { "on", "off" });
 			// Motion fixes (owner 2026-10-13 night): M1 texture tolerance, M3's
 			// cut test, the coarse search range, the forward/backward agreement.

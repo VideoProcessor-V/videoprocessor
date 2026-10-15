@@ -149,6 +149,9 @@ namespace AdaptiveDownscale
 		void SetGrainField(const GrainField& field) { grainField = field; }
 		void ClearGrainField() { grainField = GrainField(); }
 		MapState LastMapState() const { return mapState; }
+		// Stream robustness (owner 2026-10-14): a discontinuity - the map no
+		// longer follows the content and starts over (consumers see NoField).
+		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; }
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded

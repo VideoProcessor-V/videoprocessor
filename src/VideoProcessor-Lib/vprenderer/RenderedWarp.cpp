@@ -34,6 +34,27 @@ vec2 rw_source(vec2 p)
     }
     return s;
 }
+// The output displacement whose source moves by d (source pixels): the
+// sample is at p - rw_moved(...). Without NLS the map is linear and the local
+// slope is exact (d / slope, as before). With NLS (owner 2026-10-14) two
+// Newton steps on the separable map make it exact near the sides, where the
+// slope changes across a large displacement.
+vec2 rw_moved(vec2 p, vec2 slope, vec2 d)
+{
+    vec2 q = p - d / slope;
+    if (nls_active > 0.5) {
+        vec2 target = rw_source(p) - d;
+        vec2 q0 = q;
+        for (int k = 0; k < 2; k++) {
+            vec2 sl = max(rw_source(q + vec2(0.5)) - rw_source(q - vec2(0.5)), vec2(1e-4));
+            q -= (rw_source(q) - target) / sl;
+        }
+        if (any(isnan(q)) || any(isinf(q)) || any(greaterThan(abs(q - q0), abs(d / slope) + vec2(2.0))))
+            q = q0;
+        return p - q;
+    }
+    return d / slope;
+}
 )GLSL"
 		const char* const WARP_FUNCTIONS_SOURCE_ONLY = RW_SOURCE_GLSL;
 		// The held rectangles (Geometry::holds), source pixels (x0, y0, x1, y1).
@@ -115,11 +136,12 @@ if (q.x < size.x && q.y < size.y) {
             }
 #endif
 #ifdef PIXEL_MOTION
-            moved = m * d / slope;
+            moved = rw_moved(p, slope, m * d);
             o = rw_cubic(p - moved);   // the weight's share of the motion
 #else
-            o = mix(texelFetch(cached, q, 0), rw_cubic(p - d / slope), m);
-            moved = m > 0.5 ? d / slope : vec2(0.0);   // a crossfade: the dominant part
+            vec2 dm_ = rw_moved(p, slope, d);
+            o = mix(texelFetch(cached, q, 0), rw_cubic(p - dm_), m);
+            moved = m > 0.5 ? dm_ : vec2(0.0);   // a crossfade: the dominant part
 #endif
         }
     } else
@@ -142,8 +164,8 @@ if (q.x < size.x && q.y < size.y) {
         } else
 #endif
         {
-            o = rw_cubic(p - d / slope);
-            moved = d / slope;
+            moved = rw_moved(p, slope, d);
+            o = rw_cubic(p - moved);
 #ifdef FEATHER
             // Delta 9 H1: the feather is in output pixels, the field in source.
             float hw = hold_weight(sp, feather_px * max(slope.x, slope.y));
@@ -174,7 +196,7 @@ if (b.x < size.x && b.y < size.y) {
 #endif
         if (!held && shift != 0.0 && field_vector(rw_source(p), v)) {
             vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
-            o.xy = shift * strength_scale() * block_strength(rw_source(p)) * v / slope;
+            o.xy = rw_moved(p, slope, shift * strength_scale() * block_strength(rw_source(p)) * v);
         }
     }
     if (any(isnan(o.xy)) || any(isinf(o.xy)))

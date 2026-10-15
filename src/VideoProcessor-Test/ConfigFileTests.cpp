@@ -32,6 +32,7 @@
 #include <UnifiedProfileRuntime.h>
 #include <VideoConversionOverride.h>
 #include <vprenderer/DejudderPolicy.h>
+#include <vprenderer/PulldownDetector.h>
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
@@ -802,9 +803,9 @@ namespace VideoProcessorTest
             const DejudderPolicy::Input ntsc = with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 29.97; i.displayHz = 59.94; });
             Assert::IsFalse(DejudderPolicy::ExtrasAllowed(ntsc));
             Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i)
-                { i.strengthEven = 1.0; i.sourceHz = 29.97; i.displayHz = 59.94; i.evenIncludes2997 = true; })));
+                { i.strengthEven = 1.0; i.sourceHz = 29.97; i.displayHz = 59.94; i.evenIncludes1001 = true; })));
             Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i)
-                { i.strengthEven = 1.0; i.evenIncludes2997 = true; })), L"30.00 takes it with both choices");
+                { i.strengthEven = 1.0; i.evenIncludes1001 = true; })), L"30.00 takes it with both choices");
             // 24p on 60 Hz: the uneven strength, whatever the even key says.
             const DejudderPolicy::Input film = with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 24.0; });
             Assert::AreEqual(0.25, DejudderPolicy::EffectiveStrength(film));
@@ -813,8 +814,64 @@ namespace VideoProcessorTest
             // 50p on 60 Hz (1.2) stays excluded; Low_Latency stays off.
             Assert::IsTrue(DejudderPolicy::Decide(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 50.0; })) == Reason::IneligibleCadence);
             Assert::IsTrue(DejudderPolicy::Decide(with([](auto& i) { i.strengthEven = 1.0; i.lowLatency = true; })) == Reason::LowLatency);
-            // Other 2:2 sources (25p on 50 Hz) keep today's behaviour.
-            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 25.0; i.displayHz = 50.0; })));
+            // General (owner 2026-10-14): any even cadence of a film-like
+            // source takes the even strength - 25p on 50 Hz, 24p on 48 and on
+            // 120 Hz, 30p on 120 Hz - and 1000/1001 sources only when chosen.
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 25.0; i.displayHz = 50.0; })));
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 24.0; i.displayHz = 48.0; })));
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 24.0; i.displayHz = 120.0; })));
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 30.0; i.displayHz = 120.0; })));
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 24000.0 / 1001; i.displayHz = 120000.0 / 1001; })));
+            Assert::IsTrue(DejudderPolicy::ExtrasAllowed(with([](auto& i)
+                { i.strengthEven = 1.0; i.sourceHz = 24000.0 / 1001; i.displayHz = 120000.0 / 1001; i.evenIncludes1001 = true; })));
+            // 50p and 60p are video on any display (owner): never.
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 60.0; i.displayHz = 120.0; })));
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strength = 1.0; i.sourceHz = 60.0; i.displayHz = 144.0; })));
+            Assert::IsFalse(DejudderPolicy::ExtrasAllowed(with([](auto& i) { i.strengthEven = 1.0; i.sourceHz = 50.0; i.displayHz = 100.0; })));
+        }
+
+        TEST_METHOD(DejudderPolicyIsGeneral)
+        {
+            // Film-like: up to about 30 fps, and 48p; 50p/60p are video.
+            for (double hz : { 12.0, 23.976, 24.0, 25.0, 29.97, 30.0, 47.952, 48.0 })
+                Assert::IsTrue(DejudderPolicy::IsFilmLike(hz));
+            for (double hz : { 0.0, 40.0, 50.0, 59.94, 60.0, 100.0, 120.0 })
+                Assert::IsFalse(DejudderPolicy::IsFilmLike(hz));
+            // The 1000/1001 rates.
+            for (double hz : { 24000.0 / 1001, 30000.0 / 1001, 48000.0 / 1001, 60000.0 / 1001, 23.976, 29.97 })
+                Assert::IsTrue(DejudderPolicy::IsRate1001(hz));
+            for (double hz : { 24.0, 25.0, 30.0, 48.0, 50.0, 60.0 })
+                Assert::IsFalse(DejudderPolicy::IsRate1001(hz));
+            // Uneven cadences at any rates: 24p on 60, 25p on 60, 24p on 100,
+            // 25p on 120, 24p on 144 (6.0 is even), 48p on 120 (2.5).
+            for (double ratio : { 2.5, 2.4, 100.0 / 24, 4.8, 120.0 / 48 })
+                Assert::IsTrue(DejudderPolicy::IsUnevenCadence(ratio));
+            // Even cadences N >= 2: 2:2, 24p on 72, 24p on 120 (5), 24p on 144 (6).
+            Assert::AreEqual(2, DejudderPolicy::EvenCycle(2.0));
+            Assert::AreEqual(3, DejudderPolicy::EvenCycle(3.0));
+            Assert::AreEqual(5, DejudderPolicy::EvenCycle(120.0 / 24));
+            Assert::AreEqual(5, DejudderPolicy::EvenCycle((120000.0 / 1001) / (24000.0 / 1001)));
+            Assert::AreEqual(6, DejudderPolicy::EvenCycle(144.0 / 24));
+            Assert::AreEqual(0, DejudderPolicy::EvenCycle(2.5));
+            Assert::AreEqual(0, DejudderPolicy::EvenCycle(1.0));
+            // The extras cap follows the ratio: a frame owns ceil(ratio)
+            // refreshes at most (24p on 60: 3, 2 extras; on 120: 5, 4 extras;
+            // 25p on 120: 5, 4 extras; 24p on 240: 10, 9 extras).
+            Assert::AreEqual(2, DejudderPolicy::MaxExtras(2.5));
+            Assert::AreEqual(2, DejudderPolicy::MaxExtras(60000.0 / 1001 / (24000.0 / 1001)));
+            Assert::AreEqual(1, DejudderPolicy::MaxExtras(2.0));
+            Assert::AreEqual(4, DejudderPolicy::MaxExtras(5.0));
+            Assert::AreEqual(4, DejudderPolicy::MaxExtras(4.8));
+            Assert::AreEqual(9, DejudderPolicy::MaxExtras(10.0));
+            Assert::AreEqual(0, DejudderPolicy::MaxExtras(1.0));
+            // Active on uneven cadences at high refresh rates.
+            DejudderPolicy::Input in;
+            in.strength = 0.25; in.haveNext = true; in.nextMatches = true;
+            for (auto rates : { std::make_pair(24.0, 100.0), std::make_pair(25.0, 120.0), std::make_pair(48.0, 120.0) })
+            {
+                in.sourceHz = rates.first; in.displayHz = rates.second;
+                Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active);
+            }
         }
 
         TEST_METHOD(DejudderPolicyRunsOnlyForUnevenCadenceWithANextFrame)
@@ -846,7 +903,14 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::IneligibleCadence); // 1.2: video
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::IneligibleCadence); // 1.5
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.6; }) == Reason::IneligibleCadence); // 1.96: within 0.05 of 2
-            Assert::IsFalse(DejudderPolicy::IsUnevenCadence(1.94));
+            Assert::IsFalse(DejudderPolicy::IsUnevenCadence(1.03));   // ~1: nothing to fill
+            // Film under 2 refreshes per frame (owner 2026-10-14): 24p and 23.976p
+            // on 30 Hz, 25p on 30, 20p on 30.
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24.0; i.displayHz = 30.0; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 24000.0 / 1001; i.displayHz = 30000.0 / 1001; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 25.0; i.displayHz = 30.0; }) == Reason::Active);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 20.0; i.displayHz = 30.0; }) == Reason::Active);
+            Assert::AreEqual(1, DejudderPolicy::MaxExtras(30.0 / 24.0));
             // 6c mask-only mode: the estimate runs for the occlusion mask on any
             // cadence and with strength 0, but extras need strength > 0 and an
             // uneven film cadence.
@@ -1035,9 +1099,203 @@ namespace VideoProcessorTest
             for (size_t i = 0; i < DejudderPolicy::LatencyFloor::Capacity; ++i)
                 floor.Add(0.120);
             Assert::AreEqual(0.120, floor.Floor(), 0.0, L"Old values leave the window");
-            Assert::AreEqual(DejudderPolicy::LatencyFloor::Capacity, floor.Count());
+            // One early outlier among a full window does not move the floor
+            // (stream robustness, owner 2026-10-14: the 5th percentile).
+            floor.Add(0.090);
+            Assert::AreEqual(0.120, floor.Floor(), 0.0, L"A single early outlier is ignored");
+            for (int i = 0; i < 10; ++i) floor.Add(0.110);
+            Assert::AreEqual(0.110, floor.Floor(), 0.0, L"A real, sustained earlier latency is followed");
+            Assert::AreEqual(floor.Window(), floor.Count());
+            // The window is five seconds at any source rate.
+            floor.SetSourceRate(60.0);
+            Assert::AreEqual(size_t{ 300 }, floor.Window());
+            floor.SetSourceRate(24000.0 / 1001);
+            Assert::AreEqual(size_t{ 120 }, floor.Window());
             floor.Reset();
             Assert::AreEqual(size_t{ 0 }, floor.Count());
+        }
+
+        // Pulldown detection (owner 2026-10-14): feed a repeat pattern, return
+        // the decisions.
+        static std::vector<Pulldown::Decision> FeedPulldown(Pulldown::Detector& detector, const std::string& frames,
+            double signalHz, const std::string& gaps = std::string())
+        {
+            std::vector<Pulldown::Decision> decisions;
+            for (size_t i = 0; i < frames.size(); ++i)
+                decisions.push_back(detector.Next(frames[i] == 'R', i < gaps.size() && gaps[i] == 'G', signalHz));
+            return decisions;
+        }
+
+        // The repeat pattern of `filmHz` carried in `signalHz` the way a source
+        // does it: each signal frame shows the latest film frame due.
+        static std::string CarriedPattern(double filmHz, double signalHz, size_t frames)
+        {
+            std::string pattern;
+            long long previous = -1;
+            for (size_t i = 0; i < frames; ++i)
+            {
+                const long long film = static_cast<long long>(std::floor(static_cast<double>(i) * filmHz / signalHz + 1e-9));
+                pattern += film == previous ? 'R' : 'N';
+                previous = film;
+            }
+            return pattern;
+        }
+
+        TEST_METHOD(PulldownLocksOntoAnyRateCombination)
+        {
+            // General (owner 2026-10-14): no rate is fixed. Exact rates and the
+            // 1000/1001 family.
+            struct Case { double film, signal; int cycle, unique; };
+            const Case cases[] = {
+                { 24.0, 60.0, 5, 2 }, { 24000.0 / 1001, 60000.0 / 1001, 5, 2 }, { 24.0, 30.0, 5, 4 },
+                { 24000.0 / 1001, 30000.0 / 1001, 5, 4 }, { 30.0, 60.0, 2, 1 }, { 25.0, 50.0, 2, 1 },
+                { 24.0, 50.0, 25, 12 }, { 25.0, 60.0, 12, 5 }, { 24.0, 120.0, 5, 1 }, { 30.0, 120.0, 4, 1 },
+                { 24.0, 48.0, 2, 1 }, { 24.0, 72.0, 3, 1 }, { 50.0, 100.0, 2, 1 }, { 20.0, 60.0, 3, 1 },
+                { 48.0, 60.0, 5, 4 } };
+            for (const Case& c : cases)
+            {
+                const std::wstring name = std::to_wstring(c.film) + L" in " + std::to_wstring(c.signal);
+                // Start part-way into a cycle: the phase is found, not assumed.
+                const std::string frames = CarriedPattern(c.film, c.signal, static_cast<size_t>(c.signal * 4) + 3).substr(3);
+                Pulldown::Detector detector;
+                const auto decisions = FeedPulldown(detector, frames, c.signal);
+                Assert::IsTrue(decisions.back().locked, (name + L": locked").c_str());
+                Assert::AreEqual(c.cycle, decisions.back().cycle, (name + L": cycle").c_str());
+                Assert::AreEqual(c.unique, decisions.back().unique, (name + L": new frames").c_str());
+                Assert::AreEqual(c.film, decisions.back().filmHz, c.film * 1e-9, (name + L": film rate").c_str());
+                size_t lockAt = 0;
+                while (!decisions[lockAt].locked) ++lockAt;
+                const size_t need = static_cast<size_t>(Pulldown::Detector::FramesToLock(c.cycle, c.signal));
+                Assert::IsTrue(lockAt + 1 >= need, (name + L": not before two seconds and three cycles").c_str());
+                Assert::IsTrue(lockAt + 1 <= need + static_cast<size_t>(c.cycle), (name + L": soon after").c_str());
+                // From the lock on, exactly the repeats are dropped; kept frames
+                // count up one by one.
+                uint64_t kept = 0;
+                for (size_t i = lockAt; i < decisions.size(); ++i)
+                {
+                    Assert::AreEqual(frames[i] == 'R', decisions[i].drop, (name + L": drops only the repeats").c_str());
+                    if (!decisions[i].drop)
+                        Assert::AreEqual(++kept, decisions[i].filmIndex);
+                }
+            }
+        }
+
+        TEST_METHOD(PulldownNeverLocksOnVideoStillsOrChanceRepeats)
+        {
+            auto neverLocks = [](const std::string& frames, double signalHz, const wchar_t* what)
+            {
+                Pulldown::Detector detector;
+                for (const auto& d : FeedPulldown(detector, frames, signalHz))
+                    Assert::IsFalse(d.locked || d.drop, what);
+            };
+            neverLocks(std::string(600, 'N'), 60.0, L"Every frame new: video");
+            neverLocks(std::string(600, 'R'), 60.0, L"A still picture");
+            // Chance repeats (a stuttering source): pseudo-random, 20% and 50%.
+            for (int share : { 20, 50 })
+            {
+                std::string frames;
+                uint32_t x = 12345u;
+                for (int i = 0; i < 1200; ++i) { x = x * 1103515245u + 12345u; frames += (x >> 16) % 100 < static_cast<uint32_t>(share) ? 'R' : 'N'; }
+                neverLocks(frames, 60.0, L"Random repeats");
+            }
+            // A regular pattern whose film rate is under 15 fps: animation on
+            // twos at 24 (12 fps) and in 2:3 at 60 (12 fps), threes at 30 (10).
+            neverLocks(CarriedPattern(12.0, 24.0, 600), 24.0, L"Twos at 24: 12 fps");
+            neverLocks(CarriedPattern(12.0, 60.0, 600), 60.0, L"Twos carried 2:3: 12 fps");
+            neverLocks(CarriedPattern(10.0, 30.0, 600), 30.0, L"Threes at 30: 10 fps");
+            // Bunched repeats (right count, uneven): never real pulldown.
+            std::string bunched;
+            while (bunched.size() < 600) bunched += "NNRRR";   // 24 fps worth at 60, held 1 and 4
+            neverLocks(bunched, 60.0, L"Uneven holds");
+            std::string bunched30;
+            while (bunched30.size() < 600) bunched30 += "NNNRR";   // 18 fps at 30, held 1,1,3
+            neverLocks(bunched30, 30.0, L"Uneven holds at 30");
+            // A burst of a real pattern shorter than two seconds inside video.
+            for (double film : { 24.0, 30.0 })
+            {
+                std::string frames(60, 'N');
+                frames += CarriedPattern(film, 60.0, 110);   // 1.83 s
+                frames += std::string(60, 'N');
+                neverLocks(frames, 60.0, L"A burst under two seconds");
+            }
+            // A regular pattern broken once a second (a periodic glitch).
+            std::string glitched = CarriedPattern(24.0, 60.0, 600);
+            for (size_t i = 37; i < glitched.size(); i += 60) glitched[i] = glitched[i] == 'R' ? 'N' : 'R';
+            neverLocks(glitched, 60.0, L"Broken once a second");
+        }
+
+        TEST_METHOD(PulldownKeepsItsLockThroughStillsAndDropsItOnABreak)
+        {
+            // A still picture inside a lock: kept, only the cycle's own repeat
+            // slots dropped (the clock stays even).
+            Pulldown::Detector detector;
+            Assert::IsTrue(FeedPulldown(detector, CarriedPattern(24.0, 30.0, 90), 30.0).back().locked);
+            int dropped = 0;
+            for (const auto& d : FeedPulldown(detector, std::string(20, 'R'), 30.0))
+            {
+                Assert::IsTrue(d.locked, L"A still picture does not break the lock");
+                dropped += d.drop ? 1 : 0;
+            }
+            Assert::AreEqual(4, dropped, L"One drop per five frames, as the cycle");
+
+            // Video after film: new pictures where repeats belong unlock it and
+            // no new picture is ever dropped.
+            detector.Reset();
+            FeedPulldown(detector, CarriedPattern(24.0, 60.0, 180), 60.0);
+            const auto video = FeedPulldown(detector, std::string(10, 'N'), 60.0);
+            Assert::IsFalse(video.back().locked, L"Video after film unlocks");
+            for (const auto& d : video)
+                Assert::IsFalse(d.drop, L"A new picture is never dropped");
+            // ... and the next lock needs a fresh two seconds.
+            const auto again = FeedPulldown(detector, CarriedPattern(24.0, 60.0, 119), 60.0);
+            Assert::IsFalse(again.back().locked, L"No quick re-lock");
+
+            // A gap: the lock and history go; found again after two seconds.
+            detector.Reset();
+            const std::string film = CarriedPattern(24.0, 60.0, 300);
+            Assert::IsTrue(FeedPulldown(detector, film, 60.0).back().locked);
+            std::string gaps(film.size(), '.');
+            gaps[0] = 'G';
+            const auto after = FeedPulldown(detector, film, 60.0, gaps);
+            Assert::IsFalse(after.front().locked, L"A gap drops the lock");
+            Assert::IsTrue(after.back().locked, L"... and it is found again");
+
+            // The signal rate moving (a new mode without a resync) drops it;
+            // ppm drift of the same signal does not.
+            const auto moved = FeedPulldown(detector, "N", 50.0);
+            Assert::IsFalse(moved.front().locked || moved.front().drop, L"A rate change drops the lock");
+            detector.Reset();
+            FeedPulldown(detector, film, 60.0);
+            Assert::IsTrue(FeedPulldown(detector, CarriedPattern(24.0, 60.0, 310).substr(300), 60.0 * 1.0001).back().locked,
+                L"Drift keeps the lock");
+        }
+
+        TEST_METHOD(PulldownEvenPatternRule)
+        {
+            Assert::IsTrue(Pulldown::IsEvenPattern("NRNRR"));
+            Assert::IsTrue(Pulldown::IsEvenPattern("NNNNR"));
+            Assert::IsTrue(Pulldown::IsEvenPattern("RNR"));
+            Assert::IsFalse(Pulldown::IsEvenPattern("NNRRR"));
+            Assert::IsFalse(Pulldown::IsEvenPattern("NNNN"));
+            Assert::IsFalse(Pulldown::IsEvenPattern("RRRR"));
+        }
+
+        TEST_METHOD(PulldownFilmClockIsEvenAndNeverEarly)
+        {
+            // 24p in 60 Hz: kept frames arrive at signal frames 0, 2, 5, 7, 10 ...
+            Pulldown::FilmClock clock;
+            const double period = 1.0 / 60.0;
+            const int arrivals[] = { 0, 2, 5, 7, 10, 12, 15, 17, 20, 22, 25, 27 };
+            double previous = -1.0;
+            for (int n = 0; n < 12; ++n)
+            {
+                const double arrival = 3.0 + arrivals[n] * period;
+                const double t = clock.Time(static_cast<uint64_t>(n + 1), arrival, 24.0);
+                Assert::IsTrue(t >= arrival - 1e-12, L"Never before the frame arrived");
+                if (n >= 2)
+                    Assert::AreEqual(1.0 / 24.0, t - previous, 1e-9, L"Even 24 Hz spacing once settled");
+                previous = t;
+            }
         }
 
         TEST_METHOD(EdgeBlankingRejectsInvalidValues)

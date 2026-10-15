@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <utility>
+#include <vector>
 
 // Stage 6b: when the de-judder may run for a source frame, and (6b-2) whether
 // one more extra present may fill the next refresh. Pure logic, so the
@@ -21,8 +22,8 @@ namespace DejudderPolicy
 		LowLatency,       // the Low_Latency queue is active
 		Interlaced,       // an interlaced input mode (field rate unclear)
 		UnknownRates,     // source or display rate not known yet
-		IneligibleCadence, // a whole number of refreshes per source frame, or under 2 (video)
-		VideoRateMaskOnly, // mask / grain map alone, source above film rates (planner 6c, 8-3)
+		IneligibleCadence, // no strength for this cadence, under 2 refreshes per frame, or a video-rate source
+		VideoRateMaskOnly, // mask / grain map alone on a video-rate source (planner 6c, 8-3)
 		NativeRgb,        // an RGB capture: no YCbCr planes to warp
 		PlaneFormat,      // A's planes cannot be sampled linearly / stored
 		NoNextFrame,      // B not queued or not converted yet
@@ -32,10 +33,12 @@ namespace DejudderPolicy
 	struct Input
 	{
 		double strength = 0.0;
-		// Delta 10 (docs/VP-delta-8-9-10.md): the strength for even (2:2)
-		// cadences, 0 = off; and whether 29.97 takes it besides 30.00.
+		// Delta 10 (docs/VP-delta-8-9-10.md), made general (owner 2026-10-14):
+		// the strength for even cadences (a whole number of refreshes per
+		// film frame), 0 = off; and whether sources at a 1000/1001 rate (23.976,
+		// 29.97, 47.952: broadcast-derived) take it besides whole-number rates.
 		double strengthEven = 0.0;
-		bool evenIncludes2997 = false;
+		bool evenIncludes1001 = false;
 		bool occlusionMask = false;   // 6c: the estimate also runs for the mask alone
 		bool grainMap = false;        // 8-3: and for the adaptive downscale's grain map alone
 		bool lowLatency = false;
@@ -54,48 +57,90 @@ namespace DejudderPolicy
 		return sourceHz > 0.0 ? displayHz / sourceHz : 0.0;
 	}
 
-	// Extras only fill an uneven film cadence (planner 6b-2 item 4 and 6b-2a):
-	// 24p on 60 Hz (2.5) or 25p on 60 Hz (2.4), never an N:N cadence (25p/50,
-	// 30p/60, 24p/48), and never under 2 refreshes per frame (50p on 60 Hz is
-	// video: its one-in-five extra would be motion smoothing). +-0.05 absorbs
-	// 23.976/24 and 59.94/60.
+	// Everything here is general (owner 2026-10-14): no source rate, display
+	// rate or cadence is fixed; only the ratio and the source's class count.
+	//
+	// The source class: film-like sources are the measured rates up to about
+	// 30 fps and 48p HFR film; 50p and 60p (sport, video) and anything else
+	// are video, never de-juddered on any display (owner).
+	inline bool IsFilmLike(double sourceHz)
+	{
+		return (sourceHz > 0.0 && sourceHz <= 30.5) || (sourceHz >= 47.5 && sourceHz <= 48.5);
+	}
+
+	// +-0.05 refreshes absorbs the 1000/1001 rates and measured drift.
+	constexpr double kCadenceTolerance = 0.05;
+
+	// Uneven cadence (planner 6b-2 item 4 and 6b-2a, general): more than one
+	// refresh per film frame and not a whole number - 24p on 60 Hz = 2.5,
+	// 25p on 60 = 2.4, 24p on 100 = 4.17, and (owner 2026-10-14) under 2 as
+	// well: 24p on 30 Hz = 1.25 (the frames owning a second refresh get an
+	// extra at 0.8), 25p on 30 = 1.2, 20p on 30 = 1.5. Video is excluded by
+	// the source class (IsFilmLike), not by the ratio.
 	inline bool IsUnevenCadence(double ratio)
 	{
-		if (!(ratio >= 1.95))
+		if (!(ratio > 1.0 + kCadenceTolerance))
 			return false;
-		return std::abs(ratio - std::round(ratio)) > 0.05;
+		return std::abs(ratio - std::round(ratio)) > kCadenceTolerance;
 	}
 
-	// Delta 10: a 2:2 cadence (30p on 60 Hz, 25p on 50 Hz, 24p on 48 Hz).
-	inline bool IsEvenCadence(double ratio)
+	// Even cadence (delta 10, general): a whole number N >= 2 of refreshes per
+	// film frame (30p on 60, 25p on 50, 24p on 48, 24p on 120, 30p on 120).
+	// 0 when not even. Its extras sit at the exact phases k/N.
+	inline int EvenCycle(double ratio)
 	{
-		return std::abs(ratio - 2.0) <= 0.05;
+		const double n = std::round(ratio);
+		return n >= 2.0 && std::abs(ratio - n) <= kCadenceTolerance ? static_cast<int>(n) : 0;
 	}
+	inline bool IsEvenCadence(double ratio) { return EvenCycle(ratio) != 0; }
 
-	// Delta 10: the source rates the even strength applies to: exact 30.00
-	// (+-0.01), and 29.97 (+-0.01) when chosen. Other 2:2 sources (25p on
-	// 50 Hz, 24p on 48 Hz) keep today's behaviour.
-	inline bool EvenRateSelected(double sourceHz, bool includes2997)
+	// A source at a 1000/1001 rate (23.976, 29.97, 47.952): measured within
+	// 0.05% of whole-number x 1000/1001 and not of a whole number itself.
+	inline bool IsRate1001(double sourceHz)
 	{
-		return std::abs(sourceHz - 30.0) <= 0.01 || (includes2997 && std::abs(sourceHz - 29.97) <= 0.01);
+		if (!(sourceHz > 0.0))
+			return false;
+		const double whole = std::round(sourceHz);
+		const double family = std::round(sourceHz * 1.001);
+		return std::abs(sourceHz - whole) > whole * 0.0003 &&
+			std::abs(sourceHz - family * 1000.0 / 1001.0) <= family * 0.0005;
 	}
 
-	// The strength the extras run at: dejudder_strength on an uneven film
-	// cadence, dejudder_strength_even on a selected 2:2 cadence, else 0.
+	// The source rates the even strength applies to: whole-number rates, and
+	// the 1000/1001 rates when chosen (dejudder_even_rates).
+	inline bool EvenRateSelected(double sourceHz, bool includes1001)
+	{
+		return includes1001 || !IsRate1001(sourceHz);
+	}
+
+	// The strength the extras run at: dejudder_strength on an uneven cadence,
+	// dejudder_strength_even on a selected even cadence, else 0; only for a
+	// film-like source.
 	inline double EffectiveStrength(const Input& in)
 	{
+		if (!IsFilmLike(in.sourceHz))
+			return 0.0;
 		const double ratio = CadenceRatio(in.sourceHz, in.displayHz);
 		if (IsUnevenCadence(ratio))
 			return in.strength;
-		if (IsEvenCadence(ratio) && EvenRateSelected(in.sourceHz, in.evenIncludes2997))
+		if (IsEvenCadence(ratio) && EvenRateSelected(in.sourceHz, in.evenIncludes1001))
 			return in.strengthEven;
 		return 0.0;
 	}
 
+	// The most extras one film frame may have: the refreshes it owns minus
+	// its own (24p on 60 = 2, on 120 = 4, 25p on 120 = 4); PlanExtra's timing
+	// stops earlier when the next frame is due.
+	inline int MaxExtras(double ratio)
+	{
+		if (!(ratio > 1.0))
+			return 0;
+		const int owned = static_cast<int>(std::ceil(ratio - kCadenceTolerance));
+		return std::min(std::max(owned - 1, 0), 15);
+	}
+
 	// The order is the order of the checks: the first that fails is the
 	// reason reported.
-	// Mask-only mode is for film rates (planner 6b-2b/6c, item 3).
-	constexpr double kMaskOnlyMaxSourceHz = 30.5;
 
 	// Whether the motion estimate runs. It runs for the de-judder (strength
 	// > 0, uneven film cadence) and, with the occlusion mask or the grain
@@ -111,8 +156,8 @@ namespace DejudderPolicy
 		const bool extras = EffectiveStrength(in) > 0.0;
 		if (!extras && !alone)
 			return Reason::IneligibleCadence;
-		// Without extras the estimate runs for the mask / map alone: film rates only.
-		if (!extras && in.sourceHz > kMaskOnlyMaxSourceHz)
+		// Without extras the estimate runs for the mask / map alone: film-like sources only.
+		if (!extras && !IsFilmLike(in.sourceHz))
 			return Reason::VideoRateMaskOnly;
 		if (in.nativeRgb) return Reason::NativeRgb;
 		if (!in.planeFormatsUsable) return Reason::PlaneFormat;
@@ -137,8 +182,8 @@ namespace DejudderPolicy
 		case Reason::LowLatency: return "low-latency queue";
 		case Reason::Interlaced: return "interlaced input";
 		case Reason::UnknownRates: return "rates not known";
-		case Reason::IneligibleCadence: return "cadence not eligible (even without its strength, or video)";
-		case Reason::VideoRateMaskOnly: return "mask / grain map only above film rates";
+		case Reason::IneligibleCadence: return "cadence not eligible (no strength for it, or a video-rate source)";
+		case Reason::VideoRateMaskOnly: return "mask / grain map off: a video-rate source";
 		case Reason::NativeRgb: return "RGB capture";
 		case Reason::PlaneFormat: return "plane format unsuitable";
 		case Reason::NoNextFrame: return "next frame not ready";
@@ -264,30 +309,45 @@ namespace DejudderPolicy
 		return true;
 	}
 
-	// The floor of recent (first vsync - callback) values: the constant L.
+	// The floor of recent (first vsync - arrival) values: the constant L, over
+	// the last kWindowSeconds of source frames at any rate.
 	class LatencyFloor
 	{
 	public:
-		static constexpr size_t Capacity = 120;   // 5 s at 24p
+		static constexpr double kWindowSeconds = 5.0;
+		static constexpr size_t Capacity = 1200;   // 5 s at up to 240 frames per second
 		void Reset() { count = 0; next = 0; }
+		// The window for this source rate (frames in kWindowSeconds); a change
+		// starts over.
+		void SetSourceRate(double sourceHz)
+		{
+			const size_t frames = sourceHz > 0.0 ?
+				std::min(Capacity, std::max<size_t>(20, static_cast<size_t>(std::ceil(sourceHz * kWindowSeconds)))) : 120;
+			if (frames != window) { window = frames; Reset(); }
+		}
+		size_t Window() const { return window; }
 		void Add(double value)
 		{
 			values[next] = value;
-			next = (next + 1) % Capacity;
-			count = std::min(count + 1, Capacity);
+			next = (next + 1) % window;
+			count = std::min(count + 1, window);
 		}
 		size_t Count() const { return count; }
+		// The minimum while few values are known; from 20 on the 5th
+		// percentile, so one early outlier (a jittered callback) does not
+		// shift every extra's phase (stream robustness, owner 2026-10-14).
 		double Floor() const
 		{
 			if (count == 0) return 0.0;
-			double floor = values[0];
-			for (size_t i = 1; i < count; ++i)
-				floor = std::min(floor, values[i]);
-			return floor;
+			std::vector<double> sorted(values, values + count);
+			const size_t k = count < 20 ? 0 : count / 20;
+			std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(k), sorted.end());
+			return sorted[k];
 		}
 
 	private:
 		double values[Capacity] = {};
+		size_t window = 120;   // 5 s at 24p until a rate is known
 		size_t count = 0;
 		size_t next = 0;
 	};

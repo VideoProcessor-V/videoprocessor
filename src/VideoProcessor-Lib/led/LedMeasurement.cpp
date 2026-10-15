@@ -105,16 +105,24 @@ namespace LedDrive
 		if (stats.cut) sustainHistory.clear();
 		stats.sustainedApl = WindowMinimum(sustainHistory, timeMs, stats.apl, config.aplPersistMs);
 
-		// Fade: APL fell by at least fade_min_step on each of the last
-		// fade_frames frames, with no cut among them.
+		// Fade (in time, any frame rate): APL fell between every pair of
+		// frames over at least the last fade_ms, each step at no less than
+		// fade_min_slope per second, with no cut among them.
 		if (stats.cut) aplHistory.clear();
-		aplHistory.push_back(stats.apl);
-		while (static_cast<int>(aplHistory.size()) > config.fadeFrames + 1) aplHistory.pop_front();
-		if (static_cast<int>(aplHistory.size()) == config.fadeFrames + 1)
+		aplHistory.push_back({ timeMs, stats.apl });
+		// Keep the newest sample at or before the window's start, so the
+		// samples kept span the whole window.
+		while (aplHistory.size() > 2 && aplHistory[1].time <= timeMs - config.fadeMs + 1e-6)
+			aplHistory.pop_front();
+		if (aplHistory.size() >= 2 && timeMs - aplHistory.front().time >= config.fadeMs - 1e-6)
 		{
 			bool falling = true;
 			for (size_t i = 1; i < aplHistory.size(); ++i)
-				falling = falling && aplHistory[i - 1] - aplHistory[i] >= config.fadeMinStep;
+			{
+				const double seconds = std::max(0.0, aplHistory[i].time - aplHistory[i - 1].time) / 1000.0;
+				const double drop = aplHistory[i - 1].value - aplHistory[i].value;
+				falling = falling && drop > 0.0 && drop >= config.fadeMinSlope * seconds - 1e-9;
+			}
 			stats.fade = falling;
 		}
 		return stats;

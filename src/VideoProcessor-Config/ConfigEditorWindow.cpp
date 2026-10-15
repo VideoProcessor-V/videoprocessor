@@ -6352,12 +6352,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         dejudderPreset->addItem(QStringLiteral("Medium"), QStringLiteral("0.35"));
         dejudderPreset->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
         dejudderPreset->setToolTip(QStringLiteral(
-            "Smooths 24p film motion on a 60 Hz display by filling the repeated refreshes with "
-            "slightly moved pictures. Gentle (0.25) is the recommended start; Medium is 0.35; "
-            "Custom takes the strength typed below. Only for 24p/25p film; off in the low-latency queue "
-            "and for RGB or interlaced input."));
+            "Smooths film motion when the display's refreshes do not divide evenly into film frames "
+            "(e.g. 24p on 60 Hz), by filling the repeated refreshes with slightly moved pictures. "
+            "Gentle (0.25) is the recommended start; Medium is 0.35; Custom takes the strength typed below. "
+            "Film-like sources only (up to about 30 fps, and 48p); off for 50p/60p video, in the low-latency "
+            "queue and for RGB or interlaced input."));
         form->addRow(QStringLiteral("De-judder"), dejudderPreset);
-        auto* dejudderStrength = addText(QStringLiteral("Strength, 24p/25p on 60 Hz (0 to 1)"),
+        auto* dejudderStrength = addText(QStringLiteral("Strength (uneven cadences, e.g. 24p on 60 Hz)"),
             QStringLiteral("dejudder_strength"));
         dejudderStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderStrength));
         dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; Gentle 0.25, Medium 0.35"));
@@ -6391,39 +6392,51 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             const QSignalBlocker blocker(dejudderPreset);
             dejudderPreset->setCurrentIndex(index);
         });
-        // Delta 10: even (2:2) cadences, e.g. 30p nature documentaries on 60 Hz.
-        auto* strengthEven = addText(QStringLiteral("Strength, 30p on 60 Hz (0 to 1)"),
+        // Delta 10: even cadences (a whole number of refreshes per film frame).
+        auto* strengthEven = addText(QStringLiteral("Strength (even cadences, e.g. 30p on 60 Hz)"),
             QStringLiteral("dejudder_strength_even"));
         strengthEven->setValidator(new QDoubleValidator(0.0, 1.0, 3, strengthEven));
         strengthEven->setPlaceholderText(QStringLiteral("0 = off"));
         strengthEven->setToolTip(QStringLiteral(
-            "For 30p material (documentaries shot to look real), where the 30 Hz strobing on slow pans is "
-            "what shows: one in-between picture per film frame at the exact midpoint. 1.0 is true frame-rate "
-            "doubling. Its quality rides on the motion estimate: held regions stay at 30 Hz inside a smooth "
-            "picture; landscapes do well, fast foreground action holds more. 0 = off (24p is set above)."));
-        auto* evenRates = addChoice(QStringLiteral("30p strength applies to"),
-            QStringLiteral("dejudder_even_rates"), { QStringLiteral("30"), QStringLiteral("30_and_29.97") });
-        evenRates->setItemText(evenRates->findData(QStringLiteral("30")), QStringLiteral("30.00 only"));
-        evenRates->setItemText(evenRates->findData(QStringLiteral("30_and_29.97")),
-            QStringLiteral("30.00 and 29.97 (broadcast TV)"));
+            "When each film frame is shown for a whole number of refreshes (e.g. 30p on 60 Hz, 25p on 50 Hz), "
+            "the strobing on slow pans is what shows: the repeats become evenly spaced in-between pictures. "
+            "1.0 is full frame-rate conversion. Held regions keep the source rate; landscapes do well, fast "
+            "action holds more. 0 = off (uneven cadences use the strength above)."));
+        auto* evenRates = addChoice(QStringLiteral("Even strength applies to"),
+            QStringLiteral("dejudder_even_rates"), { QStringLiteral("whole"), QStringLiteral("whole_and_1001") });
+        evenRates->setItemText(evenRates->findData(QStringLiteral("whole")),
+            QStringLiteral("Whole-number rates (24, 25, 30)"));
+        evenRates->setItemText(evenRates->findData(QStringLiteral("whole_and_1001")),
+            QStringLiteral("Also 1000/1001 rates (23.976, 29.97)"));
         evenRates->setToolTip(QStringLiteral(
-            "Exact 30.00 is mostly documentary and streaming material; 29.97 is broadcast television (sitcoms, "
-            "news, sport), largely video-look already, where smoothing is purely taste."));
+            "1000/1001 rates mostly come from broadcast television, often video-look already, where "
+            "smoothing is purely taste."));
         MarkGpuCost(form, strengthEven, 2);
+        // Pulldown detection (owner 2026-10-14).
+        auto* pulldown = addChoice(QStringLiteral("Find film sent with repeated frames"),
+            QStringLiteral("dejudder_pulldown"), { QStringLiteral("off"), QStringLiteral("on") });
+        pulldown->setToolTip(QStringLiteral(
+            "Some sources send film inside a faster signal by repeating frames (e.g. 24p as 2:3 in 60 Hz). "
+            "On: the repeats are recognised, skipped and the film is shown at its own rate, so the de-judder "
+            "above applies. Experimental; default off."));
         // Delta 14: two rules against the soap-opera look.
         auto* rolloff = addChoice(QStringLiteral("Keep fast motion's strobing"),
             QStringLiteral("dejudder_motion_rolloff"), { QStringLiteral("on"), QStringLiteral("off") });
         rolloff->setToolTip(QStringLiteral(
             "Slow and medium pans get the full de-judder; above a fast pan the strength falls back (to the floor below), "
             "so fast action keeps the strobing film is expected to have. Off = the strength only rises with motion."));
-        auto* rollLo = addText(QStringLiteral("Fall from (source pixels per frame)"), QStringLiteral("dejudder_roll_lo"));
+        auto* rollLo = addText(QStringLiteral("Fall from (px per frame)"), QStringLiteral("dejudder_roll_lo"));
         rollLo->setValidator(new QDoubleValidator(0.0, 200.0, 1, rollLo));
         rollLo->setPlaceholderText(QStringLiteral("8"));
-        rollLo->setToolTip(QStringLiteral("The camera speed where the strength starts to fall (8 at 4K is about a brisk pan)."));
-        auto* rollHi = addText(QStringLiteral("Floor reached at (source px/frame)"), QStringLiteral("dejudder_roll_hi"));
+        rollLo->setToolTip(QStringLiteral(
+            "The camera speed where the strength starts to fall (8 is about a brisk pan). In pixels of a "
+            "2160-line picture; scaled for other sizes."));
+        auto* rollHi = addText(QStringLiteral("Floor reached at (px per frame)"), QStringLiteral("dejudder_roll_hi"));
         rollHi->setValidator(new QDoubleValidator(0.0, 400.0, 1, rollHi));
         rollHi->setPlaceholderText(QStringLiteral("24"));
-        rollHi->setToolTip(QStringLiteral("The camera speed where the strength reaches the floor (24 at 4K is about a whip pan)."));
+        rollHi->setToolTip(QStringLiteral(
+            "The camera speed where the strength reaches the floor (24 is about a whip pan). In pixels of a "
+            "2160-line picture; scaled for other sizes."));
         auto* rollFloor = addText(QStringLiteral("Floor (share of the strength)"), QStringLiteral("dejudder_roll_floor"));
         rollFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, rollFloor));
         rollFloor->setPlaceholderText(QStringLiteral("0.25"));
@@ -6469,7 +6482,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_global_prior"), { QStringLiteral("on"), QStringLiteral("off") });
         globalPrior->setToolTip(QStringLiteral(
             "Estimates the whole picture's movement first and starts every block's search there, so "
-            "fast pans (beyond about 120 source pixels per frame) are still followed. Default on."));
+            "fast pans (up to about a quarter of the picture height per frame) are still followed. Default on."));
         auto* estGate = addChoice(QStringLiteral("Skip the search on still scenes"),
             QStringLiteral("dejudder_est_gate"), { QStringLiteral("on"), QStringLiteral("off") });
         estGate->setToolTip(QStringLiteral(
@@ -6484,8 +6497,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         motionLo->setValidator(new QDoubleValidator(0.0, 16.0, 2, motionLo));
         motionLo->setPlaceholderText(QStringLiteral("0.25"));
         motionLo->setToolTip(QStringLiteral(
-            "Below this average movement (source pixels per film frame) the de-judder does nothing: "
-            "near-still scenes have no judder to fix."));
+            "Below this average movement per film frame the de-judder does nothing: near-still scenes have no "
+            "judder to fix. In pixels of a 2160-line picture; scaled for other sizes."));
         auto* motionHi = addText(QStringLiteral("Full strength at (pixels/frame)"),
             QStringLiteral("dejudder_motion_scale_hi"));
         motionHi->setValidator(new QDoubleValidator(0.0, 32.0, 2, motionHi));
@@ -6534,8 +6547,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         searchRange->setValidator(new QIntValidator(1, 16, searchRange));
         searchRange->setPlaceholderText(QStringLiteral("8"));
         searchRange->setToolTip(QStringLiteral(
-            "How far each block's coarse search looks (8, the default, is about 500 source pixels per frame with the "
-            "half-size estimate: fast pans; 3 was the earlier reach). Higher costs a little more time."));
+            "How far each block's coarse search looks (8, the default, is about a quarter of the picture height "
+            "per frame: fast pans; 3 was the earlier reach). Higher costs a little more time."));
         auto* globalTwo = addChoice(QStringLiteral("Two whole-picture motions"),
             QStringLiteral("dejudder_global_two"), { QStringLiteral("on"), QStringLiteral("off") });
         globalTwo->setToolTip(QStringLiteral(
@@ -6587,6 +6600,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "carries it to where it is being drawn. Where something moves in front of something else, the matched "
             "pixel can be a valid one that is not the one visible there; it then stays still. On real footage this "
             "cut the damaged patches to a third for about half a point less judder removed. Default on."));
+        auto* pictureArea = addChoice(QStringLiteral("Ignore black bars when matching"),
+            QStringLiteral("dejudder_picture_area"), { QStringLiteral("on"), QStringLiteral("off") });
+        pictureArea->setToolTip(QStringLiteral(
+            "Letterbox and pillarbox bars are left out of the motion statistics (cut detection, fades) and "
+            "stay still. Default on."));
         auto* verify = addChoice(QStringLiteral("Check matches pixel by pixel"),
             QStringLiteral("dejudder_verify"), { QStringLiteral("on"), QStringLiteral("off") });
         verify->setToolTip(QStringLiteral(
@@ -6596,17 +6614,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         verifyShare->setValidator(new QDoubleValidator(0.02, 1.0, 2, verifyShare));
         verifyShare->setPlaceholderText(QStringLiteral("0.2"));
         verifyShare->setToolTip(QStringLiteral("A block holds when more than this share of its pixels mispredict (0.2 = a fifth)."));
-        auto* lowRes = addChoice(QStringLiteral("Motion estimation size (4K)"),
+        auto* lowRes = addChoice(QStringLiteral("Motion estimation size (tall sources)"),
             QStringLiteral("dejudder_low_res"), { QStringLiteral("all"), QStringLiteral("search"), QStringLiteral("off") });
         lowRes->setItemText(lowRes->findData(QStringLiteral("all")), QStringLiteral("Half size, every step (recommended)"));
         lowRes->setItemText(lowRes->findData(QStringLiteral("search")), QStringLiteral("Half size search, full-size refinement"));
         lowRes->setItemText(lowRes->findData(QStringLiteral("off")), QStringLiteral("Full size"));
         lowRes->setToolTip(QStringLiteral(
-            "For sources wider than 1920, how finely motion is estimated. On real 4K footage, half size for every "
-            "step kept more de-judder benefit than full size (108%; averaging the grain helps the matching) at about "
-            "half the GPU time, with the dither unchanged. Half-size search with full-size refinement keeps quarter-"
-            "pixel precision and 8-pixel splits (95% of the benefit). The occlusion-fill experiment is skipped at half "
-            "size. Sources up to 1920 wide always use full size."));
+            "For sources about 1530 lines and taller, how finely motion is estimated (halved by height, again for "
+            "the tallest). On real footage, half size for every step kept more de-judder benefit than full size "
+            "(108%; averaging the grain helps the matching) at about half the GPU time. Half-size search with "
+            "full-size refinement keeps quarter-pixel precision and 8-pixel splits (95% of the benefit). The "
+            "occlusion-fill experiment is skipped at half size. Shorter sources always use full size."));
         auto* estimateAhead = addChoice(QStringLiteral("Estimate motion ahead"),
             QStringLiteral("dejudder_estimate_ahead"), { QStringLiteral("on"), QStringLiteral("off") });
         estimateAhead->setToolTip(QStringLiteral(
@@ -6627,9 +6645,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         hysteresis->setValidator(new QIntValidator(1, 8, hysteresis));
         hysteresis->setPlaceholderText(QStringLiteral("2"));
         hysteresis->setToolTip(QStringLiteral(
-            "A block switches between moved and held only after this many film frames in a row say so, so it does "
-            "not flicker between the two. A cut holds everything at once, and the first film frame after a start "
-            "or a cut stays held while the blocks earn their trust."));
+            "A block switches between moved and held only after this many film frames in a row say so (counted at "
+            "23.976p; scaled to the same time at other rates), so it does not flicker between the two. A cut holds "
+            "everything at once, and the first film frame after a start or a cut stays held while the blocks earn "
+            "their trust."));
         MarkGpuCost(form, globalPrior, 1);
         MarkGpuCost(form, vectorSmooth, 1);
         MarkGpuCost(form, estCandidates, 1);
@@ -6786,7 +6805,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         }
 
         // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
-        form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale (4K)"),
+        form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale"),
             QString::fromLatin1(kGpuCostLegend), false);
         auto* adaptiveOn = addChoice(QStringLiteral("SSIM / faithful blend"),
             QStringLiteral("adaptive_downscale"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -6862,8 +6881,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             greyAdaptive();
         }
 
-        // Stage 8b: the upscale blend (1080p and below to the screen).
-        form = addCollapsibleSection(QStringLiteral("adaptiveUpscale"), QStringLiteral("Adaptive upscale (1080p)"),
+        // Stage 8b: the upscale blend (sources smaller than the screen).
+        form = addCollapsibleSection(QStringLiteral("adaptiveUpscale"), QStringLiteral("Adaptive upscale"),
             QString::fromLatin1(kGpuCostLegend), false);
         auto* upscaleOn = addChoice(QStringLiteral("CNN / faithful blend"),
             QStringLiteral("adaptive_upscale"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -7134,7 +7153,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("fbo_float32"), { QStringLiteral("auto"), QStringLiteral("on"), QStringLiteral("off") });
         fboFloat32->setToolTip(QStringLiteral(
             "Every intermediate picture in 32-bit float: exact highlights (half-float rounds values above white "
-            "a little) at more GPU memory bandwidth (a few ms per 4K frame; check the render time in the stats "
+            "a little) at more GPU memory bandwidth (a few ms per frame at high resolutions; check the render time in the stats "
             "overlay). Auto: on, except in the queue named Low_Latency (renaming that queue changes Auto). The final "
             "output stage is 32-bit float always."));
         MarkGpuCost(form, fboFloat32, 2);
@@ -7163,7 +7182,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			QStringLiteral("Same as the upscaler (the earlier behaviour)"));
 		chromaUpscaler->setToolTip(QStringLiteral(
 			"How the colour planes of 4:2:0 / 4:2:2 video are brought up to the picture's size before the "
-			"main scaling. Auto = Catmull-Rom: on real 4K footage it looked identical to the polar EWA Lanczos "
+			"main scaling. Auto = Catmull-Rom: on real footage it looked identical to the polar EWA Lanczos "
 			"filter at about a seventh of its GPU time. 'Same as the "
 			"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest)."));
 		MarkGpuCost(form, chromaUpscaler, 2);
@@ -7186,7 +7205,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		auto* downscaleLight = addChoice(QStringLiteral("Downscale light"),
 			QStringLiteral("downscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
 		downscaleLight->setToolTip(QStringLiteral(
-			"Light domain for frames that are downscaled (4K to 1600 lines). Linear is libplacebo's "
+			"Light domain for frames that are downscaled. Linear is libplacebo's "
 			"default; gamma matches madVR's SSIM look. Upscaled frames always use linear light."));
 	}
     else if (sectionPrefix == QStringLiteral("vprenderer.subtitles"))
@@ -7727,13 +7746,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "standard" }, { "dejudder_even_rates", "30" }, { "occlusion_mask", "off" },
+                    { "capture_path", "standard" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" },
+                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },
