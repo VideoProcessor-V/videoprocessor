@@ -2349,7 +2349,7 @@ if (q.x < size.x && q.y < size.y) {
 		return ok;
 	}
 
-	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade)
+	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int levels)
 	{
 		const float codes = lumaInCodes ? 1.0f : fullRange ? 219.0f : 255.0f;
 		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
@@ -2358,10 +2358,10 @@ if (q.x < size.x && q.y < size.y) {
 		const pl_shader_desc third[2] = { Sampled("src", l1, false), Storage("dst", l2) };
 		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
 				fade ? "#define FADE_APPLY 1\n" : nullptr, DOWNSAMPLE_BODY, first, fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
-			Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
-				second, 2, nullptr, 0, l1W, l1H, 8) &&
-			Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
-				third, 2, nullptr, 0, l2W, l2H, 8);
+			(levels < 1 || Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
+				second, 2, nullptr, 0, l1W, l1H, 8)) &&
+			(levels < 2 || Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
+				third, 2, nullptr, 0, l2W, l2H, 8));
 	}
 
 	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second)
@@ -3020,11 +3020,20 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			error = "A and B differ in size";
 			return false;
 		}
-		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange) || !Downsample(b.luma, halfB, l1B, l2B, b.fullRange))
-			return false;
 		// M4: in the lowRes outer the inner matches (and tests the fade) itself.
 		ApplyScaled(Scaled(base, height));
 		const bool outerOfLowRes = HalvesForSearch();
+		// The lowRes outer's pyramid levels are read only by the picture area
+		// (A's 1/8) and by its own frame trust's regional histograms (both
+		// 1/32); the inner builds its own pyramids (2026-10-15: not built
+		// otherwise - exact, the levels are unread).
+		const bool outerTrust = !settings.lowResAll;
+		const bool outerHist = outerTrust && settings.regionalHold;
+		const int levelsA = !outerOfLowRes || outerHist ? 2 : settings.pictureArea ? 1 : 0;
+		const int levelsB = !outerOfLowRes || outerHist ? 2 : 0;
+		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange, nullptr, levelsA) ||
+			!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, nullptr, levelsB))
+			return false;
 		pictureFullRange = a.fullRange;
 		if (settings.pictureArea && !PictureArea())
 			return false;
@@ -3039,7 +3048,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// gain and offset, so M6's mask and the grain map see it (audit
 			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
 			if (settings.fadeMatch && inner && inner->FadeStateTexture() &&
-				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->FadeStateTexture()))
+				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->FadeStateTexture(), levelsB))
 				return false;
 		}
 		else

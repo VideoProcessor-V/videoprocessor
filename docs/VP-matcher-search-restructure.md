@@ -138,3 +138,12 @@ on motion changes and occlusions, with no next frame to fall back on); the one-f
 film. Live motion-smoothing options for 50/60 Hz sources to be discussed with the owner.
 
 Owner choice (2026-10-15) for 50/60 Hz live smoothing, also item 6: interpolation for rate mismatches at the same refresh (50p on a 60 Hz output, 25/30p cadences inside 50/60 Hz streams, found by the pulldown detector) and filling dropped or repeated frames in live streams from the vectors. A higher output refresh (100/120 Hz) is not pursued for now.
+
+## Unread pyramid levels in the lowRes outer (2026-10-15)
+
+With lowRes the outer matcher built the full 1/8 and 1/32 pyramids of both frames, but the inner builds its own;
+the outer's levels are read only by the picture area (A's 1/8) and, when the outer runs its own frame trust
+(not lowResAll) with regional hold, its histograms (both 1/32). Now built only when read: 27 passes instead of 28,
+about 0.4 ms GPU less in the live settings (outer 1/8 0.36 -> 0.15 ms, 1/32 0.28 -> 0). Exact: every Beta
+output line identical to the previous run (6d 0.161845), Beta passes; main tests 2606/2608 with the two known
+unrelated failures (window placement, config read cache) seen in the earlier gates.
