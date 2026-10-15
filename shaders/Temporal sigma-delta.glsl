@@ -301,25 +301,38 @@
 
 // Quarter-resolution luma of the gamma-encoded picture, in 8-bit code units
 // (the same domain as the quantizer). Each texel averages a 4x4 block.
+// Efficiency (owner 2026-10-15): the work group's 64x64 source pixels are
+// read once in a coalesced sweep into shared memory, then each texel sums its
+// 4x4 from there - the same per-pixel values in the same order, so the
+// result is bit-identical to the direct 16 reads per texel it replaces.
+shared float lq_tile_[4096];
+
 void hook()
 {
-    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(out_image);
-    if (pos.x >= size.x || pos.y >= size.y)
-        return;
     ivec2 full = textureSize(HOOKED_raw, 0);
     // The code-domain scale, as in the quantizer below.
     // 8-bit units: a true 10-bit output (color_bits 10) arrives as /1023.
     float scale = color_bits > 9.0 ? 1023.0 / 4.0 :
         ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
-    float sum = 0.0;
-    for (int y = 0; y < 4; y++)
-        for (int x = 0; x < 4; x++) {
-            ivec2 p = min(pos * 4 + ivec2(x, y), full - ivec2(1));
-            vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;
-            sum += dot(c, vec3(0.2126, 0.7152, 0.0722));
-        }
-    imageStore(out_image, pos, vec4(sum / 16.0, 0.0, 0.0, 1.0));
+    ivec2 base = ivec2(gl_WorkGroupID.xy) * 64;
+    for (int k = 0; k < 16; k++) {
+        int idx = int(gl_LocalInvocationIndex) + k * 256;
+        ivec2 p = min(base + ivec2(idx % 64, idx / 64), full - ivec2(1));
+        vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;
+        lq_tile_[idx] = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    }
+    memoryBarrierShared();
+    barrier();
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(out_image);
+    if (pos.x < size.x && pos.y < size.y) {
+        ivec2 local = ivec2(gl_LocalInvocationID.xy) * 4;
+        float sum = 0.0;
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 4; x++)
+                sum += lq_tile_[(local.y + y) * 64 + local.x + x];
+        imageStore(out_image, pos, vec4(sum / 16.0, 0.0, 0.0, 1.0));
+    }
 }
 
 //!HOOK OUTPUT
@@ -353,6 +366,8 @@ void hook()
 //!BIND LUMAC
 //!BIND LQPREV
 //!BIND MVPREV
+//!BIND RESID
+//!BIND PREV
 //!BIND RESID_NEXT
 //!BIND PREV_NEXT
 //!BIND VPVEC
@@ -399,10 +414,16 @@ float luma_cur(ivec2 p)
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
+// Efficiency (owner 2026-10-15): the state is ping-ponged instead of copied
+// each refresh. LQPREV (0,0).a says which pair the quantizer wrote last
+// (> 0.5: RESID/PREV, else RESID_NEXT/PREV_NEXT, which is also the fresh
+// state's); this pass reads that pair, as it read the staging pair before.
+bool last_in_a_;
+
 float luma_prev(ivec2 p)
 {
     p = clamp(p, ivec2(0), min(full_size, imageSize(PREV_NEXT)) - ivec2(1));
-    return dot(imageLoad(PREV_NEXT, p).rgb, vec3(0.2126, 0.7152, 0.0722));
+    return dot((last_in_a_ ? imageLoad(PREV, p) : imageLoad(PREV_NEXT, p)).rgb, vec3(0.2126, 0.7152, 0.0722));
 }
 
 // Full-resolution match of the 16x16 block displaced by v (full pixels).
@@ -508,6 +529,7 @@ void hook()
     bool searching = motion_compensation >= 0.5 && vector_source <= 0.5 && static_refresh <= 0.5;
     vec4 tag = imageLoad(LQPREV, ivec2(0));
     prev_valid = abs(tag.g - VALID_TAG) < 1e-3 && !isnan(tag.r);
+    last_in_a_ = tag.a > 0.5;
     bool run_search = inside && searching && prev_valid;
     if (lead && inside && !run_search) {
         if (motion_compensation < 0.5) {
@@ -625,7 +647,7 @@ void hook()
         ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
     ivec2 corner = block * 16;
     ivec2 tagpos = clamp(corner, ivec2(0), imageSize(RESID_NEXT) - ivec2(1));
-    bool refine = run_search && abs(imageLoad(RESID_NEXT, tagpos).a - VALID_TAG) < 1e-3;
+    bool refine = run_search && abs((last_in_a_ ? imageLoad(RESID, tagpos) : imageLoad(RESID_NEXT, tagpos)).a - VALID_TAG) < 1e-3;
     ivec2 centre = full;
     if (refine) {
         cur_luma[li] = luma_cur(corner + ivec2(li % 16, li / 16));
@@ -678,6 +700,8 @@ void hook()
 //!BIND LQPREV
 //!SAVE SIGMA_DELTA_STATE
 //!COMPONENTS 1
+//!WIDTH HOOKED.w 1.5 + 4 /
+//!HEIGHT HOOKED.h 1.5 + 4 /
 //!DESC VideoProcessor sigma-delta: carry state to this refresh
 //!COMPUTE 16 16
 
@@ -691,24 +715,25 @@ void hook()
     ivec2 size = imageSize(out_image);
     if (pos.x >= size.x || pos.y >= size.y)
         return;
-    // Last refresh's results become what this refresh reads.
-    ivec2 spos = clamp(pos, ivec2(0), imageSize(RESID) - ivec2(1));
-    imageStore(RESID, spos, imageLoad(RESID_NEXT, spos));
-    imageStore(PREV, spos, imageLoad(PREV_NEXT, spos));
-    // This refresh's luma for the next search (after the search used the
-    // previous one). Texel (0,0) carries the validity tag in g.
+    // Last refresh's results become what this refresh reads: no copy - the
+    // pair written last is read and the other written (owner 2026-10-15,
+    // ping-pong; was a full-resolution copy of both). This refresh's luma for
+    // the next search (after the search used the previous one). Texel (0,0)
+    // carries the validity tag in g and, in a, the pair this refresh's
+    // quantizer writes (0.75: RESID/PREV, 0.25: RESID_NEXT/PREV_NEXT).
     ivec2 lq_size = textureSize(LUMAQ_raw, 0);
-    if (pos.x % 4 == 0 && pos.y % 4 == 0) {
-        ivec2 q = pos / 4;
-        ivec2 lc_size = textureSize(LUMAC_raw, 0);
-        // Channel b: the coarse luma, at the same index (the coarse grid is
-        // smaller, so it fits in the same texels).
-        float coarse = (q.x < lc_size.x && q.y < lc_size.y) ?
-            (LUMAC_mul * texelFetch(LUMAC_raw, q, 0)).r : 0.0;
-        if (q.x < lq_size.x && q.y < lq_size.y)
-            imageStore(LQPREV, q, vec4((LUMAQ_mul * texelFetch(LUMAQ_raw, q, 0)).r,
-                                       VALID_TAG, coarse, 1.0));
-    }
+    ivec2 q = pos;
+    ivec2 lc_size = textureSize(LUMAC_raw, 0);
+    // Channel b: the coarse luma, at the same index (the coarse grid is
+    // smaller, so it fits in the same texels).
+    float coarse = (q.x < lc_size.x && q.y < lc_size.y) ?
+        (LUMAC_mul * texelFetch(LUMAC_raw, q, 0)).r : 0.0;
+    float pair = 1.0;
+    if (q == ivec2(0))
+        pair = imageLoad(LQPREV, ivec2(0)).a > 0.5 ? 0.25 : 0.75;   // write the other pair
+    if (q.x < lq_size.x && q.y < lq_size.y)
+        imageStore(LQPREV, q, vec4((LUMAQ_mul * texelFetch(LUMAQ_raw, q, 0)).r,
+                                   VALID_TAG, coarse, pair));
     imageStore(out_image, pos, vec4(0.0));
 }
 
@@ -720,6 +745,7 @@ void hook()
 //!BIND RESID_NEXT
 //!BIND PREV_NEXT
 //!BIND VPPIX
+//!BIND LQPREV
 //!DESC VideoProcessor temporal sigma-delta quantizer
 //!COMPUTE 16 16
 
@@ -749,11 +775,15 @@ vec3 exact_half(vec3 v)
     return vec3(unpackHalf2x16(packHalf2x16(v.rg)), unpackHalf2x16(packHalf2x16(vec2(v.b, 0.0))).x);
 }
 
+// Ping-pong (see the carry pass): true = this refresh writes RESID/PREV
+// and reads RESID_NEXT/PREV_NEXT; false the other way round.
+bool write_a_;
+
 bool carried(ivec2 from, vec3 x, float gate_scale, out vec3 r)
 {
     r = vec3(0.0);
-    vec4 rs = imageLoad(RESID, from);
-    vec4 ps = imageLoad(PREV, from);
+    vec4 rs = write_a_ ? imageLoad(RESID_NEXT, from) : imageLoad(RESID, from);
+    vec4 ps = write_a_ ? imageLoad(PREV_NEXT, from) : imageLoad(PREV, from);
     if (abs(rs.a - VALID_TAG) >= 1e-3 || any(isnan(rs.rgb)) || any(isnan(ps.rgb)))
         return false;
     // motion_threshold is in 8-bit codes; x is in output codes.
@@ -770,6 +800,7 @@ void hook()
     ivec2 out_size = imageSize(out_image);
     if (pos.x >= out_size.x || pos.y >= out_size.y)
         return;
+    write_a_ = imageLoad(LQPREV, ivec2(0)).a > 0.5;   // set by the carry pass
 
     bool limited = levels_full < 0.5;
     bool swap10 = swapchain_bits > 9.0;
@@ -861,10 +892,25 @@ void hook()
         k = clamp(floor(x + r + d + 0.5), 0.0, max_code);
         vec3 r_next = clamp(x + r - k, -0.5, 0.5);
 
-        imageStore(RESID_NEXT, spos, vec4(r_next, VALID_TAG));
-        imageStore(PREV_NEXT, spos, vec4(x, 1.0));
+        if (write_a_) {
+            imageStore(RESID, spos, vec4(r_next, VALID_TAG));
+            imageStore(PREV, spos, vec4(x, 1.0));
+        } else {
+            imageStore(RESID_NEXT, spos, vec4(r_next, VALID_TAG));
+            imageStore(PREV_NEXT, spos, vec4(x, 1.0));
+        }
     } else {
         k = clamp(floor(x + d + 0.5), 0.0, max_code);
+        // The state this refresh does not write keeps its value, as the
+        // copies did (ping-pong: carried into the pair written now).
+        ivec2 spos = clamp(pos, ivec2(0), imageSize(RESID) - ivec2(1));
+        if (write_a_) {
+            imageStore(RESID, spos, imageLoad(RESID_NEXT, spos));
+            imageStore(PREV, spos, imageLoad(PREV_NEXT, spos));
+        } else {
+            imageStore(RESID_NEXT, spos, imageLoad(RESID, spos));
+            imageStore(PREV_NEXT, spos, imageLoad(PREV, spos));
+        }
     }
 
     // With the occlusion mask or the grain (S1) in alpha, alpha goes back to
