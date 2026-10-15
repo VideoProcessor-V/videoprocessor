@@ -783,6 +783,17 @@ namespace VideoProcessorTest
 			Assert::AreEqual(8, eightBitTarget.bits.color_depth,
 				L"A requested display depth must be clamped to actual storage precision.");
 			Assert::AreEqual(0, eightBitTarget.bits.bit_shift);
+
+			// A float display surface (16-bit samples): left alone, whatever is asked.
+			for (const char* depth : { "8", "10", "auto" })
+			{
+				pl_color_repr floatTarget{};
+				floatTarget.bits.sample_depth = 16;
+				floatTarget.bits.color_depth = 16;
+				ApplyDisplayBitDepth(depth, floatTarget);
+				Assert::AreEqual(16, floatTarget.bits.color_depth, L"A float surface keeps its bit encoding.");
+				Assert::AreEqual(0, floatTarget.bits.bit_shift, L"No bit shift on a float surface.");
+			}
 		}
 
 		TEST_METHOD(DebandingStrengthUsesOneCanonicalAndDistinctNativeSetting)

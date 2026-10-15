@@ -214,17 +214,24 @@ if (b.x < size.x && b.y < size.y) {
 }
 )GLSL";
 
-		pl_fmt StorageFormat(pl_gpu gpu)
+		// picture: the cached rendered picture and the warped extra built from
+		// it, rgba32f (2026-10-15: rgba16f resolved ~1/2048 near white, about 11
+		// bits; rgba16f where 32-bit is not storable). The motion field and the
+		// displacement stay rgba16f.
+		pl_fmt StorageFormat(pl_gpu gpu, bool picture = false)
 		{
-			return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16,
-				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_STORABLE | PL_FMT_CAP_SAMPLEABLE));
+			const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_STORABLE | PL_FMT_CAP_SAMPLEABLE);
+			if (picture)
+				if (pl_fmt f32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(caps | PL_FMT_CAP_LINEAR)))
+					return f32;
+			return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, caps);
 		}
 
-		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, bool hostReadable = false)
+		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, bool hostReadable = false, bool picture = false)
 		{
-			if (tex && tex->params.w == w && tex->params.h == h)
+			pl_fmt fmt = StorageFormat(gpu, picture);
+			if (tex && tex->params.w == w && tex->params.h == h && tex->params.format == fmt)
 				return true;
-			pl_fmt fmt = StorageFormat(gpu);
 			if (!fmt)
 				return false;
 			pl_tex_params params{};
@@ -348,7 +355,7 @@ if (b.x < size.x && b.y < size.y) {
 			pl_tex_destroy(gpu, &tex);
 		gpu = params->gpu;
 		const int w = params->tex->params.w, h = params->tex->params.h;
-		if (!Ensure(gpu, tex, w, h))
+		if (!Ensure(gpu, tex, w, h, false, true))
 		{
 			++failed;
 			armed = 0;
@@ -399,9 +406,9 @@ if (b.x < size.x && b.y < size.y) {
 			return false;
 		}
 		const int w = cached->params.w, h = cached->params.h;
-		if (!Ensure(gpu, warped, w, h, hostReadable))
+		if (!Ensure(gpu, warped, w, h, hostReadable, true))
 		{
-			error = "no storable rgba16f texture";
+			error = "no storable rgba32f texture";
 			return false;
 		}
 		// The cache is either the destination rectangle itself or the whole

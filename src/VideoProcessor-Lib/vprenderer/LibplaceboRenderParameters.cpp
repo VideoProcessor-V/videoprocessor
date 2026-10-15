@@ -165,6 +165,11 @@ namespace LibplaceboRenderParameters
 
 		const int sampleDepth = targetRepresentation.bits.sample_depth;
 		if (sampleDepth <= 0) return;
+		// A 16-bit (or deeper) display surface on D3D11 is floating point
+		// (R16G16B16A16_FLOAT): no integer codes to dither to, so its bit
+		// encoding is left as it is (2026-10-15: "10" would otherwise quantise
+		// it to 10-bit codes with a meaningless bit shift).
+		if (sampleDepth >= 16) return;
 
 		const int effectiveDepth = requestedDepth < sampleDepth ?
 			requestedDepth : sampleDepth;
