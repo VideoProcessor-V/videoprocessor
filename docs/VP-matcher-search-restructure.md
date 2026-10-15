@@ -14,6 +14,8 @@ pass timing (`VP_TEST_TIMING=1`, "live settings" section):
   5.0 of the 7.3 ms. The pixel comparisons are about a third; the rest is the shape of the pass: one 256-thread
   work group per 16-px block (~8,000 groups), ~10 group barriers, single-thread (lead) phases while 255 threads
   wait, and stages that use 169-321 of the 256 threads.
+- The SADs themselves are small (level 2: 9 samples; level 1: 16 bilinear samples; half size: 144), so a work
+  group's barriers and idle lanes dominate.
 - Two exact rewrites inside that shape were byte-identical but slower (a shared-memory window of `to`; picks as
   parallel reductions, which add barriers) and were not kept.
 
@@ -26,6 +28,8 @@ must stay byte-identical; the existing Beta check against the serial search prov
 
 1. **Level-2 SADs**: one thread per (block, candidate) for the (2r+1)^2 candidates (r = coarse range) ->
    texture `l2s` (blocks x side, r32f).
+   The level-2 SADs are 3x3 samples at 1/32 and two blocks share each level-2 texel (`sad_l2(b / 2, v)`), so
+   today every one is computed twice; here once per level-2 texel, read by both blocks (same values).
 2. **Level-2 pick**: one thread per block; serial scan from the zero vector -> `v2` per block.
 3. **Level-1 SADs**: one thread per (block, search, candidate) for the 13x13 half-texel candidates of each start
    (zero, level 2, D1 global, M2 second global) -> `l1s`.
