@@ -394,6 +394,24 @@ if (b.x < blocks.x && b.y < blocks.y) {
 shared float l1_sads_z[169];
 shared float l1_sads_c[169];
 shared float l1_sads_g[169];
+// The 1/8 level's bilinear samples of `to` around each start (2026-10-15):
+// every candidate's sample positions lie on the half-texel lattice
+// o1 + start + 0.5 m, m in [-8, 10]^2, so each block samples them once
+// (19 x 19 per start) instead of 16 per candidate. The positions are
+// multiples of 0.5 (exact in float) and the same texture() calls, so every
+// SAD is the same sum of the same values in the same order.
+shared float l1_tab[4 * 361];
+
+float sad_l1_tab(int k, ivec2 o1, int dx, int dy)
+{
+    float s = 0.0;
+    for (int y = -1; y < 3; y++)
+        for (int x = -1; x < 3; x++) {
+            ivec2 p = o1 + ivec2(x, y);
+            s += abs(l1from(p) - l1_tab[k * 361 + (2 * y + dy + 8) * 19 + 2 * x + dx + 8]);
+        }
+    return s;
+}
 shared float from_win[144];
 // The start each candidate belongs to (1..5, 0 = the zero vector, ZGROUP =
 // the +-2 around zero) and the starts' centres: a candidate inside an earlier
@@ -584,16 +602,37 @@ vec2 vg2 = vec2(0.0);
     }
 }
 #endif
+// The starts' sample tables (0 zero, 1 the 1/32 result, 2 the global
+// vector, 3 M2's second), then each candidate's SAD from them.
+if (run)
+    for (int e = li; e < 4 * 361; e += NT) {
+        int k = e / 361;
+        bool wanted = k < 2 || (k == 2 && have_g);
+#ifdef GLOBAL_TWO
+        wanted = wanted || (k == 3 && have_g2);
+#endif
+        if (!wanted)
+            continue;
+        int m = e % 361;
+        vec2 start = k == 0 ? vec2(0.0) : k == 1 ? vec2(v2 * 4) : k == 2 ? vgf :
+#ifdef GLOBAL_TWO
+            vg2;
+#else
+            vec2(0.0);
+#endif
+        l1_tab[e] = l1to(vec2(b * 2) + start + 0.5 * vec2(m % 19 - 8, m / 19 - 8));
+    }
+sync_group();
 if (run)
     for (int i = li; i < 169; i += NT) {
-        vec2 h = 0.5 * vec2(i % 13 - 6, i / 13 - 6);
-        l1_sads_z[i] = sad_l1(b * 2, h);
-        l1_sads_c[i] = sad_l1(b * 2, vec2(v2 * 4) + h);
+        int dx = i % 13 - 6, dy = i / 13 - 6;
+        l1_sads_z[i] = sad_l1_tab(0, b * 2, dx, dy);
+        l1_sads_c[i] = sad_l1_tab(1, b * 2, dx, dy);
         if (have_g)
-            l1_sads_g[i] = sad_l1(b * 2, vgf + h);
+            l1_sads_g[i] = sad_l1_tab(2, b * 2, dx, dy);
 #ifdef GLOBAL_TWO
         if (have_g2)
-            l1_sads_g2[i] = sad_l1(b * 2, vg2 + h);
+            l1_sads_g2[i] = sad_l1_tab(3, b * 2, dx, dy);
 #endif
     }
 sync_group();

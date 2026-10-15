@@ -1791,7 +1791,7 @@ void RunBetaMatcherTiming()
 				{
 					const size_t en = v.find(',', st);
 					const std::string t = v.substr(st, en == std::string::npos ? std::string::npos : en - st);
-					if (t.rfind("SKIP_", 0) == 0) skips += t + ",";
+					if (t.rfind("SKIP_", 0) == 0 || t.rfind("OLD_", 0) == 0) skips += t + ",";
 					else if (t == "noglobal") vs.globalPrior = false;
 					else if (t == "nosmooth") vs.vectorSmooth = false;
 					else if (t == "nocand") vs.estCandidates = false;
