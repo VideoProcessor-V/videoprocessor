@@ -103,6 +103,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />

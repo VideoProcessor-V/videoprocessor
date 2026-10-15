@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include <libplacebo/shaders/custom.h>
+#include <libplacebo/d3d11.h>
 
 #include <algorithm>
 #include <cmath>
@@ -132,6 +133,40 @@ if (i == 0u) {
         r = vec4(float(pa_[2]) * 8.0, float(pa_[0]) * 8.0,
                  min(float(pa_[3] + 1) * 8.0, frame_size.x), min(float(pa_[1] + 1) * 8.0, frame_size.y));
     imageStore(dst, ivec2(0), r);
+}
+)GLSL";
+
+		// Optical flow source: the half-size luma (8-bit codes) as the
+		// engine's 8-bit input.
+		const char* const OF_INPUT_BODY = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x < imageSize(dst).x && p.y < imageSize(dst).y)
+    imageStore(dst, p, vec4(clamp(texelFetch(src, p, 0).r / 255.0, 0.0, 1.0), 0.0, 0.0, 1.0));
+)GLSL";
+
+		// Optical flow source: a block's vector (8x8 half-size pixels = 2x2
+		// engine vectors, S10.5) as the median of its four per component,
+		// re-scored like the searches (the 12x12 window): rg vector, b SAD.
+		const char* const OF_TO_SEARCH_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 blocks = imageSize(dst);
+if (b.x < blocks.x && b.y < blocks.y) {
+    half_size_ = textureSize(from_half, 0);
+    ivec2 fs = textureSize(flow, 0);
+    vec2 v[4];
+    for (int k = 0; k < 4; k++)
+        v[k] = vec2(texelFetch(flow, min(b * 2 + ivec2(k & 1, k >> 1), fs - ivec2(1)), 0).rg) / 32.0;
+    // The median of four: the mean of the middle two, per component.
+    vec2 lo = min(min(v[0], v[1]), min(v[2], v[3]));
+    vec2 hi = max(max(v[0], v[1]), max(v[2], v[3]));
+    vec2 m = (v[0] + v[1] + v[2] + v[3] - lo - hi) * 0.5;
+    float s = 0.0;
+    for (int y = -2; y < 10; y++)
+        for (int x = -2; x < 10; x++) {
+            ivec2 p = b * 8 + ivec2(x, y);
+            s += abs(from_at(p) - to_lin(vec2(p) + m));
+        }
+    imageStore(dst, b, vec4(m, s / 144.0, 1.0));
 }
 )GLSL";
 
@@ -1957,7 +1992,8 @@ if (q.x < size.x && q.y < size.y) {
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
-			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture })
+			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
+			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1] })
 			pl_tex_destroy(gpu, tex);
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
@@ -2732,6 +2768,88 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
+	bool MotionWarp::OpticalFlowSearch()
+	{
+		if (opticalFlowFailed)
+			return false;
+		auto fail = [this](const std::string& why) {
+			opticalFlowFailed = true;
+			opticalFlowError = why;   // the renderer logs it (OpticalFlowError)
+			return false;
+		};
+		pl_d3d11 d3d = pl_d3d11_get(gpu);
+		if (!d3d || !d3d->device)
+			return fail("not a D3D11 GPU");
+		CComPtr<ID3D11DeviceContext> context;
+		d3d->device->GetImmediateContext(&context);
+		const int w = halfW, h = halfH;
+		// Textures of the half size (the engine's grid: 4 x 4).
+		if (w != ofW || h != ofH)
+		{
+			for (int i = 0; i < 2; ++i)
+			{
+				pl_tex_destroy(gpu, &ofInTex[i]);
+				pl_tex_destroy(gpu, &ofFlowTex[i]);
+				ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release();
+			}
+			opticalFlowEngine.reset();
+			auto make = [&](int tw, int th, DXGI_FORMAT format, CComPtr<ID3D11Texture2D>& out) {
+				D3D11_TEXTURE2D_DESC desc{};
+				desc.Width = static_cast<UINT>(tw); desc.Height = static_cast<UINT>(th);
+				desc.MipLevels = 1; desc.ArraySize = 1; desc.Format = format; desc.SampleDesc.Count = 1;
+				desc.Usage = D3D11_USAGE_DEFAULT;
+				desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+				return SUCCEEDED(d3d->device->CreateTexture2D(&desc, nullptr, &out));
+			};
+			const int gw = (w + 3) / 4, gh = (h + 3) / 4;
+			for (int i = 0; i < 2; ++i)
+			{
+				if (!make(w, h, NvOpticalFlow::Engine::InputFormat(), ofIn[i]) ||
+					!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), ofFlow[i]) ||
+					!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), ofCost[i]))
+					return fail("cannot create its textures");
+				pl_d3d11_wrap_params wrapIn{}; wrapIn.tex = ofIn[i];
+				pl_d3d11_wrap_params wrapFlow{}; wrapFlow.tex = ofFlow[i];
+				ofInTex[i] = pl_d3d11_wrap(gpu, &wrapIn);
+				ofFlowTex[i] = pl_d3d11_wrap(gpu, &wrapFlow);
+				if (!ofInTex[i] || !ofFlowTex[i])
+					return fail("cannot share its textures with libplacebo");
+			}
+			ofW = w; ofH = h;
+		}
+		if (!opticalFlowEngine || opticalFlowPresetOpen != settings.opticalFlowPreset)
+		{
+			opticalFlowEngine = std::make_unique<NvOpticalFlow::Engine>();
+			const NvOpticalFlow::Preset preset = settings.opticalFlowPreset <= 0 ? NvOpticalFlow::Preset::Slow :
+				settings.opticalFlowPreset >= 2 ? NvOpticalFlow::Preset::Fast : NvOpticalFlow::Preset::Medium;
+			if (!opticalFlowEngine->Open(d3d->device, context, w, h, preset, true))
+				return fail(opticalFlowEngine->LastError());
+			opticalFlowPresetOpen = settings.opticalFlowPreset;
+		}
+		// A's and B's half-size luma as the engine's input, the flow both
+		// ways, then the blocks' vectors and SADs in the searches' format.
+		const pl_shader_desc inA[2] = { Sampled("src", halfA, false), Storage("dst", ofInTex[0]) };
+		const pl_shader_desc inB[2] = { Sampled("src", halfB, false), Storage("dst", ofInTex[1]) };
+		if (!Dispatch("VideoProcessor de-judder: optical flow input A", nullptr, OF_INPUT_BODY, inA, 2, nullptr, 0, w, h, 16) ||
+			!Dispatch("VideoProcessor de-judder: optical flow input B", nullptr, OF_INPUT_BODY, inB, 2, nullptr, 0, w, h, 16))
+			return fail("its input pass failed");
+		// libplacebo's queued work reaches the context before the engine runs.
+		pl_gpu_flush(gpu);
+		if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, true))
+			return fail(opticalFlowEngine->LastError());
+		const std::string header = std::string(RESCORE_HEADER);
+		const pl_shader_desc fw[4] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
+			Sampled("to_half", halfB, true), Storage("dst", forward) };
+		const pl_shader_desc bw[4] = { Sampled("flow", ofFlowTex[1], false), Sampled("from_half", halfB, false),
+			Sampled("to_half", halfA, true), Storage("dst", backward) };
+		if (!Dispatch("VideoProcessor de-judder: optical flow to blocks (forward)", header.c_str(), OF_TO_SEARCH_BODY, fw, 4,
+				nullptr, 0, blocksX, blocksY, 8) ||
+			!Dispatch("VideoProcessor de-judder: optical flow to blocks (backward)", header.c_str(), OF_TO_SEARCH_BODY, bw, 4,
+				nullptr, 0, blocksX, blocksY, 8))
+			return fail("its block pass failed");
+		return true;
+	}
+
 	bool MotionWarp::PictureArea()
 	{
 		if (!picture)
@@ -2847,14 +2965,16 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
 				 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)))
 				return false;
+			// Experimental: the optical flow engine instead of the searches.
+			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest && OpticalFlowSearch();
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
-			const bool twoSweeps = settings.estCandidates;
-			if (!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward,
+			const bool twoSweeps = settings.estCandidates && !opticalFlowUsed;
+			if (!opticalFlowUsed && !Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward,
 					two ? globalSecond[0] : nullptr) ||
 				!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward,
 					two ? globalSecond[1] : nullptr))
 				return false;
-			if (twoSweeps &&
+			if (twoSweeps && !opticalFlowUsed &&
 				(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward) ||
 				 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward)))
 				return false;

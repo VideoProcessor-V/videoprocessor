@@ -5,6 +5,7 @@
 #include <libplacebo/dispatch.h>
 
 #include <map>
+#include <vprenderer/NvOpticalFlow.h>
 #include <memory>
 #include <string>
 
@@ -247,6 +248,13 @@ namespace Dejudder
 		// the renderer's detected active picture when known (SetPictureArea),
 		// else the near-black full rows and columns at the frame's edges.
 		bool pictureArea = true;
+		// Motion source (owner 2026-10-14, experimental, off): the NVIDIA
+		// optical flow engine's vectors (both directions, 4x4 grid on the
+		// half-size picture; the median of a block's four) instead of the
+		// block searches, re-scored per block and judged by the same trust
+		// checks. Falls back to the searches where the engine is missing.
+		bool opticalFlow = false;
+		int opticalFlowPreset = 1;   // 0 slow, 1 medium, 2 fast
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The
@@ -543,5 +551,19 @@ namespace Dejudder
 		bool PictureArea();
 		bool lumaInCodes = false;
 		bool LowResSearch(const Planes& a, const Planes& b);
+		// The optical flow source: forward / backward in the searches' format.
+		bool OpticalFlowSearch();
+		std::unique_ptr<NvOpticalFlow::Engine> opticalFlowEngine;
+		bool opticalFlowFailed = false;   // logged once; the searches from then on
+		int opticalFlowPresetOpen = -1;
+		CComPtr<ID3D11Texture2D> ofIn[2], ofFlow[2], ofCost[2];
+		pl_tex ofInTex[2] = { nullptr, nullptr }, ofFlowTex[2] = { nullptr, nullptr };
+		int ofW = 0, ofH = 0;
+	public:
+		const std::string& OpticalFlowError() const { return opticalFlowError; }
+		bool OpticalFlowUsed() const { return opticalFlowUsed; }
+	private:
+		std::string opticalFlowError;
+		bool opticalFlowUsed = false;
 	};
 }
