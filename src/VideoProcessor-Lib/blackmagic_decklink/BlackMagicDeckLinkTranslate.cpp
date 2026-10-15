@@ -53,6 +53,22 @@ bool ReadDeckLinkCaptureFormatPreferences(const ConfigFile& config,
 {
 	preferences = {};
 	error.clear();
+	std::string ycc12;
+	if (config.TryGetString("decklink", "ycbcr_12bit_capture", ycc12))
+	{
+		const std::string normalized = ConfigFile::NormalizeName(ycc12);
+		if (normalized == "rgb12" || normalized == "auto")
+			preferences.ycbcr12 = DeckLinkCaptureFormatPreferences::YCbCr12Capture::Rgb12;
+		else if (normalized == "v210")
+			preferences.ycbcr12 = DeckLinkCaptureFormatPreferences::YCbCr12Capture::V210;
+		else if (normalized == "off")
+			preferences.ycbcr12 = DeckLinkCaptureFormatPreferences::YCbCr12Capture::Off;
+		else
+		{
+			error = "Invalid [decklink] ycbcr_12bit_capture='" + ycc12 + "'";
+			return false;
+		}
+	}
 	return ReadPacking(config, "rgb_8bit_packing", preferences.rgb8,
 		{ { "ARGB", bmdFormat8BitARGB }, { "BGRA", bmdFormat8BitBGRA } }, error) &&
 		ReadPacking(config, "rgb_10bit_packing", preferences.rgb10,
@@ -60,6 +76,31 @@ bool ReadDeckLinkCaptureFormatPreferences(const ConfigFile& config,
 			{ "R10L", bmdFormat10BitRGBXLE } }, error) &&
 		ReadPacking(config, "rgb_12bit_packing", preferences.rgb12,
 		{ { "R12B", bmdFormat12BitRGB }, { "R12L", bmdFormat12BitRGBLE } }, error);
+}
+
+
+bool DeckLinkIsYCbCr12(BMDDetectedVideoInputFormatFlags flags)
+{
+	return (flags & bmdDetectedVideoInputYCbCr422) && (flags & bmdDetectedVideoInput12BitDepth) &&
+		!(flags & bmdDetectedVideoInputRGB444);
+}
+
+
+BMDDetectedVideoInputFormatFlags DeckLinkYCbCr12AsRgb12(BMDDetectedVideoInputFormatFlags flags)
+{
+	if (!DeckLinkIsYCbCr12(flags))
+		return flags;
+	return static_cast<BMDDetectedVideoInputFormatFlags>(
+		(flags & ~bmdDetectedVideoInputYCbCr422) | bmdDetectedVideoInputRGB444);
+}
+
+
+BMDDetectedVideoInputFormatFlags DeckLinkYCbCr12AsV210(BMDDetectedVideoInputFormatFlags flags)
+{
+	if (!DeckLinkIsYCbCr12(flags))
+		return flags;
+	return static_cast<BMDDetectedVideoInputFormatFlags>(
+		(flags & ~bmdDetectedVideoInput12BitDepth) | bmdDetectedVideoInput10BitDepth);
 }
 
 

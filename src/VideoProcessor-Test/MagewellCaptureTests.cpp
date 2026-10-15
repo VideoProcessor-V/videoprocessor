@@ -1068,7 +1068,8 @@ namespace Tests
 			Assert::AreEqual<uint8_t>(0, result[255]);
 			Assert::AreEqual<uint8_t>(0x18, result[256]);
 			Assert::AreEqual<uint8_t>(0x50, result[257]);
-			Assert::IsTrue(AlphaCanUseNativeRgbUpload(VideoFrameEncoding::R10l));
+			// R10l has no D3D11 plane format (2026-10-15): GpuRgbUnpack or the P010 formatter.
+			Assert::IsFalse(AlphaCanUseNativeRgbUpload(VideoFrameEncoding::R10l));
 		}
 
 		TEST_METHOD(Rgb10RepackFeedsNativeRgbAnalysisAtLimitedEndpoints)

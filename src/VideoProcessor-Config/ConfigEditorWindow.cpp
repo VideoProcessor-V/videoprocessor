@@ -6674,6 +6674,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         ditherNext->setToolTip(QStringLiteral(
             "With the de-judder running, each new film frame's temporal dither takes the motion the de-judder already "
             "measured instead of searching again (about 5 ms less per new frame on the laptop). Off = its own search."));
+        auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
+            QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
+        nativeRgb->setToolTip(QStringLiteral(
+            "DeckLink 12-bit RGB (R12B/R12L) and 10-bit r210 reach the renderer as full-precision RGB 4:4:4, unpacked "
+            "on the GPU. Off = the old CPU conversion to 10-bit 4:2:0 YCbCr."));
 
         form = addCollapsibleSection(QStringLiteral("dejudderExperiments"), QStringLiteral("De-judder: experiments"),
             QStringLiteral("Off by default; for comparisons only. ") + QString::fromLatin1(kGpuCostLegend), false);
@@ -7768,7 +7773,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "native_rgb_ingest", "on" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },

@@ -76,7 +76,12 @@ inline bool AlphaCanUseNativeRgbUpload(VideoFrameEncoding encoding)
 	// libplacebo's generic limited-RGB representation uses conventional
 	// 10-bit 64-940 levels. DeckLink r210 has a distinct 64-960 interval, so
 	// normalize it through the range-aware P010 formatter instead.
-	return encoding != VideoFrameEncoding::R210 &&
+	// R10b / R10l: no D3D11 texture format matches their [R10 G10 B10 00]
+	// bit order, so libplacebo's uploader finds no plane format and nothing is
+	// shown (found 2026-10-15); they go through GpuRgbUnpack (native ingest)
+	// or the range-aware P010 formatter.
+	return encoding != VideoFrameEncoding::R210 && encoding != VideoFrameEncoding::R10b &&
+		encoding != VideoFrameEncoding::R10l &&
 		GetAlphaNativeRgbLayout(encoding, layout);
 }
 

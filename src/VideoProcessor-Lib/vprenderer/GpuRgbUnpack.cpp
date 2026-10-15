@@ -52,6 +52,21 @@ if (g.x < pairs && g.y < frame_height) {
 }
 )GLSL";
 
+	// R10b / R10l: one invocation per pixel ([R10 G10 B10 00]; big_endian 1 =
+	// R10b), levels 64-940 as libplacebo's limited 10-bit: the value << 6.
+	const char* const R10_BODY = R"GLSL(
+ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+if (g.x < frame_width && g.y < frame_height) {
+    uint b0 = ru_byte(4 * g.x, g.y), b1 = ru_byte(4 * g.x + 1, g.y), b2 = ru_byte(4 * g.x + 2, g.y), b3 = ru_byte(4 * g.x + 3, g.y);
+    uint w = big_endian != 0 ? (b0 << 24) | (b1 << 16) | (b2 << 8) | b3 : (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+    ivec3 v = ivec3(int((w >> 22) & 1023u), int((w >> 12) & 1023u), int((w >> 2) & 1023u));
+    imageStore(dst_rgb, g, vec4(ru_u16(uint(v.x) << 6), ru_u16(uint(v.y) << 6), ru_u16(uint(v.z) << 6), 1.0));
+    ivec3 o = v - 64;
+    int y10 = ru_clamp10(64 + ru_round_q20(cy.x * o.x + cy.y * o.y + cy.z * o.z));
+    imageStore(dst_luma, g, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
+}
+)GLSL";
+
 	// R210: one invocation per pixel ([00 R10 G10 B10], big-endian word).
 	const char* const R210_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
@@ -109,7 +124,8 @@ GpuRgbUnpack::~GpuRgbUnpack()
 bool GpuRgbUnpack::Supports(VideoFrameEncoding encoding)
 {
 	return encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ||
-		encoding == VideoFrameEncoding::R210;
+		encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
+		encoding == VideoFrameEncoding::R10l;
 }
 
 bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* data, size_t rowBytes, int width, int height,
@@ -118,7 +134,8 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	error.clear();
 	if (!gpu || !dispatch) { error = "no GPU"; return false; }
 	if (!Supports(encoding)) { error = "unsupported encoding"; return false; }
-	const bool r12 = encoding != VideoFrameEncoding::R210;
+	const bool r12 = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L;
+	const bool r10 = encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l;
 	if (!data || width <= 0 || height <= 0 || (width & 1) || (r12 && width % 8 != 0) || rowBytes % 4 != 0)
 	{
 		error = "bad frame geometry";
@@ -168,13 +185,19 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 		const int bt709[3] = { 13933, 46871, 4732 }, rec2020[3] = { 17218, 44444, 3886 };
 		for (int k = 0; k < 3; ++k) cy[k] = bt2020 ? rec2020[k] : bt709[k];
 	}
+	else if (r10)
+	{
+		// BT709_R10 / BT2020_R10 (64-940 input).
+		const int bt709[3] = { 222927, 749942, 75707 }, rec2020[3] = { 275461, 710935, 62181 };
+		for (int k = 0; k < 3; ++k) cy[k] = bt2020 ? rec2020[k] : bt709[k];
+	}
 	else
 	{
 		const int bt709[3] = { 217951, 733202, 74017 }, rec2020[3] = { 269312, 695065, 60793 };
 		for (int k = 0; k < 3; ++k) cy[k] = bt2020 ? rec2020[k] : bt709[k];
 	}
 	const int pairs = width / 2;
-	const int bigEndian = encoding == VideoFrameEncoding::R12B ? 1 : 0;
+	const int bigEndian = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R10b ? 1 : 0;
 	const pl_shader_desc descriptors[3] = { Sampled("raw", raw), Storage("dst_rgb", rgb), Storage("dst_luma", luma) };
 	pl_shader_var variables[5] = {
 		{ pl_var_int("pairs"), &pairs, false },
@@ -183,9 +206,10 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 		{ pl_var_int("big_endian"), &bigEndian, false },
 		{ pl_var_ivec3("cy"), cy, false } };
 	pl_custom_shader custom{};
-	custom.description = r12 ? "VideoProcessor capture: R12 to RGB (GPU)" : "VideoProcessor capture: r210 to RGB (GPU)";
+	custom.description = r12 ? "VideoProcessor capture: R12 to RGB (GPU)" : r10 ? "VideoProcessor capture: R10 to RGB (GPU)" :
+		"VideoProcessor capture: r210 to RGB (GPU)";
 	custom.header = RGB_UNPACK_HEADER;
-	custom.body = r12 ? R12_BODY : R210_BODY;
+	custom.body = r12 ? R12_BODY : r10 ? R10_BODY : R210_BODY;
 	custom.input = PL_SHADER_SIG_NONE;
 	custom.output = PL_SHADER_SIG_NONE;
 	custom.descriptors = descriptors;

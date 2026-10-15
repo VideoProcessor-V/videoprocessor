@@ -7475,6 +7475,17 @@ namespace VideoProcessorTest
 					rgbOut[2] = int(w & 1023u);
 					return;
 				}
+				if (encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l)
+				{
+					const BYTE* q = row + 4 * x;
+					const uint32_t w = encoding == VideoFrameEncoding::R10b ?
+						(uint32_t(q[0]) << 24) | (uint32_t(q[1]) << 16) | (uint32_t(q[2]) << 8) | q[3] :
+						(uint32_t(q[3]) << 24) | (uint32_t(q[2]) << 16) | (uint32_t(q[1]) << 8) | q[0];
+					rgbOut[0] = int((w >> 22) & 1023u);
+					rgbOut[1] = int((w >> 12) & 1023u);
+					rgbOut[2] = int((w >> 2) & 1023u);
+					return;
+				}
 				// The pair's nine bytes in stream order; R12B reverses every
 				// 32-bit word of its 36-byte block (stream byte k of the block
 				// is at k ^ 3).
@@ -7491,10 +7502,11 @@ namespace VideoProcessorTest
 					rgbOut[c] = v[(x & 1) * 3 + c];
 			};
 			int cases = 0;
-			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::R12B, VideoFrameEncoding::R12L, VideoFrameEncoding::R210 })
+			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::R12B, VideoFrameEncoding::R12L, VideoFrameEncoding::R210,
+				VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
 				for (const ColorSpace space : { ColorSpace::REC_709, ColorSpace::BT_2020 })
-					for (const int width : encoding == VideoFrameEncoding::R210 ? std::vector<int>{ 120, 122, 130, 1920 } :
-						std::vector<int>{ 104, 136, 1920 })
+					for (const int width : encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ?
+						std::vector<int>{ 104, 136, 1920 } : std::vector<int>{ 120, 122, 130, 1920 })
 					{
 						const int height = 100;
 						VideoStateComPtr state = new VideoState();
@@ -7511,7 +7523,8 @@ namespace VideoProcessorTest
 						const VideoFrame frame(source.data(), 1, 0, nullptr);
 						Assert::IsTrue(cpu.FormatVideoFrame(frame, expected.data()), L"CPU conversion failed");
 						const std::wstring name = std::wstring(encoding == VideoFrameEncoding::R12B ? L"R12B " :
-							encoding == VideoFrameEncoding::R12L ? L"R12L " : L"r210 ") +
+							encoding == VideoFrameEncoding::R12L ? L"R12L " : encoding == VideoFrameEncoding::R210 ? L"r210 " :
+							encoding == VideoFrameEncoding::R10b ? L"R10b " : L"R10l ") +
 							(space == ColorSpace::BT_2020 ? L"2020 " : L"709 ") + std::to_wstring(width);
 						Assert::IsTrue(unpack.Unpack(encoding, space == ColorSpace::BT_2020, source.data(), rowBytes, width, height, rgb, luma),
 							(name + L": " + ExtendedRangeGpuProbe::ToWide(unpack.Error())).c_str());
@@ -7529,7 +7542,8 @@ namespace VideoProcessorTest
 								for (int c = 0; c < 3; ++c)
 								{
 									const int want = encoding == VideoFrameEncoding::R210 ?
-										(4096 * 7 + (v[c] - 64) * 438 + 3) / 7 : v[c] << 4;
+										(4096 * 7 + (v[c] - 64) * 438 + 3) / 7 :
+										encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l ? v[c] << 6 : v[c] << 4;
 									if (gotRgb[i * 4 + c] != want)
 										Assert::Fail((name + L": RGB differs at (" + std::to_wstring(x) + L", " + std::to_wstring(y) +
 											L") component " + std::to_wstring(c) + L": " + std::to_wstring(gotRgb[i * 4 + c]) + L" vs " +
@@ -7542,8 +7556,8 @@ namespace VideoProcessorTest
 			std::vector<BYTE> narrow(1366 * 36 / 8 * 4 + 64);
 			Assert::IsFalse(unpack.Unpack(VideoFrameEncoding::R12L, false, narrow.data(), 6148, 1366, 4, rgb, luma),
 				L"an R12 width not a multiple of 8 must be refused");
-			Assert::IsFalse(GpuRgbUnpack::Supports(VideoFrameEncoding::R10b) || GpuRgbUnpack::Supports(VideoFrameEncoding::V210),
-				L"only R12B, R12L and r210 take this pass");
+			Assert::IsFalse(GpuRgbUnpack::Supports(VideoFrameEncoding::ARGB_8BIT) || GpuRgbUnpack::Supports(VideoFrameEncoding::V210),
+				L"only the packed 10/12-bit RGB formats take this pass");
 			pl_tex_destroy(gpu, &rgb);
 			pl_tex_destroy(gpu, &luma);
 			AssertCleanLibplaceboLog(log);

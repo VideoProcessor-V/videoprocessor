@@ -119,6 +119,15 @@ namespace
 		}
 	}
 
+	// Packed RGB (R12B / R12L / r210): a moving byte pattern (any bytes are
+	// legal codes; the content only has to change from frame to frame).
+	void FillPackedRgb(std::vector<BYTE>& frame, int height, size_t rowBytes, int n)
+	{
+		for (int y = 0; y < height; ++y)
+			for (size_t x = 0; x < rowBytes; ++x)
+				frame[static_cast<size_t>(y) * rowBytes + x] = static_cast<BYTE>(x * 7 + y * 3 + n * 5);
+	}
+
 	void FillUyvy(std::vector<BYTE>& frame, int width, int height, size_t rowBytes, int n)
 	{
 		for (int y = 0; y < height; ++y)
@@ -270,6 +279,11 @@ namespace
 				{
 					std::vector<BYTE>& buffer = ring[n % ring.size()];
 					if (encoding == VideoFrameEncoding::V210) FillV210(buffer, width, height, rowBytes, step.content);
+					else if (encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ||
+						encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
+						encoding == VideoFrameEncoding::R10l || encoding == VideoFrameEncoding::ARGB_8BIT ||
+						encoding == VideoFrameEncoding::BGRA_8BIT)
+						FillPackedRgb(buffer, height, rowBytes, step.content);
 					else FillUyvy(buffer, width, height, rowBytes, step.content);
 					// The hardware timestamp: the frame's scheduled time, as a
 					// capture card stamps it, not when this (busy) loop sent it.
@@ -644,6 +658,73 @@ namespace Tests
 				report("film then video", r);
 				Assert::IsTrue(r.Logged("(4 new of 5)"), (L"locks on the film\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Pulldown: lost"), (L"loses the lock on video\n" + r.Tail()).c_str());
+			}
+		}
+
+		TEST_METHOD(NativeRgbIngestRunsThroughTheRenderer)
+		{
+			// Roadmap item 2 (owner 2026-10-15): DeckLink 12-bit RGB (both byte
+			// orders) and r210 reach the renderer as native RGB, unpacked on the
+			// GPU, on the standard capture path as well as the gpu one; with
+			// native_rgb_ingest: off the CPU conversion as before.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const std::string failed = "Native RGB ingest: the GPU unpack failed";
+			struct Case { VideoFrameEncoding encoding; const char* path; const char* line; };
+			for (const Case& c : { Case{ VideoFrameEncoding::R12B, "standard", "Native RGB ingest: R12B unpacked on the GPU" },
+				Case{ VideoFrameEncoding::R12L, "gpu", "Native RGB ingest: R12L unpacked on the GPU" },
+				Case{ VideoFrameEncoding::R210, "standard", "Native RGB ingest: r210 unpacked on the GPU" },
+				Case{ VideoFrameEncoding::R10b, "standard", "Native RGB ingest: R10b unpacked on the GPU" },
+				Case{ VideoFrameEncoding::R10l, "gpu", "Native RGB ingest: R10l unpacked on the GPU" } })
+			{
+				const RunResult r = Run(c.encoding, c.path, 2.0);
+				const std::wstring name = std::wstring(c.line, c.line + strlen(c.line));
+				Assert::IsTrue(r.created, (name + L": renderer not created\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged(c.line), (name + L": the native path ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged(failed), (name + L": no fallback\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Alpha conversion failed"), (name + L": no conversion failure\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+			}
+			// The RGB formats already native (Bill's path, unchanged): 8-bit ARGB
+			// (e.g. a receiver's 8-bit RGB 4:4:4) and BGRA, 10-bit R10b / R10l.
+			struct Existing { VideoFrameEncoding encoding; const char* label; };
+			std::string existingFailures;
+			for (const Existing& c : { Existing{ VideoFrameEncoding::ARGB_8BIT, "ingress=Native ARGB -> RGB" },
+				Existing{ VideoFrameEncoding::BGRA_8BIT, "ingress=Native BGRA -> RGB" } })
+			{
+				// Every format tried; the failures listed together.
+				const RunResult r = Run(c.encoding, "standard", 2.0);
+				const bool ok = r.presented && !r.Logged("Alpha conversion failed") &&
+					!r.Logged("Failed picking any compatible texture format");
+				Logger::WriteMessage((std::string("existing native RGB ") + c.label + ": " + (ok ? "presented" : "NOT presented") + "\n").c_str());
+				if (!ok)
+					existingFailures += std::string(c.label) + "; ";
+			}
+			Assert::IsTrue(existingFailures.empty(), (L"existing native RGB formats not presented: " +
+				std::wstring(existingFailures.begin(), existingFailures.end())).c_str());
+			// Off: the CPU conversion, the native path never runs (R10b/R10l too:
+			// the P010 formatter, now that libplacebo's upload cannot take them).
+			for (const VideoFrameEncoding e : { VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
+			{
+				const RunResult r = Run(e, "standard", 2.0, false, "native_rgb_ingest: off\n");
+				Assert::IsFalse(r.Logged("Native RGB ingest:"), (L"R10 off: no native path\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"R10 off: frames presented (CPU conversion)\n" + r.Tail()).c_str());
+			}
+			{
+				const RunResult r = Run(VideoFrameEncoding::R12B, "standard", 2.0, false, "native_rgb_ingest: off\n");
+				Assert::IsFalse(r.Logged("Native RGB ingest:"), (L"off: no native path\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"off: frames presented\n" + r.Tail()).c_str());
+			}
+			// 23.976p with the de-judder on: it holds on RGB (its luma path is
+			// the next step) without breaking the GPU capture of other formats.
+			{
+				const RunResult r = Run(VideoFrameEncoding::R12B, "standard", 3.0, true, "dejudder_strength: 0.25\n");
+				Assert::IsTrue(r.Logged("Native RGB ingest: R12B unpacked on the GPU"), (L"film: the native path ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Capture path gpu: the GPU unpack failed"), (L"film: the V210/UYVY unpack untouched\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"film: frames presented\n" + r.Tail()).c_str());
 			}
 		}
 

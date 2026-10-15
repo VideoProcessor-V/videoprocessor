@@ -3070,6 +3070,69 @@ namespace VideoProcessorTest
 					rgb12, preferences)));
 		}
 
+		TEST_METHOD(DeckLinkYCbCr12CaptureChoice)
+		{
+			// Fix under test (owner 2026-10-15): a 12-bit YCbCr 4:2:2 signal was
+			// refused (the SDK has no 12-bit YCbCr format). rgb12 (default) asks
+			// for 12-bit RGB, v210 for 10-bit 4:2:2, off refuses as before; other
+			// signals are untouched.
+			const auto ycc12 = static_cast<BMDDetectedVideoInputFormatFlags>(
+				bmdDetectedVideoInputYCbCr422 | bmdDetectedVideoInput12BitDepth);
+			const auto ycc10 = static_cast<BMDDetectedVideoInputFormatFlags>(
+				bmdDetectedVideoInputYCbCr422 | bmdDetectedVideoInput10BitDepth);
+			const auto rgb12 = static_cast<BMDDetectedVideoInputFormatFlags>(
+				bmdDetectedVideoInputRGB444 | bmdDetectedVideoInput12BitDepth);
+			Assert::IsTrue(DeckLinkIsYCbCr12(ycc12));
+			Assert::IsFalse(DeckLinkIsYCbCr12(ycc10) || DeckLinkIsYCbCr12(rgb12));
+			Assert::AreEqual(0u, static_cast<unsigned int>(CanonicalDeckLinkCapturePixelFormat(ycc12)),
+				L"without the fix the format choice finds nothing (the refusal)");
+			Assert::AreEqual(static_cast<unsigned int>(bmdFormat12BitRGB),
+				static_cast<unsigned int>(CanonicalDeckLinkCapturePixelFormat(DeckLinkYCbCr12AsRgb12(ycc12))));
+			Assert::AreEqual(static_cast<unsigned int>(bmdFormat10BitYUV),
+				static_cast<unsigned int>(CanonicalDeckLinkCapturePixelFormat(DeckLinkYCbCr12AsV210(ycc12))));
+			// The R12 packing preference applies to the rgb12 choice.
+			DeckLinkCaptureFormatPreferences le;
+			le.rgb12 = bmdFormat12BitRGBLE;
+			Assert::AreEqual(static_cast<unsigned int>(bmdFormat12BitRGBLE),
+				static_cast<unsigned int>(PreferredDeckLinkCapturePixelFormat(DeckLinkYCbCr12AsRgb12(ycc12), le)));
+			// Other signals untouched.
+			Assert::AreEqual(static_cast<unsigned int>(ycc10), static_cast<unsigned int>(DeckLinkYCbCr12AsRgb12(ycc10)));
+			Assert::AreEqual(static_cast<unsigned int>(rgb12), static_cast<unsigned int>(DeckLinkYCbCr12AsV210(rgb12)));
+			// The switch: default rgb12; v210, off and a bad value from the file.
+			char temporaryDirectory[MAX_PATH] = {};
+			Assert::IsTrue(GetTempPathA(ARRAYSIZE(temporaryDirectory), temporaryDirectory) > 0);
+			const std::string path = std::string(temporaryDirectory) + "VideoProcessor-decklink-ycc12.cfg";
+			auto read = [&](const char* value, DeckLinkCaptureFormatPreferences& preferences, std::string& error)
+			{
+				{
+					std::ofstream file(path, std::ios::out | std::ios::trunc);
+					file << "[decklink]\n";
+					if (value)
+						file << "ycbcr_12bit_capture: " << value << "\n";
+				}
+				ConfigFile config;
+				Assert::IsTrue(config.Load(path));
+				return ReadDeckLinkCaptureFormatPreferences(config, preferences, error);
+			};
+			DeckLinkCaptureFormatPreferences preferences;
+			std::string error;
+			Assert::IsTrue(read(nullptr, preferences, error));
+			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::Rgb12, L"default rgb12");
+			Assert::IsTrue(read("v210", preferences, error));
+			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::V210);
+			Assert::IsTrue(read("off", preferences, error));
+			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::Off);
+			Assert::IsFalse(read("maybe", preferences, error), L"a bad value is an error");
+			{
+				std::ofstream file(path, std::ios::out | std::ios::trunc);
+				file << "[decklink]\nycbcr_12bit_capture: v210\n";
+			}
+			ConfigFile config;
+			Assert::IsTrue(config.Load(path));
+			Assert::IsTrue(MainConfigSchema::Validate(config, error), L"the schema accepts the key");
+			DeleteFileA(path.c_str());
+		}
+
 		TEST_METHOD(DeckLinkCapturePackingConfigurationExposesEveryRgbVariant)
 		{
 			char temporaryDirectory[MAX_PATH] = {};

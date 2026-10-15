@@ -44,6 +44,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
+#include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -941,6 +942,9 @@ namespace
 		// Efficiency under test (owner 2026-10-14): B's own first present
 		// takes the sigma-delta vectors from A's field (own search skipped).
 		bool ditherVectorsNewFrame = true;
+		// Roadmap item 2 (owner 2026-10-15, on): DeckLink R12B/R12L/r210 as
+		// native RGB (GpuRgbUnpack) instead of the CPU's 10-bit 4:2:0 P010.
+		bool nativeRgbIngest = true;
 		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
 		// signal by repeated frames is found and shown at its film rate.
 		bool dejudderPulldown = false;
@@ -1127,7 +1131,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2174,7 +2178,8 @@ namespace
 			std::make_pair("dejudder_pulldown", &settings.dejudderPulldown),
 			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea),
 			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown),
-			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame) })
+			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame),
+			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -4294,6 +4299,37 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> captureGpuFailed{ false };
 	std::unique_ptr<GpuCaptureUnpack> captureUnpack;
 	bool captureGpuLogged = false;
+	// native_rgb_ingest (roadmap item 2): R12B/R12L/r210 go on raw and are
+	// unpacked to native RGB (rgba16) plus the matcher's luma; a failed unpack
+	// turns the session back to the CPU formatter (logged once).
+	std::atomic<bool> rgbGpuWanted{ true };
+	std::atomic<bool> rgbGpuFailed{ false };
+	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
+	pl_tex rgbIngestLuma = nullptr;
+	bool rgbGpuLogged = false;
+	bool UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
+	{
+		if (!payload.Raw() || !d3d11)
+			return false;
+		if (!rgbUnpack)
+			rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
+		if (rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma))
+		{
+			if (!rgbGpuLogged)
+			{
+				const VideoFrameEncoding e = payload.rawEncoding;
+				DebugLog::Log("Native RGB ingest: %s unpacked on the GPU to RGB 4:4:4 (%dx%d, no CPU conversion)",
+					e == VideoFrameEncoding::R210 ? "r210" : e == VideoFrameEncoding::R12B ? "R12B" :
+					e == VideoFrameEncoding::R12L ? "R12L" : e == VideoFrameEncoding::R10b ? "R10b" : "R10l", width, height);
+				rgbGpuLogged = true;
+			}
+			return true;
+		}
+		if (!rgbGpuFailed.exchange(true))
+			DebugLog::Log("Native RGB ingest: the GPU unpack failed (%s); the CPU conversion for the rest of the session",
+				rgbUnpack->Error().c_str());
+		return false;
+	}
 	// The planes of a raw payload: the GPU unpack, or false (and the session
 	// back to the CPU path) when it fails.
 	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2])
@@ -8059,6 +8095,7 @@ struct LibplaceboVideoRenderer::Impl
 			config, *state, activeDisplayRule, manualRule, manualUnifiedProfiles);
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
+		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		PublishSettingsState(settings);
@@ -8688,6 +8725,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderPictureArea != next.dejudderPictureArea, "dejudder_picture_area");
 		changed(current.fixSceneCooldown != next.fixSceneCooldown, "fix_scene_cooldown");
 		changed(current.ditherVectorsNewFrame != next.ditherVectorsNewFrame, "dither_vectors_new_frame");
+		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -9018,6 +9056,7 @@ struct LibplaceboVideoRenderer::Impl
 			requestedTransport, target, settings.reportBt2020ToDisplay);
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
+		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
@@ -11832,6 +11871,10 @@ struct LibplaceboVideoRenderer::Impl
 		const DejudderUploadLayout& l = dejudderLayout;
 		if (!l.valid || payload.Bytes() != l.pixelBytes)
 			return false;
+		// native_rgb_ingest: an RGB raw frame has no YCbCr planes (the de-judder
+		// holds on it until its luma path is in).
+		if (payload.Raw() && GpuRgbUnpack::Supports(payload.rawEncoding))
+			return false;
 		if (payload.Raw())
 			return UnpackRawPayload(payload, l.width, l.height, dst);   // capture_path: gpu
 		struct pl_plane_data planes[2]{};
@@ -12783,6 +12826,10 @@ struct LibplaceboVideoRenderer::Impl
 			AlphaCanUseNativeRgbUpload(state.videoFrameEncoding) &&
 			GetAlphaNativeRgbLayout(state.videoFrameEncoding, nativeRgbLayout);
 		const bool nativeRgb8Upload = nativeRgbLayout.bitDepth == 8;
+		// native_rgb_ingest: an R12B / R12L / r210 frame handed on raw, unpacked
+		// here to native RGB (rgba16) on the GPU.
+		const bool rgbRawUpload = !nativeRgbUpload && convertedPayload && convertedPayload->Raw() &&
+			GpuRgbUnpack::Supports(convertedPayload->rawEncoding);
 		const bool lossless422Upload =
 			(state.videoFrameEncoding == VideoFrameEncoding::V210 ||
 				state.videoFrameEncoding == VideoFrameEncoding::UYVY ||
@@ -12853,7 +12900,7 @@ struct LibplaceboVideoRenderer::Impl
 			analysisSource = {
 				reinterpret_cast<const uint8_t*>(convertedPayload->rawFrame->GetData()),
 				convertedPayload->rawBytes, width, height, convertedPayload->rawRowBytes, 0,
-				AnalysisLumaFormat::NativeYuv422, state.videoFrameEncoding,
+				rgbRawUpload ? AnalysisLumaFormat::NativeRgb : AnalysisLumaFormat::NativeYuv422, state.videoFrameEncoding,
 				state.colorspace, frameGeneration
 			};
 		}
@@ -13591,6 +13638,34 @@ struct LibplaceboVideoRenderer::Impl
 				resolvedIngressStatus += " (analysis unavailable)";
 			setIngressStatus(std::move(resolvedIngressStatus));
 		}
+		else if (rgbRawUpload)
+		{
+			frameGpuTiming.BeginStage(
+				AlphaD3D11FrameGpuTimer::Stage::SourceUpload);
+			const bool sourceUploaded = UnpackRgbPayload(*convertedPayload, width, height,
+				state.colorspace == ColorSpace::BT_2020, textures[0], rgbIngestLuma);
+			frameGpuTiming.EndStage();
+			if (!sourceUploaded)
+				return false;
+			image.planes[0] = pl_plane{};
+			image.planes[0].texture = textures[0];
+			image.planes[0].components = 3;
+			image.planes[0].component_mapping[0] = PL_CHANNEL_R;
+			image.planes[0].component_mapping[1] = PL_CHANNEL_G;
+			image.planes[0].component_mapping[2] = PL_CHANNEL_B;
+			image.planes[0].flipped = state.invertedVertical;
+			image.num_planes = 1;
+			// The de-judder holds on RGB until its luma path is in.
+			UpdateDejudderEstimate(nullptr, nullptr, VideoFrameFormatterOutputContract{}, width, height, 0, 0,
+				false, state.invertedVertical, sourceSequence, cadenceRepeat, true,
+				state.displayMode && state.displayMode->IsInterlaced(),
+				SourceRateHz(state), nextSourceSequence);
+			const VideoFrameEncoding e = convertedPayload->rawEncoding;
+			setIngressStatus(std::string(e == VideoFrameEncoding::R210 ? "Native r210 -> RGB 4:4:4" :
+				e == VideoFrameEncoding::R12B ? "Native R12B -> RGB 4:4:4" : e == VideoFrameEncoding::R12L ?
+				"Native R12L -> RGB 4:4:4" : e == VideoFrameEncoding::R10b ? "Native R10b -> RGB 4:4:4" : "Native R10l -> RGB 4:4:4") +
+				" (GPU unpack)" + (analysisSource.IsValid() ? "" : " (analysis unavailable)"));
+		}
 		else
 		{
 			struct pl_plane_data planes[2]{};
@@ -13698,6 +13773,17 @@ struct LibplaceboVideoRenderer::Impl
 			formattedContract.colorDepth;
 		image.repr.bits.bit_shift = nativeRgbUpload ? 0 :
 			formattedContract.bitShift;
+		if (rgbRawUpload)
+		{
+			// GpuRgbUnpack's rgba16: R12 = the 12-bit value << 4, full range;
+			// r210 = 16-bit limited levels (4096-60160).
+			const VideoFrameEncoding e = convertedPayload->rawEncoding;
+			image.repr.sys = PL_COLOR_SYSTEM_RGB;
+			image.repr.levels = GpuRgbUnpack::FullRange(e) ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+			image.repr.bits.sample_depth = 16;
+			image.repr.bits.color_depth = GpuRgbUnpack::ColorDepth(e);
+			image.repr.bits.bit_shift = GpuRgbUnpack::BitShift(e);
+		}
 		image.color = TranslateColorSpace(state);
 		if (state.eotf == EOTF::SDR &&
 			sdrInputTransfer != PL_COLOR_TRC_UNKNOWN)
@@ -13775,7 +13861,7 @@ struct LibplaceboVideoRenderer::Impl
 		image.crop.y0 = 0.0f;
 		image.crop.x1 = static_cast<float>(width);
 		image.crop.y1 = static_cast<float>(height);
-		if (!nativeRgbUpload)
+		if (!nativeRgbUpload && !rgbRawUpload)
 			pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
 
 		struct pl_swapchain_frame swapchainFrame{};
@@ -21707,10 +21793,20 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			// capture_path: gpu (owner 2026-10-13): V210 / UYVY / HDYC go on raw
 			// (the render unpacks them on the GPU); anything else, an override,
 			// or a failed unpack earlier this session: the CPU formatter.
-			if (m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
+			// native_rgb_ingest: R12B / R12L / r210 go on raw (native RGB in the
+			// render); the contract is the CPU formatter's (the unpack's luma
+			// equals its Y plane).
+			const bool rgbRaw = m_impl->rgbGpuWanted.load(std::memory_order_acquire) &&
+				!m_impl->rgbGpuFailed.load(std::memory_order_acquire) &&
+				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
+				GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
+				((state->videoFrameEncoding != VideoFrameEncoding::R12B && state->videoFrameEncoding != VideoFrameEncoding::R12L) ||
+					state->displayMode->FrameWidth() % 8 == 0);
+			if (rgbRaw ||
+				(m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
 				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
 				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuCaptureUnpack::Supports(state->videoFrameEncoding))
+				GpuCaptureUnpack::Supports(state->videoFrameEncoding)))
 			{
 				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
 				frame.SourceBufferAddRef();   // released with the payload
@@ -21722,7 +21818,15 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
 				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
 				raw->rawEncoding = state->videoFrameEncoding;
-				raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
+				if (rgbRaw)
+				{
+					raw->contract.sampleRange = GpuRgbUnpack::FullRange(state->videoFrameEncoding) ?
+						VideoFrameSampleRange::FULL : VideoFrameSampleRange::LIMITED;
+					raw->contract.colorDepth = 10;
+					raw->contract.bitShift = 6;
+				}
+				else
+					raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
 				converted = raw;
 			}
 			else
@@ -23019,6 +23123,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dejudder_pulldown=" << s.dejudderPulldown << "\n"
 		<< "fix_scene_cooldown=" << s.fixSceneCooldown << "\n"
 		<< "dither_vectors_new_frame=" << s.ditherVectorsNewFrame << "\n"
+		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"

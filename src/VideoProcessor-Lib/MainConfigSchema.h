@@ -212,7 +212,8 @@ namespace MainConfigSchema
 		const std::vector<ConfigSchema::KeyRule> deckLinkRules = {
 			ConfigSchema::Choice("rgb_8bit_packing", { "AUTO", "ARGB", "BGRA" }),
 			ConfigSchema::Choice("rgb_10bit_packing", { "AUTO", "R210", "R10B", "R10L" }),
-			ConfigSchema::Choice("rgb_12bit_packing", { "AUTO", "R12B", "R12L" })
+			ConfigSchema::Choice("rgb_12bit_packing", { "AUTO", "R12B", "R12L" }),
+			ConfigSchema::Choice("ycbcr_12bit_capture", { "rgb12", "v210", "off" })
 		};
 		if (!ConfigSchema::ValidateSection(
 			config, "decklink", deckLinkRules, error))

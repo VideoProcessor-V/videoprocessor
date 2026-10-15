@@ -481,6 +481,26 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFormatChang
 	//
 	// Determine pixel format
 	//
+	// Fix under test (ycbcr_12bit_capture): a 12-bit YCbCr 4:2:2 signal as
+	// 12-bit RGB when the card offers it for this mode, else 10-bit 4:2:2.
+	if (DeckLinkIsYCbCr12(detectedSignalFlags) &&
+		m_formatPreferences.ycbcr12 != DeckLinkCaptureFormatPreferences::YCbCr12Capture::Off)
+	{
+		auto supported = [this, newMode](BMDPixelFormat candidate)
+		{
+			BOOL ok = FALSE;
+			BMDDisplayMode actualMode = newMode->GetDisplayMode();
+			const HRESULT result = m_deckLinkInput->DoesSupportVideoMode(
+				m_captureInputId, newMode->GetDisplayMode(), candidate,
+				bmdNoVideoInputConversion, bmdSupportedVideoModeDefault, &actualMode, &ok);
+			return SUCCEEDED(result) && ok;
+		};
+		const bool rgb12 = m_formatPreferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::Rgb12 &&
+			(supported(m_formatPreferences.rgb12) || supported(bmdFormat12BitRGB) || supported(bmdFormat12BitRGBLE));
+		detectedSignalFlags = rgb12 ? DeckLinkYCbCr12AsRgb12(detectedSignalFlags) : DeckLinkYCbCr12AsV210(detectedSignalFlags);
+		DebugLog::Log("BlackMagic: the signal is 12-bit YCbCr 4:2:2; capturing it as %s ([decklink] ycbcr_12bit_capture)",
+			rgb12 ? "12-bit RGB (all 12 bits; the card converts the colour)" : "10-bit 4:2:2 (v210)");
+	}
 	const BMDPixelFormat canonicalPixelFormat =
 		CanonicalDeckLinkCapturePixelFormat(detectedSignalFlags);
 	if (canonicalPixelFormat == BMD_PIXEL_FORMAT_INVALID)

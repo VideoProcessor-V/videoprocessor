@@ -28,7 +28,23 @@ struct DeckLinkCaptureFormatPreferences
 	BMDPixelFormat rgb8 = bmdFormat8BitARGB;
 	BMDPixelFormat rgb10 = bmdFormat10BitRGB;
 	BMDPixelFormat rgb12 = bmdFormat12BitRGB;
+	// Fix under test (owner 2026-10-15): a signal the driver reports as
+	// 12-bit YCbCr 4:2:2 (the SDK has no 12-bit YCbCr capture format) was
+	// refused. [decklink] ycbcr_12bit_capture:
+	//   rgb12 (default)  12-bit RGB from the card (all 12 bits kept; the card
+	//                    converts the colour), 10-bit 4:2:2 if the card cannot
+	//   v210             10-bit 4:2:2 (the card drops the lowest two bits)
+	//   off              refused, as before
+	enum class YCbCr12Capture { Rgb12, V210, Off };
+	YCbCr12Capture ycbcr12 = YCbCr12Capture::Rgb12;
 };
+
+// A 12-bit YCbCr 4:2:2 signal (not also RGB).
+bool DeckLinkIsYCbCr12(BMDDetectedVideoInputFormatFlags flags);
+// The flags the format choice uses for such a signal: as 12-bit RGB 4:4:4
+// (rgb12) or 10-bit 4:2:2 (v210); other signals unchanged.
+BMDDetectedVideoInputFormatFlags DeckLinkYCbCr12AsRgb12(BMDDetectedVideoInputFormatFlags flags);
+BMDDetectedVideoInputFormatFlags DeckLinkYCbCr12AsV210(BMDDetectedVideoInputFormatFlags flags);
 
 bool ReadDeckLinkCaptureFormatPreferences(const ConfigFile& config,
 	DeckLinkCaptureFormatPreferences& preferences, std::string& error);

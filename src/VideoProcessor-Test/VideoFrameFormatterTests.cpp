@@ -356,8 +356,9 @@ namespace Tests
 				{ VideoFrameEncoding::HDYC,      false, true,  false, false, false, false },
 				{ VideoFrameEncoding::V210,      false, true,  false, false, false, false },
 				{ VideoFrameEncoding::R210,      false, false, false, true,  false, false },
-				{ VideoFrameEncoding::R10b,      true,  false, true,  true,  true,  true  },
-				{ VideoFrameEncoding::R10l,      true,  false, true,  true,  true,  true  },
+				// R10b / R10l: no D3D11 plane format (2026-10-15): GpuRgbUnpack or P010.
+				{ VideoFrameEncoding::R10b,      false, false, true,  true,  true,  true  },
+				{ VideoFrameEncoding::R10l,      false, false, true,  true,  true,  true  },
 				{ VideoFrameEncoding::R12B,      false, false, true,  true,  false, false },
 				{ VideoFrameEncoding::R12L,      false, false, true,  true,  true,  true  },
 			};
@@ -1604,7 +1605,7 @@ namespace Tests
 			Assert::IsTrue(GetAlphaNativeRgbLayout(VideoFrameEncoding::R10l, layout));
 			Assert::IsFalse(layout.swapped);
 			Assert::IsTrue(layout.limitedRange);
-			Assert::IsTrue(AlphaCanUseNativeRgbUpload(VideoFrameEncoding::R10l));
+			Assert::IsFalse(AlphaCanUseNativeRgbUpload(VideoFrameEncoding::R10l));   // no D3D11 plane format
 			const uint32_t r10 = (1U << 22) | (2U << 12) | (3U << 2);
 			Assert::AreEqual(1U, static_cast<uint32_t>((r10 & layout.masks[0]) >> 22));
 			Assert::AreEqual(2U, static_cast<uint32_t>((r10 & layout.masks[1]) >> 12));
@@ -1613,7 +1614,7 @@ namespace Tests
 			Assert::IsTrue(GetAlphaNativeRgbLayout(VideoFrameEncoding::R10b, layout));
 			Assert::IsTrue(layout.swapped);
 			Assert::IsTrue(layout.limitedRange);
-			Assert::IsTrue(AlphaCanUseNativeRgbUpload(VideoFrameEncoding::R10b));
+			Assert::IsFalse(AlphaCanUseNativeRgbUpload(VideoFrameEncoding::R10b));   // no D3D11 plane format
 			Assert::AreEqual(10, layout.bitDepth);
 			Assert::IsFalse(GetAlphaNativeRgbLayout(VideoFrameEncoding::R12L, layout));
 		}
