@@ -109,7 +109,8 @@ Later timings use an in-process alternating A/B to cancel the drift.
 ## Next steps, in order (each: Beta byte-identity, then timing on mains; kept only if faster)
 
 1. Done: step A kept.
-2. If it helps: the four 1/8 picks the same way (13 threads, one row of 13 each, for all four lists; thread 0
+2. Done (2026-10-15): byte-identical, Beta passes; block search 6.08 ms on a first (cool) run against step A's
+   first runs 6.65 / 7.15 ms, matcher 9.1 ms. Kept. The four 1/8 picks the same way (13 threads, one row of 13 each, for all four lists; thread 0
    the 13 row winners).
 3. Candidate-list build in parallel: each start's 7x7 window is a fixed-size slot (start k at offset
    1 + 49 x (k - skipped)), so thread t can write its own entry once the skip flags (thread 0, a few

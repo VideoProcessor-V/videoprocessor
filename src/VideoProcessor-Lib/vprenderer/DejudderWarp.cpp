@@ -568,28 +568,49 @@ if (run && li < 169) {
 #endif
 }
 sync_group();
+if (run && li < 13) {
+    float bz = 0.0, bc = 0.0, bg = 0.0;
+    int rz = PK_EMPTY, rc = PK_EMPTY, rg = PK_EMPTY;
+#ifdef GLOBAL_TWO
+    float bg2 = 0.0;
+    int rg2 = PK_EMPTY;
+#endif
+    for (int k = 0; k < 13; k++) {
+        int i = li * 13 + k;
+        int r = i == 84 ? -1 : i;
+        if (pk_better(l1_sads_z[i], r, bz, rz)) { bz = l1_sads_z[i]; rz = r; }
+        if (pk_better(l1_sads_c[i], r, bc, rc)) { bc = l1_sads_c[i]; rc = r; }
+        if (have_g && pk_better(l1_sads_g[i], r, bg, rg)) { bg = l1_sads_g[i]; rg = r; }
+#ifdef GLOBAL_TWO
+        if (have_g2 && pk_better(l1_sads_g2[i], r, bg2, rg2)) { bg2 = l1_sads_g2[i]; rg2 = r; }
+#endif
+    }
+    pk_s[li] = bz; pk_r[li] = rz;
+    pk_s[13 + li] = bc; pk_r[13 + li] = rc;
+    pk_s[26 + li] = bg; pk_r[26 + li] = rg;
+#ifdef GLOBAL_TWO
+    pk_s[39 + li] = bg2; pk_r[39 + li] = rg2;
+#endif
+}
+sync_group();
 if (run && lead) {
-    vec2 v1z = vec2(0.0);
-    float best1z = l1_sads_z[84];
-    vec2 v1c = vec2(v2 * 4);
-    float best1c = l1_sads_c[84];
-    vec2 v1g = vgf;
-    float best1g = have_g ? l1_sads_g[84] : 0.0;
+    int rr[4];
+    for (int j = 0; j < 4; j++) {
+        float bs = 0.0;
+        int br = PK_EMPTY;
+        for (int k = 0; k < 13; k++)
+            if (pk_better(pk_s[j * 13 + k], pk_r[j * 13 + k], bs, br)) { bs = pk_s[j * 13 + k]; br = pk_r[j * 13 + k]; }
+        rr[j] = br;
+    }
+    // Rank -1 (the centre) and an empty list (no global start) keep the
+    // serial pick's first candidate: the start itself.
+#define L1_STEP(r) ((r) < 0 || (r) == PK_EMPTY ? vec2(0.0) : 0.5 * vec2((r) % 13 - 6, (r) / 13 - 6))
+    vec2 v1z = L1_STEP(rr[0]);
+    vec2 v1c = vec2(v2 * 4) + L1_STEP(rr[1]);
+    vec2 v1g = vgf + (have_g ? L1_STEP(rr[2]) : vec2(0.0));
 #ifdef GLOBAL_TWO
-    vec2 v1g2 = vg2;
-    float best1g2 = have_g2 ? l1_sads_g2[84] : 0.0;
+    vec2 v1g2 = vg2 + (have_g2 ? L1_STEP(rr[3]) : vec2(0.0));
 #endif
-    for (int dy = -6; dy <= 6; dy++)
-        for (int dx = -6; dx <= 6; dx++) {
-            int i = (dy + 6) * 13 + dx + 6;
-            vec2 h = 0.5 * vec2(dx, dy);
-            if (l1_sads_z[i] < best1z) { best1z = l1_sads_z[i]; v1z = h; }
-            if (l1_sads_c[i] < best1c) { best1c = l1_sads_c[i]; v1c = vec2(v2 * 4) + h; }
-            if (have_g && l1_sads_g[i] < best1g) { best1g = l1_sads_g[i]; v1g = vgf + h; }
-#ifdef GLOBAL_TWO
-            if (have_g2 && l1_sads_g2[i] < best1g2) { best1g2 = l1_sads_g2[i]; v1g2 = vg2 + h; }
-#endif
-        }
     s_v1z = v1z;
     s_v1c = v1c;
     s_v1g = have_g ? v1g : vec2(0.0);
