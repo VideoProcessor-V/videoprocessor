@@ -65,6 +65,9 @@ namespace Dejudder
 		// measured in limited-range-equivalent codes (219 per unit, not
 		// 255), so matchTolerance means the same for both.
 		bool fullRange = false;
+		// The source frame's number (0 = unknown): a pair whose A is the last
+		// pair's B reuses B's uncorrected half-size luma and pyramid (exact).
+		uint64_t sequence = 0;
 	};
 
 	struct Settings
@@ -353,6 +356,8 @@ namespace Dejudder
 		void FlushPassTimers();
 		// Tests only: the serial block search the parallel one must reproduce.
 		void SetSerialSearchForTest(bool on) { serialSearchForTest = on; }
+		uint64_t ReusedPlanesForTest() const { return reusedPlanesForTest; }
+		pl_tex FadeStateForTest() const { return FadeStateTexture(); }
 		// Tests only: lowRes without re-scoring the scaled-back searches.
 		void SetLowResRescoreForTest(bool on) { rescoreForTest = on; }
 		const std::map<std::string, double>& PassMs() const { return passMs; }
@@ -421,6 +426,7 @@ namespace Dejudder
 		{
 			previousValid = false;
 			holdResetPending = true;
+			keptSequence = 0;
 			if (fadeState)
 				pl_tex_destroy(gpu, &fadeState);
 			if (inner)
@@ -460,6 +466,7 @@ namespace Dejudder
 		bool EnsureTextures(const Planes& a);
 		bool passTiming = false;
 		bool serialSearchForTest = false;
+		uint64_t reusedPlanesForTest = 0;   // pairs whose A planes were the last pair's B
 		bool DispatchPerBlock(const char* description, const char* header, const char* body,
 			const pl_shader_desc* descriptors, int numDescriptors,
 			const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY);
@@ -475,7 +482,19 @@ namespace Dejudder
 			const struct pl_shader_var* variables, int numVariables,
 			int width, int height, int group);
 		// levels: 0 the half-resolution luma only, 1 also the 1/8 level, 2 also the 1/32 level.
-		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade = nullptr, int levels = 2);
+		// plain (with fade): B's uncorrected half-size luma, copied where no fade is active.
+		bool Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade = nullptr, int levels = 2,
+			pl_tex plain = nullptr);
+		// The pyramid levels above `from` up to `levels` of an existing half-size luma.
+		bool Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels);
+		// B's uncorrected planes kept for the next pair's A (2026-10-15): in the B
+		// set, or in the K set when the fade correction rewrote the B set.
+		void KeepPlainBInK();
+		pl_tex halfK = nullptr, l1K = nullptr, l2K = nullptr;
+		uint64_t keptSequence = 0;
+		bool keptInK = false;
+		int keptLevels = 0;
+		bool keptFullRange = false;
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr);
 		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);

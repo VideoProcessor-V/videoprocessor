@@ -22,18 +22,28 @@ namespace Dejudder
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (p.x < size.x && p.y < size.y) {
-    ivec2 full = textureSize(src, 0);
-    float sum = 0.0;
-    for (int y = 0; y < 2; y++)
-        for (int x = 0; x < 2; x++)
-            sum += texelFetch(src, min(p * 2 + ivec2(x, y), full - ivec2(1)), 0).r;
-    float v = sum * 0.25 * codes;
-#ifdef FADE_APPLY
-    // M4: B after the fade's global gain and offset (when active).
-    vec4 fs = texelFetch(fade_state, ivec2(0), 0);
-    if (fs.z > 0.5)
-        v = v * fs.x + fs.y;
+    float v;
+#ifdef FADE_PLAIN
+    // No fade active: B's uncorrected half-size value, stored by the plain
+    // pass (the same value this pass would store).
+    if (texelFetch(fade_state, ivec2(0), 0).z <= 0.5)
+        v = texelFetch(plain, p, 0).r;
+    else
 #endif
+    {
+        ivec2 full = textureSize(src, 0);
+        float sum = 0.0;
+        for (int y = 0; y < 2; y++)
+            for (int x = 0; x < 2; x++)
+                sum += texelFetch(src, min(p * 2 + ivec2(x, y), full - ivec2(1)), 0).r;
+        v = sum * 0.25 * codes;
+#ifdef FADE_APPLY
+        // M4: B after the fade's global gain and offset (when active).
+        vec4 fs = texelFetch(fade_state, ivec2(0), 0);
+        if (fs.z > 0.5)
+            v = v * fs.x + fs.y;
+#endif
+    }
     imageStore(dst, p, vec4(v, 0.0, 0.0, 1.0));
 }
 )GLSL";
@@ -2093,7 +2103,7 @@ if (q.x < size.x && q.y < size.y) {
 
 	MotionWarp::~MotionWarp()
 	{
-		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &forward, &backward,
+		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &halfK, &l1K, &l2K, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
@@ -2142,6 +2152,8 @@ if (q.x < size.x && q.y < size.y) {
 		if (!make(&halfA, halfW, halfH, scalar, readable) || !make(&halfB, halfW, halfH, scalar, readable) ||
 			!make(&l1A, l1W, l1H, scalar, readable) || !make(&l1B, l1W, l1H, scalar, readable) ||
 			!make(&l2A, l2W, l2H, scalar, readable) || !make(&l2B, l2W, l2H, scalar, readable) ||
+			!make(&halfK, halfW, halfH, scalar, readable) || !make(&l1K, l1W, l1H, scalar, readable) ||
+			!make(&l2K, l2W, l2H, scalar, readable) ||
 			!make(&forward, blocksX, blocksY, vec4f, readable) || !make(&backward, blocksX, blocksY, vec4f, readable) ||
 			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable) ||
 			!make(&occlusion[0], blocksX, blocksY, vec4f, readable) || !make(&occlusion[1], blocksX, blocksY, vec4f, readable) ||
@@ -2373,19 +2385,36 @@ if (q.x < size.x && q.y < size.y) {
 		return ok;
 	}
 
-	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int levels)
+	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int levels,
+		pl_tex plain)
 	{
 		const float codes = lumaInCodes ? 1.0f : fullRange ? 219.0f : 255.0f;
 		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
-		const pl_shader_desc first[3] = { Sampled("src", luma, false), Storage("dst", half), Sampled("fade_state", fade, false) };
+		const bool withPlain = fade && plain;
+		const pl_shader_desc first[4] = { Sampled("src", luma, false), Storage("dst", half), Sampled("fade_state", fade, false),
+			Sampled("plain", plain, false) };
+		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
+				withPlain ? "#define FADE_APPLY 1\n#define FADE_PLAIN 1\n" : fade ? "#define FADE_APPLY 1\n" : nullptr, DOWNSAMPLE_BODY,
+				first, withPlain ? 4 : fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
+			Pyramid(half, l1, l2, 0, levels);
+	}
+
+	bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)
+	{
 		const pl_shader_desc second[2] = { Sampled("src", half, false), Storage("dst", l1) };
 		const pl_shader_desc third[2] = { Sampled("src", l1, false), Storage("dst", l2) };
-		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
-				fade ? "#define FADE_APPLY 1\n" : nullptr, DOWNSAMPLE_BODY, first, fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
-			(levels < 1 || Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
+		return (from >= 1 || levels < 1 || Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
 				second, 2, nullptr, 0, l1W, l1H, 8)) &&
-			(levels < 2 || Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
+			(from >= 2 || levels < 2 || Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
 				third, 2, nullptr, 0, l2W, l2H, 8));
+	}
+
+	void MotionWarp::KeepPlainBInK()
+	{
+		std::swap(halfB, halfK);
+		std::swap(l1B, l1K);
+		std::swap(l2B, l2K);
+		keptInK = true;
 	}
 
 	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second)
@@ -3029,8 +3058,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			static_cast<float>(settings.referenceRateHz / settings.sourceHz) : 1.0f;
 		const float fadeLo = 0.75f * perFrame, fadeHi = 24.0f * perFrame;
 		const pl_shader_var fadeVars[2] = { { pl_var_float("fade_lo"), &fadeLo, true }, { pl_var_float("fade_hi"), &fadeHi, true } };
-		return Dispatch("VideoProcessor de-judder: fade test (M4)", header.c_str(), FADE_BODY, d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16) &&
-			Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeState);
+		if (!Dispatch("VideoProcessor de-judder: fade test (M4)", header.c_str(), FADE_BODY, d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16))
+			return false;
+		// The uncorrected B stays in the K set for the next pair's A.
+		const int levels = keptLevels;
+		KeepPlainBInK();
+		return Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeState, levels, halfK);
 	}
 
 	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot, bool wantGrainError)
@@ -3055,9 +3088,34 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool outerHist = outerTrust && settings.regionalHold;
 		const int levelsA = !outerOfLowRes || outerHist ? 2 : settings.pictureArea ? 1 : 0;
 		const int levelsB = !outerOfLowRes || outerHist ? 2 : 0;
-		if (!Downsample(a.luma, halfA, l1A, l2A, a.fullRange, nullptr, levelsA) ||
+		// 2026-10-15: A is the last pair's B (the same source frame, no gap or
+		// resync since - those forget it): its uncorrected planes are kept, so
+		// A's are those exactly; only missing pyramid levels are built.
+		const bool reuseA = a.sequence != 0 && a.sequence == keptSequence && a.fullRange == keptFullRange;
+		keptSequence = 0;
+		if (reuseA)
+		{
+			if (keptInK)
+			{
+				std::swap(halfA, halfK);
+				std::swap(l1A, l1K);
+				std::swap(l2A, l2K);
+			}
+			else
+			{
+				std::swap(halfA, halfB);
+				std::swap(l1A, l1B);
+				std::swap(l2A, l2B);
+			}
+		}
+		if (!(reuseA ? Pyramid(halfA, l1A, l2A, keptLevels, levelsA) : Downsample(a.luma, halfA, l1A, l2A, a.fullRange, nullptr, levelsA)) ||
 			!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, nullptr, levelsB))
 			return false;
+		reusedPlanesForTest += reuseA ? 1 : 0;
+		keptSequence = b.sequence;
+		keptInK = false;
+		keptLevels = levelsB;
+		keptFullRange = b.fullRange;
 		pictureFullRange = a.fullRange;
 		if (settings.pictureArea && !PictureArea())
 			return false;
@@ -3071,9 +3129,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The inner tested the fade on these planes: B here gets the same
 			// gain and offset, so M6's mask and the grain map see it (audit
 			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
-			if (settings.fadeMatch && inner && inner->FadeStateTexture() &&
-				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->FadeStateTexture(), levelsB))
-				return false;
+			if (settings.fadeMatch && inner && inner->FadeStateTexture())
+			{
+				KeepPlainBInK();
+				if (!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->FadeStateTexture(), levelsB, halfK))
+					return false;
+			}
 		}
 		else
 		{

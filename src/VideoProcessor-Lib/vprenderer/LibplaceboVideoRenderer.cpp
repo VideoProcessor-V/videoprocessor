@@ -11922,7 +11922,12 @@ struct LibplaceboVideoRenderer::Impl
 			dejudder->SetPictureArea(dejudderPicture.left, dejudderPicture.top, dejudderPicture.right, dejudderPicture.bottom);
 		else
 			dejudder->SetPictureArea(0, 0, 0, 0);
-		if (!dejudder->Estimate(a, b, maskSlot, adaptiveGrainMapWanted))
+		// The frame numbers let a pair whose A is the last pair's B reuse its
+		// planes (2026-10-15; a gap or resync forgets them).
+		Dejudder::Planes sa = a, sb = b;
+		sa.sequence = aSequence;
+		sb.sequence = bSequence;
+		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",

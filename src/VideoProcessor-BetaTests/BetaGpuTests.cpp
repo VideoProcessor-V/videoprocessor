@@ -816,6 +816,102 @@ void RunBetaDitherVectorsTests()
 		}
 		std::cout << "Beta de-judder: parallel block search byte-identical to the serial search, parallel global motion the same vector (defaults, refined)\n";
 	}
+	// 2026-10-15: a pair whose A is the last pair's B reuses B's uncorrected
+	// half-size planes. Consecutive pairs with frame numbers against the same
+	// pairs without (every plane rebuilt): the same fields, byte for byte, at
+	// full size and on the half-size path (lowRes, with and without lowResAll),
+	// on a plain pan and on a pan through a brightness fade (the fade
+	// correction rewrites B's planes; the next A must still be the
+	// uncorrected B).
+	{
+		const int rw = 384, rh = 1536;   // tall enough to halve (lowRes)
+		const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(
+			PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE);
+		auto make = [&](int w, int h, int comps, const std::vector<uint16_t>& data)
+		{
+			pl_tex_params params{};
+			params.w = w;
+			params.h = h;
+			params.format = pl_find_fmt(handle, PL_FMT_UNORM, comps, 16, 16, caps);
+			params.sampleable = true;
+			params.host_readable = true;
+			params.initial_data = data.data();
+			return pl_tex_create(handle, &params);
+		};
+		auto fieldBytes = [&](pl_tex tex)
+		{
+			std::vector<uint16_t> out(static_cast<size_t>(tex->params.w) * tex->params.h * 4);
+			pl_tex_transfer_params d{};
+			d.tex = tex;
+			d.ptr = out.data();
+			Check(pl_tex_download(handle, &d), "plane reuse: field not readable");
+			return out;
+		};
+		int fadeActivePairs = 0;
+		for (int fade = 0; fade < 2; ++fade)
+		{
+			std::vector<Dejudder::Planes> frames(4);
+			for (int k = 0; k < 4; ++k)
+			{
+				// The fade frames: a still picture brightening (a pan moves the 1/32 statistics the
+				// fade test reads); the pan frames: a pan at constant brightness.
+				const double gain = fade ? 1.0 + 0.05 * k : 1.0;
+				const int m = fade ? 0 : k;
+				std::vector<uint16_t> luma(static_cast<size_t>(rw) * rh), chroma(static_cast<size_t>(rw / 2) * rh * 2);
+				for (int y = 0; y < rh; ++y)
+					for (int x = 0; x < rw; ++x)
+						luma[static_cast<size_t>(y) * rw + x] = static_cast<uint16_t>(
+							std::min(65535.0, Texture(x - 6 * m, y - 3 * m) * gain));
+				for (int y = 0; y < rh; ++y)
+					for (int x = 0; x < rw / 2; ++x)
+						for (int c = 0; c < 2; ++c)
+							chroma[(static_cast<size_t>(y) * (rw / 2) + x) * 2 + c] = Texture((x - 3 * m) * 2, y - 3 * m, 7 + c);
+				frames[k].luma = make(rw, rh, 1, luma);
+				frames[k].chroma = make(rw / 2, rh, 2, chroma);
+				frames[k].chromaShiftX = 1;
+				frames[k].chromaShiftY = 0;
+			}
+			for (int path = 0; path < 3; ++path)
+			{
+				Dejudder::Settings s = ChainGpuProbe::Refined(settings);
+				s.hostReadable = true;
+				s.lowRes = path > 0;
+				s.lowResAll = path == 2;
+				Dejudder::MotionWarp reuse(gpu.Log(), handle, s), fresh(gpu.Log(), handle, s);
+				for (int k = 0; k + 1 < 4; ++k)
+				{
+					Dejudder::Planes ra = frames[k], rb = frames[k + 1];
+					ra.sequence = static_cast<uint64_t>(k + 1);
+					rb.sequence = static_cast<uint64_t>(k + 2);
+					Check(reuse.Estimate(ra, rb) && fresh.Estimate(frames[k], frames[k + 1]),
+						"plane reuse: estimate failed: " + reuse.LastError() + fresh.LastError());
+					if (fade && reuse.FadeStateForTest())
+					{
+						float st[4] = {};   // the fade state: 1x1 rgba32f, z = correction on
+						pl_tex_transfer_params d{};
+						d.tex = reuse.FadeStateForTest();
+						d.ptr = st;
+						Check(d.tex->params.format->texel_size == sizeof(st) && pl_tex_download(handle, &d),
+							"plane reuse: fade state not readable");
+						fadeActivePairs += st[2] > 0.5f ? 1 : 0;
+					}
+					Check(fieldBytes(reuse.Field()) == fieldBytes(fresh.Field()),
+						std::string("plane reuse: the field differs from the rebuilt planes' (") + (fade ? "fade" : "pan") +
+							", path " + std::to_string(path) + ", pair " + std::to_string(k + 1) + ")");
+				}
+				Check(reuse.ReusedPlanesForTest() == 2 && fresh.ReusedPlanesForTest() == 0,
+					"plane reuse: expected 2 reused pairs, got " + std::to_string(reuse.ReusedPlanesForTest()));
+			}
+			for (auto& f : frames)
+			{
+				pl_tex_destroy(handle, &f.luma);
+				pl_tex_destroy(handle, &f.chroma);
+			}
+		}
+		Check(fadeActivePairs > 0, "plane reuse: the fade correction never engaged on the fade frames");
+		std::cout << "Beta de-judder: reused half-size planes byte-identical to rebuilt ones (full size, lowRes, lowResAll; pan and fade, "
+			<< fadeActivePairs << " pairs with the fade correction on)\n";
+	}
 
 	pl_tex_params tp{};
 	tp.w = width;

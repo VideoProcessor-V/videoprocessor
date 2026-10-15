@@ -162,3 +162,14 @@ SADs instead of 11 (16 of 32 for half-pel instead of 8); each block's work, orde
 Byte-identical (Beta passes, 6d 0.161845). One timing on a slow GPU run: second sweep 1.13 ms (earlier
 1.18 ms) while the block search read 6.88 ms instead of ~5.4 ms, so likely ~20-25% faster; kept on that
 evidence (owner 2026-10-15: take it, confirm the timing on the next run).
+
+## Reusing the last pair's B planes (2026-10-15, kept)
+
+Each pair (A, B) is followed by (B, C): A's half-size luma and pyramid are now the last pair's B planes,
+kept uncorrected (the fade correction rewrites B's planes; the uncorrected copy moves to a third set first),
+keyed by the frame number the renderer passes (0 = unknown, no reuse; a frame gap forgets it, a resync
+destroys the matcher). Where no fade is active the corrected-B pass copies the stored uncorrected value
+instead of downsampling the full picture again (the same stored value). Exact: Beta test "reused half-size
+planes byte-identical to rebuilt ones" (full size, lowRes, lowResAll; a pan and a still fade with the
+correction on in 6 pairs). Saves A's half-size luma and pyramid on both matcher sizes (roughly 0.4-0.7 ms
+on the laptop at 4K; the live timing test passes no frame numbers, so it does not show it).
