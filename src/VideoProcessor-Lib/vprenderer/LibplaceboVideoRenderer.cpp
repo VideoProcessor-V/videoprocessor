@@ -45,6 +45,7 @@
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
+#include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -962,6 +963,11 @@ namespace
 		// both pathways (owner 2026-10-15: about half the time at 4K, no CPU
 		// conversion; every CPU consumer reads the raw frame - audited).
 		std::string capturePath = "gpu";
+		// Experimental (owner 2026-10-15, option A of the pinned-memory work):
+		// early = each raw frame uploaded on the conversion thread as it arrives
+		// (EarlyUpload, a second device and shared textures); render = the
+		// render thread uploads it (today).
+		std::string captureUpload = "render";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1985,6 +1991,7 @@ namespace
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
+		readChoice("capture_upload", settings.captureUpload, { "render", "early" });
 		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
@@ -4306,6 +4313,54 @@ struct LibplaceboVideoRenderer::Impl
 	// turns the session back to the CPU formatter (logged once).
 	std::atomic<bool> rgbGpuWanted{ true };
 	std::shared_ptr<std::atomic<int>> rawBuffersHeld = std::make_shared<std::atomic<int>>(0);
+	// capture_upload: early. The pool exists for the renderer's life (the
+	// conversion thread reads the pointer); it is opened and closed on the
+	// render thread.
+	std::atomic<bool> earlyWanted{ false };
+	const std::unique_ptr<EarlyUpload> earlyUpload = std::make_unique<EarlyUpload>();
+	bool earlyOpenFailed = false;
+	uint64_t earlyUsed = 0, earlyFallback = 0;
+	// Render thread, each raw frame: the pool open when wanted (closed when not).
+	void SyncEarlyUpload()
+	{
+		const bool wanted = earlyWanted.load(std::memory_order_acquire) && d3d11;
+		if (!wanted)
+		{
+			if (earlyUpload->IsOpen())
+			{
+				earlyUpload->Close();
+				DebugLog::Log("Early upload: off (%llu frames read early, %llu took the render upload)",
+					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback));
+			}
+			earlyOpenFailed = false;
+			return;
+		}
+		if (earlyUpload->IsOpen() || earlyOpenFailed)
+			return;
+		// Frames in flight (queue, de-judder next / ahead, the one being
+		// filled, a cadence repeat) plus a margin of 3 (owner 2026-10-15);
+		// capped at 1 GB and a quarter of the card's memory.
+		const int slots = 8 + 3;
+		if (earlyUpload->Open(d3d11->device, d3d11->gpu, slots))
+			DebugLog::Log("Early upload: on (%d slots, up to %zu MB; frames uploaded as they arrive on a second device)", slots,
+				earlyUpload->CapBytes() >> 20);
+		else
+		{
+			earlyOpenFailed = true;
+			DebugLog::Log("Early upload: not available (%s); the render upload", earlyUpload->LastError().c_str());
+		}
+	}
+	// Render thread: the early-uploaded texture of a payload (with its GPU wait
+	// queued), or nullptr (the unpack uploads from the frame).
+	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot)
+	{
+		slot = payload.early ? static_cast<EarlyUpload::Slot*>(payload.early.get()) : nullptr;
+		pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
+		if (!tex)
+			slot = nullptr;
+		++(tex ? earlyUsed : earlyFallback);
+		return tex;
+	}
 	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
@@ -4323,7 +4378,16 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		if (!rgbUnpack)
 			rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
-		if (rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma))
+		SyncEarlyUpload();
+		EarlyUpload::Slot* slot = nullptr;
+		const pl_tex early = EarlyTexture(payload, slot);
+		bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+			rgb, luma, false, early);
+		if (slot)
+			earlyUpload->Used(*slot);
+		if (!unpacked && early)
+			unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
+		if (unpacked)
 		{
 			if (!rgbGpuLogged)
 			{
@@ -4350,7 +4414,16 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		if (!captureUnpack)
 			captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
-		if (captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes))
+		SyncEarlyUpload();
+		EarlyUpload::Slot* slot = nullptr;
+		const pl_tex early = EarlyTexture(payload, slot);
+		bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+			planes, early);
+		if (slot)
+			earlyUpload->Used(*slot);
+		if (!unpacked && early)   // the early texture refused: the frame itself
+			unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
+		if (unpacked)
 		{
 			if (!captureGpuLogged)
 			{
@@ -5484,6 +5557,18 @@ struct LibplaceboVideoRenderer::Impl
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
 				captureUnpack.reset();   // its textures and dispatch, before the device
+				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
+				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
+				if (earlyUpload->IsOpen())
+				{
+					const EarlyUpload::Stats es = earlyUpload->GetStats();
+					DebugLog::Log("Early upload: closed (%llu frames read early, %llu took the render upload; %llu uploads, %llu with no free slot (held %llu, GPU release pending %llu), %llu failed)",
+						static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
+						static_cast<unsigned long long>(es.uploads), static_cast<unsigned long long>(es.noFreeSlot),
+						static_cast<unsigned long long>(es.noFreeHeld), static_cast<unsigned long long>(es.noFreeGpu),
+						static_cast<unsigned long long>(es.failures));
+				}
+				earlyUpload->Close();    // the second device and the shared textures
 				ReleaseDejudder();   // before the device goes
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
 				extendedRangeHooks.Release();   // Stage 10: its textures
@@ -8120,6 +8205,7 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
+		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		PublishSettingsState(settings);
@@ -8639,6 +8725,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderLowRes = next.dejudderLowRes;
 		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
 		currentTransport.capturePath = next.capturePath;
+		currentTransport.captureUpload = next.captureUpload;
 		currentTransport.dejudderHoldFeatherPx = next.dejudderHoldFeatherPx;
 		currentTransport.dejudderHoldHysteresis = next.dejudderHoldHysteresis;
 		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
@@ -8736,6 +8823,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
 		changed(current.dejudderEstimateAhead != next.dejudderEstimateAhead, "dejudder_estimate_ahead");
 		changed(current.capturePath != next.capturePath, "capture_path");
+		changed(current.captureUpload != next.captureUpload, "capture_upload");
 		changed(current.dejudderMotionRolloff != next.dejudderMotionRolloff || current.dejudderRollLo != next.dejudderRollLo ||
 			current.dejudderRollHi != next.dejudderRollHi || current.dejudderRollFloor != next.dejudderRollFloor,
 			"dejudder_motion_rolloff");
@@ -9085,6 +9173,7 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
+		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
@@ -11913,8 +12002,16 @@ struct LibplaceboVideoRenderer::Impl
 				return false;
 			if (!rgbUnpack)
 				rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
-			if (rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
-				l.width, l.height, dejudderRgbScratch, dst[0], true))
+			EarlyUpload::Slot* slot = nullptr;
+			const pl_tex early = EarlyTexture(payload, slot);
+			bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
+				l.width, l.height, dejudderRgbScratch, dst[0], true, early);
+			if (slot)
+				earlyUpload->Used(*slot);
+			if (!unpacked && early)
+				unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
+					l.width, l.height, dejudderRgbScratch, dst[0], true);
+			if (unpacked)
 				return true;
 			DebugLog::Log("Native RGB ingest: a de-judder frame's GPU unpack failed (%s); that frame skipped",
 				rgbUnpack->Error().c_str());
@@ -21906,6 +22003,11 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
 				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
 				raw->rawEncoding = state->videoFrameEncoding;
+				// capture_upload: early - the frame onto the GPU now, on this
+				// thread (no free slot or no pool: the render uploads it).
+				if (m_impl->earlyWanted.load(std::memory_order_acquire) && m_impl->earlyUpload->IsOpen() && state->displayMode)
+					raw->early = m_impl->earlyUpload->Upload(raw->rawFrame->GetData(), raw->rawRowBytes,
+						static_cast<int>(state->displayMode->FrameHeight()));
 				if (rgbRaw)
 				{
 					raw->contract.sampleRange = GpuRgbUnpack::FullRange(state->videoFrameEncoding) ?
@@ -23203,6 +23305,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 	std::ostringstream o;
 	o << "rule=" << rule << "\n"
 		<< "capture_path=" << s.capturePath << "\n"
+		<< "capture_upload=" << s.captureUpload << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

@@ -67,6 +67,28 @@ search", sigma-delta serial reference, "reused half-size planes byte-identical",
 - 61668ab0: test DLL built without whole-program optimisation (LNK1103 corrupt intermediates);
   quick test tier (heavy tests excluded) for routine runs, the full suite at milestones.
 
+## Early upload (2026-10-15, the pinned-memory work, option A)
+
+- Probe (PinnedUploadCapabilitiesAndTiming): libplacebo's D3D11 backend has no host-mapped buffers and no
+  buffer transfers (max_mapped_size 0, buf_transfer 0), so the planned pinned upload buffers (and the
+  earlier package's PinnedUploadStaging / NativeAnalysisReadback) cannot engage on D3D11. A 4K 12-bit
+  frame's pointer upload: the call blocks the render thread 2.4 ms, 5.5 ms with the transfer (6.8 GB/s).
+- `EarlyUpload`: a second D3D11 device on the render device's adapter, a ring of shared textures and two
+  shared fences (uploaded / released). The conversion thread uploads each raw frame as it arrives; the
+  render thread waits on the uploaded fence, unpacks from the shared texture (wrapped for libplacebo),
+  signals released. A slot is reused only when its payload is gone (CPU readers done) and every GPU use
+  is released; never blocks (no free slot: the render upload). Pool: 11 slots, capped at 1 GB and a
+  quarter of the adapter's video memory budget (an integrated GPU's dedicated size is tiny). Lifecycle
+  lock (no Close mid-upload), pool id (a reopened pool refuses old slots).
+- Switch `capture_upload` (render default / early), experimental, in Fixes under test's area of the
+  Config. GpuCaptureUnpack / GpuRgbUnpack read an already-uploaded frame (`uploaded`).
+- Fix found on the way: the RGB unpack's textures and dispatch were not released before the device at
+  teardown (rgbUnpack, rgbIngestLuma).
+- Tests: EarlyUploadMatchesTheRenderUploadAndNeverReusesBusySlots (V210 and R12B byte-identical to the
+  render upload, a held slot never handed out, a released slot back, the cap); EarlyUploadRunsThrough
+  TheRenderer (V210 / R12B, 24p de-judder: every frame after the first read early, no fallbacks);
+  quick tier 2191/2192.
+
 ## Known test notes
 
 - WindowResizeLayoutTests::ShellStylePlacementWithoutSizingHintsIsNotReverted and

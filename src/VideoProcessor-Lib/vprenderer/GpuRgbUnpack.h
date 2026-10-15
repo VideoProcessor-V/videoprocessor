@@ -64,7 +64,9 @@ public:
 	// lumaOnly: the matcher's luma alone (rgb untouched; the de-judder's next
 	// and ahead frames, which need no picture).
 	bool Unpack(VideoFrameEncoding encoding, bool bt2020, const void* data, size_t rowBytes, int width, int height,
-		pl_tex& rgb, pl_tex& luma, bool lumaOnly = false);
+		pl_tex& rgb, pl_tex& luma, bool lumaOnly = false, pl_tex uploaded = nullptr);
+	// uploaded: the raw frame already on the GPU (EarlyUpload, rgba8, rowBytes / 4
+	// texels wide); then data is not read.
 	const std::string& Error() const { return error; }
 	void SetHostReadableForTest(bool on) { hostReadable = on; }
 	void SetTimerForTest(pl_timer t) { timer = t; }

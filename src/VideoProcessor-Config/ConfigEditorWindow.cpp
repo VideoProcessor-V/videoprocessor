@@ -6671,6 +6671,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "DeckLink v210 / UYVY frames are uploaded as they arrive and unpacked on the GPU: the same picture byte for "
             "byte, about half the time at 4K and no CPU conversion. CPU = the old conversion. RGB formats follow the "
             "native RGB capture choice below."));
+        auto* captureUpload = addChoice(QStringLiteral("Upload frames as they arrive (experimental)"), QStringLiteral("capture_upload"),
+            { QStringLiteral("render"), QStringLiteral("early") });
+        captureUpload->setItemText(captureUpload->findData(QStringLiteral("render")), QStringLiteral("Off (the render thread uploads)"));
+        captureUpload->setItemText(captureUpload->findData(QStringLiteral("early")), QStringLiteral("On (early, second device)"));
+        captureUpload->setToolTip(QStringLiteral(
+            "Experimental, off by default. Each captured frame is copied to the GPU on its own thread as it arrives, "
+            "instead of by the render thread when it is shown: about 5 ms less work for the render thread per 4K 12-bit "
+            "frame, and the copy overlaps the previous frame's rendering. A frame with no free upload slot simply takes "
+            "the normal path."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7764,7 +7773,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

@@ -32,7 +32,10 @@ public:
 	// data: the raw frame, rowBytes per row (DeckLink's stride), width x
 	// height pixels (even width). planes[0] = luma (width x height),
 	// planes[1] = CbCr ((width + 1) / 2 x height); created or recreated here.
-	bool Unpack(VideoFrameEncoding encoding, const void* data, size_t rowBytes, int width, int height, pl_tex (&planes)[2]);
+	// uploaded: the raw frame already on the GPU (EarlyUpload, rgba8, rowBytes / 4
+	// texels wide); then data is not read.
+	bool Unpack(VideoFrameEncoding encoding, const void* data, size_t rowBytes, int width, int height, pl_tex (&planes)[2],
+		pl_tex uploaded = nullptr);
 	const std::string& Error() const { return error; }
 	// Tests: host-readable planes, and a GPU timer on the unpack pass.
 	void SetHostReadableForTest(bool on) { hostReadable = on; }

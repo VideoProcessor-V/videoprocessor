@@ -661,6 +661,50 @@ namespace Tests
 			}
 		}
 
+		TEST_METHOD(EarlyUploadRunsThroughTheRenderer)
+		{
+			// capture_upload: early (owner 2026-10-15, experimental): frames uploaded
+			// on the conversion thread are read by the render (V210 and 12-bit RGB,
+			// both capture paths' raw route), and the 24p de-judder's next frames
+			// come from the same early textures. Each run logs how many frames were
+			// read early at teardown.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			struct Case { VideoFrameEncoding encoding; bool film; const char* extra; const wchar_t* name; };
+			for (const Case& c : { Case{ VideoFrameEncoding::V210, false, "capture_upload: early\n", L"V210 early" },
+				Case{ VideoFrameEncoding::R12B, false, "capture_upload: early\n", L"R12B early" },
+				Case{ VideoFrameEncoding::V210, true, "capture_upload: early\ndejudder_strength: 0.25\n", L"film V210 early" },
+				Case{ VideoFrameEncoding::R12B, true, "capture_upload: early\ndejudder_strength: 0.25\n", L"film R12B early" } })
+			{
+				const RunResult r = Run(c.encoding, "gpu", c.film ? 5.0 : 3.0, c.film, c.extra);
+				Assert::IsTrue(r.Logged("Early upload: on"), (std::wstring(c.name) + L": the pool opened\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Early upload: not available"), (std::wstring(c.name) + L": available\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("GPU unpack failed"), (std::wstring(c.name) + L": no unpack failure\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (std::wstring(c.name) + L": frames presented\n" + r.Tail()).c_str());
+				if (c.film)
+					Assert::IsTrue(r.Logged("De-judder: motion estimated"), (std::wstring(c.name) + L": the de-judder estimated\n" + r.Tail()).c_str());
+				bool readEarly = false;
+				for (const std::string& line : r.log)
+					if (line.find("Capture raw route") != std::string::npos)
+						Logger::WriteMessage(line.c_str());
+					else if (line.find("Early upload: closed") != std::string::npos)
+					{
+						Logger::WriteMessage(line.c_str());
+						readEarly = line.find("(0 frames read early") == std::string::npos;
+					}
+				Assert::IsTrue(readEarly, (std::wstring(c.name) + L": frames were read early\n" + r.Tail()).c_str());
+			}
+			// Off (the default): the pool never opens.
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+				Assert::IsFalse(r.Logged("Early upload: on"), (L"default: no early upload\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"default: frames presented\n" + r.Tail()).c_str());
+			}
+		}
+
 		TEST_METHOD(NativeRgbIngestRunsThroughTheRenderer)
 		{
 			// Roadmap item 2 (owner 2026-10-15): DeckLink 12-bit RGB (both byte

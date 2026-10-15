@@ -162,7 +162,7 @@ bool GpuRgbUnpack::Supports(VideoFrameEncoding encoding)
 }
 
 bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* data, size_t rowBytes, int width, int height,
-	pl_tex& rgb, pl_tex& luma, bool lumaOnly)
+	pl_tex& rgb, pl_tex& luma, bool lumaOnly, pl_tex uploaded)
 {
 	error.clear();
 	if (!gpu || !dispatch) { error = "no GPU"; return false; }
@@ -170,7 +170,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	const bool r12 = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L;
 	const bool r10 = encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l;
 	const bool rgb8 = Is8Bit(encoding);
-	if (!data || width <= 0 || height <= 0 || (width & 1) || (r12 && width % 8 != 0) || rowBytes % 4 != 0)
+	if ((!data && !uploaded) || width <= 0 || height <= 0 || (width & 1) || (r12 && width % 8 != 0) || rowBytes % 4 != 0)
 	{
 		error = "bad frame geometry";
 		return false;
@@ -183,18 +183,27 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	pl_fmt rgba16 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, planeCaps);
 	pl_fmt r16 = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16, planeCaps);
 	if (!rgba8 || !rgba16 || !r16) { error = "no rgba8 / storable rgba16 / r16 format"; return false; }
-	pl_tex_params rawParams{};
-	rawParams.w = static_cast<int>(rowBytes / 4);
-	rawParams.h = height;
-	rawParams.format = rgba8;
-	rawParams.sampleable = true;
-	rawParams.host_writable = true;
-	if (!pl_tex_recreate(gpu, &raw, &rawParams)) { error = "cannot create the raw texture"; return false; }
-	pl_tex_transfer_params upload{};
-	upload.tex = raw;
-	upload.ptr = const_cast<void*>(data);
-	upload.row_pitch = rowBytes;
-	if (!pl_tex_upload(gpu, &upload)) { error = "raw upload failed"; return false; }
+	if (!uploaded)
+	{
+		pl_tex_params rawParams{};
+		rawParams.w = static_cast<int>(rowBytes / 4);
+		rawParams.h = height;
+		rawParams.format = rgba8;
+		rawParams.sampleable = true;
+		rawParams.host_writable = true;
+		if (!pl_tex_recreate(gpu, &raw, &rawParams)) { error = "cannot create the raw texture"; return false; }
+		pl_tex_transfer_params upload{};
+		upload.tex = raw;
+		upload.ptr = const_cast<void*>(data);
+		upload.row_pitch = rowBytes;
+		if (!pl_tex_upload(gpu, &upload)) { error = "raw upload failed"; return false; }
+	}
+	else if (uploaded->params.w != static_cast<int>(rowBytes / 4) || uploaded->params.h != height)
+	{
+		error = "the uploaded frame's size differs";
+		return false;
+	}
+	const pl_tex source = uploaded ? uploaded : raw;
 	auto plane = [this](pl_tex* tex, pl_fmt fmt, int w, int h) -> bool
 	{
 		pl_tex_params params{};
@@ -233,7 +242,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	const int pairs = width / 2;
 	const int bigEndian = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R10b ||
 		encoding == VideoFrameEncoding::ARGB_8BIT ? 1 : 0;
-	const pl_shader_desc descriptors[3] = { Sampled("raw", raw), Storage("dst_luma", luma), Storage("dst_rgb", rgb) };
+	const pl_shader_desc descriptors[3] = { Sampled("raw", source), Storage("dst_luma", luma), Storage("dst_rgb", rgb) };
 	pl_shader_var variables[5] = {
 		{ pl_var_int("pairs"), &pairs, false },
 		{ pl_var_int("frame_width"), &width, false },

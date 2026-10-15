@@ -157,6 +157,9 @@ private:
 			size_t rawRowBytes = 0;
 			size_t rawBytes = 0;
 			VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
+			// capture_upload: early - the raw frame already uploaded on the
+			// conversion thread (an EarlyUpload::Slot; null: the render uploads).
+			std::shared_ptr<void> early;
 			bool Raw() const { return rawFrame != nullptr; }
 			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};

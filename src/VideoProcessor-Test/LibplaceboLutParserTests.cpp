@@ -15,6 +15,7 @@
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
+#include <vprenderer/EarlyUpload.h>
 #include <video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
 #include <libplacebo/utils/upload.h>
@@ -531,6 +532,7 @@ namespace
 		{
 			return m_d3d11 ? m_d3d11->gpu : nullptr;
 		}
+		ID3D11Device* Device() const { return m_d3d11 ? m_d3d11->device : nullptr; }
 
 		pl_log Log() const { return m_log; }
 		pl_renderer Renderer() const { return m_renderer; }
@@ -7430,6 +7432,233 @@ namespace VideoProcessorTest
 			Assert::IsTrue(off.warped.source == on.warped.source, L"source warp");
 			Assert::IsTrue(off.warped.rendered == on.warped.rendered, L"rendered warp");
 			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(EarlyUploadMatchesTheRenderUploadAndNeverReusesBusySlots)
+		{
+			// Option A of the pinned-memory work (owner 2026-10-15): a frame
+			// uploaded early on a second device (EarlyUpload) unpacks to exactly
+			// the planes of today's upload (V210 and R12B); a held slot is never
+			// handed out again; a slot comes back once its handle is gone and its
+			// GPU uses are released; the byte cap is honoured.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			EarlyUpload early;
+			if (!early.Open(fixture.Device(), gpu, 2))
+			{
+				Logger::WriteMessage(("EarlyUpload not available on this device: " + early.LastError() + "\n").c_str());
+				return;   // the renderer then keeps the normal upload
+			}
+			uint32_t seed = 0xabcdef1u;
+			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> samples(static_cast<size_t>(tex->params.w) * tex->params.h * tex->params.format->num_components);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = samples.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"plane not host-readable");
+				return samples;
+			};
+			// V210: the early-uploaded frame against today's pointer upload.
+			{
+				GpuCaptureUnpack unpack(fixture.Log(), gpu);
+				unpack.SetHostReadableForTest(true);
+				const int width = 1920, height = 100;
+				const size_t rowBytes = static_cast<size_t>((width + 47) / 48) * 128;
+				std::vector<uint8_t> frame(rowBytes * height);
+				for (uint8_t& b : frame) b = static_cast<uint8_t>(next());
+				pl_tex normal[2] = { nullptr, nullptr }, viaEarly[2] = { nullptr, nullptr };
+				Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::V210, frame.data(), rowBytes, width, height, normal));
+				const std::vector<uint16_t> wantY = download(normal[0]), wantUV = download(normal[1]);
+				EarlyUpload::SlotHandle slot = early.Upload(frame.data(), rowBytes, height);
+				Assert::IsTrue(slot != nullptr, L"V210: a free slot");
+				pl_tex uploaded = early.Acquire(*slot);
+				Assert::IsNotNull(uploaded, ExtendedRangeGpuProbe::ToWide(early.LastError()).c_str());
+				Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::V210, nullptr, rowBytes, width, height, viaEarly, uploaded),
+					ExtendedRangeGpuProbe::ToWide(unpack.Error()).c_str());
+				early.Used(*slot);
+				Assert::IsTrue(download(viaEarly[0]) == wantY && download(viaEarly[1]) == wantUV, L"V210: early upload differs");
+				for (pl_tex* t : { &normal[0], &normal[1], &viaEarly[0], &viaEarly[1] }) pl_tex_destroy(gpu, t);
+			}
+			// R12B through GpuRgbUnpack, and the slot rules.
+			{
+				GpuRgbUnpack unpack(fixture.Log(), gpu);
+				unpack.SetHostReadableForTest(true);
+				const int width = 1920, height = 100;
+				const size_t rowBytes = static_cast<size_t>(width) * 36 / 8;
+				std::vector<uint8_t> frames[3];
+				for (auto& f : frames) { f.resize(rowBytes * height); for (uint8_t& b : f) b = static_cast<uint8_t>(next()); }
+				auto expected = [&](const std::vector<uint8_t>& f)
+				{
+					pl_tex rgb = nullptr, luma = nullptr;
+					Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R12B, false, f.data(), rowBytes, width, height, rgb, luma));
+					std::pair<std::vector<uint16_t>, std::vector<uint16_t>> out(download(rgb), download(luma));
+					pl_tex_destroy(gpu, &rgb);
+					pl_tex_destroy(gpu, &luma);
+					return out;
+				};
+				auto viaEarly = [&](EarlyUpload::SlotHandle& s)
+				{
+					pl_tex rgb = nullptr, luma = nullptr;
+					pl_tex uploaded = early.Acquire(*s);
+					Assert::IsNotNull(uploaded);
+					Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R12B, false, nullptr, rowBytes, width, height, rgb, luma, false, uploaded));
+					early.Used(*s);
+					std::pair<std::vector<uint16_t>, std::vector<uint16_t>> out(download(rgb), download(luma));
+					pl_tex_destroy(gpu, &rgb);
+					pl_tex_destroy(gpu, &luma);
+					return out;
+				};
+				EarlyUpload::SlotHandle a = early.Upload(frames[0].data(), rowBytes, height);
+				EarlyUpload::SlotHandle b = early.Upload(frames[1].data(), rowBytes, height);
+				Assert::IsTrue(a && b, L"two slots");
+				Assert::IsTrue(early.Upload(frames[2].data(), rowBytes, height) == nullptr, L"both slots held: none handed out");
+				Assert::IsTrue(viaEarly(a) == expected(frames[0]), L"R12B slot A differs");
+				Assert::IsTrue(viaEarly(b) == expected(frames[1]), L"R12B slot B differs");
+				a.reset();   // its payload gone; its GPU use released once the GPU passes it
+				pl_gpu_finish(gpu);
+				EarlyUpload::SlotHandle c = early.Upload(frames[2].data(), rowBytes, height);
+				Assert::IsTrue(c != nullptr, L"a released slot comes back");
+				Assert::IsTrue(viaEarly(c) == expected(frames[2]), L"R12B reused slot differs");
+				Assert::IsTrue(viaEarly(b) == expected(frames[1]), L"R12B slot B still intact after the reuse");
+			}
+			const EarlyUpload::Stats stats = early.GetStats();
+			Assert::IsTrue(stats.noFreeSlot >= 1 && stats.failures == 0, L"stats");
+			early.Close();
+			// The cap: a pool too small for one frame hands nothing out.
+			EarlyUpload tiny;
+			Assert::IsTrue(tiny.Open(fixture.Device(), gpu, 2, 1024));
+			std::vector<uint8_t> f(1920 * 4 * 100);
+			Assert::IsTrue(tiny.Upload(f.data(), 1920 * 4, 100) == nullptr, L"over the cap: nothing");
+			tiny.Close();
+			AssertCleanLibplaceboLog(log);
+			Logger::WriteMessage(("EarlyUpload: " + std::to_string(stats.uploads) + " uploads, " +
+				std::to_string(stats.noFreeSlot) + " with no free slot, " + std::to_string(stats.slotsMade) + " textures\n").c_str());
+		}
+
+		TEST_METHOD(PinnedUploadCapabilitiesAndTiming)
+		{
+			// Pinned memory (roadmap, owner 2026-10-15): what this GPU's libplacebo
+			// D3D11 backend offers for host-mapped upload buffers, and a 4K raw
+			// frame's upload timed three ways (report; nothing asserted beyond
+			// the uploads succeeding and matching):
+			//   pointer      pl_tex_upload from a plain pointer (today)
+			//   mapped host  a host-mapped pl_buf (PL_BUF_MEM_HOST): the copy into
+			//                it timed apart, then pl_tex_upload from the buffer
+			//   mapped vram  the same from PL_BUF_MEM_DEVICE when offered
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const pl_gpu_limits& lim = gpu->limits;
+			char line[512];
+			std::snprintf(line, sizeof(line),
+				"Pinned upload: thread_safe %d callbacks %d buf_transfer %d max_buf %zu MB max_mapped %zu MB max_mapped_vram %zu MB host_cached %d align_host_ptr %zu\n",
+				lim.thread_safe, lim.callbacks, lim.buf_transfer, lim.max_buf_size >> 20, lim.max_mapped_size >> 20,
+				lim.max_mapped_vram >> 20, lim.host_cached, lim.align_host_ptr);
+			Logger::WriteMessage(line);
+			const int width = 3840, height = 2160;
+			const size_t rowBytes = static_cast<size_t>(width) * 36 / 8;   // R12B, the largest capture format
+			const size_t bytes = rowBytes * height;
+			std::vector<uint8_t> frame(bytes);
+			uint32_t seed = 0x12345u;
+			for (uint8_t& b : frame) { seed = seed * 1664525u + 1013904223u; b = static_cast<uint8_t>(seed >> 24); }
+			pl_fmt rgba8 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(rgba8);
+			pl_tex_params tp{};
+			tp.w = static_cast<int>(rowBytes / 4);
+			tp.h = height;
+			tp.format = rgba8;
+			tp.sampleable = true;
+			tp.host_writable = true;
+			tp.host_readable = true;
+			pl_tex tex = pl_tex_create(gpu, &tp);
+			Assert::IsNotNull(tex);
+			auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
+			{ return std::chrono::duration<double, std::milli>(b - a).count(); };
+			auto check = [&](const wchar_t* what)
+			{
+				std::vector<uint8_t> back(bytes);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = back.data();
+				d.row_pitch = rowBytes;
+				Assert::IsTrue(pl_tex_download(gpu, &d), what);
+				Assert::IsTrue(back == frame, what);
+			};
+			double pointerMs = 1e30, pointerCallMs = 1e30;
+			for (int run = 0; run < 6; ++run)
+			{
+				pl_gpu_finish(gpu);
+				const auto t0 = std::chrono::steady_clock::now();
+				pl_tex_transfer_params u{};
+				u.tex = tex;
+				u.ptr = frame.data();
+				u.row_pitch = rowBytes;
+				Assert::IsTrue(pl_tex_upload(gpu, &u));
+				const auto tCall = std::chrono::steady_clock::now();
+				pl_gpu_finish(gpu);
+				pointerMs = std::min(pointerMs, ms(t0, std::chrono::steady_clock::now()));
+				pointerCallMs = std::min(pointerCallMs, ms(t0, tCall));
+			}
+			check(L"pointer upload");
+			std::snprintf(line, sizeof(line), "Pinned upload 4K R12B (%zu MB) pointer upload: the call blocks %.2f ms, with the GPU transfer %.2f ms (%.1f GB/s)\n",
+				bytes >> 20, pointerCallMs, pointerMs, bytes / (pointerMs * 1e6));
+			Logger::WriteMessage(line);
+			for (const enum pl_buf_mem_type mem : { PL_BUF_MEM_HOST, PL_BUF_MEM_DEVICE })
+			{
+				const char* name = mem == PL_BUF_MEM_HOST ? "mapped host" : "mapped vram";
+				pl_buf_params bp{};
+				bp.size = bytes;
+				bp.host_mapped = true;
+				bp.memory_type = mem;
+				pl_buf buf = (lim.max_mapped_size >= bytes && (mem == PL_BUF_MEM_HOST || lim.max_mapped_vram >= bytes)) ?
+					pl_buf_create(gpu, &bp) : nullptr;
+				if (!buf || !buf->data)
+				{
+					std::snprintf(line, sizeof(line), "Pinned upload: %s buffer of %zu MB not available\n", name, bytes >> 20);
+					Logger::WriteMessage(line);
+					pl_buf_destroy(gpu, &buf);
+					continue;
+				}
+				double copyMs = 1e30, uploadMs = 1e30;
+				for (int run = 0; run < 6; ++run)
+				{
+					pl_gpu_finish(gpu);
+					const auto t0 = std::chrono::steady_clock::now();
+					std::memcpy(buf->data, frame.data(), bytes);   // the card would write here directly
+					const auto t1 = std::chrono::steady_clock::now();
+					pl_tex_transfer_params u{};
+					u.tex = tex;
+					u.buf = buf;
+					u.row_pitch = rowBytes;
+					Assert::IsTrue(pl_tex_upload(gpu, &u));
+					pl_gpu_finish(gpu);
+					const auto t2 = std::chrono::steady_clock::now();
+					copyMs = std::min(copyMs, ms(t0, t1));
+					uploadMs = std::min(uploadMs, ms(t1, t2));
+				}
+				check(mem == PL_BUF_MEM_HOST ? L"mapped host upload" : L"mapped vram upload");
+				// Non-blocking reuse: right after an upload is queued, is the
+				// buffer reported busy, and free once the GPU is done?
+				pl_tex_transfer_params u{};
+				u.tex = tex;
+				u.buf = buf;
+				u.row_pitch = rowBytes;
+				pl_tex_upload(gpu, &u);
+				const bool busyAfterQueue = pl_buf_poll(gpu, buf, 0);
+				pl_gpu_finish(gpu);
+				const bool busyAfterFinish = pl_buf_poll(gpu, buf, 0);
+				std::snprintf(line, sizeof(line),
+					"Pinned upload 4K R12B (%zu MB): %s copy-in %.2f ms + upload from buffer %.2f ms (pointer upload %.2f ms); busy after queue %d, after finish %d\n",
+					bytes >> 20, name, copyMs, uploadMs, pointerMs, busyAfterQueue, busyAfterFinish);
+				Logger::WriteMessage(line);
+				pl_buf_destroy(gpu, &buf);
+			}
+			pl_tex_destroy(gpu, &tex);
 		}
 
 		TEST_METHOD(GpuRgbUnpackMatchesTheCpuDecode)
