@@ -39,3 +39,20 @@ Output folder:
 
 The thumbnails are small, but they are still pictures of the content: keep
 recordings local and do not commit them.
+
+## Replaying a recording through VP
+
+Copy the recording folder to the development machine and run the renderer
+harness's replay test with it (hardware GPU):
+
+```text
+set VP_TEST_GPU=hardware
+set VP_TEST_STREAM_DIR=C:\path\to\stream-YYYYMMDD-HHMMSS
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /Tests:RecordedStreamReplaysThroughTheRenderer /logger:console;verbosity=detailed
+```
+
+It replays the recorded timing, missed frames, jitter and exact-repeat cadence
+through the real renderer with pulldown detection on, and prints the pulldown
+lock changes, counted gaps and motion invalidations. Without
+VP_TEST_STREAM_DIR it replays a synthetic 24p-in-29.97 Hz recording with a
+two-frame gap (a self-check of the replay).

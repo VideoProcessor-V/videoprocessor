@@ -8,7 +8,9 @@
 #include <VideoState.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
@@ -368,6 +370,131 @@ namespace Tests
 				failures += r.presented ? 0 : 1;
 			}
 			Assert::AreEqual(0, failures, L"every on-screen run presented frames");
+		}
+
+		TEST_METHOD(RecordedStreamReplaysThroughTheRenderer)
+		{
+			// Owner 2026-10-15: a recording from VideoProcessorStreamRecorder
+			// (frames.csv: hardware times, periods since the previous frame,
+			// bit-exact repeats) replayed through the real renderer with
+			// pulldown on - its timing, gaps, jitter and repeat cadence as
+			// captured. VP_TEST_STREAM_DIR=<recording folder>; without it a
+			// synthetic recording (24p in 29.97 Hz with a 2-frame gap) checks
+			// the replay itself. Hardware only.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"stream replay: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			char* dirValue = nullptr;
+			size_t dn = 0;
+			std::string dir = _dupenv_s(&dirValue, &dn, "VP_TEST_STREAM_DIR") == 0 && dirValue ? dirValue : "";
+			std::free(dirValue);
+			const bool synthetic = dir.empty();
+			if (synthetic)
+			{
+				// 29.97 Hz, 24p carried with one repeat in five, frames 90-91 missed.
+				dir = Here() + "stream-replay-synthetic";
+				CreateDirectoryA(dir.c_str(), nullptr);
+				std::ofstream csv(dir + "\\frames.csv", std::ios::trunc);
+				csv << "index,hw_time_100ns,hw_duration_100ns,stream_time,stream_duration,callback_qpc,periods_since_previous,buffered,flags,no_input,hash,exact_repeat,callback_us\n";
+				const long long duration = 333667;   // 100 ns units at 29.97 Hz
+				int index = 0;
+				long long lastSlot = -1;
+				for (long long slot = 0; slot < 300; ++slot)
+				{
+					if (slot == 90 || slot == 91)
+						continue;
+					const bool repeat = slot % 5 == 4;
+					csv << index++ << "," << slot * duration + (slot * 7919 % 2000) << "," << duration << ",0,0,0,"
+						<< (lastSlot < 0 ? 0 : slot - lastSlot) << ",0,0x0,0,0," << (repeat ? 1 : 0) << ",0\n";
+					lastSlot = slot;
+				}
+			}
+			// The recording: per frame its hardware time, periods and repeat.
+			struct Row { long long time = 0, duration = 0; int periods = 0; bool repeat = false; };
+			std::vector<Row> rows;
+			{
+				std::ifstream csv(dir + "\\frames.csv");
+				Assert::IsTrue(csv.good(), L"stream replay: no frames.csv");
+				std::string line;
+				std::getline(csv, line);   // header
+				while (std::getline(csv, line))
+				{
+					std::vector<std::string> f;
+					std::stringstream ss(line);
+					std::string cell;
+					while (std::getline(ss, cell, ',')) f.push_back(cell);
+					if (f.size() < 12) continue;
+					Row r;
+					r.time = std::atoll(f[1].c_str());
+					r.duration = std::atoll(f[2].c_str());
+					r.periods = std::atoi(f[6].c_str());
+					r.repeat = f[11] == "1";
+					if (f.size() > 9 && f[9] == "1") continue;   // no input
+					rows.push_back(r);
+				}
+			}
+			Assert::IsTrue(rows.size() > 30, L"stream replay: too few frames");
+			std::vector<long long> durations;
+			for (const Row& r : rows) if (r.duration > 0) durations.push_back(r.duration);
+			std::sort(durations.begin(), durations.end());
+			const long long duration = durations[durations.size() / 2];
+			const double signalHz = 1.0e7 / static_cast<double>(duration);
+			// Signal slots: a frame's slot from the periods; missed slots are
+			// not sent; the jitter is the hardware time against the slot.
+			struct Slot { bool send = false; int content = 0; long long offset100ns = 0; };
+			std::vector<Slot> slots;
+			int content = 0;
+			for (size_t i = 0; i < rows.size(); ++i)
+			{
+				const int step = i == 0 ? 1 : std::max(1, rows[i].periods);
+				for (int k = 1; k < step; ++k) slots.push_back(Slot{});   // missed
+				if (!rows[i].repeat) ++content;
+				Slot s;
+				s.send = true;
+				s.content = content;
+				const long long ideal = rows[0].time + static_cast<long long>(slots.size()) * duration;
+				s.offset100ns = rows[i].time - ideal;
+				slots.push_back(s);
+			}
+			long long maxOffset = 0;
+			for (const Slot& s : slots) if (s.send) maxOffset = std::max(maxOffset, s.offset100ns);
+			FramePlan plan;
+			plan.rateNumerator = static_cast<int>(std::lround(signalHz * 1000.0));
+			plan.rateDenominator = 1000;
+			plan.step = [slots, maxOffset](int n)
+			{
+				FrameStep f;
+				if (n >= static_cast<int>(slots.size())) { f.send = false; return f; }
+				f.send = slots[n].send;
+				f.content = slots[n].content;
+				f.timestampOffsetUs = (slots[n].offset100ns - maxOffset) / 10;   // never ahead of its slot
+				return f;
+			};
+			const double seconds = std::min(60.0, slots.size() / signalHz);
+			const RunResult r = Run(VideoFrameEncoding::V210, "standard", seconds, false,
+				"dejudder_strength: 0.25\ndejudder_pulldown: on\n", false, &plan);
+			char head[160];
+			std::snprintf(head, sizeof(head), "== stream replay (%s): %zu frames at %.3f Hz, %.1f s",
+				synthetic ? "synthetic" : dir.c_str(), rows.size(), signalHz, seconds);
+			Logger::WriteMessage(head);
+			Logger::WriteMessage(("   de-judder: " + r.dejudderStatus).c_str());
+			int locks = 0, missed = 0, invalidations = 0;
+			for (const std::string& line : r.log)
+			{
+				if (line.find("Pulldown:") != std::string::npos) { ++locks; Logger::WriteMessage(("   " + line).c_str()); }
+				if (line.find("capture missed") != std::string::npos) { ++missed; Logger::WriteMessage(("   " + line).c_str()); }
+				if (line.find("motion invalidated") != std::string::npos) ++invalidations;
+			}
+			Logger::WriteMessage(("   pulldown lines " + std::to_string(locks) + ", missed lines " + std::to_string(missed) +
+				", invalidations " + std::to_string(invalidations)).c_str());
+			Assert::IsTrue(r.presented, (L"stream replay: frames presented\n" + r.Tail()).c_str());
+			if (synthetic)
+			{
+				Assert::IsTrue(r.Logged("(4 new of 5)"), (L"synthetic replay: pulldown locks\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("capture missed"), (L"synthetic replay: the gap is counted\n" + r.Tail()).c_str());
+			}
 		}
 
 		TEST_METHOD(StreamFaultsKeepTheDejudderSafeAndRecovering)
