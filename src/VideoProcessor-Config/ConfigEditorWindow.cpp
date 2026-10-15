@@ -6680,6 +6680,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "instead of by the render thread when it is shown: about 5 ms less work for the render thread per 4K 12-bit "
             "frame, and the copy overlaps the previous frame's rendering. A frame with no free upload slot simply takes "
             "the normal path."));
+        auto* sourceRange = addChoice(QStringLiteral("Source range"), QStringLiteral("source_range"),
+            { QStringLiteral("auto"), QStringLiteral("full"), QStringLiteral("limited") });
+        sourceRange->setItemText(sourceRange->findData(QStringLiteral("auto")), QStringLiteral("Auto (from the capture format)"));
+        sourceRange->setItemText(sourceRange->findData(QStringLiteral("full")), QStringLiteral("Full (0-255)"));
+        sourceRange->setItemText(sourceRange->findData(QStringLiteral("limited")), QStringLiteral("Limited (16-235)"));
+        sourceRange->setToolTip(QStringLiteral(
+            "The range the source sends. Auto: YCbCr and 10-bit RGB are limited, 8- and 12-bit RGB full - right for "
+            "most sources. If blacks look grey and whites dull (or blacks crush), the source sends the other range: "
+            "set it here. The picture and the LED dimming both follow it."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7773,7 +7782,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

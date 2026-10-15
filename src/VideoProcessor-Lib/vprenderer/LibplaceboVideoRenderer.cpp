@@ -968,6 +968,13 @@ namespace
 		// (EarlyUpload, a second device and shared textures); render = the
 		// render thread uploads it (today).
 		std::string captureUpload = "render";
+		// Owner 2026-10-15: the captured signal's range. auto = from the
+		// capture format (YCbCr and 10-bit RGB limited; 8- and 12-bit RGB
+		// full), as before; full / limited override it for a source that
+		// sends otherwise (the DeckLink SDK reports no range). The picture and
+		// the LED drive (its exact measurement follows the picture; its
+		// look-ahead reads the captured frame) both follow it.
+		std::string sourceRange = "auto";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1992,6 +1999,7 @@ namespace
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "render", "early" });
+		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
 		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
@@ -4544,6 +4552,7 @@ struct LibplaceboVideoRenderer::Impl
 	int dejudderEvenCycle = 0;   // refreshes per film frame on an even cadence, 0 = uneven
 	bool adaptiveUpscaleThisFrame = false;    // Stage 8b on the frame being built
 	int adaptiveUpscaleRatioLogged = -1;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
+	bool sourceRangeCpuLogged = false;   // source_range not applicable: logged once
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
 	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
 	bool dejudderMaskNoSigmaLogged = false;
@@ -13975,6 +13984,22 @@ struct LibplaceboVideoRenderer::Impl
 			image.repr.bits.color_depth = GpuRgbUnpack::ColorDepth(e);
 			image.repr.bits.bit_shift = GpuRgbUnpack::BitShift(e);
 		}
+		// source_range full / limited: the captured codes' range, where the
+		// uploaded picture still carries them (native RGB, the GPU unpacks,
+		// YCbCr). RGB through the CPU conversion to 4:2:0 was converted with
+		// the format's range: not overridden there (logged once).
+		if (activeSettings.sourceRange != "auto")
+		{
+			const bool cpuRgb = !nativeRgbUpload && !rgbRawUpload && GpuRgbUnpack::Supports(state.videoFrameEncoding);
+			if (!cpuRgb)
+				image.repr.levels = activeSettings.sourceRange == "full" ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+			else if (!sourceRangeCpuLogged)
+			{
+				sourceRangeCpuLogged = true;
+				DebugLog::Log("source_range %s: not applied to RGB on the CPU conversion path (native_rgb_ingest off); "
+					"the picture uses the format's range", activeSettings.sourceRange.c_str());
+			}
+		}
 		image.color = TranslateColorSpace(state);
 		if (state.eotf == EOTF::SDR &&
 			sdrInputTransfer != PL_COLOR_TRC_UNKNOWN)
@@ -17252,6 +17277,8 @@ struct LibplaceboVideoRenderer::Impl
             compensation.eotf = ledCompensationEotf.load(std::memory_order_acquire);
             if (led)
             {
+                // The look-ahead reads the captured frame: its range as the picture's.
+                led->SetSourceRange(activeSettings.sourceRange == "full" ? 1 : activeSettings.sourceRange == "limited" ? 0 : -1);
                 compensation = led->BeginFrame(sourceSequence, nominalSourceRateHz);
                 if (led->WantsPredictions())
                 {
@@ -23334,6 +23361,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 	o << "rule=" << rule << "\n"
 		<< "capture_path=" << s.capturePath << "\n"
 		<< "capture_upload=" << s.captureUpload << "\n"
+		<< "source_range=" << s.sourceRange << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

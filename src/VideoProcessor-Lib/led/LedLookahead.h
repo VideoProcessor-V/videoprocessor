@@ -38,9 +38,11 @@ namespace LedDrive
 	// Measures a raw frame the way the GPU pass measures a rendered one: 3x3
 	// block means of the mapped luma, in code units, on a block grid of at
 	// most 96 x 54 within the active picture. transfer: RAW_TRANSFER_SIZE
-	// entries, already raised to the gamma boost.
+	// entries, already raised to the gamma boost. range: the captured
+	// signal's range as the picture uses it (source_range: 1 full, 0
+	// limited); -1 = from the format (LumaIsFullRange).
 	bool MeasureRawFrame(const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& rect,
-		const std::vector<float>& transfer, RawMeasurement& out);
+		const std::vector<float>& transfer, RawMeasurement& out, int range = -1);
 
 	// Subscribes the module to the renderer's queued-frame walk. Each frame is
 	// measured once, the first time the walk sees it, in source order, so the

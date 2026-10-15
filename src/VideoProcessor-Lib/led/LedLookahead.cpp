@@ -31,7 +31,7 @@ namespace LedDrive
 	}
 
 	bool MeasureRawFrame(const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& rect,
-		const std::vector<float>& transfer, RawMeasurement& out)
+		const std::vector<float>& transfer, RawMeasurement& out, int range)
 	{
 		out = RawMeasurement{};
 		if (!luma.IsValid() || transfer.size() != RAW_TRANSFER_SIZE) return false;
@@ -42,7 +42,7 @@ namespace LedDrive
 		const int blocksX = std::min(96, width / 3), blocksY = std::min(54, height / 3);
 		const double stepX = static_cast<double>(width) / blocksX;
 		const double stepY = static_cast<double>(height) / blocksY;
-		const bool full = LumaIsFullRange(luma);
+		const bool full = range >= 0 ? range == 1 : LumaIsFullRange(luma);
 		for (int by = 0; by < blocksY; ++by)
 			for (int bx = 0; bx < blocksX; ++bx)
 			{
@@ -115,7 +115,7 @@ namespace LedDrive
 				boosted[i] = static_cast<float>(std::pow(std::max(0.0f, (*transfer)[i]), boost));
 		}
 		RawMeasurement raw;
-		if (!MeasureRawFrame(luma, activePicture, boosted, raw)) return;
+		if (!MeasureRawFrame(luma, activePicture, boosted, raw, module.SourceRange())) return;
 		lastSequence = sourceSequence;
 		// The builder's windows are in real time: one source frame apart.
 		const FrameStats stats = builder.Build(raw, sourceSequence * module.SourceFramePeriodMs());

@@ -78,6 +78,11 @@ namespace LedDrive
 		void SetRawTransfer(std::shared_ptr<const RawTransfer> transfer);
 		std::shared_ptr<const RawTransfer> CurrentRawTransfer() const;
 		void SetLookaheadDepth(size_t futureFrames);
+		// Render thread: the captured signal's range as the picture uses it
+		// (source_range: 1 full, 0 limited, -1 from the format), for the
+		// look-ahead's reading of the captured frame.
+		void SetSourceRange(int range) { sourceRange.store(range, std::memory_order_relaxed); }
+		int SourceRange() const { return sourceRange.load(std::memory_order_relaxed); }
 		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted);
 
 		// Diagnostics and tests.
@@ -224,6 +229,7 @@ namespace LedDrive
 		LookaheadObserver lookahead;
 		std::shared_ptr<const RawTransfer> rawTransfer;
 		std::map<uint64_t, FrameStats> predictions;
+		std::atomic<int> sourceRange{ -1 };
 		size_t lookaheadDepth = 0;
 		double correction = 1.0;
 		bool correctionSeeded = false;

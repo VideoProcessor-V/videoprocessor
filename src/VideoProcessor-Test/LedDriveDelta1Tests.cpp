@@ -1235,6 +1235,23 @@ namespace VideoProcessorTest
 			const double identity = std::lround(signal * 1023) / 1023.0;
 			Assert::AreEqual(16.0 + 219.0 * identity, static_cast<double>(raw.sum) / SUM_SCALE / raw.blocks, 0.05,
 				L"Identity transfer: the code comes back, the square outside the rect is not seen");
+			{
+				// source_range (owner 2026-10-15): the captured signal's range as the
+				// picture uses it - full reads the same codes as 0-1023; limited (or
+				// -1, the format's range for UYVY) as 64-940.
+				RawMeasurement full, limited;
+				Assert::IsTrue(MeasureRawFrame(luma, rect, IdentityRawTransfer(), full, 1));
+				Assert::IsTrue(MeasureRawFrame(luma, rect, IdentityRawTransfer(), limited, 0));
+				const double fullSignal = std::lround(504.0 / 1023.0 * 1023) / 1023.0;
+				Assert::AreEqual(16.0 + 219.0 * fullSignal, static_cast<double>(full.sum) / SUM_SCALE / full.blocks, 0.05,
+					L"source_range full: the codes read as full range");
+				Assert::AreEqual(static_cast<double>(raw.sum), static_cast<double>(limited.sum), 0.5,
+					L"source_range limited: as the format's own range for UYVY");
+				LedDriveModule module(ProjectorConfig(), Compensate());
+				Assert::AreEqual(-1, module.SourceRange(), L"from the format until the renderer says otherwise");
+				module.SetSourceRange(1);
+				Assert::AreEqual(1, module.SourceRange());
+			}
 
 			// SDR BT.1886 source to a 2.2 target. The table itself is checked
 			// against libplacebo rendering in LedRawTransferMatchesTheRenderedOutput.
