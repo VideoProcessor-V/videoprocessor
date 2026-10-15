@@ -4319,6 +4319,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> earlyWanted{ false };
 	const std::unique_ptr<EarlyUpload> earlyUpload = std::make_unique<EarlyUpload>();
 	bool earlyOpenFailed = false;
+	uint64_t rawAnalysisLoggedGeneration = 0;
 	uint64_t earlyUsed = 0, earlyFallback = 0;
 	// Render thread, each raw frame: the pool open when wanted (closed when not).
 	void SyncEarlyUpload()
@@ -13109,6 +13110,16 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		else
 		{
+			// The raw route (GPU unpack, early upload or not): the CPU analysis
+			// reads the captured frame itself (owner 2026-10-15: shown once per
+			// signal).
+			if (convertedPayload && convertedPayload->Raw() && rawAnalysisLoggedGeneration != frameGeneration)
+			{
+				rawAnalysisLoggedGeneration = frameGeneration;
+				DebugLog::Log("Alpha raw-frame analysis: the CPU reads the captured frame (format=%d path=%s %dx%d, upload %s, generation=%llu)",
+					static_cast<int>(state.videoFrameEncoding), AnalysisLumaFormatName(analysisSource), width, height,
+					convertedPayload->early ? "early" : "by the render", static_cast<unsigned long long>(frameGeneration));
+			}
 			if (nativeRgbUpload &&
 				(nativeRgbAnalysisLoggedGeneration != frameGeneration ||
 					nativeRgbAnalysisLoggedEncoding != state.videoFrameEncoding ||

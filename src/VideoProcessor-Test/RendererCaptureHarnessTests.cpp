@@ -686,6 +686,11 @@ namespace Tests
 				Assert::IsTrue(r.presented, (std::wstring(c.name) + L": frames presented\n" + r.Tail()).c_str());
 				if (c.film)
 					Assert::IsTrue(r.Logged("De-judder: motion estimated"), (std::wstring(c.name) + L": the de-judder estimated\n" + r.Tail()).c_str());
+				// The CPU analysis keeps reading the captured frame (the early upload
+				// copies it to the GPU; the original stays the CPU's).
+				Assert::IsFalse(r.Logged("Alpha analysis unavailable"), (std::wstring(c.name) + L": the CPU analysis ran\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Alpha raw-frame analysis: the CPU reads the captured frame"),
+					(std::wstring(c.name) + L": the CPU analysis read the captured frame\n" + r.Tail()).c_str());
 				bool readEarly = false;
 				for (const std::string& line : r.log)
 					if (line.find("Capture raw route") != std::string::npos)
@@ -701,6 +706,9 @@ namespace Tests
 			{
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
 				Assert::IsFalse(r.Logged("Early upload: on"), (L"default: no early upload\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Alpha analysis unavailable"), (L"default: the CPU analysis ran\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Alpha raw-frame analysis: the CPU reads the captured frame"),
+					(L"default: the CPU analysis read the captured frame\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (L"default: frames presented\n" + r.Tail()).c_str());
 			}
 		}
