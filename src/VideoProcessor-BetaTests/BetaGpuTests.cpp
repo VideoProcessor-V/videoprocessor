@@ -1790,6 +1790,20 @@ void RunBetaPassTiming()
 		for (const auto& entry : livePasses)
 			if (entry.first >= 0.02)
 				std::cout << "    " << entry.first << " ms  " << entry.second << "\n";
+		// The serial reference search (one thread per block, no work-group
+		// barriers) on the same live settings, for the restructure plan.
+		Dejudder::MotionWarp serialLive(gpu.Log(), g, liveSettings);
+		serialLive.SetSerialSearchForTest(true);
+		serialLive.SetPassTiming(true);
+		for (int i = 0; i < reps; ++i)
+		{
+			Check(serialLive.Estimate(a, b, slot, true), "pass timing: estimate failed");
+			slot ^= 1;
+		}
+		for (const auto& entry : serialLive.PassMs())
+			if (entry.first.find("block search") != std::string::npos || entry.first.find("global motion") != std::string::npos)
+				std::cout << "  live settings, serial reference: " << entry.second / reps << " ms  " << entry.first << "\n";
+		serialLive.SetPassTiming(false);
 	}
 	pl_tex_params cp{};
 	cp.w = ow;
