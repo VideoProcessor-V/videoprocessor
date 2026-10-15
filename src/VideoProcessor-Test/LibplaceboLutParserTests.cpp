@@ -14,6 +14,8 @@
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
+#include <vprenderer/GpuRgbUnpack.h>
+#include <video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h>
 #include <libplacebo/utils/upload.h>
 #include <video_frame_formatter/CV210toP210VideoFrameFormatter.h>
 #include <video_frame_formatter/CUYVYtoP210VideoFrameFormatter.h>
@@ -7427,6 +7429,125 @@ namespace VideoProcessorTest
 			Assert::IsTrue(off.warped.source == on.warped.source, L"source warp");
 			Assert::IsTrue(off.warped.rendered == on.warped.rendered, L"rendered warp");
 			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(GpuRgbUnpackMatchesTheCpuDecode)
+		{
+			// Roadmap item 2 (owner 2026-10-15): native ingest of R12B, R12L and
+			// r210. With random bytes (row padding included): the luma equals the
+			// CPU formatter's P010 Y plane sample for sample (BT.709 and BT.2020;
+			// the matcher sees what it saw on the converted path), and the RGB
+			// texture holds each pixel decoded independently here (R12: the
+			// 12-bit value << 4; r210: 64-960 mapped to 16-bit limited levels,
+			// below-black and above-white kept). Widths at several packings;
+			// geometry the pass cannot take (an R12 width not a multiple of 8)
+			// is refused, so the renderer keeps the CPU conversion.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			GpuRgbUnpack unpack(fixture.Log(), gpu);
+			unpack.SetHostReadableForTest(true);
+			pl_tex rgb = nullptr, luma = nullptr;
+			uint32_t seed = 0x9e3779b9u;
+			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> samples(static_cast<size_t>(tex->params.w) * tex->params.h *
+					tex->params.format->num_components);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = samples.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"plane not host-readable");
+				return samples;
+			};
+			// An independent decode of pixel x of a row (SMPTE 268M C4 for R12;
+			// big-endian [00 R G B] for r210).
+			auto decode = [](VideoFrameEncoding encoding, const BYTE* row, int x, int rgbOut[3])
+			{
+				if (encoding == VideoFrameEncoding::R210)
+				{
+					const uint32_t w = (uint32_t(row[4 * x]) << 24) | (uint32_t(row[4 * x + 1]) << 16) |
+						(uint32_t(row[4 * x + 2]) << 8) | row[4 * x + 3];
+					rgbOut[0] = int((w >> 20) & 1023u);
+					rgbOut[1] = int((w >> 10) & 1023u);
+					rgbOut[2] = int(w & 1023u);
+					return;
+				}
+				// The pair's nine bytes in stream order; R12B reverses every
+				// 32-bit word of its 36-byte block (stream byte k of the block
+				// is at k ^ 3).
+				const int pair = x / 2;
+				BYTE b[9];
+				for (int k = 0; k < 9; ++k)
+				{
+					const int stream = pair * 9 + k;
+					b[k] = encoding == VideoFrameEncoding::R12B ? row[(stream / 36) * 36 + ((stream % 36) ^ 3)] : row[stream];
+				}
+				const int v[6] = { b[0] | ((b[1] & 15) << 8), (b[1] >> 4) | (b[2] << 4), b[3] | ((b[4] & 15) << 8),
+					(b[4] >> 4) | (b[5] << 4), b[6] | ((b[7] & 15) << 8), (b[7] >> 4) | (b[8] << 4) };
+				for (int c = 0; c < 3; ++c)
+					rgbOut[c] = v[(x & 1) * 3 + c];
+			};
+			int cases = 0;
+			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::R12B, VideoFrameEncoding::R12L, VideoFrameEncoding::R210 })
+				for (const ColorSpace space : { ColorSpace::REC_709, ColorSpace::BT_2020 })
+					for (const int width : encoding == VideoFrameEncoding::R210 ? std::vector<int>{ 120, 122, 130, 1920 } :
+						std::vector<int>{ 104, 136, 1920 })
+					{
+						const int height = 100;
+						VideoStateComPtr state = new VideoState();
+						state->valid = true;
+						state->displayMode = std::make_shared<DisplayMode>(width, height, false, 24000, 1001);
+						state->videoFrameEncoding = encoding;
+						state->colorspace = space;
+						const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
+						std::vector<BYTE> source(static_cast<size_t>(state->BytesPerFrame()));
+						for (BYTE& b : source) b = static_cast<BYTE>(next());
+						CDeckLinkRGBToP010VideoFrameFormatter cpu;
+						cpu.OnVideoState(state);
+						std::vector<BYTE> expected(static_cast<size_t>(cpu.GetOutFrameSize()));
+						const VideoFrame frame(source.data(), 1, 0, nullptr);
+						Assert::IsTrue(cpu.FormatVideoFrame(frame, expected.data()), L"CPU conversion failed");
+						const std::wstring name = std::wstring(encoding == VideoFrameEncoding::R12B ? L"R12B " :
+							encoding == VideoFrameEncoding::R12L ? L"R12L " : L"r210 ") +
+							(space == ColorSpace::BT_2020 ? L"2020 " : L"709 ") + std::to_wstring(width);
+						Assert::IsTrue(unpack.Unpack(encoding, space == ColorSpace::BT_2020, source.data(), rowBytes, width, height, rgb, luma),
+							(name + L": " + ExtendedRangeGpuProbe::ToWide(unpack.Error())).c_str());
+						const std::vector<uint16_t> gotLuma = download(luma), gotRgb = download(rgb);
+						const uint16_t* wantLuma = reinterpret_cast<const uint16_t*>(expected.data());
+						for (int y = 0; y < height; ++y)
+							for (int x = 0; x < width; ++x)
+							{
+								const size_t i = static_cast<size_t>(y) * width + x;
+								if (gotLuma[i] != wantLuma[i])
+									Assert::Fail((name + L": luma differs from the CPU formatter at (" + std::to_wstring(x) + L", " +
+										std::to_wstring(y) + L"): " + std::to_wstring(gotLuma[i]) + L" vs " + std::to_wstring(wantLuma[i])).c_str());
+								int v[3];
+								decode(encoding, source.data() + static_cast<size_t>(y) * rowBytes, x, v);
+								for (int c = 0; c < 3; ++c)
+								{
+									const int want = encoding == VideoFrameEncoding::R210 ?
+										(4096 * 7 + (v[c] - 64) * 438 + 3) / 7 : v[c] << 4;
+									if (gotRgb[i * 4 + c] != want)
+										Assert::Fail((name + L": RGB differs at (" + std::to_wstring(x) + L", " + std::to_wstring(y) +
+											L") component " + std::to_wstring(c) + L": " + std::to_wstring(gotRgb[i * 4 + c]) + L" vs " +
+											std::to_wstring(want)).c_str());
+								}
+							}
+						++cases;
+					}
+			// Refused geometry: the renderer keeps the CPU conversion.
+			std::vector<BYTE> narrow(1366 * 36 / 8 * 4 + 64);
+			Assert::IsFalse(unpack.Unpack(VideoFrameEncoding::R12L, false, narrow.data(), 6148, 1366, 4, rgb, luma),
+				L"an R12 width not a multiple of 8 must be refused");
+			Assert::IsFalse(GpuRgbUnpack::Supports(VideoFrameEncoding::R10b) || GpuRgbUnpack::Supports(VideoFrameEncoding::V210),
+				L"only R12B, R12L and r210 take this pass");
+			pl_tex_destroy(gpu, &rgb);
+			pl_tex_destroy(gpu, &luma);
+			AssertCleanLibplaceboLog(log);
+			Logger::WriteMessage(("GpuRgbUnpack: " + std::to_string(cases) + " cases matched the CPU decode\n").c_str());
 		}
 
 		TEST_METHOD(GpuCaptureUnpackMatchesTheCpuFormatters)
