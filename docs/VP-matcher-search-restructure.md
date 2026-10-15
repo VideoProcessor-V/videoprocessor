@@ -19,6 +19,12 @@ pass timing (`VP_TEST_TIMING=1`, "live settings" section):
 - Two exact rewrites inside that shape were byte-identical but slower (a shared-memory window of `to`; picks as
   parallel reductions, which add barriers) and were not kept.
 
+- The serial reference (one thread per block, no barriers) is 118.7 ms on the same settings: the parallelism is
+  essential. The flat passes keep a thread per (block, candidate) - hundreds of thousands of threads - and only
+  the picks (a scan of at most a few hundred values) are one thread per block.
+- Owner 2026-10-15: this matters beyond the laptop - motion for 50/60p in low-latency modes is estimated as each
+  frame arrives (no look-ahead), so the matcher's time adds directly to that frame's latency.
+
 ## Design: flat passes, no group barriers
 
 Split the search into simple passes, each one thread per (block, candidate) or per block, with the results in
