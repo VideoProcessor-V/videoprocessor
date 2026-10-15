@@ -6321,17 +6321,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // Owner 2026-10-13: the low-latency capture path (rule-selected, e.g.
         // for sources above 59 Hz). Experimental, off by default (2026-10-14);
         // its own section, not inside Tone Mapping (audit 2026-10-14c).
-        form = addCollapsibleSection(QStringLiteral("lowLatency"), QStringLiteral("Low latency (experimental)"),
-            QStringLiteral("For gaming and live TV. Off by default; the standard path is the proven one."), false);
-        auto* capturePath = addChoice(QStringLiteral("Capture conversion"), QStringLiteral("capture_path"),
-            { QStringLiteral("standard"), QStringLiteral("gpu") });
-        capturePath->setItemText(capturePath->findData(QStringLiteral("standard")), QStringLiteral("Standard (CPU, the proven path)"));
-        capturePath->setItemText(capturePath->findData(QStringLiteral("gpu")), QStringLiteral("GPU (low latency, experimental)"));
-        capturePath->setToolTip(QStringLiteral(
-            "How DeckLink V210 / UYVY frames are converted for the renderer. GPU: the raw frame is uploaded and unpacked on "
-            "the GPU - the same picture with no CPU conversion, about half the conversion time. Meant for a low-latency "
-            "profile (for example for sources above 59 fps). It does nothing for other capture formats, which stay on the "
-            "standard path. Experimental and off by default: Standard is the proven path."));
 
         // Stage 6b-2b: the de-judder (film motion). Meant for the cinema
         // profile; the renderer switches it off by itself in the low-latency
@@ -6674,6 +6663,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         ditherNext->setToolTip(QStringLiteral(
             "With the de-judder running, each new film frame's temporal dither takes the motion the de-judder already "
             "measured instead of searching again (about 5 ms less per new frame on the laptop). Off = its own search."));
+        auto* capturePath = addChoice(QStringLiteral("Capture unpack on the GPU (v210 / UYVY)"), QStringLiteral("capture_path"),
+            { QStringLiteral("gpu"), QStringLiteral("standard") });
+        capturePath->setItemText(capturePath->findData(QStringLiteral("gpu")), QStringLiteral("GPU (default)"));
+        capturePath->setItemText(capturePath->findData(QStringLiteral("standard")), QStringLiteral("CPU (the old path)"));
+        capturePath->setToolTip(QStringLiteral(
+            "DeckLink v210 / UYVY frames are uploaded as they arrive and unpacked on the GPU: the same picture byte for "
+            "byte, about half the time at 4K and no CPU conversion. CPU = the old conversion. RGB formats follow the "
+            "native RGB capture choice below."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7767,7 +7764,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "standard" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

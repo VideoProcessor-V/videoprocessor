@@ -21,33 +21,43 @@ int ru_round_q20(int v) { return v >= 0 ? (v + 524288) >> 20 : -(((-v) + 524288)
 int ru_clamp10(int v) { return clamp(v, 0, 1023); }
 )GLSL";
 
-	// R12B / R12L: one invocation per pixel pair (nine bytes, two pixels).
-	// R12B's bytes per pair within its 36-byte block of four pairs (every
-	// 32-bit word reversed), as CDeckLinkRGBToP010's ReadPixelPair.
+	// R12B / R12L: one invocation per block of 8 pixels (4 pairs, 36 bytes =
+	// 9 texels, read once; rows are whole blocks since widths are multiples of
+	// 8). R12L's stream is the bytes in order; R12B reverses every 32-bit word,
+	// so stream byte k of a block is its byte k ^ 3 (as CDeckLinkRGBToP010's
+	// ReadPixelPair). Then each pair's nine bytes as SMPTE 268M C4.
 	const char* const R12_BODY = R"GLSL(
-const int r12b_order[36] = int[36](
-    3, 2, 1, 0, 7, 6, 5, 4, 11,
-    10, 9, 8, 15, 14, 13, 12, 19, 18,
-    17, 16, 23, 22, 21, 20, 27, 26, 25,
-    24, 31, 30, 29, 28, 35, 34, 33, 32);
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
-if (g.x < pairs && g.y < frame_height) {
-    uint b[9];
-    for (int k = 0; k < 9; k++) {
-        int o = big_endian != 0 ? (g.x / 4) * 36 + r12b_order[(g.x % 4) * 9 + k] : g.x * 9 + k;
-        b[k] = ru_byte(o, g.y);
+if (g.x < pairs / 4 && g.y < frame_height) {
+    uint blk[36];
+    for (int t = 0; t < 9; t++) {
+        uvec4 c = uvec4(round(texelFetch(raw, ivec2(g.x * 9 + t, g.y), 0) * 255.0));
+        blk[4 * t] = c.x;
+        blk[4 * t + 1] = c.y;
+        blk[4 * t + 2] = c.z;
+        blk[4 * t + 3] = c.w;
     }
-    uvec3 p0 = uvec3(b[0] | ((b[1] & 15u) << 8), (b[1] >> 4) | (b[2] << 4), b[3] | ((b[4] & 15u) << 8));
-    uvec3 p1 = uvec3((b[4] >> 4) | (b[5] << 4), b[6] | ((b[7] & 15u) << 8), (b[7] >> 4) | (b[8] << 4));
-    for (int k = 0; k < 2; k++) {
-        uvec3 p = k == 0 ? p0 : p1;
-        ivec2 at = ivec2(2 * g.x + k, g.y);
-        imageStore(dst_rgb, at, vec4(ru_u16(p.x << 4), ru_u16(p.y << 4), ru_u16(p.z << 4), 1.0));
-        // The matcher's luma: the CPU formatter's 12-to-10 scale and Q16
-        // full-range Y (10-bit code << 6).
-        ivec3 t = ivec3((p * 1023u + 2047u) / 4095u);
-        int y10 = ru_clamp10((cy.x * t.x + cy.y * t.y + cy.z * t.z + 32768) >> 16);
-        imageStore(dst_luma, at, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
+    for (int j = 0; j < 4; j++) {
+        uint b[9];
+        if (big_endian != 0) {
+            for (int k = 0; k < 9; k++)
+                b[k] = blk[(9 * j + k) ^ 3];
+        } else {
+            for (int k = 0; k < 9; k++)
+                b[k] = blk[9 * j + k];
+        }
+        uvec3 p0 = uvec3(b[0] | ((b[1] & 15u) << 8), (b[1] >> 4) | (b[2] << 4), b[3] | ((b[4] & 15u) << 8));
+        uvec3 p1 = uvec3((b[4] >> 4) | (b[5] << 4), b[6] | ((b[7] & 15u) << 8), (b[7] >> 4) | (b[8] << 4));
+        for (int k = 0; k < 2; k++) {
+            uvec3 p = k == 0 ? p0 : p1;
+            ivec2 at = ivec2(8 * g.x + 2 * j + k, g.y);
+            imageStore(dst_rgb, at, vec4(ru_u16(p.x << 4), ru_u16(p.y << 4), ru_u16(p.z << 4), 1.0));
+            // The matcher's luma: the CPU formatter's 12-to-10 scale and Q16
+            // full-range Y (10-bit code << 6).
+            ivec3 t = ivec3((p * 1023u + 2047u) / 4095u);
+            int y10 = ru_clamp10((cy.x * t.x + cy.y * t.y + cy.z * t.z + 32768) >> 16);
+            imageStore(dst_luma, at, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
+        }
     }
 }
 )GLSL";
@@ -243,7 +253,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 		error = "RGB unpack shader rejected";
 		return false;
 	}
-	const int columns = r12 ? pairs : width;
+	const int columns = r12 ? pairs / 4 : width;
 	pl_dispatch_compute_params compute{};
 	compute.shader = &sh;
 	compute.dispatch_size[0] = (columns + 15) / 16;

@@ -956,10 +956,12 @@ namespace
 		// Owner 2026-10-13: the next pair estimated in an extra's spare refresh
 		// when the frame after next is queued (else before the frame, as before).
 		bool dejudderEstimateAhead = true;
-		// Owner 2026-10-13 (docs/VP-gpu-capture-low-latency-plan.md): standard
-		// = the CPU formatters (the proven path); gpu = V210 / UYVY / HDYC
-		// unpacked on the GPU from the raw frame (others stay standard).
-		std::string capturePath = "standard";
+		// Owner 2026-10-13 (docs/VP-gpu-capture-low-latency-plan.md): gpu =
+		// V210 / UYVY / HDYC unpacked on the GPU from the raw frame (the same
+		// planes, byte for byte); standard = the CPU formatters. Default gpu on
+		// both pathways (owner 2026-10-15: about half the time at 4K, no CPU
+		// conversion; every CPU consumer reads the raw frame - audited).
+		std::string capturePath = "gpu";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -4295,7 +4297,7 @@ struct LibplaceboVideoRenderer::Impl
 	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
 	// capture_path: gpu. The conversion thread reads the two flags; a failed
 	// unpack turns the session back to the CPU formatters (logged once).
-	std::atomic<bool> captureGpuWanted{ false };
+	std::atomic<bool> captureGpuWanted{ true };
 	std::atomic<bool> captureGpuFailed{ false };
 	std::unique_ptr<GpuCaptureUnpack> captureUnpack;
 	bool captureGpuLogged = false;
@@ -4303,6 +4305,8 @@ struct LibplaceboVideoRenderer::Impl
 	// unpacked to native RGB (rgba16) plus the matcher's luma; a failed unpack
 	// turns the session back to the CPU formatter (logged once).
 	std::atomic<bool> rgbGpuWanted{ true };
+	std::shared_ptr<std::atomic<int>> rawBuffersHeld = std::make_shared<std::atomic<int>>(0);
+	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
 	pl_tex rgbIngestLuma = nullptr;
@@ -4333,7 +4337,8 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// The planes of a raw payload: the GPU unpack, or false (and the session
 	// back to the CPU path) when it fails.
-	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2])
+	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
+		bool sessionFallback = true)
 	{
 		if (!payload.Raw() || !d3d11)
 			return false;
@@ -4348,6 +4353,14 @@ struct LibplaceboVideoRenderer::Impl
 				captureGpuLogged = true;
 			}
 			return true;
+		}
+		// The de-judder's next / ahead frame: that frame only (the de-judder
+		// holds once); the picture's own frames decide the session.
+		if (!sessionFallback)
+		{
+			DebugLog::Log("Capture path gpu: a de-judder frame's GPU unpack failed (%s); that frame skipped",
+				captureUnpack->Error().c_str());
+			return false;
 		}
 		if (!captureGpuFailed.exchange(true))
 			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
@@ -4368,6 +4381,8 @@ struct LibplaceboVideoRenderer::Impl
 		int width = 0, height = 0, chromaHeight = 0;
 		size_t rowBytes = 0, pixelBytes = 0;
 		bool lossless422 = false, fullRange = false;
+		bool raw = false;   // the raw (GPU unpack) route, with its encoding
+		VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
 		VideoFrameFormatterOutputContract contract{};
 	} dejudderLayout;
 	std::unique_ptr<Dejudder::MotionWarp> dejudder;
@@ -11746,6 +11761,7 @@ struct LibplaceboVideoRenderer::Impl
 		in.haveNext = next != nullptr;
 		in.nextMatches = next && current &&
 			next->Bytes() == current->Bytes() && next->Raw() == current->Raw() &&
+			(!next->Raw() || next->rawEncoding == current->rawEncoding) &&
 			next->contract.sampleRange == contract.sampleRange &&
 			next->contract.colorDepth == contract.colorDepth &&
 			next->contract.bitShift == contract.bitShift;
@@ -11811,6 +11827,8 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderLayout.chromaHeight = chromaHeight;
 		dejudderLayout.rowBytes = rowBytes;
 		dejudderLayout.pixelBytes = next->Bytes();
+		dejudderLayout.raw = next->Raw();
+		dejudderLayout.rawEncoding = next->Raw() ? next->rawEncoding : VideoFrameEncoding::UNKNOWN;
 		dejudderLayout.lossless422 = lossless422;
 		dejudderLayout.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
 		dejudderLayout.contract = contract;
@@ -11881,7 +11899,12 @@ struct LibplaceboVideoRenderer::Impl
 		if (payload.Raw() && GpuRgbUnpack::Supports(payload.rawEncoding))
 			return false;
 		if (payload.Raw())
-			return UnpackRawPayload(payload, l.width, l.height, dst);   // capture_path: gpu
+		{
+			// capture_path: gpu; the route and format must be B's (A's layout).
+			if (!l.raw || payload.rawEncoding != l.rawEncoding)
+				return false;
+			return UnpackRawPayload(payload, l.width, l.height, dst, false);
+		}
 		struct pl_plane_data planes[2]{};
 		const BYTE* yPixels = payload.pixels.data();
 		const BYTE* uvPixels = yPixels + l.rowBytes * static_cast<size_t>(l.height);
@@ -12017,6 +12040,8 @@ struct LibplaceboVideoRenderer::Impl
 		c.estimated = dejudderEstimatedSequence;
 		c.layoutMatches = dejudderAheadPayload && dejudderLayout.valid &&
 			dejudderAheadPayload->Bytes() == dejudderLayout.pixelBytes &&
+			dejudderAheadPayload->Raw() == dejudderLayout.raw &&
+			(!dejudderLayout.raw || dejudderAheadPayload->rawEncoding == dejudderLayout.rawEncoding) &&
 			dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
 			dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
 			dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;
@@ -13746,13 +13771,13 @@ struct LibplaceboVideoRenderer::Impl
 				switch (state.videoFrameEncoding)
 				{
 				case VideoFrameEncoding::V210:
-					setIngressStatus("P210 (lossless v210 4:2:2)");
+					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
 					break;
 				case VideoFrameEncoding::HDYC:
-					setIngressStatus("P210 (lossless HDYC 4:2:2)");
+					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless HDYC 4:2:2, GPU unpack)" : "P210 (lossless HDYC 4:2:2)");
 					break;
 				default:
-					setIngressStatus("P210 (lossless UYVY 4:2:2)");
+					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless UYVY 4:2:2, GPU unpack)" : "P210 (lossless UYVY 4:2:2)");
 					break;
 				}
 			}
@@ -21830,10 +21855,21 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			{
 				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
 				frame.SourceBufferAddRef();   // released with the payload
-				raw->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [](VideoFrame* f)
+				// Capture buffers held by raw payloads (owner 2026-10-15): the most
+				// at once is logged when it rises, to check against the card's pool.
+				const int held = ++*m_impl->rawBuffersHeld;
+				int peak = m_impl->rawBuffersPeak.load(std::memory_order_relaxed);
+				while (held > peak && !m_impl->rawBuffersPeak.compare_exchange_weak(peak, held))
+				{
+				}
+				if (held > peak)
+					DebugLog::Log("Capture raw route: up to %d capture buffers held at once (queue, next / ahead frames)", held);
+				std::shared_ptr<std::atomic<int>> heldCounter = m_impl->rawBuffersHeld;
+				raw->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [heldCounter](VideoFrame* f)
 				{
 					f->SourceBufferRelease();
 					delete f;
+					--*heldCounter;
 				});
 				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
 				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());

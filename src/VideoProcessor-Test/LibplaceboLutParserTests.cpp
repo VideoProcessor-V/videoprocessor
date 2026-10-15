@@ -7572,6 +7572,48 @@ namespace VideoProcessorTest
 				L"an R12 width not a multiple of 8 must be refused");
 			Assert::IsFalse(GpuRgbUnpack::Supports(VideoFrameEncoding::V210) || GpuRgbUnpack::Supports(VideoFrameEncoding::UYVY),
 				L"only the RGB formats take this pass");
+			// Efficiency (report): 3840x2160, the CPU conversion it replaces
+			// against the raw upload + GPU pass (wall, GPU drained) and the pass
+			// alone (timer).
+			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::R12B, VideoFrameEncoding::R210, VideoFrameEncoding::ARGB_8BIT })
+			{
+				const int width = 3840, height = 2160;
+				VideoStateComPtr state = new VideoState();
+				state->valid = true;
+				state->displayMode = std::make_shared<DisplayMode>(width, height, false, 24000, 1001);
+				state->videoFrameEncoding = encoding;
+				state->colorspace = ColorSpace::REC_709;
+				std::vector<BYTE> source(static_cast<size_t>(state->BytesPerFrame()));
+				for (BYTE& b : source) b = static_cast<BYTE>(next());
+				std::unique_ptr<IVideoFrameFormatter> cpu;
+				if (GpuRgbUnpack::Is8Bit(encoding)) cpu = std::make_unique<CARGBtoP010VideoFrameFormatter>();
+				else cpu = std::make_unique<CDeckLinkRGBToP010VideoFrameFormatter>();
+				cpu->OnVideoState(state);
+				std::vector<BYTE> out(static_cast<size_t>(cpu->GetOutFrameSize()));
+				const VideoFrame frame(source.data(), 1, 0, nullptr);
+				pl_timer timer = pl_timer_create(gpu);
+				unpack.SetTimerForTest(timer);
+				double cpuMs = 1e30, gpuWallMs = 1e30, passMs = 1e30;
+				for (int run = 0; run < 8; ++run)
+				{
+					auto t0 = std::chrono::steady_clock::now();
+					cpu->FormatVideoFrame(frame, out.data());
+					cpuMs = std::min(cpuMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					pl_gpu_finish(gpu);
+					t0 = std::chrono::steady_clock::now();
+					Assert::IsTrue(unpack.Unpack(encoding, false, source.data(), static_cast<size_t>(state->BytesPerRow()), width, height, rgb, luma));
+					pl_gpu_finish(gpu);
+					gpuWallMs = std::min(gpuWallMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					const uint64_t ns = pl_timer_query(gpu, timer);
+					if (ns > 0)
+						passMs = std::min(passMs, ns / 1e6);
+				}
+				unpack.SetTimerForTest(nullptr);
+				pl_timer_destroy(gpu, &timer);
+				Logger::WriteMessage(("GpuRgbUnpack 4K " + std::string(encoding == VideoFrameEncoding::R12B ? "R12B" :
+					encoding == VideoFrameEncoding::R210 ? "r210" : "ARGB") + ": CPU conversion " + std::to_string(cpuMs) +
+					" ms; raw upload + GPU pass " + std::to_string(gpuWallMs) + " ms (pass alone " + std::to_string(passMs) + " ms)\n").c_str());
+			}
 			pl_tex_destroy(gpu, &rgb);
 			pl_tex_destroy(gpu, &luma);
 			AssertCleanLibplaceboLog(log);
