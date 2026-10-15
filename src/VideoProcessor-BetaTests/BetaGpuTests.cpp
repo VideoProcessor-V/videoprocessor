@@ -1700,6 +1700,172 @@ namespace
 	}
 }
 
+// The live matcher alone, quickly (VP_TEST_MATCHER_TIMING=1, hardware GPU; a
+// minute instead of the whole suite). VP_TEST_MATCHER_VARIANTS="a;b;c" names
+// variants, each set as VP_TEST_SEARCH_PROFILE (test builds that read it);
+// they are timed in rotation (VP_TEST_MATCHER_ROUNDS rounds, default 5) so a
+// drifting GPU clock affects them alike, and the medians are reported: the
+// live settings on consecutive frames (planes reused), wall-clock and passes.
+void RunBetaMatcherTiming()
+{
+	Gpu gpu;
+	pl_gpu g = gpu.GpuHandle();
+	const int sw = 3840, sh = 2160;
+	auto env = [](const char* name) -> std::string
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		std::string r;
+		if (_dupenv_s(&v, &n, name) == 0 && v)
+			r = v;
+		std::free(v);
+		return r;
+	};
+	std::vector<std::string> variants;
+	{
+		std::string list = env("VP_TEST_MATCHER_VARIANTS");
+		if (list.empty())
+			list = "none";
+		size_t start = 0;
+		while (start <= list.size())
+		{
+			const size_t end = list.find(';', start);
+			variants.push_back(list.substr(start, end == std::string::npos ? std::string::npos : end - start));
+			if (end == std::string::npos)
+				break;
+			start = end + 1;
+		}
+	}
+	const int rounds = std::max(1, std::atoi(env("VP_TEST_MATCHER_ROUNDS").empty() ? "5" : env("VP_TEST_MATCHER_ROUNDS").c_str()));
+	auto noise = [](int x, int y, unsigned salt)
+	{
+		const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u) ^ (salt * 83492791u);
+		return static_cast<uint16_t>(16384 + (h % 32768u));
+	};
+	const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
+	auto plane = [&](int w, int h, int comps, int shift)
+	{
+		std::vector<uint16_t> data(static_cast<size_t>(w) * h * comps);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				for (int c = 0; c < comps; ++c)
+					data[(static_cast<size_t>(y) * w + x) * comps + c] = noise((x - shift) / 4, y / 4, 7 + c);
+		pl_tex_params p{};
+		p.w = w;
+		p.h = h;
+		p.format = pl_find_fmt(g, PL_FMT_UNORM, comps, 16, 16, caps);
+		p.sampleable = true;
+		p.storable = true;
+		p.initial_data = data.data();
+		return pl_tex_create(g, &p);
+	};
+	Dejudder::Planes a, b;
+	a.luma = plane(sw, sh, 1, 0);
+	a.chroma = plane(sw / 2, sh, 2, 0);
+	b.luma = plane(sw, sh, 1, 6);
+	b.chroma = plane(sw / 2, sh, 2, 3);
+	a.chromaShiftX = b.chromaShiftX = 1;
+	a.chromaShiftY = b.chromaShiftY = 0;
+	Check(a.luma && a.chroma && b.luma && b.chroma, "matcher timing: plane upload failed");
+	Dejudder::Settings live = ChainGpuProbe::Refined(Dejudder::Settings{});
+	live.lowRes = true;
+	live.lowResAll = true;
+	live.pixelTrust = true;
+	live.pixelTrustLo = 3.0f;
+	live.pixelTrustHi = 8.0f;
+	live.landingCheck = 1.5f;
+	struct Result { std::vector<double> wall, gpu; std::map<std::string, std::vector<double>> passes; };
+	std::vector<Result> results(variants.size());
+	const int reps = 10;
+	for (int round = 0; round < rounds; ++round)
+		for (size_t vi = 0; vi < variants.size(); ++vi)
+		{
+			// Tokens: SKIP_* go to the search profile; the others switch one
+			// feature off (its cost, for the low-latency design).
+			Dejudder::Settings vs = live;
+			std::string skips;
+			{
+				const std::string& v = variants[vi];
+				size_t st = 0;
+				while (st <= v.size())
+				{
+					const size_t en = v.find(',', st);
+					const std::string t = v.substr(st, en == std::string::npos ? std::string::npos : en - st);
+					if (t.rfind("SKIP_", 0) == 0) skips += t + ",";
+					else if (t == "noglobal") vs.globalPrior = false;
+					else if (t == "nosmooth") vs.vectorSmooth = false;
+					else if (t == "nocand") vs.estCandidates = false;
+					else if (t == "noqpel") vs.estQpel = false;
+					else if (t == "nogate") vs.estGate = false;
+					else if (t == "notwo") vs.globalTwo = false;
+					else if (t == "noregional") vs.regionalHold = false;
+					else if (t == "nofade") vs.fadeMatch = false;
+					else if (t == "nopixel") vs.pixelTrust = false;
+					else if (t == "nolanding") vs.landingCheck = 0.0f;
+					else if (t == "nohyst") vs.holdHysteresis = 1;
+					else if (t == "nopicture") vs.pictureArea = false;
+					else if (t == "nolowresall") vs.lowResAll = false;
+					else if (t == "nolowres") { vs.lowRes = false; vs.lowResAll = false; }
+					else Check(t == "none" || t.empty(), "matcher timing: unknown variant token " + t);
+					if (en == std::string::npos)
+						break;
+					st = en + 1;
+				}
+			}
+			_putenv_s("VP_TEST_SEARCH_PROFILE", skips.c_str());
+			Dejudder::MotionWarp m(gpu.Log(), g, vs);
+			uint64_t seq = 0;
+			int slot = 0;
+			auto next = [&]
+			{
+				Dejudder::Planes pa = (seq % 2) ? b : a, pb = (seq % 2) ? a : b;
+				pa.sequence = seq + 1;
+				pb.sequence = seq + 2;
+				++seq;
+				const bool ok = m.Estimate(pa, pb, slot, true);
+				Check(ok, "matcher timing: estimate failed: " + m.LastError());
+				slot ^= 1;
+			};
+			next();   // the shaders compiled outside the timing
+			results[vi].wall.push_back(DrainedMs(g, reps, next));
+			m.SetPassTiming(true);
+			for (int i = 0; i < reps; ++i)
+				next();
+			double sum = 0.0;
+			for (const auto& entry : m.PassMs())
+			{
+				results[vi].passes[entry.first].push_back(entry.second / reps);
+				sum += entry.second / reps;
+			}
+			results[vi].gpu.push_back(sum);
+			m.SetPassTiming(false);
+		}
+	_putenv_s("VP_TEST_SEARCH_PROFILE", "");
+	auto median = [](std::vector<double> v)
+	{
+		std::sort(v.begin(), v.end());
+		return v.empty() ? 0.0 : v.size() % 2 ? v[v.size() / 2] : 0.5 * (v[v.size() / 2 - 1] + v[v.size() / 2]);
+	};
+	std::cout << "Beta matcher timing (live settings, 4K, consecutive frames; medians of " << rounds << " rotated rounds):\n";
+	for (size_t vi = 0; vi < variants.size(); ++vi)
+	{
+		std::vector<std::pair<double, std::string>> sorted;
+		for (const auto& entry : results[vi].passes)
+			sorted.emplace_back(median(entry.second), entry.first);
+		std::sort(sorted.rbegin(), sorted.rend());
+		std::cout << "  [" << variants[vi] << "] " << median(results[vi].wall) << " ms wall-clock, " << median(results[vi].gpu)
+			<< " ms GPU over " << sorted.size() << " passes; top:";
+		for (size_t k = 0; k < sorted.size() && k < 4; ++k)
+			std::cout << " " << sorted[k].second.substr(sorted[k].second.find(':') == std::string::npos ? 0 : sorted[k].second.find(':') + 2)
+				<< " " << sorted[k].first << ";";
+		std::cout << "\n";
+	}
+	pl_tex_destroy(g, &a.luma);
+	pl_tex_destroy(g, &a.chroma);
+	pl_tex_destroy(g, &b.luma);
+	pl_tex_destroy(g, &b.chroma);
+}
+
 void RunBetaPassTiming()
 {
 	Gpu gpu;

@@ -7,6 +7,7 @@ void RunBetaGpuTests(); // BetaGpuTests.cpp
 void RunBetaOutputFloat32Tests(); // BetaGpuTests.cpp
 void RunBetaFboTiming(); // BetaGpuTests.cpp
 void RunBetaPassTiming(); // BetaGpuTests.cpp
+void RunBetaMatcherTiming(); // BetaGpuTests.cpp
 void RunBetaScenarioTiming(); // BetaGpuTests.cpp
 void RunBetaOptionQuality(); // BetaGpuTests.cpp
 void RunBetaDejudderQuality(); // BetaGpuTests.cpp
@@ -30,6 +31,18 @@ int RunBetaTestMain() {
 int main() {
 #endif
     try {
+        {
+            // The live matcher's timing alone (VP_TEST_MATCHER_TIMING=1): skips the suite.
+            char* mt = nullptr;
+            size_t mtLength = 0;
+            const bool matcherOnly = _dupenv_s(&mt, &mtLength, "VP_TEST_MATCHER_TIMING") == 0 && mt && std::string(mt) == "1";
+            std::free(mt);
+            if (matcherOnly)
+            {
+                RunBetaMatcherTiming();
+                return 0;
+            }
+        }
         Settings settings; Projection p; std::string error;
         for (const char* quality : {"fast", "balanced", "high"}) {
             settings.quality = quality;
