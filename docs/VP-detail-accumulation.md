@@ -141,3 +141,9 @@ Owner, 2026-10-16: "are we going to have a problem with detail integration using
 
 - **One source of truth.** The renderer's motion-ahead decision (`MotionAhead::Decide` and the producer's `EngineReady`) decides. Accumulation never starts the engine or the matcher itself ([[vp-vector-refinements-fallback]]).
 - **Switching is per frame and smooth.** v2 to v1 drops the look-ahead term only, with no visible jump: the history stays. Off clears the history.
+
+## 9. Resolution detection is untouched (owner, 2026-10-16: "make sure the detail recovery doesn't break the original resolution detection for upscaling")
+
+- **Read before accumulation.** The source-resolution monitor samples the raw source frame (`sourceMonitor.Frame` on the unwarped, not re-based, not accumulated frame, once per source frame), and its look-ahead reads the queued frames. Accumulation is applied after that sampling and before the re-base, so detection never sees accumulated detail. Accumulated detail could otherwise add energy above the source rate and mask an upscale's signature, or look like native detail.
+- **T6 (gate).** Detection readings (ratio, confidence, auto decisions) are identical with accumulation on and off: the renderer harness on the upscaled and native charts, and the real-codec corpus through the renderer.
+- **The re-base factor is decided from the raw reading.** Accumulation then runs at the signal resolution (§6 Q2: limited to below the declared rate's Nyquist when re-based).
