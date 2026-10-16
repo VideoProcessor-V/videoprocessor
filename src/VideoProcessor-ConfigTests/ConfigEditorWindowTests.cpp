@@ -1616,6 +1616,37 @@ void testExclusiveButtonsForLedSourceAndMotionSource()
     require(flow->currentData().toString() == "on", "the engine button did not set optical_flow on");
 }
 
+void testTemporalDitherButtons()
+{
+    // Owner 2026-10-16: the dither as one exclusive choice (Off / libplacebo / VP temporal), saved as
+    // temporal_dither; not set = as before (a note, no button).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\ntemporal_dither: libplacebo\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* off = requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.off");
+    auto* libplacebo = requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.libplacebo");
+    auto* sigma = requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.sigma_delta");
+    auto* value = requireControl<QComboBox>(window, "config.vprenderer.temporal_dither");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(libplacebo->isChecked() && !off->isChecked() && !sigma->isChecked(), "the saved libplacebo is not shown");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(!off->isChecked() && !libplacebo->isChecked() && !sigma->isChecked(), "an unset profile shows a button");
+    sigma->click();
+    QCoreApplication::processEvents();
+    require(value->currentData().toString() == "sigma_delta" && !libplacebo->isChecked(), "VP temporal did not set sigma_delta");
+    off->click();
+    QCoreApplication::processEvents();
+    require(value->currentData().toString() == "off" && !sigma->isChecked(), "the buttons are not exclusive");
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("temporal_dither: off"), "temporal_dither not saved");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8515,6 +8546,7 @@ int main(int argc, char** argv)
     failures += run("scaling slider presets", testScalingSliderPresets);
     failures += run("shader add-ons list", testShaderAddonsList);
     failures += run("exclusive buttons: LED source and motion source", testExclusiveButtonsForLedSourceAndMotionSource);
+    failures += run("temporal dither buttons", testTemporalDitherButtons);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);

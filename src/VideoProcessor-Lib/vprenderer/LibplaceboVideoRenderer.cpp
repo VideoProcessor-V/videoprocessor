@@ -1045,6 +1045,10 @@ namespace
 		// taste; on known pans the engine reads the speed exactly where the search overshot
 		// medium pans by a step, so the taste's roll-off and camera follow the true speed.
 		bool opticalFlowGlobal = true;
+		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
+		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
+		// shader list says). auto (unset): as before - the shader list and the dithering setting.
+		std::string temporalDither = "auto";
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
 		bool rebaseKernelMatch = true;
@@ -1236,7 +1240,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2412,6 +2416,15 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid optical_flow '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.opticalFlow ? "on" : "off");
+		}
+		if (config.TryGetString(rule.section, "temporal_dither", raw))
+		{
+			const std::string v = ConfigFile::NormalizeName(raw);
+			if (v == "auto" || v == "off" || v == "libplacebo" || v == "sigma_delta")
+				settings.temporalDither = v;
+			else
+				DebugLog::Log("profile '%s': invalid temporal_dither '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.temporalDither.c_str());
 		}
 		if (config.TryGetString(rule.section, "optical_flow_global", raw))
 		{
@@ -9206,6 +9219,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
 		changed(current.opticalFlowGlobal != next.opticalFlowGlobal, "optical_flow_global");
+		changed(current.temporalDither != next.temporalDither, "temporal_dither");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
@@ -9750,10 +9764,56 @@ struct LibplaceboVideoRenderer::Impl
 		return true;
 	}
 
+	// temporal_dither (owner 2026-10-16): the sigma-delta rule removed (off, libplacebo) or added
+	// (sigma_delta) to the shader list's selection; auto leaves it as the list says.
+	static bool IsSigmaDeltaRule(const ConfiguredShaderRule& rule)
+	{
+		std::string f = rule.filename;
+		std::transform(f.begin(), f.end(), f.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return f.find("sigma-delta") != std::string::npos || f.find("sigma_delta") != std::string::npos;
+	}
+	static std::vector<ConfiguredShaderRule> TemporalDitherSelection(const std::vector<ConfiguredShaderRule>& requested,
+		const std::string& mode)
+	{
+		std::vector<ConfiguredShaderRule> out;
+		bool have = false;
+		for (const ConfiguredShaderRule& rule : requested)
+		{
+			if (IsSigmaDeltaRule(rule))
+			{
+				if (mode == "off" || mode == "libplacebo") continue;
+				have = true;
+			}
+			out.push_back(rule);
+		}
+		if (mode == "sigma_delta" && !have)
+		{
+			ConfiguredShaderRule rule;
+			rule.name = "vp.temporal_dither";
+			rule.label = "Temporal sigma-delta (VP)";
+			rule.filename = "Temporal sigma-delta.glsl";
+			rule.stageOrder = 90;
+			out.push_back(rule);
+		}
+		return out;
+	}
+	std::vector<ConfiguredShaderRule> requestedShaderSelection;
+	std::string requestedShaderSelectorRaw;
+	bool requestedShaderSelectionSet = false;
+	std::string appliedTemporalDither = "auto";
+
 	void SetConfiguredShaderSelection(const std::string& selector,
-		const std::vector<ConfiguredShaderRule>& selection,
+		const std::vector<ConfiguredShaderRule>& requested,
 		uint64_t rendererGeneration)
 	{
+		requestedShaderSelection = requested;
+		requestedShaderSelectorRaw = selector;
+		requestedShaderSelectionSet = true;
+		appliedTemporalDither = activeSettings.temporalDither;
+		const std::vector<ConfiguredShaderRule> selection = TemporalDitherSelection(requested, appliedTemporalDither);
+		if (appliedTemporalDither != "auto")
+			DebugLog::Log("Temporal dither: %s (the shader list's sigma-delta %s)", appliedTemporalDither.c_str(),
+				appliedTemporalDither == "sigma_delta" ? "added if missing" : "left out");
 		renderLoadMeter.ResetForPipelineChange();
 		coreRenderLoadMeter.ResetForPipelineChange();
 		originalPrRenderLoadMeter.ResetForPipelineChange();
@@ -18743,6 +18803,9 @@ struct LibplaceboVideoRenderer::Impl
         }
         hookTemplates.refreshHz = customHookRefreshHz;
         hookTemplates.sourceFps = nominalSourceRateHz;
+        if ((requestedShaderSelectionSet || activeSettings.temporalDither == "sigma_delta") &&
+            activeSettings.temporalDither != appliedTemporalDither)
+            SetConfiguredShaderSelection(requestedShaderSelectorRaw, requestedShaderSelection, nlsRendererGeneration);
         if (customHooks.Ensure(hookTemplates) ||
             lowLatencyQueue != customHooksPublishedLowLatency)
         {
@@ -19382,7 +19445,7 @@ struct LibplaceboVideoRenderer::Impl
         frameParams.fbo_float32 = activeSettings.fboFloat32 == 1 ||
             (activeSettings.fboFloat32 < 0 && !lowLatencyQueue);
 #endif
-        if (customHooks.SuppressesDither(lowLatencyQueue))
+        if (customHooks.SuppressesDither(lowLatencyQueue) || activeSettings.temporalDither == "off")
         {
             frameParams.dither_params = nullptr;
             frameParams.error_diffusion = nullptr;
@@ -25283,6 +25346,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
 		<< "optical_flow_global=" << (s.opticalFlowGlobal ? "on" : "off") << "\n"
+		<< "temporal_dither=" << s.temporalDither << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"

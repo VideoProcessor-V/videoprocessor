@@ -7255,6 +7255,82 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         form = addCollapsibleSection(QStringLiteral("temporalDither"), QStringLiteral("Temporal dither"),
             QStringLiteral("The temporal sigma-delta shader's use of the de-judder's motion (needs that shader). ") +
             QString::fromLatin1(kGpuCostLegend), false);
+        // Owner 2026-10-16: the dither as one choice - Off, libplacebo's, or VP's temporal sigma-delta
+        // (mutually exclusive buttons; the drop-down holds the value). Not set: as before, the shader
+        // list and the Dithering setting decide.
+        auto* temporalDither = addChoice(QStringLiteral("Dither"), QStringLiteral("temporal_dither"),
+            { QStringLiteral("auto"), QStringLiteral("off"), QStringLiteral("libplacebo"), QStringLiteral("sigma_delta") });
+        temporalDither->setItemText(temporalDither->findData(QStringLiteral("auto")), QStringLiteral("Not set (the shader list decides)"));
+        temporalDither->setItemText(temporalDither->findData(QStringLiteral("off")), QStringLiteral("Off"));
+        temporalDither->setItemText(temporalDither->findData(QStringLiteral("libplacebo")), QStringLiteral("libplacebo"));
+        temporalDither->setItemText(temporalDither->findData(QStringLiteral("sigma_delta")), QStringLiteral("VP temporal (sigma-delta)"));
+        QWidget* ditherButtons = new QWidget;
+        ditherButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("temporal_dither.buttons")));
+        {
+            auto* layout = new QVBoxLayout(ditherButtons);
+            layout->setContentsMargins(0, 0, 0, 0);
+            auto* row = new QHBoxLayout;
+            auto* group = new QButtonGroup(ditherButtons);
+            group->setExclusive(true);
+            struct Choice { const char* value; const char* label; const char* tip; };
+            static const Choice choices[] = {
+                { "off", "Off", "No dither at all (libplacebo's off, the sigma-delta not loaded)." },
+                { "libplacebo", "libplacebo", "libplacebo's own dither, with the Dithering method on the Processing section "
+                    "(Auto = blue noise; Off there = none). The sigma-delta is left out even if the shader list selects it." },
+                { "sigma_delta", "VP temporal (sigma-delta)", "VP's temporal sigma-delta, loaded by VP whatever the shader "
+                    "list says; libplacebo's dither is off while it runs. It uses the de-judder's motion when present and "
+                    "searches itself otherwise." } };
+            std::vector<QRadioButton*> radios;
+            for (const Choice& c : choices)
+            {
+                auto* radio = new QRadioButton(QString::fromLatin1(c.label));
+                radio->setObjectName(controlName(sectionPrefix, QStringLiteral("temporal_dither.") + QString::fromLatin1(c.value)));
+                radio->setToolTip(QString::fromLatin1(c.tip));
+                group->addButton(radio);
+                row->addWidget(radio);
+                radios.push_back(radio);
+                const QString value = QString::fromLatin1(c.value);
+                connect(radio, &QRadioButton::toggled, this, [temporalDither, value](bool on) {
+                    if (!on) return;
+                    const int index = temporalDither->findData(value);
+                    if (index >= 0 && temporalDither->currentIndex() != index) temporalDither->setCurrentIndex(index);
+                });
+            }
+            row->addStretch(1);
+            layout->addLayout(row);
+            auto* note = new QLabel;
+            note->setObjectName(controlName(sectionPrefix, QStringLiteral("temporal_dither.note")));
+            note->setWordWrap(true);
+            layout->addWidget(note);
+            auto sync = [temporalDither, radios, group, note]() {
+                const QString v = temporalDither->currentData().toString();
+                group->setExclusive(false);
+                for (QRadioButton* r : radios)
+                {
+                    const QSignalBlocker blocker(r);
+                    r->setChecked(false);
+                }
+                group->setExclusive(true);
+                const char* values[] = { "off", "libplacebo", "sigma_delta" };
+                bool set = false;
+                for (int i = 0; i < 3; ++i)
+                    if (v == QString::fromLatin1(values[i]))
+                    {
+                        const QSignalBlocker blocker(radios[static_cast<size_t>(i)]);
+                        radios[static_cast<size_t>(i)]->setChecked(true);
+                        set = true;
+                    }
+                note->setText(set ? QString() : QStringLiteral("Not set: the shader list and the Dithering setting decide (as before)."));
+                note->setVisible(!set);
+            };
+            connect(temporalDither, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
+            auto* refresh = new QAction(ditherButtons);
+            refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("temporal_dither_refresh")));
+            connect(refresh, &QAction::triggered, this, [sync]() { sync(); });
+            sync();
+        }
+        form->addRow(QStringLiteral("Dither"), ditherButtons);
+        form->setRowVisible(temporalDither, false);
         auto* occlusionMask = addChoice(QStringLiteral("Occlusion mask for the dither"),
             QStringLiteral("occlusion_mask"), { QStringLiteral("on"), QStringLiteral("off") });
         occlusionMask->setToolTip(QStringLiteral(
@@ -8984,6 +9060,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("optical_flow_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("temporal_dither_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();

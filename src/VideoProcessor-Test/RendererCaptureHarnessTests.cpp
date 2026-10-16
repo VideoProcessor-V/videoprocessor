@@ -906,7 +906,7 @@ namespace Tests
 			const std::string base = fingerprint("");
 			Assert::AreEqual(base, fingerprint(""), L"the same file gives the same fingerprint");
 			const char* const changes[] = { "source_range: full\n", "capture_upload: early\n", "source_resolution: 1080\n",
-				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n", "optical_flow_global: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
+				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n", "optical_flow_global: off\n", "temporal_dither: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
 				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
 				"a_key_not_invented_yet: 1\n" };
@@ -1251,6 +1251,54 @@ namespace Tests
 			g_harnessShaderProfiles = savedShaders;
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
 			Assert::AreEqual(0, failures, L"the re-base keeps the layout in every setup");
+		}
+
+		TEST_METHOD(TemporalDitherChoiceControlsTheSigmaDelta)
+		{
+			// Owner 2026-10-16: temporal_dither sigma_delta loads VP's sigma-delta whatever the shader list
+			// says; libplacebo (or off) leaves it out even when the list selects it.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			auto customCount = [](const RunResult& r) {
+				for (auto it = r.log.rbegin(); it != r.log.rend(); ++it)
+				{
+					const size_t at = it->find("custom hook(s)");
+					if (at != std::string::npos)
+					{
+						const size_t open = it->rfind(", ", at);
+						return std::atoi(it->c_str() + (open == std::string::npos ? 0 : open + 2));
+					}
+				}
+				return -1;
+			};
+			auto logged = [](const RunResult& r, const char* text) { return r.Logged(text); };
+			// No shader list selection, temporal_dither: sigma_delta.
+			g_harnessShaderProfiles.clear();
+			const RunResult added = Run(VideoFrameEncoding::V210, "gpu", 3.0, true, "temporal_dither: sigma_delta\n");
+			// The list selects the sigma-delta, temporal_dither: libplacebo.
+			const std::string shaders =
+				"[shader.standard]\ntype: multi\nlabel: Off\n"
+				"[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\nstage: post_resize\norder: 90\nglsl_file: Temporal sigma-delta.glsl\n";
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			const RunResult listed = Run(VideoFrameEncoding::V210, "gpu", 3.0, true, std::string("temporal_dither: auto\n") + shaders);
+			const RunResult removed = Run(VideoFrameEncoding::V210, "gpu", 3.0, true, std::string("temporal_dither: libplacebo\n") + shaders);
+			g_harnessShaderProfiles = saved;
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			char line[200];
+			snprintf(line, sizeof(line), "custom hooks: sigma_delta with no list %d; list + auto %d; list + libplacebo %d\n",
+				customCount(added), customCount(listed), customCount(removed));
+			Logger::WriteMessage(line);
+			Assert::IsTrue(logged(added, "Temporal dither: sigma_delta"), (L"sigma_delta logged\n" + added.Tail()).c_str());
+			Assert::IsTrue(logged(added, "custom hook"), (L"sigma_delta: the sigma-delta loaded with no shader list\n" + added.Tail()).c_str());
+			Assert::IsTrue(logged(removed, "Temporal dither: libplacebo"), (L"libplacebo logged\n" + removed.Tail()).c_str());
+			Assert::IsFalse(logged(removed, "custom hook"), (L"libplacebo: the listed sigma-delta left out\n" + removed.Tail()).c_str());
+			Assert::IsTrue(logged(listed, "custom hook"), (L"auto: the listed sigma-delta loads as before\n" + listed.Tail()).c_str());
 		}
 
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
