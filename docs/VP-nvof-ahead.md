@@ -130,8 +130,15 @@ The SDK also ships NVIDIA's frame-interpolation library (NvOFFRUC, CUDA). Our wa
 - **A black box.** None of the owner's taste semantics (displacement scale, the even cadence, the object/camera split, roll-off) and none of our trust layers or fallbacks.
 - **A whole-frame interpolator.** It replaces the de-judder's warp; it cannot feed it.
 
+**HDR** (owner, 2026-10-16: "why not hdr"). `NvFRUC.h` confirms NV12Surface and ARGBSurface only (8-bit). HDR10 must be cut to 8-bit PQ, where one step is 4 codes:
+- banding in smooth and dark areas;
+- tone mapping to the FL35 stretches the steps further;
+- only the interpolated frames would be 8-bit, so banding alternates frame to frame as a shimmer.
+
+Not ruled out. Run at the end of the chain (the FL35 link is 8-bit anyway), but the interpolated frames would miss our dither. Offer HDR as a labelled "8-bit interpolation, may band" mode, and measure banding and shimmer on the HDR clips.
+
 **Proposal (kept small).** Only after the engine-ahead work, offer it as a clearly labelled alternative motion engine ("NVIDIA interpolation") behind Fixes under test:
-- SDR / 8-bit sources only;
+- SDR first; HDR as the labelled 8-bit mode above, after measurement;
 - exclusive with ours, like libplacebo smooth motion ([[vp-motion-engine-exclusive]]);
 - compared with ours on the real-clip corpus.
 
