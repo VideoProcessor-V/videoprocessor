@@ -6890,13 +6890,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "How readily VP detects a stream upscaled before it reaches VP (many 4K streams are 1080p underneath) and "
             "undoes the upscale: Off, Cautious, Standard, Fast. Each step moves only the detection's evidence and "
             "upscale clarity; the values appear in the fields below and can be edited (Custom). Real detail above the "
-            "detected size, a seek or a source change always returns to native at once."));
+            "detected size, a seek or a source change always returns to native at once. Subtitles the player draws "
+            "itself are softened (to about the detected size) when a stream is re-based; they stay legible."));
         auto* pictureReset = new QPushButton(QStringLiteral("Reset to preset"));
         pictureReset->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_reset")));
         pictureReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
         auto* pictureDefault = new QPushButton(QStringLiteral("Default"));
         pictureDefault->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_default")));
-        pictureDefault->setToolTip(QStringLiteral("Back to the default, Off (native: the picture as captured)."));
+        pictureDefault->setToolTip(QStringLiteral("Back to the default, Standard (Auto: 3 shots and 10 s agreeing, upscale clarity 0.8)."));
         pictureRow->addWidget(new QLabel(QStringLiteral("Off")));
         pictureRow->addWidget(pictureSlider, 1);
         pictureRow->addWidget(new QLabel(QStringLiteral("Fast")));
@@ -6925,8 +6926,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         sourceResolution->setToolTip(QStringLiteral(
             "For a stream upscaled before it reaches VP (many 4K streams are 1080p underneath): VP shrinks the picture "
             "back to that size, then upscales it with its own path, as for a real 1080p source - fewer halos, cleaner "
-            "edges. Native = as captured (the default). A size = always that size (a profile for such a source). "
-            "Auto = VP detects the size the stream was upscaled from: it changes only after several shots agree "
+            "edges. Native = as captured. A size = always that size (a profile for such a source). "
+            "Auto (the default) = VP detects the size the stream was upscaled from: it changes only after several shots agree "
             "(the evidence below; standard 3 shots and 10 s), and only at a cut; any real detail above that size, a "
             "seek or a source change returns it to native at once. The stats line shows what it reads."));
         auto* autoConfidence = addText(QStringLiteral("Auto: upscale clarity needed"), QStringLiteral("source_resolution_auto_min_confidence"));
@@ -6950,12 +6951,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         {
             // The four positions, the keys they move, the defaults an unset field means.
             struct PicturePosition { const char* name; const char* description; std::array<const char*, 4> values; };
-            static const std::array<const char*, 4> kDefaults = { "native", "0.8", "10", "3" };
+            static const std::array<const char*, 4> kDefaults = { "auto", "0.8", "10", "3" };
             static const std::array<PicturePosition, 4> kPositions = { {
-                { "Off (default)", "The picture as captured: no detection acts on it.", { "native", "0.8", "10", "3" } },
+                { "Off", "The picture as captured: no detection acts on it.", { "native", "0.8", "10", "3" } },
                 { "Cautious", "Acts only on clear evidence: 4 shots and 20 s agreeing, upscale clarity 0.9. Slowest to act, "
                     "never on a doubtful source.", { "auto", "0.9", "20", "4" } },
-                { "Standard", "3 shots and 10 s agreeing, upscale clarity 0.8.", { "auto", "0.8", "10", "3" } },
+                { "Standard (default)", "3 shots and 10 s agreeing, upscale clarity 0.8.", { "auto", "0.8", "10", "3" } },
                 { "Fast", "2 shots and 5 s agreeing, upscale clarity 0.7: quickest to act, more likely to act on a soft "
                     "native film for a while.", { "auto", "0.7", "5", "2" } } } };
             const std::array<QLineEdit*, 4> texts = { nullptr, autoConfidence, evidenceSeconds, evidenceShots };
@@ -6987,7 +6988,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int i = 0; i < 4; ++i) anySet = anySet || !raw(i).isEmpty();
                 if (!anySet)
                 {
-                    pictureName->setText(QStringLiteral("Not set (the default profile's, or Off)"));
+                    pictureName->setText(QStringLiteral("Not set (the default profile's, or Standard)"));
                     pictureDescription->setText(QStringLiteral("Move the slider to choose this profile's level."));
                     return;
                 }
@@ -7021,10 +7022,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             };
             connect(pictureSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
             connect(pictureReset, &QPushButton::clicked, this, [apply, pictureSlider]() { apply(pictureSlider->value()); });
+            // The default level (Standard, position 2): one click back.
             connect(pictureDefault, &QPushButton::clicked, this, [apply, pictureSlider]() {
                 const QSignalBlocker blocker(pictureSlider);
-                pictureSlider->setValue(0);
-                apply(0);
+                pictureSlider->setValue(2);
+                apply(2);
             });
             for (int i = 0; i < 4; ++i)
             {
@@ -8374,7 +8376,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

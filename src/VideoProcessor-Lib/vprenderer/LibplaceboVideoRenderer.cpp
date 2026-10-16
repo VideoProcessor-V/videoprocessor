@@ -1016,11 +1016,11 @@ namespace
 		// the LED drive (its exact measurement follows the picture; its
 		// look-ahead reads the captured frame) both follow it.
 		std::string sourceRange = "auto";
-		// Stage 12 step A (owner 2026-10-15): source_resolution - native
-		// (default) | auto (native until step B's detection) | any height in
-		// lines. A height below the frame's re-bases the source to it
+		// Stage 12 step A (owner 2026-10-15): source_resolution - native |
+		// auto (the default since 2026-10-16: the Picture slider's Standard) | any
+		// height in lines. A height below the frame's re-bases the source to it
 		// (SourceRebase.h).
-		std::string sourceResolution = "native";
+		std::string sourceResolution = "auto";
 		// Stage 12: the confidence auto needs before it re-bases (spec 3).
 		double sourceResolutionAutoMinConfidence = 0.8;
 		// The Picture slider (owner 2026-10-16): the shots and seconds of agreeing evidence

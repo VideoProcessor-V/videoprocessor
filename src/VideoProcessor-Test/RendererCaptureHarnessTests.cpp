@@ -848,7 +848,9 @@ namespace Tests
 				// Step B reads every source (the crash-state line).
 				Logger::WriteMessage(("native: " + r.sourceStatus + "\n").c_str());
 				Assert::IsTrue(r.sourceStatus.find("Source resolution:") == 0, (L"native: status line\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.sourceStatus.find("source_resolution native") != std::string::npos);
+				// The default is auto (owner 2026-10-16: the Picture slider's Standard); the 4K
+				// harness picture stays native under it.
+				Assert::IsTrue(r.sourceStatus.find("source_resolution auto") != std::string::npos, (L"default: auto\n" + r.Tail()).c_str());
 			}
 			{
 				// Auto through the renderer (owner 2026-10-15): the harness picture

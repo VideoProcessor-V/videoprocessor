@@ -789,7 +789,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     // and pixel trust on, split off, half size every step, standard).
     const std::map<std::string, std::string> unset = read("");
     const std::pair<const char*, const char*> defaults[] = {
-        { "capture_path", "gpu" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
+        { "capture_path", "gpu" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
         { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.pictureArea", "1" }, { "dejudder_pulldown", "0" }, { "fix_scene_cooldown", "1" }, { "dither_vectors_new_frame", "1" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
         { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
         { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },
@@ -1405,7 +1405,8 @@ void testPictureSliderPresets()
     require(name->text() == "Custom", (QByteArray("A fixed 1080 is not shown as Custom: ") + name->text().toUtf8()).constData());
     profiles->setCurrentRow(0);
     QCoreApplication::processEvents();
-    require(name->text().startsWith("Not set"), (QByteArray("No keys is not shown as Not set: ") + name->text().toUtf8()).constData());
+    require(name->text().startsWith("Standard (default)") && slider->value() == 2,
+        (QByteArray("The default profile with no keys is not shown as the default Standard: ") + name->text().toUtf8()).constData());
     struct Row { int position; const char* mode; const char* clarity; const char* seconds; const char* shots; const char* label; };
     const Row rows[] = {
         { 1, "auto", "0.9", "20", "4", "Cautious" },
@@ -1450,10 +1451,12 @@ void testPictureSliderPresets()
     QCoreApplication::processEvents();
     require(seconds->text() == "10", (QByteArray("The field reset did not restore Standard's 10: ") + seconds->text().toUtf8()).constData());
     require(seconds->accessibleDescription().contains("2-120"), "No allowed range noted for the field");
-    // Default: back to Off (native).
+    // Default: back to Standard (auto) from anywhere (here an edited Standard moved to Fast).
+    slider->setValue(3);
     requireControl<QPushButton>(window, "config.vprenderer.picture_preset_default")->click();
     QCoreApplication::processEvents();
-    require(slider->value() == 0 && mode->currentData().toString() == "native" && name->text().startsWith("Off"), "Default did not restore Off");
+    require(slider->value() == 2 && mode->currentData().toString() == "auto" && shots->text() == "3" && name->text().startsWith("Standard"),
+        "Default did not restore Standard");
     // Fast saved and read back.
     slider->setValue(3);
     QCoreApplication::processEvents();
