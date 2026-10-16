@@ -7311,9 +7311,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
         form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale"),
             QString::fromLatin1(kGpuCostLegend), false);
-        // Owner 2026-10-16: the Scaling slider - speed profiles Off, Fast, Standard, Best (each step
-        // costs more GPU time) - moving only VP's scaling additions (the blends below, the grain-true
-        // filter, the grain map from motion), with a master checkbox (unticked = Off). The fields
+        // Owner 2026-10-16: the Scaling slider - speed profiles Off, Fast, Best (each step costs more
+        // GPU time) - moving only VP's scaling additions (the blends below, the grain map from motion;
+        // the separable grain-true filter throughout - owner: more flexible than polar, which cannot
+        // scale one axis alone), with a master checkbox (unticked = Off). The fields
         // stay editable (Custom). The 32-bit intermediates are precision (on by default, owner's
         // standing rule) and stay out; the upscaler / downscaler are on the Scaling page.
         auto* scalingBox = new QWidget;
@@ -7324,12 +7325,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* scalingSlider = new QSlider(Qt::Horizontal);
         scalingSlider->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset")));
         scalingSlider->setAccessibleName(QStringLiteral("Scaling"));
-        scalingSlider->setRange(0, 3);
+        scalingSlider->setRange(0, 2);
         scalingSlider->setPageStep(1);
         scalingSlider->setTickPosition(QSlider::TicksBelow);
         scalingSlider->setTickInterval(1);
         scalingSlider->setToolTip(QStringLiteral(
-            "Speed profiles for VP's scaling additions, cheapest first: Off, Fast, Standard, Best. Each step costs more GPU "
+            "Speed profiles for VP's scaling additions, cheapest first: Off, Fast, Best. Each step costs more GPU "
             "time and moves only the SSIM / CNN blends, the grain-true filter and the grain measure; the values appear "
             "in the fields below and can be edited (Custom). The upscaler and downscaler are chosen on the Scaling page "
             "and the shaders in the shader profiles; the blends act only where those shaders are enabled."));
@@ -7341,7 +7342,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         scalingDefault->setToolTip(QStringLiteral("Back to the default, Off (no VP scaling additions; today's behaviour)."));
         auto* scalingEnable = new QCheckBox(QStringLiteral("VP scaling additions"));
         scalingEnable->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_enable")));
-        scalingEnable->setToolTip(QStringLiteral("Unticked: Off (the slider greyed). Ticked: the slider's level (Standard the first time)."));
+        scalingEnable->setToolTip(QStringLiteral("Unticked: Off (the slider greyed). Ticked: the slider's level (Best the first time)."));
         scalingRow->addWidget(scalingEnable);
         scalingRow->addWidget(new QLabel(QStringLiteral("Off")));
         scalingRow->addWidget(scalingSlider, 1);
@@ -7711,21 +7712,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "output stage is 32-bit float always."));
         MarkGpuCost(form, fboFloat32, 2);
         {
-            // The Scaling slider's four speed profiles (all choices; an unset field means its default).
+            // The Scaling slider's three speed profiles (all choices; an unset field means its default).
             // Off is the two blends off alone (the other keys then do nothing).
             struct ScalingPosition { const char* name; const char* description; std::array<const char*, 4> values; };
             static const std::array<const char*, 4> kDefaults = { "off", "off", "polar", "on" };
-            static const std::array<ScalingPosition, 4> kPositions = { {
+            static const std::array<ScalingPosition, 3> kPositions = { {
                 { "Off (default)", "No VP scaling additions: the upscaler, downscaler and shaders chosen elsewhere run as they "
-                    "are (plain SSIM / CNN where those shaders are on). No extra GPU time.", { "off", "off", "polar", "off" } },
+                    "are (plain SSIM / CNN where those shaders are on). No extra GPU time.", { "off", "off", "ortho", "off" } },
                 { "Fast", "The SSIM downscale blend only (grain and hard edges lean to a faithful downscale, clean texture keeps "
                     "SSIM), with the separable filter and the per-frame grain measure. Little GPU time.",
                     { "on", "off", "ortho", "off" } },
-                { "Standard", "Both blends (the CNN upscale blend too), the separable filter, the grain measured per block "
-                    "along the motion. Moderate GPU time.", { "on", "on", "ortho", "on" } },
-                { "Best", "Both blends, the polar grain-true filter (most accurate, about four times the separable "
-                    "filter's GPU time) and the grain measured along the motion. The most GPU time.",
-                    { "on", "on", "polar", "on" } } } };
+                { "Best", "Both blends (the CNN upscale blend too), the separable filter, the grain measured per block "
+                    "along the motion. The most GPU time.", { "on", "on", "ortho", "on" } } } };
             const std::array<QComboBox*, 4> choices = { adaptiveOn, upscaleOn, adaptiveFaithful, adaptiveMap };
             auto applying = std::make_shared<bool>(false);
             auto lastOn = std::make_shared<int>(2);   // the level ticking the checkbox returns to
@@ -7741,7 +7739,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             };
             auto refresh = [=]() {
                 if (*applying) return;
-                for (int p = 0; p < 4; ++p)
+                for (int p = 0; p < 3; ++p)
                     if (matches(p))
                     {
                         const QSignalBlocker blocker(scalingSlider);

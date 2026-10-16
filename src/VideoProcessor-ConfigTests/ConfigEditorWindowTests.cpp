@@ -1497,15 +1497,14 @@ void testScalingSliderPresets()
     auto* map = requireControl<QComboBox>(window, "config.vprenderer.adaptive_grain_map");
     require(name->text().startsWith("Off") && slider->value() == 0 && !enable->isChecked() && !slider->isEnabled(),
         (QByteArray("An empty profile is not shown as Off with the checkbox unticked: ") + name->text().toUtf8()).constData());
-    // Ticking: the first level is Standard.
+    // Ticking: the first level is Best.
     enable->setChecked(true);
     QCoreApplication::processEvents();
-    require(slider->value() == 2 && name->text().startsWith("Standard") && slider->isEnabled(), "Ticking did not select Standard");
+    require(slider->value() == 2 && name->text().startsWith("Best") && slider->isEnabled(), "Ticking did not select Best");
     struct Row { int position; const char* down; const char* up; const char* faithful; const char* map; const char* label; };
     const Row rows[] = {
         { 1, "on", "off", "ortho", "off", "Fast" },
-        { 2, "on", "on", "ortho", "on", "Standard" },
-        { 3, "on", "on", "polar", "on", "Best" } };
+        { 2, "on", "on", "ortho", "on", "Best" } };
     for (const Row& r : rows)
     {
         slider->setValue(r.position);
@@ -1521,10 +1520,10 @@ void testScalingSliderPresets()
     require(down->currentData().toString() == "off" && up->currentData().toString() == "off" && name->text().startsWith("Off"), "Unticking did not turn the additions off");
     enable->setChecked(true);
     QCoreApplication::processEvents();
-    require(slider->value() == 3 && faithful->currentData().toString() == "polar", "Ticking again did not return to Best");
+    require(slider->value() == 2 && map->currentData().toString() == "on", "Ticking again did not return to Best");
     selectData(map, "off");
     QCoreApplication::processEvents();
-    require(name->text() == "Custom" && slider->value() == 3, "Editing a key did not show Custom (slider kept)");
+    require(name->text() == "Custom" && slider->value() == 2, "Editing a key did not show Custom (slider kept)");
     requireControl<QPushButton>(window, "config.vprenderer.scaling_preset_reset")->click();
     QCoreApplication::processEvents();
     require(map->currentData().toString() == "on" && name->text().startsWith("Best"), "Reset to preset did not restore Best");
