@@ -8070,6 +8070,21 @@ int run(const char* name, const std::function<void()>& test)
             matched = matched || testName.contains(word, Qt::CaseInsensitive);
         if (!matched) return 0;
     }
+    // Background runs (owner 2026-10-16: the tests made the computer unusable): with
+    // QT_QPA_PLATFORM=offscreen no window is shown and focus is never taken; the few tests that need a
+    // real native window (a Windows message to the editor's handle) are skipped and listed - run them
+    // on screen (tools/run_config_tests.ps1 -OnScreen) when the computer is free.
+    if (qEnvironmentVariable("QT_QPA_PLATFORM").compare(QStringLiteral("offscreen"), Qt::CaseInsensitive) == 0)
+    {
+        static const char* const nativeWindowTests[] = { "update shutdown discards edits without prompt" };
+        for (const char* native : nativeWindowTests)
+            if (testName.compare(QString::fromLatin1(native), Qt::CaseInsensitive) == 0)
+            {
+                if (testShardCount <= 1 || testShard == 0)   // reported once, not by every shard
+                    std::cerr << "SKIP " << name << ": needs a real window (run on screen)" << std::endl;
+                return 0;
+            }
+    }
     if (testShardCount > 1)
     {
         static const char* const serialWords[] = { "window", "focus", "z-order", "zorder", "foreground",
