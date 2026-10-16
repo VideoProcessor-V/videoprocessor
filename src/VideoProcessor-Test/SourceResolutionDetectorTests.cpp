@@ -750,6 +750,100 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// Planner G18 (2026-10-16): real codecs. tools/make_codec_corpus.py makes x265 /
+		// x264 / AV1-with-film-grain encodes of the real clips - native 4K, a 1080 rendition
+		// upscaled by the player, and a 1080 master upscaled then coded at 4K - and decodes
+		// P/B frames to raw 10-bit 4:2:0. Gate: no native frame reads lower; an upscale
+		// reads its height or native, never a wrong height. The share read is reported.
+		TEST_METHOD(RealCodecReadings)
+		{
+			const std::string folder = EnvValue("VP_TEST_CODEC_CORPUS");
+			if (folder.empty()) { Logger::WriteMessage("VP_TEST_CODEC_CORPUS not set: skipped\n"); return; }
+			FILE* manifest = nullptr;
+			if (fopen_s(&manifest, (folder + "\\manifest.csv").c_str(), "r") != 0 || !manifest) { Logger::WriteMessage("no manifest: skipped\n"); return; }
+			const int W = 3840, H = 2160, codeMax = 1023;
+			struct Tally { int frames = 0, height = 0, native = 0, wrong = 0; };
+			std::map<std::string, Tally> tallies;
+			int nativeLower = 0, wrongHeight = 0, cases = 0;
+			std::string failures;
+			char lineBuffer[512];
+			fgets(lineBuffer, sizeof(lineBuffer), manifest);   // header
+			while (fgets(lineBuffer, sizeof(lineBuffer), manifest))
+			{
+				// file,clip,scene,codec,crf,upscaler,truth,frames
+				std::vector<std::string> f;
+				std::string field;
+				for (const char* c = lineBuffer; *c && *c != '\n' && *c != '\r'; ++c)
+				{
+					if (*c == ',') { f.push_back(field); field.clear(); }
+					else field += *c;
+				}
+				f.push_back(field);
+				if (f.size() < 8) continue;
+				const double truth = atof(f[6].c_str());
+				const int frames = atoi(f[7].c_str());
+				FILE* in = nullptr;
+				if (fopen_s(&in, (folder + "\\" + f[0]).c_str(), "rb") != 0 || !in) continue;
+				++cases;
+				const std::string key = f[2] + " " + f[3] + " crf" + f[4] + (f[5].empty() ? "" : " " + f[5]);
+				std::vector<uint16_t> y(static_cast<size_t>(W) * H);
+				for (int frame = 0; frame < frames; ++frame)
+				{
+					_fseeki64(in, static_cast<long long>(frame) * W * H * 3, SEEK_SET);
+					if (fread(y.data(), 2, y.size(), in) != y.size()) break;
+					std::vector<SourceResolution::Spectrum> spectra;
+					for (int ty = 0; ty < 3; ++ty)
+						for (int tx = 0; tx < 4; ++tx)
+						{
+							const int X0 = 320 + tx * 860, Y0 = 300 + ty * 620;
+							std::vector<float> tile(static_cast<size_t>(kTile) * kTile);
+							for (int yy = 0; yy < kTile; ++yy)
+								for (int xx = 0; xx < kTile; ++xx)
+									tile[static_cast<size_t>(yy) * kTile + xx] = y[static_cast<size_t>(Y0 + yy) * W + X0 + xx] / static_cast<float>(codeMax);
+							SourceResolution::Spectrum spectrum;
+							SourceResolution::Analyse(tile.data(), kTile, kTile, spectrum, codeMax);
+							spectra.push_back(std::move(spectrum));
+						}
+					SourceResolution::Thresholds t;
+					t.codeMaximum = codeMax;
+					const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, t);
+					Tally& tally = tallies[key];
+					++tally.frames;
+					const bool native = r.ratio >= 1.0, height = std::fabs(r.ratio - truth) <= 0.01;
+					if (truth >= 1.0)
+					{
+						if (native) ++tally.native;
+						else { ++tally.wrong; ++nativeLower; }
+					}
+					else if (height) ++tally.height;
+					else if (native) ++tally.native;
+					else { ++tally.wrong; ++wrongHeight; }
+					if (!native && !height && failures.size() < 1500)
+					{
+						char what[160];
+						snprintf(what, sizeof(what), "%s f%d reads %.3f (v %.3f@%.3f h %.3f@%.3f); ", f[0].c_str(), frame, r.ratio,
+							r.vertical.coherence, r.vertical.ratio, r.horizontal.coherence, r.horizontal.ratio);
+						failures += what;
+					}
+				}
+				fclose(in);
+			}
+			fclose(manifest);
+			for (const auto& entry : tallies)
+			{
+				char row[200];
+				snprintf(row, sizeof(row), "%-34s frames %3d: height %3d, native %3d, wrong %d\n", entry.first.c_str(), entry.second.frames,
+					entry.second.height, entry.second.native, entry.second.wrong);
+				Logger::WriteMessage(row);
+			}
+			char summary[160];
+			snprintf(summary, sizeof(summary), "Real codecs: %d cases; native frames read lower %d; upscales read a wrong height %d\n", cases, nativeLower, wrongHeight);
+			Logger::WriteMessage(summary);
+			if (!failures.empty()) Logger::WriteMessage(("Wrong: " + failures + "\n").c_str());
+			Assert::AreEqual(0, nativeLower, L"no native frame reads lower (the invariant)");
+			Assert::AreEqual(0, wrongHeight, L"an upscale reads its height or native, never a wrong height");
+		}
+
 		// The tracker: lower only with sustained evidence, native at once.
 		TEST_METHOD(TrackerNeedsShotsAndTimeBeforeALowerReading)
 		{
