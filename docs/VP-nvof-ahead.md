@@ -160,3 +160,21 @@ The 8-bit limit belongs to NVIDIA's packaged FRUC library, not to the engine's r
 - **Product.** A full-frame "smooth motion (optical flow)" mode, beside the de-judder's taste-controlled warp. It is exclusive with the other engines by profile rules ([[vp-motion-engine-exclusive]]).
 - **The NVIDIA library** stays optional: an SDR-only reference for comparison on the corpus.
 - **Builds on** the engine-ahead work (vectors waiting in the store, the matcher as fallback). The new parts are the bidirectional full-frame warp and the hole filling.
+
+## Measured: the motion corpus (2026-10-16, laptop RTX 3050 Ti, 36 synthetic scenes with exact motion)
+
+| Mode | Judder removed (benefit) | Trusted-vector error (half px) | Worst wrongly trusted | Cut |
+|---|---|---|---|---|
+| Matcher (block searches), deployed | 1471.6 | 0.13 | 1.9% | held |
+| Engine instead of the searches (medium / slow) | 1291.5 / 1399.4 | 0.44 / 0.39 | 100% (the cut) | **warped** (before the reach limit) |
+| Matcher + engine as a refinement candidate | 1474.7 | 0.14 | 2.8% (fence alias) | held |
+| **Engine seed + matcher refinement (medium / slow)** | **1468.7 / 1471.5** | 0.26 / 0.24 | 3.6% (fence alias) | held |
+
+**Findings:**
+1. **A precedence bug.** The experimental replace path ran the backward search even when the engine was used. Fixed.
+2. **Engine alone is unsafe at cuts.** With the reach limit, the cut scene still reads 100% wrongly trusted in replace mode. It is never the default.
+3. **The reach limit.** The engine matched a far, similar texture across a cut. Vectors beyond the searches' own reach (coarse range × 16 + 8 half-size px) are now no candidate.
+4. **The seed mode equals the matcher (99.8–100%)** while skipping the searches (the saving; timing to follow), with the matcher's refinement, half-pixel step and trust tests unchanged.
+5. **The fence scene's wrong trust is a one-period alias**, the same picture. It was already known for the matcher.
+
+**Next:** measure the timing (live matcher vs seed vs candidate), then choose the default (seed if it saves time). Then the producer ahead and the store.
