@@ -1584,6 +1584,38 @@ void testShaderAddonsList()
     require(addons->isHidden(), "a shader without VP add-ons shows the list");
 }
 
+void testExclusiveButtonsForLedSourceAndMotionSource()
+{
+    // Owner 2026-10-16: the LED command source and the motion source as mutually exclusive buttons,
+    // bound to their keys (the drop-downs kept as hidden value holders).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n[led_drive.Default]\nenabled: true\ncommand_source: internal_script\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* script = window.findChild<QRadioButton*>(QStringLiteral("config.led_drive.default.command_source.internal_script"));
+    auto* compensate = window.findChild<QRadioButton*>(QStringLiteral("config.led_drive.default.command_source.compensate"));
+    require(script && compensate, "the LED source buttons exist");
+    require(script->isChecked() && !compensate->isChecked(), "the LED source buttons do not show the saved source");
+    compensate->click();
+    QCoreApplication::processEvents();
+    require(!script->isChecked() && requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() == "compensate",
+        "the LED source buttons are not exclusive or not bound");
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* engine = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.engine");
+    auto* matcher = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.matcher");
+    auto* flow = requireControl<QComboBox>(window, "config.vprenderer.optical_flow");
+    require(engine->isChecked() && !matcher->isChecked(), "the engine (default) is not shown selected");
+    matcher->click();
+    QCoreApplication::processEvents();
+    require(flow->currentData().toString() == "off" && !engine->isChecked(), "VP's matcher only did not set optical_flow off");
+    require(!requireControl<QComboBox>(window, "config.vprenderer.optical_flow_global")->isEnabled(), "the engine's options are not greyed with the matcher only");
+    engine->click();
+    QCoreApplication::processEvents();
+    require(flow->currentData().toString() == "on", "the engine button did not set optical_flow on");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8482,6 +8514,7 @@ int main(int argc, char** argv)
     failures += run("picture slider presets", testPictureSliderPresets);
     failures += run("scaling slider presets", testScalingSliderPresets);
     failures += run("shader add-ons list", testShaderAddonsList);
+    failures += run("exclusive buttons: LED source and motion source", testExclusiveButtonsForLedSourceAndMotionSource);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);

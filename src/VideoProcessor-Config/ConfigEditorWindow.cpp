@@ -7136,14 +7136,22 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "A player that upscales 1080p video draws its own subtitles at 4K: sharp text over a soft picture. On "
             "(default): a detection patch whose sharp detail is a band of text is left out of that frame's reading, so "
             "subtitles neither block the detection nor switch an active re-base off. Off: every patch counts."));
-        auto* opticalFlowGlobal = addChoice(QStringLiteral("Optical flow: camera motion from the engine"), QStringLiteral("optical_flow_global"),
+        // Owner 2026-10-16: the engine's options on the motion (de-judder) section, not here.
+        QFormLayout* fixesForm = form;
+        form = dejudderTasteForm;
+        {
+            auto* heading = new QLabel(QStringLiteral("<b>Motion source</b>"));
+            heading->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_source_heading")));
+            form->addRow(heading);
+        }
+        auto* opticalFlowGlobal = addChoice(QStringLiteral("Camera motion from the engine"), QStringLiteral("optical_flow_global"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlowGlobal->setToolTip(QStringLiteral(
             "On (default): with the NVIDIA optical-flow engine, the whole picture's motion (the camera's pan or tilt) is "
-            "read from the engine's vectors, computed ahead off the render thread, instead of a separate search. It reads "
-            "the pan speed exactly where the search overshot medium pans, so 'Keep fast motion's strobing' and the smoothing "
-            "of people follow the true speed; the motion vectors themselves are unchanged. Without the engine the search "
-            "runs as before. Off: always the search."));
+            "read from the engine's vectors, computed ahead off the render thread, instead of a separate search (about "
+            "0.4 ms less). The motion vectors are unchanged, and 'Keep fast motion's strobing' and the smoothing of people "
+            "read the motion field's own speed either way. Without the engine the search runs as before. Off: always "
+            "the search."));
         auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlow->setToolTip(QStringLiteral(
@@ -7157,6 +7165,55 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "NVIDIA GPUs: the optical-flow engine computes motion this many source frames ahead of the picture, on its "
             "own hardware, for the de-judder and the detail work. Off (0) or on other GPUs the matcher runs as today. "
             "Low latency always switches it off, and it never uses more frames than the queue holds: the Reliable queue (target 5) holds 4 ahead, a shallower queue gives fewer (the log says how many). Empty = 4."));
+        {
+            // The engine as mutually exclusive buttons (owner 2026-10-16); the drop-down holds the value.
+            auto* sourceButtons = new QWidget;
+            sourceButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("optical_flow.buttons")));
+            auto* sourceLayout = new QHBoxLayout(sourceButtons);
+            sourceLayout->setContentsMargins(0, 0, 0, 0);
+            auto* engineButton = new QRadioButton(QStringLiteral("NVIDIA optical-flow engine (falls back to VP's matcher)"));
+            engineButton->setObjectName(controlName(sectionPrefix, QStringLiteral("optical_flow.engine")));
+            engineButton->setToolTip(QStringLiteral(
+                "The default. NVIDIA RTX 20 / GTX 16 or newer with driver 528+: the engine computes the motion vectors ahead "
+                "of the picture on its own hardware; VP's matcher refines and checks them. Other GPUs or no engine: VP's "
+                "matcher alone, automatically."));
+            auto* matcherButton = new QRadioButton(QStringLiteral("VP's matcher only"));
+            matcherButton->setObjectName(controlName(sectionPrefix, QStringLiteral("optical_flow.matcher")));
+            matcherButton->setToolTip(QStringLiteral("VP's own block searches always (as on other GPUs)."));
+            auto* group = new QButtonGroup(sourceButtons);
+            group->setExclusive(true);
+            group->addButton(engineButton);
+            group->addButton(matcherButton);
+            sourceLayout->addWidget(engineButton);
+            sourceLayout->addWidget(matcherButton);
+            sourceLayout->addStretch(1);
+            form->addRow(QStringLiteral("Motion vectors from"), sourceButtons);
+            form->setRowVisible(opticalFlow, false);
+            auto sync = [opticalFlow, engineButton, matcherButton, opticalFlowGlobal, motionAhead]() {
+                const QSignalBlocker a(engineButton), b(matcherButton);
+                const bool off = opticalFlow->currentData().toString() == QStringLiteral("off");
+                matcherButton->setChecked(off);
+                engineButton->setChecked(!off);
+                // The engine's own options do nothing with the matcher only.
+                for (QWidget* w : { static_cast<QWidget*>(opticalFlowGlobal), static_cast<QWidget*>(motionAhead) })
+                {
+                    w->setProperty("greyedOff", off);
+                    w->setEnabled(!off);
+                }
+            };
+            auto choose = [opticalFlow](const QString& value) {
+                const int index = opticalFlow->findData(value);
+                if (index >= 0 && opticalFlow->currentIndex() != index) opticalFlow->setCurrentIndex(index);
+            };
+            connect(opticalFlow, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
+            connect(engineButton, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("on")); });
+            connect(matcherButton, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("off")); });
+            auto* refresh = new QAction(sourceButtons);
+            refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("optical_flow_refresh")));
+            connect(refresh, &QAction::triggered, this, [sync]() { sync(); });
+            sync();
+        }
+        form = fixesForm;
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -8924,6 +8981,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("optical_flow_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();
@@ -11050,6 +11110,42 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             configuredSource = sources[0];
         source->setCurrentIndex(std::max(0, static_cast<int>(sources.indexOf(configuredSource))));
         driveForm->addRow(QStringLiteral("Command source"), source);
+        {
+            // Owner 2026-10-16: the source as mutually exclusive buttons; the drop-down stays as the
+            // value holder (hidden), so writing and older files behave as before.
+            auto* sourceButtons = new QWidget;
+            sourceButtons->setObjectName(controlName(led, QStringLiteral("command_source.buttons")));
+            auto* sourceLayout = new QHBoxLayout(sourceButtons);
+            sourceLayout->setContentsMargins(0, 0, 0, 0);
+            auto* sourceGroup = new QButtonGroup(sourceButtons);
+            sourceGroup->setExclusive(true);
+            const QStringList labels = { QStringLiteral("VP's copy of your script"), QStringLiteral("Compensate"),
+                QStringLiteral("No LED commands") };
+            QList<QRadioButton*> radios;
+            for (int i = 0; i < sources.size(); ++i)
+            {
+                auto* radio = new QRadioButton(labels[i]);
+                radio->setObjectName(controlName(led, QStringLiteral("command_source.") + sources[i]));
+                sourceGroup->addButton(radio, i);
+                sourceLayout->addWidget(radio);
+                radios.push_back(radio);
+                connect(radio, &QRadioButton::toggled, this, [source, i](bool on) {
+                    if (on && source->currentIndex() != i) source->setCurrentIndex(i);
+                });
+            }
+            sourceLayout->addStretch(1);
+            auto syncRadios = [source, radios]() {
+                for (int i = 0; i < radios.size(); ++i)
+                {
+                    const QSignalBlocker blocker(radios[i]);
+                    radios[i]->setChecked(source->currentIndex() == i);
+                }
+            };
+            connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncRadios](int) { syncRadios(); });
+            syncRadios();
+            driveForm->addRow(QStringLiteral("Command source"), sourceButtons);
+            driveForm->setRowVisible(source, false);
+        }
         driveForm->addRow(QString(), helpLabel(QStringLiteral(
             "Where the LED and contrast commands come from. VP holds the RS-232 port, sends them and logs them. "
             "VP's copy of your dimming script makes the script's decisions, in its rhythm. No LED "
