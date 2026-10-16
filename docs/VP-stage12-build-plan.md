@@ -191,9 +191,7 @@ Then step C (VP debander with PQ thresholds, the vector refinements
   (2c / S8-1 / S8-2).
 - 2c / S8-1 residual stabilisation built (`cnn_residual_stabilise`,
   `ssim_residual_stabilise`, on = with the vectors): residual flicker 0.81 ->
-  0.22 codes, still picture unchanged, untrusted / off byte-identical. A
-  dedicated CNN-branch flicker test (needs a CNN shader in the test) is still
-  to add; the branch shares the code.
+  0.22 codes, still picture unchanged, untrusted / off byte-identical.
 - Fixed: the settings fingerprint lacked `source_range`, `capture_upload`
   and the Stage 12 keys, so a profile edit of only those was not applied live.
 - 2c / S8-2 built: at a low bitrate quality the SSIM and CNN weights fall
@@ -204,8 +202,10 @@ Then step C (VP debander with PQ thresholds, the vector refinements
   early capture upload through the renderer added. `native` byte-identity
   stays by construction (factor 1: the frame is never touched; the harness
   checks no re-base runs) - no pixel-capture comparison yet.
-- Next: a CNN-branch flicker test (needs a CNN shader in the test), a live
-  profile-edit test of the fingerprint fix.
+- CNN-branch test added: CNN residual flicker 0.42 -> 0.12 codes, untrusted
+  and off byte-identical.
+- Open: a live profile-edit test of the fingerprint fix (needs a mid-run
+  configuration change in the harness).
 
 ## Costs (to measure, laptop then 3090)
 

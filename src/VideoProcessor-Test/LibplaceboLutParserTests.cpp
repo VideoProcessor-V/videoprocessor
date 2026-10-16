@@ -10186,6 +10186,141 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.75f, AdaptiveDownscale::BitrateAntiring(0.5f, 0.4, 0.4), 1e-6f, L"floor: halfway to 1");
 		}
 
+		TEST_METHOD(CnnResidualHeldAlongTrustedVectors)
+		{
+			// Stage 12 §2c (owner 2026-10-15): the CNN upscaler's added detail held
+			// along the de-judder's trusted vectors. A stand-in CNN (nearest 2x
+			// doubler) on a texture whose fine detail changes every frame: the
+			// residual (output minus the faithful branch) flickers less when held;
+			// off and an untrusted field are today's output exactly.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 128, height = 64, ow = width * 3 / 2, oh = height * 3 / 2;
+			static const char doubler[] =
+				"//!HOOK LUMA\n"
+				"//!BIND HOOKED\n"
+				"//!WIDTH HOOKED.w 2 *\n"
+				"//!HEIGHT HOOKED.h 2 *\n"
+				"//!WHEN OUTPUT.h HOOKED.h / 1.300 >\n"
+				"//!DESC test nearest luma doubler\n"
+				"vec4 hook() { return HOOKED_tex((floor(HOOKED_pos * HOOKED_size) + 0.5) / HOOKED_size); }\n";
+			const pl_hook* cnn = pl_mpv_user_shader_parse(gpu, doubler, sizeof(doubler) - 1);
+			Assert::IsNotNull(cnn);
+			pl_fmt rgba16 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(rgba16);
+			auto makeField = [&](float trust) {
+				std::vector<float> f(static_cast<size_t>((width + 15) / 16) * ((height + 15) / 16) * 4);
+				for (size_t i = 0; i < f.size(); i += 4) { f[i] = 0.0f; f[i + 1] = 0.0f; f[i + 2] = trust; f[i + 3] = 0.0f; }
+				pl_tex_params p{};
+				p.w = (width + 15) / 16; p.h = (height + 15) / 16; p.format = pl_find_named_fmt(gpu, "rgba32f"); p.sampleable = true; p.initial_data = f.data();
+				return pl_tex_create(gpu, &p);
+			};
+			const float trustValue[4] = { 1.0f, 1.0f, 0.0f, 1.0f };
+			pl_tex_params tp1{};
+			tp1.w = 1; tp1.h = 1; tp1.format = pl_find_named_fmt(gpu, "rgba32f"); tp1.sampleable = true; tp1.initial_data = trustValue;
+			pl_tex frameTrust = pl_tex_create(gpu, &tp1);
+			pl_tex trusted = makeField(1.0f), untrusted = makeField(0.0f);
+			Assert::IsTrue(frameTrust && trusted && untrusted);
+			// Frame f: the texture plus fine detail that changes every frame.
+			auto frameOf = [&](int f) {
+				return MakeDejudderFrame(width, height,
+					[f](int x, int y) { return static_cast<uint16_t>((DejudderTexture(x, y) * 7 + DejudderTexture(x, y, 1000u + static_cast<unsigned>(f))) / 8); },
+					[](int, int, int) { return static_cast<uint16_t>(32768); });
+			};
+			auto render = [&](const DejudderFrame& frame, std::vector<const pl_hook*> hooks) {
+				DejudderGpuPlanes planes;
+				UploadDejudderFrame(gpu, frame, planes);
+				pl_tex_params tp{};
+				tp.w = ow; tp.h = oh; tp.format = rgba16; tp.renderable = true; tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planes.planes.luma; image.planes[0].components = 1; image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planes.planes.chroma; image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB; image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709; image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709; image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = TargetLutGpuFixture::MakeRgbFrame(target);
+				t.repr.levels = PL_COLOR_LEVELS_FULL; t.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr; params.error_diffusion = nullptr; params.sigmoid_params = nullptr;
+				params.disable_linear_scaling = true; params.upscaler = &pl_filter_ewa_lanczossharp; params.antiringing_strength = 0.5f;
+				params.hooks = hooks.empty() ? nullptr : hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &params));
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> px(static_cast<size_t>(ow) * oh * 4);
+				pl_tex_transfer_params d{}; d.tex = target; d.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+			const int frames = 10;
+			std::vector<std::vector<uint16_t>> faithful;
+			for (int f = 0; f < frames; ++f) faithful.push_back(render(frameOf(f), {}));
+			auto run = [&](bool stabilise, pl_tex field) {
+				AdaptiveDownscale::Module module;
+				AdaptiveDownscale::Settings st;
+				st.grainMap = false;
+				st.grainLo = 1000.0f; st.grainHi = 2000.0f;   // no grain: w = w_base
+				st.grainSmoothMs = 0.0f;
+				st.cnnResidualStabilise = stabilise;
+				std::vector<std::vector<uint16_t>> out;
+				for (int f = 0; f < frames; ++f)
+				{
+					module.SetFrame(st, static_cast<uint64_t>(500 + f), 1.0f / 24.0f);
+					AdaptiveDownscale::Upscale up;
+					up.on = true; up.wBase = 1.0f; up.nativeHeight = static_cast<float>(height);
+					module.SetUpscale(up);
+					module.ClearMotion();
+					if (field)
+					{
+						AdaptiveDownscale::Motion m;
+						m.field = field; m.frameTrust = frameTrust; m.minTrustedShare = 0.25f;
+						m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+						module.SetMotion(m);
+					}
+					out.push_back(render(frameOf(f), { module.Measure(), cnn, module.Blend() }));
+				}
+				const unsigned long long held = module.StabilisedFrames();
+				module.Release();
+				return std::make_pair(out, held);
+			};
+			auto flickerOf = [&](const std::vector<std::vector<uint16_t>>& o) {
+				double sum = 0; size_t n = 0;
+				for (int f = 3; f < frames; ++f)
+					for (size_t i = 0; i < o[f].size(); i += 4)
+					{
+						const double now = double(o[f][i]) - double(faithful[f][i]), before = double(o[f - 1][i]) - double(faithful[f - 1][i]);
+						sum += std::fabs(now - before);
+						++n;
+					}
+				return sum / n / 257.0;
+			};
+			auto maxDiff = [](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+				int m = 0;
+				for (size_t i = 0; i < a.size(); ++i) if (i % 4 != 3) m = (std::max)(m, std::abs(int(a[i]) - int(b[i])));
+				return m;
+			};
+			const auto today = run(false, nullptr);
+			const auto held = run(true, trusted);
+			const auto untrustedRun = run(true, untrusted);
+			const auto offWithField = run(false, trusted);
+			char line[200];
+			snprintf(line, sizeof(line), "CNN residual flicker %.3f (today) -> %.3f (held, %llu frames); untrusted %.3f\n",
+				flickerOf(today.first), flickerOf(held.first), held.second, flickerOf(untrustedRun.first));
+			Logger::WriteMessage(line);
+			Assert::IsTrue(held.second >= 8, L"held on the consecutive frames");
+			Assert::IsTrue(flickerOf(held.first) < 0.7 * flickerOf(today.first), L"the CNN residual flickers less when held");
+			Assert::AreEqual(0, maxDiff(untrustedRun.first.back(), today.first.back()), L"untrusted: today's output exactly");
+			Assert::AreEqual(0, maxDiff(offWithField.first.back(), today.first.back()), L"off: today's output exactly");
+			pl_tex_destroy(gpu, &frameTrust); pl_tex_destroy(gpu, &trusted); pl_tex_destroy(gpu, &untrusted);
+			pl_mpv_user_shader_destroy(&cnn);
+		}
+
 		TEST_METHOD(SsimResidualHeldAlongTrustedVectors)
 		{
 			// Delta 15 S8-1 / Stage 12 §2c (owner 2026-10-15): the SSIM downscaler's
