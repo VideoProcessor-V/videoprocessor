@@ -2036,6 +2036,20 @@ void RunBetaPassTiming()
 		liveSettings.landingCheck = 1.5f;
 		Dejudder::MotionWarp live(gpu.Log(), g, liveSettings);
 		const double liveMs = DrainedMs(g, 10, [&] { { const bool ok_ = live.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + live.LastError()); } slot ^= 1; });
+		// docs/VP-nvof-ahead.md: the live configuration with the optical-flow engine as a
+		// refinement candidate, and as the seed in place of the searches (wall clock, GPU
+		// drained; the engine is separate hardware but its result is waited for here).
+		for (int mode = 0; mode < 2; ++mode)
+		{
+			Dejudder::Settings ofSettings = liveSettings;
+			ofSettings.opticalFlow = true;
+			ofSettings.opticalFlowCandidate = true;
+			ofSettings.opticalFlowSeed = mode == 1;
+			Dejudder::MotionWarp of(gpu.Log(), g, ofSettings);
+			const double ofMs = DrainedMs(g, 10, [&] { { const bool ok_ = of.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + of.LastError()); } slot ^= 1; });
+			std::cout << "  de-judder live matcher + optical flow " << (mode == 1 ? "seed" : "candidate") << " " << ofMs << " ms (engine "
+				<< (of.OpticalFlowUsed() ? "used" : ("not used: " + of.OpticalFlowError()).c_str()) << "; live matcher " << liveMs << " ms)\n";
+		}
 		live.SetPassTiming(true);
 		for (int i = 0; i < reps; ++i)
 		{
@@ -3296,7 +3310,7 @@ namespace Corpus
 		bool fade = false, split = true, verify = false; float verifyShare = 0.2f;
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
-		bool opticalFlow = false; int ofPreset = 1; bool ofCandidate = false;   // docs/VP-nvof-ahead.md: the engine as the motion source
+		bool opticalFlow = false; int ofPreset = 1; bool ofCandidate = false, ofSeed = false;   // docs/VP-nvof-ahead.md: the engine as the motion source
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
 		float rollHi = 24.0f, rollFloor = 0.25f;
 		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
@@ -3335,6 +3349,12 @@ namespace Corpus
 			add("matcher + optical flow candidate, medium", true, 1, false, true);
 			add("matcher + optical flow candidate, fast", true, 2, false, true);
 			add("matcher + optical flow candidate, slow", true, 0, false, true);
+			{
+				add("optical flow seed + matcher refinement, medium", true, 1, false, true);
+				variants.back().ofSeed = true;
+				add("optical flow seed + matcher refinement, slow", true, 0, false, true);
+				variants.back().ofSeed = true;
+			}
 			add("matcher, D2/D4/R-A", false, 1, true, false);
 			add("matcher + OF candidate medium, D2/D4/R-A", true, 1, true, true);
 			return variants;
@@ -3726,6 +3746,7 @@ namespace Corpus
 		s.opticalFlow = v.opticalFlow;
 		s.opticalFlowPreset = v.ofPreset;
 		s.opticalFlowCandidate = v.ofCandidate;
+		s.opticalFlowSeed = v.ofSeed;
 		s.pixelTrustLo = v.pixLo;
 		s.pixelTrustHi = v.pixHi;
 		s.pixelTrustLoUntrusted = v.pixLoU;

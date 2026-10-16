@@ -3476,18 +3476,20 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
 				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
 			const bool replaced = opticalFlowUsed && !candidateMode;
+			// Seed: the engine's vectors stand in for the first sweep (no searches).
+			const bool seeded = opticalFlowUsed && candidateMode && settings.opticalFlowSeed;
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
 			const bool twoSweeps = settings.estCandidates && !replaced;
-			if (!replaced &&
+			if (!replaced && !seeded &&
 				(!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward,
 					two ? globalSecond[0] : nullptr) ||
 				 !Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward,
 					two ? globalSecond[1] : nullptr)))
 				return false;
-			const bool ofCandidates = opticalFlowUsed && candidateMode;
+			const bool ofCandidates = opticalFlowUsed && candidateMode && !seeded;
 			if (twoSweeps &&
-				(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward, ofCandidates ? ofSearch[0] : nullptr) ||
-				 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward, ofCandidates ? ofSearch[1] : nullptr)))
+				(!Refine(halfA, halfB, seeded ? ofSearch[0] : sweep[0], previousSearch[0], globalVector[0], forward, ofCandidates ? ofSearch[0] : nullptr) ||
+				 !Refine(halfB, halfA, seeded ? ofSearch[1] : sweep[1], previousSearch[1], globalVector[1], backward, ofCandidates ? ofSearch[1] : nullptr)))
 				return false;
 			if (settings.estCandidates || settings.estGate)
 			{
