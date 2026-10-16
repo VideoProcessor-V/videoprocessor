@@ -5148,7 +5148,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     static constexpr QueuePolicy queuePolicies[] = {
         { "low_latency", "Low latency", "Keeps at most two VP queue frames; targets one frame.", 2, 0, 1 },
         { "balanced", "Balanced", "Uses a moderate queue for ordinary playback.", 16, 3, 2 },
-        { "reliable", "Reliable", "Uses a larger queue for the most resilient playback.", 32, 4, 3 },
+        { "reliable", "Reliable", "Uses a larger queue for the most resilient playback; holds 4 frames ahead for the motion vectors.", 32, 4, 5 },
     };
     auto state = std::make_shared<State>();
     auto fields = std::make_shared<std::vector<Field>>();
@@ -6944,7 +6944,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         motionAhead->setToolTip(QStringLiteral(
             "NVIDIA GPUs: the optical-flow engine computes motion this many source frames ahead of the picture, on its "
             "own hardware, for the de-judder and the detail work. Off (0) or on other GPUs the matcher runs as today. "
-            "Low latency always switches it off, and it never uses more frames than the queue holds. Empty = 4."));
+            "Low latency always switches it off, and it never uses more frames than the queue holds: the Reliable queue (target 5) holds 4 ahead, a shallower queue gives fewer (the log says how many). Empty = 4."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
