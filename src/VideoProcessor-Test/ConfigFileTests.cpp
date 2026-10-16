@@ -473,6 +473,20 @@ namespace VideoProcessorTest
             Assert::AreEqual(125.125, QueueLatency::EffectiveLatencyMs(3, film), 1e-9);
 
             using QueueLatency::ResolveTargetFrames;
+            // Owner 2026-10-16: a time target holds at least the motion look-ahead minimum
+            // (5 queued); an explicit frame count and low latency (minimum 0) are not raised.
+            {
+                const auto shortTime = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 80, false, 0, 0, 3, film), 5);
+                Assert::IsTrue(shortTime.raisedToMinimum);
+                Assert::AreEqual<size_t>(5, shortTime.frames);
+                Assert::AreEqual(QueueLatency::EffectiveLatencyMs(5, film), shortTime.effectiveMs, 1e-9);
+                const auto longTime = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 400, false, 0, 0, 3, film), 5);
+                Assert::IsFalse(longTime.raisedToMinimum, L"a long time target is kept");
+                const auto frames = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(false, 0, true, 2, 0, 3, film), 5);
+                Assert::AreEqual<size_t>(2, frames.frames, L"an explicit frame count is the operator's choice");
+                const auto lowLatency = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 20, false, 0, 0, 3, film), 0);
+                Assert::IsFalse(lowLatency.raisedToMinimum, L"low latency is exempt");
+            }
             // Own time target wins over own frames and the default's values.
             auto decision = ResolveTargetFrames(true, 200, true, 2, 120, 3, film);
             Assert::IsTrue(decision.fromLatency);

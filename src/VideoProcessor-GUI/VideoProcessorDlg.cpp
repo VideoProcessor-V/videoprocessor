@@ -7,6 +7,7 @@
  */
 
 #include <pch.h>
+#include <MotionAhead.h>
 #include "BackendInputConfig.h"
 #include <ApplicationShutdownPolicy.h>
 #include <AnalysisDiagnosticTrace.h>
@@ -13005,6 +13006,11 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 			snapshot->queue.hasTargetFrames, snapshot->queue.targetFrames,
 			m_profileBaseTargetLatencyMs, m_profileBaseTargetFrames,
 			SnapshotSourceRateHz(*snapshot));
+		// A time target holds at least the motion look-ahead (4 ahead = 5 queued),
+		// except in a low-latency queue profile.
+		m_queueTargetDecision = QueueLatency::ApplyFrameMinimum(m_queueTargetDecision,
+			ConfigFile::NormalizeName(snapshot->queue.profile) == "low_latency" ? 0 :
+			MotionAhead::QueueFramesFor(MotionAhead::kDefaultDepth));
 		const size_t desiredTargetFrames = m_queueTargetDecision.frames;
 		const size_t desiredStartupPreroll =
 			snapshot->queue.hasStartupPrerollFrames ?
@@ -13057,9 +13063,10 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 		if (queuePolicyChanged && m_queueTargetDecision.fromLatency)
 			DebugLog::Log(
 				"Queue target from time: target_latency_ms=%d source_rate=%.3f "
-				"target_frames=%zu effective_delay_ms=%.1f",
+				"target_frames=%zu effective_delay_ms=%.1f%s",
 				m_queueTargetDecision.latencyMs, m_queueTargetDecision.rateHz,
-				m_queueTargetDecision.frames, m_queueTargetDecision.effectiveMs);
+				m_queueTargetDecision.frames, m_queueTargetDecision.effectiveMs,
+				m_queueTargetDecision.raisedToMinimum ? " (raised to the motion look-ahead minimum)" : "");
 	}
 
 	CString activeState;

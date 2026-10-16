@@ -41,6 +41,7 @@ namespace QueueLatency
 		int latencyMs = 0;          // the configured time target when derived
 		double rateHz = 0.0;        // the source rate it was derived for
 		double effectiveMs = 0.0;   // frames as time (0 when the rate is unknown)
+		bool raisedToMinimum = false;   // a time target below the frame minimum was raised to it
 	};
 
 	// Precedence, most specific first:
@@ -83,6 +84,22 @@ namespace QueueLatency
 			decision.frames = latency > 0 && ownHasFrames ? ownFrames : frames;
 		}
 		decision.effectiveMs = EffectiveLatencyMs(decision.frames, rateHz);
+		return decision;
+	}
+
+	// Owner 2026-10-16 ("make sure the queue by set time aligns at a minimum"): a
+	// queue set by time never holds fewer frames than `minimumFrames` - the motion
+	// vectors' look-ahead (docs/VP-nvof-ahead.md: 4 ahead = 5 queued). Low latency
+	// is exempt (the caller passes 0), and an explicit target_frames is the
+	// operator's choice: only time-derived targets are raised.
+	inline TargetDecision ApplyFrameMinimum(TargetDecision decision, size_t minimumFrames)
+	{
+		if (decision.fromLatency && minimumFrames > 0 && decision.frames < minimumFrames)
+		{
+			decision.frames = minimumFrames;
+			decision.raisedToMinimum = true;
+			decision.effectiveMs = EffectiveLatencyMs(decision.frames, decision.rateHz);
+		}
 		return decision;
 	}
 }
