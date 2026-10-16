@@ -2437,8 +2437,10 @@ namespace
 		if (config.TryGetString(rule.section, "motion_ahead_frames", raw))
 		{
 			double parsed = 0.0;
+			// Owner 2026-10-16: on or off - the look-ahead works only with 4 frames ahead, so any
+			// value above 0 (older files may say 1-3) is 4.
 			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= MotionAhead::kMaxDepth && parsed == static_cast<int>(parsed))
-				settings.motionAheadFrames = static_cast<int>(parsed);
+				settings.motionAheadFrames = parsed > 0.0 ? MotionAhead::kDefaultDepth : 0;
 			else
 				DebugLog::Log("profile '%s': invalid motion_ahead_frames '%s'; keeping %d",
 					rule.section.c_str(), raw.c_str(), settings.motionAheadFrames);
@@ -5187,6 +5189,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionAheadLogged;
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
+	ULONGLONG motionLastQueuedTick = 0;   // the last time frames were queued ahead (the producer's 2 s hold)
 	// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md).
 	std::atomic<bool> motionEngineReady{ false };
 	// The producer computing the pairs ahead (render thread starts / stops it; the
@@ -18165,7 +18168,14 @@ struct LibplaceboVideoRenderer::Impl
 			// The producer runs while the de-judder does, with optical flow on, outside low
 			// latency and with a depth set; it stops otherwise (the matcher covers all).
 			const bool lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-			const bool wantProducer = dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
+			// Owner 2026-10-16: the producer follows the queue - it runs while frames are queued
+			// ahead and stops after 2 s with none (no pairs it could use; no restart flicker).
+			const size_t queuedAhead = queuedFutureFrames.load(std::memory_order_acquire);
+			const ULONGLONG nowTick = GetTickCount64();
+			if (queuedAhead > 0) motionLastQueuedTick = nowTick;
+			const bool queueHoldsFrames = queuedAhead > 0 || (motionLastQueuedTick != 0 && nowTick - motionLastQueuedTick < 2000);
+			const bool wantProducer = dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency &&
+				queueHoldsFrames;
 			if (wantProducer && !motionProducer && !motionProducerFailedLogged && d3d11 && d3d11->gpu)
 			{
 				pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
@@ -18199,8 +18209,7 @@ struct LibplaceboVideoRenderer::Impl
 			const MotionAhead::Decision ahead = MotionAhead::Decide(activeSettings.motionAheadFrames,
 				lowLatency, motionProducer && motionProducer->Running(),
 				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow);
-			motionAheadDepth.store(motionProducer && motionProducer->Running() ? (std::max)(1, activeSettings.motionAheadFrames) : 0,
-				std::memory_order_release);
+			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
 			char text[200];
 			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
 				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));

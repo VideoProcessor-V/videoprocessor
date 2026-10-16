@@ -7158,13 +7158,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "On (default): on NVIDIA GPUs the optical-flow hardware computes the motion vectors, ahead of the picture. "
             "Off: VP's own matcher only (as on other GPUs). Either way the same trust checks apply, and the matcher "
             "takes over whenever the engine has no vectors."));
-        auto* motionAhead = addText(QStringLiteral("Motion vectors ahead, frames (0-4)"), QStringLiteral("motion_ahead_frames"));
-        motionAhead->setValidator(new QIntValidator(0, 4, motionAhead));
-        motionAhead->setPlaceholderText(QStringLiteral("4"));
+        auto* motionAhead = addChoice(QStringLiteral("Motion vectors computed ahead"), QStringLiteral("motion_ahead_frames"),
+            { QStringLiteral("4"), QStringLiteral("0") });
+        motionAhead->setItemText(motionAhead->findData(QStringLiteral("4")), QStringLiteral("On (4 frames ahead; the queue holds at least 5)"));
+        motionAhead->setItemText(motionAhead->findData(QStringLiteral("0")), QStringLiteral("Off"));
         motionAhead->setToolTip(QStringLiteral(
-            "NVIDIA GPUs: the optical-flow engine computes motion this many source frames ahead of the picture, on its "
-            "own hardware, for the de-judder and the detail work. Off (0) or on other GPUs the matcher runs as today. "
-            "Low latency always switches it off, and it never uses more frames than the queue holds: the Reliable queue (target 5) holds 4 ahead, a shallower queue gives fewer (the log says how many). Empty = 4."));
+            "NVIDIA GPUs: the optical-flow engine computes the motion 4 source frames ahead of the picture on its own "
+            "hardware, off the render path. It needs those 4 frames queued, so On makes the queue hold at least 5 frames "
+            "(whether it is set by time or in frames) while the de-judder runs. With no frames queued ahead the producer "
+            "stops after 2 s and the de-judder estimates at render time or holds. The low-latency queue switches it off. "
+            "Off, or other GPUs: VP's matcher at render time."));
         {
             // The engine as mutually exclusive buttons (owner 2026-10-16); the drop-down holds the value.
             auto* sourceButtons = new QWidget;

@@ -28,6 +28,10 @@ namespace UnifiedProfileRuntime
 		RendererProfileConfig::ResolvedViewport viewport;
 		RendererProfileConfig::ResolvedQueue queue;
 		RendererProfileConfig::ResolvedLldv lldv;
+		// Owner 2026-10-16: the optical-flow look-ahead needs 4 frames queued ahead - the frames
+		// the queue must hold (5) when the selected renderer / input profiles have it on (optical
+		// flow on, vectors ahead on, a de-judder strength set); 0 when off.
+		size_t lookAheadQueueFrames = 0;
 		StateVariables::Snapshot variables;
 
 		bool LookupVariable(const std::string& name, std::string& value) const

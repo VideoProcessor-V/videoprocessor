@@ -93,6 +93,30 @@ namespace VideoProcessorTest
             Assert::AreEqual(std::string("50"), padding);
         }
 
+        TEST_METHOD(LookAheadQueueFramesFollowTheSelectedProfiles)
+        {
+            // Owner 2026-10-16: the optical-flow look-ahead is on or off, and on needs 4 frames queued
+            // ahead - the snapshot says 5 when the selected profiles have it on (optical flow on,
+            // vectors ahead on, a de-judder strength), 0 otherwise.
+            auto framesFor = [](const char* text) {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n" << text;
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsTrue(runtime.Initialize(config, {}, error), std::wstring(error.begin(), error.end()).c_str());
+                const auto snapshot = runtime.GetSnapshot();
+                Assert::IsTrue(snapshot != nullptr);
+                return snapshot->lookAheadQueueFrames;
+            };
+            Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ndejudder_strength: 0.25\n"), L"de-judder on, defaults: 4 ahead");
+            Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\ndejudder_strength: 0.25\nmotion_ahead_frames: 0\n"), L"look-ahead off");
+            Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\ndejudder_strength: 0.25\noptical_flow: off\n"), L"optical flow off");
+            Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\nquality: high\n"), L"no de-judder: no look-ahead");
+            Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ndejudder_strength_even: 0.5\n"), L"even-cadence strength alone");
+        }
+
         TEST_METHOD(EdgeBlankingSurvivesAcceptedConfiguration)
         {
             CachedConfigTestFile file;
@@ -484,6 +508,10 @@ namespace VideoProcessorTest
                 Assert::IsFalse(longTime.raisedToMinimum, L"a long time target is kept");
                 const auto frames = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(false, 0, true, 2, 0, 3, film), 5);
                 Assert::AreEqual<size_t>(2, frames.frames, L"an explicit frame count is the operator's choice");
+                // Owner 2026-10-16 (later): with the look-ahead on, an explicit frame count is raised too.
+                const auto framesAhead = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(false, 0, true, 2, 0, 3, film), 5, true);
+                Assert::AreEqual<size_t>(5, framesAhead.frames, L"the look-ahead on: 4 ahead even with target_frames 2");
+                Assert::IsTrue(framesAhead.raisedToMinimum);
                 const auto lowLatency = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 20, false, 0, 0, 3, film), 0);
                 Assert::IsFalse(lowLatency.raisedToMinimum, L"low latency is exempt");
             }

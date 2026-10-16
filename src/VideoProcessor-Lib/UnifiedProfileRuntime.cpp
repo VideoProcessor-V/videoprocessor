@@ -1179,6 +1179,29 @@ namespace UnifiedProfileRuntime
 				m_model, selectedLldv->second.front(), lldv, error))
 			return false;
 
+		// The optical-flow look-ahead (owner 2026-10-16): on or off; on needs 4 frames ahead.
+		size_t lookAheadQueueFrames = 0;
+		{
+			auto setting = [&](const char* key, const std::string& fallback) {
+				std::string value = fallback;
+				for (const char* group : { "display", "input" })   // the input profile's value wins
+				{
+					const auto selected = effective.find(group);
+					if (selected == effective.end() || selected->second.empty()) continue;
+					const auto profile = m_model.profiles.find(std::string(group) + "." + selected->second.front());
+					if (profile == m_model.profiles.end()) continue;
+					const auto found = profile->second.settings.find(key);
+					if (found != profile->second.settings.end()) value = found->second;
+				}
+				return ConfigFile::NormalizeName(value);
+			};
+			const bool flow = setting("optical_flow", "on") != "off";
+			const bool ahead = std::atof(setting("motion_ahead_frames", "4").c_str()) > 0.0;
+			const bool dejudder = std::atof(setting("dejudder_strength", "0").c_str()) > 0.0 ||
+				std::atof(setting("dejudder_strength_even", "0").c_str()) > 0.0;
+			if (flow && ahead && dejudder)
+				lookAheadQueueFrames = 5;   // MotionAhead::QueueFramesFor(4): 4 ahead + the frame shown
+		}
 		std::map<std::string, StateVariables::Value> variables;
 		PublishSourceVariables(values, variables);
 		variables["viewport_profile"] =
@@ -1286,6 +1309,7 @@ namespace UnifiedProfileRuntime
 		next->viewport = viewport;
 		next->queue = queue;
 		next->lldv = lldv;
+		next->lookAheadQueueFrames = lookAheadQueueFrames;
 		next->variables = StateVariables::Snapshot(
 			generation, variables);
 		snapshot = next;

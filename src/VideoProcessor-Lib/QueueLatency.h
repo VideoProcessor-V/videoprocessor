@@ -92,9 +92,11 @@ namespace QueueLatency
 	// vectors' look-ahead (docs/VP-nvof-ahead.md: 4 ahead = 5 queued). Low latency
 	// is exempt (the caller passes 0), and an explicit target_frames is the
 	// operator's choice: only time-derived targets are raised.
-	inline TargetDecision ApplyFrameMinimum(TargetDecision decision, size_t minimumFrames)
+	// Owner 2026-10-16 (later): the look-ahead is on or off, and on needs 4 frames ahead - so with
+	// `explicitToo` an explicit target_frames is raised as well.
+	inline TargetDecision ApplyFrameMinimum(TargetDecision decision, size_t minimumFrames, bool explicitToo = false)
 	{
-		if (decision.fromLatency && minimumFrames > 0 && decision.frames < minimumFrames)
+		if ((decision.fromLatency || explicitToo) && minimumFrames > 0 && decision.frames < minimumFrames)
 		{
 			decision.frames = minimumFrames;
 			decision.raisedToMinimum = true;

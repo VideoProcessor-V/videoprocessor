@@ -13006,11 +13006,11 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 			snapshot->queue.hasTargetFrames, snapshot->queue.targetFrames,
 			m_profileBaseTargetLatencyMs, m_profileBaseTargetFrames,
 			SnapshotSourceRateHz(*snapshot));
-		// A time target holds at least the motion look-ahead (4 ahead = 5 queued),
-		// except in a low-latency queue profile.
+		// Owner 2026-10-16: the optical-flow look-ahead is on or off; on, the queue holds at least
+		// 4 frames ahead (5), whether its target is set by time or in frames. Off, or the low-latency
+		// queue profile: no minimum.
 		m_queueTargetDecision = QueueLatency::ApplyFrameMinimum(m_queueTargetDecision,
-			ConfigFile::NormalizeName(snapshot->queue.profile) == "low_latency" ? 0 :
-			MotionAhead::QueueFramesFor(MotionAhead::kDefaultDepth));
+			ConfigFile::NormalizeName(snapshot->queue.profile) == "low_latency" ? 0 : snapshot->lookAheadQueueFrames, true);
 		const size_t desiredTargetFrames = m_queueTargetDecision.frames;
 		const size_t desiredStartupPreroll =
 			snapshot->queue.hasStartupPrerollFrames ?
