@@ -5184,6 +5184,9 @@ struct LibplaceboVideoRenderer::Impl
 	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
 	// loop's count), and the last logged optical-flow depth decision.
 	std::atomic<size_t> queuedFutureFrames{ 0 };
+	// How many frames were queued ahead each time a frame was taken (0..8, 9 = more): the
+	// look-ahead's 4-ahead minimum checked against the real queue (owner 2026-10-16: 5 or 6).
+	std::array<std::atomic<unsigned long long>, 10> queuedAheadCounts{};
 	// source_resolution auto is selected (the render loop then shows the monitor the frames ahead).
 	std::atomic<bool> sourceAutoActive{ false };
 	bool sourceAheadLogged = false;   // render loop thread
@@ -12970,8 +12973,15 @@ struct LibplaceboVideoRenderer::Impl
 					DebugLog::Log("De-judder motion: %s", source);
 			}
 		}
-		if (motionProducer && ((dejudderEstimates + 1) == 24 || (dejudderEstimates + 1) % 2400 == 0))
+		if (motionProducer && ((dejudderEstimates + 1) == 24 || (dejudderEstimates + 1) % 120 == 0))
 		{
+			std::string counts;
+			for (size_t n = 0; n < queuedAheadCounts.size(); ++n)
+			{
+				const unsigned long long c = queuedAheadCounts[n].load(std::memory_order_relaxed);
+				if (c) counts += (counts.empty() ? "" : " ") + std::to_string(n) + (n == 9 ? "+" : "") + ":" + std::to_string(c);
+			}
+			DebugLog::Log("Motion ahead: frames queued ahead when taken (count:frames) %s", counts.c_str());
 			const auto ps = motionProducer->GetStats();
 			const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
 			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
@@ -24112,7 +24122,11 @@ void LibplaceboVideoRenderer::RenderLoop()
             activePictureContinuityGeneration =
                 m_activePictureTimeline.ContinuityGeneration();
             activePictureAvailableLookahead = window.availableFutureFrames;
-            if (m_impl) m_impl->queuedFutureFrames.store(window.availableFutureFrames, std::memory_order_release);
+            if (m_impl)
+            {
+                m_impl->queuedFutureFrames.store(window.availableFutureFrames, std::memory_order_release);
+                m_impl->queuedAheadCounts[(std::min)(window.availableFutureFrames, size_t{ 9 })].fetch_add(1, std::memory_order_relaxed);
+            }
             for (const size_t index : window.indices)
             {
                 activePicturePreviewFrames.push_back(m_frameQueue[index]);
@@ -24192,18 +24206,21 @@ void LibplaceboVideoRenderer::RenderLoop()
 				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
 				// no work (no pair could be used before its frames are shown).
 				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
-				const bool wasEngaged = m_impl->motionAheadEngaged;
+				// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
+				// in the same pass would skip the refill wait: the reset test, 2026-10-16).
 				if (m_impl->motionAheadEngaged &&
 					(queuedAhead == 0 || generation != m_impl->motionAheadEngagedGeneration))
+				{
 					m_impl->motionAheadEngaged = false;
-				if (!m_impl->motionAheadEngaged && queuedAhead >= static_cast<size_t>(MotionAhead::kDefaultDepth))
+					DebugLog::Log("Motion ahead: waiting for 4 frames queued ahead (%s)",
+						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
+				}
+				else if (!m_impl->motionAheadEngaged && queuedAhead >= static_cast<size_t>(MotionAhead::kDefaultDepth))
 				{
 					m_impl->motionAheadEngaged = true;
 					m_impl->motionAheadEngagedGeneration = generation;
+					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead)", queuedAhead);
 				}
-				if (wasEngaged != m_impl->motionAheadEngaged)
-					DebugLog::Log("Motion ahead: %s (%zu frames queued ahead)", m_impl->motionAheadEngaged ?
-						"engaged" : "waiting for 4 frames queued ahead", queuedAhead);
 				const bool framesAhead = m_impl->motionAheadEngaged;
 				for (QueuedFrame& ahead : motionAheadFrames)
 				{

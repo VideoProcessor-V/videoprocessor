@@ -10,6 +10,8 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
+#include <ConfigFile.h>
+#include <UnifiedProfileRuntime.h>
 
 #include <algorithm>
 #include <chrono>
@@ -192,6 +194,10 @@ namespace
 	int g_harnessWidth = 1920, g_harnessHeight = 1080;
 	// The window (the output) off the screen: 640 x 360 unless a test sets it.
 	int g_harnessWindowWidth = 640, g_harnessWindowHeight = 360;
+	// The queue target (0: 4 for film, 3 otherwise) and, as the app does, the profile snapshot
+	// applied before Build (the queue profile reaches the renderer that way).
+	size_t g_harnessQueueTarget = 0;
+	bool g_harnessApplySnapshot = false;
 	// Shader profile sections the run selects after Build (e.g. "standard.sigma_delta";
 	// their [shader.*] sections go in the configuration's extra text).
 	std::vector<std::string> g_harnessShaderProfiles;
@@ -286,6 +292,21 @@ namespace
 			state->colorspace = ColorSpace::REC_709;
 			state->eotf = EOTF::SDR;
 			renderer->OnVideoState(state);
+			if (g_harnessApplySnapshot)
+			{
+				ConfigFile profileConfig;
+				std::string error;
+				UnifiedProfileRuntime::Runtime runtime;
+				if (profileConfig.Load(configPath) && runtime.Initialize(profileConfig, {}, error))
+				{
+					const auto snapshot = runtime.GetSnapshot();
+					CString activeState;
+					bool restart = false, live = false;
+					if (snapshot) renderer->ApplyApplicationState(*snapshot, activeState, restart, live);
+				}
+				else
+					CaptureLog(("harness: the profile snapshot failed: " + error).c_str());
+			}
 			renderer->Build();
 			// As the app does: the monitor's refresh rate (smooth motion needs it;
 			// it does not come from the window's frame statistics).
@@ -304,7 +325,7 @@ namespace
 				if (restart)
 					renderer->Build();
 			}
-			renderer->SetQueueFramePolicy(2, film ? 4 : 3, true);
+			renderer->SetQueueFramePolicy(2, g_harnessQueueTarget ? g_harnessQueueTarget : (film ? 4 : 3), true);
 			renderer->Start();
 			// A ring of frames that outlives anything the queue holds.
 			const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
@@ -1299,6 +1320,72 @@ namespace Tests
 			Assert::IsTrue(logged(removed, "Temporal dither: libplacebo"), (L"libplacebo logged\n" + removed.Tail()).c_str());
 			Assert::IsFalse(logged(removed, "custom hook"), (L"libplacebo: the listed sigma-delta left out\n" + removed.Tail()).c_str());
 			Assert::IsTrue(logged(listed, "custom hook"), (L"auto: the listed sigma-delta loads as before\n" + listed.Tail()).c_str());
+		}
+
+		TEST_METHOD(MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue)
+		{
+			// Owner 2026-10-16: the look-ahead engages once 4 frames are queued ahead; the queue
+			// target that guarantees it (5 or 6) is measured here, then a reset disengages it and
+			// it re-engages at 4. NVIDIA (VP_TEST_ADAPTER=NVIDIA).
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			auto lines = [](const RunResult& r, const char* text) {
+				std::string out;
+				for (const std::string& line : r.log)
+					if (line.find(text) != std::string::npos) out += "  " + line + "\n";
+				return out;
+			};
+			bool engine = true;
+			for (const size_t target : { size_t{ 5 }, size_t{ 6 } })
+			{
+				g_harnessQueueTarget = target;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, true, "dejudder_strength: 0.25\n");
+				g_harnessQueueTarget = 0;
+				const std::string source = lines(r, "De-judder motion:");
+				if (source.find("optical-flow engine") == std::string::npos) { engine = false; Logger::WriteMessage(("no engine: " + source).c_str()); break; }
+				Logger::WriteMessage(("queue target " + std::to_string(target) + ":\n" + lines(r, "Motion ahead:")).c_str());
+				Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"target " + std::to_wstring(target) + L": the look-ahead engaged\n" + r.Tail()).c_str());
+			}
+			if (!engine) return;
+			// A reset (resync) mid-run: disengaged, then engaged again at 4.
+			FramePlan plan;
+			plan.rateNumerator = 24000;
+			plan.resetAtSeconds = 3.0;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			g_harnessQueueTarget = 5;
+			const RunResult reset = Run(VideoFrameEncoding::V210, "gpu", 7.0, true, "dejudder_strength: 0.25\n", false, &plan);
+			g_harnessQueueTarget = 0;
+			Logger::WriteMessage(("reset at 3 s:\n" + lines(reset, "Motion ahead: engaged") + lines(reset, "waiting for 4")).c_str());
+			int engaged = 0;
+			for (const std::string& line : reset.log) engaged += line.find("Motion ahead: engaged") != std::string::npos ? 1 : 0;
+			Assert::IsTrue(engaged >= 2 && reset.Logged("waiting for 4"), (L"a reset disengages and it re-engages at 4\n" + reset.Tail()).c_str());
+		}
+
+		TEST_METHOD(LowLatencyQueueFromTheFirstFrame)
+		{
+			// The bug found 2026-10-16: the low-latency flag was lost on a Build. With the queue profile
+			// applied before Build (as the app does), the renderer starts in the low-latency path: the
+			// de-judder off and the producer never started.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			g_harnessApplySnapshot = true;
+			const RunResult low = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
+				"dejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
+			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
+				"dejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
+			g_harnessApplySnapshot = false;
+			for (const std::string& line : low.log)
+				if (line.find("De-judder:") != std::string::npos || line.find("Motion ahead") != std::string::npos)
+					Logger::WriteMessage(("  low: " + line + "\n").c_str());
+			Assert::IsTrue(low.Logged("low-latency queue"), (L"the de-judder off for the low-latency queue\n" + low.Tail()).c_str());
+			Assert::IsFalse(low.Logged("Motion ahead: engaged"), (L"no look-ahead in low latency\n" + low.Tail()).c_str());
+			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is not low latency\n" + normal.Tail()).c_str());
 		}
 
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
