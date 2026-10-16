@@ -295,6 +295,7 @@
     <ClCompile Include="LedDriveMeasurementTests.cpp" />
     <ClCompile Include="LedDriveCompensateTests.cpp" />
     <ClCompile Include="LedScriptCorrelationTests.cpp" />
+    <ClCompile Include="CrashStateTests.cpp" />
     <ClCompile Include="RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="NvOpticalFlowTests.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp">

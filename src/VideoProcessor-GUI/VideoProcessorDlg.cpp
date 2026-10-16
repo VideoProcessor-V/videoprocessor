@@ -37,6 +37,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <sstream>
 #include <thread>
 #include <led/ConnectionTest.h>
+#include <CrashState.h>
 #include <AmbientConfig.h>
 #include <led/LedDriveConfig.h>
 #include <led/SerialPort.h>
@@ -16842,6 +16843,29 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 				m_processCpuUsage.AveragePercent(),
 				static_cast<unsigned long>(m_processCpuUsage.Processors()));
 		}
+	}
+	// Crash state (owner 2026-10-15): the key facts of this moment, kept in
+	// the rolling state file whether or not the overlay is shown.
+	{
+		CrashState::Recorder& crashState = CrashState::Global();
+		if (m_captureDeviceVideoState && m_captureDeviceVideoState->displayMode)
+		{
+			const auto& mode = *m_captureDeviceVideoState->displayMode;
+			char source[256];
+			snprintf(source, sizeof(source), "%ux%u%s %.3f Hz, %s, %s, %s", mode.FrameWidth(), mode.FrameHeight(),
+				mode.IsInterlaced() ? "i" : "p", mode.RefreshRateHz(),
+				CStringA(ToString(m_captureDeviceVideoState->videoFrameEncoding)).GetString(),
+				CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString(),
+				CStringA(ToString(m_captureDeviceVideoState->colorspace)).GetString());
+			crashState.SetValue("source", source);
+		}
+		else
+			crashState.SetValue("source", "no signal");
+		char display[64];
+		snprintf(display, sizeof(display), "%.3f Hz", activeTargetRefreshRate);
+		crashState.SetValue("display refresh", display);
+		crashState.SetValue("renderer", !m_videoRenderer ? "none" :
+			(m_activeRendererIsDirectShow ? "DirectShow" : "VP Renderer"));
 	}
 	// Preserve the requested visibility through renderer handoff. The next
 	// refresh submits to the native API once ready; never create a desktop OSD.

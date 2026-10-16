@@ -18,6 +18,8 @@
 #include <Windows.h>
 #include <string>
 #include <queue>
+#include <deque>
+#include <vector>
 #include <thread>
 #include <condition_variable>
 #include <atomic>
@@ -65,6 +67,23 @@ public:
 			// Queue for background writing (non-blocking)
 			QueueMessage(buffer);
 		}
+	}
+
+	/**
+	 * The most recent messages (newest last), each with its local time, no
+	 * older than maxAgeMs: the crash state's "recent log" (CrashState.h).
+	 */
+	static std::vector<std::string> RecentLines(unsigned long long maxAgeMs = 5000, size_t maxLines = 300)
+	{
+		std::vector<std::string> lines;
+		const unsigned long long now = GetTickCount64();
+		std::lock_guard<std::mutex> lock(GetRecentMutex());
+		for (const RecentLine& line : GetRecentLines())
+			if (now - line.tick <= maxAgeMs)
+				lines.push_back(line.text);
+		if (lines.size() > maxLines)
+			lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maxLines));
+		return lines;
 	}
 
 	/**
@@ -215,6 +234,9 @@ private:
 
 	static void QueueMessage(const std::string& message)
 	{
+		// The crash state's recent lines are kept even with file logging off
+		// (owner 2026-10-15: a crash report is most useful exactly then).
+		RememberRecent(message);
 		if (!GetLoggingEnabled().load(std::memory_order_acquire))
 			return;
 
@@ -230,6 +252,37 @@ private:
 			GetMessageQueue().emplace(message);
 		}
 		GetConditionVariable().notify_one();
+	}
+
+	struct RecentLine
+	{
+		unsigned long long tick = 0;
+		std::string text;
+	};
+
+	static std::mutex& GetRecentMutex()
+	{
+		static std::mutex mutex;
+		return mutex;
+	}
+
+	static std::deque<RecentLine>& GetRecentLines()
+	{
+		static std::deque<RecentLine> lines;
+		return lines;
+	}
+
+	static void RememberRecent(const std::string& message)
+	{
+		SYSTEMTIME t{};
+		GetLocalTime(&t);
+		char stamp[32];
+		snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+		std::lock_guard<std::mutex> lock(GetRecentMutex());
+		auto& lines = GetRecentLines();
+		lines.push_back({ GetTickCount64(), stamp + message });
+		while (lines.size() > 600)
+			lines.pop_front();
 	}
 
 	static void WriterThreadProc()

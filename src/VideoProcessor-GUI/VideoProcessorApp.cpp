@@ -7,6 +7,7 @@
  */
 
 #include <pch.h>
+#include <CrashState.h>
 #include <UpdateLauncher.h>
 #include <ApplicationShutdownPolicy.h>
 
@@ -1437,6 +1438,26 @@ BOOL CVideoProcessorApp::InitInstance()
 		}
 	}
 
+	// Crash state (owner 2026-10-15): a run that ended without a clean exit
+	// left logs\crash-state.txt; keep it as "crash state (N).txt" (newest 10),
+	// then keep a rolling state of this run until it exits cleanly.
+	bool crashStateClean = false;
+	{
+		char fullLog[MAX_PATH] = {};
+		const std::string logPath = DebugLog::GetLogFilePath();
+		std::string folder = GetFullPathNameA(logPath.c_str(), MAX_PATH, fullLog, nullptr) ? std::string(fullLog) : logPath;
+		folder = folder.substr(0, folder.find_last_of("\\/"));
+		for (const std::string& kept : CrashState::PreserveLeftover(folder))
+			DebugLog::Log("Crash state: the previous run did not exit cleanly; kept %s in %s", kept.c_str(), folder.c_str());
+		CrashState::Recorder& recorder = CrashState::Global();
+		char build[512];
+		snprintf(build, sizeof(build), "%ls (%ls, commit %ls%s)", VERSION_DESCRIBE, VERSION_BRANCH, VERSION_URL,
+			VERSION_DIRTY ? ", dirty" : "");
+		recorder.SetValue("build", build);
+		recorder.Start(folder, [] { return DebugLog::RecentLines(5000, 300); });
+		recorder.InstallCrashHandler();
+	}
+
 	CVideoProcessorDlg dlg;
 	m_pMainWnd = &dlg;
 
@@ -2162,6 +2183,7 @@ BOOL CVideoProcessorApp::InitInstance()
 
 		dlg.DoModal();
 		RestoreDisplayTopology("normal-exit");
+		crashStateClean = true;
 		
 	}
 	catch (std::runtime_error& e)
@@ -2180,6 +2202,10 @@ BOOL CVideoProcessorApp::InitInstance()
 	}
 
 	CoUninitialize();
+
+	// A normal exit deletes the rolling state; a fatal error keeps it for the
+	// next start.
+	CrashState::Global().Stop(crashStateClean);
 
 	// Shutdown async debug logger
 	DEBUGLOG_SHUTDOWN();
