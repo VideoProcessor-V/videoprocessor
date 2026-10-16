@@ -17,8 +17,8 @@ namespace NvOpticalFlow
 	Engine::~Engine()
 	{
 		Close();
-		if (module)
-			FreeLibrary(static_cast<HMODULE>(module));
+		// nvofapi64.dll stays loaded for the process: unloading the driver's library
+		// while its threads may still run is unsafe, and it is loaded once anyway.
 		delete List(functions);
 	}
 

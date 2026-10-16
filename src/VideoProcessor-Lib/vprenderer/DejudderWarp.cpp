@@ -2314,6 +2314,10 @@ if (q.x < size.x && q.y < size.y) {
 
 	MotionWarp::~MotionWarp()
 	{
+		// The optical-flow engine first: it unregisters its D3D11 textures, which must
+		// still exist (as members they would be released before it - a crash at
+		// teardown on NVIDIA GPUs once the engine became the default, 2026-10-16).
+		opticalFlowEngine.reset();
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &halfK, &l1K, &l2K, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
@@ -2322,6 +2326,7 @@ if (q.x < size.x && q.y < size.y) {
 			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &globalBothSad2, &globalBothSad1, &globalBothPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
 			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1] })
 			pl_tex_destroy(gpu, tex);
+		for (int i = 0; i < 2; ++i) { ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release(); }
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
 			pl_timer_destroy(gpu, &entry.second);
@@ -3231,13 +3236,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// Textures of the half size (the engine's grid: 4 x 4).
 		if (w != ofW || h != ofH)
 		{
+			opticalFlowEngine.reset();   // unregisters the textures while they still exist
 			for (int i = 0; i < 2; ++i)
 			{
 				pl_tex_destroy(gpu, &ofInTex[i]);
 				pl_tex_destroy(gpu, &ofFlowTex[i]);
 				ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release();
 			}
-			opticalFlowEngine.reset();
 			auto make = [&](int tw, int th, DXGI_FORMAT format, CComPtr<ID3D11Texture2D>& out) {
 				D3D11_TEXTURE2D_DESC desc{};
 				desc.Width = static_cast<UINT>(tw); desc.Height = static_cast<UINT>(th);

@@ -39,6 +39,21 @@ namespace
 	{
 		std::lock_guard<std::mutex> guard(g_logMutex);
 		g_log.emplace_back(message ? message : "");
+		// Diagnostics: VP_TEST_LOG_FILE also appends every line to a file, flushed
+		// per line, so the last lines survive a crash of the test host.
+		static FILE* file = [] {
+			char* v = nullptr;
+			size_t n = 0;
+			FILE* f = nullptr;
+			if (_dupenv_s(&v, &n, "VP_TEST_LOG_FILE") == 0 && v && v[0]) fopen_s(&f, v, "a");
+			std::free(v);
+			return f;
+		}();
+		if (file)
+		{
+			fprintf(file, "%s\n", message ? message : "");
+			fflush(file);
+		}
 	}
 
 	struct Callback : IRendererCallback
@@ -572,6 +587,35 @@ namespace Tests
 				Assert::IsTrue(r.Logged("(4 new of 5)"), (L"synthetic replay: pulldown locks\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("capture missed"), (L"synthetic replay: the gap is counted\n" + r.Tail()).c_str());
 			}
+		}
+
+		TEST_METHOD(OpticalFlowIsTheDefaultMotionSource)
+		{
+			// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow engine is the
+			// established default motion source; optical_flow: off = the block searches.
+			// Without the engine (not NVIDIA) the default falls back to the searches.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"optical flow default: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			auto source = [](const RunResult& r) {
+				std::string last;
+				for (const std::string& line : r.log)
+					if (line.find("De-judder motion:") != std::string::npos) last = line;
+				return last;
+			};
+			const RunResult on = Run(VideoFrameEncoding::V210, "gpu", 4.0, true, "dejudder_strength: 0.25\n");
+			const RunResult off = Run(VideoFrameEncoding::V210, "gpu", 4.0, true, "dejudder_strength: 0.25\noptical_flow: off\n");
+			Logger::WriteMessage(("default: " + source(on) + "\n").c_str());
+			Logger::WriteMessage(("off: " + source(off) + "\n").c_str());
+			Assert::IsTrue(on.presented && off.presented, L"both runs presented");
+			Assert::IsFalse(source(on).empty(), (L"the default run reports its motion source\n" + on.Tail()).c_str());
+			Assert::IsTrue(source(on).find("optical_flow off") == std::string::npos, L"the default is not off");
+			Assert::IsTrue(source(off).find("block searches (optical_flow off)") != std::string::npos,
+				(L"optical_flow: off runs the searches\n" + off.Tail()).c_str());
+			if (source(on).find("optical-flow engine") == std::string::npos)
+				Logger::WriteMessage("note: no optical-flow engine on this GPU - the default fell back to the searches\n");
 		}
 
 		TEST_METHOD(StreamFaultsKeepTheDejudderSafeAndRecovering)
