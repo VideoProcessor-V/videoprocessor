@@ -10167,6 +10167,15 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
     detailsLayout->addWidget(settingsBox);
     detailsLayout->addWidget(settingsNote);
     detailsLayout->addWidget(settingsReset, 0, Qt::AlignLeft);
+    // Owner 2026-10-16: for the shaders VP adds to, a list of VP's add-ons for the selected shader -
+    // the relative GPU cost (+ small, ++ moderate, +++ large; from earlier measurements), whether the
+    // motion (the de-judder's vectors) must be on, whether it is recommended, and where it is set.
+    auto* addonsLabel = new QLabel;
+    addonsLabel->setObjectName(QStringLiteral("config.shader.standard.addons"));
+    addonsLabel->setWordWrap(true);
+    addonsLabel->setTextFormat(Qt::RichText);
+    addonsLabel->setVisible(false);
+    detailsLayout->addWidget(addonsLabel);
     auto refreshRawParameters = std::make_shared<std::function<void()>>([] {});
     auto reloadSettings = std::make_shared<std::function<void()>>();
     auto shaderFile = [this](const QString& name)
@@ -10182,11 +10191,51 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
         return QString();
     };
     *reloadSettings = [this, state, glsl, settingsTitle, settingsBox, settingsForm, settingsNote,
-        settingsReset, refreshRawParameters, shaderFile]
+        settingsReset, refreshRawParameters, shaderFile, addonsLabel]
     {
         while (settingsForm->rowCount() > 0) settingsForm->removeRow(0);
         const QString name = glsl->text().trimmed();
         const bool available = !state->section.isEmpty();
+        {
+            // VP's add-ons for this shader: name, GPU cost, motion needed, recommended, where.
+            struct Addon { const char* name; const char* cost; const char* motion; const char* recommended; const char* where; };
+            std::vector<Addon> addons;
+            const QString file = name.toLower();
+            if (file.contains(QStringLiteral("ssimdownscaler")))
+                addons = {
+                    { "SSIM / faithful blend", "++", "no", "yes, for grainy film", "VP Renderer: Adaptive downscale (or the Scaling slider)" },
+                    { "Grain-true filter: Auto (polar where able) / 1D", "Auto ++ (about 2.4 ms more), 1D +", "no", "Auto", "Adaptive downscale" },
+                    { "Grain map from motion", "+ with the de-judder on; +++ with it off (runs the matcher, about 5.5 ms at 4K)", "yes", "yes, with the de-judder on", "Adaptive downscale" },
+                    { "Blend chroma too", "+", "no", "no (can fringe colour)", "Adaptive downscale" },
+                    { "Steady SSIM detail", "+", "yes", "yes (default on)", "Fixes under test" },
+                    { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Fixes under test" } };
+            else if (file.contains(QStringLiteral("fsrcnnx")) || file.contains(QStringLiteral("artcnn")))
+                addons = {
+                    { "CNN / faithful blend", "++", "no", "not yet (awaiting the cinema check)", "VP Renderer: Adaptive upscale (or the Scaling slider's Best)" },
+                    { "Steady CNN detail", "+", "yes", "yes (default on)", "Fixes under test" },
+                    { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Fixes under test" } };
+            else if (file.contains(QStringLiteral("ssimsuperres")))
+                addons = {
+                    { "SuperRes strength follows grain (with the CNN / faithful blend on)", "negligible", "no", "yes (default on)", "Adaptive upscale" } };
+            else if (file.contains(QStringLiteral("sigma-delta")) || file.contains(QStringLiteral("sigma_delta")))
+                addons = {
+                    { "Dither carried along the motion", "+", "yes", "yes (default auto)", "VP Renderer: Temporal dither" } };
+            if (available && !addons.empty())
+            {
+                QString html = QStringLiteral("<b>VP add-ons for this shader</b> (GPU cost: + small, ++ moderate, +++ large)"
+                    "<table cellspacing='0' cellpadding='3'><tr><th align='left'>Add-on</th><th align='left'>Cost</th>"
+                    "<th align='left'>Needs motion</th><th align='left'>Recommended</th><th align='left'>Set in</th></tr>");
+                for (const Addon& a : addons)
+                    html += QStringLiteral("<tr><td>%1</td><td>%2</td><td>%3</td><td>%4</td><td>%5</td></tr>")
+                        .arg(QString::fromUtf8(a.name), QString::fromUtf8(a.cost), QString::fromUtf8(a.motion),
+                            QString::fromUtf8(a.recommended), QString::fromUtf8(a.where));
+                html += QStringLiteral("</table>\"Needs motion\": uses the de-judder's vectors (film profiles); without them it does nothing or measures per frame.");
+                addonsLabel->setText(html);
+                addonsLabel->setVisible(true);
+            }
+            else
+                addonsLabel->setVisible(false);
+        }
         settingsTitle->setVisible(available);
         settingsBox->setVisible(false);
         settingsReset->setVisible(false);

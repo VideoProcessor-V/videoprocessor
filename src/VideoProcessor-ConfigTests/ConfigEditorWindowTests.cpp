@@ -1557,6 +1557,33 @@ void testScalingSliderPresets()
         "A reopened Config does not show the saved Fast");
 }
 
+void testShaderAddonsList()
+{
+    // Owner 2026-10-16: selecting a shader VP adds to lists VP's add-ons for it (cost, motion, recommended).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[shader.standard]\ntype: multi\nlabel: Off\n"
+        "[shader.standard.ssim]\nshader_type: custom\nlabel: SSimDownscaler\nstage: post_resize\norder: 20\nglsl_file: SSimDownscaler.glsl\n"
+        "[shader.standard.invert]\nshader_type: custom\nlabel: Invert\nstage: post_resize\norder: 30\nglsl_file: Invert.glsl\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* items = requireControl<QListWidget>(window, "config.shader.standard.items");
+    auto* addons = requireControl<QLabel>(window, "config.shader.standard.addons");
+    auto rowOf = [items](const char* text) {
+        for (int i = 0; i < items->count(); ++i)
+            if (items->item(i)->text().contains(text)) return i;
+        return -1;
+    };
+    require(rowOf("SSimDownscaler") >= 0 && rowOf("Invert") >= 0, "shader items listed");
+    items->setCurrentRow(rowOf("SSimDownscaler"));
+    QCoreApplication::processEvents();
+    require(!addons->isHidden() && addons->text().contains("SSIM / faithful blend") && addons->text().contains("Grain map from motion"),
+        (QByteArray("SSimDownscaler does not list its add-ons: ") + addons->text().left(200).toUtf8()).constData());
+    items->setCurrentRow(rowOf("Invert"));
+    QCoreApplication::processEvents();
+    require(addons->isHidden(), "a shader without VP add-ons shows the list");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8454,6 +8481,7 @@ int main(int argc, char** argv)
     failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);
     failures += run("picture slider presets", testPictureSliderPresets);
     failures += run("scaling slider presets", testScalingSliderPresets);
+    failures += run("shader add-ons list", testShaderAddonsList);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
