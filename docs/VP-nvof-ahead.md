@@ -80,3 +80,13 @@ The vector math is a small compute pass on the second device. It costs a fractio
 - **Acceleration.** Changes in velocity between successive pairs (for pacing and judder analysis).
 
 The SDK also ships NVIDIA's frame-interpolation library (NvOFFRUC, CUDA). Our warp stays our own, because its taste semantics (displacement, the even cadence, the object/camera split) are the owner's. The library is only a possible comparison reference.
+
+## Depth and the queue (owner, 2026-10-16)
+
+"I would by default accumulate the optical flow vectors to 4 frame max depth. Low latency disables. Would ensure baseline queue defaults allow for at least a 4 frame lookahead and adjusts when set lower."
+
+- **Depth.** Up to 4 source frames ahead by default. This is our setting (a slider/box with a range and a reset, per the settings scheme), with a maximum of 4.
+- **Low latency switches it off.** That covers the Low Latency queue profile and anything the de-judder already treats as low latency (`DejudderPolicy::lowLatency`). The matcher path is unchanged.
+- **The baseline queue must hold the depth.** In the shipped Normal profile, `target_frames` today is 3 (`lead_frames` 4, `queue_size` 32), which gives about 3 future frames at most. It will be raised so that 4 future frames are queued in steady state. The exact value will be measured from `availableFutureFrames` on mains, not guessed. This changes the shipped default only: deployed configurations are user data and are not edited.
+- **It adjusts when the queue is set lower.** The depth used is min(4, the future frames actually queued) per frame. `VectorStore::Plan` already takes only what is queued: no waiting, no added latency. A queue set to 1 or 2 simply means fewer pairs ahead, with the matcher covering the rest.
+- **Reporting.** The stats line and the log show the configured depth, the frames actually available, the store's hit rate, and the reason when it is off (low latency, no engine, a shallow queue).
