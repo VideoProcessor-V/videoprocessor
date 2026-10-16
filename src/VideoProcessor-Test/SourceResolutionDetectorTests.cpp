@@ -648,6 +648,7 @@ namespace VideoProcessorTest
 			int clipsRead = 0, failures = 0;
 			std::string failureText;
 			double nativeDetailLowest = 1e9, upscaleDetailHighest = -1e9, detailGap = 1e9;
+			double peakNative = 0.0, peakUpscale = 0.0;
 			for (const Clip& clip : clips)
 			{
 				FILE* f = nullptr;
@@ -742,6 +743,8 @@ namespace VideoProcessorTest
 						char name[160];
 						snprintf(name, sizeof(name), "%.10s f%lld %s [q %.2f bits %.1f blk %.2f band %.3f]", clip.file.c_str(), frameIndex, c.name.c_str(), r.bitrateQuality, r.effectiveBits, r.blockiness, r.bandShare);
 						Log(name, r);
+						if (c.ratio >= 1.0) peakNative = (std::max)(peakNative, r.peakiness);
+						else peakUpscale = (std::max)(peakUpscale, r.peakiness);
 						{
 							// Variable bitrate (owner 2026-10-16): detail above the rate in question.
 							// Per frame: native (clean or light coding) against this frame's 1080 upscales.
@@ -789,6 +792,11 @@ namespace VideoProcessorTest
 			snprintf(detail, sizeof(detail), "Detail above 1080: native lowest %.2f, its 1080 upscales highest %.2f; smallest gap in a frame %.2f (margin %.2f)\n",
 				nativeDetailLowest, upscaleDetailHighest, detailGap, SourceResolution::Tracker::Settings{}.detailMarginDecades);
 			Logger::WriteMessage(detail);
+			{
+				char pk[128];
+				snprintf(pk, sizeof(pk), "Peakiness (largest): native %.1f, upscales %.1f\n", peakNative, peakUpscale);
+				Logger::WriteMessage(pk);
+			}
 			Assert::AreEqual(0, failures, L"real-footage gates (see the log)");
 			if (clipsRead > 0)
 			{
@@ -1164,13 +1172,13 @@ namespace VideoProcessorTest
 			const SourceResolution::Tracker::Settings settings;
 			SourceResolution::Tracker tracker;
 			double t = 0.0;
-			// 30 s of the 4K rendition (shots every 6 s).
-			for (int i = 0; i < 60; ++i, t += 0.5) tracker.Update(frame(1.0, i / 12, i), t);
+			// 33 s of the 4K rendition (shots every 6 s); the switch lands mid-shot, as a real one does.
+			for (int i = 0; i < 66; ++i, t += 0.5) tracker.Update(frame(1.0, i / 12, i), t);
 			Assert::AreEqual(1.0, tracker.Ratio());
 			// The 1080 rendition, the same shots continuing.
 			double declaredAt = -1.0;
 			const double switchedAt = t;
-			for (int i = 60; i < 60 + 2 * static_cast<int>(settings.windowSeconds + 40); ++i, t += 0.5)
+			for (int i = 66; i < 66 + 2 * static_cast<int>(settings.windowSeconds + 40); ++i, t += 0.5)
 			{
 				tracker.Update(frame(0.5, i / 12, i), t);
 				if (declaredAt < 0 && tracker.Ratio() < 1.0) declaredAt = t;
@@ -1179,11 +1187,142 @@ namespace VideoProcessorTest
 			snprintf(line, sizeof(line), "down-switch declared %.1f s after the switch (window %.0f s)\n", declaredAt - switchedAt, settings.windowSeconds);
 			Logger::WriteMessage(line);
 			Assert::AreEqual(0.5, tracker.Ratio(), 0.01, L"the 1080 rendition is declared");
-			Assert::IsTrue(declaredAt - switchedAt <= settings.windowSeconds + settings.minimumSeconds, L"once the native evidence has aged out");
+			// Planner F12: the rendition change is recognised (the same shot's detail above the
+			// lower rate fell), so the lower reading needs only 10 s of evidence.
+			Assert::IsTrue(tracker.RenditionChanges() >= 1, L"a rendition change was recognised");
+			Assert::IsTrue(declaredAt - switchedAt <= 15.0, L"declared within about 15 s of the switch");
 			// Back to 4K: native on its first frame.
 			const int shotNow = static_cast<int>((t / 0.5)) / 12;
 			tracker.Update(frame(1.0, shotNow, 3), t += 0.5);
 			Assert::AreEqual(1.0, tracker.Ratio(), L"the 4K rendition returns native at once");
+		}
+
+		// Planner G1 (2026-10-16): periodic and symmetric content at native 4K - its
+		// harmonics are phase-locked, which is what mirror coherence measures. No pattern
+		// may read lower, on both axes or on one.
+		TEST_METHOD(PeriodicNativeContentReadsNative)
+		{
+			struct Pattern { const char* name; std::function<double(int, int)> f; };
+			const double tau = 2.0 * kPi;
+			std::vector<Pattern> patterns = {
+				{ "zone plate", [&](int x, int y) { const double dx = x - 128.0, dy = y - 128.0; return 0.5 + 0.35 * std::cos(tau * (dx * dx + dy * dy) / 1400.0); } },
+				{ "fence period 10", [](int x, int) { return (x % 10) < 3 ? 0.85 : 0.2; } },
+				{ "fence period 7", [](int x, int) { return (x % 7) < 2 ? 0.8 : 0.25; } },
+				{ "grille 12 x 9", [](int x, int y) { return ((x % 12) < 2 || (y % 9) < 2) ? 0.15 : 0.7; } },
+				{ "bricks 24 x 10", [](int x, int y) { const int row = y / 10; const int xx = (x + (row % 2) * 12) % 24; return (y % 10 == 0 || xx == 0) ? 0.3 : 0.65; } },
+				{ "blinds period 14 (soft)", [&](int, int y) { return 0.45 + 0.3 * std::sin(tau * y / 14.0) + 0.1 * std::sin(tau * 2 * y / 14.0); } },
+				{ "text columns", [](int x, int y) {
+					const int cx = x % 9, cy = y % 16, glyph = ((x / 9) * 7 + (y / 16) * 13) % 5;
+					return (cy < 12 && cx < 6 && ((cx + cy + glyph) % 3 == 0)) ? 0.1 : 0.9; } },
+				{ "fence period 16 + grain", [](int x, int y) { return ((x % 16) < 4 ? 0.8 : 0.3) + 0.02 * std::sin(x * 12.9898 + y * 78.233); } },
+			};
+			int fired = 0;
+			for (const Pattern& pattern : patterns)
+			{
+				std::vector<std::vector<float>> tiles;
+				for (int t = 0; t < 4; ++t)
+				{
+					std::vector<float> tile(static_cast<size_t>(kTile) * kTile);
+					for (int y = 0; y < kTile; ++y)
+						for (int x = 0; x < kTile; ++x)
+							tile[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, pattern.f(x + t * 37, y + t * 23))) * 1023.0) / 1023.0);
+					tiles.push_back(std::move(tile));
+				}
+				const SourceResolution::FrameReading r = ReadTiles(tiles);
+				Log(pattern.name, r);
+				{
+					char pk[96];
+					snprintf(pk, sizeof(pk), "  peakiness %.1f\n", r.peakiness);
+					Logger::WriteMessage(pk);
+				}
+				const bool lower = r.informative() && (r.ratio < 1.0 || r.ratioV < 1.0 || r.ratioH < 1.0);
+				fired += lower ? 1 : 0;
+				if (lower)
+				{
+					char line[160];
+					snprintf(line, sizeof(line), "  FIRED: %s reads %.3f (height %.3f, width %.3f); floors v %.3f h %.3f\n", pattern.name, r.ratio, r.ratioV, r.ratioH, r.vertical.floor, r.horizontal.floor);
+					Logger::WriteMessage(line);
+					std::string curve = "  curve v:";
+					const size_t step = (std::max)(size_t{ 1 }, r.verticalCurve.size() / 32);
+					for (size_t m2 = r.verticalCurve.size() / 8; m2 < r.verticalCurve.size(); m2 += step)
+					{
+						char v[16];
+						snprintf(v, sizeof(v), " %.2f", r.verticalCurve[m2]);
+						curve += v;
+					}
+					Logger::WriteMessage((curve + "\n").c_str());
+				}
+			}
+			Assert::AreEqual(0, fired, L"periodic native content reads native on every axis");
+		}
+
+		// Planner G3: two-step upscales (720 -> 1080 -> 2160, 480 -> 1080 -> 2160) read
+		// the lowest rate, or native - never the intermediate 1080.
+		TEST_METHOD(TwoStepUpscaleReadsTheLowestRateOrNative)
+		{
+			for (const double first : { 720.0 / 1080.0, 480.0 / 1080.0 })
+			{
+				const double lowest = first * 0.5;   // in the 4K frame
+				const SourceResolution::FrameReading r = ReadScene([&](unsigned seed) {
+					// The scene mastered at the lowest rate, upscaled to the 1080 rate, then to 4K
+					// (Catmull-Rom both times): sampled from a scene at `lowest`, through `first`.
+					const Scene scene(seed);
+					const int n1 = kTile / 2 + 16, nLow = static_cast<int>(std::ceil(n1 * first)) + 16;
+					const std::vector<double> low = scene.Sample(static_cast<int>(500 * first), static_cast<int>(350 * first), nLow, nLow);
+					auto resample = [&](const std::vector<double>& src, int ns, double ratio, int nd) {
+						std::vector<double> rows(static_cast<size_t>(ns) * nd), out(static_cast<size_t>(nd) * nd);
+						auto line = [&](const double* in, int stride, double* o, int ostride) {
+							for (int i = 0; i < nd; ++i)
+							{
+								const double u = (i + 0.5) * ratio - 0.5 + 4.0;
+								const int c = static_cast<int>(std::floor(u));
+								double sum = 0, wsum = 0;
+								for (int k = c - 2; k <= c + 3; ++k)
+								{
+									if (k < 0 || k >= ns) continue;
+									const double w = kCatmullRom(u - k);
+									sum += w * in[static_cast<size_t>(k) * stride];
+									wsum += w;
+								}
+								o[static_cast<size_t>(i) * ostride] = wsum != 0 ? sum / wsum : 0;
+							}
+						};
+						for (int y = 0; y < ns; ++y) line(&src[static_cast<size_t>(y) * ns], 1, &rows[static_cast<size_t>(y) * nd], 1);
+						for (int x = 0; x < nd; ++x) line(&rows[x], nd, &out[x], nd);
+						return out;
+					};
+					const std::vector<double> mid = resample(low, nLow, first, n1);
+					const std::vector<double> top = resample(mid, n1, 0.5, kTile);
+					std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+					for (size_t i = 0; i < t.size(); ++i) t[i] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, top[i])) * 1023.0) / 1023.0);
+					return t; });
+				char name[64];
+				snprintf(name, sizeof(name), "two-step via 1080, lowest %.3f", lowest);
+				Log(name, r);
+				const bool ok = r.ratio >= 1.0 || std::fabs(r.ratio - lowest) <= 0.02;
+				Assert::IsTrue(ok, L"the lowest rate or native, never the intermediate");
+			}
+		}
+
+		// Planner G8: a documentary - native 4K interviews and 480p archive every other shot.
+		// Native at once on the interviews; no thrashing (at most one change a minute).
+		TEST_METHOD(AlternatingNativeAndArchiveShotsDoNotThrash)
+		{
+			SourceResolution::Tracker tracker;
+			double t = 0.0, last = 1.0;
+			int changes = 0;
+			for (int shot = 0; shot < 40; ++shot)          // 40 shots of 6 s: four minutes
+				for (int i = 0; i < 24; ++i, t += 0.25)
+				{
+					const bool archive = shot % 2 == 1;
+					tracker.Update(Frame(archive ? 480.0 / 2160.0 : 1.0, 0.2 + 0.1 * (shot % 2) + 0.001 * i), t);
+					if (std::fabs(tracker.Ratio() - last) > 1e-9) { ++changes; last = tracker.Ratio(); }
+					if (!archive) Assert::AreEqual(1.0, tracker.Ratio(), L"native on the interviews");
+				}
+			char line[96];
+			snprintf(line, sizeof(line), "alternating shots: %d changes in %.0f s\n", changes, t);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(changes <= static_cast<int>(t / 60.0), L"at most one change a minute");
 		}
 
 		TEST_METHOD(DescribeIsGeneral)

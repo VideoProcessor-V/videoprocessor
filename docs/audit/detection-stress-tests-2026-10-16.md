@@ -155,3 +155,18 @@ Two second signals were tried on the real-codec corpus. Neither separates the ca
    - No separation. The 4K encoder removes the images above the source Nyquist that carry the signature.
 
 **Conclusion.** It stays native: the safe direction, a known limit. The real Apple TV captures (G19) will show how common it is and what survives in practice. **For the planner:** ideas beyond spectral statistics?
+
+## Planner priority items: results (2026-10-16)
+
+| Item | Result |
+|---|---|
+| **F12** rendition-change event | Built in the tracker. At least 6 consecutive frames read the same lower rate with no cut, and their detail above that rate fell at least 0.3 decades below the same shot's native frames. The older evidence is cleared and 10 s of evidence (time only) declares. D3 (switch mid-shot): declared **9.5 s** after the switch (was 120 s). C2 (soft shots) still passes; synthetic soft shots carry no spectra, so no event. |
+| **G1** periodic content | `PeriodicNativeContentReadsNative`: zone plate, fences (7, 10, 16 + grain), grille 12 × 9, bricks 24 × 10, soft blinds, text columns. All native on both axes and on each axis alone, with three guards:<br>• an axis reads lower only with fewer than 2 strong peaks that are neither harmonics of its rate nor coding-grid positions (the comb of exactly periodic content);<br>• no unrelated candidate outranking its peak by more than 0.1;<br>• a single-axis reading at most 0.8 (periodic (P−1)/P, e.g. 8/9 from text).<br>One-dimensional patterns carry no evidence (the other axis has no texture). Unchanged: real footage 0/42 native read lower, real codecs 0 wrong, all upscale tests. |
+| **G3** two-step upscales | `TwoStepUpscaleReadsTheLowestRateOrNative`: 720 → 1080 → 2160 reads **0.333 (720)**; 480 → 1080 → 2160 reads native (allowed). Never the intermediate 1080. |
+| **G5** scope sources | By design: readings are rates, not heights, measured on tiles inside the active picture (the monitor samples within the crop). An 800-line picture in a 1080 frame upscaled 2× reads 0.5, and the re-base takes the frame back to its 1080 frame. The stats line's "~1080" is the frame-equivalent height. |
+| **G8** alternating native / archive shots | `AlternatingNativeAndArchiveShotsDoNotThrash`: **0 changes in 4 minutes**, native on every interview shot. The native frames in the window keep the lower reading from forming. |
+| **G12** tile capture with de-judder extras | By design: `sourceMonitor.Frame` is called once per new source frame on the native, unwarped, not re-based `renderImage` (the main path). The extras path warps separately and never feeds the monitor. |
+
+**Also built:**
+- **Per-axis re-base:** a one-axis upscale is undone on that axis, the aspect ratio unchanged through the renderer.
+- **Kernel-matched re-base** for 1080p: the player's kernel identified and inverted, +8 to +15 dB on real upscales.

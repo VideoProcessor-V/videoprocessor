@@ -201,6 +201,29 @@ namespace SourceResolution
 		out.flatBlocks = flat;
 	}
 
+	double Peakiness(const Spectrum& spectrum)
+	{
+		const int n = spectrum.n;
+		if (!PowerOfTwo(n) || spectrum.vertical.size() != static_cast<size_t>(n / 2 + 1)) return 0.0;
+		double result = 0.0;
+		for (const std::vector<double>* power : { &spectrum.vertical, &spectrum.horizontal })
+		{
+			std::vector<double> band;
+			double peak = 0.0;
+			for (int k = n / 16; k < n / 2; ++k)
+			{
+				if (BlockHarmonic(k, n)) continue;
+				band.push_back((*power)[static_cast<size_t>(k)]);
+				peak = (std::max)(peak, (*power)[static_cast<size_t>(k)]);
+			}
+			if (band.empty()) continue;
+			std::nth_element(band.begin(), band.begin() + band.size() / 2, band.end());
+			const double median = band[band.size() / 2];
+			result = (std::max)(result, median > 0.0 ? peak / median : 0.0);
+		}
+		return result;
+	}
+
 	bool Informative(const Spectrum& spectrum, const Thresholds& t)
 	{
 		// The lower picture band stands well above the quantisation floor
@@ -307,6 +330,36 @@ namespace SourceResolution
 		}
 		// Runner-up away from the peak (how unique it is).
 		for (int m = from; m <= to; ++m) if (std::abs(m - best) > 3) peak.runnerUp = (std::max)(peak.runnerUp, curve[m]);
+		// Planner G1 (2026-10-16): periodic content (grilles, bricks, text) locks its
+		// harmonics at many unrelated rates - a comb of strong isolated peaks. Count the
+		// strong local maxima that are not harmonics of the chosen rate (k x best) and not
+		// coding-grid positions (j/8, odd j/16, odd j/32).
+		{
+			const double strong = (std::max)(t.coherence, 0.8 * bestValue);
+			auto onGrid = [&](int m) {
+				for (int P : { 8, 16, 32 })
+				{
+					const int step = n / P;
+					if (step < 2) continue;
+					const int j = static_cast<int>(std::lround(static_cast<double>(m) / step));
+					if (std::abs(m - j * step) <= (P == 8 ? 2 : 1)) return true;
+				}
+				return false;
+			};
+			for (int m = from + 1; m < to; ++m)
+			{
+				if (curve[m] < strong || curve[m] < curve[m - 1] || curve[m] < curve[m + 1] || std::abs(m - best) <= 3) continue;
+				bool harmonic = false;
+				for (int k = 2; k <= 6 && !harmonic; ++k) harmonic = std::abs(m - k * best) <= 3;
+				if (!harmonic && !onGrid(m)) ++peak.foreignPeaks;
+			}
+			for (int m = from; m <= to; ++m)
+			{
+				bool harmonic = false;
+				for (int k = 1; k <= 6 && !harmonic; ++k) harmonic = std::abs(m - k * best) <= 3;
+				if (!harmonic) peak.outranked = (std::max)(peak.outranked, curve[m] - bestValue);
+			}
+		}
 		// Sub-bin position (parabola through the peak and its neighbours).
 		double offset = 0.0;
 		if (best > 0 && best < n - 1)
@@ -316,6 +369,11 @@ namespace SourceResolution
 		}
 		peak.coherence = bestValue;
 		peak.ratio = (best + offset) / n;
+		{
+			std::vector<double> body(curve.begin() + from, curve.begin() + to + 1);
+			std::nth_element(body.begin(), body.begin() + body.size() / 2, body.end());
+			peak.floor = body.empty() ? 0.0 : body[body.size() / 2];
+		}
 		return peak;
 	}
 
@@ -377,6 +435,7 @@ namespace SourceResolution
 			const Spectrum& s = tiles[i];
 			sum += s.mean;
 			signature += s.mean * static_cast<double>(i + 1);
+			frame.peakiness = (std::max)(frame.peakiness, Peakiness(s));
 			if (s.n != n || !Informative(s, t) || s.mirrorVertical.size() != vertical.size() || s.mirrorHorizontal.size() != vertical.size()) continue;
 			++frame.informativeTiles;
 			for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] += s.mirrorVertical[m]; horizontal[m] += s.mirrorHorizontal[m]; }
@@ -421,11 +480,14 @@ namespace SourceResolution
 		// Both axes resampled (a uniform upscale), else native: real detail on
 		// either axis must survive. Anamorphic sources take the larger ratio so
 		// nothing either axis holds is lost.
-		if (frame.vertical.coherence >= t.coherence && frame.horizontal.coherence >= t.coherence)
+		// Planner G1: a high curve floor is periodic content, not a resample (either axis).
+		const bool quietV = frame.vertical.floor <= t.maximumFloor && frame.vertical.foreignPeaks < 2 && frame.vertical.outranked <= 0.1;
+		const bool quietH = frame.horizontal.floor <= t.maximumFloor && frame.horizontal.foreignPeaks < 2 && frame.horizontal.outranked <= 0.1;
+		if (frame.vertical.coherence >= t.coherence && frame.horizontal.coherence >= t.coherence && quietV && quietH)
 			frame.ratio = (std::max)(frame.vertical.ratio, frame.horizontal.ratio);
 		// Per axis, at the stricter single-axis coherence.
-		frame.ratioV = frame.vertical.coherence >= t.singleAxisCoherence ? frame.vertical.ratio : 1.0;
-		frame.ratioH = frame.horizontal.coherence >= t.singleAxisCoherence ? frame.horizontal.ratio : 1.0;
+		frame.ratioV = frame.vertical.coherence >= t.singleAxisCoherence && quietV && frame.vertical.ratio <= t.singleAxisMaximumRatio ? frame.vertical.ratio : 1.0;
+		frame.ratioH = frame.horizontal.coherence >= t.singleAxisCoherence && quietH && frame.horizontal.ratio <= t.singleAxisMaximumRatio ? frame.horizontal.ratio : 1.0;
 		return frame;
 	}
 
@@ -482,6 +544,10 @@ namespace SourceResolution
 		// start again (owner: robust disengagement).
 		window.clear();
 		declared = 1.0;
+		haveLastNative = false;
+		streak = 0;
+		streakDetail.clear();
+		renditionMode = false;
 		lastMean = -1.0;
 		lastSignature = 0.0;
 		lastSeconds = -1.0;
@@ -508,7 +574,7 @@ namespace SourceResolution
 		lastSeconds = seconds;
 		if (frame.tiles > 0)
 		{
-			if (haveLast && std::fabs(frame.mean - lastMean) > settings.cutLevel) { ++shot; ++cuts; }
+			if (haveLast && std::fabs(frame.mean - lastMean) > settings.cutLevel) { ++shot; ++cuts; haveLastNative = false; streak = 0; streakDetail.clear(); }
 			lastMean = frame.mean;
 			lastSignature = frame.signature;
 			haveLast = true;
@@ -535,12 +601,62 @@ namespace SourceResolution
 		}
 		// Evidence time counts only between informative, changing frames.
 		const double step = window.empty() ? 0.0 : (std::min)(dt, settings.maximumGapSeconds);
+		// F12: the rendition-change event (see Settings).
+		if (ratio >= 1.0)
+		{
+			lastNative = frame;
+			haveLastNative = !frame.verticalPower.empty();
+			lastNativeShot = shot;
+			streak = 0;
+			streakDetail.clear();
+		}
+		else
+		{
+			if (streak == 0 || std::fabs(ratio - streakRatio) > settings.tolerance || shot != lastNativeShot)
+			{
+				streak = 0;
+				streakDetail.clear();
+				streakRatio = ratio;
+				streakStart = seconds;
+			}
+			++streak;
+			const double d = DetailAbove(frame, ratio);
+			if (!std::isinf(d)) streakDetail.push_back(d);
+			if (streak >= settings.renditionFrames && haveLastNative && shot == lastNativeShot && !renditionMode &&
+				declared >= 1.0 && streakDetail.size() >= static_cast<size_t>(settings.renditionFrames))
+			{
+				std::vector<double> sorted = streakDetail;
+				std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+				const double before = DetailAbove(lastNative, streakRatio);
+				if (!std::isinf(before) && before - sorted[sorted.size() / 2] >= settings.renditionDetailDrop)
+				{
+					// The older (native) evidence belonged to the other rendition.
+					while (!window.empty() && window.front().seconds < streakStart) window.pop_front();
+					evidence = 0.0;
+					for (const Sample& s : window) evidence += s.dt;
+					renditionMode = true;
+					++renditionChanges;
+				}
+			}
+		}
 		window.push_back({ seconds, ratio, shot, step, ratio < 1.0 ? DetailAbove(frame, ratio) : std::numeric_limits<double>::infinity() });
 		evidence += step;
 		// Detail above the declared cutoff: up at once (bias to native).
 		if (ratio > declared + settings.tolerance)
 		{
 			declared = ratio;
+			renditionMode = false;
+			return;
+		}
+		// F12: after a rendition change, time only (a mid-shot switch has no shots).
+		if (renditionMode)
+		{
+			const double candidate = Candidate();
+			if (candidate < declared - settings.tolerance && EvidenceSeconds() >= settings.renditionSeconds)
+			{
+				declared = candidate;
+				renditionMode = false;
+			}
 			return;
 		}
 		// Lower only when the whole window - several shots, a sustained time -

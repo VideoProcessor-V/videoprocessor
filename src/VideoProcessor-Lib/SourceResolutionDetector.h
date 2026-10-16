@@ -63,12 +63,24 @@ namespace SourceResolution
 		// Per-axis readings (owner 2026-10-16: a source upscaled in one direction only):
 		// stricter than the both-axes rule - one axis must be clearly resampled.
 		double singleAxisCoherence = 0.5;
+		// Planner G1 (2026-10-16): periodic content (grilles, bricks, text) - an axis reads
+		// lower only when its curve's floor is at most this (real upscales 0.09-0.17).
+		double maximumFloor = 0.35;
+		// A single axis reads lower only up to this rate: real one-axis cases are 0.5
+		// (vertical) to 0.75 (anamorphic 1440 / 1920); periodic content's (P-1)/P (e.g. 8/9
+		// from text columns) sits above.
+		double singleAxisMaximumRatio = 0.8;
 		double informativeDecades = 1.5;  // lower band above the quantisation floor
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
 
 	// Enough texture on both axes to judge.
 	bool Informative(const Spectrum& spectrum, const Thresholds& thresholds = {});
+	// Planner G1 (2026-10-16): how much of a line spectrum the tile has - the strongest
+	// non-coding bin of the upper band against the band's median, the larger axis.
+	// Exactly periodic content (grilles, text, test patterns) is far above natural or
+	// upscaled pictures.
+	double Peakiness(const Spectrum& spectrum);
 
 	struct MirrorPeak
 	{
@@ -76,6 +88,15 @@ namespace SourceResolution
 		double coherence = 0.0;   // at the peak
 		double runnerUp = 0.0;    // the best candidate away from the peak
 		double grid = 0.0;        // coherence at 7/8: the 8x8 coding signature
+		// The curve's median over the candidates: low (0.1-0.2) beside a resample's peak;
+		// near 1 for exactly periodic content, whose harmonics lock at almost every rate.
+		double floor = 0.0;
+		// Strong peaks that are neither harmonics of the chosen rate nor coding-grid
+		// positions: periodic content (its harmonics lock at many unrelated rates).
+		int foreignPeaks = 0;
+		// How far the strongest non-harmonic candidate stands above the chosen peak (a
+		// resample's own rate is never outranked by an unrelated one; periodic text is).
+		double outranked = 0.0;
 	};
 
 	// The strongest resample rate in one axis's averaged coherence curve.
@@ -98,6 +119,7 @@ namespace SourceResolution
 		// also after a curve such as SDR re-encoded to PQ); 0 = unknown.
 		double bitrateQuality = 1.0, effectiveBits = 0.0;
 		double blockiness = 1.0, bandShare = 0.0;
+		double peakiness = 0.0;   // the largest over the tiles (Peakiness)
 		bool informative() const { return informativeTiles > 0; }
 	};
 
@@ -147,6 +169,15 @@ namespace SourceResolution
 			// moves an upscale's level by under 0.05; sharp 4K stands 0.10 (a bilinear
 			// 3/4) to 0.7 (1080) above.
 			double detailMarginDecades = 0.07;
+			// Planner F12 (2026-10-16): a rendition change - adaptive streaming dropping from
+			// its 4K rendition to a lower one mid-shot. At least `renditionFrames` consecutive
+			// frames read the same lower rate with no cut, and their detail above that rate
+			// fell at least `renditionDetailDrop` decades below the same shot's native frames:
+			// the older evidence is cleared and the lower reading needs only
+			// `renditionSeconds` of evidence (time only - a mid-shot switch has no shots).
+			int renditionFrames = 6;
+			double renditionDetailDrop = 0.3;
+			double renditionSeconds = 10.0;
 		};
 
 		Tracker() = default;
@@ -170,6 +201,7 @@ namespace SourceResolution
 		int Shots() const;                                       // shots in the window
 		double EvidenceSeconds() const;
 		unsigned long long Cuts() const { return cuts; }
+		unsigned long long RenditionChanges() const { return renditionChanges; }
 		// Frames reading none found without detail above the rate in question (no evidence).
 		unsigned long long Starved() const { return starved; }
 		// Height in lines for a native height, rounded to an even number; the
@@ -184,6 +216,16 @@ namespace SourceResolution
 		double lastMean = -1.0, lastSignature = 0.0, lastSeconds = -1.0, evidence = 0.0;
 		bool haveLast = false;
 		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0;
+		// F12: the same shot's last native frame (its spectra), and the run of lower readings.
+		FrameReading lastNative;
+		bool haveLastNative = false;
+		unsigned long long lastNativeShot = 0;
+		int streak = 0;
+		double streakRatio = 1.0;
+		std::vector<double> streakDetail;
+		double streakStart = 0.0;
+		bool renditionMode = false;
+		unsigned long long renditionChanges = 0;
 		std::string lastReason;
 	};
 
