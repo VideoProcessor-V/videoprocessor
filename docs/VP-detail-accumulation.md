@@ -113,3 +113,20 @@ It follows [[vp-vector-refinements-fallback]]:
    - NVIDIA's optical-flow engine (NVOFA) is the natural source. It is separate hardware from the shader cores, so it costs almost no render budget on the 3090. It gives 4×4 vectors plus a per-vector cost usable as trust. The SDK is in C:\dev\Optical_Flow_SDK_5.0.7.
    - It needs frames queued ahead (latency): film playback only, never low-latency 50/60p. Fall back to v1 when no frames are ahead or the hardware is absent.
    - Proposal: v1 first, v2 behind a switch afterwards. Planner's view?
+
+## 7. What the optical-flow corpus means for accumulation (2026-10-16)
+
+The motion corpus measured the engine's raw vectors (docs/VP-nvof-ahead.md):
+- **Precision.** About 0.4 half-size pixels of error on trusted blocks (the matcher: 0.13), roughly 0.8 px at 4K.
+- **Confident wrong matches.** It can confidently match a far, similar texture, as across a cut. The reach limit now rejects vectors beyond the searches' reach.
+
+Owner, 2026-10-16: "are we going to have a problem with detail integration using the optical flow look ahead". The rules for accumulation:
+- **v1 (causal)** uses the de-judder's finished field for (prev, cur): refined and trust-tested. It never uses raw engine vectors.
+- **v2 (look-ahead).** The engine's vectors for (cur, cur+2) are refined before use: the matcher's half-pixel step (and the quarter-pixel step) around them, with no coarse search. This is done at render time; its cost is to be measured. They also pass the same safeguards:
+  - the reach limit;
+  - forward/backward consistency;
+  - the engine's cost;
+  - a reset at cuts and discontinuities.
+- **The clamp is the backstop.** History detail is used only within the current frame's local detail range. A misaligned or wrong vector gives history that disagrees and is not used.
+- **The per-frame weight** follows how well the warped detail predicts the current frame. A slightly misaligned contribution gets little weight instead of softening texture.
+- **Test T1 gains a misalignment case.** Vectors deliberately offset by 0.5 and 1 px must not soften the result below the plain current frame.
