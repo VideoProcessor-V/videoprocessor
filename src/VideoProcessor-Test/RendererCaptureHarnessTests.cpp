@@ -151,6 +151,7 @@ namespace
 		std::string dejudderStatus, presentationStatus;   // the stats lines at the end
 		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
+		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
 		bool Logged(const std::string& text) const
 		{
 			for (const std::string& line : log)
@@ -186,6 +187,7 @@ namespace
 		int rateDenominator = 1001;
 		double paceScale = 1.0;          // < 1: the source clock runs fast (drift)
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
+		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
 		std::function<FrameStep(int)> step;
 	};
 
@@ -288,7 +290,7 @@ namespace
 			const auto period = std::chrono::microseconds(static_cast<int64_t>(
 				1e6 * rateDenominator / rateNumerator * (plan ? plan->paceScale : 1.0)));
 			const double ticksPerUs = static_cast<double>(clock.TimingClockTicksPerSecond()) / 1e6;
-			bool resetDone = false;
+			bool resetDone = false, captureRequested = false;
 			const timingclocktime_t startTicks = clock.TimingClockNow();
 			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
 			{
@@ -300,6 +302,15 @@ namespace
 					renderer->Reset();
 					renderer->OnVideoState(state);
 					resetDone = true;
+				}
+				if (plan && !captureRequested && plan->captureAtSeconds >= 0.0 &&
+					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->captureAtSeconds))
+				{
+					CString captureStatus;
+					const bool accepted = renderer->RequestRenderedOutputCapture(captureStatus);
+					Logger::WriteMessage(("capture request: " + std::string(accepted ? "accepted - " : "refused - ") +
+						CStringA(captureStatus).GetString() + "\n").c_str());
+					captureRequested = true;
 				}
 				if (step.send)
 				{
@@ -322,6 +333,30 @@ namespace
 				MSG msg;
 				while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
 				std::this_thread::sleep_until(start + period * (n + 1));
+			}
+			if (captureRequested)
+			{
+				// The capture's file is written asynchronously: wait for its log line.
+				const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				while (std::chrono::steady_clock::now() < until && result.captureMetadata.empty())
+				{
+					MSG msg;
+					while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+					{
+						std::lock_guard<std::mutex> guard(g_logMutex);
+						for (const std::string& line : g_log)
+						{
+							const size_t at = line.find("Rendered-output capture complete");
+							const size_t m = line.find("metadata=");
+							if (at != std::string::npos && m != std::string::npos)
+							{
+								const size_t end = line.find(" raw_bytes=", m);
+								result.captureMetadata = line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9);
+							}
+						}
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
 			}
 			result.presented = renderer->HasPresentedLiveFrame();
 			CString status;
@@ -771,6 +806,63 @@ namespace Tests
 				Assert::IsTrue(r.sourceStatus.find("not read") == std::string::npos, (L"auto: the source is read\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Re-base: 3840x2160"), (L"auto: not re-based within a short run\n" + r.Tail()).c_str());
 			}
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+		}
+
+		TEST_METHOD(NativeAndNewSettingsOffArePixelIdentical)
+		{
+			// Stage 12 (owner 2026-10-16): the exact output codes (VP-0133's
+			// raw_r10_sha256 of the presented frame) of a still picture with no
+			// Stage 12 keys, with source_resolution native, with auto (a short
+			// run stays native) and with every new setting off are identical; a
+			// 1080 re-base differs (the check can see a change).
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			// Captures into a writable temporary folder (the test runner lives in Program Files).
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-pixel-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			auto hashOf = [&](const char* extra, const wchar_t* name) {
+				// Dithering off in the rendering profile: VP's dither is temporal (its noise changes every
+				// frame, so captures of different frames differ by design). A [vprenderer] / [display]
+				// section would switch the file to the display-level layout and the input profile with the
+				// settings under test would not apply (measured).
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &plan);
+				if (r.captureMetadata.empty())
+					for (const std::string& line : r.log)
+						if (line.find("apture") != std::string::npos && line.find("capture_") == std::string::npos)
+							Logger::WriteMessage(("  " + line + "\n").c_str());
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
+				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				const std::string hash = text.substr(k + 19, 64);
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "\n").c_str());
+				return hash;
+			};
+			const std::string base = hashOf("", L"default");
+			const std::string again = hashOf("", L"default again");
+			Assert::AreEqual(base, hashOf("", L"default third"), L"and a third time");
+			Assert::AreEqual(base, again, L"the capture is deterministic (same settings, same codes)");
+			Assert::AreEqual(base, hashOf("source_resolution: native\n", L"native"), L"native: identical");
+			Assert::AreEqual(base, hashOf("source_resolution: auto\n", L"auto (short run)"), L"auto before it acts: identical");
+			Assert::AreEqual(base, hashOf("deband_vp: off\nlow_bitrate_handling: off\ncnn_residual_stabilise: off\n"
+				"ssim_residual_stabilise: off\nssim_bitrate_aware: off\n", L"new settings off"), L"every new setting off: identical");
+			Assert::AreNotEqual(base, hashOf("source_resolution: 1080\n", L"re-based 1080"), L"a re-base changes the codes (the check sees changes)");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
 		}
