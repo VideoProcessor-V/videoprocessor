@@ -49,6 +49,14 @@ then the responses behind `auto`; `native` is byte-identical to today.
 
 ## Step B — detection 1a/1b, readings only
 
+Owner 2026-10-15: detection must not trigger inaccurately. A false re-base
+softens real 4K (worse than missing an upscaled stream), so the design is
+biased to native: readings only until the owner has watched them; auto acts
+only on high, sustained confidence with hysteresis and cut resets; grain and
+compression noise excluded; any doubt = native. Tests lead with false
+positives (true 4K charts, grainy 4K, borderline sources) before the true
+upscaled 1080/720 cases. Manual classes stay primary; auto is opt-in.
+
 - Effective resolution, per source frame on the native luma: for each
   class h in {1440, 1080, 720}, the residual R_h = Y - up(down(Y, h))
   (separable passes at a few tiles, not the whole frame), its energy

@@ -674,6 +674,9 @@ namespace RendererProfileConfig
 			if (key == "capture_path") return IsChoice(value, { "standard", "gpu" });
 			if (key == "capture_upload") return IsChoice(value, { "render", "early" });
 			if (key == "source_range") return IsChoice(value, { "auto", "full", "limited" });
+			// native | auto | any height in lines (general: not a fixed list).
+			if (key == "source_resolution") return IsChoice(value, { "native", "auto" }) ||
+				(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(value, 144, 8640));
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 14: R-A's roll-off (source px per source frame; floor as a

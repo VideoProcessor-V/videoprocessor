@@ -6707,6 +6707,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "The range the source sends. Auto: YCbCr and 10-bit RGB are limited, 8- and 12-bit RGB full - right for "
             "most sources. If blacks look grey and whites dull (or blacks crush), the source sends the other range: "
             "set it here. The picture and the LED dimming both follow it."));
+        auto* sourceResolution = addChoice(QStringLiteral("Source resolution"), QStringLiteral("source_resolution"),
+            { QStringLiteral("native"), QStringLiteral("1440"), QStringLiteral("1080"), QStringLiteral("720"),
+              QStringLiteral("auto") });
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("native")), QStringLiteral("Native (as captured)"));
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1440")), QStringLiteral("1440 lines"));
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1080")), QStringLiteral("1080 lines"));
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("720")), QStringLiteral("720 lines"));
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("auto")), QStringLiteral("Auto (native until detection exists)"));
+        sourceResolution->setToolTip(QStringLiteral(
+            "For a stream upscaled before it reaches VP (many 4K streams are 1080p underneath): VP shrinks the picture "
+            "back to that size, then upscales it with its own path, as for a real 1080p source - fewer halos, cleaner "
+            "edges. Native = as captured (the default). Make a profile for such a source and pick its size here."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7935,7 +7947,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

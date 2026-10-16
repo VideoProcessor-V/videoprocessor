@@ -722,6 +722,39 @@ namespace Tests
 			g_harnessHeight = 1080;
 		}
 
+		TEST_METHOD(SourceResolutionRebasesThroughTheRenderer)
+		{
+			// Stage 12 step A (owner 2026-10-15): a 4K source set to 1080 is
+			// re-based for libplacebo (the log names the sizes) and presents; any
+			// height works (900); native (the default) never re-bases.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			struct Case { const char* extra; const char* expected; const wchar_t* name; };
+			for (const Case& c : { Case{ "source_resolution: 1080\n", "Re-base: 3840x2160 -> 1920x1080", L"1080" },
+				Case{ "source_resolution: 900\n", "Re-base: 3840x2160 -> 1600x900", L"900" },
+				Case{ "source_resolution: 1080\ndejudder_strength: 0.25\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the de-judder" } })
+			{
+				const bool film = std::string(c.extra).find("dejudder") != std::string::npos;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, film, c.extra);
+				Assert::IsTrue(r.Logged(c.expected), (std::wstring(c.name) + L": re-based\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Re-base failed"), (std::wstring(c.name) + L": no failure\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (std::wstring(c.name) + L": frames presented\n" + r.Tail()).c_str());
+			}
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+				Assert::IsFalse(r.Logged("Re-base: 3840x2160"), (L"native: never re-based\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"native: frames presented\n" + r.Tail()).c_str());
+			}
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+		}
+
 		TEST_METHOD(MotionEnginesCoexistWithVpShaders)
 		{
 			// v1.4.02 merge (owner 2026-10-15): libplacebo's smooth motion (Bill's)

@@ -16,6 +16,7 @@
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/EarlyUpload.h>
+#include <vprenderer/SourceRebase.h>
 #include <video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
 #include <libplacebo/utils/upload.h>
@@ -7444,6 +7445,135 @@ namespace VideoProcessorTest
 			Assert::IsTrue(off.warped.source == on.warped.source, L"source warp");
 			Assert::IsTrue(off.warped.rendered == on.warped.rendered, L"rendered warp");
 			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(SourceRebaseRestoresAnUpscaledSourceAndKeepsTheCropEdge)
+		{
+			// Stage 12 step A (owner 2026-10-15): source_resolution re-bases a
+			// 4K frame to its class, plane by plane in the signal domain.
+			Assert::AreEqual(0, SourceRebase::ClassHeight("native"));
+			Assert::AreEqual(0, SourceRebase::ClassHeight("auto"), L"auto is native until detection exists");
+			Assert::AreEqual(1080, SourceRebase::ClassHeight("1080"));
+			Assert::AreEqual(1.0, SourceRebase::Factor("native", 2160));
+			Assert::AreEqual(0.5, SourceRebase::Factor("1080", 2160));
+			Assert::AreEqual(1.0, SourceRebase::Factor("1080", 1080), L"never upward or equal");
+			Assert::AreEqual(1.0, SourceRebase::Factor("1440", 1080));
+			Assert::AreEqual(960, SourceRebase::Scaled(1920, 0.5), L"4:2:0 chroma keeps its subsampling");
+			// General (owner's standing rule): any height, any frame.
+			Assert::AreEqual(900, SourceRebase::ClassHeight("900"));
+			Assert::AreEqual(576, SourceRebase::ClassHeight("576"));
+			Assert::AreEqual(0, SourceRebase::ClassHeight("100"), L"below the minimum: native");
+			Assert::AreEqual(0, SourceRebase::ClassHeight("1080p"), L"not a number: native");
+			Assert::AreEqual(720.0 / 1080.0, SourceRebase::Factor("720", 1080), 1e-12, L"a 1080p frame upscaled from 720p");
+			Assert::AreEqual(900.0 / 2160.0, SourceRebase::Factor("900", 2160), 1e-12);
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 3840, H = 2160, w = 1920, h = 1080;
+			// A smooth 1080p picture (a few cycles each way), and the same picture
+			// sampled at 4K - what an upstream upscaler would have produced from it -
+			// with letterbox bars of 276 rows (black, code 0.0625 = 16/256).
+			auto picture = [](double x, double y) { return 0.45 + 0.3 * std::sin(x * 9.0) * std::cos(y * 7.0); };
+			const int bar4k = 276;
+			std::vector<uint16_t> luma4k(static_cast<size_t>(W) * H), chroma4k(static_cast<size_t>(W / 2) * (H / 2) * 2);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					const bool bar = y < bar4k || y >= H - bar4k;
+					const double v = bar ? 0.0625 : picture((x + 0.5) / W, (y + 0.5) / H);
+					luma4k[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(std::lround(v * 65535.0));
+				}
+			for (size_t i = 0; i < chroma4k.size(); ++i) chroma4k[i] = 32768;
+			pl_tex_params lp{};
+			lp.w = W; lp.h = H; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.host_readable = true;
+			lp.initial_data = luma4k.data();
+			pl_tex_params cp = lp;
+			cp.w = W / 2; cp.h = H / 2; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.initial_data = chroma4k.data();
+			pl_tex lumaTex = pl_tex_create(gpu, &lp), chromaTex = pl_tex_create(gpu, &cp);
+			Assert::IsTrue(lumaTex && chromaTex, L"source planes");
+			pl_frame source{};
+			source.num_planes = 2;
+			source.planes[0].texture = lumaTex; source.planes[0].components = 1; source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.planes[1].texture = chromaTex; source.planes[1].components = 2;
+			source.planes[1].component_mapping[0] = PL_CHANNEL_CB; source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			source.crop = { 0.0f, static_cast<float>(bar4k), static_cast<float>(W), static_cast<float>(H - bar4k) };
+
+			SourceRebase::Module rebase;
+			pl_frame out{};
+			Assert::IsTrue(rebase.Apply(gpu, dispatch, source, 0.5, out), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+			Assert::AreEqual(w, out.planes[0].texture->params.w);
+			Assert::AreEqual(h, out.planes[0].texture->params.h);
+			Assert::AreEqual(w / 2, out.planes[1].texture->params.w, L"chroma stays 4:2:0");
+			Assert::AreEqual(h / 2, out.planes[1].texture->params.h);
+			Assert::AreEqual(static_cast<float>(bar4k / 2), out.crop.y0, 1e-4f, L"the crop scales with the planes");
+			Assert::AreEqual(static_cast<float>(h - bar4k / 2), out.crop.y1, 1e-4f);
+			Assert::IsTrue(out.planes[0].component_mapping[0] == PL_CHANNEL_Y && out.planes[1].components == 2,
+				L"plane layout unchanged");
+
+			// Read the re-based luma back (its format may be r16 or a float
+			// fallback). The module's textures are not host-readable (they never
+			// need to be): copy into one that is.
+			pl_tex_params rp{};
+			rp.w = w; rp.h = h; rp.format = out.planes[0].texture->params.format;
+			rp.host_readable = true; rp.blit_dst = true;
+			pl_tex readable = pl_tex_create(gpu, &rp);
+			Assert::IsTrue(readable != nullptr, L"readable copy");
+			pl_tex_blit_params bp{};
+			bp.src = out.planes[0].texture; bp.dst = readable;
+			pl_tex_blit(gpu, &bp);
+			const pl_tex rebased = readable;
+			std::vector<float> values(static_cast<size_t>(w) * h);
+			if (rebased->params.format->type == PL_FMT_FLOAT)
+			{
+				std::vector<uint16_t> half(values.size());
+				pl_tex_transfer_params d{}; d.tex = rebased; d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (size_t i = 0; i < values.size(); ++i) values[i] = HalfBits(half[i]);
+			}
+			else
+			{
+				std::vector<uint16_t> unorm(values.size());
+				pl_tex_transfer_params d{}; d.tex = rebased; d.ptr = unorm.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (size_t i = 0; i < values.size(); ++i) values[i] = unorm[i] / 65535.0f;
+			}
+			// Inside the picture (away from the bar edge): the 1080p picture itself.
+			double worst = 0.0;
+			const int bar = bar4k / 2;
+			for (int y = bar + 4; y < h - bar - 4; y += 3)
+				for (int x = 4; x < w - 4; x += 3)
+					worst = (std::max)(worst, std::fabs(values[static_cast<size_t>(y) * w + x] - picture((x + 0.5) / w, (y + 0.5) / h)));
+			// At the crop edge: the bar stays black up to the edge and nothing
+			// rings below black inside the crop (what is shown). The polar
+			// kernel's lobe leaves about a code of ringing in the bar a row or
+			// two outside the crop - never shown - which is held under 2 codes.
+			double barWorst = 0.0, cropBelow = 0.0, outsideBelow = 0.0;
+			for (int y = 0; y < bar - 2; ++y)
+				for (int x = 0; x < w; x += 7)
+					barWorst = (std::max)(barWorst, std::fabs(values[static_cast<size_t>(y) * w + x] - 0.0625));
+			for (int y = bar - 3; y < bar + 3; ++y)
+				for (int x = 0; x < w; x += 7)
+				{
+					const double below = 0.0625 - values[static_cast<size_t>(y) * w + x];
+					double& slot = y >= bar ? cropBelow : outsideBelow;
+					slot = (std::max)(slot, below);
+				}
+			char line[256];
+			snprintf(line, sizeof(line), "Re-base 4K -> 1080: picture max error %.5f (%.2f 8-bit codes); bar max error %.5f; below black inside the crop %.5f, in the bar outside it %.5f\n",
+				worst, worst * 255.0, barWorst, cropBelow, outsideBelow);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(worst < 2.0 / 255.0, L"the re-based picture matches the 1080p picture within 2 codes");
+			Assert::IsTrue(barWorst < 0.5 / 255.0, L"the bar stays black up to the crop edge");
+			Assert::IsTrue(cropBelow < 0.25 / 255.0, L"anti-ringing: nothing undershoots black inside the crop");
+			Assert::IsTrue(outsideBelow < 2.0 / 255.0, L"ringing outside the crop (never shown) stays under 2 codes");
+
+			pl_tex_destroy(gpu, &lumaTex);
+			pl_tex_destroy(gpu, &chromaTex);
+			pl_tex_destroy(gpu, &readable);
+			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
 		}
 
 		TEST_METHOD(EarlyUploadMatchesTheRenderUploadAndNeverReusesBusySlots)

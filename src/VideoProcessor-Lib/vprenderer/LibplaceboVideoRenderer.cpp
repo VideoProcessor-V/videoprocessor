@@ -55,6 +55,7 @@
 #include <vprenderer/SdrToneShape.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/DownscaleLight.h>
+#include <vprenderer/SourceRebase.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
@@ -988,6 +989,11 @@ namespace
 		// the LED drive (its exact measurement follows the picture; its
 		// look-ahead reads the captured frame) both follow it.
 		std::string sourceRange = "auto";
+		// Stage 12 step A (owner 2026-10-15): source_resolution - native
+		// (default) | auto (native until step B's detection) | any height in
+		// lines. A height below the frame's re-bases the source to it
+		// (SourceRebase.h).
+		std::string sourceResolution = "native";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -2019,6 +2025,16 @@ namespace
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "render", "early" });
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
+		{
+			// native | auto | any height in lines (general, owner's standing rule).
+			std::string value;
+			if (config.TryGetString(rule.section, "source_resolution", value))
+			{
+				value = ConfigFile::NormalizeName(value);
+				if (value == "native" || value == "auto" || SourceRebase::ClassHeight(value) > 0)
+					settings.sourceResolution = value;
+			}
+		}
 		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
@@ -4412,6 +4428,11 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
+	// Stage 12 step A: the re-base of the source to its class height.
+	SourceRebase::Module sourceRebase;
+	pl_dispatch rebaseDispatch = nullptr;
+	double rebaseFactor = 1.0;          // this frame's (1 = native)
+	std::string rebaseLogged;           // the last state logged
 	pl_tex rgbIngestLuma = nullptr;
 	// De-judder on RGB (roadmap item 2): this frame's matcher luma when it came
 	// through GpuRgbUnpack (no chroma planes: the rendered warp only), and the
@@ -5667,6 +5688,8 @@ struct LibplaceboVideoRenderer::Impl
 				earlyUpload->Close();    // the second device and the shared textures
 				ReleaseDejudder();   // before the device goes
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
+				sourceRebase.Release(d3d11->gpu);   // Stage 12: its textures
+				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
@@ -13026,6 +13049,14 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				image.planes[0].texture = warped.luma;
 				image.planes[1].texture = warped.chroma;
+				// Stage 12: an extra shows the same re-based source as the main frame.
+				if (rebaseFactor < 1.0)
+				{
+					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+					pl_frame rebased{};
+					if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, image, rebaseFactor, rebased, 1))
+						image = rebased;
+				}
 			}
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
 			// present (A or the last extra: the shift step) from the de-judder's
@@ -17776,6 +17807,34 @@ struct LibplaceboVideoRenderer::Impl
             hdrPeakAnalysisMotionProtectionPixels=SubtitleHdrProtectionPixels(relocatedSubtitle,true,
                 hdrTrustedPicture.top,hdrTrustedPicture.bottom);
 
+		// Stage 12 step A: the re-base factor for this frame. Geometry above
+		// stays in native pixels; the factor applies where libplacebo samples
+		// the source (the render call, the de-judder's source-warp extras) and
+		// where the scaling gates compare source and destination heights.
+		{
+			const pl_tex luma = renderImage.num_planes > 0 ? renderImage.planes[0].texture : nullptr;
+			const int nativeHeight = luma ? luma->params.h : 0;
+			const double wanted = SourceRebase::Factor(activeSettings.sourceResolution, nativeHeight);
+			const bool temporal = temporalRenderer.Active();
+			rebaseFactor = wanted < 1.0 && !temporal ? wanted : 1.0;
+			std::string state;
+			if (wanted < 1.0 && temporal)
+				state = "Re-base: not applied while smooth motion or deinterlacing runs (source_resolution " +
+					activeSettings.sourceResolution + ")";
+			else if (rebaseFactor < 1.0 && luma)
+				state = "Re-base: " + std::to_string(luma->params.w) + "x" + std::to_string(nativeHeight) + " -> " +
+					std::to_string(SourceRebase::Scaled(luma->params.w, rebaseFactor)) + "x" +
+					std::to_string(SourceRebase::Scaled(nativeHeight, rebaseFactor)) + " (source_resolution " +
+					activeSettings.sourceResolution + "; grain map and occlusion mask off while re-based)";
+			else if (!rebaseLogged.empty())
+				state = "Re-base: off (source_resolution " + activeSettings.sourceResolution + ")";
+			if (!state.empty() && state != rebaseLogged)
+			{
+				rebaseLogged = state;
+				DebugLog::Log("%s", state.c_str());
+			}
+		}
+
 		const HdrPeakAnalysisCrop::Decision hdrPeakAnalysisDecision =
 			ApplyHdrPeakAnalysisCrop(frameGeneration, sourceSequence,
 				hdrTrustedPicture, renderImage.crop,
@@ -18393,7 +18452,8 @@ struct LibplaceboVideoRenderer::Impl
         // Stage 8b: a source shorter than the destination with the upscale
         // blend on takes the module in its upscale form (no SSIM needed: the
         // perceptual branch is whatever upscales, CNN + SuperRes when enabled).
-        const float sourceCropH = std::fabs(renderImage.crop.y1 - renderImage.crop.y0);
+        // Stage 12: the height libplacebo will sample (re-based when the factor is below 1).
+        const float sourceCropH = std::fabs(renderImage.crop.y1 - renderImage.crop.y0) * static_cast<float>(rebaseFactor);
         const float targetCropH = std::fabs(target.crop.y1 - target.crop.y0);
         const bool upscaleBlend = activeSettings.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
         adaptiveUpscaleThisFrame = upscaleBlend;
@@ -18416,7 +18476,7 @@ struct LibplaceboVideoRenderer::Impl
             up.nativeHeight = sourceCropH;
             adaptiveDownscale.SetUpscale(up);
             adaptiveDownscale.ClearGrainField();
-            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
+            if (activeSettings.adaptive.grainMap && rebaseFactor >= 1.0 && dejudder && dejudderEstimatedSequence == sourceSequence &&
                 sourceSequence != 0 && dejudder->GrainError())
             {
                 AdaptiveDownscale::GrainField field;
@@ -18461,13 +18521,12 @@ struct LibplaceboVideoRenderer::Impl
                 // SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source
                 // crop against the destination, not the (prescaled) PRE_KERNEL
                 // picture (audit stage8-rs232 item 3).
-                adaptiveDownscale.SetSourceDownscales(std::fabs(renderImage.crop.y1 - renderImage.crop.y0) >
-                    std::fabs(target.crop.y1 - target.crop.y0) + 0.5f);
+                adaptiveDownscale.SetSourceDownscales(sourceCropH > std::fabs(target.crop.y1 - target.crop.y0) + 0.5f);
                 // 8-3: the matcher's field for this source frame, when it ran
                 // for it (A->B, estimated at upload); the map follows NLS's
                 // own map (bundled NLS / NLS+ only; otherwise the scalar).
                 adaptiveDownscale.ClearGrainField();
-                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
+                if (activeSettings.adaptive.grainMap && rebaseFactor >= 1.0 && dejudder && dejudderEstimatedSequence == sourceSequence &&
                     sourceSequence != 0 && dejudder->GrainError())
                 {
                     AdaptiveDownscale::GrainField field;
@@ -18590,9 +18649,10 @@ struct LibplaceboVideoRenderer::Impl
             for (int slot = 0; slot < 2; ++slot)
                 if (dejudderMaskSequence[slot] == sourceSequence && sourceSequence != 0)
                     maskSlot = slot;
-            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat &&
+            // Stage 12: both are in native source pixels; off while re-based.
+            bool install = activeSettings.occlusionMask && rebaseFactor >= 1.0 && maskSlot >= 0 && dejudder && !cadenceRepeat &&
                 dejudder->Occlusion(maskSlot);
-            bool grainInstall = grainMap != nullptr;
+            bool grainInstall = grainMap != nullptr && rebaseFactor >= 1.0;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
             // the bundled NLS / NLS+ maps are known; any other NLS shader, or
             // a rule missing a parameter, keeps the mask off (logged once).
@@ -18849,6 +18909,16 @@ struct LibplaceboVideoRenderer::Impl
                 SetShaderStatus("NLS: Safe fit (hook failure)");
                 assembleOverlays();
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
+                // Stage 12 step A: the planes libplacebo samples, re-based.
+                if (rebaseFactor < 1.0)
+                {
+                    if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+                    pl_frame rebased{};
+                    if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactor, rebased, 0))
+                        return temporalRenderer.Render(renderer, rebased, destination, parameters);
+                    if (sourceRebase.Failures() == 1)
+                        DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
+                }
                 return temporalRenderer.Render(renderer,source,destination,parameters);
             });
         bool rendered = hookRender.rendered;
@@ -24583,6 +24653,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "capture_path=" << s.capturePath << "\n"
 		<< "capture_upload=" << s.captureUpload << "\n"
 		<< "source_range=" << s.sourceRange << "\n"
+		<< "source_resolution=" << s.sourceResolution << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

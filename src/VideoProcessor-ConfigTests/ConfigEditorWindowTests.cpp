@@ -744,7 +744,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     };
     // Every key set away from its default (as the Config test does).
     const std::map<std::string, std::string> set = read(
-        "capture_path: gpu\nsource_range: limited\ndejudder_strength: 0.25\ndejudder_strength_even: 0.5\ndejudder_even_rates: whole_and_1001\n"
+        "capture_path: gpu\nsource_range: limited\nsource_resolution: 900\ndejudder_strength: 0.25\ndejudder_strength_even: 0.5\ndejudder_even_rates: whole_and_1001\n"
         "dejudder_motion_rolloff: on\ndejudder_roll_lo: 6\ndejudder_roll_hi: 20\ndejudder_roll_floor: 0.3\n"
         "dejudder_object_strength: 0.5\ndejudder_fade_floor: 0.2\ndejudder_fade_match: off\n"
         "dejudder_match_tolerance: 5\ndejudder_frame_trust: 0.3\ndejudder_est_gate: off\ndejudder_global_prior: off\n"
@@ -760,7 +760,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         "sdr_knee_start: 0.7\nsdr_knee_strength: 0.6\nsdr_contrast_recovery: 1.2\nadaptive_downscale: on\n"
         "adaptive_upscale: on\nupscale_light: gamma\nfbo_float32: on\n");
     const std::pair<const char*, const char*> expected[] = {
-        { "capture_path", "gpu" }, { "source_range", "limited" }, { "dejudder_strength", "0.25" }, { "dejudder_strength_even", "0.5" },
+        { "capture_path", "gpu" }, { "source_range", "limited" }, { "source_resolution", "900" }, { "dejudder_strength", "0.25" }, { "dejudder_strength_even", "0.5" },
         { "dejudder_even_includes_1001", "1" }, { "dejudder_warp_rendered", "0" }, { "dejudder_estimate_ahead", "0" },
         { "occlusion_mask", "1" }, { "dither_vectors_own", "1" }, { "dither_grain_tolerance_scale", "2" },
         { "sdr_knee", "1" }, { "sdr_headroom", "0.1" }, { "sdr_knee_start", "0.7" }, { "sdr_knee_strength", "0.6" },
@@ -789,7 +789,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     // and pixel trust on, split off, half size every step, standard).
     const std::map<std::string, std::string> unset = read("");
     const std::pair<const char*, const char*> defaults[] = {
-        { "capture_path", "gpu" }, { "source_range", "auto" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
+        { "capture_path", "gpu" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
         { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.pictureArea", "1" }, { "dejudder_pulldown", "0" }, { "fix_scene_cooldown", "1" }, { "dither_vectors_new_frame", "1" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
         { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
         { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },

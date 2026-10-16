@@ -113,6 +113,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
