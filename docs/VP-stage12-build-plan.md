@@ -245,3 +245,21 @@ On the synthetic set, at 8 bits: +9 to +12 dB.
 2. A GPU inverse re-base (two separable passes, the identified kernel's weights). Fallback: the polar EWA filter (today) when nothing is identified or the ratio is not 2:1.
 3. Tests: synthetic exact recovery, GPU = CPU, the real ffmpeg material, the renderer path.
 4. Later: 3:2 (1440p), per axis, chroma, and the Apple TV's own kernel from real captures (G19).
+
+## GPU cost on the laptop RTX 3050 Ti, 4K (2026-10-16, `Stage12PassCostsAt4K`)
+
+Wall clock, GPU drained, mean of 20:
+
+| Pass | Cost |
+|---|---|
+| Re-base 2:1, polar luma + chroma (before) | 5.0 ms |
+| **Re-base 2:1, polar luma + separable chroma (now the default)** | **3.5 ms** |
+| **Re-base 2:1, kernel inverse luma + separable chroma (identified 1080p)** | **2.1 ms** |
+| Re-base, height only (1D) | 1.1 ms |
+| Re-base to 1440 | 3.9 ms |
+| VP debander (luma) | 0.8 ms |
+| Resolution monitor tile copy (2 Hz) | 0.9 ms per copy |
+
+**Luma stays polar.** A separable luma rang 2.2 codes below black into letterbox bars next to the picture edge (polar about 1), which shows when cropping is off. Chroma ringing is invisible.
+
+**The 3090 is to be measured on the cinema PC.**

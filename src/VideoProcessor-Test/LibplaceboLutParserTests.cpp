@@ -8332,6 +8332,83 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
+		TEST_METHOD(Stage12PassCostsAt4K)
+		{
+			// Planner gate (2026-10-16): the GPU cost of the Stage 12 passes at 4K on this GPU
+			// (wall clock, GPU drained, mean of 20 after a warm-up). Report only; the 3090
+			// numbers come from the cinema PC.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 3840, H = 2160;
+			std::vector<uint16_t> luma(static_cast<size_t>(W) * H), chroma(static_cast<size_t>(W / 2) * (H / 2) * 2, 32768);
+			std::mt19937 rng(3);
+			std::uniform_int_distribution<int> u(8000, 56000);
+			for (uint16_t& v : luma) v = static_cast<uint16_t>(u(rng));
+			pl_tex_params lp{};
+			lp.w = W; lp.h = H; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.initial_data = luma.data();
+			pl_tex_params cp = lp;
+			cp.w = W / 2; cp.h = H / 2; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.initial_data = chroma.data();
+			pl_tex lumaTex = pl_tex_create(gpu, &lp), chromaTex = pl_tex_create(gpu, &cp);
+			Assert::IsTrue(lumaTex && chromaTex);
+			pl_frame source{};
+			source.num_planes = 2;
+			source.planes[0].texture = lumaTex; source.planes[0].components = 1; source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.planes[1].texture = chromaTex; source.planes[1].components = 2;
+			source.planes[1].component_mapping[0] = PL_CHANNEL_CB; source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+			source.repr = pl_color_repr_uhdtv;
+			source.color = pl_color_space_bt709;
+			auto timed = [&](const char* name, const std::function<bool()>& pass) {
+				for (int i = 0; i < 3; ++i) Assert::IsTrue(pass(), ExtendedRangeGpuProbe::ToWide(std::string(name) + ": failed").c_str());
+				pl_gpu_finish(gpu);
+				const auto start = std::chrono::steady_clock::now();
+				for (int i = 0; i < 20; ++i) pass();
+				pl_gpu_finish(gpu);
+				const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 20.0;
+				char line[160];
+				snprintf(line, sizeof(line), "  %-58s %.3f ms\n", name, ms);
+				Logger::WriteMessage(line);
+				return ms;
+			};
+			Logger::WriteMessage("Stage 12 pass costs at 4K (this GPU):\n");
+			SourceRebase::Module rebase;
+			pl_frame out{};
+			rebase.separable = false;
+			timed("re-base 2:1, polar (luma + chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, out); });
+			rebase.separable = true;
+			timed("re-base 2:1, polar luma + separable chroma (default)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, out); });
+			rebase.SetKernel(KernelInverse::Find("lanczos3"));
+			timed("re-base 2:1, kernel inverse (luma) + separable (chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, out); });
+			rebase.SetKernel(-1);
+			timed("re-base height only (1D, luma + chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 1.0, 0.5, out); });
+			timed("re-base 1440 (polar luma + separable chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 1440.0 / 2160.0, out); });
+			VpDebander::Params params;
+			params.thresholdCodes = VpDebander::Strength(8.0, 10, 1.0, true);
+			params.colorDepth = 10;
+			params.radiusScale = 1.0;
+			VpDebander::Module deband;
+			pl_frame lumaOnly = source;
+			lumaOnly.num_planes = 1;
+			timed("VP debander (luma, 4K)", [&] { return deband.Apply(gpu, dispatch, lumaOnly, params, out); });
+			// The monitor's GPU side: its 8 tile copies into the readback buffer (2 Hz in use).
+			SourceResolutionMonitor::Monitor monitor;
+			uint64_t sequence = 0;
+			double seconds = 0.0;
+			timed("source-resolution monitor: tile copy (per analysed frame)", [&] {
+				monitor.Frame(gpu, dispatch, source, ++sequence, seconds);
+				seconds += 0.6;   // past its 2 Hz spacing: every call copies
+				return true;
+			});
+			monitor.Release(gpu);
+			rebase.Release(gpu);
+			deband.Release(gpu);
+			pl_tex_destroy(gpu, &lumaTex);
+			pl_tex_destroy(gpu, &chromaTex);
+			pl_dispatch_destroy(&dispatch);
+		}
+
 		TEST_METHOD(SourceRebaseKernelInverseRecoversThe1080Picture)
 		{
 			// Kernel-matched re-base (owner 2026-10-16: optimise 1080p): with the player's

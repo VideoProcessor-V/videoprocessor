@@ -172,6 +172,9 @@ if (p.x < size.x && p.y < size.y) {
 				if (textures[slot][plane] && gpu) pl_tex_destroy(gpu, &textures[slot][plane]);
 				textures[slot][plane] = nullptr;
 				pl_shader_obj_destroy(&luts[slot][plane]);
+				if (separableTemp[slot][plane] && gpu) pl_tex_destroy(gpu, &separableTemp[slot][plane]);
+				separableTemp[slot][plane] = nullptr;
+				pl_shader_obj_destroy(&lutsDown[slot][plane]);
 			}
 	}
 
@@ -239,6 +242,50 @@ if (p.x < size.x && p.y < size.y) {
 					return false;
 				}
 				kernelUsed = true;
+				result.planes[plane].texture = textures[slot][plane];
+				continue;
+			}
+			if (!oneAxis && separable && plane > 0)   // chroma only: a 1D Lanczos rings into black bars (luma stays polar)
+			{
+				// Two 1D Lanczos passes: across into a temporary, then down.
+				pl_tex_params tp = params;
+				tp.w = w;
+				tp.h = in->params.h;
+				if (!pl_tex_recreate(gpu, &separableTemp[slot][plane], &tp))
+				{
+					error = "texture allocation failed";
+					++failures;
+					return false;
+				}
+				auto ortho = [&](pl_tex from, pl_tex to, int nw, int nh, pl_shader_obj* lut) {
+					pl_shader s1 = pl_dispatch_begin(dispatch);
+					pl_sample_src s{};
+					s.tex = from;
+					s.rect = { 0.0f, 0.0f, static_cast<float>(from->params.w), static_cast<float>(from->params.h) };
+					s.new_w = nw;
+					s.new_h = nh;
+					s.components = from->params.format->num_components;
+					pl_sample_filter_params f{};
+					f.filter = pl_filter_lanczos;
+					f.antiring = antiring;
+					f.lut = lut;
+					pl_dispatch_params d{};
+					d.shader = &s1;
+					d.target = to;
+					if (!pl_shader_sample_ortho2(s1, &s, &f) || !pl_dispatch_finish(dispatch, &d))
+					{
+						if (s1) pl_dispatch_abort(dispatch, &s1);
+						return false;
+					}
+					return true;
+				};
+				if (!ortho(in, separableTemp[slot][plane], w, in->params.h, &luts[slot][plane]) ||
+					!ortho(separableTemp[slot][plane], textures[slot][plane], w, h, &lutsDown[slot][plane]))
+				{
+					error = "downscale pass failed";
+					++failures;
+					return false;
+				}
 				result.planes[plane].texture = textures[slot][plane];
 				continue;
 			}

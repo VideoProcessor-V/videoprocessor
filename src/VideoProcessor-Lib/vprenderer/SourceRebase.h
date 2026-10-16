@@ -77,11 +77,19 @@ namespace SourceRebase
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		float antiring = 0.5f;   // the faithful branch's value (Stage 8)
+		// Both axes, chroma planes: a separable Lanczos (two 1D passes) - the polar filter's
+		// footprint grows with the factor (5.1 ms for a 4K 2:1 frame on the laptop RTX 3050 Ti,
+		// separable 2.1 ms). Luma stays polar: a 1D Lanczos rings into black bars (2.2 codes
+		// below black next to the picture edge vs the polar's ~1), which show when cropping
+		// is off. false = polar for chroma too.
+		bool separable = true;
 
 	private:
 		static constexpr int kSlots = 2;
 		pl_tex textures[kSlots][PL_MAX_PLANES] = {};
 		pl_tex inverseTemp[kSlots] = {};   // the first (horizontal) inverse pass
+		pl_tex separableTemp[kSlots][PL_MAX_PLANES] = {};   // the separable filter's first pass
+		pl_shader_obj lutsDown[kSlots][PL_MAX_PLANES] = {};
 		int kernel = -1;
 		bool kernelUsed = false;
 		bool InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
