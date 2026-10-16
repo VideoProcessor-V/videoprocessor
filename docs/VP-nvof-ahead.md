@@ -3,7 +3,7 @@
 Owner, 2026-10-16:
 - "it actually might be a lot of savings ultimately if we get it to start working on the frame 4 or so ahead and save the vector sets for us to use for the 2 frame look ahead. this would free us up to do other things. obviously always have to default back to the original gpu path and keep that updated/happy. but this potentially resolves our look ahead problem for detail"
 
-Status: design, plus the CPU vector store (`VectorStore.h`) with tests. No GPU code yet.
+Status: design approved by the owner (2026-10-16: "agree and like your GPU compute if missing fallback in keeping with the design philosophy"). The CPU vector store (`VectorStore.h`) is built and tested; no GPU code yet.
 
 ## Idea
 
