@@ -109,3 +109,30 @@ The SDK also ships NVIDIA's frame-interpolation library (NvOFFRUC, CUDA). Our wa
 | The raised default target tripping `reset_queue_too_large_percent` | Must not happen. Check the threshold against the new target when the default is measured. |
 | Other readers of the queued frames (active-picture look-ahead, LED predictions, the cut look-ahead) | No conflict. They read queued frames only and never change the depth. |
 | `optical_flow: off`, or no engine | The matcher, as today. |
+
+## NVIDIA's own frame interpolation (owner, 2026-10-16: "does nvidia have an example frame interpolation setup using optical flow ... potentially include it as the interpolation option we offer. I don't want to necessarily go down that rabbit hole too much though")
+
+**What it is.** The Optical Flow SDK 5.0.7 zip (C:\dev\Optical_Flow_SDK_5.0.7.zip) includes the FRUC library: `NvFRUC.dll` (a closed binary), `NvFRUC.h`, `NvFRUCSample`, and the guide `Doc/NVOFA_FRUC.pdf`.
+
+**From the guide:**
+- **Hardware and dependencies:** Turing and later (the 3090 and the 3050 Ti). It uses NVOFA plus CUDA, with D3D11 through CUDA–DirectX interop, synchronised by ID3D11Fence.
+- **Timing:** it interpolates a frame at a requested timestamp between two inputs.
+- **Method:**
+  1. optical flow;
+  2. a forward/backward consistency check that rejects vectors;
+  3. infilling of the rejected vectors;
+  4. warping;
+  5. image-domain hole filling.
+- **Inputs: ARGB and NV12 only** (8-bit).
+
+**Fit for VP.**
+- **Precision.** 8-bit input only: no 10-bit or PQ HDR source precision. VP renders at 10 to 16 bits before the 8-bit FL35 link, so frames would be quantised before our processing.
+- **A black box.** None of the owner's taste semantics (displacement scale, the even cadence, the object/camera split, roll-off) and none of our trust layers or fallbacks.
+- **A whole-frame interpolator.** It replaces the de-judder's warp; it cannot feed it.
+
+**Proposal (kept small).** Only after the engine-ahead work, offer it as a clearly labelled alternative motion engine ("NVIDIA interpolation") behind Fixes under test:
+- SDR / 8-bit sources only;
+- exclusive with ours, like libplacebo smooth motion ([[vp-motion-engine-exclusive]]);
+- compared with ours on the real-clip corpus.
+
+It would be a thin wrapper of about a day of work, with no tuning. Its pipeline (consistency, infill, hole filling) is a useful reference for ours.
