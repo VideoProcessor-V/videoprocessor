@@ -103,3 +103,38 @@ namespace VectorStoreTest
 		}
 	};
 }
+
+#include <MotionAhead.h>
+
+namespace MotionAheadTest
+{
+	TEST_CLASS(MotionAheadTests)
+	{
+	public:
+		TEST_METHOD(DepthFollowsTheSettingTheQueueAndLowLatency)
+		{
+			using namespace MotionAhead;
+			// Default: 4 ahead when 4 or more are queued.
+			Decision d = Decide(kDefaultDepth, false, true, 6);
+			Assert::AreEqual(4, d.depth);
+			Assert::IsTrue(d.reason == Reason::Active);
+			// A shallower queue: what is there, never waiting.
+			d = Decide(4, false, true, 2);
+			Assert::AreEqual(2, d.depth);
+			Assert::IsTrue(d.reason == Reason::ShallowQueue);
+			d = Decide(4, false, true, 0);
+			Assert::AreEqual(0, d.depth);
+			Assert::IsTrue(d.reason == Reason::NoFramesAhead);
+			// Low latency disables; 0 is off; no engine = the matcher.
+			Assert::IsTrue(Decide(4, true, true, 6).reason == Reason::LowLatency);
+			Assert::AreEqual(0, Decide(4, true, true, 6).depth);
+			Assert::IsTrue(Decide(0, false, true, 6).reason == Reason::Off);
+			Assert::IsTrue(Decide(4, false, false, 6).reason == Reason::NoEngine);
+			// Clamped to 0..4.
+			Assert::AreEqual(4, Decide(9, false, true, 9).depth);
+			Assert::AreEqual(0, Decide(-3, false, true, 9).depth);
+			// The queue that holds the default depth: the current frame plus 4.
+			Assert::AreEqual(size_t{ 5 }, QueueFramesFor(kDefaultDepth));
+		}
+	};
+}

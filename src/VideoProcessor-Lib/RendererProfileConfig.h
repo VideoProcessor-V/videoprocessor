@@ -682,6 +682,8 @@ namespace RendererProfileConfig
 			if (key == "low_bitrate_handling") return IsChoice(value, { "auto", "off", "on" });
 			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return IsChoice(value, { "on", "off" });
 			if (key == "ssim_bitrate_floor") return IsNumberInRange(value, 0.0, 1.0);
+			// docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, 0..4 (whole frames).
+			if (key == "motion_ahead_frames") return IsChoice(value, { "0", "1", "2", "3", "4" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 14: R-A's roll-off (source px per source frame; floor as a

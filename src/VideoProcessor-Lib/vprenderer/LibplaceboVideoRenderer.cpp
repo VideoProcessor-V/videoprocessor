@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <MotionAhead.h>
 #include "../SubtitleProfileUpdatePolicy.h"
 #include "SubtitleBarRecovery.h"
 
@@ -1019,6 +1020,9 @@ namespace
 		// bitrate quality, down to the floor; the faithful anti-ringing raised.
 		bool ssimBitrateAware = true;
 		double ssimBitrateFloor = 0.4;
+		// docs/VP-nvof-ahead.md (owner 2026-10-16): how many source frames ahead the
+		// optical-flow engine works (0 = off); off in low latency; never more than queued.
+		int motionAheadFrames = MotionAhead::kDefaultDepth;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1203,7 +1207,7 @@ namespace
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2332,6 +2336,15 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
 					settings.adaptive.faithfulOrtho ? "ortho" : "polar");
+		}
+		if (config.TryGetString(rule.section, "motion_ahead_frames", raw))
+		{
+			double parsed = 0.0;
+			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= MotionAhead::kMaxDepth && parsed == static_cast<int>(parsed))
+				settings.motionAheadFrames = static_cast<int>(parsed);
+			else
+				DebugLog::Log("profile '%s': invalid motion_ahead_frames '%s'; keeping %d",
+					rule.section.c_str(), raw.c_str(), settings.motionAheadFrames);
 		}
 		if (config.TryGetString(rule.section, "ssim_bitrate_floor", raw))
 		{
@@ -5059,6 +5072,12 @@ struct LibplaceboVideoRenderer::Impl
 	std::vector<const pl_hook*> frameHooks;
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
+	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
+	// loop's count), and the last logged optical-flow depth decision.
+	std::atomic<size_t> queuedFutureFrames{ 0 };
+	std::string motionAheadLogged;
+	// Set when the optical-flow engine is running and passed its self-check (not built yet).
+	std::atomic<bool> motionEngineReady{ false };
 	bool customHooksPublishedLowLatency = false;
 	double customHookRefreshHz = 0.0;
 	ULONGLONG customHookRefreshTick = 0;
@@ -9073,6 +9092,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
+		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
@@ -17930,6 +17950,26 @@ struct LibplaceboVideoRenderer::Impl
             hdrPeakAnalysisMotionProtectionPixels=SubtitleHdrProtectionPixels(relocatedSubtitle,true,
                 hdrTrustedPicture.top,hdrTrustedPicture.bottom);
 
+		// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow depth for this frame -
+		// the configured depth, off in low latency or without the engine, never more than
+		// the frames queued. Logged when it changes (the matcher covers the rest).
+		{
+			const MotionAhead::Decision ahead = MotionAhead::Decide(activeSettings.motionAheadFrames,
+				lowLatencyQueueActive.load(std::memory_order_acquire), motionEngineReady.load(std::memory_order_acquire),
+				queuedFutureFrames.load(std::memory_order_acquire));
+			char text[200];
+			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
+				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
+			// Log the reason and depth, not every change of the queued count.
+			char key[96];
+			snprintf(key, sizeof(key), "%d|%d|%d", ahead.configured, ahead.depth, static_cast<int>(ahead.reason));
+			if (motionAheadLogged != key)
+			{
+				motionAheadLogged = key;
+				DebugLog::Log("%s", text);
+			}
+		}
+
 		// Stage 12 step A: the re-base factor for this frame. Geometry above
 		// stays in native pixels; the factor applies where libplacebo samples
 		// the source (the render call, the de-judder's source-warp extras) and
@@ -23786,6 +23826,7 @@ void LibplaceboVideoRenderer::RenderLoop()
             activePictureContinuityGeneration =
                 m_activePictureTimeline.ContinuityGeneration();
             activePictureAvailableLookahead = window.availableFutureFrames;
+            if (m_impl) m_impl->queuedFutureFrames.store(window.availableFutureFrames, std::memory_order_release);
             for (const size_t index : window.indices)
             {
                 activePicturePreviewFrames.push_back(m_frameQueue[index]);
@@ -24934,6 +24975,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "ssim_residual_stabilise=" << (s.adaptive.ssimResidualStabilise ? "on" : "off") << "\n"
 		<< "ssim_bitrate_aware=" << (s.ssimBitrateAware ? "on" : "off") << "\n"
 		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
+		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

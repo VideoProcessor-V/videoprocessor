@@ -6931,6 +6931,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         bitrateFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, bitrateFloor));
         bitrateFloor->setPlaceholderText(QStringLiteral("0.4"));
         bitrateFloor->setToolTip(QStringLiteral("What is left of the SSIM / CNN strength on the poorest stream (0.4 = 40 %)."));
+        // docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, whole frames 0..4.
+        auto* motionAhead = addText(QStringLiteral("Motion vectors ahead, frames (0-4)"), QStringLiteral("motion_ahead_frames"));
+        motionAhead->setValidator(new QIntValidator(0, 4, motionAhead));
+        motionAhead->setPlaceholderText(QStringLiteral("4"));
+        motionAhead->setToolTip(QStringLiteral(
+            "NVIDIA GPUs: the optical-flow engine computes motion this many source frames ahead of the picture, on its "
+            "own hardware, for the de-judder and the detail work. Off (0) or on other GPUs the matcher runs as today. "
+            "Low latency always switches it off, and it never uses more frames than the queue holds. Empty = 4."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
