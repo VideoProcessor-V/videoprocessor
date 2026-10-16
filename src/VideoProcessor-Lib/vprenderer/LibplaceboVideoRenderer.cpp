@@ -20916,8 +20916,10 @@ void LibplaceboVideoRenderer::Build()
 	VideoStateComPtr state;
 	std::string manualRule;
 	std::map<std::string, std::string> manualUnifiedProfiles;
+	bool lowLatencyQueue = false;
 	{
 		std::lock_guard<std::mutex> guard(m_stateMutex);
+		lowLatencyQueue = m_lowLatencyQueue;
 		if (!m_videoState || !m_videoState->valid || !m_videoState->displayMode)
 			throw std::runtime_error("libplacebo requires a valid video state before Build");
 		if (!m_rendererConfiguration)
@@ -20936,6 +20938,8 @@ void LibplaceboVideoRenderer::Build()
 	// driver for seconds. Build only captures an immutable construction request;
 	// RenderLoop performs the actual initialization on its own thread.
 	m_impl.reset(new Impl());
+	// The queue path as last applied (the snapshot may have been applied before this Build).
+	m_impl->lowLatencyQueueActive.store(lowLatencyQueue, std::memory_order_release);
 	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
 	if (m_ledDrive && m_ledDrive->WantsPredictions())
 		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
@@ -21346,11 +21350,11 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	std::unique_lock<std::mutex> guard(m_stateMutex);
 	const std::map<std::string, std::string> next =
 		RendererProfileConfig::FormatSelections(snapshot.effectiveSelections);
-	// cinema_only custom hooks stay out of the game queue.
+	// cinema_only custom hooks stay out of the game queue. Kept on the renderer too, so the
+	// next Build (a new Impl) starts in the same path.
+	m_lowLatencyQueue = ConfigFile::NormalizeName(snapshot.queue.profile) == "low_latency";
 	if (m_impl)
-		m_impl->lowLatencyQueueActive.store(
-			ConfigFile::NormalizeName(snapshot.queue.profile) == "low_latency",
-			std::memory_order_release);
+		m_impl->lowLatencyQueueActive.store(m_lowLatencyQueue, std::memory_order_release);
 	if (snapshot.configuration)
 	{
 		m_ledDriveConfiguration = snapshot.configuration;

@@ -391,6 +391,9 @@ private:
 	double m_ledBoostKnee = 0.0;        // delta 11
 	double m_ledBoostKneeWidth = 0.05;
 	double m_ledShadowLift = 0.0;
+	// The Low_Latency queue as last applied (2026-10-16): kept here so a Build, which makes a
+	// new Impl, starts in the right path (it was lost until the next snapshot apply).
+	bool m_lowLatencyQueue = false;
 	void UpdateLedDrive(const ConfigFile& configuration);
 };
 
