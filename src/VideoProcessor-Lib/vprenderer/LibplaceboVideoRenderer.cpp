@@ -17943,13 +17943,13 @@ struct LibplaceboVideoRenderer::Impl
 				sourceMonitorSequence = sourceSequence;
 				if (!sourceMonitorHistorySet)
 				{
-					// The rolling auto history beside the log (logs\ when the log path is not known here).
+					// The auto history beside the log, one file per session, newest 5 kept (logs\ when the log path is not known here).
 					std::string logPath = DebugLog::GetLogFilePath();
 					if (logPath.empty()) logPath = "logs\\vp.log";
 					const size_t slash = logPath.find_last_of("\\/");
 					const std::string folder = slash == std::string::npos ? std::string(".") : logPath.substr(0, slash);
 					CreateDirectoryA(folder.c_str(), nullptr);
-					sourceMonitor.SetHistoryPath(folder + "\\source-resolution.csv");
+					sourceMonitor.SetHistoryFolder(folder);
 					sourceMonitorHistorySet = true;
 				}
 				if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);

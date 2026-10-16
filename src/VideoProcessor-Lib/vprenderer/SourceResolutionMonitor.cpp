@@ -65,16 +65,50 @@ if (tile < int(tiles) && g.y < 256) {
 		FlushHistory(true);
 	}
 
-	void Monitor::SetHistoryPath(const std::string& path)
+	void Monitor::SetHistoryFolder(const std::string& folder)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		historyPath = path;
+		if (folder.empty()) { historyPath.clear(); return; }
+		CreateDirectoryA(folder.c_str(), nullptr);
+		// The sessions kept: the newest kHistorySessions - 1 earlier files (names sort by time), plus this one.
+		std::vector<std::string> earlier;
+		WIN32_FIND_DATAA found{};
+		HANDLE search = FindFirstFileA((folder + "\\source-resolution *.csv").c_str(), &found);
+		if (search != INVALID_HANDLE_VALUE)
+		{
+			do earlier.push_back(found.cFileName);
+			while (FindNextFileA(search, &found));
+			FindClose(search);
+		}
+		std::sort(earlier.begin(), earlier.end());
+		while (earlier.size() > kHistorySessions - 1)
+		{
+			DeleteFileA((folder + "\\" + earlier.front()).c_str());
+			earlier.erase(earlier.begin());
+		}
+		SYSTEMTIME t{};
+		GetLocalTime(&t);
+		char name[64];
+		snprintf(name, sizeof(name), "source-resolution %04u%02u%02u-%02u%02u%02u.csv", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+		historyPath = folder + "\\" + name;
+		char started[96];
+		snprintf(started, sizeof(started), "session,,,,,,,,,,,,,session started %04u-%02u-%02u %02u:%02u:%02u",
+			t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+		history.clear();
+		Record(started);
 	}
 
 	void Monitor::Record(const std::string& row)
 	{
 		history.push_back(Clock() + "," + row);
-		while (history.size() > kHistoryRows) history.pop_front();
+		while (history.size() > kHistoryRows)
+		{
+			// The session row stays first.
+			if (history.size() > 1 && history.front().find(",session,") != std::string::npos)
+				history.erase(history.begin() + 1);
+			else
+				history.pop_front();
+		}
 		historyDirty = true;
 	}
 

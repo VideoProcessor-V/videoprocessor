@@ -7533,12 +7533,22 @@ namespace VideoProcessorTest
 			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
 
 			SourceResolutionMonitor::Monitor monitor;
-			// Owner 2026-10-16: the rolling auto history (logs\\source-resolution.csv in VP).
+			// Owner 2026-10-16: the auto history, one file per session, the newest 5 kept.
 			char tempPath[MAX_PATH] = {};
 			GetTempPathA(MAX_PATH, tempPath);
-			const std::string historyPath = std::string(tempPath) + "vp-source-resolution-history.csv";
-			DeleteFileA(historyPath.c_str());
-			monitor.SetHistoryPath(historyPath);
+			const std::string historyFolder = std::string(tempPath) + "vp-source-resolution-history";
+			CreateDirectoryA(historyFolder.c_str(), nullptr);
+			for (int old = 0; old < 7; ++old)   // seven earlier sessions (old names sort first)
+				std::ofstream(historyFolder + "\\source-resolution 2020010" + std::to_string(old) + "-000000.csv") << "old";
+			monitor.SetHistoryFolder(historyFolder);
+			const std::string historyPath = monitor.HistoryPath();
+			{
+				int kept = 0;
+				WIN32_FIND_DATAA found{};
+				HANDLE search = FindFirstFileA((historyFolder + "\\source-resolution *.csv").c_str(), &found);
+				if (search != INVALID_HANDLE_VALUE) { do ++kept; while (FindNextFileA(search, &found)); FindClose(search); }
+				Assert::AreEqual(4, kept, L"the newest 4 earlier sessions kept before this one is written (5 with it)");
+			}
 			double seconds = 0.0;
 			uint64_t sequence = 0;
 			// One analysed frame: submit, let the GPU finish, collect, wait for the worker.
@@ -7628,13 +7638,24 @@ namespace VideoProcessorTest
 				std::ifstream in(historyPath);
 				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 				Assert::IsTrue(text.find("time,event,frame_ratio") == 0, L"history header");
+				Assert::IsTrue(text.find("session started") != std::string::npos, L"the session is marked");
 				Assert::IsTrue(text.find(",reading,") != std::string::npos, L"reading rows");
 				Assert::IsTrue(text.find("engaged at a cut") != std::string::npos, L"the engage decision and its reason");
 				Assert::IsTrue(text.find("native after 5 s without a cut") != std::string::npos, L"the bounded disengage");
 				Assert::IsTrue(text.find("discontinuity") != std::string::npos && text.find("test seek") != std::string::npos,
 					L"the seek");
 			}
-			DeleteFileA(historyPath.c_str());
+			{
+				WIN32_FIND_DATAA found{};
+				HANDLE search = FindFirstFileA((historyFolder + "\\*").c_str(), &found);
+				if (search != INVALID_HANDLE_VALUE)
+				{
+					do if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileA((historyFolder + "\\" + found.cFileName).c_str());
+					while (FindNextFileA(search, &found));
+					FindClose(search);
+				}
+				RemoveDirectoryA(historyFolder.c_str());
+			}
 
 			// Genuine full-resolution content over many shots never engages.
 			SourceResolutionMonitor::Monitor native;

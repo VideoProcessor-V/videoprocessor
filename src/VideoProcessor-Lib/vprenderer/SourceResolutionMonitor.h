@@ -78,11 +78,14 @@ namespace SourceResolutionMonitor
 		std::string Selection() const;
 
 		void Release(pl_gpu gpu);
-		// Owner 2026-10-16 (debugging auto): a rolling logs\source-resolution.csv - every
-		// analysed frame's reading and every auto decision with its reason, the newest
-		// kHistoryRows (about ten minutes), rewritten every few seconds (temp + replace).
-		// Empty path = off; the renderer sets it beside the log.
-		void SetHistoryPath(const std::string& path);
+		// Owner 2026-10-16 (debugging auto): one file per session in `folder`,
+		// "source-resolution <yyyymmdd-hhmmss>.csv" - every analysed frame's reading and
+		// every auto decision with its reason, the newest kHistoryRows (about ten minutes,
+		// ~100 KB), rewritten every few seconds (temp + replace). The newest kHistorySessions
+		// files are kept; older ones are deleted when a session starts. Empty folder = off.
+		void SetHistoryFolder(const std::string& folder);
+		const std::string& HistoryPath() const { return historyPath; }
+		static constexpr size_t kHistorySessions = 5;
 		void FlushHistoryNow() { FlushHistory(true); }
 		static constexpr size_t kHistoryRows = 1200;
 		double intervalSeconds = 0.5;   // tile copies per second: 2
