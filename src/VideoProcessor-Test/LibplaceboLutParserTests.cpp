@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "CppUnitTest.h"
 
 #include <algorithm>
@@ -3075,7 +3075,9 @@ namespace VideoProcessorTest
 				L"the old black card must be reconstructed through pictureBottom");
 			const auto noStair=fixture.RenderSubtitlePattern(hook,false,0,geometry,
 				PL_COLOR_TRC_SRGB,true,true,16,false);
-			const int reflectedStair=36*64+25;
+			// The two-pixel donor guard puts the mirror edge at y=26.
+            // Output y=32 samples stair row 19: 2*26-32-1.
+            const int reflectedStair=32*64+25;
 			const int textureDelta=int(dark[reflectedStair].r)-int(noStair[reflectedStair].r);
 			const std::wstring textureEvidence=L"reflected texture delta="+std::to_wstring(textureDelta)+
 				L" bright="+std::to_wstring(bright[reflectedStair].r)+
@@ -3194,22 +3196,27 @@ namespace VideoProcessorTest
         {
             TargetLutGpuFixture fixture;Assert::IsTrue(fixture.Create());
             const auto* hook=CreateSubtitleCutPasteHook(fixture.Gpu());Assert::IsNotNull(hook);
-            for(const bool top:{false,true}) {
+            for(const bool top:{false,true}) for(const bool measuredCapture:{false,true}) {
                 const auto g=ComputeSubtitleCutPaste(top?SubtitleBoxRect{12,7,52,24}:SubtitleBoxRect{12,40,52,57},
                     64,64,8,56,SubtitleBoxPadding(6,8,8));
                 const SubtitleBoxRect card=g.generatedCleanup;
+                auto geometry=g;
+                // Capture grants permission to key possible glyphs. It is not
+                // proof that the whole picture is contaminated; this bounded
+                // variant models a measured card interior.
+                if(measuredCapture) geometry.pictureCapture=card;
                 SubtitleGeneratedGrayStyle style;style.opacity=0.0f;style.maxLuminance=1.0f;style.blurPixels=30;
-                Assert::IsTrue(BindSubtitleCutPasteHook(hook,g,5,PL_COLOR_TRC_SRGB,style));
-                auto render=[&](int gray) {return fixture.RenderSubtitlePattern(hook,false,0,g,PL_COLOR_TRC_SRGB,
+                Assert::IsTrue(BindSubtitleCutPasteHook(hook,geometry,5,PL_COLOR_TRC_SRGB,style));
+                auto render=[&](int gray) {return fixture.RenderSubtitlePattern(hook,false,0,geometry,PL_COLOR_TRC_SRGB,
                     true,true,150,false,gray,&card,false,false,nullptr,nullptr,false,-1,false);};
                 const auto black=render(0),colored=render(80);
                 // All taps must remain outside the card even at maximum radius.
                 // Compare central cleanup pixels outside the moved glyph column.
                 for(int y=card.top;y<card.bottom;++y)for(const int x:{24,39}) {
-                    const int sourceY=y+g.source.top-g.destination.top;
+                    const int sourceY=y+geometry.source.top-geometry.destination.top;
                     // An intentionally gray source card keys as ink in the
                     // glyph envelope. Probe the clean, bar-facing margin only.
-                    if(sourceY>=g.content.top && sourceY<g.content.bottom)continue;
+                    if(sourceY>=geometry.content.top && sourceY<geometry.content.bottom)continue;
                     Assert::IsTrue(PixelDistance(black[y*64+x],colored[y*64+x])<=3,L"old backing must not leak into blur taps");
                     Assert::IsTrue(black[y*64+x].r>125,L"black physical bars must not bleed into the reconstructed picture");
                 }
@@ -6753,16 +6760,21 @@ namespace VideoProcessorTest
 				pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(ran, ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
 			pl_gpu_finish(gpu);
-			std::vector<uint16_t> half(a.luma.size() * 4);
+			// The warped picture is rgba32f since the 12-bit work (rgba16f where
+			// 32-bit is not storable): read it at the precision it has.
+			Assert::IsNotNull(warped);
+			const bool float32 = warped->params.format->component_depth[0] == 32;
+			std::vector<float> full(float32 ? a.luma.size() * 4 : 0);
+			std::vector<uint16_t> half(float32 ? 0 : a.luma.size() * 4);
 			pl_tex_transfer_params download{};
 			download.tex = warped;
-			download.ptr = half.data();
+			download.ptr = float32 ? static_cast<void*>(full.data()) : static_cast<void*>(half.data());
 			const bool downloaded = pl_tex_download(gpu, &download);
 			pl_tex_destroy(gpu, &cached);
 			Assert::IsTrue(downloaded, L"the rendered warp is not host-readable");
 			result.rendered.resize(a.luma.size());
 			for (size_t i = 0; i < a.luma.size(); ++i)
-				result.rendered[i] = HalfBits(half[i * 4]) * 65535.0f;
+				result.rendered[i] = (float32 ? full[i * 4] : HalfBits(half[i * 4])) * 65535.0f;
 			return result;
 		}
 

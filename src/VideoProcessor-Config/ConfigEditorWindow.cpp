@@ -2500,6 +2500,7 @@ bool ConfigEditorWindow::liveProfileCommand(const QString& sectionPrefix,
 				{ QStringLiteral("vprenderer"), QStringLiteral("display") },
 				{ QStringLiteral("vprenderer.color"), QStringLiteral("color") },
 				{ QStringLiteral("vprenderer.scaling"), QStringLiteral("scaling") },
+                { QStringLiteral("vprenderer.motion"), QStringLiteral("motion") },
 				{ QStringLiteral("vprenderer.output"), QStringLiteral("output") },
 				{ QStringLiteral("vprenderer.viewport"), QStringLiteral("viewport") },
 				{ QStringLiteral("vprenderer.zoom"), QStringLiteral("zoom") },
@@ -4278,7 +4279,7 @@ QWidget* ConfigEditorWindow::createShell()
     pages_->addWidget(createRendererPage());
     pages_->addWidget(createDirectShowPage());
     pages_->addWidget(createViewportPage());
-    pages_->addWidget(createLldvPage());
+    pages_->addWidget(createDvPage());
     pages_->addWidget(createShortcutsPage());
     pages_->addWidget(createActionsPage());
     pages_->addWidget(createStandardShadersPage());
@@ -4308,6 +4309,10 @@ QWidget* ConfigEditorWindow::createShell()
     pages_->addWidget(createPage(QStringLiteral("Updates"),
         QStringLiteral("Manage updates on this computer. Remote VideoProcessors update separately."), updatePanel_));
 
+    // 22 (v1.4.02 merge: Bill's Motion page follows Updates, 21).
+    pages_->addWidget(createProfilePage(QStringLiteral("Motion"),
+        QStringLiteral("Configure smooth motion and field-aware deinterlacing. Changes apply after renderer restart."),
+        QStringLiteral("vprenderer.motion")));
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
     const auto addLeaf = [this, navLayout, navGroup](const QString& title, int page)
@@ -4320,7 +4325,7 @@ QWidget* ConfigEditorWindow::createShell()
     };
     addLeaf(QStringLiteral("General"), 0);
     addLeaf(QStringLiteral("Queue"), 1);
-    addLeaf(QStringLiteral("LLDV"), 5);
+    addLeaf(QStringLiteral("DV"), 5);
     QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"), 14);
     addLeaf(QStringLiteral("Actions"), 7);
     QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
@@ -4342,6 +4347,8 @@ QWidget* ConfigEditorWindow::createShell()
     sectionTabs->setAccessibleName(QStringLiteral("Settings section pages"));
     sectionTabs->setProperty("sectionTabs", true);
     sectionTabs->setExpanding(false);
+    sectionTabs->setUsesScrollButtons(true);
+    sectionTabs->setElideMode(Qt::ElideNone);
     sectionTabs->setDrawBase(false);
     sectionTabs->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
     pageHostLayout->addWidget(sectionTabs, 0, Qt::AlignLeft);
@@ -4381,7 +4388,7 @@ QWidget* ConfigEditorWindow::createShell()
                 { QStringLiteral("NLS"), 9 } }, page);
         }
         else if (page == 2 || page == 4 || page == 11 || page == 13 ||
-			page == 16 || page == 17 || page == 18 || page == 19)
+			page == 16 || page == 17 || page == 18 || page == 19 || page == 22)
         {
             vpNavigation->setChecked(true);
             showSectionTabs({ { QStringLiteral("Rendering"), 2 },
@@ -4390,7 +4397,8 @@ QWidget* ConfigEditorWindow::createShell()
 				{ QStringLiteral("Screen"), 4 },
 				{ QStringLiteral("Zoom"), 18 },
                 { QStringLiteral("Subtitles"), 19 },
-				{ QStringLiteral("Processing"), 11 } }, page);
+				{ QStringLiteral("Motion"), 22 },   // v1.4.02 merge: after LED drive (20) and Updates (21)
+                { QStringLiteral("Processing"), 11 } }, page);
         }
         else if (page == 3 || page == 12)
         {
@@ -5108,7 +5116,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     {
         QString key;
         QWidget* widget = nullptr;
-        enum Kind { Text, Boolean, SdrGamma, Choice, Integer } kind = Text;
+        enum Kind { Text, Boolean, SdrGamma, Choice, Integer, DvMode } kind = Text;
         double displayScale = 1.0;
     };
     struct State { QString section; bool loading = false; };
@@ -5130,6 +5138,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto fields = std::make_shared<std::vector<Field>>();
     std::function<void()> updateOutputCompatibility = [] {};
     std::function<void()> updateToneControls = [] {};
+    std::function<void()> updateDvModeControls = [] {};
+    QWidget* dvModeControls = nullptr;
+    QRadioButton* dvLldvMode = nullptr;
 
     auto* splitter = new ResponsiveSplitter;
 
@@ -5163,10 +5174,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     const bool showsActiveProfile = sectionPrefix == QStringLiteral("queue") ||
         sectionPrefix == QStringLiteral("vprenderer") ||
         sectionPrefix == QStringLiteral("vprenderer.scaling") ||
+        sectionPrefix == QStringLiteral("vprenderer.motion") ||
         sectionPrefix == QStringLiteral("vprenderer.color") ||
         sectionPrefix == QStringLiteral("vprenderer.viewport") ||
         sectionPrefix == QStringLiteral("vprenderer.zoom") ||
-        sectionPrefix == QStringLiteral("vprenderer.subtitles");
+        sectionPrefix == QStringLiteral("vprenderer.subtitles") ||
+        sectionPrefix == QStringLiteral("vprenderer.motion");
     if (showsActiveProfile)
     {
         list->setItemDelegate(new ProfileStateItemDelegate(list));
@@ -5348,7 +5361,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     if (sectionPrefix != QStringLiteral("vprenderer") &&
         sectionPrefix != QStringLiteral("vprenderer.color") &&
         sectionPrefix != QStringLiteral("vprenderer.viewport") &&
-        sectionPrefix != QStringLiteral("vprenderer.zoom"))
+        sectionPrefix != QStringLiteral("vprenderer.zoom") &&
+        sectionPrefix != QStringLiteral("vprenderer.motion"))
         form = addPlainForm();
     QCheckBox* sdrGammaEnabled = nullptr;
     QLabel* sdrGammaStatus = nullptr;
@@ -6345,7 +6359,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "(e.g. 24p on 60 Hz), by filling the repeated refreshes with slightly moved pictures. "
             "Gentle (0.25) is the recommended start; Medium is 0.35; Custom takes the strength typed below. "
             "Film-like sources only (up to about 30 fps, and 48p); off for 50p/60p video, in the low-latency "
-            "queue and for RGB or interlaced input."));
+            "queue and for RGB or interlaced input. The Motion page's Motion handling chooses VP's de-judder or "
+            "libplacebo's smooth motion - one or the other, never both."));
         form->addRow(QStringLiteral("De-judder"), dejudderPreset);
         auto* dejudderStrength = addText(QStringLiteral("Strength (uneven cadences, e.g. 24p on 60 Hz)"),
             QStringLiteral("dejudder_strength"));
@@ -7196,6 +7211,80 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 
     }
 
+    else if(sectionPrefix==QStringLiteral("vprenderer.motion")) {
+        const auto addMotionSection=[&](const QString& id,const QString& heading,const QString& explanation) {
+            auto* section=new QWidget(profileFields);
+            section->setAccessibleName(heading);
+            auto* layout=new QVBoxLayout(section);
+            layout->setContentsMargins(0,0,0,4);layout->setSpacing(5);
+            auto* title=new QLabel(heading);
+            title->setObjectName(QStringLiteral("motionSection.")+id);
+            auto font=title->font();font.setBold(true);title->setFont(font);
+            layout->addWidget(title);layout->addWidget(helpLabel(explanation));
+            auto* controls=new QWidget(section);
+            auto* sectionForm=createForm(controls);layout->addWidget(controls);
+            profileFieldsLayout->addWidget(section);
+            return sectionForm;
+        };
+        form=addMotionSection(QStringLiteral("smoothMotion"),QStringLiteral("Smooth motion"),
+            QStringLiteral("Blends frames to reduce cadence judder; adds buffering."));
+        auto* motionEngine=addChoice(QStringLiteral("Motion handling"),QStringLiteral("motion_engine"),
+            {QStringLiteral("auto"),QStringLiteral("vp"),QStringLiteral("smooth_motion")});
+        motionEngine->setItemText(motionEngine->findData("auto"),"Auto (whichever is set up; VP's when both)");
+        motionEngine->setItemText(motionEngine->findData("vp"),"VP (de-judder)");
+        motionEngine->setItemText(motionEngine->findData("smooth_motion"),"libplacebo smooth motion");
+        motionEngine->setToolTip(QStringLiteral(
+            "One or the other, never both, chosen by this profile's rules like everything else. VP: the de-judder "
+            "(its strengths on the Rendering page) and VP's motion work; smooth motion stays off. libplacebo smooth "
+            "motion: frame mixing with the mode below; VP's de-judder and its motion vectors stay off. "
+            "Deinterlacing is not affected by this choice."));
+        auto* smoothMotion=addChoice(QStringLiteral("Mode"),QStringLiteral("smooth_motion"),{QStringLiteral("off"),QStringLiteral("auto"),QStringLiteral("always")});
+        auto* frameMixer=addChoice(QStringLiteral("Mixing filter"),QStringLiteral("frame_mixer"),{QStringLiteral("oversample"),QStringLiteral("hermite"),QStringLiteral("linear"),QStringLiteral("cubic")});
+        form=addMotionSection(QStringLiteral("deinterlacing"),QStringLiteral("Deinterlacing"),
+            QStringLiteral("Converts interlaced video to progressive frames. Auto detects input."));
+        auto* deinterlacing=addChoice(QStringLiteral("Mode"),QStringLiteral("deinterlace"),{QStringLiteral("auto"),QStringLiteral("off"),QStringLiteral("force")});
+        auto* deinterlaceAlgorithm=addChoice(QStringLiteral("Algorithm"),QStringLiteral("deinterlace_algorithm"),{QStringLiteral("bwdif"),QStringLiteral("yadif"),QStringLiteral("bob"),QStringLiteral("weave")});
+        auto* fieldOrder=addChoice(QStringLiteral("Field order"),QStringLiteral("field_order"),{QStringLiteral("auto"),QStringLiteral("top"),QStringLiteral("bottom")});
+        form=addCollapsibleSection(QStringLiteral("deinterlacingAdvanced"),QStringLiteral("Advanced deinterlacing"),QStringLiteral("Output cadence and YADIF-specific tuning."),false);
+        auto* fieldCadence=addChoice(QStringLiteral("Output cadence"),QStringLiteral("deinterlace_cadence"),{QStringLiteral("field"),QStringLiteral("frame")});
+        auto* spatialCheck=addChoice(QStringLiteral("YADIF skip spatial check"),QStringLiteral("deinterlace_skip_spatial"),{QStringLiteral("false"),QStringLiteral("true")});
+        smoothMotion->setItemText(smoothMotion->findData("off"),"Off");
+        smoothMotion->setItemText(smoothMotion->findData("auto"),"Auto — only for cadence mismatch");
+        smoothMotion->setItemText(smoothMotion->findData("always"),"Always");
+        smoothMotion->setToolTip(QStringLiteral(
+            "libplacebo's frame mixing, used when Motion handling selects it (or, on Auto, when VP's de-judder "
+            "is not set up). Deinterlacing is not affected."));
+        fieldOrder->setItemText(fieldOrder->findData("auto"),"From input");
+        fieldOrder->setItemText(fieldOrder->findData("top"),"Top field first");
+        fieldOrder->setItemText(fieldOrder->findData("bottom"),"Bottom field first");
+        fieldCadence->setItemText(fieldCadence->findData("field"),"Field rate (preserve motion)");
+        fieldCadence->setItemText(fieldCadence->findData("frame"),"Frame rate");
+        for(auto* combo:{deinterlaceAlgorithm}) {
+            for(const auto& label: {QStringLiteral("bwdif"),QStringLiteral("yadif"),QStringLiteral("bob")})
+                combo->setItemText(combo->findData(label),label.toUpper());
+        }
+        const auto setMotionHelp=[&](QComboBox* combo,const QString& text) {
+            combo->setToolTip(text);
+            combo->setProperty("settingHelp",text);
+            if(auto* layout=qobject_cast<QFormLayout*>(combo->parentWidget()->layout()))
+                if(auto* label=layout->labelForField(combo))label->setToolTip(text);
+        };
+        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering."));
+        setMotionHelp(frameMixer,QStringLiteral("Applies only to smooth motion.\nOversample: default frame blending.\nHermite: smooth transition between neighboring frames.\nLinear: linear blend between neighboring frames.\nCubic: wider temporal filter using more neighboring frames, with more buffering.\nThese are libplacebo frame mixers, not image upscalers."));
+        setMotionHelp(deinterlacing,QStringLiteral("Applies to interlaced input.\nAuto: deinterlace only when input reports interlacing and a known field order (default).\nOff: leave input unchanged.\nForce: apply the selected algorithm even if input is reported progressive; field order must still be known or explicitly selected."));
+        setMotionHelp(deinterlaceAlgorithm,QStringLiteral("Applies only to deinterlacing.\nBWDIF: default temporal deinterlacer.\nYADIF: alternative temporal deinterlacer.\nBob: deinterlace each field without neighboring-frame references.\nWeave: preserve both fields in the original frame.\nBWDIF/YADIF use neighboring frames; missing references fall back to Bob."));
+        setMotionHelp(fieldOrder,QStringLiteral("The order in which interlaced fields were captured.\nFrom input: use capture metadata (default). Unknown order bypasses deinterlacing.\nTop/Bottom field first: override missing or incorrect metadata. An incorrect order can cause uneven motion."));
+        setMotionHelp(fieldCadence,QStringLiteral("Applies only to deinterlacing.\nField rate: submit both fields as separate progressive images to preserve motion (default), limited by the actual display refresh rate.\nFrame rate: submit one field-derived image per source frame."));
+        setMotionHelp(spatialCheck,QStringLiteral("Applies only to YADIF. False keeps its spatial check enabled (default). True skips that check. Leave False unless you specifically need this YADIF option."));
+        updateToneControls=[smoothMotion,frameMixer,deinterlacing,deinterlaceAlgorithm,fieldOrder,fieldCadence,spatialCheck] {
+            frameMixer->setEnabled(smoothMotion->currentData().toString()!="off");
+            const bool enabled=deinterlacing->currentData().toString()!="off";
+            deinterlaceAlgorithm->setEnabled(enabled);fieldOrder->setEnabled(enabled);fieldCadence->setEnabled(enabled);
+            spatialCheck->setEnabled(enabled&&deinterlaceAlgorithm->currentData().toString()=="yadif");
+        };
+        for(auto* combo:{smoothMotion,deinterlacing,deinterlaceAlgorithm})connect(combo,qOverload<int>(&QComboBox::currentIndexChanged),this,[updateToneControls]{updateToneControls();});
+
+    }
 	else if (sectionPrefix == QStringLiteral("vprenderer.scaling"))
 	{
 		form = addPlainForm();
@@ -7212,8 +7301,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		addRendererAutoStatus(QStringLiteral("upscaler"), upscaler);
 		auto* chromaUpscaler = addChoice(QStringLiteral("Chroma upscaler"),
 			QStringLiteral("chroma_upscaler"), { QStringLiteral("AUTO"),
-			QStringLiteral("catmull_rom"), QStringLiteral("lanczos"), QStringLiteral("ewa_lanczossharp"),
-			QStringLiteral("upscaler"), QStringLiteral("bicubic"), QStringLiteral("bilinear") });
+			QStringLiteral("catmull_rom"), QStringLiteral("lanczos"), QStringLiteral("ewa_lanczos"),
+			QStringLiteral("ewa_lanczossharp"), QStringLiteral("upscaler"), QStringLiteral("bicubic"),
+			QStringLiteral("bilinear") });
 		chromaUpscaler->setItemText(chromaUpscaler->findData(QStringLiteral("upscaler")),
 			QStringLiteral("Same as the upscaler (the earlier behaviour)"));
 		chromaUpscaler->setToolTip(QStringLiteral(
@@ -7232,7 +7322,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		downscaler->setItemText(downscaler->findData(QStringLiteral("gpu")),
 			QStringLiteral("Built-in GPU sampling"));
 		addRendererAutoStatus(QStringLiteral("downscaler"), downscaler);
-		auto* antiRinging = addChoice(QStringLiteral("Anti-ringing"),
+		auto* antiRinging = addChoice(QStringLiteral("Sigmoid upscaling"),
 			QStringLiteral("sigmoid"), { QStringLiteral("AUTO"),
 			QStringLiteral("on"), QStringLiteral("off") });
 		antiRinging->setToolTip(QStringLiteral(
@@ -7322,6 +7412,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         number(QStringLiteral("Background opacity"),QStringLiteral("subtitle_generated_gray_opacity"),0,1,QStringLiteral("0–1"));
         number(QStringLiteral("Background blur"),QStringLiteral("subtitle_generated_gray_blur_px"),0,30,QStringLiteral("source pixels"));
         number(QStringLiteral("Brightness limit"),QStringLiteral("subtitle_generated_gray_max_luminance"),0.01,1,QStringLiteral("linear 0.01–1"));
+        auto* cleanupFill=addChoice(QStringLiteral("Old subtitle area fill"),QStringLiteral("cleanup_fill"),
+            {QStringLiteral("mirror"),QStringLiteral("stretch"),QStringLiteral("temporal")},false);
+        cleanupFill->setItemText(0,QStringLiteral("Mirror nearby picture"));
+        cleanupFill->setItemText(1,QStringLiteral("Stretch clean picture"));
+        cleanupFill->setItemText(2,QStringLiteral("Temporal clean frame"));
+        cleanupFill->setToolTip(QStringLiteral("Stretch fills only the old subtitle area inside the picture from a nearby clean strip. It needs at least half a clean picture height and falls back to mirror. Temporal uses a matching clean frame and also falls back to mirror."));
         form = addCollapsibleSection(QStringLiteral("hdr_analysis"),
             QStringLiteral("HDR analysis"), QStringLiteral("Protect HDR analysis from subtitles in every processing style."), false);
 		pictureOnlyHdrAnalysis = addBoolean(
@@ -7564,14 +7660,60 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     }
     if (sectionPrefix == QStringLiteral("lldv"))
     {
-        detailLayout->addWidget(helpLabel(QStringLiteral(
-            "Uses the selected profile for recognized HDFury LLDV input and sends the same effective metadata to DirectShow and VP Renderer.")));
-        detailLayout->addWidget(bindCheckField(QStringLiteral("Alternate LLDV detection"),
+        dvModeControls = new QWidget;
+        auto* modeLayout = new QVBoxLayout(dvModeControls);
+        modeLayout->setContentsMargins(0, 0, 0, 0);
+        modeLayout->setSpacing(8);
+        modeLayout->addWidget(new QLabel(QStringLiteral("Input mode")));
+        auto* choices = new QHBoxLayout;
+        choices->setSpacing(28);
+        dvLldvMode = new QRadioButton(QStringLiteral("LLDV"));
+        dvLldvMode->setObjectName(QStringLiteral("config.dv.mode.lldv"));
+        auto* tunneling = new QRadioButton(QStringLiteral("DV Tunneling"));
+        tunneling->setObjectName(QStringLiteral("config.dv.mode.tunneling"));
+        auto* modes = new QButtonGroup(dvModeControls);
+        modes->addButton(dvLldvMode);
+        modes->addButton(tunneling);
+        choices->addWidget(dvLldvMode);
+        choices->addWidget(tunneling);
+        choices->addStretch();
+        modeLayout->addLayout(choices);
+        auto* summary = helpLabel(QStringLiteral(
+            "DV Tunneling uses VP Renderer and needs no additional input settings."));
+        modeLayout->addWidget(summary);
+        detailLayout->insertWidget(2, dvModeControls);
+        fields->push_back({ QStringLiteral("dolby_vision_tunnel"), tunneling, Field::DvMode });
+
+        auto* lldvSettings = new QWidget;
+        lldvSettings->setObjectName(QStringLiteral("config.dv.lldv_settings"));
+        auto* lldvLayout = new QVBoxLayout(lldvSettings);
+        lldvLayout->setContentsMargins(0, 0, 0, 0);
+        lldvLayout->setSpacing(12);
+        lldvLayout->addWidget(helpLabel(QStringLiteral(
+            "Uses this profile's metadata for recognized HDFury LLDV input with DirectShow and VP Renderer.")));
+        lldvLayout->addWidget(bindCheckField(QStringLiteral("Alternate LLDV detection"),
             QStringLiteral("general"), QStringLiteral("newlldv")));
-        detailLayout->addWidget(helpLabel(QStringLiteral(
-            "Applies to all LLDV profiles. Uses VP's newer LLDV detection heuristic. Restart VideoProcessor after changing this setting.")));
+        lldvLayout->addWidget(helpLabel(QStringLiteral(
+            "Alternate detection applies to all LLDV profiles. Restart VideoProcessor after changing it.")));
+        lldvLayout->addWidget(profileFields);
+        detailLayout->addWidget(lldvSettings);
+        updateDvModeControls = [tunneling, lldvSettings, summary]()
+        {
+            lldvSettings->setVisible(!tunneling->isChecked());
+            summary->setVisible(tunneling->isChecked());
+        };
+        connect(tunneling, &QRadioButton::toggled, this,
+            [this, state, updateDvModeControls](bool enabled)
+        {
+            updateDvModeControls();
+            if (state->loading || state->section.isEmpty() || !document_) return;
+            document_->SetKnown(state->section.toStdString(), "dolby_vision_tunnel",
+                enabled ? "true" : "false");
+            markDirty();
+        });
     }
-    detailLayout->addWidget(profileFields);
+    else if(sectionPrefix==QStringLiteral("vprenderer.motion"))detailLayout->insertWidget(2,profileFields);
+    else detailLayout->addWidget(profileFields);
     detailLayout->addStretch();
 
     const auto updateQueuePolicyPresentation = [queuePolicy, queuePolicySummary,
@@ -7632,7 +7774,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		profileFields, sectionPrefix, anamorphicEnabled, anamorphicValue,
 		hdrAnalysisMode, pictureOnlyHdrAnalysis,
 		motionCompensatedHdrAnalysis, hdrAnalysisHeight, hdrAnalysisPosition,
-        deprecatedViewportAlias, queuePolicy, updateQueuePolicyFromValues, updateOutputCompatibility, updateToneControls](QListWidgetItem* current)
+        deprecatedViewportAlias, queuePolicy, updateQueuePolicyFromValues, updateOutputCompatibility, updateToneControls, dvModeControls, dvLldvMode, updateDvModeControls](QListWidgetItem* current)
     {
         state->loading = true;
         state->section = current ? current->data(Qt::UserRole).toString() : QString();
@@ -7643,6 +7785,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         useRule->setEnabled(available);
         rule->setEnabled(available && useRule->isChecked());
         profileFields->setEnabled(available);
+        if (dvModeControls) dvModeControls->setEnabled(available);
         remove->setEnabled(available && list->count() > 1);
         up->setEnabled(available && list->currentRow() > 0);
         down->setEnabled(available && list->currentRow() + 1 < list->count());
@@ -7733,6 +7876,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if(key == QStringLiteral("subtitle_generated_gray_opacity")) return QStringLiteral("0.85");
                 if(key == QStringLiteral("subtitle_generated_gray_blur_px")) return QStringLiteral("3");
                 if(key == QStringLiteral("subtitle_generated_gray_max_luminance")) return QStringLiteral("0.16");
+                if(key == QStringLiteral("temporal_fill")) return QStringLiteral("false");
+                if(key == QStringLiteral("cleanup_fill"))
+                    return value(section,QStringLiteral("temporal_fill")).compare(QStringLiteral("true"),Qt::CaseInsensitive)==0
+                        ? QStringLiteral("temporal") : QStringLiteral("mirror");
             }
             if (sectionPrefix == QStringLiteral("vprenderer.zoom"))
             {
@@ -7746,6 +7893,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             if (sectionPrefix == QStringLiteral("lldv"))
             {
+                if (key == QStringLiteral("dolby_vision_tunnel"))
+                    return value(QStringLiteral("general"), key,
+                        value(QStringLiteral("command_line"), key, QStringLiteral("false")));
                 QString enabled = value(QStringLiteral("general"), QStringLiteral("newlldv"));
                 if (enabled.isEmpty()) enabled = value(QStringLiteral("general"), QStringLiteral("new_lldv"));
                 if (enabled.isEmpty()) enabled = value(QStringLiteral("command_line"), QStringLiteral("newlldv"));
@@ -7804,6 +7954,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
                 return QStringLiteral("AUTO");
+            }
+            if(sectionPrefix==QStringLiteral("vprenderer.motion")) {
+                if(key=="motion_engine")return "auto";
+                if(key=="smooth_motion")return "off";
+                if(key=="frame_mixer")return "oversample";
+                if(key=="deinterlace")return "auto";
+                if(key=="deinterlace_algorithm")return "bwdif";
+                if(key=="field_order")return "auto";
+                if(key=="deinterlace_cadence")return "field";
+                if(key=="deinterlace_skip_spatial")return "false";
             }
             return {};
         };
@@ -7930,11 +8090,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             {
                 if (!field.widget->property("settingHelp").isValid())
                     field.widget->setProperty("settingHelp", field.widget->toolTip());
-                field.widget->setToolTip(field.widget->property("settingHelp").toString() + QStringLiteral("\n") + (raw.isEmpty() ?
-                (defaultProfile ?
+                QStringList tooltipParts;
+                const QString settingHelp=field.widget->property("settingHelp").toString().trimmed();
+                if(!settingHelp.isEmpty())tooltipParts.push_back(settingHelp);
+                if(raw.isEmpty())tooltipParts.push_back(defaultProfile ?
                     QStringLiteral("Using the built-in default. Editing creates an explicit setting.") :
-                    QStringLiteral("Inherited from the default profile. Editing creates an override.")) :
-                    QString()));
+                    QStringLiteral("Inherited from the default profile. Editing creates an override."));
+                field.widget->setToolTip(tooltipParts.join(u'\n'));
             }
             field.widget->style()->unpolish(field.widget);
             field.widget->style()->polish(field.widget);
@@ -7970,6 +8132,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     retained ? QStringLiteral("Saved behavior retained: conditional SDR gamma processing. Click the checkbox to select explicit gamma processing.") :
                     mode == QStringLiteral("on") ? QStringLiteral("Compensate for calibrated display gamma to produce the desired SDR gamma when no usable LUT is attached.") :
                     QStringLiteral("No SDR gamma adjustment without a LUT. A usable LUT handles calibration; other processing still applies."));
+            }
+            else if (field.kind == Field::DvMode)
+            {
+                const bool tunnel = configuredBooleanValue(configured, false);
+                if (tunnel) qobject_cast<QRadioButton*>(field.widget)->setChecked(true);
+                else dvLldvMode->setChecked(true);
             }
             else if (field.kind == Field::Boolean)
             {
@@ -8128,6 +8296,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			}
 		}
         updateToneControls();
+        updateDvModeControls();
 		if (sectionPrefix == QStringLiteral("vprenderer.viewport"))
 		{
 			auto* alignment = profileFields->findChild<QComboBox*>(
@@ -8269,6 +8438,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 });
     }
 
+    if(document_ && sectionPrefix==QStringLiteral("vprenderer.motion") && profileSections(sectionPrefix).isEmpty()) {
+        document_->AddSection("vprenderer.motion");
+        const std::pair<const char*,const char*> defaults[]={
+            {"label","Default"},{"motion_engine","auto"},{"smooth_motion","off"},{"frame_mixer","oversample"},
+            {"deinterlace","auto"},{"deinterlace_algorithm","bwdif"},{"field_order","auto"},
+            {"deinterlace_cadence","field"},{"deinterlace_skip_spatial","false"}};
+        for(const auto& entry:defaults)document_->SetKnown("vprenderer.motion",entry.first,entry.second);
+    }
     ProfileListPolicy listPolicy;
     listPolicy.sections = [this, sectionPrefix]
         { return profileSections(sectionPrefix); };
@@ -8492,6 +8669,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     splitter->addWidget(createCard(QStringLiteral("Profiles"),
         QStringLiteral("The first profile in the list is the default. Add, remove, or reorder profiles here."), listContent));
     auto* detailsCard=createCard(QStringLiteral("Profile details"),
+        sectionPrefix == QStringLiteral("lldv") ?
+        QStringLiteral("Choose this profile's input mode, shortcut, and rule.") :
+        sectionPrefix==QStringLiteral("vprenderer.motion") ? QStringLiteral("Configure playback processing; shortcuts and rules follow below.") :
         QStringLiteral("Shortcut and rule come first, followed by profile-specific settings."), detail);
     if(sectionPrefix==QStringLiteral("vprenderer.subtitles"))
         detailsCard->layout()->setSizeConstraint(QLayout::SetMinimumSize);
@@ -8719,10 +8899,10 @@ QWidget* ConfigEditorWindow::createZoomPage()
 		QStringLiteral("vprenderer.zoom"));
 }
 
-QWidget* ConfigEditorWindow::createLldvPage()
+QWidget* ConfigEditorWindow::createDvPage()
 {
-    return createProfilePage(QStringLiteral("LLDV"),
-        QStringLiteral("Configure ordered LLDV metadata profiles shared by every renderer. The first profile is the default."),
+    return createProfilePage(QStringLiteral("DV"),
+        QStringLiteral("Configure Dolby Vision profiles. Each profile selects DV Tunneling or LLDV."),
         QStringLiteral("lldv"));
 }
 

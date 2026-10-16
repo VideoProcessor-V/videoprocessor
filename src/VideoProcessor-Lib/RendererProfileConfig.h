@@ -13,6 +13,7 @@
 #include "AspectRatio.h"
 #include "HdrTargetLuminance.h"
 #include "ToneMappingTuning.h"
+#include "MotionConfig.h"
 
 #include <algorithm>
 #include <cctype>
@@ -303,6 +304,8 @@ namespace RendererProfileConfig
 	// effective default when no profile field supplies it.
 	struct ResolvedLldv
 	{
+		bool hasDolbyVisionTunnel = false;
+		bool dolbyVisionTunnel = false;
 		std::string group = "lldv";
 		std::string profile;
 		bool hasMaxCll = false;
@@ -313,6 +316,12 @@ namespace RendererProfileConfig
 		double masteringMinLuminance = 0.0;
 		bool hasMasteringMaxLuminance = false;
 		double masteringMaxLuminance = 0.0;
+
+		// Old configurations continue to use the application/command-line flag.
+		bool UseDolbyVisionTunnel(bool legacyEnabled) const
+		{
+			return hasDolbyVisionTunnel ? dolbyVisionTunnel : legacyEnabled;
+		}
 
 		LldvMetadata EffectiveMetadata(bool useNewLldvHeuristic) const
 		{
@@ -578,7 +587,8 @@ namespace RendererProfileConfig
             if (key == "hdr_peak_analysis_picture_only" || key == "hdr_peak_analysis_motion_compensation") return IsBoolean(value);
             if (key == "hdr_peak_analysis_height_percent") { int n=0; return ParseInteger(value,MIN_HDR_PEAK_ANALYSIS_HEIGHT_PERCENT,MAX_HDR_PEAK_ANALYSIS_HEIGHT_PERCENT,n); }
             if (key == "hdr_peak_analysis_position") return IsChoice(value,{"top","center","bottom"});
-            if (key == "rounded_corners") return IsBoolean(value);
+            if (key == "rounded_corners" || key == "temporal_fill") return IsBoolean(value);
+            if (key == "cleanup_fill") return IsChoice(value, { "mirror", "stretch", "temporal" });
             if (key == "background_edge") return IsChoice(value, { "extend", "float" });
             if (key == "text_reduction_percent") { int n=0; return ParseInteger(value,0,75,n); }
             if (key == "minimum_headroom_pixels") { int n=0; return ParseInteger(value,0,200,n); }
@@ -707,6 +717,19 @@ namespace RendererProfileConfig
 			if (key == "sdr_adjust_gamma") return IsChoice(value, { "auto", "on", "off", "passthrough" });
 			expected = "an input-owned setting"; return false;
 		}
+        if (group == "motion") {
+            // VP's motion handling or libplacebo's smooth motion, one or the
+            // other (owner 2026-10-15); auto = whichever is configured, VP's when both.
+            if(key=="motion_engine")return IsChoice(value,{"auto","vp","smooth_motion"});
+            if(key=="smooth_motion")return IsChoice(value,{"off","auto","always"});
+            if(key=="frame_mixer")return IsChoice(value,{"oversample","hermite","linear","cubic"});
+            if(key=="deinterlace")return IsChoice(value,{"auto","off","force"});
+            if(key=="deinterlace_algorithm")return IsChoice(value,{"weave","bob","yadif","bwdif"});
+            if(key=="field_order")return IsChoice(value,{"auto","top","bottom"});
+            if(key=="deinterlace_cadence")return IsChoice(value,{"field","frame"});
+            if(key=="deinterlace_skip_spatial")return IsBoolean(value);
+            expected="a motion-owned setting";return false;
+        }
 		if (group == "scaling")
 		{
 			if (key == "quality") return IsChoice(value, { "fast", "balanced", "high" });
@@ -715,7 +738,7 @@ namespace RendererProfileConfig
 			// planes to the luma size). auto = Catmull-Rom (owner: visually identical
 			// to the polar filter on his clip, about 1/7 of its cost); upscaler = the
 			// main upscaler (Bill's VP).
-			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "upscaler", "ewa_lanczossharp", "lanczos", "catmull_rom", "bicubic", "bilinear" });
+			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 			if (key == "downscaler")
 			{
 				// Accept the two removed spellings only as legacy input so an old
@@ -886,6 +909,7 @@ namespace RendererProfileConfig
 		}
 		if (group == "lldv")
 		{
+			if (key == "dolby_vision_tunnel") return IsBoolean(value);
 			if (key == "max_cll" || key == "max_fall" ||
 				key == "mastering_min_luminance")
 				return IsNumberInRange(value, 0.0,
@@ -901,7 +925,7 @@ namespace RendererProfileConfig
 	inline bool ValidateBaseSetting(const std::string& key, const std::string& value)
 	{
 		std::string ignored;
-		for (const char* group : { "input", "scaling", "display", "output", "viewport" })
+		for (const char* group : { "input", "scaling", "motion", "display", "output", "viewport" })
 			if (ValidateProfileSetting(group, key, value, ignored)) return true;
 		if (key == "video_conversion")
 			return IsChoice(value, { "none", "off", "v210_to_p010", "uyvy_to_p010" });
@@ -961,7 +985,7 @@ namespace RendererProfileConfig
 		std::string ignored;
 		// Legacy [vpvr.display] and literal [vprenderer] files may still carry
 		// output transport. Current files keep transport in [vprenderer.color.*].
-		for (const char* group : { "input", "scaling", "display", "output" })
+		for (const char* group : { "input", "scaling", "motion", "display", "output" })
 			if (ValidateProfileSetting(group, key, value, ignored)) return true;
 		return key == "deband" &&
 			IsChoice(value, { "auto", "on", "off" });
@@ -1148,7 +1172,7 @@ namespace RendererProfileConfig
 
 	inline bool IsRendererChildNamespace(const std::string& name)
 	{
-		for (const char* child : { "input", "input_processing", "scaling", "color", "output", "viewport", "zoom", "subtitles" })
+		for (const char* child : { "input", "input_processing", "scaling", "motion", "color", "output", "viewport", "zoom", "subtitles" })
 		{
 			const std::string root(child);
 			if (name == root ||
@@ -1378,6 +1402,7 @@ namespace RendererProfileConfig
 		const GroupSpec specs[] = {
 			{ "input", "vprenderer.input", true },
 			{ "scaling", "vprenderer.scaling", true },
+            { "motion", "vprenderer.motion", true },
 			{ "display", "vprenderer", false },
 			{ "color", "vprenderer.color", true },
 
@@ -1444,7 +1469,7 @@ namespace RendererProfileConfig
 				{
                     if (std::string(spec.name) != "subtitles" && IsLegacySubtitleKey(entry.first)) continue;
 					if ((std::string(spec.name) == "viewport" ||
-						std::string(spec.name) == "zoom" || std::string(spec.name) == "subtitles") && entry.first == "label")
+						std::string(spec.name) == "zoom" || std::string(spec.name) == "subtitles" || std::string(spec.name) == "motion") && entry.first == "label")
 					{
 						base.label = entry.second;
 						continue;
@@ -1598,7 +1623,7 @@ namespace RendererProfileConfig
 				{
                     if (std::string(spec.name) != "subtitles" && IsLegacySubtitleKey(entry.first)) continue;
 					if ((std::string(spec.name) == "viewport" ||
-						std::string(spec.name) == "zoom" || std::string(spec.name) == "subtitles") && entry.first == "label")
+						std::string(spec.name) == "zoom" || std::string(spec.name) == "subtitles" || std::string(spec.name) == "motion") && entry.first == "label")
 					{
 						profile.label = entry.second;
 						continue;
@@ -2053,7 +2078,7 @@ namespace RendererProfileConfig
 		}
 
 		const std::vector<std::string> expectedGroups = {
-			"input", "scaling", "display", "color", "output", "viewport",
+			"input", "scaling", "motion", "display", "color", "output", "viewport",
 			"zoom", "subtitles", "queue", "lldv" };
 		for (const std::string& groupName : expectedGroups)
 		{
@@ -2991,6 +3016,16 @@ namespace RendererProfileConfig
 		}
 		lldv.profile = profile->second.name;
 		const auto& settings = profile->second.settings;
+		const auto mode = settings.find("dolby_vision_tunnel");
+		if (mode != settings.end())
+		{
+			if (!ParseBoolean(mode->second, lldv.dolbyVisionTunnel))
+			{
+				error = "[lldv." + lldv.profile + "] dolby_vision_tunnel is invalid";
+				return false;
+			}
+			lldv.hasDolbyVisionTunnel = true;
+		}
 		auto resolve = [&](const char* key, bool& configured,
 			double& destination, bool strictlyPositive) -> bool
 		{

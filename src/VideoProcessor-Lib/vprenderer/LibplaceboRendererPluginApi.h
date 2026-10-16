@@ -1,6 +1,7 @@
 #pragma once
 
 #include <IRenderer.h>
+#include <AnalysisDiagnosticTrace.h>
 #include <ITimingClock.h>
 #include <VideoConversionOverride.h>
 
@@ -13,8 +14,10 @@
 // so this is the fail-closed ABI boundary for a mismatched pair.
 // 25: GetDejudderStatus (stage 6b-2b, FL35) and, separately, Bill's rc4 Beta
 // flavor export; 26: both together (rc4 merge); 27: Suspend/ResumeLedDrive
-// for the RS-232 connection test (FL35).
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 27;
+// for the RS-232 connection test (FL35); 28 (Bill, v1.4.02): the analysis
+// diagnostic sink, Dolby luminance, chroma/motion profiles; 29: 27 and 28
+// together (v1.4.02 merge, 2026-10-15).
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 29;
 static constexpr const char* VP_LIBPLACEBO_FLAVOR_EXPORT = "VideoProcessorLibplaceboIsBeta";
 static constexpr const char* VP_LIBPLACEBO_VERSION_EXPORT =
 	"VideoProcessorLibplaceboGetApiVersion";
@@ -37,3 +40,8 @@ using VideoProcessorLibplaceboCreateRendererFn = IVideoRenderer* (__cdecl *)(
 	VideoProcessorLibplaceboLogSink logSink);
 using VideoProcessorLibplaceboDestroyRendererFn = void (__cdecl *)(
 	IVideoRenderer* renderer);
+
+static constexpr const char* VP_LIBPLACEBO_DIAGNOSTIC_EXPORT = "VideoProcessorLibplaceboConfigureAnalysisDiagnosticSink";
+using VideoProcessorLibplaceboConfigureDiagnosticFn = void (__cdecl *)(void*,
+    AnalysisDiagnosticTrace::RecordSink, AnalysisDiagnosticTrace::FrameSink,
+    AnalysisDiagnosticTrace::FrameCaptureActiveCallback);

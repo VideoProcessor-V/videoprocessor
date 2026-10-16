@@ -118,6 +118,7 @@ static_assert(WM_MESSAGE_RENDERER_ACTION_EVENT !=
 #define QUEUE_PROFILE_RESET_TIMER_ID 14
 #define PROFILE_CHANGE_OVERLAY_TIMER_ID 15
 #define ASPECT_OSD_TIMER_ID 16
+#define ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID 17
 #define CONFIGURATION_EDITOR_HOTKEY_ID 0x5650
 #define SHADER_RULE_REFRESH_INTERVAL_MS 25
 #define CONFIGURATION_LIVE_APPLY_INTERVAL_MS 250
@@ -179,6 +180,7 @@ public:
 	void SceneCorrectionUpstreamSample(bool enabled);
 	void SubtitleRepositioning(SubtitleRepositionMode mode);
 	void EnableNewLldvHeuristic(bool enabled = true);
+	void EnableDolbyVisionTunnel(bool enabled = true);
 	void EnableBoundedInvalidCaptureRecovery(bool enabled);
 	void SetLldvMaxCll(double value);
 	void SetLldvMaxFall(double value);
@@ -289,6 +291,7 @@ public:
 	void OnCommandAutoSet();
 	void OnCommandToggleStatsOverlay();
 	void OnCommandCaptureRenderedOutput();
+	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
 
 	// ICaptureDeviceDiscovererCallback
@@ -336,6 +339,9 @@ protected:
 	// Optional LLDV heuristic.  DeckLink does not expose the HDMI VSIF, so
 	// BT.2020 + SDR + no static HDR metadata is only a best-effort signal.
 	bool m_useNewLldvHeuristic = false;
+	bool m_enableDolbyVisionTunnel = false;
+	// -1 preserves the legacy global flag; 0/1 comes from the active DV profile.
+	int m_profileDolbyVisionTunnelOverride = -1;
 	// Tester-facing LLDV diagnostics are emitted only when the decision or
 	// effective result changes, rather than for every state rebuild.
 	std::string m_lastLldvDecisionDiagnostic;
@@ -511,6 +517,9 @@ protected:
 	HWND m_configurationEditorPresentationTarget = nullptr;
 	ULONGLONG m_configurationEditorPresentationQueuedTick = 0;
 	bool m_configurationEditorPresentationTimeoutLogged = false;
+	CString m_analysisDiagnosticCaptionBeforeStatus;
+	ULONGLONG m_analysisDiagnosticCaptionUntilTick = 0;
+	bool m_analysisDiagnosticCaptionActive = false;
 	WORD m_lastBackgroundShortcutCommand = 0;
 	ULONGLONG m_lastBackgroundShortcutTick = 0;
 	HANDLE m_configurationChangedEvent = nullptr;
@@ -1102,7 +1111,6 @@ protected:
 	void ReloadConfiguredAccelerators();
 	void StartGlobalShortcutObserver();
 	void StopGlobalShortcutObserver();
-	void RequestPresentationFocus(const char* reason, unsigned int generation);
 	void ToggleConfigurationEditor();
 	void StartConfigurationEditorInTray();
 	// Legacy activation-intent cleanup retained for source compatibility only;

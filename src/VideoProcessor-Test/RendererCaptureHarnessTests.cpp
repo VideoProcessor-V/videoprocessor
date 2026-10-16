@@ -165,6 +165,10 @@ namespace
 
 	// The harness's frame size (1080p unless a test sets it; the 4K stress run).
 	int g_harnessWidth = 1920, g_harnessHeight = 1080;
+	// Shader profile sections the run selects after Build (e.g. "standard.sigma_delta";
+	// their [shader.*] sections go in the configuration's extra text).
+	std::vector<std::string> g_harnessShaderProfiles;
+	bool g_harnessShadersSelected = false;
 
 	// Stream faults (owner 2026-10-14): what each captured frame does. The
 	// default plan is the plain stream at the run's rate.
@@ -255,6 +259,23 @@ namespace
 			state->eotf = EOTF::SDR;
 			renderer->OnVideoState(state);
 			renderer->Build();
+			// As the app does: the monitor's refresh rate (smooth motion needs it;
+			// it does not come from the window's frame statistics).
+			{
+				DEVMODEW mode{};
+				mode.dmSize = sizeof(mode);
+				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+					renderer->SetRenderLoadDisplayRefreshRate(static_cast<double>(mode.dmDisplayFrequency));
+			}
+			g_harnessShadersSelected = false;
+			if (!g_harnessShaderProfiles.empty())
+			{
+				CString activeShaders;
+				bool restart = false;
+				g_harnessShadersSelected = renderer->SelectShaderProfiles(g_harnessShaderProfiles, activeShaders, restart);
+				if (restart)
+					renderer->Build();
+			}
 			renderer->SetQueueFramePolicy(2, film ? 4 : 3, true);
 			renderer->Start();
 			// A ring of frames that outlives anything the queue holds.
@@ -697,6 +718,68 @@ namespace Tests
 			}
 			g_harnessWidth = 1920;
 			g_harnessHeight = 1080;
+		}
+
+		TEST_METHOD(MotionEnginesCoexistWithVpShaders)
+		{
+			// v1.4.02 merge (owner 2026-10-15): libplacebo's smooth motion (Bill's)
+			// and VP's motion handling are one or the other (motion_engine), and
+			// VP's shaders keep working with either: the sigma-delta dither, the
+			// SSIM downscaler with the adaptive blend, the de-judder settings. Off
+			// the screen: the harness gives the renderer the monitor's refresh rate
+			// as the app does.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const std::string shaders =
+				"[shader.standard]\ntype: multi\nlabel: Off\n"
+				"[shader.standard.ssim_downscaler]\nshader_type: custom\nlabel: SSimDownscaler\nstage: post_resize\norder: 20\nglsl_file: SSimDownscaler.glsl\n"
+				"[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\nstage: post_resize\norder: 90\nglsl_file: Temporal sigma-delta.glsl\n";
+			g_harnessShaderProfiles = { "standard.ssim_downscaler", "standard.sigma_delta" };
+			struct Case { const char* name; bool film; const char* profile; const char* motion; bool smooth; };
+			const Case cases[] = {
+				{ "23.976p, smooth motion selected", true, "dejudder_strength: 0.25\nadaptive_downscale: on\n",
+					"motion_engine: smooth_motion\nsmooth_motion: always\n", true },
+				{ "23.976p, VP selected", true, "dejudder_strength: 0.25\nadaptive_downscale: on\n",
+					"motion_engine: vp\nsmooth_motion: always\n", false },
+				{ "23.976p, auto with only smooth motion set", true, "adaptive_downscale: on\n",
+					"smooth_motion: always\n", true },
+				{ "59.94p, smooth motion selected", false, "adaptive_downscale: on\n",
+					"motion_engine: smooth_motion\nsmooth_motion: always\n", true } };
+			int failures = 0;
+			for (const Case& c : cases)
+			{
+				const std::string extra = std::string(c.profile) + "[vprenderer.motion]\n" + c.motion + shaders;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, c.film, extra);
+				const std::wstring name(c.name, c.name + strlen(c.name));
+				Logger::WriteMessage((std::string(c.name) + ": shaders selected " + (g_harnessShadersSelected ? "yes" : "no")).c_str());
+				for (const std::string& line : r.log)
+					if (line.find("Motion engine:") != std::string::npos || line.find("Motion: smooth motion mixing") != std::string::npos ||
+						line.find("De-judder: smooth motion") != std::string::npos || line.find("Sigma-delta vectors") != std::string::npos)
+						Logger::WriteMessage(("   " + line).c_str());
+				Assert::IsTrue(g_harnessShadersSelected, (name + L": the shaders were selected\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("extra render failed") || r.Logged("extra present failed"),
+					(name + L": no render failure\n" + r.Tail()).c_str());
+				if (c.smooth)
+				{
+					Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (name + L": smooth motion is the engine\n" + r.Tail()).c_str());
+					Assert::IsTrue(r.Logged("Motion: smooth motion mixing on"), (name + L": frames were mixed\n" + r.Tail()).c_str());
+					Assert::IsFalse(r.Logged("De-judder: motion estimated"), (name + L": no de-judder estimate (no vectors)\n" + r.Tail()).c_str());
+					Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
+				}
+				else
+				{
+					Assert::IsTrue(r.Logged("Motion engine: VP"), (name + L": VP is the engine\n" + r.Tail()).c_str());
+					Assert::IsFalse(r.Logged("Motion: smooth motion mixing on"), (name + L": no mixing\n" + r.Tail()).c_str());
+					Assert::IsTrue(r.Logged("De-judder: motion estimated"), (name + L": the de-judder ran\n" + r.Tail()).c_str());
+				}
+				failures += r.presented ? 0 : 1;
+			}
+			g_harnessShaderProfiles.clear();
+			Assert::AreEqual(0, failures);
 		}
 
 		TEST_METHOD(EarlyUploadRunsThroughTheRenderer)

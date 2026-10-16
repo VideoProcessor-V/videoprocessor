@@ -1581,7 +1581,7 @@ void testQueueFrameRateRuleIsAPlainControl()
     QCoreApplication::processEvents();
     apply->click();
     QCoreApplication::processEvents();
-    require(!readBytes(path).contains("source_rate") && !readBytes(path).contains("cadence"), "Switching the frame-rate rule off did not remove it");
+    require(!readBytes(path).contains("source_rate") && !readBytes(path).contains("${cadence}"), "Switching the frame-rate rule off did not remove it");
 }
 
 void testQueueTargetDelayIsOnTheQueuePage()
@@ -1737,8 +1737,8 @@ void testEveryPageRoundTrips()
 
     QStackedWidget* pages = requireControl<QStackedWidget>(window,
         QStringLiteral("settingsPages"));
-    require(pages->count() == 22,
-        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, LED drive and Updates pages were not added as dedicated settings pages");
+    require(pages->count() == 23,
+        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, LED drive, Updates and Motion pages were not added as dedicated settings pages");
     for (QPushButton* button : window.findChildren<QPushButton*>())
         require(!button->property("navChild").toBool(),
             "Grouped settings still expose child entries in the left navigation");
@@ -1779,7 +1779,7 @@ void testEveryPageRoundTrips()
     requireTabs({ QStringLiteral("Rendering"), QStringLiteral("Color / Output"),
         QStringLiteral("Scaling"),
         QStringLiteral("Screen"), QStringLiteral("Zoom"), QStringLiteral("Subtitles"),
-        QStringLiteral("Processing") });
+        QStringLiteral("Motion"), QStringLiteral("Processing") });
     directShow->click();
     requireTabs({ QStringLiteral("General"), QStringLiteral("Input Processing") });
     shortcutsNavigation->click();
@@ -2387,18 +2387,20 @@ void testRendererSectionTabsRemainSynchronizedDuringRapidClicks()
     requireTabs({ QStringLiteral("Rendering"), QStringLiteral("Color / Output"),
         QStringLiteral("Scaling"),
         QStringLiteral("Screen"), QStringLiteral("Zoom"), QStringLiteral("Subtitles"),
-        QStringLiteral("Processing") });
+        QStringLiteral("Motion"), QStringLiteral("Processing") });
     runSequence({
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
         { 3, 4, "Screen", "config.vprenderer.viewport.profiles" },
         { 4, 18, "Zoom", "config.vprenderer.zoom.crop_narrower_content_to_fill_screen" },
         { 5, 19, "Subtitles", "config.vprenderer.subtitles.profiles" },
-        { 6, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
+        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after LED drive (20) and Updates (21)
+        { 7, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
         { 2, 17, "Scaling", "config.vprenderer.scaling.profiles" },
         { 0, 2, "Rendering", "config.vprenderer.profiles" },
         { 5, 19, "Subtitles", "config.vprenderer.subtitles.profiles" },
-        { 6, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
+        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after LED drive (20) and Updates (21)
+        { 7, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
         { 4, 18, "Zoom", "config.vprenderer.zoom.crop_narrower_content_to_fill_screen" },
         { 3, 4, "Screen", "config.vprenderer.viewport.profiles" },
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
@@ -3275,6 +3277,93 @@ void testUpdateShutdownDiscardsEditsWithoutPrompt()
     }
 }
 
+void testDvModeSelectorPreservesLldvSettings()
+{
+    QTemporaryDir directory;
+    const QString path = copyFixture(directory);
+    QByteArray original = readBytes(path);
+    original.replace("[lldv]", "[lldv.cinema]\ndolby_vision_tunnel: false");
+    original.replace("#max_cll: 1000", "max_cll: 1234");
+    original.replace("#max_fall: 401", "max_fall: 432");
+    original.replace("fullscreen_monitor_name:", "#fullscreen_monitor_name:");
+    original += "\n[lldv.streaming]\ndolby_vision_tunnel: true\n";
+    QFile fixture(path);
+    require(fixture.open(QIODevice::WriteOnly | QIODevice::Truncate),
+        "Cannot prepare per-profile DV fixture");
+    require(fixture.write(original) == original.size(), "Cannot write DV mode fixture");
+    fixture.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.resize(1180, 1000);
+    window.selectPage(5);
+    window.show();
+    QApplication::processEvents();
+    auto* list = requireControl<QListWidget>(window, "config.lldv.profiles");
+    auto* tunneling = requireControl<QRadioButton>(window, "config.dv.mode.tunneling");
+    auto* lldv = requireControl<QRadioButton>(window, "config.dv.mode.lldv");
+    auto* metadata = requireControl<QWidget>(window, "config.dv.lldv_settings");
+    require(list->count() == 2 && lldv->isChecked() && metadata->isVisible(),
+        "Cinema must open in LLDV mode with its existing fields");
+    bool dvNavigation = false;
+    for (auto* button : window.findChildren<QPushButton*>())
+        if (button->text() == QStringLiteral("DV") && button->isChecked())
+            dvNavigation = true;
+    require(dvNavigation, "The navigation entry was not renamed to DV");
+    const auto capture = [&window](const QString& name)
+    {
+        const QString captures = qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES");
+        if (captures.isEmpty()) return;
+        QDir().mkpath(captures);
+        QApplication::processEvents();
+        require(window.grab().save(QDir(captures).filePath(name)),
+            "Cannot capture per-profile DV preview");
+    };
+    save(window);
+    capture("dv-lldv-preview.png");
+    list->setCurrentRow(1);
+    require(tunneling->isChecked() && !lldv->isChecked() && !metadata->isVisible(),
+        "Streaming did not load its own DV Tunneling mode");
+    require(list->isVisible(), "DV Tunneling hid the profile list");
+    capture("dv-tunneling-preview.png");
+
+    // Change Streaming only, then verify Cinema still owns its original mode.
+    lldv->click();
+    list->setCurrentRow(0);
+    require(lldv->isChecked() && metadata->isVisible(),
+        "Changing Streaming changed Cinema's mode");
+    require(requireControl<QLineEdit>(window, "config.lldv.max_cll")->text() == "1234",
+        "Changing another profile lost Cinema metadata");
+    tunneling->click();
+    list->setCurrentRow(1);
+    require(lldv->isChecked() && metadata->isVisible(),
+        "Changing Cinema changed Streaming's mode");
+    save(window);
+
+    ConfigFile config;
+    require(config.Load(path.toStdString()), "Cannot load saved DV profiles");
+    RendererProfileConfig::Model model;
+    std::string error;
+    require(RendererProfileConfig::Read(config, model, error), error.c_str());
+    require(model.profiles.at("lldv.cinema").settings.at("dolby_vision_tunnel") == "true" &&
+        model.profiles.at("lldv.streaming").settings.at("dolby_vision_tunnel") == "false",
+        "Profile modes were not saved independently");
+    RendererProfileConfig::ResolvedLldv cinemaMode;
+    RendererProfileConfig::ResolvedLldv streamingMode;
+    require(RendererProfileConfig::ResolveLldv(model, "cinema", cinemaMode, error), error.c_str());
+    require(RendererProfileConfig::ResolveLldv(model, "streaming", streamingMode, error), error.c_str());
+    require(cinemaMode.UseDolbyVisionTunnel(false) && !streamingMode.UseDolbyVisionTunnel(true),
+        "Saved profile selections did not resolve to their runtime modes");
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("max_cll: 1234") && saved.contains("max_fall: 432") &&
+        saved.contains("#mastering_max_luminance: 4000"),
+        "Changing profile modes lost LLDV metadata or comments");
+    ConfigEditorWindow reopened(path, 0, true);
+    auto* reopenedList = requireControl<QListWidget>(reopened, "config.lldv.profiles");
+    require(requireControl<QRadioButton>(reopened, "config.dv.mode.tunneling")->isChecked(),
+        "Cinema's saved DV Tunneling mode was not restored");
+    reopenedList->setCurrentRow(1);
+    require(requireControl<QRadioButton>(reopened, "config.dv.mode.lldv")->isChecked(),
+        "Streaming's saved LLDV mode was not restored");
+}
 void testLldvStandardProfiles()
 {
     QTemporaryDir directory;
@@ -7796,6 +7885,46 @@ void testSubtitleHdrLegacyFallbackAndSharedModes()
     require(!requireControl<QLineEdit>(reopened,"config.vprenderer.subtitles.hdr_peak_analysis_height_percent")->isEnabled(),"Percentage controls enabled during Smart mode");
 }
 
+void testMotionAndChromaControlsPersistAndExposeNewTab()
+{
+    QTemporaryDir directory;
+    const QString path=copyFixture(directory);
+    QFile file(path); require(file.open(QIODevice::Append),"Cannot add Motion fixture");
+    file.write("\n[vprenderer.motion]\nsmooth_motion: off\nframe_mixer: oversample\ndeinterlace: auto\ndeinterlace_algorithm: bwdif\nfield_order: auto\ndeinterlace_cadence: field\ndeinterlace_skip_spatial: false\n");file.close();
+    ConfigEditorWindow window(path,0,true);window.selectPage(22);window.show();QApplication::processEvents();
+    auto* tabs=requireControl<QTabBar>(window,"settingsSectionTabs");
+    require(tabs->count()==8&&tabs->tabText(6)=="Motion"&&tabs->currentIndex()==6,"Motion tab is missing or not selected");
+    auto* mode=requireControl<QComboBox>(window,"config.vprenderer.motion.smooth_motion");
+    auto* mixer=requireControl<QComboBox>(window,"config.vprenderer.motion.frame_mixer");
+    require(mode->currentData()=="off"&&mixer->currentData()=="oversample","Motion defaults changed");
+    require(requireControl<QLabel>(window,"motionSection.smoothMotion")->isVisible(),"Smooth motion section is not expanded");
+    require(requireControl<QLabel>(window,"motionSection.deinterlacing")->isVisible(),"Deinterlacing section is not expanded");
+    auto* advanced=requireControl<QToolButton>(window,"rendererSection.deinterlacingAdvanced");
+    require(!advanced->isChecked(),"Advanced deinterlacing should start collapsed");
+    advanced->setChecked(true);
+    for(const char* key:{"smooth_motion","frame_mixer","deinterlace","deinterlace_algorithm","field_order","deinterlace_cadence","deinterlace_skip_spatial"}) {
+        auto* control=requireControl<QComboBox>(window,QString("config.vprenderer.motion.")+key);
+        require(!control->toolTip().trimmed().isEmpty(),"Motion control tooltip is blank");
+    }
+    require(mixer->toolTip().contains("Applies only to smooth motion"),"Mixer relationship is not explained");
+
+    selectData(mode,"always");selectData(mixer,"cubic");
+    selectData(requireControl<QComboBox>(window,"config.vprenderer.motion.field_order"),"bottom");
+    selectData(requireControl<QComboBox>(window,"config.vprenderer.motion.deinterlace_algorithm"),"yadif");
+    selectData(requireControl<QComboBox>(window,"config.vprenderer.motion.deinterlace_cadence"),"frame");
+    selectData(requireControl<QComboBox>(window,"config.vprenderer.motion.deinterlace_skip_spatial"),"true");
+    window.selectPage(17);
+    auto* chroma=requireControl<QComboBox>(window,"config.vprenderer.scaling.chroma_upscaler");
+    require(chroma->findData("auto")==-1,"Chroma unexpectedly exposes Auto");
+    selectData(chroma,"lanczos");save(window);
+    ConfigEditorWindow reopened(path,0,true);reopened.selectPage(22);
+    require(requireControl<QComboBox>(reopened,"config.vprenderer.motion.smooth_motion")->currentData()=="always","Smooth motion did not persist");
+    require(requireControl<QComboBox>(reopened,"config.vprenderer.motion.frame_mixer")->currentData()=="cubic","Mixer did not persist");
+    reopened.selectPage(17);require(requireControl<QComboBox>(reopened,"config.vprenderer.scaling.chroma_upscaler")->currentData()=="lanczos","Chroma did not persist");
+    const QString images=qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES");
+    if(!images.isEmpty()){reopened.resize(1040,700);reopened.show();reopened.selectPage(22);QApplication::processEvents();reopened.grab().save(images+"/motion.png");reopened.selectPage(17);QApplication::processEvents();reopened.grab().save(images+"/chroma.png");}
+}
+
 int run(const char* name, const std::function<void()>& test)
 {
     if (!testNameFilter.isEmpty() &&
@@ -7835,6 +7964,7 @@ int main(int argc, char** argv)
     QApplication::setStyle(VpTheme::CreateStyle());
     application.setStyleSheet(VpTheme::StyleSheet());
     int failures = 0;
+    failures += run("Motion and chroma controls persist and expose new tab",testMotionAndChromaControlsPersistAndExposeNewTab);
     failures += run("integrated updates respect local package", testIntegratedUpdatesRespectLocalPackage);
     failures += run("update shutdown discards edits without prompt", testUpdateShutdownDiscardsEditsWithoutPrompt);
     failures += run("Tone slider drag performance", testToneSliderDragPerformance);
@@ -7892,6 +8022,7 @@ int main(int argc, char** argv)
         testLldvNamedMetadataIsPreserved);
     failures += run("optional config sections are created when edited",
         testOptionalSectionsAreCreatedWhenEdited);
+    failures += run("DV mode selector preserves LLDV settings", testDvModeSelectorPreservesLldvSettings);
     failures += run("LLDV standard profiles", testLldvStandardProfiles);
     failures += run("profile lifecycle through widgets", testProfileLifecycleThroughWidgets);
     failures += run("unrelated content remains exact", testUnrelatedContentRemainsExact);

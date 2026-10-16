@@ -779,6 +779,32 @@ namespace VideoProcessorTest
             }
         }
 
+        // v1.4.02 merge (owner 2026-10-15): VP's motion handling or libplacebo's
+        // smooth motion, one or the other, chosen by motion_engine (the profile
+        // rules pick it); auto = whichever is configured, VP's when both.
+        TEST_METHOD(MotionEngineIsOneOrTheOther)
+        {
+            using DejudderPolicy::MotionEngine;
+            using DejudderPolicy::ResolveEngine;
+            Assert::IsTrue(ResolveEngine("vp", false, true) == MotionEngine::Vp, L"vp: smooth motion off even if set");
+            Assert::IsTrue(ResolveEngine("smooth_motion", true, false) == MotionEngine::SmoothMotion, L"smooth_motion: VP's off even if set");
+            Assert::IsTrue(ResolveEngine("auto", true, true) == MotionEngine::Vp, L"auto, both set: VP's");
+            Assert::IsTrue(ResolveEngine("auto", false, true) == MotionEngine::SmoothMotion, L"auto, only smooth motion set: it runs");
+            Assert::IsTrue(ResolveEngine("auto", true, false) == MotionEngine::Vp);
+            Assert::IsTrue(ResolveEngine("auto", false, false) == MotionEngine::Vp, L"nothing set: VP's (which is off)");
+            Assert::IsTrue(DejudderPolicy::Configured(0.25, 0.0) && DejudderPolicy::Configured(0.0, 1.0) && !DejudderPolicy::Configured(0.0, 0.0));
+            // With smooth motion running the de-judder steps aside, so no motion
+            // vectors are produced for any consumer.
+            DejudderPolicy::Input in;
+            in.strength = 0.25; in.sourceHz = 24000.0 / 1001.0; in.displayHz = 60.0;
+            in.haveNext = true; in.nextMatches = true;
+            Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active);
+            in.smoothMotion = true;
+            Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::SmoothMotion);
+            Assert::AreEqual(std::string("smooth motion (frame mixing) active"),
+                std::string(DejudderPolicy::Name(DejudderPolicy::Reason::SmoothMotion)));
+        }
+
         // Delta 10: the even (2:2) strength. 30.00 takes it; 29.97 only when
         // chosen; 24p keeps dejudder_strength; 50p on 60 Hz stays excluded.
         TEST_METHOD(DejudderEvenCadenceStrength)
@@ -5043,12 +5069,13 @@ namespace VideoProcessorTest
 				true, selections, selections, true));
 		}
 
-		TEST_METHOD(LibplaceboPluginApiVersionCoversConfigurationSnapshots)
+		TEST_METHOD(LibplaceboPluginApiVersionCoversConfigurationSnapshotsAndDiagnostics)
 		{
 			// 25: IVideoRenderer::GetDejudderStatus (stage 6b-2b) or rc4's Beta
 			// flavor export; 26: both (rc4 merge); 27: the LED drive's
-			// projector connection test (Suspend/ResumeLedDriveForTest).
-			Assert::AreEqual(static_cast<uint32_t>(27),
+			// projector connection test (Suspend/ResumeLedDriveForTest); 28:
+			// v1.4.02's diagnostics and profiles; 29: both (v1.4.02 merge).
+			Assert::AreEqual(static_cast<uint32_t>(29),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 
@@ -6965,6 +6992,77 @@ namespace VideoProcessorTest
 			DeleteFileA(path.c_str());
 		}
 
+		TEST_METHOD(DvProfilesResolveModeAndPublishModeOnlyReloads)
+		{
+			char temporaryDirectory[MAX_PATH] = {};
+			Assert::IsTrue(GetTempPathA(ARRAYSIZE(temporaryDirectory), temporaryDirectory) > 0);
+			char fixtureDirectory[MAX_PATH] = {};
+			Assert::IsTrue(GetTempFileNameA(temporaryDirectory, "dvp", 0, fixtureDirectory) != 0);
+			Assert::IsTrue(DeleteFileA(fixtureDirectory));
+			Assert::IsTrue(CreateDirectoryA(fixtureDirectory, nullptr));
+			const std::string path = std::string(fixtureDirectory) + "\\VideoProcessor.cfg";
+			const auto writeConfig = [&](const std::string& mode)
+			{
+				std::ofstream file(path, std::ios::out | std::ios::trunc);
+				file << "[general]\ndolby_vision_tunnel: true\n"
+					"[lldv.legacy]\nmax_cll: 1000\n"
+					"[lldv.tunnel]\nmax_fall: 401\n";
+				if (!mode.empty()) file << "dolby_vision_tunnel: " << mode << "\n";
+				file << "[lldv.plain]\ndolby_vision_tunnel: false\n";
+			};
+			const auto source = [](const std::string& name, std::string& value)
+			{
+				if (name == "eotf") { value = "HDR"; return true; }
+				if (name == "transfer") { value = "PQ"; return true; }
+				return false;
+			};
+			writeConfig("true");
+			ConfigFile config;
+			Assert::IsTrue(config.Load(path));
+			std::string error;
+			UnifiedProfileRuntime::Runtime runtime;
+			Assert::IsTrue(runtime.Initialize(config, source, error),
+				std::wstring(error.begin(), error.end()).c_str());
+			const auto legacy = runtime.GetSnapshot();
+			Assert::IsFalse(legacy->lldv.hasDolbyVisionTunnel);
+			Assert::IsTrue(legacy->lldv.UseDolbyVisionTunnel(true));
+			Assert::IsFalse(legacy->lldv.UseDolbyVisionTunnel(false));
+
+			UnifiedProfileRuntime::SelectionResult selection;
+			Assert::IsTrue(runtime.SelectProfile("lldv", "plain", true, source, selection, error));
+			Assert::IsTrue(selection.snapshot->lldv.hasDolbyVisionTunnel);
+			Assert::IsFalse(selection.snapshot->lldv.UseDolbyVisionTunnel(true));
+			Assert::IsTrue(runtime.SelectProfile("lldv", "tunnel", true, source, selection, error));
+			Assert::IsTrue(selection.snapshot->lldv.UseDolbyVisionTunnel(false));
+			Assert::IsTrue(selection.snapshot->lldv.hasMaxCll);
+			Assert::IsTrue(std::abs(selection.snapshot->lldv.maxCll - 1000.0) < 1e-12);
+
+			writeConfig("false");
+			ConfigFile updated;
+			Assert::IsTrue(updated.Load(path));
+			UnifiedProfileRuntime::RefreshResult reload;
+			Assert::IsTrue(runtime.Reload(updated, source, reload, error));
+			Assert::IsTrue(reload.changed);
+			Assert::AreEqual("tunnel", reload.snapshot->lldv.profile.c_str());
+			Assert::IsFalse(reload.snapshot->lldv.UseDolbyVisionTunnel(true));
+
+			writeConfig("");
+			ConfigFile legacyAgain;
+			Assert::IsTrue(legacyAgain.Load(path));
+			Assert::IsTrue(runtime.Reload(legacyAgain, source, reload, error));
+			Assert::IsTrue(reload.changed);
+			Assert::IsFalse(reload.snapshot->lldv.hasDolbyVisionTunnel);
+			Assert::IsTrue(reload.snapshot->lldv.UseDolbyVisionTunnel(true));
+
+			writeConfig("invalid");
+			ConfigFile invalid;
+			Assert::IsTrue(invalid.Load(path));
+			Assert::IsFalse(runtime.Reload(invalid, source, reload, error));
+			Assert::IsTrue(runtime.GetSnapshot()->lldv.UseDolbyVisionTunnel(true));
+			DeleteFileA(runtime.StatePath().c_str());
+			DeleteFileA(path.c_str());
+			RemoveDirectoryA(fixtureDirectory);
+		}
 		TEST_METHOD(LegacyLldvRootRemainsTheBaselineProfile)
 		{
 			char temporaryDirectory[MAX_PATH] = {};

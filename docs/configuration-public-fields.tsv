@@ -93,6 +93,7 @@ general.profile_change_display_seconds	general-profile-change-display	General di
 vprenderer.<variant>.when	vprenderer-variant-when	VP Renderer	no
 vprenderer.<variant>.shortcut	vprenderer-variant-shortcut	VP Renderer	no
 vprenderer.subtitles.<variant>.subtitle_script_hint	subtitle-script-hint	Subtitles	no
+lldv.dolby_vision_tunnel	dv-profile-mode	DV profiles	no
 lldv.max_cll	lldv-max-cll	LLDV metadata	no
 lldv.max_fall	lldv-max-fall	LLDV metadata	no
 lldv.mastering_min_luminance	lldv-mastering-min-luminance	LLDV metadata	no
@@ -190,3 +191,11 @@ vprenderer.color.output_transport_gamma	vprenderer-output-transport-gamma	Color 
 vprenderer.color.output_diagnostics	vprenderer-diagnostic-output-experiments	Color / Output diagnostics	no
 vprenderer.color.diagnostic_disable_shader_cache	vprenderer-diagnostic-output-experiments	Color / Output diagnostics	no
 vprenderer.color.diagnostic_allow_full_g22	vprenderer-diagnostic-output-experiments	Color / Output diagnostics	no
+vprenderer.scaling.chroma_upscaler	vprenderer-scaling-chroma-upscaler	VP Renderer	no
+vprenderer.motion.smooth_motion	vprenderer-motion-smooth-motion	VP Renderer	yes
+vprenderer.motion.frame_mixer	vprenderer-motion-frame-mixer	VP Renderer	no
+vprenderer.motion.deinterlace	vprenderer-motion-deinterlace	VP Renderer	yes
+vprenderer.motion.deinterlace_algorithm	vprenderer-motion-deinterlace-algorithm	VP Renderer	no
+vprenderer.motion.field_order	vprenderer-motion-field-order	VP Renderer	yes
+vprenderer.motion.deinterlace_cadence	vprenderer-motion-deinterlace-cadence	VP Renderer	no
+vprenderer.motion.deinterlace_skip_spatial	vprenderer-motion-deinterlace-skip-spatial	VP Renderer	no

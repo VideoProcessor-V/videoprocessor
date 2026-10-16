@@ -238,6 +238,8 @@
 	<ClInclude Include="LiveOutputTrace.h" />
 	<ClInclude Include="MadVRShaderTransactionPolicy.h" />
     <ClInclude Include="IRenderer.h" />
+    <ClInclude Include="DolbyVisionLuminanceStatus.h" />
+    <ClInclude Include="vprenderer\DolbyVisionLuminancePolicy.h" />
     <ClInclude Include="RendererLiveness.h" />
     <ClInclude Include="RendererPostStallResetAdvisor.h" />
     <ClInclude Include="RendererIngressState.h" />
@@ -245,6 +247,7 @@
 	<ClInclude Include="EotfTransitionStabilizer.h" />
     <ClInclude Include="RendererResetCoordinator.h" />
     <ClInclude Include="RendererResetPolicy.h" />
+    <ClInclude Include="SubtitleProfileUpdatePolicy.h" />
     <ClInclude Include="RendererResetRequest.h" />
     <ClInclude Include="RendererResetRequestLatch.h" />
     <ClInclude Include="RendererTransitionModel.h" />
@@ -259,6 +262,9 @@
     <ClInclude Include="ActivePictureDecisionTimeline.h" />
     <ClInclude Include="ActivePictureTransitionModel.h" />
 	<ClInclude Include="AnalysisLumaSource.h" />
+    <ClInclude Include="AnalysisFrame.h" />
+    <ClInclude Include="AnalysisDiagnosticTrace.h" />
+    <ClInclude Include="AnalysisDiagnosticHooks.h" />
     <ClInclude Include="SubtitleBoxDetector.h" />
     <ClInclude Include="SubtitleOpaqueCardRefinement.h" />
     <ClInclude Include="SubtitleBoxLookahead.h" />
@@ -329,6 +335,7 @@
     <ClInclude Include="video_frame_formatter\CARGBtoP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.h" />
+    <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.h" />
@@ -352,6 +359,8 @@
     <ClCompile Include="ActivePictureDecisionTimeline.cpp" />
     <ClCompile Include="ActivePictureTransitionModel.cpp" />
 	<ClCompile Include="AnalysisLumaSource.cpp" />
+    <ClCompile Include="AnalysisFrame.cpp" />
+    <ClCompile Include="AnalysisDiagnosticTrace.cpp" />
     <ClCompile Include="SubtitleBoxDetector.cpp" />
 	<ClCompile Include="ActivePictureAnalyzer.cpp" />
     <ClCompile Include="ActivePictureEvidence.cpp" />
@@ -475,6 +484,7 @@
     <ClCompile Include="video_frame_formatter\CARGBtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.cpp" />
+    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.cpp" />
@@ -584,6 +594,11 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.Common.h" />
+    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.AVX2.cpp">
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.AVX2.cpp">
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <WholeProgramOptimization>false</WholeProgramOptimization>

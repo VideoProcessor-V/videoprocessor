@@ -451,7 +451,7 @@ ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines)
 }
 
 
-DisplayModeSharedPtr Translate(BMDDisplayMode displayMode)
+DisplayModeSharedPtr Translate(BMDDisplayMode displayMode, BMDFieldDominance dominance)
 {
 	const auto& it = BD_DISPLAY_MODE_DATA.find(displayMode);
 	if(it == BD_DISPLAY_MODE_DATA.end())
@@ -466,7 +466,9 @@ DisplayModeSharedPtr Translate(BMDDisplayMode displayMode)
 		it->second.height,
 		(it->second.fieldsPerFrame == 2),  // Interlaced?
 		(unsigned int)it->second.timeScale,
-		(unsigned int)it->second.frameDuration);
+		(unsigned int)it->second.frameDuration,
+        dominance==bmdUpperFieldFirst?DisplayMode::FieldOrder::TopFirst:
+        dominance==bmdLowerFieldFirst?DisplayMode::FieldOrder::BottomFirst:DisplayMode::FieldOrder::Unknown);
 }
 
 

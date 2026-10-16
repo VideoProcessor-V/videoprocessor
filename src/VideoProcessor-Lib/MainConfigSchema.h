@@ -106,6 +106,7 @@ namespace MainConfigSchema
 			ConfigSchema::Boolean("scene_correction_basic"),
 			ConfigSchema::Choice("subtitle_reposition",
 				{ "true", "false", "basic", "advanced", "on", "off", "1", "0" }),
+			ConfigSchema::Boolean("dolby_vision_tunnel"),
 			ConfigSchema::Boolean("newlldv"),
 			ConfigSchema::Boolean("new_lldv"),
 			// Interface resolution deliberately validates this value non-fatally:
@@ -331,6 +332,7 @@ namespace MainConfigSchema
 		}
 
 		const std::vector<ConfigSchema::KeyRule> lldvRules = {
+			ConfigSchema::Boolean("dolby_vision_tunnel"),
 			ConfigSchema::Any("when"),
 			ConfigSchema::Any("shortcut"),
 			ConfigSchema::Any("cycle_shortcut"),

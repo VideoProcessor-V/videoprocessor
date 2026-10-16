@@ -44,6 +44,28 @@ struct VideoFrameFormatterOutputContract
 };
 
 
+// Parsed per-picture HDMI Dolby Vision display-management metadata. This is
+// kept independent of libplacebo so capture formatters can expose it directly.
+struct DolbyVisionTunnelFrameMetadata
+{
+    bool valid = false;
+    bool fullRange = true;
+    // CRC loss after DV lock is not evidence that the source became SDR.
+    bool allowSdrFallback = false;
+    // Cached DM can survive a brief loss, but an untrusted current picture
+    // must be presented as black and excluded from image analysis.
+    bool requiresBlackFrame = false;
+    uint8_t rgbBitAlignment = 0; // 1: high 8 bits of r210, 2: low 8 bits
+    float nonlinear[3][3] = {};
+    float nonlinearOffset[3] = {};
+    float linear[3][3] = {};
+    uint16_t sourceMinPq = 0;
+    uint16_t sourceMaxPq = 0;
+    bool hasSceneMetadata = false;
+    uint16_t sceneMaxPq = 0;
+    uint16_t sceneAvgPq = 0;
+};
+
 /**
  * Interface for a video frame formatter, this can render from one
  * format to another.
@@ -71,6 +93,11 @@ public:
 	{
 		return {};
 	}
+
+    virtual DolbyVisionTunnelFrameMetadata GetDolbyVisionTunnelMetadata() const
+    {
+        return {};
+    }
 	
 	// Get conversion performance metrics (optional, default implementation returns no data)
 	// currentUs: Latest frame conversion time in microseconds

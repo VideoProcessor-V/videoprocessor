@@ -181,10 +181,14 @@
     </ClCompile>
     <ClCompile Include="CpuFeaturesTests.cpp" />
     <ClCompile Include="VideoFrameFormatterTests.cpp" />
+    <ClCompile Include="DolbyVisionLuminancePolicyTests.cpp" />
+    <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp" />
     <ClCompile Include="MovingPictureTransitionTests.cpp" />
     <ClCompile Include="SubtitleBoxDetectorTests.cpp" />
     <ClCompile Include="SubtitleOpaqueCardRefinementTests.cpp" />
     <ClCompile Include="SubtitleBoxLookaheadTests.cpp" />
+    <ClCompile Include="AnalysisRecoveryParityTests.cpp" />
+    <ClCompile Include="AnalysisRecoveryDvTests.cpp" />
     <ClCompile Include="SubtitleMeasurementWorkerTests.cpp" />
     <ClCompile Include="SubtitleCutPasteTests.cpp" />
     <ClCompile Include="LookaheadOutwardProofTests.cpp">
@@ -202,6 +206,9 @@
     <ClCompile Include="NearBlackNativeBoundaryRecoveryTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="SubtitleTranslationReversalTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="AlphaSourceCropPolicyTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -215,6 +222,7 @@
     <ClCompile Include="LibplaceboLutParserTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="MotionRendererTests.cpp"><ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild></ClCompile>
     <ClCompile Include="LibplaceboRenderParametersTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -310,6 +318,8 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DebugLogRetentionTests.cpp" />
+    <ClCompile Include="AnalysisDiagnosticTraceTests.cpp" />
+    <ClCompile Include="AnalysisDiagnosticReplayTests.cpp"><LanguageStandard>stdcpp17</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="DisplayRefreshRatePolicyTests.cpp" />
 	<ClCompile Include="DisplayRefreshRateEstimatorTests.cpp" />
 	<ClCompile Include="DisplayRefreshRateWindowTests.cpp" />

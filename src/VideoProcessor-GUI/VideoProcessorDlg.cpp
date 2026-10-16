@@ -9,6 +9,7 @@
 #include <pch.h>
 #include "BackendInputConfig.h"
 #include <ApplicationShutdownPolicy.h>
+#include <AnalysisDiagnosticTrace.h>
 #include <BuildIdentityPolicy.h>
 #include <UpdateLauncher.h>
 static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.UpdateExit.v1");
@@ -96,6 +97,9 @@ double SnapshotSourceRateHz(const UnifiedProfileRuntime::Snapshot& snapshot)
 	return rate;
 }
 
+constexpr UINT CaptureAnalysisDiagnosticsMenuCommand = 0x1ef0;
+constexpr UINT CaptureAnalysisDiagnosticsWithFramesMenuCommand = 0x1f00;
+
 constexpr wchar_t ConfigurationEditorRelativePath[] =
 	L"config\\VideoProcessorConfig.exe";
 
@@ -154,6 +158,23 @@ bool GetApplicationDirectory(std::wstring& directory)
 std::wstring ConfigurationEditorPath(const std::wstring& applicationDirectory)
 {
 	return applicationDirectory + ConfigurationEditorRelativePath;
+}
+
+CString AnalysisDiagnosticPathToCString(const char* utf8Path)
+{
+	if (!utf8Path || !utf8Path[0])
+		return CString();
+
+	const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+		utf8Path, -1, nullptr, 0);
+	if (required <= 0)
+		return CString(TEXT("(output folder path unavailable)"));
+
+	std::vector<wchar_t> widePath(static_cast<size_t>(required));
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8Path, -1,
+		widePath.data(), required) != required)
+		return CString(TEXT("(output folder path unavailable)"));
+	return CString(widePath.data());
 }
 
 bool ReadShortcutsForegroundOnly(const ConfigFile& config, bool& enabled,
@@ -2815,57 +2836,6 @@ LRESULT CVideoProcessorDlg::OnConfigurationEditorPresentationTargetAcknowledgeme
 	return 1;
 }
 
-void CVideoProcessorDlg::RequestPresentationFocus(const char* reason,
-	unsigned int generation)
-{
-	HWND configurationEditor = VisibleAssociatedConfigurationEditor();
-	if (!configurationEditor)
-		configurationEditor = FindConfigurationEditorForCurrentInstallation();
-	const bool configurationVisible = configurationEditor &&
-		::IsWindow(configurationEditor) &&
-		::IsWindowVisible(configurationEditor);
-
-	const HWND fullscreenTarget = m_fullScreenVideoWindow &&
-		::IsWindow(m_fullScreenVideoWindow->GetHWND()) ?
-		m_fullScreenVideoWindow->GetHWND() : nullptr;
-	const HWND windowedTarget =
-		::IsWindow(m_windowedVideoWindow.GetSafeHwnd()) ?
-		m_windowedVideoWindow.GetSafeHwnd() : nullptr;
-	HWND target = reinterpret_cast<HWND>(
-		ConfigurationLiveApply::SelectConfigurationEditorPresentationTarget(
-			m_rendererFullscreenCheck.GetCheck() != FALSE,
-			reinterpret_cast<uintptr_t>(fullscreenTarget),
-			::IsWindow(m_rendererTargetHwnd) ?
-				reinterpret_cast<uintptr_t>(m_rendererTargetHwnd) : 0,
-			reinterpret_cast<uintptr_t>(windowedTarget)));
-	if (target && ::IsWindow(target))
-		target = ::GetAncestor(target, GA_ROOT);
-	if (!target || !::IsWindow(target))
-		target = GetSafeHwnd();
-	DWORD targetProcessId = 0;
-	if (target) ::GetWindowThreadProcessId(target, &targetProcessId);
-	const bool validTarget = target && ::IsWindow(target) &&
-		targetProcessId == GetCurrentProcessId();
-	if (!ConfigurationLiveApply::ShouldRequestPresentationFocus(
-		m_shortcutsForegroundOnly, configurationVisible, validTarget))
-	{
-		DebugLog::Log(
-			"Presentation focus request skipped: reason=%s generation=%u foreground_only=%d config_visible=%d valid_target=%d target=%p",
-			reason, generation, m_shortcutsForegroundOnly ? 1 : 0,
-			configurationVisible ? 1 : 0, validTarget ? 1 : 0, target);
-		return;
-	}
-
-	if (::IsIconic(target)) ::ShowWindowAsync(target, SW_RESTORE);
-	::BringWindowToTop(target);
-	const BOOL requested = ::SetForegroundWindow(target);
-	const HWND foreground = ::GetForegroundWindow();
-	DebugLog::Log(
-		"Presentation focus request: reason=%s generation=%u target=%p requested=%d foreground=%p acquired=%d",
-		reason, generation, target, requested ? 1 : 0, foreground,
-		foreground == target ? 1 : 0);
-}
-
 bool CVideoProcessorDlg::RequestConfigurationEditorOneShotReassert(
 	HWND editor, HWND presentationTarget)
 {
@@ -5317,6 +5287,7 @@ CVideoProcessorDlg::~CVideoProcessorDlg()
 {
 	m_configurationRpcServer.Stop();
 	KillTimer(PROFILE_CHANGE_OVERLAY_TIMER_ID);
+	KillTimer(ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID);
 	ClearStagedConfiguration();
 	if (m_fullScreenVideoWindow &&
 		::IsWindow(m_fullScreenVideoWindow->GetHWND()))
@@ -5508,6 +5479,12 @@ void CVideoProcessorDlg::EnableBoundedInvalidCaptureRecovery(bool enabled)
 void CVideoProcessorDlg::EnableNewLldvHeuristic(bool enabled)
 {
 	m_useNewLldvHeuristic = enabled;
+}
+
+void CVideoProcessorDlg::EnableDolbyVisionTunnel(bool enabled)
+{
+	m_enableDolbyVisionTunnel = enabled;
+	DebugLog::Log("Dolby Vision RGB tunnel: enabled=%d", enabled ? 1 : 0);
 }
 
 void CVideoProcessorDlg::SetLldvMaxCll(double value)
@@ -8453,6 +8430,111 @@ void CVideoProcessorDlg::OnCommandCaptureRenderedOutput()
 		status, m_rendererGeneration.load(std::memory_order_acquire));
 }
 
+void CVideoProcessorDlg::OnCommandCaptureAnalysisDiagnostics(bool includeFrames)
+{
+	auto& trace = AnalysisDiagnosticTrace::Instance();
+	const AnalysisDiagnosticTraceStatus before = trace.Status();
+	AnalysisDiagnosticCaptureResult result =
+		AnalysisDiagnosticCaptureResult::InvalidRequest;
+	if (includeFrames && !before.producerConnected)
+		result = AnalysisDiagnosticCaptureResult::NoProducer;
+	else if (includeFrames && !before.frameCaptureSupported)
+		result = AnalysisDiagnosticCaptureResult::FrameCaptureUnavailable;
+	else
+		result = trace.StartCapture(includeFrames);
+
+	const AnalysisDiagnosticTraceStatus status = trace.Status();
+	CString message;
+	UINT icon = MB_ICONINFORMATION;
+	switch (result)
+	{
+	case AnalysisDiagnosticCaptureResult::Started:
+		message = TEXT("Analysis diagnostic capture started.");
+		break;
+	case AnalysisDiagnosticCaptureResult::AlreadyRecording:
+		message = TEXT("An analysis diagnostic capture is already running.");
+		break;
+	case AnalysisDiagnosticCaptureResult::NoProducer:
+		message = TEXT("The active renderer has no connected analysis diagnostics producer. No capture was started.");
+		icon = MB_ICONWARNING;
+		break;
+	case AnalysisDiagnosticCaptureResult::FrameCaptureUnavailable:
+		message = TEXT("The active renderer does not support input-frame capture. No capture was started.");
+		icon = MB_ICONWARNING;
+		break;
+	case AnalysisDiagnosticCaptureResult::Busy:
+		message = TEXT("The analysis diagnostic recorder is busy. No capture was started.");
+		icon = MB_ICONWARNING;
+		break;
+	case AnalysisDiagnosticCaptureResult::InvalidRequest:
+	default:
+		message = TEXT("The analysis diagnostic capture request was invalid. No capture was started.");
+		icon = MB_ICONERROR;
+		break;
+	}
+
+	if (status.recording)
+	{
+		CString progress;
+		progress.Format(TEXT("\n\nRecording: %s\nRecords written: %llu\nInput frames written: %llu"),
+			status.includeFrames ? TEXT("diagnostics and input frames") :
+			TEXT("diagnostics only"),
+			static_cast<unsigned long long>(status.recordsWritten),
+			static_cast<unsigned long long>(status.framesWritten));
+		message += progress;
+	}
+	if (result == AnalysisDiagnosticCaptureResult::Started ||
+		result == AnalysisDiagnosticCaptureResult::AlreadyRecording)
+	{
+		const CString outputPath =
+			AnalysisDiagnosticPathToCString(status.outputPath);
+		if (!outputPath.IsEmpty())
+		{
+			message += TEXT("\n\nOutput folder:\n");
+			message += outputPath;
+		}
+	}
+
+	DebugLog::Log(
+		"Analysis diagnostic capture request: include_frames=%d result=%u "
+		"recording=%d producer=%d frame_capture_supported=%d records=%llu "
+		"frames=%llu output=%s",
+		includeFrames ? 1 : 0, static_cast<unsigned int>(result),
+		status.recording ? 1 : 0, status.producerConnected ? 1 : 0,
+		status.frameCaptureSupported ? 1 : 0,
+		static_cast<unsigned long long>(status.recordsWritten),
+		static_cast<unsigned long long>(status.framesWritten),
+		status.outputPath);
+	if (result == AnalysisDiagnosticCaptureResult::Started ||
+		result == AnalysisDiagnosticCaptureResult::AlreadyRecording)
+	{
+		if (!m_analysisDiagnosticCaptionActive)
+			GetWindowText(m_analysisDiagnosticCaptionBeforeStatus);
+		CString caption = m_analysisDiagnosticCaptionBeforeStatus;
+		caption += TEXT(" - ");
+		caption += result == AnalysisDiagnosticCaptureResult::Started ?
+			TEXT("Analysis diagnostics recording") :
+			TEXT("Analysis diagnostics already recording");
+		if (status.includeFrames)
+			caption += TEXT(" with input frames");
+		SetWindowText(caption);
+		m_analysisDiagnosticCaptionActive = true;
+		m_analysisDiagnosticCaptionUntilTick = GetTickCount64() + 5000;
+		if (SetTimer(ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID, 5000, nullptr) == 0)
+		{
+			SetWindowText(m_analysisDiagnosticCaptionBeforeStatus);
+			m_analysisDiagnosticCaptionBeforeStatus.Empty();
+			m_analysisDiagnosticCaptionUntilTick = 0;
+			m_analysisDiagnosticCaptionActive = false;
+			DebugLog::Log(
+				"Analysis diagnostic capture status caption unavailable: timer creation failed");
+		}
+		return;
+	}
+	::MessageBoxW(GetSafeHwnd(), message, L"Analysis diagnostics",
+		MB_OK | icon);
+}
+
 void CVideoProcessorDlg::ApplyStatsOverlayForActiveRenderer()
 {
 	if (!m_statsOverlay)
@@ -11108,7 +11190,6 @@ void CVideoProcessorDlg::TryRevealRendererTransition(uint32_t generation)
 			m_rendererResetTransitionActive = false;
 		}
 	}
-	RequestPresentationFocus("first-live-frame", generation);
 	DebugLog::Log(
 		"Renderer transition: process=%lu generation=%u event=first-live-frame-reveal "
 		"renderer=%S target=%p fullscreen_host=%p fullscreen_intent=%d "
@@ -11897,10 +11978,12 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	// metadata.  There is no exposed VSIF to prove this, so only apply the
 	// heuristic when explicitly enabled, the user selected both LLDV follow
 	// modes, and the candidate has remained stable for 1.5 seconds.
-	const bool isHDFuryLLDV = m_useNewLldvHeuristic
-		? (m_newLldvCandidateConfirmed &&
-			IsNewLldvModeSelected())
-		: isLegacyHDFuryLLDV;
+	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
+		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
+	const bool isHDFuryLLDV = m_profileDolbyVisionTunnelOverride != 1 &&
+		(m_useNewLldvHeuristic
+			? (m_newLldvCandidateConfirmed && IsNewLldvModeSelected())
+			: isLegacyHDFuryLLDV);
 	const std::string rawEotf =
 		CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString();
 	const std::string rawColorspace =
@@ -12125,6 +12208,48 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		default:
 			throw std::runtime_error("Unknown HdrLuminanceOptions");
 	}
+
+	// The opt-in path is limited to R210 carrying an RGB8 Dolby tunnel.
+	// DeckLink reports the tunnel's wrapper as SDR/Rec.709, so use the
+	// recovered picture's PQ/BT.2020 state for output negotiation.
+	const int rendererIndex = m_rendererCombo.GetCurSel();
+	const RendererId* rendererId = rendererIndex >= 0 ?
+		reinterpret_cast<const RendererId*>(
+			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
+	videoState->dolbyVisionTunnel = enableDolbyVisionTunnel &&
+		rendererId && rendererId->backend == RendererBackend::LIBPLACEBO &&
+		m_captureDeviceVideoState->valid &&
+		m_captureDeviceVideoState->videoFrameEncoding == VideoFrameEncoding::R210 &&
+		m_captureDeviceVideoState->eotf == EOTF::SDR;
+	if (videoState->dolbyVisionTunnel)
+	{
+		videoState->eotf = EOTF::PQ;
+		videoState->colorspace = ColorSpace::BT_2020;
+		if (!videoState->hdrData)
+			videoState->hdrData = std::make_shared<HDRData>();
+		auto& hdr = *videoState->hdrData;
+		if (hdr.displayPrimaryRedX <= 0 || hdr.displayPrimaryGreenX <= 0 ||
+			hdr.displayPrimaryBlueX <= 0 || hdr.whitePointX <= 0)
+		{
+			hdr.displayPrimaryRedX = ColorSpaceToCie1931RedX(ColorSpace::BT_2020);
+			hdr.displayPrimaryRedY = ColorSpaceToCie1931RedY(ColorSpace::BT_2020);
+			hdr.displayPrimaryGreenX = ColorSpaceToCie1931GreenX(ColorSpace::BT_2020);
+			hdr.displayPrimaryGreenY = ColorSpaceToCie1931GreenY(ColorSpace::BT_2020);
+			hdr.displayPrimaryBlueX = ColorSpaceToCie1931BlueX(ColorSpace::BT_2020);
+			hdr.displayPrimaryBlueY = ColorSpaceToCie1931BlueY(ColorSpace::BT_2020);
+			hdr.whitePointX = ColorSpaceToCie1931WpX(ColorSpace::BT_2020);
+			hdr.whitePointY = ColorSpaceToCie1931WpY(ColorSpace::BT_2020);
+		}
+		if (hdr.masteringDisplayMaxLuminance <= 0)
+			hdr.masteringDisplayMaxLuminance = 1000;
+		if (hdr.maxCll <= 0)
+			hdr.maxCll = 1000;
+		if (hdr.maxFall <= 0)
+			hdr.maxFall = 1000;
+		DebugLog::Log("Dolby Vision RGB tunnel: effective source R210/12-bit 4:2:2 PQ BT.2020");
+	}
+	else if (enableDolbyVisionTunnel)
+		DebugLog::Log("Dolby Vision RGB tunnel: waiting for R210 SDR capture state");
 
 	m_builtVideoState = videoState;
 	m_lastEffectiveEotf = m_builtVideoState->eotf;
@@ -12746,6 +12871,17 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 	}
 
 	bool lldvPolicyChanged = false;
+	const int desiredDvMode = snapshot->lldv.hasDolbyVisionTunnel
+		? (snapshot->lldv.dolbyVisionTunnel ? 1 : 0) : -1;
+	if (m_profileDolbyVisionTunnelOverride != desiredDvMode)
+	{
+		m_profileDolbyVisionTunnelOverride = desiredDvMode;
+		lldvPolicyChanged = true;
+		DebugLog::Log("DV profile mode applied: profile=%s mode=%s",
+			snapshot->lldv.profile.empty() ? "(none)" : snapshot->lldv.profile.c_str(),
+			snapshot->lldv.UseDolbyVisionTunnel(m_enableDolbyVisionTunnel)
+				? "DV Tunneling" : "LLDV");
+	}
 	if (!snapshot->lldv.profile.empty())
 	{
 		auto applyLldvOverride = [&lldvPolicyChanged](double& destination,
@@ -13997,6 +14133,12 @@ BOOL CVideoProcessorDlg::OnInitDialog()
     {
         systemMenu->AppendMenu(MF_SEPARATOR);
         systemMenu->AppendMenu(MF_STRING, UpdateLauncher::MenuCommand, L"Check for updates...");
+        systemMenu->AppendMenu(MF_SEPARATOR);
+        systemMenu->AppendMenu(MF_STRING, CaptureAnalysisDiagnosticsMenuCommand,
+            L"Capture analysis diagnostics...");
+        systemMenu->AppendMenu(MF_STRING,
+            CaptureAnalysisDiagnosticsWithFramesMenuCommand,
+            L"Capture analysis diagnostics with input frames...");
     }
     SetTimer(UpdateLauncher::StartupTimer, 30000, nullptr);
 	SetTimer(TIMER_ID_1SECOND, 1000, nullptr);
@@ -14590,6 +14732,32 @@ void CVideoProcessorDlg::RefreshModernStatus()
 	status.maxFall = text(m_hdrLuminanceMaxFall);
 	status.masteringMin = text(m_hdrLuminanceMasterMin);
 	status.masteringMax = text(m_hdrLuminanceMasterMax);
+	if (m_builtVideoState && m_builtVideoState->valid && m_builtVideoState->dolbyVisionTunnel)
+	{
+		status.luminanceTitle = TEXT("DV luminance (nits)");
+		status.luminanceState = TEXT("Waiting");
+		status.luminanceLabels = { TEXT("Source min"), TEXT("Source max"),
+			TEXT("Scene peak"), TEXT("Scene average") };
+		status.maxCll = status.maxFall = status.masteringMin = status.masteringMax = TEXT("---");
+		DolbyVisionLuminanceStatus dv;
+		if (m_videoRenderer && m_rendererState == RendererState::RENDERSTATE_RENDERING &&
+			m_videoRenderer->GetDolbyVisionLuminanceStatus(dv))
+		{
+			if (!dv.tunnelActive)
+				status.luminanceState = TEXT("SDR");
+			else if (dv.available)
+			{
+				status.luminanceState = dv.sourceRangeFromMetadata ? TEXT("DM") : TEXT("Fallback");
+				status.maxCll = FormatHdrLuminance(dv.sourceMin);
+				status.maxFall = FormatHdrLuminance(dv.sourceMax);
+				if (dv.sceneAvailable)
+				{
+					status.masteringMin = FormatHdrLuminance(dv.sceneMax);
+					status.masteringMax = FormatHdrLuminance(dv.sceneAvg);
+				}
+			}
+		}
+	}
 	status.rendererName = selected(m_rendererCombo);
 	status.rendererState = compactState(text(m_rendererStateText));
 	const int selectedRendererIndex = m_rendererCombo.GetCurSel();
@@ -15065,6 +15233,16 @@ void CVideoProcessorDlg::OnSysCommand(UINT command, LPARAM lParam)
 {
     if ((command & 0xfff0) == UpdateLauncher::MenuCommand)
     { UpdateLauncher::Launch(false, GetSafeHwnd()); return; }
+	if ((command & 0xfff0) == CaptureAnalysisDiagnosticsMenuCommand)
+	{
+		OnCommandCaptureAnalysisDiagnostics(false);
+		return;
+	}
+	if ((command & 0xfff0) == CaptureAnalysisDiagnosticsWithFramesMenuCommand)
+	{
+		OnCommandCaptureAnalysisDiagnostics(true);
+		return;
+	}
 	if (ApplicationShutdownPolicy::IsCloseSystemCommand(command))
 	{
 		DebugLog::Log(
@@ -15083,6 +15261,18 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
     { SetTimer(nIDEvent, 6 * 60 * 60 * 1000, nullptr); UpdateLauncher::Launch(true); return; }
 	const ULONGLONG uiNow = GetTickCount64();
 	m_lastUiMessageTick.store(uiNow, std::memory_order_release);
+	if (nIDEvent == ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID)
+	{
+		if (uiNow < m_analysisDiagnosticCaptionUntilTick)
+			return;
+		KillTimer(ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID);
+		if (m_analysisDiagnosticCaptionActive)
+			SetWindowText(m_analysisDiagnosticCaptionBeforeStatus);
+		m_analysisDiagnosticCaptionBeforeStatus.Empty();
+		m_analysisDiagnosticCaptionUntilTick = 0;
+		m_analysisDiagnosticCaptionActive = false;
+		return;
+	}
 	if (nIDEvent == PROFILE_CHANGE_OVERLAY_TIMER_ID)
 	{
 		UpdateProfileChangeOverlay(uiNow);
@@ -17702,20 +17892,16 @@ void CVideoProcessorDlg::MonitorQueueHealth(size_t rawQueueSize,
 	// as a recovery condition in case a future queue-path regression violates
 	// that invariant. DirectShow keeps its liveness-based recovery below because
 	// its downstream queues are not directly observable.
-	const bool alphaQueueExceeded =
-		!m_activeRendererIsDirectShow &&
-		(rawQueueSize > queueMaxSize || convertedQueueSize > queueMaxSize);
-	const bool alphaQueueSustainedAtCapacity =
-		!m_activeRendererIsDirectShow && atCapacity &&
-		m_consecutiveFullSeconds >= sustainedSeconds;
-	if (autoReset && (alphaQueueExceeded || alphaQueueSustainedAtCapacity))
+	const bool alphaQueueOverflowRequiresRecovery =
+		AlphaQueueOverflowRequiresRecovery(
+			!m_activeRendererIsDirectShow,
+			rawQueueSize, convertedQueueSize, queueMaxSize);
+	if (autoReset && alphaQueueOverflowRequiresRecovery)
 	{
 		DEBUGLOG(
-			"Alpha queue recovery: raw=%zu/%zu converted=%zu/%zu consecutive=%zu threshold=%zu reason=%s; requesting live-queue reset",
+			"Alpha queue overflow recovery: raw=%zu/%zu converted=%zu/%zu; requesting live-queue reset",
 			rawQueueSize, queueMaxSize,
-			convertedQueueSize, queueMaxSize,
-			m_consecutiveFullSeconds, sustainedSeconds,
-			alphaQueueExceeded ? "exceeded-capacity" : "sustained-at-capacity");
+			convertedQueueSize, queueMaxSize);
 		RequestRendererReset(RendererResetReason::QueuePressure, false, 0);
 		return;
 	}

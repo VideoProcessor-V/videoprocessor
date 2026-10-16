@@ -1,6 +1,7 @@
 #pragma once
 
 #include <IRenderer.h>
+#include <AnalysisFrame.h>
 #include <ITimingClock.h>
 #include <VideoConversionOverride.h>
 #include <ActivePictureDecisionTimeline.h>
@@ -122,6 +123,7 @@ public:
 	bool GetDisplayLutInfo(CString& details) const override;
 	bool GetDetectedPictureAspect(DetectedPictureAspect& result) const override;
 	bool GetVideoIngressInfo(CString& details) const override;
+	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
@@ -148,6 +150,7 @@ private:
 		{
 			std::vector<BYTE> pixels;
 			VideoFrameFormatterOutputContract contract;
+			DolbyVisionTunnelFrameMetadata dolby;
 			double conversionCpuMs = 0.0;
 			int64_t completedQpc = 0;
 			// capture_path: gpu (owner 2026-10-13): the raw DeckLink frame
@@ -163,12 +166,23 @@ private:
 			bool Raw() const { return rawFrame != nullptr; }
 			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};
+        struct AnalysisPayload
+        {
+            std::mutex mutex;
+            std::shared_ptr<const void> nativeOwner;
+            PreparedAnalysisFrame live;
+            PreparedAnalysisFrame queued;
+            bool liveNative = false;
+            bool live422 = false;
+        };
+        std::shared_ptr<AnalysisPayload> analysis = std::make_shared<AnalysisPayload>();
 		VideoFrame frame;
 		VideoStateComPtr state;
 		uint64_t generation = 0;
 		uint64_t sourceSequence = 0;
 		ActivePictureFrameIdentity activePictureIdentity;
 		bool activePicturePreviewAnalyzed = false;
+        uint64_t activePicturePreviewDomainKey = 0;
 		bool activePicturePreviewDecisionAvailable = false;
 		ActivePictureFrameDecision activePicturePreviewDecision;
 		ActivePictureEvidence activePicturePreviewEvidence;

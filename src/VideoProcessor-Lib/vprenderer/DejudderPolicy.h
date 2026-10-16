@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -28,6 +30,7 @@ namespace DejudderPolicy
 		PlaneFormat,      // A's planes cannot be sampled linearly / stored
 		NoNextFrame,      // B not queued or not converted yet
 		NextFrameDiffers, // B has a different size, layout or video state
+		SmoothMotion,     // libplacebo's smooth motion (frame mixing, v1.4.02) is active
 	};
 
 	struct Input
@@ -52,6 +55,11 @@ namespace DejudderPolicy
 		bool haveNext = false;
 		bool nextMatches = false;
 		bool planeFormatsUsable = true;
+		// v1.4.02 merge (owner 2026-10-15): libplacebo's smooth motion is mixing
+		// frames (never with the de-judder configured, see Configured; this is
+		// the safety net). The de-judder, its mask and the estimate step aside;
+		// with no estimate every vector consumer takes its no-vector fallback.
+		bool smoothMotion = false;
 	};
 
 	// Refreshes per source frame (P_s / P_d).
@@ -153,6 +161,7 @@ namespace DejudderPolicy
 	{
 		const bool alone = in.occlusionMask;   // the grain map never starts it alone
 		if (!(in.strength > 0.0) && !(in.strengthEven > 0.0) && !alone) return Reason::Off;
+		if (in.smoothMotion) return Reason::SmoothMotion;
 		if (in.lowLatency) return Reason::LowLatency;
 		if (in.interlaced) return Reason::Interlaced;
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) return Reason::UnknownRates;
@@ -167,6 +176,27 @@ namespace DejudderPolicy
 		if (!in.haveNext) return Reason::NoNextFrame;
 		if (!in.nextMatches) return Reason::NextFrameDiffers;
 		return Reason::Active;
+	}
+
+	// v1.4.02 merge (owner 2026-10-15): de-judder and libplacebo's smooth
+	// motion are mutually exclusive options. A profile with the de-judder
+	// configured (either strength above 0) never runs smooth motion; Config
+	// switches one off when the other is turned on.
+	inline bool Configured(double strength, double strengthEven)
+	{
+		return strength > 0.0 || strengthEven > 0.0;
+	}
+
+	// The motion engine for this profile (motion_engine): vp, smooth_motion,
+	// or auto = whichever is configured, VP's when both (existing files keep
+	// their behaviour: the de-judder where it is set, smooth motion where only
+	// it is). The 50/60p work joins VP's side (vpConfigured).
+	enum class MotionEngine { Vp, SmoothMotion };
+	inline MotionEngine ResolveEngine(const std::string& setting, bool vpConfigured, bool smoothConfigured)
+	{
+		if (setting == "vp") return MotionEngine::Vp;
+		if (setting == "smooth_motion") return MotionEngine::SmoothMotion;
+		return vpConfigured || !smoothConfigured ? MotionEngine::Vp : MotionEngine::SmoothMotion;
 	}
 
 	// Whether extra presents may run (with Decide() == Active): strength > 0
@@ -191,6 +221,7 @@ namespace DejudderPolicy
 		case Reason::PlaneFormat: return "plane format unsuitable";
 		case Reason::NoNextFrame: return "next frame not ready";
 		case Reason::NextFrameDiffers: return "next frame differs";
+		case Reason::SmoothMotion: return "smooth motion (frame mixing) active";
 		}
 		return "?";
 	}

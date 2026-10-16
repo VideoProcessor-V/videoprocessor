@@ -153,6 +153,9 @@
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
+    <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h">
+      <Filter>Header Files\video_frame_formatter</Filter>
+    </ClInclude>
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
@@ -217,6 +220,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RendererResetPolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SubtitleProfileUpdatePolicy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
 	<ClInclude Include="InvalidCaptureStateGrace.h">
@@ -399,6 +405,7 @@
     <ClInclude Include="SparseBoundaryCropExperiment.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+	<ClInclude Include="AnalysisFrame.h" />
 	<ClInclude Include="AnalysisLumaSource.h">
 	  <Filter>Header Files</Filter>
 	</ClInclude>
@@ -461,6 +468,9 @@
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
+    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp">
+      <Filter>Source Files\video_frame_formatter</Filter>
+    </ClCompile>
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
@@ -485,6 +495,7 @@
     <ClCompile Include="SparseBoundaryCropExperiment.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+	<ClCompile Include="AnalysisFrame.cpp" />
 	<ClCompile Include="AnalysisLumaSource.cpp">
 	  <Filter>Source Files</Filter>
 	</ClCompile>
@@ -679,6 +690,7 @@
     <ClInclude Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.Common.h" />
     <ClCompile Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.AVX2.cpp" />
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.Common.h" />
+    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.AVX2.cpp" />
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.AVX2.cpp" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.Common.h" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.AVX2.cpp" />
@@ -689,5 +701,11 @@
     <ClCompile Include="video_frame_formatter\CV210toP010VideoFrameFormatter.AVX2.cpp" />
     <ClInclude Include="CpuFeatures.h" />
     <ClCompile Include="CpuFeatures.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="AnalysisDiagnosticTrace.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="AnalysisDiagnosticHooks.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="AnalysisDiagnosticTrace.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
 </Project>
