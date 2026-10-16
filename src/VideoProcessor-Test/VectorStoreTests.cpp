@@ -214,3 +214,89 @@ namespace MotionAheadLumaTest
 		}
 	};
 }
+
+namespace MotionAheadRgbLumaTest
+{
+	TEST_CLASS(MotionAheadRgbLumaTests)
+	{
+	public:
+		TEST_METHOD(HalfLumaIsTheSameForR12BR12LAndR210)
+		{
+			// 4:4:4 capture (owner 2026-10-16): the RGB packings decoded directly agree.
+			const int W = 64, H = 16;   // a multiple of 8 (R12B blocks)
+			auto rgb12 = [](int x, int y, int c) { return static_cast<unsigned>((x * 53 + y * 97 + c * 301 + x * y * 5) % 4096); };
+			// R12B: per 8 pixels nine 32-bit words; the bit layout from AnalysisLumaSource's reader.
+			auto r12b = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(W / 8) * 36 * H, 0);
+			for (int y = 0; y < H; ++y)
+				for (int g = 0; g < W / 8; ++g)
+				{
+					uint8_t* bk = &(*r12b)[(static_cast<size_t>(y) * (W / 8) + g) * 36];
+					auto set = [bk](int word, int index, unsigned v) { bk[word * 4 + index] = static_cast<uint8_t>(v); };
+					auto orLo = [bk](int word, int index, unsigned v) { bk[word * 4 + index] = static_cast<uint8_t>((bk[word * 4 + index] & 0xf0) | (v & 0x0f)); };
+					auto orHi = [bk](int word, int index, unsigned v) { bk[word * 4 + index] = static_cast<uint8_t>((bk[word * 4 + index] & 0x0f) | ((v & 0x0f) << 4)); };
+					unsigned c[8][3];
+					for (int k = 0; k < 8; ++k) for (int ch = 0; ch < 3; ++ch) c[k][ch] = rgb12(g * 8 + k, y, ch);
+					// Pixel k: (low byte position, high nibble) pairs mirroring ReadR12BPixel.
+					set(0, 3, c[0][0] & 0xff); orLo(0, 2, c[0][0] >> 8); orHi(0, 2, c[0][1] & 0xf); set(0, 1, c[0][1] >> 4); set(0, 0, c[0][2] & 0xff); orLo(1, 3, c[0][2] >> 8);
+					orHi(1, 3, c[1][0] & 0xf); set(1, 2, c[1][0] >> 4); set(1, 1, c[1][1] & 0xff); orLo(1, 0, c[1][1] >> 8); orHi(1, 0, c[1][2] & 0xf); set(2, 3, c[1][2] >> 4);
+					set(2, 2, c[2][0] & 0xff); orLo(2, 1, c[2][0] >> 8); orHi(2, 1, c[2][1] & 0xf); set(2, 0, c[2][1] >> 4); set(3, 3, c[2][2] & 0xff); orLo(3, 2, c[2][2] >> 8);
+					orHi(3, 2, c[3][0] & 0xf); set(3, 1, c[3][0] >> 4); set(3, 0, c[3][1] & 0xff); orLo(4, 3, c[3][1] >> 8); orHi(4, 3, c[3][2] & 0xf); set(4, 2, c[3][2] >> 4);
+					set(4, 1, c[4][0] & 0xff); orLo(4, 0, c[4][0] >> 8); orHi(4, 0, c[4][1] & 0xf); set(5, 3, c[4][1] >> 4); set(5, 2, c[4][2] & 0xff); orLo(5, 1, c[4][2] >> 8);
+					orHi(5, 1, c[5][0] & 0xf); set(5, 0, c[5][0] >> 4); set(6, 3, c[5][1] & 0xff); orLo(6, 2, c[5][1] >> 8); orHi(6, 2, c[5][2] & 0xf); set(6, 1, c[5][2] >> 4);
+					set(6, 0, c[6][0] & 0xff); orLo(7, 3, c[6][0] >> 8); orHi(7, 3, c[6][1] & 0xf); set(7, 2, c[6][1] >> 4); set(7, 1, c[6][2] & 0xff); orLo(7, 0, c[6][2] >> 8);
+					orHi(7, 0, c[7][0] & 0xf); set(8, 3, c[7][0] >> 4); set(8, 2, c[7][1] & 0xff); orLo(8, 1, c[7][1] >> 8); orHi(8, 1, c[7][2] & 0xf); set(8, 0, c[7][2] >> 4);
+				}
+			// R12L: per 2 pixels nine bytes.
+			auto r12l = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(W / 2) * 9 * H, 0);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; x += 2)
+				{
+					uint8_t* pr = &(*r12l)[static_cast<size_t>(y) * (W / 2) * 9 + static_cast<size_t>(x / 2) * 9];
+					const unsigned r0 = rgb12(x, y, 0), g0 = rgb12(x, y, 1), b0 = rgb12(x, y, 2);
+					const unsigned r1 = rgb12(x + 1, y, 0), g1 = rgb12(x + 1, y, 1), b1 = rgb12(x + 1, y, 2);
+					pr[0] = static_cast<uint8_t>(r0); pr[1] = static_cast<uint8_t>((r0 >> 8) | ((g0 & 0xf) << 4)); pr[2] = static_cast<uint8_t>(g0 >> 4);
+					pr[3] = static_cast<uint8_t>(b0); pr[4] = static_cast<uint8_t>((b0 >> 8) | ((r1 & 0xf) << 4)); pr[5] = static_cast<uint8_t>(r1 >> 4);
+					pr[6] = static_cast<uint8_t>(g1); pr[7] = static_cast<uint8_t>((g1 >> 8) | ((b1 & 0xf) << 4)); pr[8] = static_cast<uint8_t>(b1 >> 4);
+				}
+			// r210: big-endian words, 10-bit RGB (the 12-bit values / 4).
+			auto r210 = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(W) * 4 * H, 0);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					const uint32_t word = ((rgb12(x, y, 0) >> 2) << 20) | ((rgb12(x, y, 1) >> 2) << 10) | (rgb12(x, y, 2) >> 2);
+					uint8_t* px = &(*r210)[(static_cast<size_t>(y) * W + x) * 4];
+					px[0] = static_cast<uint8_t>(word >> 24); px[1] = static_cast<uint8_t>(word >> 16); px[2] = static_cast<uint8_t>(word >> 8); px[3] = static_cast<uint8_t>(word);
+				}
+			auto source = [&](const std::shared_ptr<std::vector<uint8_t>>& bytes, size_t rowBytes, VideoFrameEncoding encoding) {
+				AnalysisLumaSource s;
+				s.data = bytes->data(); s.dataBytes = bytes->size(); s.width = W; s.height = H; s.rowBytes = rowBytes;
+				s.format = AnalysisLumaFormat::NativeRgb; s.encoding = encoding; s.backingOwner = bytes;
+				return s;
+			};
+			std::vector<uint8_t> a, b, c;
+			int w1 = 0, h1 = 0, w2 = 0, h2 = 0, w3 = 0, h3 = 0;
+			Assert::IsTrue(MotionAhead::HalfLuma8(source(r12b, static_cast<size_t>(W / 8) * 36, VideoFrameEncoding::R12B), a, w1, h1), L"R12B");
+			Assert::IsTrue(MotionAhead::HalfLuma8(source(r12l, static_cast<size_t>(W / 2) * 9, VideoFrameEncoding::R12L), b, w2, h2), L"R12L");
+			Assert::IsTrue(MotionAhead::HalfLuma8(source(r210, static_cast<size_t>(W) * 4, VideoFrameEncoding::R210), c, w3, h3), L"r210");
+			int maxAB = 0, maxAC = 0, maxRef = 0;
+			for (int y = 0; y < h1; ++y)
+				for (int x = 0; x < w1; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * w1 + x;
+					maxAB = (std::max)(maxAB, std::abs(a[i] - b[i]));
+					maxAC = (std::max)(maxAC, std::abs(a[i] - c[i]));
+					// The reference: (R + 2G + B) / 4 of the 2 x 2 pixels, in 8-bit.
+					double ref = 0;
+					for (int k = 0; k < 4; ++k)
+					{
+						const int px = 2 * x + (k & 1), py = 2 * y + (k >> 1);
+						ref += (rgb12(px, py, 0) + 2.0 * rgb12(px, py, 1) + rgb12(px, py, 2)) / 4.0;
+					}
+					maxRef = (std::max)(maxRef, std::abs(static_cast<int>(a[i]) - static_cast<int>(std::lround(ref / 4.0 / 16.0))));
+				}
+			Assert::AreEqual(0, maxAB, L"R12B = R12L");
+			Assert::IsTrue(maxAC <= 1, L"r210 (10-bit) within one 8-bit step");
+			Assert::IsTrue(maxRef <= 1, L"the luma is (R + 2G + B) / 4 of the 2 x 2 pixels");
+		}
+	};
+}
