@@ -1536,6 +1536,79 @@ namespace Tests
 			}
 		}
 
+		TEST_METHOD(EarlyUploadAndTheOpticalFlowProducerTogether)
+		{
+			// Owner 2026-10-16: the two second D3D11 devices - early upload (capture_upload: early) and the
+			// optical-flow producer - must play nicely: 4K 24p film with the de-judder, each combination,
+			// then the low-latency path at 60 Hz with early upload on and off. Reports the presentation
+			// timing; asserts no failures, frames read early, the producer engaged and never stopped.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			auto report = [](const std::string& name, const RunResult& r) {
+				std::string out = name + ":\n  presentation: " + r.presentationStatus + "\n";
+				for (const std::string& line : r.log)
+					if (line.find("Early upload: closed") != std::string::npos || line.find("Motion ahead: engaged") != std::string::npos ||
+						line.find("pairs taken") != std::string::npos || line.find("producer stopped") != std::string::npos ||
+						line.find("producer did not start") != std::string::npos)
+						out += "  " + line + "\n";
+				Logger::WriteMessage(out.c_str());
+			};
+			int failures = 0;
+			for (const bool early : { false, true })
+				for (const bool ahead : { false, true })
+				{
+					std::string extra = "dejudder_strength: 0.25\n";
+					extra += early ? "capture_upload: early\n" : "capture_upload: render\n";
+					extra += ahead ? "motion_ahead_frames: 4\n" : "motion_ahead_frames: 0\n";
+					g_harnessQueueTarget = 5;
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, true, extra);
+					g_harnessQueueTarget = 0;
+					const std::string name = std::string("early upload ") + (early ? "on" : "off") + ", look-ahead " + (ahead ? "on" : "off");
+					report(name, r);
+					bool readEarly = !early;
+					for (const std::string& line : r.log)
+						if (line.find("Early upload: closed") != std::string::npos)
+							readEarly = line.find("(0 frames read early") == std::string::npos;
+					const bool engineHere = r.Logged("optical-flow engine");
+					const bool ok = r.presented && !r.Logged("GPU unpack failed") && !r.Logged("Early upload: not available") &&
+						readEarly && !r.Logged("producer stopped") && r.Logged("De-judder: motion estimated") &&
+						(!ahead || !engineHere || r.Logged("Motion ahead: engaged"));
+					if (!ok) { ++failures; Logger::WriteMessage(("  FAILED: " + name + "\n" + std::string()).c_str()); }
+				}
+			// The low-latency path at 60 Hz (the queue profile applied before Build), early upload off / on.
+			FramePlan plan60;
+			plan60.rateNumerator = 60000;
+			plan60.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			g_harnessApplySnapshot = true;
+			for (const bool early : { false, true })
+			{
+				const std::string extra = std::string(early ? "capture_upload: early\n" : "capture_upload: render\n") +
+					"[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n";
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false, extra, false, &plan60);
+				const std::string name = std::string("low latency 60 Hz, early upload ") + (early ? "on" : "off");
+				report(name, r);
+				bool readEarly = !early;
+				for (const std::string& line : r.log)
+					if (line.find("Early upload: closed") != std::string::npos)
+						readEarly = line.find("(0 frames read early") == std::string::npos;
+				if (!r.presented || r.Logged("GPU unpack failed") || !readEarly || r.Logged("Motion ahead: engaged"))
+				{
+					++failures;
+					Logger::WriteMessage(("  FAILED: " + name + "\n").c_str());
+				}
+			}
+			g_harnessApplySnapshot = false;
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			Assert::AreEqual(0, failures, L"early upload and the optical-flow producer work in every combination and in low latency");
+		}
+
 		TEST_METHOD(NativeRgbIngestRunsThroughTheRenderer)
 		{
 			// Roadmap item 2 (owner 2026-10-15): DeckLink 12-bit RGB (both byte
