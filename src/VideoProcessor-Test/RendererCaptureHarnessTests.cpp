@@ -740,7 +740,8 @@ namespace Tests
 			struct Case { const char* extra; const char* expected; const wchar_t* name; };
 			for (const Case& c : { Case{ "source_resolution: 1080\n", "Re-base: 3840x2160 -> 1920x1080", L"1080" },
 				Case{ "source_resolution: 900\n", "Re-base: 3840x2160 -> 1600x900", L"900" },
-				Case{ "source_resolution: 1080\ndejudder_strength: 0.25\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the de-judder" } })
+				Case{ "source_resolution: 1080\ndejudder_strength: 0.25\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the de-judder" },
+				Case{ "source_resolution: 1080\ncapture_upload: early\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the early upload" } })
 			{
 				const bool film = std::string(c.extra).find("dejudder") != std::string::npos;
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, film, c.extra);

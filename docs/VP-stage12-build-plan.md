@@ -200,8 +200,12 @@ Then step C (VP debander with PQ thresholds, the vector refinements
   towards `ssim_bitrate_floor` (0.4) and the faithful anti-ringing rises
   (`ssim_bitrate_aware` on; 1 at quality 0.8 and above = today's output;
   steps of 0.05; low_bitrate_handling off = every source clean).
-- Next: A4's remaining tests (RGB, both capture_upload paths, native
-  byte-identity), a CNN-branch flicker test, a live profile-edit test.
+- A4: RGB input (one plane, all components, restored to 0.00 codes) and the
+  early capture upload through the renderer added. `native` byte-identity
+  stays by construction (factor 1: the frame is never touched; the harness
+  checks no re-base runs) - no pixel-capture comparison yet.
+- Next: a CNN-branch flicker test (needs a CNN shader in the test), a live
+  profile-edit test of the fingerprint fix.
 
 ## Costs (to measure, laptop then 3090)
 

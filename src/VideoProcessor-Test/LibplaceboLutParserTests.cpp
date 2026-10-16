@@ -7972,6 +7972,65 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
+		TEST_METHOD(SourceRebaseHandlesAnRgbPlane)
+		{
+			// Plan A4 (owner 2026-10-15): RGB 4:4:4 (native RGB ingest, the GPU
+			// RGB unpack) is one plane; it re-bases as one plane, all components.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 1024, H = 512, w = 512, h = 256;
+			// Smooth content at the target size, sampled at 2x (an upstream upscale of it).
+			auto value = [](double x, double y, int c) { return 0.4 + 0.2 * std::sin(x * (6.0 + c)) * std::cos(y * (5.0 + c)); };
+			std::vector<uint16_t> px(static_cast<size_t>(W) * H * 4);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					for (int c = 0; c < 4; ++c)
+						px[(static_cast<size_t>(y) * W + x) * 4 + c] = static_cast<uint16_t>(std::lround((c == 3 ? 1.0 : value((x + 0.5) / W, (y + 0.5) / H, c)) * 65535.0));
+			pl_tex_params tp{};
+			tp.w = W; tp.h = H; tp.format = pl_find_named_fmt(gpu, "rgba16"); tp.sampleable = true; tp.initial_data = px.data();
+			pl_tex tex = pl_tex_create(gpu, &tp);
+			Assert::IsNotNull(tex);
+			pl_frame frame = TargetLutGpuFixture::MakeRgbFrame(tex);
+			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+			SourceRebase::Module rebase;
+			pl_frame out{};
+			Assert::IsTrue(rebase.Apply(gpu, dispatch, frame, 0.5, out), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+			Assert::AreEqual(1, out.num_planes, L"one plane");
+			Assert::AreEqual(w, out.planes[0].texture->params.w);
+			Assert::AreEqual(h, out.planes[0].texture->params.h);
+			Assert::AreEqual(frame.planes[0].components, out.planes[0].components, L"all components kept");
+			Assert::AreEqual(static_cast<float>(w), out.crop.x1, 1e-4f);
+			// Read back (via a readable copy) and compare with the content at the target size.
+			pl_tex_params rp{};
+			rp.w = w; rp.h = h; rp.format = out.planes[0].texture->params.format; rp.host_readable = true; rp.blit_dst = true;
+			pl_tex readable = pl_tex_create(gpu, &rp);
+			pl_tex_blit_params bp{}; bp.src = out.planes[0].texture; bp.dst = readable;
+			pl_tex_blit(gpu, &bp);
+			double worst = 0.0;
+			const bool isFloat = readable->params.format->type == PL_FMT_FLOAT;
+			std::vector<uint16_t> back(static_cast<size_t>(w) * h * 4);
+			pl_tex_transfer_params d{}; d.tex = readable; d.ptr = back.data();
+			Assert::IsTrue(pl_tex_download(gpu, &d));
+			for (int y = 8; y < h - 8; ++y)
+				for (int x = 8; x < w - 8; ++x)
+					for (int c = 0; c < 3; ++c)
+					{
+						const uint16_t raw = back[(static_cast<size_t>(y) * w + x) * 4 + c];
+						const double v = isFloat ? HalfBits(raw) : raw / 65535.0;
+						worst = (std::max)(worst, std::fabs(v - value((x + 0.5) / w, (y + 0.5) / h, c)));
+					}
+			char line[120];
+			snprintf(line, sizeof(line), "RGB re-base 2x: worst %.5f (%.2f 8-bit codes)\n", worst, worst * 255.0);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(worst < 1.0 / 255.0, L"the RGB picture restored within a code");
+			pl_tex_destroy(gpu, &readable);
+			pl_tex_destroy(gpu, &tex);
+			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+		}
+
 		TEST_METHOD(SourceRebaseRestoresAnUpscaledSourceAndKeepsTheCropEdge)
 		{
 			// Stage 12 step A (owner 2026-10-15): source_resolution re-bases a
