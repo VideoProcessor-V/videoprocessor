@@ -9028,6 +9028,14 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.hasContrastRecovery != next.hasContrastRecovery ||
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
 		changed(current.saturation != next.saturation, "saturation");
+		changed(current.captureUpload != next.captureUpload, "capture_upload");
+		changed(current.sourceRange != next.sourceRange, "source_range");
+		changed(current.sourceResolution != next.sourceResolution ||
+			current.sourceResolutionAutoMinConfidence != next.sourceResolutionAutoMinConfidence, "source_resolution");
+		changed(current.debandVp != next.debandVp || current.lowBitrateHandling != next.lowBitrateHandling, "deband_vp");
+		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
+			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
+		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
