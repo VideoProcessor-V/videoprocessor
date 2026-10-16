@@ -145,7 +145,7 @@ namespace VideoProcessorTest
 		{
 			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
 			for (size_t i = 0; i < tiles.size(); ++i)
-				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i]));
+				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i], codeMax));
 			SourceResolution::Thresholds t;
 			t.codeMaximum = codeMax;
 			return SourceResolution::ReadFrame(spectra, t);
@@ -411,6 +411,97 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.5, up.ratio, 0.01, L"upscaled 1080 in PQ reads 1080");
 		}
 
+		// Spec 1b / 2d (owner 2026-10-15: the debander serves any low-bitrate
+		// source, native 4K included): bitrate quality and effective bit depth.
+		TEST_METHOD(BlockedFrameReadsLowQualityAndCleanStaysHigh)
+		{
+			// The spec's blocked frame: a smooth gradient (a sky) coded hard, so
+			// the blocks lose their inner detail and step at their edges.
+			auto smooth = [](unsigned seed) {
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((0.3 + 0.25 * (x + 0.6 * y) / kTile + 0.02 * std::sin(0.02 * x * seed)) * 1023.0) / 1023.0);
+				return t; };
+			const SourceResolution::FrameReading clean = ReadScene([&](unsigned seed) {
+				return Tile(Scene(seed), 1.0, kLanczos3, 1.0 / 255.0, 1023, seed); });
+			const SourceResolution::FrameReading blocked = ReadScene([&](unsigned seed) {
+				std::vector<float> t = smooth(seed);
+				Code8x8(t, kTile, 24.0, 1023);
+				return t; });
+			char line[200];
+			snprintf(line, sizeof(line), "clean: quality %.2f blockiness %.2f band %.3f bits %.1f | blocked: quality %.2f blockiness %.2f band %.3f\n",
+				clean.bitrateQuality, clean.blockiness, clean.bandShare, clean.effectiveBits, blocked.bitrateQuality, blocked.blockiness, blocked.bandShare);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(clean.bitrateQuality > 0.8, L"a clean frame reads clean");
+			Assert::IsTrue(blocked.bitrateQuality < 0.5, L"a blocked frame reads below 0.5 (spec 4)");
+		}
+
+		TEST_METHOD(EffectiveBitDepthReadsEightBitContentInATenBitSignal)
+		{
+			// Ramps (diagonal, a few hundred codes across a tile) plus gentle texture.
+			auto ramp = [](unsigned seed, int bits, bool pq, double grain) {
+				std::mt19937 rng(seed);
+				std::normal_distribution<double> noise(0.0, 1.0);
+				const double levels = std::pow(2.0, bits) - 1.0;
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						double v = 0.15 + 0.6 * (x + y) / (2.0 * kTile) + 0.01 * std::sin(0.05 * x * (seed + 1));
+						if (grain > 0) v += grain * noise(rng);
+						v = std::round((std::min)(1.0, (std::max)(0.0, v)) * levels) / levels;   // the content's own depth
+						if (pq) v = SdrToPq(v);
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(v * 1023.0) / 1023.0);   // the 10-bit signal
+					}
+				return t;
+			};
+			const SourceResolution::FrameReading eight = ReadScene([&](unsigned seed) { return ramp(seed, 8, false, 0.0); });
+			const SourceResolution::FrameReading ten = ReadScene([&](unsigned seed) { return ramp(seed, 10, false, 0.0); });
+			const SourceResolution::FrameReading eightPq = ReadScene([&](unsigned seed) { return ramp(seed, 8, true, 0.0); });
+			const SourceResolution::FrameReading tenGrain = ReadScene([&](unsigned seed) { return ramp(seed, 10, false, 2.0 / 1023.0); });
+			char line[200];
+			snprintf(line, sizeof(line), "bits: 8-in-10 %.2f, 10 %.2f, 8 via SDR->PQ %.2f, 10 + grain %.2f; banding 8-in-10 %.3f, 10 %.3f\n",
+				eight.effectiveBits, ten.effectiveBits, eightPq.effectiveBits, tenGrain.effectiveBits, eight.bandShare, ten.bandShare);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(8.0, eight.effectiveBits, 0.3, L"8-bit content in a 10-bit signal reads 8");
+			Assert::AreEqual(10.0, ten.effectiveBits, 0.3, L"true 10-bit reads 10");
+			// 8-bit SDR re-encoded to PQ spans about half the PQ code range (SDR
+			// white at 203 nits is PQ code ~590), two codes per level: the step
+			// the debander must hide is a 9-bit step in PQ codes - read as such,
+			// not as true 10-bit.
+			Assert::AreEqual(9.0, eightPq.effectiveBits, 0.35, L"8-bit content re-encoded to PQ (Apple TV LLDV) reads its step in PQ codes");
+			Assert::AreEqual(10.0, tenGrain.effectiveBits, 0.3, L"grain does not change a true 10-bit reading");
+		}
+
+		TEST_METHOD(ShallowEightBitSkyReadsAsBanded)
+		{
+			// A sky: a shallow gradient (a few 8-bit levels across a tile) shows
+			// band edges; the same sky in 10-bit with a little grain does not.
+			auto sky = [](unsigned seed, double levels, double grain) {
+				std::mt19937 rng(seed);
+				std::normal_distribution<double> noise(0.0, 1.0);
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						double v = 0.55 + (12.0 / 255.0) * (0.7 * x + 0.3 * y) / kTile + 0.002 * seed;
+						if (grain > 0) v += grain * noise(rng);
+						v = std::round(v * levels) / levels;
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(v * 1023.0) / 1023.0);
+					}
+				return t;
+			};
+			const SourceResolution::FrameReading banded = ReadScene([&](unsigned seed) { return sky(seed, 255.0, 0.0); });
+			const SourceResolution::FrameReading smooth = ReadScene([&](unsigned seed) { return sky(seed, 1023.0, 1.5 / 1023.0); });
+			char line[160];
+			snprintf(line, sizeof(line), "sky: 8-bit band share %.3f quality %.2f | 10-bit + grain band share %.3f quality %.2f\n",
+				banded.bandShare, banded.bitrateQuality, smooth.bandShare, smooth.bitrateQuality);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(banded.bandShare > 0.05 && banded.bitrateQuality < 0.8, L"the 8-bit sky reads banded");
+			Assert::IsTrue(smooth.bandShare < 0.02 && smooth.bitrateQuality > 0.9, L"the 10-bit grainy sky reads clean");
+		}
+
 		// Real 4K footage (VP_TEST_REAL_FOOTAGE; skipped when unset): the
 		// genuine frames, the same frames coded, and re-mastered at lower
 		// heights then upscaled with several kernels (and coded). Gates: every
@@ -518,7 +609,7 @@ namespace VideoProcessorTest
 								Code8x8(tile, kTile, c.q, codeMax);
 								SourceResolution::Spectrum spectrum;
 								const auto start = std::chrono::steady_clock::now();
-								SourceResolution::Analyse(tile.data(), kTile, kTile, spectrum);
+								SourceResolution::Analyse(tile.data(), kTile, kTile, spectrum, codeMax);
 								analyseMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 								spectra.push_back(std::move(spectrum));
 							}
@@ -526,7 +617,7 @@ namespace VideoProcessorTest
 						t.codeMaximum = codeMax;
 						const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, t);
 						char name[160];
-						snprintf(name, sizeof(name), "%.10s f%lld %s", clip.file.c_str(), frameIndex, c.name.c_str());
+						snprintf(name, sizeof(name), "%.10s f%lld %s [q %.2f bits %.1f blk %.2f band %.3f]", clip.file.c_str(), frameIndex, c.name.c_str(), r.bitrateQuality, r.effectiveBits, r.blockiness, r.bandShare);
 						Log(name, r);
 						if (csv) fprintf(csv, "%s,%lld,%s,%.4f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f\n", clip.file.c_str(), frameIndex, c.name.c_str(), c.ratio,
 							r.informativeTiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.vertical.runnerUp, r.vertical.grid,

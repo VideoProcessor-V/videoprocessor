@@ -35,11 +35,20 @@ namespace SourceResolution
 		// Mirror coherence per candidate source rate m / n (index m): near 0
 		// for real detail, high where the picture was resampled from rate m / n.
 		std::vector<double> mirrorVertical, mirrorHorizontal;
+		// Coding (spec 1b / 2d): the code histogram, blocking (boundary step
+		// against the others at the 8 / 16 px periods; 1 = none), the mean
+		// step, and the 8x8 blocks that are flat or hold one band edge.
+		std::vector<unsigned> histogram;
+		double blockiness = 1.0, gradient = 0.0;
+		int blocks = 0, bandEdges = 0, flatBlocks = 0;
 	};
 
 	// `n` must be a power of two (64..1024); `luma` is row-major, `stride` in
 	// elements, values in 0..1 (code / max code).
-	bool Analyse(const float* luma, int stride, int n, Spectrum& out);
+	// `codeMaximum` is the source's code range (1023 for 10-bit) for the coding
+	// measures; the tile should sit on the frame's 16-pixel grid.
+	bool Analyse(const float* luma, int stride, int n, Spectrum& out, int codeMaximum = 1023);
+	void MeasureCoding(const float* luma, int stride, int n, int codeMaximum, Spectrum& out);
 
 	struct Thresholds
 	{
@@ -76,12 +85,19 @@ namespace SourceResolution
 		double signature = 0.0;     // the tile means, weighted by position: an unchanged frame repeats it
 		MirrorPeak vertical, horizontal;
 		std::vector<double> verticalCurve, horizontalCurve;   // the averaged coherence per candidate (diagnostic)
+		// Spec 1b: 1 = clean, 0 = badly blocked or banded; spec 2d: the bits
+		// the picture really uses (8 for 8-bit content in a 10-bit signal,
+		// also after a curve such as SDR re-encoded to PQ); 0 = unknown.
+		double bitrateQuality = 1.0, effectiveBits = 0.0;
+		double blockiness = 1.0, bandShare = 0.0;
 		bool informative() const { return informativeTiles > 0; }
 	};
 
 	// One frame from its tiles: the informative tiles' coherence curves
 	// averaged per axis; a lower ratio only when both axes were resampled.
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& thresholds = {});
+	// The coding readings alone (part of ReadFrame).
+	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame);
 
 	// The declared reading over time.
 	class Tracker

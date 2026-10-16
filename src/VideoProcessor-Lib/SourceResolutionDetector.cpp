@@ -54,7 +54,7 @@ namespace SourceResolution
 		}
 	}
 
-	bool Analyse(const float* luma, int stride, int n, Spectrum& out)
+	bool Analyse(const float* luma, int stride, int n, Spectrum& out, int codeMaximum)
 	{
 		if (!luma || !PowerOfTwo(n) || stride < n) return false;
 		out.n = n;
@@ -132,7 +132,72 @@ namespace SourceResolution
 			}
 		}
 		out.mean = total / n;
+		MeasureCoding(luma, stride, n, codeMaximum, out);
 		return true;
+	}
+
+	void MeasureCoding(const float* luma, int stride, int n, int codeMaximum, Spectrum& out)
+	{
+		// Spec 1b / 2d on the tile's own codes (the tile sits on the frame's
+		// 16-pixel grid, so block boundaries fall at 7 mod 8 / 15 mod 16).
+		const int codes = (std::max)(1, codeMaximum);
+		std::vector<int> c(static_cast<size_t>(n) * n);
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
+				c[static_cast<size_t>(y) * n + x] = (std::min)(codes, (std::max)(0, static_cast<int>(std::lround(luma[static_cast<size_t>(y) * stride + x] * codes))));
+		out.histogram.assign(static_cast<size_t>(codes) + 1, 0u);
+		for (int v : c) ++out.histogram[static_cast<size_t>(v)];
+
+		// Blocking: mean absolute step at each position within the 8 and 16
+		// pixel periods, both axes; the boundary step against the others.
+		double g8[8] = {}, g16[16] = {};
+		double count8[8] = {}, count16[16] = {};
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x + 1 < n; ++x)
+			{
+				const double h = std::abs(c[static_cast<size_t>(y) * n + x + 1] - c[static_cast<size_t>(y) * n + x]);
+				const double v = std::abs(c[static_cast<size_t>(x + 1) * n + y] - c[static_cast<size_t>(x) * n + y]);
+				g8[x % 8] += h + v; count8[x % 8] += 2;
+				g16[x % 16] += h + v; count16[x % 16] += 2;
+			}
+		double inner8 = 0.0, inner16 = 0.0;
+		for (int p = 0; p < 7; ++p) inner8 += g8[p] / (std::max)(1.0, count8[p]);
+		inner8 /= 7.0;
+		for (int p = 0; p < 15; ++p) if (p != 7) inner16 += g16[p] / (std::max)(1.0, count16[p]);
+		inner16 /= 14.0;
+		const double edge8 = g8[7] / (std::max)(1.0, count8[7]), edge16 = g16[15] / (std::max)(1.0, count16[15]);
+		const double floor = 0.25;   // a quarter code: a near-flat tile is not 'blocked' by one stray step
+		out.blockiness = (std::max)((edge8 + floor) / (inner8 + floor), (edge16 + floor) / (inner16 + floor));
+		out.gradient = inner8;
+
+		// Banding: 8x8 blocks holding exactly two adjacent levels (a band edge
+		// across a flat area) among all blocks.
+		int blocks = 0, bandEdges = 0, flat = 0;
+		for (int by = 0; by + 8 <= n; by += 8)
+			for (int bx = 0; bx + 8 <= n; bx += 8)
+			{
+				int lo = codes, hi = 0;
+				for (int y = 0; y < 8; ++y)
+					for (int x = 0; x < 8; ++x)
+					{
+						const int v = c[static_cast<size_t>(by + y) * n + bx + x];
+						lo = (std::min)(lo, v);
+						hi = (std::max)(hi, v);
+					}
+				++blocks;
+				if (hi == lo) { ++flat; continue; }
+				bool twoLevels = true;
+				for (int y = 0; y < 8 && twoLevels; ++y)
+					for (int x = 0; x < 8; ++x)
+					{
+						const int v = c[static_cast<size_t>(by + y) * n + bx + x];
+						if (v != lo && v != hi) { twoLevels = false; break; }
+					}
+				if (twoLevels && hi - lo <= 8) { ++flat; ++bandEdges; }   // one step (up to 8 codes: 7-bit in 10)
+			}
+		out.blocks = blocks;
+		out.bandEdges = bandEdges;
+		out.flatBlocks = flat;
 	}
 
 	bool Informative(const Spectrum& spectrum, const Thresholds& t)
@@ -236,6 +301,51 @@ namespace SourceResolution
 		return peak;
 	}
 
+	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame)
+	{
+		// Effective bit depth: the share of codes in use. Content made with
+		// fewer levels leaves gaps however it was mapped since (8-bit x 4, or
+		// through a curve such as SDR re-encoded to PQ). Windows of 16 codes
+		// with enough pixels to fill every code (16 per code) are judged; the
+		// median occupied share s gives bits = log2(levels) + log2(s).
+		std::vector<unsigned long long> histogram;
+		double blockSum = 0.0, blockWeight = 0.0;
+		long long blocks = 0, bandEdges = 0;
+		for (const Spectrum& s : tiles)
+		{
+			if (histogram.size() < s.histogram.size()) histogram.resize(s.histogram.size(), 0ull);
+			for (size_t i = 0; i < s.histogram.size(); ++i) histogram[i] += s.histogram[i];
+			// Blocking from tiles with some variation (a flat tile has no steps to compare).
+			if (s.gradient > 0.05) { blockSum += s.blockiness; blockWeight += 1.0; }
+			blocks += s.blocks;
+			bandEdges += s.bandEdges;
+		}
+		if (histogram.size() >= 64)
+		{
+			std::vector<double> shares;
+			for (size_t w = 0; w + 16 <= histogram.size(); w += 16)
+			{
+				unsigned long long pixels = 0;
+				int used = 0;
+				for (size_t i = w; i < w + 16; ++i) { pixels += histogram[i]; used += histogram[i] > 0; }
+				if (pixels >= 16ull * 16ull) shares.push_back(used / 16.0);
+			}
+			if (!shares.empty())
+			{
+				std::nth_element(shares.begin(), shares.begin() + shares.size() / 2, shares.end());
+				const double share = (std::max)(1.0 / 16.0, shares[shares.size() / 2]);
+				frame.effectiveBits = std::log2(static_cast<double>(histogram.size())) + std::log2(share);
+			}
+		}
+		frame.blockiness = blockWeight > 0.0 ? blockSum / blockWeight : 1.0;
+		frame.bandShare = blocks > 0 ? static_cast<double>(bandEdges) / blocks : 0.0;
+		// 1 = clean; blocking from 1.1 (none visible) to 1.7 (heavy); banding
+		// from no band-edge blocks to a fifth of all blocks.
+		const double blocked = (std::min)(1.0, (std::max)(0.0, (frame.blockiness - 1.1) / 0.6));
+		const double banded = (std::min)(1.0, (std::max)(0.0, frame.bandShare / 0.2));
+		frame.bitrateQuality = 1.0 - (std::max)(blocked, banded);
+	}
+
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& t)
 	{
 		FrameReading frame;
@@ -255,6 +365,7 @@ namespace SourceResolution
 		}
 		frame.mean = sum / tiles.size();
 		frame.signature = signature;
+		ReadCoding(tiles, frame);
 		if (frame.informativeTiles == 0) return frame;
 		for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] /= frame.informativeTiles; horizontal[m] /= frame.informativeTiles; }
 		frame.verticalCurve = vertical;

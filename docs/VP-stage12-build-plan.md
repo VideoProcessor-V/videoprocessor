@@ -137,6 +137,22 @@ Step B, detection (SourceResolutionDetector, in progress):
   must work in PQ codes (tested: SDR re-encoded to PQ keeps its reading),
   and tunnelled DV must be read from the decoded picture.
 
+- Owner 2026-10-15: the debander (spec §2b/§2d) is for any low-bitrate
+  source, native 4K streams included, not only re-based ones. It runs at
+  source resolution at the re-base point: inside the re-base pass on a
+  re-based source, on the native planes otherwise. `bitrate_quality` and
+  `effective_bit_depth` are therefore read on every source, independent
+  of the resolution reading. `effective_bit_depth` from the share of
+  codes in use (not only "multiples of 4"), so 8-bit content re-encoded to
+  PQ by the Apple TV (LLDV) still reads its real step (measured: 8-bit
+  SDR in PQ codes reads 9, two PQ codes per level - the step to hide).
+- Owner 2026-10-15: the debander is vector-informed (spec �2d): its
+  blur-or-not regions held across frames along trusted vectors, with the
+  standing fallback (vectors when present for the frame, else per frame;
+  never starts the matcher); tests on both warp paths and without vectors.
+- Found on the real clips: the UVG "10-bit" files carry 8-bit content
+  (every code a multiple of 4) - the bit-depth reading says 8 on them.
+
 Then step C (auto, VP debander with PQ thresholds, the vector refinements
 2c/2d/S8-1 with the dither_vectors-style fallback, S8-2).
 
