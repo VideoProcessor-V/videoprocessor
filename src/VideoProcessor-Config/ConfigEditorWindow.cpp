@@ -6728,6 +6728,36 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         autoConfidence->setToolTip(QStringLiteral(
             "How sure the detection must be before Auto shrinks the picture (0-1). Higher = slower to act and "
             "never on a doubtful source; lower = acts sooner. Used only with Source resolution: Auto."));
+        auto* debandVp = addChoice(QStringLiteral("VP deband"), QStringLiteral("deband_vp"),
+            { QStringLiteral("off"), QStringLiteral("auto"), QStringLiteral("on") });
+        debandVp->setItemText(debandVp->findData(QStringLiteral("off")), QStringLiteral("Off"));
+        debandVp->setItemText(debandVp->findData(QStringLiteral("auto")), QStringLiteral("Auto (when the source needs it)"));
+        debandVp->setItemText(debandVp->findData(QStringLiteral("on")), QStringLiteral("On (always)"));
+        debandVp->setToolTip(QStringLiteral(
+            "VP's own debander, safe on HDR (libplacebo's leaves black specks there). Smooths the steps in skies and "
+            "shadows of 8-bit content and low-bitrate streams, native 4K included, before any scaling; texture and "
+            "grain are left alone. Auto: only as strong as the source needs (from its measured bit depth and "
+            "bitrate quality - the stats line shows both); a 10-bit clean source is untouched. With the de-judder's "
+            "motion it keeps its decisions steady along the motion."));
+        auto* lowBitrate = addChoice(QStringLiteral("Low-bitrate handling"), QStringLiteral("low_bitrate_handling"),
+            { QStringLiteral("auto"), QStringLiteral("off"), QStringLiteral("on") });
+        lowBitrate->setItemText(lowBitrate->findData(QStringLiteral("auto")), QStringLiteral("Auto (measured)"));
+        lowBitrate->setItemText(lowBitrate->findData(QStringLiteral("off")), QStringLiteral("Off"));
+        lowBitrate->setItemText(lowBitrate->findData(QStringLiteral("on")), QStringLiteral("On (treat as a low-bitrate stream)"));
+        lowBitrate->setToolTip(QStringLiteral(
+            "How VP deband reacts to compression (blocking, banding). Auto: by the measured bitrate quality. "
+            "Off: by the content's bit depth only. On: always as for a poor stream."));
+        auto* cnnStabilise = addChoice(QStringLiteral("Steady CNN detail (upscaling)"), QStringLiteral("cnn_residual_stabilise"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        cnnStabilise->setToolTip(QStringLiteral(
+            "The detail the CNN upscaler adds can shimmer on compressed streams (it is re-invented every frame). "
+            "On: where the de-judder's motion is trusted, that added detail is averaged along the motion over about "
+            "three frames; the picture itself is untouched. Without the motion it does nothing (same as off)."));
+        auto* ssimStabilise = addChoice(QStringLiteral("Steady SSIM detail (downscaling)"), QStringLiteral("ssim_residual_stabilise"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        ssimStabilise->setToolTip(QStringLiteral(
+            "The same for the SSIM downscaler's added contrast on grain and fine texture: averaged along the trusted "
+            "motion so it does not shimmer. Without the motion it does nothing (same as off)."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7956,7 +7986,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

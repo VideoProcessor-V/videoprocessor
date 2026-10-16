@@ -18,6 +18,7 @@
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/SourceRebase.h>
 #include <vprenderer/SourceResolutionMonitor.h>
+#include <vprenderer/VpDebander.h>
 #include <chrono>
 #include <random>
 #include <thread>
@@ -7787,6 +7788,190 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
+		TEST_METHOD(VpDebanderSmoothsBandsKeepsTextureAndHoldsAlongTheVectors)
+		{
+			// Stage 12 §2b / §2d (owner 2026-10-15: any low-bitrate source,
+			// vector-informed). 10-bit codes in a P010-style r16 plane.
+			Assert::AreEqual(0.0, VpDebander::Strength(10.0, 10, 1.0, true), L"true 10-bit, clean: nothing to deband");
+			Assert::AreEqual(6.0, VpDebander::Strength(8.0, 10, 1.0, true), 1e-9, L"8-bit in 10: 1.5 x the 4-code step");
+			Assert::IsTrue(VpDebander::Strength(10.0, 10, 0.2, true) > 6.0, L"low bitrate quality raises it");
+			Assert::AreEqual(0.0, VpDebander::Strength(10.0, 10, 0.2, false), L"low_bitrate_handling off: quality ignored");
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 512, H = 256;
+			auto upload = [&](const std::vector<int>& codes) {
+				std::vector<uint16_t> data(codes.size());
+				for (size_t i = 0; i < codes.size(); ++i) data[i] = static_cast<uint16_t>((std::min)(1023, (std::max)(0, codes[i])) << 6);
+				pl_tex_params p{};
+				p.w = W; p.h = H; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readback = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = W; rp.h = H; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				std::vector<double> v(static_cast<size_t>(W) * H);
+				if (readable->params.format->type == PL_FMT_FLOAT)
+				{
+					std::vector<uint16_t> half(v.size());
+					pl_tex_transfer_params d{}; d.tex = readable; d.ptr = half.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					for (size_t i = 0; i < v.size(); ++i) v[i] = HalfBits(half[i]) * 65535.0 / 64.0;
+				}
+				else
+				{
+					std::vector<uint16_t> raw(v.size());
+					pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					for (size_t i = 0; i < v.size(); ++i) v[i] = raw[i] / 64.0;   // back to 10-bit codes
+				}
+				pl_tex_destroy(gpu, &readable);
+				return v;
+			};
+			auto frameOf = [&](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+			// A shallow 8-bit ramp in the 10-bit signal (a sky): 4-code steps every 32 px.
+			std::vector<int> ramp(static_cast<size_t>(W) * H), texture(ramp.size());
+			std::mt19937 rng(9);
+			std::normal_distribution<double> noise(0.0, 12.0);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					ramp[static_cast<size_t>(y) * W + x] = 4 * (100 + x / 32);
+					texture[static_cast<size_t>(y) * W + x] = static_cast<int>(std::lround(500 + noise(rng)));
+				}
+			VpDebander::Params params;
+			params.thresholdCodes = VpDebander::Strength(8.0, 10, 1.0, true);
+			params.colorDepth = 10;
+			params.radiusScale = 1080.0 / H;   // 16 px at this picture's 'height' scale
+			VpDebander::Module deband;
+			pl_tex rampTex = upload(ramp), texTex = upload(texture);
+			pl_frame out{};
+			Assert::IsTrue(deband.Apply(gpu, dispatch, frameOf(rampTex), params, out), ExtendedRangeGpuProbe::ToWide(deband.LastError()).c_str());
+			const std::vector<double> smoothed = readback(out.planes[0].texture);
+			// Visible banding: how far the column means depart from a straight
+			// ramp (least-squares line); a 4-code staircase is ~1.15 codes RMS.
+			auto staircase = [&](auto at) {
+				std::vector<double> col;
+				for (int x = 80; x < W - 80; ++x)
+				{
+					double m = 0;
+					for (int y = 40; y < H - 40; ++y) m += at(static_cast<size_t>(y) * W + x);
+					col.push_back(m / (H - 80));
+				}
+				double sx = 0, sy = 0, sxx = 0, sxy = 0;
+				const double k = static_cast<double>(col.size());
+				for (size_t i = 0; i < col.size(); ++i) { sx += i; sy += col[i]; sxx += double(i) * i; sxy += i * col[i]; }
+				const double b = (k * sxy - sx * sy) / (k * sxx - sx * sx), a = (sy - b * sx) / k;
+				double e = 0;
+				for (size_t i = 0; i < col.size(); ++i) e += (col[i] - a - b * i) * (col[i] - a - b * i);
+				return std::sqrt(e / k);
+			};
+			const double stepIn = staircase([&](size_t i) { return static_cast<double>(ramp[i]); });
+			const double stepOut = staircase([&](size_t i) { return smoothed[i]; });
+			double meanIn = 0, meanOut = 0;
+			for (int y = 40; y < H - 40; ++y)
+				for (int x = 80; x < W - 80; ++x) { const size_t i = static_cast<size_t>(y) * W + x; meanIn += ramp[i]; meanOut += smoothed[i]; }
+			const double n = static_cast<double>((H - 80) * (W - 160));
+			// Texture: the same pass on noise keeps its variance.
+			Assert::IsTrue(deband.Apply(gpu, dispatch, frameOf(texTex), params, out, 1));
+			const std::vector<double> tex = readback(out.planes[0].texture);
+			double varIn = 0, varOut = 0;
+			for (size_t i = 0; i < tex.size(); ++i) { varIn += (texture[i] - 500.0) * (texture[i] - 500.0); varOut += (tex[i] - 500.0) * (tex[i] - 500.0); }
+			char line[220];
+			snprintf(line, sizeof(line), "deband: banding (RMS off a straight ramp) %.2f -> %.2f codes, mean %.3f -> %.3f; texture variance kept %.1f%%\n",
+				stepIn, stepOut, meanIn / n, meanOut / n, 100.0 * varOut / varIn);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(stepOut < 0.5 * stepIn, L"banding at least halved");
+			Assert::AreEqual(meanIn / n, meanOut / n, 0.25, L"the level kept");
+			Assert::IsTrue(varOut > 0.9 * varIn, L"texture kept");
+
+			// Vectors: a field (one texel per 16 px block: vx, vy, trust, error)
+			// moving the content 64 px right. Frame 1: left half banded (blurred,
+			// w = 1), right half texture (w = 0). Frame 2: all texture. Held, the
+			// columns the banded half moved into keep blurring partly; beyond the
+			// motion, nothing is blurred.
+			std::vector<float> fieldData(static_cast<size_t>(W / 16) * (H / 16) * 4);
+			for (size_t i = 0; i < fieldData.size(); i += 4) { fieldData[i] = 64.0f; fieldData[i + 1] = 0.0f; fieldData[i + 2] = 1.0f; fieldData[i + 3] = 0.0f; }
+			pl_tex_params fp{};
+			fp.w = W / 16; fp.h = H / 16; fp.format = pl_find_named_fmt(gpu, "rgba32f"); fp.sampleable = true; fp.initial_data = fieldData.data();
+			pl_tex field = pl_tex_create(gpu, &fp);
+			Assert::IsNotNull(field, L"field texture");
+			std::vector<int> half(ramp.size());
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					half[static_cast<size_t>(y) * W + x] = x < W / 2 ? ramp[static_cast<size_t>(y) * W + x] : texture[static_cast<size_t>(y) * W + x];
+			pl_tex halfTex = upload(half);
+			auto blurredShare = [&](const std::vector<double>& o, int x0, int x1) {
+				double sum = 0; int count = 0;
+				for (int y = 40; y < H - 40; ++y)
+					for (int x = x0; x < x1; ++x) { const size_t i = static_cast<size_t>(y) * W + x; sum += std::fabs(o[i] - texture[i]); ++count; }
+				return sum / count;
+			};
+			double heldMoved = 0, heldBeyond = 0, frameMoved = 0, frameBeyond = 0;
+			for (int held = 0; held < 2; ++held)
+			{
+				VpDebander::Module m;
+				VpDebander::Params p = params;
+				p.field = held ? field : nullptr;
+				p.sequence = 10;
+				Assert::IsTrue(m.Apply(gpu, dispatch, frameOf(halfTex), p, out));
+				p.sequence = 11;
+				Assert::IsTrue(m.Apply(gpu, dispatch, frameOf(texTex), p, out));
+				const std::vector<double> o = readback(out.planes[0].texture);
+				// Columns whose previous position (64 px left) was the banded half's
+				// interior (fully blurred there), and columns whose previous position
+				// was texture.
+				const double moved = blurredShare(o, 80, W / 2 - 80), beyond = blurredShare(o, W / 2 + 160, W - 16);
+				std::string profile = held ? "held profile:" : "per-frame profile:";
+				for (int x0 = 0; x0 < W; x0 += 32)
+				{
+					char cell[16];
+					snprintf(cell, sizeof(cell), " %.2f", blurredShare(o, x0, x0 + 32));
+					profile += cell;
+				}
+				Logger::WriteMessage((profile + "\n").c_str());
+				snprintf(line, sizeof(line), "%s: change where the banded half was %.2f codes, where texture was %.2f; held frames %llu\n",
+					held ? "held along the vectors" : "per frame (no vectors)", moved, beyond, m.HeldFrames());
+				Logger::WriteMessage(line);
+				if (held)
+				{
+					Assert::AreEqual(1ull, m.HeldFrames());
+					heldMoved = moved;
+					heldBeyond = beyond;
+				}
+				else
+				{
+					Assert::AreEqual(0ull, m.HeldFrames());
+					Assert::IsTrue(moved < 1.0 && beyond < 1.0, L"without vectors: per-frame decisions (texture almost untouched)");
+					frameMoved = moved;
+					frameBeyond = beyond;
+				}
+				m.Release(gpu);
+			}
+			// Held, the weights follow the motion: more blur (inside this frame's
+			// blur band) where the banded area was, less where texture was; never
+			// more blur on texture than this frame's own decisions give.
+			Assert::IsTrue(heldMoved > 1.5 * heldBeyond, L"the blur weight followed the motion");
+			Assert::IsTrue(heldMoved > frameMoved, L"steadier blur where the banded area was");
+			Assert::IsTrue(heldBeyond <= 1.05 * frameBeyond + 0.02, L"held never blurs texture more than this frame does");
+			pl_tex_destroy(gpu, &rampTex); pl_tex_destroy(gpu, &texTex); pl_tex_destroy(gpu, &halfTex); pl_tex_destroy(gpu, &field);
+			deband.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+		}
+
 		TEST_METHOD(SourceRebaseRestoresAnUpscaledSourceAndKeepsTheCropEdge)
 		{
 			// Stage 12 step A (owner 2026-10-15): source_resolution re-bases a
@@ -9927,6 +10112,162 @@ namespace VideoProcessorTest
 			Assert::IsTrue(maxDiff(cleanScaled, cleanFull) <= 1, superMessage.c_str());
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(SsimResidualHeldAlongTrustedVectors)
+		{
+			// Delta 15 S8-1 / Stage 12 §2c (owner 2026-10-15): the SSIM downscaler's
+			// added contrast held along the de-judder's trusted vectors. A
+			// flickering texture on a trusted (still) field flickers less; a still
+			// texture keeps today's output; an untrusted field is today's output
+			// exactly; off is today's output exactly.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			const pl_hook* ssim = nullptr;
+			{
+				const std::string source = LoadBundledShader("SSimDownscaler.glsl");
+				ssim = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				Assert::IsNotNull(ssim);
+			}
+			static constexpr int width = 256, height = 128;
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(srcFmt && dstFmt);
+			// Texture: noise plus a gentle pattern; `flicker` changes the fine noise.
+			auto picture = [&](unsigned seed, double flickerAmount) {
+				std::mt19937 rng(77), flick(seed);
+				std::normal_distribution<double> base(0.0, 0.04), change(0.0, 1.0);
+				std::vector<uint16_t> px(static_cast<size_t>(width) * height * 4);
+				for (int y = 0; y < height; ++y)
+					for (int x = 0; x < width; ++x)
+					{
+						double v = 0.45 + 0.1 * std::sin(x * 0.11) * std::cos(y * 0.07) + base(rng) + flickerAmount * change(flick);
+						v = (std::min)(1.0, (std::max)(0.0, v));
+						const size_t i = (static_cast<size_t>(y) * width + x) * 4;
+						px[i] = px[i + 1] = px[i + 2] = static_cast<uint16_t>(std::lround(v * 65535.0));
+						px[i + 3] = 65535;
+					}
+				pl_tex_params tp{};
+				tp.w = width; tp.h = height; tp.format = srcFmt; tp.sampleable = true; tp.initial_data = px.data();
+				return pl_tex_create(gpu, &tp);
+			};
+			// A still field (zero motion) and the frame trust: trusted or not.
+			auto makeField = [&](float trust) {
+				std::vector<float> f(static_cast<size_t>(width / 16) * (height / 16) * 4);
+				for (size_t i = 0; i < f.size(); i += 4) { f[i] = 0.0f; f[i + 1] = 0.0f; f[i + 2] = trust; f[i + 3] = 0.0f; }
+				pl_tex_params p{};
+				p.w = width / 16; p.h = height / 16; p.format = pl_find_named_fmt(gpu, "rgba32f"); p.sampleable = true; p.initial_data = f.data();
+				return pl_tex_create(gpu, &p);
+			};
+			const float trustValue[4] = { 1.0f, 1.0f, 0.0f, 1.0f };
+			pl_tex_params tp1{};
+			tp1.w = 1; tp1.h = 1; tp1.format = pl_find_named_fmt(gpu, "rgba32f"); tp1.sampleable = true; tp1.initial_data = trustValue;
+			pl_tex frameTrust = pl_tex_create(gpu, &tp1);
+			pl_tex trusted = makeField(1.0f), untrusted = makeField(0.0f);
+			Assert::IsTrue(frameTrust && trusted && untrusted);
+
+			auto run = [&](bool stabilise, pl_tex field, bool flicker, int frames, float wBase = -1.0f) {
+				AdaptiveDownscale::Module module;
+				AdaptiveDownscale::Settings st;
+				st.grainSmoothMs = 0.0f;
+				st.grainMap = false;
+				st.ssimResidualStabilise = stabilise;
+				if (wBase >= 0.0f) st.wBase = wBase;   // 0: the faithful branch alone
+				std::vector<std::vector<uint16_t>> outputs;
+				for (int f = 0; f < frames; ++f)
+				{
+					pl_tex src = picture(static_cast<unsigned>(1000 + f), flicker ? 0.03 : 0.0);
+					module.SetFrame(st, static_cast<uint64_t>(10 + f), 1.0f / 24.0f);
+					module.ClearMotion();
+					if (field)
+					{
+						AdaptiveDownscale::Motion m;
+						m.field = field;
+						m.frameTrust = frameTrust;
+						m.minTrustedShare = 0.25f;
+						m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+						module.SetMotion(m);
+					}
+					pl_tex_params tp{};
+					tp.w = width / 2; tp.h = height / 2; tp.format = dstFmt; tp.renderable = true; tp.host_readable = true;
+					pl_tex target = pl_tex_create(gpu, &tp);
+					pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+					pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+					pl_render_params params = pl_render_default_params;
+					params.dither_params = nullptr;
+					params.error_diffusion = nullptr;
+					params.downscaler = &pl_filter_mitchell;
+					const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+					params.hooks = hooks;
+					params.num_hooks = 3;
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &out, &params));
+					pl_gpu_finish(gpu);
+					std::vector<uint16_t> px(static_cast<size_t>(width / 2) * (height / 2) * 4);
+					pl_tex_transfer_params dl{}; dl.tex = target; dl.ptr = px.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dl));
+					outputs.push_back(px);
+					pl_tex_destroy(gpu, &target);
+					pl_tex_destroy(gpu, &src);
+				}
+				const unsigned long long held = module.StabilisedFrames();
+				module.Release();
+				return std::make_pair(outputs, held);
+			};
+			// The faithful branch alone on the same frames: the residual is the
+			// output minus it. Frame-to-frame change of the residual (8-bit codes).
+			const auto faithfulFlicker = run(false, nullptr, true, 10, 0.0f);
+			auto flickerOf = [&](const std::vector<std::vector<uint16_t>>& o) {
+				const auto& fa = faithfulFlicker.first;
+				double sum = 0; size_t n = 0;
+				for (size_t f = 3; f < o.size(); ++f)
+					for (size_t i = 0; i < o[f].size(); i += 4)
+					{
+						const double now = double(o[f][i]) - double(fa[f][i]), before = double(o[f - 1][i]) - double(fa[f - 1][i]);
+						sum += std::fabs(now - before);
+						++n;
+					}
+				return sum / n / 257.0;
+			};
+			auto maxDiff = [&](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+				double m = 0;
+				size_t at = 0, over = 0;
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					const double d = std::fabs(double(a[i]) - double(b[i]));
+					if (d > m) { m = d; at = i; }
+					over += d > 257.0;
+				}
+				if (m > 257.0)
+				{
+					char where[160];
+					snprintf(where, sizeof(where), "  max at pixel (%zu, %zu) channel %zu: %u vs %u; %zu values differ by more than a code\n",
+						(at / 4) % (width / 2), (at / 4) / (width / 2), at % 4, a[at], b[at], over);
+					Logger::WriteMessage(where);
+				}
+				return m / 257.0;
+			};
+			const auto todayFlicker = run(false, nullptr, true, 10);
+			const auto heldFlicker = run(true, trusted, true, 10);
+			const auto untrustedFlicker = run(true, untrusted, true, 10);
+			const auto offWithField = run(false, trusted, true, 10);
+			const auto todayStill = run(false, nullptr, false, 8);
+			const auto heldStill = run(true, trusted, false, 8);
+			char line[240];
+			snprintf(line, sizeof(line), "SSIM residual flicker %.3f (today) -> %.3f (held, %llu frames held); untrusted %.3f; still picture held vs today max %.3f 8-bit codes\n",
+				flickerOf(todayFlicker.first), flickerOf(heldFlicker.first), heldFlicker.second, flickerOf(untrustedFlicker.first),
+				maxDiff(heldStill.first.back(), todayStill.first.back()));
+			Logger::WriteMessage(line);
+			Assert::IsTrue(heldFlicker.second >= 8, L"held on the consecutive frames");
+			Assert::IsTrue(flickerOf(heldFlicker.first) < 0.7 * flickerOf(todayFlicker.first), L"the residual flickers less when held");
+			// (The count is frames with a previous residual; trust is decided per pixel in the pass.)
+			Assert::AreEqual(0.0, maxDiff(untrustedFlicker.first.back(), todayFlicker.first.back()), L"untrusted: today's output exactly");
+			Assert::AreEqual(0.0, maxDiff(offWithField.first.back(), todayFlicker.first.back()), L"off: today's output exactly");
+			Assert::IsTrue(maxDiff(heldStill.first.back(), todayStill.first.back()) <= 1.0, L"a still picture keeps today's output (within a code)");
+			pl_tex_destroy(gpu, &frameTrust); pl_tex_destroy(gpu, &trusted); pl_tex_destroy(gpu, &untrusted);
+			pl_mpv_user_shader_destroy(&ssim);
 		}
 
 		TEST_METHOD(AdaptiveDownscaleGrainMapFromTheVectors)

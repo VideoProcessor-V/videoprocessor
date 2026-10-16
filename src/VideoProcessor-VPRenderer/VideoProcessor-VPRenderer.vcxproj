@@ -115,6 +115,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />

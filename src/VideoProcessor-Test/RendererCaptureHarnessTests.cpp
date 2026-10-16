@@ -774,6 +774,38 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
+		{
+			// Stage 12 §2b/§2d (owner 2026-10-15): VP's debander through the
+			// renderer - on its own, with the de-judder (vectors held), and on a
+			// re-based source; never a failure; off is the default.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			struct Case { const char* extra; bool film; const wchar_t* name; };
+			for (const Case& c : { Case{ "deband_vp: on\n", false, L"on" },
+				Case{ "deband_vp: on\ndejudder_strength: 0.25\n", true, L"on with the de-judder" },
+				Case{ "deband_vp: on\nsource_resolution: 1080\n", false, L"on, re-based" },
+				Case{ "deband_vp: auto\nlow_bitrate_handling: on\n", false, L"auto, low-bitrate on" } })
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, c.film, c.extra);
+				Assert::IsTrue(r.presented, (std::wstring(c.name) + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("VP deband: threshold"), (std::wstring(c.name) + L": the debander ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("VP deband failed"), (std::wstring(c.name) + L": no failure\n" + r.Tail()).c_str());
+			}
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+				Assert::IsFalse(r.Logged("VP deband: threshold"), (L"default: off\n" + r.Tail()).c_str());
+			}
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+		}
+
 		TEST_METHOD(MotionEnginesCoexistWithVpShaders)
 		{
 			// v1.4.02 merge (owner 2026-10-15): libplacebo's smooth motion (Bill's)

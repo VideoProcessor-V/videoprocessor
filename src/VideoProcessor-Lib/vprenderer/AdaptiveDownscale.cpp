@@ -9,6 +9,7 @@
 #include <vprenderer/OcclusionMaskHook.h>
 
 #include <algorithm>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 
@@ -190,7 +191,7 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef AD_SUPERRES_ALPHA
     o.a = g;   // for SSimSuperRes's final pass (vp_grain_strength), which writes 1
 #endif
-    imageStore(dst, q, o);
+    STABILISE_AND_STORE
 #else
     float w = clamp(w_base * (1.0 - e) * g, 0.0, 1.0);
     vec4 o;
@@ -201,10 +202,38 @@ if (q.x < size.x && q.y < size.y) {
         o.rgb = fa.rgb + vec3(w * (dot(ss.rgb, k) - dot(fa.rgb, k)));
         o.a = fa.a;   // passed through (Stage 10b does not use alpha)
     }
-    imageStore(dst, q, o);
+    STABILISE_AND_STORE
 #endif
 }
 )GLSL";
+
+		// Stage 12 §2c / S8-1: the luma residual (this output minus the faithful
+		// branch) held along the trusted motion - the previous frame's residual
+		// where this content was (source pixels of the field, mapped into the
+		// hooked picture and the output) - a one-pole; the faithful part is
+		// untouched; untrusted blocks, a failed frame trust or no previous
+		// residual: this frame's own.
+		const char* const STABILISE_DEFINE = R"GLSL(
+#define STABILISE_AND_STORE { \
+    const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
+    float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
+    float rs = r; \
+    vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
+    ivec2 fsz = textureSize(rs_field, 0); \
+    vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / 16.0)), ivec2(0), fsz - ivec2(1)), 0); \
+    bool frame_ok = texelFetch(rs_trust, ivec2(0), 0).r >= rs_min_share; \
+    if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5) { \
+        vec2 sprev = s - f.xy * src_size / rs_crop.zw; \
+        vec2 qprev = (sprev - src_origin) / src_per_dst; \
+        float rp = texture(rs_prev, qprev / vec2(size)).r; \
+        rs = mix(rp, r, rs_alpha); \
+    } \
+    o.rgb += vec3(rs - r); \
+    imageStore(rs_out, q, vec4(rs, 0.0, 0.0, 1.0)); \
+    imageStore(dst, q, o); \
+}
+)GLSL";
+		const char* const PLAIN_DEFINE = "#define STABILISE_AND_STORE imageStore(dst, q, o);\n";
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
 		{
@@ -704,18 +733,48 @@ if (q.x < size.x && q.y < size.y) {
 		const float nlsGeometry = static_cast<float>(nls.geometry);
 		const float nlsScale[2] = { static_cast<float>(nls.xScale), static_cast<float>(nls.yScale) };
 		const float nlsProtect[2] = { static_cast<float>(nls.xProtect), static_cast<float>(nls.yProtect) };
+		// Stage 12 §2c / S8-1: the residual held along the vectors when they
+		// exist for this frame. A source frame presented again is recomputed
+		// against the same previous residual (never advancing).
+		const bool stabiliseWanted = (upscale.on ? settings.cnnResidualStabilise : settings.ssimResidualStabilise) &&
+			motion.field && motion.frameTrust && motion.sourceCrop.x1 > motion.sourceCrop.x0 && motion.sourceCrop.y1 > motion.sourceCrop.y0;
+		const bool repeat = residualSequence != 0 && sequence == residualSequence;
+		const bool consecutive = residualSequence != 0 && sequence == residualSequence + 1;
+		int readIndex = -1, writeIndex = 1 - residualIndex;
+		if (repeat) { writeIndex = residualIndex; readIndex = residualPrevValid ? 1 - residualIndex : -1; }
+		else if (consecutive) readIndex = residualIndex;
+		// Both residual textures exist while stabilising: the one not written is
+		// bound as rs_prev even when it is not read (a texture may be bound only
+		// once per pass - binding another in its place broke the write).
+		bool stabilise = stabiliseWanted && Ensure(gpu, residual[writeIndex], w, h, 1, 16, false, true) &&
+			Ensure(gpu, residual[1 - writeIndex], w, h, 1, 16, false, true);
+		if (readIndex >= 0 && readIndex != 1 - writeIndex)
+			readIndex = -1;   // (never: the previous residual is always the other texture)
+		const float prevValid = stabilise && readIndex >= 0 ? 1.0f : 0.0f;
+		const float rsCrop[4] = { motion.sourceCrop.x0, motion.sourceCrop.y0,
+			motion.sourceCrop.x1 - motion.sourceCrop.x0, motion.sourceCrop.y1 - motion.sourceCrop.y0 };
+		const float rsAlpha = 1.0f / 3.0f;
+		const float rsMinShare = motion.minTrustedShare;
 		// Without the map the pass has no `grain_map` binding and no map code
 		// (a texture may be bound only once per pass).
-		const pl_shader_desc d[6] = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
-			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out),
-			Sampled("grain_map", useMap ? map[mapIndex] : nullptr, false) };
+		std::vector<pl_shader_desc> d = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
+			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out) };
+		if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
+		if (stabilise)
+		{
+			d.push_back(Sampled("rs_field", motion.field, false));
+			d.push_back(Sampled("rs_trust", motion.frameTrust, false));
+			// With no previous residual (rs_prev_valid 0) it is bound but not read.
+			d.push_back(Sampled("rs_prev", residual[1 - writeIndex], true));
+			d.push_back(Storage("rs_out", residual[writeIndex]));
+		}
 		static const std::string mapHeader = std::string("#define AD_USE_MAP 1\n") + OcclusionMask::NlsMapGlsl();
 		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
 		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") +
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") : std::string();
-		const std::string header = upHeader + (useMap ? mapHeader : std::string());
+		const std::string header = upHeader + (useMap ? mapHeader : std::string()) + (stabilise ? STABILISE_DEFINE : PLAIN_DEFINE);
 		const float wBase = upscale.on ? upscale.wBase : settings.wBase;
-		const pl_shader_var v[12] = {
+		std::vector<pl_shader_var> v = {
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
 			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
 			{ pl_var_vec2("edge_origin"), edgeOrigin, true },
@@ -728,12 +787,37 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_float("nls_geometry"), &nlsGeometry, true },
 			{ pl_var_vec2("nls_scale"), nlsScale, true },
 			{ pl_var_vec2("nls_protect"), nlsProtect, true } };
+		if (!useMap) v.resize(5);
+		if (stabilise)
+		{
+			if (!useMap)
+				v.push_back({ pl_var_vec2("src_size"), srcSize, true });   // the map path already has it
+			v.push_back({ pl_var_vec4("rs_crop"), rsCrop, true });
+			v.push_back({ pl_var_float("rs_prev_valid"), &prevValid, true });
+			v.push_back({ pl_var_float("rs_alpha"), &rsAlpha, true });
+			v.push_back({ pl_var_float("rs_min_share"), &rsMinShare, true });
+		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
-			header.empty() ? nullptr : header.c_str(), BLEND_BODY, d, useMap ? 6 : 5, v, useMap ? 12 : 5,
+			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),
 			(w + 15) / 16, (h + 15) / 16))
 		{
 			++failures;
 			return unchanged;
+		}
+		if (stabilise)
+		{
+			if (!repeat)
+			{
+				residualPrevValid = consecutive;
+				residualIndex = writeIndex;
+				residualSequence = sequence;
+			}
+			if (prevValid > 0.5f) ++stabilised;
+		}
+		else if (!repeat)
+		{
+			residualSequence = 0;
+			residualPrevValid = false;
 		}
 		pl_hook_res res{};
 		res.output = PL_HOOK_SIG_TEX;

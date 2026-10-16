@@ -165,6 +165,41 @@ Step B, detection (SourceResolutionDetector, in progress):
 Then step C (VP debander with PQ thresholds, the vector refinements
 2c/2d/S8-1 with the dither_vectors-style fallback, S8-2).
 
+## Status 2026-10-16 early morning (built overnight)
+
+- Detection in the renderer and `source_resolution: auto` (7a1bfeec):
+  SourceResolutionMonitor (tiles twice a second, worker thread, never
+  waits), auto engages at a cut and disengages at once; status in the stats
+  line and crash state (plugin API 31); Config: Auto (detected), Auto:
+  confidence needed.
+- A3 done: the grain map and occlusion mask stay on while re-based (both map
+  through the native crop by relative position).
+- A4: the re-based chart vs the native chart through libplacebo's upscale
+  path: mean 0.00005 (half-float), worst 0.0023 (< one 8-bit code: the
+  upstream kernel's own softening, which no re-base returns), 10x closer than
+  the upscaled source as it was. Still to add: RGB input, both
+  capture_upload paths, an explicit native byte-identity check.
+- Step C, VP deband (`deband_vp` off/auto/on, default off;
+  `low_bitrate_handling` auto/off/on): built - see BUILD-STATUS. Measured:
+  8-bit sky banding 1.15 -> 0.07 codes RMS, texture variance 98% kept; the
+  hold follows the vectors and is confined to the current blur band (never
+  more blur on texture than the frame's own decision).
+- A1 now partly: `deband_vp`, `low_bitrate_handling`,
+  `source_resolution_auto_min_confidence` exist with Config controls; the
+  rest (`cnn_residual_stabilise`, `ssim_residual_stabilise`,
+  `ssim_bitrate_aware`, `ssim_bitrate_floor`) arrive with their features
+  (2c / S8-1 / S8-2).
+- 2c / S8-1 residual stabilisation built (`cnn_residual_stabilise`,
+  `ssim_residual_stabilise`, on = with the vectors): residual flicker 0.81 ->
+  0.22 codes, still picture unchanged, untrusted / off byte-identical. A
+  dedicated CNN-branch flicker test (needs a CNN shader in the test) is still
+  to add; the branch shares the code.
+- Fixed: the settings fingerprint lacked `source_range`, `capture_upload`
+  and the Stage 12 keys, so a profile edit of only those was not applied live.
+- Next: 2c / S8-2 bitrate-aware anti-ringing and SSIM weight
+  (`ssim_bitrate_aware`, `ssim_bitrate_floor`), A4's remaining tests (RGB,
+  both capture_upload paths, native byte-identity), a live profile-edit test.
+
 ## Costs (to measure, laptop then 3090)
 
 - Re-base: one downscale per plane per source frame at 4K input (the

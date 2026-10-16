@@ -678,6 +678,9 @@ namespace RendererProfileConfig
 			if (key == "source_resolution") return IsChoice(value, { "native", "auto" }) ||
 				(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(value, 144, 8640));
 			if (key == "source_resolution_auto_min_confidence") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "deband_vp") return IsChoice(value, { "off", "auto", "on" });
+			if (key == "low_bitrate_handling") return IsChoice(value, { "auto", "off", "on" });
+			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise") return IsChoice(value, { "on", "off" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 14: R-A's roll-off (source px per source frame; floor as a

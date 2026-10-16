@@ -57,6 +57,7 @@
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/SourceRebase.h>
 #include <vprenderer/SourceResolutionMonitor.h>
+#include <vprenderer/VpDebander.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
@@ -997,6 +998,10 @@ namespace
 		std::string sourceResolution = "native";
 		// Stage 12: the confidence auto needs before it re-bases (spec 3).
 		double sourceResolutionAutoMinConfidence = 0.8;
+		// Stage 12 §2b/§2d: VP's own debander (off | auto | on) and whether the
+		// bitrate quality reading raises it (auto | off | on).
+		std::string debandVp = "off";
+		std::string lowBitrateHandling = "auto";
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1176,6 +1181,11 @@ namespace
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
+			// Settings applied live must change the fingerprint, or a profile edit
+			// touching only them is not applied until something else changes.
+			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
+			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
+			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2028,6 +2038,8 @@ namespace
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "render", "early" });
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
+		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
+		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
 		{
 			// native | auto | any height in lines (general, owner's standing rule).
 			std::string value;
@@ -2245,7 +2257,10 @@ namespace
 			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea),
 			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown),
 			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame),
-			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest) })
+			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
+			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
+			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
+			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -4450,6 +4465,11 @@ struct LibplaceboVideoRenderer::Impl
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
 	uint64_t sourceMonitorSequence = 0;
+	// Stage 12 §2b/§2d: VP's debander (this frame's parameters; 0 = off).
+	VpDebander::Module debander;
+	VpDebander::Params vpDebandParams;
+	double debandThreshold = 0.0;
+	std::string debandLogged;
 	pl_tex rgbIngestLuma = nullptr;
 	// De-judder on RGB (roadmap item 2): this frame's matcher luma when it came
 	// through GpuRgbUnpack (no chroma planes: the rendered warp only), and the
@@ -5707,6 +5727,7 @@ struct LibplaceboVideoRenderer::Impl
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
 				sourceRebase.Release(d3d11->gpu);   // Stage 12: its textures
 				sourceMonitor.Release(d3d11->gpu);  // and the tile readback
+				debander.Release(d3d11->gpu);       // and the debander's planes
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				dejudderOutput.Release();
@@ -9647,6 +9668,13 @@ struct LibplaceboVideoRenderer::Impl
 		// Stage 12: the source's effective resolution, bitrate quality and bit depth.
 		descriptions.push_back(SourceResolutionMonitor::Describe(sourceMonitor.Read(), sourceMonitor.AutoRatio(),
 			activeSettings.sourceResolution == "auto"));
+		if (activeSettings.debandVp != "off" && !debandLogged.empty())
+		{
+			std::string line = debandLogged;
+			if (debander.HeldFrames() > 0)
+				line += "; held along the vectors (" + std::to_string(debander.HeldFrames()) + " frames)";
+			descriptions.push_back(line);
+		}
 		std::lock_guard<std::mutex> guard(shaderStatusMutex);
 		activeCustomShaders = descriptions;
 	}
@@ -13077,6 +13105,17 @@ struct LibplaceboVideoRenderer::Impl
 					pl_frame rebased{};
 					if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, image, rebaseFactor, rebased, 1))
 						image = rebased;
+				}
+				// Stage 12 §2b/§2d: and the same debander (per frame on an extra).
+				if (debandThreshold > 0.0)
+				{
+					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+					VpDebander::Params extra = vpDebandParams;
+					extra.field = nullptr;
+					extra.grainError = nullptr;
+					pl_frame debanded{};
+					if (debander.Apply(d3d11->gpu, rebaseDispatch, image, extra, debanded, 1))
+						image = debanded;
 				}
 			}
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
@@ -17876,6 +17915,51 @@ struct LibplaceboVideoRenderer::Impl
 				rebaseLogged = state;
 				DebugLog::Log("%s", state.c_str());
 			}
+			// Stage 12 §2b/§2d: VP's debander for this frame - strength from
+			// the readings (the content's level step; the bitrate quality),
+			// held along the de-judder's vectors when they exist for it.
+			debandThreshold = 0.0;
+			vpDebandParams = VpDebander::Params();
+			std::string debandState;
+			if (activeSettings.debandVp != "off" && luma)
+			{
+				const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+				const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
+				const bool useQuality = activeSettings.lowBitrateHandling != "off";
+				double quality = snap.reading ? snap.bitrateQuality : 1.0;
+				if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
+				const double bits = snap.reading ? snap.effectiveBits : 0.0;
+				debandThreshold = VpDebander::Strength(bits, depth, quality, useQuality);
+				if (activeSettings.debandVp == "on")
+					debandThreshold = (std::max)(debandThreshold, 1.5 * std::pow(2.0, (std::max)(0, depth - 8)));
+				if (temporal) debandThreshold = 0.0;
+				vpDebandParams.thresholdCodes = debandThreshold;
+				vpDebandParams.colorDepth = depth;
+				vpDebandParams.radiusScale = nativeHeight * rebaseFactor / 1080.0;
+				if (dejudder && dejudderEstimatedSequence == sourceSequence && sourceSequence != 0)
+				{
+					vpDebandParams.field = dejudder->Field();
+					vpDebandParams.grainError = dejudder->GrainError();
+				}
+				vpDebandParams.fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
+				vpDebandParams.sequence = sourceSequence;
+				char text[200];
+				if (temporal)
+					snprintf(text, sizeof(text), "VP deband: not applied while smooth motion or deinterlacing runs (deband_vp %s)", activeSettings.debandVp.c_str());
+				else if (debandThreshold <= 0.0)
+					snprintf(text, sizeof(text), "VP deband: idle (deband_vp %s; %.1f-bit content, bitrate quality %.1f)", activeSettings.debandVp.c_str(), bits, quality);
+				else
+					snprintf(text, sizeof(text), "VP deband: threshold %.0f codes (deband_vp %s; %.1f-bit content, bitrate quality %.1f)",
+						debandThreshold, activeSettings.debandVp.c_str(), bits, quality);
+				debandState = text;
+			}
+			else if (!debandLogged.empty())
+				debandState = "VP deband: off";
+			if (!debandState.empty() && debandState != debandLogged)
+			{
+				debandLogged = debandState;
+				DebugLog::Log("%s", debandState.c_str());
+			}
 		}
 
 		const HdrPeakAnalysisCrop::Decision hdrPeakAnalysisDecision =
@@ -18519,6 +18603,20 @@ struct LibplaceboVideoRenderer::Impl
             up.nativeHeight = sourceCropH;
             adaptiveDownscale.SetUpscale(up);
             adaptiveDownscale.ClearGrainField();
+            // Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual
+            // (vectors of this source frame only; never with NLS - its map is not
+            // linear; never starts the matcher).
+            adaptiveDownscale.ClearMotion();
+            if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && sourceSequence != 0 &&
+                dejudder->Field() && dejudder->FrameTrust())
+            {
+                AdaptiveDownscale::Motion motion;
+                motion.field = dejudder->Field();
+                motion.frameTrust = dejudder->FrameTrust();
+                motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+                motion.sourceCrop = renderImage.crop;
+                adaptiveDownscale.SetMotion(motion);
+            }
             if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
                 sourceSequence != 0 && dejudder->GrainError())
             {
@@ -18569,6 +18667,20 @@ struct LibplaceboVideoRenderer::Impl
                 // for it (A->B, estimated at upload); the map follows NLS's
                 // own map (bundled NLS / NLS+ only; otherwise the scalar).
                 adaptiveDownscale.ClearGrainField();
+                // Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual
+                // (vectors of this source frame only; never with NLS - its map is not
+                // linear; never starts the matcher).
+                adaptiveDownscale.ClearMotion();
+                if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && sourceSequence != 0 &&
+                    dejudder->Field() && dejudder->FrameTrust())
+                {
+                    AdaptiveDownscale::Motion motion;
+                    motion.field = dejudder->Field();
+                    motion.frameTrust = dejudder->FrameTrust();
+                    motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+                    motion.sourceCrop = renderImage.crop;
+                    adaptiveDownscale.SetMotion(motion);
+                }
                 if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
                     sourceSequence != 0 && dejudder->GrainError())
                 {
@@ -18955,16 +19067,27 @@ struct LibplaceboVideoRenderer::Impl
                 assembleOverlays();
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
                 // Stage 12 step A: the planes libplacebo samples, re-based.
+                pl_frame frame = source;
                 if (rebaseFactor < 1.0)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
                     pl_frame rebased{};
                     if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactor, rebased, 0))
-                        return temporalRenderer.Render(renderer, rebased, destination, parameters);
-                    if (sourceRebase.Failures() == 1)
+                        frame = rebased;
+                    else if (sourceRebase.Failures() == 1)
                         DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
                 }
-                return temporalRenderer.Render(renderer,source,destination,parameters);
+                // Stage 12 §2b/§2d: VP's debander at source resolution.
+                if (debandThreshold > 0.0)
+                {
+                    if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+                    pl_frame debanded{};
+                    if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, vpDebandParams, debanded, 0))
+                        frame = debanded;
+                    else if (debander.Failures() == 1)
+                        DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
+                }
+                return temporalRenderer.Render(renderer,frame,destination,parameters);
             });
         bool rendered = hookRender.rendered;
         if (hookRender.retried)
@@ -24715,6 +24838,10 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_range=" << s.sourceRange << "\n"
 		<< "source_resolution=" << s.sourceResolution << "\n"
 		<< "source_resolution_auto_min_confidence=" << s.sourceResolutionAutoMinConfidence << "\n"
+		<< "deband_vp=" << s.debandVp << "\n"
+		<< "low_bitrate_handling=" << s.lowBitrateHandling << "\n"
+		<< "cnn_residual_stabilise=" << (s.adaptive.cnnResidualStabilise ? "on" : "off") << "\n"
+		<< "ssim_residual_stabilise=" << (s.adaptive.ssimResidualStabilise ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

@@ -61,6 +61,13 @@ namespace AdaptiveDownscale
 		// Owner 2026-10-13 efficiency: the faithful branch as two separable
 		// Lanczos passes instead of the polar ewa_lanczossharp.
 		bool faithfulOrtho = false;
+		// Stage 12 §2c / delta 15 S8-1 (owner 2026-10-15): the CNN's (upscale)
+		// and SSIM's (downscale) added detail held along the de-judder's
+		// trusted vectors (a one-pole over ~3 frames), so it does not shimmer;
+		// the faithful part untouched; untrusted blocks, no vectors or NLS:
+		// this frame's residual (today's output).
+		bool cnnResidualStabilise = true;
+		bool ssimResidualStabilise = true;
 	};
 
 	inline bool operator==(const Settings& a, const Settings& b)
@@ -68,7 +75,8 @@ namespace AdaptiveDownscale
 		return a.wBase == b.wBase && a.edgeLo == b.edgeLo && a.edgeHi == b.edgeHi && a.grainLo == b.grainLo &&
 			a.grainHi == b.grainHi && a.grainFloor == b.grainFloor && a.grainSmoothMs == b.grainSmoothMs &&
 			a.shadowBias == b.shadowBias && a.chromaSsim == b.chromaSsim && a.antiring == b.antiring &&
-			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho;
+			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho &&
+			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise;
 	}
 
 	// 8-3: the de-judder's field for the source frame being rendered.
@@ -82,6 +90,16 @@ namespace AdaptiveDownscale
 		// pixels of the whole frame) and, with NLS, the NLS map over it.
 		pl_rect2df sourceCrop{};
 		NlsMaskMapping::Mapping nls{};
+	};
+
+	// Stage 12 §2c / S8-1: the de-judder's motion for the source frame being
+	// rendered (from the last estimate; null = none: this frame's residual).
+	struct Motion
+	{
+		pl_tex field = nullptr;        // MotionWarp::Field(): vx, vy (source px), trust, error per 16x16 block
+		pl_tex frameTrust = nullptr;   // MotionWarp::FrameTrust(): r = the trusted share
+		float minTrustedShare = 0.25f;
+		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the field's source pixels
 	};
 
 	// Matcher error (mean absolute residual of half-resolution luma between
@@ -148,10 +166,16 @@ namespace AdaptiveDownscale
 		// scalar). Call every frame; the textures are the matcher's.
 		void SetGrainField(const GrainField& field) { grainField = field; }
 		void ClearGrainField() { grainField = GrainField(); }
+		// Stage 12 §2c / S8-1: after SetFrame, the motion for this source frame
+		// (call every frame; ClearMotion when there is none or NLS is active).
+		void SetMotion(const Motion& value) { motion = value; }
+		void ClearMotion() { motion = Motion(); }
+		// Frames whose residual was held along the vectors (stats line, tests).
+		unsigned long long StabilisedFrames() const { return stabilised; }
 		MapState LastMapState() const { return mapState; }
 		// Stream robustness (owner 2026-10-14): a discontinuity - the map no
 		// longer follows the content and starts over (consumers see NoField).
-		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; }
+		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; }
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded
@@ -195,6 +219,12 @@ namespace AdaptiveDownscale
 		uint64_t mapSequence = 0;
 		MapState mapState = MapState::Off;
 		GrainField grainField{};
+		Motion motion{};
+		pl_tex residual[2] = { nullptr, nullptr };   // luma residual: this source frame's and the previous one's
+		int residualIndex = 0;                        // residual[residualIndex] = residualSequence's
+		bool residualPrevValid = false;
+		uint64_t residualSequence = 0;
+		unsigned long long stabilised = 0;
 		pl_buf readback = nullptr;
 		bool readbackPending = false;
 		pl_shader_obj polarLut = nullptr;
