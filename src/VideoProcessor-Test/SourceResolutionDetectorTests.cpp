@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <SourceResolutionDetector.h>
+#include "SubtitleTextTestPattern.h"
 
 #include <algorithm>
 #include <chrono>
@@ -142,13 +143,14 @@ namespace VideoProcessorTest
 		}
 
 		// A frame of `count` tiles, each from its own scene (seed + i).
-		SourceResolution::FrameReading ReadTiles(const std::vector<std::vector<float>>& tiles, int codeMax = 1023)
+		SourceResolution::FrameReading ReadTiles(const std::vector<std::vector<float>>& tiles, int codeMax = 1023, bool textGuard = true)
 		{
 			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
 			for (size_t i = 0; i < tiles.size(); ++i)
 				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i], codeMax));
 			SourceResolution::Thresholds t;
 			t.codeMaximum = codeMax;
+			if (!textGuard) t.textBand = 0.0;
 			return SourceResolution::ReadFrame(spectra, t);
 		}
 
@@ -163,8 +165,8 @@ namespace VideoProcessorTest
 		void Log(const char* name, const SourceResolution::FrameReading& r)
 		{
 			char line[256];
-			snprintf(line, sizeof(line), "%-34s tiles %d/%d  ratio %.4f | v %.3f @%.4f (2nd %.3f, grid %.3f)  h %.3f @%.4f (2nd %.3f, grid %.3f)\n",
-				name, r.informativeTiles, r.tiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.vertical.runnerUp, r.vertical.grid,
+			snprintf(line, sizeof(line), "%-34s tiles %d/%d (text %d)  ratio %.4f | v %.3f @%.4f (2nd %.3f, grid %.3f)  h %.3f @%.4f (2nd %.3f, grid %.3f)\n",
+				name, r.informativeTiles, r.tiles, r.textTiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.vertical.runnerUp, r.vertical.grid,
 				r.horizontal.coherence, r.horizontal.ratio, r.horizontal.runnerUp, r.horizontal.grid);
 			Logger::WriteMessage(line);
 		}
@@ -1423,6 +1425,99 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(line);
 			Assert::IsTrue(a.bitrateQuality >= 0.8, L"clean flat animation is not poor");
 			Assert::IsTrue(b.bitrateQuality >= 0.8, L"a clean white studio is not poor");
+		}
+
+		// Owner 2026-10-16 ("what about with the subtitles"): a player that upscales 1080p
+		// video draws its own subtitles at 4K - sharp text over a soft picture. Text in a
+		// tile may make a frame read native (the safe direction) but never a wrong rate.
+		TEST_METHOD(SubtitleTextOverAnUpscaleNeverReadsAWrongRate)
+		{
+			const int tiles = 8;   // the monitor's 4 x 2
+			std::vector<std::vector<float>> base;
+			for (int i = 0; i < tiles; ++i) base.push_back(Tile(Scene(static_cast<unsigned>(i + 1)), 0.5, kLanczos3, 0.0, 1023, i + 1));
+			int wrong = 0;
+			for (const int textHeight : { 40, 56, 80 })
+				for (const int withText : { 0, 1, 2, 4, 8 })
+				{
+					std::vector<std::vector<float>> frame = base;
+					for (int i = 0; i < withText; ++i)
+						SubtitleTextTestPattern::Draw(frame[static_cast<size_t>(i)], kTile, kTile, 0, kTile, 150, textHeight, 50u + i);
+					const SourceResolution::FrameReading r = ReadTiles(frame);
+					const SourceResolution::FrameReading off = ReadTiles(frame, 1023, false);
+					char name[80];
+					snprintf(name, sizeof(name), "text %d px in %d/8 tiles", textHeight, withText);
+					Log(name, r);
+					snprintf(name, sizeof(name), "  (guard off)");
+					Log(name, off);
+					// With the guard: the upscale's rate, or native when every tile holds text.
+					const bool ok = std::fabs(r.ratio - 0.5) < 0.03 || (withText == tiles && r.ratio >= 0.9);
+					if (!ok) ++wrong;
+					Assert::IsTrue(off.ratio >= 0.5 - 0.03, L"even without the guard never below the true rate (no detail lost)");
+					if (withText == 0) Assert::AreEqual(0.5, r.ratio, 0.03, L"without text: the upscale reads 0.5");
+				}
+			Assert::AreEqual(0, wrong, L"with the guard, subtitle text leaves the upscale's reading as it is");
+		}
+
+		// Two minutes of an upscaled 1080p stream with the player's 4K subtitles on and off:
+		// declared once, never thrown back to native by the text (a re-base switching on and
+		// off with every subtitle would be visible).
+		TEST_METHOD(SubtitlesComingAndGoingDoNotFlipTheDeclaration)
+		{
+			SourceResolution::Tracker tracker;
+			const int tilesPerFrame = 4, shots = 30;
+			const double framesPerSecond = 2.0, shotSeconds = 4.0;   // the monitor's 2 Hz
+			double t = 0.0, declaredAt = -1.0;
+			int flips = 0, textFrames = 0, textNative = 0, plainFrames = 0, plainLower = 0;
+			double last = 1.0;
+			std::mt19937 rng(11);
+			std::normal_distribution<double> noise(0.0, 0.6 / 1023.0);
+			for (int shot = 0; shot < shots; ++shot)
+			{
+				std::vector<std::vector<float>> plain, texted;
+				for (int i = 0; i < tilesPerFrame; ++i)
+				{
+					plain.push_back(Tile(Scene(static_cast<unsigned>(1000 + shot * 10 + i)), 0.5, kLanczos3, 0.0, 1023, shot * 10 + i));
+					// Each shot its own brightness (a cut the tracker sees).
+					for (float& v : plain.back()) v = static_cast<float>((std::min)(1.0, (std::max)(0.0, v + 0.12 * ((shot % 3) - 1))));
+					texted.push_back(plain.back());
+					// Text in the lower tiles (half of them, as the monitor's lower row).
+					if (i >= tilesPerFrame / 2)
+						SubtitleTextTestPattern::Draw(texted.back(), kTile, kTile, 0, kTile, 150, 56, 300u + shot * 10 + i);
+				}
+				const int frames = static_cast<int>(shotSeconds * framesPerSecond);
+				for (int f = 0; f < frames; ++f, t += 1.0 / framesPerSecond)
+				{
+					// Subtitles on for the second half of every other shot and through the odd ones' first half.
+					const bool text = (shot % 2 == 0) ? f >= frames / 2 : f < frames / 2;
+					std::vector<std::vector<float>> frame = text ? texted : plain;
+					for (auto& tile : frame)
+						for (float& v : tile) v = static_cast<float>(std::round((v + noise(rng)) * 1023.0) / 1023.0);
+					const SourceResolution::FrameReading r = ReadTiles(frame);
+					if (text) { ++textFrames; if (r.ratio >= 0.9) ++textNative; }
+					else { ++plainFrames; if (std::fabs(r.ratio - 0.5) < 0.03) ++plainLower; }
+					if (shot < 3)
+					{
+						char row[200];
+						snprintf(row, sizeof(row), "  shot %d frame %d text %d: ratio %.3f mean %.3f tiles %d/%d; tracker candidate %.3f shots %d evidence %.1f s\n",
+							shot, f, text ? 1 : 0, r.ratio, r.mean, r.informativeTiles, r.tiles, tracker.Candidate(), tracker.Shots(), tracker.EvidenceSeconds());
+						Logger::WriteMessage(row);
+					}
+					tracker.Update(r, t);
+					if (tracker.Ratio() != last)
+					{
+						if (last < 1.0) ++flips;   // a declared rate thrown back
+						last = tracker.Ratio();
+						if (last < 1.0 && declaredAt < 0) declaredAt = t;
+					}
+				}
+			}
+			char line[200];
+			snprintf(line, sizeof(line), "plain frames reading 0.5 %d/%d; subtitled frames reading native %d/%d; declared %.2f at %.1f s; thrown back %d times; cuts %llu\n",
+				plainLower, plainFrames, textNative, textFrames, tracker.Ratio(), declaredAt, flips, tracker.Cuts());
+			Logger::WriteMessage(line);
+			Assert::IsTrue(declaredAt >= 0.0, L"the upscale is declared despite the subtitles");
+			Assert::AreEqual(0.5, tracker.Ratio(), 0.03, L"still declared at the end");
+			Assert::AreEqual(0, flips, L"the subtitles never throw the declaration back to native");
 		}
 
 		TEST_METHOD(DescribeIsGeneral)

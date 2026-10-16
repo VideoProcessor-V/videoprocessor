@@ -55,10 +55,42 @@ namespace SourceResolution
 		}
 	}
 
+	namespace
+	{
+		// Overlay text: sharp steps across (|a - b| >= a third of the range) counted per row;
+		// the share of them in the densest band of n / 4 rows. Text drawn at the output
+		// resolution (white strokes, dark edges) is a band of many such steps; an upscale
+		// spreads every edge over two or more pixels and natural detail rarely concentrates.
+		double TextBand(const float* luma, int stride, int n)
+		{
+			std::vector<int> rows(static_cast<size_t>(n), 0);
+			long total = 0;
+			for (int y = 0; y < n; ++y)
+			{
+				const float* row = luma + static_cast<size_t>(y) * stride;
+				int count = 0;
+				for (int x = 1; x < n; ++x) count += std::fabs(row[x] - row[x - 1]) >= 1.0f / 3.0f ? 1 : 0;
+				rows[static_cast<size_t>(y)] = count;
+				total += count;
+			}
+			if (total < static_cast<long>(n) * n / 500) return 0.0;   // under 0.2 %: nothing to judge
+			const int band = n / 4;
+			long sum = 0, best = 0;
+			for (int y = 0; y < n; ++y)
+			{
+				sum += rows[static_cast<size_t>(y)];
+				if (y >= band) sum -= rows[static_cast<size_t>(y - band)];
+				best = (std::max)(best, sum);
+			}
+			return static_cast<double>(best) / total;
+		}
+	}
+
 	bool Analyse(const float* luma, int stride, int n, Spectrum& out, int codeMaximum)
 	{
 		if (!luma || !PowerOfTwo(n) || stride < n) return false;
 		out.n = n;
+		out.textBand = TextBand(luma, stride, n);
 		out.vertical.assign(n / 2 + 1, 0.0);
 		out.horizontal.assign(n / 2 + 1, 0.0);
 		std::vector<double> window(n);
@@ -441,6 +473,7 @@ namespace SourceResolution
 			sum += s.mean;
 			signature += s.mean * static_cast<double>(i + 1);
 			frame.peakiness = (std::max)(frame.peakiness, Peakiness(s));
+			if (t.textBand > 0.0 && t.textBand <= 1.0 && s.textBand >= t.textBand) { ++frame.textTiles; continue; }
 			if (s.n != n || !Informative(s, t) || s.mirrorVertical.size() != vertical.size() || s.mirrorHorizontal.size() != vertical.size()) continue;
 			++frame.informativeTiles;
 			for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] += s.mirrorVertical[m]; horizontal[m] += s.mirrorHorizontal[m]; }

@@ -41,6 +41,11 @@ namespace SourceResolution
 		std::vector<unsigned> histogram;
 		double blockiness = 1.0, gradient = 0.0;
 		int blocks = 0, bandEdges = 0, flatBlocks = 0;
+		// Overlay text (owner 2026-10-16, subtitles drawn by the player at the output
+		// resolution over an upscaled picture): the share of the tile's sharp steps
+		// (neighbours a third of the range apart) inside its densest band a quarter of the
+		// tile high; 0 when the tile has too few sharp steps to judge.
+		double textBand = 0.0;
 	};
 
 	// `n` must be a power of two (64..1024); `luma` is row-major, `stride` in
@@ -71,6 +76,10 @@ namespace SourceResolution
 		// from text columns) sits above.
 		double singleAxisMaximumRatio = 0.8;
 		double informativeDecades = 1.5;  // lower band above the quantisation floor
+		// Overlay text: a tile whose sharp steps sit this much in one band (a line of text) is
+		// no evidence - left out of the frame (safe: evidence only lost). <= 0 or > 1: off
+		// (source_resolution_text_guard off).
+		double textBand = 0.8;
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
 
@@ -105,6 +114,7 @@ namespace SourceResolution
 	struct FrameReading
 	{
 		int tiles = 0, informativeTiles = 0;
+		int textTiles = 0;          // tiles left out as overlay text
 		double ratio = 1.0;         // effective / native height; 1 = native
 		// Per axis: the height (vertical, down the columns) and the width (horizontal)
 		// read alone, at the stricter single-axis coherence; 1 = native on that axis.

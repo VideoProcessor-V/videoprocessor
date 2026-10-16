@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include "SubtitleTextTestPattern.h"
 #include <algorithm>
 #include <array>
 #include <vprenderer/LibplaceboDisplayLut.h>
@@ -8496,6 +8497,116 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(line);
 			Assert::IsTrue(rmsInverse < 0.1, L"the inverse recovers the 1080 picture (within a tenth of a 10-bit code)");
 			Assert::IsTrue(rmsInverse * 5.0 < rmsPolar, L"far closer than the polar filter");
+			pl_tex_destroy(gpu, &lumaTex);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		TEST_METHOD(SourceRebasePlayerSubtitleText)
+		{
+			// Owner 2026-10-16 ("what about with the subtitles"): a player upscales 1080p video
+			// (here Lanczos-3, identified) and draws its subtitles at 4K. The re-base reduces
+			// the text with the picture; measured after the display's upscale back: the text's
+			// error and halos (overshoot past the outline's black or the glyph's white).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int m = 256, n = 512;
+			const int k = KernelInverse::Find("lanczos3");
+			Assert::IsTrue(k >= 0);
+			const KernelInverse::Candidate& c = KernelInverse::Candidates()[static_cast<size_t>(k)];
+			auto upscale2 = [&](const std::vector<float>& in, std::vector<float>& out) {
+				std::vector<float> rows(static_cast<size_t>(m) * n), lineIn(static_cast<size_t>(m)), lineOut(static_cast<size_t>(n));
+				out.assign(static_cast<size_t>(n) * n, 0.0f);
+				for (int y = 0; y < m; ++y) KernelInverse::UpscaleLine(c, &in[static_cast<size_t>(y) * m], m, &rows[static_cast<size_t>(y) * n]);
+				for (int x = 0; x < n; ++x)
+				{
+					for (int y = 0; y < m; ++y) lineIn[static_cast<size_t>(y)] = rows[static_cast<size_t>(y) * n + x];
+					KernelInverse::UpscaleLine(c, lineIn.data(), m, lineOut.data());
+					for (int y = 0; y < n; ++y) out[static_cast<size_t>(y) * n + x] = lineOut[static_cast<size_t>(y)];
+				}
+			};
+			std::vector<float> master(static_cast<size_t>(m) * m);
+			for (int y = 0; y < m; ++y)
+				for (int x = 0; x < m; ++x)
+					master[static_cast<size_t>(y) * m + x] = static_cast<float>(0.45 + 0.15 * std::sin(x * 0.9 + y * 0.31) * std::cos(y * 0.7) + 0.08 * std::sin(x * 2.3 - y * 1.7));
+			std::vector<float> truth;
+			upscale2(master, truth);
+			for (float& v : truth) v = static_cast<float>(std::round((std::min)(1.0f, (std::max)(0.0f, v)) * 1023.0) / 1023.0);
+			std::vector<unsigned char> textMask(truth.size(), 0);
+			const int textTop = 400, textHeight = 56;
+			SubtitleTextTestPattern::Draw(truth, n, n, 16, n - 16, textTop, textHeight, 5u, &textMask);
+			std::vector<uint16_t> luma(truth.size());
+			for (size_t i = 0; i < truth.size(); ++i) luma[i] = static_cast<uint16_t>(std::lround(truth[i] * 65535.0f));
+			pl_tex_params lp{};
+			lp.w = n; lp.h = n; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.initial_data = luma.data();
+			pl_tex lumaTex = pl_tex_create(gpu, &lp);
+			Assert::IsTrue(lumaTex != nullptr);
+			pl_frame source{};
+			source.num_planes = 1;
+			source.planes[0].texture = lumaTex; source.planes[0].components = 1; source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(n), static_cast<float>(n) };
+			auto rebaseWith = [&](int kernelIndex, std::vector<float>& values) {
+				SourceRebase::Module rebase;
+				rebase.SetKernel(kernelIndex);
+				pl_frame out{};
+				Assert::IsTrue(rebase.Apply(gpu, dispatch, source, 0.5, out), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+				pl_tex_params rp{};
+				rp.w = m; rp.h = m; rp.format = out.planes[0].texture->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				pl_tex_blit_params bp{}; bp.src = out.planes[0].texture; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				values.assign(static_cast<size_t>(m) * m, 0.0f);
+				std::vector<uint16_t> raw(values.size());
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (size_t i = 0; i < values.size(); ++i)
+					values[i] = readable->params.format->type == PL_FMT_FLOAT ? HalfBits(raw[i]) : raw[i] / 65535.0f;
+				pl_tex_destroy(gpu, &readable);
+				rebase.Release(gpu);
+			};
+			struct Result { double textRms, pictureRms, worstOvershoot; long halo; };
+			auto measure = [&](const std::vector<float>& rebased) {
+				std::vector<float> shown;
+				upscale2(rebased, shown);   // the display's upscale back to 4K (Lanczos-3 as a proxy)
+				Result r{ 0, 0, 0, 0 };
+				double eText = 0, ePic = 0;
+				long nText = 0, nPic = 0;
+				for (int y = 24; y < n - 24; ++y)
+					for (int x = 24; x < n - 24; ++x)
+					{
+						const size_t i = static_cast<size_t>(y) * n + x;
+						const double e = (shown[i] - truth[i]) * 1023.0;
+						if (textMask[i])
+						{
+							eText += e * e; ++nText;
+							const double below = (SubtitleTextTestPattern::kBlack - shown[i]) * 1023.0, above = (shown[i] - SubtitleTextTestPattern::kWhite) * 1023.0;
+							r.worstOvershoot = (std::max)(r.worstOvershoot, (std::max)(below, above));
+							if (below > 8.0 || above > 8.0) ++r.halo;
+						}
+						else if (y < textTop - 24) { ePic += e * e; ++nPic; }
+					}
+				r.textRms = std::sqrt(eText / (std::max)(1L, nText));
+				r.pictureRms = std::sqrt(ePic / (std::max)(1L, nPic));
+				return r;
+			};
+			std::vector<float> inverse, polar;
+			rebaseWith(k, inverse);
+			rebaseWith(-1, polar);
+			const Result ri = measure(inverse), rp = measure(polar);
+			long textPixels = 0;
+			for (unsigned char v : textMask) textPixels += v;
+			char line[256];
+			snprintf(line, sizeof(line), "player text at 4K over a Lanczos-3 1080 upscale, re-based 2:1 and shown at 4K (%ld text pixels):\n", textPixels);
+			Logger::WriteMessage(line);
+			snprintf(line, sizeof(line), "  kernel inverse: text %.1f codes RMS, %ld halo pixels (>8 codes past black/white), worst %.1f codes; picture %.2f codes\n",
+				ri.textRms, ri.halo, ri.worstOvershoot, ri.pictureRms);
+			Logger::WriteMessage(line);
+			snprintf(line, sizeof(line), "  polar filter:   text %.1f codes RMS, %ld halo pixels, worst %.1f codes; picture %.2f codes\n",
+				rp.textRms, rp.halo, rp.worstOvershoot, rp.pictureRms);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(std::isfinite(ri.textRms) && std::isfinite(rp.textRms), L"measured");
+			Assert::IsTrue(ri.pictureRms < rp.pictureRms, L"the picture: the inverse still the closer");
 			pl_tex_destroy(gpu, &lumaTex);
 			pl_dispatch_destroy(&dispatch);
 		}

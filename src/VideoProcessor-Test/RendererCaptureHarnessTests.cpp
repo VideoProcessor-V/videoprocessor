@@ -118,16 +118,20 @@ namespace
 		return binary.substr(0, binary.find_last_of("\\/") + 1);
 	}
 
+	// Letterbox bars (black rows at the top and bottom) in the V210 frames; 0 = none.
+	int g_harnessBarRows = 0;
+
 	// One moving frame: vertical bars in luma, a chroma ramp, shifted by n.
 	void FillV210(std::vector<BYTE>& frame, int width, int height, size_t rowBytes, int n)
 	{
 		for (int y = 0; y < height; ++y)
 		{
 			uint32_t* row = reinterpret_cast<uint32_t*>(frame.data() + rowBytes * y);
+			const bool bar = y < g_harnessBarRows || y >= height - g_harnessBarRows;
 			for (int pack = 0; pack < (width + 5) / 6; ++pack)
 			{
-				auto luma = [&](int x) { return static_cast<uint32_t>(64 + ((x + 4 * n) / 32 % 2) * 700 + (y % 64)); };
-				auto chroma = [&](int x) { return static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
+				auto luma = [&](int x) { return bar ? 64u : static_cast<uint32_t>(64 + ((x + 4 * n) / 32 % 2) * 700 + (y % 64)); };
+				auto chroma = [&](int x) { return bar ? 512u : static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
 				const int x = pack * 6;
 				row[pack * 4 + 0] = chroma(x) | (luma(x) << 10) | (chroma(x + 1) << 20);
 				row[pack * 4 + 1] = luma(x + 1) | (chroma(x + 2) << 10) | (luma(x + 2) << 20);
@@ -186,6 +190,8 @@ namespace
 
 	// The harness's frame size (1080p unless a test sets it; the 4K stress run).
 	int g_harnessWidth = 1920, g_harnessHeight = 1080;
+	// The window (the output) off the screen: 640 x 360 unless a test sets it.
+	int g_harnessWindowWidth = 640, g_harnessWindowHeight = 360;
 	// Shader profile sections the run selects after Build (e.g. "standard.sigma_delta";
 	// their [shader.*] sections go in the configuration's extra text).
 	std::vector<std::string> g_harnessShaderProfiles;
@@ -258,7 +264,7 @@ namespace
 		// screen) so presentation can bypass composition and report statistics.
 		HWND hwnd = CreateWindowExA(fullscreen ? WS_EX_TOPMOST : (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (onScreen ? WS_EX_TOPMOST : 0)), wc.lpszClassName,
 			"VP capture harness", WS_POPUP, fullscreen ? 0 : onScreen ? screenW - 660 : -4000, fullscreen ? 0 : onScreen ? screenH - 420 : -4000,
-			fullscreen ? screenW : 640, fullscreen ? screenH : 360, nullptr, nullptr, wc.hInstance, nullptr);
+			fullscreen ? screenW : g_harnessWindowWidth, fullscreen ? screenH : g_harnessWindowHeight, nullptr, nullptr, wc.hInstance, nullptr);
 		Assert::IsNotNull(hwnd);
 		ShowWindow(hwnd, fullscreen ? SW_SHOW : SW_SHOWNOACTIVATE);
 		if (fullscreen)
@@ -889,7 +895,7 @@ namespace Tests
 			const std::string base = fingerprint("");
 			Assert::AreEqual(base, fingerprint(""), L"the same file gives the same fingerprint");
 			const char* const changes[] = { "source_range: full\n", "capture_upload: early\n", "source_resolution: 1080\n",
-				"source_resolution_auto_min_confidence: 0.9\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
+				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
 				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
 				"a_key_not_invented_yet: 1\n" };
@@ -1063,6 +1069,177 @@ namespace Tests
 			Logger::WriteMessage(line);
 			Assert::IsTrue(oneAcross <= 2 && oneDown <= 2, L"a one-axis re-base keeps the geometry (aspect ratio)");
 			Assert::IsTrue(uniAcross <= 2 && uniDown <= 2, L"a uniform re-base keeps the geometry");
+		}
+
+		TEST_METHOD(RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking)
+		{
+			// Owner 2026-10-16 ("black bar detection and the resizing ... touch inside ... edge
+			// blanking"): the re-base must not move the picture. Per setup, the output with
+			// source_resolution native and 1080: the picture's edges and the strong edges in it
+			// at the same output pixels. NLS: the stretched sides' sharpness against the centre's
+			// (NLS stretches the source before the upscale, so on the re-based grid).
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight, savedWW = g_harnessWindowWidth, savedWH = g_harnessWindowHeight, savedBars = g_harnessBarRows;
+			const std::vector<std::string> savedShaders = g_harnessShaderProfiles;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			g_harnessWindowWidth = 3840;
+			g_harnessWindowHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-layout";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			// NLS.glsl from the build's shaders folder (the runner's executable lives elsewhere).
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 3.0;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			auto load = [](const std::string& json, int& w, int& h) {
+				std::vector<int> codes;
+				std::string png = json.substr(0, json.size() - 5) + ".png";
+				CComPtr<IWICImagingFactory> factory;
+				if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return codes;
+				CComPtr<IWICBitmapDecoder> decoder;
+				const std::wstring wpng(png.begin(), png.end());
+				if (FAILED(factory->CreateDecoderFromFilename(wpng.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) return codes;
+				CComPtr<IWICBitmapFrameDecode> frame;
+				decoder->GetFrame(0, &frame);
+				CComPtr<IWICFormatConverter> converter;
+				factory->CreateFormatConverter(&converter);
+				converter->Initialize(frame, GUID_WICPixelFormat64bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+				UINT uw = 0, uh = 0;
+				converter->GetSize(&uw, &uh);
+				w = static_cast<int>(uw); h = static_cast<int>(uh);
+				std::vector<uint16_t> rgba(static_cast<size_t>(w) * h * 4);
+				converter->CopyPixels(nullptr, static_cast<UINT>(w * 8), static_cast<UINT>(rgba.size() * 2), reinterpret_cast<BYTE*>(rgba.data()));
+				codes.resize(static_cast<size_t>(w) * h);
+				for (size_t i = 0; i < codes.size(); ++i) codes[i] = rgba[i * 4 + 1] >> 6;
+				return codes;
+			};
+			auto profiles = [](const std::vector<int>& c, int w, int h, std::vector<double>& across, std::vector<double>& down) {
+				across.assign(w, 0.0); down.assign(h, 0.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x) { across[x] += c[static_cast<size_t>(y) * w + x]; down[y] += c[static_cast<size_t>(y) * w + x]; }
+				for (double& v : across) v /= h;
+				for (double& v : down) v /= w;
+			};
+			// The picture's extent: the first and last line whose mean stands clear of the black matte.
+			auto extent = [](const std::vector<double>& profile, int& first, int& last) {
+				const double black = (std::min)(profile.front(), profile.back());
+				first = -1; last = -1;
+				for (int i = 0; i < static_cast<int>(profile.size()); ++i)
+					if (profile[static_cast<size_t>(i)] > black + 20.0) { if (first < 0) first = i; last = i; }
+			};
+			// Sharpness across: the mean absolute step between neighbouring columns, rows in the picture.
+			auto sharpness = [](const std::vector<int>& c, int w, int x0, int x1, int y0, int y1) {
+				double sum = 0.0;
+				long count = 0;
+				for (int y = y0; y < y1; y += 4)
+					for (int x = x0 + 1; x < x1; ++x) { sum += std::abs(c[static_cast<size_t>(y) * w + x] - c[static_cast<size_t>(y) * w + x - 1]); ++count; }
+				return count ? sum / count : 0.0;
+			};
+			const std::string nlsShader =
+				"[shader.nls.standard]\nshader_type: nls\nlabel: Nonlinear Stretch\nstage: pre_resize\norder: 10\nglsl_file: NLS.glsl\nquality: high\n"
+				"geometry: classic\nstrength: 1.0\ncurve: 2.0\ntolerance_percent: 5\nmax_stretch_ratio: 1.4\naspect_direction: narrower_only\n"
+				"vprenderer_max_crop_percent: 0\nvprenderer_crop_preference: preserve_image\n";
+			const std::string blanking = "blank_left: 48\nblank_top: 24\nblank_right: 16\n";
+			struct Case { const char* name; std::string viewport; int bars; bool nls; };
+			const Case cases[] = {
+				{ "scope screen, 16:9 picture, touch inside", "[vprenderer.viewport]\nscreen_aspect: 2.35:1\ncrop_narrower_content_to_fill_screen: true\n" + blanking, 0, false },
+				{ "scope screen, 16:9 picture, NLS", "[vprenderer.viewport]\nscreen_aspect: 2.35:1\n" + blanking, 0, true },
+				{ "scope screen, letterboxed 2.39 source, auto crop", "[vprenderer.viewport]\nscreen_aspect: 2.35:1\nautomatic_crop: true\n" + blanking, 276, false } };
+			CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			int failures = 0;
+			for (const Case& c : cases)
+			{
+				g_harnessBarRows = c.bars;
+				g_harnessShaderProfiles.clear();
+				if (c.nls) g_harnessShaderProfiles.push_back("nls.standard");
+				int w[2] = {}, h[2] = {};
+				std::vector<int> shot[2];
+				const char* resolutions[2] = { "source_resolution: native\n", "source_resolution: 1080\n" };
+				for (int i = 0; i < 2; ++i)
+				{
+					const std::string extra = std::string(resolutions[i]) + "[vprenderer.Default]\ndithering: off\ndeband: off\n" + c.viewport + (c.nls ? nlsShader : std::string());
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, extra, false, &plan);
+					Assert::IsFalse(r.captureMetadata.empty(), (L"capture written\n" + r.Tail()).c_str());
+					int shown = 0;
+					for (const std::string& line : r.log)
+						if ((line.find("Re-base:") != std::string::npos || line.find("NLS") != std::string::npos || line.find("blank") != std::string::npos) && shown < 8)
+						{
+							Logger::WriteMessage(("  " + line + "\n").c_str());
+							++shown;
+						}
+					if (c.nls)
+						Logger::WriteMessage((std::string("  NLS selected: ") + (g_harnessShadersSelected ? "yes" : "no") + "\n").c_str());
+					shot[i] = load(r.captureMetadata, w[i], h[i]);
+				}
+				Assert::IsTrue(!shot[0].empty() && !shot[1].empty() && w[0] == w[1] && h[0] == h[1], L"two captures of one size");
+				std::vector<double> a[2], d[2];
+				int x0[2], x1[2], y0[2], y1[2];
+				for (int i = 0; i < 2; ++i)
+				{
+					profiles(shot[i], w[i], h[i], a[i], d[i]);
+					extent(a[i], x0[i], x1[i]);
+					extent(d[i], y0[i], y1[i]);
+				}
+				const int boundMove = (std::max)((std::max)(std::abs(x0[0] - x0[1]), std::abs(x1[0] - x1[1])), (std::max)(std::abs(y0[0] - y0[1]), std::abs(y1[0] - y1[1])));
+				// The shift that best matches the two profiles inside the picture (the stripes are
+				// periodic, so strongest-edge matching is ambiguous); 0 = not moved.
+				auto bestShift = [](const std::vector<double>& p0, const std::vector<double>& p1, int lo, int hi) {
+					int best = 0;
+					double bestError = 1e300;
+					for (int sft = -12; sft <= 12; ++sft)
+					{
+						double e = 0.0;
+						for (int i = lo + 16; i < hi - 16; ++i) e += std::fabs(p0[static_cast<size_t>(i)] - p1[static_cast<size_t>(i + sft)]);
+						if (e < bestError) { bestError = e; best = sft; }
+					}
+					return best;
+				};
+				const int edgeAcross = x0[0] >= 0 ? std::abs(bestShift(a[0], a[1], x0[0], x1[0])) : 99;
+				const int edgeDown = y0[0] >= 0 ? std::abs(bestShift(d[0], d[1], y0[0], y1[0])) : 99;
+				char line[320];
+				snprintf(line, sizeof(line), "%s (output %dx%d): picture x %d-%d y %d-%d native, x %d-%d y %d-%d re-based; bounds moved %d px, edges moved across %d down %d\n",
+					c.name, w[0], h[0], x0[0], x1[0], y0[0], y1[0], x0[1], x1[1], y0[1], y1[1], boundMove, edgeAcross, edgeDown);
+				Logger::WriteMessage(line);
+				if (x0[0] < 0 || boundMove > 1 || edgeAcross > 2 || edgeDown > 2) ++failures;
+				// NLS really ran: the 16:9 picture stretched across most of the scope screen
+				// (the linear fallback pillarboxes it at 16:9).
+				if (c.nls && (x0[0] < 0 || (x1[0] - x0[0]) < (y1[0] - y0[0]) * 2.0))
+				{
+					Logger::WriteMessage("  NLS did not stretch the picture (the fallback ran)\n");
+					++failures;
+				}
+				if (c.nls && x0[0] >= 0)
+				{
+					const int pw = x1[0] - x0[0], my0 = y0[0] + (y1[0] - y0[0]) / 4, my1 = y1[0] - (y1[0] - y0[0]) / 4;
+					const int side = pw / 8, centre0 = x0[0] + pw * 2 / 5, centre1 = x0[0] + pw * 3 / 5;
+					double ratioSide = 0.0, ratioCentre = 0.0;
+					const double sideN = sharpness(shot[0], w[0], x0[0] + 4, x0[0] + side, my0, my1) + sharpness(shot[0], w[0], x1[0] - side, x1[0] - 4, my0, my1);
+					const double sideR = sharpness(shot[1], w[1], x0[0] + 4, x0[0] + side, my0, my1) + sharpness(shot[1], w[1], x1[0] - side, x1[0] - 4, my0, my1);
+					const double centreN = sharpness(shot[0], w[0], centre0, centre1, my0, my1), centreR = sharpness(shot[1], w[1], centre0, centre1, my0, my1);
+					ratioSide = sideN > 0 ? sideR / sideN : 0.0;
+					ratioCentre = centreN > 0 ? centreR / centreN : 0.0;
+					snprintf(line, sizeof(line), "  NLS sharpness re-based / native: sides %.3f, centre %.3f (sides %.1f%% of the centre's)\n",
+						ratioSide, ratioCentre, ratioCentre > 0 ? 100.0 * ratioSide / ratioCentre : 0.0);
+					Logger::WriteMessage(line);
+				}
+			}
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			g_harnessWindowWidth = savedWW;
+			g_harnessWindowHeight = savedWH;
+			g_harnessBarRows = savedBars;
+			g_harnessShaderProfiles = savedShaders;
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			Assert::AreEqual(0, failures, L"the re-base keeps the layout in every setup");
 		}
 
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)

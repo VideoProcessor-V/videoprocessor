@@ -402,8 +402,17 @@ namespace
 		source.clear();
 		resolvedPath.clear();
 		reason.clear();
+		// Tests only: VP_TEST_SHADER_DIR names the folder that holds shaders\ (the test
+		// runner's executable lives elsewhere). Unset: beside the exe, as always.
+		std::string executablePath = CurrentExecutablePath();
+		{
+			char overrideDir[1024] = {};
+			const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_DIR", overrideDir, 1024);
+			if (overrideLength > 0 && overrideLength < 1024)
+				executablePath = std::string(overrideDir, overrideLength) + "\\VideoProcessor.exe";
+		}
 		if (!MadVRShaderLoader::ResolveShaderFilename(
-			filename, CurrentExecutablePath(), resolvedPath, reason))
+			filename, executablePath, resolvedPath, reason))
 			return false;
 
 		std::ifstream input(
@@ -1030,6 +1039,9 @@ namespace
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
 		bool rebaseKernelMatch = true;
+		// Owner 2026-10-16: tiles holding overlay text (the player's own subtitles, drawn at
+		// the output resolution) are no evidence for source_resolution auto.
+		bool sourceResolutionTextGuard = true;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1214,7 +1226,7 @@ namespace
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.rebaseKernelMatch << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2351,6 +2363,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid rebase_kernel_match '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.rebaseKernelMatch ? "on" : "off");
+		}
+		if (config.TryGetString(rule.section, "source_resolution_text_guard", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceResolutionTextGuard = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_resolution_text_guard '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceResolutionTextGuard ? "on" : "off");
 		}
 		if (config.TryGetString(rule.section, "optical_flow", raw))
 		{
@@ -9138,6 +9158,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
+		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
@@ -18111,6 +18132,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			double wanted = 1.0, wantedX = 1.0;
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
+			sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
 			{
@@ -25208,6 +25230,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
+		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"
