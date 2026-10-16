@@ -1476,6 +1476,78 @@ void testPictureSliderPresets()
         "A reopened Config does not show the saved Fast");
 }
 
+void testScalingSliderPresets()
+{
+    // Owner 2026-10-16: the Scaling slider - speed profiles Off, Fast, Standard, Best - moves VP's scaling
+    // additions; the master checkbox is Off when unticked; an edit shows Custom; Reset / Default restore;
+    // an empty profile reads Off (today's defaults); saved and read back.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* slider = requireControl<QSlider>(window, "config.vprenderer.scaling_preset");
+    auto* name = requireControl<QLabel>(window, "config.vprenderer.scaling_preset_name");
+    auto* enable = requireControl<QCheckBox>(window, "config.vprenderer.scaling_preset_enable");
+    auto* down = requireControl<QComboBox>(window, "config.vprenderer.adaptive_downscale");
+    auto* up = requireControl<QComboBox>(window, "config.vprenderer.adaptive_upscale");
+    auto* faithful = requireControl<QComboBox>(window, "config.vprenderer.adaptive_faithful");
+    auto* map = requireControl<QComboBox>(window, "config.vprenderer.adaptive_grain_map");
+    require(name->text().startsWith("Off") && slider->value() == 0 && !enable->isChecked() && !slider->isEnabled(),
+        (QByteArray("An empty profile is not shown as Off with the checkbox unticked: ") + name->text().toUtf8()).constData());
+    // Ticking: the first level is Standard.
+    enable->setChecked(true);
+    QCoreApplication::processEvents();
+    require(slider->value() == 2 && name->text().startsWith("Standard") && slider->isEnabled(), "Ticking did not select Standard");
+    struct Row { int position; const char* down; const char* up; const char* faithful; const char* map; const char* label; };
+    const Row rows[] = {
+        { 1, "on", "off", "ortho", "off", "Fast" },
+        { 2, "on", "on", "ortho", "on", "Standard" },
+        { 3, "on", "on", "polar", "on", "Best" } };
+    for (const Row& r : rows)
+    {
+        slider->setValue(r.position);
+        QCoreApplication::processEvents();
+        const QByteArray at = QByteArray("position ") + r.label + ": ";
+        require(down->currentData().toString() == r.down && up->currentData().toString() == r.up &&
+            faithful->currentData().toString() == r.faithful && map->currentData().toString() == r.map, (at + "values").constData());
+        require(name->text().startsWith(r.label), (at + "label " + name->text().toUtf8()).constData());
+    }
+    // Unticking: Off; ticking again returns to the last level (Best).
+    enable->setChecked(false);
+    QCoreApplication::processEvents();
+    require(down->currentData().toString() == "off" && up->currentData().toString() == "off" && name->text().startsWith("Off"), "Unticking did not turn the additions off");
+    enable->setChecked(true);
+    QCoreApplication::processEvents();
+    require(slider->value() == 3 && faithful->currentData().toString() == "polar", "Ticking again did not return to Best");
+    selectData(map, "off");
+    QCoreApplication::processEvents();
+    require(name->text() == "Custom" && slider->value() == 3, "Editing a key did not show Custom (slider kept)");
+    requireControl<QPushButton>(window, "config.vprenderer.scaling_preset_reset")->click();
+    QCoreApplication::processEvents();
+    require(map->currentData().toString() == "on" && name->text().startsWith("Best"), "Reset to preset did not restore Best");
+    requireControl<QPushButton>(window, "config.vprenderer.scaling_preset_default")->click();
+    QCoreApplication::processEvents();
+    require(slider->value() == 0 && !enable->isChecked() && down->currentData().toString() == "off", "Default did not restore Off");
+    slider->setEnabled(true);
+    enable->setChecked(true);
+    slider->setValue(1);
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    for (const char* expected : { "adaptive_downscale: on", "adaptive_upscale: off", "adaptive_faithful: ortho", "adaptive_grain_map: off" })
+        require(saved.contains(expected), (QByteArray("Scaling setting not saved: ") + expected).constData());
+    ConfigEditorWindow reopened(path, 0, true);
+    requireControl<QListWidget>(reopened, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(requireControl<QSlider>(reopened, "config.vprenderer.scaling_preset")->value() == 1 &&
+        requireControl<QLabel>(reopened, "config.vprenderer.scaling_preset_name")->text().startsWith("Fast"),
+        "A reopened Config does not show the saved Fast");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8372,6 +8444,7 @@ int main(int argc, char** argv)
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);
     failures += run("picture slider presets", testPictureSliderPresets);
+    failures += run("scaling slider presets", testScalingSliderPresets);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
