@@ -5075,6 +5075,8 @@ struct LibplaceboVideoRenderer::Impl
 	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
 	// loop's count), and the last logged optical-flow depth decision.
 	std::atomic<size_t> queuedFutureFrames{ 0 };
+	// source_resolution auto is selected (the render loop then shows the monitor the frames ahead).
+	std::atomic<bool> sourceAutoActive{ false };
 	std::string motionAheadLogged;
 	// Set when the optical-flow engine is running and passed its self-check (not built yet).
 	std::atomic<bool> motionEngineReady{ false };
@@ -17998,10 +18000,11 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			double wanted = 1.0;
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
+			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
 			{
 				std::string why;
-				wanted = sourceMonitor.AutoFactor(nativeHeight, activeSettings.sourceResolutionAutoMinConfidence, why);
+				wanted = sourceMonitor.AutoFactor(nativeHeight, activeSettings.sourceResolutionAutoMinConfidence, why, -1.0, sourceSequence);
 				if (!why.empty())
 				{
 					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
@@ -23780,6 +23783,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		size_t desiredQueueDepth = 1;
 		double oldestQueuedAgeMs = 0.0;
 		std::vector<QueuedFrame> activePicturePreviewFrames;
+		std::vector<QueuedFrame> sourceAheadFrames;   // source-resolution look-ahead
 		size_t activePictureAvailableLookahead = 0;
 		uint64_t activePictureLookaheadPolicyGeneration = 0;
 		uint64_t activePictureContinuityGeneration = 0;
@@ -23832,6 +23836,17 @@ void LibplaceboVideoRenderer::RenderLoop()
                 activePicturePreviewFrames.push_back(m_frameQueue[index]);
                 activePicturePreviewFrames.back().frame.SourceBufferAddRef();
             }
+            // Look-ahead verification (owner 2026-10-16): with source_resolution auto,
+            // the queued frames after the current one (not cadence repeats), up to 4,
+            // whatever Bill's active-picture look-ahead is set to. Only frames already
+            // queued: no waiting; an empty or short queue simply gives fewer.
+            if (m_impl && m_impl->sourceAutoActive.load(std::memory_order_acquire))
+                for (size_t index = 1; index < m_frameQueue.size() && sourceAheadFrames.size() < 4; ++index)
+                {
+                    if (m_frameQueue[index].cadenceRepeat || !m_frameQueue[index].state) continue;
+                    sourceAheadFrames.push_back(m_frameQueue[index]);
+                    sourceAheadFrames.back().frame.SourceBufferAddRef();
+                }
 		}
 
 		const auto preRenderActiveStart = SteadyClock::now();
@@ -23866,6 +23881,34 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// of the current policy and of analysis success.
 		for (QueuedFrame& preview : activePicturePreviewFrames)
 			preview.frame.SourceBufferRelease();
+		if (!sourceAheadFrames.empty())
+		{
+			try
+			{
+				for (QueuedFrame& ahead : sourceAheadFrames)
+				{
+					const VideoState& aheadState = *ahead.state;
+					if (!aheadState.displayMode) continue;
+					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
+						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
+						aheadState.dolbyVisionTunnel);
+					const AnalysisLumaSource& luma = prepared.source;
+					if (!luma.IsValid()) continue;
+					m_impl->sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
+						[&luma](int x, int y) {
+							AnalysisLumaSample sample;
+							return luma.Sample(x, y, sample) ? static_cast<int>(sample.luma) : 0;
+						}, 0, 0, luma.width, luma.height);
+				}
+			}
+			catch (const std::exception& e)
+			{
+				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
+			}
+			for (QueuedFrame& ahead : sourceAheadFrames)
+				ahead.frame.SourceBufferRelease();
+			sourceAheadFrames.clear();
+		}
 
 		{
 			const auto waitStarted = SteadyClock::now();
