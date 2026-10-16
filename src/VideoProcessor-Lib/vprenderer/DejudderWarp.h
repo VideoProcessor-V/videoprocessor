@@ -6,6 +6,8 @@
 
 #include <map>
 #include <vprenderer/NvOpticalFlow.h>
+
+namespace MotionAhead { struct Flow; }
 #include <memory>
 #include <string>
 
@@ -599,10 +601,30 @@ namespace Dejudder
 		pl_tex ofInTex[2] = { nullptr, nullptr }, ofFlowTex[2] = { nullptr, nullptr };
 		int ofW = 0, ofH = 0;
 	public:
-		const std::string& OpticalFlowError() const { return opticalFlowError; }
-		bool OpticalFlowUsed() const { return opticalFlowUsed; }
+		// The searching instance may be the half-size inner one (lowRes): report it.
+		const std::string& OpticalFlowError() const
+		{
+			return opticalFlowError.empty() && inner ? inner->OpticalFlowError() : opticalFlowError;
+		}
+		bool OpticalFlowUsed() const { return opticalFlowUsed || (inner && HalvesForSearch() && inner->OpticalFlowUsed()); }
+		// The engine's input size where the searches run (this instance's half size,
+		// or the inner's): the size a flow computed ahead must have. False before the
+		// first estimate.
+		bool EngineInputSize(int& w, int& h) const
+		{
+			if (HalvesForSearch() && inner) return inner->EngineInputSize(w, h);
+			w = halfW; h = halfH;
+			return halfW > 0 && halfH > 0;
+		}
+		// docs/VP-nvof-ahead.md: the next Estimate's pair as computed ahead by the
+		// producer (null = none). Used when it matches the half size; then no engine
+		// work happens at render time. Cleared by each Estimate.
+		void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow) { externalFlow = std::move(flow); }
+		bool ExternalFlowUsed() const { return externalFlowUsed || (inner && HalvesForSearch() && inner->ExternalFlowUsed()); }
 	private:
 		std::string opticalFlowError;
 		bool opticalFlowUsed = false;
+		std::shared_ptr<const MotionAhead::Flow> externalFlow;
+		bool externalFlowUsed = false;
 	};
 }

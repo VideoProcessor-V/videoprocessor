@@ -1,5 +1,6 @@
 ﻿#include <pch.h>
 #include "DejudderWarp.h"
+#include <vprenderer/MotionAheadProducer.h>
 
 #include <chrono>
 
@@ -3176,6 +3177,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		Planes la = a, lb = b;
 		la.luma = halfA;
 		lb.luma = halfB;
+		// The pair computed ahead belongs to the instance that searches.
+		inner->SetExternalFlow(std::move(externalFlow));
+		externalFlow.reset();
 		if (!inner->Estimate(la, lb, -1, false))
 		{
 			error = "lowRes: " + inner->LastError();
@@ -3239,7 +3243,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 
 	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward)
 	{
-		if (opticalFlowFailed)
+		// The pair computed ahead (docs/VP-nvof-ahead.md), taken once.
+		const std::shared_ptr<const MotionAhead::Flow> ahead = std::move(externalFlow);
+		externalFlow.reset();
+		externalFlowUsed = false;
+		const bool useAhead = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
+			ahead->gridW == (halfW + 3) / 4 && ahead->gridH == (halfH + 3) / 4;
+		if (opticalFlowFailed && !useAhead)
 			return false;
 		auto fail = [this](const std::string& why) {
 			opticalFlowFailed = true;
@@ -3286,7 +3296,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			ofW = w; ofH = h;
 		}
-		if (!opticalFlowEngine || opticalFlowPresetOpen != settings.opticalFlowPreset)
+		if (useAhead)
+		{
+			// The flow fields straight into the engine's output textures: no input
+			// passes, no engine run at render time.
+			context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
+			context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
+			externalFlowUsed = true;
+		}
+		else if (!opticalFlowEngine || opticalFlowPresetOpen != settings.opticalFlowPreset)
 		{
 			opticalFlowEngine = std::make_unique<NvOpticalFlow::Engine>();
 			const NvOpticalFlow::Preset preset = settings.opticalFlowPreset <= 0 ? NvOpticalFlow::Preset::Slow :
@@ -3295,17 +3313,20 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				return fail(opticalFlowEngine->LastError());
 			opticalFlowPresetOpen = settings.opticalFlowPreset;
 		}
-		// A's and B's half-size luma as the engine's input, the flow both
-		// ways, then the blocks' vectors and SADs in the searches' format.
-		const pl_shader_desc inA[2] = { Sampled("src", halfA, false), Storage("dst", ofInTex[0]) };
-		const pl_shader_desc inB[2] = { Sampled("src", halfB, false), Storage("dst", ofInTex[1]) };
-		if (!Dispatch("VideoProcessor de-judder: optical flow input A", nullptr, OF_INPUT_BODY, inA, 2, nullptr, 0, w, h, 16) ||
-			!Dispatch("VideoProcessor de-judder: optical flow input B", nullptr, OF_INPUT_BODY, inB, 2, nullptr, 0, w, h, 16))
-			return fail("its input pass failed");
-		// libplacebo's queued work reaches the context before the engine runs.
-		pl_gpu_flush(gpu);
-		if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, true))
-			return fail(opticalFlowEngine->LastError());
+		if (!useAhead)
+		{
+			// A's and B's half-size luma as the engine's input, the flow both
+			// ways, then the blocks' vectors and SADs in the searches' format.
+			const pl_shader_desc inA[2] = { Sampled("src", halfA, false), Storage("dst", ofInTex[0]) };
+			const pl_shader_desc inB[2] = { Sampled("src", halfB, false), Storage("dst", ofInTex[1]) };
+			if (!Dispatch("VideoProcessor de-judder: optical flow input A", nullptr, OF_INPUT_BODY, inA, 2, nullptr, 0, w, h, 16) ||
+				!Dispatch("VideoProcessor de-judder: optical flow input B", nullptr, OF_INPUT_BODY, inB, 2, nullptr, 0, w, h, 16))
+				return fail("its input pass failed");
+			// libplacebo's queued work reaches the context before the engine runs.
+			pl_gpu_flush(gpu);
+			if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, true))
+				return fail(opticalFlowEngine->LastError());
+		}
 		const std::string header = std::string(RESCORE_HEADER);
 		const pl_shader_desc fw[4] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
 			Sampled("to_half", halfB, true), Storage("dst", outForward) };

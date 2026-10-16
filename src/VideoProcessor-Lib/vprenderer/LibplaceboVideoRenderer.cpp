@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <MotionAhead.h>
+#include <vprenderer/MotionAheadProducer.h>
 #include "../SubtitleProfileUpdatePolicy.h"
 #include "SubtitleBarRecovery.h"
 
@@ -5094,8 +5095,16 @@ struct LibplaceboVideoRenderer::Impl
 	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionAheadLogged;
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
-	// Set when the optical-flow engine is running and passed its self-check (not built yet).
+	// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md).
 	std::atomic<bool> motionEngineReady{ false };
+	// The producer computing the pairs ahead (render thread starts / stops it; the
+	// render loop submits frames; the de-judder takes its pairs), and the continuity
+	// generation it stores them under (a discontinuity moves it).
+	std::unique_ptr<MotionAhead::Producer> motionProducer;
+	std::atomic<uint64_t> motionGeneration{ 1 };
+	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
+	bool motionProducerFailedLogged = false;
+	unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
 	bool customHooksPublishedLowLatency = false;
 	double customHookRefreshHz = 0.0;
 	ULONGLONG customHookRefreshTick = 0;
@@ -12768,6 +12777,16 @@ struct LibplaceboVideoRenderer::Impl
 		Dejudder::Planes sa = a, sb = b;
 		sa.sequence = aSequence;
 		sb.sequence = bSequence;
+		if (motionProducer && motionProducer->Running())
+		{
+			int engineW = 0, engineH = 0;
+			if (dejudder->EngineInputSize(engineW, engineH))
+				motionProducer->SetTargetSize(engineW, engineH);
+			MotionAhead::FlowPtr flow = motionProducer->Take(aSequence, bSequence);
+			if (flow) ++motionAheadHits; else ++motionAheadMisses;
+			dejudder->SetExternalFlow(std::move(flow));
+			motionProducer->Prune(aSequence);
+		}
 		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
@@ -12784,7 +12803,8 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		// The motion source: the optical-flow engine, or the block searches (logged on change).
 		{
-			const char* source = dejudder->OpticalFlowUsed() ? "optical-flow engine" :
+			const char* source = dejudder->ExternalFlowUsed() ? "optical-flow engine (computed ahead)" :
+				dejudder->OpticalFlowUsed() ? "optical-flow engine" :
 				!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" : "block searches (no engine)";
 			if (motionSourceLogged != source)
 			{
@@ -12794,6 +12814,12 @@ struct LibplaceboVideoRenderer::Impl
 				else
 					DebugLog::Log("De-judder motion: %s", source);
 			}
+		}
+		if (motionProducer && (dejudderEstimates + 1) % 2400 == 0)
+		{
+			const auto ps = motionProducer->GetStats();
+			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms), %llu dropped; pairs taken %llu, missed %llu",
+				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses);
 		}
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
@@ -17986,9 +18012,42 @@ struct LibplaceboVideoRenderer::Impl
 		// the configured depth, off in low latency or without the engine, never more than
 		// the frames queued. Logged when it changes (the matcher covers the rest).
 		{
+			// The producer runs while the de-judder does, with optical flow on, outside low
+			// latency and with a depth set; it stops otherwise (the matcher covers all).
+			const bool lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
+			const bool wantProducer = dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
+			if (wantProducer && !motionProducer && !motionProducerFailedLogged && d3d11 && d3d11->gpu)
+			{
+				pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
+				auto producer = std::make_unique<MotionAhead::Producer>();
+				const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Medium;
+				if (d3d && d3d->device && producer->Start(d3d->device, preset))
+					motionProducer = std::move(producer);
+				else
+				{
+					motionProducerFailedLogged = true;
+					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder estimates at render time",
+						producer->Error().c_str());
+				}
+			}
+			else if (!wantProducer && motionProducer)
+			{
+				motionProducer->Stop();
+				motionProducer.reset();
+				motionEngineReady.store(false, std::memory_order_release);
+			}
+			if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
+			{
+				motionProducerFailedLogged = true;
+				DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
+					motionProducer->Error().c_str());
+			}
+			motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
 			const MotionAhead::Decision ahead = MotionAhead::Decide(activeSettings.motionAheadFrames,
-				lowLatencyQueueActive.load(std::memory_order_acquire), motionEngineReady.load(std::memory_order_acquire),
+				lowLatency, motionProducer && motionProducer->Running(),
 				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow);
+			motionAheadDepth.store(motionProducer && motionProducer->Running() ? (std::max)(1, activeSettings.motionAheadFrames) : 0,
+				std::memory_order_release);
 			char text[200];
 			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
 				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
@@ -21481,6 +21540,7 @@ void LibplaceboVideoRenderer::Reset()
 		m_impl->RequestMotionInvalidate(true);
 		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
 		m_impl->sourceMonitor.Discontinuity("resync or source change");
+		m_impl->motionGeneration.fetch_add(1, std::memory_order_acq_rel);
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("renderer reset");
@@ -21522,6 +21582,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 		// The discarded frames break the sequence: no pair or history across it.
 		m_impl->RequestMotionInvalidate(false, "live queue reset");
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
+		m_impl->motionGeneration.fetch_add(1, std::memory_order_acq_rel);
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("live queue reset");
@@ -23814,6 +23875,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		double oldestQueuedAgeMs = 0.0;
 		std::vector<QueuedFrame> activePicturePreviewFrames;
 		std::vector<QueuedFrame> sourceAheadFrames;   // source-resolution look-ahead
+		std::vector<QueuedFrame> motionAheadFrames;   // optical flow ahead
 		size_t activePictureAvailableLookahead = 0;
 		uint64_t activePictureLookaheadPolicyGeneration = 0;
 		uint64_t activePictureContinuityGeneration = 0;
@@ -23870,6 +23932,24 @@ void LibplaceboVideoRenderer::RenderLoop()
             // the queued frames after the current one (not cadence repeats), up to 4,
             // whatever Bill's active-picture look-ahead is set to. Only frames already
             // queued: no waiting; an empty or short queue simply gives fewer.
+            // Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
+            // depth after it, each once (only frames already queued: an empty or short
+            // queue gives fewer).
+            if (m_impl && m_impl->motionProducer && m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0)
+            {
+                const size_t depth = static_cast<size_t>(m_impl->motionAheadDepth.load(std::memory_order_acquire));
+                const uint64_t last = m_impl->motionProducer->LastSubmitted();
+                size_t taken = 0;
+                for (size_t index = 0; index < m_frameQueue.size() && taken <= depth; ++index)
+                {
+                    const QueuedFrame& q = m_frameQueue[index];
+                    if (q.cadenceRepeat || !q.state) continue;
+                    ++taken;
+                    if (q.sourceSequence <= last) continue;
+                    motionAheadFrames.push_back(q);
+                    motionAheadFrames.back().frame.SourceBufferAddRef();
+                }
+            }
             if (m_impl && m_impl->sourceAutoActive.load(std::memory_order_acquire))
                 for (size_t index = 1; index < m_frameQueue.size() && sourceAheadFrames.size() < 4; ++index)
                 {
@@ -23911,6 +23991,31 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// of the current policy and of analysis success.
 		for (QueuedFrame& preview : activePicturePreviewFrames)
 			preview.frame.SourceBufferRelease();
+		if (!motionAheadFrames.empty())
+		{
+			try
+			{
+				const uint64_t generation = m_impl->motionGeneration.load(std::memory_order_acquire);
+				for (QueuedFrame& ahead : motionAheadFrames)
+				{
+					const VideoState& aheadState = *ahead.state;
+					if (!aheadState.displayMode || !m_impl->motionProducer) continue;
+					// The luma source keeps the frame's own buffer alive for the producer's worker.
+					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
+						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
+						aheadState.dolbyVisionTunnel);
+					if (prepared.source.IsValid())
+						m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source);
+				}
+			}
+			catch (const std::exception& e)
+			{
+				DebugLog::Log("Motion ahead: frames skipped: %s", e.what());
+			}
+			for (QueuedFrame& ahead : motionAheadFrames)
+				ahead.frame.SourceBufferRelease();
+			motionAheadFrames.clear();
+		}
 		if (!sourceAheadFrames.empty())
 		{
 			try

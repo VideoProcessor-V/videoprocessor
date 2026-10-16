@@ -130,3 +130,14 @@ Owner, 2026-10-16: "are we going to have a problem with detail integration using
 - **The clamp is the backstop.** History detail is used only within the current frame's local detail range. A misaligned or wrong vector gives history that disagrees and is not used.
 - **The per-frame weight** follows how well the warped detail predicts the current frame. A slightly misaligned contribution gets little weight instead of softening texture.
 - **Test T1 gains a misalignment case.** Vectors deliberately offset by 0.5 and 1 px must not soften the result below the plain current frame.
+
+## 8. Automatic enable / disable (owner, 2026-10-16: "if the detail recovery requires optical flow then it needs to be automatically disabled when it's off or not detected")
+
+| State | Accumulation |
+|---|---|
+| Optical flow on, the producer's engine ready (pairs computed ahead) | v2 (look-ahead) and v1 |
+| Optical flow off, or no engine (not NVIDIA, self-check failed, the producer stopped), or a low-latency profile | v1 only (causal, the de-judder's own vectors), automatically. Logged once: "detail accumulation: look-ahead off (no optical flow): causal only" |
+| No de-judder vectors (the de-judder off, vectors invalid after a discontinuity, interlaced, unknown rates) | Off for those frames, automatically (the current frame unchanged) |
+
+- **One source of truth.** The renderer's motion-ahead decision (`MotionAhead::Decide` and the producer's `EngineReady`) decides. Accumulation never starts the engine or the matcher itself ([[vp-vector-refinements-fallback]]).
+- **Switching is per frame and smooth.** v2 to v1 drops the look-ahead term only, with no visible jump: the history stays. Off clears the history.

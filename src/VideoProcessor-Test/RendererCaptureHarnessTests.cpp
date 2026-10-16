@@ -609,6 +609,10 @@ namespace Tests
 			const RunResult off = Run(VideoFrameEncoding::V210, "gpu", 4.0, true, "dejudder_strength: 0.25\noptical_flow: off\n");
 			Logger::WriteMessage(("default: " + source(on) + "\n").c_str());
 			Logger::WriteMessage(("off: " + source(off) + "\n").c_str());
+			// The producer ahead (docs/VP-nvof-ahead.md): its decisions and statistics.
+			for (const std::string& line : on.log)
+				if (line.find("Motion ahead") != std::string::npos || line.find("De-judder motion:") != std::string::npos)
+					Logger::WriteMessage(("  " + line + "\n").c_str());
 			Assert::IsTrue(on.presented && off.presented, L"both runs presented");
 			Assert::IsFalse(source(on).empty(), (L"the default run reports its motion source\n" + on.Tail()).c_str());
 			Assert::IsTrue(source(on).find("optical_flow off") == std::string::npos, L"the default is not off");
