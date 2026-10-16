@@ -179,22 +179,36 @@ namespace MotionAhead
 			error = "cannot find the render GPU";
 			return false;
 		}
-		const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+		// Owner 2026-10-16 (the startup queue fill): the device is created on the worker, so a
+		// start never stalls the render thread (driver calls can take tens of ms).
 		device.Release();
 		context.Release();
-		if (FAILED(D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
-				&device, nullptr, &context)))
-		{
-			error = "cannot create its D3D11 device";
-			return false;
-		}
 		stopping = false;
 		jobs.clear();
 		havePrevious = false;
 		engineReady = false;
 		sizeW = sizeH = 0;
 		running = true;
-		worker = std::thread([this] { Worker(); });
+		CComPtr<IDXGIAdapter> workerAdapter = adapter;
+		worker = std::thread([this, workerAdapter] {
+			const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+			CComPtr<ID3D11Device> created;
+			CComPtr<ID3D11DeviceContext> createdContext;
+			if (FAILED(D3D11CreateDevice(workerAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
+					&created, nullptr, &createdContext)))
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "cannot create its D3D11 device";
+				running = false;
+				return;
+			}
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				device = created;
+				context = createdContext;
+			}
+			Worker();
+		});
 		return true;
 	}
 

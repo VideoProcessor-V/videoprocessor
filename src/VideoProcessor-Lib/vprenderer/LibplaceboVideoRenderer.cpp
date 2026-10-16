@@ -5189,7 +5189,11 @@ struct LibplaceboVideoRenderer::Impl
 	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionAheadLogged;
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
-	ULONGLONG motionLastQueuedTick = 0;   // the last time frames were queued ahead (the producer's 2 s hold)
+	// Owner 2026-10-16: the look-ahead engages with 4 frames queued ahead and disengages when the
+	// queue holds none or the sequence breaks (a skip, seek or reset: a new motion generation);
+	// it re-engages only once 4 are queued again. Render-loop thread only.
+	bool motionAheadEngaged = false;
+	uint64_t motionAheadEngagedGeneration = 0;
 	// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md).
 	std::atomic<bool> motionEngineReady{ false };
 	// The producer computing the pairs ahead (render thread starts / stops it; the
@@ -18168,14 +18172,10 @@ struct LibplaceboVideoRenderer::Impl
 			// The producer runs while the de-judder does, with optical flow on, outside low
 			// latency and with a depth set; it stops otherwise (the matcher covers all).
 			const bool lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-			// Owner 2026-10-16: the producer follows the queue - it runs while frames are queued
-			// ahead and stops after 2 s with none (no pairs it could use; no restart flicker).
-			const size_t queuedAhead = queuedFutureFrames.load(std::memory_order_acquire);
-			const ULONGLONG nowTick = GetTickCount64();
-			if (queuedAhead > 0) motionLastQueuedTick = nowTick;
-			const bool queueHoldsFrames = queuedAhead > 0 || (motionLastQueuedTick != 0 && nowTick - motionLastQueuedTick < 2000);
-			const bool wantProducer = dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency &&
-				queueHoldsFrames;
+			// Owner 2026-10-16: the producer stays alive once wanted (starting it again would cost a
+			// device on every queue refill); with no frames queued ahead it gets no frames (below),
+			// so it computes nothing it could not use - the startup fill and an emptied queue alike.
+			const bool wantProducer = dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
 			if (wantProducer && !motionProducer && !motionProducerFailedLogged && d3d11 && d3d11->gpu)
 			{
 				pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
@@ -24187,10 +24187,28 @@ void LibplaceboVideoRenderer::RenderLoop()
 			try
 			{
 				const uint64_t generation = m_impl->motionGeneration.load(std::memory_order_acquire);
+				// Owner 2026-10-16: the look-ahead engages once 4 frames are queued ahead (the startup
+				// fill, a refilled queue), disengages with none queued or a broken sequence (a new
+				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
+				// no work (no pair could be used before its frames are shown).
+				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
+				const bool wasEngaged = m_impl->motionAheadEngaged;
+				if (m_impl->motionAheadEngaged &&
+					(queuedAhead == 0 || generation != m_impl->motionAheadEngagedGeneration))
+					m_impl->motionAheadEngaged = false;
+				if (!m_impl->motionAheadEngaged && queuedAhead >= static_cast<size_t>(MotionAhead::kDefaultDepth))
+				{
+					m_impl->motionAheadEngaged = true;
+					m_impl->motionAheadEngagedGeneration = generation;
+				}
+				if (wasEngaged != m_impl->motionAheadEngaged)
+					DebugLog::Log("Motion ahead: %s (%zu frames queued ahead)", m_impl->motionAheadEngaged ?
+						"engaged" : "waiting for 4 frames queued ahead", queuedAhead);
+				const bool framesAhead = m_impl->motionAheadEngaged;
 				for (QueuedFrame& ahead : motionAheadFrames)
 				{
 					const VideoState& aheadState = *ahead.state;
-					if (!aheadState.displayMode || !m_impl->motionProducer) continue;
+					if (!framesAhead || !aheadState.displayMode || !m_impl->motionProducer) continue;
 					// The luma source keeps the frame's own buffer alive for the producer's worker.
 					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
 						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
