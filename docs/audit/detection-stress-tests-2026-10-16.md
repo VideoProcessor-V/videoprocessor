@@ -117,3 +117,24 @@ Two frames are taken from each clip, read on 12 tiles per frame.
 10. **Variable bitrate and banding** (owner): the debander follows the bitrate-quality reading. That reading is smoothed over about 2 s and resets at cuts, so I/P pumping is averaged and each scene gets its own level. There is no test of debander stability under per-frame I/P quality alternation yet.
 11. **Encoders alternating detail between frames** (owner: "encoding alternates detail between one frame and the next to average it in"). The added detail (CNN/SSIM residuals) and the debander's blur are held along the trusted motion vectors, which averages detail along the motion. There is no direct test with I/P detail pumping yet. A motion-compensated temporal accumulation of source detail is a possible later addition: planner's view wanted.
 12. **Rendition switch latency.** A down-switch currently takes the 120 s rolling window. Should a confident rendition change (a sudden, sustained loss of detail above at no cut) restart the window?
+
+## G18 result: real codecs (2026-10-16, `RealCodecReadings`, tools/make_codec_corpus.py)
+
+**Corpus.** 126 real encodes of the 7 clips, made with ffmpeg 9.0.2:
+- x265 at CRF 20/26/32;
+- x264 at CRF 18/23/28;
+- SVT-AV1 at CRF 35 with film-grain synthesis.
+
+4 P/B frames of each were decoded: 504 frames in all.
+
+| Case | Frames | Read the height | Native | Wrong |
+|---|---|---|---|---|
+| Native 4K, all codecs and CRFs | 196 | — | 196 | 0 |
+| 1080 rendition, upscaled by the player (bicubic or Lanczos), all codecs incl. AV1 + FGS | 224 | 224 | 0 | 0 |
+| 1080 master upscaled, then coded at 4K (x265 CRF 20/26/32) | 84 | 0 | 84 | 0 |
+
+**Invariant held.** 0 native frames read lower, and no upscale read a wrong height.
+
+**New gap.** A "4K" stream of a 1080-mastered title is never detected. It is the safe direction, but a common case (2K-DI films streamed in 4K). The 4K encoder removes the upscaler's faint images above the source Nyquist, and those images carry the mirror coherence.
+
+**Proposed next signal.** A sharp, consistent spectral cliff at a stable rate across frames and shots, gated strictly so soft native 4K never triggers it. To be added after the look-ahead work.
