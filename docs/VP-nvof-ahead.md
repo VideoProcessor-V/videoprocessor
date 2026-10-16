@@ -199,6 +199,16 @@ The 8-bit limit belongs to NVIDIA's packaged FRUC library, not to the engine's r
 - **Live 4K matcher.** 7.5 → 5.5 ms with the engine at render time; with the producer the engine time leaves the render path too.
 - **Producer.** About 11 ms per pair on its worker. The renderer took 20 of the first 23 pairs from the store; the misses were before it started.
 
+**The producer's luma, by format** (owner: compare 4:4:4 / 4:2:2 / 4:2:0):
+- Direct decoders for P010/P210, v210, UYVY/HDYC, R12B, R12L, r210/R10b/R10l and 8-bit RGB, 2 × 2 averaged, rows on up to 4 threads (4K P010 2.3 ms).
+- The same picture gives the same luma: v210 = P010 exactly; R12B = R12L exactly; UYVY and r210 within one step.
+
+**Tests:**
+- full unit suite 2795/2795;
+- Config 112 + 1 known skip (off screen);
+- the Beta suite;
+- 998 black-bar / active-picture / crop / look-ahead tests.
+
 **Fixed on the way:**
 - a fail-fast at teardown on NVIDIA (the engine's textures released before it; the driver DLL unloaded);
 - the replace path's precedence bug;
