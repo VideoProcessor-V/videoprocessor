@@ -3310,7 +3310,7 @@ namespace Corpus
 		bool fade = false, split = true, verify = false; float verifyShare = 0.2f;
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
-		bool opticalFlow = false; int ofPreset = 1; bool ofCandidate = false, ofSeed = false;   // docs/VP-nvof-ahead.md: the engine as the motion source
+		bool opticalFlow = false; int ofPreset = 1; bool ofCandidate = false, ofSeed = false, ofGlobal = false;   // docs/VP-nvof-ahead.md: the engine as the motion source
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
 		float rollHi = 24.0f, rollFloor = 0.25f;
 		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
@@ -3354,6 +3354,14 @@ namespace Corpus
 				variants.back().ofSeed = true;
 				add("optical flow seed + matcher refinement, slow", true, 0, false, true);
 				variants.back().ofSeed = true;
+				// Planner Q1: D1 from the engine's field instead of the global search.
+				add("optical flow seed, slow, engine global", true, 0, false, true);
+				variants.back().ofSeed = true; variants.back().ofGlobal = true;
+				// The taste uses D1 (the roll-off, the camera): both with it.
+				add("optical flow seed, slow, D2/D4/R-A", true, 0, true, true);
+				variants.back().ofSeed = true;
+				add("optical flow seed, slow, engine global, D2/D4/R-A", true, 0, true, true);
+				variants.back().ofSeed = true; variants.back().ofGlobal = true;
 			}
 			add("matcher, D2/D4/R-A", false, 1, true, false);
 			add("matcher + OF candidate medium, D2/D4/R-A", true, 1, true, true);
@@ -3747,6 +3755,8 @@ namespace Corpus
 		s.opticalFlowPreset = v.ofPreset;
 		s.opticalFlowCandidate = v.ofCandidate;
 		s.opticalFlowSeed = v.ofSeed;
+		s.opticalFlowGlobal = v.ofGlobal;
+		s.opticalFlowGlobalReadback = v.ofGlobal;   // no producer in the corpus runs
 		s.pixelTrustLo = v.pixLo;
 		s.pixelTrustHi = v.pixHi;
 		s.pixelTrustLoUntrusted = v.pixLoU;
@@ -4018,6 +4028,19 @@ void RunBetaMotionCorpus()
 	}
 	size_t bestVariant = 0;
 	for (size_t vi = 1; vi < variants.size(); ++vi) if (perVariant[vi] > perVariant[bestVariant]) bestVariant = vi;
+	// Every variant (2026-10-16, planner Q1 comparison): its benefit against the first's, its
+	// trusted share on the cut (should be near 0) and its wrong-trusted share over the scenes.
+	std::cout << "Beta motion corpus: every variant (benefit summed, cut excluded; share of the first's; the cut's trusted; wrong trusted):\n";
+	for (size_t vi = 0; vi < variants.size(); ++vi)
+	{
+		double bad = 0.0;
+		for (size_t si = 0; si < scenes.size(); ++si) bad += results[si][vi].bad;
+		char row[320];
+		std::snprintf(row, sizeof(row), "  %-52s %8.2f  %6.1f%%  cut trusted %5.1f%%  wrong trusted %5.2f%%", variants[vi].name.c_str(), perVariant[vi],
+			perVariant[0] > 0 ? 100.0 * perVariant[vi] / perVariant[0] : 0.0, 100.0 * results[scenes.size() - 3][vi].trusted,
+			100.0 * bad / scenes.size());
+		std::cout << row << "\n";
+	}
 	char line[400];
 	std::snprintf(line, sizeof(line), "Beta motion corpus headroom (benefit summed over the scenes, cut excluded): today %.2f; best single setting %.2f (%s, %+.1f%%); best per scene %.2f (%+.1f%%)",
 		todayBenefit, perVariant[bestVariant], variants[bestVariant].name.c_str(),
@@ -4582,6 +4605,14 @@ void RunBetaRealFootage()
 	size_t best = 0;
 	for (size_t vi = 1; vi < variants.size(); ++vi)
 		if (perVariant[vi].hold - perVariant[vi].warp > perVariant[best].hold - perVariant[best].warp) best = vi;
+	std::cout << "Beta real footage: every variant (share of the hold removed):\n";
+	for (size_t vi = 0; vi < variants.size(); ++vi)
+	{
+		char row[256];
+		std::snprintf(row, sizeof(row), "  %-52s %5.1f%% removed", variants[vi].name.c_str(),
+			perVariant[vi].hold > 0 ? 100.0 * (perVariant[vi].hold - perVariant[vi].warp) / perVariant[vi].hold : 0.0);
+		std::cout << row << "\n";
+	}
 	// Where the difference left over lies (today and the best setting): in
 	// the pixels the warp moved, or in those left as A (held or still). The
 	// first is mostly grain, blur and resampling; the second is what a better

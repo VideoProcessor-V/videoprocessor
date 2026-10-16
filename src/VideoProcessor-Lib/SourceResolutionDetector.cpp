@@ -61,28 +61,39 @@ namespace SourceResolution
 		// the share of them in the densest band of n / 4 rows. Text drawn at the output
 		// resolution (white strokes, dark edges) is a band of many such steps; an upscale
 		// spreads every edge over two or more pixels and natural detail rarely concentrates.
+		// Planner Q6 (2026-10-16): either axis - a band of rows (subtitles, lower thirds, anywhere
+		// in the tile) or of columns (vertical CJK text, side captions); for the columns the
+		// steps down are counted.
 		double TextBand(const float* luma, int stride, int n)
 		{
-			std::vector<int> rows(static_cast<size_t>(n), 0);
-			long total = 0;
+			std::vector<int> rows(static_cast<size_t>(n), 0), columns(static_cast<size_t>(n), 0);
+			long acrossTotal = 0, downTotal = 0;
 			for (int y = 0; y < n; ++y)
 			{
 				const float* row = luma + static_cast<size_t>(y) * stride;
+				const float* above = y > 0 ? row - stride : nullptr;
 				int count = 0;
-				for (int x = 1; x < n; ++x) count += std::fabs(row[x] - row[x - 1]) >= 1.0f / 3.0f ? 1 : 0;
+				for (int x = 0; x < n; ++x)
+				{
+					if (x > 0 && std::fabs(row[x] - row[x - 1]) >= 1.0f / 3.0f) ++count;
+					if (above && std::fabs(row[x] - above[x]) >= 1.0f / 3.0f) { ++columns[static_cast<size_t>(x)]; ++downTotal; }
+				}
 				rows[static_cast<size_t>(y)] = count;
-				total += count;
+				acrossTotal += count;
 			}
-			if (total < static_cast<long>(n) * n / 500) return 0.0;   // under 0.2 %: nothing to judge
 			const int band = n / 4;
-			long sum = 0, best = 0;
-			for (int y = 0; y < n; ++y)
-			{
-				sum += rows[static_cast<size_t>(y)];
-				if (y >= band) sum -= rows[static_cast<size_t>(y - band)];
-				best = (std::max)(best, sum);
-			}
-			return static_cast<double>(best) / total;
+			auto densest = [band, n](const std::vector<int>& lines, long total) {
+				if (total < static_cast<long>(n) * n / 500) return 0.0;   // under 0.2 %: nothing to judge
+				long sum = 0, best = 0;
+				for (int i = 0; i < n; ++i)
+				{
+					sum += lines[static_cast<size_t>(i)];
+					if (i >= band) sum -= lines[static_cast<size_t>(i - band)];
+					best = (std::max)(best, sum);
+				}
+				return static_cast<double>(best) / total;
+			};
+			return (std::max)(densest(rows, acrossTotal), densest(columns, downTotal));
 		}
 	}
 
@@ -163,6 +174,43 @@ namespace SourceResolution
 				}
 				mirror[m] = magnitude > 0.0 ? std::abs(sum) / magnitude : 0.0;
 			}
+		}
+		// Planner Q5: exact periodicity from each axis's averaged power spectrum (Wiener-
+		// Khinchin), divided by the window's own autocorrelation. A repeat counts only as a
+		// local maximum standing at least 0.2 above the lowest value at a shorter lag: smooth
+		// content decays without a return, periodic content dips and comes back.
+		{
+			const int maxLag = n / 4;
+			std::vector<double> windowAuto(static_cast<size_t>(maxLag) + 2, 0.0);
+			for (int lag = 0; lag <= maxLag + 1; ++lag)
+			{
+				double s = 0.0;
+				for (int i = 0; i + lag < n; ++i) s += window[i] * window[i + lag];
+				windowAuto[static_cast<size_t>(lag)] = s / windowEnergy;
+			}
+			auto repeat = [&](const std::vector<double>& power) {
+				std::vector<double> r(static_cast<size_t>(maxLag) + 2, 0.0);
+				for (int lag = 0; lag <= maxLag + 1; ++lag)
+				{
+					double s = 0.0;
+					for (int k = 1; k <= n / 2; ++k) s += power[static_cast<size_t>(k)] * std::cos(2.0 * kPi * k * lag / n);
+					r[static_cast<size_t>(lag)] = s;
+				}
+				if (r[0] <= 0.0) return 0.0;
+				std::vector<double> v(r.size(), 0.0);
+				for (size_t lag = 0; lag < r.size(); ++lag)
+					v[lag] = windowAuto[lag] > 0.05 ? r[lag] / r[0] / windowAuto[lag] : 0.0;
+				double lowest = v[1], peak = 0.0;
+				for (int lag = 2; lag <= maxLag; ++lag)
+				{
+					const double here = v[static_cast<size_t>(lag)];
+					if (lag >= 3 && here >= v[static_cast<size_t>(lag - 1)] && here >= v[static_cast<size_t>(lag + 1)] && here - lowest >= 0.2)
+						peak = (std::max)(peak, here);
+					lowest = (std::min)(lowest, here);
+				}
+				return peak;
+			};
+			out.periodicPeak = (std::max)(repeat(out.vertical), repeat(out.horizontal));
 		}
 		out.mean = total / n;
 		MeasureCoding(luma, stride, n, codeMaximum, out);
@@ -474,6 +522,7 @@ namespace SourceResolution
 			signature += s.mean * static_cast<double>(i + 1);
 			frame.peakiness = (std::max)(frame.peakiness, Peakiness(s));
 			if (t.textBand > 0.0 && t.textBand <= 1.0 && s.textBand >= t.textBand) { ++frame.textTiles; continue; }
+			if (t.periodicPeak > 0.0 && s.periodicPeak >= t.periodicPeak) { ++frame.periodicTiles; continue; }
 			if (s.n != n || !Informative(s, t) || s.mirrorVertical.size() != vertical.size() || s.mirrorHorizontal.size() != vertical.size()) continue;
 			++frame.informativeTiles;
 			for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] += s.mirrorVertical[m]; horizontal[m] += s.mirrorHorizontal[m]; }

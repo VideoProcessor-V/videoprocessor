@@ -164,6 +164,46 @@ namespace MotionAheadLumaTest
 	TEST_CLASS(MotionAheadLumaTests)
 	{
 	public:
+		TEST_METHOD(FlowGlobalFindsTheCameraAndTheSecondLayer)
+		{
+			// Planner Q1 (2026-10-16): the whole frame's motion from the engine's field, in D1's
+			// format (1/8-size texels = one engine cell = 4 half-size px; S10.5 vectors).
+			const int gw = 120, gh = 68;
+			const size_t cells = static_cast<size_t>(gw) * gh;
+			std::vector<int16_t> v(cells * 2);
+			std::vector<uint8_t> cost(cells);
+			unsigned seed = 7;
+			auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u; return (seed >> 16) & 0x7fff; };
+			for (size_t i = 0; i < cells; ++i)
+			{
+				const unsigned r = rnd() % 100;
+				int16_t x, y;
+				if (r < 65) { x = 12 * 32; y = -6 * 32; }                       // the camera: (12, -6) half px
+				else if (r < 85) { x = -20 * 32; y = 0; }                       // a second layer: (-20, 0)
+				else { x = static_cast<int16_t>((static_cast<int>(rnd() % 200) - 100) * 32); y = static_cast<int16_t>((static_cast<int>(rnd() % 200) - 100) * 32); }
+				v[i * 2] = x; v[i * 2 + 1] = y;
+				cost[i] = r < 85 ? 10 : 200;   // the noise is unsure
+			}
+			float g[4], second[4];
+			MotionAhead::FlowGlobal(v, cost, gw, gh, g, second);
+			Assert::AreEqual(3.0f, g[0], 1e-6f, L"x in 1/8-size texels (12 half px / 4)");
+			Assert::AreEqual(-1.5f, g[1], 1e-6f, L"y (-6 half px / 4)");
+			Assert::IsTrue(g[2] < 0.9f, L"clearly the camera: usable");
+			Assert::AreEqual(1.0f, g[3]);
+			Assert::AreEqual(1.0f, second[3], L"the second layer found");
+			Assert::AreEqual(-5.0f, second[0], 1e-6f);
+			Assert::AreEqual(0.0f, second[1], 1e-6f);
+			// No agreement (every cell its own vector): ambiguous, not usable.
+			for (size_t i = 0; i < cells; ++i)
+			{
+				v[i * 2] = static_cast<int16_t>((static_cast<int>(rnd() % 300) - 150) * 32);
+				v[i * 2 + 1] = static_cast<int16_t>((static_cast<int>(rnd() % 300) - 150) * 32);
+				cost[i] = 10;
+			}
+			MotionAhead::FlowGlobal(v, cost, gw, gh, g, second);
+			Assert::IsTrue(g[2] >= 0.9f, L"no agreement: ambiguous (D1's consumers ignore it)");
+		}
+
 		TEST_METHOD(HalfLumaIsTheSameForP010V210AndUyvy)
 		{
 			// Owner 2026-10-16 (compare 4:4:4 / 4:2:2 / 4:2:0): the producer's luma, read

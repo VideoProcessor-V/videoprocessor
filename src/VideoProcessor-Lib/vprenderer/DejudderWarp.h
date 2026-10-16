@@ -271,6 +271,13 @@ namespace Dejudder
 		// (corpus 2026-10-16: 99.8-100% of the matcher's removal, the cut held; live 4K
 		// matcher 7.5 -> 5.5 ms on the laptop; the candidate mode 12.0 ms for +0.2%).
 		bool opticalFlowSeed = true;
+		// Planner Q1 (2026-10-16): with the seed and a pair computed ahead, the whole frame's
+		// motion (D1) from the engine's field (worked out on the producer's worker) instead
+		// of the global search; the search stays the fallback (no pair ahead, no engine).
+		bool opticalFlowGlobal = false;
+		// Tests only: the render-time engine's field read back (a stall) so the engine's
+		// whole-frame motion can be compared on corpora without a producer.
+		bool opticalFlowGlobalReadback = false;
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The
@@ -623,7 +630,12 @@ namespace Dejudder
 		// work happens at render time. Cleared by each Estimate.
 		void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow) { externalFlow = std::move(flow); }
 		bool ExternalFlowUsed() const { return externalFlowUsed || (inner && HalvesForSearch() && inner->ExternalFlowUsed()); }
+		// The last Estimate's D1 came from the engine's field (planner Q1).
+		bool GlobalFromEngine() const { return globalFromEngine || (inner && HalvesForSearch() && inner->GlobalFromEngine()); }
 	private:
+		bool globalFromEngine = false;
+		float engineGlobal[2][4] = {};   // the engine's whole-frame motion (D1 format), this Estimate
+		bool engineGlobalValid = false;
 		std::string opticalFlowError;
 		bool opticalFlowUsed = false;
 		std::shared_ptr<const MotionAhead::Flow> externalFlow;

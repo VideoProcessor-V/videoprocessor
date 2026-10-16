@@ -4898,6 +4898,10 @@ struct LibplaceboVideoRenderer::Impl
 			if (activeSettings.occlusionMask)
 				text += dejudderMaskUsedTick != 0 && now - dejudderMaskUsedTick < 1000 ? std::string(", mask on") :
 					", " + (dejudderMaskState.empty() ? std::string("mask waiting") : dejudderMaskState);
+			// Planner 2026-10-16: the motion source on the stats line (NVIDIA optical-flow engine,
+			// Turing or later, driver 528+; without it the block searches, as before).
+			if (!motionSourceLogged.empty())
+				text += ", motion: " + motionSourceLogged;
 		}
 		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
 		dejudderStatus = std::move(text);

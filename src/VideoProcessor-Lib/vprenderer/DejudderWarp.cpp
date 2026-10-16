@@ -11,6 +11,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <cstring>
 
 namespace Dejudder
 {
@@ -3303,6 +3304,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 			context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 			externalFlowUsed = true;
+			for (int d = 0; d < 2; ++d)
+				for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
+			engineGlobalValid = true;
 		}
 		else if (!opticalFlowEngine || opticalFlowPresetOpen != settings.opticalFlowPreset)
 		{
@@ -3326,6 +3330,41 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			pl_gpu_flush(gpu);
 			if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, true))
 				return fail(opticalFlowEngine->LastError());
+			if (settings.opticalFlowGlobalReadback)
+			{
+				// Tests only: the field read back (waits for the engine) for the whole-frame motion.
+				const int gw = (w + 3) / 4, gh = (h + 3) / 4;
+				bool read = true;
+				for (int d = 0; d < 2 && read; ++d)
+				{
+					std::vector<int16_t> vectors(static_cast<size_t>(gw) * gh * 2);
+					std::vector<uint8_t> costs(static_cast<size_t>(gw) * gh);
+					for (int part = 0; part < 2 && read; ++part)
+					{
+						ID3D11Texture2D* source = part == 0 ? ofFlow[d].p : ofCost[d].p;
+						D3D11_TEXTURE2D_DESC desc{};
+						source->GetDesc(&desc);
+						desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
+						CComPtr<ID3D11Texture2D> staging;
+						D3D11_MAPPED_SUBRESOURCE map{};
+						read = SUCCEEDED(d3d->device->CreateTexture2D(&desc, nullptr, &staging));
+						if (!read) break;
+						context->CopyResource(staging, source);
+						read = SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &map));
+						if (!read) break;
+						for (int y = 0; y < gh; ++y)
+							std::memcpy(part == 0 ? static_cast<void*>(&vectors[static_cast<size_t>(y) * gw * 2]) : static_cast<void*>(&costs[static_cast<size_t>(y) * gw]),
+								static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch, static_cast<size_t>(gw) * (part == 0 ? 4 : 1));
+						context->Unmap(staging, 0);
+					}
+					if (read)
+					{
+						float unusedSecond[4];
+						MotionAhead::FlowGlobal(vectors, costs, gw, gh, engineGlobal[d], unusedSecond);
+					}
+				}
+				engineGlobalValid = read;
+			}
 		}
 		const std::string header = std::string(RESCORE_HEADER);
 		const pl_shader_desc fw[4] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
@@ -3496,20 +3535,40 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		{
 			// M2 (parallel search only; the serial reference has one candidate).
 			const bool two = settings.globalTwo && settings.globalPrior && !serialSearchForTest;
-			if (settings.globalPrior && (serialSearchForTest ?
-					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
-					 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)) :
-					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr)))
-				return false;
 			// The optical flow engine (docs/VP-nvof-ahead.md): by default its vectors join
 			// the refinement's candidates (needs the two sweeps); otherwise they replace
-			// the searches. Without the engine the searches run as before.
+			// the searches. Without the engine the searches run as before. (Before D1:
+			// independent of it, and D1 may come from the engine - planner Q1.)
 			const bool candidateMode = settings.opticalFlowCandidate && settings.estCandidates;
+			engineGlobalValid = false;
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
 				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
 			const bool replaced = opticalFlowUsed && !candidateMode;
 			// Seed: the engine's vectors stand in for the first sweep (no searches).
 			const bool seeded = opticalFlowUsed && candidateMode && settings.opticalFlowSeed;
+			// Planner Q1: the engine's whole-frame motion when its field is known here and it
+			// seeds the refinement (the searches, which read M2's second candidate, do not run).
+			globalFromEngine = false;
+			if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid)
+			{
+				for (int d = 0; d < 2; ++d)
+				{
+					const float* g = engineGlobal[d];
+					const float value[4] = { g[0], g[1], g[2], g[3] };
+					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
+					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
+					if (!Dispatch("VideoProcessor de-judder: global motion (engine)", nullptr,
+							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
+							out, 1, var, 1, 1, 1, 1))
+						return false;
+				}
+				globalFromEngine = true;
+			}
+			else if (settings.globalPrior && (serialSearchForTest ?
+					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
+					 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)) :
+					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr)))
+				return false;
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
 			const bool twoSweeps = settings.estCandidates && !replaced;
 			if (!replaced && !seeded &&

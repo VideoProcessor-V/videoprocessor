@@ -46,6 +46,10 @@ namespace SourceResolution
 		// (neighbours a third of the range apart) inside its densest band a quarter of the
 		// tile high; 0 when the tile has too few sharp steps to judge.
 		double textBand = 0.0;
+		// Planner Q5 (2026-10-16): the strongest repeat of either axis's autocorrelation
+		// (the window's own removed) at a lag of 3 .. n / 4 that stands after a dip: near
+		// 1 for exactly periodic content (fences, grilles, test patterns), 0 when none.
+		double periodicPeak = 0.0;
 	};
 
 	// `n` must be a power of two (64..1024); `luma` is row-major, `stride` in
@@ -80,6 +84,10 @@ namespace SourceResolution
 		// no evidence - left out of the frame (safe: evidence only lost). <= 0 or > 1: off
 		// (source_resolution_text_guard off).
 		double textBand = 0.8;
+		// Planner Q5: a tile repeating itself this exactly (periodicPeak) carries no reliable
+		// coherence either way and is left out (the three G1 guards stay for near-periodic
+		// content). <= 0: off.
+		double periodicPeak = 0.9;
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
 
@@ -115,6 +123,7 @@ namespace SourceResolution
 	{
 		int tiles = 0, informativeTiles = 0;
 		int textTiles = 0;          // tiles left out as overlay text
+		int periodicTiles = 0;      // tiles left out as exactly periodic (planner Q5)
 		double ratio = 1.0;         // effective / native height; 1 = native
 		// Per axis: the height (vertical, down the columns) and the width (horizontal)
 		// read alone, at the stricter single-axis coherence; 1 = native on that axis.

@@ -5296,6 +5296,82 @@ namespace VideoProcessorTest
 
 		// D5-1 (audit delta5-beta.md): the sigma-delta's domain from the
 		// target; float / 16-bit targets are not a code domain it serves.
+		// Planner 2026-10-16 evening: regressions for the two optical-flow fixes. (1) The
+		// engine's textures were freed before it unregistered them, a fail-fast (0xC0000409)
+		// on NVIDIA at teardown and on a size change - here: two sizes, back, then destroy.
+		// (2) The replace path ran the backward block search over the engine's flow (an
+		// operator-precedence bug) - here: with the engine replacing, or seeding, the searches
+		// no block-search pass runs, and the engine's backward vectors are the ones kept.
+		TEST_METHOD(OpticalFlowEngineSurvivesResizeAndTeardownAndReplacesTheSearches)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			static constexpr int dx = 12, dy = 6;
+			auto frames = [&](int width, int height, DejudderGpuPlanes& pa, DejudderGpuPlanes& pb) {
+				const DejudderFrame a = MakeDejudderFrame(width, height,
+					[](int x, int y) { return DejudderTexture(x, y); }, [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+				const DejudderFrame b = MakeDejudderFrame(width, height,
+					[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+					[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+				UploadDejudderFrame(gpu, a, pa);
+				UploadDejudderFrame(gpu, b, pb);
+			};
+			DejudderGpuPlanes a1, b1, a2, b2;
+			frames(512, 256, a1, b1);
+			frames(768, 384, a2, b2);
+			bool engine = false;
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.opticalFlow = true;
+				settings.opticalFlowCandidate = true;
+				settings.opticalFlowSeed = true;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(a1.planes, b1.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+				engine = warp.OpticalFlowUsed();
+				if (!engine)
+				{
+					Logger::WriteMessage(("optical flow engine unavailable here (" + warp.OpticalFlowError() + "); regressions not run\n").c_str());
+					return;
+				}
+				Assert::IsTrue(warp.Estimate(a2.planes, b2.planes), L"the engine across a size change");
+				Assert::IsTrue(warp.Estimate(a1.planes, b1.planes), L"and back");
+				Assert::IsTrue(warp.OpticalFlowUsed(), L"the engine still in use after the size changes");
+			}   // destroyed here: the engine first (a fail-fast would end the test process)
+			Logger::WriteMessage("teardown after two size changes: survived\n");
+			for (const bool seed : { false, true })
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.opticalFlow = true;
+				settings.opticalFlowCandidate = seed;   // false: the engine replaces the searches
+				settings.opticalFlowSeed = seed;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				warp.SetPassTiming(true, true);
+				Assert::IsTrue(warp.Estimate(a1.planes, b1.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+				Assert::IsTrue(warp.OpticalFlowUsed());
+				std::string passes;
+				bool searched = false;
+				for (const auto& entry : warp.PassMs())
+				{
+					passes += entry.first + "; ";
+					searched = searched || entry.first.find("block search") != std::string::npos;
+				}
+				Assert::IsFalse(searched, (std::wstring(seed ? L"seed" : L"replace") + L": no block search runs: " +
+					std::wstring(passes.begin(), passes.end())).c_str());
+				// The backward field is the engine's pan, (-6, -3) half-size pixels.
+				const DejudderField bwd = DownloadField(gpu, warp, warp.Backward());
+				int interior = 0, right = 0;
+				for (int by = 2; by < bwd.blocksY - 2; ++by)
+					for (int bx = 2; bx < bwd.blocksX - 2; ++bx)
+					{
+						++interior;
+						right += std::abs(bwd.vx(bx, by) + 6) < 0.6f && std::abs(bwd.vy(bx, by) + 3) < 0.6f ? 1 : 0;
+					}
+				Assert::IsTrue(right * 100 >= interior * 90, (std::wstring(seed ? L"seed" : L"replace") + L": the backward field holds the pan (" +
+					std::to_wstring(right) + L" of " + std::to_wstring(interior) + L")").c_str());
+			}
+		}
+
 		TEST_METHOD(SigmaDeltaDomainFollowsTheTarget)
 		{
 			auto repr = [](enum pl_color_levels levels, int sample, int color)
@@ -8829,6 +8905,126 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &readable);
 			rebase.Release(gpu);
 			pl_dispatch_destroy(&dispatch);
+		}
+
+		TEST_METHOD(SourceRebaseNeverRingsIntoTheBarsInAnyVariant)
+		{
+			// Planner 2026-10-16 evening: "no ringing into blanked bars" as a standing test for
+			// every re-base variant (a separable luma once rang 2.2 codes below black into the
+			// bars). Source: a letterboxed 1080p picture upscaled 2x by the player (Lanczos-3,
+			// both planes), as a streaming box sends it. Each variant: the bars stay black up to
+			// the crop edge and nothing undershoots black inside the crop, luma and chroma.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int w = 1920, h = 1080, W = 3840, H = 2160, bar = 138;
+			const KernelInverse::Candidate& lanczos = KernelInverse::Candidates()[static_cast<size_t>(KernelInverse::Find("lanczos3"))];
+			// One plane: the 1080-class picture with bars, upscaled 2x separably.
+			auto upscaled = [&](int pw, int ph, int pbar, double barValue, const std::function<double(double, double)>& f) {
+				std::vector<float> master(static_cast<size_t>(pw) * ph);
+				for (int y = 0; y < ph; ++y)
+					for (int x = 0; x < pw; ++x)
+						master[static_cast<size_t>(y) * pw + x] = static_cast<float>(y < pbar || y >= ph - pbar ? barValue : f((x + 0.5) / pw, (y + 0.5) / ph));
+				std::vector<float> rows(static_cast<size_t>(ph) * pw * 2), up(static_cast<size_t>(pw) * 2 * ph * 2);
+				std::vector<float> in(static_cast<size_t>(ph)), out(static_cast<size_t>(ph) * 2);
+				for (int y = 0; y < ph; ++y) KernelInverse::UpscaleLine(lanczos, &master[static_cast<size_t>(y) * pw], pw, &rows[static_cast<size_t>(y) * pw * 2]);
+				for (int x = 0; x < pw * 2; ++x)
+				{
+					for (int y = 0; y < ph; ++y) in[static_cast<size_t>(y)] = rows[static_cast<size_t>(y) * pw * 2 + x];
+					KernelInverse::UpscaleLine(lanczos, in.data(), ph, out.data());
+					for (int y = 0; y < ph * 2; ++y) up[static_cast<size_t>(y) * pw * 2 + x] = out[static_cast<size_t>(y)];
+				}
+				return up;
+			};
+			const double black = 0.0625, neutral = 0.5;
+			const std::vector<float> lumaUp = upscaled(w, h, bar, black, [](double x, double y) { return 0.45 + 0.25 * std::sin(x * 9.0) * std::cos(y * 7.0); });
+			const std::vector<float> cbUp = upscaled(w / 2, h / 2, bar / 2, neutral, [](double x, double y) { return 0.5 + 0.12 * std::sin(x * 5.0 + y * 3.0); });
+			const std::vector<float> crUp = upscaled(w / 2, h / 2, bar / 2, neutral, [](double x, double y) { return 0.5 - 0.1 * std::cos(x * 4.0 - y * 6.0); });
+			std::vector<uint16_t> luma(lumaUp.size()), chroma(cbUp.size() * 2);
+			auto code = [](float v) { return static_cast<uint16_t>(std::lround((std::min)(1.0f, (std::max)(0.0f, v)) * 65535.0f)); };
+			for (size_t i = 0; i < luma.size(); ++i) luma[i] = code(lumaUp[i]);
+			for (size_t i = 0; i < cbUp.size(); ++i) { chroma[i * 2] = code(cbUp[i]); chroma[i * 2 + 1] = code(crUp[i]); }
+			pl_tex_params lp{};
+			lp.w = W; lp.h = H; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.initial_data = luma.data();
+			pl_tex_params cp = lp;
+			cp.w = W / 2; cp.h = H / 2; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.initial_data = chroma.data();
+			pl_tex lumaTex = pl_tex_create(gpu, &lp), chromaTex = pl_tex_create(gpu, &cp);
+			Assert::IsTrue(lumaTex && chromaTex);
+			pl_frame source{};
+			source.num_planes = 2;
+			source.planes[0].texture = lumaTex; source.planes[0].components = 1; source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.planes[1].texture = chromaTex; source.planes[1].components = 2;
+			source.planes[1].component_mapping[0] = PL_CHANNEL_CB; source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			source.crop = { 0.0f, static_cast<float>(2 * bar), static_cast<float>(W), static_cast<float>(H - 2 * bar) };
+			auto download = [&](pl_tex tex, int components, std::vector<float>& values) {
+				pl_tex_params rp{};
+				rp.w = tex->params.w; rp.h = tex->params.h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				const size_t n = static_cast<size_t>(rp.w) * rp.h * components;
+				std::vector<uint16_t> raw(n);
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				values.resize(n);
+				for (size_t i = 0; i < n; ++i) values[i] = readable->params.format->type == PL_FMT_FLOAT ? HalfBits(raw[i]) : raw[i] / 65535.0f;
+				pl_tex_destroy(gpu, &readable);
+			};
+			struct Variant { const char* name; double fx, fy; bool separable; int kernel; };
+			const Variant variants[] = {
+				{ "default (polar luma, separable chroma), 2:1", 0.5, 0.5, true, -1 },
+				{ "polar luma and chroma, 2:1", 0.5, 0.5, false, -1 },
+				{ "kernel inverse (Lanczos-3), 2:1", 0.5, 0.5, true, KernelInverse::Find("lanczos3") },
+				{ "height only (1D), 2:1", 1.0, 0.5, true, -1 },
+				{ "1440 (2:3)", 2.0 / 3.0, 2.0 / 3.0, true, -1 },
+				{ "900 lines", 900.0 / 2160.0, 900.0 / 2160.0, true, -1 } };
+			int failures = 0;
+			for (const Variant& v : variants)
+			{
+				SourceRebase::Module rebase;
+				rebase.separable = v.separable;
+				rebase.SetKernel(v.kernel);
+				pl_frame out{};
+				Assert::IsTrue(rebase.Apply(gpu, dispatch, source, v.fx, v.fy, out), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+				std::vector<float> y, c;
+				download(out.planes[0].texture, 1, y);
+				download(out.planes[1].texture, 2, c);
+				const int yw = out.planes[0].texture->params.w, yh = out.planes[0].texture->params.h;
+				const int cw = out.planes[1].texture->params.w, ch = out.planes[1].texture->params.h;
+				const double edge = out.crop.y0;   // the crop's top edge in luma rows
+				// The plane's bar rows (away from the edge by the filter's reach) and the first rows inside.
+				auto measure = [&](const std::vector<float>& values, int pw, int ph, int stride, int comp, double scale, double barLevel,
+					double& barWorst, double& insideBelow) {
+					const double e = edge * scale;
+					for (int row = 0; row < ph; ++row)
+					{
+						const double centre = row + 0.5;
+						for (int x = 0; x < pw; x += 5)
+						{
+							const double value = values[(static_cast<size_t>(row) * pw + x) * stride + comp];
+							if (centre < e - 4.0 * (1.0 / v.fy) - 1.0 || centre > ph - e + 4.0 * (1.0 / v.fy) + 1.0)
+								barWorst = (std::max)(barWorst, std::fabs(value - barLevel));
+							else if ((centre > e && centre < e + 3.0) || (centre < ph - e && centre > ph - e - 3.0))
+								if (barLevel == black) insideBelow = (std::max)(insideBelow, black - value);
+						}
+					}
+				};
+				double barY = 0.0, belowY = 0.0, barC = 0.0, unused = 0.0;
+				measure(y, yw, yh, 1, 0, 1.0, black, barY, belowY);
+				measure(c, cw, ch, 2, 0, 0.5, neutral, barC, unused);
+				measure(c, cw, ch, 2, 1, 0.5, neutral, barC, unused);
+				char line[260];
+				snprintf(line, sizeof(line), "%-44s bar: luma %.2f codes, chroma %.2f codes off; below black inside the crop %.2f codes (8-bit)\n",
+					v.name, barY * 255.0, barC * 255.0, belowY * 255.0);
+				Logger::WriteMessage(line);
+				if (barY > 0.5 / 255.0 || barC > 0.5 / 255.0 || belowY > 0.25 / 255.0) ++failures;
+				rebase.Release(gpu);
+			}
+			pl_tex_destroy(gpu, &lumaTex);
+			pl_tex_destroy(gpu, &chromaTex);
+			pl_dispatch_destroy(&dispatch);
+			Assert::AreEqual(0, failures, L"no re-base variant rings into the bars or below black inside the crop");
 		}
 
 		TEST_METHOD(EarlyUploadMatchesTheRenderUploadAndNeverReusesBusySlots)

@@ -27,6 +27,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,8 +47,98 @@ namespace MotionAhead
 		int gridW = 0, gridH = 0;   // (halfW + 3) / 4 x (halfH + 3) / 4
 		std::vector<int16_t> forward, backward;
 		std::vector<uint8_t> forwardCost, backwardCost;
+		// Planner Q1 (2026-10-16): the whole frame's motion from the engine's field, in the
+		// de-judder's D1 format - (x, y) in 1/8-size texels (one engine cell), z the
+		// ambiguity (< 0.9 = usable, as D1's best / second ratio), w = 1 - and the second
+		// motion layer (x, y, -, w = 1 when there is one), forward then backward. The
+		// de-judder takes them instead of its own global search when the pair came ahead.
+		float global[2][4] = {}, second[2][4] = {};
 	};
 	using FlowPtr = std::shared_ptr<const Flow>;
+
+	// The whole frame's motion from one engine field (S10.5 half-size pixels per 4 x 4
+	// cell; costs higher = less sure): the most common vector (a 3 x 3 vote on a
+	// half-cell grid, refined by the mean of the cells within one cell of it), its share
+	// of the confident cells as the ambiguity, and the most common vector away from it as
+	// the second layer (when at least 10 % of the cells hold it).
+	inline void FlowGlobal(const std::vector<int16_t>& vectors, const std::vector<uint8_t>& costs, int gridW, int gridH,
+		float global[4], float second[4])
+	{
+		// Units: one engine cell (4 half-size px) = one 1/8-size texel; votes in half texels.
+		static constexpr int kRange = 40;              // +-40 texels (D1 searches +-32)
+		static constexpr int kBins = 4 * kRange + 1;   // half-texel bins
+		global[0] = global[1] = 0.0f; global[2] = 1.0f; global[3] = 1.0f;
+		second[0] = second[1] = second[2] = second[3] = 0.0f;
+		const size_t cells = static_cast<size_t>(gridW) * gridH;
+		if (gridW <= 0 || gridH <= 0 || vectors.size() < cells * 2 || costs.size() < cells) return;
+		// Confident cells: cost at or below the field's median (the engine's own ranking).
+		std::vector<uint8_t> sorted(costs.begin(), costs.begin() + cells);
+		std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+		const uint8_t costLimit = sorted[sorted.size() / 2];
+		std::vector<int> votes(static_cast<size_t>(kBins) * kBins, 0);
+		long confident = 0;
+		auto binOf = [](int16_t v) { return static_cast<int>(std::lround(v / 32.0 / 4.0 * 2.0)) + 2 * kRange; };
+		for (size_t i = 0; i < cells; ++i)
+		{
+			if (costs[i] > costLimit) continue;
+			const int bx = binOf(vectors[i * 2]), by = binOf(vectors[i * 2 + 1]);
+			if (bx < 0 || by < 0 || bx >= kBins || by >= kBins) continue;
+			++votes[static_cast<size_t>(by) * kBins + bx];
+			++confident;
+		}
+		if (confident < static_cast<long>(cells / 10)) return;   // too few to judge: ambiguous
+		// The 3 x 3 summed vote (a texel-and-a-half window): its peak, then away from it.
+		auto window = [&](int bx, int by) {
+			int s = 0;
+			for (int dy = -1; dy <= 1; ++dy)
+				for (int dx = -1; dx <= 1; ++dx)
+				{
+					const int x = bx + dx, y = by + dy;
+					if (x >= 0 && y >= 0 && x < kBins && y < kBins) s += votes[static_cast<size_t>(y) * kBins + x];
+				}
+			return s;
+		};
+		int best = -1, bestX = 0, bestY = 0;
+		for (int y = 0; y < kBins; ++y)
+			for (int x = 0; x < kBins; ++x)
+			{
+				if (!votes[static_cast<size_t>(y) * kBins + x]) continue;
+				const int s = window(x, y);
+				if (s > best) { best = s; bestX = x; bestY = y; }
+			}
+		// Refine: the mean of the confident cells within one texel of the peak.
+		const double px = (bestX - 2 * kRange) / 2.0, py = (bestY - 2 * kRange) / 2.0;
+		double sx = 0.0, sy = 0.0;
+		long close = 0;
+		for (size_t i = 0; i < cells; ++i)
+		{
+			if (costs[i] > costLimit) continue;
+			const double vx = vectors[i * 2] / 32.0 / 4.0, vy = vectors[i * 2 + 1] / 32.0 / 4.0;
+			if (std::fabs(vx - px) <= 1.0 && std::fabs(vy - py) <= 1.0) { sx += vx; sy += vy; ++close; }
+		}
+		const double share = static_cast<double>(close) / confident;
+		// Half-texel steps, as D1's.
+		global[0] = static_cast<float>(std::round((close ? sx / close : px) * 2.0) / 2.0);
+		global[1] = static_cast<float>(std::round((close ? sy / close : py) * 2.0) / 2.0);
+		// Ambiguity on D1's scale (consumers use < 0.9): a third of the cells agreeing = 0.9.
+		global[2] = static_cast<float>((std::min)(1.0, (std::max)(0.05, 1.05 - share * 0.45 / 0.3)));
+		// The second layer: the best window more than a texel from the first.
+		int secondBest = 0, sxBin = 0, syBin = 0;
+		for (int y = 0; y < kBins; ++y)
+			for (int x = 0; x < kBins; ++x)
+			{
+				if (!votes[static_cast<size_t>(y) * kBins + x]) continue;
+				if (std::abs(x - bestX) <= 2 && std::abs(y - bestY) <= 2) continue;
+				const int s = window(x, y);
+				if (s > secondBest) { secondBest = s; sxBin = x; syBin = y; }
+			}
+		if (secondBest >= confident / 10)
+		{
+			second[0] = static_cast<float>((sxBin - 2 * kRange) / 2.0);
+			second[1] = static_cast<float>((syBin - 2 * kRange) / 2.0);
+			second[3] = 1.0f;
+		}
+	}
 
 	// The half-size 8-bit luma of a frame ((w + 1) / 2 x (h + 1) / 2, 2 x 2
 	// averaged; 10-bit codes / 4): P010 / P210 planes read directly, other

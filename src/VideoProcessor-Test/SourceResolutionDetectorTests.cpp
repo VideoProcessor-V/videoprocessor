@@ -143,7 +143,8 @@ namespace VideoProcessorTest
 		}
 
 		// A frame of `count` tiles, each from its own scene (seed + i).
-		SourceResolution::FrameReading ReadTiles(const std::vector<std::vector<float>>& tiles, int codeMax = 1023, bool textGuard = true)
+		SourceResolution::FrameReading ReadTiles(const std::vector<std::vector<float>>& tiles, int codeMax = 1023, bool textGuard = true,
+			bool periodicGuard = true)
 		{
 			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
 			for (size_t i = 0; i < tiles.size(); ++i)
@@ -151,6 +152,7 @@ namespace VideoProcessorTest
 			SourceResolution::Thresholds t;
 			t.codeMaximum = codeMax;
 			if (!textGuard) t.textBand = 0.0;
+			if (!periodicGuard) t.periodicPeak = 0.0;
 			return SourceResolution::ReadFrame(spectra, t);
 		}
 
@@ -165,8 +167,8 @@ namespace VideoProcessorTest
 		void Log(const char* name, const SourceResolution::FrameReading& r)
 		{
 			char line[256];
-			snprintf(line, sizeof(line), "%-34s tiles %d/%d (text %d)  ratio %.4f | v %.3f @%.4f (2nd %.3f, grid %.3f)  h %.3f @%.4f (2nd %.3f, grid %.3f)\n",
-				name, r.informativeTiles, r.tiles, r.textTiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.vertical.runnerUp, r.vertical.grid,
+			snprintf(line, sizeof(line), "%-34s tiles %d/%d (text %d, periodic %d)  ratio %.4f | v %.3f @%.4f (2nd %.3f, grid %.3f)  h %.3f @%.4f (2nd %.3f, grid %.3f)\n",
+				name, r.informativeTiles, r.tiles, r.textTiles, r.periodicTiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.vertical.runnerUp, r.vertical.grid,
 				r.horizontal.coherence, r.horizontal.ratio, r.horizontal.runnerUp, r.horizontal.grid);
 			Logger::WriteMessage(line);
 		}
@@ -823,6 +825,12 @@ namespace VideoProcessorTest
 			std::map<std::string, Tally> tallies;
 			std::map<std::string, std::vector<double>> curveSums;
 			std::map<std::string, int> curveCounts;
+			// Planner Q3 (2026-10-16): per frame, the fine detail (an I-frame stands out) and the
+			// lift of the min-axis curve at 1/2 over its own floor - on the sharpest frames only,
+			// does a 1080 master coded at 4K keep its signature?
+			struct FrameLift { double detail, lift; };
+			std::map<std::string, std::vector<FrameLift>> lifts;
+			std::map<std::string, std::string> kinds;
 			int nativeLower = 0, wrongHeight = 0, cases = 0;
 			std::string failures;
 			char lineBuffer[512];
@@ -877,6 +885,20 @@ namespace VideoProcessorTest
 						for (size_t m = 0; m < sum.size(); ++m) sum[m] += (std::min)(r.verticalCurve[m], r.horizontalCurve[m]);
 						++curveCounts[key];
 					}
+					if (!r.verticalCurve.empty() && r.verticalCurve.size() == r.horizontalCurve.size() && !r.verticalPower.empty())
+					{
+						const int n = static_cast<int>(r.verticalCurve.size());
+						std::vector<double> body;
+						for (int m = n / 8; m < n * 95 / 100; ++m) body.push_back((std::min)(r.verticalCurve[m], r.horizontalCurve[m]));
+						std::nth_element(body.begin(), body.begin() + body.size() / 2, body.end());
+						double at = 0.0;
+						for (int m = n / 2 - 2; m <= n / 2 + 2; ++m) at = (std::max)(at, (std::min)(r.verticalCurve[m], r.horizontalCurve[m]));
+						double fine = 0.0;
+						const size_t bins = r.verticalPower.size();
+						for (size_t k = bins / 2; k < bins; ++k) fine += r.verticalPower[k] + r.horizontalPower[k];
+						lifts[f[0]].push_back({ std::log10(fine + 1e-30), at - body[body.size() / 2] });
+						kinds[f[0]] = f[0].find("master1080") != std::string::npos ? "master1080" : truth >= 1.0 ? "native" : "stream";
+					}
 					const bool native = r.ratio >= 1.0, height = std::fabs(r.ratio - truth) <= 0.01;
 					if (truth >= 1.0)
 					{
@@ -897,6 +919,34 @@ namespace VideoProcessorTest
 				fclose(in);
 			}
 			fclose(manifest);
+			{
+				// Q3: the sharpest fifth of each case's frames against all of them; the cases
+				// separate only if every master1080 case's sharp-frame lift is above every native's.
+				double masterLowest = 1e9, nativeHighest = -1e9;
+				for (auto& entry : lifts)
+				{
+					std::vector<FrameLift>& v = entry.second;
+					if (v.size() < 2) continue;
+					double all = 0.0;
+					for (const FrameLift& fl : v) all += fl.lift;
+					all /= v.size();
+					std::sort(v.begin(), v.end(), [](const FrameLift& a, const FrameLift& b) { return a.detail > b.detail; });
+					const size_t top = (std::max)(size_t{ 1 }, v.size() / 4);
+					double sharp = 0.0;
+					for (size_t i = 0; i < top; ++i) sharp += v[i].lift;
+					sharp /= top;
+					const std::string& kind = kinds[entry.first];
+					if (kind == "master1080") masterLowest = (std::min)(masterLowest, sharp);
+					if (kind == "native") nativeHighest = (std::max)(nativeHighest, sharp);
+					char row[220];
+					snprintf(row, sizeof(row), "Q3 %-10s %-34s lift at 1/2: all frames %.3f, sharpest frame(s) %.3f\n", kind.c_str(), entry.first.c_str(), all, sharp);
+					Logger::WriteMessage(row);
+				}
+				char row[200];
+				snprintf(row, sizeof(row), "Q3: master1080 sharpest-fifth lift lowest %.3f; native highest %.3f -> %s\n", masterLowest, nativeHighest,
+					masterLowest > nativeHighest ? "SEPARATES" : "does not separate");
+				Logger::WriteMessage(row);
+			}
 			for (const auto& entry : tallies)
 			{
 				char row[200];
@@ -1239,6 +1289,12 @@ namespace VideoProcessorTest
 					snprintf(pk, sizeof(pk), "  peakiness %.1f\n", r.peakiness);
 					Logger::WriteMessage(pk);
 				}
+				// Planner Q5: exactly periodic patterns are left out (the zone plate is a chirp,
+				// not a repeat); without that guard the three soft guards still hold them native.
+				if (std::string(pattern.name) != "zone plate")
+					Assert::IsTrue(r.periodicTiles >= 3, (L"exactly periodic, left out: " + std::wstring(pattern.name, pattern.name + strlen(pattern.name))).c_str());
+				const SourceResolution::FrameReading off = ReadTiles(tiles, 1023, true, false);
+				fired += off.informative() && (off.ratio < 1.0 || off.ratioV < 1.0 || off.ratioH < 1.0) ? 1 : 0;
 				const bool lower = r.informative() && (r.ratio < 1.0 || r.ratioV < 1.0 || r.ratioH < 1.0);
 				fired += lower ? 1 : 0;
 				if (lower)
@@ -1460,6 +1516,56 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, wrong, L"with the guard, subtitle text leaves the upscale's reading as it is");
 		}
 
+		// Planner Q6 (2026-10-16): the text guard on either axis - vertical text (a column of
+		// glyphs) is left out too - and sharp points spread over the tile (a starfield, city
+		// lights) are not taken for text.
+		TEST_METHOD(TextGuardCatchesVerticalTextAndLeavesStarsAndLights)
+		{
+			// Vertical text: the subtitle pattern drawn across, then the tile transposed.
+			std::vector<std::vector<float>> vertical;
+			for (int i = 0; i < 4; ++i)
+			{
+				std::vector<float> t = Tile(Scene(static_cast<unsigned>(i + 1)), 0.5, kLanczos3, 0.0, 1023, i + 1);
+				SubtitleTextTestPattern::Draw(t, kTile, kTile, 0, kTile, 150, 56, 70u + i);
+				std::vector<float> transposed(t.size());
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x) transposed[static_cast<size_t>(x) * kTile + y] = t[static_cast<size_t>(y) * kTile + x];
+				vertical.push_back(std::move(transposed));
+			}
+			const SourceResolution::FrameReading v = ReadTiles(vertical);
+			Log("vertical text over an upscale", v);
+			Assert::AreEqual(4, v.textTiles, L"vertical text is left out like horizontal text");
+			// A starfield: sharp 1-2 px points, scattered, on a dark sky (native 4K).
+			// City lights: small sharp squares scattered over the lower two thirds.
+			auto points = [](unsigned seed, int count, int size, int top) {
+				std::mt19937 rng(seed);
+				std::uniform_int_distribution<int> px(0, kTile - size), py(top, kTile - size);
+				std::uniform_real_distribution<double> bright(0.6, 0.95);
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile, static_cast<float>(64.0 / 1023.0));
+				for (int i = 0; i < count; ++i)
+				{
+					const int x0 = px(rng), y0 = py(rng);
+					const float b = static_cast<float>(std::round(bright(rng) * 1023.0) / 1023.0);
+					for (int y = y0; y < y0 + size; ++y)
+						for (int x = x0; x < x0 + size; ++x) t[static_cast<size_t>(y) * kTile + x] = b;
+				}
+				return t;
+			};
+			std::vector<std::vector<float>> stars, lights;
+			for (int i = 0; i < 4; ++i)
+			{
+				stars.push_back(points(200u + i, 300, 1 + i % 2, 0));
+				lights.push_back(points(300u + i, 160, 3, kTile / 3));
+			}
+			const SourceResolution::FrameReading s = ReadTiles(stars);
+			const SourceResolution::FrameReading l = ReadTiles(lights);
+			Log("starfield (native)", s);
+			Log("city lights (native)", l);
+			Assert::AreEqual(0, s.textTiles, L"a starfield is not text");
+			Assert::AreEqual(0, l.textTiles, L"city lights spread over the tile are not text");
+			Assert::IsTrue(s.ratio >= 0.9 && l.ratio >= 0.9, L"both read native (or no evidence)");
+		}
+
 		// Two minutes of an upscaled 1080p stream with the player's 4K subtitles on and off:
 		// declared once, never thrown back to native by the text (a re-base switching on and
 		// off with every subtitle would be visible).
@@ -1520,6 +1626,129 @@ namespace VideoProcessorTest
 			Assert::IsTrue(declaredAt >= 0.0, L"the upscale is declared despite the subtitles");
 			Assert::AreEqual(0.5, tracker.Ratio(), 0.03, L"still declared at the end");
 			Assert::AreEqual(0, flips, L"the subtitles never throw the declaration back to native");
+		}
+
+		// Planner Q7 (2026-10-16): false-positive scenarios before relying on 10 s / 3 shots (and
+		// Fast, 5 s / 2 shots): soft native 4K with quick cutting must never be declared lower;
+		// a 2.8K-sensor title genuinely is lower (it must read so - the fixture tells soft from
+		// upsampled). Synthetic: quick cuts (2.5 s shots, 2 readings a second, 30 s), each shot
+		// its own scene and brightness.
+		TEST_METHOD(SoftNativeScenesWithQuickCutsAreNeverDeclaredLower)
+		{
+			struct Scenario { const char* name; std::function<std::vector<float>(unsigned seed, int frame)> tile; bool lower; };
+			auto grade = [](std::vector<float>& t, double contrast, double lift, double grainCodes, unsigned seed) {
+				std::mt19937 rng(seed);
+				std::normal_distribution<double> g(0.0, 1.0);
+				for (float& v : t)
+				{
+					double x = lift + contrast * (v - 0.45) + grainCodes / 1023.0 * g(rng);
+					v = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, x)) * 1023.0) / 1023.0);
+				}
+			};
+			auto soft = [&](unsigned seed, int frame, double sigma, double contrast, double lift, double grain) {
+				std::vector<float> t = Tile(Scene(seed, sigma), 1.0, kLanczos3, 0.0, 1023, seed);
+				grade(t, contrast, lift, grain, seed * 31u + static_cast<unsigned>(frame));
+				return t;
+			};
+			const std::vector<Scenario> scenarios = {
+				{ "diffusion / soft-lens film", [&](unsigned s0, int f) { return soft(s0, f, 2.5, 0.8, 0.45, 0.4); }, false },
+				{ "fog / smoke", [&](unsigned s0, int f) { return soft(s0, f, 1.5, 0.25, 0.62, 0.4); }, false },
+				{ "underwater haze", [&](unsigned s0, int f) { return soft(s0, f, 3.0, 0.35, 0.35, 0.6); }, false },
+				{ "heavy rain (sharp streaks over a soft scene)", [&](unsigned s0, int f) {
+					std::vector<float> t = soft(s0, f, 2.0, 0.6, 0.4, 0.4);
+					std::mt19937 rng(s0 * 7u + static_cast<unsigned>(f));
+					std::uniform_int_distribution<int> px(0, kTile - 1), py(0, kTile - 40);
+					for (int i = 0; i < 90; ++i)
+					{
+						const int x0 = px(rng), y0 = py(rng);
+						for (int k = 0; k < 30; ++k)
+						{
+							const int x = (std::min)(kTile - 1, x0 + k / 6), y = y0 + k;
+							float& v = t[static_cast<size_t>(y) * kTile + x];
+							v = static_cast<float>(std::round((std::min)(1.0, v + 0.25) * 1023.0) / 1023.0);
+						}
+					}
+					return t; }, false },
+				{ "night bokeh", [&](unsigned s0, int f) {
+					std::vector<float> t = soft(s0, f, 4.0, 0.3, 0.1, 0.5);
+					std::mt19937 rng(s0 * 11u);
+					std::uniform_real_distribution<double> u(0.0, 1.0);
+					for (int i = 0; i < 25; ++i)
+					{
+						const double cx = u(rng) * kTile, cy = u(rng) * kTile, r = 6.0 + 14.0 * u(rng), b = 0.4 + 0.5 * u(rng);
+						for (int y = (std::max)(0, static_cast<int>(cy - r - 3)); y < (std::min)(kTile, static_cast<int>(cy + r + 3)); ++y)
+							for (int x = (std::max)(0, static_cast<int>(cx - r - 3)); x < (std::min)(kTile, static_cast<int>(cx + r + 3)); ++x)
+							{
+								const double d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+								const double a = 0.5 - 0.5 * std::tanh((d - r) / 1.5);   // a soft-edged disc
+								float& v = t[static_cast<size_t>(y) * kTile + x];
+								v = static_cast<float>(std::round((std::min)(1.0, v + a * b) * 1023.0) / 1023.0);
+							}
+					}
+					return t; }, false },
+				{ "dream softness (glow)", [&](unsigned s0, int f) {
+					std::vector<float> t = soft(s0, f, 3.5, 0.7, 0.55, 0.3);
+					for (float& v : t) v = static_cast<float>(std::round((std::min)(1.0, 0.7 * v + 0.3 * std::sqrt(v)) * 1023.0) / 1023.0);
+					return t; }, false },
+				{ "heavy grain on a soft image", [&](unsigned s0, int f) { return soft(s0, f, 2.5, 0.8, 0.45, 18.0); }, false },
+				{ "2.8K title, sharp scaler (genuinely lower)", [&](unsigned s0, int f) {
+					std::vector<float> t = Tile(Scene(s0), 2880.0 / 3840.0, kLanczos3, 0.0, 1023, s0);
+					grade(t, 1.0, 0.45, 0.4, s0 * 31u + static_cast<unsigned>(f));
+					return t; }, true },
+				{ "2.8K-sensor title, lens softness (genuinely lower)", [&](unsigned s0, int f) {
+					std::vector<float> t = Tile(Scene(s0, 0.6), 2880.0 / 3840.0, kCatmullRom, 0.0, 1023, s0);
+					grade(t, 1.0, 0.45, 0.4, s0 * 31u + static_cast<unsigned>(f));
+					return t; }, true } };
+			SourceResolution::Tracker::Settings fast;
+			fast.minimumShots = 2;
+			fast.minimumSeconds = 5.0;
+			int failures = 0;
+			for (const Scenario& sc : scenarios)
+			{
+				SourceResolution::Tracker standard, quick(fast);
+				double t = 0.0;
+				int lowerFrames = 0, informative = 0, frames = 0;
+				double declaredStandard = 1.0, declaredFast = 1.0;
+				for (int shot = 0; shot < 12; ++shot)
+				{
+					const double offset = 0.08 * ((shot % 3) - 1);   // each shot its own level (a cut)
+					for (int f = 0; f < 5; ++f, t += 0.5)
+					{
+						std::vector<std::vector<float>> tiles;
+						for (int i = 0; i < 4; ++i)
+						{
+							std::vector<float> tile = sc.tile(static_cast<unsigned>(500 + shot * 10 + i), f);
+							for (float& v : tile) v = static_cast<float>((std::min)(1.0, (std::max)(0.0, v + offset)));
+							tiles.push_back(std::move(tile));
+						}
+						const SourceResolution::FrameReading r = ReadTiles(tiles);
+						++frames;
+						informative += r.informative() ? 1 : 0;
+						lowerFrames += r.informative() && r.ratio < 0.9 ? 1 : 0;
+						standard.Update(r, t);
+						quick.Update(r, t);
+						declaredStandard = (std::min)(declaredStandard, standard.Ratio());
+						declaredFast = (std::min)(declaredFast, quick.Ratio());
+					}
+				}
+				char line[240];
+				snprintf(line, sizeof(line), "%-46s frames %d (informative %d, read lower %d); lowest declared: Standard %.3f, Fast %.3f\n",
+					sc.name, frames, informative, lowerFrames, declaredStandard, declaredFast);
+				Logger::WriteMessage(line);
+				if (sc.lower)
+				{
+					// Distinguishable from the soft native scenes (which read lower on no frame);
+					// not declaring it is the safe direction (the picture as captured) - logged.
+					if (lowerFrames == 0) { ++failures; Logger::WriteMessage("  FAILED: the 2.8K title never reads lower\n"); }
+					else if (declaredStandard >= 1.0) Logger::WriteMessage("  note: read lower on some frames but not declared (safe: left native)\n");
+				}
+				else if (declaredStandard < 1.0 || declaredFast < 1.0)
+				{
+					++failures;
+					Logger::WriteMessage("  FAILED: soft native content was declared lower\n");
+				}
+			}
+			Assert::AreEqual(0, failures, L"soft native scenes never declared lower (Standard and Fast); the 2.8K title reads lower");
 		}
 
 		TEST_METHOD(DescribeIsGeneral)

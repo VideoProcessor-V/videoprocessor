@@ -6929,7 +6929,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "edges. Native = as captured. A size = always that size (a profile for such a source). "
             "Auto (the default) = VP detects the size the stream was upscaled from: it changes only after several shots agree "
             "(the evidence below; standard 3 shots and 10 s), and only at a cut; any real detail above that size, a "
-            "seek or a source change returns it to native at once. The stats line shows what it reads."));
+            "seek or a source change returns it to native at once. The stats line shows what it reads. A film finished at "
+            "1080p or 2K and encoded as a 4K stream reads native (the 4K encoding removes the upscale's trace)."));
         auto* autoConfidence = addText(QStringLiteral("Auto: upscale clarity needed"), QStringLiteral("source_resolution_auto_min_confidence"));
         autoConfidence->setValidator(new QDoubleValidator(0.0, 1.0, 2, autoConfidence));
         autoConfidence->setPlaceholderText(QStringLiteral("0.8"));

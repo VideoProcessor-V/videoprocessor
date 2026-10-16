@@ -402,6 +402,9 @@ namespace MotionAhead
 				}
 				if (ok)
 				{
+					// Planner Q1: the whole frame's motion, here on the worker (no render cost).
+					FlowGlobal(flow->forward, flow->forwardCost, flow->gridW, flow->gridH, flow->global[0], flow->second[0]);
+					FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH, flow->global[1], flow->second[1]);
 					store.Put(previousSequence, job.sequence, job.generation, flow);
 					engineReady = true;
 					std::lock_guard<std::mutex> lock(mutex);
