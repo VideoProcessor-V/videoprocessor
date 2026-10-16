@@ -36,6 +36,7 @@ namespace SourceResolutionMonitor
 		std::string notRead;           // why the source is not read (empty when it is)
 		int nativeWidth = 0, nativeHeight = 0;
 		double frameRatio = 1.0;       // the last analysed frame
+		bool frameBlank = false;       // the last analysed frame had no detail (black, a fade's dark end, flat)
 		double liveRatio = 1.0;        // the spec's live reading: median of the last ~2 s, snapped on a cut
 		double declaredRatio = 1.0;    // the tracker's conservative value
 		double confidence = 0.0;       // of the declared value (0..1)
@@ -143,9 +144,11 @@ namespace SourceResolutionMonitor
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::string selection = "native";
 		unsigned long long autoPendingCuts = 0;
+		unsigned long long autoPendingFrames = 0;   // engage also on a blank frame analysed after this
 		bool disengagePending = false;   // confidence fell: native at the next cut or after the wait
 		double disengageSince = 0.0;
 		unsigned long long disengageCuts = 0;
+		unsigned long long disengageFrames = 0;
 	};
 
 	// The stats-line / status text.

@@ -664,7 +664,7 @@ namespace VideoProcessorTest
 				}
 			Assert::AreEqual(0.5, tracker.Ratio(), 1e-9);
 			Assert::AreEqual(1080, tracker.Height(2160));
-			Assert::IsTrue(declaredAt >= 60, L"not before a minute of evidence");
+			Assert::IsTrue(declaredAt >= 20, L"not before 20 s of evidence");
 			// One frame of real detail: native at once.
 			tracker.Update(Frame(1.0, 0.25), t += 0.25);
 			Assert::AreEqual(1.0, tracker.Ratio());

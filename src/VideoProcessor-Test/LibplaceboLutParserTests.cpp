@@ -7581,7 +7581,7 @@ namespace VideoProcessorTest
 					if (!why.empty())
 					{
 						log.push_back("shot " + std::to_string(shot) + ": " + why);
-						if (why == "waiting for the next cut" && waitingAtShot < 0) waitingAtShot = shot;
+						if (why == "waiting for the next cut or black" && waitingAtShot < 0) waitingAtShot = shot;
 						if (why == "engaged at a cut" && engagedAtShot < 0) engagedAtShot = shot;
 					}
 				}
@@ -7595,6 +7595,64 @@ namespace VideoProcessorTest
 			Assert::IsTrue(waitingAtShot >= 0 && engagedAtShot > waitingAtShot, L"auto waits for the next cut, then engages");
 			Assert::AreEqual(0.5, factor, 1e-9, L"re-based to 540 lines");
 			Assert::AreEqual(1080, s.nativeHeight);
+
+			// Owner 2026-10-16: engaging also happens during a black frame (a fade's dark end), where
+			// the change cannot be seen - a second monitor waiting to engage, then one black frame.
+			{
+				SourceResolutionMonitor::Monitor faded;
+				double t = 0.0;
+				std::string fadedWhy;
+				double fadedFactor = 1.0;
+				bool waiting = false;
+				std::vector<double> held;   // the shot that was showing when auto began to wait
+				for (int shot = 0; shot < 6 && !waiting; ++shot)
+				{
+					const std::vector<double> picture = upscale(content(w, h, 700 + shot, shot % 2 ? 0.55 : 0.30));
+					held = picture;
+					for (int i = 0; i < 20 && !waiting; ++i)
+					{
+						pl_tex tex = upload(picture, 0.0008 * i);
+						frame.planes[0].texture = tex;
+						const unsigned long long before = faded.Read().frames;
+						faded.Frame(gpu, dispatch, frame, ++sequence, t);
+						pl_gpu_finish(gpu);
+						faded.Frame(gpu, dispatch, frame, sequence, t);
+						for (int k = 0; k < 400 && faded.Read().frames == before; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+						t += 0.5;
+						fadedFactor = faded.AutoFactor(H, 0.8, fadedWhy, t);
+						waiting = fadedWhy == "waiting for the next cut or black";
+						pl_tex_destroy(gpu, &tex);
+					}
+				}
+				Assert::IsTrue(waiting, L"auto reached 'waiting' on the upscaled shots");
+				// A fade to black (each step below the cut level, so no cut is seen): the change is
+				// made once the picture holds no detail.
+				const std::vector<double> last = held;
+				bool sawCut = false;
+				for (int step = 1; step <= 80 && fadedFactor != 0.5; ++step)
+				{
+					std::vector<double> dim(last);
+					const double keep = std::pow(0.9, step);
+					for (double& v : dim) v = 0.0625 + (v - 0.0625) * keep;
+					pl_tex tex = upload(dim);
+					frame.planes[0].texture = tex;
+					const unsigned long long cutsBefore = faded.Read().cuts;
+					const unsigned long long before = faded.Read().frames;
+					faded.Frame(gpu, dispatch, frame, ++sequence, t);
+					pl_gpu_finish(gpu);
+					faded.Frame(gpu, dispatch, frame, sequence, t);
+					for (int k = 0; k < 400 && faded.Read().frames == before; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+					sawCut = sawCut || faded.Read().cuts != cutsBefore;
+					t += 0.5;
+					fadedFactor = faded.AutoFactor(H, 0.8, fadedWhy, t);
+					pl_tex_destroy(gpu, &tex);
+				}
+				Logger::WriteMessage(("fade: " + fadedWhy + "\n").c_str());
+				Assert::IsFalse(sawCut, L"the fade made no cut");
+				Assert::AreEqual(0.5, fadedFactor, 1e-9, L"engaged in the fade");
+				Assert::AreEqual(std::string("engaged during a black or flat frame"), fadedWhy, L"at the fade's dark end");
+				faded.Release(gpu);
+			}
 
 			// Planner Q2: only the confidence falls (here: the minimum raised above it) - native at the
 			// next cut, at most 5 s later; not at once.

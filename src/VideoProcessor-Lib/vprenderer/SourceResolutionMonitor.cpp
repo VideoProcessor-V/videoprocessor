@@ -422,6 +422,7 @@ if (tile < int(tiles) && g.y < 256) {
 		snapshot.nativeWidth = j.nativeWidth;
 		snapshot.nativeHeight = j.nativeHeight;
 		snapshot.frameRatio = frame.ratio;
+		snapshot.frameBlank = !frame.informative();
 		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
 		snapshot.declaredRatio = tracker.Ratio();
 		snapshot.confidence = tracker.Ratio() < 1.0 ? evidence * clarity : 0.0;
@@ -495,11 +496,14 @@ if (tile < int(tiles) && g.y < 256) {
 				disengagePending = true;
 				disengageSince = now;
 				disengageCuts = s.cuts;
-				why = "confidence fell: native at the next cut (within 5 s)";
+				disengageFrames = s.frames;
+				why = "confidence fell: native at the next cut or black (within 5 s)";
 			}
-			else if (s.cuts != disengageCuts || now - disengageSince >= kDisengageWaitSeconds)
+			else if (s.cuts != disengageCuts || (s.frameBlank && s.frames != disengageFrames) || now - disengageSince >= kDisengageWaitSeconds)
 			{
-				why = s.cuts != disengageCuts ? "native at a cut (confidence fell)" : "native after 5 s without a cut (confidence fell)";
+				why = s.cuts != disengageCuts ? "native at a cut (confidence fell)" :
+					s.frameBlank && s.frames != disengageFrames ? "native during a black or flat frame (confidence fell)" :
+					"native after 5 s without a cut (confidence fell)";
 				autoApplied = autoPending = wanted;
 				disengagePending = false;
 			}
@@ -514,12 +518,19 @@ if (tile < int(tiles) && g.y < 256) {
 			{
 				autoPending = wanted;
 				autoPendingCuts = s.cuts;
-				why = "waiting for the next cut";
+				autoPendingFrames = s.frames;
+				why = "waiting for the next cut or black";
 			}
 			else if (s.cuts != autoPendingCuts)
 			{
 				autoApplied = wanted;
 				why = "engaged at a cut";
+			}
+			else if (s.frameBlank && s.frames != autoPendingFrames)
+			{
+				// A black or flat frame (a fade's dark end): the change cannot be seen.
+				autoApplied = wanted;
+				why = "engaged during a black or flat frame";
 			}
 		}
 		autoAppliedShared.store(autoApplied, std::memory_order_release);
