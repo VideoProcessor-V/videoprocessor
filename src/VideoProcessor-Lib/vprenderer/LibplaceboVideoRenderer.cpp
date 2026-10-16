@@ -184,6 +184,19 @@ namespace
 
 	std::wstring ScreenshotDirectory()
 	{
+		// Tests only: a writable folder when the process lives somewhere
+		// read-only (the test runner in Program Files). Unset: beside the exe.
+		{
+			wchar_t* overrideDir = nullptr;
+			size_t overrideLength = 0;
+			if (_wdupenv_s(&overrideDir, &overrideLength, L"VP_TEST_SCREENSHOT_DIR") == 0 && overrideDir && *overrideDir)
+			{
+				std::wstring value(overrideDir);
+				free(overrideDir);
+				return value;
+			}
+			free(overrideDir);
+		}
 		std::vector<wchar_t> buffer(32768);
 		const DWORD length = GetModuleFileNameW(
 			nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));

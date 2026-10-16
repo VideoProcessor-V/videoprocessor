@@ -1,0 +1,78 @@
+Audit request: Stage 12 + delta 15 (owner 2026-10-15/16: one audit for the set, before the gate and the deploy)
+Repo C:\dev\videoprocessor, branch merge-v1.4.02 (fork vmcpherson2012-dev/videoprocessor). Range 8bebdd4b..87615258
+(9 commits; `git log 8bebdd4b..87615258`) plus the pixel-identity harness test, uncommitted at the time of writing.
+Not in this range and not yet audited: the v1.4.02 merge and the work just before it (LED Python source removal,
+script pacing, motion_engine, crash state ring 8bebdd4b/df9a2d0b) - please say whether to audit those separately.
+Please write findings to C:\dev\videoprocessor\docs\audit\stage12-2026-10-16.md (save the file).
+
+Specs (verbatim; the source of truth): docs/VP-stage12-effective-resolution.md, docs/VP-delta-15-downscale-refinements.md
+(handoff VP-handoff-2026-10-14). Plan and status: docs/VP-stage12-build-plan.md ("Status" sections). BUILD-STATUS rows:
+"12 Re-base", "12 Detection", "12 VP deband", "12 / S8-1 Residual stabilisation", "2c / S8-2 Bitrate-aware weight".
+
+Groups (oldest first)
+ Step A 9cf342e3: vprenderer/SourceRebase.* (per-plane downscale, ewa_lanczossharp + anti-ring 0.5, signal domain, crop
+   scaled); LibplaceboVideoRenderer render-call re-base (slot 0) and source-warp extras (slot 1); Stage 8 gates on the
+   re-based height; source_resolution native | auto | any height 144-8640.
+ Detection b2486a93, d4fa5c68: SourceResolutionDetector.* (Lib). Mirror coherence per candidate rate (both axes, 256-px
+   tiles, Hann window; coding grid rules: 7/8 never, other 1/8 positions only when the grid is quiet or they stand above
+   both grid neighbours; fundamental over harmonics); Tracker (several shots + 60 s of evidence before a lower reading,
+   native at once on detail above it; Discontinuity; gaps; repeated frames add nothing); bitrate_quality (8/16-px
+   boundary step ratio, two-level 8x8 blocks) and effective_bit_depth (share of codes in use per 16-code window).
+ Renderer 7a1bfeec: vprenderer/SourceResolutionMonitor.* (compute tile copy into an SSBO twice a second, 2-slot ring,
+   never waits; worker thread; snapshot); auto (AutoFactor: engage at a cut, disengage at once, confidence = evidence x
+   two-axis coherence clarity); IVideoRenderer::GetSourceResolutionStatus (plugin API 31) into crash state; Config
+   (Auto (detected), Auto: confidence needed); A3 (grain map / occlusion mask no longer gated off while re-based).
+ Step C 3204289e: vprenderer/VpDebander.* (libplacebo's ring algorithm, compute, no grain, position-fixed ring; threshold
+   from the readings; held along trusted vectors only inside the current blur band; grain-error blocks excluded; repeats
+   reuse the previous weights); AdaptiveDownscale residual stabilisation (STABILISE_AND_STORE in the blend; Motion struct;
+   residual ping-pong; NLS / no vectors / untrusted: this frame's own); settings-fingerprint fix.
+ S8-2 90263b7f: AdaptiveDownscale::BitrateScale / BitrateAntiring; renderer applies them per frame (SSIM and CNN weight,
+   faithful anti-ringing).
+ Tests a0ce58b4, 87615258; log 5f97f310.
+
+Deviations from the specs (owner-approved unless marked; please check each is sound)
+ 1. Re-base in the signal domain per plane, not linear light (owner 2026-10-15; plan §A).
+ 2. source_resolution takes any height, not {1440,1080,720} (owner: general, not fixed); detection reports a ratio.
+ 3. Detection by mirror coherence instead of the radial-spectrum noise floor (spec 1a) / down-up residuals (plan B):
+    measured on the 7 real clips the spectral cliff overlapped (real 4K up to 0.92 decades, cubic upscales from 0.29);
+    coherence separates (real 0.1-0.2, upscales 0.9-0.99). Grain-map tile exclusion (spec 1a) not built - the coherence
+    is insensitive to grain by construction (independent phases); please confirm or ask for it.
+ 4. Auto selectable now, default native (owner 2026-10-16: supersedes "readings for a few evenings first").
+    source_resolution_auto_min_confidence's "confidence" is VP's definition (evidence x clarity) - please review.
+ 5. effective_bit_depth from code occupancy, not only "multiples of 4" (so SDR re-encoded to PQ by the Apple TV reads its
+    real step: 9 in PQ codes).
+ 6. Debander: no grain injection (cause of libplacebo's HDR specks; VP's output dither covers it); fixed sample ring.
+    Hold confined to the current blur band (otherwise block-level vectors blur fine grain - measured). deband_vp default
+    off (spec lists auto; owner to decide after the projector check).
+ 7. A4's "within half-float" holds on average (mean 0.00005) but the worst pixel is 0.0023 (< one 8-bit code): the
+    upstream kernel's own softening inside its passband, which no re-base can return.
+ 8. Residual stabilisation and S8-2 share one ramp/floor key (ssim_bitrate_floor) for SSIM and the CNN; 2c's
+    "bitrate-aware anti-ringing" is driven by low_bitrate_handling + ssim_bitrate_aware.
+
+Results (final build 87615258, laptop RTX 3050 Ti)
+- Full suite 2778/2778; Config 111/111; quick tier 2318/2318 (one earlier run: 1 flake in Bill's
+  FrameCaptureRetainsOwnerAndWritesIdentitySidecar, passes 3/3 alone; separate task offered).
+- Real-footage gate (VP_TEST_REAL_FOOTAGE=D:\hfr, 7 clips): 0/42 genuine frames read lower; uncoded upscales 224/224
+  at the exact ratio (error <= 0.0008); coded 1080 26/28, coded 1440 11/28 (rest native). UVG 120p clips are scaled
+  vertically only and carry 8-bit content (codes x4) - both read correctly.
+- Monitor (simulated time): a 540-line upscale declared ~540 with confidence 1.00 after a minute; auto engages at the
+  next cut; native at once on real detail and after a seek; native content never engages.
+- Debander: 8-bit sky banding 1.15 -> 0.07 codes RMS; texture variance 98% kept; hold follows the vectors.
+- Residuals: SSIM flicker 0.81 -> 0.22, CNN 0.42 -> 0.12 codes; still picture unchanged; untrusted/off byte-identical.
+- Analysis cost ~7 ms CPU per tile (8 tiles twice a second on a worker thread); GPU costs not yet measured (spec
+  "Costs" section) - laptop then 3090 at the gate.
+
+Specific questions
+ Q1 Is the coherence detector's bias to native strong enough (two-axis agreement, grid rules, tracker evidence)?
+    Anything that could make genuine 4K read lower - e.g. a camera that bins vertically (as the UVG clips) AND
+    horizontally, or a 2K DI finished to 4K (a genuine upscale: re-basing it is correct)?
+ Q2 Auto engage at a cut / disengage at once: any case where a disengage mid-shot is visible enough to matter, and should
+    disengaging also wait (briefly) for a cut?
+ Q3 Debander default: auto (spec) or off until the projector check?
+ Q4 The settings fingerprint was missing several live keys (source_range, capture_upload, Stage 12): please check the
+    rest of RendererSettings for the same gap.
+ Q5 Owner's new UI scheme (2026-10-16): taste settings as one slider of <= 5 positions, presets filling sub-settings
+    editable below, reset to defaults - motion first. Stage 12's controls (deband, residual steadying, bitrate) are
+    candidates for one "low-bitrate cleanup" slider; please advise the grouping.
+ Q6 Next on the roadmap is item 6 (50/60p: low-latency vectors, dropped/repeated-frame fill, smooth-motion parity).
+    Anything in this set to finish first?
