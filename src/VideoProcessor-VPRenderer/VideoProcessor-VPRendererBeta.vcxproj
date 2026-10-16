@@ -112,6 +112,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />

@@ -16,8 +16,9 @@
 // flavor export; 26: both together (rc4 merge); 27: Suspend/ResumeLedDrive
 // for the RS-232 connection test (FL35); 28 (Bill, v1.4.02): the analysis
 // diagnostic sink, Dolby luminance, chroma/motion profiles; 29: 27 and 28
-// together (v1.4.02 merge, 2026-10-15); 30: GetLedDriveStatus (crash state).
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 30;
+// together (v1.4.02 merge, 2026-10-15); 30: GetLedDriveStatus (crash state);
+// 31: GetSourceResolutionStatus (Stage 12, crash state).
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 31;
 static constexpr const char* VP_LIBPLACEBO_FLAVOR_EXPORT = "VideoProcessorLibplaceboIsBeta";
 static constexpr const char* VP_LIBPLACEBO_VERSION_EXPORT =
 	"VideoProcessorLibplaceboGetApiVersion";

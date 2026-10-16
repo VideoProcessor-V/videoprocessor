@@ -6714,11 +6714,20 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1440")), QStringLiteral("1440 lines"));
         sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1080")), QStringLiteral("1080 lines"));
         sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("720")), QStringLiteral("720 lines"));
-        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("auto")), QStringLiteral("Auto (native until detection exists)"));
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("auto")), QStringLiteral("Auto (detected)"));
         sourceResolution->setToolTip(QStringLiteral(
             "For a stream upscaled before it reaches VP (many 4K streams are 1080p underneath): VP shrinks the picture "
             "back to that size, then upscales it with its own path, as for a real 1080p source - fewer halos, cleaner "
-            "edges. Native = as captured (the default). Make a profile for such a source and pick its size here."));
+            "edges. Native = as captured (the default). A size = always that size (a profile for such a source). "
+            "Auto = VP detects the size the stream was upscaled from: it changes only after several shots agree "
+            "(about a minute), and only at a cut; any real detail above that size, a seek or a source change "
+            "returns it to native at once. The stats line shows what it reads."));
+        auto* autoConfidence = addText(QStringLiteral("Auto: confidence needed"), QStringLiteral("source_resolution_auto_min_confidence"));
+        autoConfidence->setValidator(new QDoubleValidator(0.0, 1.0, 2, autoConfidence));
+        autoConfidence->setPlaceholderText(QStringLiteral("0.8"));
+        autoConfidence->setToolTip(QStringLiteral(
+            "How sure the detection must be before Auto shrinks the picture (0-1). Higher = slower to act and "
+            "never on a doubtful source; lower = acts sooner. Used only with Source resolution: Auto."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(

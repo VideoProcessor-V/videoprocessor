@@ -146,14 +146,23 @@ Step B, detection (SourceResolutionDetector, in progress):
   codes in use (not only "multiples of 4"), so 8-bit content re-encoded to
   PQ by the Apple TV (LLDV) still reads its real step (measured: 8-bit
   SDR in PQ codes reads 9, two PQ codes per level - the step to hide).
-- Owner 2026-10-15: the debander is vector-informed (spec ง2d): its
+- Owner 2026-10-15: the debander is vector-informed (spec ยง2d): its
   blur-or-not regions held across frames along trusted vectors, with the
   standing fallback (vectors when present for the frame, else per frame;
   never starts the matcher); tests on both warp paths and without vectors.
 - Found on the real clips: the UVG "10-bit" files carry 8-bit content
   (every code a multiple of 4) - the bit-depth reading says 8 on them.
 
-Then step C (auto, VP debander with PQ thresholds, the vector refinements
+- Owner 2026-10-15 (supersedes "readings only first" and "the owner
+  watches them for a few evenings"): `source_resolution: auto` is a
+  selectable option now - it re-bases from the declared (conservative)
+  reading. Default stays `native`. Engaging waits for the next cut (no
+  change mid-shot); disengaging is immediate (detail above the re-based
+  height, seek/skip, source/format/HDR-DV change, signal loss, resync).
+  Gated by `source_resolution_auto_min_confidence` (0.8). The stats line
+  names what auto chose and why.
+
+Then step C (VP debander with PQ thresholds, the vector refinements
 2c/2d/S8-1 with the dither_vectors-style fallback, S8-2).
 
 ## Costs (to measure, laptop then 3090)

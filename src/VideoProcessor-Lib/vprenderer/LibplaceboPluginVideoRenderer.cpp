@@ -619,6 +619,12 @@ bool LibplaceboPluginVideoRenderer::GetLedDriveStatus(CString& status) const
 	return m_renderer && m_renderer->GetLedDriveStatus(status);
 }
 
+bool LibplaceboPluginVideoRenderer::GetSourceResolutionStatus(CString& status) const
+{
+	status.Empty();
+	return m_renderer && m_renderer->GetSourceResolutionStatus(status);
+}
+
 bool LibplaceboPluginVideoRenderer::GetDejudderStatus(CString& status) const
 {
 	status.Empty();

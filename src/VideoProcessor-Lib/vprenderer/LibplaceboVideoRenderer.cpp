@@ -56,6 +56,7 @@
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/SourceRebase.h>
+#include <vprenderer/SourceResolutionMonitor.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
@@ -994,6 +995,8 @@ namespace
 		// lines. A height below the frame's re-bases the source to it
 		// (SourceRebase.h).
 		std::string sourceResolution = "native";
+		// Stage 12: the confidence auto needs before it re-bases (spec 3).
+		double sourceResolutionAutoMinConfidence = 0.8;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -2033,6 +2036,16 @@ namespace
 				value = ConfigFile::NormalizeName(value);
 				if (value == "native" || value == "auto" || SourceRebase::ClassHeight(value) > 0)
 					settings.sourceResolution = value;
+			}
+			if (config.TryGetString(rule.section, "source_resolution_auto_min_confidence", value))
+			{
+				char* end = nullptr;
+				const double v = std::strtod(value.c_str(), &end);
+				if (end != value.c_str() && *end == '\0' && v >= 0.0 && v <= 1.0)
+					settings.sourceResolutionAutoMinConfidence = v;
+				else
+					DebugLog::Log("display rule '%s': invalid source_resolution_auto_min_confidence '%s'; retaining base setting",
+						rule.name.c_str(), value.c_str());
 			}
 		}
 		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
@@ -4433,6 +4446,10 @@ struct LibplaceboVideoRenderer::Impl
 	pl_dispatch rebaseDispatch = nullptr;
 	double rebaseFactor = 1.0;          // this frame's (1 = native)
 	std::string rebaseLogged;           // the last state logged
+	// Stage 12 step B: effective resolution, bitrate quality and bit depth
+	// of every source, read on the native frame; auto acts on it.
+	SourceResolutionMonitor::Monitor sourceMonitor;
+	uint64_t sourceMonitorSequence = 0;
 	pl_tex rgbIngestLuma = nullptr;
 	// De-judder on RGB (roadmap item 2): this frame's matcher luma when it came
 	// through GpuRgbUnpack (no chroma planes: the rendered warp only), and the
@@ -5689,6 +5706,7 @@ struct LibplaceboVideoRenderer::Impl
 				ReleaseDejudder();   // before the device goes
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
 				sourceRebase.Release(d3d11->gpu);   // Stage 12: its textures
+				sourceMonitor.Release(d3d11->gpu);  // and the tile readback
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				dejudderOutput.Release();
@@ -9626,6 +9644,9 @@ struct LibplaceboVideoRenderer::Impl
 					activeSettings.adaptive.grainMap ? ", no vectors (per-frame grain)" : "");
 			descriptions.push_back(line);
 		}
+		// Stage 12: the source's effective resolution, bitrate quality and bit depth.
+		descriptions.push_back(SourceResolutionMonitor::Describe(sourceMonitor.Read(), sourceMonitor.AutoRatio(),
+			activeSettings.sourceResolution == "auto"));
 		std::lock_guard<std::mutex> guard(shaderStatusMutex);
 		activeCustomShaders = descriptions;
 	}
@@ -17814,7 +17835,29 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			const pl_tex luma = renderImage.num_planes > 0 ? renderImage.planes[0].texture : nullptr;
 			const int nativeHeight = luma ? luma->params.h : 0;
-			const double wanted = SourceRebase::Factor(activeSettings.sourceResolution, nativeHeight);
+			// Step B: the native, unwarped, not re-based frame, once per new source frame.
+			if (sourceSequence != sourceMonitorSequence && d3d11 && d3d11->gpu)
+			{
+				sourceMonitorSequence = sourceSequence;
+				if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+				const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+				sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
+			}
+			double wanted = 1.0;
+			sourceMonitor.SetSelection(activeSettings.sourceResolution);
+			if (activeSettings.sourceResolution == "auto")
+			{
+				std::string why;
+				wanted = sourceMonitor.AutoFactor(nativeHeight, activeSettings.sourceResolutionAutoMinConfidence, why);
+				if (!why.empty())
+				{
+					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+					DebugLog::Log("Source resolution auto: %s; %s", why.c_str(),
+						SourceResolutionMonitor::Describe(snap, sourceMonitor.AutoRatio(), true).c_str());
+				}
+			}
+			else
+				wanted = SourceRebase::Factor(activeSettings.sourceResolution, nativeHeight);
 			const bool temporal = temporalRenderer.Active();
 			rebaseFactor = wanted < 1.0 && !temporal ? wanted : 1.0;
 			std::string state;
@@ -17825,7 +17868,7 @@ struct LibplaceboVideoRenderer::Impl
 				state = "Re-base: " + std::to_string(luma->params.w) + "x" + std::to_string(nativeHeight) + " -> " +
 					std::to_string(SourceRebase::Scaled(luma->params.w, rebaseFactor)) + "x" +
 					std::to_string(SourceRebase::Scaled(nativeHeight, rebaseFactor)) + " (source_resolution " +
-					activeSettings.sourceResolution + "; grain map and occlusion mask off while re-based)";
+					activeSettings.sourceResolution + ")";
 			else if (!rebaseLogged.empty())
 				state = "Re-base: off (source_resolution " + activeSettings.sourceResolution + ")";
 			if (!state.empty() && state != rebaseLogged)
@@ -18476,7 +18519,7 @@ struct LibplaceboVideoRenderer::Impl
             up.nativeHeight = sourceCropH;
             adaptiveDownscale.SetUpscale(up);
             adaptiveDownscale.ClearGrainField();
-            if (activeSettings.adaptive.grainMap && rebaseFactor >= 1.0 && dejudder && dejudderEstimatedSequence == sourceSequence &&
+            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
                 sourceSequence != 0 && dejudder->GrainError())
             {
                 AdaptiveDownscale::GrainField field;
@@ -18526,7 +18569,7 @@ struct LibplaceboVideoRenderer::Impl
                 // for it (A->B, estimated at upload); the map follows NLS's
                 // own map (bundled NLS / NLS+ only; otherwise the scalar).
                 adaptiveDownscale.ClearGrainField();
-                if (activeSettings.adaptive.grainMap && rebaseFactor >= 1.0 && dejudder && dejudderEstimatedSequence == sourceSequence &&
+                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence &&
                     sourceSequence != 0 && dejudder->GrainError())
                 {
                     AdaptiveDownscale::GrainField field;
@@ -18649,10 +18692,12 @@ struct LibplaceboVideoRenderer::Impl
             for (int slot = 0; slot < 2; ++slot)
                 if (dejudderMaskSequence[slot] == sourceSequence && sourceSequence != 0)
                     maskSlot = slot;
-            // Stage 12: both are in native source pixels; off while re-based.
-            bool install = activeSettings.occlusionMask && rebaseFactor >= 1.0 && maskSlot >= 0 && dejudder && !cadenceRepeat &&
+            // Stage 12: both map through the native source crop by relative
+            // position, so they hold at any re-base size (the vectors are the
+            // native frame's; a factor change does not touch them).
+            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat &&
                 dejudder->Occlusion(maskSlot);
-            bool grainInstall = grainMap != nullptr && rebaseFactor >= 1.0;
+            bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
             // the bundled NLS / NLS+ maps are known; any other NLS shader, or
             // a rule missing a parameter, keeps the mask off (logged once).
@@ -21148,6 +21193,8 @@ void LibplaceboVideoRenderer::Reset()
 		// with geometry from the discarded generation.
 		m_impl->RequestPresentationStateReset();
 		m_impl->RequestMotionInvalidate(true);
+		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
+		m_impl->sourceMonitor.Discontinuity("resync or source change");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("renderer reset");
@@ -21188,6 +21235,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 		m_impl->RequestPresentationStateReset();
 		// The discarded frames break the sequence: no pair or history across it.
 		m_impl->RequestMotionInvalidate(false, "live queue reset");
+		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("live queue reset");
@@ -22077,6 +22125,18 @@ bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
 		driver.lastSentLight, driver.lastLight, driver.lastSentContrast, driver.commands, driver.timeouts,
 		gain.active ? "on" : "off", gain.gain);
 	status = CString(text);
+	return true;
+}
+
+bool LibplaceboVideoRenderer::GetSourceResolutionStatus(CString& status) const
+{
+	status.Empty();
+	if (!m_impl)
+		return false;
+	const std::string selection = m_impl->sourceMonitor.Selection();
+	std::string line = SourceResolutionMonitor::Describe(m_impl->sourceMonitor.Read(), m_impl->sourceMonitor.AutoRatio(), selection == "auto");
+	line += "; source_resolution " + selection;
+	status = CString(line.c_str());
 	return true;
 }
 
@@ -24654,6 +24714,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "capture_upload=" << s.captureUpload << "\n"
 		<< "source_range=" << s.sourceRange << "\n"
 		<< "source_resolution=" << s.sourceResolution << "\n"
+		<< "source_resolution_auto_min_confidence=" << s.sourceResolutionAutoMinConfidence << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

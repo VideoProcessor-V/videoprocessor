@@ -16886,6 +16886,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			rendererLine("presentation", m_videoRenderer->GetPresentationTimingStatus(text), text);
 			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
 			rendererLine("LED drive", m_videoRenderer->GetLedDriveStatus(text), text);
+			rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
 		}
 	}
 	// Preserve the requested visibility through renderer handoff. The next

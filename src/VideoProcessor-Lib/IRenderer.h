@@ -431,6 +431,15 @@ public:
 		return false;
 	}
 
+	// Crash state (Stage 12, owner 2026-10-15): the source's effective
+	// resolution, bitrate quality and bit depth, and what source_resolution
+	// auto chose. False when the renderer does not read them.
+	virtual bool GetSourceResolutionStatus(CString& status) const
+	{
+		status.Empty();
+		return false;
+	}
+
 	// RS-232 connection test (Config, LED drive page): the renderer frees the
 	// projector's COM port for the test. False (with reason) when it will not,
 	// e.g. while video is playing. Renderers without an LED drive hold no port.

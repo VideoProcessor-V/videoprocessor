@@ -150,6 +150,7 @@ namespace
 		std::vector<std::string> log;
 		std::string dejudderStatus, presentationStatus;   // the stats lines at the end
 		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
+		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		bool Logged(const std::string& text) const
 		{
 			for (const std::string& line : log)
@@ -326,6 +327,7 @@ namespace
 			CString status;
 			if (renderer->GetDejudderStatus(status)) result.dejudderStatus = CStringA(status).GetString();
 			if (renderer->GetLedDriveStatus(status)) result.ledStatus = CStringA(status).GetString();
+			if (renderer->GetSourceResolutionStatus(status)) result.sourceStatus = CStringA(status).GetString();
 			status.Empty();
 			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
 			renderer->Stop();
@@ -750,6 +752,23 @@ namespace Tests
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
 				Assert::IsFalse(r.Logged("Re-base: 3840x2160"), (L"native: never re-based\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (L"native: frames presented\n" + r.Tail()).c_str());
+				// Step B reads every source (the crash-state line).
+				Logger::WriteMessage(("native: " + r.sourceStatus + "\n").c_str());
+				Assert::IsTrue(r.sourceStatus.find("Source resolution:") == 0, (L"native: status line\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.sourceStatus.find("source_resolution native") != std::string::npos);
+			}
+			{
+				// Auto through the renderer (owner 2026-10-15): the harness picture
+				// is generated at 4K, so auto reads it and stays native within a
+				// short run (it needs several shots and a minute before acting).
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, "source_resolution: auto\n");
+				Logger::WriteMessage(("auto: " + r.sourceStatus + "\n").c_str());
+				Assert::IsTrue(r.presented, (L"auto: frames presented\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Source resolution: the tile") || r.Logged("Source resolution: cannot") ||
+					r.Logged("Source resolution: the readback"), (L"auto: no GPU failure\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.sourceStatus.find("source_resolution auto") != std::string::npos, (L"auto: status line\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.sourceStatus.find("not read") == std::string::npos, (L"auto: the source is read\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Re-base: 3840x2160"), (L"auto: not re-based within a short run\n" + r.Tail()).c_str());
 			}
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
