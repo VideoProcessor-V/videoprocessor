@@ -7452,6 +7452,136 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		// Look-ahead verification (owner 2026-10-16): CPU only - frames ahead of display
+		// decide the switch at the cut / black frame, or cancel it.
+		TEST_METHOD(SourceResolutionLookAheadVerifiesOrCancelsTheSwitch)
+		{
+			const int FW = 1024, FH = 512, T = SourceResolutionMonitor::Monitor::kTile;
+			// A frame: an upscale (white noise at half resolution, bilinear x2) or native
+			// (white noise at full resolution), around a mean level; or flat black.
+			enum class Kind { Upscaled, Native, Black };
+			auto makeFrame = [&](Kind kind, unsigned seed, double level) {
+				std::mt19937 rng(seed);
+				std::normal_distribution<double> noise(0.0, 0.08);
+				std::vector<double> f(static_cast<size_t>(FW) * FH, 64.0 / 1023.0);
+				if (kind == Kind::Black) return f;
+				if (kind == Kind::Native)
+				{
+					for (double& v : f) v = level + noise(rng);
+					return f;
+				}
+				const int lw = FW / 2, lh = FH / 2;
+				std::vector<double> low(static_cast<size_t>(lw) * lh);
+				for (double& v : low) v = level + noise(rng);
+				for (int y = 0; y < FH; ++y)
+					for (int x = 0; x < FW; ++x)
+					{
+						const double u = (x + 0.5) * 0.5 - 0.5, w = (y + 0.5) * 0.5 - 0.5;
+						const int x0 = (std::max)(0, (std::min)(lw - 2, static_cast<int>(std::floor(u))));
+						const int y0 = (std::max)(0, (std::min)(lh - 2, static_cast<int>(std::floor(w))));
+						const double fx = (std::min)(1.0, (std::max)(0.0, u - x0)), fy = (std::min)(1.0, (std::max)(0.0, w - y0));
+						auto at = [&](int xx, int yy) { return low[static_cast<size_t>(yy) * lw + xx]; };
+						f[static_cast<size_t>(y) * FW + x] = (1 - fy) * ((1 - fx) * at(x0, y0) + fx * at(x0 + 1, y0)) + fy * ((1 - fx) * at(x0, y0 + 1) + fx * at(x0 + 1, y0 + 1));
+					}
+				return f;
+			};
+			auto code = [](double v) { return static_cast<int>(std::lround((std::min)(1.0, (std::max)(0.0, v)) * 1023.0)); };
+			// The monitor's own analysis of a displayed frame (8 tiles).
+			auto analyse = [&](SourceResolutionMonitor::Monitor& m, const std::vector<double>& f, double t) {
+				std::vector<float> tiles(static_cast<size_t>(8) * T * T);
+				for (int i = 0; i < 8; ++i)
+				{
+					const int x0 = (i % 4) * (FW - T) / 3, y0 = (i / 4) * (FH - T);
+					for (int y = 0; y < T; ++y)
+						for (int x = 0; x < T; ++x)
+							tiles[(static_cast<size_t>(i) * T + y) * T + x] = static_cast<float>(code(f[static_cast<size_t>(y0 + y) * FW + x0 + x]) / 1023.0);
+				}
+				m.AnalyseTilesForTest(tiles, 8, t, FW, FH);
+			};
+			auto ahead = [&](SourceResolutionMonitor::Monitor& m, uint64_t seq, const std::vector<double>& f) {
+				m.LookAheadFrame(seq, FW, FH, [&](int x, int y) { return code(f[static_cast<size_t>(y) * FW + x]); }, 0, 0, FW, FH);
+			};
+			auto waitReady = [&](SourceResolutionMonitor::Monitor& m) {
+				for (int k = 0; k < 400 && !m.Ahead().ready; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				return m.Ahead().ready;
+			};
+			// Upscaled shots until auto waits for the next cut; returns the time reached.
+			auto untilWaiting = [&](SourceResolutionMonitor::Monitor& m, uint64_t& seq) {
+				double t = 0.0;
+				std::string why;
+				for (int shot = 0; shot < 12; ++shot)
+					for (int i = 0; i < 8; ++i)
+					{
+						analyse(m, makeFrame(Kind::Upscaled, 50 + shot * 13 + i, shot % 2 ? 0.55 : 0.35), t);
+						m.AutoFactor(FH, 0.8, why, t, ++seq);
+						t += 0.5;
+						if (why == "waiting for the next cut or black") return t;
+					}
+				return -1.0;
+			};
+			const double offShot = 0.35;   // the level of the shot showing when auto begins to wait (even shots)
+			(void)offShot;
+
+			// 1. The next shot agrees: engaged exactly on the cut frame.
+			{
+				SourceResolutionMonitor::Monitor m;
+				uint64_t seq = 0;
+				const double t = untilWaiting(m, seq);
+				Assert::IsTrue(t > 0.0, L"auto reached waiting");
+				const double level = m.Read().frames % 2 ? 0.35 : 0.35;
+				(void)level;
+				// Ahead: one more frame of the current shot, then the cut at seq + 2.
+				const std::vector<double> same = makeFrame(Kind::Upscaled, 999, 0.35);
+				const std::vector<double> next = makeFrame(Kind::Upscaled, 1000, 0.75);
+				ahead(m, seq + 1, same);
+				ahead(m, seq + 2, next);
+				Assert::IsTrue(waitReady(m), L"the frame after the cut was analysed ahead");
+				std::string why;
+				Assert::AreEqual(1.0, m.AutoFactor(FH, 0.8, why, t, seq + 1), 1e-9, L"not before the cut frame");
+				const double f = m.AutoFactor(FH, 0.8, why, t + 0.04, seq + 2);
+				Logger::WriteMessage(("agree: " + why + "\n").c_str());
+				Assert::AreEqual(0.5, f, 1e-9, L"engaged on the cut frame");
+				Assert::AreEqual(std::string("engaged at the cut / black (look-ahead verified)"), why);
+				Assert::AreEqual(1ull, m.Ahead().verified);
+			}
+			// 2. The next shot is native: the switch is cancelled, and the cut itself is not used.
+			{
+				SourceResolutionMonitor::Monitor m;
+				uint64_t seq = 0;
+				double t = untilWaiting(m, seq);
+				Assert::IsTrue(t > 0.0);
+				const std::vector<double> native = makeFrame(Kind::Native, 2000, 0.75);
+				ahead(m, seq + 1, native);
+				Assert::IsTrue(waitReady(m));
+				std::string why;
+				const double f = m.AutoFactor(FH, 0.8, why, t, seq + 1);
+				Logger::WriteMessage(("disagree: " + why + "\n").c_str());
+				Assert::AreEqual(1.0, f, 1e-9, L"stays native");
+				Assert::AreEqual(std::string("look-ahead: the next shot disagrees - staying"), why);
+				Assert::AreEqual(1ull, m.Ahead().cancelled);
+				// The monitor then sees that cut (the native frame): still no engage on it.
+				analyse(m, native, t + 0.5);
+				Assert::AreEqual(1.0, m.AutoFactor(FH, 0.8, why, t + 0.5, seq + 2), 1e-9, L"the cancelled cut is not used");
+			}
+			// 3. A black frame ahead, then an agreeing shot: engaged on the black frame.
+			{
+				SourceResolutionMonitor::Monitor m;
+				uint64_t seq = 0;
+				const double t = untilWaiting(m, seq);
+				Assert::IsTrue(t > 0.0);
+				const std::vector<double> black = makeFrame(Kind::Black, 0, 0.0);
+				const std::vector<double> next = makeFrame(Kind::Upscaled, 3000, 0.45);
+				ahead(m, seq + 1, black);
+				ahead(m, seq + 2, black);
+				ahead(m, seq + 3, next);
+				Assert::IsTrue(waitReady(m));
+				std::string why;
+				const double f = m.AutoFactor(FH, 0.8, why, t, seq + 1);
+				Logger::WriteMessage(("black: " + why + "\n").c_str());
+				Assert::AreEqual(0.5, f, 1e-9, L"engaged on the black frame, verified by the shot after it");
+			}
+		}
+
 		TEST_METHOD(SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce)
 		{
 			// Stage 12 step B + auto (owner 2026-10-15). Simulated time (the
