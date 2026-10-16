@@ -1002,6 +1002,10 @@ namespace
 		// bitrate quality reading raises it (auto | off | on).
 		std::string debandVp = "off";
 		std::string lowBitrateHandling = "auto";
+		// Delta 15 S8-2: the SSIM weight (and the CNN's, 2c) lowered at a low
+		// bitrate quality, down to the floor; the faithful anti-ringing raised.
+		bool ssimBitrateAware = true;
+		double ssimBitrateFloor = 0.4;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1186,6 +1190,7 @@ namespace
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2260,7 +2265,8 @@ namespace
 			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
 			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
 			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
-			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise) })
+			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
+			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware) })
 		{
 			if (!config.TryGetString(rule.section, toggle.first, raw))
 				continue;
@@ -2302,6 +2308,15 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
 					settings.adaptive.faithfulOrtho ? "ortho" : "polar");
+		}
+		if (config.TryGetString(rule.section, "ssim_bitrate_floor", raw))
+		{
+			double parsed = 0.0;
+			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= 1.0)
+				settings.ssimBitrateFloor = parsed;
+			else
+				DebugLog::Log("profile '%s': invalid ssim_bitrate_floor '%s'; keeping %g",
+					rule.section.c_str(), raw.c_str(), settings.ssimBitrateFloor);
 		}
 		if (config.TryGetString(rule.section, "adaptive_upscale_w_base", raw))
 		{
@@ -4470,6 +4485,8 @@ struct LibplaceboVideoRenderer::Impl
 	VpDebander::Params vpDebandParams;
 	double debandThreshold = 0.0;
 	std::string debandLogged;
+	// Delta 15 S8-2 / 2c: this frame's weight scale from the bitrate quality (1 = clean).
+	double bitrateWeightScale = 1.0;
 	pl_tex rgbIngestLuma = nullptr;
 	// De-judder on RGB (roadmap item 2): this frame's matcher luma when it came
 	// through GpuRgbUnpack (no chroma planes: the rendered warp only), and the
@@ -9660,9 +9677,10 @@ struct LibplaceboVideoRenderer::Impl
 			else if (!st.valid)
 				std::snprintf(line, sizeof(line), "Adaptive downscale: measuring");
 			else
-				std::snprintf(line, sizeof(line), "Adaptive downscale: grain %.2f, w %.2f%s", st.grainScale, st.meanW,
+				std::snprintf(line, sizeof(line), "Adaptive downscale: grain %.2f, w %.2f%s%s", st.grainScale, st.meanW,
 					adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ? ", grain map" :
-					activeSettings.adaptive.grainMap ? ", no vectors (per-frame grain)" : "");
+					activeSettings.adaptive.grainMap ? ", no vectors (per-frame grain)" : "",
+					bitrateWeightScale < 1.0 ? (", low bitrate x" + std::to_string(bitrateWeightScale).substr(0, 4)).c_str() : "");
 			descriptions.push_back(line);
 		}
 		// Stage 12: the source's effective resolution, bitrate quality and bit depth.
@@ -18592,13 +18610,29 @@ struct LibplaceboVideoRenderer::Impl
                 upscaleBlend && activeSettings.adaptiveUpscaleSuperresScale ? 1.0 : 0.0))
                 superresHook = hook;
         const bool superresFound = superresHook != nullptr;
+        // Stage 12 §2c / delta 15 S8-2: at a low bitrate quality the CNN's and
+        // SSIM's weights fall towards the floor and the faithful branch's
+        // anti-ringing rises (low_bitrate_handling off: every source clean).
+        AdaptiveDownscale::Settings adaptiveNow = activeSettings.adaptive;
+        bitrateWeightScale = 1.0;
+        if (activeSettings.lowBitrateHandling != "off" && (upscaleBlend || activeSettings.ssimBitrateAware))
+        {
+            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+            double quality = snap.reading ? snap.bitrateQuality : 1.0;
+            if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
+            bitrateWeightScale = AdaptiveDownscale::BitrateScale(quality, activeSettings.ssimBitrateFloor);
+            adaptiveNow.antiring = AdaptiveDownscale::BitrateAntiring(activeSettings.adaptive.antiring, bitrateWeightScale,
+                activeSettings.ssimBitrateFloor);
+            if (!upscaleBlend)
+                adaptiveNow.wBase = static_cast<float>(activeSettings.adaptive.wBase * bitrateWeightScale);
+        }
         if (upscaleBlend)
         {
-            adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
+            adaptiveDownscale.SetFrame(adaptiveNow, sourceSequence,
                 nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : AdaptiveFallbackFramePeriod());
             AdaptiveDownscale::Upscale up;
             up.on = true;
-            up.wBase = static_cast<float>(activeSettings.adaptiveUpscaleWBase);
+            up.wBase = static_cast<float>(activeSettings.adaptiveUpscaleWBase * bitrateWeightScale);
             up.superresAlpha = activeSettings.adaptiveUpscaleSuperresScale && superresFound;
             up.nativeHeight = sourceCropH;
             adaptiveDownscale.SetUpscale(up);
@@ -18657,7 +18691,7 @@ struct LibplaceboVideoRenderer::Impl
             adaptiveDownscale.SetUpscale(AdaptiveDownscale::Upscale());
             if (customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue))
             {
-                adaptiveDownscale.SetFrame(activeSettings.adaptive, sourceSequence,
+                adaptiveDownscale.SetFrame(activeSettings.ssimBitrateAware ? adaptiveNow : activeSettings.adaptive, sourceSequence,
                     nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : AdaptiveFallbackFramePeriod());
                 // SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source
                 // crop against the destination, not the (prescaled) PRE_KERNEL
@@ -24842,6 +24876,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "low_bitrate_handling=" << s.lowBitrateHandling << "\n"
 		<< "cnn_residual_stabilise=" << (s.adaptive.cnnResidualStabilise ? "on" : "off") << "\n"
 		<< "ssim_residual_stabilise=" << (s.adaptive.ssimResidualStabilise ? "on" : "off") << "\n"
+		<< "ssim_bitrate_aware=" << (s.ssimBitrateAware ? "on" : "off") << "\n"
+		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

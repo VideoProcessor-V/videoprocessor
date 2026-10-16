@@ -102,6 +102,26 @@ namespace AdaptiveDownscale
 		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the field's source pixels
 	};
 
+	// Stage 12 §2c / delta 15 S8-2 (owner 2026-10-15): the weight scale for a
+	// low bitrate quality - 1 at 0.8 and above (today's output), falling to
+	// `floor` at 0.2 and below, in steps of 0.05 (no churn as the reading
+	// moves). SSIM and the CNN sharpen blocking and mosquito noise as if they
+	// were texture.
+	inline double BitrateScale(double quality, double floor)
+	{
+		floor = floor < 0.0 ? 0.0 : floor > 1.0 ? 1.0 : floor;
+		double scale = quality >= 0.8 ? 1.0 : quality <= 0.2 ? floor : floor + (1.0 - floor) * (quality - 0.2) / 0.6;
+		scale = static_cast<double>(static_cast<long long>(scale * 20.0 + 0.5)) / 20.0;
+		return scale < floor ? floor : scale > 1.0 ? 1.0 : scale;
+	}
+	// The faithful branch's anti-ringing raised with it: halfway to 1 at the floor.
+	inline float BitrateAntiring(float antiring, double scale, double floor)
+	{
+		if (scale >= 1.0 || floor >= 1.0) return antiring;
+		const double t = (1.0 - scale) / (1.0 - floor);
+		return static_cast<float>(antiring + (1.0 - antiring) * 0.5 * (t > 1.0 ? 1.0 : t));
+	}
+
 	// Matcher error (mean absolute residual of half-resolution luma between
 	// two frames) to the scalar's Laplacian energy units, for white noise of
 	// one code per source pixel: the Laplacian's mean absolute value is

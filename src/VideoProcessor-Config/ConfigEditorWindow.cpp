@@ -6758,6 +6758,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         ssimStabilise->setToolTip(QStringLiteral(
             "The same for the SSIM downscaler's added contrast on grain and fine texture: averaged along the trusted "
             "motion so it does not shimmer. Without the motion it does nothing (same as off)."));
+        auto* bitrateAware = addChoice(QStringLiteral("Gentler sharpening on poor streams"), QStringLiteral("ssim_bitrate_aware"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        bitrateAware->setToolTip(QStringLiteral(
+            "On a low-bitrate stream (the measured bitrate quality on the stats line) SSIM and the CNN would sharpen "
+            "blocking and mosquito noise as if it were texture: their strength is lowered towards the floor below, and "
+            "the faithful scaler's anti-ringing raised. A clean source is untouched."));
+        auto* bitrateFloor = addText(QStringLiteral("Poor-stream strength floor"), QStringLiteral("ssim_bitrate_floor"));
+        bitrateFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, bitrateFloor));
+        bitrateFloor->setPlaceholderText(QStringLiteral("0.4"));
+        bitrateFloor->setToolTip(QStringLiteral("What is left of the SSIM / CNN strength on the poorest stream (0.4 = 40 %)."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7986,7 +7996,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

@@ -10114,6 +10114,19 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		TEST_METHOD(BitrateScaleRampAndAntiring)
+		{
+			// Delta 15 S8-2 / 2c: clean (0.8 and above) is today's output exactly.
+			Assert::AreEqual(1.0, AdaptiveDownscale::BitrateScale(1.0, 0.4));
+			Assert::AreEqual(1.0, AdaptiveDownscale::BitrateScale(0.8, 0.4));
+			Assert::AreEqual(0.4, AdaptiveDownscale::BitrateScale(0.0, 0.4), 1e-9);
+			Assert::AreEqual(0.4, AdaptiveDownscale::BitrateScale(0.2, 0.4), 1e-9);
+			Assert::AreEqual(0.7, AdaptiveDownscale::BitrateScale(0.5, 0.4), 1e-9, L"halfway");
+			Assert::AreEqual(0.7, AdaptiveDownscale::BitrateScale(0.51, 0.4), 1e-9, L"steps of 0.05: no churn");
+			Assert::AreEqual(0.5f, AdaptiveDownscale::BitrateAntiring(0.5f, 1.0, 0.4), L"clean: anti-ringing unchanged");
+			Assert::AreEqual(0.75f, AdaptiveDownscale::BitrateAntiring(0.5f, 0.4, 0.4), 1e-6f, L"floor: halfway to 1");
+		}
+
 		TEST_METHOD(SsimResidualHeldAlongTrustedVectors)
 		{
 			// Delta 15 S8-1 / Stage 12 §2c (owner 2026-10-15): the SSIM downscaler's

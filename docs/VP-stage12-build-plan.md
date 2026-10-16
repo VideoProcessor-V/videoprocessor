@@ -196,9 +196,12 @@ Then step C (VP debander with PQ thresholds, the vector refinements
   to add; the branch shares the code.
 - Fixed: the settings fingerprint lacked `source_range`, `capture_upload`
   and the Stage 12 keys, so a profile edit of only those was not applied live.
-- Next: 2c / S8-2 bitrate-aware anti-ringing and SSIM weight
-  (`ssim_bitrate_aware`, `ssim_bitrate_floor`), A4's remaining tests (RGB,
-  both capture_upload paths, native byte-identity), a live profile-edit test.
+- 2c / S8-2 built: at a low bitrate quality the SSIM and CNN weights fall
+  towards `ssim_bitrate_floor` (0.4) and the faithful anti-ringing rises
+  (`ssim_bitrate_aware` on; 1 at quality 0.8 and above = today's output;
+  steps of 0.05; low_bitrate_handling off = every source clean).
+- Next: A4's remaining tests (RGB, both capture_upload paths, native
+  byte-identity), a CNN-branch flicker test, a live profile-edit test.
 
 ## Costs (to measure, laptop then 3090)
 
