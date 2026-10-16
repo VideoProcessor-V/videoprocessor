@@ -1023,6 +1023,8 @@ namespace
 		// docs/VP-nvof-ahead.md (owner 2026-10-16): how many source frames ahead the
 		// optical-flow engine works (0 = off); off in low latency; never more than queued.
 		int motionAheadFrames = MotionAhead::kDefaultDepth;
+		// The engine is the established default (owner 2026-10-16); off = the matcher only.
+		bool opticalFlow = true;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1207,7 +1209,7 @@ namespace
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2336,6 +2338,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
 					settings.adaptive.faithfulOrtho ? "ortho" : "polar");
+		}
+		if (config.TryGetString(rule.section, "optical_flow", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.opticalFlow = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid optical_flow '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.opticalFlow ? "on" : "off");
 		}
 		if (config.TryGetString(rule.section, "motion_ahead_frames", raw))
 		{
@@ -9096,6 +9106,7 @@ struct LibplaceboVideoRenderer::Impl
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
+		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
@@ -17959,7 +17970,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			const MotionAhead::Decision ahead = MotionAhead::Decide(activeSettings.motionAheadFrames,
 				lowLatencyQueueActive.load(std::memory_order_acquire), motionEngineReady.load(std::memory_order_acquire),
-				queuedFutureFrames.load(std::memory_order_acquire));
+				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow);
 			char text[200];
 			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
 				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
@@ -25025,6 +25036,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "ssim_bitrate_aware=" << (s.ssimBitrateAware ? "on" : "off") << "\n"
 		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
+		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

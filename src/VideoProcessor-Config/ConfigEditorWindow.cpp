@@ -6932,6 +6932,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         bitrateFloor->setPlaceholderText(QStringLiteral("0.4"));
         bitrateFloor->setToolTip(QStringLiteral("What is left of the SSIM / CNN strength on the poorest stream (0.4 = 40 %)."));
         // docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, whole frames 0..4.
+        auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        opticalFlow->setToolTip(QStringLiteral(
+            "On (default): on NVIDIA GPUs the optical-flow hardware computes the motion vectors, ahead of the picture. "
+            "Off: VP's own matcher only (as on other GPUs). Either way the same trust checks apply, and the matcher "
+            "takes over whenever the engine has no vectors."));
         auto* motionAhead = addText(QStringLiteral("Motion vectors ahead, frames (0-4)"), QStringLiteral("motion_ahead_frames"));
         motionAhead->setValidator(new QIntValidator(0, 4, motionAhead));
         motionAhead->setPlaceholderText(QStringLiteral("4"));
@@ -8167,7 +8173,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

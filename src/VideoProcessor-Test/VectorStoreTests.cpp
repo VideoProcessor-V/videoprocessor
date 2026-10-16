@@ -138,3 +138,20 @@ namespace MotionAheadTest
 		}
 	};
 }
+
+namespace MotionAheadSwitchTest
+{
+	TEST_CLASS(MotionAheadSwitchTests)
+	{
+	public:
+		TEST_METHOD(OpticalFlowOffMeansTheMatcherOnly)
+		{
+			using namespace MotionAhead;
+			// The engine is the default; optical_flow off disables it whatever else is set.
+			Assert::IsTrue(Decide(4, false, true, 6).reason == Reason::Active, L"default on");
+			const Decision off = Decide(4, false, true, 6, false);
+			Assert::IsTrue(off.reason == Reason::Disabled);
+			Assert::AreEqual(0, off.depth);
+		}
+	};
+}

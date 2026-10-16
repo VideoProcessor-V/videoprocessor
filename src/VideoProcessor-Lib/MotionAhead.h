@@ -24,6 +24,7 @@ namespace MotionAhead
 		ShallowQueue,   // fewer frames queued than configured: what is there
 		NoFramesAhead,  // nothing queued after the current frame
 		Off,            // motion_ahead_frames: 0
+		Disabled,       // optical_flow: off (the matcher only)
 		LowLatency,     // a low-latency profile
 		NoEngine,       // no optical-flow engine (not NVIDIA, failed self-check, not built yet)
 	};
@@ -36,12 +37,15 @@ namespace MotionAhead
 		Reason reason = Reason::NoEngine;
 	};
 
-	inline Decision Decide(int configured, bool lowLatency, bool engineAvailable, size_t availableFutureFrames)
+	// `opticalFlow`: the optical_flow setting (owner 2026-10-16: the engine is the
+	// established default; optical_flow: off disables it).
+	inline Decision Decide(int configured, bool lowLatency, bool engineAvailable, size_t availableFutureFrames, bool opticalFlow = true)
 	{
 		Decision d;
 		d.configured = (std::max)(0, (std::min)(kMaxDepth, configured));
 		d.available = static_cast<int>((std::min)(availableFutureFrames, static_cast<size_t>(1000)));
-		if (d.configured == 0) d.reason = Reason::Off;
+		if (!opticalFlow) d.reason = Reason::Disabled;
+		else if (d.configured == 0) d.reason = Reason::Off;
 		else if (lowLatency) d.reason = Reason::LowLatency;
 		else if (!engineAvailable) d.reason = Reason::NoEngine;
 		else if (d.available == 0) d.reason = Reason::NoFramesAhead;
@@ -61,6 +65,7 @@ namespace MotionAhead
 		case Reason::ShallowQueue: return "fewer frames queued than configured";
 		case Reason::NoFramesAhead: return "no frames queued ahead";
 		case Reason::Off: return "off (motion_ahead_frames 0)";
+		case Reason::Disabled: return "off (optical_flow off: the matcher runs)";
 		case Reason::LowLatency: return "off in low latency";
 		case Reason::NoEngine: return "no optical-flow engine (the matcher runs)";
 		}
