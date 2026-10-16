@@ -8439,12 +8439,22 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     }
 
     if(document_ && sectionPrefix==QStringLiteral("vprenderer.motion") && profileSections(sectionPrefix).isEmpty()) {
-        document_->AddSection("vprenderer.motion");
+        // The Motion page's starting profile is part of what was loaded, not
+        // an edit (v1.4.02 merge): without this every file lacking it opened
+        // with unsaved changes (Apply lit, Cancel kept a dirty copy, reloads
+        // looked like repeated migrations).
+        const bool loadedClean = !(captureDocumentSnapshot(*document_) != savedSnapshot_);
+        // A named default profile, like every other page's (the literal root
+        // is the legacy unnamed form: the rename step converted it on every
+        // load, so each reload looked like a new migration and Cancel kept a
+        // dirty copy).
+        document_->AddSection("vprenderer.motion.Default");
         const std::pair<const char*,const char*> defaults[]={
             {"label","Default"},{"motion_engine","auto"},{"smooth_motion","off"},{"frame_mixer","oversample"},
             {"deinterlace","auto"},{"deinterlace_algorithm","bwdif"},{"field_order","auto"},
             {"deinterlace_cadence","field"},{"deinterlace_skip_spatial","false"}};
-        for(const auto& entry:defaults)document_->SetKnown("vprenderer.motion",entry.first,entry.second);
+        for(const auto& entry:defaults)document_->SetKnown("vprenderer.motion.Default",entry.first,entry.second);
+        if(loadedClean)savedSnapshot_=captureDocumentSnapshot(*document_);
     }
     ProfileListPolicy listPolicy;
     listPolicy.sections = [this, sectionPrefix]

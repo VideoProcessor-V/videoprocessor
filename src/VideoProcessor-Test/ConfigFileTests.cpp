@@ -1387,6 +1387,10 @@ namespace VideoProcessorTest
 			Assert::IsTrue(original.Load(file.path));
 			WIN32_FILE_ATTRIBUTE_DATA attributes{};
 			Assert::IsTrue(GetFileAttributesExA(file.path.c_str(), GetFileExInfoStandard, &attributes) != 0);
+			// File times come from a clock that ticks about every 15.6 ms: an edit
+			// inside the same tick as the load would leave ChangeTime equal too (the
+			// test ran in ~8 ms and failed on fast machines). A real edit is slower.
+			Sleep(40);
 			file.Write("two");
 			HANDLE handle = CreateFileA(file.path.c_str(), FILE_WRITE_ATTRIBUTES,
 				FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,

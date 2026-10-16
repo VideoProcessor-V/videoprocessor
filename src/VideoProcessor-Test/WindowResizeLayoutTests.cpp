@@ -101,10 +101,14 @@ namespace Tests
 		{
 			ResizeHost host;
 			// No SC_SIZE or WM_ENTERSIZEMOVE: the shell may position directly.
-			host.Place(0, 0, 1000, 1350);
+			// A tall window, within what Windows allows on this screen (it caps a
+			// window at the screen's maximum tracking size: 1220 px on a 1200-line
+			// laptop, so a fixed 1350 could never be kept there).
+			const LONG height = (std::min)(LONG{1350}, static_cast<LONG>(GetSystemMetrics(SM_CYMAXTRACK)) - 20);
+			host.Place(0, 0, 1000, height);
 			const auto bounds = host.Bounds();
 			Assert::AreEqual(LONG{1000}, bounds.right - bounds.left);
-			Assert::AreEqual(LONG{1350}, bounds.bottom - bounds.top);
+			Assert::AreEqual(height, bounds.bottom - bounds.top);
 		}
 		TEST_METHOD(MoveOnlyThenResizeKeepsCurrentPosition)
 		{
