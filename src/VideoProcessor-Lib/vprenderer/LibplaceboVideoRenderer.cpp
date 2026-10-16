@@ -2700,6 +2700,10 @@ namespace
 		// warp it is ignored (logged once) and its pass not run.
 		settings.occlusionFill = profile.dejudderOcclusionFill && !profile.dejudderWarpRendered;
 		settings.estCandidates = profile.dejudderEstCandidates;
+		// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow engine is the
+		// established default motion source; optical_flow: off = the block searches only.
+		// Without the engine (not NVIDIA, a failure) the searches run as before.
+		settings.opticalFlow = profile.opticalFlow;
 		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
 		settings.estQpel = profile.dejudderEstQpel;
 		settings.estGate = profile.dejudderEstGate;
@@ -5089,6 +5093,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> sourceAutoActive{ false };
 	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionAheadLogged;
+	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
 	// Set when the optical-flow engine is running and passed its self-check (not built yet).
 	std::atomic<bool> motionEngineReady{ false };
 	bool customHooksPublishedLowLatency = false;
@@ -12776,6 +12781,19 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			DebugLog::Log("De-judder: estimating again on a fresh contiguous pair");
 			motionRecoveryLogPending = false;
+		}
+		// The motion source: the optical-flow engine, or the block searches (logged on change).
+		{
+			const char* source = dejudder->OpticalFlowUsed() ? "optical-flow engine" :
+				!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" : "block searches (no engine)";
+			if (motionSourceLogged != source)
+			{
+				motionSourceLogged = source;
+				if (!dejudder->OpticalFlowUsed() && dejudder->GetSettings().opticalFlow && !dejudder->OpticalFlowError().empty())
+					DebugLog::Log("De-judder motion: %s - %s", source, dejudder->OpticalFlowError().c_str());
+				else
+					DebugLog::Log("De-judder motion: %s", source);
+			}
 		}
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
@@ -25067,6 +25085,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.trustScaleFull=" << m.trustScaleFull << "\n"
 		<< "matcher.occlusionFill=" << m.occlusionFill << "\n"
 		<< "matcher.estCandidates=" << m.estCandidates << "\n"
+		<< "matcher.opticalFlow=" << m.opticalFlow << "\n"
 		<< "matcher.estLambda=" << m.estLambda << "\n"
 		<< "matcher.estQpel=" << m.estQpel << "\n"
 		<< "matcher.estGate=" << m.estGate << "\n"
