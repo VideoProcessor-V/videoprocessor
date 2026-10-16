@@ -810,6 +810,42 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		TEST_METHOD(EveryProfileKeyChangesTheLiveSettingsFingerprint)
+		{
+			// Planner Q4 (2026-10-16): a profile edit is applied live only when it changes the
+			// renderer's effective-settings fingerprint. Structural: every key of an applied profile
+			// enters it, so the keys once missed (source_range, capture_upload, the Stage 12 keys) and
+			// a key not invented yet all change it; the same file twice gives the same fingerprint.
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Fingerprint = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Fingerprint>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the test export");
+			const std::string path = folder + "vp-fingerprint-test.cfg";
+			auto fingerprint = [&](const std::string& extra) {
+				{
+					std::ofstream config(path, std::ios::trunc);
+					config << "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n" << extra;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = fingerprintOf(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				Assert::IsTrue(length > 0, L"fingerprint computed");
+				return std::string(buffer.data());
+			};
+			const std::string base = fingerprint("");
+			Assert::AreEqual(base, fingerprint(""), L"the same file gives the same fingerprint");
+			const char* const changes[] = { "source_range: full\n", "capture_upload: early\n", "source_resolution: 1080\n",
+				"source_resolution_auto_min_confidence: 0.9\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
+				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
+				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
+				"a_key_not_invented_yet: 1\n" };
+			for (const char* change : changes)
+				Assert::AreNotEqual(base, fingerprint(change),
+					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
+			DeleteFileA(path.c_str());
+		}
+
 		TEST_METHOD(NativeAndNewSettingsOffArePixelIdentical)
 		{
 			// Stage 12 (owner 2026-10-16): the exact output codes (VP-0133's

@@ -5,6 +5,7 @@
 #include <libplacebo/renderer.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -64,8 +65,12 @@ namespace SourceResolutionMonitor
 		Snapshot Read() const;
 
 		// Render thread: the re-base factor auto wants for a native height
-		// (1 = native), and why ("" when unchanged).
-		double AutoFactor(int nativeHeight, double minimumConfidence, std::string& why);
+		// (1 = native), and why ("" when unchanged). Planner Q2 (2026-10-16): back to
+		// native at once on detail above the re-based height or a discontinuity; when
+		// only the confidence fell, at the next cut, at most kDisengageWaitSeconds later.
+		// `seconds`: a monotonic clock (tests); < 0 = the steady clock.
+		double AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds = -1.0);
+		static constexpr double kDisengageWaitSeconds = 5.0;
 		double AutoRatio() const { return autoAppliedShared.load(std::memory_order_acquire); }
 		// The source_resolution setting in force (render thread sets it; any
 		// thread reads it, for the status line).
@@ -73,6 +78,13 @@ namespace SourceResolutionMonitor
 		std::string Selection() const;
 
 		void Release(pl_gpu gpu);
+		// Owner 2026-10-16 (debugging auto): a rolling logs\source-resolution.csv - every
+		// analysed frame's reading and every auto decision with its reason, the newest
+		// kHistoryRows (about ten minutes), rewritten every few seconds (temp + replace).
+		// Empty path = off; the renderer sets it beside the log.
+		void SetHistoryPath(const std::string& path);
+		void FlushHistoryNow() { FlushHistory(true); }
+		static constexpr size_t kHistoryRows = 1200;
 		double intervalSeconds = 0.5;   // tile copies per second: 2
 		static constexpr int kTile = 256;
 		static constexpr int kMaxTiles = 8;
@@ -89,6 +101,8 @@ namespace SourceResolutionMonitor
 		};
 		void Worker();
 		void Fail(const char* what, double seconds);
+		void Record(const std::string& row);   // with `mutex` held
+		void FlushHistory(bool force);
 		void Analyse(Job& job);
 
 		// GPU side (render thread).
@@ -115,6 +129,10 @@ namespace SourceResolutionMonitor
 		unsigned long long lastCuts = 0;
 		double qualitySmoothed = -1.0, bitsSmoothed = 0.0;
 		Snapshot snapshot;
+		std::deque<std::string> history;
+		std::string historyPath;
+		std::chrono::steady_clock::time_point lastFlush{};
+		bool historyDirty = false;
 
 		// Auto (render thread).
 		std::atomic<bool> autoReset{ false };
@@ -122,6 +140,9 @@ namespace SourceResolutionMonitor
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::string selection = "native";
 		unsigned long long autoPendingCuts = 0;
+		bool disengagePending = false;   // confidence fell: native at the next cut or after the wait
+		double disengageSince = 0.0;
+		unsigned long long disengageCuts = 0;
 	};
 
 	// The stats-line / status text.

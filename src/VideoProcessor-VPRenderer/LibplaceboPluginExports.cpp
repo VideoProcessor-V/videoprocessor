@@ -14,6 +14,22 @@ VideoProcessorLibplaceboGetApiVersion()
 }
 
 
+// Tests only (planner Q4): the effective-settings fingerprint of a configuration file;
+// returns its length (0 = not loaded), copying at most size - 1 characters.
+extern "C" __declspec(dllexport) int __cdecl
+VideoProcessorLibplaceboSettingsFingerprintForTest(const char* configPath, char* out, int size)
+{
+	const std::string fingerprint = LibplaceboRendererSettingsFingerprintForTest(configPath);
+	if (out && size > 0)
+	{
+		const size_t n = (std::min)(fingerprint.size(), static_cast<size_t>(size - 1));
+		memcpy(out, fingerprint.data(), n);
+		out[n] = 0;
+	}
+	return static_cast<int>(fingerprint.size());
+}
+
+
 extern "C" __declspec(dllexport) IVideoRenderer* __cdecl
 VideoProcessorLibplaceboCreateRenderer(
 	IRendererCallback* callback,

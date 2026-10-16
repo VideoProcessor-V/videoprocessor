@@ -993,6 +993,10 @@ namespace
 		// (EarlyUpload, a second device and shared textures); render = the
 		// render thread uploads it (today).
 		std::string captureUpload = "render";
+		// Planner Q4 (2026-10-16): every key and value of the profile sections applied, so a
+		// profile edit always changes the effective fingerprint (and is applied live) - also
+		// for keys added later, without anyone having to list them in the fingerprint.
+		std::string profileValues;
 		// Owner 2026-10-15: the captured signal's range. auto = from the
 		// capture format (YCbCr and 10-bit RGB limited; 8- and 12-bit RGB
 		// full), as before; full / limited override it for a source that
@@ -1227,6 +1231,10 @@ namespace
         // Keep it in the effective fingerprint to queue live changes, but out
         // of the rebuild fingerprint used by transport compatibility checks.
         if (includeViewportSettings) {
+            // Planner Q4: the applied profiles' raw values (structural: any key, present or
+            // future). Not in the rebuild / transport fingerprint (includeViewportSettings off),
+            // so they never force a restart by themselves.
+            stream << settings.profileValues << '|';
             stream
             << settings.subtitleBoxTest << '|'
             << settings.subtitleCutPasteTest << '|'
@@ -1935,6 +1943,13 @@ namespace
 	{
 		if (rule.name.empty())
 			return;
+		if (const auto* values = config.GetSectionValues(rule.section))
+		{
+			settings.profileValues += rule.section + "{";
+			for (const auto& value : *values)
+				settings.profileValues += value.first + "=" + value.second + ";";
+			settings.profileValues += "}";
+		}
 
         config.TryGetBool(rule.section, "subtitle_bbox_test", settings.subtitleBoxTest);
         config.TryGetBool(rule.section, "subtitle_cut_paste_test", settings.subtitleCutPasteTest);
@@ -4176,6 +4191,18 @@ namespace
 	};
 }
 
+// Tests only (planner Q4): the effective-settings fingerprint for a configuration file and an
+// unknown source, as the renderer computes it to decide whether a profile edit is applied live.
+std::string LibplaceboRendererSettingsFingerprintForTest(const char* configPath)
+{
+	ConfigFile config;
+	if (!configPath || !config.Load(configPath, ConfigFile::ReadPolicy::Fresh))
+		return std::string();
+	VideoState state;
+	std::string rule;
+	return EffectiveSettingsFingerprint(LoadRendererSettings(config, state, rule));
+}
+
 
 // Owns one caller-bounded timestamp-disjoint query for a candidate output
 // frame. Any early return closes and rejects the query.
@@ -4489,6 +4516,7 @@ struct LibplaceboVideoRenderer::Impl
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
 	uint64_t sourceMonitorSequence = 0;
+	bool sourceMonitorHistorySet = false;
 	// Stage 12 §2b/§2d: VP's debander (this frame's parameters; 0 = off).
 	VpDebander::Module debander;
 	VpDebander::Params vpDebandParams;
@@ -17913,6 +17941,17 @@ struct LibplaceboVideoRenderer::Impl
 			if (sourceSequence != sourceMonitorSequence && d3d11 && d3d11->gpu)
 			{
 				sourceMonitorSequence = sourceSequence;
+				if (!sourceMonitorHistorySet)
+				{
+					// The rolling auto history beside the log (logs\ when the log path is not known here).
+					std::string logPath = DebugLog::GetLogFilePath();
+					if (logPath.empty()) logPath = "logs\\vp.log";
+					const size_t slash = logPath.find_last_of("\\/");
+					const std::string folder = slash == std::string::npos ? std::string(".") : logPath.substr(0, slash);
+					CreateDirectoryA(folder.c_str(), nullptr);
+					sourceMonitor.SetHistoryPath(folder + "\\source-resolution.csv");
+					sourceMonitorHistorySet = true;
+				}
 				if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
 				const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 				sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);

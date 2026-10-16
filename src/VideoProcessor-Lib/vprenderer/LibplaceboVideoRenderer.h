@@ -393,3 +393,6 @@ private:
 	double m_ledShadowLift = 0.0;
 	void UpdateLedDrive(const ConfigFile& configuration);
 };
+
+// Tests only (planner Q4): see LibplaceboVideoRenderer.cpp.
+std::string LibplaceboRendererSettingsFingerprintForTest(const char* configPath);

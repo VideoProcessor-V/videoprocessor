@@ -7533,6 +7533,12 @@ namespace VideoProcessorTest
 			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
 
 			SourceResolutionMonitor::Monitor monitor;
+			// Owner 2026-10-16: the rolling auto history (logs\\source-resolution.csv in VP).
+			char tempPath[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, tempPath);
+			const std::string historyPath = std::string(tempPath) + "vp-source-resolution-history.csv";
+			DeleteFileA(historyPath.c_str());
+			monitor.SetHistoryPath(historyPath);
 			double seconds = 0.0;
 			uint64_t sequence = 0;
 			// One analysed frame: submit, let the GPU finish, collect, wait for the worker.
@@ -7580,6 +7586,19 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.5, factor, 1e-9, L"re-based to 540 lines");
 			Assert::AreEqual(1080, s.nativeHeight);
 
+			// Planner Q2: only the confidence falls (here: the minimum raised above it) - native at the
+			// next cut, at most 5 s later; not at once.
+			{
+				factor = monitor.AutoFactor(H, 1.01, why, seconds);
+				Logger::WriteMessage(("confidence fell: " + why + "\n").c_str());
+				Assert::AreEqual(0.5, factor, 1e-9, L"a confidence drop does not disengage mid-shot");
+				factor = monitor.AutoFactor(H, 1.01, why, seconds + 2.0);
+				Assert::AreEqual(0.5, factor, 1e-9, L"still waiting for a cut after 2 s");
+				factor = monitor.AutoFactor(H, 1.01, why, seconds + 5.1);
+				Logger::WriteMessage(("after 5 s: " + why + "\n").c_str());
+				Assert::AreEqual(1.0, factor, L"native after 5 s without a cut");
+			}
+
 			// Native detail: back to native at once (same shot level, no cut needed).
 			{
 				pl_tex tex = upload(content(W, H, 999, 0.55));
@@ -7602,6 +7621,20 @@ namespace VideoProcessorTest
 			}
 			Assert::AreEqual(1.0, monitor.Read().declaredRatio, L"evidence starts again after a seek");
 			Assert::AreEqual(std::string("test seek"), monitor.Read().lastDiscontinuity);
+
+			// The history holds the readings and every auto decision with its reason.
+			monitor.FlushHistoryNow();
+			{
+				std::ifstream in(historyPath);
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				Assert::IsTrue(text.find("time,event,frame_ratio") == 0, L"history header");
+				Assert::IsTrue(text.find(",reading,") != std::string::npos, L"reading rows");
+				Assert::IsTrue(text.find("engaged at a cut") != std::string::npos, L"the engage decision and its reason");
+				Assert::IsTrue(text.find("native after 5 s without a cut") != std::string::npos, L"the bounded disengage");
+				Assert::IsTrue(text.find("discontinuity") != std::string::npos && text.find("test seek") != std::string::npos,
+					L"the seek");
+			}
+			DeleteFileA(historyPath.c_str());
 
 			// Genuine full-resolution content over many shots never engages.
 			SourceResolutionMonitor::Monitor native;

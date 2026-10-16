@@ -31,6 +31,16 @@ if (tile < int(tiles) && g.y < 256) {
 }
 )GLSL";
 
+		// Local wall-clock time for the history rows.
+		std::string Clock()
+		{
+			SYSTEMTIME t{};
+			GetLocalTime(&t);
+			char text[32];
+			snprintf(text, sizeof(text), "%02u:%02u:%02u.%03u", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+			return text;
+		}
+
 		double Median(std::vector<double> v)
 		{
 			if (v.empty()) return 1.0;
@@ -52,6 +62,45 @@ if (tile < int(tiles) && g.y < 256) {
 		}
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
+		FlushHistory(true);
+	}
+
+	void Monitor::SetHistoryPath(const std::string& path)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		historyPath = path;
+	}
+
+	void Monitor::Record(const std::string& row)
+	{
+		history.push_back(Clock() + "," + row);
+		while (history.size() > kHistoryRows) history.pop_front();
+		historyDirty = true;
+	}
+
+	void Monitor::FlushHistory(bool force)
+	{
+		std::string path;
+		std::string text;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			const auto now = std::chrono::steady_clock::now();
+			if (historyPath.empty() || !historyDirty || (!force && now - lastFlush < std::chrono::seconds(5))) return;
+			lastFlush = now;
+			historyDirty = false;
+			path = historyPath;
+			text = "time,event,frame_ratio,coherence_v,coherence_h,live,declared,confidence,bitrate_quality,effective_bits,cuts,"
+				"tiles,auto_ratio,note\n";
+			for (const std::string& row : history) text += row + "\n";
+		}
+		// Temp + replace: a reader never sees a half-written file.
+		const std::string temp = path + ".tmp";
+		FILE* f = nullptr;
+		if (fopen_s(&f, temp.c_str(), "wb") != 0 || !f) return;
+		const bool written = fwrite(text.data(), 1, text.size(), f) == text.size();
+		fclose(f);
+		if (written) MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+		else DeleteFileA(temp.c_str());
 	}
 
 	void Monitor::Release(pl_gpu g)
@@ -276,12 +325,14 @@ if (tile < int(tiles) && g.y < 256) {
 					snapshot.confidence = 0.0;
 					snapshot.discontinuities = tracker.Discontinuities();
 					snapshot.lastDiscontinuity = cause;
+					Record(std::string("discontinuity,,,,,1,0,,,,,") + "1," + cause);
 				}
 				if (!haveJob) continue;
 				current = std::move(job);
 				haveJob = false;
 			}
 			Analyse(current);
+			FlushHistory(false);
 		}
 	}
 
@@ -348,6 +399,12 @@ if (tile < int(tiles) && g.y < 256) {
 		snapshot.discontinuities = tracker.Discontinuities();
 		++snapshot.frames;
 		snapshot.analyseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		char row[256];
+		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
+			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,
+			snapshot.confidence, snapshot.bitrateQuality, snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
+			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs);
+		Record(row);
 	}
 
 	void Monitor::SetSelection(const std::string& value)
@@ -366,14 +423,17 @@ if (tile < int(tiles) && g.y < 256) {
 		return selection;
 	}
 
-	double Monitor::AutoFactor(int nativeHeight, double minimumConfidence, std::string& why)
+	double Monitor::AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds)
 	{
 		why.clear();
+		const double now = seconds >= 0.0 ? seconds :
+			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		const Snapshot s = Read();
 		const double before = autoApplied;
 		if (autoReset.exchange(false, std::memory_order_acq_rel))
 		{
 			autoApplied = autoPending = 1.0;
+			disengagePending = false;
 			if (before < 1.0) why = "native at once (" + (s.lastDiscontinuity.empty() ? std::string("discontinuity") : s.lastDiscontinuity) + ")";
 		}
 		double wanted = s.reading && s.declaredRatio < 1.0 && s.confidence >= minimumConfidence ? s.declaredRatio : 1.0;
@@ -386,11 +446,34 @@ if (tile < int(tiles) && g.y < 256) {
 		const double tolerance = 0.01;
 		if (wanted > autoApplied + tolerance || (wanted >= 1.0 && autoApplied < 1.0))
 		{
-			// Up (towards native): at once.
-			autoApplied = autoPending = wanted;
-			if (why.empty()) why = wanted >= 1.0 ? "native at once (detail above the re-based height, or confidence fell)" : "raised at once";
+			// Up (towards native). Detail above the re-based height (the declared reading rose)
+			// is the harmful direction: at once. Only the confidence fell: at the next cut,
+			// at most kDisengageWaitSeconds later, so the scaler does not change mid-scene.
+			const bool detailAbove = !s.reading || s.declaredRatio > autoApplied + tolerance;
+			if (detailAbove)
+			{
+				autoApplied = autoPending = wanted;
+				disengagePending = false;
+				if (why.empty()) why = wanted >= 1.0 ? "native at once (detail above the re-based height)" : "raised at once (detail above the re-based height)";
+			}
+			else if (!disengagePending)
+			{
+				disengagePending = true;
+				disengageSince = now;
+				disengageCuts = s.cuts;
+				why = "confidence fell: native at the next cut (within 5 s)";
+			}
+			else if (s.cuts != disengageCuts || now - disengageSince >= kDisengageWaitSeconds)
+			{
+				why = s.cuts != disengageCuts ? "native at a cut (confidence fell)" : "native after 5 s without a cut (confidence fell)";
+				autoApplied = autoPending = wanted;
+				disengagePending = false;
+			}
 		}
-		else if (wanted < autoApplied - tolerance)
+		else
+			disengagePending = false;
+
+		if (wanted < autoApplied - tolerance)
 		{
 			// Down: wait for the next cut so the picture never changes mid-shot.
 			if (std::fabs(wanted - autoPending) > tolerance)
@@ -406,6 +489,13 @@ if (tile < int(tiles) && g.y < 256) {
 			}
 		}
 		autoAppliedShared.store(autoApplied, std::memory_order_release);
+		if (!why.empty())
+		{
+			char row[160];
+			snprintf(row, sizeof(row), "auto,,,,,%.4f,%.2f,,,%llu,,%.4f,", s.declaredRatio, s.confidence, s.cuts, autoApplied);
+			std::lock_guard<std::mutex> lock(mutex);
+			Record(row + why);
+		}
 		return autoApplied;
 	}
 
