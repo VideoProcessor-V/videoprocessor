@@ -5077,6 +5077,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<size_t> queuedFutureFrames{ 0 };
 	// source_resolution auto is selected (the render loop then shows the monitor the frames ahead).
 	std::atomic<bool> sourceAutoActive{ false };
+	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionAheadLogged;
 	// Set when the optical-flow engine is running and passed its self-check (not built yet).
 	std::atomic<bool> motionEngineReady{ false };
@@ -23904,6 +23905,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 			catch (const std::exception& e)
 			{
 				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
+			}
+			if (!m_impl->sourceAheadLogged)
+			{
+				m_impl->sourceAheadLogged = true;
+				DebugLog::Log("Source resolution look-ahead: watching %zu queued frame(s) ahead", sourceAheadFrames.size());
 			}
 			for (QueuedFrame& ahead : sourceAheadFrames)
 				ahead.frame.SourceBufferRelease();

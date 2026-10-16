@@ -805,6 +805,8 @@ namespace Tests
 				Assert::IsTrue(r.sourceStatus.find("source_resolution auto") != std::string::npos, (L"auto: status line\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.sourceStatus.find("not read") == std::string::npos, (L"auto: the source is read\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Re-base: 3840x2160"), (L"auto: not re-based within a short run\n" + r.Tail()).c_str());
+				// Look-ahead verification (owner 2026-10-16): the queued frames reach the monitor.
+				Assert::IsTrue(r.Logged("Source resolution look-ahead: watching"), (L"auto: the frames ahead are watched\n" + r.Tail()).c_str());
 			}
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
