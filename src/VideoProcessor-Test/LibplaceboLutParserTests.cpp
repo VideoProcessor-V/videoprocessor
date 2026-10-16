@@ -7551,17 +7551,19 @@ namespace VideoProcessorTest
 				double t = untilWaiting(m, seq);
 				Assert::IsTrue(t > 0.0);
 				const std::vector<double> native = makeFrame(Kind::Native, 2000, 0.75);
-				ahead(m, seq + 1, native);
+				ahead(m, seq + 1, makeFrame(Kind::Upscaled, 1999, 0.35));   // the current shot (the first frame ahead sets the baseline)
+				ahead(m, seq + 2, native);
 				Assert::IsTrue(waitReady(m));
 				std::string why;
-				const double f = m.AutoFactor(FH, 0.8, why, t, seq + 1);
+				Assert::AreEqual(1.0, m.AutoFactor(FH, 0.8, why, t, seq + 1), 1e-9);
+				const double f = m.AutoFactor(FH, 0.8, why, t, seq + 2);
 				Logger::WriteMessage(("disagree: " + why + "\n").c_str());
 				Assert::AreEqual(1.0, f, 1e-9, L"stays native");
 				Assert::AreEqual(std::string("look-ahead: the next shot disagrees - staying"), why);
 				Assert::AreEqual(1ull, m.Ahead().cancelled);
 				// The monitor then sees that cut (the native frame): still no engage on it.
 				analyse(m, native, t + 0.5);
-				Assert::AreEqual(1.0, m.AutoFactor(FH, 0.8, why, t + 0.5, seq + 2), 1e-9, L"the cancelled cut is not used");
+				Assert::AreEqual(1.0, m.AutoFactor(FH, 0.8, why, t + 0.5, seq + 3), 1e-9, L"the cancelled cut is not used");
 			}
 			// 3. A black frame ahead, then an agreeing shot: engaged on the black frame.
 			{
