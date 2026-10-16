@@ -629,6 +629,15 @@ namespace Tests
 				(L"optical_flow: off runs the searches\n" + off.Tail()).c_str());
 			if (source(on).find("optical-flow engine") == std::string::npos)
 				Logger::WriteMessage("note: no optical-flow engine on this GPU - the default fell back to the searches\n");
+			// Planner Q1: with the pair computed ahead, the camera motion comes from the engine.
+			bool ahead = false, cameraFromEngine = false;
+			for (const std::string& line : on.log)
+			{
+				ahead = ahead || line.find("optical-flow engine (computed ahead") != std::string::npos;
+				cameraFromEngine = cameraFromEngine || line.find("camera from the engine") != std::string::npos;
+			}
+			if (ahead)
+				Assert::IsTrue(cameraFromEngine, (L"pairs computed ahead: the camera from the engine\n" + on.Tail()).c_str());
 		}
 
 		TEST_METHOD(StreamFaultsKeepTheDejudderSafeAndRecovering)
@@ -897,7 +906,7 @@ namespace Tests
 			const std::string base = fingerprint("");
 			Assert::AreEqual(base, fingerprint(""), L"the same file gives the same fingerprint");
 			const char* const changes[] = { "source_range: full\n", "capture_upload: early\n", "source_resolution: 1080\n",
-				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n","deband_vp: auto\n", "low_bitrate_handling: off\n",
+				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n", "optical_flow_global: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
 				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
 				"a_key_not_invented_yet: 1\n" };

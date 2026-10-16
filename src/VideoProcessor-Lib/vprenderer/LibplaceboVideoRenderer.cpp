@@ -1040,6 +1040,11 @@ namespace
 		int motionAheadFrames = MotionAhead::kDefaultDepth;
 		// The engine is the established default (owner 2026-10-16); off = the matcher only.
 		bool opticalFlow = true;
+		// Planner Q1 (2026-10-16): the whole-frame motion from the engine's field when its pair
+		// came ahead (the global search the fallback). On the corpus identical without the
+		// taste; on known pans the engine reads the speed exactly where the search overshot
+		// medium pans by a step, so the taste's roll-off and camera follow the true speed.
+		bool opticalFlowGlobal = true;
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
 		bool rebaseKernelMatch = true;
@@ -1231,7 +1236,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2405,6 +2410,14 @@ namespace
 				DebugLog::Log("profile '%s': invalid optical_flow '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.opticalFlow ? "on" : "off");
 		}
+		if (config.TryGetString(rule.section, "optical_flow_global", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.opticalFlowGlobal = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid optical_flow_global '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.opticalFlowGlobal ? "on" : "off");
+		}
 		if (config.TryGetString(rule.section, "motion_ahead_frames", raw))
 		{
 			double parsed = 0.0;
@@ -2762,6 +2775,7 @@ namespace
 		// established default motion source; optical_flow: off = the block searches only.
 		// Without the engine (not NVIDIA, a failure) the searches run as before.
 		settings.opticalFlow = profile.opticalFlow;
+		settings.opticalFlowGlobal = profile.opticalFlowGlobal;
 		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
 		settings.estQpel = profile.dejudderEstQpel;
 		settings.estGate = profile.dejudderEstGate;
@@ -9188,6 +9202,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
+		changed(current.opticalFlowGlobal != next.opticalFlowGlobal, "optical_flow_global");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
@@ -12872,7 +12887,8 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		// The motion source: the optical-flow engine, or the block searches (logged on change).
 		{
-			const char* source = dejudder->ExternalFlowUsed() ? "optical-flow engine (computed ahead)" :
+			const char* source = dejudder->ExternalFlowUsed() ? (dejudder->GlobalFromEngine() ?
+					"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
 				dejudder->OpticalFlowUsed() ? "optical-flow engine" :
 				!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" : "block searches (no engine)";
 			if (motionSourceLogged != source)
@@ -25263,6 +25279,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
+		<< "optical_flow_global=" << (s.opticalFlowGlobal ? "on" : "off") << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"

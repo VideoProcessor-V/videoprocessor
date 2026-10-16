@@ -4030,6 +4030,29 @@ void RunBetaMotionCorpus()
 	for (size_t vi = 1; vi < variants.size(); ++vi) if (perVariant[vi] > perVariant[bestVariant]) bestVariant = vi;
 	// Every variant (2026-10-16, planner Q1 comparison): its benefit against the first's, its
 	// trusted share on the cut (should be near 0) and its wrong-trusted share over the scenes.
+	// Planner Q1 (2026-10-16): with the taste on, where the engine's whole-frame motion and D1's
+	// differ - per scene, the two taste variants' benefit and vector error.
+	{
+		size_t d1Taste = variants.size(), engineTaste = variants.size();
+		for (size_t vi = 0; vi < variants.size(); ++vi)
+		{
+			if (variants[vi].name == "optical flow seed, slow, D2/D4/R-A") d1Taste = vi;
+			if (variants[vi].name == "optical flow seed, slow, engine global, D2/D4/R-A") engineTaste = vi;
+		}
+		if (d1Taste < variants.size() && engineTaste < variants.size())
+		{
+			std::cout << "Beta motion corpus: taste on, D1 vs the engine's global (benefit; vector error px):\n";
+			for (size_t si = 0; si < scenes.size(); ++si)
+			{
+				const Result& a = results[si][d1Taste];
+				const Result& b = results[si][engineTaste];
+				char row[320];
+				std::snprintf(row, sizeof(row), "  %-26s %-34.34s D1 %7.2f (%5.2f px)  engine %7.2f (%5.2f px)%s", scenes[si].cls.c_str(), scenes[si].name.c_str(),
+					a.hold - a.warp, a.epe, b.hold - b.warp, b.epe, std::fabs((a.hold - a.warp) - (b.hold - b.warp)) > 1.0 ? "  <-" : "");
+				std::cout << row << "\n";
+			}
+		}
+	}
 	std::cout << "Beta motion corpus: every variant (benefit summed, cut excluded; share of the first's; the cut's trusted; wrong trusted):\n";
 	for (size_t vi = 0; vi < variants.size(); ++vi)
 	{

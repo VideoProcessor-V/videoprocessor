@@ -5372,6 +5372,69 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// Planner Q1 (2026-10-16): the whole-frame motion (D1) from the global search and from the
+		// engine's field, against the true pan, and whether each is marked usable (z < 0.9) -
+		// the taste's roll-off and the camera read it.
+		TEST_METHOD(EngineGlobalMatchesTheSearchOnKnownPans)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			auto readGlobal = [&](const Dejudder::MotionWarp& warp, float out[4]) {
+				pl_tex t = warp.GlobalVector();
+				Assert::IsNotNull(t);
+				const size_t texel = t->params.format->texel_size;
+				std::vector<uint8_t> raw(texel);
+				pl_tex_transfer_params d{}; d.tex = t; d.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"the global vector is not host-readable");
+				for (int k = 0; k < 4; ++k)
+				{
+					if (texel == 16) { float f; std::memcpy(&f, &raw[static_cast<size_t>(k) * 4], 4); out[k] = f; }
+					else { uint16_t h; std::memcpy(&h, &raw[static_cast<size_t>(k) * 2], 2); out[k] = HalfBits(h); }
+				}
+			};
+			int worse = 0;
+			bool engine = true;
+			for (const int dx : { 6, 12, 20, 32 })
+			{
+				const int width = 768, height = 384;
+				const DejudderFrame a = MakeDejudderFrame(width, height,
+					[](int x, int y) { return DejudderTexture(x, y); }, [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+				const DejudderFrame b = MakeDejudderFrame(width, height,
+					[dx](int x, int y) { return DejudderTexture(x - dx, y); },
+					[dx](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y, 7 + c); });
+				DejudderGpuPlanes pa, pb;
+				UploadDejudderFrame(gpu, a, pa);
+				UploadDejudderFrame(gpu, b, pb);
+				float g[2][4] = {};
+				for (int mode = 0; mode < 2; ++mode)
+				{
+					Dejudder::Settings settings = DejudderTestSettings();
+					settings.opticalFlow = true;
+					settings.opticalFlowCandidate = true;
+					settings.opticalFlowSeed = true;
+					settings.globalPrior = true;   // D1 on, as live
+					settings.estCandidates = true;   // the two sweeps the seed needs
+					settings.globalTwo = true;
+					settings.opticalFlowGlobal = mode == 1;
+					settings.opticalFlowGlobalReadback = mode == 1;
+					Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+					Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+					if (!warp.OpticalFlowUsed()) { engine = false; break; }
+					if (mode == 1) Assert::IsTrue(warp.GlobalFromEngine(), L"the engine's global was used");
+					readGlobal(warp, g[mode]);
+				}
+				if (!engine) { Logger::WriteMessage("optical flow engine unavailable: not run\n"); return; }
+				char line[240];
+				snprintf(line, sizeof(line), "pan %2d px: search (%.2f, %.2f) px z %.2f; engine (%.2f, %.2f) px z %.2f\n",
+					dx, g[0][0] * 8.0f, g[0][1] * 8.0f, g[0][2], g[1][0] * 8.0f, g[1][1] * 8.0f, g[1][2]);
+				Logger::WriteMessage(line);
+				const float errSearch = std::fabs(g[0][0] * 8.0f - dx), errEngine = std::fabs(g[1][0] * 8.0f - dx);
+				if (errEngine > errSearch + 1.0f || (g[1][2] >= 0.9f && g[0][2] < 0.9f)) ++worse;
+			}
+			Assert::AreEqual(0, worse, L"the engine's whole-frame motion is as close to the true pan and as usable as the search's");
+		}
+
 		TEST_METHOD(SigmaDeltaDomainFollowsTheTarget)
 		{
 			auto repr = [](enum pl_color_levels levels, int sample, int color)

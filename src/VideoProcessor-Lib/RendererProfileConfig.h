@@ -697,6 +697,7 @@ namespace RendererProfileConfig
 			if (key == "motion_ahead_frames") return IsChoice(value, { "0", "1", "2", "3", "4" });
 			// The optical-flow engine: the default; off = the matcher only.
 			if (key == "optical_flow") return IsChoice(value, { "on", "off" });
+			if (key == "optical_flow_global") return IsChoice(value, { "on", "off" });
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).

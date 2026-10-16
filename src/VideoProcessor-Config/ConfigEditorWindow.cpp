@@ -7136,6 +7136,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "A player that upscales 1080p video draws its own subtitles at 4K: sharp text over a soft picture. On "
             "(default): a detection patch whose sharp detail is a band of text is left out of that frame's reading, so "
             "subtitles neither block the detection nor switch an active re-base off. Off: every patch counts."));
+        auto* opticalFlowGlobal = addChoice(QStringLiteral("Optical flow: camera motion from the engine"), QStringLiteral("optical_flow_global"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        opticalFlowGlobal->setToolTip(QStringLiteral(
+            "On (default): with the NVIDIA optical-flow engine, the whole picture's motion (the camera's pan or tilt) is "
+            "read from the engine's vectors, computed ahead off the render thread, instead of a separate search. It reads "
+            "the pan speed exactly where the search overshot medium pans, so 'Keep fast motion's strobing' and the smoothing "
+            "of people follow the true speed; the motion vectors themselves are unchanged. Without the engine the search "
+            "runs as before. Off: always the search."));
         auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlow->setToolTip(QStringLiteral(
@@ -8377,7 +8385,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "optical_flow_global", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

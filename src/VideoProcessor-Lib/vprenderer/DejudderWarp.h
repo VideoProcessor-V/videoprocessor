@@ -274,7 +274,7 @@ namespace Dejudder
 		// Planner Q1 (2026-10-16): with the seed and a pair computed ahead, the whole frame's
 		// motion (D1) from the engine's field (worked out on the producer's worker) instead
 		// of the global search; the search stays the fallback (no pair ahead, no engine).
-		bool opticalFlowGlobal = false;
+		bool opticalFlowGlobal = true;
 		// Tests only: the render-time engine's field read back (a stall) so the engine's
 		// whole-frame motion can be compared on corpora without a producer.
 		bool opticalFlowGlobalReadback = false;
