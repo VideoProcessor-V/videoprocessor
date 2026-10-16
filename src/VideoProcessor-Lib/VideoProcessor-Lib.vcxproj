@@ -325,6 +325,7 @@
     <ClInclude Include="StateVariables.h" />
     <ClInclude Include="UnifiedProfileRuntime.h" />
 	<ClInclude Include="SceneDetector.h" />
+	<ClInclude Include="SourceResolutionDetector.h" />
 	<ClInclude Include="vprenderer\AlphaNativeRgbIngress.h" />
     <ClInclude Include="SubtitleRepositionMode.h" />
     <ClInclude Include="StringUtils.h" />
@@ -476,6 +477,7 @@
     <ClCompile Include="StateVariables.cpp" />
     <ClCompile Include="UnifiedProfileRuntime.cpp" />
 	<ClCompile Include="SceneDetector.cpp" />
+	<ClCompile Include="SourceResolutionDetector.cpp" />
     <ClCompile Include="StringUtils.cpp" />
     <ClCompile Include="TimingClock.cpp" />
 	<ClCompile Include="VideoTimingController.cpp" />

@@ -1,0 +1,373 @@
+#include "pch.h"
+#include "SourceResolutionDetector.h"
+
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <cstdio>
+
+namespace SourceResolution
+{
+	namespace
+	{
+		constexpr double kPi = 3.14159265358979323846;
+
+		bool PowerOfTwo(int n) { return n >= 64 && n <= 1024 && (n & (n - 1)) == 0; }
+
+		// In-place iterative radix-2 FFT.
+		void Fft(std::vector<std::complex<double>>& a)
+		{
+			const size_t n = a.size();
+			for (size_t i = 1, j = 0; i < n; ++i)
+			{
+				size_t bit = n >> 1;
+				for (; j & bit; bit >>= 1) j ^= bit;
+				j ^= bit;
+				if (i < j) std::swap(a[i], a[j]);
+			}
+			for (size_t len = 2; len <= n; len <<= 1)
+			{
+				const double angle = -2.0 * kPi / static_cast<double>(len);
+				const std::complex<double> wl(std::cos(angle), std::sin(angle));
+				for (size_t i = 0; i < n; i += len)
+				{
+					std::complex<double> w(1.0, 0.0);
+					for (size_t k = 0; k < len / 2; ++k)
+					{
+						const std::complex<double> u = a[i + k], v = a[i + k + len / 2] * w;
+						a[i + k] = u + v;
+						a[i + k + len / 2] = u - v;
+						w *= wl;
+					}
+				}
+			}
+		}
+
+		// Bins at multiples of 1/8 and 1/16 cycles per pixel carry block-coding
+		// edges (8x8 / 16x16 transforms), not picture detail: left out.
+		bool BlockHarmonic(int bin, int n)
+		{
+			const int period = n / 16;
+			if (period < 2) return false;
+			const int r = bin % period;
+			return r == 0 || r == 1 || r == period - 1;
+		}
+	}
+
+	bool Analyse(const float* luma, int stride, int n, Spectrum& out)
+	{
+		if (!luma || !PowerOfTwo(n) || stride < n) return false;
+		out.n = n;
+		out.vertical.assign(n / 2 + 1, 0.0);
+		out.horizontal.assign(n / 2 + 1, 0.0);
+		std::vector<double> window(n);
+		double windowEnergy = 0.0;
+		for (int i = 0; i < n; ++i)
+		{
+			window[i] = 0.5 - 0.5 * std::cos(2.0 * kPi * (i + 0.5) / n);
+			windowEnergy += window[i] * window[i];
+		}
+		double total = 0.0;
+		std::vector<std::complex<double>> line(n);
+		const int bins = n / 2 + 1;
+		std::vector<std::complex<double>> lines(static_cast<size_t>(n) * bins);
+		// Columns (vertical frequencies) then rows (horizontal).
+		for (int pass = 0; pass < 2; ++pass)
+		{
+			std::vector<double>& power = pass == 0 ? out.vertical : out.horizontal;
+			std::vector<double>& mirror = pass == 0 ? out.mirrorVertical : out.mirrorHorizontal;
+			for (int l = 0; l < n; ++l)
+			{
+				double mean = 0.0;
+				for (int i = 0; i < n; ++i)
+					mean += pass == 0 ? luma[static_cast<size_t>(i) * stride + l] : luma[static_cast<size_t>(l) * stride + i];
+				mean /= n;
+				if (pass == 0) total += mean;
+				for (int i = 0; i < n; ++i)
+				{
+					const double v = pass == 0 ? luma[static_cast<size_t>(i) * stride + l] : luma[static_cast<size_t>(l) * stride + i];
+					line[i] = std::complex<double>((v - mean) * window[i], 0.0);
+				}
+				Fft(line);
+				for (int k = 0; k <= n / 2; ++k)
+				{
+					power[k] += std::norm(line[k]) * (k == 0 || k == n / 2 ? 1.0 : 2.0);
+					lines[static_cast<size_t>(l) * bins + k] = line[k];
+				}
+			}
+			// White noise of variance v: sum over lines of |X|^2 = n * v * windowEnergy per bin
+			// (one-sided doubling gives 2v); normalise to v per bin.
+			for (double& p : power) p /= static_cast<double>(n) * windowEnergy * 2.0;
+
+			// Mirror coherence. A picture resampled from samples at rate r (per
+			// output pixel) has a spectrum periodic in r: its content at f and
+			// at r - f are copies, Y(f) Y(r - f) = H(f) H(r - f) |X|^2 e^(i phi)
+			// with one phase phi for every f and every line (it depends only on
+			// where the source grid sits). Real detail at the two frequencies is
+			// independent: random phases, coherence ~ 1 / sqrt(terms). For each
+			// candidate r = m / n: |sum Y(k) Y(m - k)| / sum |Y(k) Y(m - k)| over
+			// the lines and the bins just below r / 2 (bins within 2 of the
+			// mirror point share the window's main lobe and are left out).
+			mirror.assign(n, 0.0);
+			for (int m = n / 8; m < n; ++m)
+			{
+				const int half = m / 2;
+				const int band = (std::max)(4, static_cast<int>(std::lround(0.3 * half)));
+				const int kFrom = (std::max)({ 2, half - band, m - n / 2 });
+				const int kTo = (m - 5) / 2;   // m - k - k >= 5
+				if (kTo - kFrom < 2) continue;
+				std::complex<double> sum(0.0, 0.0);
+				double magnitude = 0.0;
+				for (int k = kFrom; k <= kTo; ++k)
+				{
+					if (BlockHarmonic(k, n) || BlockHarmonic(m - k, n)) continue;
+					for (int l = 0; l < n; ++l)
+					{
+						const std::complex<double> product = lines[static_cast<size_t>(l) * bins + k] * lines[static_cast<size_t>(l) * bins + (m - k)];
+						sum += product;
+						magnitude += std::abs(product);
+					}
+				}
+				mirror[m] = magnitude > 0.0 ? std::abs(sum) / magnitude : 0.0;
+			}
+		}
+		out.mean = total / n;
+		return true;
+	}
+
+	bool Informative(const Spectrum& spectrum, const Thresholds& t)
+	{
+		// The lower picture band stands well above the quantisation floor
+		// (variance step^2 / 12) on both axes: flat or dark tiles carry no evidence.
+		const int n = spectrum.n;
+		if (!PowerOfTwo(n) || spectrum.vertical.size() != static_cast<size_t>(n / 2 + 1) || spectrum.horizontal.size() != spectrum.vertical.size())
+			return false;
+		const double step = 1.0 / (std::max)(1, t.codeMaximum);
+		const double floor = std::log10(step * step / 12.0);
+		for (const std::vector<double>* power : { &spectrum.vertical, &spectrum.horizontal })
+		{
+			double sum = 0.0;
+			int count = 0;
+			for (int k = (std::max)(2, n / 32); k <= n / 8; ++k)
+				if (!BlockHarmonic(k, n)) { sum += std::log10((std::max)((*power)[k], 1e-20)); ++count; }
+			if (count == 0 || sum / count < floor + t.informativeDecades) return false;
+		}
+		return true;
+	}
+
+	MirrorPeak FindPeak(const std::vector<double>& curve, int n, const Thresholds& t)
+	{
+		MirrorPeak peak;
+		if (!PowerOfTwo(n) || curve.size() != static_cast<size_t>(n)) return peak;
+		const int from = (std::max)(n / 8, static_cast<int>(std::ceil(t.minimumRatio * n)));
+		const int to = (std::min)(n - 1, static_cast<int>(std::floor(t.maximumRatio * n)));
+		// The 8x8 block grid (coding edges) is coherent at every multiple of
+		// 1/8: a candidate there counts only when it stands clear of the other
+		// grid positions (an upscale is coherent at its own rate alone).
+		auto level = [&](int m) {
+			double v = 0.0;
+			for (int j = m - 2; j <= m + 2; ++j) if (j >= 0 && j < n) v = (std::max)(v, curve[j]);
+			return v;
+		};
+		auto gridIndex = [&](int m) {
+			const int j = static_cast<int>(std::lround(8.0 * m / n));
+			return std::abs(m - j * n / 8) <= 2 ? j : -1;
+		};
+		// Coding edges light the grid positions unevenly (7/8 strongest), so a
+		// grid candidate counts only when the rest of the grid is quiet - no
+		// coding signature at all - and it stands clear of it.
+		peak.grid = level(7 * n / 8);   // the coding signature (see allowed)
+		auto gridQuietExcept = [&](int j) {
+			double others = 0.0;
+			for (int g = 2; g <= 7; ++g) if (g != j) others = (std::max)(others, level(g * n / 8));
+			return others;
+		};
+		// Block edges make grid position j/8 coherent in proportion to the
+		// block pattern's (8 - j)th harmonic: 7/8 follows its fundamental, so
+		// 7/8 is the coding signature itself and never read as an upscale (a
+		// source that really is 7/8 of the height stays native - the safe way).
+		auto allowed = [&](int m) {
+			const int j = gridIndex(m);
+			if (j <= 0) return true;
+			if (j == 7) return false;
+			const double others = gridQuietExcept(j);
+			if (others < t.gridQuiet && curve[m] >= others + t.gridMargin) return true;
+			// With coding present the grid rises steadily towards 7/8 (each
+			// position follows a lower harmonic than the next); an upscale on
+			// a grid position stands above both grid neighbours instead.
+			// Measured on the real clips: coded genuine 4K at 4/8 at most 0.14
+			// with 7/8 at 0.77; a coded 2x upscale 0.66-0.88 at 4/8, at least
+			// 0.13 above 3/8 and 5/8.
+			const double neighbours = (std::max)(level((j - 1) * n / 8), level((j + 1) * n / 8));
+			return curve[m] >= neighbours + t.gridPeakMargin;
+		};
+		int best = -1;
+		double bestValue = 0.0;
+		for (int m = from; m <= to; ++m)
+			if (allowed(m) && curve[m] > bestValue) { bestValue = curve[m]; best = m; }
+		if (best < 0) return peak;
+		// A resample at rate r is periodic in r, so it is coherent at 2r and 3r
+		// too: take the fundamental (the lowest rate nearly as strong).
+		for (int d = 3; d >= 2; --d)
+		{
+			const int centre = static_cast<int>(std::lround(static_cast<double>(best) / d));
+			int sub = -1;
+			double subValue = 0.0;
+			for (int m = centre - 2; m <= centre + 2; ++m)
+				if (m >= from && m <= to && allowed(m) && curve[m] > subValue) { subValue = curve[m]; sub = m; }
+			if (sub >= 0 && subValue >= t.harmonicShare * bestValue && subValue >= t.coherence)
+			{
+				best = sub;
+				bestValue = subValue;
+				break;
+			}
+		}
+		// Runner-up away from the peak (how unique it is).
+		for (int m = from; m <= to; ++m) if (std::abs(m - best) > 3) peak.runnerUp = (std::max)(peak.runnerUp, curve[m]);
+		// Sub-bin position (parabola through the peak and its neighbours).
+		double offset = 0.0;
+		if (best > 0 && best < n - 1)
+		{
+			const double a = curve[best - 1], b = curve[best], c = curve[best + 1], d = a - 2.0 * b + c;
+			if (d < 0.0) offset = (std::max)(-0.5, (std::min)(0.5, 0.5 * (a - c) / d));
+		}
+		peak.coherence = bestValue;
+		peak.ratio = (best + offset) / n;
+		return peak;
+	}
+
+	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& t)
+	{
+		FrameReading frame;
+		frame.tiles = static_cast<int>(tiles.size());
+		if (tiles.empty()) return frame;
+		const int n = tiles.front().n;
+		std::vector<double> vertical(static_cast<size_t>((std::max)(n, 0)), 0.0), horizontal(vertical.size(), 0.0);
+		double sum = 0.0, signature = 0.0;
+		for (size_t i = 0; i < tiles.size(); ++i)
+		{
+			const Spectrum& s = tiles[i];
+			sum += s.mean;
+			signature += s.mean * static_cast<double>(i + 1);
+			if (s.n != n || !Informative(s, t) || s.mirrorVertical.size() != vertical.size() || s.mirrorHorizontal.size() != vertical.size()) continue;
+			++frame.informativeTiles;
+			for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] += s.mirrorVertical[m]; horizontal[m] += s.mirrorHorizontal[m]; }
+		}
+		frame.mean = sum / tiles.size();
+		frame.signature = signature;
+		if (frame.informativeTiles == 0) return frame;
+		for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] /= frame.informativeTiles; horizontal[m] /= frame.informativeTiles; }
+		frame.verticalCurve = vertical;
+		frame.horizontalCurve = horizontal;
+		frame.vertical = FindPeak(vertical, n, t);
+		frame.horizontal = FindPeak(horizontal, n, t);
+		// Both axes resampled (a uniform upscale), else native: real detail on
+		// either axis must survive. Anamorphic sources take the larger ratio so
+		// nothing either axis holds is lost.
+		if (frame.vertical.coherence >= t.coherence && frame.horizontal.coherence >= t.coherence)
+			frame.ratio = (std::max)(frame.vertical.ratio, frame.horizontal.ratio);
+		return frame;
+	}
+
+	void Tracker::Reset()
+	{
+		Discontinuity("reset");
+		cuts = 0;
+		discontinuities = 0;
+		lastReason.clear();
+	}
+
+	void Tracker::Discontinuity(const char* reason)
+	{
+		// Seek / skip, source or format change, signal loss, resync, a time
+		// jump: the evidence belonged to what came before. Back to native and
+		// start again (owner: robust disengagement).
+		window.clear();
+		declared = 1.0;
+		lastMean = -1.0;
+		lastSignature = 0.0;
+		lastSeconds = -1.0;
+		evidence = 0.0;
+		haveLast = false;
+		++discontinuities;
+		lastReason = reason ? reason : "";
+	}
+
+	void Tracker::Update(const FrameReading& frame, double seconds, bool repeated)
+	{
+		// Time running backwards or a gap with no frames: a discontinuity the
+		// caller may not have reported (a skip, a pause on the source side).
+		if (lastSeconds >= 0.0 && (seconds < lastSeconds || seconds - lastSeconds > settings.maximumGapSeconds))
+			Discontinuity(seconds < lastSeconds ? "time went backwards" : "gap");
+		// A repeated frame (pause, a repeated cadence frame, a frozen source)
+		// is no new evidence and no time.
+		if (repeated || (haveLast && frame.tiles > 0 && std::fabs(frame.signature - lastSignature) < 1e-9 && std::fabs(frame.mean - lastMean) < 1e-9))
+		{
+			lastSeconds = seconds;
+			return;
+		}
+		const double dt = lastSeconds >= 0.0 ? seconds - lastSeconds : 0.0;
+		lastSeconds = seconds;
+		if (frame.tiles > 0)
+		{
+			if (haveLast && std::fabs(frame.mean - lastMean) > settings.cutLevel) { ++shot; ++cuts; }
+			lastMean = frame.mean;
+			lastSignature = frame.signature;
+			haveLast = true;
+		}
+		while (!window.empty() && seconds - window.front().seconds > settings.windowSeconds)
+		{
+			evidence -= window.front().dt;
+			window.pop_front();
+		}
+		if (window.empty()) evidence = 0.0;
+		if (!frame.informative()) return;
+		const double ratio = frame.ratio >= settings.nativeAbove ? 1.0 : frame.ratio;
+		// Evidence time counts only between informative, changing frames.
+		const double step = window.empty() ? 0.0 : (std::min)(dt, settings.maximumGapSeconds);
+		window.push_back({ seconds, ratio, shot, step });
+		evidence += step;
+		// Detail above the declared cutoff: up at once (bias to native).
+		if (ratio > declared + settings.tolerance)
+		{
+			declared = ratio;
+			return;
+		}
+		// Lower only when the whole window - several shots, a sustained time -
+		// stays below the declared cutoff.
+		const double candidate = Candidate();
+		if (candidate < declared - settings.tolerance && Shots() >= settings.minimumShots && EvidenceSeconds() >= settings.minimumSeconds)
+			declared = candidate;
+	}
+
+	double Tracker::Candidate() const
+	{
+		double ratio = 0.0;
+		for (const Sample& s : window) ratio = (std::max)(ratio, s.ratio);
+		return window.empty() ? 1.0 : ratio;
+	}
+
+	int Tracker::Shots() const
+	{
+		return window.empty() ? 0 : static_cast<int>(window.back().shot - window.front().shot) + 1;
+	}
+
+	double Tracker::EvidenceSeconds() const
+	{
+		return evidence;
+	}
+
+	int Tracker::Height(int nativeHeight) const
+	{
+		if (declared >= 1.0 || nativeHeight <= 0) return nativeHeight;
+		return 2 * static_cast<int>(std::lround(declared * nativeHeight * 0.5));
+	}
+
+	std::string Describe(double ratio, int nativeHeight)
+	{
+		if (ratio >= 1.0 || nativeHeight <= 0) return "native";
+		char text[64];
+		snprintf(text, sizeof(text), "~%d (%.2f)", 2 * static_cast<int>(std::lround(ratio * nativeHeight * 0.5)), ratio);
+		return text;
+	}
+}

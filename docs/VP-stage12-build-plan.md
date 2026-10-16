@@ -90,6 +90,56 @@ upscaled 1080/720 cases. Manual classes stay primary; auto is opt-in.
 - 2c / S8-2 bitrate-aware anti-ringing and SSIM weight.
 - Tests per the specs, both warp paths where vectors are read.
 
+## Status 2026-10-15 night (re-read against the specs verbatim)
+
+Step A built (9cf342e3): `source_resolution` native | auto | any height
+144-8640 (owner: general, not a fixed list), per-plane re-base, crop scaled,
+Stage 8 gates on the re-based height. Gaps against the spec and this plan:
+
+- A1 the other settings and Config controls: `source_resolution_auto_min_confidence`
+  (0.8), `low_bitrate_handling` (auto|off|on), `cnn_residual_stabilise` (on),
+  `deband_vp` (auto|off|on), `ssim_residual_stabilise` (on),
+  `ssim_bitrate_aware` (on), `ssim_bitrate_floor` (0.4).
+- A2 stats line: `source_resolution=...` and the response that acted
+  (`rebase+8b`, `stage8`, `native`); S8-3 precedence stated in both Config
+  cards.
+- A3 while re-based the grain map, occlusion mask and dither grain are off
+  (a safe first cut); the plan is the vector field scaled by the factor and
+  the vectors-valid state invalidated when the factor changes.
+- A4 tests still to add: `native` byte-identical; the re-based 1080 chart
+  through the 8b path matches the native 1080 chart within half-float; RGB
+  and YCbCr inputs; both capture_upload paths.
+
+Step B, detection (SourceResolutionDetector, in progress):
+
+- Effective resolution by **mirror coherence** instead of the down/up
+  residuals or the spectral cliff: a resample from rate r makes the
+  content at f and r - f phase-locked copies; real detail is independent.
+  Measured on the 7 real 4K clips: genuine frames 0.1-0.2, uncoded upscales
+  0.9-0.99 at the exact ratio with every kernel (lanczos, Catmull-Rom,
+  Mitchell, bilinear). Both axes must agree (the UVG 120p clips are scaled
+  vertically only and must read native); the 8x8 coding grid is excluded;
+  the fundamental is taken over its harmonics. The spectral cliff was
+  measured too and overlapped (real 4K up to 0.92 decades, cubic upscales
+  from 0.29) - kept only as the texture gate.
+- Display both: the spec's live reading (~2 s smoothing, snap on a cut,
+  hysteresis) and the conservative declared value auto would use (several
+  shots, a minute of evidence, native at once on any detail above it,
+  reset on seek/skip, source/format/HDR-DV mode change, signal loss,
+  resync; paused or repeated frames add nothing).
+- Still to build: grain-map exclusion of tiles; `bitrate_quality` (8/16 px
+  block-boundary gradient energy against the mean, plus the share of flat
+  8x8 blocks with a single code step); `effective_bit_depth` (codes on
+  multiples of 4); renderer wiring (tile readback, worker thread, the
+  resets, stats line, crash state); spec §4 tests (blocked frame,
+  8-bit-in-10 ramp, cut snap, borderline hysteresis).
+- Apple TV with Match Dynamic Range off delivers LLDV (spec §2b): readings
+  must work in PQ codes (tested: SDR re-encoded to PQ keeps its reading),
+  and tunnelled DV must be read from the decoded picture.
+
+Then step C (auto, VP debander with PQ thresholds, the vector refinements
+2c/2d/S8-1 with the dither_vectors-style fallback, S8-2).
+
 ## Costs (to measure, laptop then 3090)
 
 - Re-base: one downscale per plane per source frame at 4K input (the
