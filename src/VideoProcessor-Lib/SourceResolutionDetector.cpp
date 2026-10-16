@@ -194,7 +194,12 @@ namespace SourceResolution
 						const int v = c[static_cast<size_t>(by + y) * n + bx + x];
 						if (v != lo && v != hi) { twoLevels = false; break; }
 					}
-				if (twoLevels && hi - lo <= 8) { ++flat; ++bandEdges; }   // one step (up to 8 codes: 7-bit in 10)
+				// One step (up to 8 codes: 7-bit in 10). Planner G17 (2026-10-16): in a 10-bit (or
+				// deeper) signal a one-code step is a gentle gradient, invisible - not a band; a
+				// band is at least two codes (8-bit content shows four, coarse coding more).
+				const int minimumStep = codes >= 1023 ? 2 : 1;
+				if (twoLevels && hi - lo <= 8 && hi - lo >= minimumStep) { ++flat; ++bandEdges; }
+				else if (twoLevels && hi - lo <= 8) ++flat;
 			}
 		out.blocks = blocks;
 		out.bandEdges = bandEdges;

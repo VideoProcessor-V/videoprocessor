@@ -170,3 +170,12 @@ Two second signals were tried on the real-codec corpus. Neither separates the ca
 **Also built:**
 - **Per-axis re-base:** a one-axis upscale is undone on that axis, the aspect ratio unchanged through the renderer.
 - **Kernel-matched re-base** for 1080p: the player's kernel identified and inverted, +8 to +15 dB on real upscales.
+
+### More planner items (2026-10-16 evening)
+
+| Item | Result |
+|---|---|
+| **G10** long dark film | `LongDarkFilmStaysNative`: 20 minutes of mostly dark frames plus one 10 s bright upscaled shot: native throughout. |
+| **G11** freeze frame | `FreezeFrameNeitherDeclaresNorResets`: 30 s frozen on an upscaled shot adds no evidence time, keeps the earlier evidence, and causes no discontinuity. |
+| **G16** effective bits with dither | `EffectiveBitsWithDither`: 8-bit content with a full-step dither to 10 bits reads **10.0** (the dither is the extra bit). A quarter-step dither reads **9.0**. A per-frame reading cannot tell a temporal dither; a player's small dither stays near 8. |
+| **G17** clean low-detail content | `CleanLowDetailContentIsNotPoor`: flat animation quality 0.94; a clean white studio read **0.16 ("poor") — a real false alarm**. A gentle 10-bit gradient forms two-level 8×8 blocks one code apart, and these were counted as band edges, which would have turned the debander up on a flawless picture. **Fixed:** in a 10-bit or deeper signal a band edge needs at least a 2-code step. The white studio now reads 1.00, while 8-bit-in-10 skies and hard-coded skies still read banded. Detector 26/26, debander 7/7, real footage unchanged. |

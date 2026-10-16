@@ -1325,6 +1325,106 @@ namespace VideoProcessorTest
 			Assert::IsTrue(changes <= static_cast<int>(t / 60.0), L"at most one change a minute");
 		}
 
+		// Planner G10: a long dark film - most frames carry no evidence; native throughout,
+		// and one bright upscaled shot does not declare.
+		TEST_METHOD(LongDarkFilmStaysNative)
+		{
+			SourceResolution::Tracker tracker;
+			double t = 0.0;
+			for (int minute = 0; minute < 20; ++minute)
+				for (int i = 0; i < 240; ++i, t += 0.25)
+				{
+					const bool brightUpscaledShot = minute == 10 && i < 40;   // 10 s of one upscaled shot
+					const bool dark = !brightUpscaledShot && (i % 60) >= 4;  // most frames dark
+					tracker.Update(Frame(brightUpscaledShot ? 0.5 : 1.0, (brightUpscaledShot ? 0.4 : 0.07) + 0.0005 * i, dark ? 0 : 4), t);
+					Assert::AreEqual(1.0, tracker.Ratio(), L"native through the dark film and the single bright upscaled shot");
+				}
+		}
+
+		// Planner G11: a 30 s freeze on an upscaled shot - repeated frames add nothing:
+		// neither declares nor resets.
+		TEST_METHOD(FreezeFrameNeitherDeclaresNorResets)
+		{
+			SourceResolution::Tracker tracker;
+			double t = 0.0;
+			// Two upscaled shots (not yet enough to declare).
+			for (int shot = 0; shot < 2; ++shot)
+				for (int i = 0; i < 16; ++i, t += 0.25)
+					tracker.Update(Frame(0.5, 0.2 + 0.1 * shot + 0.001 * i), t);
+			const double evidence = tracker.EvidenceSeconds();
+			const int shots = tracker.Shots();
+			// 30 s frozen (identical frames), then flagged repeats.
+			for (int i = 0; i < 120; ++i, t += 0.25) tracker.Update(Frame(0.5, 0.777), t);
+			Assert::AreEqual(1.0, tracker.Ratio(), L"the freeze does not declare");
+			Assert::IsTrue(tracker.EvidenceSeconds() - evidence < 0.5, L"no evidence time from the freeze");
+			Assert::IsTrue(tracker.Shots() >= shots, L"the freeze does not reset the evidence");
+			Assert::AreEqual(0ull, tracker.Discontinuities(), L"no discontinuity from a freeze at the normal frame rate");
+		}
+
+		// Planner G16: effective bit depth with dither. A 10-bit master made from 8-bit with
+		// noise-shaped dither uses every code: reads 10 (the dither is the extra bit). A
+		// true 8-bit picture with a small temporal dither (a player's to 10 bits) is
+		// reported as measured - the per-frame reading cannot see that it is temporal.
+		TEST_METHOD(EffectiveBitsWithDither)
+		{
+			auto ramp = [](unsigned seed, double ditherAmplitude) {
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(-0.5, 0.5);
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						const double v = 0.15 + 0.6 * (x + y) / (2.0 * kTile) + 0.01 * std::sin(0.05 * x * (seed + 1));
+						const double eight = std::round(v * 255.0) / 255.0;   // 8-bit content
+						const double out = eight + ditherAmplitude * u(rng) / 255.0;   // dither in 8-bit steps
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, out)) * 1023.0) / 1023.0);
+					}
+				return t;
+			};
+			const SourceResolution::FrameReading full = ReadScene([&](unsigned seed) { return ramp(seed, 1.0); });     // a full 8-bit step of dither
+			const SourceResolution::FrameReading quarterStep = ReadScene([&](unsigned seed) { return ramp(seed, 0.25); });   // a quarter step (temporal, small)
+			char line[160];
+			snprintf(line, sizeof(line), "8-bit + full-step dither in 10 bits: %.2f bits; + quarter-step dither: %.2f bits\n", full.effectiveBits, quarterStep.effectiveBits);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(full.effectiveBits >= 9.5, L"dithered to 10 bits: the dither is the extra bit");
+			Assert::IsTrue(quarterStep.effectiveBits <= 9.5, L"a quarter-step dither leaves most codes empty: reads close to 8");
+		}
+
+		// Planner G17: clean low-detail content (flat animation, a white studio) - few blocks,
+		// no detail - must not read 'poor' (the debander would turn up on nothing wrong).
+		TEST_METHOD(CleanLowDetailContentIsNotPoor)
+		{
+			auto cartoon = [](unsigned seed) {
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						// Flat colour regions with clean (anti-aliased) edges and a smooth gradient sky.
+						const double cx = x - 128.0 - 10.0 * seed, cy = y - 140.0;
+						const double d = std::sqrt(cx * cx + cy * cy) - 60.0;
+						const double edge = 0.5 - 0.5 * std::tanh(d / 1.2);
+						const double sky = 0.55 + 0.2 * y / kTile;
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((sky * (1 - edge) + 0.25 * edge) * 1023.0) / 1023.0);
+					}
+				return t;
+			};
+			auto studio = [](unsigned) {
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((0.86 + 0.03 * std::sin(x * 0.01) * std::cos(y * 0.013)) * 1023.0) / 1023.0);
+				return t;
+			};
+			const SourceResolution::FrameReading a = ReadScene(cartoon);
+			const SourceResolution::FrameReading b = ReadScene(studio);
+			char line[160];
+			snprintf(line, sizeof(line), "flat animation: quality %.2f (blockiness %.2f, band %.3f); white studio: quality %.2f (band %.3f)\n",
+				a.bitrateQuality, a.blockiness, a.bandShare, b.bitrateQuality, b.bandShare);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(a.bitrateQuality >= 0.8, L"clean flat animation is not poor");
+			Assert::IsTrue(b.bitrateQuality >= 0.8, L"a clean white studio is not poor");
+		}
+
 		TEST_METHOD(DescribeIsGeneral)
 		{
 			Assert::AreEqual(std::string("native"), SourceResolution::Describe(1.0, 2160));
