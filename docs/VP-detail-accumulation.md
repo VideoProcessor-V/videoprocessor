@@ -147,3 +147,16 @@ Owner, 2026-10-16: "are we going to have a problem with detail integration using
 - **Read before accumulation.** The source-resolution monitor samples the raw source frame (`sourceMonitor.Frame` on the unwarped, not re-based, not accumulated frame, once per source frame), and its look-ahead reads the queued frames. Accumulation is applied after that sampling and before the re-base, so detection never sees accumulated detail. Accumulated detail could otherwise add energy above the source rate and mask an upscale's signature, or look like native detail.
 - **T6 (gate).** Detection readings (ratio, confidence, auto decisions) are identical with accumulation on and off: the renderer harness on the upscaled and native charts, and the real-codec corpus through the renderer.
 - **The re-base factor is decided from the raw reading.** Accumulation then runs at the signal resolution (§6 Q2: limited to below the declared rate's Nyquist when re-based).
+
+## 10. Chroma formats (owner, 2026-10-16: "compare the detail recovery too between 4:4:4 and 4:2:2 and 4:2:0")
+
+**T7.** T1–T4 on each capture format: 4:4:4 (RGB R12B / r210, or YCbCr 4:4:4), 4:2:2 (v210, the DeckLink default) and 4:2:0 (P010). For each:
+- detail gain on the B frames;
+- the GOP pulse reduction;
+- ghosting;
+- cost.
+
+**Expected:**
+- **Luma** behaves the same in every format; it is the same signal.
+- **Chroma recovery** (§6 Q1) matters most for 4:2:0, where chroma is a quarter of the resolution and is coded hardest. T7 decides whether chroma accumulation is on, and for which formats.
+- **The optical-flow producer's luma** (P010 read directly, v210 and RGB sampled) must give the same vectors for the same picture in each format: same-picture equivalence within 0.1 px. It is part of T7 and of the producer tests, which so far cover P010.
