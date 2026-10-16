@@ -167,3 +167,24 @@ Owner, 2026-10-16: "are we going to have a problem with detail integration using
 - The source-resolution detector can read the chroma planes as it reads luma: upsampled 4:2:0 chroma shows the mirror signature at half the rate.
 - The same reading could let the re-base (Stage 12) treat chroma separately.
 - **T7 adds:** 4:4:4 decoded from a coded 4:2:0 stream (ffmpeg: encode 4:2:0, decode, upsample to 4:4:4) alongside a true 4:4:4 source.
+
+## 11. The opportunity, measured (2026-10-16)
+
+**Material.** Bosphorus (UVG), a 1536×768 crop, 48 frames at 24p. x265 medium, keyint 24, 4 B-frames (a streaming-like GOP). Each decode is compared with the uncompressed original.
+
+| Bitrate | I-frames | P-frames | B-frames (37 of 48) |
+|---|---|---|---|
+| CRF 24 | 75% of the fine detail kept, 43.4 dB | 74%, 42.3 dB | 72%, 41.3 dB |
+| CRF 32 (starved) | 68%, 40.3 dB | 68%, 39.1 dB | 65%, 38.8 dB |
+
+"Fine detail" is the RMS of the frame minus a 5×5 blur, as a share of the original's.
+
+**Reading:**
+- The I/B pulse with a good encoder is about 3–4 points of fine detail and 1.5–2 dB. Hardware streaming encoders and starved ladders are expected to be larger; to measure on real streams (G19).
+- A quarter to a third of the fine detail is gone from every frame: accumulation cannot restore what no frame holds.
+- **What accumulation can do:**
+  - lift the B-frames (three quarters of all frames) towards the I-frame level;
+  - average the independent coding noise across frames.
+- **Expected:** about +1 to +2 dB on most frames and steadier texture; not a large sharpness gain.
+
+**Gate for building:** the planner's view (Q4) plus a prototype on this material (scratch: D:\hfr\breathing). The prototype must lift the B-frames by at least 1 dB with no frame worse, before any GPU work.
