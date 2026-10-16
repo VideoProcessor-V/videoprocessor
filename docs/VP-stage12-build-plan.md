@@ -214,3 +214,34 @@ Then step C (VP debander with PQ thresholds, the vector refinements
   upscale path, which is cheaper than the 4K path it replaces.
 - Detection: three down/up residuals on tiles plus one reduction per
   source frame; target well under 1 ms on the 3090.
+
+## Kernel-matched re-base for 1080p (owner 2026-10-16: "1080p will be the most common variant that streaming upscales from so this one needs to work ... optimize for it")
+
+**Finding** (CPU prototype, scratch kernel_id3.py). Material: real x265 1080p decodes (UVG Bosphorus, ReadySetGo) upscaled 2× to 4K by ffmpeg. When the player's upscale kernel is known, its least-squares inverse recovers the decoded 1080p picture almost exactly.
+
+PSNR against the 1080p decode:
+
+| ffmpeg kernel | Today (Lanczos-type downscale) | Kernel-matched inverse |
+|---|---|---|
+| Bicubic | 61.6–66.7 dB | 74.4–76.8 dB |
+| Lanczos | 63.3–68.0 dB | 75.3–77.7 dB |
+
+On the synthetic set, at 8 bits: +9 to +12 dB.
+
+**Identification.** Each candidate kernel's inverse, then the reprojection residual. Only the right kernel reaches the quantisation floor (0.13–0.25 codes here).
+
+**Safety:**
+- **Interpolating candidates only:** bicubic B=0 with C 0.5 / 0.6 / 0.75, Lanczos 2/3/4, bilinear (later spline36/64). A smoothing kernel (B-spline, Mitchell) fits a natural-spline upscale perfectly, but its inverse returns the prefilter coefficients: −20 dB.
+- **A strict decision rule:** the best residual at or under the floor and at least 1.1× ahead of the next.
+- **Result:** in all 8 real cases the decision was at least as good as today, and never worse. Spline and bilinear are not accepted and fall back.
+
+**Filter.** A separable FIR of 32 taps per axis (48 for Lanczos-4: 99.3% at 32) at stride 2, one phase. GPU cost is trivial.
+
+**Build:**
+1. CPU identification in the monitor worker, on its 4K tiles, when the declared ratio is 2:1:
+   - the floor follows the effective bits;
+   - votes per accepted frame, a decision after shots/time;
+   - a reset at discontinuities.
+2. A GPU inverse re-base (two separable passes, the identified kernel's weights). Fallback: the polar EWA filter (today) when nothing is identified or the ratio is not 2:1.
+3. Tests: synthetic exact recovery, GPU = CPU, the real ffmpeg material, the renderer path.
+4. Later: 3:2 (1440p), per axis, chroma, and the Apple TV's own kernel from real captures (G19).
