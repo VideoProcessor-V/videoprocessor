@@ -1,0 +1,67 @@
+Planner review request - VideoProcessor FL35 fork, 2026-10-16 afternoon
+Branch merge-v1.4.02 (fork vmcpherson2012-dev/videoprocessor), commits since the
+detection stress-test review: 3cd4be16 .. e16a3e88. Please review the design and the
+evidence, flag risks, and answer the questions in part 6.
+
+1. Optical flow (docs/VP-nvof-ahead.md, "Built" and "Measured" sections)
+   - The NVIDIA optical-flow engine is the established default motion source
+     (optical_flow: on). Seed mode: the engine's block vectors replace the matcher's
+     block search (6.3 ms of 11.8 ms GPU at 4K on the laptop); the matcher's
+     refinement, half-pixel step and trust tests are unchanged. The engine alone is
+     unsafe at cuts (corpus: the cut was warped) - not offered. Reach limit: engine
+     vectors beyond the searches' reach are rejected.
+   - Producer: its own D3D11 device and worker compute each consecutive pair up to 4
+     frames ahead from the queued frames (half / quarter size luma decoded directly per
+     format, threaded), into a VectorStore under the continuity generation. The
+     de-judder takes its pair; miss -> engine at render time -> searches.
+     Render-loop hand-off 0.010 ms; ~8 ms per pair on the worker (slow preset).
+   - Queue: the Normal / Reliable default holds 4 ahead (target_frames 5); a time
+     target holds at least 5 frames (low latency exempt); the queue wins conflicts.
+   - Measured: synthetic corpus seed 99.8-100% of the matcher, cut held; 7 real clips
+     seed (slow) 41.9% judder removed vs the matcher's 41.3%, damage 0.35 vs 0.40.
+   - Fixed: a teardown fail-fast on NVIDIA (engine textures freed first); the old
+     replace path ran the backward search over the engine's flow (precedence bug).
+
+2. Source resolution
+   - VBR detection: 16/32-px coding grids as signatures; starved frames are no
+     evidence (detail above vs the stream's own lower-reading frames); axis agreement.
+   - Real codecs (G18): 126 encodes, 0 native read lower, player-upscaled 1080 224/224;
+     a 1080 master upscaled then coded at 4K is not detected (the encoder removes the
+     signature; cliff and time-averaged coherence tried, neither separates) - a known
+     limit (safe direction).
+   - Look-ahead verification at cuts / black: wired (queued frames ahead).
+   - Per-axis re-base: per-axis readings (single-axis coherence 0.5, rate <= 0.8),
+     per-axis trackers (6 shots, 40 s), the re-base per axis (one axis: 1D Lanczos),
+     WIDTHxHEIGHT manual class; aspect ratio held by the native output rectangle.
+   - Kernel-matched re-base for 1080p (owner: the most common streaming case): the
+     player's 2x kernel identified by reprojection residual (interpolating candidates
+     only; strict floor/margin; votes over shots) and inverted on the GPU (luma, exact
+     2:1). Real x265 decodes upscaled by ffmpeg: +8 to +15 dB closer to the decode than
+     today's re-base; never worse in 8 real cases; rebase_kernel_match on|off.
+   - Planner items: F12 rendition change (9.5 s, was 120 s), G1 periodic content
+     native (three guards), G3 two-step lowest or native, G8 no thrash; G5 / G12 by
+     design (docs/audit/detection-stress-tests-2026-10-16.md).
+
+3. Detail accumulation (docs/VP-detail-accumulation.md) - design, not built
+   - Recurrent detail-band history warped by the de-judder's vectors; TAA-style clamp;
+     v1 causal (refined field), v2 two-frame look-ahead with the engine's refined
+     vectors; automatic disable without vectors / optical flow; detection reads the
+     raw source first; tests T1-T7 incl. chroma formats and the capture-format caveat.
+
+4. Tests: full unit suite 2804/2804 (before the last detector change; re-running),
+   Config 112 + 1 known skip (off screen), Beta suite pass.
+
+5. Not yet measured on the RTX 3090 (cinema PC): everything above.
+
+6. Questions
+   Q1. Optical flow: should the engine's global flow replace the matcher's D1 global
+       search (~0.4 ms), and should the engine's cost feed the trust tests?
+   Q2. Kernel-matched re-base: extend to 3:2 (1440p) and per axis now, or wait for the
+       Apple TV captures (G19) to learn the real player kernel first?
+   Q3. The 1080-master-coded-at-4K gap: any detection idea beyond spectral statistics,
+       or accept it as the known limit?
+   Q4. Detail accumulation: the six open questions in its section 6 (chroma; rate;
+       weights; sub-pixel super-resolution; grain; the v2 future frames via the
+       engine), and the build order (v1 first?).
+   Q5. G1: are the three periodic-content guards sufficient, or should exactly periodic
+       tiles be excluded outright (a periodicity test on the tile)?
