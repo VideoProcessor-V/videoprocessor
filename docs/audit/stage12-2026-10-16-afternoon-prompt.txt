@@ -1,7 +1,7 @@
-Planner review request - VideoProcessor FL35 fork, 2026-10-16 afternoon
+Planner review request - VideoProcessor FL35 fork, 2026-10-16 (afternoon, updated evening)
 Branch merge-v1.4.02 (fork vmcpherson2012-dev/videoprocessor), commits since the
-detection stress-test review: 3cd4be16 .. e16a3e88. Please review the design and the
-evidence, flag risks, and answer the questions in part 6.
+detection stress-test review: 3cd4be16 .. 3ae9aaf9. Please review the design and the
+evidence, flag risks, and answer the questions in part 7 (Q1-Q7).
 
 1. Optical flow (docs/VP-nvof-ahead.md, "Built" and "Measured" sections)
    - The NVIDIA optical-flow engine is the established default motion source
@@ -31,43 +31,80 @@ evidence, flag risks, and answer the questions in part 6.
      limit (safe direction).
    - Look-ahead verification at cuts / black: wired (queued frames ahead).
    - Per-axis re-base: per-axis readings (single-axis coherence 0.5, rate <= 0.8),
-     per-axis trackers (6 shots, 40 s), the re-base per axis (one axis: 1D Lanczos),
-     WIDTHxHEIGHT manual class; aspect ratio held by the native output rectangle.
+     per-axis trackers (twice the shots and time), the re-base per axis (one axis: 1D
+     Lanczos), WIDTHxHEIGHT manual class; aspect ratio held by the native output rectangle.
    - Kernel-matched re-base for 1080p (owner: the most common streaming case): the
      player's 2x kernel identified by reprojection residual (interpolating candidates
      only; strict floor/margin; votes over shots) and inverted on the GPU (luma, exact
      2:1). Real x265 decodes upscaled by ffmpeg: +8 to +15 dB closer to the decode than
      today's re-base; never worse in 8 real cases; rebase_kernel_match on|off.
+   - Re-base cost at 4K on the laptop RTX 3050 Ti: 3.5 ms default (chroma separable,
+     luma polar - a separable luma rang 2.2 codes below black into letterbox bars),
+     2.1 ms with the kernel inverse; 3090 not yet measured.
    - Planner items: F12 rendition change (9.5 s, was 120 s), G1 periodic content
-     native (three guards), G3 two-step lowest or native, G8 no thrash; G5 / G12 by
-     design (docs/audit/detection-stress-tests-2026-10-16.md).
+     native (three guards), G3 two-step lowest or native, G8 no thrash, G10 long dark
+     film native, G11 freeze neither declares nor resets, G16 dithered effective bits,
+     G17 clean low detail not "poor" (a real false alarm fixed: 10-bit band edges need a
+     2-code step); G5 / G12 by design (docs/audit/detection-stress-tests-2026-10-16.md).
 
-3. Detail accumulation (docs/VP-detail-accumulation.md) - design, not built
-   UPDATE (sections 11-12): measured on a real x265 stream with a streaming GOP, the
-   I/B pulse is 3-4 points of fine detail / 1.5-2 dB; a CPU prototype of v1 (block
-   motion, detail band, trust weight, clamp at any allowance) gains only +0.01 to
-   +0.09 dB (gate +1 dB), and a strong weight makes I/P frames worse - the B-frames'
-   coding loss is correlated with their references'. Proposed: do not build now; retest
-   on real streaming captures (G19) and grainy sources.
-   - Recurrent detail-band history warped by the de-judder's vectors; TAA-style clamp;
-     v1 causal (refined field), v2 two-frame look-ahead with the engine's refined
-     vectors; automatic disable without vectors / optical flow; detection reads the
-     raw source first; tests T1-T7 incl. chroma formats and the capture-format caveat.
+3. NEW since the first send - subtitles, layout, evidence time
+   - Player-drawn subtitles (4K text over an upscaled 1080p picture) are real 4K
+     detail. Without a guard: in a detection tile they made frames read native (63 % of
+     subtitled frames), so a subtitled 1080p stream was never declared, and once
+     declared a single such frame would switch the re-base off at once (bias to native).
+     One frame with text in 4/8 tiles read 0.66 instead of 0.5 (never below the truth).
+   - Fix, source_resolution_text_guard (Fixes under test, default on): a tile whose
+     sharp steps (neighbours >= 1/3 of the range apart, >= 0.2 % of pixels) sit >= 80 %
+     inside one band a quarter of the tile high is left out of that frame's reading.
+     With it: every reading 0.5, the subtitled stream declared at 10 s, never thrown
+     back. Real footage and the real-codec corpus: 0 tiles left out.
+   - Subtitle sharpness through the re-base: both filters soften 4K text to about
+     1080 and ring slightly (kernel inverse 99 codes RMS in the text, worst overshoot
+     258; polar 113 / 175). Owner decision: legible is enough, no native-text overlay.
+   - Layout at 4K with re-base on vs off: scope screen + touch inside, scope + NLS
+     (stretch 1.32), letterboxed 2.39 + auto crop, all with edge blanking: picture
+     bounds within 1 px, 0 px shift. NLS runs on the re-based grid: its stretched sides
+     keep 91 % of the centre's relative sharpness (synthetic pattern).
+   - Evidence time: owner set the standard to 3 shots and 10 s (was 20 s) at clarity
+     0.8. Picture slider: Off (default) / Cautious 4 shots 20 s 0.9 / Standard 3 / 10 s
+     / 0.8 / Fast 2 / 5 s / 0.7; per-axis needs twice the shots and time. All false-alarm
+     tests (soft shots of a real film, VBR, alternating shots, real footage) pass at 10 s.
+   - "Confidence" relabelled "upscale clarity" in Config (it is not a probability:
+     evidence-complete x clarity, clarity = (mean min-axis mirror coherence - 0.4) / 0.3
+     over the 120 s window; real 4K ~0, real upscales ~1), checked only after every
+     frame in the window read lower and the shots/time agree.
 
-4. Tests: full unit suite 2804/2804 (before the last detector change; re-running),
-   Config 112 + 1 known skip (off screen), Beta suite pass.
+4. Detail accumulation (docs/VP-detail-accumulation.md) - design, not built
+   Measured on a real x265 stream with a streaming GOP, the I/B pulse is 3-4 points of
+   fine detail / 1.5-2 dB; a CPU prototype of v1 (block motion, detail band, trust
+   weight, clamp at any allowance) gains only +0.01 to +0.09 dB (gate +1 dB), and a
+   strong weight makes I/P frames worse - the B-frames' coding loss is correlated with
+   their references'. Proposed: do not build now; retest on real streaming captures
+   (G19) and grainy sources.
 
-5. Not yet measured on the RTX 3090 (cinema PC): everything above.
+5. Tests: full unit suite 2807/2807 before the last detector changes; since then
+   detector / monitor / re-base 38/38 (real footage and real codecs included),
+   renderer harness checks for every change pass, Config 113 + 1 known skip (off
+   screen). Full suite to be re-run before the next deploy gate.
 
-6. Questions
+6. Not yet measured on the RTX 3090 (cinema PC): everything above.
+
+7. Questions
    Q1. Optical flow: should the engine's global flow replace the matcher's D1 global
        search (~0.4 ms), and should the engine's cost feed the trust tests?
    Q2. Kernel-matched re-base: extend to 3:2 (1440p) and per axis now, or wait for the
        Apple TV captures (G19) to learn the real player kernel first?
    Q3. The 1080-master-coded-at-4K gap: any detection idea beyond spectral statistics,
        or accept it as the known limit?
-   Q4. Detail accumulation: given the prototype result (section 12), agree to park it
+   Q4. Detail accumulation: given the prototype result (part 4), agree to park it
        until real streaming captures, or is there a variant worth trying first (e.g.
        anchoring B-frames to the nearest I-frame only, or targeting grain / noise)?
    Q5. G1: are the three periodic-content guards sufficient, or should exactly periodic
        tiles be excluded outright (a periodicity test on the tile)?
+   Q6. Text guard: is "sharp steps concentrated in a quarter-height band" enough, or
+       should it also catch subtitles on a translucent box / drop-shadow-only styles,
+       vertical (CJK) text and burned-in signs? Any natural content it could exclude
+       too often (starfields, city lights at night, credits) that matters?
+   Q7. Evidence at 10 s / 3 shots: any false-positive scenario you would test before
+       relying on it (e.g. a soft-focus or heavily filtered native 4K film with quick
+       cutting, 3 soft shots within 10 s)?
