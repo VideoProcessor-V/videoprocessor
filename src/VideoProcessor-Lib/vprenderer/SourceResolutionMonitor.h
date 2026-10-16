@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -70,7 +71,7 @@ namespace SourceResolutionMonitor
 		// native at once on detail above the re-based height or a discontinuity; when
 		// only the confidence fell, at the next cut, at most kDisengageWaitSeconds later.
 		// `seconds`: a monotonic clock (tests); < 0 = the steady clock.
-		double AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds = -1.0);
+		double AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds = -1.0, uint64_t renderSequence = 0);
 		static constexpr double kDisengageWaitSeconds = 5.0;
 		double AutoRatio() const { return autoAppliedShared.load(std::memory_order_acquire); }
 		// The source_resolution setting in force (render thread sets it; any
@@ -92,6 +93,33 @@ namespace SourceResolutionMonitor
 		double intervalSeconds = 0.5;   // tile copies per second: 2
 		static constexpr int kTile = 256;
 		static constexpr int kMaxTiles = 8;
+
+		// Look-ahead verification (owner 2026-10-16: "since we have look ahead the
+		// analysis can look ahead and ensure the upcoming frames are in accordance
+		// with the previous assumption"). The render loop shows the monitor the
+		// queued frames ahead of display (10-bit luma through `luma(x, y)`, the
+		// active picture rectangle), oldest first. A cheap check per frame finds a
+		// cut or a black/flat frame ahead; while an auto change is pending, the
+		// first frame with picture after it is analysed on a separate worker (the
+		// tracker is not touched). AutoFactor, told the sequence being rendered,
+		// then switches exactly on the cut / black frame when that reading agrees
+		// with the change, or cancels the change when the next shot disagrees (it
+		// waits for a later cut). With no frames ahead nothing changes.
+		using LumaSampler = std::function<int(int x, int y)>;
+		void LookAheadFrame(uint64_t sequence, int width, int height, const LumaSampler& luma,
+			int left, int top, int right, int bottom);
+		struct AheadState
+		{
+			uint64_t eventSequence = 0;    // the cut / black frame ahead (0 = none)
+			uint64_t targetSequence = 0;   // the frame analysed for it
+			bool ready = false, informative = false;
+			double ratio = 1.0;
+			unsigned long long verified = 0, cancelled = 0;
+		};
+		AheadState Ahead() const;
+		// Tests without a GPU: one analysed frame from normalised tiles (kTile x kTile each),
+		// through the same path as a captured frame, synchronously.
+		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight);
 
 	private:
 		struct Job
@@ -137,6 +165,20 @@ namespace SourceResolutionMonitor
 		std::string historyPath;
 		std::chrono::steady_clock::time_point lastFlush{};
 		bool historyDirty = false;
+
+		// Look-ahead (render thread, plus its worker under aheadMutex).
+		void AheadWorker();
+		mutable std::mutex aheadMutex;
+		std::condition_variable aheadWake;
+		std::thread aheadThread;
+		bool aheadStopping = false, aheadHaveJob = false;
+		std::vector<float> aheadTiles;   // the target frame's tiles, normalised
+		int aheadTileCount = 0;
+		AheadState ahead;
+		uint64_t aheadLastSequence = 0;
+		double aheadLastMean = -1.0;
+		bool aheadAwaitTarget = false;   // the event frame was black: analyse the next frame with picture
+		unsigned long long autoNotBeforeCuts = 0;   // after a cancel: the cut at the event is not used
 
 		// Auto (render thread).
 		std::atomic<bool> autoReset{ false };

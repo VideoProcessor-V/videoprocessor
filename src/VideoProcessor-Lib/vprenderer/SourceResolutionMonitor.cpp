@@ -52,6 +52,7 @@ if (tile < int(tiles) && g.y < 256) {
 	Monitor::Monitor()
 	{
 		worker = std::thread([this] { Worker(); });
+		aheadThread = std::thread([this] { AheadWorker(); });
 	}
 
 	Monitor::~Monitor()
@@ -62,7 +63,139 @@ if (tile < int(tiles) && g.y < 256) {
 		}
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
+		{
+			std::lock_guard<std::mutex> lock(aheadMutex);
+			aheadStopping = true;
+		}
+		aheadWake.notify_all();
+		if (aheadThread.joinable()) aheadThread.join();
 		FlushHistory(true);
+	}
+
+	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight)
+	{
+		Job j;
+		j.values = tiles;
+		j.tiles = count;
+		j.codeMaximum = 1023;
+		j.scale = 1023.0;
+		j.seconds = seconds;
+		j.nativeWidth = nativeWidth;
+		j.nativeHeight = nativeHeight;
+		Analyse(j);
+	}
+
+	Monitor::AheadState Monitor::Ahead() const
+	{
+		std::lock_guard<std::mutex> lock(aheadMutex);
+		return ahead;
+	}
+
+	void Monitor::LookAheadFrame(uint64_t sequence, int width, int height, const LumaSampler& luma,
+		int left, int top, int right, int bottom)
+	{
+		if (!luma || sequence <= aheadLastSequence) return;
+		aheadLastSequence = sequence;
+		left = (std::max)(0, left); top = (std::max)(0, top);
+		right = (std::min)(width, right); bottom = (std::min)(height, bottom);
+		const int w = right - left, h = bottom - top;
+		if (w < 2 * kTile || h < kTile) return;
+		// The tiles: 4 x 2 on the 16-px grid inside the picture (as the GPU monitor).
+		const int tilesX = 4, tilesY = 2;
+		auto tileOrigin = [&](int i, int& x0, int& y0) {
+			const int tx = i % tilesX, ty = i / tilesX;
+			x0 = (left + (w - kTile) * (2 * tx + 1) / (2 * tilesX)) & ~15;
+			y0 = (top + (h - kTile) * (2 * ty + 1) / (2 * tilesY)) & ~15;
+			x0 = (std::max)(left, (std::min)(x0, right - kTile));
+			y0 = (std::max)(top, (std::min)(y0, bottom - kTile));
+		};
+		// Cheap check: the mean and spread on a sparse 32 x 32 grid per tile.
+		double sum = 0.0, spread = 0.0;
+		int count = 0;
+		for (int i = 0; i < tilesX * tilesY; ++i)
+		{
+			int x0, y0;
+			tileOrigin(i, x0, y0);
+			double ts = 0.0, ts2 = 0.0;
+			for (int y = 0; y < kTile; y += 8)
+				for (int x = 0; x < kTile; x += 8)
+				{
+					const double v = luma(x0 + x, y0 + y) / 1023.0;
+					ts += v; ts2 += v * v;
+				}
+			const double n = (kTile / 8.0) * (kTile / 8.0);
+			const double mean = ts / n;
+			spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / n - mean * mean)));
+			sum += mean;
+			++count;
+		}
+		const double mean = sum / count;
+		const bool cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
+		const bool blank = spread < 3.0 / 1023.0;   // no texture anywhere (black, a fade's end, flat)
+		aheadLastMean = mean;
+		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
+		bool analyse = false;
+		{
+			std::lock_guard<std::mutex> lock(aheadMutex);
+			if (!pending) { ahead.eventSequence = 0; aheadAwaitTarget = false; return; }
+			if (ahead.eventSequence == 0 && (cut || blank))
+			{
+				ahead = AheadState{ sequence, 0, false, false, 1.0, ahead.verified, ahead.cancelled };
+				aheadAwaitTarget = blank;
+				analyse = !blank;
+			}
+			else if (ahead.eventSequence != 0 && aheadAwaitTarget && !blank)
+			{
+				aheadAwaitTarget = false;
+				analyse = true;
+			}
+			if (analyse && !aheadHaveJob)
+			{
+				ahead.targetSequence = sequence;
+				aheadTileCount = tilesX * tilesY;
+				aheadTiles.resize(static_cast<size_t>(aheadTileCount) * kTile * kTile);
+				for (int i = 0; i < aheadTileCount; ++i)
+				{
+					int x0, y0;
+					tileOrigin(i, x0, y0);
+					float* t = &aheadTiles[static_cast<size_t>(i) * kTile * kTile];
+					for (int y = 0; y < kTile; ++y)
+						for (int x = 0; x < kTile; ++x) t[y * kTile + x] = luma(x0 + x, y0 + y) / 1023.0f;
+				}
+				aheadHaveJob = true;
+			}
+		}
+		if (analyse) aheadWake.notify_all();
+	}
+
+	void Monitor::AheadWorker()
+	{
+		for (;;)
+		{
+			std::vector<float> tiles;
+			int count = 0;
+			uint64_t target = 0;
+			{
+				std::unique_lock<std::mutex> lock(aheadMutex);
+				aheadWake.wait(lock, [this] { return aheadStopping || aheadHaveJob; });
+				if (aheadStopping) return;
+				tiles.swap(aheadTiles);
+				count = aheadTileCount;
+				target = ahead.targetSequence;
+			}
+			std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(count));
+			for (int i = 0; i < count; ++i)
+				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * kTile * kTile], kTile, kTile, spectra[static_cast<size_t>(i)], 1023);
+			const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra);
+			std::lock_guard<std::mutex> lock(aheadMutex);
+			aheadHaveJob = false;
+			if (ahead.targetSequence == target)
+			{
+				ahead.ready = true;
+				ahead.informative = r.informative();
+				ahead.ratio = r.ratio;
+			}
+		}
 	}
 
 	void Monitor::SetHistoryFolder(const std::string& folder)
@@ -458,7 +591,7 @@ if (tile < int(tiles) && g.y < 256) {
 		return selection;
 	}
 
-	double Monitor::AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds)
+	double Monitor::AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds, uint64_t renderSequence)
 	{
 		why.clear();
 		const double now = seconds >= 0.0 ? seconds :
@@ -514,12 +647,44 @@ if (tile < int(tiles) && g.y < 256) {
 		if (wanted < autoApplied - tolerance)
 		{
 			// Down: wait for the next cut so the picture never changes mid-shot.
+			AheadState a;
+			{
+				std::lock_guard<std::mutex> lock(aheadMutex);
+				a = ahead;
+			}
+			const bool aheadDue = renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
+				std::fabs(wanted - autoPending) <= tolerance;
 			if (std::fabs(wanted - autoPending) > tolerance)
 			{
 				autoPending = wanted;
 				autoPendingCuts = s.cuts;
 				autoPendingFrames = s.frames;
 				why = "waiting for the next cut or black";
+			}
+			else if (aheadDue)
+			{
+				// The frame after the cut / black, read ahead of display: it decides.
+				const bool agrees = !a.informative || std::fabs(a.ratio - wanted) <= 0.02;
+				std::lock_guard<std::mutex> lock(aheadMutex);
+				if (agrees)
+				{
+					autoApplied = wanted;
+					++ahead.verified;
+					why = "engaged at the cut / black (look-ahead verified)";
+				}
+				else
+				{
+					autoPending = autoApplied;
+					autoNotBeforeCuts = s.cuts + 1;   // the event's cut, when the monitor sees it, is not used
+					++ahead.cancelled;
+					why = "look-ahead: the next shot disagrees - staying";
+				}
+				ahead.eventSequence = 0;
+				ahead.ready = false;
+			}
+			else if (s.cuts <= autoNotBeforeCuts && autoNotBeforeCuts != 0)
+			{
+				// After a look-ahead cancel: wait for a later cut.
 			}
 			else if (s.cuts != autoPendingCuts)
 			{
