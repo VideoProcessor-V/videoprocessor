@@ -1116,7 +1116,18 @@ if (b.x < size.x && b.y < size.y) {
 		// over the overlap, strided to about 2048 samples), then +-2 texels in
 		// half steps at 1/8 around the winner. z = best / second best (outside
 		// +-1 of the best): near 1 on flat or ambiguous pictures.
-		const char* const GLOBAL_HEADER = R"GLSL(
+		// D1's 1/8 samples (2026-10-16): one per stride x stride cell at a hashed
+		// place in the cell, not at its corner. A fixed lattice aliases with
+		// content on the same grid and biased the half-texel pick (a synthetic
+		// 12 px pan read 16 px with 4 px of phantom vertical motion).
+#define GLOBAL_L1_SAMPLE_GLSL \
+	"ivec2 l1_sample_(ivec2 cell, int stride)\n" \
+	"{\n" \
+	"    uint h = (uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u) * 2654435761u;\n" \
+	"    return cell * stride + ivec2(int((h >> 8) % uint(stride)), int((h >> 20) % uint(stride)));\n" \
+	"}\n"
+
+		const char* const GLOBAL_HEADER = GLOBAL_L1_SAMPLE_GLSL R"GLSL(
 shared float g_sad_[256];
 shared int g_idx_[256];
 ivec2 l1s_;
@@ -1148,10 +1159,12 @@ float frame_sad_l1(vec2 v, int stride)
     for (int y = 0; y < l1s_.y; y += stride)
         for (int x = 0; x < l1s_.x; x += stride) {
             all_ += 1.0;
-            vec2 q = vec2(x, y) + v;
-            if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s_.x - 1) || q.y > float(l1s_.y - 1))
+            ivec2 p = l1_sample_(ivec2(x, y) / stride, stride);
+            vec2 q = vec2(p) + v;
+            if (p.x >= l1s_.x || p.y >= l1s_.y ||
+                q.x < 0.0 || q.y < 0.0 || q.x > float(l1s_.x - 1) || q.y > float(l1s_.y - 1))
                 continue;
-            s += abs(g1from(ivec2(x, y)) - g1to(q));
+            s += abs(g1from(p) - g1to(q));
             n += 1.0;
         }
     return n * 4.0 >= all_ && n > 0.0 ? s / n : 1e30;
@@ -1229,7 +1242,7 @@ if (i == 0u) {
 		// pick exactly as the serial body does (lowest SAD, lowest index on a
 		// tie). The sums' order differs from the serial loop (float rounding
 		// only).
-		const char* const GLOBAL_SUM_HEADER = R"GLSL(
+		const char* const GLOBAL_SUM_HEADER = GLOBAL_L1_SAMPLE_GLSL R"GLSL(
 shared float gs_s_[256];
 shared float gs_n_[256];
 )GLSL";
@@ -1331,9 +1344,9 @@ int cols = (l1s.x + stride1 - 1) / stride1;
 int total = cols * ((l1s.y + stride1 - 1) / stride1);
 float s = 0.0, n = 0.0;
 for (int k = int(i); k < total; k += 256) {
-    ivec2 p = ivec2(k % cols, k / cols) * stride1;
+    ivec2 p = l1_sample_(ivec2(k % cols, k / cols), stride1);
     vec2 q = vec2(p) + v;
-    if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
+    if (p.x >= l1s.x || p.y >= l1s.y || q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
         continue;
     s += abs(texelFetch(from_l1, p, 0).r - texture(to_l1, (q + vec2(0.5)) / vec2(l1s)).r);
     n += 1.0;
@@ -1385,7 +1398,7 @@ if (i == 0u) {
 		// Both directions in one dispatch per stage (2026-10-15): work group x
 		// below the stage's width is A to B, from there B to A; each group's
 		// work is Global's for its direction (the same sums in the same order).
-		const char* const GLOBAL_BOTH_HEADER = R"GLSL(
+		const char* const GLOBAL_BOTH_HEADER = GLOBAL_L1_SAMPLE_GLSL R"GLSL(
 shared float gs_s_[256];
 shared float gs_n_[256];
 )GLSL";
@@ -1481,9 +1494,9 @@ int cols = (l1s.x + stride1 - 1) / stride1;
 int total = cols * ((l1s.y + stride1 - 1) / stride1);
 float s = 0.0, n = 0.0;
 for (int k = int(i); k < total; k += 256) {
-    ivec2 p = ivec2(k % cols, k / cols) * stride1;
+    ivec2 p = l1_sample_(ivec2(k % cols, k / cols), stride1);
     vec2 q = vec2(p) + v;
-    if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
+    if (p.x >= l1s.x || p.y >= l1s.y || q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
         continue;
     vec2 t = (q + vec2(0.5)) / vec2(l1s);
     // Both sampled, then chosen: an implicit-LOD sample may not sit in a

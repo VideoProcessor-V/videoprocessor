@@ -5420,15 +5420,27 @@ namespace VideoProcessorTest
 					settings.opticalFlowGlobalReadback = mode == 1;
 					Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
 					Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
-					if (!warp.OpticalFlowUsed()) { engine = false; break; }
+					// Without the engine mode 0 is still D1's search (the fallback path).
+					if (!warp.OpticalFlowUsed()) engine = false;
 					if (mode == 1) Assert::IsTrue(warp.GlobalFromEngine(), L"the engine's global was used");
 					readGlobal(warp, g[mode]);
+					if (!engine) break;
 				}
-				if (!engine) { Logger::WriteMessage("optical flow engine unavailable: not run\n"); return; }
 				char line[240];
-				snprintf(line, sizeof(line), "pan %2d px: search (%.2f, %.2f) px z %.2f; engine (%.2f, %.2f) px z %.2f\n",
-					dx, g[0][0] * 8.0f, g[0][1] * 8.0f, g[0][2], g[1][0] * 8.0f, g[1][1] * 8.0f, g[1][2]);
+				if (engine)
+					snprintf(line, sizeof(line), "pan %2d px: search (%.2f, %.2f) px z %.2f; engine (%.2f, %.2f) px z %.2f\n",
+						dx, g[0][0] * 8.0f, g[0][1] * 8.0f, g[0][2], g[1][0] * 8.0f, g[1][1] * 8.0f, g[1][2]);
+				else
+					snprintf(line, sizeof(line), "pan %2d px: search (%.2f, %.2f) px z %.2f; optical flow engine unavailable\n",
+						dx, g[0][0] * 8.0f, g[0][1] * 8.0f, g[0][2]);
 				Logger::WriteMessage(line);
+				// D1's 1/8 refinement lands within one half-texel step (4 px) of the
+				// pan, with no phantom vertical motion (2026-10-16: a fixed sampling
+				// lattice read 12 px as 16 px plus 4 px vertical).
+				Assert::IsTrue(std::fabs(g[0][0] * 8.0f - dx) <= 4.0f, L"the search is within 4 px of the pan");
+				Assert::AreEqual(0.0f, g[0][1], L"the search finds no vertical motion in a horizontal pan");
+				if (!engine)
+					continue;
 				const float errSearch = std::fabs(g[0][0] * 8.0f - dx), errEngine = std::fabs(g[1][0] * 8.0f - dx);
 				if (errEngine > errSearch + 1.0f || (g[1][2] >= 0.9f && g[0][2] < 0.9f)) ++worse;
 			}
