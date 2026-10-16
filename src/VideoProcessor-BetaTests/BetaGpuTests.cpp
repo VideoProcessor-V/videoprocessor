@@ -3296,6 +3296,7 @@ namespace Corpus
 		bool fade = false, split = true, verify = false; float verifyShare = 0.2f;
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
+		bool opticalFlow = false; int ofPreset = 1;   // docs/VP-nvof-ahead.md: the engine as the motion source
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
 		float rollHi = 24.0f, rollFloor = 0.25f;
 		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
@@ -3313,6 +3314,29 @@ namespace Corpus
 		const std::string which = _dupenv_s(&set, &n, "VP_TEST_CORPUS_SET") == 0 && set ? set : "";
 		std::free(set);
 		const bool fixes = which == "fixes";
+		if (which == "opticalflow")
+		{
+			// docs/VP-nvof-ahead.md (owner 2026-10-16: the engine the established default):
+			// the deployed matcher settings with the block searches against the optical-flow
+			// engine (each preset), accuracy first, then with the deployed taste (D2/D4/R-A)
+			// scored where shown. The trust pipeline after the source is the same.
+			auto add = [&](const char* name, bool of, int preset, bool taste)
+			{
+				Variant v{ name, 4.5f, 0.5f, true };
+				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
+				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
+				v.opticalFlow = of; v.ofPreset = preset;
+				if (taste) { v.taste = true; v.rolloff = true; }
+				variants.push_back(v);
+			};
+			add("matcher (block searches), defaults", false, 1, false);
+			add("optical flow, medium", true, 1, false);
+			add("optical flow, fast", true, 2, false);
+			add("optical flow, slow", true, 0, false);
+			add("matcher, D2/D4/R-A", false, 1, true);
+			add("optical flow medium, D2/D4/R-A", true, 1, true);
+			return variants;
+		}
 		if (which == "d1")
 		{
 			// Planner D1: the damage with R-A and D2/D4 on (as deployed). Each
@@ -3697,6 +3721,8 @@ namespace Corpus
 		s.occlusionFill = v.fill;
 		s.minTrustedShare = v.minShare;
 		s.pixelTrust = v.pixel;
+		s.opticalFlow = v.opticalFlow;
+		s.opticalFlowPreset = v.ofPreset;
 		s.pixelTrustLo = v.pixLo;
 		s.pixelTrustHi = v.pixHi;
 		s.pixelTrustLoUntrusted = v.pixLoU;
