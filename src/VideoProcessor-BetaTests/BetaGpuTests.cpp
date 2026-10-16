@@ -3296,7 +3296,7 @@ namespace Corpus
 		bool fade = false, split = true, verify = false; float verifyShare = 0.2f;
 		bool fill = false; float minShare = 0.25f;
 		bool pixel = false; float pixLo = 1.0f, pixHi = 2.5f;
-		bool opticalFlow = false; int ofPreset = 1;   // docs/VP-nvof-ahead.md: the engine as the motion source
+		bool opticalFlow = false; int ofPreset = 1; bool ofCandidate = false;   // docs/VP-nvof-ahead.md: the engine as the motion source
 		bool rolloff = false; float pixLoU = 0.0f, pixHiU = 0.0f; bool pixAll = false;
 		float rollHi = 24.0f, rollFloor = 0.25f;
 		float ownTexture = 0.0f, ownError = 3.0f; bool crossfade = false;
@@ -3320,21 +3320,23 @@ namespace Corpus
 			// the deployed matcher settings with the block searches against the optical-flow
 			// engine (each preset), accuracy first, then with the deployed taste (D2/D4/R-A)
 			// scored where shown. The trust pipeline after the source is the same.
-			auto add = [&](const char* name, bool of, int preset, bool taste)
+			auto add = [&](const char* name, bool of, int preset, bool taste, bool candidate)
 			{
 				Variant v{ name, 4.5f, 0.5f, true };
 				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
 				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
-				v.opticalFlow = of; v.ofPreset = preset;
+				v.opticalFlow = of; v.ofPreset = preset; v.ofCandidate = candidate;
 				if (taste) { v.taste = true; v.rolloff = true; }
 				variants.push_back(v);
 			};
-			add("matcher (block searches), defaults", false, 1, false);
-			add("optical flow, medium", true, 1, false);
-			add("optical flow, fast", true, 2, false);
-			add("optical flow, slow", true, 0, false);
-			add("matcher, D2/D4/R-A", false, 1, true);
-			add("optical flow medium, D2/D4/R-A", true, 1, true);
+			add("matcher (block searches), defaults", false, 1, false, false);
+			add("optical flow instead, medium", true, 1, false, false);
+			add("optical flow instead, slow", true, 0, false, false);
+			add("matcher + optical flow candidate, medium", true, 1, false, true);
+			add("matcher + optical flow candidate, fast", true, 2, false, true);
+			add("matcher + optical flow candidate, slow", true, 0, false, true);
+			add("matcher, D2/D4/R-A", false, 1, true, false);
+			add("matcher + OF candidate medium, D2/D4/R-A", true, 1, true, true);
 			return variants;
 		}
 		if (which == "d1")
@@ -3723,6 +3725,7 @@ namespace Corpus
 		s.pixelTrust = v.pixel;
 		s.opticalFlow = v.opticalFlow;
 		s.opticalFlowPreset = v.ofPreset;
+		s.opticalFlowCandidate = v.ofCandidate;
 		s.pixelTrustLo = v.pixLo;
 		s.pixelTrustHi = v.pixHi;
 		s.pixelTrustLoUntrusted = v.pixLoU;

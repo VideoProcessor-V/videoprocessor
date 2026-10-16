@@ -258,6 +258,11 @@ namespace Dejudder
 		// checks. Falls back to the searches where the engine is missing.
 		bool opticalFlow = false;
 		int opticalFlowPreset = 1;   // 0 slow, 1 medium, 2 fast
+		// docs/VP-nvof-ahead.md (2026-10-16 corpus): the engine's vector as one more
+		// candidate in the matcher's refinement (each block keeps whichever predicts B
+		// best, then the half-pixel step) - true; false = the engine instead of the
+		// searches (coarser: 88-95% of the matcher's removal on the corpus).
+		bool opticalFlowCandidate = true;
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The
@@ -504,7 +509,8 @@ namespace Dejudder
 		bool GlobalBoth(pl_tex l1A, pl_tex l1B, pl_tex l2A, pl_tex l2B, pl_tex out[2], pl_tex second[2]);
 		// Two same-size copies in one dispatch (2026-10-15).
 		bool CopyPair(pl_tex src0, pl_tex dst0, pl_tex src1, pl_tex dst1);
-		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out);
+		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out,
+			pl_tex opticalFlowVectors = nullptr);
 		bool Copy(pl_tex src, pl_tex dst);
 
 		pl_log log = nullptr;
@@ -527,6 +533,8 @@ namespace Dejudder
 		pl_tex strengthState = nullptr;                     // D2/D4: last scale (rgba32f)
 		pl_tex fillOcclusion = nullptr;                     // D5: B's occlusion
 		pl_tex sweep[2] = { nullptr, nullptr };             // 11a E1: the first sweep (fwd, bwd)
+		pl_tex ofSearch[2] = { nullptr, nullptr };          // the engine's block vectors (candidate mode)
+		pl_tex ofNone = nullptr;                            // bound in their place when there are none
 		pl_tex previousSearch[2] = { nullptr, nullptr };    // 11a: last frame's searches
 		bool previousValid = false;
 		pl_tex qpelField = nullptr;                         // 11a E3: before D3
@@ -579,7 +587,7 @@ namespace Dejudder
 		bool lumaInCodes = false;
 		bool LowResSearch(const Planes& a, const Planes& b);
 		// The optical flow source: forward / backward in the searches' format.
-		bool OpticalFlowSearch();
+		bool OpticalFlowSearch(pl_tex outForward, pl_tex outBackward);
 		std::unique_ptr<NvOpticalFlow::Engine> opticalFlowEngine;
 		bool opticalFlowFailed = false;   // logged once; the searches from then on
 		int opticalFlowPresetOpen = -1;

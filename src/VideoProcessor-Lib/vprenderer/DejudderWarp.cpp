@@ -823,7 +823,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
     }
     half_size_ = textureSize(from_half, 0);
     ivec2 o = b * 8;
-    vec2 cand[11];
+    vec2 cand[12];
     float xs[9];
     float ys[9];
     int nc = 0, nn = 0;
@@ -844,11 +844,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
     vec4 gv = texelFetch(global_vec, ivec2(0), 0);
     if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
         cand[nc++] = gv.xy * 4.0;
+    if (use_of != 0)
+        cand[nc++] = texelFetch(of_vec, b, 0).xy;
     vec2 med = nn > 0 ? vec2(median_(xs, nn), median_(ys, nn)) : cand[0];
     vec2 best = cand[0];
     float best_sad = sad_sub(o, best);
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
-    for (int k = 1; k < 11; k++) {
+    for (int k = 1; k < 12; k++) {
         if (k >= nc) break;
         float s = sad_sub(o, cand[k]);
         float score = s / 144.0 + lambda * 2.0 * length(cand[k] - med);
@@ -964,7 +966,7 @@ half_size_ = textureSize(from_half, 0);
 ivec2 o = b * 8;
 // The candidate list and the neighbours' median, as the serial sweep (every
 // thread of the block builds the same list).
-vec2 cand[11];
+vec2 cand[12];
 float xs[9];
 float ys[9];
 int nc = 0, nn = 0;
@@ -985,6 +987,8 @@ if (use_temporal != 0)
 vec4 gv = texelFetch(global_vec, ivec2(0), 0);
 if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
     cand[nc++] = gv.xy * 4.0;
+if (use_of != 0 && inside)
+    cand[nc++] = texelFetch(of_vec, b, 0).xy;
 if (run)
     for (int i = li; i < 144; i += 16)
         rf_from[sub * 144 + i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
@@ -997,7 +1001,7 @@ if (run && lead) {
     vec2 best = cand[0];
     float best_sad = rf_sads[sub * 16];
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
-    for (int k = 1; k < 11; k++) {
+    for (int k = 1; k < 12; k++) {
         if (k >= nc) break;
         float s = rf_sads[sub * 16 + k];
         float score = s / 144.0 + lambda * 2.0 * length(cand[k] - med);
@@ -2321,7 +2325,7 @@ if (q.x < size.x && q.y < size.y) {
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &halfK, &l1K, &l2K, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
-			&sweep[0], &sweep[1], &previousSearch[0], &previousSearch[1], &qpelField, &subField,
+			&sweep[0], &sweep[1], &ofSearch[0], &ofSearch[1], &ofNone, &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
 			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &globalBothSad2, &globalBothSad1, &globalBothPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
 			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1] })
@@ -2379,6 +2383,8 @@ if (q.x < size.x && q.y < size.y) {
 			!make(&globalVector[0], 1, 1, vec4f, readable) || !make(&globalVector[1], 1, 1, vec4f, readable) ||
 			!make(&globalSecond[0], 1, 1, vec4f, readable) || !make(&globalSecond[1], 1, 1, vec4f, readable) ||
 			!make(&sweep[0], blocksX, blocksY, vec4f, readable) || !make(&sweep[1], blocksX, blocksY, vec4f, readable) ||
+			!make(&ofSearch[0], blocksX, blocksY, vec4f, readable) || !make(&ofSearch[1], blocksX, blocksY, vec4f, readable) ||
+			!make(&ofNone, 1, 1, vec4f, readable) ||
 			!make(&qpelField, blocksX, blocksY, vec4f, readable))
 		{
 			error = "cannot create the motion textures";
@@ -2781,31 +2787,37 @@ if (q.x < size.x && q.y < size.y) {
 			descriptors, two ? 11 : 10, variables, 5, blocksX, blocksY, 16, nt / 16);
 	}
 
-	bool MotionWarp::Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn, pl_tex previous, pl_tex global, pl_tex out)
+	bool MotionWarp::Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn, pl_tex previous, pl_tex global, pl_tex out,
+		pl_tex opticalFlowVectors)
 	{
-		const pl_shader_desc descriptors[7] = {
+		// The engine's vectors as one more candidate (each texture is bound once: a
+		// separate 1x1 texture stands in when there are none).
+		const pl_shader_desc descriptors[8] = {
 			Sampled("from_half", fromHalf, false), Sampled("to_half", toHalf, true),
 			Sampled("sweep", sweepIn, false), Sampled("previous", previous, false),
 			Sampled("global_vec", global, false), Sampled("prev_trust", frameTrust, false),
+			Sampled("of_vec", opticalFlowVectors ? opticalFlowVectors : ofNone, false),
 			Storage("dst", out) };
 		const int useGlobal = settings.globalPrior ? 1 : 0;
 		const int useTemporal = previousValid ? 1 : 0;
 		const int useGate = settings.estGate && settings.globalPrior && previousValid ? 1 : 0;
+		const int useOf = opticalFlowVectors ? 1 : 0;
 		const float motionLo = settings.motionScaleLo;
 		const float lambda = std::max(0.0f, settings.estLambda);
-		const pl_shader_var variables[5] = {
+		const pl_shader_var variables[6] = {
 			{ pl_var_int("use_global"), &useGlobal, false },
 			{ pl_var_int("use_temporal"), &useTemporal, false },
 			{ pl_var_int("use_gate"), &useGate, false },
+			{ pl_var_int("use_of"), &useOf, false },
 			{ pl_var_float("motion_lo"), &motionLo, true },
 			{ pl_var_float("lambda"), &lambda, true } };
 		const std::string header = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL;
 		if (serialSearchForTest)
 			return Dispatch("VideoProcessor de-judder: second sweep (11a E1, serial reference)", header.c_str(),
-				REFINE_BODY_SERIAL, descriptors, 7, variables, 5, blocksX, blocksY, 8);
+				REFINE_BODY_SERIAL, descriptors, 8, variables, 6, blocksX, blocksY, 8);
 		static const std::string parallel = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER + REFINE_PAIR_HEADER;
 		return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)", parallel.c_str(), REFINE_BODY,
-			descriptors, 7, variables, 5, (blocksX + 1) / 2, blocksY, 16, 2);
+			descriptors, 8, variables, 6, (blocksX + 1) / 2, blocksY, 16, 2);
 	}
 
 	bool MotionWarp::SnapshotForWarp()
@@ -3218,7 +3230,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
-	bool MotionWarp::OpticalFlowSearch()
+	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward)
 	{
 		if (opticalFlowFailed)
 			return false;
@@ -3289,9 +3301,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			return fail(opticalFlowEngine->LastError());
 		const std::string header = std::string(RESCORE_HEADER);
 		const pl_shader_desc fw[4] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
-			Sampled("to_half", halfB, true), Storage("dst", forward) };
+			Sampled("to_half", halfB, true), Storage("dst", outForward) };
 		const pl_shader_desc bw[4] = { Sampled("flow", ofFlowTex[1], false), Sampled("from_half", halfB, false),
-			Sampled("to_half", halfA, true), Storage("dst", backward) };
+			Sampled("to_half", halfA, true), Storage("dst", outBackward) };
 		if (!Dispatch("VideoProcessor de-judder: optical flow to blocks (forward)", header.c_str(), OF_TO_SEARCH_BODY, fw, 4,
 				nullptr, 0, blocksX, blocksY, 8) ||
 			!Dispatch("VideoProcessor de-judder: optical flow to blocks (backward)", header.c_str(), OF_TO_SEARCH_BODY, bw, 4,
@@ -3457,18 +3469,25 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)) :
 					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr)))
 				return false;
-			// Experimental: the optical flow engine instead of the searches.
-			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest && OpticalFlowSearch();
+			// The optical flow engine (docs/VP-nvof-ahead.md): by default its vectors join
+			// the refinement's candidates (needs the two sweeps); otherwise they replace
+			// the searches. Without the engine the searches run as before.
+			const bool candidateMode = settings.opticalFlowCandidate && settings.estCandidates;
+			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
+				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
+			const bool replaced = opticalFlowUsed && !candidateMode;
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
-			const bool twoSweeps = settings.estCandidates && !opticalFlowUsed;
-			if (!opticalFlowUsed && !Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward,
+			const bool twoSweeps = settings.estCandidates && !replaced;
+			if (!replaced &&
+				(!Search(halfA, halfB, l1A, l1B, l2A, l2B, globalVector[0], previousSearch[0], twoSweeps ? sweep[0] : forward,
 					two ? globalSecond[0] : nullptr) ||
-				!Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward,
-					two ? globalSecond[1] : nullptr))
+				 !Search(halfB, halfA, l1B, l1A, l2B, l2A, globalVector[1], previousSearch[1], twoSweeps ? sweep[1] : backward,
+					two ? globalSecond[1] : nullptr)))
 				return false;
-			if (twoSweeps && !opticalFlowUsed &&
-				(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward) ||
-				 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward)))
+			const bool ofCandidates = opticalFlowUsed && candidateMode;
+			if (twoSweeps &&
+				(!Refine(halfA, halfB, sweep[0], previousSearch[0], globalVector[0], forward, ofCandidates ? ofSearch[0] : nullptr) ||
+				 !Refine(halfB, halfA, sweep[1], previousSearch[1], globalVector[1], backward, ofCandidates ? ofSearch[1] : nullptr)))
 				return false;
 			if (settings.estCandidates || settings.estGate)
 			{
