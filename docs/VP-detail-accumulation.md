@@ -160,3 +160,10 @@ Owner, 2026-10-16: "are we going to have a problem with detail integration using
 - **Luma** behaves the same in every format; it is the same signal.
 - **Chroma recovery** (§6 Q1) matters most for 4:2:0, where chroma is a quarter of the resolution and is coded hardest. T7 decides whether chroma accumulation is on, and for which formats.
 - **The optical-flow producer's luma** (P010 read directly, v210 and RGB sampled) must give the same vectors for the same picture in each format: same-picture equivalence within 0.1 px. It is part of T7 and of the producer tests, which so far cover P010.
+
+**The capture format is not the coding history** (owner, 2026-10-16: "with 4:4:4 there could still be bitrate artifacts").
+- An Apple TV sends 4:4:4 (or RGB) decoded from a 4:2:0 HEVC stream: coding artifacts, and chroma upsampled from 4:2:0.
+- So nothing is decided from the capture format. Accumulation (and chroma accumulation) follows the measured coding quality (the bitrate-quality reading) and the chroma's measured effective resolution.
+- The source-resolution detector can read the chroma planes as it reads luma: upsampled 4:2:0 chroma shows the mirror signature at half the rate.
+- The same reading could let the re-base (Stage 12) treat chroma separately.
+- **T7 adds:** 4:4:4 decoded from a coded 4:2:0 stream (ffmpeg: encode 4:2:0, decode, upsample to 4:4:4) alongside a true 4:4:4 source.
