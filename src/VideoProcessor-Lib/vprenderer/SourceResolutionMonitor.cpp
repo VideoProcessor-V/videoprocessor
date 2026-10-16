@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
+#include <KernelInverse.h>
 
 #include "../DebugLog.h"
 
@@ -486,6 +487,9 @@ if (tile < int(tiles) && g.y < 256) {
 					trackerH.Discontinuity(cause);
 					coherenceV.clear();
 					coherenceH.clear();
+					kernelVotes.clear();
+					snapshot.kernel = -1;
+					snapshot.kernelVotes = snapshot.kernelAgree = 0;
 					snapshot.axisRatioX = snapshot.axisRatioY = 1.0;
 					snapshot.axisConfidence = 0.0;
 					live.clear();
@@ -514,6 +518,7 @@ if (tile < int(tiles) && g.y < 256) {
 		const auto start = std::chrono::steady_clock::now();
 		std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(j.tiles));
 		std::vector<float> luma(kPixels);
+		std::vector<std::vector<float>> codeTiles(static_cast<size_t>(j.tiles));   // for the kernel fit
 		for (int t = 0; t < j.tiles; ++t)
 		{
 			const float* src = j.values.data() + static_cast<size_t>(t) * kPixels;
@@ -523,6 +528,7 @@ if (tile < int(tiles) && g.y < 256) {
 				luma[i] = static_cast<float>((std::min)(static_cast<double>(j.codeMaximum), (std::max)(0.0, code)) / j.codeMaximum);
 			}
 			SourceResolution::Analyse(luma.data(), kTile, kTile, spectra[static_cast<size_t>(t)], j.codeMaximum);
+			codeTiles[static_cast<size_t>(t)] = luma;
 		}
 		SourceResolution::Thresholds thresholds;
 		thresholds.codeMaximum = j.codeMaximum;
@@ -562,6 +568,43 @@ if (tile < int(tiles) && g.y < 256) {
 		if (qualitySmoothed < 0.0 || cutNow) qualitySmoothed = frame.bitrateQuality;
 		else qualitySmoothed += 0.25 * (frame.bitrateQuality - qualitySmoothed);
 		if (frame.effectiveBits > 0.0) bitsSmoothed = bitsSmoothed <= 0.0 || cutNow ? frame.effectiveBits : bitsSmoothed + 0.25 * (frame.effectiveBits - bitsSmoothed);
+
+		// Kernel-matched re-base: at a 2:1 reading (declared, or the one being gathered),
+		// two informative tiles per analysed frame fitted against the candidate kernels;
+		// accepted fits vote (docs/VP-stage12-build-plan.md). The kernel stands with 6
+		// votes over 2 shots, 80% agreeing; a discontinuity clears it (below).
+		{
+			const double r = tracker.Ratio() < 1.0 ? tracker.Ratio() : tracker.Candidate();
+			while (!kernelVotes.empty() && j.seconds - kernelVotes.front().seconds > 120.0) kernelVotes.pop_front();
+			if (std::fabs(r - 0.5) <= 0.02 && frame.informative() && j.tiles > 0)
+			{
+				const int signalBits = static_cast<int>(std::lround(std::log2(j.codeMaximum + 1.0)));
+				const double floorCodes = KernelInverse::FloorCodes(bitsSmoothed > 0.0 ? bitsSmoothed : signalBits, signalBits);
+				for (int k = 0; k < 2; ++k)
+				{
+					const int t = static_cast<int>((kernelFitCounter++) % static_cast<unsigned long long>(j.tiles));
+					if (!SourceResolution::Informative(spectra[static_cast<size_t>(t)], thresholds)) continue;
+					const KernelInverse::TileFit fit = KernelInverse::FitTile(codeTiles[static_cast<size_t>(t)].data(), kTile, kTile, j.codeMaximum);
+					if (KernelInverse::Accept(fit, floorCodes))
+						kernelVotes.push_back({ j.seconds, fit.best, tracker.Cuts() });
+				}
+			}
+			int best = -1, bestCount = 0;
+			std::vector<int> counts(KernelInverse::Candidates().size(), 0);
+			unsigned long long firstShot = ~0ull, lastShot = 0;
+			for (const KernelVote& v : kernelVotes)
+			{
+				if (v.candidate < 0 || v.candidate >= static_cast<int>(counts.size())) continue;
+				if (++counts[static_cast<size_t>(v.candidate)] > bestCount) { bestCount = counts[static_cast<size_t>(v.candidate)]; best = v.candidate; }
+				firstShot = (std::min)(firstShot, v.shot);
+				lastShot = (std::max)(lastShot, v.shot);
+			}
+			const int votes = static_cast<int>(kernelVotes.size());
+			const bool stands = votes >= 6 && lastShot > firstShot && bestCount * 5 >= votes * 4;
+			snapshot.kernel = stands ? best : -1;
+			snapshot.kernelVotes = votes;
+			snapshot.kernelAgree = bestCount;
+		}
 
 		snapshot.reading = true;
 		snapshot.nativeWidth = j.nativeWidth;

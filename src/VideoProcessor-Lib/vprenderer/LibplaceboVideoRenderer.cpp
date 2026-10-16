@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <MotionAhead.h>
+#include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
 #include "../SubtitleProfileUpdatePolicy.h"
 #include "SubtitleBarRecovery.h"
@@ -1026,6 +1027,9 @@ namespace
 		int motionAheadFrames = MotionAhead::kDefaultDepth;
 		// The engine is the established default (owner 2026-10-16); off = the matcher only.
 		bool opticalFlow = true;
+		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
+		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
+		bool rebaseKernelMatch = true;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1210,7 +1214,7 @@ namespace
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.rebaseKernelMatch << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2339,6 +2343,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
 					settings.adaptive.faithfulOrtho ? "ortho" : "polar");
+		}
+		if (config.TryGetString(rule.section, "rebase_kernel_match", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.rebaseKernelMatch = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid rebase_kernel_match '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.rebaseKernelMatch ? "on" : "off");
 		}
 		if (config.TryGetString(rule.section, "optical_flow", raw))
 		{
@@ -9125,6 +9137,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
+		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
@@ -18118,6 +18131,17 @@ struct LibplaceboVideoRenderer::Impl
 				wanted = SourceRebase::Factor(activeSettings.sourceResolution, nativeHeight);
 				wantedX = SourceRebase::FactorX(activeSettings.sourceResolution, luma ? luma->params.w : 0, nativeHeight);
 			}
+			// The identified player kernel for an exact 2:1 luma re-base (logged on change).
+			{
+				const int identified = activeSettings.rebaseKernelMatch ? sourceMonitor.Read().kernel : -1;
+				if (identified != sourceRebase.Kernel())
+				{
+					sourceRebase.SetKernel(identified);
+					DebugLog::Log("Re-base kernel: %s", identified >= 0 ?
+						(KernelInverse::Candidates()[static_cast<size_t>(identified)].name + " identified: its inverse for 2:1 luma").c_str() :
+						(activeSettings.rebaseKernelMatch ? "none identified (the polar filter)" : "off (rebase_kernel_match off)"));
+				}
+			}
 			const bool temporal = temporalRenderer.Active();
 			rebaseFactor = wanted < 1.0 && !temporal ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal ? wantedX : 1.0;
@@ -25183,6 +25207,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
+		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

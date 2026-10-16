@@ -6932,6 +6932,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         bitrateFloor->setPlaceholderText(QStringLiteral("0.4"));
         bitrateFloor->setToolTip(QStringLiteral("What is left of the SSIM / CNN strength on the poorest stream (0.4 = 40 %)."));
         // docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, whole frames 0..4.
+        auto* kernelMatch = addChoice(QStringLiteral("Re-base: undo the player's upscaler"), QStringLiteral("rebase_kernel_match"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        kernelMatch->setToolTip(QStringLiteral(
+            "A 1080p stream upscaled 2x by the player (an Apple TV, a set-top box): VP identifies the player's upscale "
+            "filter from the picture and undoes it exactly, recovering the decoded 1080p before VP's own scaling "
+            "(+8 to +15 dB closer than an ordinary downscale on real streams). Only when the filter is identified "
+            "with confidence; otherwise the usual re-base filter. Off: always the usual filter."));
         auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlow->setToolTip(QStringLiteral(
@@ -8173,7 +8180,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "native" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "rebase_kernel_match", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },

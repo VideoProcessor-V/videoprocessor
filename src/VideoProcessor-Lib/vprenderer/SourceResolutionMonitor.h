@@ -45,6 +45,11 @@ namespace SourceResolutionMonitor
 		// both-axes reading is native: the width / height ratios declared by the per-axis
 		// trackers (stricter evidence), and their confidence. 1 = native on that axis.
 		double axisRatioX = 1.0, axisRatioY = 1.0, axisConfidence = 0.0;
+		// Kernel-matched re-base (docs/VP-stage12-build-plan.md): the player's upscale
+		// kernel identified at a 2:1 reading (KernelInverse candidate, -1 = none), and the
+		// accepted tile fits behind it (in the window) / that agree.
+		int kernel = -1;
+		int kernelVotes = 0, kernelAgree = 0;
 		double bitrateQuality = 1.0;   // spec 1b (smoothed)
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
 		double coherenceV = 0.0, coherenceH = 0.0;
@@ -189,6 +194,10 @@ namespace SourceResolutionMonitor
 		bool aheadAwaitTarget = false;   // the event frame was black: analyse the next frame with picture
 		unsigned long long autoNotBeforeCuts = 0;   // after a cancel: the cut at the event is not used
 
+		// Kernel identification (worker side): accepted fits (seconds, candidate, shot).
+		struct KernelVote { double seconds; int candidate; unsigned long long shot; };
+		std::deque<KernelVote> kernelVotes;
+		unsigned long long kernelFitCounter = 0;
 		// Per-axis trackers and their coherence history (worker side).
 		SourceResolution::Tracker trackerV{ AxisSettings() }, trackerH{ AxisSettings() };
 		std::deque<std::pair<double, double>> coherenceV, coherenceH;

@@ -7455,6 +7455,62 @@ namespace VideoProcessorTest
 
 		// Look-ahead verification (owner 2026-10-16): CPU only - frames ahead of display
 		// decide the switch at the cut / black frame, or cancel it.
+		TEST_METHOD(SourceResolutionMonitorIdentifiesThePlayerKernel)
+		{
+			// Kernel-matched re-base (owner 2026-10-16: optimise 1080p): frames upscaled 2x by
+			// a player kernel are read as 1080 and the kernel identified across shots; native
+			// frames never identify one. CPU only.
+			const int T = SourceResolutionMonitor::Monitor::kTile, M = T / 2;
+			auto frameTiles = [&](const KernelInverse::Candidate* c, unsigned seed, float level) {
+				std::vector<float> tiles(static_cast<size_t>(8) * T * T);
+				std::mt19937 rng(seed);
+				std::normal_distribution<float> noise(0.0f, 0.06f);
+				for (int t = 0; t < 8; ++t)
+				{
+					float* tile = &tiles[static_cast<size_t>(t) * T * T];
+					if (!c)
+					{
+						for (int i = 0; i < T * T; ++i) tile[i] = (std::min)(1.0f, (std::max)(0.0f, level + noise(rng)));
+					}
+					else
+					{
+						std::vector<float> master(static_cast<size_t>(M) * M), rows(static_cast<size_t>(M) * T), col(static_cast<size_t>(M)), out(static_cast<size_t>(T));
+						for (float& v : master) v = level + noise(rng);
+						for (int y = 0; y < M; ++y) KernelInverse::UpscaleLine(*c, &master[static_cast<size_t>(y) * M], M, &rows[static_cast<size_t>(y) * T]);
+						for (int x = 0; x < T; ++x)
+						{
+							for (int y = 0; y < M; ++y) col[static_cast<size_t>(y)] = rows[static_cast<size_t>(y) * T + x];
+							KernelInverse::UpscaleLine(*c, col.data(), M, out.data());
+							for (int y = 0; y < T; ++y) tile[static_cast<size_t>(y) * T + x] = (std::min)(1.0f, (std::max)(0.0f, out[static_cast<size_t>(y)]));
+						}
+					}
+					for (int i = 0; i < T * T; ++i) tile[i] = std::round(tile[i] * 1023.0f) / 1023.0f;
+				}
+				return tiles;
+			};
+			const int k = KernelInverse::Find("lanczos3");
+			const KernelInverse::Candidate& c = KernelInverse::Candidates()[static_cast<size_t>(k)];
+			auto run = [&](const KernelInverse::Candidate* kernel) {
+				SourceResolutionMonitor::Monitor m;
+				double t = 0.0;
+				for (int shot = 0; shot < 14; ++shot)
+					for (int f = 0; f < 6; ++f, t += 0.5)
+						m.AnalyseTilesForTest(frameTiles(kernel, 1000 + shot * 31 + f, shot % 2 ? 0.55f : 0.35f), 8, t, 3840, 2160);
+				return m.Read();
+			};
+			const SourceResolutionMonitor::Snapshot up = run(&c);
+			char line[200];
+			snprintf(line, sizeof(line), "upscaled (lanczos3): declared %.3f, kernel %d (%s), votes %d, agree %d\n", up.declaredRatio, up.kernel,
+				up.kernel >= 0 ? KernelInverse::Candidates()[static_cast<size_t>(up.kernel)].name.c_str() : "none", up.kernelVotes, up.kernelAgree);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0.5, up.declaredRatio, 0.01, L"read as 1080");
+			Assert::AreEqual(k, up.kernel, L"the player's kernel identified");
+			const SourceResolutionMonitor::Snapshot native = run(nullptr);
+			snprintf(line, sizeof(line), "native: declared %.3f, kernel %d, votes %d\n", native.declaredRatio, native.kernel, native.kernelVotes);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(-1, native.kernel, L"native: none");
+		}
+
 		TEST_METHOD(SourceResolutionLookAheadVerifiesOrCancelsTheSwitch)
 		{
 			const int FW = 1024, FH = 512, T = SourceResolutionMonitor::Monitor::kTile;

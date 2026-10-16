@@ -693,6 +693,7 @@ namespace RendererProfileConfig
 			if (key == "motion_ahead_frames") return IsChoice(value, { "0", "1", "2", "3", "4" });
 			// The optical-flow engine: the default; off = the matcher only.
 			if (key == "optical_flow") return IsChoice(value, { "on", "off" });
+			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 14: R-A's roll-off (source px per source frame; floor as a
