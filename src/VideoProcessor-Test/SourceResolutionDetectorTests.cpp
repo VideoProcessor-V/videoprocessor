@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -278,6 +279,79 @@ namespace VideoProcessorTest
 				}
 		}
 
+		// A streaming coder's coarse model (owner 2026-10-16, variable bitrate): square
+		// transforms of `block` px (8 / 16 / 32, as HEVC and AV1 choose per area),
+		// coefficients quantised with a step growing with frequency (`q` codes at DC ..
+		// 4q at the corner), inverse, then an in-loop deblocking filter across the
+		// block edges (smooths steps up to 2q codes, as the codecs' filters do).
+		void CodeBlocks(std::vector<float>& tile, int n, double q, int codeMax, int block, bool deblock)
+		{
+			if (q <= 0) return;
+			const int B = block;
+			std::vector<double> basis(static_cast<size_t>(B) * B);
+			for (int k = 0; k < B; ++k)
+				for (int i = 0; i < B; ++i)
+					basis[static_cast<size_t>(k) * B + i] = (k == 0 ? std::sqrt(1.0 / B) : std::sqrt(2.0 / B)) * std::cos(kPi * (i + 0.5) * k / B);
+			std::vector<double> a(static_cast<size_t>(B) * B), b(a.size());
+			for (int by = 0; by + B <= n; by += B)
+				for (int bx = 0; bx + B <= n; bx += B)
+				{
+					for (int y = 0; y < B; ++y)
+						for (int x = 0; x < B; ++x) a[static_cast<size_t>(y) * B + x] = tile[static_cast<size_t>(by + y) * n + bx + x] * codeMax;
+					// Forward, separable: rows then columns.
+					for (int y = 0; y < B; ++y)
+						for (int u = 0; u < B; ++u)
+						{
+							double sum = 0;
+							for (int x = 0; x < B; ++x) sum += basis[static_cast<size_t>(u) * B + x] * a[static_cast<size_t>(y) * B + x];
+							b[static_cast<size_t>(y) * B + u] = sum;
+						}
+					for (int u = 0; u < B; ++u)
+						for (int v = 0; v < B; ++v)
+						{
+							double sum = 0;
+							for (int y = 0; y < B; ++y) sum += basis[static_cast<size_t>(v) * B + y] * b[static_cast<size_t>(y) * B + u];
+							const double step = q * (1.0 + 3.0 * (u + v) / (2.0 * (B - 1)));
+							a[static_cast<size_t>(v) * B + u] = std::round(sum / step) * step;
+						}
+					// Inverse.
+					for (int u = 0; u < B; ++u)
+						for (int y = 0; y < B; ++y)
+						{
+							double sum = 0;
+							for (int v = 0; v < B; ++v) sum += basis[static_cast<size_t>(v) * B + y] * a[static_cast<size_t>(v) * B + u];
+							b[static_cast<size_t>(y) * B + u] = sum;
+						}
+					for (int y = 0; y < B; ++y)
+						for (int x = 0; x < B; ++x)
+						{
+							double sum = 0;
+							for (int u = 0; u < B; ++u) sum += basis[static_cast<size_t>(u) * B + x] * b[static_cast<size_t>(y) * B + u];
+							tile[static_cast<size_t>(by + y) * n + bx + x] = static_cast<float>((std::min)(static_cast<double>(codeMax), (std::max)(0.0, sum)));
+						}
+				}
+			if (deblock)
+			{
+				const double limit = 2.0 * q;
+				auto filter = [&](float& p1, float& p0, float& q0, float& q1) {
+					if (std::fabs(p0 - q0) > limit) return;   // a real edge
+					const float np0 = (p1 + 2 * p0 + q0) / 4, nq0 = (p0 + 2 * q0 + q1) / 4;
+					p0 = np0; q0 = nq0;
+				};
+				for (int y = 0; y < n; ++y)
+					for (int x = B; x < n; x += B)
+					{
+						float* r = &tile[static_cast<size_t>(y) * n];
+						filter(r[x - 2], r[x - 1], r[x], r[x + 1]);
+					}
+				for (int y = B; y < n; y += B)
+					for (int x = 0; x < n; ++x)
+						filter(tile[static_cast<size_t>(y - 2) * n + x], tile[static_cast<size_t>(y - 1) * n + x],
+							tile[static_cast<size_t>(y) * n + x], tile[static_cast<size_t>(y + 1) * n + x]);
+			}
+			for (float& v : tile) v = static_cast<float>(std::round(v) / codeMax);
+		}
+
 		SourceResolution::FrameReading Frame(double ratio, double mean, int informative = 4)
 		{
 			SourceResolution::FrameReading f;
@@ -526,6 +600,7 @@ namespace VideoProcessorTest
 			if (csv) fprintf(csv, "clip,frame,case,truth,informative,ratio,v_coherence,v_ratio,v_runnerup,v_grid,h_coherence,h_ratio,h_runnerup,h_grid,ms_per_tile\n");
 			int clipsRead = 0, failures = 0;
 			std::string failureText;
+			double nativeDetailLowest = 1e9, upscaleDetailHighest = -1e9, detailGap = 1e9;
 			for (const Clip& clip : clips)
 			{
 				FILE* f = nullptr;
@@ -571,6 +646,7 @@ namespace VideoProcessorTest
 							cases.push_back({ name, ratio, &k, 0.0 });
 							if (&k == &kernels[0] || &k == &kernels[1]) cases.push_back({ std::string(name) + " q4", ratio, &k, 4.0 });
 						}
+					double frameNative = 1e9, frameUpscale = -1e9;
 					for (const Case& c : cases)
 					{
 						std::vector<SourceResolution::Spectrum> spectra;
@@ -619,6 +695,16 @@ namespace VideoProcessorTest
 						char name[160];
 						snprintf(name, sizeof(name), "%.10s f%lld %s [q %.2f bits %.1f blk %.2f band %.3f]", clip.file.c_str(), frameIndex, c.name.c_str(), r.bitrateQuality, r.effectiveBits, r.blockiness, r.bandShare);
 						Log(name, r);
+						{
+							// Variable bitrate (owner 2026-10-16): detail above the rate in question.
+							// Per frame: native (clean or light coding) against this frame's 1080 upscales.
+							const double d = SourceResolution::DetailAbove(r, 0.5);
+							if (!std::isinf(d))
+							{
+								if (c.ratio >= 1.0 && c.q < 6.0) frameNative = (std::min)(frameNative, d);
+								else if (c.ratio == 0.5) frameUpscale = (std::max)(frameUpscale, d);
+							}
+						}
 						if (csv) fprintf(csv, "%s,%lld,%s,%.4f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f\n", clip.file.c_str(), frameIndex, c.name.c_str(), c.ratio,
 							r.informativeTiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.vertical.runnerUp, r.vertical.grid,
 							r.horizontal.coherence, r.horizontal.ratio, r.horizontal.runnerUp, r.horizontal.grid, analyseMs / spectra.size());
@@ -638,6 +724,12 @@ namespace VideoProcessorTest
 							if (failureText.size() < 1500) failureText += std::string(name) + "; ";
 						}
 					}
+					if (frameNative < 1e9 && frameUpscale > -1e9)
+					{
+						detailGap = (std::min)(detailGap, frameNative - frameUpscale);
+						nativeDetailLowest = (std::min)(nativeDetailLowest, frameNative);
+						upscaleDetailHighest = (std::max)(upscaleDetailHighest, frameUpscale);
+					}
 				}
 				fclose(f);
 			}
@@ -646,7 +738,16 @@ namespace VideoProcessorTest
 			snprintf(summary, sizeof(summary), "Real footage: %d clips, %d gate failures\n", clipsRead, failures);
 			Logger::WriteMessage(summary);
 			if (!failureText.empty()) Logger::WriteMessage(("Failed: " + failureText + "\n").c_str());
+			char detail[200];
+			snprintf(detail, sizeof(detail), "Detail above 1080: native lowest %.2f, its 1080 upscales highest %.2f; smallest gap in a frame %.2f (margin %.2f)\n",
+				nativeDetailLowest, upscaleDetailHighest, detailGap, SourceResolution::Tracker::Settings{}.detailMarginDecades);
+			Logger::WriteMessage(detail);
 			Assert::AreEqual(0, failures, L"real-footage gates (see the log)");
+			if (clipsRead > 0)
+			{
+				// Every real 4K frame stands above its own 1080 upscales by more than the margin.
+				Assert::IsTrue(detailGap > SourceResolution::Tracker::Settings{}.detailMarginDecades, L"real 4K holds more detail above than its upscales");
+			}
 		}
 
 		// The tracker: lower only with sustained evidence, native at once.
@@ -733,6 +834,177 @@ namespace VideoProcessorTest
 			for (int i = 0; i < 4000; ++i, d += 0.25) dark.Update(Frame(0.5, 0.06 + 0.001 * (i % 50), 0), d);
 			Assert::AreEqual(1.0, dark.Ratio());
 			Assert::AreEqual(0.0, dark.EvidenceSeconds());
+		}
+
+		// Variable-bitrate streams (owner 2026-10-16: "with variable bitrate streams we
+		// need to make sure we properly detect"). A starved frame can lose an upscale's
+		// coherence and read none found; it must not count as native detail.
+		TEST_METHOD(DetailAboveSeparatesStarvedFramesFromNativeDetail)
+		{
+			const double margin = SourceResolution::Tracker::Settings{}.detailMarginDecades;
+			struct K { const char* name; const Kernel* kernel; };
+			const K kernels[] = { { "lanczos3", &kLanczos3 }, { "catmull", &kCatmullRom }, { "mitchell", &kMitchell }, { "bilinear", &kBilinear } };
+			auto read = [&](double ratio, const Kernel& kernel, double defocus, double grain, double q, int block) {
+				return ReadScene([&](unsigned seed) {
+					std::vector<float> t = Tile(Scene(seed + 30, defocus), ratio, kernel, grain, 1023, seed);
+					CodeBlocks(t, kTile, q, 1023, block, true);
+					return t; });
+			};
+			std::map<double, double> sharpNativeLowest, upscaleHighest;   // per rate in question
+			double codingSpread = 0.0;
+			// Native 4K, sharp to soft, clean to moderately coded: detail above every rate it could be asked about.
+			for (double defocus : { 0.0, 0.6 })
+				for (double q : { 0.0, 2.0, 4.0 })
+					for (int block : { 8, 32 })
+					{
+						if (q == 0.0 && block == 32) continue;
+						const SourceResolution::FrameReading r = read(1.0, kLanczos3, defocus, 0.5 / 255.0, q, block);
+						for (double inQuestion : { 0.5, 1440.0 / 2160, 0.75 })
+						{
+							const double d = SourceResolution::DetailAbove(r, inQuestion);
+							char line[160];
+							snprintf(line, sizeof(line), "native defocus %.1f q%.0f b%d: ratio %.3f, detail above %.3f = %.2f decades\n", defocus, q, block, r.ratio, inQuestion, d);
+							Logger::WriteMessage(line);
+							if (defocus == 0.0)
+								sharpNativeLowest[inQuestion] = sharpNativeLowest.count(inQuestion) ? (std::min)(sharpNativeLowest[inQuestion], d) : d;
+						}
+					}
+			// Upscales, any kernel, clean or coded hard: no detail above their own rate.
+			for (double ratio : { 0.5, 1440.0 / 2160, 0.75 })
+				for (const K& k : kernels)
+				{
+					double lo = 1e9, hi = -1e9;
+					for (double q : { 0.0, 4.0, 12.0 })
+					{
+						const SourceResolution::FrameReading r = read(ratio, *k.kernel, 0.0, 0.0, q, q > 4.0 ? 32 : 8);
+						const double d = SourceResolution::DetailAbove(r, ratio);
+						char line[160];
+						snprintf(line, sizeof(line), "up %.3f %-8s q%-2.0f: ratio %.3f, detail above %.2f decades\n", ratio, k.name, q, r.ratio, d);
+						Logger::WriteMessage(line);
+						const double key = ratio == 0.5 ? 0.5 : ratio == 0.75 ? 0.75 : 1440.0 / 2160;
+						upscaleHighest[key] = upscaleHighest.count(key) ? (std::max)(upscaleHighest[key], d) : d;
+						lo = (std::min)(lo, d);
+						hi = (std::max)(hi, d);
+					}
+					codingSpread = (std::max)(codingSpread, hi - lo);
+				}
+			for (const auto& entry : upscaleHighest)
+			{
+				char line[160];
+				snprintf(line, sizeof(line), "rate %.3f: sharp native lowest %.2f, upscale highest %.2f (margin %.2f)\n", entry.first, sharpNativeLowest[entry.first], entry.second, margin);
+				Logger::WriteMessage(line);
+				Assert::IsTrue(sharpNativeLowest[entry.first] > entry.second + margin, L"sharp 4K stands above every upscale at that rate by more than the margin");
+			}
+			char spread[96];
+			snprintf(spread, sizeof(spread), "coding moves an upscale's level by %.3f decades at most\n", codingSpread);
+			Logger::WriteMessage(spread);
+			Assert::IsTrue(codingSpread < margin, L"coding (to starved) adds no detail above: a starved frame stays at its stream's level");
+			// Unknown (no spectra: the tracker tests' frames) is detail.
+			Assert::IsTrue(std::isinf(SourceResolution::DetailAbove(Frame(1.0, 0.3), 0.5)));
+		}
+
+		TEST_METHOD(VariableBitrateStreamsReadTheirSource)
+		{
+			// A simulated stream: shots of 6 s, each at its own bitrate (the coder's q from
+			// near transparent to starved) and transform size, I-frames every fourth frame
+			// coded finer than the P/B frames between, deblocked. Analysed at 2 Hz like VP.
+			struct Source { const char* name; double ratio; const Kernel* kernel; };
+			const Source sources[] = { { "native", 1.0, &kLanczos3 }, { "1080 catmull", 0.5, &kCatmullRom },
+				{ "1080 lanczos", 0.5, &kLanczos3 }, { "1440 bilinear", 1440.0 / 2160, &kBilinear } };
+			const double shotQ[] = { 1.0, 6.0, 2.0, 14.0, 4.0, 10.0, 0.5, 16.0, 3.0, 8.0, 12.0, 2.0 };
+			const int shotBlock[] = { 8, 16, 8, 32, 16, 32, 8, 32, 8, 16, 32, 8 };
+			for (const Source& src : sources)
+			{
+				SourceResolution::Tracker tracker;
+				double t = 0.0;
+				int frames = 0, readLower = 0, readNone = 0, wrong = 0;
+				double lowestRead = 1.0, highestRead = 0.0;
+				double declaredAt = -1.0;
+				for (int shot = 0; shot < 12; ++shot)
+				{
+					std::vector<std::vector<float>> base;
+					for (unsigned i = 0; i < 4; ++i)
+					{
+						std::vector<float> tile = Tile(Scene(200 + 11 * shot + i), src.ratio, *src.kernel, 0.5 / 255.0, 1023, i + 1);
+						if (shot % 2) for (float& v : tile) v = (std::min)(1.0f, v + 0.2f);   // a cut between shots (above the frame steps)
+						base.push_back(std::move(tile));
+					}
+					for (int f = 0; f < 12; ++f, t += 0.5)
+					{
+						const double q = shotQ[shot] * (f % 4 == 0 ? 0.6 : 1.3);
+						std::vector<std::vector<float>> tiles = base;
+						for (std::vector<float>& tile : tiles)
+						{
+							// Not a repeat: a step the coder cannot quantise away (a DC step of 4 codes x the block).
+							for (float& v : tile) v = (std::min)(1.0f, v + static_cast<float>(4 * f) / 1023.0f);
+							CodeBlocks(tile, kTile, q, 1023, shotBlock[shot], true);
+						}
+						const SourceResolution::FrameReading r = ReadTiles(tiles);
+						++frames;
+						readLower += r.ratio < 1.0;
+						readNone += r.ratio >= 1.0;
+						if (r.informative()) { lowestRead = (std::min)(lowestRead, r.ratio); highestRead = (std::max)(highestRead, r.ratio); }
+						tracker.Update(r, t);
+						const double now = tracker.Ratio();
+						if (src.ratio < 1.0 && now < 1.0 && declaredAt < 0) declaredAt = t;
+						if (now < 1.0 && std::fabs(now - src.ratio) > 0.01) ++wrong;
+					}
+				}
+				char line[200];
+				snprintf(line, sizeof(line), "%-14s frames %d: read lower %d, none found %d (starved %llu), readings %.3f..%.3f; shots %d, evidence %.1f s; declared %s at %.1f s; final %.3f\n",
+					src.name, frames, readLower, readNone, tracker.Starved(), lowestRead, highestRead, tracker.Shots(), tracker.EvidenceSeconds(),
+					tracker.Ratio() < 1.0 ? "yes" : "no", declaredAt, tracker.Ratio());
+				Logger::WriteMessage(line);
+				Assert::AreEqual(0, wrong, L"never a wrong lower reading");
+				if (src.ratio >= 1.0)
+					Assert::AreEqual(1.0, tracker.Ratio(), L"native 4K at any bitrate stays native");
+				else
+				{
+					Assert::IsTrue(declaredAt >= 0.0 && declaredAt <= 45.0, L"an upscaled stream is declared despite its starved shots");
+					Assert::AreEqual(src.ratio, tracker.Ratio(), 0.01, L"and stays declared through them");
+				}
+			}
+		}
+
+		TEST_METHOD(StreamSwitchingRenditionsWithoutACut)
+		{
+			// Adaptive streaming changes rendition mid-shot (no cut): 4K -> the 1080
+			// rendition when the bandwidth falls, back when it recovers. Down: the lower
+			// reading once the native evidence has left the window; up: native at once.
+			auto frame = [&](double ratio, unsigned seed, int f) {
+				std::vector<std::vector<float>> tiles;
+				for (unsigned i = 0; i < 4; ++i)
+				{
+					std::vector<float> tile = Tile(Scene(400 + seed * 7 + i), ratio, kCatmullRom, 0.5 / 255.0, 1023, i + 1);
+					for (float& v : tile) v = (std::min)(1.0f, v + static_cast<float>((f % 8) + (seed % 2) * 100) / 1023.0f);
+					CodeBlocks(tile, kTile, 3.0, 1023, 16, true);
+					tiles.push_back(std::move(tile));
+				}
+				return ReadTiles(tiles);
+			};
+			const SourceResolution::Tracker::Settings settings;
+			SourceResolution::Tracker tracker;
+			double t = 0.0;
+			// 30 s of the 4K rendition (shots every 6 s).
+			for (int i = 0; i < 60; ++i, t += 0.5) tracker.Update(frame(1.0, i / 12, i), t);
+			Assert::AreEqual(1.0, tracker.Ratio());
+			// The 1080 rendition, the same shots continuing.
+			double declaredAt = -1.0;
+			const double switchedAt = t;
+			for (int i = 60; i < 60 + 2 * static_cast<int>(settings.windowSeconds + 40); ++i, t += 0.5)
+			{
+				tracker.Update(frame(0.5, i / 12, i), t);
+				if (declaredAt < 0 && tracker.Ratio() < 1.0) declaredAt = t;
+			}
+			char line[160];
+			snprintf(line, sizeof(line), "down-switch declared %.1f s after the switch (window %.0f s)\n", declaredAt - switchedAt, settings.windowSeconds);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0.5, tracker.Ratio(), 0.01, L"the 1080 rendition is declared");
+			Assert::IsTrue(declaredAt - switchedAt <= settings.windowSeconds + settings.minimumSeconds, L"once the native evidence has aged out");
+			// Back to 4K: native on its first frame.
+			const int shotNow = static_cast<int>((t / 0.5)) / 12;
+			tracker.Update(frame(1.0, shotNow, 3), t += 0.5);
+			Assert::AreEqual(1.0, tracker.Ratio(), L"the 4K rendition returns native at once");
 		}
 
 		TEST_METHOD(DescribeIsGeneral)

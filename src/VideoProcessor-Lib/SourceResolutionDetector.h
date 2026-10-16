@@ -85,6 +85,7 @@ namespace SourceResolution
 		double signature = 0.0;     // the tile means, weighted by position: an unchanged frame repeats it
 		MirrorPeak vertical, horizontal;
 		std::vector<double> verticalCurve, horizontalCurve;   // the averaged coherence per candidate (diagnostic)
+		std::vector<double> verticalPower, horizontalPower;   // the informative tiles' averaged power spectra
 		// Spec 1b: 1 = clean, 0 = badly blocked or banded; spec 2d: the bits
 		// the picture really uses (8 for 8-bit content in a 10-bit signal,
 		// also after a curve such as SDR re-encoded to PQ); 0 = unknown.
@@ -98,6 +99,19 @@ namespace SourceResolution
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& thresholds = {});
 	// The coding readings alone (part of ReadFrame).
 	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame);
+
+	// Variable-bitrate streams (owner 2026-10-16): a starved frame can lose an
+	// upscale's mirror coherence and read "none found" (1) without holding any
+	// real detail. Real detail above a source rate r shows as picture power
+	// above r's Nyquist; an upscale leaves only its kernel's leakage and coding
+	// noise there, and a starved native frame has lost it too. Returns, in
+	// decades, the power just above r's Nyquist against the power just below
+	// it, on the axis holding more (detail on either axis keeps native).
+	// The level depends on the content (sharp 4K ~-0.5, soft 4K ~-1.2) and on
+	// the upscaler (-0.8 .. -1.3), so the tracker compares a frame with the
+	// frames of the same stream that read r, not with a fixed level. Unknown
+	// (no spectra, or r too close to 1 to measure above it) returns +infinity.
+	double DetailAbove(const FrameReading& frame, double ratio);
 
 	// The declared reading over time.
 	class Tracker
@@ -114,7 +128,14 @@ namespace SourceResolution
 			double minimumSeconds = 20.0;   // and this long with evidence
 			double windowSeconds = 120.0;   // the rolling evidence window
 			double cutLevel = 20.0 / 255.0; // tile mean jump that marks a cut (Stage 8's rule)
-			double maximumGapSeconds = 2.0; // longer without frames = a discontinuity
+			double maximumGapSeconds = 2.0; // a longer gap between frames is a discontinuity
+			// A frame reading none found (1) counts as native detail only when it holds
+			// more detail above the rate in question than the window's frames that read
+			// that rate (their median DetailAbove) by this many decades; else it is no
+			// evidence either way - a starved frame of a variable-bitrate stream. Coding
+			// moves an upscale's level by under 0.05; sharp 4K stands 0.10 (a bilinear
+			// 3/4) to 0.7 (1080) above.
+			double detailMarginDecades = 0.07;
 		};
 
 		Tracker() = default;
@@ -133,21 +154,25 @@ namespace SourceResolution
 
 		double Ratio() const { return declared; }               // 1 = native
 		double Candidate() const;                                // the window's evidence so far
+		// The window's median DetailAbove for frames reading `ratio`; +infinity when none.
+		double ReferenceDetail(double ratio) const;
 		int Shots() const;                                       // shots in the window
 		double EvidenceSeconds() const;
 		unsigned long long Cuts() const { return cuts; }
+		// Frames reading none found without detail above the rate in question (no evidence).
+		unsigned long long Starved() const { return starved; }
 		// Height in lines for a native height, rounded to an even number; the
 		// native height itself when native.
 		int Height(int nativeHeight) const;
 
 	private:
-		struct Sample { double seconds; double ratio; unsigned long long shot; double dt; };
+		struct Sample { double seconds; double ratio; unsigned long long shot; double dt; double detail; };
 		Settings settings;
 		std::deque<Sample> window;
 		double declared = 1.0;
 		double lastMean = -1.0, lastSignature = 0.0, lastSeconds = -1.0, evidence = 0.0;
 		bool haveLast = false;
-		unsigned long long shot = 0, cuts = 0, discontinuities = 0;
+		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0;
 		std::string lastReason;
 	};
 

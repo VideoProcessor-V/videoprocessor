@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <cstdio>
 
 namespace SourceResolution
@@ -251,7 +252,24 @@ namespace SourceResolution
 		// block pattern's (8 - j)th harmonic: 7/8 follows its fundamental, so
 		// 7/8 is the coding signature itself and never read as an upscale (a
 		// source that really is 7/8 of the height stays native - the safe way).
+		// Variable-bitrate streams (owner 2026-10-16): HEVC / AV1 code with 16x16
+		// and 32x32 transforms too, whose edges light the odd j/16 and j/32 the
+		// same way the 8x8 grid lights j/8 - (P-1)/P is each grid's signature
+		// (found: 15/16 = 0.937 and 29/32 = 0.906 on coded 1080 streams, so the
+		// frame read native and would have disengaged auto). (P-1)/P is never
+		// accepted; another odd position only when that grid is quiet or it
+		// stands above both of its grid neighbours.
+		auto allowedOnGrid = [&](int m, int P) {
+			if (n / P < 4) return true;   // too few bins per grid step to tell
+			const int j = static_cast<int>(std::lround(static_cast<double>(P) * m / n));
+			if (j % 2 == 0 || std::abs(m - j * n / P) > 1) return true;
+			if (j == P - 1) return false;
+			if (level((P - 1) * n / P) < t.gridQuiet) return true;
+			const double neighbours = (std::max)(level((j - 2) * n / P), j + 2 < P ? level((j + 2) * n / P) : 0.0);
+			return curve[m] >= neighbours + t.gridPeakMargin;
+		};
 		auto allowed = [&](int m) {
+			if (!allowedOnGrid(m, 16) || !allowedOnGrid(m, 32)) return false;
 			const int j = gridIndex(m);
 			if (j <= 0) return true;
 			if (j == 7) return false;
@@ -362,12 +380,20 @@ namespace SourceResolution
 			if (s.n != n || !Informative(s, t) || s.mirrorVertical.size() != vertical.size() || s.mirrorHorizontal.size() != vertical.size()) continue;
 			++frame.informativeTiles;
 			for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] += s.mirrorVertical[m]; horizontal[m] += s.mirrorHorizontal[m]; }
+			if (frame.verticalPower.empty()) { frame.verticalPower.assign(s.vertical.size(), 0.0); frame.horizontalPower.assign(s.horizontal.size(), 0.0); }
+			for (size_t k = 0; k < frame.verticalPower.size() && k < s.vertical.size() && k < s.horizontal.size(); ++k)
+			{
+				frame.verticalPower[k] += s.vertical[k];
+				frame.horizontalPower[k] += s.horizontal[k];
+			}
 		}
 		frame.mean = sum / tiles.size();
 		frame.signature = signature;
 		ReadCoding(tiles, frame);
 		if (frame.informativeTiles == 0) return frame;
 		for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] /= frame.informativeTiles; horizontal[m] /= frame.informativeTiles; }
+		for (double& p : frame.verticalPower) p /= frame.informativeTiles;
+		for (double& p : frame.horizontalPower) p /= frame.informativeTiles;
 		frame.verticalCurve = vertical;
 		frame.horizontalCurve = horizontal;
 		frame.vertical = FindPeak(vertical, n, t);
@@ -378,6 +404,34 @@ namespace SourceResolution
 		if (frame.vertical.coherence >= t.coherence && frame.horizontal.coherence >= t.coherence)
 			frame.ratio = (std::max)(frame.vertical.ratio, frame.horizontal.ratio);
 		return frame;
+	}
+
+	double DetailAbove(const FrameReading& frame, double ratio)
+	{
+		const double unknown = std::numeric_limits<double>::infinity();
+		const size_t bins = frame.verticalPower.size();
+		if (ratio <= 0.0 || ratio >= 1.0 || bins < 33 || frame.horizontalPower.size() != bins) return unknown;
+		const int half = static_cast<int>(bins) - 1;   // n / 2
+		const int n = 2 * half;
+		const double cut = ratio * half;               // r's Nyquist, in bins
+		// Below: the top of the source's own band; above: past the kernel's transition,
+		// short of the signal's own Nyquist. Block-coding harmonics are left out.
+		const int b0 = static_cast<int>(std::ceil(0.55 * cut)), b1 = static_cast<int>(std::floor(0.9 * cut));
+		const int a0 = static_cast<int>(std::ceil(1.15 * cut)), a1 = (std::min)(static_cast<int>(std::floor(0.97 * half)), a0 + (std::max)(4, b1 - b0));
+		if (a1 - a0 < 3 || b1 - b0 < 3) return unknown;
+		double best = -unknown;
+		for (const std::vector<double>* power : { &frame.verticalPower, &frame.horizontalPower })
+		{
+			auto band = [&](int from, int to) {
+				double sum = 0.0;
+				int count = 0;
+				for (int k = from; k <= to; ++k)
+					if (!BlockHarmonic(k, n)) { sum += std::log10((std::max)((*power)[k], 1e-20)); ++count; }
+				return count > 0 ? sum / count : 0.0;
+			};
+			best = (std::max)(best, band(a0, a1) - band(b0, b1));
+		}
+		return best;
 	}
 
 	void Tracker::Reset()
@@ -434,9 +488,21 @@ namespace SourceResolution
 		if (window.empty()) evidence = 0.0;
 		if (!frame.informative()) return;
 		const double ratio = frame.ratio >= settings.nativeAbove ? 1.0 : frame.ratio;
+		// Variable bitrate (owner 2026-10-16): native needs detail above the rate in
+		// question - the declared one, else the lower one the window is gathering.
+		if (ratio >= 1.0)
+		{
+			const double inQuestion = declared < 1.0 ? declared : Candidate();
+			const double reference = inQuestion < 1.0 ? ReferenceDetail(inQuestion) : std::numeric_limits<double>::infinity();
+			if (!std::isinf(reference) && DetailAbove(frame, inQuestion) < reference + settings.detailMarginDecades)
+			{
+				++starved;
+				return;
+			}
+		}
 		// Evidence time counts only between informative, changing frames.
 		const double step = window.empty() ? 0.0 : (std::min)(dt, settings.maximumGapSeconds);
-		window.push_back({ seconds, ratio, shot, step });
+		window.push_back({ seconds, ratio, shot, step, ratio < 1.0 ? DetailAbove(frame, ratio) : std::numeric_limits<double>::infinity() });
 		evidence += step;
 		// Detail above the declared cutoff: up at once (bias to native).
 		if (ratio > declared + settings.tolerance)
@@ -456,6 +522,16 @@ namespace SourceResolution
 		double ratio = 0.0;
 		for (const Sample& s : window) ratio = (std::max)(ratio, s.ratio);
 		return window.empty() ? 1.0 : ratio;
+	}
+
+	double Tracker::ReferenceDetail(double ratio) const
+	{
+		std::vector<double> levels;
+		for (const Sample& s : window)
+			if (s.ratio < 1.0 && std::fabs(s.ratio - ratio) <= settings.tolerance && !std::isinf(s.detail)) levels.push_back(s.detail);
+		if (levels.empty()) return std::numeric_limits<double>::infinity();
+		std::nth_element(levels.begin(), levels.begin() + levels.size() / 2, levels.end());
+		return levels[levels.size() / 2];
 	}
 
 	int Tracker::Shots() const
