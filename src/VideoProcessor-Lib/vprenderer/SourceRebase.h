@@ -67,6 +67,13 @@ namespace SourceRebase
 		// before; one axis only: a 1D (orthogonal) Lanczos along that axis alone.
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factorX, double factorY, pl_frame& out, int slot = 0);
 		void Release(pl_gpu gpu);
+		// Kernel-matched re-base (docs/VP-stage12-build-plan.md): the identified player
+		// kernel (KernelInverse candidate index, -1 = none). With one, the luma plane of an
+		// axis re-based exactly 2:1 is its least-squares inverse (two separable passes);
+		// chroma and every other case keep the filters above.
+		void SetKernel(int candidate) { kernel = candidate; }
+		int Kernel() const { return kernel; }
+		bool KernelUsed() const { return kernelUsed; }
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		float antiring = 0.5f;   // the faithful branch's value (Stage 8)
@@ -74,6 +81,11 @@ namespace SourceRebase
 	private:
 		static constexpr int kSlots = 2;
 		pl_tex textures[kSlots][PL_MAX_PLANES] = {};
+		pl_tex inverseTemp[kSlots] = {};   // the first (horizontal) inverse pass
+		int kernel = -1;
+		bool kernelUsed = false;
+		bool InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
+			pl_tex out, int slot);
 		pl_shader_obj luts[kSlots][PL_MAX_PLANES] = {};
 		std::string error;
 		unsigned long long failures = 0;

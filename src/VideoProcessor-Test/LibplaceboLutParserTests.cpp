@@ -17,6 +17,7 @@
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/SourceRebase.h>
+#include <KernelInverse.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 #include <vprenderer/VpDebander.h>
 #include <chrono>
@@ -8272,6 +8273,97 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &readable);
 			pl_tex_destroy(gpu, &tex);
 			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		TEST_METHOD(SourceRebaseKernelInverseRecoversThe1080Picture)
+		{
+			// Kernel-matched re-base (owner 2026-10-16: optimise 1080p): with the player's
+			// kernel identified, the GPU's luma re-base is its inverse - the 1080 picture
+			// itself, as the CPU inverse gives it.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int m = 256, n = 512;
+			const int k = KernelInverse::Find("lanczos3");
+			Assert::IsTrue(k >= 0);
+			const KernelInverse::Candidate& c = KernelInverse::Candidates()[static_cast<size_t>(k)];
+			// The 1080-class picture (textured), upscaled 2x with Lanczos-3 (separable, CPU).
+			std::vector<float> master(static_cast<size_t>(m) * m);
+			for (int y = 0; y < m; ++y)
+				for (int x = 0; x < m; ++x)
+					master[static_cast<size_t>(y) * m + x] = static_cast<float>(0.45 + 0.15 * std::sin(x * 0.9 + y * 0.31) * std::cos(y * 0.7) + 0.08 * std::sin(x * 2.3 - y * 1.7));
+			std::vector<float> rows(static_cast<size_t>(m) * n), up(static_cast<size_t>(n) * n), lineIn(static_cast<size_t>(m)), lineOut(static_cast<size_t>(n));
+			for (int y = 0; y < m; ++y) KernelInverse::UpscaleLine(c, &master[static_cast<size_t>(y) * m], m, &rows[static_cast<size_t>(y) * n]);
+			for (int x = 0; x < n; ++x)
+			{
+				for (int y = 0; y < m; ++y) lineIn[static_cast<size_t>(y)] = rows[static_cast<size_t>(y) * n + x];
+				KernelInverse::UpscaleLine(c, lineIn.data(), m, lineOut.data());
+				for (int y = 0; y < n; ++y) up[static_cast<size_t>(y) * n + x] = lineOut[static_cast<size_t>(y)];
+			}
+			std::vector<uint16_t> luma(up.size());
+			for (size_t i = 0; i < up.size(); ++i) luma[i] = static_cast<uint16_t>(std::lround((std::min)(1.0f, (std::max)(0.0f, up[i])) * 65535.0f));
+			pl_tex_params lp{};
+			lp.w = n; lp.h = n; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.initial_data = luma.data();
+			pl_tex lumaTex = pl_tex_create(gpu, &lp);
+			Assert::IsTrue(lumaTex != nullptr);
+			pl_frame source{};
+			source.num_planes = 1;
+			source.planes[0].texture = lumaTex; source.planes[0].components = 1; source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(n), static_cast<float>(n) };
+			auto rebaseWith = [&](int kernelIndex, std::vector<float>& values, bool& used) {
+				SourceRebase::Module rebase;
+				rebase.SetKernel(kernelIndex);
+				pl_frame out{};
+				Assert::IsTrue(rebase.Apply(gpu, dispatch, source, 0.5, out), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+				used = rebase.KernelUsed();
+				pl_tex_params rp{};
+				rp.w = m; rp.h = m; rp.format = out.planes[0].texture->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				pl_tex_blit_params bp{}; bp.src = out.planes[0].texture; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				values.assign(static_cast<size_t>(m) * m, 0.0f);
+				if (readable->params.format->type == PL_FMT_FLOAT)
+				{
+					std::vector<uint16_t> half(values.size());
+					pl_tex_transfer_params d{}; d.tex = readable; d.ptr = half.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					for (size_t i = 0; i < values.size(); ++i) values[i] = HalfBits(half[i]);
+				}
+				else
+				{
+					std::vector<uint16_t> unorm(values.size());
+					pl_tex_transfer_params d{}; d.tex = readable; d.ptr = unorm.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					for (size_t i = 0; i < values.size(); ++i) values[i] = unorm[i] / 65535.0f;
+				}
+				pl_tex_destroy(gpu, &readable);
+				rebase.Release(gpu);
+			};
+			std::vector<float> inverse, polar;
+			bool usedInverse = false, usedPolar = true;
+			rebaseWith(k, inverse, usedInverse);
+			rebaseWith(-1, polar, usedPolar);
+			Assert::IsTrue(usedInverse, L"the kernel inverse ran");
+			Assert::IsFalse(usedPolar, L"without a kernel: the polar filter as before");
+			double eInverse = 0.0, ePolar = 0.0;
+			long count = 0;
+			for (int y = 24; y < m - 24; ++y)
+				for (int x = 24; x < m - 24; ++x)
+				{
+					const double truth = master[static_cast<size_t>(y) * m + x];
+					eInverse += (inverse[static_cast<size_t>(y) * m + x] - truth) * (inverse[static_cast<size_t>(y) * m + x] - truth);
+					ePolar += (polar[static_cast<size_t>(y) * m + x] - truth) * (polar[static_cast<size_t>(y) * m + x] - truth);
+					++count;
+				}
+			const double rmsInverse = std::sqrt(eInverse / count) * 1023.0, rmsPolar = std::sqrt(ePolar / count) * 1023.0;
+			char line[160];
+			snprintf(line, sizeof(line), "kernel inverse on the GPU: %.3f codes RMS from the 1080 picture; the polar filter %.3f codes\n", rmsInverse, rmsPolar);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(rmsInverse < 0.1, L"the inverse recovers the 1080 picture (within a tenth of a 10-bit code)");
+			Assert::IsTrue(rmsInverse * 5.0 < rmsPolar, L"far closer than the polar filter");
+			pl_tex_destroy(gpu, &lumaTex);
 			pl_dispatch_destroy(&dispatch);
 		}
 

@@ -1,6 +1,9 @@
 #include <pch.h>
 #include "SourceRebase.h"
 
+#include <KernelInverse.h>
+#include <libplacebo/shaders/custom.h>
+
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/sampling.h>
 
@@ -54,6 +57,102 @@ namespace SourceRebase
 		return (std::max)(1, static_cast<int>(std::lround(size * factor)));
 	}
 
+	namespace
+	{
+		// One separable pass of the kernel's inverse: each output sample from up to 80
+		// input samples along the axis (2i + first + t), clamped at the edges.
+		const char* const INVERSE_BODY = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (p.x < size.x && p.y < size.y) {
+    ivec2 last = textureSize(src, 0) - ivec2(1);
+    vec4 acc = vec4(0.0);
+    for (int t = 0; t < taps; t++) {
+        int j = 2 * (horizontal != 0 ? p.x : p.y) + first + t;
+        ivec2 q = horizontal != 0 ? ivec2(clamp(j, 0, last.x), p.y) : ivec2(p.x, clamp(j, 0, last.y));
+        acc += weights[t] * texelFetch(src, q, 0);
+    }
+    imageStore(dst, p, acc);
+}
+)GLSL";
+	}
+
+	bool Module::InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
+		pl_tex out, int slot)
+	{
+		const auto& list = KernelInverse::Candidates();
+		if (kernel < 0 || kernel >= static_cast<int>(list.size()) || (!acrossInverse && !downInverse))
+		{
+			error = "no kernel";
+			return false;
+		}
+		const KernelInverse::Candidate& c = list[static_cast<size_t>(kernel)];
+		float weights[80] = {};
+		const int taps = static_cast<int>((std::min)(c.weights.size(), size_t{ 80 }));
+		for (int t = 0; t < taps; ++t) weights[t] = c.weights[static_cast<size_t>(t)];
+		const int first = c.first;
+		auto pass = [&](pl_tex src, pl_tex dst, int horizontal, int ow, int oh) {
+			pl_shader_desc d[2] = {};
+			d[0].desc.name = "src"; d[0].desc.type = PL_DESC_SAMPLED_TEX;
+			d[0].binding.object = src; d[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP; d[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+			d[1].desc.name = "dst"; d[1].desc.type = PL_DESC_STORAGE_IMG; d[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+			d[1].binding.object = dst;
+			pl_var weightVar = pl_var_float("weights");
+			weightVar.dim_a = 80;
+			const pl_shader_var v[4] = {
+				{ weightVar, weights, false },
+				{ pl_var_int("taps"), &taps, false },
+				{ pl_var_int("first"), &first, false },
+				{ pl_var_int("horizontal"), &horizontal, false } };
+			pl_custom_shader custom{};
+			custom.description = horizontal ? "VideoProcessor re-base: kernel inverse across" : "VideoProcessor re-base: kernel inverse down";
+			custom.body = INVERSE_BODY;
+			custom.input = PL_SHADER_SIG_NONE;
+			custom.output = PL_SHADER_SIG_NONE;
+			custom.descriptors = d;
+			custom.num_descriptors = 2;
+			custom.variables = v;
+			custom.num_variables = 4;
+			custom.compute = true;
+			custom.compute_group_size[0] = 16;
+			custom.compute_group_size[1] = 16;
+			pl_shader sh = pl_dispatch_begin(dispatch);
+			if (!pl_shader_custom(sh, &custom))
+			{
+				pl_dispatch_abort(dispatch, &sh);
+				return false;
+			}
+			pl_dispatch_compute_params compute{};
+			compute.shader = &sh;
+			compute.dispatch_size[0] = (ow + 15) / 16;
+			compute.dispatch_size[1] = (oh + 15) / 16;
+			compute.dispatch_size[2] = 1;
+			return pl_dispatch_compute(dispatch, &compute);
+		};
+		if (acrossInverse && downInverse)
+		{
+			pl_tex_params tp{};
+			tp.w = w;
+			tp.h = in->params.h;
+			tp.format = out->params.format;
+			tp.sampleable = true;
+			tp.storable = true;
+			if (!pl_tex_recreate(gpu, &inverseTemp[slot], &tp) ||
+				!pass(in, inverseTemp[slot], 1, w, in->params.h) || !pass(inverseTemp[slot], out, 0, w, h))
+			{
+				error = "kernel inverse pass failed";
+				return false;
+			}
+			return true;
+		}
+		if (!pass(in, out, acrossInverse ? 1 : 0, w, h))
+		{
+			error = "kernel inverse pass failed";
+			return false;
+		}
+		return true;
+	}
+
 	Module::~Module()
 	{
 		// Textures belong to a device that may already be gone; the renderer
@@ -62,6 +161,11 @@ namespace SourceRebase
 
 	void Module::Release(pl_gpu gpu)
 	{
+		for (int slot = 0; slot < kSlots; ++slot)
+		{
+			if (inverseTemp[slot] && gpu) pl_tex_destroy(gpu, &inverseTemp[slot]);
+			inverseTemp[slot] = nullptr;
+		}
 		for (int slot = 0; slot < kSlots; ++slot)
 			for (int plane = 0; plane < PL_MAX_PLANES; ++plane)
 			{
@@ -74,6 +178,7 @@ namespace SourceRebase
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factorX, double factorY, pl_frame& out, int slot)
 	{
 		error.clear();
+		kernelUsed = false;
 		factorX = factorX > 0.0 && factorX < 1.0 ? factorX : 1.0;
 		factorY = factorY > 0.0 && factorY < 1.0 ? factorY : 1.0;
 		if (!gpu || !dispatch || source.num_planes <= 0 || (factorX >= 1.0 && factorY >= 1.0))
@@ -103,6 +208,7 @@ namespace SourceRebase
 			params.sampleable = true;
 			params.renderable = true;
 			params.blit_src = true;   // the smooth-motion history copies source planes
+			params.storable = plane == 0 && kernel >= 0 && (params.format->caps & PL_FMT_CAP_STORABLE);   // the inverse passes write it
 			if (!(params.format->caps & PL_FMT_CAP_RENDERABLE))
 			{
 				// Fall back to a float format with the same component count.
@@ -120,6 +226,21 @@ namespace SourceRebase
 				error = "texture allocation failed";
 				++failures;
 				return false;
+			}
+			// Kernel-matched (luma, exactly 2:1 on each re-based axis, a kernel identified).
+			const bool acrossHalf = factorX < 1.0 && w * 2 == in->params.w;
+			const bool downHalf = factorY < 1.0 && h * 2 == in->params.h;
+			if (plane == 0 && kernel >= 0 && (factorX >= 1.0 || acrossHalf) && (factorY >= 1.0 || downHalf) &&
+				(params.format->caps & PL_FMT_CAP_STORABLE))
+			{
+				if (!InversePlane(gpu, dispatch, in, w, h, acrossHalf, downHalf, textures[slot][plane], slot))
+				{
+					++failures;
+					return false;
+				}
+				kernelUsed = true;
+				result.planes[plane].texture = textures[slot][plane];
+				continue;
 			}
 			pl_shader sh = pl_dispatch_begin(dispatch);
 			pl_sample_src src{};
