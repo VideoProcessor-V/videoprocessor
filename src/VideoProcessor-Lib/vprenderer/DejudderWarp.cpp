@@ -170,6 +170,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
     vec2 lo = min(min(v[0], v[1]), min(v[2], v[3]));
     vec2 hi = max(max(v[0], v[1]), max(v[2], v[3]));
     vec2 m = (v[0] + v[1] + v[2] + v[3] - lo - hi) * 0.5;
+    // Beyond the searches' own reach the engine can match a far, similar texture
+    // across a cut (corpus 2026-10-16: the cut was warped): such a vector is no
+    // candidate - zero motion with a failing SAD, so the block is not trusted on it.
+    if (length(m) > reach) {
+        imageStore(dst, b, vec4(0.0, 0.0, 1.0, 1.0));
+        return;
+    }
     float s = 0.0;
     for (int y = -2; y < 10; y++)
         for (int x = -2; x < 10; x++) {
@@ -3304,10 +3311,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			Sampled("to_half", halfB, true), Storage("dst", outForward) };
 		const pl_shader_desc bw[4] = { Sampled("flow", ofFlowTex[1], false), Sampled("from_half", halfB, false),
 			Sampled("to_half", halfA, true), Storage("dst", outBackward) };
+		// The searches' reach in half-size pixels: the coarse search at 1/32 of the
+		// source (1/16 of the half size), +-coarseRange texels, plus the finer steps.
+		const float reach = static_cast<float>(std::max(1, settings.coarseRange) * 16 + 8);
+		const pl_shader_var reachVar[1] = { { pl_var_float("reach"), &reach, true } };
 		if (!Dispatch("VideoProcessor de-judder: optical flow to blocks (forward)", header.c_str(), OF_TO_SEARCH_BODY, fw, 4,
-				nullptr, 0, blocksX, blocksY, 8) ||
+				reachVar, 1, blocksX, blocksY, 8) ||
 			!Dispatch("VideoProcessor de-judder: optical flow to blocks (backward)", header.c_str(), OF_TO_SEARCH_BODY, bw, 4,
-				nullptr, 0, blocksX, blocksY, 8))
+				reachVar, 1, blocksX, blocksY, 8))
 			return fail("its block pass failed");
 		return true;
 	}
