@@ -947,7 +947,7 @@ namespace VideoProcessorTest
 				}
 			Assert::AreEqual(0.5, tracker.Ratio(), 1e-9);
 			Assert::AreEqual(1080, tracker.Height(2160));
-			Assert::IsTrue(declaredAt >= 20, L"not before 20 s of evidence");
+			Assert::IsTrue(declaredAt >= SourceResolution::Tracker::Settings{}.minimumSeconds, L"not before the standard evidence time");
 			// One frame of real detail: native at once.
 			tracker.Update(Frame(1.0, 0.25), t += 0.25);
 			Assert::AreEqual(1.0, tracker.Ratio());
@@ -1000,10 +1000,12 @@ namespace VideoProcessorTest
 			// A pause: the same frame repeated for minutes builds nothing.
 			SourceResolution::Tracker paused;
 			double p = 0.0;
+			// Three shots of 2 s: below the standard evidence time, which only the pause could fill.
 			for (int shot = 0; shot < 3; ++shot)
-				for (int i = 0; i < 16; ++i, p += 0.25)
+				for (int i = 0; i < 8; ++i, p += 0.25)
 					paused.Update(Frame(0.5, 0.2 + 0.1 * (shot % 2) + 0.001 * i), p);
 			const double before = paused.EvidenceSeconds();
+			Assert::IsTrue(before < SourceResolution::Tracker::Settings{}.minimumSeconds, L"the run-up stays below the evidence time");
 			for (int i = 0; i < 2000; ++i, p += 0.25) paused.Update(Frame(0.5, 0.777), p);   // identical frames
 			Assert::IsTrue(paused.EvidenceSeconds() - before < 0.5, L"a repeated frame adds no time");
 			for (int i = 0; i < 2000; ++i, p += 0.25) paused.Update(Frame(0.5, 0.1 + 0.0001 * i), p, true);   // flagged repeats

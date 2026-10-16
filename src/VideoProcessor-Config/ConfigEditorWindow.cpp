@@ -6870,6 +6870,50 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "The range the source sends. Auto: YCbCr and 10-bit RGB are limited, 8- and 12-bit RGB full - right for "
             "most sources. If blacks look grey and whites dull (or blacks crush), the source sends the other range: "
             "set it here. The picture and the LED dimming both follow it."));
+        // Owner 2026-10-16 (docs/VP-settings-sliders): the Picture slider - how readily VP
+        // undoes a player's upscale. Off, Cautious, Standard, Fast move only the detection's
+        // keys (the fields below, still editable: a changed value shows Custom).
+        QFormLayout* pictureForm = form;
+        auto* pictureBox = new QWidget;
+        pictureBox->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_box")));
+        auto* pictureBoxLayout = new QVBoxLayout(pictureBox);
+        pictureBoxLayout->setContentsMargins(0, 0, 0, 0);
+        auto* pictureRow = new QHBoxLayout;
+        auto* pictureSlider = new QSlider(Qt::Horizontal);
+        pictureSlider->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset")));
+        pictureSlider->setAccessibleName(QStringLiteral("Picture: undo the player's upscale"));
+        pictureSlider->setRange(0, 3);
+        pictureSlider->setPageStep(1);
+        pictureSlider->setTickPosition(QSlider::TicksBelow);
+        pictureSlider->setTickInterval(1);
+        pictureSlider->setToolTip(QStringLiteral(
+            "How readily VP detects a stream upscaled before it reaches VP (many 4K streams are 1080p underneath) and "
+            "undoes the upscale: Off, Cautious, Standard, Fast. Each step moves only the detection's evidence and "
+            "upscale clarity; the values appear in the fields below and can be edited (Custom). Real detail above the "
+            "detected size, a seek or a source change always returns to native at once."));
+        auto* pictureReset = new QPushButton(QStringLiteral("Reset to preset"));
+        pictureReset->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_reset")));
+        pictureReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
+        auto* pictureDefault = new QPushButton(QStringLiteral("Default"));
+        pictureDefault->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_default")));
+        pictureDefault->setToolTip(QStringLiteral("Back to the default, Off (native: the picture as captured)."));
+        pictureRow->addWidget(new QLabel(QStringLiteral("Off")));
+        pictureRow->addWidget(pictureSlider, 1);
+        pictureRow->addWidget(new QLabel(QStringLiteral("Fast")));
+        pictureRow->addWidget(pictureReset);
+        pictureRow->addWidget(pictureDefault);
+        pictureBoxLayout->addLayout(pictureRow);
+        auto* pictureName = new QLabel;
+        pictureName->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_name")));
+        QFont pictureNameFont = pictureName->font();
+        pictureNameFont.setBold(true);
+        pictureName->setFont(pictureNameFont);
+        auto* pictureDescription = new QLabel;
+        pictureDescription->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_description")));
+        pictureDescription->setWordWrap(true);
+        pictureBoxLayout->addWidget(pictureName);
+        pictureBoxLayout->addWidget(pictureDescription);
+        form->addRow(QStringLiteral("Picture"), pictureBox);
         auto* sourceResolution = addChoice(QStringLiteral("Source resolution"), QStringLiteral("source_resolution"),
             { QStringLiteral("native"), QStringLiteral("1440"), QStringLiteral("1080"), QStringLiteral("720"),
               QStringLiteral("auto") });
@@ -6883,14 +6927,158 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "back to that size, then upscales it with its own path, as for a real 1080p source - fewer halos, cleaner "
             "edges. Native = as captured (the default). A size = always that size (a profile for such a source). "
             "Auto = VP detects the size the stream was upscaled from: it changes only after several shots agree "
-            "(about a minute), and only at a cut; any real detail above that size, a seek or a source change "
-            "returns it to native at once. The stats line shows what it reads."));
-        auto* autoConfidence = addText(QStringLiteral("Auto: confidence needed"), QStringLiteral("source_resolution_auto_min_confidence"));
+            "(the evidence below; standard 3 shots and 10 s), and only at a cut; any real detail above that size, a "
+            "seek or a source change returns it to native at once. The stats line shows what it reads."));
+        auto* autoConfidence = addText(QStringLiteral("Auto: upscale clarity needed"), QStringLiteral("source_resolution_auto_min_confidence"));
         autoConfidence->setValidator(new QDoubleValidator(0.0, 1.0, 2, autoConfidence));
         autoConfidence->setPlaceholderText(QStringLiteral("0.8"));
         autoConfidence->setToolTip(QStringLiteral(
-            "How sure the detection must be before Auto shrinks the picture (0-1). Higher = slower to act and "
-            "never on a doubtful source; lower = acts sooner. Used only with Source resolution: Auto."));
+            "Not a probability: a 0-1 score of how clearly the frames carry an upscale's fingerprint, averaged over "
+            "the last two minutes (real 4K scores about 0, real upscales 1). It is checked only after every frame in "
+            "that window has read lower and the shots and time below agree; any frame with real detail above the size "
+            "blocks or cancels it at once. Higher = slower to act. Used only with Source resolution: Auto."));
+        auto* evidenceSeconds = addText(QStringLiteral("Auto: evidence time"), QStringLiteral("source_resolution_evidence_seconds"));
+        evidenceSeconds->setPlaceholderText(QStringLiteral("10"));
+        evidenceSeconds->setToolTip(QStringLiteral(
+            "Seconds of agreeing frames before Auto shrinks the picture (a source upscaled in one direction only "
+            "needs twice this). Used only with Source resolution: Auto."));
+        auto* evidenceShots = addText(QStringLiteral("Auto: shots that must agree"), QStringLiteral("source_resolution_evidence_shots"));
+        evidenceShots->setPlaceholderText(QStringLiteral("3"));
+        evidenceShots->setToolTip(QStringLiteral(
+            "Separate shots (between cuts) that must agree: one soft shot of a real 4K film never decides alone "
+            "(a one-direction upscale needs twice this). Used only with Source resolution: Auto."));
+        {
+            // The four positions, the keys they move, the defaults an unset field means.
+            struct PicturePosition { const char* name; const char* description; std::array<const char*, 4> values; };
+            static const std::array<const char*, 4> kDefaults = { "native", "0.8", "10", "3" };
+            static const std::array<PicturePosition, 4> kPositions = { {
+                { "Off (default)", "The picture as captured: no detection acts on it.", { "native", "0.8", "10", "3" } },
+                { "Cautious", "Acts only on clear evidence: 4 shots and 20 s agreeing, upscale clarity 0.9. Slowest to act, "
+                    "never on a doubtful source.", { "auto", "0.9", "20", "4" } },
+                { "Standard", "3 shots and 10 s agreeing, upscale clarity 0.8.", { "auto", "0.8", "10", "3" } },
+                { "Fast", "2 shots and 5 s agreeing, upscale clarity 0.7: quickest to act, more likely to act on a soft "
+                    "native film for a while.", { "auto", "0.7", "5", "2" } } } };
+            const std::array<QLineEdit*, 4> texts = { nullptr, autoConfidence, evidenceSeconds, evidenceShots };
+            const std::array<QComboBox*, 4> choices = { sourceResolution, nullptr, nullptr, nullptr };
+            auto applying = std::make_shared<bool>(false);
+            auto raw = [texts, choices](int i) {
+                QString value = texts[i] ? texts[i]->text().trimmed() : choices[i]->currentData().toString().trimmed();
+                if (value.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0 && texts[i]) value.clear();
+                return value;
+            };
+            auto matches = [raw](int p) {
+                // Off is the source size alone (the evidence does not apply).
+                const int keys = p == 0 ? 1 : 4;
+                for (int i = 0; i < keys; ++i)
+                {
+                    QString value = raw(i);
+                    if (value.isEmpty()) value = QString::fromLatin1(kDefaults[i]);
+                    const QString want = QString::fromLatin1(kPositions[p].values[i]);
+                    bool okA = false, okB = false;
+                    const double a = value.toDouble(&okA), b = want.toDouble(&okB);
+                    if (okA && okB ? std::fabs(a - b) > 1e-9 : value.compare(want, Qt::CaseInsensitive) != 0)
+                        return false;
+                }
+                return true;
+            };
+            auto refresh = [=]() {
+                if (*applying) return;
+                bool anySet = false;
+                for (int i = 0; i < 4; ++i) anySet = anySet || !raw(i).isEmpty();
+                if (!anySet)
+                {
+                    pictureName->setText(QStringLiteral("Not set (the default profile's, or Off)"));
+                    pictureDescription->setText(QStringLiteral("Move the slider to choose this profile's level."));
+                    return;
+                }
+                for (int p = 0; p < 4; ++p)
+                    if (matches(p))
+                    {
+                        const QSignalBlocker blocker(pictureSlider);
+                        pictureSlider->setValue(p);
+                        pictureName->setText(QString::fromLatin1(kPositions[p].name));
+                        pictureDescription->setText(QString::fromLatin1(kPositions[p].description));
+                        return;
+                    }
+                pictureName->setText(QStringLiteral("Custom"));
+                pictureDescription->setText(QStringLiteral("The fields below differ from %1. Reset to preset puts them back.")
+                    .arg(QString::fromLatin1(kPositions[pictureSlider->value()].name)));
+            };
+            auto apply = [=](int p) {
+                *applying = true;
+                for (int i = 0; i < 4; ++i)
+                {
+                    const QString value = QString::fromLatin1(kPositions[p].values[i]);
+                    if (texts[i] && texts[i]->text() != value) texts[i]->setText(value);
+                    if (choices[i])
+                    {
+                        const int index = choices[i]->findData(value);
+                        if (index >= 0 && choices[i]->currentIndex() != index) choices[i]->setCurrentIndex(index);
+                    }
+                }
+                *applying = false;
+                refresh();
+            };
+            connect(pictureSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
+            connect(pictureReset, &QPushButton::clicked, this, [apply, pictureSlider]() { apply(pictureSlider->value()); });
+            connect(pictureDefault, &QPushButton::clicked, this, [apply, pictureSlider]() {
+                const QSignalBlocker blocker(pictureSlider);
+                pictureSlider->setValue(0);
+                apply(0);
+            });
+            for (int i = 0; i < 4; ++i)
+            {
+                if (texts[i]) connect(texts[i], &QLineEdit::textChanged, this, [refresh](const QString&) { refresh(); });
+                if (choices[i]) connect(choices[i], qOverload<int>(&QComboBox::currentIndexChanged), this, [refresh](int) { refresh(); });
+            }
+            // The freehand boxes: the allowed range beside each, only valid numbers kept (clamped
+            // and rounded when the field is left; whole shots), and a reset in each field back to
+            // the slider position's value.
+            static const std::array<double, 4> kMin = { 0.0, 0.0, 2.0, 1.0 };
+            static const std::array<double, 4> kMax = { 0.0, 1.0, 120.0, 10.0 };
+            static const std::array<int, 4> kDecimals = { 0, 2, 1, 0 };
+            static const std::array<const char*, 4> kUnits = { "", "", " s", "" };
+            for (int i = 0; i < 4; ++i)
+            {
+                QLineEdit* edit = texts[i];
+                if (!edit) continue;
+                const double lo = kMin[i], hi = kMax[i];
+                const int decimals = kDecimals[i];
+                auto* validator = new QDoubleValidator(lo, hi, decimals, edit);
+                validator->setNotation(QDoubleValidator::StandardNotation);
+                validator->setLocale(QLocale::c());
+                edit->setValidator(validator);
+                const QString range = QStringLiteral("%1-%2%3").arg(lo, 0, 'g', 6).arg(hi, 0, 'g', 6).arg(QString::fromLatin1(kUnits[i]));
+                if (auto* label = qobject_cast<QLabel*>(pictureForm->labelForField(edit)))
+                    label->setText(label->text() + QStringLiteral(" (") + range + QStringLiteral(")"));
+                edit->setAccessibleDescription(QStringLiteral("Allowed: %1.").arg(range));
+                connect(edit, &QLineEdit::editingFinished, this, [edit, lo, hi, decimals]() {
+                    QString text = edit->text().trimmed();
+                    if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
+                        return;   // unset: the default
+                    bool ok = false;
+                    double value = QLocale::c().toDouble(text, &ok);
+                    if (!ok) value = text.toDouble(&ok);
+                    if (!ok) { edit->clear(); return; }
+                    value = (std::min)(hi, (std::max)(lo, value));
+                    const double scale = std::pow(10.0, decimals);
+                    value = std::round(value * scale) / scale;
+                    const QString clean = QString::number(value, 'g', 12);
+                    if (clean != edit->text()) edit->setText(clean);
+                });
+                QAction* fieldReset = edit->addAction(edit->style()->standardIcon(QStyle::SP_BrowserReload), QLineEdit::TrailingPosition);
+                fieldReset->setObjectName(edit->objectName() + QStringLiteral(".reset"));
+                fieldReset->setToolTip(QStringLiteral("Back to the slider position's value"));
+                connect(fieldReset, &QAction::triggered, this, [edit, i, pictureSlider]() {
+                    edit->setText(QString::fromLatin1(kPositions[pictureSlider->value()].values[i]));
+                });
+            }
+            // Profile loads block the fields' signals: the load triggers this to re-read them.
+            auto* pictureRefresh = new QAction(pictureSlider);
+            pictureRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_refresh")));
+            connect(pictureRefresh, &QAction::triggered, this, [refresh]() { refresh(); });
+            refresh();
+        }
         auto* debandVp = addChoice(QStringLiteral("VP deband"), QStringLiteral("deband_vp"),
             { QStringLiteral("off"), QStringLiteral("auto"), QStringLiteral("on") });
         debandVp->setItemText(debandVp->findData(QStringLiteral("off")), QStringLiteral("Off"));
@@ -8422,7 +8610,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         model->item(0)->setEnabled(!retiredRootDefault && !(defaultProfile && scalingAutoChoice));
                 const bool hideUnspecifiedChoice = (defaultProfile && calibrationLutSlot) || (retiredRootDefault && (!raw.isEmpty() || field.key == QStringLiteral("sdr_lut_input_gamma"))) || rootRendererExplicitDefault ||
                     (defaultProfile && (sectionPrefix == QStringLiteral("vprenderer") || scalingAutoChoice) &&
-                        autoIndex >= 0);
+                        autoIndex >= 0 &&
+                        // Only where Auto really is the default: an unset source_resolution
+                        // (native) or deband_vp (off) has an Auto choice too, and showed it
+                        // as if selected (2026-10-16); they show "Default: ..." instead.
+                        (scalingAutoChoice || fallback(field.key).compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0));
                 if (auto* view = qobject_cast<QListView*>(combo->view()))
                     view->setRowHidden(0, hasUnspecifiedChoice &&
                         hideUnspecifiedChoice);
@@ -8534,6 +8726,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		{
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("motion_preset_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("picture_preset_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();

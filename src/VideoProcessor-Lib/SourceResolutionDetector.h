@@ -164,11 +164,12 @@ namespace SourceResolution
 		{
 			double tolerance = 0.03;        // hysteresis in ratio
 			double nativeAbove = 0.9;       // a ratio this high reads native
-			// Owner 2026-10-16: the standard is 3 shots and 20 s of evidence (the earlier minute was
-			// longer than needed: real 4K reads 0.1-0.2, upscales 0.9-0.99); the Picture slider
-			// will offer faster or more cautious settings.
+			// Owner 2026-10-16: the standard is 3 shots and 10 s of evidence (20 s was longer than
+			// needed: real 4K reads 0.1-0.2, upscales 0.9-0.99; the shots guard against a soft
+			// stretch of a real film). The Picture slider sets both
+			// (source_resolution_evidence_shots / _seconds).
 			int minimumShots = 3;           // distinct shots agreeing before a lower reading
-			double minimumSeconds = 20.0;   // and this long with evidence
+			double minimumSeconds = 10.0;   // and this long with evidence
 			double windowSeconds = 120.0;   // the rolling evidence window
 			double cutLevel = 20.0 / 255.0; // tile mean jump that marks a cut (Stage 8's rule)
 			double maximumGapSeconds = 2.0; // a longer gap between frames is a discontinuity
@@ -205,6 +206,9 @@ namespace SourceResolution
 		const std::string& LastDiscontinuity() const { return lastReason; }
 
 		double Ratio() const { return declared; }               // 1 = native
+		const Settings& GetSettings() const { return settings; }
+		// The Picture slider's evidence (takes effect at the next frame).
+		void SetEvidence(int shots, double seconds) { settings.minimumShots = shots; settings.minimumSeconds = seconds; }
 		double Candidate() const;                                // the window's evidence so far
 		// The window's median DetailAbove for frames reading `ratio`; +infinity when none.
 		double ReferenceDetail(double ratio) const;

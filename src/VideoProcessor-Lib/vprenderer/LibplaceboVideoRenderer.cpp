@@ -1023,6 +1023,10 @@ namespace
 		std::string sourceResolution = "native";
 		// Stage 12: the confidence auto needs before it re-bases (spec 3).
 		double sourceResolutionAutoMinConfidence = 0.8;
+		// The Picture slider (owner 2026-10-16): the shots and seconds of agreeing evidence
+		// before auto declares a lower source (standard 3 and 10 s).
+		int sourceResolutionEvidenceShots = 3;
+		double sourceResolutionEvidenceSeconds = 10.0;
 		// Stage 12 §2b/§2d: VP's own debander (off | auto | on) and whether the
 		// bitrate quality reading raises it (auto | off | on).
 		std::string debandVp = "off";
@@ -1224,7 +1228,8 @@ namespace
 			// Settings applied live must change the fingerprint, or a profile edit
 			// touching only them is not applied until something else changes.
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
-			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
+			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
+			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
@@ -2109,6 +2114,26 @@ namespace
 					settings.sourceResolutionAutoMinConfidence = v;
 				else
 					DebugLog::Log("display rule '%s': invalid source_resolution_auto_min_confidence '%s'; retaining base setting",
+						rule.name.c_str(), value.c_str());
+			}
+			if (config.TryGetString(rule.section, "source_resolution_evidence_shots", value))
+			{
+				char* end = nullptr;
+				const long v = std::strtol(value.c_str(), &end, 10);
+				if (end != value.c_str() && *end == '\0' && v >= 1 && v <= 10)
+					settings.sourceResolutionEvidenceShots = static_cast<int>(v);
+				else
+					DebugLog::Log("display rule '%s': invalid source_resolution_evidence_shots '%s'; retaining base setting",
+						rule.name.c_str(), value.c_str());
+			}
+			if (config.TryGetString(rule.section, "source_resolution_evidence_seconds", value))
+			{
+				char* end = nullptr;
+				const double v = std::strtod(value.c_str(), &end);
+				if (end != value.c_str() && *end == '\0' && v >= 2.0 && v <= 120.0)
+					settings.sourceResolutionEvidenceSeconds = v;
+				else
+					DebugLog::Log("display rule '%s': invalid source_resolution_evidence_seconds '%s'; retaining base setting",
 						rule.name.c_str(), value.c_str());
 			}
 		}
@@ -9150,7 +9175,9 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.captureUpload != next.captureUpload, "capture_upload");
 		changed(current.sourceRange != next.sourceRange, "source_range");
 		changed(current.sourceResolution != next.sourceResolution ||
-			current.sourceResolutionAutoMinConfidence != next.sourceResolutionAutoMinConfidence, "source_resolution");
+			current.sourceResolutionAutoMinConfidence != next.sourceResolutionAutoMinConfidence ||
+			current.sourceResolutionEvidenceShots != next.sourceResolutionEvidenceShots ||
+			current.sourceResolutionEvidenceSeconds != next.sourceResolutionEvidenceSeconds, "source_resolution");
 		changed(current.debandVp != next.debandVp || current.lowBitrateHandling != next.lowBitrateHandling, "deband_vp");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
@@ -18133,6 +18160,7 @@ struct LibplaceboVideoRenderer::Impl
 			double wanted = 1.0, wantedX = 1.0;
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
 			sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
+			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
 			{
@@ -25221,6 +25249,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_range=" << s.sourceRange << "\n"
 		<< "source_resolution=" << s.sourceResolution << "\n"
 		<< "source_resolution_auto_min_confidence=" << s.sourceResolutionAutoMinConfidence << "\n"
+		<< "source_resolution_evidence_shots=" << s.sourceResolutionEvidenceShots << "\n"
+		<< "source_resolution_evidence_seconds=" << s.sourceResolutionEvidenceSeconds << "\n"
 		<< "deband_vp=" << s.debandVp << "\n"
 		<< "low_bitrate_handling=" << s.lowBitrateHandling << "\n"
 		<< "cnn_residual_stabilise=" << (s.adaptive.cnnResidualStabilise ? "on" : "off") << "\n"

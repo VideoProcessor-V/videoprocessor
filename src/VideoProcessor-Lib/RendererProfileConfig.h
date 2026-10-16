@@ -685,6 +685,10 @@ namespace RendererProfileConfig
 				return x == std::string::npos ? lines(value, 8640) : lines(value.substr(0, x), 17280) && lines(value.substr(x + 1), 8640);
 			}
 			if (key == "source_resolution_auto_min_confidence") return IsNumberInRange(value, 0.0, 1.0);
+			// The Picture slider's evidence: whole shots 1..10, seconds 2..120.
+			if (key == "source_resolution_evidence_shots")
+				return !value.empty() && value.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(value, 1, 10);
+			if (key == "source_resolution_evidence_seconds") return IsNumberInRange(value, 2.0, 120.0);
 			if (key == "deband_vp") return IsChoice(value, { "off", "auto", "on" });
 			if (key == "low_bitrate_handling") return IsChoice(value, { "auto", "off", "on" });
 			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return IsChoice(value, { "on", "off" });

@@ -895,7 +895,7 @@ namespace Tests
 			const std::string base = fingerprint("");
 			Assert::AreEqual(base, fingerprint(""), L"the same file gives the same fingerprint");
 			const char* const changes[] = { "source_range: full\n", "capture_upload: early\n", "source_resolution: 1080\n",
-				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
+				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n","deband_vp: auto\n", "low_bitrate_handling: off\n",
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
 				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
 				"a_key_not_invented_yet: 1\n" };

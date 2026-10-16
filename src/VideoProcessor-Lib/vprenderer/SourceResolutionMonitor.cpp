@@ -538,6 +538,13 @@ if (tile < int(tiles) && g.y < 256) {
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
 
 		std::lock_guard<std::mutex> lock(mutex);
+		{
+			const int shots = evidenceShots.load(std::memory_order_acquire);
+			const double seconds = evidenceSeconds.load(std::memory_order_acquire);
+			tracker.SetEvidence(shots, seconds);
+			trackerV.SetEvidence(2 * shots, 2.0 * seconds);
+			trackerH.SetEvidence(2 * shots, 2.0 * seconds);
+		}
 		tracker.Update(frame, j.seconds);
 		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds);
 		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds);
@@ -561,7 +568,7 @@ if (tile < int(tiles) && g.y < 256) {
 		double coherenceMean = 0.0;
 		for (const auto& c : coherence) coherenceMean += c.second;
 		coherenceMean = coherence.empty() ? 0.0 : coherenceMean / coherence.size();
-		const SourceResolution::Tracker::Settings ts;
+		const SourceResolution::Tracker::Settings& ts = tracker.GetSettings();
 		const double evidence = (std::min)(1.0, tracker.Shots() / static_cast<double>(ts.minimumShots)) *
 			(std::min)(1.0, tracker.EvidenceSeconds() / ts.minimumSeconds);
 		const double clarity = (std::min)(1.0, (std::max)(0.0, (coherenceMean - thresholds.coherence) / 0.3));
@@ -620,7 +627,7 @@ if (tile < int(tiles) && g.y < 256) {
 		// Per axis, only while the both-axes reading is native: each declared axis's
 		// evidence (the stricter standard) times how clearly that axis was resampled.
 		{
-			const SourceResolution::Tracker::Settings as = AxisSettings();
+			const SourceResolution::Tracker::Settings as = trackerV.GetSettings();
 			auto axisConfidence = [&](const SourceResolution::Tracker& t, const std::deque<std::pair<double, double>>& c) {
 				double mean = 0.0;
 				for (const auto& e : c) mean += e.second;

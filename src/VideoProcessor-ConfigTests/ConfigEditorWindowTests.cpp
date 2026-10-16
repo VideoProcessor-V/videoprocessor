@@ -1382,6 +1382,97 @@ void testDejudderBoxPresetsAndMask()
         "A reopened Config does not show the saved Natural");
 }
 
+void testPictureSliderPresets()
+{
+    // Owner 2026-10-16: the Picture slider (Off, Cautious, Standard, Fast) moves source_resolution and
+    // auto's evidence; an edit shows Custom; Reset to preset / Default / the field resets restore; the
+    // freehand boxes clamp to their ranges; saved and read back.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\nsource_resolution: 1080\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* slider = requireControl<QSlider>(window, "config.vprenderer.picture_preset");
+    auto* name = requireControl<QLabel>(window, "config.vprenderer.picture_preset_name");
+    auto* reset = requireControl<QPushButton>(window, "config.vprenderer.picture_preset_reset");
+    auto* mode = requireControl<QComboBox>(window, "config.vprenderer.source_resolution");
+    auto* clarity = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_auto_min_confidence");
+    auto* seconds = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_seconds");
+    auto* shots = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_shots");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(name->text() == "Custom", (QByteArray("A fixed 1080 is not shown as Custom: ") + name->text().toUtf8()).constData());
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(name->text().startsWith("Not set"), (QByteArray("No keys is not shown as Not set: ") + name->text().toUtf8()).constData());
+    struct Row { int position; const char* mode; const char* clarity; const char* seconds; const char* shots; const char* label; };
+    const Row rows[] = {
+        { 1, "auto", "0.9", "20", "4", "Cautious" },
+        { 2, "auto", "0.8", "10", "3", "Standard" },
+        { 3, "auto", "0.7", "5", "2", "Fast" },
+        { 0, "native", "0.8", "10", "3", "Off" } };
+    for (const Row& r : rows)
+    {
+        slider->setValue(r.position);
+        QCoreApplication::processEvents();
+        const QByteArray at = QByteArray("position ") + r.label + ": ";
+        require(mode->currentData().toString() == r.mode, (at + "source_resolution " + mode->currentData().toString().toUtf8()).constData());
+        require(clarity->text() == r.clarity && seconds->text() == r.seconds && shots->text() == r.shots,
+            (at + "evidence " + clarity->text().toUtf8() + " " + seconds->text().toUtf8() + " " + shots->text().toUtf8()).constData());
+        require(name->text().startsWith(r.label), (at + "label " + name->text().toUtf8()).constData());
+    }
+    // Off is the source size alone: an edited evidence field under native still reads Off.
+    seconds->setText("30");
+    QCoreApplication::processEvents();
+    require(name->text().startsWith("Off"), (QByteArray("Off with other evidence is not Off: ") + name->text().toUtf8()).constData());
+    // Standard, then an edit: Custom without moving the slider; reset restores.
+    slider->setValue(2);
+    shots->setText("5");
+    QCoreApplication::processEvents();
+    require(name->text() == "Custom" && slider->value() == 2, "Editing a key did not show Custom (slider kept)");
+    reset->click();
+    QCoreApplication::processEvents();
+    require(shots->text() == "3" && name->text().startsWith("Standard"), "Reset to preset did not restore Standard");
+    // Freehand boxes: clamped to the range and rounded (whole shots) when the field is left.
+    seconds->setText("500");
+    QMetaObject::invokeMethod(seconds, "editingFinished");
+    shots->setText("2.6");
+    QMetaObject::invokeMethod(shots, "editingFinished");
+    QCoreApplication::processEvents();
+    require(seconds->text() == "120", (QByteArray("500 s was not clamped to 120: ") + seconds->text().toUtf8()).constData());
+    require(shots->text() == "3", (QByteArray("2.6 shots was not rounded to a whole 3: ") + shots->text().toUtf8()).constData());
+    QAction* secondsReset = nullptr;
+    for (QAction* action : seconds->actions())
+        if (action->objectName().endsWith(".reset")) secondsReset = action;
+    require(secondsReset != nullptr, "The field has no reset");
+    secondsReset->trigger();
+    QCoreApplication::processEvents();
+    require(seconds->text() == "10", (QByteArray("The field reset did not restore Standard's 10: ") + seconds->text().toUtf8()).constData());
+    require(seconds->accessibleDescription().contains("2-120"), "No allowed range noted for the field");
+    // Default: back to Off (native).
+    requireControl<QPushButton>(window, "config.vprenderer.picture_preset_default")->click();
+    QCoreApplication::processEvents();
+    require(slider->value() == 0 && mode->currentData().toString() == "native" && name->text().startsWith("Off"), "Default did not restore Off");
+    // Fast saved and read back.
+    slider->setValue(3);
+    QCoreApplication::processEvents();
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    require(apply->isEnabled(), "Picture edits did not enable Apply");
+    apply->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    for (const char* expected : { "source_resolution: auto", "source_resolution_auto_min_confidence: 0.7",
+        "source_resolution_evidence_seconds: 5", "source_resolution_evidence_shots: 2", "source_resolution: 1080" })
+        require(saved.contains(expected), (QByteArray("Picture setting not saved: ") + expected).constData());
+    ConfigEditorWindow reopened(path, 0, true);
+    requireControl<QListWidget>(reopened, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(requireControl<QSlider>(reopened, "config.vprenderer.picture_preset")->value() == 3 &&
+        requireControl<QLabel>(reopened, "config.vprenderer.picture_preset_name")->text().startsWith("Fast"),
+        "A reopened Config does not show the saved Fast");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8277,6 +8368,7 @@ int main(int argc, char** argv)
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);
+    failures += run("picture slider presets", testPictureSliderPresets);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
