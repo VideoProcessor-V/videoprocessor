@@ -1382,6 +1382,30 @@ void testDejudderBoxPresetsAndMask()
         "A reopened Config does not show the saved Natural");
 }
 
+void testDeckLinkYCbCr12Control()
+{
+    // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[general]\ncapture_device: BlackMagic DeckLink\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* control = requireControl<QComboBox>(window, "config.decklink.ycbcr_12bit_capture");
+    require(control->currentData().toString() == "rgb12", (QByteArray("unset is not shown as the default rgb12: ") +
+        control->currentData().toString().toUtf8()).constData());
+    selectData(control, "v210");
+    QCoreApplication::processEvents();
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    require(apply->isEnabled(), "the edit did not enable Apply");
+    apply->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("[decklink]") && saved.contains("ycbcr_12bit_capture: v210"), "ycbcr_12bit_capture not saved");
+    ConfigEditorWindow reopened(path, 0, true);
+    require(requireControl<QComboBox>(reopened, "config.decklink.ycbcr_12bit_capture")->currentData().toString() == "v210",
+        "the reopened Config does not show v210");
+}
+
 void testMotionSliderPerRuleProfile()
 {
     // Owner 2026-10-16: rules give each frame rate its own level - each rule-chosen profile keeps its own
@@ -8253,6 +8277,7 @@ int main(int argc, char** argv)
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);
+    failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
     failures += run("every new renderer control reaches VP", testEveryNewRendererControlReachesVp);

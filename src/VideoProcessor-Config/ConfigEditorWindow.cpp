@@ -4754,6 +4754,16 @@ QWidget* ConfigEditorWindow::createStartupPage()
         markDirty();
     });
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
+    // [decklink] ycbcr_12bit_capture (FL35; planner 2026-10-16: every setting has a Config control).
+    auto* ycbcr12 = bindChoiceField(QStringLiteral("decklink"), QStringLiteral("ycbcr_12bit_capture"),
+        { QStringLiteral("rgb12"), QStringLiteral("v210"), QStringLiteral("off") },
+        { QStringLiteral("12-bit RGB from the card (default)"), QStringLiteral("10-bit 4:2:2 (v210)"),
+          QStringLiteral("Refuse the signal (older behaviour)") });
+    ycbcr12->setToolTip(QStringLiteral(
+        "DeckLink only: a source sending 12-bit YCbCr 4:2:2 (some players and consoles). 12-bit RGB: the card "
+        "converts it to 12-bit RGB when it offers that for the mode (full precision), otherwise 10-bit 4:2:2. "
+        "10-bit 4:2:2: always the card's 10-bit YCbCr. Refuse: the earlier behaviour, no picture."));
+    hardwareForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);
     behaviorLayout->setContentsMargins(0, 0, 0, 0);
