@@ -7391,9 +7391,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveChroma->setToolTip(QStringLiteral(
             "Off (recommended): chroma stays faithful; SSIM on chroma can fringe colour at edges."));
         auto* adaptiveFaithful = addChoice(QStringLiteral("Grain-true downscale filter"),
-            QStringLiteral("adaptive_faithful"), { QStringLiteral("polar"), QStringLiteral("ortho") });
+            QStringLiteral("adaptive_faithful"), { QStringLiteral("polar"), QStringLiteral("ortho"), QStringLiteral("auto") });
         adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("polar")),
-            QStringLiteral("Polar EWA Lanczos sharp (most accurate)"));
+            QStringLiteral("Polar EWA Lanczos sharp (most accurate when both axes shrink alike)"));
+        adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("auto")),
+            QStringLiteral("Auto (polar; separable when only one axis shrinks)"));
         adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("ortho")),
             QStringLiteral("Separable Lanczos (faster)"));
         adaptiveFaithful->setToolTip(QStringLiteral(
@@ -7722,8 +7724,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 { "Fast", "The SSIM downscale blend only (grain and hard edges lean to a faithful downscale, clean texture keeps "
                     "SSIM), with the separable filter and the per-frame grain measure. Little GPU time.",
                     { "on", "off", "ortho", "off" } },
-                { "Best", "Both blends (the CNN upscale blend too), the separable filter, the grain measured per block "
-                    "along the motion. The most GPU time.", { "on", "on", "ortho", "on" } } } };
+                { "Best", "Both blends (the CNN upscale blend too), the polar grain-true filter where both axes shrink "
+                    "alike (the separable one when only one axis shrinks), the grain measured per block along the motion. "
+                    "The most GPU time.", { "on", "on", "auto", "on" } } } };
             const std::array<QComboBox*, 4> choices = { adaptiveOn, upscaleOn, adaptiveFaithful, adaptiveMap };
             auto applying = std::make_shared<bool>(false);
             auto lastOn = std::make_shared<int>(2);   // the level ticking the checkbox returns to

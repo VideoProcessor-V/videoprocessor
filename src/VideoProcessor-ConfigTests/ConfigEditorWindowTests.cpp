@@ -1504,7 +1504,7 @@ void testScalingSliderPresets()
     struct Row { int position; const char* down; const char* up; const char* faithful; const char* map; const char* label; };
     const Row rows[] = {
         { 1, "on", "off", "ortho", "off", "Fast" },
-        { 2, "on", "on", "ortho", "on", "Best" } };
+        { 2, "on", "on", "auto", "on", "Best" } };
     for (const Row& r : rows)
     {
         slider->setValue(r.position);

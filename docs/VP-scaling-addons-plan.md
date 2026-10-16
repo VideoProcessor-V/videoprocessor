@@ -1,5 +1,19 @@
 # Scaling add-ons per shader (owner 2026-10-16 night) - plan
 
+**Latest owner direction (supersedes the per-shader sliders below):** keep it simple - for each
+shader, **list its add-on options with their relative performance cost, whether the motion (de-judder
+/ matcher) needs to be on, and mark the "recommended" ones.** No per-shader slider needed. The
+interim Scaling slider (Off / Fast / Best) stays until this list replaces or complements it.
+
+**What Config can know about shader selection (explored 2026-10-16):** shader profiles are a global
+multi-select group (`[shader.standard.*]`, not per renderer profile), chosen by `when:` rules,
+shortcuts, Config/RPC toggles, persisted only with `persist_profile_selection`. Config already knows
+which shaders are **on in the running VP** (`refreshActiveProfileIndicators` / `ActiveProfileStatus`,
+the green dots, ConfigEditorWindow.cpp ~2649-2794); it does not evaluate rules or read the `.state`
+file, so with VP closed it cannot tell. Matching a shader: the `shader.standard.*` sections whose
+`glsl_file` is SSimDownscaler / FSRCNNX / ArtCNN. Note: SSimDownscaler is not in the shipped
+VideoProcessor.cfg (only in a test fixture).
+
 Status: agreed direction, not built. The committed Scaling slider (cc5917d5: Off / Fast / Best,
 separable throughout) is an interim; this plan replaces it.
 
@@ -50,7 +64,6 @@ follows grain, +steady detail).
    run), the grain map with the de-judder on and off, `fbo_float32` on/off. Existing harnesses:
    Beta "option quality" (BetaGpuTests.cpp ~2283, `AdaptiveDownscale::Module`), Stage12PassCostsAt4K
    pattern (LibplaceboLutParserTests.cpp).
-3. Restore `adaptive_faithful: auto` (AdaptiveDownscale `faithfulAuto`, ratio test in the faithful
-   branch; reverted uncommitted 2026-10-16, easy to redo).
+3. DONE 2026-10-16: `adaptive_faithful: auto` restored; the interim slider's Best uses it.
 4. Then the per-shader sliders (choices only, same Custom / Reset / Default rules, measured ms in each
    level's description), Config tests; replace the interim Scaling slider.

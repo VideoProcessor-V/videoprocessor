@@ -1245,7 +1245,7 @@ namespace
 			<< settings.adaptiveDownscale << '|' << settings.adaptive.wBase << '|' << settings.adaptive.edgeLo << '|'
 			<< settings.adaptive.edgeHi << '|' << settings.adaptive.grainLo << '|' << settings.adaptive.grainHi << '|'
 			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
-			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|' << settings.adaptive.faithfulOrtho << '|'
+			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|' << settings.adaptive.faithfulOrtho << '|' << settings.adaptive.faithfulAuto << '|'
 			<< settings.adaptive.grainMap << '|' << settings.adaptive.grainMapSmoothMs << '|'
             << settings.motion.Fingerprint() << '|'
 			<< settings.debandStrength << '|'
@@ -2380,11 +2380,14 @@ namespace
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
 		if (config.TryGetString(rule.section, "adaptive_faithful", raw))
 		{
-			if (raw == "polar" || raw == "ortho")
+			if (raw == "polar" || raw == "ortho" || raw == "auto")
+			{
 				settings.adaptive.faithfulOrtho = raw == "ortho";
+				settings.adaptive.faithfulAuto = raw == "auto";
+			}
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
-					settings.adaptive.faithfulOrtho ? "ortho" : "polar");
+					settings.adaptive.faithfulAuto ? "auto" : settings.adaptive.faithfulOrtho ? "ortho" : "polar");
 		}
 		if (config.TryGetString(rule.section, "rebase_kernel_match", raw))
 		{

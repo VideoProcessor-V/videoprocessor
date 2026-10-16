@@ -724,7 +724,7 @@ namespace RendererProfileConfig
 				key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale")
 				return IsChoice(value, { "on", "off" });
 			if (key == "adaptive_upscale_w_base") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "adaptive_faithful") return IsChoice(value, { "polar", "ortho" });
+			if (key == "adaptive_faithful") return IsChoice(value, { "polar", "ortho", "auto" });
 			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")
 				return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "adaptive_edge_lo" || key == "adaptive_edge_hi") return IsNumberInRange(value, 0.0, 255.0);

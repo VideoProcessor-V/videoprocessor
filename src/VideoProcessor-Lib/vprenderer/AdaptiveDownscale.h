@@ -61,6 +61,10 @@ namespace AdaptiveDownscale
 		// Owner 2026-10-13 efficiency: the faithful branch as two separable
 		// Lanczos passes instead of the polar ewa_lanczossharp.
 		bool faithfulOrtho = false;
+		// adaptive_faithful auto (owner 2026-10-16): polar where both axes shrink alike, the
+		// separable (1D) filter when they differ by more than 10 % - a circular polar footprint
+		// would soften the axis that should stay sharp (one-axis or anamorphic scaling).
+		bool faithfulAuto = false;
 		// Stage 12 §2c / delta 15 S8-1 (owner 2026-10-15): the CNN's (upscale)
 		// and SSIM's (downscale) added detail held along the de-judder's
 		// trusted vectors (a one-pole over ~3 frames), so it does not shimmer;
@@ -75,7 +79,7 @@ namespace AdaptiveDownscale
 		return a.wBase == b.wBase && a.edgeLo == b.edgeLo && a.edgeHi == b.edgeHi && a.grainLo == b.grainLo &&
 			a.grainHi == b.grainHi && a.grainFloor == b.grainFloor && a.grainSmoothMs == b.grainSmoothMs &&
 			a.shadowBias == b.shadowBias && a.chromaSsim == b.chromaSsim && a.antiring == b.antiring &&
-			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho &&
+			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho && a.faithfulAuto == b.faithfulAuto &&
 			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise;
 	}
 

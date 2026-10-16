@@ -481,8 +481,11 @@ if (q.x < size.x && q.y < size.y) {
 		}
 
 		// 1. The faithful branch: libplacebo's polar ewa_lanczossharp, or
-		// (adaptive_faithful ortho) two separable Lanczos passes.
-		if (settings.faithfulOrtho)
+		// (adaptive_faithful ortho) two separable Lanczos passes; auto: separable when the
+		// axes' ratios differ by more than 10 %.
+		const double ratioX = (sx1 - sx0) / std::max(1, dw), ratioY = (sy1 - sy0) / std::max(1, dh);
+		const bool unequal = std::max(ratioX, ratioY) > 1.1 * std::max(1e-6, std::min(ratioX, ratioY));
+		if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
 		{
 			if (!Ensure(gpu, faithfulMid, w, dh, 4, 16, true, true))
 			{
