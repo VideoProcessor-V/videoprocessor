@@ -43,6 +43,12 @@ evidence, flag risks, and answer the questions in part 6.
      design (docs/audit/detection-stress-tests-2026-10-16.md).
 
 3. Detail accumulation (docs/VP-detail-accumulation.md) - design, not built
+   UPDATE (sections 11-12): measured on a real x265 stream with a streaming GOP, the
+   I/B pulse is 3-4 points of fine detail / 1.5-2 dB; a CPU prototype of v1 (block
+   motion, detail band, trust weight, clamp at any allowance) gains only +0.01 to
+   +0.09 dB (gate +1 dB), and a strong weight makes I/P frames worse - the B-frames'
+   coding loss is correlated with their references'. Proposed: do not build now; retest
+   on real streaming captures (G19) and grainy sources.
    - Recurrent detail-band history warped by the de-judder's vectors; TAA-style clamp;
      v1 causal (refined field), v2 two-frame look-ahead with the engine's refined
      vectors; automatic disable without vectors / optical flow; detection reads the
@@ -60,8 +66,8 @@ evidence, flag risks, and answer the questions in part 6.
        Apple TV captures (G19) to learn the real player kernel first?
    Q3. The 1080-master-coded-at-4K gap: any detection idea beyond spectral statistics,
        or accept it as the known limit?
-   Q4. Detail accumulation: the six open questions in its section 6 (chroma; rate;
-       weights; sub-pixel super-resolution; grain; the v2 future frames via the
-       engine), and the build order (v1 first?).
+   Q4. Detail accumulation: given the prototype result (section 12), agree to park it
+       until real streaming captures, or is there a variant worth trying first (e.g.
+       anchoring B-frames to the nearest I-frame only, or targeting grain / noise)?
    Q5. G1: are the three periodic-content guards sufficient, or should exactly periodic
        tiles be excluded outright (a periodicity test on the tile)?
