@@ -188,3 +188,24 @@ Owner, 2026-10-16: "are we going to have a problem with detail integration using
 - **Expected:** about +1 to +2 dB on most frames and steadier texture; not a large sharpness gain.
 
 **Gate for building:** the planner's view (Q4) plus a prototype on this material (scratch: D:\hfr\breathing). The prototype must lift the B-frames by at least 1 dB with no frame worse, before any GPU work.
+
+## 12. Prototype result: the gate is not met (2026-10-16)
+
+**Prototype** (scratch accum_proto.py) on the section 11 material:
+- block motion (16×16, ±12 px, half-pixel);
+- the detail band accumulated along it;
+- a trust weight from how well the warped previous frame predicts the current one;
+- the clamp at various allowances, including none.
+
+| Variant | B-frames | I / P frames |
+|---|---|---|
+| Weight 0.5, clamp ±2 codes (CRF 32) | +0.01 dB | +0.02 / +0.03 |
+| Weight 0.5, no clamp (CRF 32 / 24) | +0.02 / +0.05 | +0.06 / +0.06 |
+| Weight 0.9, no clamp (CRF 32 / 24) | +0.05 / +0.03 | +0.09 / −0.10 (worst frame −0.19) |
+
+**Conclusion.** It falls far short of the +1 dB gate, and a strong weight makes I/P frames worse. The B-frames' loss is not independent of their references': they are predicted from the same I/P frames and the encoder removes the same fine detail everywhere. So frames hold little that differs to accumulate. The measured I/B "breathing" is mostly correlated quantisation noise.
+
+**Decision proposed to the owner and the planner: do not build now.**
+- Keep the design.
+- Retest on real streaming captures (G19), whose hardware encoders may pulse more, and on grainy or noisy sources (temporal noise is independent across frames, unlike coding loss).
+- The pieces built for it stay useful: the optical-flow producer and the vector store already serve the de-judder.
