@@ -422,6 +422,15 @@ public:
 		return false;
 	}
 
+	// Crash state (owner 2026-10-15): one line about the LED drive - its
+	// source, whether it drives the projector, the last levels sent. False
+	// when the renderer has no LED drive.
+	virtual bool GetLedDriveStatus(CString& status) const
+	{
+		status.Empty();
+		return false;
+	}
+
 	// RS-232 connection test (Config, LED drive page): the renderer frees the
 	// projector's COM port for the test. False (with reason) when it will not,
 	// e.g. while video is playing. Renderers without an LED drive hold no port.

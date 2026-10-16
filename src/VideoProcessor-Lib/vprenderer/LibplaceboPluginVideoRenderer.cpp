@@ -613,6 +613,12 @@ bool LibplaceboPluginVideoRenderer::GetPresentationTimingStatus(
 	return m_renderer && m_renderer->GetPresentationTimingStatus(status);
 }
 
+bool LibplaceboPluginVideoRenderer::GetLedDriveStatus(CString& status) const
+{
+	status.Empty();
+	return m_renderer && m_renderer->GetLedDriveStatus(status);
+}
+
 bool LibplaceboPluginVideoRenderer::GetDejudderStatus(CString& status) const
 {
 	status.Empty();

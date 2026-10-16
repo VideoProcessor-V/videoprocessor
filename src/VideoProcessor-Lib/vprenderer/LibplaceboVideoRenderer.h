@@ -128,6 +128,7 @@ public:
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
 	bool GetDejudderStatus(CString& status) const override;
+	bool GetLedDriveStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;
 	void ResumeLedDriveAfterTest() override;
 	bool GetRenderLoad(RendererRenderLoad& load) const override;

@@ -149,6 +149,7 @@ namespace
 		bool created = false, presented = false;
 		std::vector<std::string> log;
 		std::string dejudderStatus, presentationStatus;   // the stats lines at the end
+		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
 		bool Logged(const std::string& text) const
 		{
 			for (const std::string& line : log)
@@ -324,6 +325,7 @@ namespace
 			result.presented = renderer->HasPresentedLiveFrame();
 			CString status;
 			if (renderer->GetDejudderStatus(status)) result.dejudderStatus = CStringA(status).GetString();
+			if (renderer->GetLedDriveStatus(status)) result.ledStatus = CStringA(status).GetString();
 			status.Empty();
 			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
 			renderer->Stop();
@@ -776,6 +778,8 @@ namespace Tests
 					Assert::IsFalse(r.Logged("Motion: smooth motion mixing on"), (name + L": no mixing\n" + r.Tail()).c_str());
 					Assert::IsTrue(r.Logged("De-judder: motion estimated"), (name + L": the de-judder ran\n" + r.Tail()).c_str());
 				}
+				// The crash state's LED line (no LED drive configured here).
+				Assert::AreEqual(std::string("off"), r.ledStatus, (name + L": the LED drive status line").c_str());
 				failures += r.presented ? 0 : 1;
 			}
 			g_harnessShaderProfiles.clear();

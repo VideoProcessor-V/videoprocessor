@@ -16866,6 +16866,27 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		crashState.SetValue("display refresh", display);
 		crashState.SetValue("renderer", !m_videoRenderer ? "none" :
 			(m_activeRendererIsDirectShow ? "DirectShow" : "VP Renderer"));
+		if (const auto snapshot = m_profileRuntime.GetSnapshot())
+		{
+			std::string profiles;
+			for (const auto& selection : RendererProfileConfig::FormatSelections(snapshot->effectiveSelections))
+				profiles += (profiles.empty() ? "" : ", ") + selection.first + "=" + selection.second;
+			crashState.SetValue("profiles", profiles.empty() ? std::string("(none)") : profiles);
+		}
+		const auto rendererLine = [&](const char* key, bool known, const CString& text)
+		{
+			crashState.SetValue(key, known && !text.IsEmpty() ? std::string(CStringA(text).GetString()) : std::string("-"));
+		};
+		CString text;
+		if (m_videoRenderer)
+		{
+			// The de-judder line names the motion engine in use (smooth motion
+			// steps it aside with that reason).
+			rendererLine("de-judder", m_videoRenderer->GetDejudderStatus(text), text);
+			rendererLine("presentation", m_videoRenderer->GetPresentationTimingStatus(text), text);
+			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
+			rendererLine("LED drive", m_videoRenderer->GetLedDriveStatus(text), text);
+		}
 	}
 	// Preserve the requested visibility through renderer handoff. The next
 	// refresh submits to the native API once ready; never create a desktop OSD.

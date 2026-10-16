@@ -5078,8 +5078,9 @@ namespace VideoProcessorTest
 			// 25: IVideoRenderer::GetDejudderStatus (stage 6b-2b) or rc4's Beta
 			// flavor export; 26: both (rc4 merge); 27: the LED drive's
 			// projector connection test (Suspend/ResumeLedDriveForTest); 28:
-			// v1.4.02's diagnostics and profiles; 29: both (v1.4.02 merge).
-			Assert::AreEqual(static_cast<uint32_t>(29),
+			// v1.4.02's diagnostics and profiles; 29: both (v1.4.02 merge); 30:
+			// GetLedDriveStatus (crash state).
+			Assert::AreEqual(static_cast<uint32_t>(30),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

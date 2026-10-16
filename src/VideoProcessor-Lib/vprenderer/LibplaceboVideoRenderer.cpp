@@ -21982,6 +21982,34 @@ bool LibplaceboVideoRenderer::GetDejudderStatus(CString& status) const
 	return true;
 }
 
+bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
+{
+	status.Empty();
+	const std::shared_ptr<LedDrive::LedDriveModule> led = m_ledDrive;
+	if (!led)
+	{
+		status = TEXT("off");
+		return true;
+	}
+	const LedDrive::LedDriveConfig config = led->Config();
+	const LedDrive::DriverStatus driver = led->ProjectorStatus();
+	const LedDrive::CompensationGain gain = led->CurrentGain();
+	const char* mode = config.mode == LedDrive::Mode::Compensate ? "compensate" :
+		config.mode == LedDrive::Mode::Script ? "script" :
+		config.mode == LedDrive::Mode::PictureOnly ? "picture_only" : "log_only";
+	char text[512];
+	snprintf(text, sizeof(text),
+		"source %s (mode %s%s), %s, light last sent %d (confirmed %d), contrast last sent %d, commands %d, timeouts %d, "
+		"picture gain %s %.3f",
+		config.commandSource.empty() ? "(from mode)" : config.commandSource.c_str(), mode,
+		config.mode == LedDrive::Mode::Script ? (config.scriptPacing ? ", script pacing" : ", tick loop") : "",
+		led->DrivingProjector() ? "driving the projector" : "not driving the projector (dry run)",
+		driver.lastSentLight, driver.lastLight, driver.lastSentContrast, driver.commands, driver.timeouts,
+		gain.active ? "on" : "off", gain.gain);
+	status = CString(text);
+	return true;
+}
+
 bool LibplaceboVideoRenderer::GetPresentationTimingStatus(CString& status) const
 {
 	status.Empty();
