@@ -296,6 +296,7 @@
     </ClCompile>
     <ClCompile Include="SceneDetectorTests.cpp" />
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
+    <ClCompile Include="VectorStoreTests.cpp" />
     <ClCompile Include="WindowResizeLayoutTests.cpp" />
     <ClCompile Include="AlphaPresentationTelemetryTests.cpp" />
     <ClCompile Include="AlphaRenderLoadMeterTests.cpp" />

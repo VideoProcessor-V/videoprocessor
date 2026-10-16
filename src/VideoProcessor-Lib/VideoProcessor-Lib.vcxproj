@@ -326,6 +326,7 @@
     <ClInclude Include="UnifiedProfileRuntime.h" />
 	<ClInclude Include="SceneDetector.h" />
 	<ClInclude Include="SourceResolutionDetector.h" />
+	<ClInclude Include="VectorStore.h" />
 	<ClInclude Include="vprenderer\AlphaNativeRgbIngress.h" />
     <ClInclude Include="SubtitleRepositionMode.h" />
     <ClInclude Include="StringUtils.h" />
