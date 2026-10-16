@@ -90,6 +90,13 @@ namespace
 {
 QString testNameFilter;
 int selectedTestsRun = 0;
+// Faster runs (owner 2026-10-15): --match a|b runs every test whose name
+// contains one of the words (case-insensitive); --shard i/N runs every N-th
+// test from i, so N copies run the suite in parallel. Tests that need the
+// foreground window or the screen's z-order run only in shard 0, so parallel
+// copies never take focus from each other.
+QStringList testNameMatches;
+int testShard = 0, testShardCount = 1, testSequence = 0;
 
 WNDPROC testOwnerOriginalProcedure = nullptr;
 HWND testAdvertisedEditor = nullptr;
@@ -7927,20 +7934,45 @@ void testMotionAndChromaControlsPersistAndExposeNewTab()
 
 int run(const char* name, const std::function<void()>& test)
 {
+    const QString testName = QString::fromUtf8(name);
     if (!testNameFilter.isEmpty() &&
-        testNameFilter.compare(QString::fromUtf8(name), Qt::CaseInsensitive) != 0)
+        testNameFilter.compare(testName, Qt::CaseInsensitive) != 0)
         return 0;
+    if (!testNameMatches.isEmpty())
+    {
+        bool matched = false;
+        for (const QString& word : testNameMatches)
+            matched = matched || testName.contains(word, Qt::CaseInsensitive);
+        if (!matched) return 0;
+    }
+    if (testShardCount > 1)
+    {
+        static const char* const serialWords[] = { "window", "focus", "z-order", "zorder", "foreground",
+            "presentation target", "lease", "screen", "monitor", "move" };
+        bool serial = false;
+        for (const char* word : serialWords)
+            serial = serial || testName.contains(QString::fromLatin1(word), Qt::CaseInsensitive);
+        const int sequence = testSequence++;
+        if (serial ? testShard != 0 : sequence % testShardCount != testShard)
+            return 0;
+    }
     ++selectedTestsRun;
     std::cerr << "START " << name << std::endl;
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsedMs = [&started]()
+    {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    };
     try
     {
         test();
-        std::cout << "PASS " << name << std::endl;
+        std::cout << "PASS " << name << " [" << elapsedMs() << " ms]" << std::endl;
         return 0;
     }
     catch (const std::exception& error)
     {
-        std::cerr << "FAIL " << name << ": " << error.what() << std::endl;
+        std::cerr << "FAIL " << name << ": " << error.what() << " [" << elapsedMs() << " ms]" << std::endl;
         return 1;
     }
 }
@@ -7955,9 +7987,24 @@ int main(int argc, char** argv)
         const quintptr receiver = QString::fromLocal8Bit(argv[2]).toULongLong(&ok);
         return ok ? runExternalZOrderFixture(reinterpret_cast<HWND>(receiver)) : 2;
     }
-    if (argc == 3 && QString::fromLocal8Bit(argv[1]) ==
-        QStringLiteral("--test"))
-        testNameFilter = QString::fromLocal8Bit(argv[2]);
+    for (int i = 1; i + 1 < argc; i += 2)
+    {
+        const QString option = QString::fromLocal8Bit(argv[i]);
+        const QString value = QString::fromLocal8Bit(argv[i + 1]);
+        if (option == QStringLiteral("--test"))
+            testNameFilter = value;
+        else if (option == QStringLiteral("--match"))
+            testNameMatches = value.split(QLatin1Char('|'), Qt::SkipEmptyParts);
+        else if (option == QStringLiteral("--shard"))
+        {
+            const QStringList parts = value.split(QLatin1Char('/'));
+            if (parts.size() == 2 && parts[1].toInt() > 0)
+            {
+                testShard = parts[0].toInt();
+                testShardCount = parts[1].toInt();
+            }
+        }
+    }
     QApplication application(argc, argv);
     if (!qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES").isEmpty())
         QFontDatabase::addApplicationFont(QStringLiteral("C:/Windows/Fonts/segoeui.ttf"));
@@ -8126,7 +8173,7 @@ int main(int argc, char** argv)
         testVisiblePresentationTargetUpdateMovesEditor);
     failures += run("normal window architecture has no lease polling",
         testNormalWindowArchitectureHasNoLeasePolling);
-    if (!testNameFilter.isEmpty() && selectedTestsRun == 0)
+    if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
     return failures == 0 ? 0 : 1;
 }
