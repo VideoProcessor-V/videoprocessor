@@ -219,3 +219,20 @@ The 8-bit limit belongs to NVIDIA's packaged FRUC library, not to the engine's r
 - the cost buffer and the intra-block spread as trust inputs;
 - the multi-pair vector math (chained against direct, acceleration);
 - the 3090 measurements.
+
+## Measured: the 7 real clips (2026-10-16; UVG 120p at 24p spacing and Xiph 50p, laptop RTX 3050 Ti)
+
+| Mode | Judder removed | vs matcher | Damage (harm) |
+|---|---|---|---|
+| Matcher (block searches) | 41.3% | — | 0.40 |
+| Engine instead (medium / slow) | 39.1% / 40.3% | −5.3% / −2.6% | 0.33 |
+| Matcher + engine candidate | 41.4–41.5% | +0.3–0.4% | 0.40–0.41 |
+| Engine seed + matcher refinement, medium | 41.2% | −0.2% | 0.37 |
+| **Engine seed + matcher refinement, slow** | **41.9%** | **+1.3%** | **0.35** |
+
+**Per clip,** the slow seed beats the matcher on crowd_run, Jockey, park_joy, ShakeNDry and YachtRide, and ties on Bosphorus and ReadySetGo.
+
+**Defaults:**
+- The producer uses the slow preset. It is off the render path, at the matcher's engine size (a quarter at 4K).
+- The render-time fallback uses medium.
+- Owner gate ([[vp-nvof-parallel-path]]): removal at least the matcher's (+1.3%), damage at most the matcher's (0.35 vs 0.40), faster (the block search skipped). Met on the laptop; the 3090 is to be confirmed.
