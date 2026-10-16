@@ -8275,6 +8275,87 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
+		TEST_METHOD(SourceRebaseOneAxisScalesThatAxisOnly)
+		{
+			// Owner 2026-10-16 ("decompose an upscaler and then use it in the offending axis
+			// alone"): a source upscaled vertically only (true 4K detail across) is re-based
+			// in height alone; the fine horizontal detail survives untouched.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 1024, H = 512, h = 256;
+			// Horizontal: 4K-class detail (0.35 cycles per pixel); vertical: smooth (an upscale's content).
+			auto fine = [](int x) { return 0.12 * std::sin(2.0 * 3.14159265358979 * 0.35 * x); };
+			auto smooth = [](double y) { return 0.45 + 0.2 * std::cos(y * 6.0); };
+			std::vector<uint16_t> luma(static_cast<size_t>(W) * H);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					luma[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(std::lround((smooth((y + 0.5) / H) + fine(x)) * 65535.0));
+			pl_tex_params lp{};
+			lp.w = W; lp.h = H; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.initial_data = luma.data();
+			pl_tex lumaTex = pl_tex_create(gpu, &lp);
+			Assert::IsTrue(lumaTex != nullptr);
+			pl_frame source{};
+			source.num_planes = 1;
+			source.planes[0].texture = lumaTex; source.planes[0].components = 1; source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+			SourceRebase::Module rebase;
+			pl_frame out{};
+			Assert::IsTrue(rebase.Apply(gpu, dispatch, source, 1.0, 0.5, out), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+			Assert::AreEqual(W, out.planes[0].texture->params.w, L"the width untouched");
+			Assert::AreEqual(h, out.planes[0].texture->params.h, L"the height re-based");
+			Assert::AreEqual(static_cast<float>(W), out.crop.x1, 1e-4f);
+			Assert::AreEqual(static_cast<float>(h), out.crop.y1, 1e-4f);
+			pl_tex_params rp{};
+			rp.w = W; rp.h = h; rp.format = out.planes[0].texture->params.format; rp.host_readable = true; rp.blit_dst = true;
+			pl_tex readable = pl_tex_create(gpu, &rp);
+			pl_tex_blit_params bp{}; bp.src = out.planes[0].texture; bp.dst = readable;
+			pl_tex_blit(gpu, &bp);
+			std::vector<float> values(static_cast<size_t>(W) * h);
+			if (readable->params.format->type == PL_FMT_FLOAT)
+			{
+				std::vector<uint16_t> half(values.size());
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (size_t i = 0; i < values.size(); ++i) values[i] = HalfBits(half[i]);
+			}
+			else
+			{
+				std::vector<uint16_t> unorm(values.size());
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = unorm.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				for (size_t i = 0; i < values.size(); ++i) values[i] = unorm[i] / 65535.0f;
+			}
+			// Per row: the mean is the smooth vertical picture at the re-based row; the fine
+			// horizontal pattern keeps its amplitude (projection on the known sinusoid).
+			double worstMean = 0.0, worstAmplitude = 1.0;
+			for (int y = 8; y < h - 8; y += 4)
+			{
+				double mean = 0.0, proj = 0.0, norm = 0.0;
+				for (int x = 16; x < W - 16; ++x)
+				{
+					const double v = values[static_cast<size_t>(y) * W + x];
+					mean += v;
+					proj += (v - smooth((y + 0.5) / h)) * fine(x);
+					norm += fine(x) * fine(x);
+				}
+				mean /= (W - 32);
+				worstMean = (std::max)(worstMean, std::fabs(mean - smooth((y + 0.5) / h)));
+				worstAmplitude = (std::min)(worstAmplitude, proj / norm);
+			}
+			char line[160];
+			snprintf(line, sizeof(line), "one-axis re-base: vertical picture within %.4f; fine horizontal detail kept at %.1f%% amplitude\n",
+				worstMean, worstAmplitude * 100.0);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(worstMean < 0.01, L"the vertical picture restored at the re-based height");
+			Assert::IsTrue(worstAmplitude > 0.98, L"the fine horizontal detail untouched (no filtering across)");
+			pl_tex_destroy(gpu, &lumaTex);
+			pl_tex_destroy(gpu, &readable);
+			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+		}
+
 		TEST_METHOD(SourceRebaseRestoresAnUpscaledSourceAndKeepsTheCropEdge)
 		{
 			// Stage 12 step A (owner 2026-10-15): source_resolution re-bases a

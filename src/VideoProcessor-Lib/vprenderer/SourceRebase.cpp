@@ -48,14 +48,17 @@ namespace SourceRebase
 			}
 	}
 
-	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factor, pl_frame& out, int slot)
+	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factorX, double factorY, pl_frame& out, int slot)
 	{
 		error.clear();
-		if (!gpu || !dispatch || source.num_planes <= 0 || !(factor > 0.0 && factor < 1.0))
+		factorX = factorX > 0.0 && factorX < 1.0 ? factorX : 1.0;
+		factorY = factorY > 0.0 && factorY < 1.0 ? factorY : 1.0;
+		if (!gpu || !dispatch || source.num_planes <= 0 || (factorX >= 1.0 && factorY >= 1.0))
 		{
 			error = "nothing to re-base";
 			return false;
 		}
+		const bool oneAxis = factorX >= 1.0 || factorY >= 1.0;
 		slot = (std::max)(0, (std::min)(slot, kSlots - 1));
 		pl_frame result = source;
 		for (int plane = 0; plane < source.num_planes; ++plane)
@@ -67,7 +70,7 @@ namespace SourceRebase
 				++failures;
 				return false;
 			}
-			const int w = Scaled(in->params.w, factor), h = Scaled(in->params.h, factor);
+			const int w = Scaled(in->params.w, factorX), h = Scaled(in->params.h, factorY);
 			// A storable (or renderable) format of the plane's own kind: the
 			// shader writes the plane's components, its mapping is unchanged.
 			pl_tex_params params{};
@@ -103,13 +106,14 @@ namespace SourceRebase
 			src.new_h = h;
 			src.components = in->params.format->num_components;
 			pl_sample_filter_params filter{};
-			filter.filter = pl_filter_ewa_lanczossharp;
+			filter.filter = oneAxis ? pl_filter_lanczos : pl_filter_ewa_lanczossharp;
 			filter.antiring = antiring;
 			filter.lut = &luts[slot][plane];
 			pl_dispatch_params dp{};
 			dp.shader = &sh;
 			dp.target = textures[slot][plane];
-			if (!pl_shader_sample_polar(sh, &src, &filter) || !pl_dispatch_finish(dispatch, &dp))
+			const bool sampled = oneAxis ? pl_shader_sample_ortho2(sh, &src, &filter) : pl_shader_sample_polar(sh, &src, &filter);
+			if (!sampled || !pl_dispatch_finish(dispatch, &dp))
 			{
 				if (sh) pl_dispatch_abort(dispatch, &sh);
 				error = "downscale pass failed";
@@ -119,10 +123,10 @@ namespace SourceRebase
 			result.planes[plane].texture = textures[slot][plane];
 		}
 		// The crop in the luma plane's (now re-based) pixels.
-		result.crop.x0 = static_cast<float>(source.crop.x0 * factor);
-		result.crop.y0 = static_cast<float>(source.crop.y0 * factor);
-		result.crop.x1 = static_cast<float>(source.crop.x1 * factor);
-		result.crop.y1 = static_cast<float>(source.crop.y1 * factor);
+		result.crop.x0 = static_cast<float>(source.crop.x0 * factorX);
+		result.crop.y0 = static_cast<float>(source.crop.y0 * factorY);
+		result.crop.x1 = static_cast<float>(source.crop.x1 * factorX);
+		result.crop.y1 = static_cast<float>(source.crop.y1 * factorY);
 		out = result;
 		return true;
 	}

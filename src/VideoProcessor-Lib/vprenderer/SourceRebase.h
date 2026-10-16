@@ -50,7 +50,15 @@ namespace SourceRebase
 		// untouched) on any failure: the caller renders the native frame.
 		// `slot` keeps separate textures for frames that must coexist (the
 		// main frame and a de-judder extra).
-		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factor, pl_frame& out, int slot = 0);
+		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factor, pl_frame& out, int slot = 0)
+		{
+			return Apply(gpu, dispatch, source, factor, factor, out, slot);
+		}
+		// Per axis (owner 2026-10-15/16: a source upscaled in one direction only -
+		// "decompose an upscaler and then use it in the offending axis alone"): each
+		// axis by its own factor (1 = untouched). Both below 1: the polar filter as
+		// before; one axis only: a 1D (orthogonal) Lanczos along that axis alone.
+		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factorX, double factorY, pl_frame& out, int slot = 0);
 		void Release(pl_gpu gpu);
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
