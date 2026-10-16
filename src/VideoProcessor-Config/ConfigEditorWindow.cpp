@@ -7402,6 +7402,52 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "The filter of the plain, grain-true downscale the blend leans to on grainy areas. Separable "
             "Lanczos keeps the grain's character at about a quarter of the polar filter's GPU time."));
         MarkGpuCost(form, adaptiveFaithful, 2);
+        // Owner 2026-10-16: the filter as two mutually exclusive buttons - Auto (polar where both axes
+        // shrink alike, the 1D separable filter when only one does) or 1D (separable always). The
+        // drop-down stays as the value holder (hidden); a saved "polar" shows as Auto.
+        auto* faithfulButtons = new QWidget;
+        faithfulButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_faithful.buttons")));
+        auto* faithfulButtonsLayout = new QHBoxLayout(faithfulButtons);
+        faithfulButtonsLayout->setContentsMargins(0, 0, 0, 0);
+        auto* faithfulAuto = new QRadioButton(QStringLiteral("Auto (polar where able)"));
+        faithfulAuto->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_faithful.auto")));
+        faithfulAuto->setToolTip(QStringLiteral(
+            "Polar EWA Lanczos sharp where both axes shrink alike (the most accurate; about 2.4 ms more than 1D on the "
+            "laptop, the full blend effect); the 1D separable filter when only one axis shrinks, where a polar "
+            "filter would soften the other."));
+        auto* faithfulOneD = new QRadioButton(QStringLiteral("1D (separable, faster)"));
+        faithfulOneD->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_faithful.one_d")));
+        faithfulOneD->setToolTip(QStringLiteral(
+            "Two separable Lanczos passes always: about 2.4 ms cheaper than polar, keeps about 82% of the blend's effect."));
+        auto* faithfulGroup = new QButtonGroup(faithfulButtons);
+        faithfulGroup->setExclusive(true);
+        faithfulGroup->addButton(faithfulAuto);
+        faithfulGroup->addButton(faithfulOneD);
+        faithfulButtonsLayout->addWidget(faithfulAuto);
+        faithfulButtonsLayout->addWidget(faithfulOneD);
+        faithfulButtonsLayout->addStretch(1);
+        form->addRow(QStringLiteral("Grain-true downscale filter"), faithfulButtons);
+        form->setRowVisible(adaptiveFaithful, false);
+        {
+            auto syncButtons = [adaptiveFaithful, faithfulAuto, faithfulOneD]() {
+                const QSignalBlocker a(faithfulAuto), b(faithfulOneD);
+                const bool oneD = adaptiveFaithful->currentData().toString() == QStringLiteral("ortho");
+                faithfulOneD->setChecked(oneD);
+                faithfulAuto->setChecked(!oneD);
+            };
+            connect(adaptiveFaithful, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncButtons](int) { syncButtons(); });
+            auto choose = [adaptiveFaithful](const QString& value) {
+                const int index = adaptiveFaithful->findData(value);
+                if (index >= 0 && adaptiveFaithful->currentIndex() != index) adaptiveFaithful->setCurrentIndex(index);
+            };
+            connect(faithfulAuto, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("auto")); });
+            connect(faithfulOneD, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("ortho")); });
+            // Profile loads block the drop-down's signals: the load triggers this.
+            auto* faithfulRefresh = new QAction(faithfulButtons);
+            faithfulRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh")));
+            connect(faithfulRefresh, &QAction::triggered, this, [syncButtons]() { syncButtons(); });
+            syncButtons();
+        }
         // Stage 8-3: the per-block grain map from the de-judder's vectors.
         auto* adaptiveMap = addChoice(QStringLiteral("Grain map from motion"),
             QStringLiteral("adaptive_grain_map"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -7422,6 +7468,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // Greyed while they do nothing (audit 2026-10-14c).
             adaptiveRows.push_back(adaptiveChroma);
             adaptiveRows.push_back(adaptiveFaithful);
+            adaptiveRows.push_back(faithfulButtons);
             adaptiveRows.push_back(adaptiveMap);
             auto greyAdaptive = [adaptiveOn, adaptiveMap, adaptiveRows, adaptiveMapSmooth]()
             {
@@ -7717,7 +7764,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // The Scaling slider's three speed profiles (all choices; an unset field means its default).
             // Off is the two blends off alone (the other keys then do nothing).
             struct ScalingPosition { const char* name; const char* description; std::array<const char*, 4> values; };
-            static const std::array<const char*, 4> kDefaults = { "off", "off", "polar", "on" };
+            static const std::array<const char*, 4> kDefaults = { "off", "off", "auto", "on" };
             static const std::array<ScalingPosition, 3> kPositions = { {
                 { "Off (default)", "No VP scaling additions: the upscaler, downscaler and shaders chosen elsewhere run as they "
                     "are (plain SSIM / CNN where those shaders are on). No extra GPU time.", { "off", "off", "ortho", "off" } },
@@ -8525,7 +8572,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "native_rgb_ingest", "on" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
-                    { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "polar" }, { "adaptive_grain_map", "on" },
+                    { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "off" }, { "sdr_tone_shape", "off" } };
                 for (const auto& entry : choiceDefaults)
@@ -8874,6 +8921,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("scaling_preset_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();

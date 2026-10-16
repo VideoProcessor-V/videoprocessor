@@ -5435,6 +5435,71 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, worse, L"the engine's whole-frame motion is as close to the true pan and as usable as the search's");
 		}
 
+		// 2026-10-16 (the D1 taste report): at 4K the global moves in 8-px steps (the low-resolution
+		// matcher), coarser than the roll-off's 16-px ramp, so a 12 or 20 px pan read 8 / 16 / 24 by
+		// rounding luck. The roll-off now reads the refined camera (the trusted blocks near the
+		// global): its strength follows the true speed, from the search and from the engine alike.
+		TEST_METHOD(RolloffFollowsTheTruePanSpeedAt4K)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 3840, height = 2160, frames = 8;
+			auto expected = [](double v) {
+				const double t = (std::min)(1.0, (std::max)(0.0, (v - 8.0) / 16.0));
+				const double sm = t * t * (3.0 - 2.0 * t);
+				return 1.0 + (0.25 - 1.0) * sm;
+			};
+			int failures = 0;
+			bool engineSeen = true;
+			for (const int dx : { 12, 20 })
+			{
+				std::vector<DejudderGpuPlanes> planes(static_cast<size_t>(frames));
+				for (int f = 0; f < frames; ++f)
+				{
+					const int shift = dx * f;
+					const DejudderFrame frame = MakeDejudderFrame(width, height,
+						[shift](int x, int y) { return DejudderTexture(x - shift, y); },
+						[shift](int x, int y, int c) { return DejudderTexture((x - shift / 2) * 2, y, 7 + c); });
+					UploadDejudderFrame(gpu, frame, planes[static_cast<size_t>(f)]);
+				}
+				for (int mode = 0; mode < 2; ++mode)
+				{
+					Dejudder::Settings settings = DejudderTestSettings();
+					settings.globalPrior = true;
+					settings.estCandidates = true;
+					settings.globalTwo = true;
+					settings.lowRes = true;
+					settings.lowResAll = true;
+					settings.motionRolloff = true;
+					settings.opticalFlow = mode == 1;
+					settings.opticalFlowCandidate = true;
+					settings.opticalFlowSeed = true;
+					settings.opticalFlowGlobal = mode == 1;
+					settings.opticalFlowGlobalReadback = mode == 1;
+					Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+					for (int f = 0; f + 1 < frames; ++f)
+						Assert::IsTrue(warp.Estimate(planes[static_cast<size_t>(f)].planes, planes[static_cast<size_t>(f + 1)].planes),
+							std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+					if (mode == 1 && !warp.GlobalFromEngine()) { engineSeen = false; continue; }
+					pl_tex trust = warp.FrameTrust();
+					std::vector<uint8_t> raw(trust->params.format->texel_size);
+					pl_tex_transfer_params d{}; d.tex = trust; d.ptr = raw.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d), L"the frame trust is not host-readable");
+					float scale = 0.0f;
+					if (raw.size() == 16) std::memcpy(&scale, &raw[4], 4);
+					else { uint16_t h; std::memcpy(&h, &raw[2], 2); scale = HalfBits(h); }
+					char line[200];
+					snprintf(line, sizeof(line), "4K pan %d px, %s: roll-off scale %.3f (at the true speed %.3f)\n", dx,
+						mode == 1 ? "engine global" : "search D1", scale, expected(dx));
+					Logger::WriteMessage(line);
+					if (std::fabs(scale - expected(dx)) > 0.05) ++failures;
+				}
+			}
+			if (!engineSeen) Logger::WriteMessage("note: the optical-flow engine was not available; the search only\n");
+			Assert::AreEqual(0, failures, L"the roll-off follows the true pan speed at 4K (within 0.05)");
+		}
+
 		TEST_METHOD(SigmaDeltaDomainFollowsTheTarget)
 		{
 			auto repr = [](enum pl_color_levels levels, int sample, int color)

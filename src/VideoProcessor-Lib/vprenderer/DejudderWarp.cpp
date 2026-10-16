@@ -1764,7 +1764,7 @@ float picture_texels_(ivec2 ls, float scale)
 #ifdef REGIONAL
 shared uint hist_bins_[32];   // M3: A's 16 bins, then B's (integer counts)
 #endif
-#ifdef CAMERA_OUT
+#if defined(CAMERA_OUT) || defined(ROLLOFF_GLOBAL)
 shared vec3 partial_c_[256];
 #endif
 )GLSL";
@@ -1794,6 +1794,29 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
     }
     barrier();
 }
+#if defined(CAMERA_OUT) || defined(ROLLOFF_GLOBAL)
+// Delta 14 R-B / R-A (fixed 2026-10-16): the camera, refined from the global vector to the
+// mean of the trusted blocks within camera_window of it. The global moves in half-texel steps
+// (4 px at full size, 8 px with the low-resolution matcher), coarser than the roll-off's 16-px
+// ramp; the refined camera is the field's own speed (the D1 search and the engine agree on it).
+{
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    bool reliable = gv.w > 0.5 && gv.z < 0.9;
+    vec2 gpx = gv.xy * 8.0;
+    vec3 c = vec3(0.0);
+    for (int k = int(i); k < count; k += 256) {
+        vec4 f = texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0);
+        if (reliable && f.z > 0.5 && length(f.xy - gpx) < camera_window) c += vec3(f.xy, 1.0);
+    }
+    partial_c_[i] = c;
+}
+barrier();
+for (uint stride = 128u; stride > 0u; stride >>= 1) {
+    if (i < stride)
+        partial_c_[i] += partial_c_[i + stride];
+    barrier();
+}
+#endif
 #ifdef REGIONAL
 // M3: the change of the 1/32 luma histograms (16 bins of 16 codes), L1 of
 // the normalised histograms (0..2): a cut changes it, a hard pan does not.
@@ -1853,9 +1876,10 @@ if (i == 0u) {
         // Delta 14 R-A: the fall above a fast pan, on the frame's motion.
         float frame_v = mean_v;
 #ifdef ROLLOFF_GLOBAL
+        // The refined camera speed (above); the global itself when no trusted block is near it.
         vec4 gv = texelFetch(global_vec, ivec2(0), 0);
         if (gv.w > 0.5 && gv.z < 0.9)
-            frame_v = length(gv.xy) * 8.0;
+            frame_v = partial_c_[0].z > 0.0 ? length(partial_c_[0].xy / partial_c_[0].z) : length(gv.xy) * 8.0;
 #endif
         m *= mix(1.0, roll_floor, smoothstep(roll_lo, max(roll_hi, roll_lo + 1e-3), frame_v));
 #endif
@@ -1871,25 +1895,7 @@ if (i == 0u) {
     imageStore(dst, ivec2(0), vec4(cut ? share : max(share, min_share), scale, mean_v, 1.0));
 }
 #ifdef CAMERA_OUT
-// Delta 14 R-B: the camera, refined from D1's global vector (4-px steps) to
-// the mean of the trusted blocks near it.
-{
-    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
-    bool reliable = gv.w > 0.5 && gv.z < 0.9;
-    vec2 gpx = gv.xy * 8.0;
-    vec3 c = vec3(0.0);
-    for (int k = int(i); k < count; k += 256) {
-        vec4 f = texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0);
-        if (reliable && f.z > 0.5 && length(f.xy - gpx) < 6.0) c += vec3(f.xy, 1.0);
-    }
-    partial_c_[i] = c;
-}
-barrier();
-for (uint stride = 128u; stride > 0u; stride >>= 1) {
-    if (i < stride)
-        partial_c_[i] += partial_c_[i + stride];
-    barrier();
-}
+// Delta 14 R-B: the refined camera (computed above).
 if (i == 0u) {
     vec3 c = partial_c_[0];
     imageStore(camera_out, ivec2(0), c.z > 0.0 ? vec4(c.xy / c.z, 1.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0));
@@ -3748,6 +3754,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const float fadeFloor = std::min(1.0f, std::max(0.0f, settings.fadeFloor));
 			if (fadeOn)
 				trustVarList.push_back({ pl_var_float("fade_floor"), &fadeFloor, true });
+			// The refinement's window: the global moves in half-texel steps (4 px at full size,
+			// 8 px when the low-resolution matcher searched); wider than half a step, 6 px minimum.
+			const float cameraWindow = HalvesForSearch() ? 8.0f : 6.0f;
+			if (rolloffGlobal || cameraOut)
+				trustVarList.push_back({ pl_var_float("camera_window"), &cameraWindow, true });
 			if (settings.motionRolloff)
 			{
 				trustVarList.push_back({ pl_var_float("roll_lo"), &rollLo, true });

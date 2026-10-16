@@ -64,7 +64,7 @@ namespace AdaptiveDownscale
 		// adaptive_faithful auto (owner 2026-10-16): polar where both axes shrink alike, the
 		// separable (1D) filter when they differ by more than 10 % - a circular polar footprint
 		// would soften the axis that should stay sharp (one-axis or anamorphic scaling).
-		bool faithfulAuto = false;
+		bool faithfulAuto = true;   // the default since 2026-10-16 (owner: Auto or 1D)
 		// Stage 12 §2c / delta 15 S8-1 (owner 2026-10-15): the CNN's (upscale)
 		// and SSIM's (downscale) added detail held along the de-judder's
 		// trusted vectors (a one-pole over ~3 frames), so it does not shimmer;

@@ -1514,6 +1514,16 @@ void testScalingSliderPresets()
             faithful->currentData().toString() == r.faithful && map->currentData().toString() == r.map, (at + "values").constData());
         require(name->text().startsWith(r.label), (at + "label " + name->text().toUtf8()).constData());
     }
+    // Owner 2026-10-16: the filter as two exclusive buttons, Auto and 1D, bound to adaptive_faithful.
+    auto* autoButton = requireControl<QRadioButton>(window, "config.vprenderer.adaptive_faithful.auto");
+    auto* oneDButton = requireControl<QRadioButton>(window, "config.vprenderer.adaptive_faithful.one_d");
+    require(autoButton->isChecked() && !oneDButton->isChecked(), "Best's auto filter is not shown as the Auto button");
+    oneDButton->click();
+    QCoreApplication::processEvents();
+    require(faithful->currentData().toString() == "ortho" && !autoButton->isChecked(), "The 1D button did not select the separable filter");
+    autoButton->click();
+    QCoreApplication::processEvents();
+    require(faithful->currentData().toString() == "auto" && name->text().startsWith("Best"), "The Auto button did not restore auto (Best)");
     // Unticking: Off; ticking again returns to the last level (Best).
     enable->setChecked(false);
     QCoreApplication::processEvents();

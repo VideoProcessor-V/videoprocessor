@@ -3782,9 +3782,14 @@ namespace Corpus
 			s.trustScaleFull = 0.6f;
 			s.fadeFloor = 0.25f;
 		}
-		s.fadeFloor = 1.0f;
-		s.motionScaleHi = 0.0f;   // accuracy only: D2 and D4 off
-		s.trustScaleFull = 0.0f;
+		else
+		{
+			// Accuracy only: D2, D4 and the fade floor off (2026-10-16: these lines overwrote the
+			// taste above unconditionally, so the taste variants ran R-A alone).
+			s.fadeFloor = 1.0f;
+			s.motionScaleHi = 0.0f;
+			s.trustScaleFull = 0.0f;
+		}
 		s.hostReadable = true;
 		return s;
 	}
