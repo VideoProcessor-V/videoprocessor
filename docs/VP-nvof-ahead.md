@@ -96,3 +96,16 @@ The SDK also ships NVIDIA's frame-interpolation library (NvOFFRUC, CUDA). Our wa
 1. **Empty or partly filled queue.** "It also needs to adapt if the queue is unfilled or partially filled and not just crash." The depth is min(configured, frames actually queued) on every frame. Zero queued means no pairs ahead (NoFramesAhead): the matcher runs, with no waiting and no failure. Tests must cover an empty queue, a partly filled one, a queue filling at startup, a reset, and frames dropping out of the queue mid-plan.
 2. **The engine is the established default.** A separate setting, `optical_flow: on|off`, defaults to on. Setting it off disables the engine (the matcher only). It sits alongside `motion_ahead_frames` (the depth).
 3. **The engine's extra information feeds our path.** "take and vector differences etc that it allows that fed into our path." The cost buffer, forward/backward consistency, chained-versus-direct differences, the camera-motion fit, steadiness, and acceleration all go into the de-judder's trust layers and detail accumulation, not only the raw vectors.
+
+## Conflicts between the motion look-ahead and the queue (owner, 2026-10-16: "if motion look ahead and global queue disagree we'll need to sort out a conflict resolution")
+
+**Rule: the queue always wins, and the motion look-ahead adapts.** Latency is the operator's explicit choice; vectors are an optimisation. The motion side never changes the queue at run time. Only the shipped Normal default is raised to hold 4 ahead.
+
+| Conflict | Resolution |
+|---|---|
+| Depth above the frames the queue profile holds ahead | Use what is queued. Config shows an inline note beside the box ("the queue holds N ahead: N will be used"). Logged once. |
+| A Low Latency profile, directly or chosen by a frame-rate rule (e.g. 50/60 sports) | Off; the matcher only. |
+| Queue draining, refilling, resetting, or filling at startup | The depth follows it per frame. Never wait for vectors; never stall. |
+| The raised default target tripping `reset_queue_too_large_percent` | Must not happen. Check the threshold against the new target when the default is measured. |
+| Other readers of the queued frames (active-picture look-ahead, LED predictions, the cut look-ahead) | No conflict. They read queued frames only and never change the depth. |
+| `optical_flow: off`, or no engine | The matcher, as today. |
