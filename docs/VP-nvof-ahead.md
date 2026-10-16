@@ -61,3 +61,22 @@ The NVIDIA optical-flow engine (NVOFA) is separate hardware. On the 3090 and the
 4. **Consumer wiring:** the de-judder asks the store first. Statistics: hit rate and matcher runs saved.
 5. **Corpus gate** (removal, damage, cost) on the laptop, then the 3090.
 6. **Detail accumulation v2** uses the pairs two frames ahead.
+
+## Vector math (owner, 2026-10-16: "Can it do vector math too")
+
+The engine computes motion only. It is not a general compute unit. What it offers beyond the raw flow:
+- **Cost.** A per-vector cost buffer (confidence).
+- **Hints.** External hint vectors: ours, or the previous flow carried forward, to steady and speed the search.
+- **Region of interest.** An ROI (the active picture inside the bars).
+- **Grid size.** Output grids of 1, 2 or 4 px.
+- **Both directions.** Forward and backward flow, as two calls.
+
+The vector math is a small compute pass on the second device. It costs a fraction of a millisecond, because the fields are tiny (one texel per 4×4 or 16×16 block):
+- **Consistency.** Forward and backward flow should cancel, as the matcher's consistency layer already checks.
+- **Composition.** (f→f+1) chained with (f+1→f+2) is compared with the direct (f→f+2). Disagreement marks occlusions and unreliable areas.
+- **Reduction.** Median and spread to the 16×16 block field.
+- **Global and camera motion.** A robust fit (pan, zoom, rotation) over the field. This gives the camera-only part used by `object_strength`, and a cut/fade check.
+- **Temporal steadiness.** A block's vector against its own history along the motion, for the trust layers.
+- **Acceleration.** Changes in velocity between successive pairs (for pacing and judder analysis).
+
+The SDK also ships NVIDIA's frame-interpolation library (NvOFFRUC, CUDA). Our warp stays our own, because its taste semantics (displacement, the even cadence, the object/camera split) are the owner's. The library is only a possible comparison reference.
