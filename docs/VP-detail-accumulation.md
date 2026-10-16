@@ -106,3 +106,10 @@ It follows [[vp-vector-refinements-fallback]]:
 3. **Weights.** Should the per-frame weighting use a measure of the frame's coding quality (blockiness, detail energy against the history), or an I/B guess from the energy pulse?
 4. **Sub-pixel motion across many frames** can recover a little real resolution from aliased sources (multi-frame super-resolution). Streaming masters are normally filtered, so the expected gain is small. Worth a later step, or leave it?
 5. **Interaction with grain.** Film grain is new on every frame, so accumulating it averages it away. Proposal: the clamp plus a grain allowance (the de-judder's grain estimate) keep grain from being smoothed. Should grain stay fully per-frame?
+6. **Future frames, using optical flow** (owner, 2026-10-16: "if we need vectors from multiple future frames, should we be using optical flow for that part").
+   - **v1 (above)** is causal and needs only the consecutive-frame vectors the de-judder already has.
+   - **v2** would also pull detail back from the next one or two frames, e.g. an upcoming I-frame lifting the soft B-frames before it. That needs vectors from the current frame to each future frame.
+   - Our block matcher is costly per pair, and chaining consecutive vectors accumulates error.
+   - NVIDIA's optical-flow engine (NVOFA) is the natural source. It is separate hardware from the shader cores, so it costs almost no render budget on the 3090. It gives 4×4 vectors plus a per-vector cost usable as trust. The SDK is in C:\dev\Optical_Flow_SDK_5.0.7.
+   - It needs frames queued ahead (latency): film playback only, never low-latency 50/60p. Fall back to v1 when no frames are ahead or the hardware is absent.
+   - Proposal: v1 first, v2 behind a switch afterwards. Planner's view?
