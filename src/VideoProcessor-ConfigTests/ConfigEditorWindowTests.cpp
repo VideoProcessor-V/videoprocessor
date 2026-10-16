@@ -1274,37 +1274,160 @@ void testOmittedAndAutoFrameOffsetDisplayNinety()
 
 void testDejudderBoxPresetsAndMask()
 {
+    // Owner 2026-10-16 (docs/VP-motion-slider.md): the Motion slider. Each position writes exactly the
+    // table's values; an edit shows Custom; Reset to preset restores; unset = Not set; a saved value
+    // that is no position = Custom.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
     QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
     file.write("[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\ndejudder_strength: 0.3\n");
     file.close();
     ConfigEditorWindow window(path, 0, true);
     auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
-    auto* preset = requireControl<QComboBox>(window, "config.vprenderer.dejudder_preset");
+    auto* slider = requireControl<QSlider>(window, "config.vprenderer.motion_preset");
+    auto* name = requireControl<QLabel>(window, "config.vprenderer.motion_preset_name");
+    auto* reset = requireControl<QPushButton>(window, "config.vprenderer.motion_preset_reset");
     auto* strength = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_strength");
+    auto* even = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_strength_even");
+    auto* object = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_object_strength");
+    auto* floor = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_roll_floor");
+    auto* rollLo = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_roll_lo");
+    auto* rollHi = requireControl<QLineEdit>(window, "config.vprenderer.dejudder_roll_hi");
+    auto* evenRates = requireControl<QComboBox>(window, "config.vprenderer.dejudder_even_rates");
+    auto* rolloff = requireControl<QComboBox>(window, "config.vprenderer.dejudder_motion_rolloff");
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
-    require(preset->currentData().toString() == "custom", "A saved 0.3 is not shown as Custom");
+    require(name->text() == "Custom", (QByteArray("A saved 0.3 is not shown as Custom: ") + name->text().toUtf8()).constData());
     profiles->setCurrentRow(0);
     QCoreApplication::processEvents();
-    require(preset->currentIndex() == 0, (QByteArray("No strength is not shown as Not set: index ") +
-        QByteArray::number(preset->currentIndex()) + " text '" + strength->text().toUtf8() + "' row " +
-        profiles->currentItem()->text().toUtf8()).constData());
-    selectData(preset, "0.25");
-    require(strength->text() == "0.25", "Gentle did not write 0.25");
-    strength->setText("0.35");
-    require(preset->currentData().toString() == "0.35", "Typing 0.35 did not select Medium");
+    require(name->text().startsWith("Not set"), (QByteArray("No motion keys is not shown as Not set: ") + name->text().toUtf8()).constData());
+    struct Row { int position; const char* strength; const char* even; const char* rates; const char* object; const char* rolloff;
+        const char* floor; const char* lo; const char* hi; const char* label; };
+    const Row rows[] = {
+        { 1, "0.15", "0", "whole", "0.4", "on", "0.15", "6", "18", "Film" },
+        { 2, "0.25", "0", "whole", "0.5", "on", "0.25", "8", "24", "Cinema" },
+        { 3, "0.4", "0.5", "whole_and_1001", "0.7", "on", "0.5", "12", "36", "Natural" },
+        { 4, "0.65", "0.8", "whole_and_1001", "0.85", "on", "0.75", "16", "48", "Smooth" },
+        { 5, "1", "1", "whole_and_1001", "1", "off", "1", "16", "48", "Max" },
+        { 0, "0", "0", "whole", "1", "off", "0.25", "8", "24", "As shot" } };
+    for (const Row& r : rows)
+    {
+        slider->setValue(r.position);
+        QCoreApplication::processEvents();
+        const QByteArray at = QByteArray("position ") + r.label + ": ";
+        require(strength->text() == r.strength, (at + "strength " + strength->text().toUtf8()).constData());
+        require(even->text() == r.even, (at + "even strength " + even->text().toUtf8()).constData());
+        require(evenRates->currentData().toString() == r.rates, (at + "even rates").constData());
+        require(object->text() == r.object, (at + "object strength " + object->text().toUtf8()).constData());
+        require(rolloff->currentData().toString() == r.rolloff, (at + "roll-off").constData());
+        require(floor->text() == r.floor && rollLo->text() == r.lo && rollHi->text() == r.hi, (at + "roll-off band").constData());
+        require(name->text().startsWith(r.label), (at + "label " + name->text().toUtf8()).constData());
+    }
+    // Max, then an edit: Custom without moving the slider; reset restores.
+    slider->setValue(5);
+    strength->setText("0.9");
+    QCoreApplication::processEvents();
+    require(name->text() == "Custom" && slider->value() == 5, "Editing a moved key did not show Custom (slider kept)");
+    reset->click();
+    QCoreApplication::processEvents();
+    require(strength->text() == "1" && name->text().startsWith("Max"), "Reset to preset did not restore Max");
+    // Freehand boxes: out-of-range or over-precise values are clamped and rounded when the field is left;
+    // each field's own reset puts it back to the slider position's value.
+    slider->setValue(5);
+    object->setText("0.777");
+    QMetaObject::invokeMethod(object, "editingFinished");
+    QCoreApplication::processEvents();
+    require(object->text() == "0.78", (QByteArray("0.777 was not rounded to the field's 2 decimals: ") + object->text().toUtf8()).constData());
+    rollHi->setText("999");
+    QMetaObject::invokeMethod(rollHi, "editingFinished");
+    QCoreApplication::processEvents();
+    require(rollHi->text() == "400", (QByteArray("999 px was not clamped to 400: ") + rollHi->text().toUtf8()).constData());
+    QAction* objectReset = nullptr;
+    for (QAction* action : object->actions())
+        if (action->objectName().endsWith(".reset")) objectReset = action;
+    require(objectReset != nullptr, "The field has no reset");
+    objectReset->trigger();
+    QCoreApplication::processEvents();
+    require(object->text() == "1", (QByteArray("The field reset did not restore Max's 1: ") + object->text().toUtf8()).constData());
+    reset->click();
+    QCoreApplication::processEvents();
+    require(name->text().startsWith("Max"), "Reset to preset after the edits did not restore Max");
+    require(object->accessibleDescription().contains("0-1"), "No allowed range noted for the field");
+    // Default: one click back to Cinema and its values, from anywhere (here an edited Max).
+    strength->setText("0.9");
+    requireControl<QPushButton>(window, "config.vprenderer.motion_preset_default")->click();
+    QCoreApplication::processEvents();
+    require(slider->value() == 2 && strength->text() == "0.25" && object->text() == "0.5" && name->text().startsWith("Cinema"),
+        "Default did not restore Cinema");
+    // Natural saved, with the mask and the extended range.
+    slider->setValue(3);
     selectData(requireControl<QComboBox>(window, "config.vprenderer.occlusion_mask"), "on");
     selectData(requireControl<QComboBox>(window, "config.vprenderer.preserve_extended_range"), "on");
     QCoreApplication::processEvents();
     auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
-    require(apply->isEnabled(), "De-judder edits did not enable Apply");
+    require(apply->isEnabled(), "Motion edits did not enable Apply");
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    for (const char* expected : { "dejudder_strength: 0.35", "occlusion_mask: on", "preserve_extended_range: on",
-        "dejudder_strength: 0.3" })
-        require(saved.contains(expected), (QByteArray("De-judder setting not saved: ") + expected).constData());
+    for (const char* expected : { "dejudder_strength: 0.4", "dejudder_strength_even: 0.5", "dejudder_even_rates: whole_and_1001",
+        "dejudder_object_strength: 0.7", "dejudder_motion_rolloff: on", "dejudder_roll_floor: 0.5", "occlusion_mask: on",
+        "preserve_extended_range: on", "dejudder_strength: 0.3" })
+        require(saved.contains(expected), (QByteArray("Motion setting not saved: ") + expected).constData());
+    // Reopened: the slider reads the saved fields back as Natural.
+    ConfigEditorWindow reopened(path, 0, true);
+    auto* profiles2 = requireControl<QListWidget>(reopened, "config.vprenderer.profiles");
+    profiles2->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(requireControl<QSlider>(reopened, "config.vprenderer.motion_preset")->value() == 3 &&
+        requireControl<QLabel>(reopened, "config.vprenderer.motion_preset_name")->text().startsWith("Natural"),
+        "A reopened Config does not show the saved Natural");
+}
+
+void testMotionSliderPerRuleProfile()
+{
+    // Owner 2026-10-16: rules give each frame rate its own level - each rule-chosen profile keeps its own
+    // slider position (a 24p profile at Cinema, a 30p profile at Natural).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n[vprenderer.Doc30]\nwhen: $source_rate > 29\nquality: high\n"
+        "[vprenderer.Film24]\nwhen: $source_rate < 25\nquality: high\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* slider = requireControl<QSlider>(window, "config.vprenderer.motion_preset");
+    auto rowOf = [profiles](const char* text) {
+        for (int i = 0; i < profiles->count(); ++i)
+            if (profiles->item(i)->text().contains(text)) return i;
+        return -1;
+    };
+    if (rowOf("Doc30") < 0 || rowOf("Film24") < 0)
+    {
+        QByteArray listed;
+        for (int i = 0; i < profiles->count(); ++i) listed += "'" + profiles->item(i)->text().toUtf8() + "' ";
+        require(false, (QByteArray("rule profiles listed: ") + listed).constData());
+    }
+    profiles->setCurrentRow(rowOf("Doc30"));
+    QCoreApplication::processEvents();
+    slider->setValue(3);
+    profiles->setCurrentRow(rowOf("Film24"));
+    QCoreApplication::processEvents();
+    require(requireControl<QLabel>(window, "config.vprenderer.motion_preset_name")->text().startsWith("Not set"),
+        "The other profile is not independent");
+    slider->setValue(2);
+    QCoreApplication::processEvents();
+    profiles->setCurrentRow(rowOf("Doc30"));
+    QCoreApplication::processEvents();
+    require(slider->value() == 3, "Switching back lost the 30p profile's Natural");
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    const int doc = saved.indexOf("[vprenderer.Doc30]"), film = saved.indexOf("[vprenderer.Film24]");
+    require(doc >= 0 && film >= 0, "sections saved");
+    const QByteArray docBlock = doc < film ? saved.mid(doc, film - doc) : saved.mid(doc);
+    const QByteArray filmBlock = film < doc ? saved.mid(film, doc - film) : saved.mid(film);
+    require(docBlock.contains("dejudder_strength_even: 0.5") && docBlock.contains("dejudder_strength: 0.4") &&
+        docBlock.contains("when: $source_rate > 29"), "The 30p profile did not save Natural with its rule");
+    require(filmBlock.contains("dejudder_strength: 0.25") && !filmBlock.contains("dejudder_strength_even: 0.5") &&
+        filmBlock.contains("when: $source_rate < 25"), "The 24p profile did not save Cinema with its rule");
 }
 
 void testLedDrivePageAndLiveSwitches()
@@ -8114,6 +8237,7 @@ int main(int argc, char** argv)
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
+    failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);
     failures += run("every new renderer control reaches VP", testEveryNewRendererControlReachesVp);

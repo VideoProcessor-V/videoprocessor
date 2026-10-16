@@ -76,7 +76,9 @@
 #include <QPointer>
 #include <QProgressBar>
 #include <QPixmap>
+#include <QAction>
 #include <QPushButton>
+#include <QSlider>
 #include <QRegularExpression>
 #include <QRadioButton>
 #include <QRect>
@@ -104,6 +106,7 @@
 #include <QWinEventNotifier>
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <cctype>
 #include <cstring>
@@ -6349,56 +6352,59 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("Taste settings, set by eye: nothing here is measured or fitted. ") +
             QString::fromLatin1(kGpuCostLegend), false);
         QFormLayout* dejudderTasteForm = form;
-        auto* dejudderPreset = new QComboBox;
-        dejudderPreset->setObjectName(controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
-        dejudderPreset->setAccessibleName(QStringLiteral("De-judder preset"));
-        dejudderPreset->addItem(QStringLiteral("Not set (the default profile's, or off)"), QString());
-        dejudderPreset->addItem(QStringLiteral("Off"), QStringLiteral("0"));
-        dejudderPreset->addItem(QStringLiteral("Gentle"), QStringLiteral("0.25"));
-        dejudderPreset->addItem(QStringLiteral("Medium"), QStringLiteral("0.35"));
-        dejudderPreset->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
-        dejudderPreset->setToolTip(QStringLiteral(
-            "Smooths film motion when the display's refreshes do not divide evenly into film frames "
-            "(e.g. 24p on 60 Hz), by filling the repeated refreshes with slightly moved pictures. "
-            "Gentle (0.25) is the recommended start; Medium is 0.35; Custom takes the strength typed below. "
-            "Film-like sources only (up to about 30 fps, and 48p); off for 50p/60p video, in the low-latency "
-            "queue and for RGB or interlaced input. The Motion page's Motion handling chooses VP's de-judder or "
-            "libplacebo's smooth motion - one or the other, never both."));
-        form->addRow(QStringLiteral("De-judder"), dejudderPreset);
+        // Owner 2026-10-16 (docs/VP-motion-slider.md): one question - how much should motion be
+        // changed from what was shot? Five positions moving only the keys that answer it (the
+        // fields below, still editable: a changed value shows Custom; Reset to preset restores).
+        // Everything else is quality (always on) or advanced. Each profile has its own position,
+        // so rules can give each frame rate its own level.
+        auto* motionBox = new QWidget;
+        motionBox->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_box")));
+        auto* motionBoxLayout = new QVBoxLayout(motionBox);
+        motionBoxLayout->setContentsMargins(0, 0, 0, 0);
+        auto* motionRow = new QHBoxLayout;
+        auto* motionSlider = new QSlider(Qt::Horizontal);
+        motionSlider->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset")));
+        motionSlider->setAccessibleName(QStringLiteral("Motion"));
+        motionSlider->setRange(0, 5);
+        motionSlider->setPageStep(1);
+        motionSlider->setTickPosition(QSlider::TicksBelow);
+        motionSlider->setTickInterval(1);
+        motionSlider->setToolTip(QStringLiteral(
+            "How much motion is changed from what was shot, graded to the maximum: As shot, Film, Cinema (default), Natural, "
+            "Smooth, Max. "
+            "Each step moves only the de-judder strength, the smoothing of motion within the frame and how much "
+            "fast action keeps its strobing; the values appear in the fields below and can be edited (Custom). "
+            "Each profile has its own position, so profile rules can give each frame rate its own level "
+            "(e.g. a 24p profile at Cinema, a 30p profile at Natural). Film-like sources only; off for 50p/60p "
+            "video, in the low-latency queue and for interlaced input. The Motion page's Motion handling chooses "
+            "VP's de-judder or libplacebo's smooth motion - one or the other, never both."));
+        auto* motionReset = new QPushButton(QStringLiteral("Reset to preset"));
+        motionReset->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_reset")));
+        motionReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
+        motionRow->addWidget(new QLabel(QStringLiteral("As shot")));
+        motionRow->addWidget(motionSlider, 1);
+        motionRow->addWidget(new QLabel(QStringLiteral("Max")));
+        motionRow->addWidget(motionReset);
+        auto* motionDefault = new QPushButton(QStringLiteral("Default"));
+        motionDefault->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_default")));
+        motionDefault->setToolTip(QStringLiteral("Back to the default level, Cinema, with its values in the fields below."));
+        motionRow->addWidget(motionDefault);
+        motionBoxLayout->addLayout(motionRow);
+        auto* motionName = new QLabel;
+        motionName->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_name")));
+        QFont motionNameFont = motionName->font();
+        motionNameFont.setBold(true);
+        motionName->setFont(motionNameFont);
+        auto* motionDescription = new QLabel;
+        motionDescription->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_description")));
+        motionDescription->setWordWrap(true);
+        motionBoxLayout->addWidget(motionName);
+        motionBoxLayout->addWidget(motionDescription);
+        form->addRow(QStringLiteral("Motion"), motionBox);
         auto* dejudderStrength = addText(QStringLiteral("Strength (uneven cadences, e.g. 24p on 60 Hz)"),
             QStringLiteral("dejudder_strength"));
         dejudderStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderStrength));
-        dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; Gentle 0.25, Medium 0.35"));
-        // The preset writes the strength; the strength shows which preset it is.
-        connect(dejudderPreset, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [dejudderPreset, dejudderStrength](int index)
-        {
-            const QString value = dejudderPreset->itemData(index).toString();
-            if (value == QStringLiteral("custom"))
-            {
-                dejudderStrength->setFocus();
-                return;
-            }
-            if (dejudderStrength->text() != value)
-                dejudderStrength->setText(value);
-        });
-        connect(dejudderStrength, &QLineEdit::textChanged, this,
-            [dejudderPreset](const QString& text)
-        {
-            QString trimmed = text.trimmed();
-            if (trimmed.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
-                trimmed.clear();   // the default profile shows an unset field as Auto
-            int index = trimmed.isEmpty() ? 0 : dejudderPreset->findData(trimmed);
-            if (index < 0)
-            {
-                bool ok = false;
-                const double value = trimmed.toDouble(&ok);
-                index = trimmed.isEmpty() ? 0 :
-                    ok && value == 0.0 ? 1 : ok && value == 0.25 ? 2 : ok && value == 0.35 ? 3 : 4;
-            }
-            const QSignalBlocker blocker(dejudderPreset);
-            dejudderPreset->setCurrentIndex(index);
-        });
+        dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; the slider sets it"));
         // Delta 10: even cadences (a whole number of refreshes per film frame).
         auto* strengthEven = addText(QStringLiteral("Strength (even cadences, e.g. 30p on 60 Hz)"),
             QStringLiteral("dejudder_strength_even"));
@@ -6455,6 +6461,153 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "The camera's motion (pans, tracking) is always smoothed fully; this scales the smoothing of things moving "
             "within the frame. 1 = everything smoothed alike (off); 0.5 = people and objects smoothed half as much, which "
             "reads less like video; 0 = the camera only."));
+        {
+            // The five positions (docs/VP-motion-slider.md §3), the keys they move, the defaults
+            // an unset field means. Strings as the fields hold them.
+            struct MotionPosition { const char* name; const char* cost; const char* description; std::array<const char*, 8> values; };
+            static const std::array<const char*, 8> kKeys = { "dejudder_strength", "dejudder_strength_even", "dejudder_even_rates",
+                "dejudder_object_strength", "dejudder_motion_rolloff", "dejudder_roll_floor", "dejudder_roll_lo", "dejudder_roll_hi" };
+            static const std::array<const char*, 8> kDefaults = { "0", "0", "whole", "1", "off", "0.25", "8", "24" };
+            static const std::array<MotionPosition, 6> kPositions = { {
+                { "As shot", "", "No motion processing. Frames shown exactly as the source provides them, with the cadence the "
+                    "display imposes (3:2 at 24p).", { "0", "0", "whole", "1", "off", "0.25", "8", "24" } },
+                { "Film", " (GPU +)", "Eases the 3:2 hitch a little (the in-between pictures moved 15% of the way to even motion); "
+                    "people and fast action keep most of their film motion.", { "0.15", "0", "whole", "0.4", "on", "0.15", "6", "18" } },
+                { "Cinema (default)", " (GPU +)", "Eases the 3:2 hitch on pans (a quarter of the way to even motion; the earlier "
+                    "Gentle). People keep about half their 24p character; fast action keeps its strobing.",
+                    { "0.25", "0", "whole", "0.5", "on", "0.25", "8", "24" } },
+                { "Natural", " (GPU ++)", "Smoother: film 40% of the way to even motion, 30p material (documentaries) halfway "
+                    "to 60p, people smoothed most of the way. Fast action still partly strobes.",
+                    { "0.4", "0.5", "whole_and_1001", "0.7", "on", "0.5", "12", "36" } },
+                { "Smooth", " (GPU ++)", "Film two-thirds of the way to even motion, 30p 80% of the way to 60p, people nearly as "
+                    "smooth as the camera; fast action strobes only a little. Clearly smoother than film.",
+                    { "0.65", "0.8", "whole_and_1001", "0.85", "on", "0.75", "16", "48" } },
+                { "Max", " (GPU ++)", "Full strength: the in-between pictures at their true times, 30p fully doubled to 60p, "
+                    "everything smoothed alike, no strobing kept. The \"video\" look - for sport and live events, wrong for "
+                    "films - and where any motion error shows most.", { "1", "1", "whole_and_1001", "1", "off", "1", "16", "48" } } } };
+            const std::array<QLineEdit*, 8> texts = { dejudderStrength, strengthEven, nullptr, objectStrength, nullptr, rollFloor, rollLo, rollHi };
+            const std::array<QComboBox*, 8> choices = { nullptr, nullptr, evenRates, nullptr, rolloff, nullptr, nullptr, nullptr };
+            auto applying = std::make_shared<bool>(false);
+            auto raw = [texts, choices](int i) {
+                QString value = texts[i] ? texts[i]->text().trimmed() : choices[i]->currentData().toString().trimmed();
+                if (value.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0) value.clear();   // the default profile's unset field
+                return value;
+            };
+            auto matches = [raw](int p) {
+                for (int i = 0; i < 8; ++i)
+                {
+                    QString value = raw(i);
+                    if (value.isEmpty()) value = QString::fromLatin1(kDefaults[i]);
+                    const QString want = QString::fromLatin1(kPositions[p].values[i]);
+                    bool okA = false, okB = false;
+                    const double a = value.toDouble(&okA), b = want.toDouble(&okB);
+                    if (okA && okB ? std::fabs(a - b) > 1e-9 : value.compare(want, Qt::CaseInsensitive) != 0)
+                        return false;
+                }
+                return true;
+            };
+            auto refresh = [=]() {
+                if (*applying) return;
+                bool anySet = false;
+                for (int i = 0; i < 8; ++i) anySet = anySet || !raw(i).isEmpty();
+                if (!anySet)
+                {
+                    motionName->setText(QStringLiteral("Not set (the default profile's, or As shot)"));
+                    motionDescription->setText(QStringLiteral("Move the slider to choose this profile's level."));
+                    return;
+                }
+                for (int p = 0; p < 6; ++p)
+                    if (matches(p))
+                    {
+                        const QSignalBlocker blocker(motionSlider);
+                        motionSlider->setValue(p);
+                        motionName->setText(QString::fromLatin1(kPositions[p].name) + QString::fromLatin1(kPositions[p].cost));
+                        motionDescription->setText(QString::fromLatin1(kPositions[p].description));
+                        return;
+                    }
+                motionName->setText(QStringLiteral("Custom"));
+                motionDescription->setText(QStringLiteral("The fields below differ from %1. Reset to preset puts them back.")
+                    .arg(QString::fromLatin1(kPositions[motionSlider->value()].name)));
+            };
+            auto apply = [=](int p) {
+                *applying = true;
+                for (int i = 0; i < 8; ++i)
+                {
+                    const QString value = QString::fromLatin1(kPositions[p].values[i]);
+                    if (texts[i] && texts[i]->text() != value) texts[i]->setText(value);
+                    if (choices[i])
+                    {
+                        const int index = choices[i]->findData(value);
+                        if (index >= 0 && choices[i]->currentIndex() != index) choices[i]->setCurrentIndex(index);
+                    }
+                }
+                *applying = false;
+                refresh();
+            };
+            connect(motionSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
+            connect(motionReset, &QPushButton::clicked, this, [apply, motionSlider]() { apply(motionSlider->value()); });
+            // The default level (Cinema, position 2): one click back.
+            connect(motionDefault, &QPushButton::clicked, this, [apply, motionSlider]() {
+                const QSignalBlocker blocker(motionSlider);
+                motionSlider->setValue(2);
+                apply(2);
+            });
+            for (int i = 0; i < 8; ++i)
+            {
+                if (texts[i]) connect(texts[i], &QLineEdit::textChanged, this, [refresh](const QString&) { refresh(); });
+                if (choices[i]) connect(choices[i], qOverload<int>(&QComboBox::currentIndexChanged), this, [refresh](int) { refresh(); });
+            }
+            // Owner 2026-10-16: the freehand boxes - the allowed range beside each, only valid numbers
+            // kept (clamped to the range and rounded to the field's precision when the field is left;
+            // whole numbers for integer fields), and a reset in each field back to the slider
+            // position's value.
+            static const std::array<double, 8> kMin = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+            static const std::array<double, 8> kMax = { 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 200.0, 400.0 };
+            static const std::array<int, 8> kDecimals = { 3, 3, 0, 2, 0, 2, 1, 1 };
+            static const std::array<const char*, 8> kUnits = { "", "", "", "", "", "", " px", " px" };
+            for (int i = 0; i < 8; ++i)
+            {
+                QLineEdit* edit = texts[i];
+                if (!edit) continue;
+                const double lo = kMin[i], hi = kMax[i];
+                const int decimals = kDecimals[i];
+                auto* validator = new QDoubleValidator(lo, hi, decimals, edit);
+                validator->setNotation(QDoubleValidator::StandardNotation);
+                validator->setLocale(QLocale::c());
+                edit->setValidator(validator);
+                const QString range = QStringLiteral("%1-%2%3").arg(lo, 0, 'g', 6).arg(hi, 0, 'g', 6).arg(QString::fromLatin1(kUnits[i]));
+                edit->setObjectName(edit->objectName());   // unchanged; the range is shown in the row's label
+                if (auto* label = qobject_cast<QLabel*>(dejudderTasteForm->labelForField(edit)))
+                    label->setText(label->text() + QStringLiteral(" (") + range + QStringLiteral(")"));
+                edit->setAccessibleDescription(QStringLiteral("Allowed: %1.").arg(range));
+                connect(edit, &QLineEdit::editingFinished, this, [edit, lo, hi, decimals]() {
+                    QString text = edit->text().trimmed();
+                    if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
+                        return;   // unset: the default
+                    bool ok = false;
+                    double value = QLocale::c().toDouble(text, &ok);
+                    if (!ok) value = text.toDouble(&ok);
+                    if (!ok) { edit->clear(); return; }
+                    value = (std::min)(hi, (std::max)(lo, value));
+                    const double scale = std::pow(10.0, decimals);
+                    value = std::round(value * scale) / scale;
+                    const QString clean = QString::number(value, 'g', 12);
+                    if (clean != edit->text()) edit->setText(clean);
+                });
+                // The reset inside the field: this one value back to the slider position's.
+                QAction* fieldReset = edit->addAction(edit->style()->standardIcon(QStyle::SP_BrowserReload), QLineEdit::TrailingPosition);
+                fieldReset->setObjectName(edit->objectName() + QStringLiteral(".reset"));
+                fieldReset->setToolTip(QStringLiteral("Back to the slider position's value"));
+                connect(fieldReset, &QAction::triggered, this, [edit, i, motionSlider]() {
+                    edit->setText(QString::fromLatin1(kPositions[motionSlider->value()].values[i]));
+                });
+            }
+            // Profile loads block the fields' signals: the load triggers this to re-read them.
+            auto* motionRefresh = new QAction(motionSlider);
+            motionRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_refresh")));
+            connect(motionRefresh, &QAction::triggered, this, [refresh]() { refresh(); });
+            refresh();
+        }
         auto* fadeMatch = addChoice(QStringLiteral("Follow motion through fades"),
             QStringLiteral("dejudder_fade_match"), { QStringLiteral("on"), QStringLiteral("off") });
         fadeMatch->setToolTip(QStringLiteral(
@@ -6464,7 +6617,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         fadeFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, fadeFloor));
         fadeFloor->setPlaceholderText(QStringLiteral("0.25"));
         fadeFloor->setToolTip(QStringLiteral("The most de-judder a fading scene gets (0.25 = a quarter)."));
-        MarkGpuCost(form, dejudderPreset, 2);
+        MarkGpuCost(form, motionBox, 2);
 
         form = addCollapsibleSection(QStringLiteral("dejudderEstimation"),
             QStringLiteral("De-judder: motion estimation (measured - leave alone)"),
@@ -8338,26 +8491,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
             }
         state->loading = false;
-		// The de-judder preset follows the loaded strength (loading blocks the
-		// strength field's own change signal).
+		// The motion slider follows the loaded fields (loading blocks their own
+		// change signals).
 		if (sectionPrefix == QStringLiteral("vprenderer"))
 		{
-			auto* preset = profileFields->findChild<QComboBox*>(
-				controlName(sectionPrefix, QStringLiteral("dejudder_preset")));
-			auto* strength = profileFields->findChild<QLineEdit*>(
-				controlName(sectionPrefix, QStringLiteral("dejudder_strength")));
-			if (preset && strength)
-			{
-				QString text = strength->text().trimmed();
-				if (text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
-					text.clear();   // the default profile shows an unset field as Auto
-				bool ok = false;
-				const double value = text.toDouble(&ok);
-				const int index = text.isEmpty() ? 0 : !ok ? 4 :
-					value == 0.0 ? 1 : value == 0.25 ? 2 : value == 0.35 ? 3 : 4;
-				const QSignalBlocker blocker(preset);
-				preset->setCurrentIndex(index);
-			}
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("motion_preset_refresh"))))
+				refresh->trigger();
 		}
         updateToneControls();
         updateDvModeControls();
