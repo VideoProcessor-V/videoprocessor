@@ -3,7 +3,7 @@
 Owner, 2026-10-16:
 - "it actually might be a lot of savings ultimately if we get it to start working on the frame 4 or so ahead and save the vector sets for us to use for the 2 frame look ahead. this would free us up to do other things. obviously always have to default back to the original gpu path and keep that updated/happy. but this potentially resolves our look ahead problem for detail"
 
-Status: design approved by the owner (2026-10-16: "agree and like your GPU compute if missing fallback in keeping with the design philosophy"). The CPU vector store (`VectorStore.h`) is built and tested; no GPU code yet.
+Status (2026-10-16): built and on by default (`optical_flow: on`). The engine seeds the matcher's refinement; the producer computes pairs ahead on its own device; the matcher is the fallback. See "Built" at the end. Design approved by the owner (2026-10-16: "agree and like your GPU compute if missing fallback in keeping with the design philosophy").
 
 ## Idea
 
@@ -178,3 +178,34 @@ The 8-bit limit belongs to NVIDIA's packaged FRUC library, not to the engine's r
 5. **The fence scene's wrong trust is a one-period alias**, the same picture. It was already known for the matcher.
 
 **Next:** measure the timing (live matcher vs seed vs candidate), then choose the default (seed if it saves time). Then the producer ahead and the store.
+
+
+## Built (2026-10-16)
+
+**What runs:**
+- **Defaults.** `optical_flow: on` (Config: Optical-flow engine) and `motion_ahead_frames: 4` (0–4). Off in a low-latency queue profile.
+- **Seed mode by default.** The engine's block vectors seed the matcher's refinement in place of the block search (the 6.3 ms pass on the laptop at 4K). The refinement, the half-pixel step and the trust tests are unchanged. Engine vectors beyond the searches' reach are rejected (the cut case).
+- **The producer** (`MotionAhead::Producer`) runs on its own D3D11 device and worker:
+  1. the render loop submits the current and queued frames once each (hand-off 0.010 ms mean on the render loop);
+  2. the worker makes the half-size luma (halved again for the half-size inner matcher at 4K);
+  3. it runs the engine per consecutive pair, both ways, with costs;
+  4. the result goes into the VectorStore under the continuity generation.
+- **The de-judder** takes its pair from the store (no engine work at render time). A miss runs the engine at render time; no engine means the block searches.
+- **The queue.** The shipped Normal profile and Config's Reliable preset are target_frames 5 (4 ahead). A time-based target holds at least 5 frames (low latency exempt). A shallower queue gives a smaller depth.
+- **The log** reports the motion source ("optical-flow engine (computed ahead)" / "optical-flow engine" / "block searches (…)"), the depth decision, and the producer statistics.
+
+**Measured (laptop RTX 3050 Ti):**
+- **Corpus.** Seed 99.8–100% of the matcher's removal, the cut held.
+- **Live 4K matcher.** 7.5 → 5.5 ms with the engine at render time; with the producer the engine time leaves the render path too.
+- **Producer.** About 11 ms per pair on its worker. The renderer took 20 of the first 23 pairs from the store; the misses were before it started.
+
+**Fixed on the way:**
+- a fail-fast at teardown on NVIDIA (the engine's textures released before it; the driver DLL unloaded);
+- the replace path's precedence bug;
+- the inner matcher's reporting.
+
+**Not built yet:**
+- the engine's global flow in place of the D1 global search (about 0.4 ms);
+- the cost buffer and the intra-block spread as trust inputs;
+- the multi-pair vector math (chained against direct, acceleration);
+- the 3090 measurements.
