@@ -423,6 +423,9 @@ namespace SourceResolution
 		// nothing either axis holds is lost.
 		if (frame.vertical.coherence >= t.coherence && frame.horizontal.coherence >= t.coherence)
 			frame.ratio = (std::max)(frame.vertical.ratio, frame.horizontal.ratio);
+		// Per axis, at the stricter single-axis coherence.
+		frame.ratioV = frame.vertical.coherence >= t.singleAxisCoherence ? frame.vertical.ratio : 1.0;
+		frame.ratioH = frame.horizontal.coherence >= t.singleAxisCoherence ? frame.horizontal.ratio : 1.0;
 		return frame;
 	}
 
@@ -452,6 +455,16 @@ namespace SourceResolution
 			best = (std::max)(best, band(a0, a1) - band(b0, b1));
 		}
 		return best;
+	}
+
+	FrameReading AxisFrame(const FrameReading& frame, bool vertical)
+	{
+		FrameReading axis = frame;
+		axis.ratio = vertical ? frame.ratioV : frame.ratioH;
+		const std::vector<double>& power = vertical ? frame.verticalPower : frame.horizontalPower;
+		axis.verticalPower = power;
+		axis.horizontalPower = power;
+		return axis;
 	}
 
 	void Tracker::Reset()

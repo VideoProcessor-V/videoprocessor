@@ -4538,7 +4538,8 @@ struct LibplaceboVideoRenderer::Impl
 	// Stage 12 step A: the re-base of the source to its class height.
 	SourceRebase::Module sourceRebase;
 	pl_dispatch rebaseDispatch = nullptr;
-	double rebaseFactor = 1.0;          // this frame's (1 = native)
+	double rebaseFactor = 1.0;          // this frame's (1 = native); the height's when per axis
+	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
@@ -13245,11 +13246,11 @@ struct LibplaceboVideoRenderer::Impl
 				image.planes[0].texture = warped.luma;
 				image.planes[1].texture = warped.chroma;
 				// Stage 12: an extra shows the same re-based source as the main frame.
-				if (rebaseFactor < 1.0)
+				if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
 				{
 					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
 					pl_frame rebased{};
-					if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, image, rebaseFactor, rebased, 1))
+					if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, image, rebaseFactorX, rebaseFactor, rebased, 1))
 						image = rebased;
 				}
 				// Stage 12 §2b/§2d: and the same debander (per frame on an extra).
@@ -18095,13 +18096,16 @@ struct LibplaceboVideoRenderer::Impl
 				const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 				sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
 			}
-			double wanted = 1.0;
+			double wanted = 1.0, wantedX = 1.0;
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
 			{
 				std::string why;
-				wanted = sourceMonitor.AutoFactor(nativeHeight, activeSettings.sourceResolutionAutoMinConfidence, why, -1.0, sourceSequence);
+				// Per axis (owner 2026-10-16): the uniform factor when engaged, else the width
+				// and height factors of a source upscaled in one direction.
+				sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
+					why, wantedX, wanted, -1.0, sourceSequence);
 				if (!why.empty())
 				{
 					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
@@ -18110,16 +18114,20 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			}
 			else
+			{
 				wanted = SourceRebase::Factor(activeSettings.sourceResolution, nativeHeight);
+				wantedX = SourceRebase::FactorX(activeSettings.sourceResolution, luma ? luma->params.w : 0, nativeHeight);
+			}
 			const bool temporal = temporalRenderer.Active();
 			rebaseFactor = wanted < 1.0 && !temporal ? wanted : 1.0;
+			rebaseFactorX = wantedX < 1.0 && !temporal ? wantedX : 1.0;
 			std::string state;
-			if (wanted < 1.0 && temporal)
+			if ((wanted < 1.0 || wantedX < 1.0) && temporal)
 				state = "Re-base: not applied while smooth motion or deinterlacing runs (source_resolution " +
 					activeSettings.sourceResolution + ")";
-			else if (rebaseFactor < 1.0 && luma)
+			else if ((rebaseFactor < 1.0 || rebaseFactorX < 1.0) && luma)
 				state = "Re-base: " + std::to_string(luma->params.w) + "x" + std::to_string(nativeHeight) + " -> " +
-					std::to_string(SourceRebase::Scaled(luma->params.w, rebaseFactor)) + "x" +
+					std::to_string(SourceRebase::Scaled(luma->params.w, rebaseFactorX)) + "x" +
 					std::to_string(SourceRebase::Scaled(nativeHeight, rebaseFactor)) + " (source_resolution " +
 					activeSettings.sourceResolution + ")";
 			else if (!rebaseLogged.empty())
@@ -18156,6 +18164,7 @@ struct LibplaceboVideoRenderer::Impl
 					vpDebandParams.grainError = dejudder->GrainError();
 				}
 				vpDebandParams.fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
+				vpDebandParams.fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 				vpDebandParams.sequence = sourceSequence;
 				char text[200];
 				if (temporal)
@@ -19298,11 +19307,11 @@ struct LibplaceboVideoRenderer::Impl
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
                 // Stage 12 step A: the planes libplacebo samples, re-based.
                 pl_frame frame = source;
-                if (rebaseFactor < 1.0)
+                if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
                     pl_frame rebased{};
-                    if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactor, rebased, 0))
+                    if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebased, 0))
                         frame = rebased;
                     else if (sourceRebase.Failures() == 1)
                         DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());

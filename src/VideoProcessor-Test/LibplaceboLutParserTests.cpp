@@ -8375,6 +8375,16 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, SourceRebase::ClassHeight("1080p"), L"not a number: native");
 			Assert::AreEqual(720.0 / 1080.0, SourceRebase::Factor("720", 1080), 1e-12, L"a 1080p frame upscaled from 720p");
 			Assert::AreEqual(900.0 / 2160.0, SourceRebase::Factor("900", 2160), 1e-12);
+			// Per axis: WIDTHxHEIGHT (owner 2026-10-16).
+			Assert::AreEqual(1080, SourceRebase::ClassHeight("3840x1080"));
+			Assert::AreEqual(3840, SourceRebase::ClassWidth("3840x1080"));
+			Assert::AreEqual(0.5, SourceRebase::Factor("3840x1080", 2160));
+			Assert::AreEqual(1.0, SourceRebase::FactorX("3840x1080", 3840, 2160), L"the width untouched");
+			Assert::AreEqual(0.75, SourceRebase::FactorX("1440x1080", 1920, 1080), 1e-12, L"anamorphic 1440 across");
+			Assert::AreEqual(1.0, SourceRebase::Factor("1440x1080", 1080), L"its height native");
+			Assert::AreEqual(0.5, SourceRebase::FactorX("1080", 3840, 2160), L"a height alone: both axes alike");
+			Assert::AreEqual(0, SourceRebase::ClassHeight("x1080"), L"malformed: native");
+			Assert::AreEqual(0, SourceRebase::ClassHeight("3840x"), L"malformed: native");
 
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");

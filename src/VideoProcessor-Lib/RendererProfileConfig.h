@@ -675,8 +675,15 @@ namespace RendererProfileConfig
 			if (key == "capture_upload") return IsChoice(value, { "render", "early" });
 			if (key == "source_range") return IsChoice(value, { "auto", "full", "limited" });
 			// native | auto | any height in lines (general: not a fixed list).
-			if (key == "source_resolution") return IsChoice(value, { "native", "auto" }) ||
-				(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(value, 144, 8640));
+			if (key == "source_resolution")
+			{
+				if (IsChoice(value, { "native", "auto" })) return true;
+				auto lines = [](const std::string& v, double hi) {
+					return !v.empty() && v.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(v, 144, hi); };
+				// A height, or WIDTHxHEIGHT (per axis: a source upscaled in one direction).
+				const size_t x = value.find('x');
+				return x == std::string::npos ? lines(value, 8640) : lines(value.substr(0, x), 17280) && lines(value.substr(x + 1), 8640);
+			}
 			if (key == "source_resolution_auto_min_confidence") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "deband_vp") return IsChoice(value, { "off", "auto", "on" });
 			if (key == "low_bitrate_handling") return IsChoice(value, { "auto", "off", "on" });

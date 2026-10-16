@@ -32,6 +32,13 @@ namespace SourceRebase
 	// The factor for a native frame `nativeHeight` lines tall: class / native,
 	// or 1 when the class is not below the native height (or native).
 	double Factor(const std::string& setting, int nativeHeight);
+	// Per axis (owner 2026-10-16): the setting may give the source's width too,
+	// "WIDTHxHEIGHT" (e.g. 3840x1080: a 4K frame upscaled vertically only, or an
+	// anamorphic 1440x1080). The width factor: width / native width (1 when not
+	// below); a height-only setting re-bases both axes alike (the height's factor).
+	double FactorX(const std::string& setting, int nativeWidth, int nativeHeight);
+	// The width in a "WIDTHxHEIGHT" setting (0 = none).
+	int ClassWidth(const std::string& setting);
 
 	// A plane's re-based size: its own size times the factor, rounded, at
 	// least 1. Chroma follows from its own size, so 4:2:0 stays 4:2:0.

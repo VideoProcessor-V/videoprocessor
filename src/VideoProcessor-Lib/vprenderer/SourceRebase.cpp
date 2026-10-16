@@ -14,6 +14,10 @@ namespace SourceRebase
 	{
 		// General (owner's standing rule): any height, not a fixed list -
 		// 1440, 1080, 900, 720, 576 ... native and auto (until step B) are 0.
+		// "WIDTHxHEIGHT": the height after the x.
+		const size_t x = setting.find('x');
+		if (x != std::string::npos)
+			return ClassWidth(setting) > 0 ? ClassHeight(setting.substr(x + 1)) : 0;
 		if (setting.empty() || setting.find_first_not_of("0123456789") != std::string::npos) return 0;
 		const long value = std::strtol(setting.c_str(), nullptr, 10);
 		return value >= kMinimumHeight && value <= kMaximumHeight ? static_cast<int>(value) : 0;
@@ -24,6 +28,25 @@ namespace SourceRebase
 		const int target = ClassHeight(setting);
 		if (target <= 0 || nativeHeight <= 0 || target >= nativeHeight) return 1.0;
 		return static_cast<double>(target) / nativeHeight;
+	}
+
+	int ClassWidth(const std::string& setting)
+	{
+		const size_t x = setting.find('x');
+		if (x == std::string::npos || x == 0) return 0;
+		const std::string w = setting.substr(0, x), h = setting.substr(x + 1);
+		if (w.find_first_not_of("0123456789") != std::string::npos || h.empty() ||
+			h.find_first_not_of("0123456789") != std::string::npos) return 0;
+		const long value = std::strtol(w.c_str(), nullptr, 10);
+		return value >= kMinimumHeight && value <= 2 * kMaximumHeight ? static_cast<int>(value) : 0;
+	}
+
+	double FactorX(const std::string& setting, int nativeWidth, int nativeHeight)
+	{
+		const int width = ClassWidth(setting);
+		if (width <= 0) return Factor(setting, nativeHeight);
+		if (nativeWidth <= 0 || width >= nativeWidth) return 1.0;
+		return static_cast<double>(width) / nativeWidth;
 	}
 
 	int Scaled(int size, double factor)

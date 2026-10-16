@@ -60,6 +60,9 @@ namespace SourceResolution
 		double gridPeakMargin = 0.1;      // ... or it stands this far above both grid neighbours (coding cannot)
 		double harmonicShare = 0.85;      // a sub-multiple this strong is the fundamental
 		double axisAgreement = 0.05;      // an axis takes the other's rate when its curve holds it within this of its own peak
+		// Per-axis readings (owner 2026-10-16: a source upscaled in one direction only):
+		// stricter than the both-axes rule - one axis must be clearly resampled.
+		double singleAxisCoherence = 0.5;
 		double informativeDecades = 1.5;  // lower band above the quantisation floor
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
@@ -82,6 +85,9 @@ namespace SourceResolution
 	{
 		int tiles = 0, informativeTiles = 0;
 		double ratio = 1.0;         // effective / native height; 1 = native
+		// Per axis: the height (vertical, down the columns) and the width (horizontal)
+		// read alone, at the stricter single-axis coherence; 1 = native on that axis.
+		double ratioV = 1.0, ratioH = 1.0;
 		double mean = 0.0;          // mean level over the tiles
 		double signature = 0.0;     // the tile means, weighted by position: an unchanged frame repeats it
 		MirrorPeak vertical, horizontal;
@@ -113,6 +119,10 @@ namespace SourceResolution
 	// frames of the same stream that read r, not with a fixed level. Unknown
 	// (no spectra, or r too close to 1 to measure above it) returns +infinity.
 	double DetailAbove(const FrameReading& frame, double ratio);
+
+	// One axis's reading as a frame of its own (the per-axis trackers): the ratio is
+	// that axis's, and the detail-above test reads that axis's spectrum only.
+	FrameReading AxisFrame(const FrameReading& frame, bool vertical);
 
 	// The declared reading over time.
 	class Tracker

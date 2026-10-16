@@ -41,6 +41,10 @@ namespace SourceResolutionMonitor
 		double liveRatio = 1.0;        // the spec's live reading: median of the last ~2 s, snapped on a cut
 		double declaredRatio = 1.0;    // the tracker's conservative value
 		double confidence = 0.0;       // of the declared value (0..1)
+		// Per axis (owner 2026-10-16: a source upscaled in one direction only), when the
+		// both-axes reading is native: the width / height ratios declared by the per-axis
+		// trackers (stricter evidence), and their confidence. 1 = native on that axis.
+		double axisRatioX = 1.0, axisRatioY = 1.0, axisConfidence = 0.0;
 		double bitrateQuality = 1.0;   // spec 1b (smoothed)
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
 		double coherenceV = 0.0, coherenceH = 0.0;
@@ -72,6 +76,11 @@ namespace SourceResolutionMonitor
 		// only the confidence fell, at the next cut, at most kDisengageWaitSeconds later.
 		// `seconds`: a monotonic clock (tests); < 0 = the steady clock.
 		double AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds = -1.0, uint64_t renderSequence = 0);
+		// Per axis: the uniform factor when it is engaged (both = AutoFactor), else the
+		// per-axis factors (width, height) under the same rules - engage at a cut or a
+		// black frame, native at once on detail or a discontinuity.
+		void AutoFactors(int nativeWidth, int nativeHeight, double minimumConfidence, std::string& why,
+			double& factorX, double& factorY, double seconds = -1.0, uint64_t renderSequence = 0);
 		static constexpr double kDisengageWaitSeconds = 5.0;
 		double AutoRatio() const { return autoAppliedShared.load(std::memory_order_acquire); }
 		// The source_resolution setting in force (render thread sets it; any
@@ -179,6 +188,21 @@ namespace SourceResolutionMonitor
 		double aheadLastMean = -1.0;
 		bool aheadAwaitTarget = false;   // the event frame was black: analyse the next frame with picture
 		unsigned long long autoNotBeforeCuts = 0;   // after a cancel: the cut at the event is not used
+
+		// Per-axis trackers and their coherence history (worker side).
+		SourceResolution::Tracker trackerV{ AxisSettings() }, trackerH{ AxisSettings() };
+		std::deque<std::pair<double, double>> coherenceV, coherenceH;
+		static SourceResolution::Tracker::Settings AxisSettings()
+		{
+			// Stricter than the both-axes standard: twice the shots and the time.
+			SourceResolution::Tracker::Settings s;
+			s.minimumShots *= 2;
+			s.minimumSeconds *= 2.0;
+			return s;
+		}
+		// Per-axis auto (render thread).
+		double axisApplied[2] = { 1.0, 1.0 }, axisPending[2] = { 1.0, 1.0 };
+		unsigned long long axisPendingCuts = 0, axisPendingFrames = 0, axisDiscontinuities = 0;
 
 		// Auto (render thread).
 		std::atomic<bool> autoReset{ false };

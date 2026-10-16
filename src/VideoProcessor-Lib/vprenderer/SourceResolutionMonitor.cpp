@@ -482,6 +482,12 @@ if (tile < int(tiles) && g.y < 256) {
 				if (cause)
 				{
 					tracker.Discontinuity(cause);
+					trackerV.Discontinuity(cause);
+					trackerH.Discontinuity(cause);
+					coherenceV.clear();
+					coherenceH.clear();
+					snapshot.axisRatioX = snapshot.axisRatioY = 1.0;
+					snapshot.axisConfidence = 0.0;
 					live.clear();
 					coherence.clear();
 					lastCuts = tracker.Cuts();
@@ -524,14 +530,20 @@ if (tile < int(tiles) && g.y < 256) {
 
 		std::lock_guard<std::mutex> lock(mutex);
 		tracker.Update(frame, j.seconds);
+		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds);
+		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds);
 		// The live reading (spec 1a): ~2 s of informative frames, snapped on a cut.
 		if (tracker.Cuts() != lastCuts) { live.clear(); lastCuts = tracker.Cuts(); }
 		while (!live.empty() && j.seconds - live.front().first > 2.0) live.pop_front();
 		while (!coherence.empty() && j.seconds - coherence.front().first > 120.0) coherence.pop_front();
+		while (!coherenceV.empty() && j.seconds - coherenceV.front().first > 120.0) coherenceV.pop_front();
+		while (!coherenceH.empty() && j.seconds - coherenceH.front().first > 120.0) coherenceH.pop_front();
 		if (frame.informative())
 		{
 			live.push_back({ j.seconds, frame.ratio });
 			coherence.push_back({ j.seconds, (std::min)(frame.vertical.coherence, frame.horizontal.coherence) });
+			coherenceV.push_back({ j.seconds, frame.vertical.coherence });
+			coherenceH.push_back({ j.seconds, frame.horizontal.coherence });
 		}
 		std::vector<double> ratios;
 		for (const auto& l : live) ratios.push_back(l.second);
@@ -559,6 +571,30 @@ if (tile < int(tiles) && g.y < 256) {
 		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
 		snapshot.declaredRatio = tracker.Ratio();
 		snapshot.confidence = tracker.Ratio() < 1.0 ? evidence * clarity : 0.0;
+		// Per axis, only while the both-axes reading is native: each declared axis's
+		// evidence (the stricter standard) times how clearly that axis was resampled.
+		{
+			const SourceResolution::Tracker::Settings as = AxisSettings();
+			auto axisConfidence = [&](const SourceResolution::Tracker& t, const std::deque<std::pair<double, double>>& c) {
+				double mean = 0.0;
+				for (const auto& e : c) mean += e.second;
+				mean = c.empty() ? 0.0 : mean / c.size();
+				const double ev = (std::min)(1.0, t.Shots() / static_cast<double>(as.minimumShots)) *
+					(std::min)(1.0, t.EvidenceSeconds() / as.minimumSeconds);
+				return ev * (std::min)(1.0, (std::max)(0.0, (mean - thresholds.singleAxisCoherence) / 0.3));
+			};
+			snapshot.axisRatioX = snapshot.axisRatioY = 1.0;
+			snapshot.axisConfidence = 0.0;
+			if (tracker.Ratio() >= 1.0 && (trackerV.Ratio() < 1.0 || trackerH.Ratio() < 1.0))
+			{
+				snapshot.axisRatioY = trackerV.Ratio();
+				snapshot.axisRatioX = trackerH.Ratio();
+				double c = 1.0;
+				if (trackerV.Ratio() < 1.0) c = (std::min)(c, axisConfidence(trackerV, coherenceV));
+				if (trackerH.Ratio() < 1.0) c = (std::min)(c, axisConfidence(trackerH, coherenceH));
+				snapshot.axisConfidence = c;
+			}
+		}
 		snapshot.bitrateQuality = qualitySmoothed;
 		snapshot.effectiveBits = bitsSmoothed;
 		snapshot.coherenceV = frame.vertical.coherence;
@@ -707,6 +743,83 @@ if (tile < int(tiles) && g.y < 256) {
 			Record(row + why);
 		}
 		return autoApplied;
+	}
+
+	void Monitor::AutoFactors(int nativeWidth, int nativeHeight, double minimumConfidence, std::string& why,
+		double& factorX, double& factorY, double seconds, uint64_t renderSequence)
+	{
+		const double uniform = AutoFactor(nativeHeight, minimumConfidence, why, seconds, renderSequence);
+		const Snapshot s = Read();
+		// A discontinuity: the per-axis state back to native too.
+		if (s.discontinuities != axisDiscontinuities)
+		{
+			axisDiscontinuities = s.discontinuities;
+			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
+		}
+		if (uniform < 1.0)
+		{
+			factorX = factorY = uniform;
+			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
+			return;
+		}
+		// The wanted per-axis factors: even sizes from the frame's own (general).
+		double wanted[2] = { 1.0, 1.0 };
+		if (s.reading && s.axisConfidence >= minimumConfidence)
+		{
+			const int sizes[2] = { nativeWidth, nativeHeight };
+			const double ratios[2] = { s.axisRatioX, s.axisRatioY };
+			for (int a = 0; a < 2; ++a)
+				if (ratios[a] < 1.0 && sizes[a] > 0)
+				{
+					const int px = 2 * static_cast<int>(std::lround(ratios[a] * sizes[a] * 0.5));
+					wanted[a] = px < sizes[a] ? static_cast<double>(px) / sizes[a] : 1.0;
+				}
+		}
+		const double tolerance = 0.01;
+		std::string axisWhy;
+		const bool up = wanted[0] > axisApplied[0] + tolerance || wanted[1] > axisApplied[1] + tolerance;
+		if (up)
+		{
+			// Detail returned on an axis, or the confidence fell: native at once (the
+			// conservative direction; the per-axis path is the stricter one).
+			axisApplied[0] = (std::max)(axisApplied[0], wanted[0]);
+			axisApplied[1] = (std::max)(axisApplied[1], wanted[1]);
+			if (wanted[0] >= 1.0) axisApplied[0] = 1.0;
+			if (wanted[1] >= 1.0) axisApplied[1] = 1.0;
+			axisPending[0] = axisApplied[0];
+			axisPending[1] = axisApplied[1];
+			axisWhy = "per axis: back towards native at once";
+		}
+		else if (wanted[0] < axisApplied[0] - tolerance || wanted[1] < axisApplied[1] - tolerance)
+		{
+			// Down: at the next cut or black frame, as the uniform path.
+			if (std::fabs(wanted[0] - axisPending[0]) > tolerance || std::fabs(wanted[1] - axisPending[1]) > tolerance)
+			{
+				axisPending[0] = wanted[0];
+				axisPending[1] = wanted[1];
+				axisPendingCuts = s.cuts;
+				axisPendingFrames = s.frames;
+				axisWhy = "per axis: waiting for the next cut or black";
+			}
+			else if (s.cuts != axisPendingCuts || (s.frameBlank && s.frames != axisPendingFrames))
+			{
+				axisApplied[0] = wanted[0];
+				axisApplied[1] = wanted[1];
+				axisWhy = s.cuts != axisPendingCuts ? "per axis: engaged at a cut" : "per axis: engaged during a black or flat frame";
+			}
+		}
+		if (!axisWhy.empty())
+		{
+			char row[200];
+			snprintf(row, sizeof(row), "auto,,,,,%.4f,%.2f,,,%llu,,%.4f x %.4f,", s.axisRatioY, s.axisConfidence, s.cuts, axisApplied[0], axisApplied[1]);
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				Record(row + axisWhy);
+			}
+			why = why.empty() ? axisWhy : why + "; " + axisWhy;
+		}
+		factorX = axisApplied[0];
+		factorY = axisApplied[1];
 	}
 
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)

@@ -442,6 +442,53 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0, r.ratio, L"native detail present: native");
 		}
 
+		TEST_METHOD(OneAxisUpscaleReadsThatAxisOnly)
+		{
+			// Owner 2026-10-16 (common in streaming: anamorphic and deinterlaced sources):
+			// a picture resampled down the columns only reads its height on that axis and
+			// native across; the both-axes reading stays native (bias to native).
+			std::vector<std::vector<float>> tiles;
+			for (unsigned seed = 1; seed <= 4; ++seed)
+			{
+				const Scene scene(seed);
+				const int margin = 6, mh = kTile / 2 + 2 * margin;
+				// Rows from a half-height master, columns at the native rate.
+				const std::vector<double> master = scene.Sample(1000, 350 - margin, kTile, mh);
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+				{
+					const double u = (y + 0.5) * 0.5 - 0.5 + margin;
+					const int c = static_cast<int>(std::floor(u));
+					for (int x = 0; x < kTile; ++x)
+					{
+						double sum = 0, wsum = 0;
+						for (int k = c - 3; k <= c + 4; ++k)
+						{
+							if (k < 0 || k >= mh) continue;
+							const double w = kLanczos3(u - k);
+							sum += w * master[static_cast<size_t>(k) * kTile + x];
+							wsum += w;
+						}
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, sum / wsum)) * 1023.0) / 1023.0);
+					}
+				}
+				tiles.push_back(std::move(t));
+			}
+			const SourceResolution::FrameReading r = ReadTiles(tiles);
+			Log("vertical-only upscale", r);
+			char line[120];
+			snprintf(line, sizeof(line), "per axis: height %.4f, width %.4f\n", r.ratioV, r.ratioH);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(1.0, r.ratio, L"both axes: native (detail across)");
+			Assert::AreEqual(0.5, r.ratioV, 0.01, L"the height reads its rate");
+			Assert::AreEqual(1.0, r.ratioH, L"the width reads native");
+			const SourceResolution::FrameReading v = SourceResolution::AxisFrame(r, true);
+			Assert::AreEqual(0.5, v.ratio, 0.01, L"the vertical axis frame");
+			// A native picture reads native on both axes.
+			const SourceResolution::FrameReading n = ReadScene([&](unsigned seed) { return Tile(Scene(seed), 1.0, kLanczos3, 0.0, 1023, seed); });
+			Assert::IsTrue(n.ratioV == 1.0 && n.ratioH == 1.0, L"native: native on each axis");
+		}
+
 		TEST_METHOD(UpscaledWithCodingAndGrain)
 		{
 			const double ratio = 0.5;

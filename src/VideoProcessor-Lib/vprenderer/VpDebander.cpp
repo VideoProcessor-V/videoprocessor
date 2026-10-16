@@ -219,7 +219,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			const bool useGrain = haveField && params.grainError != nullptr;
 			// The plane's pixels in field (native luma) pixels.
 			const float toField[2] = {
-				static_cast<float>(params.fieldScale * luma->params.w / (std::max)(1, w)),
+				static_cast<float>((params.fieldScaleX > 0.0 ? params.fieldScaleX : params.fieldScale) * luma->params.w / (std::max)(1, w)),
 				static_cast<float>(params.fieldScale * luma->params.h / (std::max)(1, h)) };
 			const float radius = static_cast<float>((std::max)(2.0, (std::min)(64.0, 16.0 * params.radiusScale * h / (std::max)(1, luma->params.h))));
 			const float alpha = static_cast<float>(params.holdAlpha);

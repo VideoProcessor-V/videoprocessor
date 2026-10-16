@@ -40,6 +40,7 @@ namespace VpDebander
 		pl_tex field = nullptr;
 		pl_tex grainError = nullptr;
 		double fieldScale = 1.0;    // source px of the field per px of the plane's full-size luma (re-base factor inverse)
+		double fieldScaleX = 0.0;   // the same across, when the re-base is per axis (0 = fieldScale)
 		uint64_t sequence = 0;      // this source frame (holds only across consecutive frames)
 		double holdAlpha = 0.5;     // weight of this frame's decision where held
 		double grainCodes = 2.0;    // grain error (8-bit codes) above which a block is texture

@@ -1,4 +1,7 @@
 #include "pch.h"
+#include <wincodec.h>
+#include <atlbase.h>
+#pragma comment(lib, "windowscodecs.lib")
 #include "CppUnitTest.h"
 
 #include <DisplayMode.h>
@@ -951,6 +954,115 @@ namespace Tests
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
+		}
+
+		TEST_METHOD(OneAxisRebaseKeepsTheAspectRatio)
+		{
+			// Owner 2026-10-16 ("and that the aspect ratio doesn't change"): a re-base of the
+			// height alone (3840x1080: a source upscaled vertically) and a uniform one leave
+			// the picture's geometry where it is - the strong edges across and down land
+			// at the same output positions as without a re-base.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-aspect";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			// The capture's PNG (16-bit, R10 code << 6): the green channel as codes.
+			auto load = [](const std::string& json, int& w, int& h) {
+				std::vector<int> codes;
+				std::string png = json.substr(0, json.size() - 5) + ".png";
+				CComPtr<IWICImagingFactory> factory;
+				if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return codes;
+				CComPtr<IWICBitmapDecoder> decoder;
+				const std::wstring wpng(png.begin(), png.end());
+				if (FAILED(factory->CreateDecoderFromFilename(wpng.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) return codes;
+				CComPtr<IWICBitmapFrameDecode> frame;
+				decoder->GetFrame(0, &frame);
+				CComPtr<IWICFormatConverter> converter;
+				factory->CreateFormatConverter(&converter);
+				converter->Initialize(frame, GUID_WICPixelFormat64bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+				UINT uw = 0, uh = 0;
+				converter->GetSize(&uw, &uh);
+				w = static_cast<int>(uw); h = static_cast<int>(uh);
+				std::vector<uint16_t> rgba(static_cast<size_t>(w) * h * 4);
+				converter->CopyPixels(nullptr, static_cast<UINT>(w * 8), static_cast<UINT>(rgba.size() * 2), reinterpret_cast<BYTE*>(rgba.data()));
+				codes.resize(static_cast<size_t>(w) * h);
+				for (size_t i = 0; i < codes.size(); ++i) codes[i] = rgba[i * 4 + 1] >> 6;
+				return codes;
+			};
+			auto capture = [&](const char* extra, int& w, int& h) {
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &plan);
+				Assert::IsFalse(r.captureMetadata.empty(), (L"capture written\n" + r.Tail()).c_str());
+				for (const std::string& line : r.log)
+					if (line.find("Re-base:") != std::string::npos) Logger::WriteMessage(("  " + line + "\n").c_str());
+				return load(r.captureMetadata, w, h);
+			};
+			// The strongest edges of a profile (positions of the largest steps), sorted.
+			auto edges = [](const std::vector<double>& profile, int count) {
+				std::vector<std::pair<double, int>> steps;
+				for (size_t i = 1; i < profile.size(); ++i) steps.push_back({ std::fabs(profile[i] - profile[i - 1]), static_cast<int>(i) });
+				std::sort(steps.rbegin(), steps.rend());
+				std::vector<int> out;
+				for (const auto& st : steps)
+				{
+					bool close = false;
+					for (int e : out) close = close || std::abs(e - st.second) < 8;
+					if (!close) out.push_back(st.second);
+					if (static_cast<int>(out.size()) == count) break;
+				}
+				std::sort(out.begin(), out.end());
+				return out;
+			};
+			auto profiles = [](const std::vector<int>& c, int w, int h, std::vector<double>& across, std::vector<double>& down) {
+				across.assign(w, 0.0); down.assign(h, 0.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x) { across[x] += c[static_cast<size_t>(y) * w + x]; down[y] += c[static_cast<size_t>(y) * w + x]; }
+				for (double& v : across) v /= h;
+				for (double& v : down) v /= w;
+			};
+			CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			int w0 = 0, h0 = 0, w1 = 0, h1 = 0, w2 = 0, h2 = 0;
+			const std::vector<int> native = capture("source_resolution: native\n", w0, h0);
+			const std::vector<int> oneAxis = capture("source_resolution: 3840x1080\n", w1, h1);
+			const std::vector<int> uniform = capture("source_resolution: 1080\n", w2, h2);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			Assert::IsTrue(!native.empty() && !oneAxis.empty() && !uniform.empty(), L"captures read");
+			Assert::IsTrue(w0 == w1 && h0 == h1 && w0 == w2 && h0 == h2, L"the same output size");
+			std::vector<double> a0, d0, a1, d1, a2, d2;
+			profiles(native, w0, h0, a0, d0);
+			profiles(oneAxis, w1, h1, a1, d1);
+			profiles(uniform, w2, h2, a2, d2);
+			const std::vector<int> ea0 = edges(a0, 6), ed0 = edges(d0, 6);
+			auto worst = [](const std::vector<int>& ref, const std::vector<int>& got) {
+				int w = 0;
+				for (int e : ref)
+				{
+					int best = 1 << 20;
+					for (int g : got) best = (std::min)(best, std::abs(g - e));
+					w = (std::max)(w, best);
+				}
+				return w;
+			};
+			const int oneAcross = worst(ea0, edges(a1, 12)), oneDown = worst(ed0, edges(d1, 12));
+			const int uniAcross = worst(ea0, edges(a2, 12)), uniDown = worst(ed0, edges(d2, 12));
+			char line[200];
+			snprintf(line, sizeof(line), "edges moved (px): one-axis across %d, down %d; uniform across %d, down %d (output %dx%d)\n",
+				oneAcross, oneDown, uniAcross, uniDown, w0, h0);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(oneAcross <= 2 && oneDown <= 2, L"a one-axis re-base keeps the geometry (aspect ratio)");
+			Assert::IsTrue(uniAcross <= 2 && uniDown <= 2, L"a uniform re-base keeps the geometry");
 		}
 
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
