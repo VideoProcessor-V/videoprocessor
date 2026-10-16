@@ -138,3 +138,20 @@ Two frames are taken from each clip, read on 12 tiles per frame.
 **New gap.** A "4K" stream of a 1080-mastered title is never detected. It is the safe direction, but a common case (2K-DI films streamed in 4K). The 4K encoder removes the upscaler's faint images above the source Nyquist, and those images carry the mirror coherence.
 
 **Proposed next signal.** A sharp, consistent spectral cliff at a stable rate across frames and shots, gated strictly so soft native 4K never triggers it. To be added after the look-ahead work.
+
+### The G18 gap investigated (2026-10-16): a 1080 master upscaled, then coded at 4K
+
+Two second signals were tried on the real-codec corpus. Neither separates the cases safely.
+
+1. **Spectral cliff** (the log-power drop across a candidate Nyquist, min over the axes).
+   - Native: 0.29–0.74 at 1080.
+   - 2K master coded at 4K: 0.26–0.82.
+   - Overlapping. Bicubic's soft transition plus coding leaves no sharp cliff.
+2. **Time-averaged mirror coherence** (the curve summed over frames, the level at 1/2 above the curve's floor).
+   - 2K master coded at 4K: +0.018 to +0.044.
+   - Native x264: +0.060 to +0.066, because its 8×8 coding grid lights 4/8.
+   - Native x265: +0.001 to +0.007.
+   - Native AV1 with FGS: +0.046.
+   - No separation. The 4K encoder removes the images above the source Nyquist that carry the signature.
+
+**Conclusion.** It stays native: the safe direction, a known limit. The real Apple TV captures (G19) will show how common it is and what survives in practice. **For the planner:** ideas beyond spectral statistics?

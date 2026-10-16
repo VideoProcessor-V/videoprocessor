@@ -764,6 +764,8 @@ namespace VideoProcessorTest
 			const int W = 3840, H = 2160, codeMax = 1023;
 			struct Tally { int frames = 0, height = 0, native = 0, wrong = 0; };
 			std::map<std::string, Tally> tallies;
+			std::map<std::string, std::vector<double>> curveSums;
+			std::map<std::string, int> curveCounts;
 			int nativeLower = 0, wrongHeight = 0, cases = 0;
 			std::string failures;
 			char lineBuffer[512];
@@ -809,6 +811,15 @@ namespace VideoProcessorTest
 					const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, t);
 					Tally& tally = tallies[key];
 					++tally.frames;
+					// Diagnostic (2K master coded at 4K, 2026-10-16): the coherence curves summed
+					// over the frames of each case, to see whether a weak peak builds over time.
+					if (!r.verticalCurve.empty() && r.verticalCurve.size() == r.horizontalCurve.size())
+					{
+						std::vector<double>& sum = curveSums[key];
+						if (sum.empty()) sum.assign(r.verticalCurve.size(), 0.0);
+						for (size_t m = 0; m < sum.size(); ++m) sum[m] += (std::min)(r.verticalCurve[m], r.horizontalCurve[m]);
+						++curveCounts[key];
+					}
 					const bool native = r.ratio >= 1.0, height = std::fabs(r.ratio - truth) <= 0.01;
 					if (truth >= 1.0)
 					{
@@ -834,6 +845,26 @@ namespace VideoProcessorTest
 				char row[200];
 				snprintf(row, sizeof(row), "%-34s frames %3d: height %3d, native %3d, wrong %d\n", entry.first.c_str(), entry.second.frames,
 					entry.second.height, entry.second.native, entry.second.wrong);
+				Logger::WriteMessage(row);
+			}
+			for (const auto& entry : curveSums)
+			{
+				// The summed curve (min of the axes, per frame): the level at 1/2 (the 1080 rate,
+				// +-2 bins) against the curve's median over the candidates (the floor).
+				const std::vector<double>& c = entry.second;
+				const int n = static_cast<int>(c.size());
+				const double frames = curveCounts[entry.first];
+				std::vector<double> body;
+				for (int m = n / 8; m < n * 95 / 100; ++m) body.push_back(c[m] / frames);
+				std::nth_element(body.begin(), body.begin() + body.size() / 2, body.end());
+				const double floorLevel = body[body.size() / 2];
+				double at = 0.0, at38 = 0.0, at58 = 0.0;
+				for (int m = n / 2 - 2; m <= n / 2 + 2; ++m) at = (std::max)(at, c[m] / frames);
+				for (int m = 3 * n / 8 - 2; m <= 3 * n / 8 + 2; ++m) at38 = (std::max)(at38, c[m] / frames);
+				for (int m = 5 * n / 8 - 2; m <= 5 * n / 8 + 2; ++m) at58 = (std::max)(at58, c[m] / frames);
+				char row[200];
+				snprintf(row, sizeof(row), "curve %-34s at 1/2 %.3f (3/8 %.3f, 5/8 %.3f), floor %.3f, over floor %.3f\n",
+					entry.first.c_str(), at, at38, at58, floorLevel, at - floorLevel);
 				Logger::WriteMessage(row);
 			}
 			char summary[160];
