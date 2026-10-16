@@ -143,3 +143,20 @@ Not ruled out. Run at the end of the chain (the FL35 link is 8-bit anyway), but 
 - compared with ours on the real-clip corpus.
 
 It would be a thin wrapper of about a day of work, with no tuning. Its pipeline (consistency, infill, hole filling) is a useful reference for ours.
+
+### The HDR-compatible version (owner, 2026-10-16: "need an hdr compatible version to make it at all usable for people")
+
+The 8-bit limit belongs to NVIDIA's packaged FRUC library, not to the engine's role.
+
+- **Motion.** The engine gets an 8-bit (perceptual) luma copy of the frame for motion only. Vectors depend on structure, not on tonal precision, so HDR10 motion estimation is unaffected.
+- **Picture.** VP's own interpolator builds the in-between frames from the real 10-bit (HDR or SDR) frames at full precision, following FRUC's published method:
+  1. flow;
+  2. the forward/backward consistency check;
+  3. vector infill;
+  4. a bidirectional warp and blend;
+  5. hole filling.
+
+  Our temporal dither then runs on every frame alike, so there is no banding shimmer.
+- **Product.** A full-frame "smooth motion (optical flow)" mode, beside the de-judder's taste-controlled warp. It is exclusive with the other engines by profile rules ([[vp-motion-engine-exclusive]]).
+- **The NVIDIA library** stays optional: an SDR-only reference for comparison on the corpus.
+- **Builds on** the engine-ahead work (vectors waiting in the store, the matcher as fallback). The new parts are the bidirectional full-frame warp and the hole filling.
