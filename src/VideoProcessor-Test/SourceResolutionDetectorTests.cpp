@@ -919,6 +919,7 @@ namespace VideoProcessorTest
 				double t = 0.0;
 				int frames = 0, readLower = 0, readNone = 0, wrong = 0;
 				double lowestRead = 1.0, highestRead = 0.0;
+				int odd = 0;
 				double declaredAt = -1.0;
 				for (int shot = 0; shot < 12; ++shot)
 				{
@@ -944,6 +945,12 @@ namespace VideoProcessorTest
 						readLower += r.ratio < 1.0;
 						readNone += r.ratio >= 1.0;
 						if (r.informative()) { lowestRead = (std::min)(lowestRead, r.ratio); highestRead = (std::max)(highestRead, r.ratio); }
+						if (r.informative() && std::fabs(r.ratio - src.ratio) > 0.01 && odd++ < 6)
+						{
+							char what[96];
+							snprintf(what, sizeof(what), "  odd: %s shot %d frame %d q %.1f b%d", src.name, shot, f, q, shotBlock[shot]);
+							Log(what, r);
+						}
 						tracker.Update(r, t);
 						const double now = tracker.Ratio();
 						if (src.ratio < 1.0 && now < 1.0 && declaredAt < 0) declaredAt = t;

@@ -398,6 +398,26 @@ namespace SourceResolution
 		frame.horizontalCurve = horizontal;
 		frame.vertical = FindPeak(vertical, n, t);
 		frame.horizontal = FindPeak(horizontal, n, t);
+		// Variable bitrate (owner 2026-10-16): under hard coding a coding-grid position
+		// can edge out the true rate on one axis (found: 29/32 at 0.512 against 1080's
+		// 0.509 on 32-px blocks, while the other axis read 1080 cleanly). When the axes
+		// disagree and one axis's curve holds the other axis's rate nearly as strongly
+		// as its own peak (and above the threshold), the axes agree on that rate. Real
+		// detail is never this coherent (0.1-0.2), so native content is unaffected;
+		// a true anisotropic upscale has no such second peak and is left alone.
+		auto agree = [&](MirrorPeak& self, const std::vector<double>& curve, const MirrorPeak& other) {
+			if (other.coherence < t.coherence || std::fabs(self.ratio - other.ratio) <= 0.02) return;
+			const int centre = static_cast<int>(std::lround(other.ratio * n));
+			double there = 0.0;
+			for (int m = centre - 2; m <= centre + 2; ++m) if (m >= 0 && m < n) there = (std::max)(there, curve[m]);
+			if (there >= t.coherence && there >= self.coherence - t.axisAgreement)
+			{
+				self.ratio = other.ratio;
+				self.coherence = there;
+			}
+		};
+		if (frame.vertical.coherence >= frame.horizontal.coherence) agree(frame.horizontal, horizontal, frame.vertical);
+		else agree(frame.vertical, vertical, frame.horizontal);
 		// Both axes resampled (a uniform upscale), else native: real detail on
 		// either axis must survive. Anamorphic sources take the larger ratio so
 		// nothing either axis holds is lost.

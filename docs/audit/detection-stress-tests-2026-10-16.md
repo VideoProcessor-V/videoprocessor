@@ -61,7 +61,7 @@ Two frames are taken from each clip, read on 12 tiles per frame.
 - **Native:** 0 of 42 frames read a lower height (no false positives).
 - **Uncoded upscales:** exact.
 - **Coded 1080:** 26 of 28 read 1080; the other 2 read native, which is the safe direction.
-- **New (7eddcb4e):** on each frame, real 4K must hold more fine detail above 1080's limit than that frame's own 1080 upscales, by more than the margin. This has not yet been re-run on the real clips since the change.
+- **Detail above (re-run 2026-10-16):** in every frame, real 4K holds at least 0.18 decades more fine detail above 1080's limit than that frame's own 1080 upscales (the margin is 0.07). Absolute levels overlap across frames (native lowest -0.96, upscales highest -1.04), which is why the comparison is relative. Still 0 of 42 native frames read lower.
 
 ## C. Tracker over time (synthetic readings)
 
@@ -81,7 +81,7 @@ Two frames are taken from each clip, read on 12 tiles per frame.
 | # | Test | What it stresses | Result |
 |---|---|---|---|
 | D1 | DetailAboveSeparatesStarvedFramesFromNativeDetail | Fine detail above the rate for native 4K (sharp/soft, q0–q4, 8/32 transforms) vs upscales (3 rates × 4 kernels × q0/q4/q12) | Sharp 4K stands above every upscale. Gap: 0.69 decades at 1080, 0.19 at 1440, 0.10 at 3/4. Coding moves an upscale's level by ≤0.05. Soft 4K can sit at upscale levels; such a frame then counts as no evidence, never as a lower reading |
-| D2 | VariableBitrateStreamsReadTheirSource | 12 shots of 6 s, each with its own bitrate (q 0.5–16) and transform size; I-frames every 4th frame (q×0.6), P/B frames at q×1.3; analysed at 2 Hz | Native: stays native. 1080 Catmull: declared at 20 s and held. **OPEN:** 1080 Lanczos — one frame reads 0.906 and disengages auto; under investigation. 1440 bilinear: being re-checked after a test fix (the shot cuts were too small) |
+| D2 | VariableBitrateStreamsReadTheirSource | 12 shots of 6 s, each with its own bitrate (q 0.5–16) and transform size; I-frames every 4th frame (q×0.6), P/B frames at q×1.3; analysed at 2 Hz | All four pass: native stays native; 1080 Catmull, 1080 Lanczos and 1440 bilinear are declared at 20 s and held through the starved shots. (Fixed on the way: under q~21 on 32-px blocks one axis's peak sat at 29/32, 0.512 against the true rate's 0.509; the axes now agree on a rate one axis holds within 0.05 of its own peak) |
 | D3 | StreamSwitchingRenditionsWithoutACut | Adaptive streaming drops from the 4K rendition to 1080 mid-shot, then recovers | Down: declared 120 s after the switch (once the native evidence leaves the rolling window). Up: native on the first 4K frame |
 
 **Found and fixed while building D.**

@@ -59,6 +59,7 @@ namespace SourceResolution
 		double gridQuiet = 0.3;           // ... and they must all be below this (no coding signature),
 		double gridPeakMargin = 0.1;      // ... or it stands this far above both grid neighbours (coding cannot)
 		double harmonicShare = 0.85;      // a sub-multiple this strong is the fundamental
+		double axisAgreement = 0.05;      // an axis takes the other's rate when its curve holds it within this of its own peak
 		double informativeDecades = 1.5;  // lower band above the quantisation floor
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
