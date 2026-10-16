@@ -267,8 +267,10 @@ namespace Dejudder
 		bool opticalFlowCandidate = true;
 		// With the candidate mode: the engine's vectors seed the refinement in place of
 		// the first sweep's searches (the coarse pyramid search skipped - the saving),
-		// the refinement, the half-pixel step and the trust tests unchanged.
-		bool opticalFlowSeed = false;
+		// the refinement, the half-pixel step and the trust tests unchanged. The default
+		// (corpus 2026-10-16: 99.8-100% of the matcher's removal, the cut held; live 4K
+		// matcher 7.5 -> 5.5 ms on the laptop; the candidate mode 12.0 ms for +0.2%).
+		bool opticalFlowSeed = true;
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The

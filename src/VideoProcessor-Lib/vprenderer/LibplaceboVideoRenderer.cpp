@@ -5105,6 +5105,9 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
 	bool motionProducerFailedLogged = false;
 	unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
+	// The render loop's hand-off of frames to the producer (render loop thread writes).
+	std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
+	std::atomic<unsigned long long> motionHandoffCount{ 0 };
 	bool customHooksPublishedLowLatency = false;
 	double customHookRefreshHz = 0.0;
 	ULONGLONG customHookRefreshTick = 0;
@@ -12815,11 +12818,13 @@ struct LibplaceboVideoRenderer::Impl
 					DebugLog::Log("De-judder motion: %s", source);
 			}
 		}
-		if (motionProducer && (dejudderEstimates + 1) % 2400 == 0)
+		if (motionProducer && ((dejudderEstimates + 1) == 24 || (dejudderEstimates + 1) % 2400 == 0))
 		{
 			const auto ps = motionProducer->GetStats();
-			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms), %llu dropped; pairs taken %llu, missed %llu",
-				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses);
+			const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
+			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
+				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses,
+				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
 		}
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
@@ -23993,6 +23998,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			preview.frame.SourceBufferRelease();
 		if (!motionAheadFrames.empty())
 		{
+			const auto handoffStarted = SteadyClock::now();
 			try
 			{
 				const uint64_t generation = m_impl->motionGeneration.load(std::memory_order_acquire);
@@ -24015,6 +24021,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 			for (QueuedFrame& ahead : motionAheadFrames)
 				ahead.frame.SourceBufferRelease();
 			motionAheadFrames.clear();
+			// The render loop's share (the critical path): measured, reported with the stats.
+			const double handoffMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - handoffStarted).count();
+			m_impl->motionHandoffMaxMs = (std::max)(m_impl->motionHandoffMaxMs.load(std::memory_order_relaxed), handoffMs);
+			m_impl->motionHandoffTotalMs = m_impl->motionHandoffTotalMs.load(std::memory_order_relaxed) + handoffMs;
+			m_impl->motionHandoffCount.fetch_add(1, std::memory_order_relaxed);
 		}
 		if (!sourceAheadFrames.empty())
 		{
