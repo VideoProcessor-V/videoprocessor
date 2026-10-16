@@ -1,0 +1,108 @@
+# Frame detail accumulation (design, for planner review)
+
+Owner, 2026-10-16:
+- "especially for the upscale and low bitstream since I'd imagine often encoding alternates detail between one frame and the next to average it in"
+- then: "definitely want the frame detail accumulation. that would be extremely extremely cool if could be done efficiently and not just on a 5090".
+
+Status: design only. Nothing is built.
+
+## 1. What it is for
+
+Streaming encoders do not spend the same bits on every frame:
+
+- **I-frames (and reference frames) are coded finely.** The B/P frames between them predict from those frames and code a coarser residual. Fine texture therefore pulses: sharp on an I-frame, washed out over the next frames, sharp again.
+- **Low-bitrate streams pulse most.** The encoder drops texture from the B frames almost entirely and relies on the viewer's eye to average it in.
+- **Upscaled streams carry the same pulse.** In a 1080 rendition upscaled to 4K, the pulse sits within the 1080 band.
+
+**What the viewer sees is "breathing" texture** (grass, skin, fabric, film grain) that resets at every GOP (group of pictures).
+
+**What we can do.** The de-judder already knows where every 16×16 block moved between consecutive source frames, and how much each vector is trusted. Following the motion back, the detail of earlier, better-coded frames can be carried forward and blended with the current frame's own detail. Where the current frame lost texture the encoder had sent before, it comes back. Where the current frame has it, nothing changes much.
+
+**What it must not do.** It must never invent detail:
+- Only detail the stream actually sent, consistent along the motion, is accumulated.
+- Anything that disagrees with the current frame is dropped at once: moving objects, occlusions, cuts, flashes.
+
+## 2. The method (one recurrent pass, the existing vectors)
+
+**State.** One history texture at the source signal's resolution, holding a detail band only. Luma first; chroma optional (§6).
+
+**Per source frame** (not per refresh: a repeated refresh adds nothing):
+
+1. **Band split.** Split the current luma into base and detail: `base = blur(cur)`, `detail = cur - base`. The blur is a small separable Gaussian whose radius follows the rate in question: the declared Stage 12 rate, or native.
+   - Low frequencies always come from the current frame. Brightness, colour, fades and flashes therefore never lag or ghost.
+   - Only the band the encoder pulses is accumulated.
+2. **Warp the history.** Move it by the current vector field: bilinear, sub-pixel, per pixel from the 16×16 field with the warp's existing interpolation.
+3. **Decide per pixel how much history to keep (`w`).** `w = 0` (current detail only) when any of these hold:
+   - the vector is untrusted;
+   - the frame trust is below the minimum;
+   - vectors are invalid ([[vp-vector-validity]]: cut, resync, drop, repeat, seek);
+   - the warped history falls outside the current frame's detail range. The test is the TAA-style neighbourhood clamp: the current 3×3 detail min/max, widened by the expected coding noise from the bitrate reading.
+
+   Otherwise `w` is the confidence-weighted history share. Its ceiling is set by:
+   - how starved this frame is relative to the history (per-frame detail energy against the history's energy, so an I-frame overwrites more and a starved B frame keeps more);
+   - a strength setting. It is a slider, per the owner's scheme ([[vp-settings-slider-scheme]]).
+4. **Blend.** `acc = lerp(detail, clamp(warped_history), w)`, written back as the new history.
+5. **Output.** `out = base + acc`. This goes into the re-base (Stage 12) and into the existing downstream chain unchanged.
+
+**Why this is cheap.**
+- It costs one blur (2 taps × radius), one warp fetch, one 3×3 min/max, and the arithmetic, all in a single compute pass plus the separable blur.
+- The motion vectors are already computed by the de-judder. No new matcher, no optical flow, no neural network.
+- At 4K that is about 5 texture reads per pixel in total. Expected cost is 0.3–0.7 ms on the 3090, and less at a 1080 source rate. Budget: 1 ms at 4K on the 3090, measured on the laptop first.
+- Memory: one 4K r16f history (16 MB), plus a ping-pong copy.
+
+## 3. Where it sits in the chain
+
+**Placement: source frame → [detail accumulation] → Stage 12 re-base → libplacebo / CNN / SSIM → output.**
+- It runs before anything that adds or reshapes detail. The sharpeners therefore see a steady, fuller detail band. They already hold their own residual along the vectors (§2c), which removes their flicker; this removes the input's pulse.
+- The debander runs after it. A steadier input lets the debander's band detection settle as well.
+- The resolution monitor keeps reading the raw source, so detection is unchanged and independent.
+
+## 4. When it is off or falls back
+
+It follows [[vp-vector-refinements-fallback]]:
+- **No de-judder vectors, so off.** It never starts the matcher itself. 50/60p will need [[vp-low-latency-vectors]].
+- **The frame, or a block, is not trusted:** current detail only for that frame or block.
+- **Discontinuities reset the history:** cut, resync, drop, repeat, seek, format change.
+- **A clean, high-bitrate source accumulates almost nothing.** The current frame always matches its history, so `w` stays low and the output equals the input within a code. Clean Blu-ray-class sources are effectively untouched.
+
+## 5. Tests (before any default)
+
+**T1 — Synthetic I/P pulsing (CPU and GPU).**
+- Setup:
+  - textured, moving content with known truth;
+  - the coder model from the VBR tests: I every N frames at q, B frames at 3q;
+  - true motion vectors, then the matcher's vectors.
+- Gate:
+  - the per-frame detail energy's GOP pulse falls by at least half;
+  - the error against truth falls on the B frames;
+  - it never rises on the I-frames.
+
+**T2 — Faithfulness.**
+- Setup:
+  - moving objects over a static textured background;
+  - occlusion and reveal;
+  - a flash;
+  - a fade;
+  - a cut mid-GOP.
+- Gate:
+  - no ghost trail beyond one code outside the clamp;
+  - full reset at a cut;
+  - no lag in base brightness.
+
+**T3 — Clean source.**
+- Setup: an uncoded source.
+- Gate: output equals input within one code everywhere.
+
+**T4 — Real clips.**
+- Setup: the UVG and Xiph clips encoded with real x265 and AV1 (low-bitrate capped VBR, long GOP), via ffmpeg (owner approved the install, 2026-10-16).
+- Gate: measured breathing (GOP-periodic detail energy) and SSIM against the uncompressed original, on the B frames.
+
+**T5 — Cost on the laptop, then on the 3090, at 4K and at a 1080 source rate.**
+
+## 6. Open questions for the planner
+
+1. **Chroma too, or luma only?** Encoders starve chroma first, but chroma detail is visually weak. The proposal: luma first, chroma behind a switch.
+2. **Accumulate at the declared Stage 12 rate or at the signal rate?** For an upscaled stream, the band above the declared rate holds only upscaler and coding residue, so it is cleaner to accumulate below the declared rate's Nyquist and leave the band above alone.
+3. **Weights.** Should the per-frame weighting use a measure of the frame's coding quality (blockiness, detail energy against the history), or an I/B guess from the energy pulse?
+4. **Sub-pixel motion across many frames** can recover a little real resolution from aliased sources (multi-frame super-resolution). Streaming masters are normally filtered, so the expected gain is small. Worth a later step, or leave it?
+5. **Interaction with grain.** Film grain is new on every frame, so accumulating it averages it away. Proposal: the clamp plus a grain allowance (the de-judder's grain estimate) keep grain from being smoothed. Should grain stay fully per-frame?
