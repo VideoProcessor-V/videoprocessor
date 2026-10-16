@@ -1647,6 +1647,36 @@ void testTemporalDitherButtons()
     require(readBytes(path).contains("temporal_dither: off"), "temporal_dither not saved");
 }
 
+void testQueueTargetByFramesOrTime()
+{
+    // Owner 2026-10-16: the queue target is by frames or by time - exclusive buttons, one field shown;
+    // by frames writes the time off, by time writes a delay.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n[queue.Timed]\ntarget_latency_ms: 300\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.queue.profiles");
+    auto* byFrames = requireControl<QRadioButton>(window, "config.queue.target_mode.frames");
+    auto* byTime = requireControl<QRadioButton>(window, "config.queue.target_mode.time");
+    auto* latency = requireControl<QSpinBox>(window, "config.queue.target_latency_ms");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(byFrames->isChecked() && !byTime->isChecked(), "a frames queue is not shown as By frames");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(byTime->isChecked() && latency->value() == 300, "a timed queue is not shown as By time with its delay");
+    byFrames->click();
+    QCoreApplication::processEvents();
+    require(latency->value() == 0 && !byTime->isChecked(), "By frames did not switch the time off");
+    byTime->click();
+    QCoreApplication::processEvents();
+    require(latency->value() == 200, "By time did not start at 200 ms");
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("target_latency_ms: 200"), "the time target not saved");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8547,6 +8577,7 @@ int main(int argc, char** argv)
     failures += run("shader add-ons list", testShaderAddonsList);
     failures += run("exclusive buttons: LED source and motion source", testExclusiveButtonsForLedSourceAndMotionSource);
     failures += run("temporal dither buttons", testTemporalDitherButtons);
+    failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);

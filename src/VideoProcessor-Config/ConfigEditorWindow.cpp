@@ -5687,6 +5687,65 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         };
         connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, updateLatencyNote);
         updateLatencyNote(0);
+        // Owner 2026-10-16: the queue target as an either / or - by frames or by time - with only
+        // the chosen field shown. By frames writes the time as off (also switching off a time
+        // target inherited from the default queue); by time keeps target_frames as the fallback
+        // until the source rate is known.
+        addInteger(QStringLiteral("Target frames"), QStringLiteral("target_frames"),
+            0, 16, QStringLiteral("frames"));
+        auto* framesSpin = qobject_cast<QSpinBox*>(fields->back().widget);
+        {
+            QFormLayout* queueForm = form;
+            auto* modeButtons = new QWidget;
+            modeButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode")));
+            auto* modeLayout = new QHBoxLayout(modeButtons);
+            modeLayout->setContentsMargins(0, 0, 0, 0);
+            auto* byFrames = new QRadioButton(QStringLiteral("By frames"));
+            byFrames->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode.frames")));
+            byFrames->setToolTip(QStringLiteral("A fixed number of source frames: the delay changes with the frame rate."));
+            auto* byTime = new QRadioButton(QStringLiteral("By time"));
+            byTime->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode.time")));
+            byTime->setToolTip(QStringLiteral(
+                "A delay in ms, turned into whole source frames for each frame rate, so the delay (and the audio offset) "
+                "stays about the same at 24p, 30p and 60p."));
+            auto* group = new QButtonGroup(modeButtons);
+            group->setExclusive(true);
+            group->addButton(byFrames);
+            group->addButton(byTime);
+            modeLayout->addWidget(byFrames);
+            modeLayout->addWidget(byTime);
+            modeLayout->addStretch(1);
+            queueForm->insertRow(queueForm->rowCount() - 3, QStringLiteral("Queue target"), modeButtons);
+            auto* lookAheadNote = helpLabel(QStringLiteral(
+                "With the optical-flow look-ahead on (de-judder profiles), the queue holds at least 5 frames either way "
+                "(4 ahead); the low-latency queue is exempt."));
+            lookAheadNote->setObjectName(controlName(sectionPrefix, QStringLiteral("target_lookahead_note")));
+            queueForm->addRow(QString(), lookAheadNote);
+            auto show = [queueForm, latencySpin, framesSpin, latencyNote, byFrames, byTime]() {
+                const bool time = latencySpin->value() > 0;
+                {
+                    const QSignalBlocker a(byFrames), b(byTime);
+                    byTime->setChecked(time);
+                    byFrames->setChecked(!time);
+                }
+                queueForm->setRowVisible(latencySpin, time);
+                queueForm->setRowVisible(latencyNote, time);
+                queueForm->setRowVisible(framesSpin, !time);
+            };
+            connect(byTime, &QRadioButton::toggled, this, [latencySpin, show](bool on) {
+                if (on && latencySpin->value() == 0) latencySpin->setValue(200);
+                show();
+            });
+            connect(byFrames, &QRadioButton::toggled, this, [latencySpin, show](bool on) {
+                if (on && latencySpin->value() != 0) latencySpin->setValue(0);
+                show();
+            });
+            connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, [show](int) { show(); });
+            auto* refresh = new QAction(modeButtons);
+            refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode_refresh")));
+            connect(refresh, &QAction::triggered, this, [show]() { show(); });
+            show();
+        }
         form = addCollapsibleSection(QStringLiteral("queueAdvanced"),
             QStringLiteral("Advanced"), QStringLiteral(
                 "Fine-tune individual queue values. Editing one switches this profile to Custom."), false);
@@ -5695,8 +5754,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         addInteger(QStringLiteral("Lead frames"), QStringLiteral("lead_frames"),
             0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Startup pre-roll"), QStringLiteral("startup_preroll_frames"),
-            0, 16, QStringLiteral("frames"));
-        addInteger(QStringLiteral("Target frames"), QStringLiteral("target_frames"),
             0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Active-picture lookahead"), QStringLiteral("active_picture_lookahead_frames"),
             0, 8, QStringLiteral("frames"));
@@ -9045,6 +9102,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
             }
         state->loading = false;
+		// The queue target's mode follows the loaded fields (loading blocks their signals).
+		if (sectionPrefix == QStringLiteral("queue"))
+		{
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("target_mode_refresh"))))
+				refresh->trigger();
+		}
 		// The motion slider follows the loaded fields (loading blocks their own
 		// change signals).
 		if (sectionPrefix == QStringLiteral("vprenderer"))
