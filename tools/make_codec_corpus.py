@@ -11,6 +11,7 @@ gate's input format), plus manifest.csv describing every case:
 
 Usage: python tools/make_codec_corpus.py SOURCE OUT [--ffmpeg PATH] [--frames 32]
 Nothing is written inside the repository; OUT holds the encodes and decoded frames.
+Resumable: finished cases are kept; a case cut off by an interrupted run is redone.
 """
 import argparse, csv, os, subprocess, sys
 
@@ -85,6 +86,11 @@ def main():
             name = f"{base}_{scene}_{codec}_crf{crf}" + (f"_{upk}" if upk and scene == "stream1080" else "")
             coded = os.path.join(a.out, name + (".mkv"))
             frames = os.path.join(a.out, name + ".yuv")
+            complete = DECODED * 3840 * 2160 * 3   # yuv420p10le bytes for the decoded frames
+            if os.path.exists(frames) and os.path.getsize(frames) != complete:
+                os.remove(frames)   # cut off (an interrupted run): redo
+            if os.path.exists(coded) and not os.path.exists(frames):
+                os.remove(coded)
             if not os.path.exists(frames):
                 pre = []
                 if scene == "stream1080":
