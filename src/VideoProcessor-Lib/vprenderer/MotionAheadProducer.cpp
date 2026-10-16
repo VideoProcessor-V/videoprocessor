@@ -18,26 +18,57 @@ namespace MotionAhead
 		halfW = (w + 1) / 2;
 		halfH = (h + 1) / 2;
 		out.resize(static_cast<size_t>(halfW) * halfH);
+		// A row of 10-bit luma codes, decoded directly for the common capture formats
+		// (P010 / P210 planes, v210, UYVY / HDYC); false = use the sampler (RGB).
 		const bool planar16 = source.format == AnalysisLumaFormat::P010 || source.format == AnalysisLumaFormat::P210;
-		if (planar16)
+		const bool v210 = source.format == AnalysisLumaFormat::NativeYuv422 && source.encoding == VideoFrameEncoding::V210;
+		const bool uyvy = source.format == AnalysisLumaFormat::NativeYuv422 &&
+			(source.encoding == VideoFrameEncoding::UYVY || source.encoding == VideoFrameEncoding::HDYC);
+		auto decodeRow = [&](int y, uint16_t* codes) {
+			const uint8_t* row = source.data + static_cast<size_t>(y) * source.rowBytes;
+			if (planar16)
+			{
+				const uint16_t* words = reinterpret_cast<const uint16_t*>(row);
+				for (int x = 0; x < w; ++x) codes[x] = static_cast<uint16_t>(words[x] >> 6);
+			}
+			else if (v210)
+			{
+				// Six pixels per 16 bytes: Y0 = w0>>10, Y1 = w1, Y2 = w1>>20, Y3 = w2>>10, Y4 = w3, Y5 = w3>>20.
+				for (int x = 0; x < w; x += 6)
+				{
+					const uint8_t* g = row + static_cast<size_t>(x / 6) * 16;
+					uint32_t word[4];
+					std::memcpy(word, g, 16);
+					const uint16_t y6[6] = {
+						static_cast<uint16_t>((word[0] >> 10) & 0x3ff), static_cast<uint16_t>(word[1] & 0x3ff),
+						static_cast<uint16_t>((word[1] >> 20) & 0x3ff), static_cast<uint16_t>((word[2] >> 10) & 0x3ff),
+						static_cast<uint16_t>(word[3] & 0x3ff), static_cast<uint16_t>((word[3] >> 20) & 0x3ff) };
+					for (int k = 0; k < 6 && x + k < w; ++k) codes[x + k] = y6[k];
+				}
+			}
+			else
+			{
+				for (int x = 0; x < w; ++x) codes[x] = static_cast<uint16_t>(row[static_cast<size_t>(x / 2) * 4 + ((x & 1) ? 3 : 1)] << 2);
+			}
+		};
+		if (planar16 || v210 || uyvy)
 		{
-			// The luma plane: 16-bit little-endian words, the 10-bit code in the top bits.
+			std::vector<uint16_t> r0(static_cast<size_t>(w)), r1(static_cast<size_t>(w));
 			for (int y = 0; y < halfH; ++y)
 			{
-				const int y0 = (std::min)(2 * y, h - 1), y1 = (std::min)(2 * y + 1, h - 1);
-				const uint16_t* r0 = reinterpret_cast<const uint16_t*>(source.data + static_cast<size_t>(y0) * source.rowBytes);
-				const uint16_t* r1 = reinterpret_cast<const uint16_t*>(source.data + static_cast<size_t>(y1) * source.rowBytes);
+				decodeRow((std::min)(2 * y, h - 1), r0.data());
+				decodeRow((std::min)(2 * y + 1, h - 1), r1.data());
 				uint8_t* dst = &out[static_cast<size_t>(y) * halfW];
 				for (int x = 0; x < halfW; ++x)
 				{
 					const int x0 = (std::min)(2 * x, w - 1), x1 = (std::min)(2 * x + 1, w - 1);
-					const unsigned sum = (r0[x0] >> 6) + (r0[x1] >> 6) + (r1[x0] >> 6) + (r1[x1] >> 6);
+					const unsigned sum = r0[x0] + r0[x1] + r1[x0] + r1[x1];
 					dst[x] = static_cast<uint8_t>((std::min)(255u, sum >> 4));   // the mean code / 4
 				}
 			}
 			return true;
 		}
-		// Other formats (v210 / UYVY 4:2:2, RGB): the sampler, one sample per output pixel.
+		// Other formats (RGB): the sampler, one sample per output pixel.
 		AnalysisLumaSample sample;
 		for (int y = 0; y < halfH; ++y)
 		{

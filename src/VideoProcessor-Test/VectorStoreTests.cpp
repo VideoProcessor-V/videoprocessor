@@ -155,3 +155,62 @@ namespace MotionAheadSwitchTest
 		}
 	};
 }
+
+#include <vprenderer/MotionAheadProducer.h>
+#include <memory>
+
+namespace MotionAheadLumaTest
+{
+	TEST_CLASS(MotionAheadLumaTests)
+	{
+	public:
+		TEST_METHOD(HalfLumaIsTheSameForP010V210AndUyvy)
+		{
+			// Owner 2026-10-16 (compare 4:4:4 / 4:2:2 / 4:2:0): the producer's luma, read
+			// directly per format, is the same picture for the same codes.
+			const int W = 96, H = 20;   // a multiple of 6 (v210 groups) and of 2
+			auto code = [](int x, int y) { return static_cast<uint16_t>(64 + ((x * 37 + y * 101 + x * y * 7) % 877)); };
+			// P010: the luma plane (16-bit, code << 6) and a chroma plane.
+			auto p010 = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2, static_cast<uint16_t>(512 << 6));
+			for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) (*p010)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(code(x, y) << 6);
+			AnalysisLumaSource a; a.data = reinterpret_cast<const uint8_t*>(p010->data()); a.dataBytes = p010->size() * 2;
+			a.width = W; a.height = H; a.rowBytes = static_cast<size_t>(W) * 2; a.chromaRowBytes = static_cast<size_t>(W) * 2;
+			a.format = AnalysisLumaFormat::P010; a.backingOwner = p010;
+			// v210: 6 pixels per 16 bytes (Cb Y Cr | Y Cb Y | Cr Y Cb | Y Cr Y), rows of whole groups.
+			const size_t v210Row = static_cast<size_t>(W / 6) * 16;
+			auto v = std::make_shared<std::vector<uint32_t>>(v210Row / 4 * H, 0u);
+			for (int y = 0; y < H; ++y)
+				for (int g = 0; g < W / 6; ++g)
+				{
+					uint32_t* word = &(*v)[(static_cast<size_t>(y) * v210Row) / 4 + static_cast<size_t>(g) * 4];
+					auto Y = [&](int k) { return static_cast<uint32_t>(code(g * 6 + k, y)); };
+					word[0] = 512u | (Y(0) << 10) | (512u << 20);
+					word[1] = Y(1) | (512u << 10) | (Y(2) << 20);
+					word[2] = 512u | (Y(3) << 10) | (512u << 20);
+					word[3] = Y(4) | (512u << 10) | (Y(5) << 20);
+				}
+			AnalysisLumaSource b; b.data = reinterpret_cast<const uint8_t*>(v->data()); b.dataBytes = v->size() * 4;
+			b.width = W; b.height = H; b.rowBytes = v210Row; b.format = AnalysisLumaFormat::NativeYuv422;
+			b.encoding = VideoFrameEncoding::V210; b.backingOwner = v;
+			// UYVY: 8-bit (code / 4).
+			auto u = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(W) * 2 * H, static_cast<uint8_t>(128));
+			for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) (*u)[static_cast<size_t>(y) * W * 2 + static_cast<size_t>(x / 2) * 4 + ((x & 1) ? 3 : 1)] = static_cast<uint8_t>(code(x, y) >> 2);
+			AnalysisLumaSource c; c.data = u->data(); c.dataBytes = u->size(); c.width = W; c.height = H;
+			c.rowBytes = static_cast<size_t>(W) * 2; c.format = AnalysisLumaFormat::NativeYuv422; c.encoding = VideoFrameEncoding::UYVY; c.backingOwner = u;
+			std::vector<uint8_t> la, lb, lc;
+			int aw = 0, ah = 0, bw = 0, bh = 0, cw = 0, ch = 0;
+			Assert::IsTrue(MotionAhead::HalfLuma8(a, la, aw, ah), L"P010");
+			Assert::IsTrue(MotionAhead::HalfLuma8(b, lb, bw, bh), L"v210 (is the source valid?)");
+			Assert::IsTrue(MotionAhead::HalfLuma8(c, lc, cw, ch), L"UYVY");
+			Assert::IsTrue(aw == bw && ah == bh && aw == cw && ah == ch && aw == W / 2 && ah == H / 2);
+			int maxV = 0, maxU = 0;
+			for (size_t i = 0; i < la.size(); ++i)
+			{
+				maxV = (std::max)(maxV, std::abs(static_cast<int>(la[i]) - static_cast<int>(lb[i])));
+				maxU = (std::max)(maxU, std::abs(static_cast<int>(la[i]) - static_cast<int>(lc[i])));
+			}
+			Assert::AreEqual(0, maxV, L"v210 = P010 exactly (same 10-bit codes)");
+			Assert::IsTrue(maxU <= 1, L"UYVY within one 8-bit step (8-bit codes)");
+		}
+	};
+}
