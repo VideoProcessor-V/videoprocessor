@@ -154,6 +154,36 @@ namespace VideoProcessorTest
                 L"optical flow off: the matcher at render time");
         }
 
+        TEST_METHOD(RenderAheadKeysValidate)
+        {
+            // docs/VP-render-ahead-design.md: render_ahead and render_ahead_queue_credit on|off,
+            // dejudder_gate auto|period|refresh, render_ahead_utilisation 0.5..1.0.
+            std::string expected;
+            auto wide = [](const char* v) { const std::string s(v); return std::wstring(s.begin(), s.end()); };
+            for (const char* key : { "render_ahead", "render_ahead_queue_credit" })
+            {
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", key, "off", expected), wide(key).c_str());
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", key, "on", expected), wide(key).c_str());
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", key,
+                    ConfigFile::NormalizeName("On"), expected), wide(key).c_str());
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, "auto", expected), wide(key).c_str());
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, "1", expected), wide(key).c_str());
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, "", expected), wide(key).c_str());
+            }
+            for (const char* v : { "auto", "period", "refresh" })
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_gate", v, expected), wide(v).c_str());
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_gate",
+                ConfigFile::NormalizeName("Period"), expected));
+            Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_gate", "on", expected));
+            Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_gate", "frame", expected));
+            for (const char* v : { "0.5", "0.85", "1", "1.0", "0.75" })
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "render_ahead_utilisation", v, expected),
+                    wide(v).c_str());
+            for (const char* v : { "0.49", "1.01", "0", "-0.85", "2", "abc", "" })
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "render_ahead_utilisation", v, expected),
+                    wide(v).c_str());
+        }
+
         TEST_METHOD(LowLatencyPathAndLegacyTargetAreNotInherited)
         {
             // Audit 2026-10-16: low_latency_path on the default queue profile must not reach the
