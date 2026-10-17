@@ -36,12 +36,16 @@ bool ForwardFullscreenShortcut(HWND fullscreen, UINT message,
 		(repeat ? 0x100 : 0);
 	const LRESULT routed = mainWindow->SendMessage(
 		WM_MESSAGE_EXTERNAL_SHORTCUT, virtualKey, shortcutFlags);
-	DebugLog::Log(
-		"Fullscreen keyboard forwarding: message=0x%04x vk=0x%02x modifiers=0x%02x host=%p main=%p routed=%d repeat=%d",
-		message, static_cast<unsigned int>(virtualKey),
-		static_cast<unsigned int>(modifiers), reinterpret_cast<void*>(fullscreen),
-		reinterpret_cast<void*>(mainWindow->GetSafeHwnd()), routed ? 1 : 0,
-		(static_cast<ULONG_PTR>(keyData) & (1ull << 30)) != 0 ? 1 : 0);
+	// audit 2026-10-16: log only first presses that matched a shortcut; every
+	// keydown and auto-repeat used to be logged. The dialog logs (rate-limited)
+	// rejections of unconfigured keys.
+	if (!repeat && routed)
+		DebugLog::Log(
+			"Fullscreen keyboard forwarding: message=0x%04x vk=0x%02x modifiers=0x%02x host=%p main=%p routed=%d repeat=%d",
+			message, static_cast<unsigned int>(virtualKey),
+			static_cast<unsigned int>(modifiers), reinterpret_cast<void*>(fullscreen),
+			reinterpret_cast<void*>(mainWindow->GetSafeHwnd()), routed ? 1 : 0,
+			0);
 	return routed != 0;
 }
 }
@@ -213,8 +217,10 @@ void FullscreenVideoWindow::OnClose()
 
 LRESULT __forceinline FullscreenVideoWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	// audit 2026-10-16: skip auto-repeats in this diagnostic log.
 	if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) &&
-		(wParam == 'I' || wParam == VK_F4))
+		(wParam == 'I' || wParam == VK_F4) &&
+		(static_cast<ULONG_PTR>(lParam) & (1ull << 30)) == 0)
 	{
 		DebugLog::Log(
 			"Fullscreen keyboard route: message=0x%04x vk=0x%02x ctrl=%d alt=%d host=%p owner=%p root=%p foreground=%p focus=%p",

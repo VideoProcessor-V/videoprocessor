@@ -1425,16 +1425,20 @@ BOOL CVideoProcessorApp::InitInstance()
 
 	if (DisplayTopologySession::HasPendingRecovery(m_displayRecoveryStatePath))
 	{
+		// audit 2026-10-16: an unrestorable saved topology (e.g. a display is
+		// gone) used to exit silently on every start. Fall back, quarantine
+		// the record and keep starting.
 		bool restored = false;
+		bool quarantined = false;
 		std::string error;
-		if (!DisplayTopologySession::RestorePending(m_displayRecoveryStatePath,
-			"startup-recovery", restored, error))
+		if (!DisplayTopologySession::RecoverPendingAtStartup(
+			m_displayRecoveryStatePath, "startup-recovery", restored,
+			quarantined, error))
 		{
-			DebugLog::Log("Startup display recovery failed: %s",
-				error.c_str());
-			m_startupExitCode = 1;
-			DEBUGLOG_SHUTDOWN();
-			return FALSE;
+			DebugLog::Log(
+				"Startup display recovery failed: restored=%d quarantined=%d "
+				"error=%s action=continue-startup",
+				restored ? 1 : 0, quarantined ? 1 : 0, error.c_str());
 		}
 	}
 
@@ -2181,9 +2185,20 @@ BOOL CVideoProcessorApp::InitInstance()
 				GetLastError());
 		}
 
-		dlg.DoModal();
+		const INT_PTR modalResult = dlg.DoModal();
 		RestoreDisplayTopology("normal-exit");
-		crashStateClean = true;
+		// audit 2026-10-16: only a genuine clean exit deletes the crash state.
+		// A FatalError ends the dialog through the ordinary close path, and
+		// DoModal returns -1/IDABORT when the dialog could not run at all.
+		crashStateClean = !dlg.FatalErrorRaised() &&
+			modalResult != -1 && modalResult != IDABORT;
+		if (!crashStateClean)
+		{
+			DebugLog::Log(
+				"Crash state kept: dialog ended after fatal_error=%d modal_result=%lld",
+				dlg.FatalErrorRaised() ? 1 : 0,
+				static_cast<long long>(modalResult));
+		}
 		
 	}
 	catch (std::runtime_error& e)

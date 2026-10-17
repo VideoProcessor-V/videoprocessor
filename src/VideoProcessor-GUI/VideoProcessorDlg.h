@@ -170,6 +170,9 @@ public:
 	// Option handlers
 	void StartFullScreen(bool enabled = true);
 	bool StartsFullScreen() const { return m_rendererFullScreenStart; }
+	// audit 2026-10-16: set by _FatalError so the App keeps crash state
+	// instead of treating the dialog end as a clean exit.
+	bool FatalErrorRaised() const { return m_fatalErrorRaised; }
 	void WindowedFullScreenMode(bool enabled = true);
 	void FullscreenMonitorName(const CString& name);
 	CString FullscreenMonitorName() const { return m_fullscreenMonitorName; }
@@ -896,10 +899,15 @@ protected:
 	// Profile actions are serialized. Only Rendering-profile feedback is filtered
 	// while a script runs; independent screen/color/queue intent stays eligible.
 	std::atomic<bool> m_profileActionProcessActive = false;
-	std::vector<std::thread> m_unifiedActionWorkers;
+	// audit 2026-10-16: done is set by the worker as it ends, so scheduling
+	// can reap finished threads.
+	struct UnifiedActionWorker
+	{
+		std::thread thread;
+		std::shared_ptr<std::atomic<bool>> done;
+	};
+	std::vector<UnifiedActionWorker> m_unifiedActionWorkers;
 	std::map<WORD, CString> m_unifiedProfileShortcutKeys;
-	WORD m_lastUnifiedProfileCommand = 0;
-	DWORD m_lastUnifiedProfileCommandTime = 0;
 	QueueProfileRestartPolicy::PendingRequest m_queueProfileResetRequest;
 	bool m_freshRendererProfileConstruction = false;
 	uint32_t m_freshRendererProfileRendererGeneration = 0;
@@ -1189,6 +1197,7 @@ protected:
 	bool m_restartQueuedBecauseEotf = false;
 
 
+	bool m_fatalErrorRaised = false; // audit 2026-10-16
 #define FatalError(error) (_FatalError(__LINE__, __FUNCTION__, error))
 	void _FatalError(int line, const std::string& functionName, const CString& error);
 

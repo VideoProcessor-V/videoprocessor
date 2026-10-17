@@ -73,6 +73,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <EventActionLauncher.h>
 #include <DisplayRefreshRateEstimator.h>
 #include <DisplayRefreshRatePolicy.h>
+#include <DisplayTopologySession.h>
 #include <RendererGenerationGate.h>
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
@@ -635,6 +636,17 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
 		ConfigurationLiveApply::VideoOnlyToggleDefaultModifiers },
 	{ "display_rules_auto",    ID_COMMAND_DISPLAY_RULE_AUTO,      VK_F4,     0, true },
 };
+
+// audit 2026-10-16: keyboard auto-repeat (a held key) re-dispatches only the
+// commands listed here. The allow-list is deliberately empty: every
+// configurable command toggles, selects, cycles (unified profile keys),
+// captures or restarts - none is a volume-like step or nudge - so a held key
+// must act once. Add a command here only if it is a genuine step command.
+static bool IsRepeatableShortcutCommand(WORD command)
+{
+	(void)command;
+	return false;
+}
 
 bool TryParseShortcut(const std::string& value, ACCEL& accelerator)
 {
@@ -5340,8 +5352,8 @@ CVideoProcessorDlg::~CVideoProcessorDlg()
 	if (m_unifiedActionCancelEvent)
 		SetEvent(m_unifiedActionCancelEvent);
 	m_unifiedActionCoalescer.CancelAll();
-	for (std::thread& worker : m_unifiedActionWorkers)
-		if (worker.joinable()) worker.join();
+	for (UnifiedActionWorker& worker : m_unifiedActionWorkers)
+		if (worker.thread.joinable()) worker.thread.join();
 	m_unifiedActionWorkers.clear();
 	if (m_unifiedActionCancelEvent)
 	{
@@ -7515,15 +7527,9 @@ LRESULT CVideoProcessorDlg::OnMessageRendererActionEvent(
 			else if (variable == "requested_refresh") number = requestedRefreshRate;
 			else if (variable == "previous_refresh") number = previousRefreshRate;
 			else return false;
-			for (const double canonical : {
-				24000.0 / 1001.0, 30000.0 / 1001.0, 60000.0 / 1001.0 })
-			{
-				if (std::abs(number - canonical) >= 0.01)
-					continue;
-				number = canonical < 24.5 ? 23.976 :
-					(canonical < 40.0 ? 29.97 : 59.94);
-				break;
-			}
+			// audit 2026-10-16: any N*1000/1001 family (47.952, 119.88 ...),
+			// not only 23.976/29.97/59.94.
+			number = DisplayTopologySession::CanonicalRefreshRateHz(number);
 			std::ostringstream text;
 			text.imbue(std::locale::classic());
 			text.precision(9);
@@ -7702,6 +7708,10 @@ LRESULT CVideoProcessorDlg::OnMessageExternalShortcut(WPARAM wParam,
 	}
 	if (matchedAccelerator)
 	{
+		// audit 2026-10-16: a held key acts once; auto-repeats of
+		// non-repeatable commands are consumed without dispatch or logging.
+		if (repeat && !IsRepeatableShortcutCommand(matchedAccelerator->cmd))
+			return 1;
 		const BOOL posted = PostMessage(WM_COMMAND,
 			MAKEWPARAM(matchedAccelerator->cmd, 1), 0);
 		DebugLog::Log(
@@ -7711,9 +7721,26 @@ LRESULT CVideoProcessorDlg::OnMessageExternalShortcut(WPARAM wParam,
 		return posted ? 1 : 0;
 	}
 
-	DebugLog::Log(
-		"External shortcut rejected: key=%u modifiers=0x%02x reason=not-configured",
-		static_cast<unsigned>(key), static_cast<unsigned>(modifiers));
+	// audit 2026-10-16: unconfigured keys are logged only on the first press
+	// (never per auto-repeat) and at most once per second, with a count of
+	// the rejections not logged in between. UI thread only.
+	if (!repeat)
+	{
+		static ULONGLONG lastRejectionLogTick = 0;
+		static unsigned long long suppressedRejections = 0;
+		const ULONGLONG now = GetTickCount64();
+		if (lastRejectionLogTick == 0 || now - lastRejectionLogTick >= 1000)
+		{
+			DebugLog::Log(
+				"External shortcut rejected: key=%u modifiers=0x%02x reason=not-configured suppressed_since_last=%llu",
+				static_cast<unsigned>(key), static_cast<unsigned>(modifiers),
+				suppressedRejections);
+			lastRejectionLogTick = now;
+			suppressedRejections = 0;
+		}
+		else
+			++suppressedRejections;
+	}
 	return 0;
 }
 
@@ -8062,16 +8089,11 @@ void CVideoProcessorDlg::OnCommandDisplayRule(UINT commandId)
 			m_rendererShortcutIndices.find(static_cast<WORD>(commandId));
 		if (pairedRenderer != m_rendererShortcutIndices.end())
 			SelectRendererFromShortcut(pairedRenderer->second);
-		const DWORD commandTime = static_cast<DWORD>(GetMessageTime());
-		if (m_lastUnifiedProfileCommand == commandId &&
-			commandTime - m_lastUnifiedProfileCommandTime < 100)
-		{
-			DEBUGLOG("Unified profile key repeat suppressed: %S",
-				static_cast<LPCTSTR>(unifiedKey->second));
-			return;
-		}
-		m_lastUnifiedProfileCommand = static_cast<WORD>(commandId);
-		m_lastUnifiedProfileCommandTime = commandTime;
+		// audit 2026-10-16: the former 100 ms same-command window did not
+		// catch OS auto-repeat (250-1000 ms). Auto-repeat is now dropped by
+		// the repeat flag at every key entry point (TranslateConfiguredAccelerator,
+		// OnMessageExternalShortcut, the background hook's pressed-key set),
+		// so each command reaching here is a distinct press.
 		UnifiedProfileRuntime::SelectionResult result;
 		std::string error;
 		if (!m_profileRuntime.SelectCycleKey(
@@ -9182,9 +9204,12 @@ void CVideoProcessorDlg::UpdateState()
 		// If the renderer failed we don't auto-start it again but wait for something to happen
 		if (m_rendererState == RendererState::RENDERSTATE_FAILED)
 		{
-			if (!m_queueLaunchContractTerminalFailure)
-				videoProcessorApp.RestoreDisplayTopology(
-					"renderer-start-failure");
+			// audit 2026-10-16: a renderer-start failure no longer restores
+			// the pre-session topology. Nothing re-entered target-only after
+			// a later successful start, so one failure ended the session for
+			// good, and this branch re-read the recovery file on every
+			// UpdateState while FAILED. Target-only now ends only on
+			// fullscreen-off or exit (RestoreDisplayTopology callers there).
 			return;
 		}
 
@@ -13670,7 +13695,21 @@ void CVideoProcessorDlg::ScheduleUnifiedProfileActionsForRenderer(
 			invocation.action.name.c_str(), invocation.event.c_str(),
 			invocation.reason.c_str(), delayMs,
 			identity.c_str(), static_cast<unsigned long long>(generation), this);
-		m_unifiedActionWorkers.emplace_back([this, invocation, configPath,
+		// audit 2026-10-16: join and drop workers that already finished, so
+		// threads do not accumulate over a long unattended session.
+		for (auto worker = m_unifiedActionWorkers.begin();
+			worker != m_unifiedActionWorkers.end();)
+		{
+			if (worker->done && worker->done->load())
+			{
+				if (worker->thread.joinable())
+					worker->thread.join();
+				worker = m_unifiedActionWorkers.erase(worker);
+			}
+			else
+				++worker;
+		}
+		const auto workerBody = [this, invocation, configPath,
 			delayMs, identity, generation, profileTransition,
 			profileDebounceGeneration]()
 			{
@@ -13733,7 +13772,16 @@ void CVideoProcessorDlg::ScheduleUnifiedProfileActionsForRenderer(
 						invocation.action.name.c_str(), identity.c_str(),
 						invocation.event.c_str());
 				}
+			};
+		UnifiedActionWorker worker;
+		worker.done = std::make_shared<std::atomic<bool>>(false);
+		const std::shared_ptr<std::atomic<bool>> done = worker.done;
+		worker.thread = std::thread([workerBody, done]()
+			{
+				workerBody();
+				done->store(true);
 			});
+		m_unifiedActionWorkers.push_back(std::move(worker));
 	}
 }
 
@@ -13856,6 +13904,11 @@ void CVideoProcessorDlg::ScheduleNewLldvRendererRestart()
 
 void CVideoProcessorDlg::_FatalError(int line, const std::string& functionName, const CString& error)
 {
+	// audit 2026-10-16: the dialog then ends through the normal close path
+	// (EndDialog(S_FALSE) == IDOK), so the App must not read the DoModal result
+	// alone as a clean exit; this flag keeps the crash state for the next start.
+	m_fatalErrorRaised = true;
+
 	CString s;
 	s.Format(
 		_T("%s\r\n\rFile: VideoProcessorDlg.cpp:%i\r\nFunction: %s"),
@@ -14370,7 +14423,7 @@ BOOL CVideoProcessorDlg::PreTranslateMessage(MSG* pMsg)
 			SHADER_SHORTCUT_DEBOUNCE_MS, nullptr);
 	}
 	const bool diagnosticKey =
-		keyDown &&
+		keyDown && !repeat && // audit 2026-10-16: no per-repeat logging
 		(pMsg->wParam == 'I' || pMsg->wParam == VK_F4 ||
 			pMsg->wParam == VK_RETURN);
 	if (diagnosticKey)
@@ -14459,6 +14512,20 @@ BOOL CVideoProcessorDlg::TranslateConfiguredAccelerator(MSG* message)
 				}
 			}
 		}
+		// audit 2026-10-16: drop keyboard auto-repeat (lParam bit 30) before
+		// any accelerator dispatch, including ::TranslateAccelerator below,
+		// which fires on every repeat. A matched non-repeatable shortcut is
+		// consumed; an unmatched repeat passes on to normal processing (for
+		// example held keys in an edit box).
+		const bool repeat = (static_cast<ULONG_PTR>(message->lParam) &
+			(1ull << 30)) != 0;
+		if (repeat)
+		{
+			if (!matchedAccelerator)
+				return FALSE;
+			if (!IsRepeatableShortcutCommand(matchedAccelerator->cmd))
+				return TRUE;
+		}
 		if (matchedAccelerator)
 		{
 			const ACCEL& accelerator = *matchedAccelerator;
@@ -14500,7 +14567,11 @@ void CVideoProcessorDlg::OnOK()
 {
 	// Called if the user presses enter somewhere
 
+	// audit 2026-10-16: GetFocus() can be NULL (focus in another window or
+	// none); never dereference it.
 	CWnd* pwndCtrl = GetFocus();
+	if (!pwndCtrl)
+		return;
 	int ctrl_ID = pwndCtrl->GetDlgCtrlID();
 
 	switch (ctrl_ID)
@@ -14561,8 +14632,10 @@ void CVideoProcessorDlg::OnOK()
 			break;
 
 		default:
-			m_wantToRestartRenderer = true;
-			UpdateState();
+			// audit 2026-10-16: plain Enter on any other control used to
+			// restart the renderer; it now does nothing. Restarts stay on the
+			// explicit renderer restart command.
+			break;
 	}
 
 	// Don't call the super implmenetation as that will close the window
@@ -15948,7 +16021,9 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 				m_rendererLatencyToDSText.SetWindowText(_T("---"));
 			}
 
-			cstring.Format(_T("%lu"), droppedFrames);
+			// audit 2026-10-16: 64-bit counters need %llu.
+			cstring.Format(_T("%llu"),
+				static_cast<unsigned long long>(droppedFrames));
 			m_rendererDroppedFrameCountText.SetWindowText(cstring);
 
 			// INTELLIGENT QUEUE HEALTH MONITORING
@@ -15966,10 +16041,13 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 
 		if (m_captureDeviceState == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING)
 		{
-			cstring.Format(_T("%lu"), m_captureDevice->VideoFrameCapturedCount());
+			// audit 2026-10-16: 64-bit counters need %llu.
+			cstring.Format(_T("%llu"), static_cast<unsigned long long>(
+				m_captureDevice->VideoFrameCapturedCount()));
 			m_inputVideoFrameCountText.SetWindowText(cstring);
 
-			cstring.Format(_T("%lu"), m_captureDevice->VideoFrameMissedCount());
+			cstring.Format(_T("%llu"), static_cast<unsigned long long>(
+				m_captureDevice->VideoFrameMissedCount()));
 			m_inputVideoFrameMissedText.SetWindowText(cstring);
 
 			// DeckLink hardware-latency measurement was removed from the capture
@@ -16976,6 +17054,15 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
 			rendererLine("LED drive", m_videoRenderer->GetLedDriveStatus(text), text);
 			rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
+		}
+		else
+		{
+			// audit 2026-10-16: no renderer, so clear the renderer-owned keys
+			// instead of keeping a dead renderer's last values.
+			static const char* const kRendererKeys[] = {
+				"de-judder", "presentation", "render stall", "LED drive", "source resolution" };
+			for (const char* key : kRendererKeys)
+				crashState.SetValue(key, std::string("-"));
 		}
 	}
 	// Preserve the requested visibility through renderer handoff. The next

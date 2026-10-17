@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <string>
 
 namespace DisplayTopologySession
@@ -11,6 +12,35 @@ namespace DisplayTopologySession
 		bool& restored, std::string& error);
 
 	bool HasPendingRecovery(const std::string& statePath);
+
+	// audit 2026-10-16: startup form of RestorePending. When the exact saved
+	// topology cannot be replayed (for example a display is gone), retries with
+	// SDC_ALLOW_CHANGES, then SDC_TOPOLOGY_EXTEND, and quarantines the record
+	// under a timestamped key so later starts are not blocked. Returns true
+	// when some topology was applied (or nothing was pending); the caller
+	// continues starting either way.
+	bool RecoverPendingAtStartup(const std::string& statePath,
+		const char* reason, bool& restored, bool& quarantined,
+		std::string& error);
+
+	// audit 2026-10-16: canonical display value for a refresh rate. A rate
+	// within 0.01 Hz of N*1000/1001 Hz (integer N >= 11, any family:
+	// 23.976, 29.97, 47.952, 59.94, 119.88 ...) becomes that exact fraction
+	// rounded to 3 decimals; every other rate is returned unchanged. For
+	// N >= 11 the fraction is more than 0.01 Hz from N, so integer rates
+	// never snap.
+	inline double CanonicalRefreshRateHz(double rate)
+	{
+		if (!(rate > 0.0) || !std::isfinite(rate))
+			return rate;
+		const double n = std::floor(rate * 1.001 + 0.5);
+		if (n < 11.0)
+			return rate;
+		const double fractional = n * 1000.0 / 1001.0;
+		if (std::abs(rate - fractional) >= 0.01)
+			return rate;
+		return std::floor(fractional * 1000.0 + 0.5) / 1000.0;
+	}
 
 	// Captures and persists the current topology, then atomically replaces it
 	// with the one uniquely connected target matching friendlyName. The target

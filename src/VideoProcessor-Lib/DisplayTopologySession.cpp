@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -59,25 +60,35 @@ bool ReadEntry(const std::string& line, std::string& key, std::string& value)
 	return !key.empty();
 }
 
+// audit 2026-10-16: quarantineKey, when given, keeps the removed record's
+// value under that key (a timestamped name nothing reads back), so an
+// unrestorable record stops blocking every start but stays for diagnosis.
 bool UpdateRecoveryEntry(const std::string& statePath,
-	const std::string* value, std::string& error)
+	const std::string* value, std::string& error,
+	const std::string* quarantineKey = nullptr)
 {
 	error.clear();
 	std::vector<std::string> lines;
+	std::string quarantinedValue;
 	std::ifstream input(statePath);
 	std::string line;
 	while (std::getline(input, line))
 	{
 		std::string key;
-		std::string ignored;
-		if (ReadEntry(line, key, ignored) && key == RECOVERY_KEY)
+		std::string entryValue;
+		if (ReadEntry(line, key, entryValue) && key == RECOVERY_KEY)
+		{
+			quarantinedValue = entryValue;
 			continue;
+		}
 		lines.push_back(line);
 	}
 	input.close();
 
 	if (lines.empty())
 		lines.push_back("# Managed by VideoProcessor.");
+	if (quarantineKey && !quarantinedValue.empty())
+		lines.push_back(*quarantineKey + ": " + quarantinedValue);
 	if (value)
 		lines.push_back(std::string(RECOVERY_KEY) + ": " + *value);
 
@@ -744,6 +755,82 @@ namespace DisplayTopologySession
 		DebugLog::Log("Display topology restored: reason=%s paths=%zu modes=%zu record_cleared=1",
 			reason, topology.paths.size(), topology.modes.size());
 		return true;
+	}
+
+	// audit 2026-10-16: startup recovery must never stop the program on every
+	// start because a display in the saved topology is gone. Exact restore
+	// first; then the saved paths with SDC_ALLOW_CHANGES; then Windows' extend
+	// topology. Whatever happens after the exact attempt fails, the record is
+	// quarantined under a timestamped key so the next start is not blocked.
+	bool RecoverPendingAtStartup(const std::string& statePath,
+		const char* reason, bool& restored, bool& quarantined,
+		std::string& error)
+	{
+		restored = false;
+		quarantined = false;
+		error.clear();
+		std::string exactError;
+		if (RestorePending(statePath, reason, restored, exactError))
+			return true;
+
+		std::string encoded;
+		if (!ReadRecovery(statePath, encoded))
+		{
+			// The record vanished between the two reads; nothing to replay.
+			error = exactError;
+			return false;
+		}
+
+		std::string fallback = "none";
+		Topology topology;
+		std::string decodeError;
+		if (Deserialize(encoded, topology, decodeError))
+		{
+			LONG result = ERROR_SUCCESS;
+			if (ApplyTopology(topology, true, true, result) &&
+				ApplyTopology(topology, false, true, result))
+			{
+				fallback = "allow-changes";
+			}
+			else
+			{
+				DebugLog::Log(
+					"Display topology startup fallback: allow-changes failed windows_error=%ld",
+					result);
+				result = SetDisplayConfig(0, nullptr, 0, nullptr,
+					SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+				if (result == ERROR_SUCCESS)
+					fallback = "extend";
+				else
+					DebugLog::Log(
+						"Display topology startup fallback: extend failed windows_error=%ld",
+						result);
+			}
+		}
+
+		SYSTEMTIME now = {};
+		GetLocalTime(&now);
+		char stamp[32];
+		snprintf(stamp, sizeof(stamp), "%04u%02u%02u-%02u%02u%02u",
+			now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+			now.wSecond);
+		const std::string quarantineKey =
+			std::string(RECOVERY_KEY) + ".quarantined-" + stamp;
+		std::string quarantineError;
+		quarantined = UpdateRecoveryEntry(statePath, nullptr,
+			quarantineError, &quarantineKey);
+		restored = fallback != "none";
+		error = exactError;
+		if (!decodeError.empty())
+			error += "; " + decodeError;
+		if (!quarantineError.empty())
+			error += "; quarantine: " + quarantineError;
+		DebugLog::Log(
+			"Display topology startup recovery: reason=%s exact=failed fallback=%s "
+			"quarantined=%d key=%s error=%s",
+			reason, fallback.c_str(), quarantined ? 1 : 0,
+			quarantineKey.c_str(), error.c_str());
+		return restored;
 	}
 
 	bool BeginTargetOnly(const std::wstring& friendlyName,

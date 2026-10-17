@@ -305,6 +305,7 @@
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="CaptureLayerAuditTests.cpp" />
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp" />
+    <ClCompile Include="GuiAuditTests.cpp" />
     <ClCompile Include="VectorStoreTests.cpp" />
     <ClCompile Include="MotionValidityTests.cpp" />
     <ClCompile Include="KernelInverseTests.cpp" />

@@ -57,6 +57,7 @@
     <ClCompile Include="SdrToneShapeWtwTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="CaptureLayerAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="GuiAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
