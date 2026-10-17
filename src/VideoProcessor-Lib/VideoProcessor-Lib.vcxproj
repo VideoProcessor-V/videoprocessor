@@ -249,6 +249,7 @@
     <ClInclude Include="filesource\FileClockMapper.h" />
     <ClInclude Include="filesource\FilePlaybackState.h" />
     <ClInclude Include="filesource\FileMediaTypeAdapter.h" />
+    <ClInclude Include="filesource\FileSideData.h" />
     <ClInclude Include="ContentClassifier.h" />
     <ClInclude Include="ContentIntentObserver.h" />
     <ClInclude Include="DisplayProfile.h" />
@@ -436,6 +437,7 @@
     <ClCompile Include="EOTF.cpp" />
     <ClCompile Include="guid.cpp" />
     <ClCompile Include="HDRData.cpp" />
+    <ClCompile Include="filesource\FileSideData.cpp" />
     <ClCompile Include="InputLocked.cpp" />
     <ClCompile Include="IRenderer.cpp" />
 	<ClCompile Include="EotfTransitionStabilizer.cpp" />

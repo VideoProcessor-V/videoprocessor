@@ -224,6 +224,9 @@
     <ClInclude Include="HDRData.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="filesource\FileSideData.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
 	<ClInclude Include="CaptureVideoStatePolicy.h">
 	  <Filter>Header Files</Filter>
 	</ClInclude>
@@ -550,6 +553,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="HDRData.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="filesource\FileSideData.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="IRenderer.cpp">
