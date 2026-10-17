@@ -259,11 +259,11 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 		m_hasAVX2 ? "AVX2" : "scalar", m_workerCount);
 }
 
-bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
-	const VideoFrame& frame, BYTE* output)
+CR210DolbyVisionTunnelFormatter::FrameResult
+CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 {
-	if (!frame.GetData() || !output || m_outputSize <= 0)
-		return false;
+	if (!frame.GetData() || m_outputSize <= 0)
+		return FrameResult::REJECTED;
 	const auto* source = static_cast<const uint8_t*>(frame.GetData());
 	// EOS changes the immediate next picture to SDR even when its packet
 	// has no metadata body. A source counter gap can skip that picture, but
@@ -535,15 +535,28 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 		m_metadata.rgbBitAlignment =
 			m_alignment == ByteAlignment::LEFT ? 1 :
 			m_alignment == ByteAlignment::RIGHT ? 2 : 0;
-	if (m_alignment == ByteAlignment::UNKNOWN || !m_metadata.valid)
+	// The renderer may use SDR only before DV lock or after explicit EOS.
+	// Invalid metadata after DV lock must not expose the packed RGB pixels.
+	return m_alignment == ByteAlignment::UNKNOWN || !m_metadata.valid ?
+		FrameResult::BLACK : FrameResult::PICTURE;
+}
+
+bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
+	const VideoFrame& frame, BYTE* output)
+{
+	if (!output)
+		return false;
+	const FrameResult result = AnalyzeFrame(frame);
+	if (result == FrameResult::REJECTED)
+		return false;
+	if (result == FrameResult::BLACK)
 	{
-		// The renderer may use SDR only before DV lock or after explicit EOS.
-		// Invalid metadata after DV lock must not expose the packed RGB pixels.
 		memset(output, 0, static_cast<size_t>(m_outputSize));
 		return true;
 	}
 
 	// P216-style semiplanar output, with exact 12-bit I/C codes.
+	const auto* source = static_cast<const uint8_t*>(frame.GetData());
 	const bool leftAligned = m_alignment == ByteAlignment::LEFT;
 	auto* outputWords = reinterpret_cast<uint16_t*>(output);
 	if (m_workerCount > 0 &&
@@ -567,6 +580,16 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	}
 	else
 		ConvertRows(source, outputWords, 0, m_height, leftAligned);
+	return true;
+}
+
+bool CR210DolbyVisionTunnelFormatter::UnpackPicture(
+	const void* source, BYTE* output, bool highAligned) const
+{
+	if (!source || !output || m_outputSize <= 0)
+		return false;
+	ConvertRows(static_cast<const uint8_t*>(source), reinterpret_cast<uint16_t*>(output),
+		0, m_height, highAligned);
 	return true;
 }
 

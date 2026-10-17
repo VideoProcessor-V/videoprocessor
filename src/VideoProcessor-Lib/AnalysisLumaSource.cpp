@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "AnalysisLumaSource.h"
+#include "vprenderer/DolbyVisionTunnelUnpackReference.h"
 
 #include <algorithm>
 #include <limits>
@@ -285,6 +286,10 @@ bool AnalysisLumaSource::IsValid() const
 	if (!CheckedMultiply(rowBytes, static_cast<size_t>(height), requiredBytes) ||
 		requiredBytes > dataBytes)
 		return false;
+	if (format == AnalysisLumaFormat::PackedDolbyVision422)
+		return DolbyVisionTunnelUnpackReference::SupportsContainer(encoding) && (width & 1) == 0 &&
+			(rgbBitAlignment == 1 || rgbBitAlignment == 2) &&
+			rowBytes >= static_cast<size_t>(width) * 4;
 	if (format == AnalysisLumaFormat::SdrTunnelRgb)
 		return encoding == VideoFrameEncoding::R210 &&
 			(rgbBitAlignment == 1 || rgbBitAlignment == 2) &&
@@ -325,6 +330,24 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 {
 	if (!IsValid() || x < 0 || y < 0 || x >= width || y >= height)
 		return false;
+	if (format == AnalysisLumaFormat::PackedDolbyVision422)
+	{
+		// The codes DecodedDolbyVision422 reads from the CPU's planes: the
+		// pixel's 12-bit intensity and its pair's (C0, C1), upper ten bits.
+		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
+		const uint32_t shift = DolbyVisionTunnelUnpackReference::ContainerShift(encoding, rgbBitAlignment == 1);
+		const bool bigEndian = DolbyVisionTunnelUnpackReference::ContainerBigEndian(encoding);
+		auto word = [row, bigEndian](int at)
+		{
+			const uint8_t* pixel = row + static_cast<size_t>(at) * 4;
+			return bigEndian ? ReadBigEndian32(pixel) : ReadLittleEndian32(pixel);
+		};
+		const int pair = x & ~1;
+		result.luma = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Intensity(word(x), shift) >> 6);
+		result.chromaU = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair), shift) >> 6);
+		result.chromaV = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair + 1), shift) >> 6);
+		return true;
+	}
 	if (format != AnalysisLumaFormat::NativeRgb &&
 		format != AnalysisLumaFormat::SdrTunnelRgb)
 	{
@@ -413,6 +436,8 @@ const char* AnalysisLumaFormatName(const AnalysisLumaSource& source)
 		return "decoded-dv-12bit-422";
 	if (source.format == AnalysisLumaFormat::SdrTunnelRgb)
 		return "sdr-tunnel-rgb8";
+	if (source.format == AnalysisLumaFormat::PackedDolbyVision422)
+		return "packed-dv-12bit-422";
 	if (source.format == AnalysisLumaFormat::NativeRgb)
 		return "native-rgb-sparse";
 	if (source.format == AnalysisLumaFormat::NativeYuv422)

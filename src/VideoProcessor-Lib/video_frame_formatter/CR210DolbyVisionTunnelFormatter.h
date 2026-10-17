@@ -19,6 +19,24 @@ public:
 	CR210DolbyVisionTunnelFormatter& operator=(const CR210DolbyVisionTunnelFormatter&) = delete;
 	void OnVideoState(VideoStateComPtr& state) override;
 	bool FormatVideoFrame(const VideoFrame& frame, BYTE* output) override;
+	// dv_tunnel_gpu_unpack: everything FormatVideoFrame does except writing
+	// the planes. The DM packet is found and CRC-checked reading only its own
+	// pixels (plus a 4096-pixel alignment probe before lock); the metadata and
+	// contract are then current exactly as after FormatVideoFrame.
+	//   REJECTED  FormatVideoFrame would return false
+	//   BLACK     FormatVideoFrame would write zeros (no lock / no valid DM)
+	//   PICTURE   FormatVideoFrame would unpack every pixel: the caller unpacks
+	//             the raw frame itself (GpuDolbyVisionTunnelUnpack) with
+	//             PlanesHighAligned()
+	enum class FrameResult { REJECTED, BLACK, PICTURE };
+	FrameResult AnalyzeFrame(const VideoFrame& frame);
+	// The RGB8 placement inside the r210 words the planes use: true = the high
+	// eight bits of each 10-bit channel, false = the low eight.
+	bool PlanesHighAligned() const { return m_alignment == ByteAlignment::LEFT; }
+	// The planes FormatVideoFrame writes for a picture AnalyzeFrame returned
+	// PICTURE for, from that picture's raw frame and placement (the GPU
+	// unpack's fallback for a frame already handed on raw). Single-threaded.
+	bool UnpackPicture(const void* source, BYTE* output, bool highAligned) const;
 	LONG GetOutFrameSize() const override { return m_outputSize; }
 	VideoFrameFormatterOutputContract GetOutputContract() const override
 	{

@@ -118,7 +118,35 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
     {
         if (input.dolby.requiresBlackFrame)
             return result;
-        if (input.dolby.valid)
+        if (input.dolby.valid && input.dolbyTunnelPackedAlignment != 0)
+        {
+            // The same decoded codes, unpacked at each sample from the raw
+            // frame (the planes were unpacked on the GPU): r210, R10b, R10l.
+            if ((input.encoding != VideoFrameEncoding::R210 &&
+                    input.encoding != VideoFrameEncoding::R10b &&
+                    input.encoding != VideoFrameEncoding::R10l) ||
+                !input.nativeOwner || !input.converted422 ||
+                (input.dolbyTunnelPackedAlignment != 1 &&
+                    input.dolbyTunnelPackedAlignment != 2) ||
+                !input.convertedContract.IsValid() ||
+                input.convertedContract.colorDepth != 12 ||
+                input.convertedContract.bitShift != 4 ||
+                input.convertedContract.sampleRange !=
+                    (input.dolby.fullRange ? VideoFrameSampleRange::FULL :
+                        VideoFrameSampleRange::LIMITED))
+                return result;
+            backing = native(AnalysisLumaFormat::PackedDolbyVision422,
+                input.colorspace);
+            backing.rgbBitAlignment = input.dolbyTunnelPackedAlignment;
+            result.domain = AnalysisFrameDomain::DecodedDolbyVision422;
+            result.sourceOwner = input.nativeOwner;
+            result.sampleRange = input.convertedContract.sampleRange;
+            result.colorDepth = input.convertedContract.colorDepth;
+            result.bitShift = input.convertedContract.bitShift;
+            result.rgbBitAlignment = input.dolbyTunnelPackedAlignment;
+            result.dolbyFullRange = input.dolby.fullRange;
+        }
+        else if (input.dolby.valid)
         {
             if (input.encoding != VideoFrameEncoding::R210 ||
                 !input.convertedOwner || !input.converted422 ||

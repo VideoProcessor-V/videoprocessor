@@ -8,6 +8,13 @@
 #include <VideoState.h>
 #include <CpuFeatures.h>
 #include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include "DolbyVisionTunnelSender.h"
+#include <vprenderer/DolbyVisionTunnelUnpackReference.h>
+#include <AnalysisFrame.h>
+#include <memory>
+#include <chrono>
+#include <cstring>
+#include <string>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -19,208 +26,8 @@ namespace Tests
 {
     namespace
     {
-        using Packet = std::array<uint8_t, 128>;
+        using namespace DvSender;
         using Formatter = CR210DolbyVisionTunnelFormatter;
-
-        // A forward sender, independent of the decoder's bit-mask expressions.
-        // ETSI GS CCM 001 V1.1.1 sections 6.2-6.4 define the byte syntax,
-        // scrambling and raster order. RGB8 packing follows HDMI 1.4a 6.5.4
-        // and the independently published CroqueMr/libreelec-x86-DV packer:
-        // d9ad989e, CB1/src/dvbridge_render.c, lines 629-633.
-        uint32_t SenderCrc(const uint8_t* bytes, size_t count)
-        {
-            uint32_t remainder = 0xFFFFFFFFU;
-            for (size_t byte = 0; byte < count; ++byte)
-            {
-                for (int bit = 7; bit >= 0; --bit)
-                {
-                    const bool feedback = ((remainder >> 31) ^
-                        ((bytes[byte] >> bit) & 1U)) != 0;
-                    remainder <<= 1;
-                    if (feedback)
-                        remainder ^= 0x04C11DB7U;
-                }
-            }
-            return remainder;
-        }
-
-        void Put16(std::vector<uint8_t>& bytes, size_t at, uint16_t value)
-        {
-            bytes[at] = static_cast<uint8_t>(value >> 8);
-            bytes[at + 1] = static_cast<uint8_t>(value);
-        }
-
-        void Put32(uint8_t* bytes, uint32_t value)
-        {
-            for (unsigned byte = 0; byte < 4; ++byte)
-                bytes[byte] = static_cast<uint8_t>(value >> (24 - byte * 8));
-        }
-
-        void FinishPacket(Packet& packet)
-        {
-            Put32(packet.data() + 124, SenderCrc(packet.data(), 124));
-        }
-
-        std::vector<uint8_t> DmBody(uint16_t peak = 3072,
-            bool fullRange = true, size_t unknownPayload = 0)
-        {
-            std::vector<uint8_t> dm(71, 0);
-            dm[1] = 1; // scene refresh
-            const int16_t nonlinear[] = {
-                8192, -4096, 2048, 0, 8192, -2048, 512, 256, 8192
-            };
-            const uint16_t linear[] = {
-                16384, 0, 0, 0, 8192, 0, 0, 0, 4096
-            };
-            for (size_t i = 0; i < 9; ++i)
-            {
-                Put16(dm, 2 + i * 2, static_cast<uint16_t>(nonlinear[i]));
-                Put16(dm, 32 + i * 2, linear[i]);
-            }
-            Put32(dm.data() + 20, 0x01000000U);
-            Put32(dm.data() + 24, 0x08000000U);
-            Put32(dm.data() + 28, 0x08000000U);
-            dm[50] = dm[51] = 0xFF;
-            dm[60] = 12;
-            dm[61] = 2;
-            dm[62] = 1;
-            dm[63] = fullRange ? 1 : 0;
-            Put16(dm, 64, 62);
-            Put16(dm, 66, 3696);
-            dm[69] = 42;
-            dm[70] = unknownPayload ? 2 : 1;
-            if (unknownPayload)
-            {
-                const size_t at = dm.size();
-                dm.resize(at + 5 + unknownPayload, 0xA5);
-                Put32(dm.data() + at, static_cast<uint32_t>(unknownPayload));
-                dm[at + 4] = 200; // bounded unknown extension, deliberately skipped
-            }
-            const size_t at = dm.size();
-            dm.resize(at + 11, 0);
-            Put32(dm.data() + at, 6);
-            dm[at + 4] = 1;
-            Put16(dm, at + 5, 62);
-            Put16(dm, at + 7, peak);
-            Put16(dm, at + 9, 1024);
-            return dm;
-        }
-
-        std::vector<Packet> Packetize(const std::vector<uint8_t>& body,
-            uint8_t current = 3, uint8_t affected = 3,
-            bool noMetadata = false, bool eos = false)
-        {
-            std::vector<Packet> packets;
-            size_t offset = 0;
-            do
-            {
-                Packet packet{};
-                const bool first = packets.empty();
-                const size_t capacity = first ? 119 : 121;
-                const size_t chunk = noMetadata ? 0 :
-                    (std::min)(capacity, body.size() - offset);
-                const bool last = noMetadata || offset + chunk == body.size();
-                const unsigned kind = first ? (last ? 0 : 1) : (last ? 3 : 2);
-                packet[0] = static_cast<uint8_t>((kind << 6) | (noMetadata ? 1 : 0));
-                packet[1] = static_cast<uint8_t>((affected << 4) | current);
-                packet[2] = eos ? 1 : 0;
-                if (first && !noMetadata)
-                {
-                    packet[3] = static_cast<uint8_t>(body.size() >> 8);
-                    packet[4] = static_cast<uint8_t>(body.size());
-                }
-                if (chunk)
-                    std::copy_n(body.data() + offset, chunk,
-                        packet.data() + (first ? 5 : 3));
-                FinishPacket(packet);
-                packets.push_back(packet);
-                offset += chunk;
-                if (last)
-                    break;
-            } while (true);
-            return packets;
-        }
-
-        struct SenderPicture
-        {
-            VideoStateComPtr state;
-            std::vector<uint16_t> intensity, chroma;
-            std::vector<BYTE> input;
-            bool high8;
-
-            SenderPicture(bool high, uint32_t width = 130, uint32_t height = 128)
-                : high8(high)
-            {
-                state = new VideoState();
-                state->valid = true;
-                state->displayMode = std::make_shared<DisplayMode>(
-                    width, height, false, 24000, 1001);
-                state->videoFrameEncoding = VideoFrameEncoding::R210;
-                state->dolbyVisionTunnel = true;
-                intensity.resize(static_cast<size_t>(width) * height);
-                chroma.resize(intensity.size());
-                input.resize(state->BytesPerFrame(), 0xAD);
-                for (size_t i = 0; i < intensity.size(); ++i)
-                {
-                    intensity[i] = static_cast<uint16_t>(i & 4095U);
-                    chroma[i] = static_cast<uint16_t>((i * 73U + 31U) & 4095U);
-                    Pack(i);
-                }
-            }
-
-            void Pack(size_t pixel)
-            {
-                const unsigned y = intensity[pixel], c = chroma[pixel];
-                const unsigned rgb8[] = { c / 16, y / 16,
-                    (c % 16) * 16 + y % 16 };
-                const unsigned factor = high8 ? 4 : 1;
-                const uint32_t r210 = (rgb8[0] * factor << 20) |
-                    (rgb8[1] * factor << 10) | (rgb8[2] * factor);
-                const size_t width = state->displayMode->FrameWidth();
-                Put32(input.data() + (pixel / width) * state->BytesPerRow() +
-                    (pixel % width) * 4, r210);
-            }
-
-            void Embed(const std::vector<Packet>& packets)
-            {
-                Assert::IsTrue(packets.size() * 3072 <= intensity.size());
-                for (size_t p = 0; p < packets.size(); ++p)
-                {
-                    for (size_t copy = 0; copy < 3; ++copy)
-                    {
-                        for (size_t bit = 0; bit < 1024; ++bit)
-                        {
-                            const size_t pixel = p * 3072 + copy * 1024 + bit;
-                            const unsigned metadataBit =
-                                (packets[p][bit / 8] >> (7 - bit % 8)) & 1U;
-                            unsigned parity = 0;
-                            for (unsigned b = 0; b < 12; ++b)
-                            {
-                                parity ^= (intensity[pixel] >> b) & 1U;
-                                if (b != 0)
-                                    parity ^= (chroma[pixel] >> b) & 1U;
-                            }
-                            chroma[pixel] = static_cast<uint16_t>(
-                                (chroma[pixel] / 2) * 2 + (metadataBit ^ parity));
-                            Pack(pixel);
-                        }
-                    }
-                }
-            }
-
-            void CorruptCopy(size_t packet, size_t copy)
-            {
-                const size_t pixel = packet * 3072 + copy * 1024 + 17;
-                chroma[pixel] ^= 1;
-                Pack(pixel);
-            }
-
-            void CorruptAllCopies(size_t packet = 0)
-            {
-                for (size_t copy = 0; copy < 3; ++copy)
-                    CorruptCopy(packet, copy);
-            }
-        };
 
         DolbyVisionTunnelFrameMetadata Deliver(Formatter& formatter,
             SenderPicture& picture, uint64_t counter,
@@ -702,6 +509,339 @@ namespace Tests
             dm = Deliver(formatter, picture, 28);
             Assert::IsFalse(dm.valid);
             Assert::IsTrue(dm.allowSdrFallback);
+        }
+    };
+
+    namespace
+    {
+        // dv_tunnel_gpu_unpack: AnalyzeFrame on a frame whose pixels beyond the
+        // readable pages are PAGE_NOACCESS (SEH here: no C++ unwinding).
+        bool AnalyzeWithinReadableBytes(Formatter& formatter, const VideoFrame& frame,
+            Formatter::FrameResult& result)
+        {
+            __try
+            {
+                result = formatter.AnalyzeFrame(frame);
+                return true;
+            }
+            __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+            {
+                return false;
+            }
+        }
+
+        bool SameMetadata(const DolbyVisionTunnelFrameMetadata& a, const DolbyVisionTunnelFrameMetadata& b)
+        {
+            return a.valid == b.valid && a.fullRange == b.fullRange && a.allowSdrFallback == b.allowSdrFallback &&
+                a.requiresBlackFrame == b.requiresBlackFrame && a.rgbBitAlignment == b.rgbBitAlignment &&
+                std::memcmp(a.nonlinear, b.nonlinear, sizeof(a.nonlinear)) == 0 &&
+                std::memcmp(a.nonlinearOffset, b.nonlinearOffset, sizeof(a.nonlinearOffset)) == 0 &&
+                std::memcmp(a.linear, b.linear, sizeof(a.linear)) == 0 &&
+                a.sourceMinPq == b.sourceMinPq && a.sourceMaxPq == b.sourceMaxPq &&
+                a.hasSceneMetadata == b.hasSceneMetadata && a.sceneMaxPq == b.sceneMaxPq && a.sceneAvgPq == b.sceneAvgPq;
+        }
+    }
+
+    // dv_tunnel_gpu_unpack (2026-10-16): the GPU path's two halves. The CPU keeps
+    // the DM packet (AnalyzeFrame); the shader (transcribed in
+    // DolbyVisionTunnelUnpackReference) must write exactly the CPU's planes.
+    TEST_CLASS(DolbyVisionTunnelGpuUnpackReferenceTests)
+    {
+    public:
+        TEST_METHOD(ShaderFetchAndStoreRoundTripsAreExact)
+        {
+            // Every byte through the rgba8 fetch, every 16-bit sample through
+            // the unorm16 store.
+            for (uint32_t b = 0; b < 256; ++b)
+                Assert::AreEqual(b, DolbyVisionTunnelUnpackReference::FetchByte(static_cast<uint8_t>(b)));
+            for (uint32_t v = 0; v < 65536; ++v)
+                if (DolbyVisionTunnelUnpackReference::StoreUnorm16(v) != v)
+                    Assert::Fail((L"unorm16 store changed " + std::to_wstring(v)).c_str());
+        }
+
+        TEST_METHOD(ShaderReferenceMatchesCpuUnpackBitExactly)
+        {
+            // Sender pictures (every 12-bit code), then every pixel after the
+            // packet replaced by arbitrary 32-bit words (the unused top bits and
+            // the r210 bits outside the RGB8 placement set too) and the row
+            // padding filled: the reference equals the CPU's scalar and AVX2
+            // planes, for both RGB8 placements.
+            uint32_t seed = 0x2545F491u;
+            auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+            int cases = 0;
+            for (const bool high8 : { false, true })
+                for (const unsigned width : { 128U, 130U, 134U, 1922U })
+                {
+                    const unsigned height = width > 1000 ? 1081U : 100U;
+                    SenderPicture picture(high8, width, height);
+                    picture.Embed(Packetize(DmBody()));
+                    const size_t rowBytes = picture.state->BytesPerRow();
+                    for (size_t row = 0; row < height; ++row)
+                        for (size_t byte = 0; byte + 4 <= rowBytes; byte += 4)
+                        {
+                            const size_t pixel = row * width + byte / 4;
+                            if (byte / 4 < width && pixel < 3072)
+                                continue;
+                            const uint32_t word = next();
+                            std::memcpy(picture.input.data() + row * rowBytes + byte, &word, 4);
+                        }
+                    for (const auto method : { Formatter::ConversionMethod::SCALAR, Formatter::ConversionMethod::AVX2 })
+                    {
+                        if (method == Formatter::ConversionMethod::AVX2 && !CpuFeatures::SupportsAvx2Kernels())
+                            continue;
+                        Formatter formatter;
+                        formatter.SetConversionMethod(method);
+                        formatter.OnVideoState(picture.state);
+                        std::vector<BYTE> output;
+                        AssertPeak(Deliver(formatter, picture, 1, &output), 3072);
+                        // The same picture in each container (R10: the r210 word
+                        // << 2, padding bits set, big / little endian).
+                        for (const VideoFrameEncoding container : { VideoFrameEncoding::R210,
+                            VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
+                        {
+                            std::vector<BYTE> raw(picture.input.size());
+                            DolbyVisionTunnelUnpackReference::RepackR210(picture.input.data(), raw.data(), raw.size(),
+                                container, 1);
+                            std::vector<uint16_t> reference(static_cast<size_t>(width) * height * 2, 0xEEEE);
+                            DolbyVisionTunnelUnpackReference::UnpackFrame(raw.data(), rowBytes,
+                                static_cast<int>(width), static_cast<int>(height), container, high8, reference.data());
+                            Assert::AreEqual(reference.size() * 2, output.size());
+                            if (std::memcmp(reference.data(), output.data(), output.size()) != 0)
+                            {
+                                const auto* cpu = reinterpret_cast<const uint16_t*>(output.data());
+                                size_t i = 0;
+                                while (cpu[i] == reference[i]) ++i;
+                                Assert::Fail((std::wstring(container == VideoFrameEncoding::R210 ? L"r210 " :
+                                    container == VideoFrameEncoding::R10b ? L"R10b " : L"R10l ") +
+                                    (high8 ? L"high8 " : L"low8 ") + std::to_wstring(width) +
+                                    L": the shader reference differs from the CPU at sample " + std::to_wstring(i) + L": " +
+                                    std::to_wstring(reference[i]) + L" vs " + std::to_wstring(cpu[i])).c_str());
+                            }
+                            ++cases;
+                        }
+                    }
+                }
+            Logger::WriteMessage((L"shader reference: " + std::to_wstring(cases) + L" frames bit-exact with the CPU unpack\n").c_str());
+        }
+
+        TEST_METHOD(AnalyzeFrameTracksFormatVideoFrameOnEveryPicture)
+        {
+            // Two formatters fed the same pictures, one AnalyzeFrame only: the
+            // same results, metadata, contract and alignment through lock, no_md,
+            // advance metadata, an alignment change, CRC loss to the loss limit,
+            // fresh DM with EOS and the SDR boundary after it.
+            SenderPicture high(true), low(false);
+            high.Embed(Packetize(DmBody(3072, false)));
+            Formatter full, analyzed;
+            full.OnVideoState(high.state);
+            analyzed.OnVideoState(high.state);
+            uint64_t counter = 0;
+            auto step = [&](SenderPicture& picture)
+            {
+                ++counter;
+                std::vector<BYTE> output(full.GetOutFrameSize(), 0xCD);
+                const VideoFrame frame(picture.input.data(), counter, 0, nullptr);
+                Assert::IsTrue(full.FormatVideoFrame(frame, output.data()));
+                const auto result = analyzed.AnalyzeFrame(frame);
+                Assert::IsTrue(result != Formatter::FrameResult::REJECTED);
+                const bool black = std::all_of(output.begin(), output.end(), [](BYTE b) { return b == 0; });
+                Assert::IsTrue(SameMetadata(full.GetDolbyVisionTunnelMetadata(), analyzed.GetDolbyVisionTunnelMetadata()),
+                    (L"metadata differs at picture " + std::to_wstring(counter)).c_str());
+                const auto a = full.GetOutputContract(), b = analyzed.GetOutputContract();
+                Assert::IsTrue(a.sampleRange == b.sampleRange && a.colorDepth == b.colorDepth && a.bitShift == b.bitShift);
+                Assert::AreEqual(full.PlanesHighAligned(), analyzed.PlanesHighAligned());
+                if (result == Formatter::FrameResult::PICTURE)
+                {
+                    // The planes the GPU writes: the CPU's, from the alignment reported.
+                    std::vector<uint16_t> reference(output.size() / 2);
+                    DolbyVisionTunnelUnpackReference::UnpackFrame(picture.input.data(), picture.state->BytesPerRow(),
+                        static_cast<int>(picture.state->displayMode->FrameWidth()),
+                        static_cast<int>(picture.state->displayMode->FrameHeight()),
+                        VideoFrameEncoding::R210, analyzed.PlanesHighAligned(), reference.data());
+                    Assert::IsTrue(std::memcmp(reference.data(), output.data(), output.size()) == 0,
+                        (L"planes differ at picture " + std::to_wstring(counter)).c_str());
+                }
+                else
+                    Assert::IsTrue(black, (L"BLACK but the CPU wrote a picture at " + std::to_wstring(counter)).c_str());
+                return result;
+            };
+            Assert::IsTrue(step(high) == Formatter::FrameResult::PICTURE);           // lock
+            high.Embed(Packetize({}, 3, 3, true));
+            Assert::IsTrue(step(high) == Formatter::FrameResult::PICTURE);           // no_md keeps DM
+            high.Embed(Packetize(DmBody(2048), 3, 4));
+            Assert::IsTrue(step(high) == Formatter::FrameResult::PICTURE);           // advance DM
+            high.Embed(Packetize({}, 4, 4, true));
+            Assert::IsTrue(step(high) == Formatter::FrameResult::PICTURE);
+            low.Embed(Packetize(DmBody(1024), 4, 4));
+            Assert::IsTrue(step(low) == Formatter::FrameResult::PICTURE);            // alignment change
+            Assert::IsFalse(analyzed.PlanesHighAligned());
+            low.CorruptAllCopies();
+            for (int k = 0; k < 26; ++k)
+                step(low);                                                            // loss to the limit
+            Assert::IsTrue(step(low) == Formatter::FrameResult::BLACK);
+            low.Embed(Packetize(DmBody(512), 5, 5, false, true));
+            Assert::IsTrue(step(low) == Formatter::FrameResult::PICTURE);            // fresh DM with EOS
+            std::fill(low.input.begin(), low.input.end(), 0);
+            Assert::IsTrue(step(low) == Formatter::FrameResult::BLACK);              // past EOS: SDR allowed
+            Assert::IsTrue(analyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback);
+        }
+
+        TEST_METHOD(PackedAnalysisSamplesEqualTheDecodedPlanes)
+        {
+            // With the GPU unpack the CPU analysis samples the raw r210 words:
+            // every pixel gives the codes the CPU planes give (both placements,
+            // full and limited DM range), with the same domain and contract;
+            // an untrusted picture or a bad placement gives no source.
+            for (const bool high8 : { false, true })
+                for (const bool fullRange : { true, false })
+                {
+                    SenderPicture picture(high8, 130, 128);
+                    picture.Embed(Packetize(DmBody(3072, fullRange)));
+                    Formatter formatter;
+                    formatter.OnVideoState(picture.state);
+                    std::vector<BYTE> planes;
+                    const auto dm = Deliver(formatter, picture, 1, &planes);
+                    auto rawOwner = std::make_shared<std::vector<BYTE>>(picture.input);
+                    auto planeOwner = std::make_shared<std::vector<BYTE>>(planes);
+                    AnalysisFrameInput input;
+                    input.nativeData = rawOwner->data();
+                    input.nativeBytes = rawOwner->size();
+                    input.nativeRowBytes = picture.state->BytesPerRow();
+                    input.nativeOwner = rawOwner;
+                    input.convertedData = planeOwner->data();
+                    input.convertedBytes = planeOwner->size();
+                    input.convertedOwner = planeOwner;
+                    input.convertedContract = formatter.GetOutputContract();
+                    input.dolby = dm;
+                    input.width = 130;
+                    input.height = 128;
+                    input.encoding = VideoFrameEncoding::R210;
+                    input.colorspace = ColorSpace::BT_2020;
+                    input.sourceGeneration = 7;
+                    input.converted422 = true;
+                    input.dolbyVisionTunnel = true;
+                    const auto decoded = PrepareAnalysisFrame(input);
+                    AnalysisFrameInput packedInput = input;
+                    packedInput.convertedData = nullptr;
+                    packedInput.convertedBytes = 0;
+                    packedInput.convertedOwner = nullptr;
+                    packedInput.dolbyTunnelPackedAlignment = formatter.PlanesHighAligned() ? 1 : 2;
+                    const auto packed = PrepareAnalysisFrame(packedInput);
+                    Assert::IsTrue(decoded.IsValid() && packed.IsValid());
+                    // R10b / R10l containers of the same picture sample the same codes.
+                    for (const VideoFrameEncoding container : { VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
+                    {
+                        auto repacked = std::make_shared<std::vector<BYTE>>(rawOwner->size());
+                        DolbyVisionTunnelUnpackReference::RepackR210(rawOwner->data(), repacked->data(), repacked->size(),
+                            container, 2);
+                        AnalysisFrameInput r10 = packedInput;
+                        r10.nativeData = repacked->data();
+                        r10.nativeOwner = repacked;
+                        r10.encoding = container;
+                        const auto r10Packed = PrepareAnalysisFrame(r10);
+                        Assert::IsTrue(r10Packed.IsValid(), L"R10 packed analysis unavailable");
+                        for (int y = 0; y < 128; ++y)
+                            for (int x = 0; x < 130; ++x)
+                            {
+                                AnalysisLumaSample a, b;
+                                Assert::IsTrue(decoded.source.Sample(x, y, a) && r10Packed.source.Sample(x, y, b));
+                                if (a.luma != b.luma || a.chromaU != b.chromaU || a.chromaV != b.chromaV)
+                                    Assert::Fail((L"R10 packed analysis differs at (" + std::to_wstring(x) + L", " +
+                                        std::to_wstring(y) + L")").c_str());
+                            }
+                    }
+                    Assert::AreEqual(static_cast<int>(AnalysisLumaFormat::PackedDolbyVision422), static_cast<int>(packed.source.format));
+                    Assert::AreEqual(static_cast<int>(decoded.domain), static_cast<int>(packed.domain));
+                    Assert::IsTrue(decoded.sampleRange == packed.sampleRange && decoded.colorDepth == packed.colorDepth &&
+                        decoded.bitShift == packed.bitShift && decoded.dolbyFullRange == packed.dolbyFullRange);
+                    Assert::IsFalse(packed.usesConverted);
+                    for (int y = 0; y < 128; ++y)
+                        for (int x = 0; x < 130; ++x)
+                        {
+                            AnalysisLumaSample a, b;
+                            Assert::IsTrue(decoded.source.Sample(x, y, a) && packed.source.Sample(x, y, b));
+                            if (a.luma != b.luma || a.chromaU != b.chromaU || a.chromaV != b.chromaV)
+                                Assert::Fail((L"packed analysis differs at (" + std::to_wstring(x) + L", " + std::to_wstring(y) + L")").c_str());
+                        }
+                    AnalysisFrameInput untrusted = packedInput;
+                    untrusted.dolby.requiresBlackFrame = true;
+                    Assert::IsFalse(PrepareAnalysisFrame(untrusted).IsValid());
+                    AnalysisFrameInput badPlacement = packedInput;
+                    badPlacement.dolbyTunnelPackedAlignment = 3;
+                    Assert::IsFalse(PrepareAnalysisFrame(badPlacement).IsValid());
+                }
+        }
+
+        TEST_METHOD(AnalyzeFrameReadsOnlyThePacketPixels)
+        {
+            // 4K: everything after the DM packets (and the 4096-pixel alignment
+            // probe) is PAGE_NOACCESS. AnalyzeFrame locks, keeps DM and handles
+            // CRC loss without touching it, so with the GPU unpack the CPU never
+            // reads the picture. Timing against FormatVideoFrame logged.
+            for (const bool high8 : { true, false })
+            {
+                SenderPicture picture(high8, 3840, 2160);
+                const auto packets = Packetize(DmBody(3072, true, 400)); // continuation packets
+                Assert::IsTrue(packets.size() >= 2);
+                picture.Embed(packets);
+                const size_t bytes = picture.input.size();
+                const size_t rowBytes = picture.state->BytesPerRow();
+                const size_t readablePixels = (std::max)(packets.size() * 3072, size_t(4096));
+                const size_t readableBytes = ((readablePixels + 3839) / 3840) * rowBytes;
+                SYSTEM_INFO info{};
+                GetSystemInfo(&info);
+                const size_t page = info.dwPageSize;
+                const size_t readablePages = (readableBytes + page - 1) / page * page;
+                const size_t total = (bytes + page - 1) / page * page;
+                BYTE* guarded = static_cast<BYTE*>(VirtualAlloc(nullptr, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+                Assert::IsNotNull(guarded);
+                std::memcpy(guarded, picture.input.data(), bytes);
+                DWORD old = 0;
+                Assert::IsTrue(VirtualProtect(guarded + readablePages, total - readablePages, PAGE_NOACCESS, &old) != 0);
+                Formatter formatter;
+                formatter.OnVideoState(picture.state);
+                Formatter::FrameResult result = Formatter::FrameResult::REJECTED;
+                bool ok = true;
+                double analyzeMs = 1e30;
+                for (uint64_t counter = 1; counter <= 8 && ok; ++counter)
+                {
+                    const VideoFrame frame(guarded, counter, 0, nullptr);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    ok = AnalyzeWithinReadableBytes(formatter, frame, result);
+                    analyzeMs = (std::min)(analyzeMs, std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count());
+                    ok = ok && result == Formatter::FrameResult::PICTURE;
+                }
+                // CRC loss after lock (r210 bit 22 of pixel 17 in each copy of the
+                // first packet: an RGB8 bit in either placement): still no
+                // picture read, and the cached DM still shows the picture.
+                for (size_t copy = 0; copy < 3; ++copy)
+                    guarded[(copy * 1024 + 17) * 4 + 1] ^= 0x40;
+                const VideoFrame damaged(guarded, 9, 0, nullptr);
+                const bool okDamaged = AnalyzeWithinReadableBytes(formatter, damaged, result);
+                const bool damagedBlack = okDamaged && formatter.GetDolbyVisionTunnelMetadata().requiresBlackFrame;
+                VirtualFree(guarded, 0, MEM_RELEASE);
+                Assert::IsTrue(ok, L"AnalyzeFrame read beyond the DM packet pixels, or did not lock");
+                Assert::IsTrue(okDamaged, L"AnalyzeFrame read beyond the packet pixels on CRC loss");
+                Assert::IsTrue(damagedBlack, L"a picture without a CRC-valid header must be black");
+                // The CPU unpack it replaces, for the report.
+                Formatter cpu;
+                cpu.OnVideoState(picture.state);
+                std::vector<BYTE> output(cpu.GetOutFrameSize());
+                double fullMs = 1e30;
+                for (uint64_t counter = 1; counter <= 8; ++counter)
+                {
+                    const VideoFrame frame(picture.input.data(), counter, 0, nullptr);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    Assert::IsTrue(cpu.FormatVideoFrame(frame, output.data()));
+                    fullMs = (std::min)(fullMs, std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count());
+                }
+                Logger::WriteMessage(("DV tunnel 4K " + std::string(high8 ? "high8" : "low8") + ": FormatVideoFrame " +
+                    std::to_string(fullMs) + " ms (threaded unpack), AnalyzeFrame alone " + std::to_string(analyzeMs) +
+                    " ms (packets only)\n").c_str());
+            }
         }
     };
 }
