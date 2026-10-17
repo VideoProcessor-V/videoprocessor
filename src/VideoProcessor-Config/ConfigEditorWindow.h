@@ -79,6 +79,11 @@ public:
         const QString& renderer, const QString& color, bool hdrSource = false);
     void setRendererDiscoveryForTesting(const QStringList& allRenderers,
         const QStringList& filteredRenderers);
+    // Test mode normally skips modal prompts; with this on, the unsaved-edit
+    // and changed-on-disk prompts are shown so a test can answer them.
+    void setPromptsForTesting(bool enabled) { promptsForTesting_ = enabled; }
+    // The tray menu's Exit: asks about unsaved edits first.
+    void requestExit();
 
 protected:
     bool event(QEvent* event) override;
@@ -162,6 +167,18 @@ private:
     void migrateUnifiedColorOutputProfiles();
     void migrateCalibrationProfiles();
     void migrateViewportZoomProfiles();
+    // Every load-time migration, in order: construction, target switch,
+    // Cancel / Discard and reloads all run the same sequence.
+    void runLoadMigrations();
+    // Discards the working copy and reloads the target (Cancel / Discard).
+    void discardEdits();
+    // Reloads a clean editor whose file changed on disk since it was loaded.
+    bool reloadIfChangedOnDisk();
+    bool configurationChangedOnDisk() const;
+    // Save / Discard / Keep editing for unsaved edits; true when the caller
+    // may go on (saved or discarded).
+    bool resolveUnsavedEdits(const QString& action, bool reloadOnDiscard = true);
+    bool promptsEnabled() const { return !testMode_ || promptsForTesting_; }
     void loadDiscoveryCache();
     void applyMonitorDiscovery(const QStringList& discovered);
     void setupTray();
@@ -286,6 +303,10 @@ private:
     bool validationValid_ = true;
     bool hasPendingMigrations_ = false;
     bool testMode_ = false;
+    bool promptsForTesting_ = false;
+    // [vprenderer.motion.Default] added in memory for a file without a Motion
+    // profile: removed again on save while it holds no settings.
+    bool seededMotionDefault_ = false;
     std::unique_ptr<ConfigEditorCore::ConfigDocument> document_;
 	quintptr publishedWindowHandle_ = 0;
 	std::map<std::string, std::map<std::string, std::string>> savedSnapshot_;

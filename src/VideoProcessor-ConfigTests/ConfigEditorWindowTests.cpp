@@ -53,6 +53,8 @@
 #include <QListWidget>
 #include <QListView>
 #include <QMessageBox>
+#include <QWheelEvent>
+#include <cmath>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -1227,6 +1229,8 @@ void testInvalidAuditedValuesRemainActionable()
         file.write(extra); file.close();
         ConfigEditorWindow window(path,0,true);
         requireControl<QLineEdit>(window,"config.vprenderer.sdr_target_nits")->setText("210");
+        // An edit that always lands (the file may have no renderer profile to edit).
+        requireControl<QSpinBox>(window,"config.general.profile_change_display_seconds")->setValue(7);
         require(readBytes(path)==extra,"Opening invalid input changed the file");
         requireControl<QPushButton>(window,"applyConfiguration")->click();
         require(readBytes(path)==extra,(QByteArray("Apply silently saved invalid input: ")+extra+" saved: "+readBytes(path)).constData());
@@ -1560,7 +1564,10 @@ void testTemporalDitherButtons()
     require(libplacebo->isChecked() && !off->isChecked() && !sigma->isChecked(), "the saved libplacebo is not shown");
     profiles->setCurrentRow(0);
     QCoreApplication::processEvents();
-    require(!off->isChecked() && !libplacebo->isChecked() && !sigma->isChecked(), "an unset profile shows a button");
+    // Audit 2026-10-17: unset shows Auto (VP's default), the one "Not set".
+    require(!off->isChecked() && !libplacebo->isChecked() && !sigma->isChecked() &&
+        requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.auto")->isChecked(),
+        "an unset profile does not show Auto");
     sigma->click();
     QCoreApplication::processEvents();
     require(value->currentData().toString() == "sigma_delta" && !libplacebo->isChecked(), "VP temporal did not set sigma_delta");
@@ -1596,7 +1603,10 @@ void testInterpolationButtons()
     QCoreApplication::processEvents();
     require(off->isChecked() && !autoMode->isChecked() && !always->isChecked(), "off (the default) is not shown");
     require(hold->isChecked() && !blend->isChecked(), "hold (the default) is not shown");
-    require(!sourceClass->isEnabled() && !fallback->isEnabled() && !fillGaps->isEnabled(), "the options are not greyed with interpolation off");
+    require(!sourceClass->isEnabled() && !fallback->isEnabled(), "the options are not greyed with interpolation off");
+    // Owner 2026-10-17: hiccup repair is separate from motion smoothing - never greyed by it.
+    require(fillGaps->isEnabled() && fillGaps->property("greyedOff").toBool() == false,
+        "hiccup repair is greyed with interpolation off");
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(autoMode->isChecked() && blend->isChecked(), "the saved auto / blend are not shown");
@@ -1740,7 +1750,8 @@ void testDeckLinkYCbCr12Control()
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    require(saved.contains("[decklink]") && saved.contains("ycbcr_12bit_capture: v210"), "ycbcr_12bit_capture not saved");
+    require(saved.contains("[decklink]") && saved.contains("ycbcr_12bit_capture: v210"),
+        ("ycbcr_12bit_capture not saved: " + requireControl<QLabel>(window, "configurationStatus")->text()).toStdString().c_str());
     ConfigEditorWindow reopened(path, 0, true);
     require(requireControl<QComboBox>(reopened, "config.decklink.ycbcr_12bit_capture")->currentData().toString() == "v210",
         "the reopened Config does not show v210");
@@ -7677,7 +7688,8 @@ void testCalibratedLegacyAndInheritedOutputPreserved()
     ConfigEditorWindow window(path, 0, true);
     auto* flag = requireControl<QCheckBox>(window, QStringLiteral("config.vprenderer.color.diagnostic_allow_limited_g22"));
     require(!flag->isChecked(), "Opening legacy mismatch silently enabled experiment");
-    save(window);
+    // Opening writes nothing unrequested (audit 2026-10-17): save only when a migration is pending.
+    if (requireControl<QPushButton>(window, "applyConfiguration")->isEnabled()) save(window);
     require(readBytes(path).contains("output_gamma: auto") && readBytes(path).contains("sdr_target_nits: 175"), "Legacy calibration changed");
     auto* gamma = requireControl<QComboBox>(window, QStringLiteral("config.vprenderer.color.output_transport_gamma"));
     selectData(gamma, QStringLiteral("2.4"));
@@ -8535,6 +8547,438 @@ void testMotionAndChromaControlsPersistAndExposeNewTab()
     if(!images.isEmpty()){reopened.resize(1040,700);reopened.show();reopened.selectPage(22);QApplication::processEvents();reopened.grab().save(images+"/motion.png");reopened.selectPage(17);QApplication::processEvents();reopened.grab().save(images+"/chroma.png");}
 }
 
+// Audit 2026-10-17: confirmed Config editor bugs before a deploy.
+void writeFixture(const QString& path, const QByteArray& contents)
+{
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "Cannot write fixture");
+    require(file.write(contents) == contents.size(), "Cannot write fixture");
+}
+
+void testNamedProfileFallsBackToBuiltInDefault()
+{
+    // Bug 1: a named profile whose default profile leaves a setting unset shows
+    // VP's built-in default (rounded corners and dynamic target are on).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\nquality: medium\n"
+        "[vprenderer.subtitles.Classic]\ntype: classic\n[vprenderer.subtitles.Black]\ntype: black\n");
+    ConfigEditorWindow window(path, 0, true);
+    for (int row : { 0, 1 })
+    {
+        requireControl<QListWidget>(window, "config.vprenderer.subtitles.profiles")->setCurrentRow(row);
+        requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(row);
+        QCoreApplication::processEvents();
+        require(requireControl<QCheckBox>(window, "config.vprenderer.subtitles.rounded_corners")->isChecked(),
+            "Rounded corners does not show its built-in default (on)");
+        require(requireControl<QCheckBox>(window, "config.vprenderer.dynamic_target")->isChecked(),
+            "Dynamic target does not show its built-in default (on)");
+    }
+    require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "Showing defaults made edits");
+}
+
+void testRevealReloadsAnOutOfBandEdit()
+{
+    // Bug 2: Config hidden in the tray keeps its document; a reveal reloads a
+    // clean editor whose file changed meanwhile.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 5, "fixture");
+    window.hide();
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 9\n[vprenderer.Cinema]\nquality: high\n");
+    window.reveal();
+    QCoreApplication::processEvents();
+    require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 9,
+        "A reveal did not reload the changed file");
+    require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The reload left edits");
+    window.hide();
+}
+
+void testSaveAsksWhenTheFileChangedOnDisk()
+{
+    // Bug 2: a dirty editor whose file changed on disk asks Reload / Overwrite
+    // / Cancel instead of overwriting the other change silently.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    const QByteArray original = "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n";
+    const QByteArray external = "# hand edit\n[general]\nprofile_change_display_seconds: 7\n[vprenderer.Cinema]\nquality: high\n";
+    writeFixture(path, original);
+    ConfigEditorWindow window(path, 0, true);
+    window.setPromptsForTesting(true);
+    auto* seconds = requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds");
+    seconds->setValue(3);
+    writeFixture(path, external);
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    // Cancel: nothing written, the edit kept.
+    answerMessageBox(QMessageBox::Cancel);
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path) == external, "Cancel overwrote the changed file");
+    require(apply->isEnabled(), "Cancel lost the edit");
+    // A reveal keeps a dirty editor's edits.
+    window.reveal();
+    QCoreApplication::processEvents();
+    require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 3,
+        "A reveal discarded unsaved edits");
+    window.hide();
+    // Overwrite: the edits are written.
+    answerMessageBox(QMessageBox::Save);
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("profile_change_display_seconds: 3"), "Overwrite did not save the edit");
+    // Reload: edits discarded, the file's content shown.
+    writeFixture(path, external);
+    requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(2);
+    answerMessageBox(QMessageBox::Reset);
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path) == external, "Reload wrote the file");
+    require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 7,
+        "Reload did not show the file's value");
+}
+
+void testCancelRunsEveryLoadMigration()
+{
+    // Bug 3: Cancel reloads with the same migrations as opening Config (the
+    // refresh-rate switch's legacy true reads as Full Screen Only).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nswitch_refresh_rate: true\n[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    require(requireControl<QComboBox>(window, "config.general.switch_refresh_rate")->currentData().toString() == "fullscreen_only",
+        "Opening Config did not migrate switch_refresh_rate");
+    requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(9);
+    requireControl<QPushButton>(window, "cancelConfiguration")->click();
+    QCoreApplication::processEvents();
+    require(requireControl<QComboBox>(window, "config.general.switch_refresh_rate")->currentData().toString() == "fullscreen_only",
+        "Cancel reloaded without the refresh-rate migration");
+    require(readBytes(path).contains("switch_refresh_rate: true"), "Cancel wrote the file");
+}
+
+void testClearedChoiceShowsTheInheritedValue()
+{
+    // Bug 4 and suffix (e): "Not set" shows what then applies - the default
+    // profile's value "(inherited)", or VP's own "(built-in default)".
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\noptical_flow: off\n[vprenderer.Other]\noptical_flow: on\n"
+        "[vprenderer.Third]\ndejudder_fade_match: off\n");
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* engine = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.engine");
+    auto* matcher = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.matcher");
+    auto* unset = requireControl<QToolButton>(window, "config.vprenderer.optical_flow.unset");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(engine->isChecked(), "fixture: the profile's own engine choice");
+    unset->click();
+    QCoreApplication::processEvents();
+    require(matcher->isChecked() && !engine->isChecked(), "Not set still shows the profile's old value");
+    require(matcher->text().contains("(inherited)"), (QByteArray("not marked inherited: ") + matcher->text().toUtf8()).constData());
+    // The fade match: the default profile does not set it, so VP's own default.
+    auto* fade = requireControl<QComboBox>(window, "config.vprenderer.dejudder_fade_match");
+    profiles->setCurrentRow(2);
+    QCoreApplication::processEvents();
+    selectData(fade, "");
+    require(fade->property("inheritedValue").toString().compare("on", Qt::CaseInsensitive) == 0,
+        "The cleared fade match does not hold VP's default (on)");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(engine->isChecked() == false && matcher->isChecked(), "fixture: inherited matcher");
+    profiles->setCurrentRow(2);
+    QCoreApplication::processEvents();
+    require(matcher->text().contains("(inherited)"), "an inherited choice is not marked inherited");
+    // A setting no profile sets: built-in default.
+    QTemporaryDir dir2; const QString path2 = dir2.filePath("VideoProcessor.cfg");
+    writeFixture(path2, "[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\noptical_flow: off\n");
+    ConfigEditorWindow second(path2, 0, true);
+    requireControl<QListWidget>(second, "config.vprenderer.profiles")->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    requireControl<QToolButton>(second, "config.vprenderer.optical_flow.unset")->click();
+    QCoreApplication::processEvents();
+    auto* secondEngine = requireControl<QRadioButton>(second, "config.vprenderer.optical_flow.engine");
+    require(secondEngine->isChecked() && secondEngine->text().contains("(built-in default)"),
+        (QByteArray("VP's default is not marked built-in: ") + secondEngine->text().toUtf8()).constData());
+}
+
+void testUtf8BomAndEqualsSeparator()
+{
+    // Bugs 5 and 7: a UTF-8 BOM is read past and written back; SectionSettings
+    // splits on ':' or '=' like VP's reader.
+    ConfigEditorCore::ConfigDocument document;
+    document.LoadBytes(L"memory", std::string("\xEF\xBB\xBF[general]\r\nrenderer = VP Renderer\r\n"));
+    require(document.hasUtf8Bom && document.lines.front() == "[general]", "The BOM was not stripped on load");
+    const auto settings = document.SectionSettings("general");
+    require(settings.size() == 1 && settings.front().first == "renderer" && settings.front().second == "VP Renderer",
+        "SectionSettings did not split on '='");
+    require(document.Serialize().rfind("\xEF\xBB\xBF[general]", 0) == 0, "The BOM was not written back");
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "\xEF\xBB\xBF[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    {
+        ConfigEditorWindow window(path, 0, true);
+        auto* seconds = requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds");
+        require(seconds->value() == 5, "The first section after a BOM was not read");
+        seconds->setValue(6);
+        save(window);
+    }
+    const QByteArray saved = readBytes(path);
+    require(saved.startsWith("\xEF\xBB\xBF[general]") && saved.contains("profile_change_display_seconds: 6") &&
+        saved.count("[general]") == 1, (QByteArray("The BOM file did not round-trip: ") + saved.left(200)).constData());
+}
+
+void testLoadWritesNothingUnrequested()
+{
+    // Bug 6: the sample opens with Apply disabled; absent keys and the Motion
+    // starting profile are not written; a real migration keeps a backup.
+    {
+        QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+        require(QFile::copy(repositoryPath(QStringLiteral("VideoProcessor.cfg")), path), "Cannot copy the sample");
+        const QByteArray sample = readBytes(path);
+        ConfigEditorWindow window(path, 0, true);
+        require(readBytes(path) == sample, "Opening the sample wrote it");
+        if (requireControl<QPushButton>(window, "applyConfiguration")->isEnabled())
+        {
+            // Say which lines the load-time migration changed.
+            save(window);
+            const QList<QByteArray> before = sample.split('\n'), after = readBytes(path).split('\n');
+            QByteArray changed;
+            for (const QByteArray& line : after)
+                if (!before.contains(line)) changed += "+" + line.trimmed() + " ";
+            for (const QByteArray& line : before)
+                if (!after.contains(line)) changed += "-" + line.trimmed() + " ";
+            require(false, ("The sample configuration opens with unsaved changes (a load-time migration): " +
+                changed.left(600)).constData());
+        }
+    }
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    {
+        ConfigEditorWindow window(path, 0, true);
+        require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "A minimal file opens dirty");
+        require(requireControl<QComboBox>(window, "config.general.switch_refresh_rate")->currentData().toString() == "fullscreen_only",
+            "An absent switch_refresh_rate does not show VP's default");
+        requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(6);
+        save(window);
+    }
+    const QByteArray saved = readBytes(path);
+    require(!saved.contains("switch_refresh_rate") && !saved.contains("vprenderer.motion"),
+        (QByteArray("Unrequested keys were written: ") + saved).constData());
+    require(QDir(dir.path()).entryList({ QStringLiteral("*.bak") }, QDir::Files).isEmpty(), "A plain edit made a backup");
+    // A real migration (legacy true) keeps the original file.
+    writeFixture(path, "[general]\nswitch_refresh_rate: true\n[vprenderer.Cinema]\nquality: high\n");
+    {
+        ConfigEditorWindow window(path, 0, true);
+        save(window);
+    }
+    require(readBytes(path).contains("switch_refresh_rate: fullscreen_only"), "The migration was not saved");
+    require(QDir(dir.path()).entryList({ QStringLiteral("*.bak") }, QDir::Files).size() == 1,
+        "A migration did not keep a backup of the original file");
+}
+
+void testAdvancedLedSettingsMatchTheParser()
+{
+    // Bug 8: every runtime LED key has a control whose default is the parser's.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+        "compensation_eotf: 2.415\ndeadband: 80\n[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    const LedDrive::LedDriveConfig defaults;
+    {
+        ConfigEditorWindow window(path, 0, true);
+        window.selectPage(20);
+        auto number = [&](const char* key) {
+            return requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.") + key)->value();
+        };
+        require(number("tick_ms") == defaults.tickMs && number("ftb_black_ms") == defaults.ftbBlackMs &&
+            number("led_ceiling") == defaults.ledCeiling && number("anti_pump_band") == defaults.antiPumpBand &&
+            number("steps_up_split_apl") == defaults.stepsUpSplitApl && number("highlight_persist_ms") == defaults.highlightPersistMs &&
+            number("apl_persist_ms") == defaults.aplPersistMs && number("highlight_release_ms") == defaults.highlightReleaseMs &&
+            number("fade_ms") == defaults.fadeMs && number("script_highlight_code") == defaults.scriptHighlightCode &&
+            std::abs(number("knee") - defaults.knee) < 1e-9 &&
+            std::abs(number("highlight_percentile") - defaults.highlightPercentile) < 1e-9 &&
+            std::abs(number("highlight_area_small") - defaults.highlightAreaSmall) < 1e-9 &&
+            std::abs(number("highlight_area_large") - defaults.highlightAreaLarge) < 1e-9 &&
+            std::abs(number("fade_min_slope") - defaults.fadeMinSlope) < 1e-9 &&
+            std::abs(number("cut_threshold") - defaults.cutThreshold) < 1e-9,
+            "An advanced LED default differs from the parser's");
+        for (const char* key : { "early_ramp", "cut_jump", "bright_cut_dump" })
+            require(requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.") + key)->isChecked(),
+                "An advanced LED switch does not show its default (on)");
+        LedDrive::StepTable dark, bright, down;
+        std::vector<LedDrive::CurvePoint> curve;
+        double weights[3] = {};
+        auto placeholder = [&](const char* key) {
+            return requireControl<QLineEdit>(window, QStringLiteral("config.led_drive.default.") + key)->placeholderText().toStdString();
+        };
+        require(LedDrive::ParseStepTable(placeholder("steps_up_dark"), dark) && dark.rows == defaults.stepsUpDark.rows &&
+            LedDrive::ParseStepTable(placeholder("steps_up_bright"), bright) && bright.rows == defaults.stepsUpBright.rows &&
+            LedDrive::ParseStepTable(placeholder("steps_down"), down) && down.rows == defaults.stepsDown.rows &&
+            LedDrive::ParseCurve(placeholder("curve"), curve) && curve.size() == defaults.curve.size() &&
+            LedDrive::ParseWeights(placeholder("apl_weights"), weights) && weights[0] == defaults.aplWeights[0] &&
+            weights[1] == defaults.aplWeights[1] && weights[2] == defaults.aplWeights[2],
+            "An advanced LED table's shown default differs from the parser's");
+        for (size_t i = 0; i < curve.size(); ++i)
+            require(curve[i].apl == defaults.curve[i].apl && curve[i].level == defaults.curve[i].level,
+                "The shown curve differs from the parser's");
+        // (c): no rounding on load, out-of-range flagged.
+        auto* gamma = requireControl<QDoubleSpinBox>(window, "config.led_drive.default.compensation_eotf");
+        require(gamma->decimals() >= 3 && std::abs(gamma->value() - 2.415) < 1e-9, "The projector gamma was rounded");
+        auto* deadband = requireControl<QDoubleSpinBox>(window, "config.led_drive.default.deadband");
+        require(deadband->value() == 50 && deadband->property("clampedFrom").toString() == "80",
+            "An out-of-range dead band is not flagged");
+        auto* note = requireControl<QLabel>(window, "config.led_drive.default.clamped_note");
+        require(note->text().contains("deadband = 80"), "The page does not note the clamped value");
+        // Edits, a table, a reset and an invalid table.
+        requireControl<QDoubleSpinBox>(window, "config.led_drive.default.tick_ms")->setValue(500);
+        auto* steps = requireControl<QLineEdit>(window, "config.led_drive.default.steps_down");
+        steps->setText("100:6, 50:3, 0:1");
+        emit steps->textEdited(steps->text());
+        requireControl<QToolButton>(window, "config.led_drive.default.deadband.reset")->click();
+        require(deadband->value() == defaults.deadband, "Reset did not show the default");
+        auto* weightsEdit = requireControl<QLineEdit>(window, "config.led_drive.default.apl_weights");
+        weightsEdit->setText("0.5, 0.5, 0.5");
+        emit weightsEdit->textEdited(weightsEdit->text());
+        require(!requireControl<QLabel>(window, "config.led_drive.default.apl_weights.problem")->isHidden(),
+            "An invalid weight list is not flagged");
+        requireControl<QToolButton>(window, "config.led_drive.default.apl_weights.reset")->click();
+        require(weightsEdit->text().isEmpty(), "The table reset did not clear the field");
+        save(window);
+    }
+    ConfigFile config;
+    require(config.Load(path.toStdString()), "The saved LED file did not load");
+    std::string error;
+    require(LedDrive::Validate(config, error), ("VP rejects the saved LED settings: " + error).c_str());
+    const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(config);
+    require(led.tickMs == 500 && led.deadband == defaults.deadband && led.stepsDown.rows.size() == 3 &&
+        led.stepsDown.rows[0].second == 6, "VP does not read the advanced LED edits");
+    const QByteArray saved = readBytes(path);
+    require(!saved.contains("deadband") && !saved.contains("apl_weights") && saved.contains("compensation_eotf: 2.415"),
+        (QByteArray("Reset did not remove the keys, or a value was rounded: ") + saved).constData());
+}
+
+void testProfileBooleanCanBeUnset()
+{
+    // Bug 9: a named profile's own tick can be removed again ("Not set").
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n[vprenderer.subtitles.Classic]\ntype: classic\n"
+        "rounded_corners: false\n[vprenderer.subtitles.Black]\ntype: black\nrounded_corners: true\n");
+    {
+        ConfigEditorWindow window(path, 0, true);
+        auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.subtitles.profiles");
+        auto* rounded = requireControl<QCheckBox>(window, "config.vprenderer.subtitles.rounded_corners");
+        auto* unset = requireControl<QToolButton>(window, "config.vprenderer.subtitles.rounded_corners.unset");
+        profiles->setCurrentRow(0);
+        QCoreApplication::processEvents();
+        require(unset->isHidden(), "The default profile offers Not set");
+        profiles->setCurrentRow(1);
+        QCoreApplication::processEvents();
+        require(rounded->isChecked() && !unset->isHidden(), "A named profile's own tick offers no Not set");
+        unset->click();
+        QCoreApplication::processEvents();
+        require(!rounded->isChecked() && unset->isHidden(), "Not set does not show the default profile's value");
+        save(window);
+    }
+    const QByteArray saved = readBytes(path);
+    require(saved.count("rounded_corners") == 1 && saved.contains("rounded_corners: false"),
+        (QByteArray("Not set did not remove the named profile's key: ") + saved).constData());
+}
+
+void testUnsavedEditsAskOnCloseAndExit()
+{
+    // Usability (a): closing or exiting with unsaved edits asks Save /
+    // Discard / Keep editing.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    const QByteArray original = "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n";
+    writeFixture(path, original);
+    ConfigEditorWindow window(path, 0, true);
+    window.setPromptsForTesting(true);
+    window.show();
+    QCoreApplication::processEvents();
+    requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(8);
+    answerMessageBox(QMessageBox::Cancel);
+    window.close();
+    QCoreApplication::processEvents();
+    require(window.isVisible() && requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(),
+        "Keep editing closed Config or lost the edit");
+    answerMessageBox(QMessageBox::Cancel);
+    window.requestExit();
+    QCoreApplication::processEvents();
+    require(window.isVisible(), "Keep editing on Exit closed Config");
+    answerMessageBox(QMessageBox::Save);
+    window.close();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("profile_change_display_seconds: 8"), "Save on close did not save");
+    window.show();
+    QCoreApplication::processEvents();
+    requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(4);
+    answerMessageBox(QMessageBox::Discard);
+    window.close();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("profile_change_display_seconds: 8") && !window.isVisible(),
+        "Discard on close saved or kept Config open");
+}
+
+void testExplicitAutoDitherShowsAuto()
+{
+    // Usability (b): one "Not set"; an explicit temporal_dither: auto is Auto.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\ntemporal_dither: auto\n");
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    auto* autoButton = requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.auto");
+    auto* value = requireControl<QComboBox>(window, "config.vprenderer.temporal_dither");
+    require(autoButton->isChecked() && value->currentData().toString() == "auto", "An explicit auto does not show Auto");
+    int notSet = 0;
+    for (int i = 0; i < value->count(); ++i)
+        if (value->itemText(i).contains("Not set", Qt::CaseInsensitive)) ++notSet;
+    require(notSet == 0 && value->itemData(0).toString().isEmpty(), "The dither still has two Not set items");
+}
+
+void testHiccupRepairIsSeparateFromMotionSmoothing()
+{
+    // Owner 2026-10-17: "Repair dropped frames / hiccups" is its own group; motion smoothing off
+    // never disables it. Key names are unchanged.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\ninterpolation: off\n");
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* smoothing = requireControl<QLabel>(window, "config.vprenderer.interpolation_heading");
+    auto* repair = requireControl<QLabel>(window, "config.vprenderer.hiccup_repair_heading");
+    require(smoothing->text().contains("Motion smoothing (interpolation)") &&
+        repair->text().contains("Repair dropped frames / hiccups"), "the two groups are not labelled");
+    require(requireControl<QLabel>(window, "config.vprenderer.interpolation_note")->text().contains("Off for film"),
+        "the motion smoothing note is missing");
+    auto* fillGaps = requireControl<QComboBox>(window, "config.vprenderer.interpolation_fill_gaps");
+    require(fillGaps->isEnabled(), "hiccup repair is disabled with interpolation off");
+    requireControl<QRadioButton>(window, "config.vprenderer.interpolation.always")->click();
+    QCoreApplication::processEvents();
+    requireControl<QRadioButton>(window, "config.vprenderer.interpolation.off")->click();
+    QCoreApplication::processEvents();
+    require(fillGaps->isEnabled(), "switching motion smoothing off disabled hiccup repair");
+    selectData(fillGaps, "on");
+    save(window);
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("interpolation_fill_gaps: on") && saved.contains("interpolation: off"),
+        (QByteArray("the keys changed: ") + saved).constData());
+}
+
+void testUnfocusedNumberBoxesIgnoreTheWheel()
+{
+    // Usability (d): the wheel scrolls the page, not an unfocused setting.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    auto* seconds = requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds");
+    auto* refresh = requireControl<QComboBox>(window, "config.general.switch_refresh_rate");
+    const int comboIndex = refresh->currentIndex();
+    for (QWidget* control : { static_cast<QWidget*>(seconds), static_cast<QWidget*>(refresh) })
+    {
+        QWheelEvent wheel(QPointF(5, 5), control->mapToGlobal(QPointF(5, 5)), QPoint(), QPoint(0, 120),
+            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(control, &wheel);
+    }
+    require(seconds->value() == 5 && refresh->currentIndex() == comboIndex, "The wheel changed an unfocused setting");
+    require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The wheel made an edit");
+}
+
 int run(const char* name, const std::function<void()>& test)
 {
     const QString testName = QString::fromUtf8(name);
@@ -8803,6 +9247,20 @@ int main(int argc, char** argv)
         testVisiblePresentationTargetUpdateMovesEditor);
     failures += run("normal window architecture has no lease polling",
         testNormalWindowArchitectureHasNoLeasePolling);
+    // Audit 2026-10-17: confirmed Config editor bugs.
+    failures += run("named profile falls back to built-in default", testNamedProfileFallsBackToBuiltInDefault);
+    failures += run("reveal reloads an out-of-band edit", testRevealReloadsAnOutOfBandEdit);
+    failures += run("save asks when the file changed on disk", testSaveAsksWhenTheFileChangedOnDisk);
+    failures += run("Cancel runs every load migration", testCancelRunsEveryLoadMigration);
+    failures += run("cleared choice shows the inherited value", testClearedChoiceShowsTheInheritedValue);
+    failures += run("UTF-8 BOM and equals separator", testUtf8BomAndEqualsSeparator);
+    failures += run("load writes nothing unrequested", testLoadWritesNothingUnrequested);
+    failures += run("advanced LED settings match the parser", testAdvancedLedSettingsMatchTheParser);
+    failures += run("profile boolean can be unset", testProfileBooleanCanBeUnset);
+    failures += run("unsaved edits ask on close and exit", testUnsavedEditsAskOnCloseAndExit);
+    failures += run("explicit auto dither shows Auto", testExplicitAutoDitherShowsAuto);
+    failures += run("unfocused number boxes ignore the wheel", testUnfocusedNumberBoxesIgnoreTheWheel);
+    failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
     return failures == 0 ? 0 : 1;
