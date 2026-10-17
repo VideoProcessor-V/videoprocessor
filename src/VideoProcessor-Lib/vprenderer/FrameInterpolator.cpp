@@ -1,0 +1,238 @@
+#include <pch.h>
+#include "FrameInterpolator.h"
+
+#include <libplacebo/shaders/custom.h>
+
+#include <string>
+#include <vector>
+
+namespace Interpolator
+{
+	namespace
+	{
+		// One plane at phase t (see FrameInterpolator.h). Positions in this plane's
+		// pixels; plane_scale converts them to source-luma pixels (the field's
+		// space): (1, 1) for luma, the chroma subsampling for CbCr.
+		const char* const INTERPOLATE_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y) {
+    vec4 a0 = texelFetch(src_a, q, 0);
+    vec4 b0 = texelFetch(src_b, q, 0);
+    vec4 outv;
+    if (phase <= 0.0) {
+        outv = a0;
+    } else if (phase >= 1.0) {
+        outv = b0;
+    } else if (texelFetch(frame_trust, ivec2(0), 0).r < min_trusted_share) {
+        // A cut between A and B: the nearest frame whole (never a blend of two scenes).
+        outv = phase < 0.5 ? a0 : b0;
+    } else {
+        vec2 lp = (vec2(q) + vec2(0.5)) * plane_scale;   // source-luma pixels
+        vec2 v;
+        if (field_vector(lp, v)) {
+            // The vector of the content that is here at the phase (one fixed-point
+            // step: at a moving edge the output position's own block is the wrong one).
+            vec2 v1;
+            if (field_vector(lp - phase * v, v1))
+                v = v1;
+            vec2 la = lp - phase * v;
+            vec2 lb = lp + (1.0 - phase) * v;
+            vec4 sa = texture(src_a, la / plane_scale / vec2(size));
+            vec4 sb = texture(src_b, lb / plane_scale / vec2(size));
+            float wb = phase;
+#ifdef OCCLUSION
+            // B's content where the B sample lands is new (not seen in A): not the
+            // same content as the A sample - the A sample alone.
+            ivec2 osize = textureSize(occ_b, 0);
+            if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                wb = 0.0;
+#endif
+            outv = mix(sa, sb, wb);
+        } else {
+#ifdef FALLBACK_BLEND
+            outv = mix(a0, b0, phase);
+#else
+            outv = phase < 0.5 ? a0 : b0;   // hold the nearest frame's own pixel
+#endif
+        }
+    }
+    imageStore(dst, q, outv);
+}
+)GLSL";
+
+		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
+		{
+			pl_shader_desc desc{};
+			desc.desc.name = name;
+			desc.desc.type = PL_DESC_SAMPLED_TEX;
+			desc.binding.object = tex;
+			desc.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+			desc.binding.sample_mode = linear ? PL_TEX_SAMPLE_LINEAR : PL_TEX_SAMPLE_NEAREST;
+			return desc;
+		}
+
+		pl_shader_desc Storage(const char* name, pl_tex tex)
+		{
+			pl_shader_desc desc{};
+			desc.desc.name = name;
+			desc.desc.type = PL_DESC_STORAGE_IMG;
+			desc.desc.access = PL_DESC_ACCESS_WRITEONLY;
+			desc.binding.object = tex;
+			return desc;
+		}
+
+		bool SameLayout(pl_tex a, pl_tex b)
+		{
+			return a && b && a->params.w == b->params.w && a->params.h == b->params.h &&
+				a->params.format == b->params.format;
+		}
+	}
+
+	FrameInterpolator::FrameInterpolator(pl_log logIn, pl_gpu gpuIn, bool hostReadableIn)
+		: log(logIn), gpu(gpuIn), hostReadable(hostReadableIn)
+	{
+		dispatch = gpu ? pl_dispatch_create(log, gpu) : nullptr;
+	}
+
+	FrameInterpolator::~FrameInterpolator()
+	{
+		Release();
+		if (dispatch)
+			pl_dispatch_destroy(&dispatch);
+	}
+
+	void FrameInterpolator::Release()
+	{
+		if (gpu)
+		{
+			pl_tex_destroy(gpu, &outLuma);
+			pl_tex_destroy(gpu, &outChroma);
+		}
+		outLuma = outChroma = nullptr;
+	}
+
+	bool FrameInterpolator::Ensure(pl_tex& tex, pl_tex like)
+	{
+		if (tex && SameLayout(tex, like))
+			return true;
+		pl_tex_destroy(gpu, &tex);
+		if (!(like->params.format->caps & PL_FMT_CAP_STORABLE))
+		{
+			error = std::string("plane format not storable: ") + like->params.format->name;
+			return false;
+		}
+		pl_tex_params params{};
+		params.w = like->params.w;
+		params.h = like->params.h;
+		params.format = like->params.format;
+		params.sampleable = true;
+		params.storable = true;
+		params.blit_src = (like->params.format->caps & PL_FMT_CAP_BLITTABLE) != 0;
+		params.host_readable = hostReadable && (like->params.format->caps & PL_FMT_CAP_HOST_READABLE);
+		tex = pl_tex_create(gpu, &params);
+		if (!tex)
+			error = "cannot create the interpolated plane";
+		return tex != nullptr;
+	}
+
+	bool FrameInterpolator::Plane(const char* description, pl_tex srcA, pl_tex srcB, pl_tex dst, const Motion& motion,
+		float t, const float planeScale[2], const std::string& header)
+	{
+		std::vector<pl_shader_desc> desc = {
+			Sampled("src_a", srcA, true), Sampled("src_b", srcB, true), Sampled("field", motion.field, false),
+			Sampled("frame_trust", motion.frameTrust, false), Storage("dst", dst) };
+		if (motion.subField)
+			desc.push_back(Sampled("sub_field", motion.subField, false));
+		if (motion.occlusionB)
+			desc.push_back(Sampled("occ_b", motion.occlusionB, false));
+		const float minShare = motion.minTrustedShare;
+		const pl_shader_var vars[] = {
+			{ pl_var_float("phase"), &t, true },
+			{ pl_var_float("min_trusted_share"), &minShare, true },
+			{ pl_var_vec2("plane_scale"), planeScale, true } };
+		pl_custom_shader custom{};
+		custom.description = description;
+		custom.header = header.c_str();
+		custom.body = INTERPOLATE_BODY;
+		custom.input = PL_SHADER_SIG_NONE;
+		custom.output = PL_SHADER_SIG_NONE;
+		custom.descriptors = desc.data();
+		custom.num_descriptors = static_cast<int>(desc.size());
+		custom.variables = vars;
+		custom.num_variables = 3;
+		custom.compute = true;
+		custom.compute_group_size[0] = 16;
+		custom.compute_group_size[1] = 16;
+		pl_shader sh = pl_dispatch_begin(dispatch);
+		if (!pl_shader_custom(sh, &custom))
+		{
+			pl_dispatch_abort(dispatch, &sh);
+			error = std::string("shader rejected: ") + description;
+			return false;
+		}
+		pl_dispatch_compute_params compute{};
+		compute.shader = &sh;
+		compute.dispatch_size[0] = (dst->params.w + 15) / 16;
+		compute.dispatch_size[1] = (dst->params.h + 15) / 16;
+		compute.dispatch_size[2] = 1;
+		if (!pl_dispatch_compute(dispatch, &compute))
+		{
+			error = std::string("dispatch failed: ") + description;
+			return false;
+		}
+		return true;
+	}
+
+	bool FrameInterpolator::Run(const Dejudder::Planes& a, const Dejudder::Planes& b, const Motion& motion, float t,
+		InterpolationPolicy::Fallback fallback, Dejudder::Planes& out)
+	{
+		error.clear();
+		out = a;
+		if (!(t > 0.0f))
+		{
+			++passthroughs;
+			return true;   // A exactly
+		}
+		if (!(t < 1.0f))
+		{
+			out = b;
+			++passthroughs;
+			return true;   // B exactly
+		}
+		if (!gpu || !dispatch)
+		{
+			error = "no GPU";
+			return false;
+		}
+		if (!motion.field || !motion.frameTrust)
+		{
+			error = "no motion field";
+			return false;
+		}
+		if (!SameLayout(a.luma, b.luma) || ((a.chroma || b.chroma) && !SameLayout(a.chroma, b.chroma)))
+		{
+			error = "A and B differ in size or format";
+			return false;
+		}
+		if (!Ensure(outLuma, a.luma) || (a.chroma && !Ensure(outChroma, a.chroma)))
+			return false;
+		const std::string header = std::string(fallback == InterpolationPolicy::Fallback::Blend ? "#define FALLBACK_BLEND 1\n" : "") +
+			(motion.occlusionB ? "#define OCCLUSION 1\n" : "") +
+			(motion.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl());
+		const float lumaScale[2] = { 1.0f, 1.0f };
+		if (!Plane("VideoProcessor interpolator: luma", a.luma, b.luma, outLuma, motion, t, lumaScale, header))
+			return false;
+		out.luma = outLuma;
+		if (a.chroma)
+		{
+			const float chromaScale[2] = {
+				static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
+			if (!Plane("VideoProcessor interpolator: chroma", a.chroma, b.chroma, outChroma, motion, t, chromaScale, header))
+				return false;
+			out.chroma = outChroma;
+		}
+		++runs;
+		return true;
+	}
+}

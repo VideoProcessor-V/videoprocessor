@@ -13,6 +13,7 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
+#include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
@@ -11997,6 +11998,370 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&established);
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(cleanLog);
+		}
+
+		// --- VP's 50/60p frame interpolator (docs/VP-interpolator-50-60-plan.md step 3) ---
+		// GPU tests (WARP unless VP_TEST_GPU=hardware). The field is built by hand,
+		// so the interpolator is tested on its own; one test uses the matcher's field.
+
+		struct InterpolatorField
+		{
+			pl_gpu gpu = nullptr;
+			pl_tex field = nullptr, trust = nullptr, occlusion = nullptr;
+			~InterpolatorField()
+			{
+				pl_tex_destroy(gpu, &field);
+				pl_tex_destroy(gpu, &trust);
+				pl_tex_destroy(gpu, &occlusion);
+			}
+		};
+
+		static pl_tex MakeFloatTexture(pl_gpu gpu, int w, int h, const std::vector<float>& rgba)
+		{
+			pl_fmt f32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(f32, L"No sampleable RGBA32F format");
+			pl_tex_params params{};
+			params.w = w;
+			params.h = h;
+			params.format = f32;
+			params.sampleable = true;
+			params.initial_data = rgba.data();
+			pl_tex tex = pl_tex_create(gpu, &params);
+			Assert::IsNotNull(tex);
+			return tex;
+		}
+
+		// One texel per 16x16 source block: (vx, vy, trust, error) from `block`.
+		template <typename Block>
+		static void MakeInterpolatorField(pl_gpu gpu, int width, int height, float trustedShare, Block block,
+			InterpolatorField& out)
+		{
+			out.gpu = gpu;
+			const int bx = (width + 15) / 16, by = (height + 15) / 16;
+			std::vector<float> texels(static_cast<size_t>(bx) * by * 4);
+			for (int y = 0; y < by; ++y)
+				for (int x = 0; x < bx; ++x)
+				{
+					const std::array<float, 4> t = block(x, y);
+					std::copy(t.begin(), t.end(), texels.begin() + (static_cast<size_t>(y) * bx + x) * 4);
+				}
+			out.field = MakeFloatTexture(gpu, bx, by, texels);
+			out.trust = MakeFloatTexture(gpu, 1, 1, { trustedShare, 1.0f, 0.0f, 1.0f });
+		}
+
+		static Interpolator::Motion InterpolatorMotion(const InterpolatorField& f)
+		{
+			Interpolator::Motion m;
+			m.field = f.field;
+			m.frameTrust = f.trust;
+			m.occlusionB = f.occlusion;
+			m.minTrustedShare = 0.25f;
+			return m;
+		}
+
+		static std::wstring InterpolatorError(const Interpolator::FrameInterpolator& i, const std::string& log)
+		{
+			const std::string s = i.LastError() + "; log: " + log;
+			return std::wstring(s.begin(), s.end());
+		}
+
+		TEST_METHOD(InterpolatorT0IsAExactlyT1IsB)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 128, height = 64;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - 16, y); },
+				[](int x, int y, int c) { return DejudderTexture((x - 8) * 2, y, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[](int, int) { return std::array<float, 4>{ 16.0f, 0.0f, 1.0f, 0.0f }; }, field);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			Dejudder::Planes out;
+			for (auto fallback : { InterpolationPolicy::Fallback::Hold, InterpolationPolicy::Fallback::Blend })
+			{
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.0f, fallback, out));
+				Assert::IsTrue(out.luma == planesA.planes.luma && out.chroma == planesA.planes.chroma, L"t = 0 is A itself");
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 1.0f, fallback, out));
+				Assert::IsTrue(out.luma == planesB.planes.luma && out.chroma == planesB.planes.chroma, L"t = 1 is B itself");
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), -0.5f, fallback, out));
+				Assert::IsTrue(out.luma == planesA.planes.luma, L"before A: A");
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 1.5f, fallback, out));
+				Assert::IsTrue(out.luma == planesB.planes.luma, L"after B: B");
+			}
+			Assert::AreEqual(0ull, interpolator.Runs(), L"nothing dispatched at the ends");
+			// In between: new planes in the input formats and sizes.
+			Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+			Assert::IsTrue(out.luma != planesA.planes.luma && out.luma != planesB.planes.luma);
+			Assert::IsTrue(out.luma->params.format == planesA.planes.luma->params.format &&
+				out.chroma->params.format == planesA.planes.chroma->params.format, L"the input plane formats");
+			Assert::AreEqual(width, out.luma->params.w);
+			Assert::AreEqual(width / 2, out.chroma->params.w);
+			// The dispatched path is exact too: with no motion between identical frames
+			// any phase gives the frame back code for code.
+			InterpolatorField still;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[](int, int) { return std::array<float, 4>{ 0.0f, 0.0f, 1.0f, 0.0f }; }, still);
+			for (float t : { 1e-4f, 0.25f, 0.5f, 0.9999f })
+			{
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesA.planes, InterpolatorMotion(still), t,
+					InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+				Assert::IsTrue(DownloadPlane(gpu, out.luma) == a.luma, L"luma exact");
+				Assert::IsTrue(DownloadPlane(gpu, out.chroma) == a.chroma, L"chroma exact");
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(InterpolatorPanLandsAtTheTruePhase)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			static constexpr int dx = 16, dy = 8;   // per source frame: whole pixels at t = 0.25 / 0.5 / 0.75
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[](int, int) { return std::array<float, 4>{ static_cast<float>(dx), static_cast<float>(dy), 1.0f, 0.0f }; }, field);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			for (int quarter = 1; quarter <= 3; ++quarter)
+			{
+				const float t = 0.25f * quarter;
+				const int sx = dx * quarter / 4, sy = dy * quarter / 4;
+				Dejudder::Planes out;
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+					InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+				const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+				const std::vector<uint16_t> chroma = DownloadPlane(gpu, out.chroma);
+				int checked = 0, exact = 0;
+				for (int y = dy + 2; y < height - dy - 2; ++y)
+					for (int x = dx + 2; x < width - dx - 2; ++x)
+					{
+						++checked;
+						exact += std::abs(static_cast<int>(luma[static_cast<size_t>(y) * width + x]) -
+							static_cast<int>(DejudderTexture(x - sx, y - sy))) <= 1;
+					}
+				Assert::AreEqual(checked, exact, (L"luma at the true phase, t = " + std::to_wstring(t)).c_str());
+				int chromaChecked = 0, chromaExact = 0;
+				for (int y = dy + 2; y < height - dy - 2; ++y)
+					for (int x = dx / 2 + 2; x < width / 2 - dx / 2 - 2; ++x)
+						for (int c = 0; c < 2; ++c)
+						{
+							++chromaChecked;
+							chromaExact += std::abs(static_cast<int>(chroma[(static_cast<size_t>(y) * (width / 2) + x) * 2 + c]) -
+								static_cast<int>(DejudderTexture((x - sx / 2) * 2, y - sy, 7 + c))) <= 1;
+						}
+				Assert::AreEqual(chromaChecked, chromaExact, (L"chroma at the true phase, t = " + std::to_wstring(t)).c_str());
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// The same pan through the matcher's own field (the de-judder's estimate).
+		TEST_METHOD(InterpolatorPanLandsAtTheTruePhaseWithTheMatchersField)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			static constexpr int dx = 12, dy = 6;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y - dy); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes),
+				std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+			Interpolator::Motion motion;
+			motion.field = warp.Field();
+			motion.frameTrust = warp.FrameTrust();
+			motion.minTrustedShare = warp.GetSettings().minTrustedShare;
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			Dejudder::Planes out;
+			Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, motion, 0.5f,
+				InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+			const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+			int checked = 0, close = 0;
+			for (int y = 24; y < height - 24; ++y)
+				for (int x = 24; x < width - 24; ++x)
+				{
+					++checked;
+					close += std::abs(static_cast<int>(luma[static_cast<size_t>(y) * width + x]) -
+						static_cast<int>(DejudderTexture(x - dx / 2, y - dy / 2))) <= 64;
+				}
+			Assert::IsTrue(close * 100 >= checked * 95,
+				(L"pixels at the true phase (6, 3): " + std::to_wstring(close) + L" of " + std::to_wstring(checked)).c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(InterpolatorOcclusionHoleHoldsNearest)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - 16, y, 3); },
+				[](int x, int y, int c) { return DejudderTexture((x - 8) * 2, y, 9 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			// Blocks 6..9 x 2..5 (source px 96..159 x 32..95) untrusted: the hole.
+			auto inHole = [](int bx, int by) { return bx >= 6 && bx <= 9 && by >= 2 && by <= 5; };
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 0.8f, [&](int bx, int by) {
+				return std::array<float, 4>{ 16.0f, 0.0f, inHole(bx, by) ? 0.0f : 1.0f, 0.0f }; }, field);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			for (auto fallback : { InterpolationPolicy::Fallback::Hold, InterpolationPolicy::Fallback::Blend })
+				for (float t : { 0.25f, 0.75f })
+				{
+					Dejudder::Planes out;
+					Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t, fallback, out),
+						InterpolatorError(interpolator, log).c_str());
+					const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+					int checked = 0, right = 0;
+					for (int y = 32; y < 96; ++y)
+						for (int x = 96; x < 160; ++x)
+						{
+							const size_t i = static_cast<size_t>(y) * width + x;
+							const double expected = fallback == InterpolationPolicy::Fallback::Hold ?
+								(t < 0.5f ? a.luma[i] : b.luma[i]) : (1.0 - t) * a.luma[i] + t * b.luma[i];
+							++checked;
+							right += std::abs(luma[i] - expected) <= (fallback == InterpolationPolicy::Fallback::Hold ? 0.0 : 1.0);
+						}
+					Assert::AreEqual(checked, right, (std::wstring(fallback == InterpolationPolicy::Fallback::Hold ?
+						L"hold: the nearest frame's own pixels, t = " : L"blend: the mix, t = ") + std::to_wstring(t)).c_str());
+				}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(InterpolatorCutHoldsWholeFrame)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 128, height = 64;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,   // another scene
+				[](int x, int y) { return DejudderTexture(x, y, 11); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 13 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			// A few blocks still claim trust, but the share (0.1) is below min_trusted_share.
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 0.1f, [](int bx, int) {
+				return std::array<float, 4>{ 8.0f, 4.0f, bx < 2 ? 1.0f : 0.0f, 0.0f }; }, field);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			for (auto fallback : { InterpolationPolicy::Fallback::Hold, InterpolationPolicy::Fallback::Blend })
+				for (float t : { 0.1f, 0.49f, 0.51f, 0.9f })
+				{
+					Dejudder::Planes out;
+					Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t, fallback, out),
+						InterpolatorError(interpolator, log).c_str());
+					const DejudderFrame& nearest = t < 0.5f ? a : b;
+					Assert::IsTrue(DownloadPlane(gpu, out.luma) == nearest.luma, L"a cut: the nearest frame's luma whole");
+					Assert::IsTrue(DownloadPlane(gpu, out.chroma) == nearest.chroma, L"a cut: the nearest frame's chroma whole");
+				}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// HDR / 10-bit precision: a ramp over every 10-bit code (P010 layout: the code
+		// in the top 10 bits), BTB and WTW included, and a PQ-coded ramp at 16 bits,
+		// moved by whole pixels: the picture at the phase keeps every code exactly
+		// (no 8-bit step, nothing clamped).
+		TEST_METHOD(InterpolatorTenBitAndPqRampKeepPrecision)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 1024 + 64, height = 32;
+			static constexpr int dx = 32;
+			auto tenBit = [](int x) { return static_cast<uint16_t>((std::min)((std::max)(x - 32, 0), 1023) << 6); };
+			auto pq = [](int x) {
+				// The PQ (SMPTE ST 2084) code of a luminance ramp 0..10000 nits, 16-bit.
+				const double y = std::pow((std::min)((std::max)(x - 32, 0), 1023) / 1023.0, 3.0);
+				const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
+				const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
+				const double p = std::pow(y, m1);
+				return static_cast<uint16_t>(std::lround(65535.0 * std::pow((c1 + c2 * p) / (1.0 + c3 * p), m2)));
+			};
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[](int, int) { return std::array<float, 4>{ static_cast<float>(dx), 0.0f, 1.0f, 0.0f }; }, field);
+			for (int ramp = 0; ramp < 2; ++ramp)
+			{
+				auto code = [&](int x) { return ramp == 0 ? tenBit(x) : pq(x); };
+				const DejudderFrame a = MakeDejudderFrame(width, height, [&](int x, int) { return code(x); },
+					[&](int x, int, int c) { return static_cast<uint16_t>(c ? code(2 * x) : 32768); });
+				const DejudderFrame b = MakeDejudderFrame(width, height, [&](int x, int) { return code(x - dx); },
+					[&](int x, int, int c) { return static_cast<uint16_t>(c ? code(2 * (x - dx / 2)) : 32768); });
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, a, planesA);
+				UploadDejudderFrame(gpu, b, planesB);
+				for (int quarter = 1; quarter <= 3; ++quarter)
+				{
+					const int sx = dx * quarter / 4;
+					Dejudder::Planes out;
+					Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.25f * quarter,
+						InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+					const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+					for (int y = 0; y < height; ++y)
+						for (int x = dx + 2; x < width - dx - 2; ++x)
+						{
+							const uint16_t got = luma[static_cast<size_t>(y) * width + x];
+							if (got != code(x - sx))
+								Assert::Fail((std::wstring(ramp == 0 ? L"10-bit" : L"PQ") + L" ramp code changed at x " +
+									std::to_wstring(x) + L": " + std::to_wstring(got) + L" for " +
+									std::to_wstring(code(x - sx))).c_str());
+						}
+				}
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 		}
 	};
 }
