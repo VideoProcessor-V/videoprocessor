@@ -351,8 +351,10 @@ namespace SourceResolution
 		for (int x = 0; x + 1 < n; ++x) { stepsH[static_cast<size_t>(x)] /= n; stepsV[static_cast<size_t>(x)] /= n; }
 		double periodH = 0.0, periodV = 0.0;
 		const double gridH = GridBlockiness(stepsH, periodH), gridV = GridBlockiness(stepsV, periodV);
-		// Both axes (a one-axis grid counts half): a coded picture is blocked both ways.
-		out.blockinessRobust = 0.5 * (gridH + gridV);
+		// Both axes: a coded picture is blocked both ways, while the quantisation steps of a
+		// slow gradient along one axis repeat at a fixed period too (a step every 1 / slope
+		// px) but only across that axis - those are bands, counted below, not blocking.
+		out.blockinessRobust = (std::min)(gridH, gridV);
 		out.blockPeriod = gridH >= gridV ? periodH : periodV;
 	}
 
@@ -521,17 +523,33 @@ namespace SourceResolution
 	double EffectiveBitsOf(const std::vector<unsigned long long>& histogram)
 	{
 		if (histogram.size() < 64) return 0.0;
+		const size_t windows = histogram.size() / 16;
+		std::vector<double> population(windows, 0.0);
+		for (size_t w = 0; w < windows; ++w)
+			for (size_t i = w * 16; i < w * 16 + 16; ++i) population[w] += static_cast<double>(histogram[i]);
 		std::vector<double> shares;
-		for (size_t w = 0; w + 16 <= histogram.size(); w += 16)
+		for (size_t w = 1; w + 1 < windows; ++w)
 		{
-			double sum = 0.0, squares = 0.0;
-			for (size_t i = w; i < w + 16; ++i)
+			const double pop = population[w];
+			if (pop < 16.0 * 16.0) continue;
+			// Judged only where the histogram's envelope is smooth on this scale (both
+			// neighbouring windows within 3x): a narrow peak (a flat area with grain, true
+			// 10-bit) fills only a few codes of its window without any coarse step.
+			bool smooth = true;
+			for (size_t k : { w - 1, w + 1 })
+				smooth = smooth && population[k] >= pop / 3.0 && population[k] <= pop * 3.0;
+			if (!smooth) continue;
+			// The window's occupancy as a Hill number of order 4, (sum p^4)^(-1/3) / 16:
+			// equally used codes count fully, codes holding few pixels (an upscale's ramp
+			// values, a few dithered pixels) little. CPU model: 8-bit upscaled 2x into 10
+			// bits reads ~8.8 (one-pixel occupancy: 10), true 10-bit ~10, 8-bit via PQ ~8.8.
+			double fourth = 0.0;
+			for (size_t i = w * 16; i < w * 16 + 16; ++i)
 			{
-				const double c = static_cast<double>(histogram[i]);
-				sum += c;
-				squares += c * c;
+				const double p = static_cast<double>(histogram[i]) / pop;
+				fourth += (p * p) * (p * p);
 			}
-			if (sum >= 16.0 * 16.0 && squares > 0.0) shares.push_back(sum * sum / (16.0 * squares));
+			if (fourth > 0.0) shares.push_back(std::pow(fourth, -1.0 / 3.0) / 16.0);
 		}
 		if (shares.empty()) return 0.0;
 		std::nth_element(shares.begin(), shares.begin() + shares.size() / 2, shares.end());
@@ -720,7 +738,7 @@ namespace SourceResolution
 		if (codingFixes)
 		{
 			// Hunt 2 M2/M3 (source_coding_fixes): effective bits from the low-activity blocks
-			// (all pixels when they are too few), by participation ratio; blocking at the grid's
+			// (all pixels when they are too few), by occupancy (Hill number); blocking at the grid's
 			// own period; bands with two dominant levels. Exactly periodic tiles (planner Q5) are
 			// no blocking evidence: their own repeat looks like a grid.
 			std::vector<unsigned long long> flat, all;

@@ -1851,7 +1851,7 @@ namespace VideoProcessorTest
 			snprintf(line, sizeof(line), "bits: upscaled 8-bit %.2f (earlier %.2f), dithered 8-bit %.2f, true 10-bit %.2f, 10-bit + grain %.2f\n",
 				up.effectiveBits, upOld.effectiveBits, di.effectiveBits, te.effectiveBits, teg.effectiveBits);
 			Logger::WriteMessage(line);
-			Assert::IsTrue(up.effectiveBits > 0.0 && up.effectiveBits <= 8.7, L"8-bit upscaled into 10 bits reads about 8");
+			Assert::IsTrue(up.effectiveBits > 0.0 && up.effectiveBits <= 9.0, L"8-bit upscaled into 10 bits reads below 9 (most pixels on the 8-bit grid)");
 			Assert::IsTrue(upOld.effectiveBits >= 9.5, L"the earlier reading was fooled by the upscale's ramp codes (the test sees the fault)");
 			Assert::IsTrue(di.effectiveBits > 0.0 && di.effectiveBits <= 8.5, L"8-bit with a one-code dither reads about 8");
 			Assert::IsTrue(te.effectiveBits >= 9.6, L"true 10-bit reads 10");
@@ -1888,6 +1888,18 @@ namespace VideoProcessorTest
 			// Native texture (the synthetic scene, with grain) is not a grid.
 			const SourceResolution::FrameReading texture = ReadScene([&](unsigned seed) { return Tile(Scene(seed), 1.0, kLanczos3, 1.0 / 255.0, 1023, seed); });
 			Assert::IsTrue(texture.blockiness < 1.25, L"native texture reads unblocked");
+			// A slow gradient steps one code at a fixed period (here every 10 px) along one axis:
+			// quantisation, not a coding grid.
+			std::vector<std::vector<float>> slow;
+			for (unsigned seed = 1; seed <= 4; ++seed)
+			{
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(400.0 + (x + seed) / 10.0) / 1023.0);
+				slow.push_back(t);
+			}
+			Assert::IsTrue(ReadCodingMode(slow, true).blockiness < 1.1, L"a slow one-axis gradient is not blocked");
 		}
 
 		// M3: band edges count with noise, toggles and a soft upscaled edge; grain on a flat

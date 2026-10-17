@@ -46,7 +46,7 @@ namespace SourceResolution
 		// 2^(bits - 5) codes: ramps of an upscale and texture left out). blockinessRobust:
 		// the coding grid found at any period from 8 px to an eighth of the tile (an
 		// upscaled 8/16-px grid at 8 / r px), any phase, its boundary up to 3 px wide,
-		// against the other phases; blockPeriod is that period (0 = none). bandEdgesRobust:
+		// against the other phases, on both axes (the weaker); blockPeriod is that period (0 = none). bandEdgesRobust:
 		// 8x8 blocks holding a band edge with two dominant levels, ramp or noise allowed.
 		std::vector<unsigned> flatHistogram;
 		double blockinessRobust = 1.0, blockPeriod = 0.0;
@@ -260,10 +260,11 @@ namespace SourceResolution
 	// The coding readings alone (part of ReadFrame).
 	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame, bool codingFixes = true);
 
-	// Hunt 2 M2: the effective bits of a code histogram (16-code windows with at least 256
-	// pixels, each window's occupancy as its participation ratio (sum c)^2 / (16 sum c^2):
-	// equally used codes count fully, rarely used ones (an upscale's ramp values) little; the
-	// median window). 0 when no window can be judged.
+	// Hunt 2 M2: the effective bits of a code histogram: 16-code windows with at least 256
+	// pixels whose neighbouring windows hold within 3x as many (a smooth envelope: a narrow
+	// grain peak is no coarse step), each window's occupancy as a Hill number of order 4
+	// ((sum p^4)^(-1/3) / 16: equally used codes count fully, rarely used ones - an upscale's
+	// ramp values - little); the median window. 0 when no window can be judged.
 	double EffectiveBitsOf(const std::vector<unsigned long long>& histogram);
 	// Hunt 2 M3: the coding-grid blockiness of one axis's mean absolute step per position
 	// (`steps[x]` between x and x + 1). Returns 1 when no grid stands out; `period` gets the
