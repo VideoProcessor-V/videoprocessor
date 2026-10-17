@@ -105,9 +105,13 @@ namespace LedDrive
 				(static_cast<double>(command.frame + latency) - static_cast<double>(frameIndex)) * period;
 			landings.push_back({ std::max(0.0, atMs), LedFractionLocked(command.level) });
 		}
-		// This tick's LPW1, not yet written: lands led_latency_ms after it goes out.
-		if (pendingLevel >= 0)
-			landings.push_back({ static_cast<double>(projector.ledLatencyMs), LedFractionLocked(pendingLevel) });
+		// This tick's LPW1, or (bug hunt 2) the one queued earlier and not yet
+		// written, which this tick's replaces in the driver: lands led_latency_ms
+		// after it goes out, at the driver's next send slot (from now, not from the
+		// frame's display time).
+		const int queued = pendingLevel >= 0 ? pendingLevel : queuedLight;
+		if (queued >= 0 && driver)
+			landings.push_back({ QueuedLightLandingMsLocked(driver->Status()), LedFractionLocked(queued) });
 		std::stable_sort(landings.begin(), landings.end(),
 			[](const std::pair<double, double>& a, const std::pair<double, double>& b) { return a.first < b.first; });
 		return landings;
@@ -177,10 +181,34 @@ namespace LedDrive
 	// led_latency_ms in source frames, for finding the queued frame a command
 	// is for (predictions are keyed by source sequence; 24p film in a 60 Hz
 	// output shows each source frame for 2-3 output frames).
+	// Bug hunt 2 (render-ahead, a correctness fix): counted from now, when the
+	// command is written, not from the current frame's display time - a frame
+	// rendered frameAheadMs ahead is shown that much after now, so the frame the
+	// LED lands on is led_latency_ms - frameAheadMs after it (unchanged without a
+	// lead).
 	int LedDriveModule::LatencySourceFramesLocked() const
 	{
-		return sourceFps > 0.0 ? static_cast<int>(std::lround(projector.ledLatencyMs * sourceFps / 1000.0)) :
-			LatencyFramesLocked();
+		const double leadMs = CommandLeadMs(projector.ledLatencyMs, frameAheadMs);
+		return sourceFps > 0.0 ? static_cast<int>(std::lround(leadMs * sourceFps / 1000.0)) :
+			static_cast<int>(std::lround(leadMs / framePeriodMs));
+	}
+
+	int LedDriveModule::CommandLatencySourceFrames() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return LatencySourceFramesLocked();
+	}
+
+	double LedDriveModule::QueuedLightLandingMsLocked(const DriverStatus& status) const
+	{
+		// The driver writes it at its next slot; a CNTR waiting or in flight takes
+		// that slot first and the LPW1 follows a command gap later.
+		const auto now = std::chrono::steady_clock::now();
+		double delayMs = 0.0;
+		if (status.nextSendAt != std::chrono::steady_clock::time_point() && status.nextSendAt > now)
+			delayMs = std::chrono::duration<double, std::milli>(status.nextSendAt - now).count();
+		if (status.contrastBusy && driver) delayMs += driver->CommandGapMs();
+		return std::max(0.0, delayMs + projector.ledLatencyMs - std::max(0.0, frameAheadMs));
 	}
 
 	double LedDriveModule::SourceFramePeriodMs() const
@@ -250,6 +278,7 @@ namespace LedDrive
 				// mode puts CNTR back to 50 as it leaves).
 				modelledLevel = status.lastSentLight >= 0 ? status.lastSentLight : modelledLevel;
 				commands.clear();
+				queuedLight = -1;
 				ledModel.Reset(LedFractionLocked(modelledLevel));
 				contrastCommands.clear();
 				seenContrastSends = status.contrastSends;
@@ -282,6 +311,7 @@ namespace LedDrive
 				// split dimming drop kept landing under the script, which starts
 				// from the last level written).
 				driver->CancelLight();
+				queuedLight = -1;
 			}
 			compensating = nowCompensating;
 			// picture_only (delta 12): the gain stays exactly 1.
@@ -601,6 +631,11 @@ namespace LedDrive
 			if (status.lightSends != seenSends && status.lastSentLight >= 0)
 				commands.push_back({ frameIndex, status.lastSentLight, LandingMsLocked(status.lastLightSentAt,
 					projector.ledLatencyMs, timeMs, previousFrameMs, previousWallMs) });
+			// Bug hunt 2: the queued LPW1 is a landing until written (then it is
+			// one of the commands above) or dropped (nothing waiting any more).
+			if (queuedLight >= 0 && (!status.busy ||
+				(status.lightSends != seenSends && status.lastSentLight == queuedLight)))
+				queuedLight = -1;
 			seenSends = status.lightSends;
 			if (status.contrastSends != seenContrastSends && status.lastSentContrast >= 0)
 				contrastCommands.push_back({ frameIndex, status.lastSentContrast, LandingMsLocked(
@@ -823,12 +858,17 @@ namespace LedDrive
 		// slot and the LPW1 follows a command gap later, so the CNTR lands with
 		// the cut. Queued to the driver's thread, which keeps only the newest
 		// and sends it when the command gap allows; the model follows what it
-		// actually sends. Within a scene the pairing's CNTR (below) comes
-		// after the LPW1 (dark direction: LPW1 before CNTR).
+		// actually sends. Bug hunt 2: within a scene too, when the pairing's
+		// CNTR (below) and this LPW1 both wait, the driver writes the CNTR
+		// first and the LPW1 a command gap later (BarcoAsciiDriver's worker
+		// takes pendingContrast first). That CNTR is never above the need: it
+		// is paired against the LED now or where it will be, never a lower
+		// LED; only the LED comes one command gap later.
 		if (out.lightCommand >= 0 && applyGain && fadeToBlack != FadeToBlack::Deep)
 		{
 			if (out.jump) driver->SetLightJump(out.lightCommand);
 			else driver->SetLight(out.lightCommand);
+			queuedLight = out.lightCommand;
 		}
 		if (allowed && contrastCommand < 0)
 		{
@@ -847,10 +887,12 @@ namespace LedDrive
 			// cntr_pair_predict (post-merge audit 2026-10-17, owner rule): paired against
 			// the LED where it will be when this CNTR lands (cntr_latency_ms ahead), so
 			// CNTR is never above the need at landing. Off: the LED now, as before.
+			// Bug hunt 2 (render-ahead): the CNTR lands cntr_latency_ms after now,
+			// which is the frame's display time less its lead.
 			const double pairedLed = CntrPairLedFraction(led.cntrPairPredict, ledModel,
 				led.cntrPairPredict ? LedLandingsLocked(out.lightCommand >= 0 && applyGain &&
 					fadeToBlack != FadeToBlack::Deep ? out.lightCommand : -1) : std::vector<std::pair<double, double>>(),
-				projector.cntrLatencyMs);
+				CommandLeadMs(projector.cntrLatencyMs, frameAheadMs));
 			contrastCommand = pairing.Update(1.0 / std::max(1e-6, pairedLed), out.vpHeadroom, limit);
 			if (contrastCommand >= 0) driver->SetContrastAsync(contrastCommand);
 		}
@@ -967,6 +1009,7 @@ namespace LedDrive
 		holding = false;
 		modelledLevel = led.ledCeiling;
 		commands.clear();
+		queuedLight = -1;
 		ledModel.Reset(LedFractionLocked(modelledLevel));
 		contrastCommands.clear();
 		contrastModel.Reset(1.0);
@@ -1109,6 +1152,26 @@ namespace LedDrive
 		// script itself would never repeat it: CNTR stuck at 51).
 		int resendLight = -1;
 		int resendContrast = -1;
+		// Bug hunt 2 (2026-10-17): a script CNTR schedule cut short by new
+		// settings (the controller already believed its final value; the
+		// projector kept the last value written): that value is sent at the next
+		// tick, completing the schedule - CNTR is never left above the need
+		// (a stuck 51). Not a failed write, so not under
+		// script_resend_failed_writes; the script itself was never interrupted.
+		int completeContrast = -1;
+		// Set when this tick's sends were cut short by new settings.
+		bool cutShort = false;
+		// Bug hunt 2: idle-restore passes that found a write failed and tried again.
+		int idleRetries = 0;
+		// Bug hunt 2: in mode: script, the start-up's full light and CNTR 50
+		// (BringToKnownState) that failed to write are sent at the first tick
+		// like a failed script write (the controller starts from them).
+		if (driving && current.mode == Mode::Script)
+		{
+			const DriverStatus status = driver->Status();
+			if (status.lastSentLight < 0) resendLight = current.ledCeiling;
+			if (status.lastSentContrast != 50) resendContrast = 50;
+		}
 		// Post-merge audit 2026-10-17: a script send's resend value - only when the
 		// write itself did not happen. A missing reply is not a failed write (the
 		// projector may well have taken it; the driver keeps Barco's 2 s after it).
@@ -1177,6 +1240,23 @@ namespace LedDrive
 					controller = ScriptController(current);
 					controller.Reset(status.lastSentLight >= 0 ? status.lastSentLight : current.ledCeiling,
 						contrastNow);
+					// Bug hunt 2: a schedule these settings cut short (or a CNTR
+					// skipped for them) left the port on another value than the
+					// controller believes: complete it at the next tick. A failed
+					// write is already queued as a resend (not sent twice).
+					completeContrast = -1;
+					if (cutShort && status.lastSentContrast >= 0 && status.lastSentContrast != contrastNow &&
+						resendContrast < 0 && !status.contrastBusy)
+					{
+						completeContrast = contrastNow;
+						// script_smoothing: the cut schedule's unsent landings never
+						// come; the bridge restarts from the projector's value.
+						if (smoothing) smoother.Reset(status.lastSentContrast);
+					}
+					cutShort = false;
+					// The controller's light is the port's (lastSentLight): an
+					// LPW1 resend would repeat what the projector already has.
+					if (status.lastSentLight >= 0) resendLight = -1;
 					// From compensate with CNTR assist above 50: back to 50
 					// first (7c-1), which the script controller assumes.
 					if (current.mode != Mode::Compensate && assistContrastDriven)
@@ -1251,9 +1331,15 @@ namespace LedDrive
 			if (restoreAssist)
 			{
 				restoreAssist = false;
-				const bool ok = driver->SendScript("CNTR", 50);
+				completeContrast = -1;   // the controller now starts from 50
+				// Bug hunt 2: a failed write is re-sent at the next tick (the
+				// controller believes 50 and would never send it itself).
+				bool written = false;
+				const bool ok = driver->SendScript("CNTR", 50, &written);
+				resendContrast = written ? -1 : 50;
 				DebugLog::Log("LED drive: left compensate; contrast set to 50%s", ok ? "" : " (not confirmed)");
 			}
+			if (have) idleRetries = 0;
 			if (restoreScriptIdle)
 			{
 				// audit 2026-10-16: led_idle_restore_s in internal_script - full
@@ -1264,22 +1350,39 @@ namespace LedDrive
 				// not only the controller's belief (a failed write of 50 left
 				// the projector at 51 while the script believed 50).
 				const DriverStatus status = driver->Status();
+				// Bug hunt 2: a pending resend counts only while the port has not
+				// seen the value since (the driver's reopen resync may have
+				// written it): never sent twice.
 				const bool lightAt = controller.Light() == current.ledCeiling && !status.busy &&
-					(status.lastSentLight < 0 || status.lastSentLight == current.ledCeiling) && resendLight < 0;
+					(status.lastSentLight < 0 ? resendLight < 0 : status.lastSentLight == current.ledCeiling);
 				const bool contrastAt = controller.Contrast() == 50 && !status.contrastBusy &&
-					(status.lastSentContrast < 0 || status.lastSentContrast == 50) && resendContrast < 0;
-				const bool light = lightAt || driver->SendScript("LPW1", current.ledCeiling);
-				const bool contrast = contrastAt || driver->SendScript("CNTR", 50);
-				resendLight = resendContrast = -1;
+					(status.lastSentContrast < 0 ? resendContrast < 0 : status.lastSentContrast == 50);
+				bool lightWritten = lightAt, contrastWritten = contrastAt;
+				const bool light = lightAt || driver->SendScript("LPW1", current.ledCeiling, &lightWritten);
+				const bool contrast = contrastAt || driver->SendScript("CNTR", 50, &contrastWritten);
+				// Bug hunt 2: a write that failed (not a missing reply) is tried
+				// again - at the next pass while video is still away, or as a
+				// resend at the first tick once it returns (the controller
+				// believes full light and 50 and would never send them itself).
+				resendLight = lightWritten ? -1 : current.ledCeiling;
+				resendContrast = contrastWritten ? -1 : 50;
+				completeContrast = -1;
+				const bool retry = !lightWritten || !contrastWritten;
 				controller.Reset(current.ledCeiling, 50);
 				{
 					std::lock_guard<std::mutex> guard(mutex);
 					if (smoothing) smoother.Reset(50);
+					if (retry) idleRestored = false;
 				}
 				sendsDone = std::chrono::steady_clock::now();
-				DebugLog::Log("LED drive: no video for %d s; LED back to %d%s, CNTR 50%s (led_idle_restore_s)",
-					current.idleRestoreS, current.ledCeiling, light ? "" : " (not confirmed)",
-					contrast ? "" : " (not confirmed)");
+				if (idleRetries == 0)
+					DebugLog::Log("LED drive: no video for %d s; LED back to %d%s, CNTR 50%s (led_idle_restore_s)",
+						current.idleRestoreS, current.ledCeiling, light ? "" : " (not confirmed)",
+						contrast ? "" : " (not confirmed)");
+				else if (!retry)
+					DebugLog::Log("LED drive: idle restore written after %d more attempt(s) (led_idle_restore_s)",
+						idleRetries);
+				idleRetries = retry ? idleRetries + 1 : 0;
 			}
 
 			if (current.mode == Mode::Compensate)
@@ -1288,7 +1391,13 @@ namespace LedDrive
 				{
 					// Leaving script mode for compensate: CNTR back to 50, which
 					// compensate assumes. (log_only and disable restore on exit.)
-					const bool ok = driver->SendScript("CNTR", 50);
+					bool written = false;
+					const bool ok = driver->SendScript("CNTR", 50, &written);
+					// Bug hunt 2: a failed write goes to the driver's own queue,
+					// which repeats a failed write at its next slot until written
+					// (compensate assumes 50; with cntr_assist off it never sends
+					// CNTR itself). A newer compensate CNTR replaces it.
+					if (!written) driver->SetContrastAsync(50);
 					DebugLog::Log("LED drive: left script mode; contrast set to 50%s", ok ? "" : " (not confirmed)");
 					controller.Reset(controller.Light(), 50);
 					contrastDriven = false;
@@ -1431,18 +1540,57 @@ namespace LedDrive
 					resendLight = resendContrast = -1;
 				if (resendLight >= 0 && (out.lightCommand >= 0 || CustomDimEngaged()))
 					resendLight = -1;
-				if (resendContrast >= 0 && !out.contrastSchedule.empty())
-					resendContrast = -1;
-				if (resendLight >= 0)
+				if (!out.contrastSchedule.empty())
+					resendContrast = completeContrast = -1;
+				// Bug hunt 2: nothing to repeat when the port already has the value
+				// (the driver's resync after a reopen writes what the script
+				// intended): never sent twice.
+				if (resendLight >= 0 || resendContrast >= 0 || completeContrast >= 0)
+				{
+					const DriverStatus status = driver->Status();
+					if (!status.busy && status.lastSentLight >= 0 && status.lastSentLight == controller.Light())
+						resendLight = -1;
+					if (!status.contrastBusy && status.lastSentContrast >= 0 &&
+						status.lastSentContrast == controller.Contrast())
+						resendContrast = completeContrast = -1;
+				}
+				// Bug hunt 2 (#10): nothing more is sent once new settings have
+				// come (as for each CNTR of a schedule): a script LPW1 written after
+				// a switch to compensate would be taken as compensate's own.
+				auto settingsUnchanged = [&]
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					if (generation == configGeneration && !stopping) return true;
+					cutShort = true;
+					return false;
+				};
+				if (resendLight >= 0 && settingsUnchanged())
 				{
 					logResend("LPW1", controller.Light());
 					resendLight = scriptSend("LPW1", controller.Light());
 					sendsDone = std::chrono::steady_clock::now();
 				}
-				if (resendContrast >= 0)
+				if ((resendContrast >= 0 || completeContrast >= 0) && settingsUnchanged())
 				{
-					logResend("CNTR", controller.Contrast());
+					if (resendContrast >= 0)
+						logResend("CNTR", controller.Contrast());
+					else
+						DebugLog::Log("LED drive: CNTR %d sent (its schedule was cut short by new settings)",
+							controller.Contrast());
+					const bool completing = resendContrast < 0;
+					completeContrast = -1;
 					resendContrast = scriptSend("CNTR", controller.Contrast());
+					if (controller.Contrast() != 50) contrastDriven = true;
+					if (completing && resendContrast < 0)
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						if (smoothing)
+						{
+							const double landMs = NowMs() + projector.cntrLatencyMs;
+							smoother.Plan({ { landMs, controller.Contrast() } });
+							smoother.Sent(landMs);
+						}
+					}
 					sendsDone = std::chrono::steady_clock::now();
 				}
 				if (current.scriptPacing)
@@ -1470,7 +1618,10 @@ namespace LedDrive
 					for (const ScriptSend& send : sends)
 					{
 						if (!WaitUntil(std::max(sendsDone, tickStart + std::chrono::milliseconds(send.offsetMs)), generation))
+						{
+							cutShort = true;   // bug hunt 2
 							break;
+						}
 						if (send.light)
 						{
 							if (CustomDimEngaged()) continue;
@@ -1527,7 +1678,7 @@ namespace LedDrive
 				}
 				// Never LPW1 while the custom dim is on (Reconfigure leaves it
 				// before script mode runs; this only guards the order).
-				if (out.lightCommand >= 0 && !CustomDimEngaged())
+				if (out.lightCommand >= 0 && !CustomDimEngaged() && settingsUnchanged())
 				{
 					resendLight = scriptSend("LPW1", out.lightCommand);
 					sendsDone = std::chrono::steady_clock::now();
@@ -1542,7 +1693,10 @@ namespace LedDrive
 					// New settings end the tick at once (Should fix 6): the
 					// rest of a schedule is not sent under the new mode.
 					if (!WaitUntil(sendsDone + std::chrono::milliseconds(step.offsetMs - previousOffset), generation))
+					{
+						cutShort = true;   // bug hunt 2
 						break;
+					}
 					previousOffset = step.offsetMs;
 					resendContrast = scriptSend("CNTR", step.contrast);
 					sendsDone = std::chrono::steady_clock::now();

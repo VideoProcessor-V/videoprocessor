@@ -971,6 +971,7 @@ namespace LedDrive
 		status.lastSentContrast = lastSentContrast;
 		status.lastLightSentAt = lastLightSentAt;
 		status.lastContrastSentAt = lastContrastSentAt;
+		status.nextSendAt = nextSendAllowed;   // bug hunt 2
 		status.busy = pendingLight >= 0 || pendingContrast >= 0 || transmitting;
 		status.contrastBusy = pendingContrast >= 0 || contrastInFlight;   // audit 2026-10-16
 		status.sequenceBusy = !sequence.empty() || sequenceInFlight;

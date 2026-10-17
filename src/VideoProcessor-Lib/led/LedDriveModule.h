@@ -131,6 +131,9 @@ namespace LedDrive
 		double RecoveryDisplayed() const;
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
+		// Bug hunt 2 (render-ahead): the source frames after the current one that a
+		// command written now lands on (led_latency_ms less the frame's lead).
+		int CommandLatencySourceFrames() const;
 		size_t LookaheadDepth() const;
 		// led_lookahead_ms (review 2026-10-17) in source frames at the measured
 		// rate; 0 = the queue walk's own depth (active_picture_lookahead_frames).
@@ -155,6 +158,9 @@ namespace LedDrive
 		double NowMs() const;
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
+		// Bug hunt 2: a queued, not yet written LPW1's landing, in ms from the
+		// current frame (the driver's next send slot + led_latency_ms - the lead).
+		double QueuedLightLandingMsLocked(const DriverStatus& status) const;
 		CompensationGain GainLocked() const;
 		void ConfigureModelsLocked();
 		double LedFractionLocked(double level) const;
@@ -220,6 +226,9 @@ namespace LedDrive
 		struct Command { uint64_t frame; int level; double landMs; };
 		std::deque<Command> commands;
 		int seenSends = 0;
+		// Bug hunt 2: the LPW1 target last queued to the driver and not yet seen
+		// written (-1 none); a landing in LedLandingsLocked until it is written.
+		int queuedLight = -1;
 		int modelledLevel;
 		// 7c-1: the LED's light after the dead time, settling (as a fraction
 		// of the ceiling's flux), and the same for CNTR (its light factor).
@@ -246,7 +255,8 @@ namespace LedDrive
 		int CutLevelLocked() const;
 		// cntr_pair_predict (post-merge audit 2026-10-17): the LPW1s still to land, as
 		// (ms from the current frame, LED fraction) in time order - those in flight and
-		// pendingLevel (this tick's, not yet written; -1 none) led_latency_ms ahead.
+		// pendingLevel (this tick's, not yet written; -1 none) or else the queued
+		// queuedLight, led_latency_ms after the driver's next send slot (bug hunt 2).
 		std::vector<std::pair<double, double>> LedLandingsLocked(int pendingLevel) const;
 		void HoldContrastLocked();
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging

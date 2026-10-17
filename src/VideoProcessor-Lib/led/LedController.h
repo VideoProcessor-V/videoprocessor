@@ -474,6 +474,15 @@ namespace LedDrive
 		double target;
 	};
 
+	// Bug hunt 2 (2026-10-17, render-ahead): how long after the current frame is shown a
+	// command written now lands. A send lands latencyMs after it is written (now); the
+	// frame rendered ahead is shown frameAheadMs after now. Never negative; with no lead
+	// (rendered when shown) exactly latencyMs.
+	inline double CommandLeadMs(double latencyMs, double frameAheadMs)
+	{
+		return std::max(0.0, latencyMs - std::max(0.0, frameAheadMs));
+	}
+
 	// cntr_pair_predict (post-merge audit 2026-10-17; owner rule: CNTR above the need is a
 	// defect): the LED fraction compensate's CNTR pairs against. On: the higher of the LED
 	// now and the LED where it will be when the CNTR lands (cntrLatencyMs ahead) - never
