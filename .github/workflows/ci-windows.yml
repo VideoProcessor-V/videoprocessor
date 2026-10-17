@@ -107,6 +107,7 @@ jobs:
           "@ >> $env:GITHUB_STEP_SUMMARY
 
       - name: Build (x64 Release, without Magewell)
+        id: build
         shell: pwsh
         env:
           VP_QT_ROOT: ${{ env.QT_ROOT_DIR }}
@@ -183,6 +184,17 @@ jobs:
           & .\tools\run_config_tests.ps1 -Shards 1 -OutDir $out
           $code = $LASTEXITCODE
           "### Config editor tests`nexit $code, $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (logs in the TRX artifact)" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - name: Build identity tests (EXE/DLL pairing, packaging)
+        if: always() && steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          # Same Windows PowerShell 5.1 as the packaging scripts (see the Build step).
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/test_build_identity.ps1 -BuildRoot x64/Release
+          $code = $LASTEXITCODE
+          "### Build identity tests`nexit $code" >> $env:GITHUB_STEP_SUMMARY
           exit $code
 
       - name: Upload TRX

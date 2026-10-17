@@ -7,6 +7,7 @@
 #include <ConfigFile.h>
 #include <DebugLog.h>
 #include <AnalysisDiagnosticHooks.h>
+#include <VpBuildIdentity.h>
 
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,9 @@ namespace
 		HMODULE module = nullptr;
 		VideoProcessorLibplaceboCreateRendererFn createRenderer = nullptr;
 		VideoProcessorLibplaceboDestroyRendererFn destroyRenderer = nullptr;
+		// Why the plugin was refused or is unavailable; shown to the user by the
+		// renderer start (the constructor throws it) when module is null.
+		std::string failure;
 	};
 
     void __cdecl ForwardAnalysisRecord(void* context,const AnalysisDiagnosticRecordV1* record) {
@@ -71,6 +75,13 @@ namespace
 
 		const std::wstring pluginPath =
 			OptionalRendererLayout::PluginPath(executableDirectory, beta);
+		auto refuse = [&](HMODULE module, std::string reason) {
+			if (module)
+				FreeLibrary(module);
+			PluginExports refused;
+			refused.failure = std::move(reason);
+			return refused;
+		};
 		DebugLog::Log(
 			"VP Renderer plugin probe: path=%ls",
 			pluginPath.c_str());
@@ -106,8 +117,9 @@ namespace
 		{
 			DebugLog::Log(
 				"Optional libplacebo renderer plugin is missing required exports");
-			FreeLibrary(result.module);
-			return PluginExports{};
+			return refuse(result.module,
+				"VP Renderer DLL refused: it is missing required exports. Redeploy "
+				"VideoProcessor.exe and the vprenderer folders together from the same build.");
 		}
 
 		// Bug hunt 2026-10-17: the API version is checked before any other
@@ -120,15 +132,29 @@ namespace
 				"Optional libplacebo renderer plugin API mismatch: expected=%u actual=%u",
 				VP_LIBPLACEBO_PLUGIN_API_VERSION,
 				apiVersion);
-			FreeLibrary(result.module);
-			return PluginExports{};
+			return refuse(result.module,
+				"VP Renderer DLL refused: plugin API " + std::to_string(apiVersion) +
+				", VideoProcessor.exe expects " + std::to_string(VP_LIBPLACEBO_PLUGIN_API_VERSION) +
+				". Redeploy VideoProcessor.exe and the vprenderer folders together from the same build.");
+		}
+		// Hunt 2 (2026-10-17, MEDIUM-1): the API counter alone accepted DLLs of
+		// another build with the same number but a different struct layout. The
+		// build IDs must be equal (owner rule: a mismatched pair never loads; no
+		// override). Checked before any other export is called.
+		const auto getBuildId = reinterpret_cast<VideoProcessorLibplaceboGetBuildIdFn>(
+			GetProcAddress(result.module, VP_LIBPLACEBO_BUILD_ID_EXPORT));
+		const char* pluginBuildId = getBuildId ? getBuildId() : nullptr;
+		std::string pairing;
+		if (!VpBuildIdentity::CheckPair(VpBuildIdentity::Id(), pluginBuildId, pairing))
+		{
+			DebugLog::Log("%s path=%ls", pairing.c_str(), pluginPath.c_str());
+			return refuse(result.module, pairing);
 		}
 		const auto isBeta = reinterpret_cast<bool (__cdecl*)()>(
             GetProcAddress(result.module, VP_LIBPLACEBO_FLAVOR_EXPORT));
         if (!isBeta || isBeta() != beta) {
             DebugLog::Log("VP Renderer plugin flavor mismatch: path=%ls", pluginPath.c_str());
-            FreeLibrary(result.module);
-            return PluginExports{};
+            return refuse(result.module, "VP Renderer DLL refused: flavor mismatch (Beta/non-Beta folder swapped).");
         }
 
         const auto diagnostics=reinterpret_cast<VideoProcessorLibplaceboConfigureDiagnosticFn>(
@@ -141,8 +167,10 @@ namespace
         diagnostics(&recorder,ForwardAnalysisRecord,ForwardAnalysisFrame,AnalysisFramesActive);
 
 		DebugLog::Log(
-			"Optional VP Renderer plugin loaded: API=%u path=%ls",
+			"Optional VP Renderer plugin loaded: API=%u build_id=%s commit=%s path=%ls",
 			apiVersion,
+			VpBuildIdentity::Id(),
+			VpBuildIdentity::Commit(),
 			pluginPath.c_str());
 		return result;
 	}
@@ -178,7 +206,8 @@ LibplaceboPluginVideoRenderer::LibplaceboPluginVideoRenderer(
 {
 	const PluginExports& plugin = GetPlugin(beta);
 	if (!plugin.module)
-		throw std::runtime_error("optional libplacebo renderer plugin is unavailable");
+		throw std::runtime_error(plugin.failure.empty() ?
+			std::string("optional libplacebo renderer plugin is unavailable") : plugin.failure);
 
 	ConfigFile rendererConfig;
 	std::string rendererConfigPath;
@@ -639,6 +668,16 @@ bool LibplaceboPluginVideoRenderer::SuspendLedDriveForTest(CString& reason)
 	reason.Empty();
 	return !m_renderer || m_renderer->SuspendLedDriveForTest(reason);
 }
+
+// Hunt 2 LOW-1: the host's post-stall suppression deadline never reached the DLL
+// (IVideoRenderer's default no-op ran), so advisory post-stall telemetry was logged
+// during the settle interval the host had already armed.
+void LibplaceboPluginVideoRenderer::SetPostStallResetTelemetrySuppressedUntil(uint64_t untilMs)
+{
+	if (m_renderer)
+		m_renderer->SetPostStallResetTelemetrySuppressedUntil(untilMs);
+}
+
 
 bool LibplaceboPluginVideoRenderer::StopLedDriveForShutdown()
 {

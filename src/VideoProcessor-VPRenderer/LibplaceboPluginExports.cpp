@@ -1,16 +1,36 @@
 #include <pch.h>
 
 #include <ConfigFile.h>
-#include "version.h"
+// Hunt 2 LOW-2: generated per project into $(IntDir); both renderer projects used
+// to rewrite one shared src/VideoProcessor-VPRenderer/version.h concurrently.
+#include "vp_renderer_version.h"
 #include <DebugLog.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <vprenderer/LibplaceboVideoRenderer.h>
+#include <VpBuildIdentity.h>
+
+#include <type_traits>
+
+// INFO-1 (hunt 2): VideoProcessorLibplaceboDestroyRenderer cannot guard a throwing
+// destructor (destructors are noexcept; a throw terminates inside the DLL whatever
+// the export does). Keep the renderer and its members non-throwing on destruction.
+static_assert(std::is_nothrow_destructible_v<LibplaceboVideoRenderer>,
+	"LibplaceboVideoRenderer must not throw from its destructor");
 
 
 extern "C" __declspec(dllexport) uint32_t __cdecl
 VideoProcessorLibplaceboGetApiVersion()
 {
 	return VP_LIBPLACEBO_PLUGIN_API_VERSION;
+}
+
+
+// Hunt 2 (2026-10-17): this DLL's build ID, compiled by VideoProcessor-Lib from the
+// same generated header as the executable's. The loader refuses any mismatch.
+extern "C" __declspec(dllexport) const char* __cdecl
+VideoProcessorLibplaceboGetBuildId()
+{
+	return VpBuildIdentity::Id();
 }
 
 
@@ -57,8 +77,8 @@ VideoProcessorLibplaceboCreateRenderer(
 	try
 	{
 		DebugLog::SetExternalSink(logSink);
-		DebugLog::Log("VP build identity: module=renderer commit=%ls branch=%ls dirty=%d build=%ls",
-			VERSION_URL, VERSION_BRANCH, VERSION_DIRTY ? 1 : 0, VERSION_DESCRIBE);
+		DebugLog::Log("VP build identity: module=renderer commit=%ls branch=%ls dirty=%d build=%ls build_id=%s",
+			VERSION_URL, VERSION_BRANCH, VERSION_DIRTY ? 1 : 0, VERSION_DESCRIBE, VpBuildIdentity::Id());
 		ConfigFile::SetRendererConfigurationPath(
 			rendererConfigPath ? rendererConfigPath : "");
 		if (!callback)

@@ -55,7 +55,7 @@
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;_USRDLL;VP_LIBPLACEBO_BETA;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>..\VideoProcessor-Lib;..\..\3rdparty\libplacebo-beta\include;..\..\3rdparty\nvapi;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);..\VideoProcessor-Lib;..\..\3rdparty\libplacebo-beta\include;..\..\3rdparty\nvapi;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
@@ -77,7 +77,7 @@
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;_USRDLL;VP_LIBPLACEBO_BETA;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalIncludeDirectories>..\VideoProcessor-Lib;..\..\3rdparty\libplacebo-beta\include;..\..\3rdparty\nvapi;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);..\VideoProcessor-Lib;..\..\3rdparty\libplacebo-beta\include;..\..\3rdparty\nvapi;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions</EnableEnhancedInstructionSet>
     </ClCompile>
@@ -95,7 +95,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
     <PreBuildEvent>
-      <Command>powershell.exe -ExecutionPolicy RemoteSigned -File "$(ProjectDir)..\..\tools\generate_version.ps1" -Project "$(ProjectDir)." -GitRoot "$(ProjectDir)..\.."</Command>
+      <Command>powershell.exe -ExecutionPolicy RemoteSigned -File "$(ProjectDir)..\..\tools\generate_version.ps1" -Project "$(IntDir)." -HeaderFile "vp_renderer_version.h" -GitRoot "$(ProjectDir)..\.."</Command>
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

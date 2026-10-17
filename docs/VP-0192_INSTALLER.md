@@ -136,6 +136,10 @@ toolset floor; CRT must satisfy the newest shipped dependency's floor.
 validator. Its EXE and central-runtime helper are excluded from distribution. -SkipBuild requires the same successful
 build receipt, exact source contents/dirty status and binary hashes. Source changes
 during build or packaging reject the result. Never fabricate a receipt.
+The staged VideoProcessor.exe and both renderer DLLs must carry one embedded build ID
+(schema-2 runtime records, checked by package_release.ps1; see docs/VP-0107_RELEASE_LAYOUT.md);
+the installer inherits that check from its staging input. Run
+`.\tools\test_build_identity.ps1 -BuildRoot x64\Release` with the tests above.
 
 Setup and uninstall use images/VideoProcessor.ico, the player's existing icon.
 Clean installer filenames are VideoProcessorSetup-<version>-<commit-sha12>.exe, for example

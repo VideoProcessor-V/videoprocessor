@@ -87,6 +87,13 @@ $copyPlan = foreach ($entry in $manifest.files) {
     }
 }
 
+# Hunt 2 (2026-10-17, MEDIUM-2): VideoProcessor.exe and the renderer DLLs must carry
+# one build ID (a GUI-only build leaves stale DLLs; the EXE would refuse them).
+if (-not $manifest.PSObject.Properties['buildIdentity'] -or -not $manifest.buildIdentity.pairedArtifacts) {
+    throw 'The release manifest must declare buildIdentity.pairedArtifacts.'
+}
+$buildId = Assert-VpPairedBuildIdentity -CopyPlan $copyPlan -PairedArtifacts @($manifest.buildIdentity.pairedArtifacts)
+Write-Host "VP build ID (EXE and renderer DLLs): $buildId"
 $runtimeRequirement = Get-VpPackageRuntimeRequirement -CopyPlan $copyPlan `
     -Policy $manifest.vcRuntime -InstallerPath $VcRedistPath
 $runtimeMetadataPath = 'prerequisites\runtime-requirement.json'

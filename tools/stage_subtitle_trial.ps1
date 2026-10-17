@@ -25,6 +25,11 @@ foreach($source in $map.Keys) {
  if($record.configuration -ne 'Release' -or $record.architecture -ne 'x64' -or
   (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ne $record.sha256) { throw "Invalid Release binary record: $source" }
 }
+# Hunt 2: the EXE and the renderer DLL must come from one build (same build ID).
+$ids=@('VideoProcessor-GUI.exe','vprenderer\VideoProcessorVPRenderer.dll' | ForEach-Object {
+ $r=Get-Content -Raw -LiteralPath ((Join-Path $release $_)+'.runtime.json') | ConvertFrom-Json
+ if($r.PSObject.Properties['buildId']){$r.buildId}else{$null} })
+if(-not $ids[0] -or $ids[0] -ne $ids[1]) { throw "EXE/renderer DLL build ID mismatch ($($ids -join ' vs ')); rebuild the x64 Release solution." }
 foreach($cfg in @('BOX','MOVE','MOVE-RECTANGLE','MOVE-TRANSPARENT','MOVE-BLEND','MOVE-BLACK','MOVE-DARK-GRAY')) {
  if(-not (Test-Path -LiteralPath (Join-Path $seedRoot ("Subtitle-$cfg.cfg")))) { throw "Seed config missing: $cfg" }
 }
