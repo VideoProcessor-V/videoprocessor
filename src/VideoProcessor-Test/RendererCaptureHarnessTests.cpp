@@ -22,6 +22,7 @@
 #include <cstring>
 #include <sstream>
 #include <map>
+#include <random>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -122,6 +123,9 @@ namespace
 
 	// Letterbox bars (black rows at the top and bottom) in the V210 frames; 0 = none.
 	int g_harnessBarRows = 0;
+	// A picture for the V210 frames (10-bit luma codes, width x height; chroma neutral), the same
+	// every frame; empty = the moving test pattern (2026-10-16: the chain test).
+	std::vector<uint16_t> g_harnessLumaPicture;
 
 	// One moving frame: vertical bars in luma, a chroma ramp, shifted by n.
 	void FillV210(std::vector<BYTE>& frame, int width, int height, size_t rowBytes, int n)
@@ -132,8 +136,11 @@ namespace
 			const bool bar = y < g_harnessBarRows || y >= height - g_harnessBarRows;
 			for (int pack = 0; pack < (width + 5) / 6; ++pack)
 			{
-				auto luma = [&](int x) { return bar ? 64u : static_cast<uint32_t>(64 + ((x + 4 * n) / 32 % 2) * 700 + (y % 64)); };
-				auto chroma = [&](int x) { return bar ? 512u : static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
+				const bool picture = g_harnessLumaPicture.size() == static_cast<size_t>(width) * height;
+				auto luma = [&](int x) {
+					if (picture) return static_cast<uint32_t>(g_harnessLumaPicture[static_cast<size_t>(y) * width + (std::min)(x, width - 1)]);
+					return bar ? 64u : static_cast<uint32_t>(64 + ((x + 4 * n) / 32 % 2) * 700 + (y % 64)); };
+				auto chroma = [&](int x) { return bar || picture ? 512u : static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
 				const int x = pack * 6;
 				row[pack * 4 + 0] = chroma(x) | (luma(x) << 10) | (chroma(x + 1) << 20);
 				row[pack * 4 + 1] = luma(x + 1) | (chroma(x + 2) << 10) | (luma(x + 2) << 20);
@@ -1407,6 +1414,176 @@ namespace Tests
 			Assert::IsTrue(game.Logged("Early upload: on"), (L"capture_upload auto: early upload in low latency\n" + game.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("Early upload: on"), (L"auto: no early upload on the regular path\n" + normal.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is regular\n" + normal.Tail()).c_str());
+		}
+
+		TEST_METHOD(RebaseDebandAndCnnBlendKeepTheRecoveredDetail)
+		{
+			// Owner 2026-10-16: the adaptive scaling must not destroy the detail recovery (the re-base)
+			// or the debanding. A 1080p master with fine texture and a sky banded in 8-bit steps; the
+			// reference is the master fed at 1080 through the chain; the test feeds the master upscaled
+			// 2x by a player (Lanczos-3) at 4K with source_resolution 1080. Per variant (plain, + VP
+			// deband, + CNN upscaler with its blend) the 4K outputs are compared (picture and sky), and
+			// the sky's band edges counted.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int w = 1920, h = 1080, sky = h / 4;
+			std::vector<double> master(static_cast<size_t>(w) * h);
+			{
+				std::mt19937 rng(5);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				struct Wave { double fx, fy, phase, amp; };
+				std::vector<Wave> waves;
+				for (int i = 0; i < 60; ++i)
+				{
+					const double f = 0.01 * std::pow(0.45 / 0.01, u(rng)), a = u(rng) * 3.14159265;
+					waves.push_back({ f * std::cos(a), f * std::sin(a), u(rng) * 6.2831853, 0.02 / std::sqrt(f) });
+				}
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+					{
+						double v;
+						if (y < sky)
+							v = std::round((0.35 + 0.25 * y / static_cast<double>(sky)) * 255.0) / 255.0;   // 8-bit steps
+						else
+						{
+							v = 0.45;
+							for (const Wave& wv : waves) v += wv.amp * std::cos(6.2831853 * (wv.fx * x + wv.fy * y) + wv.phase);
+						}
+						master[static_cast<size_t>(y) * w + x] = (std::min)(0.95, (std::max)(0.05, v));
+					}
+			}
+			auto toCodes = [](const std::vector<double>& v) {
+				std::vector<uint16_t> c(v.size());
+				for (size_t i = 0; i < v.size(); ++i) c[i] = static_cast<uint16_t>(std::lround(64.0 + v[i] * 876.0));   // limited range
+				return c;
+			};
+			// The player's 2x Lanczos-3 (separable).
+			std::vector<double> up(static_cast<size_t>(w) * 2 * h * 2);
+			{
+				auto lanczos = [](double x) { x = std::fabs(x); if (x < 1e-9) return 1.0; if (x >= 3.0) return 0.0;
+					const double px = 3.14159265358979 * x; return 3.0 * std::sin(px) * std::sin(px / 3.0) / (px * px); };
+				std::vector<double> rows(static_cast<size_t>(w) * 2 * h);
+				auto line = [&](const double* src, int n, int stride, double* dst, int dstStride) {
+					for (int o = 0; o < 2 * n; ++o)
+					{
+						const double centre = (o + 0.5) / 2.0 - 0.5;
+						double sum = 0.0, wsum = 0.0;
+						for (int k = static_cast<int>(std::floor(centre)) - 2; k <= static_cast<int>(std::floor(centre)) + 3; ++k)
+						{
+							const int kk = (std::min)(n - 1, (std::max)(0, k));
+							const double wt = lanczos(centre - k);
+							sum += wt * src[static_cast<size_t>(kk) * stride];
+							wsum += wt;
+						}
+						dst[static_cast<size_t>(o) * dstStride] = sum / wsum;
+					}
+				};
+				for (int y = 0; y < h; ++y) line(&master[static_cast<size_t>(y) * w], w, 1, &rows[static_cast<size_t>(y) * 2 * w], 1);
+				for (int x = 0; x < 2 * w; ++x) line(&rows[x], h, 2 * w, &up[x], 2 * w);
+			}
+			for (double& v : up) v = (std::min)(1.0, (std::max)(0.0, v));
+			const std::vector<uint16_t> masterCodes = toCodes(master), upCodes = toCodes(up);
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight, savedWW = g_harnessWindowWidth, savedWH = g_harnessWindowHeight;
+			const std::vector<std::string> savedShaders = g_harnessShaderProfiles;
+			g_harnessWindowWidth = 3840;
+			g_harnessWindowHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-chain";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 3.0;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			auto load = [](const std::string& json, int& lw, int& lh) {
+				std::vector<int> codes;
+				std::string png = json.substr(0, json.size() - 5) + ".png";
+				CComPtr<IWICImagingFactory> factory;
+				if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return codes;
+				CComPtr<IWICBitmapDecoder> decoder;
+				const std::wstring wpng(png.begin(), png.end());
+				if (FAILED(factory->CreateDecoderFromFilename(wpng.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) return codes;
+				CComPtr<IWICBitmapFrameDecode> frame;
+				decoder->GetFrame(0, &frame);
+				CComPtr<IWICFormatConverter> converter;
+				factory->CreateFormatConverter(&converter);
+				converter->Initialize(frame, GUID_WICPixelFormat64bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+				UINT uw = 0, uh = 0;
+				converter->GetSize(&uw, &uh);
+				lw = static_cast<int>(uw); lh = static_cast<int>(uh);
+				std::vector<uint16_t> rgba(static_cast<size_t>(lw) * lh * 4);
+				converter->CopyPixels(nullptr, static_cast<UINT>(lw * 8), static_cast<UINT>(rgba.size() * 2), reinterpret_cast<BYTE*>(rgba.data()));
+				codes.resize(static_cast<size_t>(lw) * lh);
+				for (size_t i = 0; i < codes.size(); ++i) codes[i] = rgba[i * 4 + 1] >> 6;
+				return codes;
+			};
+			const std::string cnnShader =
+				"[shader.standard]\ntype: multi\nlabel: Off\n"
+				"[shader.standard.cnn]\nshader_type: custom\nlabel: FSRCNNX\nstage: pre_resize\norder: 10\nglsl_file: FSRCNNX_x2_16-0-4-1.glsl\n";
+			struct Variant { const char* name; std::string extra; bool cnn; };
+			const Variant variants[] = {
+				{ "plain", "deband_vp: off\nadaptive_upscale: off\n", false },
+				{ "VP deband", "deband_vp: on\nadaptive_upscale: off\n", false },
+				{ "VP deband + CNN + blend", "deband_vp: on\nadaptive_upscale: on\n", true } };
+			CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			auto capture = [&](bool source4k, const Variant& v, int& cw, int& ch) {
+				g_harnessWidth = source4k ? 2 * w : w;
+				g_harnessHeight = source4k ? 2 * h : h;
+				g_harnessLumaPicture = source4k ? upCodes : masterCodes;
+				g_harnessShaderProfiles.clear();
+				if (v.cnn) g_harnessShaderProfiles.push_back("standard.cnn");
+				const std::string extra = std::string(source4k ? "source_resolution: 1080\n" : "source_resolution: native\n") +
+					"[vprenderer.Default]\ndithering: off\ndeband: off\n" + v.extra + (v.cnn ? cnnShader : std::string());
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, extra, false, &plan);
+				for (const std::string& line : r.log)
+					if (line.find("Re-base:") != std::string::npos || line.find("Re-base kernel") != std::string::npos ||
+						line.find("VP deband") != std::string::npos || line.find("Adaptive upscale") != std::string::npos ||
+						line.find("rejected") != std::string::npos)
+						Logger::WriteMessage(("    " + line + "\n").c_str());
+				Assert::IsFalse(r.captureMetadata.empty(), (L"capture written\n" + r.Tail()).c_str());
+				return load(r.captureMetadata, cw, ch);
+			};
+			for (const Variant& v : variants)
+			{
+				int aw = 0, ah = 0, bw = 0, bh = 0;
+				const std::vector<int> ref = capture(false, v, aw, ah);
+				const std::vector<int> got = capture(true, v, bw, bh);
+				Assert::IsTrue(!ref.empty() && aw == bw && ah == bh, L"two captures of one size");
+				const int skyOut = ah / 4;
+				double ePic = 0.0, eSky = 0.0;
+				long nPic = 0, nSky = 0;
+				auto bandEdges = [&](const std::vector<int>& c) {
+					long edges = 0, count = 0;
+					for (int y = 8; y < skyOut - 8; ++y)
+						for (int x = 16; x < aw - 16; x += 4)
+						{
+							edges += std::abs(c[static_cast<size_t>(y) * aw + x] - c[static_cast<size_t>(y - 1) * aw + x]) >= 3 ? 1 : 0;
+							++count;
+						}
+					return count ? 100.0 * edges / count : 0.0;
+				};
+				for (int y = 8; y < ah - 8; ++y)
+					for (int x = 16; x < aw - 16; x += 2)
+					{
+						const double e = static_cast<double>(got[static_cast<size_t>(y) * aw + x] - ref[static_cast<size_t>(y) * aw + x]);
+						if (y < skyOut - 8) { eSky += e * e; ++nSky; }
+						else if (y > skyOut + 24) { ePic += e * e; ++nPic; }
+					}
+				char line[300];
+				snprintf(line, sizeof(line), "%-26s re-based vs the 1080 master through the same chain: picture %.2f codes RMS, sky %.2f; sky band edges: reference %.2f%%, re-based %.2f%%\n",
+					v.name, std::sqrt(ePic / (std::max)(1L, nPic)), std::sqrt(eSky / (std::max)(1L, nSky)), bandEdges(ref), bandEdges(got));
+				Logger::WriteMessage(line);
+			}
+			g_harnessLumaPicture.clear();
+			g_harnessWidth = savedW; g_harnessHeight = savedH;
+			g_harnessWindowWidth = savedWW; g_harnessWindowHeight = savedWH;
+			g_harnessShaderProfiles = savedShaders;
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
 		}
 
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
