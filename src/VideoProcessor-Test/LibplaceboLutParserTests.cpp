@@ -16,6 +16,10 @@
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
+#include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
+#include <vprenderer/DolbyVisionTunnelUnpackReference.h>
+#include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include "DolbyVisionTunnelSender.h"
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/SourceRebase.h>
 #include <KernelInverse.h>
@@ -10324,6 +10328,189 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &luma);
 			AssertCleanLibplaceboLog(log);
 			Logger::WriteMessage(("GpuRgbUnpack: " + std::to_string(cases) + " cases matched the CPU decode\n").c_str());
+		}
+
+		TEST_METHOD(GpuDolbyVisionTunnelUnpackMatchesTheCpuUnpack)
+		{
+			// dv_tunnel_gpu_unpack (owner 2026-10-16): the Dolby Vision tunnel's
+			// 12-bit IPT 4:2:2 planes unpacked on the GPU from the raw r210 frame
+			// equal CR210DolbyVisionTunnelFormatter's planes sample for sample,
+			// for both RGB8 placements, several widths (row padding filled, every
+			// pixel after the DM packet an arbitrary 32-bit word), in the r210,
+			// R10b and R10l containers (the CPU decodes the r210 picture; an R10
+			// word is the r210 word << 2), from the frame
+			// and from an already-uploaded texture (EarlyUpload). Refused geometry
+			// keeps the CPU unpack. Hardware only (VP_TEST_GPU=hardware); also on
+			// WARP with VP_TEST_DV_WARP=1 (no GPU needed).
+			auto envIs = [](const char* name, const char* want)
+			{
+				char* v = nullptr;
+				size_t n = 0;
+				const bool on = _dupenv_s(&v, &n, name) == 0 && v && std::string(v) == want;
+				std::free(v);
+				return on;
+			};
+			const bool hardware = envIs("VP_TEST_GPU", "hardware");
+			if (!hardware && !envIs("VP_TEST_DV_WARP", "1"))
+			{
+				Logger::WriteMessage(L"DV tunnel GPU unpack: VP_TEST_GPU=hardware (or VP_TEST_DV_WARP=1) only; not run");
+				return;
+			}
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			GpuDolbyVisionTunnelUnpack unpack(fixture.Log(), gpu);
+			unpack.SetHostReadableForTest(true);
+			pl_tex planes[2] = { nullptr, nullptr };
+			uint32_t seed = 0x6a09e667u;
+			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> samples(static_cast<size_t>(tex->params.w) * tex->params.h *
+					tex->params.format->num_components);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = samples.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"plane not host-readable");
+				return samples;
+			};
+			pl_fmt rgba8 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(rgba8);
+			int cases = 0;
+			std::vector<unsigned> widths = { 128U, 130U, 134U, 1922U };
+			if (hardware)
+				widths.push_back(3840U);
+			for (const bool high8 : { false, true })
+				for (const unsigned width : widths)
+				{
+					const unsigned height = width >= 3840 ? 2160U : width > 1000 ? 1081U : 100U;
+					Tests::DvSender::SenderPicture picture(high8, width, height);
+					picture.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody()));
+					const size_t rowBytes = picture.state->BytesPerRow();
+					for (size_t row = 0; row < height; ++row)
+						for (size_t byte = 0; byte + 4 <= rowBytes; byte += 4)
+						{
+							if (byte / 4 < width && row * width + byte / 4 < 3072)
+								continue;
+							const uint32_t word = next();
+							std::memcpy(picture.input.data() + row * rowBytes + byte, &word, 4);
+						}
+					const VideoFrame frame(picture.input.data(), 1, 0, nullptr);
+					CR210DolbyVisionTunnelFormatter cpu;
+					cpu.OnVideoState(picture.state);
+					std::vector<BYTE> expected(static_cast<size_t>(cpu.GetOutFrameSize()));
+					Assert::IsTrue(cpu.FormatVideoFrame(frame, expected.data()), L"CPU unpack failed");
+					Assert::IsTrue(cpu.GetDolbyVisionTunnelMetadata().valid, L"the sender picture did not lock");
+					CR210DolbyVisionTunnelFormatter analyzed;
+					analyzed.OnVideoState(picture.state);
+					Assert::IsTrue(analyzed.AnalyzeFrame(frame) == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE);
+					Assert::AreEqual(high8, analyzed.PlanesHighAligned());
+					const std::wstring name = std::wstring(high8 ? L"high8 " : L"low8 ") + std::to_wstring(width);
+					const uint16_t* want = reinterpret_cast<const uint16_t*>(expected.data());
+					const size_t planePixels = static_cast<size_t>(width) * height;
+					auto compare = [&](const wchar_t* route)
+					{
+						const std::vector<uint16_t> gotY = download(planes[0]), gotC = download(planes[1]);
+						Assert::AreEqual(planePixels, gotY.size(), (name + L": intensity plane size").c_str());
+						Assert::AreEqual(planePixels, gotC.size(), (name + L": chroma plane size").c_str());
+						for (size_t i = 0; i < planePixels; ++i)
+						{
+							if (gotY[i] != want[i])
+								Assert::Fail((name + L" " + route + L": intensity differs at (" + std::to_wstring(i % width) + L", " +
+									std::to_wstring(i / width) + L"): " + std::to_wstring(gotY[i]) + L" vs " + std::to_wstring(want[i])).c_str());
+							if (gotC[i] != want[planePixels + i])
+								Assert::Fail((name + L" " + route + L": chroma differs at (" + std::to_wstring(i % width) + L", " +
+									std::to_wstring(i / width) + L"): " + std::to_wstring(gotC[i]) + L" vs " +
+									std::to_wstring(want[planePixels + i])).c_str());
+						}
+					};
+					// Every tunnel container of the same picture (R10: the r210 word << 2,
+					// padding bits set; R10b big, R10l little endian).
+					for (const VideoFrameEncoding container : { VideoFrameEncoding::R210, VideoFrameEncoding::R10b,
+						VideoFrameEncoding::R10l })
+					{
+						std::vector<BYTE> raw(picture.input.size());
+						DolbyVisionTunnelUnpackReference::RepackR210(picture.input.data(), raw.data(), raw.size(), container, 3);
+						const wchar_t* route = container == VideoFrameEncoding::R210 ? L"r210 frame" :
+							container == VideoFrameEncoding::R10b ? L"R10b frame" : L"R10l frame";
+						Assert::IsTrue(unpack.Unpack(container, raw.data(), rowBytes, static_cast<int>(width), static_cast<int>(height),
+							analyzed.PlanesHighAligned(), planes), (name + L" " + route + L": " +
+							ExtendedRangeGpuProbe::ToWide(unpack.Error())).c_str());
+						compare(route);
+					}
+					// The early-upload route: the raw frame already on the GPU as rgba8.
+					pl_tex_params rawParams{};
+					rawParams.w = static_cast<int>(rowBytes / 4);
+					rawParams.h = static_cast<int>(height);
+					rawParams.format = rgba8;
+					rawParams.sampleable = true;
+					rawParams.host_writable = true;
+					pl_tex early = pl_tex_create(gpu, &rawParams);
+					Assert::IsNotNull(early);
+					pl_tex_transfer_params up{};
+					up.tex = early;
+					up.ptr = picture.input.data();
+					up.row_pitch = rowBytes;
+					Assert::IsTrue(pl_tex_upload(gpu, &up));
+					Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R210, nullptr, rowBytes, static_cast<int>(width), static_cast<int>(height),
+						analyzed.PlanesHighAligned(), planes, early), (name + L" early: " + ExtendedRangeGpuProbe::ToWide(unpack.Error())).c_str());
+					compare(L"early");
+					pl_tex_destroy(gpu, &early);
+					++cases;
+				}
+			// Refused geometry: the renderer keeps the CPU unpack.
+			std::vector<BYTE> tiny(1024 * 8);
+			const VideoFrameEncoding r210 = VideoFrameEncoding::R210;
+			Assert::IsFalse(unpack.Unpack(r210, tiny.data(), 1024, 129, 4, false, planes), L"an odd width must be refused");
+			Assert::IsFalse(unpack.Unpack(r210, tiny.data(), 508, 128, 4, false, planes), L"a row shorter than the frame must be refused");
+			Assert::IsFalse(unpack.Unpack(r210, nullptr, 1024, 128, 4, false, planes), L"no frame must be refused");
+			Assert::IsFalse(unpack.Unpack(VideoFrameEncoding::V210, tiny.data(), 1024, 128, 4, false, planes),
+				L"only the tunnel containers take this pass");
+			// Efficiency (report, hardware): 3840x2160, the CPU unpack it replaces
+			// against AnalyzeFrame (the CPU's part now) and the raw upload + GPU
+			// pass (wall, GPU drained) and the pass alone (timer).
+			if (hardware)
+			{
+				Tests::DvSender::SenderPicture picture(true, 3840, 2160);
+				picture.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody()));
+				CR210DolbyVisionTunnelFormatter cpu, analyzed;
+				cpu.OnVideoState(picture.state);
+				analyzed.OnVideoState(picture.state);
+				std::vector<BYTE> out(static_cast<size_t>(cpu.GetOutFrameSize()));
+				pl_timer timer = pl_timer_create(gpu);
+				unpack.SetTimerForTest(timer);
+				double cpuMs = 1e30, analyzeMs = 1e30, gpuWallMs = 1e30, passMs = 1e30;
+				for (int run = 0; run < 8; ++run)
+				{
+					const VideoFrame frame(picture.input.data(), static_cast<uint64_t>(run + 1), 0, nullptr);
+					auto t0 = std::chrono::steady_clock::now();
+					cpu.FormatVideoFrame(frame, out.data());
+					cpuMs = std::min(cpuMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					t0 = std::chrono::steady_clock::now();
+					analyzed.AnalyzeFrame(frame);
+					analyzeMs = std::min(analyzeMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					pl_gpu_finish(gpu);
+					t0 = std::chrono::steady_clock::now();
+					Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R210, picture.input.data(), static_cast<size_t>(picture.state->BytesPerRow()), 3840, 2160,
+						true, planes));
+					pl_gpu_finish(gpu);
+					gpuWallMs = std::min(gpuWallMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					const uint64_t ns = pl_timer_query(gpu, timer);
+					if (ns > 0)
+						passMs = std::min(passMs, ns / 1e6);
+				}
+				unpack.SetTimerForTest(nullptr);
+				pl_timer_destroy(gpu, &timer);
+				Logger::WriteMessage(("GpuDolbyVisionTunnelUnpack 4K: CPU unpack " + std::to_string(cpuMs) + " ms; AnalyzeFrame " +
+					std::to_string(analyzeMs) + " ms; raw upload + GPU pass " + std::to_string(gpuWallMs) + " ms (pass alone " +
+					std::to_string(passMs) + " ms)\n").c_str());
+			}
+			pl_tex_destroy(gpu, &planes[0]);
+			pl_tex_destroy(gpu, &planes[1]);
+			AssertCleanLibplaceboLog(log);
+			Logger::WriteMessage(("GpuDolbyVisionTunnelUnpack: " + std::to_string(cases) + " cases matched the CPU unpack\n").c_str());
 		}
 
 		TEST_METHOD(GpuCaptureUnpackMatchesTheCpuFormatters)
