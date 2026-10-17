@@ -19,8 +19,10 @@
 // together (v1.4.02 merge, 2026-10-15); 30: GetLedDriveStatus (crash state);
 // 31: GetSourceResolutionStatus (Stage 12, crash state); 32: the DV L1
 // scene minimum in DolbyVisionLuminanceStatus (2026-10-17);
-// 33: StopLedDriveForShutdown (2026-10-17 integration).
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 33;
+// 33: StopLedDriveForShutdown (2026-10-17 integration);
+// 34: GetContentIntentStatus and the DV L5/L6/L11 fields in
+// DolbyVisionTunnelFrameMetadata (content intent, 2026-10-17).
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 34;
 static constexpr const char* VP_LIBPLACEBO_FLAVOR_EXPORT = "VideoProcessorLibplaceboIsBeta";
 static constexpr const char* VP_LIBPLACEBO_VERSION_EXPORT =
 	"VideoProcessorLibplaceboGetApiVersion";

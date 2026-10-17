@@ -608,6 +608,11 @@ protected:
 	void ConfigureAmbientSensor();
 	void PollAmbientSensor();
 	CString AmbientOverlayLine() const;
+	// Content intent (intent interpreter item 1): the rules' `content` variable.
+	ContentIntentStatus m_contentStatus;
+	std::string m_contentValue;                  // as the rules last saw it ("" = off)
+	void UpdateContentIntent(const char* reason);
+	CString ContentIntentLine() const;
 	std::unique_ptr<ConfigFile> m_stagedConfiguration;
 	ConfigurationApplyPolicy::Action m_stagedConfigurationAction =
 		ConfigurationApplyPolicy::Action::SaveOnly;

@@ -5253,8 +5253,9 @@ namespace VideoProcessorTest
 			// v1.4.02's diagnostics and profiles; 29: both (v1.4.02 merge); 30:
 			// GetLedDriveStatus (crash state); 31: GetSourceResolutionStatus
 			// (Stage 12, crash state); 32: the DV L1 scene minimum in the luminance status;
-			// 33: StopLedDriveForShutdown (2026-10-17 integration).
-			Assert::AreEqual(static_cast<uint32_t>(33),
+			// 33: StopLedDriveForShutdown (2026-10-17 integration); 34: GetContentIntentStatus
+			// and the DV L5/L6/L11 metadata fields (content intent, 2026-10-17).
+			Assert::AreEqual(static_cast<uint32_t>(34),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

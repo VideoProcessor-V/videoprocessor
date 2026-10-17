@@ -12806,13 +12806,20 @@ CVideoProcessorDlg::GetUnifiedProfileSourceLookup()
 	const double actualRefreshRate = GetActiveTargetRefreshRate(displayWindow);
 	const std::string renderer = CStringA(rendererName).GetString();
 	const std::string ambient = CurrentAmbientValue();   // Stage 9; empty when off
-	return [sourceValues, renderer, actualRefreshRate, ambient](const std::string& name,
+	const std::string content = m_contentValue;          // content intent; empty when off
+	return [sourceValues, renderer, actualRefreshRate, ambient, content](const std::string& name,
 		std::string& value)
 	{
 		if (name == "ambient")
 		{
 			if (ambient.empty()) return false;
 			value = ambient;
+			return true;
+		}
+		if (name == "content")
+		{
+			if (content.empty()) return false;
+			value = content;
 			return true;
 		}
 		if (name == "renderer")
@@ -13748,6 +13755,45 @@ void CVideoProcessorDlg::PollAmbientSensor()
 			m_ambientConfigured.lostSeconds, Ambient::Name(m_ambientConfigured.room));
 		m_ambientState.ResetSensor();
 	}
+}
+
+// Content intent (intent interpreter item 1, 2026-10-17): the renderer's
+// content class as the rules' `content` variable ("" while intent_content is
+// off or nothing is classified). Re-evaluates the profile rules on a change.
+void CVideoProcessorDlg::UpdateContentIntent(const char* reason)
+{
+	ContentIntentStatus status;
+	if (!m_videoRenderer || m_rendererState != RendererState::RENDERSTATE_RENDERING ||
+		!m_videoRenderer->GetContentIntentStatus(status))
+		status = ContentIntentStatus();
+	m_contentStatus = status;
+	const std::string value = ContentRuleValue(status);
+	if (value == m_contentValue)
+		return;
+	DebugLog::Log("Content intent: rules see content=%s (was %s; %s, %s)",
+		value.empty() ? "(empty)" : value.c_str(), m_contentValue.empty() ? "(empty)" : m_contentValue.c_str(),
+		DisplayName(status.source), reason);
+	m_contentValue = value;
+	RefreshUnifiedProfilesForRuleContext(reason);
+}
+
+// "sports (inferred)" / "film (from metadata)"; empty while the switch is off.
+CString CVideoProcessorDlg::ContentIntentLine() const
+{
+	if (!m_contentStatus.enabled)
+		return CString();
+	CString line;
+	if (m_contentStatus.content == ContentClass::Unknown)
+		line.Format(TEXT("classifying (%hs)"), m_contentStatus.reason);
+	else
+		line.Format(TEXT("%hs (%hs)"), ToString(m_contentStatus.content), DisplayName(m_contentStatus.source));
+	if (m_contentStatus.candidate != ContentClass::Unknown && m_contentStatus.candidate != m_contentStatus.content)
+	{
+		CString pending;
+		pending.Format(TEXT(", next %hs at a cut"), ToString(m_contentStatus.candidate));
+		line += pending;
+	}
+	return line;
 }
 
 CString CVideoProcessorDlg::AmbientOverlayLine() const
@@ -16159,6 +16205,7 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 			PollAmbientSensor();
 			UpdateAmbient("ambient-sensor");
 		}
+		UpdateContentIntent("content-intent");   // intent interpreter item 1
 		UpdateActiveOutputSweep(uiNow);
 
 		// A source can publish its BT.2020/SDR state only once at startup.
@@ -17316,13 +17363,14 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
 			rendererLine("LED drive", m_videoRenderer->GetLedDriveStatus(text), text);
 			rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
+			rendererLine("content", true, ContentIntentLine());
 		}
 		else
 		{
 			// audit 2026-10-16: no renderer, so clear the renderer-owned keys
 			// instead of keeping a dead renderer's last values.
 			static const char* const kRendererKeys[] = {
-				"de-judder", "presentation", "render stall", "LED drive", "source resolution" };
+				"de-judder", "presentation", "render stall", "LED drive", "source resolution", "content" };
 			for (const char* key : kRendererKeys)
 				crashState.SetValue(key, std::string("-"));
 		}
@@ -17589,6 +17637,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		stats.activeShaderRule = m_videoRenderer->ActiveShaderRule();
 		stats.keyOverrides = KeyOverrideSummary();
 		stats.room = AmbientOverlayLine();
+		stats.content = ContentIntentLine();
 		stats.activeShaders = m_videoRenderer->ActiveShaders();
 	}
 	// A graph reset can briefly make the renderer non-rendering while the same

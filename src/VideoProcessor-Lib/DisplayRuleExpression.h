@@ -54,6 +54,7 @@ namespace DisplayRuleExpression
 			name == "viewport_profile" || name == "zoom_profile" ||
 			name == "vertical_alignment" ||
 			name == "ambient" ||   // Stage 9: dark | lit (empty when off)
+			name == "content" ||   // content intent 2026-10-17: film | video | sports | animation | static_ui (empty when off)
 			IsProfileVariable(name, "profile."))
 		{
 			type = ValueType::Text;

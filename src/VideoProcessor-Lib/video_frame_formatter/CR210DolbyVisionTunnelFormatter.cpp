@@ -228,6 +228,112 @@ namespace
 		return true;
 	}
 
+	// Content intent (intent interpreter item 1, 2026-10-17): L5 / L6 / L11.
+	// Field order and widths follow libdovi's public parser (quietvoid/dovi_tool,
+	// dolby_vision/src/rpu/extension/):
+	//   level5.rs:  active_area_left/right/top/bottom_offset, 13 bits each
+	//               (RPU ext_block_length 7);
+	//   level6.rs:  max_display_mastering_luminance, min_display_mastering_
+	//               luminance, max_content_light_level, max_frame_average_
+	//               light_level, 16 bits each (length 8);
+	//   level11.rs: content_type (byte 0), whitepoint (byte 1, bit 4 =
+	//               reference_mode_flag), reserved_byte2, reserved_byte3
+	//               (length 4).
+	// The tunnel's DM carries L1 in 16-bit containers (6 bytes, where the RPU
+	// packs 3 x 12 bits in 5), so L5 is read from four big-endian 16-bit
+	// containers (8 bytes) and, failing that, from the RPU's packed 7-byte
+	// form. Bytes 2-3 of L11 are decoded as the intended picture-mode hints
+	// (sharpness, noise reduction, MPEG noise reduction, frame-rate conversion;
+	// brightness, colour; 2 bits each, MSB first) - an assumption until a live
+	// packet is checked (the raw bytes are logged once per title). Each block
+	// is bounds-checked; a short or out-of-range block is skipped and never
+	// rejects the DM (the trim convention). The first block of a level wins.
+	bool ParseActiveArea(const uint8_t* payload, size_t length,
+		DolbyVisionTunnelFrameMetadata& parsed)
+	{
+		uint16_t offsets[4] = {};
+		if (length >= 8)
+		{
+			for (size_t i = 0; i < 4; ++i)
+				offsets[i] = ReadUnsigned16(payload + i * 2);
+		}
+		else if (length == 7)
+		{
+			// 52 bits, MSB first: four 13-bit fields, then 4 padding bits.
+			uint64_t bits = 0;
+			for (size_t i = 0; i < 7; ++i)
+				bits = (bits << 8) | payload[i];
+			bits >>= 4;
+			for (size_t i = 0; i < 4; ++i)
+				offsets[i] = static_cast<uint16_t>((bits >> (13 * (3 - i))) & 0x1FFFU);
+		}
+		else
+			return false;
+		for (const uint16_t offset : offsets)
+			if (offset > 0x1FFFU)
+				return false;
+		parsed.hasActiveArea = true;
+		parsed.activeAreaLeft = offsets[0];
+		parsed.activeAreaRight = offsets[1];
+		parsed.activeAreaTop = offsets[2];
+		parsed.activeAreaBottom = offsets[3];
+		return true;
+	}
+
+	bool ParseL6(const uint8_t* payload, size_t length,
+		DolbyVisionTunnelFrameMetadata& parsed)
+	{
+		if (length < 8)
+			return false;
+		const uint16_t maxMastering = ReadUnsigned16(payload);
+		const uint16_t minMastering = ReadUnsigned16(payload + 2);
+		const uint16_t maxCll = ReadUnsigned16(payload + 4);
+		const uint16_t maxFall = ReadUnsigned16(payload + 6);
+		// ST 2084 tops out at 10000 nits; larger values are corrupt.
+		if (maxMastering > 10000 || maxCll > 10000 || maxFall > 10000)
+			return false;
+		parsed.hasL6 = true;
+		parsed.l6MaxDisplayMasteringLuminance = maxMastering;
+		parsed.l6MinDisplayMasteringLuminance = minMastering;
+		// 0 = unknown (CTA-861.3). MaxFALL above MaxCLL cannot be: both dropped.
+		parsed.hasContentLight = maxCll > 0 && maxFall <= maxCll;
+		parsed.maxCll = parsed.hasContentLight ? maxCll : 0;
+		parsed.maxFall = parsed.hasContentLight ? maxFall : 0;
+		return true;
+	}
+
+	bool ParseL11(const uint8_t* payload, size_t length,
+		DolbyVisionTunnelFrameMetadata& parsed)
+	{
+		if (length < 4)
+			return false;
+		parsed.hasL11 = true;
+		memcpy(parsed.l11Raw, payload, 4);
+		parsed.l11ContentType = payload[0] & 0x0FU;
+		parsed.l11Whitepoint = payload[1] & 0x0FU;
+		parsed.l11ReferenceMode = (payload[1] & 0x10U) != 0;
+		parsed.l11Sharpness = (payload[2] >> 6) & 3U;
+		parsed.l11NoiseReduction = (payload[2] >> 4) & 3U;
+		parsed.l11MpegNoiseReduction = (payload[2] >> 2) & 3U;
+		parsed.l11FrameRateConversion = payload[2] & 3U;
+		parsed.l11Brightness = (payload[3] >> 6) & 3U;
+		parsed.l11Color = (payload[3] >> 4) & 3U;
+		return true;
+	}
+
+	const char* L11ContentTypeName(uint8_t type)
+	{
+		switch (type)
+		{
+		case 0: return "default";
+		case 1: return "movies";
+		case 2: return "game";
+		case 3: return "sport";
+		case 4: return "user-generated";
+		default: return "reserved";
+		}
+	}
+
 	bool ParseMetadata(const uint8_t* dm, size_t length, ParsedPacket& result,
 		std::array<uint16_t, 256>& extensionLevels, RawTrimPayload* rawTrims, bool l2First)
 	{
@@ -323,6 +429,14 @@ namespace
 				parsed.sceneMaxPq = sceneMax;
 				parsed.sceneAvgPq = sceneAvg;
 			}
+			// Content intent 2026-10-17: L5 / L6 / L11 (the first block of each;
+			// the payload is inside the validated body: payloadLength bytes).
+			if (level == 5 && !parsed.hasActiveArea)
+				ParseActiveArea(dm + extension + 5, payloadLength, parsed);
+			else if (level == 6 && !parsed.hasL6)
+				ParseL6(dm + extension + 5, payloadLength, parsed);
+			else if (level == 11 && !parsed.hasL11)
+				ParseL11(dm + extension + 5, payloadLength, parsed);
 			extension = end;
 		}
 		for (uint8_t i = 0; i < l8Count; ++i)
@@ -609,6 +723,7 @@ void CR210DolbyVisionTunnelFormatter::BeginTitle()
 	m_titleLevelCounts.fill(0);
 	m_titleLevelsLogged = false;
 	m_titleTrimLogged[0] = m_titleTrimLogged[1] = false;
+	m_titleIntentLogged = false;   // content intent 2026-10-17
 }
 
 void CR210DolbyVisionTunnelFormatter::LogTitleLevels(const char* reason)
@@ -833,6 +948,7 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 				DebugLog::Log("Dolby Vision RGB tunnel: extension L%zu %s",
 					level, level == 1 ? "scene PQ values applied" :
 					(level == 2 || level == 8) ? "trims parsed; not applied" :
+					(level == 5 || level == 6 || level == 11) ? "parsed (content intent); not applied" :
 					"recognized in transport; not applied");
 				m_seenExtensionLevels[level] = true;
 			}
@@ -887,6 +1003,32 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 				else
 					DebugLog::Log("Dolby Vision RGB tunnel: first L%u block too short for the assumed trim layout: payload_bytes=%zu raw=%s",
 						static_cast<unsigned>(level), rawTrims[slot].length, raw.c_str());
+			}
+			// Content intent 2026-10-17: one line per title naming the L11
+			// content type (with its raw bytes, to verify the layout), plus the
+			// L5 active area and L6 values when present.
+			if (!m_titleIntentLogged)
+			{
+				m_titleIntentLogged = true;
+				const DolbyVisionTunnelFrameMetadata& md = parsed.metadata;
+				char l5[96] = "absent";
+				if (md.hasActiveArea)
+					snprintf(l5, sizeof(l5), "left=%u right=%u top=%u bottom=%u",
+						md.activeAreaLeft, md.activeAreaRight, md.activeAreaTop, md.activeAreaBottom);
+				char l6[128] = "absent";
+				if (md.hasL6)
+					snprintf(l6, sizeof(l6), "mastering_max=%u mastering_min=%.4f MaxCLL=%u MaxFALL=%u%s",
+						md.l6MaxDisplayMasteringLuminance, md.l6MinDisplayMasteringLuminance / 10000.0,
+						md.maxCll, md.maxFall, md.hasContentLight ? "" : " (content light unknown)");
+				if (md.hasL11)
+					DebugLog::Log("Dolby Vision RGB tunnel: title L11 content type=%u (%s) whitepoint=%u reference_mode=%d "
+						"hints sharpness=%u nr=%u mpeg_nr=%u frc=%u brightness=%u color=%u raw=%s; L5 %s; L6 %s",
+						md.l11ContentType, L11ContentTypeName(md.l11ContentType), md.l11Whitepoint,
+						md.l11ReferenceMode ? 1 : 0, md.l11Sharpness, md.l11NoiseReduction,
+						md.l11MpegNoiseReduction, md.l11FrameRateConversion, md.l11Brightness, md.l11Color,
+						HexBytes(md.l11Raw, 4).c_str(), l5, l6);
+				else
+					DebugLog::Log("Dolby Vision RGB tunnel: title L11 content type=absent; L5 %s; L6 %s", l5, l6);
 			}
 		}
 		parsed.metadata.rgbBitAlignment = candidate == ByteAlignment::LEFT ? 1 : 2;

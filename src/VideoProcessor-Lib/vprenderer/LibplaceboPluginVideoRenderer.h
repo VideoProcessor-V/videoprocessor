@@ -92,6 +92,7 @@ public:
 	bool GetDetectedPictureAspect(DetectedPictureAspect& result) const override;
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
+	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;

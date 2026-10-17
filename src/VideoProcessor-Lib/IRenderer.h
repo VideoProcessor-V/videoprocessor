@@ -10,6 +10,7 @@
 
 #include <SubtitlePreviewMode.h>
 #include <DolbyVisionLuminanceStatus.h>
+#include <IntentDescriptor.h>
 
 
 #include <VideoFrame.h>
@@ -616,6 +617,15 @@ public:
 	virtual void ResetSubtitlePreviewMode() {}
 
 	virtual bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const
+	{
+		status = {};
+		return false;
+	}
+
+	// Content recognition (intent interpreter item 1, 2026-10-17): the content
+	// class the rules' `content` variable carries, and its source. False (and
+	// status.enabled false) when the renderer has none or intent_content is off.
+	virtual bool GetContentIntentStatus(ContentIntentStatus& status) const
 	{
 		status = {};
 		return false;

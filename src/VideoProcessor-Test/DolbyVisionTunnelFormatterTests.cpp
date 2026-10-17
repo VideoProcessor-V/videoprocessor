@@ -11,6 +11,9 @@
 #include "DolbyVisionTunnelSender.h"
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
 #include <AnalysisFrame.h>
+#include <SceneDescriptor.h>
+#include <DisplayProfile.h>
+#include <MappingPolicy.h>
 #include <memory>
 #include <chrono>
 #include <cstring>
@@ -889,6 +892,170 @@ namespace Tests
             AssertPeak(Deliver(formatter, picture, 9), 1024);
             Assert::AreEqual(size_t(1), CountOccurrences(tunnelLog,
                 "(first complete DM): L1=yes L2=no L3=no L4=no L5=no L6=no"));
+        }
+
+        // ---- content intent 2026-10-17: L5 / L6 / L11 ----------------------
+
+        TEST_METHOD(L5L6L11AreParsedIntoTheDmAndTheSceneDescriptor)
+        {
+            auto body = DmBody(2048);
+            AppendExtension(body, 5, L5Payload(0, 0, 140, 140));
+            AppendExtension(body, 6, L6Payload(1000, 50, 950, 400));
+            // content type 1 (movies), D65 (0), reference mode, hints: sharpness 1, NR 2, MPEG NR 0,
+            // FRC 3; brightness 2, colour 1.
+            AppendExtension(body, 11, L11Payload(1, 0, true, 0x63, 0x90));
+            for (const bool high8 : { false, true })
+            {
+                SenderPicture picture(high8);
+                picture.Embed(Packetize(body));
+                Formatter formatter;
+                formatter.OnVideoState(picture.state);
+                const auto dm = Deliver(formatter, picture, 1);
+                AssertPeak(dm, 2048);
+                Assert::IsTrue(dm.hasActiveArea);
+                Assert::AreEqual(0U, static_cast<unsigned>(dm.activeAreaLeft));
+                Assert::AreEqual(140U, static_cast<unsigned>(dm.activeAreaTop));
+                Assert::AreEqual(140U, static_cast<unsigned>(dm.activeAreaBottom));
+                Assert::IsTrue(dm.hasL6 && dm.hasContentLight);
+                Assert::AreEqual(1000U, static_cast<unsigned>(dm.l6MaxDisplayMasteringLuminance));
+                Assert::AreEqual(50U, static_cast<unsigned>(dm.l6MinDisplayMasteringLuminance));
+                Assert::AreEqual(950U, static_cast<unsigned>(dm.maxCll));
+                Assert::AreEqual(400U, static_cast<unsigned>(dm.maxFall));
+                Assert::IsTrue(dm.hasL11 && dm.l11ReferenceMode);
+                Assert::AreEqual(1U, static_cast<unsigned>(dm.l11ContentType));
+                Assert::AreEqual(0U, static_cast<unsigned>(dm.l11Whitepoint));
+                Assert::AreEqual(1U, static_cast<unsigned>(dm.l11Sharpness));
+                Assert::AreEqual(2U, static_cast<unsigned>(dm.l11NoiseReduction));
+                Assert::AreEqual(0U, static_cast<unsigned>(dm.l11MpegNoiseReduction));
+                Assert::AreEqual(3U, static_cast<unsigned>(dm.l11FrameRateConversion));
+                Assert::AreEqual(2U, static_cast<unsigned>(dm.l11Brightness));
+                Assert::AreEqual(1U, static_cast<unsigned>(dm.l11Color));
+                // Matrices, source range and L1 are unchanged by the new levels.
+                Assert::AreEqual(-0.5f, dm.nonlinear[0][1]);
+                Assert::AreEqual(3696U, static_cast<unsigned>(dm.sourceMaxPq));
+                Assert::AreEqual(62U, static_cast<unsigned>(dm.sceneMinPq));
+
+                // The descriptor carries each with its source tag.
+                const SceneDescriptor d = SceneDescriptorParsers::FromDolbyVisionTunnel(dm, SceneDescriptor());
+                Assert::IsTrue(d.maxCll.present && d.maxCllSource == SceneFieldSource::DvL6);
+                Assert::AreEqual(950.0f, d.maxCll.nits);
+                Assert::IsTrue(d.maxFall.present && d.maxFallSource == SceneFieldSource::DvL6);
+                Assert::IsTrue(d.activeArea.present && d.activeArea.source == SceneFieldSource::DvL5);
+                Assert::IsTrue(d.activeArea.FitsIn(1920, 1080));
+                Assert::IsFalse(d.activeArea.FitsIn(1920, 280));
+                Assert::IsTrue(d.contentIntent.present && d.contentIntent.source == SceneFieldSource::DvL11);
+                Assert::AreEqual(1U, static_cast<unsigned>(d.contentIntent.contentType));
+                Assert::AreEqual(3U, static_cast<unsigned>(d.contentIntent.frameRateConversion));
+                // L6 MaxCLL is status only: the libplacebo mapping is the same as without it.
+                DolbyVisionTunnelFrameMetadata withoutL6 = dm;
+                withoutL6.hasL6 = withoutL6.hasContentLight = false;
+                withoutL6.maxCll = withoutL6.maxFall = 0;
+                const SceneDescriptor reference = SceneDescriptorParsers::FromDolbyVisionTunnel(withoutL6, SceneDescriptor());
+                Assert::IsFalse(reference.maxCll.present);
+                Assert::IsTrue(MappingPolicies::SameHdrMetadataBits(
+                    MappingPolicies::ToLibplaceboHdrMetadata(d, DisplayProfile(), MappingPolicies::Default()),
+                    MappingPolicies::ToLibplaceboHdrMetadata(reference, DisplayProfile(), MappingPolicies::Default())));
+            }
+        }
+
+        TEST_METHOD(PackedL5AndOutOfRangeOrShortBlocksAreBoundsChecked)
+        {
+            // L5 in the RPU's packed 7-byte form; the 13-bit fields at their limits.
+            auto body = DmBody(2048);
+            AppendExtension(body, 5, L5PackedPayload(8191, 1, 4095, 4096));
+            // MaxCLL above 10000 nits: the L6 block is corrupt and skipped.
+            AppendExtension(body, 6, L6Payload(1000, 50, 12000, 400));
+            // A second L6 (the first valid one would win; this one is valid but MaxFALL > MaxCLL).
+            AppendExtension(body, 6, L6Payload(1000, 50, 300, 400));
+            // A short L11 (3 bytes) is skipped; a later full one is taken.
+            AppendExtension(body, 11, { 3, 0, 0 });
+            AppendExtension(body, 11, L11Payload(0x83, 0x21, false));
+            SenderPicture picture(false);
+            picture.Embed(Packetize(body));
+            Formatter formatter;
+            formatter.OnVideoState(picture.state);
+            const auto dm = Deliver(formatter, picture, 1);
+            AssertPeak(dm, 2048);   // the DM itself is never rejected for these blocks
+            Assert::IsTrue(dm.hasActiveArea);
+            Assert::AreEqual(8191U, static_cast<unsigned>(dm.activeAreaLeft));
+            Assert::AreEqual(1U, static_cast<unsigned>(dm.activeAreaRight));
+            Assert::AreEqual(4095U, static_cast<unsigned>(dm.activeAreaTop));
+            Assert::AreEqual(4096U, static_cast<unsigned>(dm.activeAreaBottom));
+            // The second L6 is in range, so it is kept, but its content light is unknown.
+            Assert::IsTrue(dm.hasL6);
+            Assert::IsFalse(dm.hasContentLight);
+            Assert::AreEqual(0U, static_cast<unsigned>(dm.maxCll));
+            // The reserved upper bits of content_type are masked (0x83 -> 3).
+            Assert::IsTrue(dm.hasL11);
+            Assert::AreEqual(3U, static_cast<unsigned>(dm.l11ContentType));
+            Assert::AreEqual(1U, static_cast<unsigned>(dm.l11Whitepoint));
+            Assert::IsFalse(dm.l11ReferenceMode);
+            const SceneDescriptor d = SceneDescriptorParsers::FromDolbyVisionTunnel(dm, SceneDescriptor());
+            Assert::IsFalse(d.maxCll.present);
+            Assert::IsFalse(d.activeArea.FitsIn(3840, 2160), L"offsets wider than the raster do not fit");
+
+            // An 8-byte L5 with a value above 13 bits is corrupt and skipped.
+            auto wide = DmBody(2048);
+            AppendExtension(wide, 5, L5Payload(0x2000, 0, 0, 0));
+            AppendExtension(wide, 5, std::vector<uint8_t>(5, 0));   // too short: skipped
+            picture.Embed(Packetize(wide));
+            const auto second = Deliver(formatter, picture, 2);
+            AssertPeak(second, 2048);
+            Assert::IsFalse(second.hasActiveArea);
+            Assert::IsFalse(second.hasL6 || second.hasL11);
+        }
+
+        TEST_METHOD(TruncatedL11BlockRejectsThePacketAndKeepsTheActiveDm)
+        {
+            auto good = DmBody(2048);
+            AppendExtension(good, 11, L11Payload(3, 0, false));
+            SenderPicture picture(false);
+            Formatter formatter;
+            formatter.OnVideoState(picture.state);
+            picture.Embed(Packetize(good));
+            AssertPeak(Deliver(formatter, picture, 1), 2048);
+            // The last block declares 40 bytes but the body ends after 4: the whole body is malformed.
+            auto bad = DmBody(1024);
+            AppendExtension(bad, 11, L11Payload(1, 0, true), 40);
+            picture.Embed(Packetize(bad));
+            std::vector<BYTE> output(formatter.GetOutFrameSize(), 0xCD);
+            VideoFrame frame(picture.input.data(), 2, 0, nullptr);
+            formatter.FormatVideoFrame(frame, output.data());
+            const auto kept = formatter.GetDolbyVisionTunnelMetadata();
+            Assert::IsTrue(kept.valid);
+            Assert::AreEqual(2048U, static_cast<unsigned>(kept.sceneMaxPq), L"the damaged DM replaced the active one");
+            Assert::AreEqual(3U, static_cast<unsigned>(kept.l11ContentType));
+            // A declared length shorter than the payload leaves an L11 of 2 bytes: skipped, DM valid.
+            auto shortDeclared = DmBody(1024);
+            std::vector<uint8_t> payload = L11Payload(1, 0, true);
+            payload.resize(2);
+            AppendExtension(shortDeclared, 11, payload);
+            picture.Embed(Packetize(shortDeclared));
+            const auto third = Deliver(formatter, picture, 3);
+            AssertPeak(third, 1024);
+            Assert::IsFalse(third.hasL11);
+        }
+
+        TEST_METHOD(TitleLogNamesTheL11ContentTypeOncePerTitle)
+        {
+            TunnelLogSink sink;
+            auto body = DmBody(2048);
+            AppendExtension(body, 11, L11Payload(3, 0, false, 0x01));
+            SenderPicture picture(false);
+            Formatter formatter;
+            formatter.OnVideoState(picture.state);
+            picture.Embed(Packetize(body));
+            for (uint64_t counter = 1; counter <= 4; ++counter)
+                AssertPeak(Deliver(formatter, picture, counter), 2048);
+            Assert::AreEqual(size_t(1), CountOccurrences(tunnelLog, "title L11 content type=3 (sport)"));
+            Assert::AreEqual(size_t(1), CountOccurrences(tunnelLog, "frc=1 brightness=0 color=0 raw=03000100"));
+            // EOS ends the title; a title without L11 says so once.
+            picture.Embed(Packetize({}, 3, 3, true, true));
+            Deliver(formatter, picture, 5);
+            picture.Embed(Packetize(DmBody(1024)));
+            AssertPeak(Deliver(formatter, picture, 6), 1024);
+            AssertPeak(Deliver(formatter, picture, 7), 1024);
+            Assert::AreEqual(size_t(1), CountOccurrences(tunnelLog, "title L11 content type=absent; L5 absent; L6 absent"));
         }
 
         TEST_METHOD(MoreTrimsThanCapacityAreFlaggedNotRejected)

@@ -31,6 +31,7 @@ struct StatsData
 	CString viewport;          // e.g., "cinema (2.35:1)"
 	CString keyOverrides;      // delta 6: what a key changed against the saved settings
 	CString room;              // Stage 9: room lights (empty when off)
+	CString content;           // content intent: class and source (empty when off)
 	CString rendererName;      // selected presentation backend
 	CString surfaceMode;       // actual presentation host: fullscreen or windowed
 

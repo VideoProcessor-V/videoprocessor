@@ -125,6 +125,58 @@ struct SceneTrim
     int16_t msWeight = 0;
 };
 
+// Content intent (intent interpreter item 1, 2026-10-17): which metadata
+// supplied a descriptor field that more than one source can fill.
+enum class SceneFieldSource
+{
+    None,     // not given
+    Static,   // HDR10 static InfoFrame (or LLDV substitution)
+    DvL5,     // DV tunnel L5 (active area)
+    DvL6,     // DV tunnel L6 (MaxCLL / MaxFALL)
+    DvL11,    // DV tunnel L11 (content type, reference mode, hints)
+};
+
+inline const char* ToString(SceneFieldSource source)
+{
+    switch (source)
+    {
+    case SceneFieldSource::Static: return "static";
+    case SceneFieldSource::DvL5: return "dv_l5";
+    case SceneFieldSource::DvL6: return "dv_l6";
+    case SceneFieldSource::DvL11: return "dv_l11";
+    default: return "none";
+    }
+}
+
+// DV L5: the active picture as offsets from each raster edge (source pixels).
+struct SceneActiveArea
+{
+    bool present = false;
+    SceneFieldSource source = SceneFieldSource::None;
+    uint16_t left = 0, right = 0, top = 0, bottom = 0;
+
+    // The offsets leave a non-empty picture inside a width x height raster.
+    bool FitsIn(int width, int height) const
+    {
+        return present && width > 0 && height > 0 &&
+            static_cast<int>(left) + static_cast<int>(right) < width &&
+            static_cast<int>(top) + static_cast<int>(bottom) < height;
+    }
+};
+
+// DV L11: the content type and the grader's intended picture-mode hints, as
+// transmitted (2-bit hints, 0 = no preference).
+struct SceneContentIntent
+{
+    bool present = false;
+    SceneFieldSource source = SceneFieldSource::None;
+    uint8_t contentType = 0;   // 0 default, 1 movies, 2 game, 3 sport, 4 user-generated
+    uint8_t whitepoint = 0;
+    bool referenceMode = false;
+    uint8_t sharpness = 0, noiseReduction = 0, mpegNoiseReduction = 0;
+    uint8_t frameRateConversion = 0, brightness = 0, color = 0;
+};
+
 struct SceneMasteringDisplay
 {
     bool hasPrimaries = false;
@@ -152,6 +204,12 @@ struct SceneDescriptor
     SceneMasteringDisplay mastering;
     SceneLuminance maxCll;
     SceneLuminance maxFall;
+    // Content intent 2026-10-17: where maxCll / maxFall came from (static
+    // InfoFrame or DV L6), and the DV L5 / L11 fields.
+    SceneFieldSource maxCllSource = SceneFieldSource::None;
+    SceneFieldSource maxFallSource = SceneFieldSource::None;
+    SceneActiveArea activeArea;
+    SceneContentIntent contentIntent;
 
     static constexpr uint8_t kMaxTrims = DolbyVisionTunnelFrameMetadata::kMaxTrims;
     uint8_t trimCount = 0;
@@ -215,12 +273,19 @@ namespace SceneDescriptorParsers
             m.peak = SceneLuminance::FromNits(static_cast<float>(hdr->masteringDisplayMaxLuminance));
             d.maxCll = SceneLuminance::FromNits(static_cast<float>(hdr->maxCll));
             d.maxFall = SceneLuminance::FromNits(static_cast<float>(hdr->maxFall));
+            d.maxCllSource = d.maxFallSource = SceneFieldSource::Static;
             return d;
         }
         if (hdr->maxCll > 0)
+        {
             d.maxCll = SceneLuminance::FromNits(static_cast<float>(hdr->maxCll));
+            d.maxCllSource = SceneFieldSource::Static;
+        }
         if (hdr->maxFall > 0)
+        {
             d.maxFall = SceneLuminance::FromNits(static_cast<float>(hdr->maxFall));
+            d.maxFallSource = SceneFieldSource::Static;
+        }
         if (hdr->masteringDisplayMaxLuminance > 0)
         {
             d.mastering.peak = SceneLuminance::FromNits(
@@ -253,8 +318,9 @@ namespace SceneDescriptorParsers
     // HDMI DV tunnel DM packet. staticFallback = the static descriptor for the
     // same frame (FromStaticHdr); it supplies primaries and, when the packet's
     // source range is unusable, the mastering range. Validity rules are those
-    // of DolbyVisionLuminancePolicy::Apply / SceneMinNits: the tunnel carries
-    // no MaxCLL/MaxFALL; the DM source range is used when max > min and
+    // of DolbyVisionLuminancePolicy::Apply / SceneMinNits; MaxCLL/MaxFALL come
+    // only from an L6 block (content intent 2026-10-17; tagged DvL6, and not
+    // given to libplacebo: MappingPolicy skips them); the DM source range is used when max > min and
     // max <= 4095; L1 max/avg when present and <= 4095; the L1 minimum
     // additionally needs min <= 4095.
     inline SceneDescriptor FromDolbyVisionTunnel(const DolbyVisionTunnelFrameMetadata& dm,
@@ -298,6 +364,41 @@ namespace SceneDescriptorParsers
             out.msWeight = in.msWeight;
         }
         d.trimOverflow = dm.trimOverflow || dm.trimCount > SceneDescriptor::kMaxTrims;
+        // Content intent 2026-10-17: L6 / L5 / L11, each tagged with its level.
+        if (dm.hasContentLight && dm.maxCll > 0 && dm.maxCll <= 10000 && dm.maxFall <= dm.maxCll)
+        {
+            d.maxCll = SceneLuminance::FromNits(static_cast<float>(dm.maxCll));
+            d.maxCllSource = SceneFieldSource::DvL6;
+            if (dm.maxFall > 0)
+            {
+                d.maxFall = SceneLuminance::FromNits(static_cast<float>(dm.maxFall));
+                d.maxFallSource = SceneFieldSource::DvL6;
+            }
+        }
+        if (dm.hasActiveArea)
+        {
+            d.activeArea.present = true;
+            d.activeArea.source = SceneFieldSource::DvL5;
+            d.activeArea.left = dm.activeAreaLeft;
+            d.activeArea.right = dm.activeAreaRight;
+            d.activeArea.top = dm.activeAreaTop;
+            d.activeArea.bottom = dm.activeAreaBottom;
+        }
+        if (dm.hasL11)
+        {
+            SceneContentIntent& c = d.contentIntent;
+            c.present = true;
+            c.source = SceneFieldSource::DvL11;
+            c.contentType = dm.l11ContentType;
+            c.whitepoint = dm.l11Whitepoint;
+            c.referenceMode = dm.l11ReferenceMode;
+            c.sharpness = dm.l11Sharpness;
+            c.noiseReduction = dm.l11NoiseReduction;
+            c.mpegNoiseReduction = dm.l11MpegNoiseReduction;
+            c.frameRateConversion = dm.l11FrameRateConversion;
+            c.brightness = dm.l11Brightness;
+            c.color = dm.l11Color;
+        }
         return d;
     }
 
@@ -311,6 +412,8 @@ namespace SceneDescriptorParsers
         d.mastering = staticFallback.mastering;
         d.maxCll = staticFallback.maxCll;
         d.maxFall = staticFallback.maxFall;
+        d.maxCllSource = staticFallback.maxCllSource;
+        d.maxFallSource = staticFallback.maxFallSource;
         d.valid = stats.valid;
         if (!stats.valid)
             return d;
