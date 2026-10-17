@@ -298,6 +298,19 @@ namespace LedDrive
 		// LED compensation shader. Off = rolled under white with the boosted
 		// picture, as before.
 		bool wtwPassthrough = true;
+		// Restore switch (bug hunt 2 2026-10-17, owner decision, default on):
+		// led_peak_full_coverage - the peak (mode: script's highlight test) is
+		// the largest area mean over boxes tiling the whole measured picture,
+		// each the share of the screen of the script's 854x480 INTER_AREA
+		// downscale, so every pixel counts. Off = the brightest 3x3 sample
+		// block of the sparse grid, as before.
+		bool peakFullCoverage = true;
+		// Restore switch (bug hunt 2 2026-10-17, owner decision, default on):
+		// led_picture_only - the renderer's detected subtitle box (and a moved
+		// subtitle's place) is left out of every LED statistic (peak, APL,
+		// histogram, cut cells). Unmasked while nothing is detected. Off =
+		// subtitles inside the picture count, as before.
+		bool pictureOnly = true;
 		// Restore switch (bug hunt 2026-10-17, default on): script_resend_failed_writes
 		// - internal_script re-sends a failed LPW1 / CNTR write at the next tick
 		// (only a command that tick does not send itself). Off = the pure script
@@ -633,6 +646,8 @@ namespace LedDrive
 			Choice("cut_lead", { "off", "window" }),   // review 2026-10-17, experimental
 			Integer("led_lookahead_ms", 0, 2000),     // review 2026-10-17
 			Boolean("led_wtw_passthrough"),           // restore switch 2026-10-17
+			Boolean("led_peak_full_coverage"),        // restore switch, hunt 2 2026-10-17
+			Boolean("led_picture_only"),              // restore switch, hunt 2 2026-10-17
 			Boolean("script_resend_failed_writes"),   // restore switch 2026-10-17
 			Boolean("cntr_pair_predict"),             // post-merge audit 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
@@ -983,6 +998,8 @@ namespace LedDrive
 			result.cutLeadWindow = ConfigFile::NormalizeName(value) == "window";
 		readInt("led_lookahead_ms", 0, 2000, result.ledLookaheadMs);
 		config.TryGetBool(section, "led_wtw_passthrough", result.wtwPassthrough);
+		config.TryGetBool(section, "led_peak_full_coverage", result.peakFullCoverage);
+		config.TryGetBool(section, "led_picture_only", result.pictureOnly);
 		config.TryGetBool(section, "script_resend_failed_writes", result.scriptResendFailedWrites);
 		config.TryGetBool(section, "cntr_pair_predict", result.cntrPairPredict);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);

@@ -12619,6 +12619,25 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             "VP sees the coming frames and times each change for when the LED gets there. Off: it reacts to the "
             "frame on screen."));
         driveForm->addRow(QString(), aheadHelp);
+        // Restore switches (bug hunt 2 2026-10-17, owner decision): led_peak_full_coverage,
+        // led_picture_only.
+        auto* fullPeak = bindCheckField(QStringLiteral("Peak from every pixel of the picture (fix under test)"), led,
+            QStringLiteral("led_peak_full_coverage"), true);
+        fullPeak->setToolTip(QStringLiteral(
+            "On (default): Dynamic Drive's peak (the script's highlight test) is the brightest area of the whole "
+            "picture, averaged over areas the same share of the screen as your script's 854 x 480 screenshot "
+            "downscale - every pixel counts, so a small lamp or specular is never missed. Off: the brightest of "
+            "the sparse sample blocks, as before."));
+        driveForm->addRow(QString(), fullPeak);
+        auto* pictureOnly = bindCheckField(QStringLiteral("Measure the picture only, not subtitles (fix under test)"), led,
+            QStringLiteral("led_picture_only"), true);
+        pictureOnly->setToolTip(QStringLiteral(
+            "On (default): a subtitle VP has detected in the picture (and where VP shows a moved subtitle) is left "
+            "out of everything Dynamic Drive measures - peak, average level and highlights. Subtitles are "
+            "detected only with a subtitle style that moves them (Black or Generated gray); otherwise nothing is "
+            "left out. VP's own on-screen panels are never measured. Off: subtitles inside the picture count, "
+            "as before."));
+        driveForm->addRow(QString(), pictureOnly);
         // Owner 2026-10-15: the script copy in the original script's own
         // rhythm (the default) or a fixed loop.
         auto* pacing = bindChoiceField(led, QStringLiteral("script_pacing"),

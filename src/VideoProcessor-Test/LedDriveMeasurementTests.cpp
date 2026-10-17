@@ -1,7 +1,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <AnalysisLumaSource.h>
 #include <led/LedDriveModule.h>
+#include <led/LedLookahead.h>
 #include <led/LedMeasurement.h>
 
 #include "LedDriveTestSupport.h"
@@ -34,6 +36,45 @@ namespace
 		}
 		return raw;
 	}
+
+	// Bug hunt 2: a limited-range 10-bit P010 frame (luma codes 64-940) for
+	// the raw-frame measurement; code(x, y) gives the 8-bit-equivalent
+	// limited code (16-235) of each pixel.
+	struct P010Frame
+	{
+		std::vector<uint16_t> planes;
+		AnalysisLumaSource luma;
+		template <typename Code>
+		P010Frame(int width, int height, Code code)
+		{
+			planes.assign(static_cast<size_t>(width) * height * 3 / 2, static_cast<uint16_t>(512 << 6));
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width; ++x)
+				{
+					const double y10 = 64.0 + (code(x, y) - 16.0) * 876.0 / 219.0;
+					planes[static_cast<size_t>(y) * width + x] = static_cast<uint16_t>(std::lround(y10) << 6);
+				}
+			luma.data = reinterpret_cast<const uint8_t*>(planes.data());
+			luma.dataBytes = planes.size() * 2;
+			luma.width = width;
+			luma.height = height;
+			luma.rowBytes = luma.chromaRowBytes = static_cast<size_t>(width) * 2;
+			luma.format = AnalysisLumaFormat::P010;
+			luma.encoding = VideoFrameEncoding::V210;
+			luma.colorspace = ColorSpace::REC_709;
+		}
+	};
+
+	RawMeasurement MeasureP010(const P010Frame& frame, const RawMeasureOptions& options)
+	{
+		RawMeasurement raw;
+		const QueuedFrameStatistics::PictureRect rect{ 0, 0, frame.luma.width, frame.luma.height };
+		Assert::IsTrue(MeasureRawFrame(frame.luma, rect, IdentityRawTransfer(), raw, -1, &options));
+		return raw;
+	}
+
+	double Peak(const RawMeasurement& raw) { return static_cast<double>(raw.maximum) / SUM_SCALE; }
+	double Apl(const RawMeasurement& raw) { return static_cast<double>(raw.sum) / SUM_SCALE / raw.blocks; }
 
 	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
 	{
@@ -292,6 +333,145 @@ namespace VideoProcessorTest
 			Assert::IsTrue(module.ProjectorStatus().lastLight < 255, L"The dry run still logs the levels");
 			module.Stop();
 			Assert::AreEqual(0, ports);
+		}
+
+		// ---- Bug hunt 2 (owner 2026-10-17): the peak from every pixel, the picture only ----
+
+		// The script's box: screen / 854 x screen / 480 at any resolution, tiling
+		// the measured picture exactly, never under a pixel.
+		TEST_METHOD(PeakBoxesAreTheScriptsShareOfTheScreen)
+		{
+			const PeakGrid uhd = AreaPeakGrid(3840, 2160, 3840, 2160);
+			Assert::AreEqual(854, uhd.boxesX);
+			Assert::AreEqual(480, uhd.boxesY);
+			Assert::AreEqual(3840.0 / 854.0, uhd.boxW, 1e-9);
+			Assert::AreEqual(4.5, uhd.boxH, 1e-9);
+			const PeakGrid hd = AreaPeakGrid(1920, 1080, 1920, 1080);
+			Assert::AreEqual(854, hd.boxesX);
+			Assert::AreEqual(480, hd.boxesY);
+			// A scope picture on a 16:9 screen: the same box, fewer rows.
+			const PeakGrid scope = AreaPeakGrid(3840, 1608, 3840, 2160);
+			Assert::AreEqual(854, scope.boxesX);
+			Assert::AreEqual(357, scope.boxesY);
+			Assert::AreEqual(1608.0 / 357.0, scope.boxH, 1e-9);
+			// A picture half the screen wide has half the boxes.
+			const PeakGrid half = AreaPeakGrid(1920, 1080, 3840, 2160);
+			Assert::AreEqual(427, half.boxesX);
+			Assert::AreEqual(240, half.boxesY);
+			// Below the script's resolution a box is one pixel.
+			const PeakGrid tiny = AreaPeakGrid(64, 64, 64, 64);
+			Assert::AreEqual(64, tiny.boxesX);
+			Assert::AreEqual(1.0, tiny.boxW, 1e-9);
+			Assert::AreEqual(3, PeakSampleStride(3840, 2160, LOOKAHEAD_PEAK_SAMPLE_BUDGET));
+			Assert::AreEqual(1, PeakSampleStride(960, 540, LOOKAHEAD_PEAK_SAMPLE_BUDGET));
+		}
+
+		// The area mean is cv2 INTER_AREA's: fractional pixels at a box's edge
+		// count by their share.
+		TEST_METHOD(PeakIsTheMaximumOfAnAreaAveragedDownscale)
+		{
+			// Five pixels, boxes of 2.5: box 0 = (0 + 1 + 0.5 x 0) / 2.5 = 0.4.
+			const double row[5] = { 0.0, 1.0, 0.0, 0.0, 0.0 };
+			auto value = [&](int x, int, double& v) { v = row[x]; return true; };
+			const double peak = AreaAveragedMaximum(value, 0, 0, 5, 1, 2.5 * SCRIPT_PEAK_GRID_W, SCRIPT_PEAK_GRID_H);
+			Assert::AreEqual(16.0 + 219.0 * 0.4, peak, 1e-9);
+			// The middle pixel is shared: (0.5 x 1 + 2 x 0.25) / 2.5 for a 0.25 neighbour.
+			const double shared[5] = { 0.0, 0.0, 1.0, 0.25, 0.25 };
+			auto sharedValue = [&](int x, int, double& v) { v = shared[x]; return true; };
+			Assert::AreEqual(16.0 + 219.0 * (0.5 + 0.5) / 2.5,
+				AreaAveragedMaximum(sharedValue, 0, 0, 5, 1, 2.5 * SCRIPT_PEAK_GRID_W, SCRIPT_PEAK_GRID_H), 1e-9);
+			// Nothing to measure.
+			Assert::AreEqual(-1.0, AreaAveragedMaximum(value, 0, 0, 0, 1, 1.0, 1.0));
+		}
+
+		// A small specular between the old sample points: the sparse grid
+		// (one 3x3 block every 20 pixels at 1920 wide) misses it; with every
+		// pixel counting it is the peak, at its area mean.
+		TEST_METHOD(FullCoveragePeakFindsASpecularBetweenTheSamplePoints)
+		{
+			// Dark picture (code 40), a 6x6 white specular at 8..13 - the first
+			// block reads 0..2, the next starts at 20.
+			const P010Frame frame(1920, 1080, [](int x, int y)
+				{ return x >= 8 && x < 14 && y >= 8 && y < 14 ? 235.0 : 40.0; });
+			RawMeasureOptions sparse;
+			sparse.peakFullCoverage = false;
+			const RawMeasurement before = MeasureP010(frame, sparse);
+			Assert::AreEqual(40.0, Peak(before), 0.1, L"The sparse grid misses the specular");
+			RawMeasureOptions full;   // the default: on
+			full.peakSampleBudget = 1 << 30;   // every pixel
+			const RawMeasurement after = MeasureP010(frame, full);
+			Assert::IsTrue(Peak(after) >= 215.0, (L"The specular is the script's highlight: " +
+				std::to_wstring(Peak(after))).c_str());
+			// The script's own number: the 2.25-pixel boxes inside the specular are white.
+			Assert::AreEqual(235.0, Peak(after), 0.5);
+			// Only the peak changes: APL and the blocks are the sparse grid's.
+			Assert::AreEqual(before.sum, after.sum);
+			Assert::AreEqual(before.blocks, after.blocks);
+			// Through the statistics, the script's highlight test sees it.
+			LedDriveConfig config;
+			config.mode = Mode::Script;
+			StatsBuilder builder(config);
+			Assert::IsTrue(builder.Build(after).maximum >= config.scriptHighlightCode);
+			// The look-ahead's bounded read (every third pixel at 4K) still finds a
+			// specular as large as its stride.
+			const P010Frame uhd(3840, 2160, [](int x, int y)
+				{ return x >= 30 && x < 36 && y >= 30 && y < 36 ? 235.0 : 40.0; });
+			Assert::IsTrue(Peak(MeasureP010(uhd, RawMeasureOptions())) >= 215.0,
+				L"The look-ahead's subsampled peak finds a 6-pixel specular at 4K");
+		}
+
+		// The scale is unchanged: the peak is in the same limited-range codes as
+		// the APL (madVR's limited levels in Windows' full range: the script's
+		// screenshot read the same numbers).
+		TEST_METHOD(FullCoveragePeakKeepsTheBrightnessScale)
+		{
+			const P010Frame grey(960, 540, [](int, int) { return 125.5; });
+			RawMeasureOptions full;
+			RawMeasureOptions sparse;
+			sparse.peakFullCoverage = false;
+			const RawMeasurement a = MeasureP010(grey, full), b = MeasureP010(grey, sparse);
+			Assert::AreEqual(125.5, Peak(a), 0.1);
+			Assert::AreEqual(Peak(b), Peak(a), 0.1);
+			Assert::AreEqual(Apl(a), Peak(a), 0.1);
+			StatsBuilder builder{ LedDriveConfig() };
+			Assert::AreEqual(125.5, builder.Build(a).maximum, 0.1);
+		}
+
+		// A detected subtitle is left out of every statistic; with no
+		// detection nothing is masked.
+		TEST_METHOD(SubtitleBoxIsMaskedAndNoDetectionMeasuresEverything)
+		{
+			// Dark picture, white subtitle text rows 900..960, columns 600..1320.
+			const P010Frame frame(1920, 1080, [](int x, int y)
+				{ return x >= 600 && x < 1320 && y >= 900 && y < 960 ? 235.0 : 40.0; });
+			RawMeasureOptions none;
+			none.peakSampleBudget = 1 << 30;
+			const RawMeasurement open = MeasureP010(frame, none);
+			Assert::AreEqual(235.0, Peak(open), 0.5, L"Unmasked (no detection), the subtitle is measured");
+			Assert::IsTrue(Apl(open) > 41.0);
+			RawMeasureOptions masked = none;
+			masked.masks[0] = { 590.0, 890.0, 1330.0, 970.0 };
+			masked.maskCount = 1;
+			const RawMeasurement picture = MeasureP010(frame, masked);
+			Assert::AreEqual(40.0, Peak(picture), 0.1, L"The masked subtitle is not the peak");
+			Assert::AreEqual(40.0, Apl(picture), 0.1, L"nor in the APL");
+			Assert::IsTrue(picture.blocks < open.blocks, L"Its blocks are left out");
+			uint32_t bright = 0, cells = 0;
+			for (int code = 200; code < HISTOGRAM_BINS; ++code) bright += picture.histogram[code];
+			for (uint32_t count : picture.cellCount) cells += count;
+			Assert::AreEqual(0u, bright, L"nor in the histogram (compensate's highlight)");
+			Assert::AreEqual(picture.blocks, cells, L"The cut cells count the same blocks");
+			// The sparse peak (led_peak_full_coverage off) is masked as well.
+			RawMeasureOptions sparseMasked = masked;
+			sparseMasked.peakFullCoverage = false;
+			Assert::AreEqual(40.0, Peak(MeasureP010(frame, sparseMasked)), 0.1);
+			// A box at least half masked is skipped; a mask in a source crop maps
+			// by relative position, and one outside the crop is empty.
+			const MeasurementRect inCrop = SourceRectInCrop(600, 900, 1320, 960, 0, 0, 1920, 1080);
+			Assert::AreEqual(600.0 / 1920.0, inCrop.x0, 1e-9);
+			Assert::AreEqual(960.0 / 1080.0, inCrop.y1, 1e-9);
+			Assert::IsTrue(Empty(SourceRectInCrop(0, 0, 100, 100, 200, 200, 1920, 1080)));
+			Assert::IsTrue(Empty(SourceRectInCrop(10, 10, 10, 20, 0, 0, 1920, 1080)));
 		}
 
 		TEST_METHOD(UnavailablePortDegradesToADryRun)

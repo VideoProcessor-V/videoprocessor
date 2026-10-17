@@ -12,8 +12,11 @@ The script's imports are replaced before it runs:
               timeline (the python_feed), records VP1 TICK
 The script runs with VP_LED_RELAY=1 and, unless --no-feed, VP_LED_FEED=1.
 
-timeline CSV (header): t_ms,apl,max,hl[,...]  - one row per frame, the
-frame shown from t_ms until the next row.
+timeline CSV (header): t_ms,apl,max,hl[,vp_apl,vp_max,vp_hl]  - one row per
+frame, the frame shown from t_ms until the next row. apl/max/hl: the picture
+as the script's screenshot reads it (screenshot loops); vp_*: VP's
+measurement, the python_feed's answer (bug hunt 2, owner 2026-10-17: judge
+VP against the whole picture). Without vp_* the feed answers apl/max/hl.
 Writes <out>_ticks.csv (t_ms,frame,mean,max,hl,tp,tc) and
 <out>_commands.csv (t_ms,kind,value).
 """
@@ -41,11 +44,15 @@ def main():
     parser.add_argument("--no-feed", action="store_true", help="screenshots every loop (the original)")
     args = parser.parse_args()
 
-    times, frames = [], []
+    times, frames, fed = [], [], []
     with open(args.timeline, newline="") as f:
         for row in csv.DictReader(f):
             times.append(float(row["t_ms"]) / 1000.0)
             frames.append((float(row["apl"]), float(row["max"]), int(row["hl"])))
+            if row.get("vp_apl") not in (None, ""):
+                fed.append((float(row["vp_apl"]), float(row["vp_max"]), int(row["vp_hl"])))
+            else:
+                fed.append(frames[-1])
     end = times[-1]
     clock = [0.0]
     fed_frame = [-1]
@@ -132,7 +139,7 @@ def main():
             if words[1] == "REQ":
                 index = frame_index()
                 fed_frame[0] = index
-                apl, maximum, hl = frames[index]
+                apl, maximum, hl = fed[index]
                 self.replies.append(("VPS1 id=%s mean=%d max=%d hl=%d seq=%d" % (
                     words[2], max(0, int(apl)), int(maximum), hl, index)).encode("ascii"))
             elif words[1] == "TICK":
