@@ -311,6 +311,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="VPRendererFilterTests.cpp" />
+    <ClCompile Include="VPRendererFilterGraphTests.cpp" />
     <ClCompile Include="..\VideoProcessor-VPRendererFilter\FilterTimingGlue.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
