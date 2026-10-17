@@ -131,6 +131,9 @@ namespace LedDrive
 		double RecoveryDisplayed() const;
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
+		// Bug hunt 2 (render-ahead): the source frames after the current one that a
+		// command written now lands on (led_latency_ms less the frame's lead).
+		int CommandLatencySourceFrames() const;
 		size_t LookaheadDepth() const;
 		// led_lookahead_ms (review 2026-10-17) in source frames at the measured
 		// rate; 0 = the queue walk's own depth (active_picture_lookahead_frames).
@@ -151,6 +154,9 @@ namespace LedDrive
 		double NowMs() const;
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
+		// Bug hunt 2: a queued, not yet written LPW1's landing, in ms from the
+		// current frame (the driver's next send slot + led_latency_ms - the lead).
+		double QueuedLightLandingMsLocked(const DriverStatus& status) const;
 		CompensationGain GainLocked() const;
 		void ConfigureModelsLocked();
 		double LedFractionLocked(double level) const;
@@ -216,6 +222,9 @@ namespace LedDrive
 		struct Command { uint64_t frame; int level; double landMs; };
 		std::deque<Command> commands;
 		int seenSends = 0;
+		// Bug hunt 2: the LPW1 target last queued to the driver and not yet seen
+		// written (-1 none); a landing in LedLandingsLocked until it is written.
+		int queuedLight = -1;
 		int modelledLevel;
 		// 7c-1: the LED's light after the dead time, settling (as a fraction
 		// of the ceiling's flux), and the same for CNTR (its light factor).

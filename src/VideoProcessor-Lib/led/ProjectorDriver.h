@@ -54,6 +54,11 @@ namespace LedDrive
 		// led_latency_ms / cntr_latency_ms after this.
 		std::chrono::steady_clock::time_point lastLightSentAt{};
 		std::chrono::steady_clock::time_point lastContrastSentAt{};
+		// Bug hunt 2 (2026-10-17): the earliest the driver's thread may write its
+		// next queued command (min_command_gap_ms, burst pause, Barco's 2 s after a
+		// missing reply); the epoch when unknown. The module lands a queued LPW1
+		// from there.
+		std::chrono::steady_clock::time_point nextSendAt{};
 		// A light target is waiting or being transmitted.
 		bool busy = false;
 		// A CNTR value (SetContrastAsync) is waiting or being transmitted
