@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <WindowResizeLayout.h>
-#include "HardwarePrerequisites.h"
+#include "HardwarePrerequisites.h" // CI affected-tier probe 1
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
