@@ -706,6 +706,8 @@ namespace RendererProfileConfig
 			if (key == "temporal_dither") return IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" });
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
+			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
+			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 14: R-A's roll-off (source px per source frame; floor as a

@@ -88,6 +88,34 @@ namespace SourceResolution
 		// coherence either way and is left out (the three G1 guards stay for near-periodic
 		// content). <= 0: off.
 		double periodicPeak = 0.9;
+		// Mixed screens (owner 2026-10-16): a native-resolution UI with a lower-resolution video
+		// inside it (a streaming app's menu with a preview, a 4K info panel or transport bar over
+		// a 1080 film, picture-in-picture). The re-base is whole-frame, so such a frame must count
+		// as native - re-basing it to the video's rate would soften the UI. When a frame reads
+		// lower, every tile is checked for native detail at that rate: power above the rate's
+		// Nyquist at least `mixedDetailDecades` above the resampled tiles' (their median) and at
+		// least `mixedDetailFloorDecades` above the quantisation floor (noise in a flat area is
+		// not detail). Such a tile is
+		//   - a native picture tile when it is not resampled at the rate (coherence below
+		//     `coherence` on the axes read) and not text-like: one is enough (mixedPictureTiles);
+		//   - an overlay tile otherwise (text, or sharp detail over the resampled picture,
+		//     including the tiles the text guard left out): the frame is mixed only when the
+		//     overlay tiles spread over at least two rows AND two columns of the tile grid -
+		//     a subtitle (a band of rows at the bottom or top, or a column of vertical text)
+		//     never does, so subtitles stay ignored as before.
+		// A mixed frame reads native on every axis (FrameReading::mixed) and the tracker counts it
+		// as native detail (it blocks a lower reading and disengages one).
+		// false: off - the readings are exactly as before (source_resolution_mixed_guard off).
+		bool mixedGuard = true;
+		double mixedDetailDecades = 0.3;       // above the resampled tiles' detail above the rate
+		double mixedDetailFloorDecades = 2.5;  // above the quantisation floor (step^2 / 12)
+		// A tile's textBand at or above this is text-like (overlay). Natural pictures read 0.25-0.43,
+		// one subtitle line ~1, two lines ~0.55 (measured on the synthetic fixtures).
+		double mixedTextBand = 0.45;
+		int mixedPictureTiles = 1;             // native picture tiles that make the frame mixed
+		// The tile grid for the overlay spread: tiles are row-major in rows of this many (the
+		// monitors sample 4 x 2). <= 0: one row of all the tiles (the spread rule never fires).
+		int gridColumns = 4;
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
 
@@ -139,6 +167,13 @@ namespace SourceResolution
 		double bitrateQuality = 1.0, effectiveBits = 0.0;
 		double blockiness = 1.0, bandShare = 0.0;
 		double peakiness = 0.0;   // the largest over the tiles (Peakiness)
+		// Mixed screen (Thresholds::mixedGuard): the frame read lower but holds native-resolution
+		// content (a UI around or over the video); ratio, ratioV and ratioH were set to native.
+		bool mixed = false;
+		double mixedRatio = 1.0;      // the lower reading the guard overruled (diagnostic)
+		int mixedPictureTiles = 0;    // tiles of native picture (not resampled at the reading's rate)
+		int mixedOverlayTiles = 0;    // tiles of native text / sharp overlay
+		int mixedOverlayRows = 0, mixedOverlayColumns = 0;   // the grid rows / columns they occupy
 		bool informative() const { return informativeTiles > 0; }
 	};
 
@@ -160,6 +195,10 @@ namespace SourceResolution
 	// frames of the same stream that read r, not with a fixed level. Unknown
 	// (no spectra, or r too close to 1 to measure above it) returns +infinity.
 	double DetailAbove(const FrameReading& frame, double ratio);
+	// The same measure on one tile's spectra (the mixed-screen guard). `axes`: 1 vertical,
+	// 2 horizontal, 3 both (the larger). `level` (optional) receives the mean log10 power of the
+	// band above r's Nyquist on the axis that gave the result.
+	double DetailAbove(const Spectrum& tile, double ratio, int axes = 3, double* level = nullptr);
 
 	// One axis's reading as a frame of its own (the per-axis trackers): the ratio is
 	// that axis's, and the detail-above test reads that axis's spectrum only.

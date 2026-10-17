@@ -351,6 +351,8 @@ private:
 	// refreshed from the active settings by the render loop; Reset asks for a
 	// fresh start.
 	std::atomic<bool> m_pulldownDetection{false};
+	std::atomic<bool> m_pulldownFixes{true};   // pulldown_fixes (audit 2026-10-16)
+	bool m_pulldownFixesApplied = true;        // capture thread
 	std::atomic<bool> m_pulldownResetRequested{false};
 	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
 	std::atomic<uint64_t> m_pulldownSkipped{0};

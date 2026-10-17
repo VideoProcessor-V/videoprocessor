@@ -1055,6 +1055,12 @@ namespace
 		// Owner 2026-10-16: tiles holding overlay text (the player's own subtitles, drawn at
 		// the output resolution) are no evidence for source_resolution auto.
 		bool sourceResolutionTextGuard = true;
+		// Audit 2026-10-16: a mixed screen (a native UI with a lower-resolution video in it, a 4K
+		// overlay, picture-in-picture) is read as native - no whole-frame re-base.
+		bool sourceResolutionMixedGuard = true;
+		// Audit 2026-10-16 (pulldown review D1/D3/D4): keep the lock across counted misses, re-phase
+		// in place, a cadence-aware film clock; off = the 2026-10-14 behaviour.
+		bool pulldownFixes = true;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1066,7 +1072,7 @@ namespace
 		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
 		// rgba32f regardless (LibplaceboRenderParameters).
 		int fboFloat32 = -1;
-		bool preserveExtendedRange = false; // Stage 10: BTB/WTW kept through scaling (SDR)
+		bool preserveExtendedRange = true;  // Stage 10: BTB/WTW kept through scaling (SDR); on by default (owner 2026-10-16: keep BTB and WTW)
 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
@@ -1240,7 +1246,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2408,6 +2414,22 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid rebase_kernel_match '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.rebaseKernelMatch ? "on" : "off");
+		}
+		if (tryChoice("source_resolution_mixed_guard", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceResolutionMixedGuard = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_resolution_mixed_guard '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceResolutionMixedGuard ? "on" : "off");
+		}
+		if (tryChoice("pulldown_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.pulldownFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid pulldown_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.pulldownFixes ? "on" : "off");
 		}
 		if (tryChoice("source_resolution_text_guard", raw))
 		{
@@ -4994,6 +5016,23 @@ struct LibplaceboVideoRenderer::Impl
     uint64_t subtitleTemporalScene=0,subtitleTemporalGeneration=0,subtitleTemporalTick=0;
     unsigned subtitleTemporalCleanFrames=0;
     bool subtitleTemporalValid=false;
+    // Audit 2026-10-16 (bit depth): the subtitle composite in rgba32f where every intermediate is
+    // (fbo_float32 effective), with the configured chroma upscaler; a change re-captures the
+    // temporal background (the two surfaces must share a format).
+    bool subtitleFloat32Last=false;
+    SubtitleRasterQuality SubtitleQuality()
+    {
+        SubtitleRasterQuality quality;
+        quality.float32 = activeSettings.fboFloat32 == 1 ||
+            (activeSettings.fboFloat32 < 0 && !lowLatencyQueueActive.load(std::memory_order_acquire));
+        quality.configured = &renderParams;
+        if (quality.float32 != subtitleFloat32Last)
+        {
+            subtitleFloat32Last = quality.float32;
+            subtitleTemporalValid = false;
+        }
+        return quality;
+    }
     std::array<AnalysisLumaSample,32*18> subtitleTemporalSamples{};
     SubtitlePaddingGuard subtitlePaddingGuard;
     SubtitleLayoutAnchor subtitleLayoutAnchor;
@@ -9256,6 +9295,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.temporalDither != next.temporalDither, "temporal_dither");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
+		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
+		changed(current.pulldownFixes != next.pulldownFixes, "pulldown_fixes");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
@@ -15506,8 +15547,9 @@ struct LibplaceboVideoRenderer::Impl
                         if(SubtitleTemporalFill::Capture(analysisSource,samples) &&
                             [&]() {
                                 PipelinePreparationScope preparing(libplaceboRenderStartedTick);
+                                const SubtitleRasterQuality quality=SubtitleQuality();
                                 return CaptureSubtitleTemporalBackground(renderer,d3d11->gpu,
-                                    image,&subtitleTemporalTexture);
+                                    image,&subtitleTemporalTexture,&quality);
                             }()) {
                             subtitleTemporalSamples=samples;
                             subtitleTemporalScene=sceneResult.eventId;
@@ -15614,9 +15656,10 @@ struct LibplaceboVideoRenderer::Impl
                         const int perfMode=subtitleCutPasteBackground==5?1:0;
                         const auto compositionStart=SteadyClock::now();
                         frameGpuTiming.BeginStage(perfMode?AlphaD3D11FrameGpuTimer::Stage::SubtitleGenerated:AlphaD3D11FrameGpuTimer::Stage::SubtitleBlack);
+                        const SubtitleRasterQuality subtitleQuality=SubtitleQuality();
                         subtitleHookBound=ComposeSubtitleBeforeCrop(renderer,d3d11->gpu,
                             image,subtitleCutPasteHook,&subtitleCompositionTexture,composed,
-                            activeSettings.subtitleTemporalFill && subtitleCutPasteBackground==5);
+                            activeSettings.subtitleTemporalFill && subtitleCutPasteBackground==5,&subtitleQuality);
                         frameGpuTiming.EndStage();
                         ++subtitlePerf.compose[perfMode];
                         subtitlePerf.composeCpu[perfMode]+=std::chrono::duration<double,std::milli>(SteadyClock::now()-compositionStart).count();
@@ -18314,6 +18357,7 @@ struct LibplaceboVideoRenderer::Impl
 			double wanted = 1.0, wantedX = 1.0;
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
 			sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
+			sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
 			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
@@ -19065,6 +19109,9 @@ struct LibplaceboVideoRenderer::Impl
         // SSIM's weights fall towards the floor and the faithful branch's
         // anti-ringing rises (low_bitrate_handling off: every source clean).
         AdaptiveDownscale::Settings adaptiveNow = activeSettings.adaptive;
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+        adaptiveNow.float32Picture = activeSettings.fboFloat32 == 1 || (activeSettings.fboFloat32 < 0 && !lowLatencyQueue);
+#endif
         bitrateWeightScale = 1.0;
         if (activeSettings.lowBitrateHandling != "off" && (upscaleBlend || activeSettings.ssimBitrateAware))
         {
@@ -19217,6 +19264,17 @@ struct LibplaceboVideoRenderer::Impl
         // depth and the colour depth it quantises to. A float or 16-bit
         // target is not an 8/10-bit code domain: the sigma-delta is left out
         // of that frame (audit delta5-beta.md).
+        // Audit 2026-10-16 (bit depth): the output pass in rgba32f (the Beta build's output_fbo_float32
+        // when the GPU has a renderable rgba32f): the sigma-delta's half-float snap would throw the
+        // extra precision away.
+        bool outputFloat32 = false;
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+        {
+            const pl_fmt f = pl_find_fmt(d3d11->gpu, PL_FMT_FLOAT, 4, 32, 0,
+                static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE));
+            outputFloat32 = f && f->component_depth[0] >= 32 && renderParams.output_fbo_float32;
+        }
+#endif
         {
             const SigmaDeltaDomain::Domain domain = SigmaDeltaDomain::FromTarget(target.repr);
             bool any = false;
@@ -19232,6 +19290,7 @@ struct LibplaceboVideoRenderer::Impl
                 }
                 CustomHookChain::SetHookParameter(hook, "swapchain_bits", static_cast<double>(domain.sample));
                 CustomHookChain::SetHookParameter(hook, "color_bits", static_cast<double>(domain.color));
+                CustomHookChain::SetHookParameter(hook, "output_float32", outputFloat32 ? 1.0 : 0.0);
                 ++i;
             }
             const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
@@ -19527,11 +19586,15 @@ struct LibplaceboVideoRenderer::Impl
         dejudderNextVectorsSequence = 0;   // used (or not) once
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
         // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on,
-        // off with the Low_Latency queue (games do not need the last 1/16 step).
+        // off on VP's low-latency path (games do not need the last 1/16 step).
         frameParams.fbo_float32 = activeSettings.fboFloat32 == 1 ||
             (activeSettings.fboFloat32 < 0 && !lowLatencyQueue);
 #endif
-        if (customHooks.SuppressesDither(lowLatencyQueue) || activeSettings.temporalDither == "off")
+        // Only a quantiser submitted with this frame replaces libplacebo's dither (audit 2026-10-16:
+        // a sigma-delta left out of the frame for its domain still cleared the dither).
+        const bool quantiserInFrame = std::any_of(frameHooks.begin(), frameHooks.end(),
+            [&](const pl_hook* h) { return customHooks.IsQuantizerHook(h); });
+        if (quantiserInFrame || activeSettings.temporalDither == "off")
         {
             frameParams.dither_params = nullptr;
             frameParams.error_diffusion = nullptr;
@@ -20689,9 +20752,20 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		m_pulldownSignature = signature;
 		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
 		const double signalHz = measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz();
+		const bool fixes = m_pulldownFixes.load(std::memory_order_relaxed);
+		if (fixes != m_pulldownFixesApplied)
+		{
+			m_pulldownFixesApplied = fixes;
+			Pulldown::Settings settings;
+			settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes;
+			m_pulldown.SetSettings(settings);
+		}
 		const bool wasLocked = m_pulldown.Locked();
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
-		const Pulldown::Decision decision = m_pulldown.Next(repeat, gapBefore, signalHz);
+		// D4: the counted misses keep the lock (verified over the next cycle).
+		const uint64_t missed = m_captureMissedFrames.load(std::memory_order_relaxed) - missedBefore;
+		const Pulldown::Decision decision = m_pulldown.Next(repeat, gapBefore, signalHz,
+			gapBefore && fixes ? static_cast<int>((std::min)(missed, uint64_t{ 1000 })) : -1);
 		if (decision.locked != wasLocked || decision.relocked)
 		{
 			// The frame timing changes here: no pair across it.
@@ -20710,9 +20784,19 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		m_pulldownCadence.store(decision.locked ? (decision.cycle << 16) | decision.unique : 0, std::memory_order_relaxed);
 		if (decision.drop)
 		{
+			// D1: a lock change (or a gap) on a dropped repeat marks the next kept frame.
+			if (gapBefore && fixes)
+				m_pulldown.MarkDiscontinuity();
 			m_pulldownSkipped.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
+		if (fixes && m_pulldown.ConsumeDiscontinuity() && !gapBefore)
+		{
+			gapCause = "pulldown lock change (on a skipped repeat)";
+			gapBefore = true;
+		}
+		if (decision.rephased)
+			DebugLog::Log("Pulldown: re-phased in place (lock kept)");
 		if (decision.locked)
 		{
 			filmHz = decision.filmHz;
@@ -20728,8 +20812,9 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				QueryPerformanceFrequency(&frequency);
 				const double qpcPerSecond = static_cast<double>(frequency.QuadPart);
 				const int64_t arrived = arrivalQpc > 0 ? arrivalQpc : callbackQpc;
-				arrivalQpc = static_cast<int64_t>(m_pulldownClock.Time(decision.filmIndex,
-					static_cast<double>(arrived) / qpcPerSecond, filmHz) * qpcPerSecond);
+				arrivalQpc = static_cast<int64_t>((fixes ? m_pulldownClock.Time(decision.filmIndex,
+					static_cast<double>(arrived) / qpcPerSecond, filmHz, decision.cadenceLateness, decision.cadenceLatenessMax) :
+					m_pulldownClock.Time(decision.filmIndex, static_cast<double>(arrived) / qpcPerSecond, filmHz)) * qpcPerSecond);
 				m_pulldownFilmQpc = arrivalQpc;
 			}
 		}
@@ -24582,6 +24667,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		if (m_impl)
 		{
 			m_pulldownDetection.store(m_impl->activeSettings.dejudderPulldown, std::memory_order_relaxed);
+			m_pulldownFixes.store(m_impl->activeSettings.pulldownFixes, std::memory_order_relaxed);
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
 			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
@@ -25474,6 +25560,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "temporal_dither=" << s.temporalDither << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
+		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
+		<< "pulldown_fixes=" << (s.pulldownFixes ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

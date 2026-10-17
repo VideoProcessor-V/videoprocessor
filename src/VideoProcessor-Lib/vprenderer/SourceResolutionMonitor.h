@@ -94,6 +94,8 @@ namespace SourceResolutionMonitor
 		// source_resolution_text_guard (owner 2026-10-16): leave tiles holding overlay text
 		// (the player's subtitles at the output resolution) out of the readings.
 		void SetTextGuard(bool on) { textGuard.store(on, std::memory_order_release); }
+		// source_resolution_mixed_guard (audit 2026-10-16): a mixed screen reads native.
+		void SetMixedGuard(bool on) { mixedGuard.store(on, std::memory_order_release); }
 		// source_resolution_evidence_shots / _seconds (the Picture slider): the shots and time
 		// of agreeing evidence before auto declares a lower source; the per-axis trackers
 		// need twice both.
@@ -229,6 +231,7 @@ namespace SourceResolutionMonitor
 		double autoApplied = 1.0, autoPending = 1.0;
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::atomic<bool> textGuard{ true };
+		std::atomic<bool> mixedGuard{ true };
 		std::atomic<int> evidenceShots{ SourceResolution::Tracker::Settings{}.minimumShots };
 		std::atomic<double> evidenceSeconds{ SourceResolution::Tracker::Settings{}.minimumSeconds };
 		std::string selection = "native";

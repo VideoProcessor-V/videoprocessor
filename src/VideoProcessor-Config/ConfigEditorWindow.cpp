@@ -7333,6 +7333,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "A player that upscales 1080p video draws its own subtitles at 4K: sharp text over a soft picture. On "
             "(default): a detection patch whose sharp detail is a band of text is left out of that frame's reading, so "
             "subtitles neither block the detection nor switch an active re-base off. Off: every patch counts."));
+        auto* mixedGuard = addChoice(QStringLiteral("Source resolution: never on mixed screens"), QStringLiteral("source_resolution_mixed_guard"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        mixedGuard->setToolTip(QStringLiteral(
+            "A menu or app screen drawn at 4K with a smaller video playing inside it, a 4K info panel or controls over "
+            "the film, or picture-in-picture: the re-base is one size for the whole picture, so it would soften the "
+            "sharp parts. On (default): when sharp full-resolution detail shows anywhere beside the upscaled video "
+            "(not a subtitle line), the picture counts as native - no re-base, and an active one switches off at "
+            "once. Off: the screen is read as a whole, as before."));
         // Owner 2026-10-16: the engine's options on the motion (de-judder) section, not here.
         QFormLayout* fixesForm = form;
         form = dejudderTasteForm;
@@ -7416,6 +7424,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             sync();
         }
         form = fixesForm;
+        auto* pulldownFixes = addChoice(QStringLiteral("Film-in-video detection: keep the lock"), QStringLiteral("pulldown_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        pulldownFixes->setToolTip(QStringLiteral(
+            "For 'Find film sent with repeated frames' (when it is on). On (default): a missed capture frame or an "
+            "edit in the film's repeat pattern no longer drops the lock for 2 s - the pattern is followed through "
+            "it, and the film's even timing is kept. Off: the earlier behaviour (drop the lock, find it again)."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -7940,7 +7954,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Keeps SDR picture detail below video black and above video white through scaling and "
             "the colour conversion, which otherwise clip it. Needs pure-power gammas (1.8 to 2.8) on "
             "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
-            "otherwise and for HDR. Off is the standard path."));
+            "otherwise and for HDR. On by default (owner: keep below-black and above-white). To reach the "
+            "projector they also need limited output range (Color profile: output range limited, with output "
+            "gamma 2.4). Off: libplacebo's standard path (clips them)."));
         MarkGpuCost(form, extendedRange, 1);
         // Delta 13: the SDR tone shape and headroom, in their own section
         // (audit 2026-10-14c).
@@ -8093,7 +8109,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     "so VP's scaler works from the source, and debands there. ") + QString::fromLatin1(kGpuCostLegend), false);
             for (QWidget* w : { static_cast<QWidget*>(pictureBox), static_cast<QWidget*>(sourceResolution),
                     static_cast<QWidget*>(autoConfidence), static_cast<QWidget*>(evidenceSeconds),
-                    static_cast<QWidget*>(evidenceShots), static_cast<QWidget*>(textGuard),
+                    static_cast<QWidget*>(evidenceShots), static_cast<QWidget*>(textGuard), static_cast<QWidget*>(mixedGuard),
                     static_cast<QWidget*>(kernelMatch), static_cast<QWidget*>(debandVp), static_cast<QWidget*>(lowBitrate) })
                 moveRow(w, rebaseForm);
             if (QFormLayout* downscale = sectionForm(QStringLiteral("adaptiveDownscale")))
@@ -8855,8 +8871,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
-                    { "downscale_light", "linear" }, { "preserve_extended_range", "off" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
+                    { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "sdr_tone_shape", "off" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
                 // Numbers with a placeholder showing their default: empty, so

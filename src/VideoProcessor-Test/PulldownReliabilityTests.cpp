@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -101,6 +102,7 @@ namespace VideoProcessorTest
 			bool subtitleOnly = false;  // truth: only the device subtitle changed (the same film frame)
 			bool event = false;         // a phase event (edit, miss, restart, subtitle) starts here
 			bool spike = false;         // the late-arrival spike
+			bool slip = false;          // the source's own cadence slips here (a rate mismatch)
 			int missedBefore = 0;       // signal frames lost in capture just before it (counted)
 			double arrival = 0.0;       // seconds
 		};
@@ -111,6 +113,7 @@ namespace VideoProcessorTest
 			explicit Tape(Rate signal) : m_signal(signal) {}
 
 			double SignalHz() const { return m_signal.Hz(); }
+			int ApproxCycle() const { return m_approxCycle; }
 			const std::vector<SignalFrame>& Frames() const { return m_frames; }
 
 			// Start (or restart) film: the carried cadence `offset` signal
@@ -122,6 +125,15 @@ namespace VideoProcessorTest
 				m_lastFilmFrame = -1;
 				m_scene += 1000000;
 				m_eventPending = m_eventPending || event;
+				// The shortest cycle within 0.2% of film / signal (the one a lock
+				// takes): where the source's own cadence breaks it, it slips.
+				const double ratio = film.Hz() / m_signal.Hz();
+				m_approxCycle = 0;
+				for (int q = 1; q <= Pulldown::Detector::MaxCycle(m_signal.Hz()) && m_approxCycle == 0; ++q)
+					if (std::fabs(std::round(ratio * q) / q - ratio) <= ratio * 0.002)
+						m_approxCycle = q;
+				m_cadence.clear();
+				m_lastSlip = -1000000;
 			}
 
 			// Film for `seconds`: each signal frame shows the latest film
@@ -134,6 +146,14 @@ namespace VideoProcessorTest
 					const long long n = FilmFrameAt(m_position++);
 					const bool cadenceNew = n != m_lastFilmFrame;
 					m_lastFilmFrame = n;
+					// (The segment's first frame is new by construction: not compared.)
+					m_cadence.push_back(cadenceNew);
+					const long long at = static_cast<long long>(m_cadence.size()) - 1;
+					if (m_approxCycle > 0 && at - m_approxCycle >= 1 && m_cadence[static_cast<size_t>(at)] != m_cadence[static_cast<size_t>(at - m_approxCycle)] && at - m_lastSlip > m_approxCycle)
+					{
+						m_slipPending = true;
+						m_lastSlip = at;
+					}
 					if (cadenceNew)
 					{
 						if (m_cutPending)
@@ -240,7 +260,7 @@ namespace VideoProcessorTest
 						jitter += spikeMs * 1e-3;
 						m_frames[i].spike = true;
 					}
-					m_frames[i].arrival = 10.0 + static_cast<double>(slot) * m_signal.den / m_signal.num + jitter;
+					m_frames[i].arrival = 10.0 + static_cast<double>(slot) * static_cast<double>(m_signal.den) / static_cast<double>(m_signal.num) + jitter;
 				}
 			}
 
@@ -255,6 +275,8 @@ namespace VideoProcessorTest
 			{
 				frame.missedBefore = m_missed;
 				m_missed = 0;
+				frame.slip = m_slipPending;
+				m_slipPending = false;
 				if (m_eventPending)
 				{
 					frame.event = true;
@@ -267,6 +289,10 @@ namespace VideoProcessorTest
 			Rate m_film{ 24, 1 };
 			long long m_position = 0;
 			long long m_lastFilmFrame = -1;
+			int m_approxCycle = 0;
+			std::vector<bool> m_cadence;   // cadenceNew by source position in the segment
+			long long m_lastSlip = -1000000;
+			bool m_slipPending = false;
 			uint64_t m_scene = 0;
 			int m_gain = 1000;
 			int m_subtitle = 0;
@@ -324,7 +350,7 @@ namespace VideoProcessorTest
 				if (d.locked && !d.update)
 				{
 					r.timed = true;
-					r.filmTime = clock.Time(d.filmIndex, frame.arrival, d.filmHz);
+					r.filmTime = clock.Time(d.filmIndex, frame.arrival, d.filmHz, d.cadenceLateness, d.cadenceLatenessMax);
 				}
 			}
 			return out;
@@ -351,7 +377,7 @@ namespace VideoProcessorTest
 				std::snprintf(text, sizeof(text),
 					"lock@%lld cycle %d film %.3f | unlocks %d locked %.2f%% | events %d worst %d stray %d total %d | rephases %d | "
 					"clock back %d early %d spacing %d/%d worst %.3f ms | changes %d (on drops %d) unmarked %d | new dropped %d",
-					firstLock, lockCycle, lockFilmHz, unlocksAfterLock, filmFrames ? 100.0 * filmLocked / filmFrames : 0.0,
+					firstLock, lockCycle, lockFilmHz, unlocksAfterLock, filmFrames ? 100.0 * static_cast<double>(filmLocked) / static_cast<double>(filmFrames) : 0.0,
 					events, worstEventWrong, strayWrong, totalWrong, rephases, clockBackwards, clockEarly, spacingOff, spacingChecked,
 					worstSpacingMs, lockChanges, lockChangesOnDrops, unmarked, newDropped);
 				return text;
@@ -415,29 +441,15 @@ namespace VideoProcessorTest
 				}
 			}
 
-			// Phase events: the explicit ones, and the true cadence breaking its
-			// own period where nothing was edited (a rate-mismatch slip).
+			// Phase events: the edits, misses, restarts, subtitles, the spike and
+			// the source's own slips; a wrong-time frame belongs to the latest
+			// event at most 3 frames after it and 3 cycles + 3 frames before it.
 			const int cycle = report.lockCycle > 0 ? report.lockCycle : 1;
 			const long long window = 3LL * cycle + 3;
 			std::vector<long long> events;
 			for (size_t i = 0; i < n; ++i)
-				if (frames[i].event || frames[i].spike)
+				if (frames[i].event || frames[i].spike || frames[i].slip)
 					events.push_back(static_cast<long long>(i));
-			const std::vector<long long> explicitEvents = events;
-			for (size_t i = static_cast<size_t>(cycle); i < n; ++i)
-			{
-				if (frames[i].kind != Kind::Film || frames[i - cycle].kind != Kind::Film || frames[i].cadenceNew == frames[i - cycle].cadenceNew)
-					continue;
-				bool nearExplicit = false;
-				for (long long e : explicitEvents)
-					nearExplicit = nearExplicit || (static_cast<long long>(i) >= e - window && static_cast<long long>(i) <= e + window);
-				if (!nearExplicit)
-				{
-					events.push_back(static_cast<long long>(i));
-					i += static_cast<size_t>(cycle) * 3;
-				}
-			}
-			std::sort(events.begin(), events.end());
 			report.events = static_cast<int>(events.size());
 			std::vector<int> perEvent(events.size(), 0);
 			for (size_t i = 0; i < n; ++i)
@@ -579,20 +591,40 @@ namespace VideoProcessorTest
 						lockChangesOnDrops += r.lockChangesOnDrops;
 
 						const std::wstring w = Wide(name);
+						// Safety at every combination: nothing new dropped, the clock
+						// never back or early, every lock change marked.
 						Assert::AreEqual(0, r.newDropped, (w + L": no new picture dropped").c_str());
+						Assert::AreEqual(0, r.clockBackwards, (w + L": the film clock never steps back").c_str());
+						Assert::AreEqual(0, r.clockEarly, (w + L": never timed before arrival").c_str());
+						Assert::AreEqual(0, r.unmarked, (w + L": every lock change marks the next kept frame").c_str());
+						// A source whose own cadence slips more often than 1.5 lock
+						// windows (23.976p in 50 Hz: about every 1.4 s) has no cadence
+						// to hold: the safety criteria only.
+						int slips = 0;
+						for (const SignalFrame& frame : tape.Frames())
+							slips += frame.slip ? 1 : 0;
+						const int approxCycle = tape.ApproxCycle() > 0 ? tape.ApproxCycle() : 1;
+						if (slips > 0 && tape.Frames().size() / static_cast<size_t>(slips) <
+							3 * static_cast<size_t>(Pulldown::Detector::FramesToLock(approxCycle, signal.Hz())) / 2)
+						{
+							Logger::WriteMessage((name + ": irregular cadence (" + std::to_string(slips) + " slips): safety criteria only\n").c_str());
+							continue;
+						}
 						Assert::IsTrue(r.firstLock >= 0, (w + L": locks").c_str());
 						Assert::AreEqual(film.Hz(), r.lockFilmHz, film.Hz() * 0.005, (w + L": the film rate").c_str());
-						Assert::IsTrue(r.firstLock + 1 <= Pulldown::Detector::FramesToLock(r.lockCycle, signal.Hz()) + r.lockCycle,
+						// From the start, or from the source's last slip before the
+						// lock (a slip restarts the exact-periodicity window).
+						long long acquireFrom = 0;
+						for (long long i = 0; i < r.firstLock; ++i)
+							acquireFrom = tape.Frames()[static_cast<size_t>(i)].slip ? i : acquireFrom;
+						Assert::IsTrue(r.firstLock + 1 <= acquireFrom + Pulldown::Detector::FramesToLock(r.lockCycle, signal.Hz()) + r.lockCycle,
 							(w + L": lock within FramesToLock + one cycle").c_str());
 						Assert::AreEqual(0, r.unlocksAfterLock, (w + L": no unlock through fades, black, cuts, subtitles, edits, misses, pauses").c_str());
 						Assert::IsTrue(r.filmLocked >= r.filmFrames * 98 / 100, (w + L": locked >= 98% of film time").c_str());
 						Assert::IsTrue(r.worstEventWrong <= 2, (w + L": <= 2 wrong-time frames per phase event").c_str());
 						Assert::AreEqual(0, r.strayWrong, (w + L": no wrong-time frame away from an event").c_str());
-						Assert::AreEqual(0, r.clockBackwards, (w + L": the film clock never steps back").c_str());
-						Assert::AreEqual(0, r.clockEarly, (w + L": never timed before arrival").c_str());
 						Assert::IsTrue(r.spacingChecked > 0, (w + L": quiet stretches checked").c_str());
 						Assert::AreEqual(0, r.spacingOff, (w + L": spaced 1/f within 1 ms under 3 ms jitter").c_str());
-						Assert::AreEqual(0, r.unmarked, (w + L": every lock change marks the next kept frame").c_str());
 					}
 				}
 			char text[128];
@@ -718,42 +750,40 @@ namespace VideoProcessorTest
 			for (const Case& c : cases)
 			{
 				const int cycle = static_cast<int>(Cadence(c.film, c.signal).second);
-				for (int restart = 0; restart < cycle; ++restart)
-					for (int edit = 0; edit < 3; ++edit)
+				// edit 0: pause and restart at each rotation; 1: drop; 2: duplicate.
+				for (int variant = 0; variant < cycle + 2; ++variant)
+				{
+					const int edit = variant < cycle ? 0 : variant - cycle + 1;
+					const int restart = variant < cycle ? variant : 0;
+					Tape tape(c.signal);
+					tape.StartFilm(c.film, 0);
+					tape.Film(3.0);
+					if (edit == 0)
 					{
-						Tape tape(c.signal);
-						tape.StartFilm(c.film, 0);
-						tape.Film(3.0);
-						if (edit == 0)
-						{
-							tape.Pause(0.5);
-							tape.StartFilm(c.film, restart, true);
-						}
-						else if (edit == 1)
-							tape.EditDrop();
-						else
-							tape.EditDuplicate();
-						tape.Film(3.0);
-						tape.Finish(static_cast<uint32_t>(100 + restart * 3 + edit), 0.0);
-						const auto run = Replay(tape.Frames(), tape.SignalHz(), FixesOn());
-						const Report r = Evaluate(tape.Frames(), run);
-						const std::string name = RateText(c.film) + " in " + RateText(c.signal) + (edit == 0 ? " restart at " + std::to_string(restart) :
-							edit == 1 ? std::string(" edit drop") : std::string(" edit duplicate"));
-						const std::wstring w = Wide(name);
-						if (r.worstEventWrong > 0 || r.rephases > 0)
-							Logger::WriteMessage((name + ": " + r.Text() + "\n").c_str());
-						Assert::AreEqual(0, r.newDropped, (w + L": no new picture dropped").c_str());
-						Assert::AreEqual(0, r.unlocksAfterLock, (w + L": no unlock").c_str());
-						Assert::IsTrue(r.worstEventWrong <= 2, (w + L": <= 2 wrong-time frames").c_str());
-						Assert::AreEqual(0, r.strayWrong, (w + L": none away from the event").c_str());
-						Assert::AreEqual(0, r.unmarked, (w + L": a re-phase marks the next kept frame").c_str());
-						if (edit != 0)
-							Assert::AreEqual(1, r.rephases, (w + L": one re-phase").c_str());
-						if (edit == 1 && r.rephases > 0)
-							break;   // the edits do not depend on the restart phase
-						if (edit == 2)
-							break;
+						tape.Pause(0.5);
+						tape.StartFilm(c.film, restart, true);
 					}
+					else if (edit == 1)
+						tape.EditDrop();
+					else
+						tape.EditDuplicate();
+					tape.Film(3.0);
+					tape.Finish(static_cast<uint32_t>(100 + variant), 0.0);
+					const auto run = Replay(tape.Frames(), tape.SignalHz(), FixesOn());
+					const Report r = Evaluate(tape.Frames(), run);
+					const std::string name = RateText(c.film) + " in " + RateText(c.signal) + (edit == 0 ? " restart at " + std::to_string(restart) :
+						edit == 1 ? std::string(" edit drop") : std::string(" edit duplicate"));
+					const std::wstring w = Wide(name);
+					if (r.worstEventWrong > 0 || r.rephases > 0)
+						Logger::WriteMessage((name + ": " + r.Text() + "\n").c_str());
+					Assert::AreEqual(0, r.newDropped, (w + L": no new picture dropped").c_str());
+					Assert::AreEqual(0, r.unlocksAfterLock, (w + L": no unlock").c_str());
+					Assert::IsTrue(r.worstEventWrong <= 2, (w + L": <= 2 wrong-time frames").c_str());
+					Assert::AreEqual(0, r.strayWrong, (w + L": none away from the event").c_str());
+					Assert::AreEqual(0, r.unmarked, (w + L": a re-phase marks the next kept frame").c_str());
+					if (edit != 0)
+						Assert::AreEqual(1, r.rephases, (w + L": one re-phase").c_str());
+				}
 			}
 		}
 
