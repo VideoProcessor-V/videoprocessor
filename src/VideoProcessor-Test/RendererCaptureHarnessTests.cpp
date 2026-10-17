@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -2770,6 +2771,153 @@ namespace Tests
 				Assert::IsFalse(r.Logged("Interpolation: failed"), (name + L": no failure\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("extra render failed") || r.Logged("extra present failed"), (name + L": no render failure\n" + r.Tail()).c_str());
 			}
+		}
+
+		// The opt-in for the on-screen runs (VP_TEST_HARNESS_ONSCREEN=1).
+		static bool OnScreenOptIn(const char* name)
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			const bool on = _dupenv_s(&v, &n, "VP_TEST_HARNESS_ONSCREEN") == 0 && v && std::string(v) == "1";
+			std::free(v);
+			if (!on)
+				Logger::WriteMessage((std::string("SKIP-OPT-IN ") + name + ": VP_TEST_HARNESS_ONSCREEN=1 only; not run\n").c_str());
+			return on;
+		}
+
+		// The count before a word in a log line ("..., 3 late, ..." -> 3); -1 when absent.
+		static long long CountBefore(const std::string& line, const std::string& word)
+		{
+			const size_t at = line.find(" " + word);
+			if (at == std::string::npos || at == 0)
+				return -1;
+			size_t begin = at;
+			while (begin > 0 && std::isdigit(static_cast<unsigned char>(line[begin - 1])))
+				--begin;
+			return begin == at ? -1 : std::atoll(line.substr(begin, at - begin).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(OnScreenRenderAheadExtras)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuOnScreen")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OnScreenRenderAheadExtras)
+		{
+			const HarnessScope harnessScope;
+			// docs/VP-render-ahead-design.md (on-screen, Claude on the GPU, overnight): 23.976p with
+			// the de-judder and render_ahead: on - the gate per source period and the old per-refresh
+			// rule, standard and gpu paths, plus the VP-owned DXGI presenter (the deeper swapchain
+			// applies only there), and render ahead off as the reference. A report per run: the
+			// "Render-ahead:" and "Render-ahead gate:" lines, the swapchain line, late frames and the
+			// presentation status. VP_TEST_HARNESS_ONSCREEN=1 with VP_TEST_GPU=hardware only.
+			if (!OnScreenOptIn("OnScreenRenderAheadExtras")) return;
+			if (!RequireHardwareOrSkip("OnScreenRenderAheadExtras")) return;
+			char* sv = nullptr;
+			size_t n = 0;
+			const double seconds = _dupenv_s(&sv, &n, "VP_TEST_HARNESS_SECONDS") == 0 && sv ? std::atof(sv) : 30.0;
+			std::free(sv);
+			const std::string dejudder = "dejudder_strength: 0.25\n";
+			const std::string vpOwned = "[vpvr.display]\ndiagnostic_vp_owned_dxgi_presenter: true\n";
+			struct Case { const char* name; const char* path; std::string extra; bool renderAhead; };
+			const Case cases[] = {
+				{ "23.976p standard, render ahead, gate period", "standard", dejudder + "render_ahead: on\ndejudder_gate: period\n", true },
+				{ "23.976p gpu, render ahead, gate period", "gpu", dejudder + "render_ahead: on\ndejudder_gate: period\n", true },
+				{ "23.976p standard, render ahead, gate refresh", "standard", dejudder + "render_ahead: on\ndejudder_gate: refresh\n", true },
+				{ "23.976p gpu, render ahead, gate refresh", "gpu", dejudder + "render_ahead: on\ndejudder_gate: refresh\n", true },
+				{ "23.976p gpu, render ahead, gate auto, VP-owned presenter", "gpu",
+					dejudder + "render_ahead: on\ndejudder_gate: auto\n" + vpOwned, true },
+				{ "23.976p gpu, render ahead off (reference)", "gpu", dejudder + "render_ahead: off\n", false } };
+			int failures = 0;
+			for (const Case& c : cases)
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, c.path, seconds > 5.0 ? seconds : 30.0, true, c.extra, true);
+				Logger::WriteMessage((std::string("== ") + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
+				Logger::WriteMessage(("   de-judder: " + r.dejudderStatus).c_str());
+				Logger::WriteMessage(("   presentation: " + r.presentationStatus).c_str());
+				std::string lastRenderAhead;
+				int gateChanges = 0, renderAheadLines = 0, renderFailures = 0;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Render-ahead gate:") != std::string::npos)
+					{
+						++gateChanges;
+						Logger::WriteMessage(("   " + line).c_str());
+					}
+					else if (line.find("Render-ahead swapchain:") != std::string::npos || line.find("VP_TEST_ADAPTER") != std::string::npos ||
+						line.find("VP-owned DXGI presenter") != std::string::npos)
+						Logger::WriteMessage(("   " + line).c_str());
+					else if (line.find("Render-ahead:") != std::string::npos)
+					{
+						++renderAheadLines;
+						lastRenderAhead = line;
+					}
+					if (line.find("extra render failed") != std::string::npos || line.find("extra present failed") != std::string::npos)
+						++renderFailures;
+				}
+				Logger::WriteMessage(("   last " + (lastRenderAhead.empty() ? std::string("Render-ahead: (none)") : lastRenderAhead)).c_str());
+				Logger::WriteMessage(("   render-ahead lines " + std::to_string(renderAheadLines) + ", gate changes " +
+					std::to_string(gateChanges) + ", late " + std::to_string(CountBefore(lastRenderAhead, "late")) +
+					", extras dropped " + std::to_string(CountBefore(lastRenderAhead, "extras dropped")) +
+					", render/present failures " + std::to_string(renderFailures)).c_str());
+				if (!c.renderAhead && renderAheadLines > 0)
+					Logger::WriteMessage("   UNEXPECTED: render-ahead lines with render_ahead off");
+				failures += (r.presented ? 0 : 1) + (renderFailures > 0 ? 1 : 0) + (!c.renderAhead && renderAheadLines > 0 ? 1 : 0);
+			}
+			Assert::AreEqual(0, failures, L"every on-screen run presented frames, no extra failed, off logs no render-ahead");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(OnScreenHiccupRepairWithoutInterpolation)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuOnScreen")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OnScreenHiccupRepairWithoutInterpolation)
+		{
+			const HarnessScope harnessScope;
+			// Standalone hiccup repair (render-ahead 2026-10-17): interpolation off and
+			// interpolation_fill_gaps on, a stream that misses one and then two frames - at 5/6 of
+			// the display rate and at 23.976p with the de-judder - and the fill off as the
+			// reference. A report: the "gap pair across" lines, the timeline lines and the
+			// presentation status. VP_TEST_HARNESS_ONSCREEN=1 with VP_TEST_GPU=hardware only.
+			if (!OnScreenOptIn("OnScreenHiccupRepairWithoutInterpolation")) return;
+			if (!RequireHardwareOrSkip("OnScreenHiccupRepairWithoutInterpolation")) return;
+			const auto missed = [](int n) { FrameStep f; f.content = n; f.send = !(n == 90 || (n >= 150 && n <= 151)); return f; };
+			FramePlan video = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			video.step = missed;
+			FramePlan film;
+			film.rateNumerator = 24000;
+			film.rateDenominator = 1001;
+			film.step = missed;
+			struct Case { const char* name; const FramePlan* plan; bool film; std::string extra; bool fill; };
+			const Case cases[] = {
+				{ "5/6 display rate, fill on", &video, false, "interpolation: off\ninterpolation_fill_gaps: on\n", true },
+				{ "5/6 display rate, fill off", &video, false, "interpolation: off\ninterpolation_fill_gaps: off\n", false },
+				{ "23.976p de-judder, fill on", &film, true, "interpolation: off\ninterpolation_fill_gaps: on\ndejudder_strength: 0.25\n", true },
+				{ "23.976p de-judder, fill off", &film, true, "interpolation: off\ninterpolation_fill_gaps: off\ndejudder_strength: 0.25\n", false } };
+			int failures = 0;
+			for (const Case& c : cases)
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 10.0, c.film, c.extra, true, c.plan);
+				ReportInterpolation(c.name, r);
+				Logger::WriteMessage(("   presented " + std::string(r.presented ? "yes" : "NO") + "; presentation: " +
+					r.presentationStatus).c_str());
+				int gapPairs = 0, missedLines = 0;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("gap pair across") != std::string::npos) ++gapPairs;
+					if (line.find("capture missed") != std::string::npos)
+					{
+						++missedLines;
+						Logger::WriteMessage(("   " + line).c_str());
+					}
+				}
+				Logger::WriteMessage(("   gap pair lines " + std::to_string(gapPairs) + ", capture missed lines " +
+					std::to_string(missedLines)).c_str());
+				if (!c.fill && gapPairs > 0)
+					Logger::WriteMessage("   UNEXPECTED: gap pairs with interpolation_fill_gaps off");
+				if (c.fill && gapPairs == 0)
+					Logger::WriteMessage("   NOTE: no gap pair with the fill on (report for the owner's judgement)");
+				failures += (r.presented ? 0 : 1) + (missedLines > 0 ? 0 : 1) + (!c.fill && gapPairs > 0 ? 1 : 0) +
+					(r.Logged("Interpolation: failed") ? 1 : 0);
+			}
+			Assert::AreEqual(0, failures, L"every run presented, the gaps were counted, off made no pair, no failure");
 		}
 
 		// --- Rule tests (test hardening 2026-10-17) ---
