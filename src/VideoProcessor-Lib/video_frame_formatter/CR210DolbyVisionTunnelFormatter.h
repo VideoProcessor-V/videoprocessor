@@ -35,8 +35,9 @@ public:
 	bool PlanesHighAligned() const { return m_alignment == ByteAlignment::LEFT; }
 	// The planes FormatVideoFrame writes for a picture AnalyzeFrame returned
 	// PICTURE for, from that picture's raw frame and placement (the GPU
-	// unpack's fallback for a frame already handed on raw). Single-threaded.
-	bool UnpackPicture(const void* source, BYTE* output, bool highAligned) const;
+	// unpack's fallback for a frame already handed on raw), with the same row
+	// workers. Not concurrent with FormatVideoFrame (callers hold one lock).
+	bool UnpackPicture(const void* source, BYTE* output, bool highAligned);
 	LONG GetOutFrameSize() const override { return m_outputSize; }
 	VideoFrameFormatterOutputContract GetOutputContract() const override
 	{
@@ -67,6 +68,8 @@ private:
 	bool LooksLikeTunnel(const uint8_t* source) const;
 	void BeginTitle();
 	void LogTitleLevels(const char* reason);
+	// Every row, split over the row workers at 1080p and above.
+	void ConvertPicture(const uint8_t* source, uint16_t* output, bool leftAligned);
 	void ConvertRows(const uint8_t* source, uint16_t* output,
 		uint32_t firstRow, uint32_t rowCount, bool leftAligned) const;
 	void ConvertRowsAVX2(const uint8_t* source, uint16_t* output,

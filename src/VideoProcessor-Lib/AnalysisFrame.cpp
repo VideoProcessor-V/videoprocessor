@@ -34,10 +34,14 @@ namespace
         hash = Mix(hash, static_cast<uint64_t>(result.sampleRange));
         hash = Mix(hash, result.colorDepth);
         hash = Mix(hash, result.bitShift);
-        hash = Mix(hash, result.rgbBitAlignment);
+        // dv_tunnel_gpu_unpack: decoded DV is the same evidence whether it is
+        // sampled from the CPU planes or the raw words (the GPU route), so the
+        // storage layout (placement, strides) stays out of its key.
+        const bool decodedDv = result.domain == AnalysisFrameDomain::DecodedDolbyVision422;
+        hash = Mix(hash, decodedDv ? 0 : result.rgbBitAlignment);
         hash = Mix(hash, result.dolbyFullRange ? 1 : 0);
-        hash = Mix(hash, result.source.rowBytes);
-        hash = Mix(hash, result.source.chromaRowBytes);
+        hash = Mix(hash, decodedDv ? 0 : result.source.rowBytes);
+        hash = Mix(hash, decodedDv ? 0 : result.source.chromaRowBytes);
         return hash ? hash : 1;
     }
 

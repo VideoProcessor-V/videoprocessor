@@ -105,7 +105,11 @@ WARP with `VP_TEST_DV_WARP=1`) compares the GPU planes to the CPU's. Scene,
 subtitle and active-picture analysis sample the same codes from the raw words
 (`PackedDolbyVision422`). If the GPU unpack fails, that picture is unpacked on
 the CPU at the render and the session returns to the CPU unpack (logged once);
-`VP_TEST_DV_UNPACK_FAIL=1` forces this for tests.
+`VP_TEST_DV_UNPACK_FAIL=1` forces this for tests. After a failure the payloads
+already queued go straight to the CPU fallback (no GPU retry); a new render
+device may try the GPU again. A picture neither can unpack (e.g. the mode
+changed under queued payloads) is presented black. Decoded DV has one analysis
+domain key on both routes (placement and strides are left out of it).
 
 ## Luminance status
 

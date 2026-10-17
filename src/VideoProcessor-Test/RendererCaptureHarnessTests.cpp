@@ -28,6 +28,7 @@
 #include <thread>
 #include <vector>
 
+#include "DolbyVisionTunnelSender.h"
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // capture_path (owner 2026-10-13): the shipped VP renderer DLL driven like the
@@ -197,6 +198,12 @@ namespace
 		}
 	};
 
+	// dv_tunnel_gpu_unpack (2026-10-16): a Dolby Vision tunnel signal. The frames
+	// are the given r210 pictures (FrameStep::content picks one, modulo the count),
+	// each exactly BytesPerFrame long.
+	bool g_harnessDolbyVision = false;
+	std::vector<std::vector<BYTE>> g_harnessDvFrames;
+
 	// The harness's frame size (1080p unless a test sets it; the 4K stress run).
 	int g_harnessWidth = 1920, g_harnessHeight = 1080;
 	// The window (the output) off the screen: 640 x 360 unless a test sets it.
@@ -298,6 +305,7 @@ namespace
 			state->videoFrameEncoding = encoding;
 			state->colorspace = ColorSpace::REC_709;
 			state->eotf = EOTF::SDR;
+			state->dolbyVisionTunnel = g_harnessDolbyVision;
 			renderer->OnVideoState(state);
 			if (g_harnessApplySnapshot)
 			{
@@ -367,7 +375,12 @@ namespace
 				if (step.send)
 				{
 					std::vector<BYTE>& buffer = ring[n % ring.size()];
-					if (encoding == VideoFrameEncoding::V210) FillV210(buffer, width, height, rowBytes, step.content);
+					if (!g_harnessDvFrames.empty())
+					{
+						const std::vector<BYTE>& picture = g_harnessDvFrames[static_cast<size_t>(step.content) % g_harnessDvFrames.size()];
+						std::copy(picture.begin(), picture.begin() + (std::min)(picture.size(), buffer.size()), buffer.begin());
+					}
+					else if (encoding == VideoFrameEncoding::V210) FillV210(buffer, width, height, rowBytes, step.content);
 					else if (encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ||
 						encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
 						encoding == VideoFrameEncoding::R10l || encoding == VideoFrameEncoding::ARGB_8BIT ||
@@ -1898,6 +1911,101 @@ namespace Tests
 				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"film R12B, source warp: no estimate\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (L"film R12B, source warp: frames presented\n" + r.Tail()).c_str());
 			}
+		}
+
+		TEST_METHOD(DolbyVisionGpuUnpackMatchesTheCpuUnpackThroughTheRenderer)
+		{
+			// dv_tunnel_gpu_unpack (owner 2026-10-16): a synthetic 1080p23.976 DV
+			// tunnel (sender picture + CRC-valid DM) through the renderer. The
+			// presented codes (VP-0133 raw_r10_sha256 of a still picture, dither and
+			// deband off) are identical with the GPU unpack off, on, and on with the
+			// GPU unpack forced to fail (VP_TEST_DV_UNPACK_FAIL=1: the CPU fallback).
+			// Then a stream that loses its DM packets (CRC damaged) goes black in
+			// every mode and comes back. Hardware only.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 1920;
+			g_harnessHeight = 1080;
+			// The pictures: 0 = a tunnel picture with CRC-valid DM, 1 = the same
+			// with every copy of the first packet damaged (no trusted header).
+			Tests::DvSender::SenderPicture picture(false, 1920, 1080);
+			for (size_t i = 0; i < picture.intensity.size(); ++i)
+			{
+				// A smooth picture (intensity ramp, near-neutral chroma) so the
+				// render is meaningful; the sender embeds the DM's parity bits.
+				const size_t x = i % 1920, y = i / 1920;
+				picture.intensity[i] = static_cast<uint16_t>(256 + (x * 3000) / 1920 + (y & 63));
+				picture.chroma[i] = static_cast<uint16_t>(2048 + ((x / 8 + y / 8) & 255) - 128);
+				picture.Pack(i);
+			}
+			picture.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody()));
+			Tests::DvSender::SenderPicture damaged = picture;
+			damaged.CorruptAllCopies(0);
+			g_harnessDolbyVision = true;
+			g_harnessDvFrames = { picture.input, damaged.input };
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-dv-gpu-unpack";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			const std::string settings = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			const std::string gpuLine = "Dolby Vision RGB tunnel: picture unpacked on the GPU";
+			const std::string failLine = "Dolby Vision RGB tunnel: the GPU unpack failed";
+			FramePlan still;
+			still.rateNumerator = 24000;
+			still.captureAtSeconds = 2.5;
+			still.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			auto hashOf = [&](const std::string& extra, const wchar_t* name, RunResult& r) {
+				r = Run(VideoFrameEncoding::R210, "standard", 3.5, true, extra + settings, false, &still);
+				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
+				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				const std::string hash = text.substr(k + 19, 64);
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "\n").c_str());
+				return hash;
+			};
+			RunResult off, on, fallback;
+			const std::string cpuHash = hashOf("dv_tunnel_gpu_unpack: off\n", L"CPU unpack", off);
+			Assert::IsFalse(off.Logged(gpuLine), (L"off: no GPU unpack\n" + off.Tail()).c_str());
+			const std::string gpuHash = hashOf("dv_tunnel_gpu_unpack: on\n", L"GPU unpack", on);
+			Assert::IsTrue(on.Logged(gpuLine), (L"on: the GPU unpack ran\n" + on.Tail()).c_str());
+			Assert::IsFalse(on.Logged(failLine), (L"on: no fallback\n" + on.Tail()).c_str());
+			Assert::AreEqual(cpuHash, gpuHash, L"the GPU unpack presents the CPU unpack's codes");
+			SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", L"1");
+			const std::string fallbackHash = hashOf("dv_tunnel_gpu_unpack: on\n", L"GPU unpack forced to fail", fallback);
+			Assert::IsTrue(fallback.Logged(failLine), (L"fail: the fallback ran\n" + fallback.Tail()).c_str());
+			Assert::IsFalse(fallback.Logged(gpuLine), (L"fail: no GPU picture\n" + fallback.Tail()).c_str());
+			Assert::AreEqual(cpuHash, fallbackHash, L"the CPU fallback presents the same codes");
+			// DM loss in every mode: black while the header is untrusted, the
+			// picture back after it (never the packed pixels or a stale picture).
+			FramePlan loss;
+			loss.rateNumerator = 24000;
+			loss.step = [](int n) { return FrameStep{ true, n >= 36 && n < 60 ? 1 : 0, 0 }; };
+			for (int mode = 0; mode < 3; ++mode)
+			{
+				SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", mode == 2 ? L"1" : nullptr);
+				const wchar_t* name = mode == 0 ? L"loss, CPU" : mode == 1 ? L"loss, GPU" : L"loss, GPU failing";
+				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 4.0, true,
+					std::string(mode == 0 ? "dv_tunnel_gpu_unpack: off\n" : "dv_tunnel_gpu_unpack: on\n") + settings, false, &loss);
+				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Dolby Vision transition: presenting black"), (std::wstring(name) + L": black on DM loss\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Dolby Vision transition: trusted DV picture restored"), (std::wstring(name) + L": picture restored\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Alpha conversion failed"), (std::wstring(name) + L": no conversion failure\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("could not be unpacked on the GPU or the CPU"), (std::wstring(name) + L": no unrecoverable picture\n" + r.Tail()).c_str());
+			}
+			SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			g_harnessDolbyVision = false;
+			g_harnessDvFrames.clear();
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
 		}
 
 		TEST_METHOD(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)

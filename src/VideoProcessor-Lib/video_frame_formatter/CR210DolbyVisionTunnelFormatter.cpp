@@ -988,9 +988,14 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	}
 
 	// P216-style semiplanar output, with exact 12-bit I/C codes.
-	const auto* source = static_cast<const uint8_t*>(frame.GetData());
-	const bool leftAligned = m_alignment == ByteAlignment::LEFT;
-	auto* outputWords = reinterpret_cast<uint16_t*>(output);
+	ConvertPicture(static_cast<const uint8_t*>(frame.GetData()),
+		reinterpret_cast<uint16_t*>(output), m_alignment == ByteAlignment::LEFT);
+	return true;
+}
+
+void CR210DolbyVisionTunnelFormatter::ConvertPicture(
+	const uint8_t* source, uint16_t* outputWords, bool leftAligned)
+{
 	if (m_workerCount > 0 &&
 		static_cast<uint64_t>(m_width) * m_height >= 1920ULL * 1080ULL)
 	{
@@ -1012,16 +1017,14 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	}
 	else
 		ConvertRows(source, outputWords, 0, m_height, leftAligned);
-	return true;
 }
 
 bool CR210DolbyVisionTunnelFormatter::UnpackPicture(
-	const void* source, BYTE* output, bool highAligned) const
+	const void* source, BYTE* output, bool highAligned)
 {
 	if (!source || !output || m_outputSize <= 0)
 		return false;
-	ConvertRows(static_cast<const uint8_t*>(source), reinterpret_cast<uint16_t*>(output),
-		0, m_height, highAligned);
+	ConvertPicture(static_cast<const uint8_t*>(source), reinterpret_cast<uint16_t*>(output), highAligned);
 	return true;
 }
 

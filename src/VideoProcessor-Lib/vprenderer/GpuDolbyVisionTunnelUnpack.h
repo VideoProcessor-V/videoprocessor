@@ -43,6 +43,7 @@ public:
 
 private:
 	bool hostReadable = false;
+	bool forceFail = false;
 	pl_timer timer = nullptr;
 	pl_gpu gpu = nullptr;
 	pl_dispatch dispatch = nullptr;

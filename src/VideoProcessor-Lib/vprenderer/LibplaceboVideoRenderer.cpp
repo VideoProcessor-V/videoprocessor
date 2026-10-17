@@ -4702,6 +4702,9 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> dvGpuFailed{ false };
 	std::unique_ptr<GpuDolbyVisionTunnelUnpack> dvUnpack;
 	bool dvGpuLogged = false;
+	uint64_t dvDejudderFailures = 0;      // de-judder frames whose GPU unpack failed
+	ULONGLONG dvDejudderFailureLogTick = 0;
+	bool dvUnrecoverableLogged = false;
 	// Stage 12 step A: the re-base of the source to its class height.
 	SourceRebase::Module sourceRebase;
 	pl_dispatch rebaseDispatch = nullptr;
@@ -4792,6 +4795,10 @@ struct LibplaceboVideoRenderer::Impl
 	bool UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
 		bool sessionFallback)
 	{
+		// After a failure this session the payloads still in flight go straight
+		// to the CPU fallback (no GPU retry per frame, no burst of late frames).
+		if (dvGpuFailed.load(std::memory_order_acquire))
+			return false;
 		if (!dvUnpack)
 			dvUnpack = std::make_unique<GpuDolbyVisionTunnelUnpack>(log, d3d11->gpu);
 		SyncEarlyUpload();
@@ -4816,8 +4823,15 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (!sessionFallback)
 		{
-			DebugLog::Log("Dolby Vision RGB tunnel: a de-judder frame's GPU unpack failed (%s); that frame skipped",
-				dvUnpack->Error().c_str());
+			// At most one line per 5 s, with the count.
+			++dvDejudderFailures;
+			const ULONGLONG now = GetTickCount64();
+			if (dvDejudderFailureLogTick == 0 || now - dvDejudderFailureLogTick >= 5000)
+			{
+				DebugLog::Log("Dolby Vision RGB tunnel: a de-judder frame's GPU unpack failed (%s); that frame skipped (%llu so far)",
+					dvUnpack->Error().c_str(), static_cast<unsigned long long>(dvDejudderFailures));
+				dvDejudderFailureLogTick = now;
+			}
 			return false;
 		}
 		if (!dvGpuFailed.exchange(true))
@@ -4885,6 +4899,7 @@ struct LibplaceboVideoRenderer::Impl
 		bool raw = false;   // the raw (GPU unpack) route, with its encoding
 		bool rgb = false, bt2020 = false;   // an RGB raw route: luma only, its matrix
 		VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
+		bool dvTunnelRaw = false;   // the Dolby Vision tunnel's GPU unpack route
 		VideoFrameFormatterOutputContract contract{};
 	} dejudderLayout;
 	std::unique_ptr<Dejudder::MotionWarp> dejudder;
@@ -6083,6 +6098,8 @@ struct LibplaceboVideoRenderer::Impl
 				captureUnpack.reset();   // its textures and dispatch, before the device
 				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
 				dvUnpack.reset();        // and the Dolby Vision tunnel unpack
+				dvGpuFailed.store(false, std::memory_order_release);   // a new device may unpack again
+				dvGpuLogged = false;
 				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
 				if (earlyUpload->IsOpen())
 				{
@@ -12928,6 +12945,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderLayout.pixelBytes = next->Bytes();
 		dejudderLayout.raw = next->Raw();
 		dejudderLayout.rawEncoding = next->Raw() ? next->rawEncoding : VideoFrameEncoding::UNKNOWN;
+		dejudderLayout.dvTunnelRaw = next->dvTunnelRaw;
 		dejudderLayout.rgb = dejudderRgbLuma != nullptr;
 		dejudderLayout.bt2020 = dejudderRgbBt2020;
 		dejudderLayout.lossless422 = lossless422;
@@ -13021,7 +13039,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (payload.Raw())
 		{
 			// capture_path: gpu; the route and format must be B's (A's layout).
-			if (!l.raw || payload.rawEncoding != l.rawEncoding)
+			if (!l.raw || payload.rawEncoding != l.rawEncoding || payload.dvTunnelRaw != l.dvTunnelRaw)
 				return false;
 			return UnpackRawPayload(payload, l.width, l.height, dst, false);
 		}
@@ -13204,6 +13222,7 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderAheadPayload->Bytes() == dejudderLayout.pixelBytes &&
 			dejudderAheadPayload->Raw() == dejudderLayout.raw &&
 			(!dejudderLayout.raw || dejudderAheadPayload->rawEncoding == dejudderLayout.rawEncoding) &&
+			dejudderAheadPayload->dvTunnelRaw == dejudderLayout.dvTunnelRaw &&
 			dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
 			dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
 			dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;
@@ -15092,6 +15111,19 @@ struct LibplaceboVideoRenderer::Impl
 					image.planes[plane].flipped = state.invertedVertical;
 				}
 			frameGpuTiming.EndStage();
+			if (!sourceUploaded && convertedPayload->dvTunnelRaw && !dvCpuFallback)
+			{
+				// A tunnel picture neither the GPU nor the CPU could unpack (e.g. a
+				// mode change with raw payloads queued): black, never the last
+				// picture or garbage.
+				if (!dvUnrecoverableLogged)
+				{
+					DebugLog::Log("Dolby Vision RGB tunnel: a picture could not be unpacked on the GPU or the CPU (geometry changed); presenting black");
+					dvUnrecoverableLogged = true;
+				}
+				temporalRenderer.Clear();
+				return PresentBlackFrame(false);
+			}
 			if (!sourceUploaded)
 				return false;
 			dejudderRgbLuma = nullptr;
