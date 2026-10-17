@@ -344,3 +344,257 @@ namespace MotionAheadRgbLumaTest
 		}
 	};
 }
+
+#include <OpticalFlowTrust.h>
+
+// 2026-10-17 (docs/VP-nvof-ahead.md, the engine's extras): the cost and the engine's own
+// forward/backward consistency as trust weights, and the engine's whole-frame motion with a
+// fallback to the global search when it is not clear. CPU maths only (OpticalFlowTrust.h).
+namespace OpticalFlowTrustTest
+{
+	namespace
+	{
+		// A field of gw x gh cells with cost `base` (+-1 noise), and `high` in a cell rectangle.
+		std::vector<uint8_t> Costs(int gw, int gh, int base, int high, int x0, int y0, int x1, int y1)
+		{
+			std::vector<uint8_t> c(static_cast<size_t>(gw) * gh);
+			unsigned seed = 3;
+			for (int y = 0; y < gh; ++y)
+				for (int x = 0; x < gw; ++x)
+				{
+					seed = seed * 1103515245u + 12345u;
+					const bool inside = x >= x0 && x < x1 && y >= y0 && y < y1;
+					c[static_cast<size_t>(y) * gw + x] = static_cast<uint8_t>(inside ? high : base + static_cast<int>((seed >> 16) % 3) - 1);
+				}
+			return c;
+		}
+	}
+
+	TEST_CLASS(OpticalFlowTrustTests)
+	{
+	public:
+		TEST_METHOD(CostWeightsAreNormalisedPerBlockAndGrid)
+		{
+			// The engine's 4-px grid under the de-judder's 8-px blocks: 2 x 2 cells per block.
+			const int gw = 96, gh = 48, bx = 48, by = 24;
+			const std::vector<uint8_t> costs = Costs(gw, gh, 10, 250, 40, 16, 56, 32);
+			std::vector<float> w;
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(costs, gw, gh, 4, 8, bx, by, w));
+			Assert::AreEqual(static_cast<size_t>(bx * by), w.size());
+			Assert::AreEqual(0.0f, w[static_cast<size_t>(10) * bx + 24], 1e-6f, L"an unsure block: no trust from the engine");
+			Assert::AreEqual(1.0f, w[static_cast<size_t>(2) * bx + 2], 1e-6f, L"a usual block: unchanged");
+			// The same field with every cost raised (another driver, another preset): the same weights.
+			std::vector<uint8_t> raised(costs);
+			for (uint8_t& c : raised) c = static_cast<uint8_t>((std::min)(255, c + 4));
+			std::vector<float> w2;
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(raised, gw, gh, 4, 8, bx, by, w2));
+			for (size_t i = 0; i < w.size(); ++i) Assert::AreEqual(w[i], w2[i], 1e-6f, L"relative to the field");
+			// Larger blocks (16 px: 4 x 4 cells).
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(costs, gw, gh, 4, 16, bx / 2, by / 2, w2));
+			Assert::AreEqual(0.0f, w2[static_cast<size_t>(5) * (bx / 2) + 12], 1e-6f);
+			Assert::AreEqual(1.0f, w2[0], 1e-6f);
+			Assert::AreEqual(2, OpticalFlowTrust::CellsPerBlock(4, 8));
+			Assert::AreEqual(1, OpticalFlowTrust::CellsPerBlock(8, 8), L"a coarser grid: one cell per block");
+			Assert::AreEqual(1, OpticalFlowTrust::CellsPerBlock(8, 4), L"a block smaller than a cell: its cell");
+			// A block half over a moderately unsure region (the mean of its cells): partly trusted.
+			const std::vector<uint8_t> edge = Costs(gw, gh, 10, 40, 41, 16, 56, 32);   // block 20 = cells 40 (usual), 41 (unsure)
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(edge, gw, gh, 4, 8, bx, by, w2));
+			const float half = w2[static_cast<size_t>(10) * bx + 20];
+			Assert::IsTrue(half > 0.0f && half < 1.0f, L"half its cells unsure: a partial weight");
+			// An edge block with cells missing (odd grid): the cells that exist.
+			const std::vector<uint8_t> odd = Costs(95, 47, 10, 250, 94, 0, 95, 47);
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(odd, 95, 47, 4, 8, bx, by, w2));
+			Assert::AreEqual(0.0f, w2[static_cast<size_t>(3) * bx + 47], 1e-6f, L"the last column's one cell");
+		}
+
+		TEST_METHOD(CostStatisticsAndAUniformFieldChangeNothing)
+		{
+			float median = 0.0f, spread = 0.0f;
+			const std::vector<uint8_t> c = { 1, 2, 3, 4, 100 };
+			Assert::IsTrue(OpticalFlowTrust::CostStatistics(c, c.size(), median, spread));
+			Assert::AreEqual(3.0f, median);
+			Assert::AreEqual(4.0f, spread, 1e-6f, L"MAD 1 x 1.4826, below the floor of 4 codes");
+			// A uniform field (a still picture, any level): every block fully trusted.
+			const std::vector<uint8_t> flat(96 * 48, 200);
+			std::vector<float> w;
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(flat, 96, 48, 4, 8, 48, 24, w));
+			for (float v : w) Assert::AreEqual(1.0f, v);
+			Assert::AreEqual(1.0f, OpticalFlowTrust::FallOff(2.0f, 4.0f, 1.0f));
+			Assert::AreEqual(0.5f, OpticalFlowTrust::FallOff(2.0f, 4.0f, 3.0f), 1e-6f);
+			Assert::AreEqual(0.0f, OpticalFlowTrust::FallOff(2.0f, 4.0f, 9.0f));
+		}
+
+		TEST_METHOD(MissingCostsGiveNoWeights)
+		{
+			// An older driver or a field without costs: no weights at all (the de-judder runs as before).
+			std::vector<float> w(3, 0.5f);
+			Assert::IsFalse(OpticalFlowTrust::CostWeights(std::vector<uint8_t>(), 96, 48, 4, 8, 48, 24, w));
+			Assert::IsTrue(w.empty());
+			Assert::IsFalse(OpticalFlowTrust::CostWeights(std::vector<uint8_t>(10, 1), 96, 48, 4, 8, 48, 24, w), L"too few cells");
+			Assert::IsFalse(OpticalFlowTrust::Combine(nullptr, nullptr, 48 * 24, w), L"both off: nothing applied");
+			Assert::IsTrue(w.empty());
+			const std::vector<float> wrongSize(5, 0.0f);
+			Assert::IsFalse(OpticalFlowTrust::Combine(&wrongSize, nullptr, 48 * 24, w), L"another block layout: nothing applied");
+			MotionAhead::Flow flow;
+			flow.halfW = 384; flow.halfH = 192; flow.gridW = 96; flow.gridH = 48;
+			flow.forward.assign(96 * 48 * 2, 0); flow.backward.assign(96 * 48 * 2, 0);
+			MotionAhead::FlowExtras(flow);
+			Assert::AreEqual(48, flow.blocksX);
+			Assert::AreEqual(24, flow.blocksY);
+			Assert::IsTrue(flow.costWeight.empty(), L"no costs: no cost weights");
+			Assert::AreEqual(static_cast<size_t>(96 * 48), flow.fbError.size(), L"the consistency needs only the vectors");
+		}
+
+		TEST_METHOD(CombineMultipliesTheEnabledWeights)
+		{
+			const std::vector<float> cost = { 1.0f, 0.5f, 0.0f, 1.0f }, fb = { 0.5f, 0.5f, 1.0f, 1.0f };
+			std::vector<float> w;
+			Assert::IsTrue(OpticalFlowTrust::Combine(&cost, &fb, 4, w));
+			Assert::AreEqual(0.5f, w[0]);
+			Assert::AreEqual(0.25f, w[1]);
+			Assert::AreEqual(0.0f, w[2]);
+			Assert::AreEqual(1.0f, w[3]);
+			Assert::IsTrue(OpticalFlowTrust::Combine(&cost, nullptr, 4, w));
+			Assert::AreEqual(0.5f, w[1], L"the consistency off: the cost alone");
+			Assert::IsTrue(OpticalFlowTrust::Combine(nullptr, &fb, 4, w));
+			Assert::AreEqual(1.0f, w[2], L"the cost off: the consistency alone");
+		}
+
+		TEST_METHOD(EngineForwardBackwardConsistency)
+		{
+			// A pan of (+6, -2) half-size px: the backward field cancels it everywhere but in an
+			// occluded patch (cells 22-30 x 8-15 of B), where the backward vectors point elsewhere.
+			const int gw = 64, gh = 32, bx = 32, by = 16;
+			std::vector<int16_t> fwd(static_cast<size_t>(gw) * gh * 2), bwd(fwd.size());
+			for (int y = 0; y < gh; ++y)
+				for (int x = 0; x < gw; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * gw + x;
+					fwd[i * 2] = 6 * 32;
+					fwd[i * 2 + 1] = -2 * 32;
+					const bool occluded = x >= 22 && x < 31 && y >= 8 && y < 16;
+					bwd[i * 2] = static_cast<int16_t>(occluded ? 10 * 32 : -6 * 32);
+					bwd[i * 2 + 1] = static_cast<int16_t>(occluded ? 0 : 2 * 32);
+				}
+			std::vector<float> err, w;
+			Assert::IsTrue(OpticalFlowTrust::FbError(fwd, bwd, gw, gh, 4, err));
+			Assert::AreEqual(0.0f, err[static_cast<size_t>(2) * gw + 2], 1e-6f, L"consistent");
+			// Cell (20, 10): centre (82, 42) lands at (88, 40) = cell (22, 10), occluded.
+			const float e = err[static_cast<size_t>(10) * gw + 20];
+			Assert::AreEqual(std::sqrt(16.0f * 16.0f + 2.0f * 2.0f), e, 1e-4f, L"|f + b| in half-size px");
+			Assert::IsTrue(OpticalFlowTrust::FbWeights(err, gw, gh, 4, 8, bx, by, 1.0f, w));
+			Assert::AreEqual(1.0f, w[0], L"a consistent block");
+			// Block (10, 5) = cells 20-21 x 10-11: they land in 22-23 x 10, occluded.
+			Assert::AreEqual(0.0f, w[static_cast<size_t>(5) * bx + 10], L"an occluded block");
+			// Block (9, 5) = cells 18-19: they land in 20-21 (consistent).
+			Assert::AreEqual(1.0f, w[static_cast<size_t>(5) * bx + 9]);
+			// One of four cells inconsistent: a partial weight.
+			std::vector<float> one(err.size(), 0.0f);
+			one[static_cast<size_t>(2) * gw + 3] = 10.0f;
+			Assert::IsTrue(OpticalFlowTrust::FbWeights(one, gw, gh, 4, 8, bx, by, 1.0f, w));
+			Assert::AreEqual(0.75f, w[static_cast<size_t>(1) * bx + 1], 1e-6f);
+			// Leaving the picture: the landing cell is clamped (as the matcher's test does).
+			fwd[0] = -200 * 32;
+			bwd[0] = 200 * 32;
+			Assert::IsTrue(OpticalFlowTrust::FbError(fwd, bwd, gw, gh, 4, err));
+			Assert::AreEqual(0.0f, err[0], 1e-4f);
+			Assert::IsFalse(OpticalFlowTrust::FbError(fwd, std::vector<int16_t>(), gw, gh, 4, err), L"no backward field: none");
+			Assert::IsFalse(OpticalFlowTrust::FbWeights(one, gw, gh, 4, 8, bx, by, 0.0f, w), L"no tolerance: none");
+		}
+
+		TEST_METHOD(GlobalFitWithOutliersAndTheFallback)
+		{
+			// The engine's whole-frame motion (D1 format) on synthetic fields: the camera's share
+			// of the cells, the rest outliers in any direction.
+			const int gw = 120, gh = 68;
+			const size_t cells = static_cast<size_t>(gw) * gh;
+			std::vector<int16_t> v(cells * 2);
+			std::vector<uint8_t> cost(cells, 10);
+			auto field = [&](unsigned share, int cx, int cy, unsigned seed) {
+				for (size_t i = 0; i < cells; ++i)
+				{
+					seed = seed * 1103515245u + 12345u;
+					const bool camera = (seed >> 16) % 100 < share;
+					seed = seed * 1103515245u + 12345u;
+					const int ox = static_cast<int>((seed >> 16) % 300) - 150;
+					seed = seed * 1103515245u + 12345u;
+					const int oy = static_cast<int>((seed >> 16) % 300) - 150;
+					v[i * 2] = static_cast<int16_t>(camera ? cx : ox * 32);
+					v[i * 2 + 1] = static_cast<int16_t>(camera ? cy : oy * 32);
+				}
+			};
+			float g[4], second[4];
+			// 60 % outliers: the camera (14, -10) half px = (3.5, -2.5) 1/8-size texels, exactly.
+			field(40, 14 * 32, -10 * 32, 11);
+			MotionAhead::FlowGlobal(v, cost, gw, gh, g, second);
+			Assert::AreEqual(3.5f, g[0], 1e-6f);
+			Assert::AreEqual(-2.5f, g[1], 1e-6f);
+			Assert::IsTrue(OpticalFlowTrust::GlobalUsable(g), L"40 % agree: used");
+			// 5 % agree: not clear - the global search runs instead (the fallback).
+			field(5, 14 * 32, -10 * 32, 12);
+			MotionAhead::FlowGlobal(v, cost, gw, gh, g, second);
+			Assert::IsFalse(OpticalFlowTrust::GlobalUsable(g), L"too few agree: the search");
+			// Sub-cell motion: refined by the mean of the agreeing cells, then on D1's half-texel steps.
+			field(70, 13 * 32 + 16, 0, 13);   // 13.5 half px = 3.375 texels -> 3.5
+			MotionAhead::FlowGlobal(v, cost, gw, gh, g, second);
+			Assert::AreEqual(3.5f, g[0], 1e-6f);
+			Assert::AreEqual(0.0f, g[1], 1e-6f);
+			// Unsure cells (high cost) do not vote: 40 % share one wrong vector but are unsure; the
+			// camera's 30 % win over them (the other 30 % are sure noise).
+			unsigned noise = 21;
+			for (size_t i = 0; i < cells; ++i)
+			{
+				const size_t kind = i % 10;
+				noise = noise * 1103515245u + 12345u;
+				const int nx = static_cast<int>((noise >> 16) % 300) - 150;
+				noise = noise * 1103515245u + 12345u;
+				const int ny = static_cast<int>((noise >> 16) % 300) - 150;
+				v[i * 2] = static_cast<int16_t>(kind < 3 ? 8 * 32 : kind < 7 ? -40 * 32 : nx * 32);
+				v[i * 2 + 1] = static_cast<int16_t>(kind < 3 ? 4 * 32 : kind < 7 ? 20 * 32 : ny * 32);
+				cost[i] = static_cast<uint8_t>(kind >= 3 && kind < 7 ? 200 : 10);
+			}
+			MotionAhead::FlowGlobal(v, cost, gw, gh, g, second);
+			Assert::AreEqual(2.0f, g[0], 1e-6f, L"the sure cells' camera, not the unsure majority's vector");
+			Assert::AreEqual(1.0f, g[1], 1e-6f);
+			// No field (no engine): never used.
+			MotionAhead::FlowGlobal(std::vector<int16_t>(), std::vector<uint8_t>(), 0, 0, g, second);
+			Assert::IsFalse(OpticalFlowTrust::GlobalUsable(g), L"no field: ambiguous, the search");
+			const float invalid[4] = { 0.0f, 0.0f, 0.5f, 0.0f };
+			Assert::IsFalse(OpticalFlowTrust::GlobalUsable(invalid), L"not valid: the search");
+		}
+
+		TEST_METHOD(VectorStoreCarriesTheExtrasAndForgetsThemAtADiscontinuity)
+		{
+			auto make = [](int unsureCost) {
+				auto flow = std::make_shared<MotionAhead::Flow>();
+				flow->halfW = 384; flow->halfH = 192; flow->gridW = 96; flow->gridH = 48;
+				flow->forward.assign(96 * 48 * 2, 0);
+				flow->backward.assign(96 * 48 * 2, 0);
+				for (size_t i = 0; i < 96 * 48; ++i) { flow->forward[i * 2] = 4 * 32; flow->backward[i * 2] = -4 * 32; }
+				flow->forwardCost = Costs(96, 48, 10, unsureCost, 0, 0, 8, 8);
+				flow->backwardCost = flow->forwardCost;
+				MotionAhead::FlowExtras(*flow);
+				return MotionAhead::FlowPtr(flow);
+			};
+			VectorStore<MotionAhead::FlowPtr> store;
+			store.SetGeneration(5);
+			const MotionAhead::FlowPtr flow = make(250);
+			Assert::AreEqual(static_cast<size_t>(48 * 24), flow->costWeight.size());
+			Assert::AreEqual(0.0f, flow->costWeight[0], L"the unsure corner");
+			Assert::IsTrue(store.Put(100, 101, 5, flow));
+			VectorStore<MotionAhead::FlowPtr>::Entry e;
+			Assert::IsTrue(store.Get(100, 101, e));
+			Assert::IsTrue(e.payload == flow, L"the same field, its weights with it");
+			Assert::AreEqual(0.0f, e.payload->costWeight[0]);
+			Assert::AreEqual(1.0f, e.payload->costWeight[30]);
+			Assert::AreEqual(0.0f, e.payload->fbError[100], 1e-6f, L"a consistent pan");
+			// A discontinuity: the pair and its weights are gone; one computed before it is refused.
+			store.SetGeneration(6);
+			Assert::IsFalse(store.Get(100, 101, e), L"cleared: the matcher runs (no stale weights)");
+			Assert::IsFalse(store.Put(101, 102, 5, make(250)), L"computed before the discontinuity: refused");
+			Assert::IsTrue(store.Put(101, 102, 6, make(10)));
+			Assert::IsTrue(store.Get(101, 102, e));
+			for (float w : e.payload->costWeight) Assert::AreEqual(1.0f, w, L"the new pair's own weights");
+		}
+	};
+}

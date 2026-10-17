@@ -1073,6 +1073,12 @@ namespace
 		// taste; on known pans the engine reads the speed exactly where the search overshot
 		// medium pans by a step, so the taste's roll-off and camera follow the true speed.
 		bool opticalFlowGlobal = true;
+		// 2026-10-17 (docs/VP-nvof-ahead.md, the engine's extras): the global search when the
+		// engine's whole-frame motion is not clear; the engine's cost and its own forward/
+		// backward consistency as trust inputs (Dejudder::Settings).
+		bool opticalFlowGlobalFallback = true;
+		bool opticalFlowCostTrust = true;
+		bool opticalFlowFbCheck = true;
 		// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md; owner
 		// defaults 2026-10-16, open for confirmation): off | auto (a non-integer
 		// source/display ratio only) | always (smooth-motion parity for video-class
@@ -1287,6 +1293,7 @@ namespace
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
+			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
@@ -2540,6 +2547,18 @@ namespace
 				DebugLog::Log("profile '%s': invalid optical_flow_global '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.opticalFlowGlobal ? "on" : "off");
 		}
+		// The engine's extras (2026-10-17): on | off each.
+		for (const auto& extra : { std::make_pair("optical_flow_global_fallback", &settings.opticalFlowGlobalFallback),
+				std::make_pair("optical_flow_cost_trust", &settings.opticalFlowCostTrust),
+				std::make_pair("optical_flow_fb_check", &settings.opticalFlowFbCheck) })
+			if (tryChoice(extra.first, raw))
+			{
+				if (raw == "on" || raw == "off")
+					*extra.second = raw == "on";
+				else
+					DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
+						rule.section.c_str(), extra.first, raw.c_str(), *extra.second ? "on" : "off");
+			}
 		if (config.TryGetString(rule.section, "motion_ahead_frames", raw))
 		{
 			double parsed = 0.0;
@@ -2912,6 +2931,9 @@ namespace
 		// Without the engine (not NVIDIA, a failure) the searches run as before.
 		settings.opticalFlow = profile.opticalFlow;
 		settings.opticalFlowGlobal = profile.opticalFlowGlobal;
+		settings.opticalFlowGlobalFallback = profile.opticalFlowGlobalFallback;
+		settings.opticalFlowCostTrust = profile.opticalFlowCostTrust;
+		settings.opticalFlowFbCheck = profile.opticalFlowFbCheck;
 		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
 		settings.estQpel = profile.dejudderEstQpel;
 		settings.estGate = profile.dejudderEstGate;
@@ -9630,6 +9652,9 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
 		changed(current.opticalFlowGlobal != next.opticalFlowGlobal, "optical_flow_global");
+		changed(current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback, "optical_flow_global_fallback");
+		changed(current.opticalFlowCostTrust != next.opticalFlowCostTrust, "optical_flow_cost_trust");
+		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
 		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
@@ -13440,7 +13465,9 @@ struct LibplaceboVideoRenderer::Impl
 				current.referenceHeight != next.referenceHeight || current.sourceHz != next.sourceHz ||
 				current.referenceRateHz != next.referenceRateHz ||
 				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
-				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal)
+				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal ||
+				current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback ||
+				current.opticalFlowCostTrust != next.opticalFlowCostTrust || current.opticalFlowFbCheck != next.opticalFlowFbCheck)
 				dejudder->SetSettings(next);
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
@@ -13521,6 +13548,8 @@ struct LibplaceboVideoRenderer::Impl
 			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
 				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses,
 				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
+			DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
+				ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());
 		}
 		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
@@ -26488,6 +26517,9 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
 		<< "optical_flow_global=" << (s.opticalFlowGlobal ? "on" : "off") << "\n"
+		<< "optical_flow_global_fallback=" << (s.opticalFlowGlobalFallback ? "on" : "off") << "\n"
+		<< "optical_flow_cost_trust=" << (s.opticalFlowCostTrust ? "on" : "off") << "\n"
+		<< "optical_flow_fb_check=" << (s.opticalFlowFbCheck ? "on" : "off") << "\n"
 		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"
 		<< "interpolation_fallback=" << InterpolationPolicy::Name(s.interpolationFallback) << "\n"
 		<< "interpolation_fill_gaps=" << (s.interpolationFillGaps ? "on" : "off") << "\n"

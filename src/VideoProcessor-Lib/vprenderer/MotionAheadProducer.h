@@ -17,6 +17,7 @@
 // for the session (logged) and everything falls back.
 
 #include <AnalysisLumaSource.h>
+#include <OpticalFlowTrust.h>
 #include <VectorStore.h>
 #include <vprenderer/NvOpticalFlow.h>
 
@@ -53,6 +54,15 @@ namespace MotionAhead
 		// motion layer (x, y, -, w = 1 when there is one), forward then backward. The
 		// de-judder takes them instead of its own global search when the pair came ahead.
 		float global[2][4] = {}, second[2][4] = {};
+		// The engine's extras as trust inputs (OpticalFlowTrust.h), worked out on the
+		// worker: the forward cost per de-judder block (blocks of kBlockPx half-size px,
+		// blocksX x blocksY) as a weight in [0, 1], and the engine's own forward/backward
+		// consistency error per cell (half-size px). Empty when the costs are missing:
+		// then the de-judder runs exactly as without them.
+		static constexpr int kBlockPx = 8;
+		int blocksX = 0, blocksY = 0;
+		std::vector<float> costWeight;
+		std::vector<float> fbError;
 	};
 	using FlowPtr = std::shared_ptr<const Flow>;
 
@@ -140,6 +150,21 @@ namespace MotionAhead
 		}
 	}
 
+	// The trust extras of one pair (Flow::costWeight, Flow::fbError) from its fields: the
+	// de-judder's blocks over the flow's half size, the forward cost normalised per block,
+	// the engine's own forward/backward error per cell. Either stays empty when its inputs
+	// are missing (no costs: an older driver, a field without them).
+	inline void FlowExtras(Flow& flow)
+	{
+		flow.blocksX = (flow.halfW + Flow::kBlockPx - 1) / Flow::kBlockPx;
+		flow.blocksY = (flow.halfH + Flow::kBlockPx - 1) / Flow::kBlockPx;
+		if (!OpticalFlowTrust::CostWeights(flow.forwardCost, flow.gridW, flow.gridH, NvOpticalFlow::Engine::Grid,
+				Flow::kBlockPx, flow.blocksX, flow.blocksY, flow.costWeight))
+			flow.costWeight.clear();
+		if (!OpticalFlowTrust::FbError(flow.forward, flow.backward, flow.gridW, flow.gridH, NvOpticalFlow::Engine::Grid, flow.fbError))
+			flow.fbError.clear();
+	}
+
 	// The half-size 8-bit luma of a frame ((w + 1) / 2 x (h + 1) / 2, 2 x 2
 	// averaged; 10-bit codes / 4): P010 / P210 planes read directly, other
 	// formats through the source's sampler. False when the source is not valid.
@@ -179,7 +204,8 @@ namespace MotionAhead
 		void Prune(uint64_t oldestNeeded) { store.Prune(oldestNeeded); }
 		VectorStore<FlowPtr>::Stats StoreStats() const { return store.GetStats(); }
 
-		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0; };
+		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
+		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; };
 		Stats GetStats() const;
 
 	private:

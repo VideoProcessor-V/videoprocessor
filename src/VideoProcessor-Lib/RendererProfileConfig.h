@@ -704,6 +704,9 @@ namespace RendererProfileConfig
 			// The optical-flow engine: the default; off = the matcher only.
 			if (key == "optical_flow") return IsChoice(value, { "on", "off" });
 			if (key == "optical_flow_global") return IsChoice(value, { "on", "off" });
+			// The engine's extras (2026-10-17): D1's fallback to the search, cost and forward/backward trust.
+			if (key == "optical_flow_global_fallback" || key == "optical_flow_cost_trust" || key == "optical_flow_fb_check")
+				return IsChoice(value, { "on", "off" });
 			// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md): off by default.
 			if (key == "interpolation") return IsChoice(value, { "off", "auto", "always" });
 			if (key == "interpolation_fallback") return IsChoice(value, { "hold", "blend" });

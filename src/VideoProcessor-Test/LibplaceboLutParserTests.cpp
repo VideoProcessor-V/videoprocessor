@@ -13,6 +13,7 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
+#include <vprenderer/MotionAheadProducer.h>
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
@@ -5589,6 +5590,172 @@ namespace VideoProcessorTest
 				if (errEngine > errSearch + 1.0f || (g[1][2] >= 0.9f && g[0][2] < 0.9f)) ++worse;
 			}
 			Assert::AreEqual(0, worse, L"the engine's whole-frame motion is as close to the true pan and as usable as the search's");
+		}
+
+		// 2026-10-17 (the engine's extras): a pair "computed ahead" (a synthetic engine field with
+		// costs, no engine needed) through the de-judder. Unsure blocks (a high cost) lose their
+		// trust; with every block as sure as usual, or the switches off, or no pair ahead, the
+		// field is exactly the one without the extras. The engine's whole-frame motion falls
+		// back to the global search when it is not clear.
+		static std::shared_ptr<MotionAhead::Flow> SyntheticAheadFlow(int width, int height, int dxHalf, uint8_t unsureCost,
+			int cellX0, int cellY0, int cellX1, int cellY1)
+		{
+			auto flow = std::make_shared<MotionAhead::Flow>();
+			flow->halfW = (width + 1) / 2;
+			flow->halfH = (height + 1) / 2;
+			flow->gridW = (flow->halfW + 3) / 4;
+			flow->gridH = (flow->halfH + 3) / 4;
+			const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
+			flow->forward.assign(cells * 2, 0);
+			flow->backward.assign(cells * 2, 0);
+			flow->forwardCost.assign(cells, 10);
+			for (size_t i = 0; i < cells; ++i)
+			{
+				flow->forward[i * 2] = static_cast<int16_t>(dxHalf * 32);
+				flow->backward[i * 2] = static_cast<int16_t>(-dxHalf * 32);
+				const int x = static_cast<int>(i % flow->gridW), y = static_cast<int>(i / flow->gridW);
+				if (x >= cellX0 && x < cellX1 && y >= cellY0 && y < cellY1) flow->forwardCost[i] = unsureCost;
+			}
+			flow->backwardCost = flow->forwardCost;
+			MotionAhead::FlowGlobal(flow->forward, flow->forwardCost, flow->gridW, flow->gridH, flow->global[0], flow->second[0]);
+			MotionAhead::FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH, flow->global[1], flow->second[1]);
+			MotionAhead::FlowExtras(*flow);
+			return flow;
+		}
+
+		TEST_METHOD(EngineCostLowersTrustAndSwitchOffIsIdentical)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 768, height = 384;
+			static constexpr int dx = 8;   // source px; 4 half-size px
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes pa, pb;
+			UploadDejudderFrame(gpu, a, pa);
+			UploadDejudderFrame(gpu, b, pb);
+			// Unsure cells 40-55 x 16-31 = blocks 20-27 x 8-15.
+			enum Mode { Off, OnSure, OnUnsure, OnNoPair };
+			auto run = [&](Mode mode, bool& used, bool& weighted) {
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.opticalFlow = true;
+				settings.opticalFlowCandidate = true;
+				settings.opticalFlowSeed = true;
+				settings.estCandidates = true;
+				settings.globalPrior = true;
+				settings.opticalFlowCostTrust = mode != Off;
+				settings.opticalFlowFbCheck = mode != Off;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				if (mode != OnNoPair)
+					warp.SetExternalFlow(SyntheticAheadFlow(width, height, dx / 2, mode == OnUnsure ? 250 : 10, 40, 16, 56, 32));
+				Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+				used = warp.ExternalFlowUsed();
+				weighted = warp.EngineWeightsUsed();
+				return DownloadField(gpu, warp);
+			};
+			bool used[4] = {}, weighted[4] = {};
+			const DejudderField off = run(Off, used[0], weighted[0]);
+			if (!used[0]) { Logger::WriteMessage("the pair computed ahead was not taken here (no D3D11 engine textures): not run\n"); return; }
+			const DejudderField sure = run(OnSure, used[1], weighted[1]);
+			const DejudderField unsure = run(OnUnsure, used[2], weighted[2]);
+			const DejudderField noPair = run(OnNoPair, used[3], weighted[3]);
+			Assert::IsFalse(weighted[0], L"switched off: no weights");
+			Assert::IsTrue(weighted[1] && weighted[2], L"switched on with a pair ahead: weights applied");
+			Assert::IsFalse(weighted[3], L"no pair ahead: no weights");
+			// Every block as sure as usual: exactly the field without the extras.
+			Assert::IsTrue(off.texels.size() == sure.texels.size());
+			size_t differ = 0;
+			for (size_t i = 0; i < off.texels.size(); ++i) differ += off.texels[i] != sure.texels[i] ? 1 : 0;
+			Assert::AreEqual(static_cast<size_t>(0), differ, L"weights of 1 change nothing");
+			// Unsure blocks (the region's interior; its rim may be re-trusted by the smoothing's
+			// neighbour rule) are not trusted; the rest of the picture is unchanged.
+			int inside = 0, insideTrustedOff = 0, insideTrusted = 0, outsideChanged = 0;
+			for (int by = 0; by < off.blocksY; ++by)
+				for (int bx = 0; bx < off.blocksX; ++bx)
+				{
+					const bool interior = bx >= 21 && bx < 27 && by >= 9 && by < 15;
+					const bool nearRegion = bx >= 18 && bx < 30 && by >= 6 && by < 18;
+					if (interior)
+					{
+						++inside;
+						insideTrustedOff += off.trusted(bx, by) ? 1 : 0;
+						insideTrusted += unsure.trusted(bx, by) ? 1 : 0;
+					}
+					else if (!nearRegion && off.trusted(bx, by) != unsure.trusted(bx, by))
+						++outsideChanged;
+				}
+			char line[200];
+			snprintf(line, sizeof(line), "unsure region: trusted %d / %d without the cost, %d / %d with it; changed elsewhere %d\n",
+				insideTrustedOff, inside, insideTrusted, inside, outsideChanged);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(insideTrustedOff >= inside * 9 / 10, L"the true pan is trusted without the cost");
+			Assert::AreEqual(0, insideTrusted, L"the engine's unsure blocks are not trusted");
+			Assert::AreEqual(0, outsideChanged, L"elsewhere unchanged");
+			// No pair ahead (on WARP the engine is missing: the searches): the same as switched off
+			// with the searches - compared against a matcher-only run.
+			Dejudder::Settings matcher = DejudderTestSettings();
+			matcher.opticalFlow = true;
+			matcher.opticalFlowCandidate = true;
+			matcher.opticalFlowSeed = true;
+			matcher.estCandidates = true;
+			matcher.globalPrior = true;
+			matcher.opticalFlowCostTrust = false;
+			matcher.opticalFlowFbCheck = false;
+			Dejudder::MotionWarp reference(fixture.Log(), gpu, matcher);
+			Assert::IsTrue(reference.Estimate(pa.planes, pb.planes));
+			const DejudderField referenceField = DownloadField(gpu, reference);
+			if (!reference.OpticalFlowUsed())
+			{
+				differ = 0;
+				for (size_t i = 0; i < referenceField.texels.size(); ++i) differ += referenceField.texels[i] != noPair.texels[i] ? 1 : 0;
+				Assert::AreEqual(static_cast<size_t>(0), differ, L"no pair ahead: exactly as without the switches");
+			}
+			else
+				Logger::WriteMessage("the engine ran at render time here (no weights either way)\n");
+		}
+
+		TEST_METHOD(EngineGlobalFallsBackToTheSearchWhenUnclear)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 768, height = 384;
+			static constexpr int dx = 8;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); }, [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes pa, pb;
+			UploadDejudderFrame(gpu, a, pa);
+			UploadDejudderFrame(gpu, b, pb);
+			for (int clear = 0; clear < 2; ++clear)
+				for (int fallback = 0; fallback < 2; ++fallback)
+				{
+					Dejudder::Settings settings = DejudderTestSettings();
+					settings.opticalFlow = true;
+					settings.opticalFlowCandidate = true;
+					settings.opticalFlowSeed = true;
+					settings.estCandidates = true;
+					settings.globalPrior = true;
+					settings.opticalFlowGlobal = true;
+					settings.opticalFlowGlobalFallback = fallback == 1;
+					Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+					auto flow = SyntheticAheadFlow(width, height, dx / 2, 10, 0, 0, 0, 0);
+					if (!clear)
+						for (int d = 0; d < 2; ++d) flow->global[d][2] = 1.0f;   // not clear (too few cells agree)
+					warp.SetExternalFlow(flow);
+					Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+					if (!warp.ExternalFlowUsed()) { Logger::WriteMessage("the pair computed ahead was not taken here: not run\n"); return; }
+					const bool expectEngine = clear || !fallback;
+					Assert::AreEqual(expectEngine, warp.GlobalFromEngine(), clear ? L"clear: the engine's camera" :
+						fallback ? L"unclear: the global search" : L"fallback off: the engine's value as before");
+					Assert::AreEqual(expectEngine ? 0ull : 1ull, warp.GlobalFallbacks());
+				}
 		}
 
 		// 2026-10-16 (the D1 taste report): at 4K the global moves in 8-px steps (the low-resolution
