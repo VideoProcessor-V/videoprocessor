@@ -120,9 +120,13 @@ namespace RenderAhead
 		return (vsync - in.filmTime - in.latencyFloor - in.lead) / in.sourcePeriod;
 	}
 
+	// A phase within kPhaseEpsilon of 0 is A's own time (rounding of the restart lead,
+	// which is a whole number of refreshes): a hold, not an extra with no shift.
+	constexpr double kPhaseEpsilon = 1e-6;
+
 	inline float ShiftFor(const FrameInput& in, double delta)
 	{
-		if (!(delta > 0.0))
+		if (!(delta > kPhaseEpsilon))
 			return 0.0f;
 		if (in.evenCycle > 0)
 		{
@@ -180,10 +184,12 @@ namespace RenderAhead
 			return plan;
 		plan.valid = true;
 		plan.phi0 = Phase(in, in.firstVsync);
-		// A owns refreshes while the phase is below 1; at most enough to keep every
-		// present's interval within DXGI's limit (a long restart lead is shown as
-		// holds and re-rendered A's at most).
-		const int ownedCap = std::max(1, in.maxExtras + 1 + (kMaxSyncInterval - 1));
+		// A owns refreshes while the phase is below 1; at most its extras, the restart
+		// lead's refreshes and DXGI's longest run of holds (a long restart lead is shown
+		// as holds and re-rendered A's at most, all on A: B then continues the chain).
+		const int leadRefreshes = in.lead > 0.0 ?
+			static_cast<int>(std::ceil(in.lead / in.displayPeriod - 1e-6)) : 0;
+		const int ownedCap = std::max(1, in.maxExtras + 1 + (kMaxSyncInterval - 1) + std::min(leadRefreshes, 16));
 		int refreshes = 1;
 		while (refreshes < ownedCap &&
 			Phase(in, in.firstVsync + refreshes * in.displayPeriod) < 1.0 - 1e-9)
