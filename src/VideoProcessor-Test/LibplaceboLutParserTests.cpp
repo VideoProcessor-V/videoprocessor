@@ -9060,6 +9060,138 @@ namespace VideoProcessorTest
 			};
 			const std::vector<double> y1080 = chart(W, H, 1.0, 1, 0.45, 0.5);
 			const std::vector<double> cb540 = chart(W / 2, H / 2, 1.0, 2, 0.5, 0.15), cr540 = chart(W / 2, H / 2, 1.0, 3, 0.5, 0.15);
+		TEST_METHOD(SourceResolutionReadsAndRebasesTheDolbyVisionTunnel)
+		{
+			// 2026-10-17: the DV tunnel is no longer skipped as a "packed signal".
+			// Its decoded intensity plane (12-bit codes << 4, repr DOLBYVISION) is
+			// measured like YCbCr luma: a 540-line picture upscaled to 1080 is
+			// declared 0.5. The re-base resamples the IPT planes and keeps the
+			// Dolby Vision representation (its DM matrices) for libplacebo's decode.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 1920, H = 1080, w = 960, h = 540;
+			auto content = [](int sw, int sh, unsigned seed, double level) {
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				std::vector<double> v(static_cast<size_t>(sw) * sh, level);
+				for (int k = 0; k < 120; ++k)
+				{
+					const double f = 0.004 * std::pow(0.49 / 0.004, u(rng)), a = u(rng) * 3.14159265358979, px = u(rng) * 6.283, py = u(rng) * 6.283;
+					const double fx = f * std::cos(a), fy = f * std::sin(a), amp = 0.012 / std::sqrt(f);
+					std::vector<double> cx(sw), sx(sw);
+					for (int x = 0; x < sw; ++x) { cx[x] = std::cos(6.283185307 * fx * x + px); sx[x] = std::sin(6.283185307 * fx * x + px); }
+					for (int y = 0; y < sh; ++y)
+					{
+						const double cy = std::cos(6.283185307 * fy * y + py) * amp, sy = std::sin(6.283185307 * fy * y + py) * amp;
+						double* row = &v[static_cast<size_t>(y) * sw];
+						for (int x = 0; x < sw; ++x) row[x] += cx[x] * cy - sx[x] * sy;
+					}
+				}
+				return v;
+			};
+			auto upscale = [&](const std::vector<double>& src) {
+				auto k = [](double x) { x = std::fabs(x); return x < 1 ? 1.5 * x * x * x - 2.5 * x * x + 1 : x < 2 ? -0.5 * x * x * x + 2.5 * x * x - 4 * x + 2 : 0.0; };
+				std::vector<double> rows(static_cast<size_t>(W) * h), out(static_cast<size_t>(W) * H);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						const double uu = (x + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
+						double s = 0, ws = 0;
+						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * src[static_cast<size_t>(y) * w + (std::min)(w - 1, (std::max)(0, t))]; ws += wt; }
+						rows[static_cast<size_t>(y) * W + x] = s / ws;
+					}
+				for (int y = 0; y < H; ++y)
+				{
+					const double uu = (y + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
+					for (int x = 0; x < W; ++x)
+					{
+						double s = 0, ws = 0;
+						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * rows[static_cast<size_t>((std::min)(h - 1, (std::max)(0, t))) * W + x]; ws += wt; }
+						out[static_cast<size_t>(y) * W + x] = s / ws;
+					}
+				}
+				return out;
+			};
+			// 12-bit intensity codes << 4 (the DV formatter's / GPU unpack's plane).
+			auto upload = [&](const std::vector<double>& v, double offset) {
+				std::vector<uint16_t> data(v.size());
+				for (size_t i = 0; i < v.size(); ++i)
+					data[i] = static_cast<uint16_t>(static_cast<int>(std::lround((std::min)(1.0, (std::max)(0.0, v[i] + offset)) * 4095.0)) << 4);
+				pl_tex_params p{};
+				p.w = W; p.h = H; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			std::vector<uint16_t> neutral(static_cast<size_t>(W / 2) * H * 2, static_cast<uint16_t>(2048 << 4));
+			pl_tex_params cp{};
+			cp.w = W / 2; cp.h = H; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.sampleable = true; cp.initial_data = neutral.data();
+			pl_tex chroma = pl_tex_create(gpu, &cp);
+			Assert::IsNotNull(chroma);
+			pl_dovi_metadata dovi{};
+			dovi.nonlinear.m[0][0] = dovi.nonlinear.m[1][1] = dovi.nonlinear.m[2][2] = 1.0f;
+			dovi.linear.m[0][0] = dovi.linear.m[1][1] = dovi.linear.m[2][2] = 1.0f;
+			pl_frame frame{};
+			frame.num_planes = 2;
+			frame.planes[0].components = 1;
+			frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			frame.planes[1].texture = chroma;
+			frame.planes[1].components = 2;
+			frame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			frame.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			frame.repr.sys = PL_COLOR_SYSTEM_DOLBYVISION;
+			frame.repr.dovi = &dovi;
+			frame.repr.levels = PL_COLOR_LEVELS_FULL;
+			frame.repr.bits.sample_depth = 16; frame.repr.bits.color_depth = 12; frame.repr.bits.bit_shift = 4;
+			frame.color.primaries = PL_COLOR_PRIM_BT_2020;
+			frame.color.transfer = PL_COLOR_TRC_PQ;
+			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+
+			SourceResolutionMonitor::Monitor monitor;
+			double seconds = 0.0;
+			uint64_t sequence = 0;
+			pl_tex first = nullptr;
+			for (int shot = 0; shot < 9; ++shot)
+			{
+				const std::vector<double> picture = upscale(content(w, h, 300 + shot, shot % 2 ? 0.55 : 0.30));
+				for (int i = 0; i < 20; ++i)
+				{
+					pl_tex tex = upload(picture, 0.0008 * i);
+					frame.planes[0].texture = tex;
+					Assert::IsTrue(SourceResolutionMonitor::Monitor::NotReadReason(frame).empty(), L"DV is readable");
+					const unsigned long long before = monitor.Read().frames;
+					monitor.Frame(gpu, dispatch, frame, ++sequence, seconds);
+					pl_gpu_finish(gpu);
+					monitor.Frame(gpu, dispatch, frame, sequence, seconds);
+					for (int t = 0; t < 400 && monitor.Read().frames == before; ++t) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+					seconds += 0.5;
+					if (!first && shot == 0 && i == 0) first = tex;
+					else pl_tex_destroy(gpu, &tex);
+				}
+			}
+			const SourceResolutionMonitor::Snapshot s = monitor.Read();
+			Logger::WriteMessage(("DV: " + SourceResolutionMonitor::Describe(s, monitor.AutoRatio(), true) + "\n").c_str());
+			Assert::IsTrue(s.notRead.empty(), ExtendedRangeGpuProbe::ToWide("not read: " + s.notRead).c_str());
+			Assert::IsTrue(s.reading, L"the DV intensity plane is read");
+			Assert::AreEqual(0.5, s.declaredRatio, 0.01, L"declared: the 540-line source");
+
+			// Re-base to 540 lines: both IPT planes halved, the DV representation kept.
+			frame.planes[0].texture = first;
+			SourceRebase::Module rebase;
+			pl_frame rebased{};
+			Assert::IsTrue(rebase.Apply(gpu, dispatch, frame, 0.5, rebased), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+			Assert::IsTrue(rebased.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && rebased.repr.dovi == &dovi, L"DV decode kept");
+			Assert::AreEqual(W / 2, rebased.planes[0].texture->params.w);
+			Assert::AreEqual(H / 2, rebased.planes[0].texture->params.h);
+			Assert::AreEqual(W / 4, rebased.planes[1].texture->params.w);
+			Assert::AreEqual(H / 2, rebased.planes[1].texture->params.h);
+			rebase.Release(gpu);
+			monitor.Release(gpu);
+			pl_tex_destroy(gpu, &first);
+			pl_tex_destroy(gpu, &chroma);
+			pl_dispatch_destroy(&dispatch);
+		}
+
 			pl_tex nativeLuma = plane(y1080, nullptr, nullptr, W, H), nativeChroma = plane(cb540, &cb540, &cr540, W / 2, H / 2);
 			const std::vector<double> y2160 = catmull2x(y1080, W, H), cb1080 = catmull2x(cb540, W / 2, H / 2), cr1080 = catmull2x(cr540, W / 2, H / 2);
 			pl_tex upLuma = plane(y2160, nullptr, nullptr, 2 * W, 2 * H), upChroma = plane(cb1080, &cb1080, &cr1080, W, H);

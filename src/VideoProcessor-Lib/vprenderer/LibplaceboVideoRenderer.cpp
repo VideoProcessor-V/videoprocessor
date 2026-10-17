@@ -4725,6 +4725,7 @@ struct LibplaceboVideoRenderer::Impl
 	double debandThreshold = 0.0;
 	std::string debandLogged;
 	// Delta 15 S8-2 / 2c: this frame's weight scale from the bitrate quality (1 = clean).
+	bool sourceMonitorDvLogged = false;
 	double bitrateWeightScale = 1.0;
 	pl_tex rgbIngestLuma = nullptr;
 	// De-judder on RGB (roadmap item 2): this frame's matcher luma when it came
@@ -18532,6 +18533,13 @@ struct LibplaceboVideoRenderer::Impl
 				std::string why;
 				// Per axis (owner 2026-10-16): the uniform factor when engaged, else the width
 				// and height factors of a source upscaled in one direction.
+				if (renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && !sourceMonitorDvLogged)
+				{
+					// 2026-10-17: no longer skipped as a packed signal.
+					DebugLog::Log("Source resolution on Dolby Vision: measured on the decoded intensity (I) plane; a re-base "
+						"resamples the IPT planes before libplacebo's Dolby Vision decode (as YCbCr planes before their matrix)");
+					sourceMonitorDvLogged = true;
+				}
 				sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
 					why, wantedX, wanted, -1.0, sourceSequence);
 				if (!why.empty())
