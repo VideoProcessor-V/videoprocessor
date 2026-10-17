@@ -199,6 +199,26 @@ namespace DejudderPolicy
 		return vpConfigured || !smoothConfigured ? MotionEngine::Vp : MotionEngine::SmoothMotion;
 	}
 
+	// Bug hunt 2026-10-17: on the Dolby Vision tunnel a frame is a trusted
+	// DV picture (valid packet, not marked for black), an SDR fallback (no
+	// valid packet while the tunnel is unconfirmed: allowSdrFallback, with
+	// the RGB8 placement known) or
+	// untrusted (presented as black). The next frame B pairs with A only when
+	// both are the same trusted kind: never an untrusted B, never DV with SDR.
+	enum class DolbyVisionFrameKind { Picture, SdrFallback, Untrusted };
+	inline DolbyVisionFrameKind ClassifyDolbyVisionFrame(bool valid, bool requiresBlackFrame, bool allowSdrFallback,
+		bool rgbPlacementKnown)
+	{
+		if (requiresBlackFrame) return DolbyVisionFrameKind::Untrusted;
+		if (valid) return DolbyVisionFrameKind::Picture;
+		return allowSdrFallback && rgbPlacementKnown ? DolbyVisionFrameKind::SdrFallback : DolbyVisionFrameKind::Untrusted;
+	}
+	inline bool DolbyVisionPairTrusted(bool tunnel, DolbyVisionFrameKind a, DolbyVisionFrameKind b)
+	{
+		if (!tunnel) return true;
+		return a == b && b != DolbyVisionFrameKind::Untrusted;
+	}
+
 	// Whether extra presents may run (with Decide() == Active): strength > 0
 	// and an uneven film cadence. False in mask-only mode.
 	inline bool ExtrasAllowed(const Input& in)

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AnalysisFrame.h"
+#include "vprenderer/DolbyVisionTunnelUnpackReference.h"
 
 #include <algorithm>
 #include <utility>
@@ -155,7 +156,9 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
         }
         else if (input.dolby.valid)
         {
-            if (input.encoding != VideoFrameEncoding::R210 ||
+            // Bug hunt 2026-10-17: the CPU formatter's decoded planes, from any
+            // tunnel container it unpacks (r210, R10b, R10l), not r210 only.
+            if (!DolbyVisionTunnelUnpackReference::SupportsContainer(input.encoding) ||
                 !input.convertedOwner || !input.converted422 ||
                 !input.convertedContract.IsValid() ||
                 input.convertedContract.colorDepth != 12 ||
@@ -180,6 +183,9 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
         {
             // A missing/invalid packet cannot unlock the packed RGB transport.
             // The formatter alone can authorize a proven SDR alignment.
+            // r210 only (Bug hunt 2026-10-17): the SDR sampler reads r210 words,
+            // and the render's SDR fallback has no R10b/R10l upload (no D3D11
+            // format for [R10 G10 B10 00]); such frames are presented black.
             if (!input.dolby.allowSdrFallback ||
                 (input.dolby.rgbBitAlignment != 1 &&
                     input.dolby.rgbBitAlignment != 2) ||

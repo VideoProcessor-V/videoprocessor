@@ -10748,6 +10748,9 @@ struct LibplaceboVideoRenderer::Impl
 	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
 	// The content rate the matcher's per-frame settings are converted to.
 	double dejudderSourceHz = 0.0;
+	// Bug hunt 2026-10-17: this frame's state is on the Dolby Vision tunnel
+	// (set by the render before UpdateDejudderEstimate).
+	bool dejudderDolbyVisionTunnel = false;
 	// Efficiency (owner 2026-10-14): the sigma-delta's vectors for B's own
 	// first present, made from A's field as A's extras end (the motion from
 	// A's last picture to B), so B's refresh skips the sigma-delta's own
@@ -13143,7 +13146,14 @@ struct LibplaceboVideoRenderer::Impl
 			next->dvTunnelRaw == current->dvTunnelRaw &&
 			next->contract.sampleRange == contract.sampleRange &&
 			next->contract.colorDepth == contract.colorDepth &&
-			next->contract.bitShift == contract.bitShift;
+			next->contract.bitShift == contract.bitShift &&
+			// Bug hunt 2026-10-17: on the DV tunnel never pair an untrusted B
+			// (black frame) or a DV picture with an SDR fallback.
+			DejudderPolicy::DolbyVisionPairTrusted(dejudderDolbyVisionTunnel,
+				DejudderPolicy::ClassifyDolbyVisionFrame(current->dolby.valid, current->dolby.requiresBlackFrame,
+					current->dolby.allowSdrFallback, current->dolby.rgbBitAlignment == 1 || current->dolby.rgbBitAlignment == 2),
+				DejudderPolicy::ClassifyDolbyVisionFrame(next->dolby.valid, next->dolby.requiresBlackFrame,
+					next->dolby.allowSdrFallback, next->dolby.rgbBitAlignment == 1 || next->dolby.rgbBitAlignment == 2));
 		const auto usable = [](pl_tex tex)
 		{
 			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
@@ -14475,6 +14485,9 @@ struct LibplaceboVideoRenderer::Impl
 		const int height = static_cast<int>(state.displayMode->FrameHeight());
 		DolbyVisionLuminanceStatus frameDvLuminance;
 		AlphaNativeRgbLayout nativeRgbLayout;
+		// r210 only (Bug hunt 2026-10-17, kept): libplacebo's native upload has
+		// no plane format for R10b / R10l ([R10 G10 B10 00], AlphaNativeRgbIngress.h),
+		// so their SDR fallback would show nothing; they stay black until DV is trusted.
 		const bool tunnelRgbFallback = state.dolbyVisionTunnel &&
 			state.videoFrameEncoding == VideoFrameEncoding::R210 &&
 			convertedPayload && !convertedPayload->dolby.valid &&
@@ -14483,6 +14496,7 @@ struct LibplaceboVideoRenderer::Impl
 				convertedPayload->dolby.rgbBitAlignment == 2);
 		const bool tunnelActive =
 			state.dolbyVisionTunnel && !tunnelRgbFallback;
+		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
 		if (tunnelActive && (!convertedPayload ||
 			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
 		{
