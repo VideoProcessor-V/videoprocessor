@@ -49,7 +49,8 @@ within limits the owner sets. It invents nothing, and pixels change only through
 ## 1. Motion intent (Authentic Motion analog)
 
 **Measurements:**
-- pan speed v, in picture widths per second, from projection correlation;
+- pan speed v, in picture heights per second, from projection correlation (heights, so the
+  same pan reads the same on any aspect ratio);
 - steadiness (spread of v within the shot);
 - edge contrast;
 - shot length and class;
@@ -158,7 +159,7 @@ L11 content type (which wins when present).
 
 | Signal | Class |
 |---|---|
-| 50/60 with sustained large pans | sports |
+| measured video-class source with sustained large pans | sports |
 | pulldown or film-like rate | film |
 | twos-holds plus flat areas | animation |
 | long zero motion | static UI |

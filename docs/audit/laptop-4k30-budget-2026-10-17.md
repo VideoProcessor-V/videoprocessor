@@ -89,8 +89,10 @@ Not worth it:
 - capture_upload early
 - adaptive_faithful ortho
 - (fbo_float32 off, only if the owner agrees)
-- interpolation auto only
 - optional 16-bit warp cache and 7 upload slots
+
+**Off:**
+- interpolation off (owner preference 2026-10-17: no interpolation in the laptop profile)
 
 ## Measurement run (Claude on the GPU, on mains power, about 70-80 min)
 

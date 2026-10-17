@@ -22,11 +22,12 @@ parsers feeding one tone-mapping path).
 - **Capture:** DV tunnel on the GPU + more timings (M); zero-copy upload via D3D12 interop or a
   libplacebo patch (L) / a 4K60 4:4:4 12-bit HDMI 2.1 card behind a format-agnostic capture layer.
 - **Source analysis:** pulldown D1-D4 then default-on per the review's criteria (M); 3:2 / per-axis
-  kernel inverse from the Apple TV captures (M); 2K-master detection (L, research) / learned source
-  classification as a hint behind the trust gates.
-- **Scaling and detail:** an ONNX-DirectML stage (onnxruntime-directml is already in 3rdparty) for a
+  kernel inverse from the Apple TV captures (M); 2K-master detection (L, research) / ~~learned source
+  classification as a hint behind the trust gates~~ - rejected 2026-10-17 (owner: no neural).
+- **Scaling and detail:** ~~an ONNX-DirectML stage (onnxruntime-directml is already in 3rdparty) for a
   1080->4K upscaler and a temporal denoiser, gated by PSNR/SSIM vs FSRCNNX, flicker and the 3090 budget
-  (L-XL); detail accumulation retried as MC grain averaging (M) / ML re-base later, GLSL as fallback.
+  (L-XL)~~ - rejected 2026-10-17 (owner: no neural); detail accumulation retried as MC grain averaging
+  (M) / ~~ML re-base later~~ - rejected 2026-10-17 (owner: no neural); GLSL stays the path.
 - **Motion:** interpolator Stage B (per-vsync, 60p on 50 Hz) and gap fill (L); low-latency backward
   vectors (M) / multi-reference occlusion-aware interpolation, higher refresh when a display takes it.
 - **Precision / BTB-WTW:** a precision contract in the chain gate (every intermediate >= 16-bit float,
@@ -66,14 +67,15 @@ parsers feeding one tone-mapping path).
 5. Weeks 10-11: display profile v1 (FL35 constants moved, byte-identical test); metadata layer v1 (DV
    L1 incl. min); precision contract assertion.
 6. Weeks 12-13: per-scene tone curve tuned to the FL35; L1 into the LED look-ahead; retest on the
-   captures; ONNX interop timing spike on the 3090.
+   captures; ~~ONNX interop timing spike on the 3090~~ - rejected 2026-10-17 (owner: no neural).
 
 ## Questions for the owner
 
 1. 12-bit output when the display changes: DeckLink output card, FP16 surface (full-range displays), or
    neither?
 2. Deploy before 50/60p (validate on the FL35 sooner) or after?
-3. ML upscaler / denoiser acceptable if optional, gated and measured (it can invent plausible detail)?
+3. ~~ML upscaler / denoiser acceptable if optional, gated and measured (it can invent plausible detail)?~~
+   Rejected 2026-10-17 (owner: no neural).
 4. Buy a colorimeter (e.g. Calibrite Display Pro HL) so display profiles are measured?
 5. A non-certified DV L2/L8 trim reimplementation acceptable?
 6. Interpolator: extras-only first, non-integer ratios only, fallback hold vs blend?

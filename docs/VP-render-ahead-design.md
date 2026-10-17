@@ -92,11 +92,14 @@ slow.
   | Level | What runs |
   |---|---|
   | L0 | Full |
-  | L1 | Cheaper extras: de-judder vectors for the sigma-delta, 16-bit cache |
+  | L1 | Cheaper extras: de-judder vectors for the sigma-delta only |
   | L2 | Drop the extra with the smallest s·δ |
   | L3 and on | Drop the next extra, and so on |
   | Hold | 3:2 |
 
+- **No automatic precision drop (owner 2026-10-17):** the ladder never lowers precision. The
+  higher-precision cache is the default; a 16-bit cache is only a profile choice, never a
+  ladder step.
 - **Hysteresis:**
   - step down after 2 s over budget, or at once on a late frame;
   - step up after 5 s under u − 0.10, and no sooner than 10 s after the last step down;
