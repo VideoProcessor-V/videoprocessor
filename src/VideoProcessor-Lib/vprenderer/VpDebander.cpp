@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 namespace VpDebander
 {
@@ -31,9 +33,36 @@ if (p.x < sz.x && p.y < sz.y) {
     float d = mix(1.0, radius, r1);
     vec2 o = vec2(cos(r2 * 6.2831853), sin(r2 * 6.2831853)) * d;
     vec2 q = vec2(-o.y, o.x);
+#ifdef SPLIT
+    // deband_vp_grain_guard split (GrainPreserve::kSplit*): the low band (half
+    // resolution, bilinear at pos / 2) is debanded, the residual c - low passes. The
+    // ring mean is the low band's; the pixel's own low band gets back its step part:
+    // the residual averaged along the contour (the structure tensor's direction),
+    // weighted by the contour's coherence and the residual's consistency along it.
+    vec2 linv = 0.5 / vec2(textureSize(split_low, 0));
+    vec4 lowc = texture(split_low, pos * linv);
+    vec4 avg = 0.25 * (texture(split_low, (pos + o) * linv) + texture(split_low, (pos - o) * linv) +
+                       texture(split_low, (pos + q) * linv) + texture(split_low, (pos - q) * linv));
+    vec4 J = texture(split_tensor, pos / tensor_px / vec2(textureSize(split_tensor, 0)));
+    float jd = J.x - J.z;
+    float coh = sqrt(jd * jd + 4.0 * J.y * J.y) / (J.x + J.z + coh_eps);
+    float theta = (abs(jd) + abs(J.y) > 0.0) ? 0.5 * atan(2.0 * J.y, jd) : 0.0;
+    vec2 along = vec2(-sin(theta), cos(theta)) * along_step;
+    vec4 ra = vec4(0.0), ra2 = vec4(0.0);
+    for (int k = -ALONG_N; k <= ALONG_N; k++) {
+        vec2 sp = pos + float(k) * along;
+        vec4 rv = texture(src, sp * inv) - texture(split_low, sp * linv);
+        ra += along_w(k) * rv;
+        ra2 += along_w(k) * rv * rv;
+    }
+    vec4 rho = abs(ra) / sqrt(ra2 + rho_eps);
+    vec4 base = lowc + ra * (smoothstep(coh_lo, coh_hi, coh) * smoothstep(rho_lo, rho_hi, rho));
+    vec4 diff = abs(base - avg);
+#else
     vec4 avg = 0.25 * (texture(src, (pos + o) * inv) + texture(src, (pos - o) * inv) +
                        texture(src, (pos + q) * inv) + texture(src, (pos - q) * inv));
     vec4 diff = abs(c - avg);
+#endif
     float m = diff.x;
 #if NCOMP > 1
     m = max(m, diff.y);
@@ -77,7 +106,11 @@ if (p.x < sz.x && p.y < sz.y) {
         w *= 1.0 - smoothstep(veto_lo, veto_hi, share);
     }
 #endif
+#ifdef SPLIT
+    imageStore(dst, p, c + w * (avg - base));
+#else
     imageStore(dst, p, mix(c, avg, w));
+#endif
 #ifdef WRITE_W
     imageStore(w_out, p, vec4(w, 0.0, 0.0, 1.0));
 #endif
@@ -137,6 +170,125 @@ for (uint s = 128u; s > 0u; s >>= 1u) {
 if (li == 0u)
     imageStore(guard_out, ivec2(gl_WorkGroupID.xy), vec4(gg_sum[0].x / max(gg_sum[0].y, 1.0), 0.0, 0.0, 1.0));
 )GLSL";
+
+		// deband_vp_grain_guard split: the low band at half resolution (GrainPreserve, as
+		// the interpolator's): a 2x2 box average, then the separable Gaussian (gp_w).
+		const char* const SPLIT_HALF_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y) {
+    ivec2 hi = textureSize(src, 0) - ivec2(1);
+    ivec2 p = q * 2;
+    vec4 acc = texelFetch(src, clamp(p, ivec2(0), hi), 0) + texelFetch(src, clamp(p + ivec2(1, 0), ivec2(0), hi), 0) +
+               texelFetch(src, clamp(p + ivec2(0, 1), ivec2(0), hi), 0) + texelFetch(src, clamp(p + ivec2(1, 1), ivec2(0), hi), 0);
+    imageStore(dst, q, 0.25 * acc);
+}
+)GLSL";
+		const char* const SPLIT_H_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y) {
+    ivec2 hi = textureSize(src, 0) - ivec2(1);
+    vec4 acc = vec4(0.0);
+    for (int i = -GP_R; i <= GP_R; i++)
+        acc += gp_w(i) * texelFetch(src, clamp(q + ivec2(i, 0), ivec2(0), hi), 0);
+    imageStore(dst, q, acc);
+}
+)GLSL";
+		const char* const SPLIT_V_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y) {
+    ivec2 hi = textureSize(src, 0) - ivec2(1);
+    vec4 acc = vec4(0.0);
+    for (int i = -GP_R; i <= GP_R; i++)
+        acc += gp_w(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0);
+    imageStore(dst, q, acc);
+}
+)GLSL";
+		// The structure tensor of the low band per TB x TB block of its (half-resolution)
+		// pixels: the mean of (gx^2, gx gy, gy^2), central differences, summed over the
+		// plane's components, in codes^2 (code_scale = 1 / one code).
+		const char* const SPLIT_TENSOR_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (b.x < size.x && b.y < size.y) {
+    ivec2 hi = textureSize(src, 0) - ivec2(1);
+    vec4 mask = vec4(1.0, NCOMP > 1 ? 1.0 : 0.0, NCOMP > 2 ? 1.0 : 0.0, 0.0);
+    vec3 acc = vec3(0.0);
+    float n = 0.0;
+    for (int j = 0; j < TB; j++)
+        for (int i = 0; i < TB; i++) {
+            ivec2 q = b * TB + ivec2(i, j);
+            if (q.x > hi.x || q.y > hi.y)
+                continue;
+            vec4 gx = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(1, 0), ivec2(0), hi), 0) - texelFetch(src, clamp(q - ivec2(1, 0), ivec2(0), hi), 0));
+            vec4 gy = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(0, 1), ivec2(0), hi), 0) - texelFetch(src, clamp(q - ivec2(0, 1), ivec2(0), hi), 0));
+            acc += vec3(dot(gx, gx), dot(gx, gy), dot(gy, gy));
+            n += 1.0;
+        }
+    imageStore(dst, b, vec4(acc / max(n, 1.0), 1.0));
+}
+)GLSL";
+
+		pl_fmt FloatFormat(pl_gpu gpu, int components, bool linear)
+		{
+			const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | (linear ? PL_FMT_CAP_LINEAR : 0));
+			for (int n = (std::max)(1, components); n <= 4; ++n)
+				if (pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, n, 32, 32, caps))
+					return f;
+			for (int n = (std::max)(1, components); n <= 4; ++n)
+				if (pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 16, caps))
+					return f;
+			return nullptr;
+		}
+
+		bool Pass(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
+			const pl_shader_desc* desc, int numDesc, const pl_shader_var* vars, int numVars, int groupsX, int groupsY)
+		{
+			pl_custom_shader custom{};
+			custom.description = description;
+			custom.header = header.c_str();
+			custom.body = body;
+			custom.input = PL_SHADER_SIG_NONE;
+			custom.output = PL_SHADER_SIG_NONE;
+			custom.descriptors = desc;
+			custom.num_descriptors = numDesc;
+			custom.variables = vars;
+			custom.num_variables = numVars;
+			custom.compute = true;
+			custom.compute_group_size[0] = 16;
+			custom.compute_group_size[1] = 16;
+			pl_shader sh = pl_dispatch_begin(dispatch);
+			if (!pl_shader_custom(sh, &custom))
+			{
+				pl_dispatch_abort(dispatch, &sh);
+				return false;
+			}
+			pl_dispatch_compute_params compute{};
+			compute.shader = &sh;
+			compute.dispatch_size[0] = groupsX;
+			compute.dispatch_size[1] = groupsY;
+			compute.dispatch_size[2] = 1;
+			return pl_dispatch_compute(dispatch, &compute);
+		}
+
+		// along_w(k), k in -ALONG_N..ALONG_N: GrainPreserve::SplitAlongWeight.
+		std::string AlongWeightsGlsl()
+		{
+			const int n = GrainPreserve::kSplitAlongTaps;
+			const std::string taps = std::to_string(2 * n + 1);
+			std::string s = "#define ALONG_N " + std::to_string(n) + "\nfloat along_w(int k)\n{\n    float w[" + taps + "] = float[" + taps + "](";
+			for (int k = -n; k <= n; ++k)
+			{
+				char number[32];
+				snprintf(number, sizeof(number), "%.9g", GrainPreserve::SplitAlongWeight(k));
+				s += number;
+				if (k < n)
+					s += ", ";
+			}
+			return s + ");\n    return w[k + ALONG_N];\n}\n";
+		}
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
 		{
@@ -207,8 +359,60 @@ if (li == 0u)
 				if (guard[s][p] && gpu) pl_tex_destroy(gpu, &guard[s][p]);
 				guard[s][p] = nullptr;
 			}
+		for (int s = 0; s < kSlots; ++s)
+			for (int p = 0; p < PL_MAX_PLANES; ++p)
+				for (pl_tex* tex : { &splitHalf[s][p], &splitTmp[s][p], &splitLow[s][p], &splitTensor[s][p] })
+				{
+					if (*tex && gpu) pl_tex_destroy(gpu, tex);
+					*tex = nullptr;
+				}
 		weightSequence = 0;
 		prevValid = false;
+	}
+
+	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, int ncomp, double scale, double codeUnit)
+	{
+		const int hw = (in->params.w + 1) / 2, hh = (in->params.h + 1) / 2;
+		const int n = in->params.format->num_components;
+		const int tb = GrainPreserve::SplitTensorHalfBlock(scale);
+		const int tw = (hw + tb - 1) / tb, th = (hh + tb - 1) / tb;
+		auto ensure = [&](pl_tex& tex, int w, int h, pl_fmt fmt) {
+			pl_tex_params tp{};
+			tp.w = w;
+			tp.h = h;
+			tp.format = fmt;
+			tp.sampleable = true;
+			tp.storable = true;
+			return fmt && pl_tex_recreate(gpu, &tex, &tp);
+		};
+		if (!ensure(splitHalf[slot][plane], hw, hh, FloatFormat(gpu, n, false)) ||
+			!ensure(splitTmp[slot][plane], hw, hh, FloatFormat(gpu, n, false)) ||
+			!ensure(splitLow[slot][plane], hw, hh, FloatFormat(gpu, n, true)) ||
+			!ensure(splitTensor[slot][plane], tw, th, FloatFormat(gpu, 4, true)))
+		{
+			error = "no float texture for the grain split";
+			++failures;
+			return false;
+		}
+		const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
+		const std::string weights = GrainPreserve::LowWeightsGlsl(GrainPreserve::kSplitSigma * scale);
+		const pl_shader_desc dh[2] = { Sampled("src", in, false), Storage("dst", splitHalf[slot][plane]) };
+		const pl_shader_desc dx[2] = { Sampled("src", splitHalf[slot][plane], false), Storage("dst", splitTmp[slot][plane]) };
+		const pl_shader_desc dy[2] = { Sampled("src", splitTmp[slot][plane], false), Storage("dst", splitLow[slot][plane]) };
+		const pl_shader_desc dt[2] = { Sampled("src", splitLow[slot][plane], false), Storage("dst", splitTensor[slot][plane]) };
+		const float codeScale = static_cast<float>(1.0 / codeUnit);
+		const pl_shader_var vt[1] = { { pl_var_float("code_scale"), &codeScale, true } };
+		const std::string tensorHeader = "#define NCOMP " + std::to_string(ncomp) + "\n#define TB " + std::to_string(tb) + "\n";
+		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", std::string(), SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
+			!Pass(dispatch, "VideoProcessor deband: grain split (across)", weights, SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
+			!Pass(dispatch, "VideoProcessor deband: grain split (down)", weights, SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy) ||
+			!Pass(dispatch, "VideoProcessor deband: grain split (contours)", tensorHeader, SPLIT_TENSOR_BODY, dt, 2, vt, 1, (tw + 15) / 16, (th + 15) / 16))
+		{
+			error = "the grain split passes failed";
+			++failures;
+			return false;
+		}
+		return true;
 	}
 
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result, int slot)
@@ -290,7 +494,10 @@ if (li == 0u)
 					weightIn = weight[readIndex][plane];
 			}
 			const bool useHold = weightIn != nullptr;
-			const bool useGrain = haveField && params.grainError != nullptr;
+			// deband_vp_grain_guard split: grain passes by construction, so neither veto runs
+			// (the vector grain veto read band pumping on a starved stream as grain: H1).
+			const bool useSplit = params.grainGuard && params.grainSplit;
+			const bool useGrain = haveField && params.grainError != nullptr && !useSplit;
 			// The plane's pixels in field (native luma) pixels.
 			const float toField[2] = {
 				static_cast<float>((params.fieldScaleX > 0.0 ? params.fieldScaleX : params.fieldScale) * luma->params.w / (std::max)(1, w)),
@@ -301,7 +508,19 @@ if (li == 0u)
 			const int ncomp = (std::max)(1, (std::min)(3, source.planes[plane].components));
 
 			// deband_vp_grain_guard: the plane's spatial grain estimate first.
-			const bool useGuard = params.grainGuard;
+			const bool useGuard = params.grainGuard && !useSplit;
+			// The split's distances: grain scale (GrainPreserve::GrainScale) of this plane's
+			// lines in the picture (radiusScale = the source's lines / 1080).
+			const double planeLines = 1080.0 * params.radiusScale * h / (std::max)(1, luma->params.h);
+			const double splitScale = GrainPreserve::GrainScale(planeLines);
+			const float tensorPx = static_cast<float>(2 * GrainPreserve::SplitTensorHalfBlock(splitScale));
+			const float alongStep = static_cast<float>(GrainPreserve::kSplitAlongStep * splitScale);
+			const float cohEps = static_cast<float>(GrainPreserve::kSplitTensorEps);
+			const float rhoEps = static_cast<float>(1e-12 * codeUnit * codeUnit);
+			const float cohLo = static_cast<float>(GrainPreserve::kSplitCoherenceLo), cohHi = static_cast<float>(GrainPreserve::kSplitCoherenceHi);
+			const float rhoLo = static_cast<float>(GrainPreserve::kSplitConsistencyLo), rhoHi = static_cast<float>(GrainPreserve::kSplitConsistencyHi);
+			if (useSplit && !SplitLowBand(gpu, dispatch, in, slot, plane, ncomp, splitScale, codeUnit))
+				return false;
 			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
 			const float extMin = static_cast<float>(GrainPreserve::GuardExtremumCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
 			const float vetoLo = static_cast<float>(GrainPreserve::kVetoLo);
@@ -358,7 +577,7 @@ if (li == 0u)
 				}
 			}
 
-			pl_shader_desc d[7];
+			pl_shader_desc d[9];
 			int nd = 0;
 			d[nd++] = Sampled("src", in, true);
 			d[nd++] = Storage("dst", out[slot][plane]);
@@ -367,7 +586,12 @@ if (li == 0u)
 			if (useHold) d[nd++] = Sampled("prev_w", weightIn, true);
 			if (useGrain) d[nd++] = Sampled("grain", params.grainError, false);
 			if (useGuard) d[nd++] = Sampled("grain_spatial", guard[slot][plane], true);
-			pl_shader_var v[7];
+			if (useSplit)
+			{
+				d[nd++] = Sampled("split_low", splitLow[slot][plane], true);
+				d[nd++] = Sampled("split_tensor", splitTensor[slot][plane], true);
+			}
+			pl_shader_var v[16];
 			int nv = 0;
 			v[nv++] = { pl_var_float("thr"), &thr, true };
 			v[nv++] = { pl_var_float("radius"), &radius, true };
@@ -379,13 +603,26 @@ if (li == 0u)
 				v[nv++] = { pl_var_float("veto_lo"), &vetoLo, true };
 				v[nv++] = { pl_var_float("veto_hi"), &vetoHi, true };
 			}
+			if (useSplit)
+			{
+				v[nv++] = { pl_var_float("tensor_px"), &tensorPx, true };
+				v[nv++] = { pl_var_float("along_step"), &alongStep, true };
+				v[nv++] = { pl_var_float("coh_eps"), &cohEps, true };
+				v[nv++] = { pl_var_float("rho_eps"), &rhoEps, true };
+				v[nv++] = { pl_var_float("coh_lo"), &cohLo, true };
+				v[nv++] = { pl_var_float("coh_hi"), &cohHi, true };
+				v[nv++] = { pl_var_float("rho_lo"), &rhoLo, true };
+				v[nv++] = { pl_var_float("rho_hi"), &rhoHi, true };
+			}
 			std::string header = "#define NCOMP " + std::to_string(ncomp) + "\n";
 			if (useHold) header += "#define HOLD 1\n";
 			if (useGrain) header += "#define GRAIN 1\n";
 			if (weightOut) header += "#define WRITE_W 1\n";
 			if (useGuard) header += "#define SPATIAL_GUARD 1\n";
+			if (useSplit) header += "#define SPLIT 1\n" + AlongWeightsGlsl();
 			pl_custom_shader custom{};
-			custom.description = useHold ? "VideoProcessor deband (held along the vectors)" : "VideoProcessor deband";
+			custom.description = useHold ? (useSplit ? "VideoProcessor deband, grain split (held along the vectors)" : "VideoProcessor deband (held along the vectors)") :
+				(useSplit ? "VideoProcessor deband, grain split" : "VideoProcessor deband");
 			custom.header = header.c_str();
 			custom.body = BODY;
 			custom.input = PL_SHADER_SIG_NONE;

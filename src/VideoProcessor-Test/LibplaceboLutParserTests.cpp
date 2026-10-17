@@ -9991,7 +9991,15 @@ namespace VideoProcessorTest
 			VpDebander::Module deband;
 			pl_frame lumaOnly = source;
 			lumaOnly.num_planes = 1;
-			timed("VP debander (luma, 4K)", [&] { return deband.Apply(gpu, dispatch, lumaOnly, params, out); });
+			timed("VP debander (luma, 4K), grain split (default)", [&] { return deband.Apply(gpu, dispatch, lumaOnly, params, out); });
+			{
+				VpDebander::Params veto = params;
+				veto.grainSplit = false;
+				timed("VP debander (luma, 4K), spatial-share veto", [&] { return deband.Apply(gpu, dispatch, lumaOnly, veto, out); });
+				VpDebander::Params none = params;
+				none.grainGuard = false;
+				timed("VP debander (luma, 4K), no guard", [&] { return deband.Apply(gpu, dispatch, lumaOnly, none, out); });
+			}
 			// The monitor's GPU side: its 8 tile copies into the readback buffer (2 Hz in use).
 			SourceResolutionMonitor::Monitor monitor;
 			uint64_t sequence = 0;
@@ -14200,6 +14208,7 @@ namespace VideoProcessorTest
 						Assert::IsTrue(never.Apply(gpu, dispatch, frameOf(tex), params, outNever), ExtendedRangeGpuProbe::ToWide(never.LastError()).c_str());
 						VpDebander::Params on = params;
 						on.grainGuard = true;
+						on.grainSplit = false;   // the spatial-share veto (VpDebanderGrainSplitDebandsNoisyBands: the split)
 						Assert::IsTrue(guarded.Apply(gpu, dispatch, frameOf(tex), on, outGuard), ExtendedRangeGpuProbe::ToWide(guarded.LastError()).c_str());
 						VpDebander::Params off = params;
 						off.grainGuard = false;
@@ -14232,6 +14241,7 @@ namespace VideoProcessorTest
 				params.grainGuard = false;   // without the guard (the struct default since the integration is on)
 				VpDebander::Params on = params;
 				on.grainGuard = true;
+				on.grainSplit = false;   // the spatial-share veto
 				VpDebander::Module a, b;
 				pl_frame oa{}, ob{};
 				Assert::IsTrue(a.Apply(gpu, dispatch, frameOf(tex), params, oa));
@@ -14247,6 +14257,138 @@ namespace VideoProcessorTest
 				Assert::IsTrue(changed > static_cast<int>(ra.size()) / 4, L"the bands are debanded");
 				a.Release(gpu); b.Release(gpu);
 				pl_tex_destroy(gpu, &tex);
+			}
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		TEST_METHOD(VpDebanderGrainSplitDebandsNoisyBands)
+		{
+			// deband_vp_grain_guard on = the grain split (hunt 2 07-scaling H1): the shader follows
+			// the CPU model (GrainModel::DebandSplit) within a code on 99 % of the pixels; grain of
+			// 0.5-4 8-bit codes keeps 0.95-1.05x; 8-bit bands 16 px wide with 2 codes of noise
+			// lose 70 % or more of their fundamental (the spatial-share veto: under 30 %) and
+			// pass the noise at 0.95x or more. radiusScale 2 = a 2160-line source (grain scale 1,
+			// radius 32 px).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 256, H = 128, margin = 24;
+			const double radius = 32.0;
+			auto upload = [&](const GrainModel::Image& codes) {
+				std::vector<uint16_t> data(codes.v.size());
+				for (size_t i = 0; i < codes.v.size(); ++i) data[i] = static_cast<uint16_t>((std::min)(1023L, (std::max)(0L, std::lround(codes.v[i]))) << 6);
+				pl_tex_params p{};
+				p.w = W; p.h = H; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readCodes = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = W; rp.h = H; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(W) * H);
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &readable);
+				GrainModel::Image g(W, H);
+				for (size_t i = 0; i < raw.size(); ++i) g.v[i] = raw[i] / 64.0;
+				return g;
+			};
+			auto frameOf = [&](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+			auto run = [&](const GrainModel::Image& img, double threshold, bool split) {
+				pl_tex tex = upload(img);
+				VpDebander::Params params;
+				params.thresholdCodes = threshold;
+				params.colorDepth = 10;
+				params.radiusScale = 2.0;
+				params.grainGuard = true;
+				params.grainSplit = split;
+				VpDebander::Module module;
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dispatch, frameOf(tex), params, out), ExtendedRangeGpuProbe::ToWide(module.LastError()).c_str());
+				const GrainModel::Image result = readCodes(out.planes[0].texture);
+				module.Release(gpu);
+				pl_tex_destroy(gpu, &tex);
+				return result;
+			};
+			auto matchesModel = [&](const GrainModel::Image& gpuOut, const GrainModel::Image& img, double threshold, const char* label) {
+				const GrainModel::Image cpu = GrainModel::DebandSplit(img, threshold, radius);
+				int off = 0;
+				for (size_t i = 0; i < cpu.v.size(); ++i)
+					off += std::fabs(gpuOut.v[i] - cpu.v[i]) > 1.0 ? 1 : 0;
+				char text[160];
+				snprintf(text, sizeof(text), "%s: %d of %d pixels more than a code from the CPU model", label, off, static_cast<int>(cpu.v.size()));
+				Logger::WriteMessage(text);
+				Assert::IsTrue(off * 100 <= static_cast<int>(cpu.v.size()), std::wstring(text, text + strlen(text)).c_str());
+			};
+			GrainModel::Image ramp(W, H);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					ramp.at(x, y) = 400.0 + 0.28 * x + 0.12 * y;
+			for (double threshold : { VpDebander::Strength(8.0, 10, 1.0, true), VpDebander::Strength(8.0, 10, 0.0, true) })
+				for (bool soft : { false, true })
+					for (double sigma8 : { 0.5, 1.0, 2.0, 4.0 })
+					{
+						std::mt19937 rng(61u + static_cast<unsigned>(sigma8 * 4) + (soft ? 100u : 0u));
+						const GrainModel::Image g = GrainModel::Grain(W, H, sigma8 * 4.0, soft, rng);
+						GrainModel::Image img(W, H);
+						for (size_t i = 0; i < img.v.size(); ++i) img.v[i] = static_cast<double>(std::lround(ramp.v[i] + g.v[i]));
+						const GrainModel::Image out = run(img, threshold, true);
+						const double kept = GrainModel::Rms(out - ramp, margin) / GrainModel::Rms(img - ramp, margin);
+						char text[160];
+						snprintf(text, sizeof(text), "%s grain %.1f codes, threshold %.0f: split %.3f", soft ? "soft" : "white", sigma8, threshold, kept);
+						Logger::WriteMessage(text);
+						Assert::IsTrue(kept > 0.95 && kept < 1.05, std::wstring(text, text + strlen(text)).c_str());
+						if (sigma8 == 1.0) matchesModel(out, img, threshold, text);
+					}
+			// Noisy bands: 8-bit steps every 16 px, white noise of 2 10-bit codes.
+			{
+				const double threshold = VpDebander::Strength(8.0, 10, 0.0, true);
+				GrainModel::Image bandRamp(W, H), bands(W, H), noise(W, H);
+				std::mt19937 rng(4242u);
+				const GrainModel::Image g = GrainModel::Grain(W, H, 2.0, false, rng);
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						bandRamp.at(x, y) = 400.0 + 4.0 * x / 16.0;
+						bands.at(x, y) = 4.0 * std::round(bandRamp.at(x, y) / 4.0);
+						noise.at(x, y) = std::round(g.at(x, y));
+					}
+				const GrainModel::Image img = bands + noise;
+				auto fundamental = [&](const GrainModel::Image& err) {
+					double re = 0.0, im = 0.0;
+					int n = 0;
+					for (int y = margin; y < H - margin; ++y)
+						for (int x = margin; x < W - margin; ++x)
+						{
+							re += err.at(x, y) * std::cos(6.283185307179586 * x / 16.0);
+							im -= err.at(x, y) * std::sin(6.283185307179586 * x / 16.0);
+							++n;
+						}
+					return 2.0 * std::hypot(re, im) / n;
+				};
+				const GrainModel::Image split = run(img, threshold, true), veto = run(img, threshold, false), clean = run(bands, threshold, true);
+				const double before = fundamental(img - bandRamp);
+				const double kept = fundamental(split - bandRamp) / before, vetoKept = fundamental(veto - bandRamp) / before;
+				const double pass = GrainModel::Rms(split - clean, margin) / GrainModel::Rms(noise, margin);
+				char text[200];
+				snprintf(text, sizeof(text), "noisy bands: fundamental kept split %.3f veto %.3f; noise passed %.3f", kept, vetoKept, pass);
+				Logger::WriteMessage(text);
+				const std::wstring wtext(text, text + strlen(text));
+				Assert::IsTrue(kept < 0.3, wtext.c_str());
+				Assert::IsTrue(vetoKept > 0.7, wtext.c_str());
+				Assert::IsTrue(pass > 0.95 && pass < 1.05, wtext.c_str());
+				matchesModel(split, img, threshold, "noisy bands");
 			}
 			pl_dispatch_destroy(&dispatch);
 		}

@@ -715,7 +715,11 @@ namespace RendererProfileConfig
 			// Film grain (owner 2026-10-17; docs/audit/grain-audit-2026-10-17.md).
 			if (key == "interpolation_grain") return IsChoice(value, { "preserve", "blend" });
 			if (key == "dejudder_source_warp_filter") return IsChoice(value, { "catmull", "bilinear" });
-			if (key == "residual_stabilise_grain_guard" || key == "deband_vp_grain_guard") return IsChoice(value, { "on", "off" });
+			if (key == "residual_stabilise_grain_guard") return IsChoice(value, { "on", "off" });
+			// on = the grain split (hunt 2 07-scaling H1), veto = the 2026-10-17 spatial-share veto.
+			if (key == "deband_vp_grain_guard") return IsChoice(value, { "on", "veto", "off" });
+			// 15-intent C14: libplacebo's automatic deband off while VP's grain-guarded debander runs.
+			if (key == "deband_vp_exclusive") return IsChoice(value, { "on", "off" });
 			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
 			// Content recognition (intent interpreter item 1, 2026-10-17): default off;
 			// a new class is taken after this many seconds, at a cut.

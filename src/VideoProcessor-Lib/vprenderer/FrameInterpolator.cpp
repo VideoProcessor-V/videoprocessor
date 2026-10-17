@@ -6,6 +6,8 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <cstdio>
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -345,26 +347,19 @@ if (q.x < size.x && q.y < size.y) {
 				a->params.format == b->params.format;
 		}
 
-		// gp_w(i), i in -GP_R..GP_R (GrainPreserve::kLowRadius = 5: -5..5): GrainPreserve's
-		// low-band weights.
-		const std::string& LowWeightsGlsl()
+		// gp_w(i), i in -GP_R..GP_R: GrainPreserve's low-band weights for the plane's
+		// height (kLowRadius = 5 taps each side at 2160 lines and below; wider above,
+		// GrainPreserve::GrainScale - hunt 2 C15, no fixed pixel split).
+		const std::string& LowWeightsGlsl(int planeLines)
 		{
-			static const std::string text = []()
-			{
-				const std::string taps = std::to_string(2 * GrainPreserve::kLowRadius + 1);
-				std::string s = "#define GP_R " + std::to_string(GrainPreserve::kLowRadius) + "\nfloat gp_w(int i)\n{\n    float w[" +
-					taps + "] = float[" + taps + "](";
-				for (int i = -GrainPreserve::kLowRadius; i <= GrainPreserve::kLowRadius; ++i)
-				{
-					char number[32];
-					snprintf(number, sizeof(number), "%.9g", GrainPreserve::LowWeight(i));
-					s += number;
-					if (i < GrainPreserve::kLowRadius)
-						s += ", ";
-				}
-				return s + ");\n    return w[i + GP_R];\n}\n";
-			}();
-			return text;
+			static std::mutex lock;
+			static std::map<int, std::string> cache;
+			std::lock_guard<std::mutex> guard(lock);
+			const int key = planeLines > 2160 ? planeLines : 0;
+			auto it = cache.find(key);
+			if (it == cache.end())
+				it = cache.emplace(key, GrainPreserve::LowWeightsGlsl(GrainPreserve::LowSigmaFor(planeLines))).first;
+			return it->second;
 		}
 
 		bool Compute(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
@@ -459,7 +454,7 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		const int w = half->params.w, h = half->params.h;
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
-		const std::string header = LowWeightsGlsl();
+		const std::string header = LowWeightsGlsl(src->params.h);
 		const std::vector<pl_shader_desc> passHalf = { Sampled("src", src, false), Storage("dst", half) };
 		if (!Compute(dispatch, description, std::string(), LOW_HALF_BODY, passHalf, nullptr, 0, gx, gy))
 		{

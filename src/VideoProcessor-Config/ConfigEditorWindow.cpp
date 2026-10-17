@@ -8357,10 +8357,21 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "On (default): the CNN / SSIM residual held along the motion is not held where the block is grain, so "
             "grain is not frozen or smeared. Off: the earlier behaviour."));
         auto* debandGrainGuard = addChoice(QStringLiteral("VP deband leaves grain alone"),
-            QStringLiteral("deband_vp_grain_guard"), { QStringLiteral("on"), QStringLiteral("off") });
+            QStringLiteral("deband_vp_grain_guard"), { QStringLiteral("on"), QStringLiteral("veto"), QStringLiteral("off") });
+        debandGrainGuard->setItemText(debandGrainGuard->findData(QStringLiteral("on")), QStringLiteral("On: grain split (default)"));
+        debandGrainGuard->setItemText(debandGrainGuard->findData(QStringLiteral("veto")), QStringLiteral("Veto grainy blocks (the earlier guard)"));
+        debandGrainGuard->setItemText(debandGrainGuard->findData(QStringLiteral("off")), QStringLiteral("Off (the earlier debander)"));
         debandGrainGuard->setToolTip(QStringLiteral(
-            "On (default): VP's debander measures each block's grain and does not smooth it, with or without motion "
-            "vectors; banded gradients are debanded as before. Off: the earlier debander, byte for byte."));
+            "On (default): VP's debander splits the picture into a smooth layer and the fine grain and noise on top; "
+            "only the smooth layer is debanded and the grain is put back untouched, so banding is removed even where "
+            "the stream kept some noise in the bands. Veto: the earlier guard, which skips blocks that look grainy "
+            "(it also skips noisy bands). Off: the earlier debander, byte for byte (it smooths grain)."));
+        auto* debandVpExclusive = addChoice(QStringLiteral("VP deband replaces libplacebo's"),
+            QStringLiteral("deband_vp_exclusive"), { QStringLiteral("on"), QStringLiteral("off") });
+        debandVpExclusive->setToolTip(QStringLiteral(
+            "On (default): while VP's debander runs (VP deband Auto or On) with its grain guard, libplacebo's "
+            "automatic deband (Debanding: Auto) is turned off, because it thins fine grain. A Debanding strength "
+            "chosen explicitly (Light or Default) is kept. Off: both debanders run, as before."));
         // Restore switch (DV tunnel bug hunt 2026-10-17).
         auto* dvTunnelFixes = addChoice(QStringLiteral("Dolby Vision tunnel fixes"),
             QStringLiteral("dv_tunnel_fixes"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -9957,7 +9968,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
                     { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
                     { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
-                    { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" },
+                    { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "deband_vp_exclusive", "on" },
                     { "dv_tunnel_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },

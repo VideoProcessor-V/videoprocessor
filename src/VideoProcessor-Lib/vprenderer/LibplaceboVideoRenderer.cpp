@@ -1143,6 +1143,15 @@ namespace
 		// deband_grain beside deband_strength).
 		InterpolationPolicy::Grain interpolationGrain = InterpolationPolicy::Grain::Preserve;
 		bool debandVpGrainGuard = true;
+		// deband_vp_grain_guard on (hunt 2 07-scaling H1; the default) = the grain split: the
+		// guard keeps grain by debanding only the low band; veto = the 2026-10-17 spatial-share
+		// veto (debandVpGrainSplit false); off = no guard.
+		bool debandVpGrainSplit = true;
+		// deband_vp_exclusive (hunt 2 15-intent C14: libplacebo's deband on SDR thins fine
+		// grain, 0.86x at 0.5 code): on (default) = while VP's debander runs (deband_vp auto
+		// or on) with its grain guard, libplacebo's automatic deband (deband_strength auto)
+		// is off; an explicit deband_strength (light / default) is kept. off = both run.
+		bool debandVpExclusive = true;
 		bool dejudderSourceWarpCatmull = true;
 		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
 		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
@@ -1368,7 +1377,7 @@ namespace
 			// Film grain switches (docs/audit/grain-audit-2026-10-17.md): applied live, so they
 			// must change the fingerprint like the engine's extras above.
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
-			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
+			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
@@ -2067,6 +2076,14 @@ namespace
 		return defaultValue;
 	}
 
+	// deband_vp_exclusive: libplacebo's automatic deband yields to VP's debander when that
+	// runs (deband_vp auto / on) with its grain guard; an explicit deband_strength stays.
+	bool LibplaceboDebandYieldsToVp(const RendererSettings& settings)
+	{
+		return settings.debandVpExclusive && settings.debandVp != "off" && settings.debandVpGrainGuard &&
+			settings.debandStrength == "auto" && settings.deband == AutoToggle::AUTO;
+	}
+
 	bool ApplyDebandStrength(const std::string& rawValue,
 		RendererSettings& settings)
 	{
@@ -2493,8 +2510,8 @@ namespace
 			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware),
 			// Film grain (owner 2026-10-17): the faithful defaults on / deband_grain off.
 			std::make_pair("residual_stabilise_grain_guard", &settings.adaptive.residualGrainGuard),
-			std::make_pair("deband_vp_grain_guard", &settings.debandVpGrainGuard),
-			std::make_pair("deband_grain", &settings.debandGrain) })
+			std::make_pair("deband_grain", &settings.debandGrain),
+			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -2631,6 +2648,18 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid interpolation_grain '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationGrain));
+		}
+		// deband_vp_grain_guard: on (the grain split) | veto (the 2026-10-17 spatial-share veto) | off.
+		if (tryChoice("deband_vp_grain_guard", raw))
+		{
+			if (raw == "on" || raw == "veto" || raw == "off")
+			{
+				settings.debandVpGrainGuard = raw != "off";
+				settings.debandVpGrainSplit = raw == "on";
+			}
+			else
+				DebugLog::Log("profile '%s': invalid deband_vp_grain_guard '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), !settings.debandVpGrainGuard ? "off" : settings.debandVpGrainSplit ? "on" : "veto");
 		}
 		if (tryChoice("dejudder_source_warp_filter", raw))
 		{
@@ -7575,6 +7604,15 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.deband =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.deband);
 		parameterSettings.debandGrain = settings.debandGrain;
+		if (LibplaceboDebandYieldsToVp(settings))
+		{
+			// deband_vp_exclusive: VP's grain-guarded debander does the job; libplacebo's
+			// automatic deband would thin fine grain (15-intent C14).
+			parameterSettings.debandStrength = "off";
+			parameterSettings.deband = LibplaceboRenderParameters::Toggle::Off;
+			DebugLog::Log("libplacebo deband: off while VP's debander runs with its grain guard (deband_vp %s, deband_vp_exclusive on; %s)",
+				settings.debandVp.c_str(), lifecycle);
+		}
 		parameterSettings.sigmoid =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.sigmoid);
 		parameterSettings.dithering = settings.dithering;
@@ -10140,6 +10178,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
 		currentTransport.debandGrain = next.debandGrain;
+		currentTransport.debandVpExclusive = next.debandVpExclusive;
 		currentTransport.sigmoid = next.sigmoid;
 		currentTransport.dithering = next.dithering;
 		currentTransport.displayBitDepth = next.displayBitDepth;
@@ -10214,8 +10253,9 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
 		changed(current.interpolationGrain != next.interpolationGrain, "interpolation_grain");
 		changed(current.dejudderSourceWarpCatmull != next.dejudderSourceWarpCatmull, "dejudder_source_warp_filter");
-		changed(current.debandVpGrainGuard != next.debandVpGrainGuard, "deband_vp_grain_guard");
+		changed(current.debandVpGrainGuard != next.debandVpGrainGuard || current.debandVpGrainSplit != next.debandVpGrainSplit, "deband_vp_grain_guard");
 		changed(current.debandGrain != next.debandGrain, "deband_grain");
+		changed(current.debandVpExclusive != next.debandVpExclusive, "deband_vp_exclusive");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
@@ -20069,6 +20109,7 @@ struct LibplaceboVideoRenderer::Impl
 				vpDebandParams.fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 				vpDebandParams.sequence = sourceSequence;
 				vpDebandParams.grainGuard = activeSettings.debandVpGrainGuard;
+				vpDebandParams.grainSplit = activeSettings.debandVpGrainSplit;
 				char text[200];
 				if (temporal)
 					snprintf(text, sizeof(text), "VP deband: not applied while smooth motion or deinterlacing runs (deband_vp %s)", activeSettings.debandVp.c_str());
@@ -27818,7 +27859,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion=" << s.motion.Fingerprint() << "\n"
 		<< "interpolation_grain=" << InterpolationPolicy::Name(s.interpolationGrain) << "\n"
 		<< "dejudder_source_warp_filter=" << (s.dejudderSourceWarpCatmull ? "catmull" : "bilinear") << "\n"
-		<< "deband_vp_grain_guard=" << (s.debandVpGrainGuard ? "on" : "off") << "\n"
+		<< "deband_vp_grain_guard=" << (!s.debandVpGrainGuard ? "off" : s.debandVpGrainSplit ? "on" : "veto") << "\n"
+		<< "deband_vp_exclusive=" << (s.debandVpExclusive ? "on" : "off") << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
 		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"

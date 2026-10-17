@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 // Film-grain preservation (owner 2026-10-17: film grain is never averaged or
 // interpolated away; the goal is a faithful image with detail as if it were
@@ -60,14 +62,103 @@ vec4 NAME(vec2 p) \
 	// a full-resolution 19-tap pass.
 	constexpr double kLowSigma = 3.0;
 	constexpr int kLowRadius = 5;   // half-resolution taps each side
-	inline double LowHalfSigma() { return std::sqrt(kLowSigma * kLowSigma - 0.25) / 2.0; }
-	inline double LowWeight(int i)
+	// Grain is at least pixel-sized: a source taller than the 2160-line reference
+	// carries proportionally larger grain (and picture features) in its pixels, so
+	// pixel distances meant for grain grow with the plane's height above 2160 lines;
+	// below it they stay (a 1080-line plane's grain is not half a pixel). 07-scaling
+	// L7 / 15-intent C15 (vp-general-not-fixed: distances as a share of height,
+	// reference 2160).
+	inline double GrainScale(double planeLines)
 	{
-		const double s = LowHalfSigma();
+		return planeLines > 2160.0 ? planeLines / 2160.0 : 1.0;
+	}
+	// The interpolator's split for a plane of planeLines lines: kLowSigma at 2160
+	// lines and below, by height above.
+	inline double LowSigmaFor(double planeLines) { return kLowSigma * GrainScale(planeLines); }
+	// The half-resolution sigma and tap radius of the low band for a full-resolution
+	// sigma (the 2x2 box adds 0.25 px^2 per axis): kLowRadius at kLowSigma (3.4
+	// half-resolution sigmas), the same reach for a wider split.
+	inline double LowHalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
+	inline double LowHalfSigma() { return LowHalfSigma(kLowSigma); }
+	inline int LowRadius(double sigma)
+	{
+		const int r = static_cast<int>(std::ceil(kLowRadius * LowHalfSigma(sigma) / LowHalfSigma(kLowSigma) - 1e-9));
+		return (std::max)(kLowRadius, r);
+	}
+	inline double LowWeight(int i, double sigma)
+	{
+		const double s = LowHalfSigma(sigma);
+		const int radius = LowRadius(sigma);
 		double sum = 0.0;
-		for (int k = -kLowRadius; k <= kLowRadius; ++k)
+		for (int k = -radius; k <= radius; ++k)
 			sum += std::exp(-0.5 * k * k / (s * s));
 		return std::exp(-0.5 * i * i / (s * s)) / sum;
+	}
+	inline double LowWeight(int i) { return LowWeight(i, kLowSigma); }
+	// The GLSL of the low band's weights: gp_w(i), i in -GP_R..GP_R.
+	inline std::string LowWeightsGlsl(double sigma)
+	{
+		const int radius = LowRadius(sigma);
+		const std::string taps = std::to_string(2 * radius + 1);
+		std::string s = "#define GP_R " + std::to_string(radius) + "\nfloat gp_w(int i)\n{\n    float w[" + taps + "] = float[" + taps + "](";
+		for (int i = -radius; i <= radius; ++i)
+		{
+			char number[32];
+			snprintf(number, sizeof(number), "%.9g", LowWeight(i, sigma));
+			s += number;
+			if (i < radius)
+				s += ", ";
+		}
+		return s + ");\n    return w[i + GP_R];\n}\n";
+	}
+
+	// VpDebander's grain split (deband_vp_grain_guard split, hunt 2 07-scaling H1):
+	// each pixel is the sum of a low band (this Gaussian, held at half resolution
+	// like the interpolator's) and a residual. The residual is the grain and noise
+	// and passes untouched; only the low band is debanded. Sigma 6 px (grain scale
+	// at 2160 lines and below): white grain keeps 0.98x or more, soft (0.7 px) grain
+	// 0.96x or more with the low band averaged away entirely (a 3 px split costs
+	// soft grain 6 %).
+	// A band edge is sharp, so part of each step lies in the residual (a dipole
+	// across the edge). It is put back into the low band where it is coherent along
+	// the edge: the residual averaged along the local contour (a Gaussian of sigma
+	// kSplitAlongSigma px, taps every kSplitAlongStep px; the direction from the
+	// low band's structure tensor over kSplitTensorBlock px blocks) is a step's
+	// dipole whole, and grain's average along a line is small next to its RMS along
+	// that line. It is added where the contour is coherent (kSplitCoherence*) and
+	// consistent (|mean| / RMS of the residual along the line, kSplitConsistency*).
+	// CPU model (hunt 2, the GrainPreservationTests pictures): 8-bit steps 16 px wide in
+	// a 10-bit signal keep 3-28 % of the band fundamental with noise of 1-2 codes RMS
+	// (white or soft) or +/-1-step toggles on 10-20 % of the pixels (the spatial-share
+	// veto: 100 % at 2 codes, 91 % with 20 % toggles), clean bands 3 %; the noise passes
+	// at 0.96x or more and grain of 0.5-4 8-bit codes keeps 0.96-1.02x of its RMS.
+	// Cost: three half-resolution passes, a tensor pass per block, and 33 taps along
+	// the contour (two bilinear reads each) in the deband pass.
+	constexpr double kSplitSigma = 6.0;
+	constexpr double kSplitTensorBlock = 8.0;   // full-resolution px (a whole number of half-resolution px)
+	constexpr double kSplitAlongSigma = 16.0;
+	constexpr double kSplitAlongStep = 2.0;
+	constexpr int kSplitAlongTaps = 16;          // each side
+	constexpr double kSplitCoherenceLo = 0.5, kSplitCoherenceHi = 0.8;
+	constexpr double kSplitConsistencyLo = 0.3, kSplitConsistencyHi = 0.55;
+	constexpr double kSplitTensorEps = 1e-6;    // codes^2 per px^2: a flat block is not coherent
+	// The tensor block in half-resolution px for a plane scale.
+	inline int SplitTensorHalfBlock(double scale)
+	{
+		return (std::max)(1, static_cast<int>(std::lround(kSplitTensorBlock * scale / 2.0)));
+	}
+	// The along-contour weights (normalised), k in -kSplitAlongTaps..kSplitAlongTaps;
+	// tap k sits k x kSplitAlongStep x scale px from the pixel.
+	inline double SplitAlongWeight(int k)
+	{
+		double sum = 0.0;
+		for (int i = -kSplitAlongTaps; i <= kSplitAlongTaps; ++i)
+		{
+			const double d = i * kSplitAlongStep / kSplitAlongSigma;
+			sum += std::exp(-0.5 * d * d);
+		}
+		const double d = k * kSplitAlongStep / kSplitAlongSigma;
+		return std::exp(-0.5 * d * d) / sum;
 	}
 
 	// Gain limits of the per-block energy match (the interpolator's high band):
