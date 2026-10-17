@@ -53,6 +53,8 @@
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
+#include <vprenderer/InterpolationPolicy.h>
+#include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
@@ -1046,6 +1048,15 @@ namespace
 		// taste; on known pans the engine reads the speed exactly where the search overshot
 		// medium pans by a step, so the taste's roll-off and camera follow the true speed.
 		bool opticalFlowGlobal = true;
+		// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md; owner
+		// defaults 2026-10-16, open for confirmation): off | auto (a non-integer
+		// source/display ratio only) | always (smooth-motion parity for video-class
+		// sources); where the vectors are untrusted hold (the nearest frame) or blend;
+		// gap fill off; the film / video classification legacy (IsFilmLike) or measured.
+		InterpolationPolicy::Mode interpolation = InterpolationPolicy::Mode::Off;
+		InterpolationPolicy::Fallback interpolationFallback = InterpolationPolicy::Fallback::Hold;
+		bool interpolationFillGaps = false;
+		InterpolationPolicy::SourceClass sourceClass = InterpolationPolicy::SourceClass::Legacy;
 		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
 		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
 		// shader list says). auto (unset): as before - the shader list and the dithering setting.
@@ -1241,7 +1252,9 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
+			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
+			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2417,6 +2430,38 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid source_resolution_text_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionTextGuard ? "on" : "off");
+		}
+		if (tryChoice("interpolation", raw))
+		{
+			if (raw == "off" || raw == "auto" || raw == "always")
+				settings.interpolation = InterpolationPolicy::ParseMode(raw);
+			else
+				DebugLog::Log("profile '%s': invalid interpolation '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolation));
+		}
+		if (tryChoice("interpolation_fallback", raw))
+		{
+			if (raw == "hold" || raw == "blend")
+				settings.interpolationFallback = InterpolationPolicy::ParseFallback(raw);
+			else
+				DebugLog::Log("profile '%s': invalid interpolation_fallback '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationFallback));
+		}
+		if (tryChoice("interpolation_fill_gaps", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.interpolationFillGaps = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid interpolation_fill_gaps '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.interpolationFillGaps ? "on" : "off");
+		}
+		if (tryChoice("source_class", raw))
+		{
+			if (raw == "legacy" || raw == "measured")
+				settings.sourceClass = InterpolationPolicy::ParseSourceClass(raw);
+			else
+				DebugLog::Log("profile '%s': invalid source_class '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.sourceClass));
 		}
 		if (tryChoice("optical_flow", raw))
 		{
@@ -4835,6 +4880,17 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t dejudderMaskSequence[2] = { 0, 0 };
 	uint64_t dejudderMaskEpoch[2] = { 0, 0 };   // the motion epoch each slot's mask was made in
 	bool dejudderExtrasAllowed = false;
+	// VP's 50/60p interpolation (docs/VP-interpolator-50-60-plan.md step 4, Stage A):
+	// the refreshes a source frame owns after its own present show the interpolated
+	// picture at their true phase instead of repeating it. The extras' machinery
+	// (timing, phase, presents) with the interpolator in place of the warp; one or
+	// the other per frame (film class stays with the de-judder).
+	std::unique_ptr<Interpolator::FrameInterpolator> frameInterpolator;
+	InterpolationPolicy::Decision interpolationDecision;
+	bool interpolating = false;              // this frame's extras interpolate
+	int interpolationReasonLogged = -1;
+	ULONGLONG interpolationLogTick = 0;
+	unsigned long long interpolatedPresents = 0, interpolationFailures = 0;
 	bool dejudderMaskParamSet = false;
 	bool grainToleranceParamSet = false;
 	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
@@ -4894,7 +4950,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderStatusTick = now;
 		std::string text;
 		const bool on = activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0 ||
-			activeSettings.occlusionMask;
+			activeSettings.occlusionMask || activeSettings.interpolation != InterpolationPolicy::Mode::Off;
 		if (on)
 		{
 			char line[260];
@@ -4905,8 +4961,15 @@ struct LibplaceboVideoRenderer::Impl
 				std::snprintf(dither, sizeof(dither), ", dither %.2f ms (%s)",
 					st.ditherLastExternal ? st.ditherMsExternal : st.ditherMsOwn,
 					st.ditherLastExternal ? "de-judder vectors" : "own search");
-			if (dejudderReason != DejudderPolicy::Reason::Active)
+			if (activeSettings.interpolation != InterpolationPolicy::Mode::Off && !interpolating &&
+				dejudderReason != DejudderPolicy::Reason::Active)
+				std::snprintf(line, sizeof(line), "interpolation: %s", InterpolationPolicy::Name(interpolationDecision.reason));
+			else if (dejudderReason != DejudderPolicy::Reason::Active)
 				std::snprintf(line, sizeof(line), "%s", DejudderPolicy::Name(dejudderReason));
+			else if (interpolating)
+				std::snprintf(line, sizeof(line), "interpolating (%s), ratio %.3f, +%d pictures %.1f ms, late %llu, full %llu, held %llu%s",
+					InterpolationPolicy::Name(activeSettings.interpolationFallback), st.cadenceRatio, st.lastExtrasPerFrame,
+					st.lastMs, st.late + st.nextFrameLate, st.swapchainFull, st.holds, dither);
 			else if (!dejudderExtrasAllowed)
 				std::snprintf(line, sizeof(line), "mask only (cadence %.2f)", st.cadenceRatio);
 			else
@@ -4962,6 +5025,7 @@ struct LibplaceboVideoRenderer::Impl
 	void ReleaseDejudder()
 	{
 		dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
+		frameInterpolator.reset();
 		dejudder.reset();
 		// 6d: the cache and the rendered warp hold textures (and a dispatch)
 		// of this device (audit stage10-6d blocker 1).
@@ -9262,6 +9326,10 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
 		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
 		changed(current.opticalFlowGlobal != next.opticalFlowGlobal, "optical_flow_global");
+		changed(current.interpolation != next.interpolation, "interpolation");
+		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
+		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
+		changed(current.sourceClass != next.sourceClass, "source_class");
 		changed(current.temporalDither != next.temporalDither, "temporal_dither");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
@@ -12685,6 +12753,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Off and settled: today's path, nothing else is done.
 		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
 			!activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
+			activeSettings.interpolation == InterpolationPolicy::Mode::Off && !interpolating &&
 			dejudderReason == DejudderPolicy::Reason::Off &&
 			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0])
 		{
@@ -12724,12 +12793,46 @@ struct LibplaceboVideoRenderer::Impl
 		in.planeFormatsUsable = nativeRgb || (dejudderRgbLuma ? usable(dejudderRgbLuma) :
 			(usable(textures[0]) && usable(textures[1])));
 		in.smoothMotion = smoothMotionEngine || temporalRenderer.Mixing();
-		const DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
+		DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
 		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
 		// Delta 10 (general): the strength the extras run at, and on an even
 		// cadence its cycle N (extras at the exact phases k/N).
 		dejudderEffectiveStrength = static_cast<float>(DejudderPolicy::EffectiveStrength(in));
 		dejudderEvenCycle = DejudderPolicy::EvenCycle(DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz));
+		// 50/60p interpolation (plan step 2 / 4): from the same measured rates; it takes
+		// a source the de-judder does not (exclusive per frame).
+		{
+			InterpolationPolicy::Input ii;
+			ii.mode = activeSettings.interpolation;
+			ii.sourceClass = activeSettings.sourceClass;
+			ii.sourceHz = in.sourceHz;
+			ii.displayHz = in.displayHz;
+			ii.pulldownLocked = pulldownFilmHz > 0.0;
+			ii.dejudderStrength = in.strength;
+			ii.dejudderStrengthEven = in.strengthEven;
+			ii.dejudderEvenIncludes1001 = in.evenIncludes1001;
+			ii.smoothMotion = in.smoothMotion;
+			ii.lowLatency = in.lowLatency;
+			ii.interlaced = in.interlaced;
+			ii.nativeRgb = nativeRgb || dejudderRgbLuma != nullptr;   // RGB holds (owner)
+			ii.subtitleComposed = dejudderSubtitleComposed;           // the last frame's; the extras check again
+			ii.haveNext = in.haveNext && in.nextMatches;
+			interpolationDecision = InterpolationPolicy::Decide(ii);
+			interpolating = interpolationDecision.Interpolates();
+			LogInterpolationDecision(ii);
+		}
+		if (interpolating)
+		{
+			// The estimate runs for the interpolator whatever the de-judder's cadence
+			// rules say (a video-rate source); the checks the policy has not made.
+			reason = !in.planeFormatsUsable ? DejudderPolicy::Reason::PlaneFormat :
+				!in.haveNext ? DejudderPolicy::Reason::NoNextFrame :
+				!in.nextMatches ? DejudderPolicy::Reason::NextFrameDiffers : DejudderPolicy::Reason::Active;
+			dejudderExtrasAllowed = true;
+			dejudderEffectiveStrength = 1.0f;   // the true phase: no taste
+			const int whole = InterpolationPolicy::WholeRatio(interpolationDecision.ratio);
+			dejudderEvenCycle = whole >= 2 ? whole : 0;   // always: exact k/N at a whole ratio
+		}
 		if (in.sourceHz > 0.0 && in.displayHz > 0.0)
 			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
 		if (reason == DejudderPolicy::Reason::VideoRateMaskOnly && !dejudderMaskRateLogged)
@@ -12831,6 +12934,28 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderEstimatedSequence = sourceSequence;
 			dejudderEstimatedEpoch = estimateEpoch;
 		}
+	}
+
+	// Interpolation: the decision when it changes (at most one line per 5 s), with the
+	// measured rates it came from.
+	void LogInterpolationDecision(const InterpolationPolicy::Input& in)
+	{
+		if (in.mode == InterpolationPolicy::Mode::Off && interpolationReasonLogged < 0)
+			return;
+		const int reason = static_cast<int>(interpolationDecision.reason);
+		if (reason == interpolationReasonLogged)
+			return;
+		const ULONGLONG now = GetTickCount64();
+		if (interpolationLogTick != 0 && now - interpolationLogTick < 5000)
+			return;
+		interpolationLogTick = now;
+		interpolationReasonLogged = reason;
+		DebugLog::Log("Interpolation: %s (interpolation=%s, fallback=%s, source_class=%s, source %.3f Hz%s, display %.3f Hz, "
+			"ratio %.4f, %s; %llu interpolated pictures so far)",
+			InterpolationPolicy::Name(interpolationDecision.reason), InterpolationPolicy::Name(in.mode),
+			InterpolationPolicy::Name(activeSettings.interpolationFallback), InterpolationPolicy::Name(in.sourceClass),
+			in.sourceHz, in.pulldownLocked ? " (pulldown film clock)" : "", in.displayHz, interpolationDecision.ratio,
+			interpolationDecision.filmLike ? "film-like" : "video", interpolatedPresents);
 	}
 
 	// Estimate ahead: at most one line per 5 s, with the paths so far and the
@@ -13300,7 +13425,9 @@ struct LibplaceboVideoRenderer::Impl
 		params.num_hooks = static_cast<int>(hooks.size());
 		// 6d: with A's picture cached, the extras render it warped, with
 		// only the OUTPUT-stage hooks (no repair unless still needed).
-		const pl_tex cached = dejudderCache.Texture(f.sourceSequence);
+		// Interpolation renders the source path only (the interpolated planes go through
+		// the whole chain); a composed or RGB picture holds (owner).
+		const pl_tex cached = interpolating ? nullptr : dejudderCache.Texture(f.sourceSequence);
 		// The composed picture exists only as the cache: without it the source
 		// warp would show the subtitle where it was.
 		if (!sourcePlanes && !cached)
@@ -13430,6 +13557,7 @@ struct LibplaceboVideoRenderer::Impl
 			const auto extraStart = SteadyClock::now();
 			// Delta 10 (general): on an even cadence of N refreshes the k-th
 			// extra is at exactly k/N.
+			// Interpolation: the picture at the refresh's true phase (strength 1).
 			const float shift = strength * static_cast<float>(dejudderEvenCycle > 0 ?
 				static_cast<double>(extras + 1) / dejudderEvenCycle : decision.delta);
 			pl_frame image = *f.image;
@@ -13459,7 +13587,36 @@ struct LibplaceboVideoRenderer::Impl
 			else
 			{
 				Dejudder::Planes warped;
-				if (!dejudder->Warp(a, shift, warped, true))
+				if (interpolating)
+				{
+					// Stage A: A and B (the next frame's planes, uploaded for the estimate)
+					// at the phase, with the field the warps read; B's occlusion mask when
+					// it is current.
+					Dejudder::Planes b = a;
+					b.luma = dejudderNextTextures[0];
+					b.chroma = dejudderNextTextures[1];
+					Interpolator::Motion motion;
+					motion.field = warpField;
+					motion.frameTrust = warpTrust;
+					motion.subField = warpSub;
+					motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+					for (int slot = 0; slot < 2; ++slot)
+						if (dejudderMaskSequence[slot] == f.nextSourceSequence && f.nextSourceSequence != 0 &&
+							motionValidity.Current(dejudderMaskEpoch[slot]))
+							motion.occlusionB = dejudder->Occlusion(slot);
+					if (!frameInterpolator)
+						frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+					if (!frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped))
+					{
+						if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
+							DebugLog::Log("Interpolation: failed (%s; %llu failures)", frameInterpolator->LastError().c_str(),
+								interpolationFailures);
+						failure = "interpolation failed";
+						break;
+					}
+					++interpolatedPresents;
+				}
+				else if (!dejudder->Warp(a, shift, warped, true))
 				{
 					failure = "warp failed";
 					break;
@@ -19472,7 +19629,7 @@ struct LibplaceboVideoRenderer::Impl
                 dejudderGeometry = geometry;
                 dejudderGeometryValid = true;
             }
-            if (mapped && activeSettings.dejudderWarpRendered)
+            if (mapped && activeSettings.dejudderWarpRendered && !interpolating)
             {
                 dejudderCache.Arm(sourceSequence);
                 frameHooks.push_back(dejudderCache.Hook());
@@ -25533,6 +25690,10 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
 		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
 		<< "optical_flow_global=" << (s.opticalFlowGlobal ? "on" : "off") << "\n"
+		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"
+		<< "interpolation_fallback=" << InterpolationPolicy::Name(s.interpolationFallback) << "\n"
+		<< "interpolation_fill_gaps=" << (s.interpolationFillGaps ? "on" : "off") << "\n"
+		<< "source_class=" << InterpolationPolicy::Name(s.sourceClass) << "\n"
 		<< "temporal_dither=" << s.temporalDither << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
