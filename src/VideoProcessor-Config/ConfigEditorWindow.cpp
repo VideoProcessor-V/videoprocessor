@@ -8228,13 +8228,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto* heading = new QLabel(QStringLiteral("<b>Repair dropped frames / hiccups</b>"));
             heading->setObjectName(controlName(sectionPrefix, QStringLiteral("hiccup_repair_heading")));
             form->addRow(heading);
+            // Post-merge audit 2026-10-17: the fill runs only while interpolating (the
+            // renderer's fillGap needs it); the separation comes with render-ahead.
+            form->addRow(QString(), helpLabel(QStringLiteral(
+                "Currently works only while motion smoothing is on; standalone hiccup repair is coming.")));
         }
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
             { QStringLiteral("off"), QStringLiteral("on") });
         fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
         fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (pair across 1-3 missed frames)"));
         fillGaps->setToolTip(QStringLiteral(
-            "Hiccup repair, separate from motion smoothing. When a stream loses one to three frames, On pairs the "
+            "Currently works only while motion smoothing is on; standalone hiccup repair is coming. "
+            "When a stream loses one to three frames, On pairs the "
             "frames either side of the gap and fills the missing refreshes with pictures at their true time (the "
             "motion is checked as always; untrusted areas hold). Off (default) keeps the rule that no motion is "
             "paired across a gap: the last frame stays on screen until the next arrives. (Key: interpolation_fill_gaps.)"));
@@ -13094,8 +13099,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* lookaheadMs = numberControl(led, QStringLiteral("led_lookahead_ms"), 0, 2000, 0, 10, 0,
         QStringLiteral("queue depth"));
     lookaheadMs->setToolTip(QStringLiteral(
-        "How far ahead the LED looks, in milliseconds (converted with the measured source rate). 0 (default) = as "
-        "deep as the queue's look-ahead walk."));
+        "Caps how far ahead the LED looks, in milliseconds (converted with the measured source rate): it can only "
+        "shorten the LED look-ahead, never deepen it. 0 (default) = no cap, as deep as the queue's look-ahead walk. "
+        "A deeper renderer walk is not wired yet, so values beyond the queue's depth change nothing."));
     assistForm->addRow(QStringLiteral("LED look-ahead (ms)"), lookaheadMs);
     // Restore switch (bug hunt 2026-10-17): led_wtw_passthrough.
     auto* wtw = bindCheckField(QStringLiteral("Above-white keeps its value under a boost (fix under test)"), led,
