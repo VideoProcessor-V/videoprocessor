@@ -49,6 +49,16 @@ using VideoProcessorLibplaceboCreateRendererFn = IVideoRenderer* (__cdecl *)(
 using VideoProcessorLibplaceboDestroyRendererFn = void (__cdecl *)(
 	IVideoRenderer* renderer);
 
+// Optional export (VP Renderer filter, 2026-10-17), outside the versioned
+// contract: resolve it with GetProcAddress and tolerate its absence. Ends an
+// LED drive the filter process is holding between graphs (file_led_holdover_ms,
+// led/LedDriveHoldover.h) through its normal stop, which restores full light.
+// Returns 1 when one was held. The filter calls it when it is going away for
+// good (never from DllMain).
+static constexpr const char* VP_LIBPLACEBO_END_HELD_LED_DRIVE_EXPORT =
+	"VideoProcessorLibplaceboEndHeldLedDrive";
+using VideoProcessorLibplaceboEndHeldLedDriveFn = int (__cdecl *)();
+
 static constexpr const char* VP_LIBPLACEBO_DIAGNOSTIC_EXPORT = "VideoProcessorLibplaceboConfigureAnalysisDiagnosticSink";
 using VideoProcessorLibplaceboConfigureDiagnosticFn = void (__cdecl *)(void*,
     AnalysisDiagnosticTrace::RecordSink, AnalysisDiagnosticTrace::FrameSink,

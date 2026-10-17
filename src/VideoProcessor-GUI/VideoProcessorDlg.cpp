@@ -81,6 +81,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <MainConfigSchema.h>
 #include <led/LedShutdownRestore.h>
 #include <UnifiedProfileRuntime.h>
+#include <SourceRuleVariable.h>
 
 
 #include "VideoProcessorDlg.h"
@@ -12822,6 +12823,13 @@ CVideoProcessorDlg::GetUnifiedProfileSourceLookup()
 		{
 			if (content.empty()) return false;
 			value = content;
+			return true;
+		}
+		// VP Renderer filter 2026-10-17: the capture app is always the capture
+		// source; the DirectShow filter's FileHost reports `file`.
+		if (name == SourceRuleVariable::kName)
+		{
+			value = SourceRuleVariable::kCapture;
 			return true;
 		}
 		if (name == "renderer")

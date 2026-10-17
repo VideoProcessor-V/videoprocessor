@@ -185,6 +185,10 @@
     <ClCompile Include="DolbyVisionTrimsTests.cpp" />
     <ClCompile Include="SceneDescriptorTests.cpp" />
     <ClCompile Include="ContentIntentTests.cpp" />
+    <ClCompile Include="FileSourceRuleVariableTests.cpp" />
+    <ClCompile Include="FileHostTests.cpp" />
+    <ClCompile Include="LedDriveArbiterTests.cpp" />
+    <ClCompile Include="LedDriveHoldoverTests.cpp" />
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp" />
     <ClCompile Include="MovingPictureTransitionTests.cpp" />
     <ClCompile Include="SubtitleBoxDetectorTests.cpp" />

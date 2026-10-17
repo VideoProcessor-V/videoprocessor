@@ -5,6 +5,7 @@
 #include <DebugLog.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <vprenderer/LibplaceboVideoRenderer.h>
+#include <led/LedDriveHoldover.h>
 
 
 extern "C" __declspec(dllexport) uint32_t __cdecl
@@ -92,6 +93,20 @@ extern "C" __declspec(dllexport) void __cdecl
 VideoProcessorLibplaceboDestroyRenderer(IVideoRenderer* renderer)
 {
 	delete renderer;
+}
+
+// VP Renderer filter (2026-10-17): see VP_LIBPLACEBO_END_HELD_LED_DRIVE_EXPORT.
+extern "C" __declspec(dllexport) int __cdecl
+VideoProcessorLibplaceboEndHeldLedDrive()
+{
+	try
+	{
+		return LedDrive::EndHeldLedDrive("the VP Renderer filter is closing") ? 1 : 0;
+	}
+	catch (...)
+	{
+		return 0;
+	}
 }
 
 extern "C" __declspec(dllexport) bool __cdecl VideoProcessorLibplaceboIsBeta()

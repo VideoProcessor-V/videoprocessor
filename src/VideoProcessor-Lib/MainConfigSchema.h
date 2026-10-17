@@ -16,6 +16,15 @@
 // dynamically selectable by renderer profile rules.
 namespace MainConfigSchema
 {
+	// VP Renderer filter keys ([general]); defaults and ranges shared with
+	// FileHost and the Config editor.
+	static const int FileAvOffsetDefaultMs = 0;
+	static const int FileAvOffsetMinMs = -2000;
+	static const int FileAvOffsetMaxMs = 2000;
+	static const int FileLedHoldoverDefaultMs = 3000;
+	static const int FileLedHoldoverMinMs = 0;
+	static const int FileLedHoldoverMaxMs = 30000;
+
 	inline bool IsRendererAliasName(const std::string& name)
 	{
 		if (name.empty() || name.size() > 64 || name == "vprenderer" ||
@@ -127,7 +136,13 @@ namespace MainConfigSchema
 			// recoverable faults restart the device internally (false = end
 			// capture, as before).
 			ConfigSchema::Boolean("magewell_recover_faults"),
-			ConfigSchema::Boolean("capture_display_fixes")   // restore switch, post-merge audit 2026-10-17
+			ConfigSchema::Boolean("capture_display_fixes"),   // restore switch, post-merge audit 2026-10-17
+			// VP Renderer DirectShow filter (2026-10-17), read by its FileHost only:
+			// audio/video offset for file playback (positive = picture later) and how
+			// long the filter process keeps the LED drive between graphs (0 = stop at
+			// once). Kept last: Validate() indexes the rules above by position.
+			ConfigSchema::Integer("file_av_offset_ms", FileAvOffsetMinMs, FileAvOffsetMaxMs),
+			ConfigSchema::Integer("file_led_holdover_ms", FileLedHoldoverMinMs, FileLedHoldoverMaxMs)
 		};
 	}
 
