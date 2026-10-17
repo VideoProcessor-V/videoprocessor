@@ -611,7 +611,21 @@ namespace Pulldown
 		// frame (ideal = baseTime + (n - baseIndex) / filmHz), so the clock
 		// stays continuous and the lock is kept. Off: ideal = n / filmHz,
 		// which jumps by n * (1/f1 - 1/f0) (the 2026-10-16 behaviour).
-		void SetRebaseOnRateChange(bool on) { m_rebase = on; }
+		// Post-merge audit 2026-10-17: toggled while the clock is in use (mid-lock), its
+		// state belongs to the other form (the re-based ideal or n / filmHz): the clock
+		// starts over (Reset) and the call returns true, so the caller marks a pulldown
+		// discontinuity (no pair across it), as the pulldown_fixes toggle does.
+		bool SetRebaseOnRateChange(bool on)
+		{
+			if (on == m_rebase)
+				return false;
+			m_rebase = on;
+			if (!m_haveLast && m_offsets.empty())
+				return false;   // nothing timed yet
+			Reset();
+			return true;
+		}
+		bool InUse() const { return m_haveLast || !m_offsets.empty(); }
 		// Relative change of the film rate that re-bases.
 		static constexpr double kRebaseTolerance = 1e-6;
 		unsigned long long Rebases() const { return m_rebases; }

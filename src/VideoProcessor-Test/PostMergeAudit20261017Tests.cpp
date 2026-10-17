@@ -4,6 +4,7 @@
 #include <led/LedDriveConfig.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 #include <vprenderer/DejudderPolicy.h>
+#include <vprenderer/PulldownDetector.h>
 
 #include <string>
 #include <vector>
@@ -106,6 +107,36 @@ namespace PostMergeAudit20261017Test
 			// Without the clock's rate: the old 2-8 periods.
 			Assert::IsTrue(Classify(8 * 1000, 1000).kind == Kind::Missed);
 			Assert::IsTrue(Classify(9 * 1000, 1000).kind == Kind::Break);
+		}
+	};
+
+	// B5: FilmClock::SetRebaseOnRateChange toggled mid-lock starts the clock over (the
+	// caller then marks a pulldown discontinuity); before, a re-based ideal survived
+	// into the plain form and the clock jumped.
+	TEST_CLASS(FilmClockToggleTests)
+	{
+	public:
+		TEST_METHOD(ToggleMidLockResetsTheClock)
+		{
+			Pulldown::FilmClock clock;
+			Assert::IsFalse(clock.SetRebaseOnRateChange(true), L"nothing timed yet: no discontinuity");
+			Assert::IsFalse(clock.SetRebaseOnRateChange(true), L"unchanged");
+			const uint64_t start = 200000;
+			const double t0 = 5000.0;
+			double arrival = t0;
+			for (int i = 0; i < 100; ++i)
+			{
+				const double hz = i < 50 ? 24.0 : 23.976;   // a rate change re-bases
+				arrival = t0 + i / 23.976;
+				clock.Time(start + i, arrival, hz);
+			}
+			Assert::AreEqual(1ULL, clock.Rebases());
+			Assert::IsTrue(clock.InUse());
+			Assert::IsTrue(clock.SetRebaseOnRateChange(false), L"toggled mid-lock: a discontinuity");
+			Assert::IsFalse(clock.InUse(), L"the clock started over");
+			// Fresh: the next frame is timed at its arrival, not from the stale re-based base.
+			const double next = t0 + 100 / 23.976;
+			Assert::AreEqual(next, clock.Time(start + 100, next, 23.976), 1e-9);
 		}
 	};
 

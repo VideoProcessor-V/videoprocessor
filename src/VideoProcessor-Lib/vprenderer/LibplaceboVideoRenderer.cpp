@@ -21777,7 +21777,14 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		}
 		// Bug hunt 2026-10-17 (timing_continuity_fixes): the film clock re-bases when
 		// the film rate (from signalHz: measured or nominal) changes mid-lock.
-		m_pulldownClock.SetRebaseOnRateChange(timingFixes);
+		// Post-merge audit 2026-10-17: toggled mid-lock, the clock starts over and no
+		// pair crosses the change.
+		if (m_pulldownClock.SetRebaseOnRateChange(timingFixes))
+		{
+			m_pulldown.MarkDiscontinuity();
+			DebugLog::Log("Pulldown: film clock re-basing %s (timing_continuity_fixes); clock restarted",
+				timingFixes ? "on" : "off");
+		}
 		const bool wasLocked = m_pulldown.Locked();
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
 		// D4: the counted misses keep the lock (verified over the next cycle).
