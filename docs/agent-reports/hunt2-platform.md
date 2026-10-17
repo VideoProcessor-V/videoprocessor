@@ -57,17 +57,15 @@ Lead branch: `fix/hunt2-platform`. It is based on merge-v1.4.02 `cd544707` with 
    - The v210 default feeds limited-range YCbCr into picture's extended-range carry, which is consistent with keeping BTB/WTW. R12B was full range and clipped.
 6. **Stale test.** `ConfigFileTests::DeckLinkYCbCr12CaptureChoice` still asserted the rgb12 default; it now expects v210. docs/audit-scope.md was updated (`0fa9e02c`).
 
-## Tests
+## Verification (local; GitHub account suspended, no CI)
 
-- Local x64 Release build without the Magewell SDK (the SDK is absent on this machine). VideoProcessor-GUI and VideoProcessor-Test both built.
-- Local tests, CPU only: ConfigFileTests and BugHunt2*, 198 of 198 passed. Before the stale-test fix, a wider BugHunt/proxy/reset/topology set gave 295 of 296.
-- test_build_identity.ps1: 27 of 27 passed.
-- No GPU tests were run.
-
-## CI
-
-- Run 39068079647, for tip `0fa9e02c`: the watch ended with a non-zero exit.
-- After that, the GitHub API returned "Your account was suspended" (HTTP 403), so I could not read the result or push this report. Treat CI as unverified.
+- Local x64 Release build without the Magewell SDK (`/p:VpCiNoMagewell=true`, the same as CI; the SDK is absent on this machine) of tip `ec36bfac`. GUI, Test, Config and ConfigTests built with 0 errors.
+- CPU tests, single-threaded, with no GPU classes. The filter covered BugHunt2*, BugHunt20261017*, LibplaceboPluginProxy, ConfigFileTests, RendererReset*, CaptureLayerAudit, DisplayTopology*, TimingClock*, DisplayRefresh*, DisplayMode*, ContentIntent*, PostMergeAudit*, Integration20261017*, CrashState* and RendererId*: 355 of 355 passed.
+- tools/test_build_identity.ps1: 27 of 27 passed.
+- tools/run_config_tests.ps1 -Shards 1, off screen: GATE PASSED.
+- Not run: the full CPU suite. Locally the libplacebo tests may use the real GPU, and GPU tests are the owner's/Claude's.
+- The last CI run, 39068079647 for tip 0fa9e02c, ended non-zero. The account was suspended before its log could be read.
+- No GPU tests were added.
 
 ## Deferred
 
