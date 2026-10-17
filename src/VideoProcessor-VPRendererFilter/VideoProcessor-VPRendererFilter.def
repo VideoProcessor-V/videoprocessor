@@ -1,0 +1,6 @@
+LIBRARY VPRendererFilter.ax
+EXPORTS
+	DllGetClassObject = VPRendererFilterDllGetClassObject PRIVATE
+	DllCanUnloadNow = VPRendererFilterDllCanUnloadNow PRIVATE
+	DllRegisterServer = VPRendererFilterDllRegisterServer PRIVATE
+	DllUnregisterServer = VPRendererFilterDllUnregisterServer PRIVATE
