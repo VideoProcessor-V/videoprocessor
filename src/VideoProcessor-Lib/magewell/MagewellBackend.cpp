@@ -1,5 +1,64 @@
 #include "pch.h"
 #include "MagewellBackend.h"
+
+#ifdef VP_NO_MAGEWELL
+// CI build without the proprietary MWCapture SDK headers (/p:VpCiNoMagewell=true,
+// MagewellSdk.props). The backend reports no devices; the default build is unchanged.
+namespace
+{
+    class NoMagewellDiscoverer final : public ACaptureDeviceDiscoverer
+    {
+    public:
+        explicit NoMagewellDiscoverer(ICaptureDeviceDiscovererCallback& callback)
+            : ACaptureDeviceDiscoverer(callback) {}
+        void Start() override {}
+        void Stop() override {}
+        HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
+        {
+            if (!ppv)
+                return E_INVALIDARG;
+            *ppv = nullptr;
+            if (iid != IID_IUnknown)
+                return E_NOINTERFACE;
+            *ppv = this;
+            AddRef();
+            return S_OK;
+        }
+        ULONG AddRef() override { return ++m_refCount; }
+        ULONG Release() override
+        {
+            const ULONG count = --m_refCount;
+            if (count == 0)
+                delete this;
+            return count;
+        }
+    private:
+        std::atomic<ULONG> m_refCount{ 0 };
+    };
+
+    std::atomic<bool> s_recoverFaults{ true };
+}
+
+namespace MagewellBackend
+{
+    CComPtr<ACaptureDeviceDiscoverer> CreateDiscoverer(ICaptureDeviceDiscovererCallback& callback)
+    {
+        return CComPtr<ACaptureDeviceDiscoverer>(new NoMagewellDiscoverer(callback));
+    }
+    void SetRecoverFaults(bool on) { s_recoverFaults = on; }
+    bool RecoverFaults() { return s_recoverFaults; }
+    CString UnavailableMessage(const CString& configuredDeviceName)
+    {
+        CString lower(configuredDeviceName);
+        lower.MakeLower();
+        if (lower.Find(TEXT("magewell")) < 0 && lower.Find(TEXT("pro capture")) < 0)
+            return CString();
+        return CString(TEXT("Magewell unavailable. This build was compiled without the Magewell backend."));
+    }
+    void AppendDeviceNames(std::vector<std::wstring>&) {}
+    std::vector<std::wstring> ConnectionNames(const std::wstring&) { return {}; }
+}
+#else
 #include "MagewellCaptureDeviceDiscoverer.h"
 #include "MagewellSdkInstance.h"
 #include "MagewellCaptureDevice.h"
@@ -87,3 +146,4 @@ namespace MagewellBackend
         return names;
     }
 }
+#endif // VP_NO_MAGEWELL
