@@ -170,6 +170,10 @@ public:
 	// naming them (ST 2086 commonly sends G,B,R). Assign by chromaticity:
 	// largest x is red, largest y of the remaining two is green, the last is
 	// blue. Outputs the source index of each primary.
+	// Bug hunt 2026-10-17: restart delay after recoverable capture fault
+	// number consecutiveFaults (1-based): 250 ms doubling, capped at 30 s.
+	static uint32_t RecoverableFaultBackoffMs(uint32_t consecutiveFaults);
+
 	static void OrderPrimariesByChromaticity(const double x[3], const double y[3],
 		int& redIndex, int& greenIndex, int& blueIndex);
 

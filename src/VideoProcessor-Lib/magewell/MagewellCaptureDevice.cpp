@@ -1115,9 +1115,11 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		if (++failures >= 5)
 			throw std::runtime_error(message);
 	};
+	// Declared here so unsupportedSignal (above recoverableFault) can see it.
+	bool validPending = false;
 	const auto unsupportedSignal = [&](const char* reason)
 	{
-		if (haveState)
+		if (haveState && !validPending)  // Bug hunt 2026-10-17: invalid already published
 			PublishInvalidVideoState(captureRunToken);
 		if (capturing)
 		{
@@ -1137,23 +1139,25 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 	// for 2 s, a failed MWStartVideoCapture, the capture memory budget, a
 	// slow frame copy) used to throw out of the thread and needed a manual
 	// Restart. Handle them like an unsupported signal: stop, drop the pool,
-	// forget the state, back off and try again from the signal read. Logged
-	// at most once per 10 s with a count; the GUI error is posted once per
-	// distinct reason, as for unsupported signals.
+	// forget the state, back off and try again from the signal read.
+	// Follow-up: VP is told "invalid" once per fault burst and is not told
+	// "valid" again until the first complete frame after a restart has
+	// arrived (validPending). A locked source sending no frames therefore
+	// stays steadily invalid while the device restarts stay internal, with a
+	// back-off growing to 30 s (RecoverableFaultBackoffMs). One log line per
+	// burst, one on recovery; the GUI error is posted once per burst.
 	unsigned int droppedForBudget = 0;
 	auto lastBudgetDropLog = std::chrono::steady_clock::time_point();
 	bool budgetDropLogged = false;
 	bool budgetStarving = false;
 	auto budgetStarvingSince = std::chrono::steady_clock::time_point();
 	unsigned int recoverableFaults = 0;  // consecutive, reset by a delivered frame
-	unsigned int recoverableFaultsSinceLog = 0;
 	auto recoverableRetryAfter = std::chrono::steady_clock::time_point();
-	auto lastRecoverableLog = std::chrono::steady_clock::time_point();
-	bool recoverableLogged = false;
 	const auto recoverableFault = [&](const char* reason)
 	{
-		if (haveState)
+		if (haveState && !validPending)
 			PublishInvalidVideoState(captureRunToken);
+		validPending = true;
 		if (capturing)
 		{
 			m_sdkInstance->Api().MWStopVideoCapture(channel);
@@ -1164,24 +1168,15 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		lastDeliveredFrameStart = -1;
 		budgetStarving = false;
 		++recoverableFaults;
-		++recoverableFaultsSinceLog;
-		// 250 ms doubling to a 4 s ceiling while faults repeat.
-		const unsigned int shift = (std::min)(recoverableFaults - 1, 4u);
-		const auto backoff = std::chrono::milliseconds(250u << shift);
-		const auto now = std::chrono::steady_clock::now();
-		recoverableRetryAfter = now + backoff;
-		if (!recoverableLogged ||
-			now - lastRecoverableLog >= std::chrono::seconds(10))
-		{
+		const auto backoff = std::chrono::milliseconds(
+			RecoverableFaultBackoffMs(recoverableFaults));
+		recoverableRetryAfter = std::chrono::steady_clock::now() + backoff;
+		if (recoverableFaults == 1)
 			DebugLog::Log(
-				"Magewell recoverable capture fault: %s; capture restarts in %lld ms "
-				"(consecutive %u, %u since last report)",
+				"Magewell recoverable capture fault: %s; video held invalid, "
+				"device restarts internally (first in %lld ms, back-off to %u ms)",
 				reason, static_cast<long long>(backoff.count()),
-				recoverableFaults, recoverableFaultsSinceLog);
-			recoverableLogged = true;
-			lastRecoverableLog = now;
-			recoverableFaultsSinceLog = 0;
-		}
+				RecoverableFaultBackoffMs(~0u));
 		if (lastUnsupportedReason != reason)
 		{
 			lastUnsupportedReason = reason;
@@ -1324,7 +1319,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 
 			if (!signal.locked)
 			{
-				if (haveState)
+				if (haveState && !validPending)  // Bug hunt 2026-10-17
 				{
 					VideoStateComPtr invalidState = new VideoState();
 					invalidState->valid = false;
@@ -1445,10 +1440,15 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 				}
 				capturing = true;
 
-				if (!PublishVideoState(current, encoding, captureRunToken))
-					continue;
+				// Bug hunt 2026-10-17: after a recoverable fault the valid
+				// state waits for the first complete frame (see validPending).
+				if (!validPending)
+				{
+					if (!PublishVideoState(current, encoding, captureRunToken))
+						continue;
+					lastUnsupportedReason.clear();
+				}
 				haveState = true;
-				lastUnsupportedReason.clear();
 				lastFrameNotification = std::chrono::steady_clock::now();
 			}
 
@@ -1646,7 +1646,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		frameInfoFailures = 0;
         if(current.interlaced && frameInfo.bInterlaced && !frameInfo.bSegmentedFrame) {
             const auto order=frameInfo.bTopFieldFirst?DisplayMode::FieldOrder::TopFirst:DisplayMode::FieldOrder::BottomFirst;
-            if(current.fieldOrder!=order){current.fieldOrder=order;if(!PublishVideoState(current,encoding,captureRunToken))continue;}
+            if(current.fieldOrder!=order){current.fieldOrder=order;if(!validPending&&!PublishVideoState(current,encoding,captureRunToken))continue;}
         }
 
 		// Convert the card's P210 into the v210 the renderer expects. Done
@@ -1706,6 +1706,17 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		}
 
 
+		// Bug hunt 2026-10-17: the first complete frame after a recoverable
+		// fault is what makes the state valid again.
+		if (validPending)
+		{
+			if (!PublishVideoState(current, encoding, captureRunToken))
+				continue;
+			validPending = false;
+			lastUnsupportedReason.clear();
+			DebugLog::Log("Magewell capture recovered after %u restart(s)",
+				recoverableFaults);
+		}
 		const uint64_t counter = ++m_capturedVideoFrameCount;
 		recoverableFaults = 0;  // Bug hunt 2026-10-17
 
@@ -1855,4 +1866,14 @@ ULONG MagewellCaptureDevice::Release(void)
 		delete this;
 
 	return newRefValue;
+}
+
+
+// Bug hunt 2026-10-17: delay before the device restart after recoverable fault
+// number `consecutiveFaults` (1-based): 250 ms doubling, capped at 30 s.
+uint32_t MagewellCaptureDevice::RecoverableFaultBackoffMs(uint32_t consecutiveFaults)
+{
+	const uint32_t shift = consecutiveFaults == 0 ? 0 :
+		(std::min)(consecutiveFaults - 1, 7u);
+	return (std::min)(250u << shift, 30000u);
 }

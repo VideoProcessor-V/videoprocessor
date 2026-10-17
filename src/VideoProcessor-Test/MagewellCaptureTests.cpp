@@ -660,6 +660,69 @@ namespace Tests
 			Assert::IsTrue(callback.errors.front().Find(TEXT("memory budget")) >= 0);
 		}
 
+		// Bug hunt 2026-10-17: a locked source that stops sending frames must
+		// not flap invalid/valid (each flip restarts the renderer). VP sees one
+		// invalid state; device restarts stay internal with a growing back-off;
+		// valid returns only with the first frame that actually arrives.
+		TEST_METHOD(LockedSourceWithoutFramesStaysInvalidUntilAFrameArrives)
+		{
+			Assert::AreEqual<uint32_t>(250, MagewellCaptureDevice::RecoverableFaultBackoffMs(1));
+			Assert::AreEqual<uint32_t>(500, MagewellCaptureDevice::RecoverableFaultBackoffMs(2));
+			Assert::AreEqual<uint32_t>(4000, MagewellCaptureDevice::RecoverableFaultBackoffMs(5));
+			Assert::AreEqual<uint32_t>(16000, MagewellCaptureDevice::RecoverableFaultBackoffMs(7));
+			Assert::AreEqual<uint32_t>(30000, MagewellCaptureDevice::RecoverableFaultBackoffMs(8));
+			Assert::AreEqual<uint32_t>(30000, MagewellCaptureDevice::RecoverableFaultBackoffMs(1000));
+			for (uint32_t fault = 1; fault < 12; ++fault)
+				Assert::IsTrue(MagewellCaptureDevice::RecoverableFaultBackoffMs(fault + 1) >=
+					MagewellCaptureDevice::RecoverableFaultBackoffMs(fault));
+
+			QueueCallback callback;
+			const auto sdk = MagewellSdkTestAccess::Create(CaptureApi());
+			MWCAP_CHANNEL_INFO info = {};
+			MagewellCaptureDevice device(sdk, L"fake", info, TEXT("fake"));
+			device.SetCallbackHandler(&callback);
+			device.StartCapture(1);  // one frame, then the fake goes silent
+			const bool first = callback.Wait([&]() { return !callback.frames.empty(); });
+
+			// Two stall faults: about 2 s, then 0.25 s back-off + 2 s.
+			const ULONGLONG silentUntil = GetTickCount64() + 6000;
+			while (GetTickCount64() < silentUntil)
+				Sleep(50);
+			int validDuringSilence = 0, invalidDuringSilence = 0;
+			size_t framesDuringSilence = 0;
+			{
+				std::lock_guard<std::mutex> lock(callback.mutex);
+				validDuringSilence = callback.validStates;
+				invalidDuringSilence = callback.invalidStates;
+				framesDuringSilence = callback.frames.size();
+			}
+			const int restartsDuringSilence = startCalls.load();
+
+			// Frames resume: the first complete one restores the valid state.
+			streamFrames = true;
+			bool recovered = false;
+			const ULONGLONG recoverUntil = GetTickCount64() + 10000;
+			while (!recovered && GetTickCount64() < recoverUntil)
+			{
+				SetEvent(fakeNotifyEvent);
+				Sleep(50);
+				std::lock_guard<std::mutex> lock(callback.mutex);
+				recovered = callback.validStates >= 2 &&
+					callback.frames.size() > framesDuringSilence;
+			}
+			device.StopCapture();
+			device.SetCallbackHandler(nullptr);
+
+			Assert::IsTrue(first);
+			Assert::AreEqual(1, validDuringSilence);    // no valid until a frame arrives
+			Assert::AreEqual(1, invalidDuringSilence);  // one invalid for the whole burst
+			Assert::AreEqual<size_t>(1, framesDuringSilence);
+			Assert::IsTrue(restartsDuringSilence >= 3); // internal device restarts happened
+			Assert::IsTrue(recovered);
+			Assert::AreEqual(2, callback.validStates);
+			Assert::AreEqual(1, callback.invalidStates);
+		}
+
 		TEST_METHOD(SdiRgbDepthSelectsNativeFormatsAndConvertsTwelveBit)
 		{
 			signalMode = 3;
