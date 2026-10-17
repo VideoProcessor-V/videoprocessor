@@ -54,6 +54,7 @@
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
+#include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
@@ -4925,6 +4926,96 @@ struct LibplaceboVideoRenderer::Impl
 	ULONGLONG interpolationLogTick = 0;
 	unsigned interpolationLogCount = 0;
 	unsigned long long interpolatedPresents = 0, interpolationFailures = 0;
+	// Stage B (plan step 4): the per-vsync timeline. The render loop plans each source
+	// frame's refreshes (InterpolationTimeline: none, one or several, each with its true
+	// phase between A and B, any ratio) and draws each one; RenderLocked renders the
+	// picture at that phase. Render-loop thread (RenderLocked runs on it).
+	InterpolationTimeline::Timeline vpTimeline;
+	bool vpTimelineActive = false;   // this source frame is presented by the timeline
+	bool vpSkipOutput = false;       // no refresh falls in this frame's interval (source faster)
+	double vpOutputPhase = 0.0;      // the phase of the refresh being drawn
+	bool vpPhasePlanesValid = false; // vpPhasePlanes hold this draw's picture
+	Dejudder::Planes vpPhasePlanes;
+	uint64_t dejudderNextUploadedSequence = 0;   // the source frame in dejudderNextTextures (B)
+	unsigned long long vpSkippedFrames = 0, vpPhasePictures = 0, vpHeldPictures = 0, vpGapPairs = 0;
+	// The display rate the timeline schedules at: measured when known, else the monitor's.
+	double TimelineDisplayHz() const
+	{
+		const double measured = presentationTelemetry.Snapshot().measuredDisplayHz;
+		return measured > 0.0 ? measured : renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+	}
+	// The timeline presents while the interpolation policy interpolates (the last
+	// decision; a change takes effect from the next frame), never in low latency.
+	bool VpTimelineWanted() const
+	{
+		// A queue momentarily without B keeps the schedule (A is held, never waited for), so a
+		// shallow queue does not restart the phases.
+		const bool keep = interpolationDecision.reason == InterpolationPolicy::Reason::NoNextFrame && vpTimeline.Initialized();
+		return activeSettings.interpolation != InterpolationPolicy::Mode::Off && (interpolating || keep) &&
+			!lowLatencyQueueActive.load(std::memory_order_acquire);
+	}
+	// The picture at vpOutputPhase between A (the uploaded planes) and B (the next
+	// frame's planes, uploaded for the estimate), into vpPhasePlanes. With the pair's
+	// vectors valid: the interpolator; without (an invalidation, no estimate): its
+	// no-vector fallback (hold the nearest frame, or blend); B missing: A (hold).
+	void PrepareVpPhasePicture(uint64_t sourceSequence, uint64_t nextSourceSequence, bool lossless422, bool fullRange)
+	{
+		vpPhasePlanesValid = false;
+		if (!interpolating || !(vpOutputPhase > 0.0) || !textures[0] || !textures[1])
+			return;
+		if (nextSourceSequence == 0 || dejudderNextUploadedSequence != nextSourceSequence || !dejudderNextTextures[0] ||
+			!dejudderNextTextures[1])
+		{
+			++vpHeldPictures;   // no B: A, never waiting
+			return;
+		}
+		Dejudder::Planes a;
+		a.luma = textures[0];
+		a.chroma = textures[1];
+		a.chromaShiftX = 1;
+		a.chromaShiftY = lossless422 ? 0 : 1;
+		a.fullRange = fullRange;
+		Dejudder::Planes b = a;
+		b.luma = dejudderNextTextures[0];
+		b.chroma = dejudderNextTextures[1];
+		Interpolator::Motion motion;
+		const bool vectors = dejudder && dejudderEstimatedSequence == sourceSequence && sourceSequence != 0 &&
+			motionValidity.Current(dejudderEstimatedEpoch);
+		if (vectors)
+		{
+			motion.field = dejudder->Field();
+			motion.frameTrust = dejudder->FrameTrust();
+			motion.subField = dejudder->SubField();
+			motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+			for (int slot = 0; slot < 2; ++slot)
+				if (dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderMaskEpoch[slot]))
+					motion.occlusionB = dejudder->Occlusion(slot);
+		}
+		if (!frameInterpolator)
+			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+		if (!frameInterpolator->Run(a, b, motion, static_cast<float>(vpOutputPhase), activeSettings.interpolationFallback,
+			vpPhasePlanes))
+		{
+			if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
+				DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
+					frameInterpolator->LastError().c_str(), interpolationFailures);
+			return;
+		}
+		vpPhasePlanesValid = true;
+		++vpPhasePictures;
+		if (!vectors)
+			++vpHeldPictures;
+		if (vpPhasePictures == 1 || vpPhasePictures % 2400 == 0)
+			LogVpTimeline("pictures");
+	}
+	void LogVpTimeline(const char* what)
+	{
+		DebugLog::Log("Interpolation timeline: %s (phase %.3f; %llu pictures between frames, %llu without vectors or B, "
+			"%llu source frames skipped, %llu gap pairs, %llu restarts, %llu re-anchors, span %d)", what, vpOutputPhase,
+			vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpGapPairs, vpTimeline.Restarts(), vpTimeline.Reanchors(),
+			vpTimeline.LastSpanFrames());
+	}
+	bool vpTimelineLogged = false;   // engaged / released, logged on change
 	bool dejudderMaskParamSet = false;
 	bool grainToleranceParamSet = false;
 	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
@@ -5001,6 +5092,10 @@ struct LibplaceboVideoRenderer::Impl
 				std::snprintf(line, sizeof(line), "interpolation: %s", InterpolationPolicy::Name(interpolationDecision.reason));
 			else if (dejudderReason != DejudderPolicy::Reason::Active)
 				std::snprintf(line, sizeof(line), "%s", DejudderPolicy::Name(dejudderReason));
+			else if (interpolating && vpTimelineActive)
+				std::snprintf(line, sizeof(line), "interpolating per refresh (%s), ratio %.3f, %llu pictures, %llu held, %llu frames skipped, "
+					"%llu gap pairs, %llu restarts", InterpolationPolicy::Name(activeSettings.interpolationFallback),
+					interpolationDecision.ratio, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpGapPairs, vpTimeline.Restarts());
 			else if (interpolating)
 				std::snprintf(line, sizeof(line), "interpolating (%s), ratio %.3f, +%d pictures %.1f ms, late %llu, full %llu, held %llu%s",
 					InterpolationPolicy::Name(activeSettings.interpolationFallback), st.cadenceRatio, st.lastExtrasPerFrame,
@@ -5069,6 +5164,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderVectorField.reset();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
+		dejudderNextUploadedSequence = 0;
 		for (pl_tex& tex : dejudderAheadTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		if (dejudderRgbScratch && d3d11) pl_tex_destroy(d3d11->gpu, &dejudderRgbScratch);
@@ -12879,6 +12975,7 @@ struct LibplaceboVideoRenderer::Impl
 			// frame: not decided here, so a cue does not release and rebuild the matcher.
 			ii.subtitleComposed = false;
 			ii.haveNext = in.haveNext && in.nextMatches;
+			ii.perVsyncAvailable = true;   // Stage B: the per-vsync timeline (ratios below 1)
 			interpolationDecision = InterpolationPolicy::Decide(ii);
 			interpolating = interpolationDecision.Interpolates();
 			LogInterpolationDecision(ii);
@@ -12890,7 +12987,9 @@ struct LibplaceboVideoRenderer::Impl
 			reason = !in.planeFormatsUsable ? DejudderPolicy::Reason::PlaneFormat :
 				!in.haveNext ? DejudderPolicy::Reason::NoNextFrame :
 				!in.nextMatches ? DejudderPolicy::Reason::NextFrameDiffers : DejudderPolicy::Reason::Active;
-			dejudderExtrasAllowed = true;
+			// Stage A (the extras) only until the per-vsync timeline presents (Stage B): it
+			// covers every ratio and every refresh's true phase, A's own included.
+			dejudderExtrasAllowed = !vpTimelineActive;
 			dejudderEffectiveStrength = 1.0f;   // the true phase: no taste
 			const int whole = InterpolationPolicy::WholeRatio(interpolationDecision.ratio);
 			dejudderEvenCycle = whole >= 2 ? whole : 0;   // always: exact k/N at a whole ratio
@@ -12945,6 +13044,10 @@ struct LibplaceboVideoRenderer::Impl
 		if (!motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
 			motionValidity.Epoch()))
 			return;
+		// Stage B: a frame no refresh shows (a source faster than the display) needs no
+		// pair (the producer still computes its pairs ahead).
+		if (vpTimelineActive && vpSkipOutput)
+			return;
 		// B's layout, for C (estimate ahead) to match.
 		dejudderLayout.valid = true;
 		dejudderLayout.width = width;
@@ -12966,6 +13069,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			std::swap(dejudderNextTextures[0], dejudderAheadTextures[0]);
 			std::swap(dejudderNextTextures[1], dejudderAheadTextures[1]);
+			dejudderNextUploadedSequence = nextSourceSequence;
 			dejudderEstimatedSequence = sourceSequence;
 			dejudderEstimatedEpoch = motionValidity.Epoch();
 			LogDejudderAhead();
@@ -12973,6 +13077,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		LogDejudderAhead();
 		// B: the same plane layout as A's upload above.
+		dejudderNextUploadedSequence = 0;
 		if (!UploadDejudderPlanes(*next, dejudderNextTextures))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
@@ -12980,6 +13085,7 @@ struct LibplaceboVideoRenderer::Impl
 					dejudderFailures);
 			return;
 		}
+		dejudderNextUploadedSequence = nextSourceSequence;
 		(void)flipped;   // A and B share the orientation; the warp keeps it.
 		Dejudder::Planes a, b;
 		a.luma = dejudderRgbLuma ? dejudderRgbLuma : textures[0];
@@ -15413,6 +15519,21 @@ struct LibplaceboVideoRenderer::Impl
             if(!temporalRenderer.Capture(d3d11->gpu,image,sourceSequence))temporalRenderer.Bypass(temporalRenderer.status);
             if(temporalRenderer.skipOutput)return true;
         }
+		vpPhasePlanesValid = false;
+		if (vpTimelineActive)
+		{
+			// Stage B: no refresh in this frame's interval (the source is faster): uploaded
+			// and noted, not presented (as smooth motion skips).
+			if (vpSkipOutput)
+			{
+				if (++vpSkippedFrames == 1)
+					LogVpTimeline("first source frame skipped (the source is faster than the display)");
+				return true;
+			}
+			if (!nativeRgbUpload && !rgbRawUpload)
+				PrepareVpPhasePicture(sourceSequence, nextSourceSequence, lossless422Upload,
+					image.repr.levels == PL_COLOR_LEVELS_FULL);
+		}
 		struct pl_swapchain_frame swapchainFrame{};
 		pl_tex vpOwnedFrameTarget = nullptr;
 		CComPtr<ID3D11Texture2D> vpOwnedBackbuffer;
@@ -19851,6 +19972,15 @@ struct LibplaceboVideoRenderer::Impl
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
                 // Stage 12 step A: the planes libplacebo samples, re-based.
                 pl_frame frame = source;
+                // Stage B: the picture at this refresh's phase in place of A's planes (a
+                // composed picture keeps A: hold). Everything after runs on it unchanged.
+                const bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
+                    source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
+                if (phasePicture)
+                {
+                    frame.planes[0].texture = vpPhasePlanes.luma;
+                    frame.planes[1].texture = vpPhasePlanes.chroma;
+                }
                 if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
@@ -19865,7 +19995,11 @@ struct LibplaceboVideoRenderer::Impl
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
                     pl_frame debanded{};
-                    if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, vpDebandParams, debanded, 0))
+                    // A picture between frames decides per picture (slot 1, no hold along A's field).
+                    VpDebander::Params phaseParams = vpDebandParams;
+                    if (phasePicture) { phaseParams.field = nullptr; phaseParams.grainError = nullptr; }
+                    if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, phasePicture ? phaseParams : vpDebandParams, debanded,
+                        phasePicture ? 1 : 0))
                         frame = debanded;
                     else if (debander.Failures() == 1)
                         DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
@@ -20930,8 +21064,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	const uint64_t counter = m_frameCounter.fetch_add(1, std::memory_order_relaxed);
 	const uint64_t missedBefore = m_captureMissedFrames.load(std::memory_order_relaxed);
 	UpdateFrameRateAndPPM(videoFrame.GetTimingTimestamp());
-	bool gapBefore = m_captureMissedFrames.load(std::memory_order_relaxed) != missedBefore;
+	const uint64_t missedNow = m_captureMissedFrames.load(std::memory_order_relaxed);
+	bool gapBefore = missedNow != missedBefore;
 	const char* gapCause = gapBefore ? "missed frames" : nullptr;
+	uint32_t gapFrames = gapBefore ? static_cast<uint32_t>((std::min)(missedNow - missedBefore, uint64_t{ 1000 })) : 0;
 	if (m_timingClock && counter % 20 == 0)
 	{
 		m_entryLatencyMs.store(
@@ -21007,6 +21143,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			if (!gapBefore)
 				gapCause = "pulldown lock change";
 			gapBefore = true;
+			gapFrames = 0;   // not a loss of whole frames: never filled
 			m_pulldownClock.Reset();
 			// Not rate-limited: a lock needs two seconds, so changes are rare.
 			const std::string lockText = decision.locked ?
@@ -21066,6 +21203,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		if (!gapBefore)
 			gapCause = "pulldown off";
 		gapBefore = true;
+		gapFrames = 0;
 	}
 
 	{
@@ -21114,11 +21252,15 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			const auto afterDropped = m_frameQueue.erase(dropCandidate);
 			if (afterDropped != m_frameQueue.end())
 			{
+				if (!afterDropped->gapBefore || afterDropped->gapFrames > 0)
+					afterDropped->gapFrames += 1;
 				afterDropped->gapBefore = true;
 				afterDropped->gapCause = "queue overflow drop";
 			}
 			else
 			{
+				if (!gapBefore || gapFrames > 0)
+					gapFrames += 1;
 				gapBefore = true;
 				gapCause = "queue overflow drop";
 			}
@@ -21164,6 +21306,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			queuedFrame.arrivalQpc = arrivalQpc;
 			queuedFrame.gapBefore = gapBefore;
 			queuedFrame.gapCause = gapCause;
+			queuedFrame.gapFrames = gapFrames;
 			queuedFrame.filmHz = filmHz;
 			queuedFrame.filmUpdate = filmUpdate;
 			queuedFrame.enqueueQpc = PerformanceCounterNow();
@@ -24459,6 +24602,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// already queued and converted in the same generation.
 		std::shared_ptr<const QueuedFrame::ConvertedPayload> nextConvertedPayload;
 		uint64_t nextSourceSequence = 0;
+		double nextPts = 0.0;   // B's time (the timeline's span), 0 = not known
 		// Estimate ahead (owner 2026-10-13): the frame after B (C), likewise.
 		std::shared_ptr<const QueuedFrame::ConvertedPayload> aheadConvertedPayload;
 		uint64_t aheadSourceSequence = 0;
@@ -24791,15 +24935,31 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_frameQueue.pop_front();
 			nextConvertedPayload.reset();
 			nextSourceSequence = 0;
+			nextPts = 0.0;
 			if (!m_frameQueue.empty())
 			{
 				const QueuedFrame& next = m_frameQueue.front();
-				if (next.generation == frameGeneration && !next.cadenceRepeat && !next.gapBefore && !next.filmUpdate &&
+				// Gap fill (interpolation_fill_gaps, default off): while interpolating, B may
+				// follow a short loss of whole frames; the pair then spans the missing periods
+				// (the timeline's span). Never across a pulldown change, a flush or an update.
+				const bool fillGap = next.gapBefore && m_impl && m_impl->activeSettings.interpolationFillGaps &&
+					m_impl->interpolating && next.gapFrames >= 1 &&
+					next.gapFrames < static_cast<uint32_t>(InterpolationTimeline::kMaxSpanFrames);
+				if (next.generation == frameGeneration && !next.cadenceRepeat && (!next.gapBefore || fillGap) && !next.filmUpdate &&
 					next.sourceSequence != sourceSequence && next.converted &&
 					SameDejudderVideoState(state, next.state))
 				{
 					nextConvertedPayload = next.converted;
 					nextSourceSequence = next.sourceSequence;
+					LARGE_INTEGER qpcFrequencyNext{};
+					if (next.filmHz > 0.0 && next.arrivalQpc > 0 && QueryPerformanceFrequency(&qpcFrequencyNext) && qpcFrequencyNext.QuadPart > 0)
+						nextPts = static_cast<double>(next.arrivalQpc) / static_cast<double>(qpcFrequencyNext.QuadPart);
+					else if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
+						nextPts = static_cast<double>(next.frame.GetTimingTimestamp()) /
+							static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
+					if (fillGap && ++m_impl->vpGapPairs <= 20)
+						DebugLog::Log("Interpolation: gap pair across %u missed frame(s) (interpolation_fill_gaps)",
+							static_cast<unsigned>(next.gapFrames));
 				}
 			}
 			aheadConvertedPayload.reset();
@@ -25093,10 +25253,35 @@ void LibplaceboVideoRenderer::RenderLoop()
                     DebugLog::Log("Motion: smooth motion mixing %s (%s)",m_impl->smoothMotionMixingLogged?"on":"off",
                         m_impl->temporalRenderer.status.c_str());
                 }
-                const auto motionOutputs=m_impl->temporalRenderer.outputs;
+                auto motionOutputs=m_impl->temporalRenderer.outputs;
+                // Stage B: VP's per-vsync timeline (exclusive with smooth motion, never in low
+                // latency): this frame's refreshes, each at its true phase between A and B.
+                std::vector<double> vpPhases;
+                m_impl->vpTimelineActive=false;
+                m_impl->vpSkipOutput=false;
+                m_impl->vpOutputPhase=0.0;
+                if(!m_impl->temporalRenderer.Active()&&m_impl->VpTimelineWanted()) {
+                    LARGE_INTEGER qpcFrequencyTimeline{};
+                    const bool film=frameFilmHz>0.0&&arrivalQpc>0&&QueryPerformanceFrequency(&qpcFrequencyTimeline)&&
+                        qpcFrequencyTimeline.QuadPart>0;
+                    const double ptsA=film?static_cast<double>(arrivalQpc)/static_cast<double>(qpcFrequencyTimeline.QuadPart):sourcePts;
+                    const double rateHz=frameFilmHz>0.0?frameFilmHz:captureRateHz;
+                    const auto& planned=m_impl->vpTimeline.Plan(frameGeneration,sourceSequence,ptsA,nextSourceSequence?nextPts:0.0,
+                        rateHz,m_impl->TimelineDisplayHz(),frame.IsSourceDiscontinuity());
+                    m_impl->vpTimelineActive=true;
+                    m_impl->vpSkipOutput=planned.empty();
+                    motionOutputs.clear();
+                    for(const auto& o:planned){motionOutputs.push_back(o.pts);vpPhases.push_back(o.phase);}
+                } else if(m_impl->vpTimeline.Initialized())
+                    m_impl->vpTimeline.Reset();
+                if(m_impl->vpTimelineActive!=m_impl->vpTimelineLogged) {
+                    m_impl->vpTimelineLogged=m_impl->vpTimelineActive;
+                    m_impl->LogVpTimeline(m_impl->vpTimelineActive?"engaged (one picture per display refresh)":"released");
+                }
                 const size_t motionDraws=(std::max)(size_t(1),motionOutputs.size());
                 for(size_t motionDraw=0;motionDraw<motionDraws;++motionDraw) {
                     if(!motionOutputs.empty())m_impl->temporalRenderer.outputPts=motionOutputs[motionDraw];
+                    if(m_impl->vpTimelineActive)m_impl->vpOutputPhase=motionDraw<vpPhases.size()?vpPhases[motionDraw]:0.0;
 				rendered = state && m_impl->RenderLocked(
 					frame,
 					state,

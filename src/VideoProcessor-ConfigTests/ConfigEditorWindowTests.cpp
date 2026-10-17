@@ -1586,16 +1586,15 @@ void testInterpolationButtons()
     auto* fallback = requireControl<QComboBox>(window, "config.vprenderer.interpolation_fallback");
     auto* sourceClass = requireControl<QComboBox>(window, "config.vprenderer.source_class");
     auto* fillGaps = requireControl<QComboBox>(window, "config.vprenderer.interpolation_fill_gaps");
-    require(!fillGaps->isEnabled(), "gap fill (not built) is offered");
     profiles->setCurrentRow(0);
     QCoreApplication::processEvents();
     require(off->isChecked() && !autoMode->isChecked() && !always->isChecked(), "off (the default) is not shown");
     require(hold->isChecked() && !blend->isChecked(), "hold (the default) is not shown");
-    require(!sourceClass->isEnabled() && !fallback->isEnabled(), "the options are not greyed with interpolation off");
+    require(!sourceClass->isEnabled() && !fallback->isEnabled() && !fillGaps->isEnabled(), "the options are not greyed with interpolation off");
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(autoMode->isChecked() && blend->isChecked(), "the saved auto / blend are not shown");
-    require(sourceClass->isEnabled(), "the classification is greyed with interpolation on");
+    require(sourceClass->isEnabled() && fillGaps->isEnabled(), "the options are greyed with interpolation on");
     always->click();
     QCoreApplication::processEvents();
     require(mode->currentData().toString() == "always" && !autoMode->isChecked(), "Always did not set interpolation always");

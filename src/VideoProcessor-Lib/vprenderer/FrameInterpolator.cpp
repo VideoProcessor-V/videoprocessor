@@ -130,8 +130,36 @@ DEFINE_BILERP(bilerp_b, src_b)
 		{
 			pl_tex_destroy(gpu, &outLuma);
 			pl_tex_destroy(gpu, &outChroma);
+			pl_tex_destroy(gpu, &noField);
+			pl_tex_destroy(gpu, &noTrust);
 		}
-		outLuma = outChroma = nullptr;
+		outLuma = outChroma = noField = noTrust = nullptr;
+	}
+
+	bool FrameInterpolator::EnsureNoVectors()
+	{
+		if (noField && noTrust)
+			return true;
+		pl_fmt f32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+		if (!f32)
+		{
+			error = "no RGBA32F format for the no-vector fallback";
+			return false;
+		}
+		const float untrusted[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // one block, not trusted
+		const float notACut[4] = { 1.0f, 1.0f, 0.0f, 1.0f };     // the frame-trust test passes
+		pl_tex_params params{};
+		params.w = 1;
+		params.h = 1;
+		params.format = f32;
+		params.sampleable = true;
+		params.initial_data = untrusted;
+		if (!noField) noField = pl_tex_create(gpu, &params);
+		params.initial_data = notACut;
+		if (!noTrust) noTrust = pl_tex_create(gpu, &params);
+		if (!noField || !noTrust)
+			error = "cannot create the no-vector fallback's textures";
+		return noField && noTrust;
 	}
 
 	bool FrameInterpolator::Ensure(pl_tex& tex, pl_tex like)
@@ -235,10 +263,16 @@ DEFINE_BILERP(bilerp_b, src_b)
 			error = "no GPU";
 			return false;
 		}
-		if (!motion.field || !motion.frameTrust)
+		Motion use = motion;
+		if (!use.field || !use.frameTrust)
 		{
-			error = "no motion field";
-			return false;
+			// No valid vectors: every position untrusted (the fallback), not a cut.
+			if (!EnsureNoVectors())
+				return false;
+			use = Motion();
+			use.field = noField;
+			use.frameTrust = noTrust;
+			use.minTrustedShare = motion.minTrustedShare;
 		}
 		if (!SameLayout(a.luma, b.luma) || ((a.chroma || b.chroma) && !SameLayout(a.chroma, b.chroma)))
 		{
@@ -248,17 +282,17 @@ DEFINE_BILERP(bilerp_b, src_b)
 		if (!Ensure(outLuma, a.luma) || (a.chroma && !Ensure(outChroma, a.chroma)))
 			return false;
 		const std::string header = std::string(fallback == InterpolationPolicy::Fallback::Blend ? "#define FALLBACK_BLEND 1\n" : "") +
-			(motion.occlusionB ? "#define OCCLUSION 1\n" : "") +
-			(motion.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + BILERP_HEADER;
+			(use.occlusionB ? "#define OCCLUSION 1\n" : "") +
+			(use.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + BILERP_HEADER;
 		const float lumaScale[2] = { 1.0f, 1.0f };
-		if (!Plane("VideoProcessor interpolator: luma", a.luma, b.luma, outLuma, motion, t, lumaScale, header))
+		if (!Plane("VideoProcessor interpolator: luma", a.luma, b.luma, outLuma, use, t, lumaScale, header))
 			return false;
 		out.luma = outLuma;
 		if (a.chroma)
 		{
 			const float chromaScale[2] = {
 				static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
-			if (!Plane("VideoProcessor interpolator: chroma", a.chroma, b.chroma, outChroma, motion, t, chromaScale, header))
+			if (!Plane("VideoProcessor interpolator: chroma", a.chroma, b.chroma, outChroma, use, t, chromaScale, header))
 				return false;
 			out.chroma = outChroma;
 		}

@@ -41,7 +41,10 @@ namespace Interpolator
 {
 	struct Motion
 	{
-		pl_tex field = nullptr;        // A->B block field (MotionWarp::Field() or its snapshot)
+		// A->B block field (MotionWarp::Field() or its snapshot). nullptr: no valid vectors (an
+		// invalidation, no estimate): every position takes the fallback (hold the nearest frame,
+		// or blend), the frame-trust test passed.
+		pl_tex field = nullptr;
 		pl_tex frameTrust = nullptr;   // 1x1, r = the share of trusted blocks (MotionWarp::FrameTrust())
 		pl_tex subField = nullptr;     // optional: 11a E2's split sub-field (MotionWarp::SubField())
 		pl_tex occlusionB = nullptr;   // optional: B's occlusion mask (MotionWarp::Occlusion(slot)), r = 1 seen in A
@@ -77,6 +80,8 @@ namespace Interpolator
 		pl_dispatch dispatch = nullptr;
 		bool hostReadable = false;
 		pl_tex outLuma = nullptr, outChroma = nullptr;
+		pl_tex noField = nullptr, noTrust = nullptr;   // the no-vector fallback's 1x1 field and trust
+		bool EnsureNoVectors();
 		std::string error;
 		unsigned long long runs = 0, passthroughs = 0;
 	};

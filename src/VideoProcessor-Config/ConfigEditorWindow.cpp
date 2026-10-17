@@ -7744,8 +7744,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         interpolation->setToolTip(QStringLiteral(
             "VP's own HDR-safe frame interpolation for video sources (50p / 60p and other video rates), from the "
             "motion vectors above. Off (default): today's picture. Auto: only where the source rate does not divide "
-            "the display rate (50p on a 60 Hz display): the refreshes that would repeat a frame show a picture at "
-            "their true time instead. Always: also at whole ratios (30p video on 60 Hz). Film stays with the "
+            "the display rate (50p on 60 Hz, 60p on 50 Hz): every display refresh shows the picture at its true "
+            "time, instead of repeated or dropped frames. Always: also at whole ratios (30p video on 60 Hz). Film stays with the "
             "de-judder; 50/60p at the display's own rate is never touched; the low-latency queue switches it off. "
             "Exclusive with libplacebo's smooth motion."));
         auto* interpolationFallback = addChoice(QStringLiteral("Where the motion is not trusted"),
@@ -7765,16 +7765,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "fixed rates (48p on 60 Hz then counts as video)."));
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
             { QStringLiteral("off"), QStringLiteral("on") });
+        fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
+        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (pair across 1-3 missed frames)"));
         fillGaps->setToolTip(QStringLiteral(
-            "Reserved, not built yet: a picture interpolated across frames a stream dropped. Off (default) keeps the "
-            "rule that no motion is paired across a gap."));
-        fillGaps->setEnabled(false);
-        fillGaps->setProperty("greyedOff", true);
+            "When a stream loses one to three frames while interpolating, On pairs the frames either side of the gap "
+            "and fills the missing refreshes with pictures at their true time (the motion is checked as always; "
+            "untrusted areas hold). Off (default) keeps the rule that no motion is paired across a gap: the last "
+            "frame stays on screen until the next arrives."));
         {
             const auto syncMode = exclusiveButtons(interpolation, QStringLiteral("interpolation"), QStringLiteral("Interpolation"),
                 { { "off", QStringLiteral("Off"), QStringLiteral("Today's picture (the default).") },
                   { "auto", QStringLiteral("Auto (rate mismatch only)"), QStringLiteral(
-                      "Only where the source rate does not divide the display rate, e.g. 50p on 60 Hz.") },
+                      "Only where the source rate does not divide the display rate, e.g. 50p on 60 Hz or 60p on 50 Hz.") },
                   { "always", QStringLiteral("Always (video sources)"), QStringLiteral(
                       "Also at whole ratios (30p video on 60 Hz): smooth-motion parity. Film keeps the de-judder.") } },
                 QStringLiteral("off"), nullptr);
@@ -7784,13 +7786,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 { { "hold", QStringLiteral("Hold the nearest frame"), QStringLiteral("Never a double image (the default).") },
                   { "blend", QStringLiteral("Blend the two frames"), QStringLiteral("A time-weighted mix, as a frame mixer.") } },
                 QStringLiteral("hold"), &fallbackButtons);
-            auto sync = [syncMode, syncFallback, interpolation, interpolationFallback, sourceClass, fallbackButtons]() {
+            auto sync = [syncMode, syncFallback, interpolation, interpolationFallback, sourceClass, fillGaps, fallbackButtons]() {
                 syncMode();
                 syncFallback();
                 // The fallback and the classification do nothing with interpolation off.
                 const bool off = effectiveChoiceValue(interpolation) != QStringLiteral("auto") &&
                     effectiveChoiceValue(interpolation) != QStringLiteral("always");
-                for (QWidget* w : { static_cast<QWidget*>(interpolationFallback), static_cast<QWidget*>(sourceClass) })
+                for (QWidget* w : { static_cast<QWidget*>(interpolationFallback), static_cast<QWidget*>(sourceClass),
+                         static_cast<QWidget*>(fillGaps) })
                 {
                     w->setProperty("greyedOff", off);
                     w->setEnabled(!off);

@@ -204,6 +204,10 @@ private:
 		// with it, and the motion history starts over (owner 2026-10-14).
 		bool gapBefore = false;
 		const char* gapCause = nullptr;   // why (a static string), for the log
+		// The source frames the gap lost (missed capture frames, a dropped queued
+		// frame); 0 = not a loss of whole frames (a pulldown lock change, a flush).
+		// Interpolation's gap fill pairs across a short loss (interpolation_fill_gaps).
+		uint32_t gapFrames = 0;
 		// Pulldown locked (owner 2026-10-14): the film rate of this unique
 		// frame (0 = the signal's rate); arrivalQpc is then its even film time.
 		double filmHz = 0.0;

@@ -2,9 +2,12 @@
 #include "CppUnitTest.h"
 
 #include <vprenderer/InterpolationPolicy.h>
+#include <vprenderer/InterpolationTimeline.h>
 
+#include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -226,6 +229,165 @@ namespace InterpolationPolicyTest
 			Assert::AreEqual(-1.0, InterpolationPolicy::RefreshPhase(0.5, 1, 1.2), L"past B: B's refresh");
 			Assert::AreEqual(-1.0, InterpolationPolicy::RefreshPhase(0.0, 1, 0.8), L"below 1: no refresh of A's own to fill");
 			Assert::AreEqual(0.0, InterpolationPolicy::FilledPerFrame(0.8));
+		}
+	};
+}
+
+namespace InterpolationTimelineTest
+{
+	using InterpolationTimeline::Output;
+	using InterpolationTimeline::Timeline;
+
+	// Feeds `frames` source frames at sourceHz (optional jitter) and returns every output in order.
+	static std::vector<Output> Feed(Timeline& timeline, double sourceHz, double displayHz, int frames,
+		double jitter = 0.0, int firstSequence = 1, double start = 100.0, std::vector<size_t>* perFrame = nullptr)
+	{
+		std::vector<Output> all;
+		const double period = 1.0 / sourceHz;
+		for (int f = 0; f < frames; ++f)
+		{
+			const double wobble = jitter * std::sin(f * 2.3999632);   // deterministic, +-jitter
+			const double pts = start + f * period + wobble;
+			const double next = start + (f + 1) * period + jitter * std::sin((f + 1) * 2.3999632);
+			const auto& out = timeline.Plan(1, firstSequence + f, pts, next, sourceHz, displayHz, false);
+			if (perFrame) perFrame->push_back(out.size());
+			all.insert(all.end(), out.begin(), out.end());
+		}
+		return all;
+	}
+
+	TEST_CLASS(InterpolationTimelineTests)
+	{
+	public:
+		// Any ratio: the outputs are one per display period (the display's cadence),
+		// every phase in [0, 1), and over a long run the refreshes per source frame
+		// average display / source - frames skipped below 1, several above.
+		TEST_METHOD(RatioSweepKeepsTheDisplayCadence)
+		{
+			for (double display = 47.0; display <= 241.0; display += 13.7)
+				for (double ratio = 0.41; ratio <= 4.9; ratio += 0.173)
+				{
+					const double source = display / ratio;
+					Timeline timeline;
+					std::vector<size_t> perFrame;
+					const int frames = 600;
+					const std::vector<Output> all = Feed(timeline, source, display, frames, 0.0, 1, 100.0, &perFrame);
+					for (size_t i = 0; i < all.size(); ++i)
+					{
+						Assert::IsTrue(all[i].phase >= 0.0 && all[i].phase < 1.0, L"phase in [0, 1)");
+						if (i > 0)
+							Assert::AreEqual(1.0 / display, all[i].pts - all[i - 1].pts, 1e-9, L"one output per display period");
+					}
+					const double perSource = static_cast<double>(all.size()) / frames;
+					Assert::AreEqual(ratio, perSource, 0.01, L"refreshes per source frame = the ratio");
+					const bool skips = std::find(perFrame.begin(), perFrame.end(), size_t{ 0 }) != perFrame.end();
+					Assert::AreEqual(ratio < 1.0, skips, L"frames skipped exactly when the source is faster");
+					Assert::AreEqual(0ull, timeline.Restarts(), L"a steady stream never restarts");
+				}
+		}
+
+		TEST_METHOD(SixtyOnFiftyAndFiftyOnSixty)
+		{
+			// 60p on 50 Hz (Stage B): one frame in six is skipped; each refresh sits
+			// k/5 of the way through its pair (0, 0.2, 0.4, 0.6, 0.8 of a source period).
+			Timeline timeline;
+			std::vector<size_t> perFrame;
+			const std::vector<Output> all = Feed(timeline, 60.0, 50.0, 60, 0.0, 1, 100.0, &perFrame);
+			Assert::AreEqual(size_t{ 50 }, all.size());
+			Assert::AreEqual(size_t{ 10 }, static_cast<size_t>(std::count(perFrame.begin(), perFrame.end(), size_t{ 0 })));
+			for (size_t i = 0; i < 5; ++i)
+				Assert::AreEqual(0.2 * static_cast<double>(i), all[i].phase, 1e-9);
+			// 50p on 60 Hz: one frame in five gets two refreshes; phases 0, 5/6, 4/6 (=0.667), ...
+			Timeline up;
+			const std::vector<Output> six = Feed(up, 50.0, 60.0, 50);
+			Assert::AreEqual(size_t{ 60 }, six.size());
+			Assert::AreEqual(0.0, six[0].phase, 1e-9);
+			Assert::AreEqual(5.0 / 6.0, six[1].phase, 1e-9, L"A's second refresh, near B");
+			Assert::AreEqual(4.0 / 6.0, six[2].phase, 1e-9, L"the next frame's own refresh is not at phase 0");
+		}
+
+		TEST_METHOD(JitterDoesNotMovePhases)
+		{
+			// 2 ms of capture jitter at 50p on 59.94 Hz: every refresh's position in source
+			// time (its frame index + phase) stays within a small share of a period of the
+			// exact one (refresh time - start) / period, whatever frame it falls in.
+			Timeline timeline;
+			const double source = 50.0, display = 59.94, period = 1.0 / source, start = 100.0, jitter = 0.002;
+			double worst = 0.0;
+			for (int f = 0; f < 600; ++f)
+			{
+				const double pts = start + f * period + jitter * std::sin(f * 2.3999632);
+				const double next = start + (f + 1) * period + jitter * std::sin((f + 1) * 2.3999632);
+				for (const Output& o : timeline.Plan(1, 1 + f, pts, next, source, display, false))
+					worst = (std::max)(worst, std::abs((f + o.phase) - (o.pts - start) / period));
+			}
+			Assert::IsTrue(worst < 0.05, (L"worst position error (source periods) " + std::to_wstring(worst)).c_str());
+			Assert::AreEqual(0ull, timeline.Reanchors());
+			Assert::AreEqual(0ull, timeline.Restarts());
+		}
+
+		TEST_METHOD(DiscontinuitiesRestartAtPhaseZero)
+		{
+			Timeline timeline;
+			Feed(timeline, 50.0, 60.0, 20);
+			// A new queue generation.
+			auto out = timeline.Plan(2, 21, 100.4, 100.42, 50.0, 60.0, false);
+			Assert::IsTrue(!out.empty() && out[0].phase == 0.0 && out[0].pts == 100.4);
+			// A sequence that does not follow (a drop).
+			out = timeline.Plan(2, 30, 100.6, 100.62, 50.0, 60.0, false);
+			Assert::IsTrue(!out.empty() && out[0].phase == 0.0);
+			// The source discontinuity flag.
+			out = timeline.Plan(2, 31, 100.62, 100.64, 50.0, 60.0, true);
+			Assert::IsTrue(!out.empty() && out[0].phase == 0.0);
+			// A rate change.
+			out = timeline.Plan(2, 32, 100.64, 100.66, 25.0, 60.0, false);
+			Assert::IsTrue(!out.empty() && out[0].phase == 0.0);
+			Assert::AreEqual(4ull, timeline.Restarts());
+			// Rates unknown: A, once (today's present).
+			out = timeline.Plan(2, 33, 100.7, 0.0, 0.0, 60.0, false);
+			Assert::AreEqual(size_t{ 1 }, out.size());
+			Assert::AreEqual(0.0, out[0].phase);
+		}
+
+		TEST_METHOD(ARepeatPresentsTheLastOutputAgain)
+		{
+			Timeline timeline;
+			Feed(timeline, 50.0, 60.0, 10);
+			const Output last = timeline.Outputs().back();
+			const auto& again = timeline.Plan(1, 10, 100.0 + 9 * 0.02, 100.0 + 10 * 0.02, 50.0, 60.0, false);
+			Assert::AreEqual(size_t{ 1 }, again.size());
+			Assert::AreEqual(last.pts, again[0].pts);
+			Assert::AreEqual(last.phase, again[0].phase);
+			Assert::AreEqual(1ull, timeline.Repeats());
+		}
+
+		TEST_METHOD(AGapPairSpansTheMissingPeriods)
+		{
+			// Gap fill: B two periods after A (one missed frame) spans 2 periods: the
+			// refreshes in between get phases over the whole span; the frame after the
+			// gap continues the same display cadence.
+			Timeline timeline;
+			Feed(timeline, 50.0, 50.0, 5);   // 1:1, sequence 1..5, pts 100.00 .. 100.08
+			const auto& gap = timeline.Plan(1, 6, 100.10, 100.14, 50.0, 50.0, false);   // frame 7 missed
+			Assert::AreEqual(2, timeline.LastSpanFrames());
+			Assert::AreEqual(size_t{ 2 }, gap.size());
+			Assert::AreEqual(0.0, gap[0].phase, 1e-9);
+			Assert::AreEqual(0.5, gap[1].phase, 1e-9, L"the missing frame's refresh, half way across the gap");
+			const auto& after = timeline.Plan(1, 7, 100.14, 100.16, 50.0, 50.0, false);
+			Assert::AreEqual(size_t{ 1 }, after.size());
+			Assert::AreEqual(0.0, after[0].phase, 1e-9);
+			Assert::AreEqual(0ull, timeline.Restarts());
+			// Without B's time (no pair across the gap): one period, and the next frame
+			// resumes at the first refresh at its time.
+			Timeline plain;
+			Feed(plain, 50.0, 50.0, 5);
+			Assert::AreEqual(size_t{ 1 }, plain.Plan(1, 6, 100.10, 0.0, 50.0, 50.0, false).size());
+			const auto& resumed = plain.Plan(1, 7, 100.14, 0.0, 50.0, 50.0, false);
+			Assert::AreEqual(size_t{ 1 }, resumed.size());
+			Assert::AreEqual(100.14, resumed[0].pts, 1e-9);
+			// A jump beyond the longest span restarts.
+			plain.Plan(1, 8, 100.40, 0.0, 50.0, 50.0, false);
+			Assert::AreEqual(1ull, plain.Restarts());
 		}
 	};
 }

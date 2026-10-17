@@ -13052,6 +13052,44 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		// No valid vectors (an invalidation, no estimate for the pair): Stage B still draws
+		// every refresh - hold shows the nearest frame whole, blend the time-weighted mix.
+		TEST_METHOD(InterpolatorWithoutVectorsHoldsNearestOrBlends)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 128, height = 64;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - 8, y, 5); },
+				[](int x, int y, int c) { return DejudderTexture((x - 4) * 2, y, 9 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			Interpolator::Motion none;   // no field, no trust
+			for (float t : { 0.2f, 0.8f })
+			{
+				Dejudder::Planes out;
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, none, t, InterpolationPolicy::Fallback::Hold, out),
+					InterpolatorError(interpolator, log).c_str());
+				Assert::IsTrue(DownloadPlane(gpu, out.luma) == (t < 0.5f ? a.luma : b.luma), L"hold: the nearest frame");
+				Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, none, t, InterpolationPolicy::Fallback::Blend, out),
+					InterpolatorError(interpolator, log).c_str());
+				const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+				for (size_t i = 0; i < luma.size(); ++i)
+					if (std::abs(luma[i] - ((1.0 - t) * a.luma[i] + t * b.luma[i])) > 1.0)
+						Assert::Fail(L"blend: the time-weighted mix");
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		// HDR / 10-bit precision: a ramp over every 10-bit code (P010 layout: the code
 		// in the top 10 bits), BTB and WTW included, and a PQ-coded ramp at 16 bits,
 		// moved by whole pixels: the picture at the phase keeps every code exactly

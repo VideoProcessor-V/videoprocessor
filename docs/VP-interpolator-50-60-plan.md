@@ -288,3 +288,60 @@ Always; Hold / Blend), Film or video, the disabled gap fill, tooltips, defaults 
 Stage B; gap fill (build order step 6); the sigma-delta's vectors on interpolated pictures come from
 the de-judder's vector-field pass (taste settings such as R-B's object strength apply there, not the
 true motion); step 1b (the store keyed on the epoch); the chain-gate matrix axis; the 3090 timing.
+
+
+## Stage B and gap fill (2026-10-17, branch interp-5060)
+
+**Per-vsync timeline** (`vprenderer/InterpolationTimeline.h`, pure). The render loop plans each
+dequeued source frame's display refreshes inside [A, B): none, one or several, each with its true
+phase. Smooth motion's draw model is reused: the loop draws once per planned refresh and skips the
+present of a frame no refresh falls on. The presents therefore consume source frames at the source
+rate and refreshes at the display rate, at any ratio: 60p on 50 Hz skips one frame in six instead of
+drift correction dropping it, and 50p on 60 Hz gets a second picture in one frame of five.
+- **A's own refresh** is interpolated too (phase 0 .. 1/ratio), not shown at phase 0.
+- **Clock:** smoothed (whole periods, pulled 5% towards the arrival, re-anchored beyond a quarter
+  period), so capture jitter does not move the phases. The pulldown film clock is used when locked.
+- **Display rate:** measured when known, else the monitor's.
+- **Restarts** at A's own time on a new generation, a non-adjacent sequence, a rate change, time going
+  backwards or a jump beyond the span. A cadence repeat re-presents the last output.
+- **Never waits:** no B = A (hold). A queue momentarily without B keeps the schedule.
+- **Low latency** never uses it. It is exclusive with smooth motion.
+- **Supersedes Stage A:** the extras serve interpolation only until the timeline presents.
+
+**Each refresh's picture** (`PrepareVpPhasePicture`). The interpolator at the phase from A's
+uploaded planes and B's planes (uploaded for the estimate and tracked by sequence), with the
+estimate's field when it is current (MotionValidity epoch). With no valid vectors (an invalidation,
+no estimate) it uses the interpolator's no-vector fallback: hold the nearest frame, or blend. With no
+B it shows A. A composed (subtitle) or RGB picture keeps A.
+- The planes replace A's in the render: re-base, scaling, tone mapping, the dither and LED all run
+  unchanged, so the chain stays HDR-safe.
+- VP deband decides per picture on a picture between frames (slot 1, no hold along A's field).
+- A frame the timeline skips is uploaded and noted (contiguity) but not estimated; the producer still
+  computes its pairs ahead.
+
+**Gap fill** (`interpolation_fill_gaps: on`, default off). While interpolating, B may follow a loss
+of 1 to 3 whole frames (`QueuedFrame::gapFrames`: missed capture frames, a dropped queued frame;
+never a pulldown change, a flush or a film update). The timeline's span then covers the missing
+periods (their refreshes get phases across the whole gap). The pair's motion is checked as always
+(untrusted areas hold) and comes from the matcher or the render-time engine (the producer stores no
+pair across a gap). Off keeps "never pair across a gap". The Config control is now live (greyed while
+interpolation is off).
+
+**Log / status:**
+- "Interpolation timeline: engaged / released / pictures (... skipped, gap pairs, restarts, span)".
+- "Interpolation timeline: first source frame skipped ...".
+- "Interpolation: gap pair across N missed frame(s)".
+- Status line "interpolating per refresh (...)".
+
+**Tests:**
+- CPU `InterpolationTimelineTests` (ratio sweep 0.41..4.9 over 47..241 Hz displays, 60-on-50 and
+  50-on-60 phases, jitter, discontinuities, repeats, gap span).
+- GPU `InterpolatorWithoutVectorsHoldsNearestOrBlends`.
+- Harness `InterpolationTimelineAtEveryRatio` and `InterpolationGapFillPairsAcrossMissedFrames`; the
+  on-screen test reads the timeline's log.
+
+**Open:**
+- Each refresh re-runs the whole chain per present, as smooth motion does: cost on the 3090 at 4K
+  and 120 Hz to be measured.
+- The sigma-delta's next-frame and extras vectors are not bound for pictures between frames (it does
+  its own search).

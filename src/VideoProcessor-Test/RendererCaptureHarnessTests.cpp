@@ -2106,6 +2106,60 @@ namespace Tests
 			Assert::IsTrue(r.presented);
 		}
 
+		TEST_METHOD(InterpolationTimelineAtEveryRatio)
+		{
+			// Stage B: the per-refresh timeline engages above and below 1 (5/6 and 6/5 of the
+			// display rate: 50p on 60 Hz, 60p on 50 Hz, whatever the display); below 1 it skips
+			// source frames instead of letting drift correction drop them; no failures.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const double display = HarnessMonitorHz();
+			struct Case { double factor; const char* name; bool skips; };
+			for (const Case& c : { Case{ 5.0 / 6.0, "slower than the display", false }, Case{ 6.0 / 5.0, "faster than the display", true },
+				Case{ 0.4, "film-like rate without the de-judder", false } })
+			{
+				const FramePlan plan = RatePlan(display * c.factor);
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, false, "interpolation: auto\n", false, &plan);
+				ReportInterpolation(c.name, r);
+				const std::wstring name(c.name, c.name + strlen(c.name));
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Interpolation: interpolating"), (name + L": interpolating\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Interpolation timeline: engaged"), (name + L": the timeline engaged\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Interpolation timeline: pictures"), (name + L": pictures between frames\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: failed"), (name + L": no failure\n" + r.Tail()).c_str());
+				Assert::AreEqual(c.skips, r.Logged("first source frame skipped"),
+					(name + (c.skips ? L": source frames skipped\n" : L": no source frame skipped\n") + r.Tail()).c_str());
+			}
+		}
+
+		TEST_METHOD(InterpolationGapFillPairsAcrossMissedFrames)
+		{
+			// interpolation_fill_gaps: on - a pair across one or two missed capture frames
+			// (the timeline spans them); off (default) - no pair across the gap.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const double source = HarnessMonitorHz() * 5.0 / 6.0;
+			for (const bool fill : { true, false })
+			{
+				FramePlan plan = RatePlan(source);
+				plan.step = [](int n) { FrameStep f; f.content = n; f.send = !(n == 90 || (n >= 150 && n <= 151)); return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, false,
+					std::string("interpolation: auto\ninterpolation_fill_gaps: ") + (fill ? "on" : "off") + "\n", false, &plan);
+				ReportInterpolation(fill ? "gap fill on" : "gap fill off", r);
+				Assert::IsTrue(r.Logged("capture missed"), (L"the gaps were counted\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: failed"), (L"no failure\n" + r.Tail()).c_str());
+				Assert::AreEqual(fill, r.Logged("Interpolation: gap pair across"),
+					(std::wstring(fill ? L"on: gap pairs made\n" : L"off: no gap pair\n") + r.Tail()).c_str());
+				Assert::IsTrue(r.presented);
+			}
+		}
+
 		TEST_METHOD(InterpolationOnScreenFillsTheRepeatRefreshes)
 		{
 			// On the screen only (VP_TEST_HARNESS_ONSCREEN=1, real refresh statistics): at
@@ -2127,7 +2181,7 @@ namespace Tests
 					std::string("interpolation: auto\ninterpolation_fallback: ") + fallback + "\n", true, &plan);
 				ReportInterpolation(fallback, r);
 				const std::wstring name(fallback, fallback + strlen(fallback));
-				Assert::IsTrue(r.Logged("interpolated=1"), (name + L": interpolated pictures presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Interpolation timeline: pictures"), (name + L": interpolated pictures presented\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation: failed"), (name + L": no failure\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("extra render failed") || r.Logged("extra present failed"), (name + L": no render failure\n" + r.Tail()).c_str());
 			}
