@@ -57,6 +57,15 @@ namespace CustomHookChain
         return hook && (hook->stages & PL_HOOK_OUTPUT) != 0;
     }
 
+    // Audit 2026-10-16: a hook that quantises the output itself (replaces
+    // libplacebo's dither). Only such a hook suppresses the dither; any other
+    // OUTPUT-stage hook keeps it. Marked by this token anywhere in the shader
+    // source (a plain comment line, never a //! directive, which libplacebo
+    // would reject), or by the sigma-delta's file name for older copies.
+    constexpr const char* OutputQuantizerMarker = "VP_OUTPUT_QUANTIZER";
+    constexpr const char* SigmaDeltaFileName = "Temporal sigma-delta.glsl";
+    bool IsOutputQuantizer(const std::string& filename, const std::string& source);
+
     struct Loader
     {
         std::function<bool(const std::string& filename, std::string& source,
@@ -87,9 +96,15 @@ namespace CustomHookChain
         // lowLatency is true.
         void Collect(bool lowLatency, std::vector<const pl_hook*>& hooks) const;
 
-        // True when a hook submitted this frame owns the OUTPUT stage; the
-        // renderer then clears libplacebo's dither for that frame.
+        // True when a hook submitted this frame quantises the OUTPUT stage
+        // (IsOutputQuantizer, audit 2026-10-16); the renderer then clears
+        // libplacebo's dither for that frame. Other OUTPUT hooks keep it.
         bool SuppressesDither(bool lowLatency) const;
+
+        // Audit 2026-10-16: true when `hook` is a loaded output quantiser of
+        // this chain, so the renderer can confirm one is still in the frame's
+        // hook list (it drops the sigma-delta on an unsupported code domain).
+        bool IsQuantizerHook(const pl_hook* hook) const;
 
         // Latches entries whose hook libplacebo disabled at runtime. Returns
         // true when at least one entry newly dropped out.
@@ -112,6 +127,7 @@ namespace CustomHookChain
             std::string source;
             std::string key;
             const pl_hook* hook = nullptr;
+            bool quantizer = false;   // IsOutputQuantizer (audit 2026-10-16)
             bool loadFailed = false;
             bool runtimeFailed = false;
         };

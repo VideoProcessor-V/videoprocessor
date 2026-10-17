@@ -198,6 +198,11 @@ namespace LedDrive
 		// (grain averages out, a real highlight survives). APL and the block
 		// maximum (script mode) unchanged. Off = the plain statistics.
 		bool highlightGrainSuppress = true;
+		// Fix under test (audit 2026-10-16): the look-ahead's correction ratio
+		// is smoothed by the time since its last update (it updates once per
+		// new source frame). Off = the earlier weight, one output frame period
+		// per update (slower to converge when source frames repeat).
+		bool correctionWeightByTime = true;
 		// The LED core (owner 2026-10-14): one place that holds the port,
 		// sends and logs, fed by a selectable command source -
 		// command_source: internal_script (VP's copy of the script's rules),
@@ -372,7 +377,8 @@ namespace LedDrive
 	}
 
 	// Thresholds must be distinct whole numbers, written largest first, and end
-	// at 0 so every distance has a step.
+	// at 0 so every distance has a step. Every step moves at least one level
+	// (audit 2026-10-16: a step of 0 would never reach its target).
 	inline bool ParseStepTable(const std::string& text, StepTable& table)
 	{
 		std::vector<std::pair<double, double>> pairs;
@@ -381,7 +387,7 @@ namespace LedDrive
 		for (const auto& pair : pairs)
 		{
 			if (pair.first != std::floor(pair.first) || pair.second != std::floor(pair.second) ||
-				pair.first < 0 || pair.first > 255 || pair.second < 0 || pair.second > 255)
+				pair.first < 0 || pair.first > 255 || pair.second < 1 || pair.second > 255)
 				return false;
 			if (!parsed.rows.empty() && pair.first >= parsed.rows.back().first) return false;
 			parsed.rows.emplace_back(static_cast<int>(pair.first), static_cast<int>(pair.second));
@@ -408,7 +414,9 @@ namespace LedDrive
 		return true;
 	}
 
-	// lpw : relative flux pairs, lpw ascending (0-255), flux positive.
+	// lpw : relative flux pairs, lpw ascending (0-255), flux positive and
+	// rising with lpw (audit 2026-10-16: the model inverts flux to a level, so
+	// a flat or falling flux has no answer).
 	inline bool ParseFluxTable(const std::string& text, std::vector<std::pair<double, double>>& table)
 	{
 		std::vector<std::pair<double, double>> pairs;
@@ -417,7 +425,8 @@ namespace LedDrive
 		{
 			if (pairs[i].first < 0 || pairs[i].first > 255 || pairs[i].second <= 0.0 || pairs[i].second > 10.0)
 				return false;
-			if (i > 0 && pairs[i].first <= pairs[i - 1].first) return false;
+			if (i > 0 && (pairs[i].first <= pairs[i - 1].first || pairs[i].second <= pairs[i - 1].second))
+				return false;
 		}
 		table = pairs;
 		return true;
@@ -443,6 +452,16 @@ namespace LedDrive
 		const char* expected)
 	{
 		return { key, std::move(validator), expected };
+	}
+
+	// dmd_clip_cntr: -1 (= cntr_max_usable) or 50-100 (audit 2026-10-16: the
+	// documented -1 was rejected).
+	inline bool ParseDmdClipCntr(const std::string& text, int& value)
+	{
+		int parsed = 0;
+		if (!Detail::ParseInt(text, -1, 100, parsed) || (parsed != -1 && parsed < 50)) return false;
+		value = parsed;
+		return true;
 	}
 
 	inline std::vector<ConfigSchema::KeyRule> ProjectorRules()
@@ -479,10 +498,12 @@ namespace LedDrive
 			Integer("cntr_latency_ms", 0, 2000),
 			Integer("cntr_settle_ms", 0, 5000),
 			Integer("cntr_max_usable", 50, 100),
-			Integer("dmd_clip_cntr", 50, 100),
+			Custom("dmd_clip_cntr", [](const std::string& value) { int v = 0; return ParseDmdClipCntr(value, v); },
+				"-1 (= cntr_max_usable) or a contrast from 50 to 100"),
 			Custom("flux_table", [](const std::string& value)
 				{ std::vector<std::pair<double, double>> t; return ParseFluxTable(value, t); },
-				"ascending lpw:relative_flux pairs, e.g. 60:0.55, 80:0.78, 100:1.00"),
+				"lpw:relative_flux pairs with both lpw and flux rising (flux above 0, at most 10), "
+				"e.g. 60:0.55, 80:0.78, 100:1.00"),
 		};
 	}
 
@@ -543,6 +564,7 @@ namespace LedDrive
 			Number("rate_max_down", 0.0, 10000.0),
 			Boolean("cntr_assist"),
 			Boolean("led_highlight_grain_suppress"),
+			Boolean("correction_weight_by_time"),
 			Integer("cntr_assist_max", 50, 100),
 			Boolean("cut_cntr_dump"),
 			Boolean("shaped_recovery"),
@@ -567,10 +589,10 @@ namespace LedDrive
 			Custom("curve", [](const std::string& value)
 				{ std::vector<CurvePoint> c; return ParseCurve(value, c); },
 				"ascending APL:level pairs (0-255), e.g. 0:100, 40:200, 100:255"),
-			Custom("steps_up_dark", table, "descending distance:step pairs ending at 0"),
-			Custom("steps_up_bright", table, "descending distance:step pairs ending at 0"),
+			Custom("steps_up_dark", table, "descending distance:step pairs ending at 0, each step 1 or more"),
+			Custom("steps_up_bright", table, "descending distance:step pairs ending at 0, each step 1 or more"),
 			Integer("steps_up_split_apl", 0, 255),
-			Custom("steps_down", table, "descending distance:step pairs ending at 0"),
+			Custom("steps_down", table, "descending distance:step pairs ending at 0, each step 1 or more"),
 			Custom("apl_weights", [](const std::string& value)
 				{ double w[3]; return ParseWeights(value, w); },
 				"three non-negative R, G, B weights summing to 1"),
@@ -613,6 +635,15 @@ namespace LedDrive
 	inline std::string LedProfilePath(const ConfigFile& config);
 	inline std::string LedProfileSection(const ConfigFile& profile);
 	inline LedDriveConfig ReadLedDriveConfig(const ConfigFile& config);
+	inline void ApplyLedDriveSection(const ConfigFile& config, const std::string& section, LedDriveConfig& result);
+
+	// audit 2026-10-16: a speed's minimum above its maximum ("" when fine).
+	inline std::string RateOrderError(const LedDriveConfig& config)
+	{
+		if (config.rateMinUp > config.rateMaxUp) return "needs rate_min_up <= rate_max_up";
+		if (config.rateMinDown > config.rateMaxDown) return "needs rate_min_down <= rate_max_down";
+		return {};
+	}
 
 	inline bool Validate(const ConfigFile& config, std::string& error)
 	{
@@ -664,6 +695,22 @@ namespace LedDrive
 				{
 					error = "[" + section + "] needs ftb_custom_floor < ftb_custom_start";
 					return false;
+				}
+				// audit 2026-10-16: this section's speeds over the defaults (and
+				// its rate_preset), checked when it names one.
+				bool namesRates = false;
+				for (const char* key : { "rate_preset", "rate_min_up", "rate_max_up", "rate_min_down", "rate_max_down" })
+					namesRates = namesRates || config.TryGetString(section, key, value);
+				if (namesRates)
+				{
+					LedDriveConfig speeds;
+					ApplyLedDriveSection(config, section, speeds);
+					const std::string rateError = RateOrderError(speeds);
+					if (!rateError.empty())
+					{
+						error = "[" + section + "] " + rateError;
+						return false;
+					}
 				}
 			}
 		}
@@ -735,6 +782,12 @@ namespace LedDrive
 				error = "LED profile " + profilePath + ": needs highlight_area_small < highlight_area_large";
 				return false;
 			}
+			const std::string rateError = RateOrderError(merged);   // audit 2026-10-16
+			if (!rateError.empty())
+			{
+				error = "LED profile " + profilePath + ": " + rateError;
+				return false;
+			}
 		}
 		return true;
 	}
@@ -775,7 +828,7 @@ namespace LedDrive
 		if (config.TryGetString(section, "led_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.ledSettleMs);
 		if (config.TryGetString(section, "cntr_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.cntrSettleMs);
 		if (config.TryGetString(section, "cntr_max_usable", value)) Detail::ParseInt(value, 50, 100, result.cntrMaxUsable);
-		if (config.TryGetString(section, "dmd_clip_cntr", value)) Detail::ParseInt(value, 50, 100, result.dmdClipCntr);
+		if (config.TryGetString(section, "dmd_clip_cntr", value)) ParseDmdClipCntr(value, result.dmdClipCntr);
 		if (config.TryGetString(section, "flux_table", value)) ParseFluxTable(value, result.fluxTable);
 		return result;
 	}
@@ -851,6 +904,7 @@ namespace LedDrive
 		readNumber("rate_max_down", result.rateMaxDown);
 		config.TryGetBool(section, "cntr_assist", result.cntrAssist);
 		config.TryGetBool(section, "led_highlight_grain_suppress", result.highlightGrainSuppress);
+		config.TryGetBool(section, "correction_weight_by_time", result.correctionWeightByTime);
 		readInt("cntr_assist_max", 50, 100, result.cntrAssistMax);
 		config.TryGetBool(section, "cut_cntr_dump", result.cutCntrDump);
 		config.TryGetBool(section, "shaped_recovery", result.shapedRecovery);

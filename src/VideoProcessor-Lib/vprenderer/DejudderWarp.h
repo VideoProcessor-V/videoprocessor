@@ -445,6 +445,7 @@ namespace Dejudder
 		void ForgetHistory()
 		{
 			previousValid = false;
+			ofHintValid = false;
 			holdResetPending = true;
 			keptSequence = 0;
 			if (fadeState)
@@ -609,6 +610,9 @@ namespace Dejudder
 		CComPtr<ID3D11Texture2D> ofIn[2], ofFlow[2], ofCost[2];
 		pl_tex ofInTex[2] = { nullptr, nullptr }, ofFlowTex[2] = { nullptr, nullptr };
 		int ofW = 0, ofH = 0;
+		// The engine's temporal hints only from the pair just before (audit 2026-10-16: they carried
+		// across resyncs, gaps and runs of pairs computed ahead).
+		bool ofHintValid = false;
 	public:
 		// The searching instance may be the half-size inner one (lowRes): report it.
 		const std::string& OpticalFlowError() const

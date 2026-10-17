@@ -86,7 +86,7 @@ namespace MotionAhead
 			++votes[static_cast<size_t>(by) * kBins + bx];
 			++confident;
 		}
-		if (confident < static_cast<long>(cells / 10)) return;   // too few to judge: ambiguous
+		if (confident == 0 || confident < static_cast<long>(cells / 10)) return;   // too few to judge: ambiguous (none: no 0/0, audit 2026-10-16)
 		// The 3 x 3 summed vote (a texel-and-a-half window): its peak, then away from it.
 		auto window = [&](int bx, int by) {
 			int s = 0;
@@ -132,7 +132,7 @@ namespace MotionAhead
 				const int s = window(x, y);
 				if (s > secondBest) { secondBest = s; sxBin = x; syBin = y; }
 			}
-		if (secondBest >= confident / 10)
+		if (secondBest > 0 && secondBest >= confident / 10)
 		{
 			second[0] = static_cast<float>((sxBin - 2 * kRange) / 2.0);
 			second[1] = static_cast<float>((syBin - 2 * kRange) / 2.0);
@@ -187,6 +187,7 @@ namespace MotionAhead
 
 		mutable std::mutex mutex;
 		std::condition_variable wake;
+		unsigned consecutiveFailures = 0;   // under mutex
 		std::deque<Job> jobs;
 		bool stopping = false;
 		std::thread worker;
@@ -208,6 +209,7 @@ namespace MotionAhead
 		int current = 0;
 		bool havePrevious = false;
 		uint64_t previousSequence = 0, previousGeneration = 0;
+		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
 		VectorStore<FlowPtr> store{ 16 };
 	};

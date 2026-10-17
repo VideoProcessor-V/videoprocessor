@@ -4,6 +4,7 @@
 
 #include <DebugLog.h>
 #include <EventActionLauncher.h>
+#include <MotionAhead.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1062,7 +1063,21 @@ namespace UnifiedProfileRuntime
 				output << "profile." << group.name << ": " <<
 					RendererProfileConfig::FormatSelection(selection->second) << "\n";
 		}
+		// audit 2026-10-16: flush the stream and the file to disk before the
+		// atomic rename, so a power loss cannot commit an empty state file.
+		output.flush();
 		output.close();
+		if (output)
+		{
+			const HANDLE flushHandle = CreateFileA(temporaryPath.c_str(),
+				GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+				FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (flushHandle != INVALID_HANDLE_VALUE)
+			{
+				FlushFileBuffers(flushHandle);
+				CloseHandle(flushHandle);
+			}
+		}
 		if (!output)
 		{
 			DeleteFileA(temporaryPath.c_str());
@@ -1204,7 +1219,8 @@ namespace UnifiedProfileRuntime
 			const bool dejudder = std::atof(setting("dejudder_strength", "0").c_str()) > 0.0 ||
 				std::atof(setting("dejudder_strength_even", "0").c_str()) > 0.0;
 			if (flow && ahead && dejudder)
-				lookAheadQueueFrames = 5;   // MotionAhead::QueueFramesFor(4): 4 ahead + the frame shown
+				// audit 2026-10-16: derived from the engine depth, not a literal 5 (4 ahead + the frame shown).
+				lookAheadQueueFrames = MotionAhead::QueueFramesFor(MotionAhead::kDefaultDepth);
 		}
 		std::map<std::string, StateVariables::Value> variables;
 		PublishSourceVariables(values, variables);

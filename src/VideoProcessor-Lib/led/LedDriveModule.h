@@ -233,6 +233,8 @@ namespace LedDrive
 		size_t lookaheadDepth = 0;
 		double correction = 1.0;
 		bool correctionSeeded = false;
+		// The output frame of the last correction update (audit 2026-10-16).
+		uint64_t lastCorrectionFrame = 0;
 
 		std::string pendingLog;
 		bool pendingLogSent = false;

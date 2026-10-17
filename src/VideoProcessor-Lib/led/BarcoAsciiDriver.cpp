@@ -102,9 +102,16 @@ namespace LedDrive
 			}
 			std::this_thread::sleep_for(wait);
 		}
-		port->DiscardInput();
 		std::string error;
-		const bool written = port->Write(command, error);
+		bool written = false;
+		// audit 2026-10-16: a port closed after failed writes is reopened
+		// here (with its back-off) instead of failing for the rest of the run.
+		if (EnsurePortLocked(error))
+		{
+			port->DiscardInput();
+			written = port->Write(command, error);
+		}
+		lastWriteOk = written;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (written)
@@ -125,9 +132,44 @@ namespace LedDrive
 		}
 		bool ok = written && !framing.acknowledged;
 		if (!written)
-			DebugLog::Log("LED drive: projector write of \"%s\" failed: %s",
-				Printable(command).c_str(), error.c_str());
-		else if (framing.acknowledged)
+		{
+			// audit 2026-10-16: an unplugged port fails every command; log the
+			// first failure, then at most once per 10 s with a count, and after
+			// 5 failures in a row close the port so it is reopened.
+			const auto failedAt = steady_clock::now();
+			++writeFailures;
+			++unloggedWriteFailures;
+			if (!writeFailureLogged || failedAt - lastWriteFailureLog >= seconds(10))
+			{
+				DebugLog::Log("LED drive: projector write of \"%s\" failed: %s (%d failed write(s) since the last report)",
+					Printable(command).c_str(), error.c_str(), unloggedWriteFailures);
+				writeFailureLogged = true;
+				lastWriteFailureLog = failedAt;
+				unloggedWriteFailures = 0;
+			}
+			if (writeFailures >= 5 && port->IsOpen())
+			{
+				port->Close();
+				reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
+				reopenAt = failedAt + milliseconds(reopenBackoffMs);
+				DebugLog::Log("LED drive: %d projector writes failed in a row; %s closed, reopening in %d ms",
+					writeFailures, config.port.c_str(), reopenBackoffMs);
+			}
+		}
+		else
+		{
+			const auto now = steady_clock::now();
+			if (unloggedWriteFailures > 0 && now - lastWriteFailureLog >= seconds(10))
+			{
+				DebugLog::Log("LED drive: projector writes succeed again (%d failed write(s) since the last report)",
+					unloggedWriteFailures);
+				lastWriteFailureLog = now;
+				unloggedWriteFailures = 0;
+			}
+			writeFailures = 0;
+			reopenBackoffMs = 0;
+		}
+		if (written && framing.acknowledged)
 		{
 			const auto deadline = steady_clock::now() + milliseconds(timeoutMs);
 			std::string line;
@@ -167,8 +209,15 @@ namespace LedDrive
 		}
 		int gap = config.minCommandGapMs;
 		// Barco: at least 2 s before sending again when no reply came.
-		if (written && framing.acknowledged && !ok) gap = std::max(gap, 2000);
+		const bool noReply = written && framing.acknowledged && !ok;
+		if (noReply) gap = std::max(gap, 2000);
+		// audit 2026-10-16: a failed write is retried; never in a tight loop,
+		// even with min_command_gap_ms 0.
+		if (!written) gap = std::max(gap, 200);
 		std::lock_guard<std::mutex> guard(stateMutex);
+		// audit 2026-10-16: kept apart, so the script and sequence sends (no
+		// command gap) still keep it.
+		if (noReply) replyBackoffUntil = steady_clock::now() + milliseconds(2000);
 		if (config.burstCommands > 0 && sinceBurst >= config.burstCommands)
 		{
 			gap = std::max(gap, config.burstPauseMs);
@@ -182,6 +231,49 @@ namespace LedDrive
 	{
 		return framing.acknowledged &&
 			Transact(Format(mnemonic, argument), mnemonic, &value, config.ackTimeoutMs, -1);
+	}
+
+	bool BarcoAsciiDriver::EnsurePortLocked(std::string& error)
+	{
+		using namespace std::chrono;
+		if (port->IsOpen()) return true;
+		const auto now = steady_clock::now();
+		if (now < reopenAt)
+		{
+			error = config.port + " closed; reopening in " +
+				std::to_string(duration_cast<milliseconds>(reopenAt - now).count()) + " ms";
+			return false;
+		}
+		std::string openError;
+		if (port->Open(config.port, config.baud, openError))
+		{
+			// The back-off itself resets only after a write succeeds, so a port
+			// that opens but cannot write is not reopened in a tight loop.
+			{
+				// audit 2026-10-16 follow-up: what the projector holds is unknown
+				// now; the worker redoes the handshake and re-sends the targets
+				// once this command is done.
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				state.lightKnown = false;
+				state.contrastKnown = false;
+				resyncAfterReopen = true;
+				wake.notify_one();
+			}
+			++reopensUnlogged;
+			if (lastReopenLog == steady_clock::time_point() || now - lastReopenLog >= seconds(10))
+			{
+				DebugLog::Log("LED drive: %s reopened (%d reopen(s) since the last report)",
+					config.port.c_str(), reopensUnlogged);
+				lastReopenLog = now;
+				reopensUnlogged = 0;
+			}
+			writeFailures = 0;
+			return true;
+		}
+		reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
+		reopenAt = now + milliseconds(reopenBackoffMs);
+		error = openError + "; retrying in " + std::to_string(reopenBackoffMs) + " ms";
+		return false;
 	}
 
 	// Candidate framings, tried in order for terminator: auto. The script's
@@ -252,6 +344,9 @@ namespace LedDrive
 		}
 		{
 			std::lock_guard<std::timed_mutex> guard(portMutex);
+			writeFailures = 0;
+			reopenBackoffMs = 0;
+			reopenAt = std::chrono::steady_clock::time_point();
 			SelectFraming();
 			int minimum = 0, maximum = 0;
 			if (framing.acknowledged)
@@ -339,6 +434,9 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(stateMutex);
 		if (!opened || shuttingDown) return;
 		pendingContrast = value;
+		// audit 2026-10-16: a hold's -1 also stops a value the worker has
+		// already taken but not yet written (a newer value simply follows it).
+		if (value < 0) ++contrastGeneration;
 		wake.notify_one();
 	}
 
@@ -412,7 +510,8 @@ namespace LedDrive
 			// sequence. The exit restore may have begun while this waited.
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (shuttingDown) return false;
-			nextSendAllowed = std::chrono::steady_clock::now();
+			// audit 2026-10-16: but Barco's 2 s after a missing reply stays.
+			nextSendAllowed = std::max(std::chrono::steady_clock::now(), replyBackoffUntil);
 			sinceBurst = 0;
 		}
 		int confirmed = -1;
@@ -434,6 +533,8 @@ namespace LedDrive
 		shuttingDown = true;
 		pendingLight = -1;
 		pendingContrast = -1;
+		++lightGeneration;      // audit 2026-10-16
+		++contrastGeneration;
 		sequence.clear();
 		wake.notify_all();
 	}
@@ -447,6 +548,8 @@ namespace LedDrive
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (!opened) return false;
 			pendingLight = -1;
+			// audit 2026-10-16: nor a target the worker took before this.
+			++lightGeneration;
 			clamped = Clamp(level);
 		}
 		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
@@ -497,10 +600,12 @@ namespace LedDrive
 		for (;;)
 		{
 			int target = -1;
+			bool jump = false;
+			int lightTargetGeneration = 0;
 			{
 				std::unique_lock<std::mutex> lock(stateMutex);
 				wake.wait(lock, [this]
-					{ return stopping || pendingLight >= 0 || pendingContrast >= 0 || !sequence.empty(); });
+					{ return stopping || pendingLight >= 0 || pendingContrast >= 0 || !sequence.empty() || resyncAfterReopen; });
 				if (!stopping && !shuttingDown && !sequence.empty())
 				{
 					// Experimental custom dim: its own spacing (ftb_step_ms, like
@@ -512,7 +617,8 @@ namespace LedDrive
 					const std::pair<std::string, int> command = sequence.front();
 					sequence.pop_front();
 					sequenceInFlight = true;
-					nextSendAllowed = std::chrono::steady_clock::now();
+					// audit 2026-10-16: Barco's 2 s after a missing reply stays.
+					nextSendAllowed = std::max(std::chrono::steady_clock::now(), replyBackoffUntil);
 					lock.unlock();
 					{
 						std::lock_guard<std::timed_mutex> guard(portMutex);
@@ -537,13 +643,18 @@ namespace LedDrive
 				while (!stopping && std::chrono::steady_clock::now() < nextSendAllowed)
 					wake.wait_until(lock, nextSendAllowed);
 				if (stopping) return;
-				if (shuttingDown) continue;
-				if (pendingContrast >= 0)
+				if (shuttingDown)
 				{
-					// 7c-1: a CNTR crossing takes this slot; a waiting LPW1
-					// keeps its place for the next one.
-					const int contrast = pendingContrast;
-					pendingContrast = -1;
+					resyncAfterReopen = false;
+					continue;
+				}
+				if (resyncAfterReopen)
+				{
+					// audit 2026-10-16 follow-up: after a reopen, Open()'s ECHO
+					// (when the framing is acknowledged and echo is on), then the
+					// light and CNTR the model holds - CNTR 50, the startup value,
+					// when none was sent - unless newer targets are waiting.
+					resyncAfterReopen = false;
 					transmitting = true;
 					lock.unlock();
 					{
@@ -552,6 +663,44 @@ namespace LedDrive
 						{
 							std::lock_guard<std::mutex> stateGuard(stateMutex);
 							skip = shuttingDown;
+						}
+						if (!skip && framing.acknowledged && config.echo)
+							Transact(Format("ECHO", "1"), "ECHO", nullptr, config.ackTimeoutMs, -1, -1, true);
+					}
+					lock.lock();
+					transmitting = false;
+					if (!stopping && !shuttingDown)
+					{
+						DebugLog::Log("LED drive: %s reopened; re-sending LPW1 %d and CNTR %d",
+							config.port.c_str(), pendingLight >= 0 ? pendingLight : lastSentLight,
+							pendingContrast >= 0 ? pendingContrast : lastSentContrast >= 0 ? lastSentContrast : 50);
+						if (pendingContrast < 0) pendingContrast = lastSentContrast >= 0 ? lastSentContrast : 50;
+						if (pendingLight < 0 && lastSentLight >= 0)
+						{
+							pendingLight = lastSentLight;
+							pendingJump = true;   // the level itself, not split
+						}
+					}
+					continue;
+				}
+				if (pendingContrast >= 0)
+				{
+					// 7c-1: a CNTR crossing takes this slot; a waiting LPW1
+					// keeps its place for the next one.
+					const int contrast = pendingContrast;
+					const int generation = contrastGeneration;
+					pendingContrast = -1;
+					transmitting = true;
+					contrastInFlight = true;
+					lock.unlock();
+					{
+						std::lock_guard<std::timed_mutex> guard(portMutex);
+						bool skip = false;
+						{
+							// audit 2026-10-16: cancelled (a hold's -1, or shutdown)
+							// while this waited for the port: not sent.
+							std::lock_guard<std::mutex> stateGuard(stateMutex);
+							skip = shuttingDown || contrastGeneration != generation;
 						}
 						int confirmed = -1;
 						if (!skip &&
@@ -562,15 +711,26 @@ namespace LedDrive
 							state.contrastKnown = true;
 							state.contrast = confirmed >= 0 ? confirmed : contrast;
 						}
+						else if (!skip && !lastWriteOk)
+						{
+							// audit 2026-10-16: a failed write is sent again at the
+							// next slot (the command gap), unless replaced or
+							// cancelled meanwhile.
+							std::lock_guard<std::mutex> stateGuard(stateMutex);
+							if (!stopping && !shuttingDown && pendingContrast < 0 && contrastGeneration == generation)
+								pendingContrast = contrast;
+						}
 					}
 					lock.lock();
 					transmitting = false;
+					contrastInFlight = false;
 					continue;
 				}
 				if (pendingLight < 0) continue;
 				target = pendingLight;
 				pendingLight = -1;
-				const bool jump = pendingJump;
+				jump = pendingJump;
+				lightTargetGeneration = lightGeneration;
 				pendingJump = false;
 				// Dim at most max_levels_per_command per command (a cut jump is
 				// sent whole); the rest of the drop stays pending for the next
@@ -587,8 +747,9 @@ namespace LedDrive
 			{
 				// The exit restore may have begun while this target waited for
 				// the port: never send a stale level after it.
+				// audit 2026-10-16: nor one SetLightNow replaced meanwhile.
 				std::lock_guard<std::mutex> stateGuard(stateMutex);
-				if (shuttingDown)
+				if (shuttingDown || lightGeneration != lightTargetGeneration)
 				{
 					transmitting = false;
 					continue;
@@ -600,6 +761,16 @@ namespace LedDrive
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
 			transmitting = false;
 			if (ok) lastLight = confirmed >= 0 ? confirmed : target;
+			// audit 2026-10-16: a failed write is sent again at the next slot
+			// (the command gap) unless a newer target is waiting; the model only
+			// follows levels really written, so it stays on the old one meanwhile.
+			else if (!lastWriteOk && !stopping && !shuttingDown && pendingLight < 0 &&
+				lightGeneration == lightTargetGeneration)
+			{
+				pendingLight = target;
+				pendingJump = jump;
+				wake.notify_one();
+			}
 		}
 	}
 
@@ -631,6 +802,7 @@ namespace LedDrive
 		status.contrastSends = contrastSends;
 		status.lastSentContrast = lastSentContrast;
 		status.busy = pendingLight >= 0 || pendingContrast >= 0 || transmitting;
+		status.contrastBusy = pendingContrast >= 0 || contrastInFlight;   // audit 2026-10-16
 		status.sequenceBusy = !sequence.empty() || sequenceInFlight;
 		status.sequencesDone = sequencesDone;
 		return status;

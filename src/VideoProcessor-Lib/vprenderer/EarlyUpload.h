@@ -111,6 +111,11 @@ private:
 	std::vector<Entry> entries;
 	size_t capBytes = 0;
 	size_t budgetCap = 0;
+	// audit 2026-10-16: the last uploaded frame size (guarded by `lock`); a
+	// change frees the textures the new size will not reuse.
+	size_t lastRowBytes = 0;
+	int lastHeight = 0;
+	bool trimPending = false;   // some could not be freed yet (held or in GPU use)
 	std::atomic<bool> ready{ false };
 	Stats stats;
 	std::string error;

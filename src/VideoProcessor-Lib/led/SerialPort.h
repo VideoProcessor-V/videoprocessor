@@ -20,8 +20,9 @@ namespace LedDrive
 		// Discards anything received but not yet read.
 		virtual void DiscardInput() = 0;
 		virtual bool Write(const std::string& bytes, std::string& error) = 0;
-		// Reads up to and excluding '\r'; '\n' is dropped. False on timeout
-		// (whatever arrived is returned in line).
+		// Reads up to and excluding '\r'; '\n' is dropped. False on timeout,
+		// with line empty: a partial line is kept for the next call (audit
+		// 2026-10-16). A failed read closes the port (IsOpen() false).
 		virtual bool ReadLine(int timeoutMs, std::string& line) = 0;
 	};
 

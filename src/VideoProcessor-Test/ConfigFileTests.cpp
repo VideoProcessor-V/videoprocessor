@@ -563,6 +563,18 @@ namespace VideoProcessorTest
                 Assert::IsTrue(framesAhead.raisedToMinimum);
                 const auto lowLatency = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 20, false, 0, 0, 3, film), 0);
                 Assert::IsFalse(lowLatency.raisedToMinimum, L"low latency is exempt");
+                // audit 2026-10-16: the raised target never exceeds the queue capacity.
+                bool clamped = false;
+                const auto smallQueue = QueueLatency::ClampToCapacity(framesAhead, 3, &clamped);
+                Assert::IsTrue(clamped, L"queue_size 3 < 5: clamped");
+                Assert::AreEqual<size_t>(3, smallQueue.frames);
+                Assert::AreEqual(QueueLatency::EffectiveLatencyMs(3, film), smallQueue.effectiveMs, 1e-9);
+                const auto bigQueue = QueueLatency::ClampToCapacity(framesAhead, 8, &clamped);
+                Assert::IsFalse(clamped, L"a queue that holds the target is left alone");
+                Assert::AreEqual<size_t>(5, bigQueue.frames);
+                const auto unknownQueue = QueueLatency::ClampToCapacity(framesAhead, 0, &clamped);
+                Assert::IsFalse(clamped, L"capacity 0 (unknown) does not clamp");
+                Assert::AreEqual<size_t>(5, unknownQueue.frames);
             }
             // Own time target wins over own frames and the default's values.
             auto decision = ResolveTargetFrames(true, 200, true, 2, 120, 3, film);

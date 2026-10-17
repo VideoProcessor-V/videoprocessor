@@ -192,7 +192,7 @@ namespace VideoProcessorTest
 		{
 			FakeShaders shaders;
 			shaders.files["chroma.glsl"] = "CHROMA";
-			shaders.files["quant.glsl"] = "OUTPUT {{output_width}}";
+			shaders.files["quant.glsl"] = "OUTPUT {{output_width}} VP_OUTPUT_QUANTIZER";   // a quantiser (audit 2026-10-16)
 			CustomHookChain::Chain chain(shaders.Loader());
 
 			chain.Configure({ CustomRule("cfl", "chroma.glsl", 10) });
@@ -207,13 +207,13 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t{ 2 }, hooks.size());
 			Assert::IsTrue(chain.SuppressesDither(false));
 			Assert::IsTrue(CustomHookChain::HooksOutput(hooks[1]));
-			Assert::AreEqual(std::string("OUTPUT 2560"), shaders.parsed.back());
+			Assert::AreEqual(std::string("OUTPUT 2560 VP_OUTPUT_QUANTIZER"), shaders.parsed.back());
 		}
 
 		TEST_METHOD(ParamValuesFromConfigurationReachTheParsedHook)
 		{
 			FakeShaders shaders;
-			shaders.files["quant.glsl"] = "OUTPUT";
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER";   // a quantiser (audit 2026-10-16: only those suppress the dither)
 			CustomHookChain::Chain chain(shaders.Loader());
 			ConfiguredShaderRule rule = CustomRule("sigma", "quant.glsl", 90);
 			rule.parameters["noise_amplitude"] = "0.25";
@@ -270,7 +270,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(CinemaOnlyHooksAreSkippedInLowLatency)
 		{
 			FakeShaders shaders;
-			shaders.files["quant.glsl"] = "OUTPUT";
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER";   // a quantiser (audit 2026-10-16: only those suppress the dither)
 			shaders.files["judder.glsl"] = "CHROMA";
 			CustomHookChain::Chain chain(shaders.Loader());
 			ConfiguredShaderRule judder = CustomRule("judder", "judder.glsl", 50);
@@ -289,7 +289,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(RuntimeFailureLatchesUntilSelectionChanges)
 		{
 			FakeShaders shaders;
-			shaders.files["quant.glsl"] = "OUTPUT";
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER";   // a quantiser (audit 2026-10-16: only those suppress the dither)
 			CustomHookChain::Chain chain(shaders.Loader());
 			chain.Configure({ CustomRule("sigma", "quant.glsl", 90) });
 			chain.Ensure(Output2560x1600());

@@ -1585,7 +1585,8 @@ void testInheritedButtonsAndReorganisedSections()
     require(inSection("config.vprenderer.picture_preset_box", QStringLiteral("sourceRebase")), "Picture not under Source resolution & re-base");
     require(inSection("config.vprenderer.deband_vp", QStringLiteral("sourceRebase")), "VP deband not under Source resolution & re-base");
     require(inSection("config.vprenderer.ssim_residual_stabilise", QStringLiteral("adaptiveDownscale")), "SSIM steadiness not with the downscale blend");
-    require(inSection("config.vprenderer.dither_vectors_new_frame", QStringLiteral("temporalDither")), "dither motion fix not with the dither");
+    require(inSection("config.vprenderer.dither_vectors_new_frame", QStringLiteral("fixesUnderTest")), "dither motion fix left Fixes under test");
+    require(inSection("config.vprenderer.native_rgb_ingest", QStringLiteral("fixesUnderTest")), "native RGB left Fixes under test");
     require(inSection("config.vprenderer.capture_upload", QStringLiteral("fixesUnderTest")), "capture_upload left Fixes under test");
     auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
     profiles->setCurrentRow(1);

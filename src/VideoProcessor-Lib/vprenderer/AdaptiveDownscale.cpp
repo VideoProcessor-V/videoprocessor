@@ -259,7 +259,9 @@ if (q.x < size.x && q.y < size.y) {
 		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, int components, int depth, bool renderable,
 			bool linear, bool hostReadable = false)
 		{
-			if (tex && tex->params.w == w && tex->params.h == h)
+			// Audit 2026-10-16: the depth too (float32Picture can change it).
+			if (tex && tex->params.w == w && tex->params.h == h && tex->params.format &&
+				tex->params.format->component_depth[0] == depth)
 				return true;
 			enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
 			if (renderable) caps = static_cast<enum pl_fmt_caps>(caps | PL_FMT_CAP_RENDERABLE);
@@ -277,6 +279,14 @@ if (q.x < size.x && q.y < size.y) {
 			params.renderable = renderable;
 			params.host_readable = hostReadable;
 			return pl_tex_recreate(gpu, &tex, &params);
+		}
+
+		// Audit 2026-10-16: a picture texture (the faithful branch) in 32-bit
+		// float when wanted, else (or without a suitable rgba32f) 16-bit float.
+		bool EnsurePicture(pl_gpu gpu, pl_tex& tex, int w, int h, bool float32)
+		{
+			return (float32 && Ensure(gpu, tex, w, h, 4, 32, true, true)) ||
+				Ensure(gpu, tex, w, h, 4, 16, true, true);
 		}
 
 		bool Compute(pl_dispatch dispatch, const char* description, const char* header, const char* body,
@@ -463,7 +473,7 @@ if (q.x < size.x && q.y < size.y) {
 		const int w = std::max(1, static_cast<int>(std::ceil(sx1)) - ox);
 		const int h = std::max(1, static_cast<int>(std::ceil(sy1)) - oy);
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
-		if (!Ensure(gpu, faithful, dw, dh, 4, 16, true, true) || !Ensure(gpu, edge, w, h, 1, 16, false, true) ||
+		if (!EnsurePicture(gpu, faithful, dw, dh, settings.float32Picture) || !Ensure(gpu, edge, w, h, 1, 16, false, true) ||
 			!Ensure(gpu, partial, gx, gy, 4, 32, false, false) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
 		{
 			++failures;
@@ -487,7 +497,7 @@ if (q.x < size.x && q.y < size.y) {
 		const bool unequal = std::max(ratioX, ratioY) > 1.1 * std::max(1e-6, std::min(ratioX, ratioY));
 		if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
 		{
-			if (!Ensure(gpu, faithfulMid, w, dh, 4, 16, true, true))
+			if (!EnsurePicture(gpu, faithfulMid, w, dh, settings.float32Picture))
 			{
 				++failures;
 				return unchanged;
@@ -753,6 +763,12 @@ if (q.x < size.x && q.y < size.y) {
 			Ensure(gpu, residual[1 - writeIndex], w, h, 1, 16, false, true);
 		if (readIndex >= 0 && readIndex != 1 - writeIndex)
 			readIndex = -1;   // (never: the previous residual is always the other texture)
+		// A new size recreated the textures: nothing previous to read (audit 2026-10-16: an
+		// undefined texture was mixed in for one frame after a resize / zoom / crop change).
+		if (w != residualW || h != residualH)
+			readIndex = -1;
+		residualW = w;
+		residualH = h;
 		const float prevValid = stabilise && readIndex >= 0 ? 1.0f : 0.0f;
 		const float rsCrop[4] = { motion.sourceCrop.x0, motion.sourceCrop.y0,
 			motion.sourceCrop.x1 - motion.sourceCrop.x0, motion.sourceCrop.y1 - motion.sourceCrop.y0 };

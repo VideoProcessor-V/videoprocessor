@@ -4,6 +4,7 @@
 #include <CrashState.h>
 #include <DebugLog.h>
 
+#include <atomic>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -102,10 +103,50 @@ namespace VideoProcessorTest
 				recorder.Start(folder, {}, 100);
 				recorder.Stop(false);
 				Assert::IsTrue(Exists(folder + "\\crash-state.txt"), L"an unclean exit leaves it");
+				// audit 2026-10-16: the final snapshot is written atomically too.
+				Assert::IsFalse(Exists(folder + "\\crash-state.txt.tmp"), L"no temporary file is left");
 			}
 			const auto kept = CrashState::PreserveLeftover(folder);
 			Assert::AreEqual(size_t(1), kept.size());
 			Assert::AreEqual(std::string("crash state (1).txt"), kept.front());
+		}
+
+		// audit 2026-10-16: the crash handler's write never waits on a held
+		// lock - it gives up after a bounded wait - and otherwise writes the
+		// crash with the recent lines of the last periodic write.
+		TEST_METHOD(HandlerWriteDoesNotBlockOnAHeldWriterLock)
+		{
+			const std::string folder = TempFolder("handler");
+			std::atomic<bool> block{ false };
+			std::atomic<bool> entered{ false };
+			CrashState::Recorder recorder;
+			Assert::IsTrue(recorder.Start(folder, [&]
+			{
+				if (block.load())
+				{
+					entered = true;
+					while (block.load()) Sleep(1);
+				}
+				return std::vector<std::string>{ "handler test recent line" };
+			}, 100));
+			block = true;
+			const ULONGLONG waitStart = GetTickCount64();
+			while (!entered.load() && GetTickCount64() - waitStart < 5000) Sleep(1);
+			Assert::IsTrue(entered.load(), L"the periodic write is inside the log source, holding the writer lock");
+			const ULONGLONG start = GetTickCount64();
+			const bool blockedWrite = recorder.WriteFromHandler("held lock");
+			const ULONGLONG elapsed = GetTickCount64() - start;
+			block = false;
+			Assert::IsFalse(blockedWrite, L"a held writer lock skips the handler's write");
+			Assert::IsTrue(elapsed < 3000, L"the handler gives up after a bounded wait");
+			Sleep(250);
+			Assert::IsTrue(recorder.WriteFromHandler("test crash"), L"a free writer lock is written");
+			const std::string text = Read(folder + "\\crash-state.txt");
+			Assert::IsTrue(text.find("crash: test crash") != std::string::npos, L"the crash value is written");
+			Assert::IsTrue(text.find("handler test recent line") != std::string::npos,
+				L"the recent lines of the last periodic write are kept");
+			Assert::IsFalse(Exists(folder + "\\crash-state.txt.tmp"), L"no temporary file is left");
+			recorder.Stop(true);
 		}
 
 		TEST_METHOD(MinidumpIsWrittenBesideTheState)

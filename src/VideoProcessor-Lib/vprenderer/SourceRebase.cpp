@@ -208,6 +208,12 @@ if (p.x < size.x && p.y < size.y) {
 			params.w = w;
 			params.h = h;
 			params.format = in->params.format;
+			// Never below 16 bits: an 8-bit (or 10-bit packed) source plane would requantise the
+			// downscale and lose what the 2:1 average gains (audit 2026-10-16).
+			if (params.format->component_depth[0] < 16)
+				if (pl_fmt wide = pl_find_fmt(gpu, PL_FMT_UNORM, params.format->num_components, 16, 16,
+						static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR)))
+					params.format = wide;
 			params.sampleable = true;
 			params.renderable = true;
 			params.blit_src = true;   // the smooth-motion history copies source planes

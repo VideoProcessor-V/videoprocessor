@@ -88,6 +88,15 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 
+// audit 2026-10-16: the capture thread reads m_videoRenderer with
+// std::atomic_load_explicit and DestroyVideoRenderer detaches it with
+// std::atomic_exchange_explicit, so a new renderer is published atomically too.
+void PublishVideoRenderer(std::shared_ptr<IVideoRenderer>& slot,
+	std::shared_ptr<IVideoRenderer> renderer)
+{
+	std::atomic_store_explicit(&slot, std::move(renderer), std::memory_order_release);
+}
+
 // The exact source rate the profile rules saw (${cadence}); 0 when unknown.
 double SnapshotSourceRateHz(const UnifiedProfileRuntime::Snapshot& snapshot)
 {
@@ -9863,14 +9872,14 @@ void CVideoProcessorDlg::RenderStart()
 			if (!alphaStart.accepted)
 				throw std::runtime_error(
 					"Alpha queue lifecycle construction was not accepted");
-			m_videoRenderer = std::make_shared<LibplaceboPluginVideoRenderer>(
+			PublishVideoRenderer(m_videoRenderer, std::make_shared<LibplaceboPluginVideoRenderer>(
 				*this,
 				rendererGeneration,
 				m_rendererTargetHwnd,
 				timingClock,
 				GetRendererVideoFrameUseQueue(),
 				alphaQueueCapacity,
-				videoConversionOverride, selectedRenderer->libplaceboBeta);
+				videoConversionOverride, selectedRenderer->libplaceboBeta));
 			BindRendererResetSink();
 
 			ApplyUnifiedProfileSnapshot(profileSnapshot, false);
@@ -9979,7 +9988,7 @@ void CVideoProcessorDlg::RenderStart()
 				"DirectShow queue lifecycle construction was not accepted");
 		m_queueLaunchContractManualRetryPending = false;
 		if (IsEqualCLSID(*rendererClSID, CLSID_MPCVR))
-			m_videoRenderer = std::make_shared<DirectShowMPCVideoRenderer>(
+			PublishVideoRenderer(m_videoRenderer, std::make_shared<DirectShowMPCVideoRenderer>(
 				*this, rendererGeneration, m_rendererTargetHwnd, GetSafeHwnd(),
 				WM_MESSAGE_DIRECTSHOW_NOTIFICATION,
 				WM_MESSAGE_DIRECTSHOW_OWNER_COMPLETION, timingClock,
@@ -9990,10 +9999,10 @@ void CVideoProcessorDlg::RenderStart()
 				queueLaunchDesired.profileGeneration,
 				videoConversionOverride, forceNominalRange,
 				forceVideoTransferFunction, forceVideoTransferMatrix,
-				forceVideoPrimaries);
+				forceVideoPrimaries));
 		else if (IsEqualCLSID(
 			*rendererClSID, CLSID_EnhancedVideoRenderer))
-			m_videoRenderer =
+			PublishVideoRenderer(m_videoRenderer,
 				std::make_shared<DirectShowEnhancedVideoRenderer>(
 					*this, rendererGeneration, m_rendererTargetHwnd, GetSafeHwnd(),
 					WM_MESSAGE_DIRECTSHOW_NOTIFICATION,
@@ -10003,9 +10012,9 @@ void CVideoProcessorDlg::RenderStart()
 					directShowQueueCapacity,
 					queueLaunchDesired.effectiveRevision,
 					queueLaunchDesired.profileGeneration,
-					videoConversionOverride);
+					videoConversionOverride));
 		else if (m_activeRendererName.Find(TEXT("madVR")) >= 0)
-			m_videoRenderer =
+			PublishVideoRenderer(m_videoRenderer,
 				std::make_shared<DirectShowGenericHDRVideoRenderer>(
 					*rendererClSID, *this, rendererGeneration, m_rendererTargetHwnd,
 					GetSafeHwnd(), WM_MESSAGE_DIRECTSHOW_NOTIFICATION,
@@ -10017,9 +10026,9 @@ void CVideoProcessorDlg::RenderStart()
 					queueLaunchDesired.profileGeneration,
 					videoConversionOverride, forceNominalRange,
 					forceVideoTransferFunction, forceVideoTransferMatrix,
-					forceVideoPrimaries);
+					forceVideoPrimaries));
 		else
-			m_videoRenderer =
+			PublishVideoRenderer(m_videoRenderer,
 				std::make_shared<DirectShowGenericVideoRenderer>(
 					*rendererClSID, *this, rendererGeneration, m_rendererTargetHwnd,
 					GetSafeHwnd(), WM_MESSAGE_DIRECTSHOW_NOTIFICATION,
@@ -10029,7 +10038,7 @@ void CVideoProcessorDlg::RenderStart()
 					directShowQueueCapacity,
 					queueLaunchDesired.effectiveRevision,
 					queueLaunchDesired.profileGeneration,
-					videoConversionOverride);
+					videoConversionOverride));
 		BindRendererResetSink();
 		if (const auto directShowRenderer =
 			std::dynamic_pointer_cast<DirectShowVideoRenderer>(m_videoRenderer))
@@ -10096,7 +10105,7 @@ void CVideoProcessorDlg::RenderStart()
 			m_rendererConstructionActive = true;
 			if (IsEqualCLSID(*rendererClSID, CLSID_MPCVR))
 			{
-				m_videoRenderer = std::make_shared<DirectShowMPCVideoRenderer>(
+				PublishVideoRenderer(m_videoRenderer, std::make_shared<DirectShowMPCVideoRenderer>(
 					*this,
 					rendererGeneration,
 					m_rendererTargetHwnd,
@@ -10113,11 +10122,11 @@ void CVideoProcessorDlg::RenderStart()
 					forceNominalRange,
 					forceVideoTransferFunction,
 					forceVideoTransferMatrix,
-					forceVideoPrimaries);
+					forceVideoPrimaries));
 			}
 			else if (IsEqualCLSID(*rendererClSID, CLSID_EnhancedVideoRenderer))
 			{
-				m_videoRenderer = std::make_shared<DirectShowEnhancedVideoRenderer>(
+				PublishVideoRenderer(m_videoRenderer, std::make_shared<DirectShowEnhancedVideoRenderer>(
 					*this,
 					rendererGeneration,
 					m_rendererTargetHwnd,
@@ -10130,10 +10139,10 @@ void CVideoProcessorDlg::RenderStart()
 					directShowQueueCapacity,
 					queueLaunchDesired.effectiveRevision,
 					queueLaunchDesired.profileGeneration,
-					videoConversionOverride);
+					videoConversionOverride));
 			}
 			else
-				m_videoRenderer = std::make_shared<DirectShowGenericVideoRenderer>(
+				PublishVideoRenderer(m_videoRenderer, std::make_shared<DirectShowGenericVideoRenderer>(
 					*rendererClSID,
 					*this,
 					rendererGeneration,
@@ -10147,7 +10156,7 @@ void CVideoProcessorDlg::RenderStart()
 					directShowQueueCapacity,
 					queueLaunchDesired.effectiveRevision,
 					queueLaunchDesired.profileGeneration,
-					videoConversionOverride);
+					videoConversionOverride));
 
 			if (!m_videoRenderer)
 				FatalError(TEXT("Failed to build DirectShow Video Renderer"));
@@ -13011,12 +13020,35 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 		// queue profile: no minimum.
 		m_queueTargetDecision = QueueLatency::ApplyFrameMinimum(m_queueTargetDecision,
 			snapshot->queue.lowLatencyPath ? 0 : snapshot->lookAheadQueueFrames, true);
+		// audit 2026-10-16: the look-ahead minimum never asks for more frames
+		// than the queue holds; say so once per change.
+		m_queueTargetDecision = QueueLatency::ClampToCapacity(
+			m_queueTargetDecision, desiredQueueSize);
+		{
+			static size_t s_loggedShortQueueSize = 0;
+			const size_t lookAheadFrames = snapshot->queue.lowLatencyPath ? 0 : snapshot->lookAheadQueueFrames;
+			const size_t shortQueueSize =
+				lookAheadFrames > 0 && desiredQueueSize > 0 && desiredQueueSize < lookAheadFrames ?
+				desiredQueueSize : 0;
+			if (shortQueueSize != s_loggedShortQueueSize)
+			{
+				s_loggedShortQueueSize = shortQueueSize;
+				if (shortQueueSize > 0)
+					DebugLog::Log("Queue: queue_size %zu < %zu: the motion look-ahead needs %zu "
+						"(target held at %zu)", shortQueueSize, lookAheadFrames, lookAheadFrames,
+						m_queueTargetDecision.frames);
+			}
+		}
 		const size_t desiredTargetFrames = m_queueTargetDecision.frames;
 		const size_t desiredStartupPreroll =
 			snapshot->queue.hasStartupPrerollFrames ?
 			snapshot->queue.startupPrerollFrames :
 			m_profileBaseStartupPrerollFrames;
-		if (videoProcessorApp.GetQueueSteadyReserveFrames() != desiredTargetFrames ||
+		// audit 2026-10-16: a capacity change re-sends the frame policy too - the
+		// renderer re-clamps its target to the new capacity, so an unchanged
+		// target must still reach it after the queue size moves.
+		if (queueCapacityChanged ||
+			videoProcessorApp.GetQueueSteadyReserveFrames() != desiredTargetFrames ||
 			videoProcessorApp.GetQueueStartupPrerollFrames() != desiredStartupPreroll)
 		{
 			videoProcessorApp.SetQueueSteadyReserveFrames(desiredTargetFrames);
@@ -14465,6 +14497,13 @@ void CVideoProcessorDlg::OnOK()
 				else
 				{
 					m_videoRenderer->SetFrameQueueMaxSize(capacity);
+					// audit 2026-10-16: re-send the frame policy after the
+					// capacity change, so a target clamped by a smaller queue
+					// is restored when the queue grows again.
+					m_videoRenderer->SetQueueFramePolicy(
+						videoProcessorApp.GetQueueStartupPrerollFrames(),
+						videoProcessorApp.GetQueueSteadyReserveFrames(),
+						videoProcessorApp.HasQueueSteadyReserveFrames());
 					RequestRendererReset(
 						RendererResetReason::QueueSizeChange, false, 0);
 				}
@@ -17040,7 +17079,9 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		stats.convertedQueueSize = m_videoRenderer->GetConvertedQueueSize();
 		stats.currentQueueSize = stats.rawQueueSize + stats.convertedQueueSize;
 		stats.maxQueueSize = GetRendererVideoFrameQueueSizeMax();
-		stats.isQueueFull = (stats.currentQueueSize >= stats.maxQueueSize);
+		// audit 2026-10-16: an unknown capacity (0) is not "full".
+		stats.isQueueFull = stats.maxQueueSize > 0 &&
+			stats.currentQueueSize >= stats.maxQueueSize;
 		stats.queueTargetFromTime = m_queueTargetDecision.fromLatency;
 		stats.queueTargetFrames = m_queueTargetDecision.frames;
 		stats.queueTargetEffectiveMs = m_queueTargetDecision.effectiveMs;

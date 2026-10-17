@@ -63,6 +63,10 @@ namespace LedDrive
 			int timeoutMs, int maxGapWaitMs, int sentLight = -1, bool abortable = false,
 			int sentContrast = -1);
 		bool QueryLocked(const char* mnemonic, const std::string& argument, int& value);
+		// audit 2026-10-16: reopens a port closed after repeated write
+		// failures (or a failed read), with a back-off of 2 s doubling to
+		// 30 s. True when the port is open. Caller holds portMutex.
+		bool EnsurePortLocked(std::string& error);
 		void SelectFraming();
 		int Clamp(int level) const;
 		void Worker();
@@ -90,6 +94,33 @@ namespace LedDrive
 		int contrastSends = 0;
 		int lastSentContrast = -1;
 		bool transmitting = false;
+		// audit 2026-10-16 (guarded by stateMutex): a value the worker has
+		// taken is sent only if its generation is unchanged once it holds the
+		// port - SetContrastAsync(-1) (a hold), SetLightNow and BeginShutdown
+		// cancel one waiting for the port.
+		int contrastGeneration = 0;
+		int lightGeneration = 0;
+		bool contrastInFlight = false;
+		// Barco's 2 s after a missing reply, kept by the script and sequence
+		// sends that otherwise skip the command gap.
+		std::chrono::steady_clock::time_point replyBackoffUntil;
+		// Guarded by portMutex: the last Transact's write succeeded, write
+		// failures in a row, the port's reopen back-off and the rate-limited
+		// failure log.
+		bool lastWriteOk = true;
+		int writeFailures = 0;
+		int reopenBackoffMs = 0;
+		std::chrono::steady_clock::time_point reopenAt;
+		std::chrono::steady_clock::time_point lastWriteFailureLog;
+		bool writeFailureLogged = false;
+		int unloggedWriteFailures = 0;
+		std::chrono::steady_clock::time_point lastReopenLog;
+		// audit 2026-10-16 follow-up (guarded by stateMutex): the port was
+		// reopened; the worker repeats the handshake's ECHO and re-sends the
+		// light and CNTR the model believes (a power-cycled projector is at
+		// its own defaults).
+		bool resyncAfterReopen = false;
+		int reopensUnlogged = 0;
 		bool shuttingDown = false;
 		// Experimental custom dim sequence (guarded by stateMutex).
 		std::deque<std::pair<std::string, int>> sequence;

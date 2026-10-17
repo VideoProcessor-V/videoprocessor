@@ -280,17 +280,24 @@ namespace MotionAhead
 				job = std::move(jobs.front());
 				jobs.pop_front();
 			}
-			if (!Process(job))
+			// An exception escaping the worker would end the process: counted as a failure instead.
+			// Three failures IN A ROW stop the producer (audit 2026-10-16: three over a whole session did).
+			bool ok = false;
+			try { ok = Process(job); }
+			catch (...) { ok = false; }
+			std::lock_guard<std::mutex> lock(mutex);
+			if (ok)
 			{
-				std::lock_guard<std::mutex> lock(mutex);
-				++stats.failures;
-				if (stats.failures >= 3)
-				{
-					// Persistent failure: stop for the session (the matcher covers everything).
-					running = false;
-					engineReady = false;
-					return;
-				}
+				consecutiveFailures = 0;
+				continue;
+			}
+			++stats.failures;
+			if (++consecutiveFailures >= 3)
+			{
+				// Persistent failure: stop (the matcher covers everything) until the producer is wanted again.
+				running = false;
+				engineReady = false;
+				return;
 			}
 		}
 	}
@@ -379,7 +386,11 @@ namespace MotionAhead
 		if (havePrevious && previousGeneration == job.generation && previousSequence < job.sequence)
 		{
 			const int prev = current;
-			if (!engine->Run(lumaTex[prev], lumaTex[slot], flowTex[0], flowTex[1], costTex[0], costTex[1], nullptr, true))
+			// The temporal hints only when the engine's last pair ended at this pair's first frame
+			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
+			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
+			hintSequence = UINT64_MAX;
+			if (!engine->Run(lumaTex[prev], lumaTex[slot], flowTex[0], flowTex[1], costTex[0], costTex[1], nullptr, continuous))
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				error = engine->LastError();
@@ -387,6 +398,8 @@ namespace MotionAhead
 			}
 			else
 			{
+				hintSequence = job.sequence;
+				hintGeneration = job.generation;
 				for (int i = 0; i < 2; ++i)
 				{
 					context->CopyResource(flowRead[i], flowTex[i]);

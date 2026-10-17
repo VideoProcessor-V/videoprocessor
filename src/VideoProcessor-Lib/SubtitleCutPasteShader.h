@@ -873,24 +873,47 @@ inline bool BindSubtitleCutPasteHook(const pl_hook* hook,
     return BindSubtitleCutPasteHook(hook,geometry,backgroundMode,transfer,style);
 }
 
+// Audit 2026-10-16: precision of the full-raster composite. Without it (the
+// historical default) the surface is rgba16f and chroma is upsampled with
+// pl_render_fast_params' bilinear. The renderer passes float32 = the
+// effective state of its rgba32f FBOs (fbo_float32 / output_fbo_float32) and
+// its configured render params, so the composite carries the picture at the
+// same precision and with the same chroma upscaler as the main render.
+struct SubtitleRasterQuality {
+    bool float32=false;                         // rgba32f surface (falls back to rgba16f if missing)
+    const pl_render_params* configured=nullptr; // plane_upscaler/downscaler + antiringing source
+};
+
 // Compose before the main renderer crops away letterbox pixels. Reuse a
 // full-resolution floating-point surface and retain the input transfer function;
 // output tone mapping, scaling, NLS and viewport placement occur only afterward.
 inline bool RenderSubtitleFullRaster(pl_renderer renderer,pl_gpu gpu,
     const pl_frame& source,const pl_hook* hook,pl_tex* surface,pl_frame& composed,
-    bool blitSource,bool blitDestination)
+    bool blitSource,bool blitDestination,const SubtitleRasterQuality* quality=nullptr)
 {
     if(source.num_planes<1 || !source.planes[0].texture)return false;
     const auto texture=source.planes[0].texture;
     pl_tex_params storage{};
     storage.w=texture->params.w;storage.h=texture->params.h;
-    storage.format=pl_find_fmt(gpu,PL_FMT_FLOAT,4,16,0,
-        static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE|PL_FMT_CAP_RENDERABLE|
-            ((blitSource||blitDestination)?PL_FMT_CAP_BLITTABLE:0)));
-    if(!storage.format && blitDestination) {
-        blitDestination=false;
-        storage.format=pl_find_fmt(gpu,PL_FMT_FLOAT,4,16,0,
-            static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE|PL_FMT_CAP_RENDERABLE));
+    // Audit 2026-10-16: rgba32f first when the caller's float32 FBOs are in
+    // effect (float carries BTB/WTW either way; 32-bit drops the float16
+    // rounding), then the historical rgba16f.
+    const int depths[]={(quality && quality->float32)?32:16,16};
+    for(int depth : depths) {
+        bool blit=blitDestination;
+        storage.format=pl_find_fmt(gpu,PL_FMT_FLOAT,4,depth,0,
+            static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE|PL_FMT_CAP_RENDERABLE|
+                ((blitSource||blit)?PL_FMT_CAP_BLITTABLE:0)));
+        if(!storage.format && blit) {
+            blit=false;
+            storage.format=pl_find_fmt(gpu,PL_FMT_FLOAT,4,depth,0,
+                static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE|PL_FMT_CAP_RENDERABLE));
+        }
+        if(storage.format && storage.format->component_depth[0]>=depth) {
+            blitDestination=blit;
+            break;
+        }
+        storage.format=nullptr;
     }
     storage.sampleable=true;storage.renderable=true;
     storage.blit_src=blitSource;storage.blit_dst=blitDestination;
@@ -904,6 +927,19 @@ inline bool RenderSubtitleFullRaster(pl_renderer renderer,pl_gpu gpu,
     target.repr.alpha=PL_ALPHA_NONE;target.color=source.color;
     auto params=pl_render_fast_params;
     params.dither_params=nullptr;params.peak_detect_params=nullptr;
+    if(quality && quality->configured) {
+        // Audit 2026-10-16: the configured chroma upscaler (libplacebo uses
+        // the main upscaler for planes when plane_upscaler is unset) and its
+        // anti-ringing, not fast params' bilinear. Luma is not scaled here.
+        const auto& configured=*quality->configured;
+        params.plane_upscaler=configured.plane_upscaler?configured.plane_upscaler:configured.upscaler;
+        params.plane_downscaler=configured.plane_downscaler?configured.plane_downscaler:configured.downscaler;
+        params.antiringing_strength=configured.antiringing_strength;
+    }
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+    // Audit 2026-10-16: the MAIN-stage hook passes in rgba32f as well.
+    if(quality && quality->float32)params.fbo_float32=true;
+#endif
     params.hooks=hook?&hook:nullptr;params.num_hooks=hook?1:0;
     if(!pl_render_image(renderer,&input,&target,&params))return false;
     if(hook) {
@@ -916,18 +952,20 @@ inline bool RenderSubtitleFullRaster(pl_renderer renderer,pl_gpu gpu,
     return true;
 }
 
+// Audit 2026-10-16: pass the same quality to both calls so the temporal
+// background and the composition surface keep one format (they are blitted).
 inline bool ComposeSubtitleBeforeCrop(pl_renderer renderer,pl_gpu gpu,
     const pl_frame& source,const pl_hook* hook,pl_tex* surface,pl_frame& composed,
-    bool temporalBlit=false)
+    bool temporalBlit=false,const SubtitleRasterQuality* quality=nullptr)
 {
     return hook && RenderSubtitleFullRaster(renderer,gpu,source,hook,surface,
-        composed,false,temporalBlit);
+        composed,false,temporalBlit,quality);
 }
 
 inline bool CaptureSubtitleTemporalBackground(pl_renderer renderer,pl_gpu gpu,
-    const pl_frame& source,pl_tex* surface)
+    const pl_frame& source,pl_tex* surface,const SubtitleRasterQuality* quality=nullptr)
 {
     pl_frame captured{};
     return RenderSubtitleFullRaster(renderer,gpu,source,nullptr,surface,
-        captured,true,false);
+        captured,true,false,quality);
 }

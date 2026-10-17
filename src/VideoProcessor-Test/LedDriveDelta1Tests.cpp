@@ -1287,6 +1287,40 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0, module.CorrectionRatio(), 1e-12);
 		}
 
+		// Audit 2026-10-16: correction_weight_by_time off keeps the earlier
+		// weight (one output frame period per update, however many output
+		// frames passed); on weights by the output frames since the update.
+		TEST_METHOD(CorrectionWeightByTimeOffKeepsTheEarlierWeight)
+		{
+			for (const bool byTime : { false, true })
+			{
+				LedDriveConfig config = Compensate();
+				config.correctionWeightByTime = byTime;
+				LedDriveModule module(ProjectorConfig(), config);
+				StatsBuilder builder(module.Config());
+				const double exact = 100.0;
+				auto submit = [&](uint64_t sequence, double ratio)
+				{
+					module.SubmitPrediction(sequence, builder.Build(Frame(16.0 + (exact - 16.0) / ratio),
+						sequence * FRAME_MS));
+					module.SubmitMeasurement(Frame(exact), sequence);
+				};
+				submit(1, 1.0);   // seeds the correction at 1
+				Assert::AreEqual(1.0, module.CorrectionRatio(), 1e-9);
+				// Three output frames (24p on 60 Hz averages 2.5) before the next
+				// source frame's measurement.
+				for (int frame = 1; frame <= 3; ++frame)
+					module.BeginFrameAt(0, frame * FRAME_MS);
+				const double period = module.FramePeriodMs();
+				submit(2, 1.2);
+				const double frames = byTime ? 3.0 : 1.0;
+				Assert::AreEqual(1.0 + (1.2 - 1.0) * frames * period / 3000.0, module.CorrectionRatio(), 1e-4,
+					byTime ? L"on: weighted by the frames since the last update" : L"off: one frame period per update");
+			}
+			LedDriveConfig defaults;
+			Assert::IsTrue(defaults.correctionWeightByTime, L"On by default");
+		}
+
 		TEST_METHOD(ScriptModeIgnoresTheLookahead)
 		{
 			LedDriveConfig script;

@@ -50,6 +50,9 @@ namespace LedDrive
 		dcb.fInX = FALSE;
 		dcb.fDtrControl = DTR_CONTROL_ENABLE;
 		dcb.fRtsControl = RTS_CONTROL_ENABLE;
+		// audit 2026-10-16: a line error must not abort every later read
+		// (ReadFile failing now closes the port).
+		dcb.fAbortOnError = FALSE;
 		COMMTIMEOUTS timeouts{};
 		// Reads return as soon as a byte is available or after the per-call
 		// total; ReadLine sets the total for each call.
@@ -135,12 +138,32 @@ namespace LedDrive
 			char buffer[64];
 			DWORD read = 0;
 			if (!ReadFile(static_cast<HANDLE>(handle), buffer, sizeof(buffer), &read, nullptr))
-				break;
+			{
+				// audit 2026-10-16: a failed read (device unplugged) closes the
+				// port, so its owner reopens it with its back-off instead of
+				// calling straight back into a failing read (100% CPU).
+				Close();
+				return false;
+			}
+			if (read == 0)
+			{
+				// audit 2026-10-16: some USB serial drivers return at once with
+				// nothing after an unplug; a failing ClearCommError tells.
+				DWORD errors = 0;
+				COMSTAT status{};
+				if (!ClearCommError(static_cast<HANDLE>(handle), &errors, &status))
+				{
+					Close();
+					return false;
+				}
+			}
 			pending.append(buffer, read);
+			// Kept partial lines are bounded: noise without a CR never grows it.
+			if (pending.size() > 4096) pending.erase(0, pending.size() - 4096);
 		}
-		for (char c : pending)
-			if (c != '\n') line += c;
-		pending.clear();
+		// audit 2026-10-16: a timeout keeps the partial line in `pending` for
+		// the next call (a reply split across the driver's short reads was
+		// lost); only a complete line is returned.
 		return false;
 	}
 

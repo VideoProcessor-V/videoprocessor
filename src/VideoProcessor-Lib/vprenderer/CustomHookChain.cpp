@@ -234,6 +234,7 @@ namespace CustomHookChain
                         entry.rule.name.c_str(), entry.rule.filename.c_str(), reason.c_str());
                     continue;
                 }
+                entry.quantizer = IsOutputQuantizer(entry.rule.filename, entry.source);
             }
             if (entry.source.empty()) continue;
             const std::string key = TemplateKey(entry.source, values);
@@ -314,8 +315,27 @@ namespace CustomHookChain
     {
         return std::any_of(entries.begin(), entries.end(), [&](const Entry& entry)
             {
-                return Submitted(entry, lowLatency) && HooksOutput(entry.hook);
+                // Audit 2026-10-16: only a quantiser replaces the dither; a
+                // non-quantising OUTPUT hook left the picture undithered.
+                return Submitted(entry, lowLatency) && HooksOutput(entry.hook) && entry.quantizer;
             });
+    }
+
+    bool Chain::IsQuantizerHook(const pl_hook* hook) const
+    {
+        return hook && std::any_of(entries.begin(), entries.end(), [&](const Entry& entry)
+            {
+                return entry.hook == hook && entry.quantizer && HooksOutput(entry.hook);
+            });
+    }
+
+    bool IsOutputQuantizer(const std::string& filename, const std::string& source)
+    {
+        if (source.find(OutputQuantizerMarker) != std::string::npos)
+            return true;
+        const size_t slash = filename.find_last_of("\\/");
+        const std::string name = slash == std::string::npos ? filename : filename.substr(slash + 1);
+        return _stricmp(name.c_str(), SigmaDeltaFileName) == 0;
     }
 
     bool Chain::MarkRuntimeFailures(const uint64_t* signatures, int count)

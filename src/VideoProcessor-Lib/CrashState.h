@@ -59,9 +59,16 @@ namespace CrashState
 		// beside the live file, then Windows' normal handling continues.
 		void InstallCrashHandler();
 		bool WriteMinidump(void* exceptionPointers);
+		// audit 2026-10-16: the handlers' write. Sets "crash", never blocks on a
+		// held lock (bounded try-lock), ignores re-entry on the same thread and
+		// uses the recent log lines of the last periodic write. True when written.
+		bool WriteFromHandler(const std::string& crash);
 
 	private:
 		void Loop();
+		std::string Compose(const std::map<std::string, std::string>& valuesIn,
+			const std::vector<std::string>& recentLines) const;
+		bool WriteAtomically(const std::string& content);
 
 		std::string directory;
 		LinesSource recent;
@@ -70,6 +77,7 @@ namespace CrashState
 		std::string startedAt;
 		mutable std::mutex mutex;
 		std::map<std::string, std::string> values;
+		std::vector<std::string> lastRecent;   // guarded by `mutex`
 		std::mutex writeMutex;
 		std::thread worker;
 		std::condition_variable wake;

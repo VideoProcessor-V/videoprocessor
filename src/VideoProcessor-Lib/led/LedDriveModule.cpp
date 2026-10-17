@@ -96,7 +96,10 @@ namespace LedDrive
 
 	int LedDriveModule::CutLevelLocked() const
 	{
-		return led.cutCntrLevel >= 50 ? led.cutCntrLevel : DmdClipLocked();
+		// audit 2026-10-16: never above the assist's ceiling (cntr_assist_max,
+		// itself within cntr_max_usable), as for every other CNTR command.
+		const int assistMax = std::max(50, std::min(led.cntrAssistMax, projector.cntrMaxUsable));
+		return std::min(led.cutCntrLevel >= 50 ? led.cutCntrLevel : DmdClipLocked(), assistMax);
 	}
 
 	int LedDriveModule::DmdClipLocked() const
@@ -380,7 +383,16 @@ namespace LedDrive
 		if (predicted != predictions.end() && predicted->second.apl > 20.0 && stats.apl > 17.0)
 		{
 			const double ratio = std::max(0.25, std::min((stats.apl - 16.0) / (predicted->second.apl - 16.0), 4.0));
-			const double weight = std::min(1.0, framePeriodMs / CORRECTION_WINDOW_MS);
+			// audit 2026-10-16: weighted by the time since the last update (it
+			// runs once per new source frame, not per output frame): the output
+			// frames rendered since, at least one, at most 250 ms. Behind
+			// correction_weight_by_time (default on); off = one output frame
+			// period per update, as before.
+			const uint64_t frames = std::max<uint64_t>(1, frameIndex - std::min(frameIndex, lastCorrectionFrame));
+			const double elapsedMs = led.correctionWeightByTime ?
+				std::min(static_cast<double>(frames) * framePeriodMs, 250.0) : framePeriodMs;
+			lastCorrectionFrame = frameIndex;
+			const double weight = std::min(1.0, elapsedMs / CORRECTION_WINDOW_MS);
 			correction = correctionSeeded ? correction + (ratio - correction) * weight : ratio;
 			correctionSeeded = true;
 		}
@@ -455,6 +467,15 @@ namespace LedDrive
 			if (status.contrastSends != seenContrastSends && status.lastSentContrast >= 0)
 				contrastCommands.push_back({ frameIndex, status.lastSentContrast });
 			seenContrastSends = status.contrastSends;
+			// audit 2026-10-16: with no CNTR waiting or in flight, the pairing
+			// believes what the projector was last sent. A CNTR the driver was
+			// already writing when a hold dropped it, or one whose write failed,
+			// would otherwise leave them apart: the pairing sends only when its
+			// value changes, so CNTR could stay above the need (a stuck 51).
+			// Not while a pre-position hold keeps CNTR up.
+			if (!status.contrastBusy && status.lastSentContrast >= 0 && pairing.Hold() < 0 &&
+				pairing.Contrast() != status.lastSentContrast)
+				pairing.Reset(status.lastSentContrast);
 		}
 		++frameIndex;
 		if (smoothing && !compensating)

@@ -91,7 +91,21 @@ bool UpdateRecoveryEntry(const std::string& statePath,
 	}
 	for (const std::string& current : lines)
 		output << current << "\n";
+	// audit 2026-10-16: flush the stream and the file to disk before the
+	// atomic rename, so a power loss cannot commit an empty state file.
+	output.flush();
 	output.close();
+	if (output)
+	{
+		const HANDLE flushHandle = CreateFileA(temporaryPath.c_str(),
+			GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (flushHandle != INVALID_HANDLE_VALUE)
+		{
+			FlushFileBuffers(flushHandle);
+			CloseHandle(flushHandle);
+		}
+	}
 	if (!output)
 	{
 		DeleteFileA(temporaryPath.c_str());

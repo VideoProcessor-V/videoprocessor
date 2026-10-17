@@ -47,30 +47,49 @@ namespace CrashState
 		LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = nullptr;
 		std::terminate_handler g_previousTerminate = nullptr;
 
+		// audit 2026-10-16: a crash handler must never block on a lock the
+		// crashed thread (or a stalled one) holds: try for a short, bounded
+		// time and give up instead.
+		bool TryLockFor(std::mutex& lock, DWORD milliseconds)
+		{
+			const ULONGLONG deadline = GetTickCount64() + milliseconds;
+			for (;;)
+			{
+				if (lock.try_lock()) return true;
+				if (GetTickCount64() >= deadline) return false;
+				Sleep(1);
+			}
+		}
+
+		// audit 2026-10-16: a fault inside a handler (or terminate during the
+		// filter) on the same thread does not run the handler's write again.
+		thread_local bool t_inCrashHandler = false;
+
 		LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* pointers)
 		{
-			if (Recorder* recorder = g_handlerRecorder)
+			Recorder* recorder = g_handlerRecorder;
+			if (recorder && !t_inCrashHandler)
 			{
-				recorder->SetValue("crash", "unhandled exception 0x" + [&]
-				{
-					char code[16];
-					std::snprintf(code, sizeof(code), "%08lX",
-						pointers && pointers->ExceptionRecord ? pointers->ExceptionRecord->ExceptionCode : 0ul);
-					return std::string(code);
-				}());
-				recorder->WriteNow();
+				char code[16];
+				std::snprintf(code, sizeof(code), "%08lX",
+					pointers && pointers->ExceptionRecord ? pointers->ExceptionRecord->ExceptionCode : 0ul);
+				recorder->WriteFromHandler(std::string("unhandled exception 0x") + code);
+				t_inCrashHandler = true;   // the dump is guarded against re-entry too
 				recorder->WriteMinidump(pointers);
+				t_inCrashHandler = false;
 			}
 			return g_previousFilter ? g_previousFilter(pointers) : EXCEPTION_CONTINUE_SEARCH;
 		}
 
 		void TerminateHandler()
 		{
-			if (Recorder* recorder = g_handlerRecorder)
+			Recorder* recorder = g_handlerRecorder;
+			if (recorder && !t_inCrashHandler)
 			{
-				recorder->SetValue("crash", "std::terminate");
-				recorder->WriteNow();
+				recorder->WriteFromHandler("std::terminate");
+				t_inCrashHandler = true;   // the dump is guarded against re-entry too
 				recorder->WriteMinidump(nullptr);
+				t_inCrashHandler = false;
 			}
 			if (g_previousTerminate) g_previousTerminate();
 			std::abort();
@@ -160,6 +179,20 @@ namespace CrashState
 
 	std::string Recorder::Text() const
 	{
+		std::map<std::string, std::string> valuesCopy;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			valuesCopy = values;
+		}
+		std::vector<std::string> lines;
+		if (recent)
+			lines = recent();
+		return Compose(valuesCopy, lines);
+	}
+
+	std::string Recorder::Compose(const std::map<std::string, std::string>& valuesIn,
+		const std::vector<std::string>& recentLines) const
+	{
 		std::ostringstream text;
 		text << "VideoProcessor rolling state - rewritten about once a second and deleted on a clean exit.\n"
 			"If you find this as \"crash state (N).txt\", VP did not exit cleanly: please send it (and the .dmp\n"
@@ -172,37 +205,94 @@ namespace CrashState
 		if (K32GetProcessMemoryInfo(GetCurrentProcess(), &memory, sizeof(memory)))
 			text << "working set: " << memory.WorkingSetSize / (1024 * 1024) << " MB (peak "
 				<< memory.PeakWorkingSetSize / (1024 * 1024) << " MB)\n";
+		if (!valuesIn.empty())
 		{
-			std::lock_guard<std::mutex> guard(mutex);
-			if (!values.empty())
-			{
-				text << "\n[state]\n";
-				for (const auto& value : values)
-					text << value.first << ": " << value.second << "\n";
-			}
+			text << "\n[state]\n";
+			for (const auto& value : valuesIn)
+				text << value.first << ": " << value.second << "\n";
 		}
 		text << "\n[recent log]\n";
-		if (recent)
-			for (const std::string& line : recent())
-				text << line << "\n";
+		for (const std::string& line : recentLines)
+			text << line << "\n";
 		return text.str();
+	}
+
+	// The caller holds writeMutex.
+	bool Recorder::WriteAtomically(const std::string& content)
+	{
+		const std::string live = LivePath();
+		const std::string temporary = live + ".tmp";
+		{
+			std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+			if (!out) return false;
+			out << content;
+			out.flush();   // audit 2026-10-16
+			if (!out.good()) return false;
+		}
+		// audit 2026-10-16: the data reaches the disk before the rename, so the
+		// replace never commits an empty file after a power loss.
+		const HANDLE flushHandle = CreateFileA(temporary.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (flushHandle != INVALID_HANDLE_VALUE)
+		{
+			FlushFileBuffers(flushHandle);
+			CloseHandle(flushHandle);
+		}
+		// The replace is atomic on NTFS: a reader (or a crash) sees the old
+		// file or the new one, never half of one.
+		return MoveFileExA(temporary.c_str(), live.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
 	}
 
 	bool Recorder::WriteNow()
 	{
 		if (!running.load() && !stopping.load()) return false;
 		std::lock_guard<std::mutex> guard(writeMutex);
-		const std::string live = LivePath();
-		const std::string temporary = live + ".tmp";
+		std::vector<std::string> lines;
+		if (recent)
+			lines = recent();
+		std::map<std::string, std::string> valuesCopy;
 		{
-			std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-			if (!out) return false;
-			out << Text();
-			if (!out.good()) return false;
+			std::lock_guard<std::mutex> lock(mutex);
+			valuesCopy = values;
+			// audit 2026-10-16: kept for the crash handler, which must not call
+			// the log source (the crashed thread may hold the log's lock).
+			lastRecent = lines;
 		}
-		// The replace is atomic on NTFS: a reader (or a crash) sees the old
-		// file or the new one, never half of one.
-		return MoveFileExA(temporary.c_str(), live.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+		return WriteAtomically(Compose(valuesCopy, lines));
+	}
+
+	bool Recorder::WriteFromHandler(const std::string& crash)
+	{
+		// audit 2026-10-16: handler context. Re-entry on the same thread is
+		// ignored and every lock is tried with a bounded wait: a busy state
+		// lock still writes a minimal snapshot, a busy writer skips the write.
+		if (t_inCrashHandler) return false;
+		t_inCrashHandler = true;
+		bool written = false;
+		if (running.load() || stopping.load())
+		{
+			std::map<std::string, std::string> valuesCopy;
+			std::vector<std::string> lines;
+			if (TryLockFor(mutex, 200))
+			{
+				values["crash"] = crash;
+				valuesCopy = values;
+				lines = lastRecent;
+				mutex.unlock();
+			}
+			else
+			{
+				valuesCopy["crash"] = crash;
+				lines.push_back("(state values and recent log unavailable: locked when the crash handler ran)");
+			}
+			if (TryLockFor(writeMutex, 500))
+			{
+				written = WriteAtomically(Compose(valuesCopy, lines));
+				writeMutex.unlock();
+			}
+		}
+		t_inCrashHandler = false;
+		return written;
 	}
 
 	void Recorder::Loop()
@@ -233,8 +323,9 @@ namespace CrashState
 		}
 		else
 		{
-			// Leave a final snapshot for the next start.
-			std::ofstream(LivePath(), std::ios::binary | std::ios::trunc) << Text();
+			// Leave a final snapshot for the next start. audit 2026-10-16:
+			// written atomically (temporary + replace), like WriteNow.
+			WriteAtomically(Text());
 		}
 		stopping = false;
 	}

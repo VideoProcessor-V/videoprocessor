@@ -3310,6 +3310,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 			context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 			externalFlowUsed = true;
+			ofHintValid = false;   // the engine did not see this pair
 			for (int d = 0; d < 2; ++d)
 				for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
 			engineGlobalValid = true;
@@ -3322,6 +3323,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (!opticalFlowEngine->Open(d3d->device, context, w, h, preset, true))
 				return fail(opticalFlowEngine->LastError());
 			opticalFlowPresetOpen = settings.opticalFlowPreset;
+			ofHintValid = false;
 		}
 		if (!useAhead)
 		{
@@ -3334,8 +3336,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				return fail("its input pass failed");
 			// libplacebo's queued work reaches the context before the engine runs.
 			pl_gpu_flush(gpu);
-			if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, true))
+			const bool continuous = ofHintValid;
+			ofHintValid = false;
+			if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, continuous))
 				return fail(opticalFlowEngine->LastError());
+			ofHintValid = true;
 			if (settings.opticalFlowGlobalReadback)
 			{
 				// Tests only: the field read back (waits for the engine) for the whole-frame motion.

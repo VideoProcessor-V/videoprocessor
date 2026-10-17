@@ -8083,10 +8083,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 to->setRowVisible(field, visible);
             };
             QFormLayout* captureForm = addCollapsibleSection(QStringLiteral("captureSource"), QStringLiteral("Capture & source"),
-                QStringLiteral("How the captured signal is read: unpacked on the GPU, its range, native RGB. ") +
+                QStringLiteral("How the captured signal is read: unpacked on the GPU and its range (native RGB: Fixes under test). ") +
                 QString::fromLatin1(kGpuCostLegend), false);
-            for (QWidget* w : { static_cast<QWidget*>(capturePath), static_cast<QWidget*>(sourceRange),
-                    static_cast<QWidget*>(nativeRgb) })
+            // Native RGB stays in Fixes under test (owner: a Fixes switch, default native).
+            for (QWidget* w : { static_cast<QWidget*>(capturePath), static_cast<QWidget*>(sourceRange) })
                 moveRow(w, captureForm);
             QFormLayout* rebaseForm = addCollapsibleSection(QStringLiteral("sourceRebase"), QStringLiteral("Source resolution & re-base"),
                 QStringLiteral("Finds a picture upscaled before VP (a 1080p film sent at 4K), re-bases it to its real resolution "
@@ -8102,8 +8102,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     moveRow(w, downscale);
             if (QFormLayout* upscale = sectionForm(QStringLiteral("adaptiveUpscale")))
                 moveRow(cnnStabilise, upscale);
-            if (QFormLayout* dither = sectionForm(QStringLiteral("temporalDither")))
-                moveRow(ditherNext, dither);
+            // The dither's motion-reuse fix stays in Fixes under test (a fix with its switch).
             // The section order: Bill's opening sections, then VP's in signal order, then Bill's others.
             const QStringList order = { QStringLiteral("captureSource"), QStringLiteral("sourceRebase"),
                 QStringLiteral("adaptiveDownscale"), QStringLiteral("adaptiveUpscale"), QStringLiteral("dejudder"),
@@ -9352,12 +9351,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 note->setText(queueLatencyNoteText(0));
             // Low latency also takes VP's low-latency path, whatever the profile is called (audit
             // 2026-10-16: on another name the look-ahead minimum raised a 1-frame queue's target to 5).
-            if (selectedId == QStringLiteral("low_latency"))
-                if (auto* path = profileFields->findChild<QComboBox*>(QStringLiteral("config.queue.low_latency_path")))
-                {
-                    const int on = path->findData(QStringLiteral("on"));
-                    if (on >= 0) path->setCurrentIndex(on);
-                }
+            // The others return it to Not set (the Low_Latency name rule), so a deep queue never stays on it.
+            if (auto* path = profileFields->findChild<QComboBox*>(QStringLiteral("config.queue.low_latency_path")))
+            {
+                const int index = selectedId == QStringLiteral("low_latency") ? path->findData(QStringLiteral("on")) : 0;
+                if (index >= 0 && path->currentIndex() != index) path->setCurrentIndex(index);
+            }
             // The spin boxes were set under signal blockers: the By frames / By time buttons follow
             // (audit 2026-10-16: By time stayed shown with Target frames hidden).
             if (auto* refresh = profileFields->findChild<QAction*>(QStringLiteral("config.queue.target_mode_refresh")))
@@ -11289,18 +11288,21 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     const QString projector = QStringLiteral("projector.default");
     auto* cards = new ResponsiveCardGrid;
 
-    // The projector's LED cannot go below 60 with LPW1, so neither can these.
+    // The projector's LED cannot go below 60 with LPW1, so the controls start
+    // there; a configured value below it (the configuration allows 0-255) is
+    // shown as it is, not as 60 (audit 2026-10-16).
     auto levelControl = [this, led](const QString& key, int fallback)
     {
         auto* spin = new QSpinBox;
         spin->setObjectName(controlName(led, key));
-        spin->setRange(60, 255);
+        bool valid = false;
+        const int configured = value(led, key).toInt(&valid);
+        const bool inRange = valid && configured >= 0 && configured <= 255;
+        spin->setRange(inRange ? std::min(60, configured) : 60, 255);
         spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
         spin->setMaximumWidth(108);
         spin->setAlignment(Qt::AlignRight);
-        bool valid = false;
-        const int configured = value(led, key).toInt(&valid);
-        spin->setValue(valid ? std::max(60, std::min(configured, 255)) : fallback);
+        spin->setValue(inRange ? configured : fallback);
         connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, key](int level)
         {
             if (!document_) return;
@@ -11655,6 +11657,15 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "keeps the three colours within one small step of each other, so the black does not change colour. "
         "The custom dim runs 0-40 (40 is about 40/255, a small step down from LPW1's 60; 0 turns the LEDs "
         "off, true black).")));
+    // Fix under test (audit 2026-10-16), default on.
+    auto* correctionByTime = bindCheckField(QStringLiteral("Fix under test: look-ahead correction smoothed by real time"),
+        led, QStringLiteral("correction_weight_by_time"), true);
+    correctionByTime->setToolTip(QStringLiteral(
+        "VP compares each measured frame with what the look-ahead predicted for it and smooths the "
+        "difference over about three seconds. On: each update counts for the real time since the last one "
+        "(24p film on a 60 Hz output updates once per film frame, so it settles in about three seconds). "
+        "Off: each update counts for one output frame, as before (about 2.5 times slower with 24p on 60 Hz)."));
+    experimentForm->addRow(QString(), correctionByTime);
     auto syncExperiment = [experimentEnabled, method, stepMs, turnStep, customStart, customFloor]
     {
         const bool on = experimentEnabled->isChecked();
@@ -12068,7 +12079,31 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         numberControl(projector, QStringLiteral("cntr_settle_ms"), 0, 5000, 0, 10, 0, QString()));
     auto* maxUsable = numberControl(projector, QStringLiteral("cntr_max_usable"), 50, 100, 0, 1, 74, QString());
     responseForm->addRow(QStringLiteral("Highest useful contrast"), maxUsable);
-    auto* whiteClips = numberControl(projector, QStringLiteral("dmd_clip_cntr"), 50, 100, 0, 1, 59, QString());
+    // audit 2026-10-16: dmd_clip_cntr -1 = cntr_max_usable, shown as the
+    // special value below 50 and written as -1 (not removed: unset is 59).
+    auto* whiteClips = numberControl(projector, QStringLiteral("dmd_clip_cntr"), 50, 100, 0, 1, 59,
+        QStringLiteral("Usable max (-1)"));
+    {
+        const QSignalBlocker blocked(whiteClips);
+        bool valid = false;
+        const double configured = value(projector, QStringLiteral("dmd_clip_cntr")).toDouble(&valid);
+        whiteClips->setValue(!valid ? 59.0 : configured < 50.0 ? whiteClips->minimum() : std::min(configured, 100.0));
+    }
+    disconnect(whiteClips, qOverload<double>(&QDoubleSpinBox::valueChanged), this, nullptr);
+    connect(whiteClips, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+        [this, projector, whiteClips](double number)
+    {
+        if (!document_) return;
+        const std::string name = projector.toStdString();
+        const std::string text = number <= whiteClips->minimum() ? std::string("-1") :
+            QString::number(number, 'f', 0).toStdString();
+        if (!document_->SetKnown(name, "dmd_clip_cntr", text))
+        {
+            document_->AddSection(name);
+            document_->SetKnown(name, "dmd_clip_cntr", text);
+        }
+        markDirty();
+    });
     responseForm->addRow(QStringLiteral("Contrast where white clips"), whiteClips);
     responseForm->addRow(QString(), helpLabel(QStringLiteral(
         "From the camera and light-meter measurements; leave the defaults until then. Settle time: how long "

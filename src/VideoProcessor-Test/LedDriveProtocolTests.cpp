@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -523,6 +524,150 @@ namespace VideoProcessorTest
 				std::chrono::steady_clock::now() - start).count();
 			Assert::IsTrue(elapsed < 1150, L"Exit restore must give up within a second");
 			Assert::AreEqual(std::string(":LPW1255\r"), LightCommands(projector->Writes()).back());
+		}
+
+		// Audit 2026-10-16: a CNTR the driver thread has taken but not yet
+		// written (waiting for the port) is dropped when a hold cancels it, so
+		// it cannot land after the module put its model back.
+		TEST_METHOD(CancelledContrastWaitingForThePortIsNotSent)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.ackTimeoutMs = 1500;
+			auto driver = OpenDriver(projector, config);
+			const size_t before = projector->Writes().size();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->holdReplies = true;
+			}
+			// A script send holds the port while its reply is held back.
+			std::thread script([&] { driver->SendScript("LPW1", 200); });
+			Assert::IsTrue(projector->WaitForWrites(before + 1));
+			driver->SetContrastAsync(51);
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(driver->Status().contrastBusy, L"51 is waiting for the port");
+			driver->SetContrastAsync(-1);
+			projector->Release();
+			script.join();
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			for (const auto& write : projector->Writes())
+				Assert::AreNotEqual(std::string(":CNTR51\r"), write, L"The cancelled CNTR was sent");
+			const auto status = driver->Status();
+			Assert::IsFalse(status.contrastBusy);
+			Assert::AreEqual(0, status.contrastSends);
+			driver->Close();
+		}
+
+		// Audit 2026-10-16: a failed write is sent again (model and projector
+		// stay together); after 5 failures in a row the port is closed and
+		// reopened after its back-off (2 s at first).
+		TEST_METHOD(FailedWritesAreRetriedAndThePortIsReopened)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			auto driver = OpenDriver(projector);
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			driver->SetContrastAsync(55);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+			Assert::AreEqual(-1, driver->Status().lastSentContrast, L"Nothing was written");
+			Assert::IsTrue(driver->Status().contrastBusy, L"55 is still to be sent");
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = false;
+				Assert::AreEqual(1, projector->opens, L"Not reopened before its back-off");
+			}
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
+			auto echoes = [&]
+			{
+				const auto writes = projector->Writes();
+				return static_cast<size_t>(std::count(writes.begin(), writes.end(), std::string(":ECHO1\r")));
+			};
+			const size_t echoesBefore = echoes();
+			while (std::chrono::steady_clock::now() < deadline &&
+				(driver->Status().lastSentContrast != 55 || driver->Status().busy || echoes() == echoesBefore))
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			Assert::AreEqual(55, driver->Status().lastSentContrast);
+			Assert::AreEqual(55, projector->contrast);
+			Assert::IsFalse(driver->Status().busy);
+			// Follow-up: after the reopen, the handshake's ECHO again and the
+			// believed CNTR re-sent (a power-cycled projector is at its default).
+			Assert::AreEqual(echoesBefore + 1, echoes(), L"ECHO repeated after the reopen");
+			const auto writes = projector->Writes();
+			const auto echo = std::find(writes.rbegin(), writes.rend(), std::string(":ECHO1\r"));
+			Assert::IsTrue(std::find(writes.rbegin(), echo, std::string(":CNTR55\r")) != echo,
+				L"CNTR re-sent after the handshake");
+			std::lock_guard<std::mutex> guard(projector->mutex);
+			Assert::AreEqual(2, projector->opens, L"Closed after 5 failures and reopened once");
+		}
+
+		// Audit 2026-10-16: script sends skip the command gap but keep
+		// Barco's 2 s after a missing reply.
+		TEST_METHOD(ScriptSendsKeepTheNoReplyBackoff)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			projector->silent = true;
+			Assert::IsFalse(driver->SendScript("CNTR", 60));
+			projector->silent = false;
+			const auto start = std::chrono::steady_clock::now();
+			Assert::IsTrue(driver->SendScript("CNTR", 61));
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			Assert::IsTrue(elapsed >= 1800, (L"sent after only " + std::to_wstring(elapsed) + L" ms").c_str());
+			driver->Close();
+		}
+
+		// Audit 2026-10-16: the ranges the module relies on.
+		TEST_METHOD(ValidationRejectsTablesAndRangesTheModuleCannotUse)
+		{
+			std::vector<std::pair<double, double>> flux;
+			Assert::IsTrue(ParseFluxTable("60:0.55, 80:0.78, 100:1.00", flux));
+			Assert::IsFalse(ParseFluxTable("60:0.55, 80:0.50, 100:1.00", flux), L"Falling flux");
+			Assert::IsFalse(ParseFluxTable("60:0.55, 80:0.55, 100:1.00", flux), L"Flat flux");
+			StepTable steps;
+			Assert::IsFalse(ParseStepTable("100:5, 50:0, 0:1", steps), L"A step of 0");
+			int clip = 0;
+			Assert::IsTrue(ParseDmdClipCntr("-1", clip));
+			Assert::AreEqual(-1, clip);
+			Assert::IsTrue(ParseDmdClipCntr("61", clip));
+			Assert::AreEqual(61, clip);
+			Assert::IsFalse(ParseDmdClipCntr("0", clip));
+			Assert::IsFalse(ParseDmdClipCntr("49", clip));
+			std::string error;
+			for (const char* good : {
+				"[projector.Default]\ndmd_clip_cntr: -1\n",
+				"[led_drive.Default]\nrate_min_up: 10\nrate_max_up: 10\n",
+				"[led_drive.Default]\nrate_preset: compensated\n" })
+			{
+				TemporaryConfig file(good);
+				ConfigFile accepted;
+				Assert::IsTrue(accepted.Load(file.path));
+				Assert::IsTrue(MainConfigSchema::Validate(accepted, error), std::wstring(error.begin(), error.end()).c_str());
+			}
+			Assert::AreEqual(-1, [&]
+				{
+					TemporaryConfig file("[projector.Default]\ndmd_clip_cntr: -1\n");
+					ConfigFile read;
+					Assert::IsTrue(read.Load(file.path));
+					return ReadProjectorConfig(read).dmdClipCntr;
+				}());
+			for (const char* bad : {
+				"[projector.Default]\nflux_table: 60:0.6, 80:0.5, 100:1.0\n",
+				"[projector.Default]\ndmd_clip_cntr: 49\n",
+				"[led_drive.Default]\nsteps_down: 100:5, 50:0, 0:1\n",
+				"[led_drive.Default]\nrate_min_up: 30\nrate_max_up: 20\n",
+				"[led_drive.Default]\nrate_min_down: 20\n" })   // above the default rate_max_down 12.5
+			{
+				TemporaryConfig file(bad);
+				ConfigFile rejected;
+				Assert::IsTrue(rejected.Load(file.path));
+				Assert::IsFalse(MainConfigSchema::Validate(rejected, error),
+					std::wstring(bad, bad + strlen(bad)).c_str());
+			}
 		}
 
 		TEST_METHOD(ConfigurationDefaultsMatchTheScriptAndValidationIsStrict)

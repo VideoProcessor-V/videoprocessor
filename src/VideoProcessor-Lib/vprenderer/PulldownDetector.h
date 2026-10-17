@@ -27,6 +27,25 @@
 // gives - a gap or the signal rate moving more than 0.5% drop the lock; the
 // next lock needs a fresh two seconds. Even a wrong lock never drops a new
 // picture: only bit-exact repeats are ever skipped.
+//
+// Audit 2026-10-16 (docs/audit/pulldown-review-2026-10-16.md), each behind a
+// Settings switch, on by default, the old behaviour available:
+//  - D4: a counted capture miss of at most one cycle advances the phase and
+//    keeps the lock, verified over the next cycle (a contradiction in it
+//    drops the lock); an uncounted or longer gap still resets.
+//  - D3: a phase shift (an edited telecine, pause and restart, a 23.976-in-60
+//    slip) re-phases in place: from a contradiction on, the rotations of the
+//    locked pattern that match every frame since are followed; while the
+//    locked phase is contradicted the frames are decided by those rotations
+//    (only exact repeats dropped), and after one full cycle with exactly one
+//    rotation left it is adopted - the lock and film clock continue, no 2 s
+//    relock. A contradiction in the next cycle drops the lock.
+//  - D1: every lock change (gained, lost, restarted, re-phased) and every
+//    counted miss leaves a pending discontinuity until ConsumeDiscontinuity()
+//    - the renderer consumes it on the next KEPT frame, so a change on a
+//    dropped repeat still breaks the motion pair.
+//  - D2: FilmToSignalRatio() for resolving a time-based queue target at the
+//    film rate while locked.
 // Pure logic: no GPU, no capture types.
 
 #include <cmath>
@@ -36,6 +55,7 @@
 #include <deque>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace Pulldown
 {
@@ -103,6 +123,18 @@ namespace Pulldown
 		int cycle = 0;            // frames in the cycle
 		int unique = 0;           // new pictures in the cycle
 		uint64_t filmIndex = 0;   // counts kept frames while locked (the even clock)
+		// Audit 2026-10-16 (D1/D3).
+		bool lockChanged = false;   // the lock was gained, lost, restarted or re-phased at this frame
+		bool rephased = false;      // the phase moved at this frame; lock and film clock continue (D3)
+		bool discontinuity = false; // a lock change or counted miss is pending (ConsumeDiscontinuity)
+	};
+
+	// Behaviour fixes of the audit 2026-10-16, switchable (owner rule); off
+	// gives the 2026-10-14 behaviour.
+	struct Settings
+	{
+		bool keepLockAcrossMisses = true;   // D4: a counted miss <= one cycle keeps the lock
+		bool rephaseInPlace = true;         // D3: a phase shift re-phases instead of unlocking
 	};
 
 	// "23.976p film in 59.940 Hz (2 new of 5)".
@@ -142,20 +174,70 @@ namespace Pulldown
 
 		void Reset()
 		{
-			m_history.clear();
-			Unlock();
-			m_signalHz = 0.0;
+			ResetState();
+			m_pendingDiscontinuity = false;
 		}
+
+		void SetSettings(const Settings& settings) { m_settings = settings; }
+		const Settings& GetSettings() const { return m_settings; }
 
 		// Feed every captured frame in order: `repeat` = same content as the
 		// previous frame; `gap` = frames were lost just before it; signalHz =
 		// the capture's frame rate. A gap or the signal rate moving more than
 		// 0.5% (a new mode without a resync) drops the lock and the history; a
 		// resync resets the detector from the renderer.
-		Decision Next(bool repeat, bool gap, double signalHz)
+		// Audit 2026-10-16 (D4): `missedFrames` = how many signal frames the
+		// gap lost (-1 unknown). With keepLockAcrossMisses, a locked detector
+		// told of 1..cycle missed frames advances its phase over them and keeps
+		// the lock (verified over the next cycle); `repeat` for this frame is
+		// still against the last frame captured. Unknown or longer: reset.
+		Decision Next(bool repeat, bool gap, double signalHz, int missedFrames = -1)
 		{
-			if (gap || (m_signalHz > 0.0 && signalHz > 0.0 && std::fabs(signalHz - m_signalHz) > m_signalHz * 0.005))
-				Reset();
+			const bool wasLocked = m_locked;
+			Decision decision = Decide(repeat, gap, signalHz, missedFrames);
+			// Audit 2026-10-16 (D1): a lock change is pending until a kept frame
+			// consumes it, so one landing on a dropped repeat is not lost.
+			decision.lockChanged = decision.locked != wasLocked || decision.relocked || decision.rephased;
+			if (decision.lockChanged)
+				m_pendingDiscontinuity = true;
+			decision.discontinuity = m_pendingDiscontinuity;
+			return decision;
+		}
+
+		// Audit 2026-10-16 (D1). The renderer, on every frame it keeps (after
+		// `drop` was false - not on dropped repeats):
+		//   if (m_pulldown.ConsumeDiscontinuity()) gapBefore = true;   // no motion pair across it
+		// and resets its FilmClock when the decision was `relocked` or the lock
+		// was lost (not on `rephased`: the clock continues). A frame the
+		// renderer drops with its own gap (missed frames, a resync) calls
+		// MarkDiscontinuity() so the next kept frame carries the gap.
+		bool ConsumeDiscontinuity()
+		{
+			const bool pending = m_pendingDiscontinuity;
+			m_pendingDiscontinuity = false;
+			return pending;
+		}
+		void MarkDiscontinuity() { m_pendingDiscontinuity = true; }
+		bool PendingDiscontinuity() const { return m_pendingDiscontinuity; }
+
+		// Audit 2026-10-16 (D2): film frames per signal frame while locked
+		// (new / cycle, e.g. 0.4 at 3:2), 1 when not. A locked queue holds film
+		// frames, so a time-based queue target resolves at the film rate:
+		//   frames = round(targetSeconds * signalHz * FilmToSignalRatio())
+		// (200 ms at 24p in 60 = 5 frames, not 12). Re-resolve whenever
+		// Decision::lockChanged is set (lock gained / lost changes the ratio).
+		double FilmToSignalRatio() const
+		{
+			return m_locked && !m_pattern.empty() ? static_cast<double>(m_unique) / static_cast<double>(m_pattern.size()) : 1.0;
+		}
+
+	private:
+		Decision Decide(bool repeat, bool gap, double signalHz, int missedFrames)
+		{
+			if (m_signalHz > 0.0 && signalHz > 0.0 && std::fabs(signalHz - m_signalHz) > m_signalHz * 0.005)
+				ResetState();
+			else if (gap && !SkipMissed(missedFrames))
+				ResetState();
 			if (signalHz > 0.0 && m_signalHz <= 0.0)
 				m_signalHz = signalHz;
 			++m_frames;
@@ -167,18 +249,42 @@ namespace Pulldown
 			if (m_locked)
 			{
 				m_phase = (m_phase + 1) % static_cast<int>(m_pattern.size());
-				const char expected = m_pattern[m_phase];
-				const bool contradiction = expected == 'R' && !repeat;
 				const uint64_t window = static_cast<uint64_t>(std::ceil(
 					(signalHz > 0.0 ? signalHz : 60.0) * kContradictionSeconds));
 				while (!m_contradictions.empty() && m_frames - m_contradictions.front() >= window)
 					m_contradictions.pop_front();
-				if (contradiction)
-					m_contradictions.push_back(m_frames);
-				if (static_cast<int>(m_contradictions.size()) >= kContradictionsToUnlock)
+				// Audit 2026-10-16 (D4): the first frame after a counted miss
+				// whose missed slots held a new picture, on a repeat slot: new
+				// against the frame before the miss = that missed film frame
+				// (already counted), shown at once; a repeat = a still.
+				const bool carry = m_missCarry;
+				m_missCarry = false;
+				if (carry && m_pattern[m_phase] == 'R')
+					return Locked(decision, signalHz, repeat, false, false, false);
+				const char observed = repeat ? 'R' : 'N';
+				char expected = m_pattern[m_phase];
+				bool contradiction = expected == 'R' && !repeat;
+				// Audit 2026-10-16 (D3/D4): the cycle after a re-phase or a
+				// counted miss verifies it; a contradiction there drops the lock.
+				if (contradiction && m_probationUntil > 0 && m_frames <= m_probationUntil)
 					Unlock();
 				else
-					return Locked(decision, signalHz, expected == 'R' && repeat, false, contradiction);
+				{
+					bool rephased = false, provisional = false;
+					if (m_settings.rephaseInPlace)
+						expected = Track(observed, expected, contradiction, rephased, provisional);
+					if (rephased || provisional)
+						contradiction = false;   // decided by the rotations that match: not a contradiction
+					if (contradiction)
+						m_contradictions.push_back(m_frames);
+					if (static_cast<int>(m_contradictions.size()) >= kContradictionsToUnlock)
+						Unlock();
+					else
+					{
+						decision.rephased = rephased;
+						return Locked(decision, signalHz, expected == 'R' && repeat, false, expected == 'R' && !repeat);
+					}
+				}
 			}
 
 			// Not locked: the shortest cycle the latest frames follow exactly.
@@ -209,17 +315,27 @@ namespace Pulldown
 				m_unique = unique;
 				m_filmIndex = 0;
 				m_contradictions.clear();
+				EndTracking();
+				m_probationUntil = 0;
+				m_missCarry = false;
 				return Locked(decision, signalHz, repeat && pattern[m_phase] == 'R', true, false);
 			}
 			return decision;
 		}
 
+	public:
 		bool Locked() const { return m_locked; }
 		int Cycle() const { return m_locked ? static_cast<int>(m_pattern.size()) : 0; }
 		int Unique() const { return m_locked ? m_unique : 0; }
 
 	private:
 		Decision Locked(Decision& decision, double signalHz, bool drop, bool relocked, bool update)
+		{
+			return Locked(decision, signalHz, drop, relocked, update, !drop && !update);
+		}
+
+		// `advance`: a new film frame (the clock moves on).
+		Decision Locked(Decision& decision, double signalHz, bool drop, bool relocked, bool update, bool advance)
 		{
 			decision.locked = true;
 			decision.relocked = relocked;
@@ -228,7 +344,7 @@ namespace Pulldown
 			decision.unique = m_unique;
 			decision.filmHz = signalHz * m_unique / decision.cycle;
 			decision.drop = drop;
-			if (!drop && !update)
+			if (advance)
 				++m_filmIndex;
 			decision.filmIndex = m_filmIndex;
 			return decision;
@@ -242,8 +358,119 @@ namespace Pulldown
 			m_unique = 0;
 			m_filmIndex = 0;
 			m_contradictions.clear();
+			EndTracking();
+			m_probationUntil = 0;
+			m_missCarry = false;
 		}
 
+		void ResetState()
+		{
+			m_history.clear();
+			Unlock();
+			m_signalHz = 0.0;
+		}
+
+		// Audit 2026-10-16 (D4): advance over `missed` lost signal frames and
+		// keep the lock. False (the caller resets) when the switch is off, not
+		// locked, or the count is unknown or longer than one cycle.
+		bool SkipMissed(int missed)
+		{
+			const int cycle = static_cast<int>(m_pattern.size());
+			if (!m_settings.keepLockAcrossMisses || !m_locked || missed <= 0 || missed > cycle)
+				return false;
+			for (int i = 0; i < missed; ++i)
+			{
+				m_phase = (m_phase + 1) % cycle;
+				if (m_pattern[m_phase] == 'N')
+				{
+					++m_filmIndex;   // a film frame went by unseen: the clock stays on time
+					m_missCarry = true;
+				}
+			}
+			// The missed slots are unknown: a later relock needs fresh frames.
+			m_history.clear();
+			EndTracking();
+			m_probationUntil = m_frames + static_cast<uint64_t>(cycle);   // verify over the next cycle
+			m_pendingDiscontinuity = true;
+			return true;
+		}
+
+		void EndTracking()
+		{
+			m_trackFrames = 0;
+			m_candidates.clear();
+			m_currentFailed = false;
+		}
+
+		// Audit 2026-10-16 (D3): re-phase in place. Starts at a contradiction
+		// (a new picture on a repeat slot: a subtitle, or the phase moved) with
+		// every other phase whose slot is new; each frame keeps the phases (the
+		// rotations of the pattern) that match it. Once the locked phase has
+		// been contradicted again (a single subtitle leaves it matching), the
+		// frames are decided by the matching rotations - they all agree with
+		// the frame - and after exactly one cycle with one rotation left it is
+		// adopted. No rotation left, or the locked phase never failed again:
+		// tracking ends and the locked phase stands (contradictions count as
+		// before). Returns the slot value to decide this frame with.
+		char Track(char observed, char expected, bool contradiction, bool& rephased, bool& provisional)
+		{
+			const int cycle = static_cast<int>(m_pattern.size());
+			if (m_trackFrames > 0)
+			{
+				++m_trackFrames;
+				size_t kept = 0;
+				for (int candidate : m_candidates)
+				{
+					const int next = (candidate + 1) % cycle;
+					if (m_pattern[next] == observed)
+						m_candidates[kept++] = next;
+				}
+				m_candidates.resize(kept);
+				if (observed != expected)
+					m_currentFailed = true;
+				if (m_candidates.empty())
+					EndTracking();
+				else if (m_trackFrames >= cycle)
+				{
+					if (m_currentFailed && m_candidates.size() == 1)
+					{
+						// The contradiction that started it stays counted: content
+						// that keeps moving phase (24p through a 30p lock) still
+						// unlocks on the usual rule instead of re-phasing forever.
+						m_phase = m_candidates.front();
+						rephased = true;
+						m_probationUntil = m_frames + static_cast<uint64_t>(cycle);
+						EndTracking();
+						return m_pattern[m_phase];
+					}
+					EndTracking();
+				}
+				else if (m_currentFailed)
+				{
+					provisional = true;
+					return observed;
+				}
+				else
+					return expected;
+			}
+			if (contradiction)
+			{
+				for (int phase = 0; phase < cycle; ++phase)
+					if (phase != m_phase && m_pattern[phase] == 'N')
+						m_candidates.push_back(phase);
+				m_trackFrames = m_candidates.empty() ? 0 : 1;
+				m_currentFailed = false;
+			}
+			return expected;
+		}
+
+		Settings m_settings;
+		bool m_pendingDiscontinuity = false;   // D1: until ConsumeDiscontinuity()
+		bool m_missCarry = false;              // D4: the missed slots held a new picture
+		uint64_t m_probationUntil = 0;         // D3/D4: verify up to this frame (0 none)
+		int m_trackFrames = 0;                 // D3: frames since the contradiction (0 not tracking)
+		std::vector<int> m_candidates;         // D3: phases of the latest frame that match since
+		bool m_currentFailed = false;          // D3: the locked phase failed after the contradiction
 		std::deque<char> m_history;
 		std::deque<uint64_t> m_contradictions;   // frame numbers of recent contradictions
 		uint64_t m_frames = 0;

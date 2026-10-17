@@ -109,6 +109,14 @@
  *   exact-code snap follows the rgba16f step at the value's brightness
  *   (half a code near white, finer below), and the final store writes an
  *   exactly representable half.
+ *   Audit 2026-10-16: with `output_float32` = 1 (set by the renderer when
+ *   libplacebo's output pass runs in rgba32f, output_fbo_float32) the
+ *   texture holds values to about 1e-4 code, so the snap shrinks to 1e-3
+ *   code (a few float32 ulps of colour-math error near white) and the final
+ *   store skips the half-float rounding. Rgba16f's snap there reached half a
+ *   code above mid grey, rounding every value to a whole code before the
+ *   quantizer, so the upper half carried no residual (undithered). At 0
+ *   (the default, and always on libplacebo 7.360) the output is unchanged.
  *   All three parameters (levels_full, swapchain_bits, color_bits) are set by
  *   the renderer every frame from the target; a value in the shader rule is
  *   overwritten.
@@ -125,6 +133,10 @@
  *   set by the renderer when it creates the hook): on a hardware GPU a new
  *   hook can be given a freed hook's memory, and a constant tag made it
  *   trust that stale state on its first refresh (gate 2026-10-13).
+ *
+ * VP_OUTPUT_QUANTIZER (audit 2026-10-16): this marker tells the hook chain
+ *   that the shader quantises the output itself, so libplacebo's dither is
+ *   cleared while it runs; other OUTPUT hooks keep the dither.
  *
  * Copyright (C) 2026 Victor McPherson
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -223,6 +235,13 @@
 
 //!PARAM vector_pixel
 //!DESC Set by the renderer (planner D2): 1 = the quantizer takes this refresh's per-pixel displacement from VPPIX
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
+//!PARAM output_float32
+//!DESC Set by the renderer (audit 2026-10-16): 1 = the OUTPUT texture is rgba32f (output_fbo_float32 in effect), 0 = rgba16f
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
@@ -835,6 +854,12 @@ void hook()
     vec3 snap = vec3(0.13);
     if (ten)
         snap = max(vec3(0.13), exp2(floor(log2(max(src.rgb, vec3(1e-6)))) - 10.0) * in_scale * 1.04);
+    // Audit 2026-10-16: an rgba32f OUTPUT texture (output_float32) carries
+    // the sub-code detail the rgba16f snap above discards; only colour-math
+    // error (a few float32 ulps, ~1e-4 code near white) is snapped away.
+    bool f32 = output_float32 > 0.5;
+    if (f32)
+        snap = vec3(1e-3);
     x = mix(x, whole, vec3(lessThan(abs(x - whole), snap)));
 
     if (test_ramp > 0.5) {
@@ -917,7 +942,9 @@ void hook()
     // 1 here.
     vec4 outc = vec4(k * out_step, occlusion_mask > 0.5 || grain_tolerance_scale > 1.0 ? 1.0 : src.a);
     vec4 stored = outc / HOOKED_mul;
-    if (ten)
+    // Audit 2026-10-16: an rgba32f texture stores k/1023 exactly enough;
+    // the half-float workaround applies only to rgba16f.
+    if (ten && !f32)
         stored.rgb = exact_half(stored.rgb);
     imageStore(out_image, pos, stored);
 }

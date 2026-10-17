@@ -93,6 +93,9 @@ bool EarlyUpload::Open(ID3D11Device* renderDeviceIn, pl_gpu gpuIn, int slots, si
 		nextUploadValue = 0;
 		nextReleaseValue = 0;
 		stats = Stats{};
+		lastRowBytes = 0;
+		lastHeight = 0;
+		trimPending = false;
 	}
 	{
 		std::lock_guard<std::mutex> guard(control->m);
@@ -184,6 +187,41 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 		const size_t allowed = capBytes / std::max<size_t>(frameBytes, 1);
 		// A free slot whose every GPU use has been released.
 		const uint64_t released = releasedFence->GetCompletedValue();
+		// audit 2026-10-16: after a frame size change, free the textures the
+		// new size will not reuse (beyond the slots the cap allows, or of the
+		// old size), so the pool stays within its byte cap. Slots still held
+		// or in GPU use are freed on a later upload; the render side drops its
+		// opened copies in Acquire.
+		if (rowBytes != lastRowBytes || height != lastHeight)
+		{
+			lastRowBytes = rowBytes;
+			lastHeight = height;
+			trimPending = true;
+		}
+		if (trimPending)
+		{
+			trimPending = false;
+			for (size_t i = 0; i < entries.size(); ++i)
+			{
+				Entry& e = entries[i];
+				if (!e.uploadTex || (i < allowed && e.rowBytes == rowBytes && e.height == height))
+					continue;
+				if (e.busy || released < e.releaseValue)
+				{
+					trimPending = true;
+					continue;
+				}
+				e.uploadTex.Release();
+				if (e.shared)
+				{
+					CloseHandle(e.shared);
+					e.shared = nullptr;
+				}
+				e.rowBytes = 0;
+				e.height = 0;
+				++e.generation;
+			}
+		}
 		for (size_t i = 0; i < entries.size() && i < allowed; ++i)
 		{
 			Entry& e = entries[i];
@@ -244,6 +282,19 @@ pl_tex EarlyUpload::Acquire(Slot& slot)
 	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0 ||
 		static_cast<size_t>(slot.index) >= entries.size())
 		return nullptr;
+	{
+		// audit 2026-10-16: render side of the size-change trim - the opened
+		// copies of freed slots go too (they keep the shared memory alive).
+		std::lock_guard<std::mutex> guard(lock);
+		for (Entry& stale : entries)
+		{
+			if (stale.uploadTex || stale.busy || (!stale.wrapped && !stale.renderTex))
+				continue;
+			if (stale.wrapped)
+				pl_tex_destroy(gpu, &stale.wrapped);
+			stale.renderTex.Release();
+		}
+	}
 	Entry& e = entries[static_cast<size_t>(slot.index)];
 	if (e.wrappedGeneration != e.generation || !e.wrapped)
 	{

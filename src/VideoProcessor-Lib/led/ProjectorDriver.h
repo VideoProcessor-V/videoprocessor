@@ -49,6 +49,9 @@ namespace LedDrive
 		int lastSentContrast = -1;
 		// A light target is waiting or being transmitted.
 		bool busy = false;
+		// A CNTR value (SetContrastAsync) is waiting or being transmitted
+		// (audit 2026-10-16).
+		bool contrastBusy = false;
 		// A command sequence (experimental custom dim) is waiting or being
 		// sent, and how many sequences have finished.
 		bool sequenceBusy = false;

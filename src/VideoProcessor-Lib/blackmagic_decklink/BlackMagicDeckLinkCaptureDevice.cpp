@@ -234,6 +234,9 @@ void BlackMagicDeckLinkCaptureDevice::StartCapture(
 
 	m_capturedVideoFrameCount = 0;
 	m_missedVideoFrameCount = 0;
+	// audit 2026-10-16: a new run starts its frame-interval count afresh; the
+	// previous run's last timestamp is meaningless here.
+	m_previousTimingClockFrameTime = TIMING_CLOCK_TIME_INVALID;
 
 
 	//
@@ -601,6 +604,9 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFormatChang
 		//
 
 		ResetVideoState();
+		// audit 2026-10-16: the restarted stream's timestamps do not continue
+		// the old ones - start the frame-interval count afresh.
+		m_previousTimingClockFrameTime = TIMING_CLOCK_TIME_INVALID;
 		m_bmdPixelFormat = bmdPixelFormat;
 		m_bmdDisplayMode = newMode->GetDisplayMode();
         m_bmdFieldDominance=newMode->GetFieldDominance();
@@ -703,8 +709,9 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 			assert(m_previousTimingClockFrameTime < timingClockFrameTime);
 
 			const double frameDiffTicks = (double)(timingClockFrameTime - m_previousTimingClockFrameTime);
-			const int frames = (int)round(frameDiffTicks / m_ticksPerFrame);
-			assert(frames >= 0);
+			// audit 2026-10-16: a delivered frame counts at least once, even when
+			// the interval rounds to zero or the timestamp went backwards.
+			const int frames = std::max(1, (int)round(frameDiffTicks / m_ticksPerFrame));
 
 			m_capturedVideoFrameCount += frames;
 			m_missedVideoFrameCount += std::max((frames - 1), 0);

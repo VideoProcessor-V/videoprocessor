@@ -30,6 +30,8 @@ namespace
 		bool silent = false;
 		bool holdReplies = false;
 		bool openFails = false;
+		// Writes fail (an unplugged adapter): nothing reaches the projector.
+		bool writeFails = false;
 		int opens = 0;
 		int light = 120;
 		int contrast = 74;
@@ -116,8 +118,12 @@ namespace
 			std::lock_guard<std::mutex> guard(projector->mutex);
 			projector->replies.clear();
 		}
-		bool Write(const std::string& bytes, std::string&) override
+		bool Write(const std::string& bytes, std::string& error) override
 		{
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				if (projector->writeFails) { error = "write failed"; return false; }
+			}
 			projector->Receive(bytes);
 			return true;
 		}

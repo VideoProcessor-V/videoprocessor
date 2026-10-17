@@ -96,7 +96,9 @@ if (p.x < sz.x && p.y < sz.y) {
 		pl_fmt StorableLike(pl_gpu gpu, pl_fmt like)
 		{
 			const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
-			if (like && (like->caps & caps) == caps) return like;
+			// At least 16 bits: an 8-bit output would round the debanded gradient back onto its
+			// band steps (audit 2026-10-16).
+			if (like && (like->caps & caps) == caps && like->component_depth[0] >= 16) return like;
 			const int n = like ? like->num_components : 1;
 			pl_fmt f = pl_find_fmt(gpu, PL_FMT_UNORM, n, 16, 16, caps);
 			return f ? f : pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 16, caps);

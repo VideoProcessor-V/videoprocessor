@@ -72,6 +72,11 @@ namespace AdaptiveDownscale
 		// this frame's residual (today's output).
 		bool cnnResidualStabilise = true;
 		bool ssimResidualStabilise = true;
+		// Audit 2026-10-16: the faithful branch's textures (they become the
+		// picture) in 32-bit float. Set by the renderer from its rgba32f FBOs'
+		// effective state (fbo_float32); falls back to 16-bit float when the
+		// GPU has no suitable rgba32f format. Precision only, no switch.
+		bool float32Picture = true;
 	};
 
 	inline bool operator==(const Settings& a, const Settings& b)
@@ -80,7 +85,8 @@ namespace AdaptiveDownscale
 			a.grainHi == b.grainHi && a.grainFloor == b.grainFloor && a.grainSmoothMs == b.grainSmoothMs &&
 			a.shadowBias == b.shadowBias && a.chromaSsim == b.chromaSsim && a.antiring == b.antiring &&
 			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho && a.faithfulAuto == b.faithfulAuto &&
-			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise;
+			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise &&
+			a.float32Picture == b.float32Picture;
 	}
 
 	// 8-3: the de-judder's field for the source frame being rendered.
@@ -248,6 +254,7 @@ namespace AdaptiveDownscale
 		int residualIndex = 0;                        // residual[residualIndex] = residualSequence's
 		bool residualPrevValid = false;
 		uint64_t residualSequence = 0;
+		int residualW = 0, residualH = 0;              // the residual textures' size (audit 2026-10-16)
 		unsigned long long stabilised = 0;
 		pl_buf readback = nullptr;
 		bool readbackPending = false;

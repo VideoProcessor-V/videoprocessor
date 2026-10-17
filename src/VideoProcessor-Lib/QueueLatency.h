@@ -104,4 +104,20 @@ namespace QueueLatency
 		}
 		return decision;
 	}
+
+	// audit 2026-10-16: the target can never exceed the queue capacity - a
+	// look-ahead minimum above queue_size would otherwise ask for frames the
+	// queue cannot hold. capacity 0 (unknown) leaves the target alone.
+	inline TargetDecision ClampToCapacity(TargetDecision decision, size_t capacity, bool* clamped = nullptr)
+	{
+		const bool over = capacity > 0 && decision.frames > capacity;
+		if (over)
+		{
+			decision.frames = capacity;
+			decision.effectiveMs = EffectiveLatencyMs(decision.frames, decision.rateHz);
+		}
+		if (clamped)
+			*clamped = over;
+		return decision;
+	}
 }

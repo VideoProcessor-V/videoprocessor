@@ -297,6 +297,7 @@
     <ClCompile Include="SceneDetectorTests.cpp" />
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="VectorStoreTests.cpp" />
+    <ClCompile Include="MotionValidityTests.cpp" />
     <ClCompile Include="KernelInverseTests.cpp" />
     <ClCompile Include="WindowResizeLayoutTests.cpp" />
     <ClCompile Include="AlphaPresentationTelemetryTests.cpp" />

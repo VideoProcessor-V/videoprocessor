@@ -4643,6 +4643,9 @@ struct LibplaceboVideoRenderer::Impl
 	SourceRebase::Module sourceRebase;
 	pl_dispatch rebaseDispatch = nullptr;
 	double rebaseFactor = 1.0;          // this frame's (1 = native); the height's when per axis
+	unsigned long long rebaseFailuresSeen = 0;
+	SteadyClock::time_point rebasePausedUntil{};
+	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
@@ -5206,6 +5209,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> sourceAutoActive{ false };
 	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionAheadLogged;
+	SteadyClock::time_point motionAheadLoggedAt{};
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
 	// Owner 2026-10-16: the look-ahead engages with 4 frames queued ahead and disengages when the
 	// queue holds none or the sequence breaks (a skip, seek or reset: a new motion generation);
@@ -5221,6 +5225,10 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<uint64_t> motionGeneration{ 1 };
 	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
 	bool motionProducerFailedLogged = false;
+	// Audit 2026-10-16: since when the producer has been unwanted only because the de-judder was
+	// released (a resync or reset releases it): kept alive instead of a join on the render thread and
+	// a new device on every resync.
+	SteadyClock::time_point motionProducerIdleSince{};
 	unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
 	// The render loop's hand-off of frames to the producer (render loop thread writes).
 	std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
@@ -12992,7 +13000,7 @@ struct LibplaceboVideoRenderer::Impl
 					DebugLog::Log("De-judder motion: %s", source);
 			}
 		}
-		if (motionProducer && ((dejudderEstimates + 1) == 24 || (dejudderEstimates + 1) % 120 == 0))
+		if (motionProducer && ((dejudderEstimates + 1) == 24 || (dejudderEstimates + 1) % 2400 == 0))   // as the other periodic logs (audit 2026-10-16)
 		{
 			std::string counts;
 			for (size_t n = 0; n < queuedAheadCounts.size(); ++n)
@@ -18224,7 +18232,14 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			else if (!wantProducer)
 			{
-				if (motionProducer)
+				const bool onlyReleased = !dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
+				const auto now = SteadyClock::now();
+				if (!onlyReleased || motionProducerIdleSince == SteadyClock::time_point{})
+					motionProducerIdleSince = now;
+				// Owner: the producer stays alive once wanted - kept while the settings still want it
+				// (a resync or format change can take longer than any timer); stopped when they change.
+				const bool keepBriefly = motionProducer && onlyReleased;
+				if (motionProducer && !keepBriefly)
 				{
 					motionProducer->Stop();
 					motionProducer.reset();
@@ -18233,9 +18248,12 @@ struct LibplaceboVideoRenderer::Impl
 				// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow
 				// off and on, low latency and back), and the look-ahead re-engages only after the
 				// refill (4 queued ahead) - never on a stale engagement.
-				motionProducerFailedLogged = false;
+				if (!keepBriefly)
+					motionProducerFailedLogged = false;
 				motionAheadEngaged = false;
 			}
+			if (wantProducer)
+				motionProducerIdleSince = SteadyClock::time_point{};
 			if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
 			{
 				motionProducerFailedLogged = true;
@@ -18255,9 +18273,14 @@ struct LibplaceboVideoRenderer::Impl
 			// Log the reason and depth, not every change of the queued count.
 			char key[96];
 			snprintf(key, sizeof(key), "%d|%d|%d", ahead.configured, ahead.depth, static_cast<int>(ahead.reason));
-			if (motionAheadLogged != key)
+			// The queue level swings around the depth as frames arrive and are shown: an Active /
+			// ShallowQueue flip is logged at most every 5 s (audit 2026-10-16: up to once per frame).
+			const bool levelOnly = ahead.reason == MotionAhead::Reason::Active || ahead.reason == MotionAhead::Reason::ShallowQueue;
+			const auto now = SteadyClock::now();
+			if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
 			{
 				motionAheadLogged = key;
+				motionAheadLoggedAt = now;
 				DebugLog::Log("%s", text);
 			}
 		}
@@ -18324,10 +18347,25 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			}
 			const bool temporal = temporalRenderer.Active();
-			rebaseFactor = wanted < 1.0 && !temporal ? wanted : 1.0;
-			rebaseFactorX = wantedX < 1.0 && !temporal ? wantedX : 1.0;
+			// Audit 2026-10-16: a failed re-base renders the native frame while the blend, the SSIM gate
+			// and the debander were set up for the re-based one; after a failure the re-base pauses for
+			// 5 s (then retries), so a persistent failure costs one frame, not every frame.
+			if (sourceRebase.Failures() != rebaseFailuresSeen)
+			{
+				// 5 s, doubling to 60 s while it keeps failing (one native frame per retry).
+				const bool recent = SteadyClock::now() < rebasePausedUntil + std::chrono::seconds(rebasePauseSeconds * 2);
+				rebasePauseSeconds = recent ? (std::min)(60, rebasePauseSeconds * 2) : 5;
+				rebaseFailuresSeen = sourceRebase.Failures();
+				rebasePausedUntil = SteadyClock::now() + std::chrono::seconds(rebasePauseSeconds);
+			}
+			const bool rebasePaused = SteadyClock::now() < rebasePausedUntil;
+			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
+			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
 			std::string state;
-			if ((wanted < 1.0 || wantedX < 1.0) && temporal)
+			if ((wanted < 1.0 || wantedX < 1.0) && rebasePaused)
+				state = "Re-base: paused " + std::to_string(rebasePauseSeconds) + " s after a failure (" + sourceRebase.LastError() +
+					", " + std::to_string(rebaseFailuresSeen) + " so far)";
+			else if ((wanted < 1.0 || wantedX < 1.0) && temporal)
 				state = "Re-base: not applied while smooth motion or deinterlacing runs (source_resolution " +
 					activeSettings.sourceResolution + ")";
 			else if ((rebaseFactor < 1.0 || rebaseFactorX < 1.0) && luma)
@@ -24266,8 +24304,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
 						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
 						aheadState.dolbyVisionTunnel);
-					if (prepared.source.IsValid())
-						m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source);
+					// The first frame not ready yet (a conversion pending) stops this pass: the producer's
+					// high-water mark would otherwise pass it and its pairs would never exist (audit 2026-10-16).
+					if (!prepared.source.IsValid())
+						break;
+					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source);
 				}
 			}
 			catch (const std::exception& e)
