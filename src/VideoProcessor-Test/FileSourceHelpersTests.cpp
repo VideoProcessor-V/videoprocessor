@@ -825,10 +825,10 @@ namespace FileSourceTests
 			wrongFormat.mt.formattype = nullGuid;
 			Assert::IsFalse(ParseFileMediaType(wrongFormat.mt).ok);
 
-			MediaTypeFixture small = MakeVih2(FourCcSubtype(Fcc('N', 'V', '1', '2')), 1920, 1080,
+			MediaTypeFixture tooSmall = MakeVih2(FourCcSubtype(Fcc('N', 'V', '1', '2')), 1920, 1080,
 				Rect(0, 0, 0, 0), 400000);
-			small.mt.cbFormat = (ULONG)sizeof(VIDEOINFOHEADER);
-			Assert::IsFalse(ParseFileMediaType(small.mt).ok);
+			tooSmall.mt.cbFormat = (ULONG)sizeof(VIDEOINFOHEADER);
+			Assert::IsFalse(ParseFileMediaType(tooSmall.mt).ok);
 
 			MediaTypeFixture audio = MakeVih2(FourCcSubtype(Fcc('N', 'V', '1', '2')), 1920, 1080,
 				Rect(0, 0, 0, 0), 400000);
