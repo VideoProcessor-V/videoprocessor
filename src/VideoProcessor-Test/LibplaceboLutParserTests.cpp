@@ -7235,6 +7235,121 @@ namespace VideoProcessorTest
 			Assert::IsNotNull(vectors);
 		}
 
+		// Bug hunt 2026-10-17: the cached picture (PRE_OUTPUT) already has the
+		// target's normalized calibration LUT applied (colour management), so an
+		// extra rendered from it must not have the LUT on its target: then it
+		// shows A exactly; with the LUT left on (the bug) it is applied twice.
+		TEST_METHOD(DejudderCachedExtraAppliesTheTargetLutOnce)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 128, height = 64;
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, [](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			DejudderGpuPlanes planesA;
+			UploadDejudderFrame(gpu, a, planesA);
+			// A strong, non-identity calibration LUT: out = 0.75 in + 0.15 (per channel).
+			std::string cube = "LUT_3D_SIZE 2\n";
+			for (int b = 0; b < 2; ++b)
+				for (int g = 0; g < 2; ++g)
+					for (int r = 0; r < 2; ++r)
+						cube += std::to_string(0.15 + 0.75 * r) + " " + std::to_string(0.15 + 0.75 * g) + " " +
+							std::to_string(0.15 + 0.75 * b) + "\n";
+			pl_custom_lut* lut = pl_lut_parse_cube(fixture.Log(), cube.data(), cube.size());
+			Assert::IsNotNull(lut, L"the test LUT did not parse");
+			struct LutOwner { pl_custom_lut** l; ~LutOwner() { pl_lut_free(l); } } lutOwner{ &lut };
+			pl_tex_params targetParams{};
+			targetParams.w = width;
+			targetParams.h = height;
+			targetParams.format = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			targetParams.renderable = true;
+			targetParams.host_readable = true;
+			pl_tex targetTexture = pl_tex_create(gpu, &targetParams);
+			Assert::IsNotNull(targetTexture);
+			struct TexOwner { pl_gpu g; pl_tex* t; ~TexOwner() { pl_tex_destroy(g, t); } } texOwner{ gpu, &targetTexture };
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			auto target = [&](bool withLut)
+			{
+				pl_frame t = TargetLutGpuFixture::MakeRgbFrame(targetTexture);
+				t.repr.levels = PL_COLOR_LEVELS_FULL;
+				t.color.transfer = PL_COLOR_TRC_BT_1886;
+				t.lut = withLut ? lut : nullptr;
+				t.lut_type = withLut ? PL_LUT_NORMALIZED : PL_LUT_UNKNOWN;
+				return t;
+			};
+			auto download = [&]()
+			{
+				pl_gpu_finish(gpu);
+				std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
+				pl_tex_transfer_params d{};
+				d.tex = targetTexture;
+				d.ptr = output.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				return output;
+			};
+			DejudderRendered::Cache cache;
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planesA.planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planesA.planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = target(true);
+				std::vector<const pl_hook*> hooks = { cache.Hook() };
+				OutputEncodingRepair::Hook repair;
+				if (OutputEncodingRepair::Needed(hooks, nullptr, PL_LUT_NORMALIZED))
+				{
+					repair.SetTarget(t.repr);
+					hooks.insert(hooks.begin(), repair.Get());
+				}
+				pl_render_params p = params;
+				p.hooks = hooks.data();
+				p.num_hooks = static_cast<int>(hooks.size());
+				cache.Arm(11);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+			}
+			const std::vector<RgbaPixel> own = download();
+			Assert::IsNotNull(cache.Texture(11));
+			auto extra = [&](bool withLut)
+			{
+				pl_frame image = DejudderRendered::Frame(cache.Texture(11), cache.Repr(), cache.Color());
+				pl_frame t = target(withLut);
+				std::vector<const pl_hook*> kept;
+				const pl_render_params p = DejudderRendered::OutputOnly(params, {}, kept);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+				return download();
+			};
+			const std::vector<RgbaPixel> fixed = extra(false);
+			const std::vector<RgbaPixel> twice = extra(true);
+			int fixedMax = 0, twiceMax = 0;
+			for (size_t i = 0; i < own.size(); ++i)
+			{
+				auto diff = [](const RgbaPixel& p, const RgbaPixel& q)
+				{
+					return std::max({ std::abs(p.r - q.r), std::abs(p.g - q.g), std::abs(p.b - q.b) });
+				};
+				fixedMax = std::max(fixedMax, diff(fixed[i], own[i]));
+				twiceMax = std::max(twiceMax, diff(twice[i], own[i]));
+			}
+			Assert::IsTrue(fixedMax <= 1, (L"the extra without the target LUT differs from A by " +
+				std::to_wstring(fixedMax) + L" codes").c_str());
+			Assert::IsTrue(twiceMax >= 8, (L"with the LUT on the extra's target it should apply twice; max diff " +
+				std::to_wstring(twiceMax)).c_str());
+		}
+
 		TEST_METHOD(DejudderRenderedWarpMatchesTheSourceWarp)
 		{
 			TargetLutGpuFixture fixture;
