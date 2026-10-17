@@ -9308,8 +9308,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             if(auto* layout=qobject_cast<QFormLayout*>(combo->parentWidget()->layout()))
                 if(auto* label=layout->labelForField(combo))label->setToolTip(text);
         };
-        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering.
-"
+        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering.\n"
             "Below-black (BTB) is clipped on blended refreshes: libplacebo's frame mixer clips it (a libplacebo limitation; "
             "above-white is kept). VP's own motion engine is the path that keeps both. While blending, keeping below-black / "
             "above-white turns itself off with a calibration LUT or a wide-gamut SDR source."));
