@@ -5356,6 +5356,10 @@ namespace VideoProcessorTest
 		{
 			Dejudder::Settings settings;
 			settings.hostReadable = true;
+			// Integration 2026-10-17: the object's default source warp became Catmull-Rom (the
+			// faithful grain path). These object-level warp tests were written against the
+			// bilinear source warp, so they keep it explicitly; the grain tests set catmull.
+			settings.sourceWarpCatmull = false;
 			return settings;
 		}
 
@@ -9752,6 +9756,7 @@ namespace VideoProcessorTest
 			params.thresholdCodes = VpDebander::Strength(8.0, 10, 1.0, true);
 			params.colorDepth = 10;
 			params.radiusScale = 1080.0 / H;   // 16 px at this picture's 'height' scale
+			params.grainGuard = false;   // written for the 2026-10-16 debander (the guard is the default since the integration)
 			VpDebander::Module deband;
 			pl_tex rampTex = upload(ramp), texTex = upload(texture);
 			pl_frame out{};
@@ -13764,6 +13769,7 @@ namespace VideoProcessorTest
 					UploadDejudderFrame(gpu, gf.frames[0], planesA);
 					UploadDejudderFrame(gpu, gf.frames[1], planesB);
 					Interpolator::FrameInterpolator legacy(fixture.Log(), gpu, true), preserve(fixture.Log(), gpu, true);
+					legacy.SetGrain(InterpolationPolicy::Grain::Blend);   // the object default is Preserve since the integration
 					preserve.SetGrain(InterpolationPolicy::Grain::Preserve);
 					const double sourceLuma = GrainModel::Rms(gf.lumaGrain[0], margin);
 					const double sourceChroma = GrainModel::Rms(ChromaGrainOf(gf.frames[0].chroma, width, height, 0), margin / 2);
@@ -13969,7 +13975,8 @@ namespace VideoProcessorTest
 			Dejudder::Settings bilinearSettings = DejudderTestSettings();
 			Dejudder::Settings catmullSettings = DejudderTestSettings();
 			catmullSettings.sourceWarpCatmull = true;
-			Assert::IsFalse(Dejudder::Settings().sourceWarpCatmull, L"the object's default is the established bilinear");
+			bilinearSettings.sourceWarpCatmull = false;
+			Assert::IsTrue(Dejudder::Settings().sourceWarpCatmull, L"the object's default is the faithful Catmull-Rom (integration 2026-10-17)");
 			Dejudder::MotionWarp never(fixture.Log(), gpu, DejudderTestSettings());
 			Dejudder::MotionWarp bilinear(fixture.Log(), gpu, bilinearSettings);
 			Dejudder::MotionWarp catmull(fixture.Log(), gpu, catmullSettings);
@@ -14388,6 +14395,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			Dejudder::Planes out;
 			for (auto fallback : { InterpolationPolicy::Fallback::Hold, InterpolationPolicy::Fallback::Blend })
 			{
@@ -14447,6 +14455,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			for (int quarter = 1; quarter <= 3; ++quarter)
 			{
 				const float t = 0.25f * quarter;
@@ -14507,6 +14516,7 @@ namespace VideoProcessorTest
 			motion.frameTrust = warp.FrameTrust();
 			motion.minTrustedShare = warp.GetSettings().minTrustedShare;
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			Dejudder::Planes out;
 			Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, motion, 0.5f,
 				InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
@@ -14548,6 +14558,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			for (auto fallback : { InterpolationPolicy::Fallback::Hold, InterpolationPolicy::Fallback::Blend })
 				for (float t : { 0.25f, 0.75f })
 				{
@@ -14594,6 +14605,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			for (auto fallback : { InterpolationPolicy::Fallback::Hold, InterpolationPolicy::Fallback::Blend })
 				for (float t : { 0.1f, 0.49f, 0.51f, 0.9f })
 				{
@@ -14647,6 +14659,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			const float t = 0.25f;   // nearer A: the hold would show A
 			Dejudder::Planes out;
 			Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
@@ -14691,6 +14704,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			Interpolator::Motion none;   // no field, no trust
 			for (float t : { 0.2f, 0.8f })
 			{
@@ -14732,6 +14746,7 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			interpolator.SetGrain(InterpolationPolicy::Grain::Blend);   // legacy: written before the grain path became the default
 			InterpolatorField field;
 			MakeInterpolatorField(gpu, width, height, 1.0f,
 				[](int, int) { return std::array<float, 4>{ static_cast<float>(dx), 0.0f, 1.0f, 0.0f }; }, field);

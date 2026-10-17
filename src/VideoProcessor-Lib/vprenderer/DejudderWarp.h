@@ -235,10 +235,10 @@ namespace Dejudder
 		// dejudder_source_warp_filter (owner 2026-10-17: grain is never averaged away): the
 		// source warp samples A (and the fill's B) with Catmull-Rom instead of the hardware's
 		// bilinear filter, which keeps only 0.62x of white grain at a 0.25 px shift and 0.5x
-		// at 0.5 px. false = bilinear (the established output; the object's default - the
-		// renderer sets it from the profile, default catmull). The rendered warp is
-		// Catmull-Rom already.
-		bool sourceWarpCatmull = false;
+		// at 0.5 px. false = bilinear (the established output). Integration 2026-10-17: the
+		// faithful path is the object's default as well as the profile's. The rendered warp
+		// is Catmull-Rom already.
+		bool sourceWarpCatmull = true;
 		// General scaling (owner 2026-10-14: nothing tied to a resolution or a
 		// rate). referenceHeight > 0: the pixel-valued settings (the D2 motion
 		// scale, the roll-off, the landing check, the source warp's feather)

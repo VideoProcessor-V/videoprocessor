@@ -104,7 +104,7 @@ namespace Interpolator
 		bool PrepareBands(int index, pl_tex srcA, pl_tex srcB);
 		bool Plane(const char* description, pl_tex srcA, pl_tex srcB, pl_tex dst, const Motion& motion, float t,
 			const float planeScale[2], const std::string& header, const GrainBands* bands);
-		InterpolationPolicy::Grain grain = InterpolationPolicy::Grain::Blend;
+		InterpolationPolicy::Grain grain = InterpolationPolicy::Grain::Preserve;   // integration 2026-10-17: the faithful path is the object default
 		GrainBands grainBands[2];   // luma, chroma
 		unsigned long long grainPreservedRuns = 0;
 		pl_log log = nullptr;

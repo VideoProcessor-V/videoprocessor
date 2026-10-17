@@ -1664,15 +1664,19 @@ if (b.x < blocks.x && b.y < blocks.y) {
 #else
     float extra_ = 0.0;
 #endif
+    // decision_: the error the trust decision sees. The field's w keeps the raw SAD
+    // (integration 2026-10-17: the engine's penalty used to inflate the stored SAD, which
+    // the grain map, the taper and the occlusion fill read as a worse match).
+    float decision_ = f.z;
 #ifdef OF_TRUST
     // The engine's trust weight (w: its cost, its own forward/backward consistency; 1 =
     // none): a less sure engine vector counts as a worse match - tapered, or untrusted.
-    f.z += (1.0 - clamp(f.w, 0.0, 1.0)) * of_penalty;
+    decision_ += (1.0 - clamp(f.w, 0.0, 1.0)) * of_penalty;
 #endif
 #ifdef TAPER
-    bool good = f.z <= taper_sad + extra_;   // delta 9 H3: marginal blocks warp, tapered
+    bool good = decision_ <= taper_sad + extra_;   // delta 9 H3: marginal blocks warp, tapered
 #else
-    bool good = f.z <= tolerance + extra_;
+    bool good = decision_ <= tolerance + extra_;
 #endif
     float trust = (consistent && good) ? 1.0 : 0.0;
 #ifdef PICTURE

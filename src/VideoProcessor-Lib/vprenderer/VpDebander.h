@@ -49,9 +49,9 @@ namespace VpDebander
 		// grain estimate - the share of pixels per 16x16 block whose Laplacian exceeds a third
 		// of the threshold - vetoes the blur where it is consistent with grain (or texture),
 		// with or without vectors. A banded gradient is flat but for its band edges and is
-		// debanded as before. false = the 2026-10-16 debander, byte for byte (the struct's
-		// default; the renderer sets it from the profile, default on).
-		bool grainGuard = false;
+		// debanded as before. false = the 2026-10-16 debander, byte for byte. Integration
+		// 2026-10-17: on is the struct's default as well as the profile's.
+		bool grainGuard = true;
 	};
 
 	// The threshold in codes from the readings (spec 2d / 2b): the content's
