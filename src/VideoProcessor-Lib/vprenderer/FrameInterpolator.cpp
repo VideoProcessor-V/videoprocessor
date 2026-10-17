@@ -38,8 +38,8 @@ if (q.x < size.x && q.y < size.y) {
                 v = v1;
             vec2 la = lp - phase * v;
             vec2 lb = lp + (1.0 - phase) * v;
-            vec4 sa = texture(src_a, la / plane_scale / vec2(size));
-            vec4 sb = texture(src_b, lb / plane_scale / vec2(size));
+            vec4 sa = bilerp_a(la / plane_scale);
+            vec4 sb = bilerp_b(lb / plane_scale);
             float wb = phase;
 #ifdef OCCLUSION
             // B's content where the B sample lands is new (not seen in A): not the
@@ -59,6 +59,28 @@ if (q.x < size.x && q.y < size.y) {
     }
     imageStore(dst, q, outv);
 }
+)GLSL";
+
+		// Bilinear sampling done in the shader from texelFetch (fp32 weights, edge clamped):
+		// exact at a texel centre (a whole-pixel move or no motion gives the source codes
+		// back) and full precision for 16-bit planes, which the hardware's filtering of
+		// UNORM16 does not guarantee. Positions in this plane's pixels.
+		const char* const BILERP_HEADER = R"GLSL(
+#define DEFINE_BILERP(NAME, TEX) \
+vec4 NAME(vec2 p) \
+{ \
+    ivec2 hi = textureSize(TEX, 0) - ivec2(1); \
+    vec2 g = p - vec2(0.5); \
+    ivec2 i0 = ivec2(floor(g)); \
+    vec2 f = g - vec2(i0); \
+    vec4 c00 = texelFetch(TEX, clamp(i0, ivec2(0), hi), 0); \
+    vec4 c10 = texelFetch(TEX, clamp(i0 + ivec2(1, 0), ivec2(0), hi), 0); \
+    vec4 c01 = texelFetch(TEX, clamp(i0 + ivec2(0, 1), ivec2(0), hi), 0); \
+    vec4 c11 = texelFetch(TEX, clamp(i0 + ivec2(1, 1), ivec2(0), hi), 0); \
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y); \
+}
+DEFINE_BILERP(bilerp_a, src_a)
+DEFINE_BILERP(bilerp_b, src_b)
 )GLSL";
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
@@ -139,9 +161,16 @@ if (q.x < size.x && q.y < size.y) {
 	bool FrameInterpolator::Plane(const char* description, pl_tex srcA, pl_tex srcB, pl_tex dst, const Motion& motion,
 		float t, const float planeScale[2], const std::string& header)
 	{
-		std::vector<pl_shader_desc> desc = {
-			Sampled("src_a", srcA, true), Sampled("src_b", srcB, true), Sampled("field", motion.field, false),
-			Sampled("frame_trust", motion.frameTrust, false), Storage("dst", dst) };
+		// One texture bound twice in a pass is rejected by libplacebo, which reports it
+		// only in its log (the pass then writes nothing): A and B the same texture (a
+		// repeated frame, the identity test) bind it once, src_b an alias of src_a.
+		const bool same = srcA == srcB;
+		std::vector<pl_shader_desc> desc = { Sampled("src_a", srcA, false) };
+		if (!same)
+			desc.push_back(Sampled("src_b", srcB, false));
+		desc.push_back(Sampled("field", motion.field, false));
+		desc.push_back(Sampled("frame_trust", motion.frameTrust, false));
+		desc.push_back(Storage("dst", dst));
 		if (motion.subField)
 			desc.push_back(Sampled("sub_field", motion.subField, false));
 		if (motion.occlusionB)
@@ -153,7 +182,8 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_vec2("plane_scale"), planeScale, true } };
 		pl_custom_shader custom{};
 		custom.description = description;
-		custom.header = header.c_str();
+		const std::string fullHeader = std::string(same ? "#define src_b src_a\n" : "") + header;
+		custom.header = fullHeader.c_str();
 		custom.body = INTERPOLATE_BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
@@ -219,7 +249,7 @@ if (q.x < size.x && q.y < size.y) {
 			return false;
 		const std::string header = std::string(fallback == InterpolationPolicy::Fallback::Blend ? "#define FALLBACK_BLEND 1\n" : "") +
 			(motion.occlusionB ? "#define OCCLUSION 1\n" : "") +
-			(motion.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl());
+			(motion.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + BILERP_HEADER;
 		const float lumaScale[2] = { 1.0f, 1.0f };
 		if (!Plane("VideoProcessor interpolator: luma", a.luma, b.luma, outLuma, motion, t, lumaScale, header))
 			return false;
