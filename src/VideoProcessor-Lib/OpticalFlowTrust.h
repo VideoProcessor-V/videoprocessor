@@ -188,8 +188,9 @@ namespace OpticalFlowTrust
 	}
 
 	// The engine's whole-frame motion (D1 format: x, y, ambiguity, valid) is usable when
-	// it is valid and clear (the ambiguity below D1's 0.9: about a third of the confident
-	// cells agree). Otherwise the global search runs as without the engine.
+	// it is valid and clear (the ambiguity below D1's 0.9: more than a tenth of the confident
+	// cells agree - MotionAhead::FlowGlobal's 1.05 - 1.5 x share). Otherwise the global search
+	// runs as without the engine.
 	inline bool GlobalUsable(const float g[4])
 	{
 		return g[3] > 0.5f && g[2] < 0.9f;

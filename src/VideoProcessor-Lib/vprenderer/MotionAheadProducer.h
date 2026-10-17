@@ -130,7 +130,8 @@ namespace MotionAhead
 		// Half-texel steps, as D1's.
 		global[0] = static_cast<float>(std::round((close ? sx / close : px) * 2.0) / 2.0);
 		global[1] = static_cast<float>(std::round((close ? sy / close : py) * 2.0) / 2.0);
-		// Ambiguity on D1's scale (consumers use < 0.9): a third of the cells agreeing = 0.9.
+		// Ambiguity on D1's scale (consumers use < 0.9): 1.05 - 1.5 x share, so a tenth of the
+		// confident cells agreeing = 0.9 (usable above that) and 70 % or more = 0.05.
 		global[2] = static_cast<float>((std::min)(1.0, (std::max)(0.05, 1.05 - share * 0.45 / 0.3)));
 		// The second layer: the best window more than a texel from the first.
 		int secondBest = 0, sxBin = 0, syBin = 0;

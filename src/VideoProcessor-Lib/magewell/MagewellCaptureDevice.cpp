@@ -1874,8 +1874,8 @@ ULONG MagewellCaptureDevice::Release(void)
 }
 
 
-// Bug hunt 2026-10-17: delay before the device restart after recoverable fault
-// number `consecutiveFaults` (1-based): 250 ms doubling, capped at 30 s.
+// Bug hunt 2026-10-17: magewell_recover_faults - whether a recoverable capture
+// fault restarts the device internally (on) or ends capture (off).
 namespace
 {
 	std::atomic<bool> g_magewellRecoverFaults{ true };   // magewell_recover_faults
@@ -1893,6 +1893,8 @@ bool MagewellCaptureDevice::RecoverFaults()
 	return g_magewellRecoverFaults.load();
 }
 
+// Bug hunt 2026-10-17: delay before the device restart after recoverable fault
+// number `consecutiveFaults` (1-based): 250 ms doubling, capped at 30 s.
 uint32_t MagewellCaptureDevice::RecoverableFaultBackoffMs(uint32_t consecutiveFaults)
 {
 	const uint32_t shift = consecutiveFaults == 0 ? 0 :

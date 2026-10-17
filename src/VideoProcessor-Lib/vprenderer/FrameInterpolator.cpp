@@ -345,7 +345,8 @@ if (q.x < size.x && q.y < size.y) {
 				a->params.format == b->params.format;
 		}
 
-		// gp_w(i), i in -4..4: GrainPreserve's low-band weights.
+		// gp_w(i), i in -GP_R..GP_R (GrainPreserve::kLowRadius = 5: -5..5): GrainPreserve's
+		// low-band weights.
 		const std::string& LowWeightsGlsl()
 		{
 			static const std::string text = []()

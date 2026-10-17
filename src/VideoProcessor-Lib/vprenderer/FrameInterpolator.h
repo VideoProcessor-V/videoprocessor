@@ -49,9 +49,10 @@
 // 16x16 block to that frame's own high band at the same pixels (gain 1..2; exactly 1
 // at a whole-pixel position): one frame's grain at
 // full strength at every phase, and no more frame-to-frame correlation than a
-// hold. blend is the whole-signal blend above, byte for byte (the object's
-// default, so a caller that never sets it gets the established output; the
-// renderer sets it from interpolation_grain, default preserve).
+// hold. blend is the whole-signal blend above, byte for byte. Preserve is the
+// object's default (integration 2026-10-17: the faithful path, so a caller that
+// never sets it keeps the grain); the renderer sets it from interpolation_grain,
+// default preserve.
 namespace Interpolator
 {
 	struct Motion
