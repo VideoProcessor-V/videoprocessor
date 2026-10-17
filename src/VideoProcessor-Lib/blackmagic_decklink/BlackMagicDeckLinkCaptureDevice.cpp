@@ -245,7 +245,10 @@ void BlackMagicDeckLinkCaptureDevice::StartCapture(
 	// a change.
 	//
 
-	SendCardStateCallback();
+	// audit 2026-10-16: card state is informational; an unknown mode or
+	// missing signal must not make StartCapture throw half way through.
+	SendCardStateCallbackNoThrow();
+	m_streamsForcedToStop.store(false, std::memory_order_release);
 
 
 	//
@@ -276,8 +279,11 @@ void BlackMagicDeckLinkCaptureDevice::StartCapture(
 
 void BlackMagicDeckLinkCaptureDevice::StopCapture()
 {
-	if (!m_outputCaptureData.load(std::memory_order_acquire))
-		throw std::runtime_error("StopCapture() called while not started");
+	// audit 2026-10-16: idempotent, as ACaptureDevice documents. A profile
+	// change may already have stopped egress (and the driver the streams);
+	// the input is still torn down here so a restart starts clean.
+	if (!m_outputCaptureData.load(std::memory_order_acquire) && !m_deckLinkInput)
+		return;
 
 	// Stop egressing data
 	m_outputCaptureData.store(false, std::memory_order_release);
@@ -285,7 +291,13 @@ void BlackMagicDeckLinkCaptureDevice::StopCapture()
 
 	assert(m_deckLinkInput);
 
-	IF_NOT_S_OK(m_deckLinkInput->StopStreams())
+	const bool forcedStop = m_streamsForcedToStop.exchange(false, std::memory_order_acq_rel);
+	const HRESULT stopResult = m_deckLinkInput->StopStreams();
+	if (stopResult != S_OK && forcedStop)
+	{
+		DebugLog::Log("BlackMagic: StopStreams hr=0x%08lx after a forced profile stop (ignored)", stopResult);
+	}
+	else if (stopResult != S_OK)
 	{
 		m_deckLinkInput.Release();
 		m_deckLinkInput = nullptr;
@@ -376,12 +388,11 @@ void BlackMagicDeckLinkCaptureDevice::SetFrameOffsetMs(int frameOffsetMs)
 
 timingclocktime_t BlackMagicDeckLinkCaptureDevice::TimingClockNow()
 {
-	assert(m_deckLinkInput);
-
-	assert(m_outputCaptureData.load(std::memory_order_acquire));
-	assert(
-		m_state == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING ||
-		m_state == CaptureDeviceState::CAPTUREDEVICESTATE_READY );  // TODO: We will also get called if we're ready not sure if we want to be more strict on this and not allow it + tighten up state machine
+	// audit 2026-10-16: the renderer may still read the clock after capture
+	// stopped (profile change, error, stale state). Return the last good value
+	// instead of dereferencing a released input or throwing on its thread.
+	if (!m_deckLinkInput)
+		return m_lastClockTicks.load(std::memory_order_acquire);
 
 	BMDTimeValue currentTimeTicks;
 	BMDTimeValue ticksPerFrame = 0;
@@ -394,7 +405,13 @@ timingclocktime_t BlackMagicDeckLinkCaptureDevice::TimingClockNow()
 		&currentTimeTicks,
 		&ticksPerFrame,  // Now capturing frame timing info
 		&timeScale))     // Now capturing time scale info
-		throw std::runtime_error("Could not get the hardware clock timestamp");
+	{
+		// audit 2026-10-16: was a throw on the caller's (renderer) thread.
+		static std::atomic<int> clockFailureLogs{ 0 };
+		if (clockFailureLogs.fetch_add(1) < 5)
+			DebugLog::Log("BlackMagic: hardware clock read failed; returning the last good clock value");
+		return m_lastClockTicks.load(std::memory_order_acquire);
+	}
 
 #ifdef _DEBUG
 	// CLOCK DRIFT DETECTION: Warn if hardware clock reports unexpected time scale
@@ -421,6 +438,7 @@ timingclocktime_t BlackMagicDeckLinkCaptureDevice::TimingClockNow()
 	}
 #endif
 
+	m_lastClockTicks.store(currentTimeTicks, std::memory_order_release);
 	return currentTimeTicks;
 }
 
@@ -462,21 +480,38 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFormatChang
 		!m_outputCaptureData.load(std::memory_order_acquire))
 		return S_OK;
 
-#ifdef _DEBUG
-
-	// We can validate our Displaymode against the given
+	// audit 2026-10-16: the frame period comes from the card's own
+	// description (GetFrameRate), with the mode table only as a fallback, so a
+	// mode missing from the table no longer throws here (FPS() did) and stalls
+	// capture. A mode with no usable rate is reported as an invalid state; the
+	// streams keep running so the next format change can recover.
+	BMDTimeValue modeFrameDuration = 0;
+	BMDTimeScale modeTimeScale = 0;
+	if (newMode->GetFrameRate(&modeFrameDuration, &modeTimeScale) != S_OK ||
+		modeFrameDuration <= 0 || modeTimeScale <= 0)
 	{
-		DisplayModeSharedPtr dp = Translate(newMode->GetDisplayMode());
-		assert(dp->FrameWidth() == newMode->GetWidth());
-		assert(dp->FrameHeight() == newMode->GetHeight());
-
-		BMDTimeValue frameDuration;
-		BMDTimeScale timeScale;
-		assert(newMode->GetFrameRate(&frameDuration, &timeScale) == S_OK);
-		const double frameRate = (double)timeScale / frameDuration;
-		assert(fabs(frameRate - dp->RefreshRateHz()) < 0.01);
+		modeFrameDuration = modeTimeScale = 0;
+		DeckLinkModeTableFrameRate(newMode->GetDisplayMode(), modeFrameDuration, modeTimeScale);
+	}
+	if (modeFrameDuration <= 0 || modeTimeScale <= 0)
+	{
+		DebugLog::Log("BlackMagic: display mode 0x%08x %ldx%ld reports no usable frame rate; video state invalid until the next format change",
+			(unsigned int)newMode->GetDisplayMode(), newMode->GetWidth(), newMode->GetHeight());
+		ResetVideoState();
+		m_previousTimingClockFrameTime = TIMING_CLOCK_TIME_INVALID;
+		SendVideoStateCallback(captureRunToken);
+		Error(TEXT("DeckLink reported a display mode with no usable frame rate; waiting for the next format change"));
+		return S_OK;
 	}
 
+#ifdef _DEBUG
+	{
+		BMDTimeValue tableDuration = 0;
+		BMDTimeScale tableScale = 0;
+		if (DeckLinkModeTableFrameRate(newMode->GetDisplayMode(), tableDuration, tableScale))
+			assert(fabs((double)tableScale / tableDuration -
+				(double)modeTimeScale / modeFrameDuration) < 0.01);
+	}
 #endif // _DEBUG
 
 	bool changed = false;
@@ -610,7 +645,28 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFormatChang
 		m_bmdPixelFormat = bmdPixelFormat;
 		m_bmdDisplayMode = newMode->GetDisplayMode();
         m_bmdFieldDominance=newMode->GetFieldDominance();
-		m_ticksPerFrame = (timingclocktime_t)round((1.0 / FPS(m_bmdDisplayMode)) * TimingClockTicksPerSecond());
+		// audit 2026-10-16: frame period from GetFrameRate (FPS() threw for
+		// modes missing from the table, inside this callback).
+		m_modeWidth = newMode->GetWidth();
+		m_modeHeight = newMode->GetHeight();
+		m_modeFrameDuration = modeFrameDuration;
+		m_modeTimeScale = modeTimeScale;
+		m_ticksPerFrame = (timingclocktime_t)round(
+			(double)modeFrameDuration * (double)TimingClockTicksPerSecond() / (double)modeTimeScale);
+		// audit 2026-10-16: the row size VP will assume for this mode/packing
+		// (VideoFrame has no stride; every consumer uses BytesPerRow()).
+		m_expectedRowBytes = 0;
+		try
+		{
+			VideoState rowState;
+			rowState.displayMode = TranslateDeckLinkDisplayMode(newMode);
+			rowState.videoFrameEncoding = Translate(bmdPixelFormat, ColorSpace::UNKNOWN);
+			m_expectedRowBytes = (long)rowState.BytesPerRow();
+		}
+		catch (const std::exception& e)
+		{
+			DebugLog::Log("BlackMagic: no row-size check for this mode/packing: %s", e.what());
+		}
 
 		// Inform callback handlers that stream will be invalid before re-starting
 		if (!SendVideoStateCallback(captureRunToken))
@@ -719,6 +775,12 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 			// Simple frame counting without PLL correction
 			// PLL correction system has been removed for simplicity
 		}
+		else
+		{
+			// audit 2026-10-16: the first frame after a start or resync counts
+			// too; before, it repeated the previous frame's counter.
+			m_capturedVideoFrameCount += 1;
+		}
 
 		m_previousTimingClockFrameTime = timingClockFrameTime;
 
@@ -739,20 +801,23 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 		// TODO: What to do with this?
 		//assert(videoFrame->GetFlags() & bmdFrameCapturedAsPsF == 0);
 
-#ifdef _DEBUG
+		// audit 2026-10-16: checked in Release too (was Debug-only). VP reads
+		// rows at BytesPerRow(); a padded/mismatched frame would shear
+		// silently, so it is dropped (and counted missed) with a rate-limited log.
+		if ((m_modeWidth > 0 && videoFrame->GetWidth() != m_modeWidth) ||
+			(m_modeHeight > 0 && videoFrame->GetHeight() != m_modeHeight) ||
+			videoFrame->GetPixelFormat() != m_bmdPixelFormat ||
+			(m_expectedRowBytes > 0 && videoFrame->GetRowBytes() != m_expectedRowBytes))
 		{
-			// Check the incoming video frame against our known state and translations
-			DisplayModeSharedPtr dp = Translate(m_bmdDisplayMode);
-			assert(videoFrame->GetHeight() == dp->FrameHeight());
-			assert(videoFrame->GetWidth() == dp->FrameWidth());
-			assert(videoFrame->GetPixelFormat() == m_bmdPixelFormat);
-
-			VideoState vs;
-			vs.displayMode = dp;
-			vs.videoFrameEncoding = Translate(m_bmdPixelFormat, vs.colorspace);
-			assert(vs.BytesPerRow() == videoFrame->GetRowBytes());
+			++m_missedVideoFrameCount;
+			if (++m_frameGeometryDrops == 1 || m_frameGeometryDrops % 300 == 0)
+				DebugLog::Log("BlackMagic: dropped frame with unexpected geometry (%llu so far): %ldx%ld rowBytes=%ld format=0x%08x, expected %ldx%ld rowBytes=%ld format=0x%08x",
+					(unsigned long long)m_frameGeometryDrops,
+					videoFrame->GetWidth(), videoFrame->GetHeight(), videoFrame->GetRowBytes(),
+					(unsigned int)videoFrame->GetPixelFormat(),
+					m_modeWidth, m_modeHeight, m_expectedRowBytes, (unsigned int)m_bmdPixelFormat);
+			return S_OK;
 		}
-#endif // _DEBUG
 
 		double doubleValue = 0.0;
 		LONGLONG intValue = 0;
@@ -925,8 +990,11 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 		if (videoStateChanged)
 		{
 			if (!SendVideoStateCallback(captureRunToken))
-				return E_FAIL;
+				return S_OK;  // audit 2026-10-16: invalid state sent; frame held back
 		}
+		// audit 2026-10-16: no frames flow while the current state is rejected.
+		if (m_videoStateRejected)
+			return S_OK;
 
 		void* data;
 		if (FAILED(videoFrame->GetBytes(&data)))
@@ -961,8 +1029,26 @@ HRESULT	STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::ProfileChanging(
 
 	if (streamsWillBeForcedToStop)
 	{
-		// TODO: Handle properly by stopping and informing the client through the state callback
-		throw std::runtime_error("Profile changed and forced to stop, not yet implemented");
+		// audit 2026-10-16: was a throw (capture stopped silently). Stop egress
+		// cleanly, tell the client the video state is gone and report the
+		// error; the GUI's StopCapture()/restart then tears the input down
+		// (tolerating the driver-stopped streams). The busy-status notification
+		// reports CAPTURING -> READY as usual.
+		DebugLog::Log("BlackMagic: profile change forces the streams to stop; stopping capture");
+		const CaptureRunToken captureRunToken =
+			m_captureRunToken.load(std::memory_order_acquire);
+		const bool wasCapturing =
+			m_outputCaptureData.exchange(false, std::memory_order_acq_rel);
+		m_captureRunToken.store(0, std::memory_order_release);
+		if (wasCapturing)
+		{
+			m_streamsForcedToStop.store(true, std::memory_order_release);
+			ResetVideoState();
+			m_previousTimingClockFrameTime = TIMING_CLOCK_TIME_INVALID;
+			if (m_callback && captureRunToken != 0)
+				SendVideoStateCallback(captureRunToken);
+			Error(TEXT("DeckLink profile change stopped capture; restart capture to resume"));
+		}
 	}
 
 	return S_OK;
@@ -997,7 +1083,8 @@ HRESULT BlackMagicDeckLinkCaptureDevice::Notify(BMDNotifications topic, uint64_t
 	{
 
 	case bmdPreferencesChanged:
-		throw std::runtime_error("Preference change not implemented");
+		// audit 2026-10-16: was a throw; nothing VP needs to do.
+		DebugLog::Log("BlackMagic: DeckLink preferences changed");
 		break;
 
 	case bmdStatusChanged:
@@ -1005,7 +1092,8 @@ HRESULT BlackMagicDeckLinkCaptureDevice::Notify(BMDNotifications topic, uint64_t
 		break;
 
 	default:
-		throw std::runtime_error("Unknown BMDNotifications");
+		// audit 2026-10-16: was a throw; newer SDKs add topics.
+		break;
 	}
 
 	return S_OK;
@@ -1041,6 +1129,19 @@ HRESULT	BlackMagicDeckLinkCaptureDevice::QueryInterface(REFIID iid, LPVOID* ppv)
 		AddRef();
 		return S_OK;
 	}
+	// audit 2026-10-16: the device is also registered as these callbacks.
+	else if (iid == IID_IDeckLinkProfileCallback)
+	{
+		*ppv = static_cast<IDeckLinkProfileCallback*>(this);
+		AddRef();
+		return S_OK;
+	}
+	else if (iid == IID_IDeckLinkNotificationCallback)
+	{
+		*ppv = static_cast<IDeckLinkNotificationCallback*>(this);
+		AddRef();
+		return S_OK;
+	}
 
 	return E_NOINTERFACE;
 }
@@ -1071,6 +1172,12 @@ void BlackMagicDeckLinkCaptureDevice::ResetVideoState()
 	m_videoEotf = BMD_EOTF_INVALID;
 	m_videoColorSpace = BMD_COLOR_SPACE_INVALID;
 	m_videoHasHdrData = false;
+	// audit 2026-10-16
+	m_modeWidth = m_modeHeight = 0;
+	m_modeFrameDuration = 0;
+	m_modeTimeScale = 0;
+	m_expectedRowBytes = 0;
+	m_videoStateRejected = false;
 
 	ZeroMemory(&m_videoHdrData, sizeof(m_videoHdrData));
 }
@@ -1122,7 +1229,11 @@ bool BlackMagicDeckLinkCaptureDevice::SendVideoStateCallback(
 			assert(m_videoColorSpace != BMD_COLOR_SPACE_INVALID);
 
 			videoState->valid = true;
-			videoState->displayMode = Translate(m_bmdDisplayMode,m_bmdFieldDominance);
+			// audit 2026-10-16: modes missing from the table are built from the
+			// card's own description instead of throwing.
+			videoState->displayMode = TranslateDeckLinkDisplayMode(m_bmdDisplayMode,
+				m_modeWidth, m_modeHeight, m_modeFrameDuration, m_modeTimeScale,
+				m_bmdFieldDominance);
 			videoState->eotf = TranslateEOTF(m_videoEotf);
 			videoState->colorspace = Translate(
 				(BMDColorspace)m_videoColorSpace,
@@ -1140,9 +1251,27 @@ bool BlackMagicDeckLinkCaptureDevice::SendVideoStateCallback(
 
 		m_callback->OnCaptureDeviceVideoStateChange(
 			this, captureRunToken, videoState);
+		m_videoStateRejected = false;
 	}
-	catch (const std::runtime_error& e)
+	catch (const std::exception& e)
 	{
+		// audit 2026-10-16: the state could not be built (unknown colour space,
+		// EOTF, mode...). Tell the client the state is invalid so it does not
+		// keep rendering frames under the previous state, hold frames back
+		// until the next state change, and report the error once.
+		DebugLog::Log("BlackMagic: video state rejected: %s", e.what());
+		m_videoStateRejected = true;
+		try
+		{
+			VideoStateComPtr invalidState = new VideoState();
+			invalidState->valid = false;
+			m_callback->OnCaptureDeviceVideoStateChange(
+				this, captureRunToken, invalidState);
+		}
+		catch (...)
+		{
+			DebugLog::Log("BlackMagic: invalid video state callback threw");
+		}
 		wchar_t* ew = ToString(e.what());
 		Error(ew);
 		delete[] ew;
@@ -1177,13 +1306,40 @@ void BlackMagicDeckLinkCaptureDevice::SendCardStateCallback()
 	IF_S_OK(m_deckLinkStatus->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &boolValue))
 		cardState->inputLocked = boolValue ? InputLocked::YES : InputLocked::NO;
 
+	// audit 2026-10-16: unknown modes / missing signal used to throw here
+	// (from StartCapture and the driver's notification thread). Each field is
+	// optional; an unknown mode is described by the card itself.
 	IF_S_OK(m_deckLinkStatus->GetInt(bmdDeckLinkStatusDetectedVideoInputMode, &intValue))
-		cardState->inputDisplayMode = Translate((BMDDisplayMode)intValue);
+	{
+		try
+		{
+			CComPtr<IDeckLinkDisplayMode> detectedMode;
+			if (m_deckLinkInput &&
+				m_deckLinkInput->GetDisplayMode((BMDDisplayMode)intValue, &detectedMode) == S_OK &&
+				detectedMode)
+				cardState->inputDisplayMode = TranslateDeckLinkDisplayMode(detectedMode);
+			else
+				cardState->inputDisplayMode = Translate((BMDDisplayMode)intValue);
+		}
+		catch (const std::exception& e)
+		{
+			DebugLog::Log("BlackMagic: card state mode 0x%08x not translated: %s",
+				(unsigned int)intValue, e.what());
+		}
+	}
 
 	IF_S_OK(m_deckLinkStatus->GetInt(bmdDeckLinkStatusDetectedVideoInputFormatFlags, &intValue))
 	{
-		cardState->inputEncoding = TranslateColorFormat((BMDDetectedVideoInputFormatFlags)intValue);
-		cardState->inputBitDepth = TranslateBithDepth((BMDDetectedVideoInputFormatFlags)intValue);
+		try
+		{
+			cardState->inputEncoding = TranslateColorFormat((BMDDetectedVideoInputFormatFlags)intValue);
+			cardState->inputBitDepth = TranslateBithDepth((BMDDetectedVideoInputFormatFlags)intValue);
+		}
+		catch (const std::exception& e)
+		{
+			DebugLog::Log("BlackMagic: card state format flags 0x%llx not translated: %s",
+				(unsigned long long)intValue, e.what());
+		}
 	}
 
 	//
@@ -1207,6 +1363,24 @@ void BlackMagicDeckLinkCaptureDevice::SendCardStateCallback()
 	// Send
 	//
 	m_callback->OnCaptureDeviceCardStateChange(cardState);
+}
+
+
+void BlackMagicDeckLinkCaptureDevice::SendCardStateCallbackNoThrow()
+{
+	// audit 2026-10-16
+	try
+	{
+		SendCardStateCallback();
+	}
+	catch (const std::exception& e)
+	{
+		DebugLog::Log("BlackMagic: card state not sent: %s", e.what());
+	}
+	catch (...)
+	{
+		DebugLog::Log("BlackMagic: card state not sent: unknown exception");
+	}
 }
 
 
@@ -1256,7 +1430,7 @@ void BlackMagicDeckLinkCaptureDevice::OnNotifyStatusChanged(BMDDeckLinkStatusID 
 	case bmdDeckLinkStatusDetectedVideoInputFieldDominance:
 	case bmdDeckLinkStatusDetectedVideoInputMode:
 	case bmdDeckLinkStatusDetectedVideoInputFormatFlags:
-		SendCardStateCallback();
+		SendCardStateCallbackNoThrow();  // audit 2026-10-16
 		break;
 
 	// Video state changed
@@ -1283,14 +1457,15 @@ void BlackMagicDeckLinkCaptureDevice::OnLinkStatusBusyChange()
 
 	const bool captureBusy = (intValue & bmdDeviceCaptureBusy);
 
+	// audit 2026-10-16: a repeated busy notification (e.g. after a forced
+	// profile stop) must not report the same state twice.
 	if (captureBusy)
 	{
-		assert(m_state == CaptureDeviceState::CAPTUREDEVICESTATE_READY);
-		UpdateState(CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING);
+		if (m_state != CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING)
+			UpdateState(CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING);
 	}
-	else
+	else if (m_state != CaptureDeviceState::CAPTUREDEVICESTATE_READY)
 	{
-		assert(m_state == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING);
 		ResetVideoState();
 		UpdateState(CaptureDeviceState::CAPTUREDEVICESTATE_READY);
 	}

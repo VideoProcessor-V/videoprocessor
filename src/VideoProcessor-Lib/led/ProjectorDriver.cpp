@@ -4,6 +4,8 @@
 
 #include "../DebugLog.h"
 
+#include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <sstream>
 
@@ -146,16 +148,43 @@ namespace LedDrive
 
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode, bool restoreContrast)
 	{
+		using namespace std::chrono;
 		driver.BeginShutdown();
-		// Within one second in total: standard dim mode first, then full
-		// light, then (after mode: script) contrast back to 50.
-		const int contrastMs = restoreContrast ? 350 : 0;
-		if (resetDimMode) driver.SendNow("LDMM", 0, restoreContrast ? 300 : 400);
-		const bool ok = driver.SetLightNow(ledCeiling, (resetDimMode ? 600 : 1000) - contrastMs);
+		// Standard dim mode first, then full light, then (after mode: script
+		// or the CNTR assist) contrast back to 50 - only the commands needed.
+		// audit 2026-10-16: CNTR is skipped when 50 was the last value sent
+		// and none is waiting or in flight.
+		if (restoreContrast)
+		{
+			const DriverStatus status = driver.Status();
+			if (status.lastSentContrast == 50 && !status.contrastBusy)
+				restoreContrast = false;
+		}
+		// audit 2026-10-16: the old fixed budgets (LDMM 300 ms, LPW1 250, CNTR
+		// 350) could not keep Barco's 500 ms command gap, so a restore command
+		// could be dropped and the projector stay dim after exit. One shared
+		// deadline: each later command keeps the gap plus 50 ms for its reply;
+		// time the earlier ones did not use carries over.
+		const int count = 1 + (resetDimMode ? 1 : 0) + (restoreContrast ? 1 : 0);
+		const int perLater = std::max(0, driver.CommandGapMs()) + 50;
+		// The first command keeps 600 ms (the port wait, any gap left, its
+		// reply): 1 s alone, 1.15 s for two, 1.7 s for three at a 500 ms gap.
+		const auto deadline = steady_clock::now() + milliseconds(std::max(1000, (count - 1) * perLater + 600));
+		int remaining = count;
+		auto budget = [&]()
+		{
+			--remaining;
+			const int left = static_cast<int>(duration_cast<milliseconds>(deadline - steady_clock::now()).count());
+			return std::max(1, left - remaining * perLater);
+		};
+		if (resetDimMode)
+			DebugLog::Log("LED drive: LED dim mode restored to standard%s",
+				driver.SendNow("LDMM", 0, budget()) ? "" : " (not confirmed)");
+		const bool ok = driver.SetLightNow(ledCeiling, budget());
 		DebugLog::Log("LED drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
 		if (restoreContrast)
 		{
-			const bool contrast = driver.SendNow("CNTR", 50, contrastMs);
+			const bool contrast = driver.SendNow("CNTR", 50, budget());
 			DebugLog::Log("LED drive: contrast restored to 50%s", contrast ? "" : " (not confirmed)");
 		}
 		return ok;

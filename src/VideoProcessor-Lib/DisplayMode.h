@@ -59,8 +59,18 @@ public:
 	// Refresh rate in Hz as double
 	double RefreshRateHz() const;
 
-	// Nanosecond per frame
-	uint64_t NanosecondsPerFrame() const {}
+	// Nanosecond per frame (rounded to the nearest nanosecond)
+	// audit 2026-10-16: previously had no return statement (undefined behaviour).
+	uint64_t NanosecondsPerFrame() const;
+
+	// audit 2026-10-16: refresh-rate policy shared by every capture backend
+	// (was a hard 23-120 Hz reject in this constructor and in Magewell).
+	// Accepted: MinimumRefreshRateHz()..MaximumRefreshRateHz(). Rates outside
+	// the usual video range (23-120 Hz) are accepted but logged once per rate.
+	static double MinimumRefreshRateHz() { return 10.0; }
+	static double MaximumRefreshRateHz() { return 240.0; }
+	static bool IsRefreshRateSupported(double refreshRateHz);
+	static bool IsRefreshRateUnusual(double refreshRateHz);
 
 	// Return the mode as a human-understandable string
 	CString ToString() const;

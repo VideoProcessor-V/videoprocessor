@@ -22,7 +22,9 @@ namespace
     uint64_t DomainKey(const PreparedAnalysisFrame& result)
     {
         uint64_t hash = 14695981039346656037ull;
-        hash = Mix(hash, 1); // evidence sampling contract version
+        // evidence sampling contract version; 2 = full-range sources mapped
+        // to the limited code domain (audit 2026-10-16)
+        hash = Mix(hash, 2);
         hash = Mix(hash, static_cast<uint64_t>(result.domain));
         hash = Mix(hash, static_cast<uint64_t>(result.source.width));
         hash = Mix(hash, static_cast<uint64_t>(result.source.height));
@@ -130,6 +132,9 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
                         VideoFrameSampleRange::LIMITED))
                 return result;
             backing = converted(AnalysisLumaFormat::DecodedDolbyVision422);
+            // audit 2026-10-16: full-range DV codes are mapped to the limited
+            // analysis domain by the sampler (contract validated above).
+            backing.fullRangeYuv = input.dolby.fullRange;
             result.domain = AnalysisFrameDomain::DecodedDolbyVision422;
             result.sourceOwner = input.convertedOwner;
             result.sampleRange = input.convertedContract.sampleRange;

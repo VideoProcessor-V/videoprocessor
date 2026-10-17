@@ -859,7 +859,7 @@ namespace VideoProcessorTest
                 Case{ "dither_vectors", "auto", true }, Case{ "dither_vectors", "own", true },
                 Case{ "dither_vectors", "external", false },
                 Case{ "adaptive_faithful", "ortho", true }, Case{ "adaptive_faithful", "polar", true },
-                Case{ "adaptive_faithful", "auto", true },
+                Case{ "adaptive_faithful", "auto", true },   // Auto is the owner-chosen default (2026-10-16)
                 Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },
                 Case{ "dejudder_est_gate", "maybe", false }, Case{ "dejudder_est_lambda", "0.5", true },
                 Case{ "dejudder_est_lambda", "9", false },

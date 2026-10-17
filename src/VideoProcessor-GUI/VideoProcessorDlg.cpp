@@ -6223,26 +6223,61 @@ LRESULT	CVideoProcessorDlg::OnMessageCaptureDeviceStateChange(WPARAM wParam, LPA
 	if (!m_captureDevice)
 		return 0;
 
-	assert(newState != m_captureDeviceState);
-	m_captureDeviceState = newState;
+	// audit 2026-10-16: FAILED means the device is idle and cannot capture;
+	// the GUI tracks it as READY (so Restart can remove and re-create the
+	// capture through the READY path) while the status line says "Failed".
+	// Devices never send UNKNOWN/STARTING/STOPPING; those are ignored.
+	const CaptureDeviceState previousState = m_captureDeviceState;
+	const bool failed = newState == CaptureDeviceState::CAPTUREDEVICESTATE_FAILED;
+	const CaptureDeviceState trackedState =
+		failed ? CaptureDeviceState::CAPTUREDEVICESTATE_READY : newState;
+	if (trackedState != CaptureDeviceState::CAPTUREDEVICESTATE_READY &&
+		trackedState != CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING)
+	{
+		DebugLog::Log("Capture device state %S ignored (GUI state %S)",
+			ToString(newState), ToString(previousState));
+		return 0;
+	}
+	// audit 2026-10-16: a repeated state (stale or duplicate message) was an
+	// assert; it changes nothing.
+	if (trackedState == previousState && !failed)
+		return 0;
+	m_captureDeviceState = trackedState;
 	m_cadenceIntervalEstimate.Reset();
 
 	bool enableButtons = false;
 
-	switch (newState)
+	switch (trackedState)
 	{
 	case CaptureDeviceState::CAPTUREDEVICESTATE_READY:
-		m_captureDeviceStateText.SetWindowText(TEXT("Ready"));
+		m_captureDeviceStateText.SetWindowText(failed ? TEXT("Failed") : TEXT("Ready"));
+		// audit 2026-10-16: READY/FAILED while the GUI expected CAPTURING is
+		// an unexpected stop (capture thread abort, forced DeckLink profile
+		// change): keep Restart available as the way back.
+		enableButtons = failed ||
+			previousState == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING;
+		if (enableButtons)
+			DebugLog::Log("Capture device reported %S while the GUI was %S; Restart capture to resume",
+				ToString(newState), ToString(previousState));
 		break;
 
 	case CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING:
+	{
 		m_captureDeviceStateText.SetWindowText(TEXT("Capturing"));
-		m_timingClockDescriptionText.SetWindowText(m_captureDevice->GetTimingClock()->TimingClockDescription());
+		// audit 2026-10-16: a stale CAPTURING message can arrive after the
+		// device already left CAPTURING, when it has no clock (was a null
+		// dereference).
+		ITimingClock* timingClock = m_captureDevice->GetTimingClock();
+		m_timingClockDescriptionText.SetWindowText(
+			timingClock ? timingClock->TimingClockDescription() : TEXT(""));
+		if (!timingClock)
+			DebugLog::Log("Capture device reported CAPTURING without a timing clock (stale state message)");
 		enableButtons = true;
 		break;
+	}
 
 	default:
-		assert(false);
+		break;
 	}
 
 	m_captureDeviceRestartButton.EnableWindow(enableButtons);
@@ -6662,8 +6697,16 @@ LRESULT CVideoProcessorDlg::OnMessageCaptureDeviceError(WPARAM wParam, LPARAM lP
 	CString error(*(CString*)wParam);
 	delete (CString*)wParam;
 
-	// TODO: DO something with the error
-	::MessageBox(nullptr, error, TEXT("Capture error"), MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+	// audit 2026-10-16: a system-modal MessageBox popped over fullscreen video
+	// and blocked until dismissed (capture errors include recoverable ones such
+	// as an unsupported format). Log it and show it on the capture status line
+	// instead; there is no non-modal notification surface to reuse.
+	DebugLog::Log("Capture error: %S", error.GetString());
+	CString statusText(TEXT("Error: "));
+	statusText += error.GetLength() > 160 ? error.Left(157) + TEXT("...") : error;
+	m_captureDeviceStateText.SetWindowText(statusText);
+	if (m_captureDevice)
+		m_captureDeviceRestartButton.EnableWindow(TRUE);
 
 	return 0;
 }

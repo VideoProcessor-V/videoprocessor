@@ -262,12 +262,14 @@ static const std::map<BMDDisplayMode, BMDDisplayModeData> BD_DISPLAY_MODE_DATA =
 	{bmdMode4kDCI2398,    {4096, 2160, 1,  24000, 1001}},
 	{bmdMode4kDCI24,      {4096, 2160, 1,  24000, 1000}},
 	{bmdMode4kDCI25,      {4096, 2160, 1,  25000, 1000}},
-	{bmdMode4kDCI2997,    {4096, 2160, 1,  30000, 1000}},
+	// audit 2026-10-16: 29.97 is 30000/1001 (was 30000/1000).
+	{bmdMode4kDCI2997,    {4096, 2160, 1,  30000, 1001}},
 	{bmdMode4kDCI30,      {4096, 2160, 1,  30000, 1000}},
 	{bmdMode4kDCI4795,    {4096, 2160, 1,  48000, 1001}},
 	{bmdMode4kDCI48,      {4096, 2160, 1,  48000, 1000}},
 	{bmdMode4kDCI50,      {4096, 2160, 1,  50000, 1000}},
 	{bmdMode4kDCI5994,    {4096, 2160, 1,  60000, 1001}},
+	{bmdMode4kDCI60,      {4096, 2160, 1,  60000, 1000}},  // audit 2026-10-16: was missing
 	{bmdMode4kDCI9590,    {4096, 2160, 1,  96000, 1001}},
 	{bmdMode4kDCI96,      {4096, 2160, 1,  96000, 1000}},
 	{bmdMode4kDCI100,     {4096, 2160, 1, 100000, 1000}},
@@ -451,6 +453,30 @@ ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines)
 }
 
 
+namespace
+{
+	DisplayMode::FieldOrder TranslateFieldOrder(BMDFieldDominance dominance)
+	{
+		return dominance == bmdUpperFieldFirst ? DisplayMode::FieldOrder::TopFirst :
+			dominance == bmdLowerFieldFirst ? DisplayMode::FieldOrder::BottomFirst :
+			DisplayMode::FieldOrder::Unknown;
+	}
+}
+
+
+bool DeckLinkModeTableFrameRate(BMDDisplayMode displayMode,
+	BMDTimeValue& frameDuration, BMDTimeScale& timeScale)
+{
+	// audit 2026-10-16
+	const auto it = BD_DISPLAY_MODE_DATA.find(displayMode);
+	if (it == BD_DISPLAY_MODE_DATA.end())
+		return false;
+	frameDuration = it->second.frameDuration;
+	timeScale = it->second.timeScale;
+	return true;
+}
+
+
 DisplayModeSharedPtr Translate(BMDDisplayMode displayMode, BMDFieldDominance dominance)
 {
 	const auto& it = BD_DISPLAY_MODE_DATA.find(displayMode);
@@ -467,8 +493,49 @@ DisplayModeSharedPtr Translate(BMDDisplayMode displayMode, BMDFieldDominance dom
 		(it->second.fieldsPerFrame == 2),  // Interlaced?
 		(unsigned int)it->second.timeScale,
 		(unsigned int)it->second.frameDuration,
-        dominance==bmdUpperFieldFirst?DisplayMode::FieldOrder::TopFirst:
-        dominance==bmdLowerFieldFirst?DisplayMode::FieldOrder::BottomFirst:DisplayMode::FieldOrder::Unknown);
+		TranslateFieldOrder(dominance));
+}
+
+
+DisplayModeSharedPtr TranslateDeckLinkDisplayMode(BMDDisplayMode displayMode,
+	long width, long height, BMDTimeValue frameDuration, BMDTimeScale timeScale,
+	BMDFieldDominance dominance)
+{
+	// audit 2026-10-16: the table stays authoritative for the modes it knows
+	// (exact rationals); any other mode is built from what the card reports
+	// instead of throwing, so a new card or SDK mode does not stall capture.
+	if (BD_DISPLAY_MODE_DATA.find(displayMode) != BD_DISPLAY_MODE_DATA.end())
+		return Translate(displayMode, dominance);
+
+	if (width <= 0 || height <= 0 || frameDuration <= 0 || timeScale <= 0 ||
+		frameDuration > 0xFFFFFFFFLL || timeScale > 0xFFFFFFFFLL)
+		throw std::runtime_error("DeckLink display mode is not in the mode table and reports no usable geometry/frame rate");
+
+	// Interlaced modes report the frame (two-field) rate, as the table does.
+	const bool interlaced =
+		dominance == bmdUpperFieldFirst || dominance == bmdLowerFieldFirst;
+	return std::make_shared<DisplayMode>(
+		(unsigned int)width,
+		(unsigned int)height,
+		interlaced,
+		(unsigned int)timeScale,
+		(unsigned int)frameDuration,
+		TranslateFieldOrder(dominance));
+}
+
+
+DisplayModeSharedPtr TranslateDeckLinkDisplayMode(IDeckLinkDisplayMode* mode)
+{
+	// audit 2026-10-16
+	if (!mode)
+		throw std::runtime_error("No DeckLink display mode");
+	BMDTimeValue frameDuration = 0;
+	BMDTimeScale timeScale = 0;
+	if (mode->GetFrameRate(&frameDuration, &timeScale) != S_OK)
+		frameDuration = timeScale = 0;
+	return TranslateDeckLinkDisplayMode(mode->GetDisplayMode(),
+		mode->GetWidth(), mode->GetHeight(), frameDuration, timeScale,
+		mode->GetFieldDominance());
 }
 
 

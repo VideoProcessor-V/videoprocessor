@@ -65,8 +65,8 @@ struct PreparedAnalysisFrame
     AnalysisSourceProfile profile = AnalysisSourceProfile::QueuedCapture;
     uint32_t transferKey = 0;
     // Describe the encoded storage contract selected for the frame. They do
-    // not rescale AnalysisLumaSample: Sample emits the established 10-bit
-    // evidence codes using format-specific unpacking and rounding.
+    // not rescale AnalysisLumaSample: Sample emits 10-bit evidence codes in
+    // the limited domain, mapping full-range sources itself (audit 2026-10-16).
     VideoFrameSampleRange sampleRange = VideoFrameSampleRange::UNKNOWN;
     uint8_t colorDepth = 0;
     uint8_t bitShift = 0;

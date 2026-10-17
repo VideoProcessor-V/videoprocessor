@@ -77,9 +77,12 @@ uint32_t VideoFrameEncodingBitsPerPixel(const VideoFrameEncoding videoFrameEncod
 		return 32;
 
 	case VideoFrameEncoding::R210:
+	case VideoFrameEncoding::R10b:  // audit 2026-10-16: same 10-bit RGB payload as r210
+	case VideoFrameEncoding::R10l:
 		return 30;
 
 	case VideoFrameEncoding::R12B:
+	case VideoFrameEncoding::R12L:  // audit 2026-10-16: little-endian R12B
 		// DeckLink R12B packs three 12-bit RGB components per pixel.
 		return 36;
 	}

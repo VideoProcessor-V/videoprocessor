@@ -8349,7 +8349,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* extendedMore = addChoice(QStringLiteral("Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR"),
             QStringLiteral("extended_range_more_cases"), { QStringLiteral("on"), QStringLiteral("off") });
         extendedMore->setToolTip(QStringLiteral(
-            "Fix under test (audit 2026-10-16; off by default until its GPU tests pass). On: the keeping of below-black and above-white also works "
+            "Fix under test (audit 2026-10-16). On (default): the keeping of below-black and above-white also works "
             "with BT.1886 and sRGB curves, SDR in wider colour spaces (BT.2020 / P3), a calibration 3D LUT (extended "
             "past its edges by its own slope) and HDR shown without tone mapping. Off: only pure-power gammas with "
             "BT.709 SDR and no LUT, as before."));
@@ -9269,7 +9269,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
-                    { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "off" }, { "sdr_tone_shape", "off" },
+                    { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
                     { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
@@ -9778,7 +9778,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // The others return it to Not set (the Low_Latency name rule), so a deep queue never stays on it.
             if (auto* path = profileFields->findChild<QComboBox*>(QStringLiteral("config.queue.low_latency_path")))
             {
-                const int index = selectedId == QStringLiteral("low_latency") ? path->findData(QStringLiteral("on")) : 0;
+                // On a profile named Low_Latency "Not set" means on: the other presets write off there.
+                const bool namedLowLatency = state->section.compare(QStringLiteral("queue.low_latency"), Qt::CaseInsensitive) == 0;
+                const int index = selectedId == QStringLiteral("low_latency") ? path->findData(QStringLiteral("on")) :
+                    (namedLowLatency ? path->findData(QStringLiteral("off")) : 0);
                 if (index >= 0 && path->currentIndex() != index) path->setCurrentIndex(index);
             }
             // The spin boxes were set under signal blockers: the By frames / By time buttons follow
@@ -12091,6 +12094,13 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "(24p film on a 60 Hz output updates once per film frame, so it settles in about three seconds). "
         "Off: each update counts for one output frame, as before (about 2.5 times slower with 24p on 60 Hz)."));
     experimentForm->addRow(QString(), correctionByTime);
+    // Audit 2026-10-16: full light after no video (every source), on the main LED card.
+    auto* idleRestore = numberSetting(QStringLiteral("led_idle_restore_s"), 0, 600, 10, QStringLiteral(" s"));
+    idleRestore->setToolTip(QStringLiteral(
+        "After this many seconds without a video frame (pause, stop), VP puts the LED back to the LED ceiling "
+        "and CNTR to 50 (and leaves the custom dim). VP's copy of your script stops acting on the last frame "
+        "until video returns. 0 keeps the projector where it was, as before."));
+    driveForm->addRow(QStringLiteral("Full light after no video (0 = off)"), idleRestore);
     auto syncExperiment = [experimentEnabled, method, stepMs, turnStep, customStart, customFloor]
     {
         const bool on = experimentEnabled->isChecked();

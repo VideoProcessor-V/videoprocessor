@@ -1248,8 +1248,19 @@ namespace Tests
                     Assert::IsTrue(queued.source.Sample(0, 0, black));
                     Assert::IsTrue(queued.source.Sample(1, 0, headroom));
                     Assert::IsTrue(queued.source.Sample(2, 0, chromatic));
-                    Assert::IsTrue(black.luma < 8);
-                    Assert::IsTrue(headroom.luma > 1000);
+                    // audit 2026-10-16: 8-bit RGB is full range and maps to
+                    // limited black/white exactly; r210/R10 code 0 / 1023 are
+                    // below/above the limited range and stay outside it.
+                    if (eightBit)
+                    {
+                        Assert::AreEqual(64, static_cast<int>(black.luma));
+                        Assert::AreEqual(940, static_cast<int>(headroom.luma));
+                    }
+                    else
+                    {
+                        Assert::IsTrue(black.luma < 8);
+                        Assert::IsTrue(headroom.luma > 1000);
+                    }
                     Assert::IsTrue(chromatic.chromaV > chromatic.chromaU);
                     auto detached = queued.source;
                     std::weak_ptr<std::vector<uint8_t>> lifetime = pixels;
@@ -1331,6 +1342,9 @@ namespace Tests
                 p010.encoding = encoding;
                 p010.colorspace = ColorSpace::REC_709;
                 p010.generation = 59;
+                // audit 2026-10-16: the RGB->P010 formatter declares full
+                // range; the sampler maps it to the limited analysis domain.
+                p010.fullRangeYuv = true;
 
                 uint64_t canonicalKey = 0;
                 for (const auto profile : { AnalysisSourceProfile::LiveRenderer,
@@ -1374,8 +1388,10 @@ namespace Tests
                         AnalysisLumaSample nativeSample, convertedSample;
                         Assert::IsTrue(baseline.Sample(x, y, nativeSample));
                         Assert::IsTrue(p010.Sample(x, y, convertedSample));
-                        Assert::AreEqual(static_cast<int>(nativeSample.luma),
-                            static_cast<int>(convertedSample.luma));
+                        // audit 2026-10-16: the converted plane is rounded
+                        // to full-range 10-bit before the limited mapping.
+                        Assert::IsTrue(std::abs(static_cast<int>(nativeSample.luma) -
+                            static_cast<int>(convertedSample.luma)) <= 1);
                         foundChromaFootprintDifference =
                             foundChromaFootprintDifference ||
                             nativeSample.chromaU != convertedSample.chromaU ||
@@ -1386,12 +1402,14 @@ namespace Tests
                 AnalysisLumaSample nativeRed, convertedRed;
                 Assert::IsTrue(baseline.Sample(2, 0, nativeRed));
                 Assert::IsTrue(p010.Sample(2, 0, convertedRed));
-                Assert::AreEqual(217, static_cast<int>(nativeRed.luma));
-                Assert::AreEqual(395, static_cast<int>(nativeRed.chromaU));
-                Assert::AreEqual(1023, static_cast<int>(nativeRed.chromaV));
-                Assert::AreEqual(217, static_cast<int>(convertedRed.luma));
-                Assert::AreEqual(611, static_cast<int>(convertedRed.chromaU));
-                Assert::AreEqual(628, static_cast<int>(convertedRed.chromaV));
+                // audit 2026-10-16: limited-domain codes, identical to the
+                // limited r210/R10 red reference (250, 409, 960).
+                Assert::AreEqual(250, static_cast<int>(nativeRed.luma));
+                Assert::AreEqual(409, static_cast<int>(nativeRed.chromaU));
+                Assert::AreEqual(960, static_cast<int>(nativeRed.chromaV));
+                Assert::AreEqual(250, static_cast<int>(convertedRed.luma));
+                Assert::AreEqual(599, static_cast<int>(convertedRed.chromaU));
+                Assert::AreEqual(614, static_cast<int>(convertedRed.chromaV));
             }
         }
 

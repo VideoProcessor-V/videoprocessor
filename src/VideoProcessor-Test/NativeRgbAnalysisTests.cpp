@@ -46,9 +46,12 @@ namespace Tests
 						{
 							const size_t offset =
 								(static_cast<size_t>(y) * width + x) * 4;
-							pixels[offset + 0] = 16;
-							pixels[offset + 1] = 16;
-							pixels[offset + 2] = 16;
+							// audit 2026-10-16: full-range RGB black is 0;
+							// 16 is a visible dark grey once analysis maps
+							// full-range RGB to the limited code domain.
+							pixels[offset + 0] = 0;
+							pixels[offset + 1] = 0;
+							pixels[offset + 2] = 0;
 						}
 			}
 
@@ -345,10 +348,12 @@ namespace Tests
 				AnalysisLumaFormat::NativeRgb, VideoFrameEncoding::R12L,
 				ColorSpace::REC_709, 1 };
 			AnalysisLumaSample sample;
+			// audit 2026-10-16: full-range 12-bit RGB is reported in the
+			// limited analysis domain (full code 63 -> 118, 1023 -> 940).
 			Assert::IsTrue(big.Sample(0, 0, sample));
-			Assert::AreEqual(63, static_cast<int>(sample.luma));
+			Assert::AreEqual(118, static_cast<int>(sample.luma));
 			Assert::IsTrue(little.Sample(7, 0, sample));
-			Assert::AreEqual(1023, static_cast<int>(sample.luma));
+			Assert::AreEqual(940, static_cast<int>(sample.luma));
 			Assert::AreEqual(512, static_cast<int>(sample.chromaU));
 			Assert::AreEqual(512, static_cast<int>(sample.chromaV));
 		}
@@ -373,7 +378,8 @@ namespace Tests
 			};
 			AnalysisLumaSample sample;
 			Assert::IsTrue(source.Sample(0, 0, sample));
-			Assert::AreEqual(0, static_cast<int>(sample.luma));
+			// audit 2026-10-16: full-range black maps to limited black 64.
+			Assert::AreEqual(64, static_cast<int>(sample.luma));
 			Assert::AreEqual(512, static_cast<int>(sample.chromaU));
 			Assert::AreEqual(512, static_cast<int>(sample.chromaV));
 		}

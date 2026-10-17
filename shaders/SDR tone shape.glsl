@@ -75,12 +75,21 @@ vec4 hook()
     vec3 slope = vec3(1.0);
     if (strength > 0.0)
     {
+        // Audit 2026-10-16 (above-white preserved): the knee as before up to
+        // the placed white (1 - headroom), so 0..1 is unchanged; above it
+        // the curve continues as its tangent at the white (C1, strictly
+        // increasing, slope >= exp(-1)) instead of squeezing the source's
+        // above-white toward peak. Mirrors SdrToneShape::Knee.
+        float white = 1.0 - headroom;
         float k = 1.0 - knee_start;
-        vec3 e = exp(-(max(y, vec3(knee_start)) - vec3(knee_start)) / k);
+        vec3 yc = min(y, vec3(white));
+        vec3 e = exp(-(max(yc, vec3(knee_start)) - vec3(knee_start)) / k);
         vec3 rolled = vec3(knee_start) + vec3(k) * (vec3(1.0) - e);
-        vec3 above = step(vec3(knee_start), y) * step(vec3(0.0), color.rgb);
-        shaped = mix(y, mix(y, rolled, strength), above);
-        slope = mix(vec3(1.0), vec3(1.0 - strength) + strength * e, above);
+        vec3 above = step(vec3(knee_start), yc) * step(vec3(0.0), color.rgb);
+        vec3 m = vec3(1.0 - strength) + strength * e;
+        vec3 kneed = mix(yc, rolled, strength) + m * max(y - vec3(white), vec3(0.0));
+        shaped = mix(y, kneed, above);
+        slope = mix(vec3(1.0), m, above);
         if (recovery > 0.0 && any(greaterThan(above, vec3(0.0))))
         {
             // The local detail (the picture minus a 5x5-footprint blur, in

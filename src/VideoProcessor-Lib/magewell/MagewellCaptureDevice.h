@@ -156,6 +156,23 @@ public:
 	ULONG AddRef() override;
 	ULONG Release() override;
 
+	// audit 2026-10-16: frames the card produced but VP never captured between
+	// two delivered frames, from their start timestamps (100ns) and the frame
+	// period. MWCAP_VIDEO_FRAME_ID_NEWEST_BUFFERED silently skips frames when
+	// the thread falls behind, so this is the only place drops are visible.
+	// A repeated/older timestamp counts 0; a gap above maxGapFrames periods is
+	// treated as a stream discontinuity (0), not as missed frames.
+	static uint64_t MissedFramesBetween(int64_t previousStart100ns,
+		int64_t currentStart100ns, uint32_t framePeriod100ns,
+		uint64_t maxGapFrames = 1000);
+
+	// audit 2026-10-16: CTA-861.3 numbers display primaries 0..2 without
+	// naming them (ST 2086 commonly sends G,B,R). Assign by chromaticity:
+	// largest x is red, largest y of the remaining two is green, the last is
+	// blue. Outputs the source index of each primary.
+	static void OrderPrimariesByChromaticity(const double x[3], const double y[3],
+		int& redIndex, int& greenIndex, int& blueIndex);
+
 private:
 	friend class MagewellCaptureTestAccess;
 

@@ -108,5 +108,48 @@ namespace Tests
             Assert::AreEqual(0.0f, lost.sceneMax);
             Assert::AreEqual(0.0f, hdr.max_pq_y);
         }
+
+        // audit 2026-10-16: L1 scene minimum is carried, not written into the
+        // static source range (libplacebo has no scene-minimum field).
+        TEST_METHOD(SceneMinimumIsCarriedSeparatelyFromSourceRange)
+        {
+            pl_hdr_metadata hdr{};
+            DolbyVisionTunnelFrameMetadata dm;
+            dm.valid = true;
+            dm.sourceMinPq = 62;
+            dm.sourceMaxPq = 3696;
+            dm.hasSceneMetadata = true;
+            dm.sceneMinPq = 1024;
+            dm.sceneMaxPq = 3072;
+            dm.sceneAvgPq = 2048;
+            DolbyVisionLuminancePolicy::Apply(dm, hdr);
+            const float sourceMin = pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, 62.0f / 4095.0f);
+            Assert::AreEqual(sourceMin, hdr.min_luma, 1e-6f);
+            float nits = -1;
+            Assert::IsTrue(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+            Assert::AreEqual(pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, 1024.0f / 4095.0f), nits, 1e-4f);
+            Assert::AreEqual(1024.0f / 4095.0f, DolbyVisionLuminancePolicy::SceneMinPq(dm));
+            Assert::IsTrue(nits < pl_hdr_rescale(PL_HDR_PQ, PL_HDR_NITS, 2048.0f / 4095.0f));
+        }
+
+        TEST_METHOD(SceneMinimumAbsentOrBlackIsDistinguished)
+        {
+            DolbyVisionTunnelFrameMetadata dm;
+            dm.valid = true;
+            dm.sourceMaxPq = 4095;
+            float nits = -1;
+            Assert::IsFalse(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+            Assert::AreEqual(0.0f, nits);
+            Assert::AreEqual(-1.0f, DolbyVisionLuminancePolicy::SceneMinPq(dm));
+            dm.hasSceneMetadata = true; // present black scene minimum
+            Assert::IsTrue(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+            Assert::AreEqual(0.0f, nits, 1e-6f);
+            Assert::AreEqual(0.0f, DolbyVisionLuminancePolicy::SceneMinPq(dm));
+            dm.sceneMinPq = 5000; // out of 12-bit range
+            Assert::IsFalse(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+            dm.sceneMinPq = 0;
+            dm.valid = false; // lost metadata never publishes a minimum
+            Assert::IsFalse(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+        }
     };
 }

@@ -141,6 +141,12 @@ namespace ExtendedRange
 		bool wideSourcePrimaries = true;  // 2: SDR primaries other than BT.709
 		bool calibrationLut = true;       // 3: carry around a 3D calibration LUT
 		bool hdrPassthrough = true;       // 4: HDR when libplacebo maps nothing
+		// Audit 2026-10-16 (GPU run): not a switch but the frame's state - true
+		// when libplacebo's tone mapping is dynamic (peak detection on,
+		// pl_render_params.peak_detect_params): equal colour spaces are then
+		// still tone-mapped (measured: PQ 502 -> 371), the restore at SCALED
+		// would be clamped by it, so HDR passthrough is off (HdrMapped).
+		bool hdrDynamicToneMapping = false;
 	};
 
 	// Audit 2026-10-16: a transfer in relative linear light (see 1. above).
@@ -232,7 +238,8 @@ namespace ExtendedRange
 		const pl_hook* Carry() const { return &carry; }
 		// Audit 2026-10-16: the late restore, the first hook at PRE_OUTPUT
 		// (LUT extrapolation, or the linear remainder after libplacebo's
-		// gamut mapping). Renders its own float texture.
+		// gamut mapping). Renders its own float texture (an inline form is
+		// rejected by libplacebo at PRE_OUTPUT, measured).
 		const pl_hook* LateRestore() const { return &late; }
 		// textureForm: the restore renders its own texture (after another
 		// hook's texture output at PRE/POST_KERNEL, or hooks on the planes
@@ -257,6 +264,8 @@ namespace ExtendedRange
 		static pl_hook_res RunRestoreTexture(void* priv, const pl_hook_params* params);
 		bool AppendRestore(pl_shader sh, pl_color_space& color, const pl_rect2df& rect) const;
 		static pl_hook_res RunLate(void* priv, const pl_hook_params* params);
+		bool AppendLate(pl_shader sh, const pl_rect2df& rect) const;
+		int LateReady(pl_gpu gpu);
 		bool EnsureLut(pl_gpu gpu);
 
 		pl_hook carry{};

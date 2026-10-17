@@ -756,7 +756,10 @@ public:
         auto f=Frame();PanelToBar(f,190,300,470);Text(f,200,310,20);SubtitleBoxDetector p010;
         auto expected=p010.Analyze(Source(f),45,315,0,1);Assert::IsTrue(expected.detected);
         std::vector<uint8_t> rgb(W*H*4,255);
-        for(int i=0;i<W*H;++i) for(int c=0;c<3;++c) rgb[i*4+c]=static_cast<uint8_t>((f[i]>>6)/4);
+        // audit 2026-10-16: full-range RGB equivalent of the limited P010 codes;
+        // analysis maps it back to the same limited code domain.
+        for(int i=0;i<W*H;++i) for(int c=0;c<3;++c) rgb[i*4+c]=static_cast<uint8_t>(
+            (std::max)(0,(std::min)(255,((static_cast<int>(f[i]>>6)-64)*255+438)/876)));
         AnalysisLumaSource s;s.data=rgb.data();s.dataBytes=rgb.size();s.width=W;s.height=H;
         s.rowBytes=W*4;s.format=AnalysisLumaFormat::NativeRgb;s.encoding=VideoFrameEncoding::BGRA_8BIT;
         s.colorspace=ColorSpace::REC_709;s.generation=1;
