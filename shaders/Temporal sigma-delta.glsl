@@ -16,7 +16,7 @@
  *   finds, for each 16x16 block, where its content was on the previous
  *   refresh (forward only, from a persistent previous-luma texture), and the
  *   quantizer takes the carried residual from there. A vector error only
- *   misplaces a residual of at most half a code, and every pixel is still
+ *   misplaces a residual of at most 0.5 + noise_amplitude code, and every pixel is still
  *   checked by the motion gate against the value it is carried from, so a
  *   wrong or low-confidence vector falls back to the plain gate.
  *   Reference: FFmpeg vf_minterpolate (block matching algorithm, not code).
@@ -59,7 +59,7 @@
  *   test above is unchanged). The block match tolerance and the per-pixel
  *   motion gate are both multiplied by mix(1, grain_tolerance_scale, g), so
  *   the residual survives film grain. The carried payload stays within
- *   +-0.5 code. At 1 (the default) nothing reads the grain.
+ *   +-(0.5 + noise_amplitude) code. At 1 (the default) nothing reads the grain.
  *
  * External vectors (delta 8 R1, `vector_source` = 1, set by the renderer)
  *   On a de-judder extra the renderer knows the motion since the previous
@@ -800,6 +800,16 @@ vec3 exact_half(vec3 v)
     return vec3(unpackHalf2x16(packHalf2x16(v.rg)), unpackHalf2x16(packHalf2x16(vec2(v.b, 0.0))).x);
 }
 
+// Hunt 2 L1: bound of the carried residual. k quantises x + r + d, and the
+// dither d is not fed back, so |x + r - k| reaches 0.5 + noise_amplitude in
+// normal operation. Clipping it at 0.5 threw away error the loop needed to
+// cancel (a mean bias up to ~0.06 code at amplitude 0.5). The bound only
+// stops wind-up where k is clamped at the code limits.
+float resid_bound()
+{
+    return 0.5 + noise_amplitude;
+}
+
 // Ping-pong (see the carry pass): true = this refresh writes RESID/PREV
 // and reads RESID_NEXT/PREV_NEXT; false the other way round.
 bool write_a_;
@@ -815,7 +825,7 @@ bool carried(ivec2 from, vec3 x, float gate_scale, out vec3 r)
     float units = color_bits > 9.0 ? 4.0 : 1.0;
     if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
         return false;
-    r = clamp(rs.rgb, -0.5, 0.5);
+    r = clamp(rs.rgb, -resid_bound(), resid_bound());
     return true;
 }
 
@@ -841,7 +851,17 @@ void hook()
     bool ten = color_bits > 9.0;
     float in_scale = ten ? 1023.0 : ((limited && swap10) ? 255.75 : 255.0);
     float out_step = ten ? (1.0 / 1023.0) : ((limited && swap10) ? (4.0 / 1023.0) : (1.0 / 255.0));
-    float max_code = ten ? 1023.0 : 255.0;
+    // Hunt 2 L2: the codes that survive libplacebo's output clamp (beta fork
+    // patch 0002, applied after every user hook). Limited range reserves only
+    // the timing codes, 2^(n-8) - 1 below and above (8-bit 0 and 255, 10-bit
+    // 0-3 and 1020-1023); footroom and headroom (BTB/WTW) are kept. Full range
+    // uses every code. k is clamped to these before the residual is computed,
+    // so the feedback sees the code really emitted and reserved codes are never
+    // emitted (also on the stable DLL, which has no output clamp).
+    float code_bits = ten ? 10.0 : 8.0;
+    float code_unit = exp2(code_bits - 8.0);
+    float code_min = limited ? code_unit : 0.0;
+    float code_max = limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0;
     // 8-bit codes: 0.13 (one rgba16f step near white is 1/8 code).
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
@@ -920,8 +940,8 @@ void hook()
 
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
-        k = clamp(floor(x + r + d + 0.5), 0.0, max_code);
-        vec3 r_next = clamp(x + r - k, -0.5, 0.5);
+        k = clamp(floor(x + r + d + 0.5), code_min, code_max);
+        vec3 r_next = clamp(x + r - k, -resid_bound(), resid_bound());
 
         if (write_a_) {
             imageStore(RESID, spos, vec4(r_next, VALID_TAG));
@@ -931,7 +951,7 @@ void hook()
             imageStore(PREV_NEXT, spos, vec4(x, 1.0));
         }
     } else {
-        k = clamp(floor(x + d + 0.5), 0.0, max_code);
+        k = clamp(floor(x + d + 0.5), code_min, code_max);
         // The state this refresh does not write keeps its value, as the
         // copies did (ping-pong: carried into the pair written now).
         ivec2 spos = clamp(pos, ivec2(0), imageSize(RESID) - ivec2(1));

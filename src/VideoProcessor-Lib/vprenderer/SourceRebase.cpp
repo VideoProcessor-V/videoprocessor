@@ -220,15 +220,26 @@ if (p.x < size.x && p.y < size.y) {
 			params.storable = plane == 0 && kernel >= 0 && (params.format->caps & PL_FMT_CAP_STORABLE);   // the inverse passes write it
 			if (!(params.format->caps & PL_FMT_CAP_RENDERABLE))
 			{
-				// Fall back to a float format with the same component count.
-				params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, params.format->num_components, 16, 16,
-					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR));
+				// Fall back to a float format with the same component count: 32-bit first
+				// (C19 / hunt 2 07-L4: fp16 holds 11 bits, about half a 10-bit code near
+				// white, below the 16 bits asked for), half float only when 32-bit is not
+				// renderable. Logged by the renderer (FormatNote).
+				const pl_fmt wanted = params.format;
+				const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR);
+				params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 32, 32, caps);
+				const bool half = !params.format;
+				if (half)
+					params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 16, 16, caps);
 				if (!params.format)
 				{
 					error = "no renderable format for plane " + std::to_string(plane);
 					++failures;
 					return false;
 				}
+				params.storable = plane == 0 && kernel >= 0 && (params.format->caps & PL_FMT_CAP_STORABLE);
+				formatNote = "plane " + std::to_string(plane) + ": " + (wanted->name ? wanted->name : "?") +
+					" not renderable, " + (params.format->name ? params.format->name : "float") +
+					(half ? " (half float: 32-bit float not renderable)" : "");
 			}
 			if (!pl_tex_recreate(gpu, &textures[slot][plane], &params))
 			{

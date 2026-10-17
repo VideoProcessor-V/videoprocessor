@@ -1144,6 +1144,11 @@ namespace
 		InterpolationPolicy::Grain interpolationGrain = InterpolationPolicy::Grain::Preserve;
 		bool debandVpGrainGuard = true;
 		bool dejudderSourceWarpCatmull = true;
+		// Hunt 2 M1: nls_sampling. catmull (default): the NLS / NLS+ warp samples the
+		// source with a separable Catmull-Rom widened by the map's local minification
+		// (a low-pass at the centre); bilinear: the hooked texture's bilinear sampler,
+		// the earlier output.
+		bool nlsSamplingCatmull = true;
 		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
 		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
 		// shader list says). auto (unset): as before - the shader list and the dithering setting.
@@ -1157,6 +1162,9 @@ namespace
 		// Audit 2026-10-16: a mixed screen (a native UI with a lower-resolution video in it, a 4K
 		// overlay, picture-in-picture) is read as native - no whole-frame re-base.
 		bool sourceResolutionMixedGuard = true;
+		// Hunt 2 M2/M3: the coding readings (effective bits, blocking, banding) robust to
+		// upscales, dither and noise; off = the fixed 8/16-px grid and one-pixel occupancy.
+		bool sourceCodingFixes = true;
 		// Audit 2026-10-16 (pulldown review D1/D3/D4): keep the lock across counted misses, re-phase
 		// in place, a cadence-aware film clock; off = the 2026-10-14 behaviour.
 		bool pulldownFixes = true;
@@ -1368,6 +1376,7 @@ namespace
 			// Film grain switches (docs/audit/grain-audit-2026-10-17.md): applied live, so they
 			// must change the fingerprint like the engine's extras above.
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
+			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
@@ -2556,6 +2565,14 @@ namespace
 				DebugLog::Log("profile '%s': invalid source_resolution_mixed_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionMixedGuard ? "on" : "off");
 		}
+		if (tryChoice("source_coding_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceCodingFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_coding_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceCodingFixes ? "on" : "off");
+		}
 		if (tryChoice("timing_continuity_fixes", raw))
 		{
 			if (raw == "on" || raw == "off")
@@ -2639,6 +2656,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid dejudder_source_warp_filter '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.dejudderSourceWarpCatmull ? "catmull" : "bilinear");
+		}
+		if (tryChoice("nls_sampling", raw))
+		{
+			if (raw == "catmull" || raw == "bilinear")
+				settings.nlsSamplingCatmull = raw == "catmull";
+			else
+				DebugLog::Log("profile '%s': invalid nls_sampling '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.nlsSamplingCatmull ? "catmull" : "bilinear");
 		}
 		if (tryChoice("interpolation_fill_gaps", raw))
 		{
@@ -4995,6 +5020,7 @@ struct LibplaceboVideoRenderer::Impl
 	pl_dispatch rebaseDispatch = nullptr;
 	double rebaseFactor = 1.0;          // this frame's (1 = native); the height's when per axis
 	unsigned long long rebaseFailuresSeen = 0;
+	std::string rebaseFormatNoteLogged;   // C19: the re-base's float fallback, logged once per change
 	SteadyClock::time_point rebasePausedUntil{};
 	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
@@ -10214,6 +10240,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
 		changed(current.interpolationGrain != next.interpolationGrain, "interpolation_grain");
 		changed(current.dejudderSourceWarpCatmull != next.dejudderSourceWarpCatmull, "dejudder_source_warp_filter");
+		changed(current.nlsSamplingCatmull != next.nlsSamplingCatmull, "nls_sampling");
+		changed(current.sourceCodingFixes != next.sourceCodingFixes, "source_coding_fixes");
 		changed(current.debandVpGrainGuard != next.debandVpGrainGuard, "deband_vp_grain_guard");
 		changed(current.debandGrain != next.debandGrain, "deband_grain");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
@@ -11103,6 +11131,19 @@ struct LibplaceboVideoRenderer::Impl
 		return stretchUpdated && axisUpdated;
 	}
 
+	// Hunt 2 M1: the NLS shaders' `sampling` parameter (DYNAMIC: no recompile).
+	// A user's own NLS shader without it is left alone.
+	static void SetNlsSampling(const struct pl_hook* hook, bool catmull)
+	{
+		for (int index = 0; hook && index < hook->num_parameters; ++index)
+		{
+			const struct pl_hook_par& parameter = hook->parameters[index];
+			if (parameter.name && parameter.data && parameter.type == PL_VAR_FLOAT &&
+				strcmp(parameter.name, "sampling") == 0)
+				parameter.data->f = catmull ? 1.0f : 0.0f;
+		}
+	}
+
 	void LogNlsHookBinding(const NlsMappingDecision& decision,
 		const NlsHookMappingState& binding)
 	{
@@ -11153,6 +11194,7 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		if (nlsHook && nlsHookSignature == hookKey)
 		{
+			SetNlsSampling(nlsHook, activeSettings.nlsSamplingCatmull);
 			NlsHookMappingState binding;
 			const bool updated = SetNlsHookMapping(
 				nlsHook, decision, &binding);
@@ -11186,6 +11228,7 @@ struct LibplaceboVideoRenderer::Impl
 				nlsRule.filename.c_str());
 			return false;
 		}
+		SetNlsSampling(replacement, activeSettings.nlsSamplingCatmull);
 		pl_mpv_user_shader_destroy(&nlsHook);
 		nlsHook = replacement;
 		nlsHookSignature = replacementKey;
@@ -15124,7 +15167,10 @@ struct LibplaceboVideoRenderer::Impl
 		// (from A's last picture, at previousShift, to B at the full vector).
 		dejudderNextVectorsSequence = 0;
 		ditherNextGate.Clear();
-		if (activeSettings.ditherVectorsNewFrame && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
+		// Hunt 2 09-L4: not after a failed extra. The fallback showed A at shift 0 (or
+		// nothing was presented), so vectors from previousShift would carry from the
+		// wrong place; the sigma-delta's own search covers B (vector validity rule).
+		if (!failure && activeSettings.ditherVectorsNewFrame && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
 			warpField && warpTrust &&
 			dejudderGeometryValid && f.nextSourceSequence != 0)
 		{
@@ -19966,6 +20012,7 @@ struct LibplaceboVideoRenderer::Impl
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
 			sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
 			sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
+			sourceMonitor.SetCodingFixes(activeSettings.sourceCodingFixes);
 			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
@@ -21384,7 +21431,14 @@ struct LibplaceboVideoRenderer::Impl
                     pl_frame rebased{};
                     // The picture being drawn (a Stage B picture between frames, or A).
                     if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
+                    {
                         frame = rebased;
+                        if (sourceRebase.FormatNote() != rebaseFormatNoteLogged)
+                        {
+                            rebaseFormatNoteLogged = sourceRebase.FormatNote();
+                            DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
+                        }
+                    }
                     else if (sourceRebase.Failures() == 1)
                         DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
                 }
@@ -27818,6 +27872,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion=" << s.motion.Fingerprint() << "\n"
 		<< "interpolation_grain=" << InterpolationPolicy::Name(s.interpolationGrain) << "\n"
 		<< "dejudder_source_warp_filter=" << (s.dejudderSourceWarpCatmull ? "catmull" : "bilinear") << "\n"
+		<< "nls_sampling=" << (s.nlsSamplingCatmull ? "catmull" : "bilinear") << "\n"
+		<< "source_coding_fixes=" << (s.sourceCodingFixes ? "on" : "off") << "\n"
 		<< "deband_vp_grain_guard=" << (s.debandVpGrainGuard ? "on" : "off") << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"

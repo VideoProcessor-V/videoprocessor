@@ -715,6 +715,7 @@ namespace RendererProfileConfig
 			// Film grain (owner 2026-10-17; docs/audit/grain-audit-2026-10-17.md).
 			if (key == "interpolation_grain") return IsChoice(value, { "preserve", "blend" });
 			if (key == "dejudder_source_warp_filter") return IsChoice(value, { "catmull", "bilinear" });
+			if (key == "nls_sampling") return IsChoice(value, { "catmull", "bilinear" });   // hunt 2 M1
 			if (key == "residual_stabilise_grain_guard" || key == "deband_vp_grain_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
 			// Content recognition (intent interpreter item 1, 2026-10-17): default off;
@@ -725,6 +726,7 @@ namespace RendererProfileConfig
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
+			if (key == "source_coding_fixes") return IsChoice(value, { "on", "off" });   // hunt 2 M2/M3
 			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
 			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the
