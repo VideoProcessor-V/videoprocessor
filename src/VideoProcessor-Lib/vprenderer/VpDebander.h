@@ -47,7 +47,7 @@ namespace VpDebander
 		// deband_vp_grain_guard (owner 2026-10-17: grain is never averaged away; grain audit:
 		// without vectors the debander kept 0.59x of 0.5-code grain): a per-frame spatial
 		// grain estimate - the share of pixels per 16x16 block whose Laplacian exceeds a third
-		// of the threshold - vetoes the blur where it is consistent with grain (or texture),
+		// of the threshold or that are local extrema (GrainPreserve.h) - vetoes the blur where it is consistent with grain (or texture),
 		// with or without vectors. A banded gradient is flat but for its band edges and is
 		// debanded as before. false = the 2026-10-16 debander, byte for byte. Integration
 		// 2026-10-17: on is the struct's default as well as the profile's.

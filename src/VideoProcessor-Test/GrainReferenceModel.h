@@ -244,9 +244,27 @@ namespace GrainModel
 		return out;
 	}
 
+	// GUARD_BODY's busy test at (x, y): the Laplacian above lapMin, or a strict local
+	// extremum along x, y or a diagonal by more than extMin on both sides.
+	inline bool GuardBusy(const Image& img, int x, int y, double lapMin, double extMin)
+	{
+		const double c = img.at(x, y);
+		const double dw = c - img.get(x - 1, y), de = c - img.get(x + 1, y);
+		const double dn = c - img.get(x, y - 1), ds = c - img.get(x, y + 1);
+		if (std::fabs(dw + de + dn + ds) > lapMin)
+			return true;
+		const double d[4][2] = { { dw, de }, { dn, ds },
+			{ c - img.get(x - 1, y - 1), c - img.get(x + 1, y + 1) }, { c - img.get(x + 1, y - 1), c - img.get(x - 1, y + 1) } };
+		for (const auto& line : d)
+			if ((std::max)((std::min)(line[0], line[1]), -(std::max)(line[0], line[1])) > extMin)
+				return true;
+		return false;
+	}
+
 	// VpDebander per frame (no vectors: BODY without HOLD / GRAIN), with the spatial
-	// grain guard (GUARD_BODY + SPATIAL_GUARD) when lapMin > 0. Values in codes.
-	inline Image Deband(const Image& img, double thr, double radius, double lapMin)
+	// grain guard (GUARD_BODY + SPATIAL_GUARD) when lapMin > 0 (levels from
+	// GrainPreserve::GuardLaplacianCodes / GuardExtremumCodes). Values in codes.
+	inline Image Deband(const Image& img, double thr, double radius, double lapMin, double extMin)
 	{
 		Image share;
 		if (lapMin > 0.0)
@@ -260,9 +278,7 @@ namespace GrainModel
 					for (int y = by * 16; y < (std::min)(img.h, by * 16 + 16); ++y)
 						for (int x = bx * 16; x < (std::min)(img.w, bx * 16 + 16); ++x)
 						{
-							const double lap = std::fabs(4.0 * img.at(x, y) - img.get(x + 1, y) - img.get(x - 1, y) -
-								img.get(x, y + 1) - img.get(x, y - 1));
-							hit += lap > lapMin ? 1 : 0;
+							hit += GuardBusy(img, x, y, lapMin, extMin) ? 1 : 0;
 							++n;
 						}
 					share.at(bx, by) = static_cast<double>(hit) / (std::max)(n, 1);
