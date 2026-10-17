@@ -229,12 +229,17 @@ namespace BugHunt20261017Test
 			using DejudderPolicy::DolbyVisionFrameKind;
 			using DejudderPolicy::DolbyVisionPairTrusted;
 			// Formatter states: confirmed tunnel (allowSdrFallback false) or not.
-			const DolbyVisionFrameKind dv = ClassifyDolbyVisionFrame(true, false, false, true);
-			const DolbyVisionFrameKind dvUnconfirmed = ClassifyDolbyVisionFrame(true, false, true, true);
-			const DolbyVisionFrameKind black = ClassifyDolbyVisionFrame(false, true, false, true);
-			const DolbyVisionFrameKind lostPacket = ClassifyDolbyVisionFrame(false, false, false, true);
-			const DolbyVisionFrameKind sdr = ClassifyDolbyVisionFrame(false, false, true, true);
-			const DolbyVisionFrameKind sdrUnknownPlacement = ClassifyDolbyVisionFrame(false, false, true, false);
+			// The last argument: r210 (an SDR fallback renders); R10b / R10l show it black.
+			const DolbyVisionFrameKind dv = ClassifyDolbyVisionFrame(true, false, false, true, true);
+			const DolbyVisionFrameKind dvUnconfirmed = ClassifyDolbyVisionFrame(true, false, true, true, true);
+			const DolbyVisionFrameKind black = ClassifyDolbyVisionFrame(false, true, false, true, true);
+			const DolbyVisionFrameKind lostPacket = ClassifyDolbyVisionFrame(false, false, false, true, true);
+			const DolbyVisionFrameKind sdr = ClassifyDolbyVisionFrame(false, false, true, true, true);
+			const DolbyVisionFrameKind sdrUnknownPlacement = ClassifyDolbyVisionFrame(false, false, true, false, true);
+			// Integration 2026-10-17: off r210 an SDR fallback is untrusted (rendered black);
+			// a DV picture is a picture on every encoding.
+			Assert::IsTrue(ClassifyDolbyVisionFrame(false, false, true, true, false) == DolbyVisionFrameKind::Untrusted);
+			Assert::IsTrue(ClassifyDolbyVisionFrame(true, false, false, true, false) == DolbyVisionFrameKind::Picture);
 			Assert::IsTrue(dv == DolbyVisionFrameKind::Picture);
 			Assert::IsTrue(dvUnconfirmed == DolbyVisionFrameKind::Picture);
 			Assert::IsTrue(black == DolbyVisionFrameKind::Untrusted);
@@ -242,7 +247,7 @@ namespace BugHunt20261017Test
 			Assert::IsTrue(sdr == DolbyVisionFrameKind::SdrFallback);
 			Assert::IsTrue(sdrUnknownPlacement == DolbyVisionFrameKind::Untrusted);
 			// A valid packet marked for black is untrusted.
-			Assert::IsTrue(ClassifyDolbyVisionFrame(true, true, false, true) == DolbyVisionFrameKind::Untrusted);
+			Assert::IsTrue(ClassifyDolbyVisionFrame(true, true, false, true, true) == DolbyVisionFrameKind::Untrusted);
 
 			Assert::IsTrue(DolbyVisionPairTrusted(true, dv, dv));
 			Assert::IsTrue(DolbyVisionPairTrusted(true, dv, dvUnconfirmed));

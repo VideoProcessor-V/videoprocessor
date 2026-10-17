@@ -62,6 +62,7 @@
     <ClCompile Include="ExtendedRangeCarryTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="SdrToneShapeWtwTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="BugHunt20261017CaptureTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Integration20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="CaptureLayerAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="GuiAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>

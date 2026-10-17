@@ -1130,6 +1130,49 @@ namespace Tests
             Assert::IsFalse(dm.valid || dm.allowSdrFallback);
         }
 
+        // Integration 2026-10-17: a Magewell recoverable fault cycle publishes an
+        // invalid and then a valid video state; the formatter's OnVideoState must
+        // start the loss run over, so pictures lost before the fault do not count
+        // towards the limit after it.
+        TEST_METHOD(VideoStateCycleResetsTheLossRun)
+        {
+            SenderPicture picture(true);
+            Formatter formatter;
+            formatter.OnVideoState(picture.state);
+            picture.Embed(Packetize(DmBody()));
+            AssertPeak(Deliver(formatter, picture, 1), 3072);
+            picture.CorruptAllCopies();
+            for (uint64_t counter = 2; counter < 22; ++counter)   // 20 pictures lost
+                AssertPeak(Deliver(formatter, picture, counter), 3072);
+            formatter.OnVideoState(picture.state);   // the fault cycle's new valid state
+            picture.Embed(Packetize(DmBody()));
+            AssertPeak(Deliver(formatter, picture, 1), 3072);
+            picture.CorruptAllCopies();
+            for (uint64_t counter = 2; counter < 25; ++counter)   // 23 lost: below the limit
+                AssertPeak(Deliver(formatter, picture, counter), 3072);
+            // (Had the run carried over, the limit would have hit at the 4th picture above.)
+            const auto dm = Deliver(formatter, picture, 25);   // the 24th: the limit
+            Assert::IsFalse(dm.valid || dm.allowSdrFallback, L"the limit counts only the pictures lost since the new state");
+        }
+
+        // dv_tunnel_fixes off (restore switch): the loss limit counts analysed
+        // pictures again, so every third picture reaching the formatter does not
+        // reach the limit by counter span.
+        TEST_METHOD(DvTunnelFixesOffCountsAnalysedPictures)
+        {
+            SenderPicture picture(true);
+            Formatter formatter;
+            Assert::IsTrue(formatter.BugHuntFixes(), L"on by default");
+            formatter.SetBugHuntFixes(false);
+            formatter.OnVideoState(picture.state);
+            picture.Embed(Packetize(DmBody()));
+            AssertPeak(Deliver(formatter, picture, 1), 3072);
+            picture.CorruptAllCopies();
+            for (uint64_t counter = 2; counter < 25; counter += 3)
+                AssertPeak(Deliver(formatter, picture, counter), 3072);
+            AssertPeak(Deliver(formatter, picture, 25), 3072);   // 9 analysed pictures: the DM is still held
+        }
+
         // ---- audit 2026-10-16: faithful-unpack coverage -------------------
 
         TEST_METHOD(AllContainersTimingsAndRastersUnpackBitExact)

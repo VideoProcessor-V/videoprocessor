@@ -7,11 +7,13 @@
 #include <led/LedLookahead.h>
 #include <led/LedMeasurement.h>
 #include <led/LedRawTransfer.h>
+#include <led/LedShutdownRestore.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 
 #include "LedDriveTestSupport.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -1750,6 +1752,138 @@ namespace VideoProcessorTest
 			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 4000),
 				L"the idle restore sent CNTR 50 although the script believed 50");
 			module.Stop();
+		}
+		// ---- Integration 2026-10-17: restore switches and the forced-shutdown restore ----
+
+		TEST_METHOD(RestoreSwitchesAreReadWithTheirDefaults)
+		{
+			const LedDriveConfig defaults;
+			Assert::IsTrue(defaults.scriptResendFailedWrites, L"script_resend_failed_writes on by default");
+			Assert::IsTrue(defaults.wtwPassthrough, L"led_wtw_passthrough on by default");
+			std::string error;
+			const std::string good = "[led_drive.Default]\nscript_resend_failed_writes: false\nled_wtw_passthrough: false\n";
+			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(good);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::IsFalse(led.scriptResendFailedWrites);
+			Assert::IsFalse(led.wtwPassthrough);
+			Assert::IsFalse(Validates("[led_drive.Default]\nscript_resend_failed_writes: maybe\n", error));
+		}
+
+		// script_resend_failed_writes off: the pure script stream - the failed
+		// CNTR 50 is not repeated (the script believes 50 and never sends it again).
+		TEST_METHOD(ScriptResendOffKeepsThePureScriptStream)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.scriptPacing = false;
+			config.tickMs = 400;
+			config.scriptResendFailedWrites = false;
+			ParseCurve("0:255, 255:255", config.curve);
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(50.0));
+			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			const int ticks = module.Ticks();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			module.SubmitMeasurement(Frame(50.0, 100, 235));
+			Assert::IsTrue(WaitFor([&] { return module.Ticks() > ticks; }));
+			const size_t before = projector->Writes().size();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1300));   // three more ticks
+			const auto writes = projector->Writes();
+			Assert::IsTrue(std::count(writes.begin() + before, writes.end(), std::string(":CNTR50\r")) == 0,
+				L"off: a failed write is not repeated");
+			Assert::AreEqual(51, projector->contrast, L"the projector still has the value that went through");
+			module.Stop();
+		}
+
+		// With no failed write, the script's command stream is the same with the
+		// resend switch on and off (the resend adds nothing of its own).
+		TEST_METHOD(ScriptStreamIsUnchangedWhenNoWriteFails)
+		{
+			auto run = [](bool resend)
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->contrast = 50;
+				LedDriveConfig config = Compensate();
+				config.mode = Mode::Script;
+				config.scriptPacing = false;
+				config.tickMs = 400;
+				config.scriptResendFailedWrites = resend;
+				ParseCurve("0:255, 255:255", config.curve);
+				LedDriveModule module(Port(50), config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+				module.SubmitMeasurement(Frame(50.0));
+				Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"CNTR 51");
+				module.SubmitMeasurement(Frame(50.0, 100, 235));
+				Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }), L"CNTR 50");
+				std::this_thread::sleep_for(std::chrono::milliseconds(900));
+				module.Stop();
+				return projector->Writes();
+			};
+			const auto on = run(true);
+			const auto off = run(false);
+			Assert::IsTrue(on == off, L"the same command stream with the resend on and off when nothing fails");
+		}
+
+		// The forced shutdown (a blocked renderer retirement) stops the LED drive on
+		// its own thread, bounded: the projector gets full light and CNTR 50 back.
+		TEST_METHOD(BoundedRestoreReturnsFullLightAndContrast)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.scriptPacing = false;
+			config.tickMs = 400;
+			ParseCurve("0:120, 255:120", config.curve);   // the script dims the LED
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
+			module.SubmitMeasurement(Frame(50.0));
+			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51 && projector->light < 255; }, 4000),
+				L"the script dimmed the LED and raised CNTR");
+			const BoundedRestoreResult result = RunBoundedRestore([&module] { module.Stop(); return true; }, 3000);
+			Assert::IsTrue(result == BoundedRestoreResult::Restored, L"stopped within the bound");
+			Assert::AreEqual(255, projector->light, L"full light restored");
+			Assert::AreEqual(50, projector->contrast, L"CNTR never left high");
+		}
+
+		TEST_METHOD(BoundedRestoreGivesUpOnABlockedStop)
+		{
+			auto release = std::make_shared<std::atomic<bool>>(false);
+			const auto started = std::chrono::steady_clock::now();
+			const BoundedRestoreResult result = RunBoundedRestore([release]
+				{
+					while (!release->load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+					return true;
+				}, 200);
+			const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - started).count();
+			release->store(true);
+			Assert::IsTrue(result == BoundedRestoreResult::TimedOut, L"a blocked stop times out");
+			Assert::IsTrue(waited < 2000, L"the caller is not held");
+			Assert::IsTrue(RunBoundedRestore([] { return false; }, 1000) == BoundedRestoreResult::NotConfirmed);
+			Assert::IsTrue(RunBoundedRestore([]() -> bool { throw std::runtime_error("x"); }, 1000) ==
+				BoundedRestoreResult::Failed);
 		}
 	};
 }

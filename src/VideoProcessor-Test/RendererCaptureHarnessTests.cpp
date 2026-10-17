@@ -1264,10 +1264,95 @@ namespace Tests
 				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n", "optical_flow_global: off\n", "temporal_dither: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
 				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
+				// Integration 2026-10-17: the engine's extras, the grain switches, dv_tunnel_fixes.
+				"optical_flow_global_fallback: off\n", "optical_flow_cost_trust: off\n", "optical_flow_fb_check: off\n",
+				"interpolation_grain: blend\n", "dejudder_source_warp_filter: bilinear\n", "deband_vp_grain_guard: off\n",
+				"deband_grain: on\n", "residual_stabilise_grain_guard: off\n", "dv_tunnel_fixes: off\n",
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
 					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
+			DeleteFileA(path.c_str());
+		}
+
+		// Integration 2026-10-17: the keys the merge brought (the engine's extras, the
+		// grain switches, dv_tunnel_fixes) are parsed, dumped and change the live and the
+		// rebuild-independent settings; at profile defaults the interpolator keeps grain
+		// (preserve) and the source warp is Catmull-Rom; the sample configuration's
+		// [vprenderer.motion.Default] reaches the motion settings.
+		TEST_METHOD(IntegrationKeysReachTheSettingsAndTheirDefaultsAreFaithful)
+		{
+			const HarnessScope harnessScope;
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Export = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
+			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
+			const std::string path = folder + "vp-integration-keys-test.cfg";
+			auto call = [&](Export function, const std::string& text) {
+				{
+					std::ofstream config(path, std::ios::trunc | std::ios::binary);
+					config << text;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				Assert::IsTrue(length > 0, L"the export ran");
+				return std::string(buffer.data());
+			};
+			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
+			const std::string baseDump = call(describe, head);
+			const std::string baseFingerprint = call(fingerprintOf, head);
+			auto line = [](const std::string& dump, const std::string& key) {
+				const size_t at = dump.find("\n" + key + "=");
+				if (at == std::string::npos) return std::string();
+				const size_t start = at + key.size() + 2;
+				return dump.substr(start, dump.find('\n', start) - start);
+			};
+			// Profile defaults: the faithful grain paths and the restore switches on.
+			const std::pair<const char*, const char*> defaults[] = {
+				{ "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
+				{ "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "residual_stabilise_grain_guard", "on" },
+				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
+				{ "dv_tunnel_fixes", "on" } };
+			for (const auto& entry : defaults)
+				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
+					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
+			// Each key flipped: its dump line and the fingerprint change.
+			const std::pair<const char*, const char*> flips[] = {
+				{ "interpolation_grain", "blend" }, { "dejudder_source_warp_filter", "bilinear" },
+				{ "deband_vp_grain_guard", "off" }, { "deband_grain", "on" }, { "residual_stabilise_grain_guard", "off" },
+				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
+				{ "dv_tunnel_fixes", "off" } };
+			for (const auto& flip : flips)
+			{
+				const std::string text = head + flip.first + ": " + flip.second + "\n";
+				const std::wstring name(flip.first, flip.first + strlen(flip.first));
+				Assert::AreEqual(std::string(flip.second), line(call(describe, text), flip.first), (L"parsed: " + name).c_str());
+				Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
+			}
+			// The sample's renamed motion section reaches the motion settings (a value
+			// changed from the default so the read is visible).
+			std::string repository = __FILE__;
+			std::replace(repository.begin(), repository.end(), '/', '\\');
+			repository.resize(repository.rfind("\\src\\VideoProcessor-Test\\"));
+			std::ifstream sampleFile(repository + "\\VideoProcessor.cfg", std::ios::binary);
+			std::string sample((std::istreambuf_iterator<char>(sampleFile)), std::istreambuf_iterator<char>());
+			Assert::IsFalse(sample.empty(), L"the sample configuration");
+			const std::string sampleDump = call(describe, sample);
+			Assert::IsFalse(line(sampleDump, "motion").empty(), L"motion settings dumped");
+			const std::string motionSection = "[vprenderer.motion.Default]";
+			const size_t at = sample.find(motionSection);
+			Assert::IsTrue(at != std::string::npos, L"the sample's motion profile");
+			std::string changed = sample;
+			const size_t smooth = changed.find("smooth_motion: off", at);
+			Assert::IsTrue(smooth != std::string::npos, L"the sample's smooth_motion");
+			changed.replace(smooth, strlen("smooth_motion: off"), "smooth_motion: always");
+			const std::string motion = line(call(describe, changed), "motion");
+			Assert::IsTrue(motion.find("|always|") != std::string::npos,
+				(L"the motion profile's smooth_motion was read: " + std::wstring(motion.begin(), motion.end())).c_str());
 			DeleteFileA(path.c_str());
 		}
 
