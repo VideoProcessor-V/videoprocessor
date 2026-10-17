@@ -135,7 +135,8 @@ namespace LedDrive
 		// led_lookahead_ms (review 2026-10-17) in source frames at the measured
 		// rate; 0 = the queue walk's own depth (active_picture_lookahead_frames).
 		// For the renderer: how far its queued-frame walk would have to reach
-		// for the LED alone (not wired in the renderer yet).
+		// for the LED alone (wired 2026-10-17: the walk visits max(active picture, this),
+		// the frames beyond the active picture feed the LED only).
 		size_t WantedLookaheadFrames() const;
 		// The smoothed exact / predicted ratio applied to predictions.
 		double CorrectionRatio() const;
