@@ -8297,6 +8297,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Under test (default on). A jump in the capture's timestamps is treated as a break: no motion is carried "
             "across it. The film clock stays continuous when the measured capture rate replaces or resets the nominal one, "
             "and the 50/60p timeline keeps the last measured display rate while it is re-measured. Off: the earlier behaviour."));
+        // Hunt 2 2026-10-17 (timing and motion).
+        auto* cadenceClass = addChoice(QStringLiteral("Film / video classification fixes"), QStringLiteral("cadence_class_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        cadenceClass->setToolTip(QStringLiteral(
+            "Under test (default on). Film-in-video detection never takes animation drawn on twos for 15 fps film, its film "
+            "timing re-anchors after a phase shift and ignores a single late frame, and the queue holds the same time while "
+            "locked. Film / video is judged from the source alone (never from the display rate), and content recognition "
+            "no longer takes 3:2 film or dark film for animation or a still menu, and also runs without look-ahead frames. "
+            "Off: the earlier behaviour."));
         // Render-ahead (docs/VP-render-ahead-design.md, owner 2026-10-17): processing follows the
         // source frame rate, not the display refresh. Off by default until the on-screen runs pass.
         auto* renderAhead = addChoice(QStringLiteral("De-judder: render ahead (under test)"), QStringLiteral("render_ahead"),
@@ -9951,7 +9960,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" },
                     // Render-ahead (docs/VP-render-ahead-design.md).
                     { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.

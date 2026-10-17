@@ -38,6 +38,9 @@ namespace ContentIntent
         // Frames were lost before this one, or the source marked a discontinuity:
         // no motion pair with the previous frame (a cut for the hysteresis).
         bool discontinuity = false;
+        // Hunt 2 (cadence_class_fixes, default on): the source-only film / video
+        // class (InterpolationPolicy::IsFilmLike) and the classifier's fixes.
+        bool classFixes = true;
     };
 
     // The existing film / video classification (source_class) at the
@@ -46,8 +49,9 @@ namespace ContentIntent
     inline bool FilmLike(const FrameContext& c, bool& rateKnown)
     {
         rateKnown = c.contentHz > 0.0 &&
-            (c.sourceClass == InterpolationPolicy::SourceClass::Legacy || c.pulldownLocked || c.displayHz > 0.0);
-        return rateKnown && InterpolationPolicy::IsFilmLike(c.sourceClass, c.contentHz, c.displayHz, c.pulldownLocked);
+            (c.sourceClass == InterpolationPolicy::SourceClass::Legacy || c.classFixes || c.pulldownLocked || c.displayHz > 0.0);
+        return rateKnown && InterpolationPolicy::IsFilmLike(c.sourceClass, c.contentHz, c.displayHz, c.pulldownLocked,
+            c.classFixes);
     }
 
     // The reduced grid from any sampler (sample(x, y, luma) -> bool), cell
@@ -155,6 +159,16 @@ namespace ContentIntent
             in.filmLike = FilmLike(context, in.rateKnown);
             in.pulldownLocked = context.pulldownLocked;
             in.stats = m_statistics.Current();
+            in.classFixes = context.classFixes;
+            in.contentHz = context.contentHz;
+            if (CarrierHolds(in))
+            {
+                // Hunt 2: the pictures' own rate inside the carrier.
+                FrameContext pictures = context;
+                pictures.contentHz = context.contentHz * in.stats.pictureShare;
+                bool known = false;
+                in.carrierFilmLike = FilmLike(pictures, known) && known;
+            }
             const Classification candidate = Classify(in);
             const ContentClass before = m_hysteresis.Current().content;
             if (m_hysteresis.Update(candidate, m_statistics.Time(), cut))

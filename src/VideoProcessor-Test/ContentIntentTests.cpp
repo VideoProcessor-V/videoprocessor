@@ -26,10 +26,13 @@ namespace Tests
         using namespace ContentIntent;
         using SourceClass = InterpolationPolicy::SourceClass;
 
+        // classFixes false: the tables below are the behaviour before cadence_class_fixes
+        // (Hunt2CadenceClass* tests cover the fixes, the default).
         FrameContext Context(double contentHz, double displayHz, SourceClass sourceClass = SourceClass::Legacy,
-            bool pulldownLocked = false)
+            bool pulldownLocked = false, bool classFixes = false)
         {
             FrameContext c;
+            c.classFixes = classFixes;
             c.contentHz = contentHz;
             c.displayHz = displayHz;
             c.sourceClass = sourceClass;
@@ -55,6 +58,7 @@ namespace Tests
             in.filmLike = FilmLike(c, in.rateKnown);
             in.pulldownLocked = c.pulldownLocked;
             in.stats = stats;
+            in.classFixes = c.classFixes;
             return Classify(in).content;
         }
 

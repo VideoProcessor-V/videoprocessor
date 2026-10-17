@@ -146,6 +146,20 @@ namespace RendererProfileConfig
 		std::map<std::string, std::string> settings;
 	};
 
+	// Hunt 2 (02-dv L6): the content classifier's own inputs. A profile whose when:
+	// rule reads `content` and sets one of them would change the class that selected it
+	// and loop with the hold time; the renderer ignores them there (cadence_class_fixes)
+	// and the configuration check warns.
+	inline bool IsContentClassifierInput(const std::string& key)
+	{
+		return key == "intent_content" || key == "source_class" || key == "dejudder_pulldown" ||
+			key == "cadence_class_fixes";
+	}
+	inline bool IsContentGated(const Profile& profile)
+	{
+		return !profile.when.empty() && profile.whenExpression.Variables().count("content") != 0;
+	}
+
 	struct Group
 	{
 		std::string name;
@@ -727,6 +741,7 @@ namespace RendererProfileConfig
 			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
 			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
+			if (key == "cadence_class_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 2026-10-17
 			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the
 			// de-judder's gate per source period, its GPU budget and the queue credit.
 			if (key == "render_ahead" || key == "render_ahead_queue_credit") return IsChoice(value, { "on", "off" });
@@ -2016,7 +2031,29 @@ namespace RendererProfileConfig
 		return true;
 	}
 
+	inline bool ReadUnchecked(const ConfigFile& config, Model& model, std::string& error);
+
+	// Hunt 2 (02-dv L6): warns for every content-gated profile that sets one of the
+	// classifier's own inputs (the renderer ignores them there).
+	inline void AppendContentGateWarnings(Model& model)
+	{
+		for (const auto& entry : model.profiles)
+			if (IsContentGated(entry.second))
+				for (const auto& setting : entry.second.settings)
+					if (IsContentClassifierInput(setting.first))
+						model.warnings.push_back("[profile " + entry.first + "] " + setting.first +
+							" is ignored: the profile's when= reads content, which this key changes");
+	}
+
 	inline bool Read(const ConfigFile& config, Model& model, std::string& error)
+	{
+		if (!ReadUnchecked(config, model, error))
+			return false;
+		AppendContentGateWarnings(model);
+		return true;
+	}
+
+	inline bool ReadUnchecked(const ConfigFile& config, Model& model, std::string& error)
 	{
 		if (IsTargetModel(config))
 			return ReadTarget(config, model, error);

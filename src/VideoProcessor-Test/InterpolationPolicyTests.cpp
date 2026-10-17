@@ -165,16 +165,21 @@ namespace InterpolationPolicyTest
 			{
 				const double justFilm = display / 2.0;
 				const double justVideo = display / 1.9;
-				Assert::IsTrue(InterpolationPolicy::IsFilmLike(SourceClass::Measured, justFilm, display, false));
-				Assert::IsFalse(InterpolationPolicy::IsFilmLike(SourceClass::Measured, justVideo, display, false));
-				Assert::IsTrue(InterpolationPolicy::IsFilmLike(SourceClass::Measured, justVideo, display, true));
+				// cadence_class_fixes off: the display-ratio rule (Hunt2CadenceClassPolicyTests: on).
+				Assert::IsTrue(InterpolationPolicy::IsFilmLike(SourceClass::Measured, justFilm, display, false, false));
+				Assert::IsFalse(InterpolationPolicy::IsFilmLike(SourceClass::Measured, justVideo, display, false, false));
+				Assert::IsTrue(InterpolationPolicy::IsFilmLike(SourceClass::Measured, justVideo, display, true, false));
 			}
 			// 48p on 60 Hz: legacy film (HFR), measured video -> interpolated in auto.
 			Input hfr = VideoInput(48.0, 60.0);
 			hfr.dejudderStrength = 0.6;
 			Assert::IsTrue(Decide(hfr).reason == Reason::FilmToDejudder);
 			hfr.sourceClass = SourceClass::Measured;
+			hfr.classFixes = false;
 			Assert::IsTrue(Decide(hfr).reason == Reason::Interpolate);
+			// With the fixes (default): 48p is the owner's HFR film on any display.
+			hfr.classFixes = true;
+			Assert::IsTrue(Decide(hfr).reason == Reason::FilmToDejudder);
 		}
 
 		TEST_METHOD(ExclusionsAndHolds)
