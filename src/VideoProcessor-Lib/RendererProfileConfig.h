@@ -723,6 +723,11 @@ namespace RendererProfileConfig
 			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
 			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
+			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the
+			// de-judder's gate per source period, its GPU budget and the queue credit.
+			if (key == "render_ahead" || key == "render_ahead_queue_credit") return IsChoice(value, { "on", "off" });
+			if (key == "dejudder_gate") return IsChoice(value, { "auto", "period", "refresh" });
+			if (key == "render_ahead_utilisation") return IsNumberInRange(value, 0.5, 1.0);
 			// Stage 11a E2: the split threshold (0 = the match tolerance).
 			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
 			// Delta 14: R-A's roll-off (source px per source frame; floor as a

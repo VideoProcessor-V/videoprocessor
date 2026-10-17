@@ -45,6 +45,32 @@ namespace AlphaQueuePolicy
 		return result;
 	}
 
+	// led_lookahead_ms (2026-10-17): the queued-frame walk visits
+	// max(active_picture_lookahead_frames, the LED's wanted depth) future frames,
+	// bounded by what is queued. Only the first active-picture count (the current
+	// frame and its configured look-ahead) goes to the active-picture decision; the
+	// statistics observer (the LED) sees every frame walked. The walk runs for the
+	// LED alone when the active-picture look-ahead is 0. With the LED wanting no
+	// more than the active picture, this is exactly SelectActivePicturePreview.
+	struct LookaheadWalk
+	{
+		ActivePicturePreviewWindow window;   // every frame walked (indices), current first
+		size_t activePictureFrames = 0;      // the leading frames of window for the active picture
+	};
+
+	template<typename Queue>
+	LookaheadWalk SelectLookaheadWalk(const Queue& queue, size_t activePictureConfigured,
+		size_t ledWanted, size_t maxActivePicture)
+	{
+		LookaheadWalk walk;
+		const size_t activePicture = (std::min)(activePictureConfigured, maxActivePicture);
+		const size_t depth = (std::max)(activePicture, ledWanted);
+		walk.window = SelectActivePicturePreview(queue, depth, (std::max)(maxActivePicture, ledWanted));
+		walk.activePictureFrames = activePicture == 0 ? 0 :
+			(std::min)(walk.window.indices.size(), activePicture + 1);
+		return walk;
+	}
+
 	inline size_t NormalizeDesiredDepth(size_t value)
 	{
 		return std::max<size_t>(1, value);

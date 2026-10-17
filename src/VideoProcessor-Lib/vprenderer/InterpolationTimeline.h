@@ -38,6 +38,24 @@ namespace InterpolationTimeline
 	constexpr int kMaxSpanFrames = 4;       // a pair spans at most this many source periods
 	constexpr size_t kMaxOutputs = 16;      // per source frame (as TemporalRenderer's bound)
 
+	// Hiccup repair (interpolation_fill_gaps, owner 2026-10-17): decided independently
+	// of motion smoothing. B is offered across a short loss of whole frames (1 to
+	// kMaxSpanFrames - 1 missed) when its time is within the span; never across a
+	// flush (gapFrames 0) and never on the low-latency path (as before: it never
+	// interpolates there).
+	inline bool GapFillPair(bool gapBefore, bool fillGaps, uint32_t gapFrames, bool spanOk, bool lowLatency)
+	{
+		return gapBefore && fillGaps && !lowLatency && gapFrames >= 1 &&
+			gapFrames < static_cast<uint32_t>(kMaxSpanFrames) && spanOk;
+	}
+
+	// The timeline presents a gap pair by itself (its vectors and phases for that pair
+	// only) when interpolation is not presenting this source already.
+	inline bool GapFillStandalone(bool gapFillPair, bool interpolating)
+	{
+		return gapFillPair && !interpolating;
+	}
+
 	struct Output
 	{
 		double pts = 0.0;     // the refresh time on the source clock (seconds)
