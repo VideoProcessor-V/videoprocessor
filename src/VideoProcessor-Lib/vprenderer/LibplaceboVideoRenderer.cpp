@@ -5224,6 +5224,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderPhaseLogPending = true;
 	CComPtr<IDXGIOutput> dejudderOutput;
 	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
+	IDXGISwapChain* dejudderOutputFailedSwapchain = nullptr;   // GetContainingOutput failed (identity only)
 	ULONGLONG dejudderHoldLogTick = 0;
 	unsigned long long dejudderHoldsNotLogged = 0;
 	// The holds since the last hold lines, per reason (render-ahead follow-up 2026-10-17:
@@ -5260,6 +5261,15 @@ struct LibplaceboVideoRenderer::Impl
 	unsigned long long renderAheadFrames = 0, renderAheadRestarts = 0, renderAheadLate = 0, renderAheadDropped = 0,
 		renderAheadHeld = 0, renderAheadIntervalPresents = 0;
 	ULONGLONG renderAheadLogTick = 0;
+	// Diagnostics (render-ahead follow-up 2026-10-17): each planned present's SyncInterval
+	// and, from the statistics, shown - planned in refreshes per kind (interval 1 or a
+	// present after holds): whether the presentation honours queued holds.
+	std::deque<std::pair<uint32_t, int>> renderAheadPresentIntervals;
+	int renderAheadLastMainInterval = 1;
+	unsigned long long renderAheadObservedSeen = 0;
+	double renderAheadShownError[2] = { 0.0, 0.0 };
+	unsigned long long renderAheadShownCount[2] = { 0, 0 }, renderAheadShownOnTime[2] = { 0, 0 };
+	double renderAheadExtraCostKnownAt = 0.0;     // when it was measured (RenderAheadNow)
 	double renderAheadExtraCostKnownMs = 0.0;      // the last p95 of an extra (the gate at a degraded level)
 	double renderAheadEstimateCostKnownMs = 0.0;   // the last p95 of the estimate ahead
 	bool renderAheadSwapchainLogged = false;
@@ -5421,7 +5431,12 @@ struct LibplaceboVideoRenderer::Impl
 		// the extra's cost unknown (render-ahead follow-up 2026-10-17: before, a hold
 		// reached that way was never left).
 		if (renderAheadExtraCost.Count() >= 4)
+		{
 			renderAheadExtraCostKnownMs = g.costs.extraMs;
+			renderAheadExtraCostKnownAt = now;
+		}
+		else if (renderAheadExtraCostKnownMs > 0.0 && now - renderAheadExtraCostKnownAt > 30.0)
+			renderAheadExtraCostKnownMs = 0.0;   // 30 s old: unknown again (probe), never a hold for good
 		if (renderAheadEstimateCost.Count() > 0)
 			renderAheadEstimateCostKnownMs = g.costs.estimateMs;
 		const bool degraded = renderAheadGate.Level() > 0;
@@ -5462,11 +5477,12 @@ struct LibplaceboVideoRenderer::Impl
 		if (renderAheadLogTick != 0 && now - renderAheadLogTick < 5000)
 			return;
 		renderAheadLogTick = now;
-		DebugLog::Log("Render-ahead: %s%s%s%llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
+		DebugLog::Log("Render-ahead: %s%s%s%llu extras presented, %llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
 			"(%llu presents after a hold), lead %.2f ms, target lead %.2f ms, gate %s (%s), latency floor %.2f ms, "
 			"p95 new frame %.2f ms, extra %.2f ms, estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
-			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections)",
-			holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "",
+			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections; shown - planned: interval 1 %+.2f refreshes "
+			"(%llu, %llu on time), after holds %+.2f (%llu, %llu on time))",
+			holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "", dejudderExtraStats.extras,
 			renderAheadFrames, renderAheadRestarts, renderAheadLate, renderAheadDropped, renderAheadHeld,
 			renderAheadIntervalPresents, renderAheadLead * 1000.0, renderAheadTargetLeadMs,
 			RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
@@ -5476,7 +5492,10 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadEstimateCost.P95(), renderAheadCreditFrames.load(std::memory_order_relaxed), ratio,
 			renderAheadTimersReady ? "GPU timers" : "CPU timings", dejudderDisplayRate.hz,
 			OpenLoopDisplayRate::Name(dejudderDisplayRate.source), dejudderDisplayRate.openLoop ? "open" : "closed",
-			renderAheadOpenLoopFrames, renderAheadLateByPresent, renderAheadSchedule.EarlyCorrections());
+			renderAheadOpenLoopFrames, renderAheadLateByPresent, renderAheadSchedule.EarlyCorrections(),
+			renderAheadShownCount[0] ? renderAheadShownError[0] / renderAheadShownCount[0] : 0.0, renderAheadShownCount[0],
+			renderAheadShownOnTime[0], renderAheadShownCount[1] ? renderAheadShownError[1] / renderAheadShownCount[1] : 0.0,
+			renderAheadShownCount[1], renderAheadShownOnTime[1]);
 	}
 
 	// The SyncInterval for the main present now being made (consumed): the holds the
@@ -5485,6 +5504,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		const int interval = std::max(1, std::min(renderAheadMainInterval, RenderAhead::kMaxSyncInterval));
 		renderAheadMainInterval = 1;
+		renderAheadLastMainInterval = interval;
 		if (interval > 1)
 			++renderAheadIntervalPresents;
 		return static_cast<UINT>(interval);
@@ -14358,12 +14378,15 @@ struct LibplaceboVideoRenderer::Impl
 		// on hybrid graphics (the panel on the iGPU, rendering on the discrete GPU)
 		// GetContainingOutput fails with DXGI_ERROR_UNSUPPORTED, which used to hold every
 		// frame "no output for vsync" (render-ahead follow-up 2026-10-17).
-		if (dejudderOutputSwapchain != native.p)
+		// (render_ahead off retries every frame, as before; render-ahead asks once per swapchain.)
+		if (dejudderOutputSwapchain != native.p && !(queuedMode && dejudderOutputFailedSwapchain == native.p))
 		{
 			dejudderOutput.Release();
 			dejudderOutputSwapchain = nullptr;
 			if (SUCCEEDED(native->GetContainingOutput(&dejudderOutput)) && dejudderOutput)
 				dejudderOutputSwapchain = native.p;
+			else
+				dejudderOutputFailedSwapchain = native.p;
 		}
 		if (!dejudderOutput && !queuedMode)
 		{
@@ -14428,14 +14451,37 @@ struct LibplaceboVideoRenderer::Impl
 			double gridVsync = 0.0;
 			bool late = false;
 			bool closedLoop = false;
+			// Only statistics the presentation telemetry accepts (a measured display rate):
+			// composed presentation on hybrid graphics returns statistics the telemetry
+			// rejects (no measured rate), and matched per present they disagree with any
+			// consistent plan (shown - planned +1.2..+1.5 refreshes for interval-1
+			// presents, -0.2..-0.3 after holds, 25-30% on time), so the closed loop
+			// moved the chain wrongly every few frames and logged ~30% of frames late
+			// (render-ahead follow-up 2026-10-17). Those displays run the open loop.
 			DXGI_FRAME_STATISTICS statistics{};
-			if (SUCCEEDED(native->GetFrameStatistics(&statistics)) && statistics.SyncQPCTime.QuadPart > 0)
+			if (!dejudderDisplayRate.openLoop && SUCCEEDED(native->GetFrameStatistics(&statistics)) &&
+				statistics.SyncQPCTime.QuadPart > 0)
 			{
 				closedLoop = true;
 				gridVsync = static_cast<double>(statistics.SyncQPCTime.QuadPart) / qpc;
 				const double shownAt = gridVsync - static_cast<double>(static_cast<int32_t>(
 					statistics.SyncRefreshCount - statistics.PresentRefreshCount)) * displayPeriod;
 				late = renderAheadSchedule.Observe(statistics.PresentCount, shownAt, displayPeriod);
+				if (renderAheadSchedule.ObservedCount() != renderAheadObservedSeen)
+				{
+					renderAheadObservedSeen = renderAheadSchedule.ObservedCount();
+					const uint32_t id = renderAheadSchedule.LastObservedId();
+					const auto known = std::find_if(renderAheadPresentIntervals.begin(), renderAheadPresentIntervals.end(),
+						[id](const std::pair<uint32_t, int>& p) { return p.first == id; });
+					if (known != renderAheadPresentIntervals.end())
+					{
+						const int kind = known->second > 1 ? 1 : 0;
+						const double e = renderAheadSchedule.LastObservedError();
+						renderAheadShownError[kind] += e;
+						++renderAheadShownCount[kind];
+						if (std::abs(e) <= 0.5) ++renderAheadShownOnTime[kind];
+					}
+				}
 				if (std::find(dejudderExtraIds.begin(), dejudderExtraIds.end(), statistics.PresentCount) == dejudderExtraIds.end() &&
 					(dejudderMainRefresh.empty() || dejudderMainRefresh.back().first != statistics.PresentCount))
 				{
@@ -14463,6 +14509,10 @@ struct LibplaceboVideoRenderer::Impl
 			const double maxAhead = RenderAhead::PlannedLead(sourcePeriod, displayPeriod) +
 				(queueDepth + 1) * std::ceil(ratio - RenderAhead::kTolerance) * displayPeriod;
 			plannedFirstVsync = renderAheadSchedule.FirstVsync(now, displayPeriod, gridVsync, restart, behind, maxAhead);
+			// A new anchor: the old chain's pending presents no longer apply (else a
+			// correction already made by the restart is made again when they show).
+			if (restart)
+				renderAheadSchedule.Break();
 			late = late || behind;
 			if (late)
 			{
@@ -14500,6 +14550,8 @@ struct LibplaceboVideoRenderer::Impl
 				return false;
 			}
 			plannedIds.emplace_back(mainPresentId, plannedFirstVsync);
+			renderAheadPresentIntervals.emplace_back(mainPresentId, renderAheadLastMainInterval);
+			renderAheadLastMainInterval = 1;
 			renderAheadTargetLeadMs = f.swapEndQpc > 0 ?
 				(plannedFirstVsync - static_cast<double>(f.swapEndQpc) / qpc) * 1000.0 : 0.0;
 			++renderAheadFrames;
@@ -15000,7 +15052,12 @@ struct LibplaceboVideoRenderer::Impl
 				++dejudderExtraStats.swapchainFull;
 			native->GetLastPresentCount(&presentId);
 			if (queuedMode)
+			{
 				plannedIds.emplace_back(presentId, decision.targetVsync);
+				renderAheadPresentIntervals.emplace_back(presentId, static_cast<int>(syncInterval));
+				while (renderAheadPresentIntervals.size() > 128)
+					renderAheadPresentIntervals.pop_front();
+			}
 			// Open loop: a present that returned more than a refresh after its planned
 			// vsync was not shown on time (OpenLoopDisplayRate::LateRefreshes).
 			if (queuedMode && openLoopFrame)
@@ -15042,7 +15099,7 @@ struct LibplaceboVideoRenderer::Impl
 				const auto estimateStart = SteadyClock::now();
 				const bool estimatedAhead = EstimateAhead(f.sourceSequence, f.nextSourceSequence,
 					cached != nullptr && dejudderRenderedWarp != nullptr, &estimateTiming);
-				if (estimatedAhead)
+				if (estimatedAhead && dejudderAhead.LastReason() == Dejudder::AheadSchedule::Reason::Ahead)
 					estimateTiming.Accept(++renderAheadTimerSerial);
 				else
 					estimateTiming.Reject();

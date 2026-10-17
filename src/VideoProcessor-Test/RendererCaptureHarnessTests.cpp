@@ -2943,7 +2943,7 @@ namespace Tests
 				}
 				Logger::WriteMessage(("   last " + (lastRenderAhead.empty() ? std::string("Render-ahead: (none)") : lastRenderAhead)).c_str());
 				Logger::WriteMessage(("   render-ahead lines " + std::to_string(renderAheadLines) + ", gate changes " +
-					std::to_string(gateChanges) + ", late " + std::to_string(CountBefore(lastRenderAhead, "late")) +
+					std::to_string(gateChanges) + ", late " + std::to_string(CountBefore(lastRenderAhead, "late,")) +
 					", extras dropped " + std::to_string(CountBefore(lastRenderAhead, "extras dropped")) +
 					", render/present failures " + std::to_string(renderFailures)).c_str());
 				if (!c.renderAhead && renderAheadLines > 0)

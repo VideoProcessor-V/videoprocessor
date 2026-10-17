@@ -326,6 +326,9 @@ namespace RenderAhead
 				const double planned = pending.front().second;
 				pending.pop_front();
 				const double error = actual - planned;
+				lastObservedId = presentId;
+				lastObservedError = displayPeriod > 0.0 ? error / displayPeriod : 0.0;
+				++observedCount;
 				if (error > 0.5 * displayPeriod)
 				{
 					late = true;
@@ -375,9 +378,17 @@ namespace RenderAhead
 
 		size_t Pending() const { return pending.size(); }
 		unsigned long long EarlyCorrections() const { return earlyCorrections; }
+		// The last present matched with its plan: its id and shown - planned (refreshes),
+		// and a count that moves on every match (diagnostics).
+		uint32_t LastObservedId() const { return lastObservedId; }
+		double LastObservedError() const { return lastObservedError; }
+		unsigned long long ObservedCount() const { return observedCount; }
 
 	private:
 		unsigned long long earlyCorrections = 0;
+		uint32_t lastObservedId = 0;
+		double lastObservedError = 0.0;
+		unsigned long long observedCount = 0;
 		bool active = false;
 		double nextVsync = 0.0;
 		int lateDrops = 0;
