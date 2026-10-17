@@ -13836,8 +13836,8 @@ struct LibplaceboVideoRenderer::Impl
 				std::vector<const pl_hook*> withoutRepair(outputHooks);
 				withoutRepair.erase(withoutRepair.begin() + (repairHook - outputHooks.begin()));
 				const pl_render_errors errors = pl_renderer_get_errors(renderer);
-				if (!OutputEncodingRepair::Needed(withoutRepair, &errors,
-					f.target->lut ? f.target->lut_type : PL_LUT_UNKNOWN))
+				// The cached picture renders without the target LUT (Bug hunt 2026-10-17).
+				if (!OutputEncodingRepair::Needed(withoutRepair, &errors, PL_LUT_UNKNOWN))
 					outputHooks = std::move(withoutRepair);
 				renderedParams.hooks = outputHooks.empty() ? nullptr : outputHooks.data();
 				renderedParams.num_hooks = static_cast<int>(outputHooks.size());
@@ -14116,7 +14116,15 @@ struct LibplaceboVideoRenderer::Impl
 			extraParams = &timedParams;
 			pl_frame target = *f.target;
 			if (renderedCrop)
+			{
 				target.crop = dejudderGeometry.targetCrop;   // the cache's rounded rectangle: 1:1
+				// Bug hunt 2026-10-17: the cached picture was taken at PRE_OUTPUT,
+				// after libplacebo applied the target's (normalized) calibration LUT
+				// in colour management; with the LUT on this target it was applied a
+				// second time. OutputOnly clears only the parameters' LUT.
+				target.lut = nullptr;
+				target.lut_type = PL_LUT_UNKNOWN;
+			}
 			bool rendered = false;
 			bool submitted = false;
 			double blockMs = 0.0;
@@ -14167,8 +14175,12 @@ struct LibplaceboVideoRenderer::Impl
 				if (!rendered)
 				{
 					vectorGuard.Release();
-					pl_frame_clear(d3d11->gpu, &target, black);
-					pl_render_image(renderer, f.image, &target, &params);
+					// Bug hunt 2026-10-17: A itself with A's own target (its crop and
+					// calibration LUT), not the cached picture's.
+					pl_frame fallbackTarget = *f.target;
+					fallbackTarget.planes[0].texture = frame.fbo;
+					pl_frame_clear(d3d11->gpu, &fallbackTarget, black);
+					pl_render_image(renderer, f.image, &fallbackTarget, &params);
 				}
 				const int64_t presentStart = PerformanceCounterNow();
 				submitted = pl_swapchain_submit_frame(swapchain);
@@ -20339,14 +20351,16 @@ struct LibplaceboVideoRenderer::Impl
         struct NextVectorGuard
         {
             std::vector<const pl_hook*> hooks;
-            ~NextVectorGuard()
+            void Release()
             {
                 for (const pl_hook* hook : hooks)
                 {
                     CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
                     SetSigmaDeltaVectors(hook, nullptr);
                 }
+                hooks.clear();
             }
+            ~NextVectorGuard() { Release(); }
         } nextVectorGuard;
         if (dejudderNextVectorsSequence != 0 && dejudderNextVectorsSequence == sourceSequence && !cadenceRepeat &&
             dejudderNextVectors && dejudderGeometryValid && SameGeometry(dejudderGeometry, dejudderNextVectorsGeometry) &&
@@ -20390,8 +20404,11 @@ struct LibplaceboVideoRenderer::Impl
             frameParams.dither_params = nullptr;
             frameParams.error_diffusion = nullptr;
         }
-        const auto hookRender = NlsHookRecovery::Render(renderer, d3d11->gpu,
-            renderImage, target, baseTarget, frameParams, submittedNls, [&]()
+        // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
+        // frameHooks itself (a member), so frameParams - read again by the
+        // de-judder extras - never points at a list local to the recovery.
+        const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
+            renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
             {
                 runtimeRejectedNlsHookSignature = nlsHookSignature;
                 runtimeRejectedNlsSignature = nlsHook->signature;
@@ -20459,6 +20476,9 @@ struct LibplaceboVideoRenderer::Impl
                 return temporalRenderer.Render(renderer,frame,destination,parameters);
             });
         bool rendered = hookRender.rendered;
+        // Bug hunt 2026-10-17: B's carried vectors are for this present only;
+        // released here so the de-judder extras below never see them bound.
+        nextVectorGuard.Release();
         if (hookRender.retried)
         {
             renderParams.hooks = nullptr;
