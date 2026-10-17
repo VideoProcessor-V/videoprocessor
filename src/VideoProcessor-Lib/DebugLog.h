@@ -351,8 +351,7 @@ private:
 						localtime_s(&reopenTm, &msg.timestamp);
 						file << std::put_time(&reopenTm, "%Y-%m-%d %H:%M:%S") <<
 							" | Log reopened after a failed rollover reopen; " <<
-							droppedWhileClosed << " message(s) were not written
-";
+							droppedWhileClosed << " message(s) were not written" << std::endl;
 						reopenPending = false;
 						droppedWhileClosed = 0;
 						reopenBackoffMs = FLUSH_INTERVAL_MS;
