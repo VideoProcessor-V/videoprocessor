@@ -912,6 +912,224 @@ namespace Tests
             Assert::AreEqual(1007U, static_cast<unsigned>(dm.trims[7].targetMaxPq));
         }
 
+        // ---- Bug hunt 2026-10-17 -------------------------------------------
+
+        TEST_METHOD(L8BlocksBeforeL2CannotCrowdOutL2Trims)
+        {
+            // Eight L8 blocks arrive first, then two L2 blocks: both L2 trims
+            // (the ones dv_trims applies) keep a slot; L8 fills what is left.
+            auto body = DmBody(2048);
+            for (uint8_t i = 0; i < 8; ++i)
+            {
+                std::vector<uint8_t> l8{ i };
+                for (int f = 0; f < 6; ++f)
+                    Push16(l8, 2048);
+                AddExtension(body, 8, l8);
+            }
+            for (uint16_t i = 0; i < 2; ++i)
+            {
+                std::vector<uint8_t> l2;
+                Push16(l2, static_cast<uint16_t>(2000 + i));
+                for (int f = 0; f < 6; ++f)
+                    Push16(l2, 2048);
+                AddExtension(body, 2, l2);
+            }
+            SenderPicture picture(false);
+            picture.Embed(Packetize(body));
+            Formatter formatter;
+            formatter.OnVideoState(picture.state);
+            const auto dm = Deliver(formatter, picture, 1);
+            AssertPeak(dm, 2048);
+            Assert::AreEqual(8U, static_cast<unsigned>(dm.trimCount));
+            Assert::IsTrue(dm.trimOverflow);
+            unsigned l2Count = 0, l8Count = 0;
+            for (uint8_t t = 0; t < dm.trimCount; ++t)
+            {
+                if (dm.trims[t].level == 2)
+                {
+                    Assert::AreEqual(2000U + l2Count, static_cast<unsigned>(dm.trims[t].targetMaxPq));
+                    ++l2Count;
+                }
+                else if (dm.trims[t].level == 8)
+                {
+                    Assert::AreEqual(l8Count, static_cast<unsigned>(dm.trims[t].targetDisplayIndex));
+                    ++l8Count;
+                }
+            }
+            Assert::AreEqual(2U, l2Count);
+            Assert::AreEqual(6U, l8Count);
+        }
+
+        TEST_METHOD(LetterboxedSdrResolvesAlignmentFromTheWholePicture)
+        {
+            // Black bars cover the top (and bottom) quarter, i.e. far more than
+            // the first 4096 pixels the old probe looked at. Several rasters,
+            // padded strides and containers; both placements.
+            struct Case { uint32_t width, height; VideoFrameEncoding encoding; };
+            const Case cases[] = {
+                { 130, 128, VideoFrameEncoding::R210 },
+                { 1920, 1080, VideoFrameEncoding::R210 },
+                { 1280, 720, VideoFrameEncoding::R10l },
+                { 720, 576, VideoFrameEncoding::R10b } };
+            for (const auto& test : cases)
+            {
+                for (const bool high8 : { false, true })
+                {
+                    SenderPicture sdr(high8, test.width, test.height, test.encoding);
+                    sdr.FillSdrRamp();
+                    const uint32_t bar = test.height / 4;
+                    for (size_t pixel = 0; pixel < sdr.intensity.size(); ++pixel)
+                    {
+                        const size_t row = pixel / test.width;
+                        if (row < bar || row >= test.height - bar)
+                            sdr.WriteRgb8(pixel, 0, 0, 0);
+                    }
+                    Formatter formatter;
+                    formatter.OnVideoState(sdr.state);
+                    std::vector<BYTE> output;
+                    const auto dm = Deliver(formatter, sdr, 1, &output);
+                    const std::wstring where = std::to_wstring(test.width) + L"x" +
+                        std::to_wstring(test.height) + L" high8=" + std::to_wstring(high8);
+                    Assert::IsFalse(dm.valid || dm.requiresBlackFrame, where.c_str());
+                    Assert::IsTrue(dm.allowSdrFallback, where.c_str());
+                    Assert::AreEqual(high8 ? 1U : 2U,
+                        static_cast<unsigned>(dm.rgbBitAlignment), where.c_str());
+                    Assert::IsTrue(AllZero(output)); // the renderer uses the raw RGB frame
+                }
+            }
+        }
+
+        TEST_METHOD(BlackAndDarkSdrNeverLockAWrongAlignment)
+        {
+            for (const bool high8 : { false, true })
+            {
+                SenderPicture sdr(high8);
+                Formatter formatter;
+                formatter.OnVideoState(sdr.state);
+                // All black: nothing discriminates, the placement stays unknown.
+                for (size_t pixel = 0; pixel < sdr.intensity.size(); ++pixel)
+                    sdr.WriteRgb8(pixel, 0, 0, 0);
+                for (uint64_t counter = 1; counter <= 10; ++counter)
+                {
+                    const auto dm = Deliver(formatter, sdr, counter);
+                    Assert::AreEqual(0U, static_cast<unsigned>(dm.rgbBitAlignment));
+                    Assert::IsTrue(dm.allowSdrFallback);
+                }
+                // Dark scene (RGB8 values below 64): high8 has no bits in the
+                // top two of each field, so it stays unknown; low8 sets the
+                // low bits and resolves correctly. Never the wrong placement.
+                for (size_t pixel = 0; pixel < sdr.intensity.size(); ++pixel)
+                {
+                    const unsigned v = static_cast<unsigned>((pixel * 7) % 64);
+                    sdr.WriteRgb8(pixel, v, (v + 9) % 64, (v + 21) % 64);
+                }
+                const unsigned expected = high8 ? 1U : 2U;
+                const auto dark = Deliver(formatter, sdr, 11);
+                Assert::AreEqual(high8 ? 0U : 2U, static_cast<unsigned>(dark.rgbBitAlignment));
+                // A bright letterboxed picture then resolves the placement.
+                sdr.FillSdrRamp();
+                for (size_t pixel = 0; pixel < sdr.intensity.size() / 2; ++pixel)
+                    sdr.WriteRgb8(pixel, 0, 0, 0);
+                const auto bright = Deliver(formatter, sdr, 12);
+                Assert::AreEqual(expected, static_cast<unsigned>(bright.rgbBitAlignment));
+                Assert::IsTrue(bright.allowSdrFallback);
+            }
+        }
+
+        TEST_METHOD(GreySdrMenuAfterTunnelExitsWithinTheWindow)
+        {
+            // A grey menu (R = G = B around 128) after the tunnel stops without
+            // EOS used to satisfy the neutral-R cue and stay black for ever.
+            for (const bool high8 : { false, true })
+            {
+                SenderPicture tunnel(high8);
+                SenderPicture menu(high8);
+                const size_t width = menu.state->displayMode->FrameWidth();
+                for (size_t pixel = 0; pixel < menu.intensity.size(); ++pixel)
+                {
+                    const size_t x = pixel % width, y = pixel / width;
+                    unsigned v = 128;                       // background
+                    if (y >= 40 && y < 60 && x >= 20 && x < 110)
+                        v = 150;                            // highlighted item
+                    if (y % 16 == 3 && x % 5 < 3)
+                        v = 108;                            // text strokes
+                    menu.WriteRgb8(pixel, v, v, v);
+                }
+                Formatter formatter;
+                formatter.OnVideoState(tunnel.state);
+                tunnel.Embed(Packetize(DmBody()));
+                AssertPeak(Deliver(formatter, tunnel, 1), 3072);
+                const uint64_t window = SdrExitPictures(24000, 1001);
+                for (uint64_t counter = 2; counter <= window; ++counter)
+                {
+                    const auto dm = Deliver(formatter, menu, counter);
+                    Assert::IsTrue(dm.requiresBlackFrame);
+                    Assert::IsFalse(dm.allowSdrFallback);
+                }
+                const auto exited = Deliver(formatter, menu, window + 1);
+                Assert::IsFalse(exited.valid || exited.requiresBlackFrame);
+                Assert::IsTrue(exited.allowSdrFallback);
+                Assert::AreEqual(high8 ? 1U : 2U, static_cast<unsigned>(exited.rgbBitAlignment));
+            }
+        }
+
+        TEST_METHOD(GrainyMidGreyTunnelWithLostHeadersStaysTunnel)
+        {
+            // Mid-grey tunnel content (G near R near 128) is no longer held by
+            // the neutral-R cue; its noisy low nibbles (B) still are.
+            for (const bool high8 : { false, true })
+            {
+                SenderPicture picture(high8);
+                uint32_t seed = 12345;
+                for (size_t pixel = 0; pixel < picture.intensity.size(); ++pixel)
+                {
+                    seed = seed * 1664525U + 1013904223U;
+                    picture.intensity[pixel] = static_cast<uint16_t>(2040 + ((seed >> 16) & 15U));
+                    picture.chroma[pixel] = static_cast<uint16_t>(2040 + ((seed >> 24) & 15U));
+                    picture.Pack(pixel);
+                }
+                picture.Embed(Packetize(DmBody()));
+                Formatter formatter;
+                formatter.OnVideoState(picture.state);
+                AssertPeak(Deliver(formatter, picture, 1), 3072);
+                picture.CorruptAllCopies();
+                const uint64_t window = SdrExitPictures(24000, 1001);
+                for (uint64_t counter = 2; counter < 2 + 3 * window; ++counter)
+                {
+                    const auto dm = Deliver(formatter, picture, counter);
+                    Assert::IsFalse(dm.allowSdrFallback);
+                    Assert::IsTrue(dm.requiresBlackFrame);
+                }
+            }
+        }
+
+        TEST_METHOD(LossLimitCountsSourcePicturesIncludingSkippedCounters)
+        {
+            // Only every third source picture reaches the formatter: the limit
+            // (24 pictures, ~1 s at 23.976 Hz) is reached by counter span.
+            SenderPicture picture(true);
+            Formatter formatter;
+            formatter.OnVideoState(picture.state);
+            picture.Embed(Packetize(DmBody()));
+            AssertPeak(Deliver(formatter, picture, 1), 3072);
+            picture.CorruptAllCopies();
+            for (uint64_t counter = 2; counter < 25; counter += 3)
+                AssertPeak(Deliver(formatter, picture, counter), 3072);
+            auto dm = Deliver(formatter, picture, 25); // 25 - 2 + 1 = 24 source pictures
+            Assert::IsFalse(dm.valid || dm.allowSdrFallback);
+            Assert::IsTrue(dm.requiresBlackFrame);
+            // Recovery clears the run; a counter reset during a later loss
+            // restarts the span at the new counter instead of underflowing.
+            picture.Embed(Packetize(DmBody(2048)));
+            AssertPeak(Deliver(formatter, picture, 100), 2048);
+            picture.CorruptAllCopies();
+            AssertPeak(Deliver(formatter, picture, 101), 2048);
+            for (uint64_t counter = 5; counter < 28; ++counter)
+                AssertPeak(Deliver(formatter, picture, counter), 2048);
+            dm = Deliver(formatter, picture, 28); // 28 - 5 + 1 = 24
+            Assert::IsFalse(dm.valid || dm.allowSdrFallback);
+        }
+
         // ---- audit 2026-10-16: faithful-unpack coverage -------------------
 
         TEST_METHOD(AllContainersTimingsAndRastersUnpackBitExact)
