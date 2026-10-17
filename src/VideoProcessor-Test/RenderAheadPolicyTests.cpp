@@ -3,6 +3,7 @@
 
 #include <led/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
@@ -110,7 +111,7 @@ namespace RenderAheadPolicyTest
 		// FIFO, no sooner than SyncInterval refreshes after the previous one. The
 		// renderer plans each frame after its own present, as LibplaceboVideoRenderer
 		// does: the latest present on screen (closed loop) or nothing (open loop),
-		// FirstVsync, the latency floor (min), TakeLateDrops, PlanFrame, Commit.
+		// FirstVsync, L at the anchor (AnchorLatency), TakeLateDrops, PlanFrame, Commit.
 		SimResult Simulate(const SimConfig& c)
 		{
 			SimResult r;
@@ -141,7 +142,6 @@ namespace RenderAheadPolicyTest
 			};
 
 			Schedule schedule;
-			double floor = std::numeric_limits<double>::infinity();
 			double gpuFree = 2.0 * Ps;   // the queue: the first frame starts two source periods in
 			int mainInterval = 1;
 			const int frames = static_cast<int>(c.seconds / Ps);
@@ -174,7 +174,7 @@ namespace RenderAheadPolicyTest
 				const double firstVsync = schedule.FirstVsync(now, Pd, grid, restart, behind);
 				present(done, mainInterval, firstVsync);
 				const double lead = PlannedLead(Ps, Pd);
-				floor = std::min(floor, firstVsync - film - (restart ? 0.0 : lead));
+				const double floor = schedule.AnchorLatency(restart, firstVsync, film);
 				if (late || behind) ++r.lateObserved;
 				if (restart) ++r.restarts;
 				FrameInput in;
@@ -433,6 +433,208 @@ namespace RenderAheadPolicyTest
 			Assert::AreEqual<size_t>(0, QueueCredit(0.0, 1.0 / 24.0, 6));
 			Assert::AreEqual<size_t>(0, QueueCredit(2.0 / 60.0, 1.0 / 24.0, 2));
 			Assert::AreEqual<size_t>(1, QueueCredit(0.5, 1.0 / 24.0, 3), L"never below 2 queued frames");
+		}
+	};
+
+	// Bug hunt 05 H1/H2/M3: the planner as the renderer drives it (FirstVsync, a restart's
+	// Break, L at the anchor, PlanFrame, Commit; a hold-only frame committed when it fits)
+	// over thousands of frames with deterministic arrival jitter, on measured-looking
+	// rates. The average refreshes per frame is the ratio (H1: the floor ratcheted on
+	// every inexact cadence), L stays bounded, and on a whole ratio no frame owns n+1 or
+	// n-1 refreshes because of jitter (H2), hold-only frames included (M3).
+	TEST_CLASS(RenderAheadJitterSimulationTests)
+	{
+	public:
+		struct ChainResult
+		{
+			int frames = 0;
+			long long refreshes = 0;   // chained frames' refreshes (restart frames excluded)
+			int chained = 0;
+			int restarts = 0;
+			int holdsCommitted = 0;
+			int holdsBroken = 0;
+			int offByOne = 0;          // whole ratio: chained frames not owning exactly n
+			double minL = 1e9, maxL = -1e9;
+		};
+
+		static ChainResult RunChain(double sourceHz, double displayHz, int frames, double jitter, int holdEvery,
+			unsigned seed)
+		{
+			ChainResult r;
+			const double Ps = 1.0 / sourceHz, Pd = 1.0 / displayHz;
+			const double ratio = DejudderPolicy::CadenceRatio(sourceHz, displayHz);
+			const double v0 = 0.37 * Pd;          // the display's vsync grid
+			const double call = 0.4 * Ps;         // arrival to A's present returning
+			const int maxExtras = DejudderPolicy::MaxExtras(ratio);
+			const double lead = PlannedLead(Ps, Pd);
+			const double maxAhead = lead + (static_cast<int>(kQueuedFrameLatency) + 1) *
+				std::ceil(ratio - kTolerance) * Pd;
+			const bool whole = std::abs(ratio - std::round(ratio)) < 1e-6;
+			const int n = static_cast<int>(std::round(ratio));
+			uint32_t state = seed;
+			auto uniform = [&state]()
+			{
+				state = state * 1664525u + 1013904223u;   // deterministic LCG
+				return static_cast<double>(state >> 8) / static_cast<double>(1u << 24) * 2.0 - 1.0;
+			};
+			Schedule schedule;
+			for (int i = 0; i < frames; ++i)
+			{
+				const double film = 10.0 + i * Ps + jitter * uniform();
+				const double now = film + call;
+				bool restart = false, behind = false;
+				const double first = schedule.FirstVsync(now, Pd, v0, restart, behind, maxAhead);
+				if (restart)
+				{
+					schedule.Break();
+					++r.restarts;
+				}
+				const double L = schedule.AnchorLatency(restart, first, film);
+				r.minL = std::min(r.minL, L);
+				r.maxL = std::max(r.maxL, L);
+				const bool hold = holdEvery > 0 && i % holdEvery == holdEvery - 1;
+				FrameInput in;
+				in.filmTime = film;
+				in.sourcePeriod = Ps;
+				in.displayPeriod = Pd;
+				in.firstVsync = first;
+				in.latencyFloor = L;
+				in.lead = lead;
+				in.strength = hold ? 0.0 : 1.0;
+				in.evenCycle = DejudderPolicy::EvenCycle(ratio);
+				in.maxExtras = maxExtras;
+				in.dropExtras = hold ? 0 : schedule.TakeLateDrops() + (behind ? 1 : 0);
+				in.arrivalJitter = schedule.NoteArrival(film, Ps);
+				const FramePlan plan = PlanFrame(in);
+				Assert::IsTrue(plan.valid);
+				if (hold)
+				{
+					// As the renderer: committed when nothing must be rendered, else the chain ends.
+					if (plan.rendered == 0 && IntervalsFit(plan))
+						++r.holdsCommitted;
+					else
+					{
+						++r.holdsBroken;
+						schedule.Break();
+						continue;
+					}
+				}
+				else
+				{
+					Assert::IsTrue(IntervalsFit(plan));
+					if (!restart)
+						Assert::IsTrue(plan.rendered <= maxExtras);
+				}
+				schedule.Commit(plan.nextFirstVsync, {});
+				if (!restart)
+				{
+					++r.chained;
+					r.refreshes += plan.refreshes;
+					// After the jitter estimate's first second (it starts at kTolerance).
+					if (whole && plan.refreshes != n && i >= static_cast<int>(sourceHz))
+						++r.offByOne;
+				}
+			}
+			r.frames = frames;
+			return r;
+		}
+
+		TEST_METHOD(AverageIsTheRatioAndLatencyStaysBounded)
+		{
+			const double sources[] = { 24000.0 / 1001.0, 24.0, 25.0, 30000.0 / 1001.0, 30.0 };
+			const double displays[] = { 50.0, 60000.0 / 1001.0, 60.0, 120.0, 144.0 };
+			const double jitter = 0.0005;   // +-0.5 ms arrival jitter
+			const int frames = 6000;
+			for (int holds = 0; holds < 2; ++holds)
+				for (double sourceHz : sources)
+					for (double displayHz : displays)
+					{
+						const double ratio = displayHz / sourceHz;
+						const double Pd = 1.0 / displayHz, Ps = 1.0 / sourceHz;
+						const ChainResult r = RunChain(sourceHz, displayHz, frames, jitter, holds ? 37 : 0, 11u);
+						const std::wstring what = Name(sourceHz, displayHz) + (holds ? L" (holds)" : L"");
+						const double average = static_cast<double>(r.refreshes) / std::max(1, r.chained);
+						wchar_t line[320];
+						swprintf_s(line, L"%s: ratio %.6f average %.6f restarts %d L %.3f..%.3f ms off-by-one %d holds %d/%d",
+							what.c_str(), ratio, average, r.restarts, r.minL * 1000.0, r.maxL * 1000.0, r.offByOne,
+							r.holdsCommitted, r.holdsBroken);
+						Logger::WriteMessage(line);
+						Assert::IsTrue(r.chained > frames / 2, (what + L": chained").c_str());
+						// The average: the ratio within a few refreshes over the whole run
+						// (each restart moves the chain by at most the lead and a refresh).
+						const double slack = (2.0 + ratio) * (1 + r.restarts + r.holdsBroken);
+						Assert::AreEqual(ratio, average, slack / r.chained, (what + L": average").c_str());
+						// L bounded: the anchor's latency (call + at most a refresh), however long the run.
+						Assert::IsTrue(r.maxL - r.minL <= Pd + 2.0 * jitter + 1e-9, (what + L": L spread").c_str());
+						Assert::IsTrue(r.maxL <= 0.4 * Ps + Pd + jitter + 1e-9, (what + L": L bound").c_str());
+						if (holds == 0)
+							Assert::AreEqual(1, r.restarts, (what + L": one anchor").c_str());
+						// A whole ratio: every chained frame owns exactly n (H2).
+						if (std::abs(ratio - std::round(ratio)) < 1e-6)
+							Assert::AreEqual(0, r.offByOne, (what + L": n+-1 split").c_str());
+						if (holds && std::ceil(ratio - 1e-9) <= kMaxSyncInterval)   // every frame fits a hold-only plan
+							Assert::AreEqual(0, r.holdsBroken, (what + L": hold-only frames continue the chain").c_str());
+					}
+		}
+
+		// A jitter larger than the tolerance still never ratchets: it may split a whole
+		// ratio, but the average stays the ratio and L never moves without a restart.
+		TEST_METHOD(LargeJitterDoesNotRatchet)
+		{
+			const double rates[][2] = { { 24000.0 / 1001.0, 60.0 }, { 30000.0 / 1001.0, 60.0 },
+				{ 25.0, 60.0 }, { 24000.0 / 1001.0, 60000.0 / 1001.0 }, { 30.0, 60.0 } };
+			for (const auto& rate : rates)
+			{
+				const ChainResult r = RunChain(rate[0], rate[1], 3000, 0.002, 0, 5u);
+				const double ratio = rate[1] / rate[0];
+				const double average = static_cast<double>(r.refreshes) / std::max(1, r.chained);
+				const std::wstring what = Name(rate[0], rate[1]);
+				Assert::AreEqual(ratio, average, (2.0 + ratio) * (1 + r.restarts) / r.chained, (what + L": average").c_str());
+				Assert::IsTrue(r.maxL - r.minL <= 1.0 / rate[1] + 0.004 + 1e-9, (what + L": L bounded").c_str());
+			}
+		}
+
+		// L: fixed at a restart, kept by chained frames and by corrections, re-anchored
+		// by the next restart.
+		TEST_METHOD(AnchorLatencyMovesOnlyAtARestart)
+		{
+			Schedule schedule;
+			Assert::IsFalse(schedule.Anchored());
+			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 1.025, 1.0), 1e-12, L"the first frame anchors");
+			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 2.100, 2.0), 1e-12, L"chained: kept");
+			schedule.Commit(3.0, { { 1u, 2.9 } });
+			Assert::IsTrue(schedule.Observe(1u, 2.9 + 2.0 / 60.0, 1.0 / 60.0), L"late: the chain moves");
+			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 3.0 + 2.0 / 60.0, 2.9), 1e-12, L"a correction keeps L");
+			Assert::AreEqual(0.031, schedule.AnchorLatency(true, 4.031, 4.0), 1e-12, L"a restart re-anchors");
+			schedule.Reset();
+			Assert::IsFalse(schedule.Anchored());
+		}
+
+		// H2 at the planner: a whole ratio's frame with phases moved by less than the
+		// tolerance either way owns exactly n refreshes, its extras at k/N.
+		TEST_METHOD(WholeRatioToleratesSmallPhaseShifts)
+		{
+			const double pairs[][2] = { { 30.0, 60.0 }, { 25.0, 50.0 }, { 30.0, 120.0 }, { 24.0, 120.0 },
+				{ 60.0, 120.0 }, { 30000.0 / 1001.0, 60000.0 / 1001.0 } };
+			for (const auto& pr : pairs)
+			{
+				const double Ps = 1.0 / pr[0], Pd = 1.0 / pr[1];
+				const int n = static_cast<int>(std::round(Ps / Pd));
+				for (double shift : { -0.9, -0.5, -0.1, 0.0, 0.1, 0.5, 0.9 })
+				{
+					FrameInput in = Input(pr[0], pr[1], 100.0, 0.0, 0.020);
+					in.firstVsync = 100.0 + 0.020 + in.lead;
+					in.filmTime = 100.0 + shift * kTolerance * Pd;   // within the tolerance
+					const FramePlan plan = PlanFrame(in);
+					const std::wstring what = Name(pr[0], pr[1]) + L" shift " + std::to_wstring(shift);
+					Assert::AreEqual(n, plan.refreshes, what.c_str());
+					Assert::IsTrue(plan.phi0 >= 0.0, (what + L": phi0 near 0 counts as 0").c_str());
+					for (size_t k = 0; k < plan.slots.size(); ++k)
+						if (plan.slots[k].render)
+							Assert::AreEqual(static_cast<float>(1.0 * (k + 1) / n), plan.slots[k].shift, 1e-6f, (what + L": k/N").c_str());
+					Assert::AreEqual(std::min(n - 1, in.maxExtras), plan.rendered, what.c_str());
+				}
+			}
 		}
 	};
 

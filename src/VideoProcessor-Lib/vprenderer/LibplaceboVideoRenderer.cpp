@@ -14302,26 +14302,53 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderPredictedVsync = 0.0;
 		if (dejudderReason != DejudderPolicy::Reason::Active || !dejudder)
 			return false;
-		if (dejudderEstimatedSequence != f.sourceSequence) { DejudderHold("no motion estimate for this frame"); return false; }
+		// Render-ahead (Bug hunt 05 M3): a frame that holds for a reason that keeps the
+		// timing (no estimate, MotionValidity, a cadence repeat, a composed picture) is
+		// still planned, hold-only, and committed, so the chain, B's interval and the
+		// queue credit continue; returning uncommitted broke the chain, which showed this
+		// frame short by the lead and the next one long. Only real discontinuities (a
+		// generation change, missing rates or timing, no swapchain) break it.
+		// render_ahead off: every hold returns here at once, as before.
+		const bool renderAheadOn = activeSettings.renderAhead;
+		const char* timedHold = nullptr;
+		auto holdKeepsTiming = [&](const char* why)
+		{
+			if (!renderAheadOn)
+			{
+				DejudderHold(why);
+				return true;   // return now (render_ahead off: unchanged)
+			}
+			if (!timedHold)
+				timedHold = why;
+			return false;
+		};
+		if (dejudderEstimatedSequence != f.sourceSequence && holdKeepsTiming("no motion estimate for this frame")) return false;
 		// MotionValidity: the estimate's epoch is over (a discontinuity since).
-		if (!motionValidity.Current(dejudderEstimatedEpoch)) { DejudderHold(MotionValidity::Describe(motionValidity.LastCause())); return false; }
+		if (!motionValidity.Current(dejudderEstimatedEpoch) && holdKeepsTiming(MotionValidity::Describe(motionValidity.LastCause()))) return false;
 		// The rendered warp's settings for this output (general scaling).
 		const int outputHeight = f.target && f.target->num_planes > 0 && f.target->planes[0].texture ?
 			f.target->planes[0].texture->params.h : 0;
 		const Dejudder::Settings renderedWarpSettings = RenderedWarpSettings(outputHeight);
-		if (f.cadenceRepeat) { DejudderHold("cadence repeat"); return false; }
+		if (f.cadenceRepeat && holdKeepsTiming("cadence repeat")) return false;
 		// A moved subtitle's composed picture: the rendered warp holds its
 		// rectangles still (owner 2026-10-13); the source warp cannot.
 		const bool sourcePlanes = f.image && f.image->num_planes == 2 && f.image->planes[0].texture == textures[0] &&
 			f.image->planes[1].texture == textures[1];
 		// An RGB source (no YCbCr planes): the rendered warp only, checked below.
 		const bool rgbSource = dejudderLayout.valid && dejudderLayout.rgb;
-		if (!f.image || (!sourcePlanes && !rgbSource && !(dejudderSubtitleComposed && activeSettings.dejudderWarpRendered &&
-			dejudderGeometryValid && dejudderGeometry.numHolds > 0)))
+		if (!f.image)
 		{
 			DejudderHold("composed source (subtitle moving)");
 			return false;
 		}
+		if (!sourcePlanes && !rgbSource && !(dejudderSubtitleComposed && activeSettings.dejudderWarpRendered &&
+			dejudderGeometryValid && dejudderGeometry.numHolds > 0) && holdKeepsTiming("composed source (subtitle moving)"))
+			return false;
+		// The composed picture exists only as the cache (checked again below, where
+		// render_ahead off holds as before): render-ahead holds it with the timing kept.
+		if (renderAheadOn && !sourcePlanes && !(interpolating ? nullptr : dejudderCache.Texture(f.sourceSequence)))
+			holdKeepsTiming(rgbSource ? "RGB source without the rendered picture (the rendered warp only)" :
+				"composed source without the cached picture");
 		if (actualOutput.presentationModel != LibplaceboOutput::PresentationModel::FLIP)
 		{
 			DejudderHold("no flip presentation");
@@ -14522,11 +14549,15 @@ struct LibplaceboVideoRenderer::Impl
 			if (restart)
 				++renderAheadRestarts;
 			renderAheadLead = RenderAhead::PlannedLead(sourcePeriod, displayPeriod);
-			// L, the constant that fixes which refresh is phase 0, without the lead (a
-			// chained frame's first refresh includes it; an anchor's does not).
-			dejudderLatencyFloor.Add(plannedFirstVsync - callbackA - (restart ? 0.0 : renderAheadLead));
+			// L, the constant that fixes which refresh is phase 0, without the lead: fixed
+			// at the anchor (a restart's first vsync - film time) and kept by chained
+			// frames (Schedule::AnchorLatency, Bug hunt 05 H1: a floor over chained samples
+			// ratcheted upward on every inexact cadence). The floor window only reports it.
+			const double anchorLatency = renderAheadSchedule.AnchorLatency(restart, plannedFirstVsync, callbackA);
+			dejudderLatencyFloor.Add(anchorLatency);
 			const int maxExtras = DejudderPolicy::MaxExtras(ratio);
-			int drops = renderAheadSchedule.TakeLateDrops() + (behind ? 1 : 0);
+			// A hold-only frame leaves lateness's drop for the next frame with extras.
+			int drops = timedHold ? 0 : renderAheadSchedule.TakeLateDrops() + (behind ? 1 : 0);
 			if (gateMode == RenderAhead::GateMode::Period)
 			{
 				gateLevel = UpdateRenderAheadGate(RenderAheadNow(), sourcePeriod, displayPeriod, late, maxExtras);
@@ -14537,12 +14568,13 @@ struct LibplaceboVideoRenderer::Impl
 			in.sourcePeriod = sourcePeriod;
 			in.displayPeriod = displayPeriod;
 			in.firstVsync = plannedFirstVsync;
-			in.latencyFloor = dejudderLatencyFloor.Floor();
+			in.latencyFloor = anchorLatency;
 			in.lead = renderAheadLead;
-			in.strength = dejudderEffectiveStrength;
+			in.strength = timedHold ? 0.0 : dejudderEffectiveStrength;   // a hold-only plan
 			in.evenCycle = dejudderEvenCycle;
 			in.maxExtras = maxExtras;
 			in.dropExtras = drops;
+			in.arrivalJitter = renderAheadSchedule.NoteArrival(callbackA, sourcePeriod);   // H2's tolerance
 			plan = RenderAhead::PlanFrame(in);
 			if (!plan.valid)
 			{
@@ -14558,6 +14590,24 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadDropped += static_cast<unsigned long long>(plan.dropped);
 			renderAheadHeld += static_cast<unsigned long long>(plan.slots.size()) -
 				static_cast<unsigned long long>(plan.rendered);
+		}
+		if (timedHold)
+		{
+			// Render-ahead hold-only frame (M3): A shown for all its refreshes; the plan is
+			// committed as an extras frame's would be (B's interval and refresh), the
+			// credit kept. A plan that would need A presented again (more holds in a row
+			// than DXGI's interval allows) cannot be made without rendering: the chain ends.
+			DejudderHold(timedHold);
+			if (queuedMode && plan.valid && plan.rendered == 0 && RenderAhead::IntervalsFit(plan))
+			{
+				renderAheadSchedule.Commit(plan.nextFirstVsync, plannedIds);
+				renderAheadMainInterval = plan.nextInterval;
+				UINT lastPresent = 0;
+				renderAheadExpectedPresent = SUCCEEDED(native->GetLastPresentCount(&lastPresent)) ? lastPresent + 1 : 0;
+				renderAheadCommitted = true;
+				LogRenderAhead(ratio, gateLevel);
+			}
+			return false;
 		}
 
 		Dejudder::Planes a;

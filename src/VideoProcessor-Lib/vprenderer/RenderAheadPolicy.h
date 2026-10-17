@@ -90,6 +90,7 @@ namespace RenderAhead
 		int evenCycle = 0;            // N on an even cadence (extras at k/N), else 0
 		int maxExtras = 0;            // the cap (MaxExtras of the ratio)
 		int dropExtras = 0;           // extras to drop: lateness + the gate's ladder
+		double arrivalJitter = 0.0;   // measured arrival jitter (s, Schedule::NoteArrival): widens the phase tolerance
 	};
 
 	struct Slot
@@ -124,14 +125,37 @@ namespace RenderAhead
 	// which is a whole number of refreshes): a hold, not an extra with no shift.
 	constexpr double kPhaseEpsilon = 1e-6;
 
+	// The phase boundaries' tolerance, expressed in phase: at least kTolerance
+	// refreshes, or the measured arrival jitter when larger, at most
+	// kMaxToleranceRefreshes. Arrival jitter moves every phase of a frame by the same
+	// small amount; without a tolerance a refresh at phase 1 - jitter stays with A on a
+	// whole ratio, so A owns n+1 refreshes and B n-1 (Bug hunt 05 H2: 3:1 / 1:3 splits
+	// on 30p at 60 Hz). A refresh within it below 1 belongs to B (B's own picture then
+	// shows at most the tolerance early instead of up to a refresh late), and a phase
+	// within it of 0 is A's own time (a hold, not an extra with a near-zero shift).
+	constexpr double kMaxToleranceRefreshes = 0.45;
+	constexpr double kJitterMargin = 1.5;   // over the decaying peak (an anchor at a jitter extreme)
+	inline double PhaseTolerance(const FrameInput& in)
+	{
+		if (!(in.sourcePeriod > 0.0) || !(in.displayPeriod > 0.0))
+			return kPhaseEpsilon;
+		const double jitterRefreshes = in.arrivalJitter > 0.0 && std::isfinite(in.arrivalJitter) ?
+			kJitterMargin * in.arrivalJitter / in.displayPeriod : 0.0;
+		const double refreshes = std::min(kMaxToleranceRefreshes, std::max(kTolerance, jitterRefreshes));
+		return std::max(kPhaseEpsilon, refreshes * in.displayPeriod / in.sourcePeriod);
+	}
+
 	inline float ShiftFor(const FrameInput& in, double delta)
 	{
-		if (!(delta > kPhaseEpsilon))
+		const double tolerance = PhaseTolerance(in);
+		if (!(delta > tolerance))
 			return 0.0f;
 		if (in.evenCycle > 0)
 		{
-			// Delta 10: an even cadence's extras sit at the exact phases k/N.
-			const double k = std::floor(delta * in.evenCycle + 1e-6);
+			// Delta 10: an even cadence's extras sit at the exact phases k/N; a phase
+			// within the tolerance below k/N is still k (the same tolerance in k).
+			const double toleranceK = std::min(0.49, std::max(1e-6, tolerance * in.evenCycle));
+			const double k = std::floor(delta * in.evenCycle + toleranceK);
 			if (!(k >= 1.0))
 				return 0.0f;
 			return static_cast<float>(in.strength * std::min(k, static_cast<double>(in.evenCycle - 1)) / in.evenCycle);
@@ -183,7 +207,10 @@ namespace RenderAhead
 			!std::isfinite(in.filmTime))
 			return plan;
 		plan.valid = true;
+		const double tolerance = PhaseTolerance(in);
 		plan.phi0 = Phase(in, in.firstVsync);
+		if (plan.phi0 < 0.0 && plan.phi0 > -tolerance)
+			plan.phi0 = 0.0;   // within the tolerance of 0: A's own time (H2)
 		// A owns refreshes while the phase is below 1; at most its extras, the restart
 		// lead's refreshes and DXGI's longest run of holds (a long restart lead is shown
 		// as holds and re-rendered A's at most, all on A: B then continues the chain).
@@ -192,7 +219,7 @@ namespace RenderAhead
 		const int ownedCap = std::max(1, in.maxExtras + 1 + (kMaxSyncInterval - 1) + std::min(leadRefreshes, 16));
 		int refreshes = 1;
 		while (refreshes < ownedCap &&
-			Phase(in, in.firstVsync + refreshes * in.displayPeriod) < 1.0 - 1e-9)
+			Phase(in, in.firstVsync + refreshes * in.displayPeriod) < 1.0 - tolerance)
 			++refreshes;
 		plan.refreshes = refreshes;
 		for (int k = 1; k < refreshes; ++k)
@@ -266,7 +293,55 @@ namespace RenderAhead
 			nextVsync = 0.0;
 			lateDrops = 0;
 			pending.clear();
+			anchored = false;
+			anchorLatency = 0.0;
+			haveLastFilm = false;
+			lastFilm = 0.0;
+			arrivalJitter = 0.0;
 		}
+
+		// L, the constant that fixes which refresh is phase 0 (FrameInput::latencyFloor),
+		// for the frame whose own present lands at firstVsync (FirstVsync). Fixed at the
+		// anchor: a restart's sample (first vsync - film time, the lead excluded) - and a
+		// restart follows every Break, generation change and chain too far ahead or
+		// behind. A chained frame keeps it (Bug hunt 05 H1): its sample is >= L by
+		// construction (the ownership loop picks the first vsync at phase >= 1), so a
+		// floor or percentile over chained samples ratcheted upward on every inexact
+		// cadence (23.976 on 60: 12 -> 121 ms in 120 s, more refreshes planned than the
+		// display gives). A closed-loop or open-loop correction (Observe / NoteLate)
+		// moves the chain and not L: the next frame's phases follow, it owns the
+		// refreshes back (FIFO: the intervals' sum is what the display shows), and the
+		// chain returns to the anchor's latency, which stays bounded.
+		double AnchorLatency(bool restart, double firstVsync, double filmTime)
+		{
+			if (restart || !anchored)
+			{
+				anchorLatency = firstVsync - filmTime;
+				anchored = true;
+			}
+			return anchorLatency;
+		}
+		bool Anchored() const { return anchored; }
+
+		// The arrival jitter the phase tolerance allows for (FrameInput::arrivalJitter),
+		// from the film times themselves: the peak of |film - previous film - P_s| (the
+		// spread of two arrivals, what an anchored chain sees between its anchor and a
+		// later frame), decaying slowly (half-life about 700 frames). A step of half a
+		// source period or more is a dropped or repeated frame, not jitter. Kept across
+		// breaks (it belongs to the source); Reset clears it.
+		double NoteArrival(double filmTime, double sourcePeriod)
+		{
+			if (haveLastFilm && sourcePeriod > 0.0 && std::isfinite(filmTime))
+			{
+				const double step = std::abs(filmTime - lastFilm - sourcePeriod);
+				if (step < 0.5 * sourcePeriod)
+					arrivalJitter = std::max(step, arrivalJitter * kJitterDecay);
+			}
+			lastFilm = filmTime;
+			haveLastFilm = std::isfinite(filmTime);
+			return arrivalJitter;
+		}
+		double ArrivalJitter() const { return arrivalJitter; }
 
 		bool Active() const { return active; }
 		double NextVsync() const { return nextVsync; }
@@ -392,6 +467,12 @@ namespace RenderAhead
 		bool active = false;
 		double nextVsync = 0.0;
 		int lateDrops = 0;
+		bool anchored = false;
+		double anchorLatency = 0.0;   // L at the anchor (AnchorLatency)
+		static constexpr double kJitterDecay = 0.999;
+		bool haveLastFilm = false;
+		double lastFilm = 0.0;
+		double arrivalJitter = 0.0;   // NoteArrival
 		std::deque<std::pair<uint32_t, double>> pending;
 	};
 
