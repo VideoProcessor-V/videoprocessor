@@ -6,6 +6,7 @@
 // as audio only.
 
 #include "VPRendererFilter.h"
+#include "VPRendererLedGuard.h"
 
 #include <DebugLog.h>
 
@@ -271,6 +272,8 @@ namespace VPRendererFilter
 		if (!EnsureWindow())
 			return E_FAIL;
 		m_window.SetOwner(parent);
+		// A player that closes during the LED hold-over ends the held drive.
+		WatchPlayerWindowForLedHoldover(parent);
 		DebugLog::Log("VP Renderer filter: owner window %p", parent);
 		return S_OK;
 	}

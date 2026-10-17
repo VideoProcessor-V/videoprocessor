@@ -11,6 +11,7 @@
 #include "../VideoProcessor-VPRendererFilter/VPRendererFilterPluginCheck.h"
 #include "../VideoProcessor-VPRendererFilter/VPRendererFilterRegistration.h"
 #include "../VideoProcessor-VPRendererFilter/VPRendererFilterRepack.h"
+#include "../VideoProcessor-VPRendererFilter/VPRendererLedGuard.h"
 
 #include <DisplayMode.h>
 #include <VideoState.h>
@@ -758,6 +759,18 @@ namespace Tests
 			model.Stop();
 			model.Run(0);
 			Assert::AreEqual<int64_t>(0, model.BuildTiming(Times(0, 400000), rate).presentationQpc);
+		}
+
+		TEST_METHOD(LedGuardFiresOnlyForThePlayerWindowItself)
+		{
+			const HWND root = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
+			const HWND other = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x5678));
+			Assert::IsTrue(IsRootDestroyed(root, EVENT_OBJECT_DESTROY, root, OBJID_WINDOW, CHILDID_SELF));
+			Assert::IsFalse(IsRootDestroyed(root, EVENT_OBJECT_DESTROY, other, OBJID_WINDOW, CHILDID_SELF));
+			Assert::IsFalse(IsRootDestroyed(root, EVENT_OBJECT_DESTROY, root, OBJID_CARET, CHILDID_SELF));
+			Assert::IsFalse(IsRootDestroyed(root, EVENT_OBJECT_DESTROY, root, OBJID_WINDOW, 3));
+			Assert::IsFalse(IsRootDestroyed(root, EVENT_OBJECT_HIDE, root, OBJID_WINDOW, CHILDID_SELF));
+			Assert::IsFalse(IsRootDestroyed(nullptr, EVENT_OBJECT_DESTROY, root, OBJID_WINDOW, CHILDID_SELF));
 		}
 
 		TEST_METHOD(CorrelationFromAReferenceClock)
