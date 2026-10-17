@@ -9764,10 +9764,24 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         lldvLayout->setSpacing(12);
         lldvLayout->addWidget(helpLabel(QStringLiteral(
             "Uses this profile's metadata for recognized HDFury LLDV input with DirectShow and VP Renderer.")));
-        lldvLayout->addWidget(bindCheckField(QStringLiteral("Alternate LLDV detection"),
-            QStringLiteral("general"), QStringLiteral("newlldv")));
+        auto* newLldvCheck = bindCheckField(
+            QStringLiteral("Treat BT.2020 without HDR flag as HDR (LLDV/HDR10)"),
+            QStringLiteral("general"), QStringLiteral("newlldv"));
+        newLldvCheck->setToolTip(QStringLiteral(
+            "A BT.2020, 10/12-bit signal without an HDR InfoFrame is shown as PQ HDR after 1.5 s: "
+            "LLDV, and HDR10 whose HDR flag was dropped (for example an HDFury with its HDR toggle off). "
+            "Metadata comes from this LLDV profile; peak detection works as usual. "
+            "Never for the DV tunnel, BT.709 or a source that sends an HDR InfoFrame. Key: newlldv."));
+        lldvLayout->addWidget(newLldvCheck);
+        auto* sdrVetoCheck = bindCheckField(
+            QStringLiteral("Return real SDR to SDR from the picture (SDR veto)"),
+            QStringLiteral("general"), QStringLiteral("newlldv_sdr_veto"), true);
+        sdrVetoCheck->setToolTip(QStringLiteral(
+            "With the option above, SDR sent as BT.2020 returns to SDR when the picture shows SDR highlights "
+            "(at a cut, after evidence in two shots; once per signal). Default on. Key: newlldv_sdr_veto."));
+        lldvLayout->addWidget(sdrVetoCheck);
         lldvLayout->addWidget(helpLabel(QStringLiteral(
-            "Alternate detection applies to all LLDV profiles. Restart VideoProcessor after changing it.")));
+            "These apply to all LLDV profiles and to HDR10 without an HDR flag. Restart VideoProcessor after changing them.")));
         lldvLayout->addWidget(profileFields);
         detailLayout->addWidget(lldvSettings);
         updateDvModeControls = [tunneling, lldvSettings, summary]()

@@ -306,6 +306,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SceneDetectorTests.cpp" />
+    <ClCompile Include="HdrInferenceTests.cpp" />
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="SourceResolutionLatchTests.cpp" />

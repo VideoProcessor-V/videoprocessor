@@ -180,7 +180,7 @@ namespace
 	{
 		for (const char* rawName :
 			{ "eotf", "transfer", "colorspace", "primaries", "format",
-			  "resolution", "range", "scan", "hdr_metadata", "interlaced",
+			  "resolution", "range", "scan", "hdr_metadata", "hdr_inferred", "interlaced",
 			  "source_rate", "cadence", "width", "height", "ambient", "content" })
 		{
 			const std::string name(rawName);

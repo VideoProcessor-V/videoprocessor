@@ -10,6 +10,7 @@
 #include <UnifiedProfileRuntime.h>
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"
 #include "../VideoProcessor-Lib/VpBuildIdentity.h"
+#include "HardwarePrerequisites.h"
 #include <atomic>
 #include <fstream>
 #include <mutex>
@@ -143,6 +144,10 @@ namespace VideoProcessorTest
 		TEST_METHOD(RendererMetadataCyclesReuseAcceptedSnapshotWithoutDiskReads)
 		{
 			// Exercise the real renderer DLL and D3D initialization without capture hardware.
+			// The renderer refuses software devices, so it needs a hardware D3D11 adapter.
+			std::string gpuReason;
+			if (!HardwarePrerequisites::RequireConditionOrSkip("RendererMetadataCyclesReuseAcceptedSnapshotWithoutDiskReads",
+				HardwarePrerequisites::HardwareD3D11Renderer(gpuReason), gpuReason)) return;
 			HMODULE testModule = nullptr;
 			Assert::IsTrue(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 				GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,

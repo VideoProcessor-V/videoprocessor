@@ -159,6 +159,11 @@ namespace StateVariables
 			value = CStringA(ToString(state.videoFrameEncoding)).GetString();
 			return true;
 		}
+		if (name == "hdr_inferred")
+		{
+			value = state.hdrInferred ? "true" : "false";
+			return true;
+		}
 		if (name == "hdr_metadata")
 		{
 			value = state.hdrData && state.hdrData->IsValid()

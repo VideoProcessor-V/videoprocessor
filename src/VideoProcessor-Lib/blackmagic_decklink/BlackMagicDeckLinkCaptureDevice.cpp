@@ -873,6 +873,19 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 					videoStateChanged = true;
 				}
 			}
+			else if ((videoFrame->GetFlags() & bmdFrameContainsHDRMetadata) == 0 &&
+				m_videoEotf != BMD_EOTF_INVALID && m_videoEotf != 0)
+			{
+				// newlldv: the EOTF only updated when GetInt succeeded, so a PQ
+				// value latched after the source (or an HDFury with its HDR
+				// toggle off) stopped sending the DRM InfoFrame. A frame with no
+				// HDR metadata and no readable EOTF is SDR (CTA-861.3 EOTF 0).
+				DebugLog::Log(
+					"BlackMagic: EOTF unreadable on a frame without HDR metadata; clearing latched EOTF %lld to SDR",
+					static_cast<long long>(m_videoEotf));
+				m_videoEotf = 0;
+				videoStateChanged = true;
+			}
 
 			// Color space
 			IF_S_OK(metadataExtensions->GetInt(bmdDeckLinkFrameMetadataColorspace, &intValue))

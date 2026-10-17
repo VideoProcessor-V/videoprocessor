@@ -76,6 +76,8 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <DisplayTopologySession.h>
 #include <CaptureDisplayFixes.h>
 #include <CaptureStatePolicy.h>
+#include <AnalysisFrame.h>
+#include <HdrInference.h>
 #include <RendererGenerationGate.h>
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
@@ -2197,6 +2199,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_MESSAGE(WM_MESSAGE_RENDERER_QUEUE_CONTRACT_CHANGED, &CVideoProcessorDlg::OnMessageRendererQueueContractChanged)
 	ON_MESSAGE(WM_MESSAGE_CONFIGURATION_RPC_REQUEST, &CVideoProcessorDlg::OnConfigurationRpcRequest)
 	ON_MESSAGE(WM_MESSAGE_PROJECTOR_TEST_DONE, &CVideoProcessorDlg::OnProjectorTestDone)
+	ON_MESSAGE(WM_MESSAGE_HDR_INFERENCE_PICTURE, &CVideoProcessorDlg::OnMessageHdrInferencePicture)
 	ON_MESSAGE(WM_MODERN_OPERATOR_ACTION, &CVideoProcessorDlg::OnMessageModernOperatorAction)
 
 	// Command handlers (from accelerator)
@@ -5556,6 +5559,18 @@ void CVideoProcessorDlg::EnableBoundedInvalidCaptureRecovery(bool enabled)
 void CVideoProcessorDlg::EnableNewLldvHeuristic(bool enabled)
 {
 	m_useNewLldvHeuristic = enabled;
+	DebugLog::Log(
+		"newlldv: %s (BT.2020, 10/12-bit, no HDR InfoFrame is treated as PQ for LLDV and HDR10)",
+		enabled ? "on" : "off");
+}
+
+void CVideoProcessorDlg::EnableHdrInferenceSdrVeto(bool enabled)
+{
+	m_hdrInferenceSdrVeto = enabled;
+	HdrInferenceOptions options = m_hdrInference.Options();
+	options.sdrVeto = enabled;
+	m_hdrInference.SetOptions(options);
+	DebugLog::Log("newlldv_sdr_veto: %s", enabled ? "on" : "off");
 }
 
 void CVideoProcessorDlg::EnableDolbyVisionTunnel(bool enabled)
@@ -6408,6 +6423,7 @@ LRESULT CVideoProcessorDlg::OnMessageCaptureDeviceCardStateChange(WPARAM wParam,
 	else
 		m_inputEncodingText.SetWindowText(TEXT(""));
 
+	m_captureInputBitDepth = cardState->inputBitDepth;
 	if (cardState->inputBitDepth != BitDepth::UNKNOWN)
 		m_inputBitDepthText.SetWindowText(ToString(cardState->inputBitDepth));
 	else
@@ -6553,10 +6569,11 @@ LRESULT CVideoProcessorDlg::OnMessageCaptureDeviceVideoStateChange(WPARAM wParam
 	const bool wasNewLldvEffective =
 		m_useNewLldvHeuristic &&
 		m_newLldvCandidateConfirmed &&
-		IsNewLldvModeSelected();
+		HdrModesPermitInference();
 
 	m_captureDeviceVideoState = videoState;
-	const bool newLldvJustConfirmed = UpdateNewLldvCandidate();
+	const bool newLldvJustConfirmed =
+		UpdateNewLldvCandidate().event == HdrInferenceEvent::Inferred;
 	const bool newLldvWasCleared =
 		wasNewLldvEffective && !m_newLldvCandidateConfirmed;
 	const bool newLldvJustEndedInSdr =
@@ -6661,7 +6678,7 @@ LRESULT CVideoProcessorDlg::OnMessageCaptureDeviceVideoStateChange(WPARAM wParam
 			DebugLog::Log(
 				"Renderer video-state update rejected: signal invalid; action=stop renderer");
 		}
-		else if (newLldvJustConfirmed && IsNewLldvModeSelected())
+		else if (newLldvJustConfirmed && HdrModesPermitInference())
 		{
 			// BT.2020/SDR LLDV changes the effective output to PQ while the raw
 			// DeckLink EOTF remains SDR.  Use the stabilized LLDV restart path.
@@ -8879,12 +8896,17 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 	uint64_t recoveredFirstFrameCounter = 0;
 	uint64_t recoveredLastFrameCounter = 0;
 	uint64_t recoveredTotalRejectedFrameCount = 0;
+	const bool measureHdrVeto =
+		m_hdrVetoMeasure.load(std::memory_order_acquire);
+	VideoStateComPtr hdrVetoState;
 	{
 		std::lock_guard<std::mutex> sourceLock(
 			m_captureVideoStateNotificationMutex);
 		if (source != m_captureVideoStateSource ||
 			captureRunToken != m_captureVideoStateSourceEpoch)
 			return;
+		if (measureHdrVeto)
+			hdrVetoState = m_lastPublishedValidCaptureVideoState;
 		ingressLease = m_rendererIngressState->TryAcquire();
 		if (!ingressLease)
 		{
@@ -8965,6 +8987,9 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 	assert(m_rendererState == RendererState::RENDERSTATE_RENDERING);
 
 	renderer->OnVideoFrame(videoFrame);
+	// newlldv SDR veto: picture statistics after the renderer has the frame.
+	if (measureHdrVeto)
+		MeasureHdrVetoPicture(hdrVetoState, videoFrame);
 	if (renderer->HasPresentedLiveFrame() &&
 		!m_transitionRevealPosted.exchange(
 			true, std::memory_order_acq_rel))
@@ -12452,74 +12477,316 @@ void CVideoProcessorDlg::ClearRendererCombo()
 }
 
 
-bool CVideoProcessorDlg::IsNewLldvModeSelected()
+bool CVideoProcessorDlg::HdrModesPermitInference()
 {
-	if (m_hdrColorspaceCombo.GetCurSel() < 0 || m_hdrLuminanceCombo.GetCurSel() < 0)
-		return false;
-
-	return
-		static_cast<HdrColorspaceOptions>(m_hdrColorspaceCombo.GetItemData(m_hdrColorspaceCombo.GetCurSel())) ==
-			HdrColorspaceOptions::HDR_COLORSPACE_FOLLOW_INPUT_LLDV &&
-		static_cast<HdrLuminanceOptions>(m_hdrLuminanceCombo.GetItemData(m_hdrLuminanceCombo.GetCurSel())) ==
-			HdrLuminanceOptions::HDR_LUMINANCE_FOLLOW_INPUT_LLDV;
+	// Owner decision 2026-10-17: newlldv no longer requires both "Follow input
+	// (LLDV)" modes. Every follow mode lets the inference supply what it
+	// follows; explicit primaries/luminance still win for the fields they set.
+	// Only an explicit Rec.709 hdr_colorspace contradicts a BT.2020 HDR reading.
+	if (m_hdrColorspaceCombo.GetCurSel() < 0)
+		return true;
+	return static_cast<HdrColorspaceOptions>(m_hdrColorspaceCombo.GetItemData(
+		m_hdrColorspaceCombo.GetCurSel())) !=
+		HdrColorspaceOptions::HDR_COLORSPACE_REC709;
 }
 
-bool CVideoProcessorDlg::UpdateNewLldvCandidate()
+HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
 {
-	if (!m_useNewLldvHeuristic || !m_captureDeviceVideoState || !m_captureDeviceVideoState->valid)
+	HdrInferenceSignal signal;
+	signal.enabled = m_useNewLldvHeuristic;
+	const VideoState* state = m_captureDeviceVideoState;
+	signal.valid = state && state->valid;
+	if (!signal.valid)
+		return signal;
+	signal.colorspace = state->colorspace;
+	signal.eotf = state->eotf;
+	signal.hdrInfoFrame = state->hdrData != nullptr;
+	switch (m_captureInputBitDepth)
 	{
-		m_newLldvCandidateActive = false;
-		m_newLldvCandidateConfirmed = false;
-		m_newLldvCandidateSince = 0;
-		return false;
-	}
-
-	const bool isCandidate =
-		m_captureDeviceVideoState->colorspace == ColorSpace::BT_2020 &&
-		m_captureDeviceVideoState->eotf == EOTF::SDR &&
-		!m_captureDeviceVideoState->hdrData;
-
-	if (!isCandidate)
-	{
-		if (m_newLldvCandidateActive)
+	case BitDepth::BITDEPTH_8BIT: signal.bitDepth = 8; break;
+	case BitDepth::BITDEPTH_10BIT: signal.bitDepth = 10; break;
+	case BitDepth::BITDEPTH_12BIT: signal.bitDepth = 12; break;
+	default:
+		// The card did not report the wire depth: use the capture encoding.
+		switch (state->videoFrameEncoding)
 		{
-			if (m_newLldvCandidateConfirmed)
-			{
-				DebugLog::Log(
-					"New LLDV heuristic: confirmed LLDV input ended; capture state is now %s / %s",
-					CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString(),
-					CStringA(ToString(m_captureDeviceVideoState->colorspace)).GetString());
-			}
-			else
-			{
-				DebugLog::Log(
-					"New LLDV heuristic: BT.2020/SDR candidate cleared before confirmation");
-			}
+		case VideoFrameEncoding::UYVY:
+		case VideoFrameEncoding::HDYC:
+		case VideoFrameEncoding::ARGB_8BIT:
+		case VideoFrameEncoding::BGRA_8BIT:
+			signal.bitDepth = 8; break;
+		case VideoFrameEncoding::V210:
+		case VideoFrameEncoding::R210:
+		case VideoFrameEncoding::R10b:
+		case VideoFrameEncoding::R10l:
+			signal.bitDepth = 10; break;
+		case VideoFrameEncoding::R12B:
+		case VideoFrameEncoding::R12L:
+			signal.bitDepth = 12; break;
+		default:
+			signal.bitDepth = 0; break;
 		}
-
-		m_newLldvCandidateActive = false;
-		m_newLldvCandidateConfirmed = false;
-		m_newLldvCandidateSince = 0;
-		return false;
+		break;
 	}
-
-	const DWORD now = GetTickCount();
-	if (!m_newLldvCandidateActive)
+	// The DV tunnel (same predicate as BuildPushVideoState) and a profile that
+	// forces it own the signal; the inference never applies to them.
+	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
+		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
+	const int rendererIndex = m_rendererCombo.GetCurSel();
+	const RendererId* rendererId = rendererIndex >= 0 ?
+		reinterpret_cast<const RendererId*>(
+			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
+	signal.dolbyVisionTunnel = m_profileDolbyVisionTunnelOverride == 1 ||
+		(enableDolbyVisionTunnel && rendererId &&
+			rendererId->backend == RendererBackend::LIBPLACEBO &&
+			state->videoFrameEncoding == VideoFrameEncoding::R210 &&
+			state->eotf == EOTF::SDR);
+	signal.explicitSettingsForbid = !HdrModesPermitInference();
+	const DisplayModeSharedPtr& mode = state->displayMode;
+	uint64_t key = static_cast<uint64_t>(state->videoFrameEncoding) & 0xff;
+	if (mode)
 	{
-		m_newLldvCandidateActive = true;
-		m_newLldvCandidateSince = now;
-		DebugLog::Log("New LLDV heuristic: BT.2020/SDR candidate seen; waiting 1500ms before treating it as LLDV");
-		return false;
+		key = (key << 14) ^ (mode->FrameWidth() & 0x3fff);
+		key = (key << 14) ^ (mode->FrameHeight() & 0x3fff);
+		key = (key << 20) ^ (static_cast<uint64_t>(
+			std::llround(mode->RefreshRateHz() * 1000.0)) & 0xfffff);
+		key = (key << 1) ^ (mode->IsInterlaced() ? 1 : 0);
 	}
+	signal.signalKey = key;
+	return signal;
+}
 
-	if (!m_newLldvCandidateConfirmed && now - m_newLldvCandidateSince >= 1500)
+HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
+{
+	const HdrInferenceSignal signal = BuildHdrInferenceSignal();
+	const HdrInferenceUpdate update =
+		m_hdrInference.OnSignal(signal, GetTickCount64());
+	switch (update.event)
 	{
-		m_newLldvCandidateConfirmed = true;
-		DebugLog::Log("New LLDV heuristic: BT.2020/SDR candidate confirmed after stabilization period");
-		return true;
+	case HdrInferenceEvent::CandidateSeen:
+		DebugLog::Log(
+			"newlldv: BT.2020 / %d-bit / no HDR InfoFrame candidate seen (epoch %llu); waiting %ums before treating it as PQ",
+			signal.bitDepth,
+			static_cast<unsigned long long>(m_hdrInference.Epoch()),
+			m_hdrInference.Options().confirmMs);
+		break;
+	case HdrInferenceEvent::Inferred:
+		DebugLog::Log(
+			"newlldv: candidate confirmed after stabilization (epoch %llu); treating it as PQ / BT.2020",
+			static_cast<unsigned long long>(m_hdrInference.Epoch()));
+		break;
+	case HdrInferenceEvent::CandidateCleared:
+		DebugLog::Log(
+			"newlldv: candidate cleared before confirmation: %s",
+			m_hdrInference.Reason());
+		break;
+	case HdrInferenceEvent::Ended:
+		DebugLog::Log(
+			"newlldv: inference epoch %llu ended: %s; capture state is now %s / %s",
+			static_cast<unsigned long long>(m_hdrInference.Epoch()),
+			m_hdrInference.Reason(),
+			signal.valid ? CStringA(ToString(signal.eotf)).GetString() : "invalid",
+			signal.valid ? CStringA(ToString(signal.colorspace)).GetString() : "invalid");
+		break;
+	case HdrInferenceEvent::NewEpoch:
+		DebugLog::Log(
+			"newlldv: signal changed while eligible; new epoch %llu state=%s",
+			static_cast<unsigned long long>(m_hdrInference.Epoch()),
+			ToString(m_hdrInference.State()));
+		break;
+	default:
+		break;
 	}
+	if (signal.enabled && !m_hdrInference.IsCandidate())
+	{
+		const std::string eligibility = m_hdrInference.Reason();
+		if (eligibility != m_lastHdrInferenceEligibilityLog)
+		{
+			DebugLog::Log("newlldv: not inferring HDR: %s", eligibility.c_str());
+			m_lastHdrInferenceEligibilityLog = eligibility;
+		}
+	}
+	else
+		m_lastHdrInferenceEligibilityLog.clear();
+	m_newLldvCandidateActive = m_hdrInference.IsCandidate();
+	m_newLldvCandidateConfirmed = m_hdrInference.IsInferredPq();
+	UpdateHdrVetoMeasurement();
+	return update;
+}
 
-	return false;
+void CVideoProcessorDlg::UpdateHdrVetoMeasurement()
+{
+	const bool measure = m_hdrInference.WantsPictureStatistics() &&
+		m_profileDolbyVisionTunnelOverride != 1 && HdrModesPermitInference();
+	const bool previous = m_hdrVetoMeasure.load(std::memory_order_acquire);
+	if (measure == previous)
+		return;
+	if (measure)
+		m_hdrVetoGeneration.fetch_add(1, std::memory_order_acq_rel);
+	m_hdrVetoMeasure.store(measure, std::memory_order_release);
+	DebugLog::Log("newlldv SDR veto: picture statistics %s (epoch %llu)",
+		measure ? "started" : "stopped",
+		static_cast<unsigned long long>(m_hdrInference.Epoch()));
+}
+
+namespace
+{
+	// Capture thread -> UI thread: one analysed picture for the SDR veto.
+	struct HdrVetoPictureMessage
+	{
+		uint64_t generation = 0;
+		uint64_t tickMs = 0;
+		bool supported = false;
+		VideoFrameEncoding encoding = VideoFrameEncoding::UNKNOWN;
+		HdrPictureObservation observation;
+		float gridDifference = 0.0f;
+		float histogramDistance = 0.0f;
+		uint32_t measureUs = 0;
+	};
+}
+
+void CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPtr& state,
+	const VideoFrame& frame)
+{
+	// WARNING: capture thread. Runs after the frame was handed to the renderer
+	// (no added latency to it), at most every 50 ms, only while the veto is
+	// measuring. 160 x 90 samples per picture.
+	const ULONGLONG now = GetTickCount64();
+	const uint64_t generation = m_hdrVetoGeneration.load(std::memory_order_acquire);
+	if (generation != m_hdrVetoCaptureGeneration)
+	{
+		m_hdrVetoCaptureGeneration = generation;
+		m_hdrVetoCutDetector.Reset();
+		m_hdrVetoLastSampleTick = 0;
+	}
+	if (m_hdrVetoLastSampleTick != 0 && now - m_hdrVetoLastSampleTick < 50)
+		return;
+	m_hdrVetoLastSampleTick = now;
+	if (!state || !state->valid || !state->displayMode || !frame.GetData())
+		return;
+
+	const auto start = std::chrono::steady_clock::now();
+	std::unique_ptr<HdrVetoPictureMessage> message(new HdrVetoPictureMessage());
+	message->generation = generation;
+	message->tickMs = now;
+	message->encoding = state->videoFrameEncoding;
+	AnalysisFrameInput input;
+	input.nativeData = reinterpret_cast<const uint8_t*>(frame.GetData());
+	input.nativeBytes = static_cast<size_t>(state->BytesPerFrame());
+	input.nativeRowBytes = static_cast<size_t>(state->BytesPerRow());
+	// The frame stays valid for the duration of this callback.
+	input.nativeOwner = std::shared_ptr<const void>(frame.GetData(), [](const void*) {});
+	input.width = static_cast<int>(state->displayMode->FrameWidth());
+	input.height = static_cast<int>(state->displayMode->FrameHeight());
+	input.encoding = state->videoFrameEncoding;
+	input.colorspace = state->colorspace;
+	input.transferKey = static_cast<uint32_t>(state->eotf);
+	input.sourceGeneration = generation;
+	const PreparedAnalysisFrame prepared = PrepareAnalysisFrame(input);
+	if (prepared.IsValid() &&
+		SampleHdrVetoGrid(prepared.source, 160, 90, m_hdrVetoGrid))
+	{
+		const HdrVetoFrameStats stats =
+			MeasureHdrVetoGrid(m_hdrVetoGrid.data(), 160, 90);
+		message->supported = true;
+		message->observation.measured = stats.measured;
+		message->observation.activePicture = stats.activePicture;
+		message->observation.sdrEvidence = stats.sdrEvidence;
+		message->observation.fractionAt880 = stats.fractionAtHigh;
+		message->observation.p999 = stats.p999;
+		message->observation.cut = m_hdrVetoCutDetector.Observe(stats);
+		message->gridDifference = m_hdrVetoCutDetector.LastGridDifference();
+		message->histogramDistance = m_hdrVetoCutDetector.LastHistogramDistance();
+	}
+	message->measureUs = static_cast<uint32_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - start).count());
+	if (PostMessage(WM_MESSAGE_HDR_INFERENCE_PICTURE,
+		reinterpret_cast<WPARAM>(message.get()), 0))
+		message.release();
+}
+
+LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
+{
+	std::unique_ptr<HdrVetoPictureMessage> message(
+		reinterpret_cast<HdrVetoPictureMessage*>(wParam));
+	if (!message ||
+		message->generation != m_hdrVetoGeneration.load(std::memory_order_acquire) ||
+		!m_hdrVetoMeasure.load(std::memory_order_acquire))
+		return 0;
+	if (!message->supported)
+	{
+		if (m_hdrVetoUnsupportedLoggedGeneration != message->generation)
+		{
+			DebugLog::Log(
+				"newlldv SDR veto: picture statistics unavailable for capture format %s; the veto cannot act",
+				CStringA(ToString(message->encoding)).GetString());
+			m_hdrVetoUnsupportedLoggedGeneration = message->generation;
+		}
+		return 0;
+	}
+	const HdrPictureObservation& picture = message->observation;
+	if (picture.cut && DebugLog::IsEnhancedLoggingEnabled())
+	{
+		DebugLog::Log(
+			"newlldv SDR veto: cut grid=%.1f histogram=%.3f measure_us=%u",
+			message->gridDifference, message->histogramDistance,
+			message->measureUs);
+	}
+	const HdrInferenceUpdate update =
+		m_hdrInference.OnPicture(picture, message->tickMs);
+	switch (update.event)
+	{
+	case HdrInferenceEvent::ShotEvidence:
+		DebugLog::Log(
+			"newlldv SDR veto: SDR evidence in shot %u of %u (codes>=880 %.3f%%, p99.9=%u, measure_us=%u)",
+			m_hdrInference.ShotsWithEvidence(), m_hdrInference.Options().shotsRequired,
+			picture.fractionAt880 * 100.0, static_cast<unsigned>(picture.p999),
+			message->measureUs);
+		break;
+	case HdrInferenceEvent::VetoArmed:
+		DebugLog::Log(
+			"newlldv SDR veto: armed after SDR evidence in %u shots (codes>=880 %.3f%%, p99.9=%u); returning to SDR at the next cut (or in %u s without one)",
+			m_hdrInference.ShotsWithEvidence(), picture.fractionAt880 * 100.0,
+			static_cast<unsigned>(picture.p999),
+			m_hdrInference.Options().noCutFallbackMs / 1000);
+		break;
+	case HdrInferenceEvent::VetoAtCut:
+	case HdrInferenceEvent::VetoWithoutCut:
+		ApplyHdrInferenceVeto(update, "picture");
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+void CVideoProcessorDlg::ApplyHdrInferenceVeto(const HdrInferenceUpdate& update,
+	const char* source)
+{
+	DebugLog::Log(
+		"newlldv SDR veto: returning epoch %llu to SDR %s (source=%s); it stays SDR until the signal changes",
+		static_cast<unsigned long long>(m_hdrInference.Epoch()),
+		update.event == HdrInferenceEvent::VetoAtCut ? "at a cut" :
+			"without a cut (none within the fallback interval; switched in place, no crossfade)",
+		source);
+	m_newLldvCandidateConfirmed = m_hdrInference.IsInferredPq();
+	m_newLldvCandidateActive = m_hdrInference.IsCandidate();
+	UpdateHdrVetoMeasurement();
+	if (!update.effectiveChanged)
+		return;
+	KillTimer(LLDV_CHANGE_RESTART_TIMER_ID);
+	m_lldvChangeRestartDelaySeconds = -1;
+	m_lldvRestartPending = false;
+	const bool rendererAcceptedState = BuildPushVideoState();
+	if (m_videoRenderer && m_rendererState == RendererState::RENDERSTATE_RENDERING &&
+		(!m_videoRenderer->SupportsDynamicVideoState() || !rendererAcceptedState))
+	{
+		DebugLog::Log(
+			"newlldv SDR veto: renderer cannot take PQ -> SDR in place; restarting renderer");
+		m_wantToRestartRenderer = true;
+		UpdateState();
+	}
 }
 
 bool CVideoProcessorDlg::BuildPushVideoState()
@@ -12559,7 +12826,7 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		m_captureDeviceVideoState->eotf == EOTF::PQ &&
 		(!rawHdrData || hasVertex2CustomHdrSignature);
 	DebugLog::Log(
-		"LLDV state trace: raw_eotf=%s raw_colorspace=%s raw_hdr=%d raw_values=%g/%g/%g/%g vertex2_signature=%d lldv_modes_selected=%d newlldv=%d legacy_match=%d",
+		"LLDV state trace: raw_eotf=%s raw_colorspace=%s raw_hdr=%d raw_values=%g/%g/%g/%g vertex2_signature=%d hdr_modes_permit=%d newlldv=%d legacy_match=%d",
 		CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString(),
 		CStringA(ToString(m_captureDeviceVideoState->colorspace)).GetString(),
 		rawHdrData ? 1 : 0,
@@ -12568,20 +12835,25 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		rawHdrData ? rawHdrData->masteringDisplayMinLuminance : -1.0,
 		rawHdrData ? rawHdrData->masteringDisplayMaxLuminance : -1.0,
 		hasVertex2CustomHdrSignature ? 1 : 0,
-		IsNewLldvModeSelected() ? 1 : 0,
+		HdrModesPermitInference() ? 1 : 0,
 		m_useNewLldvHeuristic ? 1 : 0,
 		isLegacyHDFuryLLDV ? 1 : 0);
 
-	// New behavior: DeckLink reports LLDV as BT.2020 + SDR without static HDR
-	// metadata.  There is no exposed VSIF to prove this, so only apply the
-	// heuristic when explicitly enabled, the user selected both LLDV follow
-	// modes, and the candidate has remained stable for 1.5 seconds.
+	// newlldv (owner decision 2026-10-17): DeckLink/Magewell report LLDV, and
+	// HDR10 whose DRM InfoFrame was dropped (HDFury Integral 2, HDR toggle off),
+	// as BT.2020 + SDR without static HDR metadata. With newlldv on, the
+	// HdrInferenceTracker infers PQ once a BT.2020, 10/12-bit, no-InfoFrame
+	// signal has been stable for 1.5 s (never for the DV tunnel, BT.709/unknown,
+	// a real HDR InfoFrame, or an explicit Rec.709 hdr_colorspace), and its
+	// picture-statistics veto may return the epoch to SDR.
 	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
 		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
 	const bool isHDFuryLLDV = m_profileDolbyVisionTunnelOverride != 1 &&
 		(m_useNewLldvHeuristic
-			? (m_newLldvCandidateConfirmed && IsNewLldvModeSelected())
+			? (m_newLldvCandidateConfirmed && HdrModesPermitInference())
 			: isLegacyHDFuryLLDV);
+	// The inferred path (newlldv): PQ is supplied by VP, not by the source.
+	const bool hdrInferred = m_useNewLldvHeuristic && isHDFuryLLDV;
 	const std::string rawEotf =
 		CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString();
 	const std::string rawColorspace =
@@ -12593,17 +12865,16 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	}
 	else if (m_useNewLldvHeuristic)
 	{
-		if (!IsNewLldvModeSelected())
+		if (isHDFuryLLDV)
 			lldvDecisionReason =
-				"rejected: newlldv requires both Follow input (LLDV) modes";
-		else if (isHDFuryLLDV)
-			lldvDecisionReason = "new-match: stabilized BT.2020 + SDR candidate";
-		else if (m_captureDeviceVideoState->colorspace == ColorSpace::BT_2020 &&
-			m_captureDeviceVideoState->eotf == EOTF::SDR && !rawHdrData)
+				"new-match: stabilized BT.2020 / 10-12-bit / no HDR InfoFrame (LLDV or HDR10)";
+		else if (m_hdrInference.State() == HdrInferenceState::Waiting)
 			lldvDecisionReason = "new-candidate-waiting: stabilization not complete";
+		else if (m_hdrInference.State() == HdrInferenceState::VetoedSdr)
+			lldvDecisionReason = "new-vetoed: picture statistics say SDR for this epoch";
 		else
-			lldvDecisionReason =
-				"rejected: newlldv expects BT.2020 + SDR without static HDR metadata";
+			lldvDecisionReason = std::string("rejected: ") +
+				m_hdrInference.Reason();
 	}
 	else if (isLegacyHDFuryLLDV)
 	{
@@ -12631,7 +12902,8 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		" raw_colorspace=" + rawColorspace +
 		" raw_hdr=" + (rawHdrData ? "1" : "0") +
 		" newlldv=" + (m_useNewLldvHeuristic ? "1" : "0") +
-		" lldv_modes_selected=" + (IsNewLldvModeSelected() ? "1" : "0");
+		" hdr_modes_permit=" + (HdrModesPermitInference() ? "1" : "0") +
+		" inference=" + ToString(m_hdrInference.State());
 	if (lldvDecisionDiagnostic != m_lastLldvDecisionDiagnostic)
 	{
 		DebugLog::Log("%s", lldvDecisionDiagnostic.c_str());
@@ -12644,8 +12916,11 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	}
 	m_lldvDiagnosticWasApplied = isHDFuryLLDV;
 
-	if (m_useNewLldvHeuristic && isHDFuryLLDV)
+	if (hdrInferred)
+	{
 		videoState->eotf = EOTF::PQ;
+		videoState->hdrInferred = true;
+	}
 
 	// Change container colorspace
 	int i = m_colorspaceContainerCombo.GetCurSel();
@@ -12660,8 +12935,11 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		i = m_hdrColorspaceCombo.GetCurSel();
 		switch ((HdrColorspaceOptions)m_hdrColorspaceCombo.GetItemData(i))
 		{
-			// No need to do anything
+			// No need to do anything, unless newlldv inferred PQ: the source
+			// sent no primaries, so follow its (BT.2020) container.
 			case HdrColorspaceOptions::HDR_COLORSPACE_FOLLOW_INPUT:
+				if (hdrInferred)
+					hdrColorSpace = videoState->colorspace;
 				break;
 
 			// Special mode where if there is an input, but there are no HDR settings
@@ -12710,15 +12988,21 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 
 	// Change HDR lumiance if available and requested
 	i = m_hdrLuminanceCombo.GetCurSel();
-	switch ((HdrLuminanceOptions)m_hdrLuminanceCombo.GetItemData(i))
+	const HdrLuminanceOptions hdrLuminanceOption =
+		(HdrLuminanceOptions)m_hdrLuminanceCombo.GetItemData(i);
+	switch (hdrLuminanceOption)
 	{
-		// No need to do anything
+		// Plain Follow input needs nothing, unless newlldv inferred PQ: the
+		// source sent no metadata to follow, so the active [lldv.*] profile
+		// supplies it exactly as for Follow input (LLDV). Precedence: explicit
+		// (command line, User mode) > profile > VP defaults.
 		case HdrLuminanceOptions::HDR_LUMINANCE_FOLLOW_INPUT:
-			break;
-
 		case HdrLuminanceOptions::HDR_LUMINANCE_FOLLOW_INPUT_LLDV:
 
-			if (isHDFuryLLDV)
+			if (isHDFuryLLDV &&
+				(hdrLuminanceOption ==
+					HdrLuminanceOptions::HDR_LUMINANCE_FOLLOW_INPUT_LLDV ||
+				 hdrInferred))
 			{
 				if (!videoState->hdrData)
 					videoState->hdrData = std::make_shared<HDRData>();
@@ -12851,6 +13135,40 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 
 	m_builtVideoState = videoState;
 	m_lastEffectiveEotf = m_builtVideoState->eotf;
+	if (hdrInferred != m_hdrInferredApplied)
+	{
+		const HDRData* inferredHdr = m_builtVideoState->hdrData.get();
+		if (hdrInferred)
+		{
+			DebugLog::Log(
+				"HDR10 inferred (no HDR flag from source; newlldv): raw=%s/%s effective=PQ/%s epoch=%llu metadata MaxCLL=%g MaxFALL=%g mastering=%g..%g sdr_veto=%s",
+				rawColorspace.c_str(), rawEotf.c_str(),
+				CStringA(ToString(m_builtVideoState->colorspace)).GetString(),
+				static_cast<unsigned long long>(m_hdrInference.Epoch()),
+				inferredHdr ? inferredHdr->maxCll : -1.0,
+				inferredHdr ? inferredHdr->maxFall : -1.0,
+				inferredHdr ? inferredHdr->masteringDisplayMinLuminance : -1.0,
+				inferredHdr ? inferredHdr->masteringDisplayMaxLuminance : -1.0,
+				m_hdrInferenceSdrVeto ? "on" : "off");
+		}
+		else
+		{
+			DebugLog::Log(
+				"HDR10 inference ended (newlldv): state=%s reason=%s raw=%s/%s",
+				ToString(m_hdrInference.State()), m_hdrInference.Reason(),
+				rawColorspace.c_str(), rawEotf.c_str());
+		}
+		if (m_hdrInference.State() == HdrInferenceState::VetoedSdr ||
+			hdrInferred)
+		{
+			ShowProfileOverlayItems({ { "hdr", "HDR",
+				hdrInferred ? "PQ inferred (no HDR flag)" :
+					"SDR (picture veto; no HDR flag)",
+				ProfileChangeOverlay::Item::Indicator::None } },
+				false, "hdr-inference");
+		}
+		m_hdrInferredApplied = hdrInferred;
+	}
 	const auto logLldvEffectiveState = [this, &rawEotf, &rawColorspace,
 		isHDFuryLLDV](const char* rendererResult)
 	{
@@ -12929,7 +13247,10 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		m_videoValidText.SetWindowText(_T("Yes"));
 		m_videoDisplayModeText.SetWindowText(videoState->displayMode->ToString());
 		m_videoPixelFormatText.SetWindowText(ToString(videoState->videoFrameEncoding));
-		m_videoEotfText.SetWindowText(ToString(videoState->eotf));
+		if (videoState->hdrInferred)
+			m_videoEotfText.SetWindowText(_T("PQ (inferred)"));
+		else
+			m_videoEotfText.SetWindowText(ToString(videoState->eotf));
 		m_videoColorSpaceText.SetWindowText(ToString(videoState->colorspace));
 	}
 	else
@@ -13161,8 +13482,11 @@ void CVideoProcessorDlg::PublishActiveProfileStatus()
 		shaderSections.emplace_back(CStringA(section).GetString());
 	const uint64_t rendererGeneration =
 		m_rendererGeneration.load(std::memory_order_acquire);
-	const std::string sourceEotf = m_builtVideoState && m_builtVideoState->valid ?
+	std::string sourceEotf = m_builtVideoState && m_builtVideoState->valid ?
 		CStringA(ToString(m_builtVideoState->eotf)).GetString() : std::string();
+	if (m_builtVideoState && m_builtVideoState->valid &&
+		m_builtVideoState->hdrInferred)
+		sourceEotf += " (inferred)";   // startsWith("PQ") readers still see PQ
 	const std::string sourceColorSpace = m_builtVideoState && m_builtVideoState->valid ?
 		CStringA(ToString(m_builtVideoState->colorspace)).GetString() : std::string();
     RendererOutputContract::Status outputStatus;
@@ -16498,7 +16822,11 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 		// A source can publish its BT.2020/SDR state only once at startup.
 		// Re-evaluate the opt-in LLDV candidate here so confirmation does not
 		// depend on receiving a second video-state notification.
-		if (UpdateNewLldvCandidate() && IsNewLldvModeSelected())
+		const HdrInferenceUpdate hdrInferenceUpdate = UpdateNewLldvCandidate();
+		if (hdrInferenceUpdate.event == HdrInferenceEvent::VetoWithoutCut)
+			ApplyHdrInferenceVeto(hdrInferenceUpdate, "timer");
+		else if (hdrInferenceUpdate.event == HdrInferenceEvent::Inferred &&
+			HdrModesPermitInference())
 		{
 			DbgLog((LOG_TRACE, 1, TEXT("New LLDV heuristic confirmed; preparing PQ and synthetic HDR metadata")));
 

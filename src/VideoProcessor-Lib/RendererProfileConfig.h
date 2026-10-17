@@ -1487,8 +1487,8 @@ namespace RendererProfileConfig
 		};
 		const std::set<std::string> expressionVariables = {
 			"eotf", "transfer", "colorspace", "primaries", "format",
-			"hdr_metadata", "interlaced", "scan", "source_rate", "cadence",
-			"width", "height", "resolution", "renderer", "actual_refresh",
+			"hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
+			"cadence", "width", "height", "resolution", "renderer", "actual_refresh",
 			"key", "ambient", "content"
 		};
 
@@ -2289,7 +2289,7 @@ namespace RendererProfileConfig
 					(!profile.whenExpression.Compile(profile.when, error, true) ||
 					 !ValidateExpressionVariables(profile.whenExpression,
 						{ "eotf", "transfer", "colorspace", "primaries", "format",
-						  "hdr_metadata", "interlaced", "scan", "source_rate",
+						  "hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
 						  "cadence", "width", "height", "resolution", "renderer",
 						  "actual_refresh", "key", "ambient", "content" },
 						"[" + profileSection + "] when=", error)))

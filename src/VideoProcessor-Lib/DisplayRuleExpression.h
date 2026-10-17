@@ -65,7 +65,8 @@ namespace DisplayRuleExpression
 			type = ValueType::Text;
 			return true;
 		}
-		if (name == "hdr_metadata" || name == "interlaced")
+		if (name == "hdr_metadata" || name == "hdr_inferred" ||
+			name == "interlaced")
 		{
 			type = ValueType::Boolean;
 			return true;

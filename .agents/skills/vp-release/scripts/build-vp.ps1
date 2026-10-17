@@ -42,7 +42,11 @@ foreach ($path in @($msbuild,$vstest,$devshell,$VcRedistPath,$IsccPath,(Join-Pat
 }
 # The compiler engine version is verified from its compilation log below.
 $previousQt = $env:VP_QT_ROOT
+$previousRequireHardware = $env:VP_TEST_REQUIRE_HARDWARE
 $env:VP_QT_ROOT = $QtRoot
+# Full suite on the owner's machine: a test whose hardware precondition is missing
+# (SKIP-NO-HARDWARE) fails instead of skipping.
+$env:VP_TEST_REQUIRE_HARDWARE = '1'
 & $devshell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation | Out-Host
 $evidence = Join-Path $Checkout ('artifacts\release-verification-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $evidence -Force | Out-Null
@@ -104,4 +108,4 @@ try {
   if ((Get-FileHash -LiteralPath (Join-Path $outputFull $artifact.name)).Hash -ne $artifact.sha256) { throw 'Export hash mismatch.' }
  }
  Write-Host "Verified release exported: $outputFull ($($counts.passed) tests passed)"
-} finally { $env:VP_QT_ROOT = $previousQt }
+} finally { $env:VP_QT_ROOT = $previousQt; $env:VP_TEST_REQUIRE_HARDWARE = $previousRequireHardware }

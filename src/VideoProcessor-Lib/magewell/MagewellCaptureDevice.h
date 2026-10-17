@@ -224,6 +224,9 @@ private:
 
 	// Parses the HDMI HDR InfoFrame into VP's HDR metadata.
 	bool ReadHdrInfoFrame(HCHANNEL channel, SignalDescription& signal) const;
+	// newlldv: the AVI InfoFrame's BT.2020 flag for RGB input, which the SDK
+	// status reports without colorimetry.
+	bool ReadAviBt2020(HCHANNEL channel, const SignalDescription& signal) const;
 
 	// Chooses only formats the card reports as supported. RGB8 uses ARGB,
 	// RGB10 is repacked into R10l, and YCbCr uses P210 repacked into V210.
@@ -297,6 +300,7 @@ private:
 	// Bug hunt 2026-10-17: last HDR InfoFrame logged; logged again only on change.
 	mutable std::mutex m_hdrInfoFrameLogMutex;
 	mutable std::string m_lastHdrInfoFrameLog;
+	mutable std::string m_lastAviInfoFrameLog;
 	// Shared with every buffer so renderer-held frames remain charged after a
 	// format change or Stop. This cap applies only to Magewell capture memory.
 	std::shared_ptr<MagewellCaptureMemoryBudget> m_memoryBudget =

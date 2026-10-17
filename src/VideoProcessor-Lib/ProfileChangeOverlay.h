@@ -53,6 +53,7 @@ namespace ProfileChangeOverlay
 		if (group == "scaling") return "Scaling";
 		if (group == "queue") return "Queue";
 		if (group == "lldv") return "LLDV";
+		if (group == "hdr") return "HDR";
 		if (group == "nls") return "NLS";
 		if (group == "standard_shaders") return "Standard shaders";
 		if (group.empty()) return "Profile";
