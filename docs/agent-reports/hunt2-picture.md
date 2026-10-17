@@ -136,5 +136,5 @@ on the GPU.
 - **Run 39066138152** (93467197) failed to build. Both causes are fixed:
   - `std::clamp` in the C++14 test project;
   - the C2001 raw newline in the tooltip string.
-- Commits after 14e6dac5 (this report) are local only, in `D:\codexideoprocessor\hunt2-picture`,
+- Commits after 14e6dac5 (this report) are local only, in `D:/codex/videoprocessor/hunt2-picture`,
   until the account is restored.
