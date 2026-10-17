@@ -173,5 +173,6 @@
   <ItemGroup><ClCompile Include="InterpolationPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="GrainPreservationTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="PulldownCorpusTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="BugHunt20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>

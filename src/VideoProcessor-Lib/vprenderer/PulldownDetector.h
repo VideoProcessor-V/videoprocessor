@@ -298,6 +298,20 @@ namespace Pulldown
 						expected = Track(observed, expected, contradiction, rephased);
 					if (m_retrying && !rephased && m_trackFrames == 0 && m_probationUntil == 0)
 						unlock = true;   // the retry found no rotation
+					// Corpus 2026-10-17: kContradictionsToUnlock re-phases within the
+					// time a lock needs are another cadence beating against a short
+					// pattern (24p in 50 under a 2:2 lock re-phases every half second,
+					// two contradictions a second - under the release rule), not phase
+					// shifts (an edit and a rate-mismatch slip may still fall close).
+					if (rephased)
+					{
+						const uint64_t lockFrames = static_cast<uint64_t>(FramesToLock(static_cast<int>(m_pattern.size()), signalHz));
+						while (!m_rephases.empty() && m_frames - m_rephases.front() >= lockFrames)
+							m_rephases.pop_front();
+						m_rephases.push_back(m_frames);
+						if (static_cast<int>(m_rephases.size()) >= kContradictionsToUnlock)
+							unlock = true;
+					}
 					if (contradiction)
 						m_contradictions.push_back(m_frames);
 					if (unlock || static_cast<int>(m_contradictions.size()) >= kContradictionsToUnlock)
@@ -392,6 +406,7 @@ namespace Pulldown
 			m_probationUntil = 0;
 			m_retrying = false;
 			m_missCarry = false;
+			m_rephases.clear();
 		}
 
 		// Audit 2026-10-16: per slot, how many signal frames after its film
@@ -573,6 +588,7 @@ namespace Pulldown
 		std::vector<uint64_t> m_absorbed;      // D3: contradictions held back while tracking
 		bool m_retrying = false;               // D3/D4: a verification was contradicted once
 		int m_restartsLeft = 0;                // D3: restarts that keep the held-back contradictions
+		std::deque<uint64_t> m_rephases;       // D3: frames of the recent re-phases in this lock
 		std::vector<double> m_lateness;        // per slot, in signal frames (BuildLateness)
 		double m_latenessMax = 0.0;
 		std::deque<char> m_history;
