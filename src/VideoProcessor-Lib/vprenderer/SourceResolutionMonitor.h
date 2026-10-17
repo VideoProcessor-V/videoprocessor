@@ -56,6 +56,7 @@ namespace SourceResolutionMonitor
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
 		std::string lastDiscontinuity;
 		double analyseMs = 0.0;        // worker time for the last frame
+		int tiles = 0;                 // tiles in the last analysed frame (8 = base grid, 16 = dense)
 		std::string error;             // the last GPU-side failure (empty when none)
 	};
 
@@ -119,7 +120,12 @@ namespace SourceResolutionMonitor
 		static constexpr size_t kHistoryRows = 1200;
 		double intervalSeconds = 0.5;   // tile copies per second: 2
 		static constexpr int kTile = 256;
-		static constexpr int kMaxTiles = 8;
+		// The base 4 x 2 grid, plus two more rows (SourceResolution::PlaceTiles) while a lower
+		// reading is declared or being gathered - so a picture-in-picture or UI between the base
+		// tiles is seen before the frame is re-based (mixed-screen guard).
+		static constexpr int kMaxTiles = 16;
+		static constexpr int kBaseTiles = 8;
+		bool DenseGrid() const { return denseGrid.load(std::memory_order_acquire); }
 
 		// Look-ahead verification (owner 2026-10-16: "since we have look ahead the
 		// analysis can look ahead and ensure the upcoming frames are in accordance
@@ -157,6 +163,10 @@ namespace SourceResolutionMonitor
 			double scale = 1023.0;       // sample -> code
 			double seconds = 0.0;
 			int nativeWidth = 0, nativeHeight = 0;
+			// The tiles' centres in the picture (normalised; empty: the 4-column layout) and how
+			// many of them are the base grid (the frame signature; 0 = all).
+			std::vector<float> tileX, tileY;
+			int baseTiles = 0;
 		};
 		void Worker();
 		void Fail(const char* what, double seconds);
@@ -232,6 +242,9 @@ namespace SourceResolutionMonitor
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::atomic<bool> textGuard{ true };
 		std::atomic<bool> mixedGuard{ true };
+		// Worker sets, render thread reads: sample the dense grid (a lower reading declared or
+		// being gathered by any of the trackers).
+		std::atomic<bool> denseGrid{ false };
 		std::atomic<int> evidenceShots{ SourceResolution::Tracker::Settings{}.minimumShots };
 		std::atomic<double> evidenceSeconds{ SourceResolution::Tracker::Settings{}.minimumSeconds };
 		std::string selection = "native";

@@ -27,9 +27,12 @@ TEST_CLASS(SubtitleOpaqueCardRefinementTests) {
             s.colorspace=ColorSpace::REC_709;s.generation=1;return s;
         }
     };
+    // audit 2026-10-16: BGRA black 0 now samples as limited black 64, so the
+    // fixture's dark limit is black + 28 (was 28 over full-range code 0).
+    static constexpr int kDarkLimit=64+28;
     static bool Refine(const Frame& frame, SubtitleOpaqueCardRefinement& result) {
         return RefineSubtitleOpaqueCard(frame.Source(),{1903,1825,2094,1876},48,
-            263,1897,28,550,512,512,result);
+            263,1897,kDarkLimit,550,512,512,result);
     }
 public:
     TEST_METHOD(PartialTailSeedRecoversBothLinesInsideFiniteOpaqueCard) {
@@ -83,7 +86,7 @@ public:
         for(int x=1400;x<2400;x+=40)f.Fill({x,1730,x+12,1766},220);
         SubtitleOpaqueCardRefinement r;
         Assert::IsTrue(RefineSubtitleOpaqueCard(f.Source(),{1400,1730,2400,1766},36,
-            263,1897,28,550,512,512,r));
+            263,1897,kDarkLimit,550,512,512,r));
         Assert::IsTrue(r.workLimit);
         Assert::AreEqual(131072u,r.sampledPixels);
         Assert::AreEqual(200,r.interior.left);Assert::AreEqual(3400,r.interior.right);
@@ -102,7 +105,7 @@ public:
         f.Fill({704,1768,705,1769},220);
         SubtitleOpaqueCardRefinement r;
         Assert::IsTrue(RefineSubtitleOpaqueCard(f.Source(),{600,1730,1400,1766},36,
-            263,1897,28,550,512,512,r));
+            263,1897,kDarkLimit,550,512,512,r));
         Assert::IsFalse(r.workLimit);
         Assert::AreEqual(206,r.interior.left);Assert::AreEqual(1660,r.interior.top);
         Assert::AreEqual(1,r.glyphRowCount);

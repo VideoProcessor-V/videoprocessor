@@ -10,6 +10,9 @@
 
 #include <algorithm>
 
+#include <CaptureCallbackBoundary.h>
+#include <DebugLog.h>
+
 #include "BlackMagicDeckLinkCaptureDeviceDiscoverer.h"
 #include "BlackMagicDeckLinkCaptureDevice.h"
 
@@ -71,32 +74,56 @@ void BlackMagicDeckLinkCaptureDeviceDiscoverer::Stop()
 
 HRESULT	STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDeviceDiscoverer::DeckLinkDeviceArrived(IDeckLink* deckLinkDevice)
 {
-	assert(m_deckLinkDiscovery);
-	assert(m_captureDeviceMap.find(deckLinkDevice) == m_captureDeviceMap.end());
+	// audit 2026-10-16: called by the DeckLink driver on its own thread - no
+	// exception may cross this COM boundary (device constructor, EDID write
+	// and callbacks all throw). A device that fails to build is skipped.
+	return CaptureCallbackBoundary([&]() -> HRESULT
+	{
+		assert(m_deckLinkDiscovery);
+		if (!deckLinkDevice)
+			return E_INVALIDARG;
+		if (m_captureDeviceMap.find(deckLinkDevice) != m_captureDeviceMap.end())
+			return S_OK;
 
-	// Build device
-	ACaptureDeviceComPtr captureDevice;
-	captureDevice.Attach(new BlackMagicDeckLinkCaptureDevice(
-		deckLinkDevice, m_formatPreferences));
+		// Build device. The object starts with one reference (the creator's),
+		// which Attach() takes over; the map AddRefs its own copy and
+		// OnCaptureDeviceFound() moves the local reference into the GUI message.
+		ACaptureDeviceComPtr captureDevice;
+		captureDevice.Attach(new BlackMagicDeckLinkCaptureDevice(
+			deckLinkDevice, m_formatPreferences));
 
-	m_captureDeviceMap[deckLinkDevice] = captureDevice;
+		m_captureDeviceMap[deckLinkDevice] = captureDevice;
 
-	m_callback.OnCaptureDeviceFound(captureDevice);
+		m_callback.OnCaptureDeviceFound(captureDevice);
 
-	return S_OK;
+		return S_OK;
+	}, [](const char* error)
+	{
+		DebugLog::Log("BlackMagic: DeckLinkDeviceArrived skipped the device: %s", error);
+	});
 }
 
 
 HRESULT	STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDeviceDiscoverer::DeckLinkDeviceRemoved(IDeckLink* deckLinkDevice)
 {
-	assert(m_deckLinkDiscovery);
-	assert(m_captureDeviceMap.find(deckLinkDevice) != m_captureDeviceMap.end());
+	// audit 2026-10-16: COM boundary; a device whose construction failed was
+	// never added, so its removal is not an error.
+	return CaptureCallbackBoundary([&]() -> HRESULT
+	{
+		assert(m_deckLinkDiscovery);
+		const auto it = m_captureDeviceMap.find(deckLinkDevice);
+		if (it == m_captureDeviceMap.end())
+			return S_OK;
 
-	m_callback.OnCaptureDeviceLost(m_captureDeviceMap[deckLinkDevice]);
+		m_callback.OnCaptureDeviceLost(it->second);
 
-	m_captureDeviceMap.erase(deckLinkDevice);
+		m_captureDeviceMap.erase(it);
 
-	return S_OK;
+		return S_OK;
+	}, [](const char* error)
+	{
+		DebugLog::Log("BlackMagic: DeckLinkDeviceRemoved exception contained: %s", error);
+	});
 }
 
 
@@ -108,7 +135,10 @@ HRESULT	BlackMagicDeckLinkCaptureDeviceDiscoverer::QueryInterface(REFIID iid, LP
 	// Initialise the return result
 	*ppv = nullptr;
 
-	if (iid == IID_IUnknown || iid == IID_IDeckLinkInputCallback)
+	// audit 2026-10-16: this object is a device-notification callback, not an
+	// input callback (IID_IDeckLinkInputCallback kept for compatibility).
+	if (iid == IID_IUnknown || iid == IID_IDeckLinkDeviceNotificationCallback ||
+		iid == IID_IDeckLinkInputCallback)
 	{
 		*ppv = this;
 		AddRef();

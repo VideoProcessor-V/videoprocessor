@@ -119,6 +119,24 @@ private:
 	BMDDisplayMode m_bmdDisplayMode = BMD_DISPLAY_MODE_INVALID;
     BMDFieldDominance m_bmdFieldDominance=bmdUnknownFieldDominance;
 	timingclocktime_t m_ticksPerFrame = TIMING_CLOCK_TIME_INVALID;
+	// audit 2026-10-16: the active mode as the card described it, so modes
+	// missing from the translation table still produce a DisplayMode.
+	long m_modeWidth = 0;
+	long m_modeHeight = 0;
+	BMDTimeValue m_modeFrameDuration = 0;
+	BMDTimeScale m_modeTimeScale = 0;
+	// audit 2026-10-16: expected GetRowBytes() for the active mode/packing
+	// (0 = unknown, no check), and the rate-limited drop count on mismatch.
+	long m_expectedRowBytes = 0;
+	uint64_t m_frameGeometryDrops = 0;
+	// audit 2026-10-16: the last video state could not be built; frames are
+	// held back until the next state change instead of flowing unannounced.
+	bool m_videoStateRejected = false;
+	// audit 2026-10-16: a profile change forced the streams to stop.
+	std::atomic_bool m_streamsForcedToStop{ false };
+	// audit 2026-10-16: last good hardware clock value, returned when the
+	// clock cannot be read (input released or streams stopped).
+	std::atomic<timingclocktime_t> m_lastClockTicks{ 0 };
 	bool m_videoHasInputSource = false;
 	bool m_videoInvertedVertical = false;
 	LONGLONG m_videoEotf = BMD_EOTF_INVALID;
@@ -150,5 +168,12 @@ private:
 	void OnNotifyStatusChanged(BMDDeckLinkStatusID statusID);
 	void OnLinkStatusBusyChange();
 
-	std::atomic<ULONG> m_refCount;
+	// audit 2026-10-16: COM rule - a new object starts with the creator's
+	// reference (the discoverer Attach()es it). Was uninitialised. Starting at
+	// 1 also keeps the SDK's AddRef/Release pairs made during construction
+	// (profile/notification callback registration) from deleting the object.
+	std::atomic<ULONG> m_refCount{ 1 };
+
+	// audit 2026-10-16: never throws (card state is informational).
+	void SendCardStateCallbackNoThrow();
 };

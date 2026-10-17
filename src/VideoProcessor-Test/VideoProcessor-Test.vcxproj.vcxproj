@@ -298,6 +298,8 @@
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
+    <ClCompile Include="SdrToneShapeWtwTests.cpp" />
+    <ClCompile Include="CaptureLayerAuditTests.cpp" />
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp" />
     <ClCompile Include="VectorStoreTests.cpp" />
     <ClCompile Include="MotionValidityTests.cpp" />
@@ -371,6 +373,7 @@
     <ClCompile Include="FullRasterColorEvidenceFormatTests.cpp" />
 	<ClCompile Include="InvalidCaptureStateGraceTests.cpp" />
 	<ClCompile Include="EotfTransitionStabilizerTests.cpp" />
+    <ClCompile Include="AnalysisLumaRangeTests.cpp" />
     <ClCompile Include="NativeRgbAnalysisTests.cpp" />
     <ClCompile Include="RendererIdTests.cpp" />
     <ClCompile Include="RendererResetPolicyTests.cpp" />

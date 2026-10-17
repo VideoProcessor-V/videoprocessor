@@ -82,25 +82,35 @@ namespace LedDrive
 		int* value, int timeoutMs, int maxGapWaitMs, int sentLight, bool abortable, int sentContrast)
 	{
 		using namespace std::chrono;
-		steady_clock::time_point allowed;
 		{
-			std::lock_guard<std::mutex> guard(stateMutex);
-			allowed = nextSendAllowed;
-		}
-		const auto now = steady_clock::now();
-		if (allowed > now)
-		{
-			auto wait = allowed - now;
-			if (maxGapWaitMs >= 0 && wait > milliseconds(maxGapWaitMs))
+			std::unique_lock<std::mutex> lock(stateMutex);
+			const steady_clock::time_point allowed = nextSendAllowed;
+			const auto now = steady_clock::now();
+			if (allowed > now)
 			{
-				// Only the bounded exit restore gets here: full light matters
-				// more than the rest of a pause.
-				DebugLog::Log("LED drive: \"%s\" sent %lld ms before the command gap/pause allowed (exit is bounded)",
-					Printable(command).c_str(),
-					static_cast<long long>(duration_cast<milliseconds>(wait).count() - maxGapWaitMs));
-				wait = milliseconds(maxGapWaitMs);
+				auto until = allowed;
+				if (maxGapWaitMs >= 0 && allowed - now > milliseconds(maxGapWaitMs))
+				{
+					// Only the bounded exit restore gets here: full light matters
+					// more than the rest of a pause.
+					DebugLog::Log("LED drive: \"%s\" sent %lld ms before the command gap/pause allowed (exit is bounded)",
+						Printable(command).c_str(),
+						static_cast<long long>(duration_cast<milliseconds>(allowed - now).count() - maxGapWaitMs));
+					until = now + milliseconds(maxGapWaitMs);
+				}
+				// audit 2026-10-16: the pre-wait (up to 2 s after a missing reply)
+				// holds portMutex; the driver thread's and the script's commands
+				// (abortable) end it as soon as the exit restore begins, unsent,
+				// so the restore is not locked out of the port.
+				if (abortable)
+				{
+					gapWake.wait_until(lock, until, [this] { return shuttingDown || stopping; });
+					if (shuttingDown || stopping) return false;
+				}
+				else
+					while (steady_clock::now() < until)
+						gapWake.wait_until(lock, until);
 			}
-			std::this_thread::sleep_for(wait);
 		}
 		std::string error;
 		bool written = false;
@@ -167,7 +177,8 @@ namespace LedDrive
 				unloggedWriteFailures = 0;
 			}
 			writeFailures = 0;
-			reopenBackoffMs = 0;
+			// audit 2026-10-16: the reopen back-off resets below, once the
+			// reply wait has not closed the port.
 		}
 		if (written && framing.acknowledged)
 		{
@@ -181,6 +192,10 @@ namespace LedDrive
 				// Short reads, so an exit can end the wait of a command in flight.
 				if (!port->ReadLine(static_cast<int>(std::min<long long>(remaining, 50)), line))
 				{
+					// audit 2026-10-16: a failed read closed the port; every
+					// further read fails at once, so waiting out the ack timeout
+					// here only spun holding portMutex.
+					if (!port->IsOpen()) break;
 					std::lock_guard<std::mutex> guard(stateMutex);
 					if (abortable && shuttingDown) break;
 					continue;
@@ -205,6 +220,23 @@ namespace LedDrive
 				}
 				DebugLog::Log("LED drive: no %s reply within %d ms to \"%s\"",
 					mnemonic, timeoutMs, Printable(command).c_str());
+			}
+		}
+		if (written)
+		{
+			if (port->IsOpen())
+				reopenBackoffMs = 0;
+			else
+			{
+				// audit 2026-10-16: the port closed on a failed read (device
+				// unplugged): treated like repeated write failures - reopened only
+				// after the back-off (2 s doubling to 30 s), so the next command
+				// does not reopen, resync and close again at once.
+				const auto closedAt = steady_clock::now();
+				reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
+				reopenAt = closedAt + milliseconds(reopenBackoffMs);
+				DebugLog::Log("LED drive: reading %s failed; port closed, reopening in %d ms",
+					config.port.c_str(), reopenBackoffMs);
 			}
 		}
 		int gap = config.minCommandGapMs;
@@ -240,9 +272,22 @@ namespace LedDrive
 		const auto now = steady_clock::now();
 		if (now < reopenAt)
 		{
-			error = config.port + " closed; reopening in " +
-				std::to_string(duration_cast<milliseconds>(reopenAt - now).count()) + " ms";
-			return false;
+			// audit 2026-10-16: the exit restore tries one Open regardless of
+			// the back-off (once per shutdown), so an outage that ended during
+			// the back-off does not leave the projector dim after exit.
+			bool force = false;
+			{
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				force = shuttingDown && !shutdownOpenTried;
+			}
+			if (!force)
+			{
+				error = config.port + " closed; reopening in " +
+					std::to_string(duration_cast<milliseconds>(reopenAt - now).count()) + " ms";
+				return false;
+			}
+			shutdownOpenTried = true;
+			DebugLog::Log("LED drive: exit restore - trying to reopen %s ahead of its back-off", config.port.c_str());
 		}
 		std::string openError;
 		if (port->Open(config.port, config.baud, openError))
@@ -347,6 +392,7 @@ namespace LedDrive
 			writeFailures = 0;
 			reopenBackoffMs = 0;
 			reopenAt = std::chrono::steady_clock::time_point();
+			shutdownOpenTried = false;   // audit 2026-10-16
 			SelectFraming();
 			int minimum = 0, maximum = 0;
 			if (framing.acknowledged)
@@ -372,6 +418,8 @@ namespace LedDrive
 			shuttingDown = false;
 			pendingLight = -1;
 			pendingContrast = -1;
+			scriptLight = -1;      // audit 2026-10-16
+			scriptContrast = -1;
 			opened = true;
 		}
 		worker = std::thread(&BarcoAsciiDriver::Worker, this);
@@ -423,9 +471,12 @@ namespace LedDrive
 	void BarcoAsciiDriver::SetLight(int level)
 	{
 		std::lock_guard<std::mutex> guard(stateMutex);
-		if (!opened) return;
+		// audit 2026-10-16: not after the exit restore began (the worker
+		// skips targets then, and a pending one kept it spinning).
+		if (!opened || shuttingDown) return;
 		pendingLight = Clamp(level);
 		pendingJump = false;
+		scriptLight = -1;   // audit 2026-10-16: the driver's own targets now
 		wake.notify_one();
 	}
 
@@ -437,15 +488,17 @@ namespace LedDrive
 		// audit 2026-10-16: a hold's -1 also stops a value the worker has
 		// already taken but not yet written (a newer value simply follows it).
 		if (value < 0) ++contrastGeneration;
+		else scriptContrast = -1;   // audit 2026-10-16
 		wake.notify_one();
 	}
 
 	void BarcoAsciiDriver::SetLightJump(int level)
 	{
 		std::lock_guard<std::mutex> guard(stateMutex);
-		if (!opened) return;
+		if (!opened || shuttingDown) return;   // audit 2026-10-16
 		pendingLight = Clamp(level);
 		pendingJump = true;
+		scriptLight = -1;   // audit 2026-10-16
 		wake.notify_one();
 	}
 
@@ -487,16 +540,54 @@ namespace LedDrive
 			lock.lock();
 		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
 			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
-		return timeoutMs > 0 ?
-			Transact(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
-				std::max(1, std::min(left / 2, config.ackTimeoutMs)), left / 2) :
+		const bool light = mnemonic == "LPW1";
+		const bool contrast = mnemonic == "CNTR";
+		const bool ok = timeoutMs > 0 ?
+			BoundedTransactLocked(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
+				left, light ? value : -1, contrast ? value : -1) :
 			Transact(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
 				config.ackTimeoutMs, -1);
+		if (ok && contrast)
+		{
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			state.contrastKnown = true;
+			state.contrast = value;
+		}
+		return ok;
+	}
+
+	// audit 2026-10-16: a bounded (exit) command. The command gap is waited
+	// in full whenever what is left of the budget allows it, keeping at least
+	// a short reply wait (a quarter of the budget, at most 100 ms); the reply
+	// gets the rest, up to ack_timeout_ms. Previously both were capped at
+	// half the budget, so a 300-350 ms budget could not keep Barco's 500 ms
+	// gap and the restore could be dropped. Caller holds portMutex.
+	bool BarcoAsciiDriver::BoundedTransactLocked(const std::string& command, const char* mnemonic, int* value,
+		int budgetMs, int sentLight, int sentContrast)
+	{
+		using namespace std::chrono;
+		int gapMs = 0;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			const auto now = steady_clock::now();
+			if (nextSendAllowed > now)
+				gapMs = static_cast<int>(duration_cast<milliseconds>(nextSendAllowed - now).count()) + 1;
+		}
+		const int replyFloor = std::min(100, budgetMs / 4);
+		const int gapWait = std::min(gapMs, std::max(0, budgetMs - replyFloor));
+		const int reply = std::max(1, std::min(config.ackTimeoutMs, budgetMs - gapWait));
+		return Transact(command, mnemonic, value, reply, gapWait, sentLight, false, sentContrast);
+	}
+
+	int BarcoAsciiDriver::CommandGapMs() const
+	{
+		return std::max(0, config.minCommandGapMs);
 	}
 
 	bool BarcoAsciiDriver::SendScript(const std::string& mnemonic, int value)
 	{
 		const bool light = mnemonic == "LPW1";
+		const bool contrast = mnemonic == "CNTR";
 		int sent = value;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
@@ -513,13 +604,32 @@ namespace LedDrive
 			// audit 2026-10-16: but Barco's 2 s after a missing reply stays.
 			nextSendAllowed = std::max(std::chrono::steady_clock::now(), replyBackoffUntil);
 			sinceBurst = 0;
+			// audit 2026-10-16: this is now the newest value for its command.
+			// A resync target (or any value) the driver thread still holds or
+			// has taken is dropped, so it cannot land after this one, and the
+			// script's intended value is kept even when the write fails: after
+			// a reopen the resync re-sends what the script controller believes,
+			// not the last value that reached the port (CNTR stuck at 58 while
+			// the script believes 50).
+			if (light)
+			{
+				pendingLight = -1;
+				++lightGeneration;
+				scriptLight = sent;
+			}
+			else if (contrast)
+			{
+				pendingContrast = -1;
+				++contrastGeneration;
+				scriptContrast = sent;
+			}
 		}
 		int confirmed = -1;
 		const bool ok = Transact(Format(mnemonic.c_str(), std::to_string(sent)), mnemonic.c_str(), &confirmed,
-			config.ackTimeoutMs, -1, light ? sent : -1, true, mnemonic == "CNTR" ? sent : -1);
+			config.ackTimeoutMs, -1, light ? sent : -1, true, contrast ? sent : -1);
 		std::lock_guard<std::mutex> guard(stateMutex);
 		if (ok && light) lastLight = confirmed >= 0 ? confirmed : sent;
-		if (ok && mnemonic == "CNTR")
+		if (ok && contrast)
 		{
 			state.contrastKnown = true;
 			state.contrast = confirmed >= 0 ? confirmed : sent;
@@ -537,6 +647,7 @@ namespace LedDrive
 		++contrastGeneration;
 		sequence.clear();
 		wake.notify_all();
+		gapWake.notify_all();   // audit 2026-10-16: ends an abortable pre-wait
 	}
 
 	bool BarcoAsciiDriver::SetLightNow(int level, int timeoutMs)
@@ -550,6 +661,7 @@ namespace LedDrive
 			pendingLight = -1;
 			// audit 2026-10-16: nor a target the worker took before this.
 			++lightGeneration;
+			scriptLight = -1;   // audit 2026-10-16
 			clamped = Clamp(level);
 		}
 		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
@@ -570,8 +682,7 @@ namespace LedDrive
 		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
 			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
 		const bool ok = timeoutMs > 0 ?
-			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
-				std::max(1, std::min(left / 2, config.ackTimeoutMs)), left / 2, clamped) :
+			BoundedTransactLocked(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed, left, clamped, -1) :
 			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
 				config.ackTimeoutMs, -1, clamped);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
@@ -582,6 +693,10 @@ namespace LedDrive
 	bool BarcoAsciiDriver::SetContrast(int value)
 	{
 		if (!opened) return false;
+		{
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			scriptContrast = -1;   // audit 2026-10-16
+		}
 		std::lock_guard<std::timed_mutex> guard(portMutex);
 		int confirmed = -1;
 		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
@@ -646,6 +761,11 @@ namespace LedDrive
 				if (shuttingDown)
 				{
 					resyncAfterReopen = false;
+					// audit 2026-10-16: nothing more is sent; a target left here
+					// would wake this loop again at once (a spin).
+					pendingLight = -1;
+					pendingContrast = -1;
+					sequence.clear();
 					continue;
 				}
 				if (resyncAfterReopen)
@@ -671,13 +791,20 @@ namespace LedDrive
 					transmitting = false;
 					if (!stopping && !shuttingDown)
 					{
+						// audit 2026-10-16: after script sends, the values the
+						// script intended (kept even when their writes failed), not
+						// the last ones that reached the port; a newer SendScript
+						// drops these again (pending cleared, generation bumped).
+						const int lightTarget = pendingLight >= 0 ? pendingLight :
+							scriptLight >= 0 ? scriptLight : lastSentLight;
+						const int contrastTarget = pendingContrast >= 0 ? pendingContrast :
+							scriptContrast >= 0 ? scriptContrast : lastSentContrast >= 0 ? lastSentContrast : 50;
 						DebugLog::Log("LED drive: %s reopened; re-sending LPW1 %d and CNTR %d",
-							config.port.c_str(), pendingLight >= 0 ? pendingLight : lastSentLight,
-							pendingContrast >= 0 ? pendingContrast : lastSentContrast >= 0 ? lastSentContrast : 50);
-						if (pendingContrast < 0) pendingContrast = lastSentContrast >= 0 ? lastSentContrast : 50;
-						if (pendingLight < 0 && lastSentLight >= 0)
+							config.port.c_str(), lightTarget, contrastTarget);
+						pendingContrast = contrastTarget;
+						if (pendingLight < 0 && lightTarget >= 0)
 						{
-							pendingLight = lastSentLight;
+							pendingLight = lightTarget;
 							pendingJump = true;   // the level itself, not split
 						}
 					}
@@ -784,6 +911,7 @@ namespace LedDrive
 			pendingContrast = -1;
 		}
 		wake.notify_all();
+		gapWake.notify_all();   // audit 2026-10-16
 		if (worker.joinable()) worker.join();
 		if (port) port->Close();
 	}

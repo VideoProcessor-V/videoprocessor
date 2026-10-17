@@ -24,7 +24,8 @@ ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 int tile = g.x / 256;
 int x = g.x - tile * 256;
 if (tile < int(tiles) && g.y < 256) {
-    vec4 pair = tile < 2 ? o01 : tile < 4 ? o23 : tile < 6 ? o45 : o67;
+    vec4 pair = tile < 2 ? o01 : tile < 4 ? o23 : tile < 6 ? o45 : tile < 8 ? o67 :
+                tile < 10 ? o89 : tile < 12 ? oab : tile < 14 ? ocd : oef;
     vec2 origin = (tile % 2) == 0 ? pair.xy : pair.zw;
     ivec2 p = clamp(ivec2(origin) + ivec2(x, g.y), ivec2(0), textureSize(src, 0) - ivec2(1));
     vec4 c = texelFetch(src, p, 0);
@@ -358,24 +359,18 @@ if (tile < int(tiles) && g.y < 256) {
 		const float w = cx1 > cx0 ? cx1 - cx0 : static_cast<float>(luma->params.w);
 		const float h = cy1 > cy0 ? cy1 - cy0 : static_cast<float>(luma->params.h);
 		const float x0 = cx1 > cx0 ? cx0 : 0.0f, y0 = cy1 > cy0 ? cy0 : 0.0f;
-		const int cols = (std::min)(4, static_cast<int>((w - 16.0f) / kTile));
-		const int rows = (std::min)(2, static_cast<int>((h - 16.0f) / kTile));
-		if (cols <= 0 || rows <= 0) return;
-		float origins[16] = {};
-		int tiles = 0;
-		for (int r = 0; r < rows; ++r)
-			for (int c = 0; c < cols && tiles < kMaxTiles; ++c)
-			{
-				auto place = [](float start, float span, int index, int count) {
-					const float centre = start + (index + 0.5f) * span / count;
-					float o = std::floor((centre - kTile / 2) / 16.0f) * 16.0f;
-					const float lo = std::ceil(start / 16.0f) * 16.0f, hi = std::floor((start + span - kTile) / 16.0f) * 16.0f;
-					return (std::max)(lo, (std::min)(hi, o));
-				};
-				origins[tiles * 2] = place(x0, w, c, cols);
-				origins[tiles * 2 + 1] = place(y0, h, r, rows);
-				++tiles;
-			}
+		// The base 4 x 2 grid first (unchanged, so frame signatures compare across a switch),
+		// then the dense rows while a lower reading is declared or gathered.
+		int baseTiles = 0;
+		const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, w, h, kTile, denseGrid.load(std::memory_order_acquire), &baseTiles);
+		if (places.empty()) return;
+		float origins[2 * kMaxTiles] = {};
+		const int tiles = (std::min)(kMaxTiles, static_cast<int>(places.size()));
+		for (int i = 0; i < tiles; ++i)
+		{
+			origins[i * 2] = static_cast<float>(places[static_cast<size_t>(i)].x0);
+			origins[i * 2 + 1] = static_cast<float>(places[static_cast<size_t>(i)].y0);
+		}
 
 		const int slot = nextSlot;
 		if (busy[slot]) return;   // the oldest copy is still on its way: skip, never wait
@@ -412,13 +407,17 @@ if (tile < int(tiles) && g.y < 256) {
 		descriptors[1].memory = PL_MEMORY_COHERENT;
 		const float tileCount = static_cast<float>(tiles);
 		const float rgb = luma->params.format->num_components >= 3 ? 1.0f : 0.0f;
-		const pl_shader_var variables[6] = {
+		const pl_shader_var variables[10] = {
 			{ pl_var_float("tiles"), &tileCount, true },
 			{ pl_var_float("is_rgb"), &rgb, true },
 			{ pl_var_vec4("o01"), &origins[0], true },
 			{ pl_var_vec4("o23"), &origins[4], true },
 			{ pl_var_vec4("o45"), &origins[8], true },
-			{ pl_var_vec4("o67"), &origins[12], true } };
+			{ pl_var_vec4("o67"), &origins[12], true },
+			{ pl_var_vec4("o89"), &origins[16], true },
+			{ pl_var_vec4("oab"), &origins[20], true },
+			{ pl_var_vec4("ocd"), &origins[24], true },
+			{ pl_var_vec4("oef"), &origins[28], true } };
 		pl_custom_shader custom{};
 		custom.description = "VideoProcessor source resolution tiles";
 		custom.body = BODY;
@@ -427,7 +426,7 @@ if (tile < int(tiles) && g.y < 256) {
 		custom.descriptors = descriptors;
 		custom.num_descriptors = 2;
 		custom.variables = variables;
-		custom.num_variables = 6;
+		custom.num_variables = 10;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;
@@ -451,6 +450,14 @@ if (tile < int(tiles) && g.y < 256) {
 		Job& meta = pendingMeta[slot];
 		meta.values.clear();
 		meta.tiles = tiles;
+		meta.baseTiles = (std::min)(baseTiles, tiles);
+		meta.tileX.clear();
+		meta.tileY.clear();
+		for (int i = 0; i < tiles; ++i)
+		{
+			meta.tileX.push_back(places[static_cast<size_t>(i)].centreX);
+			meta.tileY.push_back(places[static_cast<size_t>(i)].centreY);
+		}
 		const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : luma->params.format->component_depth[0];
 		const int colorDepth = source.repr.bits.color_depth > 0 ? source.repr.bits.color_depth : sampleDepth;
 		meta.codeMaximum = (1 << (std::min)(16, (std::max)(1, colorDepth))) - 1;
@@ -488,6 +495,7 @@ if (tile < int(tiles) && g.y < 256) {
 					tracker.Discontinuity(cause);
 					trackerV.Discontinuity(cause);
 					trackerH.Discontinuity(cause);
+					denseGrid.store(false, std::memory_order_release);
 					coherenceV.clear();
 					coherenceH.clear();
 					kernelVotes.clear();
@@ -537,6 +545,14 @@ if (tile < int(tiles) && g.y < 256) {
 		thresholds.codeMaximum = j.codeMaximum;
 		if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 		thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
+		// The tiles' positions (the overlay spread) and the base grid for the frame signature:
+		// switching between the base and the dense grid is neither a cut nor a new shot.
+		if (j.tileX.size() == static_cast<size_t>(j.tiles) && j.tileY.size() == static_cast<size_t>(j.tiles))
+		{
+			thresholds.tileX = j.tileX;
+			thresholds.tileY = j.tileY;
+		}
+		thresholds.signatureTiles = j.baseTiles;
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
 
 		std::lock_guard<std::mutex> lock(mutex);
@@ -550,6 +566,10 @@ if (tile < int(tiles) && g.y < 256) {
 		tracker.Update(frame, j.seconds);
 		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds);
 		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds);
+		// The dense grid while any tracker has a lower reading declared or in its window (from the
+		// next copy on); back to the base grid once all are native again.
+		denseGrid.store(tracker.Ratio() < 1.0 || tracker.Candidate() < 1.0 || trackerV.Ratio() < 1.0 || trackerV.Candidate() < 1.0 ||
+			trackerH.Ratio() < 1.0 || trackerH.Candidate() < 1.0, std::memory_order_release);
 		// The live reading (spec 1a): ~2 s of informative frames, snapped on a cut.
 		if (tracker.Cuts() != lastCuts) { live.clear(); lastCuts = tracker.Cuts(); }
 		while (!live.empty() && j.seconds - live.front().first > 2.0) live.pop_front();
@@ -658,6 +678,7 @@ if (tile < int(tiles) && g.y < 256) {
 		snapshot.discontinuities = tracker.Discontinuities();
 		++snapshot.frames;
 		snapshot.analyseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		snapshot.tiles = j.tiles;
 		char row[256];
 		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
 			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,

@@ -36,6 +36,7 @@ namespace LedDrive
 		bool SendNow(const std::string& mnemonic, int value, int timeoutMs) override;
 		bool SendScript(const std::string& mnemonic, int value) override;
 		bool SetContrast(int value) override;
+		int CommandGapMs() const override;
 		void Close() override;
 		DriverStatus Status() const override;
 
@@ -62,6 +63,11 @@ namespace LedDrive
 		bool Transact(const std::string& command, const char* mnemonic, int* value,
 			int timeoutMs, int maxGapWaitMs, int sentLight = -1, bool abortable = false,
 			int sentContrast = -1);
+		// audit 2026-10-16: an exit command within budgetMs (after the port
+		// wait): the command gap first, in full when the budget allows, then
+		// the reply. Caller holds portMutex.
+		bool BoundedTransactLocked(const std::string& command, const char* mnemonic, int* value,
+			int budgetMs, int sentLight, int sentContrast);
 		bool QueryLocked(const char* mnemonic, const std::string& argument, int& value);
 		// audit 2026-10-16: reopens a port closed after repeated write
 		// failures (or a failed read), with a back-off of 2 s doubling to
@@ -80,6 +86,10 @@ namespace LedDrive
 		mutable std::mutex stateMutex;
 		std::timed_mutex portMutex;
 		std::condition_variable wake;
+		// audit 2026-10-16 (with stateMutex): Transact's pre-wait, ended by
+		// BeginShutdown/Close for abortable commands. Separate from `wake`, so
+		// a notify_one meant for the worker is never taken by a pre-wait.
+		std::condition_variable gapWake;
 		std::thread worker;
 		bool stopping = false;
 		bool opened = false;
@@ -120,6 +130,15 @@ namespace LedDrive
 		// light and CNTR the model believes (a power-cycled projector is at
 		// its own defaults).
 		bool resyncAfterReopen = false;
+		// audit 2026-10-16 (guarded by stateMutex): the last LPW1 / CNTR value
+		// SendScript was asked for, recorded even when its write failed; -1
+		// once the driver's own targets (SetLight, SetContrastAsync, ...) take
+		// over. The resync's target after script sends.
+		int scriptLight = -1;
+		int scriptContrast = -1;
+		// audit 2026-10-16 (guarded by portMutex): the exit restore's one
+		// Open attempt ahead of the reopen back-off was made.
+		bool shutdownOpenTried = false;
 		int reopensUnlogged = 0;
 		bool shuttingDown = false;
 		// Experimental custom dim sequence (guarded by stateMutex).

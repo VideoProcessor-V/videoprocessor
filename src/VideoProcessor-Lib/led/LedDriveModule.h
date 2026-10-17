@@ -89,8 +89,9 @@ namespace LedDrive
 		// True while the experimental custom-dim fade to black is engaged.
 		bool CustomDimEngaged() const;
 		bool DrivingProjector() const;
-		// Milliseconds since the last BeginFrame (a video frame); very large
-		// before the first. The RS-232 test is refused while video plays.
+		// Milliseconds since the last BeginFrame (a video frame), on the
+		// module's own clock; very large before the first. The RS-232 test is
+		// refused while video plays; led_idle_restore_s acts on it.
 		double MsSinceLastFrame() const;
 		DriverStatus ProjectorStatus() const;
 		int Ticks() const;
@@ -147,6 +148,9 @@ namespace LedDrive
 		FrameStats Corrected(const FrameStats& predicted) const;
 		void StepCompensateLocked(uint64_t sequence, double elapsedMs);
 		void StepFadeToBlackLocked(uint64_t sequence, double timeMs);
+		// audit 2026-10-16: led_idle_restore_s.
+		double MsSinceLastFrameLocked() const;
+		void RestoreIdleCompensateLocked();
 
 		ProjectorConfig projector;
 		LedDriveConfig led;
@@ -185,6 +189,10 @@ namespace LedDrive
 		// by the frame during which they were written.
 		uint64_t frameIndex = 0;
 		double lastFrameMs = -1.0;
+		// audit 2026-10-16: NowMs() at the last BeginFrame (-1 before any),
+		// and the idle restore (led_idle_restore_s) done since it.
+		double lastFrameWallMs = -1.0;
+		bool idleRestored = false;
 		double framePeriodMs = 1000.0 / 60.0;
 		double sourceFps = 0.0;
 		struct Command { uint64_t frame; int level; };

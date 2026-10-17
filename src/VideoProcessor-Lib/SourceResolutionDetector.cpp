@@ -64,7 +64,9 @@ namespace SourceResolution
 		// Planner Q6 (2026-10-16): either axis - a band of rows (subtitles, lower thirds, anywhere
 		// in the tile) or of columns (vertical CJK text, side captions); for the columns the
 		// steps down are counted.
-		double TextBand(const float* luma, int stride, int n)
+		// `lines` (optional): the separate bands of sharp steps along the axis that gave the share
+		// (text lines; mixed-screen guard: subtitles are one or two, UI panels three or more).
+		double TextBand(const float* luma, int stride, int n, int* lines = nullptr, double* sharpAcross = nullptr, double* sharpDown = nullptr)
 		{
 			std::vector<int> rows(static_cast<size_t>(n), 0), columns(static_cast<size_t>(n), 0);
 			long acrossTotal = 0, downTotal = 0;
@@ -93,7 +95,34 @@ namespace SourceResolution
 				}
 				return static_cast<double>(best) / total;
 			};
-			return (std::max)(densest(rows, acrossTotal), densest(columns, downTotal));
+			// Text lines: runs of lines (rows or columns) holding at least two sharp steps, gaps of up
+			// to 3 bridged, at least 6 long and holding a fiftieth of the steps (stray steps in the
+			// picture under the text are not a line).
+			auto runs = [n](const std::vector<int>& counts, long total) {
+				if (total < static_cast<long>(n) * n / 500) return 0;
+				int found = 0, start = -1, last = -1;
+				long sum = 0;
+				auto close = [&]() {
+					if (start >= 0 && last - start + 1 >= 6 && sum * 50 >= total) ++found;
+					start = -1;
+					sum = 0;
+				};
+				for (int i = 0; i < n; ++i)
+				{
+					if (counts[static_cast<size_t>(i)] < 2) continue;
+					if (start >= 0 && i - last > 4) close();
+					if (start < 0) start = i;
+					last = i;
+					sum += counts[static_cast<size_t>(i)];
+				}
+				close();
+				return found;
+			};
+			if (sharpAcross) *sharpAcross = static_cast<double>(acrossTotal) / (static_cast<double>(n) * (n - 1));
+			if (sharpDown) *sharpDown = static_cast<double>(downTotal) / (static_cast<double>(n) * (n - 1));
+			const double acrossShare = densest(rows, acrossTotal), downShare = densest(columns, downTotal);
+			if (lines) *lines = acrossShare >= downShare ? runs(rows, acrossTotal) : runs(columns, downTotal);
+			return (std::max)(acrossShare, downShare);
 		}
 	}
 
@@ -101,7 +130,8 @@ namespace SourceResolution
 	{
 		if (!luma || !PowerOfTwo(n) || stride < n) return false;
 		out.n = n;
-		out.textBand = TextBand(luma, stride, n);
+		out.textBand = TextBand(luma, stride, n, &out.textLines, &out.sharpStepsH, &out.sharpStepsV);
+		out.sharpSteps = 0.5 * (out.sharpStepsH + out.sharpStepsV);
 		out.vertical.assign(n / 2 + 1, 0.0);
 		out.horizontal.assign(n / 2 + 1, 0.0);
 		std::vector<double> window(n);
@@ -551,9 +581,22 @@ namespace SourceResolution
 			struct View { bool valid = false, coherent = false, incoherent = false, informative = false; double detail = 0.0, level = 0.0; };
 			std::vector<View> views(tiles.size());
 			std::vector<double> reference;
+			// One-pixel full-contrast steps (Spectrum::sharpSteps): an upscale spreads every edge over
+			// 1 / r pixels (measured: 0.0000 at r 1/3, 0.0001 at 1/2, 0.0015 at 2/3, 0.004 at 3/4),
+			// native picture holds 0.014 - 0.018 and UI text 0.03 - 0.05. Such a tile is native, never
+			// the resampled picture; not text-like (not a subtitle band) it is UI - also when it is
+			// what made the frame read lower (evenly spaced UI text lines are mirror-coherent and can
+			// read a false rate, ~0.3 measured, with no resampled tile at that rate at all).
+			const bool sharpRule = t.mixedRowGuard && t.mixedSharpSteps > 0.0;
+			// On the axes read: a one-axis upscale is native - and sharp - across the other axis.
+			auto sharpness = [&](const Spectrum& s) {
+				return useV && useH ? s.sharpSteps : useV ? s.sharpStepsV : s.sharpStepsH;
+			};
+			int sharpUi = 0;
 			for (size_t i = 0; i < tiles.size(); ++i)
 			{
 				const Spectrum& s = tiles[i];
+				if (sharpRule && s.n == n && sharpness(s) >= t.mixedSharpSteps && s.textBand < t.mixedTextBand && Informative(s, t)) ++sharpUi;
 				if (s.n != n || s.vertical.size() != static_cast<size_t>(n / 2 + 1) || s.horizontal.size() != s.vertical.size() ||
 					s.mirrorVertical.size() != static_cast<size_t>(n) || s.mirrorHorizontal.size() != static_cast<size_t>(n))
 					continue;
@@ -575,17 +618,42 @@ namespace SourceResolution
 				const double curveFloor = (std::max)(useV ? CurveFloor(s.mirrorVertical, n, t) : 0.0, useH ? CurveFloor(s.mirrorHorizontal, n, t) : 0.0);
 				// The resampled picture: the tiles that carry the reading themselves - not text or
 				// sharp edges, which are coherent at every rate (a high floor) and hold native detail.
-				if (v.coherent && v.informative && !excluded && s.textBand < t.mixedTextBand && curveFloor <= t.maximumFloor) reference.push_back(detail);
+				const bool sharp = t.mixedSharpSteps > 0.0 && sharpness(s) >= t.mixedSharpSteps;
+				if (v.coherent && v.informative && !excluded && !sharp && s.textBand < t.mixedTextBand && curveFloor <= t.maximumFloor) reference.push_back(detail);
+			}
+			frame.mixedSharpTiles = sharpUi;
+			if (sharpUi > 0)
+			{
+				frame.mixed = true;
+				frame.mixedRatio = both ? frame.ratio : rate;
+				frame.ratio = frame.ratioV = frame.ratioH = 1.0;
+				return;
 			}
 			// No tile is resampled on its own (the reading came from the average only): nothing to
 			// compare with - left as before.
 			if (reference.empty()) return;
-			std::nth_element(reference.begin(), reference.begin() + reference.size() / 2, reference.end());
-			const double resampled = reference[reference.size() / 2];
+			// The lower quartile, not the median: tiles of native text over a dimmed video (a panel,
+			// a menu) are partly coherent and can make up half of the candidates; the resampled
+			// tiles themselves agree within ~0.15 decades, so the quartile moves them little.
+			const size_t quartile = reference.size() / 4;
+			std::nth_element(reference.begin(), reference.begin() + quartile, reference.end());
+			const double resampled = reference[quartile];
 			const int count = static_cast<int>(tiles.size());
-			const int columns = t.gridColumns > 0 ? (std::min)(t.gridColumns, count) : count;
-			std::vector<bool> rows(static_cast<size_t>((count + columns - 1) / columns), false), cols(static_cast<size_t>(columns), false);
-			int picture = 0, overlay = 0;
+			// Each tile's centre (normalised): the explicit centres, else the gridColumns layout.
+			std::vector<float> cx(tiles.size()), cy(tiles.size());
+			if (t.tileX.size() == tiles.size() && t.tileY.size() == tiles.size()) { cx = t.tileX; cy = t.tileY; }
+			else
+			{
+				const int columns = t.gridColumns > 0 ? (std::min)(t.gridColumns, count) : count;
+				const int gridRows = (count + columns - 1) / columns;
+				for (int i = 0; i < count; ++i)
+				{
+					cx[static_cast<size_t>(i)] = static_cast<float>((i % columns + 0.5) / columns);
+					cy[static_cast<size_t>(i)] = static_cast<float>((i / columns + 0.5) / gridRows);
+				}
+			}
+			std::vector<float> overlayX, overlayY;
+			int picture = 0, overlay = 0, ui = 0;
 			for (size_t i = 0; i < tiles.size(); ++i)
 			{
 				const View& v = views[i];
@@ -593,15 +661,42 @@ namespace SourceResolution
 				const bool textLike = tiles[i].textBand >= t.mixedTextBand;
 				if (!textLike && v.incoherent && v.informative) { ++picture; continue; }
 				++overlay;
-				rows[i / static_cast<size_t>(columns)] = true;
-				cols[i % static_cast<size_t>(columns)] = true;
+				// Native detail over (or beside) the resampled picture that is not a band of one or
+				// two text lines: UI, wherever it sits (a single row included).
+				// Three or more text lines in one tile are a UI panel or menu, not subtitles (one or two
+				// lines), whatever the band share reads (a panel's lines spaced near a quarter tile
+				// read 0.36 - 0.5, at the text-like threshold).
+				if (!textLike || (t.mixedTextLines > 0 && tiles[i].textLines >= t.mixedTextLines)) ++ui;
+				overlayX.push_back(cx[i]);
+				overlayY.push_back(cy[i]);
 			}
+			// Rows / columns: distinct centres (a 1e-3 of the picture apart).
+			auto distinct = [](std::vector<float> v) {
+				std::sort(v.begin(), v.end());
+				int k = 0;
+				for (size_t i = 0; i < v.size(); ++i) if (i == 0 || v[i] - v[i - 1] > 1e-3f) ++k;
+				return k;
+			};
+			int rowMost = 0;
+			for (size_t i = 0; i < overlayY.size(); ++i)
+			{
+				int same = 0;
+				for (const float y : overlayY) same += std::fabs(y - overlayY[i]) <= 1e-3f ? 1 : 0;
+				rowMost = (std::max)(rowMost, same);
+			}
+			frame.mixedUiTiles = ui;
+			frame.mixedRowMost = rowMost;
 			frame.mixedPictureTiles = picture;
 			frame.mixedOverlayTiles = overlay;
-			frame.mixedOverlayRows = static_cast<int>(std::count(rows.begin(), rows.end(), true));
-			frame.mixedOverlayColumns = static_cast<int>(std::count(cols.begin(), cols.end(), true));
-			const bool spread = frame.mixedOverlayRows >= 2 && frame.mixedOverlayColumns >= 2;
-			if ((t.mixedPictureTiles > 0 && picture >= t.mixedPictureTiles) || spread)
+			frame.mixedOverlayRows = distinct(overlayY);
+			frame.mixedOverlayColumns = distinct(overlayX);
+			// The spread: overlay far enough apart both ways (the 4 x 2 grid: two rows and two
+			// columns, exactly as before; a subtitle band never spans 0.3 of the height).
+			const bool spread = !overlayY.empty() &&
+				*std::max_element(overlayY.begin(), overlayY.end()) - *std::min_element(overlayY.begin(), overlayY.end()) >= t.mixedSpreadHeight - 1e-6 &&
+				*std::max_element(overlayX.begin(), overlayX.end()) - *std::min_element(overlayX.begin(), overlayX.end()) >= t.mixedSpreadWidth - 1e-6;
+			const bool row = (t.mixedRowGuard && ui > 0) || (t.mixedRowTiles > 0 && frame.mixedRowMost >= t.mixedRowTiles);
+			if ((t.mixedPictureTiles > 0 && picture >= t.mixedPictureTiles) || spread || row)
 			{
 				frame.mixed = true;
 				frame.mixedRatio = both ? frame.ratio : rate;
@@ -618,11 +713,17 @@ namespace SourceResolution
 		const int n = tiles.front().n;
 		std::vector<double> vertical(static_cast<size_t>((std::max)(n, 0)), 0.0), horizontal(vertical.size(), 0.0);
 		double sum = 0.0, signature = 0.0;
+		// The mean and signature from the base tiles only (Thresholds::signatureTiles).
+		const size_t signatureTiles = t.signatureTiles > 0 && static_cast<size_t>(t.signatureTiles) < tiles.size()
+			? static_cast<size_t>(t.signatureTiles) : tiles.size();
 		for (size_t i = 0; i < tiles.size(); ++i)
 		{
 			const Spectrum& s = tiles[i];
-			sum += s.mean;
-			signature += s.mean * static_cast<double>(i + 1);
+			if (i < signatureTiles)
+			{
+				sum += s.mean;
+				signature += s.mean * static_cast<double>(i + 1);
+			}
 			frame.peakiness = (std::max)(frame.peakiness, Peakiness(s));
 			if (t.textBand > 0.0 && t.textBand <= 1.0 && s.textBand >= t.textBand) { ++frame.textTiles; continue; }
 			if (t.periodicPeak > 0.0 && s.periodicPeak >= t.periodicPeak) { ++frame.periodicTiles; continue; }
@@ -636,7 +737,7 @@ namespace SourceResolution
 				frame.horizontalPower[k] += s.horizontal[k];
 			}
 		}
-		frame.mean = sum / tiles.size();
+		frame.mean = sum / signatureTiles;
 		frame.signature = signature;
 		ReadCoding(tiles, frame);
 		if (frame.informativeTiles == 0) return frame;
@@ -731,6 +832,44 @@ namespace SourceResolution
 	double DetailAbove(const Spectrum& tile, double ratio, int axes, double* level)
 	{
 		return DetailAboveSpectra(tile.vertical, tile.horizontal, ratio, axes, level);
+	}
+
+	std::vector<TilePlace> PlaceTiles(double x0, double y0, double w, double h, int tile, bool dense, int* baseTiles)
+	{
+		std::vector<TilePlace> places;
+		if (baseTiles) *baseTiles = 0;
+		if (tile <= 0 || w <= 0.0 || h <= 0.0) return places;
+		const int cols = (std::min)(4, static_cast<int>((w - 16.0) / tile));
+		const int rows = (std::min)(2, static_cast<int>((h - 16.0) / tile));
+		if (cols <= 0 || rows <= 0) return places;
+		// A tile centred at `centre`, on the 16-px grid, inside [start, start + span).
+		auto place = [tile](double start, double span, double centre) {
+			const double o = std::floor((centre - tile / 2) / 16.0) * 16.0;
+			const double lo = std::ceil(start / 16.0) * 16.0, hi = std::floor((start + span - tile) / 16.0) * 16.0;
+			return static_cast<int>((std::max)(lo, (std::min)(hi, o)));
+		};
+		auto add = [&](double centreY, int c) {
+			TilePlace p;
+			p.x0 = place(x0, w, x0 + (c + 0.5) * w / cols);
+			p.y0 = place(y0, h, centreY);
+			p.centreX = static_cast<float>((p.x0 + tile * 0.5 - x0) / w);
+			p.centreY = static_cast<float>((p.y0 + tile * 0.5 - y0) / h);
+			places.push_back(p);
+		};
+		for (int r = 0; r < rows; ++r)
+			for (int c = 0; c < cols; ++c) add(y0 + (r + 0.5) * h / rows, c);
+		if (baseTiles) *baseTiles = static_cast<int>(places.size());
+		if (dense && rows == 2 && static_cast<int>((h - 16.0) / tile) >= 4)
+			for (const double share : { 0.5, 0.875 })
+				for (int c = 0; c < cols; ++c) add(y0 + share * h, c);
+		return places;
+	}
+
+	void SetTileCentres(const std::vector<TilePlace>& places, Thresholds& thresholds)
+	{
+		thresholds.tileX.clear();
+		thresholds.tileY.clear();
+		for (const TilePlace& p : places) { thresholds.tileX.push_back(p.centreX); thresholds.tileY.push_back(p.centreY); }
 	}
 
 	FrameReading AxisFrame(const FrameReading& frame, bool vertical)

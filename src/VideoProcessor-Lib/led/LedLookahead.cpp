@@ -16,18 +16,41 @@ namespace LedDrive
 		return identity;
 	}
 
+	namespace
+	{
+		bool FullRangeRgbEncoding(VideoFrameEncoding encoding)
+		{
+			switch (encoding)
+			{
+			case VideoFrameEncoding::BGRA_8BIT:
+			case VideoFrameEncoding::ARGB_8BIT:
+			case VideoFrameEncoding::R12B:
+			case VideoFrameEncoding::R12L:
+				return true;
+			default:
+				return false;
+			}
+		}
+	}
+
+	bool SampleRemapsFullRange(const AnalysisLumaSource& luma)
+	{
+		// audit 2026-10-16: Sample() maps natively full-range sources (8-bit
+		// and 12-bit RGB, the DV SDR-tunnel RGB, full-range YCbCr planes) to
+		// the limited code domain: Y = 64 + 876/1023 * Y'.
+		if (!kAnalysisLumaSampleLimitedDomain) return false;
+		if (luma.format == AnalysisLumaFormat::SdrTunnelRgb) return true;
+		if (luma.format == AnalysisLumaFormat::NativeRgb) return FullRangeRgbEncoding(luma.encoding);
+		return luma.fullRangeYuv;
+	}
+
 	bool LumaIsFullRange(const AnalysisLumaSource& luma)
 	{
-		switch (luma.encoding)
-		{
-		case VideoFrameEncoding::BGRA_8BIT:
-		case VideoFrameEncoding::ARGB_8BIT:
-		case VideoFrameEncoding::R12B:
-		case VideoFrameEncoding::R12L:
-			return true;
-		default:
-			return false;
-		}
+		// audit 2026-10-16: with the limited-domain sampler, Sample() never
+		// returns full-range codes (reading them as 0-1023 again was a double
+		// conversion: full-range RGB black read ~6%).
+		if (kAnalysisLumaSampleLimitedDomain) return false;
+		return FullRangeRgbEncoding(luma.encoding);
 	}
 
 	bool MeasureRawFrame(const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& rect,
@@ -42,7 +65,13 @@ namespace LedDrive
 		const int blocksX = std::min(96, width / 3), blocksY = std::min(54, height / 3);
 		const double stepX = static_cast<double>(width) / blocksX;
 		const double stepY = static_cast<double>(height) / blocksY;
-		const bool full = range >= 0 ? range == 1 : LumaIsFullRange(luma);
+		// audit 2026-10-16: source_range describes the captured codes. Where
+		// Sample() remapped full-range codes to the limited domain, the source
+		// code is recovered first, so auto and full read the remapped code as
+		// limited (no second conversion) and a forced limited still reads the
+		// source's own codes as 64-940.
+		const bool remapped = SampleRemapsFullRange(luma);
+		const bool full = range >= 0 ? range == 1 : (remapped || LumaIsFullRange(luma));
 		for (int by = 0; by < blocksY; ++by)
 			for (int bx = 0; bx < blocksX; ++bx)
 			{
@@ -56,7 +85,8 @@ namespace LedDrive
 						AnalysisLumaSample sample;
 						if (!luma.Sample(std::min(ox + dx, right - 1), std::min(oy + dy, bottom - 1), sample))
 							continue;
-						const double signal = full ? sample.luma / 1023.0 : (sample.luma - 64.0) / 876.0;
+						const double sourceCode = remapped ? (sample.luma - 64.0) * 1023.0 / 876.0 : sample.luma;
+						const double signal = full ? sourceCode / 1023.0 : (sourceCode - 64.0) / 876.0;
 						const int index = static_cast<int>(std::lround(
 							std::max(0.0, std::min(signal, 1.0)) * (RAW_TRANSFER_SIZE - 1)));
 						acc += transfer[index];

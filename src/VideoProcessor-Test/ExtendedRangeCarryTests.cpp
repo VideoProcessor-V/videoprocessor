@@ -539,6 +539,10 @@ namespace VideoProcessorTest
 			Assert::IsFalse(d.convertGamma || d.convertPrimaries || d.libplaceboMapsPrimaries);
 			Assert::IsTrue(d.source.kind == TransferKind::Identity);
 			Assert::IsTrue(ExtendedRange::Decide(true, off, pq, pq, nullptr, PL_LUT_UNKNOWN).reason == R::HdrSource);
+			// Dynamic tone mapping (peak detection) maps even equal colour spaces.
+			ExtendedRange::Settings dynamic{};
+			dynamic.hdrDynamicToneMapping = true;
+			Assert::IsTrue(ExtendedRange::Decide(true, dynamic, pq, pq, nullptr, PL_LUT_UNKNOWN).reason == R::HdrMapped);
 			pl_color_space display = pq;
 			display.hdr.max_luma = 600.0f;   // tone mapping
 			Assert::IsTrue(ExtendedRange::Decide(true, on, pq, display, nullptr, PL_LUT_UNKNOWN).reason == R::HdrMapped);

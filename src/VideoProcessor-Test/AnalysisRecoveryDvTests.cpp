@@ -156,15 +156,17 @@ namespace Tests
 			Assert::IsTrue(prepared.source.backingOwner != nullptr);
 
 			// Codes are stored as code << 4. The beta detector reads the
-			// upper ten bits directly; it does not rescale or round 12-bit data.
+			// upper ten bits directly (no 12-bit rounding). audit 2026-10-16:
+			// full-range codes are then mapped to the limited analysis domain
+			// (Y 64 + 876/1023 Y', C 512 + 896/1023 C').
 			const auto firstRow = SampleAt(prepared, 0, 0);
-			Assert::AreEqual(0, static_cast<int>(firstRow.luma)); // 3 >> 2
-			Assert::AreEqual(0, static_cast<int>(firstRow.chromaU)); // 3 >> 2
-			Assert::AreEqual(1023, static_cast<int>(firstRow.chromaV));
+			Assert::AreEqual(64, static_cast<int>(firstRow.luma)); // 3 >> 2 = 0
+			Assert::AreEqual(64, static_cast<int>(firstRow.chromaU)); // 0
+			Assert::AreEqual(960, static_cast<int>(firstRow.chromaV)); // 1023
 			const auto secondRow = SampleAt(prepared, 0, 1);
-			Assert::AreEqual(687, static_cast<int>(secondRow.luma)); // 0xABC >> 2
-			Assert::AreEqual(687, static_cast<int>(secondRow.chromaU));
-			Assert::AreEqual(72, static_cast<int>(secondRow.chromaV)); // 0x123 >> 2
+			Assert::AreEqual(652, static_cast<int>(secondRow.luma)); // 0xABC >> 2 = 687
+			Assert::AreEqual(665, static_cast<int>(secondRow.chromaU)); // 687
+			Assert::AreEqual(127, static_cast<int>(secondRow.chromaV)); // 0x123 >> 2 = 72
 
 			// The formatter contract and the parsed DM full-range flag must
 			// agree. When both consistently select limited range, preserve it.
@@ -195,10 +197,11 @@ namespace Tests
 				Assert::IsTrue(prepared.usesConverted);
 				Assert::AreEqual(static_cast<int>(AnalysisFrameDomain::DecodedDolbyVision422),
 					static_cast<int>(prepared.domain));
+				// audit 2026-10-16: full-range DV in the limited domain.
 				const auto sample = SampleAt(prepared, 0, 0);
-				Assert::AreEqual(0, static_cast<int>(sample.luma));
-				Assert::AreEqual(0, static_cast<int>(sample.chromaU));
-				Assert::AreEqual(1023, static_cast<int>(sample.chromaV));
+				Assert::AreEqual(64, static_cast<int>(sample.luma));
+				Assert::AreEqual(64, static_cast<int>(sample.chromaU));
+				Assert::AreEqual(960, static_cast<int>(sample.chromaV));
 			}
 		}
 
@@ -225,7 +228,8 @@ namespace Tests
 			Assert::AreEqual(2, static_cast<int>(low.rgbBitAlignment));
 			const auto highSample = SampleAt(high, 0, 0);
 			const auto lowSample = SampleAt(low, 0, 0);
-			Assert::AreEqual(514, static_cast<int>(highSample.luma));
+			// audit 2026-10-16: full-range grey 128 (10-bit 514) -> limited 504.
+			Assert::AreEqual(504, static_cast<int>(highSample.luma));
 			Assert::AreEqual(static_cast<int>(highSample.luma),
 				static_cast<int>(lowSample.luma));
 			Assert::AreEqual(static_cast<int>(highSample.chromaU),
@@ -435,7 +439,7 @@ namespace Tests
 				static_cast<unsigned long long>(dv.domainKey),
 				static_cast<unsigned long long>(sdr.domainKey));
 			const auto sdrSample = SampleAt(sdr, 0, 0);
-			Assert::AreEqual(514, static_cast<int>(sdrSample.luma));
+			Assert::AreEqual(504, static_cast<int>(sdrSample.luma)); // audit 2026-10-16
 			Assert::AreNotEqual(0, static_cast<int>(sdrSample.luma));
 		}
 
@@ -521,7 +525,7 @@ namespace Tests
 			Assert::IsFalse(weakDecoded.expired());
 			Assert::IsTrue(prepared.IsValid());
 			const auto sample = SampleAt(prepared, 0, 1);
-			Assert::AreEqual(687, static_cast<int>(sample.luma));
+			Assert::AreEqual(652, static_cast<int>(sample.luma)); // 687 full -> limited, audit 2026-10-16
 		}
 	};
 }

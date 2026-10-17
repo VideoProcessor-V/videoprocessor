@@ -32,6 +32,9 @@ namespace
 		bool openFails = false;
 		// Writes fail (an unplugged adapter): nothing reaches the projector.
 		bool writeFails = false;
+		// audit 2026-10-16: a read fails and closes the port (as
+		// Win32SerialPort::ReadLine does on a ReadFile failure).
+		bool readCloses = false;
 		int opens = 0;
 		int light = 120;
 		int contrast = 74;
@@ -129,7 +132,15 @@ namespace
 		}
 		bool ReadLine(int timeoutMs, std::string& line) override
 		{
+			// audit 2026-10-16: like Win32SerialPort - a closed port fails at
+			// once, and readCloses closes it on the read.
+			if (!open) return false;
 			std::unique_lock<std::mutex> lock(projector->mutex);
+			if (projector->readCloses)
+			{
+				open = false;
+				return false;
+			}
 			if (!projector->changed.wait_for(lock, std::chrono::milliseconds(timeoutMs),
 				[&] { return !projector->holdReplies && !projector->replies.empty(); }))
 				return false;

@@ -129,6 +129,64 @@ namespace
 		269312, 695065, 60793, -146413, -377875, 524288,
 		524288, -482120, -42168
 	};
+	// audit 2026-10-16: BT.601 (Kr 0.299, Kb 0.114) with the same scaling
+	// as the BT.709 tables above (R10: luma 1, chroma 896/876; r210: luma
+	// 876/896, chroma 1). Rows sum to the BT.709 rows' totals.
+	constexpr LimitedRgbCoefficients BT601_R10 = {
+		313524, 615514, 119538, -180972, -355286, 536258,
+		536258, -449049, -87209
+	};
+	constexpr LimitedRgbCoefficients BT601_R210 = {
+		306526, 601775, 116869, -176934, -347354, 524288,
+		524288, -439026, -85262
+	};
+
+	// Full-range RGB -> full-range Y'CbCr, Q16, applied to 10-bit codes.
+	struct FullRgbCoefficients
+	{
+		int32_t yR, yG, yB;
+		int32_t cbR, cbG, cbB;
+		int32_t crR, crG, crB;
+	};
+	constexpr FullRgbCoefficients BT709_FULL = {
+		13933, 46871, 4732, -7508, -25259, 32768, 32768, -29763, -3005
+	};
+	constexpr FullRgbCoefficients BT2020_FULL = {
+		17218, 44444, 3886, -9147, -23621, 32768, 32768, -30134, -2634
+	};
+	constexpr FullRgbCoefficients BT601_FULL = { // audit 2026-10-16
+		19595, 38470, 7471, -11058, -21710, 32768, 32768, -27439, -5329
+	};
+
+	bool IsBt601(ColorSpace colorspace)
+	{
+		return colorspace == ColorSpace::REC_601_525 ||
+			colorspace == ColorSpace::REC_601_576 ||
+			colorspace == ColorSpace::REC_601_625;
+	}
+
+	// Symmetric round-half-away-from-zero division; denominator > 0.
+	int64_t RoundDivide(int64_t numerator, int64_t denominator)
+	{
+		return numerator >= 0 ? (numerator + denominator / 2) / denominator :
+			-((-numerator + denominator / 2) / denominator);
+	}
+
+	// audit 2026-10-16: full-range 10-bit code (scaled by `scale`) to the
+	// limited code domain every analysis consumer assumes. Monotonic and
+	// unclamped before the final 10-bit container clamp, so codes outside
+	// the nominal range keep their order (nothing is folded onto black/white).
+	uint16_t FullLumaToLimited(int64_t scaledLuma, int64_t scale)
+	{
+		return Clamp10(64 + static_cast<int>(
+			RoundDivide(scaledLuma * 876, 1023LL * scale)));
+	}
+
+	uint16_t FullChromaToLimited(int64_t scaledOffset, int64_t scale)
+	{
+		return Clamp10(512 + static_cast<int>(
+			RoundDivide(scaledOffset * 896, 1023LL * scale)));
+	}
 
 	int RoundQ20(int64_t value)
 	{
@@ -328,8 +386,26 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 	if (format != AnalysisLumaFormat::NativeRgb &&
 		format != AnalysisLumaFormat::SdrTunnelRgb)
 	{
+		// audit 2026-10-16: full-range YCbCr (e.g. decoded DV with the DM
+		// full-range flag) is mapped from its upper-ten-bit codes to the
+		// limited domain; limited sources are returned unchanged.
+		auto toLimited = [this](AnalysisLumaSample& sample)
+		{
+			if (!fullRangeYuv)
+				return;
+			sample.luma = FullLumaToLimited(sample.luma, 1);
+			sample.chromaU = FullChromaToLimited(
+				static_cast<int>(sample.chromaU) - 512, 1);
+			sample.chromaV = FullChromaToLimited(
+				static_cast<int>(sample.chromaV) - 512, 1);
+		};
 		if (format == AnalysisLumaFormat::NativeYuv422)
-			return ReadNativeYuv422(*this, x, y, result);
+		{
+			if (!ReadNativeYuv422(*this, x, y, result))
+				return false;
+			toLimited(result);
+			return true;
+		}
 		const uint8_t* luma = data + static_cast<size_t>(y) * rowBytes +
 			static_cast<size_t>(x) * 2;
 		const size_t lumaBytes = rowBytes * static_cast<size_t>(height);
@@ -343,6 +419,7 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 		result.luma = readCode(luma);
 		result.chromaU = readCode(chroma);
 		result.chromaV = readCode(chroma + 2);
+		toLimited(result);
 		return true;
 	}
 	uint16_t red = 0;
@@ -366,15 +443,18 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 	else if (!ReadRgb10(*this, x, y, red, green, blue))
 		return false;
 	const bool bt2020 = colorspace == ColorSpace::BT_2020;
+	const bool bt601 = IsBt601(colorspace); // audit 2026-10-16
 	const bool limitedRgb = format != AnalysisLumaFormat::SdrTunnelRgb &&
 		(encoding == VideoFrameEncoding::R210 ||
 		encoding == VideoFrameEncoding::R10b ||
 		encoding == VideoFrameEncoding::R10l);
 	if (limitedRgb)
 	{
+		const bool r210 = encoding == VideoFrameEncoding::R210;
 		const LimitedRgbCoefficients& coefficients = bt2020 ?
-			(encoding == VideoFrameEncoding::R210 ? BT2020_R210 : BT2020_R10) :
-			(encoding == VideoFrameEncoding::R210 ? BT709_R210 : BT709_R10);
+			(r210 ? BT2020_R210 : BT2020_R10) :
+			(bt601 ? (r210 ? BT601_R210 : BT601_R10) :
+			(r210 ? BT709_R210 : BT709_R10));
 		const int r = static_cast<int>(red) - 64;
 		const int g = static_cast<int>(green) - 64;
 		const int b = static_cast<int>(blue) - 64;
@@ -392,18 +472,21 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 			static_cast<int64_t>(coefficients.crB) * b));
 		return true;
 	}
-	const int yRed = bt2020 ? 17218 : 13933;
-	const int yGreen = bt2020 ? 44444 : 46871;
-	const int yBlue = bt2020 ? 3886 : 4732;
-	const int cbRed = bt2020 ? -9147 : -7508;
-	const int cbGreen = bt2020 ? -23621 : -25259;
-	const int cbBlue = 32768;
-	const int crRed = 32768;
-	const int crGreen = bt2020 ? -30134 : -29763;
-	const int crBlue = bt2020 ? -2634 : -3005;
-	result.luma = Clamp10((yRed * red + yGreen * green + yBlue * blue + 32768) >> 16);
-	result.chromaU = Clamp10(((cbRed * red + cbGreen * green + cbBlue * blue + 32768) >> 16) + 512);
-	result.chromaV = Clamp10(((crRed * red + crGreen * green + crBlue * blue + 32768) >> 16) + 512);
+	// audit 2026-10-16: full-range RGB (8-bit, R12B/R12L, SDR tunnel). The
+	// Q16 full-range Y'CbCr sums are mapped straight to the limited code
+	// domain with a single rounding (previously emitted as 0..1023 / +-511,
+	// which every darkness threshold misread as studio codes).
+	const FullRgbCoefficients& full = bt2020 ? BT2020_FULL :
+		(bt601 ? BT601_FULL : BT709_FULL);
+	const int64_t r = red;
+	const int64_t g = green;
+	const int64_t b = blue;
+	const int64_t ySum = full.yR * r + full.yG * g + full.yB * b;
+	const int64_t cbSum = full.cbR * r + full.cbG * g + full.cbB * b;
+	const int64_t crSum = full.crR * r + full.crG * g + full.crB * b;
+	result.luma = FullLumaToLimited(ySum, 65536);
+	result.chromaU = FullChromaToLimited(cbSum, 65536);
+	result.chromaV = FullChromaToLimited(crSum, 65536);
 	return true;
 }
 

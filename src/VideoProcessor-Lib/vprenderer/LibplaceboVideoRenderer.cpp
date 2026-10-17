@@ -769,6 +769,20 @@ namespace
 			result.hdr.max_cll = static_cast<float>(hdr.maxCll);
 			result.hdr.max_fall = static_cast<float>(hdr.maxFall);
 		}
+		else if (state.hdrData)
+		{
+			// audit 2026-10-16: an InfoFrame with zero primaries but real luminance values keeps them
+			// (all were dropped; tone mapping then assumed a much brighter master).
+			const HDRData& hdr = *state.hdrData;
+			if (hdr.maxCll > 0) result.hdr.max_cll = static_cast<float>(hdr.maxCll);
+			if (hdr.maxFall > 0) result.hdr.max_fall = static_cast<float>(hdr.maxFall);
+			if (hdr.masteringDisplayMaxLuminance > 0)
+			{
+				result.hdr.max_luma = static_cast<float>(hdr.masteringDisplayMaxLuminance);
+				if (hdr.masteringDisplayMinLuminance > 0)
+					result.hdr.min_luma = static_cast<float>(hdr.masteringDisplayMinLuminance);
+			}
+		}
 
 		return result;
 	}
@@ -1069,13 +1083,13 @@ namespace
 		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
 		bool ditherVectorsOwn = false;   // delta 8 R1: dither_vectors own (auto = the de-judder's on extras)
 		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
-		// (on, off with the Low_Latency queue), 0 off, 1 on. The output pass is
+		// (on, on everywhere (owner 2026-10-16)), 0 off, 1 on. The output pass is
 		// rgba32f regardless (LibplaceboRenderParameters).
 		int fboFloat32 = -1;
 		bool preserveExtendedRange = true;  // Stage 10: BTB/WTW kept through scaling (SDR); on by default (owner 2026-10-16: keep BTB and WTW)
 		// Audit 2026-10-16: the carry also for BT.1886 / sRGB, SDR in other primaries, a calibration
 		// LUT and HDR passed through unmapped (off = the Stage 10 eligibility).
-		bool extendedRangeMoreCases = false;   // off until its GPU tests pass (2026-10-16 night)
+		bool extendedRangeMoreCases = true;   // GPU tests pass (2026-10-17 night); owner: BTB/WTW in all cases
 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
@@ -2404,7 +2418,7 @@ namespace
 			if (raw == "polar" || raw == "ortho" || raw == "auto")
 			{
 				settings.adaptive.faithfulOrtho = raw == "ortho";
-				settings.adaptive.faithfulAuto = raw == "auto" || raw == "polar";   // a saved polar = Auto, as the editor shows it (audit 2026-10-16)
+				settings.adaptive.faithfulAuto = raw == "auto";
 			}
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
@@ -2579,8 +2593,9 @@ namespace
         config.TryGetBool(rule.section, "custom_tone_mapping", settings.customToneMapping);
 		if (config.TryGetString(rule.section, "contrast_recovery", raw))
 		{
-			settings.hasContrastRecovery = false;
-			if (ConfigFile::NormalizeName(raw) != "auto")
+			if (ConfigFile::NormalizeName(raw) == "auto")
+				settings.hasContrastRecovery = false;
+			else
 			{
 				double value = 0.0;
 				if (ParseDouble(raw, value) && value >= 0.0 && value <= 2.0)
@@ -2588,6 +2603,9 @@ namespace
 					settings.hasContrastRecovery = true;
 					settings.contrastRecovery = static_cast<float>(value);
 				}
+				else   // audit 2026-10-16: an invalid value no longer silently resets to Auto
+					DebugLog::Log("profile '%s': invalid contrast_recovery '%s' (auto or 0-2); keeping the inherited value",
+						rule.section.c_str(), raw.c_str());
 			}
 		}
         if (ownsCalibration) {
@@ -2932,7 +2950,7 @@ namespace
 			else
 				DebugLog::Log(
 					"libplacebo: sdr_target_nits must be finite, above 0.000001 and at most 10000; using %.0f",
-					PL_COLOR_SDR_WHITE);
+					settings.sdrTargetNits);
 		}
 
 		settings.sdrBlackNits = HdrTargetLuminance::DefaultBlack;
@@ -5278,7 +5296,6 @@ struct LibplaceboVideoRenderer::Impl
 	// Audit 2026-10-16: since when the producer has been unwanted only because the de-judder was
 	// released (a resync or reset releases it): kept alive instead of a join on the render thread and
 	// a new device on every resync.
-	SteadyClock::time_point motionProducerIdleSince{};
 	unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
 	// The render loop's hand-off of frames to the producer (render loop thread writes).
 	std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
@@ -14200,7 +14217,11 @@ struct LibplaceboVideoRenderer::Impl
 				// detector's 2 s cooldown is written in, at the content rate.
 				activeSettings.fixSceneCooldown && SourceRateHz(state) > 0.0 ?
 					static_cast<uint64_t>(std::llround(1.0e7 / SourceRateHz(state))) :
-					static_cast<uint64_t>(state.displayMode->FrameDuration()),
+					// audit 2026-10-16: with the fix on and the rate unknown, TimeScale ticks -> 100 ns;
+					// with the fix off, the earlier value exactly (the switch restores old behaviour).
+					(activeSettings.fixSceneCooldown && state.displayMode->TimeScale() > 0 ?
+						static_cast<uint64_t>(std::llround(1.0e7 * state.displayMode->FrameDuration() / state.displayMode->TimeScale())) :
+						static_cast<uint64_t>(state.displayMode->FrameDuration())),
 				sceneDetectionEnabled || automaticSourceCrop, &analysisSource });
 		}
 		if (!cadenceRepeat && analysisSource.IsValid() &&
@@ -18289,12 +18310,9 @@ struct LibplaceboVideoRenderer::Impl
 			else if (!wantProducer)
 			{
 				const bool onlyReleased = !dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
-				const auto now = SteadyClock::now();
-				if (!onlyReleased || motionProducerIdleSince == SteadyClock::time_point{})
-					motionProducerIdleSince = now;
 				// Owner: the producer stays alive once wanted - kept while the settings still want it
 				// (a resync or format change can take longer than any timer); stopped when they change.
-				const bool keepBriefly = motionProducer && onlyReleased;
+				const bool keepBriefly = motionProducer && motionProducer->Running() && onlyReleased;   // never a dead one
 				if (motionProducer && !keepBriefly)
 				{
 					motionProducer->Stop();
@@ -18308,8 +18326,6 @@ struct LibplaceboVideoRenderer::Impl
 					motionProducerFailedLogged = false;
 				motionAheadEngaged = false;
 			}
-			if (wantProducer)
-				motionProducerIdleSince = SteadyClock::time_point{};
 			if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
 			{
 				motionProducerFailedLogged = true;
@@ -18962,7 +18978,9 @@ struct LibplaceboVideoRenderer::Impl
         {
             const bool sdr = !pl_color_space_is_hdr(&renderImage.color) && !pl_color_space_is_hdr(&target.color);
             const bool wanted = SdrToneShape::Active(activeSettings.sdrTone);
-            int state = !wanted ? 0 : sdr ? 1 : 2;
+            // audit 2026-10-16: not after a calibration 3D LUT (PRE_OUTPUT runs after the LUT; the shape
+            // would bend the calibrated response with the LUT's input gamma).
+            int state = !wanted ? 0 : !sdr ? 2 : target.lut ? 4 : 1;
             if (state == 1)
             {
                 if (!sdrToneShapeConfigured)
@@ -18993,7 +19011,7 @@ struct LibplaceboVideoRenderer::Impl
             if (state != sdrToneShapeLogged)
             {
                 sdrToneShapeLogged = state;
-                static const char* const names[] = { "off", "active", "off for HDR", "NOT applied (shaders\\SDR tone shape.glsl did not load)" };
+                static const char* const names[] = { "off", "active", "off for HDR", "NOT applied (shaders\\SDR tone shape.glsl did not load)", "off with a calibration LUT (it would act after the LUT)" };
                 DebugLog::Log("SDR tone shape: %s (shape %s, headroom %.2f, knee start %.2f, strength %.2f, recovery %s)",
                     names[state], activeSettings.sdrTone.knee ? "knee" : "off", activeSettings.sdrTone.headroom,
                     activeSettings.sdrTone.kneeStart, activeSettings.sdrTone.kneeStrength,
@@ -19444,6 +19462,7 @@ struct LibplaceboVideoRenderer::Impl
             ExtendedRange::Settings extendedSettings;
             extendedSettings.piecewiseTransfers = extendedSettings.wideSourcePrimaries =
                 extendedSettings.calibrationLut = extendedSettings.hdrPassthrough = activeSettings.extendedRangeMoreCases;
+            extendedSettings.hdrDynamicToneMapping = renderParams.peak_detect_params != nullptr;   // audit 2026-10-16
             ExtendedRange::Decision extended = ExtendedRange::Decide(activeSettings.preserveExtendedRange, extendedSettings,
                 renderImage.color, target.color, target.lut, target.lut ? target.lut_type : PL_LUT_UNKNOWN);
             if (extended.Active() && extendedRangeHookFailed)
@@ -20808,9 +20827,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			m_pulldownSkipped.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		if (fixes && m_pulldown.ConsumeDiscontinuity() && !gapBefore)
+		// Consumed always (a mark left while the fixes were off must not fire later); labelled by cause.
+		if (m_pulldown.ConsumeDiscontinuity() && fixes && !gapBefore)
 		{
-			gapCause = "pulldown lock change (on a skipped repeat)";
+			gapCause = decision.rephased ? "pulldown re-phase" : "pulldown lock change (on a skipped repeat)";
 			gapBefore = true;
 		}
 		if (decision.rephased)
