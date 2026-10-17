@@ -105,3 +105,16 @@ stays PQ; no false cuts inside shots.
 4. If a source is 8-bit or BT.709 the log says `newlldv: not inferring HDR:
    <reason>`. On Magewell RGB the line `Magewell AVI InfoFrame (RGB input):
    ... bt2020=1 consistent=1` confirms the colorimetry read.
+
+## Verification
+
+- CI (fork run 39069670569): the x64 Release build job succeeded (whole
+  solution, without Magewell). The test shards could not be read afterwards:
+  the GitHub account was suspended (HTTP 403) during the run.
+- Local: VideoProcessor-Test.dll built (x64 Release, VpCiNoMagewell); the
+  affected classes (HdrInference, ConfigFile, DisplayRuleExpression,
+  StateVariables, UnifiedProfile, ConfigEditorCore, RendererProfileConfig,
+  ProfileChangeOverlay, CaptureVideoState, CommandLine) ran 249/249 passed,
+  with VP_TEST_REAL_FOOTAGE=D:\hfr. Qt Config editor tests were not run here.
+- Magewell code is not compiled anywhere without the SDK: build it locally
+  with the SDK before deploying.
