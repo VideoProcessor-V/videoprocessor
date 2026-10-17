@@ -231,6 +231,7 @@ color.a = 1.0;
 		case Reason::HookFailed: return "off: libplacebo disabled its hook";
 		case Reason::HdrMapped: return "off: HDR source tone/gamut mapped to the output";
 		case Reason::LutUnsupported: return "off: the calibration LUT is not a plain 3D normalized LUT";
+		case Reason::TemporalMix: return "off: libplacebo frame mixing (smooth motion) with a calibration LUT or gamut mapping";
 		}
 		return "off";
 	}
@@ -511,6 +512,13 @@ color.a = 1.0;
 		return d;
 	}
 
+	Decision ForTemporal(const Decision& decision, bool frameMixing)
+	{
+		if (decision.Active() && frameMixing && decision.LateRestore())
+			return Decision{ Reason::TemporalMix };
+		return decision;
+	}
+
 	std::string Describe(const Decision& d)
 	{
 		if (!d.Active())
@@ -724,8 +732,12 @@ color.a = 1.0;
 	// restore at SCALED once ("resizing non-resizable stage") and disables it
 	// for the renderer's life: measured. There the restore renders its own
 	// full-float texture. (Not used otherwise: a texture input makes
-	// libplacebo store the scaled picture in a half-float texture first,
-	// costing up to a quarter code; with those hooks it is stored anyway.)
+	// libplacebo store the scaled picture in an intermediate texture first;
+	// with those hooks it is stored anyway. Precision of that texture (hunt 2,
+	// 08 #9): rgba32f on the Beta build (output_fbo_float32 always set,
+	// fbo_float32 default on: LibplaceboRenderParameters.cpp); half float,
+	// up to about a quarter code, only on the Stable 7.360 build or with
+	// fbo_float32 off by hand.)
 	pl_hook_res Hooks::RunRestoreTexture(void* priv, const pl_hook_params* params)
 	{
 		Hooks* self = static_cast<Hooks*>(priv);
@@ -899,7 +911,8 @@ color.a = 1.0;
 	// 2026-10-16 (GPU run): an inline form in libplacebo's PRE_OUTPUT shader
 	// is rejected ("User hook tried resizing non-resizable stage!", then
 	// disabled), as at SCALED; so the picture goes through libplacebo's
-	// half-float texture first (about 1/4 code, as the 10b SCALED restore).
+	// intermediate texture first: rgba32f on the Beta build (hunt 2, 08 #9;
+	// half float - about 1/4 code - only on Stable 7.360 or fbo_float32 off).
 	pl_hook_res Hooks::RunLate(void* priv, const pl_hook_params* params)
 	{
 		Hooks* self = static_cast<Hooks*>(priv);

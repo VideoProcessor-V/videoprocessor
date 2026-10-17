@@ -5719,6 +5719,7 @@ struct LibplaceboVideoRenderer::Impl
 	int extendedRangeLogged = -1;          // the last logged decision
 	std::string extendedRangeDescribed;    // the last logged description (audit 2026-10-16)
 	bool extendedRangeHookFailed = false;  // libplacebo disabled a hook: off until restart
+	bool extendedRangeMixLogged = false;   // hunt 2 (08 #2): BTB lost in libplacebo's frame mix, logged
 	// 6b-2b: the stats overlay line, published by the render thread at most
 	// twice a second and read by the UI under its own small lock.
 	std::mutex dejudderStatusMutex;
@@ -15393,6 +15394,10 @@ struct LibplaceboVideoRenderer::Impl
 				convertedPayload->dolby.rgbBitAlignment == 2);
 		const bool tunnelActive =
 			state.dolbyVisionTunnel && !tunnelRgbFallback;
+		// Hunt 2 (08 #3): the SDR picture shown on the DV-tunnel wrapper is SDR
+		// input (BT.709 / BT.1886 below), whatever the tunnel state declares (PQ /
+		// BT.2020): every SDR gate (input transfer, gamma, LUT domain, luminance) uses it.
+		const bool inputIsSdr = state.eotf == EOTF::SDR || tunnelRgbFallback;
 		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
 		if (tunnelActive && (!convertedPayload ||
 			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
@@ -16650,7 +16655,7 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			}
 		}
-		if (state.eotf == EOTF::SDR &&
+		if (inputIsSdr &&
 			sdrInputTransfer != PL_COLOR_TRC_UNKNOWN)
 		{
 			// This is an explicit interpretation override used for controlled
@@ -16667,7 +16672,7 @@ struct LibplaceboVideoRenderer::Impl
         // always fall back to physical display encoding, never a stale LUT domain.
         MaybeReloadDisplayLut();
         const auto calibrationTransfer = LibplaceboOutput::ResolveCalibrationTransfers(
-            state.eotf == EOTF::SDR, actualOutput.safeToRender, displayLutParsed && displayLut,
+            inputIsSdr, actualOutput.safeToRender, displayLutParsed && displayLut,
             sdrAdjustGamma, LibplaceboOutput::ParseGamma(activeSettings.outputGamma),
             LibplaceboOutput::ParseGamma(activeSettings.hdrToneMapTargetGamma),
             ToSdrTransfer(declaredSourceTransfer), ToSdrTransfer(acceptedOutputTransfer),
@@ -16688,7 +16693,7 @@ struct LibplaceboVideoRenderer::Impl
 		const bool gammaPrimariesConversion = image.color.primaries !=
 			PL_COLOR_PRIM_UNKNOWN && image.color.primaries != gammaTargetPrimaries;
 		std::ostringstream gammaSignature;
-		gammaSignature << static_cast<int>(state.eotf) << '|'
+		gammaSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
 			<< static_cast<int>(lastSdrGammaDecision.requested) << '|'
 			<< static_cast<int>(lastSdrGammaDecision.action) << '|'
 			<< static_cast<int>(lastSdrGammaDecision.declaredSource) << '|'
@@ -16721,7 +16726,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		// SDR never inherits the HDR tone-map destination or its black level.
 		LibplaceboRenderParameters::ApplySourceLuminance(
-			state.eotf == EOTF::SDR, image.color);
+			inputIsSdr, image.color);
 		image.crop.x0 = 0.0f;
 		image.crop.y0 = 0.0f;
 		image.crop.x1 = static_cast<float>(width);
@@ -16884,7 +16889,7 @@ struct LibplaceboVideoRenderer::Impl
             baseTarget.color.transfer = renderTargetTransfer;
 		baseTarget.color.primaries = TargetPlPrimaries();
 		LibplaceboRenderParameters::ApplyTargetLuminance(
-			state.eotf == EOTF::SDR, static_cast<float>(sdrTargetNits),
+			inputIsSdr, static_cast<float>(sdrTargetNits),
 			static_cast<float>(sdrBlackNits), baseTarget.color);
 		// DV next step (f): display profile from today's target settings, and
 		// the mapping policy's libplacebo parameters compared bit for bit with
@@ -16933,7 +16938,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 		}
 		std::ostringstream luminanceSignature;
-		luminanceSignature << static_cast<int>(state.eotf) << '|'
+		luminanceSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
 			<< image.color.transfer << '|' << image.color.hdr.min_luma << '|'
 			<< image.color.hdr.max_luma << '|' << baseTarget.color.transfer << '|'
 			<< baseTarget.color.hdr.min_luma << '|' << baseTarget.color.hdr.max_luma
@@ -16945,7 +16950,7 @@ struct LibplaceboVideoRenderer::Impl
 			lastLuminanceSignature = luminanceSignature.str();
 			DebugLog::Log(
 				"LUMINANCE_CONTRACT input_sdr=%d source_transfer=%s source_luma=%.7g..%.2f source_effective_hdr=%d target_transfer=%s target_luma=%.7g..%.2f target_effective_hdr=%d hdr_destination=%.7g..%.2f format=%s dxgi=%s peak_eligible=%d",
-				state.eotf == EOTF::SDR ? 1 : 0,
+				inputIsSdr ? 1 : 0,
 				pl_color_transfer_name(image.color.transfer),
 				image.color.hdr.min_luma, image.color.hdr.max_luma,
 				pl_color_space_is_hdr(&image.color) ? 1 : 0,
@@ -21167,6 +21172,10 @@ struct LibplaceboVideoRenderer::Impl
         // Stage 10: BTB/WTW through libplacebo for SDR. Decided on this
         // frame's source and target; libplacebo is then told the source is in
         // the target's colour space and VP's hooks do the conversion.
+        // Hunt 2 (08 #1): true when Prepare relabelled renderImage.color; the
+        // temporal renderer's retained frames then get the same label, so no
+        // frame is converted twice (TemporalRenderer::Render historyColor).
+        bool extendedRangeRelabelled = false;
         {
             ExtendedRange::Settings extendedSettings;
             extendedSettings.piecewiseTransfers = extendedSettings.wideSourcePrimaries =
@@ -21176,6 +21185,10 @@ struct LibplaceboVideoRenderer::Impl
                 renderImage.color, target.color, target.lut, target.lut ? target.lut_type : PL_LUT_UNKNOWN);
             if (extended.Active() && extendedRangeHookFailed)
                 extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
+            // Hunt 2 (08 #1): a late restore cannot follow libplacebo's frame mix.
+            if (temporalRenderer.Active())
+                extended = ExtendedRange::ForTemporal(extended, temporalRenderer.Mixing());
+            extendedRangeRelabelled = extended.Active();
             // A one-plane RGB source (the subtitle move's composed picture, an
             // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
             ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
@@ -21187,6 +21200,16 @@ struct LibplaceboVideoRenderer::Impl
                 extendedRangeDescribed = described;
                 extendedRangeLogged = static_cast<int>(extended.reason);
                 DebugLog::Log("Extended range (BTB/WTW): %s", described.c_str());
+            }
+            // Hunt 2 (08 #2): libplacebo's frame mixer linearises each frame with
+            // a clamp at 0 (no fork): mixed refreshes lose BTB, WTW is kept.
+            const bool mixClipsBtb = extended.Active() && temporalRenderer.Mixing();
+            if (mixClipsBtb != extendedRangeMixLogged)
+            {
+                extendedRangeMixLogged = mixClipsBtb;
+                if (mixClipsBtb)
+                    DebugLog::Log("Extended range (BTB/WTW): libplacebo smooth motion (frame mixing) clips BTB on mixed refreshes "
+                        "(libplacebo limitation; WTW kept); VP's own motion engine keeps both");
             }
         }
         // Stage 6d: when this frame may get de-judder extras, keep A's
@@ -21418,7 +21441,8 @@ struct LibplaceboVideoRenderer::Impl
                     else if (debander.Failures() == 1)
                         DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
                 }
-                return temporalRenderer.Render(renderer,frame,destination,parameters);
+                return temporalRenderer.Render(renderer,frame,destination,parameters,
+                    extendedRangeRelabelled ? &source.color : nullptr);
             });
         bool rendered = hookRender.rendered;
         // Bug hunt 2026-10-17: B's carried vectors are for this present only;

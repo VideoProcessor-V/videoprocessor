@@ -9025,7 +9025,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
             "otherwise and for HDR. On by default (owner: keep below-black and above-white). To reach the "
             "projector they also need limited output range (Color profile: output range limited, with output "
-            "gamma 2.4). Off: libplacebo's standard path (clips them)."));
+            "gamma 2.4). Off: libplacebo's standard path (clips them). Works with deinterlacing; libplacebo smooth motion "
+            "clips below-black on blended refreshes (libplacebo limitation) - VP's own motion engine keeps both."));
         MarkGpuCost(form, extendedRange, 1);
         auto* extendedMore = addChoice(QStringLiteral("Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR"),
             QStringLiteral("extended_range_more_cases"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -9276,7 +9277,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             if(auto* layout=qobject_cast<QFormLayout*>(combo->parentWidget()->layout()))
                 if(auto* label=layout->labelForField(combo))label->setToolTip(text);
         };
-        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering."));
+        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering.
+"
+            "Below-black (BTB) is clipped on blended refreshes: libplacebo's frame mixer clips it (a libplacebo limitation; "
+            "above-white is kept). VP's own motion engine is the path that keeps both. While blending, keeping below-black / "
+            "above-white turns itself off with a calibration LUT or a wide-gamut SDR source."));
         setMotionHelp(frameMixer,QStringLiteral("Applies only to smooth motion.\nOversample: default frame blending.\nHermite: smooth transition between neighboring frames.\nLinear: linear blend between neighboring frames.\nCubic: wider temporal filter using more neighboring frames, with more buffering.\nThese are libplacebo frame mixers, not image upscalers."));
         setMotionHelp(deinterlacing,QStringLiteral("Applies to interlaced input.\nAuto: deinterlace only when input reports interlacing and a known field order (default).\nOff: leave input unchanged.\nForce: apply the selected algorithm even if input is reported progressive; field order must still be known or explicitly selected."));
         setMotionHelp(deinterlaceAlgorithm,QStringLiteral("Applies only to deinterlacing.\nBWDIF: default temporal deinterlacer.\nYADIF: alternative temporal deinterlacer.\nBob: deinterlace each field without neighboring-frame references.\nWeave: preserve both fields in the original frame.\nBWDIF/YADIF use neighboring frames; missing references fall back to Bob."));
