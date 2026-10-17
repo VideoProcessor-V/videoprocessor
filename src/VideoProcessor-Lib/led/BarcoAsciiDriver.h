@@ -35,7 +35,7 @@ namespace LedDrive
 		bool QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
 		bool QueueSequenceNow(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
 		bool SendNow(const std::string& mnemonic, int value, int timeoutMs) override;
-		bool SendScript(const std::string& mnemonic, int value) override;
+		bool SendScript(const std::string& mnemonic, int value, bool* written = nullptr) override;
 		bool SetContrast(int value) override;
 		int CommandGapMs() const override;
 		void Close() override;
@@ -61,9 +61,16 @@ namespace LedDrive
 		// abortable: the reply wait ends early once BeginShutdown() is called
 		// (the driver thread's commands only).
 		// sentContrast >= 0 records a CNTR write.
+		// generation / expectedGeneration (post-merge audit 2026-10-17): a value the
+		// caller took at expectedGeneration of *generation (lightGeneration or
+		// contrastGeneration, guarded by stateMutex); when the counter moved
+		// (CancelLight, SetLightNow, a hold, a script send) the command is not sent -
+		// checked before and after the gap wait, which also ends on the change.
+		// wrote (optional): whether the write itself happened.
 		bool Transact(const std::string& command, const char* mnemonic, int* value,
 			int timeoutMs, int maxGapWaitMs, int sentLight = -1, bool abortable = false,
-			int sentContrast = -1);
+			int sentContrast = -1, const int* generation = nullptr, int expectedGeneration = 0,
+			bool* wrote = nullptr);
 		// audit 2026-10-16: an exit command within budgetMs (after the port
 		// wait): the command gap first, in full when the budget allows, then
 		// the reply. Caller holds portMutex.

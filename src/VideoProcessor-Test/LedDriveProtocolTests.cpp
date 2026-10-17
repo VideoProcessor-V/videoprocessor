@@ -1053,5 +1053,82 @@ namespace VideoProcessorTest
 			Assert::IsFalse(driver->Status().busy, L"nothing left waiting");
 			driver->Close();
 		}
+
+		// Post-merge audit 2026-10-17 (B1): SendScript reports whether the write itself
+		// happened - a missing reply is written, a failed write is not.
+		TEST_METHOD(SendScriptReportsWhetherTheWriteHappened)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			bool written = true;
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			Assert::IsFalse(driver->SendScript("CNTR", 60, &written));
+			Assert::IsFalse(written, L"a failed write: not written");
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = false;
+			}
+			projector->silent = true;
+			written = false;
+			Assert::IsFalse(driver->SendScript("CNTR", 61, &written), L"no reply");
+			Assert::IsTrue(written, L"a missing reply: the write happened");
+			projector->silent = false;
+			Assert::IsTrue(driver->SendScript("CNTR", 62, &written));
+			Assert::IsTrue(written);
+			driver->Close();
+		}
+
+		// Post-merge audit 2026-10-17 (B3): the worker took an LPW1 while another command
+		// held the port, then waits its command gap inside Transact; interrupt runs the
+		// interruption (CancelLight or SetLightNow) during that wait. The LPW1 is never sent.
+		static void LightInsideTheGapWait(const std::function<void(IProjectorDriver&)>& interrupt,
+			std::shared_ptr<FakeProjector>& projectorOut, std::unique_ptr<IProjectorDriver>& driverOut)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.minCommandGapMs = 800;
+			config.ackTimeoutMs = 600;
+			auto driver = OpenDriver(projector, config);
+			std::this_thread::sleep_for(std::chrono::milliseconds(900));   // Open's gap has passed
+			projector->holdReplies = true;
+			std::thread busy([&] { driver->SetContrast(60); });   // holds the port for its reply
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+			driver->SetLight(200);   // the worker takes it and waits for the port
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+			projector->Release();    // SetContrast's reply: the 800 ms gap starts now
+			busy.join();
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));   // the worker is in the gap wait
+			interrupt(*driver);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+			projectorOut = projector;
+			driverOut = std::move(driver);
+		}
+
+		TEST_METHOD(CancelLightStopsAnLpw1InsideTheGapWait)
+		{
+			std::shared_ptr<FakeProjector> projector;
+			std::unique_ptr<IProjectorDriver> driver;
+			LightInsideTheGapWait([](IProjectorDriver& d) { d.CancelLight(); }, projector, driver);
+			const auto writes = projector->Writes();
+			Assert::IsTrue(std::find(writes.begin(), writes.end(), std::string(":LPW1200\r")) == writes.end(),
+				L"the cancelled LPW1 200 was not sent");
+			Assert::IsFalse(driver->Status().busy);
+			driver->Close();
+		}
+
+		TEST_METHOD(SetLightNowStopsAnLpw1InsideTheGapWait)
+		{
+			std::shared_ptr<FakeProjector> projector;
+			std::unique_ptr<IProjectorDriver> driver;
+			LightInsideTheGapWait([](IProjectorDriver& d) { Assert::IsTrue(d.SetLightNow(150, 0)); }, projector, driver);
+			const auto writes = projector->Writes();
+			Assert::IsTrue(std::find(writes.begin(), writes.end(), std::string(":LPW1200\r")) == writes.end(),
+				L"the replaced LPW1 200 was not sent");
+			Assert::AreEqual(150, projector->light);
+			driver->Close();
+		}
 	};
 }

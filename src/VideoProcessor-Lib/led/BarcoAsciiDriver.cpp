@@ -79,11 +79,17 @@ namespace LedDrive
 	}
 
 	bool BarcoAsciiDriver::Transact(const std::string& command, const char* mnemonic,
-		int* value, int timeoutMs, int maxGapWaitMs, int sentLight, bool abortable, int sentContrast)
+		int* value, int timeoutMs, int maxGapWaitMs, int sentLight, bool abortable, int sentContrast,
+		const int* generation, int expectedGeneration, bool* wrote)
 	{
 		using namespace std::chrono;
+		if (wrote) *wrote = false;
 		{
 			std::unique_lock<std::mutex> lock(stateMutex);
+			// Post-merge audit 2026-10-17: a value superseded (CancelLight, SetLightNow,
+			// a hold) before or during the gap wait is not sent.
+			const auto superseded = [&] { return generation && *generation != expectedGeneration; };
+			if (superseded()) return false;
 			const steady_clock::time_point allowed = nextSendAllowed;
 			const auto now = steady_clock::now();
 			if (allowed > now)
@@ -104,12 +110,19 @@ namespace LedDrive
 				// so the restore is not locked out of the port.
 				if (abortable)
 				{
-					gapWake.wait_until(lock, until, [this] { return shuttingDown || stopping; });
+					gapWake.wait_until(lock, until, [&] { return shuttingDown || stopping || superseded(); });
 					if (shuttingDown || stopping) return false;
 				}
 				else
-					while (steady_clock::now() < until)
+					while (steady_clock::now() < until && !superseded())
 						gapWake.wait_until(lock, until);
+			}
+			// Rechecked after the gap wait, under stateMutex.
+			if (superseded())
+			{
+				DebugLog::Log("LED drive: \"%s\" not sent (superseded during the command gap)",
+					Printable(command).c_str());
+				return false;
 			}
 		}
 		std::string error;
@@ -122,6 +135,7 @@ namespace LedDrive
 			written = port->Write(command, error);
 		}
 		lastWriteOk = written;
+		if (wrote) *wrote = written;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (written)
@@ -491,7 +505,11 @@ namespace LedDrive
 		pendingContrast = value;
 		// audit 2026-10-16: a hold's -1 also stops a value the worker has
 		// already taken but not yet written (a newer value simply follows it).
-		if (value < 0) ++contrastGeneration;
+		if (value < 0)
+		{
+			++contrastGeneration;
+			gapWake.notify_all();   // post-merge audit 2026-10-17: a CNTR in its gap wait too
+		}
 		else scriptContrast = -1;   // audit 2026-10-16
 		wake.notify_one();
 	}
@@ -506,6 +524,8 @@ namespace LedDrive
 		pendingJump = false;
 		++lightGeneration;
 		wake.notify_one();
+		// Post-merge audit 2026-10-17: also an LPW1 already inside Transact's gap wait.
+		gapWake.notify_all();
 	}
 
 	void BarcoAsciiDriver::SetLightJump(int level)
@@ -600,11 +620,12 @@ namespace LedDrive
 		return std::max(0, config.minCommandGapMs);
 	}
 
-	bool BarcoAsciiDriver::SendScript(const std::string& mnemonic, int value)
+	bool BarcoAsciiDriver::SendScript(const std::string& mnemonic, int value, bool* written)
 	{
 		const bool light = mnemonic == "LPW1";
 		const bool contrast = mnemonic == "CNTR";
 		int sent = value;
+		if (written) *written = false;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (!opened || shuttingDown) return false;
@@ -642,7 +663,7 @@ namespace LedDrive
 		}
 		int confirmed = -1;
 		const bool ok = Transact(Format(mnemonic.c_str(), std::to_string(sent)), mnemonic.c_str(), &confirmed,
-			config.ackTimeoutMs, -1, light ? sent : -1, true, contrast ? sent : -1);
+			config.ackTimeoutMs, -1, light ? sent : -1, true, contrast ? sent : -1, nullptr, 0, written);
 		std::lock_guard<std::mutex> guard(stateMutex);
 		if (ok && light) lastLight = confirmed >= 0 ? confirmed : sent;
 		if (ok && contrast)
@@ -679,6 +700,9 @@ namespace LedDrive
 			++lightGeneration;
 			scriptLight = -1;   // audit 2026-10-16
 			clamped = Clamp(level);
+			// Post-merge audit 2026-10-17: a worker LPW1 already inside Transact's gap
+			// wait ends it unsent (it holds the port this call needs).
+			gapWake.notify_all();
 		}
 		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
 		if (timeoutMs > 0)
@@ -848,7 +872,7 @@ namespace LedDrive
 						int confirmed = -1;
 						if (!skip &&
 							Transact(Format("CNTR", std::to_string(contrast)), "CNTR", &confirmed,
-								config.ackTimeoutMs, -1, -1, true, contrast))
+								config.ackTimeoutMs, -1, -1, true, contrast, &contrastGeneration, generation))
 						{
 							std::lock_guard<std::mutex> stateGuard(stateMutex);
 							state.contrastKnown = true;
@@ -900,7 +924,7 @@ namespace LedDrive
 			}
 			int confirmed = -1;
 			const bool ok = Transact(Format("LPW1", std::to_string(target)), "LPW1", &confirmed,
-				config.ackTimeoutMs, -1, target, true);
+				config.ackTimeoutMs, -1, target, true, -1, &lightGeneration, lightTargetGeneration);
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
 			transmitting = false;
 			if (ok) lastLight = confirmed >= 0 ? confirmed : target;

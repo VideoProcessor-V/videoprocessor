@@ -124,10 +124,14 @@ namespace LedDrive
 		// Bug hunt 2026-10-17: drops a waiting LPW1 target and the rest of a
 		// split dimming drop (compensate's queue when the mode changes).
 		virtual void CancelLight() {}
-		virtual bool SendScript(const std::string& mnemonic, int value)
+		// written (optional, post-merge audit 2026-10-17): whether the write itself
+		// happened, apart from the reply - a missing reply is not a failed write
+		// (the caller resends only when nothing was written).
+		virtual bool SendScript(const std::string& mnemonic, int value, bool* written = nullptr)
 		{
 			(void)mnemonic;
 			(void)value;
+			if (written) *written = false;
 			return false;
 		}
 		// The startup correction to 50 and, after mode: script, the exit

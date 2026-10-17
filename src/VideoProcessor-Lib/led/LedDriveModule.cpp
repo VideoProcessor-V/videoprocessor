@@ -1034,6 +1034,31 @@ namespace LedDrive
 		// script itself would never repeat it: CNTR stuck at 51).
 		int resendLight = -1;
 		int resendContrast = -1;
+		// Post-merge audit 2026-10-17: a script send's resend value - only when the
+		// write itself did not happen. A missing reply is not a failed write (the
+		// projector may well have taken it; the driver keeps Barco's 2 s after it).
+		auto scriptSend = [this](const char* mnemonic, int value) -> int
+		{
+			bool written = false;
+			driver->SendScript(mnemonic, value, &written);
+			return written ? -1 : value;
+		};
+		// The resend log: at most once per 10 s, with the count since the last line.
+		std::chrono::steady_clock::time_point resendLogTime{};
+		int resendsNotLogged = 0;
+		auto logResend = [&](const char* mnemonic, int value)
+		{
+			++resendsNotLogged;
+			const auto now = std::chrono::steady_clock::now();
+			if (resendLogTime == std::chrono::steady_clock::time_point{} ||
+				now - resendLogTime >= std::chrono::seconds(10))
+			{
+				DebugLog::Log("LED drive: re-sending %s %d (the last write failed; %d re-send(s) since the last report)",
+					mnemonic, value, resendsNotLogged);
+				resendLogTime = now;
+				resendsNotLogged = 0;
+			}
+		};
 		auto setSmoothing = [this](bool on, int contrast)
 		{
 			std::lock_guard<std::mutex> guard(mutex);
@@ -1218,14 +1243,14 @@ namespace LedDrive
 					resendContrast = -1;
 				if (resendLight >= 0)
 				{
-					DebugLog::Log("LED drive: re-sending LPW1 %d (the last write failed)", controller.Light());
-					resendLight = driver->SendScript("LPW1", controller.Light()) ? -1 : controller.Light();
+					logResend("LPW1", controller.Light());
+					resendLight = scriptSend("LPW1", controller.Light());
 					sendsDone = std::chrono::steady_clock::now();
 				}
 				if (resendContrast >= 0)
 				{
-					DebugLog::Log("LED drive: re-sending CNTR %d (the last write failed)", controller.Contrast());
-					resendContrast = driver->SendScript("CNTR", controller.Contrast()) ? -1 : controller.Contrast();
+					logResend("CNTR", controller.Contrast());
+					resendContrast = scriptSend("CNTR", controller.Contrast());
 					sendsDone = std::chrono::steady_clock::now();
 				}
 				if (current.scriptPacing)
@@ -1257,11 +1282,11 @@ namespace LedDrive
 						if (send.light)
 						{
 							if (CustomDimEngaged()) continue;
-							resendLight = driver->SendScript("LPW1", send.value) ? -1 : send.value;
+							resendLight = scriptSend("LPW1", send.value);
 						}
 						else
 						{
-							resendContrast = driver->SendScript("CNTR", send.value) ? -1 : send.value;
+							resendContrast = scriptSend("CNTR", send.value);
 							if (send.value != 50) contrastDriven = true;
 							if (smoothNow)
 							{
@@ -1312,7 +1337,7 @@ namespace LedDrive
 				// before script mode runs; this only guards the order).
 				if (out.lightCommand >= 0 && !CustomDimEngaged())
 				{
-					resendLight = driver->SendScript("LPW1", out.lightCommand) ? -1 : out.lightCommand;
+					resendLight = scriptSend("LPW1", out.lightCommand);
 					sendsDone = std::chrono::steady_clock::now();
 					// The script slept 200 ms after LPW1 even with no CNTR to
 					// follow; keep that with a tick_ms below it (audit note 4).
@@ -1327,7 +1352,7 @@ namespace LedDrive
 					if (!WaitUntil(sendsDone + std::chrono::milliseconds(step.offsetMs - previousOffset), generation))
 						break;
 					previousOffset = step.offsetMs;
-					resendContrast = driver->SendScript("CNTR", step.contrast) ? -1 : step.contrast;
+					resendContrast = scriptSend("CNTR", step.contrast);
 					sendsDone = std::chrono::steady_clock::now();
 					if (step.contrast != 50) contrastDriven = true;
 					if (smoothNow)

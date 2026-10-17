@@ -61,8 +61,9 @@ namespace LedDrive
 				status.lastContrastSentAt = std::chrono::steady_clock::now();
 			}
 
-			bool SendScript(const std::string& mnemonic, int value) override
+			bool SendScript(const std::string& mnemonic, int value, bool* written = nullptr) override
 			{
+				if (written) *written = true;
 				if (mnemonic == "LPW1")
 					Record(value);
 				else

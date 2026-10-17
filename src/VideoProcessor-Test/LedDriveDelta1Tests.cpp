@@ -1701,6 +1701,43 @@ namespace VideoProcessorTest
 			module.Stop();
 		}
 
+		// Post-merge audit 2026-10-17 (B1): a CNTR that was written but got no reply is
+		// not re-sent (the projector may well have taken it); only a failed write is
+		// (ScriptResendsAFailedWriteAtTheNextTick).
+		TEST_METHOD(ScriptDroppedReplyIsNotResent)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.scriptPacing = false;
+			config.tickMs = 400;
+			ParseCurve("0:255, 255:255", config.curve);
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(50.0));
+			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			const size_t before = projector->Writes().size();
+			projector->silent = true;   // written, never answered
+			module.SubmitMeasurement(Frame(50.0, 100, 235));   // a highlight: back to 50
+			auto count50 = [&]
+			{
+				const auto writes = projector->Writes();
+				return std::count(writes.begin() + before, writes.end(), std::string(":CNTR50\r"));
+			};
+			Assert::IsTrue(WaitFor([&] { return count50() == 1; }), L"CNTR 50 written");
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			projector->silent = false;
+			// Past Barco's 2 s after the missing reply and several ticks.
+			std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+			Assert::AreEqual(static_cast<std::ptrdiff_t>(1), static_cast<std::ptrdiff_t>(count50()),
+				L"a dropped reply is not re-sent");
+			module.Stop();
+		}
+
 		// Bug hunt 2026-10-17 (internal_script): the idle restore decides from
 		// what the port last saw: CNTR 51 written, the write of 50 failed, so
 		// the script believes 50 - the restore still sends CNTR 50.
