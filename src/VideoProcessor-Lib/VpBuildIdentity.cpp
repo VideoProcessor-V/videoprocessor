@@ -55,8 +55,8 @@ namespace VpBuildIdentity
 			pluginOk ? pluginId : "invalid";
 		message = "VP Renderer DLL refused: it is from a different build than VideoProcessor.exe "
 			"(EXE build ID " + host + ", DLL build ID " + plugin + "). "
-			"Redeploy VideoProcessor.exe and vprenderer\VideoProcessorVPRenderer.dll "
-			"(and vprenderer-beta\VideoProcessorVPRendererBeta.dll) together from the same build.";
+			"Redeploy VideoProcessor.exe and vprenderer\\VideoProcessorVPRenderer.dll "
+			"(and vprenderer-beta\\VideoProcessorVPRendererBeta.dll) together from the same build.";
 		return false;
 	}
 }

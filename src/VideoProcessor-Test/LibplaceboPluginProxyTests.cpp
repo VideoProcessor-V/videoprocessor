@@ -309,7 +309,7 @@ namespace VideoProcessorTest
 			wchar_t modulePath[MAX_PATH] = {};
 			GetModuleFileNameW(testModule, modulePath, MAX_PATH);
 			const std::wstring fullPath(modulePath);
-			const std::wstring root = fullPath.substr(0, fullPath.find_last_of(L"\/"));
+			const std::wstring root = fullPath.substr(0, fullPath.find_last_of(L"\\/"));
 			for (const bool beta : { false, true })
 			{
 				const std::wstring pluginPath = OptionalRendererLayout::PluginPath(root, beta);
