@@ -17,6 +17,8 @@
 #include <mutex>
 #include <string>
 
+#include <filesource/FileHost.h>
+
 #include "FilterTimingGlue.h"
 #include "VPRendererFilterMediaTypes.h"
 #include "VPRendererFrameBufferPool.h"
@@ -27,9 +29,8 @@ namespace VPRendererFilter
 {
 	class CVPRendererFilter;
 
-	// Frames VP may queue ahead of presentation.
-	// TODO(VP Renderer integration, agent D): from VP's queue settings
-	// (queue_size / the active queue profile) instead of this default.
+	// Frames VP may queue ahead of presentation until the profile snapshot
+	// (FileHost, the active queue profile's queue_size) sets its own.
 	constexpr size_t kDefaultFrameQueueCapacity = 16;
 	// Receive waits for a queue slot in slices of this length so a flush or
 	// stop is noticed promptly.
@@ -41,6 +42,9 @@ namespace VPRendererFilter
 	public:
 		CVPRendererInputPin(CVPRendererFilter* filter, HRESULT* phr);
 		HRESULT GetMediaType(int position, CMediaType* mediaType) override;
+		// Segment start/stop/rate also go to the filter's timing model (a seek
+		// or rate change is a discontinuity for VP).
+		STDMETHODIMP NewSegment(REFERENCE_TIME start, REFERENCE_TIME stop, double rate) override;
 	};
 
 
@@ -185,11 +189,22 @@ namespace VPRendererFilter
 		void OnRendererState(RendererState state, uint32_t generation) override;
 		void OnRendererDetailString(const CString& details, uint32_t generation) override;
 
+	public:
+		// From the input pin's NewSegment.
+		void OnNewSegment(REFERENCE_TIME start, REFERENCE_TIME stop, double rate);
+
+	private:
+
 		using RendererPtr = std::shared_ptr<IVideoRenderer>;
 		RendererPtr Renderer() const;
 		HRESULT CreateRenderer(std::string& reason);
 		void DestroyRenderer();
-		bool EnsureVideoState(IMediaSample* sample, std::string& reason);
+		// Sends the current format at `rate` (with the latest static HDR10
+		// metadata) when the format, the rate or that metadata changed.
+		bool EnsureVideoState(const RationalRate& rate, std::string& reason);
+		bool StartHost();
+		void OnHostApplied(const FileSource::FileHost::ApplyOutcome& outcome);
+		void ReadSideData(IMediaSample* sample);
 		HRESULT DeliverSample(IMediaSample* sample, bool pausedHold);
 		bool WaitForQueueSlot(const RendererPtr& renderer);
 		void CancelQueueWait(const RendererPtr& renderer);
@@ -214,9 +229,20 @@ namespace VPRendererFilter
 		uint64_t m_sentFormatGeneration = 0;   // format of the last OnVideoState
 		bool m_videoStateSent = false;
 		RationalRate m_sourceRate;
+		bool m_sentHdrValid = false;           // m_sentHdr went with the last state
+		HDRData m_sentHdr;
 		QpcTimingClock m_timingClock;
-		std::unique_ptr<IFilterFormatAdapter> m_formatAdapter;
-		std::unique_ptr<IFilterClockAdapter> m_clockAdapter;
+		// Graph state, reference clock -> QPC, PTS-verified rate (FilterTimingGlue.h).
+		FileTimingModel m_timing;
+		// LAV side data (streaming thread only).
+		FileSideDataTracker m_sideData;
+		bool m_loggedDolbyVision = false;
+		// VideoProcessor.cfg, the profile runtime (source=file) and the filter's
+		// own keys; created with the first renderer, kept for the filter's life.
+		std::unique_ptr<FileSource::FileHost> m_host;
+		bool m_hostStarted = false;
+		// Queue capacity last given to the current renderer (0 = its default).
+		std::atomic<size_t> m_appliedQueueSize{ 0 };
 		FrameBufferPool m_bufferPool;
 		VPRendererVideoWindow m_window;
 

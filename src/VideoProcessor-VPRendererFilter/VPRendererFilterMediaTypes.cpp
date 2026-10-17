@@ -47,28 +47,6 @@ namespace VPRendererFilter
 			va_end(args);
 			return buffer;
 		}
-
-		// True when the exact duration 10^7 * denominator / numerator is within
-		// one 100 ns unit of duration100ns (sources round or truncate).
-		bool Reproduces(int64_t duration100ns, uint64_t numerator, uint64_t denominator)
-		{
-			if (numerator == 0 || denominator == 0 ||
-				numerator > 0xFFFFFFFFull || denominator > 0xFFFFFFFFull)
-				return false;
-			// |10^7 * d / n - T| < 1  <=>  |10^7 * d - T * n| < n
-			const int64_t lhs = static_cast<int64_t>(10000000ull * denominator) -
-				duration100ns * static_cast<int64_t>(numerator);
-			return static_cast<uint64_t>(lhs < 0 ? -lhs : lhs) < numerator;
-		}
-
-		RationalRate Reduced(uint64_t numerator, uint64_t denominator)
-		{
-			const uint64_t g = Gcd(numerator, denominator);
-			RationalRate r;
-			r.numerator = static_cast<uint32_t>(numerator / g);
-			r.denominator = static_cast<uint32_t>(denominator / g);
-			return r;
-		}
 	}
 
 	const GUID kMediaTypeVideo = FourccGuid(Fourcc('v', 'i', 'd', 's'));
@@ -320,44 +298,5 @@ namespace VPRendererFilter
 			out.aspectY = static_cast<uint32_t>(out.height / g);
 		}
 		return true;
-	}
-
-
-	RationalRate RationalFromFrameDuration(int64_t duration100ns)
-	{
-		RationalRate none;
-		if (duration100ns <= 0)
-			return none;
-		const uint64_t T = static_cast<uint64_t>(duration100ns);
-
-		// Integer rate.
-		const uint64_t integer = (10000000ull + T / 2) / T;
-		if (Reproduces(duration100ns, integer, 1))
-			return Reduced(integer, 1);
-
-		// 1000/1001 timebase family: (k * 1000) / 1001.
-		const uint64_t k = (10000000ull * 1001ull / T + 500ull) / 1000ull;
-		if (k > 0 && Reproduces(duration100ns, k * 1000ull, 1001))
-			return Reduced(k * 1000ull, 1001);
-
-		// Simplest convergent of 10^7 / T that reproduces T; the last convergent
-		// is exact, so this always ends.
-		uint64_t a = 10000000ull, b = T;
-		uint64_t p0 = 0, q0 = 1, p1 = 1, q1 = 0;
-		while (b != 0)
-		{
-			const uint64_t term = a / b;
-			const uint64_t p2 = term * p1 + p0;
-			const uint64_t q2 = term * q1 + q0;
-			if (p2 > 0xFFFFFFFFull || q2 > 0xFFFFFFFFull)
-				break;
-			if (Reproduces(duration100ns, p2, q2))
-				return Reduced(p2, q2);
-			p0 = p1; q0 = q1; p1 = p2; q1 = q2;
-			const uint64_t r = a % b;
-			a = b;
-			b = r;
-		}
-		return Reduced(10000000ull, T);
 	}
 }

@@ -305,7 +305,7 @@ namespace VPRendererFilter
 
 	STDMETHODIMP CVPRendererFilter::put_BorderColor(long color)
 	{
-		// TODO(VP Renderer integration, agent A): VP draws its own borders.
+		// TODO(VP Renderer): VP draws its own borders.
 		std::lock_guard<std::mutex> lock(m_windowStateMutex);
 		m_borderColor = color;
 		return S_OK;
@@ -403,7 +403,7 @@ namespace VPRendererFilter
 	//
 	// IBasicVideo / IBasicVideo2
 	//
-	// TODO(VP Renderer integration, agent A): the source and destination
+	// TODO(VP Renderer): the source and destination
 	// rectangles are recorded but VP does not crop/position by them yet (zoom and
 	// pan in the player need a viewport call on the renderer).
 
@@ -698,7 +698,7 @@ namespace VPRendererFilter
 
 	STDMETHODIMP CVPRendererFilter::GetCurrentImage(long*, long*)
 	{
-		// TODO(VP Renderer integration, agent A): rendered-output capture
+		// TODO(VP Renderer): rendered-output capture
 		// (RequestRenderedOutputCapture) could back this.
 		return E_NOTIMPL;
 	}

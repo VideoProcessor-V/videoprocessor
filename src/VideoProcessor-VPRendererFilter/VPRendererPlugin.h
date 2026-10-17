@@ -23,7 +23,7 @@ namespace VPRendererFilter
 		bool IsLoaded() const { return module != nullptr; }
 	};
 
-	// TODO(VP Renderer integration, agent D): a filter setting may select the
+	// TODO(VP Renderer): a filter setting may select the
 	// beta flavor (vprenderer-beta\VideoProcessorVPRendererBeta.dll).
 	constexpr bool kUseBetaPlugin = false;
 

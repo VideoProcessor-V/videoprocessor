@@ -6,7 +6,7 @@
 // filter's .cpp files compiled here are listed in VideoProcessor-Test's
 // project; nothing is registered and no plugin is loaded.
 
-#include "../VideoProcessor-VPRendererFilter/FilterTimingGlueMath.h"
+#include "../VideoProcessor-VPRendererFilter/FilterTimingGlue.h"
 #include "../VideoProcessor-VPRendererFilter/VPRendererFilterMediaTypes.h"
 #include "../VideoProcessor-VPRendererFilter/VPRendererFilterPluginCheck.h"
 #include "../VideoProcessor-VPRendererFilter/VPRendererFilterRegistration.h"
@@ -16,6 +16,7 @@
 #include <VideoState.h>
 
 #include <dvdmedia.h>
+#include <IMediaSideData.h>
 
 #include <cstring>
 #include <memory>
@@ -232,22 +233,37 @@ namespace Tests
 			Assert::AreEqual<uint32_t>(4, c.transferMatrix);
 			Assert::AreEqual<uint32_t>(9, c.primaries);
 			Assert::AreEqual<uint32_t>(15, c.transferFunction);
-			Assert::IsTrue(ColorSpaceFromColorimetry(c) == ColorSpace::BT_2020);
-			Assert::IsTrue(EotfFromColorimetry(c) == EOTF::PQ);
+			VideoFormat f;
+			f.width = 3840;
+			f.height = 2160;
+			f.colorimetry = c;
+			FileColorDecision d = DecideColor(f);
+			Assert::IsTrue(d.colorSpace == ColorSpace::BT_2020);
+			Assert::IsTrue(d.eotf == EOTF::PQ);
+			Assert::IsFalse(d.eotfAssumed);
 
-			Colorimetry hlg = c;
-			hlg.transferFunction = 16;
-			Assert::IsTrue(EotfFromColorimetry(hlg) == EOTF::HLG);
-			Colorimetry sdr = c;
-			sdr.primaries = 2;
-			sdr.transferFunction = 4;   // BT.709
-			Assert::IsTrue(ColorSpaceFromColorimetry(sdr) == ColorSpace::REC_709);
-			Assert::IsTrue(EotfFromColorimetry(sdr) == EOTF::SDR);
+			f.colorimetry.transferFunction = 16;
+			Assert::IsTrue(DecideColor(f).eotf == EOTF::HLG);
+			f.colorimetry.primaries = 2;
+			f.colorimetry.transferFunction = 4;   // gamma 2.2 class -> SDR
+			d = DecideColor(f);
+			Assert::IsTrue(d.colorSpace == ColorSpace::REC_709);
+			Assert::IsTrue(d.eotf == EOTF::SDR);
 
+			// Nothing signalled: SDR (assumed) and the capture path's height rule.
 			const Colorimetry absent = DecodeColorimetry(AMCONTROL_USED | (9u << 22));
 			Assert::IsFalse(absent.present);
-			Assert::IsTrue(ColorSpaceFromColorimetry(absent) == ColorSpace::UNKNOWN);
-			Assert::IsTrue(EotfFromColorimetry(absent) == EOTF::UNKNOWN);
+			f.colorimetry = absent;
+			d = DecideColor(f);
+			Assert::IsTrue(d.eotf == EOTF::SDR);
+			Assert::IsTrue(d.eotfAssumed);
+			Assert::IsTrue(d.colorSpace == ColorSpace::REC_709);
+			Assert::IsTrue(d.colorSpaceFromHeight);
+			f.width = 720;
+			f.height = 576;
+			Assert::IsTrue(DecideColor(f).colorSpace == ColorSpace::REC_601_625);
+			f.height = 480;
+			Assert::IsTrue(DecideColor(f).colorSpace == ColorSpace::REC_601_525);
 		}
 
 		TEST_METHOD(TightLayoutMatchesVideoState)
@@ -270,32 +286,6 @@ namespace Tests
 						TightFrameBytes(e, size[0], size[1]));
 				}
 			}
-		}
-
-		TEST_METHOD(ExactRateFromFrameDuration)
-		{
-			struct Case { int64_t duration; uint32_t num; uint32_t den; };
-			const Case cases[] = {
-				{ 417083, 24000, 1001 }, { 417084, 24000, 1001 },
-				{ 416666, 24, 1 }, { 416667, 24, 1 },
-				{ 400000, 25, 1 }, { 333667, 30000, 1001 }, { 333333, 30, 1 },
-				{ 200000, 50, 1 }, { 166833, 60000, 1001 }, { 166667, 60, 1 },
-				{ 83333, 120, 1 }, { 1428571, 7, 1 },
-			};
-			for (const Case& c : cases)
-			{
-				const RationalRate r = RationalFromFrameDuration(c.duration);
-				Assert::AreEqual(c.num, r.numerator, std::to_wstring(c.duration).c_str());
-				Assert::AreEqual(c.den, r.denominator, std::to_wstring(c.duration).c_str());
-			}
-			const RationalRate none = RationalFromFrameDuration(0);
-			Assert::AreEqual<uint32_t>(0, none.numerator);
-			Assert::AreEqual<uint32_t>(0, none.denominator);
-			// Neither an integer nor a 1001-family rate: the simplest convergent
-			// that reproduces the duration (23.5 Hz).
-			const RationalRate half = RationalFromFrameDuration(425532);
-			Assert::AreEqual<uint32_t>(47, half.numerator);
-			Assert::AreEqual<uint32_t>(2, half.denominator);
 		}
 
 	private:
@@ -587,25 +577,242 @@ namespace Tests
 	};
 
 
+	// A reference clock that only answers GetTime (FileClockMapper's correlation).
+	class FakeReferenceClock final : public IReferenceClock
+	{
+	public:
+		REFERENCE_TIME now = 0;
+		STDMETHODIMP QueryInterface(REFIID, void** ppv) override { *ppv = nullptr; return E_NOINTERFACE; }
+		STDMETHODIMP_(ULONG) AddRef() override { return 2; }
+		STDMETHODIMP_(ULONG) Release() override { return 1; }
+		STDMETHODIMP GetTime(REFERENCE_TIME* time) override { *time = now; return S_OK; }
+		STDMETHODIMP AdviseTime(REFERENCE_TIME, REFERENCE_TIME, HEVENT, DWORD_PTR*) override { return E_NOTIMPL; }
+		STDMETHODIMP AdvisePeriodic(REFERENCE_TIME, REFERENCE_TIME, HSEMAPHORE, DWORD_PTR*) override { return E_NOTIMPL; }
+		STDMETHODIMP Unadvise(DWORD_PTR) override { return E_NOTIMPL; }
+	};
+
+	// 10 MHz QPC so 100 ns reference units map one to one.
+	filesource::ClockCorrelation Correlation(int64_t reference, int64_t qpc)
+	{
+		filesource::ClockCorrelation c;
+		c.referenceTime100ns = reference;
+		c.qpcTicks = qpc;
+		c.qpcFrequency = 10000000;
+		return c;
+	}
+
+	filesource::FileSampleTimes Times(int64_t start, int64_t duration, bool discontinuity = false)
+	{
+		filesource::FileSampleTimes t;
+		t.hasStart = true;
+		t.hasStop = true;
+		t.start100ns = start;
+		t.stop100ns = start + duration;
+		t.discontinuityFlag = discontinuity;
+		return t;
+	}
+
+	struct SideDataSource
+	{
+		std::vector<std::pair<GUID, std::vector<BYTE>>> items;
+		static HRESULT Get(void* context, const GUID& type, const BYTE** data, size_t* size)
+		{
+			for (const auto& item : static_cast<SideDataSource*>(context)->items)
+			{
+				if (IsEqualGUID(item.first, type))
+				{
+					*data = item.second.data();
+					*size = item.second.size();
+					return S_OK;
+				}
+			}
+			return E_FAIL;
+		}
+	};
+
+	template <typename T>
+	std::vector<BYTE> Bytes(const T& value)
+	{
+		const BYTE* p = reinterpret_cast<const BYTE*>(&value);
+		return std::vector<BYTE>(p, p + sizeof(T));
+	}
+
 	TEST_CLASS(VPRendererFilterTimingGlueTests)
 	{
 	public:
-		TEST_METHOD(ReferenceTimeMapsToQpc)
+		TEST_METHOD(VideoStateCarriesExactRateColorAndHdr)
 		{
-			// 10 MHz QPC: 100 ns units map one to one.
-			Assert::AreEqual<int64_t>(1000 + 5000000,
-				ReferenceTimeToQpc(25000000, 20000000, 1000, 10000000));
-			// 3 MHz QPC, due one and a half seconds ahead.
-			Assert::AreEqual<int64_t>(77 + 4500000,
-				ReferenceTimeToQpc(15000000, 0, 77, 3000000));
-			// Late frames map to the past.
-			Assert::AreEqual<int64_t>(1000000 - 300000,
-				ReferenceTimeToQpc(0, 1000000, 1000000, 3000000));
-			// Hours ahead without overflow (24 MHz QPC, 10 h).
-			const int64_t tenHours = 10ll * 3600 * 10000000;
-			Assert::AreEqual<int64_t>(5 + 10ll * 3600 * 24000000,
-				ReferenceTimeToQpc(tenHours, 0, 5, 24000000));
-			Assert::AreEqual<int64_t>(0, ReferenceTimeToQpc(1, 0, 5, 0));
+			TestMediaType t(kSubtypeP010, 3840, 2160);
+			t.vih2.dwControlFlags = AMCONTROL_COLORINFO_PRESENT | AMCONTROL_USED |
+				(2u << 12) | (4u << 15) | (9u << 22) | (15u << 27);
+			VideoFormat f;
+			std::string reason;
+			Assert::IsTrue(ParseVideoMediaType(t.mt, f, reason));
+			const RationalRate rate = filesource::SnapAvgTimePerFrame(f.avgTimePerFrame);
+			Assert::AreEqual<uint32_t>(24000, rate.numerator);
+			Assert::AreEqual<uint32_t>(1001, rate.denominator);
+
+			HDRData hdr;
+			hdr.masteringDisplayMaxLuminance = 1000;
+			hdr.maxCll = 900;
+			VideoStateComPtr state;
+			Assert::IsTrue(BuildFileVideoState(f, rate, &hdr, state, reason));
+			Assert::IsTrue(state->valid);
+			Assert::IsTrue(state->videoFrameEncoding == VideoFrameEncoding::P010);
+			Assert::IsTrue(state->eotf == EOTF::PQ);
+			Assert::IsTrue(state->colorspace == ColorSpace::BT_2020);
+			Assert::AreEqual(3840u, state->displayMode->FrameWidth());
+			Assert::AreEqual(1000.0, state->hdrData->masteringDisplayMaxLuminance);
+			Assert::AreEqual(900.0, state->hdrData->maxCll);
+
+			// No HDR side data: an empty HDRData, never null.
+			Assert::IsTrue(BuildFileVideoState(f, rate, nullptr, state, reason));
+			Assert::IsNotNull(state->hdrData.get());
+			Assert::IsFalse(state->hdrData->IsValid());
+
+			// An unknown rate is refused with a reason (the filter waits for PTS).
+			Assert::IsFalse(BuildFileVideoState(f, RationalRate(), nullptr, state, reason));
+			Assert::IsFalse(reason.empty());
+		}
+
+		TEST_METHOD(RateFromHeaderOrTimestamps)
+		{
+			FileTimingModel model;
+			// Header 23.976: valid at once, still valid while the PTS agree.
+			RationalRate r = model.ObserveSample(true, 0, false, 417083);
+			Assert::AreEqual<uint32_t>(24000, r.numerator);
+			for (int i = 1; i < 12; ++i)
+				r = model.ObserveSample(true, (i * 4170833LL + 5) / 10, false, 417083);
+			Assert::AreEqual<uint32_t>(24000, r.numerator);
+			Assert::AreEqual<uint32_t>(1001, r.denominator);
+
+			// No header: unknown until the timestamps give 25 Hz.
+			FileTimingModel noHeader;
+			r = noHeader.ObserveSample(true, 0, false, 0);
+			Assert::IsFalse(r.IsValid());
+			for (int i = 1; i < 12; ++i)
+				r = noHeader.ObserveSample(true, i * 400000LL, false, 0);
+			Assert::AreEqual<uint32_t>(25, r.numerator);
+			Assert::AreEqual<uint32_t>(1, r.denominator);
+
+			// A header that disagrees with the stream (claims 25, runs 50): measured wins.
+			FileTimingModel wrong;
+			for (int i = 0; i < 12; ++i)
+				r = wrong.ObserveSample(true, i * 200000LL, false, 400000);
+			Assert::AreEqual<uint32_t>(50, r.numerator);
+		}
+
+		TEST_METHOD(PresentationQpcFollowsClockOffsetAndState)
+		{
+			FileTimingModel model;
+			model.AddCorrelation(Correlation(100000000, 500000000));
+			model.AddCorrelation(Correlation(110000000, 510000000));
+			const RationalRate rate = filesource::SnapAvgTimePerFrame(400000);
+
+			// Paused (pre-roll): held, shown at once, first frame is a discontinuity.
+			model.Pause();
+			FileFrameTiming t = model.BuildTiming(Times(0, 400000), rate);
+			Assert::IsTrue(t.paused);
+			Assert::AreEqual<int64_t>(0, t.presentationQpc);
+			Assert::IsTrue(t.discontinuity);
+			Assert::AreEqual<uint32_t>(25, t.sourceRateNumerator);
+
+			// Running from tStart = 120000000: due at tStart + rtStart.
+			model.Run(120000000);
+			t = model.BuildTiming(Times(400000, 400000), rate);
+			Assert::IsFalse(t.paused);
+			Assert::IsFalse(t.discontinuity);
+			Assert::AreEqual<int64_t>(500000000 + 20000000 + 400000, t.presentationQpc);
+			Assert::IsTrue(t.isFileSource);
+
+			// file_av_offset_ms = -40: 40 ms earlier.
+			model.SetAvOffsetMs(-40);
+			t = model.BuildTiming(Times(800000, 400000), rate);
+			Assert::AreEqual<int64_t>(500000000 + 20000000 + 800000 - 400000, t.presentationQpc);
+			model.SetAvOffsetMs(0);
+
+			// A seek (flush + new segment) and a format change are discontinuities.
+			model.BeginFlush();
+			model.EndFlush();
+			Assert::IsTrue(model.BuildTiming(Times(0, 400000), rate).discontinuity);
+			Assert::IsFalse(model.BuildTiming(Times(400000, 400000), rate).discontinuity);
+			model.MarkDiscontinuity();
+			Assert::IsTrue(model.BuildTiming(Times(800000, 400000), rate).discontinuity);
+			Assert::IsTrue(model.BuildTiming(Times(1200000, 400000, true), rate).discontinuity);
+
+			// Rate 2.0: carried to VP, motion off, and the rate change is a discontinuity.
+			Assert::IsTrue(model.MotionAllowed());
+			Assert::IsTrue(model.NewSegment(0, 0, 2.0));
+			t = model.BuildTiming(Times(0, 200000), rate);
+			Assert::AreEqual(2.0, t.playbackRate);
+			Assert::IsTrue(t.discontinuity);
+			Assert::IsFalse(model.MotionAllowed());
+
+			// A frame step: held and a discontinuity.
+			model.FrameStep();
+			t = model.BuildTiming(Times(200000, 200000), rate);
+			Assert::IsTrue(t.paused);
+			Assert::IsTrue(t.discontinuity);
+
+			// Stop forgets the clock fit: nothing can be mapped until it is rebuilt.
+			model.Stop();
+			model.Run(0);
+			Assert::AreEqual<int64_t>(0, model.BuildTiming(Times(0, 400000), rate).presentationQpc);
+		}
+
+		TEST_METHOD(CorrelationFromAReferenceClock)
+		{
+			FakeReferenceClock clock;
+			clock.now = 123456789;
+			filesource::ClockCorrelation c;
+			Assert::IsTrue(filesource::SampleReferenceClockCorrelation(&clock, c));
+			Assert::AreEqual<int64_t>(123456789, c.referenceTime100ns);
+			Assert::IsTrue(c.qpcTicks > 0 && c.qpcFrequency > 0);
+		}
+
+		TEST_METHOD(SideDataTrackerReportsStaticHdrChangesOnly)
+		{
+			MediaSideDataHDR mastering = {};
+			mastering.display_primaries_x[0] = 0.170;   // LAV order: G, B, R
+			mastering.display_primaries_y[0] = 0.797;
+			mastering.display_primaries_x[1] = 0.131;
+			mastering.display_primaries_y[1] = 0.046;
+			mastering.display_primaries_x[2] = 0.708;
+			mastering.display_primaries_y[2] = 0.292;
+			mastering.white_point_x = 0.3127;
+			mastering.white_point_y = 0.3290;
+			mastering.max_display_mastering_luminance = 1000.0;
+			mastering.min_display_mastering_luminance = 0.005;
+			MediaSideDataHDRContentLightLevel cll = {};
+			cll.MaxCLL = 900;
+			cll.MaxFALL = 300;
+
+			SideDataSource source;
+			source.items.push_back(std::make_pair(IID_MediaSideDataHDR, Bytes(mastering)));
+			source.items.push_back(std::make_pair(IID_MediaSideDataHDRContentLightLevel, Bytes(cll)));
+
+			FileSideDataTracker tracker;
+			Assert::IsFalse(tracker.HasStaticHdr());
+			Assert::IsTrue(tracker.Update(&SideDataSource::Get, &source));
+			Assert::IsTrue(tracker.HasStaticHdr());
+			Assert::AreEqual(1000.0, tracker.StaticHdr().masteringDisplayMaxLuminance);
+			Assert::AreEqual(900.0, tracker.StaticHdr().maxCll);
+			Assert::AreEqual(0.708, tracker.StaticHdr().displayPrimaryRedX, 1e-9);
+			// The same metadata again: no change. None on a sample: kept.
+			Assert::IsFalse(tracker.Update(&SideDataSource::Get, &source));
+			SideDataSource empty;
+			Assert::IsFalse(tracker.Update(&SideDataSource::Get, &empty));
+			Assert::IsTrue(tracker.HasStaticHdr());
+			// A new MaxCLL is a change; a truncated block is ignored.
+			cll.MaxCLL = 1200;
+			source.items[1].second = Bytes(cll);
+			Assert::IsTrue(tracker.Update(&SideDataSource::Get, &source));
+			Assert::AreEqual(1200.0, tracker.StaticHdr().maxCll);
+			source.items[0].second.resize(8);
+			Assert::IsFalse(tracker.Update(&SideDataSource::Get, &source));
+			tracker.Reset();
+			Assert::IsFalse(tracker.HasStaticHdr());
+			Assert::AreEqual<uint64_t>(0, tracker.DolbyVisionFrames());
 		}
 	};
 }

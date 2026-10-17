@@ -7,7 +7,9 @@
 #include "VPRendererFilterRepack.h"
 #include "VPRendererPlugin.h"
 
+#include <ConfigFile.h>
 #include <DebugLog.h>
+#include <IMediaSideData.h>
 #include <VideoFrame.h>
 #include <VideoConversionOverride.h>
 
@@ -45,12 +47,6 @@ namespace VPRendererFilter
 			return "?";
 		}
 
-		int64_t QpcNow()
-		{
-			LARGE_INTEGER now = {};
-			QueryPerformanceCounter(&now);
-			return now.QuadPart;
-		}
 	}
 
 
@@ -67,6 +63,15 @@ namespace VPRendererFilter
 	{
 		return static_cast<CVPRendererFilter*>(m_pRenderer)->GetProposedMediaType(
 			position, mediaType);
+	}
+
+	STDMETHODIMP CVPRendererInputPin::NewSegment(REFERENCE_TIME start, REFERENCE_TIME stop,
+		double rate)
+	{
+		const HRESULT hr = CRendererInputPin::NewSegment(start, stop, rate);
+		if (SUCCEEDED(hr))
+			static_cast<CVPRendererFilter*>(m_pRenderer)->OnNewSegment(start, stop, rate);
+		return hr;
 	}
 
 
@@ -97,8 +102,6 @@ namespace VPRendererFilter
 
 	CVPRendererFilter::CVPRendererFilter(LPUNKNOWN outer, HRESULT* phr) :
 		CBaseRenderer(kClsidVPRendererFilter, NAME("VP Renderer"), outer, phr),
-		m_formatAdapter(CreateLocalFormatAdapter()),
-		m_clockAdapter(CreateLocalClockAdapter()),
 		m_stepRelease(TRUE)
 	{
 		VPRendererFilterLog::Initialize();
@@ -112,6 +115,8 @@ namespace VPRendererFilter
 		try
 		{
 			DestroyRenderer();
+			if (m_host)
+				m_host->Stop();
 			m_window.Destroy();
 		}
 		catch (...)
@@ -265,6 +270,9 @@ namespace VPRendererFilter
 			std::lock_guard<std::mutex> lock(m_formatMutex);
 			m_hasFormat = false;
 		}
+		// The next connection is a new stream: no HDR10 / DV carried over.
+		m_sideData.Reset();
+		m_loggedDolbyVision = false;
 		return hr;
 	}
 
@@ -346,13 +354,29 @@ namespace VPRendererFilter
 
 		try
 		{
+			StartHost();
+			// VideoProcessorRenderer.cfg beside the VideoProcessor.cfg FileHost
+			// found (the executable loads it from its own folder; MPC's folder
+			// means nothing here). Empty = the plugin's defaults.
+			std::string rendererConfigPath;
+			if (m_host)
+			{
+				const std::wstring mainPath = m_host->ConfigurationPath();
+				const size_t slash = mainPath.find_last_of(L"\\/");
+				if (slash != std::wstring::npos)
+				{
+					const std::wstring candidate = mainPath.substr(0, slash + 1) +
+						std::wstring(CA2W(ConfigFile::RENDERER_FILENAME));
+					if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+						rendererConfigPath = std::string(CW2A(candidate.c_str()));
+				}
+			}
+
 			const uint32_t generation = ++m_rendererGeneration;
-			// TODO(VP Renderer integration, agent D): renderer configuration path
-			// (VP's renderer config for the filter), queue capacity and the
-			// unified profile snapshot; the empty path means plugin defaults.
 			IVideoRenderer* raw = plugin.createRenderer(static_cast<IRendererCallback*>(this),
 				generation, hwnd, &m_timingClock, true, kDefaultFrameQueueCapacity,
-				VideoConversionOverride::VIDEOCONVERSION_NONE, "", &VPRendererFilterLog::Sink);
+				VideoConversionOverride::VIDEOCONVERSION_NONE, rendererConfigPath.c_str(),
+				&VPRendererFilterLog::Sink);
 			if (!raw)
 			{
 				reason = "the VP renderer plugin failed to create a renderer";
@@ -376,18 +400,30 @@ namespace VPRendererFilter
 				std::lock_guard<std::mutex> lock(m_rendererMutex);
 				m_renderer = renderer;
 				m_videoStateSent = false;
+				m_sentHdrValid = false;
+				m_appliedQueueSize = 0;
 			}
 
 			// The executable's order: video state (when known), Build, Start. A
-			// stream without AvgTimePerFrame sends its state on the first sample.
+			// stream without AvgTimePerFrame sends its state once the sample
+			// timestamps give the rate.
 			std::string stateReason;
-			if (!EnsureVideoState(nullptr, stateReason))
-				DebugLog::Log("VP Renderer filter: video state deferred to the first sample: %s",
+			VideoFormat format;
+			RationalRate initialRate;
+			if (CurrentFormat(format))
+				initialRate = filesource::SnapAvgTimePerFrame(format.avgTimePerFrame);
+			if (!EnsureVideoState(initialRate, stateReason))
+				DebugLog::Log("VP Renderer filter: video state deferred to the first samples: %s",
 					stateReason.c_str());
 			renderer->Build();
 			renderer->Start();
-			DebugLog::Log("VP Renderer filter: renderer generation %u started (plugin %ls)",
-				generation, plugin.path.c_str());
+			DebugLog::Log("VP Renderer filter: renderer generation %u started (plugin %ls, "
+				"renderer config '%s')", generation, plugin.path.c_str(),
+				rendererConfigPath.c_str());
+			// The profile snapshot (rules see source=file), applied the way the
+			// executable applies it; OnHostApplied takes the queue size.
+			if (m_host)
+				m_host->SetRenderer(renderer.get());
 			return S_OK;
 		}
 		catch (const std::exception& e)
@@ -413,6 +449,12 @@ namespace VPRendererFilter
 		}
 		if (!renderer)
 			return;
+		// Before the renderer goes: FileHost holds a raw pointer to it. With
+		// source=file the renderer parks its LED drive on Stop for
+		// file_led_holdover_ms so MPC's per-file graph rebuild does not flash
+		// the projector to full light (LedDriveHoldover.h).
+		if (m_host)
+			m_host->SetRenderer(nullptr);
 		try
 		{
 			renderer->CancelFileFrameWait();
@@ -425,7 +467,126 @@ namespace VPRendererFilter
 	}
 
 
-	bool CVPRendererFilter::EnsureVideoState(IMediaSample* sample, std::string& reason)
+	bool CVPRendererFilter::StartHost()
+	{
+		if (m_hostStarted)
+			return m_host != nullptr;
+		m_hostStarted = true;
+		try
+		{
+			// The FileHost code is linked into this module, so its module
+			// directory is the .ax's folder.
+			std::unique_ptr<FileSource::FileHost> host(new FileSource::FileHost());
+			host->SetRendererName("VP Renderer (DirectShow filter)");
+			host->SetApplyHandler([this](const FileSource::FileHost::ApplyOutcome& outcome)
+			{
+				OnHostApplied(outcome);
+			});
+			std::string error;
+			if (!host->Start(error))
+				DebugLog::Log("VP Renderer filter: configuration: %s (defaults in force; a later "
+					"valid VideoProcessor.cfg is picked up)", error.c_str());
+			else
+				DebugLog::Log("VP Renderer filter: configuration %ls (file_av_offset_ms %d, "
+					"file_led_holdover_ms %u)", host->ConfigurationPath().c_str(),
+					host->AvOffsetMs(), host->LedHoldoverMs());
+			m_timing.SetAvOffsetMs(host->AvOffsetMs());
+			m_host = std::move(host);
+			return true;
+		}
+		catch (const std::exception& e)
+		{
+			DebugLog::Log("VP Renderer filter: FileHost failed to start: %s", e.what());
+		}
+		return false;
+	}
+
+
+	void CVPRendererFilter::OnHostApplied(const FileSource::FileHost::ApplyOutcome& outcome)
+	{
+		DebugLog::Log("VP Renderer filter: profile %s%s%s%s%s", outcome.applied ? "applied" : "not applied",
+			outcome.activeState.empty() ? "" : ": ", outcome.activeState.c_str(),
+			outcome.reason.empty() ? "" : " - ", outcome.reason.c_str());
+		if (!m_host)
+			return;
+		m_timing.SetAvOffsetMs(m_host->AvOffsetMs());
+		RendererPtr renderer = Renderer();
+		if (!renderer || !outcome.applied)
+			return;
+		// The queue profile's capacity, as VideoProcessor.exe applies it.
+		if (const auto snapshot = m_host->Snapshot())
+		{
+			if (snapshot->queue.hasQueueSize && snapshot->queue.queueSize > 0 &&
+				m_appliedQueueSize.exchange(snapshot->queue.queueSize) != snapshot->queue.queueSize)
+			{
+				try { renderer->SetFrameQueueMaxSize(snapshot->queue.queueSize); }
+				catch (const std::exception& e)
+				{
+					DebugLog::Log("VP Renderer filter: queue size %zu refused: %s",
+						static_cast<size_t>(snapshot->queue.queueSize), e.what());
+				}
+			}
+		}
+		if (outcome.rendererRestartRequired || outcome.liveResetRequired)
+		{
+			// A renderer restart takes effect with the next graph (MPC builds one
+			// per file); a live reset only needs the queue re-primed.
+			DebugLog::Log("VP Renderer filter: profile change needs %s",
+				outcome.rendererRestartRequired ? "a renderer restart (next file)" : "a queue reset");
+			if (outcome.liveResetRequired && !outcome.rendererRestartRequired)
+			{
+				try { renderer->ResetLiveQueue(); }
+				catch (...) {}
+				m_timing.MarkDiscontinuity();
+			}
+		}
+	}
+
+
+	void CVPRendererFilter::OnNewSegment(REFERENCE_TIME start, REFERENCE_TIME stop, double rate)
+	{
+		const bool rateChanged = m_timing.NewSegment(start, stop, rate);
+		DebugLog::Log("VP Renderer filter: new segment %lld..%lld rate %.3f%s",
+			static_cast<long long>(start), static_cast<long long>(stop), rate,
+			rateChanged ? " (rate changed)" : "");
+	}
+
+
+	namespace
+	{
+		HRESULT GetSampleSideData(void* context, const GUID& type, const BYTE** data, size_t* size)
+		{
+			return static_cast<IMediaSideData*>(context)->GetSideData(type, data, size);
+		}
+	}
+
+
+	void CVPRendererFilter::ReadSideData(IMediaSample* sample)
+	{
+		CComQIPtr<IMediaSideData> sideData(sample);
+		if (!sideData)
+			return;
+		if (m_sideData.Update(&GetSampleSideData, sideData.p))
+		{
+			const HDRData& hdr = m_sideData.StaticHdr();
+			DebugLog::Log("VP Renderer filter: HDR10 metadata: mastering %.4f-%.1f cd/m2, "
+				"MaxCLL %.0f MaxFALL %.0f", hdr.masteringDisplayMinLuminance,
+				hdr.masteringDisplayMaxLuminance, hdr.maxCll, hdr.maxFall);
+		}
+		if (m_sideData.Last().hasDolbyVision && !m_loggedDolbyVision)
+		{
+			m_loggedDolbyVision = true;
+			// ABI 35 has no per-frame Dolby Vision entry point for file frames:
+			// the base layer is shown with its static metadata (see the report).
+			DebugLog::Log("VP Renderer filter: Dolby Vision metadata present (profile %u, "
+				"extensions 0x%08X); not yet passed to the renderer, base layer shown",
+				m_sideData.Last().dolbyVision.guessedProfile,
+				m_sideData.Last().dolbyVision.extensionLevelMask);
+		}
+	}
+
+
+	bool CVPRendererFilter::EnsureVideoState(const RationalRate& rate, std::string& reason)
 	{
 		RendererPtr renderer = Renderer();
 		if (!renderer)
@@ -440,35 +601,41 @@ namespace VPRendererFilter
 			reason = "no media type";
 			return false;
 		}
-		if (m_videoStateSent && generation == m_sentFormatGeneration)
+		const bool hasHdr = m_sideData.HasStaticHdr();
+		const bool hdrChanged = hasHdr != m_sentHdrValid ||
+			(hasHdr && m_sideData.StaticHdr() != m_sentHdr);
+		if (m_videoStateSent && generation == m_sentFormatGeneration &&
+			(!rate.IsValid() || rate == m_sourceRate) && !hdrChanged)
 			return true;
-
-		int64_t duration = format.avgTimePerFrame;
-		if (duration <= 0 && sample)
-		{
-			REFERENCE_TIME start = 0, stop = 0;
-			if (SUCCEEDED(sample->GetTime(&start, &stop)) && stop > start)
-				duration = stop - start;
-		}
+		if (!rate.IsValid() && m_videoStateSent)
+			return true;   // keep the sent rate until the timestamps give one
 
 		VideoStateComPtr state;
-		RationalRate rate;
-		if (!m_formatAdapter->BuildVideoState(format, duration, state, rate, reason))
+		if (!BuildFileVideoState(format, rate, hasHdr ? &m_sideData.StaticHdr() : nullptr,
+			state, reason))
 			return false;
 		if (!renderer->OnVideoState(state))
 		{
-			// TODO(VP Renderer integration, agent A): a renderer that cannot take
-			// the change in place needs a rebuild; the filter only logs it now.
+			// The renderer could not take the change in place (pixel format or
+			// mode); it reports the restart through its callback. Logged here.
 			reason = "the renderer rejected the video state";
 			return false;
 		}
+		const FileColorDecision color = DecideColor(format);
 		m_sourceRate = rate;
+		m_sentHdrValid = hasHdr;
+		if (hasHdr)
+			m_sentHdr = m_sideData.StaticHdr();
 		m_videoStateSent = true;
 		m_sentFormatGeneration = generation;
-		m_discontinuityPending = true;
-		DebugLog::Log("VP Renderer filter: video state sent: %ux%u %ls rate %u/%u",
-			format.width, format.height, ::ToString(format.encoding),
-			rate.numerator, rate.denominator);
+		m_timing.MarkDiscontinuity();
+		if (m_host)
+			m_host->UpdateVideoState(state);
+		DebugLog::Log("VP Renderer filter: video state sent: %ux%u %ls rate %u/%u eotf %ls%s "
+			"colorspace %ls%s hdr10 %s", format.width, format.height, ::ToString(format.encoding),
+			rate.numerator, rate.denominator, ::ToString(color.eotf),
+			color.eotfAssumed ? " (assumed)" : "", ::ToString(color.colorSpace),
+			color.colorSpaceFromHeight ? " (from height)" : "", hasHdr ? "yes" : "no");
 		return true;
 	}
 
@@ -577,8 +744,26 @@ namespace VPRendererFilter
 			RendererPtr renderer = Renderer();
 			if (!renderer)
 				return E_UNEXPECTED;
+
+			// Side data first: a static HDR10 change goes out with the state.
+			ReadSideData(sample);
+
+			REFERENCE_TIME start = 0, stop = 0;
+			const HRESULT timeResult = sample->GetTime(&start, &stop);
+			const bool hasStart = SUCCEEDED(timeResult);
+			const bool hasStop = timeResult == S_OK;   // VFW_S_NO_STOP_TIME: start only
+			const bool sampleDiscontinuity = sample->IsDiscontinuity() == S_OK;
+			VideoFormat currentFormat;
+			const int64_t avgTimePerFrame = CurrentFormat(currentFormat) ?
+				currentFormat.avgTimePerFrame : 0;
+			// AvgTimePerFrame snapped to a rational, checked against the PTS deltas
+			// (a header of 0 or one that disagrees: the measured rate). Held and
+			// stepped pictures are not a cadence.
+			const RationalRate rate = m_timing.ObserveSample(hasStart && !pausedHold,
+				start, sampleDiscontinuity, avgTimePerFrame);
+
 			std::string reason;
-			if (!EnsureVideoState(sample, reason))
+			if (!EnsureVideoState(rate, reason))
 			{
 				if (ShouldLog(g_frameErrorLogs))
 					DebugLog::Log("VP Renderer filter: frame not delivered: %s", reason.c_str());
@@ -616,25 +801,36 @@ namespace VPRendererFilter
 			}
 
 			const long stepping = m_stepRemaining.load();
-			REFERENCE_TIME start = 0, stop = 0;
-			const bool hasTime = SUCCEEDED(sample->GetTime(&start, &stop));
 
-			FileFrameTiming timing;
-			const bool immediate = pausedHold || stepping > 0 || !hasTime ||
-				m_State != State_Running;
-			timing.presentationQpc = immediate ? 0 :
-				m_clockAdapter->PresentationQpc(m_pClock, m_tStart, start);
-			timing.sourceRateNumerator = m_sourceRate.numerator;
-			timing.sourceRateDenominator = m_sourceRate.denominator;
-			timing.sourceRateHz = m_sourceRate.denominator ?
-				static_cast<double>(m_sourceRate.numerator) / m_sourceRate.denominator : 0.0;
-			timing.playbackRate = m_pInputPin->CurrentRate();
-			timing.sampleStart100ns = hasTime ? start : 0;
-			timing.sampleStop100ns = hasTime ? stop : 0;
-			timing.discontinuity = m_discontinuityPending.exchange(false) ||
-				sample->IsDiscontinuity() == S_OK || stepping > 0;
-			timing.isFileSource = true;
-			timing.paused = pausedHold || stepping > 0;
+			// Reference clock <-> QPC: one correlation per frame keeps the fit
+			// current (FileClockMapper smooths and detects clock jumps).
+			if (m_pClock)
+			{
+				filesource::ClockCorrelation correlation;
+				if (filesource::SampleReferenceClockCorrelation(m_pClock, correlation))
+					m_timing.AddCorrelation(correlation);
+			}
+			if (m_host)
+				m_timing.SetAvOffsetMs(m_host->AvOffsetMs());
+			if (stepping > 0)
+				m_timing.FrameStep();
+			if (m_discontinuityPending.exchange(false))
+				m_timing.MarkDiscontinuity();
+
+			filesource::FileSampleTimes times;
+			times.hasStart = hasStart;
+			times.start100ns = hasStart ? start : 0;
+			times.hasStop = hasStop;
+			times.stop100ns = hasStop ? stop : 0;
+			times.discontinuityFlag = sampleDiscontinuity;
+			// Present at tStart + rtStart (+ file_av_offset_ms) on the QPC clock
+			// while running; held pictures (pre-roll, pause, step) at once.
+			FileFrameTiming timing = m_timing.BuildTiming(times, m_sourceRate);
+			if (pausedHold || stepping > 0 || m_State != State_Running)
+			{
+				timing.presentationQpc = 0;
+				timing.paused = true;
+			}
 
 			const int64_t now = m_timingClock.TimingClockNow();
 			VideoFrame frame(buffer->Data(), ++m_frameCounter, now, buffer);
@@ -683,7 +879,7 @@ namespace VPRendererFilter
 		m_discontinuityPending = true;
 		m_awaitingPreroll = true;
 		m_prerollSample = nullptr;
-		m_clockAdapter->Reset();
+		m_timing.BeginFlush();
 		if (renderer)
 		{
 			try { renderer->ResetLiveQueue(); }
@@ -695,6 +891,7 @@ namespace VPRendererFilter
 
 	HRESULT CVPRendererFilter::EndFlush()
 	{
+		m_timing.EndFlush();
 		return CBaseRenderer::EndFlush();
 	}
 
@@ -710,7 +907,7 @@ namespace VPRendererFilter
 		m_discontinuityPending = true;
 		m_awaitingPreroll = true;
 		m_prerollSample = nullptr;
-		m_clockAdapter->Reset();
+		m_timing.Stop();
 		if (renderer)
 		{
 			try { renderer->ResetLiveQueue(); }
@@ -725,15 +922,19 @@ namespace VPRendererFilter
 		// A completed step is released by the pause the graph issues for it.
 		m_stepHold = false;
 		m_stepRelease.Set();
-		// TODO(VP Renderer integration, agent A): a pause from running leaves
-		// the frames VP already queued presenting on their QPC times; ABI 35 has
-		// no hold/re-time call for queued file frames.
+		// Known limit (ABI 35): a pause from running leaves the frames VP has
+		// already queued (at most the queue depth) presenting on their QPC
+		// times before the picture holds; there is no re-time call for queued
+		// file frames yet.
+		m_timing.Pause();
 		return CBaseRenderer::Pause();
 	}
 
 
 	STDMETHODIMP CVPRendererFilter::Run(REFERENCE_TIME startTime)
 	{
+		// The resume's new tStart re-maps the stream onto the clock.
+		m_timing.Run(startTime);
 		return CBaseRenderer::Run(startTime);
 	}
 
@@ -820,7 +1021,7 @@ namespace VPRendererFilter
 		return S_OK;
 	}
 
-	// TODO(VP Renderer integration, agent A): presentation jitter and sync
+	// TODO(VP Renderer): presentation jitter and sync
 	// offset from VP's presentation telemetry; the filter cannot see them.
 	STDMETHODIMP CVPRendererFilter::get_Jitter(int* jitterMs)
 	{
