@@ -37,6 +37,7 @@
 #include "../VideoProcessor-Config/InlineColorPicker.h"
 #include <QToolButton>
 #include <QComboBox>
+#include <QValidator>
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
@@ -9078,6 +9079,58 @@ void testHiccupRepairIsSeparateFromMotionSmoothing()
     const QByteArray saved = readBytes(path);
     require(saved.contains("interpolation_fill_gaps: on") && saved.contains("interpolation: off"),
         (QByteArray("the keys changed: ") + saved).constData());
+    // Render-ahead 2026-10-17: the fill no longer needs motion smoothing; the wording says so.
+    require(!fillGaps->toolTip().contains("Currently works only while motion smoothing") &&
+        fillGaps->toolTip().contains("motion smoothing on or off"),
+        ("the fill-gaps tooltip still says it needs motion smoothing: " + fillGaps->toolTip().toStdString()).c_str());
+}
+
+void testRenderAheadControlsShowDefaultsAndSave()
+{
+    // docs/VP-render-ahead-design.md: the four render-ahead keys have controls in Fixes under test,
+    // unset shows the renderer's defaults, and each edit saves under its key.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* renderAhead = requireControl<QComboBox>(window, "config.vprenderer.render_ahead");
+    auto* gate = requireControl<QComboBox>(window, "config.vprenderer.dejudder_gate");
+    auto* utilisation = requireControl<QLineEdit>(window, "config.vprenderer.render_ahead_utilisation");
+    auto* credit = requireControl<QComboBox>(window, "config.vprenderer.render_ahead_queue_credit");
+    require(renderAhead->currentIndex() == 0 && renderAhead->itemText(0).contains("off", Qt::CaseInsensitive),
+        ("An unset render ahead does not say its default (off): " + renderAhead->itemText(0).toStdString()).c_str());
+    // On the default profile an unset choice whose default is Auto shows the Auto choice itself
+    // (the "Default" row is hidden, as for the other auto defaults).
+    require(gate->currentText().contains("auto", Qt::CaseInsensitive) &&
+        (gate->currentIndex() == 0 || gate->currentData().toString() == "auto"),
+        ("An unset de-judder gate does not say its default (auto): " + gate->currentText().toStdString()).c_str());
+    require(credit->currentIndex() == 0 && credit->itemText(0).contains("off", Qt::CaseInsensitive),
+        ("An unset queue credit does not say its default (off): " + credit->itemText(0).toStdString()).c_str());
+    require(utilisation->text().isEmpty() && utilisation->placeholderText() == "0.85",
+        ("An unset utilisation does not show its default 0.85: '" + utilisation->text().toStdString() + "' / '" +
+            utilisation->placeholderText().toStdString() + "'").c_str());
+    require(utilisation->validator() != nullptr, "the utilisation field has no validator");
+    {
+        QString tooHigh = QStringLiteral("1.5"); int pos = 0;
+        require(utilisation->validator()->validate(tooHigh, pos) != QValidator::Acceptable,
+            "the utilisation field accepts 1.5");
+        QString inRange = QStringLiteral("0.9"); pos = 0;
+        require(utilisation->validator()->validate(inRange, pos) == QValidator::Acceptable,
+            "the utilisation field rejects 0.9");
+    }
+    require(!renderAhead->toolTip().isEmpty() && !gate->toolTip().isEmpty() && !utilisation->toolTip().isEmpty() &&
+        !credit->toolTip().isEmpty(), "a render-ahead control has no tooltip");
+    selectData(renderAhead, "on");
+    selectData(gate, "period");
+    utilisation->setText("0.9");
+    selectData(credit, "on");
+    save(window);
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("render_ahead: on") && saved.contains("dejudder_gate: period") &&
+        saved.contains("render_ahead_utilisation: 0.9") && saved.contains("render_ahead_queue_credit: on") &&
+        saved.contains("quality: high"),
+        (QByteArray("the render-ahead keys did not save: ") + saved).constData());
 }
 
 void testUnfocusedNumberBoxesIgnoreTheWheel()
@@ -9382,6 +9435,7 @@ int main(int argc, char** argv)
     failures += run("explicit auto dither shows Auto", testExplicitAutoDitherShowsAuto);
     failures += run("unfocused number boxes ignore the wheel", testUnfocusedNumberBoxesIgnoreTheWheel);
     failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
+    failures += run("render-ahead controls show defaults and save", testRenderAheadControlsShowDefaultsAndSave);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
     return failures == 0 ? 0 : 1;
