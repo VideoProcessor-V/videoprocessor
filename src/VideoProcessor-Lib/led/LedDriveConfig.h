@@ -303,6 +303,12 @@ namespace LedDrive
 		// (only a command that tick does not send itself). Off = the pure script
 		// stream: a failed write is not repeated.
 		bool scriptResendFailedWrites = true;
+		// Post-merge audit 2026-10-17 (owner rule: CNTR above need is a defect):
+		// cntr_pair_predict - compensate's CNTR pairs against the LED where it will be
+		// when the CNTR lands (cntr_latency_ms ahead: the LPW1s in flight and the
+		// settle), not the LED now, so CNTR is never above the need when it lands
+		// (an LED rising from a dark scene). Off = paired against the LED now, as before.
+		bool cntrPairPredict = true;
 		// The fade-up's displayed-light ramp for the shortfall LED x CNTR x
 		// gain cannot yet reach: fast, bounded by the modelled light (the
 		// paired LED / CNTR move itself keeps the script-matched rates).
@@ -628,6 +634,7 @@ namespace LedDrive
 			Integer("led_lookahead_ms", 0, 2000),     // review 2026-10-17
 			Boolean("led_wtw_passthrough"),           // restore switch 2026-10-17
 			Boolean("script_resend_failed_writes"),   // restore switch 2026-10-17
+			Boolean("cntr_pair_predict"),             // post-merge audit 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
 			Number("recovery_rate_min", 0.0, 10000.0),
 			Number("recovery_rate_max", 1.0, 10000.0),
@@ -977,6 +984,7 @@ namespace LedDrive
 		readInt("led_lookahead_ms", 0, 2000, result.ledLookaheadMs);
 		config.TryGetBool(section, "led_wtw_passthrough", result.wtwPassthrough);
 		config.TryGetBool(section, "script_resend_failed_writes", result.scriptResendFailedWrites);
+		config.TryGetBool(section, "cntr_pair_predict", result.cntrPairPredict);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
 		readNumber("recovery_rate_min", result.recoveryRateMin);
 		readNumber("recovery_rate_max", result.recoveryRateMax);

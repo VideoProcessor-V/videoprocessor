@@ -12442,9 +12442,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         auto* resend = bindCheckField(QStringLiteral("Re-send a failed LED / contrast write (fix under test)"), led,
             QStringLiteral("script_resend_failed_writes"), true);
         resend->setToolTip(QStringLiteral(
-            "Script mode. On (default): an LPW1 or CNTR write the projector did not confirm is sent again at the "
-            "next decision with the script's current value (only when that decision sends nothing itself, so the "
-            "script's own commands are unchanged). Off: the pure script stream - a failed write is not repeated."));
+            "Script mode. On (default): an LPW1 or CNTR whose write failed (a port or write error; a missing "
+            "reply is not a failure) is sent again at the next decision with the script's current value (only "
+            "when that decision sends nothing itself, so the script's own commands are unchanged). Off: the pure "
+            "script stream - a failed write is not repeated."));
         driveForm->addRow(QString(), resend);
         auto pacingSpin = [this, led, driveForm](const char* key, int maximum, int fallback, const QString& label,
             const QString& tip)
@@ -13110,6 +13111,15 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "On (default): when VP's gain brightens the picture, whiter-than-white detail keeps its own value instead "
         "of being rolled under white with the boosted picture (owner rule: keep BTB and WTW). Off: as before."));
     assistForm->addRow(QString(), wtw);
+    // Post-merge audit 2026-10-17 (owner rule: CNTR above need is a defect): cntr_pair_predict.
+    auto* pairPredict = bindCheckField(QStringLiteral("Contrast paired with the LED where it lands (fix under test)"), led,
+        QStringLiteral("cntr_pair_predict"), true);
+    pairPredict->setToolTip(QStringLiteral(
+        "On (default): each contrast step is chosen for the LED as it will be when the step lands (contrast "
+        "response time ahead: the LED commands in flight and its settling), so contrast is never left above "
+        "what is needed when it arrives - for example while the LED rises out of a dark scene. Off: paired "
+        "with the LED as it is now (the earlier behaviour)."));
+    assistForm->addRow(QString(), pairPredict);
     assistForm->addRow(QString(), helpLabel(QStringLiteral(
         "On a cut to a brighter scene the contrast goes to the cut level (auto = where white starts to clip, 59 "
         "until measured; never 50), VP's gain to its maximum and the knee rolls off highlights; then the picture "

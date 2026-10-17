@@ -94,6 +94,25 @@ namespace LedDrive
 		recovery.Configure(led, flux);
 	}
 
+	std::vector<std::pair<double, double>> LedDriveModule::LedLandingsLocked(int pendingLevel) const
+	{
+		std::vector<std::pair<double, double>> landings;
+		const int latency = LatencyFramesLocked();
+		const double period = std::max(1.0, framePeriodMs);
+		for (const Command& command : commands)
+		{
+			const double atMs = command.landMs >= 0.0 && lastFrameMs >= 0.0 ? command.landMs - lastFrameMs :
+				(static_cast<double>(command.frame + latency) - static_cast<double>(frameIndex)) * period;
+			landings.push_back({ std::max(0.0, atMs), LedFractionLocked(command.level) });
+		}
+		// This tick's LPW1, not yet written: lands led_latency_ms after it goes out.
+		if (pendingLevel >= 0)
+			landings.push_back({ static_cast<double>(projector.ledLatencyMs), LedFractionLocked(pendingLevel) });
+		std::stable_sort(landings.begin(), landings.end(),
+			[](const std::pair<double, double>& a, const std::pair<double, double>& b) { return a.first < b.first; });
+		return landings;
+	}
+
 	int LedDriveModule::CutLevelLocked() const
 	{
 		// audit 2026-10-16: never above the assist's ceiling (cntr_assist_max,
@@ -779,7 +798,14 @@ namespace LedDrive
 			// CNTR does not rise (the port is kept for the cut); it may still
 			// descend, never staying above the need.
 			if (out.cutLeadHold) limit = limit >= 50 ? std::min(limit, pairing.Contrast()) : pairing.Contrast();
-			contrastCommand = pairing.Update(1.0 / std::max(1e-6, ledModel.Value()), out.vpHeadroom, limit);
+			// cntr_pair_predict (post-merge audit 2026-10-17, owner rule): paired against
+			// the LED where it will be when this CNTR lands (cntr_latency_ms ahead), so
+			// CNTR is never above the need at landing. Off: the LED now, as before.
+			const double pairedLed = CntrPairLedFraction(led.cntrPairPredict, ledModel,
+				led.cntrPairPredict ? LedLandingsLocked(out.lightCommand >= 0 && applyGain &&
+					fadeToBlack != FadeToBlack::Deep ? out.lightCommand : -1) : std::vector<std::pair<double, double>>(),
+				projector.cntrLatencyMs);
+			contrastCommand = pairing.Update(1.0 / std::max(1e-6, pairedLed), out.vpHeadroom, limit);
 			if (contrastCommand >= 0) driver->SetContrastAsync(contrastCommand);
 		}
 		if (contrastCommand > 50) assistContrastDriven = true;

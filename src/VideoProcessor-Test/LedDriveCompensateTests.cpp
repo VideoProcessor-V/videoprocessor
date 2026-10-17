@@ -1090,6 +1090,76 @@ namespace VideoProcessorTest
 			Assert::AreEqual(50, pairing.Update(0.5, 1e9), L"released: back to what the pairing needs");
 		}
 
+		// Post-merge audit 2026-10-17 (C2, cntr_pair_predict): a compensate simulation -
+		// LPW1 dead time, the LED's settle and the CNTR's own latency, one LED command per
+		// frame. Each CNTR sent is checked when it lands against the smallest whole value
+		// covering the need for the LED then. Software first with no VP headroom, so the
+		// need is the whole compensation.
+		static void SimulateCntrLandings(bool predict, bool rising, int& above, int& checked)
+		{
+			const double frameMs = 1000.0 / 60.0;
+			const double ledLatencyMs = 5 * frameMs, settleMs = 100.0, cntrLatencyMs = 12 * frameMs;
+			auto target = [rising](int k) {
+				const double p = (std::min)(1.0, k / 120.0);
+				return rising ? 0.5 + 0.5 * p : 1.0 - 0.5 * p;
+			};
+			SettleModel led(settleMs, target(0));
+			CntrPairing pairing;
+			pairing.Configure(2.41, 74, true, true);
+			for (int i = 0; i < 4; ++i) pairing.Update(1.0 / led.Value(), 1.0);   // settled on the start
+			auto covering = [&](double ledFraction) {
+				const double need = (std::max)(1.0, 1.0 / ledFraction);
+				int value = 50;
+				while (value < 74 && pairing.Light(value) < need - 1e-12) ++value;
+				return value;
+			};
+			std::vector<std::pair<double, double>> lpw1;   // (lands at ms, fraction)
+			std::vector<std::pair<double, int>> cntr;      // (lands at ms, value)
+			above = checked = 0;
+			for (int k = 1; k <= 300; ++k)
+			{
+				const double now = k * frameMs;
+				led.Step(frameMs);
+				while (!lpw1.empty() && lpw1.front().first <= now + 1e-6)
+				{
+					led.Land(lpw1.front().second);
+					lpw1.erase(lpw1.begin());
+				}
+				for (auto it = cntr.begin(); it != cntr.end();)
+				{
+					if (it->first > now + 1e-6) { ++it; continue; }
+					++checked;
+					if (it->second > covering(led.Value())) ++above;
+					it = cntr.erase(it);
+				}
+				// This frame's LPW1, then the pairing (the module's order: LPW1 before CNTR).
+				const double next = target(k);
+				std::vector<std::pair<double, double>> landings;
+				for (const auto& c : lpw1) landings.push_back({ c.first - now, c.second });
+				landings.push_back({ ledLatencyMs, next });
+				const double paired = CntrPairLedFraction(predict, led, landings, cntrLatencyMs);
+				const int command = pairing.Update(1.0 / paired, 1.0);
+				if (command >= 0) cntr.push_back({ now + cntrLatencyMs, command });
+				lpw1.push_back({ now + ledLatencyMs, next });
+			}
+		}
+
+		TEST_METHOD(CntrPairPredictNeverLandsAboveTheNeed)
+		{
+			int above = 0, checked = 0;
+			SimulateCntrLandings(true, true, above, checked);
+			Assert::IsTrue(checked >= 5, L"CNTR steps down while the LED rises");
+			Assert::AreEqual(0, above, L"on, rising LED: never above the need when it lands");
+			SimulateCntrLandings(true, false, above, checked);
+			Assert::IsTrue(checked >= 5, L"CNTR steps up while the LED falls");
+			Assert::AreEqual(0, above, L"on, falling LED: never above the need when it lands");
+			// Off (the old pairing against the LED now): a rising LED lands CNTR above the need.
+			SimulateCntrLandings(false, true, above, checked);
+			Assert::IsTrue(above > 0, L"off: the defect the switch fixes");
+			const LedDriveConfig defaults;
+			Assert::IsTrue(defaults.cntrPairPredict, L"cntr_pair_predict on by default");
+		}
+
 		// Post-merge audit 2026-10-17 (B6): the limit (cut_lead window) caps the
 		// pre-position hold; before, the hold overrode it.
 		TEST_METHOD(CntrLimitCapsTheHold)

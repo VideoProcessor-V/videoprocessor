@@ -2,6 +2,7 @@
 
 #include "LedDriveConfig.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -348,12 +349,49 @@ namespace LedDrive
 		}
 		double Value() const { return value; }
 		double Target() const { return target; }
+		// Post-merge audit 2026-10-17 (cntr_pair_predict): where it will be aheadMs from
+		// now, with the commands still to land (ms from now, the fraction each lands at;
+		// in time order): the settle toward the current target until the first lands,
+		// then toward each in turn. Exact for this model.
+		double PredictThrough(const std::vector<std::pair<double, double>>& landings, double aheadMs) const
+		{
+			double v = value, toward = target, t = 0.0;
+			auto settle = [&](double untilMs)
+			{
+				const double dt = untilMs - t;
+				if (dt <= 0.0) return;
+				v = settleMs > 0.0 ? toward + (v - toward) * std::exp(-dt / settleMs) : toward;
+				t = untilMs;
+			};
+			for (const auto& landing : landings)
+			{
+				if (landing.first > aheadMs) break;
+				settle(std::max(0.0, landing.first));
+				toward = landing.second;
+				if (settleMs <= 0.0) v = toward;
+			}
+			settle(aheadMs);
+			return v;
+		}
 
 	private:
 		double settleMs;
 		double value;
 		double target;
 	};
+
+	// cntr_pair_predict (post-merge audit 2026-10-17; owner rule: CNTR above the need is a
+	// defect): the LED fraction compensate's CNTR pairs against. On: the higher of the LED
+	// now and the LED where it will be when the CNTR lands (cntrLatencyMs ahead) - never
+	// a lower LED than either, so the CNTR is never above the need when it lands (a rising
+	// LED lowers the need before the CNTR arrives; a falling one is paired as now). Off:
+	// the LED now (the earlier behaviour).
+	inline double CntrPairLedFraction(bool predict, const SettleModel& led,
+		const std::vector<std::pair<double, double>>& landings, double cntrLatencyMs)
+	{
+		if (!predict) return led.Value();
+		return std::max(led.Value(), led.PredictThrough(landings, cntrLatencyMs));
+	}
 
 	// mode: compensate's CNTR assist (control policy 2, 3.1, 3.2; 7c-1). CNTR
 	// supplies only the light VP's gain cannot add without compressing
