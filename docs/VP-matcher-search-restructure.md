@@ -72,6 +72,8 @@ output. On the RTX 3090 the matcher is already ~1-2 ms; the gain matters most fo
    planes only if wanted.
 2. 12-bit output: make sure VP's own code allows it (no forced 10-bit formats, clamps or depth assumptions in its
    transports and the dither's depth handling); not chasing libplacebo's output stages (owner).
+   *Owner decision 2026-10-17 (FINAL): 12-bit output only via VPV for Dolby Vision displays; FP16 output
+   parked, no DeckLink output card; non-DV displays stay 10-bit + sigma-delta (docs/VP-roadmap-2026-2031.md).*
 
 ## Result of the flat-pass version (2026-10-15)
 

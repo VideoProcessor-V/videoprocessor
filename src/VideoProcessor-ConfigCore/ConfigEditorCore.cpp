@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cwchar>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -689,6 +690,18 @@ namespace ConfigEditorCore
 		return true;
 	}
 
+	// Wall-clock local time for backup names, so they sort and match the
+	// deployment backup convention (hunt 2, L8).
+	static std::wstring BackupTimestamp()
+	{
+		SYSTEMTIME now{};
+		GetLocalTime(&now);
+		wchar_t text[32]{};
+		swprintf_s(text, L"%04u%02u%02u-%02u%02u%02u-%03u", now.wYear, now.wMonth,
+			now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+		return text;
+	}
+
 	bool SaveSafely(ConfigDocument& document, SaveResult& result,
 		std::wstring& error, bool overwriteExternalChanges)
 	{
@@ -700,6 +713,9 @@ namespace ConfigEditorCore
 		}
 		if (!ValidateCandidate(document, error)) return false;
 		bool creatingConfiguration = !document.existedAtLoad;
+		// Overwrite after a conflict replaces a file someone else wrote: keep
+		// it (hunt 2, L2).
+		bool overwritingExternalFile = false;
 		if (document.existedAtLoad)
 		{
 			std::string currentBytes;
@@ -715,7 +731,7 @@ namespace ConfigEditorCore
 					L"loaded. Reload and review those changes before saving.";
 				return false;
 			}
-
+			overwritingExternalFile = currentBytes != document.loadedBytes;
 		}
 		else
 		{
@@ -729,12 +745,17 @@ namespace ConfigEditorCore
 					return false;
 				}
 				creatingConfiguration = false;
+				overwritingExternalFile = true;
 			}
-			const DWORD failure = GetLastError();
-			if (failure != ERROR_FILE_NOT_FOUND && failure != ERROR_PATH_NOT_FOUND)
+			else
 			{
-				error = L"Could not verify that the new configuration path is unused.";
-				return false;
+				// The last error is defined only after a failed call (hunt 2, L1).
+				const DWORD failure = GetLastError();
+				if (failure != ERROR_FILE_NOT_FOUND && failure != ERROR_PATH_NOT_FOUND)
+				{
+					error = L"Could not verify that the new configuration path is unused.";
+					return false;
+				}
 			}
 		}
 
@@ -745,13 +766,27 @@ namespace ConfigEditorCore
 			error = L"Could not write the temporary configuration. The configuration was not changed.";
 			return false;
 		}
-        if (document.requiresMigrationBackup && !creatingConfiguration)
+        if (overwritingExternalFile)
         {
-            result.backupPath = document.path + L".before-unified-color-output." +
-                std::to_wstring(GetTickCount64()) + L".bak";
+            result.overwriteBackupPath = document.path + L".before-overwrite." +
+                BackupTimestamp() + L".bak";
+            if (!CopyFileW(document.path.c_str(), result.overwriteBackupPath.c_str(), TRUE))
+            {
+                error = L"Could not back up the configuration on disk before overwriting it. "
+                    L"The configuration was not changed.";
+                result.overwriteBackupPath.clear();
+                return false;
+            }
+        }
+        // The overwrite backup above already holds the file on disk.
+        else if (document.requiresMigrationBackup && !creatingConfiguration)
+        {
+            result.backupPath = document.path + L".before-config-migration." +
+                BackupTimestamp() + L".bak";
             if (!CopyFileW(document.path.c_str(), result.backupPath.c_str(), TRUE))
             {
-                error = L"Could not back up the original configuration before profile migration.";
+                error = L"Could not back up the original configuration before migration.";
+                result.backupPath.clear();
                 return false;
             }
         }

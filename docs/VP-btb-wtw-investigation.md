@@ -121,6 +121,11 @@ codes on average and was rejected. libplacebo's log stayed clean throughout.
    This proposal covers SDR. HDR needs its own study, perhaps the same
    carry around the tone mapper. The owner's cinema profile uses a static
    LLDV tone map.
+   *Resolved 2026-10-17:* after HDR->SDR tone mapping BTB/WTW have no
+   meaning, by design (the tone mapper maps the HDR signal range into the
+   SDR range; no footroom is left). HDR passthrough is carried; an SDR
+   source on an HDR output is not covered. See docs/VP-btb-wtw-answers.md,
+   "BTB/WTW and HDR".
 3. **Output floor.** Codes below the output's representable range still
    clip. 8-bit limited allows 1–254; 10-bit allows 4–1019. That is
    correct.

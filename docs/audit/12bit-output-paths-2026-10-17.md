@@ -2,6 +2,12 @@
 
 Owner: 12-bit output will be necessary for a future display (not the FL35, whose link is 8-bit).
 
+> **Owner decision 2026-10-17 (FINAL), overrides recommendations 3 and 4 and route 1 below:**
+> no DeckLink output card. 12-bit output only via VPV (VP sends a TV-led DV tunnel through the
+> NVIDIA GPU, NVAPI `NV_HDR_MODE_DOLBY_VISION`), for DV displays. FP16 half-float output is PARKED
+> (rounding/dither unknowns). Non-DV displays stay on the 10-bit 4:4:4 surface + sigma-delta. The
+> research below is kept as written.
+
 ## Findings
 
 - **D3D12 and Vulkan add no 12-bit output on Windows.** Both present through the DXGI/DWM flip

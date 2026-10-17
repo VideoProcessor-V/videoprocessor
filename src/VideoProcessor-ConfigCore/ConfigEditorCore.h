@@ -84,7 +84,12 @@ namespace ConfigEditorCore
 
 	struct SaveResult
 	{
+		// <cfg>.before-config-migration.<local time>.bak: the original file,
+		// kept when a load-time migration is saved.
 		std::wstring backupPath;
+		// <cfg>.before-overwrite.<local time>.bak: the file on disk, kept when
+		// an Overwrite replaces a file changed or created outside the editor.
+		std::wstring overwriteBackupPath;
 	};
 
 	// Validates the exact serialized bytes using VP's normal configuration

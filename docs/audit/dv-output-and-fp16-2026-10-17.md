@@ -1,5 +1,16 @@
 # VP sending Dolby Vision, and the FP16 PC-levels idea (research, 2026-10-17)
 
+> **Owner decision 2026-10-17 (FINAL):**
+> - **VPV is the chosen route:** VP sends a TV-led DV tunnel itself through the NVIDIA hidden
+>   mode (the "NVIDIA route" below). Built only when a DV-capable display exists; pixels proven
+>   bit-exact by loopback first; needs a safe exit/recovery path (stuck-black report). The output
+>   is never labelled Dolby Vision.
+> - **DeckLink output card: rejected** (buying one does not make sense).
+> - **FP16 half-float output (Q2): PARKED** (rounding/dither unknowns). Non-DV displays stay on the
+>   10-bit 4:4:4 surface + sigma-delta. The Q2 measurement plan below is not scheduled.
+>
+> The research below is kept as written.
+
 ## Q1: Can VP send DV itself?
 
 Yes, as an unofficial experiment, by one of two routes.

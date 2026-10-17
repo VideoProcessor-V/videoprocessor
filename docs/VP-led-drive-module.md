@@ -765,6 +765,10 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - N-1: DEPLOY.txt §6 now asks for `read_back` on for the first custom-dim
   run. With read-back on, a missing or refused LDC*/LDMM reply is logged
   ("no LDCR reply ..." or "reply ... ignored while waiting for LDCR").
+  **Open question for the owner (2026-10-17):** the owner's rule is read-back OFF by default and
+  only where genuinely necessary (his script never read back). Is this first custom-dim run such
+  a necessary case, or should the DEPLOY.txt §6 step be dropped? Not decided; the code default
+  stays `read_back` off.
 - N-5 (`target_latency_ms` 120 vs 200): owner chose 200 ms; the test config
   now sets 200 (5 frames at 24p) and the audio delay goes up ~84 ms once.
 - N-6: agreed. The rc2 rebase is next, before anything more is added to

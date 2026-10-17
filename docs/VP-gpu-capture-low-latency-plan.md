@@ -1,4 +1,12 @@
-# GPU capture path for a rule-selected low-latency mode (plan, not built)
+# GPU capture path for a rule-selected low-latency mode (plan, ~~not built~~)
+
+> **Status 2026-10-17: built; the defaults differ from this plan.** GPU unpack (55a71776,
+> a10288e3) is the default on BOTH pathways: `capture_path: gpu` (owner 2026-10-15; `standard`
+> = the CPU formatters, kept as the fallback). Early upload (317fbf74, a second D3D11 device with
+> shared textures) is selected by `capture_upload: auto` = early upload in the low-latency path,
+> render-time upload otherwise (owner 2026-10-16); `render` and `early` can be forced. See
+> `capturePath` / `captureUpload` in LibplaceboVideoRenderer.cpp. True pinned host-mapped buffers
+> were not built (libplacebo's D3D11 backend has none). The plan below is kept as written.
 
 Owner, 2026-10-13: "implement it as widely as possible in a 'low latency
 mode' that we can create rules for, i.e. for >59 Hz since those are the
@@ -22,7 +30,7 @@ CPU P010 converters (DirectShow media type) and keep them unchanged.
 ## Shape
 
 - **A profile key, rule-selectable:** `capture_path: standard | gpu`
-  (input profile; default `standard` = today's proven path). A rule such
+  (input profile; ~~default `standard` = today's proven path~~ - default `gpu` since 2026-10-15). A rule such
   as `when: $source_rate > 59` picks a low-latency profile that sets
   `gpu` together with `[queue.Low_Latency]`. Cinema (23.976/24) keeps
   `standard`.

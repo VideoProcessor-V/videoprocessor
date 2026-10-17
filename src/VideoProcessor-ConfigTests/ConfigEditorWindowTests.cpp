@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <fstream>
 #include <map>
+#include <regex>
 #include <sstream>
 #include <vector>
 #include <cstring>
@@ -4118,8 +4119,10 @@ void testUnrelatedContentRemainsExact()
     requireControl<QCheckBox>(advancedWindow, QStringLiteral("config.general.scene_detect"))->setChecked(true);
     save(advancedWindow);
     require(readBytes(path).contains("chroma_downsampling: ADVANCED"), "UI save changed ADVANCED");
-    require(advancedWindow.findChild<QWidget*>(QStringLiteral("config.directshow.conversion.chroma_downsampling")) == nullptr,
-        "Manual chroma policy leaked into UI");
+    // Hunt 2 (2026-10-17, owner: every setting has a Config control): the chroma policy now has a
+    // control; it shows the hand-edited value and an unrelated save keeps it.
+    require(requireControl<QComboBox>(advancedWindow, "config.directshow.conversion.chroma_downsampling")
+        ->currentData().toString() == "ADVANCED", "The chroma control does not show the hand-edited ADVANCED");
 }
 
 void testSceneDetectionDefaultsOffAndHidesManualOverrides()
@@ -7840,7 +7843,7 @@ output_range: full
     require(saved.contains("[legacy_output.first]") && saved.contains("[legacy_output.unused]") &&
         saved.contains("# retain output comment") && saved.contains("unknown_future_key: retained") &&
         saved.contains("diagnostic_allow_full_g22: true"), "Migration discarded old settings/comments");
-    const auto backups = QDir(directory.path()).entryList({"*.before-unified-color-output.*.bak"},QDir::Files);
+    const auto backups = QDir(directory.path()).entryList({"*.before-config-migration.*.bak"},QDir::Files);
     require(backups.size() == 1 && readBytes(directory.filePath(backups.front())) == original,
         "Migration did not preserve an exact original-file backup");
     ConfigEditorWindow reloaded(path, 0, true);
@@ -8710,6 +8713,13 @@ void testSaveAsksWhenTheFileChangedOnDisk()
     requireControl<QPushButton>(window, "applyConfiguration")->click();
     QCoreApplication::processEvents();
     require(readBytes(path).contains("profile_change_display_seconds: 3"), "Overwrite did not save the edit");
+    // Hunt 2 (L2): the replaced external edit is kept; no migration backup is made.
+    const QStringList overwriteBackups = QDir(dir.path()).entryList(
+        { QStringLiteral("VideoProcessor.cfg.before-overwrite.*.bak") }, QDir::Files);
+    require(overwriteBackups.size() == 1 && readBytes(dir.filePath(overwriteBackups.front())) == external,
+        "Overwrite did not keep the external edit in a .before-overwrite backup");
+    require(QDir(dir.path()).entryList({ QStringLiteral("*.before-config-migration.*.bak") }, QDir::Files).isEmpty(),
+        "A plain overwrite made a migration backup");
     // Reload: edits discarded, the file's content shown.
     writeFixture(path, external);
     requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(2);
@@ -8879,13 +8889,11 @@ static std::set<std::string> RendererValidatedKeys()
         if (start == std::string::npos) continue;
         const size_t end = text.find("\n\tinline ", start + 10);
         const std::string body = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        const std::string marker = "key == \"";
-        for (size_t at = body.find(marker); at != std::string::npos; at = body.find(marker, at + 1))
-        {
-            const size_t open = at + marker.size();
-            const size_t close = body.find('"', open);
-            if (close != std::string::npos) keys.insert(body.substr(open, close - open));
-        }
+        // Any spacing: `key == "x"`, `key=="x"` (hunt 2: the compact spelling hid
+        // subtitle_detection_optimization).
+        static const std::regex marker(R"re(\bkey\s*==\s*"([^"]+)")re");
+        for (std::sregex_iterator it(body.begin(), body.end(), marker), last; it != last; ++it)
+            keys.insert((*it)[1].str());
     }
     return keys;
 }
@@ -8897,80 +8905,258 @@ void testEverySchemaKeyHasAConfigControl()
         "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
         "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
     ConfigEditorWindow window(path, 0, true);
-    std::set<std::string> controlled;
+    // Hunt 2 (2026-10-17): coverage is per section. A control named
+    // "config.<section>.<key>" covers <key> only for the schema whose section it
+    // belongs to, so a same-named control elsewhere (a shader's "curve", the
+    // Actions page's "enabled") cannot hide a missing one.
+    std::map<std::string, std::set<std::string>> controlSections; // key -> sections
     for (QObject* object : window.findChildren<QObject*>())
     {
         const QString name = object->objectName();
         if (!name.startsWith(QStringLiteral("config."))) continue;
-        controlled.insert(name.mid(name.lastIndexOf(QLatin1Char('.')) + 1).toStdString());
+        QStringList parts = name.mid(7).split(QLatin1Char('.'));
+        // A key edited through several widgets names them "<key>.auto" / "<key>.value";
+        // a combo's reset button is "<key>.unset", a unit label "<key>.unit".
+        if (parts.size() > 2 && QStringList({ QStringLiteral("auto"), QStringLiteral("value"),
+            QStringLiteral("unset"), QStringLiteral("unit") }).contains(parts.last()))
+            parts.removeLast();
+        if (parts.size() < 2) continue;
+        const QString key = parts.takeLast();
+        controlSections[key.toStdString()].insert(parts.join(QLatin1Char('.')).toStdString());
     }
-    // Keys that intentionally have no control of their own, with the reason. Only
-    // retired, alias and diagnostic-only keys (post-merge audit 2026-10-17: the "gap"
-    // entries got controls - profile_update_mode, fullscreen_monitor_session_mode,
-    // diagnostic_allow_full_g22 - or were found by reading the parser to be aliases).
+    struct Source { const char* name; std::vector<std::string> sections; std::vector<std::string> keys; };
+    auto keysOf = [](const std::vector<ConfigSchema::KeyRule>& rules)
+    {
+        std::vector<std::string> keys;
+        for (const auto& rule : rules) keys.push_back(rule.key);
+        return keys;
+    };
+    const std::set<std::string> rendererKeySet = RendererValidatedKeys();
+    require(rendererKeySet.size() > 100, "the renderer validators' keys were not found");
+    std::vector<Source> sources = {
+        { "led_drive", { "led_drive" }, keysOf(LedDrive::LedDriveRules()) },
+        { "projector", { "projector" }, keysOf(LedDrive::ProjectorRules()) },
+        { "general", { "general", "command_line" }, keysOf(MainConfigSchema::GeneralRules()) },
+        { "general", { "general" }, { MainConfigSchema::BoundedInvalidCaptureRecoveryRule().key } },
+        { "queue", { "queue" }, keysOf(MainConfigSchema::QueueRules()) },
+        { "queue_recovery", { "queue_recovery", "queue" }, keysOf(MainConfigSchema::RecoveryRules()) },
+        { "directshow", { "directshow" }, keysOf(MainConfigSchema::DirectShowRules()) },
+        { "vprenderer.input_processing", { "vprenderer.input_processing" }, keysOf(MainConfigSchema::VpRendererInputRules()) },
+        { "decklink", { "decklink" }, keysOf(MainConfigSchema::DeckLinkRules()) },
+        { "directshow.conversion", { "directshow.conversion" }, keysOf(MainConfigSchema::ConversionRules()) },
+        { "directshow.ppm", { "directshow.ppm" }, keysOf(MainConfigSchema::PpmRules()) },
+        { "shortcuts", { "shortcuts" }, keysOf(MainConfigSchema::ShortcutSwitchRules()) },
+        { "ambient", { "ambient" }, keysOf(Ambient::SchemaRules()) },
+        { "lldv", { "lldv" }, keysOf(MainConfigSchema::LldvRules()) },
+        { "logging", { "logging" }, keysOf(MainConfigSchema::LoggingRules()) },
+        // RendererProfileConfig's validators also own the [queue.*] and [lldv.*] profile groups.
+        { "renderer", { "vprenderer", "queue", "lldv" }, std::vector<std::string>(rendererKeySet.begin(), rendererKeySet.end()) },
+    };
+    // Keys that intentionally have no control of their own, "<source>:<key>" with the
+    // reason. Only retired, alias, legacy-location and diagnostic-only keys; a live
+    // key never belongs here (hunt 2: subtitle_hold_ms / subtitle_near_bar_px were
+    // listed as "legacy" while the Subtitles profiles read them).
     static const std::map<std::string, const char*> allowList = {
         // [led_drive]: the retired Python relay (removed 2026-10-15; accepted, ignored).
-        { "listen_port", "retired (ignored)" }, { "listen_log", "retired (ignored)" },
-        { "python_drives_port", "retired (ignored)" }, { "python_feed", "retired (ignored)" },
-        { "listen_script", "retired (ignored)" }, { "python", "retired (ignored)" },
+        { "led_drive:listen_port", "retired (ignored)" }, { "led_drive:listen_log", "retired (ignored)" },
+        { "led_drive:python_drives_port", "retired (ignored)" }, { "led_drive:python_feed", "retired (ignored)" },
+        { "led_drive:listen_script", "retired (ignored)" }, { "led_drive:python", "retired (ignored)" },
         // [led_drive]: superseded by the per-direction rate fields and the fade time.
-        { "rate_up", "alias: older single rate, superseded by rate_gain/min/max_up" },
-        { "rate_down", "alias: older single rate, superseded by rate_gain/min/max_down" },
-        { "fade_frames", "alias: older fade length in frames at 24p (fade_ms has the control)" },
-        { "fade_min_step", "alias: older per-frame fade slope, read as fade_min_slope x 24 (fade_min_slope has the control)" },
-        { "script_smoothing", "legacy: set from adaptive_gamma (which has the control) whenever command_source "
+        { "led_drive:rate_up", "alias: older single rate, superseded by rate_gain/min/max_up" },
+        { "led_drive:rate_down", "alias: older single rate, superseded by rate_gain/min/max_down" },
+        { "led_drive:fade_frames", "alias: older fade length in frames at 24p (fade_ms has the control)" },
+        { "led_drive:fade_min_step", "alias: older per-frame fade slope, read as fade_min_slope x 24 (fade_min_slope has the control)" },
+        { "led_drive:script_smoothing", "legacy: set from adaptive_gamma (which has the control) whenever command_source "
             "is named; read only from older mode-only files" },
+        { "led_drive:mode", "legacy: older files' mode; Config shows it as command_source (which has the control) "
+            "and keeps the older switches only for such files" },
         // [general]: spellings of keys that have a control under the other spelling.
-        { "windowedfullscreenmode", "alias of windowed_fullscreen_mode" },
-        { "no_ui", "alias of noui" }, { "start_minimized", "alias of startminimized" },
-        { "new_lldv", "alias of newlldv" }, { "scene", "alias of scene_detect" },
+        { "general:windowedfullscreenmode", "alias of windowed_fullscreen_mode" },
+        { "general:no_ui", "alias of noui" }, { "general:start_minimized", "alias of startminimized" },
+        { "general:new_lldv", "alias of newlldv" }, { "general:scene", "alias of scene_detect" },
         // [general]: kept for manual compatibility editing only (see the scene-detection control).
-        { "disable_detection_features", "compatibility editing only" },
-        { "scene_correction_mode", "compatibility editing only" },
-        { "scene_correction_basic", "compatibility editing only" },
+        { "general:disable_detection_features", "compatibility editing only" },
+        { "general:scene_correction_mode", "compatibility editing only" },
+        { "general:scene_correction_basic", "compatibility editing only" },
         // [general]: command-line / session state rather than settings.
-        { "dolby_vision_tunnel", "command-line / per-session capture state" },
-        { "interface", "command-line interface choice" },
-        { "frame_offset", "legacy location: Config moves [general] frame_offset to [directshow] frame_offset, "
+        { "general:dolby_vision_tunnel", "command-line / per-session capture state" },
+        { "general:interface", "command-line interface choice" },
+        { "general:frame_offset", "legacy location: Config moves [general] frame_offset to [directshow] frame_offset, "
             "which has the control" },
-        { "subtitle_reposition", "command-line option (/subtitle_reposition); the [general] key is validated "
+        { "general:queue_size", "legacy location: Config moves [command_line] queue_size into [queue.*], which has the control" },
+        { "general:renderer_start_stop_time_method", "legacy location: the [directshow] control replaces the [general] value on edit" },
+        { "general:renderer_nominal_range", "legacy location: the [directshow] control replaces the [general] value on edit" },
+        { "general:renderer_transfer_function", "legacy location: the [directshow] control replaces the [general] value on edit" },
+        { "general:renderer_transfer_matrix", "legacy location: the [directshow] control replaces the [general] value on edit" },
+        { "general:renderer_primaries", "legacy location: the [directshow] control replaces the [general] value on edit" },
+        // Legacy queue locations Config folds into [queue.*] on load.
+        { "queue:steady_reserve_frames", "alias: legacy spelling of target_frames; Config migrates it on load" },
+        { "queue_recovery:reset_after_render_restart_seconds", "legacy location: Config moves it into [queue.*], which has the control" },
+        { "queue_recovery:reset_queue_too_large_percent", "legacy location: Config moves it into [queue.*], which has the control" },
+        { "directshow:presentation_lead_frames", "legacy location: Config moves it to [queue.*] lead_frames, which has the control" },
+        // Dolby Vision profiles: edited by the DV mode buttons (config.dv.mode.lldv / .tunneling).
+        { "lldv:dolby_vision_tunnel", "edited by the DV mode buttons (config.dv.mode.*)" },
+        { "renderer:dolby_vision_tunnel", "edited by the DV mode buttons (config.dv.mode.*)" },
+        { "general:subtitle_reposition", "command-line option (/subtitle_reposition); the [general] key is validated "
             "but never read at runtime" },
         // Renderer keys.
-        { "deband", "legacy toggle; deband_strength has the control" },
-        { "sdr_target_primaries", "legacy spelling of target_primaries" },
-        { "calibration_lut_input_gamma", "retired: accepted but no longer controls LUT / HDR encoding "
+        { "renderer:deband", "legacy toggle; deband_strength has the control" },
+        { "renderer:sdr_target_primaries", "legacy spelling of target_primaries" },
+        { "renderer:calibration_lut_input_gamma", "retired: accepted but no longer controls LUT / HDR encoding "
             "(hdr_tone_map_target_gamma has the control)" },
-        { "calibration_lut_input_transfer", "alias accepted for HDR target (Rendering)" },
-        { "live_profile_updates", "alias: legacy switch for profile_update_mode live (which has the control)" },
-        { "steady_reserve_frames", "alias: legacy spelling of target_frames; Config migrates it on load" },
-        { "subtitle_bbox_test", "test / diagnostic overlay" }, { "subtitle_cut_paste_test", "test / diagnostic overlay" },
-        { "subtitle_cut_paste_background", "test / diagnostic overlay" },
-        { "subtitle_box_padding_mode", "legacy subtitle key (Subtitles profiles replace it)" },
-        { "subtitle_box_padding_sides", "legacy subtitle key" }, { "subtitle_box_padding_top", "legacy subtitle key" },
-        { "subtitle_box_padding_bottom", "legacy subtitle key" },
-        { "subtitle_box_padding_sides_percent", "legacy subtitle key" },
-        { "subtitle_box_padding_top_percent", "legacy subtitle key" },
-        { "subtitle_box_padding_bottom_percent", "legacy subtitle key" },
-        { "subtitle_hold_ms", "legacy subtitle key" }, { "subtitle_move_inset", "legacy subtitle key" },
-        { "subtitle_near_bar_px", "legacy subtitle key" }, { "subtitle_padding_pixels", "legacy subtitle key" },
-        { "subtitle_fit", "retired Screen setting (ignored)" },
-        { "temporal_fill", "alias: legacy Subtitles switch for cleanup_fill temporal (cleanup_fill has the control)" },
+        { "renderer:calibration_lut_input_transfer", "alias accepted for HDR target (Rendering)" },
+        { "renderer:live_profile_updates", "alias: legacy switch for profile_update_mode live (which has the control)" },
+        { "renderer:steady_reserve_frames", "alias: legacy spelling of target_frames; Config migrates it on load" },
+        { "renderer:mode", "legacy Screen label (normal / scope): validated for compatibility, never changes the "
+            "geometry; screen_aspect has the control" },
+        { "renderer:profile_update_mode", "renderer policy read from [general]; the [general] control covers it" },
+        { "renderer:switch_refresh_rate", "renderer policy read from [general]; Config migrates it there and the "
+            "[general] control covers it" },
+        { "renderer:subtitle_detection_optimization", "legacy subtitle key: accepted in renderer / Screen sections "
+            "only, and the renderer resets it before applying the Subtitles profile (LVR, \"Discard legacy subtitle "
+            "settings\"), so it never takes effect" },
+        { "renderer:subtitle_bbox_test", "test / diagnostic overlay" },
+        { "renderer:subtitle_cut_paste_test", "test / diagnostic overlay" },
+        { "renderer:subtitle_cut_paste_background", "legacy subtitle key (rule-section background, migrated to "
+            "the Subtitles profiles)" },
+        { "renderer:subtitle_box_padding_mode", "legacy subtitle key (Subtitles profiles replace it)" },
+        { "renderer:subtitle_box_padding_sides", "legacy subtitle key" },
+        { "renderer:subtitle_box_padding_top", "legacy subtitle key" },
+        { "renderer:subtitle_box_padding_bottom", "legacy subtitle key" },
+        { "renderer:subtitle_box_padding_sides_percent", "legacy subtitle key" },
+        { "renderer:subtitle_box_padding_top_percent", "legacy subtitle key" },
+        { "renderer:subtitle_box_padding_bottom_percent", "legacy subtitle key" },
+        { "renderer:subtitle_move_inset", "legacy subtitle key" },
+        { "renderer:subtitle_padding_pixels", "legacy subtitle key" },
+        { "renderer:subtitle_fit", "retired Screen setting (ignored)" },
+        { "renderer:temporal_fill", "alias: legacy Subtitles switch for cleanup_fill temporal (cleanup_fill has the control)" },
     };
+    std::set<std::string> usedAllowList;
     std::vector<std::string> missing;
-    auto check = [&](const std::string& source, const std::string& key)
-    {
-        if (controlled.count(key) || allowList.count(key)) return;
-        missing.push_back(source + ":" + key);
-    };
-    for (const auto& rule : LedDrive::LedDriveRules()) check("led_drive", rule.key);
-    for (const auto& rule : LedDrive::ProjectorRules()) check("projector", rule.key);
-    for (const auto& rule : MainConfigSchema::GeneralRules()) check("general", rule.key);
-    const std::set<std::string> rendererKeys = RendererValidatedKeys();
-    require(rendererKeys.size() > 100, "the renderer validators' keys were not found");
-    for (const std::string& key : rendererKeys) check("renderer", key);
+    for (const Source& source : sources)
+        for (const std::string& key : source.keys)
+        {
+            const auto found = controlSections.find(key);
+            bool covered = false;
+            std::string elsewhere;
+            if (found != controlSections.end())
+                for (const std::string& section : found->second)
+                {
+                    bool inSource = false;
+                    for (const std::string& prefix : source.sections)
+                        if (section == prefix || section.rfind(prefix + ".", 0) == 0) inSource = true;
+                    if (inSource) covered = true;
+                    else elsewhere += (elsewhere.empty() ? "" : ",") + section;
+                }
+            const std::string id = std::string(source.name) + ":" + key;
+            if (allowList.count(id)) { usedAllowList.insert(id); continue; }
+            if (!covered)
+                missing.push_back(id + (elsewhere.empty() ? "" : " (only in " + elsewhere + ")"));
+        }
     std::string list;
     for (const std::string& key : missing) list += " " + key;
     require(missing.empty(), ("Settings without a Config control (add one or allow-list it with a reason):" + list).c_str());
+    // A stale allow-list entry (the key is no longer validated) would silently cover
+    // a future key of the same name: keep the list exact.
+    std::string stale;
+    for (const auto& entry : allowList)
+        if (!usedAllowList.count(entry.first)) stale += " " + entry.first;
+    require(stale.empty(), ("Allow-list entries for keys no schema validates (remove them):" + stale).c_str());
+}
+
+void testHunt2StartupControlsWriteParserSpellings()
+{
+    // Hunt 2 (2026-10-17, every setting has a control): DeckLink RGB packing, the DirectShow P010
+    // conversion, the PPM correction and bounded_invalid_capture_recovery. Unset stays unset (no
+    // write on open); each edit writes a value MainConfigSchema accepts.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\ncapture_device: BlackMagic DeckLink\n");
+    const QByteArray original = readBytes(path);
+    ConfigEditorWindow window(path, 0, true);
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    require(!apply->isEnabled(), "opening Config with the new controls unset marked the editor dirty");
+    for (const char* name : { "config.decklink.rgb_8bit_packing", "config.decklink.rgb_10bit_packing",
+        "config.decklink.rgb_12bit_packing", "config.directshow.conversion.conversion_method",
+        "config.directshow.conversion.chroma_downsampling" })
+        require(requireControl<QComboBox>(window, name)->currentData().toString().isEmpty(),
+            (std::string(name) + " does not show Not set for an unset key").c_str());
+    for (const char* name : { "config.directshow.conversion.min_core_count",
+        "config.directshow.conversion.max_core_count", "config.directshow.ppm.ppm" })
+        require(requireControl<QLineEdit>(window, name)->text().isEmpty(),
+            (std::string(name) + " is not empty for an unset key").c_str());
+    auto* recovery = requireControl<QCheckBox>(window, "config.general.bounded_invalid_capture_recovery");
+    require(recovery->isChecked(), "bounded_invalid_capture_recovery does not show its runtime default (on)");
+    require(readBytes(path) == original, "Config wrote the file without an edit");
+
+    selectData(requireControl<QComboBox>(window, "config.decklink.rgb_8bit_packing"), "BGRA");
+    selectData(requireControl<QComboBox>(window, "config.decklink.rgb_10bit_packing"), "R10L");
+    selectData(requireControl<QComboBox>(window, "config.decklink.rgb_12bit_packing"), "R12L");
+    selectData(requireControl<QComboBox>(window, "config.directshow.conversion.conversion_method"), "simd");
+    selectData(requireControl<QComboBox>(window, "config.directshow.conversion.chroma_downsampling"), "ADVANCED");
+    requireControl<QLineEdit>(window, "config.directshow.conversion.min_core_count")->setText("2");
+    requireControl<QLineEdit>(window, "config.directshow.conversion.max_core_count")->setText("4");
+    requireControl<QLineEdit>(window, "config.directshow.ppm.ppm")->setText("AUTO");
+    recovery->setChecked(false);
+    QCoreApplication::processEvents();
+    require(apply->isEnabled(), "the edits did not enable Apply");
+    apply->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    for (const char* expected : { "rgb_8bit_packing: BGRA", "rgb_10bit_packing: R10L", "rgb_12bit_packing: R12L",
+        "conversion_method: simd", "chroma_downsampling: ADVANCED", "min_core_count: 2", "max_core_count: 4",
+        "ppm: AUTO", "bounded_invalid_capture_recovery: false" })
+        require(saved.contains(expected), (std::string("not saved: ") + expected + "\n" + saved.toStdString()).c_str());
+    ConfigFile parsed;
+    require(parsed.Load(path.toStdString()), "the saved file does not load");
+    std::string error;
+    require(MainConfigSchema::Validate(parsed, error), ("the parser rejects the saved values: " + error).c_str());
+    ConfigEditorWindow reopened(path, 0, true);
+    require(requireControl<QComboBox>(reopened, "config.decklink.rgb_10bit_packing")->currentData().toString() == "R10L",
+        "the reopened Config does not show R10L");
+    require(!requireControl<QCheckBox>(reopened, "config.general.bounded_invalid_capture_recovery")->isChecked(),
+        "the reopened Config does not show bounded recovery off");
+    // Not set removes the key again.
+    selectData(requireControl<QComboBox>(reopened, "config.decklink.rgb_10bit_packing"), "");
+    requireControl<QLineEdit>(reopened, "config.directshow.ppm.ppm")->clear();
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(reopened, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray cleared = readBytes(path);
+    require(!cleared.contains("rgb_10bit_packing") && !cleared.contains("ppm: AUTO"),
+        "Not set did not remove the keys");
+}
+
+void testHunt2SubtitleDetectionFields()
+{
+    // Hunt 2 (2026-10-17): subtitle_hold_ms / subtitle_near_bar_px are read from every Subtitles
+    // profile (LVR) and had no control (the coverage allow-list called them legacy).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nrenderer: VP Renderer\n"
+        "[vprenderer.subtitles.Classic]\ntype: classic\n");
+    ConfigEditorWindow window(path, 0, true);
+    window.show(); QApplication::processEvents();
+    auto* list = requireControl<QListWidget>(window, "config.vprenderer.subtitles.profiles");
+    require(list->count() == 1, "the Subtitles profile is missing");
+    list->setCurrentRow(0);
+    QApplication::processEvents();
+    auto* hold = requireControl<QLineEdit>(window, "config.vprenderer.subtitles.subtitle_hold_ms");
+    auto* nearBar = requireControl<QLineEdit>(window, "config.vprenderer.subtitles.subtitle_near_bar_px");
+    require(hold->text() == "250", ("hold does not show the runtime default 250: " + hold->text()).toStdString().c_str());
+    require(nearBar->text() == "20", ("near-bar does not show the runtime default 20: " + nearBar->text()).toStdString().c_str());
+    require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(),
+        "showing the Subtitles profile marked the editor dirty");
+    hold->setText("400");
+    nearBar->setText("35");
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("subtitle_hold_ms: 400") && saved.contains("subtitle_near_bar_px: 35"),
+        ("subtitle detection fields not saved: " + saved.toStdString()).c_str());
+    ConfigFile parsed;
+    require(parsed.Load(path.toStdString()), "the saved file does not load");
+    std::string error;
+    require(RendererProfileConfig::ValidateOwnedSections(parsed, error), ("the parser rejects the saved values: " + error).c_str());
 }
 
 void testAdvancedLedSettingsMatchTheParser()
@@ -9279,6 +9465,116 @@ void testUnfocusedNumberBoxesIgnoreTheWheel()
     }
     require(seconds->value() == 5 && refresh->currentIndex() == comboIndex, "The wheel changed an unfocused setting");
     require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The wheel made an edit");
+    // Hunt 2 (M3): scrolling the page past the Motion or Picture slider changes nothing.
+    for (const char* name : { "config.vprenderer.motion_preset", "config.vprenderer.picture_preset" })
+    {
+        auto* slider = requireControl<QSlider>(window, name);
+        const int before = slider->value();
+        for (const int delta : { 120, -120 })
+        {
+            QWheelEvent wheel(QPointF(5, 5), slider->mapToGlobal(QPointF(5, 5)), QPoint(), QPoint(0, delta),
+                Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(slider, &wheel);
+            require(slider->value() == before, (QByteArray("The wheel moved the unfocused slider ") + name).constData());
+        }
+    }
+    require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The wheel over a slider made an edit");
+}
+
+// Hunt 2 (L4/L5/L6): an inherited Picture level is "Not set" and leaving an inherited
+// field writes nothing; render ahead's settings are greyed while it is off; an
+// out-of-range share is clamped when the field is left.
+void testInheritedPictureFieldsAndGreyedRenderAhead()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n"
+        "[vprenderer.Cinema]\nquality: high\nsource_resolution_auto_min_confidence: 0.70\n"
+        "source_resolution_evidence_seconds: 5\nsource_resolution_evidence_shots: 2\n"
+        "[vprenderer.Night]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(requireControl<QLabel>(window, "config.vprenderer.picture_preset_name")->text().startsWith("Not set"),
+        "An inherited Picture level showed as this profile's own");
+    for (const char* name : { "config.vprenderer.source_resolution_auto_min_confidence",
+        "config.vprenderer.source_resolution_evidence_seconds", "config.vprenderer.source_resolution_evidence_shots" })
+        QMetaObject::invokeMethod(requireControl<QLineEdit>(window, name), "editingFinished", Qt::DirectConnection);
+    QCoreApplication::processEvents();
+    require(!apply->isEnabled(), "Leaving an inherited Picture field wrote an override");
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* share = requireControl<QLineEdit>(window, "config.vprenderer.render_ahead_utilisation");
+    require(!share->isEnabled() && !requireControl<QComboBox>(window, "config.vprenderer.dejudder_gate")->isEnabled() &&
+        !requireControl<QComboBox>(window, "config.vprenderer.render_ahead_queue_credit")->isEnabled(),
+        "Render ahead's settings are not greyed while it is off");
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.render_ahead"), "on");
+    require(share->isEnabled(), "Render ahead on did not enable its share");
+    share->setText("0.3");
+    QMetaObject::invokeMethod(share, "editingFinished", Qt::DirectConnection);
+    require(share->text() == "0.5", ("An out-of-range share was not clamped: " + share->text()).toStdString().c_str());
+}
+
+// Hunt 2 (M1/M2): the legacy queue fold and the profile value rewrites run once at
+// load as real migrations. The editor shows them as unsaved changes, the file is not
+// written until Save, Save keeps the original in .before-config-migration.<time>.bak,
+// and afterwards displaying every profile changes nothing.
+void testProfileRewritesAreBackedUpLoadMigrations()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    const QByteArray original =
+        "[general]\nprofile_change_display_seconds: 5\nrenderer: VideoProcessor Renderer (Alpha)\n"
+        "[directshow]\npresentation_lead_frames: 2\n"
+        "[queue.Steady]\nsteady_reserve_frames: 3\n"
+        "[vprenderer.Cinema]\nquality: high\n"
+        "[vprenderer.scaling.Sharp]\ndownscaler: ewa_lanczos\n"
+        "[vprenderer.zoom.Scope]\ncrop_wider_content_to_fill_screen: true\n"
+        "crop_wider_content_aspect_limit: not-a-ratio\n";
+    writeFixture(path, original);
+    const auto showEveryProfile = [](ConfigEditorWindow& window)
+    {
+        for (const char* name : { "config.queue.profiles", "config.vprenderer.profiles",
+            "config.vprenderer.scaling.profiles", "config.vprenderer.zoom.profiles",
+            "config.vprenderer.color.profiles" })
+        {
+            auto* profiles = requireControl<QListWidget>(window, name);
+            for (int row = profiles->count() - 1; row >= 0; --row)
+                profiles->setCurrentRow(row);
+        }
+        QCoreApplication::processEvents();
+    };
+    {
+        ConfigEditorWindow window(path, 0, true);
+        require(requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(),
+            "A load-time migration did not show as an unsaved change");
+        showEveryProfile(window);
+        require(readBytes(path) == original, "Opening and displaying profiles wrote the file");
+        require(QDir(dir.path()).entryList({ QStringLiteral("*.bak") }, QDir::Files).isEmpty(),
+            "A backup was made without a save");
+        save(window);
+    }
+    const QByteArray saved = readBytes(path);
+    require(!saved.contains("presentation_lead_frames") && !saved.contains("steady_reserve_frames") &&
+        saved.contains("lead_frames: 2") && saved.contains("target_frames: 3"),
+        (QByteArray("The legacy queue fold was not saved: ") + saved).constData());
+    require(saved.contains("downscaler: AUTO") && !saved.contains("ewa_lanczos") &&
+        !saved.contains("not-a-ratio") && saved.contains("crop_wider_content_to_fill_screen: true"),
+        (QByteArray("The profile value migrations were not saved: ") + saved).constData());
+    require(saved.contains("renderer: VP Renderer") && !saved.contains("(Alpha)"),
+        (QByteArray("The former renderer name was not migrated: ") + saved).constData());
+    const QStringList backups = QDir(dir.path()).entryList(
+        { QStringLiteral("VideoProcessor.cfg.before-config-migration.*.bak") }, QDir::Files);
+    require(backups.size() == 1 && readBytes(dir.filePath(backups.front())) == original,
+        "The migration did not keep an exact backup of the original file");
+    {
+        ConfigEditorWindow reopened(path, 0, true);
+        require(!requireControl<QPushButton>(reopened, "applyConfiguration")->isEnabled(),
+            "A migrated file opens with unsaved changes");
+        showEveryProfile(reopened);
+        require(!requireControl<QPushButton>(reopened, "applyConfiguration")->isEnabled(),
+            "Displaying a profile changed the document");
+    }
+    require(readBytes(path) == saved, "Reopening the migrated file wrote it");
 }
 
 int run(const char* name, const std::function<void()>& test)
@@ -9561,10 +9857,14 @@ int main(int argc, char** argv)
     failures += run("advanced LED settings match the parser", testAdvancedLedSettingsMatchTheParser);
     failures += run("Dynamic Drive alias section kept", testDynamicDriveAliasSectionIsKept);   // bug hunt 2
     failures += run("every schema key has a Config control", testEverySchemaKeyHasAConfigControl);
+    failures += run("hunt2 startup controls write parser spellings", testHunt2StartupControlsWriteParserSpellings);
+    failures += run("hunt2 subtitle detection fields", testHunt2SubtitleDetectionFields);
     failures += run("profile boolean can be unset", testProfileBooleanCanBeUnset);
     failures += run("unsaved edits ask on close and exit", testUnsavedEditsAskOnCloseAndExit);
     failures += run("explicit auto dither shows Auto", testExplicitAutoDitherShowsAuto);
     failures += run("unfocused number boxes ignore the wheel", testUnfocusedNumberBoxesIgnoreTheWheel);
+    failures += run("profile rewrites are backed-up load migrations", testProfileRewritesAreBackedUpLoadMigrations);
+    failures += run("inherited Picture fields and greyed render ahead", testInheritedPictureFieldsAndGreyedRenderAhead);
     failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
     failures += run("render-ahead controls show defaults and save", testRenderAheadControlsShowDefaultsAndSave);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)

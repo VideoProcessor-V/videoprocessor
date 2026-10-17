@@ -85,6 +85,7 @@
 #include <QRegion>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSettings>
@@ -576,6 +577,28 @@ void showCanonicalShortcutSpelling(QWidget* root)
     }
 }
 
+// Hunt 2 (L6): a number field whose validator lets Intermediate input through
+// (0.3 under a 0.5 minimum) is clamped and rounded when it is left, as the
+// Picture fields are, so an out-of-range value is never stored. An inherited
+// or empty field is left alone.
+void clampNumberFieldOnLeave(QLineEdit* edit, double lo, double hi, int decimals)
+{
+    QObject::connect(edit, &QLineEdit::editingFinished, edit, [edit, lo, hi, decimals]() {
+        if (edit->property("inherited").toBool()) return;
+        const QString text = edit->text().trimmed();
+        if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0) return;
+        bool ok = false;
+        double value = QLocale::c().toDouble(text, &ok);
+        if (!ok) value = text.toDouble(&ok);
+        if (!ok) { edit->clear(); return; }
+        value = (std::min)(hi, (std::max)(lo, value));
+        const double scale = std::pow(10.0, decimals);
+        value = std::round(value * scale) / scale;
+        const QString clean = QString::number(value, 'g', 12);
+        if (clean != edit->text()) edit->setText(clean);
+    });
+}
+
 // Audit 2026-10-17: number boxes and drop-downs ignore the mouse wheel unless
 // they have the keyboard focus, so scrolling a page never changes the setting
 // under the pointer; the wheel scrolls the page instead. Installed on the
@@ -590,14 +613,21 @@ protected:
     {
         if (event->type() != QEvent::Wheel) return false;
         QWidget* control = qobject_cast<QWidget*>(watched);
+        // Sliders (Motion, Picture) take the wheel without focus too (hunt 2,
+        // M3); scroll bars are the page's own and keep it.
+        const auto guarded = [](const QWidget* widget)
+        {
+            return qobject_cast<const QAbstractSpinBox*>(widget) || qobject_cast<const QComboBox*>(widget) ||
+                (qobject_cast<const QAbstractSlider*>(widget) && !qobject_cast<const QScrollBar*>(widget));
+        };
         // The control itself, or its inner line edit (two levels at most; an
         // open drop-down's list is its own window and keeps the wheel).
         for (int level = 0; control && level < 2; ++level)
         {
-            if (qobject_cast<QAbstractSpinBox*>(control) || qobject_cast<QComboBox*>(control)) break;
+            if (guarded(control)) break;
             control = control->isWindow() ? nullptr : control->parentWidget();
         }
-        if (!control || (!qobject_cast<QAbstractSpinBox*>(control) && !qobject_cast<QComboBox*>(control)))
+        if (!control || !guarded(control))
             return false;
         const QWidget* focus = QApplication::focusWidget();
         if (focus && (focus == control || control->isAncestorOf(focus))) return false;
@@ -2097,7 +2127,8 @@ bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 			preferences.setValue(QStringLiteral("configRpc/manualPort"), target.port);
 		}
 	}
-	dirty_ = false;
+	// loadConfiguration set dirty_ for a new file or its own migration; keep
+	// it (hunt 2, L3).
 	runLoadMigrations();
 	loadDiscoveryCache();
 	preparedRemoteSwitch_.reset();
@@ -2236,10 +2267,12 @@ void ConfigEditorWindow::loadConfiguration()
 				migratedLegacyInputPolicy = true;
 			}
 		}
-		if (document_->SectionSettings("vprenderer.input").empty())
-			document_->RemoveSection("vprenderer.input");
-		if (document_->SectionSettings("vprenderer").empty())
-			document_->RemoveSection("vprenderer");
+		// Removing an empty header is a visible migration (hunt 2, L9): the
+		// presence of [vprenderer] alone selects the [general] validation.
+		for (const char* emptied : { "vprenderer.input", "vprenderer" })
+			if (document_->SectionSettings(emptied).empty() &&
+				document_->RemoveSection(emptied))
+				migratedLegacyInputPolicy = true;
 	}
 	dirty_ = configurationLoaded_ && (!document_->existedAtLoad ||
 		migratedLegacyInputPolicy);
@@ -2266,6 +2299,9 @@ void ConfigEditorWindow::runLoadMigrations()
     migrateUnifiedColorOutputProfiles();
     migrateCalibrationProfiles();
     migrateViewportZoomProfiles();
+    migrateLegacyQueueOwnership();
+    migrateProfileValueNormalisations();
+    migrateLegacyRendererName();
     // Any real migration keeps a backup of the original file on save.
     if (document_ && configurationLoaded_ && document_->Serialize() != before)
         document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -2838,8 +2874,13 @@ void ConfigEditorWindow::migrateSharedRefreshRate()
         dirty_ = true;
         hasPendingMigrations_ = true;
     }
-    if (document_->SectionSettings(root.toStdString()).empty())
-        document_->RemoveSection(root.toStdString());
+    // Removing an empty root is a visible migration (hunt 2, L9).
+    if (document_->SectionSettings(root.toStdString()).empty() &&
+        document_->RemoveSection(root.toStdString()))
+    {
+        dirty_ = true;
+        hasPendingMigrations_ = true;
+    }
 }
 
 void ConfigEditorWindow::migrateRefreshRateSwitchMode()
@@ -2865,6 +2906,124 @@ void ConfigEditorWindow::migrateRefreshRateSwitchMode()
 		dirty_ = true;
 		hasPendingMigrations_ = true;
 	}
+}
+
+void ConfigEditorWindow::migrateLegacyQueueOwnership()
+{
+    // Fold legacy queue ownership into the first ordered queue profile in the
+    // pending document. Compatibility readers remain in place for old files,
+    // but every save from this editor uses [queue.*] exclusively. A real
+    // migration (hunt 2, M1): it runs at load, inside runLoadMigrations'
+    // before/after comparison, and keeps a backup of the original file.
+    if (!configurationLoaded_ || !document_) return;
+    const QStringList queues = profileSections(QStringLiteral("queue"));
+    if (queues.isEmpty()) return;
+    const QString baseline = queues.front();
+    bool migrated = false;
+    auto migrate = [this, &baseline, &migrated](const QString& oldSection,
+        const QString& oldKey, const QString& newKey)
+    {
+        const QString legacy = value(oldSection, oldKey);
+        if (legacy.isEmpty()) return;
+        if (value(baseline, newKey).isEmpty())
+            document_->SetKnown(baseline.toStdString(),
+                newKey.toStdString().c_str(), legacy.toLocal8Bit().constData());
+        document_->RemoveKnown(oldSection.toStdString(),
+            oldKey.toStdString().c_str());
+        migrated = true;
+    };
+    migrate(QStringLiteral("queue_recovery"),
+        QStringLiteral("reset_after_render_restart_seconds"),
+        QStringLiteral("reset_after_render_restart_seconds"));
+    migrate(QStringLiteral("queue_recovery"),
+        QStringLiteral("reset_queue_too_large_percent"),
+        QStringLiteral("reset_queue_too_large_percent"));
+    migrate(QStringLiteral("directshow"),
+        QStringLiteral("presentation_lead_frames"),
+        QStringLiteral("lead_frames"));
+    migrate(QStringLiteral("command_line"),
+        QStringLiteral("queue_size"), QStringLiteral("queue_size"));
+    for (const QString& queueSection : queues)
+    {
+        const QString legacy = value(queueSection,
+            QStringLiteral("steady_reserve_frames"));
+        if (legacy.isEmpty()) continue;
+        if (value(queueSection, QStringLiteral("target_frames")).isEmpty())
+            document_->SetKnown(queueSection.toStdString(), "target_frames",
+                legacy.toLocal8Bit().constData());
+        document_->RemoveKnown(queueSection.toStdString(),
+            "steady_reserve_frames");
+        migrated = true;
+    }
+    if (!migrated) return;
+    dirty_ = true;
+    hasPendingMigrations_ = true;
+    document_->requiresMigrationBackup = document_->existedAtLoad;
+}
+
+void ConfigEditorWindow::migrateLegacyRendererName()
+{
+    // Keep old configurations loadable, but migrate the former public display
+    // name in the pending document so the next editor save uses the final name.
+    // A real migration at load (hunt 2): dirty, and the original is backed up.
+    if (!configurationLoaded_ || !document_ ||
+        value(QStringLiteral("general"), QStringLiteral("renderer")).trimmed().compare(
+            QStringLiteral("VideoProcessor Renderer (Alpha)"), Qt::CaseInsensitive) != 0)
+        return;
+    document_->SetKnown("general", "renderer", "VP Renderer");
+    dirty_ = true;
+    hasPendingMigrations_ = true;
+    document_->requiresMigrationBackup = document_->existedAtLoad;
+}
+
+void ConfigEditorWindow::migrateProfileValueNormalisations()
+{
+    // Rewrites that loadDetails used to make each time a profile was shown
+    // (hunt 2, M2). They run once at load as real migrations: the editor is
+    // dirty, the original file is backed up on save, and displaying a
+    // profile never changes the document.
+    if (!configurationLoaded_ || !document_) return;
+    bool migrated = false;
+    // Calibration LUT paths are stored with forward slashes.
+    for (const QString& section : profileSections(QStringLiteral("vprenderer.color")))
+        for (const char* key : { "calibration_lut_bt709", "calibration_lut_p3_d65",
+            "calibration_lut_bt2020" })
+        {
+            const QString raw = value(section, QString::fromLatin1(key));
+            if (raw.isEmpty()) continue;
+            const QString normalized = QDir::fromNativeSeparators(raw);
+            if (normalized == raw) continue;
+            document_->SetKnown(section.toStdString(), key, normalized.toStdString());
+            migrated = true;
+        }
+    // The retired downscaler spellings resolve to the quality preset. Keep
+    // Auto explicit instead of inheriting a parent's named filter.
+    for (const QString& section : profileSections(QStringLiteral("vprenderer.scaling")))
+    {
+        const QString raw = value(section, QStringLiteral("downscaler")).trimmed().toLower();
+        if (raw != QStringLiteral("none") && raw != QStringLiteral("ewa_lanczos")) continue;
+        document_->SetKnown(section.toStdString(), "downscaler", "AUTO");
+        migrated = true;
+    }
+    // Optional crop aspect limits are best-effort: a malformed value is
+    // removed (a visible, backed-up migration) rather than carried on.
+    for (const QString& section : profileSections(QStringLiteral("vprenderer.zoom")))
+        for (const char* key : { "crop_narrower_content_aspect_limit",
+            "crop_wider_content_aspect_limit" })
+        {
+            const QString raw = value(section, QString::fromLatin1(key));
+            if (raw.isEmpty()) continue;
+            AspectRatio ignored;
+            std::string parseError;
+            if (AspectRatioParser::Parse(raw.toStdString(), 1.0, 4.0, ignored, parseError))
+                continue;
+            document_->RemoveKnown(section.toStdString(), key);
+            migrated = true;
+        }
+    if (!migrated) return;
+    dirty_ = true;
+    hasPendingMigrations_ = true;
+    document_->requiresMigrationBackup = document_->existedAtLoad;
 }
 
 void ConfigEditorWindow::installProfileContextMenu(QListWidget* list,
@@ -4772,6 +4931,15 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     updateEffectSummary();
     showCanonicalShortcutSpelling(this);
 
+    // Say where a replaced file was kept (hunt 2, L2/L8).
+    QString kept;
+    if (!result.overwriteBackupPath.empty())
+        kept = QStringLiteral(" The file it replaced is kept at %1.")
+            .arg(QDir::toNativeSeparators(QString::fromStdWString(result.overwriteBackupPath)));
+    else if (!result.backupPath.empty())
+        kept = QStringLiteral(" The original file is kept at %1.")
+            .arg(QDir::toNativeSeparators(QString::fromStdWString(result.backupPath)));
+
     // The editor is a separate process. Signal the running VP instance only
     // after the atomic safe-save has committed the complete validated file.
     // An auto-reset event also makes saves harmless when VP is not running.
@@ -4782,25 +4950,25 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
         setStatus(QStringLiteral("Changes saved%1. Incomplete action%2 %3 saved as disabled draft%2.")
             .arg(notified ? QStringLiteral(" and sent to VideoProcessor") : QStringLiteral("; VideoProcessor could not be notified"))
             .arg(draftedActions.size() == 1 ? QString() : QStringLiteral("s"),
-                draftedActions.join(QStringLiteral(", "))));
+                draftedActions.join(QStringLiteral(", "))) + kept);
     }
 	else if (creatingConfiguration)
     {
         const QString effect = QString::fromLatin1(
             ConfigurationApplyPolicy::ActionLabel(action));
-        setStatus(notified ?
+        setStatus((notified ?
             QStringLiteral("Configuration created safely at %1. %2 was requested.")
                 .arg(configPath_, effect) :
             QStringLiteral("Configuration created safely at %1. It will take effect when VideoProcessor next starts.")
-                .arg(configPath_), false);
+                .arg(configPath_)) + kept, false);
     }
     else
     {
         const QString effect = QString::fromLatin1(
             ConfigurationApplyPolicy::ActionLabel(action));
-        setStatus(notified ?
+        setStatus((notified ?
             QStringLiteral("Changes saved safely. %1 was requested.").arg(effect) :
-            QStringLiteral("Changes saved safely. Takes effect when VideoProcessor next starts."), false);
+            QStringLiteral("Changes saved safely. Takes effect when VideoProcessor next starts.")) + kept, false);
     }
     return true;
 }
@@ -5262,16 +5430,9 @@ QWidget* ConfigEditorWindow::createPage(const QString& title, const QString& des
 
 QWidget* ConfigEditorWindow::createStartupPage()
 {
-    // Keep old configurations loadable, but migrate the former public display
-    // name in the pending document so the next editor save uses the final name.
-    if (configurationLoaded_ && document_ &&
-        value(QStringLiteral("general"), QStringLiteral("renderer")).compare(
-            QStringLiteral("VideoProcessor Renderer (Alpha)"), Qt::CaseInsensitive) == 0)
-    {
-        document_->SetKnown("general", "renderer", "VP Renderer");
-        dirty_ = true;
-        hasPendingMigrations_ = true;
-    }
+    // The former renderer display name is migrated at load (runLoadMigrations);
+    // this covers a page rebuilt from a document that did not pass through it.
+    migrateLegacyRendererName();
 
 	auto* cards = new ResponsiveCardGrid;
 	auto persistDiscoveredDefault = [this](const QString& key,
@@ -5401,6 +5562,61 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "12-bit RGB when it offers that for the mode (all 12 bits, but the card's conversion clips "
         "below-black/above-white and out-of-gamut values), otherwise 10-bit 4:2:2. Refuse: no picture."));
     hardwareForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
+    // Hunt 2 (2026-10-17, every setting has a control): [decklink] RGB packing,
+    // [directshow.conversion] and [directshow.ppm]. The first entry of each choice
+    // leaves the key unset (the runtime default).
+    const auto deckLinkPacking = [this, hardwareForm](const QString& key, const QString& label,
+        const QStringList& packings, const QString& defaults)
+    {
+        QStringList values{ QString(), QStringLiteral("AUTO") };
+        QStringList labels{ QStringLiteral("Not set (AUTO: %1)").arg(defaults), QStringLiteral("AUTO (%1)").arg(defaults) };
+        for (const QString& packing : packings) { values << packing; labels << packing; }
+        auto* combo = bindChoiceField(QStringLiteral("decklink"), key, values, labels);
+        combo->setToolTip(QStringLiteral(
+            "DeckLink only: host-memory packing requested for detected RGB input at this depth. AUTO keeps the "
+            "established ARGB / r210 / R12B. The device and mode are checked; an unsupported packing falls "
+            "back safely and is logged."));
+        hardwareForm->addRow(label, combo);
+    };
+    deckLinkPacking(QStringLiteral("rgb_8bit_packing"), QStringLiteral("8-bit RGB packing (DeckLink)"),
+        { QStringLiteral("ARGB"), QStringLiteral("BGRA") }, QStringLiteral("ARGB"));
+    deckLinkPacking(QStringLiteral("rgb_10bit_packing"), QStringLiteral("10-bit RGB packing (DeckLink)"),
+        { QStringLiteral("R210"), QStringLiteral("R10B"), QStringLiteral("R10L") }, QStringLiteral("r210"));
+    deckLinkPacking(QStringLiteral("rgb_12bit_packing"), QStringLiteral("12-bit RGB packing (DeckLink)"),
+        { QStringLiteral("R12B"), QStringLiteral("R12L") }, QStringLiteral("R12B"));
+    auto* conversionMethod = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("conversion_method"),
+        { QString(), QStringLiteral("auto"), QStringLiteral("simd"), QStringLiteral("optimized"), QStringLiteral("standard") },
+        { QStringLiteral("Not set (Auto)"), QStringLiteral("Auto"), QStringLiteral("SIMD"), QStringLiteral("Optimized"),
+          QStringLiteral("Standard") });
+    conversionMethod->setToolTip(QStringLiteral(
+        "DirectShow path: the CPU method that converts v210 capture to P010. Auto picks the fastest available."));
+    hardwareForm->addRow(QStringLiteral("P010 conversion method (DirectShow)"), conversionMethod);
+    auto* chromaDownsampling = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("chroma_downsampling"),
+        { QString(), QStringLiteral("AVERAGE"), QStringLiteral("LEGACY"), QStringLiteral("ADVANCED") },
+        { QStringLiteral("Not set (Average)"), QStringLiteral("Average adjacent rows"),
+          QStringLiteral("Legacy: even rows, no averaging"), QStringLiteral("Advanced: Lanczos-3 (more CPU)") });
+    chromaDownsampling->setToolTip(QStringLiteral(
+        "DirectShow path: 4:2:2 to 4:2:0 chroma for P010. Average (default) averages adjacent chroma rows; "
+        "Legacy takes the even rows; Advanced uses 12-tap Lanczos-3 vertical filtering (more CPU, possible ringing)."));
+    hardwareForm->addRow(QStringLiteral("P010 chroma downsampling (DirectShow)"), chromaDownsampling);
+    for (const auto& cores : { std::make_pair(QStringLiteral("min_core_count"), QStringLiteral("P010 conversion helpers, minimum")),
+        std::make_pair(QStringLiteral("max_core_count"), QStringLiteral("P010 conversion helpers, maximum")) })
+    {
+        auto* count = bindTextField(QStringLiteral("directshow.conversion"), cores.first);
+        count->setValidator(new QIntValidator(1, INT_MAX, count));
+        count->setPlaceholderText(QStringLiteral("1 (default)"));
+        count->setToolTip(QStringLiteral(
+            "DirectShow path: helper threads for the P010 conversion, not counting the calling thread. Empty = 1."));
+        hardwareForm->addRow(cores.second, count);
+    }
+    auto* ppm = bindTextField(QStringLiteral("directshow.ppm"), QStringLiteral("ppm"));
+    ppm->setValidator(new QRegularExpressionValidator(QRegularExpression(
+        QStringLiteral("^(|[Aa][Uu][Tt][Oo]|-?(1000000|[0-9]{1,6}))$")), ppm));
+    ppm->setPlaceholderText(QStringLiteral("Not set (no correction)"));
+    ppm->setToolTip(QStringLiteral(
+        "DirectShow path: clock correction in parts per million for every source rate. AUTO measures it; a number "
+        "from -1000000 to 1000000 applies it; empty applies none."));
+    hardwareForm->addRow(QStringLiteral("Clock PPM correction (DirectShow)"), ppm);
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);
     behaviorLayout->setContentsMargins(0, 0, 0, 0);
@@ -5412,6 +5628,13 @@ QWidget* ConfigEditorWindow::createStartupPage()
         configuredBooleanValue(value(QStringLiteral("general"),
             QStringLiteral("no_ui")), false)));
     behaviorLayout->addWidget(bindCheckField(QStringLiteral("Start minimized"), QStringLiteral("general"), QStringLiteral("startminimized")));
+    // Hunt 2 (2026-10-17): VP-0179 recovery policy, read once at startup (default on).
+    auto* boundedRecovery = bindCheckField(QStringLiteral("Bounded invalid-capture recovery"),
+        QStringLiteral("general"), QStringLiteral("bounded_invalid_capture_recovery"), true);
+    boundedRecovery->setToolTip(QStringLiteral(
+        "On (default): a bounded 1500 ms grace after an invalid capture state; only a valid capture state cancels "
+        "recovery. Off: the earlier recovery, which keeps the frame counter. Takes effect when VP restarts."));
+    behaviorLayout->addWidget(boundedRecovery);
     // Delta 6 (settings first): the saved state of what a key or a main-window
     // control can change.
     auto* statsOverlay = bindCheckField(QStringLiteral("Show statistics overlay"),
@@ -5774,54 +5997,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         }
     }
 
-    // Fold legacy queue ownership into the first ordered queue profile in the
-    // pending document. Compatibility readers remain in place for old files,
-    // but every save from this editor uses [queue.*] exclusively.
-    if (configurationLoaded_ && document_ && sectionPrefix == QStringLiteral("queue"))
-    {
-        const QStringList queues = profileSections(sectionPrefix);
-        if (!queues.isEmpty())
-        {
-            const QString baseline = queues.front();
-            bool migrated = false;
-            auto migrate = [this, &baseline, &migrated](const QString& oldSection,
-                const QString& oldKey, const QString& newKey)
-            {
-                const QString legacy = value(oldSection, oldKey);
-                if (legacy.isEmpty()) return;
-                if (value(baseline, newKey).isEmpty())
-                    document_->SetKnown(baseline.toStdString(),
-                        newKey.toStdString().c_str(), legacy.toLocal8Bit().constData());
-                document_->RemoveKnown(oldSection.toStdString(),
-                    oldKey.toStdString().c_str());
-                migrated = true;
-            };
-            migrate(QStringLiteral("queue_recovery"),
-                QStringLiteral("reset_after_render_restart_seconds"),
-                QStringLiteral("reset_after_render_restart_seconds"));
-            migrate(QStringLiteral("queue_recovery"),
-                QStringLiteral("reset_queue_too_large_percent"),
-                QStringLiteral("reset_queue_too_large_percent"));
-            migrate(QStringLiteral("directshow"),
-                QStringLiteral("presentation_lead_frames"),
-                QStringLiteral("lead_frames"));
-            migrate(QStringLiteral("command_line"),
-                QStringLiteral("queue_size"), QStringLiteral("queue_size"));
-            for (const QString& queueSection : queues)
-            {
-                const QString legacy = value(queueSection,
-                    QStringLiteral("steady_reserve_frames"));
-                if (legacy.isEmpty()) continue;
-                if (value(queueSection, QStringLiteral("target_frames")).isEmpty())
-                    document_->SetKnown(queueSection.toStdString(), "target_frames",
-                        legacy.toLocal8Bit().constData());
-                document_->RemoveKnown(queueSection.toStdString(),
-                    "steady_reserve_frames");
-                migrated = true;
-            }
-            if (migrated) markDirty();
-        }
-    }
+    // Legacy queue ownership is folded at load (runLoadMigrations); this
+    // covers a page rebuilt from a document that did not pass through it.
+    if (sectionPrefix == QStringLiteral("queue")) migrateLegacyQueueOwnership();
     struct Field
     {
         QString key;
@@ -7481,6 +7659,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     label->setText(label->text() + QStringLiteral(" (") + range + QStringLiteral(")"));
                 edit->setAccessibleDescription(QStringLiteral("Allowed: %1.").arg(range));
                 connect(edit, &QLineEdit::editingFinished, this, [edit, lo, hi, decimals]() {
+                    // Leaving an inherited field untouched writes no override (hunt 2, L5).
+                    if (edit->property("inherited").toBool()) return;
                     QString text = edit->text().trimmed();
                     if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
                         return;   // unset: the default
@@ -7881,6 +8061,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (value.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0 && texts[i]) value.clear();
                 return value;
             };
+            // This profile's own value: text inherited from the default profile is
+            // not set here (hunt 2, L5). raw() still reads it for the handle's level.
+            auto own = [texts, raw](int i) {
+                return texts[i] && texts[i]->property("inherited").toBool() ? QString() : raw(i);
+            };
             auto matches = [raw](int p) {
                 // Off is the source size alone (the evidence does not apply).
                 const int keys = p == 0 ? 1 : 4;
@@ -7899,7 +8084,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto refresh = [=]() {
                 if (*applying) return;
                 bool anySet = false;
-                for (int i = 0; i < 4; ++i) anySet = anySet || !raw(i).isEmpty();
+                for (int i = 0; i < 4; ++i) anySet = anySet || !own(i).isEmpty();
                 if (!anySet)
                 {
                     // Audit 2026-10-16: the handle moves to the built-in level too (it kept the previous
@@ -7945,9 +8130,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             };
             connect(pictureSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
             // Not set: the handle already on the chosen position emits no valueChanged; the release writes it.
-            connect(pictureSlider, &QSlider::sliderReleased, this, [apply, raw, pictureSlider]() {
+            connect(pictureSlider, &QSlider::sliderReleased, this, [apply, own, pictureSlider]() {
                 for (int i = 0; i < 4; ++i)
-                    if (!raw(i).isEmpty()) return;
+                    if (!own(i).isEmpty()) return;
                 apply(pictureSlider->value());
             });
             connect(pictureReset, &QPushButton::clicked, this, [apply, pictureSlider]() { apply(pictureSlider->value()); });
@@ -7984,6 +8169,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     label->setText(label->text() + QStringLiteral(" (") + range + QStringLiteral(")"));
                 edit->setAccessibleDescription(QStringLiteral("Allowed: %1.").arg(range));
                 connect(edit, &QLineEdit::editingFinished, this, [edit, lo, hi, decimals]() {
+                    // Leaving an inherited field untouched writes no override (hunt 2, L5).
+                    if (edit->property("inherited").toBool()) return;
                     QString text = edit->text().trimmed();
                     if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
                         return;   // unset: the default
@@ -8364,6 +8551,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* renderAheadUtilisation = addText(QStringLiteral("De-judder: share of a source frame to use"),
             QStringLiteral("render_ahead_utilisation"));
         renderAheadUtilisation->setValidator(new QDoubleValidator(0.5, 1.0, 2, renderAheadUtilisation));
+        clampNumberFieldOnLeave(renderAheadUtilisation, 0.5, 1.0, 2);
         renderAheadUtilisation->setPlaceholderText(QStringLiteral("0.85"));
         renderAheadUtilisation->setToolTip(QStringLiteral(
             "With the per-source-frame budget: the share of a source frame's time the GPU may be busy (0.5 to 1.0; "
@@ -8423,6 +8611,53 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "On (default): while VP's debander runs (VP deband Auto or On) with its grain guard, libplacebo's "
             "automatic deband (Debanding: Auto) is turned off, because it thins fine grain. A Debanding strength "
             "chosen explicitly (Light or Default) is kept. Off: both debanders run, as before."));
+        {
+            // Hunt 2 (L4): a setting that does nothing in the current state is greyed
+            // (greyedOff, audit 2026-10-14c), read from the effective values so an
+            // inherited or default choice counts. Profile loads trigger the refresh.
+            const auto grey = [](QWidget* widget, bool off)
+            {
+                widget->setProperty("greyedOff", off);
+                widget->setEnabled(!off);
+            };
+            auto syncGreyed = [grey, opticalFlow, opticalFlowGlobal, opticalFlowFallback, opticalFlowCost,
+                opticalFlowFb, renderAhead, dejudderGate, renderAheadUtilisation, renderAheadCredit,
+                sourceResolution, autoConfidence, evidenceSeconds, evidenceShots, interpolation,
+                interpolationGrain, debandVp, debandGrainGuard, debandVpExclusive]()
+            {
+                // The engine's extras do nothing with VP's matcher only; the search
+                // fallback also needs the engine's camera motion.
+                const bool matcherOnly = effectiveChoiceValue(opticalFlow) == QStringLiteral("off");
+                grey(opticalFlowCost, matcherOnly);
+                grey(opticalFlowFb, matcherOnly);
+                grey(opticalFlowFallback, matcherOnly ||
+                    effectiveChoiceValue(opticalFlowGlobal) == QStringLiteral("off"));
+                // Render ahead's budget, queue credit and share apply only with it on;
+                // the share only with the per-source-frame budget.
+                const bool renderAheadOff = effectiveChoiceValue(renderAhead) != QStringLiteral("on");
+                grey(dejudderGate, renderAheadOff);
+                grey(renderAheadCredit, renderAheadOff);
+                grey(renderAheadUtilisation, renderAheadOff ||
+                    effectiveChoiceValue(dejudderGate) == QStringLiteral("refresh"));
+                // Auto's evidence is used only with Source resolution: Auto.
+                const bool sourceAuto = effectiveChoiceValue(sourceResolution) == QStringLiteral("auto");
+                for (QWidget* widget : { static_cast<QWidget*>(autoConfidence), static_cast<QWidget*>(evidenceSeconds),
+                    static_cast<QWidget*>(evidenceShots) })
+                    grey(widget, !sourceAuto);
+                const QString interpolationMode = effectiveChoiceValue(interpolation);
+                grey(interpolationGrain, interpolationMode != QStringLiteral("auto") &&
+                    interpolationMode != QStringLiteral("always"));
+                grey(debandGrainGuard, effectiveChoiceValue(debandVp) == QStringLiteral("off"));
+                grey(debandVpExclusive, effectiveChoiceValue(debandVp) == QStringLiteral("off"));
+            };
+            for (QComboBox* driver : { opticalFlow, opticalFlowGlobal, renderAhead, dejudderGate, sourceResolution,
+                interpolation, debandVp })
+                connect(driver, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncGreyed](int) { syncGreyed(); });
+            auto* greyedRefresh = new QAction(debandGrainGuard);
+            greyedRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("greyed_state_refresh")));
+            connect(greyedRefresh, &QAction::triggered, this, [syncGreyed]() { syncGreyed(); });
+            syncGreyed();
+        }
         // Restore switch (DV tunnel bug hunt 2026-10-17).
         auto* dvTunnelFixes = addChoice(QStringLiteral("Dolby Vision tunnel fixes"),
             QStringLiteral("dv_tunnel_fixes"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -8512,6 +8747,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto* hold = addText(QStringLiteral("    Change class after"), QStringLiteral("intent_content_hold_seconds"),
                 QStringLiteral("s"));
             hold->setValidator(new QDoubleValidator(1.0, 60.0, 1, hold));
+            clampNumberFieldOnLeave(hold, 1.0, 60.0, 1);
             hold->setPlaceholderText(QStringLiteral("5"));
             hold->setAccessibleDescription(QStringLiteral("Value in s, 1-60."));
             hold->setToolTip(QStringLiteral(
@@ -9433,6 +9669,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* offset = addText(QStringLiteral("Inward offset / Classic padding"), QStringLiteral("offset_pixels"), QStringLiteral("source pixels"));
         offset->setValidator(new QIntValidator(0,500,offset));
         offset->setToolTip(QStringLiteral("Offsets the whole moved subtitle box: bottom subtitles move higher and top subtitles move lower. Text stays centered within the box; extension to the black bar does not count toward centering. In Classic, this is the original subtitle padding."));
+        // Hunt 2 (2026-10-17): detection keys every Subtitles profile reads (LVR ~3683),
+        // which had no control. Runtime defaults 250 ms / 20 px.
+        auto* detectionHold = addText(QStringLiteral("Detection hold"), QStringLiteral("subtitle_hold_ms"), QStringLiteral("ms"));
+        detectionHold->setValidator(new QIntValidator(0,1000,detectionHold));
+        detectionHold->setToolTip(QStringLiteral("How long a detected subtitle box is kept after detection loses it (0-1000 ms, default 250), "
+            "so a flicker in detection does not drop the box for a frame or two."));
+        auto* nearBar = addText(QStringLiteral("Near-bar distance"), QStringLiteral("subtitle_near_bar_px"), QStringLiteral("source pixels"));
+        nearBar->setValidator(new QIntValidator(0,200,nearBar));
+        nearBar->setToolTip(QStringLiteral("How close to the black bar subtitle text must be to count as a bar subtitle "
+            "(0-200 source pixels, default 20)."));
         auto* commonForm=form;
         form = addCollapsibleSection(QStringLiteral("classic"), QStringLiteral("Classic picture movement"), QString(), true);
         auto* classicSection=profileFieldsLayout->itemAt(profileFieldsLayout->count()-1)->widget();
@@ -9951,6 +10197,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if(key == QStringLiteral("subtitle_engage_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_ENGAGE_DRIFT_MS);
                 if(key == QStringLiteral("subtitle_release_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_RELEASE_DRIFT_MS);
                 if(key == QStringLiteral("subtitle_target_buffer_pixels")) return QStringLiteral("10");
+                if(key == QStringLiteral("subtitle_hold_ms")) return QStringLiteral("250");
+                if(key == QStringLiteral("subtitle_near_bar_px")) return QStringLiteral("20");
                 if(key == QStringLiteral("subtitle_text_color")) return QStringLiteral("FFFFFF");
                 if(key == QStringLiteral("subtitle_generated_gray_color")) return value(section,QStringLiteral("type"))==QStringLiteral("black") ? QStringLiteral("000000") : QStringLiteral("040404");
                 if(key == QStringLiteral("minimum_headroom_pixels")) return QStringLiteral("12");
@@ -10104,16 +10352,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				(field.key == QStringLiteral("calibration_lut_bt709") ||
                  field.key == QStringLiteral("calibration_lut_p3_d65") ||
                  field.key == QStringLiteral("calibration_lut_bt2020"));
+            // Display only: the stored value is normalised once at load by
+            // migrateProfileValueNormalisations (hunt 2, M2).
             if (calibrationLutSlot && !raw.isEmpty())
-            {
-                const QString normalized = QDir::fromNativeSeparators(raw);
-                if (normalized != raw)
-                {
-                    document_->SetKnown(section.toStdString(), field.key.toStdString().c_str(), normalized.toStdString());
-                    raw = normalized;
-                    markDirty();
-                }
-            }
+                raw = QDir::fromNativeSeparators(raw);
 			const bool requiresExplicitValue =
 				field.widget->property("requiresExplicitValue").toBool();
 			const bool scalingDownscaler =
@@ -10122,14 +10364,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			if (scalingDownscaler && !raw.isEmpty())
 			{
 				const QString normalized = raw.trimmed().toLower();
+                // These retired spellings resolve to the quality preset; the
+                // stored value is rewritten once at load (hunt 2, M2).
                 if (normalized == QStringLiteral("none") || normalized == QStringLiteral("ewa_lanczos"))
-				{
-                    // These retired spellings resolve to the quality preset.
-                    // Keep Auto explicit instead of inheriting a parent's named filter.
-                    document_->SetKnown(section.toStdString(), field.key.toStdString().c_str(), "AUTO");
                     raw = QStringLiteral("AUTO");
-					markDirty();
-				}
 			}
 			const bool viewportAspectLimit =
 				sectionPrefix == QStringLiteral("vprenderer.zoom") &&
@@ -10141,13 +10379,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				std::string parseError;
 				if (!AspectRatioParser::Parse(raw.toStdString(), 1.0, 4.0,
 					ignored, parseError))
-				{
-					// Optional limits are best-effort. Clean up any legacy or
-					// malformed value on the next save rather than carrying it on.
-					document_->RemoveKnown(section.toStdString(),
-						field.key.toStdString().c_str());
+					// Optional limits are best-effort; a malformed value is
+					// removed once at load (hunt 2, M2). Display it as unset.
 					raw.clear();
-				}
 			}
             const bool defaultOnlyRendererField = sectionPrefix == QStringLiteral("vprenderer") &&
                 (field.key == QStringLiteral("output_diagnostics") ||
@@ -10301,9 +10535,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 const bool hideUnspecifiedChoice = (defaultProfile && calibrationLutSlot) || (retiredRootDefault && (!raw.isEmpty() || field.key == QStringLiteral("sdr_lut_input_gamma"))) || rootRendererExplicitDefault ||
                     (defaultProfile && (sectionPrefix == QStringLiteral("vprenderer") || scalingAutoChoice) &&
                         autoIndex >= 0 &&
-                        // Only where Auto really is the default: an unset source_resolution
-                        // (native) or deband_vp (off) has an Auto choice too, and showed it
-                        // as if selected (2026-10-16); they show "Default: ..." instead.
+                        // Only where Auto really is the default (source_resolution has been
+                        // auto since 2026-10-16): an unset deband_vp (off) has an Auto choice
+                        // too, and showed it as if selected; it shows "Default: ..." instead.
                         (scalingAutoChoice || fallback(field.key).compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0));
                 if (auto* view = qobject_cast<QListView*>(combo->view()))
                     view->setRowHidden(0, hasUnspecifiedChoice &&
@@ -10453,6 +10687,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();

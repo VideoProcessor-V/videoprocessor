@@ -24,7 +24,8 @@ only piece of real colour design from the plan.
 3. **HDR/LLDV: out of scope, permanently.** Below-black in PQ is a few
    thousandths of a nit and above-white is what the tone map compresses by
    design; there is nothing to preserve. The libplacebo path stays for
-   HDR, and the switch is SDR-only. §4.2 closes.
+   HDR, and the switch is SDR-only. §4.2 closes. *(Later: HDR passthrough with equal colour
+   spaces was added 2026-10-16; see "BTB/WTW and HDR" at the end.)*
 
 4. **Transfers:** the VP conversion supports pure-power source and target
    gammas (the owner's 2.2 in / 2.2+boost out) with sign-preserving
@@ -96,3 +97,21 @@ After Stage 6 as proposed, as its own stage ("Stage 10 — extended range"):
   line.
 - LED shader: code 40 and 1019 greys preserved through gain 1.3 and
   gamma boost.
+
+## BTB/WTW and HDR (as built, 2026-10-17)
+
+Eligibility is decided by `ExtendedRange::Decide` (src/VideoProcessor-Lib/vprenderer/ExtendedRange.h
+and .cpp); the reason is logged.
+
+- **HDR source tone-mapped to an SDR output: BTB/WTW have no meaning there, by design.** The tone
+  mapper maps the HDR signal range into the SDR range; there is no below-black/above-white footroom
+  left to carry (a signal-domain remainder has no meaning after the curve: the output's black and
+  white are the curve's). Reason `HdrSource`. The in-range picture goes through libplacebo's tone
+  mapping as before. Also `HdrMapped` when an HDR source and an HDR output differ, or when dynamic
+  tone mapping (peak detection) is on. This is not a gap to fix.
+- **HDR passthrough** (HDR source and output colour spaces equal, so libplacebo maps nothing, and no
+  dynamic tone mapping): BTB/WTW are carried in the signal domain (no transfer, no matrix).
+  Eligibility switch 4 (`hdrPassthrough`), on with `extended_range_more_cases` (default on).
+- **SDR source on an HDR output:** the code does not carry BTB/WTW (reason `HdrOutput`, "not
+  covered" in ExtendedRange.h); the in-range picture goes through libplacebo as before. Nothing
+  further is decided for this case.

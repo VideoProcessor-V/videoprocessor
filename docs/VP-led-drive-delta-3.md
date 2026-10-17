@@ -4,6 +4,11 @@
 `compensate` mode. `script` mode is unchanged. Instructions relative to the
 current implementation; keep the file structure.
 
+> **Owner 2026-10-17:** "byte-identical to the script" below means the script's decisions, bands
+> and rhythm (and the FL35 command stream). The script is the reference for intent, not for its
+> coding limitations (picture-only, full-coverage peaks; read-back off). See
+> docs/VP-led-core-sources.md, "The script is the reference for intent".
+
 ## Why
 
 The owner's light-meter table (CNTR vs LPW1 at equal white, fit
