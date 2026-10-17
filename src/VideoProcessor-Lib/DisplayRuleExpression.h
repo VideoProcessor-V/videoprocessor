@@ -131,9 +131,33 @@ namespace DisplayRuleExpression
 		catch (const std::exception&) { return false; }
 	}
 
+	// audit 2026-10-16: the one spelling of ${source_rate}, shared by every
+	// lookup (StateVariables, the madVR target-shader lookup and the VP
+	// renderer's legacy lookup).  It is the nominal whole-number rate rounded
+	// to the nearest integer: 59.94 -> 60, 29.97 -> 30, 23.976 -> 24, 50 -> 50.
+	// Previously the copies floored (59.94 -> 59; the madVR copy added 0.0001
+	// first), so `${source_rate} > 59` missed 59.94p and `== 23` matched
+	// 23.976p.  ${cadence} remains the exact rate for rules that need it.
+	// A missing, non-finite or non-positive rate reads as "0".
+	inline std::string NominalSourceRateText(double rateHz)
+	{
+		if (!std::isfinite(rateHz) || rateHz <= 0.0) return "0";
+		return std::to_string(static_cast<long long>(std::floor(rateHz + 0.5)));
+	}
+
 	inline bool ParseNumberOrRange(const std::string& text, double& minimum, double& maximum)
 	{
-		const size_t separator = text.find('-', 1);
+		// audit 2026-10-16: a '-' that follows an exponent marker belongs to
+		// the number (1e-3, 2.5E-4), not to a range; previously "1e-3" was
+		// split into "1e" and "3" and rejected.  The range separator is the
+		// first '-' after the first character that does not follow 'e'/'E'.
+		size_t separator = std::string::npos;
+		for (size_t index = 1; index < text.size(); ++index)
+			if (text[index] == '-' && text[index - 1] != 'e' && text[index - 1] != 'E')
+			{
+				separator = index;
+				break;
+			}
 		if (separator == std::string::npos)
 		{
 			if (!ParseNumber(text, minimum)) return false;
@@ -168,6 +192,21 @@ namespace DisplayRuleExpression
 
 	enum class Operation { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual, Contains };
 
+	// audit 2026-10-16: rule evaluation uses three-valued (Kleene) logic.
+	// A comparison whose variable is unavailable (lookup fails, the value is
+	// empty, or a numeric variable's value does not parse) is Unknown, not
+	// false.  Unknown propagates: !Unknown = Unknown; Unknown && False = False,
+	// Unknown && True = Unknown; Unknown || True = True, Unknown || False =
+	// Unknown.  A rule whose overall result is Unknown does not match.
+	// Previously an unavailable comparison was plain false for every operator,
+	// so `${eotf} != pq` was false but `!(${eotf} == pq)` was true while the
+	// EOTF was unknown; both are now Unknown, so neither matches.  The only
+	// selection change is under `!`: a negated comparison on an unavailable
+	// variable no longer matches.  Exception: ${key} with no key pressed (an
+	// empty key) is a known state, so its comparisons stay definitively false
+	// and `!(${key} == "X")` still matches when no key is pressed.
+	enum class Truth { False, True, Unknown };
+
 	struct Node
 	{
 		enum class Kind { Comparison, Not, And, Or };
@@ -179,42 +218,59 @@ namespace DisplayRuleExpression
 		Operation operation = Operation::Equal;
 		std::vector<std::string> expected;
 
-		bool Evaluate(const ValueLookup& lookup, bool& value, int& specificity) const
+		// Returns false only on an internal evaluation error (none at
+		// present); `value` is the three-valued result.
+		bool Evaluate(const ValueLookup& lookup, Truth& value, int& specificity) const
 		{
 			if (kind == Kind::Not)
 			{
 				if (!left->Evaluate(lookup, value, specificity)) return false;
-				value = !value;
+				if (value != Truth::Unknown)
+					value = value == Truth::True ? Truth::False : Truth::True;
 				return true;
 			}
 			if (kind == Kind::And || kind == Kind::Or)
 			{
-				bool leftValue = false, rightValue = false;
+				Truth leftValue = Truth::False, rightValue = Truth::False;
 				int leftSpecificity = 0, rightSpecificity = 0;
 				if (!left->Evaluate(lookup, leftValue, leftSpecificity) ||
 					!right->Evaluate(lookup, rightValue, rightSpecificity)) return false;
+				const bool leftTrue = leftValue == Truth::True;
+				const bool rightTrue = rightValue == Truth::True;
 				if (kind == Kind::And)
 				{
-					value = leftValue && rightValue;
+					value = leftValue == Truth::False || rightValue == Truth::False ?
+						Truth::False : (leftTrue && rightTrue ? Truth::True : Truth::Unknown);
 					specificity = leftSpecificity + rightSpecificity;
 				}
 				else
 				{
-					value = leftValue || rightValue;
-					specificity = leftValue && rightValue ?
+					value = leftTrue || rightTrue ? Truth::True :
+						(leftValue == Truth::False && rightValue == Truth::False ?
+							Truth::False : Truth::Unknown);
+					specificity = leftTrue && rightTrue ?
 						std::max(leftSpecificity, rightSpecificity) :
-						(leftValue ? leftSpecificity : rightSpecificity);
+						(leftTrue ? leftSpecificity : rightSpecificity);
 				}
 				return true;
 			}
 
 			specificity = variable == "key" ? 0 : 1;
+			bool result = false;
+			value = !EvaluateComparison(lookup, result) ? Truth::Unknown :
+				(result ? Truth::True : Truth::False);
+			return true;
+		}
+
+	private:
+		// Returns false when the comparison is Unknown (the variable is
+		// unavailable); otherwise true with `value` holding the result.
+		bool EvaluateComparison(const ValueLookup& lookup, bool& value) const
+		{
+			value = false;
 			std::string actual;
 			if (!lookup(variable, actual) || actual.empty())
-			{
-				value = false;
-				return true;
-			}
+				return variable == "key"; // no key pressed: known, false
 			// Chords use a canonical spelling (for example Shift+L); letter
 			// casing alone never denotes Shift, so ${key} remains case-sensitive.
 			// Other expression values remain case-insensitive.
@@ -226,10 +282,7 @@ namespace DisplayRuleExpression
 			{
 				double actualNumber = 0.0;
 				if (!ParseNumber(actual, actualNumber))
-				{
-					value = false;
-					return true;
-				}
+					return false; // an unparseable number is unavailable
 				if (operation == Operation::Equal || operation == Operation::NotEqual)
 				{
 					bool equality = false;
@@ -473,6 +526,7 @@ namespace DisplayRuleExpression
 
 			Operation operation = Operation::Equal;
 			const std::string operatorText = m_current.text;
+			bool operatorConsumed = true;
 			switch (m_current.kind)
 			{
 			case TokenKind::Contains: operation = Operation::Contains; Next(); break;
@@ -485,8 +539,20 @@ namespace DisplayRuleExpression
 			default:
 				if (type != ValueType::Boolean)
 					return Fail("expected comparison operator after '${" + variable + "}'", error);
+				operatorConsumed = false;
 				break;
 			}
+			// audit 2026-10-16: a bare Boolean variable means "== true".  A
+			// value word after it without an operator (`${hdr_metadata} false`)
+			// used to be read as `== false`, silently inverting the apparent
+			// meaning and slipping past strict mode.  Without an operator only
+			// the implicit true is accepted: non-strict rules may still spell
+			// the redundant `true`, any other word is a parse error, and strict
+			// (unified) rules reject every bare value word.
+			if (!operatorConsumed && m_current.kind == TokenKind::Word &&
+				(m_strict || ConfigFile::NormalizeName(m_current.text) != "true"))
+				return Fail("expected comparison operator between '${" + variable +
+					"}' and '" + m_current.text + "'", error);
 			if (m_strict && operatorText == "=")
 				return Fail("unified expressions require '==' rather than '='", error);
 
@@ -502,6 +568,8 @@ namespace DisplayRuleExpression
 				Next();
 				while (m_current.kind == TokenKind::Alternative)
 				{
+					if (!operatorConsumed) // audit 2026-10-16: `${b} true|false`
+						return Fail("expected comparison operator after '${" + variable + "}'", error);
 					if (m_strict)
 						return Fail("unified expressions require full comparisons joined by '||'", error);
 					Next();
@@ -601,8 +669,9 @@ namespace DisplayRuleExpression
 				error = "expression was not compiled";
 				return false;
 			}
-			bool value = false;
-			return m_root->Evaluate(lookup, value, specificity) && value;
+			// audit 2026-10-16: an Unknown overall result does not match.
+			Truth value = Truth::False;
+			return m_root->Evaluate(lookup, value, specificity) && value == Truth::True;
 		}
 
 		const std::set<std::string>& Variables() const { return m_variables; }

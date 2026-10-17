@@ -1,5 +1,6 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.IO.Compression  # audit 2026-10-16: ZipArchiveMode lives here (Windows PowerShell 5.1)
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root=Split-Path -Parent $PSScriptRoot
 $fixture=Join-Path $root ('artifacts\portable-config-tests-'+[guid]::NewGuid().ToString('N'))
@@ -7,7 +8,8 @@ $null=New-Item -ItemType Directory -Path $fixture
 $sample=Join-Path $fixture 'source.cfg'
 [IO.File]::WriteAllText($sample,'# sample configuration')
 $hash=(Get-FileHash -LiteralPath $sample).Hash
-$cases=@('valid','missing','empty','different','nested','duplicate','active','bad-manifest')
+# audit 2026-10-16: nested-active (config/VideoProcessor.cfg) and backslash entry names must fail.
+$cases=@('valid','missing','empty','different','nested','duplicate','active','nested-active','backslash','bad-manifest')
 foreach($case in $cases){
     $path=Join-Path $fixture ($case+'.zip')
     $zip=[IO.Compression.ZipFile]::Open($path,[IO.Compression.ZipArchiveMode]::Create)
@@ -17,6 +19,8 @@ foreach($case in $cases){
         if($case -eq 'nested'){$names=@('nested/VideoProcessor.cfg.example')}
         if($case -eq 'duplicate'){$names+= 'VideoProcessor.cfg.example'}
         if($case -eq 'active'){$names+= 'VideoProcessor.cfg'}
+        if($case -eq 'nested-active'){$names+= 'config/VideoProcessor.cfg'}
+        if($case -eq 'backslash'){$names+= 'shaders\sample.hook'}
         foreach($name in $names){
             $writer=[IO.StreamWriter]::new($zip.CreateEntry($name).Open(),[Text.UTF8Encoding]::new($false))
             try {

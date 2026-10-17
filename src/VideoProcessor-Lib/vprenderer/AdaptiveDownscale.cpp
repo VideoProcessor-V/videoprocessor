@@ -439,7 +439,7 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		// The SSIM shader's own condition: the source is made shorter (the
 		// renderer's NATIVE_CROPPED.h > POSTKERNEL.h); and this picture too.
-		else if (!sourceDownscales || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f))
+		else if (!sourceDownscales || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f || sx1 - sx0 > static_cast<float>(dw) + 0.5f))   // either axis (audit 2026-10-16)
 			return unchanged;
 		if (gpu && gpu != p->gpu)
 			Release();

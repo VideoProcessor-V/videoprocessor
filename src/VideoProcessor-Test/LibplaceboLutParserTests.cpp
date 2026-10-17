@@ -5551,10 +5551,17 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ), p3, false).reason == Reason::HdrSource);
 			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ), false).reason == Reason::HdrOutput);
 			Assert::IsTrue(Decide(true, source, p3, true).reason == Reason::CalibrationLut);
-			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886), p3, false).reason == Reason::SourceTransfer);
-			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_DISPLAY_P3, PL_COLOR_TRC_SRGB), false).reason == Reason::OutputTransfer);
-			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA22), p3, false).reason == Reason::SourcePrimaries);
-			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_DCI_P3, PL_COLOR_TRC_GAMMA24), false).reason == Reason::OutputPrimaries);
+			// The Stage 10 eligibility (the audit 2026-10-16 extensions off) ...
+			const ExtendedRange::Settings stage10{ false, false, false, false };
+			Assert::IsTrue(Decide(true, stage10, space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886), p3, nullptr, PL_LUT_UNKNOWN).reason == Reason::SourceTransfer);
+			Assert::IsTrue(Decide(true, stage10, source, space(PL_COLOR_PRIM_DISPLAY_P3, PL_COLOR_TRC_SRGB), nullptr, PL_LUT_UNKNOWN).reason == Reason::OutputTransfer);
+			Assert::IsTrue(Decide(true, stage10, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA22), p3, nullptr, PL_LUT_UNKNOWN).reason == Reason::SourcePrimaries);
+			Assert::IsTrue(Decide(true, stage10, source, space(PL_COLOR_PRIM_DCI_P3, PL_COLOR_TRC_GAMMA24), nullptr, PL_LUT_UNKNOWN).reason == Reason::OutputPrimaries);
+			// ... and with them (the default): all four carried.
+			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886), p3, false).Active());
+			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_DISPLAY_P3, PL_COLOR_TRC_SRGB), false).Active());
+			Assert::IsTrue(Decide(true, space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA22), p3, false).Active());
+			Assert::IsTrue(Decide(true, source, space(PL_COLOR_PRIM_DCI_P3, PL_COLOR_TRC_GAMMA24), false).Active());
 			// Prepare: nothing for an inactive decision; for an active one the
 			// source is declared in the output's space, the restore goes first
 			// (first at SCALED) and the carry last (last at RGB, after NLS).
@@ -5803,6 +5810,745 @@ namespace VideoProcessorTest
 				std::string("on down after gamma light: "), std::string("on down mitchell after off mitchell: ") })
 				Assert::IsTrue(report.find(row + "4 16 40 64 100 502 900 940") != std::string::npos,
 					ExtendedRangeGpuProbe::ToWide("a first carry frame is wrong\n" + report).c_str());
+		}
+
+		// ---- Audit 2026-10-16: the widened BTB/WTW carry (ExtendedRange.h 1.-4.) ----
+		// A render like ExtendedRangeGpuProbe::Render (10-bit limited 4:2:2 in,
+		// 10-bit limited RGB out), with explicit ExtendedRange::Settings (so the
+		// tests do not depend on the renderer's config key), a target LUT
+		// (PL_LUT_NORMALIZED, as the renderer attaches it), an HDR output equal to
+		// the source, a BT.2020 YCbCr matrix, a further texture-input PRE_OUTPUT
+		// hook (as the LED shader) and the 7.360 output-encoding repair the
+		// renderer adds when it is needed.
+		struct ErMoreCase
+		{
+			ExtendedRangeGpuProbe::Case c;
+			ExtendedRange::Settings settings{};
+			const pl_custom_lut* lut = nullptr;
+			bool hdrSameOutput = false;   // output colour space = the (HDR) source's
+			bool bt2020Matrix = false;    // YCbCr BT.2020 NCL
+			const pl_hook* preOutputHook = nullptr;
+		};
+
+		struct ErMoreResult
+		{
+			ExtendedRangeGpuProbe::Result r;
+			bool erHookDisabled = false;   // libplacebo disabled one of VP's extended-range hooks
+			int disabledHooks = 0;
+			bool repaired = false;         // the output-encoding repair was in the chain
+		};
+
+		static ErMoreResult ErRender(pl_gpu gpu, pl_renderer renderer, const ExtendedRangeGpuProbe::Planes& planes,
+			const ErMoreCase& m)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			ErMoreResult more;
+			Result& result = more.r;
+			const Case& c = m.c;
+			const auto sampleCaps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+			pl_fmt r16 = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16, sampleCaps);
+			pl_fmt rg16 = pl_find_fmt(gpu, PL_FMT_UNORM, 2, 16, 16, sampleCaps);
+			pl_fmt t10 = nullptr;
+			const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+			for (int i = 0; i < gpu->num_formats; ++i)
+			{
+				pl_fmt f = gpu->formats[i];
+				if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+					f->texel_size == 4 && (f->caps & caps) == caps && f->host_bits[0] == 10) { t10 = f; break; }
+			}
+			if (!r16 || !rg16 || !t10) { result.error = "formats"; return more; }
+			pl_tex_params lp{}; lp.w = planes.width; lp.h = planes.height; lp.format = r16; lp.sampleable = true;
+			lp.initial_data = planes.luma.data();
+			pl_tex_params cp{}; cp.w = planes.width / 2; cp.h = planes.height; cp.format = rg16; cp.sampleable = true;
+			cp.initial_data = planes.chroma.data();
+			result.width = static_cast<int>(planes.width * c.scale);
+			result.height = static_cast<int>(planes.height * c.scale);
+			pl_tex_params tp{}; tp.w = result.width; tp.h = result.height; tp.format = t10; tp.renderable = true;
+			tp.host_readable = true;
+			tp.blit_dst = (t10->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			pl_tex lt = pl_tex_create(gpu, &lp), ct = pl_tex_create(gpu, &cp), tt = pl_tex_create(gpu, &tp);
+			if (lt && ct && tt)
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = lt; image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = ct; image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = m.bt2020Matrix ? PL_COLOR_SYSTEM_BT_2020_NC : PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				image.repr.bits.sample_depth = 16; image.repr.bits.color_depth = 10; image.repr.bits.bit_shift = 6;
+				image.color.primaries = c.sourcePrimaries;
+				image.color.transfer = c.sourceTransfer;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				if (c.hdrSource)
+				{
+					image.repr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+					image.color.primaries = PL_COLOR_PRIM_BT_2020;
+					image.color.transfer = PL_COLOR_TRC_PQ;
+					image.color.hdr.min_luma = 0.005f;
+					image.color.hdr.max_luma = 1000.0f;
+				}
+				pl_frame target{};
+				target.num_planes = 1;
+				target.planes[0].texture = tt;
+				target.planes[0].components = 3;
+				for (int i = 0; i < 3; ++i) target.planes[0].component_mapping[i] = i;
+				target.repr.sys = PL_COLOR_SYSTEM_RGB;
+				target.repr.levels = c.fullRangeOutput ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+				target.repr.bits.sample_depth = 10; target.repr.bits.color_depth = 10;
+				target.color.primaries = c.outputPrimaries;
+				target.color.transfer = c.outputTransfer;
+				if (m.hdrSameOutput)
+					target.color = image.color;
+				else if (c.hdrSource)
+					LibplaceboRenderParameters::ApplyTargetLuminance(false, c.targetNits, 0.0f, target.color);
+				if (c.blank[0] || c.blank[1] || c.blank[2] || c.blank[3])
+					target.crop = { static_cast<float>(c.blank[0]), static_cast<float>(c.blank[1]),
+						static_cast<float>(result.width - c.blank[2]), static_cast<float>(result.height - c.blank[3]) };
+				target.lut = m.lut;
+				target.lut_type = m.lut ? PL_LUT_NORMALIZED : PL_LUT_UNKNOWN;
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+				params.output_fbo_float32 = c.outputFloat32;
+#endif
+				params.sigmoid_params = c.sigmoid ? &pl_sigmoid_default_params : nullptr;
+				params.disable_linear_scaling = !c.linear;
+				ExtendedRange::Hooks hooks;
+				std::vector<const pl_hook*> list;
+				if (m.preOutputHook)
+					list.push_back(m.preOutputHook);
+				// The new overload with explicit Settings and the target's LUT.
+				result.decision = ExtendedRange::Decide(c.on, m.settings, image.color, target.color, m.lut, target.lut_type);
+				ExtendedRange::Prepare(result.decision, hooks, image.color, target.color, list, false);
+				OutputEncodingRepair::Hook repair;
+				const pl_render_errors before = pl_renderer_get_errors(renderer);
+				if (OutputEncodingRepair::Needed(list, &before, target.lut_type))
+				{
+					repair.SetTarget(target.repr);
+					list.insert(list.begin(), repair.Get());
+					more.repaired = true;
+				}
+				params.hooks = list.empty() ? nullptr : list.data();
+				params.num_hooks = static_cast<int>(list.size());
+				const float black[3] = { 0.0f, 0.0f, 0.0f };
+				pl_frame_clear(gpu, &target, black);
+				if (pl_render_image(renderer, &image, &target, &params))
+				{
+					pl_gpu_finish(gpu);
+					result.pixels.resize(static_cast<size_t>(result.width) * result.height);
+					pl_tex_transfer_params d{}; d.tex = tt; d.ptr = result.pixels.data();
+					result.ok = pl_tex_download(gpu, &d);
+					if (!result.ok) result.error = "download";
+				}
+				else
+					result.error = "pl_render_image";
+				const pl_render_errors errors = pl_renderer_get_errors(renderer);
+				more.disabledHooks = errors.num_disabled_hooks;
+				for (int i = 0; i < errors.num_disabled_hooks; ++i)
+					more.erHookDisabled = more.erHookDisabled || hooks.Owns(errors.disabled_hooks[i]);
+				result.restores = hooks.Applied();
+				hooks.Release();
+			}
+			else
+				result.error = "textures";
+			pl_tex_destroy(gpu, &lt);
+			pl_tex_destroy(gpu, &ct);
+			pl_tex_destroy(gpu, &tt);
+			return more;
+		}
+
+		// 64 + 876 * Eout^-1(Esrc(v)), v = (code - 64) / 876: the carry's
+		// transfer conversion on a grey, from the decision's own transfers.
+		static int ErExpected(const ExtendedRange::Decision& d, int code)
+		{
+			const double v = (code - 64) / 876.0;
+			const double o = ExtendedRange::FromLinear(d.output, ExtendedRange::ToLinear(d.source, v));
+			return (std::min)((std::max)(static_cast<int>(std::lround(64 + 876 * o)), 0), 1023);
+		}
+
+		// Limited 10-bit YCbCr codes of R'G'B' (any values) for matrix kr / kb.
+		static ExtendedRangeGpuProbe::Patch ErPatch(double r, double g, double b, double kr, double kb)
+		{
+			const double y = kr * r + (1.0 - kr - kb) * g + kb * b;
+			const double cb = (b - y) / (2.0 * (1.0 - kb)), cr = (r - y) / (2.0 * (1.0 - kr));
+			return { static_cast<int>(std::lround(64 + 876 * y)), static_cast<int>(std::lround(512 + 896 * cb)),
+				static_cast<int>(std::lround(512 + 896 * cr)) };
+		}
+
+		// A 3D LUT out = A p + t (identity: A = I, t = 0).
+		struct ErLut
+		{
+			std::vector<float> data;
+			pl_custom_lut lut{};
+			float a[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+			float t[3] = { 0, 0, 0 };
+
+			void Build(int n, uint64_t signature)
+			{
+				data.assign(static_cast<size_t>(n) * n * n * 3, 0.0f);
+				for (int bi = 0; bi < n; ++bi)
+					for (int gi = 0; gi < n; ++gi)
+						for (int ri = 0; ri < n; ++ri)
+						{
+							const float p[3] = { ri / float(n - 1), gi / float(n - 1), bi / float(n - 1) };
+							const size_t i = ((static_cast<size_t>(bi) * n + gi) * n + ri) * 3;
+							for (int k = 0; k < 3; ++k)
+								data[i + k] = t[k] + a[k][0] * p[0] + a[k][1] * p[1] + a[k][2] * p[2];
+						}
+				lut = pl_custom_lut{};
+				lut.signature = signature;
+				lut.size[0] = lut.size[1] = lut.size[2] = n;
+				lut.data = data.data();
+			}
+			// A neutral grey v through the LUT, channel k.
+			double Grey(double v, int k) const { return t[k] + (a[k][0] + a[k][1] + a[k][2]) * v; }
+		};
+
+		// A texture-input PRE_OUTPUT hook that changes nothing (as a user
+		// shader such as the LED compensation forces a texture there).
+		static const pl_hook* ErTexturePreOutputHook()
+		{
+			static pl_hook hook = []
+			{
+				pl_hook h{};
+				h.stages = PL_HOOK_PRE_OUTPUT;
+				h.input = PL_HOOK_SIG_TEX;
+				h.signature = 0x5650544553545058ull;   // "VPTESTPX"
+				h.hook = [](void*, const pl_hook_params*) { return pl_hook_res{}; };
+				return h;
+			}();
+			return &hook;
+		}
+
+		static const std::vector<int>& ErCodes()
+		{
+			static const std::vector<int> codes = { 4, 16, 40, 64, 100, 502, 900, 940, 980, 1019 };
+			return codes;
+		}
+
+		// 1: a BT.1886 or sRGB source into several outputs, 1:1, up 1.5,
+		// down 0.5. Every grey (BTB and WTW included) = the carry's conversion
+		// (<= 1 code; <= 2 down), strictly monotonic, BTB below 64 and WTW above
+		// 940; in-range greys as switch-off (<= 1); in-range edges as
+		// switch-off (max 1, mean 0.1, as ExtendedRangeKeepsTodaysScalingAndColours);
+		// all switches off = the old decision (inactive).
+		static void ErTransferCarry(TargetLutGpuFixture& fixture, enum pl_color_transfer source,
+			std::initializer_list<enum pl_color_transfer> outputs, std::string& report)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			const std::vector<int>& codes = ErCodes();
+			const int n = static_cast<int>(codes.size());
+			const Planes greys = Greys(codes);
+			const Planes edges = Edges();
+			for (enum pl_color_transfer output : outputs)
+				for (double scale : { 1.0, 1.5, 0.5 })
+				{
+					ErMoreCase m;
+					m.c.sourceTransfer = source;
+					m.c.outputTransfer = output;
+					m.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+					m.c.scale = scale;
+					ErMoreCase off = m;
+					off.c.on = false;
+					ErMoreCase old = m;
+					old.settings = ExtendedRange::Settings{ false, false, false, false };
+					const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+					const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), greys, off);
+					const ErMoreResult before = ErRender(fixture.Gpu(), fixture.Renderer(), greys, old);
+					const std::string name = std::string(pl_color_transfer_name(source)) + " -> " +
+						pl_color_transfer_name(output) + " x" + std::to_string(scale);
+					Assert::IsTrue(on.r.ok && ref.r.ok && before.r.ok, ToWide(name + ": render failed").c_str());
+					Assert::IsFalse(before.r.decision.Active(), ToWide(name + ": switches off must keep the old (inactive) decision").c_str());
+					Assert::IsTrue(on.r.decision.Active() && on.r.restores > 0, ToWide(name + ": the hooks did not run").c_str());
+					const auto got = Columns(on.r, n, scale), offCodes = Columns(ref.r, n, scale);
+					report += name + ": on " + Join(got) + " | off " + Join(offCodes) + "\n";
+					const int tolerance = scale < 1.0 ? 2 : 1;
+					int previous = -1;
+					for (int i = 0; i < n; ++i)
+					{
+						const int expected = ErExpected(on.r.decision, codes[i]);
+						Assert::IsTrue(std::abs(got[i] - expected) <= tolerance,
+							ToWide(name + ": grey " + std::to_string(codes[i]) + " expected " + std::to_string(expected) + "\n" + report).c_str());
+						if (codes[i] >= 64 && codes[i] <= 940)
+							Assert::IsTrue(std::abs(got[i] - offCodes[i]) <= 1,
+								ToWide(name + ": in-range grey " + std::to_string(codes[i]) + " differs from switch-off\n" + report).c_str());
+						Assert::IsTrue(got[i] > previous, ToWide(name + ": not monotonic\n" + report).c_str());
+						previous = got[i];
+					}
+					Assert::IsTrue(got.front() < 64 && got.back() > 940, ToWide(name + ": BTB/WTW not kept\n" + report).c_str());
+					if (scale != 1.0)
+					{
+						const ErMoreResult a = ErRender(fixture.Gpu(), fixture.Renderer(), edges, off);
+						const ErMoreResult b = ErRender(fixture.Gpu(), fixture.Renderer(), edges, m);
+						Assert::IsTrue(a.r.ok && b.r.ok);
+						const Difference d = Compare(a.r, b.r);
+						report += name + " edges: max " + std::to_string(d.max) + " mean " + std::to_string(d.mean) + "\n";
+						Assert::IsTrue(d.max <= 1 && d.mean <= 0.1, ToWide(name + ": in-range edges changed\n" + report).c_str());
+					}
+				}
+		}
+
+		TEST_METHOD(ExtendedRangeBt1886Carry)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			ErTransferCarry(fixture, PL_COLOR_TRC_BT_1886, { PL_COLOR_TRC_GAMMA24, PL_COLOR_TRC_BT_1886, PL_COLOR_TRC_GAMMA22 }, report);
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		TEST_METHOD(ExtendedRangeSrgbCarry)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			ErTransferCarry(fixture, PL_COLOR_TRC_SRGB, { PL_COLOR_TRC_GAMMA22, PL_COLOR_TRC_SRGB, PL_COLOR_TRC_BT_1886 }, report);
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// 2: an SDR BT.2020 source on a BT.709 output keeps libplacebo's gamut
+		// mapping: in-range saturated colours (out of BT.709's gamut) as
+		// switch-off (<= 1 code per channel), greys incl. BTB/WTW kept (<= 1),
+		// a WTW red above 940 and not below switch-off, a BTB blue below 64 and
+		// not above switch-off; no SCALED restore, the late restore ran.
+		TEST_METHOD(ExtendedRangeWideGamutLateRestore)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			const double kr = 0.2627, kb = 0.0593;
+			const std::vector<Patch> patches = { ErPatch(0.1, 0.9, 0.1, kr, kb), ErPatch(0.9, 0.1, 0.1, kr, kb),
+				ErPatch(0.1, 0.1, 0.9, kr, kb), ErPatch(0.6, 0.6, 0.6, kr, kb),
+				ErPatch(1.06, 0.5, 0.5, kr, kb), ErPatch(0.5, 0.5, -0.06, kr, kb) };
+			const Planes colours = Patches(patches);
+			const Planes greys = Greys(ErCodes());
+			for (double scale : { 1.0, 1.5 })
+			{
+				ErMoreCase m;
+				m.c.sourcePrimaries = PL_COLOR_PRIM_BT_2020;
+				m.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				m.c.scale = scale;
+				m.bt2020Matrix = true;
+				ErMoreCase off = m;
+				off.c.on = false;
+				const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), colours, m);
+				const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), colours, off);
+				Assert::IsTrue(on.r.ok && ref.r.ok);
+				const ExtendedRange::Decision& d = on.r.decision;
+				Assert::IsTrue(d.Active() && d.libplaceboMapsPrimaries && d.LateRestore() && !d.ScaledRestore() && on.r.restores > 0,
+					ToWide(ExtendedRange::Describe(d)).c_str());
+				const int y = on.r.height / 2;
+				for (size_t i = 0; i < patches.size(); ++i)
+				{
+					const int x = static_cast<int>((i * 32 + 16) * scale);
+					report += "x" + std::to_string(scale) + " patch " + std::to_string(i) + ": on ";
+					for (int ch = 0; ch < 3; ++ch) report += std::to_string(on.r.Channel(x, y, ch)) + (ch < 2 ? "," : "");
+					report += " off ";
+					for (int ch = 0; ch < 3; ++ch) report += std::to_string(ref.r.Channel(x, y, ch)) + (ch < 2 ? "," : "");
+					report += "\n";
+				}
+				for (size_t i = 0; i < 4; ++i)
+				{
+					const int x = static_cast<int>((i * 32 + 16) * scale);
+					for (int ch = 0; ch < 3; ++ch)
+						Assert::IsTrue(std::abs(on.r.Channel(x, y, ch) - ref.r.Channel(x, y, ch)) <= 1,
+							ToWide("in-range colour changed\n" + report).c_str());
+				}
+				const int xr = static_cast<int>((4 * 32 + 16) * scale), xb = static_cast<int>((5 * 32 + 16) * scale);
+				Assert::IsTrue(on.r.Channel(xr, y, 0) > 940 && on.r.Channel(xr, y, 0) >= ref.r.Channel(xr, y, 0),
+					ToWide("WTW red not restored\n" + report).c_str());
+				Assert::IsTrue(on.r.Channel(xb, y, 2) < 64 && on.r.Channel(xb, y, 2) <= ref.r.Channel(xb, y, 2),
+					ToWide("BTB blue not restored\n" + report).c_str());
+				const ErMoreResult g = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+				Assert::IsTrue(g.r.ok);
+				const auto got = Columns(g.r, static_cast<int>(ErCodes().size()), scale);
+				report += "greys x" + std::to_string(scale) + ": " + Join(got) + "\n";
+				for (size_t i = 0; i < got.size(); ++i)
+					Assert::IsTrue(std::abs(got[i] - ErCodes()[i]) <= 1, ToWide("grey not kept\n" + report).c_str());
+				// Switch off: the old eligibility refuses this source.
+				ErMoreCase old = m;
+				old.settings.wideSourcePrimaries = false;
+				Assert::IsTrue(ErRender(fixture.Gpu(), fixture.Renderer(), greys, old).r.decision.reason ==
+					ExtendedRange::Reason::SourcePrimaries);
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// 2: a contained gamut (BT.601 EBU SDR on a BT.2020 output; Display P3
+		// is not contained for libplacebo: its red is ~0.0017 outside) converts in
+		// the carry: greys incl. BTB/WTW kept (<= 1), in-range colours as
+		// switch-off (<= 2, as the BT.709 -> P3 colours test).
+		TEST_METHOD(ExtendedRangeContainedGamut)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			const std::vector<Patch> patches = { { 502, 512, 512 }, { 560, 440, 600 }, { 400, 450, 700 },
+				{ 600, 350, 450 }, { 300, 700, 480 }, { 700, 560, 380 } };
+			const Planes colours = Patches(patches);
+			const Planes greys = Greys(ErCodes());
+			for (double scale : { 1.0, 1.5 })
+			{
+				ErMoreCase m;
+				m.c.sourcePrimaries = PL_COLOR_PRIM_BT_601_625;
+				m.c.outputPrimaries = PL_COLOR_PRIM_BT_2020;
+				m.c.scale = scale;
+				ErMoreCase off = m;
+				off.c.on = false;
+				const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), colours, m);
+				const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), colours, off);
+				Assert::IsTrue(on.r.ok && ref.r.ok);
+				const ExtendedRange::Decision& d = on.r.decision;
+				Assert::IsTrue(d.Active() && d.convertPrimaries && !d.libplaceboMapsPrimaries && d.ScaledRestore() && !d.LateRestore(),
+					ToWide(ExtendedRange::Describe(d)).c_str());
+				int worst = 0;
+				const int y = on.r.height / 2;
+				for (size_t i = 0; i < patches.size(); ++i)
+					for (int ch = 0; ch < 3; ++ch)
+					{
+						const int x = static_cast<int>((i * 32 + 16) * scale);
+						worst = std::max(worst, std::abs(on.r.Channel(x, y, ch) - ref.r.Channel(x, y, ch)));
+					}
+				report += "x" + std::to_string(scale) + ": colours worst " + std::to_string(worst) + "\n";
+				Assert::IsTrue(worst <= 2, ToWide("in-range colours changed\n" + report).c_str());
+				const ErMoreResult g = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+				Assert::IsTrue(g.r.ok);
+				const auto got = Columns(g.r, static_cast<int>(ErCodes().size()), scale);
+				report += "greys: " + Join(got) + "\n";
+				for (size_t i = 0; i < got.size(); ++i)
+					Assert::IsTrue(std::abs(got[i] - ErCodes()[i]) <= 1, ToWide("grey not kept\n" + report).c_str());
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// 3: a calibration LUT. Identity 17^3 LUT: the whole picture (BTB/WTW
+		// greys) as without a LUT (max 1 code), in-range edges as switch-off
+		// with the LUT (max 1, mean 0.1). Affine 17^3 LUT with cross-talk: every
+		// grey channel (BTB/WTW included) = A v + t extrapolated (<= 1 code);
+		// switch-off clamps there (logged). The SCALED and late restores ran.
+		TEST_METHOD(ExtendedRangeLutLateRestore)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			ErLut identity;
+			identity.Build(17, 0x4552494431370001ull);
+			ErLut affine;
+			const float a[3][3] = { { 0.90f, 0.05f, 0.01f }, { 0.03f, 0.92f, 0.02f }, { 0.02f, 0.04f, 0.88f } };
+			const float t[3] = { 0.02f, 0.01f, 0.03f };
+			std::memcpy(affine.a, a, sizeof(a));
+			std::memcpy(affine.t, t, sizeof(t));
+			affine.Build(17, 0x4552414631370001ull);
+			const std::vector<int>& codes = ErCodes();
+			const Planes greys = Greys(codes);
+			const Planes edges = Edges();
+			for (double scale : { 1.0, 1.5 })
+			{
+				ErMoreCase m;
+				m.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				m.c.scale = scale;
+				// Identity LUT vs no LUT, both on.
+				ErMoreCase withLut = m;
+				withLut.lut = &identity.lut;
+				const ErMoreResult noLut = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+				const ErMoreResult lut = ErRender(fixture.Gpu(), fixture.Renderer(), greys, withLut);
+				Assert::IsTrue(noLut.r.ok && lut.r.ok);
+				Assert::IsTrue(lut.r.decision.Active() && lut.r.decision.lut == &identity.lut &&
+					lut.r.decision.LateRestore() && lut.r.decision.ScaledRestore() && lut.r.restores >= 2,
+					ToWide(ExtendedRange::Describe(lut.r.decision)).c_str());
+				const Difference d = Compare(noLut.r, lut.r);
+				report += "identity LUT x" + std::to_string(scale) + ": " + Join(Columns(lut.r, static_cast<int>(codes.size()), scale)) +
+					" (max " + std::to_string(d.max) + ")\n";
+				Assert::IsTrue(d.max <= 1, ToWide("identity LUT changed the picture\n" + report).c_str());
+				ErMoreCase offLut = withLut;
+				offLut.c.on = false;
+				const ErMoreResult ea = ErRender(fixture.Gpu(), fixture.Renderer(), edges, offLut);
+				const ErMoreResult eb = ErRender(fixture.Gpu(), fixture.Renderer(), edges, withLut);
+				Assert::IsTrue(ea.r.ok && eb.r.ok);
+				const Difference e = Compare(ea.r, eb.r);
+				report += "identity LUT edges x" + std::to_string(scale) + ": max " + std::to_string(e.max) + " mean " + std::to_string(e.mean) + "\n";
+				Assert::IsTrue(e.max <= 1 && e.mean <= 0.1, ToWide("in-range edges changed with the LUT\n" + report).c_str());
+				// Affine LUT: the extrapolation is exact for an affine LUT.
+				ErMoreCase withAffine = m;
+				withAffine.lut = &affine.lut;
+				ErMoreCase offAffine = withAffine;
+				offAffine.c.on = false;
+				const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), greys, withAffine);
+				const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), greys, offAffine);
+				Assert::IsTrue(on.r.ok && ref.r.ok);
+				const int y = on.r.height / 2;
+				for (size_t i = 0; i < codes.size(); ++i)
+				{
+					const int x = static_cast<int>((i * 32 + 16) * scale);
+					const double v = (codes[i] - 64) / 876.0;
+					report += "affine x" + std::to_string(scale) + " grey " + std::to_string(codes[i]) + ": on ";
+					for (int ch = 0; ch < 3; ++ch) report += std::to_string(on.r.Channel(x, y, ch)) + (ch < 2 ? "," : "");
+					report += " off ";
+					for (int ch = 0; ch < 3; ++ch) report += std::to_string(ref.r.Channel(x, y, ch)) + (ch < 2 ? "," : "");
+					report += "\n";
+					for (int ch = 0; ch < 3; ++ch)
+					{
+						const int expected = static_cast<int>(std::lround(64 + 876 * affine.Grey(v, ch)));
+						Assert::IsTrue(std::abs(on.r.Channel(x, y, ch) - expected) <= 1,
+							ToWide("affine LUT grey " + std::to_string(codes[i]) + " channel " + std::to_string(ch) +
+								" expected " + std::to_string(expected) + "\n" + report).c_str());
+					}
+				}
+				// Switch off: the old eligibility (CalibrationLut).
+				ErMoreCase old = withAffine;
+				old.settings.calibrationLut = false;
+				Assert::IsTrue(ErRender(fixture.Gpu(), fixture.Renderer(), greys, old).r.decision.reason ==
+					ExtendedRange::Reason::CalibrationLut);
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// 2 + 3: a BT.2020 SDR source, BT.709 output and a LUT: the carry clips
+		// the gamut (logged), the LUT carry applies. Identity LUT: greys incl.
+		// BTB/WTW kept (<= 1); low-saturation in-gamut colours as switch-off
+		// without a LUT (<= 2).
+		TEST_METHOD(ExtendedRangeLutGamutClip)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			ErLut identity;
+			identity.Build(17, 0x4552494431370002ull);
+			const double kr = 0.2627, kb = 0.0593;
+			const std::vector<Patch> patches = { ErPatch(0.5, 0.45, 0.4, kr, kb), ErPatch(0.4, 0.45, 0.5, kr, kb),
+				ErPatch(0.45, 0.5, 0.42, kr, kb) };
+			const Planes colours = Patches(patches);
+			const Planes greys = Greys(ErCodes());
+			ErMoreCase m;
+			m.c.sourcePrimaries = PL_COLOR_PRIM_BT_2020;
+			m.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+			m.bt2020Matrix = true;
+			m.lut = &identity.lut;
+			const ErMoreResult g = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+			Assert::IsTrue(g.r.ok);
+			const ExtendedRange::Decision& d = g.r.decision;
+			Assert::IsTrue(d.Active() && d.gamutClip && d.convertPrimaries && !d.libplaceboMapsPrimaries && d.LateRestore() &&
+				d.ScaledRestore(), ToWide(ExtendedRange::Describe(d)).c_str());
+			const auto got = Columns(g.r, static_cast<int>(ErCodes().size()), 1.0);
+			report += "greys: " + Join(got) + "\n";
+			for (size_t i = 0; i < got.size(); ++i)
+				Assert::IsTrue(std::abs(got[i] - ErCodes()[i]) <= 1, ToWide("grey not kept\n" + report).c_str());
+			ErMoreCase off = m;
+			off.c.on = false;
+			off.lut = nullptr;
+			const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), colours, m);
+			const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), colours, off);
+			Assert::IsTrue(on.r.ok && ref.r.ok);
+			int worst = 0;
+			for (size_t i = 0; i < patches.size(); ++i)
+				for (int ch = 0; ch < 3; ++ch)
+					worst = std::max(worst, std::abs(on.r.Channel(static_cast<int>(i * 32 + 16), on.r.height / 2, ch) -
+						ref.r.Channel(static_cast<int>(i * 32 + 16), ref.r.height / 2, ch)));
+			report += "low-saturation colours worst " + std::to_string(worst) + "\n";
+			Assert::IsTrue(worst <= 2, ToWide("in-gamut colours changed\n" + report).c_str());
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// 4: limited-range PQ into an identical PQ output (identity tone
+		// mapping): every grey code 4..1019 kept (<= 1 at 1:1 and up 1.5, <= 2
+		// down 0.5, where libplacebo linearises and switch-off clips BTB - logged).
+		// Tone-mapped cases stay off: HdrSource (SDR output), HdrMapped (other
+		// HDR metadata), and with hdrPassthrough off.
+		TEST_METHOD(ExtendedRangeHdrPassthrough)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			const std::vector<int>& codes = ErCodes();
+			const Planes greys = Greys(codes);
+			for (double scale : { 1.0, 1.5, 0.5 })
+			{
+				ErMoreCase m;
+				m.c.hdrSource = true;
+				m.c.scale = scale;
+				m.hdrSameOutput = true;
+				ErMoreCase off = m;
+				off.c.on = false;
+				const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+				const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), greys, off);
+				Assert::IsTrue(on.r.ok && ref.r.ok);
+				Assert::IsTrue(on.r.decision.Active() && on.r.decision.hdrPassthrough && on.r.restores > 0,
+					ToWide(ExtendedRange::Describe(on.r.decision)).c_str());
+				const auto got = Columns(on.r, static_cast<int>(codes.size()), scale);
+				report += "PQ x" + std::to_string(scale) + ": on " + Join(got) + " | off " +
+					Join(Columns(ref.r, static_cast<int>(codes.size()), scale)) + "\n";
+				const int tolerance = scale < 1.0 ? 2 : 1;
+				for (size_t i = 0; i < codes.size(); ++i)
+					Assert::IsTrue(std::abs(got[i] - codes[i]) <= tolerance, ToWide("PQ code not kept\n" + report).c_str());
+				ErMoreCase old = m;
+				old.settings.hdrPassthrough = false;
+				Assert::IsTrue(ErRender(fixture.Gpu(), fixture.Renderer(), greys, old).r.decision.reason ==
+					ExtendedRange::Reason::HdrSource);
+			}
+			ErMoreCase toned;
+			toned.c.hdrSource = true;
+			toned.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+			Assert::IsTrue(ErRender(fixture.Gpu(), fixture.Renderer(), greys, toned).r.decision.reason ==
+				ExtendedRange::Reason::HdrSource);
+			pl_color_space pq{};
+			pq.primaries = PL_COLOR_PRIM_BT_2020;
+			pq.transfer = PL_COLOR_TRC_PQ;
+			pq.hdr.min_luma = 0.005f;
+			pq.hdr.max_luma = 1000.0f;
+			pl_color_space display = pq;
+			display.hdr.max_luma = 600.0f;
+			Assert::IsTrue(ExtendedRange::Decide(true, ExtendedRange::Settings{}, pq, display, nullptr, PL_LUT_UNKNOWN).reason ==
+				ExtendedRange::Reason::HdrMapped);
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// The late restore with a texture-input PRE_OUTPUT hook after it (as
+		// the LED shader), frames alternating with switch-off frames, 1:1, up
+		// and down: libplacebo disables no hook (0 disabled), the hooks run every
+		// on-frame, the limited output encoding is intact (greys 64/502/940
+		// within 1 code; on 7.360 with the repair) and BTB stays below 64.
+		TEST_METHOD(ExtendedRangeLateHookNotDisabled)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			ErLut identity;
+			identity.Build(17, 0x4552494431370003ull);
+			const std::vector<int>& codes = ErCodes();
+			const Planes greys = Greys(codes);
+			for (int mode = 0; mode < 2; ++mode)
+				for (double scale : { 1.0, 1.5, 0.5 })
+					for (int frame = 0; frame < 3; ++frame)
+					{
+						ErMoreCase m;
+						m.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+						m.c.scale = scale;
+						m.preOutputHook = ErTexturePreOutputHook();
+						if (mode == 0)
+							m.lut = &identity.lut;
+						else
+						{
+							m.c.sourcePrimaries = PL_COLOR_PRIM_BT_2020;
+							m.bt2020Matrix = true;
+						}
+						ErMoreCase off = m;
+						off.c.on = false;
+						const ErMoreResult on = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+						const ErMoreResult ref = ErRender(fixture.Gpu(), fixture.Renderer(), greys, off);
+						Assert::IsTrue(on.r.ok && ref.r.ok);
+						const std::string name = std::string(mode == 0 ? "LUT" : "gamut") + " x" + std::to_string(scale) +
+							" frame " + std::to_string(frame);
+						const auto got = Columns(on.r, static_cast<int>(codes.size()), scale);
+						report += name + ": " + Join(got) + (on.repaired ? " (repaired)" : "") + " disabled " +
+							std::to_string(on.disabledHooks) + "\n";
+						Assert::IsTrue(on.r.decision.Active() && on.r.decision.LateRestore(), ToWide(name).c_str());
+						Assert::IsFalse(on.erHookDisabled, ToWide(name + ": an extended-range hook was disabled\n" + report).c_str());
+						Assert::AreEqual(0, on.disabledHooks, ToWide(name + ": a hook was disabled\n" + report).c_str());
+						Assert::IsTrue(on.r.restores >= static_cast<unsigned long long>(mode == 0 ? 2 : 1),
+							ToWide(name + ": the hooks did not run\n" + report).c_str());
+#if PL_API_VER < 377
+						Assert::IsTrue(on.repaired, ToWide(name + ": the output-encoding repair is needed on 7.360").c_str());
+#endif
+						for (size_t i = 0; i < codes.size(); ++i)
+							if (codes[i] == 64 || codes[i] == 502 || codes[i] == 940)
+								Assert::IsTrue(std::abs(got[i] - codes[i]) <= 1, ToWide(name + ": output encoding wrong\n" + report).c_str());
+						Assert::IsTrue(got.front() < 64, ToWide(name + ": BTB lost\n" + report).c_str());
+					}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+		}
+
+		// The late restore's position mapping with an offset target crop
+		// (blanking 13/3/7/5) and narrow alternating BTB/WTW columns. LUT mode:
+		// identity LUT vs no LUT (SCALED restore only), every pixel max 1 code,
+		// mean 0.1, at 1:1 and up 1.5 (the late restore reads v back exactly).
+		// Gamut mode: BT.2020 greys vs the same greys as BT.709 (SCALED restore
+		// path), column centres <= 1 code (edges differ by the remainder's
+		// linear vs. signal footprint averaging, not checked).
+		TEST_METHOD(ExtendedRangeLateRestoreCropAlignment)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			std::string log, report;
+			fixture.CaptureLog(&log);
+			ErLut identity;
+			identity.Build(17, 0x4552494431370004ull);
+			const std::vector<int> codes = { 4, 1019, 4, 1019, 64, 940, 16, 980, 502, 4, 1019, 40 };
+			const int width = 16;
+			const Planes greys = Greys(codes, width, 16);
+			for (double scale : { 1.0, 1.5 })
+			{
+				ErMoreCase m;
+				m.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				m.c.scale = scale;
+				m.c.blank[0] = 13; m.c.blank[1] = 3; m.c.blank[2] = 7; m.c.blank[3] = 5;
+				ErMoreCase withLut = m;
+				withLut.lut = &identity.lut;
+				const ErMoreResult a = ErRender(fixture.Gpu(), fixture.Renderer(), greys, m);
+				const ErMoreResult b = ErRender(fixture.Gpu(), fixture.Renderer(), greys, withLut);
+				Assert::IsTrue(a.r.ok && b.r.ok && b.r.decision.LateRestore());
+				const Difference d = Compare(a.r, b.r);
+				report += "LUT x" + std::to_string(scale) + ": max " + std::to_string(d.max) + " mean " + std::to_string(d.mean) + "\n";
+				Assert::IsTrue(d.max <= 1 && d.mean <= 0.1, ToWide("the late LUT restore is misaligned\n" + report).c_str());
+
+				ErMoreCase wide = m;
+				wide.c.sourcePrimaries = PL_COLOR_PRIM_BT_2020;
+				wide.bt2020Matrix = true;
+				const ErMoreResult w = ErRender(fixture.Gpu(), fixture.Renderer(), greys, wide);
+				Assert::IsTrue(w.r.ok && w.r.decision.libplaceboMapsPrimaries);
+				const double cropW = a.r.width - m.c.blank[0] - m.c.blank[2];
+				const double cropH = a.r.height - m.c.blank[1] - m.c.blank[3];
+				const int y = static_cast<int>(m.c.blank[1] + cropH / 2);
+				std::string line = "gamut x" + std::to_string(scale) + ":";
+				for (size_t i = 0; i < codes.size(); ++i)
+				{
+					const int x = static_cast<int>(m.c.blank[0] + (i * width + width / 2.0) * cropW / greys.width);
+					line += " " + std::to_string(w.r.Channel(x, y, 1)) + "/" + std::to_string(a.r.Channel(x, y, 1));
+					for (int ch = 0; ch < 3; ++ch)
+						Assert::IsTrue(std::abs(w.r.Channel(x, y, ch) - a.r.Channel(x, y, ch)) <= 1,
+							ToWide("the late gamut restore is misaligned\n" + report + line).c_str());
+				}
+				report += line + "\n";
+			}
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
 		}
 
 		TEST_METHOD(DejudderToleranceFollowsTheSourceRange)

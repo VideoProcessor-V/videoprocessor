@@ -27,14 +27,18 @@ function Get-Dependencies([string]$File){
 }
 $requirement=Get-Content -LiteralPath (Join-Path $PayloadRoot 'prerequisites\runtime-requirement.json') -Raw | ConvertFrom-Json
 $minimum=[version]$requirement.minimumVersion
-$groups=@{'host'=@();'config'=@();'vprenderer'=@()}
+# audit 2026-10-16: vprenderer-beta is its own load directory (like vprenderer); its
+# runtime closure is staged next to the beta renderer instead of the host group.
+$rendererGroups=@('vprenderer','vprenderer-beta')
+$groups=@{'host'=@();'config'=@();'vprenderer'=@();'vprenderer-beta'=@()}
 $mfcMinimum=[version]'14.0.0.0'
 foreach($file in Get-ChildItem -LiteralPath $PayloadRoot -File -Recurse){
  if($file.Extension -notin @('.exe','.dll')){continue}
  $relative=$file.FullName.Substring($PayloadRoot.TrimEnd('\').Length+1).Replace('\','/')
  if($relative -like 'prerequisites/*'){continue}
  $dependencies=@(Get-Dependencies $file.FullName | Where-Object {$_ -match $runtimeNames})
- $group=if($relative -like 'config/*'){'config'}elseif($relative -like 'vprenderer/*'){'vprenderer'}else{'host'}
+ $top=$relative.Split('/')[0]
+ $group=if($relative -like 'config/*'){'config'}elseif($relative.Contains('/') -and $top -in $rendererGroups){$top}else{'host'}
  $groups[$group]+=$dependencies
  if($dependencies -contains 'mfc140u.dll'){
   $record=@($requirement.buildArtifacts | Where-Object file -eq $relative)
@@ -43,7 +47,7 @@ foreach($file in Get-ChildItem -LiteralPath $PayloadRoot -File -Recurse){
  }
 }
 $sources=@{};$entries=@()
-foreach($group in @('host','config','vprenderer')){
+foreach($group in @('host','config','vprenderer','vprenderer-beta')){
  $pending=[Collections.Generic.Queue[string]]::new()
  foreach($name in $groups[$group]){$pending.Enqueue($name)}
  $seen=@{}

@@ -464,7 +464,8 @@ QString queueLatencyNoteText(int milliseconds)
 {
     if (milliseconds <= 0)
         return QStringLiteral(
-            "Off: the queue holds Target frames (Advanced), so the delay changes with the frame rate.");
+            // audit 2026-10-16: Target frames moved out of Advanced (Queue target: By frames).
+            "Off: the queue holds Target frames (Queue target: By frames), so the delay changes with the frame rate.");
     QStringList parts;
     const struct { const char* name; double rate; } rates[] = {
         { "24p", 24000.0 / 1001.0 }, { "25p", 25.0 }, { "30p", 30000.0 / 1001.0 },
@@ -979,6 +980,145 @@ QString controlName(const QString& section, const QString& key)
     return QStringLiteral("config.%1.%2").arg(section, key);
 }
 
+// The fixed [shortcuts] commands and VP's compiled defaults, shown on the
+// Shortcuts page and validated before Apply (audit 2026-10-16).
+struct FixedShortcutField
+{
+    const char* label;
+    const char* key;
+    const char* defaultValue;
+};
+const FixedShortcutField kApplicationShortcutFields[] = {
+    { "Open configuration", "config_editor", "Ctrl+Shift+S" },
+    { "Toggle video-only UI", "toggle_noui", "Ctrl+Shift+U" },
+    { "Toggle fullscreen", "fullscreen_toggle", "Alt+Enter" },
+    { "Exit fullscreen", "fullscreen_exit", "Esc" },
+    { "Toggle statistics", "toggle_stats_overlay", "Ctrl+I" },
+    { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
+    { "Re-apply rules", "reapply_rules", "" },
+    { "Room lights (dark / lit)", "room_lights", "" },
+    { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
+    { "Automatic transfer (DirectShow only)", "auto_set", "Ctrl+Shift+A" },
+    { "PQ transfer (DirectShow only)", "pq_set", "Ctrl+Shift+P" }
+};
+const FixedShortcutField kCaptureShortcutFields[] = {
+    { "Restart renderer", "renderer_restart", "Shift+R" },
+    { "Reset renderer", "renderer_reset", "R" },
+    { "DeckLink input 1", "capture_1", "Ctrl+1" },
+    { "DeckLink input 2", "capture_2", "Ctrl+2" },
+    { "DeckLink input 3", "capture_3", "Ctrl+3" },
+    { "DeckLink input 4", "capture_4", "Ctrl+4" },
+    { "Video conversion off", "video_conversion_off", "V" },
+    { "V210 to P010 conversion", "video_conversion_p010", "Shift+V" }
+};
+
+struct ShortcutIssue
+{
+    QString message;
+    QString field;
+    QString otherField; // the other side of a clash, marked too
+};
+
+// audit 2026-10-16: the editor's port of the legacy Config's
+// ValidateFixedShortcuts. Fixed shortcuts (an absent key keeps VP's default,
+// an empty one disables it) and renderer-selection shortcuts (render.N) must
+// be valid chords and unique; a profile's shortcut= or cycle_shortcut must be
+// a valid chord and must not take a fixed shortcut. Several NLS modes may
+// share one cycle_shortcut (that is one cycle), and profile-to-profile
+// clashes are left to VP's own profile validation.
+std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument& document)
+{
+    std::vector<ShortcutIssue> issues;
+    const QString chordHelp = QStringLiteral(
+        "Use one key (A-Z, 0-9, F1-F24, Esc or Enter) with optional Ctrl, Alt or Shift, such as Ctrl+Shift+A.");
+    std::map<std::string, std::string> configured;
+    for (const auto& setting : document.SectionSettings("shortcuts"))
+        configured[ConfigFile::NormalizeName(setting.first)] = setting.second;
+
+    std::map<std::string, std::pair<QString, QString>> used; // canonical chord -> owner label, field
+    auto useFixed = [&](const QString& label, const QString& key, const std::string& text)
+    {
+        const std::string trimmed = ConfigFile::Trim(text);
+        if (trimmed.empty()) return;
+        std::string canonical;
+        if (!RendererProfileConfig::CanonicalizeKeyChord(trimmed, canonical))
+        {
+            issues.push_back({ QStringLiteral("[shortcuts] %1: '%2' is not a valid shortcut. %3")
+                .arg(label, QString::fromLocal8Bit(trimmed.c_str()), chordHelp),
+                controlName(QStringLiteral("shortcuts"), key) });
+            return;
+        }
+        const QString field = controlName(QStringLiteral("shortcuts"), key);
+        const auto existing = used.find(canonical);
+        if (existing != used.end())
+        {
+            issues.push_back({ QStringLiteral("[shortcuts] %1 and %2 both use %3. Fixed shortcuts must be unique.")
+                .arg(existing->second.first, label, QString::fromStdString(canonical)),
+                field, existing->second.second });
+            return;
+        }
+        used.emplace(canonical, std::make_pair(label, field));
+    };
+    auto useFixedFields = [&](const FixedShortcutField* fields, size_t count)
+    {
+        for (size_t index = 0; index < count; ++index)
+        {
+            const FixedShortcutField& field = fields[index];
+            const auto entry = configured.find(field.key);
+            useFixed(QString::fromLatin1(field.label), QString::fromLatin1(field.key),
+                entry != configured.end() ? entry->second : std::string(field.defaultValue));
+        }
+    };
+    useFixedFields(kApplicationShortcutFields, std::size(kApplicationShortcutFields));
+    useFixedFields(kCaptureShortcutFields, std::size(kCaptureShortcutFields));
+    for (const auto& entry : configured)
+    {
+        unsigned int index = 0;
+        if (!ConfigFile::TryParseIndexedKey(entry.first, "render", index)) continue;
+        useFixed(QStringLiteral("Renderer %1 selection").arg(index),
+            QString::fromStdString(entry.first), entry.second);
+    }
+
+    const char* profileRoots[] = { "queue", "lldv", "vprenderer", "shader", "shaders" };
+    for (const std::string& section : document.SectionNames())
+    {
+        const std::string normalized = ConfigFile::NormalizeName(section);
+        bool profileSection = false;
+        for (const char* root : profileRoots)
+        {
+            const std::string prefix(root);
+            if (normalized == prefix ||
+                (normalized.size() > prefix.size() && normalized.compare(0, prefix.size(), prefix) == 0 &&
+                    normalized[prefix.size()] == '.'))
+                profileSection = true;
+        }
+        if (!profileSection) continue;
+        for (const auto& setting : document.SectionSettings(section))
+        {
+            const std::string key = ConfigFile::NormalizeName(setting.first);
+            if (key != "shortcut" && key != "cycle_shortcut") continue;
+            const std::string trimmed = ConfigFile::Trim(setting.second);
+            if (trimmed.empty()) continue;
+            const QString sectionText = QString::fromStdString(section);
+            const QString keyText = QString::fromStdString(key);
+            std::string canonical;
+            if (!RendererProfileConfig::CanonicalizeKeyChord(trimmed, canonical))
+            {
+                issues.push_back({ QStringLiteral("[%1] %2 '%3' is not a valid shortcut. %4")
+                    .arg(sectionText, keyText, QString::fromLocal8Bit(trimmed.c_str()), chordHelp),
+                    controlName(sectionText, keyText) });
+                continue;
+            }
+            const auto fixed = used.find(canonical);
+            if (fixed != used.end())
+                issues.push_back({ QStringLiteral("[%1] %2 %3 is already the fixed shortcut for %4. Change one of them.")
+                    .arg(sectionText, keyText, QString::fromStdString(canonical), fixed->second.first),
+                    controlName(sectionText, keyText), fixed->second.second });
+        }
+    }
+    return issues;
+}
+
 QString accessibleSettingName(QString key)
 {
     key.replace(u'_', u' ');
@@ -1322,6 +1462,17 @@ ConfigEditorWindow::~ConfigEditorWindow()
 	{
 		manualCommandThread_->wait();
 		manualCommandThread_ = nullptr;
+	}
+	// audit 2026-10-16: the RS-232 test and a remote Apply may still run.
+	if (projectorTestThread_)
+	{
+		projectorTestThread_->wait();
+		projectorTestThread_ = nullptr;
+	}
+	if (remoteApplyThread_)
+	{
+		remoteApplyThread_->wait();
+		remoteApplyThread_ = nullptr;
 	}
 	if (revealEventNotifier_)
 		revealEventNotifier_->setEnabled(false);
@@ -1725,6 +1876,7 @@ void ConfigEditorWindow::finishLocalTargetSwitch(const Target& target,
 bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 {
 	if (targetSwitchPending_) return false;
+	if (remoteApplyThread_) return false; // audit 2026-10-16: Apply in flight
 	if (target.host.isEmpty() && !localAvailable_) return false;
 	if (!noTarget_ && target.host.compare(remoteHost_, Qt::CaseInsensitive) == 0 &&
 		target.port == remotePort_) return true;
@@ -1741,7 +1893,9 @@ bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 		prompt.exec();
 		if (prompt.clickedButton() == apply)
 		{
-			if (!saveChanges()) return false;
+			// audit 2026-10-16: a remote Apply runs in the background; switch
+			// once it has succeeded (no longer dirty, so no second prompt).
+			if (!saveChanges([this, target] { selectAnotherTarget(target); })) return false;
 		}
 		else if (prompt.clickedButton() != discard) return false;
 	}
@@ -3718,6 +3872,13 @@ QStringList ConfigEditorWindow::validationErrors(QStringList& fields,
             fields.push_back(controlName(section, QStringLiteral("sdr_black_nits")));
         }
     }
+    // audit 2026-10-16: invalid, duplicate or clashing shortcuts block Apply
+    // instead of being saved for VP to reject or silently drop.
+    for (const ShortcutIssue& issue : shortcutIssues(*document_))
+    {
+        errors.push_back(issue.message);
+        fields.push_back(issue.field);
+    }
     return errors;
 }
 
@@ -3742,6 +3903,29 @@ bool ConfigEditorWindow::updateValidationState()
     const QStringList errors = validationErrors(fields, true, false);
     const bool valid = errors.isEmpty();
     validationValid_ = valid;
+    {
+        // audit 2026-10-16: mark shortcut fields that block Apply and clear
+        // the mark once they are corrected.
+        QStringList marked;
+        if (configurationLoaded_ && document_)
+            for (const ShortcutIssue& issue : shortcutIssues(*document_))
+                for (const QString& name : { issue.field, issue.otherField })
+                    if (!name.isEmpty()) marked.push_back(name);
+        QStringList touched = invalidShortcutFields_;
+        touched.append(marked);
+        touched.removeDuplicates();
+        for (const QString& name : touched)
+        {
+            auto* edit = findChild<QLineEdit*>(name);
+            if (!edit) continue;
+            const bool invalid = marked.contains(name);
+            if (edit->property("invalid").toBool() == invalid) continue;
+            edit->setProperty("invalid", invalid);
+            edit->style()->unpolish(edit);
+            edit->style()->polish(edit);
+        }
+        invalidShortcutFields_ = marked;
+    }
     if (saveButton_)
         saveButton_->setEnabled(configurationLoaded_ && valid);
     if (applyButton_)
@@ -3965,6 +4149,23 @@ void ConfigEditorWindow::applyChanges()
     saveChanges();
 }
 
+// audit 2026-10-16: lock the editor while a remote Apply is in flight; on
+// release the normal validation state re-enables Apply and OK.
+void ConfigEditorWindow::setRemoteApplyBusy(bool busy)
+{
+    if (configurationHost_) configurationHost_->setEnabled(!busy);
+    if (navigation_) navigation_->setEnabled(!busy);
+    if (auto* cancel = findChild<QPushButton*>(QStringLiteral("cancelConfiguration")))
+        cancel->setEnabled(!busy);
+    if (busy)
+    {
+        if (applyButton_) applyButton_->setEnabled(false);
+        if (saveButton_) saveButton_->setEnabled(false);
+        return;
+    }
+    updateValidationState();
+}
+
 void ConfigEditorWindow::setRendererDiscoveryForTesting(
     const QStringList& allRenderers, const QStringList& filteredRenderers)
 {
@@ -4042,9 +4243,19 @@ void ConfigEditorWindow::applyRendererVisibilityFilter(bool hideLegacyRenderers)
     }
 }
 
-bool ConfigEditorWindow::saveChanges()
+bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
 {
     if (!configurationLoaded_ || !document_) return false;
+    // audit 2026-10-16: a remote Apply runs off the UI thread; one at a time.
+    if (remoteApplyThread_)
+    {
+        setStatus(QStringLiteral("Still applying on the target; wait for it to finish."));
+        return false;
+    }
+    // audit 2026-10-16: canonical shortcut spelling and disabled action drafts
+    // are written into the document only for this save. If validation or the
+    // save fails, restore the document so it matches the controls again.
+    const auto rollback = std::make_shared<const ConfigEditorCore::ConfigDocument>(*document_);
 
     const DocumentSnapshot currentSnapshot = captureDocumentSnapshot(*document_);
     const std::vector<ConfigurationApplyPolicy::Change> changed = changedDocumentValues(
@@ -4071,7 +4282,9 @@ bool ConfigEditorWindow::saveChanges()
                             "foreground_only" &&
                         ConfigFile::NormalizeName(setting.first) !=
                             "global_hotkeys") ||
-                    ConfigFile::NormalizeName(setting.first) == "shortcut";
+                    ConfigFile::NormalizeName(setting.first) == "shortcut" ||
+                    // audit 2026-10-16: cycle shortcuts too.
+                    ConfigFile::NormalizeName(setting.first) == "cycle_shortcut";
                 if (!isShortcut || ConfigFile::Trim(setting.second).empty()) continue;
                 std::string canonical;
                 if (RendererProfileConfig::CanonicalizeKeyChord(setting.second, canonical))
@@ -4108,41 +4321,95 @@ bool ConfigEditorWindow::saveChanges()
 	const bool creatingConfiguration = !document_->existedAtLoad;
     if (!validateCandidate(error))
     {
+        *document_ = *rollback; // audit 2026-10-16
         setStatus(QString::fromStdWString(error), true);
         if (saveButton_) saveButton_->setEnabled(false);
         if (applyButton_) applyButton_->setEnabled(false);
         return false;
     }
+    // Uncheck the Enabled box of a drafted action shown on the Actions page
+    // once the save has committed (audit 2026-10-16: not before).
+    const auto showDraftedActions = [this](const QStringList& drafted)
+    {
+        if (drafted.isEmpty()) return;
+        if (auto* actions = findChild<QListWidget*>(QStringLiteral("config.actions.items"));
+            actions && actions->currentItem() &&
+            drafted.contains(actions->currentItem()->text(), Qt::CaseInsensitive))
+        {
+            if (auto* enabled = findChild<QCheckBox*>(QStringLiteral("config.actions.enabled")))
+            {
+                const QSignalBlocker blocker(enabled);
+                enabled->setChecked(false);
+            }
+        }
+    };
 	if (remoteClient_)
 	{
-		ConfigurationRpcClient::ApplyResult applied;
-		std::string rpcError;
-		const std::string candidate = document_->Serialize();
-		if (!remoteClient_->ApplyConfig(document_->loadedBytes,
-			candidate, applied, rpcError))
+		// audit 2026-10-16: VP may take up to about a minute to answer an
+		// Apply. Run it on a worker thread (like runTargetCommand) with a
+		// copy of the stateless client, and keep the editor locked meanwhile
+		// so the document cannot change under the request.
+		struct Outcome
 		{
-			setStatus(QString::fromUtf8(rpcError), true);
-			return false;
-		}
-		document_->loadedBytes = candidate;
-		document_->requiresMigrationBackup = false;
-		dirty_ = false;
-		if (saveButton_) saveButton_->setEnabled(true);
-		if (applyButton_) applyButton_->setEnabled(false);
-		savedSnapshot_ = captureDocumentSnapshot(*document_);
-		updateEffectSummary();
-		const QString outcome = applied.status == 0 ?
-			QStringLiteral("Saved on target for next start") :
-			applied.status == 1 ? QStringLiteral("Applied on target") :
-			QStringLiteral("Saved on target; reset or restart requested");
-		setStatus(QStringLiteral("%1: %2.").arg(outcome,
-			QString::fromUtf8(applied.action)));
-		return true;
+			bool ok = false;
+			ConfigurationRpcClient::ApplyResult applied;
+			std::string error;
+		};
+		const auto outcome = std::make_shared<Outcome>();
+		const ConfigurationRpcClient client = *remoteClient_;
+		const std::string baseline = document_->loadedBytes;
+		const std::string candidate = document_->Serialize();
+		remoteApplyThread_ = QThread::create([client, baseline, candidate, outcome]
+		{
+			outcome->ok = client.ApplyConfig(baseline, candidate, outcome->applied, outcome->error);
+		});
+		remoteApplyThread_->setParent(this);
+		QThread* worker = remoteApplyThread_;
+		setRemoteApplyBusy(true);
+		setStatus(QStringLiteral("Applying on the target… VP can take up to a minute to answer."));
+		connect(worker, &QThread::finished, this, [this, worker, outcome, rollback, candidate,
+			draftedActions, showDraftedActions, afterRemoteApply]
+		{
+			if (remoteApplyThread_ == worker) remoteApplyThread_ = nullptr;
+			worker->deleteLater();
+			setRemoteApplyBusy(false);
+			if (!document_) return;
+			if (!outcome->ok)
+			{
+				*document_ = *rollback;
+				updateValidationState();
+				setStatus(QString::fromUtf8(outcome->error), true);
+				return;
+			}
+			document_->loadedBytes = candidate;
+			document_->requiresMigrationBackup = false;
+			dirty_ = false;
+			if (saveButton_) saveButton_->setEnabled(true);
+			if (applyButton_) applyButton_->setEnabled(false);
+			savedSnapshot_ = captureDocumentSnapshot(*document_);
+			updateEffectSummary();
+			showDraftedActions(draftedActions);
+			const QString applied = outcome->applied.status == 0 ?
+				QStringLiteral("Saved on target for next start") :
+				outcome->applied.status == 1 ? QStringLiteral("Applied on target") :
+				QStringLiteral("Saved on target; reset or restart requested");
+			QString message = QStringLiteral("%1: %2.").arg(applied,
+				QString::fromUtf8(outcome->applied.action));
+			if (!draftedActions.isEmpty())
+				message += QStringLiteral(" Incomplete action%1 %2 saved as disabled draft%1.")
+					.arg(draftedActions.size() == 1 ? QString() : QStringLiteral("s"),
+						draftedActions.join(QStringLiteral(", ")));
+			setStatus(message);
+			if (afterRemoteApply) afterRemoteApply();
+		});
+		worker->start();
+		return false;
 	}
     // Config is the interactive authority for this file. Save the user's
     // validated editor state instead of refusing a stale-file conflict.
     if (!ConfigEditorCore::SaveSafely(*document_, result, error, true))
     {
+        *document_ = *rollback; // audit 2026-10-16
         setStatus(QString::fromStdWString(error), true);
         if (!testMode_) openValidationError(this, QString::fromStdWString(error));
         return false;
@@ -4159,16 +4426,7 @@ bool ConfigEditorWindow::saveChanges()
     const bool notified = notifyVideoProcessor();
     if (!draftedActions.isEmpty())
     {
-        if (auto* actions = findChild<QListWidget*>(QStringLiteral("config.actions.items"));
-            actions && actions->currentItem() &&
-            draftedActions.contains(actions->currentItem()->text(), Qt::CaseInsensitive))
-        {
-            if (auto* enabled = findChild<QCheckBox*>(QStringLiteral("config.actions.enabled")))
-            {
-                const QSignalBlocker blocker(enabled);
-                enabled->setChecked(false);
-            }
-        }
+        showDraftedActions(draftedActions);
         setStatus(QStringLiteral("Changes saved%1. Incomplete action%2 %3 saved as disabled draft%2.")
             .arg(notified ? QStringLiteral(" and sent to VideoProcessor") : QStringLiteral("; VideoProcessor could not be notified"))
             .arg(draftedActions.size() == 1 ? QString() : QStringLiteral("s"),
@@ -4554,7 +4812,8 @@ QWidget* ConfigEditorWindow::createShell()
         // A clean OK is just a close. A dirty OK must remain open if validation
         // or safe persistence fails, so the user can correct the candidate.
         if (!dirty_) hide();
-        else if (saveChanges()) hide();
+        // audit 2026-10-16: a remote Apply finishes later and hides then.
+        else if (saveChanges([this] { hide(); })) hide();
     });
     connect(cancel, &QPushButton::clicked, this, [this]
     {
@@ -5315,7 +5574,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto* useLayout = new QHBoxLayout(useRow);
             useLayout->setContentsMargins(0, 0, 0, 0);
             useLayout->addWidget(new QLabel(QStringLiteral("Use this queue:")));
-            auto* offButton = new QRadioButton(QStringLiteral("Off (by hand or shortcut)"));
+            // audit 2026-10-16: "Off" read as the queue being disabled.
+            auto* offButton = new QRadioButton(QStringLiteral("Only when chosen (shortcut or by hand)"));
             offButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.off")));
             auto* rulesButton = new QRadioButton(QStringLiteral("By rules"));
             rulesButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rules")));
@@ -5773,9 +6033,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* lowLatencyPath = addChoice(QStringLiteral("VP's low-latency path"), QStringLiteral("low_latency_path"),
             { QStringLiteral("on"), QStringLiteral("off") });
         lowLatencyPath->setToolTip(QStringLiteral(
-            "On: with this queue VP takes its low-latency path - the de-judder off, no motion computed ahead, half-float "
-            "buffers (32-bit float Auto), cinema-only shaders skipped, and early upload with 'Upload frames as they arrive: "
-            "Auto'. Off: the regular path. Not set: on only for a profile named Low_Latency."));
+            "On: with this queue VP takes its low-latency path - the de-judder off, no motion computed ahead, "
+            "cinema-only shaders skipped, and early upload with 'Upload frames as they arrive: Auto' (full 32-bit "
+            "precision is kept). Off: the regular path. Not set: on only for a queue named Low_Latency."));
         // Stage 5: the queue target as time. VP turns it into Target frames
         // for each source rate, so the delay - and the audio offset - stays
         // about the same at 24p, 30p and 60p.
@@ -6548,7 +6808,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         motionSlider->setToolTip(QStringLiteral(
             "How much motion is changed from what was shot, graded to the maximum: As shot, Film, Cinema (default), Natural, "
             "Smooth, Max. "
-            "Each step moves only the de-judder strength, the smoothing of motion within the frame and how much "
+            // audit 2026-10-16: the slider also moves the even-cadence (30p) strength and the 1000/1001 rates.
+            "Each step moves only the de-judder strength, the strength on even cadences (30p doubled to 60p), whether "
+            "1000/1001 rates (23.976, 29.97) are included, the smoothing of motion within the frame and how much "
             "fast action keeps its strobing; the values appear in the fields below and can be edited (Custom). "
             "Each profile has its own position, so profile rules can give each frame rate its own level "
             "(e.g. a 24p profile at Cinema, a 30p profile at Natural). Film-like sources only; off for 50p/60p "
@@ -7032,17 +7294,19 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         capturePath->setToolTip(QStringLiteral(
             "DeckLink v210 / UYVY frames are uploaded as they arrive and unpacked on the GPU: the same picture byte for "
             "byte, about half the time at 4K and no CPU conversion. CPU = the old conversion. RGB formats follow the "
-            "native RGB capture choice below."));
-        auto* captureUpload = addChoice(QStringLiteral("Upload frames as they arrive (experimental)"), QStringLiteral("capture_upload"),
+            "'Native 10/12-bit RGB capture' choice (in Fixes under test)."));   // audit 2026-10-16: was "below"
+        // audit 2026-10-16: the default is Auto (on only in the low-latency
+        // path), so the label no longer says experimental.
+        auto* captureUpload = addChoice(QStringLiteral("Upload frames as they arrive"), QStringLiteral("capture_upload"),
             { QStringLiteral("auto"), QStringLiteral("render"), QStringLiteral("early") });
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("auto")), QStringLiteral("Auto (early in the low-latency path)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("render")), QStringLiteral("Off (the render thread uploads)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("early")), QStringLiteral("On (early, second device)"));
         captureUpload->setToolTip(QStringLiteral(
-            "Experimental, off by default. Each captured frame is copied to the GPU on its own thread as it arrives, "
-            "instead of by the render thread when it is shown: about 5 ms less work for the render thread per 4K 12-bit "
-            "frame, and the copy overlaps the previous frame's rendering. A frame with no free upload slot simply takes "
-            "the normal path."));
+            "Auto (default): on only in the low-latency path, off otherwise. On: each captured frame is copied to the "
+            "GPU on its own thread as it arrives, instead of by the render thread when it is shown: about 5 ms less work "
+            "for the render thread per 4K 12-bit frame, and the copy overlaps the previous frame's rendering. A frame "
+            "with no free upload slot simply takes the normal path. Off: the render thread uploads every frame."));
         auto* sourceRange = addChoice(QStringLiteral("Source range"), QStringLiteral("source_range"),
             { QStringLiteral("auto"), QStringLiteral("full"), QStringLiteral("limited") });
         sourceRange->setItemText(sourceRange->findData(QStringLiteral("auto")), QStringLiteral("Auto (from the capture format)"));
@@ -7372,7 +7636,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "hardware, off the render path. It needs those 4 frames queued, so On makes the queue hold at least 5 frames "
             "(whether it is set by time or in frames) while the de-judder runs. With no frames queued ahead the producer "
             "stops after 2 s and the de-judder estimates at render time or holds. The low-latency queue switches it off. "
-            "Off, or other GPUs: VP's matcher at render time."));
+            "Off, or other GPUs: VP's matcher at render time. A queue raised to 5 frames adds latency (5 frames are "
+            "about 210 ms at 24p), so re-check the audio offset (lip sync) after switching it."));   // audit 2026-10-16
         {
             // The engine as mutually exclusive buttons (owner 2026-10-16); the drop-down holds the value.
             auto* sourceButtons = new QWidget;
@@ -7469,7 +7734,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         MarkGpuCost(form, occlusionFill, 1);
 
         form = addCollapsibleSection(QStringLiteral("temporalDither"), QStringLiteral("Temporal dither"),
-            QStringLiteral("The temporal sigma-delta shader's use of the de-judder's motion (needs that shader). ") +
+            // audit 2026-10-16: VP's temporal choice loads the sigma-delta itself.
+            QStringLiteral("Which dither runs, and how VP's motion-aware dither (sigma-delta) uses the de-judder's motion. "
+                "Choosing VP's dither loads it whatever the shader list says. ") +
             QString::fromLatin1(kGpuCostLegend), false);
         // Owner 2026-10-16: the dither as one choice - Off, libplacebo's, or VP's temporal sigma-delta
         // (mutually exclusive buttons; the drop-down holds the value). Not set: as before, the shader
@@ -7479,7 +7746,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         temporalDither->setItemText(temporalDither->findData(QStringLiteral("auto")), QStringLiteral("Not set (the shader list decides)"));
         temporalDither->setItemText(temporalDither->findData(QStringLiteral("off")), QStringLiteral("Off"));
         temporalDither->setItemText(temporalDither->findData(QStringLiteral("libplacebo")), QStringLiteral("libplacebo"));
-        temporalDither->setItemText(temporalDither->findData(QStringLiteral("sigma_delta")), QStringLiteral("VP temporal (sigma-delta)"));
+        temporalDither->setItemText(temporalDither->findData(QStringLiteral("sigma_delta")), QStringLiteral("VP's motion-aware dither (sigma-delta)"));   // audit 2026-10-16
         QWidget* ditherButtons = new QWidget;
         ditherButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("temporal_dither.buttons")));
         {
@@ -7493,7 +7760,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 { "off", "Off", "No dither at all (libplacebo's off, the sigma-delta not loaded)." },
                 { "libplacebo", "libplacebo", "libplacebo's own dither, with the Dithering method on the Processing section "
                     "(Auto = blue noise; Off there = none). The sigma-delta is left out even if the shader list selects it." },
-                { "sigma_delta", "VP temporal (sigma-delta)", "VP's temporal sigma-delta, loaded by VP whatever the shader "
+                { "sigma_delta", "VP's motion-aware dither (sigma-delta)", "VP's temporal sigma-delta, loaded by VP whatever the shader "
                     "list says; libplacebo's dither is off while it runs. It uses the de-judder's motion when present and "
                     "searches itself otherwise." } };
             std::vector<QRadioButton*> radios;
@@ -7554,7 +7821,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         occlusionMask->setToolTip(QStringLiteral(
             "Tells the temporal sigma-delta where new or uncovered picture content appears, so it "
             "does not carry its sub-code residual into it. Works with the de-judder off too "
-            "(the motion matcher then runs for the mask alone). Needs the sigma-delta shader."));
+            "(the motion matcher then runs for the mask alone). Needs the temporal sigma-delta: Dither set to VP's "
+            "motion-aware dither, or the sigma-delta shader selected in the shader list."));   // audit 2026-10-16
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
@@ -7566,7 +7834,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* ditherVectors = addChoice(QStringLiteral("Dither reuses the de-judder's motion"), QStringLiteral("dither_vectors"),
             { QStringLiteral("auto"), QStringLiteral("own") });
         ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("auto")), QStringLiteral("De-judder's (auto)"));
-        ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("own")), QStringLiteral("Sigma-delta's own search"));
+        ditherVectors->setItemText(ditherVectors->findData(QStringLiteral("own")), QStringLiteral("The dither's own search"));   // audit 2026-10-16
         ditherVectors->setToolTip(QStringLiteral(
             "On de-judder extras the temporal sigma-delta can take the motion from the de-judder (exact there, and "
             "it skips its own search, about 1 ms less per extra) instead of searching itself. Needs the VP Renderer "
@@ -7757,8 +8025,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveMap->setToolTip(QStringLiteral(
             "On: grain is measured per block from frame-to-frame noise along the motion vectors, so grainy "
             "areas lean faithful while clean texture keeps SSIM. Film rates (30 fps or less) with a next frame "
-            "queued; runs the motion matcher even with de-judder off. Elsewhere (the low-latency queue, 50/60p) the "
-            "per-frame measure is used. Off: the per-frame measure only."));
+            "queued, using the de-judder's motion vectors when they exist (it never starts the motion search on its "
+            "own). Otherwise (de-judder off, the low-latency queue, 50/60p) the per-frame measure is used. Off: the "
+            "per-frame measure only."));
         auto* adaptiveMapSmooth = addText(QStringLiteral("Grain map smoothing (ms)"),
             QStringLiteral("adaptive_grain_map_smooth_ms"));
         adaptiveMapSmooth->setValidator(new QDoubleValidator(0.0, 10000.0, 3, adaptiveMapSmooth));
@@ -7958,6 +8227,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "projector they also need limited output range (Color profile: output range limited, with output "
             "gamma 2.4). Off: libplacebo's standard path (clips them)."));
         MarkGpuCost(form, extendedRange, 1);
+        auto* extendedMore = addChoice(QStringLiteral("Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR"),
+            QStringLiteral("extended_range_more_cases"), { QStringLiteral("on"), QStringLiteral("off") });
+        extendedMore->setToolTip(QStringLiteral(
+            "Fix under test (audit 2026-10-16; off by default until its GPU tests pass). On: the keeping of below-black and above-white also works "
+            "with BT.1886 and sRGB curves, SDR in wider colour spaces (BT.2020 / P3), a calibration 3D LUT (extended "
+            "past its edges by its own slope) and HDR shown without tone mapping. Off: only pure-power gammas with "
+            "BT.709 SDR and no LUT, as before."));
         // Delta 13: the SDR tone shape and headroom, in their own section
         // (audit 2026-10-14c).
         form = addCollapsibleSection(QStringLiteral("sdrHighlights"), QStringLiteral("SDR highlights"),
@@ -8062,8 +8338,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         fboFloat32->setToolTip(QStringLiteral(
             "Every intermediate picture in 32-bit float: exact highlights (half-float rounds values above white "
             "a little) at more GPU memory bandwidth (a few ms per frame at high resolutions; check the render time in the stats "
-            "overlay). Auto: on, except with VP's low-latency path (the queue profile's 'VP's low-latency path'; "
-            "unset, a queue named Low_Latency). The final output stage is 32-bit float always."));
+            "overlay). Auto (default): on everywhere, the low-latency path too (higher precision is the default). "
+            "Off only by choice. The final output stage is 32-bit float always."));
         MarkGpuCost(form, fboFloat32, 2);
 
         // Owner 2026-10-16 (reorganise if necessary): VP's own settings in signal order - capture, source
@@ -8118,7 +8394,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     moveRow(w, downscale);
             if (QFormLayout* upscale = sectionForm(QStringLiteral("adaptiveUpscale")))
                 moveRow(cnnStabilise, upscale);
-            // The dither's motion-reuse fix stays in Fixes under test (a fix with its switch).
+            // The dither's motion-reuse fix stays in Fixes under test (a fix with its switch); the
+            // extended-range widening (built beside Bill's Processing rows) joins it.
+            if (QFormLayout* fixes = sectionForm(QStringLiteral("fixesUnderTest")))
+                moveRow(extendedMore, fixes);
             // The section order: Bill's opening sections, then VP's in signal order, then Bill's others.
             const QStringList order = { QStringLiteral("captureSource"), QStringLiteral("sourceRebase"),
                 QStringLiteral("adaptiveDownscale"), QStringLiteral("adaptiveUpscale"), QStringLiteral("dejudder"),
@@ -8871,7 +9150,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
-                    { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "sdr_tone_shape", "off" },
+                    { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "off" }, { "sdr_tone_shape", "off" },
                     { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
@@ -9147,6 +9426,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
                 if (hasUnspecifiedChoice && scalingAutoChoice && !defaultProfile)
                     combo->setItemText(0, QStringLiteral("Inherit from default profile"));
+                // audit 2026-10-16: say what an unset low-latency path does.
+                if (hasUnspecifiedChoice && sectionPrefix == QStringLiteral("queue") &&
+                    field.key == QStringLiteral("low_latency_path") && raw.isEmpty() && configured.isEmpty())
+                    combo->setItemText(0, QStringLiteral("Not set (on only for the Low Latency queue profile)"));
                 const int effectiveIndex = autoIndex >= 0 ? autoIndex :
                     combo->findData(configured, Qt::UserRole, Qt::MatchFixedString);
                 int index = raw.isEmpty() ?
@@ -10529,13 +10812,14 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
                     { "Grain-true filter: Auto (polar where able) / 1D", "Auto ++ (about 2.4 ms more), 1D +", "no", "Auto", "Adaptive downscale" },
                     { "Grain map from motion", "+ with the de-judder on; +++ with it off (runs the matcher, about 5.5 ms at 4K)", "yes", "yes, with the de-judder on", "Adaptive downscale" },
                     { "Blend chroma too", "+", "no", "no (can fringe colour)", "Adaptive downscale" },
-                    { "Steady SSIM detail", "+", "yes", "yes (default on)", "Fixes under test" },
-                    { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Fixes under test" } };
+                    // audit 2026-10-16: these switches moved out of Fixes under test.
+                    { "Steady SSIM detail", "+", "yes", "yes (default on)", "Adaptive downscale" },
+                    { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Adaptive downscale" } };
             else if (file.contains(QStringLiteral("fsrcnnx")) || file.contains(QStringLiteral("artcnn")))
                 addons = {
-                    { "CNN / faithful blend", "++", "no", "not yet (awaiting the cinema check)", "VP Renderer: Adaptive upscale" },
-                    { "Steady CNN detail", "+", "yes", "yes (default on)", "Fixes under test" },
-                    { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Fixes under test" } };
+                    { "CNN / faithful blend", "++", "no", "optional", "VP Renderer: Adaptive upscale" },
+                    { "Steady CNN detail", "+", "yes", "yes (default on)", "Adaptive upscale" },
+                    { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Adaptive downscale (SSIM and CNN)" } };
             else if (file.contains(QStringLiteral("ssimsuperres")))
                 addons = {
                     { "SuperRes strength follows grain (with the CNN / faithful blend on)", "negligible", "no", "yes (default on)", "Adaptive upscale" } };
@@ -11820,7 +12104,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     {
         bool valid = false;
         const int configured = value(projector, QStringLiteral("cntr_latency_ms")).toInt(&valid);
-        contrastLatency->setValue(valid ? std::max(0, std::min(configured, 500)) : 80);
+        // audit 2026-10-16: clamp to the control's range (0-2000), not 500.
+        contrastLatency->setValue(valid ? std::max(contrastLatency->minimum(),
+            std::min(configured, contrastLatency->maximum())) : 80);
     }
     connect(contrastLatency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
     {
@@ -11856,9 +12142,27 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     testResult->setWordWrap(true);
     testResult->setTextInteractionFlags(Qt::TextSelectableByMouse);
     connectionForm->addRow(testButton, testResult);
-    connect(testButton, &QPushButton::clicked, this, [this, testButton, testResult]
+    if (projectorTestThread_)
     {
-        if (noTarget_) return;
+        // audit 2026-10-16: a test started before this page was rebuilt.
+        testButton->setEnabled(false);
+        testResult->setText(QStringLiteral("Testing… about 8 s"));
+    }
+    // audit 2026-10-16: a rebuild (Cancel, reload, target switch) deletes
+    // this button and label while the ~8 s test runs; guard them with
+    // QPointer and keep the worker in a member that the destructor waits for.
+    connect(testButton, &QPushButton::clicked, this, [this, projector, button = QPointer<QPushButton>(testButton),
+        label = QPointer<QLabel>(testResult)]
+    {
+        if (noTarget_ || !button || !label) return;
+        if (projectorTestThread_)
+        {
+            label->setStyleSheet(QString());
+            label->setText(QStringLiteral("A connection test is already running; wait for it to finish."));
+            return;
+        }
+        QPushButton* testButton = button;
+        QLabel* testResult = label;
         const bool remote = remoteClient_ != nullptr;
         const QString host = remote ? remoteHost_ : QStringLiteral("127.0.0.1");
         const quint16 rpcPort = remote ? remotePort_ : 41686;
@@ -11907,13 +12211,26 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 outcome->details += QString::fromStdString(line) + QLatin1Char('\n');
         });
         worker->setParent(this);
-        connect(worker, &QThread::finished, this, [worker, outcome, testButton, testResult]
+        projectorTestThread_ = worker;
+        connect(worker, &QThread::finished, this, [this, projector, worker, outcome, button, label]
         {
+            if (projectorTestThread_ == worker) projectorTestThread_ = nullptr;
             worker->deleteLater();
-            testButton->setEnabled(true);
-            testResult->setText(outcome->summary);
-            testResult->setToolTip(outcome->details.trimmed());
-            testResult->setStyleSheet(outcome->pass ? QStringLiteral("color: #2e7d32;") :
+            // audit 2026-10-16: find the current page's controls by name when
+            // the originals were rebuilt meanwhile.
+            QPointer<QPushButton> shownButton = button;
+            QPointer<QLabel> shownResult = label;
+            if (!shownButton)
+                shownButton = findChild<QPushButton*>(controlName(projector,
+                    QStringLiteral("connection_test")));
+            if (!shownResult)
+                shownResult = findChild<QLabel*>(controlName(projector,
+                    QStringLiteral("connection_test.result")));
+            if (shownButton) shownButton->setEnabled(true);
+            if (!shownResult) return;
+            shownResult->setText(outcome->summary);
+            shownResult->setToolTip(outcome->details.trimmed());
+            shownResult->setStyleSheet(outcome->pass ? QStringLiteral("color: #2e7d32;") :
                 outcome->refused ? QString() : QStringLiteral("color: #c62828;"));
         });
         worker->start();
@@ -12379,35 +12696,10 @@ QWidget* ConfigEditorWindow::createLogsPage()
 
 QWidget* ConfigEditorWindow::createShortcutsPage()
 {
-    struct ShortcutField
-    {
-        const char* label;
-        const char* key;
-        const char* defaultValue;
-    };
-    const ShortcutField applicationFields[] = {
-        { "Open configuration", "config_editor", "Ctrl+Shift+S" },
-        { "Toggle video-only UI", "toggle_noui", "Ctrl+Shift+U" },
-        { "Toggle fullscreen", "fullscreen_toggle", "Alt+Enter" },
-        { "Exit fullscreen", "fullscreen_exit", "Esc" },
-        { "Toggle statistics", "toggle_stats_overlay", "Ctrl+I" },
-        { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
-        { "Re-apply rules", "reapply_rules", "" },
-        { "Room lights (dark / lit)", "room_lights", "" },
-        { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
-        { "Automatic transfer (DirectShow only)", "auto_set", "Ctrl+Shift+A" },
-        { "PQ transfer (DirectShow only)", "pq_set", "Ctrl+Shift+P" }
-    };
-    const ShortcutField captureFields[] = {
-        { "Restart renderer", "renderer_restart", "Shift+R" },
-        { "Reset renderer", "renderer_reset", "R" },
-        { "DeckLink input 1", "capture_1", "Ctrl+1" },
-        { "DeckLink input 2", "capture_2", "Ctrl+2" },
-        { "DeckLink input 3", "capture_3", "Ctrl+3" },
-        { "DeckLink input 4", "capture_4", "Ctrl+4" },
-        { "Video conversion off", "video_conversion_off", "V" },
-        { "V210 to P010 conversion", "video_conversion_p010", "Shift+V" }
-    };
+    // The field lists are shared with shortcut validation (audit 2026-10-16).
+    using ShortcutField = FixedShortcutField;
+    const auto& applicationFields = kApplicationShortcutFields;
+    const auto& captureFields = kCaptureShortcutFields;
 
     auto makeEditor = [this](const QString& key, const QString& defaultValue)
     {
@@ -12459,6 +12751,8 @@ QWidget* ConfigEditorWindow::createShortcutsPage()
             const QString normalized = QString::fromStdString(canonical);
             if (edit->text() != normalized) edit->setText(normalized);
             else if (document_) document_->SetKnown("shortcuts", key.c_str(), canonical);
+            // audit 2026-10-16: a valid chord may still duplicate another.
+            updateValidationState();
         });
         return edit;
     };

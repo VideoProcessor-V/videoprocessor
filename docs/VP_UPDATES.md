@@ -145,7 +145,8 @@ no NuGet or Qt dependency. It is compiled by packaging, not the native solution.
    ```
 
    Add `-PortableZip` to either flavor to export an updater-enabled ZIP.
-   Each EXE receives `.sha256` and `.manifest.json` sidecars. The latter contains
+   Each EXE receives `.sha256` and `.manifest.json` sidecars in `artifacts\installers\evidence`
+   (kept out of the upload folder, audit 2026-10-16). The latter contains
    the exact inventory bytes embedded in setup, not a reconstructed inventory.
 3. Qualify both installers and upgrade/recovery behavior in disposable Windows
    installations. Do not use a live playback installation for lifecycle tests.

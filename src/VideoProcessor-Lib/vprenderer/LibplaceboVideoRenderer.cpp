@@ -1073,6 +1073,9 @@ namespace
 		// rgba32f regardless (LibplaceboRenderParameters).
 		int fboFloat32 = -1;
 		bool preserveExtendedRange = true;  // Stage 10: BTB/WTW kept through scaling (SDR); on by default (owner 2026-10-16: keep BTB and WTW)
+		// Audit 2026-10-16: the carry also for BT.1886 / sRGB, SDR in other primaries, a calibration
+		// LUT and HDR passed through unmapped (off = the Stage 10 eligibility).
+		bool extendedRangeMoreCases = false;   // off until its GPU tests pass (2026-10-16 night)
 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
 		std::string upscaler = "auto";
@@ -1239,7 +1242,7 @@ namespace
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
-			<< settings.preserveExtendedRange << '|' << settings.dejudderWarpRendered << '|'
+			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
 			// Settings applied live must change the fingerprint, or a profile edit
 			// touching only them is not applied until something else changes.
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
@@ -1403,7 +1406,7 @@ namespace
 				else if (variable == "hdr_metadata") value = state.hdrData && state.hdrData->IsValid() ? "true" : "false";
 				else if (variable == "interlaced") value = state.displayMode && state.displayMode->IsInterlaced() ? "true" : "false";
 				else if (!state.displayMode) return false;
-				else if (variable == "source_rate") value = std::to_string(static_cast<int>(std::floor(state.displayMode->RefreshRateHz())));
+				else if (variable == "source_rate") value = DisplayRuleExpression::NominalSourceRateText(state.displayMode->RefreshRateHz());   // rounded, shared spelling (audit 2026-10-16)
 				else if (variable == "width") value = std::to_string(state.displayMode->FrameWidth());
 				else if (variable == "height") value = std::to_string(state.displayMode->FrameHeight());
 				else if (variable == "resolution") value = std::to_string(state.displayMode->FrameWidth()) + "x" + std::to_string(state.displayMode->FrameHeight());
@@ -2401,7 +2404,7 @@ namespace
 			if (raw == "polar" || raw == "ortho" || raw == "auto")
 			{
 				settings.adaptive.faithfulOrtho = raw == "ortho";
-				settings.adaptive.faithfulAuto = raw == "auto";
+				settings.adaptive.faithfulAuto = raw == "auto" || raw == "polar";   // a saved polar = Auto, as the editor shows it (audit 2026-10-16)
 			}
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
@@ -2514,6 +2517,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid dejudder_warp_stage '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.dejudderWarpRendered ? "rendered" : "source");
+		}
+		if (tryChoice("extended_range_more_cases", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.extendedRangeMoreCases = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid extended_range_more_cases '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.extendedRangeMoreCases ? "on" : "off");
 		}
 		if (tryChoice("preserve_extended_range", raw))
 		{
@@ -4899,6 +4910,7 @@ struct LibplaceboVideoRenderer::Impl
 	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
 	ExtendedRange::Hooks extendedRangeHooks;
 	int extendedRangeLogged = -1;          // the last logged decision
+	std::string extendedRangeDescribed;    // the last logged description (audit 2026-10-16)
 	bool extendedRangeHookFailed = false;  // libplacebo disabled a hook: off until restart
 	// 6b-2b: the stats overlay line, published by the render thread at most
 	// twice a second and read by the UI under its own small lock.
@@ -5023,8 +5035,7 @@ struct LibplaceboVideoRenderer::Impl
     SubtitleRasterQuality SubtitleQuality()
     {
         SubtitleRasterQuality quality;
-        quality.float32 = activeSettings.fboFloat32 == 1 ||
-            (activeSettings.fboFloat32 < 0 && !lowLatencyQueueActive.load(std::memory_order_acquire));
+        quality.float32 = activeSettings.fboFloat32 != 0;   // Auto = on everywhere (owner 2026-10-16)
         quality.configured = &renderParams;
         if (quality.float32 != subtitleFloat32Last)
         {
@@ -9209,6 +9220,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.ditherVectorsOwn = next.ditherVectorsOwn;
 		currentTransport.fboFloat32 = next.fboFloat32;
 		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
+		currentTransport.extendedRangeMoreCases = next.extendedRangeMoreCases;
 		currentTransport.sdrTone = next.sdrTone;
 		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
 		currentTransport.upscaler = next.upscaler;
@@ -9343,6 +9355,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.ditherVectorsOwn != next.ditherVectorsOwn, "dither_vectors");
 		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
 		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
+		changed(current.extendedRangeMoreCases != next.extendedRangeMoreCases, "extended_range_more_cases");
 		changed(current.sdrTone.knee != next.sdrTone.knee || current.sdrTone.headroom != next.sdrTone.headroom ||
 			current.sdrTone.kneeStart != next.sdrTone.kneeStart || current.sdrTone.kneeStrength != next.sdrTone.kneeStrength ||
 			current.sdrTone.recovery != next.sdrTone.recovery, "sdr_tone_shape");
@@ -19110,7 +19123,7 @@ struct LibplaceboVideoRenderer::Impl
         // anti-ringing rises (low_bitrate_handling off: every source clean).
         AdaptiveDownscale::Settings adaptiveNow = activeSettings.adaptive;
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
-        adaptiveNow.float32Picture = activeSettings.fboFloat32 == 1 || (activeSettings.fboFloat32 < 0 && !lowLatencyQueue);
+        adaptiveNow.float32Picture = activeSettings.fboFloat32 != 0;
 #endif
         bitrateWeightScale = 1.0;
         if (activeSettings.lowBitrateHandling != "off" && (upscaleBlend || activeSettings.ssimBitrateAware))
@@ -19194,7 +19207,13 @@ struct LibplaceboVideoRenderer::Impl
                 // SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source
                 // crop against the destination, not the (prescaled) PRE_KERNEL
                 // picture (audit stage8-rs232 item 3).
-                adaptiveDownscale.SetSourceDownscales(sourceCropH > std::fabs(target.crop.y1 - target.crop.y0) + 0.5f);
+                // Audit 2026-10-16: the shader now runs when either axis shrinks (a width-only
+                // downscale ran pass 2 without L2); the blend follows.
+                {
+                    const float sourceCropW = std::fabs(renderImage.crop.x1 - renderImage.crop.x0) * static_cast<float>(rebaseFactorX);
+                    adaptiveDownscale.SetSourceDownscales(sourceCropH > std::fabs(target.crop.y1 - target.crop.y0) + 0.5f ||
+                        sourceCropW > std::fabs(target.crop.x1 - target.crop.x0) + 0.5f);
+                }
                 // 8-3: the matcher's field for this source frame, when it ran
                 // for it (A->B, estimated at upload); the map follows NLS's
                 // own map (bundled NLS / NLS+ only; otherwise the scalar).
@@ -19422,25 +19441,24 @@ struct LibplaceboVideoRenderer::Impl
         // frame's source and target; libplacebo is then told the source is in
         // the target's colour space and VP's hooks do the conversion.
         {
-            ExtendedRange::Decision extended = ExtendedRange::Decide(
-                activeSettings.preserveExtendedRange, renderImage.color, target.color, target.lut != nullptr);
+            ExtendedRange::Settings extendedSettings;
+            extendedSettings.piecewiseTransfers = extendedSettings.wideSourcePrimaries =
+                extendedSettings.calibrationLut = extendedSettings.hdrPassthrough = activeSettings.extendedRangeMoreCases;
+            ExtendedRange::Decision extended = ExtendedRange::Decide(activeSettings.preserveExtendedRange, extendedSettings,
+                renderImage.color, target.color, target.lut, target.lut ? target.lut_type : PL_LUT_UNKNOWN);
             if (extended.Active() && extendedRangeHookFailed)
                 extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
             // A one-plane RGB source (the subtitle move's composed picture, an
             // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
             ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
                 renderImage.num_planes == 1);
-            const int logged = static_cast<int>(extended.reason);
-            if (logged != extendedRangeLogged && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
+            // Logged on any change of the description (a LUT attached, a mode change while active).
+            const std::string described = ExtendedRange::Describe(extended);
+            if (described != extendedRangeDescribed && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
             {
-                extendedRangeLogged = logged;
-                if (extended.Active())
-                    DebugLog::Log("Extended range (BTB/WTW): active, gamma %.2f -> %.2f%s, primaries %s%s",
-                        extended.sourceGamma, extended.outputGamma, extended.convertGamma ? "" : " (none)",
-                        pl_color_primaries_name(target.color.primaries),
-                        extended.convertPrimaries ? " (from BT.709)" : " (none)");
-                else
-                    DebugLog::Log("Extended range (BTB/WTW): %s", ExtendedRange::ToString(extended.reason));
+                extendedRangeDescribed = described;
+                extendedRangeLogged = static_cast<int>(extended.reason);
+                DebugLog::Log("Extended range (BTB/WTW): %s", described.c_str());
             }
         }
         // Stage 6d: when this frame may get de-judder extras, keep A's
@@ -19585,10 +19603,10 @@ struct LibplaceboVideoRenderer::Impl
         }
         dejudderNextVectorsSequence = 0;   // used (or not) once
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
-        // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on,
-        // off on VP's low-latency path (games do not need the last 1/16 step).
-        frameParams.fbo_float32 = activeSettings.fboFloat32 == 1 ||
-            (activeSettings.fboFloat32 < 0 && !lowLatencyQueue);
+        // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
+        // low-latency path too (owner 2026-10-16: higher precision is the default; half-float
+        // there was never agreed). Off by hand only.
+        frameParams.fbo_float32 = activeSettings.fboFloat32 != 0;
 #endif
         // Only a quantiser submitted with this frame replaces libplacebo's dither (audit 2026-10-16:
         // a sigma-delta left out of the frame for its domain still cleared the dither).
@@ -21237,21 +21255,6 @@ bool LibplaceboVideoRenderer::SelectShaderRule(
 		static_cast<const char*>(selectorUtf8);
 	if (MadVRShaderLoader::CanonicalizeRuleSelector(selector).empty())
 		return false;
-	{
-		std::lock_guard<std::mutex> pendingGuard(m_pendingShaderMutex);
-		if (MadVRShaderLoader::RuleSelectorsEqual(
-			m_requestedShaderSelector, selector))
-		{
-			std::lock_guard<std::mutex> statusGuard(
-				m_impl->shaderStatusMutex);
-			activeRule = CString(CStringA(
-				m_impl->activeShaderStatus.c_str()));
-			DebugLog::Log(
-				"Alpha shaders: coalesced duplicate request for \"%s\"",
-				selector.c_str());
-			return true;
-		}
-	}
 
 	std::vector<ConfiguredShaderRule> selection;
 	std::vector<std::string> activeSections;
@@ -21267,6 +21270,32 @@ bool LibplaceboVideoRenderer::SelectShaderRule(
 			selector.c_str(), reason.c_str());
 		return false;
 	}
+	// Audit 2026-10-16: a duplicate is the same selector resolving to the same rules (files and
+	// parameters): an edited shader profile behind an unchanged selector is applied again.
+	std::string fingerprint;
+	for (const ConfiguredShaderRule& rule : selection)
+	{
+		fingerprint += rule.name + '|' + rule.filename + '|' + std::to_string(rule.stageOrder) + '|' +
+			(rule.nls ? "n" : "") + (rule.cinemaOnly ? "c" : "") + '|';
+		for (const auto& parameter : rule.parameters)
+			fingerprint += parameter.first + '=' + parameter.second + ';';
+		fingerprint += '\n';
+	}
+	{
+		std::lock_guard<std::mutex> pendingGuard(m_pendingShaderMutex);
+		if (MadVRShaderLoader::RuleSelectorsEqual(
+			m_requestedShaderSelector, selector) && fingerprint == m_requestedShaderFingerprint)
+		{
+			std::lock_guard<std::mutex> statusGuard(
+				m_impl->shaderStatusMutex);
+			activeRule = CString(CStringA(
+				m_impl->activeShaderStatus.c_str()));
+			DebugLog::Log(
+				"Alpha shaders: coalesced duplicate request for \"%s\"",
+				selector.c_str());
+			return true;
+		}
+	}
 
 	{
 		std::lock_guard<std::mutex> stateGuard(m_stateMutex);
@@ -21281,6 +21310,7 @@ bool LibplaceboVideoRenderer::SelectShaderRule(
 		// when it consumes an Off/base selector, or later when NLS geometry attaches
 		// the hook to the exact frame that may compile it.
 		m_requestedShaderSelector = selector;
+		m_requestedShaderFingerprint = fingerprint;
 		m_pendingShaderSelector = selector;
 		activeRule = TEXT("NLS: Pending");
 		DebugLog::Log(
@@ -21325,6 +21355,15 @@ void LibplaceboVideoRenderer::ApplyPendingShaderSelectionLocked()
 		DebugLog::Log(
 			"Alpha shaders: queued selector \"%s\" rejected on render thread: %s",
 			selector.c_str(), reason.c_str());
+		// A later request for the same selector is tried again, not coalesced (audit 2026-10-16).
+		{
+			std::lock_guard<std::mutex> pendingGuard(m_pendingShaderMutex);
+			if (MadVRShaderLoader::RuleSelectorsEqual(m_requestedShaderSelector, selector))
+			{
+				m_requestedShaderSelector.clear();
+				m_requestedShaderFingerprint.clear();
+			}
+		}
 		return;
 	}
 

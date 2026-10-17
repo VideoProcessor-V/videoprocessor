@@ -5,7 +5,10 @@ param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9A-Fa-f]{40}$')][string]$CertificateThumbprint,
     [Parameter(Mandatory=$true)][string]$NotesPath,
     [string]$OutputPath,
-    [ValidateRange(1,365)][int]$ValidDays=90
+    [ValidateRange(1,365)][int]$ValidDays=90,
+    # audit 2026-10-16: build_installer.ps1 writes .sha256/.manifest.json sidecars to
+    # <installer folder>\evidence, keeping artifacts\installers publishable as-is.
+    [string]$EvidenceDirectory
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -18,12 +21,19 @@ if ($notes.Length -gt 30000) { throw 'Release notes exceed 30000 characters.' }
 $packages=@(); $baseline=$null; $flavors=@{}
 foreach ($path in $InstallerPaths) {
     $file=(Resolve-Path -LiteralPath $path).Path
-    $manifestFile=$file+'.manifest.json'
+    $evidence=if ($EvidenceDirectory) { (Resolve-Path -LiteralPath $EvidenceDirectory).Path } else { Join-Path (Split-Path -Parent $file) 'evidence' }
+    $manifestFile=Join-Path $evidence ([IO.Path]::GetFileName($file)+'.manifest.json')
     $manifest=Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
     if ($manifest.dirty -or $manifest.sourceCommit -ne $source.commit -or $manifest.sourceFingerprint -ne $source.fingerprint -or $manifest.updateSequence -le 0) { throw 'Installer does not identify this exact clean release source and a positive release sequence.' }
     if ($manifest.flavor -notin @('full','config') -or $flavors.ContainsKey($manifest.flavor)) { throw 'Duplicate or unknown package flavor.' }
     $expectedId = if ($manifest.flavor -eq 'full') { 'VideoProcessor-42D852F1-70E9-43ED-8739-D61752106D59' } else { 'VideoProcessorConfig-BA15DBE8-210F-42AA-AE86-B4628395E77F' }
     if ($manifest.schemaVersion -ne 1 -or $manifest.applicationId -ne $expectedId -or $manifest.updateChannel -notin @('stable','beta') -or $manifest.rpcVersion -le 0 -or $manifest.configurationVersion -le 0) { throw 'Unsupported installer identity or release metadata.' }
+    # audit 2026-10-16: published update packages must ship the updater helper;
+    # a -NoUpdater (owner deploy) build is never described by vp-update.json.
+    if (($manifest.PSObject.Properties['updaterIncluded'] -and -not $manifest.updaterIncluded) -or
+        @($manifest.files | Where-Object { $_.path -eq 'VideoProcessorUpdate.exe' -and $_.policy -eq 'managed' }).Count -ne 1) {
+        throw 'Installer was built without VideoProcessorUpdate.exe (-NoUpdater); it cannot be published as an update.'
+    }
     $flavors[$manifest.flavor]=$true
     if ($baseline) {
         foreach ($property in @('updateSequence','updateChannel','sourceCommit','sourceFingerprint','coreVersion','rpcVersion','configurationVersion')) {
@@ -31,7 +41,7 @@ foreach ($path in $InstallerPaths) {
         }
     } else { $baseline=$manifest }
     $hash=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-    $sidecar=(Get-Content -LiteralPath ($file+'.sha256') -Raw).Trim().Split(' ')[0]
+    $sidecar=(Get-Content -LiteralPath (Join-Path $evidence ([IO.Path]::GetFileName($file)+'.sha256')) -Raw).Trim().Split(' ')[0]
     if ($hash -ne $sidecar) { throw 'Installer changed after packaging.' }
     $packages += [ordered]@{flavor=$manifest.flavor;url=('https://github.com/billslack2/videoprocessor/releases/download/'+$ReleaseTag+'/'+[IO.Path]::GetFileName($file));size=(Get-Item -LiteralPath $file).Length;sha256=$hash;installManifestSha256=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()}
 }

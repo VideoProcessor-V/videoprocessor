@@ -741,6 +741,7 @@ namespace RendererProfileConfig
 				return IsNumberInRange(value, 0.0, 10000.0);
 			// Stage 10: BTB/WTW kept through libplacebo's scaling (SDR).
 			if (key == "preserve_extended_range") return IsChoice(value, { "on", "off" });
+			if (key == "extended_range_more_cases") return IsChoice(value, { "on", "off" });
 			// Delta 13: the SDR tone shape and headroom.
 			if (key == "sdr_tone_shape") return IsChoice(value, { "off", "knee" });
 			if (key == "sdr_white_headroom") return IsNumberInRange(value, 0.0, 0.5);

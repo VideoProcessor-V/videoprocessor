@@ -25,7 +25,8 @@ does not grant broad permissions. Protected destinations need to be moved to a
 user-writable location. No application storage or behavior changes are included.
 
 Setup is self-contained and works offline. Microsoft-signed x64 Visual C++
-runtime DLLs are installed beside VP and in config/vprenderer as required by
+runtime DLLs are installed beside VP and in config, vprenderer and vprenderer-beta
+(each renderer's closure beside it; audit 2026-10-16) as required by
 their dependencies. Setup never executes a system-wide redistributable, asks
 for runtime elevation or creates a desktop icon. Windows 10/11 supplies the
 Windows/UCRT components. Start menu shortcuts and one per-user uninstall/location
@@ -124,7 +125,7 @@ For a release, use a clean checkout of the selected source commit:
 ~~~
 
 The command completes a full x64 Release solution rebuild, records the exact
-commit, source fingerprint and four VP binary hashes, invokes the runtime-aware
+commit, source fingerprint and five VP binary hashes, invokes the runtime-aware
 manifest packager, resolves private runtime dependencies with dumpbin, then
 compiles setup. Licensed Visual Studio Release CRT/MFC redistributable folders
 are discovered automatically; -RuntimeDirectories may specify them explicitly.
@@ -147,8 +148,14 @@ build receipt; setup and Windows file properties show the version and build labe
 Clean builds of the same version use distinct commit-bearing filenames; archive
 them in separate build directories when retaining multiple test builds.
 
-Outputs under artifacts\installers include SHA-256 sidecars for the exact
-executable bytes. Optional ZIPs contain the same self-contained application and
+Outputs under artifacts\installers are only the setup EXE and optional portable
+ZIP (plus vp-update.json once signed). SHA-256 sidecars for the exact bytes and the
+`<setup>.manifest.json` copy are internal evidence written to
+artifacts\installers\evidence; tools/new_update_release.ps1 reads them there
+(or from -EvidenceDirectory). Rejected packages are moved to
+artifacts\installers-invalid. A glob upload of artifacts\installers (not
+recursive) therefore cannot include sidecars; the builder warns about any other
+file left there (audit 2026-10-16). Optional ZIPs contain the same self-contained application and
 private runtime DLLs, with VideoProcessor.cfg.example instead of an active
 configuration file, and keep their version/build-labelled filenames. No runtime
 setup is needed. Copy/rename the example only when creating a new configuration. Publish clean, qualified builds.
@@ -171,6 +178,21 @@ After qualification, manually upload artifacts to billslack2/videoprocessor
 Releases. Include commit, runtime minimum, signing status, supported Windows
 versions, test evidence and rollback compatibility limits. This command does
 not publish or deploy.
+
+### Optional build switches (audit 2026-10-16)
+
+- `-NoUpdater` leaves VideoProcessorUpdate.exe out of setup, the portable ZIP
+  and INSTALL-MANIFEST.json's managed file list, and records
+  `updaterIncluded: false` in the manifest. Use it for the owner's own (FL35)
+  deployment builds, which must not carry the auto-updater. The default is
+  unchanged: public releases ship the helper, and new_update_release.ps1 refuses
+  to describe a -NoUpdater package in vp-update.json. Installing a -NoUpdater
+  build over one that shipped the helper follows the normal retirement rules for
+  files that leave the managed list.
+- `-MagewellSdkRoot <path>` passes `/p:MagewellSdkRoot=<path>` to the solution
+  rebuild, for isolated worktrees whose 3rdparty\magewell\SDKv3 is empty. The
+  builder refuses a root without Include\LibMWCapture\MWCapture.h. Example:
+  `-MagewellSdkRoot E:\codex	ools\MagewellCaptureSDK-3.3.1.1596\SDKv3`.
 
 ## Qualification matrix
 
@@ -215,4 +237,8 @@ VideoProcessor.cfg before editing it. Preserve an existing configuration on upgr
 The packager runs tools/test_portable_config_contract.ps1 and checks the finished
 ZIP with tools/test_portable_config.ps1. Missing, empty, changed, misplaced or
 untracked samples fail packaging; the source and manifest SHA-256 must agree.
-An active VideoProcessor.cfg in the portable ZIP is also rejected.
+An active VideoProcessor.cfg anywhere in the portable ZIP (root or nested,
+for example config/VideoProcessor.cfg) is also rejected. The builder writes the
+ZIP with System.IO.Compression and forward-slash entry names, independent of the
+PowerShell version; the check rejects any entry name containing a backslash
+(audit 2026-10-16).

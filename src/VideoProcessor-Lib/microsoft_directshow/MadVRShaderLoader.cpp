@@ -601,6 +601,39 @@ bool MatchesTargetShaderWhen(const std::string& rawWhen,
 }
 
 
+// audit 2026-10-16: whether a target-shader rule declares the pressed key.
+// MergeShortcutIntoWhen rewrites `shortcut: X` as `(auto) || ${key}=="X"`, so
+// evaluating every rule on a key press also pinned members (or reset groups)
+// whose automatic condition merely happened to be true for the current source.
+// As in the unified path (RendererProfileConfig::SelectForKey's matchingChord),
+// only rules that declare a chord equal to the pressed key take part in a key
+// press; chords compare canonically (L == l, Shift+L distinct), falling back
+// to the literal spelling when either side is not a registrable chord.
+bool TargetShaderWhenDeclaresKey(const std::string& rawWhen,
+	const std::string& key, bool& declares, std::string& reason)
+{
+	declares = false;
+	DisplayRuleExpression::Expression expression;
+	if (!expression.Compile(rawWhen, reason, true))
+		return false;
+	std::string canonicalKey;
+	const bool keyCanonical =
+		RendererProfileConfig::CanonicalizeKeyChord(key, canonicalKey);
+	for (const std::string& chord : expression.KeyChords())
+	{
+		std::string canonicalChord;
+		const bool chordCanonical = keyCanonical &&
+			RendererProfileConfig::CanonicalizeKeyChord(chord, canonicalChord);
+		if (chordCanonical ? canonicalChord == canonicalKey : chord == key)
+		{
+			declares = true;
+			break;
+		}
+	}
+	return true;
+}
+
+
 bool ResolveTargetShaderKey(const ConfigFile& config, const std::string& key,
 	const DisplayRuleExpression::ValueLookup& source,
 	std::vector<std::string>& names, std::string& reason,
@@ -616,16 +649,29 @@ bool ResolveTargetShaderKey(const ConfigFile& config, const std::string& key,
 	{
 		bool consumed = false;
 		std::lock_guard<std::mutex> guard(g_targetShaderSelectionMutex);
+		// audit 2026-10-16: work on a copy and commit only when every group
+		// succeeded; a failure part-way (a later group's error, or a
+		// multi-member conflict) used to leave earlier groups changed.
+		std::map<std::string, std::vector<std::string>> pending =
+			g_targetShaderSelections;
 		for (const TargetShaderGroup& group : groups)
 		{
 			bool matches = false;
-			if (!group.resetWhen.empty() &&
-				!MatchesTargetShaderWhen(group.resetWhen, key, source,
-					matches, reason))
-				return false;
+			bool declares = false;
+			if (!group.resetWhen.empty())
+			{
+				// audit 2026-10-16: a reset rule acts on a key press only when
+				// it declares that key (see TargetShaderWhenDeclaresKey).
+				if (!TargetShaderWhenDeclaresKey(group.resetWhen, key,
+					declares, reason))
+					return false;
+				if (declares && !MatchesTargetShaderWhen(group.resetWhen, key,
+					source, matches, reason))
+					return false;
+			}
 			if (matches)
 			{
-				g_targetShaderSelections.erase(group.name);
+				pending.erase(group.name);
 				consumed = true;
 				continue;
 			}
@@ -633,6 +679,11 @@ bool ResolveTargetShaderKey(const ConfigFile& config, const std::string& key,
 			for (const auto& member : group.members)
 			{
 				if (member.second.empty()) continue;
+				// audit 2026-10-16: skip members that do not declare the key,
+				// so a true automatic condition does not pin the member.
+				if (!TargetShaderWhenDeclaresKey(member.second, key, declares,
+					reason)) return false;
+				if (!declares) continue;
 				if (!MatchesTargetShaderWhen(member.second, key, source,
 					matches, reason)) return false;
 				if (matches) selected.push_back(member.first);
@@ -644,7 +695,7 @@ bool ResolveTargetShaderKey(const ConfigFile& config, const std::string& key,
 					group.name + "]";
 				return false;
 			}
-			g_targetShaderSelections[group.name] = selected;
+			pending[group.name] = selected;
 			consumed = true;
 		}
 		if (!consumed)
@@ -652,6 +703,7 @@ bool ResolveTargetShaderKey(const ConfigFile& config, const std::string& key,
 			reason = "key '" + key + "' does not select a shader group";
 			return false;
 		}
+		g_targetShaderSelections.swap(pending);
 	}
 
 	std::map<std::string, std::vector<std::string>> manual;
@@ -1513,10 +1565,12 @@ DisplayRuleExpression::ValueLookup TargetVideoLookup(const VideoState& videoStat
 		}
 		if (variable == "source_rate")
 		{
-			std::ostringstream text;
-			text.imbue(std::locale::classic());
-			text << static_cast<int>(std::floor(refreshRate + 0.0001));
-			value = text.str();
+			// audit 2026-10-16: the shared nominal spelling, rounded to the
+			// nearest whole rate (was floor(rate + 0.0001): 59.94 -> 59).
+			// Without a display mode the rate is unavailable, as in
+			// StateVariables, rather than "0".
+			if (!videoState.displayMode) return false;
+			value = DisplayRuleExpression::NominalSourceRateText(refreshRate);
 			return true;
 		}
 		return false;
@@ -2805,6 +2859,23 @@ bool MadVRShaderLoader::RuleSelectorsEqual(const std::string& left,
 	const std::string& right)
 {
 	return CanonicalizeRuleSelector(left) == CanonicalizeRuleSelector(right);
+}
+
+
+// audit 2026-10-16: test seams (see the header).
+bool MadVRShaderLoader::ResolveTargetShaderKeyWithSource(const ConfigFile& config,
+	const std::string& key,
+	const std::function<bool(const std::string&, std::string&)>& source,
+	std::vector<std::string>& names, std::string& reason)
+{
+	return ResolveTargetShaderKey(config, key, source, names, reason);
+}
+
+
+void MadVRShaderLoader::ResetTargetShaderSelections()
+{
+	std::lock_guard<std::mutex> guard(g_targetShaderSelectionMutex);
+	g_targetShaderSelections.clear();
 }
 
 

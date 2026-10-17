@@ -13,8 +13,17 @@ try {
     if($samples.Count -ne 1 -or $samples[0].FullName -cne 'VideoProcessor.cfg.example' -or $samples[0].Length -eq 0){
         throw 'Portable ZIP must contain one nonempty root VideoProcessor.cfg.example.'
     }
-    if(@($zip.Entries | Where-Object { $_.FullName -ieq 'VideoProcessor.cfg' }).Count){
-        throw 'Portable ZIP must not contain an active VideoProcessor.cfg that could overwrite user settings.'
+    # audit 2026-10-16: entry names must use forward slashes (Windows PowerShell 5.1
+    # Compress-Archive wrote backslashes, which other extractors treat as file names).
+    $backslashed=@($zip.Entries | Where-Object { $_.FullName.Contains('\') })
+    if($backslashed.Count){
+        throw "Portable ZIP entry names must use '/' separators: $($backslashed[0].FullName)"
+    }
+    # audit 2026-10-16: reject an active VideoProcessor.cfg at any depth (for example
+    # config/VideoProcessor.cfg), not only at the root. The root .example stays required.
+    $active=@($zip.Entries | Where-Object { ($_.FullName -split '[\\/]')[-1] -ieq 'VideoProcessor.cfg' })
+    if($active.Count){
+        throw "Portable ZIP must not contain an active VideoProcessor.cfg that could overwrite user settings: $($active[0].FullName)"
     }
     $stream=$samples[0].Open()
     $sha=[Security.Cryptography.SHA256]::Create()

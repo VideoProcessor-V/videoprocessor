@@ -356,14 +356,16 @@ namespace VideoProcessorTest
             ConfigFile config;
             Assert::IsTrue(config.Load(file.path));
             // As VP reports them (StateVariables): source_rate is the rate
-            // floored to a whole number, cadence the exact rate.
+            // rounded to the nearest whole number (audit 2026-10-16: was
+            // floored; the shipped rule uses ${cadence}, so the expected
+            // selections are unchanged), cadence the exact rate.
             auto source = [](const char* rate)
             {
                 const double exact = std::stod(rate);
                 return [exact](const std::string& variable, std::string& value)
                 {
                     if (variable == "source_rate")
-                        value = std::to_string(static_cast<int>(std::floor(exact)));
+                        value = DisplayRuleExpression::NominalSourceRateText(exact);
                     else if (variable == "cadence")
                     {
                         std::ostringstream text;
@@ -379,7 +381,7 @@ namespace VideoProcessorTest
             };
             UnifiedProfileRuntime::Runtime runtime;
             std::string error;
-            // Audit round 2: 59.94 Hz (source_rate 59) must select the game queue.
+            // Audit round 2: 59.94 Hz (cadence 59.94; source_rate now 60) must select the game queue.
             Assert::IsTrue(runtime.Initialize(config, source("59.94005994005994"), error),
                 std::wstring(error.begin(), error.end()).c_str());
             Assert::AreEqual(std::string("low_latency"), RendererProfileConfig::FormatSelection(
@@ -461,8 +463,8 @@ namespace VideoProcessorTest
                     std::ostringstream text;
                     text.imbue(std::locale::classic());
                     text.precision(17);
-                    if (variable == "source_rate")
-                        text << static_cast<int>(std::floor(exact));
+                    if (variable == "source_rate") // audit 2026-10-16: rounded, as VP reports it
+                        text << DisplayRuleExpression::NominalSourceRateText(exact);
                     else if (variable == "cadence")
                         text << exact;
                     else

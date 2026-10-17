@@ -258,6 +258,7 @@ private:
 	std::atomic<RendererState> m_state{RendererState::RENDERSTATE_UNKNOWN};
 	std::atomic_bool m_retirementSucceeded{true};
 	std::string m_requestedShaderSelector;
+	std::string m_requestedShaderFingerprint;   // the rules it resolved to (audit 2026-10-16)
 	std::mutex m_pendingShaderMutex;
 	std::string m_pendingShaderSelector;
 	std::vector<std::string> m_activeShaderSections;

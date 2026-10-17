@@ -174,8 +174,10 @@ namespace StateVariables
 			value = state.displayMode->IsInterlaced()
 				? "interlaced" : "progressive";
 		else if (name == "source_rate")
-			value = std::to_string(static_cast<int>(
-				std::floor(state.displayMode->RefreshRateHz())));
+			// audit 2026-10-16: nominal rate rounded to nearest (59.94 -> 60,
+			// 23.976 -> 24), was floored; ${cadence} below stays exact.
+			value = DisplayRuleExpression::NominalSourceRateText(
+				state.displayMode->RefreshRateHz());
 		else if (name == "cadence")
 		{
 			std::ostringstream cadence;

@@ -53,6 +53,8 @@
     <ClCompile Include="SubtitleTranslationReversalTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ExtendedRangeCarryTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
