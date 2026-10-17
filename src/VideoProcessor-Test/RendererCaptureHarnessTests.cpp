@@ -281,6 +281,9 @@ namespace
 	// their [shader.*] sections go in the configuration's extra text).
 	std::vector<std::string> g_harnessShaderProfiles;
 	bool g_harnessShadersSelected = false;
+	// On-screen window mode for Run(): -1 = VP_TEST_HARNESS_FULLSCREEN (1 = fullscreen), 0 =
+	// windowed, 1 = fullscreen. A test that runs both modes (OnScreenModes) sets it per pass.
+	int g_harnessFullscreen = -1;
 
 	// Stream faults (owner 2026-10-14): what each captured frame does. The
 	// default plan is the plain stream at the run's rate.
@@ -319,6 +322,7 @@ namespace
 		bool applySnapshot = false;
 		std::vector<std::string> shaderProfiles;
 		bool shadersSelected = false;
+		int fullscreen = -1;
 	};
 
 	HarnessGlobals CaptureHarnessGlobals()
@@ -339,6 +343,7 @@ namespace
 		g.applySnapshot = g_harnessApplySnapshot;
 		g.shaderProfiles = g_harnessShaderProfiles;
 		g.shadersSelected = g_harnessShadersSelected;
+		g.fullscreen = g_harnessFullscreen;
 		return g;
 	}
 
@@ -359,6 +364,42 @@ namespace
 		g_harnessApplySnapshot = g.applySnapshot;
 		g_harnessShaderProfiles = g.shaderProfiles;
 		g_harnessShadersSelected = g.shadersSelected;
+		g_harnessFullscreen = g.fullscreen;
+	}
+
+	// The window modes an on-screen test runs (render-ahead follow-up 2026-10-17):
+	// VP_TEST_HARNESS_FULLSCREEN=1 fullscreen only, =both windowed then fullscreen, otherwise
+	// windowed only. Each pass sets g_harnessFullscreen; the report names the mode.
+	std::vector<int> OnScreenModes()
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		const std::string value = _dupenv_s(&v, &n, "VP_TEST_HARNESS_FULLSCREEN") == 0 && v ? v : "";
+		std::free(v);
+		if (value == "both") return { 0, 1 };
+		if (value == "1") return { 1 };
+		return { 0 };
+	}
+
+	const char* OnScreenModeName(int fullscreen) { return fullscreen == 1 ? "fullscreen" : "windowed"; }
+
+	// "De-judder: hold (<reason>; <n> holds since the last line, ...)" -> per reason, the holds
+	// (the line is rate-limited, so the count, not the lines).
+	std::map<std::string, long long> HoldCounts(const std::vector<std::string>& log)
+	{
+		std::map<std::string, long long> holds;
+		for (const std::string& line : log)
+		{
+			const size_t at = line.find("De-judder: hold (");
+			if (at == std::string::npos)
+				continue;
+			const size_t semi = line.find(';', at);
+			if (semi == std::string::npos)
+				continue;
+			const long long count = std::atoll(line.c_str() + semi + 1);
+			holds[line.substr(at + 17, semi - at - 17)] += count > 0 ? count : 1;
+		}
+		return holds;
 	}
 
 	const wchar_t* const kHarnessEnvironment[] = { L"VP_TEST_SCREENSHOT_DIR", L"VP_TEST_CAPTURE_UNPACK_FAIL",
@@ -572,8 +613,9 @@ namespace
 		// live extras planner runs.
 		char* fs = nullptr;
 		size_t fsn = 0;
-		const bool fullscreen = onScreen && _dupenv_s(&fs, &fsn, "VP_TEST_HARNESS_FULLSCREEN") == 0 && fs && std::string(fs) == "1";
+		const bool fullscreenEnv = _dupenv_s(&fs, &fsn, "VP_TEST_HARNESS_FULLSCREEN") == 0 && fs && std::string(fs) == "1";
 		std::free(fs);
+		const bool fullscreen = onScreen && (g_harnessFullscreen >= 0 ? g_harnessFullscreen == 1 : fullscreenEnv);
 		// Fullscreen: an ordinary activated window (foreground, covering the
 		// screen) so presentation can bypass composition and report statistics.
 		RunResources resources;
@@ -789,13 +831,24 @@ namespace Tests
 				{ "23.976p gpu, ahead off", "gpu", true, "dejudder_strength: 0.25@occlusion_mask: on@dejudder_estimate_ahead: off@" },
 				{ "59.94p standard", "standard", false, "" },
 				{ "59.94p gpu", "gpu", false, "" } };
+			// Render-ahead follow-up 2026-10-17: this test runs the per-refresh planner (render_ahead
+			// off), which needs DXGI frame statistics. On a display without them (the laptop's
+			// internal panel) every film case held with "timing not known: display rate" and the
+			// test passed vacuously. Such a run is now reported INCONCLUSIVE with the marker
+			// SKIP-NO-DISPLAY-TIMING (run_chain_gate.ps1 fails on it when on-screen is requested).
+			// VP_TEST_HARNESS_FULLSCREEN=1|both: the fullscreen pass (reported separately).
 			int failures = 0;
+			for (const int mode : OnScreenModes())
+			{
+			g_harnessFullscreen = mode;
+			const std::string modeName = OnScreenModeName(mode);
+			int noTiming = 0, filmCases = 0, filmWithExtras = 0;
 			for (const Case& c : cases)
 			{
 				std::string extra = c.extra;
 				for (char& ch : extra) if (ch == '@') ch = '\n';
 				const RunResult r = Run(VideoFrameEncoding::V210, c.path, seconds > 5.0 ? seconds : 60.0, c.film, extra, true);
-				Logger::WriteMessage((std::string("== ") + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
+				Logger::WriteMessage((std::string("== [") + modeName + "] " + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
 				Logger::WriteMessage(("   de-judder: " + r.dejudderStatus).c_str());
 				Logger::WriteMessage(("   presentation: " + r.presentationStatus).c_str());
 				std::string lastAhead, lastHold, phase;
@@ -823,7 +876,25 @@ namespace Tests
 				}
 				for (const auto& hold : holds)
 					Logger::WriteMessage(("   hold: " + hold.first + " x" + std::to_string(hold.second)).c_str());
+				if (c.film)
+				{
+					++filmCases;
+					filmWithExtras += extrasLines > 0 ? 1 : 0;
+					// No statistics: the display rate never became known, so nothing was tested.
+					if (extrasLines == 0 && holds.count("timing not known: display rate") > 0)
+					{
+						++noTiming;
+						Logger::WriteMessage("   INCONCLUSIVE: the display gave no frame statistics (timing not known: display rate)");
+					}
+				}
 				failures += r.presented ? 0 : 1;
+			}
+			Logger::WriteMessage(("-- [" + modeName + "] film cases with extras " + std::to_string(filmWithExtras) + " of " +
+				std::to_string(filmCases) + ", without display timing " + std::to_string(noTiming)).c_str());
+			if (noTiming > 0)
+				Logger::WriteMessage(("SKIP-NO-DISPLAY-TIMING OnScreenLiveExtrasAndEstimateAhead: [" + modeName + "] " +
+					std::to_string(noTiming) + " film case(s) held for want of DXGI frame statistics; outcome INCONCLUSIVE "
+					"(the per-refresh planner needs statistics; render_ahead runs open loop: see OnScreenRenderAheadExtras)\n").c_str());
 			}
 			Assert::AreEqual(0, failures, L"every on-screen run presented frames");
 		}
@@ -2826,11 +2897,25 @@ namespace Tests
 				{ "23.976p gpu, render ahead, gate auto, VP-owned presenter", "gpu",
 					dejudder + "render_ahead: on\ndejudder_gate: auto\n" + vpOwned, true },
 				{ "23.976p gpu, render ahead off (reference)", "gpu", dejudder + "render_ahead: off\n", false } };
+			// Strict (render-ahead follow-up 2026-10-17; the laptop's internal panel passed vacuously
+			// with every frame held "timing not known: display rate"). A render_ahead case FAILS unless:
+			// "Render-ahead:" lines > 0 with the gate level in them; queued extras > 0, or the gate
+			// dropped/held them (reported with its reason); no "timing not known: display rate" hold
+			// at all (render-ahead takes an open-loop rate without statistics), and other
+			// "timing not known" holds at most max(24, 10% of the frames) (start-up only). The
+			// render_ahead off reference keeps today's checks. VP_TEST_HARNESS_FULLSCREEN=1|both:
+			// the fullscreen pass, reported separately.
 			int failures = 0;
+			const double runSeconds = seconds > 5.0 ? seconds : 30.0;
+			for (const int mode : OnScreenModes())
+			{
+			g_harnessFullscreen = mode;
+			const std::string modeName = OnScreenModeName(mode);
+			int modeFailures = 0;
 			for (const Case& c : cases)
 			{
-				const RunResult r = Run(VideoFrameEncoding::V210, c.path, seconds > 5.0 ? seconds : 30.0, true, c.extra, true);
-				Logger::WriteMessage((std::string("== ") + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
+				const RunResult r = Run(VideoFrameEncoding::V210, c.path, runSeconds, true, c.extra, true);
+				Logger::WriteMessage((std::string("== [") + modeName + "] " + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
 				Logger::WriteMessage(("   de-judder: " + r.dejudderStatus).c_str());
 				Logger::WriteMessage(("   presentation: " + r.presentationStatus).c_str());
 				std::string lastRenderAhead;
@@ -2860,9 +2945,75 @@ namespace Tests
 					", render/present failures " + std::to_string(renderFailures)).c_str());
 				if (!c.renderAhead && renderAheadLines > 0)
 					Logger::WriteMessage("   UNEXPECTED: render-ahead lines with render_ahead off");
-				failures += (r.presented ? 0 : 1) + (renderFailures > 0 ? 1 : 0) + (!c.renderAhead && renderAheadLines > 0 ? 1 : 0);
+				int caseFailures = (r.presented ? 0 : 1) + (renderFailures > 0 ? 1 : 0) + (!c.renderAhead && renderAheadLines > 0 ? 1 : 0);
+				if (c.renderAhead)
+				{
+					int queuedExtras = 0;
+					std::string rateLine, lastGateLine;
+					for (const std::string& line : r.log)
+					{
+						if (line.find("De-judder extra:") != std::string::npos && line.find("queued=1") != std::string::npos)
+							++queuedExtras;
+						if (line.find("Render-ahead: open loop") != std::string::npos ||
+							line.find("Render-ahead: closed loop") != std::string::npos ||
+							line.find("Render-ahead: no display rate") != std::string::npos)
+							rateLine = line;
+						if (line.find("Render-ahead gate:") != std::string::npos)
+							lastGateLine = line;
+					}
+					const std::map<std::string, long long> holds = HoldCounts(r.log);
+					long long displayRateHolds = 0, otherTimingHolds = 0;
+					for (const auto& hold : holds)
+					{
+						Logger::WriteMessage(("   hold: " + hold.first + " x" + std::to_string(hold.second)).c_str());
+						if (hold.first == "timing not known: display rate")
+							displayRateHolds += hold.second;
+						else if (hold.first.find("timing not known") == 0)
+							otherTimingHolds += hold.second;
+					}
+					const auto refreshGateHolds = holds.find("frame work too long for extras (the next frame could be late)");
+					const long long timingHoldLimit = std::max(24LL, static_cast<long long>(0.1 * runSeconds * 24000.0 / 1001.0));
+					const bool engaged = renderAheadLines > 0;
+					const bool gateLogged = engaged && lastRenderAhead.find(", gate ") != std::string::npos;
+					const long long dropped = CountBefore(lastRenderAhead, "extras dropped");
+					const bool gateHold = lastRenderAhead.find(", gate hold") != std::string::npos ||
+						lastGateLine.find("-> hold") != std::string::npos;
+					const bool refreshRuleHeld = std::string(c.extra).find("dejudder_gate: refresh") != std::string::npos &&
+						refreshGateHolds != holds.end() && refreshGateHolds->second > 0;
+					const bool gateExplains = dropped > 0 || gateHold || refreshRuleHeld;
+					Logger::WriteMessage(("   rate: " + (rateLine.empty() ? std::string("(no display-rate line)") : rateLine)).c_str());
+					Logger::WriteMessage(("   queued extras logged " + std::to_string(queuedExtras) + ", display-rate holds " +
+						std::to_string(displayRateHolds) + ", other timing holds " + std::to_string(otherTimingHolds) +
+						" (limit " + std::to_string(timingHoldLimit) + ")").c_str());
+					std::vector<std::string> why;
+					if (displayRateHolds > 0)
+						why.push_back("held for want of a display rate (" + std::to_string(displayRateHolds) + " holds)");
+					if (otherTimingHolds > timingHoldLimit)
+						why.push_back("timing-not-known hold storm (" + std::to_string(otherTimingHolds) + " holds)");
+					if (!engaged && !refreshRuleHeld)
+						why.push_back("no Render-ahead: line (render-ahead never engaged)");
+					if (engaged && !gateLogged)
+						why.push_back("the gate level is not in the Render-ahead: line");
+					if (queuedExtras == 0 && !gateExplains)
+						why.push_back("no queued extras and the gate did not drop or hold them");
+					if (queuedExtras == 0 && gateExplains)
+						Logger::WriteMessage(("   GATE-DROPPED: no queued extras; reason: " + (refreshRuleHeld ?
+							std::string("dejudder_gate refresh held (frame work too long for extras), ") +
+								std::to_string(refreshGateHolds->second) + " holds" :
+							!lastGateLine.empty() ? lastGateLine : "extras dropped " + std::to_string(dropped))).c_str());
+					for (const std::string& w : why)
+						Logger::WriteMessage(("   FAIL: " + w).c_str());
+					caseFailures += why.empty() ? 0 : 1;
+				}
+				Logger::WriteMessage(("   [" + modeName + "] " + (caseFailures == 0 ? "PASS" : "FAIL")).c_str());
+				modeFailures += caseFailures;
 			}
-			Assert::AreEqual(0, failures, L"every on-screen run presented frames, no extra failed, off logs no render-ahead");
+			Logger::WriteMessage(("-- [" + modeName + "] OnScreenRenderAheadExtras: " + std::to_string(modeFailures) +
+				" failure(s)").c_str());
+			failures += modeFailures;
+			}
+			Assert::AreEqual(0, failures, L"render_ahead engaged with extras (or a gate reason) in every mode, no timing-hold storm, "
+				L"no extra failed, off logs no render-ahead");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(OnScreenHiccupRepairWithoutInterpolation)

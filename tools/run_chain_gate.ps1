@@ -10,18 +10,27 @@ harness is selected by its class.
   run_chain_gate.ps1 -Names "DolbyVision"             # harness + only the DV GPU tests
   run_chain_gate.ps1 -NoHarness -Names "SigmaDelta"   # GPU tests only
 
+  run_chain_gate.ps1 -OnScreen                        # + the opt-in on-screen tests, windowed
+  run_chain_gate.ps1 -OnScreen -Fullscreen both       # windowed, then fullscreen (reported apart)
+
 Reads the TRX (vstest prints no summary for some hosts here) and fails (exit 1) when any test
 failed or did not run, when no test ran, or when a SKIP-NO-GPU marker appears (a hardware test
-that skipped). Prints totals, failures and every SKIP-* marker.
+that skipped). With an on-screen run requested (-OnScreen, or VP_TEST_HARNESS_ONSCREEN=1 in the
+environment) a SKIP-NO-DISPLAY-TIMING marker also fails it: an on-screen test whose display gave
+no frame statistics tested nothing (render-ahead follow-up 2026-10-17). Prints totals, failures
+and every SKIP-* marker.
 #>
 param(
     [string]$Dll = (Join-Path $PSScriptRoot "..\x64\Release\VideoProcessor-Test.dll"),
     [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision",
     [switch]$NoHarness,
+    [switch]$OnScreen,
+    [string]$Fullscreen = "",   # VP_TEST_HARNESS_FULLSCREEN for the on-screen tests: 0, 1 or both
     [string]$Adapter = "NVIDIA",
     [string]$OutDir = (Join-Path ([System.IO.Path]::GetTempPath()) "vp-chain-gate")
 )
 $ErrorActionPreference = "Stop"
+if ($Fullscreen -and $Fullscreen -notin @("0", "1", "both")) { throw "-Fullscreen takes 0, 1 or both" }
 $Dll = (Resolve-Path $Dll).Path
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $vstest = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter vstest.console.exe -ErrorAction SilentlyContinue |
@@ -35,8 +44,13 @@ $filter = $clauses -join '|'
 $trx = Join-Path $OutDir "chain-gate.trx"
 Remove-Item $trx -ErrorAction SilentlyContinue
 $saved = @{}
-foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU") { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN") {
+    $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+}
+$onScreenRequested = $OnScreen -or $env:VP_TEST_HARNESS_ONSCREEN -eq "1"
 $env:VP_TEST_GPU = "hardware"; $env:VP_TEST_ADAPTER = $Adapter; $env:VP_TEST_REQUIRE_GPU = "1"
+if ($OnScreen) { $env:VP_TEST_HARNESS_ONSCREEN = "1" }
+if ($Fullscreen) { $env:VP_TEST_HARNESS_FULLSCREEN = $Fullscreen }
 try {
     # vstest writes "Test Run Failed." to stderr; under Stop that would end the script before the TRX
     # is read, so the run itself is not allowed to throw (the TRX decides).
@@ -58,6 +72,11 @@ $markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+ [A-Za-z0-9_]+' -All
     ForEach-Object { $_.Value } | Sort-Object -Unique)
 $markers | ForEach-Object { "  marker: $_" }
 $noGpu = @($markers | Where-Object { $_ -like "SKIP-NO-GPU *" })
-if ($results.Count -eq 0 -or $bad.Count -gt 0 -or $noGpu.Count -gt 0) { "Chain gate: FAILED"; exit 1 }
+$noTiming = @()
+if ($onScreenRequested) {
+    $noTiming = @($markers | Where-Object { $_ -like "SKIP-NO-DISPLAY-TIMING *" })
+    $noTiming | ForEach-Object { "  on-screen run without display timing (inconclusive, fails the gate): $_" }
+}
+if ($results.Count -eq 0 -or $bad.Count -gt 0 -or $noGpu.Count -gt 0 -or $noTiming.Count -gt 0) { "Chain gate: FAILED"; exit 1 }
 "Chain gate: PASSED"
 exit 0
