@@ -1978,6 +1978,15 @@ namespace Tests
 			Assert::IsTrue(on.Logged(gpuLine), (L"on: the GPU unpack ran\n" + on.Tail()).c_str());
 			Assert::IsFalse(on.Logged(failLine), (L"on: no fallback\n" + on.Tail()).c_str());
 			Assert::AreEqual(cpuHash, gpuHash, L"the GPU unpack presents the CPU unpack's codes");
+			// dv_trims on: this DM carries no L2 trim, so the stage reports neutral and
+			// the picture is unchanged (the wiring, not the maths: DolbyVisionTrimsTests).
+			{
+				RunResult trims;
+				const std::string trimHash = hashOf("dv_tunnel_gpu_unpack: on\ndv_trims: on\n", L"GPU unpack + dv_trims", trims);
+				Assert::IsTrue(trims.Logged("Dolby Vision trims (non-certified): neutral: no L2 trim"),
+					(L"dv_trims: neutral without L2\n" + trims.Tail()).c_str());
+				Assert::AreEqual(cpuHash, trimHash, L"dv_trims without L2: unchanged");
+			}
 			SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", L"1");
 			const std::string fallbackHash = hashOf("dv_tunnel_gpu_unpack: on\n", L"GPU unpack forced to fail", fallback);
 			Assert::IsTrue(fallback.Logged(failLine), (L"fail: the fallback ran\n" + fallback.Tail()).c_str());

@@ -40,6 +40,7 @@
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/SdrToneShape.h>
+#include <vprenderer/DolbyVisionTrims.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
@@ -3639,6 +3640,94 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.3, SdrToneShape::EffectiveRecovery(knee, 0.3), 1e-12, L"auto follows the profile");
 			knee.recovery = 0.0;
 			Assert::AreEqual(0.0, SdrToneShape::EffectiveRecovery(knee, 0.3), 1e-12, L"off");
+		}
+
+		// dv_trims (2026-10-17): DV trims.glsl matches DolbyVisionTrims::ApplyPixel
+		// on the GPU (PQ and gamma signals, neutral = untouched).
+		TEST_METHOD(DolbyVisionTrimShaderMatchesItsReference)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "dv_trims";
+			rule.filename = "DV trims.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 64;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected DV trims.glsl");
+			Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
+			const pl_hook* hook = hooks[0];
+			auto set = [hook](const DolbyVisionTrims::Params& p, const DolbyVisionTrims::Signal& s)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_slope", p.slope));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_offset", p.offset));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_power", p.power));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_chroma_weight", p.chromaWeight));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_sat_gain", p.saturationGain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", s.pq ? 1.0 : 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_gamma", s.gamma));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", s.peakNits));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", s.kr));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", s.kb));
+			};
+			int checked = 0;
+			for (const bool pq : { true, false })
+			{
+				DolbyVisionTrims::Signal signal;
+				signal.pq = pq;
+				signal.peakNits = pq ? 600.0 : 100.0;
+				if (!pq) { signal.kr = 0.2126; signal.kg = 0.7152; signal.kb = 0.0722; }
+				else { signal.kr = 0.2627; signal.kg = 0.6780; signal.kb = 0.0593; }
+				set(DolbyVisionTrims::Params(), signal);
+				const auto unity = fixture.RenderCoordinateField(hook);
+				for (size_t i = 0; i < unity.size(); ++i)
+					Assert::IsTrue(std::abs(static_cast<int>(baseline[i].r) - static_cast<int>(unity[i].r)) <= 1 &&
+						std::abs(static_cast<int>(baseline[i].b) - static_cast<int>(unity[i].b)) <= 1, L"neutral = untouched");
+				DolbyVisionTrims::Params trim;
+				trim.slope = 0.85; trim.offset = 0.02; trim.power = 1.15; trim.chromaWeight = 0.2; trim.saturationGain = 1.2;
+				set(trim, signal);
+				const auto trimmed = fixture.RenderCoordinateField(hook);
+				int changed = 0;
+				for (size_t i = 0; i < trimmed.size(); ++i)
+				{
+					double v[3] = { baseline[i].r / 255.0, baseline[i].g / 255.0, baseline[i].b / 255.0 };
+					DolbyVisionTrims::ApplyPixel(v, trim, signal);
+					const uint8_t got[3] = { trimmed[i].r, trimmed[i].g, trimmed[i].b };
+					for (int c = 0; c < 3; ++c)
+					{
+						const double expected = 255.0 * (std::min)(1.0, (std::max)(0.0, v[c]));
+						Assert::AreEqual(expected, static_cast<double>(got[c]), 1.5,
+							(std::wstring(pq ? L"PQ " : L"gamma ") + L"pixel " + std::to_wstring(i) + L" channel " +
+								std::to_wstring(c)).c_str());
+					}
+					changed += got[0] != baseline[i].r || got[1] != baseline[i].g || got[2] != baseline[i].b;
+					++checked;
+				}
+				Assert::IsTrue(changed > static_cast<int>(trimmed.size()) / 2, L"the trim changes the picture");
+			}
+			// libplacebo's known PRE_OUTPUT log noise (the output-encoding bug the
+			// renderer repairs), as in the SDR tone shape test.
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+			Logger::WriteMessage(("DV trims shader: " + std::to_string(checked) + " pixels matched the reference\n").c_str());
 		}
 
 		// Delta 13: the shader matches its reference on the GPU.
@@ -8971,95 +9060,6 @@ namespace VideoProcessorTest
 			pl_log_destroy(&errorLog);
 		}
 
-		TEST_METHOD(RebasedChartMatchesTheNativeChartThroughTheUpscalePath)
-		{
-			// Stage 12 spec §4 / plan A4 (owner 2026-10-15): a 1080-line chart
-			// upscaled to 2160 upstream and re-based to 1080 goes through the
-			// same libplacebo upscale path as the native 1080 chart and comes
-			// out the same within half-float. YCbCr 4:2:0, both rendered to 4K.
-			TargetLutGpuFixture fixture;
-			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
-			pl_gpu gpu = fixture.Gpu();
-			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
-			const int W = 1920, H = 1080;
-			// A chart inside the upstream upscaler's flat passband (waves up to
-			// 0.04 cycles per 1080-line pixel): what the re-base can restore. Above
-			// it the upstream kernel has already softened the picture and no
-			// re-base can bring that back (measured: 0.13 cycles gives 0.011).
-			auto chart = [](int w, int h, double scale, unsigned seed, double level, double amplitude) {
-				std::mt19937 rng(seed);
-				std::uniform_real_distribution<double> u(0.0, 1.0);
-				std::vector<double> v(static_cast<size_t>(w) * h, level);
-				for (int k = 0; k < 40; ++k)
-				{
-					const double f = (0.002 + 0.038 * u(rng)) / scale, a = u(rng) * 3.14159265358979, ph = u(rng) * 6.283;
-					const double fx = f * std::cos(a), fy = f * std::sin(a);
-					for (int y = 0; y < h; ++y)
-						for (int x = 0; x < w; ++x)
-							v[static_cast<size_t>(y) * w + x] += amplitude / 40.0 * std::cos(6.283185307 * (fx * (x + 0.5) + fy * (y + 0.5)) + ph);
-				}
-				return v;
-			};
-			auto catmull2x = [](const std::vector<double>& src, int w, int h) {
-				auto k = [](double x) { x = std::fabs(x); return x < 1 ? 1.5 * x * x * x - 2.5 * x * x + 1 : x < 2 ? -0.5 * x * x * x + 2.5 * x * x - 4 * x + 2 : 0.0; };
-				const int W2 = 2 * w, H2 = 2 * h;
-				std::vector<double> rows(static_cast<size_t>(W2) * h), out(static_cast<size_t>(W2) * H2);
-				for (int y = 0; y < h; ++y)
-					for (int x = 0; x < W2; ++x)
-					{
-						const double uu = (x + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
-						double s = 0, ws = 0;
-						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * src[static_cast<size_t>(y) * w + (std::min)(w - 1, (std::max)(0, t))]; ws += wt; }
-						rows[static_cast<size_t>(y) * W2 + x] = s / ws;
-					}
-				for (int y = 0; y < H2; ++y)
-				{
-					const double uu = (y + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
-					for (int x = 0; x < W2; ++x)
-					{
-						double s = 0, ws = 0;
-						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * rows[static_cast<size_t>((std::min)(h - 1, (std::max)(0, t))) * W2 + x]; ws += wt; }
-						out[static_cast<size_t>(y) * W2 + x] = s / ws;
-					}
-				}
-				return out;
-			};
-			auto plane = [&](const std::vector<double>& y, const std::vector<double>* cb, const std::vector<double>* cr, int w, int h) {
-				pl_tex_params p{};
-				p.w = w; p.h = h; p.sampleable = true;
-				std::vector<uint16_t> data;
-				if (!cb)
-				{
-					p.format = pl_find_named_fmt(gpu, "r16");
-					for (double v : y) data.push_back(static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, v)) * 65535.0)));
-				}
-				else
-				{
-					p.format = pl_find_named_fmt(gpu, "rg16");
-					for (size_t i = 0; i < cb->size(); ++i)
-					{
-						data.push_back(static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, (*cb)[i])) * 65535.0)));
-						data.push_back(static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, (*cr)[i])) * 65535.0)));
-					}
-				}
-				p.initial_data = data.data();
-				return pl_tex_create(gpu, &p);
-			};
-			auto frameOf = [&](pl_tex luma, pl_tex chroma, int w, int h) {
-				pl_frame f{};
-				f.num_planes = 2;
-				f.planes[0].texture = luma; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
-				f.planes[1].texture = chroma; f.planes[1].components = 2;
-				f.planes[1].component_mapping[0] = PL_CHANNEL_CB; f.planes[1].component_mapping[1] = PL_CHANNEL_CR;
-				f.repr.sys = PL_COLOR_SYSTEM_BT_709;
-				f.repr.levels = PL_COLOR_LEVELS_LIMITED;
-				f.color = pl_color_space_bt709;
-				f.crop = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
-				pl_frame_set_chroma_location(&f, PL_CHROMA_CENTER);
-				return f;
-			};
-			const std::vector<double> y1080 = chart(W, H, 1.0, 1, 0.45, 0.5);
-			const std::vector<double> cb540 = chart(W / 2, H / 2, 1.0, 2, 0.5, 0.15), cr540 = chart(W / 2, H / 2, 1.0, 3, 0.5, 0.15);
 		TEST_METHOD(SourceResolutionReadsAndRebasesTheDolbyVisionTunnel)
 		{
 			// 2026-10-17: the DV tunnel is no longer skipped as a "packed signal".
@@ -9192,6 +9192,95 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
+		TEST_METHOD(RebasedChartMatchesTheNativeChartThroughTheUpscalePath)
+		{
+			// Stage 12 spec §4 / plan A4 (owner 2026-10-15): a 1080-line chart
+			// upscaled to 2160 upstream and re-based to 1080 goes through the
+			// same libplacebo upscale path as the native 1080 chart and comes
+			// out the same within half-float. YCbCr 4:2:0, both rendered to 4K.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 1920, H = 1080;
+			// A chart inside the upstream upscaler's flat passband (waves up to
+			// 0.04 cycles per 1080-line pixel): what the re-base can restore. Above
+			// it the upstream kernel has already softened the picture and no
+			// re-base can bring that back (measured: 0.13 cycles gives 0.011).
+			auto chart = [](int w, int h, double scale, unsigned seed, double level, double amplitude) {
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				std::vector<double> v(static_cast<size_t>(w) * h, level);
+				for (int k = 0; k < 40; ++k)
+				{
+					const double f = (0.002 + 0.038 * u(rng)) / scale, a = u(rng) * 3.14159265358979, ph = u(rng) * 6.283;
+					const double fx = f * std::cos(a), fy = f * std::sin(a);
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x)
+							v[static_cast<size_t>(y) * w + x] += amplitude / 40.0 * std::cos(6.283185307 * (fx * (x + 0.5) + fy * (y + 0.5)) + ph);
+				}
+				return v;
+			};
+			auto catmull2x = [](const std::vector<double>& src, int w, int h) {
+				auto k = [](double x) { x = std::fabs(x); return x < 1 ? 1.5 * x * x * x - 2.5 * x * x + 1 : x < 2 ? -0.5 * x * x * x + 2.5 * x * x - 4 * x + 2 : 0.0; };
+				const int W2 = 2 * w, H2 = 2 * h;
+				std::vector<double> rows(static_cast<size_t>(W2) * h), out(static_cast<size_t>(W2) * H2);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < W2; ++x)
+					{
+						const double uu = (x + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
+						double s = 0, ws = 0;
+						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * src[static_cast<size_t>(y) * w + (std::min)(w - 1, (std::max)(0, t))]; ws += wt; }
+						rows[static_cast<size_t>(y) * W2 + x] = s / ws;
+					}
+				for (int y = 0; y < H2; ++y)
+				{
+					const double uu = (y + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
+					for (int x = 0; x < W2; ++x)
+					{
+						double s = 0, ws = 0;
+						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * rows[static_cast<size_t>((std::min)(h - 1, (std::max)(0, t))) * W2 + x]; ws += wt; }
+						out[static_cast<size_t>(y) * W2 + x] = s / ws;
+					}
+				}
+				return out;
+			};
+			auto plane = [&](const std::vector<double>& y, const std::vector<double>* cb, const std::vector<double>* cr, int w, int h) {
+				pl_tex_params p{};
+				p.w = w; p.h = h; p.sampleable = true;
+				std::vector<uint16_t> data;
+				if (!cb)
+				{
+					p.format = pl_find_named_fmt(gpu, "r16");
+					for (double v : y) data.push_back(static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, v)) * 65535.0)));
+				}
+				else
+				{
+					p.format = pl_find_named_fmt(gpu, "rg16");
+					for (size_t i = 0; i < cb->size(); ++i)
+					{
+						data.push_back(static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, (*cb)[i])) * 65535.0)));
+						data.push_back(static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, (*cr)[i])) * 65535.0)));
+					}
+				}
+				p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto frameOf = [&](pl_tex luma, pl_tex chroma, int w, int h) {
+				pl_frame f{};
+				f.num_planes = 2;
+				f.planes[0].texture = luma; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.planes[1].texture = chroma; f.planes[1].components = 2;
+				f.planes[1].component_mapping[0] = PL_CHANNEL_CB; f.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.color = pl_color_space_bt709;
+				f.crop = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+				pl_frame_set_chroma_location(&f, PL_CHROMA_CENTER);
+				return f;
+			};
+			const std::vector<double> y1080 = chart(W, H, 1.0, 1, 0.45, 0.5);
+			const std::vector<double> cb540 = chart(W / 2, H / 2, 1.0, 2, 0.5, 0.15), cr540 = chart(W / 2, H / 2, 1.0, 3, 0.5, 0.15);
 			pl_tex nativeLuma = plane(y1080, nullptr, nullptr, W, H), nativeChroma = plane(cb540, &cb540, &cr540, W / 2, H / 2);
 			const std::vector<double> y2160 = catmull2x(y1080, W, H), cb1080 = catmull2x(cb540, W / 2, H / 2), cr1080 = catmull2x(cr540, W / 2, H / 2);
 			pl_tex upLuma = plane(y2160, nullptr, nullptr, 2 * W, 2 * H), upChroma = plane(cb1080, &cb1080, &cr1080, W, H);

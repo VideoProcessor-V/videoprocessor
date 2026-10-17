@@ -7700,6 +7700,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         nativeRgb->setToolTip(QStringLiteral(
             "DeckLink 12-bit RGB (R12B/R12L) and 10-bit r210 reach the renderer as full-precision RGB 4:4:4, unpacked "
             "on the GPU. Off = the old CPU conversion to 10-bit 4:2:0 YCbCr."));
+        auto* dvTrims = addChoice(QStringLiteral("Dolby Vision: L2 trims"),
+            QStringLiteral("dv_trims"), { QStringLiteral("on"), QStringLiteral("off") });
+        dvTrims->setToolTip(QStringLiteral(
+            "Under test (default off). Applies the Dolby Vision Level 2 trim chosen for your display's peak "
+            "(interpolated between the grader's trims) after VP's tone mapping: slope, offset, power, chroma "
+            "weight and saturation. A non-certified reimplementation, not Dolby display management. "
+            "Not used with a calibration 3D LUT."));
         auto* dvGpu = addChoice(QStringLiteral("Dolby Vision tunnel: GPU unpack"),
             QStringLiteral("dv_tunnel_gpu_unpack"), { QStringLiteral("on"), QStringLiteral("off") });
         dvGpu->setToolTip(QStringLiteral(
@@ -9151,7 +9158,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "off" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "off" }, { "dv_trims", "off" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
