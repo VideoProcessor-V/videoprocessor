@@ -22,6 +22,13 @@
       "vprenderer-beta/VideoProcessorVPRendererBeta.dll"
     ]
   },
+  "buildIdentity": {
+    "pairedArtifacts": [
+      "VideoProcessor.exe",
+      "vprenderer/VideoProcessorVPRenderer.dll",
+      "vprenderer-beta/VideoProcessorVPRendererBeta.dll"
+    ]
+  },
   "generatedFiles": ["prerequisites/runtime-requirement.json"],
   "directories": [
     {

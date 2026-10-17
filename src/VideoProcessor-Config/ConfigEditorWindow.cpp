@@ -5390,13 +5390,16 @@ QWidget* ConfigEditorWindow::createStartupPage()
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
     // [decklink] ycbcr_12bit_capture (FL35; planner 2026-10-16: every setting has a Config control).
     auto* ycbcr12 = bindChoiceField(QStringLiteral("decklink"), QStringLiteral("ycbcr_12bit_capture"),
-        { QStringLiteral("rgb12"), QStringLiteral("v210"), QStringLiteral("off") },
-        { QStringLiteral("12-bit RGB from the card (default)"), QStringLiteral("10-bit 4:2:2 (v210)"),
+        { QStringLiteral("v210"), QStringLiteral("rgb12"), QStringLiteral("off") },
+        { QStringLiteral("10-bit 4:2:2, keeps BTB/WTW (default)"),
+          QStringLiteral("12-bit RGB from the card, clips BTB/WTW (earlier default)"),
           QStringLiteral("Refuse the signal (older behaviour)") });
     ycbcr12->setToolTip(QStringLiteral(
-        "DeckLink only: a source sending 12-bit YCbCr 4:2:2 (some players and consoles). 12-bit RGB: the card "
-        "converts it to 12-bit RGB when it offers that for the mode (full precision), otherwise 10-bit 4:2:2. "
-        "10-bit 4:2:2: always the card's 10-bit YCbCr. Refuse: the earlier behaviour, no picture."));
+        "DeckLink only: a source sending 12-bit YCbCr 4:2:2 (some players and consoles); the SDK has no 12-bit "
+        "YCbCr capture format. 10-bit 4:2:2 (default): the signal as sent minus the lowest two bits; "
+        "below-black/above-white kept and VP owns the colour matrix. 12-bit RGB: the card converts to full-range "
+        "12-bit RGB when it offers that for the mode (all 12 bits, but the card's conversion clips "
+        "below-black/above-white and out-of-gamut values), otherwise 10-bit 4:2:2. Refuse: no picture."));
     hardwareForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);

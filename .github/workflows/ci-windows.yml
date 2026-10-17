@@ -1,0 +1,206 @@
+name: ci-windows
+
+# Safety net for the owner's fork: x64 Release build of VideoProcessor.sln and the
+# CPU test suite on GitHub's Windows runners (no GPU, no capture card, no footage).
+#
+# Differences from the local build (see the "Toolchain" step output):
+#  - Built with /p:VpCiNoMagewell=true: the proprietary MWCapture SDK headers are
+#    not available here, so the Magewell backend compiles to a no-device stub and
+#    its tests are left out. Nothing licensed is downloaded or committed.
+#  - Visual Studio 18 Enterprise (runner image) vs 18 Community locally. The image
+#    lacks v142 ATL/MFC, which the job installs; the projects' own v142/v143
+#    toolsets are then used. Windows SDK 10.0.19041 is absent, so the job
+#    overrides WindowsTargetPlatformVersion to the newest installed SDK.
+#  - Qt 6.8.3 msvc2022_64 comes from install-qt-action (cached), passed as VP_QT_ROOT.
+#  - Tests: RendererCaptureHarnessTests (GpuHardware / GpuOnScreen) are excluded;
+#    libplacebo tests run on WARP or skip; footage tests skip (no D:\hfr).
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      QT_VERSION: '6.8.3'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Toolchain
+        id: toolchain
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vsVersion = & $vswhere -latest -products * -property catalog_productDisplayVersion
+          Write-Host "Visual Studio: $vs ($vsVersion)"
+          $msbuild = Join-Path $vs 'MSBuild\Current\Bin\amd64\MSBuild.exe'
+          $vstest = Get-ChildItem (Join-Path $vs 'Common7\IDE\Extensions\TestPlatform\vstest.console.exe') | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "MSBuild: $msbuild"; Write-Host "vstest: $vstest"
+          $toolsets = Get-ChildItem (Join-Path $vs 'MSBuild\Microsoft\VC\*\Platforms\x64\PlatformToolsets\*') -Directory | ForEach-Object Name
+          Write-Host "Platform toolsets: $($toolsets -join ', ')"
+          $msvc = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC') -Directory | ForEach-Object Name
+          Write-Host "MSVC tools: $($msvc -join ', ')"
+          $mfc142 = @(Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*\atlmfc\lib\x64\mfc140u.lib') -ErrorAction SilentlyContinue).Count -gt 0
+          Write-Host "v142 (14.29) MFC present: $mfc142"
+          if (($toolsets -contains 'v142') -and -not $mfc142) {
+            # The image has the v142 compiler but not its ATL/MFC; the MFC projects (Lib, GUI,
+            # renderers, tests) target v142 as locally, so add the same two components.
+            Write-Host "Installing v142 ATL/MFC (14.29) components"
+            $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
+            $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @('modify', '--installPath', "`"$vs`"",
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL',
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.MFC',
+              '--quiet', '--norestart', '--nocache')
+            Write-Host "vs_installer exit $($p.ExitCode)"
+            $mfc142 = @(Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*\atlmfc\lib\x64\mfc140u.lib') -ErrorAction SilentlyContinue).Count -gt 0
+            Write-Host "v142 (14.29) MFC present after install: $mfc142"
+          }
+          $sdks = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory | ForEach-Object Name | Sort-Object { [version]$_ }
+          Write-Host "Windows SDKs: $($sdks -join ', ')"
+          $extra = @()
+          if (-not (($toolsets -contains 'v142') -and $mfc142)) {
+            Write-Host "v142 with MFC unavailable: overriding PlatformToolset=v143"
+            $extra += '/p:PlatformToolset=v143'
+          }
+          if (-not (($sdks -contains '10.0.19041.0') -and ($sdks -contains '10.0.26100.0'))) {
+            $newest = $sdks | Where-Object { $_ -like '10.0.*' } | Select-Object -Last 1
+            Write-Host "A targeted Windows SDK is missing: overriding WindowsTargetPlatformVersion=$newest"
+            $extra += "/p:WindowsTargetPlatformVersion=$newest"
+          }
+          "msbuild=$msbuild" >> $env:GITHUB_OUTPUT
+          "vstest=$vstest" >> $env:GITHUB_OUTPUT
+          "extra=$($extra -join ' ')" >> $env:GITHUB_OUTPUT
+          @"
+          ### Toolchain
+          | | |
+          |---|---|
+          | Visual Studio | $vsVersion |
+          | Platform toolsets | $($toolsets -join ', ') |
+          | MSVC tools | $($msvc -join ', ') |
+          | Windows SDKs | $($sdks -join ', ') |
+          | Overrides | $(if ($extra) { $extra -join ' ' } else { 'none (project toolsets/SDKs used)' }) |
+          | Qt | $env:QT_VERSION ($env:QT_ROOT_DIR) |
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Build (x64 Release, without Magewell)
+        id: build
+        shell: pwsh
+        env:
+          VP_QT_ROOT: ${{ env.QT_ROOT_DIR }}
+        run: |
+          # tools/record_runtime_requirement.ps1 runs under Windows PowerShell 5.1 after each link;
+          # pwsh's PSModulePath would make it load PowerShell 7 modules (Get-FileHash not found).
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          # Always an array: splatting a single string would pass it character by character.
+          $extra = @('${{ steps.toolchain.outputs.extra }}' -split ' ' | Where-Object { $_ })
+          & '${{ steps.toolchain.outputs.msbuild }}' VideoProcessor.sln /t:Build /m /nr:false `
+            /p:Configuration=Release /p:Platform=x64 /p:VpCiNoMagewell=true @extra /v:minimal
+          $code = $LASTEXITCODE
+          "Build: $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (exit $code)" | Tee-Object -FilePath build-time.txt
+          "### Build`n$(Get-Content build-time.txt)" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - name: CPU tests (vstest, one process)
+        id: tests
+        shell: pwsh
+        run: |
+          $trxDir = Join-Path $env:GITHUB_WORKSPACE 'test-results'
+          New-Item -ItemType Directory -Force $trxDir | Out-Null
+          # Make sure no GPU/on-screen/footage switch leaks in from the image.
+          foreach ($k in 'VP_TEST_GPU','VP_TEST_REQUIRE_GPU','VP_TEST_HARNESS_ONSCREEN','VP_TEST_REAL_FOOTAGE','VP_PULLDOWN_RECORDINGS') {
+            Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+          }
+          # vstest's native adapter ignores TEST_METHOD_ATTRIBUTE traits, so the GpuHardware /
+          # GpuOnScreen tests are excluded by their class (as tools/run_chain_gate.ps1 selects them).
+          $filter = 'FullyQualifiedName!~RendererCaptureHarnessTests'
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          & '${{ steps.toolchain.outputs.vstest }}' x64\Release\VideoProcessor-Test.dll /Platform:x64 `
+            "/TestCaseFilter:$filter" "/Logger:trx;LogFileName=cpu-tests.trx" "/ResultsDirectory:$trxDir"
+          "Tests: $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (vstest exit $LASTEXITCODE)"
+          exit 0
+
+      - name: Test summary
+        if: always() && steps.tests.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          $trx = Join-Path $env:GITHUB_WORKSPACE 'test-results\cpu-tests.trx'
+          if (-not (Test-Path $trx)) { "### Tests`nNo TRX written." >> $env:GITHUB_STEP_SUMMARY; exit 1 }
+          [xml]$x = Get-Content $trx -Raw
+          $results = @($x.TestRun.Results.UnitTestResult)
+          $passed = @($results | Where-Object outcome -eq 'Passed').Count
+          $failed = @($results | Where-Object outcome -eq 'Failed').Count
+          $other = @($results | Where-Object { $_.outcome -notin 'Passed','Failed' }).Count
+          # Tests that cannot run here (no footage, no GPU) pass after logging a SKIP-* marker.
+          $markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+' -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object Value)
+          $skipTests = @($results | Where-Object { $_.Output.StdOut -match 'SKIP-[A-Z-]+' }).Count
+          $byMarker = $markers | Group-Object | Sort-Object Count -Descending | ForEach-Object { "| $($_.Name) | $($_.Count) |" }
+          $summary = @"
+          ### CPU tests
+          | Total | Passed | Failed | Not run / other | Passed with SKIP marker |
+          |---|---|---|---|---|
+          | $($results.Count) | $passed | $failed | $other | $skipTests |
+
+          | SKIP marker | Count |
+          |---|---|
+          $($byMarker -join "`n")
+          "@
+          $summary >> $env:GITHUB_STEP_SUMMARY
+          $results | Where-Object { $_.outcome -ne 'Passed' } | ForEach-Object { "- $($_.outcome): $($_.testName)" } |
+            Select-Object -First 100 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Write-Host "Total $($results.Count), passed $passed, failed $failed, other $other, skip-marked $skipTests"
+          if ($results.Count -eq 0 -or $failed -gt 0 -or $other -gt 0) { exit 1 }
+
+      - name: Config editor tests (Qt, off screen)
+        if: always() && steps.tests.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $out = Join-Path $env:GITHUB_WORKSPACE 'test-results\config-tests'
+          & .\tools\run_config_tests.ps1 -Shards 1 -OutDir $out
+          $code = $LASTEXITCODE
+          "### Config editor tests`nexit $code, $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (logs in the TRX artifact)" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - name: Build identity tests (EXE/DLL pairing, packaging)
+        if: always() && steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          # Same Windows PowerShell 5.1 as the packaging scripts (see the Build step).
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/test_build_identity.ps1 -BuildRoot x64/Release
+          $code = $LASTEXITCODE
+          "### Build identity tests`nexit $code" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - name: Upload TRX
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cpu-tests-trx-${{ github.sha }}
+          path: test-results/
+          if-no-files-found: ignore

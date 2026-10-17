@@ -75,6 +75,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <DisplayRefreshRatePolicy.h>
 #include <DisplayTopologySession.h>
 #include <CaptureDisplayFixes.h>
+#include <CaptureStatePolicy.h>
 #include <RendererGenerationGate.h>
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
@@ -918,13 +919,24 @@ HACCEL CreateConfiguredAccelerators(
 				return nullptr;
 			}
 			// A duplicate user binding is ambiguous, so retain the command's
-			// compiled default when it is still available.
+			// compiled default when it is still available. Bug hunt 2 (L6):
+			// every collision and its resolution is logged (it was silent).
 			if (definition.defaultKey == 0)
+			{
+				DebugLog::Log("Shortcut collision: [shortcuts] %s duplicates an earlier "
+					"binding; no compiled default, command left unbound",
+					definition.configKey);
 				continue;
+			}
 			accelerator = { static_cast<BYTE>(FVIRTKEY | definition.defaultModifiers), definition.defaultKey, definition.command };
 			const unsigned int defaultBinding = (static_cast<unsigned int>(accelerator.fVirt) << 16) | accelerator.key;
-			if (bindings.insert(defaultBinding).second)
+			const bool defaultFree = bindings.insert(defaultBinding).second;
+			if (defaultFree)
 				accelerators.push_back(accelerator);
+			DebugLog::Log("Shortcut collision: [shortcuts] %s duplicates an earlier "
+				"binding; %s", definition.configKey,
+				defaultFree ? "using the compiled default" :
+				"compiled default also taken, command left unbound");
 		}
 	}
 
@@ -1691,8 +1703,8 @@ public:
 	void SetNominalRate(double nominalRateHz)
 	{
 		const double normalizedRate =
-			std::isfinite(nominalRateHz) && nominalRateHz >= 10.0 &&
-			nominalRateHz <= 240.0 ? nominalRateHz : 0.0;
+			// Bug hunt 2 (L2): the general display bounds, not a fixed 240 Hz cap.
+			DisplayRefreshBounds::Accepts(nominalRateHz) ? nominalRateHz : 0.0;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (std::fabs(m_nominalRateHz - normalizedRate) < 0.01)
@@ -1982,8 +1994,7 @@ private:
 				}
 				if (publishRate)
 				{
-					if (estimate.startupRateHz >= 10.0 &&
-						estimate.startupRateHz <= 240.0)
+					if (DisplayRefreshBounds::Accepts(estimate.startupRateHz))   // bug hunt 2 (L2)
 					{
 						std::lock_guard<std::mutex> lock(m_mutex);
 						if (m_targetGeneration == targetGeneration)
@@ -2477,8 +2488,7 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 			size_t valueLength = 0;
 			const double overrideRate = std::stod(setting.second, &valueLength);
 			if (valueLength != setting.second.length() ||
-				!std::isfinite(overrideRate) ||
-				overrideRate < 10.0 || overrideRate > 240.0)
+				!DisplayRefreshBounds::Accepts(overrideRate))   // bug hunt 2 (L2)
 			{
 				throw std::runtime_error("out of range");
 			}
@@ -2492,8 +2502,9 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 		{
 			DebugLog::Log(
 				"Display timing override ignored: invalid entry %s=%s "
-				"(expected nominal integer 1-1000 = rate 10.0-240.0 or AUTO)",
-				setting.first.c_str(), setting.second.c_str());
+				"(expected nominal integer 1-1000 = rate %.1f-%.1f or AUTO)",
+				setting.first.c_str(), setting.second.c_str(),
+				DisplayRefreshBounds::kMinimumHz, DisplayRefreshBounds::kMaximumHz);
 		}
 	}
 }
@@ -5465,6 +5476,18 @@ CVideoProcessorDlg::~CVideoProcessorDlg()
 
 
 	}
+	// Bug hunt 2 (H1): cancel the shutdown watchdog last, so it also covers the
+	// joins above. If it is already forcing the exit, this waits for the
+	// process to end (it holds the mutex and never returns).
+	if (m_shutdownWatchdog)
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_shutdownWatchdog->mutex);
+			m_shutdownWatchdog->cancelled = true;
+			m_shutdownWatchdog->dialog = nullptr;
+		}
+		m_shutdownWatchdog->wake.notify_all();
+	}
 }
 
 //
@@ -6177,6 +6200,11 @@ void CVideoProcessorDlg::OnBnClickedRendererFullScreenCheck()
 		return;
 	if (!m_rendererFullscreenCheck.GetCheck() && !m_fullScreenVideoWindow)
 		videoProcessorApp.RestoreDisplayTopology("fullscreen-off");
+	// Bug hunt 2 (L10): fullscreen on again re-enters the configured
+	// target-only session (it used to be entered only at startup).
+	if (m_rendererFullscreenCheck.GetCheck())
+		videoProcessorApp.BeginTargetOnlyDisplaySession(
+			FullscreenMonitorName(), "fullscreen-on");
 	if (m_videoRenderer && !m_activeRendererIsDirectShow)
 	{
 		// Alpha reconstructs its own swapchain for an HWND/fullscreen change.
@@ -6303,16 +6331,21 @@ LRESULT	CVideoProcessorDlg::OnMessageCaptureDeviceStateChange(WPARAM wParam, LPA
 	switch (trackedState)
 	{
 	case CaptureDeviceState::CAPTUREDEVICESTATE_READY:
-		m_captureDeviceStateText.SetWindowText(failed ? TEXT("Failed") : TEXT("Ready"));
+	{
+		// Bug hunt 2 (M3): READY right after STARTING is a failed start
+		// (Magewell posts Error() then READY); Restart stays available.
+		const bool startFailed = CaptureStatePolicy::StartFailed(newState, previousState);
+		m_captureDeviceStateText.SetWindowText(failed ? TEXT("Failed") :
+			startFailed ? TEXT("Start failed - Restart capture to retry") : TEXT("Ready"));
 		// audit 2026-10-16: READY/FAILED while the GUI expected CAPTURING is
 		// an unexpected stop (capture thread abort, forced DeckLink profile
 		// change): keep Restart available as the way back.
-		enableButtons = failed ||
-			previousState == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING;
+		enableButtons = CaptureStatePolicy::RestartAvailable(newState, previousState);
 		if (enableButtons)
 			DebugLog::Log("Capture device reported %S while the GUI was %S; Restart capture to resume",
 				ToString(newState), ToString(previousState));
 		break;
+	}
 
 	case CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING:
 	{
@@ -6888,7 +6921,16 @@ LRESULT CVideoProcessorDlg::OnMessageRendererStateChange(WPARAM wParam, LPARAM l
 		assert(oldRendererState == RendererState::RENDERSTATE_READY);
 
 		m_restartQueuedBecauseEotf = false;
-		ResetRendererFailureRetry("renderer-rendering");
+		// Bug hunt 2 (M5): the retry count clears only after sustained
+		// rendering (PollRendererFailureRetry), not at the first RENDERING.
+		m_rendererRenderingSinceTick = GetTickCount64();
+		if (m_fullscreenSuspendedByRendererFailure)
+		{
+			m_fullscreenSuspendedByRendererFailure = false;
+			DebugLog::Log(
+				"Renderer failure fullscreen suspension ended: reason=renderer-rendering "
+				"retry_attempts_kept=%u", m_rendererFailureRetryAttempt);
+		}
 		const uint64_t latestCaptureSequence =
 			m_rendererIngressState->LatestCaptureSequence();
 		if (m_rendererCaptureVideoStateNotificationSequence == 0 ||
@@ -7317,11 +7359,11 @@ bool CVideoProcessorDlg::TryFinalizeRendererRetirement(
 				ConvertHandoffToShutdown;
 		m_shutdownRendererRetirementBlocked = action ==
 			RendererRetirementService::IncompleteAction::RetainFailedShutdown;
-		// Bug hunt 2026-10-17: bound the wait (see PollShutdownRetirementDeadline).
-		if (m_shutdownRendererRetirementBlocked &&
-			m_shutdownRetirementBlockedDeadlineTick == 0)
-			m_shutdownRetirementBlockedDeadlineTick =
-				GetTickCount64() + ShutdownBlockedRetirementDeadlineMs;
+		// Bug hunt 2026-10-17: bound the wait (see PollShutdownDeadline). A
+		// fail-closed shutdown retirement brings the shutdown deadline forward.
+		if (m_shutdownRendererRetirementBlocked)
+			m_shutdownDeadline.BringForward(
+				GetTickCount64(), ShutdownBlockedRetirementDeadlineMs);
 		if (convertHandoffToShutdown)
 		{
 			m_failedRendererRetirementNextRetryTick = 0;
@@ -9023,8 +9065,8 @@ void CVideoProcessorDlg::UpdateState()
 		if (m_shutdownRendererRetirementBlocked)
 		{
 			// Bug hunt 2026-10-17: this used to return forever, so exit hung.
-			// The UI timer keeps calling UpdateState while it is blocked.
-			PollShutdownRetirementDeadline(GetTickCount64());
+			// The UI timers poll the shutdown deadline while it is blocked.
+			PollShutdownDeadline(GetTickCount64());
 			return;
 		}
 		const ULONGLONG now = GetTickCount64();
@@ -9071,6 +9113,10 @@ void CVideoProcessorDlg::UpdateState()
 			TEXT("CVideoProcessorDlg::UpdateState(): waiting for renderer construction")));
 		return;
 	}
+
+	// Bug hunt 2 (M4): before the capture-state returns below, so fullscreen
+	// off is honoured while capture is lost, stopped or failed.
+	TeardownUnwantedFullscreenHost("fullscreen-off");
 
 	// Want to change cards or want to restart capture
 	if (!m_desiredCaptureDevice.IsEqualObject(m_captureDevice) ||
@@ -9260,12 +9306,7 @@ void CVideoProcessorDlg::UpdateState()
 			m_fullscreenModeChangePending = false;
 		}
 		// If we still have a full screen window and don't want to be full screen anymore clean it up
-		if (!m_rendererFullscreenCheck.GetCheck() && m_fullScreenVideoWindow &&
-			!m_preserveFullscreenHostForProfileRestart)
-		{
-			FullScreenVideoWindowDestroy();
-			videoProcessorApp.RestoreDisplayTopology("fullscreen-off");
-		}
+		TeardownUnwantedFullscreenHost("fullscreen-off");
 
 		// If the renderer failed we don't auto-start it again here but wait for
 		// something to happen (a new capture state, Restart, or - bug hunt
@@ -9360,10 +9401,20 @@ void CVideoProcessorDlg::HandleRendererFailureFullscreen(const char* site)
 			site,
 			m_fullScreenVideoWindow ? m_fullScreenVideoWindow->GetHWND() : nullptr);
 	}
+	m_rendererRenderingSinceTick = 0;
 	if (m_queueLaunchContractTerminalFailure)
 	{
 		// That failure asks for Restart Renderer explicitly; do not retry it.
 		m_rendererFailureNextRetryTick = 0;
+		return;
+	}
+	// Bug hunt 2 (M5): several sites report one failure; schedule once. A
+	// second report must not push the due retry later.
+	if (!RendererFailureRetryShouldSchedule(m_rendererFailureNextRetryTick))
+	{
+		DebugLog::Log(
+			"Renderer failure retry already scheduled: site=%s attempt=%u",
+			site, m_rendererFailureRetryAttempt + 1);
 		return;
 	}
 	if (!RendererFailureRetryAllowed(m_rendererFailureRetryAttempt))
@@ -9413,6 +9464,13 @@ void CVideoProcessorDlg::ResetRendererFailureRetry(const char* reason)
 // state; otherwise the retry stays due and is re-evaluated on the next tick.
 void CVideoProcessorDlg::PollRendererFailureRetry(ULONGLONG now)
 {
+	const bool rendering = m_videoRenderer &&
+		m_rendererState == RendererState::RENDERSTATE_RENDERING;
+	if (!rendering)
+		m_rendererRenderingSinceTick = 0;
+	else if (RendererFailureRetryShouldClear(
+		rendering, m_rendererRenderingSinceTick, now))
+		ResetRendererFailureRetry("renderer-rendering-sustained");
 	if (m_rendererFailureNextRetryTick == 0 || now < m_rendererFailureNextRetryTick)
 		return;
 	if (!m_rendererFailureKeepFullscreen || m_wantToTerminate ||
@@ -9447,72 +9505,246 @@ void CVideoProcessorDlg::PollRendererFailureRetry(ULONGLONG now)
 }
 
 
-// Bug hunt 2026-10-17: m_shutdownRendererRetirementBlocked (a renderer whose
-// application-shutdown retirement could not complete) made UpdateState return
-// forever, so VP never exited. After the deadline, abandon the retained
-// renderer, stop and detach the capture device, and end the dialog. The
-// normal-exit path in the application then restores the display topology.
-void CVideoProcessorDlg::PollShutdownRetirementDeadline(ULONGLONG now)
+// Bug hunt 2 (2026-10-17, H1): one shutdown deadline for every way the exit
+// can block. The first version covered only m_shutdownRendererRetirementBlocked
+// and was polled only from that branch, so a retirement worker that never
+// returned (m_rendererRetirementPending for ever), a construction, a capture
+// stop that never reached READY or a renderer that never stopped kept VP
+// alive with no topology or LED restore. Now the deadline is armed when the
+// close is first requested and polled from the UI timers whatever blocks.
+// Bug hunt 2 (2026-10-17, M4): fullscreen off used to be honoured only past
+// UpdateState's capture-state returns, so with capture lost/stopped (and a
+// failed renderer keeping the host under renderer_failure_keep_fullscreen) the
+// host and the target-only topology stayed until capture returned or exit.
+void CVideoProcessorDlg::TeardownUnwantedFullscreenHost(const char* site)
 {
-	if (!m_shutdownRendererRetirementBlocked || !m_wantToTerminate)
+	if (m_wantToTerminate || m_rendererFullscreenCheck.GetCheck() ||
+		!m_fullScreenVideoWindow || m_preserveFullscreenHostForProfileRestart ||
+		m_videoRenderer || m_rendererRetirementPending ||
+		m_failedRendererRetirement || m_rendererConstructionActive ||
+		m_fullscreenRetargetPending)
 		return;
-	if (m_shutdownRetirementBlockedDeadlineTick == 0)
-		m_shutdownRetirementBlockedDeadlineTick =
-			now + ShutdownBlockedRetirementDeadlineMs;
-	if (now < m_shutdownRetirementBlockedDeadlineTick)
-		return;
+	DebugLog::Log("Fullscreen host removed: site=%s capture_state=%d",
+		site, static_cast<int>(m_captureDeviceState));
+	FullScreenVideoWindowDestroy();
+	videoProcessorApp.RestoreDisplayTopology("fullscreen-off");
+}
 
+
+ShutdownDeadline::Blockers CVideoProcessorDlg::CurrentShutdownBlockers() const
+{
+	ShutdownDeadline::Blockers blockers;
+	blockers.retirementPending = m_rendererRetirementPending;
+	blockers.failedRetirement = m_failedRendererRetirement != nullptr;
+	blockers.retirementShutdownBlocked = m_shutdownRendererRetirementBlocked;
+	blockers.constructionActive = m_rendererConstructionActive;
+	blockers.captureStopping = m_captureStopInProgress ||
+		m_captureDeviceState == CaptureDeviceState::CAPTUREDEVICESTATE_STOPPING;
+	blockers.rendererPresent = m_videoRenderer != nullptr;
+	blockers.capturePresent = m_captureDevice != nullptr;
+	return blockers;
+}
+
+
+void CVideoProcessorDlg::ArmShutdownDeadline(const char* site)
+{
+	const ULONGLONG now = GetTickCount64();
+	if (!m_shutdownDeadline.Arm(now, ShutdownDeadline::ForcedExitDeadlineMs))
+		return;
 	DebugLog::Log(
-		"Renderer shutdown retirement deadline expired: renderer=%S "
-		"deadline_ms=%u capture=%d action=abandon-renderer-end-dialog",
-		static_cast<LPCTSTR>(m_retiringRendererName),
-		ShutdownBlockedRetirementDeadlineMs,
-		m_captureDevice ? 1 : 0);
-	// Integration 2026-10-17: before leaking, stop the renderer's LED drive on
-	// its own thread (bounded: the blocked renderer may hold its locks), so the
-	// projector is restored to full light and CNTR is never left high.
-	if (m_failedRendererRetirement)
-	{
-		const std::shared_ptr<IVideoRenderer> renderer = m_failedRendererRetirement;
-		const LedDrive::BoundedRestoreResult restore = LedDrive::RunBoundedRestore(
-			[renderer]() { return renderer->StopLedDriveForShutdown(); },
-			ShutdownLedRestoreTimeoutMs);
-		DebugLog::Log(
-			"Forced shutdown LED restore: %s (timeout_ms=%u)",
-			LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
-	}
-	// Deliberately leaked: its backend already failed to release, and
-	// destroying it here or in the dialog destructor would re-enter that
-	// backend on the UI thread. Process exit reclaims it.
-	if (m_failedRendererRetirement)
-		new std::shared_ptr<IVideoRenderer>(std::move(m_failedRendererRetirement));
-	m_shutdownRendererRetirementBlocked = false;
+		"Application shutdown deadline armed: site=%s deadline_ms=%u "
+		"watchdog_ms=%u",
+		site, ShutdownDeadline::ForcedExitDeadlineMs,
+		ShutdownDeadline::ForcedExitDeadlineMs + ShutdownDeadline::WatchdogGraceMs);
 
-	// No capture callback may outlive the dialog.
-	if (m_captureDevice)
+	// Backstop for a blocked UI thread (no timer runs then): a detached thread
+	// forces the exit after the deadline plus a grace. The destructor cancels
+	// it under the same mutex, so it never touches a destroyed dialog; while it
+	// runs the forced exit, the destructor waits for the process to end.
+	auto state = std::make_shared<ShutdownWatchdogState>();
+	state->dialog = this;
+	try
 	{
-		try
-		{
-			if (m_captureDeviceState ==
-				CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING ||
-				m_captureDeviceState ==
-				CaptureDeviceState::CAPTUREDEVICESTATE_STOPPING)
-				m_captureDevice->StopCapture();
-		}
-		catch (const std::exception& e)
-		{
-			DebugLog::Log("Forced shutdown capture stop failed: %s", e.what());
-		}
-		catch (...)
-		{
-			DebugLog::Log("Forced shutdown capture stop failed: unknown exception");
-		}
-		m_captureDevice->SetCallbackHandler(nullptr);
-		m_captureDevice.Release();
-		m_captureDeviceState = CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN;
+		std::thread([state]()
+			{
+				std::unique_lock<std::mutex> lock(state->mutex);
+				if (state->wake.wait_for(lock,
+					std::chrono::milliseconds(ShutdownDeadline::ForcedExitDeadlineMs +
+						ShutdownDeadline::WatchdogGraceMs),
+					[&state]() { return state->cancelled; }))
+					return;
+				DebugLog::Log(
+					"Application shutdown watchdog expired: the UI thread did not "
+					"complete or force the exit");
+				state->dialog->ForceExitProcess(
+					"shutdown-watchdog", "ui-thread-unresponsive");
+			}).detach();
+		m_shutdownWatchdog = std::move(state);
 	}
-	CloseOwnedTopLevelWindowsForShutdown();
-	CDialog::EndDialog(S_OK);
+	catch (...)
+	{
+		DebugLog::Log("Application shutdown watchdog could not start; "
+			"the UI-timer deadline remains");
+	}
+}
+
+
+void CVideoProcessorDlg::PollShutdownDeadline(ULONGLONG now)
+{
+	if (!m_wantToTerminate)
+		return;
+	if (!m_shutdownDeadline.Armed())
+		ArmShutdownDeadline("poll");
+	if (m_shutdownRendererRetirementBlocked)
+		m_shutdownDeadline.BringForward(now, ShutdownBlockedRetirementDeadlineMs);
+	if (m_shutdownDeadline.Evaluate(now) != ShutdownDeadline::Decision::Expire)
+		return;
+	const ShutdownDeadline::Blockers blockers = CurrentShutdownBlockers();
+	DebugLog::Log(
+		"Application shutdown deadline expired: blocking=%s elapsed_ms=%llu "
+		"retirement_pending=%d retirement_failed=%d retirement_blocked=%d "
+		"construction=%d capture_state=%d capture_stop_in_progress=%d "
+		"renderer=%d renderer_state=%d retiring=%S action=forced-exit",
+		ShutdownDeadline::Describe(blockers),
+		static_cast<unsigned long long>(now - m_shutdownDeadline.ArmedAt()),
+		blockers.retirementPending ? 1 : 0, blockers.failedRetirement ? 1 : 0,
+		blockers.retirementShutdownBlocked ? 1 : 0,
+		blockers.constructionActive ? 1 : 0,
+		static_cast<int>(m_captureDeviceState),
+		m_captureStopInProgress ? 1 : 0,
+		blockers.rendererPresent ? 1 : 0, static_cast<int>(m_rendererState),
+		static_cast<LPCTSTR>(m_retiringRendererName));
+	ForceExitProcess("shutdown-deadline", ShutdownDeadline::Describe(blockers));
+}
+
+
+// Forced exit, done in place (it does not depend on DoModal returning: the
+// UI thread may be inside a nested call that never returns). Every step is
+// bounded; the process is then terminated, so no destructor re-enters a
+// blocked backend and no windowless process is left behind.
+void CVideoProcessorDlg::ForceExitProcess(const char* reason, const char* blocking)
+{
+	if (m_forcedShutdownStarted.exchange(true))
+	{
+		// Another thread is already forcing the exit. If it is itself stuck,
+		// end the process after the grace anyway.
+		Sleep(ShutdownDeadline::WatchdogGraceMs);
+		TerminateProcess(GetCurrentProcess(), ShutdownDeadline::ForcedExitCode);
+		for (;;)
+			Sleep(INFINITE);
+	}
+	const bool uiThread = ::GetCurrentThreadId() == m_uiThreadId;
+	const ShutdownDeadline::ForcedExitPlan plan =
+		ShutdownDeadline::PlanForcedExit(ShutdownDeadline::Blockers{});
+	DebugLog::Log("Forced shutdown: reason=%s blocking=%s thread=%s",
+		reason, blocking, uiThread ? "ui" : "watchdog");
+	try
+	{
+		CrashState::Global().SetValue("exit",
+			std::string("forced shutdown: ") + reason + " (" + blocking + ")");
+	}
+	catch (...) {}
+
+	// 1. LED (Dynamic Drive) restore on every renderer that may hold the
+	//    drive: the current one, the one in (or blocked in) the retirement
+	//    worker, and a retained failed retirement. Each stop runs on its own
+	//    thread with a bound; a renderer that holds its locks times out.
+	if (plan.restoreLed)
+	{
+		std::vector<std::shared_ptr<IVideoRenderer>> renderers;
+		const auto add = [&renderers](std::shared_ptr<IVideoRenderer> renderer)
+		{
+			if (renderer && std::find(renderers.begin(), renderers.end(),
+				renderer) == renderers.end())
+				renderers.push_back(std::move(renderer));
+		};
+		add(std::atomic_load_explicit(&m_videoRenderer, std::memory_order_acquire));
+		{
+			std::lock_guard<std::mutex> lock(m_shutdownRetiringRendererMutex);
+			add(m_shutdownRetiringRenderer.lock());
+		}
+		if (uiThread)
+			add(m_failedRendererRetirement);
+		if (renderers.empty())
+			DebugLog::Log("Forced shutdown LED restore: no renderer reachable "
+				"(an exited renderer restored its drive when it stopped)");
+		for (const std::shared_ptr<IVideoRenderer>& renderer : renderers)
+		{
+			const LedDrive::BoundedRestoreResult restore = LedDrive::RunBoundedRestore(
+				[renderer]() { return renderer->StopLedDriveForShutdown(); },
+				ShutdownLedRestoreTimeoutMs);
+			DebugLog::Log("Forced shutdown LED restore: %s (timeout_ms=%u)",
+				LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
+		}
+		// Deliberately leaked: their backends may be blocked, and no destructor
+		// may re-enter them. Process termination reclaims them.
+		for (std::shared_ptr<IVideoRenderer>& renderer : renderers)
+			new std::shared_ptr<IVideoRenderer>(std::move(renderer));
+	}
+
+	// 2. Target-only display topology restore (no-op without a session).
+	if (plan.restoreTopology)
+	{
+		const bool restored =
+			videoProcessorApp.RestoreDisplayTopology("forced-shutdown");
+		DebugLog::Log("Forced shutdown topology restore: %s",
+			restored ? "done-or-not-needed" : "pending (kept for the next start)");
+	}
+
+	// 3. Crash state kept: a forced exit is not a clean exit.
+	DebugLog::Log(
+		"Forced shutdown: terminating process exit_code=%u crash_state=%s",
+		ShutdownDeadline::ForcedExitCode, plan.keepCrashState ? "kept" : "deleted");
+	CrashState::Global().Stop(!plan.keepCrashState);
+	DEBUGLOG_SHUTDOWN();
+	TerminateProcess(GetCurrentProcess(), ShutdownDeadline::ForcedExitCode);
+	for (;;)
+		Sleep(INFINITE);
+}
+
+
+bool CVideoProcessorDlg::WaitForShutdownWorkers(DWORD timeoutMs)
+{
+	const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+	const auto waitBounded = [deadline](HANDLE handle)
+	{
+		if (!handle)
+			return true;
+		for (;;)
+		{
+			const ULONGLONG now = GetTickCount64();
+			const DWORD remaining = now >= deadline ? 0 :
+				static_cast<DWORD>(deadline - now);
+			const DWORD waitResult = MsgWaitForMultipleObjectsEx(
+				1, &handle, remaining, QS_SENDMESSAGE, MWMO_INPUTAVAILABLE);
+			if (waitResult == WAIT_OBJECT_0)
+				return true;
+			if (waitResult != WAIT_OBJECT_0 + 1)
+				return false;   // timeout or failure
+			MSG message;
+			PeekMessage(&message, nullptr, WM_NULL, WM_NULL, PM_NOREMOVE);
+		}
+	};
+	m_rendererRetirementService.RequestClose();
+	const bool retirementDone =
+		waitBounded(m_rendererRetirementService.NativeThreadHandle());
+	bool resetDone = true;
+	if (m_rendererResetCoordinator)
+	{
+		m_rendererResetCoordinator->Close();
+		resetDone = waitBounded(static_cast<HANDLE>(
+			m_rendererResetCoordinator->NativeThreadHandle()));
+	}
+	if (!retirementDone || !resetDone)
+	{
+		DebugLog::Log(
+			"Application shutdown workers did not finish: retirement_worker=%s "
+			"reset_coordinator=%s timeout_ms=%lu",
+			retirementDone ? "done" : "blocked", resetDone ? "done" : "blocked",
+			timeoutMs);
+		return false;
+	}
+	return true;
 }
 
 //
@@ -10260,6 +10492,15 @@ void CVideoProcessorDlg::RenderStart()
 			delete[] ew;
 
 			HandleRendererFailureFullscreen("libplacebo-start");
+			// Hunt 2 platform sweep: a refused plugin (build ID mismatch etc.) is
+			// refused for the life of the process; automatic retries cannot help.
+			// The fix is redeploying the pair and restarting VP (the probe is cached).
+			if (RendererId::IsLibplaceboRefused(selectedRenderer->libplaceboBeta) &&
+				m_rendererFailureNextRetryTick != 0)
+			{
+				m_rendererFailureNextRetryTick = 0;
+				DebugLog::Log("Renderer failure retry not scheduled: plugin refused (redeploy EXE and DLL from one build)");
+			}
 			UpdateState();
 			m_rendererRestartButton.EnableWindow(true);
 		}
@@ -10727,6 +10968,12 @@ void CVideoProcessorDlg::DestroyVideoRenderer()
 	m_retiringRendererActionSnapshot = m_profileRuntime.GetSnapshot();
 	m_retiringRendererActionSelectorIndex = m_activeRendererSelectorIndex;
 	m_retiringRendererActionIsAlpha = !m_activeRendererIsDirectShow;
+	{
+		// Bug hunt 2 (H1): reachable for the forced-exit LED restore while the
+		// worker may be blocked inside this renderer's Retire().
+		std::lock_guard<std::mutex> lock(m_shutdownRetiringRendererMutex);
+		m_shutdownRetiringRenderer = rendererToDestroy;
+	}
 	DebugLog::Log(
 		"Renderer retirement queued: process=%lu generation=%u renderer=%S "
 		"token=%llu target=%p fullscreen_host=%p fullscreen_intent=%d "
@@ -12147,10 +12394,22 @@ void CVideoProcessorDlg::RebuildRendererCombo()
 
 	DirectShowVideoRendererIds(rendererIds);
 #if defined(_WIN64)
-	if (RendererId::IsLibplaceboAvailable())
-		rendererIds.push_back(RendererId::Libplacebo());
-	if (RendererId::IsLibplaceboAvailable(true))
-		rendererIds.push_back(RendererId::Libplacebo(true));
+	// Hunt 2 platform sweep: a refused plugin (EXE/DLL build ID mismatch, API,
+	// flavour) used to vanish from the list, so the configured VP Renderer
+	// silently fell back to another renderer and the refusal was only in the
+	// log. It stays listed; starting it fails with the refusal text in the
+	// renderer box. The DLL itself is never kept loaded.
+	for (const bool beta : { false, true })
+	{
+		if (RendererId::IsLibplaceboAvailable(beta))
+			rendererIds.push_back(RendererId::Libplacebo(beta));
+		else if (RendererId::IsLibplaceboRefused(beta))
+		{
+			DebugLog::Log("Renderer list: %s plugin refused; listed so its start reports why",
+				beta ? "VP Renderer (Beta)" : "VP Renderer");
+			rendererIds.push_back(RendererId::Libplacebo(beta));
+		}
+	}
 #endif
 
 	// Alpha is always first; remaining eligible renderers are shown in the
@@ -13762,14 +14021,27 @@ void CVideoProcessorDlg::PollAmbientSensor()
 // Content intent (intent interpreter item 1, 2026-10-17): the renderer's
 // content class as the rules' `content` variable ("" while intent_content is
 // off or nothing is classified). Re-evaluates the profile rules on a change.
+//
+// Bug hunt 2 (2026-10-17, H2): the value used to become "" whenever the
+// renderer was not RENDERING, and every new renderer reclassifies from
+// Unknown, so each renderer stop/restart flipped content-ruled profiles to
+// their fallback and back (an endless loop when that profile needs a renderer
+// restart). The last classification is now held across stops and restarts
+// and changes only on a real classification change (ContentRuleHold).
+// Correctness fix, no switch: intent_content off still gives "".
 void CVideoProcessorDlg::UpdateContentIntent(const char* reason)
 {
 	ContentIntentStatus status;
-	if (!m_videoRenderer || m_rendererState != RendererState::RENDERSTATE_RENDERING ||
-		!m_videoRenderer->GetContentIntentStatus(status))
+	const bool rendering = m_videoRenderer &&
+		m_rendererState == RendererState::RENDERSTATE_RENDERING;
+	const bool statusAvailable = rendering &&
+		m_videoRenderer->GetContentIntentStatus(status);
+	if (!statusAvailable)
 		status = ContentIntentStatus();
-	m_contentStatus = status;
-	const std::string value = ContentRuleValue(status);
+	if (rendering)
+		m_contentStatus = status;   // the overlay line shows the live state
+	const std::string value =
+		m_contentRuleHold.Update(rendering, statusAvailable, status);
 	if (value == m_contentValue)
 		return;
 	DebugLog::Log("Content intent: rules see content=%s (was %s; %s, %s)",
@@ -15632,12 +15904,15 @@ void CVideoProcessorDlg::OnClose()
 		DebugLog::Log(
 			"Keyboard close handler: phase=retry result=advance-existing-termination");
 		UpdateState();
+		PollShutdownDeadline(GetTickCount64());
 		return;
 	}
 
 	// Set intent first, stopping the discoverer will lead to state update calls
 	m_desiredCaptureDevice = nullptr;
 	m_wantToTerminate = true;
+	// Bug hunt 2 (H1): the exit is bounded from the first close request.
+	ArmShutdownDeadline("close");
 	m_configurationRpcServer.Stop();
 	KillTimer(FULLSCREEN_FOCUS_TIMER_ID);
 	if (m_fullscreenRetargetPending)
@@ -15830,6 +16105,8 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 		// renderer transition after termination intent is published.
 		if (m_failedRendererRetirement)
 			UpdateState();
+		// Bug hunt 2 (H1): polled whatever blocks the exit.
+		PollShutdownDeadline(GetTickCount64());
 		return;
 	}
 
@@ -15961,6 +16238,14 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 			m_shaderLoadingWindow.Hide();
 			m_shaderLoadingPopupShownTick = 0;
 		}
+
+		// Bug hunt 2 (2026-10-17, M6): the content class switches at a cut;
+		// consume that published change here (a cheap status read) instead of
+		// up to 1 s later on the 1 s timer, so a profile change lands with the
+		// cut. The 1 s timer remains the fallback.
+		if (m_rendererState == RendererState::RENDERSTATE_RENDERING &&
+			m_videoRenderer && !m_wantToRestartRenderer)
+			UpdateContentIntent("content-intent-change");
 
 		if (m_rendererState == RendererState::RENDERSTATE_RENDERING &&
 			m_videoRenderer && !m_wantToRestartRenderer)

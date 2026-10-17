@@ -124,6 +124,12 @@ public:
 	void Revoke(RendererBindingToken token) noexcept;
 	void Close() noexcept;
 	void Join() noexcept;
+	// Bug hunt 2 (2026-10-17): for a bounded shutdown wait (the Win32 thread
+	// handle; null when there is no worker).
+	void* NativeThreadHandle() noexcept
+	{
+		return m_worker.joinable() ? m_worker.native_handle() : nullptr;
+	}
 
 	// UI-originated requests use the current binding and the injected clock.
 	bool RequestUi(RendererResetReason reason, RendererResetScope scope,

@@ -83,3 +83,42 @@ static inline uint64_t U64_MulDivRemainder(uint64_t a, uint64_t b, uint64_t div,
 	uint64_t lo = _umul128(a, b, &hi);
 	return _udiv128(hi, lo, div, remainder);
 }
+
+/**
+ * Bug hunt 2 (2026-10-17, M2/L11): overflow-safe round((a * b) / div) for
+ * clock conversions. The 128-bit product never overflows; when the quotient
+ * itself would not fit the result saturates instead of faulting (_udiv128
+ * raises #DE on quotient overflow) or wrapping.
+ */
+static inline uint64_t U64_MulDivRoundSaturating(uint64_t a, uint64_t b, uint64_t div)
+{
+	if (div == 0) return 0;
+	uint64_t hi = 0;
+	const uint64_t lo = _umul128(a, b, &hi);
+	if (hi >= div)
+		return UINT64_MAX;
+	uint64_t remainder = 0;
+	uint64_t quotient = _udiv128(hi, lo, div, &remainder);
+	if (remainder >= div - remainder && quotient != UINT64_MAX)
+		++quotient;
+	return quotient;
+}
+
+/**
+ * Signed variant: round half away from zero, saturating at INT64_MIN/MAX.
+ * Exact for every input whose true result fits in int64 (any tick count and
+ * any clock frequency), so long sessions keep sub-tick precision.
+ */
+static inline int64_t I64_MulDivRoundSaturating(int64_t a, int64_t b, int64_t div)
+{
+	if (div == 0) return 0;
+	const bool negative = ((a < 0) != (b < 0)) != (div < 0);
+	const uint64_t ua = a < 0 ? 0ULL - static_cast<uint64_t>(a) : static_cast<uint64_t>(a);
+	const uint64_t ub = b < 0 ? 0ULL - static_cast<uint64_t>(b) : static_cast<uint64_t>(b);
+	const uint64_t ud = div < 0 ? 0ULL - static_cast<uint64_t>(div) : static_cast<uint64_t>(div);
+	const uint64_t magnitude = U64_MulDivRoundSaturating(ua, ub, ud);
+	const uint64_t limit = negative ? (1ULL << 63) : static_cast<uint64_t>(INT64_MAX);
+	if (magnitude >= limit)
+		return negative ? INT64_MIN : INT64_MAX;
+	return negative ? -static_cast<int64_t>(magnitude) : static_cast<int64_t>(magnitude);
+}

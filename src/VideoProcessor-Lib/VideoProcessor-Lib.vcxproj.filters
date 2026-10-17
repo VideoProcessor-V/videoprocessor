@@ -129,6 +129,9 @@
 	<ClInclude Include="CaptureDisplayFixes.h">
 	  <Filter>Header Files</Filter>
 	</ClInclude>
+	<ClInclude Include="CaptureStatePolicy.h">
+	  <Filter>Header Files</Filter>
+	</ClInclude>
 	<ClInclude Include="EventActionLauncher.h">
 	  <Filter>Header Files</Filter>
 	</ClInclude>

@@ -311,6 +311,8 @@
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
+    <ClCompile Include="BugHunt2GuiTests.cpp" />
+    <ClCompile Include="BugHunt2CaptureTests.cpp" />
     <ClCompile Include="Integration20261017Tests.cpp" />
     <ClCompile Include="PostMergeAudit20261017Tests.cpp" />
     <ClCompile Include="CaptureLayerAuditTests.cpp" />
@@ -419,7 +421,7 @@
 	<ClCompile Include="LiveEpochConvergenceControllerTests.cpp" />
 	<ClCompile Include="LiveFrameCounterTrackerTests.cpp" />
 	<ClCompile Include="OutputReadinessControllerTests.cpp" />
-    <ClCompile Include="Magewell*.cpp" />
+    <ClCompile Include="Magewell*.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
 	<ClCompile Include="RationalLiveOutputSequencerTests.cpp" />
 	<ClCompile Include="ConsecutiveFrameDurationHistoryTests.cpp" />
   </ItemGroup>

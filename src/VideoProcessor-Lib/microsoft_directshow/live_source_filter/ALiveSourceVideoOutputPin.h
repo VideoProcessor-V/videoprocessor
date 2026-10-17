@@ -451,26 +451,11 @@ protected:
 		if (ticksPerSecond == 0)
 			return 0;
 
-		// OVERFLOW PROTECTION: DeckLink clock at 1MHz wraps after ~2.5 hours (9,223,372,036,854,775,807 ticks)
-		// Check if (timestamp * 10000000) would overflow int64_t
-		// Max safe value: INT64_MAX / 10000000 = 922,337,203,685 ticks (~10.7 days at 1MHz)
-		const int64_t maxSafeValue = INT64_MAX / REFERENCE_TIME_TICKS_PER_SECOND;
-		
-		if (timestamp > maxSafeValue)
-		{
-			// Overflow would occur - use alternative calculation
-			// Slightly less precise but prevents catastrophic failure
-			// This path only triggers after ~10 days of continuous operation
-			return (timestamp / ticksPerSecond) * REFERENCE_TIME_TICKS_PER_SECOND;
-		}
-		
-		// NORMAL PATH: High-precision conversion with exact U64_MulDiv to prevent duplicate timestamps
-		// This eliminates cumulative precision loss at high refresh rates (120Hz+)
-		//
-		// Example at 120Hz: 8.333ms frame period
-		// Old truncation: loses ~0.03µs per frame → 200µs drift per minute
-		// New rounding: maintains <10µs precision indefinitely
-		return U64_MulDiv(timestamp, REFERENCE_TIME_TICKS_PER_SECOND, ticksPerSecond);
+		// Bug hunt 2 (M2): exact rounded conversion with a 128-bit
+		// intermediate for every tick count. The earlier fallback past
+		// INT64_MAX / 1e7 ticks (~10.7 days at 1 MHz, ~25.6 h at 10 MHz)
+		// truncated to whole seconds, so 24-60 frames shared one timestamp.
+		return I64_MulDivRoundSaturating(timestamp, REFERENCE_TIME_TICKS_PER_SECOND, ticksPerSecond);
 	}
 
 	static bool IsMonotonicProgression(REFERENCE_TIME current, REFERENCE_TIME previous)

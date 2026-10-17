@@ -1796,20 +1796,20 @@ void testDeckLinkYCbCr12Control()
     file.close();
     ConfigEditorWindow window(path, 0, true);
     auto* control = requireControl<QComboBox>(window, "config.decklink.ycbcr_12bit_capture");
-    require(control->currentData().toString() == "rgb12", (QByteArray("unset is not shown as the default rgb12: ") +
+    require(control->currentData().toString() == "v210", (QByteArray("unset is not shown as the default v210 (bug hunt 2): ") +
         control->currentData().toString().toUtf8()).constData());
-    selectData(control, "v210");
+    selectData(control, "rgb12");
     QCoreApplication::processEvents();
     auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
     require(apply->isEnabled(), "the edit did not enable Apply");
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    require(saved.contains("[decklink]") && saved.contains("ycbcr_12bit_capture: v210"),
+    require(saved.contains("[decklink]") && saved.contains("ycbcr_12bit_capture: rgb12"),
         ("ycbcr_12bit_capture not saved: " + requireControl<QLabel>(window, "configurationStatus")->text()).toStdString().c_str());
     ConfigEditorWindow reopened(path, 0, true);
-    require(requireControl<QComboBox>(reopened, "config.decklink.ycbcr_12bit_capture")->currentData().toString() == "v210",
-        "the reopened Config does not show v210");
+    require(requireControl<QComboBox>(reopened, "config.decklink.ycbcr_12bit_capture")->currentData().toString() == "rgb12",
+        "the reopened Config does not show rgb12 (the earlier choice stays restorable)");
 }
 
 void testMotionSliderPerRuleProfile()

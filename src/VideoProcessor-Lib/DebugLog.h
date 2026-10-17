@@ -10,6 +10,8 @@
 
 #include "DebugLogRetention.h"
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -301,6 +303,14 @@ private:
 		size_t messagesSinceFlush = 0;
 		// Bug hunt 2026-10-17: size of the active log, for the rollover.
 		unsigned long long bytesWritten = 0;
+		// Bug hunt 2 (2026-10-17, L3): a failed reopen after the rollover (an
+		// antivirus or indexer holding the file) used to drop every later
+		// message for the rest of the session. Retry with a doubling back-off
+		// and log the gap once the file reopens.
+		bool reopenPending = false;
+		unsigned long long droppedWhileClosed = 0;
+		auto nextReopenAttempt = std::chrono::steady_clock::now();
+		long long reopenBackoffMs = FLUSH_INTERVAL_MS;
 		{
 			WIN32_FILE_ATTRIBUTE_DATA data = {};
 			if (GetFileAttributesExA(logPath.c_str(), GetFileExInfoStandard, &data))
@@ -330,6 +340,32 @@ private:
 				// Release lock while writing to file
 				lock.unlock();
 				
+				if (reopenPending && !file.is_open() &&
+					std::chrono::steady_clock::now() >= nextReopenAttempt)
+				{
+					file.clear();
+					file.open(logPath, std::ios::app);
+					if (file.is_open())
+					{
+						struct tm reopenTm;
+						localtime_s(&reopenTm, &msg.timestamp);
+						file << std::put_time(&reopenTm, "%Y-%m-%d %H:%M:%S") <<
+							" | Log reopened after a failed rollover reopen; " <<
+							droppedWhileClosed << " message(s) were not written" << std::endl;
+						reopenPending = false;
+						droppedWhileClosed = 0;
+						reopenBackoffMs = FLUSH_INTERVAL_MS;
+					}
+					else
+					{
+						nextReopenAttempt = std::chrono::steady_clock::now() +
+							std::chrono::milliseconds(reopenBackoffMs);
+						reopenBackoffMs = (std::min)(reopenBackoffMs * 2, 30000LL);
+					}
+				}
+				if (reopenPending && !file.is_open())
+					++droppedWhileClosed;
+
 				// Write to file (file is already open)
 				if (file.is_open())
 				{
@@ -355,6 +391,12 @@ private:
 						bytesWritten = 0;
 						messagesSinceFlush = 0;
 						lastFlushTime = std::chrono::steady_clock::now();
+						if (!file.is_open())
+						{
+							reopenPending = true;
+							nextReopenAttempt = lastFlushTime +
+								std::chrono::milliseconds(reopenBackoffMs);
+						}
 						if (file.is_open())
 						{
 							for (const std::string& diagnostic : diagnostics)

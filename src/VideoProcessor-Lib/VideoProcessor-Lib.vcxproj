@@ -210,6 +210,7 @@
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
     <ClInclude Include="CrashState.h" />
+    <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />
     <ClInclude Include="DisplayMode.h" />
     <ClInclude Include="DisplayRefreshRatePolicy.h" />
@@ -219,6 +220,7 @@
 	<ClInclude Include="OsdTimingPolicy.h" />
 	<ClInclude Include="DisplayTopologySession.h" />
 	<ClInclude Include="CaptureDisplayFixes.h" />
+    <ClInclude Include="CaptureStatePolicy.h" />
 	<ClInclude Include="DirectShowFrameDeliverer.h" />
 	<ClInclude Include="DirectShowDeliveryOutcome.h" />
 	<ClInclude Include="DirectShowSegmentTransition.h" />
@@ -256,6 +258,7 @@
 	<ClInclude Include="EotfTransitionStabilizer.h" />
     <ClInclude Include="RendererResetCoordinator.h" />
     <ClInclude Include="RendererResetPolicy.h" />
+    <ClInclude Include="GuiLifecyclePolicy.h" />
     <ClInclude Include="SubtitleProfileUpdatePolicy.h" />
     <ClInclude Include="RendererResetRequest.h" />
     <ClInclude Include="RendererResetRequestLatch.h" />
@@ -374,6 +377,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="CrashState.cpp" />
+    <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="WindowsDisplayDiagnostics.cpp" />
     <ClCompile Include="ACaptureDevice.cpp" />
     <ClCompile Include="ActivePictureDecisionTimeline.cpp" />
@@ -391,11 +395,11 @@
     <ClCompile Include="AutoPpmCalibrator.cpp" />
     <ClCompile Include="BitDepth.cpp" />
     <ClCompile Include="blackmagic_decklink\BlackMagicDeckLinkCaptureDevice.cpp" />
-    <ClCompile Include="magewell\MagewellSdkInstance.cpp" />
-    <ClCompile Include="magewell\MagewellSdkApi.cpp" />
+    <ClCompile Include="magewell\MagewellSdkInstance.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
+    <ClCompile Include="magewell\MagewellSdkApi.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
     <ClCompile Include="magewell\MagewellBackend.cpp" />
-    <ClCompile Include="magewell\MagewellCaptureDevice.cpp" />
-    <ClCompile Include="magewell\MagewellCaptureDeviceDiscoverer.cpp" />
+    <ClCompile Include="magewell\MagewellCaptureDevice.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
+    <ClCompile Include="magewell\MagewellCaptureDeviceDiscoverer.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
     <ClCompile Include="blackmagic_decklink\BlackMagicDeckLinkCaptureDeviceDiscoverer.cpp" />
     <ClCompile Include="blackmagic_decklink\BlackMagicDeckLinkTranslate.cpp" />
     <ClCompile Include="CaptureInput.cpp" />

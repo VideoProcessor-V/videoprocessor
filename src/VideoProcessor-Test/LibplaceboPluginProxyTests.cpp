@@ -9,6 +9,7 @@
 #include <ConfigFile.h>
 #include <UnifiedProfileRuntime.h>
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"
+#include "../VideoProcessor-Lib/VpBuildIdentity.h"
 #include <atomic>
 #include <fstream>
 #include <mutex>
@@ -255,6 +256,88 @@ namespace VideoProcessorTest
 			Assert::IsTrue((std::is_same_v<
 				decltype(&LibplaceboPluginVideoRenderer::
 					SetActivePictureLookaheadFrames),
+				ExpectedMethod>));
+		}
+
+		// Hunt 2 (2026-10-17, MEDIUM-1): the pairing rule the loader applies.
+		TEST_METHOD(BuildIdentityPairingRefusesAnyMismatch)
+		{
+			const char* a = "0123456789abcdef0123456789abcdef";
+			const char* b = "0123456789abcdef0123456789abcdee";
+			std::string message = "stale";
+			Assert::IsTrue(VpBuildIdentity::CheckPair(a, a, message));
+			Assert::IsTrue(message.empty());
+			Assert::IsFalse(VpBuildIdentity::CheckPair(a, b, message));
+			// The refusal names both IDs and the fix.
+			Assert::IsTrue(message.find(a) != std::string::npos);
+			Assert::IsTrue(message.find(b) != std::string::npos);
+			Assert::IsTrue(message.find("same build") != std::string::npos);
+			Assert::IsTrue(message.find("VideoProcessorVPRenderer.dll") != std::string::npos);
+			// An older DLL without the export, and malformed IDs, never pair; two equal
+			// malformed IDs (e.g. a placeholder) do not either.
+			Assert::IsFalse(VpBuildIdentity::CheckPair(a, nullptr, message));
+			Assert::IsTrue(message.find("missing") != std::string::npos);
+			Assert::IsFalse(VpBuildIdentity::CheckPair(nullptr, a, message));
+			Assert::IsFalse(VpBuildIdentity::CheckPair("", "", message));
+			Assert::IsFalse(VpBuildIdentity::CheckPair("unknown", "unknown", message));
+			const char* upper = "0123456789ABCDEF0123456789ABCDEF";
+			Assert::IsFalse(VpBuildIdentity::CheckPair(upper, upper, message));
+			const char* longer = "0123456789abcdef0123456789abcdef0";
+			Assert::IsFalse(VpBuildIdentity::CheckPair(longer, longer, message));
+			const char* shorter = "0123456789abcdef0123456789abcde";
+			Assert::IsFalse(VpBuildIdentity::CheckPair(shorter, shorter, message));
+		}
+
+		TEST_METHOD(HostBuildIdIsWellFormedAndEmbeddedAsOneMarker)
+		{
+			Assert::IsTrue(VpBuildIdentity::IsWellFormed(VpBuildIdentity::Id()));
+			// The packaging scan relies on "VP-BUILD-ID:" immediately preceding the ID.
+			const char* id = VpBuildIdentity::Id();
+			const size_t prefix = strlen(VpBuildIdentity::kMarkerPrefix);
+			Assert::AreEqual(0, memcmp(id - prefix, VpBuildIdentity::kMarkerPrefix, prefix));
+			Assert::IsNotNull(VpBuildIdentity::Commit());
+		}
+
+		// The built renderer DLL exports the same build ID as this binary (both link
+		// the VideoProcessor-Lib of one build). Loading the DLL needs no GPU.
+		TEST_METHOD(RendererDllExportsTheHostBuildId)
+		{
+			HMODULE testModule = nullptr;
+			Assert::IsTrue(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+				GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&SnapshotTestLog), &testModule) != FALSE);
+			wchar_t modulePath[MAX_PATH] = {};
+			GetModuleFileNameW(testModule, modulePath, MAX_PATH);
+			const std::wstring fullPath(modulePath);
+			const std::wstring root = fullPath.substr(0, fullPath.find_last_of(L"\\/"));
+			for (const bool beta : { false, true })
+			{
+				const std::wstring pluginPath = OptionalRendererLayout::PluginPath(root, beta);
+				HMODULE plugin = LoadLibraryExW(pluginPath.c_str(), nullptr,
+					LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+				Assert::IsNotNull(plugin, L"Build the Release renderer DLLs before this test");
+				const auto getBuildId = reinterpret_cast<VideoProcessorLibplaceboGetBuildIdFn>(
+					GetProcAddress(plugin, VP_LIBPLACEBO_BUILD_ID_EXPORT));
+				const auto version = reinterpret_cast<VideoProcessorLibplaceboGetApiVersionFn>(
+					GetProcAddress(plugin, VP_LIBPLACEBO_VERSION_EXPORT));
+				const std::string pluginId = getBuildId && getBuildId() ? getBuildId() : "";
+				const uint32_t apiVersion = version ? version() : 0;
+				FreeLibrary(plugin);
+				Assert::IsTrue(getBuildId != nullptr, L"renderer DLL lacks the build-ID export");
+				Assert::AreEqual(VP_LIBPLACEBO_PLUGIN_API_VERSION, apiVersion);
+				std::string message;
+				Assert::IsTrue(VpBuildIdentity::CheckPair(VpBuildIdentity::Id(), pluginId.c_str(), message),
+					std::wstring(message.begin(), message.end()).c_str());
+			}
+		}
+
+		TEST_METHOD(PostStallTelemetrySuppressionHasExplicitProxyOverride)
+		{
+			// Hunt 2 LOW-1: the proxy dropped this call (IVideoRenderer's no-op ran).
+			using ExpectedMethod = void (LibplaceboPluginVideoRenderer::*)(uint64_t);
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::
+					SetPostStallResetTelemetrySuppressedUntil),
 				ExpectedMethod>));
 		}
 

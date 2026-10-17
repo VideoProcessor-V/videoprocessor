@@ -2,7 +2,9 @@
 #include "CppUnitTest.h"
 
 #include <blackmagic_decklink/BlackMagicDeckLinkTranslate.h>
+#ifndef VP_NO_MAGEWELL
 #include <magewell/MagewellCaptureDevice.h>
+#endif
 #include <DisplayMode.h>
 #include <VideoFrameEncoding.h>
 
@@ -172,6 +174,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(32U, VideoFrameEncodingBitsPerPixel(VideoFrameEncoding::ARGB_8BIT));
 		}
 
+#ifndef VP_NO_MAGEWELL  // Magewell device helpers (CI builds without the SDK skip them)
 		TEST_METHOD(HdrPrimariesAreOrderedByChromaticity)
 		{
 			// BT.2020 primaries: R(0.708,0.292) G(0.170,0.797) B(0.131,0.046).
@@ -230,5 +233,6 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint64_t>(0, MagewellCaptureDevice::MissedFramesBetween(1000, 1000 + 4 * period, 0));
 			Assert::AreEqual<uint64_t>(0, MagewellCaptureDevice::MissedFramesBetween(0, 2000LL * period, period));
 		}
+#endif
 	};
 }

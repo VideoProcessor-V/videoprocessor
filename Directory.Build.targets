@@ -1,5 +1,23 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <!-- Preserve the actual toolset and binary identity for release prerequisite checks. -->
+  <!-- Hunt 2 (2026-10-17): EXE/DLL build identity. VideoProcessor-Lib is the single
+       writer of VpBuildIdentity.generated.h (in its own intermediate directory, per
+       configuration); every binary that pairs (VideoProcessor.exe, both renderer DLLs)
+       links Lib and so carries the ID Lib compiled. See tools/generate_build_identity.ps1. -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'VideoProcessor-Lib'">
+    <VpBuildIdentityDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(IntDir)vp-build-identity'))</VpBuildIdentityDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(MSBuildProjectName)' == 'VideoProcessor-Lib'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(VpBuildIdentityDir)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <Target Name="VpGenerateBuildIdentity" BeforeTargets="ClCompile"
+          Condition="'$(MSBuildProjectName)' == 'VideoProcessor-Lib'">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)tools\generate_build_identity.ps1&quot; -RepositoryRoot &quot;$(MSBuildThisFileDirectory).&quot; -OutputFile &quot;$(VpBuildIdentityDir)\VpBuildIdentity.generated.h&quot; -BuildInputs &quot;Configuration=$(Configuration);Platform=$(Platform);PlatformToolset=$(PlatformToolset);VCToolsVersion=$(VCToolsVersion);VpCiNoMagewell=$(VpCiNoMagewell)&quot;" />
+  </Target>
+
+  <!-- Preserve the actual toolset and binary identity for release prerequisite checks.
+       The record also carries the binary's embedded build ID (schema 2). -->
   <Target Name="RecordVpRuntimeRequirement" AfterTargets="Build"
           Condition="'$(Configuration)' == 'Release' and '$(Platform)' == 'x64' and ('$(ConfigurationType)' == 'Application' or '$(ConfigurationType)' == 'DynamicLibrary')">
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)tools\record_runtime_requirement.ps1&quot; -BinaryPath &quot;$(TargetPath)&quot; -ToolsetVersion &quot;$(VCToolsVersion)&quot;" />

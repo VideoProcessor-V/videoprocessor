@@ -186,11 +186,34 @@ constexpr uint32_t RendererFailureRetryDelayMs(uint32_t attempt)
 
 // Post-merge audit 2026-10-17: the automatic renderer retry is bounded. After
 // this many attempts it stops (logged once) and leaves Restart Renderer to the
-// operator; a renderer that reaches rendering clears the count.
+// operator; a renderer that keeps rendering (see below) clears the count.
 constexpr uint32_t RendererFailureRetryMaxAttempts = 10u;
 constexpr bool RendererFailureRetryAllowed(uint32_t attemptsMade)
 {
 	return attemptsMade < RendererFailureRetryMaxAttempts;
+}
+
+// Bug hunt 2 (2026-10-17, M5): the count used to clear at the first RENDERING,
+// so a renderer that failed seconds after starting retried for ever and the
+// cap above never held. The count now clears only after the renderer has kept
+// rendering for a sustained period, derived from the retry schedule: twice its
+// longest back-off, so a renderer that fails within one retry cycle of
+// starting is counted as the same fault.
+constexpr uint32_t RendererFailureRetryStableRenderingMs()
+{
+	return 2u * RendererFailureRetryDelayMs(RendererFailureRetryMaxAttempts);
+}
+constexpr bool RendererFailureRetryShouldClear(
+	bool rendering, uint64_t renderingSinceTick, uint64_t now)
+{
+	return rendering && renderingSinceTick != 0 && now >= renderingSinceTick &&
+		now - renderingSinceTick >= RendererFailureRetryStableRenderingMs();
+}
+// One schedule per failure: a second failure report for the same failure
+// (several sites report one failure) must not push the due retry later.
+constexpr bool RendererFailureRetryShouldSchedule(uint64_t nextRetryTick)
+{
+	return nextRetryTick == 0;
 }
 
 // Bug hunt 2026-10-17: how long application shutdown waits for a renderer

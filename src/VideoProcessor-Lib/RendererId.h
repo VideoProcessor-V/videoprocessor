@@ -36,4 +36,7 @@ struct RendererId
 
 	static RendererId Libplacebo(bool beta = false);
 	static bool IsLibplaceboAvailable(bool beta = false);
+	// Present but refused (e.g. build ID of another build): listed so that
+	// starting it shows the refusal; never loaded.
+	static bool IsLibplaceboRefused(bool beta = false);
 };
