@@ -1566,6 +1566,46 @@ void testTemporalDitherButtons()
     require(readBytes(path).contains("temporal_dither: off"), "temporal_dither not saved");
 }
 
+void testInheritedButtonsAndReorganisedSections()
+{
+    // Audit 2026-10-16: an unset profile's exclusive buttons show the default profile's choice,
+    // marked inherited; clicking it writes it; "Not set" removes it again. And VP's settings sit in
+    // their signal-order sections (Capture & source, Source resolution & re-base).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\noptical_flow: off\n[vprenderer.Other]\nquality: high\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto inSection = [&window](const char* control, const QString& section) {
+        auto* widget = window.findChild<QWidget*>(QString::fromLatin1(control));
+        auto* content = window.findChild<QWidget*>(QStringLiteral("rendererSection.%1.content").arg(section));
+        return widget && content && content->isAncestorOf(widget);
+    };
+    require(inSection("config.vprenderer.capture_path", QStringLiteral("captureSource")), "capture_path not under Capture & source");
+    require(inSection("config.vprenderer.picture_preset_box", QStringLiteral("sourceRebase")), "Picture not under Source resolution & re-base");
+    require(inSection("config.vprenderer.deband_vp", QStringLiteral("sourceRebase")), "VP deband not under Source resolution & re-base");
+    require(inSection("config.vprenderer.ssim_residual_stabilise", QStringLiteral("adaptiveDownscale")), "SSIM steadiness not with the downscale blend");
+    require(inSection("config.vprenderer.dither_vectors_new_frame", QStringLiteral("temporalDither")), "dither motion fix not with the dither");
+    require(inSection("config.vprenderer.capture_upload", QStringLiteral("fixesUnderTest")), "capture_upload left Fixes under test");
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    auto* matcher = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.matcher");
+    auto* value = requireControl<QComboBox>(window, "config.vprenderer.optical_flow");
+    auto* unset = requireControl<QToolButton>(window, "config.vprenderer.optical_flow.unset");
+    require(matcher->isChecked(), "the inherited matcher-only is not shown");
+    require(matcher->text().contains("(inherited)"), (QByteArray("not marked inherited: ") + matcher->text().toUtf8()).constData());
+    require(value->currentData().toString().isEmpty(), "the profile should be unset");
+    require(matcher->isEnabled(), "the motion source buttons are disabled");
+    matcher->click();
+    QCoreApplication::processEvents();
+    require(value->currentData().toString() == "off", "a click on the shown inherited button did not write it");
+    require(!matcher->text().contains("(inherited)"), "still marked inherited after the click");
+    unset->click();
+    QCoreApplication::processEvents();
+    require(value->currentData().toString().isEmpty() && matcher->isChecked(), "Not set did not return to inherited");
+}
+
 void testQueueTargetByFramesOrTime()
 {
     // Owner 2026-10-16: the queue target is by frames or by time - exclusive buttons, one field shown;
@@ -8529,6 +8569,7 @@ int main(int argc, char** argv)
     failures += run("temporal dither buttons", testTemporalDitherButtons);
     failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
     failures += run("queue use mode and low-latency path", testQueueUseModeAndLowLatencyPath);
+    failures += run("inherited buttons and reorganised sections", testInheritedButtonsAndReorganisedSections);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);

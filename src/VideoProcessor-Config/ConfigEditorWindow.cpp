@@ -8046,9 +8046,81 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         fboFloat32->setToolTip(QStringLiteral(
             "Every intermediate picture in 32-bit float: exact highlights (half-float rounds values above white "
             "a little) at more GPU memory bandwidth (a few ms per frame at high resolutions; check the render time in the stats "
-            "overlay). Auto: on, except in the queue named Low_Latency (renaming that queue changes Auto). The final "
-            "output stage is 32-bit float always."));
+            "overlay). Auto: on, except with VP's low-latency path (the queue profile's 'VP's low-latency path'; "
+            "unset, a queue named Low_Latency). The final output stage is 32-bit float always."));
         MarkGpuCost(form, fboFloat32, 2);
+
+        // Owner 2026-10-16 (reorganise if necessary): VP's own settings in signal order - capture, source
+        // resolution and re-base, scaling blends, motion, dither, then what is still under test. The rows
+        // were built where their logic lives; here they move to their sections (the controls, names and
+        // behaviour unchanged). Bill's sections keep their places.
+        {
+            auto sectionWidget = [profileFields](const QString& id) -> QWidget* {
+                auto* toggle = profileFields->findChild<QToolButton*>(QStringLiteral("rendererSection.") + id);
+                return toggle ? toggle->parentWidget() : nullptr;
+            };
+            auto sectionForm = [profileFields](const QString& id) -> QFormLayout* {
+                auto* content = profileFields->findChild<QWidget*>(QStringLiteral("rendererSection.%1.content").arg(id));
+                if (!content) return nullptr;
+                for (QWidget* child : content->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly))
+                    if (auto* layout = qobject_cast<QFormLayout*>(child->layout())) return layout;
+                return nullptr;
+            };
+            auto moveRow = [](QWidget* field, QFormLayout* to) {
+                if (!field || !to || !field->parentWidget()) return;
+                auto* from = qobject_cast<QFormLayout*>(field->parentWidget()->layout());
+                if (!from || from == to) return;
+                int row = -1;
+                QFormLayout::ItemRole role;
+                from->getWidgetPosition(field, &row, &role);
+                if (row < 0) return;
+                const bool visible = from->isRowVisible(row);
+                const QFormLayout::TakeRowResult taken = from->takeRow(row);
+                QWidget* label = taken.labelItem ? taken.labelItem->widget() : nullptr;
+                delete taken.labelItem;
+                delete taken.fieldItem;
+                if (label) to->addRow(label, field); else to->addRow(field);
+                to->setRowVisible(field, visible);
+            };
+            QFormLayout* captureForm = addCollapsibleSection(QStringLiteral("captureSource"), QStringLiteral("Capture & source"),
+                QStringLiteral("How the captured signal is read: unpacked on the GPU, its range, native RGB. ") +
+                QString::fromLatin1(kGpuCostLegend), false);
+            for (QWidget* w : { static_cast<QWidget*>(capturePath), static_cast<QWidget*>(sourceRange),
+                    static_cast<QWidget*>(nativeRgb) })
+                moveRow(w, captureForm);
+            QFormLayout* rebaseForm = addCollapsibleSection(QStringLiteral("sourceRebase"), QStringLiteral("Source resolution & re-base"),
+                QStringLiteral("Finds a picture upscaled before VP (a 1080p film sent at 4K), re-bases it to its real resolution "
+                    "so VP's scaler works from the source, and debands there. ") + QString::fromLatin1(kGpuCostLegend), false);
+            for (QWidget* w : { static_cast<QWidget*>(pictureBox), static_cast<QWidget*>(sourceResolution),
+                    static_cast<QWidget*>(autoConfidence), static_cast<QWidget*>(evidenceSeconds),
+                    static_cast<QWidget*>(evidenceShots), static_cast<QWidget*>(textGuard),
+                    static_cast<QWidget*>(kernelMatch), static_cast<QWidget*>(debandVp), static_cast<QWidget*>(lowBitrate) })
+                moveRow(w, rebaseForm);
+            if (QFormLayout* downscale = sectionForm(QStringLiteral("adaptiveDownscale")))
+                for (QWidget* w : { static_cast<QWidget*>(ssimStabilise), static_cast<QWidget*>(bitrateAware),
+                        static_cast<QWidget*>(bitrateFloor) })
+                    moveRow(w, downscale);
+            if (QFormLayout* upscale = sectionForm(QStringLiteral("adaptiveUpscale")))
+                moveRow(cnnStabilise, upscale);
+            if (QFormLayout* dither = sectionForm(QStringLiteral("temporalDither")))
+                moveRow(ditherNext, dither);
+            // The section order: Bill's opening sections, then VP's in signal order, then Bill's others.
+            const QStringList order = { QStringLiteral("captureSource"), QStringLiteral("sourceRebase"),
+                QStringLiteral("adaptiveDownscale"), QStringLiteral("adaptiveUpscale"), QStringLiteral("dejudder"),
+                QStringLiteral("dejudderEstimation"), QStringLiteral("temporalDither"), QStringLiteral("fixesUnderTest"),
+                QStringLiteral("dejudderExperiments") };
+            QWidget* anchor = sectionWidget(QStringLiteral("dejudder"));
+            int at = anchor ? profileFieldsLayout->indexOf(anchor) : -1;
+            for (const QString& id : order)
+                if (QWidget* section = sectionWidget(id); section && at >= 0)
+                {
+                    const int index = profileFieldsLayout->indexOf(section);
+                    if (index < 0) continue;
+                    profileFieldsLayout->removeWidget(section);
+                    if (index < at) --at;
+                    profileFieldsLayout->insertWidget(at++, section);
+                }
+        }
 
     }
 
