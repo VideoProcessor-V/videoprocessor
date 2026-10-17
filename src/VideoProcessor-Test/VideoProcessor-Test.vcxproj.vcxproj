@@ -417,7 +417,7 @@
 	<ClCompile Include="LiveEpochConvergenceControllerTests.cpp" />
 	<ClCompile Include="LiveFrameCounterTrackerTests.cpp" />
 	<ClCompile Include="OutputReadinessControllerTests.cpp" />
-    <ClCompile Include="Magewell*.cpp" />
+    <ClCompile Include="Magewell*.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
 	<ClCompile Include="RationalLiveOutputSequencerTests.cpp" />
 	<ClCompile Include="ConsecutiveFrameDurationHistoryTests.cpp" />
   </ItemGroup>
