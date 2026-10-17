@@ -199,6 +199,13 @@
     <ClInclude Include="led\ProjectorDriver.h" />
     <ClInclude Include="led\LedShutdownRestore.h" />
     <ClInclude Include="led\BarcoAsciiDriver.h" />
+    <ClInclude Include="calibration\ColorMath.h" />
+    <ClInclude Include="calibration\PatternPlan.h" />
+    <ClInclude Include="calibration\DisplayModel.h" />
+    <ClInclude Include="calibration\LedCharacterize.h" />
+    <ClInclude Include="calibration\CalibrationOutputs.h" />
+    <ClInclude Include="calibration\SimulatedDisplay.h" />
+    <ClInclude Include="calibration\SimulatedMeter.h" />
     <ClInclude Include="led\LedController.h" />
     <ClInclude Include="led\LedMeasurement.h" />
     <ClInclude Include="led\LedDriveModule.h" />
@@ -415,6 +422,12 @@
     <ClCompile Include="AmbientSensor.cpp" />
     <ClCompile Include="led\ProjectorDriver.cpp" />
     <ClCompile Include="led\BarcoAsciiDriver.cpp" />
+    <ClCompile Include="calibration\PatternPlan.cpp" />
+    <ClCompile Include="calibration\DisplayModel.cpp" />
+    <ClCompile Include="calibration\LedCharacterize.cpp" />
+    <ClCompile Include="calibration\CalibrationOutputs.cpp" />
+    <ClCompile Include="calibration\SimulatedDisplay.cpp" />
+    <ClCompile Include="calibration\SimulatedMeter.cpp" />
     <ClCompile Include="led\LedController.cpp" />
     <ClCompile Include="led\LedMeasurement.cpp" />
     <ClCompile Include="led\LedDriveModule.cpp" />

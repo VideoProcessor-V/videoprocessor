@@ -308,6 +308,7 @@
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
+    <ClCompile Include="CalibrationCoreTests.cpp" />
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
     <ClCompile Include="Integration20261017Tests.cpp" />
