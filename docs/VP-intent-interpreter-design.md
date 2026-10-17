@@ -187,3 +187,7 @@ The class changes only after N seconds and at a cut.
 - Recorded-stream fixtures from StreamRecorder: 24p film, 30p documentaries, sport, telecine,
   animation.
 - Projector: meter readings vs predicted B_eff.
+
+## Owner decision 2026-10-17
+
+Build all five. Config: one group headed "Experimental content-adaptive settings" with a checkbox per function (content recognition, motion intent, ambient adaptation, black protection, display mapping), each off by default, with its sub-settings (strength, ranges, taus) beneath its checkbox. The motion-intent policy question (vs dejudder_motion_rolloff) is decided after the display-only phase.
