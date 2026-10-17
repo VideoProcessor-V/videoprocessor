@@ -104,3 +104,5 @@ Run 39071448541 (https://github.com/vmcpherson2012-dev/videoprocessor/actions/ru
 triggered by the push of 752d748a. It reached the Install Qt step, then the GitHub API began returning
 "HTTP 403: Sorry. Your account was suspended" for vmcpherson2012-dev. The gh token is now invalid and
 the run page returns 404, so the CI result could not be observed. Local results above are the evidence.
+
+The fork already has b29f0ff7..752d748a. The report commit could not be pushed (403). Per the lead, the push and CI steps are skipped; merge from the local worktree.
