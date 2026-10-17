@@ -141,8 +141,8 @@ jobs:
           # tests, its 4 vCPUs miss the 4K60 converter budget, and the libplacebo renderer
           # cannot initialize without a GPU/Vulkan driver.
           $hostOnly = @(
-            'WindowResizeLayoutTests.ResizePreservesRequestedWindowBounds',
-            'WindowResizeLayoutTests.LayoutCompletesBeforeRendererNotification',
+            'ResizePreservesRequestedWindowBounds',
+            'LayoutCompletesBeforeRendererNotification',
             'DeckLinkConvertersSustained4K60PerformanceComparison',
             'RendererMetadataCyclesReuseAcceptedSnapshotWithoutDiskReads')
           $filter = (@('FullyQualifiedName!~RendererCaptureHarnessTests') +
