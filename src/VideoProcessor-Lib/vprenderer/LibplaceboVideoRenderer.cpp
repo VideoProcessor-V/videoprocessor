@@ -24024,7 +24024,11 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			// native_rgb_ingest: R12B / R12L / r210 go on raw (native RGB in the
 			// render); the contract is the CPU formatter's (the unpack's luma
 			// equals its Y plane).
-			const bool rgbRaw = m_impl->rgbGpuWanted.load(std::memory_order_acquire) &&
+			// Never on the Dolby Vision tunnel: its r210 words carry packed
+			// 12-bit IPT and the DM packet, not RGB (the render excludes it too,
+			// so a raw RGB payload there had no metadata and showed black).
+			const bool rgbRaw = !state->dolbyVisionTunnel &&
+				m_impl->rgbGpuWanted.load(std::memory_order_acquire) &&
 				!m_impl->rgbGpuFailed.load(std::memory_order_acquire) &&
 				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
 				GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
