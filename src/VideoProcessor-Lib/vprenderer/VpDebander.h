@@ -65,6 +65,11 @@ namespace VpDebander
 		// 1 = a de-judder extra (decides per frame, leaves the state alone).
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out, int slot = 0);
 		void Release(pl_gpu gpu);
+		// A motion discontinuity (MotionValidity, plan step 1 E): the hold weights
+		// belong to the frames before it; the next frame starts a new hold run.
+		// A missed-capture gap keeps the sequence contiguous, so the sequence
+		// check alone would carry the hold across it.
+		void ForgetHold() { weightSequence = 0; prevValid = false; }
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long HeldFrames() const { return held; }

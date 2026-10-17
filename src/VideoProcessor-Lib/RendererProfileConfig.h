@@ -704,6 +704,11 @@ namespace RendererProfileConfig
 			// The optical-flow engine: the default; off = the matcher only.
 			if (key == "optical_flow") return IsChoice(value, { "on", "off" });
 			if (key == "optical_flow_global") return IsChoice(value, { "on", "off" });
+			// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md): off by default.
+			if (key == "interpolation") return IsChoice(value, { "off", "auto", "always" });
+			if (key == "interpolation_fallback") return IsChoice(value, { "hold", "blend" });
+			if (key == "interpolation_fill_gaps") return IsChoice(value, { "off", "on" });
+			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
 			if (key == "temporal_dither") return IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" });
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });

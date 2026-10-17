@@ -43,7 +43,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel><SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <AdditionalOptions>/utf-8 /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;VP_CONFIGFILE_STANDALONE;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -60,7 +60,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel><SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><FunctionLevelLinking>true</FunctionLevelLinking>
-      <AdditionalOptions>/utf-8 /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;VP_CONFIGFILE_STANDALONE;QT_NO_DEBUG;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>

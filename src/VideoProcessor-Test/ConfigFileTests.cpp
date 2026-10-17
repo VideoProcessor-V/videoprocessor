@@ -117,6 +117,43 @@ namespace VideoProcessorTest
             Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ndejudder_strength_even: 0.5\n"), L"even-cadence strength alone");
         }
 
+        TEST_METHOD(InterpolationKeysValidateAndWantTheLookAhead)
+        {
+            // docs/VP-interpolator-50-60-plan.md: the 50/60p interpolation keys (owner defaults
+            // off / hold / off / legacy) are validated in the renderer input group, and an
+            // interpolating profile wants the producer's look-ahead like the de-judder.
+            std::string expected;
+            for (const char* v : { "off", "auto", "always", "Auto" })
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "interpolation",
+                    ConfigFile::NormalizeName(v), expected));
+            Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "interpolation", "on", expected));
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "interpolation_fallback", "hold", expected));
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "interpolation_fallback", "blend", expected));
+            Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "interpolation_fallback", "mix", expected));
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "interpolation_fill_gaps", "off", expected));
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "interpolation_fill_gaps", "on", expected));
+            Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "interpolation_fill_gaps", "2", expected));
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "source_class", "legacy", expected));
+            Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "source_class", "measured", expected));
+            Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "source_class", "film", expected));
+            auto framesFor = [](const char* text) {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n" << text;
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsTrue(runtime.Initialize(config, {}, error), std::wstring(error.begin(), error.end()).c_str());
+                const auto snapshot = runtime.GetSnapshot();
+                Assert::IsTrue(snapshot != nullptr);
+                return snapshot->lookAheadQueueFrames;
+            };
+            Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ninterpolation: auto\n"), L"interpolation alone: 4 ahead");
+            Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\ninterpolation: off\n"), L"off: no look-ahead");
+            Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\ninterpolation: always\noptical_flow: off\n"),
+                L"optical flow off: the matcher at render time");
+        }
+
         TEST_METHOD(LowLatencyPathAndLegacyTargetAreNotInherited)
         {
             // Audit 2026-10-16: low_latency_path on the default queue profile must not reach the

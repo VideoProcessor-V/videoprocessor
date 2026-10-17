@@ -1218,7 +1218,9 @@ namespace UnifiedProfileRuntime
 			const bool ahead = std::atof(setting("motion_ahead_frames", "4").c_str()) > 0.0;
 			const bool dejudder = std::atof(setting("dejudder_strength", "0").c_str()) > 0.0 ||
 				std::atof(setting("dejudder_strength_even", "0").c_str()) > 0.0;
-			if (flow && ahead && dejudder)
+			// The interpolator takes its pairs from the producer too (plan step 5).
+			const bool interpolation = setting("interpolation", "off") != "off";
+			if (flow && ahead && (dejudder || interpolation))
 				// audit 2026-10-16: derived from the engine depth, not a literal 5 (4 ahead + the frame shown).
 				lookAheadQueueFrames = MotionAhead::QueueFramesFor(MotionAhead::kDefaultDepth);
 		}

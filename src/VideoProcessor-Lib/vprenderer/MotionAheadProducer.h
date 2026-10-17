@@ -164,8 +164,11 @@ namespace MotionAhead
 		std::string Error() const;
 
 		// From the render loop, each frame once, oldest first. `generation` is the
-		// continuity generation (a new one clears the store and the chain).
-		void Submit(uint64_t sequence, uint64_t generation, const AnalysisLumaSource& luma);
+		// continuity generation (a new one clears the store and the chain). breakBefore:
+		// this frame follows a break the sequence does not show (a missed-capture gap,
+		// a film update, a pulldown lock change): no pair with the previous submission
+		// (MotionValidity step 1 F), so the store holds only valid pairs.
+		void Submit(uint64_t sequence, uint64_t generation, const AnalysisLumaSource& luma, bool breakBefore = false);
 		// The engine input size the de-judder searches at (its half size, or a
 		// quarter with the half-size inner matcher); 0 = the frame's half size.
 		void SetTargetSize(int w, int h) { targetW.store(w, std::memory_order_release); targetH.store(h, std::memory_order_release); }
@@ -180,7 +183,7 @@ namespace MotionAhead
 		Stats GetStats() const;
 
 	private:
-		struct Job { uint64_t sequence = 0, generation = 0; AnalysisLumaSource luma; };
+		struct Job { uint64_t sequence = 0, generation = 0; AnalysisLumaSource luma; bool breakBefore = false; };
 		void Worker();
 		bool Process(const Job& job);
 		bool EnsureSize(int halfW, int halfH);
