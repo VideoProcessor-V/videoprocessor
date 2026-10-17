@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+ <PropertyGroup Label="Globals"><ProjectGuid>{6B1E4C2A-7F3D-4E59-9A1B-2C8D5E0F7A31}</ProjectGuid><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+ <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v142</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+ <PropertyGroup><OutDir>$(ProjectDir)..\..\x64\Release\</OutDir><IntDir>$(ProjectDir)..\..\x64\Release\obj\vpv-probe\</IntDir><TargetName>vpv-probe</TargetName></PropertyGroup>
+ <ItemDefinitionGroup>
+  <ClCompile>
+   <AdditionalIncludeDirectories>$(ProjectDir)..\..\3rdparty\nvapi;$(ProjectDir)..\..\src\VideoProcessor-Lib;$(ProjectDir)..\..\src\VideoProcessor-Lib\vprenderer</AdditionalIncludeDirectories>
+   <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+   <Optimization>MaxSpeed</Optimization>
+   <ExceptionHandling>Sync</ExceptionHandling>
+   <LanguageStandard>stdcpp17</LanguageStandard>
+   <WarningLevel>Level3</WarningLevel>
+   <PreprocessorDefinitions>NDEBUG;NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+  </ClCompile>
+  <Link>
+   <SubSystem>Console</SubSystem>
+   <AdditionalLibraryDirectories>$(ProjectDir)..\..\3rdparty\nvapi\amd64</AdditionalLibraryDirectories>
+   <AdditionalDependencies>nvapi64.lib;d3d11.lib;dxgi.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+  </Link>
+ </ItemDefinitionGroup>
+ <ItemGroup><ClCompile Include="vpv_probe.cpp" /></ItemGroup>
+ <ItemGroup><ClInclude Include="VpvLog.h" /><ClInclude Include="VpvRecovery.h" /><ClInclude Include="VpvTunnelPacker.h" /></ItemGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
