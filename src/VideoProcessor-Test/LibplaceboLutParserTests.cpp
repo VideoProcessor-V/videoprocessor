@@ -9810,6 +9810,11 @@ namespace VideoProcessorTest
 			Assert::AreEqual(6.0, VpDebander::Strength(8.0, 10, 1.0, true), 1e-9, L"8-bit in 10: 1.5 x the 4-code step");
 			Assert::IsTrue(VpDebander::Strength(10.0, 10, 0.2, true) > 6.0, L"low bitrate quality raises it");
 			Assert::AreEqual(0.0, VpDebander::Strength(10.0, 10, 0.2, false), L"low_bitrate_handling off: quality ignored");
+			// Hunt 2 sweep: the occupancy reading puts 8-bit-in-10 at ~8.8; the snapped step is the real 4 codes.
+			Assert::AreEqual(6.0, VpDebander::Strength(8.8, 10, 1.0, true, true), 1e-9, L"8.8-bit reading: the 8-bit step (6 codes)");
+			Assert::IsTrue(VpDebander::Strength(8.8, 10, 1.0, true, false) < 4.0, L"unsnapped, the threshold falls below the 4-code step (the fault)");
+			Assert::AreEqual(6.0, VpDebander::Strength(8.0, 10, 1.0, true, true), 1e-9, L"exact 8-bit unchanged");
+			Assert::AreEqual(0.0, VpDebander::Strength(9.6, 10, 1.0, true, true), L"true 10-bit with grain (9.6) is not debanded");
 
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");

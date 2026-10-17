@@ -323,11 +323,16 @@ if (b.x < size.x && b.y < size.y) {
 		}
 	}
 
-	double Strength(double effectiveBits, int colorDepth, double bitrateQuality, bool useQuality)
+	double Strength(double effectiveBits, int colorDepth, double bitrateQuality, bool useQuality, bool snapLevels)
 	{
 		double threshold = 0.0;
 		// The content's own level step: a band is one step high.
-		if (effectiveBits > 0.0 && effectiveBits < colorDepth - 0.25)
+		if (snapLevels)
+		{
+			if (effectiveBits > 0.0 && effectiveBits < colorDepth - 0.5)
+				threshold = 1.5 * std::pow(2.0, colorDepth - std::floor(effectiveBits + 0.1));
+		}
+		else if (effectiveBits > 0.0 && effectiveBits < colorDepth - 0.25)
 			threshold = 1.5 * std::pow(2.0, colorDepth - effectiveBits);
 		// Low bitrate (spec 2b): up to three 8-bit steps at quality 0, from
 		// nothing at 0.8 and above.

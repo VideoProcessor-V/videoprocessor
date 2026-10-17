@@ -6202,6 +6202,14 @@ struct LibplaceboVideoRenderer::Impl
 	struct pl_peak_detect_params peakDetectParams{};
 	struct pl_sigmoid_params sigmoidParams{};
 	struct pl_deband_params debandParams{};
+	// Hunt 2 picture sweep: libplacebo's deband as configured before deband_vp_exclusive
+	// yielded it to VP's debander. VP's debander does not run while smooth motion or
+	// deinterlacing runs (temporalRenderer), so those frames take this back instead of
+	// going without any deband.
+	struct pl_deband_params yieldedDebandParams{};
+	bool debandYieldedToVp = false;
+	bool yieldedDebandOn = false;
+	bool yieldedDebandLogged = false;
 	struct pl_dither_params ditherParams{};
 	double sdrTargetNits = PL_COLOR_SDR_WHITE;
 	double sdrBlackNits = HdrTargetLuminance::DefaultBlack;
@@ -7631,8 +7639,12 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.deband =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.deband);
 		parameterSettings.debandGrain = settings.debandGrain;
+		const LibplaceboRenderParameters::Settings unyieldedSettings = parameterSettings;
+		debandYieldedToVp = false;
+		yieldedDebandOn = false;
 		if (LibplaceboDebandYieldsToVp(settings))
 		{
+			debandYieldedToVp = true;
 			// deband_vp_exclusive: VP's grain-guarded debander does the job; libplacebo's
 			// automatic deband would thin fine grain (15-intent C14).
 			parameterSettings.debandStrength = "off";
@@ -7655,6 +7667,18 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			throw std::runtime_error(
 				"could not configure libplacebo render parameters: " + projectionError);
+		}
+		if (debandYieldedToVp)
+		{
+			LibplaceboRenderParameters::Projection unyielded;
+			std::string unyieldedError;
+			if (LibplaceboRenderParameters::Build(unyieldedSettings, displayLutParsed && displayLut, unyielded, unyieldedError))
+			{
+				yieldedDebandOn = unyielded.renderParams.deband_params != nullptr;
+				if (yieldedDebandOn) yieldedDebandParams = *unyielded.renderParams.deband_params;
+			}
+			else
+				DebugLog::Log("libplacebo deband: could not build the yielded deband for temporal frames (%s)", unyieldedError.c_str());
 		}
 		renderParams = projection.renderParams;
 		colorMapParams = projection.colorMapParams;
@@ -20145,7 +20169,7 @@ struct LibplaceboVideoRenderer::Impl
 				double quality = snap.reading ? snap.bitrateQuality : 1.0;
 				if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
 				const double bits = snap.reading ? snap.effectiveBits : 0.0;
-				debandThreshold = VpDebander::Strength(bits, depth, quality, useQuality);
+				debandThreshold = VpDebander::Strength(bits, depth, quality, useQuality, activeSettings.sourceCodingFixes);
 				if (activeSettings.debandVp == "on")
 					debandThreshold = (std::max)(debandThreshold, 1.5 * std::pow(2.0, (std::max)(0, depth - 8)));
 				if (temporal) debandThreshold = 0.0;
@@ -21374,6 +21398,18 @@ struct LibplaceboVideoRenderer::Impl
             outputEncodingRepairLogged = true;
         }
         pl_render_params frameParams = renderParams;
+        // Hunt 2 picture sweep: deband_vp_exclusive yields libplacebo's automatic deband to VP's
+        // debander, which is idle while smooth motion or deinterlacing runs; those frames keep
+        // libplacebo's deband as configured (otherwise nothing would deband them).
+        if (debandYieldedToVp && yieldedDebandOn && temporalRenderer.Active())
+        {
+            frameParams.deband_params = &yieldedDebandParams;
+            if (!yieldedDebandLogged)
+                DebugLog::Log("libplacebo deband: on for temporal frames (VP's debander does not run with smooth motion or deinterlacing)");
+            yieldedDebandLogged = true;
+        }
+        else
+            yieldedDebandLogged = false;
         // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
         // judder extras reuse these parameters).
         {

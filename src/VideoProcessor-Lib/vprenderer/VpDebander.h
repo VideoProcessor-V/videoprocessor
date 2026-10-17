@@ -66,7 +66,13 @@ namespace VpDebander
 	// level step (2^(colorDepth - effectiveBits) codes, x1.5 for the mean's
 	// spread) and, for a poor bitrate quality, up to three 8-bit steps. 0 =
 	// nothing to deband.
-	double Strength(double effectiveBits, int colorDepth, double bitrateQuality, bool useQuality);
+	// snapLevels (source_coding_fixes on, hunt 2 sweep): the occupancy reading counts a few
+	// in-between codes (an upscale's ramps, a PQ remap) and so reads 8-bit content in a 10-bit
+	// signal at ~8.8 bits, which would give 1.5 x 2^1.2 = 3.4 codes: below the real 4-code
+	// step. Content has a whole number of bits, so the step is taken at floor(bits + 0.1)
+	// (8.8 -> 8 -> 6 codes), and readings within half a bit of the signal depth are the
+	// signal's own depth (true 10-bit with grain reads 9.6 or more). false = the earlier formula.
+	double Strength(double effectiveBits, int colorDepth, double bitrateQuality, bool useQuality, bool snapLevels = false);
 
 	class Module
 	{
