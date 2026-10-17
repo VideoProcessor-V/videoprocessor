@@ -8823,20 +8823,22 @@ void testEverySchemaKeyHasAConfigControl()
         if (!name.startsWith(QStringLiteral("config."))) continue;
         controlled.insert(name.mid(name.lastIndexOf(QLatin1Char('.')) + 1).toStdString());
     }
-    // Keys that intentionally have no control of their own, with the reason.
-    // "gap" entries were found by this test at the integration (2026-10-17) and are
-    // left for the Config organisation pass; the rest are intentional.
+    // Keys that intentionally have no control of their own, with the reason. Only
+    // retired, alias and diagnostic-only keys (post-merge audit 2026-10-17: the "gap"
+    // entries got controls - profile_update_mode, fullscreen_monitor_session_mode,
+    // diagnostic_allow_full_g22 - or were found by reading the parser to be aliases).
     static const std::map<std::string, const char*> allowList = {
         // [led_drive]: the retired Python relay (removed 2026-10-15; accepted, ignored).
         { "listen_port", "retired (ignored)" }, { "listen_log", "retired (ignored)" },
         { "python_drives_port", "retired (ignored)" }, { "python_feed", "retired (ignored)" },
         { "listen_script", "retired (ignored)" }, { "python", "retired (ignored)" },
         // [led_drive]: superseded by the per-direction rate fields and the fade time.
-        { "rate_up", "gap: older single rate, superseded by rate_gain/min/max_up" },
-        { "rate_down", "gap: older single rate, superseded by rate_gain/min/max_down" },
-        { "fade_frames", "gap: older fade length in frames (fade_ms has the control)" },
-        { "fade_min_step", "gap: no control yet" },
-        { "script_smoothing", "gap: no control yet" },
+        { "rate_up", "alias: older single rate, superseded by rate_gain/min/max_up" },
+        { "rate_down", "alias: older single rate, superseded by rate_gain/min/max_down" },
+        { "fade_frames", "alias: older fade length in frames at 24p (fade_ms has the control)" },
+        { "fade_min_step", "alias: older per-frame fade slope, read as fade_min_slope x 24 (fade_min_slope has the control)" },
+        { "script_smoothing", "legacy: set from adaptive_gamma (which has the control) whenever command_source "
+            "is named; read only from older mode-only files" },
         // [general]: spellings of keys that have a control under the other spelling.
         { "windowedfullscreenmode", "alias of windowed_fullscreen_mode" },
         { "no_ui", "alias of noui" }, { "start_minimized", "alias of startminimized" },
@@ -8848,17 +8850,18 @@ void testEverySchemaKeyHasAConfigControl()
         // [general]: command-line / session state rather than settings.
         { "dolby_vision_tunnel", "command-line / per-session capture state" },
         { "interface", "command-line interface choice" },
-        { "fullscreen_monitor_session_mode", "gap: no control yet" },
-        { "frame_offset", "gap: no [general] control (the DirectShow page has its own)" },
-        { "subtitle_reposition", "gap: no control yet" },
+        { "frame_offset", "legacy location: Config moves [general] frame_offset to [directshow] frame_offset, "
+            "which has the control" },
+        { "subtitle_reposition", "command-line option (/subtitle_reposition); the [general] key is validated "
+            "but never read at runtime" },
         // Renderer keys.
         { "deband", "legacy toggle; deband_strength has the control" },
         { "sdr_target_primaries", "legacy spelling of target_primaries" },
-        { "calibration_lut_input_gamma", "gap: no control yet" },
+        { "calibration_lut_input_gamma", "retired: accepted but no longer controls LUT / HDR encoding "
+            "(hdr_tone_map_target_gamma has the control)" },
         { "calibration_lut_input_transfer", "alias accepted for HDR target (Rendering)" },
-        { "diagnostic_allow_full_g22", "gap: diagnostic, no control yet" },
-        { "live_profile_updates", "gap: no control yet" }, { "profile_update_mode", "gap: no control yet" },
-        { "steady_reserve_frames", "gap: no control yet" },
+        { "live_profile_updates", "alias: legacy switch for profile_update_mode live (which has the control)" },
+        { "steady_reserve_frames", "alias: legacy spelling of target_frames; Config migrates it on load" },
         { "subtitle_bbox_test", "test / diagnostic overlay" }, { "subtitle_cut_paste_test", "test / diagnostic overlay" },
         { "subtitle_cut_paste_background", "test / diagnostic overlay" },
         { "subtitle_box_padding_mode", "legacy subtitle key (Subtitles profiles replace it)" },
@@ -8870,7 +8873,7 @@ void testEverySchemaKeyHasAConfigControl()
         { "subtitle_hold_ms", "legacy subtitle key" }, { "subtitle_move_inset", "legacy subtitle key" },
         { "subtitle_near_bar_px", "legacy subtitle key" }, { "subtitle_padding_pixels", "legacy subtitle key" },
         { "subtitle_fit", "retired Screen setting (ignored)" },
-        { "temporal_fill", "gap: Subtitles profile key, no control yet" },
+        { "temporal_fill", "alias: legacy Subtitles switch for cleanup_fill temporal (cleanup_fill has the control)" },
     };
     std::vector<std::string> missing;
     auto check = [&](const std::string& source, const std::string& key)

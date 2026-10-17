@@ -5465,6 +5465,16 @@ QWidget* ConfigEditorWindow::createStartupPage()
         QStringLiteral("fullscreen_monitor_name"), withDefaultChoice(monitors_),
         { QStringLiteral("Default monitor") });
     sourceForm->addRow(QStringLiteral("Monitor"), monitorChoice_);
+    // Post-merge audit 2026-10-17 (owner: every setting has a control). Bill's key.
+    auto* monitorSession = bindChoiceField(QStringLiteral("general"),
+        QStringLiteral("fullscreen_monitor_session_mode"),
+        { QStringLiteral("existing"), QStringLiteral("target-only") },
+        { QStringLiteral("Keep the existing displays (default)"), QStringLiteral("Target monitor only") });
+    monitorSession->setToolTip(QStringLiteral(
+        "Bill's setting (upstream). When VP starts full screen: Existing (default) keeps the current display "
+        "layout; Target monitor only switches to a session with only the full-screen monitor active and restores "
+        "the layout on exit. Read at start-up. (Key: [general] fullscreen_monitor_session_mode.)"));
+    sourceForm->addRow(QStringLiteral("Full-screen display session (Bill)"), monitorSession);
 	const bool hideLegacy = configuredBooleanValue(value(QStringLiteral("general"),
 		QStringLiteral("hide_legacy_renderers")), true);
 	const QStringList visibleRenderers = hideLegacy ? filteredRenderers_ : allRenderers_;
@@ -5519,6 +5529,19 @@ QWidget* ConfigEditorWindow::createStartupPage()
 		switchRefreshRate->setCurrentIndex(switchRefreshRate->findData(QStringLiteral("fullscreen_only")));
 	}
 	sourceForm->addRow(QStringLiteral("Switch refresh rate"), switchRefreshRate);
+	// Post-merge audit 2026-10-17 (owner: every setting has a control). Bill's key; a renderer
+	// policy key read from [general] like switch_refresh_rate. Unset = rebuild (first item).
+	auto* profileUpdateMode = bindChoiceField(QStringLiteral("general"),
+		QStringLiteral("profile_update_mode"),
+		{ QStringLiteral("rebuild"), QStringLiteral("live"), QStringLiteral("never") },
+		{ QStringLiteral("Rebuild the renderer (default)"), QStringLiteral("Live (no rebuild)"),
+		  QStringLiteral("Never (keep the current settings)") });
+	profileUpdateMode->setToolTip(QStringLiteral(
+		"Bill's setting (upstream). How a display-profile change during playback is applied: Rebuild (default) "
+		"rebuilds the renderer with the new profile; Live applies the settings that can change live without a "
+		"rebuild; Never keeps the current settings and shader program (a safe diagnostic). The older live_profile_updates switch is its "
+		"alias. (Key: profile_update_mode.)"));
+	sourceForm->addRow(QStringLiteral("Profile updates (Bill)"), profileUpdateMode);
 	auto* profileChangeDisplay = new QSpinBox;
 	profileChangeDisplay->setObjectName(controlName(QStringLiteral("general"),
 		QStringLiteral("profile_change_display_seconds")));
@@ -6968,6 +6991,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         limitedFlag->setProperty("derivedSetting", true);
         limitedFlag->setEnabled(false);
         form->setRowVisible(limitedFlag, false);
+        // Post-merge audit 2026-10-17 (owner: every setting has a control). Bill's diagnostic.
+        auto* fullG22 = addBoolean(QStringLiteral("Full-range 2.2 transport experiment (Bill, diagnostic)"),
+            QStringLiteral("diagnostic_allow_full_g22"));
+        fullG22->setToolTip(QStringLiteral(
+            "Bill's diagnostic (upstream), off by default: allows the experimental full-range gamma 2.2 output "
+            "transport when the output path is investigated. Leave off for viewing. (Key: diagnostic_allow_full_g22.)"));
         addBoolean(QStringLiteral("Disable D3D11 compute shaders"),
             QStringLiteral("diagnostic_disable_compute"));
         addBoolean(QStringLiteral("Force 8-bit SDR swapchain"),
