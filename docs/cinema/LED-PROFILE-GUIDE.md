@@ -4,7 +4,7 @@ For the owner, and for any agent asked to help build or tune an LED profile.
 
 ## What a profile is
 
-VideoProcessor's LED drive has three layers of settings, each overriding
+VideoProcessor's Dynamic Drive has three layers of settings, each overriding
 the one before:
 
 1. **Built-in** - the values in `led-profile-example.cfg`. They reproduce
@@ -12,7 +12,7 @@ the one before:
 2. **An LED profile file** (optional) - a small file with a
    `[led_drive.Default]` section holding only the lines you want to change.
 3. **The main configuration's `[led_drive.Default]`** - the core settings
-   the Config app's LED drive page edits: `enabled`, `mode`, `led_floor`,
+   the Config app's Dynamic Drive page edits: `enabled`, `mode`, `led_floor`,
    `led_floor_reactive`, `led_floor_black`, `highlight_tolerance_stops`,
    `gamma_boost`, the experimental fade-to-black settings, and
    `profile_file` (which file to use). These always win.
@@ -25,7 +25,7 @@ keeps the everyday choices (on/off, mode, how low the LED goes).
 1. Copy `docs/cinema/led-profile-example.cfg` next to the main configuration
    (`VideoProcessor-test.cfg`), e.g. as `my-led-profile.cfg`.
 2. Change the lines you want; delete the rest.
-3. In the Config app: LED drive page -> LED profile -> Browse..., choose the
+3. In the Config app: Dynamic Drive page -> LED profile -> Browse..., choose the
    file, Apply. (Or add `profile_file: my-led-profile.cfg` to
    `[led_drive.Default]`; a name without a folder means "next to the main
    configuration".)
@@ -75,10 +75,10 @@ full light.
 | `apl_persist_ms` | compensate | flash rejection window | raise if lightning or muzzle flashes still move the LED |
 | `cut_threshold`, `fade_frames`, `fade_min_step` | both | scene-change detection | raise `cut_threshold` if ordinary motion is taken for cuts |
 | `apl_weights` | both | how brightness is measured | leave |
-| `compensation_eotf` | compensate | the projector's light exponent on the final code (2.41, the FL35 light-meter fit; delta 4); also on the LED drive page as "Projector gamma", which wins. It no longer sets the gamma boost | leave |
+| `compensation_eotf` | compensate | the projector's light exponent on the final code (2.41, the FL35 light-meter fit; delta 4); also on the Dynamic Drive page as "Projector gamma", which wins. It no longer sets the gamma boost | leave |
 
 The most important everyday setting - how low the LED goes - is not in the
-profile: it is "Lowest LED level" (`led_floor`, 60-255) on the LED drive
+profile: it is "Lowest LED level" (`led_floor`, 60-255) on the Dynamic Drive
 page, with "Lowest level in fades to black" (`led_floor_black`, default 60)
 beside it. 60 is the lowest LPW1 accepts.
 
@@ -89,7 +89,7 @@ beside it. 60 is the lowest LPW1 accepts.
 - Check the file with VP's own validator: load the main configuration with
   `profile_file` set and run the native test
   `LedDriveDelta1Tests::LedProfileFileFillsInWhatTheMainSettingsLeaveOut` as
-  a model, or start VP and read `C:\logs\vp.log` for "LED drive:
+  a model, or start VP and read `C:\logs\vp.log` for "Dynamic Drive:
   configuration rejected (...)".
 - Never put `enabled`, `profile_file` or projector settings in the profile.
 - The owner judges on the projector with the acceptance tests in
@@ -105,7 +105,7 @@ colour) may reach lower; it bypasses the automatic colour balance, which
 does not matter on black, but the three colours are separate commands, so
 changing them one after another can tint the black for a moment.
 
-The LED drive page has an **Experimental** box for this (off by default;
+The Dynamic Drive page has an **Experimental** box for this (off by default;
 its options are greyed out until it is ticked):
 
 | Setting | Key | Default | Meaning |

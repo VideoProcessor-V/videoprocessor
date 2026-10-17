@@ -4729,14 +4729,36 @@ namespace VideoProcessorTest
 			auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
 			const double boost = 2.2 / 2.4;
 
-			// Sign fix: code 40 (24 below black 64) stays below black.
-			set(1.3, boost);
+			// Bug hunt 2 2026-10-17, led_btb_passthrough (default on): below
+			// black leaves the hook exactly as captured - the same code as with
+			// the hook idle (gain 1, no boost) - under the boost and gain, in
+			// both gain domains, and a deep code (8) is no longer pushed to the
+			// encode floor by a large gain.
 			const double btb = signal(40.0);
+			set(1.0, 1.0);
+			const int idle40 = code(btb), idle8 = code(signal(8.0)), idleBlack = code(signal(64.0)),
+				idle80 = code(signal(80.0));
+			Assert::IsTrue(idle40 < 64 && idle8 < idle40, L"the idle hook does not keep below black");
+			set(1.3, boost);
+			Assert::AreEqual(idle40, code(btb), L"Below black did not pass through (linear gain 1.3, boost)");
+			set(2.5, boost);
+			Assert::AreEqual(idle8, code(signal(8.0)), L"Deep below black did not pass through (linear gain 2.5)");
+			// Continuous and monotonic at black: black stays black, above black
+			// rises with the gain.
+			Assert::AreEqual(idleBlack, code(signal(64.0)), L"Black moved");
+			Assert::IsTrue(code(signal(80.0)) > idle80, L"Above black was not lifted by the gain");
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", 0.0));
+			Assert::AreEqual(idle40, code(btb), L"Below black did not pass through (encoded gain 2.5)");
+			// Off (the old behaviour): the sign-preserving boost and gain act on
+			// below black too, so code 40 moves by the gain (still below black).
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 0.0));
+			set(1.3, boost);
 			const int btbOut = code(btb);
 			const double btbExpected = 64.0 + 876.0 * spow(spow(spow(btb, boost), 2.41) * 1.3, 1.0 / 2.41);
 			Assert::IsTrue(btbOut < 64, (L"Below black was cut to black: " + std::to_wstring(btbOut)).c_str());
 			Assert::AreEqual(btbExpected, static_cast<double>(btbOut), 1.5,
-				(L"Below black, expected " + std::to_wstring(btbExpected)).c_str());
+				(L"Below black (passthrough off), expected " + std::to_wstring(btbExpected)).c_str());
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 1.0));
 			// Above white keeps its order against white (the knee rolls it off).
 			const int white = code(signal(940.0));
 			const int wtw = code(signal(1019.0));

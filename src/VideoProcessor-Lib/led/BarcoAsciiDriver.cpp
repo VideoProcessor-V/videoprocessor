@@ -99,7 +99,7 @@ namespace LedDrive
 				{
 					// Only the bounded exit restore gets here: full light matters
 					// more than the rest of a pause.
-					DebugLog::Log("LED drive: \"%s\" sent %lld ms before the command gap/pause allowed (exit is bounded)",
+					DebugLog::Log("Dynamic Drive: \"%s\" sent %lld ms before the command gap/pause allowed (exit is bounded)",
 						Printable(command).c_str(),
 						static_cast<long long>(duration_cast<milliseconds>(allowed - now).count() - maxGapWaitMs));
 					until = now + milliseconds(maxGapWaitMs);
@@ -120,7 +120,7 @@ namespace LedDrive
 			// Rechecked after the gap wait, under stateMutex.
 			if (superseded())
 			{
-				DebugLog::Log("LED drive: \"%s\" not sent (superseded during the command gap)",
+				DebugLog::Log("Dynamic Drive: \"%s\" not sent (superseded during the command gap)",
 					Printable(command).c_str());
 				return false;
 			}
@@ -169,7 +169,7 @@ namespace LedDrive
 			++unloggedWriteFailures;
 			if (!writeFailureLogged || failedAt - lastWriteFailureLog >= seconds(10))
 			{
-				DebugLog::Log("LED drive: projector write of \"%s\" failed: %s (%d failed write(s) since the last report)",
+				DebugLog::Log("Dynamic Drive: projector write of \"%s\" failed: %s (%d failed write(s) since the last report)",
 					Printable(command).c_str(), error.c_str(), unloggedWriteFailures);
 				writeFailureLogged = true;
 				lastWriteFailureLog = failedAt;
@@ -180,7 +180,7 @@ namespace LedDrive
 				port->Close();
 				reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
 				reopenAt = failedAt + milliseconds(reopenBackoffMs);
-				DebugLog::Log("LED drive: %d projector writes failed in a row; %s closed, reopening in %d ms",
+				DebugLog::Log("Dynamic Drive: %d projector writes failed in a row; %s closed, reopening in %d ms",
 					writeFailures, config.port.c_str(), reopenBackoffMs);
 			}
 		}
@@ -189,7 +189,7 @@ namespace LedDrive
 			const auto now = steady_clock::now();
 			if (unloggedWriteFailures > 0 && now - lastWriteFailureLog >= seconds(10))
 			{
-				DebugLog::Log("LED drive: projector writes succeed again (%d failed write(s) since the last report)",
+				DebugLog::Log("Dynamic Drive: projector writes succeed again (%d failed write(s) since the last report)",
 					unloggedWriteFailures);
 				lastWriteFailureLog = now;
 				unloggedWriteFailures = 0;
@@ -227,7 +227,7 @@ namespace LedDrive
 					break;
 				}
 				if (!line.empty())
-					DebugLog::Log("LED drive: projector reply \"%s\" ignored while waiting for %s",
+					DebugLog::Log("Dynamic Drive: projector reply \"%s\" ignored while waiting for %s",
 						Printable(line).c_str(), mnemonic);
 			}
 			if (!ok)
@@ -236,7 +236,7 @@ namespace LedDrive
 					std::lock_guard<std::mutex> guard(stateMutex);
 					++timeouts;
 				}
-				DebugLog::Log("LED drive: no %s reply within %d ms to \"%s\"",
+				DebugLog::Log("Dynamic Drive: no %s reply within %d ms to \"%s\"",
 					mnemonic, timeoutMs, Printable(command).c_str());
 			}
 		}
@@ -253,7 +253,7 @@ namespace LedDrive
 				const auto closedAt = steady_clock::now();
 				reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
 				reopenAt = closedAt + milliseconds(reopenBackoffMs);
-				DebugLog::Log("LED drive: reading %s failed; port closed, reopening in %d ms",
+				DebugLog::Log("Dynamic Drive: reading %s failed; port closed, reopening in %d ms",
 					config.port.c_str(), reopenBackoffMs);
 			}
 		}
@@ -305,7 +305,7 @@ namespace LedDrive
 				return false;
 			}
 			shutdownOpenTried = true;
-			DebugLog::Log("LED drive: exit restore - trying to reopen %s ahead of its back-off", config.port.c_str());
+			DebugLog::Log("Dynamic Drive: exit restore - trying to reopen %s ahead of its back-off", config.port.c_str());
 		}
 		std::string openError;
 		if (port->Open(config.port, config.baud, openError))
@@ -325,7 +325,7 @@ namespace LedDrive
 			++reopensUnlogged;
 			if (lastReopenLog == steady_clock::time_point() || now - lastReopenLog >= seconds(10))
 			{
-				DebugLog::Log("LED drive: %s reopened (%d reopen(s) since the last report)",
+				DebugLog::Log("Dynamic Drive: %s reopened (%d reopen(s) since the last report)",
 					config.port.c_str(), reopensUnlogged);
 				lastReopenLog = now;
 				reopensUnlogged = 0;
@@ -357,7 +357,7 @@ namespace LedDrive
 			case Terminator::LiteralCr: framing = { "literal_cr", false, "cr\r", false }; break;
 			default: framing = script; break;
 			}
-			DebugLog::Log("LED drive: read_back off; sending with framing \"%s\" without waiting for replies",
+			DebugLog::Log("Dynamic Drive: read_back off; sending with framing \"%s\" without waiting for replies",
 				framing.name);
 			return;
 		}
@@ -380,7 +380,7 @@ namespace LedDrive
 				std::lock_guard<std::mutex> guard(stateMutex);
 				state.lightKnown = true;
 				state.light = light;
-				DebugLog::Log("LED drive: projector answers with framing \"%s\" (LPW1=%d)",
+				DebugLog::Log("Dynamic Drive: projector answers with framing \"%s\" (LPW1=%d)",
 					framing.name, light);
 				return;
 			}
@@ -389,10 +389,10 @@ namespace LedDrive
 		{
 			framing = script;
 			DebugLog::Log(
-				"LED drive: projector did not answer with \\r or cr\\r framing; sending the old script's exact bytes without waiting for replies");
+				"Dynamic Drive: projector did not answer with \\r or cr\\r framing; sending the old script's exact bytes without waiting for replies");
 		}
 		else
-			DebugLog::Log("LED drive: projector did not answer with configured framing \"%s\"",
+			DebugLog::Log("Dynamic Drive: projector did not answer with configured framing \"%s\"",
 				framing.name);
 	}
 
@@ -402,7 +402,7 @@ namespace LedDrive
 		if (!port || !port->Open(config.port, config.baud, error))
 		{
 			if (!port) error = "no serial port";
-			DebugLog::Log("LED drive: %s; projector control disabled", error.c_str());
+			DebugLog::Log("Dynamic Drive: %s; projector control disabled", error.c_str());
 			return false;
 		}
 		{
@@ -442,7 +442,7 @@ namespace LedDrive
 		}
 		worker = std::thread(&BarcoAsciiDriver::Worker, this);
 		const LightRange reported = QueryLightRange();
-		DebugLog::Log("LED drive: barco_ascii on %s %d baud, framing=%s acknowledged=%d range=%s",
+		DebugLog::Log("Dynamic Drive: barco_ascii on %s %d baud, framing=%s acknowledged=%d range=%s",
 			config.port.c_str(), config.baud, framing.name, framing.acknowledged ? 1 : 0,
 			reported.known ? (std::to_string(reported.minimum) + "-" +
 				std::to_string(reported.maximum)).c_str() : "unknown");
@@ -712,7 +712,7 @@ namespace LedDrive
 			// wait), the rest split between the gap and the reply.
 			if (!lock.try_lock_for(milliseconds(timeoutMs / 2)))
 			{
-				DebugLog::Log("LED drive: port still busy after %d ms; light not restored", timeoutMs / 2);
+				DebugLog::Log("Dynamic Drive: port still busy after %d ms; light not restored", timeoutMs / 2);
 				return false;
 			}
 		}
@@ -839,7 +839,7 @@ namespace LedDrive
 							scriptLight >= 0 ? scriptLight : lastSentLight;
 						const int contrastTarget = pendingContrast >= 0 ? pendingContrast :
 							scriptContrast >= 0 ? scriptContrast : lastSentContrast >= 0 ? lastSentContrast : 50;
-						DebugLog::Log("LED drive: %s reopened; re-sending LPW1 %d and CNTR %d",
+						DebugLog::Log("Dynamic Drive: %s reopened; re-sending LPW1 %d and CNTR %d",
 							config.port.c_str(), lightTarget, contrastTarget);
 						pendingContrast = contrastTarget;
 						if (pendingLight < 0 && lightTarget >= 0)

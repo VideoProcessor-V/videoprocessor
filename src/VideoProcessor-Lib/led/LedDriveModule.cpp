@@ -491,20 +491,39 @@ namespace LedDrive
 		if (started) return;
 		started = true;
 		stopping = false;
+		restoreConfirmed = true;
 		thread = std::thread(&LedDriveModule::Run, this);
 	}
 
-	void LedDriveModule::Stop()
+	// Bug hunt 2 2026-10-17: the forced-shutdown restore (a detached thread)
+	// can race UpdateLedDrive / the connection test's suspend. `started` was
+	// checked under the mutex but the join was outside it, so a second caller
+	// joined the same std::thread (undefined behaviour). Now the caller that
+	// sets `stopping` joins; any other waits for it and reports the same
+	// restore result.
+	bool LedDriveModule::Stop()
 	{
+		std::unique_lock<std::mutex> lock(mutex);
+		if (!started) return restoreConfirmed;
+		if (stopping)
 		{
-			std::lock_guard<std::mutex> guard(mutex);
-			if (!started) return;
-			stopping = true;
+			// Waits for this stop only (a Start() right after it does not hold us).
+			const uint64_t generation = stopGeneration;
+			stopped.wait(lock, [this, generation] { return stopGeneration != generation; });
+			return stoppedConfirmed;
 		}
+		stopping = true;
+		lock.unlock();
 		wake.notify_all();
 		if (thread.joinable()) thread.join();
-		std::lock_guard<std::mutex> guard(mutex);
+		lock.lock();
 		started = false;
+		const bool confirmed = restoreConfirmed;
+		stoppedConfirmed = confirmed;
+		++stopGeneration;
+		lock.unlock();
+		stopped.notify_all();
+		return confirmed;
 	}
 
 	void LedDriveModule::SubmitMeasurement(const RawMeasurement& raw, uint64_t sequence)
@@ -1744,8 +1763,13 @@ namespace LedDrive
 				contrastDriven = true;
 		}
 		if (driving)
+		{
+			RestoreOutcome restored;
 			RestoreFullLight(*driver, current.ledCeiling,
-				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal, contrastDriven);
+				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal, contrastDriven, &restored);
+			std::lock_guard<std::mutex> guard(mutex);
+			restoreConfirmed = restored.Confirmed();   // bug hunt 2: reported by Stop()
+		}
 		driver->Close();
 	}
 }

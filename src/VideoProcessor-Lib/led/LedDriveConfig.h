@@ -18,11 +18,73 @@ namespace LedDrive
 {
 	constexpr const char* PROJECTOR_SECTION = "projector.default";
 	constexpr const char* LED_DRIVE_SECTION = "led_drive.default";
+	// "Dynamic Drive" (owner 2026-10-17) is the feature's name; [led_drive*]
+	// stays the section VP has always read and the Config app writes for a
+	// fresh file. [dynamic_drive] / [dynamic_drive.<name>] is accepted as an
+	// alias wherever sections are recognised. Precedence: when a file holds
+	// both spellings of one section, [led_drive.<name>] is used and the
+	// [dynamic_drive.<name>] copy is ignored (logged by the renderer, see
+	// LedDriveAliasConflict); both are still validated strictly.
+	constexpr const char* DYNAMIC_DRIVE_SECTION = "dynamic_drive.default";
+
+	inline bool IsLedDriveSection(const std::string& section)
+	{
+		return section == "led_drive" || section.rfind("led_drive.", 0) == 0 ||
+			section == "dynamic_drive" || section.rfind("dynamic_drive.", 0) == 0;
+	}
+
+	inline bool IsProjectorSection(const std::string& section)
+	{
+		return section == "projector" || section.rfind("projector.", 0) == 0;
+	}
 
 	inline bool OwnsSection(const std::string& section)
 	{
-		return section == "projector" || section.rfind("projector.", 0) == 0 ||
-			section == "led_drive" || section.rfind("led_drive.", 0) == 0;
+		return IsProjectorSection(section) || IsLedDriveSection(section);
+	}
+
+	// The other spelling of an [led_drive*] / [dynamic_drive*] name (normalised,
+	// lower case); "" for any other section.
+	inline std::string LedDriveSectionAlias(const std::string& section)
+	{
+		const std::string normalized = ConfigFile::NormalizeName(section);
+		if (normalized == "led_drive" || normalized.rfind("led_drive.", 0) == 0)
+			return "dynamic_drive" + normalized.substr(9);
+		if (normalized == "dynamic_drive" || normalized.rfind("dynamic_drive.", 0) == 0)
+			return "led_drive" + normalized.substr(13);
+		return {};
+	}
+
+	// The section that holds an [led_drive.<name>]'s settings in `config`:
+	// [led_drive.<name>] when present (it wins over the alias), otherwise
+	// [dynamic_drive.<name>] when present, otherwise [led_drive.<name>].
+	inline std::string ResolveLedDriveSection(const ConfigFile& config,
+		const std::string& section = LED_DRIVE_SECTION)
+	{
+		const std::string normalized = ConfigFile::NormalizeName(section);
+		const std::string alias = LedDriveSectionAlias(normalized);
+		if (alias.empty()) return normalized;
+		const bool dynamicName = normalized.rfind("dynamic_drive", 0) == 0;
+		const std::string legacy = dynamicName ? alias : normalized;
+		const std::string dynamic = dynamicName ? normalized : alias;
+		if (config.HasSection(legacy)) return legacy;
+		return config.HasSection(dynamic) ? dynamic : legacy;
+	}
+
+	// A warning when a file holds both spellings of a section ("" when not):
+	// the [dynamic_drive*] copy is ignored.
+	inline std::string LedDriveAliasConflict(const ConfigFile& config)
+	{
+		for (const std::string& section : config.GetSectionNames())
+		{
+			const std::string normalized = ConfigFile::NormalizeName(section);
+			if (normalized.rfind("dynamic_drive", 0) != 0 || !IsLedDriveSection(normalized)) continue;
+			const std::string legacy = LedDriveSectionAlias(normalized);
+			if (config.HasSection(legacy))
+				return "[" + normalized + "] ignored: [" + legacy +
+					"] is also present and takes precedence (keep one of the two)";
+		}
+		return {};
 	}
 
 	// "distance threshold : step", evaluated from the largest threshold down.
@@ -315,6 +377,12 @@ namespace LedDrive
 		// LED compensation shader. Off = rolled under white with the boosted
 		// picture, as before.
 		bool wtwPassthrough = true;
+		// Restore switch (bug hunt 2 2026-10-17, default on): led_btb_passthrough -
+		// below black leaves the LED compensation shader exactly as it came in
+		// (no boost, lift or gain; both gain domains), so the gain no longer
+		// pushes BTB past the encode floor. Off = boosted and gained with the
+		// picture (sign-preserving), as before.
+		bool btbPassthrough = true;
 		// Restore switch (bug hunt 2026-10-17, default on): script_resend_failed_writes
 		// - internal_script re-sends a failed LPW1 / CNTR write at the next tick
 		// (only a command that tick does not send itself). Off = the pure script
@@ -651,6 +719,7 @@ namespace LedDrive
 			Choice("cut_lead", { "off", "window" }),   // review 2026-10-17, experimental
 			Integer("led_lookahead_ms", 0, 2000),     // review 2026-10-17
 			Boolean("led_wtw_passthrough"),           // restore switch 2026-10-17
+			Boolean("led_btb_passthrough"),           // restore switch 2026-10-17 (bug hunt 2)
 			Boolean("script_resend_failed_writes"),   // restore switch 2026-10-17
 			Boolean("cntr_pair_predict"),             // post-merge audit 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
@@ -732,8 +801,8 @@ namespace LedDrive
 		const auto ledRules = LedDriveRules();
 		for (const std::string& section : config.GetSectionNames())
 		{
-			const bool projector = section == "projector" || section.rfind("projector.", 0) == 0;
-			const bool led = section == "led_drive" || section.rfind("led_drive.", 0) == 0;
+			const bool projector = IsProjectorSection(section);
+			const bool led = IsLedDriveSection(section);   // [dynamic_drive*] is an alias
 			if (!projector && !led) continue;
 			std::string moved;
 			if (led && config.TryGetString(section, "led_response_ms", moved))
@@ -920,7 +989,7 @@ namespace LedDrive
 	inline std::string LedProfilePath(const ConfigFile& config)
 	{
 		std::string value;
-		if (!config.TryGetString(LED_DRIVE_SECTION, "profile_file", value)) return {};
+		if (!config.TryGetString(ResolveLedDriveSection(config), "profile_file", value)) return {};
 		std::string path = ConfigFile::Trim(value);
 		if (path.size() >= 2 && path.front() == '"' && path.back() == '"') path = path.substr(1, path.size() - 2);
 		if (path.empty()) return {};
@@ -932,13 +1001,13 @@ namespace LedDrive
 	}
 
 	// The LED profile file's own settings section: [led_drive.Default] (or
-	// [led_drive]); empty when it has neither.
+	// [led_drive]), or the alias [dynamic_drive.Default] / [dynamic_drive]
+	// (an [led_drive*] spelling wins over its alias); empty when it has none.
 	inline std::string LedProfileSection(const ConfigFile& profile)
 	{
-		for (const std::string& section : profile.GetSectionNames())
-			if (section == LED_DRIVE_SECTION) return section;
-		for (const std::string& section : profile.GetSectionNames())
-			if (section == "led_drive") return section;
+		for (const char* wanted : { LED_DRIVE_SECTION, DYNAMIC_DRIVE_SECTION, "led_drive", "dynamic_drive" })
+			for (const std::string& section : profile.GetSectionNames())
+				if (section == wanted) return section;
 		return {};
 	}
 
@@ -1002,6 +1071,7 @@ namespace LedDrive
 			result.cutLeadWindow = ConfigFile::NormalizeName(value) == "window";
 		readInt("led_lookahead_ms", 0, 2000, result.ledLookaheadMs);
 		config.TryGetBool(section, "led_wtw_passthrough", result.wtwPassthrough);
+		config.TryGetBool(section, "led_btb_passthrough", result.btbPassthrough);
 		config.TryGetBool(section, "script_resend_failed_writes", result.scriptResendFailedWrites);
 		config.TryGetBool(section, "cntr_pair_predict", result.cntrPairPredict);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
@@ -1112,7 +1182,7 @@ namespace LedDrive
 				if (!section.empty()) ApplyLedDriveSection(profile, section, result);
 			}
 		}
-		ApplyLedDriveSection(config, LED_DRIVE_SECTION, result);
+		ApplyLedDriveSection(config, ResolveLedDriveSection(config), result);
 		ApplyCommandSource(result);
 		return result;
 	}

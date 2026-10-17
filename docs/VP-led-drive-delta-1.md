@@ -1,4 +1,4 @@
-# LED drive module — delta 1 (apply to the current implementation)
+# Dynamic Drive module — delta 1 (apply to the current implementation)
 
 2026-10-09. Instructions only; no history. Read with
 `VP-led-drive-delta-1-answers.md`, which takes precedence where they differ. Each item says what to change

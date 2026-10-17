@@ -52,8 +52,12 @@ namespace LedDrive
 
 		void Start();
 		// Restores full light (when it was driving the projector) and stops the
-		// thread. Called by the destructor.
-		void Stop();
+		// thread. Called by the destructor. Safe for concurrent callers (bug
+		// hunt 2 2026-10-17): only the first joins the thread, later ones wait
+		// until it has stopped. Returns whether the exit restore was confirmed
+		// (light, and LDMM / CNTR when sent); true when there was nothing to
+		// restore or the module was not running.
+		bool Stop();
 
 		// Render thread, before each output frame: the source sequence of the
 		// frame about to be rendered and the source frame rate (0 = unknown;
@@ -182,6 +186,13 @@ namespace LedDrive
 		std::thread thread;
 		bool stopping = false;
 		bool started = false;
+		// Stop() (bug hunt 2): signalled when the joining caller has finished,
+		// for concurrent callers; the exit restore's result, written by the
+		// module's thread before it ends.
+		std::condition_variable stopped;
+		bool restoreConfirmed = true;
+		uint64_t stopGeneration = 0;     // completed Stop()s
+		bool stoppedConfirmed = true;    // restoreConfirmed as the last Stop() saw it
 
 		uint64_t configGeneration = 0;
 		StatsBuilder statsBuilder;

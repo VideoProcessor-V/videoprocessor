@@ -457,13 +457,23 @@ void RunBetaFeatureGpuTests()
 		auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
 		const double boost = 2.2 / 2.4;
 		gpu.messages.clear();
-		set(1.3, boost);
 		const double btb = signal(40.0);
+		// Bug hunt 2 2026-10-17, led_btb_passthrough (default on): below black
+		// leaves the hook as it came in - the idle hook's code.
+		set(1.0, 1.0);
+		const double btbExpected = code(btb);
+		set(1.3, boost);
 		const int btbOut = code(btb);
-		const double btbExpected = 64.0 + 876.0 * spow(spow(spow(btb, boost), 2.41) * 1.3, 1.0 / 2.41);
 		Check(btbOut < 64, "LED compensation: below black was cut to black on the Beta: " + std::to_string(btbOut));
-		Check(std::abs(btbOut - btbExpected) <= 1.5, "LED compensation: below black " + std::to_string(btbOut) +
-			", expected " + std::to_string(btbExpected));
+		Check(std::abs(btbOut - btbExpected) <= 0.5, "LED compensation: below black " + std::to_string(btbOut) +
+			", expected " + std::to_string(btbExpected) + " (passed through)");
+		// Passthrough off: the sign-preserving boost and gain, as before.
+		Check(SetParam(hook, "btb_passthrough", 0.0), "LED compensation btb_passthrough parameter");
+		const int btbOld = code(btb);
+		const double btbOldExpected = 64.0 + 876.0 * spow(spow(spow(btb, boost), 2.41) * 1.3, 1.0 / 2.41);
+		Check(std::abs(btbOld - btbOldExpected) <= 1.5, "LED compensation (btb_passthrough off): below black " +
+			std::to_string(btbOld) + ", expected " + std::to_string(btbOldExpected));
+		Check(SetParam(hook, "btb_passthrough", 1.0), "LED compensation btb_passthrough parameter");
 		const double grey = (126.0 - 16.0) / 219.0;
 		for (const double b : { boost, 1.0 })
 		{

@@ -1,4 +1,4 @@
-# VideoProcessor LED drive module — implementation guide (Stage 7)
+# VideoProcessor Dynamic Drive module — implementation guide (Stage 7)
 
 Companion to `docs/VP-dither-judder-plan.md` (read that first; §0, §1, §4,
 §4b and Stage 7 apply). This file is the detailed specification for the
@@ -169,6 +169,17 @@ highlight_tolerance_stops: 0.33
 knee: 0.08
 anti_pump_band: 3
 ```
+
+**Dynamic Drive (2026-10-17).** The feature is called Dynamic Drive in the
+UI, the logs and the docs; the section names are unchanged. `[dynamic_drive]`
+/ `[dynamic_drive.<name>]` is accepted as an alias of `[led_drive]` /
+`[led_drive.<name>]` everywhere sections are recognised (the parser, strict
+validation, `MainConfigSchema::OwnsSection`, an LED profile file, the Config
+app). Precedence: when a file has both spellings of one section,
+`[led_drive.<name>]` is used, the `[dynamic_drive.<name>]` copy is ignored
+and VP logs a warning (both are still validated). The Config app reads and
+saves whichever spelling the file already uses (never migrating or
+duplicating it); a fresh file gets `[led_drive.default]`.
 
 Both sections are live-editable in the Config app (plain settings sections,
 no profile groups, no key toggle — answers file §9). Nothing is profile-
@@ -460,7 +471,7 @@ script:
   the port parameters itself with the Win32 serial API (`CreateFile` on
   `\\.\COMn`, `SetCommState`, `SetCommTimeouts`).
 
-### 5a. RS-232 connection test (Config, LED drive page; 2026-10-12)
+### 5a. RS-232 connection test (Config, Dynamic Drive page; 2026-10-12)
 
 A button under the projector connection settings: LED 60, read back
 (`LPW1 ?`), wait 5 s, LED 255 (or the projector's reported maximum when
@@ -473,8 +484,8 @@ step that failed (not sent, no reply, or the level the projector reports).
   read-back on (framing probe, ECHO). The saved setting is not changed.
 - **Route (owner):** Config asks the running VP (RPC operation 9,
   `ProjectorTest`; local `127.0.0.1` or the remote target). VP's renderer
-  stops its LED drive (full light, port closed: `SuspendLedDriveForTest`,
-  plugin API 27), a worker thread runs the test, then the LED drive restarts
+  stops its Dynamic Drive (full light, port closed: `SuspendLedDriveForTest`,
+  plugin API 27), a worker thread runs the test, then Dynamic Drive restarts
   from the saved settings (`ResumeLedDriveAfterTest`). Refused while video is
   playing (a frame within the last 2 s; owner's choice). Without a VP on this
   computer, Config opens the port itself (it compiles the serial / Barco /
@@ -519,6 +530,17 @@ v' = pow(lin, 1/eotf)`. Encoded path: multiply `v` directly, same knee.
   LedCompensationKeepsBelowBlackAndLightExact (code 40 stays below black;
   a mid grey's light at LED 100 with compensation equals LED 255 within 1%,
   with the boost on and off).
+- **Below black passes through (`led_btb_passthrough`, default on; bug hunt
+  2, 2026-10-17).** The sign-preserving gain multiplied negatives too: with
+  gain 2.5 in linear light a BTB value grew ~1.46x and codes ~20 and below
+  were clipped at the limited-range encode floor on every dimmed scene. Now a
+  negative input leaves the hook with exactly its input value (no boost, lift
+  or gain; both gain domains). The gain restores light the dimmed LED took
+  away and below black has none, so passing it through changes nothing on
+  screen except keeping every BTB code as captured (PLUGE-style setup still
+  works); the curve stays continuous at 0 and monotonic. Off (Config:
+  "Below-black passes through unchanged") = the sign-preserving boost and
+  gain on negatives, as before.
 
 ## 7. Tests and acceptance
 
@@ -735,7 +757,7 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
   preset was set at the time; that preset is unknown. The same E also
   decides `gamma_boost` (0.9167 = 2.2/2.4 assumes E = 2.2): if E were 2.4,
   the boost would make the picture darker than intended. Proposed check: a
-  direct code-to-light reading with the LED drive off (so no boost), black
+  direct code-to-light reading with Dynamic Drive off (so no boost), black
   subtracted, for a 50% field (code 126) against white (code 235):
   ratio 0.218 means E = 2.2, ratio 0.189 means E = 2.4. Until then the
   owner's decision of 2.2 stands. The value, and how it was measured, will
@@ -761,7 +783,7 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
 - Should fix (LED profile file stops VP): fixed. A missing or invalid
   profile no longer invalidates the configuration.
   `LedDrive::ValidateLedProfile` reports the problem.
-  `ReadLedDriveConfig` leaves the profile out, so the LED drive runs on the
+  `ReadLedDriveConfig` leaves the profile out, so Dynamic Drive runs on the
   built-in values (the beta_22 script) plus the page settings. The renderer
   logs "WARNING LED profile ignored (...)". The Config app's LED page shows
   "VP will ignore this profile ..." under the file name.
@@ -798,7 +820,7 @@ On the projector (owner), in cinema-time order (answers-2 §B5):
    single exponent later.
 2. Cleanest: a pattern source straight into the projector, bypassing VP.
    Through VP instead:
-   - LED drive off (no boost), sigma-delta and every standard shader off;
+   - Dynamic Drive off (no boost), sigma-delta and every standard shader off;
    - an SDR pattern, not LLDV;
    - the stats overlay showing no tone map.
    Then `output_gamma: 2.2` leaves the codes unchanged.
@@ -824,7 +846,7 @@ range conversion, the YCbCr encoding and alpha.
 
 **Hooks affected.** Both the LED measurement hook and `LED compensation.glsl`
 hook PRE_OUTPUT. The compensation shader runs whenever the gamma boost is
-on, even with the LED drive off.
+on, even with Dynamic Drive off.
 
 **Effect.** With the test configuration's `output_range: limited`, every
 FL35 build since Stage 7 step 4 would have shown the picture **full range**:

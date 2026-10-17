@@ -8,7 +8,7 @@ tried: **OK**, **Problem: …** (and tell Claude), or **Skip**.
 Last updated: 2026-10-11. **Test folder: `C:\dev\deploy\VideoProcessor-FL35-rangefix2` (or rangefix
 for everything except the dither) or newer.** Earlier folders are not to be used on the projector: from Stage 7
 step 4 up to that build, the picture was output full range whenever the gamma
-boost or LED drive was on (a libplacebo bug, repaired in e7b3cceb). See the
+boost or Dynamic Drive was on (a libplacebo bug, repaired in e7b3cceb). See the
 folder's DEPLOY.txt for the exact steps.
 
 ## Basics
@@ -40,7 +40,7 @@ folder's DEPLOY.txt for the exact steps.
 | 16 | Stage 4 motion-compensated dither | Shader settings: motion_compensation 1; slow pans and fades, compare with 0 | not tested |
 | 17 | GPU time with sigma-delta + motion compensation | overlay render time (budget about 1 ms) | not tested |
 
-## LED drive (Config > LED drive)
+## Dynamic Drive (Config > Dynamic Drive)
 | # | Check | How | Result |
 |---|---|---|---|
 | 18 | Log only | watch the log, nothing sent | not tested |

@@ -1879,18 +1879,18 @@ void testLedDrivePageAndLiveSwitches()
     file.close();
     ConfigEditorWindow window(path, 0, true);
 
-    // LED drive: real controls, saved to the configuration on Apply.
+    // Dynamic Drive: real controls, saved to the configuration on Apply.
     window.selectPage(20);
     auto* enabled = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.enabled"));
-    require(!enabled->isChecked(), "LED drive did not load as off");
+    require(!enabled->isChecked(), "Dynamic Drive did not load as off");
     // The LED core (owner 2026-10-14): the command source is read from an
     // older configuration's mode (log_only = no LED commands).
     auto* mode = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.command_source"));
     require(mode->currentData().toString() == QStringLiteral("none"), "The LED command source did not load from mode");
-    // Everything greys while the LED drive is off (audit 2026-10-14c).
-    require(!mode->isEnabled(), "The command source is offered with the LED drive off");
+    // Everything greys while Dynamic Drive is off (audit 2026-10-14c).
+    require(!mode->isEnabled(), "The command source is offered with Dynamic Drive off");
     enabled->setChecked(true);
-    require(mode->isEnabled(), "Switching the LED drive on did not offer the command source");
+    require(mode->isEnabled(), "Switching Dynamic Drive on did not offer the command source");
     require(!requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isVisibleTo(&window) &&
         !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.script_pacing"))->isVisibleTo(&window),
         "Look-ahead or script pacing is shown with no command source");
@@ -1922,7 +1922,7 @@ void testLedDrivePageAndLiveSwitches()
     auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
     require(port->text() == QStringLiteral("COM1"), "COM port did not load");
     auto* readBack = requireControl<QCheckBox>(window, QStringLiteral("config.projector.default.read_back"));
-    // RS-232 connection test button (LED drive page), idle until pressed.
+    // RS-232 connection test button (Dynamic Drive page), idle until pressed.
     auto* connectionTest = requireControl<QPushButton>(window,
         QStringLiteral("config.projector.default.connection_test"));
     require(connectionTest->isEnabled(), "The RS-232 connection test button is disabled");
@@ -2041,7 +2041,7 @@ void testLedDrivePageAndLiveSwitches()
     customFloor->setValue(20);
     QCoreApplication::processEvents();
     QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
-    require(apply->isEnabled(), "LED drive edits did not enable Apply");
+    require(apply->isEnabled(), "Dynamic Drive edits did not enable Apply");
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
@@ -2051,7 +2051,7 @@ void testLedDrivePageAndLiveSwitches()
         "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "lookahead: false", "cut_cntr_level: 57", "max_cut_dip: 0.40",
         "black_prelift_max: 110", "rate_max_up: 20.0", "rate_preset: compensated", "led_settle_ms: 250",
         "dmd_clip_cntr: 61" })
-        require(saved.contains(expected), QStringLiteral("LED drive setting not saved: %1")
+        require(saved.contains(expected), QStringLiteral("Dynamic Drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);
     require(!method->isEnabled(), "Switching the experiment off did not grey out its options");
@@ -2313,7 +2313,7 @@ void testEveryPageRoundTrips()
     QStackedWidget* pages = requireControl<QStackedWidget>(window,
         QStringLiteral("settingsPages"));
     require(pages->count() == 23,
-        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, LED drive, Updates and Motion pages were not added as dedicated settings pages");
+        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, Dynamic Drive, Updates and Motion pages were not added as dedicated settings pages");
     for (QPushButton* button : window.findChildren<QPushButton*>())
         require(!button->property("navChild").toBool(),
             "Grouped settings still expose child entries in the left navigation");
@@ -2968,13 +2968,13 @@ void testRendererSectionTabsRemainSynchronizedDuringRapidClicks()
         { 3, 4, "Screen", "config.vprenderer.viewport.profiles" },
         { 4, 18, "Zoom", "config.vprenderer.zoom.crop_narrower_content_to_fill_screen" },
         { 5, 19, "Subtitles", "config.vprenderer.subtitles.profiles" },
-        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after LED drive (20) and Updates (21)
+        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after Dynamic Drive (20) and Updates (21)
         { 7, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
         { 2, 17, "Scaling", "config.vprenderer.scaling.profiles" },
         { 0, 2, "Rendering", "config.vprenderer.profiles" },
         { 5, 19, "Subtitles", "config.vprenderer.subtitles.profiles" },
-        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after LED drive (20) and Updates (21)
+        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after Dynamic Drive (20) and Updates (21)
         { 7, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
         { 4, 18, "Zoom", "config.vprenderer.zoom.crop_narrower_content_to_fill_screen" },
         { 3, 4, "Screen", "config.vprenderer.viewport.profiles" },
@@ -8113,7 +8113,7 @@ void testNoTargetStartupIsQuiet()
         QApplication::activeModalWidget() == nullptr,
         "No-target startup opened a prompt or allowed configuration writes");
     // RC3: with no target only Updates stays clickable (page 21 after the
-    // merge; page 20 is the LED drive).
+    // merge; page 20 is Dynamic Drive).
     auto* updatesEntry = requireControl<QPushButton>(window, "config.openUpdates");
     require(updatesEntry->isEnabled(), "Updates is not clickable without a target");
     for (auto* button : window.findChildren<QPushButton*>())
@@ -9038,6 +9038,55 @@ void testAdvancedLedSettingsMatchTheParser()
         (QByteArray("Reset did not remove the keys, or a value was rounded: ") + saved).constData());
 }
 
+void testDynamicDriveAliasSectionIsKept()
+{
+    // Bug hunt 2 2026-10-17 ("Dynamic Drive"): a file that spells the section
+    // [dynamic_drive.Default] shows its values on the Dynamic Drive page and
+    // keeps being saved there - no [led_drive] section is added.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[dynamic_drive.Default]\nenabled: true\ncommand_source: compensate\nled_floor: 90\n"
+        "led_btb_passthrough: false\n[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    {
+        ConfigEditorWindow window(path, 0, true);
+        window.selectPage(20);
+        require(requireControl<QCheckBox>(window, "config.led_drive.default.enabled")->isChecked(),
+            "The [dynamic_drive] enabled value was not read");
+        require(requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() ==
+            "compensate", "The [dynamic_drive] command source was not read");
+        require(requireControl<QSpinBox>(window, "config.led_drive.default.led_floor")->value() == 90,
+            "The [dynamic_drive] LED floor was not read");
+        auto* btb = requireControl<QCheckBox>(window, "config.led_drive.default.led_btb_passthrough");
+        require(!btb->isChecked(), "The [dynamic_drive] led_btb_passthrough was not read");
+        btb->setChecked(true);
+        requireControl<QSpinBox>(window, "config.led_drive.default.led_floor")->setValue(100);
+        save(window);
+    }
+    const QByteArray saved = readBytes(path);
+    require(!saved.contains("[led_drive") && saved.count("[dynamic_drive.Default]") == 1 &&
+        saved.contains("led_btb_passthrough: true") && saved.contains("led_floor: 100"),
+        (QByteArray("The edits did not stay in [dynamic_drive.Default]: ") + saved).constData());
+    ConfigFile config;
+    require(config.Load(path.toStdString()), "The saved file did not load");
+    std::string error;
+    require(LedDrive::Validate(config, error), ("VP rejects the saved alias section: " + error).c_str());
+    const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(config);
+    require(led.enabled && led.btbPassthrough && led.ledFloor == 100, "VP does not read the saved alias section");
+
+    // A fresh file keeps getting [led_drive.default].
+    const QString fresh = dir.filePath("Fresh.cfg");
+    writeFixture(fresh, "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    {
+        ConfigEditorWindow window(fresh, 0, true);
+        window.selectPage(20);
+        requireControl<QCheckBox>(window, "config.led_drive.default.led_btb_passthrough")->setChecked(false);
+        save(window);
+    }
+    const QByteArray freshSaved = readBytes(fresh);
+    require(freshSaved.contains("led_btb_passthrough: false") && !freshSaved.contains("dynamic_drive") &&
+        freshSaved.toLower().contains("[led_drive.default]"),
+        (QByteArray("A fresh file did not get [led_drive.default]: ") + freshSaved).constData());
+}
+
 void testProfileBooleanCanBeUnset()
 {
     // Bug 9: a named profile's own tick can be removed again ("Not set").
@@ -9412,7 +9461,7 @@ int main(int argc, char** argv)
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
     failures += run("failed save rolls back action draft", testFailedSaveRollsBackActionDraft);   // audit 2026-10-16
     failures += run("shortcut conflicts block Apply", testShortcutConflictsBlockApply);   // audit 2026-10-16
-    failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
+    failures += run("Dynamic Drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);
     failures += run("picture slider presets", testPictureSliderPresets);
@@ -9495,6 +9544,7 @@ int main(int argc, char** argv)
     failures += run("UTF-8 BOM and equals separator", testUtf8BomAndEqualsSeparator);
     failures += run("load writes nothing unrequested", testLoadWritesNothingUnrequested);
     failures += run("advanced LED settings match the parser", testAdvancedLedSettingsMatchTheParser);
+    failures += run("Dynamic Drive alias section kept", testDynamicDriveAliasSectionIsKept);   // bug hunt 2
     failures += run("every schema key has a Config control", testEverySchemaKeyHasAConfigControl);
     failures += run("profile boolean can be unset", testProfileBooleanCanBeUnset);
     failures += run("unsaved edits ask on close and exit", testUnsavedEditsAskOnCloseAndExit);

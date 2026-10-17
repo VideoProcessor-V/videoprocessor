@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <ConfigFile.h>
+#include <MainConfigSchema.h>
 #include <led/LedController.h>
 #include <led/LedDriveModule.h>
 #include <led/LedLookahead.h>
@@ -1798,8 +1799,10 @@ namespace VideoProcessorTest
 			const LedDriveConfig defaults;
 			Assert::IsTrue(defaults.scriptResendFailedWrites, L"script_resend_failed_writes on by default");
 			Assert::IsTrue(defaults.wtwPassthrough, L"led_wtw_passthrough on by default");
+			Assert::IsTrue(defaults.btbPassthrough, L"led_btb_passthrough on by default");
 			std::string error;
-			const std::string good = "[led_drive.Default]\nscript_resend_failed_writes: false\nled_wtw_passthrough: false\n";
+			const std::string good = "[led_drive.Default]\nscript_resend_failed_writes: false\nled_wtw_passthrough: false\n"
+				"led_btb_passthrough: false\n";
 			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
 			const std::string file = Write(good);
 			ConfigFile config;
@@ -1808,7 +1811,158 @@ namespace VideoProcessorTest
 			DeleteFileA(file.c_str());
 			Assert::IsFalse(led.scriptResendFailedWrites);
 			Assert::IsFalse(led.wtwPassthrough);
+			Assert::IsFalse(led.btbPassthrough);
 			Assert::IsFalse(Validates("[led_drive.Default]\nscript_resend_failed_writes: maybe\n", error));
+			Assert::IsFalse(Validates("[led_drive.Default]\nled_btb_passthrough: maybe\n", error));
+		}
+
+		// ---- Bug hunt 2 2026-10-17: "Dynamic Drive" - [dynamic_drive*] is an alias ----
+
+		TEST_METHOD(DynamicDriveSectionIsAnAliasOfLedDrive)
+		{
+			Assert::IsTrue(OwnsSection("dynamic_drive") && OwnsSection("dynamic_drive.default") &&
+				OwnsSection("led_drive.default") && OwnsSection("projector.default"));
+			Assert::IsTrue(MainConfigSchema::OwnsSection("dynamic_drive.default"), L"the main schema owns the alias");
+			Assert::IsFalse(OwnsSection("dynamic_drives") || OwnsSection("dynamic_driver.x"));
+			Assert::AreEqual(std::string("dynamic_drive.default"), LedDriveSectionAlias("Led_Drive.Default"));
+			Assert::AreEqual(std::string("led_drive"), LedDriveSectionAlias("dynamic_drive"));
+			Assert::AreEqual(std::string(), LedDriveSectionAlias("projector.default"));
+
+			// Read through the alias, with strict validation.
+			std::string error;
+			const std::string alias = "[dynamic_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+				"led_floor: 90\nled_btb_passthrough: false\n";
+			Assert::IsTrue(Validates(alias, error), std::wstring(error.begin(), error.end()).c_str());
+			Assert::IsFalse(Validates("[dynamic_drive.Default]\nled_floor: lots\n", error), L"the alias is validated");
+			Assert::IsFalse(Validates("[dynamic_drive.Default]\nno_such_key: 1\n", error), L"unknown keys in the alias");
+			{
+				const std::string file = Write(alias);
+				ConfigFile config;
+				Assert::IsTrue(config.Load(file.c_str()));
+				DeleteFileA(file.c_str());
+				Assert::AreEqual(std::string("dynamic_drive.default"), ResolveLedDriveSection(config));
+				Assert::AreEqual(std::string(), LedDriveAliasConflict(config));
+				const LedDriveConfig led = ReadLedDriveConfig(config);
+				Assert::IsTrue(led.enabled && led.mode == Mode::Compensate);
+				Assert::AreEqual(90, led.ledFloor);
+				Assert::IsFalse(led.btbPassthrough);
+			}
+			// Both spellings: [led_drive.*] takes precedence, and it is reported.
+			{
+				const std::string both = "[led_drive.Default]\nenabled: false\nled_floor: 80\n"
+					"[dynamic_drive.Default]\nenabled: true\nled_floor: 120\n";
+				Assert::IsTrue(Validates(both, error), std::wstring(error.begin(), error.end()).c_str());
+				const std::string file = Write(both);
+				ConfigFile config;
+				Assert::IsTrue(config.Load(file.c_str()));
+				DeleteFileA(file.c_str());
+				Assert::AreEqual(std::string("led_drive.default"), ResolveLedDriveSection(config));
+				Assert::AreEqual(std::string("led_drive.default"), ResolveLedDriveSection(config, "dynamic_drive.default"));
+				Assert::IsFalse(LedDriveAliasConflict(config).empty(), L"both spellings are reported");
+				const LedDriveConfig led = ReadLedDriveConfig(config);
+				Assert::IsFalse(led.enabled);
+				Assert::AreEqual(80, led.ledFloor);
+			}
+			// Neither: the [led_drive.default] name (what the Config app writes).
+			{
+				const std::string file = Write("[general]\n");
+				ConfigFile config;
+				Assert::IsTrue(config.Load(file.c_str()));
+				DeleteFileA(file.c_str());
+				Assert::AreEqual(std::string(LED_DRIVE_SECTION), ResolveLedDriveSection(config));
+			}
+			// An LED profile file may use the alias too; profile_file is found in it.
+			{
+				const std::string profile = Write("[dynamic_drive.Default]\nled_floor: 110\n");
+				const std::string file = Write("[dynamic_drive.Default]\nprofile_file: " + profile + "\n");
+				ConfigFile config;
+				Assert::IsTrue(config.Load(file.c_str()));
+				Assert::AreEqual(profile, LedProfilePath(config));
+				Assert::IsTrue(ValidateLedProfile(config, error), std::wstring(error.begin(), error.end()).c_str());
+				Assert::AreEqual(110, ReadLedDriveConfig(config).ledFloor);
+				DeleteFileA(file.c_str());
+				DeleteFileA(profile.c_str());
+			}
+		}
+
+		// ---- Bug hunt 2 2026-10-17: Stop() for concurrent callers, restore result ----
+
+		// Several threads (the forced-shutdown restore and UpdateLedDrive / the
+		// connection test's suspend) stop the module at once: only one joins
+		// its thread; every caller returns only after the restore, with its
+		// result.
+		TEST_METHOD(ConcurrentStopJoinsOnceAndEveryCallerWaitsForTheRestore)
+		{
+			for (int round = 0; round < 3; ++round)
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->contrast = 50;
+				LedDriveConfig config = Compensate();
+				config.mode = Mode::Script;
+				config.scriptPacing = false;
+				config.tickMs = 400;
+				ParseCurve("0:120, 255:120", config.curve);   // the script dims the LED
+				LedDriveModule module(Port(50), config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
+				module.SubmitMeasurement(Frame(50.0));
+				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }, 4000), L"the script dimmed the LED");
+				std::atomic<bool> go{ false };
+				std::atomic<int> ready{ 0 };
+				constexpr int CALLERS = 3;
+				int lightSeen[CALLERS] = {};
+				bool confirmed[CALLERS] = {};
+				std::vector<std::thread> callers;
+				for (int i = 0; i < CALLERS; ++i)
+					callers.emplace_back([&, i]
+						{
+							++ready;
+							while (!go.load()) std::this_thread::yield();
+							confirmed[i] = module.Stop();
+							std::lock_guard<std::mutex> guard(projector->mutex);
+							lightSeen[i] = projector->light;
+						});
+				while (ready.load() < CALLERS) std::this_thread::yield();
+				go.store(true);
+				for (std::thread& caller : callers) caller.join();
+				for (int i = 0; i < CALLERS; ++i)
+				{
+					Assert::IsTrue(confirmed[i], L"every caller reports the confirmed restore");
+					Assert::AreEqual(255, lightSeen[i], L"no caller returns before full light is back");
+				}
+				Assert::IsTrue(module.Stop(), L"a later Stop is a no-op with the same result");
+			}
+		}
+
+		// The exit restore fails (the adapter is unplugged): Stop() and the
+		// bounded restore report it instead of "restored".
+		TEST_METHOD(FailedExitRestoreIsReportedAsNotConfirmed)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.scriptPacing = false;
+			config.tickMs = 400;
+			ParseCurve("0:120, 255:120", config.curve);
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
+			module.SubmitMeasurement(Frame(50.0));
+			Assert::IsTrue(WaitFor([&] { return projector->light < 255; }, 4000), L"the script dimmed the LED");
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			const BoundedRestoreResult result = RunBoundedRestore([&module] { return module.Stop(); }, 5000);
+			const std::string name = Name(result);
+			Assert::IsTrue(result == BoundedRestoreResult::NotConfirmed,
+				(L"a failed restore is reported as not confirmed, got " + std::wstring(name.begin(), name.end())).c_str());
+			Assert::IsFalse(module.Stop(), L"the result stays with the stopped module");
+			std::lock_guard<std::mutex> guard(projector->mutex);
+			Assert::IsTrue(projector->light < 255, L"(the fake projector really stayed dim)");
 		}
 
 		// script_resend_failed_writes off: the pure script stream - the failed
@@ -1899,7 +2053,7 @@ namespace VideoProcessorTest
 			module.SubmitMeasurement(Frame(50.0));
 			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51 && projector->light < 255; }, 4000),
 				L"the script dimmed the LED and raised CNTR");
-			const BoundedRestoreResult result = RunBoundedRestore([&module] { module.Stop(); return true; }, 3000);
+			const BoundedRestoreResult result = RunBoundedRestore([&module] { return module.Stop(); }, 3000);
 			Assert::IsTrue(result == BoundedRestoreResult::Restored, L"stopped within the bound");
 			Assert::AreEqual(255, projector->light, L"full light restored");
 			Assert::AreEqual(50, projector->contrast, L"CNTR never left high");

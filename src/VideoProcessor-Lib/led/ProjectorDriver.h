@@ -175,6 +175,15 @@ namespace LedDrive
 	// LDMM 0 and/or CNTR as well, by enough to keep the projector's command
 	// gap between them (CommandGapMs + 50 ms for each later one; 1.7 s for
 	// three at Barco's 500 ms), so no restore command is dropped.
+	// Returns whether the light was confirmed; `outcome` (optional, bug hunt 2
+	// 2026-10-17) also reports the LDMM and CNTR sends (true when not needed).
+	struct RestoreOutcome
+	{
+		bool light = true;
+		bool dimMode = true;
+		bool contrast = true;
+		bool Confirmed() const { return light && dimMode && contrast; }
+	};
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
-		bool restoreContrast = false);
+		bool restoreContrast = false, RestoreOutcome* outcome = nullptr);
 }
