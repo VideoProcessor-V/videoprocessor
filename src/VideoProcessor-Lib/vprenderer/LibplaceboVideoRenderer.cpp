@@ -22001,8 +22001,10 @@ void LibplaceboVideoRenderer::UpdateFrameRateAndPPM(
 		// clock. They are counted (the estimate stays valid, so the
 		// de-judder does not hold for seconds) and recorded for the gap check.
 		// Bug hunt 2026-10-17: the rules in CaptureTimestampGap (unit-tested).
+		// Post-merge audit 2026-10-17: Missed is bounded by time (the clock's rate).
 		const CaptureTimestampGap::Step step = CaptureTimestampGap::Classify(
-			static_cast<long long>(observedTicks), static_cast<long long>(expectedFrameTicks));
+			static_cast<long long>(observedTicks), static_cast<long long>(expectedFrameTicks),
+			static_cast<long long>(m_timingClock->TimingClockTicksPerSecond()));
 		const long long periods = step.periods;
 		if (step.kind == CaptureTimestampGap::Kind::Missed)
 		{
@@ -25563,6 +25565,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					// DV tunnel, when the pair is not trusted (DolbyVisionPairTrusted).
 					DejudderPolicy::MotionAheadFrame aheadFrame;
 					aheadFrame.time = aheadTime(ahead);
+					aheadFrame.filmClock = ahead.filmHz > 0.0;
 					if (ahead.converted)
 						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionFrame(ahead.converted->dolby.valid,
 							ahead.converted->dolby.requiresBlackFrame, ahead.converted->dolby.allowSdrFallback,
@@ -25755,7 +25758,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 				// Bug hunt 2026-10-17 (timing_continuity_fixes): an ordinary pair whose times
 				// are both known is at most 1.5 periods apart (a clock step no gap reported).
 				const bool adjacentOk = fillGap || !(m_impl && m_impl->activeSettings.timingContinuityFixes) ||
-					CaptureTimestampGap::AdjacentPairTimes(timeA, timeB, pairRateHz);
+					// Post-merge audit 2026-10-17: not judged across a pulldown lock change
+					// (film clock against capture clock).
+					CaptureTimestampGap::AdjacentPairTimes(timeA, frameFilmHz > 0.0, timeB, next.filmHz > 0.0, pairRateHz);
 				if (next.generation == frameGeneration && !next.cadenceRepeat && (!next.gapBefore || fillGap) && !next.filmUpdate &&
 					(!skipUpdate || spanOk) && adjacentOk &&
 					next.sourceSequence != sourceSequence && next.converted &&

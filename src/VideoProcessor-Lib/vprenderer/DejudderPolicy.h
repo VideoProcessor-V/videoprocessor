@@ -252,6 +252,7 @@ namespace DejudderPolicy
 	struct MotionAheadFrame
 	{
 		double time = 0.0;   // seconds; 0 = unknown
+		bool filmClock = false;   // time is the film clock (pulldown locked), not the capture clock
 		DolbyVisionFrameKind kind = DolbyVisionFrameKind::Untrusted;
 	};
 	inline bool MotionAheadBreakBefore(bool gapBefore, bool filmUpdate, bool checkTimes, double pairRateHz,
@@ -261,7 +262,8 @@ namespace DejudderPolicy
 			return true;
 		if (!havePrev)
 			return false;
-		if (checkTimes && !CaptureTimestampGap::AdjacentPairTimes(previous.time, frame.time, pairRateHz))
+		if (checkTimes && !CaptureTimestampGap::AdjacentPairTimes(previous.time, previous.filmClock,
+			frame.time, frame.filmClock, pairRateHz))
 			return true;
 		return !DolbyVisionPairTrusted(dvTunnel, previous.kind, frame.kind);
 	}

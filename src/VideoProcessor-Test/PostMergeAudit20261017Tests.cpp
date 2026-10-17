@@ -45,6 +45,70 @@ namespace PostMergeAudit20261017Test
 		}
 	};
 
+	// B4: the dequeue / producer adjacency test across a pulldown lock change compares
+	// the film clock (QPC) with the capture clock: not judged, so no hitch.
+	TEST_CLASS(PulldownLockChangeAdjacencyTests)
+	{
+	public:
+		TEST_METHOD(LockChangeIsNotJudged)
+		{
+			using CaptureTimestampGap::AdjacentPairTimes;
+			// A on the film clock (QPC seconds since boot), B on the capture clock.
+			Assert::IsTrue(AdjacentPairTimes(86400.0, true, 12.5, false, 24.0), L"lock lost: accepted");
+			Assert::IsTrue(AdjacentPairTimes(12.5, false, 86400.0, true, 24.0), L"lock gained: accepted");
+			// The same clock is still judged.
+			Assert::IsTrue(AdjacentPairTimes(10.0, true, 10.0 + 1.0 / 24.0, true, 24.0));
+			Assert::IsFalse(AdjacentPairTimes(10.0, true, 11.0, true, 24.0));
+			Assert::IsFalse(AdjacentPairTimes(10.0, false, 11.0, false, 24.0));
+
+			DejudderPolicy::MotionAheadFrame a, b;
+			a.time = 86400.0; a.filmClock = true; a.kind = DejudderPolicy::DolbyVisionFrameKind::Picture;
+			b.time = 12.5; b.filmClock = false; b.kind = DejudderPolicy::DolbyVisionFrameKind::Picture;
+			Assert::IsFalse(DejudderPolicy::MotionAheadBreakBefore(false, false, true, 24.0, false, true, a, b),
+				L"the producer: no break at the lock change");
+			b.filmClock = true;
+			Assert::IsTrue(DejudderPolicy::MotionAheadBreakBefore(false, false, true, 24.0, false, true, a, b),
+				L"the same clock far apart: a break");
+		}
+	};
+
+	// C6: Missed is defined by time, so the same loss behaves alike at 24, 50 and 120 Hz.
+	TEST_CLASS(MissedFramesByTimeTests)
+	{
+	public:
+		TEST_METHOD(MissedSpanIsTheSameAtEveryRate)
+		{
+			using CaptureTimestampGap::Classify;
+			using CaptureTimestampGap::Kind;
+			const long long tps = 10000000;   // 100 ns ticks
+			for (double hz : { 24.0, 50.0, 120.0 })
+			{
+				const long long period = static_cast<long long>(tps / hz);
+				const std::wstring at = L" at " + std::to_wstring(hz) + L" Hz";
+				Assert::IsTrue(Classify(period, period, tps).kind == Kind::Normal, (L"one period" + at).c_str());
+				const auto three = Classify(3 * period, period, tps);
+				Assert::IsTrue(three.kind == Kind::Missed, (L"3 periods" + at).c_str());
+				Assert::AreEqual(2LL, three.missed);
+				// About 300 ms lost: missed frames at every rate (7 / 15 / 36 periods).
+				const long long p300 = static_cast<long long>(0.3 * hz + 0.5);
+				const auto loss300 = Classify(p300 * period, period, tps);
+				Assert::IsTrue(loss300.kind == Kind::Missed, (L"300 ms" + at).c_str());
+				Assert::AreEqual(p300 - 1, loss300.missed);
+				// Half a second lost: a break at every rate (12 / 25 / 60 periods).
+				const long long p500 = static_cast<long long>(0.5 * hz + 0.5);
+				Assert::IsTrue(Classify(p500 * period, period, tps).kind == Kind::Break, (L"500 ms" + at).c_str());
+				// Between whole periods is still a break.
+				Assert::IsTrue(Classify(3 * period + period / 2, period, tps).kind == Kind::Break, (L"3.5 periods" + at).c_str());
+			}
+			// 8 periods of 23.976 film stay missed frames (the old span).
+			const long long film = static_cast<long long>(tps * 1001 / 24000);
+			Assert::IsTrue(Classify(8 * film, film, tps).kind == Kind::Missed);
+			// Without the clock's rate: the old 2-8 periods.
+			Assert::IsTrue(Classify(8 * 1000, 1000).kind == Kind::Missed);
+			Assert::IsTrue(Classify(9 * 1000, 1000).kind == Kind::Break);
+		}
+	};
+
 	TEST_CLASS(DolbyVisionCaptureEncodingTests)
 	{
 	public:
