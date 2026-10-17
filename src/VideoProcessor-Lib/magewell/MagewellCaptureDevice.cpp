@@ -654,9 +654,30 @@ bool MagewellCaptureDevice::ReadSignal(
 		signal.colorSpace = ColorSpace::REC_709;
 		break;
 	case MWCAP_VIDEO_COLOR_FORMAT_YUV601:
-		signal.colorSpace = (signal.height > 576)
-			? ColorSpace::REC_709
-			: (signal.height == 576 ? ColorSpace::REC_601_576 : ColorSpace::REC_601_525);
+		if (signal.height > 576)
+		{
+			// Hunt 2 (08 #4): decided by the source's flag. Above 576 lines the
+			// card's YUV601 may be its own default (unverified), so the AVI
+			// InfoFrame's colorimetry decides: a declared BT.601 keeps the BT.601
+			// matrix (the native YCbCr path asks the card for no conversion, so
+			// the renderer's matrix is the only one); no AVI InfoFrame or C = 00
+			// keeps CTA-861's HD default, BT.709, as before.
+			AviColorimetry declared = AviColorimetry::NoData;
+			DWORD validFlags = 0;
+			HDMI_INFOFRAME_PACKET avi = {};
+			if (m_sdkInstance->Api().MWGetHDMIInfoFrameValidFlag(channel, &validFlags) == MW_SUCCEEDED &&
+				(validFlags & MWCAP_HDMI_INFOFRAME_MASK_AVI) != 0 &&
+				m_sdkInstance->Api().MWGetHDMIInfoFramePacket(channel, MWCAP_HDMI_INFOFRAME_ID_AVI, &avi) == MW_SUCCEEDED)
+				declared = DecodeAviColorimetry(avi.aviInfoFramePayload.byColorimetry,
+					avi.aviInfoFramePayload.byExtendedColorimetry);
+			signal.colorSpace = declared == AviColorimetry::Bt601
+				? Rec601ColorSpace(signal.height,
+					signal.frameDuration100ns > 0
+						? (double)MAGEWELL_CLOCK_TICKS_SECOND / signal.frameDuration100ns : 0.0)
+				: ColorSpace::REC_709;
+		}
+		else
+			signal.colorSpace = signal.height == 576 ? ColorSpace::REC_601_576 : ColorSpace::REC_601_525;
 		break;
 	default:
 		// PQ and HLG imply BT.2020 content regardless of what the wire says.

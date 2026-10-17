@@ -190,6 +190,22 @@ is the previous `libplacebo-377.dll`.
   main render, so the source warp's extras re-run them and the rendered warp
   warps their result; nothing is path-specific (no separate tests).
 
+### Known gaps in keeping BTB/WTW (owner rule: both kept in all cases)
+
+Recorded by hunt 2 (2026-10-17, findings 08 #1/#2/#6 and 15 C6). Where
+Extended Range (Stage 10, `preserve_extended_range`) keeps BTB/WTW and where
+it cannot:
+
+| Path | BTB | WTW | Note |
+|---|---|---|---|
+| SDR, progressive, no libplacebo motion | kept | kept | the Stage 10 design |
+| SDR, deinterlacing (no frame mixing) | kept | kept | retained fields relabelled with the prepared colour (08 #1 fixed; converted once) |
+| SDR, libplacebo smooth motion (frame mixing) | **clipped on blended refreshes** | kept | libplacebo's mixer linearises each frame with a clamp at 0; no fork (owner). Logged once per activation. VP's own motion engine is the BTB-safe path (Config tooltips say so). |
+| SDR, frame mixing + calibration LUT or wide-gamut SDR source | clipped | clipped | Extended Range turns off (`TemporalMix`): its late restore cannot follow a mix |
+| HDR tone mapped to SDR (the owner's static HDR->SDR path) | **clipped** | **clipped** | known gap: `HdrSource` / `HdrMapped`. A sign-preserving PQ->SDR conversion in a VP-owned hook is the design the memory prefers; not built |
+| HDR passthrough (switch 4) | (unreachable) | (unreachable) | the VP renderer's target is never PQ/HLG, so `outputHdr` is always false (08 #6) |
+| SDR source on an HDR output | clipped | clipped | `HdrOutput`, not covered |
+
 ## Build notes
 
 Things that look like build problems but are not.

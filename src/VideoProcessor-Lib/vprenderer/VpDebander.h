@@ -52,13 +52,27 @@ namespace VpDebander
 		// debanded as before. false = the 2026-10-16 debander, byte for byte. Integration
 		// 2026-10-17: on is the struct's default as well as the profile's.
 		bool grainGuard = true;
+		// deband_vp_grain_guard split (hunt 2 07-scaling H1: the spatial-share veto above
+		// also vetoed real coded banding that kept some noise, the usual look of a starved
+		// stream): with grainGuard on, each pixel is split into a low band and a residual
+		// (GrainPreserve::kSplitSigma); only the low band is debanded - its sharp step part
+		// put back where coherent along the contour - and the residual (grain, noise)
+		// passes untouched. No veto: noisy bands are debanded, grain keeps 0.96x or more.
+		// false (with grainGuard on) = the spatial-share veto (deband_vp_grain_guard veto).
+		bool grainSplit = true;
 	};
 
 	// The threshold in codes from the readings (spec 2d / 2b): the content's
 	// level step (2^(colorDepth - effectiveBits) codes, x1.5 for the mean's
 	// spread) and, for a poor bitrate quality, up to three 8-bit steps. 0 =
 	// nothing to deband.
-	double Strength(double effectiveBits, int colorDepth, double bitrateQuality, bool useQuality);
+	// snapLevels (source_coding_fixes on, hunt 2 sweep): the occupancy reading counts a few
+	// in-between codes (an upscale's ramps, a PQ remap) and so reads 8-bit content in a 10-bit
+	// signal at ~8.8 bits, which would give 1.5 x 2^1.2 = 3.4 codes: below the real 4-code
+	// step. Content has a whole number of bits, so the step is taken at floor(bits + 0.1)
+	// (8.8 -> 8 -> 6 codes), and readings within half a bit of the signal depth are the
+	// signal's own depth (true 10-bit with grain reads 9.6 or more). false = the earlier formula.
+	double Strength(double effectiveBits, int colorDepth, double bitrateQuality, bool useQuality, bool snapLevels = false);
 
 	class Module
 	{
@@ -101,6 +115,11 @@ namespace VpDebander
 		pl_tex out[kSlots][PL_MAX_PLANES] = {};
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
+		// grainSplit: the half-resolution low band (box, across, down) and the structure
+		// tensor per block of it.
+		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {}, splitTmp[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {}, splitTensor[kSlots][PL_MAX_PLANES] = {};
+		bool SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, int ncomp, double scale, double codeUnit);
 		int curIndex = 0;                        // weight[curIndex] = weightSequence's
 		bool prevValid = false;                  // weight[1 - curIndex] = weightSequence - 1's
 		uint64_t weightSequence = 0;

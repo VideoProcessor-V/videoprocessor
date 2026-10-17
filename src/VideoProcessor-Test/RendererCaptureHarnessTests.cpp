@@ -1346,6 +1346,7 @@ namespace Tests
 				"optical_flow_global_fallback: off\n", "optical_flow_cost_trust: on\n", "optical_flow_fb_check: on\n",
 				"interpolation_grain: blend\n", "dejudder_source_warp_filter: bilinear\n", "deband_vp_grain_guard: off\n",
 				"deband_grain: on\n", "residual_stabilise_grain_guard: off\n", "dv_tunnel_fixes: off\n",
+				"deband_vp_grain_guard: veto\n", "deband_vp_exclusive: off\n",
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
@@ -1393,6 +1394,7 @@ namespace Tests
 			const std::pair<const char*, const char*> defaults[] = {
 				{ "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
 				{ "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "residual_stabilise_grain_guard", "on" },
+				{ "deband_vp_exclusive", "on" },
 				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
 				{ "dv_tunnel_fixes", "on" } };
 			for (const auto& entry : defaults)
@@ -1402,6 +1404,7 @@ namespace Tests
 			const std::pair<const char*, const char*> flips[] = {
 				{ "interpolation_grain", "blend" }, { "dejudder_source_warp_filter", "bilinear" },
 				{ "deband_vp_grain_guard", "off" }, { "deband_grain", "on" }, { "residual_stabilise_grain_guard", "off" },
+				{ "deband_vp_grain_guard", "veto" }, { "deband_vp_exclusive", "off" },
 				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
 				{ "dv_tunnel_fixes", "off" } };
 			for (const auto& flip : flips)
@@ -1431,6 +1434,52 @@ namespace Tests
 			const std::string motion = line(call(describe, changed), "motion");
 			Assert::IsTrue(motion.find("|always|") != std::string::npos,
 				(L"the motion profile's smooth_motion was read: " + std::wstring(motion.begin(), motion.end())).c_str());
+			DeleteFileA(path.c_str());
+		}
+
+		// Hunt 2 (picture C): nls_sampling and source_coding_fixes are parsed and dumped, default
+		// to the faithful / fixed paths, and change the fingerprint (applied live).
+		TEST_METHOD(Hunt2PictureKeysReachTheSettings)
+		{
+			const HarnessScope harnessScope;
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Export = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
+			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
+			const std::string path = folder + "vp-hunt2-picture-keys-test.cfg";
+			auto call = [&](Export function, const std::string& text) {
+				{
+					std::ofstream config(path, std::ios::trunc | std::ios::binary);
+					config << text;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				Assert::IsTrue(length > 0, L"the export ran");
+				return std::string(buffer.data());
+			};
+			auto line = [](const std::string& dump, const std::string& key) {
+				const size_t at = dump.find("\n" + key + "=");
+				if (at == std::string::npos) return std::string();
+				const size_t start = at + key.size() + 2;
+				return dump.substr(start, dump.find('\n', start) - start);
+			};
+			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
+			const std::string baseDump = call(describe, head);
+			const std::string baseFingerprint = call(fingerprintOf, head);
+			Assert::AreEqual(std::string("catmull"), line(baseDump, "nls_sampling"), L"nls_sampling defaults to Catmull-Rom");
+			Assert::AreEqual(std::string("on"), line(baseDump, "source_coding_fixes"), L"source_coding_fixes defaults on");
+			const std::pair<const char*, const char*> flips[] = { { "nls_sampling", "bilinear" }, { "source_coding_fixes", "off" } };
+			for (const auto& flip : flips)
+			{
+				const std::string text = head + flip.first + ": " + flip.second + "\n";
+				const std::wstring name(flip.first, flip.first + strlen(flip.first));
+				Assert::AreEqual(std::string(flip.second), line(call(describe, text), flip.first), (L"parsed: " + name).c_str());
+				Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
+			}
 			DeleteFileA(path.c_str());
 		}
 

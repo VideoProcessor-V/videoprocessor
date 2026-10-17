@@ -1143,7 +1143,21 @@ namespace
 		// deband_grain beside deband_strength).
 		InterpolationPolicy::Grain interpolationGrain = InterpolationPolicy::Grain::Preserve;
 		bool debandVpGrainGuard = true;
+		// deband_vp_grain_guard on (hunt 2 07-scaling H1; the default) = the grain split: the
+		// guard keeps grain by debanding only the low band; veto = the 2026-10-17 spatial-share
+		// veto (debandVpGrainSplit false); off = no guard.
+		bool debandVpGrainSplit = true;
+		// deband_vp_exclusive (hunt 2 15-intent C14: libplacebo's deband on SDR thins fine
+		// grain, 0.86x at 0.5 code): on (default) = while VP's debander runs (deband_vp auto
+		// or on) with its grain guard, libplacebo's automatic deband (deband_strength auto)
+		// is off; an explicit deband_strength (light / default) is kept. off = both run.
+		bool debandVpExclusive = true;
 		bool dejudderSourceWarpCatmull = true;
+		// Hunt 2 M1: nls_sampling. catmull (default): the NLS / NLS+ warp samples the
+		// source with a separable Catmull-Rom widened by the map's local minification
+		// (a low-pass at the centre); bilinear: the hooked texture's bilinear sampler,
+		// the earlier output.
+		bool nlsSamplingCatmull = true;
 		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
 		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
 		// shader list says). auto (unset): as before - the shader list and the dithering setting.
@@ -1157,6 +1171,9 @@ namespace
 		// Audit 2026-10-16: a mixed screen (a native UI with a lower-resolution video in it, a 4K
 		// overlay, picture-in-picture) is read as native - no whole-frame re-base.
 		bool sourceResolutionMixedGuard = true;
+		// Hunt 2 M2/M3: the coding readings (effective bits, blocking, banding) robust to
+		// upscales, dither and noise; off = the fixed 8/16-px grid and one-pixel occupancy.
+		bool sourceCodingFixes = true;
 		// Audit 2026-10-16 (pulldown review D1/D3/D4): keep the lock across counted misses, re-phase
 		// in place, a cadence-aware film clock; off = the 2026-10-14 behaviour.
 		bool pulldownFixes = true;
@@ -1368,7 +1385,8 @@ namespace
 			// Film grain switches (docs/audit/grain-audit-2026-10-17.md): applied live, so they
 			// must change the fingerprint like the engine's extras above.
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
-			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
+			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
+			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
@@ -2067,6 +2085,14 @@ namespace
 		return defaultValue;
 	}
 
+	// deband_vp_exclusive: libplacebo's automatic deband yields to VP's debander when that
+	// runs (deband_vp auto / on) with its grain guard; an explicit deband_strength stays.
+	bool LibplaceboDebandYieldsToVp(const RendererSettings& settings)
+	{
+		return settings.debandVpExclusive && settings.debandVp != "off" && settings.debandVpGrainGuard &&
+			settings.debandStrength == "auto" && settings.deband == AutoToggle::AUTO;
+	}
+
 	bool ApplyDebandStrength(const std::string& rawValue,
 		RendererSettings& settings)
 	{
@@ -2493,8 +2519,8 @@ namespace
 			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware),
 			// Film grain (owner 2026-10-17): the faithful defaults on / deband_grain off.
 			std::make_pair("residual_stabilise_grain_guard", &settings.adaptive.residualGrainGuard),
-			std::make_pair("deband_vp_grain_guard", &settings.debandVpGrainGuard),
-			std::make_pair("deband_grain", &settings.debandGrain) })
+			std::make_pair("deband_grain", &settings.debandGrain),
+			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -2555,6 +2581,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid source_resolution_mixed_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionMixedGuard ? "on" : "off");
+		}
+		if (tryChoice("source_coding_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceCodingFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_coding_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceCodingFixes ? "on" : "off");
 		}
 		if (tryChoice("timing_continuity_fixes", raw))
 		{
@@ -2632,6 +2666,18 @@ namespace
 				DebugLog::Log("profile '%s': invalid interpolation_grain '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationGrain));
 		}
+		// deband_vp_grain_guard: on (the grain split) | veto (the 2026-10-17 spatial-share veto) | off.
+		if (tryChoice("deband_vp_grain_guard", raw))
+		{
+			if (raw == "on" || raw == "veto" || raw == "off")
+			{
+				settings.debandVpGrainGuard = raw != "off";
+				settings.debandVpGrainSplit = raw == "on";
+			}
+			else
+				DebugLog::Log("profile '%s': invalid deband_vp_grain_guard '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), !settings.debandVpGrainGuard ? "off" : settings.debandVpGrainSplit ? "on" : "veto");
+		}
 		if (tryChoice("dejudder_source_warp_filter", raw))
 		{
 			if (raw == "catmull" || raw == "bilinear")
@@ -2639,6 +2685,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid dejudder_source_warp_filter '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.dejudderSourceWarpCatmull ? "catmull" : "bilinear");
+		}
+		if (tryChoice("nls_sampling", raw))
+		{
+			if (raw == "catmull" || raw == "bilinear")
+				settings.nlsSamplingCatmull = raw == "catmull";
+			else
+				DebugLog::Log("profile '%s': invalid nls_sampling '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.nlsSamplingCatmull ? "catmull" : "bilinear");
 		}
 		if (tryChoice("interpolation_fill_gaps", raw))
 		{
@@ -4995,6 +5049,7 @@ struct LibplaceboVideoRenderer::Impl
 	pl_dispatch rebaseDispatch = nullptr;
 	double rebaseFactor = 1.0;          // this frame's (1 = native); the height's when per axis
 	unsigned long long rebaseFailuresSeen = 0;
+	std::string rebaseFormatNoteLogged;   // C19: the re-base's float fallback, logged once per change
 	SteadyClock::time_point rebasePausedUntil{};
 	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
@@ -5762,6 +5817,7 @@ struct LibplaceboVideoRenderer::Impl
 	int extendedRangeLogged = -1;          // the last logged decision
 	std::string extendedRangeDescribed;    // the last logged description (audit 2026-10-16)
 	bool extendedRangeHookFailed = false;  // libplacebo disabled a hook: off until restart
+	bool extendedRangeMixLogged = false;   // hunt 2 (08 #2): BTB lost in libplacebo's frame mix, logged
 	// 6b-2b: the stats overlay line, published by the render thread at most
 	// twice a second and read by the UI under its own small lock.
 	std::mutex dejudderStatusMutex;
@@ -6189,6 +6245,14 @@ struct LibplaceboVideoRenderer::Impl
 	struct pl_peak_detect_params peakDetectParams{};
 	struct pl_sigmoid_params sigmoidParams{};
 	struct pl_deband_params debandParams{};
+	// Hunt 2 picture sweep: libplacebo's deband as configured before deband_vp_exclusive
+	// yielded it to VP's debander. VP's debander does not run while smooth motion or
+	// deinterlacing runs (temporalRenderer), so those frames take this back instead of
+	// going without any deband.
+	struct pl_deband_params yieldedDebandParams{};
+	bool debandYieldedToVp = false;
+	bool yieldedDebandOn = false;
+	bool yieldedDebandLogged = false;
 	struct pl_dither_params ditherParams{};
 	double sdrTargetNits = PL_COLOR_SDR_WHITE;
 	double sdrBlackNits = HdrTargetLuminance::DefaultBlack;
@@ -7618,6 +7682,19 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.deband =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.deband);
 		parameterSettings.debandGrain = settings.debandGrain;
+		const LibplaceboRenderParameters::Settings unyieldedSettings = parameterSettings;
+		debandYieldedToVp = false;
+		yieldedDebandOn = false;
+		if (LibplaceboDebandYieldsToVp(settings))
+		{
+			debandYieldedToVp = true;
+			// deband_vp_exclusive: VP's grain-guarded debander does the job; libplacebo's
+			// automatic deband would thin fine grain (15-intent C14).
+			parameterSettings.debandStrength = "off";
+			parameterSettings.deband = LibplaceboRenderParameters::Toggle::Off;
+			DebugLog::Log("libplacebo deband: off while VP's debander runs with its grain guard (deband_vp %s, deband_vp_exclusive on; %s)",
+				settings.debandVp.c_str(), lifecycle);
+		}
 		parameterSettings.sigmoid =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.sigmoid);
 		parameterSettings.dithering = settings.dithering;
@@ -7633,6 +7710,18 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			throw std::runtime_error(
 				"could not configure libplacebo render parameters: " + projectionError);
+		}
+		if (debandYieldedToVp)
+		{
+			LibplaceboRenderParameters::Projection unyielded;
+			std::string unyieldedError;
+			if (LibplaceboRenderParameters::Build(unyieldedSettings, displayLutParsed && displayLut, unyielded, unyieldedError))
+			{
+				yieldedDebandOn = unyielded.renderParams.deband_params != nullptr;
+				if (yieldedDebandOn) yieldedDebandParams = *unyielded.renderParams.deband_params;
+			}
+			else
+				DebugLog::Log("libplacebo deband: could not build the yielded deband for temporal frames (%s)", unyieldedError.c_str());
 		}
 		renderParams = projection.renderParams;
 		colorMapParams = projection.colorMapParams;
@@ -10239,6 +10328,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
 		currentTransport.debandGrain = next.debandGrain;
+		currentTransport.debandVpExclusive = next.debandVpExclusive;
 		currentTransport.sigmoid = next.sigmoid;
 		currentTransport.dithering = next.dithering;
 		currentTransport.displayBitDepth = next.displayBitDepth;
@@ -10313,8 +10403,11 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
 		changed(current.interpolationGrain != next.interpolationGrain, "interpolation_grain");
 		changed(current.dejudderSourceWarpCatmull != next.dejudderSourceWarpCatmull, "dejudder_source_warp_filter");
-		changed(current.debandVpGrainGuard != next.debandVpGrainGuard, "deband_vp_grain_guard");
+		changed(current.nlsSamplingCatmull != next.nlsSamplingCatmull, "nls_sampling");
+		changed(current.sourceCodingFixes != next.sourceCodingFixes, "source_coding_fixes");
+		changed(current.debandVpGrainGuard != next.debandVpGrainGuard || current.debandVpGrainSplit != next.debandVpGrainSplit, "deband_vp_grain_guard");
 		changed(current.debandGrain != next.debandGrain, "deband_grain");
+		changed(current.debandVpExclusive != next.debandVpExclusive, "deband_vp_exclusive");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
@@ -11204,6 +11297,19 @@ struct LibplaceboVideoRenderer::Impl
 		return stretchUpdated && axisUpdated;
 	}
 
+	// Hunt 2 M1: the NLS shaders' `sampling` parameter (DYNAMIC: no recompile).
+	// A user's own NLS shader without it is left alone.
+	static void SetNlsSampling(const struct pl_hook* hook, bool catmull)
+	{
+		for (int index = 0; hook && index < hook->num_parameters; ++index)
+		{
+			const struct pl_hook_par& parameter = hook->parameters[index];
+			if (parameter.name && parameter.data && parameter.type == PL_VAR_FLOAT &&
+				strcmp(parameter.name, "sampling") == 0)
+				parameter.data->f = catmull ? 1.0f : 0.0f;
+		}
+	}
+
 	void LogNlsHookBinding(const NlsMappingDecision& decision,
 		const NlsHookMappingState& binding)
 	{
@@ -11254,6 +11360,7 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		if (nlsHook && nlsHookSignature == hookKey)
 		{
+			SetNlsSampling(nlsHook, activeSettings.nlsSamplingCatmull);
 			NlsHookMappingState binding;
 			const bool updated = SetNlsHookMapping(
 				nlsHook, decision, &binding);
@@ -11287,6 +11394,7 @@ struct LibplaceboVideoRenderer::Impl
 				nlsRule.filename.c_str());
 			return false;
 		}
+		SetNlsSampling(replacement, activeSettings.nlsSamplingCatmull);
 		pl_mpv_user_shader_destroy(&nlsHook);
 		nlsHook = replacement;
 		nlsHookSignature = replacementKey;
@@ -15321,7 +15429,10 @@ struct LibplaceboVideoRenderer::Impl
 		// (from A's last picture, at previousShift, to B at the full vector).
 		dejudderNextVectorsSequence = 0;
 		ditherNextGate.Clear();
-		if (activeSettings.ditherVectorsNewFrame && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
+		// Hunt 2 09-L4: not after a failed extra. The fallback showed A at shift 0 (or
+		// nothing was presented), so vectors from previousShift would carry from the
+		// wrong place; the sigma-delta's own search covers B (vector validity rule).
+		if (!failure && activeSettings.ditherVectorsNewFrame && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
 			warpField && warpTrust &&
 			dejudderGeometryValid && f.nextSourceSequence != 0)
 		{
@@ -15596,6 +15707,10 @@ struct LibplaceboVideoRenderer::Impl
 				convertedPayload->dolby.rgbBitAlignment == 2);
 		const bool tunnelActive =
 			state.dolbyVisionTunnel && !tunnelRgbFallback;
+		// Hunt 2 (08 #3): the SDR picture shown on the DV-tunnel wrapper is SDR
+		// input (BT.709 / BT.1886 below), whatever the tunnel state declares (PQ /
+		// BT.2020): every SDR gate (input transfer, gamma, LUT domain, luminance) uses it.
+		const bool inputIsSdr = state.eotf == EOTF::SDR || tunnelRgbFallback;
 		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
 		if (tunnelActive && (!convertedPayload ||
 			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
@@ -16853,7 +16968,7 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			}
 		}
-		if (state.eotf == EOTF::SDR &&
+		if (inputIsSdr &&
 			sdrInputTransfer != PL_COLOR_TRC_UNKNOWN)
 		{
 			// This is an explicit interpretation override used for controlled
@@ -16870,7 +16985,7 @@ struct LibplaceboVideoRenderer::Impl
         // always fall back to physical display encoding, never a stale LUT domain.
         MaybeReloadDisplayLut();
         const auto calibrationTransfer = LibplaceboOutput::ResolveCalibrationTransfers(
-            state.eotf == EOTF::SDR, actualOutput.safeToRender, displayLutParsed && displayLut,
+            inputIsSdr, actualOutput.safeToRender, displayLutParsed && displayLut,
             sdrAdjustGamma, LibplaceboOutput::ParseGamma(activeSettings.outputGamma),
             LibplaceboOutput::ParseGamma(activeSettings.hdrToneMapTargetGamma),
             ToSdrTransfer(declaredSourceTransfer), ToSdrTransfer(acceptedOutputTransfer),
@@ -16891,7 +17006,7 @@ struct LibplaceboVideoRenderer::Impl
 		const bool gammaPrimariesConversion = image.color.primaries !=
 			PL_COLOR_PRIM_UNKNOWN && image.color.primaries != gammaTargetPrimaries;
 		std::ostringstream gammaSignature;
-		gammaSignature << static_cast<int>(state.eotf) << '|'
+		gammaSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
 			<< static_cast<int>(lastSdrGammaDecision.requested) << '|'
 			<< static_cast<int>(lastSdrGammaDecision.action) << '|'
 			<< static_cast<int>(lastSdrGammaDecision.declaredSource) << '|'
@@ -16924,7 +17039,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		// SDR never inherits the HDR tone-map destination or its black level.
 		LibplaceboRenderParameters::ApplySourceLuminance(
-			state.eotf == EOTF::SDR, image.color);
+			inputIsSdr, image.color);
 		image.crop.x0 = 0.0f;
 		image.crop.y0 = 0.0f;
 		image.crop.x1 = static_cast<float>(width);
@@ -17087,7 +17202,7 @@ struct LibplaceboVideoRenderer::Impl
             baseTarget.color.transfer = renderTargetTransfer;
 		baseTarget.color.primaries = TargetPlPrimaries();
 		LibplaceboRenderParameters::ApplyTargetLuminance(
-			state.eotf == EOTF::SDR, static_cast<float>(sdrTargetNits),
+			inputIsSdr, static_cast<float>(sdrTargetNits),
 			static_cast<float>(sdrBlackNits), baseTarget.color);
 		// DV next step (f): display profile from today's target settings, and
 		// the mapping policy's libplacebo parameters compared bit for bit with
@@ -17136,7 +17251,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 		}
 		std::ostringstream luminanceSignature;
-		luminanceSignature << static_cast<int>(state.eotf) << '|'
+		luminanceSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
 			<< image.color.transfer << '|' << image.color.hdr.min_luma << '|'
 			<< image.color.hdr.max_luma << '|' << baseTarget.color.transfer << '|'
 			<< baseTarget.color.hdr.min_luma << '|' << baseTarget.color.hdr.max_luma
@@ -17148,7 +17263,7 @@ struct LibplaceboVideoRenderer::Impl
 			lastLuminanceSignature = luminanceSignature.str();
 			DebugLog::Log(
 				"LUMINANCE_CONTRACT input_sdr=%d source_transfer=%s source_luma=%.7g..%.2f source_effective_hdr=%d target_transfer=%s target_luma=%.7g..%.2f target_effective_hdr=%d hdr_destination=%.7g..%.2f format=%s dxgi=%s peak_eligible=%d",
-				state.eotf == EOTF::SDR ? 1 : 0,
+				inputIsSdr ? 1 : 0,
 				pl_color_transfer_name(image.color.transfer),
 				image.color.hdr.min_luma, image.color.hdr.max_luma,
 				pl_color_space_is_hdr(&image.color) ? 1 : 0,
@@ -20169,6 +20284,7 @@ struct LibplaceboVideoRenderer::Impl
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
 			sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
 			sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
+			sourceMonitor.SetCodingFixes(activeSettings.sourceCodingFixes);
 			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
@@ -20256,7 +20372,7 @@ struct LibplaceboVideoRenderer::Impl
 				double quality = snap.reading ? snap.bitrateQuality : 1.0;
 				if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
 				const double bits = snap.reading ? snap.effectiveBits : 0.0;
-				debandThreshold = VpDebander::Strength(bits, depth, quality, useQuality);
+				debandThreshold = VpDebander::Strength(bits, depth, quality, useQuality, activeSettings.sourceCodingFixes);
 				if (activeSettings.debandVp == "on")
 					debandThreshold = (std::max)(debandThreshold, 1.5 * std::pow(2.0, (std::max)(0, depth - 8)));
 				if (temporal) debandThreshold = 0.0;
@@ -20272,6 +20388,7 @@ struct LibplaceboVideoRenderer::Impl
 				vpDebandParams.fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 				vpDebandParams.sequence = sourceSequence;
 				vpDebandParams.grainGuard = activeSettings.debandVpGrainGuard;
+				vpDebandParams.grainSplit = activeSettings.debandVpGrainSplit;
 				char text[200];
 				if (temporal)
 					snprintf(text, sizeof(text), "VP deband: not applied while smooth motion or deinterlacing runs (deband_vp %s)", activeSettings.debandVp.c_str());
@@ -21370,6 +21487,10 @@ struct LibplaceboVideoRenderer::Impl
         // Stage 10: BTB/WTW through libplacebo for SDR. Decided on this
         // frame's source and target; libplacebo is then told the source is in
         // the target's colour space and VP's hooks do the conversion.
+        // Hunt 2 (08 #1): true when Prepare relabelled renderImage.color; the
+        // temporal renderer's retained frames then get the same label, so no
+        // frame is converted twice (TemporalRenderer::Render historyColor).
+        bool extendedRangeRelabelled = false;
         {
             ExtendedRange::Settings extendedSettings;
             extendedSettings.piecewiseTransfers = extendedSettings.wideSourcePrimaries =
@@ -21379,6 +21500,10 @@ struct LibplaceboVideoRenderer::Impl
                 renderImage.color, target.color, target.lut, target.lut ? target.lut_type : PL_LUT_UNKNOWN);
             if (extended.Active() && extendedRangeHookFailed)
                 extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
+            // Hunt 2 (08 #1): a late restore cannot follow libplacebo's frame mix.
+            if (temporalRenderer.Active())
+                extended = ExtendedRange::ForTemporal(extended, temporalRenderer.Mixing());
+            extendedRangeRelabelled = extended.Active();
             // A one-plane RGB source (the subtitle move's composed picture, an
             // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
             ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
@@ -21390,6 +21515,16 @@ struct LibplaceboVideoRenderer::Impl
                 extendedRangeDescribed = described;
                 extendedRangeLogged = static_cast<int>(extended.reason);
                 DebugLog::Log("Extended range (BTB/WTW): %s", described.c_str());
+            }
+            // Hunt 2 (08 #2): libplacebo's frame mixer linearises each frame with
+            // a clamp at 0 (no fork): mixed refreshes lose BTB, WTW is kept.
+            const bool mixClipsBtb = extended.Active() && temporalRenderer.Mixing();
+            if (mixClipsBtb != extendedRangeMixLogged)
+            {
+                extendedRangeMixLogged = mixClipsBtb;
+                if (mixClipsBtb)
+                    DebugLog::Log("Extended range (BTB/WTW): libplacebo smooth motion (frame mixing) clips BTB on mixed refreshes "
+                        "(libplacebo limitation; WTW kept); VP's own motion engine keeps both");
             }
         }
         // Stage 6d: when this frame may get de-judder extras, keep A's
@@ -21466,6 +21601,18 @@ struct LibplaceboVideoRenderer::Impl
             outputEncodingRepairLogged = true;
         }
         pl_render_params frameParams = renderParams;
+        // Hunt 2 picture sweep: deband_vp_exclusive yields libplacebo's automatic deband to VP's
+        // debander, which is idle while smooth motion or deinterlacing runs; those frames keep
+        // libplacebo's deband as configured (otherwise nothing would deband them).
+        if (debandYieldedToVp && yieldedDebandOn && temporalRenderer.Active())
+        {
+            frameParams.deband_params = &yieldedDebandParams;
+            if (!yieldedDebandLogged)
+                DebugLog::Log("libplacebo deband: on for temporal frames (VP's debander does not run with smooth motion or deinterlacing)");
+            yieldedDebandLogged = true;
+        }
+        else
+            yieldedDebandLogged = false;
         // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
         // judder extras reuse these parameters).
         {
@@ -21587,7 +21734,14 @@ struct LibplaceboVideoRenderer::Impl
                     pl_frame rebased{};
                     // The picture being drawn (a Stage B picture between frames, or A).
                     if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
+                    {
                         frame = rebased;
+                        if (sourceRebase.FormatNote() != rebaseFormatNoteLogged)
+                        {
+                            rebaseFormatNoteLogged = sourceRebase.FormatNote();
+                            DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
+                        }
+                    }
                     else if (sourceRebase.Failures() == 1)
                         DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
                 }
@@ -21621,7 +21775,8 @@ struct LibplaceboVideoRenderer::Impl
                     else if (debander.Failures() == 1)
                         DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
                 }
-                return temporalRenderer.Render(renderer,frame,destination,parameters);
+                return temporalRenderer.Render(renderer,frame,destination,parameters,
+                    extendedRangeRelabelled ? &source.color : nullptr);
             });
         bool rendered = hookRender.rendered;
         // Bug hunt 2026-10-17: B's carried vectors are for this present only;
@@ -28026,7 +28181,10 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion=" << s.motion.Fingerprint() << "\n"
 		<< "interpolation_grain=" << InterpolationPolicy::Name(s.interpolationGrain) << "\n"
 		<< "dejudder_source_warp_filter=" << (s.dejudderSourceWarpCatmull ? "catmull" : "bilinear") << "\n"
-		<< "deband_vp_grain_guard=" << (s.debandVpGrainGuard ? "on" : "off") << "\n"
+		<< "nls_sampling=" << (s.nlsSamplingCatmull ? "catmull" : "bilinear") << "\n"
+		<< "source_coding_fixes=" << (s.sourceCodingFixes ? "on" : "off") << "\n"
+		<< "deband_vp_grain_guard=" << (!s.debandVpGrainGuard ? "off" : s.debandVpGrainSplit ? "on" : "veto") << "\n"
+		<< "deband_vp_exclusive=" << (s.debandVpExclusive ? "on" : "off") << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
 		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"

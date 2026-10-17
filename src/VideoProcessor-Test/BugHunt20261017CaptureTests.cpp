@@ -147,8 +147,57 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 576) == ColorSpace::REC_601_625);
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 625) == ColorSpace::REC_601_625);
 			Assert::IsTrue(Translate(bmdColorspaceRec709, 1080) == ColorSpace::REC_709);
-			// Bug hunt 2 (M1): other rasters no longer throw (BugHunt2CaptureTests).
+			// Hunt 2 (08 #4): an HD source flagged BT.601 keeps the BT.601 matrix
+			// (SMPTE 170M) instead of throwing (no picture, an error box).
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 720) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 1080) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 2160) == ColorSpace::REC_601_525);
+		}
+
+		// Hunt 2 (08 #4): the flag decides; the line count only picks the BT.601 entry.
+		TEST_METHOD(Rec601FlagAndAviColorimetryDecideTheMatrix)
+		{
+			Assert::IsTrue(Rec601ColorSpace(576) == ColorSpace::REC_601_625);
+			Assert::IsTrue(Rec601ColorSpace(625) == ColorSpace::REC_601_625);
+			Assert::IsTrue(Rec601ColorSpace(480) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Rec601ColorSpace(1080) == ColorSpace::REC_601_525);
+			Assert::IsTrue(DecodeAviColorimetry(0, 0) == AviColorimetry::NoData);
+			Assert::IsTrue(DecodeAviColorimetry(1, 6) == AviColorimetry::Bt601, L"EC is read only for C = 11");
+			Assert::IsTrue(DecodeAviColorimetry(2, 0) == AviColorimetry::Bt709);
+			Assert::IsTrue(DecodeAviColorimetry(3, 0) == AviColorimetry::Bt601);   // xvYCC601
+			Assert::IsTrue(DecodeAviColorimetry(3, 1) == AviColorimetry::Bt709);   // xvYCC709
+			Assert::IsTrue(DecodeAviColorimetry(3, 2) == AviColorimetry::Bt601);   // sYCC601
+			Assert::IsTrue(DecodeAviColorimetry(3, 3) == AviColorimetry::Bt601);   // opYCC601
+			Assert::IsTrue(DecodeAviColorimetry(3, 4) == AviColorimetry::Other);   // opRGB
+			Assert::IsTrue(DecodeAviColorimetry(3, 5) == AviColorimetry::Bt2020);
+			Assert::IsTrue(DecodeAviColorimetry(3, 6) == AviColorimetry::Bt2020);
+			Assert::IsTrue(DecodeAviColorimetry(3, 7) == AviColorimetry::Other);
+		}
+
+		// Integration 2026-10-17: a 50 Hz HD source flagged BT.601 gets the same
+		// primaries (625) on Magewell (Rec601ColorSpace with the measured rate)
+		// as on DeckLink (Translate with the measured rate); 59.94/60/24 give 525.
+		TEST_METHOD(Rec601AtHdTakesTheSamePrimariesOnBothCaptureCards)
+		{
+			const double rates[] = { 25.0, 50.0, 100.0, 24.0, 24000.0 / 1001.0, 30.0,
+				60000.0 / 1001.0, 60.0, 120.0, 0.0 };
+			const uint32_t heights[] = { 720, 1080, 1440, 2160, 4320 };
+			for (const uint32_t h : heights)
+				for (const double hz : rates)
+				{
+					const ColorSpace magewell = Rec601ColorSpace(h, hz);
+					Assert::IsTrue(magewell == Translate(bmdColorspaceRec601, h, true, hz));
+					Assert::IsTrue(magewell == Translate(bmdColorspaceRec601, h, false, hz));
+					Assert::IsTrue(magewell == (RateIs625Family(hz) ?
+						ColorSpace::REC_601_625 : ColorSpace::REC_601_525));
+				}
+			Assert::IsTrue(Rec601ColorSpace(1080, 50.0) == ColorSpace::REC_601_625, L"1080p50 BT.601 -> 625");
+			Assert::IsTrue(Rec601ColorSpace(2160, 25.0) == ColorSpace::REC_601_625);
+			Assert::IsTrue(Rec601ColorSpace(1080, 60000.0 / 1001.0) == ColorSpace::REC_601_525);
+			// SD heights stay decided by their line count, whatever the rate.
+			Assert::IsTrue(Rec601ColorSpace(576, 60.0) == ColorSpace::REC_601_625);
+			Assert::IsTrue(Rec601ColorSpace(480, 50.0) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Rec601ColorSpace(486, 50.0) == ColorSpace::REC_601_525);
 		}
 
 		// Post-merge audit 2026-10-17: capture_display_fixes off restores Bill's earlier

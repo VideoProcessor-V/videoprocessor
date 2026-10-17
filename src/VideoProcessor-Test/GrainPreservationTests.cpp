@@ -535,6 +535,249 @@ namespace GrainPreservationTest
 			Assert::AreEqual(0.125, GrainPreserve::GuardExtremumCodes(1.5, 8), 1e-12);
 		}
 
+		// deband_vp_grain_guard on = the grain split (hunt 2 07-scaling H1): VpDebander without
+		// vectors keeps grain of 0.5-4 8-bit codes, white and soft, within +-5 % at the default
+		// threshold and at the low-bitrate maximum, in 8-bit content and in the GPU test's 10-bit
+		// picture, with no veto at all (the residual passes, the low band is debanded).
+		TEST_METHOD(VpDebanderSplitKeepsGrain)
+		{
+			auto check = [](const char* label, const Image& img, const Image& ramp, int margin, double thr, double radius) {
+				const double source = Rms(img - ramp, margin);
+				const double split = Rms(DebandSplit(img, thr, radius) - ramp, margin) / source;
+				const double legacy = Rms(Deband(img, thr, radius, 0.0, 0.0) - ramp, margin) / source;
+				char text[160];
+				snprintf(text, sizeof(text), "%s threshold %.1f: split %.3f legacy %.3f", label, thr, split, legacy);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(split > 0.95 && split < 1.05, W(text).c_str());
+			};
+			for (bool soft : { false, true })
+				for (double sigma : kSigmas)
+					for (double thr : { 1.5, 3.0 })
+					{
+						std::mt19937 rng(909u + static_cast<unsigned>(sigma * 8) + (soft ? 1000u : 0u));
+						const Image g = Grain(kW, kH, sigma, soft, rng);
+						Image img(kW, kH), ramp(kW, kH);
+						for (int y = 0; y < kH; ++y)
+							for (int x = 0; x < kW; ++x)
+							{
+								ramp.at(x, y) = 100.0 + 0.07 * x + 0.03 * y;
+								img.at(x, y) = std::round(ramp.at(x, y) + g.at(x, y));   // 8-bit content
+							}
+						char label[64];
+						snprintf(label, sizeof(label), "8-bit %s sigma %.1f", soft ? "soft" : "white", sigma);
+						check(label, img, ramp, kMargin, thr, 16.0);
+					}
+			const int w = 256, h = 128, margin = 24;
+			Image ramp(w, h);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+					ramp.at(x, y) = 400.0 + 0.28 * x + 0.12 * y;
+			for (double thr : { 6.0, 12.0 })
+				for (bool soft : { false, true })
+					for (double sigma8 : kSigmas)
+					{
+						std::mt19937 rng(61u + static_cast<unsigned>(sigma8 * 4) + (soft ? 100u : 0u));
+						const Image g = Grain(w, h, sigma8 * 4.0, soft, rng);
+						Image img(w, h);
+						for (size_t i = 0; i < img.v.size(); ++i) img.v[i] = static_cast<double>(std::lround(ramp.v[i] + g.v[i]));
+						char label[64];
+						snprintf(label, sizeof(label), "10-bit %s grain %.1f 8-bit codes", soft ? "soft" : "white", sigma8);
+						check(label, img, ramp, margin, thr, 64.0);
+					}
+		}
+
+		// The H1 scenario: coded banding that kept some noise (a dithered master at a low
+		// bitrate). 8-bit steps in a 10-bit signal, bands 16 and 32 px wide, along x and
+		// diagonal, with 1-2 codes RMS of noise (white, soft) or +/-1-step toggles on 10-20 %
+		// of the pixels. The split removes 70 % or more of the band fundamental (clean bands
+		// 90 %) and passes the noise at 0.95x or more (the output's change from the clean
+		// bands' output, against the noise); the spatial-share veto (deband_vp_grain_guard
+		// veto) leaves 70 % or more of the bands at 2 codes of noise (the finding).
+		TEST_METHOD(VpDebanderSplitDebandsNoisyBands)
+		{
+			const int w = 256, h = 128, margin = 24;
+			const double thr = 12.0, radius = 64.0;
+			auto fundamental = [&](const Image& err, double dx, double dy, double period) {
+				double re = 0.0, im = 0.0;
+				int n = 0;
+				for (int y = margin; y < h - margin; ++y)
+					for (int x = margin; x < w - margin; ++x)
+					{
+						const double u = (x * dx + y * dy) * 6.283185307179586 / period;
+						re += err.at(x, y) * std::cos(u);
+						im -= err.at(x, y) * std::sin(u);
+						++n;
+					}
+				return 2.0 * std::hypot(re, im) / n;
+			};
+			for (double width : { 16.0, 32.0 })
+				for (double diag : { 0.0, 0.5 })
+				{
+					const double norm = std::sqrt(1.0 + diag * diag), dx = 1.0 / norm, dy = diag / norm;
+					Image ramp(w, h), bands(w, h);
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x)
+						{
+							ramp.at(x, y) = 400.0 + 4.0 * (x * dx + y * dy) / width;
+							bands.at(x, y) = 4.0 * std::round(ramp.at(x, y) / 4.0);
+						}
+					const Image clean = DebandSplit(bands, thr, radius);
+					const double before = fundamental(bands - ramp, dx, dy, width);
+					{
+						const double after = fundamental(clean - ramp, dx, dy, width) / before;
+						char text[160];
+						snprintf(text, sizeof(text), "clean bands %.0f px, diagonal %.1f: fundamental kept %.3f", width, diag, after);
+						Logger::WriteMessage(text);
+						Assert::IsTrue(after < 0.1, W(text).c_str());
+					}
+					struct Noise { const char* name; bool soft; double sigma; double toggles; };
+					for (const Noise& noise : { Noise{ "white 1", false, 1.0, 0.0 }, Noise{ "white 2", false, 2.0, 0.0 },
+						Noise{ "soft 1", true, 1.0, 0.0 }, Noise{ "soft 2", true, 2.0, 0.0 },
+						Noise{ "toggles 10 %", false, 0.0, 0.10 }, Noise{ "toggles 20 %", false, 0.0, 0.20 } })
+					{
+						std::mt19937 rng(11u + static_cast<unsigned>(width) + static_cast<unsigned>(diag * 10.0) + static_cast<unsigned>(noise.sigma * 7.0 + noise.toggles * 100.0) + (noise.soft ? 1000u : 0u));
+						Image n(w, h);
+						if (noise.toggles > 0.0)
+						{
+							std::uniform_real_distribution<double> u01(0.0, 1.0);
+							for (double& v : n.v)
+							{
+								const bool hit = u01(rng) < noise.toggles;
+								const double sign = u01(rng) < 0.5 ? 1.0 : -1.0;
+								v = hit ? 4.0 * sign : 0.0;
+							}
+						}
+						else
+						{
+							const Image g = Grain(w, h, noise.sigma, noise.soft, rng);
+							for (size_t i = 0; i < n.v.size(); ++i) n.v[i] = std::round(g.v[i]);
+						}
+						const Image img = bands + n;
+						const Image split = DebandSplit(img, thr, radius);
+						const double lapMin = GrainPreserve::GuardLaplacianCodes(thr, 10), extMin = GrainPreserve::GuardExtremumCodes(thr, 10);
+						const Image veto = Deband(img, thr, radius, lapMin, extMin);
+						const double noisyBefore = fundamental(img - ramp, dx, dy, width);
+						const double kept = fundamental(split - ramp, dx, dy, width) / noisyBefore;
+						const double vetoKept = fundamental(veto - ramp, dx, dy, width) / noisyBefore;
+						const double pass = Rms(split - clean, margin) / Rms(n, margin);
+						char text[220];
+						snprintf(text, sizeof(text), "bands %.0f px, diagonal %.1f, %s: fundamental kept split %.3f veto %.3f; noise passed %.3f",
+							width, diag, noise.name, kept, vetoKept, pass);
+						Logger::WriteMessage(text);
+						Assert::IsTrue(kept < 0.3, W(text).c_str());
+						Assert::IsTrue(pass > 0.95 && pass < 1.05, W(text).c_str());
+						if (noise.sigma == 2.0 && width == 16.0)
+							Assert::IsTrue(vetoKept > 0.7, (L"the veto leaves noisy bands alone (H1); " + W(text)).c_str());
+					}
+				}
+		}
+
+		// The split leaves picture structure above the threshold as the established debander
+		// does (a one-pixel line of 16 or 40 codes keeps 0.95x or more of its contrast) and
+		// debands clean banded gradients at least as well (8-bit steps at three slopes).
+		TEST_METHOD(VpDebanderSplitKeepsStructureAndDebandsCleanBands)
+		{
+			const int w = 256, h = 128, margin = 24;
+			for (double contrast : { 16.0, 40.0 })
+			{
+				Image ramp(w, h), img(w, h);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+					{
+						ramp.at(x, y) = 400.0 + 0.28 * x;
+						img.at(x, y) = std::round(ramp.at(x, y) + (x == 128 ? contrast : 0.0));
+					}
+				const Image out = DebandSplit(img, 12.0, 64.0);
+				double line = 0.0;
+				for (int y = margin; y < h - margin; ++y)
+					line += out.at(128, y) - 0.5 * (out.at(124, y) + out.at(132, y));
+				line /= h - 2 * margin;
+				char text[120];
+				snprintf(text, sizeof(text), "line of %.0f codes: %.2f after", contrast, line);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(line > 0.95 * contrast, W(text).c_str());
+			}
+			for (double slope : { 1.0 / 32.0, 1.0 / 16.0, 1.0 / 8.0 })
+			{
+				Image ramp(kW, kH), banded(kW, kH);
+				for (int y = 0; y < kH; ++y)
+					for (int x = 0; x < kW; ++x)
+					{
+						ramp.at(x, y) = 100.0 + slope * x;
+						banded.at(x, y) = std::round(ramp.at(x, y));
+					}
+				const double before = Rms(banded - ramp, kMargin);
+				const double legacy = Rms(Deband(banded, 1.5, 16.0, 0.0, 0.0) - ramp, kMargin);
+				const double split = Rms(DebandSplit(banded, 1.5, 16.0) - ramp, kMargin);
+				char text[160];
+				snprintf(text, sizeof(text), "8-bit band slope %.4f: error %.3f -> legacy %.3f, split %.3f", slope, before, legacy, split);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(split < 0.75 * before && split <= legacy + 0.01 * before, W(text).c_str());
+			}
+		}
+
+		// Fixed pixel constants follow the picture (07-scaling L7, 15-intent C15): grain-scale
+		// distances stay at and below the 2160-line reference and grow above it; the
+		// interpolator's split and its GLSL weights are unchanged at the reference.
+		TEST_METHOD(GrainSplitConstantsScaleWithHeight)
+		{
+			Assert::AreEqual(1.0, GrainPreserve::GrainScale(540.0), 1e-12);
+			Assert::AreEqual(1.0, GrainPreserve::GrainScale(1080.0), 1e-12);
+			Assert::AreEqual(1.0, GrainPreserve::GrainScale(2160.0), 1e-12);
+			Assert::AreEqual(2.0, GrainPreserve::GrainScale(4320.0), 1e-12);
+			Assert::AreEqual(GrainPreserve::kLowSigma, GrainPreserve::LowSigmaFor(2160.0), 1e-12);
+			Assert::AreEqual(2.0 * GrainPreserve::kLowSigma, GrainPreserve::LowSigmaFor(4320.0), 1e-12);
+			Assert::AreEqual(GrainPreserve::kLowRadius, GrainPreserve::LowRadius(GrainPreserve::kLowSigma));
+			Assert::IsTrue(GrainPreserve::LowRadius(2.0 * GrainPreserve::kLowSigma) >= 2 * GrainPreserve::kLowRadius, L"the taps reach as far in sigmas");
+			for (double sigma : { GrainPreserve::kLowSigma, GrainPreserve::kSplitSigma, 2.0 * GrainPreserve::kSplitSigma })
+			{
+				double sum = 0.0;
+				const int r = GrainPreserve::LowRadius(sigma);
+				for (int i = -r; i <= r; ++i) sum += GrainPreserve::LowWeight(i, sigma);
+				Assert::AreEqual(1.0, sum, 1e-12);
+			}
+			// The interpolator's weights at the reference: the pre-hunt-2 text.
+			std::string expected = "#define GP_R 5\nfloat gp_w(int i)\n{\n    float w[11] = float[11](";
+			for (int i = -5; i <= 5; ++i)
+			{
+				const double s = std::sqrt(9.0 - 0.25) / 2.0;
+				double norm = 0.0;
+				for (int k = -5; k <= 5; ++k) norm += std::exp(-0.5 * k * k / (s * s));
+				char number[32];
+				snprintf(number, sizeof(number), "%.9g", std::exp(-0.5 * i * i / (s * s)) / norm);
+				expected += number;
+				if (i < 5) expected += ", ";
+			}
+			expected += ");\n    return w[i + GP_R];\n}\n";
+			Assert::AreEqual(expected, GrainPreserve::LowWeightsGlsl(GrainPreserve::LowSigmaFor(1080.0)));
+			Assert::AreEqual(4, GrainPreserve::SplitTensorHalfBlock(1.0));
+			Assert::AreEqual(8, GrainPreserve::SplitTensorHalfBlock(2.0));
+			double along = 0.0;
+			for (int k = -GrainPreserve::kSplitAlongTaps; k <= GrainPreserve::kSplitAlongTaps; ++k) along += GrainPreserve::SplitAlongWeight(k);
+			Assert::AreEqual(1.0, along, 1e-12);
+			// A twice-taller picture with twice-larger features debands like the reference.
+			const int w = 192, h = 96;
+			Image ramp(w, h), banded(w, h), ramp2(2 * w, 2 * h), banded2(2 * w, 2 * h);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					ramp.at(x, y) = 400.0 + 4.0 * x / 16.0;
+					banded.at(x, y) = 4.0 * std::round(ramp.at(x, y) / 4.0);
+				}
+			for (int y = 0; y < 2 * h; ++y)
+				for (int x = 0; x < 2 * w; ++x)
+				{
+					ramp2.at(x, y) = 400.0 + 4.0 * x / 32.0;
+					banded2.at(x, y) = 4.0 * std::round(ramp2.at(x, y) / 4.0);
+				}
+			const double e1 = Rms(DebandSplit(banded, 12.0, 32.0, 1.0) - ramp, 24) / Rms(banded - ramp, 24);
+			const double e2 = Rms(DebandSplit(banded2, 12.0, 64.0, 2.0) - ramp2, 48) / Rms(banded2 - ramp2, 48);
+			char text[120];
+			snprintf(text, sizeof(text), "band error kept: reference %.3f, twice the height %.3f", e1, e2);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(e1 < 0.5 && e2 < 0.5, W(text).c_str());
+		}
+
 		// deband_grain off: libplacebo's deband adds no grain; threshold, radius and
 		// iterations stay as selected for every strength; on restores its parameters.
 		TEST_METHOD(LibplaceboDebandGrainOffZeroesOnlyTheGrain)
@@ -582,12 +825,16 @@ namespace GrainPreservationTest
 			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_source_warp_filter", "catmull", expected));
 			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_source_warp_filter", "bilinear", expected));
 			Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "dejudder_source_warp_filter", "lanczos", expected));
-			for (const char* key : { "residual_stabilise_grain_guard", "deband_vp_grain_guard" })
+			for (const char* key : { "residual_stabilise_grain_guard", "deband_vp_grain_guard", "deband_vp_exclusive" })
 			{
 				Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", key, "on", expected));
 				Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", key, "off", expected));
 				Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, "auto", expected));
 			}
+			// deband_vp_grain_guard veto: the 2026-10-17 spatial-share veto (on = the grain split).
+			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "deband_vp_grain_guard", "veto", expected));
+			Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "residual_stabilise_grain_guard", "veto", expected));
+			Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "deband_vp_grain_guard", "split", expected));
 			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("scaling", "deband_grain", "on", expected));
 			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("scaling", "deband_grain", "off", expected));
 			Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("scaling", "deband_grain", "light", expected));

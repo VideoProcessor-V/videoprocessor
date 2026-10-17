@@ -888,6 +888,11 @@ namespace VideoProcessorTest
                 Case{ "fbo_float32", "yes", false },
                 Case{ "dither_vectors", "auto", true }, Case{ "dither_vectors", "own", true },
                 Case{ "dither_vectors", "external", false },
+                // Hunt 2 M1 / M2-M3 (picture C).
+                Case{ "nls_sampling", "catmull", true }, Case{ "nls_sampling", "bilinear", true },
+                Case{ "nls_sampling", "lanczos", false },
+                Case{ "source_coding_fixes", "on", true }, Case{ "source_coding_fixes", "off", true },
+                Case{ "source_coding_fixes", "auto", false },
                 Case{ "adaptive_faithful", "ortho", true }, Case{ "adaptive_faithful", "polar", true },
                 Case{ "adaptive_faithful", "auto", true },   // Auto is the owner-chosen default (2026-10-16)
                 Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },

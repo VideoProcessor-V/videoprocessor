@@ -560,5 +560,49 @@ namespace VideoProcessorTest
 			Assert::IsTrue(pl_color_space_equal(&source, &pq));
 			Assert::AreEqual(size_t(2), list.size());
 		}
+
+		// Hunt 2 (08 #1): through the temporal renderer every frame is converted
+		// once. Deinterlacing alone keeps every mode; libplacebo frame mixing
+		// keeps the carry + SCALED restore (inside each frame's pass) and turns
+		// a late restore off (it would read the last-rendered frame, not the mix).
+		TEST_METHOD(ForTemporalKeepsPerFrameModesAndDropsLateRestoreUnderMixing)
+		{
+			using namespace ErCarry;
+			using R = ExtendedRange::Reason;
+			const ExtendedRange::Settings on{};
+			const pl_color_space s = Space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA24);
+			const pl_color_space o = Space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22);
+			const ExtendedRange::Decision scaled = ExtendedRange::Decide(true, on, s, o, nullptr, PL_LUT_UNKNOWN);
+			Assert::IsTrue(scaled.Active() && !scaled.LateRestore());
+			Assert::IsTrue(ExtendedRange::ForTemporal(scaled, false).Active());
+			Assert::IsTrue(ExtendedRange::ForTemporal(scaled, true).Active());
+
+			const std::vector<float> data = MakeLut(5, Affine);
+			const pl_custom_lut lut = PlainLut(data, 5);
+			const ExtendedRange::Decision withLut = ExtendedRange::Decide(true, on, s, o, &lut, PL_LUT_NORMALIZED);
+			Assert::IsTrue(withLut.Active() && withLut.LateRestore());
+			Assert::IsTrue(ExtendedRange::ForTemporal(withLut, false).Active());
+			Assert::IsTrue(ExtendedRange::ForTemporal(withLut, true).reason == R::TemporalMix);
+
+			// Wide source gamut: libplacebo maps the primaries, linear remainder restored late.
+			const pl_color_space wide = Space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_GAMMA24);
+			const ExtendedRange::Decision mapped = ExtendedRange::Decide(true, on, wide, o, nullptr, PL_LUT_UNKNOWN);
+			Assert::IsTrue(mapped.Active() && mapped.libplaceboMapsPrimaries);
+			Assert::IsTrue(ExtendedRange::ForTemporal(mapped, false).Active());
+			Assert::IsTrue(ExtendedRange::ForTemporal(mapped, true).reason == R::TemporalMix);
+
+			// An inactive decision keeps its reason; the off text names the cause.
+			const ExtendedRange::Decision off = ExtendedRange::Decide(false, on, s, o, nullptr, PL_LUT_UNKNOWN);
+			Assert::IsTrue(ExtendedRange::ForTemporal(off, true).reason == R::Off);
+			Assert::IsTrue(ExtendedRange::Describe(ExtendedRange::Decision{ R::TemporalMix }).find("frame mixing") != std::string::npos);
+
+			// Under mixing a TemporalMix decision prepares nothing: libplacebo keeps the source label.
+			ExtendedRange::Hooks hooks;
+			pl_color_space source = s;
+			std::vector<const pl_hook*> list;
+			ExtendedRange::Prepare(ExtendedRange::ForTemporal(withLut, true), hooks, source, o, list);
+			Assert::IsTrue(pl_color_space_equal(&source, &s));
+			Assert::AreEqual(size_t(0), list.size());
+		}
 	};
 }

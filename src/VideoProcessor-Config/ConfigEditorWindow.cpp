@@ -8052,6 +8052,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "sharp parts. On (default): when sharp full-resolution detail shows anywhere beside the upscaled video "
             "(not a subtitle line), the picture counts as native - no re-base, and an active one switches off at "
             "once. Off: the screen is read as a whole, as before."));
+        // Hunt 2 M2/M3: the coding readings behind auto deband and low-bitrate handling.
+        auto* codingFixes = addChoice(QStringLiteral("Bit depth and coding detection fixes"), QStringLiteral("source_coding_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        codingFixes->setToolTip(QStringLiteral(
+            "Fix under test (default on). How VP reads the source's real bit depth and its coding damage, which drive "
+            "auto debanding and low-bitrate handling. On: the bit depth is read from the flat parts of the picture and "
+            "codes used only by a few pixels count little, so 8-bit video upscaled or dithered into 10 bits reads 8-bit; "
+            "block edges are found at any spacing (an upscaled stream's 16- or 24-pixel blocks, not only 8 and 16) and "
+            "bands still count with noise or a soft upscaled edge. Off: the earlier readings."));
         // Owner 2026-10-16: the engine's options on the motion (de-judder) section, not here.
         QFormLayout* fixesForm = form;
         form = dejudderTasteForm;
@@ -8354,16 +8363,38 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         warpFilter->setToolTip(QStringLiteral(
             "How the de-judder samples the source when it warps it. Catmull-Rom (default) keeps fine grain; "
             "bilinear keeps only about half of it at half-pixel shifts. The rendered warp is Catmull-Rom either way."));
+        // Hunt 2 M1: how the NLS / NLS+ warp samples the source.
+        auto* nlsSampling = addChoice(QStringLiteral("NLS stretch sampling"),
+            QStringLiteral("nls_sampling"), { QStringLiteral("catmull"), QStringLiteral("bilinear") });
+        nlsSampling->setItemText(nlsSampling->findData(QStringLiteral("catmull")), QStringLiteral("Catmull-Rom (default, faithful)"));
+        nlsSampling->setItemText(nlsSampling->findData(QStringLiteral("bilinear")), QStringLiteral("Bilinear (the earlier output)"));
+        nlsSampling->setToolTip(QStringLiteral(
+            "How the nonlinear stretch (NLS, NLS+, NLS-V) reads the picture it reshapes. Catmull-Rom (default): a sharp "
+            "filter along the stretched axis that keeps grain and detail, widened where the stretch shrinks the "
+            "picture (the centre) so fine detail does not alias. Bilinear: the earlier output (softer, the centre "
+            "shrunk without a filter). Only matters while an NLS shader is active."));
+        MarkGpuCost(form, nlsSampling, 1);
         auto* residualGrainGuard = addChoice(QStringLiteral("Residual stabilise leaves grain alone"),
             QStringLiteral("residual_stabilise_grain_guard"), { QStringLiteral("on"), QStringLiteral("off") });
         residualGrainGuard->setToolTip(QStringLiteral(
             "On (default): the CNN / SSIM residual held along the motion is not held where the block is grain, so "
             "grain is not frozen or smeared. Off: the earlier behaviour."));
         auto* debandGrainGuard = addChoice(QStringLiteral("VP deband leaves grain alone"),
-            QStringLiteral("deband_vp_grain_guard"), { QStringLiteral("on"), QStringLiteral("off") });
+            QStringLiteral("deband_vp_grain_guard"), { QStringLiteral("on"), QStringLiteral("veto"), QStringLiteral("off") });
+        debandGrainGuard->setItemText(debandGrainGuard->findData(QStringLiteral("on")), QStringLiteral("On: grain split (default)"));
+        debandGrainGuard->setItemText(debandGrainGuard->findData(QStringLiteral("veto")), QStringLiteral("Veto grainy blocks (the earlier guard)"));
+        debandGrainGuard->setItemText(debandGrainGuard->findData(QStringLiteral("off")), QStringLiteral("Off (the earlier debander)"));
         debandGrainGuard->setToolTip(QStringLiteral(
-            "On (default): VP's debander measures each block's grain and does not smooth it, with or without motion "
-            "vectors; banded gradients are debanded as before. Off: the earlier debander, byte for byte."));
+            "On (default): VP's debander splits the picture into a smooth layer and the fine grain and noise on top; "
+            "only the smooth layer is debanded and the grain is put back untouched, so banding is removed even where "
+            "the stream kept some noise in the bands. Veto: the earlier guard, which skips blocks that look grainy "
+            "(it also skips noisy bands). Off: the earlier debander, byte for byte (it smooths grain)."));
+        auto* debandVpExclusive = addChoice(QStringLiteral("VP deband replaces libplacebo's"),
+            QStringLiteral("deband_vp_exclusive"), { QStringLiteral("on"), QStringLiteral("off") });
+        debandVpExclusive->setToolTip(QStringLiteral(
+            "On (default): while VP's debander runs (VP deband Auto or On) with its grain guard, libplacebo's "
+            "automatic deband (Debanding: Auto) is turned off, because it thins fine grain. A Debanding strength "
+            "chosen explicitly (Light or Default) is kept. Off: both debanders run, as before."));
         // Restore switch (DV tunnel bug hunt 2026-10-17).
         auto* dvTunnelFixes = addChoice(QStringLiteral("Dolby Vision tunnel fixes"),
             QStringLiteral("dv_tunnel_fixes"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -9028,7 +9059,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
             "otherwise and for HDR. On by default (owner: keep below-black and above-white). To reach the "
             "projector they also need limited output range (Color profile: output range limited, with output "
-            "gamma 2.4). Off: libplacebo's standard path (clips them)."));
+            "gamma 2.4). Off: libplacebo's standard path (clips them). Works with deinterlacing; libplacebo smooth motion "
+            "clips below-black on blended refreshes (libplacebo limitation) - VP's own motion engine keeps both."));
         MarkGpuCost(form, extendedRange, 1);
         auto* extendedMore = addChoice(QStringLiteral("Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR"),
             QStringLiteral("extended_range_more_cases"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -9279,7 +9311,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             if(auto* layout=qobject_cast<QFormLayout*>(combo->parentWidget()->layout()))
                 if(auto* label=layout->labelForField(combo))label->setToolTip(text);
         };
-        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering."));
+        setMotionHelp(smoothMotion,QStringLiteral("Smooth motion blends neighboring frames; it does not generate motion-compensated frames like RIFE.\nOff: normal playback (default).\nAuto: blend only when measured source/display rates are not an integer match.\nAlways: blend even at matching rates. Active mixing adds frame buffering.\n"
+            "Below-black (BTB) is clipped on blended refreshes: libplacebo's frame mixer clips it (a libplacebo limitation; "
+            "above-white is kept). VP's own motion engine is the path that keeps both. While blending, keeping below-black / "
+            "above-white turns itself off with a calibration LUT or a wide-gamut SDR source."));
         setMotionHelp(frameMixer,QStringLiteral("Applies only to smooth motion.\nOversample: default frame blending.\nHermite: smooth transition between neighboring frames.\nLinear: linear blend between neighboring frames.\nCubic: wider temporal filter using more neighboring frames, with more buffering.\nThese are libplacebo frame mixers, not image upscalers."));
         setMotionHelp(deinterlacing,QStringLiteral("Applies to interlaced input.\nAuto: deinterlace only when input reports interlacing and a known field order (default).\nOff: leave input unchanged.\nForce: apply the selected algorithm even if input is reported progressive; field order must still be known or explicitly selected."));
         setMotionHelp(deinterlaceAlgorithm,QStringLiteral("Applies only to deinterlacing.\nBWDIF: default temporal deinterlacer.\nYADIF: alternative temporal deinterlacer.\nBob: deinterlace each field without neighboring-frame references.\nWeave: preserve both fields in the original frame.\nBWDIF/YADIF use neighboring frames; missing references fall back to Bob."));
@@ -9960,8 +9995,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
                     { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
                     { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
-                    { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" },
+                    { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "deband_vp_exclusive", "on" },
                     { "dv_tunnel_fixes", "on" },
+                    // Hunt 2 M1: the NLS warp's sampling.
+                    { "nls_sampling", "catmull" }, { "source_coding_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
                     { "source_class", "legacy" },   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)

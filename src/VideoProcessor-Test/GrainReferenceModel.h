@@ -87,16 +87,16 @@ namespace GrainModel
 
 	// The low band at half resolution (GrainPreserve; LOW_HALF_BODY, LOW_H_BODY,
 	// LOW_V_BODY): a 2x2 box average, then the separable Gaussian.
-	inline Image Low(const Image& img)
+	inline Image Low(const Image& img, double sigma)
 	{
 		const int hw = (img.w + 1) / 2, hh = (img.h + 1) / 2;
 		Image half(hw, hh);
 		for (int y = 0; y < hh; ++y)
 			for (int x = 0; x < hw; ++x)
 				half.at(x, y) = 0.25 * (img.get(2 * x, 2 * y) + img.get(2 * x + 1, 2 * y) + img.get(2 * x, 2 * y + 1) + img.get(2 * x + 1, 2 * y + 1));
-		const int r = GrainPreserve::kLowRadius;
+		const int r = GrainPreserve::LowRadius(sigma);
 		std::vector<double> w(2 * r + 1);
-		for (int i = -r; i <= r; ++i) w[i + r] = GrainPreserve::LowWeight(i);
+		for (int i = -r; i <= r; ++i) w[i + r] = GrainPreserve::LowWeight(i, sigma);
 		Image across(hw, hh), out(hw, hh);
 		for (int y = 0; y < hh; ++y)
 			for (int x = 0; x < hw; ++x)
@@ -114,6 +114,7 @@ namespace GrainModel
 			}
 		return out;
 	}
+	inline Image Low(const Image& img) { return Low(img, GrainPreserve::kLowSigma); }
 
 	// The low band at p (full-resolution pixels): the half-resolution band, bilinear at p / 2.
 	inline double LowAt(const Image& lowHalf, double px, double py) { return Bilinear(lowHalf, px * 0.5, py * 0.5); }
@@ -303,6 +304,80 @@ namespace GrainModel
 				if (lapMin > 0.0)
 					w *= 1.0 - Smoothstep(GrainPreserve::kVetoLo, GrainPreserve::kVetoHi, Bilinear(share, px / 16.0, py / 16.0));
 				out.at(x, y) = c * (1.0 - w) + avg * w;
+			}
+		return out;
+	}
+
+	// VpDebander with deband_vp_grain_guard split (BODY with SPLIT, SPLIT_*_BODY), no
+	// vectors: the low band (Low(img, kSplitSigma x scale), bilinear at p / 2) is
+	// debanded and the residual passes; the pixel's own low band gets back the residual
+	// averaged along the contour (structure tensor of the low band per block, bilinear
+	// between block centres), weighted by coherence and consistency. Values in codes.
+	inline Image DebandSplit(const Image& img, double thr, double radius, double scale = 1.0, Image* gateOut = nullptr)
+	{
+		const Image low = Low(img, GrainPreserve::kSplitSigma * scale);
+		const int tb = GrainPreserve::SplitTensorHalfBlock(scale);
+		const int tw = (low.w + tb - 1) / tb, th = (low.h + tb - 1) / tb;
+		Image jxx(tw, th), jxy(tw, th), jyy(tw, th);
+		for (int by = 0; by < th; ++by)
+			for (int bx = 0; bx < tw; ++bx)
+			{
+				double axx = 0.0, axy = 0.0, ayy = 0.0;
+				int n = 0;
+				for (int y = by * tb; y < (std::min)(low.h, by * tb + tb); ++y)
+					for (int x = bx * tb; x < (std::min)(low.w, bx * tb + tb); ++x)
+					{
+						const double gx = 0.5 * (low.get(x + 1, y) - low.get(x - 1, y));
+						const double gy = 0.5 * (low.get(x, y + 1) - low.get(x, y - 1));
+						axx += gx * gx;
+						axy += gx * gy;
+						ayy += gy * gy;
+						++n;
+					}
+				const double k = 1.0 / (std::max)(n, 1);
+				jxx.at(bx, by) = axx * k;
+				jxy.at(bx, by) = axy * k;
+				jyy.at(bx, by) = ayy * k;
+			}
+		const double tensorPx = 2.0 * tb, step = GrainPreserve::kSplitAlongStep * scale;
+		if (gateOut) *gateOut = Image(img.w, img.h);
+		Image out(img.w, img.h);
+		for (int y = 0; y < img.h; ++y)
+			for (int x = 0; x < img.w; ++x)
+			{
+				const double px = x + 0.5, py = y + 0.5;
+				uint32_t h = static_cast<uint32_t>(x) * 1973u + static_cast<uint32_t>(y) * 9277u + 26699u;
+				h = (h ^ (h >> 13u)) * 1540483477u;
+				h ^= h >> 15u;
+				const double r1 = static_cast<double>(h & 65535u) / 65535.0;
+				const double r2 = static_cast<double>(h >> 16u) / 65535.0;
+				const double d = 1.0 + (radius - 1.0) * r1;
+				const double ox = std::cos(r2 * 6.2831853) * d, oy = std::sin(r2 * 6.2831853) * d;
+				const double c = img.at(x, y);
+				const double lowc = Bilinear(low, px * 0.5, py * 0.5);
+				const double avg = 0.25 * (Bilinear(low, (px + ox) * 0.5, (py + oy) * 0.5) + Bilinear(low, (px - ox) * 0.5, (py - oy) * 0.5) +
+					Bilinear(low, (px - oy) * 0.5, (py + ox) * 0.5) + Bilinear(low, (px + oy) * 0.5, (py - ox) * 0.5));
+				const double a = Bilinear(jxx, px / tensorPx, py / tensorPx), b = Bilinear(jxy, px / tensorPx, py / tensorPx),
+					e = Bilinear(jyy, px / tensorPx, py / tensorPx);
+				const double jd = a - e;
+				const double coh = std::sqrt(jd * jd + 4.0 * b * b) / (a + e + GrainPreserve::kSplitTensorEps);
+				const double theta = std::fabs(jd) + std::fabs(b) > 0.0 ? 0.5 * std::atan2(2.0 * b, jd) : 0.0;
+				const double tx = -std::sin(theta) * step, ty = std::cos(theta) * step;
+				double ra = 0.0, ra2 = 0.0;
+				for (int k = -GrainPreserve::kSplitAlongTaps; k <= GrainPreserve::kSplitAlongTaps; ++k)
+				{
+					const double sx = px + k * tx, sy = py + k * ty;
+					const double rv = Bilinear(img, sx, sy) - Bilinear(low, sx * 0.5, sy * 0.5);
+					ra += GrainPreserve::SplitAlongWeight(k) * rv;
+					ra2 += GrainPreserve::SplitAlongWeight(k) * rv * rv;
+				}
+				const double rho = GrainPreserve::SplitConsistency(ra, ra2, 1e-12);
+				const double gate = Smoothstep(GrainPreserve::kSplitCoherenceLo, GrainPreserve::kSplitCoherenceHi, coh) *
+					Smoothstep(GrainPreserve::kSplitConsistencyLo, GrainPreserve::kSplitConsistencyHi, rho);
+				const double base = lowc + ra * gate;
+				const double w = 1.0 - Smoothstep(0.6 * thr, thr, std::fabs(base - avg));
+				out.at(x, y) = c + w * (avg - base);
+				if (gateOut) gateOut->at(x, y) = gate;
 			}
 		return out;
 	}

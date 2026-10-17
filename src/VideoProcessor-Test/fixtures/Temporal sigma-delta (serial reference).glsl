@@ -643,7 +643,7 @@ bool carried(ivec2 from, vec3 x, float gate_scale, out vec3 r)
     float units = color_bits > 9.0 ? 4.0 : 1.0;
     if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
         return false;
-    r = clamp(rs.rgb, -0.5, 0.5);
+    r = clamp(rs.rgb, -(0.5 + noise_amplitude), 0.5 + noise_amplitude);   // hunt 2 L1 (as the shipped shader)
     return true;
 }
 
@@ -668,7 +668,10 @@ void hook()
     bool ten = color_bits > 9.0;
     float in_scale = ten ? 1023.0 : ((limited && swap10) ? 255.75 : 255.0);
     float out_step = ten ? (1.0 / 1023.0) : ((limited && swap10) ? (4.0 / 1023.0) : (1.0 / 255.0));
-    float max_code = ten ? 1023.0 : 255.0;
+    // Hunt 2 L2 (as the shipped shader): codes that survive the output clamp.
+    float code_unit = ten ? 4.0 : 1.0;
+    float code_min = limited ? code_unit : 0.0;
+    float code_max = limited ? 255.0 * code_unit - 1.0 : (ten ? 1023.0 : 255.0);
     // 8-bit codes: 0.13 (one rgba16f step near white is 1/8 code).
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
@@ -736,13 +739,13 @@ void hook()
 
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
-        k = clamp(floor(x + r + d + 0.5), 0.0, max_code);
-        vec3 r_next = clamp(x + r - k, -0.5, 0.5);
+        k = clamp(floor(x + r + d + 0.5), code_min, code_max);
+        vec3 r_next = clamp(x + r - k, -(0.5 + noise_amplitude), 0.5 + noise_amplitude);
 
         imageStore(RESID_NEXT, spos, vec4(r_next, VALID_TAG));
         imageStore(PREV_NEXT, spos, vec4(x, 1.0));
     } else {
-        k = clamp(floor(x + d + 0.5), 0.0, max_code);
+        k = clamp(floor(x + d + 0.5), code_min, code_max);
     }
 
     // With the occlusion mask or the grain (S1) in alpha, alpha goes back to

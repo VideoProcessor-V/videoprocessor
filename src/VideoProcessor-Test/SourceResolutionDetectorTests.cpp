@@ -1751,6 +1751,235 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, failures, L"soft native scenes never declared lower (Standard and Fast); the 2.8K title reads lower");
 		}
 
+		// ---- Hunt 2 M2/M3 (source_coding_fixes): robust coding readings ----
+
+		// The frame read with the robust readings on or off (Thresholds::codingFixes).
+		static SourceResolution::FrameReading ReadCodingMode(const std::vector<std::vector<float>>& tiles, bool fixes, int codeMax = 1023)
+		{
+			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
+			for (size_t i = 0; i < tiles.size(); ++i)
+				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i], codeMax));
+			SourceResolution::Thresholds t;
+			t.codeMaximum = codeMax;
+			t.codingFixes = fixes;
+			return SourceResolution::ReadFrame(spectra, t);
+		}
+
+		// A low-resolution picture (`low(x, y)` in its own pixels, 0..1, already at its own
+		// depth), optionally coded in 8x8 blocks at that resolution, upscaled by 1 / ratio with
+		// Catmull-Rom (centre aligned, any phase) and put into a 10-bit signal.
+		template <typename Low>
+		static std::vector<float> UpscaledTile(Low low, double ratio, double codeStep, double phase = 0.0)
+		{
+			const int m = ((static_cast<int>(std::ceil(kTile * ratio)) + 8 + 7) / 8) * 8;
+			std::vector<float> lo(static_cast<size_t>(m) * m);
+			for (int y = 0; y < m; ++y)
+				for (int x = 0; x < m; ++x)
+					lo[static_cast<size_t>(y) * m + x] = static_cast<float>(low(x, y));
+			if (codeStep > 0) Code8x8(lo, m, codeStep, 1023);
+			auto at = [&](int x, int y) {
+				return static_cast<double>(lo[static_cast<size_t>((std::min)(m - 1, (std::max)(0, y))) * m + (std::min)(m - 1, (std::max)(0, x))]);
+			};
+			std::vector<double> rows(static_cast<size_t>(m) * kTile);
+			for (int y = 0; y < m; ++y)
+				for (int x = 0; x < kTile; ++x)
+				{
+					const double u = (x + 0.5) * ratio - 0.5 + phase;
+					const int c = static_cast<int>(std::floor(u));
+					double sum = 0, wsum = 0;
+					for (int k = c - 1; k <= c + 2; ++k) { const double w = kCatmullRom(u - k); sum += w * at(k, y); wsum += w; }
+					rows[static_cast<size_t>(y) * kTile + x] = sum / wsum;
+				}
+			std::vector<float> out(static_cast<size_t>(kTile) * kTile);
+			for (int y = 0; y < kTile; ++y)
+				for (int x = 0; x < kTile; ++x)
+				{
+					const double u = (y + 0.5) * ratio - 0.5 + phase;
+					const int c = static_cast<int>(std::floor(u));
+					double sum = 0, wsum = 0;
+					for (int k = c - 1; k <= c + 2; ++k)
+					{
+						const int kk = (std::min)(m - 1, (std::max)(0, k));
+						const double w = kCatmullRom(u - k);
+						sum += w * rows[static_cast<size_t>(kk) * kTile + x];
+						wsum += w;
+					}
+					const double v = (std::min)(1.0, (std::max)(0.0, sum / wsum));
+					out[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(v * 1023.0) / 1023.0);
+				}
+			return out;
+		}
+
+		// A gentle gradient (a sky): about 40 8-bit levels across the picture plus a slow wave.
+		static double Sky(double x, double y, double scale, unsigned seed)
+		{
+			return 0.3 + 0.16 * (x + 0.4 * y) / (kTile * scale) + 0.01 * std::sin(0.03 * x / scale * (seed + 1));
+		}
+
+		// M2: upscaled 8-bit and 8-bit with dither read 8 bits; true 10-bit, also with grain,
+		// reads 10. The earlier one-pixel occupancy read the upscale as 10.
+		TEST_METHOD(CodingFixesEffectiveBitsUpscaledDitheredAndTrueTenBit)
+		{
+			std::vector<std::vector<float>> upscaled, dithered, ten, tenGrain;
+			for (unsigned seed = 1; seed <= 4; ++seed)
+			{
+				upscaled.push_back(UpscaledTile([&](int x, int y) { return std::round(Sky(x, y, 0.5, seed) * 255.0) / 255.0; }, 0.5, 0.0, 0.1 * seed));
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				std::normal_distribution<double> g(0.0, 1.0);
+				std::vector<float> d(static_cast<size_t>(kTile) * kTile), t(d.size()), tg(d.size());
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						const double v = Sky(x, y, 1.0, seed);
+						// A player's 8-bit dither: one code up or down on 10 % of the pixels.
+						double eight = std::round(v * 255.0);
+						const double r = u(rng);
+						if (r < 0.05) eight -= 1.0; else if (r < 0.10) eight += 1.0;
+						d[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(eight / 255.0 * 1023.0) / 1023.0);
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(v * 1023.0) / 1023.0);
+						tg[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((v + 1.5 * g(rng) / 1023.0) * 1023.0) / 1023.0);
+					}
+				dithered.push_back(d);
+				ten.push_back(t);
+				tenGrain.push_back(tg);
+			}
+			const auto up = ReadCodingMode(upscaled, true), upOld = ReadCodingMode(upscaled, false);
+			const auto di = ReadCodingMode(dithered, true);
+			const auto te = ReadCodingMode(ten, true), teg = ReadCodingMode(tenGrain, true);
+			char line[220];
+			snprintf(line, sizeof(line), "bits: upscaled 8-bit %.2f (earlier %.2f), dithered 8-bit %.2f, true 10-bit %.2f, 10-bit + grain %.2f\n",
+				up.effectiveBits, upOld.effectiveBits, di.effectiveBits, te.effectiveBits, teg.effectiveBits);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(up.effectiveBits > 0.0 && up.effectiveBits <= 9.0, L"8-bit upscaled into 10 bits reads below 9 (most pixels on the 8-bit grid)");
+			Assert::IsTrue(upOld.effectiveBits >= 9.5, L"the earlier reading was fooled by the upscale's ramp codes (the test sees the fault)");
+			Assert::IsTrue(di.effectiveBits > 0.0 && di.effectiveBits <= 8.5, L"8-bit with a one-code dither reads about 8");
+			Assert::IsTrue(te.effectiveBits >= 9.6, L"true 10-bit reads 10");
+			Assert::IsTrue(teg.effectiveBits >= 9.6, L"true 10-bit with grain reads 10");
+		}
+
+		// M3: an upscaled stream's coding grid (8-px blocks at 16, 24 or 12 px, any phase) is
+		// found; a clean upscale and native texture are not called blocked.
+		TEST_METHOD(CodingFixesFindUpscaledBlockGrids)
+		{
+			for (double ratio : { 1.0, 0.5, 2.0 / 3.0, 1.0 / 3.0 })
+			{
+				std::vector<std::vector<float>> coded, clean;
+				for (unsigned seed = 1; seed <= 4; ++seed)
+				{
+					auto low = [&](int x, int y) {
+						const double s = ratio;
+						return 0.3 + 0.25 * (x + 0.6 * y) / (kTile * s) + 0.02 * std::sin(0.02 * x / s * seed);
+					};
+					coded.push_back(UpscaledTile(low, ratio, 24.0, 0.13 * seed));
+					clean.push_back(UpscaledTile(low, ratio, 0.0, 0.13 * seed));
+				}
+				const auto c = ReadCodingMode(coded, true), cOld = ReadCodingMode(coded, false);
+				const auto k = ReadCodingMode(clean, true);
+				char line[220];
+				snprintf(line, sizeof(line), "ratio %.3f: coded quality %.2f blockiness %.2f (earlier %.2f / %.2f) | clean quality %.2f blockiness %.2f band %.3f\n",
+					ratio, c.bitrateQuality, c.blockiness, cOld.bitrateQuality, cOld.blockiness, k.bitrateQuality, k.blockiness, k.bandShare);
+				Logger::WriteMessage(line);
+				Assert::IsTrue(c.bitrateQuality < 0.5, L"a coded picture reads low quality at any upscale");
+				Assert::IsTrue(k.bitrateQuality > 0.8, L"a clean upscale reads clean");
+				if (ratio == 1.0 / 3.0)
+					Assert::IsTrue(cOld.bitrateQuality > 0.5, L"the earlier fixed 8/16-px grid was blind to a 24-px grid (the test sees the fault)");
+			}
+			// Native texture (the synthetic scene, with grain) is not a grid.
+			const SourceResolution::FrameReading texture = ReadScene([&](unsigned seed) { return Tile(Scene(seed), 1.0, kLanczos3, 1.0 / 255.0, 1023, seed); });
+			Assert::IsTrue(texture.blockiness < 1.25, L"native texture reads unblocked");
+			// A slow gradient steps one code at a fixed period (here every 10 px) along one axis:
+			// quantisation, not a coding grid.
+			std::vector<std::vector<float>> slow;
+			for (unsigned seed = 1; seed <= 4; ++seed)
+			{
+				std::vector<float> t(static_cast<size_t>(kTile) * kTile);
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(400.0 + (x + seed) / 10.0) / 1023.0);
+				slow.push_back(t);
+			}
+			Assert::IsTrue(ReadCodingMode(slow, true).blockiness < 1.1, L"a slow one-axis gradient is not blocked");
+		}
+
+		// M3: band edges count with noise, toggles and a soft upscaled edge; grain on a flat
+		// area and a true 10-bit gradient with grain are no bands.
+		TEST_METHOD(CodingFixesCountNoisyBands)
+		{
+			std::vector<std::vector<float>> toggled, noisy, upscaled, grain, gradient;
+			for (unsigned seed = 1; seed <= 4; ++seed)
+			{
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				std::normal_distribution<double> g(0.0, 1.0);
+				std::vector<float> a(static_cast<size_t>(kTile) * kTile), b(a.size()), d(a.size()), e(a.size());
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						const double level = 100.0 + std::floor((x + 4 + 3 * seed) / 16.0);   // 8-bit bands 16 px wide
+						double t = level;
+						const double r = u(rng);
+						if (r < 0.05) t -= 1.0; else if (r < 0.10) t += 1.0;               // 10 % one-code toggles
+						a[static_cast<size_t>(y) * kTile + x] = static_cast<float>(t * 4.0 / 1023.0);
+						const double n8 = std::round(100.0 + (x + 4 + 3 * seed) / 16.0 + 0.3 * g(rng));   // requantised noise
+						b[static_cast<size_t>(y) * kTile + x] = static_cast<float>(n8 * 4.0 / 1023.0);
+						d[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(512.0 + 1.5 * g(rng)) / 1023.0);
+						e[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(400.0 + x / 2.0 + 0.7 * g(rng)) / 1023.0);
+					}
+				toggled.push_back(a);
+				noisy.push_back(b);
+				grain.push_back(d);
+				gradient.push_back(e);
+				upscaled.push_back(UpscaledTile([&](int x, int) { return (100.0 + std::floor((x + 2 + seed) / 8.0)) / 255.0; }, 0.5, 0.0, 0.25));
+			}
+			const auto t = ReadCodingMode(toggled, true), tOld = ReadCodingMode(toggled, false);
+			const auto n = ReadCodingMode(noisy, true), up = ReadCodingMode(upscaled, true), upOld = ReadCodingMode(upscaled, false);
+			const auto gr = ReadCodingMode(grain, true), gd = ReadCodingMode(gradient, true);
+			char line[260];
+			snprintf(line, sizeof(line), "band share: toggled %.3f (earlier %.3f), noisy %.3f, upscaled %.3f (earlier %.3f), grain %.3f, 10-bit gradient + grain %.3f\n",
+				t.bandShare, tOld.bandShare, n.bandShare, up.bandShare, upOld.bandShare, gr.bandShare, gd.bandShare);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(t.bandShare >= 0.3, L"bands with one-code toggles count");
+			Assert::IsTrue(tOld.bandShare < 0.15, L"the earlier exact two-level test missed them (the test sees the fault)");
+			Assert::IsTrue(n.bandShare >= 0.2, L"bands with requantised noise count");
+			Assert::IsTrue(up.bandShare >= 0.3, L"upscaled band edges (ramps) count");
+			Assert::IsTrue(gr.bandShare < 0.03, L"grain on a flat area is no band");
+			Assert::IsTrue(gd.bandShare < 0.03, L"a true 10-bit gradient with grain is no band");
+			Assert::IsTrue(t.bitrateQuality < 0.5 && gd.bitrateQuality > 0.8, L"quality follows");
+		}
+
+		// M3 units: the grid period is found wherever it lies, with a spread boundary.
+		TEST_METHOD(CodingFixesGridPeriodIsGeneral)
+		{
+			for (double period : { 8.0, 12.0, 16.0, 24.0, 12.5 })
+				for (int width : { 1, 2, 3 })
+				{
+					std::vector<double> steps(255, 1.0);
+					for (double b = 3.3; b < 255.0; b += period)
+						for (int j = 0; j < width; ++j)
+						{
+							const int x = static_cast<int>(b) + j;
+							if (x < 255) steps[static_cast<size_t>(x)] += 3.0 / width;
+						}
+					double found = 0.0;
+					const double blockiness = SourceResolution::GridBlockiness(steps, found);
+					char line[120];
+					snprintf(line, sizeof(line), "grid %.1f px, %d px wide: blockiness %.2f at %.2f px\n", period, width, blockiness, found);
+					Logger::WriteMessage(line);
+					Assert::IsTrue(blockiness > 2.0, L"the grid is found");
+					const double multiple = found / period;
+					Assert::IsTrue(std::fabs(multiple - std::round(multiple)) < 0.05 && std::round(multiple) >= 1.0, L"at its period (or a multiple)");
+				}
+			// One strong edge and smooth variation are no grid.
+			std::vector<double> edge(255, 1.0);
+			edge[100] = 40.0;
+			double found = 0.0;
+			Assert::IsTrue(SourceResolution::GridBlockiness(edge, found) < 1.05, L"one edge is not a grid");
+			std::vector<double> wave(255);
+			for (int x = 0; x < 255; ++x) wave[static_cast<size_t>(x)] = 1.0 + 0.3 * std::sin(x * 0.05);
+			Assert::IsTrue(SourceResolution::GridBlockiness(wave, found) < 1.1, L"smooth variation is not a grid");
+		}
+
 		TEST_METHOD(DescribeIsGeneral)
 		{
 			Assert::AreEqual(std::string("native"), SourceResolution::Describe(1.0, 2160));

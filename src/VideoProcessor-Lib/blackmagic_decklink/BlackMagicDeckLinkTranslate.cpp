@@ -444,15 +444,8 @@ EOTF TranslateEOTF(LONGLONG electroOpticalTransferFuncValue, bool* reserved)
 
 bool DeckLinkRateIs625Family(double frameRateHz)
 {
-	// Classified from the measured rate, no fixed list: an integral rate that
-	// is a multiple of 25 but not of 24 or 30 belongs to the 25 Hz family.
-	if (!(frameRateHz > 0.0) || !std::isfinite(frameRateHz))
-		return false;
-	const double rounded = std::round(frameRateHz);
-	if (std::fabs(frameRateHz - rounded) > 1e-3)
-		return false;   // 1000/1001 rates are the 525 family
-	const long long rate = static_cast<long long>(rounded);
-	return rate % 25 == 0 && rate % 24 != 0 && rate % 30 != 0;
+	// One classifier for both capture cards (ColorSpace.cpp).
+	return RateIs625Family(frameRateHz);
 }
 
 

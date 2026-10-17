@@ -101,6 +101,8 @@ namespace SourceResolutionMonitor
 		void SetTextGuard(bool on) { textGuard.store(on, std::memory_order_release); }
 		// source_resolution_mixed_guard (audit 2026-10-16): a mixed screen reads native.
 		void SetMixedGuard(bool on) { mixedGuard.store(on, std::memory_order_release); }
+		// Hunt 2 M2/M3 (source_coding_fixes): the robust coding readings (Thresholds::codingFixes).
+		void SetCodingFixes(bool on) { codingFixes.store(on, std::memory_order_release); }
 		// source_resolution_evidence_shots / _seconds (the Picture slider): the shots and time
 		// of agreeing evidence before auto declares a lower source; the per-axis trackers
 		// need twice both.
@@ -246,6 +248,7 @@ namespace SourceResolutionMonitor
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::atomic<bool> textGuard{ true };
 		std::atomic<bool> mixedGuard{ true };
+		std::atomic<bool> codingFixes{ true };
 		// Worker sets, render thread reads: sample the dense grid (a lower reading declared or
 		// being gathered by any of the trackers).
 		std::atomic<bool> denseGrid{ false };

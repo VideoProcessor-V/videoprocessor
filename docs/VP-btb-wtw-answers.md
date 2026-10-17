@@ -48,6 +48,24 @@ only piece of real colour design from the plan.
 
 8. **No libplacebo fork.** Keep the §5 note as the fallback.
 
+## Temporal paths (hunt 2, 2026-10-17)
+
+- Deinterlacing and libplacebo smooth motion draw retained copies of earlier
+  frames (`TemporalRenderer`). `ExtendedRange::Prepare` relabels only the
+  current frame's colour, so the copies kept the source label and were
+  converted twice (VP's carry, then libplacebo). The copies now take the
+  prepared colour (`TemporalRenderer::Render`'s `historyColor`); the carry and
+  the SCALED restore run inside each frame's own libplacebo pass, so every
+  frame is converted exactly once.
+- With frame mixing, the late restore (calibration LUT, libplacebo gamut
+  mapping) would read the last-rendered frame instead of the mix, so the
+  decision becomes `TemporalMix` (off) for that path only
+  (`ExtendedRange::ForTemporal`).
+- libplacebo's mixer itself clips BTB on blended refreshes (linearise with a
+  clamp at 0); WTW survives. Not fixed (no libplacebo fork); logged, and the
+  Config tooltips name VP's own motion engine as the BTB-safe path. See
+  BUILD-STATUS "Known gaps in keeping BTB/WTW".
+
 ## Order
 
 After Stage 6 as proposed, as its own stage ("Stage 10 — extended range"):

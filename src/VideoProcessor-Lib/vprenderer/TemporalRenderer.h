@@ -135,9 +135,24 @@ public:
         while(history.size()>8)history.pop_front();
         return true;
     }
-    bool Render(pl_renderer renderer,const pl_frame& source,const pl_frame& target,pl_render_params& params) {
+    // Hunt 2 (08 #1): the colour space libplacebo is told for a retained
+    // frame. Extended Range (Stage 10) relabels the current frame's colour
+    // after Capture (ExtendedRange::Prepare) and its hooks then do the
+    // conversion; a history frame still labelled with the captured source
+    // colour would be converted twice (once by the hooks, again by
+    // libplacebo). historyColor: the current frame's prepared colour space,
+    // or null to keep each frame's captured colour (no relabelling).
+    static pl_frame HistoryFrame(const pl_frame& stored,const pl_color_space* historyColor){
+        pl_frame frame=stored;if(historyColor)frame.color=*historyColor;return frame;
+    }
+    bool Render(pl_renderer renderer,const pl_frame& source,const pl_frame& target,pl_render_params& params,
+        const pl_color_space* historyColor=nullptr) {
         lastSubmittedField=PL_FIELD_NONE;
         if(!Active()||history.empty())return pl_render_image(renderer,&source,&target,&params);
+        // One relabelled copy per retained frame; the deinterlacer's prev/next
+        // point into it (stable: sized once, never grown below).
+        std::vector<pl_frame> base;base.reserve(history.size());
+        for(const auto& stored:history)base.push_back(HistoryFrame(stored->frame,historyColor));
         std::vector<pl_frame> frames;std::vector<const pl_frame*> pointers;
         using Timestamp=std::remove_const_t<std::remove_pointer_t<decltype(pl_frame_mix{}.timestamps)>>;
         std::vector<uint64_t> signatures;std::vector<Timestamp> timestamps;
@@ -146,10 +161,10 @@ public:
         const double unit=sourceDuration/(fields?2.0:1.0);
         for(size_t i=0;i<history.size();++i){
             for(int f=0;f<(fields?2:1);++f){
-                pl_frame frame=history[i]->frame;
+                pl_frame frame=base[i];
                 if(interlaced){frame.first_field=topFirst?PL_FIELD_TOP:PL_FIELD_BOTTOM;frame.field=f?pl_field_other(frame.first_field):frame.first_field;
-                    frame.prev=i?&history[i-1]->frame:nullptr;
-                    frame.next=i+1<history.size()?&history[i+1]->frame:nullptr;
+                    frame.prev=i?&base[i-1]:nullptr;
+                    frame.next=i+1<history.size()?&base[i+1]:nullptr;
                 }
                 // Geometry is committed by the current presentation pass; never
                 // blend unrelated source rectangles across aspect transitions.
