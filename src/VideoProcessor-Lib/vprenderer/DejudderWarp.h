@@ -301,6 +301,11 @@ namespace Dejudder
 		// Tests only: the render-time engine's field read back (a stall) so the engine's
 		// whole-frame motion can be compared on corpora without a producer.
 		bool opticalFlowGlobalReadback = false;
+		// Hunt 2 fix group 5 (motion_history_fixes; the renderer's key defaults on, the
+		// object's default is the matcher as before): a pair not chained to the last
+		// estimated one (its A is not that pair's B) starts the temporal history over
+		// (04 M1), and ForgetHistory also forgets the D2/D4 strength state (04 L2).
+		bool historyFixes = false;
 		// The vectors M6 uses: true = only trusted blocks' (bilinear between
 		// trusted centres; a failed block can only follow its trusted
 		// neighbours, never its own vector); false = every block's. The
@@ -473,9 +478,19 @@ namespace Dejudder
 			keptSequence = 0;
 			if (fadeState)
 				pl_tex_destroy(gpu, &fadeState);
+			// Hunt 2 04 L2: the D2/D4 strength scale is temporal state from the vectors
+			// before the break; EnsureTextures recreates it zeroed (no history).
+			if (base.historyFixes && strengthState)
+				pl_tex_destroy(gpu, &strengthState);
 			if (inner)
 				inner->ForgetHistory();
 		}
+		// How many times the search input is halved (lowRes: once, an 8K input twice).
+		int SearchHalvings() const
+		{
+			return HalvesForSearch() ? 1 + (inner ? inner->SearchHalvings() : 0) : 0;
+		}
+		uint64_t HistoryRestartsForTest() const { return historyRestarts; }
 		void SetSettings(const Settings& given)
 		{
 			base = given;
@@ -536,6 +551,7 @@ namespace Dejudder
 		void KeepPlainBInK();
 		pl_tex halfK = nullptr, l1K = nullptr, l2K = nullptr;
 		uint64_t keptSequence = 0;
+		uint64_t historyRestarts = 0;   // Hunt 2 04 M1: pairs not chained to the last estimate
 		bool keptInK = false;
 		int keptLevels = 0;
 		bool keptFullRange = false;

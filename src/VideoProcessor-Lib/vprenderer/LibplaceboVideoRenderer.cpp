@@ -1164,6 +1164,13 @@ namespace
 		// pair's times), the film clock re-bases on a signal-rate change, and the timeline
 		// holds the last measured display rate; off = the behaviour before.
 		bool timingContinuityFixes = true;
+		// Hunt 2 fix group 5 (motion): the matcher's history restarts on a pair not chained
+		// to the last estimate and forgets the strength state with the rest; A's repeat
+		// draws never read the (B, C) field estimated ahead; the ahead frame C is chosen by
+		// B's adjacency and DV rules; DV pairs need byte-equal DM matrices; a matcher setting
+		// or motion source change invalidates the vectors; a repeat-preserving queue drop
+		// marks a gap; off = the behaviour before.
+		bool motionHistoryFixes = true;
 		// Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17): the
 		// de-judder's extras queued straight after their frame (no vblank waits), so the next
 		// frame renders while they are shown; off until the owner's on-screen runs pass.
@@ -1370,7 +1377,7 @@ namespace
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.motionHistoryFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2564,6 +2571,14 @@ namespace
 				DebugLog::Log("profile '%s': invalid timing_continuity_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.timingContinuityFixes ? "on" : "off");
 		}
+		if (tryChoice("motion_history_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.motionHistoryFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid motion_history_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.motionHistoryFixes ? "on" : "off");
+		}
 		// Render-ahead (docs/VP-render-ahead-design.md).
 		for (const auto& toggle : { std::make_pair("render_ahead", &settings.renderAhead),
 				std::make_pair("render_ahead_queue_credit", &settings.renderAheadQueueCredit) })
@@ -3068,6 +3083,7 @@ namespace
 		// warp it is ignored (logged once) and its pass not run.
 		settings.occlusionFill = profile.dejudderOcclusionFill && !profile.dejudderWarpRendered;
 		settings.estCandidates = profile.dejudderEstCandidates;
+		settings.historyFixes = profile.motionHistoryFixes;   // Hunt 2 04 M1 / L2
 		// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow engine is the
 		// established default motion source; optical_flow: off = the block searches only.
 		// Without the engine (not NVIDIA, a failure) the searches run as before.
@@ -5192,6 +5208,21 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
 	uint64_t dejudderEstimatedSequence = 0;
 	uint64_t dejudderEstimatedEpoch = 0;   // the motion epoch the estimate was made in (MotionValidity)
+	// Hunt 2 04 M2: the A of the pair whose field the matcher's live outputs hold (0 = none).
+	// After an ahead estimate it is B while A is still showing, so A's repeat draws must not
+	// read the live field as A's (the extras read their snapshot).
+	uint64_t dejudderLiveFieldFrom = 0;
+	// Hunt 2 04 L3: the motion source last estimated with (0 matcher only, 1 render-time
+	// engine, 2 engine with the producer ahead); -1 = none yet.
+	int dejudderMotionSourceKey = -1;
+	// Whether the matcher's live outputs (field, trust, grain error) are this source
+	// frame's (sequence, sequence + 1) pair of the current motion epoch.
+	bool DejudderLiveFieldFor(uint64_t sequence) const
+	{
+		return dejudder && sequence != 0 && dejudderEstimatedSequence == sequence &&
+			motionValidity.Current(dejudderEstimatedEpoch) &&
+			(!activeSettings.motionHistoryFixes || dejudderLiveFieldFrom == sequence);
+	}
 	unsigned long long dejudderEstimates = 0;
 	unsigned long long dejudderFailures = 0;
 	ULONGLONG dejudderReasonLogTick = 0;
@@ -5669,8 +5700,7 @@ struct LibplaceboVideoRenderer::Impl
 		b.luma = dejudderNextTextures[0];
 		b.chroma = dejudderNextTextures[1];
 		Interpolator::Motion motion;
-		const bool vectors = dejudder && dejudderEstimatedSequence == sourceSequence && sourceSequence != 0 &&
-			motionValidity.Current(dejudderEstimatedEpoch);
+		const bool vectors = DejudderLiveFieldFor(sourceSequence);
 		if (vectors)
 		{
 			motion.field = dejudder->Field();
@@ -5741,6 +5771,9 @@ struct LibplaceboVideoRenderer::Impl
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
 	DejudderRendered::Geometry dejudderGeometry;
 	bool dejudderGeometryValid = false;   // this frame's geometry (both warp paths; delta 8 R1)
+	// Hunt 2 10-layout M1: the source frame whose draw the NLS hook recovery redrew; its
+	// extras hold (their geometry, cache and NLS map were the failed draw's).
+	uint64_t dejudderNlsRetrySequence = 0;
 	// Owner 2026-10-13: this frame's picture has a moved subtitle (cut/paste);
 	// the rendered warp's extras run, holding its rectangles still.
 	bool dejudderSubtitleComposed = false;
@@ -5864,6 +5897,8 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
 		frameInterpolator.reset();
 		dejudder.reset();
+		dejudderLiveFieldFrom = 0;
+		dejudderMotionSourceKey = -1;
 		// 6d: the cache and the rendered warp hold textures (and a dispatch)
 		// of this device (audit stage10-6d blocker 1).
 		dejudderCache.Release();
@@ -10328,6 +10363,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
 		changed(current.pulldownFixes != next.pulldownFixes, "pulldown_fixes");
 		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
+		changed(current.motionHistoryFixes != next.motionHistoryFixes, "motion_history_fixes");
 		changed(current.renderAhead != next.renderAhead, "render_ahead");
 		changed(current.dejudderGate != next.dejudderGate, "dejudder_gate");
 		changed(current.renderAheadUtilisation != next.renderAheadUtilisation, "render_ahead_utilisation");
@@ -11506,6 +11542,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderMaskEpoch[0] = dejudderMaskEpoch[1] = 0;
 		dejudderEstimatedSequence = 0;
 		dejudderEstimatedEpoch = 0;
+		dejudderLiveFieldFrom = 0;
 		adaptiveDownscale.ForgetMap();
 		debander.ForgetHold();
 		const int cause = static_cast<int>(pending.cause);
@@ -13819,7 +13856,8 @@ struct LibplaceboVideoRenderer::Impl
 			// Bug hunt 2026-10-17: on the DV tunnel never pair an untrusted B
 			// (black frame) or a DV picture with an SDR fallback.
 			// By the capture encoding (every payload), not rawEncoding (raw only).
-			DejudderPolicy::DolbyVisionNextPairs(dejudderDolbyVisionTunnel, *current, *next);
+			DejudderPolicy::DolbyVisionNextPairs(dejudderDolbyVisionTunnel, *current, *next,
+				activeSettings.motionHistoryFixes);   // Hunt 2 02-dv L2: byte-equal DM matrices
 		const auto usable = [](pl_tex tex)
 		{
 			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
@@ -14147,7 +14185,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			const Dejudder::Settings current = dejudder->GetSettings();
 			const Dejudder::Settings next = wanted(current);
-			if (current.matchTolerance != next.matchTolerance || current.minTrustedShare != next.minTrustedShare ||
+			const bool meaningChanged = current.matchTolerance != next.matchTolerance || current.minTrustedShare != next.minTrustedShare ||
 				current.globalPrior != next.globalPrior || current.vectorSmooth != next.vectorSmooth ||
 				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
 				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
@@ -14170,13 +14208,35 @@ struct LibplaceboVideoRenderer::Impl
 				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
 				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
 				current.sourceWarpCatmull != next.sourceWarpCatmull ||
-				current.referenceHeight != next.referenceHeight || current.sourceHz != next.sourceHz ||
-				current.referenceRateHz != next.referenceRateHz ||
+				current.referenceHeight != next.referenceHeight ||
 				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
 				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal ||
 				current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback ||
-				current.opticalFlowCostTrust != next.opticalFlowCostTrust || current.opticalFlowFbCheck != next.opticalFlowFbCheck)
+				current.opticalFlowCostTrust != next.opticalFlowCostTrust || current.opticalFlowFbCheck != next.opticalFlowFbCheck;
+			// The measured content rate (it follows the source; converts the per-frame values) and
+			// the switch itself change no vector's meaning.
+			if (meaningChanged || current.sourceHz != next.sourceHz || current.referenceRateHz != next.referenceRateHz ||
+				current.historyFixes != next.historyFixes)
 				dejudder->SetSettings(next);
+			// Hunt 2 04 L3 (motion_history_fixes): a matcher setting that changes what the vectors
+			// mean invalidates them (the consumers fall back until a fresh pair) and this pair is
+			// estimated without the old history.
+			if (meaningChanged && activeSettings.motionHistoryFixes)
+			{
+				RequestMotionInvalidate(MotionValidity::Cause::SettingsChange);
+				dejudder->ForgetHistory();
+			}
+		}
+		// Hunt 2 04 L3 (motion_history_fixes): the motion source (the optical-flow engine on or
+		// off, the producer ahead wanted or not) changed while the matcher kept its history.
+		{
+			const int sourceKey = !activeSettings.opticalFlow ? 0 : activeSettings.motionAheadFrames > 0 ? 2 : 1;
+			if (activeSettings.motionHistoryFixes && dejudderMotionSourceKey >= 0 && sourceKey != dejudderMotionSourceKey)
+			{
+				RequestMotionInvalidate(MotionValidity::Cause::MotionSourceChange);
+				dejudder->ForgetHistory();
+			}
+			dejudderMotionSourceKey = sourceKey;
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
 		// frame A (now showing, or B itself ahead), so A's survives until it
@@ -14210,6 +14270,7 @@ struct LibplaceboVideoRenderer::Impl
 			dejudder->SetExternalFlow(std::move(flow));
 			motionProducer->Prune(aSequence);
 		}
+		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
 		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
@@ -14217,6 +14278,7 @@ struct LibplaceboVideoRenderer::Impl
 					dejudder->LastError().c_str(), dejudderFailures);
 			return false;
 		}
+		dejudderLiveFieldFrom = aSequence;
 		if (maskSlot >= 0)
 		{
 			dejudderMaskSequence[maskSlot] = bSequence;
@@ -14424,6 +14486,8 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		};
 		if (dejudderEstimatedSequence != f.sourceSequence && holdKeepsTiming("no motion estimate for this frame")) return false;
+		if (dejudderNlsRetrySequence != 0 && dejudderNlsRetrySequence == f.sourceSequence &&
+			holdKeepsTiming("NLS hook recovery redrew the frame")) return false;
 		// MotionValidity: the estimate's epoch is over (a discontinuity since).
 		if (!motionValidity.Current(dejudderEstimatedEpoch) && holdKeepsTiming(MotionValidity::Describe(motionValidity.LastCause()))) return false;
 		// The rendered warp's settings for this output (general scaling).
@@ -20263,7 +20327,7 @@ struct LibplaceboVideoRenderer::Impl
 				vpDebandParams.thresholdCodes = debandThreshold;
 				vpDebandParams.colorDepth = depth;
 				vpDebandParams.radiusScale = nativeHeight * rebaseFactor / 1080.0;
-				if (dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)
+				if (DejudderLiveFieldFor(sourceSequence))
 				{
 					vpDebandParams.field = dejudder->Field();
 					vpDebandParams.grainError = dejudder->GrainError();
@@ -21081,7 +21145,7 @@ struct LibplaceboVideoRenderer::Impl
             // (vectors of this source frame only; never with NLS - its map is not
             // linear; never starts the matcher).
             adaptiveDownscale.ClearMotion();
-            if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) && sourceSequence != 0 &&
+            if (!submittedNls && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
                 dejudder->Field() && dejudder->FrameTrust())
             {
                 AdaptiveDownscale::Motion motion;
@@ -21091,8 +21155,8 @@ struct LibplaceboVideoRenderer::Impl
                 motion.sourceCrop = renderImage.crop;
                 adaptiveDownscale.SetMotion(motion);
             }
-            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) &&
-                sourceSequence != 0 && dejudder->GrainError())
+            if (activeSettings.adaptive.grainMap && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
+                dejudder->GrainError())
             {
                 AdaptiveDownscale::GrainField field;
                 field.error = dejudder->GrainError();
@@ -21151,7 +21215,7 @@ struct LibplaceboVideoRenderer::Impl
                 // (vectors of this source frame only; never with NLS - its map is not
                 // linear; never starts the matcher).
                 adaptiveDownscale.ClearMotion();
-                if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) && sourceSequence != 0 &&
+                if (!submittedNls && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
                     dejudder->Field() && dejudder->FrameTrust())
                 {
                     AdaptiveDownscale::Motion motion;
@@ -21161,8 +21225,8 @@ struct LibplaceboVideoRenderer::Impl
                     motion.sourceCrop = renderImage.crop;
                     adaptiveDownscale.SetMotion(motion);
                 }
-                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) &&
-                    sourceSequence != 0 && dejudder->GrainError())
+                if (activeSettings.adaptive.grainMap && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
+                    dejudder->GrainError())
                 {
                     AdaptiveDownscale::GrainField field;
                     field.error = dejudder->GrainError();
@@ -21568,6 +21632,15 @@ struct LibplaceboVideoRenderer::Impl
                 MadVRShaderLoader::SetRuntimeShaderSelection(requestedShaderSelector,
                     requestedShaderSelector, nlsDecision.mode);
                 SetShaderStatus("NLS: Safe fit (hook failure)");
+                // Hunt 2 10-layout M1: the de-judder geometry, the rendered-picture cache and
+                // the occlusion mask's NLS map were made for the failed draw (the NLS screen
+                // rectangle and map). The redraw copies nothing, the extras of this frame hold,
+                // and the mask is off for the redraw (its grain follows the linear fit).
+                dejudderCache.Invalidate();
+                dejudderGeometryValid = false;
+                dejudderGeometry.numHolds = 0;
+                dejudderNlsRetrySequence = sourceSequence;
+                occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                 assembleOverlays();
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
                 // Stage 12 step A: the planes libplacebo samples, re-based.
@@ -22915,6 +22988,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 						m_frameQueue.front().cadenceActionId));
 				m_droppedFrames.fetch_add(
 					1, std::memory_order_relaxed);
+				// Hunt 2 04 L4 (motion_history_fixes): the next enqueued frame follows a
+				// missing capture frame - mark it as a gap like the other drop paths.
+				if (m_motionHistoryFixes.load(std::memory_order_relaxed))
+					++m_repeatPreservingDrops;
 				return;
 			}
 			if (m_overflowLoggedGeneration != m_queueGeneration)
@@ -22946,6 +23023,14 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				gapCause = "queue overflow drop";
 			}
 			m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (m_repeatPreservingDrops > 0)
+		{
+			if (!gapBefore)
+				gapCause = "repeat-preserving queue drop";
+			if (!gapBefore || gapFrames > 0)
+				gapFrames += m_repeatPreservingDrops;
+			gapBefore = true;
 		}
 		videoFrame.SourceBufferAddRef();
 		try
@@ -22992,6 +23077,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			queuedFrame.filmUpdate = filmUpdate;
 			queuedFrame.enqueueQpc = PerformanceCounterNow();
 			m_frameQueue.push_back(std::move(queuedFrame));
+			m_repeatPreservingDrops = 0;   // carried by this frame
 		}
 		catch (const std::exception& e)
 		{
@@ -26713,18 +26799,20 @@ void LibplaceboVideoRenderer::RenderLoop()
 					DejudderPolicy::MotionAheadFrame aheadFrame;
 					aheadFrame.time = aheadTime(ahead);
 					aheadFrame.filmClock = ahead.filmHz > 0.0;
+					// Hunt 2 02-dv L1: the kind by the payload's capture encoding, as the dequeue
+					// classifies it (ClassifyDolbyVisionPayload), not the walk's state encoding.
 					if (ahead.converted)
-						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionFrame(ahead.converted->dolby.valid,
-							ahead.converted->dolby.requiresBlackFrame, ahead.converted->dolby.allowSdrFallback,
-							ahead.converted->dolby.rgbBitAlignment == 1 || ahead.converted->dolby.rgbBitAlignment == 2,
-							aheadState.videoFrameEncoding == VideoFrameEncoding::R210);
+					{
+						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionPayload(*ahead.converted);
+						aheadFrame.matrices = DejudderPolicy::DolbyVisionMatricesOf(ahead.converted->dolby);
+					}
 					const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
 						m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
 						aheadState.displayMode->RefreshRateHz();
 					const bool havePrev = m_impl->motionAheadPrevKnown && m_impl->motionAheadPrevGeneration == generation;
 					const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
 						m_impl->activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
-						havePrev, m_impl->motionAheadPrev, aheadFrame);
+						havePrev, m_impl->motionAheadPrev, aheadFrame, m_impl->activeSettings.motionHistoryFixes);
 					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
 					m_impl->motionAheadPrevKnown = true;
 					m_impl->motionAheadPrevGeneration = generation;
@@ -26937,9 +27025,38 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (nextConvertedPayload && m_frameQueue.size() >= 2)
 			{
 				const QueuedFrame& after = m_frameQueue[1];
+				// Hunt 2 04 L1 (motion_history_fixes): C is B's next by B's own rules - the pair
+				// times adjacent (timing_continuity_fixes) and, on the DV tunnel, a trusted pair.
+				const bool historyFixes = m_impl && m_impl->activeSettings.motionHistoryFixes;
+				bool afterAdjacent = true;
+				if (historyFixes && after.converted && nextConvertedPayload)
+				{
+					LARGE_INTEGER qpcFrequencyAfter{};
+					const bool qpcKnownAfter = QueryPerformanceFrequency(&qpcFrequencyAfter) && qpcFrequencyAfter.QuadPart > 0;
+					auto queuedTime = [&](const QueuedFrame& q) -> double {
+						if (q.filmHz > 0.0 && q.arrivalQpc > 0 && qpcKnownAfter)
+							return static_cast<double>(q.arrivalQpc) / static_cast<double>(qpcFrequencyAfter.QuadPart);
+						if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
+							return static_cast<double>(q.frame.GetTimingTimestamp()) / static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
+						return 0.0;
+					};
+					const QueuedFrame* nextQueued = nullptr;
+					for (size_t i = 0; i < m_frameQueue.size() && i < 2; ++i)
+						if (m_frameQueue[i].sourceSequence == nextSourceSequence) nextQueued = &m_frameQueue[i];
+					if (nextQueued && m_impl->activeSettings.timingContinuityFixes)
+					{
+						const double afterRateHz = after.filmHz > 0.0 ? after.filmHz :
+							m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
+							(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0);
+						afterAdjacent = CaptureTimestampGap::AdjacentPairTimes(queuedTime(*nextQueued), nextQueued->filmHz > 0.0,
+							queuedTime(after), after.filmHz > 0.0, afterRateHz);
+					}
+					afterAdjacent = afterAdjacent && DejudderPolicy::DolbyVisionNextPairs(state && state->dolbyVisionTunnel,
+						*nextConvertedPayload, *after.converted, true);
+				}
 				if (after.generation == frameGeneration && !after.cadenceRepeat && !after.gapBefore && !after.filmUpdate &&
 					after.sourceSequence != nextSourceSequence && after.sourceSequence != sourceSequence &&
-					after.converted && SameDejudderVideoState(state, after.state))
+					after.converted && SameDejudderVideoState(state, after.state) && afterAdjacent)
 				{
 					aheadConvertedPayload = after.converted;
 					aheadSourceSequence = after.sourceSequence;
@@ -27067,6 +27184,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_pulldownDetection.store(m_impl->activeSettings.dejudderPulldown, std::memory_order_relaxed);
 			m_pulldownFixes.store(m_impl->activeSettings.pulldownFixes, std::memory_order_relaxed);
 			m_timingContinuityFixes.store(m_impl->activeSettings.timingContinuityFixes, std::memory_order_relaxed);
+			m_motionHistoryFixes.store(m_impl->activeSettings.motionHistoryFixes, std::memory_order_relaxed);
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->pulldownFilmHz = frameFilmHz;
@@ -28041,6 +28159,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
 		<< "pulldown_fixes=" << (s.pulldownFixes ? "on" : "off") << "\n"
 		<< "timing_continuity_fixes=" << (s.timingContinuityFixes ? "on" : "off") << "\n"
+		<< "motion_history_fixes=" << (s.motionHistoryFixes ? "on" : "off") << "\n"
 		<< "render_ahead=" << (s.renderAhead ? "on" : "off") << "\n"
 		<< "dejudder_gate=" << s.dejudderGate << "\n"
 		<< "render_ahead_utilisation=" << s.renderAheadUtilisation << "\n"

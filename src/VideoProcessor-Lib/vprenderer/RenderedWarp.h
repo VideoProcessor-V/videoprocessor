@@ -61,6 +61,9 @@ namespace DejudderRendered
 		// Arm before A's render: the hook then copies A's PRE_OUTPUT picture.
 		void Arm(uint64_t sequence) { armed = sequence; valid = 0; }
 		void Disarm() { armed = 0; }
+		// Hunt 2 10-layout M1: a picture copied from a draw that was then redrawn (the NLS
+		// hook recovery) is not A's: no copy, and the extras find none.
+		void Invalidate() { armed = 0; valid = 0; }
 		// Frees the texture while its device still exists (audit stage10-6d
 		// blocker 1: before the renderer destroys the device).
 		void Release();

@@ -727,6 +727,7 @@ namespace RendererProfileConfig
 			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
 			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
+			if (key == "motion_history_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 fix group 5
 			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the
 			// de-judder's gate per source period, its GPU budget and the queue credit.
 			if (key == "render_ahead" || key == "render_ahead_queue_credit") return IsChoice(value, { "on", "off" });
