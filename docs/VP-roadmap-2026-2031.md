@@ -8,7 +8,8 @@ Rebuilt from scratch from the memory files, today's design and audit docs and `g
 **Where VP stands.** The chain is largely built: native 12-bit RGB ingest with GPU unpack; source
 resolution detection with a kernel-matched, per-axis re-base; VP's debander; NVIDIA optical flow
 running ahead of display, with the matcher as fallback; de-judder (frame A, rendered warp); the
-sigma-delta onto the 8-bit FL35 link; BTB/WTW kept in all cases; grain-faithful switches on by
+sigma-delta onto the 8-bit FL35 link; BTB/WTW kept in all cases where they exist (after HDR->SDR
+tone mapping they have no meaning, by design; docs/VP-btb-wtw-answers.md); grain-faithful switches on by
 default; LED/CNTR drive; the DV tunnel (robust, GPU unpack, L1 min, L2 trims off); 50/60p
 interpolation and gap fill (off); pulldown detection (off); crash state; and a metadata layer
 skeleton. Three gaps remain:
@@ -197,7 +198,7 @@ gate. Designed: report hotkey (DiagnosticHistory, Ctrl+Alt+D, about 5 days).
 4. **Measured budgets.** Cost is per source frame, as p95 per slot type, on the laptop and the
    3090. The degrade ladder drops extras, never precision.
 5. **Precision contract in the chain gate.** Intermediates are 16-bit float or better and
-   sign-preserving, with one final quantisation. BTB 4-63 and WTW 941-1019 survive every cell.
+   sign-preserving, with one final quantisation. BTB 4-63 and WTW 941-1019 survive every cell where they exist (not after HDR->SDR tone mapping, by design).
    Grain RMS stays within ±5% and lag-1 correlation no higher than the source's. Fork-only patches
    have a test that fails if they are lost.
 6. **Generality.** Rates, cadences, distances and resolutions are derived from measurement, never

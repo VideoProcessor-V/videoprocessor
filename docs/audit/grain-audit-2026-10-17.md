@@ -53,7 +53,7 @@ Each fix sits behind a switch whose default is the faithful behaviour. Costs are
 6. **De-judder source warp:** Catmull-Rom instead of bilinear. Cost about 0.3 ms.
 7. **Re-base guard:** refuse a class when the band above its Nyquist holds temporally independent
    energy.
-8. **Detail accumulation (when built):** exclude the temporally independent band from history.
+8. **Detail accumulation ~~(when built)~~ (rejected by the owner 2026-10-17; applies to any successor):** exclude the temporally independent band from history.
 
 ## Tests
 

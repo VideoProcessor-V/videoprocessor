@@ -19,6 +19,10 @@ The NVIDIA optical-flow engine (NVOFA) is separate hardware. On the 3090 and the
 | Look-ahead verification at cuts | none (luma only) | n/a |
 | Low-latency 50/60p (backward vectors) | (prev, cur) | Planned |
 
+Note 2026-10-17: detail accumulation (both rows above, and step 6 below) was REJECTED by the owner
+(grain rule; docs/VP-detail-accumulation.md). Its successors (`detail_pulse_stabilise`,
+`texture_restore`) may use the same pairs.
+
 ## Architecture
 
 1. **Upload.** EarlyUpload (`capture_upload: early`) already uploads each frame on the conversion thread, as it arrives, on a second D3D11 device on the same adapter. The frames are in shared textures well before display.
