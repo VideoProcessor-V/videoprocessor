@@ -4,7 +4,11 @@
 #include "vprenderer/DolbyVisionTunnelUnpackReference.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
+#if defined(__AVX__)
+#include <immintrin.h>
+#endif
 
 namespace
 {
@@ -388,6 +392,190 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 {
 	if (!IsValid() || x < 0 || y < 0 || x >= width || y >= height)
 		return false;
+	return SampleUnchecked(x, y, result);
+}
+
+bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) const
+{
+	if (!out || count < 0 || !IsValid() || x0 < 0 || y < 0 || y >= height || count > width - x0)
+		return false;
+	// Full-range YCbCr codes to the limited domain, as Sample() maps them.
+	static const auto fullToLimited = []
+	{
+		std::array<uint16_t, 1024> table{};
+		for (int code = 0; code < 1024; ++code)
+			table[code] = FullLumaToLimited(code, 1);
+		return table;
+	}();
+	if (format == AnalysisLumaFormat::P010 || format == AnalysisLumaFormat::P210 ||
+		format == AnalysisLumaFormat::DecodedDolbyVision422)
+	{
+		// The upper ten bits of each little-endian 16-bit lane (P010Code and
+		// DecodedDolbyVisionCode alike).
+		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes + static_cast<size_t>(x0) * 2;
+		if (fullRangeYuv)
+			for (int i = 0; i < count; ++i)
+				out[i] = fullToLimited[P010Code(row + static_cast<size_t>(i) * 2)];
+		else
+			for (int i = 0; i < count; ++i)
+				out[i] = P010Code(row + static_cast<size_t>(i) * 2);
+		return true;
+	}
+	if (format == AnalysisLumaFormat::NativeYuv422 &&
+		(encoding == VideoFrameEncoding::UYVY || encoding == VideoFrameEncoding::HDYC))
+	{
+		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
+		for (int i = 0; i < count; ++i)
+		{
+			const int x = x0 + i;
+			const uint16_t code = static_cast<uint16_t>(row[static_cast<size_t>(x / 2) * 4 + ((x & 1) ? 3 : 1)]) << 2;
+			out[i] = fullRangeYuv ? fullToLimited[code] : code;
+		}
+		return true;
+	}
+	if (format == AnalysisLumaFormat::NativeYuv422 && encoding == VideoFrameEncoding::V210)
+	{
+		// Each 16-byte group carries six lumas (ReadNativeYuv422's layout).
+		static constexpr int lumaWord[6] = { 0, 1, 1, 2, 3, 3 };
+		static constexpr int lumaShift[6] = { 10, 0, 20, 10, 0, 20 };
+		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
+		for (int i = 0; i < count; ++i)
+		{
+			const int x = x0 + i, k = x % 6;
+			const uint8_t* group = row + static_cast<size_t>(x / 6) * 16;
+			const uint16_t code = static_cast<uint16_t>(
+				(ReadLittleEndian32(group + lumaWord[k] * 4) >> lumaShift[k]) & 0x3ff);
+			out[i] = fullRangeYuv ? fullToLimited[code] : code;
+		}
+		return true;
+	}
+	if (format == AnalysisLumaFormat::NativeRgb || format == AnalysisLumaFormat::SdrTunnelRgb)
+	{
+		// Sample()'s luma arithmetic without the chroma.
+		const bool bt2020 = colorspace == ColorSpace::BT_2020;
+		const bool bt601 = IsBt601(colorspace);
+		const bool tunnel = format == AnalysisLumaFormat::SdrTunnelRgb;
+		uint16_t red = 0, green = 0, blue = 0;
+		if (!tunnel && (encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
+			encoding == VideoFrameEncoding::R10l))
+		{
+			const bool r210 = encoding == VideoFrameEncoding::R210;
+			const LimitedRgbCoefficients& c = bt2020 ? (r210 ? BT2020_R210 : BT2020_R10) :
+				(bt601 ? (r210 ? BT601_R210 : BT601_R10) : (r210 ? BT709_R210 : BT709_R10));
+			// ReadRgb10's word layouts, decoded inline: r210 big-endian 2:10:10:10,
+			// R10b big-endian and R10l little-endian 10:10:10:2.
+			const uint8_t* pixel = data + static_cast<size_t>(y) * rowBytes + static_cast<size_t>(x0) * 4;
+			const bool bigEndian = encoding != VideoFrameEncoding::R10l;
+			const int shift = r210 ? 0 : 2;
+			// |sum| <= (222927 + 749942 + 75707) x 1023 < 2^31: exact in 32 bits.
+			const int32_t yR = c.yR, yG = c.yG, yB = c.yB;
+			int i = 0;
+#if defined(__AVX__)
+			{
+				// Four pixels at a time (SSE4.1, in the AVX baseline), the same
+				// integer arithmetic: byte order, shift, mask, Q20 products,
+				// round half away from zero, clamp.
+				const __m128i order = bigEndian ?
+					_mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12) :
+					_mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+				const __m128i wordShift = _mm_cvtsi32_si128(shift);
+				const __m128i mask = _mm_set1_epi32(0x3ff), black = _mm_set1_epi32(64);
+				const __m128i half = _mm_set1_epi32(1 << 19), top = _mm_set1_epi32(1023);
+				const __m128i cr = _mm_set1_epi32(yR), cg = _mm_set1_epi32(yG), cb = _mm_set1_epi32(yB);
+				for (; i + 4 <= count; i += 4, pixel += 16)
+				{
+					const __m128i words = _mm_srl_epi32(_mm_shuffle_epi8(
+						_mm_loadu_si128(reinterpret_cast<const __m128i*>(pixel)), order), wordShift);
+					const __m128i r = _mm_sub_epi32(_mm_and_si128(_mm_srli_epi32(words, 20), mask), black);
+					const __m128i g = _mm_sub_epi32(_mm_and_si128(_mm_srli_epi32(words, 10), mask), black);
+					const __m128i b = _mm_sub_epi32(_mm_and_si128(words, mask), black);
+					const __m128i sum = _mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(cr, r),
+						_mm_mullo_epi32(cg, g)), _mm_mullo_epi32(cb, b));
+					const __m128i magnitude = _mm_srli_epi32(_mm_add_epi32(_mm_abs_epi32(sum), half), 20);
+					const __m128i luma = _mm_min_epi32(_mm_max_epi32(
+						_mm_add_epi32(black, _mm_sign_epi32(magnitude, sum)), _mm_setzero_si128()), top);
+					_mm_storel_epi64(reinterpret_cast<__m128i*>(out + i), _mm_packus_epi32(luma, luma));
+				}
+			}
+#endif
+			for (; i < count; ++i, pixel += 4)
+			{
+				const uint32_t word = (bigEndian ? ReadBigEndian32(pixel) : ReadLittleEndian32(pixel)) >> shift;
+				const int32_t sum = yR * (static_cast<int32_t>((word >> 20) & 0x3ff) - 64) +
+					yG * (static_cast<int32_t>((word >> 10) & 0x3ff) - 64) +
+					yB * (static_cast<int32_t>(word & 0x3ff) - 64);
+				out[i] = Clamp10(64 + RoundQ20(sum));
+			}
+			return true;
+		}
+		const FullRgbCoefficients& f = bt2020 ? BT2020_FULL : (bt601 ? BT601_FULL : BT709_FULL);
+		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
+		const bool high = rgbBitAlignment == 1;
+		auto channel = [high](uint32_t code)
+		{
+			return Expand8To10(static_cast<uint8_t>(high ? (code >> 2) : (code & 0xff)));
+		};
+		if (!tunnel && (encoding == VideoFrameEncoding::BGRA_8BIT || encoding == VideoFrameEncoding::ARGB_8BIT))
+		{
+			// 8-bit RGB: byte order as ReadRgb10.
+			const bool bgra = encoding == VideoFrameEncoding::BGRA_8BIT;
+			const uint8_t* pixel = row + static_cast<size_t>(x0) * 4;
+			for (int i = 0; i < count; ++i, pixel += 4)
+			{
+				red = Expand8To10(pixel[bgra ? 2 : 1]);
+				green = Expand8To10(pixel[bgra ? 1 : 2]);
+				blue = Expand8To10(pixel[bgra ? 0 : 3]);
+				out[i] = FullLumaToLimited(f.yR * static_cast<int64_t>(red) + f.yG * static_cast<int64_t>(green) +
+					f.yB * static_cast<int64_t>(blue), 65536);
+			}
+			return true;
+		}
+		for (int i = 0; i < count; ++i)
+		{
+			if (tunnel)
+			{
+				const uint32_t word = ReadBigEndian32(row + static_cast<size_t>(x0 + i) * 4);
+				red = channel((word >> 20) & 0x3ff);
+				green = channel((word >> 10) & 0x3ff);
+				blue = channel(word & 0x3ff);
+			}
+			else if (!ReadRgb10(*this, x0 + i, y, red, green, blue))
+				return false;
+			out[i] = FullLumaToLimited(f.yR * static_cast<int64_t>(red) + f.yG * static_cast<int64_t>(green) +
+				f.yB * static_cast<int64_t>(blue), 65536);
+		}
+		return true;
+	}
+	AnalysisLumaSample sample;
+	for (int i = 0; i < count; ++i)
+	{
+		if (!SampleUnchecked(x0 + i, y, sample))
+			return false;
+		out[i] = sample.luma;
+	}
+	return true;
+}
+
+const uint16_t* AnalysisLumaSource::LumaPlaneRow(int y) const
+{
+	if ((format != AnalysisLumaFormat::P010 && format != AnalysisLumaFormat::P210 &&
+		format != AnalysisLumaFormat::DecodedDolbyVision422) || y < 0 || y >= height || !IsValid())
+		return nullptr;
+	// Little-endian lanes read in place (x86/x64).
+	const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
+	if ((reinterpret_cast<uintptr_t>(row) & 1) != 0)
+		return nullptr;
+	return reinterpret_cast<const uint16_t*>(row);
+}
+
+uint16_t AnalysisLumaSource::PlaneLuma(uint16_t code) const
+{
+	code &= 0x3ff;
+	return fullRangeYuv ? FullLumaToLimited(code, 1) : code;
+}
+
+bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& result) const
+{
 	if (format == AnalysisLumaFormat::PackedDolbyVision422)
 	{
 		// The codes DecodedDolbyVision422 reads from the CPU's planes: the

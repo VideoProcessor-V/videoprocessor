@@ -3,6 +3,7 @@
 #include "../QueuedFrameStatistics.h"
 #include "LedMeasurement.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -55,20 +56,31 @@ namespace LedDrive
 	// is AreaAveragedMaximum over the active picture, boxes the script's
 	// share of the screen; screenWidth/Height: the output screen in this
 	// frame's raster pixels (0 = the frame fills it). masks (led_picture_only,
-	// raster pixels): left out of the peak and of every block. The peak reads
-	// at most about peakSampleBudget pixels (every stride-th per axis on a
-	// large frame, never coarser than the box), so its cost stays bounded.
-	constexpr int LOOKAHEAD_PEAK_SAMPLE_BUDGET = 1000000;
+	// raster pixels): left out of the peak and of every block. The peak
+	// counts every pixel (FullCoveragePeak: a row reader, a code table and a
+	// separable box sum, about 2-3 ms for a 4K P010 frame on one core).
 	struct RawMeasureOptions
 	{
 		bool peakFullCoverage = true;
 		double screenWidth = 0.0, screenHeight = 0.0;
 		PixelRect masks[MAX_MASK_RECTS];
 		int maskCount = 0;
-		int peakSampleBudget = LOOKAHEAD_PEAK_SAMPLE_BUDGET;
 	};
-	// The peak's read stride for a width x height picture under a budget.
-	int PeakSampleStride(int width, int height, int budget);
+
+	// Every 10-bit code Sample() can return.
+	constexpr int LUMA_CODES = 1024;
+	using LumaValueTable = std::array<float, LUMA_CODES>;
+	// The raw measurement's per-pixel mapping as a table: a Sample() luma
+	// code to its boosted signal (normally 0..1) through `transfer` (RAW_TRANSFER_SIZE
+	// entries) under `range` (as MeasureRawFrame).
+	LumaValueTable PeakValueTable(const AnalysisLumaSource& luma, const std::vector<float>& transfer, int range);
+	// Hunt 2 (look-ahead cost, owner 2026-10-17): AreaAveragedMaximum of the
+	// table's values over [left,right) x [top,bottom) at every pixel, read a
+	// row at a time (AnalysisLumaSource::SampleLumaRow) into an
+	// AreaPeakAccumulator. Same boxes, masks and result (within float
+	// rounding); -1 when no box was measured.
+	double FullCoveragePeak(const AnalysisLumaSource& luma, int left, int top, int right, int bottom,
+		const LumaValueTable& table, double screenW, double screenH, const PixelRect* masks, int maskCount);
 
 	bool MeasureRawFrame(const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& rect,
 		const std::vector<float>& transfer, RawMeasurement& out, int range = -1,

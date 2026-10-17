@@ -60,6 +60,21 @@ struct AnalysisLumaSource
 
 	bool IsValid() const;
 	bool Sample(int x, int y, AnalysisLumaSample& result) const;
+	// Hunt 2 (look-ahead full-coverage peak): Sample(x, y).luma for `count`
+	// pixels of row y from x0, decoded a row at a time (plane formats read
+	// the row directly; others decode each pixel without re-validating the
+	// frame). False when the span is outside the picture or the format
+	// cannot be read; `out` is then unspecified.
+	bool SampleLumaRow(int x0, int y, int count, uint16_t* out) const;
+	// Row y of the luma plane for the 16-bit plane formats (P010, P210,
+	// decoded DV 4:2:2: each lane's upper ten bits are the code), or null
+	// (other formats, an unaligned row, outside the picture). PlaneLuma maps
+	// such a code to Sample()'s luma (the full-range remap when flagged).
+	const uint16_t* LumaPlaneRow(int y) const;
+	uint16_t PlaneLuma(uint16_t code) const;
+
+private:
+	bool SampleUnchecked(int x, int y, AnalysisLumaSample& result) const;
 };
 
 const char* AnalysisLumaFormatName(const AnalysisLumaSource& source);
