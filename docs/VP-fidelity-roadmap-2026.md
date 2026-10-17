@@ -73,8 +73,10 @@ parsers feeding one tone-mapping path).
 
 ## Questions for the owner
 
-1. 12-bit output when the display changes: DeckLink output card, FP16 surface (full-range displays), or
-   neither?
+1. ~~12-bit output when the display changes: DeckLink output card, FP16 surface (full-range displays), or
+   neither?~~ Answered 2026-10-17 (owner, FINAL): no DeckLink output card; FP16 output PARKED; 12-bit
+   only via VPV (VP sends a DV tunnel through the NVIDIA GPU) for DV displays; non-DV displays stay on
+   10-bit 4:4:4 + sigma-delta.
 2. Deploy before 50/60p (validate on the FL35 sooner) or after?
 3. ~~ML upscaler / denoiser acceptable if optional, gated and measured (it can invent plausible detail)?~~
    Rejected 2026-10-17 (owner: no neural).

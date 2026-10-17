@@ -36,8 +36,10 @@ skeleton. Three gaps remain:
 - **New top priority:** render-ahead. The RTX 3050 Ti laptop is now the reference mid-range GPU.
 - **Built since the old draft:** 50/60p, the pulldown fixes, the metadata skeleton, and the DV
   tunnel work.
-- **12-bit output:** back as a future need. The DeckLink route is rejected. The candidate is the
-  measured FP16 PC-levels path; VPV covers a DV display.
+- **12-bit output:** back as a future need. The DeckLink route is rejected. ~~The candidate is the
+  measured FP16 PC-levels path; VPV covers a DV display.~~ **Owner decision 2026-10-17 (FINAL):** 12-bit output only via
+  VPV, for DV displays. FP16 half-float output is PARKED (rounding/dither unknowns). Non-DV displays
+  stay on the 10-bit 4:4:4 surface + sigma-delta.
 - **New work:** auto-calibration, the intent interpreter, the detail-pulse stabiliser and texture
   restorer, the report hotkey, pruning, the efficiency round and the libplacebo fork.
 - **LED:** the script now defines intent, not its coding limits.
@@ -78,10 +80,12 @@ fill, one vectors-valid state.
 
 **Precision & output (B/D).** Built: rgba32f caches, the sigma-delta, BTB/WTW, the 10-bit
 surface. 12-bit: no API offers a 12-bit swapchain (docs/audit/12bit-output-paths-2026-10-17.md).
-- 6 months: loopback measurement of the FP16 PC-levels mapping on the laptop with the UltraStudio
-  (1-2 days; scratchpad dv-output-and-fp16-2026-10-17.md); the precision contract in the gate.
-- 5 years: a measured FP16 path for a 12-bit display if the measurement allows it; VPV (VP sends a
+- ~~6 months: loopback measurement of the FP16 PC-levels mapping on the laptop with the UltraStudio
+  (1-2 days; scratchpad dv-output-and-fp16-2026-10-17.md);~~ the precision contract in the gate.
+- 5 years: ~~a measured FP16 path for a 12-bit display if the measurement allows it;~~ VPV (VP sends a
   DV tunnel through NVAPI) for a DV display, proven bit-exact by loopback first.
+- Owner decision 2026-10-17 (FINAL): FP16 output PARKED; 12-bit only via VPV for DV displays; non-DV displays stay
+  10-bit + sigma-delta (docs/audit/dv-output-and-fp16-2026-10-17.md).
 
 **HDR/DV mapping & metadata layer (B/D).** Built: SceneDescriptor, DisplayProfile and
 MappingPolicy (no behaviour change); L1 min; L2 trims (off). Designed: the intent interpreter.
@@ -149,7 +153,8 @@ gate. Designed: report hotkey (DiagnosticHistory, Ctrl+Alt+D, about 5 days).
 - **Cinema DV session** (about 40 min, docs/audit/dv-live-verification-checklist.md): before the
   first deploy. Best after week 1's gate or week 6's render-ahead (see question 1).
 - **3090 timings:** in the same visit.
-- **UltraStudio loopback:** FP16/10-bit mapping and the VPV pixel test, any evening after week 4.
+- **UltraStudio loopback:** ~~FP16/10-bit mapping and~~ the VPV pixel test, any evening after week 4
+  (FP16 parked 2026-10-17).
 - **Apple TV recordings** (Mini Recorder, including a Crave 24-in-30 case): as early as possible.
   They gate pulldown default-on, G19, and the texture/stabiliser retests.
 - **Colorimeter:** order by week 10 so it is on hand at week 12. Test it with Argyll 3.5; buy
@@ -174,7 +179,8 @@ gate. Designed: report hotkey (DiagnosticHistory, Ctrl+Alt+D, about 5 days).
   - Ambient adaptation tuned with the sensor; second efficiency pass.
 - **Q4 2027.**
   - Maintenance cadence (upstream rebase, driver re-measure, nightly matrix).
-  - Prepare for a new display: profile, calibration, and VPV or FP16 as its link needs. DV2
+  - Prepare for a new display: profile, calibration, and VPV ~~or FP16~~ as its link needs (a non-DV
+    display stays 10-bit + sigma-delta; FP16 parked 2026-10-17). DV2
     parser when DV2 can be decoded.
 
 ## 4. Architecture principles for durability
@@ -208,10 +214,11 @@ gate. Designed: report hotkey (DiagnosticHistory, Ctrl+Alt+D, about 5 days).
   - FL35 LED latency, settle and flux are placeholders.
   - Quad HDMI Recorder 4K60 RGB is unverified.
   - DXGI statistics on the laptop's internal panel are unconfirmed.
-  - NVIDIA's FP16-to-link conversion and dithering are undocumented.
+  - NVIDIA's FP16-to-link conversion and dithering are undocumented (the reason FP16 output is
+    parked, owner 2026-10-17).
   - 3090 timings for everything new are unmeasured.
 - **Driver changes:** NVOF ships in the driver; the NVAPI DV mode is "experimental" and has a
-  stuck-black report; FP16 mappings must be re-measured after each update.
+  stuck-black report; FP16 mappings would need re-measuring after each update (FP16 is parked).
 - **libplacebo:** each rebase can bring back the 375 integer clamp, flip the PRE_OUTPUT repair,
   or drop fork-only patches. Bill may adopt master on his own schedule.
 - **Upstream merges from Bill:** plugin API bumps and conflicts in the renderer, settings and
@@ -247,7 +254,8 @@ gate. Designed: report hotkey (DiagnosticHistory, Ctrl+Alt+D, about 5 days).
 | Neural motion estimators (RIFE/RAFT) as a primary path | Same; only reconsidered if real footage shows an occlusion shortfall |
 | Detail accumulation, including "retry as MC grain averaging" | Prototype +0.01-0.09 dB against a +1 dB gate; averaging breaks the grain rule. Replaced by the pulse stabiliser and texture restore |
 | 12-bit via a DeckLink output card | Owner rejected it; a DV display gets VPV instead |
-| FP16 scRGB surface as a second output path (2026-10-15 form) | Dropped as a parallel-path hassle; only the measured PC-levels variant remains |
+| FP16 scRGB surface as a second output path (2026-10-15 form) | Dropped as a parallel-path hassle |
+| FP16 half-float PC-levels output (any form) | PARKED by the owner 2026-10-17 (FINAL): rounding/dither unknowns; 12-bit only via VPV for DV displays; non-DV stays 10-bit 4:4:4 + sigma-delta |
 | D3D12/Vulkan rebase for 12-bit | No API has a 12-bit swapchain; months of work for no gain |
 | Interpolator Stage B and gap fill as future targets | Built (off by default) |
 | Question "deploy before or after 50/60p?" | Moot: 50/60p is built |

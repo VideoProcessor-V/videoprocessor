@@ -45,6 +45,22 @@ the reference copy is `tools\led-reference\main_vp.py`).
   older file is not rejected.
 - The script is no longer shipped (`scripts\main_vp.py` is not installed).
 
+## The script is the reference for intent (owner 2026-10-17)
+
+"Byte-identical to beta_22.py" (the delta-3 lineage) holds for the script's decisions, bands and
+rhythm, and for the FL35 command stream. The script is the reference for what the owner MEANT, not
+for its accidental coding limitations. Where its behaviour comes from such a limitation, VP's copy
+matches the intent (and asks the owner if unclear); the rules themselves are never "improved"
+without him. Decided so far:
+- Highlights/peaks are measured on the PICTURE ONLY (no subtitles or overlays, which the script's
+  screenshot counted by accident), with full-coverage peak detection, not sparse samples.
+- Read-back from the projector is off by default (the script never read back); resend only on
+  real write/port errors.
+- CNTR is never left above the needed value.
+- Script mode was always meant to have look-ahead (the script lacks it only because a screenshot
+  cannot see the future). At this commit the queued-frame look-ahead runs for compensate only
+  (`LedDriveModule::WantedLookaheadFrames`); script-mode look-ahead is assigned to the LED fix group.
+
 ## Config
 
 The LED drive card starts with "LED drive on" and the command source, then

@@ -321,13 +321,21 @@ B it shows A. A composed (subtitle) or RGB picture keeps A.
   carries over it, and the producer still computes its pairs ahead. (Doc corrected, bug hunt
   2026-10-17.)
 
-**Gap fill** (`interpolation_fill_gaps: on`, default off). While interpolating, B may follow a loss
+> **Update 2026-10-17 (owner: hiccup repair is separate from interpolation and never greyed by
+> it; built with render-ahead):** gap fill is now decided independently of motion smoothing. With
+> interpolation not presenting the source, the timeline presents the gap pair alone and every
+> other frame as before (`InterpolationTimeline::GapFillStandalone`). Config shows it under its own
+> heading "Repair dropped frames / hiccups", never greyed. Default still off (under test); the
+> key is still `interpolation_fill_gaps`. The "while interpolating" and "greyed" wording below
+> is superseded.
+
+**Gap fill** (`interpolation_fill_gaps: on`, default off). ~~While interpolating,~~ B may follow a loss
 of 1 to 3 whole frames (`QueuedFrame::gapFrames`: missed capture frames, a dropped queued frame;
 never a pulldown change, a flush or a film update). The timeline's span then covers the missing
 periods (their refreshes get phases across the whole gap). The pair's motion is checked as always
 (untrusted areas hold) and comes from the matcher or the render-time engine (the producer stores no
-pair across a gap). Off keeps "never pair across a gap". The Config control is now live (greyed while
-interpolation is off).
+pair across a gap). Off keeps "never pair across a gap". The Config control is now live ~~(greyed while
+interpolation is off)~~ (never greyed, owner 2026-10-17).
 
 **Log / status:**
 - "Interpolation timeline: engaged / released / pictures (... skipped, gap pairs, restarts, span)".

@@ -1,5 +1,12 @@
 # Stage 11b — learned motion candidates (post-cut; recorded now)
 
+> **REJECTED by the owner 2026-10-17:** neural/learned methods are rejected for VP's processing
+> (they invent detail and are poor value for the cost), including learned motion estimators
+> (RIFE/RAFT class) as a primary path. A neural flow would only be reconsidered as a supplement if
+> real footage shows an occlusion shortfall. Motion comes from the NVIDIA optical-flow engine with
+> VP's matcher as fallback (docs/VP-nvof-ahead.md). The "owner-approved direction" below dates from
+> 2026-10-13 and is superseded; the text is kept for the record.
+
 2026-10-13. Owner-approved direction. Not for the cut: comes after the
 projector has confirmed the current field's limits. Two parts: a motion
 corpus with ground truth (the prerequisite and the training set), and a
