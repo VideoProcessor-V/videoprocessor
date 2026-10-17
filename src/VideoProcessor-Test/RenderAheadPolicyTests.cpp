@@ -5,6 +5,8 @@
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
+#include <vprenderer/OpenLoopDisplayRate.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include <algorithm>
 #include <chrono>
@@ -903,6 +905,231 @@ namespace RenderAheadPolicyTest
 			module.BeginFrame(2);   // its time is now: before the previous frame's, elapsed clamps to 1 ms
 			const double after = module.FramePeriodMs();
 			Assert::AreEqual(before + 0.1 * (1.0 - before), after, 1e-6);
+		}
+	};
+	// Render-ahead without DXGI frame statistics (follow-up 2026-10-17): the open-loop
+	// display-rate source selection, its lateness by QPC and the general display bounds
+	// (the DWM rate used to be accepted only in 20..120 Hz). Rates swept, none fixed.
+	TEST_CLASS(RenderAheadOpenLoopRateTests)
+	{
+	public:
+		static OpenLoopDisplayRate::Candidates All(double hz)
+		{
+			OpenLoopDisplayRate::Candidates c;
+			c.displayConfigHz = hz;
+			c.dwmHz = hz;
+			c.hostHz = hz;
+			c.modeIntegerHz = std::floor(hz);
+			c.cadenceHz = hz;
+			return c;
+		}
+
+		TEST_METHOD(StatisticsAlwaysWin)
+		{
+			for (bool renderAhead : { false, true })
+			{
+				OpenLoopDisplayRate::Candidates c = All(60.0);
+				c.statisticsHz = 59.94;
+				const OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, renderAhead);
+				Assert::AreEqual(59.94, choice.hz);
+				Assert::IsTrue(choice.source == OpenLoopDisplayRate::Source::Statistics);
+				Assert::IsFalse(choice.openLoop, L"closed loop");
+			}
+		}
+
+		// render_ahead off: no fallback, so the old "timing not known: display rate" hold stays.
+		TEST_METHOD(RenderAheadOffKeepsTheHold)
+		{
+			const OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(All(60.0), false);
+			Assert::AreEqual(0.0, choice.hz);
+			Assert::IsTrue(choice.source == OpenLoopDisplayRate::Source::None);
+			Assert::IsFalse(choice.openLoop);
+		}
+
+		TEST_METHOD(OrderWithoutStatistics)
+		{
+			using S = OpenLoopDisplayRate::Source;
+			const double hz = 60000.0 / 1001.0;
+			OpenLoopDisplayRate::Candidates c = All(hz);
+			c.dwmHz = 59.95;   // DWM's measured period: close to, not exactly, the mode
+			auto pick = [&]() { return OpenLoopDisplayRate::Select(c, true); };
+			Assert::IsTrue(pick().source == S::DisplayConfig, L"the monitor's exact mode first");
+			Assert::AreEqual(hz, pick().hz);
+			Assert::IsTrue(pick().openLoop);
+			c.displayConfigHz = 0.0;
+			Assert::IsTrue(pick().source == S::Dwm, L"then DWM (agrees with the whole-Hz mode 59 within 2%)");
+			Assert::AreEqual(59.95, pick().hz);
+			c.dwmHz = 0.0;
+			Assert::IsTrue(pick().source == S::Host, L"then the application's rate");
+			c.hostHz = 0.0;
+			Assert::IsTrue(pick().source == S::ModeInteger, L"then the whole-Hz mode");
+			Assert::AreEqual(59.0, pick().hz);
+			c.modeIntegerHz = 0.0;
+			Assert::IsTrue(pick().source == S::VBlankCadence, L"then the vblank cadence");
+			c.cadenceHz = 0.0;
+			Assert::IsTrue(pick().source == S::None, L"nothing: no rate (the hold)");
+			Assert::AreEqual(0.0, pick().hz);
+		}
+
+		// Mixed-rate desktop: DWM at another monitor's rate is skipped while this monitor's
+		// mode is known; without a mode DWM is taken as it is.
+		TEST_METHOD(DwmAtAnotherMonitorsRateIsSkipped)
+		{
+			using S = OpenLoopDisplayRate::Source;
+			OpenLoopDisplayRate::Candidates c;
+			c.dwmHz = 144.0;
+			c.modeIntegerHz = 60.0;
+			c.hostHz = 60.0;
+			Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == S::Host);
+			c.hostHz = 0.0;
+			Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == S::ModeInteger);
+			c.modeIntegerHz = 0.0;
+			Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == S::Dwm, L"no mode to disagree with");
+			c.displayConfigHz = 143.856;
+			Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == S::DisplayConfig);
+			c.displayConfigHz = 0.0;
+			c.modeIntegerHz = 143.0;   // 144 vs 143: within 2%
+			Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == S::Dwm);
+		}
+
+		// Every source alone, across the general display range (no rate is special).
+		TEST_METHOD(EachSourceAloneAcrossTheRange)
+		{
+			using S = OpenLoopDisplayRate::Source;
+			const double rates[] = { 10.0, 23.976, 24.0, 30.0, 48.0, 50.0, 59.94, 60.0, 75.0, 90.0, 100.0, 119.88, 120.0,
+				144.0, 165.0, 240.0, 360.0, 480.0, 500.0 };
+			for (double hz : rates)
+			{
+				for (int which = 0; which < 5; ++which)
+				{
+					OpenLoopDisplayRate::Candidates c;
+					(which == 0 ? c.displayConfigHz : which == 1 ? c.dwmHz : which == 2 ? c.hostHz :
+						which == 3 ? c.modeIntegerHz : c.cadenceHz) = hz;
+					const OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, true);
+					const S expected = which == 0 ? S::DisplayConfig : which == 1 ? S::Dwm : which == 2 ? S::Host :
+						which == 3 ? S::ModeInteger : S::VBlankCadence;
+					Assert::IsTrue(choice.source == expected, (L"source at " + std::to_wstring(hz)).c_str());
+					Assert::AreEqual(hz, choice.hz);
+					Assert::IsTrue(choice.openLoop);
+				}
+			}
+		}
+
+		TEST_METHOD(OutOfBoundsCandidatesAreIgnored)
+		{
+			const double bad[] = { 0.0, -60.0, 9.99, 500.01, 1000.0, std::numeric_limits<double>::quiet_NaN(),
+				std::numeric_limits<double>::infinity() };
+			for (double hz : bad)
+			{
+				OpenLoopDisplayRate::Candidates c;
+				c.statisticsHz = hz;
+				c.displayConfigHz = hz;
+				c.dwmHz = hz;
+				c.hostHz = hz;
+				c.modeIntegerHz = hz;
+				c.cadenceHz = hz;
+				Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == OpenLoopDisplayRate::Source::None);
+				c.cadenceHz = 75.0;
+				Assert::AreEqual(75.0, OpenLoopDisplayRate::Select(c, true).hz, L"the next valid source");
+			}
+		}
+
+		// The general display bounds: DisplayMode's floor to 500 Hz (the DWM rate was 20..120).
+		TEST_METHOD(GeneralDisplayBoundsReplaceTheDwmWindow)
+		{
+			Assert::AreEqual(10.0, DisplayRefreshBounds::kMinimumHz);
+			Assert::AreEqual(500.0, DisplayRefreshBounds::kMaximumHz);
+			for (double hz = 20.0; hz <= 500.0; hz += 0.5)
+				Assert::IsTrue(DisplayRefreshBounds::Accepts(hz), std::to_wstring(hz).c_str());
+			for (double hz : { 10.0, 144.0, 165.0, 240.0, 360.0, 480.0, 500.0 })
+				Assert::IsTrue(DisplayRefreshBounds::Accepts(hz));
+			for (double hz : { 0.0, 9.999, 500.001, -1.0, std::numeric_limits<double>::quiet_NaN(),
+				std::numeric_limits<double>::infinity() })
+				Assert::IsFalse(DisplayRefreshBounds::Accepts(hz));
+		}
+
+		// The vblank cadence: the median interval, robust to a missed and a doubled wait.
+		TEST_METHOD(VBlankCadenceMedian)
+		{
+			for (double hz : { 50.0, 60000.0 / 1001.0, 120.0, 144.0, 240.0 })
+			{
+				OpenLoopDisplayRate::VBlankCadence cadence;
+				const double P = 1.0 / hz;
+				double t = 100.0;
+				cadence.Add(t);
+				for (size_t i = 0; i + 1 < OpenLoopDisplayRate::VBlankCadence::kMinIntervals; ++i)
+				{
+					t += P;
+					cadence.Add(t);
+				}
+				Assert::AreEqual(0.0, cadence.Hz(), L"too few intervals");
+				std::mt19937 random(11);
+				std::uniform_real_distribution<double> jitter(-0.03, 0.03);
+				for (int i = 0; i < 40; ++i)
+				{
+					t += P * (i == 10 ? 2.0 : 1.0 + jitter(random));   // one missed vblank
+					cadence.Add(t);
+					if (i == 20)
+					{
+						t += 1e-5;   // a doubled wait
+						cadence.Add(t);
+					}
+				}
+				Assert::AreEqual(hz, cadence.Hz(), hz * 0.01, std::to_wstring(hz).c_str());
+				cadence.Reset();
+				Assert::AreEqual<size_t>(0, cadence.Count());
+				Assert::AreEqual(0.0, cadence.Hz());
+			}
+		}
+
+		// Open-loop lateness by QPC: more than one refresh after the planned vsync (the
+		// open-loop grid may be up to a refresh off the real vsyncs).
+		TEST_METHOD(LateRefreshesByPresentReturn)
+		{
+			for (double hz : { 24.0, 50.0, 60.0, 144.0 })
+			{
+				const double P = 1.0 / hz, v = 10.0;
+				Assert::AreEqual(0, OpenLoopDisplayRate::LateRefreshes(v - 3.0 * P, v, P), L"queued ahead");
+				Assert::AreEqual(0, OpenLoopDisplayRate::LateRefreshes(v + 0.9 * P, v, P));
+				Assert::AreEqual(0, OpenLoopDisplayRate::LateRefreshes(v + P, v, P), L"one refresh: grid uncertainty");
+				Assert::AreEqual(2, OpenLoopDisplayRate::LateRefreshes(v + 1.1 * P, v, P));
+				Assert::AreEqual(3, OpenLoopDisplayRate::LateRefreshes(v + 2.5 * P, v, P));
+			}
+			Assert::AreEqual(0, OpenLoopDisplayRate::LateRefreshes(5.0, 1.0, 0.0), L"no period");
+			Assert::AreEqual(0, OpenLoopDisplayRate::LateRefreshes(5.0, 0.0, 0.01), L"no plan");
+		}
+
+		// Schedule::NoteLate (open loop) acts as an observed late present.
+		TEST_METHOD(NoteLateMovesTheChainAndDropsOne)
+		{
+			const double Pd = 1.0 / 60.0;
+			Schedule schedule;
+			schedule.Commit(1.0, { { 1u, 0.95 }, { 2u, 0.95 + Pd } });
+			schedule.NoteLate(0, Pd);
+			Assert::AreEqual(1.0, schedule.NextVsync());
+			Assert::AreEqual(0, schedule.TakeLateDrops(), L"on time: nothing");
+			schedule.NoteLate(2, Pd);
+			Assert::AreEqual(1.0 + 2 * Pd, schedule.NextVsync(), 1e-12);
+			Assert::AreEqual(1, schedule.TakeLateDrops());
+			Assert::AreEqual(0, schedule.TakeLateDrops(), L"consumed");
+			// The pending plans moved too: present 1 at its moved vsync is on time.
+			Assert::IsFalse(schedule.Observe(1u, 0.95 + 2 * Pd, Pd));
+		}
+
+		TEST_METHOD(ChangeWorthALine)
+		{
+			OpenLoopDisplayRate::Choice a, b;
+			a.hz = 60.0;
+			a.source = OpenLoopDisplayRate::Source::Dwm;
+			b = a;
+			b.hz = 60.03;
+			Assert::IsFalse(OpenLoopDisplayRate::Changed(a, b), L"under 0.1%");
+			b.hz = 60.1;
+			Assert::IsTrue(OpenLoopDisplayRate::Changed(a, b));
+			b = a;
+			b.source = OpenLoopDisplayRate::Source::Host;
+			Assert::IsTrue(OpenLoopDisplayRate::Changed(a, b), L"a new source");
+			Assert::IsTrue(OpenLoopDisplayRate::Changed(OpenLoopDisplayRate::Choice(), a), L"the first rate");
 		}
 	};
 }

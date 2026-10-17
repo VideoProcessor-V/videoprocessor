@@ -98,6 +98,22 @@ enum class RefreshRateSwitchMode
 
 double DisplayRefreshRateHz(const DisplayRefreshRational& rate);
 
+// The general bounds for a display (output) refresh rate read from the system:
+// DWM's composition period, the monitor's mode, a vblank cadence. The floor is
+// DisplayMode's minimum; the ceiling covers today's fastest panels (500 Hz) and
+// matches the renderer's SetRenderLoadDisplayRefreshRate. Render-ahead 2026-10-17:
+// the DWM rate used to be accepted only in 20..120 Hz, which hid 144-500 Hz
+// panels from the open-loop rate source. (Capture-side limits stay DisplayMode's.)
+struct DisplayRefreshBounds
+{
+	static constexpr double kMinimumHz = 10.0;
+	static constexpr double kMaximumHz = 500.0;
+	static bool Accepts(double hz)
+	{
+		return hz >= kMinimumHz && hz <= kMaximumHz;   // false for NaN
+	}
+};
+
 // Select a display mode in two intentional passes. The first pass accepts an
 // exactly equivalent rational or tight driver rounding. Only if that fails is
 // the closest cadence-family candidate accepted within the bounded fallback

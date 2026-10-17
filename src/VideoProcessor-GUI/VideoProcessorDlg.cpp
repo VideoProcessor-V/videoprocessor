@@ -2001,7 +2001,8 @@ private:
 					if (estimate.phaseRateHz > 0.0)
 					{
 						const double rate = estimate.phaseRateHz;
-						if (rate >= 20.0 && rate <= 120.0)
+						// The general display bounds (was 20..120 Hz: render-ahead 2026-10-17).
+						if (DisplayRefreshBounds::Accepts(rate))
 						{
 							std::lock_guard<std::mutex> lock(m_mutex);
 							if (m_targetGeneration == targetGeneration)
@@ -2096,7 +2097,8 @@ DisplayTimingSnapshot GetDisplayTimingSnapshot(HWND hwnd)
 
 	const double refreshRate = static_cast<double>(qpcFrequency.QuadPart) /
 		static_cast<double>(timing.qpcRefreshPeriod);
-	if (refreshRate < 20.0 || refreshRate > 120.0 || timing.qpcVBlank == 0)
+	// The general display bounds (was 20..120 Hz, which hid 144-500 Hz panels).
+	if (!DisplayRefreshBounds::Accepts(refreshRate) || timing.qpcVBlank == 0)
 		return result;
 
 	result.refreshRateHz = refreshRate;

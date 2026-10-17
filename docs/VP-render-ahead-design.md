@@ -179,3 +179,41 @@ drift-correction repeats.
 - **Also in this branch:** hiccup repair without motion smoothing (the timeline presents a gap
   pair alone; the matcher is kept while `interpolation_fill_gaps` is on), and the queued-frame
   walk extended to the LED's `led_lookahead_ms` depth (the extra frames feed the LED only).
+
+## Open loop without statistics (follow-up 2026-10-17)
+
+- **Found on screen:** on the laptop's internal panel (Intel iGPU, no DXGI frame statistics)
+  every render-ahead case held with "timing not known: display rate" before the planner ran, and
+  the on-screen tests passed vacuously.
+- **Rate source** (`vprenderer/OpenLoopDisplayRate.h`, pure): the statistics' measured rate
+  always wins (closed loop). Without it, and only with `render_ahead on`, the first available of:
+  the window's monitor mode as an exact rational (QueryDisplayConfig target mode), DWM's
+  composition period (DwmGetCompositionTimingInfo, skipped when it disagrees with the monitor's
+  mode by more than 2%: another monitor's rate), the application's display rate
+  (SetRenderLoadDisplayRefreshRate), the whole-hertz mode (EnumDisplaySettings), and last a short
+  vblank cadence (median QPC interval of ~9 WaitForVBlank returns, at most once per 10 s). The
+  system candidates are re-read every 2 s. One line logs the source and every candidate when it
+  changes ("Render-ahead: open loop, display rate ... from ..."); the 5 s "Render-ahead:" line
+  ends with the rate, its source, open/closed loop, open-loop frames and presents late by QPC.
+  `render_ahead off` keeps the old hold (dejudder_gate refresh / legacy unchanged).
+- **Open-loop schedule:** no closed-loop correction. A restart anchors on DWM's last vblank when
+  DWM composes at the planned rate and the vblank is recent (otherwise on the present time, as
+  before). Lateness is weaker: an extra whose Present returned more than one refresh after its
+  planned vsync is counted late (one refresh, not half: the open-loop grid may be a refresh off);
+  the chain moves by those refreshes and the next frame drops one extra and feeds the gate.
+- **DWM-composed window vs independent flip:** in a composed window DWM shows the latest queued
+  flip-model present at each composition, and DXGI still holds a present made with SyncInterval
+  n for n vblanks, so the holds and queued extras keep their meaning; composition adds about one
+  refresh of latency and the panel's DWM rate is the rate that matters (hence DWM's vblank as the
+  grid). Fullscreen independent flip uses the same queue without composition. This is the
+  documented DXGI behaviour, not yet confirmed on screen: OnScreenRenderAheadExtras reports
+  windowed and fullscreen passes separately (VP_TEST_HARNESS_FULLSCREEN=1|both). Panels with
+  dynamic refresh (Windows DRR, Intel DRRS) can change rate: the candidates are re-read every 2 s
+  and the DWM rate per frame.
+- **Bounds:** the DWM and display-rate estimator rates were accepted only in 20..120 Hz; they now
+  use `DisplayRefreshBounds` (DisplayMode's 10 Hz floor to 500 Hz). Still fixed elsewhere (flagged):
+  DisplayRefreshRatePolicy's 10..240 Hz, the GUI's startup-rate and nominal-rate 240 Hz caps.
+- **Tests:** CPU RenderAheadOpenLoopRateTests. On screen, OnScreenRenderAheadExtras is strict
+  (render-ahead lines, gate level, queued extras or a gate reason, no display-rate holds, no
+  timing-hold storm); OnScreenLiveExtrasAndEstimateAhead marks a run without statistics
+  SKIP-NO-DISPLAY-TIMING (inconclusive), which fails run_chain_gate.ps1 -OnScreen.

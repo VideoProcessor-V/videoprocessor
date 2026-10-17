@@ -60,6 +60,7 @@
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
+#include <vprenderer/OpenLoopDisplayRate.h>
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/GrainPreserve.h>
 #include <vprenderer/OcclusionMaskHook.h>
@@ -113,6 +114,7 @@
 #pragma warning(pop)
 
 #include <dxgi1_6.h>
+#include <dwmapi.h>
 #include <nvapi.h>
 #include <wincodec.h>
 #include <bcrypt.h>
@@ -4102,6 +4104,65 @@ namespace
 		return false;
 	}
 
+	// Render-ahead open loop (2026-10-17): the current refresh of the monitor the
+	// window is on, as the exact rational of its target mode (59.94 stays 59.94,
+	// unlike EnumDisplaySettings). 0 when unknown.
+	double MonitorDisplayConfigHz(HWND window)
+	{
+		const std::wstring device = DisplayDeviceNameForWindow(window);
+		if (device.empty())
+			return 0.0;
+		std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+		std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+		UINT32 pathCount = 0, modeCount = 0;
+		size_t match = 0;
+		if (!QueryDisplayPath(device, paths, modes, pathCount, modeCount, match) || match >= pathCount)
+			return 0.0;
+		const DISPLAYCONFIG_PATH_INFO& path = paths[match];
+		const auto hzOf = [](const DISPLAYCONFIG_RATIONAL& r)
+		{
+			const double hz = r.Denominator ? static_cast<double>(r.Numerator) / static_cast<double>(r.Denominator) : 0.0;
+			return DisplayRefreshBounds::Accepts(hz) ? hz : 0.0;
+		};
+		const UINT32 index = path.targetInfo.modeInfoIdx;
+		if (index != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && index < modeCount &&
+			modes[index].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET)
+		{
+			const double hz = hzOf(modes[index].targetMode.targetVideoSignalInfo.vSyncFreq);
+			if (hz > 0.0)
+				return hz;
+		}
+		return path.targetInfo.targetAvailable ? hzOf(path.targetInfo.refreshRate) : 0.0;
+	}
+
+	// DWM's composition timing (non-blocking; hwnd must be null since Windows 8.1):
+	// its refresh period as a rate and its last vblank (QPC). dwmapi is loaded once
+	// and kept, as the renderer does not link it.
+	bool DwmCompositionTiming(double& hz, int64_t& vblankQpc)
+	{
+		hz = 0.0;
+		vblankQpc = 0;
+		using Fn = HRESULT(WINAPI*)(HWND, DWM_TIMING_INFO*);
+		static const Fn getTiming = []() -> Fn
+		{
+			const HMODULE module = LoadLibraryW(L"dwmapi.dll");
+			return module ? reinterpret_cast<Fn>(GetProcAddress(module, "DwmGetCompositionTimingInfo")) : nullptr;
+		}();
+		LARGE_INTEGER frequency{};
+		if (!getTiming || !QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+			return false;
+		DWM_TIMING_INFO timing{};
+		timing.cbSize = sizeof(timing);
+		if (FAILED(getTiming(nullptr, &timing)) || timing.qpcRefreshPeriod == 0)
+			return false;
+		const double rate = static_cast<double>(frequency.QuadPart) / static_cast<double>(timing.qpcRefreshPeriod);
+		if (!DisplayRefreshBounds::Accepts(rate))
+			return false;
+		hz = rate;
+		vblankQpc = static_cast<int64_t>(timing.qpcVBlank);
+		return true;
+	}
+
 	struct RankedDisplayRefreshRate
 	{
 		DISPLAYCONFIG_RATIONAL refreshRate{};
@@ -5197,6 +5258,17 @@ struct LibplaceboVideoRenderer::Impl
 		renderAheadHeld = 0, renderAheadIntervalPresents = 0;
 	ULONGLONG renderAheadLogTick = 0;
 	bool renderAheadSwapchainLogged = false;
+	// Render-ahead without DXGI frame statistics (follow-up 2026-10-17): the display
+	// rate the extras plan with (OpenLoopDisplayRate), the system candidates (re-read
+	// every 2 s), the last-resort vblank cadence, and lateness seen by QPC (no
+	// statistics to say when a present was shown). Render-loop thread.
+	OpenLoopDisplayRate::Choice dejudderDisplayRate;
+	OpenLoopDisplayRate::Choice dejudderDisplayRateLogged;
+	ULONGLONG openLoopCandidatesTick = 0, openLoopCadenceTick = 0;
+	double openLoopDisplayConfigHz = 0.0, openLoopModeIntegerHz = 0.0;
+	OpenLoopDisplayRate::VBlankCadence openLoopCadence;
+	unsigned long long renderAheadOpenLoopFrames = 0, renderAheadLateByPresent = 0;
+	bool renderAheadOpenLoopLate = false;   // seen on the last frame's extras: the gate's lateness for this one
 
 	// The chain ends (a frame not queued by the plan): the next present is not
 	// predicted, the queue credit is returned.
@@ -5206,6 +5278,88 @@ struct LibplaceboVideoRenderer::Impl
 		renderAheadMainInterval = 1;
 		renderAheadTargetLeadMs = 0.0;
 		renderAheadCreditFrames.store(0, std::memory_order_release);
+	}
+
+	// The display rate the de-judder extras plan with. The statistics' measured rate
+	// when there is one; else, with render_ahead on only, the open-loop fallback (the
+	// monitor's exact mode, DWM's composition rate, the application's rate, the
+	// whole-hertz mode, a vblank cadence) - the old hold stays with render_ahead off.
+	// Logged when the source or the rate changes.
+	OpenLoopDisplayRate::Choice SelectDejudderDisplayRate()
+	{
+		OpenLoopDisplayRate::Candidates c;
+		c.statisticsHz = presentationTelemetry.Snapshot().measuredDisplayHz;
+		if (activeSettings.renderAhead && !DisplayRefreshBounds::Accepts(c.statisticsHz))
+		{
+			const ULONGLONG now = GetTickCount64();
+			if (openLoopCandidatesTick == 0 || now - openLoopCandidatesTick >= 2000)
+			{
+				openLoopCandidatesTick = now;
+				openLoopDisplayConfigHz = MonitorDisplayConfigHz(videoHwnd);
+				openLoopModeIntegerHz = MonitorRefreshHz(videoHwnd);
+			}
+			int64_t vblank = 0;
+			DwmCompositionTiming(c.dwmHz, vblank);
+			c.displayConfigHz = openLoopDisplayConfigHz;
+			c.modeIntegerHz = openLoopModeIntegerHz;
+			c.hostHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+			// The last resort, when nothing else is known: a short vblank sample on the
+			// swapchain's output (blocks about ten refreshes, at most once per 10 s).
+			const bool nothing = !DisplayRefreshBounds::Accepts(c.displayConfigHz) &&
+				!DisplayRefreshBounds::Accepts(c.dwmHz) && !DisplayRefreshBounds::Accepts(c.hostHz) &&
+				!DisplayRefreshBounds::Accepts(c.modeIntegerHz);
+			if (nothing && !(openLoopCadence.Hz() > 0.0) && swapchain &&
+				(openLoopCadenceTick == 0 || now - openLoopCadenceTick >= 10000))
+			{
+				openLoopCadenceTick = now;
+				openLoopCadence.Reset();
+				CComPtr<IDXGISwapChain> native;
+				native.Attach(pl_d3d11_swapchain_unwrap(swapchain));
+				CComPtr<IDXGIOutput> output;
+				LARGE_INTEGER frequency{};
+				if (native && SUCCEEDED(native->GetContainingOutput(&output)) && output &&
+					QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+				{
+					for (size_t i = 0; i <= OpenLoopDisplayRate::VBlankCadence::kMinIntervals; ++i)
+					{
+						if (FAILED(output->WaitForVBlank()))
+							break;
+						openLoopCadence.Add(static_cast<double>(PerformanceCounterNow()) / static_cast<double>(frequency.QuadPart));
+					}
+				}
+			}
+			c.cadenceHz = openLoopCadence.Hz();
+		}
+		const OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, activeSettings.renderAhead);
+		if (activeSettings.renderAhead && OpenLoopDisplayRate::Changed(dejudderDisplayRateLogged, choice))
+		{
+			if (choice.openLoop)
+				DebugLog::Log("Render-ahead: open loop, display rate %.3f Hz from %s (no DXGI frame statistics; candidates: "
+					"display config %.3f, DWM %.3f, application %.3f, whole-Hz mode %.0f, vblank cadence %.3f Hz)",
+					choice.hz, OpenLoopDisplayRate::Name(choice.source), c.displayConfigHz, c.dwmHz, c.hostHz,
+					c.modeIntegerHz, c.cadenceHz);
+			else if (choice.source == OpenLoopDisplayRate::Source::Statistics)
+				DebugLog::Log("Render-ahead: closed loop, display rate %.3f Hz from %s", choice.hz,
+					OpenLoopDisplayRate::Name(choice.source));
+			else
+				DebugLog::Log("Render-ahead: no display rate from any source (statistics, display config, DWM, "
+					"application, mode, vblank cadence)");
+			dejudderDisplayRateLogged = choice;
+		}
+		return choice;
+	}
+
+	// Open loop: the vsync grid from DWM's last vblank, when DWM composes at the
+	// planned rate (relative tolerance) and its vblank is recent; 0 otherwise.
+	static double OpenLoopGridVsync(double displayHz, double now, double qpcFrequency)
+	{
+		double dwmHz = 0.0;
+		int64_t vblank = 0;
+		if (!DwmCompositionTiming(dwmHz, vblank) || vblank <= 0 || !(displayHz > 0.0) ||
+			std::abs(dwmHz - displayHz) > OpenLoopDisplayRate::kDwmAgreesWithMode * displayHz)
+			return 0.0;
+		const double vblankSeconds = static_cast<double>(vblank) / qpcFrequency;
+		return std::abs(now - vblankSeconds) < 1.0 ? vblankSeconds : 0.0;
 	}
 
 	static double RenderAheadNow()
@@ -5283,7 +5437,8 @@ struct LibplaceboVideoRenderer::Impl
 		renderAheadLogTick = now;
 		DebugLog::Log("Render-ahead: %llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
 			"(%llu presents after a hold), lead %.2f ms, target lead %.2f ms, gate %s (%s), latency floor %.2f ms, "
-			"p95 new frame %.2f ms, extra %.2f ms, estimate %.2f ms, queue credit %zu, cadence %.3f, %s",
+			"p95 new frame %.2f ms, extra %.2f ms, estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
+			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC)",
 			renderAheadFrames, renderAheadRestarts, renderAheadLate, renderAheadDropped, renderAheadHeld,
 			renderAheadIntervalPresents, renderAheadLead * 1000.0, renderAheadTargetLeadMs,
 			RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
@@ -5291,7 +5446,9 @@ struct LibplaceboVideoRenderer::Impl
 				"period" : "refresh",
 			dejudderLatencyFloor.Floor() * 1000.0, renderAheadNewFrameCost.P95(), renderAheadExtraCost.P95(),
 			renderAheadEstimateCost.P95(), renderAheadCreditFrames.load(std::memory_order_relaxed), ratio,
-			renderAheadTimersReady ? "GPU timers" : "CPU timings");
+			renderAheadTimersReady ? "GPU timers" : "CPU timings", dejudderDisplayRate.hz,
+			OpenLoopDisplayRate::Name(dejudderDisplayRate.source), dejudderDisplayRate.openLoop ? "open" : "closed",
+			renderAheadOpenLoopFrames, renderAheadLateByPresent);
 	}
 
 	// The SyncInterval for the main present now being made (consumed): the holds the
@@ -13495,8 +13652,10 @@ struct LibplaceboVideoRenderer::Impl
 		in.grainMap = adaptiveGrainMapWanted;
 		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
 		in.sourceHz = sourceHz;
+		// Render-ahead without statistics: the extras' open-loop rate (the same one
+		// PresentDejudderExtras plans with), so the cadence ratio agrees.
 		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
-			customHookRefreshHz;
+			activeSettings.renderAhead && dejudderDisplayRate.openLoop ? dejudderDisplayRate.hz : customHookRefreshHz;
 		in.interlaced = interlaced;
 		in.nativeRgb = nativeRgb;
 		in.haveNext = next != nullptr;
@@ -14090,7 +14249,11 @@ struct LibplaceboVideoRenderer::Impl
 		LARGE_INTEGER frequency{};
 		QueryPerformanceFrequency(&frequency);
 		const double qpc = static_cast<double>(frequency.QuadPart);
-		const double displayHz = presentationTelemetry.Snapshot().measuredDisplayHz;
+		// The statistics' measured rate; with render_ahead on and no statistics, the
+		// open-loop fallback (OpenLoopDisplayRate). render_ahead off: unchanged.
+		dejudderDisplayRate = SelectDejudderDisplayRate();
+		const double displayHz = dejudderDisplayRate.hz > 0.0 ? dejudderDisplayRate.hz :
+			presentationTelemetry.Snapshot().measuredDisplayHz;
 		// Which timing is missing, for the log (the same checks as before).
 		const char* timingMissing = !(f.captureRateHz >= 10.0 && f.captureRateHz <= 240.0) ? "timing not known: source rate" :
 			!(displayHz >= 10.0 && displayHz <= 480.0) ? "timing not known: display rate" :
@@ -14181,6 +14344,8 @@ struct LibplaceboVideoRenderer::Impl
 
 		// Render-ahead (design Phase 1, steps 1-4): every refresh A owns, planned now.
 		RenderAhead::FramePlan plan;
+		bool openLoopFrame = false;        // render-ahead without statistics this frame
+		int openLoopLateRefreshes = 0;     // the most any extra was late by its QPC return
 		double plannedFirstVsync = 0.0;
 		size_t planSlot = 0;
 		std::vector<std::pair<uint32_t, double>> plannedIds;
@@ -14195,9 +14360,11 @@ struct LibplaceboVideoRenderer::Impl
 			// screen and the vsync it showed at (none on some internal panels: open loop).
 			double gridVsync = 0.0;
 			bool late = false;
+			bool closedLoop = false;
 			DXGI_FRAME_STATISTICS statistics{};
 			if (SUCCEEDED(native->GetFrameStatistics(&statistics)) && statistics.SyncQPCTime.QuadPart > 0)
 			{
+				closedLoop = true;
 				gridVsync = static_cast<double>(statistics.SyncQPCTime.QuadPart) / qpc;
 				const double shownAt = gridVsync - static_cast<double>(static_cast<int32_t>(
 					statistics.SyncRefreshCount - statistics.PresentRefreshCount)) * displayPeriod;
@@ -14211,6 +14378,17 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			}
 			const double now = static_cast<double>(PerformanceCounterNow()) / qpc;
+			// Open loop (no statistics): no closed-loop correction. DWM's vblank, when it
+			// composes at this rate, puts an anchor on the vsync grid; lateness comes from
+			// the presents' QPC return times (the last frame's, below).
+			openLoopFrame = !closedLoop;
+			if (openLoopFrame)
+			{
+				++renderAheadOpenLoopFrames;
+				gridVsync = OpenLoopGridVsync(displayHz, now, qpc);
+				late = renderAheadOpenLoopLate;
+			}
+			renderAheadOpenLoopLate = false;
 			bool restart = false, behind = false;
 			plannedFirstVsync = renderAheadSchedule.FirstVsync(now, displayPeriod, gridVsync, restart, behind);
 			late = late || behind;
@@ -14746,6 +14924,18 @@ struct LibplaceboVideoRenderer::Impl
 			native->GetLastPresentCount(&presentId);
 			if (queuedMode)
 				plannedIds.emplace_back(presentId, decision.targetVsync);
+			// Open loop: a present that returned more than a refresh after its planned
+			// vsync was not shown on time (OpenLoopDisplayRate::LateRefreshes).
+			if (queuedMode && openLoopFrame)
+			{
+				const int lateBy = OpenLoopDisplayRate::LateRefreshes(static_cast<double>(PerformanceCounterNow()) / qpc,
+					decision.targetVsync, displayPeriod);
+				if (lateBy > 0)
+				{
+					++renderAheadLateByPresent;
+					openLoopLateRefreshes = std::max(openLoopLateRefreshes, lateBy);
+				}
+			}
 			dejudderExtraIds.push_back(presentId);
 			if (dejudderExtraIds.size() > 256)
 				dejudderExtraIds.pop_front();
@@ -14836,6 +15026,13 @@ struct LibplaceboVideoRenderer::Impl
 		if (queuedMode && !failure)
 		{
 			renderAheadSchedule.Commit(plan.nextFirstVsync, plannedIds);
+			if (openLoopLateRefreshes > 0)
+			{
+				// As a statistics-observed late present: the chain moves, the next frame
+				// drops one extra, and the next frame counts it late and feeds the gate.
+				renderAheadSchedule.NoteLate(openLoopLateRefreshes, displayPeriod);
+				renderAheadOpenLoopLate = true;
+			}
 			renderAheadMainInterval = plan.nextInterval;
 			UINT lastPresent = 0;
 			renderAheadExpectedPresent = SUCCEEDED(native->GetLastPresentCount(&lastPresent)) ? lastPresent + 1 : 0;

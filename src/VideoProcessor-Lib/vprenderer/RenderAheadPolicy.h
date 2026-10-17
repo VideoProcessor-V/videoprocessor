@@ -332,6 +332,19 @@ namespace RenderAhead
 			return late;
 		}
 
+		// Open loop (no statistics): a present seen late by its QPC return time
+		// (OpenLoopDisplayRate::LateRefreshes). As Observe: the chain and the
+		// pending plans move by the refreshes, and the next frame drops one extra.
+		void NoteLate(int refreshes, double displayPeriod)
+		{
+			if (refreshes <= 0 || !(displayPeriod > 0.0))
+				return;
+			lateDrops = 1;
+			nextVsync += refreshes * displayPeriod;
+			for (auto& p : pending)
+				p.second += refreshes * displayPeriod;
+		}
+
 		// The drops lateness asks of the next frame (consumed).
 		int TakeLateDrops()
 		{
