@@ -13,6 +13,7 @@
 
 #include <map>
 #include <stdexcept>
+#include <cmath>
 
 #include <DeckLinkAPI_h.h>
 
@@ -48,6 +49,25 @@ namespace
 }
 
 
+bool ParseDeckLinkYCbCr12Capture(const std::string& value,
+	DeckLinkCaptureFormatPreferences::YCbCr12Capture& choice)
+{
+	using Choice = DeckLinkCaptureFormatPreferences::YCbCr12Capture;
+	const std::string normalized = ConfigFile::NormalizeName(value);
+	if (normalized == "auto")
+		choice = DeckLinkCaptureFormatPreferences{}.ycbcr12;   // bug hunt 2: v210
+	else if (normalized == "v210")
+		choice = Choice::V210;
+	else if (normalized == "rgb12")
+		choice = Choice::Rgb12;
+	else if (normalized == "off")
+		choice = Choice::Off;
+	else
+		return false;
+	return true;
+}
+
+
 bool ReadDeckLinkCaptureFormatPreferences(const ConfigFile& config,
 	DeckLinkCaptureFormatPreferences& preferences, std::string& error)
 {
@@ -56,14 +76,7 @@ bool ReadDeckLinkCaptureFormatPreferences(const ConfigFile& config,
 	std::string ycc12;
 	if (config.TryGetString("decklink", "ycbcr_12bit_capture", ycc12))
 	{
-		const std::string normalized = ConfigFile::NormalizeName(ycc12);
-		if (normalized == "rgb12" || normalized == "auto")
-			preferences.ycbcr12 = DeckLinkCaptureFormatPreferences::YCbCr12Capture::Rgb12;
-		else if (normalized == "v210")
-			preferences.ycbcr12 = DeckLinkCaptureFormatPreferences::YCbCr12Capture::V210;
-		else if (normalized == "off")
-			preferences.ycbcr12 = DeckLinkCaptureFormatPreferences::YCbCr12Capture::Off;
-		else
+		if (!ParseDeckLinkYCbCr12Capture(ycc12, preferences.ycbcr12))
 		{
 			error = "Invalid [decklink] ycbcr_12bit_capture='" + ycc12 + "'";
 			return false;
@@ -396,11 +409,10 @@ VideoFrameEncoding Translate(BMDPixelFormat bmdPixelFormat, ColorSpace colorSpac
 }
 
 
-EOTF TranslateEOTF(LONGLONG electroOpticalTransferFuncValue)
+EOTF TranslateEOTF(LONGLONG electroOpticalTransferFuncValue, bool* reserved)
 {
-	// 3 bit value
-	assert(electroOpticalTransferFuncValue >= 0);
-	assert(electroOpticalTransferFuncValue <= 7);
+	if (reserved)
+		*reserved = false;
 
 	// Comments in the SDK 12 docs: "EOTF in range 0-7 as per CEA 861.3",
 	// which is "A2016 HDR STATIC METADATA EXTENSIONS".
@@ -417,16 +429,39 @@ EOTF TranslateEOTF(LONGLONG electroOpticalTransferFuncValue)
 
 	case 3:
 		return EOTF::HLG;
-
-	// 4-7 are reserved for future use
 	}
 
-	throw std::runtime_error("Failed to translate EOTF");
+	// Bug hunt 2 (2026-10-17, L10): 4-7 are reserved (CTA-861.3) and used
+	// to throw, which rejected the whole video state (black picture). A sink
+	// that does not understand the EOTF treats the signal as traditional SDR;
+	// the caller logs it. (UNKNOWN is not used: the DirectShow path cannot
+	// translate it.)
+	if (reserved)
+		*reserved = true;
+	return EOTF::SDR;
 }
 
 
-ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines, bool captureDisplayFixes)
+bool DeckLinkRateIs625Family(double frameRateHz)
 {
+	// Classified from the measured rate, no fixed list: an integral rate that
+	// is a multiple of 25 but not of 24 or 30 belongs to the 25 Hz family.
+	if (!(frameRateHz > 0.0) || !std::isfinite(frameRateHz))
+		return false;
+	const double rounded = std::round(frameRateHz);
+	if (std::fabs(frameRateHz - rounded) > 1e-3)
+		return false;   // 1000/1001 rates are the 525 family
+	const long long rate = static_cast<long long>(rounded);
+	return rate % 25 == 0 && rate % 24 != 0 && rate % 30 != 0;
+}
+
+
+ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines, bool captureDisplayFixes,
+	double frameRateHz, bool* rec601OnOtherRaster)
+{
+	if (rec601OnOtherRaster)
+		*rec601OnOtherRaster = false;
+
 	switch (colorSpace)
 	{
 	case bmdColorspaceRec601:
@@ -447,19 +482,31 @@ ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines, bool capt
 				return ColorSpace::REC_601_576;
 			if (verticalLines == 625)
 				return ColorSpace::REC_601_625;
-			throw std::runtime_error("Unknown amount of lines for REC 601 color space");
+		}
+		else
+		{
+			// Bug hunt 2026-10-17: the caller passes the active picture height,
+			// so NTSC arrives as 486 (or 480) lines and PAL as 576. 486 used to
+			// map to UNKNOWN (real NTSC lost its matrix) and 576 to the analog
+			// PAL entry. Total-line counts (525/625) are kept for other callers.
+			if (verticalLines == 486 || verticalLines == 480 || verticalLines == 525)
+				return ColorSpace::REC_601_525;
+			if (verticalLines == 576 || verticalLines == 625)
+				return ColorSpace::REC_601_625;
 		}
 
-		// Bug hunt 2026-10-17: the caller passes the active picture height,
-		// so NTSC arrives as 486 (or 480) lines and PAL as 576. 486 used to
-		// map to UNKNOWN (real NTSC lost its matrix) and 576 to the analog
-		// PAL entry. Total-line counts (525/625) are kept for other callers.
-		if (verticalLines == 486 || verticalLines == 480 || verticalLines == 525)
-			return ColorSpace::REC_601_525;
-		if (verticalLines == 576 || verticalLines == 625)
-			return ColorSpace::REC_601_625;
-
-		throw std::runtime_error("Unknown amount of lines for REC 601 color space");
+		// Bug hunt 2 (2026-10-17, M1): a source may legally signal BT.601 on
+		// any other raster (PCs, GPUs and consoles in YCbCr mode do it at
+		// 720p/1080p/2160p). This used to throw, the state was rejected and
+		// no frame reached the renderer. Carry Rec.601 through: the matrix
+		// is the same for both entries, only the primaries differ, and they
+		// are chosen from the measured frame-rate family (25 Hz family ->
+		// 625, everything else -> 525), never from a fixed height. Pure
+		// correctness, so both capture_display_fixes settings take it.
+		if (rec601OnOtherRaster)
+			*rec601OnOtherRaster = true;
+		return DeckLinkRateIs625Family(frameRateHz) ?
+			ColorSpace::REC_601_625 : ColorSpace::REC_601_525;
 
 	case bmdColorspaceRec709:
 		return ColorSpace::REC_709;

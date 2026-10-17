@@ -75,6 +75,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <DisplayRefreshRatePolicy.h>
 #include <DisplayTopologySession.h>
 #include <CaptureDisplayFixes.h>
+#include <CaptureStatePolicy.h>
 #include <RendererGenerationGate.h>
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
@@ -6330,16 +6331,21 @@ LRESULT	CVideoProcessorDlg::OnMessageCaptureDeviceStateChange(WPARAM wParam, LPA
 	switch (trackedState)
 	{
 	case CaptureDeviceState::CAPTUREDEVICESTATE_READY:
-		m_captureDeviceStateText.SetWindowText(failed ? TEXT("Failed") : TEXT("Ready"));
+	{
+		// Bug hunt 2 (M3): READY right after STARTING is a failed start
+		// (Magewell posts Error() then READY); Restart stays available.
+		const bool startFailed = CaptureStatePolicy::StartFailed(newState, previousState);
+		m_captureDeviceStateText.SetWindowText(failed ? TEXT("Failed") :
+			startFailed ? TEXT("Start failed - Restart capture to retry") : TEXT("Ready"));
 		// audit 2026-10-16: READY/FAILED while the GUI expected CAPTURING is
 		// an unexpected stop (capture thread abort, forced DeckLink profile
 		// change): keep Restart available as the way back.
-		enableButtons = failed ||
-			previousState == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING;
+		enableButtons = CaptureStatePolicy::RestartAvailable(newState, previousState);
 		if (enableButtons)
 			DebugLog::Log("Capture device reported %S while the GUI was %S; Restart capture to resume",
 				ToString(newState), ToString(previousState));
 		break;
+	}
 
 	case CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING:
 	{

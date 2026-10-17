@@ -147,9 +147,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 576) == ColorSpace::REC_601_625);
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 625) == ColorSpace::REC_601_625);
 			Assert::IsTrue(Translate(bmdColorspaceRec709, 1080) == ColorSpace::REC_709);
-			Assert::ExpectException<std::runtime_error>([]() {
-				Translate(bmdColorspaceRec601, 720);
-			});
+			// Bug hunt 2 (M1): other rasters no longer throw (BugHunt2CaptureTests).
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 720) == ColorSpace::REC_601_525);
 		}
 
 		// Post-merge audit 2026-10-17: capture_display_fixes off restores Bill's earlier
@@ -169,7 +168,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 525, false) == ColorSpace::REC_601_525);
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 576, false) == ColorSpace::REC_601_576);
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 625, false) == ColorSpace::REC_601_625);
-			Assert::ExpectException<std::runtime_error>([]() { Translate(bmdColorspaceRec601, 480, false); });
+			// Bug hunt 2 (M1): 480 with the fixes off is carried through as Rec.601
+			// (it used to throw and reject the state).
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 480, false, 60000.0 / 1001.0) == ColorSpace::REC_601_525);
 			// On: the 486 guard's protection is kept - the brief mode never throws.
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 486, true) == ColorSpace::REC_601_525);
 		}
