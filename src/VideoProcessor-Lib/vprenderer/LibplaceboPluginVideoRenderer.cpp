@@ -241,6 +241,32 @@ void LibplaceboPluginVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 }
 
 
+bool LibplaceboPluginVideoRenderer::SupportsTimedFileFrames() const
+{
+	return m_renderer && m_renderer->SupportsTimedFileFrames();
+}
+
+
+void LibplaceboPluginVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
+	const FileFrameTiming& timing)
+{
+	m_renderer->OnTimedVideoFrame(videoFrame, timing);
+}
+
+
+bool LibplaceboPluginVideoRenderer::WaitForFileFrameSlot(uint32_t timeoutMs)
+{
+	return m_renderer && m_renderer->WaitForFileFrameSlot(timeoutMs);
+}
+
+
+void LibplaceboPluginVideoRenderer::CancelFileFrameWait()
+{
+	if (m_renderer)
+		m_renderer->CancelFileFrameWait();
+}
+
+
 bool LibplaceboPluginVideoRenderer::HasPresentedLiveFrame() const
 {
 	return m_renderer->HasPresentedLiveFrame();

@@ -377,6 +377,7 @@
     <ClCompile Include="ActivePictureDecisionTimelineTests.cpp" />
     <ClCompile Include="FullRasterLookaheadTests.cpp" />
     <ClCompile Include="LibplaceboPluginProxyTests.cpp" />
+    <ClCompile Include="FileFrameTests.cpp" />
     <ClCompile Include="ActivePictureTransitionModelTests.cpp" />
 	<ClCompile Include="ActivePictureAnalyzerTests.cpp" />
     <ClCompile Include="ActivePictureEvidenceTests.cpp" />

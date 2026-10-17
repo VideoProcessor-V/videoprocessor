@@ -358,6 +358,9 @@
     <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h" />
+    <ClInclude Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.h" />
+    <ClInclude Include="vprenderer\FileFrameClock.h" />
+    <ClInclude Include="vprenderer\FileFrameSlotGate.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CV210toP010VideoFrameFormatter.h" />
@@ -510,6 +513,7 @@
     <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
+    <ClCompile Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CV210toP010VideoFrameFormatter.cpp" />
