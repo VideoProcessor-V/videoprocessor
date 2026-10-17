@@ -1380,21 +1380,65 @@ namespace Tests
 					if (line.find("Re-base:") != std::string::npos) Logger::WriteMessage(("  " + line + "\n").c_str());
 				return load(r.captureMetadata, w, h);
 			};
-			// The strongest edges of a profile (positions of the largest steps), sorted.
-			auto edges = [](const std::vector<double>& profile, int count) {
-				std::vector<std::pair<double, int>> steps;
-				for (size_t i = 1; i < profile.size(); ++i) steps.push_back({ std::fabs(profile[i] - profile[i - 1]), static_cast<int>(i) });
-				std::sort(steps.rbegin(), steps.rend());
-				std::vector<int> out;
-				for (const auto& st : steps)
+			// The harness pattern is periodic (bars every 32 source pixels, a 64-row ramp), so its
+			// edges all have the same height: ranking "the strongest edges" picks an arbitrary
+			// subset decided by sub-code differences, and a different subset in each capture reads
+			// as a move of a whole bar (the false "26 px" of 2026-10-17, with the pictures
+			// identical to 0.00 px). Instead: (1) the local shift, per quarter of the profile, by
+			// normalised correlation at sub-pixel steps within +-3 px (under half the output period,
+			// so never a whole-period alias) - a moved or stretched picture moves the quarters;
+			// (2) the profile's period (first autocorrelation peak, sub-pixel) - the scale on that
+			// axis, so a changed aspect ratio changes it directly.
+			auto correlation = [](const std::vector<double>& p0, const std::vector<double>& p1, int lo, int hi, double s) {
+				double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+				int n = 0;
+				for (int i = lo; i < hi; ++i)
 				{
-					bool close = false;
-					for (int e : out) close = close || std::abs(e - st.second) < 8;
-					if (!close) out.push_back(st.second);
-					if (static_cast<int>(out.size()) == count) break;
+					const double x = i + s;
+					const int i0 = static_cast<int>(std::floor(x));
+					if (i0 < 0 || i0 + 1 >= static_cast<int>(p1.size())) continue;
+					const double f = x - i0, a = p0[static_cast<size_t>(i)], b = p1[static_cast<size_t>(i0)] * (1.0 - f) + p1[static_cast<size_t>(i0) + 1] * f;
+					sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b; ++n;
 				}
-				std::sort(out.begin(), out.end());
-				return out;
+				if (n < 2) return -1.0;
+				const double va = saa - sa * sa / n, vb = sbb - sb * sb / n;
+				return (va > 1e-12 && vb > 1e-12) ? (sab - sa * sb / n) / std::sqrt(va * vb) : -1.0;
+			};
+			// The worst local shift (px) and the lowest best correlation over four windows.
+			auto localShifts = [&](const std::vector<double>& ref, const std::vector<double>& got, double& worstShift, double& lowestCorr) {
+				worstShift = 0.0;
+				lowestCorr = 1.0;
+				const int n = static_cast<int>(ref.size()), lo = 16, hi = n - 16, span = (hi - lo) / 4;
+				for (int k = 0; k < 4; ++k)
+				{
+					double bestC = -2.0, bestS = 0.0;
+					for (int t = -60; t <= 60; ++t)
+					{
+						const double c = correlation(ref, got, lo + k * span, lo + (k + 1) * span, t * 0.05);
+						if (c > bestC) { bestC = c; bestS = t * 0.05; }
+					}
+					worstShift = (std::max)(worstShift, std::fabs(bestS));
+					lowestCorr = (std::min)(lowestCorr, bestC);
+				}
+			};
+			// The period (px): the first autocorrelation peak above 0.5 after it has gone negative,
+			// refined by a parabola; 0 when the profile is not periodic.
+			auto period = [&](const std::vector<double>& p) {
+				const int n = static_cast<int>(p.size());
+				std::vector<double> ac(static_cast<size_t>(n / 3) + 2, 0.0);
+				for (int lag = 1; lag < static_cast<int>(ac.size()); ++lag) ac[static_cast<size_t>(lag)] = correlation(p, p, 0, n - lag, lag);
+				bool wentNegative = false;
+				for (int lag = 2; lag + 1 < static_cast<int>(ac.size()); ++lag)
+				{
+					const double a = ac[static_cast<size_t>(lag) - 1], b = ac[static_cast<size_t>(lag)], c = ac[static_cast<size_t>(lag) + 1];
+					wentNegative = wentNegative || b < 0.0;
+					if (wentNegative && b > 0.5 && b >= a && b >= c)
+					{
+						const double d = a - 2.0 * b + c;
+						return lag + (std::fabs(d) > 1e-12 ? 0.5 * (a - c) / d : 0.0);
+					}
+				}
+				return 0.0;
 			};
 			auto profiles = [](const std::vector<int>& c, int w, int h, std::vector<double>& across, std::vector<double>& down) {
 				across.assign(w, 0.0); down.assign(h, 0.0);
@@ -1416,25 +1460,26 @@ namespace Tests
 			profiles(native, w0, h0, a0, d0);
 			profiles(oneAxis, w1, h1, a1, d1);
 			profiles(uniform, w2, h2, a2, d2);
-			const std::vector<int> ea0 = edges(a0, 6), ed0 = edges(d0, 6);
-			auto worst = [](const std::vector<int>& ref, const std::vector<int>& got) {
-				int w = 0;
-				for (int e : ref)
-				{
-					int best = 1 << 20;
-					for (int g : got) best = (std::min)(best, std::abs(g - e));
-					w = (std::max)(w, best);
-				}
-				return w;
+			const double pa0 = period(a0), pd0 = period(d0);
+			// One re-based capture against native: true when its geometry is kept on both axes.
+			auto kept = [&](const char* name, const std::vector<double>& a, const std::vector<double>& d) {
+				double shiftA = 0, corrA = 0, shiftD = 0, corrD = 0;
+				localShifts(a0, a, shiftA, corrA);
+				localShifts(d0, d, shiftD, corrD);
+				const double pa = period(a), pd = period(d);
+				const double scaleA = pa0 > 0 && pa > 0 ? pa / pa0 : 0.0, scaleD = pd0 > 0 && pd > 0 ? pd / pd0 : 0.0;
+				char line[320];
+				snprintf(line, sizeof(line), "%s: moved across %.2f px (corr %.4f), down %.2f px (corr %.4f); period across %.3f/%.3f (x%.4f), down %.3f/%.3f (x%.4f) (output %dx%d)\n",
+					name, shiftA, corrA, shiftD, corrD, pa, pa0, scaleA, pd, pd0, scaleD, w0, h0);
+				Logger::WriteMessage(line);
+				const bool periodsKept = (pa0 <= 0 || std::fabs(scaleA - 1.0) <= 0.01) && (pd0 <= 0 || std::fabs(scaleD - 1.0) <= 0.01);
+				return shiftA <= 1.0 && shiftD <= 1.0 && corrA >= 0.97 && corrD >= 0.97 && periodsKept;
 			};
-			const int oneAcross = worst(ea0, edges(a1, 12)), oneDown = worst(ed0, edges(d1, 12));
-			const int uniAcross = worst(ea0, edges(a2, 12)), uniDown = worst(ed0, edges(d2, 12));
-			char line[200];
-			snprintf(line, sizeof(line), "edges moved (px): one-axis across %d, down %d; uniform across %d, down %d (output %dx%d)\n",
-				oneAcross, oneDown, uniAcross, uniDown, w0, h0);
-			Logger::WriteMessage(line);
-			Assert::IsTrue(oneAcross <= 2 && oneDown <= 2, L"a one-axis re-base keeps the geometry (aspect ratio)");
-			Assert::IsTrue(uniAcross <= 2 && uniDown <= 2, L"a uniform re-base keeps the geometry");
+			Assert::IsTrue(pa0 > 0 && pd0 > 0, L"the native capture's period found on both axes (the scale check runs)");
+			const bool oneKept = kept("one-axis", a1, d1);
+			const bool uniKept = kept("uniform", a2, d2);
+			Assert::IsTrue(oneKept, L"a one-axis re-base keeps the geometry (aspect ratio)");
+			Assert::IsTrue(uniKept, L"a uniform re-base keeps the geometry");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking)
