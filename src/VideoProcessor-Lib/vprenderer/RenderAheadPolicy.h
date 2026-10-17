@@ -277,10 +277,17 @@ namespace RenderAhead
 		// (gridVsync > 0: any vsync seen on the display). restart reports a new anchor;
 		// behind, that the chain was active but its refresh had passed (the frame is
 		// late: the next frame drops one extra).
-		double FirstVsync(double earliest, double displayPeriod, double gridVsync, bool& restart, bool& behind) const
+		// maxAhead (s, 0 = no bound): the furthest a present made now can land - the
+		// presents the queue holds, the lead and a margin. A chain further ahead than
+		// that is not real (a burst of frames planned faster than they were shown, e.g.
+		// after a backlog flush; the open loop never sees it): a restart, not late
+		// (render-ahead follow-up 2026-10-17).
+		double FirstVsync(double earliest, double displayPeriod, double gridVsync, bool& restart, bool& behind,
+			double maxAhead = 0.0) const
 		{
-			restart = !active || !(nextVsync >= earliest - 0.25 * displayPeriod);
-			behind = active && restart;
+			const bool tooFarAhead = active && maxAhead > 0.0 && nextVsync > earliest + maxAhead;
+			restart = !active || !(nextVsync >= earliest - 0.25 * displayPeriod) || tooFarAhead;
+			behind = active && restart && !tooFarAhead;
 			if (!restart)
 				return nextVsync;
 			if (gridVsync > 0.0 && displayPeriod > 0.0)
@@ -328,6 +335,19 @@ namespace RenderAhead
 					for (auto& p : pending)
 						p.second += refreshes * displayPeriod;
 				}
+				else if (error < -0.5 * displayPeriod)
+				{
+					// Shown earlier than planned: the chain ran ahead of the screen (a
+					// FIFO present shows at the first free refresh, so it is never early
+					// on a true plan). The chain moves back by the difference - not late.
+					// Before, only lateness moved it and the plan stayed ahead for good
+					// (render-ahead follow-up 2026-10-17).
+					const double refreshes = std::round(-error / displayPeriod);
+					nextVsync -= refreshes * displayPeriod;
+					for (auto& p : pending)
+						p.second -= refreshes * displayPeriod;
+					++earlyCorrections;
+				}
 			}
 			return late;
 		}
@@ -354,8 +374,10 @@ namespace RenderAhead
 		}
 
 		size_t Pending() const { return pending.size(); }
+		unsigned long long EarlyCorrections() const { return earlyCorrections; }
 
 	private:
+		unsigned long long earlyCorrections = 0;
 		bool active = false;
 		double nextVsync = 0.0;
 		int lateDrops = 0;

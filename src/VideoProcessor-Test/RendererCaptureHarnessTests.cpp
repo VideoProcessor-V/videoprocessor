@@ -2887,7 +2887,10 @@ namespace Tests
 			const double seconds = _dupenv_s(&sv, &n, "VP_TEST_HARNESS_SECONDS") == 0 && sv ? std::atof(sv) : 30.0;
 			std::free(sv);
 			const std::string dejudder = "dejudder_strength: 0.25\n";
-			const std::string vpOwned = "[vpvr.display]\ndiagnostic_vp_owned_dxgi_presenter: true\n";
+			// The unified section: a legacy [vpvr.display] next to [vprenderer.input.*] made the
+			// renderer ignore the whole unified configuration (VP-0079), so that case ran without
+			// the de-judder or render_ahead at all (render-ahead follow-up 2026-10-17).
+			const std::string vpOwned = "[vprenderer]\ndiagnostic_vp_owned_dxgi_presenter: true\n";
 			struct Case { const char* name; const char* path; std::string extra; bool renderAhead; };
 			const Case cases[] = {
 				{ "23.976p standard, render ahead, gate period", "standard", dejudder + "render_ahead: on\ndejudder_gate: period\n", true },
@@ -2992,6 +2995,8 @@ namespace Tests
 						why.push_back("timing-not-known hold storm (" + std::to_string(otherTimingHolds) + " holds)");
 					if (!engaged && !refreshRuleHeld)
 						why.push_back("no Render-ahead: line (render-ahead never engaged)");
+					if (c.extra.find(vpOwned) != std::string::npos && !r.Logged("VP-owned DXGI swapchain: created"))
+						why.push_back("the VP-owned presenter was not created");
 					if (engaged && !gateLogged)
 						why.push_back("the gate level is not in the Render-ahead: line");
 					if (queuedExtras == 0 && !gateExplains)

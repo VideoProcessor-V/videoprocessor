@@ -487,6 +487,37 @@ namespace RenderAheadPolicyTest
 			Assert::AreEqual<size_t>(0, schedule.Pending());
 		}
 
+		// Render-ahead follow-up 2026-10-17: a present shown earlier than planned means the
+		// chain ran ahead of the screen; it moves back (not late, no drop).
+		TEST_METHOD(EarlyShownPresentMovesTheChainBack)
+		{
+			const double Pd = 1.0 / 60.0;
+			Schedule schedule;
+			schedule.Commit(1.0, { { 20u, 0.9 }, { 21u, 0.9 + Pd } });
+			Assert::IsFalse(schedule.Observe(20u, 0.9 - 0.4 * Pd, Pd), L"under half a refresh early: no change");
+			Assert::AreEqual(1.0, schedule.NextVsync(), 1e-12);
+			Assert::IsFalse(schedule.Observe(21u, 0.9 - 2 * Pd, Pd), L"early is never late");
+			Assert::AreEqual(1.0 - 3 * Pd, schedule.NextVsync(), 1e-12, L"the chain moves back by the difference");
+			Assert::AreEqual(0, schedule.TakeLateDrops());
+			Assert::AreEqual(1ull, schedule.EarlyCorrections());
+		}
+
+		// A chain further ahead than any queued present can land restarts (not behind).
+		TEST_METHOD(FirstVsyncChainTooFarAheadRestarts)
+		{
+			const double Pd = 1.0 / 60.0;
+			Schedule schedule;
+			schedule.Commit(1.5, {});
+			bool restart = false, behind = true;
+			Assert::AreEqual(1.5, schedule.FirstVsync(1.0, Pd, 0.0, restart, behind));
+			Assert::IsTrue(!restart && !behind, L"no bound: the chain");
+			Assert::AreEqual(1.5, schedule.FirstVsync(1.0, Pd, 0.0, restart, behind, 0.6));
+			Assert::IsTrue(!restart, L"within the bound: the chain");
+			const double v = schedule.FirstVsync(1.0, Pd, 0.995, restart, behind, 0.2);
+			Assert::IsTrue(restart && !behind, L"beyond the bound: a restart, not late");
+			Assert::AreEqual(0.995 + Pd, v, 1e-12, L"on the vsync grid");
+		}
+
 		TEST_METHOD(FirstVsyncChainBehindAndBreak)
 		{
 			const double Pd = 1.0 / 50.0;
