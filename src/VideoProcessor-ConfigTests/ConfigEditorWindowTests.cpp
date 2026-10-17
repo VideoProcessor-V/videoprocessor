@@ -7813,7 +7813,7 @@ output_range: full
     require(saved.contains("[legacy_output.first]") && saved.contains("[legacy_output.unused]") &&
         saved.contains("# retain output comment") && saved.contains("unknown_future_key: retained") &&
         saved.contains("diagnostic_allow_full_g22: true"), "Migration discarded old settings/comments");
-    const auto backups = QDir(directory.path()).entryList({"*.before-unified-color-output.*.bak"},QDir::Files);
+    const auto backups = QDir(directory.path()).entryList({"*.before-config-migration.*.bak"},QDir::Files);
     require(backups.size() == 1 && readBytes(directory.filePath(backups.front())) == original,
         "Migration did not preserve an exact original-file backup");
     ConfigEditorWindow reloaded(path, 0, true);
@@ -8680,6 +8680,13 @@ void testSaveAsksWhenTheFileChangedOnDisk()
     requireControl<QPushButton>(window, "applyConfiguration")->click();
     QCoreApplication::processEvents();
     require(readBytes(path).contains("profile_change_display_seconds: 3"), "Overwrite did not save the edit");
+    // Hunt 2 (L2): the replaced external edit is kept; no migration backup is made.
+    const QStringList overwriteBackups = QDir(dir.path()).entryList(
+        { QStringLiteral("VideoProcessor.cfg.before-overwrite.*.bak") }, QDir::Files);
+    require(overwriteBackups.size() == 1 && readBytes(dir.filePath(overwriteBackups.front())) == external,
+        "Overwrite did not keep the external edit in a .before-overwrite backup");
+    require(QDir(dir.path()).entryList({ QStringLiteral("*.before-config-migration.*.bak") }, QDir::Files).isEmpty(),
+        "A plain overwrite made a migration backup");
     // Reload: edits discarded, the file's content shown.
     writeFixture(path, external);
     requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(2);
@@ -9200,6 +9207,93 @@ void testUnfocusedNumberBoxesIgnoreTheWheel()
     }
     require(seconds->value() == 5 && refresh->currentIndex() == comboIndex, "The wheel changed an unfocused setting");
     require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The wheel made an edit");
+    // Hunt 2 (M3): scrolling the page past the Motion or Picture slider changes nothing.
+    for (const char* name : { "config.vprenderer.motion_preset", "config.vprenderer.picture_preset" })
+    {
+        auto* slider = requireControl<QSlider>(window, name);
+        const int before = slider->value();
+        for (const int delta : { 120, -120 })
+        {
+            QWheelEvent wheel(QPointF(5, 5), slider->mapToGlobal(QPointF(5, 5)), QPoint(), QPoint(0, delta),
+                Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(slider, &wheel);
+            require(slider->value() == before, (QByteArray("The wheel moved the unfocused slider ") + name).constData());
+        }
+    }
+    require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The wheel over a slider made an edit");
+}
+
+// Hunt 2 (M1/M2): the legacy queue fold and the profile value rewrites run once at
+// load as real migrations. The editor shows them as unsaved changes, the file is not
+// written until Save, Save keeps the original in .before-config-migration.<time>.bak,
+// and afterwards displaying every profile changes nothing.
+void testProfileRewritesAreBackedUpLoadMigrations()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    const QByteArray original =
+        "[general]
+profile_change_display_seconds: 5
+"
+        "[directshow]
+presentation_lead_frames: 2
+"
+        "[queue.Steady]
+steady_reserve_frames: 3
+"
+        "[vprenderer.Cinema]
+quality: high
+"
+        "[vprenderer.scaling.Sharp]
+downscaler: ewa_lanczos
+"
+        "[vprenderer.zoom.Scope]
+crop_wider_content_to_fill_screen: true
+"
+        "crop_wider_content_aspect_limit: not-a-ratio
+";
+    writeFixture(path, original);
+    const auto showEveryProfile = [](ConfigEditorWindow& window)
+    {
+        for (const char* name : { "config.queue.profiles", "config.vprenderer.profiles",
+            "config.vprenderer.scaling.profiles", "config.vprenderer.zoom.profiles",
+            "config.vprenderer.color.profiles" })
+        {
+            auto* profiles = requireControl<QListWidget>(window, name);
+            for (int row = profiles->count() - 1; row >= 0; --row)
+                profiles->setCurrentRow(row);
+        }
+        QCoreApplication::processEvents();
+    };
+    {
+        ConfigEditorWindow window(path, 0, true);
+        require(requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(),
+            "A load-time migration did not show as an unsaved change");
+        showEveryProfile(window);
+        require(readBytes(path) == original, "Opening and displaying profiles wrote the file");
+        require(QDir(dir.path()).entryList({ QStringLiteral("*.bak") }, QDir::Files).isEmpty(),
+            "A backup was made without a save");
+        save(window);
+    }
+    const QByteArray saved = readBytes(path);
+    require(!saved.contains("presentation_lead_frames") && !saved.contains("steady_reserve_frames") &&
+        saved.contains("lead_frames: 2") && saved.contains("target_frames: 3"),
+        (QByteArray("The legacy queue fold was not saved: ") + saved).constData());
+    require(saved.contains("downscaler: AUTO") && !saved.contains("ewa_lanczos") &&
+        !saved.contains("not-a-ratio") && saved.contains("crop_wider_content_to_fill_screen: true"),
+        (QByteArray("The profile value migrations were not saved: ") + saved).constData());
+    const QStringList backups = QDir(dir.path()).entryList(
+        { QStringLiteral("VideoProcessor.cfg.before-config-migration.*.bak") }, QDir::Files);
+    require(backups.size() == 1 && readBytes(dir.filePath(backups.front())) == original,
+        "The migration did not keep an exact backup of the original file");
+    {
+        ConfigEditorWindow reopened(path, 0, true);
+        require(!requireControl<QPushButton>(reopened, "applyConfiguration")->isEnabled(),
+            "A migrated file opens with unsaved changes");
+        showEveryProfile(reopened);
+        require(!requireControl<QPushButton>(reopened, "applyConfiguration")->isEnabled(),
+            "Displaying a profile changed the document");
+    }
+    require(readBytes(path) == saved, "Reopening the migrated file wrote it");
 }
 
 int run(const char* name, const std::function<void()>& test)
@@ -9485,6 +9579,7 @@ int main(int argc, char** argv)
     failures += run("unsaved edits ask on close and exit", testUnsavedEditsAskOnCloseAndExit);
     failures += run("explicit auto dither shows Auto", testExplicitAutoDitherShowsAuto);
     failures += run("unfocused number boxes ignore the wheel", testUnfocusedNumberBoxesIgnoreTheWheel);
+    failures += run("profile rewrites are backed-up load migrations", testProfileRewritesAreBackedUpLoadMigrations);
     failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
     failures += run("render-ahead controls show defaults and save", testRenderAheadControlsShowDefaultsAndSave);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)

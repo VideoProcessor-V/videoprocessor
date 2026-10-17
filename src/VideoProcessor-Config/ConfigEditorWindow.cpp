@@ -85,6 +85,7 @@
 #include <QRegion>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSettings>
@@ -590,14 +591,21 @@ protected:
     {
         if (event->type() != QEvent::Wheel) return false;
         QWidget* control = qobject_cast<QWidget*>(watched);
+        // Sliders (Motion, Picture) take the wheel without focus too (hunt 2,
+        // M3); scroll bars are the page's own and keep it.
+        const auto guarded = [](const QWidget* widget)
+        {
+            return qobject_cast<const QAbstractSpinBox*>(widget) || qobject_cast<const QComboBox*>(widget) ||
+                (qobject_cast<const QAbstractSlider*>(widget) && !qobject_cast<const QScrollBar*>(widget));
+        };
         // The control itself, or its inner line edit (two levels at most; an
         // open drop-down's list is its own window and keeps the wheel).
         for (int level = 0; control && level < 2; ++level)
         {
-            if (qobject_cast<QAbstractSpinBox*>(control) || qobject_cast<QComboBox*>(control)) break;
+            if (guarded(control)) break;
             control = control->isWindow() ? nullptr : control->parentWidget();
         }
-        if (!control || (!qobject_cast<QAbstractSpinBox*>(control) && !qobject_cast<QComboBox*>(control)))
+        if (!control || !guarded(control))
             return false;
         const QWidget* focus = QApplication::focusWidget();
         if (focus && (focus == control || control->isAncestorOf(focus))) return false;
@@ -2097,7 +2105,8 @@ bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 			preferences.setValue(QStringLiteral("configRpc/manualPort"), target.port);
 		}
 	}
-	dirty_ = false;
+	// loadConfiguration set dirty_ for a new file or its own migration; keep
+	// it (hunt 2, L3).
 	runLoadMigrations();
 	loadDiscoveryCache();
 	preparedRemoteSwitch_.reset();
@@ -2236,10 +2245,12 @@ void ConfigEditorWindow::loadConfiguration()
 				migratedLegacyInputPolicy = true;
 			}
 		}
-		if (document_->SectionSettings("vprenderer.input").empty())
-			document_->RemoveSection("vprenderer.input");
-		if (document_->SectionSettings("vprenderer").empty())
-			document_->RemoveSection("vprenderer");
+		// Removing an empty header is a visible migration (hunt 2, L9): the
+		// presence of [vprenderer] alone selects the [general] validation.
+		for (const char* emptied : { "vprenderer.input", "vprenderer" })
+			if (document_->SectionSettings(emptied).empty() &&
+				document_->RemoveSection(emptied))
+				migratedLegacyInputPolicy = true;
 	}
 	dirty_ = configurationLoaded_ && (!document_->existedAtLoad ||
 		migratedLegacyInputPolicy);
@@ -2266,6 +2277,8 @@ void ConfigEditorWindow::runLoadMigrations()
     migrateUnifiedColorOutputProfiles();
     migrateCalibrationProfiles();
     migrateViewportZoomProfiles();
+    migrateLegacyQueueOwnership();
+    migrateProfileValueNormalisations();
     // Any real migration keeps a backup of the original file on save.
     if (document_ && configurationLoaded_ && document_->Serialize() != before)
         document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -2838,8 +2851,13 @@ void ConfigEditorWindow::migrateSharedRefreshRate()
         dirty_ = true;
         hasPendingMigrations_ = true;
     }
-    if (document_->SectionSettings(root.toStdString()).empty())
-        document_->RemoveSection(root.toStdString());
+    // Removing an empty root is a visible migration (hunt 2, L9).
+    if (document_->SectionSettings(root.toStdString()).empty() &&
+        document_->RemoveSection(root.toStdString()))
+    {
+        dirty_ = true;
+        hasPendingMigrations_ = true;
+    }
 }
 
 void ConfigEditorWindow::migrateRefreshRateSwitchMode()
@@ -2865,6 +2883,109 @@ void ConfigEditorWindow::migrateRefreshRateSwitchMode()
 		dirty_ = true;
 		hasPendingMigrations_ = true;
 	}
+}
+
+void ConfigEditorWindow::migrateLegacyQueueOwnership()
+{
+    // Fold legacy queue ownership into the first ordered queue profile in the
+    // pending document. Compatibility readers remain in place for old files,
+    // but every save from this editor uses [queue.*] exclusively. A real
+    // migration (hunt 2, M1): it runs at load, inside runLoadMigrations'
+    // before/after comparison, and keeps a backup of the original file.
+    if (!configurationLoaded_ || !document_) return;
+    const QStringList queues = profileSections(QStringLiteral("queue"));
+    if (queues.isEmpty()) return;
+    const QString baseline = queues.front();
+    bool migrated = false;
+    auto migrate = [this, &baseline, &migrated](const QString& oldSection,
+        const QString& oldKey, const QString& newKey)
+    {
+        const QString legacy = value(oldSection, oldKey);
+        if (legacy.isEmpty()) return;
+        if (value(baseline, newKey).isEmpty())
+            document_->SetKnown(baseline.toStdString(),
+                newKey.toStdString().c_str(), legacy.toLocal8Bit().constData());
+        document_->RemoveKnown(oldSection.toStdString(),
+            oldKey.toStdString().c_str());
+        migrated = true;
+    };
+    migrate(QStringLiteral("queue_recovery"),
+        QStringLiteral("reset_after_render_restart_seconds"),
+        QStringLiteral("reset_after_render_restart_seconds"));
+    migrate(QStringLiteral("queue_recovery"),
+        QStringLiteral("reset_queue_too_large_percent"),
+        QStringLiteral("reset_queue_too_large_percent"));
+    migrate(QStringLiteral("directshow"),
+        QStringLiteral("presentation_lead_frames"),
+        QStringLiteral("lead_frames"));
+    migrate(QStringLiteral("command_line"),
+        QStringLiteral("queue_size"), QStringLiteral("queue_size"));
+    for (const QString& queueSection : queues)
+    {
+        const QString legacy = value(queueSection,
+            QStringLiteral("steady_reserve_frames"));
+        if (legacy.isEmpty()) continue;
+        if (value(queueSection, QStringLiteral("target_frames")).isEmpty())
+            document_->SetKnown(queueSection.toStdString(), "target_frames",
+                legacy.toLocal8Bit().constData());
+        document_->RemoveKnown(queueSection.toStdString(),
+            "steady_reserve_frames");
+        migrated = true;
+    }
+    if (!migrated) return;
+    dirty_ = true;
+    hasPendingMigrations_ = true;
+    document_->requiresMigrationBackup = document_->existedAtLoad;
+}
+
+void ConfigEditorWindow::migrateProfileValueNormalisations()
+{
+    // Rewrites that loadDetails used to make each time a profile was shown
+    // (hunt 2, M2). They run once at load as real migrations: the editor is
+    // dirty, the original file is backed up on save, and displaying a
+    // profile never changes the document.
+    if (!configurationLoaded_ || !document_) return;
+    bool migrated = false;
+    // Calibration LUT paths are stored with forward slashes.
+    for (const QString& section : profileSections(QStringLiteral("vprenderer.color")))
+        for (const char* key : { "calibration_lut_bt709", "calibration_lut_p3_d65",
+            "calibration_lut_bt2020" })
+        {
+            const QString raw = value(section, QString::fromLatin1(key));
+            if (raw.isEmpty()) continue;
+            const QString normalized = QDir::fromNativeSeparators(raw);
+            if (normalized == raw) continue;
+            document_->SetKnown(section.toStdString(), key, normalized.toStdString());
+            migrated = true;
+        }
+    // The retired downscaler spellings resolve to the quality preset. Keep
+    // Auto explicit instead of inheriting a parent's named filter.
+    for (const QString& section : profileSections(QStringLiteral("vprenderer.scaling")))
+    {
+        const QString raw = value(section, QStringLiteral("downscaler")).trimmed().toLower();
+        if (raw != QStringLiteral("none") && raw != QStringLiteral("ewa_lanczos")) continue;
+        document_->SetKnown(section.toStdString(), "downscaler", "AUTO");
+        migrated = true;
+    }
+    // Optional crop aspect limits are best-effort: a malformed value is
+    // removed (a visible, backed-up migration) rather than carried on.
+    for (const QString& section : profileSections(QStringLiteral("vprenderer.zoom")))
+        for (const char* key : { "crop_narrower_content_aspect_limit",
+            "crop_wider_content_aspect_limit" })
+        {
+            const QString raw = value(section, QString::fromLatin1(key));
+            if (raw.isEmpty()) continue;
+            AspectRatio ignored;
+            std::string parseError;
+            if (AspectRatioParser::Parse(raw.toStdString(), 1.0, 4.0, ignored, parseError))
+                continue;
+            document_->RemoveKnown(section.toStdString(), key);
+            migrated = true;
+        }
+    if (!migrated) return;
+    dirty_ = true;
+    hasPendingMigrations_ = true;
+    document_->requiresMigrationBackup = document_->existedAtLoad;
 }
 
 void ConfigEditorWindow::installProfileContextMenu(QListWidget* list,
@@ -4772,6 +4893,15 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     updateEffectSummary();
     showCanonicalShortcutSpelling(this);
 
+    // Say where a replaced file was kept (hunt 2, L2/L8).
+    QString kept;
+    if (!result.overwriteBackupPath.empty())
+        kept = QStringLiteral(" The file it replaced is kept at %1.")
+            .arg(QDir::toNativeSeparators(QString::fromStdWString(result.overwriteBackupPath)));
+    else if (!result.backupPath.empty())
+        kept = QStringLiteral(" The original file is kept at %1.")
+            .arg(QDir::toNativeSeparators(QString::fromStdWString(result.backupPath)));
+
     // The editor is a separate process. Signal the running VP instance only
     // after the atomic safe-save has committed the complete validated file.
     // An auto-reset event also makes saves harmless when VP is not running.
@@ -4782,25 +4912,25 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
         setStatus(QStringLiteral("Changes saved%1. Incomplete action%2 %3 saved as disabled draft%2.")
             .arg(notified ? QStringLiteral(" and sent to VideoProcessor") : QStringLiteral("; VideoProcessor could not be notified"))
             .arg(draftedActions.size() == 1 ? QString() : QStringLiteral("s"),
-                draftedActions.join(QStringLiteral(", "))));
+                draftedActions.join(QStringLiteral(", "))) + kept);
     }
 	else if (creatingConfiguration)
     {
         const QString effect = QString::fromLatin1(
             ConfigurationApplyPolicy::ActionLabel(action));
-        setStatus(notified ?
+        setStatus((notified ?
             QStringLiteral("Configuration created safely at %1. %2 was requested.")
                 .arg(configPath_, effect) :
             QStringLiteral("Configuration created safely at %1. It will take effect when VideoProcessor next starts.")
-                .arg(configPath_), false);
+                .arg(configPath_)) + kept, false);
     }
     else
     {
         const QString effect = QString::fromLatin1(
             ConfigurationApplyPolicy::ActionLabel(action));
-        setStatus(notified ?
+        setStatus((notified ?
             QStringLiteral("Changes saved safely. %1 was requested.").arg(effect) :
-            QStringLiteral("Changes saved safely. Takes effect when VideoProcessor next starts."), false);
+            QStringLiteral("Changes saved safely. Takes effect when VideoProcessor next starts.")) + kept, false);
     }
     return true;
 }
@@ -5771,54 +5901,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         }
     }
 
-    // Fold legacy queue ownership into the first ordered queue profile in the
-    // pending document. Compatibility readers remain in place for old files,
-    // but every save from this editor uses [queue.*] exclusively.
-    if (configurationLoaded_ && document_ && sectionPrefix == QStringLiteral("queue"))
-    {
-        const QStringList queues = profileSections(sectionPrefix);
-        if (!queues.isEmpty())
-        {
-            const QString baseline = queues.front();
-            bool migrated = false;
-            auto migrate = [this, &baseline, &migrated](const QString& oldSection,
-                const QString& oldKey, const QString& newKey)
-            {
-                const QString legacy = value(oldSection, oldKey);
-                if (legacy.isEmpty()) return;
-                if (value(baseline, newKey).isEmpty())
-                    document_->SetKnown(baseline.toStdString(),
-                        newKey.toStdString().c_str(), legacy.toLocal8Bit().constData());
-                document_->RemoveKnown(oldSection.toStdString(),
-                    oldKey.toStdString().c_str());
-                migrated = true;
-            };
-            migrate(QStringLiteral("queue_recovery"),
-                QStringLiteral("reset_after_render_restart_seconds"),
-                QStringLiteral("reset_after_render_restart_seconds"));
-            migrate(QStringLiteral("queue_recovery"),
-                QStringLiteral("reset_queue_too_large_percent"),
-                QStringLiteral("reset_queue_too_large_percent"));
-            migrate(QStringLiteral("directshow"),
-                QStringLiteral("presentation_lead_frames"),
-                QStringLiteral("lead_frames"));
-            migrate(QStringLiteral("command_line"),
-                QStringLiteral("queue_size"), QStringLiteral("queue_size"));
-            for (const QString& queueSection : queues)
-            {
-                const QString legacy = value(queueSection,
-                    QStringLiteral("steady_reserve_frames"));
-                if (legacy.isEmpty()) continue;
-                if (value(queueSection, QStringLiteral("target_frames")).isEmpty())
-                    document_->SetKnown(queueSection.toStdString(), "target_frames",
-                        legacy.toLocal8Bit().constData());
-                document_->RemoveKnown(queueSection.toStdString(),
-                    "steady_reserve_frames");
-                migrated = true;
-            }
-            if (migrated) markDirty();
-        }
-    }
+    // Legacy queue ownership is folded at load (runLoadMigrations); this
+    // covers a page rebuilt from a document that did not pass through it.
+    if (sectionPrefix == QStringLiteral("queue")) migrateLegacyQueueOwnership();
     struct Field
     {
         QString key;
@@ -10022,16 +10107,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				(field.key == QStringLiteral("calibration_lut_bt709") ||
                  field.key == QStringLiteral("calibration_lut_p3_d65") ||
                  field.key == QStringLiteral("calibration_lut_bt2020"));
+            // Display only: the stored value is normalised once at load by
+            // migrateProfileValueNormalisations (hunt 2, M2).
             if (calibrationLutSlot && !raw.isEmpty())
-            {
-                const QString normalized = QDir::fromNativeSeparators(raw);
-                if (normalized != raw)
-                {
-                    document_->SetKnown(section.toStdString(), field.key.toStdString().c_str(), normalized.toStdString());
-                    raw = normalized;
-                    markDirty();
-                }
-            }
+                raw = QDir::fromNativeSeparators(raw);
 			const bool requiresExplicitValue =
 				field.widget->property("requiresExplicitValue").toBool();
 			const bool scalingDownscaler =
@@ -10040,14 +10119,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			if (scalingDownscaler && !raw.isEmpty())
 			{
 				const QString normalized = raw.trimmed().toLower();
+                // These retired spellings resolve to the quality preset; the
+                // stored value is rewritten once at load (hunt 2, M2).
                 if (normalized == QStringLiteral("none") || normalized == QStringLiteral("ewa_lanczos"))
-				{
-                    // These retired spellings resolve to the quality preset.
-                    // Keep Auto explicit instead of inheriting a parent's named filter.
-                    document_->SetKnown(section.toStdString(), field.key.toStdString().c_str(), "AUTO");
                     raw = QStringLiteral("AUTO");
-					markDirty();
-				}
 			}
 			const bool viewportAspectLimit =
 				sectionPrefix == QStringLiteral("vprenderer.zoom") &&
@@ -10059,13 +10134,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				std::string parseError;
 				if (!AspectRatioParser::Parse(raw.toStdString(), 1.0, 4.0,
 					ignored, parseError))
-				{
-					// Optional limits are best-effort. Clean up any legacy or
-					// malformed value on the next save rather than carrying it on.
-					document_->RemoveKnown(section.toStdString(),
-						field.key.toStdString().c_str());
+					// Optional limits are best-effort; a malformed value is
+					// removed once at load (hunt 2, M2). Display it as unset.
 					raw.clear();
-				}
 			}
             const bool defaultOnlyRendererField = sectionPrefix == QStringLiteral("vprenderer") &&
                 (field.key == QStringLiteral("output_diagnostics") ||

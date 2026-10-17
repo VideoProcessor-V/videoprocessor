@@ -167,6 +167,9 @@ private:
     void migrateUnifiedColorOutputProfiles();
     void migrateCalibrationProfiles();
     void migrateViewportZoomProfiles();
+    // Hunt 2 (M1/M2): legacy queue keys and profile value rewrites, once at load.
+    void migrateLegacyQueueOwnership();
+    void migrateProfileValueNormalisations();
     // Every load-time migration, in order: construction, target switch,
     // Cancel / Discard and reloads all run the same sequence.
     void runLoadMigrations();
