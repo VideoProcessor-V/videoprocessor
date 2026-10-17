@@ -295,8 +295,9 @@ namespace Dejudder
 		// pass limit, where the final vector is the engine's (within a half-size pixel);
 		// missing extras (an older driver, the render-time engine, the searches) change
 		// nothing.
-		bool opticalFlowCostTrust = true;
-		bool opticalFlowFbCheck = true;
+		// corpus 2026-10-17: no measured benefit on real clips (cost trust identical; fb check trades removal for damage) - off by default, owner gate
+		bool opticalFlowCostTrust = false;
+		bool opticalFlowFbCheck = false;
 		// Tests only: the render-time engine's field read back (a stall) so the engine's
 		// whole-frame motion can be compared on corpora without a producer.
 		bool opticalFlowGlobalReadback = false;

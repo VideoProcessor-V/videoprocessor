@@ -1265,7 +1265,7 @@ namespace Tests
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
 				"ssim_bitrate_floor: 0.5\n", "dejudder_strength: 0.25\n", "dejudder_object_strength: 0.5\n",
 				// Integration 2026-10-17: the engine's extras, the grain switches, dv_tunnel_fixes.
-				"optical_flow_global_fallback: off\n", "optical_flow_cost_trust: off\n", "optical_flow_fb_check: off\n",
+				"optical_flow_global_fallback: off\n", "optical_flow_cost_trust: on\n", "optical_flow_fb_check: on\n",
 				"interpolation_grain: blend\n", "dejudder_source_warp_filter: bilinear\n", "deband_vp_grain_guard: off\n",
 				"deband_grain: on\n", "residual_stabilise_grain_guard: off\n", "dv_tunnel_fixes: off\n",
 				"a_key_not_invented_yet: 1\n" };
@@ -1315,7 +1315,7 @@ namespace Tests
 			const std::pair<const char*, const char*> defaults[] = {
 				{ "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
 				{ "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "residual_stabilise_grain_guard", "on" },
-				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
+				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
 				{ "dv_tunnel_fixes", "on" } };
 			for (const auto& entry : defaults)
 				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
@@ -1324,7 +1324,7 @@ namespace Tests
 			const std::pair<const char*, const char*> flips[] = {
 				{ "interpolation_grain", "blend" }, { "dejudder_source_warp_filter", "bilinear" },
 				{ "deband_vp_grain_guard", "off" }, { "deband_grain", "on" }, { "residual_stabilise_grain_guard", "off" },
-				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
+				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
 				{ "dv_tunnel_fixes", "off" } };
 			for (const auto& flip : flips)
 			{

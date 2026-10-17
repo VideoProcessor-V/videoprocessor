@@ -8074,13 +8074,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* opticalFlowCost = addChoice(QStringLiteral("Engine's match cost lowers trust"),
             QStringLiteral("optical_flow_cost_trust"), { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlowCost->setToolTip(QStringLiteral(
-            "On (default): the engine's own cost for each vector counts in the trust check - a less certain vector "
-            "counts as a worse match (tapered or held). Off: only VP's match error decides."));
+            "On: the engine's own cost for each vector counts in the trust check - a less certain vector "
+            "counts as a worse match (tapered or held). Off (default): only VP's match error decides "
+            "(on real clips it made no measurable difference, 2026-10-17)."));
         auto* opticalFlowFb = addChoice(QStringLiteral("Engine's forward/backward check"),
             QStringLiteral("optical_flow_fb_check"), { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlowFb->setToolTip(QStringLiteral(
-            "On (default): the engine's forward and backward vectors must agree for a vector to be fully trusted "
-            "(occlusions and failed matches show as disagreement). Off: not checked."));
+            "On: the engine's forward and backward vectors must agree for a vector to be fully trusted "
+            "(occlusions and failed matches show as disagreement): about 6% less damage for about 1-2% less "
+            "judder removed on real clips. Off (default): not checked."));
         auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlow->setToolTip(QStringLiteral(
@@ -9808,7 +9810,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
                     { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
-                    { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
+                    { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
                     { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
                     { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" },
                     { "dv_tunnel_fixes", "on" },

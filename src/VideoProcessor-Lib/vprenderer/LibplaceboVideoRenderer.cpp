@@ -1115,8 +1115,9 @@ namespace
 		// engine's whole-frame motion is not clear; the engine's cost and its own forward/
 		// backward consistency as trust inputs (Dejudder::Settings).
 		bool opticalFlowGlobalFallback = true;
-		bool opticalFlowCostTrust = true;
-		bool opticalFlowFbCheck = true;
+		// corpus 2026-10-17: no measured benefit on real clips (cost trust identical; fb check trades removal for damage) - off by default, owner gate
+		bool opticalFlowCostTrust = false;
+		bool opticalFlowFbCheck = false;
 		// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md; owner
 		// defaults 2026-10-16, open for confirmation): off | auto (a non-integer
 		// source/display ratio only) | always (smooth-motion parity for video-class

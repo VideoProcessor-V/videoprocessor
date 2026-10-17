@@ -1,3 +1,5 @@
+﻿> SUPERSEDED 2026-10-17 by docs/VP-roadmap-2026-2031.md (rebuilt against the owner's updated goals). Kept for history.
+
 # VP fidelity roadmap 2026-2031 (draft for the owner, 2026-10-16 night)
 
 Owner goal: scaling software that earns its keep for 5+ years (DV2, a new display) - highest fidelity
