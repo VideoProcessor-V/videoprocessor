@@ -9,7 +9,11 @@
 #include "CR210DolbyVisionTunnelFormatter.h"
 
 #include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <string>
 
 namespace
 {
@@ -19,8 +23,33 @@ namespace
 	constexpr size_t kPacketBytes = 128;
 	constexpr size_t kRepeats = 3;
 	constexpr size_t kMaxMetadataBytes = 0x2F00;
-	constexpr uint32_t kPacketLossLimit = 24;
 	constexpr uint32_t kDiagnosticInterval = 600;
+	// audit 2026-10-16: time-based limits, converted to pictures from the
+	// display mode's measured rate (never a fixed frame count). The loss
+	// limit equals the original 24 pictures at 23.976 Hz.
+	constexpr double kPacketLossSeconds = 24.0 * 1001.0 / 24000.0;
+	// Black is shown for this long before a header-less, non-tunnel-looking
+	// signal is accepted as SDR (same-mode SDR switch without EOS).
+	constexpr double kSdrFallbackSeconds = 2.0;
+	// ETSI metadata IDs are 4-bit and wrap after 16 values. The sender can
+	// advance the current ID by at most one per picture (affected is current
+	// or current+1), so an ID equality across 16 or more pictures without a
+	// header cannot prove continuity: the ID may have wrapped back.
+	constexpr uint32_t kMetadataIdModulus = 16;
+
+	// Modular (mod-16) forward distance from one metadata ID to another.
+	uint8_t MetadataIdDistance(uint8_t from, uint8_t to)
+	{
+		return static_cast<uint8_t>((to - from) & (kMetadataIdModulus - 1U));
+	}
+
+	uint32_t ReadLittleEndian32(const uint8_t* bytes)
+	{
+		return (static_cast<uint32_t>(bytes[3]) << 24) |
+			(static_cast<uint32_t>(bytes[2]) << 16) |
+			(static_cast<uint32_t>(bytes[1]) << 8) |
+			static_cast<uint32_t>(bytes[0]);
+	}
 
 	uint32_t ReadBigEndian32(const uint8_t* bytes)
 	{
@@ -80,7 +109,9 @@ namespace
 
 	// Equivalent to the original RGB8 unpack and 12-bit I/C reconstruction.
 	// Keep each shift constant inside the hot loop for the scalar fallback.
-	template<unsigned Shift>
+	// audit 2026-10-16: Shift 0/2 = r210 low8/high8; 2/4 = R10b/R10l
+	// low8/high8 (R10 word = r210 word << 2). LittleEndian selects R10l.
+	template<unsigned Shift, bool LittleEndian = false>
 	void ConvertRowsScalar(const uint8_t* source, uint16_t* output,
 		uint32_t width, uint32_t height, uint32_t stride,
 		uint32_t firstRow, uint32_t rowCount)
@@ -93,7 +124,9 @@ namespace
 			uint16_t* uv = output + planePixels + static_cast<size_t>(row) * width;
 			for (uint32_t x = 0; x < width; ++x)
 			{
-				const uint32_t p = ReadBigEndian32(input + static_cast<size_t>(x) * 4);
+				const uint32_t p = LittleEndian ?
+					ReadLittleEndian32(input + static_cast<size_t>(x) * 4) :
+					ReadBigEndian32(input + static_cast<size_t>(x) * 4);
 				y[x] = static_cast<uint16_t>(
 					((p >> (2 + Shift)) & 0xFF00U) |
 					((p << (4 - Shift)) & 0xF0U));
@@ -123,12 +156,80 @@ namespace
 		result.currentId = packet[1] & 15U;
 		result.endOfStream = (packet[2] & 1U) != 0;
 		result.noMetadata = (packet[0] & 1U) != 0;
-		return result.affectedId == result.currentId ||
-			result.affectedId == ((result.currentId + 1U) & 15U);
+		// audit 2026-10-16: modular comparison (15 -> 0 is the next ID).
+		return MetadataIdDistance(result.currentId, result.affectedId) <= 1U;
+	}
+
+	// audit 2026-10-16: first L2/L8 payload bytes, for one log line per title
+	// so a live run can verify the assumed container layout.
+	struct RawTrimPayload
+	{
+		bool present = false;
+		size_t length = 0;
+		uint8_t bytes[32] = {};
+	};
+
+	// audit 2026-10-16: generic L2/L8 trim parser (not applied). Containers
+	// follow the existing L1 convention: big-endian 16-bit fields.
+	//   L2: target_max_PQ, slope, offset, power, chroma_weight,
+	//       saturation_gain, ms_weight(signed)                     = 14 bytes
+	//   L8: target_display_index(u8), slope, offset, power, chroma_weight,
+	//       saturation_gain, ms_weight(signed)                     = 13 bytes
+	//       [+ target_mid_contrast, clip_trim] [+ 6 saturation] [+ 6 hue]
+	// A short/odd trim block is skipped; it never rejects the DM.
+	bool ParseTrim(const uint8_t* payload, size_t length, uint8_t level,
+		DolbyVisionTunnelFrameMetadata::Trim& trim)
+	{
+		trim = DolbyVisionTunnelFrameMetadata::Trim();
+		trim.level = level;
+		size_t at = 0;
+		if (level == 2)
+		{
+			if (length < 14)
+				return false;
+			trim.targetMaxPq = ReadUnsigned16(payload);
+			at = 2;
+		}
+		else
+		{
+			if (length < 13)
+				return false;
+			trim.targetDisplayIndex = payload[0];
+			at = 1;
+		}
+		trim.slope = ReadUnsigned16(payload + at);
+		trim.offset = ReadUnsigned16(payload + at + 2);
+		trim.power = ReadUnsigned16(payload + at + 4);
+		trim.chromaWeight = ReadUnsigned16(payload + at + 6);
+		trim.saturationGain = ReadUnsigned16(payload + at + 8);
+		trim.msWeight = ReadSigned16(payload + at + 10);
+		at += 12;
+		if (level == 8)
+		{
+			if (length >= at + 4)
+			{
+				trim.hasMidContrastAndClip = true;
+				trim.midContrast = ReadUnsigned16(payload + at);
+				trim.clipTrim = ReadUnsigned16(payload + at + 2);
+				at += 4;
+			}
+			if (length >= at + 6)
+			{
+				trim.hasSaturationVector = true;
+				memcpy(trim.saturationVector, payload + at, 6);
+				at += 6;
+			}
+			if (length >= at + 6)
+			{
+				trim.hasHueVector = true;
+				memcpy(trim.hueVector, payload + at, 6);
+			}
+		}
+		return true;
 	}
 
 	bool ParseMetadata(const uint8_t* dm, size_t length, ParsedPacket& result,
-		std::array<bool, 256>& extensionLevels)
+		std::array<uint16_t, 256>& extensionLevels, RawTrimPayload* rawTrims)
 	{
 		if (length < 71)
 			return false;
@@ -167,7 +268,25 @@ namespace
 			if (payloadLength > length - extension - 5)
 				return false;
 			const size_t end = extension + 5 + payloadLength;
-			extensionLevels[level] = true;
+			if (extensionLevels[level] != (std::numeric_limits<uint16_t>::max)())
+				++extensionLevels[level]; // audit 2026-10-16: block count per level
+			if (level == 2 || level == 8)
+			{
+				const uint8_t* payload = dm + extension + 5;
+				RawTrimPayload& raw = rawTrims[level == 2 ? 0 : 1];
+				if (!raw.present)
+				{
+					raw.present = true;
+					raw.length = payloadLength;
+					memcpy(raw.bytes, payload, (std::min)(static_cast<size_t>(payloadLength),
+						sizeof(raw.bytes)));
+				}
+				if (parsed.trimCount >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
+					parsed.trimOverflow = true;
+				else if (ParseTrim(payload, payloadLength, level,
+					parsed.trims[parsed.trimCount]))
+					++parsed.trimCount;
+			}
 			if (level == 1)
 			{
 				if (payloadLength != 6)
@@ -178,6 +297,7 @@ namespace
 				if (sceneMin > 4095 || sceneMax > 4095 || sceneAvg > 4095)
 					return false;
 				parsed.hasSceneMetadata = true;
+				parsed.sceneMinPq = sceneMin; // audit 2026-10-16: no longer dropped
 				parsed.sceneMaxPq = sceneMax;
 				parsed.sceneAvgPq = sceneAvg;
 			}
@@ -185,6 +305,39 @@ namespace
 		}
 		result.metadata = parsed;
 		return true;
+	}
+
+	// audit 2026-10-16: SMPTE ST 2084 code -> nits, for log lines only.
+	double PqCodeToNits(uint16_t code)
+	{
+		const double m1 = 0.1593017578125, m2 = 78.84375;
+		const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+		const double p = std::pow(static_cast<double>(code) / 4095.0, 1.0 / m2);
+		const double numerator = (std::max)(p - c1, 0.0);
+		return 10000.0 * std::pow(numerator / (c2 - c3 * p), 1.0 / m1);
+	}
+
+	std::string FormatLevelCount(uint16_t count)
+	{
+		if (count == 0)
+			return "no";
+		if (count == 1)
+			return "yes";
+		char text[16];
+		snprintf(text, sizeof(text), "x%u", static_cast<unsigned>(count));
+		return text;
+	}
+
+	std::string HexBytes(const uint8_t* bytes, size_t count)
+	{
+		std::string text;
+		char item[4];
+		for (size_t i = 0; i < count; ++i)
+		{
+			snprintf(item, sizeof(item), "%02X", bytes[i]);
+			text += item;
+		}
+		return text;
 	}
 }
 
@@ -211,10 +364,15 @@ CR210DolbyVisionTunnelFormatter::~CR210DolbyVisionTunnelFormatter()
 
 void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 {
+	// audit 2026-10-16: R10b/R10l hold the same 10-bit RGB fields as r210,
+	// two bits higher. Only a CRC-valid packet proves that the card stored
+	// the tunnel's RGB8 bytes exactly; otherwise DV never locks.
 	if (!state || !state->displayMode ||
-		state->videoFrameEncoding != VideoFrameEncoding::R210 ||
+		(state->videoFrameEncoding != VideoFrameEncoding::R210 &&
+			state->videoFrameEncoding != VideoFrameEncoding::R10b &&
+			state->videoFrameEncoding != VideoFrameEncoding::R10l) ||
 		!state->dolbyVisionTunnel)
-		throw std::runtime_error("Dolby Vision tunnel requires enabled R210 capture");
+		throw std::runtime_error("Dolby Vision tunnel requires enabled r210, R10b or R10l capture");
 	const auto width = state->displayMode->FrameWidth();
 	const auto height = state->displayMode->FrameHeight();
 	if (width <= 0 || height <= 0 || (width & 1) != 0)
@@ -255,8 +413,184 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 	m_hasActiveMetadataId = false;
 	m_endOfStreamAfterCounter = 0;
 	m_hasEndOfStream = false;
+	// audit 2026-10-16: container, timing and time-based limits come from
+	// the display mode (any rate/raster the tunnel carries; no fixed 4K23.976).
+	m_wordLayout = state->videoFrameEncoding == VideoFrameEncoding::R10b ?
+		WordLayout::R10_BIG_ENDIAN :
+		state->videoFrameEncoding == VideoFrameEncoding::R10l ?
+		WordLayout::R10_LITTLE_ENDIAN : WordLayout::R210;
+	// The tunnel is a progressive raster; a woven interlaced frame would
+	// scramble the packet/raster order. Never lock DV on it (SDR only).
+	m_tunnelCapable = !state->displayMode->IsInterlaced();
+	const double rate = state->displayMode->RefreshRateHz();
+	m_frameRate = rate > 0 ? rate : 24000.0 / 1001.0;
+	m_packetLossLimit = static_cast<uint32_t>((std::max)(1.0,
+		std::floor(m_frameRate * kPacketLossSeconds + 0.5)));
+	m_sdrFallbackFrames = static_cast<uint64_t>((std::max)(2.0,
+		std::ceil(m_frameRate * kSdrFallbackSeconds - 1e-9)));
+	m_sdrSuspect = false;
+	m_sdrSuspectStartCounter = 0;
+	m_lastHeaderCounter = 0;
+	m_hasLastHeaderCounter = false;
+	m_idAmbiguityResets = 0;
+	m_majorityRecoveries = 0;
+	BeginTitle();
 	DebugLog::Log("Dolby Vision RGB tunnel unpack: %s, row workers=%u",
 		m_hasAVX2 ? "AVX2" : "scalar", m_workerCount);
+	DebugLog::Log("Dolby Vision RGB tunnel: container=%s %ux%u%s %.3f Hz; loss limit=%u pictures; SDR exit without EOS after %llu header-less non-tunnel pictures%s",
+		m_wordLayout == WordLayout::R210 ? "r210" :
+		m_wordLayout == WordLayout::R10_BIG_ENDIAN ? "R10b" : "R10l",
+		m_width, m_height, m_tunnelCapable ? "p" : "i", m_frameRate,
+		m_packetLossLimit, static_cast<unsigned long long>(m_sdrFallbackFrames),
+		m_tunnelCapable ? "" : "; interlaced: DV lock disabled, SDR passthrough only");
+}
+
+uint32_t CR210DolbyVisionTunnelFormatter::ReadTunnelWord(
+	const uint8_t* source, size_t pixel) const
+{
+	// audit 2026-10-16: returns the r210 layout [00 R10 G10 B10] for every
+	// supported container (R10 words carry two padding bits at the bottom).
+	const size_t y = pixel / m_width;
+	const size_t x = pixel % m_width;
+	const uint8_t* bytes = source + y * m_stride + x * 4;
+	if (m_wordLayout == WordLayout::R10_BIG_ENDIAN)
+		return ReadBigEndian32(bytes) >> 2;
+	if (m_wordLayout == WordLayout::R10_LITTLE_ENDIAN)
+		return ReadLittleEndian32(bytes) >> 2;
+	return ReadBigEndian32(bytes);
+}
+
+bool CR210DolbyVisionTunnelFormatter::ReadPacketCopies(const uint8_t* source,
+	size_t index, bool leftAligned, uint8_t* packet)
+{
+	uint8_t copies[kRepeats][kPacketBytes];
+	for (size_t copy = 0; copy < kRepeats; ++copy)
+	{
+		uint8_t* bytes = copies[copy];
+		memset(bytes, 0, kPacketBytes);
+		for (size_t bit = 0; bit < kPacketBits; ++bit)
+		{
+			const Rgb8 rgb = DecodeRgb(ReadTunnelWord(source,
+				(index * kRepeats + copy) * kPacketBits + bit), leftAligned);
+			bytes[bit / 8] |= static_cast<uint8_t>(Parity(
+				(static_cast<uint32_t>(rgb.r) << 16) |
+				(static_cast<uint32_t>(rgb.g) << 8) | rgb.b) << (7 - bit % 8));
+		}
+		if (PacketCrc(bytes) == 0)
+		{
+			if (copy != 0)
+				++m_recoveredPackets;
+			memcpy(packet, bytes, kPacketBytes);
+			return true;
+		}
+		++m_crcFailedCopies;
+	}
+	// audit 2026-10-16: when every copy has (different) bit errors, a
+	// bitwise 2-of-3 vote can still rebuild the packet. The CRC remains the
+	// only authority, so this never accepts an unverified packet.
+	for (size_t i = 0; i < kPacketBytes; ++i)
+	{
+		const uint8_t a = copies[0][i], b = copies[1][i], c = copies[2][i];
+		packet[i] = static_cast<uint8_t>((a & b) | (a & c) | (b & c));
+	}
+	if (PacketCrc(packet) == 0)
+	{
+		++m_majorityRecoveries;
+		return true;
+	}
+	return false;
+}
+
+bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnel(const uint8_t* source) const
+{
+	// audit 2026-10-16: cheap content check, evaluated only while a locked
+	// tunnel has no CRC-valid header. In the RGB8 tunnel G = I[11:4] (smooth,
+	// like luma), R = C[11:4] (near neutral 128 for most content) and
+	// B = C[3:0]<<4 | I[3:0] (low nibbles: close to random between
+	// neighbours; Cb/Cr alternate per pixel). Ordinary RGB has B about as
+	// smooth as G, and R follows brightness. Black (all-zero) RGB fails both.
+	// Conservative by design: a false "still tunnel" only prolongs black,
+	// a false "not tunnel" would show packed pixels. Both byte placements are
+	// evaluated (flat tunnel content can CRC-validate in either placement),
+	// and either cue in either placement counts as tunnel content.
+	if (m_width < 2 || m_height == 0)
+		return true;
+	const uint32_t rows = (std::min)(m_height, 64U);
+	const uint32_t pairsPerRow = (std::min)(m_width / 2, 128U);
+	uint64_t roughB[2] = {}, roughG[2] = {}, neutral[2] = {}, pairs = 0;
+	for (uint32_t r = 0; r < rows; ++r)
+	{
+		const size_t y = (static_cast<size_t>(r) * 2 + 1) * m_height / (rows * 2);
+		for (uint32_t c = 0; c < pairsPerRow; ++c)
+		{
+			const size_t x = ((static_cast<size_t>(c) * 2 + 1) * (m_width / 2) /
+				(pairsPerRow * 2)) * 2;
+			const uint32_t words[2] = {
+				ReadTunnelWord(source, y * m_width + x),
+				ReadTunnelWord(source, y * m_width + x + 1) };
+			++pairs;
+			for (size_t placement = 0; placement < 2; ++placement)
+			{
+				const bool leftAligned = placement == 1;
+				const Rgb8 first = DecodeRgb(words[0], leftAligned);
+				const Rgb8 second = DecodeRgb(words[1], leftAligned);
+				roughB[placement] += static_cast<uint64_t>(std::abs(
+					static_cast<int>(first.b) - static_cast<int>(second.b)));
+				roughG[placement] += static_cast<uint64_t>(std::abs(
+					static_cast<int>(first.g) - static_cast<int>(second.g)));
+				neutral[placement] +=
+					(std::abs(static_cast<int>(first.r) - 128) <= 32 ? 1U : 0U) +
+					(std::abs(static_cast<int>(second.r) - 128) <= 32 ? 1U : 0U);
+			}
+		}
+	}
+	if (pairs == 0)
+		return true;
+	for (size_t placement = 0; placement < 2; ++placement)
+	{
+		// Noisy low nibbles in B while G stays comparatively smooth.
+		if (roughB[placement] >= 16 * pairs &&
+			roughB[placement] >= 3 * roughG[placement] + pairs)
+			return true;
+		// Near-neutral R (tunnel chroma high byte) on most samples, at any
+		// brightness. Also keeps flat grey SDR black: safe, just slower.
+		if (neutral[placement] * 10 >= pairs * 2 * 8)
+			return true;
+	}
+	return false;
+}
+
+void CR210DolbyVisionTunnelFormatter::BeginTitle()
+{
+	// audit 2026-10-16: a "title" is one DV lock (lock .. EOS / SDR exit /
+	// video-state reset). Extension levels are summarised once per title.
+	m_titleLevelCounts.fill(0);
+	m_titleLevelsLogged = false;
+	m_titleTrimLogged[0] = m_titleTrimLogged[1] = false;
+}
+
+void CR210DolbyVisionTunnelFormatter::LogTitleLevels(const char* reason)
+{
+	std::string other;
+	for (size_t level = 0; level < m_titleLevelCounts.size(); ++level)
+	{
+		const bool named = (level >= 1 && level <= 6) ||
+			(level >= 8 && level <= 11) || level == 254;
+		if (named || m_titleLevelCounts[level] == 0)
+			continue;
+		char item[32];
+		snprintf(item, sizeof(item), "%sL%u:%s", other.empty() ? "" : ",",
+			static_cast<unsigned>(level), FormatLevelCount(m_titleLevelCounts[level]).c_str());
+		other += item;
+	}
+	DebugLog::Log("Dolby Vision RGB tunnel: title DM extension levels (%s): L1=%s L2=%s L3=%s L4=%s L5=%s L6=%s L8=%s L9=%s L10=%s L11=%s L254=%s other=%s (L1 applied; L2/L8 parsed, not applied; xN = blocks per DM)",
+		reason,
+		FormatLevelCount(m_titleLevelCounts[1]).c_str(), FormatLevelCount(m_titleLevelCounts[2]).c_str(),
+		FormatLevelCount(m_titleLevelCounts[3]).c_str(), FormatLevelCount(m_titleLevelCounts[4]).c_str(),
+		FormatLevelCount(m_titleLevelCounts[5]).c_str(), FormatLevelCount(m_titleLevelCounts[6]).c_str(),
+		FormatLevelCount(m_titleLevelCounts[8]).c_str(), FormatLevelCount(m_titleLevelCounts[9]).c_str(),
+		FormatLevelCount(m_titleLevelCounts[10]).c_str(), FormatLevelCount(m_titleLevelCounts[11]).c_str(),
+		FormatLevelCount(m_titleLevelCounts[254]).c_str(), other.empty() ? "none" : other.c_str());
 }
 
 bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
@@ -265,6 +599,7 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	if (!frame.GetData() || !output || m_outputSize <= 0)
 		return false;
 	const auto* source = static_cast<const uint8_t*>(frame.GetData());
+	const uint64_t counter = frame.GetCounter(); // audit 2026-10-16
 	// EOS changes the immediate next picture to SDR even when its packet
 	// has no metadata body. A source counter gap can skip that picture, but
 	// every later captured picture is still beyond the HDR stream boundary.
@@ -276,6 +611,8 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 		m_hasPendingMetadata = false;
 		m_hasEndOfStream = false;
 		m_tunnelConfirmed = false;
+		m_sdrSuspect = false; // audit 2026-10-16
+		BeginTitle();         // audit 2026-10-16: EOS ends the title
 		DebugLog::Log("Dolby Vision RGB tunnel: EOS boundary; allowing SDR RGB passthrough");
 	}
 	// A packet may announce new DM metadata for the immediate next picture.
@@ -289,11 +626,10 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 		m_hasActiveMetadataId = true;
 		m_hasPendingMetadata = false;
 	}
+	// audit 2026-10-16: container-independent word read (r210 layout).
 	auto readWord = [this, source](size_t pixel)
 	{
-		const size_t y = pixel / m_width;
-		const size_t x = pixel % m_width;
-		return ReadBigEndian32(source + y * m_stride + x * 4);
+		return ReadTunnelWord(source, pixel);
 	};
 
 	bool acceptedMetadata = false;
@@ -308,27 +644,9 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	{
 		if (index >= availablePackets)
 			return false;
-		for (size_t copy = 0; copy < kRepeats; ++copy)
-		{
-			packet.fill(0);
-			for (size_t bit = 0; bit < kPacketBits; ++bit)
-			{
-				const Rgb8 rgb = DecodeRgb(readWord(
-					(index * kRepeats + copy) * kPacketBits + bit),
-					candidate == ByteAlignment::LEFT);
-				packet[bit / 8] |= static_cast<uint8_t>(Parity(
-					(static_cast<uint32_t>(rgb.r) << 16) |
-					(static_cast<uint32_t>(rgb.g) << 8) | rgb.b) << (7 - bit % 8));
-			}
-			if (PacketCrc(packet.data()) == 0)
-			{
-				if (copy != 0)
-					++m_recoveredPackets;
-				return true;
-			}
-			++m_crcFailedCopies;
-		}
-		return false;
+		// audit 2026-10-16: copies + 2-of-3 majority, see ReadPacketCopies.
+		return ReadPacketCopies(source, index,
+			candidate == ByteAlignment::LEFT, packet.data());
 	};
 
 	// Prefer the current alignment so normal low8 capture does not probe a
@@ -338,12 +656,32 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	for (const ByteAlignment candidate : { firstCandidate,
 		firstCandidate == ByteAlignment::LEFT ? ByteAlignment::RIGHT : ByteAlignment::LEFT })
 	{
+		if (!m_tunnelCapable)
+			break; // audit 2026-10-16: interlaced raster never locks DV
 		std::array<uint8_t, kPacketBytes> packet{};
 		ParsedPacket parsed;
 		if (!readPacket(0, candidate, packet) ||
 			(packet[0] >> 6) > 1 || !ParseHeader(packet.data(), parsed))
 			continue;
 		supportedHeader = true;
+		// audit 2026-10-16: metadata-ID wrap guard. IDs are mod 16 and move
+		// at most one step per picture, so after 16+ pictures without a
+		// header an equal ID may have wrapped all the way round. The cached
+		// active/pending DM then cannot be associated by ID: require fresh DM.
+		if (m_hasLastHeaderCounter &&
+			(counter < m_lastHeaderCounter ||
+				counter - m_lastHeaderCounter >= kMetadataIdModulus) &&
+			(m_hasActiveMetadataId || m_hasPendingMetadata))
+		{
+			DebugLog::Log("Dolby Vision RGB tunnel: %llu pictures since the last valid header; 4-bit metadata IDs may have wrapped, cached DM discarded until fresh DM",
+				static_cast<unsigned long long>(counter - m_lastHeaderCounter));
+			m_metadata = {};
+			m_hasActiveMetadataId = false;
+			m_hasPendingMetadata = false;
+			++m_idAmbiguityResets;
+		}
+		m_lastHeaderCounter = counter;
+		m_hasLastHeaderCounter = true;
 		if (m_haveDiagnosticIds && (parsed.currentId != m_lastCurrentId ||
 			parsed.affectedId != m_lastAffectedId))
 			++m_metadataIdTransitions;
@@ -353,7 +691,10 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 		if (!m_tunnelConfirmed || m_alignment != candidate)
 			DebugLog::Log("Dolby Vision RGB tunnel: CRC-validated r210 RGB8 alignment=%s",
 				candidate == ByteAlignment::LEFT ? "high8" : "low8");
+		if (!m_tunnelConfirmed)
+			BeginTitle(); // audit 2026-10-16: a new DV lock starts a title
 		m_tunnelConfirmed = true;
+		m_sdrSuspect = false;
 		m_alignment = candidate;
 		// Header information remains usable even if a later packet fails.
 		if (m_hasPendingMetadata)
@@ -382,7 +723,8 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 
 		size_t length = 0;
 		size_t packetCount = 1;
-		std::array<bool, 256> extensionLevels{};
+		std::array<uint16_t, 256> extensionLevels{}; // audit 2026-10-16: block counts
+		RawTrimPayload rawTrims[2];
 		if (!parsed.noMetadata)
 		{
 			length = ReadUnsigned16(packet.data() + 3);
@@ -424,14 +766,14 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 			}
 			if (!complete || copied != length)
 				break;
-			if (!ParseMetadata(body.data(), length, parsed, extensionLevels))
+			if (!ParseMetadata(body.data(), length, parsed, extensionLevels, rawTrims))
 			{
 				failureReason = "unsupported/malformed metadata body";
 				break;
 			}
 		}
 
-		if (m_missingPacketReported && m_missingPacketFrames >= kPacketLossLimit)
+		if (m_missingPacketReported && m_missingPacketFrames >= m_packetLossLimit)
 			DebugLog::Log("Dolby Vision RGB tunnel: metadata transport recovered after %u rejected/missing pictures; fresh_DM=%s",
 				m_missingPacketFrames, parsed.noMetadata ? "no" : "yes");
 		if (!parsed.noMetadata && (packetCount != m_lastPacketCount ||
@@ -447,8 +789,62 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 			if (extensionLevels[level] && !m_seenExtensionLevels[level])
 			{
 				DebugLog::Log("Dolby Vision RGB tunnel: extension L%zu %s",
-					level, level == 1 ? "scene PQ values applied" : "recognized in transport; not applied");
+					level, level == 1 ? "scene PQ values applied" :
+					(level == 2 || level == 8) ? "trims parsed; not applied" :
+					"recognized in transport; not applied");
 				m_seenExtensionLevels[level] = true;
+			}
+		}
+		// audit 2026-10-16: one compact per-title line answering "which levels
+		// arrive", repeated only if a new level appears later in the title,
+		// plus the first L2 / L8 block (decoded + raw) to verify the layout.
+		if (!parsed.noMetadata)
+		{
+			bool newTitleLevel = false;
+			for (size_t level = 0; level < extensionLevels.size(); ++level)
+			{
+				if (extensionLevels[level] == 0)
+					continue;
+				if (m_titleLevelCounts[level] == 0)
+					newTitleLevel = true;
+				m_titleLevelCounts[level] = (std::max)(m_titleLevelCounts[level],
+					extensionLevels[level]);
+			}
+			if (!m_titleLevelsLogged)
+			{
+				LogTitleLevels("first complete DM");
+				m_titleLevelsLogged = true;
+			}
+			else if (newTitleLevel)
+				LogTitleLevels("new level in title");
+			for (unsigned slot = 0; slot < 2; ++slot)
+			{
+				const uint8_t level = slot == 0 ? 2 : 8;
+				if (!rawTrims[slot].present || m_titleTrimLogged[slot])
+					continue;
+				m_titleTrimLogged[slot] = true;
+				const DolbyVisionTunnelFrameMetadata::Trim* trim = nullptr;
+				for (uint8_t t = 0; t < parsed.metadata.trimCount; ++t)
+				{
+					if (parsed.metadata.trims[t].level == level)
+					{
+						trim = &parsed.metadata.trims[t];
+						break;
+					}
+				}
+				const std::string raw = HexBytes(rawTrims[slot].bytes,
+					(std::min)(rawTrims[slot].length, sizeof(rawTrims[slot].bytes)));
+				if (trim)
+					DebugLog::Log("Dolby Vision RGB tunnel: first L%u trim (not applied): target_max_pq=%u (%.0f nits) target_index=%u slope=%u offset=%u power=%u chroma_weight=%u saturation_gain=%u ms_weight=%d%s payload_bytes=%zu raw=%s",
+						static_cast<unsigned>(level), trim->targetMaxPq,
+						level == 2 ? PqCodeToNits(static_cast<uint16_t>((std::min)(trim->targetMaxPq, uint16_t(4095)))) : 0.0,
+						trim->targetDisplayIndex, trim->slope, trim->offset, trim->power,
+						trim->chromaWeight, trim->saturationGain, static_cast<int>(trim->msWeight),
+						trim->hasMidContrastAndClip ? " (+mid_contrast/clip)" : "",
+						rawTrims[slot].length, raw.c_str());
+				else
+					DebugLog::Log("Dolby Vision RGB tunnel: first L%u block too short for the assumed trim layout: payload_bytes=%zu raw=%s",
+						static_cast<unsigned>(level), rawTrims[slot].length, raw.c_str());
 			}
 		}
 		parsed.metadata.rgbBitAlignment = candidate == ByteAlignment::LEFT ? 1 : 2;
@@ -484,7 +880,7 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 		++m_rejectedFrames;
 		if (m_missingPacketFrames != (std::numeric_limits<uint32_t>::max)())
 			++m_missingPacketFrames;
-		if (!m_missingPacketReported && m_missingPacketFrames >= kPacketLossLimit)
+		if (!m_missingPacketReported && m_missingPacketFrames >= m_packetLossLimit)
 		{
 			DebugLog::Log("Dolby Vision RGB tunnel: %u pictures without usable metadata (last_header=%s reason=%s); %s",
 				m_missingPacketFrames, supportedHeader ? "CRC-valid" : "missing/CRC-invalid", failureReason,
@@ -492,21 +888,57 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 				"no DV lock; allowing SDR RGB8 when alignment is known");
 			m_missingPacketReported = true;
 		}
-		if (m_tunnelConfirmed && m_missingPacketFrames >= kPacketLossLimit)
+		if (m_tunnelConfirmed && m_missingPacketFrames >= m_packetLossLimit)
 		{
 			m_metadata = {};
 			m_hasActiveMetadataId = false;
 			m_hasPendingMetadata = false;
 		}
 	}
+	// audit 2026-10-16: safe exit for a same-mode SDR switch without EOS.
+	// CRC loss alone still never authorizes SDR (a damaged tunnel looks the
+	// same). Only when, for kSdrFallbackSeconds of capture time (counted in
+	// source pictures, so drops count too), no picture has had a CRC-valid
+	// header AND no picture has looked like tunnel content, is the signal
+	// accepted as SDR. Black is presented throughout the uncertainty window.
+	if (m_tunnelConfirmed && !supportedHeader)
+	{
+		if (LooksLikeTunnel(source))
+			m_sdrSuspect = false;
+		else if (!m_sdrSuspect || counter < m_sdrSuspectStartCounter)
+		{
+			m_sdrSuspect = true;
+			m_sdrSuspectStartCounter = counter;
+		}
+		if (m_sdrSuspect &&
+			counter - m_sdrSuspectStartCounter + 1 >= m_sdrFallbackFrames)
+		{
+			DebugLog::Log("Dolby Vision RGB tunnel: no CRC-valid header and no tunnel-like content for %llu pictures (%.2f s at %.3f Hz) without EOS; treating source as SDR",
+				static_cast<unsigned long long>(counter - m_sdrSuspectStartCounter + 1),
+				static_cast<double>(counter - m_sdrSuspectStartCounter + 1) / m_frameRate,
+				m_frameRate);
+			m_metadata = {};
+			m_hasActiveMetadataId = false;
+			m_hasPendingMetadata = false;
+			m_hasEndOfStream = false;
+			m_tunnelConfirmed = false;
+			m_sdrSuspect = false;
+			m_currentPictureHasValidHeader = false;
+			BeginTitle();
+		}
+	}
+	else
+		m_sdrSuspect = false;
 	if (++m_diagnosticFrames >= kDiagnosticInterval)
 	{
-		DebugLog::Log("Dolby Vision RGB tunnel: last %u pictures: rejected=%u no_md=%u CRC_failed_copies=%u repeat_recoveries=%u id_transitions=%u current_id=%u affected_id=%u active_DM=%s",
+		DebugLog::Log("Dolby Vision RGB tunnel: last %u pictures: rejected=%u no_md=%u CRC_failed_copies=%u repeat_recoveries=%u majority_recoveries=%u id_transitions=%u id_wrap_resets=%u current_id=%u affected_id=%u active_DM=%s",
 			m_diagnosticFrames, m_rejectedFrames, m_noMetadataFrames,
-			m_crcFailedCopies, m_recoveredPackets, m_metadataIdTransitions,
+			m_crcFailedCopies, m_recoveredPackets, m_majorityRecoveries,
+			m_metadataIdTransitions, m_idAmbiguityResets,
 			m_lastCurrentId, m_lastAffectedId, m_metadata.valid ? "yes" : "no");
 		m_diagnosticFrames = m_rejectedFrames = m_noMetadataFrames = 0;
 		m_crcFailedCopies = m_recoveredPackets = m_metadataIdTransitions = 0;
+		m_majorityRecoveries = m_idAmbiguityResets = 0;
 	}
 	if (m_alignment == ByteAlignment::UNKNOWN)
 	{
@@ -577,6 +1009,28 @@ void CR210DolbyVisionTunnelFormatter::ConvertRows(
 	if (m_hasAVX2 && m_conversionMethod != ConversionMethod::SCALAR)
 	{
 		ConvertRowsAVX2(source, output, firstRow, rowCount, leftAligned);
+		return;
+	}
+	// audit 2026-10-16: R10b/R10l = r210 masks with Shift + 2 (R10l also
+	// little-endian). The r210 branch below is unchanged.
+	if (m_wordLayout == WordLayout::R10_BIG_ENDIAN)
+	{
+		if (leftAligned)
+			ConvertRowsScalar<4>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		else
+			ConvertRowsScalar<2>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		return;
+	}
+	if (m_wordLayout == WordLayout::R10_LITTLE_ENDIAN)
+	{
+		if (leftAligned)
+			ConvertRowsScalar<4, true>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		else
+			ConvertRowsScalar<2, true>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
 		return;
 	}
 	if (leftAligned)
