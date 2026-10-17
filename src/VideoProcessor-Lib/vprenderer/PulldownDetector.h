@@ -594,7 +594,27 @@ namespace Pulldown
 	public:
 		static constexpr double kWindowSeconds = 2.0;
 
-		void Reset() { m_offsets.clear(); }
+		void Reset()
+		{
+			m_offsets.clear();
+			m_baseIndex = 0;
+			m_baseTime = 0.0;
+			m_filmHz = 0.0;
+			m_lastIndex = 0;
+			m_lastIdeal = 0.0;
+			m_haveLast = false;
+		}
+
+		// Bug hunt 2026-10-17 (timing_continuity_fixes): with rebasing on, a
+		// film rate that changes mid-lock (the measured signal rate replacing
+		// the nominal one, or resetting) re-bases the ideal time at the last
+		// frame (ideal = baseTime + (n - baseIndex) / filmHz), so the clock
+		// stays continuous and the lock is kept. Off: ideal = n / filmHz,
+		// which jumps by n * (1/f1 - 1/f0) (the 2026-10-16 behaviour).
+		void SetRebaseOnRateChange(bool on) { m_rebase = on; }
+		// Relative change of the film rate that re-bases.
+		static constexpr double kRebaseTolerance = 1e-6;
+		unsigned long long Rebases() const { return m_rebases; }
 
 		// arrival and the result in seconds on any steady clock; the anchor
 		// over the last kWindowSeconds of film.
@@ -609,7 +629,22 @@ namespace Pulldown
 		{
 			if (!(filmHz > 0.0))
 				return arrival;
-			const double ideal = static_cast<double>(filmIndex) / filmHz;
+			double ideal = static_cast<double>(filmIndex) / filmHz;
+			if (m_rebase)
+			{
+				// Bug hunt 2026-10-17: re-base at the last frame on a rate change.
+				if (m_haveLast && m_filmHz > 0.0 && std::abs(filmHz - m_filmHz) > kRebaseTolerance * m_filmHz)
+				{
+					m_baseIndex = m_lastIndex;
+					m_baseTime = m_lastIdeal;
+					++m_rebases;
+				}
+				m_filmHz = filmHz;
+				ideal = m_baseTime + (static_cast<double>(filmIndex) - static_cast<double>(m_baseIndex)) / filmHz;
+				m_lastIndex = filmIndex;
+				m_lastIdeal = ideal;
+				m_haveLast = true;
+			}
 			m_offsets.push_back({ ideal, arrival - lateness - ideal });
 			while (m_offsets.size() > 1 && ideal - m_offsets.front().first > kWindowSeconds)
 				m_offsets.pop_front();
@@ -622,5 +657,14 @@ namespace Pulldown
 
 	private:
 		std::deque<std::pair<double, double>> m_offsets;   // (ideal time, arrival - ideal)
+		// Bug hunt 2026-10-17: the re-based ideal time (rebasing on only).
+		bool m_rebase = false;
+		uint64_t m_baseIndex = 0;
+		double m_baseTime = 0.0;
+		double m_filmHz = 0.0;
+		uint64_t m_lastIndex = 0;
+		double m_lastIdeal = 0.0;
+		bool m_haveLast = false;
+		unsigned long long m_rebases = 0;
 	};
 }

@@ -370,6 +370,10 @@ private:
 	std::atomic<bool> m_pulldownDetection{false};
 	std::atomic<bool> m_pulldownFixes{true};   // pulldown_fixes (audit 2026-10-16)
 	bool m_pulldownFixesApplied = true;        // capture thread
+	// timing_continuity_fixes (Bug hunt 2026-10-17): refreshed by the render loop.
+	std::atomic<bool> m_timingContinuityFixes{true};
+	// Capture timestamp breaks (UpdateFrameRateAndPPM's discontinuity branch).
+	std::atomic<uint64_t> m_captureTimestampBreaks{0};
 	std::atomic<bool> m_pulldownResetRequested{false};
 	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
 	std::atomic<uint64_t> m_pulldownSkipped{0};

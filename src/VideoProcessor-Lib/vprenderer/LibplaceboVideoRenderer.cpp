@@ -45,6 +45,8 @@
 #include <vprenderer/AnamorphicPresentation.h>
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
+#include <vprenderer/CaptureTimestampGap.h>
+#include <vprenderer/DisplayRateHold.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/DejudderWarp.h>
@@ -1129,6 +1131,10 @@ namespace
 		// Audit 2026-10-16 (pulldown review D1/D3/D4): keep the lock across counted misses, re-phase
 		// in place, a cadence-aware film clock; off = the 2026-10-14 behaviour.
 		bool pulldownFixes = true;
+		// Bug hunt 2026-10-17: a capture timestamp break is a gap (and the dequeue checks a
+		// pair's times), the film clock re-bases on a signal-rate change, and the timeline
+		// holds the last measured display rate; off = the behaviour before.
+		bool timingContinuityFixes = true;
 		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
 		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
 		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
@@ -1319,7 +1325,7 @@ namespace
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2497,6 +2503,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid source_resolution_mixed_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionMixedGuard ? "on" : "off");
+		}
+		if (tryChoice("timing_continuity_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.timingContinuityFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid timing_continuity_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.timingContinuityFixes ? "on" : "off");
 		}
 		if (tryChoice("pulldown_fixes", raw))
 		{
@@ -5100,11 +5114,16 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> motionLastStateReset{ false };
 	unsigned long long vpSkippedFrames = 0, vpPhasePictures = 0, vpHeldPictures = 0, vpGapPairs = 0;
 	// The display rate the timeline schedules at: measured when known, else the monitor's.
+	// Bug hunt 2026-10-17 (timing_continuity_fixes): the last good measurement is held
+	// while a cadence reset zeroes it (DisplayRateHold); the monitor's rate only when
+	// nothing was measured since start or a mode change. Render thread.
 	double TimelineDisplayHz() const
 	{
 		const double measured = presentationTelemetry.Snapshot().measuredDisplayHz;
-		return measured > 0.0 ? measured : renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+		return timelineDisplayRateHold.Update(measured, renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
+			activeSettings.timingContinuityFixes);
 	}
+	mutable DisplayRateHold timelineDisplayRateHold;
 	// The timeline presents while the interpolation policy interpolates (the last
 	// decision; a change takes effect from the next frame), never in low latency.
 	bool VpTimelineWanted() const
@@ -9678,6 +9697,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
 		changed(current.pulldownFixes != next.pulldownFixes, "pulldown_fixes");
+		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
 		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
 			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
@@ -21551,11 +21571,22 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 
 	const uint64_t counter = m_frameCounter.fetch_add(1, std::memory_order_relaxed);
 	const uint64_t missedBefore = m_captureMissedFrames.load(std::memory_order_relaxed);
+	const uint64_t breaksBefore = m_captureTimestampBreaks.load(std::memory_order_relaxed);
 	UpdateFrameRateAndPPM(videoFrame.GetTimingTimestamp());
 	const uint64_t missedNow = m_captureMissedFrames.load(std::memory_order_relaxed);
 	bool gapBefore = missedNow != missedBefore;
 	const char* gapCause = gapBefore ? "missed frames" : nullptr;
 	uint32_t gapFrames = gapBefore ? static_cast<uint32_t>((std::min)(missedNow - missedBefore, uint64_t{ 1000 })) : 0;
+	// Bug hunt 2026-10-17 (timing_continuity_fixes): a timestamp break (a jump of
+	// 9+ periods, an odd jump, a backward step) is a gap too - not whole missed
+	// frames, so never filled - else motion pairs and history carry across it.
+	const bool timingFixes = m_timingContinuityFixes.load(std::memory_order_relaxed);
+	if (timingFixes && m_captureTimestampBreaks.load(std::memory_order_relaxed) != breaksBefore)
+	{
+		gapBefore = true;
+		gapFrames = 0;
+		gapCause = "capture timestamp discontinuity";
+	}
 	if (m_timingClock && counter % 20 == 0)
 	{
 		m_entryLatencyMs.store(
@@ -21618,7 +21649,14 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			Pulldown::Settings settings;
 			settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes;
 			m_pulldown.SetSettings(settings);
+			// Bug hunt 2026-10-17: the clock's form changes with the switch (cadence-aware
+			// or not): start it over, and no pair across the change.
+			m_pulldownClock.Reset();
+			m_pulldown.MarkDiscontinuity();
 		}
+		// Bug hunt 2026-10-17 (timing_continuity_fixes): the film clock re-bases when
+		// the film rate (from signalHz: measured or nominal) changes mid-lock.
+		m_pulldownClock.SetRebaseOnRateChange(timingFixes);
 		const bool wasLocked = m_pulldown.Locked();
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
 		// D4: the counted misses keep the lock (verified over the next cycle).
@@ -21841,10 +21879,11 @@ void LibplaceboVideoRenderer::UpdateFrameRateAndPPM(
 		// frame periods (2 to 8) is frames the capture missed, not a new
 		// clock. They are counted (the estimate stays valid, so the
 		// de-judder does not hold for seconds) and recorded for the gap check.
-		const long long periods = observedTicks > 0 ?
-			(observedTicks + expectedFrameTicks / 2) / expectedFrameTicks : 0;
-		const timingclocktime_t remainder = observedTicks - static_cast<timingclocktime_t>(periods) * expectedFrameTicks;
-		if (periods >= 2 && periods <= 8 && remainder < expectedFrameTicks / 4 && remainder > -expectedFrameTicks / 4)
+		// Bug hunt 2026-10-17: the rules in CaptureTimestampGap (unit-tested).
+		const CaptureTimestampGap::Step step = CaptureTimestampGap::Classify(
+			static_cast<long long>(observedTicks), static_cast<long long>(expectedFrameTicks));
+		const long long periods = step.periods;
+		if (step.kind == CaptureTimestampGap::Kind::Missed)
 		{
 			m_ppmFrameCount.fetch_add(static_cast<uint64_t>(periods - 1), std::memory_order_relaxed);
 			m_captureMissedFrames.fetch_add(static_cast<uint64_t>(periods - 1), std::memory_order_relaxed);
@@ -21856,13 +21895,14 @@ void LibplaceboVideoRenderer::UpdateFrameRateAndPPM(
 					periods - 1, periods, static_cast<unsigned long long>(m_captureMissedFrames.load(std::memory_order_relaxed)));
 			}
 		}
-		else if (observedTicks <= 0 || observedTicks > expectedFrameTicks * 3 / 2 ||
-			observedTicks < expectedFrameTicks / 2)
+		else if (step.kind == CaptureTimestampGap::Kind::Break)
 		{
 			DebugLog::Log(
 				"libplacebo: capture timestamp discontinuity (%lld ticks; expected %lld); resetting cadence estimate",
 				static_cast<long long>(observedTicks),
 				static_cast<long long>(expectedFrameTicks));
+			// Bug hunt 2026-10-17: counted, so OnVideoFrame marks a gap before this frame.
+			m_captureTimestampBreaks.fetch_add(1, std::memory_order_relaxed);
 			ResetFrameRateAndPPM();
 			m_firstPpmFrameTimestamp.store(frameTimestamp, std::memory_order_release);
 			m_lastPpmFrameTimestamp.store(frameTimestamp, std::memory_order_release);
@@ -25533,8 +25573,12 @@ void LibplaceboVideoRenderer::RenderLoop()
 					timeB - timeA <= (InterpolationTimeline::kMaxSpanFrames + 0.25) / pairRateHz;
 				const bool fillGap = next.gapBefore && interpolatingNow && m_impl->activeSettings.interpolationFillGaps &&
 					next.gapFrames >= 1 && next.gapFrames < static_cast<uint32_t>(InterpolationTimeline::kMaxSpanFrames) && spanOk;
+				// Bug hunt 2026-10-17 (timing_continuity_fixes): an ordinary pair whose times
+				// are both known is at most 1.5 periods apart (a clock step no gap reported).
+				const bool adjacentOk = fillGap || !(m_impl && m_impl->activeSettings.timingContinuityFixes) ||
+					CaptureTimestampGap::AdjacentPairTimes(timeA, timeB, pairRateHz);
 				if (next.generation == frameGeneration && !next.cadenceRepeat && (!next.gapBefore || fillGap) && !next.filmUpdate &&
-					(!skipUpdate || spanOk) &&
+					(!skipUpdate || spanOk) && adjacentOk &&
 					next.sourceSequence != sourceSequence && next.converted &&
 					SameDejudderVideoState(state, next.state))
 				{
@@ -25682,6 +25726,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		{
 			m_pulldownDetection.store(m_impl->activeSettings.dejudderPulldown, std::memory_order_relaxed);
 			m_pulldownFixes.store(m_impl->activeSettings.pulldownFixes, std::memory_order_relaxed);
+			m_timingContinuityFixes.store(m_impl->activeSettings.timingContinuityFixes, std::memory_order_relaxed);
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
 			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
@@ -26632,6 +26677,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
 		<< "pulldown_fixes=" << (s.pulldownFixes ? "on" : "off") << "\n"
+		<< "timing_continuity_fixes=" << (s.timingContinuityFixes ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
 		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
 		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"

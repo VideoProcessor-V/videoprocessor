@@ -7996,6 +7996,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "For 'Find film sent with repeated frames' (when it is on). On (default): a missed capture frame or an "
             "edit in the film's repeat pattern no longer drops the lock for 2 s - the pattern is followed through "
             "it, and the film's even timing is kept. Off: the earlier behaviour (drop the lock, find it again)."));
+        // Bug hunt 2026-10-17.
+        auto* timingContinuity = addChoice(QStringLiteral("Timing continuity fixes"), QStringLiteral("timing_continuity_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        timingContinuity->setToolTip(QStringLiteral(
+            "Under test (default on). A jump in the capture's timestamps is treated as a break: no motion is carried "
+            "across it. The film clock stays continuous when the measured capture rate replaces or resets the nominal one, "
+            "and the 50/60p timeline keeps the last measured display rate while it is re-measured. Off: the earlier behaviour."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -9465,7 +9472,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
                     { "source_class", "legacy" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
