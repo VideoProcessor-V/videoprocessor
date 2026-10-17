@@ -60,6 +60,7 @@
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/FrameInterpolator.h>
+#include <vprenderer/GrainPreserve.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
@@ -1121,6 +1122,14 @@ namespace
 		InterpolationPolicy::Fallback interpolationFallback = InterpolationPolicy::Fallback::Hold;
 		bool interpolationFillGaps = false;
 		InterpolationPolicy::SourceClass sourceClass = InterpolationPolicy::SourceClass::Legacy;
+		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
+		// default is the faithful path, the other value the established one byte for byte;
+		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,
+		// dejudder_source_warp_filter (residual_stabilise_grain_guard is in `adaptive`,
+		// deband_grain beside deband_strength).
+		InterpolationPolicy::Grain interpolationGrain = InterpolationPolicy::Grain::Preserve;
+		bool debandVpGrainGuard = true;
+		bool dejudderSourceWarpCatmull = true;
 		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
 		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
 		// shader list says). auto (unset): as before - the shader list and the dithering setting.
@@ -1173,6 +1182,7 @@ namespace
         MotionConfig::Settings motion;   // v1.4.02 (Bill): smooth motion / frame mixer / deinterlacing
 		std::string debandStrength = "auto";
 		AutoToggle deband = AutoToggle::AUTO;
+		bool debandGrain = false;   // deband_grain: libplacebo's deband adds grain (off: VP's dither does that job)
 		AutoToggle sigmoid = AutoToggle::AUTO;
 		std::string dithering = "auto";
 		std::string displayBitDepth = "auto";
@@ -2449,7 +2459,11 @@ namespace
 			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
 			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
 			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
-			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware) })
+			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware),
+			// Film grain (owner 2026-10-17): the faithful defaults on / deband_grain off.
+			std::make_pair("residual_stabilise_grain_guard", &settings.adaptive.residualGrainGuard),
+			std::make_pair("deband_vp_grain_guard", &settings.debandVpGrainGuard),
+			std::make_pair("deband_grain", &settings.debandGrain) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -2550,6 +2564,22 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid interpolation_fallback '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationFallback));
+		}
+		if (tryChoice("interpolation_grain", raw))
+		{
+			if (raw == "preserve" || raw == "blend")
+				settings.interpolationGrain = InterpolationPolicy::ParseGrain(raw);
+			else
+				DebugLog::Log("profile '%s': invalid interpolation_grain '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationGrain));
+		}
+		if (tryChoice("dejudder_source_warp_filter", raw))
+		{
+			if (raw == "catmull" || raw == "bilinear")
+				settings.dejudderSourceWarpCatmull = raw == "catmull";
+			else
+				DebugLog::Log("profile '%s': invalid dejudder_source_warp_filter '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.dejudderSourceWarpCatmull ? "catmull" : "bilinear");
 		}
 		if (tryChoice("interpolation_fill_gaps", raw))
 		{
@@ -3003,6 +3033,7 @@ namespace
 		settings.pixelTrustLo = static_cast<float>(profile.dejudderPixelTrustLo);
 		settings.pixelTrustHi = static_cast<float>(profile.dejudderPixelTrustHi);
 		settings.landingCheck = profile.dejudderLandingCheck ? 1.5f : 0.0f;
+		settings.sourceWarpCatmull = profile.dejudderSourceWarpCatmull;
 		settings.pictureArea = profile.dejudderPictureArea;
 		// General (owner 2026-10-14): pixel values for a 2160-line picture,
 		// per-frame values at 23.976p; the matcher scales them to the source.
@@ -3124,6 +3155,14 @@ namespace
 			if (!ApplyDebandStrength(rawValue, settings))
 				DebugLog::Log(
 					"libplacebo: deband_strength must be Auto, off, light, or default; retaining the debanding setting");
+		}
+		if (TryGetDisplayString(config, "deband_grain", rawValue))
+		{
+			const std::string value = ConfigFile::NormalizeName(rawValue);
+			if (value == "on" || value == "off")
+				settings.debandGrain = value == "on";
+			else
+				DebugLog::Log("libplacebo: deband_grain must be on or off; retaining %s", settings.debandGrain ? "on" : "off");
 		}
 		settings.sigmoid = ReadAutoToggle(config, "sigmoid");
         MotionConfig::Read(config,"vprenderer.motion",settings.motion);
@@ -5195,6 +5234,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (!frameInterpolator)
 			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+		frameInterpolator->SetGrain(activeSettings.interpolationGrain);
 		if (!frameInterpolator->Run(a, b, motion, static_cast<float>(vpOutputPhase), activeSettings.interpolationFallback,
 			vpPhasePlanes))
 		{
@@ -7107,6 +7147,7 @@ struct LibplaceboVideoRenderer::Impl
 		parameterSettings.debandStrength = settings.debandStrength;
 		parameterSettings.deband =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.deband);
+		parameterSettings.debandGrain = settings.debandGrain;
 		parameterSettings.sigmoid =
 			static_cast<LibplaceboRenderParameters::Toggle>(settings.sigmoid);
 		parameterSettings.dithering = settings.dithering;
@@ -9641,6 +9682,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
+		currentTransport.debandGrain = next.debandGrain;
 		currentTransport.sigmoid = next.sigmoid;
 		currentTransport.dithering = next.dithering;
 		currentTransport.displayBitDepth = next.displayBitDepth;
@@ -9787,7 +9829,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.adaptiveDownscale != next.adaptiveDownscale ||
 			!(current.adaptive == next.adaptive), "adaptive_downscale");
 		changed(current.debandStrength != next.debandStrength ||
-			current.deband != next.deband, "deband");
+			current.deband != next.deband || current.debandGrain != next.debandGrain, "deband");
 		changed(current.sigmoid != next.sigmoid, "sigmoid");
         changed(current.motion.Fingerprint()!=next.motion.Fingerprint(),"motion");
 		changed(current.dithering != next.dithering, "dithering");
@@ -13531,6 +13573,7 @@ struct LibplaceboVideoRenderer::Impl
 				current.pixelTrust != next.pixelTrust || current.pixelTrustLo != next.pixelTrustLo ||
 				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
 				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
+				current.sourceWarpCatmull != next.sourceWarpCatmull ||
 				current.referenceHeight != next.referenceHeight || current.sourceHz != next.sourceHz ||
 				current.referenceRateHz != next.referenceRateHz ||
 				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
@@ -14056,6 +14099,7 @@ struct LibplaceboVideoRenderer::Impl
 							motion.occlusionB = dejudder->Occlusion(slot);
 					if (!frameInterpolator)
 						frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+					frameInterpolator->SetGrain(activeSettings.interpolationGrain);
 					if (!frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped))
 					{
 						if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
@@ -19217,6 +19261,7 @@ struct LibplaceboVideoRenderer::Impl
 				vpDebandParams.fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
 				vpDebandParams.fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 				vpDebandParams.sequence = sourceSequence;
+				vpDebandParams.grainGuard = activeSettings.debandVpGrainGuard;
 				char text[200];
 				if (temporal)
 					snprintf(text, sizeof(text), "VP deband: not applied while smooth motion or deinterlacing runs (deband_vp %s)", activeSettings.debandVp.c_str());
@@ -19980,6 +20025,15 @@ struct LibplaceboVideoRenderer::Impl
                 activeSettings.ssimBitrateFloor);
             if (!upscaleBlend)
                 adaptiveNow.wBase = static_cast<float>(activeSettings.adaptive.wBase * bitrateWeightScale);
+        }
+        // residual_stabilise_grain_guard: the held residual change limited to the coding
+        // noise the bitrate reading implies (no reading: no limit).
+        adaptiveNow.residualCodingNoiseCodes = 0.0f;
+        if (adaptiveNow.residualGrainGuard)
+        {
+            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+            if (snap.reading)
+                adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(snap.bitrateQuality));
         }
         if (upscaleBlend)
         {

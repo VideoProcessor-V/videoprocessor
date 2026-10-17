@@ -41,6 +41,17 @@
 // downstream (re-base, debanding, scaling, tone mapping, VP's dither) runs on
 // them exactly as on a source frame: HDR (PQ / HLG, 10 to 16 bits) keeps its
 // precision; no 8-bit step. Values are never clamped (BTB / WTW kept).
+//
+// Film grain (owner 2026-10-17: never averaged or interpolated away; SetGrain):
+// preserve blends only the low band (Gaussian sigma 3, held at half resolution) of the warped A / B by
+// phase and takes the high band from the nearer frame (A where the occlusion
+// forces the A sample alone), sampled with Catmull-Rom and energy-matched per
+// 16x16 block to that frame's own high band at the same pixels (gain 1..2; exactly 1
+// at a whole-pixel position): one frame's grain at
+// full strength at every phase, and no more frame-to-frame correlation than a
+// hold. blend is the whole-signal blend above, byte for byte (the object's
+// default, so a caller that never sets it gets the established output; the
+// renderer sets it from interpolation_grain, default preserve).
 namespace Interpolator
 {
 	struct Motion
@@ -70,15 +81,32 @@ namespace Interpolator
 		bool Run(const Dejudder::Planes& a, const Dejudder::Planes& b, const Motion& motion, float t,
 			InterpolationPolicy::Fallback fallback, Dejudder::Planes& out);
 
+		// interpolation_grain (InterpolationPolicy::Grain); takes effect on the next Run.
+		void SetGrain(InterpolationPolicy::Grain value) { grain = value; }
+		InterpolationPolicy::Grain GetGrain() const { return grain; }
+
 		const std::string& LastError() const { return error; }
 		unsigned long long Runs() const { return runs; }               // dispatched pictures
+		unsigned long long GrainPreservedRuns() const { return grainPreservedRuns; }
 		unsigned long long Passthroughs() const { return passthroughs; } // t at 0 or 1
 		void Release();
 
 	private:
+		// interpolation_grain preserve, per plane: the low band of A and B at half resolution
+		// (32-bit float); half = the 2x2 average, tmp = the across pass.
+		struct GrainBands
+		{
+			pl_tex half = nullptr, tmp = nullptr, lowA = nullptr, lowB = nullptr;
+		};
 		bool Ensure(pl_tex& tex, pl_tex like);
+		bool EnsureFloat(pl_tex& tex, int w, int h, int components);
+		bool LowBand(const char* description, pl_tex src, pl_tex half, pl_tex tmp, pl_tex low);
+		bool PrepareBands(int index, pl_tex srcA, pl_tex srcB);
 		bool Plane(const char* description, pl_tex srcA, pl_tex srcB, pl_tex dst, const Motion& motion, float t,
-			const float planeScale[2], const std::string& header);
+			const float planeScale[2], const std::string& header, const GrainBands* bands);
+		InterpolationPolicy::Grain grain = InterpolationPolicy::Grain::Blend;
+		GrainBands grainBands[2];   // luma, chroma
+		unsigned long long grainPreservedRuns = 0;
 		pl_log log = nullptr;
 		pl_gpu gpu = nullptr;
 		pl_dispatch dispatch = nullptr;

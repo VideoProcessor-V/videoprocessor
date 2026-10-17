@@ -1,5 +1,6 @@
 ﻿#include <pch.h>
 #include "DejudderWarp.h"
+#include <vprenderer/GrainPreserve.h>
 #include <vprenderer/MotionAheadProducer.h>
 #include <OpticalFlowTrust.h>
 
@@ -2179,6 +2180,20 @@ bool fill_position(vec2 lp, float s, out vec2 pos)
 }
 )GLSL";
 
+		// dejudder_source_warp_filter (owner 2026-10-17, grain audit): the warp's source
+		// samples. bilinear = the hardware's linear filter (today's: 0.5x of white grain at a
+		// half-pixel shift); catmull = Catmull-Rom from texelFetch (GrainPreserve; 0.8x or
+		// more at any shift, exact at whole pixels). Positions normalised as for texture().
+		const char* const WARP_SAMPLE_BILINEAR = "#define WARP_SRC(uv) texture(src, uv)\n#define WARP_SRC_B(uv) texture(src_b, uv)\n";
+		const char* const WARP_SAMPLE_CATMULL = R"GLSL(
+DEFINE_CATMULL(warp_cat_src, src)
+#define WARP_SRC(uv) warp_cat_src((uv) * vec2(textureSize(src, 0)))
+#ifdef FILL
+DEFINE_CATMULL(warp_cat_src_b, src_b)
+#define WARP_SRC_B(uv) warp_cat_src_b((uv) * vec2(textureSize(src_b, 0)))
+#endif
+)GLSL";
+
 		const char* const WARP_LUMA_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
@@ -2213,9 +2228,9 @@ if (q.x < size.x && q.y < size.y) {
         }
 #endif
 #ifdef PIXEL_MOTION
-        outv = texture(src, (c - m * sc * va) / vec2(size));   // the weight's share of the motion
+        outv = WARP_SRC((c - m * sc * va) / vec2(size));   // the weight's share of the motion
 #else
-        outv = mix(texelFetch(src, q, 0), texture(src, from / vec2(size)), m);
+        outv = mix(texelFetch(src, q, 0), WARP_SRC(from / vec2(size)), m);
 #endif
     } else
         outv = texelFetch(src, q, 0);
@@ -2224,7 +2239,7 @@ if (q.x < size.x && q.y < size.y) {
 #endif
     if (field_vector(c, v)) {
         // Edges clamp (the sampler's address mode): never black.
-        outv = texture(src, (c - shift * strength_scale() * block_strength(c) * v) / vec2(size));
+        outv = WARP_SRC((c - shift * strength_scale() * block_strength(c) * v) / vec2(size));
 #ifdef FEATHER
         outv = mix(texelFetch(src, q, 0), outv, hold_weight(c, feather_px));
 #endif
@@ -2232,7 +2247,7 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef FILL
         vec2 pb;
         if (fill_position(c, shift * strength_scale(), pb))
-            outv = texture(src_b, pb / vec2(size));
+            outv = WARP_SRC_B(pb / vec2(size));
         else
 #endif
         outv = texelFetch(src, q, 0);   // hard hold of A
@@ -2271,9 +2286,9 @@ if (q.x < size.x && q.y < size.y) {
         }
 #endif
 #ifdef PIXEL_MOTION
-        outv = texture(src, (c - m * sc * va / chroma_scale) / vec2(size));
+        outv = WARP_SRC((c - m * sc * va / chroma_scale) / vec2(size));
 #else
-        outv = mix(texelFetch(src, q, 0), texture(src, from / vec2(size)), m);
+        outv = mix(texelFetch(src, q, 0), WARP_SRC(from / vec2(size)), m);
 #endif
     } else
         outv = texelFetch(src, q, 0);
@@ -2281,7 +2296,7 @@ if (q.x < size.x && q.y < size.y) {
     return;
 #endif
     if (field_vector(c * chroma_scale, v)) {
-        outv = texture(src, (c - shift * strength_scale() * block_strength(c * chroma_scale) * v / chroma_scale) / vec2(size));
+        outv = WARP_SRC((c - shift * strength_scale() * block_strength(c * chroma_scale) * v / chroma_scale) / vec2(size));
 #ifdef FEATHER
         outv = mix(texelFetch(src, q, 0), outv, hold_weight(c * chroma_scale, feather_px));
 #endif
@@ -2289,7 +2304,7 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef FILL
         vec2 pb;
         if (fill_position(c * chroma_scale, shift * strength_scale(), pb))
-            outv = texture(src_b, pb / chroma_scale / vec2(size));
+            outv = WARP_SRC_B(pb / chroma_scale / vec2(size));
         else
 #endif
         outv = texelFetch(src, q, 0);
@@ -4069,7 +4084,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
 			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
 			(pixel && settings.landingCheck > 0.0f ? "#define LAND_A " + std::to_string(settings.landingCheck) + "\n" : std::string()) +
-			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "");
+			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "") +
+			(settings.sourceWarpCatmull ? std::string(GrainPreserve::CatmullGlsl()) + WARP_SAMPLE_CATMULL : std::string(WARP_SAMPLE_BILINEAR));
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
 		const float featherPx = settings.holdFeatherPx;

@@ -1,6 +1,8 @@
 #include <pch.h>
 #include "VpDebander.h"
 
+#include <vprenderer/GrainPreserve.h>
+
 #include <libplacebo/dispatch.h>
 
 #include <algorithm>
@@ -65,11 +67,60 @@ if (p.x < sz.x && p.y < sz.y) {
         w = mix(wp, w, hold_alpha);
     }
 #endif
+#ifdef SPATIAL_GUARD
+    // deband_vp_grain_guard (owner 2026-10-17): this frame's own grain estimate, no
+    // vectors needed - the share of pixels per 16x16 block whose Laplacian exceeds
+    // lap_min (a band is flat but for its edges; grain is busy
+    // everywhere), bilinear between block centres; blur vetoed from veto_lo to veto_hi.
+    {
+        float share = texture(grain_spatial, pos / 16.0 / vec2(textureSize(grain_spatial, 0))).r;
+        w *= 1.0 - smoothstep(veto_lo, veto_hi, share);
+    }
+#endif
     imageStore(dst, p, mix(c, avg, w));
 #ifdef WRITE_W
     imageStore(w_out, p, vec4(w, 0.0, 0.0, 1.0));
 #endif
 }
+)GLSL";
+
+		// The spatial grain estimate per 16x16 block (one workgroup): the share of the
+		// block's pixels whose Laplacian |4c - n - s - e - w| (largest channel) exceeds
+		// lap_min (GrainPreserve::GuardLaplacianCodes: a third of the threshold's
+		// content-step part, never raised by the low-bitrate allowance).
+		const char* const GUARD_HEADER = R"GLSL(
+shared vec2 gg_sum[256];
+)GLSL";
+		const char* const GUARD_BODY = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+uint li = gl_LocalInvocationIndex;
+ivec2 sz = textureSize(src, 0);
+vec2 v = vec2(0.0);
+if (p.x < sz.x && p.y < sz.y) {
+    ivec2 hi = sz - ivec2(1);
+    vec4 c = texelFetch(src, p, 0);
+    vec4 l = abs(4.0 * c - texelFetch(src, clamp(p + ivec2(1, 0), ivec2(0), hi), 0)
+                         - texelFetch(src, clamp(p - ivec2(1, 0), ivec2(0), hi), 0)
+                         - texelFetch(src, clamp(p + ivec2(0, 1), ivec2(0), hi), 0)
+                         - texelFetch(src, clamp(p - ivec2(0, 1), ivec2(0), hi), 0));
+    float m = l.x;
+#if NCOMP > 1
+    m = max(m, l.y);
+#endif
+#if NCOMP > 2
+    m = max(m, l.z);
+#endif
+    v = vec2(m > lap_min ? 1.0 : 0.0, 1.0);
+}
+gg_sum[li] = v;
+barrier();
+for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (li < s)
+        gg_sum[li] += gg_sum[li + s];
+    barrier();
+}
+if (li == 0u)
+    imageStore(guard_out, ivec2(gl_WorkGroupID.xy), vec4(gg_sum[0].x / max(gg_sum[0].y, 1.0), 0.0, 0.0, 1.0));
 )GLSL";
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
@@ -134,6 +185,12 @@ if (p.x < sz.x && p.y < sz.y) {
 			{
 				if (weight[i][p] && gpu) pl_tex_destroy(gpu, &weight[i][p]);
 				weight[i][p] = nullptr;
+			}
+		for (int s = 0; s < kSlots; ++s)
+			for (int p = 0; p < PL_MAX_PLANES; ++p)
+			{
+				if (guard[s][p] && gpu) pl_tex_destroy(gpu, &guard[s][p]);
+				guard[s][p] = nullptr;
 			}
 		weightSequence = 0;
 		prevValid = false;
@@ -228,7 +285,63 @@ if (p.x < sz.x && p.y < sz.y) {
 			const float grainCodes = static_cast<float>(params.grainCodes);
 			const int ncomp = (std::max)(1, (std::min)(3, source.planes[plane].components));
 
-			pl_shader_desc d[6];
+			// deband_vp_grain_guard: the plane's spatial grain estimate first.
+			const bool useGuard = params.grainGuard;
+			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
+			const float vetoLo = static_cast<float>(GrainPreserve::kVetoLo);
+			const float vetoHi = static_cast<float>(GrainPreserve::kVetoHi);
+			if (useGuard)
+			{
+				pl_tex_params gp{};
+				gp.w = (w + 15) / 16;
+				gp.h = (h + 15) / 16;
+				gp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r16f"));
+				gp.sampleable = true;
+				gp.storable = true;
+				if (!gp.format || !pl_tex_recreate(gpu, &guard[slot][plane], &gp))
+				{
+					error = "no grain guard texture";
+					++failures;
+					return false;
+				}
+				const pl_shader_desc gd[2] = { Sampled("src", in, false), Storage("guard_out", guard[slot][plane]) };
+				const pl_shader_var gv[1] = { { pl_var_float("lap_min"), &lapMin, true } };
+				const std::string guardHeader = "#define NCOMP " + std::to_string(ncomp) + "\n" + GUARD_HEADER;
+				pl_custom_shader gc{};
+				gc.description = "VideoProcessor deband: grain guard";
+				gc.header = guardHeader.c_str();
+				gc.body = GUARD_BODY;
+				gc.input = PL_SHADER_SIG_NONE;
+				gc.output = PL_SHADER_SIG_NONE;
+				gc.descriptors = gd;
+				gc.num_descriptors = 2;
+				gc.variables = gv;
+				gc.num_variables = 1;
+				gc.compute = true;
+				gc.compute_group_size[0] = 16;
+				gc.compute_group_size[1] = 16;
+				pl_shader gsh = pl_dispatch_begin(dispatch);
+				if (!pl_shader_custom(gsh, &gc))
+				{
+					pl_dispatch_abort(dispatch, &gsh);
+					error = "the grain guard shader was refused";
+					++failures;
+					return false;
+				}
+				pl_dispatch_compute_params gcompute{};
+				gcompute.shader = &gsh;
+				gcompute.dispatch_size[0] = gp.w;
+				gcompute.dispatch_size[1] = gp.h;
+				gcompute.dispatch_size[2] = 1;
+				if (!pl_dispatch_compute(dispatch, &gcompute))
+				{
+					error = "the grain guard pass failed";
+					++failures;
+					return false;
+				}
+			}
+
+			pl_shader_desc d[7];
 			int nd = 0;
 			d[nd++] = Sampled("src", in, true);
 			d[nd++] = Storage("dst", out[slot][plane]);
@@ -236,17 +349,24 @@ if (p.x < sz.x && p.y < sz.y) {
 			if (useHold || useGrain) d[nd++] = Sampled("field", params.field, false);
 			if (useHold) d[nd++] = Sampled("prev_w", weightIn, true);
 			if (useGrain) d[nd++] = Sampled("grain", params.grainError, false);
-			pl_shader_var v[5];
+			if (useGuard) d[nd++] = Sampled("grain_spatial", guard[slot][plane], true);
+			pl_shader_var v[7];
 			int nv = 0;
 			v[nv++] = { pl_var_float("thr"), &thr, true };
 			v[nv++] = { pl_var_float("radius"), &radius, true };
 			if (useHold || useGrain) v[nv++] = { pl_var_vec2("to_field"), toField, true };
 			if (useHold) v[nv++] = { pl_var_float("hold_alpha"), &alpha, true };
 			if (useGrain) v[nv++] = { pl_var_float("grain_codes"), &grainCodes, true };
+			if (useGuard)
+			{
+				v[nv++] = { pl_var_float("veto_lo"), &vetoLo, true };
+				v[nv++] = { pl_var_float("veto_hi"), &vetoHi, true };
+			}
 			std::string header = "#define NCOMP " + std::to_string(ncomp) + "\n";
 			if (useHold) header += "#define HOLD 1\n";
 			if (useGrain) header += "#define GRAIN 1\n";
 			if (weightOut) header += "#define WRITE_W 1\n";
+			if (useGuard) header += "#define SPATIAL_GUARD 1\n";
 			pl_custom_shader custom{};
 			custom.description = useHold ? "VideoProcessor deband (held along the vectors)" : "VideoProcessor deband";
 			custom.header = header.c_str();

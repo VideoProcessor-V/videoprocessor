@@ -44,6 +44,14 @@ namespace VpDebander
 		uint64_t sequence = 0;      // this source frame (holds only across consecutive frames)
 		double holdAlpha = 0.5;     // weight of this frame's decision where held
 		double grainCodes = 2.0;    // grain error (8-bit codes) above which a block is texture
+		// deband_vp_grain_guard (owner 2026-10-17: grain is never averaged away; grain audit:
+		// without vectors the debander kept 0.59x of 0.5-code grain): a per-frame spatial
+		// grain estimate - the share of pixels per 16x16 block whose Laplacian exceeds a third
+		// of the threshold - vetoes the blur where it is consistent with grain (or texture),
+		// with or without vectors. A banded gradient is flat but for its band edges and is
+		// debanded as before. false = the 2026-10-16 debander, byte for byte (the struct's
+		// default; the renderer sets it from the profile, default on).
+		bool grainGuard = false;
 	};
 
 	// The threshold in codes from the readings (spec 2d / 2b): the content's
@@ -92,6 +100,7 @@ namespace VpDebander
 		static constexpr int kSlots = 2;
 		pl_tex out[kSlots][PL_MAX_PLANES] = {};
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
+		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
 		int curIndex = 0;                        // weight[curIndex] = weightSequence's
 		bool prevValid = false;                  // weight[1 - curIndex] = weightSequence - 1's
 		uint64_t weightSequence = 0;

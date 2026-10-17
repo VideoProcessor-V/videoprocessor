@@ -49,6 +49,13 @@ namespace InterpolationPolicy
 	}
 	inline Fallback ParseFallback(const std::string& v) { return v == "blend" ? Fallback::Blend : Fallback::Hold; }
 	inline const char* Name(Fallback f) { return f == Fallback::Blend ? "blend" : "hold"; }
+	// Film grain (owner 2026-10-17: grain is never averaged away; docs/audit/grain-audit-2026-10-17.md):
+	// preserve = only the low band of the warped pair is blended by phase, the high band comes from
+	// the nearer frame (Catmull-Rom), energy-matched per 16x16 block; blend = the pre-2026-10-17
+	// bidirectional blend of the whole signal (byte for byte).
+	enum class Grain { Preserve, Blend };
+	inline Grain ParseGrain(const std::string& v) { return v == "blend" ? Grain::Blend : Grain::Preserve; }
+	inline const char* Name(Grain g) { return g == Grain::Blend ? "blend" : "preserve"; }
 	inline SourceClass ParseSourceClass(const std::string& v)
 	{
 		return v == "measured" ? SourceClass::Measured : SourceClass::Legacy;

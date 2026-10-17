@@ -58,6 +58,10 @@ namespace LibplaceboRenderParameters
 		// explicit parameter set. `deband` remains for legacy configuration.
 		std::string debandStrength = "auto";
 		Toggle deband = Toggle::Auto;
+		// deband_grain (owner 2026-10-17: film grain is never averaged away; grain audit):
+		// false = libplacebo's deband adds no grain (grain 0; VP's dither does that job);
+		// true = the selected parameters' grain, as before.
+		bool debandGrain = false;
 		Toggle sigmoid = Toggle::Auto;
 		// auto uses the quality preset; the remaining values name the
 		// libplacebo PL_DITHER_* methods, with off disabling dithering.
