@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 #include <vprenderer/TemporalRenderer.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
+#include <vprenderer/ExtendedRange.h>
 #include <libplacebo/d3d11.h>
 #include <libplacebo/utils/upload.h>
 #include <array>
@@ -145,6 +146,66 @@ TEST_CLASS(MotionRendererTests){public:
         g.Upload(0);g.temporal.Begin(settings,24,60,false,0,1,1,0,false);Assert::IsTrue(g.temporal.Capture(g.device->gpu,g.input,1));
         g.Upload(255);g.temporal.Begin(settings,24,60,false,0,2,2,1./24,true);Assert::IsTrue(g.temporal.Capture(g.device->gpu,g.input,2));
         Assert::AreEqual(size_t(1),g.temporal.HistoryDepth());g.temporal.outputPts=1./24;g.Draw();
+    }
+    // Hunt 2 (08 #1): a deinterlaced frame is drawn from the retained copy; with
+    // Extended Range the current frame's colour is relabelled after Capture, so
+    // the copy must carry that label (else the ER hooks and libplacebo both convert).
+    TEST_METHOD(HistoryFramesTakeThePreparedColourWhenGiven){
+        const pl_frame stored=[]{pl_frame f{};f.color=pl_color_space_srgb;return f;}();
+        pl_color_space prepared{};prepared.primaries=PL_COLOR_PRIM_BT_2020;prepared.transfer=PL_COLOR_TRC_GAMMA22;
+        const pl_frame kept=TemporalRenderer::HistoryFrame(stored,nullptr),relabelled=TemporalRenderer::HistoryFrame(stored,&prepared);
+        Assert::IsTrue(pl_color_space_equal(&kept.color,&stored.color));
+        Assert::IsTrue(pl_color_space_equal(&relabelled.color,&prepared));
+    }
+    TEST_METHOD(DeinterlacedHistoryIsConvertedOnceWithThePreparedColour){
+        GpuFixture g;MotionConfig::Settings settings;settings.deinterlace="force";settings.algorithm="bob";settings.cadence="frame";
+        for(uint64_t i=0;i<3;++i){g.Upload(128);g.temporal.Begin(settings,30,60,false,1,1,i+1,double(i)/30,false);Assert::IsTrue(g.temporal.Capture(g.device->gpu,g.input,i+1));}
+        Assert::IsTrue(g.temporal.Active()&&!g.temporal.Mixing());
+        auto params=pl_render_default_params;params.dither_params=nullptr;params.deband_params=nullptr;params.peak_detect_params=nullptr;
+        auto read=[&]{std::vector<unsigned char> pixels(64*64*4);pl_tex_transfer_params r{};r.tex=g.target;r.ptr=pixels.data();
+            Assert::IsTrue(pl_tex_download(g.device->gpu,&r));const size_t o=(32*64+32)*4;return std::array<int,3>{pixels[o],pixels[o+1],pixels[o+2]};};
+        // The current frame relabelled after Capture (as ExtendedRange::Prepare does): linear light.
+        pl_frame relabelled=g.input;relabelled.color.transfer=PL_COLOR_TRC_LINEAR;
+        Assert::IsTrue(pl_render_image(g.renderer,&relabelled,&g.output,&params));const auto direct=read();
+        g.temporal.outputPts=1./30;
+        Assert::IsTrue(g.temporal.Render(g.renderer,relabelled,g.output,params,&relabelled.color));const auto once=read();
+        Assert::IsTrue(g.temporal.Render(g.renderer,relabelled,g.output,params));const auto captured=read();
+        for(int c=0;c<3;++c){
+            Assert::IsTrue(std::abs(once[c]-direct[c])<=1,L"history frame not drawn with the prepared colour");
+            Assert::IsTrue(std::abs(captured[c]-direct[c])>=20,L"fixture does not distinguish the labels");
+        }
+    }
+    // Hunt 2 (08 #1) with the real Extended Range hooks: gamma 2.4 source on a
+    // gamma 2.2 output (the carry re-encodes). Deinterlaced through the temporal
+    // renderer with the prepared colour = the direct single-frame render with the
+    // same hooks; with the captured label the gamma is converted twice.
+    TEST_METHOD(DeinterlacedExtendedRangeConvertsEachFrameOnce){
+        GpuFixture g;MotionConfig::Settings settings;settings.deinterlace="force";settings.algorithm="bob";settings.cadence="frame";
+        pl_color_space source{};source.primaries=PL_COLOR_PRIM_BT_709;source.transfer=PL_COLOR_TRC_GAMMA24;
+        pl_color_space output=source;output.transfer=PL_COLOR_TRC_GAMMA22;
+        g.input.color=source;g.output.color=output;
+        for(uint64_t i=0;i<3;++i){g.Upload(128);g.temporal.Begin(settings,30,60,false,1,1,i+1,double(i)/30,false);Assert::IsTrue(g.temporal.Capture(g.device->gpu,g.input,i+1));}
+        const ExtendedRange::Decision decision=ExtendedRange::Decide(true,ExtendedRange::Settings{},source,output,nullptr,PL_LUT_UNKNOWN);
+        Assert::IsTrue(decision.Active()&&decision.convertGamma);
+        ExtendedRange::Hooks hooks;std::vector<const pl_hook*> list;pl_frame prepared=g.input;
+        ExtendedRange::Prepare(ExtendedRange::ForTemporal(decision,g.temporal.Mixing()),hooks,prepared.color,output,list,true);
+        Assert::IsTrue(pl_color_space_equal(&prepared.color,&output));
+        auto params=pl_render_default_params;params.dither_params=nullptr;params.deband_params=nullptr;params.peak_detect_params=nullptr;
+        params.hooks=list.data();params.num_hooks=static_cast<int>(list.size());
+        auto read=[&]{std::vector<unsigned char> pixels(64*64*4);pl_tex_transfer_params r{};r.tex=g.target;r.ptr=pixels.data();
+            Assert::IsTrue(pl_tex_download(g.device->gpu,&r));const size_t o=(32*64+32)*4;return std::array<int,3>{pixels[o],pixels[o+1],pixels[o+2]};};
+        Assert::IsTrue(pl_render_image(g.renderer,&prepared,&g.output,&params));const auto direct=read();
+        g.temporal.outputPts=1./30;
+        Assert::IsTrue(g.temporal.Render(g.renderer,prepared,g.output,params,&prepared.color));const auto once=read();
+        Assert::IsTrue(g.temporal.Render(g.renderer,prepared,g.output,params));const auto twice=read();
+        const auto errors=pl_renderer_get_errors(g.renderer);
+        hooks.Release();
+        Assert::AreEqual(0,errors.num_disabled_hooks,L"libplacebo disabled an Extended Range hook");
+        // 128 in gamma 2.4 shown in gamma 2.2: about 120 once; converted twice it moves further.
+        for(int c=0;c<3;++c){
+            Assert::IsTrue(std::abs(once[c]-direct[c])<=1,L"deinterlaced frame differs from the single-frame ER render");
+            Assert::IsTrue(std::abs(direct[c]-twice[c])>=4,L"the captured label should convert twice (fixture check)");
+        }
     }
     TEST_METHOD(ChromaDefaultAndExplicitScalerReachRenderParameters){
         LibplaceboRenderParameters::Settings settings;LibplaceboRenderParameters::Projection projection;std::string error;

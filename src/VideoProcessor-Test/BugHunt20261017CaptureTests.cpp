@@ -147,9 +147,31 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 576) == ColorSpace::REC_601_625);
 			Assert::IsTrue(Translate(bmdColorspaceRec601, 625) == ColorSpace::REC_601_625);
 			Assert::IsTrue(Translate(bmdColorspaceRec709, 1080) == ColorSpace::REC_709);
-			Assert::ExpectException<std::runtime_error>([]() {
-				Translate(bmdColorspaceRec601, 720);
-			});
+			// Hunt 2 (08 #4): an HD source flagged BT.601 keeps the BT.601 matrix
+			// (SMPTE 170M) instead of throwing (no picture, an error box).
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 720) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 1080) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 2160) == ColorSpace::REC_601_525);
+		}
+
+		// Hunt 2 (08 #4): the flag decides; the line count only picks the BT.601 entry.
+		TEST_METHOD(Rec601FlagAndAviColorimetryDecideTheMatrix)
+		{
+			Assert::IsTrue(Rec601ColorSpace(576) == ColorSpace::REC_601_625);
+			Assert::IsTrue(Rec601ColorSpace(625) == ColorSpace::REC_601_625);
+			Assert::IsTrue(Rec601ColorSpace(480) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Rec601ColorSpace(1080) == ColorSpace::REC_601_525);
+			Assert::IsTrue(DecodeAviColorimetry(0, 0) == AviColorimetry::NoData);
+			Assert::IsTrue(DecodeAviColorimetry(1, 6) == AviColorimetry::Bt601, L"EC is read only for C = 11");
+			Assert::IsTrue(DecodeAviColorimetry(2, 0) == AviColorimetry::Bt709);
+			Assert::IsTrue(DecodeAviColorimetry(3, 0) == AviColorimetry::Bt601);   // xvYCC601
+			Assert::IsTrue(DecodeAviColorimetry(3, 1) == AviColorimetry::Bt709);   // xvYCC709
+			Assert::IsTrue(DecodeAviColorimetry(3, 2) == AviColorimetry::Bt601);   // sYCC601
+			Assert::IsTrue(DecodeAviColorimetry(3, 3) == AviColorimetry::Bt601);   // opYCC601
+			Assert::IsTrue(DecodeAviColorimetry(3, 4) == AviColorimetry::Other);   // opRGB
+			Assert::IsTrue(DecodeAviColorimetry(3, 5) == AviColorimetry::Bt2020);
+			Assert::IsTrue(DecodeAviColorimetry(3, 6) == AviColorimetry::Bt2020);
+			Assert::IsTrue(DecodeAviColorimetry(3, 7) == AviColorimetry::Other);
 		}
 
 		// Post-merge audit 2026-10-17: capture_display_fixes off restores Bill's earlier

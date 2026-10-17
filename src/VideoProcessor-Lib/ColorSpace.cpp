@@ -232,3 +232,35 @@ double ColorSpaceToCie1931WpY(ColorSpace colorspace)
 
 	throw std::runtime_error("Cannot convert colorspace to CIE1931 coordinate");
 }
+
+
+ColorSpace Rec601ColorSpace(unsigned int activeLines)
+{
+	return activeLines == 576 || activeLines == 625 ? ColorSpace::REC_601_625 : ColorSpace::REC_601_525;
+}
+
+
+AviColorimetry DecodeAviColorimetry(unsigned int c, unsigned int ec)
+{
+	switch (c & 3u)
+	{
+	case 0: return AviColorimetry::NoData;
+	case 1: return AviColorimetry::Bt601;
+	case 2: return AviColorimetry::Bt709;
+	default: break;
+	}
+	switch (ec & 7u)
+	{
+	case 0:   // xvYCC601
+	case 2:   // sYCC601
+	case 3:   // opYCC601
+		return AviColorimetry::Bt601;
+	case 1:   // xvYCC709
+		return AviColorimetry::Bt709;
+	case 5:   // BT.2020 YcCbcCrc
+	case 6:   // BT.2020 R'G'B' or Y'C'bC'r
+		return AviColorimetry::Bt2020;
+	default:  // 4 opRGB, 7 reserved (additional colorimetry extension)
+		return AviColorimetry::Other;
+	}
+}

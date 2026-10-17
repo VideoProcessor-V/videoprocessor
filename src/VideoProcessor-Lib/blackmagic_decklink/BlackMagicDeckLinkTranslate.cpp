@@ -459,7 +459,11 @@ ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines, bool capt
 		if (verticalLines == 576 || verticalLines == 625)
 			return ColorSpace::REC_601_625;
 
-		throw std::runtime_error("Unknown amount of lines for REC 601 color space");
+		// Hunt 2 (08 #4): an HD (or any other height) source flagged BT.601 keeps
+		// its BT.601 matrix (SMPTE 170M, Rec601ColorSpace) instead of throwing,
+		// which rejected the signal with an error box. capture_display_fixes off
+		// keeps the earlier exception above.
+		return Rec601ColorSpace(verticalLines);
 
 	case bmdColorspaceRec709:
 		return ColorSpace::REC_709;

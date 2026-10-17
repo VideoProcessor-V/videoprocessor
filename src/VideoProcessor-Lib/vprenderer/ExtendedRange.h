@@ -126,6 +126,7 @@ namespace ExtendedRange
 		HookFailed,       // libplacebo disabled one of the hooks
 		HdrMapped,        // audit 2026-10-16: HDR source and output differ (tone/gamut mapping)
 		LutUnsupported,   // audit 2026-10-16: 1D LUT, shaper matrices or not PL_LUT_NORMALIZED
+		TemporalMix,      // hunt 2 (08 #1): libplacebo frame mixing with a late restore (cannot follow a mix)
 	};
 
 	const char* ToString(Reason reason);
@@ -224,6 +225,21 @@ namespace ExtendedRange
 	// lutType = target.lut_type.
 	Decision Decide(bool enabled, const Settings& settings, const pl_color_space& source,
 		const pl_color_space& output, const pl_custom_lut* lut, enum pl_lut_type lutType);
+	// Hunt 2 (08 #1): the decision for a frame drawn through the temporal
+	// renderer (deinterlacing / libplacebo smooth motion). The retained frames
+	// are relabelled with the prepared colour (TemporalRenderer::Render's
+	// historyColor), so every frame is converted exactly once by the carry
+	// and the SCALED restore, both of which run inside each frame's own
+	// libplacebo pass (deinterlaced or mixed). The late restore (calibration
+	// LUT, libplacebo gamut mapping) runs once after the mix and reads the
+	// SCALED texture / remainder of whichever frame was rendered last, so it
+	// cannot follow a mix: frameMixing with LateRestore() returns TemporalMix
+	// (off: libplacebo's own clamping conversion, no double conversion).
+	// Deinterlacing alone renders one frame per draw and keeps every mode.
+	// Note: libplacebo's mixer linearises each frame with a clamp at 0, so a
+	// mixed refresh loses BTB even when this stays active (WTW is kept);
+	// VP's own motion (de-judder) is the BTB-safe path (docs/VP-btb-wtw-answers.md).
+	Decision ForTemporal(const Decision& decision, bool frameMixing);
 	// One log line's worth: transfers, primaries, modes.
 	std::string Describe(const Decision& decision);
 

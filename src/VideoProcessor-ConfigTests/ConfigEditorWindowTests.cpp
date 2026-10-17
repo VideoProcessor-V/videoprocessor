@@ -8584,6 +8584,9 @@ void testMotionAndChromaControlsPersistAndExposeNewTab()
         require(!control->toolTip().trimmed().isEmpty(),"Motion control tooltip is blank");
     }
     require(mixer->toolTip().contains("Applies only to smooth motion"),"Mixer relationship is not explained");
+    // Hunt 2 (08 #2): libplacebo's mixer clips BTB; the tooltip names VP's motion as the BTB-safe path.
+    require(mode->toolTip().contains("Below-black")&&mode->toolTip().contains("VP's own motion engine"),
+        "Smooth motion tooltip does not explain the below-black limitation");
 
     selectData(mode,"always");selectData(mixer,"cubic");
     selectData(requireControl<QComboBox>(window,"config.vprenderer.motion.field_order"),"bottom");
