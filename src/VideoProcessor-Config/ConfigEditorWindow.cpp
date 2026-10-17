@@ -5427,6 +5427,22 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "Resets an over-full queue by itself (the main window's \"auto reset\" check), at the "
         "queue recovery threshold."));
     behaviorLayout->addWidget(autoReset);
+    // Bug hunt 2026-10-17: [general] renderer_failure_keep_fullscreen.
+    auto* keepFullscreen = bindCheckField(QStringLiteral("Stay fullscreen and retry after a renderer failure"),
+        QStringLiteral("general"), QStringLiteral("renderer_failure_keep_fullscreen"), true);
+    keepFullscreen->setToolTip(QStringLiteral(
+        "On (default): when the renderer fails, VP keeps fullscreen and retries it by itself (after 2 s, 5 s, "
+        "10 s, then every 30 s). Off: the earlier behaviour - fullscreen is left and the renderer waits for a "
+        "manual restart."));
+    behaviorLayout->addWidget(keepFullscreen);
+    // Restore switch 2026-10-17: [general] magewell_recover_faults.
+    auto* magewellRecover = bindCheckField(QStringLiteral("Magewell: recover from capture faults (fix under test)"),
+        QStringLiteral("general"), QStringLiteral("magewell_recover_faults"), true);
+    magewellRecover->setToolTip(QStringLiteral(
+        "On (default): a Magewell fault the card recovers from (no frames for 2 s, a failed start, the capture "
+        "memory budget, a slow frame copy) holds the video invalid and restarts the device by itself. Off: the "
+        "earlier behaviour - capture stops and needs a manual Restart."));
+    behaviorLayout->addWidget(magewellRecover);
     auto* persistSelection = bindCheckField(QStringLiteral("Keep key-selected profiles after restart"),
         QStringLiteral("general"), QStringLiteral("persist_profile_selection"), false);
     persistSelection->setToolTip(QStringLiteral(
@@ -8011,6 +8027,22 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "0.4 ms less). The motion vectors are unchanged, and 'Keep fast motion's strobing' and the smoothing of people "
             "read the motion field's own speed either way. Without the engine the search runs as before. Off: always "
             "the search."));
+        // The engine's extras (2026-10-17, docs/VP-nvof-ahead.md).
+        auto* opticalFlowFallback = addChoice(QStringLiteral("Camera motion: search when the engine is unclear"),
+            QStringLiteral("optical_flow_global_fallback"), { QStringLiteral("on"), QStringLiteral("off") });
+        opticalFlowFallback->setToolTip(QStringLiteral(
+            "On (default): when the engine's whole-picture motion is not clear (no dominant motion), the separate "
+            "search reads the camera motion instead. Off: the engine's reading is used as it is."));
+        auto* opticalFlowCost = addChoice(QStringLiteral("Engine's match cost lowers trust"),
+            QStringLiteral("optical_flow_cost_trust"), { QStringLiteral("on"), QStringLiteral("off") });
+        opticalFlowCost->setToolTip(QStringLiteral(
+            "On (default): the engine's own cost for each vector counts in the trust check - a less certain vector "
+            "counts as a worse match (tapered or held). Off: only VP's match error decides."));
+        auto* opticalFlowFb = addChoice(QStringLiteral("Engine's forward/backward check"),
+            QStringLiteral("optical_flow_fb_check"), { QStringLiteral("on"), QStringLiteral("off") });
+        opticalFlowFb->setToolTip(QStringLiteral(
+            "On (default): the engine's forward and backward vectors must agree for a vector to be fully trusted "
+            "(occlusions and failed matches show as disagreement). Off: not checked."));
         auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlow->setToolTip(QStringLiteral(
@@ -8220,6 +8252,39 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Under test (default on). A jump in the capture's timestamps is treated as a break: no motion is carried "
             "across it. The film clock stays continuous when the measured capture rate replaces or resets the nominal one, "
             "and the 50/60p timeline keeps the last measured display rate while it is re-measured. Off: the earlier behaviour."));
+        // Film grain (owner 2026-10-17: never averaged or interpolated away; docs/audit/grain-audit-2026-10-17.md).
+        // Each default is the faithful path; the other value is the established output.
+        auto* interpolationGrain = addChoice(QStringLiteral("50/60p interpolation keeps film grain"),
+            QStringLiteral("interpolation_grain"), { QStringLiteral("preserve"), QStringLiteral("blend") });
+        interpolationGrain->setItemText(interpolationGrain->findData(QStringLiteral("preserve")), QStringLiteral("Preserve (default)"));
+        interpolationGrain->setItemText(interpolationGrain->findData(QStringLiteral("blend")), QStringLiteral("Blend (the earlier output)"));
+        interpolationGrain->setToolTip(QStringLiteral(
+            "Preserve (default): an interpolated picture keeps the grain of the nearer source frame instead of "
+            "averaging two frames' grain away. Blend: the earlier output (grain softened between frames)."));
+        auto* warpFilter = addChoice(QStringLiteral("De-judder source warp filter"),
+            QStringLiteral("dejudder_source_warp_filter"), { QStringLiteral("catmull"), QStringLiteral("bilinear") });
+        warpFilter->setItemText(warpFilter->findData(QStringLiteral("catmull")), QStringLiteral("Catmull-Rom (default, keeps grain)"));
+        warpFilter->setItemText(warpFilter->findData(QStringLiteral("bilinear")), QStringLiteral("Bilinear (the earlier output)"));
+        warpFilter->setToolTip(QStringLiteral(
+            "How the de-judder samples the source when it warps it. Catmull-Rom (default) keeps fine grain; "
+            "bilinear keeps only about half of it at half-pixel shifts. The rendered warp is Catmull-Rom either way."));
+        auto* residualGrainGuard = addChoice(QStringLiteral("Residual stabilise leaves grain alone"),
+            QStringLiteral("residual_stabilise_grain_guard"), { QStringLiteral("on"), QStringLiteral("off") });
+        residualGrainGuard->setToolTip(QStringLiteral(
+            "On (default): the CNN / SSIM residual held along the motion is not held where the block is grain, so "
+            "grain is not frozen or smeared. Off: the earlier behaviour."));
+        auto* debandGrainGuard = addChoice(QStringLiteral("VP deband leaves grain alone"),
+            QStringLiteral("deband_vp_grain_guard"), { QStringLiteral("on"), QStringLiteral("off") });
+        debandGrainGuard->setToolTip(QStringLiteral(
+            "On (default): VP's debander measures each block's grain and does not smooth it, with or without motion "
+            "vectors; banded gradients are debanded as before. Off: the earlier debander, byte for byte."));
+        // Restore switch (DV tunnel bug hunt 2026-10-17).
+        auto* dvTunnelFixes = addChoice(QStringLiteral("Dolby Vision tunnel fixes"),
+            QStringLiteral("dv_tunnel_fixes"), { QStringLiteral("on"), QStringLiteral("off") });
+        dvTunnelFixes->setToolTip(QStringLiteral(
+            "Under test (default on). The SDR placement probe samples the whole picture (letterboxed or dark menus no "
+            "longer stay black), a grey SDR menu ends the tunnel, the metadata-loss limit counts source pictures, and "
+            "L2 trims are kept before L8. Off: the earlier behaviour."));
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
         nativeRgb->setToolTip(QStringLiteral(
@@ -8758,6 +8823,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
         debanding->setItemText(debanding->findData(QStringLiteral("default")), QStringLiteral("Standard"));
         addRendererAutoStatus(QStringLiteral("deband_strength"), debanding);
+        // Film grain (owner 2026-10-17): libplacebo's deband adds no grain by default.
+        auto* debandGrain = addChoice(QStringLiteral("Debanding adds grain (libplacebo)"),
+            QStringLiteral("deband_grain"), { QStringLiteral("off"), QStringLiteral("on") });
+        debandGrain->setToolTip(QStringLiteral(
+            "Off (default): libplacebo's debanding adds no synthetic grain - VP's dither does that job and the "
+            "film's own grain is left as it is. On: libplacebo's grain is added as before 2026-10-17."));
         auto* extendedRange = addChoice(QStringLiteral("Keep below-black and above-white (SDR)"),
             QStringLiteral("preserve_extended_range"), { QStringLiteral("on"), QStringLiteral("off") });
         extendedRange->setToolTip(QStringLiteral(
@@ -9693,6 +9764,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
                     { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
+                    // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
+                    { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
+                    { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
+                    { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" },
+                    { "dv_tunnel_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
                     { "source_class", "legacy" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
@@ -12357,6 +12433,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             "same moments as your original script. Fixed loop: every 400 ms."));
         driveForm->addRow(QStringLiteral("Script pacing"), pacing);
         pacingRows.push_back(pacing);
+        // Restore switch (bug hunt 2026-10-17): script_resend_failed_writes.
+        auto* resend = bindCheckField(QStringLiteral("Re-send a failed LED / contrast write (fix under test)"), led,
+            QStringLiteral("script_resend_failed_writes"), true);
+        resend->setToolTip(QStringLiteral(
+            "Script mode. On (default): an LPW1 or CNTR write the projector did not confirm is sent again at the "
+            "next decision with the script's current value (only when that decision sends nothing itself, so the "
+            "script's own commands are unchanged). Off: the pure script stream - a failed write is not repeated."));
+        driveForm->addRow(QString(), resend);
         auto pacingSpin = [this, led, driveForm](const char* key, int maximum, int fallback, const QString& label,
             const QString& tip)
         {
@@ -12980,6 +13064,42 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         numberControl(led, QStringLiteral("recovery_bias_pct"), 0.0, 20.0, 1, 0.5, 3.0, QString()));
     auto* prelift = levelControl(QStringLiteral("black_prelift_max"), 120);
     assistForm->addRow(QStringLiteral("LED lift allowed while still black"), prelift);
+    // Review 2026-10-17 (docs/audit/VP-led-compensate-review-2026-10-17.md).
+    auto* blackOnly = bindCheckField(QStringLiteral("Pre-position only on true black (fix under test)"), led,
+        QStringLiteral("preposition_black_only"), true);
+    blackOnly->setToolTip(QStringLiteral(
+        "On (default): the contrast hold and the LED pre-lift when coming out of black apply only while the frame "
+        "the LED lands on is truly black, so a visible fade-in never carries the cut contrast. Off: also on very "
+        "dark frames, as before."));
+    assistForm->addRow(QString(), blackOnly);
+    auto* landingMs = bindCheckField(QStringLiteral("Time each command from when it was written (fix under test)"), led,
+        QStringLiteral("led_landing_ms"), true);
+    landingMs->setToolTip(QStringLiteral(
+        "On (default): each LED / contrast command lands its response time after the moment the port wrote it, on "
+        "the nearest frame. Off: it is credited to the frame during which it was written and lands whole frames "
+        "later, as before."));
+    assistForm->addRow(QString(), landingMs);
+    auto* cutLead = bindChoiceField(led, QStringLiteral("cut_lead"),
+        { QStringLiteral("off"), QStringLiteral("window") },
+        { QStringLiteral("Off (default)"), QStringLiteral("As soon as the cut is seen (experimental)") });
+    cutLead->setToolTip(QStringLiteral(
+        "Experimental. As soon as the cut is seen: a bright cut found in the look-ahead gets its LED jump when it "
+        "enters the look-ahead window; until the cut the LED holds and the contrast does not rise. Off: the jump "
+        "goes out at the command latency ahead of the cut, as before."));
+    assistForm->addRow(QStringLiteral("Bright cut lead (experimental)"), cutLead);
+    auto* lookaheadMs = numberControl(led, QStringLiteral("led_lookahead_ms"), 0, 2000, 0, 10, 0,
+        QStringLiteral("queue depth"));
+    lookaheadMs->setToolTip(QStringLiteral(
+        "How far ahead the LED looks, in milliseconds (converted with the measured source rate). 0 (default) = as "
+        "deep as the queue's look-ahead walk."));
+    assistForm->addRow(QStringLiteral("LED look-ahead (ms)"), lookaheadMs);
+    // Restore switch (bug hunt 2026-10-17): led_wtw_passthrough.
+    auto* wtw = bindCheckField(QStringLiteral("Above-white keeps its value under a boost (fix under test)"), led,
+        QStringLiteral("led_wtw_passthrough"), true);
+    wtw->setToolTip(QStringLiteral(
+        "On (default): when VP's gain brightens the picture, whiter-than-white detail keeps its own value instead "
+        "of being rolled under white with the boosted picture (owner rule: keep BTB and WTW). Off: as before."));
+    assistForm->addRow(QString(), wtw);
     assistForm->addRow(QString(), helpLabel(QStringLiteral(
         "On a cut to a brighter scene the contrast goes to the cut level (auto = where white starts to clip, 59 "
         "until measured; never 50), VP's gain to its maximum and the knee rolls off highlights; then the picture "

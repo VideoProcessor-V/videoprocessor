@@ -15,6 +15,10 @@
 #include <RendererProfileConfig.h>
 #include <ConfigFile.h>
 #include <led/LedDriveConfig.h>
+#include <MainConfigSchema.h>
+#include <set>
+#include <iterator>
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -8772,6 +8776,119 @@ void testLoadWritesNothingUnrequested()
         "A migration did not keep a backup of the original file");
 }
 
+// Owner rule (every setting has a control), schema-driven (integration 2026-10-17;
+// replaces the hard-coded coverage list): every key of the LED and projector
+// schemas (LedDriveRules / ProjectorRules), of the [general] application schema
+// (MainConfigSchema::GeneralRules) and every renderer key RendererProfileConfig
+// validates has a Config control - a widget whose object name ends in ".<key>" -
+// or is on the explicit allow-list below, each entry with its reason.
+static std::set<std::string> RendererValidatedKeys()
+{
+    // RendererProfileConfig validates with if-chains; its keys are read from the
+    // validators' source (ValidateProfileSetting and ValidateBaseSetting).
+    std::string path = __FILE__;
+    std::replace(path.begin(), path.end(), '/', '\\');
+    path.resize(path.rfind("\\src\\") + 5);
+    std::ifstream file(path + "VideoProcessor-Lib\\RendererProfileConfig.h", std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::set<std::string> keys;
+    for (const char* function : { "inline bool ValidateProfileSetting(", "inline bool ValidateBaseSetting(" })
+    {
+        const size_t start = text.find(function);
+        if (start == std::string::npos) continue;
+        const size_t end = text.find("\n\tinline ", start + 10);
+        const std::string body = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const std::string marker = "key == \"";
+        for (size_t at = body.find(marker); at != std::string::npos; at = body.find(marker, at + 1))
+        {
+            const size_t open = at + marker.size();
+            const size_t close = body.find('"', open);
+            if (close != std::string::npos) keys.insert(body.substr(open, close - open));
+        }
+    }
+    return keys;
+}
+
+void testEverySchemaKeyHasAConfigControl()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
+        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    ConfigEditorWindow window(path, 0, true);
+    std::set<std::string> controlled;
+    for (QObject* object : window.findChildren<QObject*>())
+    {
+        const QString name = object->objectName();
+        if (!name.startsWith(QStringLiteral("config."))) continue;
+        controlled.insert(name.mid(name.lastIndexOf(QLatin1Char('.')) + 1).toStdString());
+    }
+    // Keys that intentionally have no control of their own, with the reason.
+    // "gap" entries were found by this test at the integration (2026-10-17) and are
+    // left for the Config organisation pass; the rest are intentional.
+    static const std::map<std::string, const char*> allowList = {
+        // [led_drive]: the retired Python relay (removed 2026-10-15; accepted, ignored).
+        { "listen_port", "retired (ignored)" }, { "listen_log", "retired (ignored)" },
+        { "python_drives_port", "retired (ignored)" }, { "python_feed", "retired (ignored)" },
+        { "listen_script", "retired (ignored)" }, { "python", "retired (ignored)" },
+        // [led_drive]: superseded by the per-direction rate fields and the fade time.
+        { "rate_up", "gap: older single rate, superseded by rate_gain/min/max_up" },
+        { "rate_down", "gap: older single rate, superseded by rate_gain/min/max_down" },
+        { "fade_frames", "gap: older fade length in frames (fade_ms has the control)" },
+        { "fade_min_step", "gap: no control yet" },
+        { "script_smoothing", "gap: no control yet" },
+        // [general]: spellings of keys that have a control under the other spelling.
+        { "windowedfullscreenmode", "alias of windowed_fullscreen_mode" },
+        { "no_ui", "alias of noui" }, { "start_minimized", "alias of startminimized" },
+        { "new_lldv", "alias of newlldv" }, { "scene", "alias of scene_detect" },
+        // [general]: kept for manual compatibility editing only (see the scene-detection control).
+        { "disable_detection_features", "compatibility editing only" },
+        { "scene_correction_mode", "compatibility editing only" },
+        { "scene_correction_basic", "compatibility editing only" },
+        // [general]: command-line / session state rather than settings.
+        { "dolby_vision_tunnel", "command-line / per-session capture state" },
+        { "interface", "command-line interface choice" },
+        { "fullscreen_monitor_session_mode", "gap: no control yet" },
+        { "frame_offset", "gap: no [general] control (the DirectShow page has its own)" },
+        { "subtitle_reposition", "gap: no control yet" },
+        // Renderer keys.
+        { "deband", "legacy toggle; deband_strength has the control" },
+        { "sdr_target_primaries", "legacy spelling of target_primaries" },
+        { "calibration_lut_input_gamma", "gap: no control yet" },
+        { "calibration_lut_input_transfer", "alias accepted for HDR target (Rendering)" },
+        { "diagnostic_allow_full_g22", "gap: diagnostic, no control yet" },
+        { "live_profile_updates", "gap: no control yet" }, { "profile_update_mode", "gap: no control yet" },
+        { "steady_reserve_frames", "gap: no control yet" },
+        { "subtitle_bbox_test", "test / diagnostic overlay" }, { "subtitle_cut_paste_test", "test / diagnostic overlay" },
+        { "subtitle_cut_paste_background", "test / diagnostic overlay" },
+        { "subtitle_box_padding_mode", "legacy subtitle key (Subtitles profiles replace it)" },
+        { "subtitle_box_padding_sides", "legacy subtitle key" }, { "subtitle_box_padding_top", "legacy subtitle key" },
+        { "subtitle_box_padding_bottom", "legacy subtitle key" },
+        { "subtitle_box_padding_sides_percent", "legacy subtitle key" },
+        { "subtitle_box_padding_top_percent", "legacy subtitle key" },
+        { "subtitle_box_padding_bottom_percent", "legacy subtitle key" },
+        { "subtitle_hold_ms", "legacy subtitle key" }, { "subtitle_move_inset", "legacy subtitle key" },
+        { "subtitle_near_bar_px", "legacy subtitle key" }, { "subtitle_padding_pixels", "legacy subtitle key" },
+        { "subtitle_fit", "retired Screen setting (ignored)" },
+        { "temporal_fill", "gap: Subtitles profile key, no control yet" },
+    };
+    std::vector<std::string> missing;
+    auto check = [&](const std::string& source, const std::string& key)
+    {
+        if (controlled.count(key) || allowList.count(key)) return;
+        missing.push_back(source + ":" + key);
+    };
+    for (const auto& rule : LedDrive::LedDriveRules()) check("led_drive", rule.key);
+    for (const auto& rule : LedDrive::ProjectorRules()) check("projector", rule.key);
+    for (const auto& rule : MainConfigSchema::GeneralRules()) check("general", rule.key);
+    const std::set<std::string> rendererKeys = RendererValidatedKeys();
+    require(rendererKeys.size() > 100, "the renderer validators' keys were not found");
+    for (const std::string& key : rendererKeys) check("renderer", key);
+    std::string list;
+    for (const std::string& key : missing) list += " " + key;
+    require(missing.empty(), ("Settings without a Config control (add one or allow-list it with a reason):" + list).c_str());
+}
+
 void testAdvancedLedSettingsMatchTheParser()
 {
     // Bug 8: every runtime LED key has a control whose default is the parser's.
@@ -9256,6 +9373,7 @@ int main(int argc, char** argv)
     failures += run("UTF-8 BOM and equals separator", testUtf8BomAndEqualsSeparator);
     failures += run("load writes nothing unrequested", testLoadWritesNothingUnrequested);
     failures += run("advanced LED settings match the parser", testAdvancedLedSettingsMatchTheParser);
+    failures += run("every schema key has a Config control", testEverySchemaKeyHasAConfigControl);
     failures += run("profile boolean can be unset", testProfileBooleanCanBeUnset);
     failures += run("unsaved edits ask on close and exit", testUnsavedEditsAskOnCloseAndExit);
     failures += run("explicit auto dither shows Auto", testExplicitAutoDitherShowsAuto);
