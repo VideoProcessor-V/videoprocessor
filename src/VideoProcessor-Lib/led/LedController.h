@@ -32,8 +32,9 @@ namespace LedDrive
 		// that is more recent): mode: compensate aims the LED at it, so a flash
 		// never makes the LED chase it; a fall, or a cut, acts at once.
 		double sustainedApl = 16.0;
-		// The brightest 3x3 block (the script's max of its downscale): the
-		// highlight test of mode: script.
+		// The script's max of its downscale (the largest area mean over the
+		// whole picture, led_peak_full_coverage; off: the brightest 3x3
+		// block): the highlight test of mode: script.
 		double maximum = 16.0;
 		bool cut = false;
 		bool fade = false;

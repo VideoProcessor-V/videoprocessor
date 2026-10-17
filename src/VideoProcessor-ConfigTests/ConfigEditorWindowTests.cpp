@@ -2039,6 +2039,18 @@ void testLedDrivePageAndLiveSwitches()
     require(turnStep->isEnabled() && turnStep->value() == 2, "The step size is not offered for 'taking turns'");
     turnStep->setValue(3);
     customFloor->setValue(20);
+    // Bug hunt 2 (owner 2026-10-17): the peak from every pixel and picture-only measurement,
+    // restore switches on by default with their own controls.
+    auto* fullPeak = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.led_peak_full_coverage"));
+    auto* pictureOnly = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.led_picture_only"));
+    require(fullPeak->isChecked() && pictureOnly->isChecked(),
+        "led_peak_full_coverage / led_picture_only are not on by default");
+    require(fullPeak->isVisibleTo(&window) && pictureOnly->isVisibleTo(&window) && fullPeak->isEnabled() &&
+        pictureOnly->isEnabled(), "The Dynamic Drive measurement switches are not offered");
+    require(fullPeak->toolTip().contains(QStringLiteral("Dynamic Drive")) &&
+        pictureOnly->toolTip().contains(QStringLiteral("subtitle")), "The measurement switches do not say what they do");
+    fullPeak->setChecked(false);
+    pictureOnly->setChecked(false);
     QCoreApplication::processEvents();
     QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
     require(apply->isEnabled(), "Dynamic Drive edits did not enable Apply");
@@ -2050,7 +2062,7 @@ void testLedDrivePageAndLiveSwitches()
         "led_floor_reactive: 110", "led_latency_ms: 100", "ftb_turn_step: 3", "compensation_eotf: 2.35",
         "cntr_latency_ms: 120", "adaptive_gamma: true", "command_source: compensate", "lookahead: false", "cut_cntr_level: 57", "max_cut_dip: 0.40",
         "black_prelift_max: 110", "rate_max_up: 20.0", "rate_preset: compensated", "led_settle_ms: 250",
-        "dmd_clip_cntr: 61" })
+        "dmd_clip_cntr: 61", "led_peak_full_coverage: false", "led_picture_only: false" })
         require(saved.contains(expected), QStringLiteral("Dynamic Drive setting not saved: %1")
             .arg(QString::fromLatin1(expected)).toStdString().c_str());
     experiment->setChecked(false);

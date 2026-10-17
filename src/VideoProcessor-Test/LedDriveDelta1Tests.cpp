@@ -1965,6 +1965,27 @@ namespace VideoProcessorTest
 			Assert::IsTrue(projector->light < 255, L"(the fake projector really stayed dim)");
 		}
 
+		// Bug hunt 2 (owner 2026-10-17): the peak from every pixel and picture-only
+		// measurement are restore switches, on by default.
+		TEST_METHOD(MeasurementSwitchesAreReadWithTheirDefaults)
+		{
+			const LedDriveConfig defaults;
+			Assert::IsTrue(defaults.peakFullCoverage, L"led_peak_full_coverage on by default");
+			Assert::IsTrue(defaults.pictureOnly, L"led_picture_only on by default");
+			std::string error;
+			const std::string good = "[led_drive.Default]\nled_peak_full_coverage: false\nled_picture_only: false\n";
+			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(good);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::IsFalse(led.peakFullCoverage);
+			Assert::IsFalse(led.pictureOnly);
+			Assert::IsFalse(Validates("[led_drive.Default]\nled_picture_only: sometimes\n", error));
+			Assert::IsFalse(Validates("[led_drive.Default]\nled_peak_full_coverage: 2\n", error));
+		}
+
 		// script_resend_failed_writes off: the pure script stream - the failed
 		// CNTR 50 is not repeated (the script believes 50 and never sends it again).
 		TEST_METHOD(ScriptResendOffKeepsThePureScriptStream)

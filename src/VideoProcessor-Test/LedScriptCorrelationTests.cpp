@@ -33,6 +33,11 @@ using namespace LedDrive;
 //      script's command timeline - LED and CNTR levels over time;
 //   C  the feed against the screenshots: the same script, the feed padded to
 //      the screenshot's time - the command timelines should match.
+// Bug hunt 2 (owner 2026-10-17): judged against the intended behaviour - the
+// script's screenshot runs (and C) read the whole picture as the script's
+// INTER_AREA downscale would (ScriptScreenshot, independent of VP's code);
+// the fed runs read VP's measurement (the peak from every pixel). I reports
+// how often VP's highlight decision and APL band input match the picture's.
 // Opt-in: VP_TEST_LED_CORRELATION=1. Writes led-correlation.txt (and the
 // timeline and the script's output) to VP_TEST_CORPUS_DIR or beside the DLL.
 namespace
@@ -92,19 +97,88 @@ namespace
 		return clip.frames > 0;
 	}
 
+	// Bug hunt 2 (owner 2026-10-17): the intended measurement, independent of
+	// VP's code - what the owner's script's screenshot would read of the whole
+	// picture, the picture only (no subtitles or overlays in these clips): the
+	// frame as the screen's 8-bit grey (madVR's limited levels inside Windows'
+	// full range: the limited code), cv2.resize to 854x480 with INTER_AREA
+	// (exact fractional area weights, rounded to 8 bits as cv2 does), its
+	// maximum, and its mean over the whole picture (the script's fixed crop
+	// rows 57..423 assumed a scope picture: a limitation, not its intent).
+	struct ScriptView
+	{
+		double apl = 16.0;
+		double maximum = 16.0;
+	};
+
+	ScriptView ScriptScreenshot(const std::vector<uint8_t>& grey, int width, int height)
+	{
+		const int gridW = 854, gridH = 480;
+		const double sx = static_cast<double>(width) / gridW, sy = static_cast<double>(height) / gridH;
+		struct Split { int box; double w0; };
+		auto splits = [](int count, double scale, int boxes)
+		{
+			std::vector<Split> out(count);
+			for (int i = 0; i < count; ++i)
+			{
+				const int box = std::min(boxes - 1, static_cast<int>(std::floor(i / scale)));
+				const double edge = (box + 1) * scale;
+				out[i] = { box, box + 1 < boxes ? std::min(1.0, edge - i) : 1.0 };
+			}
+			return out;
+		};
+		const std::vector<Split> columns = splits(width, sx, gridW), rows = splits(height, sy, gridH);
+		std::vector<double> acc(static_cast<size_t>(gridW) * gridH, 0.0);
+		std::vector<double> line(static_cast<size_t>(gridW) + 1);
+		for (int y = 0; y < height; ++y)
+		{
+			std::fill(line.begin(), line.end(), 0.0);
+			const uint8_t* row = grey.data() + static_cast<size_t>(y) * width;
+			for (int x = 0; x < width; ++x)
+			{
+				const Split& c = columns[x];
+				line[c.box] += c.w0 * row[x];
+				line[c.box + 1] += (1.0 - c.w0) * row[x];
+			}
+			const Split& r = rows[y];
+			for (int bx = 0; bx < gridW; ++bx)
+			{
+				acc[static_cast<size_t>(r.box) * gridW + bx] += r.w0 * line[bx];
+				if (r.box + 1 < gridH)
+					acc[static_cast<size_t>(r.box + 1) * gridW + bx] += (1.0 - r.w0) * line[bx];
+			}
+		}
+		ScriptView view;
+		double sum = 0.0, maximum = 0.0;
+		for (double a : acc)
+		{
+			const double value = std::min(255.0, std::floor(a / (sx * sy) + 0.5));
+			sum += value;
+			maximum = std::max(maximum, value);
+		}
+		view.apl = sum / acc.size();
+		view.maximum = maximum;
+		return view;
+	}
+
 	// Every `step`-th frame measured as VP's look-ahead measures a raw frame
 	// (3x3 block means on a grid of at most 96 x 54, limited-range codes; the
-	// identity transfer: the frame's own signal), cached per clip.
-	bool MeasureClip(const Clip& clip, int step, const std::string& cacheDir, std::vector<RawMeasurement>& out)
+	// identity transfer: the frame's own signal; the peak from every pixel at
+	// the look-ahead's bounded read, led_peak_full_coverage), and the script's
+	// view of the same frame (ScriptScreenshot), cached per clip.
+	bool MeasureClip(const Clip& clip, int step, const std::string& cacheDir, std::vector<RawMeasurement>& out,
+		std::vector<ScriptView>& views)
 	{
-		const std::string cache = cacheDir + clip.name + "-" + std::to_string(step) + ".ledraw";
+		const std::string cache = cacheDir + clip.name + "-" + std::to_string(step) + "-v2.ledraw";
 		{
 			std::ifstream in(cache, std::ios::binary);
 			int count = 0;
 			if (in.read(reinterpret_cast<char*>(&count), sizeof(count)) && count > 0)
 			{
 				out.resize(count);
-				if (in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(sizeof(RawMeasurement)) * count))
+				views.resize(count);
+				if (in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(sizeof(RawMeasurement)) * count) &&
+					in.read(reinterpret_cast<char*>(views.data()), static_cast<std::streamsize>(sizeof(ScriptView)) * count))
 					return true;
 			}
 		}
@@ -124,7 +198,9 @@ namespace
 		luma.colorspace = ColorSpace::REC_709;
 		QueuedFrameStatistics::PictureRect rect{ 0, 0, clip.width, clip.height };
 		const RawTransfer transfer = IdentityRawTransfer();
+		std::vector<uint8_t> grey(lumaSamples);
 		out.clear();
+		views.clear();
 		for (int frame = 0; frame < clip.frames; frame += step)
 		{
 			const long long offset = clip.headerBytes + static_cast<long long>(frame) * clip.frameBytes + (clip.y4m ? 6 : 0);
@@ -133,15 +209,22 @@ namespace
 			{
 				if (fread(bytes.data(), 1, lumaSamples, f) != lumaSamples) break;
 				for (size_t i = 0; i < lumaSamples; ++i) p010[i] = static_cast<uint16_t>(bytes[i] << 8);
+				grey = bytes;
 			}
 			else
 			{
 				if (fread(p010.data(), 2, lumaSamples, f) != lumaSamples) break;
-				for (size_t i = 0; i < lumaSamples; ++i) p010[i] = static_cast<uint16_t>(p010[i] << 6);
+				for (size_t i = 0; i < lumaSamples; ++i)
+				{
+					grey[i] = static_cast<uint8_t>(std::min(255, (p010[i] + 2) / 4));   // 10-bit to the screen's 8 bits
+					p010[i] = static_cast<uint16_t>(p010[i] << 6);
+				}
 			}
 			RawMeasurement raw;
-			if (!MeasureRawFrame(luma, rect, transfer, raw)) break;
+			RawMeasureOptions options;   // the defaults: the peak from every pixel, the frame fills the screen
+			if (!MeasureRawFrame(luma, rect, transfer, raw, -1, &options)) break;
 			out.push_back(raw);
+			views.push_back(ScriptScreenshot(grey, clip.width, clip.height));
 		}
 		fclose(f);
 		if (out.empty()) return false;
@@ -149,6 +232,7 @@ namespace
 		const int count = static_cast<int>(out.size());
 		save.write(reinterpret_cast<const char*>(&count), sizeof(count));
 		save.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(sizeof(RawMeasurement)) * count);
+		save.write(reinterpret_cast<const char*>(views.data()), static_cast<std::streamsize>(sizeof(ScriptView)) * count);
 		return true;
 	}
 
@@ -175,6 +259,11 @@ namespace
 			out.histogram[std::max(0, std::min(static_cast<int>(code), HISTOGRAM_BINS - 1))] += raw.histogram[bin];
 		}
 		return out;
+	}
+
+	ScriptView Darkened(const ScriptView& view, double k)
+	{
+		return { 16.0 + (view.apl - 16.0) * k, 16.0 + (view.maximum - 16.0) * k };
 	}
 
 	struct Tick { double t; int frame, mean, maximum, hl, tp, tc; };
@@ -335,36 +424,46 @@ namespace VideoProcessorTest
 			}
 			Assert::IsFalse(clips.empty(), L"no clips found in VP_TEST_REAL_FOOTAGE");
 			std::vector<std::vector<RawMeasurement>> measured(clips.size());
+			std::vector<std::vector<ScriptView>> viewed(clips.size());
 			for (size_t i = 0; i < clips.size(); ++i)
 			{
 				const int step = std::max(1, static_cast<int>(std::lround(clips[i].fps / 24.0)));
-				Assert::IsTrue(MeasureClip(clips[i], step, outDir, measured[i]), std::wstring(clips[i].name.begin(), clips[i].name.end()).c_str());
+				Assert::IsTrue(MeasureClip(clips[i], step, outDir, measured[i], viewed[i]), std::wstring(clips[i].name.begin(), clips[i].name.end()).c_str());
 			}
 
 			// The scenes: per clip bright, a cut to darker, a fade through black,
 			// dark, very dark, and a cut back to bright - every band of the
 			// script's power and contrast tables, its fast dumps and its
 			// anti-pump. Played forwards, then backwards (seamless).
-			struct Shown { const RawMeasurement* raw; double k; };
+			struct Shown { const RawMeasurement* raw; const ScriptView* view; double k; };
 			std::vector<Shown> shown;
 			const RawMeasurement black = Darkened(measured[0][0], 0.0);
+			const ScriptView blackView = Darkened(viewed[0][0], 0.0);
 			for (size_t i = 0; i < clips.size(); ++i)
 			{
 				const auto& m = measured[i];
+				const auto& v = viewed[i];
 				const int n = static_cast<int>(m.size());
 				auto play = [&](double k, bool backwards)
 				{
-					for (int j = 0; j < n; ++j) shown.push_back({ &m[backwards ? n - 1 - j : j], k });
+					for (int j = 0; j < n; ++j)
+					{
+						const int at = backwards ? n - 1 - j : j;
+						shown.push_back({ &m[at], &v[at], k });
+					}
 				};
 				auto fade = [&](double from, double to, int frames, bool backwards)
 				{
 					for (int j = 0; j < frames; ++j)
-						shown.push_back({ &m[backwards ? n - 1 - (j % n) : j % n], from + (to - from) * (j + 1) / frames });
+					{
+						const int at = backwards ? n - 1 - (j % n) : j % n;
+						shown.push_back({ &m[at], &v[at], from + (to - from) * (j + 1) / frames });
+					}
 				};
 				play(1.0, false);
 				play(0.4, true);
 				fade(0.4, 0.0, 48, false);
-				for (int j = 0; j < 24; ++j) shown.push_back({ &black, 1.0 });
+				for (int j = 0; j < 24; ++j) shown.push_back({ &black, &blackView, 1.0 });
 				fade(0.0, 0.15, 48, true);
 				play(0.15, false);
 				play(0.08, true);
@@ -378,15 +477,28 @@ namespace VideoProcessorTest
 			const double frameMs = 1000.0 / 24.0;
 			std::vector<FrameStats> stats;
 			stats.reserve(shown.size());
+			// I: VP's measurement against the picture's (the script's view).
+			int highlightAgree = 0;
+			double peakDifference = 0.0, peakDifferenceMax = 0.0, aplDifference = 0.0, aplDifferenceMax = 0.0;
 			{
 				std::ofstream timeline(outDir + "led-timeline.csv", std::ios::trunc);
-				timeline << "t_ms,apl,max,hl\n";
+				// apl/max/hl: the picture as the script's screenshot reads it (screenshot
+				// loops); vp_*: VP's measurement (the feed).
+				timeline << "t_ms,apl,max,hl,vp_apl,vp_max,vp_hl\n";
 				for (size_t f = 0; f < shown.size(); ++f)
 				{
 					stats.push_back(builder.Build(Darkened(*shown[f].raw, shown[f].k), f * frameMs));
 					const FrameStats& s = stats.back();
-					timeline << f * frameMs << "," << s.apl << "," << s.maximum << ","
-						<< (s.maximum >= config.scriptHighlightCode ? 1 : 0) << "\n";
+					const ScriptView view = Darkened(*shown[f].view, shown[f].k);
+					const int vpHl = s.maximum >= config.scriptHighlightCode ? 1 : 0;
+					const int viewHl = view.maximum >= config.scriptHighlightCode ? 1 : 0;
+					highlightAgree += vpHl == viewHl ? 1 : 0;
+					peakDifference += std::abs(s.maximum - view.maximum);
+					peakDifferenceMax = std::max(peakDifferenceMax, std::abs(s.maximum - view.maximum));
+					aplDifference += std::abs(s.apl - view.apl);
+					aplDifferenceMax = std::max(aplDifferenceMax, std::abs(s.apl - view.apl));
+					timeline << f * frameMs << "," << view.apl << "," << view.maximum << "," << viewHl << ","
+						<< s.apl << "," << s.maximum << "," << vpHl << "\n";
 				}
 			}
 			const double endMs = shown.size() * frameMs;
@@ -499,10 +611,19 @@ namespace VideoProcessorTest
 				<< "; commands " << vpCommands.size() << " vs " << scriptCommands.size() << "\n"
 				<< "B' with script_pacing: script (screenshot " << shotMs << " ms, echo " << echoMs << " ms): "
 				<< Describe(pacedVsScript) << "; commands " << pacedCommands.size() << " vs " << scriptCommands.size() << "\n"
-				<< "C  the script fed vs with screenshots: " << Describe(fedVsShots) << "; commands " << scriptCommands.size()
-				<< " vs " << shotCommands.size() << "\n";
+				<< "C  the script fed VP's measurement vs its screenshots of the whole picture: " << Describe(fedVsShots)
+				<< "; commands " << scriptCommands.size() << " vs " << shotCommands.size() << "\n"
+				<< "I  VP's measurement vs the picture (the script's INTER_AREA view): highlight decision agrees on "
+				<< 100.0 * highlightAgree / std::max<size_t>(1, shown.size()) << "% of frames; peak |diff| mean "
+				<< peakDifference / std::max<size_t>(1, shown.size()) << " max " << peakDifferenceMax
+				<< " codes; APL |diff| mean " << aplDifference / std::max<size_t>(1, shown.size()) << " max "
+				<< aplDifferenceMax << " codes\n";
 			std::ofstream(outDir + "led-correlation.txt", std::ios::trunc) << report.str();
 			Logger::WriteMessage(report.str().c_str());
+			// The intent: the same highlight decisions as the whole picture gives
+			// (near-threshold frames may round differently: 8-bit screenshot, bounded read).
+			const std::string text = report.str();
+			Assert::IsTrue(highlightAgree >= 0.97 * shown.size(), std::wstring(text.begin(), text.end()).c_str());
 		}
 	};
 }

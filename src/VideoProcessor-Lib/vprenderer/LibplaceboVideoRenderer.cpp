@@ -20771,6 +20771,81 @@ struct LibplaceboVideoRenderer::Impl
                     hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
                     renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent,
                     sourceSequence);
+                // Bug hunt 2 (owner 2026-10-17, led_peak_full_coverage): the peak over every
+                // pixel, in boxes the share of the screen of the script's full-screen
+                // downscale. The screen is the whole output (the script's screenshot).
+                const double ledScreenW = baseTarget.crop.x1 - baseTarget.crop.x0;
+                const double ledScreenH = baseTarget.crop.y1 - baseTarget.crop.y0;
+                ledMeasurement.SetPeak(led->Config().peakFullCoverage, ledScreenW, ledScreenH);
+                // Bug hunt 2 (owner 2026-10-17, led_picture_only): measure the PICTURE ONLY. The
+                // detected subtitle (padded box and card), and a moved subtitle's place, cover
+                // and cleanup fill, are left out of every LED statistic. Detection runs only with
+                // a subtitle style that moves cues (Black / Generated gray) or the box test; with
+                // no detection nothing is masked. VP's own overlays (stats, OSD, profile panel,
+                // the subtitle test box) are target overlays libplacebo draws after the output
+                // pass, so this PRE_OUTPUT measurement never sees them.
+                LedDrive::MeasurementRect ledMasks[LedDrive::MAX_MASK_RECTS];
+                LedDrive::PixelRect ledSourceMasks[LedDrive::MAX_MASK_RECTS];
+                int ledMaskCount = 0;
+                if (led->Config().pictureOnly)
+                {
+                    std::vector<SubtitleBoxRect> boxes;
+                    if (subtitleBoxResult.detected && subtitleBoxResult.bounds.Valid())
+                    {
+                        boxes.push_back(ExpandSubtitleBox(subtitleBoxResult.bounds, width, height, safeSubtitlePadding));
+                        boxes.push_back(subtitleBoxResult.sourcePanel);
+                    }
+                    if (subtitleCompositionSucceeded)
+                        for (const SubtitleBoxRect& r : { relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage,
+                            relocatedSubtitle.generatedCleanup, relocatedSubtitle.source })
+                            boxes.push_back(r);
+                    // NLS warps the picture before the scaler: a box follows the NLS map (the
+                    // shader's output-to-source curve, inverted per edge). An NLS shader whose map
+                    // is not known masks the box's rows across the whole width, a little taller.
+                    const NlsMaskMapping::Mapping ledNls = submittedNls ? KnownNlsMapping() : NlsMaskMapping::Mapping();
+                    auto outputOf = [&](double source, bool vertical)
+                    {
+                        const double scale = vertical ? ledNls.yScale : ledNls.xScale;
+                        const double protect = vertical ? ledNls.yProtect : ledNls.xProtect;
+                        double lo = 0.0, hi = 1.0;
+                        for (int i = 0; i < 40; ++i)
+                        {
+                            const double mid = 0.5 * (lo + hi);
+                            if (NlsMaskMapping::MapCoordinate(mid, scale, ledNls.curve, ledNls.geometry, protect) < source)
+                                lo = mid;
+                            else
+                                hi = mid;
+                        }
+                        return 0.5 * (lo + hi);
+                    };
+                    for (const SubtitleBoxRect& box : boxes)
+                    {
+                        if (!box.Valid() || ledMaskCount >= LedDrive::MAX_MASK_RECTS) continue;
+                        LedDrive::MeasurementRect m = LedDrive::SourceRectInCrop(box.left, box.top, box.right,
+                            box.bottom, renderImage.crop.x0, renderImage.crop.y0, renderImage.crop.x1, renderImage.crop.y1);
+                        if (LedDrive::Empty(m)) continue;
+                        ledSourceMasks[ledMaskCount] = { static_cast<double>(box.left), static_cast<double>(box.top),
+                            static_cast<double>(box.right), static_cast<double>(box.bottom) };
+                        if (submittedNls && ledNls.valid)
+                            m = { outputOf(m.x0, false), outputOf(m.y0, true), outputOf(m.x1, false), outputOf(m.y1, true) };
+                        else if (submittedNls)
+                            m = { 0.0, std::max(0.0, m.y0 - 0.02), 1.0, std::min(1.0, m.y1 + 0.02) };
+                        ledMasks[ledMaskCount++] = m;
+                    }
+                }
+                ledMeasurement.SetMask(ledMasks, ledMaskCount);
+                // The look-ahead measures queued raw frames (source raster): the screen in
+                // source pixels for the box size, and the current subtitle for their masks.
+                {
+                    const double cropW = renderImage.crop.x1 - renderImage.crop.x0;
+                    const double cropH = renderImage.crop.y1 - renderImage.crop.y0;
+                    const double shownW = target.crop.x1 - target.crop.x0;
+                    const double shownH = target.crop.y1 - target.crop.y0;
+                    static_cast<LedDrive::LookaheadObserver&>(led->Lookahead()).SetPictureGeometry(
+                        shownW > 0.0 && cropW > 0.0 ? ledScreenW * cropW / shownW : 0.0,
+                        shownH > 0.0 && cropH > 0.0 ? ledScreenH * cropH / shownH : 0.0,
+                        ledSourceMasks, ledMaskCount);
+                }
                 // Delta 8 R2: the grain map (the previous source frame's, as
                 // for S1) for grain-suppressed highlight statistics.
                 ledMeasurement.SetGrain(led->Config().highlightGrainSuppress && adaptiveDownscale.Active() &&

@@ -36,6 +36,28 @@ namespace LedDrive
 		// the frame's source sequence, handed back with its measurement.
 		void SetFrame(const MeasurementRect& rect, const double weights[3], double boost = 1.0,
 			uint64_t sequence = 0);
+		// Hunt 2 (owner 2026-10-17), led_peak_full_coverage: the peak
+		// (RawMeasurement::maximum) as the largest area mean over boxes
+		// tiling the whole measured rectangle, each the script's share of
+		// the screen (AreaPeakGrid); screenWidth/Height: the output screen
+		// in the hooked picture's pixels (0 = the hooked texture). Off: the
+		// brightest 3x3 sample block, as before. Call every frame.
+		void SetPeak(bool fullCoverage, double screenWidth = 0.0, double screenHeight = 0.0)
+		{
+			peakFullCoverage = fullCoverage;
+			screenSize[0] = static_cast<float>(screenWidth);
+			screenSize[1] = static_cast<float>(screenHeight);
+		}
+		// Hunt 2 (owner 2026-10-17), led_picture_only: rectangles of the
+		// hooked picture (normalised like SetFrame's rect) left out of every
+		// statistic - a detected subtitle. count 0 = nothing masked. At most
+		// MAX_MASK_RECTS are used. Call every frame.
+		void SetMask(const MeasurementRect* rects, int count)
+		{
+			maskCount = 0;
+			for (int i = 0; rects && i < count && maskCount < MAX_MASK_RECTS; ++i)
+				if (!Empty(rects[i])) masks[maskCount++] = rects[i];
+		}
 		// Delta 8 R2: the Stage 8 grain map (one texel per 16x16 source block;
 		// r = grain scale grain_floor..1, g = trusted) and the source crop the
 		// picture shows, or nullptr. A grainy block's histogram entry (the
@@ -74,6 +96,10 @@ namespace LedDrive
 		MeasurementRect rect;
 		float weights[3] = { 0.114f, 0.587f, 0.299f };
 		float boost = 1.0f;
+		bool peakFullCoverage = true;
+		float screenSize[2] = { 0.0f, 0.0f };
+		MeasurementRect masks[MAX_MASK_RECTS];
+		int maskCount = 0;
 		pl_tex grain = nullptr;
 		float grainFloorValue = 0.4f;
 		pl_rect2df crop{};

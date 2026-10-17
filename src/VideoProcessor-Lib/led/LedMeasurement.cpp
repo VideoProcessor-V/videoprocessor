@@ -26,6 +26,40 @@ namespace LedDrive
 		return active;
 	}
 
+	MeasurementRect SourceRectInCrop(int left, int top, int right, int bottom,
+		double cropX0, double cropY0, double cropX1, double cropY1)
+	{
+		MeasurementRect empty{ 0.0, 0.0, 0.0, 0.0 };
+		const double width = cropX1 - cropX0, height = cropY1 - cropY0;
+		if (width <= 0.0 || height <= 0.0 || right <= left || bottom <= top) return empty;
+		auto clamp01 = [](double v) { return std::max(0.0, std::min(v, 1.0)); };
+		MeasurementRect r;
+		r.x0 = clamp01((left - cropX0) / width);
+		r.x1 = clamp01((right - cropX0) / width);
+		r.y0 = clamp01((top - cropY0) / height);
+		r.y1 = clamp01((bottom - cropY0) / height);
+		return Empty(r) ? empty : r;
+	}
+
+	PeakGrid AreaPeakGrid(double rectW, double rectH, double screenW, double screenH)
+	{
+		PeakGrid grid;
+		if (rectW <= 0.0 || rectH <= 0.0) return grid;
+		if (screenW <= 0.0) screenW = rectW;
+		if (screenH <= 0.0) screenH = rectH;
+		// The script's box in pixels of this screen, never under one pixel.
+		const double boxW = std::max(1.0, screenW / SCRIPT_PEAK_GRID_W);
+		const double boxH = std::max(1.0, screenH / SCRIPT_PEAK_GRID_H);
+		grid.boxesX = std::max(1, static_cast<int>(std::lround(rectW / boxW)));
+		grid.boxesY = std::max(1, static_cast<int>(std::lround(rectH / boxH)));
+		// Never a box under a pixel after the stretch (rounding up near 1 px).
+		grid.boxesX = std::min(grid.boxesX, std::max(1, static_cast<int>(std::floor(rectW))));
+		grid.boxesY = std::min(grid.boxesY, std::max(1, static_cast<int>(std::floor(rectH))));
+		grid.boxW = rectW / grid.boxesX;
+		grid.boxH = rectH / grid.boxesY;
+		return grid;
+	}
+
 	double HistogramPercentile(const uint32_t* histogram, uint32_t total, double percentile)
 	{
 		if (total == 0) return 16.0;
