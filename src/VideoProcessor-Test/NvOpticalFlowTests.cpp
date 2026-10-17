@@ -3,6 +3,8 @@
 
 #include <vprenderer/NvOpticalFlow.h>
 #include <vprenderer/MotionAheadProducer.h>
+#include <OpticalFlowTrust.h>
+#include <chrono>
 #include <thread>
 
 #include <dxgi1_2.h>
@@ -183,6 +185,105 @@ namespace Tests
 					Assert::AreEqual(static_cast<float>(-dy), Median(by), 0.5f, L"backward y");
 				}
 			}
+		}
+
+		TEST_METHOD(ProducerCarriesTheEngineTrustExtras)
+		{
+			// 2026-10-17 (the engine's extras): each pair computed ahead carries the cost per
+			// de-judder block as a weight and the engine's own forward/backward error per cell;
+			// on a clean pan nearly every block is as sure as usual and consistent, and the
+			// whole-frame motion is clear. Reports the extras' time on the worker.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"producer extras: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			CComPtr<IDXGIFactory1> factory;
+			Assert::IsTrue(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))));
+			CComPtr<IDXGIAdapter1> nvidia;
+			for (UINT i = 0; !nvidia; ++i)
+			{
+				CComPtr<IDXGIAdapter1> adapter;
+				if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+				DXGI_ADAPTER_DESC1 desc{};
+				adapter->GetDesc1(&desc);
+				if (desc.VendorId == 0x10DE) nvidia = adapter;
+			}
+			if (!nvidia) { Logger::WriteMessage(L"producer extras: no NVIDIA GPU; not run"); return; }
+			CComPtr<ID3D11Device> device;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
+				D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+			const int W = 1920, H = 1080, dx = 8, dy = 4, BW = W + 64, BH = H + 64;
+			std::vector<uint8_t> base(static_cast<size_t>(BW) * BH), noise(base.size());
+			uint32_t seed = 4242u;
+			for (uint8_t& v : noise) { seed = seed * 1664525u + 1013904223u; v = static_cast<uint8_t>(seed >> 24); }
+			for (int y = 0; y < BH; ++y)
+				for (int x = 0; x < BW; ++x)
+				{
+					int sum = 0;
+					for (int k = -2; k <= 2; ++k)
+						for (int j = -2; j <= 2; ++j)
+							sum += noise[static_cast<size_t>(ClampInt(y + k, 0, BH - 1)) * BW + ClampInt(x + j, 0, BW - 1)];
+					base[static_cast<size_t>(y) * BW + x] = static_cast<uint8_t>(sum / 25);
+				}
+			auto frame = [&](int index) {
+				auto buffer = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2, static_cast<uint16_t>(512 << 6));
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						const int sx = ClampInt(x - index * dx + 32, 0, BW - 1), sy = ClampInt(y - index * dy + 32, 0, BH - 1);
+						(*buffer)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>((64 + base[static_cast<size_t>(sy) * BW + sx] * 3) << 6);
+					}
+				AnalysisLumaSource source;
+				source.data = reinterpret_cast<const uint8_t*>(buffer->data());
+				source.dataBytes = buffer->size() * 2;
+				source.width = W;
+				source.height = H;
+				source.rowBytes = static_cast<size_t>(W) * 2;
+				source.chromaRowBytes = static_cast<size_t>(W) * 2;
+				source.format = AnalysisLumaFormat::P010;
+				source.backingOwner = buffer;
+				return source;
+			};
+			MotionAhead::Producer producer;
+			Assert::IsTrue(producer.Start(device, NvOpticalFlow::Preset::Slow), L"producer started");
+			for (int f = 0; f < 4; ++f) producer.Submit(static_cast<uint64_t>(f + 1), 1, frame(f));
+			MotionAhead::FlowPtr flow;
+			for (int k = 0; k < 400 && !flow; ++k)
+			{
+				flow = producer.Take(3, 4);
+				if (!flow) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				if (!flow && !producer.Running()) break;
+			}
+			if (!flow && !producer.Running())
+			{
+				Logger::WriteMessage(("producer extras: engine unavailable: " + producer.Error() + "\n").c_str());
+				return;
+			}
+			Assert::IsTrue(static_cast<bool>(flow), L"a pair computed ahead");
+			Assert::AreEqual(static_cast<size_t>(flow->blocksX) * flow->blocksY, flow->costWeight.size(), L"the cost weights, per block");
+			Assert::AreEqual(static_cast<size_t>(flow->gridW) * flow->gridH, flow->fbError.size(), L"the consistency, per cell");
+			double meanWeight = 0.0;
+			for (float w : flow->costWeight) meanWeight += w;
+			meanWeight /= flow->costWeight.size();
+			const float fbMedian = Median(flow->fbError);
+			std::vector<float> fbWeights;
+			Assert::IsTrue(OpticalFlowTrust::FbWeights(flow->fbError, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid,
+				MotionAhead::Flow::kBlockPx, flow->blocksX, flow->blocksY, 1.0f, fbWeights));
+			double meanFb = 0.0;
+			for (float w : fbWeights) meanFb += w;
+			meanFb /= fbWeights.size();
+			char line[260];
+			std::snprintf(line, sizeof(line), "producer extras (1080p pan, half %dx%d): mean cost weight %.3f, fb error median %.3f px, mean fb weight %.3f, global (%.2f, %.2f) z %.2f; extras %.2f ms, pair %.1f ms\n",
+				flow->halfW, flow->halfH, meanWeight, fbMedian, meanFb, flow->global[0][0], flow->global[0][1], flow->global[0][2],
+				producer.GetStats().extrasMs, producer.GetStats().lastPairMs);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(meanWeight > 0.9, L"a clean pan: nearly every block as sure as usual");
+			Assert::IsTrue(fbMedian < 1.0f, L"the engine's two directions agree");
+			Assert::IsTrue(meanFb > 0.9, L"nearly every block consistent");
+			Assert::IsTrue(OpticalFlowTrust::GlobalUsable(flow->global[0]), L"the camera is clear");
+			Assert::IsTrue(producer.GetStats().extrasMs < 5.0, L"the extras are cheap on the worker");
+			producer.Stop();
 		}
 
 		TEST_METHOD(ProducerComputesPairsAheadAndAdaptsToTheQueue)

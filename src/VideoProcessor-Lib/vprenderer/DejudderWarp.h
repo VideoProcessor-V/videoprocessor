@@ -10,6 +10,7 @@
 namespace MotionAhead { struct Flow; }
 #include <memory>
 #include <string>
+#include <vector>
 
 // Stage 6 (6a): the de-judder's motion matcher and warp, as a standalone GPU
 // component. The renderer runs it from Stage 6b (estimate in 6b-1, extra
@@ -275,6 +276,20 @@ namespace Dejudder
 		// motion (D1) from the engine's field (worked out on the producer's worker) instead
 		// of the global search; the search stays the fallback (no pair ahead, no engine).
 		bool opticalFlowGlobal = true;
+		// With opticalFlowGlobal: the global search runs instead when the engine's
+		// whole-frame motion is not clear (too few confident cells agree: ambiguity >= 0.9,
+		// OpticalFlowTrust::GlobalUsable); false = the engine's value even then (before
+		// 2026-10-17).
+		bool opticalFlowGlobalFallback = true;
+		// The engine's extras as trust inputs (OpticalFlowTrust.h), for a pair computed
+		// ahead: the cost per block (a high cost lowers the block's trust) and the engine's
+		// own forward/backward consistency per cell (inconsistent cells lower it). Both
+		// raise the block's match error in the consistency pass by (1 - weight) x twice the
+		// pass limit, where the final vector is the engine's (within a half-size pixel);
+		// missing extras (an older driver, the render-time engine, the searches) change
+		// nothing.
+		bool opticalFlowCostTrust = true;
+		bool opticalFlowFbCheck = true;
 		// Tests only: the render-time engine's field read back (a stall) so the engine's
 		// whole-frame motion can be compared on corpora without a producer.
 		bool opticalFlowGlobalReadback = false;
@@ -604,6 +619,9 @@ namespace Dejudder
 		bool LowResSearch(const Planes& a, const Planes& b);
 		// The optical flow source: forward / backward in the searches' format.
 		bool OpticalFlowSearch(pl_tex outForward, pl_tex outBackward);
+		// The pair's trust weights (cost, the engine's own consistency) into ofWeight per
+		// block (ofWeighted); none when switched off, missing or not uploadable.
+		bool UploadEngineWeights(const MotionAhead::Flow& flow);
 		std::unique_ptr<NvOpticalFlow::Engine> opticalFlowEngine;
 		bool opticalFlowFailed = false;   // logged once; the searches from then on
 		int opticalFlowPresetOpen = -1;
@@ -636,8 +654,18 @@ namespace Dejudder
 		bool ExternalFlowUsed() const { return externalFlowUsed || (inner && HalvesForSearch() && inner->ExternalFlowUsed()); }
 		// The last Estimate's D1 came from the engine's field (planner Q1).
 		bool GlobalFromEngine() const { return globalFromEngine || (inner && HalvesForSearch() && inner->GlobalFromEngine()); }
+		// The engine's whole-frame motion was there but not clear, so the global search ran
+		// (opticalFlowGlobalFallback), counted over this instance's life (and the inner's).
+		unsigned long long GlobalFallbacks() const { return globalFallbacks + (inner ? inner->GlobalFallbacks() : 0ull); }
+		// The last Estimate applied the engine's trust weights (cost / consistency).
+		bool EngineWeightsUsed() const { return ofWeighted || (inner && HalvesForSearch() && inner->EngineWeightsUsed()); }
 	private:
 		bool globalFromEngine = false;
+		unsigned long long globalFallbacks = 0;
+		bool ofWeighted = false;          // this Estimate's engine block vectors carry trust weights (w)
+		bool refineCarriesWeight = false; // Refine keeps the seed's weight with its own vector
+		pl_tex ofWeight = nullptr;        // the weights per block (r32f / r16f), uploaded per pair
+		std::vector<float> ofWeights, ofFbWeights;   // CPU scratch
 		float engineGlobal[2][4] = {};   // the engine's whole-frame motion (D1 format), this Estimate
 		bool engineGlobalValid = false;
 		std::string opticalFlowError;

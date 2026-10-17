@@ -1,6 +1,7 @@
 ﻿#include <pch.h>
 #include "DejudderWarp.h"
 #include <vprenderer/MotionAheadProducer.h>
+#include <OpticalFlowTrust.h>
 
 #include <chrono>
 
@@ -185,7 +186,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
             ivec2 p = b * 8 + ivec2(x, y);
             s += abs(from_at(p) - to_lin(vec2(p) + m));
         }
-    imageStore(dst, b, vec4(m, s / 144.0, 1.0));
+#ifdef OF_WEIGHT
+    // The engine's trust weight for this block (cost / its own consistency), carried in w.
+    float w_ = clamp(texelFetch(of_weight, min(b, textureSize(of_weight, 0) - ivec2(1)), 0).r, 0.0, 1.0);
+#else
+    float w_ = 1.0;
+#endif
+    imageStore(dst, b, vec4(m, s / 144.0, w_));
 }
 )GLSL";
 
@@ -873,7 +880,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
             float s = sad_sub(o, v);
             if (s < best_sad) { best_sad = s; fbest = v; }
         }
-    imageStore(dst, b, vec4(fbest, best_sad / 144.0, 1.0));
+#ifdef COST_W
+    // The engine's trust weight stays with its own vector (within a half-size pixel).
+    float w_ = length(fbest - cand[0]) <= 1.0 ? texelFetch(sweep, b, 0).w : 1.0;
+#else
+    float w_ = 1.0;
+#endif
+    imageStore(dst, b, vec4(fbest, best_sad / 144.0, w_));
 }
 )GLSL";
 
@@ -1033,7 +1046,13 @@ if (run && lead) {
             float s = rf_sads[sub * 16 + (dy + 1) * 3 + dx + 1];
             if (s < best_sad) { best_sad = s; fbest = best + 0.5 * vec2(dx, dy); }
         }
-    imageStore(dst, b, vec4(fbest, best_sad / 144.0, 1.0));
+#ifdef COST_W
+    // The engine's trust weight stays with its own vector (within a half-size pixel).
+    float w_ = length(fbest - cand[0]) <= 1.0 ? texelFetch(sweep, b, 0).w : 1.0;
+#else
+    float w_ = 1.0;
+#endif
+    imageStore(dst, b, vec4(fbest, best_sad / 144.0, w_));
 }
 )GLSL";
 
@@ -1643,6 +1662,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float extra_ = texture_tol * tex_ / 128.0;
 #else
     float extra_ = 0.0;
+#endif
+#ifdef OF_TRUST
+    // The engine's trust weight (w: its cost, its own forward/backward consistency; 1 =
+    // none): a less sure engine vector counts as a worse match - tapered, or untrusted.
+    f.z += (1.0 - clamp(f.w, 0.0, 1.0)) * of_penalty;
 #endif
 #ifdef TAPER
     bool good = f.z <= taper_sad + extra_;   // delta 9 H3: marginal blocks warp, tapered
@@ -2343,7 +2367,7 @@ if (q.x < size.x && q.y < size.y) {
 			&sweep[0], &sweep[1], &ofSearch[0], &ofSearch[1], &ofNone, &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
 			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &globalBothSad2, &globalBothSad1, &globalBothPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
-			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1] })
+			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1], &ofWeight })
 			pl_tex_destroy(gpu, tex);
 		for (int i = 0; i < 2; ++i) { ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release(); }
 		inner.reset();   // its textures before the dispatch and the device
@@ -2826,12 +2850,17 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_int("use_of"), &useOf, false },
 			{ pl_var_float("motion_lo"), &motionLo, true },
 			{ pl_var_float("lambda"), &lambda, true } };
-		const std::string header = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL;
+		// The engine's trust weights ride in the seed's w (OF_WEIGHT): kept with the winner
+		// when it is the block's own engine vector.
+		const char* weightDefine = refineCarriesWeight ? "#define COST_W 1\n" : "";
+		const std::string header = std::string(weightDefine) + SUBPEL_HEADER + GATE_GLSL + MEDIAN_GLSL;
 		if (serialSearchForTest)
 			return Dispatch("VideoProcessor de-judder: second sweep (11a E1, serial reference)", header.c_str(),
 				REFINE_BODY_SERIAL, descriptors, 8, variables, 6, blocksX, blocksY, 8);
 		static const std::string parallel = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER + REFINE_PAIR_HEADER;
-		return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)", parallel.c_str(), REFINE_BODY,
+		static const std::string parallelWeighted = std::string("#define COST_W 1\n") + parallel;
+		return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)",
+			refineCarriesWeight ? parallelWeighted.c_str() : parallel.c_str(), REFINE_BODY,
 			descriptors, 8, variables, 6, (blocksX + 1) / 2, blocksY, 16, 2);
 	}
 
@@ -3248,12 +3277,50 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
+	bool MotionWarp::UploadEngineWeights(const MotionAhead::Flow& flow)
+	{
+		ofWeighted = false;
+		if (!settings.opticalFlowCostTrust && !settings.opticalFlowFbCheck)
+			return true;
+		// The producer's blocks are this instance's (the same half size, 8-px blocks).
+		if (flow.blocksX != blocksX || flow.blocksY != blocksY)
+			return true;
+		const size_t blocks = static_cast<size_t>(blocksX) * blocksY;
+		const bool fb = settings.opticalFlowFbCheck &&
+			OpticalFlowTrust::FbWeights(flow.fbError, flow.gridW, flow.gridH, NvOpticalFlow::Engine::Grid,
+				MotionAhead::Flow::kBlockPx, blocksX, blocksY, settings.consistencyPixels, ofFbWeights);
+		if (!OpticalFlowTrust::Combine(settings.opticalFlowCostTrust ? &flow.costWeight : nullptr, fb ? &ofFbWeights : nullptr,
+				blocks, ofWeights))
+			return true;   // nothing to apply: exactly as without the extras
+		if (!ofWeight || ofWeight->params.w != blocksX || ofWeight->params.h != blocksY)
+		{
+			pl_fmt r32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_tex_params params{};
+			params.w = blocksX;
+			params.h = blocksY;
+			params.format = r32;
+			params.sampleable = true;
+			params.host_writable = true;
+			if (!r32 || !pl_tex_recreate(gpu, &ofWeight, &params))
+				return true;   // no float texture: the weights are skipped (as without them)
+		}
+		pl_tex_transfer_params upload{};
+		upload.tex = ofWeight;
+		upload.ptr = ofWeights.data();
+		upload.row_pitch = static_cast<size_t>(blocksX) * sizeof(float);
+		if (!pl_tex_upload(gpu, &upload))
+			return true;
+		ofWeighted = true;
+		return true;
+	}
+
 	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward)
 	{
 		// The pair computed ahead (docs/VP-nvof-ahead.md), taken once.
 		const std::shared_ptr<const MotionAhead::Flow> ahead = std::move(externalFlow);
 		externalFlow.reset();
 		externalFlowUsed = false;
+		ofWeighted = false;
 		const bool useAhead = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
 			ahead->gridW == (halfW + 3) / 4 && ahead->gridH == (halfH + 3) / 4;
 		if (opticalFlowFailed && !useAhead)
@@ -3314,6 +3381,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			for (int d = 0; d < 2; ++d)
 				for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
 			engineGlobalValid = true;
+			// The engine's extras as trust weights per block (cost; its own consistency).
+			UploadEngineWeights(*ahead);   // none applied when it cannot (as without them)
 		}
 		else if (!opticalFlowEngine || opticalFlowPresetOpen != settings.opticalFlowPreset)
 		{
@@ -3378,16 +3447,17 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 		}
 		const std::string header = std::string(RESCORE_HEADER);
-		const pl_shader_desc fw[4] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
-			Sampled("to_half", halfB, true), Storage("dst", outForward) };
+		const std::string weightedHeader = std::string("#define OF_WEIGHT 1\n") + RESCORE_HEADER;
+		const pl_shader_desc fw[5] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
+			Sampled("to_half", halfB, true), Storage("dst", outForward), Sampled("of_weight", ofWeight, false) };
 		const pl_shader_desc bw[4] = { Sampled("flow", ofFlowTex[1], false), Sampled("from_half", halfB, false),
 			Sampled("to_half", halfA, true), Storage("dst", outBackward) };
 		// The searches' reach in half-size pixels: the coarse search at 1/32 of the
 		// source (1/16 of the half size), +-coarseRange texels, plus the finer steps.
 		const float reach = static_cast<float>(std::max(1, settings.coarseRange) * 16 + 8);
 		const pl_shader_var reachVar[1] = { { pl_var_float("reach"), &reach, true } };
-		if (!Dispatch("VideoProcessor de-judder: optical flow to blocks (forward)", header.c_str(), OF_TO_SEARCH_BODY, fw, 4,
-				reachVar, 1, blocksX, blocksY, 8) ||
+		if (!Dispatch("VideoProcessor de-judder: optical flow to blocks (forward)", ofWeighted ? weightedHeader.c_str() : header.c_str(),
+				OF_TO_SEARCH_BODY, fw, ofWeighted ? 5 : 4, reachVar, 1, blocksX, blocksY, 8) ||
 			!Dispatch("VideoProcessor de-judder: optical flow to blocks (backward)", header.c_str(), OF_TO_SEARCH_BODY, bw, 4,
 				reachVar, 1, blocksX, blocksY, 8))
 			return fail("its block pass failed");
@@ -3552,6 +3622,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// independent of it, and D1 may come from the engine - planner Q1.)
 			const bool candidateMode = settings.opticalFlowCandidate && settings.estCandidates;
 			engineGlobalValid = false;
+			ofWeighted = false;
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
 				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
 			const bool replaced = opticalFlowUsed && !candidateMode;
@@ -3560,7 +3631,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// Planner Q1: the engine's whole-frame motion when its field is known here and it
 			// seeds the refinement (the searches, which read M2's second candidate, do not run).
 			globalFromEngine = false;
-			if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid)
+			// ... when it is clear; otherwise the global search below (opticalFlowGlobalFallback).
+			const bool engineGlobalClear = !settings.opticalFlowGlobalFallback ||
+				(OpticalFlowTrust::GlobalUsable(engineGlobal[0]) && OpticalFlowTrust::GlobalUsable(engineGlobal[1]));
+			if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
+				++globalFallbacks;
+			if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear)
 			{
 				for (int d = 0; d < 2; ++d)
 				{
@@ -3589,6 +3665,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					two ? globalSecond[1] : nullptr)))
 				return false;
 			const bool ofCandidates = opticalFlowUsed && candidateMode && !seeded;
+			// The engine's trust weights stay with the seed's vectors through the refinement.
+			refineCarriesWeight = seeded && ofWeighted;
 			if (twoSweeps &&
 				(!Refine(halfA, halfB, seeded ? ofSearch[0] : sweep[0], previousSearch[0], globalVector[0], forward, ofCandidates ? ofSearch[0] : nullptr) ||
 				 !Refine(halfB, halfA, seeded ? ofSearch[1] : sweep[1], previousSearch[1], globalVector[1], backward, ofCandidates ? ofSearch[1] : nullptr)))
@@ -3629,13 +3707,20 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				consistencyVars.push_back({ pl_var_float("taper_sad"), &taperSad, true });
 			if (textureTol)
 				consistencyVars.push_back({ pl_var_float("texture_tol"), &textureTolValue, true });
+			// The engine's trust weights (in the searches' w; 1 everywhere else): a weight of 0
+			// adds twice the pass limit to the block's error.
+			const bool ofTrust = settings.opticalFlow && (settings.opticalFlowCostTrust || settings.opticalFlowFbCheck);
+			const float ofPenalty = 2.0f * (settings.blockTaper ? taperSad : tolerance);
+			if (ofTrust)
+				consistencyVars.push_back({ pl_var_float("of_penalty"), &ofPenalty, true });
 			if (textureTol)
 				descriptors.push_back(Sampled("from_half", halfA, false));
 			const bool withPicture = settings.pictureArea && picture;
 			if (withPicture)
 				descriptors.push_back(Sampled("picture", picture, false));
 			const std::string consistencyHeader = std::string(settings.blockTaper ? "#define TAPER 1\n" : "") +
-				(textureTol ? "#define TEXTURE_TOL 1\n" : "") + (withPicture ? "#define PICTURE 1\n" : "");
+				(textureTol ? "#define TEXTURE_TOL 1\n" : "") + (withPicture ? "#define PICTURE 1\n" : "") +
+				(ofTrust ? "#define OF_TRUST 1\n" : "");
 			if (!Dispatch("VideoProcessor de-judder: consistency", consistencyHeader.empty() ? nullptr : consistencyHeader.c_str(),
 				CONSISTENCY_BODY, descriptors.data(), static_cast<int>(descriptors.size()), consistencyVars.data(),
 				static_cast<int>(consistencyVars.size()), blocksX, blocksY, 8))

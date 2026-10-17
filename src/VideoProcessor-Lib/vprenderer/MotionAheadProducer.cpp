@@ -433,12 +433,17 @@ namespace MotionAhead
 				if (ok)
 				{
 					// Planner Q1: the whole frame's motion, here on the worker (no render cost).
+					const auto extrasStart = std::chrono::steady_clock::now();
 					FlowGlobal(flow->forward, flow->forwardCost, flow->gridW, flow->gridH, flow->global[0], flow->second[0]);
 					FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH, flow->global[1], flow->second[1]);
+					// The cost and the engine's own forward/backward consistency as trust inputs.
+					FlowExtras(*flow);
+					const double extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
 					store.Put(previousSequence, job.sequence, job.generation, flow);
 					engineReady = true;
 					std::lock_guard<std::mutex> lock(mutex);
 					++stats.pairs;
+					stats.extrasMs = extrasMs;
 					stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 				}
 			}

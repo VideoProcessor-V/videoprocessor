@@ -244,3 +244,15 @@ The whole frame's motion (D1) comes from the engine's field when its pair came a
 **Correction (the D1 taste report, 2026-10-16):** an earlier note here said the engine "reads the speed exactly" and that the taste therefore followed the true speed. That was wrong for 4K. Both the search's and the engine's global move in half-texel steps: 4 px at full size, **8 px with the low-resolution matcher (4K)**. That is coarser than the roll-off's 16-px ramp (8 -> 24), so the corpus's 12 / 20 px pans (exact ties) read 16 / 16 (search) and 8 / 24 (engine) by rounding. The earlier full-resolution test used exact multiples and looked exact. **Fix:** the roll-off now reads the **refined camera** (the trusted blocks within 6 px, or 8 px at low resolution, of the global; the same refinement R-B's camera used). `RolloffFollowsTheTruePanSpeedAt4K`: 12 px -> 0.883 (search) / 0.882 (engine), 20 px -> 0.367 / 0.367, against 0.883 / 0.367 at the true speed (before: 0.625 / 0.875 and 0.625 / 0.25). The corpus harness also overwrote the taste values unconditionally (the "D2/D4/R-A" variants ran R-A alone); fixed - the taste totals need a new baseline.
 
 **Re-baselined corpus (2026-10-16, refined-camera roll-off + the harness fix):** accuracy variants unchanged (matcher 1471.61, cut trusted 0%); with the taste (now really D2 / D4 / R-A): search D1 1045.32, engine global 1047.83 (71.0% / 71.2% of the matcher) - the two agree; only "zoom out 1.5%" still differs (43.5 vs 46.0). Earlier taste totals (930 / 1056) are void.
+
+## The engine's extras as trust inputs (2026-10-17)
+
+For a pair computed ahead, the producer's worker also works out (`OpticalFlowTrust.h`, `MotionAhead::FlowExtras`):
+- **Cost per block.** The forward cost averaged over each de-judder block's cells (2 x 2 at the 4-px grid; general in block size and grid), judged against the field's own median and spread (MAD, floor 4 codes): full trust up to median + 3 spreads, none from median + 8. A uniform field changes nothing.
+- **The engine's own forward/backward consistency.** The engine already returns both directions in one run, so this costs no engine time: |f + b| per cell, and per block the mean of 1 within the matcher's consistency limit falling to 0 at twice it.
+
+The de-judder multiplies the enabled weights, carries them in the seed's `w` through the refinement (kept only where the final vector is the block's own engine vector, within a half-size pixel), and its consistency pass raises the block's error by (1 - weight) x twice the pass limit: tapered or untrusted, so the matcher's vector or the hold wins there. Missing extras (an older driver, the render-time engine, the searches) and weights of 1 change nothing.
+
+The engine's whole-frame motion (D1) now falls back to the global search when it is not clear (ambiguity >= 0.9, about a tenth of the confident cells agreeing).
+
+Switches (Fixes under test; parser defaults on): `optical_flow_cost_trust`, `optical_flow_fb_check`, `optical_flow_global_fallback` (with `optical_flow_global`). Logged every 2400 estimates: the extras' time on the worker, whether weights were applied, and the number of fallbacks.
