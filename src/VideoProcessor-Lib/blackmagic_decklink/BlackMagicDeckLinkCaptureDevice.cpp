@@ -134,7 +134,7 @@ void BlackMagicDeckLinkCaptureDevice::SetCallbackHandler(ICaptureDeviceCallback*
 	// Note that thisis a read from the state which is set by the capture thread.
 	if (m_callback)
 	{
-		m_callback->OnCaptureDeviceState(m_state);
+		m_callback->OnCaptureDeviceState(m_state.load());
 		SendVideoStateCallback(0);
 	}
 
@@ -178,6 +178,22 @@ void BlackMagicDeckLinkCaptureDevice::StartCapture(
 
 	if (!CanCapture())
 		throw std::runtime_error("Card cannot capture");
+
+	// Bug hunt 2 (L1): after a forced profile stop the GUI sees READY and
+	// never calls StopCapture(), so the input from the previous run is still
+	// enabled with this device as its callback. Tear it down before enabling
+	// it again (StopStreams may fail because the driver already stopped them).
+	if (m_deckLinkInput)
+	{
+		const bool forcedStop = m_streamsForcedToStop.exchange(false, std::memory_order_acq_rel);
+		const HRESULT stopResult = m_deckLinkInput->StopStreams();
+		const HRESULT callbackResult = m_deckLinkInput->SetCallback(nullptr);
+		const HRESULT disableResult = m_deckLinkInput->DisableVideoInput();
+		DebugLog::Log("BlackMagic: StartCapture tore down the previous run's input (forced_stop=%d StopStreams=0x%08lx SetCallback=0x%08lx DisableVideoInput=0x%08lx)",
+			forcedStop ? 1 : 0, stopResult, callbackResult, disableResult);
+		m_deckLinkInput.Release();
+		m_deckLinkInput = nullptr;
+	}
 
 	//
 	// Set up input
@@ -521,7 +537,9 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFormatChang
 	// Determine pixel format
 	//
 	// Fix under test (ycbcr_12bit_capture): a 12-bit YCbCr 4:2:2 signal as
-	// 12-bit RGB when the card offers it for this mode, else 10-bit 4:2:2.
+	// 10-bit 4:2:2 (v210, default since bug hunt 2: BTB/WTW kept) or, with
+	// rgb12, as 12-bit full-range RGB when the card offers it for this mode
+	// (the card's conversion clips BTB/WTW), else 10-bit 4:2:2.
 	if (DeckLinkIsYCbCr12(detectedSignalFlags) &&
 		m_formatPreferences.ycbcr12 != DeckLinkCaptureFormatPreferences::YCbCr12Capture::Off)
 	{
@@ -538,7 +556,8 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFormatChang
 			(supported(m_formatPreferences.rgb12) || supported(bmdFormat12BitRGB) || supported(bmdFormat12BitRGBLE));
 		detectedSignalFlags = rgb12 ? DeckLinkYCbCr12AsRgb12(detectedSignalFlags) : DeckLinkYCbCr12AsV210(detectedSignalFlags);
 		DebugLog::Log("BlackMagic: the signal is 12-bit YCbCr 4:2:2; capturing it as %s ([decklink] ycbcr_12bit_capture)",
-			rgb12 ? "12-bit RGB (all 12 bits; the card converts the colour)" : "10-bit 4:2:2 (v210)");
+			rgb12 ? "12-bit RGB (all 12 bits; the card converts the colour to full-range R12B, so BTB/WTW are clipped)" :
+				"10-bit 4:2:2 (v210; BTB/WTW kept)");
 	}
 	const BMDPixelFormat canonicalPixelFormat =
 		CanonicalDeckLinkCapturePixelFormat(detectedSignalFlags);
@@ -1045,8 +1064,8 @@ HRESULT	STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::ProfileChanging(
 	{
 		// audit 2026-10-16: was a throw (capture stopped silently). Stop egress
 		// cleanly, tell the client the video state is gone and report the
-		// error; the GUI's StopCapture()/restart then tears the input down
-		// (tolerating the driver-stopped streams). The busy-status notification
+		// error. The GUI's restart goes through READY without StopCapture(),
+		// so the next StartCapture() tears the old input down (bug hunt 2, L1). The busy-status notification
 		// reports CAPTURING -> READY as usual.
 		DebugLog::Log("BlackMagic: profile change forces the streams to stop; stopping capture");
 		const CaptureRunToken captureRunToken =
@@ -1248,11 +1267,27 @@ bool BlackMagicDeckLinkCaptureDevice::SendVideoStateCallback(
 			videoState->displayMode = TranslateDeckLinkDisplayMode(m_bmdDisplayMode,
 				m_modeWidth, m_modeHeight, m_modeFrameDuration, m_modeTimeScale,
 				m_bmdFieldDominance);
-			videoState->eotf = TranslateEOTF(m_videoEotf);
+			// Bug hunt 2 (L10): reserved EOTF values map to SDR with a log
+			// instead of rejecting the state.
+			bool reservedEotf = false;
+			videoState->eotf = TranslateEOTF(m_videoEotf, &reservedEotf);
+			if (reservedEotf)
+				DebugLog::Log("BlackMagic: reserved HDR EOTF value %lld treated as SDR",
+					static_cast<long long>(m_videoEotf));
+			// Bug hunt 2 (M1): Rec.601 on a non-SD raster is carried through
+			// (primaries from the measured rate family) instead of throwing.
+			bool rec601OnOtherRaster = false;
 			videoState->colorspace = Translate(
 				(BMDColorspace)m_videoColorSpace,
 				videoState->displayMode->FrameHeight(),
-				CaptureDisplayFixes::Enabled());   // capture_display_fixes
+				CaptureDisplayFixes::Enabled(),   // capture_display_fixes
+				videoState->displayMode->RefreshRateHz(),
+				&rec601OnOtherRaster);
+			if (rec601OnOtherRaster)
+				DebugLog::Log("BlackMagic: source signals Rec.601 on a %ux%u raster at %.3f Hz; carried through as %s",
+					videoState->displayMode->FrameWidth(), videoState->displayMode->FrameHeight(),
+					videoState->displayMode->RefreshRateHz(),
+					videoState->colorspace == ColorSpace::REC_601_625 ? "REC_601_625" : "REC_601_525");
 			videoState->invertedVertical = m_videoInvertedVertical;
 			videoState->videoFrameEncoding = Translate(m_bmdPixelFormat, videoState->colorspace);
 
@@ -1403,7 +1438,7 @@ void BlackMagicDeckLinkCaptureDevice::UpdateState(CaptureDeviceState state)
 {
 	// WARNING: Called from some internal capture card thread!
 
-	assert(state != m_state);  // Double state is not allowed
+	assert(state != m_state.load());  // Double state is not allowed
 	m_state = state;
 
 	if (m_callback)

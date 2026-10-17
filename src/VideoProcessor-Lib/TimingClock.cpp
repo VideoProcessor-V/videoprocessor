@@ -16,19 +16,15 @@ double TimingClockDiffMs(timingclocktime_t start, timingclocktime_t stop, timing
 {
 	const timingclocktime_t diff = stop - start;
 	
-	// HIGH-PRECISION INTEGER-ONLY MATH: Avoid floating-point precision loss
-	// Problem: Old code used FP division (diff / (ticksPerSecond / 1000.0)) which accumulates rounding errors
-	// Solution: Keep all math in 64-bit integer domain until final conversion
-	//
-	// At 120Hz with 1MHz clock: 7,200 conversions/minute
-	// Old method: FP rounding error compounds to ~100µs drift/minute
-	// New method: Exact integer math, zero cumulative error
-	//
-	// Example: diff=8333 ticks, ticksPerSecond=1000000
-	// Old: 8333 / 1000.0 = 8.333 (FP precision issues)
-	// New: (8333 * 1000) / 1000000 = 8 (exact integer result, then convert to double)
-	const int64_t diffMs = (diff * 1000LL) / ticksPerSecond;
-	
-	// Convert to double only at the end, after all integer math is complete
-	return (double)diffMs;
+	if (ticksPerSecond == 0)
+		return 0.0;
+
+	// Bug hunt 2 (L12): the earlier integer (diff * 1000) / ticksPerSecond
+	// truncated to whole milliseconds (and overflowed for large diffs).
+	// Split into whole seconds and the remainder so both parts are exact
+	// before the single conversion to double: sub-millisecond latency kept.
+	const timingclocktime_t seconds = diff / ticksPerSecond;
+	const timingclocktime_t remainder = diff % ticksPerSecond;
+	return static_cast<double>(seconds) * 1000.0 +
+		static_cast<double>(remainder) * 1000.0 / static_cast<double>(ticksPerSecond);
 }

@@ -158,7 +158,9 @@ private:
 
 	// Current state, update through UpdateState()
 	// WARNING: R/W from the capture thread, do not read from other thread
-	CaptureDeviceState m_state = CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN;
+	// Bug hunt 2 (L2, partial): read by GetTimingClock() on the GUI thread while
+	// SDK notification threads write it.
+	std::atomic<CaptureDeviceState> m_state{ CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN };
 	void UpdateState(CaptureDeviceState state);
 
 	// An error occurred and capture will not proceed (until the input changes)

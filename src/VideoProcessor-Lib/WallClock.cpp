@@ -9,6 +9,7 @@
 #include <pch.h>
 
 #include "WallClock.h"
+#include "IntegerMath.h"
 
 
 timestamp_t GetWallClockTime()
@@ -27,5 +28,7 @@ timestamp_t GetWallClockTime()
 	// Convert to 100ns increments (ticks) for compatibility with existing code
 	// counter.QuadPart / frequency.QuadPart = seconds
 	// seconds * 10,000,000 = 100ns ticks
-	return (counter.QuadPart * 10000000) / frequency.QuadPart;
+	// Bug hunt 2 (L11): counter * 1e7 overflowed int64 after ~25.6 h of
+	// uptime at a 10 MHz QPC; the 128-bit conversion never does.
+	return I64_MulDivRoundSaturating(counter.QuadPart, 10000000, frequency.QuadPart);
 }

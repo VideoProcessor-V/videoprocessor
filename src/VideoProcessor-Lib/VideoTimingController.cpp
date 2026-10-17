@@ -114,14 +114,13 @@ VideoReferenceTime VideoTimingController::ClockToReferenceTime(
 {
 	if (ticksPerSecond == 0)
 		return 0;
-	const uint64_t maxSafeValue =
-		static_cast<uint64_t>((std::numeric_limits<int64_t>::max)()) /
-		kReferenceTimeTicksPerSecond;
-	if (timestamp > maxSafeValue)
-		return static_cast<VideoReferenceTime>(
-			(timestamp / ticksPerSecond) * kReferenceTimeTicksPerSecond);
-	return static_cast<VideoReferenceTime>(
-		U64_MulDiv(timestamp, kReferenceTimeTicksPerSecond, ticksPerSecond));
+	// Bug hunt 2 (M2): exact for every tick count (the earlier fallback past
+	// INT64_MAX / 1e7 ticks truncated to whole seconds); saturates only when
+	// the result itself cannot be represented.
+	const uint64_t value = U64_MulDivRoundSaturating(
+		timestamp, kReferenceTimeTicksPerSecond, ticksPerSecond);
+	const uint64_t limit = static_cast<uint64_t>((std::numeric_limits<int64_t>::max)());
+	return static_cast<VideoReferenceTime>(value > limit ? limit : value);
 }
 
 bool VideoTimingController::UsesStartTime() const

@@ -219,6 +219,7 @@
 	<ClInclude Include="OsdTimingPolicy.h" />
 	<ClInclude Include="DisplayTopologySession.h" />
 	<ClInclude Include="CaptureDisplayFixes.h" />
+    <ClInclude Include="CaptureStatePolicy.h" />
 	<ClInclude Include="DirectShowFrameDeliverer.h" />
 	<ClInclude Include="DirectShowDeliveryOutcome.h" />
 	<ClInclude Include="DirectShowSegmentTransition.h" />

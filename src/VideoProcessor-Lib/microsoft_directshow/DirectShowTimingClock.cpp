@@ -10,6 +10,7 @@
 #include <pch.h>
 
 #include "DirectShowTimingClock.h"
+#include <IntegerMath.h>
 
 
 DirectShowTimingClock::DirectShowTimingClock(ITimingClock& timingClock, HRESULT& result) :
@@ -37,7 +38,9 @@ REFERENCE_TIME DirectShowTimingClock::GetPrivateTime()
 	try
 	{
 		const timingclocktime_t now = m_timingClock.TimingClockNow();
-		const REFERENCE_TIME rt = (now * 10000000) / m_ticksPerSecond;
+		// Bug hunt 2 (M2): now * 1e7 overflowed int64 after 9.2e11 ticks
+		// (~10.7 days at 1 MHz, ~25.6 h at 10 MHz) and froze the graph clock.
+		const REFERENCE_TIME rt = I64_MulDivRoundSaturating(now, 10000000, m_ticksPerSecond);
 		m_lastReturnedTime.store(rt, std::memory_order_relaxed);
 		return rt;
 	}

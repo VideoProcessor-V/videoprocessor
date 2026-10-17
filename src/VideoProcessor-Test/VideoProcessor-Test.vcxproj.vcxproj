@@ -311,6 +311,7 @@
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
+    <ClCompile Include="BugHunt2CaptureTests.cpp" />
     <ClCompile Include="Integration20261017Tests.cpp" />
     <ClCompile Include="PostMergeAudit20261017Tests.cpp" />
     <ClCompile Include="CaptureLayerAuditTests.cpp" />
