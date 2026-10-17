@@ -117,6 +117,28 @@ namespace VideoProcessorTest
             Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ndejudder_strength_even: 0.5\n"), L"even-cadence strength alone");
         }
 
+        TEST_METHOD(LowLatencyPathIsAQueueProperty)
+        {
+            // Owner 2026-10-16: low_latency_path on the queue profile; unset = the Low_Latency name.
+            auto pathFor = [](const char* text) {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n" << text;
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                // Config's Apply validates against the main schema too (it rejected the key, 2026-10-16).
+                Assert::IsTrue(MainConfigSchema::Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsTrue(runtime.Initialize(config, {}, error), std::wstring(error.begin(), error.end()).c_str());
+                return runtime.GetSnapshot()->queue.lowLatencyPath;
+            };
+            Assert::IsTrue(pathFor("[queue.Low_Latency]\nqueue_size: 2\n"), L"the Low_Latency name, unset: on");
+            Assert::IsFalse(pathFor("[queue.Normal]\nqueue_size: 32\n"), L"another name, unset: off");
+            Assert::IsTrue(pathFor("[queue.Game]\nqueue_size: 2\nlow_latency_path: on\nwhen: ${cadence} == 49-61\n"),
+                L"any name with low_latency_path: on (and the 50/60 Hz rule validates)");
+            Assert::IsFalse(pathFor("[queue.Low_Latency]\nqueue_size: 2\nlow_latency_path: off\n"), L"Low_Latency with off: the regular path");
+        }
+
         TEST_METHOD(EdgeBlankingSurvivesAcceptedConfiguration)
         {
             CachedConfigTestFile file;

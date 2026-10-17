@@ -1677,6 +1677,38 @@ void testQueueTargetByFramesOrTime()
     require(readBytes(path).contains("target_latency_ms: 200"), "the time target not saved");
 }
 
+void testQueueUseModeAndLowLatencyPath()
+{
+    // Owner 2026-10-16: when a queue is used - Off / By rules / 50/60 Hz - and its low-latency path.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n[queue.Game]\nqueue_size: 2\ntarget_frames: 1\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.queue.profiles");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    auto* off = requireControl<QRadioButton>(window, "config.queue.use_mode.off");
+    auto* rules = requireControl<QRadioButton>(window, "config.queue.use_mode.rules");
+    auto* rate = requireControl<QRadioButton>(window, "config.queue.use_mode.rate5060");
+    require(off->isChecked(), "a queue without a rule is not shown as Off");
+    rate->click();
+    QCoreApplication::processEvents();
+    require(rate->isChecked() && !off->isChecked(), "50/60 Hz not selected");
+    rules->click();
+    QCoreApplication::processEvents();
+    require(rules->isChecked(), "By rules not selected");
+    rate->click();
+    QCoreApplication::processEvents();
+    selectData(requireControl<QComboBox>(window, "config.queue.low_latency_path"), "on");
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("${cadence} == 49-61"), (QByteArray("the 50/60 Hz rule not saved: ") + saved).constData());
+    require(saved.contains("low_latency_path: on"), "low_latency_path not saved");
+}
+
 void testDeckLinkYCbCr12Control()
 {
     // Planner 2026-10-16: [decklink] ycbcr_12bit_capture has a Config control; unset shows the default.
@@ -8578,6 +8610,7 @@ int main(int argc, char** argv)
     failures += run("exclusive buttons: LED source and motion source", testExclusiveButtonsForLedSourceAndMotionSource);
     failures += run("temporal dither buttons", testTemporalDitherButtons);
     failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
+    failures += run("queue use mode and low-latency path", testQueueUseModeAndLowLatencyPath);
     failures += run("decklink 12-bit YCbCr control", testDeckLinkYCbCr12Control);
     failures += run("renderer cards show defaults and round-trip", testRendererCardsShowDefaultsAndRoundTrip);
     failures += run("every new LED control reaches VP", testEveryNewLedControlReachesVp);

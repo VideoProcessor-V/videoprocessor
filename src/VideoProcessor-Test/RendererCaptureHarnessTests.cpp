@@ -1388,6 +1388,27 @@ namespace Tests
 			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is not low latency\n" + normal.Tail()).c_str());
 		}
 
+		TEST_METHOD(LowLatencyPathPropertyAndAutoEarlyUpload)
+		{
+			// Owner 2026-10-16: low_latency_path on any queue profile takes the low-latency path; with
+			// capture_upload auto (the default) early upload opens there and not on the regular path.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			g_harnessApplySnapshot = true;
+			const RunResult game = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
+				"dejudder_strength: 0.25\n[queue.Game]\nqueue_size: 4\ntarget_frames: 1\nlow_latency_path: on\n");
+			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
+				"dejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
+			g_harnessApplySnapshot = false;
+			Assert::IsTrue(game.Logged("low-latency queue"), (L"low_latency_path on: the low-latency path\n" + game.Tail()).c_str());
+			Assert::IsTrue(game.Logged("Early upload: on"), (L"capture_upload auto: early upload in low latency\n" + game.Tail()).c_str());
+			Assert::IsFalse(normal.Logged("Early upload: on"), (L"auto: no early upload on the regular path\n" + normal.Tail()).c_str());
+			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is regular\n" + normal.Tail()).c_str());
+		}
+
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
 		{
 			// Stage 12 §2b/§2d (owner 2026-10-15): VP's debander through the

@@ -277,6 +277,11 @@ namespace RendererProfileConfig
 		int resetAfterRendererRestartSeconds = 0;
 		bool hasResetQueueTooLargePercent = false;
 		int resetQueueTooLargePercent = 0;
+		// Owner 2026-10-16: VP's low-latency path (de-judder off, no frames computed ahead, half-float
+		// buffers, cinema-only shaders off, early upload with capture_upload auto) as a property of
+		// the queue profile; unset = on for a profile named Low_Latency (older files unchanged).
+		bool hasLowLatencyPath = false;
+		bool lowLatencyPath = false;
 	};
 
 	// The source path reports LLDV metadata only when it synthesizes HDR data.
@@ -672,7 +677,7 @@ namespace RendererProfileConfig
 			if (key == "dejudder_low_res") return IsChoice(value, { "off", "search", "all" });
 			// Owner 2026-10-13: the capture path (gpu = the low-latency GPU unpack).
 			if (key == "capture_path") return IsChoice(value, { "standard", "gpu" });
-			if (key == "capture_upload") return IsChoice(value, { "render", "early" });
+			if (key == "capture_upload") return IsChoice(value, { "auto", "render", "early" });
 			if (key == "source_range") return IsChoice(value, { "auto", "full", "limited" });
 			// native | auto | any height in lines (general: not a fixed list).
 			if (key == "source_resolution")
@@ -932,6 +937,7 @@ namespace RendererProfileConfig
 				return ParseInteger(value, 1, INT_MAX, parsed);
 			if (key == "reset_queue_too_large_percent")
 				return ParseInteger(value, 1, 200, parsed);
+			if (key == "low_latency_path") return IsChoice(value, { "on", "off" });
 			expected = "a queue-owned setting"; return false;
 		}
 		if (group == "lldv")
@@ -3024,6 +3030,12 @@ namespace RendererProfileConfig
 		if (!queue.hasTargetFrames && !resolveSize("steady_reserve_frames", 0, 16,
 			queue.hasTargetFrames, queue.targetFrames))
 			return false;
+		{
+			const auto path = settings.find("low_latency_path");
+			queue.hasLowLatencyPath = path != settings.end();
+			queue.lowLatencyPath = queue.hasLowLatencyPath ? ConfigFile::NormalizeName(path->second) == "on" :
+				ConfigFile::NormalizeName(profileName) == "low_latency";
+		}
 		return true;
 	}
 

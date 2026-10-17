@@ -1004,7 +1004,7 @@ namespace
 		// early = each raw frame uploaded on the conversion thread as it arrives
 		// (EarlyUpload, a second device and shared textures); render = the
 		// render thread uploads it (today).
-		std::string captureUpload = "render";
+		std::string captureUpload = "auto";   // auto (2026-10-16): early upload in the low-latency path
 		// Planner Q4 (2026-10-16): every key and value of the profile sections applied, so a
 		// profile edit always changes the effective fingerprint (and is applied live) - also
 		// for keys added later, without anyone having to list them in the fingerprint.
@@ -2102,7 +2102,7 @@ namespace
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
-		readChoice("capture_upload", settings.captureUpload, { "render", "early" });
+		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
 		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
 		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
@@ -4576,6 +4576,13 @@ struct LibplaceboVideoRenderer::Impl
 	// conversion thread reads the pointer); it is opened and closed on the
 	// render thread.
 	std::atomic<bool> earlyWanted{ false };
+	// capture_upload auto (the default since 2026-10-16): early upload in the low-latency path.
+	std::atomic<bool> earlyAuto{ false };
+	bool EarlyActive() const
+	{
+		return earlyWanted.load(std::memory_order_acquire) ||
+			(earlyAuto.load(std::memory_order_acquire) && lowLatencyQueueActive.load(std::memory_order_acquire));
+	}
 	const std::unique_ptr<EarlyUpload> earlyUpload = std::make_unique<EarlyUpload>();
 	bool earlyOpenFailed = false;
 	uint64_t rawAnalysisLoggedGeneration = 0;
@@ -4583,7 +4590,7 @@ struct LibplaceboVideoRenderer::Impl
 	// Render thread, each raw frame: the pool open when wanted (closed when not).
 	void SyncEarlyUpload()
 	{
-		const bool wanted = earlyWanted.load(std::memory_order_acquire) && d3d11;
+		const bool wanted = EarlyActive() && d3d11;
 		if (!wanted)
 		{
 			if (earlyUpload->IsOpen())
@@ -8600,6 +8607,8 @@ struct LibplaceboVideoRenderer::Impl
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
+		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
+		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		PublishSettingsState(settings);
@@ -8909,7 +8918,7 @@ struct LibplaceboVideoRenderer::Impl
 			rgbUnpack ? "native RGB 4:4:4 (GPU unpack)" :
 			IsNativeRgbUpload(e, videoConversionOverride) ? "native RGB (libplacebo upload)" :
 			yuv422 ? (settings.capturePath == "gpu" ? "lossless P210 (GPU unpack)" : "lossless P210 (CPU)") : "P010 (CPU)";
-		if ((rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)) && settings.captureUpload == "early")
+		if ((rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)) && EarlyActive())
 			route += ", uploaded early";
 		std::string gpuName = "unknown GPU";
 		{
@@ -21371,7 +21380,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		RendererProfileConfig::FormatSelections(snapshot.effectiveSelections);
 	// cinema_only custom hooks stay out of the game queue. Kept on the renderer too, so the
 	// next Build (a new Impl) starts in the same path.
-	m_lowLatencyQueue = ConfigFile::NormalizeName(snapshot.queue.profile) == "low_latency";
+	m_lowLatencyQueue = snapshot.queue.lowLatencyPath;   // the queue profile's low_latency_path (or its name)
 	if (m_impl)
 		m_impl->lowLatencyQueueActive.store(m_lowLatencyQueue, std::memory_order_release);
 	if (snapshot.configuration)
@@ -23872,7 +23881,7 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				raw->rawEncoding = state->videoFrameEncoding;
 				// capture_upload: early - the frame onto the GPU now, on this
 				// thread (no free slot or no pool: the render uploads it).
-				if (m_impl->earlyWanted.load(std::memory_order_acquire) && m_impl->earlyUpload->IsOpen() && state->displayMode)
+				if (m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() && state->displayMode)
 					raw->early = m_impl->earlyUpload->Upload(raw->rawFrame->GetData(), raw->rawRowBytes,
 						static_cast<int>(state->displayMode->FrameHeight()));
 				if (rgbRaw)

@@ -164,7 +164,9 @@ namespace MainConfigSchema
 			ConfigSchema::Integer("startup_preroll_frames", 0, 16),
 			ConfigSchema::Integer("steady_reserve_frames", 0, 16),
 			ConfigSchema::Integer("reset_after_render_restart_seconds", 1, INT_MAX),
-			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200)
+			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200),
+			// Owner 2026-10-16: VP's low-latency path as a queue property.
+			ConfigSchema::Choice("low_latency_path", { "on", "off" })
 		};
 		std::string defaultQueueSection;
 		const bool hasDefaultQueue = QueueConfiguration::ResolveDefaultSection(

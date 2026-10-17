@@ -13010,7 +13010,7 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 		// 4 frames ahead (5), whether its target is set by time or in frames. Off, or the low-latency
 		// queue profile: no minimum.
 		m_queueTargetDecision = QueueLatency::ApplyFrameMinimum(m_queueTargetDecision,
-			ConfigFile::NormalizeName(snapshot->queue.profile) == "low_latency" ? 0 : snapshot->lookAheadQueueFrames, true);
+			snapshot->queue.lowLatencyPath ? 0 : snapshot->lookAheadQueueFrames, true);
 		const size_t desiredTargetFrames = m_queueTargetDecision.frames;
 		const size_t desiredStartupPreroll =
 			snapshot->queue.hasStartupPrerollFrames ?

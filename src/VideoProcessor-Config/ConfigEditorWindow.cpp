@@ -5271,6 +5271,62 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         const int ruleIndex = detailLayout->indexOf(useRule);
         detailLayout->insertWidget(ruleIndex, rateNote);
         detailLayout->insertWidget(ruleIndex, rateRow);
+        if (sectionPrefix == QStringLiteral("queue"))
+        {
+            // Owner 2026-10-16: when this queue is used - Off (chosen by hand or shortcut only), By rules
+            // (the formula below), or 50/60 Hz sources (the rule written for 50, 59.94 and 60 Hz).
+            static const QString kRate5060 = QStringLiteral("${cadence} == 49-61");
+            rateRow->setVisible(false);
+            auto* useRow = new QWidget;
+            useRow->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode")));
+            auto* useLayout = new QHBoxLayout(useRow);
+            useLayout->setContentsMargins(0, 0, 0, 0);
+            useLayout->addWidget(new QLabel(QStringLiteral("Use this queue:")));
+            auto* offButton = new QRadioButton(QStringLiteral("Off (by hand or shortcut)"));
+            offButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.off")));
+            auto* rulesButton = new QRadioButton(QStringLiteral("By rules"));
+            rulesButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rules")));
+            auto* rateButton = new QRadioButton(QStringLiteral("50/60 Hz sources"));
+            rateButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rate5060")));
+            rateButton->setToolTip(QStringLiteral(
+                "Writes the rule ${cadence} == 49-61: 50, 59.94 and 60 Hz signals. Film sent in a 60 Hz signal (3:2) "
+                "matches too until the cadence detection keeps it on the regular path."));
+            auto* group = new QButtonGroup(useRow);
+            group->setExclusive(true);
+            for (QRadioButton* b : { offButton, rulesButton, rateButton })
+            {
+                group->addButton(b);
+                useLayout->addWidget(b);
+            }
+            useLayout->addStretch();
+            detailLayout->insertWidget(ruleIndex, useRow);
+            auto syncUse = [rule, useRule, offButton, rulesButton, rateButton]
+            {
+                const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
+                const QSignalBlocker a(offButton), b(rulesButton), c(rateButton);
+                offButton->setChecked(text.isEmpty() && !useRule->isChecked());
+                rateButton->setChecked(text == kRate5060);
+                rulesButton->setChecked(useRule->isChecked() && text != kRate5060);
+            };
+            connect(rule, &QPlainTextEdit::textChanged, this, syncUse);
+            connect(useRule, &QCheckBox::toggled, this, syncUse);
+            connect(offButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
+                if (!on) return;
+                rule->clear();
+                useRule->setChecked(false);
+            });
+            connect(rulesButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
+                if (!on) return;
+                if (rule->toPlainText().trimmed() == kRate5060) rule->clear();
+                useRule->setChecked(true);
+            });
+            connect(rateButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
+                if (!on) return;
+                rule->setPlainText(kRate5060);
+                useRule->setChecked(true);
+            });
+            syncUse();
+        }
         auto syncFromRule = [rule, useRule, rateRule, rateThreshold, rateNote]
         {
             QSignalBlocker blockRule(rateRule);
@@ -5667,6 +5723,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Choose a policy for a complete queue baseline."));
         queuePolicySummary->setObjectName(QStringLiteral("config.queue.policy_summary"));
         form->addRow(QString(), queuePolicySummary);
+        // Owner 2026-10-16: VP's low-latency path as a property of the queue profile (unset: on for a
+        // profile named Low_Latency, as before).
+        auto* lowLatencyPath = addChoice(QStringLiteral("VP's low-latency path"), QStringLiteral("low_latency_path"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        lowLatencyPath->setToolTip(QStringLiteral(
+            "On: with this queue VP takes its low-latency path - the de-judder off, no motion computed ahead, half-float "
+            "buffers (32-bit float Auto), cinema-only shaders skipped, and early upload with 'Upload frames as they arrive: "
+            "Auto'. Off: the regular path. Not set: on only for a profile named Low_Latency."));
         // Stage 5: the queue target as time. VP turns it into Target frames
         // for each source rate, so the delay - and the audio offset - stays
         // about the same at 24p, 30p and 60p.
@@ -6910,7 +6974,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "byte, about half the time at 4K and no CPU conversion. CPU = the old conversion. RGB formats follow the "
             "native RGB capture choice below."));
         auto* captureUpload = addChoice(QStringLiteral("Upload frames as they arrive (experimental)"), QStringLiteral("capture_upload"),
-            { QStringLiteral("render"), QStringLiteral("early") });
+            { QStringLiteral("auto"), QStringLiteral("render"), QStringLiteral("early") });
+        captureUpload->setItemText(captureUpload->findData(QStringLiteral("auto")), QStringLiteral("Auto (early in the low-latency path)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("render")), QStringLiteral("Off (the render thread uploads)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("early")), QStringLiteral("On (early, second device)"));
         captureUpload->setToolTip(QStringLiteral(
@@ -8756,7 +8821,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // settings, AdaptiveDownscale.h), so an unset choice says what
                 // it really is (audit 2026-10-14c: these all showed "Auto").
                 static const std::pair<const char*, const char*> choiceDefaults[] = {
-                    { "capture_path", "gpu" }, { "capture_upload", "render" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "optical_flow_global", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+                    { "capture_path", "gpu" }, { "capture_upload", "auto" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "optical_flow_global", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
