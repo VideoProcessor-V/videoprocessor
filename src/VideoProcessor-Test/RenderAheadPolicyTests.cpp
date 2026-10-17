@@ -429,7 +429,10 @@ namespace RenderAheadPolicyTest
 			Assert::AreEqual(5, MaxExtras(6.0));
 			Assert::AreEqual(2.0 / 60.0, PlannedLead(1.0 / 24.0, 1.0 / 60.0), 1e-12);
 			Assert::AreEqual(0.0, PlannedLead(1.0 / 60.0, 1.0 / 60.0), 1e-12);
-			Assert::AreEqual<size_t>(1, QueueCredit(2.0 / 60.0, 1.0 / 24.0, 6));
+			// floor(lead / P_s) (bug hunt 05 M4): a 33 ms lead at 24/60 gives back no whole frame.
+			Assert::AreEqual<size_t>(0, QueueCredit(2.0 / 60.0, 1.0 / 24.0, 6));
+			Assert::AreEqual<size_t>(1, QueueCredit(1.0 / 24.0, 1.0 / 24.0, 6), L"a whole frame's lead");
+			Assert::AreEqual<size_t>(1, QueueCredit(1.9 / 24.0, 1.0 / 24.0, 6));
 			Assert::AreEqual<size_t>(0, QueueCredit(0.0, 1.0 / 24.0, 6));
 			Assert::AreEqual<size_t>(0, QueueCredit(2.0 / 60.0, 1.0 / 24.0, 2));
 			Assert::AreEqual<size_t>(1, QueueCredit(0.5, 1.0 / 24.0, 3), L"never below 2 queued frames");
@@ -475,6 +478,8 @@ namespace RenderAheadPolicyTest
 		{
 			const double Pd = 1.0 / 60.0;
 			Schedule schedule;
+			schedule.Commit(0.8, { { 9u, 0.85 } });
+			Assert::IsFalse(schedule.Observe(9u, 0.85, Pd), L"the anchor, on time");
 			schedule.Commit(1.0, { { 10u, 0.9 }, { 11u, 0.9 + Pd }, { 12u, 0.9 + 2 * Pd } });
 			Assert::IsTrue(schedule.Observe(10u, 0.9 + 2 * Pd, Pd), L"two refreshes late");
 			Assert::AreEqual(1.0 + 2 * Pd, schedule.NextVsync(), 1e-12);
@@ -1136,15 +1141,21 @@ namespace RenderAheadPolicyTest
 			const double Pd = 1.0 / 60.0;
 			Schedule schedule;
 			schedule.Commit(1.0, { { 1u, 0.95 }, { 2u, 0.95 + Pd } });
-			schedule.NoteLate(0, Pd);
+			Assert::IsFalse(schedule.NoteLate(0, Pd));
 			Assert::AreEqual(1.0, schedule.NextVsync());
 			Assert::AreEqual(0, schedule.TakeLateDrops(), L"on time: nothing");
-			schedule.NoteLate(2, Pd);
-			Assert::AreEqual(1.0 + 2 * Pd, schedule.NextVsync(), 1e-12);
+			// The first after the anchor re-anchors only (bug hunt 05 M2): the chain moves,
+			// nothing is dropped, not late.
+			Assert::IsFalse(schedule.NoteLate(1, Pd));
+			Assert::AreEqual(1.0 + Pd, schedule.NextVsync(), 1e-12);
+			Assert::AreEqual(0, schedule.TakeLateDrops());
+			Assert::AreEqual(1ull, schedule.Reanchors());
+			Assert::IsTrue(schedule.NoteLate(2, Pd));
+			Assert::AreEqual(1.0 + 3 * Pd, schedule.NextVsync(), 1e-12);
 			Assert::AreEqual(1, schedule.TakeLateDrops());
 			Assert::AreEqual(0, schedule.TakeLateDrops(), L"consumed");
 			// The pending plans moved too: present 1 at its moved vsync is on time.
-			Assert::IsFalse(schedule.Observe(1u, 0.95 + 2 * Pd, Pd));
+			Assert::IsFalse(schedule.Observe(1u, 0.95 + 3 * Pd, Pd));
 		}
 
 		TEST_METHOD(ChangeWorthALine)
@@ -1161,6 +1172,269 @@ namespace RenderAheadPolicyTest
 			b.source = OpenLoopDisplayRate::Source::Host;
 			Assert::IsTrue(OpenLoopDisplayRate::Changed(a, b), L"a new source");
 			Assert::IsTrue(OpenLoopDisplayRate::Changed(OpenLoopDisplayRate::Choice(), a), L"the first rate");
+		}
+	};
+
+	// Bug hunt 05 (render-ahead gate, queue credit, chain depth, re-anchoring).
+	TEST_CLASS(RenderAheadGateFixTests)
+	{
+	public:
+		static GateInput Heavy()
+		{
+			GateInput g;
+			g.sourcePeriod = 1.0 / 24.0;
+			g.displayPeriod = 1.0 / 60.0;
+			g.costs.newFrameMs = 27.0;
+			g.costs.extraMs = 7.0;
+			g.costs.estimateMs = 2.0;
+			return g;
+		}
+
+		// H3: a new generation, a new cadence or render_ahead switched on is a new epoch,
+		// and a reset gate starts at full, free to step down again at once.
+		TEST_METHOD(EpochChangesResetTheGate)
+		{
+			GateEpoch epoch;
+			Assert::IsTrue(epoch.Changed(1, 2.5), L"the first frame");
+			Assert::IsFalse(epoch.Changed(1, 2.5));
+			Assert::IsFalse(epoch.Changed(1, 2.51), L"jitter in the measured rates");
+			Assert::IsTrue(epoch.Changed(2, 2.51), L"a new generation");
+			Assert::IsFalse(epoch.Changed(2, 2.51));
+			Assert::IsTrue(epoch.Changed(2, 1.0), L"a new cadence (60p)");
+			Assert::IsTrue(epoch.Changed(2, 2.5), L"and back");
+			epoch.Invalidate();
+			Assert::IsTrue(epoch.Changed(2, 2.5), L"render_ahead switched on");
+			Assert::IsFalse(epoch.Changed(2, 2.5));
+			// Small steps never add up to a missed change: the epoch keeps its own ratio.
+			GateEpoch slow;
+			slow.Changed(1, 2.5);
+			bool changed = false;
+			for (int i = 1; i <= 10; ++i)
+				changed = slow.Changed(1, 2.5 + 0.005 * i) || changed;
+			Assert::IsTrue(changed, L"0.05 in 0.005 steps");
+
+			Gate gate;
+			gate.Reset();
+			GateInput light = Heavy();
+			light.costs.newFrameMs = 20.0;
+			Assert::IsTrue(gate.Update(0.0, light, true).changed);
+			Assert::AreNotEqual(0, gate.Level());
+			gate.Reset();
+			Assert::AreEqual(0, gate.Level());
+			const GateChange again = gate.Update(0.1, light, true);
+			Assert::IsTrue(again.changed, L"a reset gate steps down again from full");
+		}
+
+		// H3: a cost window that empties keeps its last p95 for 30 s, then is unknown.
+		TEST_METHOD(KnownCostHoldsThenForgets)
+		{
+			KnownCost x(4);
+			Assert::IsFalse(x.Known());
+			for (int i = 0; i < 3; ++i)
+				x.Add(i * 0.1, 7.0);
+			x.Trim(0.3);
+			Assert::IsFalse(x.Measured());
+			Assert::AreEqual(0.0, x.Current(), L"three samples: not measured, nothing held");
+			x.Add(0.4, 7.0);
+			x.Trim(0.4);
+			Assert::IsTrue(x.Measured());
+			Assert::AreEqual(7.0, x.Current());
+			x.Trim(6.0);   // the window empties (5 s)
+			Assert::IsFalse(x.Measured());
+			Assert::IsTrue(x.Known());
+			Assert::AreEqual(7.0, x.Current(), L"held");
+			x.Trim(0.4 + KnownCost::kHoldSeconds + 0.1);
+			Assert::IsFalse(x.Known(), L"30 s old: unknown again");
+			Assert::AreEqual(0.0, x.Current());
+			x.Add(40.0, 5.0);
+			x.Reset();
+			Assert::AreEqual<size_t>(0, x.Count());
+			Assert::IsFalse(x.Known());
+		}
+
+		// M4: floor(lead / P_s), latched while the cadence holds; a single break keeps it.
+		TEST_METHOD(QueueCreditLatches)
+		{
+			Assert::AreEqual<size_t>(0, CreditFrames(2.0 / 60.0, 1.0 / 24.0), L"33 ms of 41.7 ms: no whole frame");
+			Assert::AreEqual<size_t>(1, CreditFrames(1.0 / 24.0, 1.0 / 24.0));
+			Assert::AreEqual<size_t>(2, CreditFrames(2.5 / 30.0, 1.0 / 30.0));
+			Assert::AreEqual<size_t>(0, CreditFrames(0.05, 0.0));
+
+			const double Ps = 1.0 / 30.0, lead = 2.2 * Ps;
+			CreditLatch latch;
+			Assert::AreEqual<size_t>(2, latch.Commit(lead, Ps, 3.0));
+			Assert::AreEqual<size_t>(2, latch.Break(10.0), L"a single break keeps the credit");
+			Assert::AreEqual<size_t>(2, latch.Commit(lead, Ps, 3.0));
+			Assert::AreEqual<size_t>(2, latch.Break(11.0));
+			Assert::AreEqual<size_t>(2, latch.Break(11.0 + CreditLatch::kReleaseSeconds - 0.01));
+			Assert::AreEqual<size_t>(0, latch.Break(11.0 + CreditLatch::kReleaseSeconds), L"broken for 2 s: returned");
+			Assert::AreEqual<size_t>(0, latch.Frames());
+			Assert::AreEqual<size_t>(2, latch.Commit(lead, Ps, 3.0));
+			Assert::AreEqual<size_t>(2, latch.Commit(lead * 0.9, Ps, 3.01), L"the same cadence: latched");
+			Assert::AreEqual<size_t>(1, latch.Commit(1.5 * Ps, Ps, 2.0), L"a new cadence: its own credit");
+			latch.Reset();
+			Assert::AreEqual<size_t>(0, latch.Frames());
+			Assert::AreEqual<size_t>(0, latch.Break(20.0));
+		}
+
+		// M6: low latency and content without extras keep today's chain.
+		TEST_METHOD(ChainDepthKeepsTodayWithoutExtras)
+		{
+			const ChainDepth today;
+			Assert::AreEqual(3, today.buffers);
+			Assert::AreEqual(2u, today.latency);
+			Assert::IsTrue(ChainDepthFor(false, false, 2.5) == today, L"render_ahead off");
+			Assert::IsTrue(ChainDepthFor(true, true, 2.5) == today, L"low latency");
+			Assert::IsTrue(ChainDepthFor(true, false, 0.0) == today, L"cadence not known");
+			Assert::IsTrue(ChainDepthFor(true, false, 1.0) == today, L"60p on 60 Hz: no extras");
+			Assert::IsTrue(ChainDepthFor(true, false, 1.001) == today, L"59.94 on 60: no extras");
+			const ChainDepth film = ChainDepthFor(true, false, 2.5);
+			Assert::AreEqual(SwapchainBuffers(2.5), film.buffers);
+			Assert::AreEqual(kQueuedFrameLatency, film.latency);
+			Assert::IsTrue(ChainDepthFor(true, false, 2.0) != film);
+		}
+
+		// M7: X per vector mode; each level priced with its own, the saving counted once.
+		TEST_METHOD(ExtraCostPerVectorMode)
+		{
+			// Both measured: level 0 = own, L1 = external; no estimate.
+			GateCosts c = ExtraCosts(7.0, 4.0, 2.5, true);
+			Assert::AreEqual(7.0, c.extraMs);
+			Assert::AreEqual(4.0, c.extraCheaperMs, L"measured at L1: the saving is in it already");
+			// Only the L1 window measured (the ladder sits at L1): level 0 = X_ext + saving,
+			// not the cheaper X (before: level 0 priced cheap, the ladder oscillated).
+			c = ExtraCosts(0.0, 4.0, 2.5, true);
+			Assert::AreEqual(6.5, c.extraMs);
+			Assert::AreEqual(4.0, c.extraCheaperMs);
+			// Only level 0 measured: L1 = X_own - saving.
+			c = ExtraCosts(7.0, 0.0, 2.5, true);
+			Assert::AreEqual(7.0, c.extraMs);
+			Assert::AreEqual(4.5, c.extraCheaperMs);
+			c = ExtraCosts(7.0, 0.0, -1.0, true);
+			Assert::AreEqual(7.0, c.extraCheaperMs, L"a negative saving counts as none");
+			// No L1 (one mode for every level): the dearer, no cheaper price.
+			c = ExtraCosts(5.0, 6.0, 2.5, false);
+			Assert::AreEqual(6.0, c.extraMs);
+			Assert::AreEqual(0.0, c.extraCheaperMs);
+			c = ExtraCosts(0.0, 0.0, 2.5, true);
+			Assert::AreEqual(0.0, c.extraMs);
+			Assert::AreEqual(0.0, c.extraCheaperMs);
+
+			// The oscillation: at L1 with only external extras timed, the up-check prices
+			// level 0 with X_own (6.5 ms here), which does not fit, so the ladder stays.
+			GateInput g = Heavy();
+			g.l1Available = true;
+			g.costs.newFrameMs = 20.0;
+			const GateCosts atL1 = ExtraCosts(0.0, 4.0, 2.5, true);
+			g.costs.extraMs = atL1.extraMs;
+			g.costs.extraCheaperMs = atL1.extraCheaperMs;
+			Assert::IsTrue(Fits(g, 1, 0.85), L"L1 fits: 20 + 2 + 1.5 x 4 = 28");
+			Assert::IsFalse(Fits(g, 0, 0.85 - Gate::kUpMargin), L"level 0 at 6.5 ms does not fit u - 0.10");
+			GateInput old = g;
+			old.costs.extraMs = 4.0;   // the old single window at L1
+			Assert::IsTrue(Fits(old, 0, 0.85 - Gate::kUpMargin), L"before: level 0 priced with the L1 extra");
+		}
+
+		// L1: the cadence clamp is not a step down: no change, no lastDown (recovery is
+		// not delayed by 10 s).
+		TEST_METHOD(CadenceClampIsNotAStepDown)
+		{
+			GateInput overload = Heavy();
+			overload.l1Available = true;
+			overload.costs.newFrameMs = 60.0;
+			Gate gate;
+			gate.Reset();
+			for (int t = 0; t <= 100; ++t)
+				gate.Update(t / 10.0, overload, false);
+			Assert::AreEqual(HoldLevel(2), gate.Level());
+			// 30 s later the cadence changes to one extra: the level clamps to its hold.
+			GateInput thirty = overload;
+			thirty.displayPeriod = 1.0 / 30.0;
+			const GateChange clamp = gate.Update(40.0, thirty, false);
+			Assert::IsFalse(clamp.changed, L"no change logged");
+			Assert::AreEqual(HoldLevel(1), gate.Level());
+			Assert::AreEqual(std::string(""), std::string(clamp.why));
+			// A light load at the new cadence steps up after 5 s under, not 10 s after the clamp.
+			GateInput light = thirty;
+			light.costs.newFrameMs = 20.0;
+			light.costs.extraMs = 4.0;
+			light.costs.estimateMs = 1.0;
+			bool up = false;
+			for (int t = 401; t <= 460 && !up; ++t)
+				up = gate.Update(t / 10.0, light, false).changed;
+			Assert::IsTrue(up, L"up 5 s after the clamp");
+		}
+
+		// M2: the first observation after a new anchor re-anchors only; later lateness is
+		// late as before. A break re-arms it.
+		TEST_METHOD(FirstObservationAfterRestartReanchors)
+		{
+			const double Pd = 1.0 / 60.0;
+			Schedule schedule;
+			bool restart = false, behind = false;
+			const double v = schedule.FirstVsync(1.0, Pd, 0.995, restart, behind);
+			Assert::IsTrue(restart);
+			schedule.Commit(v + 3 * Pd, { { 1u, v }, { 2u, v + Pd }, { 3u, v + 2 * Pd } });
+			// A's GPU work was still running: it shows two refreshes after the anchor.
+			Assert::IsFalse(schedule.Observe(1u, v + 2 * Pd, Pd), L"re-anchor, not late");
+			Assert::AreEqual(0, schedule.TakeLateDrops(), L"nothing dropped");
+			Assert::AreEqual(v + 5 * Pd, schedule.NextVsync(), 1e-12, L"the chain moved");
+			Assert::AreEqual(1ull, schedule.Reanchors());
+			// The pending presents moved with it.
+			Assert::IsFalse(schedule.Observe(2u, v + 3 * Pd, Pd));
+			// Genuine lateness afterwards is late.
+			Assert::IsTrue(schedule.Observe(3u, v + 6 * Pd, Pd));
+			Assert::AreEqual(1, schedule.TakeLateDrops());
+			// A chained commit does not re-arm; a break does.
+			schedule.Commit(2.0, { { 4u, 1.9 } });
+			Assert::IsTrue(schedule.Observe(4u, 1.9 + Pd, Pd), L"chained: late");
+			schedule.TakeLateDrops();
+			schedule.Break();
+			schedule.Commit(3.0, { { 5u, 2.9 } });
+			Assert::IsFalse(schedule.Observe(5u, 2.9 + Pd, Pd), L"after a break: re-anchor");
+			Assert::AreEqual(2ull, schedule.Reanchors());
+			// An on-time first observation also uses up the re-anchor.
+			schedule.Break();
+			schedule.Commit(4.0, { { 6u, 3.9 }, { 7u, 3.9 + Pd } });
+			Assert::IsFalse(schedule.Observe(6u, 3.9, Pd));
+			Assert::IsTrue(schedule.Observe(7u, 3.9 + 2 * Pd, Pd));
+		}
+
+		// M5: open-loop drift corrections reach the gate only when sustained (2 in 2 s).
+		TEST_METHOD(DriftCorrectionsOnlyWhenSustained)
+		{
+			SustainedLateness drift;
+			Assert::IsFalse(drift.Note(0.0), L"one correction: not the gate's");
+			Assert::IsFalse(drift.Note(2.5), L"2.5 s later: not sustained");
+			Assert::IsTrue(drift.Note(3.5), L"two in 2 s");
+			Assert::IsFalse(drift.Note(3.6), L"the count starts again");
+			Assert::IsTrue(drift.Note(4.0));
+			drift.Reset();
+			Assert::IsFalse(drift.Note(4.1));
+
+			// A slow drift (one correction every ~170 s, 100 ppm at 60 Hz) never moves the
+			// ladder; the gate with a light load stays at full.
+			Gate gate;
+			gate.Reset();
+			GateInput light = Heavy();
+			light.costs.newFrameMs = 20.0;
+			light.costs.extraMs = 4.0;
+			SustainedLateness slow;
+			for (int i = 0; i < 20; ++i)
+			{
+				const double now = i * 170.0;
+				gate.Update(now, light, slow.Note(now));
+				Assert::AreEqual(0, gate.Level());
+			}
+			// Sustained lateness (every frame late) still steps down.
+			SustainedLateness fast;
+			bool stepped = false;
+			for (int i = 0; i < 4 && !stepped; ++i)
+			{
+				const double now = 4000.0 + i / 24.0;
+				stepped = gate.Update(now, light, fast.Note(now)).changed;
+			}
+			Assert::IsTrue(stepped);
 		}
 	};
 }

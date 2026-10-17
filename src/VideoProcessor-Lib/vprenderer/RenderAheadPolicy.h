@@ -64,15 +64,98 @@ namespace RenderAhead
 		return MaxExtras(sourcePeriod / displayPeriod) * displayPeriod;
 	}
 
-	// render_ahead_queue_credit: whole source frames the queue target may give back
-	// for the lead (the latency the queued extras add), never below 2 queued frames
-	// (B must still be queued when A renders).
+	// render_ahead_queue_credit: whole source frames the queue may give back for the
+	// lead - floor(lead / P_s), only the latency the queued extras really add (bug hunt
+	// 05 M4: ceil returned a whole frame for a smaller lead, 41.7 ms for 33 ms at 24/60,
+	// and cut the queue's jitter margin below render_ahead off's).
+	inline size_t CreditFrames(double lead, double sourcePeriod)
+	{
+		if (!(lead > 0.0) || !(sourcePeriod > 0.0) || !std::isfinite(lead / sourcePeriod))
+			return 0;
+		return static_cast<size_t>(std::floor(lead / sourcePeriod + 1e-9));
+	}
+
+	// The credit against a queue target: never below 2 queued frames (B must still be
+	// queued when A renders).
 	inline size_t QueueCredit(double lead, double sourcePeriod, size_t desiredDepth)
 	{
-		if (!(lead > 0.0) || !(sourcePeriod > 0.0) || desiredDepth <= 2)
+		if (desiredDepth <= 2)
 			return 0;
-		const size_t frames = static_cast<size_t>(std::ceil(lead / sourcePeriod - 1e-9));
-		return std::min(frames, desiredDepth - 2);
+		return std::min(CreditFrames(lead, sourcePeriod), desiredDepth - 2);
+	}
+
+	// The queue credit, latched (bug hunt 05 M4): it stays while render-ahead runs at
+	// one cadence, so a single break (a hold, a scene cut) no longer raises the queue
+	// target by a frame (a repeat on screen) and lowers it again on the next plan (a
+	// surplus frame). It changes with the cadence, and it is returned only once the
+	// chain has been broken for kReleaseSeconds, or on Reset (a new generation, a new
+	// cadence, render_ahead switched on).
+	class CreditLatch
+	{
+	public:
+		static constexpr double kReleaseSeconds = 2.0;
+		static constexpr double kCadenceChange = 0.02;   // refreshes per source frame, as the phase reset
+
+		void Reset()
+		{
+			frames = 0;
+			ratio = 0.0;
+			brokenSince = -1.0;
+		}
+		// A frame's plan was queued: the credit for its lead at this cadence.
+		size_t Commit(double lead, double sourcePeriod, double cadenceRatio)
+		{
+			brokenSince = -1.0;
+			const size_t wanted = CreditFrames(lead, sourcePeriod);
+			if (frames == 0 || std::abs(cadenceRatio - ratio) > kCadenceChange)
+			{
+				frames = wanted;
+				ratio = cadenceRatio;
+			}
+			return frames;
+		}
+		// A frame not queued by the plan: the credit stays until the chain has been
+		// broken for kReleaseSeconds.
+		size_t Break(double now)
+		{
+			if (frames == 0)
+				return 0;
+			if (brokenSince < 0.0)
+				brokenSince = now;
+			else if (now - brokenSince >= kReleaseSeconds)
+				Reset();
+			return frames;
+		}
+		size_t Frames() const { return frames; }
+
+	private:
+		size_t frames = 0;
+		double ratio = 0.0;
+		double brokenSince = -1.0;
+	};
+
+	// The VP-owned chain's depth (bug hunt 05 M6). Low latency, and content without
+	// extras (maxExtras 0, e.g. 50/60p on 60 Hz) or a cadence not known yet, keep
+	// today's chain: 3 buffers, a frame latency of 2 (owner: low latency keeps today's
+	// behaviour). Render-ahead with extras: SwapchainBuffers(ratio) and
+	// kQueuedFrameLatency. Before, the chain was made before the first frame set the
+	// source rate, so it took 6 buffers and a latency of 3 whatever the content.
+	struct ChainDepth
+	{
+		int buffers = kMinBuffers;
+		unsigned latency = 2;
+		bool operator==(const ChainDepth& o) const { return buffers == o.buffers && latency == o.latency; }
+		bool operator!=(const ChainDepth& o) const { return !(*this == o); }
+	};
+
+	inline ChainDepth ChainDepthFor(bool renderAhead, bool lowLatency, double ratio)
+	{
+		ChainDepth depth;
+		if (!renderAhead || lowLatency || MaxExtras(ratio) == 0)
+			return depth;
+		depth.buffers = SwapchainBuffers(ratio);
+		depth.latency = kQueuedFrameLatency;
+		return depth;
 	}
 
 	// ---------------------------------------------------------------------
@@ -265,6 +348,7 @@ namespace RenderAhead
 			active = false;
 			nextVsync = 0.0;
 			lateDrops = 0;
+			reanchorPending = false;
 			pending.clear();
 		}
 
@@ -302,6 +386,10 @@ namespace RenderAhead
 		// each was planned for (for the lateness check).
 		void Commit(double nextFirstVsync, const std::vector<std::pair<uint32_t, double>>& planned)
 		{
+			// A new anchor (the chain was not active): its first observation re-anchors
+			// only (bug hunt 05 M2).
+			if (!active)
+				reanchorPending = true;
 			active = true;
 			nextVsync = nextFirstVsync;
 			for (const auto& p : planned)
@@ -310,12 +398,17 @@ namespace RenderAhead
 				pending.pop_front();
 		}
 
-		void Break() { active = false; pending.clear(); }
+		void Break() { active = false; pending.clear(); reanchorPending = false; }
 
 		// DXGI saw present `presentId` on screen at vsync `actual`. A present shown
 		// more than half a refresh after its planned vsync is late: the chain moves by
 		// the difference, and the next frame drops one extra (design step 4). Returns
 		// true when late.
+		// The first observation after a new anchor re-anchors only (bug hunt 05 M2): a
+		// restart plans A on the first vsync after its Present returned, while its GPU
+		// work may still run, so A often lands a refresh or more later. That is where the
+		// chain really starts, not lateness: the chain moves, nothing is dropped, and it
+		// is not late (the gate does not step down).
 		bool Observe(uint32_t presentId, double actual, double displayPeriod)
 		{
 			bool late = false;
@@ -329,10 +422,17 @@ namespace RenderAhead
 				lastObservedId = presentId;
 				lastObservedError = displayPeriod > 0.0 ? error / displayPeriod : 0.0;
 				++observedCount;
+				const bool reanchor = reanchorPending;
+				reanchorPending = false;
 				if (error > 0.5 * displayPeriod)
 				{
-					late = true;
-					lateDrops = 1;
+					if (reanchor)
+						++reanchors;
+					else
+					{
+						late = true;
+						lateDrops = 1;
+					}
 					const double refreshes = std::round(error / displayPeriod);
 					nextVsync += refreshes * displayPeriod;
 					for (auto& p : pending)
@@ -358,14 +458,23 @@ namespace RenderAhead
 		// Open loop (no statistics): a present seen late by its QPC return time
 		// (OpenLoopDisplayRate::LateRefreshes). As Observe: the chain and the
 		// pending plans move by the refreshes, and the next frame drops one extra.
-		void NoteLate(int refreshes, double displayPeriod)
+		// The first after a new anchor re-anchors only (as Observe). Returns true when
+		// it counts as late (an open-loop drift correction: the gate takes it only when
+		// sustained, SustainedLateness).
+		bool NoteLate(int refreshes, double displayPeriod)
 		{
 			if (refreshes <= 0 || !(displayPeriod > 0.0))
-				return;
-			lateDrops = 1;
+				return false;
+			const bool reanchor = reanchorPending;
+			reanchorPending = false;
+			if (reanchor)
+				++reanchors;
+			else
+				lateDrops = 1;
 			nextVsync += refreshes * displayPeriod;
 			for (auto& p : pending)
 				p.second += refreshes * displayPeriod;
+			return !reanchor;
 		}
 
 		// The drops lateness asks of the next frame (consumed).
@@ -378,6 +487,7 @@ namespace RenderAhead
 
 		size_t Pending() const { return pending.size(); }
 		unsigned long long EarlyCorrections() const { return earlyCorrections; }
+		unsigned long long Reanchors() const { return reanchors; }
 		// The last present matched with its plan: its id and shown - planned (refreshes),
 		// and a count that moves on every match (diagnostics).
 		uint32_t LastObservedId() const { return lastObservedId; }
@@ -386,6 +496,8 @@ namespace RenderAhead
 
 	private:
 		unsigned long long earlyCorrections = 0;
+		unsigned long long reanchors = 0;
+		bool reanchorPending = false;
 		uint32_t lastObservedId = 0;
 		double lastObservedError = 0.0;
 		unsigned long long observedCount = 0;
@@ -455,6 +567,48 @@ namespace RenderAhead
 		std::deque<std::pair<double, double>> samples;
 	};
 
+	// A cost window that holds its last good p95 when it empties (a degraded level
+	// renders fewer extras, none at hold), for kHoldSeconds; then the cost is unknown
+	// again (0), so the ladder probes up instead of holding for good (bug hunt 05 H3).
+	class KnownCost
+	{
+	public:
+		static constexpr double kHoldSeconds = 30.0;
+
+		explicit KnownCost(size_t minSamples = 4) : minSamples(minSamples) {}
+		void Reset()
+		{
+			window.Reset();
+			knownMs = 0.0;
+			knownAt = 0.0;
+		}
+		void Add(double now, double ms) { window.Add(now, ms); }
+		// Trims the window; a measured p95 refreshes the held value.
+		void Trim(double now)
+		{
+			window.Trim(now);
+			if (Measured())
+			{
+				knownMs = window.P95();
+				knownAt = now;
+			}
+			else if (knownMs > 0.0 && now - knownAt > kHoldSeconds)
+				knownMs = 0.0;
+		}
+		bool Measured() const { return window.Count() >= minSamples && minSamples > 0; }
+		size_t Count() const { return window.Count(); }
+		double P95() const { return window.P95(); }
+		// The window's p95 when measured, else the held value (0 = unknown).
+		double Current() const { return Measured() ? window.P95() : knownMs; }
+		bool Known() const { return Measured() || knownMs > 0.0; }
+
+	private:
+		CostWindow window;
+		size_t minSamples;
+		double knownMs = 0.0;
+		double knownAt = 0.0;
+	};
+
 	// The ladder (owner 2026-10-17: precision is never dropped automatically; a 16-bit
 	// cache is a profile choice only):
 	//   level 0          full
@@ -491,6 +645,29 @@ namespace RenderAhead
 		double extraCheaperMs = 0.0;   // X at L1 (the de-judder's vectors), 0 = not known
 		double estimateMs = 0.0;       // E: the estimate ahead (p95)
 	};
+
+	// X per vector mode (bug hunt 05 M7): the extras timed with the sigma-delta's own
+	// search (ownMs) and with the de-judder's vectors (externalMs), each priced at the
+	// levels that run it. Before, one window held whatever ran: at L1 it held the
+	// cheaper extras, so level 0 was priced cheap (the ladder climbed to full, went
+	// over budget, dropped back - every ~12 s), and L1's price subtracted the saving a
+	// second time. When only one mode is measured the other is estimated from the
+	// sigma-delta's own/external time (saving = own - external, never negative).
+	// Returns extraMs (level 0) and extraCheaperMs (L1 and below; 0 = no L1).
+	inline GateCosts ExtraCosts(double ownMs, double externalMs, double savingMs, bool l1Available)
+	{
+		GateCosts c;
+		const double saving = savingMs > 0.0 && std::isfinite(savingMs) ? savingMs : 0.0;
+		if (!l1Available)
+		{
+			// One mode for every level (dither_vectors not own): the dearer of what was timed.
+			c.extraMs = std::max(ownMs, externalMs);
+			return c;
+		}
+		c.extraMs = ownMs > 0.0 ? ownMs : externalMs > 0.0 ? externalMs + saving : 0.0;
+		c.extraCheaperMs = externalMs > 0.0 ? externalMs : ownMs > 0.0 ? std::max(0.0, ownMs - saving) : 0.0;
+		return c;
+	}
 
 	struct GateInput
 	{
@@ -573,11 +750,14 @@ namespace RenderAhead
 		GateChange Update(double now, const GateInput& in, bool lateFrame)
 		{
 			GateChange change;
-			change.from = level;
 			const double ratio = in.displayPeriod > 0.0 ? in.sourcePeriod / in.displayPeriod : 0.0;
 			const int maxExtras = MaxExtras(ratio);
+			// The cadence changed: the same hold at the new cadence, not a step down (bug
+			// hunt 05 L1: it set lastDown, delaying recovery by 10 s, and logged a change
+			// with no reason).
 			if (level > HoldLevel(maxExtras))
-				level = HoldLevel(maxExtras);   // the cadence changed
+				level = HoldLevel(maxExtras);
+			change.from = level;
 			const bool over = !Fits(in, level, in.utilisation);
 			if (lateFrame && level < HoldLevel(maxExtras))
 			{
@@ -623,6 +803,62 @@ namespace RenderAhead
 		double overSince = -1.0;
 		double underSince = -1.0;
 		double lastDown = -1e9;
+	};
+
+	// Lateness that moves the ladder only when sustained (bug hunt 05 M5): an open-loop
+	// drift correction (a present seen late by its QPC return, Schedule::NoteLate)
+	// moves the chain and drops an extra, but on its own it is the plan's display rate
+	// drifting from the display, not the GPU falling behind. kCount corrections within
+	// kWindowSeconds are lateness for the gate.
+	class SustainedLateness
+	{
+	public:
+		static constexpr size_t kCount = 2;
+		static constexpr double kWindowSeconds = 2.0;
+
+		void Reset() { times.clear(); }
+		// A correction at `now`; true when it makes kCount within the window (the gate
+		// steps down, and the count starts again).
+		bool Note(double now)
+		{
+			while (!times.empty() && now - times.front() > kWindowSeconds)
+				times.pop_front();
+			times.push_back(now);
+			if (times.size() < kCount)
+				return false;
+			times.clear();
+			return true;
+		}
+
+	private:
+		std::deque<double> times;
+	};
+
+	// What the gate's measurements belong to (bug hunt 05 H3): a new queue generation,
+	// a new cadence (refreshes per source frame) or render_ahead switched on starts the
+	// gate, its cost windows and the queue credit again. Changed reports a new epoch
+	// (the first call too).
+	class GateEpoch
+	{
+	public:
+		static constexpr double kCadenceChange = 0.02;   // as the de-judder's phase reset
+
+		void Invalidate() { valid = false; }
+		bool Changed(uint64_t generation, double cadenceRatio)
+		{
+			const bool changed = !valid || generation != currentGeneration ||
+				!(std::abs(cadenceRatio - currentRatio) <= kCadenceChange);
+			valid = true;
+			currentGeneration = generation;
+			if (changed)
+				currentRatio = cadenceRatio;
+			return changed;
+		}
+
+	private:
+		bool valid = false;
+		uint64_t currentGeneration = 0;
+		double currentRatio = 0.0;
 	};
 
 	inline std::string LevelName(int level, int maxExtras)

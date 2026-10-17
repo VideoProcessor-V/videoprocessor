@@ -5247,7 +5247,17 @@ struct LibplaceboVideoRenderer::Impl
 	// Render-loop thread.
 	RenderAhead::Schedule renderAheadSchedule;
 	RenderAhead::Gate renderAheadGate;
-	RenderAhead::CostWindow renderAheadNewFrameCost, renderAheadExtraCost, renderAheadEstimateCost;
+	RenderAhead::CostWindow renderAheadNewFrameCost;
+	// X per vector mode (bug hunt 05 M7): the sigma-delta's own search / the de-judder's
+	// vectors; E, the estimate ahead. Each holds its last p95 for a while when it empties.
+	RenderAhead::KnownCost renderAheadExtraCostOwn{ 4 }, renderAheadExtraCostExternal{ 4 }, renderAheadEstimateCost{ 1 };
+	std::deque<std::pair<unsigned long long, bool>> renderAheadExtraTimerModes;   // timer serial -> de-judder vectors
+	RenderAhead::GateEpoch renderAheadEpoch;                 // generation / cadence / render_ahead on (H3)
+	RenderAhead::SustainedLateness renderAheadDriftLateness; // open-loop drift corrections (M5)
+	RenderAhead::CreditLatch renderAheadCredit;              // render_ahead_queue_credit, latched (M4)
+	RenderAhead::ChainDepth renderAheadChainDepth;           // the VP-owned chain as created (M6)
+	double renderAheadChainWantedSince = -1.0;               // another depth wanted since (RenderAheadNow)
+	unsigned long long renderAheadGateResets = 0;
 	AlphaD3D11FrameGpuTimer renderAheadExtraTimer, renderAheadEstimateTimer;   // X and E on the GPU
 	bool renderAheadTimersReady = false;
 	unsigned long long renderAheadTimerOrdinal = 0, renderAheadTimerSerial = 0;
@@ -5269,9 +5279,6 @@ struct LibplaceboVideoRenderer::Impl
 	unsigned long long renderAheadObservedSeen = 0;
 	double renderAheadShownError[2] = { 0.0, 0.0 };
 	unsigned long long renderAheadShownCount[2] = { 0, 0 }, renderAheadShownOnTime[2] = { 0, 0 };
-	double renderAheadExtraCostKnownAt = 0.0;     // when it was measured (RenderAheadNow)
-	double renderAheadExtraCostKnownMs = 0.0;      // the last p95 of an extra (the gate at a degraded level)
-	double renderAheadEstimateCostKnownMs = 0.0;   // the last p95 of the estimate ahead
 	bool renderAheadSwapchainLogged = false;
 	// Render-ahead without DXGI frame statistics (follow-up 2026-10-17): the display
 	// rate the extras plan with (OpenLoopDisplayRate), the system candidates (re-read
@@ -5286,13 +5293,34 @@ struct LibplaceboVideoRenderer::Impl
 	bool renderAheadOpenLoopLate = false;   // seen on the last frame's extras: the gate's lateness for this one
 
 	// The chain ends (a frame not queued by the plan): the next present is not
-	// predicted, the queue credit is returned.
+	// predicted. The queue credit is latched (bug hunt 05 M4): a single break keeps it;
+	// it is returned once the chain has stayed broken for CreditLatch::kReleaseSeconds.
 	void RenderAheadBreak()
 	{
 		renderAheadSchedule.Break();
 		renderAheadMainInterval = 1;
 		renderAheadTargetLeadMs = 0.0;
+		renderAheadCreditFrames.store(renderAheadCredit.Break(RenderAheadNow()), std::memory_order_release);
+	}
+
+	// A new epoch for the gate (bug hunt 05 H3): a new queue generation, a new cadence
+	// or render_ahead switched on. The ladder, its cost windows, the held costs, the
+	// drift-lateness count and the queue credit start again.
+	void ResetRenderAheadGate(const char* why)
+	{
+		const int level = renderAheadGate.Level();
+		renderAheadGate.Reset();
+		renderAheadNewFrameCost.Reset();
+		renderAheadExtraCostOwn.Reset();
+		renderAheadExtraCostExternal.Reset();
+		renderAheadEstimateCost.Reset();
+		renderAheadDriftLateness.Reset();
+		renderAheadCredit.Reset();
 		renderAheadCreditFrames.store(0, std::memory_order_release);
+		renderAheadL1 = false;
+		++renderAheadGateResets;
+		DebugLog::Log("Render-ahead gate: reset (%s; was %s)", why,
+			level == 0 ? "full" : "degraded");
 	}
 
 	// The display rate the de-judder extras plan with. The statistics' measured rate
@@ -5391,17 +5419,36 @@ struct LibplaceboVideoRenderer::Impl
 		for (int timer = 0; timer < 2; ++timer)
 		{
 			AlphaD3D11FrameGpuTimer& source = timer == 0 ? renderAheadExtraTimer : renderAheadEstimateTimer;
-			RenderAhead::CostWindow& window = timer == 0 ? renderAheadExtraCost : renderAheadEstimateCost;
 			for (int resolved = 0; resolved < 8; ++resolved)
 			{
 				AlphaD3D11FrameGpuTimer::Sample sample;
 				const AlphaD3D11FrameGpuTimer::ResolveResult result = source.TryResolveOldest(renderTimingContext, sample);
 				if (result == AlphaD3D11FrameGpuTimer::ResolveResult::Resolved)
-					window.Add(now, sample.milliseconds);
+				{
+					if (timer == 1)
+						renderAheadEstimateCost.Add(now, sample.milliseconds);
+					else
+						(TakeRenderAheadExtraTimerMode(sample.submissionSerial) ? renderAheadExtraCostExternal :
+							renderAheadExtraCostOwn).Add(now, sample.milliseconds);
+				}
 				else if (result != AlphaD3D11FrameGpuTimer::ResolveResult::Discarded)
 					break;
 			}
 		}
+	}
+
+	// The vector mode an extra's GPU timer ran with (true: the de-judder's vectors),
+	// by its submission serial; older entries are dropped. Unknown: the last extra's.
+	bool TakeRenderAheadExtraTimerMode(unsigned long long serial)
+	{
+		bool external = dejudderExtraStats.ditherLastExternal;
+		while (!renderAheadExtraTimerModes.empty() && renderAheadExtraTimerModes.front().first <= serial)
+		{
+			if (renderAheadExtraTimerModes.front().first == serial)
+				external = renderAheadExtraTimerModes.front().second;
+			renderAheadExtraTimerModes.pop_front();
+		}
+		return external;
 	}
 
 	// The gate per source period (dejudder_gate period): p95 costs over 5 s, the
@@ -5409,48 +5456,37 @@ struct LibplaceboVideoRenderer::Impl
 	int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras)
 	{
 		renderAheadNewFrameCost.Trim(now);
-		renderAheadExtraCost.Trim(now);
+		renderAheadExtraCostOwn.Trim(now);
+		renderAheadExtraCostExternal.Trim(now);
 		renderAheadEstimateCost.Trim(now);
 		RenderAhead::GateInput g;
 		g.sourcePeriod = sourcePeriod;
 		g.displayPeriod = displayPeriod;
 		g.utilisation = activeSettings.renderAheadUtilisation;
-		g.queueDepth = vpOwnedSwapchain ? static_cast<int>(RenderAhead::kQueuedFrameLatency) : 2;
+		// The frame latency the VP-owned chain was made with (bug hunt 05 M6: today's 2
+		// without extras or in low latency).
+		g.queueDepth = vpOwnedSwapchain ? static_cast<int>(renderAheadChainDepth.latency) : 2;
 		g.l1Available = activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported();
 		g.costs.newFrameMs = renderAheadNewFrameCost.P95();
-		g.costs.extraMs = renderAheadExtraCost.P95();
-		g.costs.estimateMs = renderAheadEstimateCost.P95();
-		// L1's saving: the sigma-delta's own search against the de-judder's vectors.
-		if (g.costs.extraMs > 0.0 && dejudderExtraStats.ditherMsOwn > 0.0 && dejudderExtraStats.ditherMsExternal > 0.0)
-			g.costs.extraCheaperMs = std::max(0.0, g.costs.extraMs -
-				std::max(0.0, dejudderExtraStats.ditherMsOwn - dejudderExtraStats.ditherMsExternal));
-		// Until there is a measurement only lateness moves the ladder. A degraded level
-		// renders fewer extras (none at hold), so their window empties: the last p95
-		// measured stands for them, and with none ever measured (the ladder went down on
+		g.costs.estimateMs = renderAheadEstimateCost.Current();
+		// X per vector mode, each level priced with its own (M7). A degraded level renders
+		// fewer extras (none at hold), so their windows empty: the last p95 measured
+		// stands for them (KnownCost, 30 s), and with none known (the ladder went down on
 		// start-up lateness before the first extra) the ladder probes one step up with
 		// the extra's cost unknown (render-ahead follow-up 2026-10-17: before, a hold
 		// reached that way was never left).
-		if (renderAheadExtraCost.Count() >= 4)
-		{
-			renderAheadExtraCostKnownMs = g.costs.extraMs;
-			renderAheadExtraCostKnownAt = now;
-		}
-		else if (renderAheadExtraCostKnownMs > 0.0 && now - renderAheadExtraCostKnownAt > 30.0)
-			renderAheadExtraCostKnownMs = 0.0;   // 30 s old: unknown again (probe), never a hold for good
-		if (renderAheadEstimateCost.Count() > 0)
-			renderAheadEstimateCostKnownMs = g.costs.estimateMs;
+		const double saving = dejudderExtraStats.ditherMsOwn > 0.0 && dejudderExtraStats.ditherMsExternal > 0.0 ?
+			dejudderExtraStats.ditherMsOwn - dejudderExtraStats.ditherMsExternal : 0.0;
+		const RenderAhead::GateCosts extra = RenderAhead::ExtraCosts(renderAheadExtraCostOwn.Current(),
+			renderAheadExtraCostExternal.Current(), saving, g.l1Available);
+		g.costs.extraMs = extra.extraMs;
+		g.costs.extraCheaperMs = extra.extraCheaperMs;
 		const bool degraded = renderAheadGate.Level() > 0;
-		const bool extraKnown = renderAheadExtraCost.Count() >= 4 || renderAheadExtraCostKnownMs > 0.0;
-		bool probing = false;
-		if (degraded && renderAheadExtraCost.Count() < 4)
-		{
-			g.costs.extraMs = renderAheadExtraCostKnownMs;
-			if (renderAheadEstimateCost.Count() == 0)
-				g.costs.estimateMs = renderAheadEstimateCostKnownMs;
-			probing = !extraKnown;
-		}
+		const bool extraMeasured = renderAheadExtraCostOwn.Measured() || renderAheadExtraCostExternal.Measured();
+		const bool extraKnown = renderAheadExtraCostOwn.Known() || renderAheadExtraCostExternal.Known();
+		const bool probing = degraded && !extraKnown;
 		const bool measured = renderAheadNewFrameCost.Count() >= 10 &&
-			(maxExtras == 0 || renderAheadExtraCost.Count() >= 4 || degraded);
+			(maxExtras == 0 || extraMeasured || degraded);
 		if (measured || late)
 		{
 			if (!measured)
@@ -5479,8 +5515,8 @@ struct LibplaceboVideoRenderer::Impl
 		renderAheadLogTick = now;
 		DebugLog::Log("Render-ahead: %s%s%s%llu extras presented, %llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
 			"(%llu presents after a hold), lead %.2f ms, target lead %.2f ms, gate %s (%s), latency floor %.2f ms, "
-			"p95 new frame %.2f ms, extra %.2f ms, estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
-			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections; shown - planned: interval 1 %+.2f refreshes "
+			"p95 new frame %.2f ms, extra %.2f ms (own vectors) / %.2f ms (de-judder vectors), estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
+			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections, %llu re-anchors; shown - planned: interval 1 %+.2f refreshes "
 			"(%llu, %llu on time), after holds %+.2f (%llu, %llu on time))",
 			holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "", dejudderExtraStats.extras,
 			renderAheadFrames, renderAheadRestarts, renderAheadLate, renderAheadDropped, renderAheadHeld,
@@ -5488,22 +5524,24 @@ struct LibplaceboVideoRenderer::Impl
 			RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
 			RenderAhead::ResolveGate(activeSettings.dejudderGate, activeSettings.renderAhead) == RenderAhead::GateMode::Period ?
 				"period" : "refresh",
-			dejudderLatencyFloor.Floor() * 1000.0, renderAheadNewFrameCost.P95(), renderAheadExtraCost.P95(),
-			renderAheadEstimateCost.P95(), renderAheadCreditFrames.load(std::memory_order_relaxed), ratio,
+			dejudderLatencyFloor.Floor() * 1000.0, renderAheadNewFrameCost.P95(), renderAheadExtraCostOwn.P95(),
+			renderAheadExtraCostExternal.P95(), renderAheadEstimateCost.P95(),
+			renderAheadCreditFrames.load(std::memory_order_relaxed), ratio,
 			renderAheadTimersReady ? "GPU timers" : "CPU timings", dejudderDisplayRate.hz,
 			OpenLoopDisplayRate::Name(dejudderDisplayRate.source), dejudderDisplayRate.openLoop ? "open" : "closed",
 			renderAheadOpenLoopFrames, renderAheadLateByPresent, renderAheadSchedule.EarlyCorrections(),
+			renderAheadSchedule.Reanchors(),
 			renderAheadShownCount[0] ? renderAheadShownError[0] / renderAheadShownCount[0] : 0.0, renderAheadShownCount[0],
 			renderAheadShownOnTime[0], renderAheadShownCount[1] ? renderAheadShownError[1] / renderAheadShownCount[1] : 0.0,
 			renderAheadShownCount[1], renderAheadShownOnTime[1]);
 	}
 
-	// The SyncInterval for the main present now being made (consumed): the holds the
-	// last plan left after its last extra, 1 otherwise.
-	UINT TakeRenderAheadMainInterval()
+	// The SyncInterval for the main present now being made: the holds the last plan
+	// left after its last extra (taken at RenderLocked's entry, so every exit consumes
+	// it, bug hunt 05 L2), 1 otherwise.
+	UINT TakeRenderAheadMainInterval(int pending)
 	{
-		const int interval = std::max(1, std::min(renderAheadMainInterval, RenderAhead::kMaxSyncInterval));
-		renderAheadMainInterval = 1;
+		const int interval = std::max(1, std::min(pending, RenderAhead::kMaxSyncInterval));
 		renderAheadLastMainInterval = interval;
 		if (interval > 1)
 			++renderAheadIntervalPresents;
@@ -8686,6 +8724,56 @@ struct LibplaceboVideoRenderer::Impl
 		vpOwnedClearLoggedGeneration = 0;
 	}
 
+	// Refreshes per source frame for the chain's depth (0 = not known yet).
+	double RenderAheadChainRatio() const
+	{
+		const double displayHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+		return dejudderSourceHz > 0.0 && displayHz > 0.0 ? displayHz / dejudderSourceHz : 0.0;
+	}
+
+	// Render-ahead (bug hunt 05 M6): the VP-owned chain is made before the first frame
+	// sets the source rate, so it starts at today's depth; once the depth wanted
+	// (ChainDepthFor: the cadence, low latency) has differed for kSettleSeconds the chain
+	// is made again at the render safe point. render_ahead off never gets here.
+	void CheckRenderAheadChainDepthLocked()
+	{
+		constexpr double kSettleSeconds = 1.0;
+		if (!activeSettings.renderAhead || !vpOwnedSwapchain || swapchainBlit || !swapchain)
+		{
+			renderAheadChainWantedSince = -1.0;
+			return;
+		}
+		const double ratio = RenderAheadChainRatio();
+		const RenderAhead::ChainDepth wanted = RenderAhead::ChainDepthFor(true,
+			lowLatencyQueueActive.load(std::memory_order_acquire), ratio);
+		if (wanted == renderAheadChainDepth)
+		{
+			renderAheadChainWantedSince = -1.0;
+			return;
+		}
+		const double now = RenderAheadNow();
+		if (renderAheadChainWantedSince < 0.0)
+		{
+			renderAheadChainWantedSince = now;
+			return;
+		}
+		if (now - renderAheadChainWantedSince < kSettleSeconds)
+			return;
+		DebugLog::Log("Render-ahead swapchain: depth %d buffers / latency %u -> %d / %u (ratio %.3f, low latency %d): making the chain again",
+			renderAheadChainDepth.buffers, renderAheadChainDepth.latency, wanted.buffers, wanted.latency, ratio,
+			lowLatencyQueueActive.load(std::memory_order_acquire) ? 1 : 0);
+		RenderAheadBreak();
+		renderAheadEpoch.Invalidate();   // another queue depth: the gate starts again
+		if (!RecreateSwapchain(swapchainBlit, suppressLimitedNegotiation, "render-ahead chain depth"))
+		{
+			// Keep the attempt from repeating every frame; ConfigureAndFallback recovers
+			// a missing chain as for any other recreation failure.
+			renderAheadChainDepth = wanted;
+			return;
+		}
+		EnsureAutoLimitedFallback("render-ahead chain depth");
+	}
+
 	bool CreateVpOwnedSwapchain(bool blit, const char* trigger)
 	{
 		if (!d3d11 || !d3d11->device)
@@ -8722,12 +8810,13 @@ struct LibplaceboVideoRenderer::Impl
 		desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT |
 			DXGI_USAGE_SHADER_INPUT | DXGI_USAGE_UNORDERED_ACCESS;
 		// Render-ahead (design step 3, VP-owned chain only): ceil(refreshes per source
-		// frame) + 2 buffers, at most 6 (6 while the rates are not measured yet).
-		const double renderAheadDisplayHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
-		const double renderAheadRatio = dejudderSourceHz > 0.0 && renderAheadDisplayHz > 0.0 ?
-			renderAheadDisplayHz / dejudderSourceHz : 0.0;
-		desc.BufferCount = blit ? 1 : activeSettings.renderAhead ?
-			static_cast<UINT>(RenderAhead::SwapchainBuffers(renderAheadRatio)) : 3;
+		// frame) + 2 buffers, at most 6, once the cadence is known and it has extras;
+		// low latency, no extras or a cadence not known yet keep today's 3 (bug hunt 05
+		// M6; CheckRenderAheadChainDepthLocked makes the chain again when that changes).
+		const double renderAheadRatio = RenderAheadChainRatio();
+		const RenderAhead::ChainDepth chainDepth = RenderAhead::ChainDepthFor(activeSettings.renderAhead && !blit,
+			lowLatencyQueueActive.load(std::memory_order_acquire), renderAheadRatio);
+		desc.BufferCount = blit ? 1 : static_cast<UINT>(chainDepth.buffers);
 		desc.Scaling = DXGI_SCALING_STRETCH;
 		desc.SwapEffect = blit ? DXGI_SWAP_EFFECT_DISCARD :
 			DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -8748,11 +8837,14 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		vpOwnedSwapchain = created;
 		++vpOwnedSwapchainGeneration;
-		// Render-ahead (design step 3): three presents in flight on the VP-owned chain;
-		// otherwise libplacebo's 2 (its device parameter), as before. Device-wide in DXGI.
+		// Render-ahead (design step 3): three presents in flight on the VP-owned chain
+		// with extras; otherwise libplacebo's 2 (its device parameter), as before.
+		// Device-wide in DXGI.
+		renderAheadChainDepth = chainDepth;
+		renderAheadChainWantedSince = -1.0;
 		{
 			CComQIPtr<IDXGIDevice1> latencyDevice(d3d11->device);
-			const UINT latency = activeSettings.renderAhead && !blit ? RenderAhead::kQueuedFrameLatency : 2;
+			const UINT latency = chainDepth.latency;
 			const HRESULT latencyResult = latencyDevice ? latencyDevice->SetMaximumFrameLatency(latency) : E_NOINTERFACE;
 			if (activeSettings.renderAhead || renderAheadSwapchainLogged)
 			{
@@ -9558,6 +9650,8 @@ struct LibplaceboVideoRenderer::Impl
         WindowsDisplayDiagnostics::Log(videoHwnd, "vp-before-initialize", L"VP Renderer", this);
 		const RendererSettings settings = LoadRendererSettings(
 			config, *state, activeDisplayRule, manualRule, manualUnifiedProfiles);
+		if (settings.renderAhead && !activeSettings.renderAhead)
+			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
@@ -10677,6 +10771,8 @@ struct LibplaceboVideoRenderer::Impl
 				: LibplaceboOutput::SdrTargetPrimaries::REC709;
 		const auto contract = LibplaceboOutput::MakeSdrOutputContract(
 			requestedTransport, target, settings.reportBt2020ToDisplay);
+		if (settings.renderAhead && !activeSettings.renderAhead)
+			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
@@ -14442,6 +14538,10 @@ struct LibplaceboVideoRenderer::Impl
 		int gateLevel = 0;
 		if (queuedMode)
 		{
+			// A new queue generation, cadence or render_ahead switched on: the gate and its
+			// measurements start again (bug hunt 05 H3).
+			if (renderAheadEpoch.Changed(f.frameGeneration, ratio))
+				ResetRenderAheadGate("new generation, cadence or render_ahead on");
 			// Presents outside the plan since the last one (a per-refresh timeline frame,
 			// a drift-correction repeat): the chain starts again.
 			if (renderAheadExpectedPresent != 0 && mainPresentId != renderAheadExpectedPresent)
@@ -14451,6 +14551,7 @@ struct LibplaceboVideoRenderer::Impl
 			double gridVsync = 0.0;
 			bool late = false;
 			bool closedLoop = false;
+			bool openLoopDrift = false;   // late only by an open-loop drift correction (M5)
 			// Only statistics the presentation telemetry accepts (a measured display rate):
 			// composed presentation on hybrid graphics returns statistics the telemetry
 			// rejects (no measured rate), and matched per present they disagree with any
@@ -14500,6 +14601,7 @@ struct LibplaceboVideoRenderer::Impl
 				++renderAheadOpenLoopFrames;
 				gridVsync = OpenLoopGridVsync(displayHz, now, qpc);
 				late = renderAheadOpenLoopLate;
+				openLoopDrift = renderAheadOpenLoopLate;
 			}
 			renderAheadOpenLoopLate = false;
 			bool restart = false, behind = false;
@@ -14529,7 +14631,13 @@ struct LibplaceboVideoRenderer::Impl
 			int drops = renderAheadSchedule.TakeLateDrops() + (behind ? 1 : 0);
 			if (gateMode == RenderAhead::GateMode::Period)
 			{
-				gateLevel = UpdateRenderAheadGate(RenderAheadNow(), sourcePeriod, displayPeriod, late, maxExtras);
+				// Lateness for the ladder: a late observed present or a chain that fell
+				// behind at once; an open-loop drift correction only when sustained
+				// (SustainedLateness, bug hunt 05 M5). A re-anchor is never late (M2).
+				const double gateNow = RenderAheadNow();
+				const bool gateLate = behind || (late && !openLoopDrift) ||
+					(openLoopDrift && renderAheadDriftLateness.Note(gateNow));
+				gateLevel = UpdateRenderAheadGate(gateNow, sourcePeriod, displayPeriod, gateLate, maxExtras);
 				drops += gateLevel >= RenderAhead::HoldLevel(maxExtras) ? 16 : RenderAhead::DropsAt(gateLevel);
 			}
 			RenderAhead::FrameInput in;
@@ -15035,6 +15143,12 @@ struct LibplaceboVideoRenderer::Impl
 			++extras;
 			++dejudderExtraStats.extras;
 			extraTiming.Accept(++renderAheadTimerSerial);
+			if (timeExtra)
+			{
+				renderAheadExtraTimerModes.emplace_back(renderAheadTimerSerial, externalThisExtra);
+				while (renderAheadExtraTimerModes.size() > 64)
+					renderAheadExtraTimerModes.pop_front();
+			}
 			extraTimerSuspension.Resume();
 			if (ditherTotals.sigmaNs > 0.0)
 			{
@@ -15046,7 +15160,8 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderExtraStats.lastMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - extraStart).count();
 			if (queuedMode && !renderAheadTimersReady)   // no GPU timer: the CPU time without the FIFO wait
-				renderAheadExtraCost.Add(RenderAheadNow(), std::max(0.0, dejudderExtraStats.lastMs - blockMs));
+				(externalThisExtra ? renderAheadExtraCostExternal : renderAheadExtraCostOwn).Add(RenderAheadNow(),
+					std::max(0.0, dejudderExtraStats.lastMs - blockMs));
 			// Render-ahead: a full FIFO is the back-pressure that paces it, not a stall.
 			if (!queuedMode && blockMs > 500.0 * displayPeriod)
 				++dejudderExtraStats.swapchainFull;
@@ -15169,15 +15284,17 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				// As a statistics-observed late present: the chain moves, the next frame
 				// drops one extra, and the next frame counts it late and feeds the gate.
-				renderAheadSchedule.NoteLate(openLoopLateRefreshes, displayPeriod);
-				renderAheadOpenLoopLate = true;
+				// The first after a new anchor re-anchors only (bug hunt 05 M2).
+				renderAheadOpenLoopLate = renderAheadSchedule.NoteLate(openLoopLateRefreshes, displayPeriod);
 			}
 			renderAheadMainInterval = plan.nextInterval;
 			UINT lastPresent = 0;
 			renderAheadExpectedPresent = SUCCEEDED(native->GetLastPresentCount(&lastPresent)) ? lastPresent + 1 : 0;
 			renderAheadCommitted = true;
+			// render_ahead_queue_credit: floor(lead / P_s), latched while the cadence holds
+			// (bug hunt 05 M4).
 			renderAheadCreditFrames.store(activeSettings.renderAheadQueueCredit ?
-				static_cast<size_t>(std::ceil(renderAheadLead / sourcePeriod - 1e-9)) : 0, std::memory_order_release);
+				renderAheadCredit.Commit(renderAheadLead, sourcePeriod, ratio) : 0, std::memory_order_release);
 			LogRenderAhead(ratio, gateLevel);
 		}
 		// After a second of frames, so the latency floor (and phi0) is settled.
@@ -15233,6 +15350,10 @@ struct LibplaceboVideoRenderer::Impl
 		bool& dejudderExtrasSpentTime)
 	{
 		dejudderExtrasSpentTime = false;
+		// Render-ahead: the last plan's interval for this frame's main present, consumed
+		// here so that no exit (a failed render) leaves it for a later present (bug hunt
+		// 05 L2).
+		const int renderAheadPendingMainInterval = std::exchange(renderAheadMainInterval, 1);
 		dejudderAheadPayload = aheadConvertedPayload;   // C for this frame's extras (estimate ahead)
 		dejudderAheadPayloadSequence = aheadConvertedPayload ? aheadSourceSequence : 0;
 		const int64_t renderLockedStartQpc = PerformanceCounterNow();
@@ -21550,7 +21671,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				// Render-ahead: the holds the last plan left after its last extra keep
 				// that picture up for its refreshes (1 = today's present).
-				const HRESULT presentResult = vpOwnedSwapchain->Present(TakeRenderAheadMainInterval(), 0);
+				const HRESULT presentResult = vpOwnedSwapchain->Present(TakeRenderAheadMainInterval(renderAheadPendingMainInterval), 0);
 				submitted = SUCCEEDED(presentResult);
 				if (!submitted && vpOwnedPresentFailureLoggedGeneration !=
 					vpOwnedSwapchainGeneration)
@@ -21594,7 +21715,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				// Render-ahead: libplacebo's swap is Present(1, 0); a planned hold
 				// after the last extra presents with its interval instead.
-				const UINT interval = TakeRenderAheadMainInterval();
+				const UINT interval = TakeRenderAheadMainInterval(renderAheadPendingMainInterval);
 				CComPtr<IDXGISwapChain> nativeForInterval;
 				if (interval > 1)
 					nativeForInterval.Attach(pl_d3d11_swapchain_unwrap(swapchain));
@@ -26919,6 +27040,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			{
 				m_impl->ResizeLocked(m_videoHwnd);
 			}
+			m_impl->CheckRenderAheadChainDepthLocked();
 			if (m_impl->outputRenegotiationPending.exchange(false,
 				std::memory_order_acq_rel))
 			{
