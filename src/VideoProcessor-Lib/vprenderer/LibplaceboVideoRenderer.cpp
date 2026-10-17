@@ -6224,6 +6224,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<double> ledBoostKnee{ 0.0 };
 	std::atomic<double> ledBoostKneeWidth{ 0.05 };
 	std::atomic<bool> ledWtwPassthrough{ true };   // led_wtw_passthrough ([led_drive], default on)
+	std::atomic<bool> ledBtbPassthrough{ true };   // led_btb_passthrough ([led_drive], default on)
 	std::atomic<double> ledShadowLift{ 0.0 };
 	std::vector<const pl_hook*> frameHooks;
 	std::vector<std::string> activeCustomShaders;
@@ -21088,7 +21089,7 @@ struct LibplaceboVideoRenderer::Impl
         if (boostExponent != lastLoggedBoostExponent)
         {
             lastLoggedBoostExponent = boostExponent;
-            DebugLog::Log("LED drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
+            DebugLog::Log("Dynamic Drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
                 boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
         }
         if (led || boostExponent != 1.0 || ledShadowLift.load(std::memory_order_acquire) > 0.0)
@@ -21149,6 +21150,81 @@ struct LibplaceboVideoRenderer::Impl
                     hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
                     renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent,
                     sourceSequence);
+                // Bug hunt 2 (owner 2026-10-17, led_peak_full_coverage): the peak over every
+                // pixel, in boxes the share of the screen of the script's full-screen
+                // downscale. The screen is the whole output (the script's screenshot).
+                const double ledScreenW = baseTarget.crop.x1 - baseTarget.crop.x0;
+                const double ledScreenH = baseTarget.crop.y1 - baseTarget.crop.y0;
+                ledMeasurement.SetPeak(led->Config().peakFullCoverage, ledScreenW, ledScreenH);
+                // Bug hunt 2 (owner 2026-10-17, led_picture_only): measure the PICTURE ONLY. The
+                // detected subtitle (padded box and card), and a moved subtitle's place, cover
+                // and cleanup fill, are left out of every LED statistic. Detection runs only with
+                // a subtitle style that moves cues (Black / Generated gray) or the box test; with
+                // no detection nothing is masked. VP's own overlays (stats, OSD, profile panel,
+                // the subtitle test box) are target overlays libplacebo draws after the output
+                // pass, so this PRE_OUTPUT measurement never sees them.
+                LedDrive::MeasurementRect ledMasks[LedDrive::MAX_MASK_RECTS];
+                LedDrive::PixelRect ledSourceMasks[LedDrive::MAX_MASK_RECTS];
+                int ledMaskCount = 0;
+                if (led->Config().pictureOnly)
+                {
+                    std::vector<SubtitleBoxRect> boxes;
+                    if (subtitleBoxResult.detected && subtitleBoxResult.bounds.Valid())
+                    {
+                        boxes.push_back(ExpandSubtitleBox(subtitleBoxResult.bounds, width, height, safeSubtitlePadding));
+                        boxes.push_back(subtitleBoxResult.sourcePanel);
+                    }
+                    if (subtitleCompositionSucceeded)
+                        for (const SubtitleBoxRect& r : { relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage,
+                            relocatedSubtitle.generatedCleanup, relocatedSubtitle.source })
+                            boxes.push_back(r);
+                    // NLS warps the picture before the scaler: a box follows the NLS map (the
+                    // shader's output-to-source curve, inverted per edge). An NLS shader whose map
+                    // is not known masks the box's rows across the whole width, a little taller.
+                    const NlsMaskMapping::Mapping ledNls = submittedNls ? KnownNlsMapping() : NlsMaskMapping::Mapping();
+                    auto outputOf = [&](double source, bool vertical)
+                    {
+                        const double scale = vertical ? ledNls.yScale : ledNls.xScale;
+                        const double protect = vertical ? ledNls.yProtect : ledNls.xProtect;
+                        double lo = 0.0, hi = 1.0;
+                        for (int i = 0; i < 40; ++i)
+                        {
+                            const double mid = 0.5 * (lo + hi);
+                            if (NlsMaskMapping::MapCoordinate(mid, scale, ledNls.curve, ledNls.geometry, protect) < source)
+                                lo = mid;
+                            else
+                                hi = mid;
+                        }
+                        return 0.5 * (lo + hi);
+                    };
+                    for (const SubtitleBoxRect& box : boxes)
+                    {
+                        if (!box.Valid() || ledMaskCount >= LedDrive::MAX_MASK_RECTS) continue;
+                        LedDrive::MeasurementRect m = LedDrive::SourceRectInCrop(box.left, box.top, box.right,
+                            box.bottom, renderImage.crop.x0, renderImage.crop.y0, renderImage.crop.x1, renderImage.crop.y1);
+                        if (LedDrive::Empty(m)) continue;
+                        ledSourceMasks[ledMaskCount] = { static_cast<double>(box.left), static_cast<double>(box.top),
+                            static_cast<double>(box.right), static_cast<double>(box.bottom) };
+                        if (submittedNls && ledNls.valid)
+                            m = { outputOf(m.x0, false), outputOf(m.y0, true), outputOf(m.x1, false), outputOf(m.y1, true) };
+                        else if (submittedNls)
+                            m = { 0.0, std::max(0.0, m.y0 - 0.02), 1.0, std::min(1.0, m.y1 + 0.02) };
+                        ledMasks[ledMaskCount++] = m;
+                    }
+                }
+                ledMeasurement.SetMask(ledMasks, ledMaskCount);
+                // The look-ahead measures queued raw frames (source raster): the screen in
+                // source pixels for the box size, and the current subtitle for their masks.
+                {
+                    const double cropW = renderImage.crop.x1 - renderImage.crop.x0;
+                    const double cropH = renderImage.crop.y1 - renderImage.crop.y0;
+                    const double shownW = target.crop.x1 - target.crop.x0;
+                    const double shownH = target.crop.y1 - target.crop.y0;
+                    static_cast<LedDrive::LookaheadObserver&>(led->Lookahead()).SetPictureGeometry(
+                        shownW > 0.0 && cropW > 0.0 ? ledScreenW * cropW / shownW : 0.0,
+                        shownH > 0.0 && cropH > 0.0 ? ledScreenH * cropH / shownH : 0.0,
+                        ledSourceMasks, ledMaskCount);
+                }
                 // Delta 8 R2: the grain map (the previous source frame's, as
                 // for S1) for grain-suppressed highlight statistics.
                 ledMeasurement.SetGrain(led->Config().highlightGrainSuppress && adaptiveDownscale.Active() &&
@@ -21162,14 +21238,14 @@ struct LibplaceboVideoRenderer::Impl
             if (boostExponent != 1.0 && frameHooks.size() == compensationStart)
             {
                 if (!ledBoostMissingLogged)
-                    DebugLog::Log("LED drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
+                    DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
                         boostExponent);
                 ledBoostMissingLogged = true;
             }
             else if (frameHooks.size() > compensationStart)
             {
                 if (ledBoostMissingLogged)
-                    DebugLog::Log("LED drive: gamma boost applied again (compensation hook running)");
+                    DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
                 ledBoostMissingLogged = false;
             }
             for (size_t i = compensationStart; i < frameHooks.size(); ++i)
@@ -21188,6 +21264,8 @@ struct LibplaceboVideoRenderer::Impl
                 CustomHookChain::SetHookParameter(frameHooks[i], "veil", compensation.veil);
                 CustomHookChain::SetHookParameter(frameHooks[i], "wtw_passthrough",
                     ledWtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
+                CustomHookChain::SetHookParameter(frameHooks[i], "btb_passthrough",
+                    ledBtbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
@@ -21908,7 +21986,7 @@ struct LibplaceboVideoRenderer::Impl
             for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
                 if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
                 {
-                    DebugLog::Log("LED drive: WARNING libplacebo disabled the measurement pass; the LED keeps its last statistics");
+                    DebugLog::Log("Dynamic Drive: WARNING libplacebo disabled the measurement pass; the LED keeps its last statistics");
                     ledMeasurementDisabledLogged = true;
                 }
         }
@@ -23445,6 +23523,7 @@ void LibplaceboVideoRenderer::Build()
 	m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
 	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
 	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
+	m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
 	m_impl->displayRefreshRate.SetEventSink(
 		[this](const std::string& event, double actualRefreshRate,
 			double requestedRefreshRate, double previousRefreshRate)
@@ -23708,13 +23787,20 @@ bool LibplaceboVideoRenderer::RefreshShaderRule(
 
 void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 {
-	// Only [projector.default] and [led_drive.default] matter; any other
-	// configuration change leaves a running module alone.
+	// Only [projector.default] and [led_drive.default] (or its alias
+	// [dynamic_drive.default]) matter; any other configuration change leaves
+	// a running module alone.
 	std::string signature;
-	for (const char* section : { LedDrive::PROJECTOR_SECTION, LedDrive::LED_DRIVE_SECTION })
+	const std::string ledSection = LedDrive::ResolveLedDriveSection(configuration);
+	for (const std::string& section : { std::string(LedDrive::PROJECTOR_SECTION), ledSection })
 		if (const auto* values = configuration.GetSectionValues(section))
 			for (const auto& value : *values)
-				signature += std::string(section) + "." + value.first + "=" + value.second + "\n";
+				signature += section + "." + value.first + "=" + value.second + "\n";
+	// Both spellings in one file: [led_drive.*] wins; said once per change.
+	const std::string aliasConflict = LedDrive::LedDriveAliasConflict(configuration);
+	if (aliasConflict != m_ledDriveAliasConflict && !aliasConflict.empty())
+		DebugLog::Log("Dynamic Drive: WARNING %s", aliasConflict.c_str());
+	m_ledDriveAliasConflict = aliasConflict;
 	// An LED profile file is part of the settings: editing it applies too.
 	const std::string ledProfilePath = LedDrive::LedProfilePath(configuration);
 	if (!ledProfilePath.empty())
@@ -23731,7 +23817,7 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	// The exponent is output gamma / gamma_boost, worked out per frame from
 	// the frame's output transfer; the renderer logs it when it changes.
 	if (boostConfig.gammaBoost != m_ledGammaBoost)
-		DebugLog::Log("LED drive: gamma boost setting %s (%.2f)",
+		DebugLog::Log("Dynamic Drive: gamma boost setting %s (%.2f)",
 			boostConfig.gammaBoost > 0.0 ? "on" : "off", boostConfig.gammaBoost);
 	m_ledGammaBoost = boostConfig.gammaBoost;
 	m_ledCompensationEotf = boostConfig.compensationEotf;
@@ -23739,6 +23825,7 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	m_ledBoostKnee = boostConfig.gammaBoostKnee;
 	m_ledBoostKneeWidth = boostConfig.gammaBoostKneeWidth;
 	m_ledWtwPassthrough = boostConfig.wtwPassthrough;
+	m_ledBtbPassthrough = boostConfig.btbPassthrough;
 	// The shadow lift is part of adaptive gamma (owner 2026-10-14).
 	m_ledShadowLift = boostConfig.adaptiveGamma ? boostConfig.shadowLiftAnsi : 0.0;
 	if (m_impl)
@@ -23750,6 +23837,7 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
 		m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
 		m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
+		m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
 	}
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
 		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
@@ -23758,7 +23846,7 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	// plus the main settings) and said once per change.
 	std::string profileProblem;
 	if (!LedDrive::ValidateLedProfile(configuration, profileProblem))
-		DebugLog::Log("LED drive: WARNING LED profile ignored (%s); using the built-in values",
+		DebugLog::Log("Dynamic Drive: WARNING LED profile ignored (%s); using the built-in values",
 			profileProblem.c_str());
 	// Tuning and script/compensate switches go to the running module, so the
 	// LED carries on from its level instead of restoring full light.
@@ -23783,14 +23871,14 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	if (previous) previous->Stop();
 	if (!valid)
 	{
-		DebugLog::Log("LED drive: configuration rejected (%s); module and gamma boost off",
+		DebugLog::Log("Dynamic Drive: configuration rejected (%s); module and gamma boost off",
 			validationError.c_str());
 		return;
 	}
 	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);
 	if (!led.enabled)
 	{
-		if (previous) DebugLog::Log("LED drive: disabled");
+		if (previous) DebugLog::Log("Dynamic Drive: disabled");
 		return;
 	}
 	m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
@@ -25103,7 +25191,7 @@ bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
 	if (module)
 	{
 		module->Stop();
-		DebugLog::Log("LED drive: stopped for the RS-232 connection test");
+		DebugLog::Log("Dynamic Drive: stopped for the RS-232 connection test");
 	}
 	return true;
 }
@@ -25124,10 +25212,13 @@ bool LibplaceboVideoRenderer::StopLedDriveForShutdown()
 	}
 	if (!module)
 		return true;
-	DebugLog::Log("LED drive: stopping for the forced shutdown (restoring full light)");
-	module->Stop();
-	DebugLog::Log("LED drive: stopped for the forced shutdown");
-	return true;
+	DebugLog::Log("Dynamic Drive: stopping for the forced shutdown (restoring full light)");
+	// Bug hunt 2 2026-10-17: the restore's result (light, and LDMM / CNTR
+	// when sent), so the caller can say "not confirmed" when it was not.
+	const bool confirmed = module->Stop();
+	DebugLog::Log("Dynamic Drive: stopped for the forced shutdown%s",
+		confirmed ? "" : " (restore not confirmed)");
+	return confirmed;
 }
 
 void LibplaceboVideoRenderer::ResumeLedDriveAfterTest()
@@ -25159,8 +25250,8 @@ void LibplaceboVideoRenderer::ResumeLedDriveAfterTest()
 	if ((wasSuspended || stale) && m_ledDriveConfiguration)
 	{
 		UpdateLedDrive(*m_ledDriveConfiguration);
-		DebugLog::Log(wasSuspended ? "LED drive: restarted after the RS-232 connection test" :
-			"LED drive: restarted after the RS-232 connection test (renderer created during the test)");
+		DebugLog::Log(wasSuspended ? "Dynamic Drive: restarted after the RS-232 connection test" :
+			"Dynamic Drive: restarted after the RS-232 connection test (renderer created during the test)");
 	}
 }
 

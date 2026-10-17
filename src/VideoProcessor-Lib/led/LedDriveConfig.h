@@ -18,11 +18,73 @@ namespace LedDrive
 {
 	constexpr const char* PROJECTOR_SECTION = "projector.default";
 	constexpr const char* LED_DRIVE_SECTION = "led_drive.default";
+	// "Dynamic Drive" (owner 2026-10-17) is the feature's name; [led_drive*]
+	// stays the section VP has always read and the Config app writes for a
+	// fresh file. [dynamic_drive] / [dynamic_drive.<name>] is accepted as an
+	// alias wherever sections are recognised. Precedence: when a file holds
+	// both spellings of one section, [led_drive.<name>] is used and the
+	// [dynamic_drive.<name>] copy is ignored (logged by the renderer, see
+	// LedDriveAliasConflict); both are still validated strictly.
+	constexpr const char* DYNAMIC_DRIVE_SECTION = "dynamic_drive.default";
+
+	inline bool IsLedDriveSection(const std::string& section)
+	{
+		return section == "led_drive" || section.rfind("led_drive.", 0) == 0 ||
+			section == "dynamic_drive" || section.rfind("dynamic_drive.", 0) == 0;
+	}
+
+	inline bool IsProjectorSection(const std::string& section)
+	{
+		return section == "projector" || section.rfind("projector.", 0) == 0;
+	}
 
 	inline bool OwnsSection(const std::string& section)
 	{
-		return section == "projector" || section.rfind("projector.", 0) == 0 ||
-			section == "led_drive" || section.rfind("led_drive.", 0) == 0;
+		return IsProjectorSection(section) || IsLedDriveSection(section);
+	}
+
+	// The other spelling of an [led_drive*] / [dynamic_drive*] name (normalised,
+	// lower case); "" for any other section.
+	inline std::string LedDriveSectionAlias(const std::string& section)
+	{
+		const std::string normalized = ConfigFile::NormalizeName(section);
+		if (normalized == "led_drive" || normalized.rfind("led_drive.", 0) == 0)
+			return "dynamic_drive" + normalized.substr(9);
+		if (normalized == "dynamic_drive" || normalized.rfind("dynamic_drive.", 0) == 0)
+			return "led_drive" + normalized.substr(13);
+		return {};
+	}
+
+	// The section that holds an [led_drive.<name>]'s settings in `config`:
+	// [led_drive.<name>] when present (it wins over the alias), otherwise
+	// [dynamic_drive.<name>] when present, otherwise [led_drive.<name>].
+	inline std::string ResolveLedDriveSection(const ConfigFile& config,
+		const std::string& section = LED_DRIVE_SECTION)
+	{
+		const std::string normalized = ConfigFile::NormalizeName(section);
+		const std::string alias = LedDriveSectionAlias(normalized);
+		if (alias.empty()) return normalized;
+		const bool dynamicName = normalized.rfind("dynamic_drive", 0) == 0;
+		const std::string legacy = dynamicName ? alias : normalized;
+		const std::string dynamic = dynamicName ? normalized : alias;
+		if (config.HasSection(legacy)) return legacy;
+		return config.HasSection(dynamic) ? dynamic : legacy;
+	}
+
+	// A warning when a file holds both spellings of a section ("" when not):
+	// the [dynamic_drive*] copy is ignored.
+	inline std::string LedDriveAliasConflict(const ConfigFile& config)
+	{
+		for (const std::string& section : config.GetSectionNames())
+		{
+			const std::string normalized = ConfigFile::NormalizeName(section);
+			if (normalized.rfind("dynamic_drive", 0) != 0 || !IsLedDriveSection(normalized)) continue;
+			const std::string legacy = LedDriveSectionAlias(normalized);
+			if (config.HasSection(legacy))
+				return "[" + normalized + "] ignored: [" + legacy +
+					"] is also present and takes precedence (keep one of the two)";
+		}
+		return {};
 	}
 
 	// "distance threshold : step", evaluated from the largest threshold down.
@@ -161,6 +223,22 @@ namespace LedDrive
 		bool scriptPacing = true;
 		int scriptMeasureMs = 150;
 		int scriptEchoMs = 30;
+		// script_lookahead (owner 2026-10-17, default on): the internal script
+		// copy decides from the queued frame that will be on screen when its
+		// command lands (now + its send time + led_latency_ms; a rise from the
+		// frame where it will have settled, + led_settle_ms), with the
+		// script's own bands, steps, CNTR logic and rhythm. A cut to a brighter
+		// scene seen in the queue gets the scene's targets landing on its first
+		// frame; black before it allows a pre-lift up to black_prelift_max
+		// (preposition_black_only's black). With the look-ahead covering
+		// led_latency_ms + led_settle_ms the lowest level is led_floor (the
+		// script's bottom band continues its curve down to it), else
+		// led_floor_reactive. A queue short of the landing frame: its last
+		// frame (the nearest there is; a cut in it still jumps, at once). No
+		// queued frames (Low Latency): the frame on screen, as before. Off: the
+		// script's decisions on the frame on screen and led_floor, exactly as
+		// before.
+		bool scriptLookahead = true;
 		// mode: compensate ramps: levels per second, and no movement while
 		// |target - current| <= deadband. early_ramp lets the ramp start ahead
 		// of a cut the lookahead has seen.
@@ -219,8 +297,11 @@ namespace LedDrive
 		// configurations keep it on): VP's picture adapts to the LED - the
 		// gain across each step (script smoothing for the script sources, the
 		// compensation gain for compensate) and the ANSI shadow lift (its
-		// strength still shadow_lift_ansi). lookahead (default on): the
-		// queued-frame look-ahead of VP's internal sources; off = reactive.
+		// strength still shadow_lift_ansi). lookahead (default on): compensate's
+		// queued-frame look-ahead; off = reactive. The script copy has its own
+		// switch, script_lookahead. Both look through every frame the active
+		// queue profile has queued (owner 2026-10-17: queue = look-ahead; Low
+		// Latency queues nothing, so it is reactive), capped by led_lookahead_ms.
 		std::string commandSource;
 		int adaptiveGammaSetting = -1;   // adaptive_gamma as read: -1 not named
 		bool modeNamed = false;          // the file names `mode` (an older file)
@@ -285,19 +366,39 @@ namespace LedDrive
 		// still descend: never above need). The exit-from-black pre-lift keeps
 		// its cap. off = as before.
 		bool cutLeadWindow = false;
-		// LED look-ahead depth in time (review 2026-10-17, "Before deploy" 1;
-		// time-based, owner rule): 0 = as deep as the queue walk
-		// (active_picture_lookahead_frames). Above 0 the LED uses at most this
-		// far ahead, in source frames at the measured rate; the renderer can
-		// ask for a deeper walk with LedDriveModule::WantedLookaheadFrames()
-		// (wired 2026-10-17: the walk visits the deeper frames for the LED
-		// observer only, so this extends the depth as well as capping it).
+		// LED look-ahead cap in time (review 2026-10-17; time-based, owner rule):
+		// 0 = every frame queued under the active queue profile (owner
+		// 2026-10-17: queue = look-ahead, independent of
+		// active_picture_lookahead_frames). Above 0 the LED looks at most this
+		// far ahead, in source frames at the measured rate (never past what is
+		// queued). LedDriveModule::WantedLookaheadFrames() asks the renderer's
+		// walk for that depth; the frames beyond the active picture's own
+		// look-ahead feed the LED only.
 		int ledLookaheadMs = 0;
 		// Restore switch (bug hunt 2026-10-17, default on): led_wtw_passthrough -
 		// under a boost (gain > 1) whiter-than-white keeps its own value in the
 		// LED compensation shader. Off = rolled under white with the boosted
 		// picture, as before.
 		bool wtwPassthrough = true;
+		// Restore switch (bug hunt 2 2026-10-17, default on): led_btb_passthrough -
+		// below black leaves the LED compensation shader exactly as it came in
+		// (no boost, lift or gain; both gain domains), so the gain no longer
+		// pushes BTB past the encode floor. Off = boosted and gained with the
+		// picture (sign-preserving), as before.
+		bool btbPassthrough = true;
+		// Restore switch (bug hunt 2 2026-10-17, owner decision, default on):
+		// led_peak_full_coverage - the peak (mode: script's highlight test) is
+		// the largest area mean over boxes tiling the whole measured picture,
+		// each the share of the screen of the script's 854x480 INTER_AREA
+		// downscale, so every pixel counts. Off = the brightest 3x3 sample
+		// block of the sparse grid, as before.
+		bool peakFullCoverage = true;
+		// Restore switch (bug hunt 2 2026-10-17, owner decision, default on):
+		// led_picture_only - the renderer's detected subtitle box (and a moved
+		// subtitle's place) is left out of every LED statistic (peak, APL,
+		// histogram, cut cells). Unmasked while nothing is detected. Off =
+		// subtitles inside the picture count, as before.
+		bool pictureOnly = true;
 		// Restore switch (bug hunt 2026-10-17, default on): script_resend_failed_writes
 		// - internal_script re-sends a failed LPW1 / CNTR write at the next tick
 		// (only a command that tick does not send itself). Off = the pure script
@@ -600,6 +701,7 @@ namespace LedDrive
 			Choice("command_source", { "python", "internal_script", "compensate", "none" }),
 			Boolean("adaptive_gamma"),
 			Boolean("lookahead"),
+			Boolean("script_lookahead"),   // owner 2026-10-17
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
@@ -633,6 +735,9 @@ namespace LedDrive
 			Choice("cut_lead", { "off", "window" }),   // review 2026-10-17, experimental
 			Integer("led_lookahead_ms", 0, 2000),     // review 2026-10-17
 			Boolean("led_wtw_passthrough"),           // restore switch 2026-10-17
+			Boolean("led_btb_passthrough"),           // restore switch 2026-10-17 (bug hunt 2)
+			Boolean("led_peak_full_coverage"),        // restore switch, hunt 2 2026-10-17
+			Boolean("led_picture_only"),              // restore switch, hunt 2 2026-10-17
 			Boolean("script_resend_failed_writes"),   // restore switch 2026-10-17
 			Boolean("cntr_pair_predict"),             // post-merge audit 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
@@ -714,8 +819,8 @@ namespace LedDrive
 		const auto ledRules = LedDriveRules();
 		for (const std::string& section : config.GetSectionNames())
 		{
-			const bool projector = section == "projector" || section.rfind("projector.", 0) == 0;
-			const bool led = section == "led_drive" || section.rfind("led_drive.", 0) == 0;
+			const bool projector = IsProjectorSection(section);
+			const bool led = IsLedDriveSection(section);   // [dynamic_drive*] is an alias
 			if (!projector && !led) continue;
 			std::string moved;
 			if (led && config.TryGetString(section, "led_response_ms", moved))
@@ -902,7 +1007,7 @@ namespace LedDrive
 	inline std::string LedProfilePath(const ConfigFile& config)
 	{
 		std::string value;
-		if (!config.TryGetString(LED_DRIVE_SECTION, "profile_file", value)) return {};
+		if (!config.TryGetString(ResolveLedDriveSection(config), "profile_file", value)) return {};
 		std::string path = ConfigFile::Trim(value);
 		if (path.size() >= 2 && path.front() == '"' && path.back() == '"') path = path.substr(1, path.size() - 2);
 		if (path.empty()) return {};
@@ -914,13 +1019,13 @@ namespace LedDrive
 	}
 
 	// The LED profile file's own settings section: [led_drive.Default] (or
-	// [led_drive]); empty when it has neither.
+	// [led_drive]), or the alias [dynamic_drive.Default] / [dynamic_drive]
+	// (an [led_drive*] spelling wins over its alias); empty when it has none.
 	inline std::string LedProfileSection(const ConfigFile& profile)
 	{
-		for (const std::string& section : profile.GetSectionNames())
-			if (section == LED_DRIVE_SECTION) return section;
-		for (const std::string& section : profile.GetSectionNames())
-			if (section == "led_drive") return section;
+		for (const char* wanted : { LED_DRIVE_SECTION, DYNAMIC_DRIVE_SECTION, "led_drive", "dynamic_drive" })
+			for (const std::string& section : profile.GetSectionNames())
+				if (section == wanted) return section;
 		return {};
 	}
 
@@ -955,6 +1060,7 @@ namespace LedDrive
 				result.adaptiveGammaSetting = adaptive ? 1 : 0;
 		}
 		config.TryGetBool(section, "lookahead", result.lookahead);
+		config.TryGetBool(section, "script_lookahead", result.scriptLookahead);
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
 		if (config.TryGetString(section, "rate_preset", value))
@@ -983,6 +1089,9 @@ namespace LedDrive
 			result.cutLeadWindow = ConfigFile::NormalizeName(value) == "window";
 		readInt("led_lookahead_ms", 0, 2000, result.ledLookaheadMs);
 		config.TryGetBool(section, "led_wtw_passthrough", result.wtwPassthrough);
+		config.TryGetBool(section, "led_btb_passthrough", result.btbPassthrough);
+		config.TryGetBool(section, "led_peak_full_coverage", result.peakFullCoverage);
+		config.TryGetBool(section, "led_picture_only", result.pictureOnly);
 		config.TryGetBool(section, "script_resend_failed_writes", result.scriptResendFailedWrites);
 		config.TryGetBool(section, "cntr_pair_predict", result.cntrPairPredict);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
@@ -1093,7 +1202,7 @@ namespace LedDrive
 				if (!section.empty()) ApplyLedDriveSection(profile, section, result);
 			}
 		}
-		ApplyLedDriveSection(config, LED_DRIVE_SECTION, result);
+		ApplyLedDriveSection(config, ResolveLedDriveSection(config), result);
 		ApplyCommandSource(result);
 		return result;
 	}

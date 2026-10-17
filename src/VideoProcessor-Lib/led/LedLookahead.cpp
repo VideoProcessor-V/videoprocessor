@@ -53,9 +53,103 @@ namespace LedDrive
 		return FullRangeRgbEncoding(luma.encoding);
 	}
 
-	bool MeasureRawFrame(const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& rect,
-		const std::vector<float>& transfer, RawMeasurement& out, int range)
+	LumaValueTable PeakValueTable(const AnalysisLumaSource& luma, const std::vector<float>& transfer, int range)
 	{
+		LumaValueTable table{};
+		if (transfer.size() != RAW_TRANSFER_SIZE) return table;
+		// audit 2026-10-16: source_range describes the captured codes. Where
+		// Sample() remapped full-range codes to the limited domain, the source
+		// code is recovered first, so auto and full read the remapped code as
+		// limited (no second conversion) and a forced limited still reads the
+		// source's own codes as 64-940.
+		const bool remapped = SampleRemapsFullRange(luma);
+		const bool full = range >= 0 ? range == 1 : (remapped || LumaIsFullRange(luma));
+		for (int code = 0; code < LUMA_CODES; ++code)
+		{
+			const double sourceCode = remapped ? (code - 64.0) * 1023.0 / 876.0 : code;
+			const double signal = full ? sourceCode / 1023.0 : (sourceCode - 64.0) / 876.0;
+			const int index = static_cast<int>(std::lround(
+				std::max(0.0, std::min(signal, 1.0)) * (RAW_TRANSFER_SIZE - 1)));
+			table[code] = transfer[index];
+		}
+		return table;
+	}
+
+	double FullCoveragePeak(const AnalysisLumaSource& luma, int left, int top, int right, int bottom,
+		const LumaValueTable& table, double screenW, double screenH, const PixelRect* masks, int maskCount)
+	{
+		left = std::max(0, left);
+		top = std::max(0, top);
+		right = std::min(luma.width, right);
+		bottom = std::min(luma.height, bottom);
+		const int width = right - left, height = bottom - top;
+		if (width <= 0 || height <= 0 || !luma.IsValid()) return -1.0;
+		maskCount = std::max(0, std::min(maskCount, MAX_MASK_RECTS));
+		AreaPeakAccumulator accumulator(width, height, screenW, screenH);
+		// The accumulator's values are the template's, clamped to 0..1.
+		LumaValueTable clamped;
+		for (int code = 0; code < LUMA_CODES; ++code)
+			clamped[code] = std::max(0.0f, std::min(table[code], 1.0f));
+		// The 16-bit plane formats are read in place, the table indexed by the
+		// lane's upper ten bits; other formats are decoded a row at a time.
+		const bool plane = luma.LumaPlaneRow(top) != nullptr;
+		LumaValueTable planeTable{};
+		if (plane)
+			for (int code = 0; code < LUMA_CODES; ++code)
+				planeTable[code] = clamped[luma.PlaneLuma(static_cast<uint16_t>(code))];
+		std::vector<uint16_t> codes(plane ? 0 : static_cast<size_t>(width));
+		AreaPeakAccumulator::Span spans[MAX_MASK_RECTS];
+		for (int y = top; y < bottom; ++y)
+		{
+			const uint16_t* planeRow = plane ? luma.LumaPlaneRow(y) : nullptr;
+			if (plane ? !planeRow : !luma.SampleLumaRow(left, y, width, codes.data()))
+			{
+				// A format the row reader cannot decode: the per-pixel reference.
+				auto value = [&](int x, int yy, double& v)
+				{
+					AnalysisLumaSample sample;
+					if (!luma.Sample(x, yy, sample)) return false;
+					v = table[std::min<int>(sample.luma, LUMA_CODES - 1)];
+					return true;
+				};
+				return AreaAveragedMaximum(value, left, top, right, bottom, screenW, screenH, masks, maskCount);
+			}
+			// The masks crossing this row as pixel spans: a pixel is masked
+			// when its centre lies inside (PixelRect::Contains).
+			int count = 0;
+			for (int m = 0; m < maskCount; ++m)
+			{
+				const PixelRect& r = masks[m];
+				if (!(y + 0.5 >= r.y0 && y + 0.5 < r.y1)) continue;
+				int x0 = static_cast<int>(std::max<double>(left, std::min<double>(right, std::ceil(r.x0 - 0.5))));
+				int x1 = static_cast<int>(std::max<double>(left, std::min<double>(right, std::ceil(r.x1 - 0.5))));
+				while (x0 > left && r.Contains(x0 - 1 + 0.5, y + 0.5)) --x0;
+				while (x0 < x1 && !r.Contains(x0 + 0.5, y + 0.5)) ++x0;
+				while (x1 < right && r.Contains(x1 + 0.5, y + 0.5)) ++x1;
+				while (x1 > x0 && !r.Contains(x1 - 1 + 0.5, y + 0.5)) --x1;
+				if (x1 > x0) spans[count++] = { x0 - left, x1 - left };
+			}
+			// Sorted and merged.
+			std::sort(spans, spans + count, [](const auto& a, const auto& b) { return a.x0 < b.x0; });
+			int merged = 0;
+			for (int i = 0; i < count; ++i)
+				if (merged > 0 && spans[i].x0 <= spans[merged - 1].x1)
+					spans[merged - 1].x1 = std::max(spans[merged - 1].x1, spans[i].x1);
+				else
+					spans[merged++] = spans[i];
+			if (plane)
+				accumulator.AddRow(planeRow + left, 6, planeTable.data(), spans, merged, true);
+			else
+				accumulator.AddRow(codes.data(), 0, clamped.data(), spans, merged);
+		}
+		return accumulator.Result();
+	}
+
+	bool MeasureRawFrame(const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& rect,
+		const std::vector<float>& transfer, RawMeasurement& out, int range, const RawMeasureOptions* optionsIn)
+	{
+		static const RawMeasureOptions defaults{};
+		const RawMeasureOptions& options = optionsIn ? *optionsIn : defaults;
 		out = RawMeasurement{};
 		if (!luma.IsValid() || transfer.size() != RAW_TRANSFER_SIZE) return false;
 		const int left = std::max(0, rect.left), top = std::max(0, rect.top);
@@ -65,31 +159,35 @@ namespace LedDrive
 		const int blocksX = std::min(96, width / 3), blocksY = std::min(54, height / 3);
 		const double stepX = static_cast<double>(width) / blocksX;
 		const double stepY = static_cast<double>(height) / blocksY;
-		// audit 2026-10-16: source_range describes the captured codes. Where
-		// Sample() remapped full-range codes to the limited domain, the source
-		// code is recovered first, so auto and full read the remapped code as
-		// limited (no second conversion) and a forced limited still reads the
-		// source's own codes as 64-940.
-		const bool remapped = SampleRemapsFullRange(luma);
-		const bool full = range >= 0 ? range == 1 : (remapped || LumaIsFullRange(luma));
+		// One pixel's mapped (boosted) signal, 0..1, through the code table.
+		const LumaValueTable table = PeakValueTable(luma, transfer, range);
+		auto mapped = [&](int x, int y, double& value)
+		{
+			AnalysisLumaSample sample;
+			if (!luma.Sample(x, y, sample)) return false;
+			value = table[std::min<int>(sample.luma, LUMA_CODES - 1)];
+			return true;
+		};
+		const int maskCount = std::max(0, std::min(options.maskCount, MAX_MASK_RECTS));
 		for (int by = 0; by < blocksY; ++by)
 			for (int bx = 0; bx < blocksX; ++bx)
 			{
 				const int ox = left + static_cast<int>(bx * stepX);
 				const int oy = top + static_cast<int>(by * stepY);
+				// Hunt 2 (led_picture_only): a block centred in a mask is left out.
+				bool masked = false;
+				for (int m = 0; m < maskCount && !masked; ++m)
+					masked = options.masks[m].Contains(ox + 1.5, oy + 1.5);
+				if (masked) continue;
 				double acc = 0.0;
 				int samples = 0;
 				for (int dy = 0; dy < 3; ++dy)
 					for (int dx = 0; dx < 3; ++dx)
 					{
-						AnalysisLumaSample sample;
-						if (!luma.Sample(std::min(ox + dx, right - 1), std::min(oy + dy, bottom - 1), sample))
+						double value = 0.0;
+						if (!mapped(std::min(ox + dx, right - 1), std::min(oy + dy, bottom - 1), value))
 							continue;
-						const double sourceCode = remapped ? (sample.luma - 64.0) * 1023.0 / 876.0 : sample.luma;
-						const double signal = full ? sourceCode / 1023.0 : (sourceCode - 64.0) / 876.0;
-						const int index = static_cast<int>(std::lround(
-							std::max(0.0, std::min(signal, 1.0)) * (RAW_TRANSFER_SIZE - 1)));
-						acc += transfer[index];
+						acc += value;
 						++samples;
 					}
 				if (samples == 0) continue;
@@ -104,12 +202,34 @@ namespace LedDrive
 				out.cellSum[cell] += scaled;
 				out.cellCount[cell] += 1;
 			}
+		if (out.blocks > 0 && options.peakFullCoverage)
+		{
+			// Hunt 2 (led_peak_full_coverage): the peak over the whole picture,
+			// every pixel counted.
+			const double peak = FullCoveragePeak(luma, left, top, right, bottom, table,
+				options.screenWidth > 0.0 ? options.screenWidth : luma.width,
+				options.screenHeight > 0.0 ? options.screenHeight : luma.height,
+				options.masks, maskCount);
+			out.maximum = peak >= 0.0 ? static_cast<uint32_t>(peak * SUM_SCALE + 0.5) : 0u;
+		}
 		return out.blocks > 0;
 	}
 
 	LookaheadObserver::LookaheadObserver(LedDriveModule& moduleIn)
 		: module(moduleIn), builder(LedDriveConfig())
 	{
+	}
+
+	void LookaheadObserver::SetPictureGeometry(double screenWidth, double screenHeight,
+		const PixelRect* masks, int count)
+	{
+		std::lock_guard<std::mutex> lock(geometryMutex);
+		geometry.screenWidth = screenWidth;
+		geometry.screenHeight = screenHeight;
+		geometry.maskCount = 0;
+		for (int i = 0; masks && i < count && geometry.maskCount < MAX_MASK_RECTS; ++i)
+			if (masks[i].x1 > masks[i].x0 && masks[i].y1 > masks[i].y0)
+				geometry.masks[geometry.maskCount++] = masks[i];
 	}
 
 	void LookaheadObserver::BeginWalk(size_t futureFrames)
@@ -144,8 +264,16 @@ namespace LedDrive
 			for (size_t i = 0; i < transfer->size(); ++i)
 				boosted[i] = static_cast<float>(std::pow(std::max(0.0f, (*transfer)[i]), boost));
 		}
+		RawMeasureOptions options;
+		{
+			std::lock_guard<std::mutex> lock(geometryMutex);
+			options = geometry;
+		}
+		const LedDriveConfig& config = module.Config();
+		options.peakFullCoverage = config.peakFullCoverage;
+		if (!config.pictureOnly) options.maskCount = 0;
 		RawMeasurement raw;
-		if (!MeasureRawFrame(luma, activePicture, boosted, raw, module.SourceRange())) return;
+		if (!MeasureRawFrame(luma, activePicture, boosted, raw, module.SourceRange(), &options)) return;
 		lastSequence = sourceSequence;
 		// The builder's windows are in real time: one source frame apart.
 		const FrameStats stats = builder.Build(raw, sourceSequence * module.SourceFramePeriodMs());

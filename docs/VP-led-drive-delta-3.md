@@ -1,4 +1,4 @@
-# LED drive module — delta 3: use the projector's reserve (hybrid LED + CNTR)
+# Dynamic Drive module — delta 3: use the projector's reserve (hybrid LED + CNTR)
 
 2026-10-11. Supersedes "CNTR is never driven" (answers-1 §1, delta-1) for
 `compensate` mode. `script` mode is unchanged. Instructions relative to the

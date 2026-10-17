@@ -1,4 +1,4 @@
-# LED drive module — answers to implementation questions (round 1)
+# Dynamic Drive module — answers to implementation questions (round 1)
 
 2026-10-09. Answers are decisions unless marked "verify". Where this file
 contradicts `VP-led-drive-module.md` or the brief, this file wins; fold the

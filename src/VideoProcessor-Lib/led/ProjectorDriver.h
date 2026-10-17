@@ -54,6 +54,11 @@ namespace LedDrive
 		// led_latency_ms / cntr_latency_ms after this.
 		std::chrono::steady_clock::time_point lastLightSentAt{};
 		std::chrono::steady_clock::time_point lastContrastSentAt{};
+		// Bug hunt 2 (2026-10-17): the earliest the driver's thread may write its
+		// next queued command (min_command_gap_ms, burst pause, Barco's 2 s after a
+		// missing reply); the epoch when unknown. The module lands a queued LPW1
+		// from there.
+		std::chrono::steady_clock::time_point nextSendAt{};
 		// A light target is waiting or being transmitted.
 		bool busy = false;
 		// A CNTR value (SetContrastAsync) is waiting or being transmitted
@@ -170,6 +175,15 @@ namespace LedDrive
 	// LDMM 0 and/or CNTR as well, by enough to keep the projector's command
 	// gap between them (CommandGapMs + 50 ms for each later one; 1.7 s for
 	// three at Barco's 500 ms), so no restore command is dropped.
+	// Returns whether the light was confirmed; `outcome` (optional, bug hunt 2
+	// 2026-10-17) also reports the LDMM and CNTR sends (true when not needed).
+	struct RestoreOutcome
+	{
+		bool light = true;
+		bool dimMode = true;
+		bool contrast = true;
+		bool Confirmed() const { return light && dimMode && contrast; }
+	};
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
-		bool restoreContrast = false);
+		bool restoreContrast = false, RestoreOutcome* outcome = nullptr);
 }

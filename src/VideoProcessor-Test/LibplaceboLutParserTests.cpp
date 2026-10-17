@@ -3436,6 +3436,61 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 
+		// Bug hunt 2 (owner 2026-10-17), on the WARP device: the full-coverage peak
+		// pass against its CPU reference (box = the script's share of the screen),
+		// and a subtitle mask leaving its pixels out of every statistic.
+		TEST_METHOD(LedMeasurementHookFullCoveragePeakAndPictureOnlyMask)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int size = 192;
+			// Dark (40), a 2x2 specular (250) and a bright subtitle bar (230).
+			auto code = [](int, int x, int y)
+			{
+				if (x >= 61 && x < 63 && y >= 61 && y < 63) return 250;
+				if (x >= 40 && x < 150 && y >= 160 && y < 176) return 230;
+				return 40;
+			};
+			const double weights[3] = { 0.299, 0.587, 0.114 };
+			// A screen three times the script's grid: 3x3-pixel boxes.
+			const double screenW = 3.0 * LedDrive::SCRIPT_PEAK_GRID_W, screenH = 3.0 * LedDrive::SCRIPT_PEAK_GRID_H;
+			std::vector<int> rendered;   // the picture as rendered (red = grey), for the reference
+			auto measure = [&](const LedDrive::MeasurementRect* masks, int count)
+			{
+				LedDrive::MeasurementHook hook;
+				hook.SetFrame({}, weights);
+				hook.SetPeak(true, screenW, screenH);
+				hook.SetMask(masks, count);
+				rendered = fixture.RenderSequence(std::vector<const pl_hook*>{ hook.Hook() }, size, size, 1, code).front();
+				std::vector<LedDrive::RawMeasurement> measured;
+				Assert::AreEqual(1, hook.Collect(measured, 5000), L"No measurement came back");
+				hook.Release();
+				return measured.front();
+			};
+			auto reference = [&](const LedDrive::PixelRect* masks, int count)
+			{
+				auto value = [&](int x, int y, double& v) { v = rendered[static_cast<size_t>(y) * size + x] / 255.0; return true; };
+				return LedDrive::AreaAveragedMaximum(value, 0, 0, size, size, screenW, screenH, masks, count);
+			};
+			const LedDrive::RawMeasurement open = measure(nullptr, 0);
+			const std::wstring message = L"peak " + std::to_wstring(open.maximum / 16.0) + L" reference " +
+				std::to_wstring(reference(nullptr, 0)) + L"; log: " + std::wstring(log.begin(), log.end());
+			Assert::AreEqual(reference(nullptr, 0), open.maximum / 16.0, 0.75, message.c_str());
+			// The subtitle bar (16 rows of 230) is the brightest 3x3 area; masked, the
+			// specular's box is: (4 x 250 + 5 x 40) / 9 in the box at 60..62.
+			const LedDrive::MeasurementRect subtitle{ 36.0 / size, 156.0 / size, 154.0 / size, 180.0 / size };
+			const LedDrive::PixelRect subtitlePx{ 36.0, 156.0, 154.0, 180.0 };
+			const LedDrive::RawMeasurement picture = measure(&subtitle, 1);
+			Assert::AreEqual(reference(&subtitlePx, 1), picture.maximum / 16.0, 0.75, message.c_str());
+			Assert::IsTrue(picture.maximum < open.maximum, L"The masked subtitle is not the peak");
+			Assert::IsTrue(picture.blocks < open.blocks && picture.sum / static_cast<double>(picture.blocks) <
+				open.sum / static_cast<double>(open.blocks), L"nor in the blocks and the APL");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
+
 		TEST_METHOD(LedMeasurementHookMeasuresWithoutTouchingThePicture)
 		{
 			TargetLutGpuFixture fixture;
@@ -3491,8 +3546,27 @@ namespace VideoProcessorTest
 			Assert::AreEqual(raw.blocks, cellTotal);
 			const double apl = static_cast<double>(raw.sum) / LedDrive::SUM_SCALE / raw.blocks;
 			Assert::AreEqual(expected, apl, 0.75);
-			Assert::AreEqual(brightest, static_cast<double>(raw.maximum) / LedDrive::SUM_SCALE, 0.75,
+			// Bug hunt 2 (led_peak_full_coverage, the default): the peak over every
+			// pixel; at 64x64 (under the script's 854x480) a box is one pixel.
+			auto pixelValue = [&](int x, int y, double& v)
+			{
+				const RgbaPixel& p = baseline[y * 64 + x];
+				v = (weights[0] * p.r + weights[1] * p.g + weights[2] * p.b) / 255.0;
+				return true;
+			};
+			const double fullPeak = LedDrive::AreaAveragedMaximum(pixelValue, 0, 0, 64, 64, 64.0, 64.0);
+			Assert::IsTrue(fullPeak >= brightest - 0.75);
+			Assert::AreEqual(fullPeak, static_cast<double>(raw.maximum) / LedDrive::SUM_SCALE, 0.75,
+				L"The full-coverage peak comes back in the same readback buffer");
+			// Off: the brightest sample block, as before.
+			hook.SetPeak(false);
+			fixture.RenderCoordinateField(hook.Hook());
+			measured.clear();
+			Assert::AreEqual(1, hook.Collect(measured, 5000));
+			Assert::AreEqual(brightest, static_cast<double>(measured.front().maximum) / LedDrive::SUM_SCALE, 0.75,
 				L"The block maximum comes back in the same readback buffer");
+			Assert::AreEqual(raw.sum, measured.front().sum, L"The peak mode never changes the APL");
+			hook.SetPeak(true);
 
 			// Measuring only the left half sees less red.
 			hook.SetFrame({ 0.0, 0.0, 0.5, 1.0 }, weights);
@@ -4729,14 +4803,36 @@ namespace VideoProcessorTest
 			auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
 			const double boost = 2.2 / 2.4;
 
-			// Sign fix: code 40 (24 below black 64) stays below black.
-			set(1.3, boost);
+			// Bug hunt 2 2026-10-17, led_btb_passthrough (default on): below
+			// black leaves the hook exactly as captured - the same code as with
+			// the hook idle (gain 1, no boost) - under the boost and gain, in
+			// both gain domains, and a deep code (8) is no longer pushed to the
+			// encode floor by a large gain.
 			const double btb = signal(40.0);
+			set(1.0, 1.0);
+			const int idle40 = code(btb), idle8 = code(signal(8.0)), idleBlack = code(signal(64.0)),
+				idle80 = code(signal(80.0));
+			Assert::IsTrue(idle40 < 64 && idle8 < idle40, L"the idle hook does not keep below black");
+			set(1.3, boost);
+			Assert::AreEqual(idle40, code(btb), L"Below black did not pass through (linear gain 1.3, boost)");
+			set(2.5, boost);
+			Assert::AreEqual(idle8, code(signal(8.0)), L"Deep below black did not pass through (linear gain 2.5)");
+			// Continuous and monotonic at black: black stays black, above black
+			// rises with the gain.
+			Assert::AreEqual(idleBlack, code(signal(64.0)), L"Black moved");
+			Assert::IsTrue(code(signal(80.0)) > idle80, L"Above black was not lifted by the gain");
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", 0.0));
+			Assert::AreEqual(idle40, code(btb), L"Below black did not pass through (encoded gain 2.5)");
+			// Off (the old behaviour): the sign-preserving boost and gain act on
+			// below black too, so code 40 moves by the gain (still below black).
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 0.0));
+			set(1.3, boost);
 			const int btbOut = code(btb);
 			const double btbExpected = 64.0 + 876.0 * spow(spow(spow(btb, boost), 2.41) * 1.3, 1.0 / 2.41);
 			Assert::IsTrue(btbOut < 64, (L"Below black was cut to black: " + std::to_wstring(btbOut)).c_str());
 			Assert::AreEqual(btbExpected, static_cast<double>(btbOut), 1.5,
-				(L"Below black, expected " + std::to_wstring(btbExpected)).c_str());
+				(L"Below black (passthrough off), expected " + std::to_wstring(btbExpected)).c_str());
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 1.0));
 			// Above white keeps its order against white (the knee rolls it off).
 			const int white = code(signal(940.0));
 			const int wtw = code(signal(1019.0));

@@ -411,6 +411,7 @@ private:
 	// full light. Recreated only when its configuration sections change.
 	std::shared_ptr<LedDrive::LedDriveModule> m_ledDrive;
 	std::string m_ledDriveSignature;
+	std::string m_ledDriveAliasConflict;   // [led_drive*] and [dynamic_drive*] both present (logged once)
 	// RS-232 connection test: the configuration the LED drive is restarted
 	// from, and whether it is stopped for a test.
 	std::shared_ptr<const ConfigFile> m_ledDriveConfiguration;
@@ -422,6 +423,7 @@ private:
 	double m_ledBoostKnee = 0.0;        // delta 11
 	double m_ledBoostKneeWidth = 0.05;
 	bool m_ledWtwPassthrough = true;   // led_wtw_passthrough
+	bool m_ledBtbPassthrough = true;   // led_btb_passthrough
 	double m_ledShadowLift = 0.0;
 	// The Low_Latency queue as last applied (2026-10-16): kept here so a Build, which makes a
 	// new Impl, starts in the right path (it was lost until the next snapshot apply).

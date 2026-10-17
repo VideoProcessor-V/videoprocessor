@@ -52,8 +52,12 @@ namespace LedDrive
 
 		void Start();
 		// Restores full light (when it was driving the projector) and stops the
-		// thread. Called by the destructor.
-		void Stop();
+		// thread. Called by the destructor. Safe for concurrent callers (bug
+		// hunt 2 2026-10-17): only the first joins the thread, later ones wait
+		// until it has stopped. Returns whether the exit restore was confirmed
+		// (light, and LDMM / CNTR when sent); true when there was nothing to
+		// restore or the module was not running.
+		bool Stop();
 
 		// Render thread, before each output frame: the source sequence of the
 		// frame about to be rendered and the source frame rate (0 = unknown;
@@ -131,13 +135,20 @@ namespace LedDrive
 		double RecoveryDisplayed() const;
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
+		// Bug hunt 2 (render-ahead): the source frames after the current one that a
+		// command written now lands on (led_latency_ms less the frame's lead).
+		int CommandLatencySourceFrames() const;
 		size_t LookaheadDepth() const;
 		// led_lookahead_ms (review 2026-10-17) in source frames at the measured
 		// rate; 0 = the queue walk's own depth (active_picture_lookahead_frames).
 		// For the renderer: how far its queued-frame walk would have to reach
 		// for the LED alone (wired 2026-10-17: the walk visits max(active picture, this),
 		// the frames beyond the active picture feed the LED only).
+		// Owner 2026-10-17 (queue = look-ahead): WHOLE_QUEUE (every queued frame)
+		// whenever the LED looks ahead (compensate with lookahead, internal_script
+		// with script_lookahead), or led_lookahead_ms's frames when set; 0 otherwise.
 		size_t WantedLookaheadFrames() const;
+		static constexpr size_t WHOLE_QUEUE = static_cast<size_t>(-1);
 		// The smoothed exact / predicted ratio applied to predictions.
 		double CorrectionRatio() const;
 
@@ -151,6 +162,9 @@ namespace LedDrive
 		double NowMs() const;
 		int LatencyFramesLocked() const;
 		int LatencySourceFramesLocked() const;
+		// Bug hunt 2: a queued, not yet written LPW1's landing, in ms from the
+		// current frame (the driver's next send slot + led_latency_ms - the lead).
+		double QueuedLightLandingMsLocked(const DriverStatus& status) const;
 		CompensationGain GainLocked() const;
 		void ConfigureModelsLocked();
 		double LedFractionLocked(double level) const;
@@ -172,6 +186,13 @@ namespace LedDrive
 		std::thread thread;
 		bool stopping = false;
 		bool started = false;
+		// Stop() (bug hunt 2): signalled when the joining caller has finished,
+		// for concurrent callers; the exit restore's result, written by the
+		// module's thread before it ends.
+		std::condition_variable stopped;
+		bool restoreConfirmed = true;
+		uint64_t stopGeneration = 0;     // completed Stop()s
+		bool stoppedConfirmed = true;    // restoreConfirmed as the last Stop() saw it
 
 		uint64_t configGeneration = 0;
 		StatsBuilder statsBuilder;
@@ -216,6 +237,9 @@ namespace LedDrive
 		struct Command { uint64_t frame; int level; double landMs; };
 		std::deque<Command> commands;
 		int seenSends = 0;
+		// Bug hunt 2: the LPW1 target last queued to the driver and not yet seen
+		// written (-1 none); a landing in LedLandingsLocked until it is written.
+		int queuedLight = -1;
 		int modelledLevel;
 		// 7c-1: the LED's light after the dead time, settling (as a fraction
 		// of the ceiling's flux), and the same for CNTR (its light factor).
@@ -242,7 +266,8 @@ namespace LedDrive
 		int CutLevelLocked() const;
 		// cntr_pair_predict (post-merge audit 2026-10-17): the LPW1s still to land, as
 		// (ms from the current frame, LED fraction) in time order - those in flight and
-		// pendingLevel (this tick's, not yet written; -1 none) led_latency_ms ahead.
+		// pendingLevel (this tick's, not yet written; -1 none) or else the queued
+		// queuedLight, led_latency_ms after the driver's next send slot (bug hunt 2).
 		std::vector<std::pair<double, double>> LedLandingsLocked(int pendingLevel) const;
 		void HoldContrastLocked();
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
@@ -266,6 +291,19 @@ namespace LedDrive
 		// 0 depth available, 1 warned), logged by the module's thread.
 		double lastWalkWallMs = -1.0;
 		int lookaheadWarnState = -1;
+		// Owner 2026-10-17: NowMs() of the last prediction (-1 before any).
+		double lastPredictionWallMs = -1.0;
+		// The source sequence of the last BeginFrame (lastFrameMs is its time).
+		uint64_t lastFrameSequence = 0;
+		// The LED looks ahead in the current mode (compensate: lookahead;
+		// internal_script: script_lookahead).
+		bool LookaheadWantedLocked() const;
+		// The walk's future frames the LED may use now: 0 when no walk came for a
+		// second (Low Latency queues nothing), capped by led_lookahead_ms.
+		size_t LookaheadDepthLocked() const;
+		// The once-per-change look-ahead log (pendingWarning): a warning only for a
+		// real fault - frames queued and walked but no statistics from them.
+		void UpdateLookaheadWarningLocked();
 		std::string pendingWarning;
 		size_t LedLookaheadFramesLocked() const;
 		// led_landing_ms: the frame-clock time a send written at `sentAt`

@@ -250,12 +250,30 @@ namespace ConfigEditorCore
 		return value;
 	}
 
+	std::string ConfigDocument::StoredSection(const std::string& wantedSection) const
+	{
+		const std::string normalized = ConfigFile::NormalizeName(wantedSection);
+		if (normalized.rfind("led_drive", 0) != 0 || !LedDrive::IsLedDriveSection(normalized))
+			return wantedSection;
+		const std::string alias = LedDrive::LedDriveSectionAlias(normalized);
+		bool hasLegacy = false, hasAlias = false;
+		for (const std::string& raw : lines)
+		{
+			const std::string text = ConfigFile::Trim(StripComment(raw));
+			if (text.size() < 2 || text.front() != '[' || text.back() != ']') continue;
+			const std::string name = ConfigFile::NormalizeName(text.substr(1, text.size() - 2));
+			hasLegacy = hasLegacy || name == normalized;
+			hasAlias = hasAlias || name == alias;
+		}
+		return hasAlias && !hasLegacy ? alias : wantedSection;
+	}
+
 	bool ConfigDocument::Find(const std::string& wantedSection,
 		const std::string& wantedKey, size_t& lineIndex, size_t& valueStart,
 		size_t& valueEnd) const
 	{
 		const std::string normalizedSection =
-			ConfigFile::NormalizeName(wantedSection);
+			ConfigFile::NormalizeName(StoredSection(wantedSection));
 		const std::string normalizedKey = ConfigFile::NormalizeName(wantedKey);
 		std::string section;
 		for (size_t index = 0; index < lines.size(); ++index)
@@ -335,7 +353,7 @@ namespace ConfigEditorCore
             return true;
         }
 
-		const std::string normalized = ConfigFile::NormalizeName(wantedSection);
+		const std::string normalized = ConfigFile::NormalizeName(StoredSection(wantedSection));
 		for (size_t index = 0; index < lines.size(); ++index)
 		{
 			const std::string text = ConfigFile::Trim(StripComment(lines[index]));
@@ -389,8 +407,10 @@ namespace ConfigEditorCore
         return removed;
 	}
 
-	bool ConfigDocument::AddSection(const std::string& section)
+	bool ConfigDocument::AddSection(const std::string& requested)
 	{
+		// An [led_drive.*] the file already holds as [dynamic_drive.*] exists.
+		const std::string section = StoredSection(requested);
 		const std::string normalized = ConfigFile::NormalizeName(section);
 		for (const std::string& existing : SectionNamesWithPrefix(section))
 			if (ConfigFile::NormalizeName(existing) == normalized) return false;
@@ -401,7 +421,7 @@ namespace ConfigEditorCore
 
 	bool ConfigDocument::RemoveSection(const std::string& wantedSection)
 	{
-		const std::string normalized = ConfigFile::NormalizeName(wantedSection);
+		const std::string normalized = ConfigFile::NormalizeName(StoredSection(wantedSection));
 		for (size_t index = 0; index < lines.size(); ++index)
 		{
 			const std::string text = ConfigFile::Trim(StripComment(lines[index]));
@@ -432,7 +452,7 @@ namespace ConfigEditorCore
 	bool ConfigDocument::FindSectionHeader(const std::string& wantedSection,
 		size_t& lineIndex, size_t& nameStart, size_t& nameEnd) const
 	{
-		const std::string normalized = ConfigFile::NormalizeName(wantedSection);
+		const std::string normalized = ConfigFile::NormalizeName(StoredSection(wantedSection));
 		for (size_t index = 0; index < lines.size(); ++index)
 		{
 			const std::string text = ConfigFile::Trim(StripComment(lines[index]));

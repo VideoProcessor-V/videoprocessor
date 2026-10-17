@@ -32,8 +32,9 @@ namespace LedDrive
 		// that is more recent): mode: compensate aims the LED at it, so a flash
 		// never makes the LED chase it; a fall, or a cut, acts at once.
 		double sustainedApl = 16.0;
-		// The brightest 3x3 block (the script's max of its downscale): the
-		// highlight test of mode: script.
+		// The script's max of its downscale (the largest area mean over the
+		// whole picture, led_peak_full_coverage; off: the brightest 3x3
+		// block): the highlight test of mode: script.
 		double maximum = 16.0;
 		bool cut = false;
 		bool fade = false;
@@ -184,6 +185,17 @@ namespace LedDrive
 		double riseStartMs = -1e300;
 	};
 
+	// script_lookahead (owner 2026-10-17): the script copy's lowest light level.
+	// Legacy: led_floor, as before (script_lookahead off). Reactive: the
+	// look-ahead does not cover the projector's response, so the higher of
+	// led_floor and led_floor_reactive, as compensate. Covered: the look-ahead
+	// covers led_latency_ms + led_settle_ms, so a bright cut is seen in time for
+	// its jump; the script's flat bottom band (the built-in curve's 100 below
+	// APL 20, which is the script's own reactive floor) continues down the
+	// slope of the curve's first rising segment to led_floor. Everything above
+	// that band is the script's own curve, unchanged.
+	enum class ScriptFloor { Legacy, Reactive, Covered };
+
 	class ScriptController
 	{
 	public:
@@ -197,12 +209,96 @@ namespace LedDrive
 		static int ContrastTargetFor(int apl, bool highlight);
 		int Light() const { return light; }
 		int Contrast() const { return contrast; }
+		// script_lookahead: the floor rule (Legacy by default) and, while the
+		// look-ahead shows a bright scene after black, the pre-lift the light
+		// does not step below (-1 none).
+		void SetFloor(ScriptFloor floorIn) { floor = floorIn; }
+		ScriptFloor Floor() const { return floor; }
+		void SetLightHold(int level) { lightHold = level; }
 
 	private:
 		LedDriveConfig config;
 		int light;
 		int contrast;
+		ScriptFloor floor = ScriptFloor::Legacy;
+		int lightHold = -1;
 	};
+
+	// script_lookahead (owner 2026-10-17): the script copy decides from the frame
+	// that will be on screen when its command lands, not the frame on screen
+	// (the script's screenshot could not see the future: a coding limitation,
+	// not its intent). Pure: the module supplies the queued frames' statistics
+	// and the clocks; the decision rules stay the script's.
+	struct ScriptLookaheadInput
+	{
+		// The queued frames after the one on screen, in source order (corrected
+		// predictions), with their source sequences.
+		std::vector<std::pair<uint64_t, FrameStats>> ahead;
+		uint64_t onScreenSequence = 0;
+		// The frame clock (ms): when onScreenSequence is displayed, and now.
+		double onScreenMs = 0.0;
+		double nowMs = 0.0;
+		double sourcePeriodMs = 1000.0 / 24.0;
+		// When this tick's first command goes out, after now (script pacing:
+		// its measuring time; the fixed loop: 0).
+		double sendOffsetMs = 0.0;
+		// The latest the next tick's decision may come, after now
+		// (ScriptTickBoundMs).
+		double nextTickMs = 800.0;
+		int ledLatencyMs = 80;
+		int ledSettleMs = 0;
+		int cntrLatencyMs = 80;
+		// The port's spacing between two commands (min_command_gap_ms and the
+		// script's echo): a cut's CNTR goes this much ahead of its LPW1 when both
+		// would go out together (an early CNTR decrease is never above need; a
+		// late one would be).
+		double commandGapMs = 200.0;
+		int light = 255;     // what the script believes the projector is at
+		int contrast = 50;
+	};
+
+	struct ScriptTimedSend
+	{
+		double atMs = 0.0;   // frame clock
+		bool light = false;  // LPW1, else CNTR
+		int value = 0;
+	};
+
+	struct ScriptLookaheadPlan
+	{
+		enum class Kind
+		{
+			Current,   // nothing queued, or the command lands on the frame on screen: as before
+			Ahead,     // the script's tick on the frame its command lands on (a rise: where it
+			           // will have settled; a short queue: its last frame)
+			PreLift,   // black now and until a bright scene in the queue: the script's tick
+			           // on the frame on screen, the light not below `lightHold`
+			CutJump    // a cut to a brighter scene: straight to its targets, landing on its first frame
+		};
+		Kind kind = Kind::Current;
+		FrameStats stats;        // Ahead: the landing frame's
+		ScriptFloor floor = ScriptFloor::Reactive;
+		bool covered = false;    // the look-ahead covers latency + settle
+		uint64_t targetSequence = 0;
+		int lightHold = -1;      // PreLift: min(bright target, black_prelift_max)
+		int preliftTarget = -1;  // PreLift: a direct LPW1 to the hold (-1 none)
+		std::vector<ScriptTimedSend> sends;   // CutJump, in time order
+		double cutMs = 0.0;      // CutJump / PreLift: the bright scene's first frame on the frame clock
+	};
+
+	// Black for the exit-from-black rules: IsTrueBlack with
+	// preposition_black_only (the default), else very dark (APL < 20).
+	bool ScriptBlackForPreposition(const LedDriveConfig& config, const FrameStats& stats);
+
+	// The longest an ordinary script tick (its measuring, LPW1 and CNTR sends with
+	// their sleeps and echoes) keeps the next one from starting: a cut whose
+	// commands fall due within it is sent from this tick.
+	int ScriptTickBoundMs(const LedDriveConfig& config);
+
+	// One tick's look-ahead decision. `controller` supplies the script's targets
+	// (its floor is set from the result by the caller).
+	ScriptLookaheadPlan PlanScriptLookahead(const LedDriveConfig& config, const ScriptController& controller,
+		const FrameStats& current, const ScriptLookaheadInput& input);
 
 	// script_pacing: script - one tick of the internal script copy in the
 	// script's own timing: the sends, in order, relative to the tick start
@@ -379,6 +475,15 @@ namespace LedDrive
 		double value;
 		double target;
 	};
+
+	// Bug hunt 2 (2026-10-17, render-ahead): how long after the current frame is shown a
+	// command written now lands. A send lands latencyMs after it is written (now); the
+	// frame rendered ahead is shown frameAheadMs after now. Never negative; with no lead
+	// (rendered when shown) exactly latencyMs.
+	inline double CommandLeadMs(double latencyMs, double frameAheadMs)
+	{
+		return std::max(0.0, latencyMs - std::max(0.0, frameAheadMs));
+	}
 
 	// cntr_pair_predict (post-merge audit 2026-10-17; owner rule: CNTR above the need is a
 	// defect): the LED fraction compensate's CNTR pairs against. On: the higher of the LED

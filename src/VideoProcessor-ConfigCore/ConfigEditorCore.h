@@ -41,6 +41,14 @@ namespace ConfigEditorCore
         bool MigrateTransferChoices();
 
 		static std::string StripComment(const std::string& value);
+		// The section an edit of `wantedSection` reads and writes. "Dynamic
+		// Drive" (owner 2026-10-17): [dynamic_drive.<name>] is an alias of
+		// [led_drive.<name>]; a file that spells the section [dynamic_drive.*]
+		// (and has no [led_drive.*] of that name) keeps being read and written
+		// there - never migrated or duplicated. With both present, or neither,
+		// the [led_drive.*] name is used (VP's precedence). Any other section:
+		// unchanged.
+		std::string StoredSection(const std::string& wantedSection) const;
 		bool Find(const std::string& wantedSection,
 			const std::string& wantedKey, size_t& lineIndex,
 			size_t& valueStart, size_t& valueEnd) const;
