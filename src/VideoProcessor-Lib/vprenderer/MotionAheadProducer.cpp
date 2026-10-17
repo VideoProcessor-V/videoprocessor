@@ -244,7 +244,7 @@ namespace MotionAhead
 		return stats;
 	}
 
-	void Producer::Submit(uint64_t sequence, uint64_t generation, const AnalysisLumaSource& luma)
+	void Producer::Submit(uint64_t sequence, uint64_t generation, const AnalysisLumaSource& luma, bool breakBefore)
 	{
 		if (!running.load(std::memory_order_acquire)) return;
 		{
@@ -256,7 +256,7 @@ namespace MotionAhead
 				jobs.pop_front();
 				++stats.dropped;
 			}
-			jobs.push_back(Job{ sequence, generation, luma });
+			jobs.push_back(Job{ sequence, generation, luma, breakBefore });
 		}
 		lastSubmitted.store(sequence, std::memory_order_release);
 		wake.notify_all();
@@ -380,10 +380,13 @@ namespace MotionAhead
 			store.SetGeneration(job.generation);
 			havePrevious = false;
 		}
+		// A break the sequence does not show: no pair across it (MotionValidity step 1 F).
+		if (job.breakBefore)
+			havePrevious = false;
 		const int slot = havePrevious ? 1 - current : current;
 		context->UpdateSubresource(lumaTex[slot], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		bool ok = true;
-		if (havePrevious && previousGeneration == job.generation && previousSequence < job.sequence)
+		if (havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence)
 		{
 			const int prev = current;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
