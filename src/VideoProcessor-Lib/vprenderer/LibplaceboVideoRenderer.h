@@ -385,6 +385,11 @@ private:
 	std::atomic<bool> m_cadenceClassFixes{true};
 	bool m_cadenceClassFixesApplied = true;   // capture thread
 	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
+	// motion_history_fixes (Hunt 2 fix group 5): refreshed by the render loop.
+	std::atomic<bool> m_motionHistoryFixes{true};
+	// Hunt 2 04 L4: incoming frames dropped to preserve queued cadence repeats since the
+	// last enqueued frame; the next enqueued frame carries them as a gap. Under m_queueMutex.
+	uint32_t m_repeatPreservingDrops = 0;
 	// Capture timestamp breaks (UpdateFrameRateAndPPM's discontinuity branch).
 	std::atomic<uint64_t> m_captureTimestampBreaks{0};
 	std::atomic<bool> m_pulldownResetRequested{false};
