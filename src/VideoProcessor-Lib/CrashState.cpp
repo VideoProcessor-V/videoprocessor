@@ -5,8 +5,11 @@
 #include <Psapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <regex>
@@ -46,6 +49,14 @@ namespace CrashState
 		Recorder* g_handlerRecorder = nullptr;
 		LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = nullptr;
 		std::terminate_handler g_previousTerminate = nullptr;
+		// Bug hunt 2026-10-17: abort() on any thread (CRT invalid-parameter /
+		// pure-call paths, assert, an explicit abort in a library) bypassed
+		// both handlers above and left no crash state.
+		using AbortSignalHandler = void(__cdecl*)(int);
+		AbortSignalHandler g_previousAbort = SIG_DFL;
+		// Set once a terminate has recorded, so the abort() it raises does not
+		// record the same crash a second time.
+		std::atomic<bool> g_terminateRecorded{ false };
 
 		// audit 2026-10-16: a crash handler must never block on a lock the
 		// crashed thread (or a stalled one) holds: try for a short, bounded
@@ -90,9 +101,30 @@ namespace CrashState
 				t_inCrashHandler = true;   // the dump is guarded against re-entry too
 				recorder->WriteMinidump(nullptr);
 				t_inCrashHandler = false;
+				g_terminateRecorded.store(true);
 			}
 			if (g_previousTerminate) g_previousTerminate();
 			std::abort();
+		}
+
+		// Bug hunt 2026-10-17: SIGABRT is process-wide in the MSVC CRT, so this
+		// covers worker threads. Records the crash state as the terminate
+		// handler does, then chains to any previous handler; abort() then ends
+		// the process (with _CALL_REPORTFAULT cleared, without WER).
+		void __cdecl AbortHandler(int signalNumber)
+		{
+			Recorder* recorder = g_handlerRecorder;
+			if (recorder && !t_inCrashHandler && !g_terminateRecorded.load())
+			{
+				recorder->WriteFromHandler("abort (SIGABRT)");
+				t_inCrashHandler = true;   // the dump is guarded against re-entry too
+				recorder->WriteMinidump(nullptr);
+				t_inCrashHandler = false;
+			}
+			const AbortSignalHandler previous = g_previousAbort;
+			if (previous != SIG_DFL && previous != SIG_IGN && previous != SIG_ERR &&
+				previous != AbortHandler)
+				previous(signalNumber);
 		}
 	}
 
@@ -335,6 +367,11 @@ namespace CrashState
 		g_handlerRecorder = this;
 		g_previousFilter = SetUnhandledExceptionFilter(UnhandledFilter);
 		g_previousTerminate = std::set_terminate(TerminateHandler);
+		// Bug hunt 2026-10-17: abort() on any thread records the crash state.
+		const AbortSignalHandler previousAbort = std::signal(SIGABRT, AbortHandler);
+		if (previousAbort != SIG_ERR && previousAbort != AbortHandler)
+			g_previousAbort = previousAbort;
+		_set_abort_behavior(0, _CALL_REPORTFAULT);
 	}
 
 	bool Recorder::WriteMinidump(void* exceptionPointers)

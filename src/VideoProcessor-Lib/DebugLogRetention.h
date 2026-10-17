@@ -203,6 +203,61 @@ public:
 		return result;
 	}
 
+	// Bug hunt 2026-10-17: in-session size rollover. Startup rotation alone let
+	// one long session (or a log storm) grow vp.log without bound. The active
+	// log becomes <name>.r1, older parts shift to .r2 ... .r<keepCount>, and
+	// the oldest part is deleted. The "r" keeps these apart from the indexed
+	// session archives (<name>.0, .1, ...), which this never touches.
+	static constexpr unsigned long long ROLLOVER_BYTES = 100ULL * 1024 * 1024;
+	static constexpr size_t ROLLOVER_KEEP = 3;
+
+	static std::string RolloverPartPath(const std::string& activePath, size_t part)
+	{
+		return activePath + ".r" + std::to_string(part);
+	}
+
+	static bool RollOver(
+		const std::string& activePath,
+		size_t keepCount,
+		std::vector<std::string>& diagnostics)
+	{
+		if (keepCount < 1)
+			keepCount = 1;
+		const std::string oldest = RolloverPartPath(activePath, keepCount);
+		if (GetFileAttributesA(oldest.c_str()) != INVALID_FILE_ATTRIBUTES &&
+			!DeleteFileA(oldest.c_str()))
+		{
+			diagnostics.push_back("Debug log rollover: could not delete '" + oldest +
+				"' (Windows error " + std::to_string(GetLastError()) + ")");
+			return false;
+		}
+		for (size_t part = keepCount - 1; part >= 1; --part)
+		{
+			const std::string source = RolloverPartPath(activePath, part);
+			if (GetFileAttributesA(source.c_str()) == INVALID_FILE_ATTRIBUTES)
+				continue;
+			const std::string destination = RolloverPartPath(activePath, part + 1);
+			if (!MoveFileExA(source.c_str(), destination.c_str(),
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+			{
+				diagnostics.push_back("Debug log rollover: could not shift '" + source +
+					"' (Windows error " + std::to_string(GetLastError()) + ")");
+				return false;
+			}
+		}
+		const std::string first = RolloverPartPath(activePath, 1);
+		if (!MoveFileExA(activePath.c_str(), first.c_str(),
+			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+		{
+			diagnostics.push_back("Debug log rollover: could not rename '" + activePath +
+				"' (Windows error " + std::to_string(GetLastError()) + ")");
+			return false;
+		}
+		diagnostics.push_back("Debug log rollover: previous part saved as " +
+			FileName(first) + ", keeping " + std::to_string(keepCount) + " part(s)");
+		return true;
+	}
+
 	static bool IsArchiveFileName(
 		const std::string& activeFileName,
 		const std::string& candidateFileName)

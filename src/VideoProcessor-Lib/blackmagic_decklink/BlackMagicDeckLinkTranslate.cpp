@@ -431,13 +431,13 @@ ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines)
 	{
 	case bmdColorspaceRec601:
 
-		if (verticalLines == 486)
-			return ColorSpace::UNKNOWN;  // The card will once in a while throw an odd (invalid?) mode with 486 vertical lines for a very brief period, we simply ignore it.
-		if (verticalLines == 525)
+		// Bug hunt 2026-10-17: the caller passes the active picture height,
+		// so NTSC arrives as 486 (or 480) lines and PAL as 576. 486 used to
+		// map to UNKNOWN (real NTSC lost its matrix) and 576 to the analog
+		// PAL entry. Total-line counts (525/625) are kept for other callers.
+		if (verticalLines == 486 || verticalLines == 480 || verticalLines == 525)
 			return ColorSpace::REC_601_525;
-		if (verticalLines == 576)
-			return ColorSpace::REC_601_576;
-		if (verticalLines == 625)
+		if (verticalLines == 576 || verticalLines == 625)
 			return ColorSpace::REC_601_625;
 
 		throw std::runtime_error("Unknown amount of lines for REC 601 color space");

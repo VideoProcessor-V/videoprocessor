@@ -174,6 +174,11 @@ private:
 	// (profile/notification callback registration) from deleting the object.
 	std::atomic<ULONG> m_refCount{ 1 };
 
+	// Bug hunt 2026-10-17: rate limit for the frame-arrived exception log
+	// (DeckLink frame callback thread only).
+	ULONGLONG m_frameArrivedExceptionLastLogTick = 0;
+	uint64_t m_frameArrivedExceptionCount = 0;
+
 	// audit 2026-10-16: never throws (card state is informational).
 	void SendCardStateCallbackNoThrow();
 };

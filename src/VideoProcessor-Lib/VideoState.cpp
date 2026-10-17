@@ -11,7 +11,8 @@
 #include "VideoState.h"
 
 
-VideoState::VideoState(const VideoState& other)
+VideoState::VideoState(const VideoState& other):
+	m_refCount(0)   // Bug hunt 2026-10-17: a copy is a new object with its own count
 {
 	valid = other.valid;
 	displayMode = other.displayMode;

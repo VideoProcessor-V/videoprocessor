@@ -410,19 +410,28 @@ bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 	}
 	DEVMODEW best = {};
 	bool found = false;
+	// Bug hunt 2026-10-17: area first, then refresh; interlaced skipped
+	// (DisplayTopologySession::DisplayModeRanksAbove).
+	const auto describe = [](const DEVMODEW& mode)
+	{
+		DisplayTopologySession::DisplayModeCandidate result;
+		result.width = mode.dmPelsWidth;
+		result.height = mode.dmPelsHeight;
+		result.refreshHz = mode.dmDisplayFrequency;
+		result.bitsPerPixel = mode.dmBitsPerPel;
+		result.interlaced = (mode.dmDisplayFlags & DM_INTERLACED) != 0;
+		return result;
+	};
 	for (DWORD index = 0;; ++index)
 	{
 		DEVMODEW candidate = {};
 		candidate.dmSize = sizeof(candidate);
 		if (!EnumDisplaySettingsExW(device.c_str(), index, &candidate, 0))
 			break;
-		if (candidate.dmBitsPerPel < 32 || candidate.dmPelsWidth == 0 ||
-			candidate.dmPelsHeight == 0 || candidate.dmDisplayFrequency == 0)
+		const DisplayTopologySession::DisplayModeCandidate mode = describe(candidate);
+		if (!DisplayTopologySession::IsMaximumModeCandidate(mode))
 			continue;
-		const uint64_t area = static_cast<uint64_t>(candidate.dmPelsWidth) * candidate.dmPelsHeight;
-		const uint64_t bestArea = static_cast<uint64_t>(best.dmPelsWidth) * best.dmPelsHeight;
-		if (!found || candidate.dmDisplayFrequency > best.dmDisplayFrequency ||
-			(candidate.dmDisplayFrequency == best.dmDisplayFrequency && area > bestArea))
+		if (!found || DisplayTopologySession::DisplayModeRanksAbove(mode, describe(best)))
 		{
 			best = candidate;
 			found = true;

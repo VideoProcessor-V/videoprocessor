@@ -171,3 +171,19 @@ constexpr bool AlphaFreshStartRequiresDelayedReprime(
 		transition == AlphaFreshStartTransition::HostTransition ||
 		transition == AlphaFreshStartTransition::BackendHandoff;
 }
+
+// Bug hunt 2026-10-17: delay before automatic renderer retry number `attempt`
+// (0-based) after a renderer failure while capture is valid. Quick first
+// retries cover transient device/driver faults; afterwards one attempt every
+// 30 s keeps a failed renderer from spinning the UI thread.
+constexpr uint32_t RendererFailureRetryDelayMs(uint32_t attempt)
+{
+	return attempt == 0 ? 2000u :
+		attempt == 1 ? 5000u :
+		attempt == 2 ? 10000u :
+		30000u;
+}
+
+// Bug hunt 2026-10-17: how long application shutdown waits for a renderer
+// whose shutdown retirement is retained before it ends the dialog anyway.
+constexpr uint32_t ShutdownBlockedRetirementDeadlineMs = 10000u;

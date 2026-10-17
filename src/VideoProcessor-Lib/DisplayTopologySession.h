@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 namespace DisplayTopologySession
@@ -40,6 +41,35 @@ namespace DisplayTopologySession
 		if (std::abs(rate - fractional) >= 0.01)
 			return rate;
 		return std::floor(fractional * 1000.0 + 0.5) / 1000.0;
+	}
+
+	// Bug hunt 2026-10-17: the maximum-mode choice for a target-only session.
+	// It ranked refresh before area (so a low-resolution high-refresh mode
+	// beat the native resolution) and accepted interlaced modes. Rank by
+	// area, then refresh; skip interlaced and sub-32-bit modes. No resolution
+	// or rate is preferred by value.
+	struct DisplayModeCandidate
+	{
+		uint32_t width = 0;
+		uint32_t height = 0;
+		uint32_t refreshHz = 0;
+		uint32_t bitsPerPixel = 0;
+		bool interlaced = false;
+	};
+
+	inline bool IsMaximumModeCandidate(const DisplayModeCandidate& mode)
+	{
+		return mode.bitsPerPixel >= 32 && mode.width != 0 && mode.height != 0 &&
+			mode.refreshHz != 0 && !mode.interlaced;
+	}
+
+	inline bool DisplayModeRanksAbove(const DisplayModeCandidate& candidate,
+		const DisplayModeCandidate& best)
+	{
+		const uint64_t area = static_cast<uint64_t>(candidate.width) * candidate.height;
+		const uint64_t bestArea = static_cast<uint64_t>(best.width) * best.height;
+		return area > bestArea ||
+			(area == bestArea && candidate.refreshHz > best.refreshHz);
 	}
 
 	// Captures and persists the current topology, then atomically replaces it

@@ -293,6 +293,11 @@ void MagewellCaptureDevice::StartCapture(CaptureRunToken captureRunToken)
 	// The GUI records STARTING before this call. Expected setup failures must
 	// report an error and return to READY, so it cannot remain stuck there.
 	m_state.store(CaptureDeviceState::CAPTUREDEVICESTATE_STARTING);
+	{
+		// Bug hunt 2026-10-17: each capture run logs its first HDR InfoFrame.
+		std::lock_guard<std::mutex> lock(m_hdrInfoFrameLogMutex);
+		m_lastHdrInfoFrameLog.clear();
+	}
 	HCHANNEL channel = nullptr;
 	try
 	{
@@ -537,8 +542,11 @@ bool MagewellCaptureDevice::ReadHdrInfoFrame(
 
 	signal.hasHdrData = true;
 
-	DebugLog::Log(
-		"Magewell HDR InfoFrame: eotf=%d wire order R,G,B=%d,%d,%d primaries R(%.4f,%.4f) G(%.4f,%.4f) B(%.4f,%.4f) "
+	// Bug hunt 2026-10-17: this is read on every signal poll (4 per second)
+	// and on every InfoFrame notification; log it only when it changes.
+	char description[512] = {};
+	_snprintf_s(description, _TRUNCATE,
+		"eotf=%d wire order R,G,B=%d,%d,%d primaries R(%.4f,%.4f) G(%.4f,%.4f) B(%.4f,%.4f) "
 		"white=(%.4f,%.4f) maxLum=%.0f minLum=%.4f maxCLL=%.0f maxFALL=%.0f",
 		(int)hdr.byEOTF, redIndex, greenIndex, blueIndex,
 		signal.hdrData.displayPrimaryRedX, signal.hdrData.displayPrimaryRedY,
@@ -548,6 +556,17 @@ bool MagewellCaptureDevice::ReadHdrInfoFrame(
 		signal.hdrData.masteringDisplayMaxLuminance,
 		signal.hdrData.masteringDisplayMinLuminance,
 		signal.hdrData.maxCll, signal.hdrData.maxFall);
+	bool changed = false;
+	{
+		std::lock_guard<std::mutex> lock(m_hdrInfoFrameLogMutex);
+		if (m_lastHdrInfoFrameLog != description)
+		{
+			m_lastHdrInfoFrameLog = description;
+			changed = true;
+		}
+	}
+	if (changed)
+		DebugLog::Log("Magewell HDR InfoFrame: %s", description);
 
 	return true;
 }
@@ -1096,9 +1115,11 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		if (++failures >= 5)
 			throw std::runtime_error(message);
 	};
+	// Declared here so unsupportedSignal (above recoverableFault) can see it.
+	bool validPending = false;
 	const auto unsupportedSignal = [&](const char* reason)
 	{
-		if (haveState)
+		if (haveState && !validPending)  // Bug hunt 2026-10-17: invalid already published
 			PublishInvalidVideoState(captureRunToken);
 		if (capturing)
 		{
@@ -1108,6 +1129,54 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		buffers.clear();
 		haveState = false;
 		lastDeliveredFrameStart = -1;  // audit 2026-10-16
+		if (lastUnsupportedReason != reason)
+		{
+			lastUnsupportedReason = reason;
+			Error(CString(reason));
+		}
+	};
+	// Bug hunt 2026-10-17: faults the card recovers from (no buffered frames
+	// for 2 s, a failed MWStartVideoCapture, the capture memory budget, a
+	// slow frame copy) used to throw out of the thread and needed a manual
+	// Restart. Handle them like an unsupported signal: stop, drop the pool,
+	// forget the state, back off and try again from the signal read.
+	// Follow-up: VP is told "invalid" once per fault burst and is not told
+	// "valid" again until the first complete frame after a restart has
+	// arrived (validPending). A locked source sending no frames therefore
+	// stays steadily invalid while the device restarts stay internal, with a
+	// back-off growing to 30 s (RecoverableFaultBackoffMs). One log line per
+	// burst, one on recovery; the GUI error is posted once per burst.
+	unsigned int droppedForBudget = 0;
+	auto lastBudgetDropLog = std::chrono::steady_clock::time_point();
+	bool budgetDropLogged = false;
+	bool budgetStarving = false;
+	auto budgetStarvingSince = std::chrono::steady_clock::time_point();
+	unsigned int recoverableFaults = 0;  // consecutive, reset by a delivered frame
+	auto recoverableRetryAfter = std::chrono::steady_clock::time_point();
+	const auto recoverableFault = [&](const char* reason)
+	{
+		if (haveState && !validPending)
+			PublishInvalidVideoState(captureRunToken);
+		validPending = true;
+		if (capturing)
+		{
+			m_sdkInstance->Api().MWStopVideoCapture(channel);
+			capturing = false;
+		}
+		buffers.clear();
+		haveState = false;
+		lastDeliveredFrameStart = -1;
+		budgetStarving = false;
+		++recoverableFaults;
+		const auto backoff = std::chrono::milliseconds(
+			RecoverableFaultBackoffMs(recoverableFaults));
+		recoverableRetryAfter = std::chrono::steady_clock::now() + backoff;
+		if (recoverableFaults == 1)
+			DebugLog::Log(
+				"Magewell recoverable capture fault: %s; video held invalid, "
+				"device restarts internally (first in %lld ms, back-off to %u ms)",
+				reason, static_cast<long long>(backoff.count()),
+				RecoverableFaultBackoffMs(~0u));
 		if (lastUnsupportedReason != reason)
 		{
 			lastUnsupportedReason = reason;
@@ -1211,6 +1280,10 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		// audit 2026-10-16: set when this pass stopped/reconfigured capture, so
 		// a FRAME_BUFFERED bit in the same notification refers to the old stream.
 		bool captureReconfigured = false;
+		// Bug hunt 2026-10-17: hold off after a recoverable fault.
+		if (!haveState && recoverableFaults > 0 &&
+			std::chrono::steady_clock::now() < recoverableRetryAfter)
+			continue;
 		if (formatEvent || !haveState)
 		{
 			SignalDescription signal;
@@ -1246,7 +1319,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 
 			if (!signal.locked)
 			{
-				if (haveState)
+				if (haveState && !validPending)  // Bug hunt 2026-10-17
 				{
 					VideoStateComPtr invalidState = new VideoState();
 					invalidState->valid = false;
@@ -1340,29 +1413,65 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 					stride, frameSize, repackP210 ? 1 : 0);
 
 				buffers.clear();
-				buffers.reserve(MAGEWELL_CAPTURE_BUFFER_COUNT);
-				for (int i = 0; i < MAGEWELL_CAPTURE_BUFFER_COUNT; ++i)
-					buffers.push_back(
-						std::make_shared<MagewellCaptureBuffer>(frameSize,
-							m_memoryBudget));
+				// Bug hunt 2026-10-17: budget exhaustion (renderer still
+				// holding frames of the old format) and a failed start are
+				// recoverable; they used to end the capture thread.
+				try
+				{
+					buffers.reserve(MAGEWELL_CAPTURE_BUFFER_COUNT);
+					for (int i = 0; i < MAGEWELL_CAPTURE_BUFFER_COUNT; ++i)
+						buffers.push_back(
+							std::make_shared<MagewellCaptureBuffer>(frameSize,
+								m_memoryBudget));
+				}
+				catch (const std::exception&)
+				{
+					// MagewellCaptureBuffer throws on budget (or allocation)
+					// failure; recoverableFault logs, rate-limited.
+					recoverableFault("Magewell capture memory budget exhausted");
+					continue;
+				}
 				bufferIndex = 0;
 
 				if (m_sdkInstance->Api().MWStartVideoCapture(channel, captureEvent) != MW_SUCCEEDED)
-					throw std::runtime_error("Failed to restart Magewell capture after format change");
+				{
+					recoverableFault("Failed to restart Magewell capture after format change");
+					continue;
+				}
 				capturing = true;
 
-				if (!PublishVideoState(current, encoding, captureRunToken))
-					continue;
+				// Bug hunt 2026-10-17: after a recoverable fault the valid
+				// state waits for the first complete frame (see validPending).
+				if (!validPending)
+				{
+					if (!PublishVideoState(current, encoding, captureRunToken))
+						continue;
+					lastUnsupportedReason.clear();
+				}
 				haveState = true;
-				lastUnsupportedReason.clear();
 				lastFrameNotification = std::chrono::steady_clock::now();
+			}
+
+			// Bug hunt 2026-10-17: pool starvation is also checked on the
+			// signal poll, so it is reported as such even when no further
+			// frame notification arrives to retry the pool.
+			if (haveState && budgetStarving &&
+				std::chrono::steady_clock::now() - budgetStarvingSince >=
+					std::chrono::seconds(1))
+			{
+				budgetStarving = false;
+				recoverableFault("Magewell capture memory budget exhausted; renderer holds every buffer");
+				continue;
 			}
 
 			if (haveState &&
 				std::chrono::steady_clock::now() - lastFrameNotification >
 					std::chrono::seconds(2))
-				throw std::runtime_error(
-					"Magewell stopped reporting buffered frames for two seconds; capture stopped. Restart required");
+			{
+				// Bug hunt 2026-10-17: was a throw that ended capture.
+				recoverableFault("Magewell stopped reporting buffered frames for two seconds");
+				continue;
+			}
 
 			// audit 2026-10-16: a notification can carry FRAME_BUFFERED together
 			// with a format bit (InfoFrame/AVI refresh, unchanged format). That
@@ -1403,10 +1512,53 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 			}
 		}
 
-		if (!buffer)
+		if (buffer)
+			budgetStarving = false;
+		else
 		{
-			buffers.push_back(std::make_shared<MagewellCaptureBuffer>(
-				frameSize, m_memoryBudget));
+			// Bug hunt 2026-10-17: when the budget cannot cover another buffer
+			// (the renderer holds them all), drop this frame instead of ending
+			// capture; a buffer comes back as soon as the renderer releases one.
+			// A pool held for a whole second is starvation, not a stall: it
+			// invalidates and restarts through recoverableFault.
+			std::shared_ptr<MagewellCaptureBuffer> grown;
+			try
+			{
+				grown = std::make_shared<MagewellCaptureBuffer>(
+					frameSize, m_memoryBudget);
+			}
+			catch (const std::exception& exception)
+			{
+				++droppedForBudget;
+				const auto now = std::chrono::steady_clock::now();
+				if (!budgetStarving)
+				{
+					budgetStarving = true;
+					budgetStarvingSince = now;
+				}
+				else if (now - budgetStarvingSince >= std::chrono::seconds(1))
+				{
+					budgetStarving = false;
+					recoverableFault("Magewell capture memory budget exhausted; renderer holds every buffer");
+					continue;
+				}
+				if (!budgetDropLogged ||
+					now - lastBudgetDropLog >= std::chrono::seconds(10))
+				{
+					DebugLog::Log(
+						"Magewell capture pool cannot grow beyond %u buffers (%s); "
+						"%u frame(s) dropped since last report",
+						static_cast<unsigned int>(buffers.size()),
+						exception.what(), droppedForBudget);
+					budgetDropLogged = true;
+					lastBudgetDropLog = now;
+					droppedForBudget = 0;
+				}
+				++m_missedVideoFrameCount;
+				continue;
+			}
+			budgetStarving = false;
+			buffers.push_back(std::move(grown));
 			buffer = buffers.back().get();
 			bufferIndex = 0;
 			DebugLog::Log("Magewell capture pool expanded to %u buffers",
@@ -1466,15 +1618,24 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		}
 		copyFailures = 0;
 
+		// Bug hunt 2026-10-17: a slow or incomplete copy used to end capture.
+		// recoverableFault stops capture (no late write can follow) before it
+		// drops the pool, the same order the thread's scope exit used.
 		if (WaitForSingleObject(captureEvent, 200) != WAIT_OBJECT_0)
-			throw std::runtime_error("Magewell frame copy timed out; capture stopped to avoid a late write into reused memory");
+		{
+			recoverableFault("Magewell frame copy timed out");
+			continue;
+		}
 
 		MWCAP_VIDEO_CAPTURE_STATUS captureStatus = {};
 		const MW_RESULT captureStatusResult =
 			m_sdkInstance->Api().MWGetVideoCaptureStatus(channel, &captureStatus);
 		if (captureStatusResult != MW_SUCCEEDED ||
 			captureStatus.bFrameCompleted == FALSE)
-			throw std::runtime_error("Magewell frame copy did not complete; capture stopped before reusing its memory");
+		{
+			recoverableFault("Magewell frame copy did not complete");
+			continue;
+		}
 		MWCAP_VIDEO_FRAME_INFO frameInfo = {};
 		if (m_sdkInstance->Api().MWGetVideoFrameInfo(
 			channel, captureStatus.iFrame, &frameInfo) != MW_SUCCEEDED)
@@ -1485,7 +1646,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		frameInfoFailures = 0;
         if(current.interlaced && frameInfo.bInterlaced && !frameInfo.bSegmentedFrame) {
             const auto order=frameInfo.bTopFieldFirst?DisplayMode::FieldOrder::TopFirst:DisplayMode::FieldOrder::BottomFirst;
-            if(current.fieldOrder!=order){current.fieldOrder=order;if(!PublishVideoState(current,encoding,captureRunToken))continue;}
+            if(current.fieldOrder!=order){current.fieldOrder=order;if(!validPending&&!PublishVideoState(current,encoding,captureRunToken))continue;}
         }
 
 		// Convert the card's P210 into the v210 the renderer expects. Done
@@ -1545,7 +1706,19 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		}
 
 
+		// Bug hunt 2026-10-17: the first complete frame after a recoverable
+		// fault is what makes the state valid again.
+		if (validPending)
+		{
+			if (!PublishVideoState(current, encoding, captureRunToken))
+				continue;
+			validPending = false;
+			lastUnsupportedReason.clear();
+			DebugLog::Log("Magewell capture recovered after %u restart(s)",
+				recoverableFaults);
+		}
 		const uint64_t counter = ++m_capturedVideoFrameCount;
+		recoverableFaults = 0;  // Bug hunt 2026-10-17
 
 		VideoFrame videoFrame(
 			buffer->Data(),
@@ -1693,4 +1866,14 @@ ULONG MagewellCaptureDevice::Release(void)
 		delete this;
 
 	return newRefValue;
+}
+
+
+// Bug hunt 2026-10-17: delay before the device restart after recoverable fault
+// number `consecutiveFaults` (1-based): 250 ms doubling, capped at 30 s.
+uint32_t MagewellCaptureDevice::RecoverableFaultBackoffMs(uint32_t consecutiveFaults)
+{
+	const uint32_t shift = consecutiveFaults == 0 ? 0 :
+		(std::min)(consecutiveFaults - 1, 7u);
+	return (std::min)(250u << shift, 30000u);
 }

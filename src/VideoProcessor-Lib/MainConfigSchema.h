@@ -126,7 +126,10 @@ namespace MainConfigSchema
 			// change (settings first).
 			ConfigSchema::Boolean("stats_overlay"),
 			ConfigSchema::Boolean("use_frame_queue"),
-			ConfigSchema::Boolean("queue_auto_reset")
+			ConfigSchema::Boolean("queue_auto_reset"),
+			// Bug hunt 2026-10-17: keep fullscreen intent and retry the
+			// renderer after a failure (false = old behaviour).
+			ConfigSchema::Boolean("renderer_failure_keep_fullscreen")
 		};
 		if (!ConfigSchema::ValidateSection(
 			config, "command_line", commandLineRules, error))

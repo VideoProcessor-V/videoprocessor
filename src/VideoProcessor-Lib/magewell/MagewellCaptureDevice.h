@@ -105,7 +105,7 @@ private:
 
 	std::shared_ptr<MagewellCaptureMemoryBudget> m_budget;
 	std::vector<BYTE> m_data;
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // Bug hunt 2026-10-17: default-initialised for every constructor
 	std::mutex m_referenceMutex;
 	std::shared_ptr<MagewellCaptureBuffer> m_inFlightOwner;
 };
@@ -170,6 +170,10 @@ public:
 	// naming them (ST 2086 commonly sends G,B,R). Assign by chromaticity:
 	// largest x is red, largest y of the remaining two is green, the last is
 	// blue. Outputs the source index of each primary.
+	// Bug hunt 2026-10-17: restart delay after recoverable capture fault
+	// number consecutiveFaults (1-based): 250 ms doubling, capped at 30 s.
+	static uint32_t RecoverableFaultBackoffMs(uint32_t consecutiveFaults);
+
 	static void OrderPrimariesByChromaticity(const double x[3], const double y[3],
 		int& redIndex, int& greenIndex, int& blueIndex);
 
@@ -280,6 +284,9 @@ private:
 	std::atomic<double> m_hardwareLatencyMs{ 0 };
 	std::atomic<uint64_t> m_capturedVideoFrameCount{ 0 };
 	std::atomic<uint64_t> m_missedVideoFrameCount{ 0 };
+	// Bug hunt 2026-10-17: last HDR InfoFrame logged; logged again only on change.
+	mutable std::mutex m_hdrInfoFrameLogMutex;
+	mutable std::string m_lastHdrInfoFrameLog;
 	// Shared with every buffer so renderer-held frames remain charged after a
 	// format change or Stop. This cap applies only to Magewell capture memory.
 	std::shared_ptr<MagewellCaptureMemoryBudget> m_memoryBudget =
@@ -289,5 +296,5 @@ private:
 		CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN };
 	ICaptureDeviceCallback* m_callback = nullptr;
 
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // Bug hunt 2026-10-17: default-initialised for every constructor
 };

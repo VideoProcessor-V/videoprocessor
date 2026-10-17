@@ -299,6 +299,14 @@ private:
 
 		auto lastFlushTime = std::chrono::steady_clock::now();
 		size_t messagesSinceFlush = 0;
+		// Bug hunt 2026-10-17: size of the active log, for the rollover.
+		unsigned long long bytesWritten = 0;
+		{
+			WIN32_FILE_ATTRIBUTE_DATA data = {};
+			if (GetFileAttributesExA(logPath.c_str(), GetFileExInfoStandard, &data))
+				bytesWritten = (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) |
+					data.nFileSizeLow;
+		}
 
 		while (true)
 		{
@@ -330,9 +338,34 @@ private:
 					
 					file << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " | " << msg.message << "\n";
 					messagesSinceFlush++;
+					bytesWritten += msg.message.size() + 23;  // timestamp, separator, newline
+
+					// Bug hunt 2026-10-17: in-session size rollover (see
+					// DebugLogRetention::RollOver). Enhanced logging keeps its
+					// no-rotation forensic contract.
+					if (bytesWritten >= DebugLogRetention::ROLLOVER_BYTES &&
+						!GetEnhancedLoggingEnabled().load(std::memory_order_acquire))
+					{
+						file.flush();
+						file.close();
+						std::vector<std::string> diagnostics;
+						DebugLogRetention::RollOver(
+							logPath, DebugLogRetention::ROLLOVER_KEEP, diagnostics);
+						file.open(logPath, std::ios::app);
+						bytesWritten = 0;
+						messagesSinceFlush = 0;
+						lastFlushTime = std::chrono::steady_clock::now();
+						if (file.is_open())
+						{
+							for (const std::string& diagnostic : diagnostics)
+								file << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") <<
+									" | " << diagnostic << "\n";
+							file.flush();
+						}
+					}
 
 					// Flush periodically to ensure data is written
-					if (messagesSinceFlush >= BATCH_SIZE)
+					if (file.is_open() && messagesSinceFlush >= BATCH_SIZE)
 					{
 						file.flush();
 						messagesSinceFlush = 0;

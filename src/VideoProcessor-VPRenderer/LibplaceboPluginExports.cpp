@@ -19,14 +19,24 @@ VideoProcessorLibplaceboGetApiVersion()
 extern "C" __declspec(dllexport) int __cdecl
 VideoProcessorLibplaceboSettingsFingerprintForTest(const char* configPath, char* out, int size)
 {
-	const std::string fingerprint = LibplaceboRendererSettingsFingerprintForTest(configPath);
-	if (out && size > 0)
+	// Bug hunt 2026-10-17: no C++ exception may cross the DLL's C ABI.
+	try
 	{
-		const size_t n = (std::min)(fingerprint.size(), static_cast<size_t>(size - 1));
-		memcpy(out, fingerprint.data(), n);
-		out[n] = 0;
+		const std::string fingerprint = LibplaceboRendererSettingsFingerprintForTest(configPath);
+		if (out && size > 0)
+		{
+			const size_t n = (std::min)(fingerprint.size(), static_cast<size_t>(size - 1));
+			memcpy(out, fingerprint.data(), n);
+			out[n] = 0;
+		}
+		return static_cast<int>(fingerprint.size());
 	}
-	return static_cast<int>(fingerprint.size());
+	catch (...)
+	{
+		if (out && size > 0)
+			out[0] = 0;
+		return 0;
+	}
 }
 
 
@@ -42,19 +52,21 @@ VideoProcessorLibplaceboCreateRenderer(
 	const char* rendererConfigPath,
 	VideoProcessorLibplaceboLogSink logSink)
 {
-	DebugLog::SetExternalSink(logSink);
-	DebugLog::Log("VP build identity: module=renderer commit=%ls branch=%ls dirty=%d build=%ls",
-		VERSION_URL, VERSION_BRANCH, VERSION_DIRTY ? 1 : 0, VERSION_DESCRIBE);
-	ConfigFile::SetRendererConfigurationPath(
-		rendererConfigPath ? rendererConfigPath : "");
-	if (!callback)
-	{
-		DebugLog::Log("libplacebo plugin factory rejected a null renderer callback");
-		return nullptr;
-	}
-
+	// Bug hunt 2026-10-17: the set-up below (logging, configuration path) is
+	// inside the try as well, so no C++ exception can cross the C ABI.
 	try
 	{
+		DebugLog::SetExternalSink(logSink);
+		DebugLog::Log("VP build identity: module=renderer commit=%ls branch=%ls dirty=%d build=%ls",
+			VERSION_URL, VERSION_BRANCH, VERSION_DIRTY ? 1 : 0, VERSION_DESCRIBE);
+		ConfigFile::SetRendererConfigurationPath(
+			rendererConfigPath ? rendererConfigPath : "");
+		if (!callback)
+		{
+			DebugLog::Log("libplacebo plugin factory rejected a null renderer callback");
+			return nullptr;
+		}
+
 		return new LibplaceboVideoRenderer(
 			*callback,
 			rendererGeneration,
@@ -96,5 +108,13 @@ VideoProcessorLibplaceboConfigureAnalysisDiagnosticSink(void* context,
     AnalysisDiagnosticTrace::RecordSink records, AnalysisDiagnosticTrace::FrameSink frames,
     AnalysisDiagnosticTrace::FrameCaptureActiveCallback active)
 {
-    AnalysisDiagnosticTrace::SetExternalSinks(context,records,frames,active);
+    // Bug hunt 2026-10-17: no C++ exception may cross the DLL's C ABI.
+    try
+    {
+        AnalysisDiagnosticTrace::SetExternalSinks(context,records,frames,active);
+    }
+    catch (...)
+    {
+        DebugLog::Log("libplacebo plugin analysis diagnostic sink configuration failed");
+    }
 }
