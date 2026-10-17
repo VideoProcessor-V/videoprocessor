@@ -12816,7 +12816,9 @@ struct LibplaceboVideoRenderer::Impl
 			ii.lowLatency = in.lowLatency;
 			ii.interlaced = in.interlaced;
 			ii.nativeRgb = nativeRgb || dejudderRgbLuma != nullptr;   // RGB holds (owner)
-			ii.subtitleComposed = dejudderSubtitleComposed;           // the last frame's; the extras check again
+			// A subtitle-composed picture holds in the extras (no source planes to interpolate), per
+			// frame: not decided here, so a cue does not release and rebuild the matcher.
+			ii.subtitleComposed = false;
 			ii.haveNext = in.haveNext && in.nextMatches;
 			interpolationDecision = InterpolationPolicy::Decide(ii);
 			interpolating = interpolationDecision.Interpolates();

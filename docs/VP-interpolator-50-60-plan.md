@@ -173,3 +173,118 @@ adds noise.
 still pass unchanged. Add: for each cause, until a fresh contiguous pair arrives, the extras hold, the
 mask is not installed, the grain field is not set, the next-frame VPVEC is not bound and `Take` is not
 called; a missed-capture gap resets VP deband's hold.
+
+
+## Built (2026-10-16, branch interp-5060)
+
+Commits on `interp-5060` (from f25d4159). CPU tests and the Config tests run; the GPU and harness
+tests are written and not run here (VP_TEST_GPU=hardware).
+
+### Owner decisions applied as defaults (open for confirmation)
+
+| Question | Default applied |
+|---|---|
+| 1. Per-vsync synthesis first? | No: Stage A (fill the refreshes that would repeat a frame) is built; Stage B (ratios below 1) is not. |
+| 2. Interpolate only at non-integer ratios? | `interpolation: off` by default; `auto` = non-integer ratio only; `always` = also whole ratios above 1, video class only. |
+| 3. Hold or blend? | `interpolation_fallback: hold` (default) or `blend`; a cut always holds the nearest frame whole. |
+| 4. Gap fill? | `interpolation_fill_gaps: off`; the key is validated and parsed but nothing is built (the editor control is disabled). |
+| 5. Near-1 ratios? | Within 0.5% of a whole number (relative) counts as whole: 59.94 on 60 and 60 on 59.94 pass through (drift correction). |
+| 6. Generalise IsFilmLike? | `source_class: legacy` (default) or `measured` (below). |
+| 7. NvFRUC? | Not included. |
+| 8. Subtitle-composed and RGB? | Hold. RGB never interpolates; a composed picture holds per frame in the extras. |
+| Low latency | Never; no B queued = A (today's output); never waits. |
+| Smooth motion | Exclusive: smooth motion selected or mixing = no interpolation. |
+| 50/60 at the display's rate | Untouched (whole ratio). |
+
+### Step 1: MotionValidity wired
+
+As in "Step 1 wiring" above, with these decisions:
+- **Wired causes:** Resync (Reset), QueueReset (ResetLiveQueue), Gap (dequeued `gapBefore`; the
+  gap's own cause kept for the log), DriftDrop (the render loop's drop, and `NoteKept` for holes
+  nothing reported), SmoothMotionMix (engine and mixing changes), SourceFormatChange (a dequeued
+  frame's valid state differs from the last one's; releases).
+- **RebaseChange:** not a motion invalidation (the field belongs to the native frame); a factor
+  change calls `VpDebander::ForgetHold()` only, so this frame's estimate and consumers are unchanged.
+- **Not wired:** MotionSourceChange (engine vs matcher switches per pair by design, the owner's
+  "switching is smooth"; the source alternates with store hits and misses) and SettingsChange
+  (`SetSettings` already resets the state a setting makes stale).
+- **Consumers:** extras (hold with the cause), occlusion mask slots (`dejudderMaskEpoch`), grain
+  field, residual / CNN hold motion, VP deband field and hold (`ForgetHold` on every invalidation),
+  next-frame VPVEC (`ConsumerGate`), the estimate and the producer's `Take` (adjacent pairs of the
+  current epoch only).
+- **Producer:** `Submit(..., breakBefore)` for gaps and film updates; pairs only for adjacent
+  sequences; the store stays keyed on `StreamGeneration()` (step 1b, the full fold, not done).
+
+### Step 2: `InterpolationPolicy.h` (pure)
+
+Reasons in check order: Off, SmoothMotion, LowLatency, Interlaced, UnknownRates, FilmToDejudder,
+FilmIntegerRatio (film at the de-judder's even cadence), IntegerRatio (whole, near-1 or a whole
+decimation such as 120p on 60 Hz), RatioBelowOne (Stage B not built), NativeRgb, SubtitleComposed,
+NoNextFrame, Interpolate. A film-like source the de-judder has no strength for may be interpolated in
+auto at a non-integer ratio (25p inside a 50 Hz stream on 60 Hz, through the pulldown film clock).
+
+`source_class: measured`: film-like when the content rate came from a pulldown lock, or the source
+owns at least two refreshes per frame (2 minus the cadence tolerance); otherwise video. No fixed
+rates. On a 120 Hz display this makes 50/60p film-like (see the open questions). With interpolation
+on and measured, 48p on 60 Hz becomes video and is interpolated instead of de-juddered (one or the
+other per frame, never both).
+
+### Step 3: `FrameInterpolator` (GPU)
+
+`src/VideoProcessor-Lib/vprenderer/FrameInterpolator.*`. A, B, the A->B block field (the matcher's,
+engine-seeded or from the producer), the frame trust, the optional sub-field and B's occlusion mask, a
+phase t. t <= 0 / t >= 1 return A's / B's planes (nothing dispatched). A trusted position takes the
+field's own rule (`FieldVectorGlsl`, one fixed-point step to the content there at t) and blends A at
+p - t v with B at p + (1 - t) v by (1 - t, t); where B's occlusion mask marks B's content there as new,
+the A sample alone. Untrusted: hold (nearest frame's own pixel) or blend. A cut: the nearest frame
+whole. The outputs have the input planes' formats and sizes: re-base, VP deband, scaling, tone mapping
+and the dither run on them unchanged; no 8-bit step, no clamping (BTB / WTW kept). The blend is in the
+signal domain (PQ / gamma coded), as libplacebo's frame mixer does.
+
+### Step 4: Stage A presentation
+
+When the policy interpolates, the estimate runs for the video-rate source (the de-judder's cadence
+rules skipped; the plane and next-frame checks kept) and the extras machinery (vsync wait, latency
+floor, `PlanExtra`, B never delayed) presents interpolated pictures at the refresh's true phase
+instead of repeating A (exact k/N at a whole ratio in `always`). Source path only: the rendered-warp
+cache is not armed. The status line reads "interpolating (hold|blend), ratio ..."; the log has
+"Interpolation: <reason> (...)" on changes and `interpolated=1` on each extra line. A's own refresh
+still shows A (phase 0 .. 1/ratio), as with the de-judder; Stage B's per-vsync model would remove that.
+
+Not built: **Stage B** (ratios below 1, 60p on 50 Hz). The render loop presents once per dequeued
+source frame plus extras; below 1 it must render one picture per vsync from (A, B) at the vsync's
+phase and skip source frames: a vsync-driven loop over the queue (the `TemporalRenderer` timeline
+already produces the output times). Its own piece of work, after Stage A has run on the 3090.
+
+### Step 5: vectors
+
+The interpolator reads the estimate's field: the producer's pair when valid (`Take`), else the engine
+at render time, else the matcher. The producer starts with the estimate, off in low latency; an
+interpolating profile asks for the 4-ahead queue like the de-judder (`UnifiedProfileRuntime`
+lookAheadQueueFrames).
+
+### Step 6: config
+
+`interpolation`, `interpolation_fallback`, `interpolation_fill_gaps`, `source_class`: validated
+(`RendererProfileConfig.h`, input group), parsed, in the settings fingerprint, the live-apply delta and
+the settings dump. Config: Rendering page, beside "Motion source", exclusive buttons (Off / Auto /
+Always; Hold / Blend), Film or video, the disabled gap fill, tooltips, defaults table.
+
+### Tests
+
+- CPU: `InterpolationPolicyTests` (9: ratio sweeps for auto / always / film / measured, exclusions,
+  phase timeline), `MotionValidityTests` (10), `ConfigurationReadCacheTests::InterpolationKeysValidateAndWantTheLookAhead`.
+- Config: `interpolation buttons`.
+- GPU (written, not run): `LibplaceboLutParserTests::Interpolator*` (T0IsAExactlyT1IsB,
+  PanLandsAtTheTruePhase, PanLandsAtTheTruePhaseWithTheMatchersField, OcclusionHoleHoldsNearest,
+  CutHoldsWholeFrame, TenBitAndPqRampKeepPrecision).
+- Harness (written, not run): `RendererCaptureHarnessTests::Interpolation*` (RunsAtAMeasuredRateMismatch,
+  LowLatencyFromTheFirstFrame, StreamFaultsFallBackAndRecover, IsExclusiveWithSmoothMotion,
+  OnScreenFillsTheRepeatRefreshes), plus the step-1 proofs `NativeAndNewSettingsOffArePixelIdentical`
+  and `StreamFaultsKeepTheDejudderSafeAndRecovering`.
+
+### Remaining
+
+Stage B; gap fill (build order step 6); the sigma-delta's vectors on interpolated pictures come from
+the de-judder's vector-field pass (taste settings such as R-B's object strength apply there, not the
+true motion); step 1b (the store keyed on the epoch); the chain-gate matrix axis; the 3090 timing.
