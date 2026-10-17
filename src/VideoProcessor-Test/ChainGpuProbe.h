@@ -737,7 +737,7 @@ namespace ChainGpuProbe
 					levels[f], gain, grey, light, 100.0 * (light / reference502 - 1.0));
 				outcome.report += line;
 				if (std::abs(light / reference502 - 1.0) > 0.02)
-					return fail("LED drive: the light changed with the LED level through the chain");
+					return fail("Dynamic Drive: the light changed with the LED level through the chain");
 				std::string rampLine = "LED " + std::to_string(static_cast<int>(levels[f])) + " below black:";
 				for (size_t i = 0; i < 3; ++i)
 				{
@@ -747,11 +747,11 @@ namespace ChainGpuProbe
 					// reserved timing codes); 7.360 goes on to 0. Either is accepted there.
 					const bool belowLegal = expected[i] < 4.0;
 					if (got >= 64 || (belowLegal ? got > 4 : std::abs(got - expected[i]) > 2.0))
-						return fail("LED drive: below black " + std::to_string(ramp[i]) + " came out " + std::to_string(got));
+						return fail("Dynamic Drive: below black " + std::to_string(ramp[i]) + " came out " + std::to_string(got));
 				}
 				outcome.report += rampLine + "\n";
 				if (disabled())
-					return fail("LED drive: a hook was disabled");
+					return fail("Dynamic Drive: a hook was disabled");
 			}
 			SetParam(led->hook, "gain", 1.0);
 		}

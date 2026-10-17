@@ -20710,7 +20710,7 @@ struct LibplaceboVideoRenderer::Impl
         if (boostExponent != lastLoggedBoostExponent)
         {
             lastLoggedBoostExponent = boostExponent;
-            DebugLog::Log("LED drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
+            DebugLog::Log("Dynamic Drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
                 boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
         }
         if (led || boostExponent != 1.0 || ledShadowLift.load(std::memory_order_acquire) > 0.0)

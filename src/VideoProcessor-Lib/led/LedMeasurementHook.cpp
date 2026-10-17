@@ -206,7 +206,7 @@ if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
 			ring[slot] = pl_buf_create(gpu, &bufParams);
 			if (!ring[slot])
 			{
-				DebugLog::Log("LED drive: cannot create the measurement buffer");
+				DebugLog::Log("Dynamic Drive: cannot create the measurement buffer");
 				pl_hook_res failed{};
 				failed.failed = true;
 				return failed;
@@ -244,7 +244,7 @@ if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
 		}
 		if (offset != sizeof(RawMeasurement))
 		{
-			DebugLog::Log("LED drive: measurement buffer layout mismatch (%zu bytes)", offset);
+			DebugLog::Log("Dynamic Drive: measurement buffer layout mismatch (%zu bytes)", offset);
 			pl_hook_res failed{};
 			failed.failed = true;
 			return failed;
@@ -315,8 +315,8 @@ if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
 			std::string("#define FULL_PEAK 1\n") + MASK_HEADER,
 			std::string("#define FULL_PEAK 1\n#define GRAIN 1\n") + MASK_HEADER + GRAIN_HEADER };
 		pl_custom_shader custom{};
-		custom.description = useGrain ? "VideoProcessor LED drive measurement (grain-suppressed highlights)" :
-			"VideoProcessor LED drive measurement";
+		custom.description = useGrain ? "VideoProcessor Dynamic Drive measurement (grain-suppressed highlights)" :
+			"VideoProcessor Dynamic Drive measurement";
 		custom.header = headers[(fullPeak ? 2 : 0) + (useGrain ? 1 : 0)].c_str();
 		custom.body = BODY;
 		custom.input = PL_SHADER_SIG_NONE;

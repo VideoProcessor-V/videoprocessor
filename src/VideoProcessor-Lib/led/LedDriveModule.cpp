@@ -340,12 +340,12 @@ namespace LedDrive
 					driver->QueueSequenceNow(CustomDimUp(led), led.ftbStepMs);
 				fadeToBlack = FadeToBlack::Normal;
 				blackSinceMs = -1.0;
-				DebugLog::Log("LED drive: fade to black - custom dim off (settings changed)");
+				DebugLog::Log("Dynamic Drive: fade to black - custom dim off (settings changed)");
 			}
 		}
 		++configGeneration;
 		wake.notify_all();
-		DebugLog::Log("LED drive: settings applied to the running module (mode=%s); the LED carries on from its current level",
+		DebugLog::Log("Dynamic Drive: settings applied to the running module (mode=%s); the LED carries on from its current level",
 			ModeName(led.mode));
 		return true;
 	}
@@ -430,14 +430,14 @@ namespace LedDrive
 		if (state == lookaheadWarnState) return;
 		const char* who = led.mode == Mode::Script ? "the script copy" : "compensate";
 		if (state == 1)
-			pendingWarning = std::string("LED drive: WARNING - ") + who + " looks ahead and " +
+			pendingWarning = std::string("Dynamic Drive: WARNING - ") + who + " looks ahead and " +
 				std::to_string(lookaheadDepth) + " frame(s) are queued, but no statistics come from them: "
 				"every cut and exit from black is reactive";
 		else if (state == 0)
-			pendingWarning = std::string("LED drive: look-ahead over ") + std::to_string(LookaheadDepthLocked()) +
+			pendingWarning = std::string("Dynamic Drive: look-ahead over ") + std::to_string(LookaheadDepthLocked()) +
 				" queued frame(s) (" + who + ")";
 		else if (state == 2 && lookaheadWarnState >= 0)
-			pendingWarning = std::string("LED drive: no frames queued ahead (Low Latency or a short queue): ") + who +
+			pendingWarning = std::string("Dynamic Drive: no frames queued ahead (Low Latency or a short queue): ") + who +
 				" reacts to the frame on screen";
 		lookaheadWarnState = state;
 	}
@@ -959,8 +959,8 @@ namespace LedDrive
 				fadeToBlack = FadeToBlack::Deep;
 				HoldContrastLocked();
 				pendingLog = led.ftbCustomDim == FtbCustomDim::Turns ?
-					"LED drive: fade to black - custom dim on, colours taking turns" :
-					"LED drive: fade to black - custom dim on, colours together";
+					"Dynamic Drive: fade to black - custom dim on, colours taking turns" :
+					"Dynamic Drive: fade to black - custom dim on, colours together";
 				pendingLogSent = true;
 			}
 			break;
@@ -971,7 +971,7 @@ namespace LedDrive
 				fadeToBlack = FadeToBlack::Leaving;
 				// Then the LED straight to the coming scene's level.
 				driver->SetLightJump(compensator.Light());
-				pendingLog = "LED drive: fade to black - picture returning, custom dim off";
+				pendingLog = "Dynamic Drive: fade to black - picture returning, custom dim off";
 				pendingLogSent = true;
 			}
 			break;
@@ -1115,14 +1115,14 @@ namespace LedDrive
 		// Retired source (owner 2026-10-15): an older file naming it runs
 		// VP's own copy of the script.
 		if (startLed.pythonSourceRetired)
-			DebugLog::Log("LED drive: command_source: python / mode: listen is retired; this configuration runs VP's "
+			DebugLog::Log("Dynamic Drive: command_source: python / mode: listen is retired; this configuration runs VP's "
 				"copy of the script (internal_script), which drives the port itself");
 		std::unique_ptr<IProjectorDriver> opened = CreateProjectorDriver(protocol, startProjector, portFactory);
 		std::string error;
 		bool driving = protocol != "none";
 		if (!opened->Open(error))
 		{
-			DebugLog::Log("LED drive: %s; continuing as a dry run", error.c_str());
+			DebugLog::Log("Dynamic Drive: %s; continuing as a dry run", error.c_str());
 			opened = CreateProjectorDriver("none", startProjector, portFactory);
 			opened->Open(error);
 			driving = false;
@@ -1134,11 +1134,11 @@ namespace LedDrive
 		BringToKnownState(*opened, startLed.ledCeiling, driving || startLed.ftbCustomDim != FtbCustomDim::Off,
 			startLed.mode == Mode::Script);
 		const LightRange range = opened->QueryLightRange();
-		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f led_latency=%d ms",
+		DebugLog::Log("Dynamic Drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f led_latency=%d ms",
 			ModeName(startLed.mode), driving ? protocol.c_str() : "none (dry run)", startLed.tickMs, startLed.gammaBoost,
 			startProjector.ledLatencyMs);
 		if (startFlux.Linear())
-			DebugLog::Log("LED drive: no flux_table; assuming flux proportional to LPW1 (lpw_max=%d%s)",
+			DebugLog::Log("Dynamic Drive: no flux_table; assuming flux proportional to LPW1 (lpw_max=%d%s)",
 				range.known ? range.maximum : startLed.ledCeiling, range.known ? "" : ", from led_ceiling");
 		{
 			std::lock_guard<std::mutex> guard(mutex);
@@ -1210,7 +1210,7 @@ namespace LedDrive
 			if (resendLogTime == std::chrono::steady_clock::time_point{} ||
 				now - resendLogTime >= std::chrono::seconds(10))
 			{
-				DebugLog::Log("LED drive: re-sending %s %d (the last write failed; %d re-send(s) since the last report)",
+				DebugLog::Log("Dynamic Drive: re-sending %s %d (the last write failed; %d re-send(s) since the last report)",
 					mnemonic, value, resendsNotLogged);
 				resendLogTime = now;
 				resendsNotLogged = 0;
@@ -1299,7 +1299,7 @@ namespace LedDrive
 					if (compensating && applyGain)
 					{
 						RestoreIdleCompensateLocked();
-						DebugLog::Log("LED drive: no video for %d s; LED back to %d, CNTR 50 (led_idle_restore_s)",
+						DebugLog::Log("Dynamic Drive: no video for %d s; LED back to %d, CNTR 50 (led_idle_restore_s)",
 							current.idleRestoreS, led.ledCeiling);
 					}
 					else if (current.mode == Mode::Script && applyGain)
@@ -1356,7 +1356,7 @@ namespace LedDrive
 				bool written = false;
 				const bool ok = driver->SendScript("CNTR", 50, &written);
 				resendContrast = written ? -1 : 50;
-				DebugLog::Log("LED drive: left compensate; contrast set to 50%s", ok ? "" : " (not confirmed)");
+				DebugLog::Log("Dynamic Drive: left compensate; contrast set to 50%s", ok ? "" : " (not confirmed)");
 			}
 			if (have) idleRetries = 0;
 			if (restoreScriptIdle)
@@ -1395,11 +1395,11 @@ namespace LedDrive
 				}
 				sendsDone = std::chrono::steady_clock::now();
 				if (idleRetries == 0)
-					DebugLog::Log("LED drive: no video for %d s; LED back to %d%s, CNTR 50%s (led_idle_restore_s)",
+					DebugLog::Log("Dynamic Drive: no video for %d s; LED back to %d%s, CNTR 50%s (led_idle_restore_s)",
 						current.idleRestoreS, current.ledCeiling, light ? "" : " (not confirmed)",
 						contrast ? "" : " (not confirmed)");
 				else if (!retry)
-					DebugLog::Log("LED drive: idle restore written after %d more attempt(s) (led_idle_restore_s)",
+					DebugLog::Log("Dynamic Drive: idle restore written after %d more attempt(s) (led_idle_restore_s)",
 						idleRetries);
 				idleRetries = retry ? idleRetries + 1 : 0;
 			}
@@ -1417,7 +1417,7 @@ namespace LedDrive
 					// (compensate assumes 50; with cntr_assist off it never sends
 					// CNTR itself). A newer compensate CNTR replaces it.
 					if (!written) driver->SetContrastAsync(50);
-					DebugLog::Log("LED drive: left script mode; contrast set to 50%s", ok ? "" : " (not confirmed)");
+					DebugLog::Log("Dynamic Drive: left script mode; contrast set to 50%s", ok ? "" : " (not confirmed)");
 					controller.Reset(controller.Light(), 50);
 					contrastDriven = false;
 				}
@@ -1459,7 +1459,7 @@ namespace LedDrive
 						std::lock_guard<std::mutex> guard(mutex);
 						veil = gain.veil;
 					}
-					DebugLog::Log("LED drive: picture only (RS-232 port not opened; veil %.2f)", veil);
+					DebugLog::Log("Dynamic Drive: picture only (RS-232 port not opened; veil %.2f)", veil);
 					lastLogTime = now;
 				}
 			}
@@ -1594,7 +1594,7 @@ namespace LedDrive
 					if (resendContrast >= 0)
 						logResend("CNTR", controller.Contrast());
 					else
-						DebugLog::Log("LED drive: CNTR %d sent (its schedule was cut short by new settings)",
+						DebugLog::Log("Dynamic Drive: CNTR %d sent (its schedule was cut short by new settings)",
 							controller.Contrast());
 					const bool completing = resendContrast < 0;
 					completeContrast = -1;
