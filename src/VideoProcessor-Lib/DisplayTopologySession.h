@@ -57,17 +57,22 @@ namespace DisplayTopologySession
 		bool interlaced = false;
 	};
 
-	inline bool IsMaximumModeCandidate(const DisplayModeCandidate& mode)
+	// fixes: [general] capture_display_fixes (CaptureDisplayFixes.h); false = the
+	// earlier rules (interlaced accepted; refresh first, then area).
+	inline bool IsMaximumModeCandidate(const DisplayModeCandidate& mode, bool fixes = true)
 	{
 		return mode.bitsPerPixel >= 32 && mode.width != 0 && mode.height != 0 &&
-			mode.refreshHz != 0 && !mode.interlaced;
+			mode.refreshHz != 0 && (!fixes || !mode.interlaced);
 	}
 
 	inline bool DisplayModeRanksAbove(const DisplayModeCandidate& candidate,
-		const DisplayModeCandidate& best)
+		const DisplayModeCandidate& best, bool fixes = true)
 	{
 		const uint64_t area = static_cast<uint64_t>(candidate.width) * candidate.height;
 		const uint64_t bestArea = static_cast<uint64_t>(best.width) * best.height;
+		if (!fixes)
+			return candidate.refreshHz > best.refreshHz ||
+				(candidate.refreshHz == best.refreshHz && area > bestArea);
 		return area > bestArea ||
 			(area == bestArea && candidate.refreshHz > best.refreshHz);
 	}

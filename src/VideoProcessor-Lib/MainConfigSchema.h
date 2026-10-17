@@ -126,7 +126,8 @@ namespace MainConfigSchema
 			// Restore switch (bug hunt 2026-10-17, default on): Magewell
 			// recoverable faults restart the device internally (false = end
 			// capture, as before).
-			ConfigSchema::Boolean("magewell_recover_faults")
+			ConfigSchema::Boolean("magewell_recover_faults"),
+			ConfigSchema::Boolean("capture_display_fixes")   // restore switch, post-merge audit 2026-10-17
 		};
 	}
 

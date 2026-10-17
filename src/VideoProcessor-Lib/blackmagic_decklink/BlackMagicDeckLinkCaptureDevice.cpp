@@ -22,6 +22,7 @@
 #include <WallClock.h>
 
 #include "BlackMagicDeckLinkCaptureDevice.h"
+#include <CaptureDisplayFixes.h>
 
 
 static const timingclocktime_t DECKLINK_CLOCK_MAX_TICKS_SECOND = 1000000LL;  // us
@@ -1250,7 +1251,8 @@ bool BlackMagicDeckLinkCaptureDevice::SendVideoStateCallback(
 			videoState->eotf = TranslateEOTF(m_videoEotf);
 			videoState->colorspace = Translate(
 				(BMDColorspace)m_videoColorSpace,
-				videoState->displayMode->FrameHeight());
+				videoState->displayMode->FrameHeight(),
+				CaptureDisplayFixes::Enabled());   // capture_display_fixes
 			videoState->invertedVertical = m_videoInvertedVertical;
 			videoState->videoFrameEncoding = Translate(m_bmdPixelFormat, videoState->colorspace);
 

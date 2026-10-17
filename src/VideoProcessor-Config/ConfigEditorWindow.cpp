@@ -5432,8 +5432,8 @@ QWidget* ConfigEditorWindow::createStartupPage()
         QStringLiteral("general"), QStringLiteral("renderer_failure_keep_fullscreen"), true);
     keepFullscreen->setToolTip(QStringLiteral(
         "On (default): when the renderer fails, VP keeps fullscreen and retries it by itself (after 2 s, 5 s, "
-        "10 s, then every 30 s). Off: the earlier behaviour - fullscreen is left and the renderer waits for a "
-        "manual restart."));
+        "10 s, then every 30 s, at most 10 times; then Restart Renderer). Off: the earlier behaviour - "
+        "fullscreen is left and the renderer waits for a manual restart."));
     behaviorLayout->addWidget(keepFullscreen);
     // Restore switch 2026-10-17: [general] magewell_recover_faults.
     auto* magewellRecover = bindCheckField(QStringLiteral("Magewell: recover from capture faults (fix under test)"),
@@ -5443,6 +5443,15 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "memory budget, a slow frame copy) holds the video invalid and restarts the device by itself. Off: the "
         "earlier behaviour - capture stops and needs a manual Restart."));
     behaviorLayout->addWidget(magewellRecover);
+    // Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
+    auto* captureDisplayFixes = bindCheckField(QStringLiteral("Capture / display fixes in Bill's code (fix under test)"),
+        QStringLiteral("general"), QStringLiteral("capture_display_fixes"), true);
+    captureDisplayFixes->setToolTip(QStringLiteral(
+        "On (default): the target-only full-screen session picks the monitor's largest mode first (then the "
+        "highest refresh) and never an interlaced one; a DeckLink Rec.601 source is recognised by its active "
+        "lines (486 / 480 NTSC, 576 PAL). Off: Bill's earlier behaviour - highest refresh first, interlaced "
+        "allowed, 486 lines left without a colour space and 576 on the analog PAL entry."));
+    behaviorLayout->addWidget(captureDisplayFixes);
     auto* persistSelection = bindCheckField(QStringLiteral("Keep key-selected profiles after restart"),
         QStringLiteral("general"), QStringLiteral("persist_profile_selection"), false);
     persistSelection->setToolTip(QStringLiteral(

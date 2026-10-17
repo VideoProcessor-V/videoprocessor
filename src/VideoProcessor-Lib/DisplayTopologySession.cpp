@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include "DisplayTopologySession.h"
+#include "CaptureDisplayFixes.h"
 
 #include <DebugLog.h>
 
@@ -410,6 +411,8 @@ bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 	}
 	DEVMODEW best = {};
 	bool found = false;
+	// capture_display_fixes (post-merge audit 2026-10-17): off = the earlier ranking.
+	const bool fixes = CaptureDisplayFixes::Enabled();
 	// Bug hunt 2026-10-17: area first, then refresh; interlaced skipped
 	// (DisplayTopologySession::DisplayModeRanksAbove).
 	const auto describe = [](const DEVMODEW& mode)
@@ -429,9 +432,9 @@ bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 		if (!EnumDisplaySettingsExW(device.c_str(), index, &candidate, 0))
 			break;
 		const DisplayTopologySession::DisplayModeCandidate mode = describe(candidate);
-		if (!DisplayTopologySession::IsMaximumModeCandidate(mode))
+		if (!DisplayTopologySession::IsMaximumModeCandidate(mode, fixes))
 			continue;
-		if (!found || DisplayTopologySession::DisplayModeRanksAbove(mode, describe(best)))
+		if (!found || DisplayTopologySession::DisplayModeRanksAbove(mode, describe(best), fixes))
 		{
 			best = candidate;
 			found = true;

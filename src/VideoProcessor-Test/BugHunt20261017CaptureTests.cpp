@@ -66,15 +66,15 @@ namespace VideoProcessorTest
 
 		// The ranking loop of ApplyMaximumMode, over plain candidates.
 		DisplayTopologySession::DisplayModeCandidate Best(
-			const std::vector<DisplayTopologySession::DisplayModeCandidate>& modes)
+			const std::vector<DisplayTopologySession::DisplayModeCandidate>& modes, bool fixes = true)
 		{
 			DisplayTopologySession::DisplayModeCandidate best;
 			bool found = false;
 			for (const auto& mode : modes)
 			{
-				if (!DisplayTopologySession::IsMaximumModeCandidate(mode))
+				if (!DisplayTopologySession::IsMaximumModeCandidate(mode, fixes))
 					continue;
-				if (!found || DisplayTopologySession::DisplayModeRanksAbove(mode, best))
+				if (!found || DisplayTopologySession::DisplayModeRanksAbove(mode, best, fixes))
 				{
 					best = mode;
 					found = true;
@@ -150,6 +150,28 @@ namespace VideoProcessorTest
 			Assert::ExpectException<std::runtime_error>([]() {
 				Translate(bmdColorspaceRec601, 720);
 			});
+		}
+
+		// Post-merge audit 2026-10-17: capture_display_fixes off restores Bill's earlier
+		// ranking (refresh first, interlaced accepted) and Rec.601 mapping.
+		TEST_METHOD(CaptureDisplayFixesOffRestoresTheEarlierBehaviour)
+		{
+			const auto best = Best({
+				Mode(1920, 1080, 60),
+				Mode(1280, 720, 144),
+				Mode(3840, 2160, 60) }, false);
+			Assert::AreEqual<uint32_t>(1280, best.width, L"off: the highest refresh first");
+			Assert::AreEqual<uint32_t>(144, best.refreshHz);
+			const auto interlaced = Best({ Mode(1920, 1080, 60, true), Mode(1920, 1080, 50) }, false);
+			Assert::IsTrue(interlaced.interlaced, L"off: interlaced accepted");
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 486, false) == ColorSpace::UNKNOWN,
+				L"off: the card's brief 486-line mode has no colour space (no exception)");
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 525, false) == ColorSpace::REC_601_525);
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 576, false) == ColorSpace::REC_601_576);
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 625, false) == ColorSpace::REC_601_625);
+			Assert::ExpectException<std::runtime_error>([]() { Translate(bmdColorspaceRec601, 480, false); });
+			// On: the 486 guard's protection is kept - the brief mode never throws.
+			Assert::IsTrue(Translate(bmdColorspaceRec601, 486, true) == ColorSpace::REC_601_525);
 		}
 
 		TEST_METHOD(LogRolloverKeepsThreePartsApartFromSessionArchives)

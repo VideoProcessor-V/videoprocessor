@@ -74,6 +74,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <DisplayRefreshRateEstimator.h>
 #include <DisplayRefreshRatePolicy.h>
 #include <DisplayTopologySession.h>
+#include <CaptureDisplayFixes.h>
 #include <RendererGenerationGate.h>
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
@@ -4577,7 +4578,9 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 		!ReadGeneralBoolean(config, "renderer_failure_keep_fullscreen", true,
 			m_stagedRuntimeSettings.rendererFailureKeepFullscreen, error) ||   // Bug hunt 2026-10-17
 		!ReadGeneralBoolean(config, "magewell_recover_faults", true,
-			m_stagedRuntimeSettings.magewellRecoverFaults, error))   // restore switch 2026-10-17
+			m_stagedRuntimeSettings.magewellRecoverFaults, error) ||   // restore switch 2026-10-17
+		!ReadGeneralBoolean(config, "capture_display_fixes", true,
+			m_stagedRuntimeSettings.captureDisplayFixes, error))   // post-merge audit 2026-10-17
 		return false;
 	if (!Ambient::Read(config, m_stagedRuntimeSettings.ambient, error))
 		return false;
@@ -4893,6 +4896,10 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 	}
 	// Restore switch 2026-10-17: [general] magewell_recover_faults (logged on change).
 	MagewellBackend::SetRecoverFaults(m_stagedRuntimeSettings.magewellRecoverFaults);
+	// Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
+	if (CaptureDisplayFixes::Set(m_stagedRuntimeSettings.captureDisplayFixes))
+		DebugLog::Log("capture_display_fixes: %s (display mode ranking, DeckLink Rec.601 lines)",
+			m_stagedRuntimeSettings.captureDisplayFixes ? "on" : "off (the earlier behaviour)");
 	// Bug hunt 2026-10-17: [general] renderer_failure_keep_fullscreen.
 	if (m_stagedRuntimeSettings.rendererFailureKeepFullscreen !=
 		m_rendererFailureKeepFullscreen)
@@ -4901,7 +4908,7 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 			m_stagedRuntimeSettings.rendererFailureKeepFullscreen;
 		DebugLog::Log("Renderer failure policy: keep_fullscreen=%d retry=%s",
 			m_rendererFailureKeepFullscreen ? 1 : 0,
-			m_rendererFailureKeepFullscreen ? "2s,5s,10s,then-30s" : "manual");
+			m_rendererFailureKeepFullscreen ? "2s,5s,10s,then-30s,at-most-10" : "manual");
 		if (!m_rendererFailureKeepFullscreen)
 			ResetRendererFailureRetry("policy-disabled");
 	}

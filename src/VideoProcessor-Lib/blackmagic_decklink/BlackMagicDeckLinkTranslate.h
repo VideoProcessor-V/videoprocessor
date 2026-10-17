@@ -73,7 +73,9 @@ VideoFrameEncoding Translate(BMDPixelFormat, ColorSpace);
 
 EOTF TranslateEOTF(LONGLONG electroOpticalTransferFuncValue);
 
-ColorSpace Translate(BMDColorspace, uint32_t verticalLines);
+// captureDisplayFixes: [general] capture_display_fixes (CaptureDisplayFixes.h);
+// false = the earlier Rec.601 mapping (486 -> UNKNOWN, 576 -> REC_601_576).
+ColorSpace Translate(BMDColorspace, uint32_t verticalLines, bool captureDisplayFixes = true);
 
 DisplayModeSharedPtr Translate(BMDDisplayMode, BMDFieldDominance dominance=bmdUnknownFieldDominance);
 

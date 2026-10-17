@@ -425,11 +425,30 @@ EOTF TranslateEOTF(LONGLONG electroOpticalTransferFuncValue)
 }
 
 
-ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines)
+ColorSpace Translate(BMDColorspace colorSpace, uint32_t verticalLines, bool captureDisplayFixes)
 {
 	switch (colorSpace)
 	{
 	case bmdColorspaceRec601:
+
+		// capture_display_fixes off (post-merge audit 2026-10-17): the earlier mapping.
+		// 486: "The card will once in a while throw an odd (invalid?) mode with 486
+		// vertical lines for a very brief period, we simply ignore it" (Dennis
+		// Fleurbaaij) - UNKNOWN instead of the exception that raised an error box.
+		// With the fixes on that protection is kept: 486 maps to REC_601_525, so the
+		// transient mode never throws either (no error box).
+		if (!captureDisplayFixes)
+		{
+			if (verticalLines == 486)
+				return ColorSpace::UNKNOWN;
+			if (verticalLines == 525)
+				return ColorSpace::REC_601_525;
+			if (verticalLines == 576)
+				return ColorSpace::REC_601_576;
+			if (verticalLines == 625)
+				return ColorSpace::REC_601_625;
+			throw std::runtime_error("Unknown amount of lines for REC 601 color space");
+		}
 
 		// Bug hunt 2026-10-17: the caller passes the active picture height,
 		// so NTSC arrives as 486 (or 480) lines and PAL as 576. 486 used to

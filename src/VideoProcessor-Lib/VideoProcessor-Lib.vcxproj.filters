@@ -126,6 +126,9 @@
 	<ClInclude Include="DisplayTopologySession.h">
 	  <Filter>Header Files</Filter>
 	</ClInclude>
+	<ClInclude Include="CaptureDisplayFixes.h">
+	  <Filter>Header Files</Filter>
+	</ClInclude>
 	<ClInclude Include="EventActionLauncher.h">
 	  <Filter>Header Files</Filter>
 	</ClInclude>

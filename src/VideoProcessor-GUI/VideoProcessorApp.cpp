@@ -19,6 +19,7 @@
 #include <QueueConfiguration.h>
 #include <DisplayRuleExpression.h>
 #include <DisplayTopologySession.h>
+#include <CaptureDisplayFixes.h>
 #include <MainConfigSchema.h>
 #include <UnifiedProfileRuntime.h>
 #include <StateVariables.h>
@@ -905,7 +906,14 @@ bool LoadTargetOnlyDisplaySessionMode()
 {
 	ConfigFile config;
 	std::string value;
-	if (!config.Load() || !config.TryGetString("general",
+	if (!config.Load())
+		return false;
+	// Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes,
+	// before the target-only session picks its mode (the dialog re-reads it on Apply).
+	bool captureDisplayFixes = true;
+	if (config.TryGetBool("general", "capture_display_fixes", captureDisplayFixes))
+		CaptureDisplayFixes::Set(captureDisplayFixes);
+	if (!config.TryGetString("general",
 		"fullscreen_monitor_session_mode", value))
 		return false;
 	value = ConfigFile::NormalizeName(value);
