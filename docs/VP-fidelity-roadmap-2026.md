@@ -79,3 +79,13 @@ parsers feeding one tone-mapping path).
 6. Interpolator: extras-only first, non-integer ratios only, fallback hold vs blend?
 7. Pulldown: accept the review's pass criteria for default-on?
 8. Hardware budget/timing for a 4K60 4:4:4 capture card and the next display?
+
+## Updates 2026-10-17 (owner decisions)
+
+- Built: 50/60p interpolator + gap fill; pulldown fixes; DV GPU unpack and trims; metadata layer (SceneDescriptor/DisplayProfile/MappingPolicy, no behaviour change).
+- Rejected by the owner: neural/ONNX upscaler, denoiser and motion estimators (invented detail, poor value); detail accumulation as grain averaging (grain rule: never average grain away). Only detail-pulse stabilisation survives (docs/audit/detail-retrieval-research-2026-10-17.md).
+- New priorities: render-ahead (budget per source frame, docs/VP-render-ahead-design.md) is top; the RTX 3050 Ti laptop is the reference mid-range GPU (4K30 goal); full-precision optimisation before any half-precision path; features designed to be default-on when faithful and the 3090 runs them; interpolation off for the owner (kept for others); hiccup repair separate and wanted.
+- New work: intent interpreter (DV2 analogs, Experimental content-adaptive settings, docs/VP-intent-interpreter-design.md); report-a-problem hotkey; per-component Claude handover files at the end of the design period; pruning of superseded options (fallbacks for low latency and non-optical-flow paths kept).
+- libplacebo: public maintained fork vmcpherson2012-dev/libplacebo (vp-fl35, CI build), rebasing onto upstream over time; output_fbo_float32 is fork-only and must be carried forward. Zero-copy upload via a libplacebo patch is now realistic.
+- DV: tunnel delivers bit-exact 12-bit 4:2:2 through any card that passes 8-bit RGB 4:4:4 untouched; 60 Hz DV needs 2160p60 8-bit RGB capture (Quad HDMI Recorder likely 30p only).
+- Questions answered: Q3 (ML) no; Q5 (non-certified trims) yes; Q6 interpolation off for the owner, hiccup repair separate; Q1 closed for the FL35 (revisit with a new display). Open: Q4 colorimeter, Q7 pulldown criteria, Q8 card/display budget.
