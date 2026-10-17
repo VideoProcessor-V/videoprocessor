@@ -233,6 +233,47 @@ if (q.x < size.x && q.y < size.y) {
     imageStore(dst, q, o); \
 }
 )GLSL";
+		// residual_stabilise_grain_guard (owner 2026-10-17, grain audit: the one-pole kept
+		// only 0.83-0.90x of the grain): the hold limited to the coding-artefact band.
+		//   - the previous residual by texel (nearest), not bilinear (which averages
+		//     the grain of four pixels);
+		//   - blocks the grain term marks as grain (g, the map's or the frame's scalar,
+		//     from 1 = clean down to grain_floor = grain) pass this frame's residual
+		//     through: rs = mix(held, r, smoothstep(0.25, 0.75, (1 - g) / (1 - floor)));
+		//   - the held change |rs - r| at most the expected coding-noise RMS (rs_noise,
+		//     from the bitrate-quality reading; 0 = no reading: no clamp), converted to
+		//     linear light when the hooked picture is linear.
+		const char* const STABILISE_GUARD_DEFINE = R"GLSL(
+#define STABILISE_AND_STORE { \
+    const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
+    float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
+    float rs = r; \
+    vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
+    ivec2 fsz = textureSize(rs_field, 0); \
+    vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / 16.0)), ivec2(0), fsz - ivec2(1)), 0); \
+    bool frame_ok = texelFetch(rs_trust, ivec2(0), 0).r >= rs_min_share; \
+    if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5) { \
+        vec2 sprev = s - f.xy * src_size / rs_crop.zw; \
+        vec2 qprev = (sprev - src_origin) / src_per_dst; \
+        ivec2 psz = textureSize(rs_prev, 0); \
+        float rp = texelFetch(rs_prev, clamp(ivec2(floor(qprev)), ivec2(0), psz - ivec2(1)), 0).r; \
+        rs = mix(rp, r, rs_alpha); \
+        float grainy = clamp((1.0 - g) / max(1.0 - rs_grain_floor, 1e-3), 0.0, 1.0); \
+        rs = mix(rs, r, smoothstep(0.25, 0.75, grainy)); \
+        if (rs_noise > 0.0) { \
+            float lim = rs_noise; \
+            if (rs_linear > 0.5) { \
+                float yl = max(dot(fa.rgb, kr), 0.0); \
+                lim *= 2.2 * pow(max(pow(yl, 1.0 / 2.2), 1e-3), 1.2); \
+            } \
+            rs = r + clamp(rs - r, -lim, lim); \
+        } \
+    } \
+    o.rgb += vec3(rs - r); \
+    imageStore(rs_out, q, vec4(rs, 0.0, 0.0, 1.0)); \
+    imageStore(dst, q, o); \
+}
+)GLSL";
 		const char* const PLAIN_DEFINE = "#define STABILISE_AND_STORE imageStore(dst, q, o);\n";
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
@@ -793,7 +834,9 @@ if (q.x < size.x && q.y < size.y) {
 		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
 		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") +
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") : std::string();
-		const std::string header = upHeader + (useMap ? mapHeader : std::string()) + (stabilise ? STABILISE_DEFINE : PLAIN_DEFINE);
+		const bool guard = stabilise && settings.residualGrainGuard;
+		const std::string header = upHeader + (useMap ? mapHeader : std::string()) +
+			(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
 		const float wBase = upscale.on ? upscale.wBase : settings.wBase;
 		std::vector<pl_shader_var> v = {
 			{ pl_var_vec2("src_origin"), srcOrigin, true },
@@ -817,6 +860,16 @@ if (q.x < size.x && q.y < size.y) {
 			v.push_back({ pl_var_float("rs_prev_valid"), &prevValid, true });
 			v.push_back({ pl_var_float("rs_alpha"), &rsAlpha, true });
 			v.push_back({ pl_var_float("rs_min_share"), &rsMinShare, true });
+		}
+		// The guard's coding-noise limit: 8-bit codes of the encoded picture -> normalised.
+		const float rsNoise = settings.residualCodingNoiseCodes > 0.0f ? settings.residualCodingNoiseCodes / 255.0f : 0.0f;
+		const float rsLinear = p->color.transfer == PL_COLOR_TRC_LINEAR ? 1.0f : 0.0f;
+		const float rsGrainFloor = settings.grainFloor;
+		if (guard)
+		{
+			v.push_back({ pl_var_float("rs_noise"), &rsNoise, true });
+			v.push_back({ pl_var_float("rs_linear"), &rsLinear, true });
+			v.push_back({ pl_var_float("rs_grain_floor"), &rsGrainFloor, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),

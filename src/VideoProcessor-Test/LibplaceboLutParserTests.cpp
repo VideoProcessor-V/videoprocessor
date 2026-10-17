@@ -46,6 +46,8 @@
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
 #include "ChainGpuProbe.h"
+#include "GrainReferenceModel.h"
+#include <memory>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
@@ -12688,6 +12690,7 @@ namespace VideoProcessorTest
 				st.grainLo = 1000.0f; st.grainHi = 2000.0f;   // no grain: w = w_base
 				st.grainSmoothMs = 0.0f;
 				st.cnnResidualStabilise = stabilise;
+				st.residualGrainGuard = false;   // the 2026-10-15 one-pole (SsimResidualStabiliseLeavesGrainBlocks: the guard)
 				std::vector<std::vector<uint16_t>> out;
 				for (int f = 0; f < frames; ++f)
 				{
@@ -12802,6 +12805,7 @@ namespace VideoProcessorTest
 				st.grainSmoothMs = 0.0f;
 				st.grainMap = false;
 				st.ssimResidualStabilise = stabilise;
+				st.residualGrainGuard = false;   // the 2026-10-15 one-pole (SsimResidualStabiliseLeavesGrainBlocks: the guard)
 				if (wBase >= 0.0f) st.wBase = wBase;   // 0: the faithful branch alone
 				std::vector<std::vector<uint16_t>> outputs;
 				for (int f = 0; f < frames; ++f)
@@ -13393,6 +13397,627 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&established);
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(cleanLog);
+		}
+
+		// --- Film grain (owner 2026-10-17: never averaged or interpolated away;
+		// docs/audit/grain-audit-2026-10-17.md). GPU tests (WARP unless VP_TEST_GPU=hardware) of
+		// the shaders behind the grain switches; GrainPreservationTests holds the CPU reference
+		// models. Each also checks that its legacy switch is the established output byte for byte.
+
+		// 16-bit plane units per 8-bit code.
+		static constexpr double kGrainCode16 = 256.0;
+
+		// A gentle picture in 16-bit codes (its own high band small next to the grain).
+		static double GrainTexture16(double x, double y)
+		{
+			return 30000.0 + 2000.0 * std::sin(6.283185307 * x / 211.0) + 2000.0 * std::sin(6.283185307 * y / 241.0 + 1.0);
+		}
+
+		// Frame k of a pan (vx, vy source px per frame): the gentle picture plus fresh grain
+		// (8-bit codes, white or soft) in luma and in both chroma channels (4:2:2 planes).
+		struct GrainFrames
+		{
+			std::vector<DejudderFrame> frames;
+			std::vector<GrainModel::Image> lumaGrain;
+		};
+
+		static GrainFrames MakeGrainFrames(int width, int height, int count, double vx, double vy, double sigma, bool soft, unsigned seed)
+		{
+			std::mt19937 rng(seed);
+			GrainFrames out;
+			for (int k = 0; k < count; ++k)
+			{
+				const GrainModel::Image g = GrainModel::Grain(width, height, sigma, soft, rng);
+				const GrainModel::Image cb = GrainModel::Grain(width / 2, height, sigma, soft, rng);
+				const GrainModel::Image cr = GrainModel::Grain(width / 2, height, sigma, soft, rng);
+				auto clamp16 = [](double v) { return static_cast<uint16_t>(std::lround((std::min)(65535.0, (std::max)(0.0, v)))); };
+				out.frames.push_back(MakeDejudderFrame(width, height,
+					[&](int x, int y) { return clamp16(GrainTexture16(x + 0.5 - k * vx, y + 0.5 - k * vy) + kGrainCode16 * g.at(x, y)); },
+					[&](int x, int y, int c) { return clamp16(32768.0 + kGrainCode16 * (c == 0 ? cb : cr).at(x, y)); }));
+				out.lumaGrain.push_back(g);
+			}
+			return out;
+		}
+
+		// The luma plane's grain (8-bit codes): the output minus the picture at `shift` frames.
+		static GrainModel::Image LumaGrainOf(const std::vector<uint16_t>& luma, int width, int height, double shift, double vx, double vy)
+		{
+			GrainModel::Image g(width, height);
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width; ++x)
+					g.at(x, y) = (luma[static_cast<size_t>(y) * width + x] - GrainTexture16(x + 0.5 - shift * vx, y + 0.5 - shift * vy)) / kGrainCode16;
+			return g;
+		}
+
+		static GrainModel::Image ChromaGrainOf(const std::vector<uint16_t>& chroma, int width, int height, int channel)
+		{
+			GrainModel::Image g(width / 2, height);
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width / 2; ++x)
+					g.at(x, y) = (chroma[(static_cast<size_t>(y) * (width / 2) + x) * 2 + channel] - 32768.0) / kGrainCode16;
+			return g;
+		}
+
+		TEST_METHOD(InterpolatorKeepsGrainRmsAtEveryPhase)
+		{
+			// interpolation_grain preserve: the luma and chroma grain RMS of every synthesised
+			// phase within +-5 % of the source's (white and soft, 0.5 to 4 codes) on a fractional
+			// pan; the luma matches the CPU reference model; blend (the legacy) carries about half;
+			// blend after preserve is the never-switched object's output byte for byte.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128, margin = 24;
+			const double vx = 3.3, vy = 1.7;
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[&](int, int) { return std::array<float, 4>{ static_cast<float>(vx), static_cast<float>(vy), 1.0f, 0.0f }; }, field);
+			std::string log;
+			fixture.CaptureLog(&log);
+			for (bool soft : { false, true })
+				for (double sigma : { 0.5, 1.0, 2.0, 4.0 })
+				{
+					const GrainFrames gf = MakeGrainFrames(width, height, 2, vx, vy, sigma, soft, 31u + static_cast<unsigned>(sigma * 4) + (soft ? 100u : 0u));
+					DejudderGpuPlanes planesA, planesB;
+					UploadDejudderFrame(gpu, gf.frames[0], planesA);
+					UploadDejudderFrame(gpu, gf.frames[1], planesB);
+					Interpolator::FrameInterpolator legacy(fixture.Log(), gpu, true), preserve(fixture.Log(), gpu, true);
+					preserve.SetGrain(InterpolationPolicy::Grain::Preserve);
+					const double sourceLuma = GrainModel::Rms(gf.lumaGrain[0], margin);
+					const double sourceChroma = GrainModel::Rms(ChromaGrainOf(gf.frames[0].chroma, width, height, 0), margin / 2);
+					for (float t : { 0.2f, 0.4f, 0.5f, 0.6f, 0.8f })
+					{
+						Dejudder::Planes out;
+						Assert::IsTrue(preserve.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+							InterpolationPolicy::Fallback::Hold, out), InterpolatorError(preserve, log).c_str());
+						const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+						const std::vector<uint16_t> chroma = DownloadPlane(gpu, out.chroma);
+						const double rl = GrainModel::Rms(LumaGrainOf(luma, width, height, t, vx, vy), margin) / sourceLuma;
+						const double rc = GrainModel::Rms(ChromaGrainOf(chroma, width, height, 0), margin / 2) / sourceChroma;
+						// The CPU reference model on the same frames (16-bit codes).
+						GrainModel::Image a(width, height), b(width, height);
+						for (size_t i = 0; i < a.v.size(); ++i) { a.v[i] = gf.frames[0].luma[i]; b.v[i] = gf.frames[1].luma[i]; }
+						const GrainModel::Image model = GrainModel::InterpolatePreserve(a, b, t, { vx, vy });
+						double worst = 0.0;
+						for (int y = margin; y < height - margin; ++y)
+							for (int x = margin; x < width - margin; ++x)
+								worst = (std::max)(worst, std::fabs(luma[static_cast<size_t>(y) * width + x] - model.at(x, y)));
+						// Blend (legacy) on the never-switched object.
+						Dejudder::Planes old;
+						Assert::IsTrue(legacy.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+							InterpolationPolicy::Fallback::Hold, old), InterpolatorError(legacy, log).c_str());
+						const std::vector<uint16_t> oldLuma = DownloadPlane(gpu, old.luma);
+						const std::vector<uint16_t> oldChroma = DownloadPlane(gpu, old.chroma);
+						const double rb = GrainModel::Rms(LumaGrainOf(oldLuma, width, height, t, vx, vy), margin) / sourceLuma;
+						char text[240];
+						snprintf(text, sizeof(text), "%s sigma %.1f t %.1f: preserve luma %.3f chroma %.3f (model max diff %.1f 16-bit codes); blend luma %.3f",
+							soft ? "soft" : "white", sigma, t, rl, rc, worst, rb);
+						Logger::WriteMessage(text);
+						const std::wstring wtext(text, text + strlen(text));
+						Assert::IsTrue(rl > 0.95 && rl < 1.05, wtext.c_str());
+						Assert::IsTrue(rc > 0.95 && rc < 1.05, wtext.c_str());
+						Assert::IsTrue(worst <= 96.0, (L"the shader is the reference model: " + wtext).c_str());
+						if (t == 0.5f) Assert::IsTrue(rb < 0.8, (L"blend averages grain away: " + wtext).c_str());
+						// The legacy switch restored on the switched object: byte for byte.
+						preserve.SetGrain(InterpolationPolicy::Grain::Blend);
+						Dejudder::Planes back;
+						Assert::IsTrue(preserve.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+							InterpolationPolicy::Fallback::Hold, back), InterpolatorError(preserve, log).c_str());
+						Assert::IsTrue(DownloadPlane(gpu, back.luma) == oldLuma, L"blend luma byte for byte");
+						Assert::IsTrue(DownloadPlane(gpu, back.chroma) == oldChroma, L"blend chroma byte for byte");
+						preserve.SetGrain(InterpolationPolicy::Grain::Preserve);
+					}
+					Assert::AreEqual(5ull, preserve.GrainPreservedRuns());
+					Assert::AreEqual(0ull, legacy.GrainPreservedRuns());
+				}
+			// The fallback blend (untrusted vectors) splits the same way: the grain is kept.
+			{
+				const GrainFrames gf = MakeGrainFrames(width, height, 2, 0.0, 0.0, 2.0, false, 77u);
+				DejudderGpuPlanes planesA, planesB;
+				UploadDejudderFrame(gpu, gf.frames[0], planesA);
+				UploadDejudderFrame(gpu, gf.frames[1], planesB);
+				Interpolator::FrameInterpolator preserve(fixture.Log(), gpu, true);
+				preserve.SetGrain(InterpolationPolicy::Grain::Preserve);
+				Dejudder::Planes out;
+				Assert::IsTrue(preserve.Run(planesA.planes, planesB.planes, Interpolator::Motion(), 0.5f,
+					InterpolationPolicy::Fallback::Blend, out), InterpolatorError(preserve, log).c_str());
+				const double r = GrainModel::Rms(LumaGrainOf(DownloadPlane(gpu, out.luma), width, height, 0.0, 0.0, 0.0), margin) /
+					GrainModel::Rms(gf.lumaGrain[0], margin);
+				Assert::IsTrue(r > 0.95 && r < 1.05, (L"fallback blend keeps the grain: " + std::to_wstring(r)).c_str());
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(InterpolatorGrainNotSmearedAcrossFrames)
+		{
+			// 50p on 60 Hz through the shader: per cycle at most as many near-duplicate output
+			// pairs (lag-1 correlation along the pan > 0.5) as a hold has repeats (one), every other
+			// pair below 0.10; blend (the legacy) shares grain over several pairs.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128, margin = 24;
+			const double vx = 3.3, vy = 1.7, ratio = 50.0 / 60.0;
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[&](int, int) { return std::array<float, 4>{ static_cast<float>(vx), static_cast<float>(vy), 1.0f, 0.0f }; }, field);
+			std::string log;
+			fixture.CaptureLog(&log);
+			for (bool soft : { false, true })
+			{
+				const GrainFrames gf = MakeGrainFrames(width, height, 8, vx, vy, 2.0, soft, 41u + (soft ? 100u : 0u));
+				std::vector<std::unique_ptr<DejudderGpuPlanes>> planes;
+				for (const DejudderFrame& f : gf.frames)
+				{
+					planes.push_back(std::make_unique<DejudderGpuPlanes>());
+					UploadDejudderFrame(gpu, f, *planes.back());
+				}
+				for (bool preserveMode : { true, false })
+				{
+					Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+					interpolator.SetGrain(preserveMode ? InterpolationPolicy::Grain::Preserve : InterpolationPolicy::Grain::Blend);
+					std::vector<GrainModel::Image> grains;
+					std::vector<double> positions;
+					for (int n = 0; n < 7; ++n)
+					{
+						const double x = n * ratio;
+						const int m = static_cast<int>(std::floor(x + 1e-9));
+						Dejudder::Planes out;
+						Assert::IsTrue(interpolator.Run(planes[m]->planes, planes[m + 1]->planes, InterpolatorMotion(field),
+							static_cast<float>(x - m), InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+						grains.push_back(LumaGrainOf(DownloadPlane(gpu, out.luma), width, height, x, vx, vy));
+						positions.push_back(x);
+					}
+					int shared = 0, smeared = 0;
+					std::string text = std::string(soft ? "soft" : "white") + (preserveMode ? " preserve" : " blend") + " lag-1:";
+					for (int n = 0; n + 1 < 7; ++n)
+					{
+						const double d = positions[n + 1] - positions[n];
+						const double c = GrainModel::Corr(GrainModel::Warp(grains[n], d * vx, d * vy, true), grains[n + 1], margin);
+						char v[32];
+						snprintf(v, sizeof(v), " %.2f", c);
+						text += v;
+						if (c > 0.5) ++shared;
+						else if (c >= 0.10) ++smeared;
+					}
+					Logger::WriteMessage(text.c_str());
+					const std::wstring wtext(text.begin(), text.end());
+					if (preserveMode)
+						Assert::IsTrue(shared <= 1 && smeared == 0, wtext.c_str());
+					else
+						Assert::IsTrue(smeared >= 2, wtext.c_str());
+				}
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(DejudderRenderedWarpKeepsGrainRms)
+		{
+			// The de-judder's rendered warp (Catmull-Rom at the output resolution; no switch):
+			// grain rendered at 2x keeps 0.95x or more at fractional output shifts (audit:
+			// 0.96-0.98x). The source warp (dejudder_source_warp_filter): catmull keeps more than
+			// the hardware's bilinear at a fractional shift; bilinear is the never-switched
+			// matcher's output byte for byte.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 128, height = 64, ow = width * 2, oh = height * 2;
+			// The rendered picture: white grain at the source resolution, upscaled 2x (Catmull-Rom).
+			std::mt19937 rng(51u);
+			const GrainModel::Image g = GrainModel::Grain(width, height, 2.0, false, rng);
+			GrainModel::Image up(ow, oh);
+			for (int y = 0; y < oh; ++y)
+				for (int x = 0; x < ow; ++x)
+					up.at(x, y) = GrainModel::Catmull(g, (x + 0.5) / 2.0, (y + 0.5) / 2.0);
+			std::vector<uint16_t> rgba(static_cast<size_t>(ow) * oh * 4);
+			for (size_t i = 0; i < up.v.size(); ++i)
+			{
+				const uint16_t v = static_cast<uint16_t>(std::lround(30000.0 + kGrainCode16 * up.v[i]));
+				rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = v;
+				rgba[i * 4 + 3] = 65535;
+			}
+			pl_tex_params cp{};
+			cp.w = ow; cp.h = oh;
+			cp.format = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			cp.sampleable = true;
+			cp.initial_data = rgba.data();
+			pl_tex cached = pl_tex_create(gpu, &cp);
+			Assert::IsNotNull(cached);
+			const double vx = 12.0, vy = 6.0;   // source px per frame
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[&](int, int) { return std::array<float, 4>{ static_cast<float>(vx), static_cast<float>(vy), 1.0f, 0.0f }; }, field);
+			DejudderRendered::Warp rendered(fixture.Log(), gpu, true);
+			DejudderRendered::Geometry geometry;
+			geometry.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+			geometry.targetCrop = { 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+			const double source = GrainModel::Rms(up, 24);
+			for (float shift : { 0.15f, 0.3f, 0.55f })
+			{
+				pl_tex out = nullptr;
+				Assert::IsTrue(rendered.Run(cached, field.field, field.trust, 0.25f, shift, geometry, out),
+					ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
+				std::vector<float> px(static_cast<size_t>(out->params.w) * out->params.h * out->params.format->num_components);
+				pl_tex_transfer_params d{}; d.tex = out; d.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				const int nc = out->params.format->num_components;
+				GrainModel::Image w(ow, oh);
+				for (size_t i = 0; i < w.v.size(); ++i) w.v[i] = (px[i * nc] * 65535.0 - 30000.0) / kGrainCode16;
+				const double r = GrainModel::Rms(w, 24) / source;
+				char text[120];
+				snprintf(text, sizeof(text), "rendered warp shift %.2f (output px %.2f, %.2f): grain %.3f", shift, shift * vx * 2, shift * vy * 2, r);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(r >= 0.95 && r < 1.05, std::wstring(text, text + strlen(text)).c_str());
+			}
+			pl_tex_destroy(gpu, &cached);
+
+			// The source warp: two matchers on the same pair (B = A moved by (12, 6), the same grain).
+			const GrainFrames gf = MakeGrainFrames(256, 128, 1, 0.0, 0.0, 3.0, true, 52u);
+			const DejudderFrame& a = gf.frames[0];
+			const DejudderFrame b = MakeDejudderFrame(256, 128,
+				[&](int x, int y) { return a.luma[static_cast<size_t>((std::max)(0, y - 6)) * 256 + (std::max)(0, x - 12)]; },
+				[&](int x, int y, int c) { return a.chroma[(static_cast<size_t>((std::max)(0, y - 6)) * 128 + (std::max)(0, x - 6)) * 2 + c]; });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			Dejudder::Settings bilinearSettings = DejudderTestSettings();
+			Dejudder::Settings catmullSettings = DejudderTestSettings();
+			catmullSettings.sourceWarpCatmull = true;
+			Assert::IsFalse(Dejudder::Settings().sourceWarpCatmull, L"the object's default is the established bilinear");
+			Dejudder::MotionWarp never(fixture.Log(), gpu, DejudderTestSettings());
+			Dejudder::MotionWarp bilinear(fixture.Log(), gpu, bilinearSettings);
+			Dejudder::MotionWarp catmull(fixture.Log(), gpu, catmullSettings);
+			for (Dejudder::MotionWarp* m : { &never, &bilinear, &catmull })
+				Assert::IsTrue(m->Estimate(planesA.planes, planesB.planes), ExtendedRangeGpuProbe::ToWide(m->LastError()).c_str());
+			Dejudder::Planes outNever, outBilinear, outCatmull;
+			Assert::IsTrue(never.Warp(planesA.planes, 0.3f, outNever));
+			Assert::IsTrue(bilinear.Warp(planesA.planes, 0.3f, outBilinear));
+			Assert::IsTrue(catmull.Warp(planesA.planes, 0.3f, outCatmull));
+			const std::vector<uint16_t> lumaNever = DownloadPlane(gpu, outNever.luma);
+			Assert::IsTrue(DownloadPlane(gpu, outBilinear.luma) == lumaNever, L"bilinear: the established warp byte for byte");
+			Assert::IsTrue(DownloadPlane(gpu, outBilinear.chroma) == DownloadPlane(gpu, outNever.chroma), L"bilinear chroma byte for byte");
+			// The warped picture minus the picture at (3.6, 1.8): its grain.
+			auto grainOf = [&](const std::vector<uint16_t>& luma) {
+				GrainModel::Image w(256, 128);
+				for (int y = 0; y < 128; ++y)
+					for (int x = 0; x < 256; ++x)
+						w.at(x, y) = (luma[static_cast<size_t>(y) * 256 + x] - GrainTexture16(x + 0.5 - 3.6, y + 0.5 - 1.8)) / kGrainCode16;
+				return w;
+			};
+			const double src = GrainModel::Rms(gf.lumaGrain[0], 32);
+			const double rBil = GrainModel::Rms(grainOf(lumaNever), 32) / src;
+			const double rCat = GrainModel::Rms(grainOf(DownloadPlane(gpu, outCatmull.luma)), 32) / src;
+			char text[160];
+			snprintf(text, sizeof(text), "source warp at (3.6, 1.8), soft grain: catmull %.3f, bilinear %.3f", rCat, rBil);
+			Logger::WriteMessage(text);
+			const std::wstring wtext(text, text + strlen(text));
+			Assert::IsTrue(rCat > rBil + 0.05, wtext.c_str());
+			Assert::IsTrue(rCat >= 0.9 && rCat < 1.05, wtext.c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		TEST_METHOD(SsimResidualStabiliseLeavesGrainBlocks)
+		{
+			// residual_stabilise_grain_guard: on a picture whose grain is fresh every frame, the
+			// SSIM residual held along trusted (still) vectors passes this frame's residual
+			// through where the grain term marks grain - today's (unheld) output within a code and
+			// the same frame-to-frame change; off is the established one-pole (it steadies the
+			// residual, averaging the grain), twice the same bytes.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create());
+			pl_gpu gpu = fixture.Gpu();
+			const pl_hook* ssim = nullptr;
+			{
+				const std::string source = LoadBundledShader("SSimDownscaler.glsl");
+				ssim = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				Assert::IsNotNull(ssim);
+			}
+			static constexpr int width = 256, height = 128;
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(srcFmt && dstFmt);
+			auto picture = [&](unsigned seed) {
+				std::mt19937 grain(seed);
+				std::normal_distribution<double> n(0.0, 0.03);   // fresh grain, about 8 codes
+				std::vector<uint16_t> px(static_cast<size_t>(width) * height * 4);
+				for (int y = 0; y < height; ++y)
+					for (int x = 0; x < width; ++x)
+					{
+						const double v = (std::min)(1.0, (std::max)(0.0, 0.45 + 0.1 * std::sin(x * 0.11) * std::cos(y * 0.07) + n(grain)));
+						const size_t i = (static_cast<size_t>(y) * width + x) * 4;
+						px[i] = px[i + 1] = px[i + 2] = static_cast<uint16_t>(std::lround(v * 65535.0));
+						px[i + 3] = 65535;
+					}
+				pl_tex_params tp{};
+				tp.w = width; tp.h = height; tp.format = srcFmt; tp.sampleable = true; tp.initial_data = px.data();
+				return pl_tex_create(gpu, &tp);
+			};
+			std::vector<float> f(static_cast<size_t>(width / 16) * (height / 16) * 4);
+			for (size_t i = 0; i < f.size(); i += 4) { f[i] = 0.0f; f[i + 1] = 0.0f; f[i + 2] = 1.0f; f[i + 3] = 0.0f; }
+			pl_tex_params fp{};
+			fp.w = width / 16; fp.h = height / 16; fp.format = pl_find_named_fmt(gpu, "rgba32f"); fp.sampleable = true; fp.initial_data = f.data();
+			pl_tex trusted = pl_tex_create(gpu, &fp);
+			const float trustValue[4] = { 1.0f, 1.0f, 0.0f, 1.0f };
+			pl_tex_params tp1{};
+			tp1.w = 1; tp1.h = 1; tp1.format = pl_find_named_fmt(gpu, "rgba32f"); tp1.sampleable = true; tp1.initial_data = trustValue;
+			pl_tex frameTrust = pl_tex_create(gpu, &tp1);
+			Assert::IsTrue(trusted && frameTrust);
+			auto run = [&](bool stabilise, bool guard, int frames) {
+				AdaptiveDownscale::Module module;
+				AdaptiveDownscale::Settings st;
+				st.grainSmoothMs = 0.0f;
+				st.grainMap = false;
+				st.ssimResidualStabilise = stabilise;
+				st.residualGrainGuard = guard;
+				std::vector<std::vector<uint16_t>> outputs;
+				for (int k = 0; k < frames; ++k)
+				{
+					pl_tex src = picture(static_cast<unsigned>(2000 + k));
+					module.SetFrame(st, static_cast<uint64_t>(10 + k), 1.0f / 24.0f);
+					module.ClearMotion();
+					AdaptiveDownscale::Motion m;
+					m.field = trusted;
+					m.frameTrust = frameTrust;
+					m.minTrustedShare = 0.25f;
+					m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+					module.SetMotion(m);
+					pl_tex_params tp{};
+					tp.w = width / 2; tp.h = height / 2; tp.format = dstFmt; tp.renderable = true; tp.host_readable = true;
+					pl_tex target = pl_tex_create(gpu, &tp);
+					pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+					pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+					pl_render_params params = pl_render_default_params;
+					params.dither_params = nullptr;
+					params.error_diffusion = nullptr;
+					params.downscaler = &pl_filter_mitchell;
+					const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+					params.hooks = hooks;
+					params.num_hooks = 3;
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &out, &params));
+					pl_gpu_finish(gpu);
+					std::vector<uint16_t> px(static_cast<size_t>(width / 2) * (height / 2) * 4);
+					pl_tex_transfer_params dl{}; dl.tex = target; dl.ptr = px.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dl));
+					outputs.push_back(px);
+					pl_tex_destroy(gpu, &target);
+					pl_tex_destroy(gpu, &src);
+				}
+				module.Release();
+				return outputs;
+			};
+			auto change = [](const std::vector<std::vector<uint16_t>>& o) {
+				double sum = 0; size_t n = 0;
+				for (size_t k = 3; k < o.size(); ++k)
+					for (size_t i = 0; i < o[k].size(); i += 4) { sum += std::fabs(double(o[k][i]) - double(o[k - 1][i])); ++n; }
+				return sum / n / 257.0;
+			};
+			auto maxDiff = [](const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+				int m = 0;
+				for (size_t i = 0; i < a.size(); ++i) if (i % 4 != 3) m = (std::max)(m, std::abs(int(a[i]) - int(b[i])));
+				return m / 257.0;
+			};
+			const int frames = 8;
+			const auto today = run(false, true, frames);
+			const auto guarded = run(true, true, frames);
+			const auto legacy = run(true, false, frames);
+			const auto legacyAgain = run(true, false, frames);
+			char text[200];
+			snprintf(text, sizeof(text), "frame-to-frame change: today %.3f, guard %.3f, legacy one-pole %.3f; guard vs today max %.2f codes",
+				change(today), change(guarded), change(legacy), maxDiff(guarded.back(), today.back()));
+			Logger::WriteMessage(text);
+			const std::wstring wtext(text, text + strlen(text));
+			Assert::IsTrue(maxDiff(guarded.back(), today.back()) <= 1.0, wtext.c_str());
+			Assert::IsTrue(std::fabs(change(guarded) - change(today)) <= 0.05 * change(today), wtext.c_str());
+			Assert::IsTrue(change(legacy) < change(today), (L"off: the one-pole holds (averages) the residual: " + wtext).c_str());
+			for (int k = 0; k < frames; ++k)
+				Assert::IsTrue(legacy[k] == legacyAgain[k], L"off: deterministic, the established pass");
+			pl_tex_destroy(gpu, &frameTrust);
+			pl_tex_destroy(gpu, &trusted);
+			pl_mpv_user_shader_destroy(&ssim);
+		}
+
+		TEST_METHOD(VpDebanderKeepsGrainWithoutVectors)
+		{
+			// deband_vp_grain_guard: without vectors, grain of 0.5 8-bit code (2 10-bit codes) and
+			// more keeps 0.95x or more at the 8-bit-in-10 threshold (6 codes) and at the low-bitrate
+			// maximum (12 codes); a banded ramp is debanded as before (within a code); off is the
+			// never-switched module's output byte for byte (0.5-0.6x of the grain).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 256, H = 128, margin = 24;
+			auto upload = [&](const std::vector<int>& codes) {
+				std::vector<uint16_t> data(codes.size());
+				for (size_t i = 0; i < codes.size(); ++i) data[i] = static_cast<uint16_t>((std::min)(1023, (std::max)(0, codes[i])) << 6);
+				pl_tex_params p{};
+				p.w = W; p.h = H; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readback = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = W; rp.h = H; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(W) * H);
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &readable);
+				return raw;
+			};
+			auto toCodes = [&](const std::vector<uint16_t>& raw) {
+				GrainModel::Image g(W, H);
+				for (size_t i = 0; i < raw.size(); ++i) g.v[i] = raw[i] / 64.0;
+				return g;
+			};
+			auto frameOf = [&](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+			GrainModel::Image ramp(W, H);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					ramp.at(x, y) = 400.0 + 0.28 * x + 0.12 * y;   // 10-bit codes
+			for (double threshold : { VpDebander::Strength(8.0, 10, 1.0, true), VpDebander::Strength(8.0, 10, 0.0, true) })
+				for (bool soft : { false, true })
+					for (double sigma8 : { 0.5, 1.0, 2.0, 4.0 })
+					{
+						std::mt19937 rng(61u + static_cast<unsigned>(sigma8 * 4) + (soft ? 100u : 0u));
+						const GrainModel::Image g = GrainModel::Grain(W, H, sigma8 * 4.0, soft, rng);   // 10-bit codes
+						std::vector<int> codes(static_cast<size_t>(W) * H);
+						for (size_t i = 0; i < codes.size(); ++i) codes[i] = static_cast<int>(std::lround(ramp.v[i] + g.v[i]));
+						pl_tex tex = upload(codes);
+						GrainModel::Image input(W, H);
+						for (size_t i = 0; i < codes.size(); ++i) input.v[i] = codes[i];
+						const double source = GrainModel::Rms(input - ramp, margin);
+						VpDebander::Params params;
+						params.thresholdCodes = threshold;
+						params.colorDepth = 10;
+						params.radiusScale = 1080.0 / H;
+						VpDebander::Module never, guarded, legacy;
+						pl_frame outNever{}, outGuard{}, outLegacy{};
+						Assert::IsTrue(never.Apply(gpu, dispatch, frameOf(tex), params, outNever), ExtendedRangeGpuProbe::ToWide(never.LastError()).c_str());
+						VpDebander::Params on = params;
+						on.grainGuard = true;
+						Assert::IsTrue(guarded.Apply(gpu, dispatch, frameOf(tex), on, outGuard), ExtendedRangeGpuProbe::ToWide(guarded.LastError()).c_str());
+						VpDebander::Params off = params;
+						off.grainGuard = false;
+						Assert::IsTrue(legacy.Apply(gpu, dispatch, frameOf(tex), off, outLegacy), ExtendedRangeGpuProbe::ToWide(legacy.LastError()).c_str());
+						const std::vector<uint16_t> rawNever = readback(outNever.planes[0].texture);
+						const std::vector<uint16_t> rawLegacy = readback(outLegacy.planes[0].texture);
+						const double rg = GrainModel::Rms(toCodes(readback(outGuard.planes[0].texture)) - ramp, margin) / source;
+						const double rl = GrainModel::Rms(toCodes(rawLegacy) - ramp, margin) / source;
+						char text[160];
+						snprintf(text, sizeof(text), "%s grain %.1f codes, threshold %.0f: guard %.3f legacy %.3f", soft ? "soft" : "white", sigma8, threshold, rg, rl);
+						Logger::WriteMessage(text);
+						const std::wstring wtext(text, text + strlen(text));
+						Assert::IsTrue(rawLegacy == rawNever, (L"off: the established debander byte for byte; " + wtext).c_str());
+						Assert::IsTrue(rg > 0.95 && rg < 1.05, wtext.c_str());
+						if (sigma8 == 0.5) Assert::IsTrue(rl < 0.8, wtext.c_str());
+						pl_tex_destroy(gpu, &tex);
+						never.Release(gpu); guarded.Release(gpu); legacy.Release(gpu);
+					}
+			// A banded ramp (8-bit steps in the 10-bit signal): debanded with the guard as without.
+			{
+				std::vector<int> banded(static_cast<size_t>(W) * H);
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+						banded[static_cast<size_t>(y) * W + x] = 4 * (100 + x / 24);
+				pl_tex tex = upload(banded);
+				VpDebander::Params params;
+				params.thresholdCodes = VpDebander::Strength(8.0, 10, 1.0, true);
+				params.colorDepth = 10;
+				params.radiusScale = 1080.0 / H;
+				VpDebander::Params on = params;
+				on.grainGuard = true;
+				VpDebander::Module a, b;
+				pl_frame oa{}, ob{};
+				Assert::IsTrue(a.Apply(gpu, dispatch, frameOf(tex), params, oa));
+				Assert::IsTrue(b.Apply(gpu, dispatch, frameOf(tex), on, ob));
+				const std::vector<uint16_t> ra = readback(oa.planes[0].texture), rb = readback(ob.planes[0].texture);
+				int worst = 0, changed = 0;
+				for (size_t i = 0; i < ra.size(); ++i)
+				{
+					worst = (std::max)(worst, std::abs(int(ra[i]) - int(rb[i])) / 64);
+					changed += ra[i] != static_cast<uint16_t>(banded[i] << 6);
+				}
+				Assert::IsTrue(worst <= 1, L"bands debanded with the guard as without (within a code)");
+				Assert::IsTrue(changed > static_cast<int>(ra.size()) / 4, L"the bands are debanded");
+				a.Release(gpu); b.Release(gpu);
+				pl_tex_destroy(gpu, &tex);
+			}
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		TEST_METHOD(LibplaceboDebandAddsNoGrainWhenOff)
+		{
+			// deband_grain off: libplacebo's deband (default strength) on a flat picture adds no
+			// noise - the output is flat; on adds its grain (about 0.29 8-bit code RMS); on is
+			// libplacebo's own default parameters byte for byte (a fresh renderer each).
+			auto render = [](const pl_deband_params* deband) {
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create());
+				pl_gpu gpu = fixture.Gpu();
+				const int w = 64, h = 64;
+				std::vector<uint16_t> px(static_cast<size_t>(w) * h * 4, 0);
+				for (size_t i = 0; i < px.size(); i += 4) { px[i] = px[i + 1] = px[i + 2] = 30000; px[i + 3] = 65535; }
+				pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+				pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				pl_tex_params sp{}; sp.w = w; sp.h = h; sp.format = srcFmt; sp.sampleable = true; sp.initial_data = px.data();
+				pl_tex src = pl_tex_create(gpu, &sp);
+				pl_tex_params dp{}; dp.w = w; dp.h = h; dp.format = dstFmt; dp.renderable = true; dp.host_readable = true;
+				pl_tex dst = pl_tex_create(gpu, &dp);
+				Assert::IsTrue(src && dst);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				pl_frame target = TargetLutGpuFixture::MakeRgbFrame(dst);
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.deband_params = deband;
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &target, &params));
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> out(static_cast<size_t>(w) * h * 4);
+				pl_tex_transfer_params d{}; d.tex = dst; d.ptr = out.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &src);
+				pl_tex_destroy(gpu, &dst);
+				return out;
+			};
+			auto rms = [](const std::vector<uint16_t>& o) {
+				double mean = 0.0, sq = 0.0; size_t n = 0;
+				for (size_t i = 0; i < o.size(); i += 4) { mean += o[i]; ++n; }
+				mean /= n;
+				for (size_t i = 0; i < o.size(); i += 4) sq += (o[i] - mean) * (o[i] - mean);
+				return std::sqrt(sq / n) / 257.0;   // 8-bit codes
+			};
+			LibplaceboRenderParameters::Settings on, off;
+			on.debandStrength = off.debandStrength = "default";
+			on.debandGrain = true;
+			off.debandGrain = false;
+			LibplaceboRenderParameters::Projection pOn, pOff;
+			std::string error;
+			Assert::IsTrue(LibplaceboRenderParameters::Build(on, false, pOn, error));
+			Assert::IsTrue(LibplaceboRenderParameters::Build(off, false, pOff, error));
+			const std::vector<uint16_t> withGrain = render(pOn.renderParams.deband_params);
+			const std::vector<uint16_t> without = render(pOff.renderParams.deband_params);
+			const std::vector<uint16_t> native = render(&pl_deband_default_params);
+			char text[120];
+			snprintf(text, sizeof(text), "flat picture through libplacebo's deband: grain on %.3f, off %.3f 8-bit codes RMS", rms(withGrain), rms(without));
+			Logger::WriteMessage(text);
+			Assert::AreEqual(0.0, rms(without), 1e-9, L"off: no added noise");
+			Assert::IsTrue(rms(withGrain) > 0.1, L"on: libplacebo's grain");
+			Assert::IsTrue(withGrain == native, L"on: libplacebo's own default parameters byte for byte");
 		}
 
 		// --- VP's 50/60p frame interpolator (docs/VP-interpolator-50-60-plan.md step 3) ---

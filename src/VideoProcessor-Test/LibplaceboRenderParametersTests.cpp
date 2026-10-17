@@ -650,6 +650,7 @@ namespace VideoProcessorTest
 			settings.sigmoid = Toggle::On;
 			settings.peakDetection = PeakDetection::HighQuality;
 			settings.deband = Toggle::On;
+			settings.debandGrain = true;   // libplacebo's own parameters, grain included (deband_grain on)
 			settings.dithering = "blue_noise";
 			Projection projection;
 			BuildOrFail(settings, false, projection);
@@ -799,6 +800,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(DebandingStrengthUsesOneCanonicalAndDistinctNativeSetting)
 		{
 			Settings settings;
+			settings.debandGrain = true;   // libplacebo's own parameters, grain included (deband_grain on)
 			Projection projection;
 
 			settings.debandStrength = "off";

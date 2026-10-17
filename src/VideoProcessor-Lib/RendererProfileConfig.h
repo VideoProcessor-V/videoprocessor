@@ -708,6 +708,10 @@ namespace RendererProfileConfig
 			if (key == "interpolation") return IsChoice(value, { "off", "auto", "always" });
 			if (key == "interpolation_fallback") return IsChoice(value, { "hold", "blend" });
 			if (key == "interpolation_fill_gaps") return IsChoice(value, { "off", "on" });
+			// Film grain (owner 2026-10-17; docs/audit/grain-audit-2026-10-17.md).
+			if (key == "interpolation_grain") return IsChoice(value, { "preserve", "blend" });
+			if (key == "dejudder_source_warp_filter") return IsChoice(value, { "catmull", "bilinear" });
+			if (key == "residual_stabilise_grain_guard" || key == "deband_vp_grain_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
 			if (key == "temporal_dither") return IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" });
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
@@ -802,6 +806,8 @@ namespace RendererProfileConfig
 				"error_diffusion_stucki", "error_diffusion_burkes",
 				"error_diffusion_sierra2", "error_diffusion_sierra3" });
 			if (key == "deband_strength") return IsChoice(value, { "auto", "off", "light", "default" });
+			// Owner 2026-10-17 (grain audit): libplacebo's deband adds grain (off: none; VP's dither).
+			if (key == "deband_grain") return IsChoice(value, { "on", "off" });
 			expected = "a scaling-owned setting"; return false;
 		}
 		if (group == "display")
@@ -2092,7 +2098,7 @@ namespace RendererProfileConfig
 				"switch_refresh_rate",
 				"quality", "tone_mapping", "gamut_mapping", "peak_detection",
 				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "chroma_upscaler", "downscaler", "deband",
-				"deband_strength", "sigmoid", "downscale_light", "dithering", "display_bit_depth", "output_presentation",
+				"deband_strength", "deband_grain", "sigmoid", "downscale_light", "dithering", "display_bit_depth", "output_presentation",
 				"output_range", "output_gamma", "output_path_profile",
 				"target_primaries", "sdr_target_primaries", "report_bt2020_to_display",
 				"sdr_input_transfer", "sdr_adjust_gamma", "output_diagnostics",

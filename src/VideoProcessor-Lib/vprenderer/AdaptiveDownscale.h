@@ -72,6 +72,16 @@ namespace AdaptiveDownscale
 		// this frame's residual (today's output).
 		bool cnnResidualStabilise = true;
 		bool ssimResidualStabilise = true;
+		// residual_stabilise_grain_guard (owner 2026-10-17: grain is never averaged away;
+		// grain audit): the hold limited to the coding-artefact band - blocks the grain term
+		// marks as grain pass this frame's residual through, the held change is clamped to
+		// the expected coding-noise RMS (residualCodingNoiseCodes, when there is a bitrate
+		// reading) and the previous residual is fetched by texel, not bilinear. off = the
+		// 2026-10-15 one-pole, byte for byte.
+		bool residualGrainGuard = true;
+		// Set per frame by the renderer from the bitrate-quality reading
+		// (GrainPreserve::CodingNoiseCodes; 8-bit codes); 0 = no reading, no clamp.
+		float residualCodingNoiseCodes = 0.0f;
 		// Audit 2026-10-16: the faithful branch's textures (they become the
 		// picture) in 32-bit float. Set by the renderer from its rgba32f FBOs'
 		// effective state (fbo_float32); falls back to 16-bit float when the
@@ -86,6 +96,7 @@ namespace AdaptiveDownscale
 			a.shadowBias == b.shadowBias && a.chromaSsim == b.chromaSsim && a.antiring == b.antiring &&
 			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho && a.faithfulAuto == b.faithfulAuto &&
 			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise &&
+			a.residualGrainGuard == b.residualGrainGuard &&
 			a.float32Picture == b.float32Picture;
 	}
 

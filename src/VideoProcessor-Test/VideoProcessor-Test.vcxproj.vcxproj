@@ -315,6 +315,7 @@
     <ClCompile Include="VectorStoreTests.cpp" />
     <ClCompile Include="MotionValidityTests.cpp" />
     <ClCompile Include="InterpolationPolicyTests.cpp" />
+    <ClCompile Include="GrainPreservationTests.cpp" />
     <ClCompile Include="KernelInverseTests.cpp" />
     <ClCompile Include="WindowResizeLayoutTests.cpp" />
     <ClCompile Include="AlphaPresentationTelemetryTests.cpp" />

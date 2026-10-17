@@ -381,6 +381,18 @@ namespace LibplaceboRenderParameters
 			return false;
 		}
 
+		// deband_grain off (owner 2026-10-17, grain audit): libplacebo's deband adds no
+		// noise of its own (its grain, 0.29 8-bit code RMS of fresh random noise on every
+		// frame at the default 4.0); VP's output dither does that job. Its threshold,
+		// radius and iterations stay as selected. on = the established parameters.
+		if (!settings.debandGrain && projection.renderParams.deband_params)
+		{
+			if (projection.renderParams.deband_params != &projection.debandParams)
+				projection.debandParams = *projection.renderParams.deband_params;
+			projection.debandParams.grain = 0.0f;
+			projection.renderParams.deband_params = &projection.debandParams;
+		}
+
 #if defined(VP_LIBPLACEBO_BETA)
         projection.colorMapParams.dynamic_target = settings.dynamicTarget;
         projection.colorMapParams.vp_gamut_compression = settings.customToneMapping;
