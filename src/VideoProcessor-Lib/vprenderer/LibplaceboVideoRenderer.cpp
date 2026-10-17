@@ -6663,7 +6663,11 @@ struct LibplaceboVideoRenderer::Impl
 				", \"source_min_nits\": " << sourceImage.color.hdr.min_luma <<
 				", \"source_max_nits\": " << sourceImage.color.hdr.max_luma <<
 				", \"scene_peak_pq\": " << sourceImage.color.hdr.max_pq_y <<
-				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y << "},\n"
+				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y <<
+				", \"scene_min_present\": " <<
+				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? "true" : "false") <<
+				", \"scene_min_nits\": " <<
+				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? captureDvLuminance.sceneMin : 0.0f) << "},\n"
 			<< "  \"source_levels\": \"" <<
 				(sourceImage.repr.levels == PL_COLOR_LEVELS_LIMITED ?
 					"limited" : "full") << "\",\n"
@@ -15261,16 +15265,16 @@ struct LibplaceboVideoRenderer::Impl
 				DebugLog::Log("Dolby Vision RGB tunnel: new display-management matrix");
 			}
 			image.repr.dovi = found->second.get();
-			const auto luminance = DolbyVisionLuminancePolicy::Apply(dm, image.color.hdr);
+			const auto luminance = DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, image.color.hdr);
 			frameDvLuminance = luminance;
 			const uint64_t luminanceTick = GetTickCount64();
 			if (luminanceTick >= nextSourceLuminanceLogTick)
 			{
 				nextSourceLuminanceLogTick = luminanceTick + 5000;
-				DebugLog::Log("Dolby Vision luminance: range=%s source_min_nits=%.4f source_max_nits=%.2f scene_present=%d scene_peak_nits=%.2f scene_average_nits=%.2f MaxCLL=unknown MaxFALL=unknown",
+				DebugLog::Log("Dolby Vision luminance: range=%s source_min_nits=%.4f source_max_nits=%.2f scene_present=%d scene_peak_nits=%.2f scene_average_nits=%.2f scene_min_nits=%.4f MaxCLL=unknown MaxFALL=unknown",
 					luminance.sourceRangeFromMetadata ? "DM" : "fallback",
 					luminance.sourceMin, luminance.sourceMax, luminance.sceneAvailable ? 1 : 0,
-					luminance.sceneMax, luminance.sceneAvg);
+					luminance.sceneMax, luminance.sceneAvg, luminance.sceneMinAvailable ? luminance.sceneMin : -1.0f);
 			}
 			{
 				std::lock_guard<std::mutex> guard(ingressStatusMutex);

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <vprenderer/DolbyVisionLuminancePolicy.h>
+#include <cstring>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -150,6 +151,33 @@ namespace Tests
             dm.sceneMinPq = 0;
             dm.valid = false; // lost metadata never publishes a minimum
             Assert::IsFalse(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+        }
+    
+        TEST_METHOD(SceneMinimumReachesTheStatusButNotTheToneMapper)
+        {
+            // 2026-10-17: the L1 scene minimum is published with the status
+            // (DV card, capture JSON); hdr is written exactly as Apply does.
+            DolbyVisionTunnelFrameMetadata dm;
+            dm.valid = true;
+            dm.sourceMinPq = 62;
+            dm.sourceMaxPq = 3696;
+            dm.hasSceneMetadata = true;
+            dm.sceneMinPq = 410;
+            dm.sceneMaxPq = 3000;
+            dm.sceneAvgPq = 1500;
+            pl_hdr_metadata a{}, b{};
+            const auto plain = DolbyVisionLuminancePolicy::Apply(dm, a);
+            const auto withMin = DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, b);
+            Assert::IsTrue(memcmp(&a, &b, sizeof(a)) == 0, L"hdr unchanged by the scene minimum");
+            Assert::IsFalse(plain.sceneMinAvailable);
+            Assert::IsTrue(withMin.sceneMinAvailable);
+            float nits = 0;
+            Assert::IsTrue(DolbyVisionLuminancePolicy::SceneMinNits(dm, nits));
+            Assert::AreEqual(nits, withMin.sceneMin);
+            Assert::IsTrue(withMin.sceneMin > 0.0f && withMin.sceneMin < withMin.sceneAvg);
+            dm.hasSceneMetadata = false;
+            pl_hdr_metadata c{};
+            Assert::IsFalse(DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, c).sceneMinAvailable);
         }
     };
 }

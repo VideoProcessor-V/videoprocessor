@@ -14827,7 +14827,7 @@ void CVideoProcessorDlg::RefreshModernStatus()
 		status.luminanceTitle = TEXT("DV luminance (nits)");
 		status.luminanceState = TEXT("Waiting");
 		status.luminanceLabels = { TEXT("Source min"), TEXT("Source max"),
-			TEXT("Scene peak"), TEXT("Scene average") };
+			TEXT("Scene peak"), TEXT("Scene avg / min") };
 		status.maxCll = status.maxFall = status.masteringMin = status.masteringMax = TEXT("---");
 		DolbyVisionLuminanceStatus dv;
 		if (m_videoRenderer && m_rendererState == RendererState::RENDERSTATE_RENDERING &&
@@ -14843,7 +14843,10 @@ void CVideoProcessorDlg::RefreshModernStatus()
 				if (dv.sceneAvailable)
 				{
 					status.masteringMin = FormatHdrLuminance(dv.sceneMax);
-					status.masteringMax = FormatHdrLuminance(dv.sceneAvg);
+					// The L1 scene minimum beside the average (2026-10-17); "---"
+					// when L1 carries none.
+					status.masteringMax = FormatHdrLuminance(dv.sceneAvg) + TEXT(" / ") +
+						(dv.sceneMinAvailable ? FormatHdrLuminance(dv.sceneMin) : CString(TEXT("---")));
 				}
 			}
 		}
