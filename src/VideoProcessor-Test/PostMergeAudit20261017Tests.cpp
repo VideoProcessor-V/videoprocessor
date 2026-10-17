@@ -3,9 +3,11 @@
 
 #include <led/LedDriveConfig.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
+#include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/PulldownDetector.h>
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -137,6 +139,55 @@ namespace PostMergeAudit20261017Test
 			// Fresh: the next frame is timed at its arrival, not from the stale re-based base.
 			const double next = t0 + 100 / 23.976;
 			Assert::AreEqual(next, clock.Time(start + 100, next, 23.976), 1e-9);
+		}
+	};
+
+	// C6: the residual grain guard's code -> linear conversion follows the source's
+	// transfer (the shader's rs_slope, mirrored on the CPU), not an assumed 2.2.
+	TEST_CLASS(GrainGuardTransferTests)
+	{
+	public:
+		TEST_METHOD(SlopeFollowsTheSourceTransfer)
+		{
+			using namespace AdaptiveDownscale;
+			// Gamma 2.2: the earlier formula, 2.2 x code^1.2.
+			pl_color_space g22{};
+			g22.primaries = PL_COLOR_PRIM_BT_709;
+			g22.transfer = PL_COLOR_TRC_GAMMA22;
+			const GuardTransferParams t22 = GuardTransfer(g22);
+			for (double y : { 0.01, 0.1, 0.5, 0.9 })
+				Assert::AreEqual(2.2 * std::pow(std::pow(y, 1.0 / 2.2), 1.2), GuardSlope(t22, y), 1e-2 * GuardSlope(t22, y));
+			// Gamma 2.4 differs from it (the 2.2 assumption was wrong there).
+			pl_color_space g24 = g22;
+			g24.transfer = PL_COLOR_TRC_GAMMA24;
+			const GuardTransferParams t24 = GuardTransfer(g24);
+			Assert::AreEqual(2.4 * std::pow(std::pow(0.1, 1.0 / 2.4), 1.4), GuardSlope(t24, 0.1), 1e-2);
+			// Code and linear invert each other for every mode.
+			pl_color_space bt1886 = g22, pq = g22, hlg = g22;
+			bt1886.transfer = PL_COLOR_TRC_BT_1886;
+			pq.primaries = hlg.primaries = PL_COLOR_PRIM_BT_2020;
+			pq.transfer = PL_COLOR_TRC_PQ;
+			hlg.transfer = PL_COLOR_TRC_HLG;
+			for (const pl_color_space& csp : { g22, g24, bt1886, pq, hlg })
+			{
+				const GuardTransferParams t = GuardTransfer(csp);
+				for (double c : { 0.1, 0.3, 0.5, 0.75, 0.9 })
+				{
+					const double y = GuardLinear(t, c);
+					Assert::AreEqual(c, GuardCode(t, y), 1e-4, L"code(linear(c)) = c");
+					Assert::IsTrue(GuardSlope(t, y) > 0.0);
+				}
+			}
+			// PQ: the slope is PQ's own (finite difference of the ST 2084 curve), far
+			// from a 2.2 power at the same code.
+			const GuardTransferParams tpq = GuardTransfer(pq);
+			Assert::AreEqual(1.0f, tpq.mode, 0.0f);
+			const double c = 0.58;   // about 203 nits
+			const double y = GuardLinear(tpq, c);
+			Assert::AreEqual(1.0, y, 0.05, L"PQ 0.58 is near SDR white");
+			const double numeric = (GuardLinear(tpq, c + 1e-4) - GuardLinear(tpq, c - 1e-4)) / 2e-4;
+			Assert::AreEqual(numeric, GuardSlope(tpq, y), numeric * 1e-2);
+			Assert::IsTrue(std::abs(GuardSlope(tpq, y) - 2.2 * std::pow(std::pow(y, 1.0 / 2.2), 1.2)) > 1.0);
 		}
 	};
 

@@ -5,6 +5,8 @@
 
 #include <vprenderer/NlsMaskMapping.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -128,6 +130,58 @@ namespace AdaptiveDownscale
 	// `floor` at 0.2 and below, in steps of 0.05 (no churn as the reading
 	// moves). SSIM and the CNN sharpen blocking and mosquito noise as if they
 	// were texture.
+	// Post-merge audit 2026-10-17 (general, not fixed): the residual grain guard's
+	// code -> linear-light conversion follows the source's own transfer, as
+	// pl_shader_linearize decodes it, instead of an assumed 2.2. mode 0: power,
+	// a (c + b)^g (gamma 1.8-2.8 and unknown scaled by the nominal peak; BT.1886 with
+	// its black lift; sRGB and the log curves as gamma 2.2, their nearest power);
+	// 1: PQ (1.0 = SDR white, 203 nits); 2: HLG - a = nominal peak, b = black lift,
+	// g = system gamma, the OOTF applied on luma.
+	struct GuardTransferParams
+	{
+		float mode = 0.0f;
+		float a = 1.0f;
+		float b = 0.0f;
+		float g = 2.2f;
+	};
+	GuardTransferParams GuardTransfer(const pl_color_space& source);
+	// CPU mirrors of the shader's rs_lin / rs_code / rs_slope (tests).
+	inline double GuardLinear(const GuardTransferParams& t, double c)
+	{
+		c = c > 0.0 ? c : 0.0;
+		if (t.mode < 0.5)
+			return t.a * std::pow(c + t.b, static_cast<double>(t.g));
+		if (t.mode < 1.5)
+		{
+			const double e = std::pow(c, 1.0 / 78.84375);
+			const double n = (std::max)(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+			return std::pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
+		}
+		const double x = (1.0 - t.b) * c + t.b;
+		const double s = (x <= 0.5 ? 4.0 * x * x : std::exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
+		return t.a * std::pow((std::max)(s, 0.0), static_cast<double>(t.g));
+	}
+	inline double GuardCode(const GuardTransferParams& t, double y)
+	{
+		y = y > 0.0 ? y : 0.0;
+		if (t.mode < 0.5)
+			return (std::max)(std::pow(y / t.a, 1.0 / t.g) - t.b, 0.0);
+		if (t.mode < 1.5)
+		{
+			const double v = std::pow(y * (203.0 / 10000.0), 0.1593017578125);
+			return std::pow((0.8359375 + 18.8515625 * v) / (1.0 + 18.6875 * v), 78.84375);
+		}
+		const double v = std::pow(y / t.a, 1.0 / t.g) * 12.0;
+		const double x = v <= 1.0 ? 0.5 * std::sqrt(v) : 0.17883277 * std::log((std::max)(v - 0.28466892, 1e-6)) + 0.55991073;
+		return (x - t.b) / (std::max)(1.0 - t.b, 1e-6);
+	}
+	inline double GuardSlope(const GuardTransferParams& t, double y)
+	{
+		const double c = (std::max)(GuardCode(t, y), 1e-3);
+		const double lo = (std::max)(c - 1e-3, 0.0), hi = c + 1e-3;
+		return (GuardLinear(t, hi) - GuardLinear(t, lo)) / (hi - lo);
+	}
+
 	inline double BitrateScale(double quality, double floor)
 	{
 		floor = floor < 0.0 ? 0.0 : floor > 1.0 ? 1.0 : floor;

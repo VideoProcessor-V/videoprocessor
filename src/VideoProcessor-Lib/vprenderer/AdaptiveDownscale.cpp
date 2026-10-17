@@ -19,7 +19,10 @@ namespace AdaptiveDownscale
 	{
 		// Luma in 8-bit codes of the encoded picture (a linear PREKERNEL is
 		// re-encoded with 1/2.2 so the code thresholds mean the same in both
-		// light domains), edges, and per-workgroup sums for the grain term.
+		// light domains), edges, and per-workgroup sums for the grain term. That 1/2.2
+		// is a fixed reference domain for the edge / grain thresholds (they were tuned in
+		// it), not a claim about the source; the residual guard's noise limit, which is in
+		// the source's own codes, uses the source transfer (GuardTransfer).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
 float ad_luma(ivec2 p)
@@ -243,7 +246,44 @@ if (q.x < size.x && q.y < size.y) {
 		//   - the held change |rs - r| at most the expected coding-noise RMS (rs_noise,
 		//     from the bitrate-quality reading; 0 = no reading: no clamp), converted to
 		//     linear light when the hooked picture is linear.
+		// Post-merge audit 2026-10-17 (general, not fixed): that conversion is the slope of
+		// the source's own transfer (the hook's orig_color, as pl_shader_linearize decodes
+		// it: power / BT.1886 a (c + b)^g, PQ, HLG with its OOTF on luma) at the pixel's
+		// code, not an assumed 2.2. GuardTransfer() sets rs_trc / rs_a / rs_b / rs_g.
 		const char* const STABILISE_GUARD_DEFINE = R"GLSL(
+float rs_lin(float c)
+{
+    c = max(c, 0.0);
+    if (rs_trc < 0.5)
+        return rs_a * pow(c + rs_b, rs_g);
+    if (rs_trc < 1.5) {
+        float e = pow(c, 1.0 / 78.84375);
+        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+        return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
+    }
+    float x = (1.0 - rs_b) * c + rs_b;
+    float s = (x <= 0.5 ? 4.0 * x * x : exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
+    return rs_a * pow(max(s, 0.0), rs_g);
+}
+float rs_code(float y)
+{
+    y = max(y, 0.0);
+    if (rs_trc < 0.5)
+        return max(pow(y / rs_a, 1.0 / rs_g) - rs_b, 0.0);
+    if (rs_trc < 1.5) {
+        float v = pow(y * (203.0 / 10000.0), 0.1593017578125);
+        return pow((0.8359375 + 18.8515625 * v) / (1.0 + 18.6875 * v), 78.84375);
+    }
+    float v = pow(y / rs_a, 1.0 / rs_g) * 12.0;
+    float x = v <= 1.0 ? 0.5 * sqrt(v) : 0.17883277 * log(max(v - 0.28466892, 1e-6)) + 0.55991073;
+    return (x - rs_b) / max(1.0 - rs_b, 1e-6);
+}
+float rs_slope(float y)
+{
+    float c = max(rs_code(y), 1e-3);
+    float lo = max(c - 1e-3, 0.0), hi = c + 1e-3;
+    return (rs_lin(hi) - rs_lin(lo)) / (hi - lo);
+}
 #define STABILISE_AND_STORE { \
     const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
     float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
@@ -264,7 +304,7 @@ if (q.x < size.x && q.y < size.y) {
             float lim = rs_noise; \
             if (rs_linear > 0.5) { \
                 float yl = max(dot(fa.rgb, kr), 0.0); \
-                lim *= 2.2 * pow(max(pow(yl, 1.0 / 2.2), 1e-3), 1.2); \
+                lim *= rs_slope(yl); \
             } \
             rs = r + clamp(rs - r, -lim, lim); \
         } \
@@ -428,6 +468,58 @@ if (q.x < size.x && q.y < size.y) {
 		settings = value;
 		sequence = sourceSequence;
 		frameSeconds = seconds > 0.0f ? seconds : 1.0f / 24.0f;
+	}
+
+	GuardTransferParams GuardTransfer(const pl_color_space& source)
+	{
+		GuardTransferParams t;
+		float cspMin = 0.0f, cspMax = 1.0f;
+		pl_nominal_luma_params luma{};
+		luma.color = &source;
+		luma.metadata = PL_HDR_METADATA_HDR10;
+		luma.scaling = PL_HDR_NORM;
+		luma.out_min = &cspMin;
+		luma.out_max = &cspMax;
+		pl_color_space_nominal_luma_ex(&luma);
+		if (!(cspMax > 0.0f)) cspMax = 1.0f;
+		switch (source.transfer)
+		{
+		case PL_COLOR_TRC_LINEAR:
+			t.g = 1.0f;
+			break;
+		case PL_COLOR_TRC_BT_1886:
+		{
+			const float lb = std::pow((std::max)(cspMin, 0.0f), 1.0f / 2.4f);
+			const float lw = std::pow(cspMax, 1.0f / 2.4f);
+			t.a = std::pow((std::max)(lw - lb, 1e-6f), 2.4f);
+			t.b = lb / (std::max)(lw - lb, 1e-6f);
+			t.g = 2.4f;
+			break;
+		}
+		case PL_COLOR_TRC_GAMMA18: t.g = 1.8f; t.a = cspMax - cspMin; break;
+		case PL_COLOR_TRC_GAMMA20: t.g = 2.0f; t.a = cspMax - cspMin; break;
+		case PL_COLOR_TRC_GAMMA24: t.g = 2.4f; t.a = cspMax - cspMin; break;
+		case PL_COLOR_TRC_GAMMA26: t.g = 2.6f; t.a = cspMax - cspMin; break;
+		case PL_COLOR_TRC_GAMMA28: t.g = 2.8f; t.a = cspMax - cspMin; break;
+		case PL_COLOR_TRC_PQ:
+			t.mode = 1.0f;
+			break;
+		case PL_COLOR_TRC_HLG:
+		{
+			const float hlgRef = 1000.0f / PL_COLOR_SDR_WHITE;
+			t.mode = 2.0f;
+			t.a = cspMax;
+			t.g = 1.2f * std::pow(1.111f, std::log2(cspMax / hlgRef));
+			t.b = std::sqrt(3.0f * std::pow((std::max)(cspMin, 0.0f) / cspMax, 1.0f / t.g));
+			break;
+		}
+		default:   // unknown, gamma 2.2, sRGB, the log curves: gamma 2.2
+			t.g = 2.2f;
+			t.a = (std::max)(cspMax - cspMin, 1e-6f);
+			break;
+		}
+		if (!(t.a > 0.0f)) t.a = 1.0f;
+		return t;
 	}
 
 	pl_hook_res Module::RunMeasure(void* priv, const pl_hook_params* params)
@@ -865,11 +957,16 @@ if (q.x < size.x && q.y < size.y) {
 		const float rsNoise = settings.residualCodingNoiseCodes > 0.0f ? settings.residualCodingNoiseCodes / 255.0f : 0.0f;
 		const float rsLinear = p->color.transfer == PL_COLOR_TRC_LINEAR ? 1.0f : 0.0f;
 		const float rsGrainFloor = settings.grainFloor;
+		const GuardTransferParams rsTransfer = GuardTransfer(p->orig_color ? *p->orig_color : p->color);
 		if (guard)
 		{
 			v.push_back({ pl_var_float("rs_noise"), &rsNoise, true });
 			v.push_back({ pl_var_float("rs_linear"), &rsLinear, true });
 			v.push_back({ pl_var_float("rs_grain_floor"), &rsGrainFloor, true });
+			v.push_back({ pl_var_float("rs_trc"), &rsTransfer.mode, true });
+			v.push_back({ pl_var_float("rs_a"), &rsTransfer.a, true });
+			v.push_back({ pl_var_float("rs_b"), &rsTransfer.b, true });
+			v.push_back({ pl_var_float("rs_g"), &rsTransfer.g, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),
