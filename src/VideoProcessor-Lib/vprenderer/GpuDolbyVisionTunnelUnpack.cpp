@@ -70,10 +70,9 @@ GpuDolbyVisionTunnelUnpack::GpuDolbyVisionTunnelUnpack(pl_log log, pl_gpu gpuIn)
 	dispatch = gpu ? pl_dispatch_create(log, gpu) : nullptr;
 	// Tests: VP_TEST_DV_UNPACK_FAIL=1, read once per unpack object (one per
 	// renderer device), not per frame.
-	char* v = nullptr;
-	size_t n = 0;
-	forceFail = _dupenv_s(&v, &n, "VP_TEST_DV_UNPACK_FAIL") == 0 && v && v[0] == '1';
-	std::free(v);
+	// The process environment itself (SetEnvironmentVariable / _putenv both).
+	char v[4] = {};
+	forceFail = GetEnvironmentVariableA("VP_TEST_DV_UNPACK_FAIL", v, sizeof(v)) > 0 && v[0] == '1';
 }
 
 GpuDolbyVisionTunnelUnpack::~GpuDolbyVisionTunnelUnpack()
