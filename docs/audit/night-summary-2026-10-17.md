@@ -18,9 +18,10 @@ Agents ran on Opus 5.5; GPU tests run by me (or one agent with exclusive GPU), C
 | cb682f09 | DV tunnel GPU unpack (switch `dv_tunnel_gpu_unpack`, off): CPU 2.6 ms -> 0.007 ms at 4K, GPU pass 0.41 ms, bit-exact on hardware; fixes DV showing black with native RGB ingest on |
 | 37b68faa | GUI: crash state kept on fatal errors, no key auto-repeat, Enter no longer restarts the renderer, display recovery never blocks startup |
 | (merge) | 50/60p interpolation: Stage A + Stage B (any ratio, e.g. 60p on 50 Hz) + gap fill + one vectors-valid state; `interpolation` OFF by default; reviewed + fixed; GPU 24/24 |
+| c0ae8edf | Interpolator second-review fixes (OFF path byte-identical) + DV trims review fixes (no near-black specks, continuous at black, corrupt codes rejected) |
 | (merge) | DV next: L1 scene minimum on the DV card / JSON (plugin API 32: deploy EXE + DLL together); source resolution + re-base on DV; L2 trims (non-certified, `dv_trims`, off) |
 
-Test status at the final merge (CPU 1093/1093, Config 122/0/1, GPU smoke 80/80 incl. interpolation and DV). Earlier, at 392cc2ec: CPU ~890 targeted tests pass; Config 121 pass / 0 fail / 1 skip (needs a real
+Test status at c0ae8edf: CPU 1100/1100, Config 122/0/1, GPU smoke 80/80 incl. interpolation and DV. Earlier, at 392cc2ec: CPU ~890 targeted tests pass; Config 121 pass / 0 fail / 1 skip (needs a real
 window); GPU smoke 57/57 (pixel identity, stream faults, re-base chain, sigma-delta, LED compensation,
 extended range, SDR tone shape, bars, look-ahead, low latency).
 
