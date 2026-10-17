@@ -236,7 +236,7 @@ namespace VideoProcessorTest
 				CComQIPtr<IMediaControl> control(graph);
 				CComQIPtr<IMediaEventEx> events(graph);
 				CComQIPtr<IMediaSeeking> seeking(graph);
-				CComQIPtr<IQualProp> quality(renderer);
+				CComQIPtr<IQualProp, &IID_IQualProp> quality(renderer);
 				Assert::IsTrue(control && events && quality);
 				long abortCode = 0;
 
