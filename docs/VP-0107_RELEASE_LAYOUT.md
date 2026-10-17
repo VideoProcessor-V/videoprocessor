@@ -74,6 +74,19 @@ SHA-256 are recorded in the generated requirement JSON. Update the policy floor
 when third-party headers/binaries require a newer runtime patch: a PE header
 cannot tell us the full compiler/header version used for a prebuilt dependency.
 
+**EXE/DLL build identity (hunt 2, 2026-10-17).** `VideoProcessor.exe` and the renderer
+DLLs (`vprenderer\VideoProcessorVPRenderer.dll`, `vprenderer-beta\VideoProcessorVPRendererBeta.dll`)
+are one versioned runtime pair. Each embeds a build ID (`VP-BUILD-ID:` plus 32 hex digits), a
+content hash of the sources and build inputs generated once per build by
+`tools/generate_build_identity.ps1` (VideoProcessor-Lib is the single writer). The runtime records
+are schema 2 and carry that `buildId`, read from the binary. The packager
+(`Assert-VpPairedBuildIdentity`, driven by `buildIdentity.pairedArtifacts` in
+`packaging/release-manifest.json`) fails unless every paired binary's record is current, names the
+ID embedded in the binary, and all IDs are equal: a GUI-only build or a manual copy cannot ship a
+stale DLL. At run time the EXE refuses a DLL of another build (log line and the renderer status
+text name both IDs); there is no override. Schema-1 records require a rebuild. Run
+`tools/test_build_identity.ps1 [-BuildRoot x64\Release]` (also run by CI).
+
 Setup reports old app-local Microsoft runtime DLLs that could shadow the system
 runtime, and asks the user to extract into a clean folder. It does not remove DLLs,
 modify VP settings, start VP, or downgrade a sufficient runtime. For managed

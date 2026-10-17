@@ -210,6 +210,7 @@
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
     <ClInclude Include="CrashState.h" />
+    <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />
     <ClInclude Include="DisplayMode.h" />
     <ClInclude Include="DisplayRefreshRatePolicy.h" />
@@ -376,6 +377,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="CrashState.cpp" />
+    <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="WindowsDisplayDiagnostics.cpp" />
     <ClCompile Include="ACaptureDevice.cpp" />
     <ClCompile Include="ActivePictureDecisionTimeline.cpp" />

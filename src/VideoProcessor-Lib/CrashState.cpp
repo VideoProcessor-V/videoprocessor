@@ -49,9 +49,14 @@ namespace CrashState
 		Recorder* g_handlerRecorder = nullptr;
 		LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = nullptr;
 		std::terminate_handler g_previousTerminate = nullptr;
-		// Bug hunt 2026-10-17: abort() on any thread (CRT invalid-parameter /
-		// pure-call paths, assert, an explicit abort in a library) bypassed
-		// both handlers above and left no crash state.
+		// Bug hunt 2026-10-17: abort() on any thread (assert, an explicit abort
+		// in a library, a std::terminate on a worker thread, whose per-thread
+		// terminate handler is the CRT default) bypassed both handlers above and
+		// left no crash state. Hunt 2 LOW-3: CRT invalid-parameter and pure-call
+		// failures do not call abort() in Release (they fail fast, bypassing every
+		// handler here); they have their own handlers below. /GS and heap
+		// corruption fail-fast terminations still leave no crash: line (use WER
+		// LocalDumps for those).
 		using AbortSignalHandler = void(__cdecl*)(int);
 		AbortSignalHandler g_previousAbort = SIG_DFL;
 		// Set once a terminate has recorded, so the abort() it raises does not
@@ -104,6 +109,35 @@ namespace CrashState
 				g_terminateRecorded.store(true);
 			}
 			if (g_previousTerminate) g_previousTerminate();
+			std::abort();
+		}
+
+		// Hunt 2 LOW-3: process-wide in the shared UCRT (every /MD module). Record,
+		// then end the process with abort() as before (the abort handler sees
+		// g_terminateRecorded and does not record twice).
+		void RecordFatalFromHandler(const char* label)
+		{
+			Recorder* recorder = g_handlerRecorder;
+			if (recorder && !t_inCrashHandler && !g_terminateRecorded.load())
+			{
+				recorder->WriteFromHandler(label);
+				t_inCrashHandler = true;
+				recorder->WriteMinidump(nullptr);
+				t_inCrashHandler = false;
+				g_terminateRecorded.store(true);
+			}
+		}
+
+		void __cdecl InvalidParameterHandler(const wchar_t*, const wchar_t*, const wchar_t*,
+			unsigned int, uintptr_t)
+		{
+			RecordFatalFromHandler("CRT invalid parameter");
+			std::abort();
+		}
+
+		void __cdecl PurecallHandler()
+		{
+			RecordFatalFromHandler("pure virtual call");
 			std::abort();
 		}
 
@@ -372,6 +406,9 @@ namespace CrashState
 		if (previousAbort != SIG_ERR && previousAbort != AbortHandler)
 			g_previousAbort = previousAbort;
 		_set_abort_behavior(0, _CALL_REPORTFAULT);
+		// Hunt 2 LOW-3: these fail fast in Release instead of calling abort().
+		_set_invalid_parameter_handler(InvalidParameterHandler);
+		_set_purecall_handler(PurecallHandler);
 	}
 
 	bool Recorder::WriteMinidump(void* exceptionPointers)

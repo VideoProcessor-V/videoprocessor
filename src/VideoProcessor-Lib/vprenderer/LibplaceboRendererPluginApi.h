@@ -21,8 +21,21 @@
 // scene minimum in DolbyVisionLuminanceStatus (2026-10-17);
 // 33: StopLedDriveForShutdown (2026-10-17 integration);
 // 34: GetContentIntentStatus and the DV L5/L6/L11 fields in
-// DolbyVisionTunnelFrameMetadata (content intent, 2026-10-17).
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 34;
+// DolbyVisionTunnelFrameMetadata (content intent, 2026-10-17; the tunnel
+// metadata itself stays inside the DLL, GetContentIntentStatus needed it);
+// 35: the required build-ID export below (hunt 2, 2026-10-17). Raised so an
+// older executable, which does not check build IDs, refuses this DLL too.
+//
+// The counter is maintained by hand and can collide across branches (the MPC
+// branch also plans 35) or miss a layout change. The build ID is the
+// mechanical check: the loader refuses any DLL whose
+// VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
+// (VpBuildIdentity.h), so only a DLL from the same build loads.
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 35;
+static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
+	"VideoProcessorLibplaceboGetBuildId";
+// Returns the DLL's 32-hex-digit build ID (static storage); never throws.
+using VideoProcessorLibplaceboGetBuildIdFn = const char* (__cdecl *)();
 static constexpr const char* VP_LIBPLACEBO_FLAVOR_EXPORT = "VideoProcessorLibplaceboIsBeta";
 static constexpr const char* VP_LIBPLACEBO_VERSION_EXPORT =
 	"VideoProcessorLibplaceboGetApiVersion";

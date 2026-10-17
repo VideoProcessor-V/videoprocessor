@@ -100,6 +100,7 @@ public:
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;
+	void SetPostStallResetTelemetrySuppressedUntil(uint64_t untilMs) override;
 	bool StopLedDriveForShutdown() override;
 	void ResumeLedDriveAfterTest() override;
 	bool SupportsNativeStatsOverlay() const override;
