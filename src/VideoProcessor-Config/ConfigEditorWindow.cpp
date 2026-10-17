@@ -5398,6 +5398,61 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "converts it to 12-bit RGB when it offers that for the mode (full precision), otherwise 10-bit 4:2:2. "
         "10-bit 4:2:2: always the card's 10-bit YCbCr. Refuse: the earlier behaviour, no picture."));
     hardwareForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
+    // Hunt 2 (2026-10-17, every setting has a control): [decklink] RGB packing,
+    // [directshow.conversion] and [directshow.ppm]. The first entry of each choice
+    // leaves the key unset (the runtime default).
+    const auto deckLinkPacking = [this, hardwareForm](const QString& key, const QString& label,
+        const QStringList& packings, const QString& defaults)
+    {
+        QStringList values{ QString(), QStringLiteral("AUTO") };
+        QStringList labels{ QStringLiteral("Not set (AUTO: %1)").arg(defaults), QStringLiteral("AUTO (%1)").arg(defaults) };
+        for (const QString& packing : packings) { values << packing; labels << packing; }
+        auto* combo = bindChoiceField(QStringLiteral("decklink"), key, values, labels);
+        combo->setToolTip(QStringLiteral(
+            "DeckLink only: host-memory packing requested for detected RGB input at this depth. AUTO keeps the "
+            "established ARGB / r210 / R12B. The device and mode are checked; an unsupported packing falls "
+            "back safely and is logged."));
+        hardwareForm->addRow(label, combo);
+    };
+    deckLinkPacking(QStringLiteral("rgb_8bit_packing"), QStringLiteral("8-bit RGB packing (DeckLink)"),
+        { QStringLiteral("ARGB"), QStringLiteral("BGRA") }, QStringLiteral("ARGB"));
+    deckLinkPacking(QStringLiteral("rgb_10bit_packing"), QStringLiteral("10-bit RGB packing (DeckLink)"),
+        { QStringLiteral("R210"), QStringLiteral("R10B"), QStringLiteral("R10L") }, QStringLiteral("r210"));
+    deckLinkPacking(QStringLiteral("rgb_12bit_packing"), QStringLiteral("12-bit RGB packing (DeckLink)"),
+        { QStringLiteral("R12B"), QStringLiteral("R12L") }, QStringLiteral("R12B"));
+    auto* conversionMethod = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("conversion_method"),
+        { QString(), QStringLiteral("auto"), QStringLiteral("simd"), QStringLiteral("optimized"), QStringLiteral("standard") },
+        { QStringLiteral("Not set (Auto)"), QStringLiteral("Auto"), QStringLiteral("SIMD"), QStringLiteral("Optimized"),
+          QStringLiteral("Standard") });
+    conversionMethod->setToolTip(QStringLiteral(
+        "DirectShow path: the CPU method that converts v210 capture to P010. Auto picks the fastest available."));
+    hardwareForm->addRow(QStringLiteral("P010 conversion method (DirectShow)"), conversionMethod);
+    auto* chromaDownsampling = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("chroma_downsampling"),
+        { QString(), QStringLiteral("AVERAGE"), QStringLiteral("LEGACY"), QStringLiteral("ADVANCED") },
+        { QStringLiteral("Not set (Average)"), QStringLiteral("Average adjacent rows"),
+          QStringLiteral("Legacy: even rows, no averaging"), QStringLiteral("Advanced: Lanczos-3 (more CPU)") });
+    chromaDownsampling->setToolTip(QStringLiteral(
+        "DirectShow path: 4:2:2 to 4:2:0 chroma for P010. Average (default) averages adjacent chroma rows; "
+        "Legacy takes the even rows; Advanced uses 12-tap Lanczos-3 vertical filtering (more CPU, possible ringing)."));
+    hardwareForm->addRow(QStringLiteral("P010 chroma downsampling (DirectShow)"), chromaDownsampling);
+    for (const auto& cores : { std::make_pair(QStringLiteral("min_core_count"), QStringLiteral("P010 conversion helpers, minimum")),
+        std::make_pair(QStringLiteral("max_core_count"), QStringLiteral("P010 conversion helpers, maximum")) })
+    {
+        auto* count = bindTextField(QStringLiteral("directshow.conversion"), cores.first);
+        count->setValidator(new QIntValidator(1, INT_MAX, count));
+        count->setPlaceholderText(QStringLiteral("1 (default)"));
+        count->setToolTip(QStringLiteral(
+            "DirectShow path: helper threads for the P010 conversion, not counting the calling thread. Empty = 1."));
+        hardwareForm->addRow(cores.second, count);
+    }
+    auto* ppm = bindTextField(QStringLiteral("directshow.ppm"), QStringLiteral("ppm"));
+    ppm->setValidator(new QRegularExpressionValidator(QRegularExpression(
+        QStringLiteral("^(|[Aa][Uu][Tt][Oo]|-?(1000000|[0-9]{1,6}))$")), ppm));
+    ppm->setPlaceholderText(QStringLiteral("Not set (no correction)"));
+    ppm->setToolTip(QStringLiteral(
+        "DirectShow path: clock correction in parts per million for every source rate. AUTO measures it; a number "
+        "from -1000000 to 1000000 applies it; empty applies none."));
+    hardwareForm->addRow(QStringLiteral("Clock PPM correction (DirectShow)"), ppm);
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);
     behaviorLayout->setContentsMargins(0, 0, 0, 0);
@@ -5409,6 +5464,13 @@ QWidget* ConfigEditorWindow::createStartupPage()
         configuredBooleanValue(value(QStringLiteral("general"),
             QStringLiteral("no_ui")), false)));
     behaviorLayout->addWidget(bindCheckField(QStringLiteral("Start minimized"), QStringLiteral("general"), QStringLiteral("startminimized")));
+    // Hunt 2 (2026-10-17): VP-0179 recovery policy, read once at startup (default on).
+    auto* boundedRecovery = bindCheckField(QStringLiteral("Bounded invalid-capture recovery"),
+        QStringLiteral("general"), QStringLiteral("bounded_invalid_capture_recovery"), true);
+    boundedRecovery->setToolTip(QStringLiteral(
+        "On (default): a bounded 1500 ms grace after an invalid capture state; only a valid capture state cancels "
+        "recovery. Off: the earlier recovery, which keeps the frame counter. Takes effect when VP restarts."));
+    behaviorLayout->addWidget(boundedRecovery);
     // Delta 6 (settings first): the saved state of what a key or a main-window
     // control can change.
     auto* statsOverlay = bindCheckField(QStringLiteral("Show statistics overlay"),
@@ -9367,6 +9429,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* offset = addText(QStringLiteral("Inward offset / Classic padding"), QStringLiteral("offset_pixels"), QStringLiteral("source pixels"));
         offset->setValidator(new QIntValidator(0,500,offset));
         offset->setToolTip(QStringLiteral("Offsets the whole moved subtitle box: bottom subtitles move higher and top subtitles move lower. Text stays centered within the box; extension to the black bar does not count toward centering. In Classic, this is the original subtitle padding."));
+        // Hunt 2 (2026-10-17): detection keys every Subtitles profile reads (LVR ~3683),
+        // which had no control. Runtime defaults 250 ms / 20 px.
+        auto* detectionHold = addText(QStringLiteral("Detection hold"), QStringLiteral("subtitle_hold_ms"), QStringLiteral("ms"));
+        detectionHold->setValidator(new QIntValidator(0,1000,detectionHold));
+        detectionHold->setToolTip(QStringLiteral("How long a detected subtitle box is kept after detection loses it (0-1000 ms, default 250), "
+            "so a flicker in detection does not drop the box for a frame or two."));
+        auto* nearBar = addText(QStringLiteral("Near-bar distance"), QStringLiteral("subtitle_near_bar_px"), QStringLiteral("source pixels"));
+        nearBar->setValidator(new QIntValidator(0,200,nearBar));
+        nearBar->setToolTip(QStringLiteral("How close to the black bar subtitle text must be to count as a bar subtitle "
+            "(0-200 source pixels, default 20)."));
         auto* commonForm=form;
         form = addCollapsibleSection(QStringLiteral("classic"), QStringLiteral("Classic picture movement"), QString(), true);
         auto* classicSection=profileFieldsLayout->itemAt(profileFieldsLayout->count()-1)->widget();
@@ -9871,6 +9943,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if(key == QStringLiteral("subtitle_engage_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_ENGAGE_DRIFT_MS);
                 if(key == QStringLiteral("subtitle_release_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_RELEASE_DRIFT_MS);
                 if(key == QStringLiteral("subtitle_target_buffer_pixels")) return QStringLiteral("10");
+                if(key == QStringLiteral("subtitle_hold_ms")) return QStringLiteral("250");
+                if(key == QStringLiteral("subtitle_near_bar_px")) return QStringLiteral("20");
                 if(key == QStringLiteral("subtitle_text_color")) return QStringLiteral("FFFFFF");
                 if(key == QStringLiteral("subtitle_generated_gray_color")) return value(section,QStringLiteral("type"))==QStringLiteral("black") ? QStringLiteral("000000") : QStringLiteral("040404");
                 if(key == QStringLiteral("minimum_headroom_pixels")) return QStringLiteral("12");

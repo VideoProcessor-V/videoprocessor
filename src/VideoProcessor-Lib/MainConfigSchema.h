@@ -131,10 +131,157 @@ namespace MainConfigSchema
 		};
 	}
 
+	// The rule lists below are exposed (hunt 2, 2026-10-17) so the Config coverage
+	// test checks every validated key; Validate uses the same lists.
+	inline ConfigSchema::KeyRule BoundedInvalidCaptureRecoveryRule()
+	{
+		return ConfigSchema::Boolean("bounded_invalid_capture_recovery");
+	}
+
+	// [queue] / [queue.<name>]: whole frames, capped; old names still accepted.
+	inline std::vector<ConfigSchema::KeyRule> QueueRules()
+	{
+		return {
+			ConfigSchema::Any("when"),
+			ConfigSchema::Any("shortcut"),
+			ConfigSchema::Any("cycle_shortcut"),
+			ConfigSchema::Integer("queue_size", 1, INT_MAX),
+			ConfigSchema::Integer("lead_frames", 0, 16),
+			ConfigSchema::Integer("target_frames", 0, 16),
+			ConfigSchema::Integer("target_latency_ms", 0, 1000),
+			ConfigSchema::Integer("active_picture_lookahead_frames", 0, 8),
+			ConfigSchema::Integer("startup_preroll_frames", 0, 16),
+			ConfigSchema::Integer("steady_reserve_frames", 0, 16),
+			ConfigSchema::Integer("reset_after_render_restart_seconds", 1, INT_MAX),
+			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200),
+			// Owner 2026-10-16: VP's low-latency path as a queue property.
+			ConfigSchema::Choice("low_latency_path", { "on", "off" })
+		};
+	}
+
+	// [directshow]: presentation lead plus the input-policy overrides of [general].
+	inline std::vector<ConfigSchema::KeyRule> DirectShowRules()
+	{
+		const std::vector<ConfigSchema::KeyRule> general = GeneralRules();
+		return {
+			ConfigSchema::Integer("presentation_lead_frames", 0, 16),
+			general[9],  // frame_offset
+			general[10], // video_conversion
+			general[11], // container_colorspace
+			general[12], // hdr_colorspace
+			general[13], // hdr_luminance
+			general[14], // renderer_start_stop_time_method
+			general[15], // renderer_nominal_range
+			general[16], // renderer_transfer_function
+			general[17], // renderer_transfer_matrix
+			general[18]  // renderer_primaries
+		};
+	}
+
+	// [vprenderer.input_processing]: the VP renderer's input-policy overrides.
+	inline std::vector<ConfigSchema::KeyRule> VpRendererInputRules()
+	{
+		const std::vector<ConfigSchema::KeyRule> general = GeneralRules();
+		return {
+			general[10], // video_conversion
+			general[11], // container_colorspace
+			general[12], // hdr_colorspace
+			general[13]  // hdr_luminance
+		};
+	}
+
+	// [shortcuts] Boolean switches (the shortcut bindings themselves are free-form).
+	inline std::vector<ConfigSchema::KeyRule> ShortcutSwitchRules()
+	{
+		return { ConfigSchema::Boolean("foreground_only"), ConfigSchema::Boolean("global_hotkeys") };
+	}
+
+	// [decklink] capture packing.
+	inline std::vector<ConfigSchema::KeyRule> DeckLinkRules()
+	{
+		return {
+			ConfigSchema::Choice("rgb_8bit_packing", { "AUTO", "ARGB", "BGRA" }),
+			ConfigSchema::Choice("rgb_10bit_packing", { "AUTO", "R210", "R10B", "R10L" }),
+			ConfigSchema::Choice("rgb_12bit_packing", { "AUTO", "R12B", "R12L" }),
+			ConfigSchema::Choice("ycbcr_12bit_capture", { "rgb12", "v210", "off" })
+		};
+	}
+
+	// [directshow.conversion]: the P010 CPU conversion.
+	inline std::vector<ConfigSchema::KeyRule> ConversionRules()
+	{
+		return {
+			ConfigSchema::Choice("conversion_method",
+				{ "auto", "simd", "optimized", "standard" }),
+			ConfigSchema::Integer("min_core_count", 1, INT_MAX),
+			ConfigSchema::Integer("max_core_count", 1, INT_MAX),
+			ConfigSchema::Choice("chroma_downsampling", { "AVERAGE", "LEGACY", "ADVANCED" })
+		};
+	}
+
+	// [directshow.ppm]: clock PPM correction.
+	inline std::vector<ConfigSchema::KeyRule> PpmRules()
+	{
+		return {
+			{
+				"ppm",
+				[](const std::string& value)
+				{
+					const std::string normalized = ConfigFile::NormalizeName(value);
+					if (normalized == "auto") return true;
+					try
+					{
+						size_t consumed = 0;
+						const long long parsed = std::stoll(
+							ConfigFile::Trim(value), &consumed);
+						return consumed == ConfigFile::Trim(value).size() &&
+							parsed >= -1000000 && parsed <= 1000000;
+					}
+					catch (const std::exception&) { return false; }
+				},
+				"AUTO or an integer from -1000000 to 1000000"
+			}
+		};
+	}
+
+	// [queue_recovery]: legacy location of the queue reset keys (Config moves them to [queue.*]).
+	inline std::vector<ConfigSchema::KeyRule> RecoveryRules()
+	{
+		return {
+			ConfigSchema::Integer("reset_after_render_restart_seconds", 1, INT_MAX),
+			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200)
+		};
+	}
+
+	// [lldv] / [lldv.<name>].
+	inline std::vector<ConfigSchema::KeyRule> LldvRules()
+	{
+		return {
+			ConfigSchema::Boolean("dolby_vision_tunnel"),
+			ConfigSchema::Any("when"),
+			ConfigSchema::Any("shortcut"),
+			ConfigSchema::Any("cycle_shortcut"),
+			ConfigSchema::NumberAtLeast("max_cll", 0.0),
+			ConfigSchema::NumberAtLeast("max_fall", 0.0),
+			ConfigSchema::NumberAtLeast("mastering_min_luminance", 0.0),
+			ConfigSchema::NumberAtLeast("mastering_max_luminance", 0.0, false)
+		};
+	}
+
+	// [logging]: retention defaults safely; resolution validates 1-200 before logger startup.
+	inline std::vector<ConfigSchema::KeyRule> LoggingRules()
+	{
+		return {
+			ConfigSchema::Boolean("enabled"),
+			ConfigSchema::Boolean("debug"),
+			ConfigSchema::Any("debug_log_retention")
+		};
+	}
+
 	inline bool Validate(const ConfigFile& config, std::string& error)
 	{
 		error.clear();
-		const auto recoveryRule = ConfigSchema::Boolean("bounded_invalid_capture_recovery");
+		const auto recoveryRule = BoundedInvalidCaptureRecoveryRule();
 		std::string recoveryValue;
 		if (config.TryGetString("general", recoveryRule.key, recoveryValue) &&
 			!recoveryRule.validator(recoveryValue))
@@ -167,22 +314,7 @@ namespace MainConfigSchema
 		// Queue policy is deliberately expressed in whole frames and capped so
 		// a config typo cannot create an impractically deep live queue. The old
 		// names remain accepted for configuration-file compatibility.
-		const std::vector<ConfigSchema::KeyRule> queueRules = {
-			ConfigSchema::Any("when"),
-			ConfigSchema::Any("shortcut"),
-			ConfigSchema::Any("cycle_shortcut"),
-			ConfigSchema::Integer("queue_size", 1, INT_MAX),
-			ConfigSchema::Integer("lead_frames", 0, 16),
-			ConfigSchema::Integer("target_frames", 0, 16),
-			ConfigSchema::Integer("target_latency_ms", 0, 1000),
-			ConfigSchema::Integer("active_picture_lookahead_frames", 0, 8),
-			ConfigSchema::Integer("startup_preroll_frames", 0, 16),
-			ConfigSchema::Integer("steady_reserve_frames", 0, 16),
-			ConfigSchema::Integer("reset_after_render_restart_seconds", 1, INT_MAX),
-			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200),
-			// Owner 2026-10-16: VP's low-latency path as a queue property.
-			ConfigSchema::Choice("low_latency_path", { "on", "off" })
-		};
+		const std::vector<ConfigSchema::KeyRule> queueRules = QueueRules();
 		std::string defaultQueueSection;
 		const bool hasDefaultQueue = QueueConfiguration::ResolveDefaultSection(
 			config, defaultQueueSection);
@@ -194,28 +326,11 @@ namespace MainConfigSchema
 					return false;
 			}
 
-		const std::vector<ConfigSchema::KeyRule> directShowRules = {
-			ConfigSchema::Integer("presentation_lead_frames", 0, 16),
-			commandLineRules[9],  // frame_offset
-			commandLineRules[10], // video_conversion
-			commandLineRules[11], // container_colorspace
-			commandLineRules[12], // hdr_colorspace
-			commandLineRules[13], // hdr_luminance
-			commandLineRules[14], // renderer_start_stop_time_method
-			commandLineRules[15], // renderer_nominal_range
-			commandLineRules[16], // renderer_transfer_function
-			commandLineRules[17], // renderer_transfer_matrix
-			commandLineRules[18]  // renderer_primaries
-		};
+		const std::vector<ConfigSchema::KeyRule> directShowRules = DirectShowRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "directshow", directShowRules, error))
 			return false;
-		const std::vector<ConfigSchema::KeyRule> vpRendererInputRules = {
-			commandLineRules[10], // video_conversion
-			commandLineRules[11], // container_colorspace
-			commandLineRules[12], // hdr_colorspace
-			commandLineRules[13]  // hdr_luminance
-		};
+		const std::vector<ConfigSchema::KeyRule> vpRendererInputRules = VpRendererInputRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "vprenderer.input_processing", vpRendererInputRules, error))
 			return false;
@@ -227,12 +342,7 @@ namespace MainConfigSchema
 		if (!ConfigSchema::ValidateSection(config, "ambient", Ambient::SchemaRules(), error) ||
 			Ambient::PortClashesWithProjector(config, error))
 			return false;
-		const std::vector<ConfigSchema::KeyRule> deckLinkRules = {
-			ConfigSchema::Choice("rgb_8bit_packing", { "AUTO", "ARGB", "BGRA" }),
-			ConfigSchema::Choice("rgb_10bit_packing", { "AUTO", "R210", "R10B", "R10L" }),
-			ConfigSchema::Choice("rgb_12bit_packing", { "AUTO", "R12B", "R12L" }),
-			ConfigSchema::Choice("ycbcr_12bit_capture", { "rgb12", "v210", "off" })
-		};
+		const std::vector<ConfigSchema::KeyRule> deckLinkRules = DeckLinkRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "decklink", deckLinkRules, error))
 			return false;
@@ -250,36 +360,11 @@ namespace MainConfigSchema
 			error = "[shortcuts] key 'global_hotkeys' must be a Boolean";
 			return false;
 		}
-		const std::vector<ConfigSchema::KeyRule> conversionRules = {
-			ConfigSchema::Choice("conversion_method",
-				{ "auto", "simd", "optimized", "standard" }),
-			ConfigSchema::Integer("min_core_count", 1, INT_MAX),
-			ConfigSchema::Integer("max_core_count", 1, INT_MAX),
-			ConfigSchema::Choice("chroma_downsampling", { "AVERAGE", "LEGACY", "ADVANCED" })
-		};
+		const std::vector<ConfigSchema::KeyRule> conversionRules = ConversionRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "directshow.conversion", conversionRules, error))
 			return false;
-		const std::vector<ConfigSchema::KeyRule> ppmRules = {
-			{
-				"ppm",
-				[](const std::string& value)
-				{
-					const std::string normalized = ConfigFile::NormalizeName(value);
-					if (normalized == "auto") return true;
-					try
-					{
-						size_t consumed = 0;
-						const long long parsed = std::stoll(
-							ConfigFile::Trim(value), &consumed);
-						return consumed == ConfigFile::Trim(value).size() &&
-							parsed >= -1000000 && parsed <= 1000000;
-					}
-					catch (const std::exception&) { return false; }
-				},
-				"AUTO or an integer from -1000000 to 1000000"
-			}
-		};
+		const std::vector<ConfigSchema::KeyRule> ppmRules = PpmRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "directshow.ppm", ppmRules, error))
 			return false;
@@ -326,10 +411,7 @@ namespace MainConfigSchema
 			return false;
 		}
 
-		const std::vector<ConfigSchema::KeyRule> recoveryRules = {
-			ConfigSchema::Integer("reset_after_render_restart_seconds", 1, INT_MAX),
-			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200)
-		};
+		const std::vector<ConfigSchema::KeyRule> recoveryRules = RecoveryRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "queue_recovery", recoveryRules, error))
 			return false;
@@ -348,16 +430,7 @@ namespace MainConfigSchema
 			}
 		}
 
-		const std::vector<ConfigSchema::KeyRule> lldvRules = {
-			ConfigSchema::Boolean("dolby_vision_tunnel"),
-			ConfigSchema::Any("when"),
-			ConfigSchema::Any("shortcut"),
-			ConfigSchema::Any("cycle_shortcut"),
-			ConfigSchema::NumberAtLeast("max_cll", 0.0),
-			ConfigSchema::NumberAtLeast("max_fall", 0.0),
-			ConfigSchema::NumberAtLeast("mastering_min_luminance", 0.0),
-			ConfigSchema::NumberAtLeast("mastering_max_luminance", 0.0, false)
-		};
+		const std::vector<ConfigSchema::KeyRule> lldvRules = LldvRules();
 		for (const std::string& section : config.GetSectionNames())
 			if (section == "lldv" ||
 				(section.rfind("lldv.", 0) == 0 &&
@@ -370,11 +443,7 @@ namespace MainConfigSchema
 		// Debug-log retention deliberately defaults safely instead of making an
 		// otherwise usable configuration fatal. Resolution validates 1-200
 		// before logger startup; the schema still rejects unknown logging keys.
-		const std::vector<ConfigSchema::KeyRule> loggingRules = {
-			ConfigSchema::Boolean("enabled"),
-			ConfigSchema::Boolean("debug"),
-			ConfigSchema::Any("debug_log_retention")
-		};
+		const std::vector<ConfigSchema::KeyRule> loggingRules = LoggingRules();
 		return ConfigSchema::ValidateSection(
 			config, "logging", loggingRules, error);
 	}
