@@ -328,6 +328,7 @@
 	<ClInclude Include="SourceResolutionDetector.h" />
 	<ClInclude Include="VectorStore.h" />
 	<ClInclude Include="MotionValidity.h" />
+	<ClInclude Include="vprenderer\InterpolationPolicy.h" />
 	<ClInclude Include="MotionAhead.h" />
 	<ClInclude Include="KernelInverse.h" />
 	<ClInclude Include="vprenderer\AlphaNativeRgbIngress.h" />

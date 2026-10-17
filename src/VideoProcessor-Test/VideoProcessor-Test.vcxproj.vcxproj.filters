@@ -152,4 +152,5 @@
   <ItemGroup><ClCompile Include="LocalBoundaryRefinementTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="SparseEntryEpisodeRecoveryTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="MotionValidityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="InterpolationPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>
