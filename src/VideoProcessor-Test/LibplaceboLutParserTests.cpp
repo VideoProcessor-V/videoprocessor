@@ -41,6 +41,7 @@
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/SdrToneShape.h>
+#include <vprenderer/DolbyVisionTrims.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
@@ -3640,6 +3641,94 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.3, SdrToneShape::EffectiveRecovery(knee, 0.3), 1e-12, L"auto follows the profile");
 			knee.recovery = 0.0;
 			Assert::AreEqual(0.0, SdrToneShape::EffectiveRecovery(knee, 0.3), 1e-12, L"off");
+		}
+
+		// dv_trims (2026-10-17): DV trims.glsl matches DolbyVisionTrims::ApplyPixel
+		// on the GPU (PQ and gamma signals, neutral = untouched).
+		TEST_METHOD(DolbyVisionTrimShaderMatchesItsReference)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "dv_trims";
+			rule.filename = "DV trims.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 64;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected DV trims.glsl");
+			Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
+			const pl_hook* hook = hooks[0];
+			auto set = [hook](const DolbyVisionTrims::Params& p, const DolbyVisionTrims::Signal& s)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_slope", p.slope));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_offset", p.offset));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_power", p.power));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_chroma_weight", p.chromaWeight));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_sat_gain", p.saturationGain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", s.pq ? 1.0 : 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_gamma", s.gamma));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", s.peakNits));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", s.kr));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", s.kb));
+			};
+			int checked = 0;
+			for (const bool pq : { true, false })
+			{
+				DolbyVisionTrims::Signal signal;
+				signal.pq = pq;
+				signal.peakNits = pq ? 600.0 : 100.0;
+				if (!pq) { signal.kr = 0.2126; signal.kg = 0.7152; signal.kb = 0.0722; }
+				else { signal.kr = 0.2627; signal.kg = 0.6780; signal.kb = 0.0593; }
+				set(DolbyVisionTrims::Params(), signal);
+				const auto unity = fixture.RenderCoordinateField(hook);
+				for (size_t i = 0; i < unity.size(); ++i)
+					Assert::IsTrue(std::abs(static_cast<int>(baseline[i].r) - static_cast<int>(unity[i].r)) <= 1 &&
+						std::abs(static_cast<int>(baseline[i].b) - static_cast<int>(unity[i].b)) <= 1, L"neutral = untouched");
+				DolbyVisionTrims::Params trim;
+				trim.slope = 0.85; trim.offset = 0.02; trim.power = 1.15; trim.chromaWeight = 0.2; trim.saturationGain = 1.2;
+				set(trim, signal);
+				const auto trimmed = fixture.RenderCoordinateField(hook);
+				int changed = 0;
+				for (size_t i = 0; i < trimmed.size(); ++i)
+				{
+					double v[3] = { baseline[i].r / 255.0, baseline[i].g / 255.0, baseline[i].b / 255.0 };
+					DolbyVisionTrims::ApplyPixel(v, trim, signal);
+					const uint8_t got[3] = { trimmed[i].r, trimmed[i].g, trimmed[i].b };
+					for (int c = 0; c < 3; ++c)
+					{
+						const double expected = 255.0 * (std::min)(1.0, (std::max)(0.0, v[c]));
+						Assert::AreEqual(expected, static_cast<double>(got[c]), 1.5,
+							(std::wstring(pq ? L"PQ " : L"gamma ") + L"pixel " + std::to_wstring(i) + L" channel " +
+								std::to_wstring(c)).c_str());
+					}
+					changed += got[0] != baseline[i].r || got[1] != baseline[i].g || got[2] != baseline[i].b;
+					++checked;
+				}
+				Assert::IsTrue(changed > static_cast<int>(trimmed.size()) / 2, L"the trim changes the picture");
+			}
+			// libplacebo's known PRE_OUTPUT log noise (the output-encoding bug the
+			// renderer repairs), as in the SDR tone shape test.
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+			Logger::WriteMessage(("DV trims shader: " + std::to_string(checked) + " pixels matched the reference\n").c_str());
 		}
 
 		// Delta 13: the shader matches its reference on the GPU.
@@ -8970,6 +9059,138 @@ namespace VideoProcessorTest
 			native.Release(gpu);
 			pl_dispatch_destroy(&dispatch);
 			pl_log_destroy(&errorLog);
+		}
+
+		TEST_METHOD(SourceResolutionReadsAndRebasesTheDolbyVisionTunnel)
+		{
+			// 2026-10-17: the DV tunnel is no longer skipped as a "packed signal".
+			// Its decoded intensity plane (12-bit codes << 4, repr DOLBYVISION) is
+			// measured like YCbCr luma: a 540-line picture upscaled to 1080 is
+			// declared 0.5. The re-base resamples the IPT planes and keeps the
+			// Dolby Vision representation (its DM matrices) for libplacebo's decode.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 1920, H = 1080, w = 960, h = 540;
+			auto content = [](int sw, int sh, unsigned seed, double level) {
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				std::vector<double> v(static_cast<size_t>(sw) * sh, level);
+				for (int k = 0; k < 120; ++k)
+				{
+					const double f = 0.004 * std::pow(0.49 / 0.004, u(rng)), a = u(rng) * 3.14159265358979, px = u(rng) * 6.283, py = u(rng) * 6.283;
+					const double fx = f * std::cos(a), fy = f * std::sin(a), amp = 0.012 / std::sqrt(f);
+					std::vector<double> cx(sw), sx(sw);
+					for (int x = 0; x < sw; ++x) { cx[x] = std::cos(6.283185307 * fx * x + px); sx[x] = std::sin(6.283185307 * fx * x + px); }
+					for (int y = 0; y < sh; ++y)
+					{
+						const double cy = std::cos(6.283185307 * fy * y + py) * amp, sy = std::sin(6.283185307 * fy * y + py) * amp;
+						double* row = &v[static_cast<size_t>(y) * sw];
+						for (int x = 0; x < sw; ++x) row[x] += cx[x] * cy - sx[x] * sy;
+					}
+				}
+				return v;
+			};
+			auto upscale = [&](const std::vector<double>& src) {
+				auto k = [](double x) { x = std::fabs(x); return x < 1 ? 1.5 * x * x * x - 2.5 * x * x + 1 : x < 2 ? -0.5 * x * x * x + 2.5 * x * x - 4 * x + 2 : 0.0; };
+				std::vector<double> rows(static_cast<size_t>(W) * h), out(static_cast<size_t>(W) * H);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						const double uu = (x + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
+						double s = 0, ws = 0;
+						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * src[static_cast<size_t>(y) * w + (std::min)(w - 1, (std::max)(0, t))]; ws += wt; }
+						rows[static_cast<size_t>(y) * W + x] = s / ws;
+					}
+				for (int y = 0; y < H; ++y)
+				{
+					const double uu = (y + 0.5) * 0.5 - 0.5; const int c = static_cast<int>(std::floor(uu));
+					for (int x = 0; x < W; ++x)
+					{
+						double s = 0, ws = 0;
+						for (int t = c - 1; t <= c + 2; ++t) { const double wt = k(uu - t); s += wt * rows[static_cast<size_t>((std::min)(h - 1, (std::max)(0, t))) * W + x]; ws += wt; }
+						out[static_cast<size_t>(y) * W + x] = s / ws;
+					}
+				}
+				return out;
+			};
+			// 12-bit intensity codes << 4 (the DV formatter's / GPU unpack's plane).
+			auto upload = [&](const std::vector<double>& v, double offset) {
+				std::vector<uint16_t> data(v.size());
+				for (size_t i = 0; i < v.size(); ++i)
+					data[i] = static_cast<uint16_t>(static_cast<int>(std::lround((std::min)(1.0, (std::max)(0.0, v[i] + offset)) * 4095.0)) << 4);
+				pl_tex_params p{};
+				p.w = W; p.h = H; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			std::vector<uint16_t> neutral(static_cast<size_t>(W / 2) * H * 2, static_cast<uint16_t>(2048 << 4));
+			pl_tex_params cp{};
+			cp.w = W / 2; cp.h = H; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.sampleable = true; cp.initial_data = neutral.data();
+			pl_tex chroma = pl_tex_create(gpu, &cp);
+			Assert::IsNotNull(chroma);
+			pl_dovi_metadata dovi{};
+			dovi.nonlinear.m[0][0] = dovi.nonlinear.m[1][1] = dovi.nonlinear.m[2][2] = 1.0f;
+			dovi.linear.m[0][0] = dovi.linear.m[1][1] = dovi.linear.m[2][2] = 1.0f;
+			pl_frame frame{};
+			frame.num_planes = 2;
+			frame.planes[0].components = 1;
+			frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			frame.planes[1].texture = chroma;
+			frame.planes[1].components = 2;
+			frame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			frame.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			frame.repr.sys = PL_COLOR_SYSTEM_DOLBYVISION;
+			frame.repr.dovi = &dovi;
+			frame.repr.levels = PL_COLOR_LEVELS_FULL;
+			frame.repr.bits.sample_depth = 16; frame.repr.bits.color_depth = 12; frame.repr.bits.bit_shift = 4;
+			frame.color.primaries = PL_COLOR_PRIM_BT_2020;
+			frame.color.transfer = PL_COLOR_TRC_PQ;
+			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+
+			SourceResolutionMonitor::Monitor monitor;
+			double seconds = 0.0;
+			uint64_t sequence = 0;
+			pl_tex first = nullptr;
+			for (int shot = 0; shot < 9; ++shot)
+			{
+				const std::vector<double> picture = upscale(content(w, h, 300 + shot, shot % 2 ? 0.55 : 0.30));
+				for (int i = 0; i < 20; ++i)
+				{
+					pl_tex tex = upload(picture, 0.0008 * i);
+					frame.planes[0].texture = tex;
+					Assert::IsTrue(SourceResolutionMonitor::Monitor::NotReadReason(frame).empty(), L"DV is readable");
+					const unsigned long long before = monitor.Read().frames;
+					monitor.Frame(gpu, dispatch, frame, ++sequence, seconds);
+					pl_gpu_finish(gpu);
+					monitor.Frame(gpu, dispatch, frame, sequence, seconds);
+					for (int t = 0; t < 400 && monitor.Read().frames == before; ++t) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+					seconds += 0.5;
+					if (!first && shot == 0 && i == 0) first = tex;
+					else pl_tex_destroy(gpu, &tex);
+				}
+			}
+			const SourceResolutionMonitor::Snapshot s = monitor.Read();
+			Logger::WriteMessage(("DV: " + SourceResolutionMonitor::Describe(s, monitor.AutoRatio(), true) + "\n").c_str());
+			Assert::IsTrue(s.notRead.empty(), ExtendedRangeGpuProbe::ToWide("not read: " + s.notRead).c_str());
+			Assert::IsTrue(s.reading, L"the DV intensity plane is read");
+			Assert::AreEqual(0.5, s.declaredRatio, 0.01, L"declared: the 540-line source");
+
+			// Re-base to 540 lines: both IPT planes halved, the DV representation kept.
+			frame.planes[0].texture = first;
+			SourceRebase::Module rebase;
+			pl_frame rebased{};
+			Assert::IsTrue(rebase.Apply(gpu, dispatch, frame, 0.5, rebased), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+			Assert::IsTrue(rebased.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && rebased.repr.dovi == &dovi, L"DV decode kept");
+			Assert::AreEqual(W / 2, rebased.planes[0].texture->params.w);
+			Assert::AreEqual(H / 2, rebased.planes[0].texture->params.h);
+			Assert::AreEqual(W / 4, rebased.planes[1].texture->params.w);
+			Assert::AreEqual(H / 2, rebased.planes[1].texture->params.h);
+			rebase.Release(gpu);
+			monitor.Release(gpu);
+			pl_tex_destroy(gpu, &first);
+			pl_tex_destroy(gpu, &chroma);
+			pl_dispatch_destroy(&dispatch);
 		}
 
 		TEST_METHOD(RebasedChartMatchesTheNativeChartThroughTheUpscalePath)

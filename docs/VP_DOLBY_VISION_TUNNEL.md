@@ -111,6 +111,45 @@ device may try the GPU again. A picture neither can unpack (e.g. the mode
 changed under queued payloads) is presented black. Decoded DV has one analysis
 domain key on both routes (placement and strides are left out of it).
 
+## L2 trims (under test, non-certified)
+
+`dv_trims: on` (renderer profile key, Config: Fixes under test; default `off`)
+applies the Dolby Vision Level 2 trim for the display's peak after
+libplacebo's tone mapping (`shaders/DV trims.glsl`, PRE_OUTPUT, before the LED
+stages). This is NOT Dolby display management and is not certified: it is an
+independent reimplementation from the published L2 fields (12-bit codes,
+2048 = neutral) applied to VP's own tone-mapped output.
+
+- Selection: the L2 targets (PQ codes) against the display peak in PQ
+  (libplacebo's inferred target peak). A trim at the peak is used as sent, two
+  bracketing trims are interpolated linearly in PQ, below every target the
+  lowest-target trim is used, above every target the highest-target trim fades
+  to neutral at the mastering peak, and at or above the mastering peak nothing
+  is applied.
+- Per pixel: luminance Y in nits from the output signal (PQ, or gamma x the
+  display peak); CDL `clamp(t * slope + offset, 0, 1) ^ power` on
+  `t = PQ(Y) / PQ(peak)` (continued with slope 1 above the peak, so kept
+  above-white is not clipped; Y <= 0 untouched); RGB scaled by Y'/Y; saturation
+  around Y' by `saturation_gain x (Y'/Y) ^ chroma_weight` (0..2).
+- Off with a calibration 3D LUT, for HLG/other outputs, and for pictures
+  without DM. The log reports the choice ("Dolby Vision trims").
+  The reference maths is `vprenderer/DolbyVisionTrims.h`. Tests:
+  `DolbyVisionTrimsTests` (CPU) and `DolbyVisionTrimShaderMatchesItsReference`
+  (GPU).
+
+## Source resolution on DV
+
+Source-resolution detection no longer skips the tunnel as a "packed
+signal". It measures the decoded intensity (I) plane like YCbCr luma. A
+re-base, manual or auto, resamples the IPT planes before libplacebo's Dolby
+Vision decode, just as YCbCr planes are resampled before their matrix. The
+DV representation (DM matrices) is kept.
+
+The L1 scene minimum is shown on the DV luminance card ("Scene avg / min")
+and in the capture JSON (`scene_min_present`, `scene_min_nits`). It is not
+passed to the tone mapper, because libplacebo has no input for it. The
+renderer API is 32.
+
 ## Luminance status
 
 The Modern view shows a **DV luminance (nits)** card while the tunnel is active:

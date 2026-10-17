@@ -48,6 +48,19 @@ namespace DolbyVisionLuminancePolicy
         return status;
     }
 
+    // Forward declaration for ApplyWithSceneMin.
+    inline bool SceneMinNits(const DolbyVisionTunnelFrameMetadata& dm, float& nits);
+
+    // Apply plus the L1 scene minimum on the status (2026-10-17). hdr is
+    // written exactly as by Apply; the minimum is status only.
+    inline DolbyVisionLuminanceStatus ApplyWithSceneMin(
+        const DolbyVisionTunnelFrameMetadata& dm, pl_hdr_metadata& hdr)
+    {
+        DolbyVisionLuminanceStatus status = Apply(dm, hdr);
+        status.sceneMinAvailable = SceneMinNits(dm, status.sceneMin);
+        return status;
+    }
+
     // audit 2026-10-16: the L1 scene minimum. pl_hdr_metadata has no scene
     // minimum (only max_pq_y / avg_pq_y), and min_luma is the static
     // mastering/source black, so this is deliberately NOT written into hdr.

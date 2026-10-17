@@ -299,6 +299,16 @@ if (tile < int(tiles) && g.y < 256) {
 		return snapshot;
 	}
 
+	std::string Monitor::NotReadReason(const pl_frame& source)
+	{
+		const pl_tex luma = source.num_planes > 0 ? source.planes[0].texture : nullptr;
+		if (!luma) return "no source";
+		// Dolby Vision used to be skipped as a "packed signal"; its planes are the
+		// unpacked 12-bit IPT (I in planes[0]), so it is read like YCbCr luma.
+		if (!luma->params.sampleable) return "source not sampleable";
+		return std::string();
+	}
+
 	void Monitor::Frame(pl_gpu g, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds)
 	{
 		(void)sourceSequence;
@@ -329,10 +339,7 @@ if (tile < int(tiles) && g.y < 256) {
 
 		// What the source is (a change is a discontinuity) and whether it can be read.
 		const pl_tex luma = source.num_planes > 0 ? source.planes[0].texture : nullptr;
-		std::string notRead;
-		if (!luma) notRead = "no source";
-		else if (source.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION) notRead = "Dolby Vision tunnel (packed signal)";
-		else if (!luma->params.sampleable) notRead = "source not sampleable";
+		const std::string notRead = NotReadReason(source);
 		char sig[160];
 		snprintf(sig, sizeof(sig), "%dx%d sys%d lev%d bits%d/%d/%d trc%d prim%d", luma ? luma->params.w : 0, luma ? luma->params.h : 0,
 			static_cast<int>(source.repr.sys), static_cast<int>(source.repr.levels), source.repr.bits.sample_depth,

@@ -72,6 +72,10 @@ namespace SourceResolutionMonitor
 		// the interval has passed and a slot is free, and collects finished
 		// copies for the worker. `seconds`: a monotonic clock.
 		void Frame(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds);
+		// Why a source cannot be measured ("" = it can). Dolby Vision (2026-10-17):
+		// measured on its decoded intensity (I) plane, planes[0] (12-bit IPT-PQ,
+		// the tunnel's luma-like channel), as any YCbCr luma.
+		static std::string NotReadReason(const pl_frame& source);
 		// Any thread: what came before no longer describes the source.
 		void Discontinuity(const char* cause);
 		Snapshot Read() const;

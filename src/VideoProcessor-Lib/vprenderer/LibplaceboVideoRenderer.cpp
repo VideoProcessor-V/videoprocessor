@@ -52,6 +52,7 @@
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
+#include <vprenderer/DolbyVisionTrims.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -1006,6 +1007,10 @@ namespace
 		// Dolby Vision tunnel's picture unpacked on the GPU; the CPU keeps the
 		// DM packet (its pixels only). A failed unpack falls back to the CPU.
 		bool dvTunnelGpuUnpack = false;
+		// DV extension item 3 (owner 2026-10-17, off): Dolby Vision L2 trims as a
+		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
+		// non-certified reimplementation, see DolbyVisionTrims.h).
+		bool dvTrims = false;
 		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
 		// signal by repeated frames is found and shown at its film rate.
 		bool dejudderPulldown = false;
@@ -1270,7 +1275,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|' << settings.dvTrims << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2396,6 +2401,7 @@ namespace
 			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame),
 			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
 			std::make_pair("dv_tunnel_gpu_unpack", &settings.dvTunnelGpuUnpack),
+			std::make_pair("dv_trims", &settings.dvTrims),
 			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
 			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
 			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
@@ -4766,6 +4772,7 @@ struct LibplaceboVideoRenderer::Impl
 	SourceResolutionMonitor::Monitor sourceMonitor;
 	uint64_t sourceMonitorSequence = 0;
 	bool sourceMonitorHistorySet = false;
+	bool sourceMonitorDvLogged = false;
 	// Stage 12 §2b/§2d: VP's debander (this frame's parameters; 0 = off).
 	VpDebander::Module debander;
 	VpDebander::Params vpDebandParams;
@@ -5498,6 +5505,9 @@ struct LibplaceboVideoRenderer::Impl
 	bool outputEncodingRepairLogged = false;
 	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
 	CustomHookChain::Chain sdrToneShape{ GlslHookLoader() };   // delta 13
+	CustomHookChain::Chain dvTrimsHook{ GlslHookLoader() };    // DV L2 trims (dv_trims)
+	bool dvTrimsConfigured = false;
+	std::string dvTrimsLogged;
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
 	bool ledCompensationConfigured = false;
@@ -6259,6 +6269,8 @@ struct LibplaceboVideoRenderer::Impl
 			ledCompensation.Clear();
 			sdrToneShape.Clear();
 			sdrToneShapeConfigured = false;
+			dvTrimsHook.Clear();
+			dvTrimsConfigured = false;
 			ledCompensationConfigured = false;
             pl_mpv_user_shader_destroy(&subtitleCutPasteHook);
             subtitleCutPasteHookFailed = false;
@@ -6844,7 +6856,11 @@ struct LibplaceboVideoRenderer::Impl
 				", \"source_min_nits\": " << sourceImage.color.hdr.min_luma <<
 				", \"source_max_nits\": " << sourceImage.color.hdr.max_luma <<
 				", \"scene_peak_pq\": " << sourceImage.color.hdr.max_pq_y <<
-				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y << "},\n"
+				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y <<
+				", \"scene_min_present\": " <<
+				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? "true" : "false") <<
+				", \"scene_min_nits\": " <<
+				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? captureDvLuminance.sceneMin : 0.0f) << "},\n"
 			<< "  \"source_levels\": \"" <<
 				(sourceImage.repr.levels == PL_COLOR_LEVELS_LIMITED ?
 					"limited" : "full") << "\",\n"
@@ -9648,6 +9664,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.ditherVectorsNewFrame != next.ditherVectorsNewFrame, "dither_vectors_new_frame");
 		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
+		changed(current.dvTrims != next.dvTrims, "dv_trims");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -15620,16 +15637,16 @@ struct LibplaceboVideoRenderer::Impl
 				DebugLog::Log("Dolby Vision RGB tunnel: new display-management matrix");
 			}
 			image.repr.dovi = found->second.get();
-			const auto luminance = DolbyVisionLuminancePolicy::Apply(dm, image.color.hdr);
+			const auto luminance = DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, image.color.hdr);
 			frameDvLuminance = luminance;
 			const uint64_t luminanceTick = GetTickCount64();
 			if (luminanceTick >= nextSourceLuminanceLogTick)
 			{
 				nextSourceLuminanceLogTick = luminanceTick + 5000;
-				DebugLog::Log("Dolby Vision luminance: range=%s source_min_nits=%.4f source_max_nits=%.2f scene_present=%d scene_peak_nits=%.2f scene_average_nits=%.2f MaxCLL=unknown MaxFALL=unknown",
+				DebugLog::Log("Dolby Vision luminance: range=%s source_min_nits=%.4f source_max_nits=%.2f scene_present=%d scene_peak_nits=%.2f scene_average_nits=%.2f scene_min_nits=%.4f MaxCLL=unknown MaxFALL=unknown",
 					luminance.sourceRangeFromMetadata ? "DM" : "fallback",
 					luminance.sourceMin, luminance.sourceMax, luminance.sceneAvailable ? 1 : 0,
-					luminance.sceneMax, luminance.sceneAvg);
+					luminance.sceneMax, luminance.sceneAvg, luminance.sceneMinAvailable ? luminance.sceneMin : -1.0f);
 			}
 			{
 				std::lock_guard<std::mutex> guard(ingressStatusMutex);
@@ -18894,6 +18911,13 @@ struct LibplaceboVideoRenderer::Impl
 				if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
 				const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 				sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
+				if (renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && !sourceMonitorDvLogged)
+				{
+					// 2026-10-17: no longer skipped as a packed signal.
+					DebugLog::Log("Source resolution on Dolby Vision: measured on the decoded intensity (I) plane; a re-base "
+						"resamples the IPT planes before libplacebo's Dolby Vision decode (as YCbCr planes before their matrix)");
+					sourceMonitorDvLogged = true;
+				}
 			}
 			double wanted = 1.0, wantedX = 1.0;
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
@@ -19535,6 +19559,71 @@ struct LibplaceboVideoRenderer::Impl
                     names[state], activeSettings.sdrTone.knee ? "knee" : "off", activeSettings.sdrTone.headroom,
                     activeSettings.sdrTone.kneeStart, activeSettings.sdrTone.kneeStrength,
                     activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
+            }
+        }
+        // dv_trims (owner 2026-10-17, off): the Dolby Vision L2 trim for the
+        // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
+        // the LED stages). Tunnel pictures with DM only; not after a
+        // calibration LUT; PQ or gamma outputs. Non-certified (DolbyVisionTrims.h).
+        if (activeSettings.dvTrims || !dvTrimsLogged.empty())
+        {
+            std::string state;
+            const bool dvPicture = state.empty() && renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
+                convertedPayload && convertedPayload->dolby.valid;
+            pl_color_space display = target.color;
+            pl_color_space_infer(&display);
+            const bool pq = target.color.transfer == PL_COLOR_TRC_PQ;
+            const bool gammaSignal = !pq && !pl_color_space_is_hdr(&target.color);
+            DolbyVisionTrims::Selection selection;
+            if (!activeSettings.dvTrims)
+                state = "off";
+            else if (!dvPicture)
+                state = "idle (no Dolby Vision picture with DM)";
+            else if (target.lut)
+                state = "off with a calibration LUT (it would act after the LUT)";
+            else if (!pq && !gammaSignal)
+                state = "off for this output transfer (PQ or gamma outputs only)";
+            else
+            {
+                selection = DolbyVisionTrims::Select(convertedPayload->dolby, display.hdr.max_luma);
+                if (!selection.apply)
+                    state = std::string("neutral: ") + selection.reason;
+                else
+                {
+                    if (!dvTrimsConfigured)
+                    {
+                        ConfiguredShaderRule rule;
+                        rule.name = "dv_trims";
+                        rule.filename = "DV trims.glsl";
+                        dvTrimsHook.Configure({ rule });
+                        dvTrimsConfigured = true;
+                    }
+                    dvTrimsHook.Ensure(hookTemplates);
+                    const size_t start = frameHooks.size();
+                    dvTrimsHook.Collect(false, frameHooks);
+                    const bool bt2020 = target.color.primaries == PL_COLOR_PRIM_BT_2020;
+                    for (size_t i = start; i < frameHooks.size(); ++i)
+                    {
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_slope", selection.params.slope);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_offset", selection.params.offset);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_power", selection.params.power);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_chroma_weight", selection.params.chromaWeight);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_sat_gain", selection.params.saturationGain);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_signal_pq", pq ? 1.0 : 0.0);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_gamma", LedDisplayGamma(target.color.transfer));
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_peak_nits", display.hdr.max_luma);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kr", bt2020 ? 0.2627 : 0.2126);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kb", bt2020 ? 0.0593 : 0.0722);
+                    }
+                    state = frameHooks.size() == start ? "NOT applied (shaders\\DV trims.glsl did not load)" :
+                        "active: " + DolbyVisionTrims::Describe(selection);
+                }
+            }
+            if (state != dvTrimsLogged)
+            {
+                dvTrimsLogged = activeSettings.dvTrims ? state : std::string();
+                DebugLog::Log("Dolby Vision trims (non-certified): %s (display peak %.1f nits)", state.c_str(),
+                    static_cast<double>(display.hdr.max_luma));
             }
         }
         // LED drive, gain in: measurement first (it must see the picture before
@@ -26338,6 +26427,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dither_vectors_new_frame=" << s.ditherVectorsNewFrame << "\n"
 		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
+		<< "dv_trims=" << s.dvTrims << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"
