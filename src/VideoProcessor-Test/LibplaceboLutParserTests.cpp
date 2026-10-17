@@ -3699,9 +3699,12 @@ namespace VideoProcessorTest
 				else { signal.kr = 0.2627; signal.kg = 0.6780; signal.kb = 0.0593; }
 				set(DolbyVisionTrims::Params(), signal);
 				const auto unity = fixture.RenderCoordinateField(hook);
+				// Neutral = untouched, exactly, on every channel.
 				for (size_t i = 0; i < unity.size(); ++i)
-					Assert::IsTrue(std::abs(static_cast<int>(baseline[i].r) - static_cast<int>(unity[i].r)) <= 1 &&
-						std::abs(static_cast<int>(baseline[i].b) - static_cast<int>(unity[i].b)) <= 1, L"neutral = untouched");
+					Assert::IsTrue(baseline[i].r == unity[i].r && baseline[i].g == unity[i].g && baseline[i].b == unity[i].b,
+						(L"neutral = untouched (exact) at " + std::to_wstring(i) + L": " +
+							std::to_wstring(baseline[i].r) + L"," + std::to_wstring(baseline[i].g) + L"," + std::to_wstring(baseline[i].b) + L" vs " +
+							std::to_wstring(unity[i].r) + L"," + std::to_wstring(unity[i].g) + L"," + std::to_wstring(unity[i].b)).c_str());
 				// A darkening trim, and a lifting one past 1 (the offset fade-in near
 				// black and the shoulder below the peak, reviews C2 / S3).
 				for (int variant = 0; variant < 2; ++variant)
@@ -5302,21 +5305,48 @@ namespace VideoProcessorTest
 		// libplacebo reports some failures (a rejected pass) only in its log,
 		// with the call still returning success (design review 4, N-6), so the
 		// GPU tests also require a clean log.
-		static void AssertCleanLibplaceboLog(const std::string& log)
+		// The one exception: libplacebo's timing notes on a loaded machine,
+		// "Spent <N> ms <operation> (slow!)" (any operation: shader compiles,
+		// pipeline creation, ...). Every other warning or error stays fatal.
+		static bool IsLibplaceboSlowTimingNote(std::string line)
 		{
-			Assert::IsTrue(log.empty(),
-				(L"libplacebo logged a warning or error: " + std::wstring(log.begin(), log.end())).c_str());
+			while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+				line.pop_back();
+			static const std::string slow = "(slow!)";
+			return line.compare(0, 6, "Spent ") == 0 && line.find(" ms ") != std::string::npos &&
+				line.size() >= slow.size() && line.compare(line.size() - slow.size(), slow.size(), slow) == 0;
+		}
+
+		static std::string WithoutLibplaceboTimingNotes(const std::string& log)
+		{
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (!IsLibplaceboSlowTimingNote(entry))
+					remaining += entry + "\n";
+			return remaining;
+		}
+
+		static void AssertCleanLibplaceboLog(const std::string& log, const std::string& context = std::string())
+		{
+			const std::string remaining = WithoutLibplaceboTimingNotes(log);
+			const std::string message = (context.empty() ? std::string() : context + ": ") +
+				"libplacebo logged a warning or error: " + remaining;
+			Assert::IsTrue(remaining.empty(), std::wstring(message.begin(), message.end()).c_str());
 		}
 
 		// The same, but accepting the one message libplacebo 7.360.1 logs for
 		// every texture-input PRE_OUTPUT hook (the dropped output encoding that
 		// OutputEncodingRepair puts back; see PreOutputHooksKeep...Repair).
-		static void AssertCleanLibplaceboLogExceptPreOutputBug(std::string log)
+		static void AssertCleanLibplaceboLogExceptPreOutputBug(const std::string& log,
+			const std::string& context = std::string())
 		{
-			const std::string known = "Attempted to modify an immutable shader!\n";
-			for (size_t at; (at = log.find(known)) != std::string::npos; )
-				log.erase(at, known.size());
-			AssertCleanLibplaceboLog(log);
+			std::string remaining;
+			std::istringstream lines(log);
+			for (std::string entry; std::getline(lines, entry);)
+				if (entry.find("Attempted to modify an immutable shader!") == std::string::npos)
+					remaining += entry + "\n";
+			AssertCleanLibplaceboLog(remaining, context);
 		}
 
 		static Dejudder::Settings DejudderTestSettings()
@@ -5791,7 +5821,7 @@ namespace VideoProcessorTest
 			}
 			fixture.CaptureLog(nullptr);
 			Logger::WriteMessage(report.c_str());
-			Assert::IsTrue(log.empty(), ToWide("libplacebo logged: " + log).c_str());
+			AssertCleanLibplaceboLog(log);
 		}
 
 		// Stage 10: in-range content is scaled as without the switch (planner:
@@ -7759,12 +7789,7 @@ namespace VideoProcessorTest
 			module.Release();
 			pl_mpv_user_shader_destroy(&ssim);
 			// Only shader-compiler timing notes may appear (a loaded machine).
-			std::string remaining;
-			std::istringstream lines(log);
-			for (std::string entry; std::getline(lines, entry);)
-				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
-					remaining += entry + "\n";
-			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 
@@ -7820,12 +7845,7 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(report.c_str());
 			pl_mpv_user_shader_destroy(&ssim);
 			pl_mpv_user_shader_destroy(&nls);
-			std::string remaining;
-			std::istringstream lines(log);
-			for (std::string entry; std::getline(lines, entry);)
-				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
-					remaining += entry + "\n";
-			Assert::IsTrue(remaining.empty(), ToWide("libplacebo logged: " + remaining).c_str());
+			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 
@@ -10676,8 +10696,10 @@ namespace VideoProcessorTest
 			// R10b and R10l containers (each against the CPU's own decode of that
 			// container, R10 padding bits set), from the frame
 			// and from an already-uploaded texture (EarlyUpload). Refused geometry
-			// keeps the CPU unpack. Hardware only (VP_TEST_GPU=hardware); also on
-			// WARP with VP_TEST_DV_WARP=1 (no GPU needed).
+			// keeps the CPU unpack. Runs on WARP by default (no GPU needed; the
+			// fixture's default device), on the GPU with VP_TEST_GPU=hardware (adds
+			// 3840 and the 4K timing report). VP_TEST_DV_WARP=1 is accepted (now the
+			// default).
 			auto envIs = [](const char* name, const char* want)
 			{
 				char* v = nullptr;
@@ -10687,11 +10709,7 @@ namespace VideoProcessorTest
 				return on;
 			};
 			const bool hardware = envIs("VP_TEST_GPU", "hardware");
-			if (!hardware && !envIs("VP_TEST_DV_WARP", "1"))
-			{
-				Logger::WriteMessage(L"DV tunnel GPU unpack: VP_TEST_GPU=hardware (or VP_TEST_DV_WARP=1) only; not run");
-				return;
-			}
+			Logger::WriteMessage(hardware ? L"DV tunnel GPU unpack: on the hardware GPU\n" : L"DV tunnel GPU unpack: on WARP\n");
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = fixture.Gpu();
@@ -10841,6 +10859,150 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &planes[1]);
 			AssertCleanLibplaceboLog(log);
 			Logger::WriteMessage(("GpuDolbyVisionTunnelUnpack: " + std::to_string(cases) + " cases matched the CPU unpack\n").c_str());
+		}
+
+		// Rule test (2026-10-17): Dolby Vision GPU unpack with a lost / corrupt DM packet
+		// presents black, never garbage. A tunnel stream through the renderer's route
+		// (LibplaceboVideoRenderer's dvRaw path: AnalyzeFrame decides, PICTURE ->
+		// GpuDolbyVisionTunnelUnpack, otherwise zero planes) on WARP: a locked picture
+		// unpacks on the GPU equal to the CPU; with every copy of the DM header damaged
+		// the route reaches BLACK within the formatter's loss limit and the planes the
+		// renderer receives are all zero (the CPU formatter agrees); the packed pixels
+		// would not be black (the gate matters); a fresh DM brings the GPU picture
+		// back. A stream that starts with a damaged DM is black from its first frame.
+		TEST_METHOD(GpuDolbyVisionDmLossPresentsBlackNotGarbage)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			GpuDolbyVisionTunnelUnpack unpack(fixture.Log(), gpu);
+			unpack.SetHostReadableForTest(true);
+			pl_tex planes[2] = { nullptr, nullptr };
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> samples(static_cast<size_t>(tex->params.w) * tex->params.h *
+					tex->params.format->num_components);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = samples.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"plane not host-readable");
+				return samples;
+			};
+			const unsigned width = 130, height = 128;
+			Tests::DvSender::SenderPicture picture(true, width, height);
+			picture.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody()));
+			Tests::DvSender::SenderPicture damaged = picture;
+			damaged.CorruptAllCopies(0);
+			const size_t rowBytes = picture.state->BytesPerRow();
+			const size_t planePixels = static_cast<size_t>(width) * height;
+			// The renderer's route for one frame; returns the planes it would render.
+			struct Routed { CR210DolbyVisionTunnelFormatter::FrameResult result; std::vector<uint16_t> intensity, chroma; };
+			auto route = [&](CR210DolbyVisionTunnelFormatter& analyzed, CR210DolbyVisionTunnelFormatter& cpu,
+				const std::vector<BYTE>& input, uint64_t counter, const wchar_t* name)
+			{
+				Routed out;
+				const VideoFrame frame(const_cast<BYTE*>(input.data()), counter, 0, nullptr);
+				out.result = analyzed.AnalyzeFrame(frame);
+				Assert::IsTrue(out.result != CR210DolbyVisionTunnelFormatter::FrameResult::REJECTED,
+					(std::wstring(name) + L": frame rejected").c_str());
+				std::vector<BYTE> expected(static_cast<size_t>(cpu.GetOutFrameSize()));
+				Assert::IsTrue(cpu.FormatVideoFrame(frame, expected.data()), (std::wstring(name) + L": CPU unpack failed").c_str());
+				const uint16_t* want = reinterpret_cast<const uint16_t*>(expected.data());
+				if (out.result == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE)
+				{
+					Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R210, input.data(), rowBytes, static_cast<int>(width),
+						static_cast<int>(height), analyzed.PlanesHighAligned(), planes),
+						(std::wstring(name) + L": " + ExtendedRangeGpuProbe::ToWide(unpack.Error())).c_str());
+					out.intensity = download(planes[0]);
+					out.chroma = download(planes[1]);
+					Assert::AreEqual(planePixels, out.intensity.size());
+					for (size_t i = 0; i < planePixels; ++i)
+						Assert::IsTrue(out.intensity[i] == want[i] && out.chroma[i] == want[planePixels + i],
+							(std::wstring(name) + L": the GPU picture differs from the CPU at " + std::to_wstring(i)).c_str());
+				}
+				else
+				{
+					// No trusted DM: the renderer hands on zero planes (never the packed bytes).
+					out.intensity.assign(planePixels, 0);
+					out.chroma.assign(planePixels, 0);
+					for (size_t i = 0; i < 2 * planePixels; ++i)
+						Assert::AreEqual(0, static_cast<int>(want[i]), (std::wstring(name) + L": the CPU formatter is not black").c_str());
+				}
+				return out;
+			};
+			auto black = [](const Routed& r)
+			{
+				for (uint16_t v : r.intensity) if (v != 0) return false;
+				for (uint16_t v : r.chroma) if (v != 0) return false;
+				return true;
+			};
+			// The packed pixels of the damaged frame, unpacked anyway: not black (what the route
+			// must never show).
+			{
+				CR210DolbyVisionTunnelFormatter probe;
+				probe.OnVideoState(picture.state);
+				const VideoFrame frame(picture.input.data(), 1, 0, nullptr);
+				Assert::IsTrue(probe.AnalyzeFrame(frame) == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE);
+				Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R210, damaged.input.data(), rowBytes, static_cast<int>(width),
+					static_cast<int>(height), probe.PlanesHighAligned(), planes));
+				const std::vector<uint16_t> garbage = download(planes[0]);
+				size_t nonZero = 0;
+				for (uint16_t v : garbage) nonZero += v != 0 ? 1 : 0;
+				Assert::IsTrue(nonZero > planePixels / 2, L"precondition: the damaged frame's packed pixels are not black");
+			}
+			// Locked, then the DM lost, then a fresh DM.
+			CR210DolbyVisionTunnelFormatter analyzed, cpu;
+			analyzed.OnVideoState(picture.state);
+			cpu.OnVideoState(picture.state);
+			uint64_t counter = 1;
+			Assert::IsTrue(route(analyzed, cpu, picture.input, counter++, L"locked").result ==
+				CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE, L"the sender picture locks");
+			int blackAt = -1;
+			for (int lost = 0; lost < 60 && blackAt < 0; ++lost)
+			{
+				const Routed r = route(analyzed, cpu, damaged.input, counter++, L"DM lost");
+				if (r.result == CR210DolbyVisionTunnelFormatter::FrameResult::BLACK)
+				{
+					Assert::IsTrue(black(r), L"DM lost: black planes");
+					blackAt = lost;
+				}
+			}
+			Logger::WriteMessage(("DM loss: black after " + std::to_string(blackAt + 1) + " damaged frame(s)\n").c_str());
+			Assert::IsTrue(blackAt >= 0, L"a lasting DM loss reaches black within the loss limit");
+			Assert::IsFalse(analyzed.GetDolbyVisionTunnelMetadata().valid || analyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback,
+				L"after DV lock a lost DM is neither trusted nor allowed the SDR passthrough (the packed pixels)");
+			// Still lost: stays black.
+			for (int more = 0; more < 5; ++more)
+				Assert::IsTrue(black(route(analyzed, cpu, damaged.input, counter++, L"still lost")), L"stays black while the DM is lost");
+			// A fresh, complete DM (a new metadata ID, as a sender restarts): the GPU picture again.
+			Tests::DvSender::SenderPicture fresh = picture;
+			fresh.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody(2048)));
+			bool restored = false;
+			for (int k = 0; k < 10 && !restored; ++k)
+				restored = route(analyzed, cpu, fresh.input, counter++, L"fresh DM").result ==
+					CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE;
+			Assert::IsTrue(restored, L"a fresh DM brings the GPU picture back");
+			// A stream whose first frame already has a damaged DM: zero DV planes from the start (before
+			// any lock the renderer may still choose the SDR passthrough - allowSdrFallback, reported).
+			{
+				CR210DolbyVisionTunnelFormatter coldAnalyzed, coldCpu;
+				coldAnalyzed.OnVideoState(picture.state);
+				coldCpu.OnVideoState(picture.state);
+				for (uint64_t n = 1; n <= 3; ++n)
+				{
+					const Routed r = route(coldAnalyzed, coldCpu, damaged.input, n, L"never locked");
+					Assert::IsTrue(r.result == CR210DolbyVisionTunnelFormatter::FrameResult::BLACK && black(r),
+						L"never locked with a damaged DM: zero planes, not the packed pixels");
+				}
+				Logger::WriteMessage(coldAnalyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback ?
+					"never locked: SDR passthrough allowed (no DV lock yet)\n" : "never locked: SDR passthrough not allowed\n");
+			}
+			pl_tex_destroy(gpu, &planes[0]);
+			pl_tex_destroy(gpu, &planes[1]);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 		}
 
 		TEST_METHOD(GpuCaptureUnpackMatchesTheCpuFormatters)
@@ -12916,12 +13078,7 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(report.c_str());
 			module.Release();
 			pl_mpv_user_shader_destroy(&ssim);
-			std::string remaining;
-			std::istringstream lines(log);
-			for (std::string entry; std::getline(lines, entry);)
-				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
-					remaining += entry + "\n";
-			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 
@@ -12939,13 +13096,7 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(outcome.report.c_str());
 			Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
 			// The 7.360 PRE_OUTPUT note (repaired) and shader-compiler timing notes only.
-			std::string remaining;
-			std::istringstream lines(log);
-			for (std::string entry; std::getline(lines, entry);)
-				if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
-					entry.find("Attempted to modify an immutable shader!") == std::string::npos)
-					remaining += entry + "\n";
-			Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 
 		// The whole chain with motion (the matcher's look-ahead vectors, the
@@ -13124,13 +13275,7 @@ namespace VideoProcessorTest
 				fixture.CaptureLog(nullptr);
 				report += outcome.report;
 				Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
-				std::string remaining;
-				std::istringstream lines(log);
-				for (std::string entry; std::getline(lines, entry);)
-					if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
-						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
-						remaining += entry + "\n";
-				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide(combo.Name() + ": libplacebo logged: " + remaining).c_str());
+				AssertCleanLibplaceboLogExceptPreOutputBug(log, combo.Name());
 				++passed;
 			}
 			Logger::WriteMessage((report + std::to_string(passed) + " combinations passed\n").c_str());
@@ -13149,13 +13294,7 @@ namespace VideoProcessorTest
 				fixture.CaptureLog(nullptr);
 				Logger::WriteMessage(outcome.report.c_str());
 				Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide(outcome.failure).c_str());
-				std::string remaining;
-				std::istringstream lines(log);
-				for (std::string entry; std::getline(lines, entry);)
-					if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
-						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
-						remaining += entry + "\n";
-				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+				AssertCleanLibplaceboLogExceptPreOutputBug(log);
 			}
 		}
 
@@ -13175,13 +13314,7 @@ namespace VideoProcessorTest
 				Logger::WriteMessage(outcome.report.c_str());
 				Assert::IsTrue(outcome.ok, ExtendedRangeGpuProbe::ToWide((refinements ? "refinements on: " : "") +
 					outcome.failure).c_str());
-				std::string remaining;
-				std::istringstream lines(log);
-				for (std::string entry; std::getline(lines, entry);)
-					if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos) &&
-						entry.find("Attempted to modify an immutable shader!") == std::string::npos)
-						remaining += entry + "\n";
-				Assert::IsTrue(remaining.empty(), ExtendedRangeGpuProbe::ToWide("libplacebo logged: " + remaining).c_str());
+				AssertCleanLibplaceboLogExceptPreOutputBug(log);
 			}
 		}
 

@@ -322,16 +322,36 @@ namespace
 		return text;
 	}
 
-	// Shader-compiler timing notes ("Spent N ms translating HLSL to DXBC" or "GLSL to SPIR-V (slow!)", a
-	// loaded machine) are not failures; anything else is.
-	void CheckCleanLog(const Gpu& gpu, const char* test)
+	// libplacebo timing notes on a loaded machine ("Spent <N> ms <operation> (slow!)", any operation) are
+	// not failures; anything else is.
+	bool IsSlowTimingNote(std::string line)
+	{
+		while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+			line.pop_back();
+		static const std::string slow = "(slow!)";
+		return line.compare(0, 6, "Spent ") == 0 && line.find(" ms ") != std::string::npos &&
+			line.size() >= slow.size() && line.compare(line.size() - slow.size(), slow.size(), slow) == 0;
+	}
+
+	std::string WithoutTimingNotes(const std::string& messages)
 	{
 		std::string remaining;
-		std::istringstream lines(gpu.messages);
+		std::istringstream lines(messages);
 		for (std::string entry; std::getline(lines, entry);)
-			if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
+			if (!IsSlowTimingNote(entry))
 				remaining += entry + "\n";
-		Check(remaining.empty(), std::string(test) + ": libplacebo logged: " + remaining);
+		return remaining;
+	}
+
+	void CheckCleanMessages(const std::string& messages, const std::string& test)
+	{
+		const std::string remaining = WithoutTimingNotes(messages);
+		Check(remaining.empty(), test + ": libplacebo logged: " + remaining);
+	}
+
+	void CheckCleanLog(const Gpu& gpu, const char* test)
+	{
+		CheckCleanMessages(gpu.messages, test);
 	}
 
 	// Aperiodic texture (the stable GPU tests' DejudderTexture), 16-bit codes.
@@ -1303,12 +1323,7 @@ void RunBetaChainGpuTest()
 		[](const char* file) { return LoadRepoShader(file); }, false);
 	std::cout << outcome.report;
 	Check(outcome.ok, "whole chain on 377: " + outcome.failure);
-	std::string remaining;
-	std::istringstream lines(gpu.messages);
-	for (std::string entry; std::getline(lines, entry);)
-		if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
-			remaining += entry + "\n";
-	Check(remaining.empty(), "whole chain on 377: libplacebo logged: " + remaining);
+	CheckCleanMessages(gpu.messages, "whole chain on 377");
 
 	// Motion, a de-judder extra and the LED drive's gain sequence; as built
 	// and with every refinement on (D1-D4, S1).
@@ -1320,12 +1335,7 @@ void RunBetaChainGpuTest()
 		std::cout << (refinements ? "-- refinements on\n" : "") << motion.report;
 		Check(motion.ok, std::string("whole chain with motion on 377") + (refinements ? " (refinements on)" : "") +
 			": " + motion.failure);
-		remaining.clear();
-		std::istringstream movingLines(moving.messages);
-		for (std::string entry; std::getline(movingLines, entry);)
-			if ((entry.find("translating HLSL to DXBC (slow!)") == std::string::npos && entry.find("translating GLSL to SPIR-V (slow!)") == std::string::npos))
-				remaining += entry + "\n";
-		Check(remaining.empty(), "whole chain with motion on 377: libplacebo logged: " + remaining);
+		CheckCleanMessages(moving.messages, "whole chain with motion on 377");
 	}
 
 	// The combination matrix on the deployed libplacebo (planner 2026-10-12:
@@ -5245,6 +5255,12 @@ void RunBetaTimingGate()
 	ExtendedRangeGpuProbe::TestDeviceParams(&device);
 	if (!ExtendedRangeGpuProbe::OnHardwareGpu())
 	{
+		// A gate asked to run on the GPU (VP_TEST_REQUIRE_GPU=1) must not pass by skipping.
+		char* rq = nullptr;
+		size_t rqLength = 0;
+		const bool requireGpu = _dupenv_s(&rq, &rqLength, "VP_TEST_REQUIRE_GPU") == 0 && rq && std::string(rq) == "1";
+		std::free(rq);
+		Check(!requireGpu, "Beta timing gate: VP_TEST_REQUIRE_GPU=1 but not on the hardware GPU (set VP_TEST_GPU=hardware)");
 		std::cout << "Beta timing gate: needs VP_TEST_GPU=hardware (WARP times mean nothing); skipped\n";
 		return;
 	}

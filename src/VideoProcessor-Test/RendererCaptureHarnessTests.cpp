@@ -111,6 +111,44 @@ namespace
 		return on;
 	}
 
+	bool EnvIs(const char* name, const char* want)
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		const bool is = _dupenv_s(&v, &n, name) == 0 && v && std::string(v) == want;
+		std::free(v);
+		return is;
+	}
+
+	// VP_TEST_REQUIRE_GPU=1: a gate run that must exercise the GPU; a hardware test that would
+	// skip fails instead.
+	bool RequireGpu()
+	{
+		return EnvIs("VP_TEST_REQUIRE_GPU", "1");
+	}
+
+	// The hardware tests' guard: true when the test can run (VP_TEST_GPU=hardware). Otherwise,
+	// under VP_TEST_REQUIRE_GPU=1 the test fails; without it the test logs the fixed marker
+	// "SKIP-NO-GPU <name>" (searchable in the TRX) and returns false, so the caller returns.
+	bool RequireHardwareOrSkip(const char* name)
+	{
+		if (OnHardware())
+			return true;
+		const std::string marker = std::string("SKIP-NO-GPU ") + name;
+		if (RequireGpu())
+		{
+			const std::string message = marker + ": VP_TEST_REQUIRE_GPU=1 but VP_TEST_GPU is not hardware";
+			Assert::Fail(std::wstring(message.begin(), message.end()).c_str());
+		}
+		Logger::WriteMessage((marker + "\n").c_str());
+		return false;
+	}
+
+	std::wstring HarnessWide(const std::string& text)
+	{
+		return std::wstring(text.begin(), text.end());
+	}
+
 	std::string Here()
 	{
 		char here[MAX_PATH] = {};
@@ -127,6 +165,12 @@ namespace
 	// A picture for the V210 frames (10-bit luma codes, width x height; chroma neutral), the same
 	// every frame; empty = the moving test pattern (2026-10-16: the chain test).
 	std::vector<uint16_t> g_harnessLumaPicture;
+	// The picture moving (2026-10-17, the mixed-screen rule test): shifted left by this many
+	// pixels per content step (0 = still), except the top g_harnessLumaStaticRows rows (a static
+	// overlay); g_harnessShotFrames > 0 adds a brightness cut every that many content steps.
+	int g_harnessLumaShift = 0;
+	int g_harnessLumaStaticRows = 0;
+	int g_harnessShotFrames = 0;
 
 	// One moving frame: vertical bars in luma, a chroma ramp, shifted by n.
 	void FillV210(std::vector<BYTE>& frame, int width, int height, size_t rowBytes, int n)
@@ -139,7 +183,23 @@ namespace
 			{
 				const bool picture = g_harnessLumaPicture.size() == static_cast<size_t>(width) * height;
 				auto luma = [&](int x) {
-					if (picture) return static_cast<uint32_t>(g_harnessLumaPicture[static_cast<size_t>(y) * width + (std::min)(x, width - 1)]);
+					if (picture)
+					{
+						const bool moving = y >= g_harnessLumaStaticRows;
+						long long sx = (std::min)(x, width - 1);
+						if (moving && g_harnessLumaShift != 0)
+						{
+							sx = (sx + static_cast<long long>(g_harnessLumaShift) * n) % width;
+							if (sx < 0) sx += width;
+						}
+						int value = g_harnessLumaPicture[static_cast<size_t>(y) * width + static_cast<size_t>(sx)];
+						if (moving && g_harnessShotFrames > 0)
+						{
+							static const int cut[3] = { 0, 100, -100 };
+							value = (std::min)(1000, (std::max)(16, value + cut[(n / g_harnessShotFrames) % 3]));
+						}
+						return static_cast<uint32_t>(value);
+					}
 					return bar ? 64u : static_cast<uint32_t>(64 + ((x + 4 * n) / 32 % 2) * 700 + (y % 64)); };
 				auto chroma = [&](int x) { return bar || picture ? 512u : static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
 				const int x = pack * 6;
@@ -184,6 +244,10 @@ namespace
 		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
+		// Sampled once per sent frame through the second half of the run: the renderer's queue depth
+		// (GetFrameQueueSize) and its capture-to-output delay (ExitLatencyMs).
+		std::vector<size_t> queueDepths;
+		std::vector<double> exitLatencyMs;
 		bool Logged(const std::string& text) const
 		{
 			for (const std::string& line : log)
@@ -235,8 +299,237 @@ namespace
 		std::function<FrameStep(int)> step;
 	};
 
+	// Every harness global and the environment variables the tests set, saved and restored
+	// (HarnessScope, RAII), and reset to the defaults after every test (TEST_METHOD_CLEANUP), so a
+	// test that fails half-way never leaves a 4K frame size, a DV stream, a forced unpack failure
+	// or a screenshot folder to the next test.
+	struct HarnessGlobals
+	{
+		int barRows = 0;
+		std::vector<uint16_t> lumaPicture;
+		int lumaShift = 0;
+		int lumaStaticRows = 0;
+		int shotFrames = 0;
+		bool dolbyVision = false;
+		std::vector<std::vector<BYTE>> dvFrames;
+		int width = 1920, height = 1080;
+		int windowWidth = 640, windowHeight = 360;
+		size_t queueTarget = 0;
+		bool applySnapshot = false;
+		std::vector<std::string> shaderProfiles;
+		bool shadersSelected = false;
+	};
+
+	HarnessGlobals CaptureHarnessGlobals()
+	{
+		HarnessGlobals g;
+		g.barRows = g_harnessBarRows;
+		g.lumaPicture = g_harnessLumaPicture;
+		g.lumaShift = g_harnessLumaShift;
+		g.lumaStaticRows = g_harnessLumaStaticRows;
+		g.shotFrames = g_harnessShotFrames;
+		g.dolbyVision = g_harnessDolbyVision;
+		g.dvFrames = g_harnessDvFrames;
+		g.width = g_harnessWidth;
+		g.height = g_harnessHeight;
+		g.windowWidth = g_harnessWindowWidth;
+		g.windowHeight = g_harnessWindowHeight;
+		g.queueTarget = g_harnessQueueTarget;
+		g.applySnapshot = g_harnessApplySnapshot;
+		g.shaderProfiles = g_harnessShaderProfiles;
+		g.shadersSelected = g_harnessShadersSelected;
+		return g;
+	}
+
+	void RestoreHarnessGlobals(const HarnessGlobals& g)
+	{
+		g_harnessBarRows = g.barRows;
+		g_harnessLumaPicture = g.lumaPicture;
+		g_harnessLumaShift = g.lumaShift;
+		g_harnessLumaStaticRows = g.lumaStaticRows;
+		g_harnessShotFrames = g.shotFrames;
+		g_harnessDolbyVision = g.dolbyVision;
+		g_harnessDvFrames = g.dvFrames;
+		g_harnessWidth = g.width;
+		g_harnessHeight = g.height;
+		g_harnessWindowWidth = g.windowWidth;
+		g_harnessWindowHeight = g.windowHeight;
+		g_harnessQueueTarget = g.queueTarget;
+		g_harnessApplySnapshot = g.applySnapshot;
+		g_harnessShaderProfiles = g.shaderProfiles;
+		g_harnessShadersSelected = g.shadersSelected;
+	}
+
+	const wchar_t* const kHarnessEnvironment[] = { L"VP_TEST_SCREENSHOT_DIR", L"VP_TEST_CAPTURE_UNPACK_FAIL",
+		L"VP_TEST_DV_UNPACK_FAIL", L"VP_TEST_SHADER_DIR" };
+
+	// Both copies of the environment: the tests set these through the Win32 block
+	// (SetEnvironmentVariable) and through the CRT (_putenv_s).
+	void SetHarnessEnvironment(const wchar_t* name, const std::wstring* value)
+	{
+		if (value)
+		{
+			_wputenv_s(name, value->c_str());
+			SetEnvironmentVariableW(name, value->c_str());
+		}
+		else
+		{
+			_wputenv_s(name, L"");
+			SetEnvironmentVariableW(name, nullptr);
+		}
+	}
+
+	class HarnessScope
+	{
+	public:
+		HarnessScope() : globals(CaptureHarnessGlobals())
+		{
+			for (const wchar_t* name : kHarnessEnvironment)
+			{
+				const DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
+				if (size == 0)
+				{
+					environment.push_back(std::make_pair(false, std::wstring()));
+					continue;
+				}
+				std::wstring value(size, L'\0');
+				const DWORD got = GetEnvironmentVariableW(name, &value[0], size);
+				value.resize(got < size ? got : size - 1);
+				environment.push_back(std::make_pair(true, value));
+			}
+		}
+		HarnessScope(const HarnessScope&) = delete;
+		HarnessScope& operator=(const HarnessScope&) = delete;
+		~HarnessScope()
+		{
+			RestoreHarnessGlobals(globals);
+			for (size_t i = 0; i < environment.size(); ++i)
+				SetHarnessEnvironment(kHarnessEnvironment[i], environment[i].first ? &environment[i].second : nullptr);
+		}
+
+	private:
+		HarnessGlobals globals;
+		std::vector<std::pair<bool, std::wstring>> environment;
+	};
+
+	void ResetHarnessDefaults()
+	{
+		RestoreHarnessGlobals(HarnessGlobals());
+		for (const wchar_t* name : kHarnessEnvironment)
+			SetHarnessEnvironment(name, nullptr);
+	}
+
+	// Releases what Run() created even when an Assert fails part-way (Asserts throw): the
+	// renderer stopped and destroyed, then its window, so the next run starts clean.
+	class RunResources
+	{
+	public:
+		using Destroy = void(__cdecl*)(IVideoRenderer*);
+		RunResources() = default;
+		RunResources(const RunResources&) = delete;
+		RunResources& operator=(const RunResources&) = delete;
+		~RunResources()
+		{
+			try { Release(); }
+			catch (...) {}
+		}
+		void SetWindow(HWND window) { hwnd = window; }
+		void SetRenderer(IVideoRenderer* created, Destroy destroyFunction) { renderer = created; destroy = destroyFunction; }
+		void Started() { started = true; }
+		void ReleaseRenderer()
+		{
+			if (renderer)
+			{
+				if (started)
+					renderer->Stop();
+				if (destroy)
+					destroy(renderer);
+			}
+			renderer = nullptr;
+			started = false;
+		}
+		void Release()
+		{
+			ReleaseRenderer();
+			if (hwnd)
+				DestroyWindow(hwnd);
+			hwnd = nullptr;
+		}
+
+	private:
+		IVideoRenderer* renderer = nullptr;
+		Destroy destroy = nullptr;
+		bool started = false;
+		HWND hwnd = nullptr;
+	};
+
+	// A writable folder for rendered-output captures (the test runner lives in Program Files).
+	std::wstring HarnessTempFolder(const wchar_t* name)
+	{
+		wchar_t tempPath[MAX_PATH] = {};
+		GetTempPathW(MAX_PATH, tempPath);
+		const std::wstring folder = std::wstring(tempPath) + name;
+		CreateDirectoryW(folder.c_str(), nullptr);
+		return folder;
+	}
+
+	// The capture's raw_r10_sha256 (VP-0133 sidecar); empty when missing.
+	std::string CaptureHash(const RunResult& r)
+	{
+		if (r.captureMetadata.empty())
+			return std::string();
+		std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+		std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		const size_t k = text.find("\"raw_r10_sha256\": \"");
+		return k == std::string::npos ? std::string() : text.substr(k + 19, 64);
+	}
+
+	// The capture's PNG (16-bit, R10 code c stored as (c << 6) | (c >> 4)) as R10 codes, three per
+	// pixel (R, G, B); empty when it cannot be read.
+	std::vector<int> LoadCaptureRgb(const std::string& json, int& w, int& h)
+	{
+		std::vector<int> codes;
+		w = h = 0;
+		if (json.size() < 5)
+			return codes;
+		const std::string png = json.substr(0, json.size() - 5) + ".png";
+		CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+		CComPtr<IWICImagingFactory> factory;
+		if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return codes;
+		CComPtr<IWICBitmapDecoder> decoder;
+		const std::wstring wpng(png.begin(), png.end());
+		if (FAILED(factory->CreateDecoderFromFilename(wpng.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) return codes;
+		CComPtr<IWICBitmapFrameDecode> frame;
+		if (FAILED(decoder->GetFrame(0, &frame))) return codes;
+		CComPtr<IWICFormatConverter> converter;
+		if (FAILED(factory->CreateFormatConverter(&converter))) return codes;
+		if (FAILED(converter->Initialize(frame, GUID_WICPixelFormat64bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0,
+			WICBitmapPaletteTypeCustom))) return codes;
+		UINT uw = 0, uh = 0;
+		converter->GetSize(&uw, &uh);
+		std::vector<uint16_t> rgba(static_cast<size_t>(uw) * uh * 4);
+		if (FAILED(converter->CopyPixels(nullptr, uw * 8, static_cast<UINT>(rgba.size() * 2), reinterpret_cast<BYTE*>(rgba.data()))))
+			return codes;
+		w = static_cast<int>(uw);
+		h = static_cast<int>(uh);
+		codes.resize(static_cast<size_t>(w) * h * 3);
+		for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+			for (size_t c = 0; c < 3; ++c)
+				codes[i * 3 + c] = rgba[i * 4 + c] >> 6;
+		return codes;
+	}
+
+	template <typename T>
+	double Median(std::vector<T> values)
+	{
+		if (values.empty())
+			return -1.0;
+		std::sort(values.begin(), values.end());
+		return static_cast<double>(values[values.size() / 2]);
+	}
+
 	// The renderer from its DLL, a profile with capture_path, frames for
-	// `seconds`, then stopped and destroyed.
+	// `seconds`, then stopped and destroyed (also when an Assert fails part-way: RunResources).
 	RunResult Run(VideoFrameEncoding encoding, const std::string& capturePath, double seconds,
 		bool film = false, const std::string& extra = std::string(), bool onScreen = false,
 		const FramePlan* plan = nullptr)
@@ -282,9 +575,11 @@ namespace
 		std::free(fs);
 		// Fullscreen: an ordinary activated window (foreground, covering the
 		// screen) so presentation can bypass composition and report statistics.
+		RunResources resources;
 		HWND hwnd = CreateWindowExA(fullscreen ? WS_EX_TOPMOST : (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (onScreen ? WS_EX_TOPMOST : 0)), wc.lpszClassName,
 			"VP capture harness", WS_POPUP, fullscreen ? 0 : onScreen ? screenW - 660 : -4000, fullscreen ? 0 : onScreen ? screenH - 420 : -4000,
 			fullscreen ? screenW : g_harnessWindowWidth, fullscreen ? screenH : g_harnessWindowHeight, nullptr, nullptr, wc.hInstance, nullptr);
+		resources.SetWindow(hwnd);
 		Assert::IsNotNull(hwnd);
 		ShowWindow(hwnd, fullscreen ? SW_SHOW : SW_SHOWNOACTIVATE);
 		if (fullscreen)
@@ -294,6 +589,7 @@ namespace
 		IVideoRenderer* renderer = create(&callback, 1, hwnd, &clock, true, 8,
 			VideoConversionOverride::VIDEOCONVERSION_NONE, configPath.c_str(), &CaptureLog);
 		result.created = renderer != nullptr;
+		resources.SetRenderer(renderer, destroy);
 		if (renderer)
 		{
 			const int width = g_harnessWidth, height = g_harnessHeight;
@@ -342,6 +638,7 @@ namespace
 			}
 			renderer->SetQueueFramePolicy(2, g_harnessQueueTarget ? g_harnessQueueTarget : (film ? 4 : 3), true);
 			renderer->Start();
+			resources.Started();
 			// A ring of frames that outlives anything the queue holds.
 			const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
 			std::vector<std::vector<BYTE>> ring(24, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
@@ -397,6 +694,11 @@ namespace
 				}
 				MSG msg;
 				while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+				if (std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(seconds * 0.5))
+				{
+					result.queueDepths.push_back(renderer->GetFrameQueueSize());
+					result.exitLatencyMs.push_back(renderer->ExitLatencyMs());
+				}
 				std::this_thread::sleep_until(start + period * (n + 1));
 			}
 			if (captureRequested)
@@ -430,10 +732,9 @@ namespace
 			if (renderer->GetSourceResolutionStatus(status)) result.sourceStatus = CStringA(status).GetString();
 			status.Empty();
 			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
-			renderer->Stop();
-			destroy(renderer);
+			resources.ReleaseRenderer();
 		}
-		DestroyWindow(hwnd);
+		resources.Release();
 		{
 			std::lock_guard<std::mutex> guard(g_logMutex);
 			result.log = g_log;
@@ -447,8 +748,19 @@ namespace Tests
 	TEST_CLASS(RendererCaptureHarnessTests)
 	{
 	public:
+		// Whatever a test left (a failed test skips its own restores): the harness defaults and no
+		// test environment variables for the next test.
+		TEST_METHOD_CLEANUP(ResetHarness)
+		{
+			ResetHarnessDefaults();
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(OnScreenLiveExtrasAndEstimateAhead)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuOnScreen")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OnScreenLiveExtrasAndEstimateAhead)
 		{
+			const HarnessScope harnessScope;
 			// Overnight only (owner 2026-10-13): VP_TEST_HARNESS_ONSCREEN=1 with
 			// VP_TEST_GPU=hardware. A small window on the screen gets real
 			// refresh statistics, so VP's live extras planner and estimate ahead
@@ -459,11 +771,12 @@ namespace Tests
 			size_t n = 0;
 			const bool on = _dupenv_s(&v, &n, "VP_TEST_HARNESS_ONSCREEN") == 0 && v && std::string(v) == "1";
 			std::free(v);
-			if (!on || !OnHardware())
+			if (!on)
 			{
-				Logger::WriteMessage(L"on-screen harness: VP_TEST_HARNESS_ONSCREEN=1 and VP_TEST_GPU=hardware only; not run");
+				Logger::WriteMessage("SKIP-OPT-IN OnScreenLiveExtrasAndEstimateAhead: VP_TEST_HARNESS_ONSCREEN=1 only; not run\n");
 				return;
 			}
+			if (!RequireHardwareOrSkip("OnScreenLiveExtrasAndEstimateAhead")) return;
 			char* sv = nullptr;
 			const double seconds = _dupenv_s(&sv, &n, "VP_TEST_HARNESS_SECONDS") == 0 && sv ? std::atof(sv) : 60.0;
 			std::free(sv);
@@ -514,8 +827,12 @@ namespace Tests
 			Assert::AreEqual(0, failures, L"every on-screen run presented frames");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(RecordedStreamReplaysThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RecordedStreamReplaysThroughTheRenderer)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-15: a recording from VideoProcessorStreamRecorder
 			// (frames.csv: hardware times, periods since the previous frame,
 			// bit-exact repeats) replayed through the real renderer with
@@ -523,11 +840,7 @@ namespace Tests
 			// captured. VP_TEST_STREAM_DIR=<recording folder>; without it a
 			// synthetic recording (24p in 29.97 Hz with a 2-frame gap) checks
 			// the replay itself. Hardware only.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"stream replay: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("RecordedStreamReplaysThroughTheRenderer")) return;
 			char* dirValue = nullptr;
 			size_t dn = 0;
 			std::string dir = _dupenv_s(&dirValue, &dn, "VP_TEST_STREAM_DIR") == 0 && dirValue ? dirValue : "";
@@ -639,16 +952,16 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(OpticalFlowIsTheDefaultMotionSource)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OpticalFlowIsTheDefaultMotionSource)
 		{
+			const HarnessScope harnessScope;
 			// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow engine is the
 			// established default motion source; optical_flow: off = the block searches.
 			// Without the engine (not NVIDIA) the default falls back to the searches.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"optical flow default: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("OpticalFlowIsTheDefaultMotionSource")) return;
 			auto source = [](const RunResult& r) {
 				std::string last;
 				for (const std::string& line : r.log)
@@ -681,16 +994,16 @@ namespace Tests
 				Assert::IsTrue(cameraFromEngine, (L"pairs computed ahead: the camera from the engine\n" + on.Tail()).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(StreamFaultsKeepTheDejudderSafeAndRecovering)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(StreamFaultsKeepTheDejudderSafeAndRecovering)
 		{
+			const HarnessScope harnessScope;
 			// Stream robustness and pulldown (owner 2026-10-14): each fault
 			// class injected into a 23.976p de-judder run, plus the pulldown
 			// cadences, through the real renderer. Hardware only.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"stream faults: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("StreamFaultsKeepTheDejudderSafeAndRecovering")) return;
 			const std::string dejudder = "dejudder_strength: 0.25\n";
 			auto after = [](const RunResult& r, const std::string& marker, const std::string& text)
 			{
@@ -831,8 +1144,12 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(Stress4K60Rgb12EarlyUpload)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(Stress4K60Rgb12EarlyUpload)
 		{
+			const HarnessScope harnessScope;
 			// The maximum stress case (owner 2026-10-15): 3840x2160 12-bit RGB (R12B,
 			// the largest capture frame, 37 MB) at 59.94 Hz through the renderer, with
 			// early upload on and off. Checked: frames presented, no unpack failures;
@@ -840,11 +1157,7 @@ namespace Tests
 			// at once and the presentation stats (drops) of both runs. Whether the
 			// whole chain holds 4K60 in real time is the RTX 3090's to show; the
 			// laptop shows the upload pipeline under the heaviest load.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("Stress4K60Rgb12EarlyUpload")) return;
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
 			for (const bool early : { true, false })
@@ -866,16 +1179,16 @@ namespace Tests
 			g_harnessHeight = 1080;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(SourceResolutionRebasesThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SourceResolutionRebasesThroughTheRenderer)
 		{
+			const HarnessScope harnessScope;
 			// Stage 12 step A (owner 2026-10-15): a 4K source set to 1080 is
 			// re-based for libplacebo (the log names the sizes) and presents; any
 			// height works (900); native (the default) never re-bases.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("SourceResolutionRebasesThroughTheRenderer")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
@@ -923,6 +1236,7 @@ namespace Tests
 
 		TEST_METHOD(EveryProfileKeyChangesTheLiveSettingsFingerprint)
 		{
+			const HarnessScope harnessScope;
 			// Planner Q4 (2026-10-16): a profile edit is applied live only when it changes the
 			// renderer's effective-settings fingerprint. Structural: every key of an applied profile
 			// enters it, so the keys once missed (source_range, capture_upload, the Stage 12 keys) and
@@ -957,18 +1271,18 @@ namespace Tests
 			DeleteFileA(path.c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(NativeAndNewSettingsOffArePixelIdentical)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(NativeAndNewSettingsOffArePixelIdentical)
 		{
+			const HarnessScope harnessScope;
 			// Stage 12 (owner 2026-10-16): the exact output codes (VP-0133's
 			// raw_r10_sha256 of the presented frame) of a still picture with no
 			// Stage 12 keys, with source_resolution native, with auto (a short
 			// run stays native) and with every new setting off are identical; a
 			// 1080 re-base differs (the check can see a change).
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("NativeAndNewSettingsOffArePixelIdentical")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
@@ -1014,17 +1328,17 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(OneAxisRebaseKeepsTheAspectRatio)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OneAxisRebaseKeepsTheAspectRatio)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16 ("and that the aspect ratio doesn't change"): a re-base of the
 			// height alone (3840x1080: a source upscaled vertically) and a uniform one leave
 			// the picture's geometry where it is - the strong edges across and down land
 			// at the same output positions as without a re-base.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("OneAxisRebaseKeepsTheAspectRatio")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
@@ -1123,18 +1437,18 @@ namespace Tests
 			Assert::IsTrue(uniAcross <= 2 && uniDown <= 2, L"a uniform re-base keeps the geometry");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16 ("black bar detection and the resizing ... touch inside ... edge
 			// blanking"): the re-base must not move the picture. Per setup, the output with
 			// source_resolution native and 1080: the picture's edges and the strong edges in it
 			// at the same output pixels. NLS: the stretched sides' sharpness against the centre's
 			// (NLS stretches the source before the upscale, so on the re-based grid).
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight, savedWW = g_harnessWindowWidth, savedWH = g_harnessWindowHeight, savedBars = g_harnessBarRows;
 			const std::vector<std::string> savedShaders = g_harnessShaderProfiles;
 			g_harnessWidth = 3840;
@@ -1294,15 +1608,15 @@ namespace Tests
 			Assert::AreEqual(0, failures, L"the re-base keeps the layout in every setup");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(TemporalDitherChoiceControlsTheSigmaDelta)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(TemporalDitherChoiceControlsTheSigmaDelta)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16: temporal_dither sigma_delta loads VP's sigma-delta whatever the shader list
 			// says; libplacebo (or off) leaves it out even when the list selects it.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("TemporalDitherChoiceControlsTheSigmaDelta")) return;
 			const std::string here = Here();
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
 			const std::vector<std::string> saved = g_harnessShaderProfiles;
@@ -1342,16 +1656,16 @@ namespace Tests
 			Assert::IsTrue(logged(listed, "custom hook"), (L"auto: the listed sigma-delta loads as before\n" + listed.Tail()).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16: the look-ahead engages once 4 frames are queued ahead; the queue
 			// target that guarantees it (5 or 6) is measured here, then a reset disengages it and
 			// it re-engages at 4. NVIDIA (VP_TEST_ADAPTER=NVIDIA).
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue")) return;
 			auto lines = [](const RunResult& r, const char* text) {
 				std::string out;
 				for (const std::string& line : r.log)
@@ -1369,7 +1683,13 @@ namespace Tests
 				Logger::WriteMessage(("queue target " + std::to_string(target) + ":\n" + lines(r, "Motion ahead:")).c_str());
 				Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"target " + std::to_wstring(target) + L": the look-ahead engaged\n" + r.Tail()).c_str());
 			}
-			if (!engine) return;
+			if (!engine)
+			{
+				// A GPU gate run (VP_TEST_REQUIRE_GPU=1, NVIDIA) must exercise the look-ahead.
+				Assert::IsFalse(RequireGpu(), L"VP_TEST_REQUIRE_GPU=1: no optical-flow engine, the look-ahead was not tested");
+				Logger::WriteMessage("SKIP-NO-ENGINE MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue\n");
+				return;
+			}
 			// A reset (resync) mid-run: disengaged, then engaged again at 4.
 			FramePlan plan;
 			plan.rateNumerator = 24000;
@@ -1384,16 +1704,16 @@ namespace Tests
 			Assert::IsTrue(engaged >= 2 && reset.Logged("waiting for 4"), (L"a reset disengages and it re-engages at 4\n" + reset.Tail()).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowLatencyQueueFromTheFirstFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LowLatencyQueueFromTheFirstFrame)
 		{
+			const HarnessScope harnessScope;
 			// The bug found 2026-10-16: the low-latency flag was lost on a Build. With the queue profile
 			// applied before Build (as the app does), the renderer starts in the low-latency path: the
 			// de-judder off and the producer never started.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("LowLatencyQueueFromTheFirstFrame")) return;
 			g_harnessApplySnapshot = true;
 			const RunResult low = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
@@ -1403,20 +1723,23 @@ namespace Tests
 			for (const std::string& line : low.log)
 				if (line.find("De-judder:") != std::string::npos || line.find("Motion ahead") != std::string::npos)
 					Logger::WriteMessage(("  low: " + line + "\n").c_str());
+			Assert::IsTrue(low.presented && normal.presented, L"both runs presented");
 			Assert::IsTrue(low.Logged("low-latency queue"), (L"the de-judder off for the low-latency queue\n" + low.Tail()).c_str());
 			Assert::IsFalse(low.Logged("Motion ahead: engaged"), (L"no look-ahead in low latency\n" + low.Tail()).c_str());
+			// Anchor: the Normal run's log is there and its de-judder ran (so "not low latency" is seen, not missed).
+			Assert::IsTrue(normal.Logged("De-judder: motion estimated"), (L"the Normal queue runs the de-judder\n" + normal.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is not low latency\n" + normal.Tail()).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowLatencyPathPropertyAndAutoEarlyUpload)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LowLatencyPathPropertyAndAutoEarlyUpload)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16: low_latency_path on any queue profile takes the low-latency path; with
 			// capture_upload auto (the default) early upload opens there and not on the regular path.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("LowLatencyPathPropertyAndAutoEarlyUpload")) return;
 			g_harnessApplySnapshot = true;
 			const RunResult game = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Game]\nqueue_size: 4\ntarget_frames: 1\nlow_latency_path: on\n");
@@ -1425,23 +1748,26 @@ namespace Tests
 			g_harnessApplySnapshot = false;
 			Assert::IsTrue(game.Logged("low-latency queue"), (L"low_latency_path on: the low-latency path\n" + game.Tail()).c_str());
 			Assert::IsTrue(game.Logged("Early upload: on"), (L"capture_upload auto: early upload in low latency\n" + game.Tail()).c_str());
+			// Anchor: the regular run presented and its de-judder ran.
+			Assert::IsTrue(normal.presented, (L"the Normal run presented\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("De-judder: motion estimated"), (L"the Normal queue runs the de-judder\n" + normal.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("Early upload: on"), (L"auto: no early upload on the regular path\n" + normal.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is regular\n" + normal.Tail()).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseDebandAndCnnBlendKeepTheRecoveredDetail)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RebaseDebandAndCnnBlendKeepTheRecoveredDetail)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16: the adaptive scaling must not destroy the detail recovery (the re-base)
 			// or the debanding. A 1080p master with fine texture and a sky banded in 8-bit steps; the
 			// reference is the master fed at 1080 through the chain; the test feeds the master upscaled
 			// 2x by a player (Lanczos-3) at 4K with source_resolution 1080. Per variant (plain, + VP
 			// deband, + CNN upscaler with its blend) the 4K outputs are compared (picture and sky), and
 			// the sky's band edges counted.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("RebaseDebandAndCnnBlendKeepTheRecoveredDetail")) return;
 			const int w = 1920, h = 1080, sky = h / 4;
 			std::vector<double> master(static_cast<size_t>(w) * h);
 			{
@@ -1599,16 +1925,16 @@ namespace Tests
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(VpDebanderRunsThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(VpDebanderRunsThroughTheRenderer)
 		{
+			const HarnessScope harnessScope;
 			// Stage 12 §2b/§2d (owner 2026-10-15): VP's debander through the
 			// renderer - on its own, with the de-judder (vectors held), and on a
 			// re-based source; never a failure; off is the default.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("VpDebanderRunsThroughTheRenderer")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
@@ -1631,19 +1957,19 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(MotionEnginesCoexistWithVpShaders)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(MotionEnginesCoexistWithVpShaders)
 		{
+			const HarnessScope harnessScope;
 			// v1.4.02 merge (owner 2026-10-15): libplacebo's smooth motion (Bill's)
 			// and VP's motion handling are one or the other (motion_engine), and
 			// VP's shaders keep working with either: the sigma-delta dither, the
 			// SSIM downscaler with the adaptive blend, the de-judder settings. Off
 			// the screen: the harness gives the renderer the monitor's refresh rate
 			// as the app does.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("MotionEnginesCoexistWithVpShaders")) return;
 			const std::string shaders =
 				"[shader.standard]\ntype: multi\nlabel: Off\n"
 				"[shader.standard.ssim_downscaler]\nshader_type: custom\nlabel: SSimDownscaler\nstage: post_resize\norder: 20\nglsl_file: SSimDownscaler.glsl\n"
@@ -1695,18 +2021,18 @@ namespace Tests
 			Assert::AreEqual(0, failures);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(EarlyUploadRunsThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(EarlyUploadRunsThroughTheRenderer)
 		{
+			const HarnessScope harnessScope;
 			// capture_upload: early (owner 2026-10-15, experimental): frames uploaded
 			// on the conversion thread are read by the render (V210 and 12-bit RGB,
 			// both capture paths' raw route), and the 24p de-judder's next frames
 			// come from the same early textures. Each run logs how many frames were
 			// read early at teardown.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("EarlyUploadRunsThroughTheRenderer")) return;
 			struct Case { VideoFrameEncoding encoding; bool film; const char* extra; const wchar_t* name; };
 			for (const Case& c : { Case{ VideoFrameEncoding::V210, false, "capture_upload: early\n", L"V210 early" },
 				Case{ VideoFrameEncoding::R12B, false, "capture_upload: early\n", L"R12B early" },
@@ -1747,17 +2073,17 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(EarlyUploadAndTheOpticalFlowProducerTogether)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(EarlyUploadAndTheOpticalFlowProducerTogether)
 		{
+			const HarnessScope harnessScope;
 			// Owner 2026-10-16: the two second D3D11 devices - early upload (capture_upload: early) and the
 			// optical-flow producer - must play nicely: 4K 24p film with the de-judder, each combination,
 			// then the low-latency path at 60 Hz with early upload on and off. Reports the presentation
 			// timing; asserts no failures, frames read early, the producer engaged and never stopped.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("EarlyUploadAndTheOpticalFlowProducerTogether")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
@@ -1820,17 +2146,17 @@ namespace Tests
 			Assert::AreEqual(0, failures, L"early upload and the optical-flow producer work in every combination and in low latency");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(NativeRgbIngestRunsThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(NativeRgbIngestRunsThroughTheRenderer)
 		{
+			const HarnessScope harnessScope;
 			// Roadmap item 2 (owner 2026-10-15): DeckLink 12-bit RGB (both byte
 			// orders) and r210 reach the renderer as native RGB, unpacked on the
 			// GPU, on the standard capture path as well as the gpu one; with
 			// native_rgb_ingest: off the CPU conversion as before.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("NativeRgbIngestRunsThroughTheRenderer")) return;
 			const std::string failed = "Native RGB ingest: the GPU unpack failed";
 			struct Case { VideoFrameEncoding encoding; const char* path; const char* line; };
 			for (const Case& c : { Case{ VideoFrameEncoding::R12B, "standard", "Native RGB ingest: R12B unpacked on the GPU" },
@@ -1913,8 +2239,12 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(DolbyVisionGpuUnpackMatchesTheCpuUnpackThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DolbyVisionGpuUnpackMatchesTheCpuUnpackThroughTheRenderer)
 		{
+			const HarnessScope harnessScope;
 			// dv_tunnel_gpu_unpack (owner 2026-10-16): a synthetic 1080p23.976 DV
 			// tunnel (sender picture + CRC-valid DM) through the renderer. The
 			// presented codes (VP-0133 raw_r10_sha256 of a still picture, dither and
@@ -1922,11 +2252,7 @@ namespace Tests
 			// GPU unpack forced to fail (VP_TEST_DV_UNPACK_FAIL=1: the CPU fallback).
 			// Then a stream that loses its DM packets (CRC damaged) goes black in
 			// every mode and comes back. Hardware only.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("DolbyVisionGpuUnpackMatchesTheCpuUnpackThroughTheRenderer")) return;
 			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
 			g_harnessWidth = 1920;
 			g_harnessHeight = 1080;
@@ -2017,13 +2343,13 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)
 		{
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames")) return;
 			const std::string gpuLine = "Capture path gpu: ", failed = "Capture path gpu: the GPU unpack failed";
 			// gpu, V210: unpacked on the GPU, never failed, frames presented.
 			{
@@ -2105,15 +2431,15 @@ namespace Tests
 					Logger::WriteMessage(("   " + line).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationRunsAtAMeasuredRateMismatch)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationRunsAtAMeasuredRateMismatch)
 		{
+			const HarnessScope harnessScope;
 			// auto at a non-integer ratio interpolates (the estimate runs for a video-rate
 			// source); at the display's own rate it passes through; off logs nothing.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("InterpolationRunsAtAMeasuredRateMismatch")) return;
 			const double display = HarnessMonitorHz();
 			{
 				const FramePlan plan = RatePlan(display * 5.0 / 6.0);
@@ -2135,20 +2461,23 @@ namespace Tests
 			{
 				const FramePlan plan = RatePlan(display * 5.0 / 6.0);
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, false, "", false, &plan);
+				// Anchor: the run presented and its log was captured (the GPU capture path ran).
+				Assert::IsTrue(r.presented, (L"off: frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Capture path gpu: V210 unpacked on the GPU"), (L"off: the run's log is there\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation:"), (L"off by default\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"off: no estimate\n" + r.Tail()).c_str());
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationLowLatencyFromTheFirstFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationLowLatencyFromTheFirstFrame)
 		{
+			const HarnessScope harnessScope;
 			// Zero queue / low latency: never interpolate, never wait for B (today's output),
 			// from the first frame (the queue profile applied before Build, as the app does).
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("InterpolationLowLatencyFromTheFirstFrame")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
 			g_harnessApplySnapshot = true;
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
@@ -2159,18 +2488,21 @@ namespace Tests
 			Assert::IsTrue(r.Logged("Interpolation: low-latency queue"), (L"off in low latency\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("Interpolation: interpolating"), (L"never interpolating\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead\n" + r.Tail()).c_str());
+			// interpolated=1 lines come from the live extras planner (on screen only); off screen the
+			// anchor is the capture path's line, so the negative checks read a real log.
+			Assert::IsTrue(r.Logged("Capture path gpu: V210 unpacked on the GPU"), (L"the run's log is there\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("interpolated=1"), (L"no interpolated picture\n" + r.Tail()).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationStreamFaultsFallBackAndRecover)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationStreamFaultsFallBackAndRecover)
 		{
+			const HarnessScope harnessScope;
 			// Missed frames and a resync during interpolation: the vectors are invalidated
 			// (MotionValidity), the interpolator holds, and it estimates again on a fresh pair.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("InterpolationStreamFaultsFallBackAndRecover")) return;
 			const double source = HarnessMonitorHz() * 5.0 / 6.0;
 			auto after = [](const RunResult& r, const std::string& marker, const std::string& text)
 			{
@@ -2204,35 +2536,36 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationIsExclusiveWithSmoothMotion)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationIsExclusiveWithSmoothMotion)
 		{
+			const HarnessScope harnessScope;
 			// One motion engine (owner 2026-10-15): with libplacebo's smooth motion selected,
 			// VP's interpolation stays off (no estimate, no vectors).
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("InterpolationIsExclusiveWithSmoothMotion")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
 				"interpolation: auto\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
 			ReportInterpolation("smooth motion selected", r);
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("Interpolation: interpolating"), (L"VP's interpolation off\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"no estimate\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.presented);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationTimelineAtEveryRatio)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationTimelineAtEveryRatio)
 		{
+			const HarnessScope harnessScope;
 			// Stage B: the per-refresh timeline engages above and below 1 (5/6 and 6/5 of the
 			// display rate: 50p on 60 Hz, 60p on 50 Hz, whatever the display); below 1 it skips
 			// source frames instead of letting drift correction drop them; no failures.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("InterpolationTimelineAtEveryRatio")) return;
 			const double display = HarnessMonitorHz();
 			struct Case { double factor; const char* name; bool skips; };
 			for (const Case& c : { Case{ 5.0 / 6.0, "slower than the display", false }, Case{ 6.0 / 5.0, "faster than the display", true },
@@ -2252,15 +2585,15 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationGapFillPairsAcrossMissedFrames)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationGapFillPairsAcrossMissedFrames)
 		{
+			const HarnessScope harnessScope;
 			// interpolation_fill_gaps: on - a pair across one or two missed capture frames
 			// (the timeline spans them); off (default) - no pair across the gap.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
-				return;
-			}
+			if (!RequireHardwareOrSkip("InterpolationGapFillPairsAcrossMissedFrames")) return;
 			const double source = HarnessMonitorHz() * 5.0 / 6.0;
 			for (const bool fill : { true, false })
 			{
@@ -2277,8 +2610,12 @@ namespace Tests
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationOnScreenFillsTheRepeatRefreshes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuOnScreen")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(InterpolationOnScreenFillsTheRepeatRefreshes)
 		{
+			const HarnessScope harnessScope;
 			// On the screen only (VP_TEST_HARNESS_ONSCREEN=1, real refresh statistics): at
 			// 5/6 of the display rate one refresh in six would repeat a frame; Stage A shows
 			// an interpolated picture there (the extras planner's interpolated=1 lines).
@@ -2286,11 +2623,12 @@ namespace Tests
 			size_t n = 0;
 			const bool on = _dupenv_s(&v, &n, "VP_TEST_HARNESS_ONSCREEN") == 0 && v && std::string(v) == "1";
 			std::free(v);
-			if (!on || !OnHardware())
+			if (!on)
 			{
-				Logger::WriteMessage(L"on-screen harness: VP_TEST_HARNESS_ONSCREEN=1 and VP_TEST_GPU=hardware only; not run");
+				Logger::WriteMessage("SKIP-OPT-IN InterpolationOnScreenFillsTheRepeatRefreshes: VP_TEST_HARNESS_ONSCREEN=1 only; not run\n");
 				return;
 			}
+			if (!RequireHardwareOrSkip("InterpolationOnScreenFillsTheRepeatRefreshes")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
 			for (const char* fallback : { "hold", "blend" })
 			{
@@ -2302,6 +2640,244 @@ namespace Tests
 				Assert::IsFalse(r.Logged("Interpolation: failed"), (name + L": no failure\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("extra render failed") || r.Logged("extra present failed"), (name + L": no render failure\n" + r.Tail()).c_str());
 			}
+		}
+
+		// --- Rule tests (test hardening 2026-10-17) ---
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationOffIsPixelIdenticalAtAWholeRatio)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(InterpolationOffIsPixelIdenticalAtAWholeRatio)
+		{
+			// Rule: interpolation off changes nothing. A still picture at the display's own rate (a
+			// whole ratio, where auto passes through): the presented codes (VP-0133 raw_r10_sha256,
+			// dither and deband off) with no interpolation key, with interpolation: off and with
+			// interpolation: auto are identical.
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("InterpolationOffIsPixelIdenticalAtAWholeRatio")) return;
+			const std::wstring shots = HarnessTempFolder(L"vp-interpolation-off");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan = RatePlan(HarnessMonitorHz());
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			auto hashOf = [&](const char* extra, const wchar_t* name, RunResult& r) {
+				r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false,
+					std::string(extra) + "[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &plan);
+				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
+				const std::string hash = CaptureHash(r);
+				Assert::IsFalse(hash.empty(), (std::wstring(name) + L": capture written with its hash\n" + r.Tail()).c_str());
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "\n").c_str());
+				return hash;
+			};
+			RunResult none, again, off, autoRun;
+			const std::string base = hashOf("", L"no key", none);
+			Assert::AreEqual(base, hashOf("", L"no key again", again), L"the capture is deterministic");
+			Assert::AreEqual(base, hashOf("interpolation: off\n", L"interpolation: off", off), L"off: identical codes");
+			Assert::AreEqual(base, hashOf("interpolation: auto\n", L"interpolation: auto (whole ratio)", autoRun),
+				L"auto at a whole ratio: identical codes");
+			Assert::IsTrue(autoRun.Logged("Interpolation: whole ratio: passes through"),
+				(L"auto: the whole ratio was recognised (anchor)\n" + autoRun.Tail()).c_str());
+			Assert::IsFalse(off.Logged("Interpolation: interpolating") || autoRun.Logged("Interpolation: interpolating"),
+				L"nothing interpolated");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(BtbAndWtwSurviveTheRendererEndToEnd)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(BtbAndWtwSurviveTheRendererEndToEnd)
+		{
+			// Owner rule: below black and above white are kept in all cases. A V210 picture of four
+			// flat bars - codes 4 and 40 (below black), 980 and 1019 (above white), chroma neutral -
+			// through the whole renderer (Run) to a limited-range output: the captured R10 codes of
+			// every channel inside each bar are within 2 codes of the input.
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("BtbAndWtwSurviveTheRendererEndToEnd")) return;
+			const int w = g_harnessWidth, h = g_harnessHeight;
+			const int codes[4] = { 4, 40, 980, 1019 };
+			g_harnessLumaPicture.assign(static_cast<size_t>(w) * h, 0);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+					g_harnessLumaPicture[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(codes[(std::min)(3, x * 4 / w)]);
+			const std::wstring shots = HarnessTempFolder(L"vp-btb-wtw");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false,
+				"[vprenderer.Default]\ndithering: off\ndeband: off\noutput_range: limited\n", false, &plan);
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.captureMetadata.empty(), (L"capture written\n" + r.Tail()).c_str());
+			int cw = 0, ch = 0;
+			const std::vector<int> rgb = LoadCaptureRgb(r.captureMetadata, cw, ch);
+			Assert::IsFalse(rgb.empty(), L"capture PNG read");
+			std::string report;
+			int worst = 0;
+			for (int bar = 0; bar < 4; ++bar)
+			{
+				// The bar's inside (away from the scaler's edges), the middle half of the rows.
+				const int x0 = cw * bar / 4 + cw / 16, x1 = cw * (bar + 1) / 4 - cw / 16;
+				int lo[3] = { 1 << 20, 1 << 20, 1 << 20 }, hi[3] = { -1, -1, -1 };
+				for (int y = ch / 4; y < ch * 3 / 4; ++y)
+					for (int x = x0; x < x1; ++x)
+						for (int c = 0; c < 3; ++c)
+						{
+							const int v = rgb[(static_cast<size_t>(y) * cw + x) * 3 + c];
+							lo[c] = (std::min)(lo[c], v);
+							hi[c] = (std::max)(hi[c], v);
+							worst = (std::max)(worst, std::abs(v - codes[bar]));
+						}
+				char line[200];
+				snprintf(line, sizeof(line), "bar %d (in %d): R %d..%d G %d..%d B %d..%d\n", bar, codes[bar], lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+				report += line;
+			}
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(worst <= 2, HarnessWide("BTB/WTW not kept end to end (worst " + std::to_string(worst) + " codes)\n" + report).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowLatencyQueueDepthAndDelayAreMeasured)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LowLatencyQueueDepthAndDelayAreMeasured)
+		{
+			// Low latency, measured (not only log lines): with the low-latency queue profile (target 1
+			// frame, as the app hands target_frames to the renderer) the renderer's queue depth and its
+			// capture-to-output delay (ExitLatencyMs), sampled through the second half of the run, are
+			// lower than with the Normal profile (target 5): at most 2 frames queued, and at least one
+			// source frame period less delay.
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("LowLatencyQueueDepthAndDelayAreMeasured")) return;
+			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 1;
+			const RunResult low = Run(VideoFrameEncoding::V210, "gpu", 6.0, true,
+				"dejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
+			g_harnessQueueTarget = 5;
+			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 6.0, true,
+				"dejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
+			const double period = 1001.0 / 24.0;   // the run's source frame period (23.976p), ms
+			const double lowQueue = Median(low.queueDepths), normalQueue = Median(normal.queueDepths);
+			const double lowDelay = Median(low.exitLatencyMs), normalDelay = Median(normal.exitLatencyMs);
+			char line[300];
+			snprintf(line, sizeof(line), "queue depth median: low %.1f, normal %.1f (%zu / %zu samples); exit latency median: low %.1f ms, normal %.1f ms\n",
+				lowQueue, normalQueue, low.queueDepths.size(), normal.queueDepths.size(), lowDelay, normalDelay);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(low.presented && normal.presented, L"both runs presented");
+			Assert::IsTrue(low.Logged("low-latency queue"), (L"the low-latency path ran (anchor)\n" + low.Tail()).c_str());
+			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is regular\n" + normal.Tail()).c_str());
+			Assert::IsTrue(low.queueDepths.size() > 10 && normal.queueDepths.size() > 10, L"samples taken");
+			Assert::IsTrue(lowQueue <= 2.0, HarnessWide(std::string("low latency: queue depth too deep\n") + line).c_str());
+			Assert::IsTrue(normalQueue > lowQueue, HarnessWide(std::string("the measure sees the deeper Normal queue\n") + line).c_str());
+			Assert::IsTrue(lowDelay > 0.0 && normalDelay > 0.0, HarnessWide(std::string("exit latency measured\n") + line).c_str());
+			Assert::IsTrue(lowDelay + period <= normalDelay,
+				HarnessWide(std::string("low latency: at least one frame period less delay\n") + line).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(MixedScreenNativeUiOverAnUpscaleIsNotRebased)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(MixedScreenNativeUiOverAnUpscaleIsNotRebased)
+		{
+			// Mixed screen through the renderer (source_resolution auto, evidence shortened to 1
+			// shot / 2 s): a moving 1080p picture upscaled 2x to 4K with cuts is re-based (the
+			// positive control: the check can see a re-base); the same picture with a static native
+			// 4K UI over its top half (a menu over the video) is never re-based.
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("MixedScreenNativeUiOverAnUpscaleIsNotRebased")) return;
+			const int mw = 1920, mh = 1080, w = 3840, h = 2160;
+			std::vector<double> master(static_cast<size_t>(mw) * mh);
+			{
+				std::mt19937 rng(11);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				struct Wave { double fx, fy, phase, amp; };
+				std::vector<Wave> waves;
+				for (int i = 0; i < 40; ++i)
+				{
+					const double f = 0.01 * std::pow(0.45 / 0.01, u(rng)), a = u(rng) * 3.14159265;
+					waves.push_back({ f * std::cos(a), f * std::sin(a), u(rng) * 6.2831853, 0.02 / std::sqrt(f) });
+				}
+				for (int y = 0; y < mh; ++y)
+					for (int x = 0; x < mw; ++x)
+					{
+						double v = 0.45;
+						for (const Wave& wv : waves) v += wv.amp * std::cos(6.2831853 * (wv.fx * x + wv.fy * y) + wv.phase);
+						master[static_cast<size_t>(y) * mw + x] = (std::min)(0.95, (std::max)(0.05, v));
+					}
+			}
+			// The player's 2x Lanczos-3 (separable), as limited-range 10-bit codes.
+			std::vector<uint16_t> upscaled(static_cast<size_t>(w) * h);
+			{
+				auto lanczos = [](double x) { x = std::fabs(x); if (x < 1e-9) return 1.0; if (x >= 3.0) return 0.0;
+					const double px = 3.14159265358979 * x; return 3.0 * std::sin(px) * std::sin(px / 3.0) / (px * px); };
+				auto line = [&](const double* src, int n, int stride, double* dst, int dstStride) {
+					for (int o = 0; o < 2 * n; ++o)
+					{
+						const double centre = (o + 0.5) / 2.0 - 0.5;
+						double sum = 0.0, wsum = 0.0;
+						for (int k = static_cast<int>(std::floor(centre)) - 2; k <= static_cast<int>(std::floor(centre)) + 3; ++k)
+						{
+							const int kk = (std::min)(n - 1, (std::max)(0, k));
+							const double wt = lanczos(centre - k);
+							sum += wt * src[static_cast<size_t>(kk) * stride];
+							wsum += wt;
+						}
+						dst[static_cast<size_t>(o) * dstStride] = sum / wsum;
+					}
+				};
+				std::vector<double> rows(static_cast<size_t>(w) * mh), up(static_cast<size_t>(w) * h);
+				for (int y = 0; y < mh; ++y) line(&master[static_cast<size_t>(y) * mw], mw, 1, &rows[static_cast<size_t>(y) * w], 1);
+				for (int x = 0; x < w; ++x) line(&rows[x], mh, w, &up[x], w);
+				for (size_t i = 0; i < up.size(); ++i)
+					upscaled[i] = static_cast<uint16_t>(std::lround(64.0 + (std::min)(1.0, (std::max)(0.0, up[i])) * 876.0));
+			}
+			// The native UI: a panel with rows of 1-2 pixel glyph strokes (4K detail), top half.
+			std::vector<uint16_t> mixed = upscaled;
+			{
+				std::mt19937 rng(23);
+				for (int y = 0; y < h / 2; ++y)
+					for (int x = 0; x < w; ++x)
+						mixed[static_cast<size_t>(y) * w + x] = 180;
+				for (int row = 0; row * 48 + 60 < h / 2; ++row)
+					for (int glyph = 0; glyph * 18 + 80 < w - 80; ++glyph)
+					{
+						const unsigned long long bits = (static_cast<unsigned long long>(rng()) << 32) | rng();
+						for (int gy = 0; gy < 7; ++gy)
+							for (int gx = 0; gx < 5; ++gx)
+							{
+								if (!((bits >> (gy * 5 + gx)) & 1ull)) continue;
+								for (int py = 0; py < 3; ++py)
+									for (int px = 0; px < 2; ++px)
+									{
+										const int x = 80 + glyph * 18 + gx * 2 + px, y = 60 + row * 48 + gy * 3 + py;
+										mixed[static_cast<size_t>(y) * w + x] = 900;
+									}
+							}
+					}
+			}
+			g_harnessWidth = w;
+			g_harnessHeight = h;
+			g_harnessLumaShift = 2;     // 1 master pixel per frame: still an exact 2x upscale
+			g_harnessShotFrames = 36;   // a cut (brightness jump) every 1.5 s at 24p
+			const FramePlan plan = RatePlan(24.0);
+			const std::string settings = "source_resolution: auto\nsource_resolution_evidence_shots: 1\nsource_resolution_evidence_seconds: 2\n";
+			auto report = [](const char* name, const RunResult& r) {
+				Logger::WriteMessage((std::string(name) + ": " + r.sourceStatus + "\n").c_str());
+				for (const std::string& line : r.log)
+					if (line.find("Re-base") != std::string::npos || line.find("Source resolution") != std::string::npos)
+						Logger::WriteMessage(("   " + line + "\n").c_str());
+			};
+			g_harnessLumaPicture = upscaled;
+			g_harnessLumaStaticRows = 0;
+			const RunResult plain = Run(VideoFrameEncoding::V210, "gpu", 14.0, false, settings, false, &plan);
+			report("upscale", plain);
+			g_harnessLumaPicture = mixed;
+			g_harnessLumaStaticRows = h / 2;
+			const RunResult menu = Run(VideoFrameEncoding::V210, "gpu", 14.0, false, settings, false, &plan);
+			report("native UI over the upscale", menu);
+			Assert::IsTrue(plain.presented && menu.presented, L"both runs presented");
+			Assert::IsTrue(plain.Logged("Re-base: 3840x2160 ->"),
+				(L"positive control: the plain 2x upscale is re-based under auto\n" + plain.Tail()).c_str());
+			Assert::IsTrue(menu.sourceStatus.find("source_resolution auto") != std::string::npos &&
+				menu.sourceStatus.find("not read") == std::string::npos, (L"the mixed screen was read (anchor)\n" + menu.Tail()).c_str());
+			Assert::IsFalse(menu.Logged("Re-base:"), (L"native UI over half the screen: never re-based\n" + menu.Tail()).c_str());
 		}
 	};
 }

@@ -28,6 +28,11 @@ public:
 	};
 
 	ConfigurationRpcClient(std::string host, uint16_t port = 41686);
+	// The error a receive timeout reports: VP is busy and the outcome of the
+	// request is unknown (audit 2026-10-16).
+	static constexpr const char* TimeoutError =
+		"VP is busy (timed out); the outcome is unknown. Check VP, then retry.";
+	static bool IsTimeoutError(const std::string& error) { return error == TimeoutError; }
 	bool GetConfig(std::string& targetPath, std::string& bytes,
 		std::string& error) const;
 	bool GetCapabilities(Capabilities& capabilities,

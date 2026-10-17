@@ -139,8 +139,16 @@ namespace VideoProcessorTest
 			block = false;
 			Assert::IsFalse(blockedWrite, L"a held writer lock skips the handler's write");
 			Assert::IsTrue(elapsed < 3000, L"the handler gives up after a bounded wait");
-			Sleep(250);
-			Assert::IsTrue(recorder.WriteFromHandler("test crash"), L"a free writer lock is written");
+			// The released periodic write finishes on its own thread: poll until the lock is free
+			// (bounded) instead of assuming a fixed delay is enough on a loaded machine.
+			bool written = false;
+			const ULONGLONG freeStart = GetTickCount64();
+			while (!written && GetTickCount64() - freeStart < 10000)
+			{
+				written = recorder.WriteFromHandler("test crash");
+				if (!written) Sleep(10);
+			}
+			Assert::IsTrue(written, L"a free writer lock is written");
 			const std::string text = Read(folder + "\\crash-state.txt");
 			Assert::IsTrue(text.find("crash: test crash") != std::string::npos, L"the crash value is written");
 			Assert::IsTrue(text.find("handler test recent line") != std::string::npos,

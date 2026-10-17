@@ -803,79 +803,32 @@ namespace VideoProcessorTest
 		{
 			const SourceResolution::Thresholds defaults;
 			Assert::IsTrue(defaults.mixedGuard, L"on by default");
-			Layout l;
-			l.name = "menu: 50% preview + poster row";
-			l.video = { { 0, 0, 3840, 1080 } };
-			l.native = kPosterRow;
+			// The fixture must give the guard something to overrule. The former one (a 50% preview
+			// over a poster row) read native with the guard off as well - half its tiles are the
+			// native posters - so the overrule check never ran (audit 2026-10-17). A 4K info panel
+			// over a 1080 film reads the film's rate with the guard off on every shot (measured).
+			Layout l = Film(0.5);
+			l.name = "info panel (thumbnail + text) over the top of a 1080 film";
+			l.dimmed = { { 0, 0, 3840, 900 } };
+			l.native = { { 200, 200, 900, 800 } };
 			std::vector<std::vector<float>> cache;
-			const std::vector<ShotTile> tiles = MakeShot(l, 0, cache);
-			const std::vector<SourceResolution::Spectrum> spectra = AnalyseFrame(tiles, 0.0);
 			SourceResolution::Thresholds off;
 			off.mixedGuard = false;
-			const SourceResolution::FrameReading rOn = SourceResolution::ReadFrame(spectra);
-			const SourceResolution::FrameReading rOff = SourceResolution::ReadFrame(spectra, off);
-			char line[200];
-			snprintf(line, sizeof(line), "50%% menu, one frame: guard off ratio %.3f; on ratio %.3f mixed %d (picture %d overlay %d)\n",
-				rOff.ratio, rOn.ratio, rOn.mixed ? 1 : 0, rOn.mixedPictureTiles, rOn.mixedOverlayTiles);
-			Logger::WriteMessage(line);
-			Assert::IsFalse(rOff.mixed);
-			Assert::AreEqual(0, rOff.mixedPictureTiles + rOff.mixedOverlayTiles, L"off: the guard does not run");
-			if (rOff.ratio < 1.0) Assert::IsTrue(rOn.mixed && rOn.ratio == 1.0, L"on: the lower reading is overruled");
-		}
-	};
-}
-
-// TEMP DIAGNOSTIC (remove before handing back)
-namespace VideoProcessorTest
-{
-	TEST_CLASS(MixedScreenDiagTemp)
-	{
-	public:
-		TEST_METHOD(Diag)
-		{
-			using namespace MixedScreen;
-			Layout two = Film(0.5);
-			two.name = "two lines";
-			two.text = { { 1000, 2840, 1560, 56 }, { 900, 2940, 1640, 56 } };
-			Layout menu = Film(0.5);
-			menu.name = "menu";
-			menu.dimmed = { { 0, 1080, 3840, 2160 } };
-			menu.text = kListText;
-			Layout info = Film(0.5);
-			info.name = "info";
-			info.dimmed = { { 0, 0, 3840, 900 } };
-			info.text = { { 200, 3700, 250, 64 }, { 200, 3700, 420, 44 }, { 200, 3700, 500, 44 }, { 200, 3700, 580, 44 }, { 200, 3700, 700, 44 } };
-			Layout up667 = Film(2.0 / 3.0); up667.name = "up667";
-			Layout up75 = Film(0.75); up75.name = "up75";
-			Layout up33 = Film(1.0 / 3.0); up33.name = "up33";
-			Layout nat = Film(1.0); nat.name = "native";
-			for (const Layout* l : { &info, &two, &menu, &up667, &up75, &up33, &nat })
+			for (int shot = 0; shot < 3; ++shot)
 			{
-				std::vector<std::vector<float>> cache;
-				for (int shot = 0; shot < 6; ++shot)
-				{
-					const std::vector<ShotTile> tiles = MakeShot(*l, shot, cache);
-					for (int f = 0; f < 6; f += 6)
-					{
-						const double offset = (shot % 2 ? 0.2 : -0.2) + 3.0 * f / 1023.0;
-						const std::vector<SourceResolution::Spectrum> sp = AnalyseFrame(tiles, offset);
-						const SourceResolution::FrameReading r = SourceResolution::ReadFrame(sp);
-						char line[300];
-						snprintf(line, sizeof(line), "%s shot %d f %d: ratio %.3f mixed %d (mixedRatio %.3f) pic %d ov %d ui %d inf %d text %d\n", l->name.c_str(), shot, f, r.ratio, r.mixed, r.mixedRatio, r.mixedPictureTiles, r.mixedOverlayTiles, r.mixedUiTiles, r.informativeTiles, r.textTiles);
-						Logger::WriteMessage(line);
-						const double rate = r.mixed ? r.mixedRatio : r.ratio;
-						for (size_t i = 0; i < 8; ++i)
-						{
-							double lev = 0;
-							const double d = rate < 1.0 ? SourceResolution::DetailAbove(sp[i], rate, 3, &lev) : 0.0;
-							const int c = static_cast<int>(std::lround(rate * 256));
-							double cv = 0, ch = 0;
-							for (int m = c - 2; m <= c + 2; ++m) if (m >= 0 && m < 256) { cv = (std::max)(cv, sp[i].mirrorVertical[m]); ch = (std::max)(ch, sp[i].mirrorHorizontal[m]); }
-							snprintf(line, sizeof(line), "   tile %zu: sharp %.4f tb %.2f lines %d detail %.2f lvl %.2f coh %.2f/%.2f inf %d\n", i, sp[i].sharpSteps, sp[i].textBand, sp[i].textLines, d, lev, cv, ch, SourceResolution::Informative(sp[i]) ? 1 : 0);
-							Logger::WriteMessage(line);
-						}
-					}
-				}
+				const std::vector<ShotTile> tiles = MakeShot(l, shot, cache);
+				const std::vector<SourceResolution::Spectrum> spectra = AnalyseFrame(tiles, 0.0);
+				const SourceResolution::FrameReading rOn = SourceResolution::ReadFrame(spectra);
+				const SourceResolution::FrameReading rOff = SourceResolution::ReadFrame(spectra, off);
+				char line[200];
+				snprintf(line, sizeof(line), "info panel over a film, shot %d: guard off ratio %.3f; on ratio %.3f mixed %d (picture %d overlay %d)\n",
+					shot, rOff.ratio, rOn.ratio, rOn.mixed ? 1 : 0, rOn.mixedPictureTiles, rOn.mixedOverlayTiles);
+				Logger::WriteMessage(line);
+				Assert::IsFalse(rOff.mixed);
+				Assert::AreEqual(0, rOff.mixedPictureTiles + rOff.mixedOverlayTiles, L"off: the guard does not run");
+				// The precondition first: guard off reads the lower rate.
+				Assert::IsTrue(rOff.ratio < 1.0, L"precondition: guard off reads the film's lower rate");
+				Assert::IsTrue(rOn.mixed && rOn.ratio == 1.0, L"on: the lower reading is overruled");
 			}
 		}
 	};

@@ -994,7 +994,9 @@ namespace VideoProcessorTest
 					Assert::AreEqual(0, unlocks, (w + L": holds").c_str());
 				}
 			}
-			if (clipsRead == 0) Logger::WriteMessage("VP_TEST_REAL_FOOTAGE: no clip found\n");
+			// VP_TEST_REAL_FOOTAGE was set (the run asked for real footage): a folder with none of the
+			// clips is a failure, not a silent pass.
+			Assert::IsTrue(clipsRead > 0, Wide("VP_TEST_REAL_FOOTAGE=" + folder + ": no clip found").c_str());
 		}
 	};
 }

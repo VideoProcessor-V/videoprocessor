@@ -21,6 +21,17 @@ void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
 void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
 void RunBetaChainGpuTest(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
+// Report modes (VP_TEST_MATCHER_TIMING, _DEJUDDER_QUALITY, _DITHER_COMPARE, _TIMING_GATE, _MOTION_CORPUS,
+// _REAL_FOOTAGE, _QUALITY, _SCENARIO) run one report and stop before the gate's whole-chain tests: they
+// return this distinct code and print "MODE <name>: gate not run", so a gate run with a stray report
+// switch can never pass (the test host fails it unless VP_TEST_REPORT_MODE=1).
+const int kBetaReportModeExitCode = 3;
+static int BetaReportMode(const char* name)
+{
+    std::cout << "MODE " << name << ": gate not run\n";
+    std::cout.flush();
+    return kBetaReportModeExitCode;
+}
 // The suite's entry: the program's main, or (VP_BETA_TEST_DLL) a function the
 // native test host calls - Smart App Control on the development laptop blocks
 // new builds of this program but not test DLLs loaded by Microsoft's signed
@@ -40,7 +51,7 @@ int main() {
             if (matcherOnly)
             {
                 RunBetaMatcherTiming();
-                return 0;
+                return BetaReportMode("VP_TEST_MATCHER_TIMING");
             }
         }
         Settings settings; Projection p; std::string error;
@@ -109,7 +120,7 @@ int main() {
             if (runDejudderQuality)
             {
                 RunBetaDejudderQuality();
-                return 0;
+                return BetaReportMode("VP_TEST_DEJUDDER_QUALITY");
             }
             char* dc = nullptr;
             size_t dcLength = 0;
@@ -119,7 +130,7 @@ int main() {
             if (runDitherCompare)
             {
                 RunBetaDitherCompare();
-                return 0;
+                return BetaReportMode("VP_TEST_DITHER_COMPARE");
             }
             char* tg = nullptr;
             size_t tgLength = 0;
@@ -129,7 +140,7 @@ int main() {
             if (runTimingGate)
             {
                 RunBetaTimingGate();
-                return 0;
+                return BetaReportMode("VP_TEST_TIMING_GATE");
             }
             char* mc = nullptr;
             size_t mcLength = 0;
@@ -138,7 +149,7 @@ int main() {
             if (runCorpus)
             {
                 RunBetaMotionCorpus();
-                return 0;
+                return BetaReportMode("VP_TEST_MOTION_CORPUS");
             }
             char* rf = nullptr;
             size_t rfLength = 0;
@@ -147,18 +158,18 @@ int main() {
             if (runReal)
             {
                 RunBetaRealFootage();
-                return 0;
+                return BetaReportMode("VP_TEST_REAL_FOOTAGE");
             }
             if (runQuality)
             {
                 RunBetaOptionQuality();
-                return 0;
+                return BetaReportMode("VP_TEST_QUALITY");
             }
             if (runScenario)
             {
                 // Report only, then stop (the rest of the suite is the gate's).
                 RunBetaScenarioTiming();
-                return 0;
+                return BetaReportMode("VP_TEST_SCENARIO");
             }
         }
         RunBetaChainBiasRegression();

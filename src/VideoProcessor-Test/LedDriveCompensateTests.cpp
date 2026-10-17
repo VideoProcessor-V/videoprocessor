@@ -646,6 +646,58 @@ namespace VideoProcessorTest
 			Assert::IsTrue(previous > 50 && commands <= previous - 50, L"at most one command per whole value");
 		}
 
+		// Rule test (owner: CNTR left above the need is a visible defect): over a need that
+		// rises then falls (the LED dimming into a dark scene and back), after every update the
+		// CNTR value is never above the smallest whole value covering the need; on the way down
+		// it equals it exactly; on the way up it lags only inside the 2% anti-chatter margin.
+		TEST_METHOD(CntrFollowsARisingThenFallingNeedAtTheSmallestCoveringValue)
+		{
+			const double eotf = 2.41;
+			const int maxUsable = 74;
+			CntrPairing pairing;
+			pairing.Configure(eotf, maxUsable, true, true);
+			const double headroom = 1.25;
+			auto smallestCovering = [&](double need) {
+				const double required = need > 1.0 ? need : 1.0;
+				int value = 50;
+				while (value < maxUsable && pairing.Light(value) < required - 1e-12) ++value;
+				return value;
+			};
+			std::vector<double> needs;
+			for (int i = 0; i <= 300; ++i) needs.push_back(0.8 + 2.4 * i / 300.0);    // rises to 3.2 (beyond the top)
+			for (int i = 300; i >= 0; --i) needs.push_back(0.8 + 2.4 * i / 300.0);    // falls back
+			int peak = 50, rises = 0, falls = 0;
+			double previousNeed = 0.0;
+			for (size_t step = 0; step < needs.size(); ++step)
+			{
+				const double compensation = needs[step] * headroom;   // the LED's light factor
+				pairing.Update(compensation, headroom);
+				const double need = compensation / headroom;
+				const int covering = smallestCovering(need);
+				const int contrast = pairing.Contrast();
+				const std::wstring at = L" at step " + std::to_wstring(step) + L" (need " + std::to_wstring(need) +
+					L", CNTR " + std::to_wstring(contrast) + L", covering " + std::to_wstring(covering) + L")";
+				Assert::IsTrue(contrast <= covering, (L"CNTR left above the smallest covering value" + at).c_str());
+				if (need < previousNeed)
+				{
+					Assert::AreEqual(covering, contrast, (L"falling need: CNTR exactly at the smallest covering value" + at).c_str());
+					++falls;
+				}
+				else
+				{
+					// Rising: at most the anti-chatter margin below (VP's gain covers the 2%).
+					Assert::IsTrue(contrast == covering || need <= pairing.Light(contrast) * 1.02 + 1e-12,
+						(L"rising need: CNTR lags beyond the 2% margin" + at).c_str());
+					++rises;
+				}
+				peak = (std::max)(peak, contrast);
+				previousNeed = need;
+			}
+			Assert::AreEqual(maxUsable, peak, L"the need reached the top usable value");
+			Assert::AreEqual(50, pairing.Contrast(), L"back to 50 once nothing is needed");
+			Assert::IsTrue(rises > 100 && falls > 100, L"both directions exercised");
+		}
+
 		// With CNTR assist the highlight floor may go lower by CNTR's
 		// headroom, and the controller reports VP's own headroom.
 		TEST_METHOD(ContrastHeadroomLowersTheHighlightFloor)

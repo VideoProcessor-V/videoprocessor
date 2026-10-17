@@ -177,7 +177,7 @@ bool ConfigurationRpcClient::Request(uint16_t operation,
 		// audit 2026-10-16: a receive timeout is a busy VP, not a version
 		// mismatch; for Apply the change may or may not have been made.
 		error = timedOut ?
-			"VP is busy (timed out); the outcome is unknown. Check VP, then retry." :
+			TimeoutError :
 			"VP did not complete the configuration version handshake. Update VP and Config UI together, or retry when VP is running.";
 		return false;
 	}
@@ -203,7 +203,7 @@ bool ConfigurationRpcClient::Request(uint16_t operation,
 		wire.data() + HeaderBytes, payloadBytes, &timedOut))
 	{
 		error = timedOut ?
-			"VP is busy (timed out); the outcome is unknown. Check VP, then retry." :
+			TimeoutError :
 			"VP returned an incomplete configuration response.";
 		return false;
 	}

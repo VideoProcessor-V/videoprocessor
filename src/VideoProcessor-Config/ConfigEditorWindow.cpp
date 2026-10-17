@@ -112,7 +112,9 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <regex>
 #include <set>
+#include <sstream>
 
 namespace
 {
@@ -552,6 +554,26 @@ QString canonicalShortcutText(const QString& text)
     return RendererProfileConfig::CanonicalizeKeyChord(
         trimmed.toStdString(), canonical) ?
         QString::fromStdString(canonical) : trimmed;
+}
+
+// After a save the document holds every shortcut in canonical spelling; show
+// the same in the shortcut fields without marking anything edited (second
+// pass, audit 2026-10-16).
+void showCanonicalShortcutSpelling(QWidget* root)
+{
+    if (!root) return;
+    for (QLineEdit* edit : root->findChildren<QLineEdit*>())
+    {
+        const QString name = edit->objectName();
+        if (!name.startsWith(QStringLiteral("config.shortcuts.")) &&
+            !name.endsWith(QStringLiteral(".shortcut")) &&
+            !name.endsWith(QStringLiteral(".cycle_shortcut")))
+            continue;
+        const QString canonical = canonicalShortcutText(edit->text());
+        if (canonical == edit->text()) continue;
+        const QSignalBlocker blocker(edit);
+        edit->setText(canonical);
+    }
 }
 
 QString effectiveChoiceValue(const QComboBox* combo)
@@ -1019,6 +1041,24 @@ struct ShortcutIssue
     QString otherField; // the other side of a clash, marked too
 };
 
+// As RendererProfileConfig::IsUnified plus VP's LLDV rule: whether VP takes
+// this configuration's renderer settings from the main file (second pass,
+// audit 2026-10-16).
+bool documentUsesUnifiedRendererConfig(const ConfigEditorCore::ConfigDocument& document)
+{
+    for (const std::string& section : document.SectionNames())
+    {
+        const std::string name = ConfigFile::NormalizeName(section);
+        if (name == "vprenderer" || name == "profile_groups" || name == "general" ||
+            name == "event_actions" || name == "profiles.input" || name == "profiles.scaling" ||
+            name == "profiles.display" || name == "profiles.viewport" || name == "lldv" ||
+            name.rfind("profile_groups.", 0) == 0 || name.rfind("profiles.", 0) == 0 ||
+            name.rfind("event_actions.", 0) == 0 || name.rfind("lldv.", 0) == 0)
+            return true;
+    }
+    return false;
+}
+
 // audit 2026-10-16: the editor's port of the legacy Config's
 // ValidateFixedShortcuts. Fixed shortcuts (an absent key keeps VP's default,
 // an empty one disables it) and renderer-selection shortcuts (render.N) must
@@ -1036,7 +1076,13 @@ std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument
         configured[ConfigFile::NormalizeName(setting.first)] = setting.second;
 
     std::map<std::string, std::pair<QString, QString>> used; // canonical chord -> owner label, field
-    auto useFixed = [&](const QString& label, const QString& key, const std::string& text)
+    // render.N chords live apart (second pass, audit 2026-10-16): VP pairs a
+    // renderer selection with a profile shortcut on the same chord on purpose
+    // (VideoProcessorDlg: "Paired shortcut"), so they clash only with fixed
+    // shortcuts and with each other.
+    std::map<std::string, std::pair<QString, QString>> renderUsed;
+    auto useFixed = [&](const QString& label, const QString& key, const std::string& text,
+        bool rendererSelection = false)
     {
         const std::string trimmed = ConfigFile::Trim(text);
         if (trimmed.empty()) return;
@@ -1049,15 +1095,20 @@ std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument
             return;
         }
         const QString field = controlName(QStringLiteral("shortcuts"), key);
-        const auto existing = used.find(canonical);
-        if (existing != used.end())
+        const std::pair<QString, QString>* owner = nullptr;
+        if (const auto fixed = used.find(canonical); fixed != used.end())
+            owner = &fixed->second;
+        else if (rendererSelection)
+            if (const auto renderer = renderUsed.find(canonical); renderer != renderUsed.end())
+                owner = &renderer->second;
+        if (owner)
         {
             issues.push_back({ QStringLiteral("[shortcuts] %1 and %2 both use %3. Fixed shortcuts must be unique.")
-                .arg(existing->second.first, label, QString::fromStdString(canonical)),
-                field, existing->second.second });
+                .arg(owner->first, label, QString::fromStdString(canonical)),
+                field, owner->second });
             return;
         }
-        used.emplace(canonical, std::make_pair(label, field));
+        (rendererSelection ? renderUsed : used).emplace(canonical, std::make_pair(label, field));
     };
     auto useFixedFields = [&](const FixedShortcutField* fields, size_t count)
     {
@@ -1071,12 +1122,34 @@ std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument
     };
     useFixedFields(kApplicationShortcutFields, std::size(kApplicationShortcutFields));
     useFixedFields(kCaptureShortcutFields, std::size(kCaptureShortcutFields));
+    // display_rules_auto (F4 by default): VP reads it, from the separate
+    // renderer file, only for a configuration that is not unified - so it
+    // takes F4 only then. It has no field here (second pass, audit 2026-10-16).
+    if (!documentUsesUnifiedRendererConfig(document))
+    {
+        std::string canonical;
+        if (RendererProfileConfig::CanonicalizeKeyChord("F4", canonical) && !used.count(canonical))
+            used.emplace(canonical, std::make_pair(QStringLiteral("Automatic display rules (F4)"), QString()));
+    }
     for (const auto& entry : configured)
     {
         unsigned int index = 0;
         if (!ConfigFile::TryParseIndexedKey(entry.first, "render", index)) continue;
         useFixed(QStringLiteral("Renderer %1 selection").arg(index),
-            QString::fromStdString(entry.first), entry.second);
+            QString::fromStdString(entry.first), entry.second, true);
+    }
+    // [shaders.X] shortcuts count only for rules listed in [shaders] rules,
+    // as VP reads them (second pass, audit 2026-10-16).
+    std::set<std::string> listedShaderRules;
+    {
+        std::string rules;
+        for (const auto& setting : document.SectionSettings("shaders"))
+            if (ConfigFile::NormalizeName(setting.first) == "rules") rules = setting.second;
+        std::istringstream stream(rules);
+        std::string item;
+        while (std::getline(stream, item, ','))
+            if (!ConfigFile::Trim(item).empty())
+                listedShaderRules.insert(ConfigFile::NormalizeName(ConfigFile::Trim(item)));
     }
 
     const char* profileRoots[] = { "queue", "lldv", "vprenderer", "shader", "shaders" };
@@ -1093,6 +1166,9 @@ std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument
                 profileSection = true;
         }
         if (!profileSection) continue;
+        if (normalized == "shaders") continue; // [shaders] holds the rule list, not a shortcut
+        if (normalized.compare(0, 8, "shaders.") == 0 && !listedShaderRules.count(normalized.substr(8)))
+            continue;
         for (const auto& setting : document.SectionSettings(section))
         {
             const std::string key = ConfigFile::NormalizeName(setting.first);
@@ -1471,8 +1547,13 @@ ConfigEditorWindow::~ConfigEditorWindow()
 	}
 	if (remoteApplyThread_)
 	{
-		remoteApplyThread_->wait();
+		// Second pass (audit 2026-10-16): do not hold exit for up to a
+		// minute. The worker owns copies of everything it uses, so let it
+		// finish (or end with the process) and delete itself.
+		QThread* worker = remoteApplyThread_;
 		remoteApplyThread_ = nullptr;
+		worker->setParent(nullptr);
+		QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
 	}
 	if (revealEventNotifier_)
 		revealEventNotifier_->setEnabled(false);
@@ -1876,7 +1957,11 @@ void ConfigEditorWindow::finishLocalTargetSwitch(const Target& target,
 bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 {
 	if (targetSwitchPending_) return false;
-	if (remoteApplyThread_) return false; // audit 2026-10-16: Apply in flight
+	if (remoteApplyThread_) // audit 2026-10-16: Apply in flight
+	{
+		setStatus(QStringLiteral("Still applying on the target; switch when it has finished."));
+		return false;
+	}
 	if (target.host.isEmpty() && !localAvailable_) return false;
 	if (!noTarget_ && target.host.compare(remoteHost_, Qt::CaseInsensitive) == 0 &&
 		target.port == remotePort_) return true;
@@ -2989,7 +3074,8 @@ void ConfigEditorWindow::applyActiveProfileIndicators(bool available,
         // A profile list initially edits its first (default) row. Once the
         // live snapshot arrives, open the active row instead. A later snapshot
         // must never move an operator away from a row they chose to edit.
-        if (!shaderList && profileSelectionReady_ &&
+        // Not while a remote Apply locks the editor (audit 2026-10-16).
+        if (!shaderList && profileSelectionReady_ && !remoteApplyThread_ &&
             binding.pendingActiveSelection)
         {
             if (binding.editSelectionTouched)
@@ -3926,10 +4012,12 @@ bool ConfigEditorWindow::updateValidationState()
         }
         invalidShortcutFields_ = marked;
     }
+    // A remote Apply in flight keeps Apply and OK disabled (audit 2026-10-16).
+    const bool busy = remoteApplyThread_ != nullptr;
     if (saveButton_)
-        saveButton_->setEnabled(configurationLoaded_ && valid);
+        saveButton_->setEnabled(configurationLoaded_ && valid && !busy);
     if (applyButton_)
-        applyButton_->setEnabled(configurationLoaded_ && dirty_ && valid);
+        applyButton_->setEnabled(configurationLoaded_ && dirty_ && valid && !busy);
     if (!valid)
     {
         int latest = 0;
@@ -4157,6 +4245,10 @@ void ConfigEditorWindow::setRemoteApplyBusy(bool busy)
     if (navigation_) navigation_->setEnabled(!busy);
     if (auto* cancel = findChild<QPushButton*>(QStringLiteral("cancelConfiguration")))
         cancel->setEnabled(!busy);
+    // Second pass (audit 2026-10-16): no target switch or refresh mid-Apply.
+    if (targetChoice_) targetChoice_->setEnabled(!busy);
+    if (auto* refresh = findChild<QToolButton*>(QStringLiteral("config.refreshTargets")))
+        refresh->setEnabled(!busy);
     if (busy)
     {
         if (applyButton_) applyButton_->setEnabled(false);
@@ -4349,56 +4441,145 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
 		// Apply. Run it on a worker thread (like runTargetCommand) with a
 		// copy of the stateless client, and keep the editor locked meanwhile
 		// so the document cannot change under the request.
+		// Second pass (audit 2026-10-16):
+		// - ValidateCandidate skips remote documents, so the local drafting
+		//   loop above never sees an unfinished action. The worker drafts on
+		//   VP's own "[actions.x] ..." rejection and applies again (once per
+		//   action).
+		// - On a receive timeout it reads the target's configuration back: if
+		//   it already equals the candidate the Apply took effect.
+		// - The worker captures no window state, so exit can leave it running.
 		struct Outcome
 		{
 			bool ok = false;
+			bool timedOut = false;
+			bool confirmedAfterTimeout = false;
+			bool targetRead = false;
 			ConfigurationRpcClient::ApplyResult applied;
 			std::string error;
+			std::string targetPath;
+			std::string targetBytes;
+			std::string candidate;
+			std::vector<std::string> draftedSections;
+			ConfigEditorCore::ConfigDocument document;
 		};
 		const auto outcome = std::make_shared<Outcome>();
+		outcome->document = *document_;
 		const ConfigurationRpcClient client = *remoteClient_;
 		const std::string baseline = document_->loadedBytes;
-		const std::string candidate = document_->Serialize();
-		remoteApplyThread_ = QThread::create([client, baseline, candidate, outcome]
+		remoteApplyThread_ = QThread::create([client, baseline, outcome]
 		{
-			outcome->ok = client.ApplyConfig(baseline, candidate, outcome->applied, outcome->error);
+			const size_t maximumDrafts = outcome->document.SectionNamesWithPrefix("actions").size();
+			const std::regex actionError(R"(\[(actions\.[^\]]+)\] (?!enabled(?: |$)))");
+			for (size_t attempt = 0; attempt <= maximumDrafts; ++attempt)
+			{
+				outcome->candidate = outcome->document.Serialize();
+				outcome->error.clear();
+				outcome->ok = client.ApplyConfig(baseline, outcome->candidate, outcome->applied, outcome->error);
+				if (outcome->ok || ConfigurationRpcClient::IsTimeoutError(outcome->error)) break;
+				std::smatch match;
+				if (!std::regex_search(outcome->error, match, actionError)) break;
+				const std::string section = match[1].str();
+				const std::string enabled = ConfigFile::NormalizeName(
+					ConfigFile::Trim(outcome->document.Get(section.c_str(), "enabled")));
+				if (enabled == "false" || enabled == "0" || enabled == "no" || enabled == "off") break;
+				if (!outcome->document.SetKnown(section, "enabled", "false")) break;
+				outcome->draftedSections.push_back(section);
+			}
+			if (!outcome->ok && ConfigurationRpcClient::IsTimeoutError(outcome->error))
+			{
+				outcome->timedOut = true;
+				std::string readError;
+				outcome->targetRead = client.GetConfig(outcome->targetPath, outcome->targetBytes, readError);
+				outcome->confirmedAfterTimeout = outcome->targetRead && outcome->targetBytes == outcome->candidate;
+			}
 		});
 		remoteApplyThread_->setParent(this);
 		QThread* worker = remoteApplyThread_;
 		setRemoteApplyBusy(true);
 		setStatus(QStringLiteral("Applying on the target… VP can take up to a minute to answer."));
-		connect(worker, &QThread::finished, this, [this, worker, outcome, rollback, candidate,
+		connect(worker, &QThread::finished, this, [this, worker, outcome, rollback,
 			draftedActions, showDraftedActions, afterRemoteApply]
 		{
 			if (remoteApplyThread_ == worker) remoteApplyThread_ = nullptr;
 			worker->deleteLater();
 			setRemoteApplyBusy(false);
 			if (!document_) return;
-			if (!outcome->ok)
+			if (!outcome->ok && !outcome->confirmedAfterTimeout)
 			{
 				*document_ = *rollback;
 				updateValidationState();
-				setStatus(QString::fromUtf8(outcome->error), true);
+				if (!outcome->timedOut)
+				{
+					setStatus(QString::fromUtf8(outcome->error), true);
+					return;
+				}
+				if (!outcome->targetRead)
+				{
+					setStatus(QStringLiteral("VP did not answer in time and its configuration could not be read back; "
+						"the outcome is unknown. Check VP and reload its configuration before applying again."), true);
+					return;
+				}
+				// VP may still apply the change after this answer: offer the
+				// target's current configuration instead of a blind retry.
+				bool reload = false;
+				if (!testMode_)
+				{
+					QMessageBox prompt(this);
+					prompt.setWindowTitle(QStringLiteral("Apply not confirmed"));
+					prompt.setText(QStringLiteral("VP did not confirm the Apply in time, and its configuration does not "
+						"match your edits yet. VP may still be applying them."));
+					prompt.setInformativeText(QStringLiteral("Reload the target's current configuration (your unapplied "
+						"edits are discarded), or keep your edits and check VP before applying again."));
+					auto* reloadButton = prompt.addButton(QStringLiteral("Reload from VP"), QMessageBox::AcceptRole);
+					prompt.addButton(QStringLiteral("Keep my edits"), QMessageBox::RejectRole);
+					prompt.exec();
+					reload = prompt.clickedButton() == reloadButton;
+				}
+				if (!reload)
+				{
+					setStatus(QStringLiteral("VP did not confirm the Apply; the outcome is unknown. Check VP and reload "
+						"its configuration before applying again."), true);
+					return;
+				}
+				configPath_ = QString::fromUtf8(outcome->targetPath);
+				document_->LoadBytes(configPath_.toStdWString(), outcome->targetBytes);
+				savedSnapshot_ = captureDocumentSnapshot(*document_);
+				hasPendingMigrations_ = false;
+				dirty_ = false;
+				rebuildConfigurationShell();
+				setStatus(QStringLiteral("Reloaded the target's current configuration."));
 				return;
 			}
-			document_->loadedBytes = candidate;
+			*document_ = outcome->document;
+			QStringList drafted = draftedActions;
+			for (const std::string& section : outcome->draftedSections)
+				drafted.push_back(displayName(QString::fromStdString(section), QStringLiteral("actions")));
+			document_->loadedBytes = outcome->candidate;
 			document_->requiresMigrationBackup = false;
 			dirty_ = false;
 			if (saveButton_) saveButton_->setEnabled(true);
 			if (applyButton_) applyButton_->setEnabled(false);
 			savedSnapshot_ = captureDocumentSnapshot(*document_);
 			updateEffectSummary();
-			showDraftedActions(draftedActions);
-			const QString applied = outcome->applied.status == 0 ?
-				QStringLiteral("Saved on target for next start") :
-				outcome->applied.status == 1 ? QStringLiteral("Applied on target") :
-				QStringLiteral("Saved on target; reset or restart requested");
-			QString message = QStringLiteral("%1: %2.").arg(applied,
-				QString::fromUtf8(outcome->applied.action));
-			if (!draftedActions.isEmpty())
+			showDraftedActions(drafted);
+			showCanonicalShortcutSpelling(this);
+			QString message;
+			if (outcome->confirmedAfterTimeout)
+				message = QStringLiteral("Saved on target: VP answered slowly, and its configuration now matches your edits.");
+			else
+			{
+				const QString applied = outcome->applied.status == 0 ?
+					QStringLiteral("Saved on target for next start") :
+					outcome->applied.status == 1 ? QStringLiteral("Applied on target") :
+					QStringLiteral("Saved on target; reset or restart requested");
+				message = QStringLiteral("%1: %2.").arg(applied,
+					QString::fromUtf8(outcome->applied.action));
+			}
+			if (!drafted.isEmpty())
 				message += QStringLiteral(" Incomplete action%1 %2 saved as disabled draft%1.")
-					.arg(draftedActions.size() == 1 ? QString() : QStringLiteral("s"),
-						draftedActions.join(QStringLiteral(", ")));
+					.arg(drafted.size() == 1 ? QString() : QStringLiteral("s"),
+						drafted.join(QStringLiteral(", ")));
 			setStatus(message);
 			if (afterRemoteApply) afterRemoteApply();
 		});
@@ -4419,6 +4600,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     if (applyButton_) applyButton_->setEnabled(false);
     savedSnapshot_ = captureDocumentSnapshot(*document_);
     updateEffectSummary();
+    showCanonicalShortcutSpelling(this);
 
     // The editor is a separate process. Signal the running VP instance only
     // after the atomic safe-save has committed the complete validated file.
@@ -9393,7 +9575,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                  field.key == QStringLiteral("diagnostic_disable_shader_cache"));
             const bool defaultOnlyField = defaultOnlyRendererField;
             QString configured = raw;
-			if (!requiresExplicitValue && configured.isEmpty() && list->count() > 0)
+            // VP never inherits low_latency_path from the default queue
+            // (RendererProfileConfig: unset = on only for the name Low_Latency);
+            // second pass, audit 2026-10-16.
+            const bool ownOnlyQueueField = sectionPrefix == QStringLiteral("queue") &&
+                field.key == QStringLiteral("low_latency_path");
+			if (!requiresExplicitValue && !ownOnlyQueueField && configured.isEmpty() && list->count() > 0)
                 configured = defaultProfile ? fallback(field.key) :
                     profileValue(list->item(0)->data(Qt::UserRole).toString(), field.key);
 			// Stage 5, as VP reads it: a queue's own Target frames switches off a
@@ -9562,9 +9749,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (hasUnspecifiedChoice && scalingAutoChoice && !defaultProfile)
                     combo->setItemText(0, QStringLiteral("Inherit from default profile"));
                 // audit 2026-10-16: say what an unset low-latency path does.
-                if (hasUnspecifiedChoice && sectionPrefix == QStringLiteral("queue") &&
-                    field.key == QStringLiteral("low_latency_path") && raw.isEmpty() && configured.isEmpty())
-                    combo->setItemText(0, QStringLiteral("Not set (on only for the Low Latency queue profile)"));
+                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty())
+                {
+                    // As VP decides it: on only when the profile's name normalises to low_latency.
+                    const QString queueName = section.startsWith(QStringLiteral("queue."), Qt::CaseInsensitive) ?
+                        section.mid(6) : QString();
+                    const bool namedLowLatency = !queueName.isEmpty() &&
+                        ConfigFile::NormalizeName(queueName.toStdString()) == "low_latency";
+                    combo->setItemText(0, namedLowLatency ?
+                        QStringLiteral("Not set: on (the Low Latency queue)") :
+                        QStringLiteral("Not set: off (on only for the Low Latency queue)"));
+                }
                 const int effectiveIndex = autoIndex >= 0 ? autoIndex :
                     combo->findData(configured, Qt::UserRole, Qt::MatchFixedString);
                 int index = raw.isEmpty() ?
