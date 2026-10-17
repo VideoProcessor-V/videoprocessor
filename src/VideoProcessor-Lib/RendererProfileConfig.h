@@ -1714,6 +1714,16 @@ namespace RendererProfileConfig
 					(values->count("target_frames") || values->count("steady_reserve_frames")) &&
 					!values->count("target_latency_ms"))
 					profile.settings.erase("target_latency_ms");
+				if (std::string(spec.name) == "queue")
+				{
+					// Audit 2026-10-16: low_latency_path is the profile's own (unset = on only for the
+					// name Low_Latency), never inherited from the default queue profile.
+					if (!values->count("low_latency_path"))
+						profile.settings.erase("low_latency_path");
+					// The legacy steady_reserve_frames on a variant beats an inherited target_frames.
+					if (values->count("steady_reserve_frames") && !values->count("target_frames"))
+						profile.settings.erase("target_frames");
+				}
 				if (!MergeShortcutIntoWhen(profileShortcut, "[" + variantSection + "]", profile.when, error))
 					return false;
 				if (!profileCycleShortcut.empty() &&

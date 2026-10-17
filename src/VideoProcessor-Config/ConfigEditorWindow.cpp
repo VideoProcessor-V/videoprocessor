@@ -560,6 +560,37 @@ QString effectiveChoiceValue(const QComboBox* combo)
     return (selected.isEmpty() ? combo->property("effectiveValue").toString() : selected).trimmed().toLower();
 }
 
+// Audit 2026-10-16: exclusive buttons over a hidden drop-down. The buttons show the effective
+// value (inherited from the default profile, or the built-in default), marked as such; a
+// "Not set" button returns the profile to the drop-down's unspecified item (the key removed).
+QToolButton* addChoiceUnsetButton(QComboBox* combo, QBoxLayout* layout, QObject* context)
+{
+    auto* unset = new QToolButton;
+    unset->setObjectName(combo->objectName() + QStringLiteral(".unset"));
+    unset->setText(QStringLiteral("Not set"));
+    unset->setToolTip(QStringLiteral(
+        "Removes this profile's choice: the default profile's choice (or the built-in default) applies."));
+    layout->addWidget(unset);
+    QObject::connect(unset, &QToolButton::clicked, context, [combo]() {
+        if (combo->count() > 0 && combo->itemData(0).toString().isEmpty()) combo->setCurrentIndex(0);
+    });
+    return unset;
+}
+
+void markChoiceButtons(const QComboBox* combo, const QList<QRadioButton*>& radios, QToolButton* unset)
+{
+    const bool unspecified = combo->currentData().toString().isEmpty();
+    const QString suffix = !unspecified ? QString() :
+        combo->property("inherited").toBool() ? QStringLiteral(" (inherited)") : QStringLiteral(" (default)");
+    for (QRadioButton* radio : radios)
+    {
+        if (!radio->property("baseText").isValid()) radio->setProperty("baseText", radio->text());
+        radio->setText(radio->property("baseText").toString() + (radio->isChecked() ? suffix : QString()));
+    }
+    if (unset)
+        unset->setVisible(!unspecified && combo->count() > 0 && combo->itemData(0).toString().isEmpty());
+}
+
 QString diagnosticPresetForControls(const QObject* parent)
 {
     for (const char* key : { "diagnostic_disable_compute", "diagnostic_force_8bit_sdr_swapchain",
@@ -5144,11 +5175,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         int capacity;
         int lead;
         int target;
+        int resetPercent;   // reset_queue_too_large_percent
     };
+    // Low latency matches the shipped [queue.Low_Latency] (1 / 1 / 1, reset at 200%; audit 2026-10-16).
     static constexpr QueuePolicy queuePolicies[] = {
-        { "low_latency", "Low latency", "Keeps at most two VP queue frames; targets one frame.", 2, 0, 1 },
-        { "balanced", "Balanced", "Uses a moderate queue for ordinary playback.", 16, 3, 2 },
-        { "reliable", "Reliable", "Uses a larger queue for the most resilient playback; holds 4 frames ahead for the motion vectors.", 32, 4, 5 },
+        { "low_latency", "Low latency", "Keeps one VP queue frame and targets one frame; a full queue is tolerated (reset only at 200%).", 1, 1, 1, 200 },
+        { "balanced", "Balanced", "Uses a moderate queue for ordinary playback.", 16, 3, 2, 75 },
+        { "reliable", "Reliable", "Uses a larger queue for the most resilient playback; holds 4 frames ahead for the motion vectors.", 32, 4, 5, 75 },
     };
     auto state = std::make_shared<State>();
     auto fields = std::make_shared<std::vector<Field>>();
@@ -5310,18 +5343,30 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             };
             connect(rule, &QPlainTextEdit::textChanged, this, syncUse);
             connect(useRule, &QCheckBox::toggled, this, syncUse);
-            connect(offButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
+            // Audit 2026-10-16: a hand-written rule is kept aside when Off or 50/60 Hz replaces it, and
+            // By rules brings it back; an empty rule is not saved (the profile reads Off), so say so.
+            auto keepCustom = [rule]() {
+                const QString text = rule->toPlainText().trimmed();
+                if (!text.isEmpty() && text != kRate5060) rule->setProperty("customRule", text);
+            };
+            rule->setPlaceholderText(QStringLiteral("Type the rule here; an empty rule is not saved (the queue is then Off)."));
+            connect(offButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
                 if (!on) return;
+                keepCustom();
                 rule->clear();
                 useRule->setChecked(false);
             });
             connect(rulesButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
                 if (!on) return;
-                if (rule->toPlainText().trimmed() == kRate5060) rule->clear();
+                const QString text = rule->toPlainText().trimmed();
+                if (text.isEmpty() || text == kRate5060)
+                    rule->setPlainText(rule->property("customRule").toString());
                 useRule->setChecked(true);
+                rule->setFocus();
             });
-            connect(rateButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
+            connect(rateButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
                 if (!on) return;
+                keepCustom();
                 rule->setPlainText(kRate5060);
                 useRule->setChecked(true);
             });
@@ -6643,6 +6688,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int i = 0; i < 8; ++i) anySet = anySet || !raw(i).isEmpty();
                 if (!anySet)
                 {
+                    // Audit 2026-10-16: the handle moves to the built-in level too (it kept the previous
+                    // profile's position); releasing it on that position writes the level.
+                    for (int p = 0; p < 6; ++p)
+                        if (matches(p))
+                        {
+                            const QSignalBlocker blocker(motionSlider);
+                            motionSlider->setValue(p);
+                            break;
+                        }
                     motionName->setText(QStringLiteral("Not set (the default profile's, or As shot)"));
                     motionDescription->setText(QStringLiteral("Move the slider to choose this profile's level."));
                     return;
@@ -6676,6 +6730,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 refresh();
             };
             connect(motionSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
+            // Not set: the handle already on the chosen position emits no valueChanged; the release writes it.
+            connect(motionSlider, &QSlider::sliderReleased, this, [apply, raw, motionSlider]() {
+                for (int i = 0; i < 8; ++i)
+                    if (!raw(i).isEmpty()) return;
+                apply(motionSlider->value());
+            });
             connect(motionReset, &QPushButton::clicked, this, [apply, motionSlider]() { apply(motionSlider->value()); });
             // The default level (Cinema, position 2): one click back.
             connect(motionDefault, &QPushButton::clicked, this, [apply, motionSlider]() {
@@ -7111,6 +7171,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int i = 0; i < 4; ++i) anySet = anySet || !raw(i).isEmpty();
                 if (!anySet)
                 {
+                    // Audit 2026-10-16: the handle moves to the built-in level too (it kept the previous
+                    // profile's position); releasing it on that position writes the level.
+                    for (int p = 0; p < 4; ++p)
+                        if (matches(p))
+                        {
+                            const QSignalBlocker blocker(pictureSlider);
+                            pictureSlider->setValue(p);
+                            break;
+                        }
                     pictureName->setText(QStringLiteral("Not set (the default profile's, or Standard)"));
                     pictureDescription->setText(QStringLiteral("Move the slider to choose this profile's level."));
                     return;
@@ -7144,6 +7213,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 refresh();
             };
             connect(pictureSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
+            // Not set: the handle already on the chosen position emits no valueChanged; the release writes it.
+            connect(pictureSlider, &QSlider::sliderReleased, this, [apply, raw, pictureSlider]() {
+                for (int i = 0; i < 4; ++i)
+                    if (!raw(i).isEmpty()) return;
+                apply(pictureSlider->value());
+            });
             connect(pictureReset, &QPushButton::clicked, this, [apply, pictureSlider]() { apply(pictureSlider->value()); });
             // The default level (Standard, position 2): one click back.
             connect(pictureDefault, &QPushButton::clicked, this, [apply, pictureSlider]() {
@@ -7311,14 +7386,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             group->addButton(matcherButton);
             sourceLayout->addWidget(engineButton);
             sourceLayout->addWidget(matcherButton);
+            QToolButton* flowUnset = addChoiceUnsetButton(opticalFlow, sourceLayout, this);
             sourceLayout->addStretch(1);
             form->addRow(QStringLiteral("Motion vectors from"), sourceButtons);
             form->setRowVisible(opticalFlow, false);
-            auto sync = [opticalFlow, engineButton, matcherButton, opticalFlowGlobal, motionAhead]() {
+            auto sync = [opticalFlow, engineButton, matcherButton, opticalFlowGlobal, motionAhead, flowUnset]() {
                 const QSignalBlocker a(engineButton), b(matcherButton);
-                const bool off = opticalFlow->currentData().toString() == QStringLiteral("off");
+                const bool off = effectiveChoiceValue(opticalFlow) == QStringLiteral("off");
                 matcherButton->setChecked(off);
                 engineButton->setChecked(!off);
+                markChoiceButtons(opticalFlow, { engineButton, matcherButton }, flowUnset);
                 // The engine's own options do nothing with the matcher only.
                 for (QWidget* w : { static_cast<QWidget*>(opticalFlowGlobal), static_cast<QWidget*>(motionAhead) })
                 {
@@ -7331,8 +7408,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (index >= 0 && opticalFlow->currentIndex() != index) opticalFlow->setCurrentIndex(index);
             };
             connect(opticalFlow, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
-            connect(engineButton, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("on")); });
-            connect(matcherButton, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("off")); });
+            connect(engineButton, &QRadioButton::clicked, this, [choose]() { choose(QStringLiteral("on")); });
+            connect(matcherButton, &QRadioButton::clicked, this, [choose]() { choose(QStringLiteral("off")); });
             auto* refresh = new QAction(sourceButtons);
             refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("optical_flow_refresh")));
             connect(refresh, &QAction::triggered, this, [sync]() { sync(); });
@@ -7415,20 +7492,21 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 row->addWidget(radio);
                 radios.push_back(radio);
                 const QString value = QString::fromLatin1(c.value);
-                connect(radio, &QRadioButton::toggled, this, [temporalDither, value](bool on) {
-                    if (!on) return;
+                // clicked, not toggled: a click on the button shown for an inherited value writes it.
+                connect(radio, &QRadioButton::clicked, this, [temporalDither, value]() {
                     const int index = temporalDither->findData(value);
                     if (index >= 0 && temporalDither->currentIndex() != index) temporalDither->setCurrentIndex(index);
                 });
             }
+            QToolButton* unset = addChoiceUnsetButton(temporalDither, row, this);
             row->addStretch(1);
             layout->addLayout(row);
             auto* note = new QLabel;
             note->setObjectName(controlName(sectionPrefix, QStringLiteral("temporal_dither.note")));
             note->setWordWrap(true);
             layout->addWidget(note);
-            auto sync = [temporalDither, radios, group, note]() {
-                const QString v = temporalDither->currentData().toString();
+            auto sync = [temporalDither, radios, group, note, unset]() {
+                const QString v = effectiveChoiceValue(temporalDither);
                 group->setExclusive(false);
                 for (QRadioButton* r : radios)
                 {
@@ -7447,6 +7525,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     }
                 note->setText(set ? QString() : QStringLiteral("Not set: the shader list and the Dithering setting decide (as before)."));
                 note->setVisible(!set);
+                markChoiceButtons(temporalDither, QList<QRadioButton*>(radios.begin(), radios.end()), unset);
             };
             connect(temporalDither, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
             auto* refresh = new QAction(ditherButtons);
@@ -7633,23 +7712,25 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         faithfulGroup->addButton(faithfulOneD);
         faithfulButtonsLayout->addWidget(faithfulAuto);
         faithfulButtonsLayout->addWidget(faithfulOneD);
+        QToolButton* faithfulUnset = addChoiceUnsetButton(adaptiveFaithful, faithfulButtonsLayout, this);
         faithfulButtonsLayout->addStretch(1);
         form->addRow(QStringLiteral("Grain-true downscale filter"), faithfulButtons);
         form->setRowVisible(adaptiveFaithful, false);
         {
-            auto syncButtons = [adaptiveFaithful, faithfulAuto, faithfulOneD]() {
+            auto syncButtons = [adaptiveFaithful, faithfulAuto, faithfulOneD, faithfulUnset]() {
                 const QSignalBlocker a(faithfulAuto), b(faithfulOneD);
-                const bool oneD = adaptiveFaithful->currentData().toString() == QStringLiteral("ortho");
+                const bool oneD = effectiveChoiceValue(adaptiveFaithful) == QStringLiteral("ortho");
                 faithfulOneD->setChecked(oneD);
                 faithfulAuto->setChecked(!oneD);
+                markChoiceButtons(adaptiveFaithful, { faithfulAuto, faithfulOneD }, faithfulUnset);
             };
             connect(adaptiveFaithful, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncButtons](int) { syncButtons(); });
             auto choose = [adaptiveFaithful](const QString& value) {
                 const int index = adaptiveFaithful->findData(value);
                 if (index >= 0 && adaptiveFaithful->currentIndex() != index) adaptiveFaithful->setCurrentIndex(index);
             };
-            connect(faithfulAuto, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("auto")); });
-            connect(faithfulOneD, &QRadioButton::toggled, this, [choose](bool on) { if (on) choose(QStringLiteral("ortho")); });
+            connect(faithfulAuto, &QRadioButton::clicked, this, [choose]() { choose(QStringLiteral("auto")); });
+            connect(faithfulOneD, &QRadioButton::clicked, this, [choose]() { choose(QStringLiteral("ortho")); });
             // Profile loads block the drop-down's signals: the load triggers this.
             auto* faithfulRefresh = new QAction(faithfulButtons);
             faithfulRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh")));
@@ -8520,7 +8601,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
                 queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
-                queueValue(QStringLiteral("reset_queue_too_large_percent")) == 75)
+                queueValue(QStringLiteral("reset_queue_too_large_percent")) == policy.resetPercent)
             {
                 policyId = QString::fromLatin1(policy.id);
                 break;
@@ -8703,14 +8784,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
-                    { "downscale_light", "linear" }, { "preserve_extended_range", "off" }, { "sdr_tone_shape", "off" } };
+                    { "downscale_light", "linear" }, { "preserve_extended_range", "off" }, { "sdr_tone_shape", "off" },
+                    { "motion_ahead_frames", "4" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
                 // Numbers with a placeholder showing their default: empty, so
                 // the placeholder (not "Auto") is what an unset field shows.
                 if ((key.startsWith(QStringLiteral("dejudder_")) || key.startsWith(QStringLiteral("dither_")) ||
                         key.startsWith(QStringLiteral("adaptive_")) || key == QStringLiteral("sdr_white_headroom") ||
-                        key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength")) &&
+                        key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength") ||
+                        key == QStringLiteral("ssim_bitrate_floor") || key.startsWith(QStringLiteral("source_resolution_auto_")) ||
+                        key.startsWith(QStringLiteral("source_resolution_evidence_"))) &&
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
                 return QStringLiteral("AUTO");
@@ -9153,7 +9237,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 advanced->setChecked(true);
         });
         connect(queuePolicy, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
+            [this, queuePolicy, state, fields, profileFields, updateQueuePolicyPresentation](int index)
         {
             if (state->loading || state->section.isEmpty() || !document_ || index < 0) return;
             const QString selectedId = queuePolicy->itemData(index).toString();
@@ -9178,7 +9262,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("target_latency_ms", 0);
             setValue("active_picture_lookahead_frames", 0);
             setValue("reset_after_render_restart_seconds", 5);
-            setValue("reset_queue_too_large_percent", 75);
+            setValue("reset_queue_too_large_percent", selected->resetPercent);
             for (const Field& field : *fields)
                 if (field.kind == Field::Integer)
                 {
@@ -9187,13 +9271,25 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     else if (field.key == QStringLiteral("lead_frames")) value = selected->lead;
                     else if (field.key == QStringLiteral("target_frames")) value = selected->target;
                     else if (field.key == QStringLiteral("reset_after_render_restart_seconds")) value = 5;
-                    else if (field.key == QStringLiteral("reset_queue_too_large_percent")) value = 75;
+                    else if (field.key == QStringLiteral("reset_queue_too_large_percent")) value = selected->resetPercent;
                     QSignalBlocker blocker(field.widget);
                     qobject_cast<QSpinBox*>(field.widget)->setValue(value);
                 }
             // A preset switches Target delay off; its note follows.
             if (auto* note = findChild<QLabel*>(QStringLiteral("config.queue.target_latency_note")))
                 note->setText(queueLatencyNoteText(0));
+            // Low latency also takes VP's low-latency path, whatever the profile is called (audit
+            // 2026-10-16: on another name the look-ahead minimum raised a 1-frame queue's target to 5).
+            if (selectedId == QStringLiteral("low_latency"))
+                if (auto* path = profileFields->findChild<QComboBox*>(QStringLiteral("config.queue.low_latency_path")))
+                {
+                    const int on = path->findData(QStringLiteral("on"));
+                    if (on >= 0) path->setCurrentIndex(on);
+                }
+            // The spin boxes were set under signal blockers: the By frames / By time buttons follow
+            // (audit 2026-10-16: By time stayed shown with Target frames hidden).
+            if (auto* refresh = profileFields->findChild<QAction*>(QStringLiteral("config.queue.target_mode_refresh")))
+                refresh->trigger();
             markDirty();
             updateQueuePolicyPresentation();
         });
@@ -11208,8 +11304,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 sourceGroup->addButton(radio, i);
                 sourceLayout->addWidget(radio);
                 radios.push_back(radio);
-                connect(radio, &QRadioButton::toggled, this, [source, i](bool on) {
-                    if (on && source->currentIndex() != i) source->setCurrentIndex(i);
+                connect(radio, &QRadioButton::clicked, this, [source, i]() {
+                    if (source->currentIndex() != i) source->setCurrentIndex(i);
+                    else emit source->activated(i);   // converts an older file; writes "No LED commands" on a new one
                 });
             }
             sourceLayout->addStretch(1);
@@ -11394,7 +11491,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     {
         bool valid = false;
         const double configured = value(led, QStringLiteral("compensation_eotf")).toDouble(&valid);
-        projectorGamma->setValue(valid ? std::max(1.8, std::min(configured, 3.0)) : 2.41);
+        // The spin box's own range (1.0-3.0, as the LED validation); was clamped to 1.8 (audit 2026-10-16).
+        projectorGamma->setValue(valid ? std::max(1.0, std::min(configured, 3.0)) : 2.41);
     }
     connect(projectorGamma, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
         [this, led](double exponent)

@@ -117,6 +117,33 @@ namespace VideoProcessorTest
             Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ndejudder_strength_even: 0.5\n"), L"even-cadence strength alone");
         }
 
+        TEST_METHOD(LowLatencyPathAndLegacyTargetAreNotInherited)
+        {
+            // Audit 2026-10-16: low_latency_path on the default queue profile must not reach the
+            // others (Low_Latency kept its 1-frame queue on the regular path), and a variant's
+            // legacy steady_reserve_frames beats an inherited target_frames.
+            auto resolve = [](const char* text, const char* name) {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << text;
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                RendererProfileConfig::Model model;
+                Assert::IsTrue(RendererProfileConfig::Read(config, model, error), std::wstring(error.begin(), error.end()).c_str());
+                RendererProfileConfig::ResolvedQueue resolved;
+                Assert::IsTrue(RendererProfileConfig::ResolveQueue(model, name, resolved, error), std::wstring(error.begin(), error.end()).c_str());
+                return resolved;
+            };
+            const char* offOnNormal = "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\nlow_latency_path: off\n"
+                "[queue.Low_Latency]\nqueue_size: 1\ntarget_frames: 1\n[queue.Other]\nqueue_size: 8\n";
+            Assert::IsTrue(resolve(offOnNormal, "low_latency").lowLatencyPath, L"Low_Latency, unset: on (not Normal's off)");
+            Assert::IsFalse(resolve(offOnNormal, "normal").lowLatencyPath);
+            const char* onOnNormal = "[queue.Normal]\nqueue_size: 4\nlow_latency_path: on\n[queue.Other]\nqueue_size: 8\n";
+            Assert::IsFalse(resolve(onOnNormal, "other").lowLatencyPath, L"another name, unset: off (not Normal's on)");
+            const char* legacy = "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n[queue.Old]\nsteady_reserve_frames: 1\n";
+            Assert::AreEqual<size_t>(1, resolve(legacy, "old").targetFrames, L"the variant's steady_reserve_frames");
+        }
+
         TEST_METHOD(LowLatencyPathIsAQueueProperty)
         {
             // Owner 2026-10-16: low_latency_path on the queue profile; unset = the Low_Latency name.

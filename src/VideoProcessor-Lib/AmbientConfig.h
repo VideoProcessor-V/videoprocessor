@@ -58,12 +58,12 @@ namespace Ambient
 		settings = Settings();
 		bool ok = true;
 		std::string raw;
-		if (config.TryGetString("ambient", "mode", raw) && !ParseMode(ConfigFile::Trim(raw), settings.mode))
+		if (config.TryGetString("ambient", "mode", raw) && !ParseMode(ConfigFile::NormalizeName(raw), settings.mode))
 		{
 			error = "unsupported value for ambient.mode: " + raw;
 			ok = false;
 		}
-		if (config.TryGetString("ambient", "room", raw) && !ParseRoom(ConfigFile::Trim(raw), settings.room))
+		if (config.TryGetString("ambient", "room", raw) && !ParseRoom(ConfigFile::NormalizeName(raw), settings.room))
 		{
 			error = "unsupported value for ambient.room: " + raw;
 			ok = false;

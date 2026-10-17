@@ -2018,6 +2018,14 @@ namespace
 				if (value == choice) { target = value; return; }
 			DebugLog::Log("display rule '%s': invalid %s value '%s'; retaining base setting", rule.name.c_str(), key, raw.c_str());
 		};
+		// The raw on/off-style compares below, case-insensitive like the validation (audit 2026-10-16:
+		// a hand-written "On" passed Apply and was then ignored).
+		auto tryChoice = [&config, &rule](const char* key, std::string& out)
+		{
+			if (!config.TryGetString(rule.section, key, out)) return false;
+			out = ConfigFile::NormalizeName(out);
+			return true;
+		};
 		auto readToggle = [&config, &rule](const char* key, AutoToggle& target)
 		{
 			std::string raw;
@@ -2242,7 +2250,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid saturation '%s'; using 0",
 					rule.section.c_str(), raw.c_str());
 		}
-		if (config.TryGetString(rule.section, "dejudder_even_rates", raw))
+		if (tryChoice("dejudder_even_rates", raw))
 		{
 			// General (owner 2026-10-14): whole-number source rates, or also the
 			// 1000/1001 rates; "30" / "30_and_29.97" are the earlier names.
@@ -2306,7 +2314,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid dejudder_hold_hysteresis '%s'; keeping %d",
 					rule.section.c_str(), raw.c_str(), settings.dejudderHoldHysteresis);
 		}
-		if (config.TryGetString(rule.section, "dither_vectors", raw))
+		if (tryChoice("dither_vectors", raw))
 		{
 			if (raw == "auto" || raw == "own")
 				settings.ditherVectorsOwn = raw == "own";
@@ -2314,7 +2322,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid dither_vectors '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
 					settings.ditherVectorsOwn ? "own" : "auto");
 		}
-		if (config.TryGetString(rule.section, "fbo_float32", raw))
+		if (tryChoice("fbo_float32", raw))
 		{
 			if (raw == "auto" || raw == "on" || raw == "off")
 				settings.fboFloat32 = raw == "auto" ? -1 : (raw == "on" ? 1 : 0);
@@ -2349,7 +2357,7 @@ namespace
 			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
 			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware) })
 		{
-			if (!config.TryGetString(rule.section, toggle.first, raw))
+			if (!tryChoice(toggle.first, raw))
 				continue;
 			if (raw == "on" || raw == "off")
 				*toggle.second = raw == "on";
@@ -2382,7 +2390,7 @@ namespace
 			settings.adaptive.edgeHi = settings.adaptive.edgeLo + 1.0f;
 		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
-		if (config.TryGetString(rule.section, "adaptive_faithful", raw))
+		if (tryChoice("adaptive_faithful", raw))
 		{
 			if (raw == "polar" || raw == "ortho" || raw == "auto")
 			{
@@ -2393,7 +2401,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
 					settings.adaptive.faithfulAuto ? "auto" : settings.adaptive.faithfulOrtho ? "ortho" : "polar");
 		}
-		if (config.TryGetString(rule.section, "rebase_kernel_match", raw))
+		if (tryChoice("rebase_kernel_match", raw))
 		{
 			if (raw == "on" || raw == "off")
 				settings.rebaseKernelMatch = raw == "on";
@@ -2401,7 +2409,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid rebase_kernel_match '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.rebaseKernelMatch ? "on" : "off");
 		}
-		if (config.TryGetString(rule.section, "source_resolution_text_guard", raw))
+		if (tryChoice("source_resolution_text_guard", raw))
 		{
 			if (raw == "on" || raw == "off")
 				settings.sourceResolutionTextGuard = raw == "on";
@@ -2409,7 +2417,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid source_resolution_text_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionTextGuard ? "on" : "off");
 		}
-		if (config.TryGetString(rule.section, "optical_flow", raw))
+		if (tryChoice("optical_flow", raw))
 		{
 			if (raw == "on" || raw == "off")
 				settings.opticalFlow = raw == "on";
@@ -2426,7 +2434,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid temporal_dither '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.temporalDither.c_str());
 		}
-		if (config.TryGetString(rule.section, "optical_flow_global", raw))
+		if (tryChoice("optical_flow_global", raw))
 		{
 			if (raw == "on" || raw == "off")
 				settings.opticalFlowGlobal = raw == "on";
@@ -2469,7 +2477,7 @@ namespace
 			std::make_pair("adaptive_upscale", &settings.adaptiveUpscale),
 			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale) })
 		{
-			if (!config.TryGetString(rule.section, toggle.first, raw))
+			if (!tryChoice(toggle.first, raw))
 				continue;
 			if (raw == "on" || raw == "off")
 				*toggle.second = raw == "on";
@@ -2477,7 +2485,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
 					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
 		}
-		if (config.TryGetString(rule.section, "dejudder_warp_stage", raw))
+		if (tryChoice("dejudder_warp_stage", raw))
 		{
 			if (raw == "rendered" || raw == "source")
 				settings.dejudderWarpRendered = raw == "rendered";
@@ -2485,7 +2493,7 @@ namespace
 				DebugLog::Log("profile '%s': invalid dejudder_warp_stage '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.dejudderWarpRendered ? "rendered" : "source");
 		}
-		if (config.TryGetString(rule.section, "preserve_extended_range", raw))
+		if (tryChoice("preserve_extended_range", raw))
 		{
 			if (raw == "on" || raw == "off")
 				settings.preserveExtendedRange = raw == "on";
@@ -2494,7 +2502,7 @@ namespace
 					rule.section.c_str(), raw.c_str(), settings.preserveExtendedRange ? "on" : "off");
 		}
 		// Delta 13: the SDR tone shape and headroom.
-		if (config.TryGetString(rule.section, "sdr_tone_shape", raw))
+		if (tryChoice("sdr_tone_shape", raw))
 		{
 			if (raw == "off" || raw == "knee")
 				settings.sdrTone.knee = raw == "knee";
@@ -8608,7 +8616,6 @@ struct LibplaceboVideoRenderer::Impl
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
 		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
-		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		PublishSettingsState(settings);
@@ -9681,6 +9688,7 @@ struct LibplaceboVideoRenderer::Impl
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
+		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
@@ -12921,7 +12929,9 @@ struct LibplaceboVideoRenderer::Impl
 				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
 				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
 				current.referenceHeight != next.referenceHeight || current.sourceHz != next.sourceHz ||
-				current.referenceRateHz != next.referenceRateHz)
+				current.referenceRateHz != next.referenceRateHz ||
+				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
+				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal)
 				dejudder->SetSettings(next);
 		}
 		// 6c: B's occlusion mask into the slot not holding the mask for the
@@ -18212,11 +18222,19 @@ struct LibplaceboVideoRenderer::Impl
 						producer->Error().c_str());
 				}
 			}
-			else if (!wantProducer && motionProducer)
+			else if (!wantProducer)
 			{
-				motionProducer->Stop();
-				motionProducer.reset();
-				motionEngineReady.store(false, std::memory_order_release);
+				if (motionProducer)
+				{
+					motionProducer->Stop();
+					motionProducer.reset();
+					motionEngineReady.store(false, std::memory_order_release);
+				}
+				// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow
+				// off and on, low latency and back), and the look-ahead re-engages only after the
+				// refill (4 queued ahead) - never on a stale engagement.
+				motionProducerFailedLogged = false;
+				motionAheadEngaged = false;
 			}
 			if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
 			{
@@ -18229,6 +18247,8 @@ struct LibplaceboVideoRenderer::Impl
 				lowLatency, motionProducer && motionProducer->Running(),
 				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow);
 			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
+			if (!(motionProducer && motionProducer->Running()) || ahead.depth == 0)
+				motionAheadEngaged = false;   // no frames collected below: no stale engagement (audit 2026-10-16)
 			char text[200];
 			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
 				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
@@ -21380,9 +21400,14 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		RendererProfileConfig::FormatSelections(snapshot.effectiveSelections);
 	// cinema_only custom hooks stay out of the game queue. Kept on the renderer too, so the
 	// next Build (a new Impl) starts in the same path.
-	m_lowLatencyQueue = snapshot.queue.lowLatencyPath;   // the queue profile's low_latency_path (or its name)
-	if (m_impl)
-		m_impl->lowLatencyQueueActive.store(m_lowLatencyQueue, std::memory_order_release);
+	// Published only where the profile is applied (audit 2026-10-16: a failed load or a retained
+	// profile switched the low-latency path while the renderer settings stayed).
+	auto publishLowLatencyPath = [this, &snapshot]()
+	{
+		m_lowLatencyQueue = snapshot.queue.lowLatencyPath;   // the queue profile's low_latency_path (or its name)
+		if (m_impl)
+			m_impl->lowLatencyQueueActive.store(m_lowLatencyQueue, std::memory_order_release);
+	};
 	if (snapshot.configuration)
 	{
 		m_ledDriveConfiguration = snapshot.configuration;
@@ -21418,6 +21443,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		DebugLog::Log(
 			"application profile generation %llu superseded in-progress renderer initialization",
 			static_cast<unsigned long long>(snapshot.generation));
+		publishLowLatencyPath();
 		return true;
 	}
 	std::string currentDisplayRule;
@@ -21551,6 +21577,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		static_cast<unsigned long long>(snapshot.generation),
 		rendererRestartRequired ? "renderer rebuild required" :
 			"live");
+	publishLowLatencyPath();
 	return true;
 }
 

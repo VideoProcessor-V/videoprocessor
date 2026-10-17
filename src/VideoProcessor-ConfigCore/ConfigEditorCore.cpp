@@ -336,15 +336,18 @@ namespace ConfigEditorCore
 			if (ConfigFile::NormalizeName(text.substr(1, text.size() - 2)) !=
 				normalized)
 				continue;
+			// After the section's last setting (audit 2026-10-16): trailing blank lines and
+			// comments usually introduce the next section (or hold a commented-out header).
 			size_t insertAt = index + 1;
-			while (insertAt < lines.size())
+			for (size_t scan = index + 1; scan < lines.size(); ++scan)
 			{
 				const std::string next = ConfigFile::Trim(
-					StripComment(lines[insertAt]));
+					StripComment(lines[scan]));
 				if (next.size() >= 2 && next.front() == '[' &&
 					next.back() == ']')
 					break;
-				++insertAt;
+				if (!next.empty())
+					insertAt = scan + 1;
 			}
 			lines.insert(lines.begin() + insertAt,
 				std::string(key) + ": " + value);

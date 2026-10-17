@@ -125,7 +125,11 @@ namespace
 			left.queue.hasResetQueueTooLargePercent !=
 				right.queue.hasResetQueueTooLargePercent ||
 			left.queue.resetQueueTooLargePercent !=
-				right.queue.resetQueueTooLargePercent)
+				right.queue.resetQueueTooLargePercent ||
+			// Audit 2026-10-16: the low-latency path and the look-ahead minimum are state too.
+			left.queue.hasLowLatencyPath != right.queue.hasLowLatencyPath ||
+			left.queue.lowLatencyPath != right.queue.lowLatencyPath ||
+			left.lookAheadQueueFrames != right.lookAheadQueueFrames)
 			return false;
 		if (left.lldv.hasDolbyVisionTunnel != right.lldv.hasDolbyVisionTunnel ||
 			left.lldv.dolbyVisionTunnel != right.lldv.dolbyVisionTunnel ||
