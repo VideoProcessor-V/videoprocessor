@@ -50,8 +50,18 @@ namespace VideoProcessorTest
 		namespace SrcLatch
 		{
 			constexpr double kPi = 3.14159265358979323846;
-			constexpr int kTile = SourceResolutionMonitor::Monitor::kTile;
-			constexpr int W = 3840, H = 2160;
+			// The source clips' planes (3840 x 2160) and the output frame the monitor reads - 4K by
+			// default; OutputFrame switches it (a 1080 source made from the 4K clips). kTile follows the
+			// monitor (SourceResolution::TileSize with the latch fixes, else 256), set by Run.
+			constexpr int SW = 3840, SH = 2160;
+			int W = 3840, H = 2160;
+			int kTile = SourceResolutionMonitor::Monitor::kTile;
+			struct OutputFrame
+			{
+				int w0, h0, t0;
+				OutputFrame(int w, int h) : w0(W), h0(H), t0(kTile) { W = w; H = h; }
+				~OutputFrame() { W = w0; H = h0; kTile = t0; }
+			};
 			constexpr double kBlack = SubtitleTextTestPattern::kBlack, kWhite = SubtitleTextTestPattern::kWhite;
 
 			std::string Env(const char* name)
@@ -291,11 +301,11 @@ namespace VideoProcessorTest
 					const double scale = 1.0 / p.codeMax;
 					for (int y = 0; y < h; ++y)
 					{
-						const int yy = (std::min)(H - 1, (std::max)(0, y0 + y));
-						const uint16_t* row = &p.v[static_cast<size_t>(yy) * W];
+						const int yy = (std::min)(SH - 1, (std::max)(0, y0 + y));
+						const uint16_t* row = &p.v[static_cast<size_t>(yy) * SW];
 						for (int x = 0; x < w; ++x)
 						{
-							const int xx = (std::min)(W - 1, (std::max)(0, x0 + x));
+							const int xx = (std::min)(SW - 1, (std::max)(0, x0 + x));
 							r.v[static_cast<size_t>(y) * w + x] = row[xx] * scale;
 						}
 					}
@@ -319,22 +329,22 @@ namespace VideoProcessorTest
 					Plane p;
 					p.clip = clip;
 					p.frame = frame;
-					p.v.assign(static_cast<size_t>(W) * H, 0);
+					p.v.assign(static_cast<size_t>(SW) * SH, 0);
 					FILE* f = nullptr;
 					if (fopen_s(&f, c.path.c_str(), "rb") == 0 && f)
 					{
 						if (c.y4m)
 						{
 							p.codeMax = 255;
-							_fseeki64(f, c.header + static_cast<long long>(frame) * (static_cast<long long>(W) * H * 3 / 2 + 6) + 6, SEEK_SET);
-							std::vector<uint8_t> y(static_cast<size_t>(W) * H);
+							_fseeki64(f, c.header + static_cast<long long>(frame) * (static_cast<long long>(SW) * SH * 3 / 2 + 6) + 6, SEEK_SET);
+							std::vector<uint8_t> y(static_cast<size_t>(SW) * SH);
 							if (fread(y.data(), 1, y.size(), f) == y.size())
 								for (size_t i = 0; i < y.size(); ++i) p.v[i] = y[i];
 						}
 						else
 						{
 							p.codeMax = 1023;
-							_fseeki64(f, static_cast<long long>(frame) * W * H * 3, SEEK_SET);
+							_fseeki64(f, static_cast<long long>(frame) * SW * SH * 3, SEEK_SET);
 							(void)fread(p.v.data(), 2, p.v.size(), f);
 						}
 						fclose(f);
@@ -368,7 +378,8 @@ namespace VideoProcessorTest
 				double truth = 1.0;            // the effective ratio (ratio x the clip's own)
 				Overlay overlay = Overlay::None;
 				int other = -1;                // PiP / menu artwork content
-				double px0 = 0, px1 = W, py0 = 0, py1 = H;   // the active picture (bars outside)
+				double px0 = 0, px1 = 1e9, py0 = 0, py1 = 1e9;   // the active picture (bars outside; output px)
+				double outScale = 1.0;         // the output frame against the 4K clips (0.5: a 1080 source)
 				double gain = 1.0;             // around video black: a dark scene
 				double lift = 0.0;             // added level (another shot's exposure; cuts the tracker sees)
 				double dither = 0.0;           // per-frame noise (codes): a still with dither, coding jitter
@@ -380,6 +391,9 @@ namespace VideoProcessorTest
 				double seconds = 3.0;
 				bool cut = true;               // a real cut at its start (false: a mid-shot change)
 				double fadeIn = 0.0, fadeOut = 0.0;
+				// A uniform brightness change inside the shot (no cut): the gain goes to `dip` and back
+				// over its middle `dipSeconds` (a fade to dark and back, < 1; a flash / exposure, > 1).
+				double dip = 1.0, dipSeconds = 0.0;
 			};
 
 			struct Studio
@@ -418,7 +432,19 @@ namespace VideoProcessorTest
 					if (c.ratio >= 1.0)
 					{
 						const int pad = c.blur > 0 ? static_cast<int>(std::ceil(3 * c.blur)) + 1 : 0;
-						Region src = corpus.Read(c.clip, frame, ox - pad, oy - pad, kTile + 2 * pad, kTile + 2 * pad);
+						Region src;
+						if (c.outScale < 1.0)
+						{
+							// Native at the output size: the 4K clip downscaled (antialiased Lanczos-3).
+							const double sc = c.outScale;
+							const int ix0 = static_cast<int>(std::floor((ox - pad - 8) / sc)) - 8, iy0 = static_cast<int>(std::floor((oy - pad - 8) / sc)) - 8;
+							const int iw = static_cast<int>(std::ceil((kTile + 2 * pad + 16) / sc)) + 16;
+							const Region in = corpus.Read(c.clip, frame, ix0, iy0, iw, iw);
+							src = Resample(in, sc, ox - pad, oy - pad, kTile + 2 * pad, kTile + 2 * pad, Lanczos(3), 3);
+							for (double& v : src.v) v = std::round((std::min)(1.0, (std::max)(0.0, v)) * 1023.0) / 1023.0;
+						}
+						else
+							src = corpus.Read(c.clip, frame, ox - pad, oy - pad, kTile + 2 * pad, kTile + 2 * pad);
 						GaussianBlur(src, c.blur);
 						std::vector<double> v(static_cast<size_t>(kTile) * kTile);
 						for (int y = 0; y < kTile; ++y)
@@ -429,16 +455,16 @@ namespace VideoProcessorTest
 					}
 					else
 					{
-						const double r = c.ratio;
+						const double r = c.ratio, rm = c.ratio * c.outScale;   // output -> source; 4K clip -> source
 						// The source-size square covering the tile and the kernels' reach, on its 16-px grid.
 						const int mx0 = static_cast<int>(std::floor((std::floor(ox * r) - 8) / 16.0)) * 16;
 						const int my0 = static_cast<int>(std::floor((std::floor(oy * r) - 8) / 16.0)) * 16;
 						const int span = static_cast<int>(std::ceil(kTile * r)) + 24;
 						const int n = ((span + 15) / 16) * 16 + 16;
-						const int ix0 = static_cast<int>(std::floor((mx0 - 8) / r)) - 8, iy0 = static_cast<int>(std::floor((my0 - 8) / r)) - 8;
-						const int iw = static_cast<int>(std::ceil((n + 16) / r)) + 16;
+						const int ix0 = static_cast<int>(std::floor((mx0 - 8) / rm)) - 8, iy0 = static_cast<int>(std::floor((my0 - 8) / rm)) - 8;
+						const int iw = static_cast<int>(std::ceil((n + 16) / rm)) + 16;
 						const Region in = corpus.Read(c.clip, frame, ix0, iy0, iw, iw);
-						Region master = Resample(in, r, mx0, my0, n, n, Lanczos(3), 3);
+						Region master = Resample(in, rm, mx0, my0, n, n, Lanczos(3), 3);
 						// Bars in the source (letterboxed / pillarboxed streams): upscaled with the picture.
 						for (int y = 0; y < n; ++y)
 							for (int x = 0; x < n; ++x)
@@ -521,8 +547,8 @@ namespace VideoProcessorTest
 						}
 						break;
 					case Overlay::PlayerPillarbox:   // 4:3 picture, bars added by the player at 4K (sharp edges)
-						Rect(t, ox, oy, 0, 0, 480, H, [](int, float) { return static_cast<float>(kBlack); });
-						Rect(t, ox, oy, 3360, 0, W, H, [](int, float) { return static_cast<float>(kBlack); });
+						Rect(t, ox, oy, 0, 0, W / 8, H, [](int, float) { return static_cast<float>(kBlack); });
+						Rect(t, ox, oy, W - W / 8, 0, W, H, [](int, float) { return static_cast<float>(kBlack); });
 						break;
 					}
 				}
@@ -541,6 +567,12 @@ namespace VideoProcessorTest
 				double minimumConfidence = 0.8;
 				bool mixedGuard = true;
 				std::vector<double> gaps;      // source times at which the clock jumps by 2.5 s (no frames)
+				// source_resolution_latch_fixes and its switch timing (the renderer's defaults).
+				bool latchFixes = true;
+				double maxWait = 20.0, crossfade = 1.5, releaseFade = 0.25;
+				// A fast pan: from panFrom to panTo (source seconds) the motion hint (MotionValidity's
+				// global vector) reports panHeights picture heights per second.
+				double panFrom = -1.0, panTo = -1.0, panHeights = 1.0;
 			};
 
 			struct Change
@@ -551,7 +583,9 @@ namespace VideoProcessorTest
 				std::string why;
 				double sinceCut = 0.0;     // since the last real cut (segment start with cut)
 				bool atBlack = false;      // the frame or the last analysed one was black / flat
+				bool trueBlack = false;    // the frame shown is black (video black, or a fade's end)
 				double declared = 1.0;
+				double fade = 0.0;         // the transition's duration (0 = a hard switch)
 			};
 
 			struct RunResult
@@ -571,6 +605,13 @@ namespace VideoProcessorTest
 				unsigned long long cuts = 0;
 				int kernel = -1;
 				double declaredMin = 1.0;
+				// Latch fixes (owner 2026-10-17): engagements away from a cut / real black that were not
+				// a crossfade, a fast pan or a low-detail moment (must be none).
+				int offCut = 0;
+				// Latch fixes: the longest fade of a release (a step towards native; owner: at most 0.25 s).
+				double maxReleaseFade = 0.0;
+				std::vector<double> cutTimes;      // the analysed frames on which the monitor saw a cut
+				double maxFadeWeightTime = 0.0;   // the longest any fade took to reach weight 1
 			};
 
 			double Gain(const Segment& s, double tIn)
@@ -578,7 +619,14 @@ namespace VideoProcessorTest
 				double g = 1.0;
 				if (s.fadeIn > 0) g = (std::min)(g, tIn / s.fadeIn);
 				if (s.fadeOut > 0) g = (std::min)(g, (s.seconds - tIn) / s.fadeOut);
-				return (std::max)(0.0, g);
+				g = (std::max)(0.0, g);
+				if (s.dipSeconds > 0)
+				{
+					const double mid = s.seconds / 2, half = s.dipSeconds / 2;
+					const double d = std::fabs(tIn - mid);
+					if (d < half) g *= 1.0 + (s.dip - 1.0) * (1.0 - d / half);
+				}
+				return g;
 			}
 
 			// The look-ahead's tile origins (Monitor::LookAheadFrame, the full frame as the picture).
@@ -598,6 +646,11 @@ namespace VideoProcessorTest
 				SourceResolutionMonitor::Monitor monitor;
 				monitor.SetSelection("auto");
 				monitor.SetMixedGuard(o.mixedGuard);
+				monitor.SetLatchFixes(o.latchFixes);
+				monitor.SetEngageTiming(o.maxWait, o.crossfade, o.releaseFade);
+				// The monitor's tile for this output (a fraction of the height with the fixes).
+				const int tile = monitor.TileFor(H);
+				if (tile != kTile) { kTile = tile; studio.tiles.clear(); }
 				double total = 0.0;
 				for (const Segment& s : segments) { result.segmentStart.push_back(total); total += s.seconds; }
 				const size_t ns = segments.size();
@@ -680,7 +733,7 @@ namespace VideoProcessorTest
 					while (!queue.empty() && queue.front().due <= t + 1e-9)
 					{
 						Job& j = queue.front();
-						monitor.AnalyseTilesForTest(j.values, j.count, j.seconds, W, H, j.tx, j.ty, j.base);
+						monitor.AnalyseTilesForTest(j.values, j.count, j.seconds, W, H, j.tx, j.ty, j.base, kTile, kBlack);
 						++result.analyses;
 						const SourceResolutionMonitor::Snapshot snap = monitor.Read();
 						lastAnalysisBlank = snap.frameBlank;
@@ -691,6 +744,11 @@ namespace VideoProcessorTest
 							result.maxLowerFrameRatio = (std::max)(result.maxLowerFrameRatio, snap.frameRatio);
 						}
 						if (snap.declaredRatio < 1.0 && result.firstDeclared < 0) result.firstDeclared = j.seconds;
+						if (snap.cuts != result.cuts)
+						{
+							result.cuts = snap.cuts;
+							result.cutTimes.push_back(j.seconds);
+						}
 						result.declaredMin = (std::min)(result.declaredMin, snap.declaredRatio);
 						queue.pop_front();
 					}
@@ -732,9 +790,15 @@ namespace VideoProcessorTest
 							std::this_thread::sleep_for(std::chrono::milliseconds(1));
 						}
 					}
+					if (o.panFrom >= 0.0 && i / o.fps >= o.panFrom && i / o.fps < o.panTo)
+						monitor.SetMotion(o.panHeights * H / o.fps, static_cast<uint64_t>(i + 1));
 					std::string why;
 					double nx = 1.0, ny = 1.0;
 					monitor.AutoFactors(W, H, o.minimumConfidence, why, nx, ny, t, static_cast<uint64_t>(i + 1));
+					{
+						const SourceResolutionMonitor::Monitor::Transition tr = monitor.AutoTransition(t);
+						if (tr.Active()) result.maxFadeWeightTime = (std::max)(result.maxFadeWeightTime, tr.duration);
+					}
 					const bool wasEngaged = fx < 1.0 || fy < 1.0, engaged = nx < 1.0 || ny < 1.0;
 					if (std::fabs(nx - fx) > 1e-9 || std::fabs(ny - fy) > 1e-9)
 					{
@@ -742,7 +806,17 @@ namespace VideoProcessorTest
 						ch.t = t; ch.segment = seg; ch.fromX = fx; ch.fromY = fy; ch.toX = nx; ch.toY = ny; ch.why = why;
 						ch.sinceCut = t - lastCut;
 						ch.atBlack = lastAnalysisBlank || gain * c.gain < 0.05 || c.clip < 0;
+						ch.trueBlack = gain * c.gain < 0.02 || c.clip < 0;
 						ch.declared = monitor.Read().declaredRatio;
+						ch.fade = monitor.AutoTransition(t).duration;
+						// The owner's rule: an engagement shows at a cut, a real black, a fast pan, a
+						// low-detail moment, or by a crossfade - never as a plain switch mid-shot.
+						const bool down = nx < fx - 1e-9 || ny < fy - 1e-9;
+						if (o.latchFixes && down && !(ch.t - lastCut <= 0.5 + o.latency + 2.0 / o.fps) && !ch.trueBlack &&
+							why.find("crossfade") == std::string::npos && why.find("fast pan") == std::string::npos &&
+							why.find("low-detail") == std::string::npos)
+							++result.offCut;
+						if (o.latchFixes && !down) result.maxReleaseFade = (std::max)(result.maxReleaseFade, ch.fade);
 						result.changes.push_back(ch);
 						if (!wasEngaged && engaged) ++result.engages;
 						if (wasEngaged && !engaged) ++result.disengages;
@@ -771,10 +845,15 @@ namespace VideoProcessorTest
 					result.kernel >= 0 ? KernelInverse::Candidates()[static_cast<size_t>(result.kernel)].name.c_str() : "none",
 					result.last.kernelVotes, result.last.kernelAgree, result.cpuSeconds);
 				Logger::WriteMessage(line);
+				{
+					std::string cuts = "   cuts seen at";
+					for (const double ct : result.cutTimes) { char b[24]; snprintf(b, sizeof(b), " %.1f", ct); cuts += b; }
+					Logger::WriteMessage((cuts + " s\n").c_str());
+				}
 				for (const Change& ch : result.changes)
 				{
-					snprintf(line, sizeof(line), "   %7.3f s seg %d: %.4f x %.4f -> %.4f x %.4f (declared %.4f), %.3f s after the cut%s: %s\n", ch.t, ch.segment,
-						ch.fromX, ch.fromY, ch.toX, ch.toY, ch.declared, ch.sinceCut, ch.atBlack ? ", black/flat" : "", ch.why.c_str());
+					snprintf(line, sizeof(line), "   %7.3f s seg %d: %.4f x %.4f -> %.4f x %.4f (declared %.4f), %.3f s after the cut%s, fade %.2f s: %s\n", ch.t, ch.segment,
+						ch.fromX, ch.fromY, ch.toX, ch.toY, ch.declared, ch.sinceCut, ch.atBlack ? ", black/flat" : "", ch.fade, ch.why.c_str());
 					Logger::WriteMessage(line);
 				}
 				for (size_t si = 0; si < ns; ++si)
@@ -785,6 +864,14 @@ namespace VideoProcessorTest
 						result.segmentFirstEngaged[si], result.segmentMin[si], result.segmentEndX[si], result.segmentEndY[si]);
 					Logger::WriteMessage(line);
 				}
+				if (result.offCut > 0)
+				{
+					snprintf(line, sizeof(line), "OFF-CUT: %d engagement(s) mid-shot without a crossfade, pan or low-detail moment\n", result.offCut);
+					Logger::WriteMessage(line);
+				}
+				Assert::IsTrue(result.maxReleaseFade <= SourceResolutionMonitor::Monitor::kMaxReleaseFade + 1e-9 && result.maxReleaseFade <= o.releaseFade + 1e-9,
+					L"a release faded longer than source_resolution_release_fade_s (at most 0.25 s)");
+				Assert::AreEqual(0, result.offCut, L"an engagement switched mid-shot (not at a cut, a real black, a fast pan, a low-detail moment or by a crossfade)");
 				return result;
 			}
 
@@ -881,6 +968,30 @@ namespace VideoProcessorTest
 			// One frame of content `ci` (cycle position k, level gain) read directly (ReadFrame on the dense
 			// grid with its centres, as the monitor's worker): the reading, the mixed-screen guard's
 			// counts and the detail above 1080 (diagnostic).
+			SourceResolution::FrameReading ReadContent(Studio& st, int ci, int k, double gain)
+			{
+				const Content& c = st.contents[static_cast<size_t>(ci)];
+				int base = 0;
+				const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(0, 0, W, H, kTile, true, &base);
+				std::vector<SourceResolution::Spectrum> spectra(places.size());
+				std::vector<float> tile(static_cast<size_t>(kTile) * kTile);
+				for (size_t p = 0; p < places.size(); ++p)
+				{
+					const std::vector<float>& t = st.Tile(ci, k, places[p].x0, places[p].y0);
+					for (size_t i = 0; i < tile.size(); ++i)
+					{
+						const double v = kBlack + (t[i] - kBlack) * gain * c.gain + c.lift * gain;
+						tile[i] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, v)) * 1023.0) / 1023.0);
+					}
+					SourceResolution::Analyse(tile.data(), kTile, kTile, spectra[p], 1023);
+				}
+				SourceResolution::Thresholds th;
+				SourceResolution::SetTileCentres(places, th);
+				th.signatureTiles = base;
+				th.blackLevel = kBlack;
+				return SourceResolution::ReadFrame(spectra, th);
+			}
+
 			SourceResolution::FrameReading Diagnose(Studio& st, int ci, int k, double gain, const char* label)
 			{
 				const Content& c = st.contents[static_cast<size_t>(ci)];
@@ -975,7 +1086,21 @@ namespace VideoProcessorTest
 			const RunResult r = Run(st, segs, o, "native 4K: clean, grain, low bitrate, fog, dark");
 			Assert::AreEqual(0, r.engages, L"never engaged on native 4K");
 			Assert::AreEqual(1.0, r.declaredMin, 1e-9, L"never declared a lower source");
-			Budget("NativeFourKNeverEngages", started, 45);
+			// Latch fixes: 10 s of one shot is now enough evidence on its own (owner 2026-10-17), so
+			// long single native shots - the soft, dark and vertically soft ones - must still never
+			// read lower for 10 s.
+			const int uvg = AddNative(st, c.bosphorus, 200, "UVG Bosphorus native (soft vertically)");
+			const int crowdFogLong = AddNative(st, c.crowd, 150, "crowd native defocused 6 px (fog), long", 0.0, 0.0, 6.0);
+			st.contents[static_cast<size_t>(crowdFogLong)].cycle = 20;
+			st.contents[static_cast<size_t>(crowdFogLong)].frameStep = 5;
+			std::vector<Segment> longShots = { { crowdFogLong, 22.0 }, { parkDark, 22.0 }, { uvg, 22.0 }, { parkFogNoise, 22.0 } };
+			const RunResult rl = Run(st, longShots, o, "native 4K long single shots: fog, dark, UVG, fog + noise");
+			char line[200];
+			snprintf(line, sizeof(line), "RESULT native long shots: engages %d, declared min %.4f, floor-starved readings logged above\n", rl.engages, rl.declaredMin);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0, rl.engages, L"never engaged on long native 4K shots");
+			Assert::AreEqual(1.0, rl.declaredMin, 1e-9, L"long native shots never declared a lower source");
+			Budget("NativeFourKNeverEngages", started, 100);
 		}
 
 		// The UVG clips are 4K wide but soft vertically (scaled vertically at capture): the uniform
@@ -1089,9 +1214,10 @@ namespace VideoProcessorTest
 			const double upStart = 6.0;
 			int up[4];
 			for (int i = 0; i < 4; ++i) up[i] = AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0);
-			// 132 s of upscaled shots (4 s each), cycling four shots.
-			for (int i = 0; i < 33; ++i) segs.push_back({ up[i % 4], 4.0 });
-			const double backAt = upStart + 132.0;
+			// 40 s of upscaled shots (4 s each), cycling four shots (before the latch fixes: 132 s, as the
+			// window held the native shot's readings for 120 s).
+			for (int i = 0; i < 10; ++i) segs.push_back({ up[i % 4], 4.0 });
+			const double backAt = upStart + 40.0;
 			segs.push_back({ AddNative(st, c.crowd, 300, "crowd native (back)"), 4.0 });
 			RunOptions o;
 			const RunResult r = Run(st, segs, o, "native -> 1080 lanczos3 -> native");
@@ -1105,7 +1231,11 @@ namespace VideoProcessorTest
 			Assert::IsNotNull(d, L"back to native");
 			Assert::IsTrue(d->t - backAt <= 0.5 + o.latency + 2.0 / o.fps, L"native within one tile copy of the cut");
 			Assert::AreEqual(1, r.engages, L"one engagement, no flapping");
-			Budget("CutFromNativeToUpscaleAndBack", started, 90);
+			// Latch fixes: the standard again after the native shot (owner: 10 s / 3 shots), switched at
+			// the next cut; the return to native is immediate with a fade of at most 0.25 s.
+			Assert::IsTrue(e->t - upStart <= 15.0, L"engaged within ~10-15 s of the first upscaled cut");
+			Assert::IsTrue(d->fade <= SourceResolutionMonitor::Monitor::kMaxReleaseFade + 1e-9, L"release fade at most 0.25 s");
+			Budget("CutFromNativeToUpscaleAndBack", started, 40);
 		}
 
 		// Fades through black between upscaled shots, then a long dark scene: engagement on the black
@@ -1147,10 +1277,18 @@ namespace VideoProcessorTest
 			// ~0.1 contrast loses its coherence (output rounding dominates) and its relative detail above
 			// 1080 exceeds the bright frames' reference, so it counts as native detail: one unlatch, then
 			// no re-engage for the 120 s window (LatchDiagnostics, "dark scene ... fading in").
-			if (r.disengages > 0) Logger::WriteMessage("FINDING: the dark scene unlatched the re-base (false native on a low-contrast frame)\n");
-			Assert::IsTrue(r.disengages <= 1, L"at most the one known unlatch");
+			// Latch fixes: that reading's detail sits at the rounding floor - no evidence - so no unlatch.
+			Assert::AreEqual(0, r.disengages, L"the dark scene does not unlatch (level-aware native test)");
 			Assert::IsTrue(r.segmentNativeReadings.back() <= 2, L"the dark scene reads its class otherwise");
-			Budget("FadeThroughBlackAndLongDarkScene", started, 45);
+			// The switch off: the behaviour before (the one false native and its unlatch).
+			RunOptions old = o;
+			old.latchFixes = false;
+			const RunResult ro = Run(st, segs, old, "fades through black + long dark scene (latch fixes off)");
+			snprintf(line, sizeof(line), "RESULT fade/dark (fixes off): engages %d, disengages %d\n", ro.engages, ro.disengages);
+			Logger::WriteMessage(line);
+			if (ro.disengages > 0) Logger::WriteMessage("FINDING (fixes off): the dark scene unlatched the re-base (false native on a low-contrast frame)\n");
+			Assert::IsTrue(ro.disengages <= 1, L"fixes off: at most the one known unlatch");
+			Budget("FadeThroughBlackAndLongDarkScene", started, 90);
 		}
 
 		// After an engaged upscale, a cut to a defocused native 4K shot (fog, very little detail
@@ -1181,6 +1319,9 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(line);
 			Assert::IsNotNull(FirstEngage(r), L"engaged on the upscale first");
 			Assert::IsTrue(r.segmentEngagedFrames[6] <= static_cast<int>(std::ceil((0.5 + o.latency) * o.fps)) + 2, L"sharp native unlatched within one tile copy");
+			// Latch fixes: the level-aware test only on dark / low-contrast frames - the defocused shot at a
+			// normal level is native evidence, unlatched within one tile copy as before (never re-base real 4K).
+			Assert::IsTrue(r.segmentEngagedFrames[5] <= static_cast<int>(std::ceil((0.5 + o.latency) * o.fps)) + 2, L"soft native unlatched within one tile copy");
 			Budget("SoftNativeShotAfterAnEngagedUpscale", started, 40);
 		}
 
@@ -1298,9 +1439,9 @@ namespace VideoProcessorTest
 			const double menuAt = 16.0;
 			segs.push_back({ menu, 3.0 });
 			const double menuOff = menuAt + 3.0;
-			for (int i = 0; i < 34; ++i) segs.push_back({ up[(i + 1) % 4], 4.0 });   // 136 s of the film
+			for (int i = 0; i < 8; ++i) segs.push_back({ up[(i + 1) % 4], 4.0 });   // 32 s of the film (was 136 s: the 120 s window)
 			RunOptions o;
-			const RunResult r = Run(st, segs, o, "menu over an engaged upscale, then 136 s of film");
+			const RunResult r = Run(st, segs, o, "menu over an engaged upscale, then 32 s of film");
 			const Change* off = FirstDisengage(r, menuAt);
 			const Change* back = FirstEngage(r, menuOff);
 			char line[260];
@@ -1309,7 +1450,11 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(line);
 			Assert::IsNotNull(off, L"unlatched under the menu");
 			Assert::IsTrue(r.segmentEngagedFrames[4] <= static_cast<int>(std::ceil((0.5 + o.latency) * o.fps)) + 2, L"not re-based under the menu");
-			Budget("MixedScreenResumeTime", started, 90);
+			// Latch fixes: the menu's readings are discarded once it leaves; the standard again, at a cut.
+			Assert::IsNotNull(back, L"re-engaged after the menu");
+			Assert::IsTrue(back->t - menuOff <= 15.0, L"re-engaged within ~10-15 s of the menu leaving");
+			Assert::IsTrue(back->why.find("cut") != std::string::npos, L"re-engaged at a cut");
+			Budget("MixedScreenResumeTime", started, 30);
 		}
 
 		// Letterbox (bars in the stream, upscaled with it), a mid-shot change from full frame to
@@ -1354,12 +1499,30 @@ namespace VideoProcessorTest
 				// Finding: with the tiles over the player's bars (VP not cropping), the hard bar edges lift the
 				// horizontal coherence floor above maximumFloor (0.53 > 0.35, LatchDiagnostics): never engaged
 				// (the safe direction). Logged, not asserted.
-				if (variant == 1 && !e) Logger::WriteMessage("FINDING: 4:3 with player-added bars never engaged (bar edges raise the curve floor)\n");
+				// Latch fixes: tiles whose own floor is high (the bar edge) are left out: it engages.
+				if (variant == 1 && !e) failures += std::string("4:3 with player-added bars never engaged: ") + line;
 				if (e && std::fabs(e->toY - 0.5) > 0.005) failures += std::string("class: ") + line;
 				if (r.disengages != 0) failures += std::string("flapped on the bar change: ") + line;
 			}
+			// The switch off: the behaviour before (bar edges raise the floor; never engaged).
+			{
+				st.tiles.clear();
+				std::vector<Segment> segs;
+				for (int i = 0; i < 6; ++i)
+				{
+					const int id = AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0, 0.0, " 4:3, player bars");
+					st.contents[static_cast<size_t>(id)].overlay = Overlay::PlayerPillarbox;
+					segs.push_back({ id, 3.0 });
+				}
+				RunOptions old;
+				old.latchFixes = false;
+				const RunResult r = Run(st, segs, old, "1080 4:3 with player bars (latch fixes off)");
+				snprintf(line, sizeof(line), "RESULT player pillarbox (fixes off): engages %d\n", r.engages);
+				Logger::WriteMessage(line);
+				if (r.engages != 0) failures += std::string("fixes off: the old result changed: ") + line;
+			}
 			if (!failures.empty()) Assert::Fail(std::wstring(failures.begin(), failures.end()).c_str());
-			Budget("LetterboxAndPillarbox", started, 60);
+			Budget("LetterboxAndPillarbox", started, 75);
 		}
 
 		// Adaptive streaming: an engaged 1080 rendition switches to the 4K rendition mid-shot (no cut):
@@ -1532,6 +1695,9 @@ namespace VideoProcessorTest
 			Assert::IsNotNull(FirstEngage(r), L"engaged despite jitter");
 			Assert::IsNotNull(gap, L"the clock gap unlatched");
 			Assert::IsTrue(r.disengages <= 1, L"only the gap unlatches");
+			// Latch fixes: routed through Monitor::Discontinuity with its own reason.
+			Assert::IsTrue(gap->why.find("gap") != std::string::npos && gap->why.find("detail above") == std::string::npos,
+				L"the gap is reported as a gap, not as detail above the re-based height");
 			st.tiles.clear();
 			const int natives[] = { c.crowd, c.park };
 			for (int i = 0; i < 8; ++i)
@@ -1573,14 +1739,16 @@ namespace VideoProcessorTest
 			// The next shot native: cancelled, and no engagement on the native shot.
 			st.tiles.clear();
 			std::vector<Segment> segs2;
-			for (int i = 0; i < 4; ++i) segs2.push_back({ AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0), 3.2 });
+			// Three upscaled shots (confirmed by the third: 3 shots, latch fixes), so the native shot is
+			// the first cut after the confirmation.
+			for (int i = 0; i < 3; ++i) segs2.push_back({ AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0), 3.2 });
 			segs2.push_back({ AddNative(st, c.bosphorus, 300, "Bosphorus native (next shot)"), 3.0 });
 			segs2.push_back({ AddNative(st, c.park, 300, "park native"), 3.0 });
 			const RunResult r2 = Run(st, segs2, o, "1080 upscale, then native shots, with the look-ahead");
 			snprintf(line, sizeof(line), "RESULT look-ahead native next: engages %d, engaged frames on native %d+%d, cancelled %llu\n",
-				r2.engages, r2.segmentEngagedFrames[4], r2.segmentEngagedFrames[5], r2.ahead.cancelled);
+				r2.engages, r2.segmentEngagedFrames[3], r2.segmentEngagedFrames[4], r2.ahead.cancelled);
 			Logger::WriteMessage(line);
-			Assert::AreEqual(0, r2.segmentEngagedFrames[4] + r2.segmentEngagedFrames[5], L"never re-based a native shot");
+			Assert::AreEqual(0, r2.segmentEngagedFrames[3] + r2.segmentEngagedFrames[4], L"never re-based a native shot");
 			Budget("LookAheadEngagesOnTheCutFrame", started, 40);
 		}
 
@@ -1686,6 +1854,378 @@ namespace VideoProcessorTest
 					Logger::WriteMessage(line);
 				}
 			}
+		}
+
+
+		// ---- Latch fixes (latch review 2026-10-17, owner rules) ----
+
+		// The crossfade's mix (libplacebo's frame mixer with the triangle filter, FadeMixTimestamps):
+		// monotonic in time, and each path exactly at its end (bit-exact floats).
+		TEST_METHOD(CrossfadeMixIsMonotonicAndExactAtTheEnds)
+		{
+			using M = SourceResolutionMonitor::Monitor;
+			const float pairs[][2] = { { 0.0626f, 0.9188f }, { 0.9188f, 0.0626f }, { 0.31234567f, 0.31234570f }, { -0.02f, 1.05f } };   // BTB / WTW kept
+			for (const auto& pr : pairs)
+			{
+				Assert::IsTrue(M::FadeMixValue(pr[0], pr[1], 0.0) == pr[0], L"weight 0: the old path exactly");
+				Assert::IsTrue(M::FadeMixValue(pr[0], pr[1], 1.0) == pr[1], L"weight 1: the new path exactly");
+				float last = pr[0];
+				for (int i = 0; i <= 1000; ++i)
+				{
+					const float v = M::FadeMixValue(pr[0], pr[1], i / 1000.0);
+					if (pr[1] >= pr[0]) Assert::IsTrue(v >= last - 1e-7f, L"monotonic (rising)");
+					else Assert::IsTrue(v <= last + 1e-7f, L"monotonic (falling)");
+					last = v;
+				}
+			}
+			// The weight in time: 0 at the start, exactly 1 at the end and after, linear between.
+			Assert::AreEqual(0.0, M::FadeWeight(0.0, 1.5));
+			Assert::AreEqual(1.0, M::FadeWeight(1.5, 1.5));
+			Assert::AreEqual(1.0, M::FadeWeight(0.1, 0.0), L"no duration: a hard switch");
+			Assert::AreEqual(0.5, M::FadeWeight(0.75, 1.5), 1e-12);
+			float ts[2];
+			M::FadeMixTimestamps(0.25, ts);
+			Assert::IsTrue(ts[0] <= ts[1], L"timestamps ascending (pl_render_image_mix requires it)");
+		}
+
+		// A long take (no cut, black, pan or dark moment): confirmed by time alone (10 s), then a
+		// crossfade after source_resolution_engage_max_wait_s; the same times at 24, 50 and 60 fps.
+		TEST_METHOD(LongTakeCrossfadesAfterTheWait)
+		{
+			using namespace SrcLatch;
+			const auto started = std::chrono::steady_clock::now();
+			const std::string root = Root();
+			if (Skip(root, "LongTakeCrossfadesAfterTheWait")) return;
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			Content take = st.contents[static_cast<size_t>(AddUpscale(st, c.yacht, 40, 0.5, kLanczos3, 2.0, 0.0, " long take"))];
+			take.frameStep = 4;
+			take.cycle = 60;
+			const int id = st.Add(take);
+			const std::vector<Segment> segs = { { id, 34.0 } };
+			char line[300];
+			std::vector<double> engagedAt;
+			for (const double fps : { 24.0, 50.0, 60.0 })
+			{
+				RunOptions o;
+				o.fps = fps;
+				const RunResult r = Run(st, segs, o, "1080 long take, no cut");
+				const Change* e = FirstEngage(r);
+				snprintf(line, sizeof(line), "RESULT long take @%.0f fps: declared %.2f s, engaged %.2f s (%s), fade %.2f s\n",
+					fps, r.firstDeclared, e ? e->t : -1.0, e ? e->why.c_str() : "never", e ? e->fade : -1.0);
+				Logger::WriteMessage(line);
+				Assert::IsNotNull(e, L"engaged in the long take");
+				Assert::IsTrue(e->why.find("crossfade") != std::string::npos, L"by a crossfade");
+				Assert::AreEqual(o.crossfade, e->fade, 1e-9, L"over source_resolution_crossfade_s");
+				Assert::IsTrue(r.firstDeclared >= 9.5 && r.firstDeclared <= 11.0, L"confirmed by 10 s in one shot");
+				Assert::IsTrue(std::fabs(e->t - (r.firstDeclared + o.latency + o.maxWait)) <= 0.7, L"after the wait from the confirmation");
+				engagedAt.push_back(e->t);
+			}
+			for (size_t i = 1; i < engagedAt.size(); ++i) Assert::AreEqual(engagedAt[0], engagedAt[i], 0.6, L"time-based: the same at 24/50/60 fps");
+			Budget("LongTakeCrossfadesAfterTheWait", started, 45);
+		}
+
+		// A fast pan in a long take (the motion hint): the switch happens during it, at once.
+		TEST_METHOD(FastPanSwitchesInALongTake)
+		{
+			using namespace SrcLatch;
+			const auto started = std::chrono::steady_clock::now();
+			const std::string root = Root();
+			if (Skip(root, "FastPanSwitchesInALongTake")) return;
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			Content take = st.contents[static_cast<size_t>(AddUpscale(st, c.yacht, 40, 0.5, kLanczos3, 2.0, 0.0, " long take"))];
+			take.frameStep = 4;
+			take.cycle = 60;
+			const int id = st.Add(take);
+			RunOptions o;
+			o.panFrom = 15.0;
+			o.panTo = 16.0;
+			const RunResult r = Run(st, { { id, 20.0 } }, o, "1080 long take with a fast pan at 15 s");
+			const Change* e = FirstEngage(r);
+			char line[200];
+			snprintf(line, sizeof(line), "RESULT fast pan: declared %.2f s, engaged %.2f s (%s)\n", r.firstDeclared, e ? e->t : -1.0, e ? e->why.c_str() : "never");
+			Logger::WriteMessage(line);
+			Assert::IsNotNull(e);
+			Assert::IsTrue(e->why.find("fast pan") != std::string::npos && e->t >= 15.0 && e->t < 16.0, L"during the pan");
+			Assert::AreEqual(0.0, e->fade, L"at once (the pan hides it)");
+			Budget("FastPanSwitchesInALongTake", started, 15);
+		}
+
+		// Fades and flashes inside shots (a uniform brightness change, no cut) are not cuts; the
+		// engagement waits for a real cut.
+		TEST_METHOD(FadesAndFlashesAreNotCuts)
+		{
+			using namespace SrcLatch;
+			const auto started = std::chrono::steady_clock::now();
+			const std::string root = Root();
+			if (Skip(root, "FadesAndFlashesAreNotCuts")) return;
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			const std::vector<ShotSource> shots = Shots(c);
+			std::vector<Segment> segs;
+			for (int i = 0; i < 8; ++i)
+			{
+				Segment sg{ AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kCatmull, 2.0), 4.0 };
+				sg.dip = i % 2 ? 1.4 : 0.3;   // a flash / exposure lift, a fade to dark and back
+				sg.dipSeconds = 2.0;
+				segs.push_back(sg);
+			}
+			char line[260];
+			RunOptions o;
+			const RunResult r = Run(st, segs, o, "1080 shots with in-shot fades and flashes");
+			RunOptions old;
+			old.latchFixes = false;
+			const RunResult ro = Run(st, segs, old, "1080 shots with in-shot fades and flashes (latch fixes off)");
+			const Change* e = FirstEngage(r);
+			snprintf(line, sizeof(line), "RESULT fades/flashes: cuts seen %llu (fixes off %llu) of 7 real; engaged %.2f s, %.3f s after the cut (%s)\n",
+				r.cuts, ro.cuts, e ? e->t : -1.0, e ? e->sinceCut : -1.0, e ? e->why.c_str() : "never");
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.cuts <= 7, L"no fade or flash counted as a cut");
+			Assert::IsTrue(r.cuts >= 6, L"the real cuts found");
+			Assert::IsNotNull(e);
+			Budget("FadesAndFlashesAreNotCuts", started, 30);
+		}
+
+		// After an engaged upscale, cuts to dark native 4K and to UVG (vertically soft) native 4K: the
+		// level-aware native test must not slow their unlatch (real detail first).
+		TEST_METHOD(DarkAndSoftNativeUnlatchQuickly)
+		{
+			using namespace SrcLatch;
+			const auto started = std::chrono::steady_clock::now();
+			const std::string root = Root();
+			if (Skip(root, "DarkAndSoftNativeUnlatchQuickly")) return;
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			const std::vector<ShotSource> shots = Shots(c);
+			Content dark = st.contents[static_cast<size_t>(AddNative(st, c.park, 100, "park native"))];
+			dark.gain = 0.15;
+			dark.name = "park native dark (gain 0.15)";
+			const int darkId = st.Add(dark);
+			const int uvg = AddNative(st, c.jockey, 200, "UVG Jockey native");
+			// Continuous frames through the shot (the default 5-step cycle jumps 36 frames back after
+			// 2.5 s: in Jockey's fast motion that jump reads as a cut, which real video never has).
+			st.contents[static_cast<size_t>(uvg)].frameStep = 3;
+			st.contents[static_cast<size_t>(uvg)].cycle = 40;
+			std::vector<Segment> segs;
+			for (int i = 0; i < 4; ++i) segs.push_back({ AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0), 3.0 });
+			const double darkAt = 12.0;
+			segs.push_back({ darkId, 4.0 });
+			for (int i = 4; i < 9; ++i) segs.push_back({ AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0), 3.0 });
+			const double uvgAt = 31.0;
+			segs.push_back({ uvg, 4.0 });
+			RunOptions o;
+			const RunResult r = Run(st, segs, o, "upscale -> dark native -> upscale -> UVG native");
+			const Change* d1 = FirstDisengage(r, darkAt - 0.01);
+			const Change* d2 = FirstDisengage(r, uvgAt - 0.01);
+			char line[300];
+			snprintf(line, sizeof(line), "RESULT dark / soft native: dark unlatched %.3f s after its cut (%s), engaged frames %d; UVG unlatched %.3f s (%s), engaged frames %d\n",
+				d1 ? d1->t - darkAt : -1.0, d1 ? d1->why.c_str() : "-", r.segmentEngagedFrames[4], d2 ? d2->t - uvgAt : -1.0, d2 ? d2->why.c_str() : "-", r.segmentEngagedFrames[10]);
+			Logger::WriteMessage(line);
+			const int bound = static_cast<int>(std::ceil((0.5 + o.latency) * o.fps)) + 2;
+			Assert::IsTrue(r.segmentEngagedFrames[4] <= bound, L"dark native unlatched within one tile copy");
+			Assert::IsNotNull(d2, L"UVG native unlatched");
+			Assert::IsTrue(d2->t - uvgAt <= 0.5 + o.latency + 2.0 / o.fps, L"UVG native unlatched within one tile copy");
+			// The UVG clips are vertically soft: a per-axis (vertical only) re-base is faithful by the owner's
+			// rule; a uniform one never.
+			for (const Change& ch : r.changes)
+				if (ch.t >= uvgAt + 0.01 && ch.toX < 1.0 && ch.toY < 1.0) Assert::Fail(L"a uniform re-base on UVG native");
+			Budget("DarkAndSoftNativeUnlatchQuickly", started, 40);
+		}
+
+		// A 1080 source (made from the 4K clips): the tile is a fraction of the height (128 px), the
+		// dense grid covers it; native 1080 never engages; a 720 upscale engages at its class at a cut.
+		TEST_METHOD(Source1080UsesHeightRelativeTiles)
+		{
+			using namespace SrcLatch;
+			const auto started = std::chrono::steady_clock::now();
+			const std::string root = Root();
+			if (Skip(root, "Source1080UsesHeightRelativeTiles")) return;
+			OutputFrame frame1080(1920, 1080);
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			const std::vector<ShotSource> shots = Shots(c);
+			Assert::AreEqual(128, SourceResolution::TileSize(1080), L"128-px tiles at 1080");
+			Assert::AreEqual(256, SourceResolution::TileSize(2160), L"256-px tiles at 2160");
+			int base = 0;
+			Assert::AreEqual(16, static_cast<int>(SourceResolution::PlaceTiles(0, 0, 1920, 1080, 128, true, &base).size()), L"the dense grid at 1080");
+			std::vector<Segment> natives, ups;
+			const int nclips[] = { c.crowd, c.park, c.bosphorus, c.crowd, c.park, c.yacht, c.crowd, c.park };
+			for (int i = 0; i < 8; ++i)
+			{
+				const int id = AddNative(st, nclips[i], 40 + 50 * i, "native 1080 (from 4K)");
+				st.contents[static_cast<size_t>(id)].outScale = 0.5;
+				if (i % 2) st.contents[static_cast<size_t>(id)].lift = 0.12;
+				natives.push_back({ id, 3.5 });
+			}
+			for (int i = 0; i < 6; ++i)
+			{
+				const int id = AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 720.0 / 1080, kLanczos3, 2.0, 0.0, " in a 1080 frame");
+				st.contents[static_cast<size_t>(id)].outScale = 0.5;
+				ups.push_back({ id, 3.0 });
+			}
+			RunOptions o;
+			const RunResult rn = Run(st, natives, o, "native 1080 source, 128-px tiles");
+			const RunResult ru = Run(st, ups, o, "720 upscaled in a 1080 source, 128-px tiles");
+			const Change* e = FirstEngage(ru);
+			char line[300];
+			snprintf(line, sizeof(line), "RESULT 1080 source: tile %d; native engages %d (declared min %.4f); 720 upscale engaged %.2f s (%s), class %.4f\n",
+				kTile, rn.engages, rn.declaredMin, e ? e->t : -1.0, e ? e->why.c_str() : "never", e ? e->toY : 1.0);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0, rn.engages, L"native 1080 never engages");
+			Assert::AreEqual(1.0, rn.declaredMin, 1e-9);
+			Assert::IsNotNull(e, L"the 720 upscale engages");
+			Assert::AreEqual(720.0 / 1080, e->toY, 0.006, L"its class");
+			Budget("Source1080UsesHeightRelativeTiles", started, 30);
+		}
+
+		// The level-aware native test and the shape-aware cut test on single frames: the readings
+		// behind their settings (logged), with the margins asserted.
+		TEST_METHOD(LatchFixesCalibration)
+		{
+			using namespace SrcLatch;
+			const auto started = std::chrono::steady_clock::now();
+			const std::string root = Root();
+			if (Skip(root, "LatchFixesCalibration")) return;
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			const SourceResolution::Tracker::Settings ts;
+			char line[300];
+			// 1. Native detail above 1080 against the rounding floor (the level-aware test needs every
+			// native frame above floor + nativeFloorDecades, the dark upscale's false natives below).
+			double nativeLowest = 1e9, upscaleHighest = -1e9, defocusedHighest = -1e9;
+			// The contrast gate (nativeFloorContrast): the dark upscale's false natives below it, the
+			// defocused natives at a normal level above it (they stay native evidence).
+			double upscaleContrastHighest = -1.0, defocusedContrastLowest = 1e9;
+			// native: 1 with detail, 2 defocused (fog, a soft shot: nothing above 1080 but rounding noise), 0 the dark upscale.
+			auto above = [&](int id, int k, double gain, const char* label, int native) {
+				const SourceResolution::FrameReading f = ReadContent(st, id, k, gain);
+				double level = 0.0;
+				const double d = SourceResolution::DetailAbove(f, 0.5, &level);
+				const double coherence = SourceResolution::CoherenceAtRate(f, 0.5);
+				snprintf(line, sizeof(line), "CAL level %-40s gain %.2f: ratio %.4f, detail above 1080 %.3f, level %.2f = floor %+.2f decades (floor %.2f, %.1f bits), coherence at 1080 %.3f, contrast %.4f\n",
+					label, gain, f.ratio, d, level, level - f.quantisationFloor, f.quantisationFloor, f.effectiveBits, coherence, f.contrast);
+				Logger::WriteMessage(line);
+				if (std::isinf(d) || !f.informative()) return;
+				if (native == 1) nativeLowest = (std::min)(nativeLowest, level - f.quantisationFloor);
+				else if (native == 2) { defocusedHighest = (std::max)(defocusedHighest, level - f.quantisationFloor); defocusedContrastLowest = (std::min)(defocusedContrastLowest, f.contrast); }
+				else if (f.ratio >= 1.0) { upscaleHighest = (std::max)(upscaleHighest, level - f.quantisationFloor); upscaleContrastHighest = (std::max)(upscaleContrastHighest, f.contrast); }
+			};
+			const int park = AddNative(st, c.park, 100, "park native");
+			const int crowdFog = AddNative(st, c.crowd, 300, "crowd native fog 6 px", 0.0, 0.0, 6.0);
+			const int yachtSoft = AddNative(st, c.yacht, 100, "yacht native defocused 3 px", 0.0, 0.0, 3.0);
+			for (int k = 0; k < 2; ++k)
+			{
+				above(park, k, 1.0, "park native", 1);
+				above(park, k, 0.15, "park native dark", 1);
+				above(crowdFog, k, 1.0, "crowd native fog 6 px", 2);
+				above(yachtSoft, k, 1.0, "yacht native soft 3 px", 2);
+				for (const int clip : { c.bosphorus, c.jockey, c.readySetGo, c.yacht, c.shake })
+					above(AddNative(st, clip, 100 + 30 * k, "UVG native"), k, 1.0, "UVG native", 1);
+			}
+			Content dark = st.contents[static_cast<size_t>(AddUpscale(st, c.bosphorus, 300, 0.5, kCatmull, 2.0))];
+			dark.gain = 0.12;
+			const int darkUp = st.Add(dark);
+			for (const double g : { 1.0, 0.8, 0.6, 0.4, 0.2 }) above(darkUp, 1, g, "1080 dark scene (x0.12) fading in", 0);
+			snprintf(line, sizeof(line), "CAL level: native with detail lowest %+.2f decades above the floor; defocused native highest %+.2f (nothing above 1080); false-native upscale highest %+.2f; threshold %.2f\n",
+				nativeLowest, defocusedHighest, upscaleHighest, ts.nativeFloorDecades);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(nativeLowest >= ts.nativeFloorDecades, L"every native frame stands above the floor test");
+			if (upscaleHighest > -1e8) Assert::IsTrue(upscaleHighest < ts.nativeFloorDecades, L"the dark upscale's false natives are within it");
+			snprintf(line, sizeof(line), "CAL contrast: false-native dark upscale highest %.4f; defocused native lowest %.4f; gate %.3f\n",
+				upscaleContrastHighest, defocusedContrastLowest, ts.nativeFloorContrast);
+			Logger::WriteMessage(line);
+			if (upscaleContrastHighest >= 0.0) Assert::IsTrue(upscaleContrastHighest < ts.nativeFloorContrast, L"the dark upscale's false natives are under the contrast gate");
+			Assert::IsTrue(defocusedContrastLowest > ts.nativeFloorContrast, L"defocused native at a normal level is above the contrast gate (stays native evidence)");
+			// 2. The cut test: consecutive analysed frames of one shot (the 0.5 s step, and the cycle's
+			// wrap), the same frames faded / flashed, and cuts between the corpus shots.
+			const std::vector<ShotSource> shots = Shots(c);
+			std::vector<int> ids;
+			for (int i = 0; i < 8; ++i) ids.push_back(AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0));
+			double withinWorstDec = 0.0, withinWorstShare = 0.0, fadeWorst = 0.0, cutLeast = 1e9;
+			int withinCuts = 0, fadeCuts = 0, missed = 0;
+			// The tracker's judge, fed in playing order (its motion level carries from shot to shot).
+			SourceResolution::Tracker::CutJudge judge;
+			auto isCut = [&](double dec, double jump) { return judge.Judge(dec, jump, 0.5, ts); };
+			for (size_t i = 0; i < ids.size(); ++i)
+			{
+				std::vector<SourceResolution::FrameReading> f;
+				for (int k = 0; k < 6; ++k) f.push_back(ReadContent(st, ids[i], k, 1.0));
+				for (int k = 0; k + 1 < 6; ++k)
+				{
+					double dec = 0.0, share = 0.0;
+					double jump = 0.0;
+					if (!SourceResolution::PatternChange(f[k].pattern, f[k].patternFlat, f[k + 1].pattern, f[k + 1].patternFlat, kBlack, 2.0 / 1023, dec, share, &jump)) continue;
+					{
+						// Diagnostic: the same pair on whole-tile means (the quadrants averaged).
+						auto tiles = [](const SourceResolution::FrameReading& r) {
+							std::vector<double> v;
+							for (size_t q = 0; q + 3 < r.pattern.size(); q += 4) v.push_back(0.25 * (r.pattern[q] + r.pattern[q + 1] + r.pattern[q + 2] + r.pattern[q + 3]));
+							return v;
+						};
+						const std::vector<double> a = tiles(f[k]), b = tiles(f[k + 1]);
+						std::vector<char> none(a.size(), 0);
+						double d8 = -1.0, s8 = -1.0;
+						std::vector<double> a2 = a, b2 = b;   // 8 points < the 8-position minimum: duplicate
+						a2.insert(a2.end(), a.begin(), a.end()); b2.insert(b2.end(), b.begin(), b.end());
+						std::vector<char> none2(a2.size(), 0);
+						SourceResolution::PatternChange(a2, none2, b2, none2, kBlack, 2.0 / 1023, d8, s8);
+						snprintf(line, sizeof(line), "CAL within shot %zu step %d->%d: quadrants dec %.3f share %.3f jump %.3f; tiles dec %.3f share %.3f\n", i, k, k + 1, dec, share, jump, d8, s8);
+						Logger::WriteMessage(line);
+					}
+					withinWorstDec = (std::max)(withinWorstDec, dec);
+					withinWorstShare = (std::max)(withinWorstShare, share);
+					withinCuts += isCut(dec, jump) ? 1 : 0;
+				}
+				for (const double g : { 0.3, 0.6, 1.4 })
+				{
+					const SourceResolution::FrameReading faded = ReadContent(st, ids[i], 1, g);
+					double dec = 0.0, share = 0.0;
+					double jump = 0.0;
+					if (!SourceResolution::PatternChange(f[1].pattern, f[1].patternFlat, faded.pattern, faded.patternFlat, kBlack, 2.0 / 1023, dec, share, &jump)) continue;
+					snprintf(line, sizeof(line), "CAL fade shot %zu gain %.1f: dec %.3f share %.3f jump %.3f\n", i, g, dec, share, jump);
+					Logger::WriteMessage(line);
+					fadeWorst = (std::max)(fadeWorst, dec);
+					SourceResolution::Tracker::CutJudge copy = judge;   // a fade at this point of the shot
+					fadeCuts += copy.Judge(dec, jump, 0.5, ts) ? 1 : 0;
+				}
+				if (i + 1 < ids.size())
+				{
+					const SourceResolution::FrameReading next = ReadContent(st, ids[i + 1], 0, 1.0);
+					double dec = 0.0, share = 0.0;
+					double jump = 0.0;
+					if (SourceResolution::PatternChange(f[5].pattern, f[5].patternFlat, next.pattern, next.patternFlat, kBlack, 2.0 / 1023, dec, share, &jump))
+					{
+						auto tiles = [](const SourceResolution::FrameReading& r) {
+							std::vector<double> v;
+							for (size_t q = 0; q + 3 < r.pattern.size(); q += 4) v.push_back(0.25 * (r.pattern[q] + r.pattern[q + 1] + r.pattern[q + 2] + r.pattern[q + 3]));
+							v.insert(v.end(), v.begin(), v.end());
+							return v;
+						};
+						const std::vector<double> a = tiles(f[5]), b = tiles(next);
+						std::vector<char> none(a.size(), 0);
+						double d8 = -1.0, s8 = -1.0;
+						SourceResolution::PatternChange(a, none, b, none, kBlack, 2.0 / 1023, d8, s8);
+						snprintf(line, sizeof(line), "CAL cut %zu -> %zu: decorrelation %.3f, share %.3f jump %.3f; tiles dec %.3f share %.3f\n", i, i + 1, dec, share, jump, d8, s8);
+						Logger::WriteMessage(line);
+						cutLeast = (std::min)(cutLeast, dec);
+						missed += isCut(dec, jump) ? 0 : 1;
+					}
+				}
+			}
+			snprintf(line, sizeof(line), "CAL cuts: within a shot worst decorrelation %.3f share %.3f (%d counted as cuts); fades/flashes worst %.3f (%d); real cuts least %.3f (%d missed); thresholds decorrelation %.2f with a jump %.2f, or %.2f alone, %.2f above the motion level\n",
+				withinWorstDec, withinWorstShare, withinCuts, fadeWorst, fadeCuts, cutLeast, missed, ts.cutDecorrelation, ts.cutJump, ts.cutDecorrelationAlone, ts.cutMotionMargin);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0, fadeCuts, L"no fade or flash is a cut");
+			Assert::AreEqual(0, withinCuts, L"no step inside a shot is a cut");
+			Assert::IsTrue(missed <= 2, L"the real cuts are found (a cut out of a fast pan may be missed: the safe direction)");
+			Budget("LatchFixesCalibration", started, 30);
 		}
 
 		// ---- The tracker alone (synthetic readings; fast, minutes of time) ----
@@ -1796,9 +2336,12 @@ namespace VideoProcessorTest
 		TEST_METHOD(TrackerResumeAfterNativeEvidence)
 		{
 			char line[200];
+			for (const bool fixes : { true, false })
 			for (const double nativeSeconds : { 0.5, 3.0, 30.0 })
 			{
-				SourceResolution::Tracker tracker;
+				SourceResolution::Tracker::Settings settings;
+				settings.latchFixes = fixes;
+				SourceResolution::Tracker tracker(settings);
 				const double dt = 0.5, nativeAt = 60.0;
 				double declaredAgain = -1.0;
 				for (int i = 0; i < 2 * 400; ++i)
@@ -1815,9 +2358,12 @@ namespace VideoProcessorTest
 					tracker.Update(f, t);
 					if (t >= nativeAt + nativeSeconds && declaredAgain < 0 && tracker.Ratio() < 1.0) declaredAgain = t - (nativeAt + nativeSeconds);
 				}
-				snprintf(line, sizeof(line), "RESULT tracker resume after %.1f s of native: declared again %.1f s after it ended\n", nativeSeconds, declaredAgain);
+				snprintf(line, sizeof(line), "RESULT tracker resume after %.1f s of native (fixes %s): declared again %.1f s after it ended\n",
+					nativeSeconds, fixes ? "on" : "off", declaredAgain);
 				Logger::WriteMessage(line);
 				Assert::IsTrue(declaredAgain > 0.0, L"declared again eventually");
+				if (fixes) Assert::IsTrue(declaredAgain <= 10.5, L"fixes on: the standard again (10 s or 3 shots) after the native evidence");
+				else Assert::IsTrue(declaredAgain >= 100.0, L"fixes off: the 120 s window as before");
 			}
 		}
 	};

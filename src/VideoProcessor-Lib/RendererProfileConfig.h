@@ -721,6 +721,11 @@ namespace RendererProfileConfig
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
+			// Latch review 2026-10-17: the latch fixes and the switch timing (seconds).
+			if (key == "source_resolution_latch_fixes") return IsChoice(value, { "on", "off" });
+			if (key == "source_resolution_engage_max_wait_s") return IsNumberInRange(value, 0.0, 600.0);
+			if (key == "source_resolution_crossfade_s") return IsNumberInRange(value, 0.0, 10.0);
+			if (key == "source_resolution_release_fade_s") return IsNumberInRange(value, 0.0, 0.25);
 			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
 			// Stage 11a E2: the split threshold (0 = the match tolerance).

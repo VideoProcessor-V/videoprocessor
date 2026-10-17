@@ -120,3 +120,22 @@ and per-axis) judges its evidence by `renditionSeconds` alone. Tests:
 No GPU test was needed: the CPU tiles are the pixels the GPU copy reads (nearest,
 native luma), and `AnalyseTilesForTest` gained an overload with tile centres / base
 count, so the dense grid and frame signature match `Monitor::Frame`.
+
+## Latch fixes (2026-10-17, `source_resolution_latch_fixes`, default on)
+
+Every finding above is addressed behind one switch (off = the behaviour measured above):
+
+| Finding | Fix | Measured after |
+|---|---|---|
+| 1 post-native block 120 s | a native (or mixed-screen) reading clears the window; the standard (3 shots OR 10 s, owner) restarts from the readings since | re-declared 10.0 s after 0.5 / 3 / 30 s of native (was 120 s); menu resume 12.1 s at a cut (was 124 s) |
+| 2 low-contrast false native | a native reading on a dark / low-contrast frame (contrast < 0.04 of the range) whose detail above the rate sits within 0.5 decades of the rounding floor is no evidence | dark scene: 0 unlatches (was 1); defocused native at normal level still unlatches in 0.125 s (contrast 0.118 vs false natives <= 0.010) |
+| 3 player bars | bar tiles (constant dark strip >= 1/32 of the tile on the picture-edge side) left out of the curves and the mixed guard; flat bar tiles out of the mean / cut pattern | 4:3 with player bars engages at a cut (was never) |
+| 4 fades as cuts | shape-aware cut: quadrant pattern decorrelation (a uniform gain change fits exactly) against the shot's own motion level | 7 of 7 real cuts, 0 fades / flashes (fixes off: 23 "cuts") |
+| 5 tracker gaps | gaps / clock reversal reset the whole monitor (`ResetEvidence`) with their own reason; an internal tracker reset clears kernel votes, coherence and per-axis state | "native at once (a gap of 2.6 s with no frames)" |
+| fixed constants | tile = height x 256/2160 (power of two, 128..256); cuts relative to the level above black; rendition streak 2.5 s | 1080 source: 128-px tiles, dense grid, native never engages, 720 class found |
+
+Switching (owner): once confirmed, at the first cut, real black, fast pan (>= 0.5 picture heights/s,
+optical-flow global vector) or very-low-detail frame, at once; otherwise a crossfade of
+`source_resolution_crossfade_s` (1.5) after `source_resolution_engage_max_wait_s` (20). Release is
+immediate with a fade of at most `source_resolution_release_fade_s` (<= 0.25). Discontinuities are
+hard switches. Report: docs/agent-reports/srcres-latch.md.

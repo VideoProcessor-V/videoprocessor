@@ -7839,6 +7839,26 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         evidenceShots->setToolTip(QStringLiteral(
             "Separate shots (between cuts) that must agree: one soft shot of a real 4K film never decides alone "
             "(a one-direction upscale needs twice this). Used only with Source resolution: Auto."));
+        // Latch review 2026-10-17 (owner): when a confirmed change is shown (with the latch fixes on).
+        auto* engageWait = addText(QStringLiteral("Auto: longest wait for a cut"), QStringLiteral("source_resolution_engage_max_wait_s"));
+        engageWait->setValidator(new QDoubleValidator(0.0, 600.0, 2, engageWait));
+        engageWait->setPlaceholderText(QStringLiteral("20"));
+        engageWait->setToolTip(QStringLiteral(
+            "Seconds (0-600). Once Auto is sure, it switches at the next cut, real black, fast pan or very dark / "
+            "detail-free moment, where the change cannot be seen. If none comes within this time (a long take), it "
+            "crossfades instead. Used with Source resolution: Auto and the latch fixes on."));
+        auto* crossfade = addText(QStringLiteral("Auto: crossfade time"), QStringLiteral("source_resolution_crossfade_s"));
+        crossfade->setValidator(new QDoubleValidator(0.0, 10.0, 2, crossfade));
+        crossfade->setPlaceholderText(QStringLiteral("1.5"));
+        crossfade->setToolTip(QStringLiteral(
+            "Seconds (0-10) of the crossfade a long take gets: both versions of the picture are drawn and mixed. "
+            "0 = switch at once."));
+        auto* releaseFade = addText(QStringLiteral("Auto: fade back to native"), QStringLiteral("source_resolution_release_fade_s"));
+        releaseFade->setValidator(new QDoubleValidator(0.0, 0.25, 2, releaseFade));
+        releaseFade->setPlaceholderText(QStringLiteral("0.25"));
+        releaseFade->setToolTip(QStringLiteral(
+            "Seconds (0-0.25). Returning to native is immediate when real detail appears; this short fade only "
+            "avoids a visible snap. 0 = a hard switch."));
         {
             // The four positions, the keys they move, the defaults an unset field means.
             struct PicturePosition { const char* name; const char* description; std::array<const char*, 4> values; };
@@ -8049,6 +8069,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "sharp parts. On (default): when sharp full-resolution detail shows anywhere beside the upscaled video "
             "(not a subtitle line), the picture counts as native - no re-base, and an active one switches off at "
             "once. Off: the screen is read as a whole, as before."));
+        // Latch review 2026-10-17 (fix under test, default on).
+        auto* latchFixes = addChoice(QStringLiteral("Source resolution: auto latch fixes"), QStringLiteral("source_resolution_latch_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        latchFixes->setToolTip(QStringLiteral(
+            "Under test (default on). Auto re-bases again within the evidence standard after a menu or a native shot "
+            "(not two minutes later); dark or low-contrast frames, player-added bars and fades no longer block or "
+            "fake a change; the switch waits for a cut, a real black, a fast pan or a low-detail moment, else crossfades "
+            "(times below); a return to native stays immediate with a short fade. Off: the earlier behaviour."));
         // Owner 2026-10-16: the engine's options on the motion (de-judder) section, not here.
         QFormLayout* fixesForm = form;
         form = dejudderTasteForm;
@@ -9806,7 +9834,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
                     { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
                     { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },

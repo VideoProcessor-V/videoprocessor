@@ -243,6 +243,41 @@ namespace SourceResolution
 			out.periodicPeak = (std::max)(repeat(out.vertical), repeat(out.horizontal));
 		}
 		out.mean = total / n;
+		// Latch review 2026-10-17: the spread and the quadrant means (cut shape, flat bars).
+		{
+			double q[4] = {}, sq = 0.0;
+			const int h = n / 2;
+			for (int y = 0; y < n; ++y)
+			{
+				const float* row = luma + static_cast<size_t>(y) * stride;
+				for (int x = 0; x < n; ++x)
+				{
+					const double v = row[x];
+					q[(y >= h ? 2 : 0) + (x >= h ? 1 : 0)] += v;
+					sq += (v - out.mean) * (v - out.mean);
+				}
+			}
+			for (int i = 0; i < 4; ++i) out.quadrants[i] = q[i] / (static_cast<double>(h) * h);
+			out.spread = std::sqrt(sq / (static_cast<double>(n) * n));
+			// Bars: constant (two codes) dark (a tenth of the range) full columns / rows from each edge.
+			const double flat = 2.0 / (std::max)(1, codeMaximum), dark = 0.1;
+			auto column = [&](int x) {
+				double lo = 1e9, hi = -1e9;
+				for (int y = 0; y < n; ++y) { const double v = luma[static_cast<size_t>(y) * stride + x]; lo = (std::min)(lo, v); hi = (std::max)(hi, v); }
+				return hi - lo <= flat && hi <= dark;
+			};
+			auto row = [&](int y) {
+				double lo = 1e9, hi = -1e9;
+				const float* r = luma + static_cast<size_t>(y) * stride;
+				for (int x = 0; x < n; ++x) { lo = (std::min)(lo, static_cast<double>(r[x])); hi = (std::max)(hi, static_cast<double>(r[x])); }
+				return hi - lo <= flat && hi <= dark;
+			};
+			out.barLeft = out.barRight = out.barTop = out.barBottom = 0;
+			while (out.barLeft < n && column(out.barLeft)) ++out.barLeft;
+			while (out.barRight < n - out.barLeft && column(n - 1 - out.barRight)) ++out.barRight;
+			while (out.barTop < n && row(out.barTop)) ++out.barTop;
+			while (out.barBottom < n - out.barTop && row(n - 1 - out.barBottom)) ++out.barBottom;
+		}
 		MeasureCoding(luma, stride, n, codeMaximum, out);
 		return true;
 	}
@@ -564,7 +599,7 @@ namespace SourceResolution
 		// Mixed screens (Thresholds::mixedGuard; owner 2026-10-16): the frame read lower on the
 		// averaged curves; look for tiles holding native-resolution content at that rate - a UI
 		// around or over the video. See Thresholds for the rules.
-		void ReadMixedScreen(const std::vector<Spectrum>& tiles, const Thresholds& t, FrameReading& frame)
+		void ReadMixedScreen(const std::vector<Spectrum>& tiles, const Thresholds& t, FrameReading& frame, const std::vector<char>& bars)
 		{
 			const bool both = frame.ratio < 1.0;
 			const bool useV = both || frame.ratioV < 1.0, useH = both || frame.ratioH < 1.0;
@@ -596,6 +631,8 @@ namespace SourceResolution
 			for (size_t i = 0; i < tiles.size(); ++i)
 			{
 				const Spectrum& s = tiles[i];
+				// Latch fixes: a player-added bar's edge is not native UI.
+				if (i < bars.size() && bars[i]) continue;
 				if (sharpRule && s.n == n && sharpness(s) >= t.mixedSharpSteps && s.textBand < t.mixedTextBand && Informative(s, t)) ++sharpUi;
 				if (s.n != n || s.vertical.size() != static_cast<size_t>(n / 2 + 1) || s.horizontal.size() != s.vertical.size() ||
 					s.mirrorVertical.size() != static_cast<size_t>(n) || s.mirrorHorizontal.size() != static_cast<size_t>(n))
@@ -716,19 +753,67 @@ namespace SourceResolution
 		// The mean and signature from the base tiles only (Thresholds::signatureTiles).
 		const size_t signatureTiles = t.signatureTiles > 0 && static_cast<size_t>(t.signatureTiles) < tiles.size()
 			? static_cast<size_t>(t.signatureTiles) : tiles.size();
+		// Latch fixes: flat bar tiles (near-constant at or near black) carry no shape and no level.
+		const double codeStep = 1.0 / (std::max)(1, t.codeMaximum);
+		frame.blackLevel = t.blackLevel;
+		frame.noiseLevel = t.flatSpreadCodes * codeStep;
+		auto flatBar = [&](const Spectrum& s) {
+			return s.spread <= t.flatSpreadCodes * codeStep && s.mean <= t.blackLevel + t.nearBlackShare * (1.0 - t.blackLevel);
+		};
+		// Latch fixes: bar tiles (see Thresholds::latchFixes) - by the tile centres, else the grid.
+		std::vector<float> centreX(tiles.size(), 0.5f), centreY(tiles.size(), 0.5f);
+		if (t.tileX.size() == tiles.size() && t.tileY.size() == tiles.size()) { centreX = t.tileX; centreY = t.tileY; }
+		else
+		{
+			const int count = static_cast<int>(tiles.size());
+			const int columns = t.gridColumns > 0 ? (std::min)(t.gridColumns, count) : count;
+			const int gridRows = (count + columns - 1) / columns;
+			for (int i = 0; i < count; ++i)
+			{
+				centreX[static_cast<size_t>(i)] = static_cast<float>((i % columns + 0.5) / columns);
+				centreY[static_cast<size_t>(i)] = static_cast<float>((i / columns + 0.5) / gridRows);
+			}
+		}
+		auto barTile = [&](size_t i) {
+			if (!t.latchFixes) return false;
+			const Spectrum& s = tiles[i];
+			const int minimum = (std::max)(1, static_cast<int>(std::ceil(t.barMinimumShare * s.n)));
+			if (s.barLeft >= s.n || s.barTop >= s.n) return false;   // all flat: no picture to protect
+			return (centreX[i] < 0.3f && s.barLeft >= minimum) || (centreX[i] > 0.7f && s.barRight >= minimum) ||
+				(centreY[i] < 0.3f && s.barTop >= minimum) || (centreY[i] > 0.7f && s.barBottom >= minimum);
+		};
+		std::vector<char> bars(tiles.size(), 0);
+		for (size_t i = 0; i < tiles.size(); ++i) bars[i] = barTile(i) ? 1 : 0;
+		size_t counted = 0;
+		bool allFlat = true;
+		for (size_t i = 0; i < tiles.size(); ++i) allFlat = allFlat && flatBar(tiles[i]);
 		for (size_t i = 0; i < tiles.size(); ++i)
 		{
 			const Spectrum& s = tiles[i];
 			if (i < signatureTiles)
 			{
-				sum += s.mean;
-				signature += s.mean * static_cast<double>(i + 1);
+				const bool flat = t.latchFixes && flatBar(s);
+				if (t.latchFixes)
+				{
+					for (int q = 0; q < 4; ++q) { frame.pattern.push_back(s.quadrants[q]); frame.patternFlat.push_back(flat ? 1 : 0); }
+				}
+				// A flat bar tile stays out of the mean / signature unless every tile is flat (black).
+				if (!flat || allFlat)
+				{
+					sum += s.mean;
+					signature += s.mean * static_cast<double>(i + 1);
+					++counted;
+				}
 			}
 			frame.peakiness = (std::max)(frame.peakiness, Peakiness(s));
 			if (t.textBand > 0.0 && t.textBand <= 1.0 && s.textBand >= t.textBand) { ++frame.textTiles; continue; }
 			if (t.periodicPeak > 0.0 && s.periodicPeak >= t.periodicPeak) { ++frame.periodicTiles; continue; }
 			if (s.n != n || !Informative(s, t) || s.mirrorVertical.size() != vertical.size() || s.mirrorHorizontal.size() != vertical.size()) continue;
+			// Latch fixes: a tile holding a player-added bar (its sharp edge is coherent at every rate):
+			// left out (evidence only lost).
+			if (barTile(i)) { ++frame.barTiles; continue; }
 			++frame.informativeTiles;
+			frame.contrast += s.spread;
 			for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] += s.mirrorVertical[m]; horizontal[m] += s.mirrorHorizontal[m]; }
 			if (frame.verticalPower.empty()) { frame.verticalPower.assign(s.vertical.size(), 0.0); frame.horizontalPower.assign(s.horizontal.size(), 0.0); }
 			for (size_t k = 0; k < frame.verticalPower.size() && k < s.vertical.size() && k < s.horizontal.size(); ++k)
@@ -737,10 +822,20 @@ namespace SourceResolution
 				frame.horizontalPower[k] += s.horizontal[k];
 			}
 		}
-		frame.mean = sum / signatureTiles;
+		frame.mean = counted > 0 ? sum / counted : sum / signatureTiles;
 		frame.signature = signature;
 		ReadCoding(tiles, frame);
-		if (frame.informativeTiles == 0) return frame;
+		frame.black = t.latchFixes && allFlat;
+		{
+			// The rounding floor at the effective bit depth (8-bit content in a 10-bit signal rounds
+			// in steps of 4 codes), the signal's own when unknown.
+			const double signalBits = std::log2(static_cast<double>((std::max)(1, t.codeMaximum)) + 1.0);
+			double step = codeStep;
+			if (frame.effectiveBits > 0.0 && frame.effectiveBits < signalBits) step *= std::pow(2.0, signalBits - frame.effectiveBits);
+			frame.quantisationFloor = std::log10(step * step / 12.0);
+		}
+		if (frame.informativeTiles == 0) { frame.contrast = 0.0; return frame; }
+		frame.contrast = t.latchFixes ? frame.contrast / frame.informativeTiles / (std::max)(1e-6, 1.0 - t.blackLevel) : 0.0;
 		for (size_t m = 0; m < vertical.size(); ++m) { vertical[m] /= frame.informativeTiles; horizontal[m] /= frame.informativeTiles; }
 		for (double& p : frame.verticalPower) p /= frame.informativeTiles;
 		for (double& p : frame.horizontalPower) p /= frame.informativeTiles;
@@ -780,7 +875,7 @@ namespace SourceResolution
 		frame.ratioV = frame.vertical.coherence >= t.singleAxisCoherence && quietV && frame.vertical.ratio <= t.singleAxisMaximumRatio ? frame.vertical.ratio : 1.0;
 		frame.ratioH = frame.horizontal.coherence >= t.singleAxisCoherence && quietH && frame.horizontal.ratio <= t.singleAxisMaximumRatio ? frame.horizontal.ratio : 1.0;
 		// Mixed screens: a lower reading with native UI in the frame reads native (off: as before).
-		if (t.mixedGuard && (frame.ratio < 1.0 || frame.ratioV < 1.0 || frame.ratioH < 1.0)) ReadMixedScreen(tiles, t, frame);
+		if (t.mixedGuard && (frame.ratio < 1.0 || frame.ratioV < 1.0 || frame.ratioH < 1.0)) ReadMixedScreen(tiles, t, frame, bars);
 		return frame;
 	}
 
@@ -829,6 +924,64 @@ namespace SourceResolution
 		return DetailAboveSpectra(frame.verticalPower, frame.horizontalPower, ratio, 3, nullptr);
 	}
 
+	double DetailAbove(const FrameReading& frame, double ratio, double* level)
+	{
+		return DetailAboveSpectra(frame.verticalPower, frame.horizontalPower, ratio, 3, level);
+	}
+
+	double CoherenceAtRate(const FrameReading& frame, double ratio)
+	{
+		const int n = static_cast<int>(frame.verticalCurve.size());
+		if (n == 0 || frame.horizontalCurve.size() != frame.verticalCurve.size()) return 0.0;
+		return (std::min)(CoherenceAt(frame.verticalCurve, ratio, n), CoherenceAt(frame.horizontalCurve, ratio, n));
+	}
+
+	bool PatternChange(const std::vector<double>& x, const std::vector<char>& flatX, const std::vector<double>& y,
+		const std::vector<char>& flatY, double blackLevel, double noise, double& decorrelation, double& share, double* jump)
+	{
+		decorrelation = share = 0.0;
+		if (jump) *jump = 0.0;
+		if (x.size() != y.size()) return false;
+		std::vector<double> a, b;
+		for (size_t i = 0; i < x.size(); ++i)
+		{
+			if ((i < flatX.size() && flatX[i]) || (i < flatY.size() && flatY[i])) continue;
+			a.push_back(x[i]);
+			b.push_back(y[i]);
+		}
+		if (a.size() < 8) return false;
+		const double count = static_cast<double>(a.size());
+		double ma = 0.0, mb = 0.0;
+		for (size_t i = 0; i < a.size(); ++i) { ma += a[i]; mb += b[i]; }
+		ma /= count; mb /= count;
+		double va = 0.0, vb = 0.0, cab = 0.0;
+		for (size_t i = 0; i < a.size(); ++i)
+		{
+			va += (a[i] - ma) * (a[i] - ma);
+			vb += (b[i] - mb) * (b[i] - mb);
+			cab += (a[i] - ma) * (b[i] - mb);
+		}
+		va /= count; vb /= count; cab /= count;
+		// No shape to compare (black, a flat frame): not judged.
+		if (std::sqrt(va) <= noise || std::sqrt(vb) <= noise) return false;
+		const double slope = cab / va;
+		const double residual = std::sqrt((std::max)(0.0, vb - slope * cab));
+		decorrelation = residual / std::sqrt(vb);
+		const double level = (std::max)({ 0.5 * (ma + mb) - blackLevel, noise, 1e-6 });
+		share = residual / level;
+		if (jump) *jump = std::fabs(mb - ma) / level;
+		return true;
+	}
+
+	int TileSize(double height, int maximum)
+	{
+		// 256 px at 2160 (the size the detector's thresholds were measured with).
+		const double wanted = height * 256.0 / 2160.0;
+		int size = 128;
+		while (size * 2 <= maximum && std::fabs(std::log2(wanted / (size * 2.0))) < std::fabs(std::log2(wanted / size))) size *= 2;
+		return (std::min)(maximum, size);
+	}
+
 	double DetailAbove(const Spectrum& tile, double ratio, int axes, double* level)
 	{
 		return DetailAboveSpectra(tile.vertical, tile.horizontal, ratio, axes, level);
@@ -859,6 +1012,8 @@ namespace SourceResolution
 		for (int r = 0; r < rows; ++r)
 			for (int c = 0; c < cols; ++c) add(y0 + (r + 0.5) * h / rows, c);
 		if (baseTiles) *baseTiles = static_cast<int>(places.size());
+		// (Latch review 2026-10-17: with the tile a fraction of the height - TileSize - every picture
+		// is about eight tiles high, so a 1080 picture, cropped or not, gets the dense grid too.)
 		if (dense && rows == 2 && static_cast<int>((h - 16.0) / tile) >= 4)
 			for (const double share : { 0.5, 0.875 })
 				for (int c = 0; c < cols; ++c) add(y0 + share * h, c);
@@ -907,6 +1062,10 @@ namespace SourceResolution
 		lastSeconds = -1.0;
 		evidence = 0.0;
 		haveLast = false;
+		lastPattern.clear();
+		lastPatternFlat.clear();
+		lastPatternSeconds = -1.0;
+		cutJudge = CutJudge{};
 		++discontinuities;
 		lastReason = reason ? reason : "";
 	}
@@ -928,7 +1087,38 @@ namespace SourceResolution
 		lastSeconds = seconds;
 		if (frame.tiles > 0)
 		{
-			if (haveLast && std::fabs(frame.mean - lastMean) > settings.cutLevel) { ++shot; ++cuts; haveLastNative = false; streak = 0; streakDetail.clear(); }
+			bool cut = false;
+			if (settings.latchFixes)
+			{
+				// Latch fixes: a cut is a change of shape, compared with the last frame that had one
+				// (so a fade through black between two shots is a cut, a fade within a shot is not).
+				double decorrelation = 0.0, share = 0.0, jump = 0.0;
+				if (PatternChange(lastPattern, lastPatternFlat, frame.pattern, frame.patternFlat, frame.blackLevel, frame.noiseLevel, decorrelation, share, &jump))
+				{
+					cut = cutJudge.Judge(decorrelation, jump, lastPatternSeconds >= 0.0 ? seconds - lastPatternSeconds : 0.0, settings);
+					if (cut) lastCutSpan = lastPatternSeconds >= 0.0 ? seconds - lastPatternSeconds : 0.0;
+					lastPattern = frame.pattern;
+					lastPatternFlat = frame.patternFlat;
+					lastPatternSeconds = seconds;
+				}
+				else
+				{
+					// No comparison: keep this pattern when it has a shape of its own.
+					double d = 0.0, sh = 0.0;
+					if (PatternChange(frame.pattern, frame.patternFlat, frame.pattern, frame.patternFlat, frame.blackLevel, frame.noiseLevel, d, sh))
+					{
+						lastPattern = frame.pattern;
+						lastPatternFlat = frame.patternFlat;
+						lastPatternSeconds = seconds;
+					}
+				}
+			}
+			else
+			{
+				cut = haveLast && std::fabs(frame.mean - lastMean) > settings.cutLevel;
+				if (cut) lastCutSpan = dt;
+			}
+			if (cut) { ++shot; ++cuts; haveLastNative = false; streak = 0; streakDetail.clear(); }
 			lastMean = frame.mean;
 			lastSignature = frame.signature;
 			haveLast = true;
@@ -948,6 +1138,20 @@ namespace SourceResolution
 		if (ratio >= 1.0 && !frame.mixed)
 		{
 			const double inQuestion = declared < 1.0 ? declared : Candidate();
+			// Latch fixes: level-aware - detail above the rate that is no more than the rounding noise
+			// of the picture's bit depth (a dark or low-contrast frame) is no evidence either way.
+			const bool dark = frame.contrast <= 0.0 || frame.contrast < settings.nativeFloorContrast;
+			if (settings.latchFixes && inQuestion < 1.0 && dark)
+			{
+				double level = 0.0;
+				const double d = DetailAbove(frame, inQuestion, &level);
+				if (!std::isinf(d) && level < frame.quantisationFloor + settings.nativeFloorDecades)
+				{
+					++starved;
+					++floorStarved;
+					return;
+				}
+			}
 			const double reference = inQuestion < 1.0 ? ReferenceDetail(inQuestion) : std::numeric_limits<double>::infinity();
 			if (!std::isinf(reference) && DetailAbove(frame, inQuestion) < reference + settings.detailMarginDecades)
 			{
@@ -966,6 +1170,21 @@ namespace SourceResolution
 			lastNativeShot = shot;
 			streak = 0;
 			streakDetail.clear();
+			if (settings.latchFixes)
+			{
+				// Latch fixes: native evidence ends the lower one - the window starts again after it
+				// (the standard, minimumShots and minimumSeconds, from the readings since), instead of
+				// holding re-engagement for windowSeconds. A mixed screen's frames go with it.
+				window.clear();
+				evidence = 0.0;
+				renditionMode = false;
+				if (declared < 1.0)
+				{
+					declared = 1.0;
+					declaredByRendition = false;
+				}
+				return;
+			}
 		}
 		else
 		{
@@ -979,8 +1198,11 @@ namespace SourceResolution
 			++streak;
 			const double d = DetailAbove(frame, ratio);
 			if (!std::isinf(d)) streakDetail.push_back(d);
-			if (streak >= settings.renditionFrames && haveLastNative && shot == lastNativeShot && !renditionMode &&
-				declared >= 1.0 && streakDetail.size() >= static_cast<size_t>(settings.renditionFrames))
+			const bool streakLong = settings.latchFixes
+				? seconds - streakStart >= settings.renditionStreakSeconds - 1e-6 && streakDetail.size() >= 3
+				: streak >= settings.renditionFrames && streakDetail.size() >= static_cast<size_t>(settings.renditionFrames);
+			if (streakLong && haveLastNative && shot == lastNativeShot && !renditionMode &&
+				declared >= 1.0)
 			{
 				std::vector<double> sorted = streakDetail;
 				std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
@@ -1021,7 +1243,12 @@ namespace SourceResolution
 		// Lower only when the whole window - several shots, a sustained time -
 		// stays below the declared cutoff.
 		const double candidate = Candidate();
-		if (candidate < declared - settings.tolerance && Shots() >= settings.minimumShots && EvidenceSeconds() >= settings.minimumSeconds)
+		// Latch fixes (owner 2026-10-17): the shots OR the time, whichever comes first - the tiles are
+		// independent readings, so one long shot can confirm on its own.
+		const bool enough = settings.latchFixes
+			? Shots() >= settings.minimumShots || EvidenceSeconds() >= settings.minimumSeconds
+			: Shots() >= settings.minimumShots && EvidenceSeconds() >= settings.minimumSeconds;
+		if (candidate < declared - settings.tolerance && enough)
 		{
 			declared = candidate;
 			declaredByRendition = false;

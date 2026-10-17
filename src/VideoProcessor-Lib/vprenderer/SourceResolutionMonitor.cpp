@@ -18,18 +18,20 @@ namespace SourceResolutionMonitor
 		constexpr int kPixels = Monitor::kTile * Monitor::kTile;
 
 		// One invocation per tile pixel: the native luma (or Rec. 709 luma of
-		// an RGB plane) at the tile's origin, written as a float.
+		// an RGB plane) at the tile's origin, written as a float. Tiles of
+		// tile_size px (at most Monitor::kTile), packed one after another.
 		const char* const BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
-int tile = g.x / 256;
-int x = g.x - tile * 256;
-if (tile < int(tiles) && g.y < 256) {
+int ts = int(tile_size);
+int tile = g.x / ts;
+int x = g.x - tile * ts;
+if (tile < int(tiles) && g.y < ts) {
     vec4 pair = tile < 2 ? o01 : tile < 4 ? o23 : tile < 6 ? o45 : tile < 8 ? o67 :
                 tile < 10 ? o89 : tile < 12 ? oab : tile < 14 ? ocd : oef;
     vec2 origin = (tile % 2) == 0 ? pair.xy : pair.zw;
     ivec2 p = clamp(ivec2(origin) + ivec2(x, g.y), ivec2(0), textureSize(src, 0) - ivec2(1));
     vec4 c = texelFetch(src, p, 0);
-    values[(tile * 256 + g.y) * 256 + x] = is_rgb > 0.5 ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)) : c.r;
+    values[(tile * ts + g.y) * ts + x] = is_rgb > 0.5 ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)) : c.r;
 }
 )GLSL";
 
@@ -72,6 +74,25 @@ if (tile < int(tiles) && g.y < 256) {
 		aheadWake.notify_all();
 		if (aheadThread.joinable()) aheadThread.join();
 		FlushHistory(true);
+	}
+
+	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+		const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel)
+	{
+		Job j;
+		j.values = tiles;
+		j.tiles = count;
+		j.codeMaximum = 1023;
+		j.scale = 1023.0;
+		j.seconds = seconds;
+		j.nativeWidth = nativeWidth;
+		j.nativeHeight = nativeHeight;
+		j.tileX = tileX;
+		j.tileY = tileY;
+		j.baseTiles = (std::min)(baseTiles, count);
+		j.tileSize = tileSize;
+		j.blackLevel = blackLevel;
+		Analyse(j);
 	}
 
 	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
@@ -118,39 +139,71 @@ if (tile < int(tiles) && g.y < 256) {
 		left = (std::max)(0, left); top = (std::max)(0, top);
 		right = (std::min)(width, right); bottom = (std::min)(height, bottom);
 		const int w = right - left, h = bottom - top;
-		if (w < 2 * kTile || h < kTile) return;
+		const bool fixes = LatchFixes();
+		const int tileSize = TileFor(h);
+		if (w < 2 * tileSize || h < tileSize) return;
 		// The tiles: 4 x 2 on the 16-px grid inside the picture (as the GPU monitor).
 		const int tilesX = 4, tilesY = 2;
 		auto tileOrigin = [&](int i, int& x0, int& y0) {
 			const int tx = i % tilesX, ty = i / tilesX;
-			x0 = (left + (w - kTile) * (2 * tx + 1) / (2 * tilesX)) & ~15;
-			y0 = (top + (h - kTile) * (2 * ty + 1) / (2 * tilesY)) & ~15;
-			x0 = (std::max)(left, (std::min)(x0, right - kTile));
-			y0 = (std::max)(top, (std::min)(y0, bottom - kTile));
+			x0 = (left + (w - tileSize) * (2 * tx + 1) / (2 * tilesX)) & ~15;
+			y0 = (top + (h - tileSize) * (2 * ty + 1) / (2 * tilesY)) & ~15;
+			x0 = (std::max)(left, (std::min)(x0, right - tileSize));
+			y0 = (std::max)(top, (std::min)(y0, bottom - tileSize));
 		};
 		// Cheap check: the mean and spread on a sparse 32 x 32 grid per tile.
 		double sum = 0.0, spread = 0.0;
 		int count = 0;
+		std::vector<double> pattern;
+		// The sparse grid: 32 x 32 samples per tile whatever its size.
+		const int step = (std::max)(4, tileSize / 32);
+		const int half = tileSize / 2;
 		for (int i = 0; i < tilesX * tilesY; ++i)
 		{
 			int x0, y0;
 			tileOrigin(i, x0, y0);
-			double ts = 0.0, ts2 = 0.0;
-			for (int y = 0; y < kTile; y += 8)
-				for (int x = 0; x < kTile; x += 8)
+			double ts = 0.0, ts2 = 0.0, q[4] = {};
+			double samples = 0.0;
+			for (int y = 0; y < tileSize; y += step)
+				for (int x = 0; x < tileSize; x += step)
 				{
 					const double v = luma(x0 + x, y0 + y) / 1023.0;
 					ts += v; ts2 += v * v;
+					q[(y >= half ? 2 : 0) + (x >= half ? 1 : 0)] += v;
+					samples += 1.0;
 				}
-			const double n = (kTile / 8.0) * (kTile / 8.0);
-			const double mean = ts / n;
-			spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / n - mean * mean)));
+			const double mean = ts / samples;
+			spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / samples - mean * mean)));
+			for (int k = 0; k < 4; ++k) pattern.push_back(q[k] / (samples / 4.0));
 			sum += mean;
 			++count;
 		}
 		const double mean = sum / count;
-		const bool cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
-		const bool blank = spread < 3.0 / 1023.0;   // no texture anywhere (black, a fade's end, flat)
+		bool cut = false, blank = false;
+		if (fixes)
+		{
+			// Latch fixes: the tracker's shape-aware cut (a fade or a flash is not a cut) and a
+			// real black (flat and at black) - the look-ahead's events are cuts and blacks only.
+			const SourceResolution::Tracker::Settings ts;
+			const SourceResolution::Thresholds th;
+			const std::vector<char> none(pattern.size(), 0);
+			const double noise = th.flatSpreadCodes / 1023.0;
+			double decorrelation = 0.0, share = 0.0, jump = 0.0;
+			if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
+			{
+				// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
+				cut = aheadCutJudge.Judge(decorrelation, jump, secondsPerFrame > 0.0 ? secondsPerFrame : 1.0 / 24.0, ts);
+				aheadLastPattern = pattern;
+			}
+			else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))
+				aheadLastPattern = pattern;
+			blank = spread < 3.0 / 1023.0 && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
+		}
+		else
+		{
+			cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
+			blank = spread < 3.0 / 1023.0;   // no texture anywhere (black, a fade's end, flat)
+		}
 		aheadLastMean = mean;
 		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
 		bool analyse = false;
@@ -172,14 +225,15 @@ if (tile < int(tiles) && g.y < 256) {
 			{
 				ahead.targetSequence = sequence;
 				aheadTileCount = tilesX * tilesY;
-				aheadTiles.resize(static_cast<size_t>(aheadTileCount) * kTile * kTile);
+				aheadTileSize = tileSize;
+				aheadTiles.resize(static_cast<size_t>(aheadTileCount) * tileSize * tileSize);
 				for (int i = 0; i < aheadTileCount; ++i)
 				{
 					int x0, y0;
 					tileOrigin(i, x0, y0);
-					float* t = &aheadTiles[static_cast<size_t>(i) * kTile * kTile];
-					for (int y = 0; y < kTile; ++y)
-						for (int x = 0; x < kTile; ++x) t[y * kTile + x] = luma(x0 + x, y0 + y) / 1023.0f;
+					float* t = &aheadTiles[static_cast<size_t>(i) * tileSize * tileSize];
+					for (int y = 0; y < tileSize; ++y)
+						for (int x = 0; x < tileSize; ++x) t[y * tileSize + x] = luma(x0 + x, y0 + y) / 1023.0f;
 				}
 				aheadHaveJob = true;
 			}
@@ -192,7 +246,7 @@ if (tile < int(tiles) && g.y < 256) {
 		for (;;)
 		{
 			std::vector<float> tiles;
-			int count = 0;
+			int count = 0, size = kTile;
 			uint64_t target = 0;
 			{
 				std::unique_lock<std::mutex> lock(aheadMutex);
@@ -200,12 +254,14 @@ if (tile < int(tiles) && g.y < 256) {
 				if (aheadStopping) return;
 				tiles.swap(aheadTiles);
 				count = aheadTileCount;
+				size = aheadTileSize;
 				target = ahead.targetSequence;
 			}
 			std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(count));
 			for (int i = 0; i < count; ++i)
-				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * kTile * kTile], kTile, kTile, spectra[static_cast<size_t>(i)], 1023);
+				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * size * size], size, size, spectra[static_cast<size_t>(i)], 1023);
 			SourceResolution::Thresholds thresholds;
+			thresholds.latchFixes = LatchFixes();
 			if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 			thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
 			const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, thresholds);
@@ -338,7 +394,7 @@ if (tile < int(tiles) && g.y < 256) {
 		{
 			if (!busy[i] || pl_buf_poll(gpu, ring[i], 0)) continue;
 			Job done = pendingMeta[i];
-			done.values.resize(static_cast<size_t>(done.tiles) * kPixels);
+			done.values.resize(static_cast<size_t>(done.tiles) * done.tileSize * done.tileSize);
 			const bool ok = pl_buf_read(gpu, ring[i], 0, done.values.data(), done.values.size() * sizeof(float));
 			busy[i] = false;
 			if (!ok)
@@ -386,7 +442,8 @@ if (tile < int(tiles) && g.y < 256) {
 		// The base 4 x 2 grid first (unchanged, so frame signatures compare across a switch),
 		// then the dense rows while a lower reading is declared or gathered.
 		int baseTiles = 0;
-		const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, w, h, kTile, denseGrid.load(std::memory_order_acquire), &baseTiles);
+		const int tileSize = TileFor(h);
+		const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, w, h, tileSize, denseGrid.load(std::memory_order_acquire), &baseTiles);
 		if (places.empty()) return;
 		float origins[2 * kMaxTiles] = {};
 		const int tiles = (std::min)(kMaxTiles, static_cast<int>(places.size()));
@@ -430,9 +487,11 @@ if (tile < int(tiles) && g.y < 256) {
 		descriptors[1].num_buffer_vars = 1;
 		descriptors[1].memory = PL_MEMORY_COHERENT;
 		const float tileCount = static_cast<float>(tiles);
+		const float tileSizeVar = static_cast<float>(tileSize);
 		const float rgb = luma->params.format->num_components >= 3 ? 1.0f : 0.0f;
-		const pl_shader_var variables[10] = {
+		const pl_shader_var variables[11] = {
 			{ pl_var_float("tiles"), &tileCount, true },
+			{ pl_var_float("tile_size"), &tileSizeVar, true },
 			{ pl_var_float("is_rgb"), &rgb, true },
 			{ pl_var_vec4("o01"), &origins[0], true },
 			{ pl_var_vec4("o23"), &origins[4], true },
@@ -450,7 +509,7 @@ if (tile < int(tiles) && g.y < 256) {
 		custom.descriptors = descriptors;
 		custom.num_descriptors = 2;
 		custom.variables = variables;
-		custom.num_variables = 10;
+		custom.num_variables = 11;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;
@@ -463,8 +522,8 @@ if (tile < int(tiles) && g.y < 256) {
 		}
 		pl_dispatch_compute_params compute{};
 		compute.shader = &sh;
-		compute.dispatch_size[0] = tiles * kTile / 16;
-		compute.dispatch_size[1] = kTile / 16;
+		compute.dispatch_size[0] = tiles * tileSize / 16;
+		compute.dispatch_size[1] = tileSize / 16;
 		compute.dispatch_size[2] = 1;
 		if (!pl_dispatch_compute(dispatch, &compute))
 		{
@@ -474,6 +533,7 @@ if (tile < int(tiles) && g.y < 256) {
 		Job& meta = pendingMeta[slot];
 		meta.values.clear();
 		meta.tiles = tiles;
+		meta.tileSize = tileSize;
 		meta.baseTiles = (std::min)(baseTiles, tiles);
 		meta.tileX.clear();
 		meta.tileY.clear();
@@ -487,6 +547,9 @@ if (tile < int(tiles) && g.y < 256) {
 		meta.codeMaximum = (1 << (std::min)(16, (std::max)(1, colorDepth))) - 1;
 		meta.scale = (std::pow(2.0, (std::min)(16, (std::max)(1, sampleDepth))) - 1.0) / std::pow(2.0, source.repr.bits.bit_shift);
 		if (luma->params.format->type == PL_FMT_FLOAT) meta.scale = meta.codeMaximum;   // float planes hold normalised values
+		// The signal's black (normalised): full range 0, limited 16 << (bits - 8).
+		meta.blackLevel = source.repr.levels == PL_COLOR_LEVELS_FULL ? 0.0 : 16.0 * (meta.codeMaximum + 1) / 256.0 / meta.codeMaximum;
+		blackLevelSeen = meta.blackLevel;
 		meta.seconds = seconds;
 		meta.nativeWidth = luma->params.w;
 		meta.nativeHeight = luma->params.h;
@@ -514,31 +577,7 @@ if (tile < int(tiles) && g.y < 256) {
 				wake.wait(lock, [this] { return stopping || haveJob || discontinuityCause.load(std::memory_order_acquire); });
 				if (stopping) return;
 				const char* cause = discontinuityCause.exchange(nullptr, std::memory_order_acq_rel);
-				if (cause)
-				{
-					tracker.Discontinuity(cause);
-					trackerV.Discontinuity(cause);
-					trackerH.Discontinuity(cause);
-					denseGrid.store(false, std::memory_order_release);
-					coherenceV.clear();
-					coherenceH.clear();
-					kernelVotes.clear();
-					snapshot.kernel = -1;
-					snapshot.kernelVotes = snapshot.kernelAgree = 0;
-					snapshot.axisRatioX = snapshot.axisRatioY = 1.0;
-					snapshot.axisConfidence = 0.0;
-					live.clear();
-					coherence.clear();
-					lastCuts = tracker.Cuts();
-					qualitySmoothed = -1.0;
-					bitsSmoothed = 0.0;
-					snapshot.reading = false;
-					snapshot.liveRatio = snapshot.declaredRatio = snapshot.frameRatio = 1.0;
-					snapshot.confidence = 0.0;
-					snapshot.discontinuities = tracker.Discontinuities();
-					snapshot.lastDiscontinuity = cause;
-					Record(std::string("discontinuity,,,,,1,0,,,,,") + "1," + cause);
-				}
+				if (cause) ResetEvidence(cause);
 				if (!haveJob) continue;
 				current = std::move(job);
 				haveJob = false;
@@ -548,27 +587,60 @@ if (tile < int(tiles) && g.y < 256) {
 		}
 	}
 
+	void Monitor::ResetEvidence(const char* cause)
+	{
+		// Every piece of evidence: the trackers, the kernel votes, the coherence / live history.
+		tracker.Discontinuity(cause);
+		trackerV.Discontinuity(cause);
+		trackerH.Discontinuity(cause);
+		denseGrid.store(false, std::memory_order_release);
+		coherenceV.clear();
+		coherenceH.clear();
+		kernelVotes.clear();
+		snapshot.kernel = -1;
+		snapshot.kernelVotes = snapshot.kernelAgree = 0;
+		snapshot.axisRatioX = snapshot.axisRatioY = 1.0;
+		snapshot.axisConfidence = 0.0;
+		live.clear();
+		coherence.clear();
+		lastCuts = tracker.Cuts();
+		qualitySmoothed = -1.0;
+		bitsSmoothed = 0.0;
+		lastAnalysedSeconds = -1.0;
+		snapshot.reading = false;
+		snapshot.liveRatio = snapshot.declaredRatio = snapshot.frameRatio = 1.0;
+		snapshot.confidence = 0.0;
+		snapshot.discontinuities = tracker.Discontinuities();
+		snapshot.lastDiscontinuity = cause;
+		Record(std::string("discontinuity,,,,,1,0,,,,,") + "1," + cause);
+	}
+
 	void Monitor::Analyse(Job& j)
 	{
 		const auto start = std::chrono::steady_clock::now();
 		std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(j.tiles));
-		std::vector<float> luma(kPixels);
+		const int T = j.tileSize > 0 ? j.tileSize : kTile;
+		const int pixels = T * T;
+		std::vector<float> luma(static_cast<size_t>(pixels));
 		std::vector<std::vector<float>> codeTiles(static_cast<size_t>(j.tiles));   // for the kernel fit
 		for (int t = 0; t < j.tiles; ++t)
 		{
-			const float* src = j.values.data() + static_cast<size_t>(t) * kPixels;
-			for (int i = 0; i < kPixels; ++i)
+			const float* src = j.values.data() + static_cast<size_t>(t) * pixels;
+			for (int i = 0; i < pixels; ++i)
 			{
 				const double code = std::round(src[i] * j.scale);
 				luma[i] = static_cast<float>((std::min)(static_cast<double>(j.codeMaximum), (std::max)(0.0, code)) / j.codeMaximum);
 			}
-			SourceResolution::Analyse(luma.data(), kTile, kTile, spectra[static_cast<size_t>(t)], j.codeMaximum);
+			SourceResolution::Analyse(luma.data(), T, T, spectra[static_cast<size_t>(t)], j.codeMaximum);
 			codeTiles[static_cast<size_t>(t)] = luma;
 		}
 		SourceResolution::Thresholds thresholds;
 		thresholds.codeMaximum = j.codeMaximum;
 		if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 		thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
+		const bool fixes = LatchFixes();
+		thresholds.latchFixes = fixes;
+		thresholds.blackLevel = j.blackLevel;
 		// The tiles' positions (the overlay spread) and the base grid for the frame signature:
 		// switching between the base and the dense grid is neither a cut nor a new shot.
 		if (j.tileX.size() == static_cast<size_t>(j.tiles) && j.tileY.size() == static_cast<size_t>(j.tiles))
@@ -586,10 +658,45 @@ if (tile < int(tiles) && g.y < 256) {
 			tracker.SetEvidence(shots, seconds);
 			trackerV.SetEvidence(2 * shots, 2.0 * seconds);
 			trackerH.SetEvidence(2 * shots, 2.0 * seconds);
+			tracker.SetLatchFixes(fixes);
+			trackerV.SetLatchFixes(fixes);
+			trackerH.SetLatchFixes(fixes);
 		}
+		// Latch fixes: a gap with no frames (or time going backwards) is a discontinuity of the whole
+		// monitor with its own reason - not of the tracker alone (the kernel votes, the coherence
+		// history and the per-axis state went on, and auto blamed "detail above the re-based height").
+		if (fixes && lastAnalysedSeconds >= 0.0)
+		{
+			const double gap = j.seconds - lastAnalysedSeconds;
+			if (gap < 0.0 || gap > tracker.GetSettings().maximumGapSeconds)
+			{
+				char text[96];
+				if (gap < 0.0) snprintf(text, sizeof(text), "the source clock went backwards");
+				else snprintf(text, sizeof(text), "a gap of %.1f s with no frames", gap);
+				gapReason = text;
+				ResetEvidence(gapReason.c_str());
+				autoReset.store(true, std::memory_order_release);
+			}
+		}
+		lastAnalysedSeconds = j.seconds;
+		const unsigned long long trackerResets = tracker.Discontinuities();
 		tracker.Update(frame, j.seconds);
 		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds);
 		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds);
+		// Latch fixes: the tracker reset itself for a cause the check above did not see: the rest too.
+		if (fixes && tracker.Discontinuities() != trackerResets)
+		{
+			gapReason = tracker.LastDiscontinuity();
+			kernelVotes.clear();
+			coherence.clear();
+			coherenceV.clear();
+			coherenceH.clear();
+			live.clear();
+			trackerV.Discontinuity(gapReason.c_str());
+			trackerH.Discontinuity(gapReason.c_str());
+			snapshot.lastDiscontinuity = gapReason;
+			autoReset.store(true, std::memory_order_release);
+		}
 		// The dense grid while any tracker has a lower reading declared or in its window (from the
 		// next copy on); back to the base grid once all are native again.
 		denseGrid.store(tracker.Ratio() < 1.0 || tracker.Candidate() < 1.0 || trackerV.Ratio() < 1.0 || trackerV.Candidate() < 1.0 ||
@@ -600,6 +707,17 @@ if (tile < int(tiles) && g.y < 256) {
 		while (!coherence.empty() && j.seconds - coherence.front().first > 120.0) coherence.pop_front();
 		while (!coherenceV.empty() && j.seconds - coherenceV.front().first > 120.0) coherenceV.pop_front();
 		while (!coherenceH.empty() && j.seconds - coherenceH.front().first > 120.0) coherenceH.pop_front();
+		// Latch fixes: the clarity behind a declaration comes from the frames since the last native
+		// evidence (where the tracker's window starts again), not from 120 s holding a native shot.
+		if (fixes)
+		{
+			auto since = [](std::deque<std::pair<double, double>>& c, const SourceResolution::Tracker& t) {
+				if (t.Ratio() >= 1.0 && t.Candidate() >= 1.0) c.clear();
+			};
+			since(coherence, tracker);
+			since(coherenceV, trackerV);
+			since(coherenceH, trackerH);
+		}
 		if (frame.informative())
 		{
 			live.push_back({ j.seconds, frame.ratio });
@@ -620,6 +738,10 @@ if (tile < int(tiles) && g.y < 256) {
 		auto evidenceOf = [](const SourceResolution::Tracker& t) {
 			const SourceResolution::Tracker::Settings& s = t.GetSettings();
 			if (t.DeclaredByRendition()) return (std::min)(1.0, t.EvidenceSeconds() / (std::max)(1e-9, s.renditionSeconds));
+			// Latch fixes (owner 2026-10-17): the shots OR the time, whichever is met first.
+			if (s.latchFixes)
+				return (std::min)(1.0, (std::max)(t.Shots() / static_cast<double>((std::max)(1, s.minimumShots)),
+					t.EvidenceSeconds() / (std::max)(1e-9, s.minimumSeconds)));
 			return (std::min)(1.0, t.Shots() / static_cast<double>((std::max)(1, s.minimumShots))) *
 				(std::min)(1.0, t.EvidenceSeconds() / (std::max)(1e-9, s.minimumSeconds));
 		};
@@ -647,7 +769,7 @@ if (tile < int(tiles) && g.y < 256) {
 				{
 					const int t = static_cast<int>((kernelFitCounter++) % static_cast<unsigned long long>(j.tiles));
 					if (!SourceResolution::Informative(spectra[static_cast<size_t>(t)], thresholds)) continue;
-					const KernelInverse::TileFit fit = KernelInverse::FitTile(codeTiles[static_cast<size_t>(t)].data(), kTile, kTile, j.codeMaximum);
+					const KernelInverse::TileFit fit = KernelInverse::FitTile(codeTiles[static_cast<size_t>(t)].data(), T, T, j.codeMaximum);
 					if (KernelInverse::Accept(fit, floorCodes))
 						kernelVotes.push_back({ j.seconds, fit.best, tracker.Cuts() });
 				}
@@ -674,6 +796,7 @@ if (tile < int(tiles) && g.y < 256) {
 		snapshot.nativeHeight = j.nativeHeight;
 		snapshot.frameRatio = frame.ratio;
 		snapshot.frameBlank = !frame.informative();
+		snapshot.frameBlack = frame.black;
 		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
 		snapshot.declaredRatio = tracker.Ratio();
 		snapshot.confidence = tracker.Ratio() < 1.0 ? evidence * clarity : 0.0;
@@ -704,6 +827,7 @@ if (tile < int(tiles) && g.y < 256) {
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();
+		snapshot.cutSpan = tracker.LastCutSpan();
 		snapshot.discontinuities = tracker.Discontinuities();
 		++snapshot.frames;
 		snapshot.analyseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -739,10 +863,19 @@ if (tile < int(tiles) && g.y < 256) {
 			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		const Snapshot s = Read();
 		const double before = autoApplied;
+		const bool fixes = LatchFixes();
+		// The source frame interval, measured (the pan speed's time base).
+		if (renderSequence > clockSequence && clockSequence != 0)
+		{
+			const double per = (now - clockSeconds) / static_cast<double>(renderSequence - clockSequence);
+			if (per > 0.0 && per < 1.0) secondsPerFrame = secondsPerFrame > 0.0 ? secondsPerFrame + 0.1 * (per - secondsPerFrame) : per;
+		}
+		if (renderSequence > clockSequence) { clockSequence = renderSequence; clockSeconds = now; }
 		if (autoReset.exchange(false, std::memory_order_acq_rel))
 		{
 			autoApplied = autoPending = 1.0;
 			disengagePending = false;
+			nextFadeSeconds = 0.0;   // a discontinuity: the old picture is not faded from
 			if (before < 1.0) why = "native at once (" + (s.lastDiscontinuity.empty() ? std::string("discontinuity") : s.lastDiscontinuity) + ")";
 		}
 		double wanted = s.reading && s.declaredRatio < 1.0 && s.confidence >= minimumConfidence ? s.declaredRatio : 1.0;
@@ -763,6 +896,7 @@ if (tile < int(tiles) && g.y < 256) {
 			{
 				autoApplied = autoPending = wanted;
 				disengagePending = false;
+				nextFadeSeconds = fixes ? ReleaseFade() : 0.0;
 				if (why.empty()) why = wanted >= 1.0 ? "native at once (detail above the re-based height)" : "raised at once (detail above the re-based height)";
 			}
 			else if (!disengagePending)
@@ -780,6 +914,7 @@ if (tile < int(tiles) && g.y < 256) {
 					"native after 5 s without a cut (confidence fell)";
 				autoApplied = autoPending = wanted;
 				disengagePending = false;
+				nextFadeSeconds = fixes ? ReleaseFade() : 0.0;
 			}
 		}
 		else
@@ -800,7 +935,9 @@ if (tile < int(tiles) && g.y < 256) {
 				autoPending = wanted;
 				autoPendingCuts = s.cuts;
 				autoPendingFrames = s.frames;
-				why = "waiting for the next cut or black";
+				autoPendingSince = now;
+				why = fixes ? "confirmed: waiting for a cut, a black, a fast pan or a low-detail moment (else a crossfade)" :
+					"waiting for the next cut or black";
 			}
 			else if (aheadDue)
 			{
@@ -810,6 +947,7 @@ if (tile < int(tiles) && g.y < 256) {
 				if (agrees)
 				{
 					autoApplied = wanted;
+					nextFadeSeconds = 0.0;
 					++ahead.verified;
 					why = "engaged at the cut / black (look-ahead verified)";
 				}
@@ -822,6 +960,18 @@ if (tile < int(tiles) && g.y < 256) {
 				}
 				ahead.eventSequence = 0;
 				ahead.ready = false;
+			}
+			else if (fixes)
+			{
+				// Latch fixes (owner 2026-10-17): switch at the first cut, real black, fast pan or
+				// low-detail moment; after the longest wait, a crossfade.
+				const bool cutAllowed = !(s.cuts <= autoNotBeforeCuts && autoNotBeforeCuts != 0);
+				const int trigger = EngageTrigger(s, autoPendingCuts, autoPendingFrames, autoPendingSince, now, renderSequence, cutAllowed, why);
+				if (trigger != 0)
+				{
+					autoApplied = wanted;
+					nextFadeSeconds = trigger == 2 ? CrossfadeSeconds() : 0.0;
+				}
 			}
 			else if (s.cuts <= autoNotBeforeCuts && autoNotBeforeCuts != 0)
 			{
@@ -854,6 +1004,8 @@ if (tile < int(tiles) && g.y < 256) {
 		double& factorX, double& factorY, double seconds, uint64_t renderSequence)
 	{
 		const double uniform = AutoFactor(nativeHeight, minimumConfidence, why, seconds, renderSequence);
+		const double now = seconds >= 0.0 ? seconds :
+			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		const Snapshot s = Read();
 		// A discontinuity: the per-axis state back to native too.
 		if (s.discontinuities != axisDiscontinuities)
@@ -865,6 +1017,7 @@ if (tile < int(tiles) && g.y < 256) {
 		{
 			factorX = factorY = uniform;
 			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
+			Transit(factorX, factorY, now);
 			return;
 		}
 		// The wanted per-axis factors: even sizes from the frame's own (general).
@@ -894,6 +1047,7 @@ if (tile < int(tiles) && g.y < 256) {
 			axisPending[0] = axisApplied[0];
 			axisPending[1] = axisApplied[1];
 			axisWhy = "per axis: back towards native at once";
+			nextFadeSeconds = LatchFixes() ? ReleaseFade() : 0.0;
 		}
 		else if (wanted[0] < axisApplied[0] - tolerance || wanted[1] < axisApplied[1] - tolerance)
 		{
@@ -904,7 +1058,20 @@ if (tile < int(tiles) && g.y < 256) {
 				axisPending[1] = wanted[1];
 				axisPendingCuts = s.cuts;
 				axisPendingFrames = s.frames;
+				axisPendingSince = now;
 				axisWhy = "per axis: waiting for the next cut or black";
+			}
+			else if (LatchFixes())
+			{
+				std::string triggerWhy;
+				const int trigger = EngageTrigger(s, axisPendingCuts, axisPendingFrames, axisPendingSince, now, renderSequence, true, triggerWhy);
+				if (trigger != 0)
+				{
+					axisApplied[0] = wanted[0];
+					axisApplied[1] = wanted[1];
+					nextFadeSeconds = trigger == 2 ? CrossfadeSeconds() : 0.0;
+					axisWhy = "per axis: " + triggerWhy;
+				}
 			}
 			else if (s.cuts != axisPendingCuts || (s.frameBlank && s.frames != axisPendingFrames))
 			{
@@ -925,6 +1092,116 @@ if (tile < int(tiles) && g.y < 256) {
 		}
 		factorX = axisApplied[0];
 		factorY = axisApplied[1];
+		Transit(factorX, factorY, now);
+	}
+
+	int Monitor::EngageTrigger(const Snapshot& s, unsigned long long pendingCuts, unsigned long long pendingFrames, double pendingSince,
+		double now, uint64_t renderSequence, bool cutAllowed, std::string& why)
+	{
+		// The look-ahead, while it runs, finds the cut on the frame itself: the tracker's (a tile copy
+		// later) is not used then.
+		const bool aheadLive = renderSequence != 0 && aheadLastSequence > renderSequence;
+		const bool newFrame = s.frames != pendingFrames;
+		// A cut found across a lost tile copy happened somewhere in a longer span: switching on it could
+		// land mid-shot, so it waits for the next moment.
+		if (cutAllowed && !aheadLive && s.cuts != pendingCuts && s.cuts != cutsNotUsable)
+		{
+			if (s.cutSpan <= 1.5 * intervalSeconds + 1e-6) { why = "engaged at a cut"; return 1; }
+			cutsNotUsable = s.cuts;
+		}
+		if (s.frameBlack && newFrame) { why = "engaged during a real black"; return 1; }
+		// A fast pan: motion blur hides the change (MotionValidity's pair, at most two frames old).
+		if (panSequence != 0 && renderSequence != 0 && renderSequence - (std::min)(renderSequence, panSequence) <= 2 &&
+			secondsPerFrame > 0.0 && s.nativeHeight > 0)
+		{
+			const double heightsPerSecond = panPixelsPerFrame / secondsPerFrame / s.nativeHeight;
+			if (heightsPerSecond >= kPanHeightsPerSecond) { why = "engaged during a fast pan"; return 1; }
+		}
+		// A moment of very low detail: no tile above the floor (nothing the change could show on).
+		if (s.frameBlank && newFrame) { why = "engaged during a low-detail moment"; return 1; }
+		if (now - pendingSince >= EngageMaxWait()) { why = "engaged by a crossfade (no cut within the wait)"; return 2; }
+		return 0;
+	}
+
+	void Monitor::Transit(double factorX, double factorY, double now)
+	{
+		if (!LatchFixes())
+		{
+			fadeFromX = lastFactorX = factorX;
+			fadeFromY = lastFactorY = factorY;
+			fadeDuration = 0.0;
+			nextFadeSeconds = 0.0;
+			return;
+		}
+		if (std::fabs(factorX - lastFactorX) > 1e-9 || std::fabs(factorY - lastFactorY) > 1e-9)
+		{
+			// From what is on screen now (mid-fade: the path being left stays the 'from').
+			const double w = FadeWeight(now - fadeStart, fadeDuration);
+			if (w >= 1.0) { fadeFromX = lastFactorX; fadeFromY = lastFactorY; }
+			fadeStart = now;
+			// Back to what is being faded from (a reversal mid-fade): nothing left to fade.
+			const bool same = std::fabs(fadeFromX - factorX) <= 1e-9 && std::fabs(fadeFromY - factorY) <= 1e-9;
+			fadeDuration = same ? 0.0 : nextFadeSeconds;
+			lastFactorX = factorX;
+			lastFactorY = factorY;
+		}
+		nextFadeSeconds = 0.0;
+	}
+
+	Monitor::Transition Monitor::AutoTransition(double seconds) const
+	{
+		const double now = seconds >= 0.0 ? seconds :
+			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		Transition t;
+		t.toX = lastFactorX;
+		t.toY = lastFactorY;
+		t.weight = FadeWeight(now - fadeStart, fadeDuration);
+		t.fromX = t.weight < 1.0 ? fadeFromX : lastFactorX;
+		t.fromY = t.weight < 1.0 ? fadeFromY : lastFactorY;
+		t.duration = fadeDuration;
+		return t;
+	}
+
+	double Monitor::FadeWeight(double elapsed, double duration)
+	{
+		if (!(duration > 0.0) || elapsed >= duration) return 1.0;
+		if (elapsed <= 0.0) return 0.0;
+		return elapsed / duration;
+	}
+
+	void Monitor::FadeMixTimestamps(double weight, float timestamps[2])
+	{
+		// libplacebo's frame mixer with the triangle filter (radius 1) samples each frame's weight
+		// at its timestamp: the old path at -w, the new at 1 - w give (1 - w, w); at w = 0 the new
+		// path is outside the radius and at w = 1 the old one is, so the endpoints are each path alone.
+		const double w = (std::min)(1.0, (std::max)(0.0, weight));
+		timestamps[0] = static_cast<float>(-w);
+		timestamps[1] = static_cast<float>(1.0 - w);
+	}
+
+	float Monitor::FadeMixValue(float oldValue, float newValue, double weight)
+	{
+		// libplacebo's pl_render_image_mix on two frames (renderer.c): weights from the triangle
+		// filter, frames outside its radius skipped, contributions at or below 1e-3 culled (never
+		// the frame nearest to 0), normalised by their sum, accumulated in float.
+		float ts[2];
+		FadeMixTimestamps(weight, ts);
+		const int nearest = std::fabs(ts[0]) <= std::fabs(ts[1]) ? 0 : 1;
+		float weights[2] = { 0.0f, 0.0f };
+		float sum = 0.0f;
+		for (int i = 0; i < 2; ++i)
+		{
+			if (std::fabs(ts[i]) >= 1.0f) continue;
+			const float wi = 1.0f - std::fabs(ts[i]);
+			if (std::fabs(wi) <= 1e-3f && i != nearest) continue;
+			weights[i] = wi;
+			sum += wi;
+		}
+		if (sum <= 0.0f) return nearest == 0 ? oldValue : newValue;
+		float out = 0.0f;
+		out += (weights[0] / sum) * oldValue;
+		out += (weights[1] / sum) * newValue;
+		return out;
 	}
 
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)

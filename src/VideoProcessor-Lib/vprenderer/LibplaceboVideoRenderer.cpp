@@ -1147,6 +1147,14 @@ namespace
 		// Audit 2026-10-16: a mixed screen (a native UI with a lower-resolution video in it, a 4K
 		// overlay, picture-in-picture) is read as native - no whole-frame re-base.
 		bool sourceResolutionMixedGuard = true;
+		// Latch review 2026-10-17 (owner): source_resolution auto's latch fixes - re-engage on the
+		// standard after native evidence, level-aware native readings, per-tile floor test, shape
+		// cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a
+		// short release fade; off = the behaviour before (and no fades).
+		bool sourceResolutionLatchFixes = true;
+		double sourceResolutionEngageMaxWait = 20.0;   // s: the longest wait for a switching moment
+		double sourceResolutionCrossfade = 1.5;        // s: the crossfade after that wait
+		double sourceResolutionReleaseFade = 0.25;     // s: the fade back to native (at most 0.25)
 		// Audit 2026-10-16 (pulldown review D1/D3/D4): keep the lock across counted misses, re-phase
 		// in place, a cadence-aware film clock; off = the 2026-10-14 behaviour.
 		bool pulldownFixes = true;
@@ -1350,7 +1358,7 @@ namespace
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2243,6 +2251,19 @@ namespace
 					DebugLog::Log("display rule '%s': invalid source_resolution_auto_min_confidence '%s'; retaining base setting",
 						rule.name.c_str(), value.c_str());
 			}
+			// Latch review 2026-10-17: the switch timing (seconds).
+			auto readSeconds = [&](const char* key, double lo, double hi, double& out) {
+				if (!config.TryGetString(rule.section, key, value)) return;
+				char* end = nullptr;
+				const double v = std::strtod(value.c_str(), &end);
+				if (end != value.c_str() && *end == '\0' && v >= lo && v <= hi)
+					out = v;
+				else
+					DebugLog::Log("display rule '%s': invalid %s '%s'; retaining base setting", rule.name.c_str(), key, value.c_str());
+			};
+			readSeconds("source_resolution_engage_max_wait_s", 0.0, 600.0, settings.sourceResolutionEngageMaxWait);
+			readSeconds("source_resolution_crossfade_s", 0.0, 10.0, settings.sourceResolutionCrossfade);
+			readSeconds("source_resolution_release_fade_s", 0.0, 0.25, settings.sourceResolutionReleaseFade);
 			if (config.TryGetString(rule.section, "source_resolution_evidence_shots", value))
 			{
 				char* end = nullptr;
@@ -2533,6 +2554,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid source_resolution_mixed_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionMixedGuard ? "on" : "off");
+		}
+		if (tryChoice("source_resolution_latch_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceResolutionLatchFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_resolution_latch_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceResolutionLatchFixes ? "on" : "off");
 		}
 		if (tryChoice("timing_continuity_fixes", raw))
 		{
@@ -4877,6 +4906,11 @@ struct LibplaceboVideoRenderer::Impl
 	SourceRebase::Module sourceRebase;
 	pl_dispatch rebaseDispatch = nullptr;
 	double rebaseFactor = 1.0;          // this frame's (1 = native); the height's when per axis
+	// Latch review 2026-10-17: the crossfade (weight of the current factors; 1 = none) and the
+	// factors faded from.
+	double rebaseFade = 1.0, rebaseFromFactor = 1.0, rebaseFromFactorX = 1.0;
+	uint64_t rebaseFadeRender = 0;   // a per-draw counter for the mix signatures
+	bool rebaseFadeFailedLogged = false;
 	unsigned long long rebaseFailuresSeen = 0;
 	SteadyClock::time_point rebasePausedUntil{};
 	int rebasePauseSeconds = 5;
@@ -9785,6 +9819,10 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
+		changed(current.sourceResolutionLatchFixes != next.sourceResolutionLatchFixes, "source_resolution_latch_fixes");
+		changed(current.sourceResolutionEngageMaxWait != next.sourceResolutionEngageMaxWait ||
+			current.sourceResolutionCrossfade != next.sourceResolutionCrossfade ||
+			current.sourceResolutionReleaseFade != next.sourceResolutionReleaseFade, "source_resolution_crossfade_s");
 		changed(current.pulldownFixes != next.pulldownFixes, "pulldown_fixes");
 		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
 		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
@@ -13641,6 +13679,10 @@ struct LibplaceboVideoRenderer::Impl
 			MotionAhead::FlowPtr flow = motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(),
 				motionValidity.Epoch()) ? motionProducer->Take(aSequence, bSequence) : nullptr;
 			if (flow) ++motionAheadHits; else ++motionAheadMisses;
+			// Latch review 2026-10-17: the engine's whole-frame motion (1/8-size texels = 8 source px;
+			// z < 0.9 usable) for source_resolution auto's fast-pan switch.
+			if (flow && flow->global[0][2] < 0.9f)
+				sourceMonitor.SetMotion(8.0 * std::hypot(static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1])), bSequence);
 			dejudder->SetExternalFlow(std::move(flow));
 			motionProducer->Prune(aSequence);
 		}
@@ -19189,6 +19231,9 @@ struct LibplaceboVideoRenderer::Impl
 			sourceMonitor.SetSelection(activeSettings.sourceResolution);
 			sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
 			sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
+			sourceMonitor.SetLatchFixes(activeSettings.sourceResolutionLatchFixes);
+			sourceMonitor.SetEngageTiming(activeSettings.sourceResolutionEngageMaxWait, activeSettings.sourceResolutionCrossfade,
+				activeSettings.sourceResolutionReleaseFade);
 			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
 			sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 			if (activeSettings.sourceResolution == "auto")
@@ -19237,6 +19282,19 @@ struct LibplaceboVideoRenderer::Impl
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
+			// Latch review 2026-10-17: a crossfade between the path being left and this one (auto
+			// only; never while smooth motion / deinterlacing runs or the re-base is paused).
+			rebaseFade = 1.0;
+			if (activeSettings.sourceResolution == "auto" && activeSettings.sourceResolutionLatchFixes && !temporal && !rebasePaused)
+			{
+				const SourceResolutionMonitor::Monitor::Transition tr = sourceMonitor.AutoTransition();
+				if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
+				{
+					rebaseFade = tr.weight;
+					rebaseFromFactor = tr.fromY;
+					rebaseFromFactorX = tr.fromX;
+				}
+			}
 			// MotionValidity step 1 (RebaseChange): the motion field belongs to the native
 			// frame and survives a factor change, but VP deband's hold weights are
 			// plane-sized: they start over (no motion invalidation, so this frame's
@@ -20588,6 +20646,9 @@ struct LibplaceboVideoRenderer::Impl
                     frame.planes[0].texture = vpPhasePlanes.luma;
                     frame.planes[1].texture = vpPhasePlanes.chroma;
                 }
+                // Latch review 2026-10-17: during a crossfade the path being left, drawn with the
+                // other's weight (below); the frame before the re-base is kept for it.
+                const pl_frame unrebased = frame;
                 if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
@@ -20627,6 +20688,49 @@ struct LibplaceboVideoRenderer::Impl
                         frame = debanded;
                     else if (debander.Failures() == 1)
                         DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
+                }
+                if (rebaseFade < 1.0 && !temporalRenderer.Active())
+                {
+                    // The crossfade (owner 2026-10-17): both paths of this one frame, rendered by
+                    // libplacebo's frame mixer into float intermediates and mixed linearly before
+                    // the output stage (dither, encoding) - exact at both ends (FadeMixTimestamps).
+                    // VP deband (when on) stays on the path being shown fully; the path left is drawn
+                    // without it for the fade's duration.
+                    pl_frame from = unrebased;
+                    bool fromReady = true;
+                    if (rebaseFromFactor < 1.0 || rebaseFromFactorX < 1.0)
+                    {
+                        pl_frame rebasedFrom{};
+                        fromReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, unrebased, rebaseFromFactorX, rebaseFromFactor, rebasedFrom, 1);
+                        if (fromReady) from = rebasedFrom;
+                    }
+                    if (fromReady)
+                    {
+                        float timestamps[2];
+                        SourceResolutionMonitor::Monitor::FadeMixTimestamps(rebaseFade, timestamps);
+                        const pl_frame* frames[2] = { &from, &frame };
+                        ++rebaseFadeRender;
+                        const uint64_t signatures[2] = { (rebaseFadeRender << 1) | 0u, (rebaseFadeRender << 1) | 1u };
+                        pl_frame_mix mix{};
+                        mix.num_frames = 2;
+                        mix.frames = frames;
+                        mix.signatures = signatures;
+                        // float in libplacebo 7.360, double in the beta build.
+                        using MixTimestamp = std::remove_const_t<std::remove_pointer_t<decltype(pl_frame_mix{}.timestamps)>>;
+                        const MixTimestamp mixTimestamps[2] = { static_cast<MixTimestamp>(timestamps[0]), static_cast<MixTimestamp>(timestamps[1]) };
+                        mix.timestamps = mixTimestamps;
+                        mix.vsync_duration = 1e-3f;   // far below the 1.0 between the two: no mixer blur
+                        pl_render_params fade = parameters;
+                        fade.frame_mixer = &pl_filter_triangle;
+                        fade.preserve_mixing_cache = false;
+                        if (pl_render_image_mix(renderer, &mix, &destination, &fade))
+                            return true;
+                        if (!rebaseFadeFailedLogged)
+                        {
+                            DebugLog::Log("Source resolution: the crossfade could not be rendered; the change is shown at once");
+                            rebaseFadeFailedLogged = true;
+                        }
+                    }
                 }
                 return temporalRenderer.Render(renderer,frame,destination,parameters);
             });
@@ -26876,6 +26980,10 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
+		<< "source_resolution_latch_fixes=" << (s.sourceResolutionLatchFixes ? "on" : "off") << "\n"
+		<< "source_resolution_engage_max_wait_s=" << s.sourceResolutionEngageMaxWait << "\n"
+		<< "source_resolution_crossfade_s=" << s.sourceResolutionCrossfade << "\n"
+		<< "source_resolution_release_fade_s=" << s.sourceResolutionReleaseFade << "\n"
 		<< "pulldown_fixes=" << (s.pulldownFixes ? "on" : "off") << "\n"
 		<< "timing_continuity_fixes=" << (s.timingContinuityFixes ? "on" : "off") << "\n"
 		<< "dejudder_strength=" << s.dejudderStrength << "\n"
