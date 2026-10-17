@@ -169,6 +169,11 @@ private:
 			size_t rawRowBytes = 0;
 			size_t rawBytes = 0;
 			VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
+			// The capture encoding of the frame (state->videoFrameEncoding), set on
+			// every payload by ConversionLoop: raw, CPU-formatted and SDR fallback
+			// alike (post-merge audit 2026-10-17: the DV pair rule needs r210 for
+			// non-raw SDR fallback payloads).
+			VideoFrameEncoding captureEncoding = VideoFrameEncoding::UNKNOWN;
 			// capture_upload: early - the raw frame already uploaded on the
 			// conversion thread (an EarlyUpload::Slot; null: the render uploads).
 			std::shared_ptr<void> early;

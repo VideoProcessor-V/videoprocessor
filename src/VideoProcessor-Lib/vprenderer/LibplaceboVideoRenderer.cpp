@@ -13269,13 +13269,8 @@ struct LibplaceboVideoRenderer::Impl
 			next->contract.bitShift == contract.bitShift &&
 			// Bug hunt 2026-10-17: on the DV tunnel never pair an untrusted B
 			// (black frame) or a DV picture with an SDR fallback.
-			DejudderPolicy::DolbyVisionPairTrusted(dejudderDolbyVisionTunnel,
-				DejudderPolicy::ClassifyDolbyVisionFrame(current->dolby.valid, current->dolby.requiresBlackFrame,
-					current->dolby.allowSdrFallback, current->dolby.rgbBitAlignment == 1 || current->dolby.rgbBitAlignment == 2,
-					current->rawEncoding == VideoFrameEncoding::R210),
-				DejudderPolicy::ClassifyDolbyVisionFrame(next->dolby.valid, next->dolby.requiresBlackFrame,
-					next->dolby.allowSdrFallback, next->dolby.rgbBitAlignment == 1 || next->dolby.rgbBitAlignment == 2,
-					next->rawEncoding == VideoFrameEncoding::R210));
+			// By the capture encoding (every payload), not rawEncoding (raw only).
+			DejudderPolicy::DolbyVisionNextPairs(dejudderDolbyVisionTunnel, *current, *next);
 		const auto usable = [](pl_tex tex)
 		{
 			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
@@ -25219,6 +25214,8 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				converted->dolby = m_impl->formatter->GetDolbyVisionTunnelMetadata();
 			}
 			}
+			// Every payload (pooled ones too) carries its capture encoding.
+			converted->captureEncoding = state->videoFrameEncoding;
 			converted->conversionCpuMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - started).count();
 			converted->completedQpc = PerformanceCounterNow();
@@ -25570,7 +25567,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionFrame(ahead.converted->dolby.valid,
 							ahead.converted->dolby.requiresBlackFrame, ahead.converted->dolby.allowSdrFallback,
 							ahead.converted->dolby.rgbBitAlignment == 1 || ahead.converted->dolby.rgbBitAlignment == 2,
-							ahead.converted->rawEncoding == VideoFrameEncoding::R210);
+							aheadState.videoFrameEncoding == VideoFrameEncoding::R210);
 					const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
 						m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
 						aheadState.displayMode->RefreshRateHz();

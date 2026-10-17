@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "CaptureTimestampGap.h"
+#include <VideoFrameEncoding.h>
 
 // Stage 6b: when the de-judder may run for a source frame, and (6b-2) whether
 // one more extra present may fill the next refresh. Pure logic, so the
@@ -223,6 +224,24 @@ namespace DejudderPolicy
 	{
 		if (!tunnel) return true;
 		return a == b && b != DolbyVisionFrameKind::Untrusted;
+	}
+	// Post-merge audit 2026-10-17: a queued payload's kind by its capture encoding
+	// (captureEncoding, set on every payload), not rawEncoding - that is set only on
+	// raw GPU-unpack payloads, and an SDR fallback is never raw, so it never counted
+	// as r210 and r210 SDR fallback pairs were refused. Payload: a converted payload
+	// (dolby, captureEncoding).
+	template <typename Payload>
+	inline DolbyVisionFrameKind ClassifyDolbyVisionPayload(const Payload& p)
+	{
+		return ClassifyDolbyVisionFrame(p.dolby.valid, p.dolby.requiresBlackFrame, p.dolby.allowSdrFallback,
+			p.dolby.rgbBitAlignment == 1 || p.dolby.rgbBitAlignment == 2,
+			p.captureEncoding == VideoFrameEncoding::R210);
+	}
+	// The dequeue's DV rule for the next frame B after A (nextMatches).
+	template <typename Payload>
+	inline bool DolbyVisionNextPairs(bool tunnel, const Payload& a, const Payload& b)
+	{
+		return DolbyVisionPairTrusted(tunnel, ClassifyDolbyVisionPayload(a), ClassifyDolbyVisionPayload(b));
 	}
 
 	// Integration 2026-10-17: the optical-flow producer's break before a frame (no pair
