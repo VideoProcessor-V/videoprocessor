@@ -1005,7 +1005,11 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TrackerKeepsNativeThroughSoftShotsOfARealFilm)
 		{
-			SourceResolution::Tracker tracker;
+			// source_resolution_latch_fixes off: the behaviour before - any sharp shot within the 120 s
+			// window keeps native.
+			SourceResolution::Tracker::Settings old;
+			old.latchFixes = false;
+			SourceResolution::Tracker tracker(old);
 			double t = 0.0;
 			// Long soft stretches (reading 0.5) with a sharp shot every 90 s.
 			for (int minute = 0; minute < 10; ++minute)
@@ -1014,6 +1018,21 @@ namespace VideoProcessorTest
 					const bool sharp = (i % 360) < 8;
 					tracker.Update(Frame(sharp ? 1.0 : 0.5, 0.2 + 0.1 * ((i / 40) % 2) + 0.0001 * i), t);
 					Assert::AreEqual(1.0, tracker.Ratio(), L"a sharp shot within the window keeps native");
+				}
+			// Latch fixes (owner 2026-10-17): after the native evidence ends, the standard again (10 s or
+			// 3 shots of consistent lower readings, no native reading since); native at once on the next
+			// sharp frame. (A real 4K film's soft stretch reads native or no evidence, not 0.5: the
+			// readings here are an upscale's.)
+			SourceResolution::Tracker fixed;
+			t = 0.0;
+			double sharpEnded = -1.0;
+			for (int minute = 0; minute < 10; ++minute)
+				for (int i = 0; i < 360; ++i, t += 0.25)
+				{
+					const bool sharp = (i % 360) < 8;
+					fixed.Update(Frame(sharp ? 1.0 : 0.5, 0.2 + 0.1 * ((i / 40) % 2) + 0.0001 * i), t);
+					if (sharp) { Assert::AreEqual(1.0, fixed.Ratio(), L"native at once on a sharp frame"); sharpEnded = t; }
+					else if (t - sharpEnded > 10.6) Assert::AreEqual(0.5, fixed.Ratio(), 1e-9, L"declared again within 10 s of the sharp shot");
 				}
 		}
 
@@ -1223,8 +1242,11 @@ namespace VideoProcessorTest
 				}
 				return ReadTiles(tiles);
 			};
-			const SourceResolution::Tracker::Settings settings;
-			SourceResolution::Tracker tracker;
+			for (const bool fixes : { false, true })
+			{
+			SourceResolution::Tracker::Settings settings;
+			settings.latchFixes = fixes;
+			SourceResolution::Tracker tracker(settings);
 			double t = 0.0;
 			// 33 s of the 4K rendition (shots every 6 s); the switch lands mid-shot, as a real one does.
 			for (int i = 0; i < 66; ++i, t += 0.5) tracker.Update(frame(1.0, i / 12, i), t);
@@ -1238,17 +1260,20 @@ namespace VideoProcessorTest
 				if (declaredAt < 0 && tracker.Ratio() < 1.0) declaredAt = t;
 			}
 			char line[160];
-			snprintf(line, sizeof(line), "down-switch declared %.1f s after the switch (window %.0f s)\n", declaredAt - switchedAt, settings.windowSeconds);
+			snprintf(line, sizeof(line), "down-switch declared %.1f s after the switch (window %.0f s, latch fixes %s, rendition changes %llu)\n",
+				declaredAt - switchedAt, settings.windowSeconds, fixes ? "on" : "off", tracker.RenditionChanges());
 			Logger::WriteMessage(line);
 			Assert::AreEqual(0.5, tracker.Ratio(), 0.01, L"the 1080 rendition is declared");
 			// Planner F12: the rendition change is recognised (the same shot's detail above the
-			// lower rate fell), so the lower reading needs only 10 s of evidence.
-			Assert::IsTrue(tracker.RenditionChanges() >= 1, L"a rendition change was recognised");
+			// lower rate fell), so the lower reading needs only 10 s of evidence. With the latch fixes the
+			// standard itself restarts after the native readings, so it may declare first.
+			if (!fixes) Assert::IsTrue(tracker.RenditionChanges() >= 1, L"a rendition change was recognised");
 			Assert::IsTrue(declaredAt - switchedAt <= 15.0, L"declared within about 15 s of the switch");
 			// Back to 4K: native on its first frame.
 			const int shotNow = static_cast<int>((t / 0.5)) / 12;
 			tracker.Update(frame(1.0, shotNow, 3), t += 0.5);
 			Assert::AreEqual(1.0, tracker.Ratio(), L"the 4K rendition returns native at once");
+			}
 		}
 
 		// Planner G1 (2026-10-16): periodic and symmetric content at native 4K - its

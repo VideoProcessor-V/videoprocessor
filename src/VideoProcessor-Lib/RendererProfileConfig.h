@@ -731,6 +731,11 @@ namespace RendererProfileConfig
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_coding_fixes") return IsChoice(value, { "on", "off" });   // hunt 2 M2/M3
+			// Latch review 2026-10-17: the latch fixes and the switch timing (seconds).
+			if (key == "source_resolution_latch_fixes") return IsChoice(value, { "on", "off" });
+			if (key == "source_resolution_engage_max_wait_s") return IsNumberInRange(value, 0.0, 600.0);
+			if (key == "source_resolution_crossfade_s") return IsNumberInRange(value, 0.0, 10.0);
+			if (key == "source_resolution_release_fade_s") return IsNumberInRange(value, 0.0, 0.25);
 			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
 			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the

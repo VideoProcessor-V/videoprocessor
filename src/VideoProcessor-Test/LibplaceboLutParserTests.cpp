@@ -9073,6 +9073,9 @@ namespace VideoProcessorTest
 			const KernelInverse::Candidate& c = KernelInverse::Candidates()[static_cast<size_t>(k)];
 			auto run = [&](const KernelInverse::Candidate* kernel) {
 				SourceResolutionMonitor::Monitor m;
+				// The behaviour before the latch fixes (its synthetic noise frames have no shape, so the
+				// shape-aware cut test sees one long shot; SourceResolutionLatchTests cover the fixes).
+				m.SetLatchFixes(false);
 				double t = 0.0;
 				for (int shot = 0; shot < 14; ++shot)
 					for (int f = 0; f < 6; ++f, t += 0.5)
@@ -9163,6 +9166,7 @@ namespace VideoProcessorTest
 			// 1. The next shot agrees: engaged exactly on the cut frame.
 			{
 				SourceResolutionMonitor::Monitor m;
+				m.SetLatchFixes(false);   // the behaviour before the latch fixes (256-px ahead tiles, mean-jump cuts)
 				uint64_t seq = 0;
 				const double t = untilWaiting(m, seq);
 				Assert::IsTrue(t > 0.0, L"auto reached waiting");
@@ -9185,6 +9189,7 @@ namespace VideoProcessorTest
 			// 2. The next shot is native: the switch is cancelled, and the cut itself is not used.
 			{
 				SourceResolutionMonitor::Monitor m;
+				m.SetLatchFixes(false);   // the behaviour before the latch fixes (256-px ahead tiles, mean-jump cuts)
 				uint64_t seq = 0;
 				double t = untilWaiting(m, seq);
 				Assert::IsTrue(t > 0.0);
@@ -9206,6 +9211,7 @@ namespace VideoProcessorTest
 			// 3. A black frame ahead, then an agreeing shot: engaged on the black frame.
 			{
 				SourceResolutionMonitor::Monitor m;
+				m.SetLatchFixes(false);   // the behaviour before the latch fixes (256-px ahead tiles, mean-jump cuts)
 				uint64_t seq = 0;
 				const double t = untilWaiting(m, seq);
 				Assert::IsTrue(t > 0.0);

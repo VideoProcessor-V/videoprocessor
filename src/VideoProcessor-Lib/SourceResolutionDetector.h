@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <deque>
 #include <string>
 #include <vector>
@@ -67,6 +69,15 @@ namespace SourceResolution
 		// (the window's own removed) at a lag of 3 .. n / 4 that stands after a dip: near
 		// 1 for exactly periodic content (fences, grilles, test patterns), 0 when none.
 		double periodicPeak = 0.0;
+		// Latch review 2026-10-17 (source_resolution_latch_fixes): the tile's pixel spread (standard
+		// deviation, 0..1) and the means of its four quadrants (row-major) - the shape the cut test
+		// compares, and the flat-bar test.
+		double spread = 0.0;
+		double quadrants[4] = {};
+		// Player-added bars: the full columns (from the left / right edge) and rows (top / bottom)
+		// that are constant (within two codes) and dark (at most a tenth of the range) - a bar beside
+		// or above the picture.
+		int barLeft = 0, barRight = 0, barTop = 0, barBottom = 0;
 	};
 
 	// `n` must be a power of two (64..1024); `luma` is row-major, `stride` in
@@ -175,6 +186,25 @@ namespace SourceResolution
 		// bandEdgesRobust); false: the earlier fixed 8/16-px grid, exact two-level bands and
 		// one-pixel code occupancy, exactly as before.
 		bool codingFixes = true;
+		// Latch review 2026-10-17: [vprenderer] source_resolution_latch_fixes (default on; false =
+		// the readings exactly as before):
+		//   - a bar tile - in the outer columns (rows), holding a constant dark strip of at least
+		//     barMinimumShare of the tile along its edge facing the picture's edge (a player-added
+		//     pillar- or letterbox bar) - is left out of the averaged curves and of the mixed-screen
+		//     guard (its sharp bar edge lifted the curve floor and read as native UI, so a 4:3 picture
+		//     with player bars never engaged);
+		//   - flat bar tiles (near-constant, at or near black) are left out of the frame mean, the
+		//     signature and the cut pattern;
+		//   - FrameReading::pattern / black / quantisationFloor are filled (the tracker's shape-aware
+		//     cut test, the real-black engage, the level-aware native test).
+		bool latchFixes = true;
+		// The signal's black (normalised): limited range 16 << (bits - 8), full range 0.
+		double blackLevel = 64.0 / 1023.0;
+		// Flat: the tile's spread at most this many codes (the rounding / dither floor) ...
+		double flatSpreadCodes = 2.0;
+		// ... and its mean within this share of the range above black (a bar, a black frame).
+		double nearBlackShare = 0.05;
+		double barMinimumShare = 1.0 / 32.0;   // of the tile (8 px of a 256 px tile)
 	};
 
 	// The monitor's tile placement (owner 2026-10-15; dense grid 2026-10-16): tiles of `tile` px
@@ -251,6 +281,22 @@ namespace SourceResolution
 		int mixedSharpTiles = 0;      // informative, not text-like tiles of one-pixel steps (mixedSharpSteps)
 		int mixedUiTiles = 0;         // overlay tiles that are not text-like (mixedRowGuard)
 		int mixedRowMost = 0;         // the most overlay tiles in one grid row (mixedRowTiles)
+		// Latch review 2026-10-17 (Thresholds::latchFixes):
+		int barTiles = 0;             // tiles left out as holding a player-added bar
+		// The signature tiles' quadrant means (4 per tile, tile order) and which belong to flat bar
+		// tiles (not compared): the shape the cut test correlates.
+		std::vector<double> pattern;
+		std::vector<char> patternFlat;
+		double blackLevel = 64.0 / 1023.0;
+		double noiseLevel = 2.0 / 1023.0;   // the rounding floor of a level (flatSpreadCodes)
+		// A real black: every tile flat at or near black (not only uninformative - a dark scene is).
+		bool black = false;
+		// log10 of the rounding noise's power per bin (step^2 / 12) at the picture's effective bit
+		// depth (the signal's when unknown): the floor a native reading's detail must stand above.
+		double quantisationFloor = -7.1;
+		// The informative tiles' mean pixel spread relative to the range above black (0 = unknown):
+		// the level-aware native test applies to dark / low-contrast frames only.
+		double contrast = 0.0;
 		bool informative() const { return informativeTiles > 0; }
 	};
 
@@ -287,6 +333,10 @@ namespace SourceResolution
 	// frames of the same stream that read r, not with a fixed level. Unknown
 	// (no spectra, or r too close to 1 to measure above it) returns +infinity.
 	double DetailAbove(const FrameReading& frame, double ratio);
+	// ... and the above band's mean log10 power on the axis that gave the result (`level`).
+	double DetailAbove(const FrameReading& frame, double ratio, double* level);
+	// The frame's averaged mirror coherence at `ratio`, the weaker axis (0 when unknown).
+	double CoherenceAtRate(const FrameReading& frame, double ratio);
 	// The same measure on one tile's spectra (the mixed-screen guard). `axes`: 1 vertical,
 	// 2 horizontal, 3 both (the larger). `level` (optional) receives the mean log10 power of the
 	// band above r's Nyquist on the axis that gave the result.
@@ -295,6 +345,23 @@ namespace SourceResolution
 	// One axis's reading as a frame of its own (the per-axis trackers): the ratio is
 	// that axis's, and the detail-above test reads that axis's spectrum only.
 	FrameReading AxisFrame(const FrameReading& frame, bool vertical);
+
+	// Latch review 2026-10-17: the shape-aware cut test. The new pattern y against the old x (the
+	// quadrant means; positions flat in either are skipped) is fitted as y = a + b x - a uniform
+	// brightness change (a fade, a flash, an exposure change) fits exactly. Returns the residual
+	// (RMS) relative to the new pattern's spread (sqrt(1 - correlation^2)) in `decorrelation` and to
+	// the signal's level above black in `share`; false when the shape cannot be judged (fewer than 8
+	// positions, or either pattern's spread within `noise`: black, a flat frame).
+	bool PatternChange(const std::vector<double>& x, const std::vector<char>& flatX, const std::vector<double>& y,
+		const std::vector<char>& flatY, double blackLevel, double noise, double& decorrelation, double& share, double* jump = nullptr);
+	// `jump` (optional): the change of the mean level relative to the level above black.
+
+	// The analysis tile for a picture `height` px high (latch review 2026-10-17: a fraction of the
+	// height, 256 px at 2160, so the share of the picture covered does not shrink with the
+	// resolution). A power of two (the FFT), at least 128 (the coherence statistics need the
+	// lines x bins) and at most `maximum` (the analysis cost grows as n^3 per tile: above 256 it
+	// would no longer fit the 0.5 s tile interval on the CPU worker).
+	int TileSize(double height, int maximum = 256);
 
 	// The declared reading over time.
 	class Tracker
@@ -329,6 +396,62 @@ namespace SourceResolution
 			int renditionFrames = 6;
 			double renditionDetailDrop = 0.3;
 			double renditionSeconds = 10.0;
+			// Latch review 2026-10-17: [vprenderer] source_resolution_latch_fixes (default on; false =
+			// the behaviour before):
+			//   - after native evidence the lower reading needs the standard again (minimumShots,
+			//     minimumSeconds) from the readings since, not the whole window: a native reading
+			//     (a mixed screen included) clears the window instead of holding it for windowSeconds;
+			//   - a native reading whose detail above the rate in question sits within
+			//     nativeFloorDecades of the rounding floor (FrameReading::quantisationFloor) is no
+			//     evidence (a dark or low-contrast frame of an upscale);
+			//   - cuts are a change of the picture's shape (PatternChange), not a fixed mean jump: the
+			//     tile pattern decorrelated by at least cutDecorrelation together with a level jump of at
+			//     least cutJump of the level above black, or decorrelated by cutDecorrelationAlone at any
+			//     level - a fade or flash (a uniform change, decorrelation <= 0.21 measured) is never a
+			//     cut, motion within a shot (level jump <= 0.11 at the 0.5 s spacing, decorrelation up to
+			//     0.78 in a fast pan) is not, real cuts measured 0.39 - 0.90 jump / 0.55 - 0.99;
+			//   - the rendition streak is time (renditionStreakSeconds), not a frame count;
+			//   - a lower reading is declared on minimumShots OR minimumSeconds, whichever comes
+			//     first (owner 2026-10-17; off: both).
+			bool latchFixes = true;
+			double nativeFloorDecades = 0.5;
+			// ... and only on a dark / low-contrast frame (FrameReading::contrast below this share of
+			// the range above black; unknown: always): a defocused native shot at a normal level stays
+			// native evidence (owner: never re-base real 4K).
+			double nativeFloorContrast = 0.04;
+			double cutDecorrelation = 0.4;
+			double cutJump = 0.2;
+			double cutDecorrelationAlone = 0.9;
+			// ... and the decorrelation must stand cutMotionMargin above the shot's own motion level
+			// (the frames' decorrelation without a cut, averaged over cutMotionSeconds): a fast pan
+			// decorrelates by itself (up to 0.78 at the 0.5 s spacing), and with a fade over it the
+			// level jumps too.
+			double cutMotionMargin = 0.3;
+			double cutMotionSeconds = 1.5;
+			// After a cut the new shot's motion is not known yet: it is taken as at least this (a fast
+			// shot) until its own frames bring the level down (cutMotionSeconds).
+			double cutMotionAfterCut = 0.5;
+			double renditionStreakSeconds = 2.5;   // 6 analysed frames at the 0.5 s interval
+		};
+
+		// The shape-aware cut decision with the motion level it keeps (Tracker, look-ahead).
+		struct CutJudge
+		{
+			double motion = 0.0;
+			bool Judge(double decorrelation, double jump, double seconds, const Settings& s)
+			{
+				const double needed = motion + s.cutMotionMargin;
+				const bool cut = (decorrelation >= (std::max)(s.cutDecorrelation, needed) && jump >= s.cutJump) ||
+					decorrelation >= (std::max)(s.cutDecorrelationAlone, needed);
+				if (cut)
+					motion = (std::max)(motion, s.cutMotionAfterCut);
+				else
+				{
+					const double a = s.cutMotionSeconds > 0.0 ? 1.0 - std::exp(-(std::max)(0.0, seconds) / s.cutMotionSeconds) : 1.0;
+					motion += a * (decorrelation - motion);
+				}
+				return cut;
+			}
 		};
 
 		Tracker() = default;
@@ -349,13 +472,23 @@ namespace SourceResolution
 		const Settings& GetSettings() const { return settings; }
 		// The Picture slider's evidence (takes effect at the next frame).
 		void SetEvidence(int shots, double seconds) { settings.minimumShots = shots; settings.minimumSeconds = seconds; }
+		void SetLatchFixes(bool on) { settings.latchFixes = on; }
+		// Native readings left out as within the rounding floor (latchFixes).
+		unsigned long long FloorStarved() const { return floorStarved; }
 		double Candidate() const;                                // the window's evidence so far
 		// The window's median DetailAbove for frames reading `ratio`; +infinity when none.
 		double ReferenceDetail(double ratio) const;
 		int Shots() const;                                       // shots in the window
 		double EvidenceSeconds() const;
 		unsigned long long Cuts() const { return cuts; }
+		// Latch fixes: the time between the two frames the last cut was found between (how well its
+		// moment is known: a lost tile copy widens it).
+		double LastCutSpan() const { return lastCutSpan; }
 		unsigned long long RenditionChanges() const { return renditionChanges; }
+		// The declared lower reading came from a rendition change (F12: time only, no shots), so
+		// its evidence is judged against renditionSeconds alone (audit 2026-10-17: the monitor's
+		// confidence also required minimumShots, so F12 could never engage auto mid-shot).
+		bool DeclaredByRendition() const { return declaredByRendition; }
 		// Frames reading none found without detail above the rate in question (no evidence).
 		unsigned long long Starved() const { return starved; }
 		// Height in lines for a native height, rounded to an even number; the
@@ -369,7 +502,12 @@ namespace SourceResolution
 		double declared = 1.0;
 		double lastMean = -1.0, lastSignature = 0.0, lastSeconds = -1.0, evidence = 0.0;
 		bool haveLast = false;
-		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0;
+		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0, floorStarved = 0;
+		// latchFixes: the last frame whose shape could be judged (the cut test compares across black).
+		std::vector<double> lastPattern;
+		std::vector<char> lastPatternFlat;
+		double lastPatternSeconds = -1.0, lastCutSpan = 0.0;
+		CutJudge cutJudge;
 		// F12: the same shot's last native frame (its spectra), and the run of lower readings.
 		FrameReading lastNative;
 		bool haveLastNative = false;
@@ -378,7 +516,7 @@ namespace SourceResolution
 		double streakRatio = 1.0;
 		std::vector<double> streakDetail;
 		double streakStart = 0.0;
-		bool renditionMode = false;
+		bool renditionMode = false, declaredByRendition = false;
 		unsigned long long renditionChanges = 0;
 		std::string lastReason;
 	};
