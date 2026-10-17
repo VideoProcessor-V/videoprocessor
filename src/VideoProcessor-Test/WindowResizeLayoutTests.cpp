@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <WindowResizeLayout.h>
+#include "HardwarePrerequisites.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -77,6 +78,10 @@ namespace Tests
 	public:
 		TEST_METHOD(ResizePreservesRequestedWindowBounds)
 		{
+			// 1400x900 must fit the desktop's maximum window size, else Windows clamps it.
+			std::string reason;
+			if (!HardwarePrerequisites::RequireConditionOrSkip("ResizePreservesRequestedWindowBounds",
+				HardwarePrerequisites::DesktopFitsWindow(1400, 900, reason), reason)) return;
 			ResizeHost host;
 			host.Place(100, 100, 1400, 900);
 			const auto bounds = host.Bounds();
@@ -122,6 +127,11 @@ namespace Tests
 		}
 		TEST_METHOD(LayoutCompletesBeforeRendererNotification)
 		{
+			// On a smaller desktop the 1400x900 request is clamped to the size the window
+			// already has, so no WM_SIZE (and no notification) can arrive.
+			std::string reason;
+			if (!HardwarePrerequisites::RequireConditionOrSkip("LayoutCompletesBeforeRendererNotification",
+				HardwarePrerequisites::DesktopFitsWindow(1400, 900, reason), reason)) return;
 			ResizeHost host;
 			const auto before = host.notifications;
 			host.Place(200, 200, 1400, 900);
