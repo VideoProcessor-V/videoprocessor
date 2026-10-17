@@ -76,6 +76,9 @@
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
+#include <led/LedDriveArbiter.h>
+#include <led/LedDriveHoldover.h>
+#include <filesource/FileHostSettings.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
@@ -22205,6 +22208,17 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 	if (m_conversionThread.joinable())
 		m_conversionThread.join();
 	ClearQueue("renderer destruction");
+	// VP Renderer filter (2026-10-17): in the filter process (source=file) the
+	// running LED drive is held for the next graph instead of returning the
+	// projector to full light; the capture app never gets here with a hold-over.
+	if (m_ledHoldoverMs > 0 && m_ledDrive && !m_ledDriveSuspended)
+	{
+		std::shared_ptr<LedDrive::LedDriveModule> held = m_ledDrive;
+		m_ledDrive.reset();
+		if (m_impl)
+			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+		LedDrive::ProcessLedDriveHoldover().Park(held, m_ledDriveSignature, m_ledHoldoverMs);
+	}
 	m_impl.reset();
 }
 
@@ -23384,9 +23398,17 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		if (previous) DebugLog::Log("LED drive: disabled");
 		return;
 	}
-	m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
-		LedDrive::ReadProjectorConfig(configuration), led);
-	m_ledDrive->Start();
+	// VP Renderer filter (2026-10-17): a drive the previous file's renderer
+	// held (same LED settings) carries on; nothing is held in the capture app.
+	m_ledDrive = LedDrive::ProcessLedDriveHoldover().Adopt(signature);
+	if (!m_ledDrive)
+	{
+		// The serial port goes through the LED drive arbiter: VideoProcessor.exe
+		// and the filter never drive the projector at the same time.
+		m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
+			LedDrive::ReadProjectorConfig(configuration), led, LedDrive::ArbitratedSerialPortFactory());
+		m_ledDrive->Start();
+	}
 	if (m_impl)
 	{
 		std::atomic_store(&m_impl->ledDrive, m_ledDrive);
@@ -23471,6 +23493,10 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	};
 	if (snapshot.configuration)
 	{
+		// VP Renderer filter (2026-10-17): the LED hold-over is for file playback only.
+		std::string sourceKind;
+		m_ledHoldoverMs = snapshot.LookupVariable("source", sourceKind) && sourceKind == "file" ?
+			FileSource::ReadFileHostSettings(*snapshot.configuration).ledHoldoverMs : 0;
 		m_ledDriveConfiguration = snapshot.configuration;
 		if (!m_ledDriveSuspended)
 			UpdateLedDrive(*snapshot.configuration);

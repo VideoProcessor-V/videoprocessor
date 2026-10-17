@@ -458,6 +458,10 @@ private:
 	// from, and whether it is stopped for a test.
 	std::shared_ptr<const ConfigFile> m_ledDriveConfiguration;
 	bool m_ledDriveSuspended = false;
+	// VP Renderer filter (2026-10-17): file_led_holdover_ms while the applied
+	// snapshot says source=file (the DirectShow filter's FileHost); 0 for the
+	// capture app, whose LED drive is never parked (LedDriveHoldover.h).
+	uint32_t m_ledHoldoverMs = 0;
 	// gamma_boost (and the hook's knee/EOTF) as last published, for new Impls.
 	double m_ledGammaBoost = 0.0;   // the gamma_boost setting (0 = off)
 	double m_ledCompensationEotf = 2.2;
