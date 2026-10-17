@@ -108,6 +108,8 @@ fully before touching source. When a decision changes, change it here.
      With gain > 1 (compensate mode) the knee also compresses WTW toward
      white, by design.
    - HDR sources are tone-mapped, so BTB/WTW do not apply in the same way.
+     (2026-10-17: after HDR->SDR tone mapping they have no meaning, by
+     design; see docs/VP-btb-wtw-answers.md, "BTB/WTW and HDR".)
    - Measured further (`docs/VP-btb-wtw-investigation.md`): SDR upscaling
      (sigmoid) also clips WTW, and downscaling (linear light) clips BTB.
      **Stage 10** preserves both for SDR (`preserve_extended_range`);

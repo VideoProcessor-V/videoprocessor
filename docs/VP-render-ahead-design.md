@@ -122,7 +122,7 @@ drift-correction repeats.
 | Switch | Default |
 |---|---|
 | `render_ahead` | off, until proven, then on |
-| `dejudder_gate` | period (`refresh` restores the old rule) |
+| `dejudder_gate` | ~~period~~ `auto` as built: period with `render_ahead` on, else refresh (the old rule); `period` and `refresh` can be forced |
 | `render_ahead_utilisation` | 0.85 |
 | `render_ahead_queue_credit` | off |
 

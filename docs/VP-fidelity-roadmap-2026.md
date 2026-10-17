@@ -28,14 +28,15 @@ parsers feeding one tone-mapping path).
   classification as a hint behind the trust gates~~ - rejected 2026-10-17 (owner: no neural).
 - **Scaling and detail:** ~~an ONNX-DirectML stage (onnxruntime-directml is already in 3rdparty) for a
   1080->4K upscaler and a temporal denoiser, gated by PSNR/SSIM vs FSRCNNX, flicker and the 3090 budget
-  (L-XL)~~ - rejected 2026-10-17 (owner: no neural); detail accumulation retried as MC grain averaging
-  (M) / ~~ML re-base later~~ - rejected 2026-10-17 (owner: no neural); GLSL stays the path.
+  (L-XL)~~ - rejected 2026-10-17 (owner: no neural); ~~detail accumulation retried as MC grain averaging
+  (M)~~ - rejected 2026-10-17 (grain rule; replaced by the pulse stabiliser and texture restore) / ~~ML re-base later~~ - rejected 2026-10-17 (owner: no neural); GLSL stays the path.
 - **Motion:** interpolator Stage B (per-vsync, 60p on 50 Hz) and gap fill (L); low-latency backward
   vectors (M) / multi-reference occlusion-aware interpolation, higher refresh when a display takes it.
 - **Precision / BTB-WTW:** a precision contract in the chain gate (every intermediate >= 16-bit float,
   sign-preserving, one final quantisation; BTB 4-63 / WTW 941-1019 survive every cell) (S-M); the SDR
-  full-strength roll-off fix (S); perceptual dither (M) / 12-bit output via a DeckLink output card or
-  FP16 for full-range displays (owner question 1).
+  full-strength roll-off fix (S); perceptual dither (M) / ~~12-bit output via a DeckLink output card or
+  FP16 for full-range displays (owner question 1)~~ - owner 2026-10-17: 12-bit only via VPV for DV
+  displays; FP16 parked; no DeckLink card.
 - **HDR and DV:** DV level check (S); L1 min + FL35 peak/black curve (S-M); L2/L8 trims if they arrive
   (M-L); per-scene dynamic tone mapping with queue look-ahead (M) / DV2 and HDR10+ as metadata parsers.
 - **LED/CNTR:** projector validation first; DV L1 / scene statistics into the look-ahead (M); measured
@@ -73,8 +74,10 @@ parsers feeding one tone-mapping path).
 
 ## Questions for the owner
 
-1. 12-bit output when the display changes: DeckLink output card, FP16 surface (full-range displays), or
-   neither?
+1. ~~12-bit output when the display changes: DeckLink output card, FP16 surface (full-range displays), or
+   neither?~~ Answered 2026-10-17 (owner, FINAL): no DeckLink output card; FP16 output PARKED; 12-bit
+   only via VPV (VP sends a DV tunnel through the NVIDIA GPU) for DV displays; non-DV displays stay on
+   10-bit 4:4:4 + sigma-delta.
 2. Deploy before 50/60p (validate on the FL35 sooner) or after?
 3. ~~ML upscaler / denoiser acceptable if optional, gated and measured (it can invent plausible detail)?~~
    Rejected 2026-10-17 (owner: no neural).

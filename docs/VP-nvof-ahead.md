@@ -19,6 +19,10 @@ The NVIDIA optical-flow engine (NVOFA) is separate hardware. On the 3090 and the
 | Look-ahead verification at cuts | none (luma only) | n/a |
 | Low-latency 50/60p (backward vectors) | (prev, cur) | Planned |
 
+Note 2026-10-17: detail accumulation (both rows above, and step 6 below) was REJECTED by the owner
+(grain rule; docs/VP-detail-accumulation.md). Its successors (`detail_pulse_stabilise`,
+`texture_restore`) may use the same pairs.
+
 ## Architecture
 
 1. **Upload.** EarlyUpload (`capture_upload: early`) already uploads each frame on the conversion thread, as it arrives, on a second D3D11 device on the same adapter. The frames are in shared textures well before display.
@@ -255,4 +259,4 @@ The de-judder multiplies the enabled weights, carries them in the seed's `w` thr
 
 The engine's whole-frame motion (D1) now falls back to the global search when it is not clear (ambiguity >= 0.9, about a tenth of the confident cells agreeing).
 
-Switches (Fixes under test; parser defaults on): `optical_flow_cost_trust`, `optical_flow_fb_check`, `optical_flow_global_fallback` (with `optical_flow_global`). Logged every 2400 estimates: the extras' time on the worker, whether weights were applied, and the number of fallbacks.
+Switches ~~(Fixes under test; parser defaults on)~~: `optical_flow_cost_trust`, `optical_flow_fb_check`, `optical_flow_global_fallback` (with `optical_flow_global`). **Defaults after the real-clip corpus (2026-10-17, 7 clips, laptop):** `optical_flow_cost_trust` OFF (bit-identical on the corpus, thresholds never cut in; retune later); `optical_flow_fb_check` OFF, kept as an option (-0.8% removal for -6% damage; owner taste); `optical_flow_global_fallback` ON (identical output, fired 6/168). The code matches (LibplaceboVideoRenderer.cpp settings defaults). Config places them in the de-judder "Motion source" section, not in Fixes under test. Logged every 2400 estimates: the extras' time on the worker, whether weights were applied, and the number of fallbacks.

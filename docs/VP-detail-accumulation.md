@@ -4,7 +4,11 @@ Owner, 2026-10-16:
 - "especially for the upscale and low bitstream since I'd imagine often encoding alternates detail between one frame and the next to average it in"
 - then: "definitely want the frame detail accumulation. that would be extremely extremely cool if could be done efficiently and not just on a 5090".
 
-Status: design only. Nothing is built.
+Status: ~~design only. Nothing is built.~~ **REJECTED by the owner 2026-10-17** (roadmap,
+docs/VP-roadmap-2026-2031.md section 7): accumulating detail along vectors averages film grain
+away, against the grain rule (never average grain away). The prototype also missed its gate (§12).
+Superseded by `detail_pulse_stabilise` and `texture_restore` (queued, both default off; see
+docs/audit/detail-retrieval-research-2026-10-17.md). The design is kept for the record.
 
 ## 1. What it is for
 
