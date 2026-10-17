@@ -136,5 +136,8 @@ on the GPU.
 - **Run 39066138152** (93467197) failed to build. Both causes are fixed:
   - `std::clamp` in the C++14 test project;
   - the C2001 raw newline in the tooltip string.
+- Local verification after the suspension (x64 Release, VpCiNoMagewell=true, VPRenderer + Test built):
+  245/245 targeted CPU tests pass, including Hunt2PictureKeysReachTheSettings. Config editor
+  (Qt) tests were not run locally (no Qt on this laptop); the Config project compiled on CI.
 - Commits after 14e6dac5 (this report) are local only, in `D:/codex/videoprocessor/hunt2-picture`,
   until the account is restored.
