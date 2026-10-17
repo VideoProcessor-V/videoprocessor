@@ -240,6 +240,9 @@
 	<ClInclude Include="MadVRShaderTransactionPolicy.h" />
     <ClInclude Include="IRenderer.h" />
     <ClInclude Include="DolbyVisionLuminanceStatus.h" />
+    <ClInclude Include="SceneDescriptor.h" />
+    <ClInclude Include="DisplayProfile.h" />
+    <ClInclude Include="MappingPolicy.h" />
     <ClInclude Include="vprenderer\DolbyVisionLuminancePolicy.h" />
     <ClInclude Include="RendererLiveness.h" />
     <ClInclude Include="RendererPostStallResetAdvisor.h" />

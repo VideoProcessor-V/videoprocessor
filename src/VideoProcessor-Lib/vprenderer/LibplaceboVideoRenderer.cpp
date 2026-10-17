@@ -84,6 +84,9 @@
 #include <vprenderer/LibplaceboOutputPolicy.h>
 #include <HdrTargetLuminance.h>
 #include <vprenderer/DolbyVisionLuminancePolicy.h>
+#include <SceneDescriptor.h>
+#include <DisplayProfile.h>
+#include <MappingPolicy.h>
 #include <WindowsDisplayDiagnostics.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
@@ -791,6 +794,34 @@ namespace
 		}
 
 		return result;
+	}
+
+	// DV next step (f): the display profile's EOTF from the target transfer.
+	DisplayEotf ToDisplayEotf(enum pl_color_transfer transfer)
+	{
+		switch (transfer)
+		{
+		case PL_COLOR_TRC_BT_1886: return DisplayEotf::Bt1886;
+		case PL_COLOR_TRC_SRGB: return DisplayEotf::Srgb;
+		case PL_COLOR_TRC_GAMMA22: return DisplayEotf::Gamma22;
+		case PL_COLOR_TRC_GAMMA24: return DisplayEotf::Gamma24;
+		case PL_COLOR_TRC_PQ: return DisplayEotf::Pq;
+		case PL_COLOR_TRC_HLG: return DisplayEotf::Hlg;
+		case PL_COLOR_TRC_LINEAR: return DisplayEotf::Linear;
+		case PL_COLOR_TRC_UNKNOWN: return DisplayEotf::Unknown;
+		default: return DisplayEotf::Other;
+		}
+	}
+
+	DisplayGamut ToDisplayGamut(enum pl_color_primaries primaries)
+	{
+		switch (primaries)
+		{
+		case PL_COLOR_PRIM_BT_709: return DisplayGamut::Bt709;
+		case PL_COLOR_PRIM_DISPLAY_P3: return DisplayGamut::DisplayP3;
+		case PL_COLOR_PRIM_BT_2020: return DisplayGamut::Bt2020;
+		default: return DisplayGamut::Unknown;
+		}
 	}
 
 	bool IsNativeRgbUpload(VideoFrameEncoding encoding,
@@ -5419,6 +5450,14 @@ struct LibplaceboVideoRenderer::Impl
 	std::mutex ingressStatusMutex;
 	DolbyVisionLuminanceStatus sourceLuminance;
 	bool sourceLuminanceObserved = false;
+	// DV next step (f): the format-neutral scene descriptor and display profile
+	// of the last rendered frame (under ingressStatusMutex). Exposed for future
+	// consumers (LED look-ahead, stats); nothing consumes them yet.
+	SceneDescriptor sceneDescriptor;
+	DisplayProfile sceneDisplayProfile;
+	bool sceneDescriptorObserved = false;
+	uint32_t sceneMappingMatchLoggedSources = 0;    // one bit per SceneMetadataSource
+	uint32_t sceneMappingMismatchLoggedSources = 0;
 	uint64_t sourceLuminanceQueueGeneration = 0;
 	uint64_t nextSourceLuminanceLogTick = 0;
 	std::string ingressStatus = "P010 (initializing)";
@@ -14445,6 +14484,10 @@ struct LibplaceboVideoRenderer::Impl
 					sourceLuminance = {};
 					sourceLuminance.tunnelActive = true;
 					sourceLuminanceObserved = true;
+					// Black frame: no trusted DV metadata for this picture.
+					sceneDescriptor = {};
+					sceneDescriptor.source = SceneMetadataSource::DvTunnelL1;
+					sceneDescriptorObserved = true;
 				}
 			}
 			const bool presented = PresentBlackFrame(!dvTransitionBlackActive);
@@ -15605,6 +15648,13 @@ struct LibplaceboVideoRenderer::Impl
 			}
 		}
 		image.color = TranslateColorSpace(state);
+		// DV next step (f): the format-neutral scene descriptor for this frame,
+		// built alongside today's HDR metadata (compared after the target is
+		// set; nothing consumes it yet). The renderer cannot tell LLDV static
+		// values from an HDR10 InfoFrame (both arrive as HDRData), so both are
+		// tagged hdr10_static here.
+		SceneDescriptor frameScene = tunnelRgbFallback ? SceneDescriptor{} :
+			SceneDescriptorParsers::FromStaticHdr(state.hdrData.get());
 		if (tunnelRgbFallback)
 		{
 			image.color = {};
@@ -15654,6 +15704,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			image.repr.dovi = found->second.get();
 			const auto luminance = DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, image.color.hdr);
+			frameScene = SceneDescriptorParsers::FromDolbyVisionTunnel(dm, frameScene);
 			frameDvLuminance = luminance;
 			const uint64_t luminanceTick = GetTickCount64();
 			if (luminanceTick >= nextSourceLuminanceLogTick)
@@ -15909,6 +15960,52 @@ struct LibplaceboVideoRenderer::Impl
 		LibplaceboRenderParameters::ApplyTargetLuminance(
 			state.eotf == EOTF::SDR, static_cast<float>(sdrTargetNits),
 			static_cast<float>(sdrBlackNits), baseTarget.color);
+		// DV next step (f): display profile from today's target settings, and
+		// the mapping policy's libplacebo parameters compared bit for bit with
+		// the HDR metadata actually given to libplacebo (no behaviour change:
+		// the existing values stay in use). Exposed for future consumers.
+		{
+			DisplayProfileRendererSettings displaySettings;
+			displaySettings.targetNits = sdrTargetNits;
+			displaySettings.resolvedBlackNits = LibplaceboRenderParameters::ResolveTargetBlack(
+				static_cast<float>(sdrBlackNits));
+			displaySettings.outputEotf = ToDisplayEotf(baseTarget.color.transfer);
+			displaySettings.targetGamut = ToDisplayGamut(baseTarget.color.primaries);
+			displaySettings.displayBitDepth = activeSettings.displayBitDepth;
+			const DisplayProfile displayProfile = DisplayProfiles::FromRendererSettings(displaySettings);
+			const MappingPolicy mappingPolicy = MappingPolicies::Default();
+			const pl_hdr_metadata mapped = MappingPolicies::ToLibplaceboHdrMetadata(
+				frameScene, displayProfile, mappingPolicy);
+			const bool sameMapping = MappingPolicies::SameHdrMetadataBits(mapped, image.color.hdr);
+			const uint32_t sourceBit = 1u << static_cast<unsigned>(frameScene.source);
+			if (sameMapping && !(sceneMappingMatchLoggedSources & sourceBit))
+			{
+				sceneMappingMatchLoggedSources |= sourceBit;
+				DebugLog::Log("Scene descriptor: source=%s mapping=%s reproduces the HDR metadata given to libplacebo "
+					"(bit-identical); display profile peak=%.2f black=%.5f eotf=%s gamut=%s link_bits=%d own_dynamic_mapping=%d",
+					ToString(frameScene.source), ToString(mappingPolicy.curve), displayProfile.peakNits,
+					displayProfile.blackNits, ToString(displayProfile.eotf), ToString(displayProfile.gamut),
+					displayProfile.linkBitDepth, displayProfile.doesOwnDynamicMapping ? 1 : 0);
+			}
+			else if (!sameMapping && !(sceneMappingMismatchLoggedSources & sourceBit))
+			{
+				sceneMappingMismatchLoggedSources |= sourceBit;
+				DebugLog::Log("Scene descriptor: MISMATCH source=%s mapping=%s: mapped min=%.7g max=%.7g cll=%.7g fall=%.7g "
+					"max_pq_y=%.7g avg_pq_y=%.7g; libplacebo min=%.7g max=%.7g cll=%.7g fall=%.7g max_pq_y=%.7g avg_pq_y=%.7g "
+					"(the existing values stay in use)",
+					ToString(frameScene.source), ToString(mappingPolicy.curve),
+					mapped.min_luma, mapped.max_luma, mapped.max_cll, mapped.max_fall, mapped.max_pq_y, mapped.avg_pq_y,
+					image.color.hdr.min_luma, image.color.hdr.max_luma, image.color.hdr.max_cll,
+					image.color.hdr.max_fall, image.color.hdr.max_pq_y, image.color.hdr.avg_pq_y);
+			}
+			std::lock_guard<std::mutex> guard(ingressStatusMutex);
+			if (sourceLuminanceQueueGeneration == frameGeneration)
+			{
+				sceneDescriptor = frameScene;
+				sceneDisplayProfile = displayProfile;
+				sceneDescriptorObserved = true;
+			}
+		}
 		std::ostringstream luminanceSignature;
 		luminanceSignature << static_cast<int>(state.eotf) << '|'
 			<< image.color.transfer << '|' << image.color.hdr.min_luma << '|'
@@ -21264,6 +21361,8 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 		std::lock_guard<std::mutex> sourceGuard(m_impl->ingressStatusMutex);
 		m_impl->sourceLuminance = {};
 		m_impl->sourceLuminanceObserved = false;
+		m_impl->sceneDescriptor = {};
+		m_impl->sceneDescriptorObserved = false;
 	}
 	if (materialSourceTransition && !m_manualDisplayRule.empty())
 	{
@@ -26372,6 +26471,8 @@ void LibplaceboVideoRenderer::BeginQueueGeneration(
 					m_impl->ingressStatusMutex);
 				m_impl->sourceLuminance = {};
 				m_impl->sourceLuminanceObserved = false;
+				m_impl->sceneDescriptor = {};
+				m_impl->sceneDescriptorObserved = false;
 				m_impl->sourceLuminanceQueueGeneration = generation;
 			}
 			m_impl->renderLoadMeter.ResetForGeneration(generation);
@@ -26580,4 +26681,17 @@ bool LibplaceboVideoRenderer::GetDolbyVisionLuminanceStatus(
 	std::lock_guard<std::mutex> guard(m_impl->ingressStatusMutex);
 	status = m_impl->sourceLuminance;
 	return m_impl->sourceLuminanceObserved;
+}
+
+bool LibplaceboVideoRenderer::GetSceneDescriptor(
+	SceneDescriptor& descriptor, DisplayProfile& display) const
+{
+	descriptor = {};
+	display = {};
+	if (!m_impl)
+		return false;
+	std::lock_guard<std::mutex> guard(m_impl->ingressStatusMutex);
+	descriptor = m_impl->sceneDescriptor;
+	display = m_impl->sceneDisplayProfile;
+	return m_impl->sceneDescriptorObserved;
 }

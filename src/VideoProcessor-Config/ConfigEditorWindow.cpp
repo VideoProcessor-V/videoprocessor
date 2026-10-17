@@ -8001,12 +8001,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         nativeRgb->setToolTip(QStringLiteral(
             "DeckLink 12-bit RGB (R12B/R12L) and 10-bit r210 reach the renderer as full-precision RGB 4:4:4, unpacked "
             "on the GPU. Off = the old CPU conversion to 10-bit 4:2:0 YCbCr."));
-        auto* dvTrims = addChoice(QStringLiteral("Dolby Vision: L2 trims"),
+        auto* dvTrims = addChoice(QStringLiteral("VP's interpretation of DV metadata: L2 trims"),
             QStringLiteral("dv_trims"), { QStringLiteral("on"), QStringLiteral("off") });
         dvTrims->setToolTip(QStringLiteral(
-            "Under test (default off). Applies the Dolby Vision Level 2 trim chosen for your display's peak "
-            "(interpolated between the grader's trims) after VP's tone mapping: slope, offset, power, chroma "
-            "weight and saturation. A non-certified reimplementation, not Dolby display management. "
+            "Under test (default off). VP's interpretation of DV metadata: applies the Level 2 trim chosen for "
+            "your display's peak (interpolated between the grader's trims) after VP's tone mapping: slope, offset, "
+            "power, chroma weight and saturation. Not certified and not Dolby display management. "
             "Not used with a calibration 3D LUT."));
         auto* dvGpu = addChoice(QStringLiteral("Dolby Vision tunnel: GPU unpack"),
             QStringLiteral("dv_tunnel_gpu_unpack"), { QStringLiteral("on"), QStringLiteral("off") });

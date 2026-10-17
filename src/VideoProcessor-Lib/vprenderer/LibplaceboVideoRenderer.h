@@ -29,6 +29,8 @@ namespace LedDrive { class LedDriveModule; }
 
 
 class ConfigFile;
+struct SceneDescriptor;
+struct DisplayProfile;
 
 // In-process D3D11 renderer. HDR input is color-managed and tone-mapped to
 // an SDR Rec.709 swapchain; this backend deliberately does not emit HDR.
@@ -124,6 +126,10 @@ public:
 	bool GetDetectedPictureAspect(DetectedPictureAspect& result) const override;
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
+	// DV next step (f): the last rendered frame's format-neutral scene
+	// descriptor and display profile (SceneDescriptor.h / DisplayProfile.h),
+	// for future consumers (LED look-ahead, stats). False until a frame was rendered.
+	bool GetSceneDescriptor(SceneDescriptor& descriptor, DisplayProfile& display) const;
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
