@@ -183,6 +183,7 @@
     <ClCompile Include="VideoFrameFormatterTests.cpp" />
     <ClCompile Include="DolbyVisionLuminancePolicyTests.cpp" />
     <ClCompile Include="DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="FileSideDataTests.cpp" />
     <ClCompile Include="SceneDescriptorTests.cpp" />
     <ClCompile Include="ContentIntentTests.cpp" />
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp" />
