@@ -12838,8 +12838,12 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         QStringLiteral("read_back"), false);
     connectionForm->addRow(QString(), readBack);
     connectionForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Off: send only, exactly like the old script. On: wait for each reply, ask the projector its range and "
-        "log lost commands. 19200 baud, 8 data bits, no parity, 1 stop bit, no flow control.")));
+        "Default off: send only, exactly like the original script (which never read the projector back). "
+        "Start-up still reaches a known state without replies: light to the ceiling and CNTR 50 are sent "
+        "unconditionally, and the light range comes from LED floor / ceiling. A send is retried only when the "
+        "write itself fails. On (diagnostics, the old behaviour): wait for each reply, ask the projector its "
+        "range and state at start-up and log lost commands. The RS-232 connection test always reads back. "
+        "19200 baud, 8 data bits, no parity, 1 stop bit, no flow control.")));
     // RS-232 connection test: LED 60, read back, 5 s, LED 255, read back.
     auto* testButton = new QPushButton(QStringLiteral("Test RS-232 connection"));
     testButton->setObjectName(controlName(projector, QStringLiteral("connection_test")));

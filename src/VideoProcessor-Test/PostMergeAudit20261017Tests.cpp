@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <led/LedDriveConfig.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 #include <vprenderer/DejudderPolicy.h>
 
@@ -31,6 +32,18 @@ namespace PostMergeAudit20261017Test
 		p.captureEncoding = capture;
 		return p;
 	}
+
+	// Owner 2026-10-17: projector read-back off by default (the original script never
+	// read back); start-up reaches a known state by sending, not by asking.
+	TEST_CLASS(LedReadBackDefaultTests)
+	{
+	public:
+		TEST_METHOD(ReadBackIsOffByDefault)
+		{
+			const LedDrive::ProjectorConfig defaults;
+			Assert::IsFalse(defaults.readBack);
+		}
+	};
 
 	TEST_CLASS(DolbyVisionCaptureEncodingTests)
 	{
