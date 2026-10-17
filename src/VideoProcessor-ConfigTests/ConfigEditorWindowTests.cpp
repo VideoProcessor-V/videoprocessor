@@ -1631,6 +1631,56 @@ void testInterpolationButtons()
     require(mode->currentData().toString() == "off" && !sourceClass->isEnabled(), "Off did not set interpolation off");
 }
 
+void testContentAdaptiveGroup()
+{
+    // Intent interpreter item 1 (owner decision 2026-10-17): one group "Experimental content-adaptive
+    // settings", a checkbox per function, default off; content recognition's checkbox writes
+    // intent_content on/off and its hold time sits beneath it, greyed while it is off; the other
+    // four functions are greyed placeholders.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer]\nquality: high\n[vprenderer.Sports]\nintent_content_hold_seconds: 8\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* section = requireControl<QToolButton>(window, "rendererSection.contentAdaptive");
+    require(section->text() == QStringLiteral("Experimental content-adaptive settings"), "the group heading is wrong");
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* check = requireControl<QCheckBox>(window, "config.vprenderer.intent_content.check");
+    auto* mode = requireControl<QComboBox>(window, "config.vprenderer.intent_content");
+    auto* hold = requireControl<QLineEdit>(window, "config.vprenderer.intent_content_hold_seconds");
+    for (const char* planned : { "config.vprenderer.intent_motion_planned", "config.vprenderer.intent_ambient_planned",
+        "config.vprenderer.intent_black_planned", "config.vprenderer.intent_display_planned" })
+    {
+        auto* placeholder = requireControl<QCheckBox>(window, planned);
+        require(!placeholder->isEnabled() && !placeholder->isChecked(), "a planned function is not a greyed placeholder");
+    }
+    requireControl<QWidget>(window, "config.vprenderer.intent_motion_policy_planned");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(!check->isChecked(), "content recognition is not off by default");
+    require(!hold->isEnabled(), "the hold time is not greyed with content recognition off");
+    check->click();
+    QCoreApplication::processEvents();
+    require(mode->currentData().toString() == "on" && hold->isEnabled(), "the checkbox did not turn content recognition on");
+    hold->setText(QStringLiteral("6"));
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("intent_content: on") && saved.contains("intent_content_hold_seconds: 6"),
+        (QByteArray("content recognition not saved: ") + saved.left(400)).constData());
+    // A named profile shows its own hold time and the default profile's (inherited) switch.
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(hold->text() == QStringLiteral("8"), "the named profile's hold time is not shown");
+    require(check->isChecked(), "the inherited switch is not shown in the named profile");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    check->click();
+    QCoreApplication::processEvents();
+    require(mode->currentData().toString() == "off" && !hold->isEnabled(), "unticking did not turn it off");
+}
+
 void testInheritedButtonsAndReorganisedSections()
 {
     // Audit 2026-10-16: an unset profile's exclusive buttons show the default profile's choice,
@@ -9302,6 +9352,7 @@ int main(int argc, char** argv)
     failures += run("exclusive buttons: LED source and motion source", testExclusiveButtonsForLedSourceAndMotionSource);
     failures += run("temporal dither buttons", testTemporalDitherButtons);
     failures += run("interpolation buttons", testInterpolationButtons);
+    failures += run("content-adaptive group", testContentAdaptiveGroup);
     failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
     failures += run("queue use mode and low-latency path", testQueueUseModeAndLowLatencyPath);
     failures += run("inherited buttons and reorganised sections", testInheritedButtonsAndReorganisedSections);

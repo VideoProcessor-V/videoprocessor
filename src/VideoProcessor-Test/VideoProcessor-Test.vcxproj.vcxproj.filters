@@ -16,6 +16,9 @@
     <ClCompile Include="SceneDescriptorTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ContentIntentTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

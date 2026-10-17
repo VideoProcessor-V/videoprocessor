@@ -8379,6 +8379,111 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         MarkGpuCost(form, warpStage, 3);
         MarkGpuCost(form, occlusionFill, 1);
 
+        // Intent interpreter (docs/VP-intent-interpreter-design.md; owner decision 2026-10-17): one
+        // group with a checkbox per function, each off by default, its sub-settings beneath it. Item 1
+        // (content recognition) is built; the other four are placeholders until they are.
+        form = addCollapsibleSection(QStringLiteral("contentAdaptive"), QStringLiteral("Experimental content-adaptive settings"),
+            QStringLiteral("Each function is off by default. Rule-based (no AI): VP measures the picture and reads the "
+                "Dolby Vision metadata, and only steers settings you already set, within your limits."), false);
+        {
+            auto* contentMode = addChoice(QStringLiteral("Content recognition"), QStringLiteral("intent_content"),
+                { QStringLiteral("off"), QStringLiteral("on") });
+            form->setRowVisible(contentMode, false);
+            auto* contentRow = new QWidget;
+            contentRow->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_content.row")));
+            auto* contentLayout = new QHBoxLayout(contentRow);
+            contentLayout->setContentsMargins(0, 0, 0, 0);
+            auto* contentCheck = new QCheckBox(QStringLiteral("Content recognition"));
+            contentCheck->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_content.check")));
+            contentCheck->setToolTip(QStringLiteral(
+                "Off (default). On: VP labels what is playing - film, video, sports, animation or a still menu "
+                "(static_ui) - from the pulldown lock and measured rates, the film/video setting, the camera "
+                "motion of the queued frames and the Dolby Vision L11 content type (which wins when present). "
+                "Your profile rules can then use it: when: $content==\"sports\". It only selects profiles you "
+                "wrote; it never changes a setting itself. Sports means a video-class source with sustained "
+                "large pans, never a fixed frame rate. Needs the active-picture look-ahead for the motion. "
+                "(Key: intent_content.)"));
+            contentLayout->addWidget(contentCheck);
+            QToolButton* contentUnset = addChoiceUnsetButton(contentMode, contentLayout, this);
+            contentLayout->addStretch(1);
+            form->addRow(QString(), contentRow);
+            auto* hold = addText(QStringLiteral("    Change class after"), QStringLiteral("intent_content_hold_seconds"),
+                QStringLiteral("s"));
+            hold->setValidator(new QDoubleValidator(1.0, 60.0, 1, hold));
+            hold->setPlaceholderText(QStringLiteral("5"));
+            hold->setAccessibleDescription(QStringLiteral("Value in s, 1-60."));
+            hold->setToolTip(QStringLiteral(
+                "A new class must hold this long (seconds of content, 1-60, default 5) and then waits for a cut, "
+                "so a profile never switches in the middle of a shot. A still menu is entered without a cut and "
+                "left at once. (Key: intent_content_hold_seconds.)"));
+            connect(contentCheck, &QCheckBox::clicked, this, [contentMode](bool checked) {
+                const int index = contentMode->findData(checked ? QStringLiteral("on") : QStringLiteral("off"));
+                if (index >= 0 && contentMode->currentIndex() != index) contentMode->setCurrentIndex(index);
+            });
+            auto syncContent = [contentMode, contentCheck, contentUnset, hold]() {
+                const bool on = effectiveChoiceValue(contentMode) == QStringLiteral("on");
+                {
+                    const QSignalBlocker block(contentCheck);
+                    contentCheck->setChecked(on);
+                }
+                const bool inherited = contentMode->currentData().toString().isEmpty();
+                contentCheck->setProperty("inherited", inherited);
+                contentCheck->style()->unpolish(contentCheck);
+                contentCheck->style()->polish(contentCheck);
+                if (contentUnset)
+                    contentUnset->setVisible(!inherited && contentMode->count() > 0 &&
+                        contentMode->itemData(0).toString().isEmpty());
+                hold->setProperty("greyedOff", !on);
+                hold->setEnabled(on);
+            };
+            connect(contentMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncContent](int) { syncContent(); });
+            auto* contentRefresh = new QAction(contentMode);
+            contentRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_content_refresh")));
+            connect(contentRefresh, &QAction::triggered, this, [syncContent]() { syncContent(); });
+            syncContent();
+
+            // Placeholders for items 2-5 (not built yet): shown greyed so the group's layout is fixed.
+            struct Planned { const char* id; QString text; QString tip; };
+            const Planned planned[] = {
+                { "intent_motion_planned", QStringLiteral("Motion intent (planned)"), QStringLiteral(
+                    "Not built yet. Per-shot motion analysis; the policies below choose what it may do with the "
+                    "de-judder strength (never above yours, only at cuts).") },
+                { "intent_ambient_planned", QStringLiteral("Ambient adaptation (planned)"), QStringLiteral(
+                    "Not built yet. Living rooms: render to the black the room light leaves visible.") },
+                { "intent_black_planned", QStringLiteral("Black protection (planned)"), QStringLiteral(
+                    "Not built yet. Reports shadow steps lost below the display black; later protects them.") },
+                { "intent_display_planned", QStringLiteral("Display mapping readout (planned)"), QStringLiteral(
+                    "Not built yet. Shows the scene-to-display compression and the trim in use.") } };
+            for (const Planned& p : planned)
+            {
+                auto* check = new QCheckBox(p.text);
+                check->setObjectName(controlName(sectionPrefix, QString::fromLatin1(p.id)));
+                check->setToolTip(p.tip);
+                check->setEnabled(false);
+                form->addRow(QString(), check);
+                if (QString::fromLatin1(p.id) == QStringLiteral("intent_motion_planned"))
+                {
+                    auto* policies = new QWidget;
+                    policies->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_motion_policy_planned")));
+                    auto* policyLayout = new QHBoxLayout(policies);
+                    policyLayout->setContentsMargins(24, 0, 0, 0);
+                    auto* group = new QButtonGroup(policies);
+                    group->setExclusive(true);
+                    for (const QString& text : { QStringLiteral("Display only"), QStringLiteral("Ease on fast pans"),
+                        QStringLiteral("Ease on slow shots"), QStringLiteral("Visibility-weighted"),
+                        QStringLiteral("Metadata only") })
+                    {
+                        auto* radio = new QRadioButton(text);
+                        radio->setEnabled(false);
+                        group->addButton(radio);
+                        policyLayout->addWidget(radio);
+                    }
+                    policyLayout->addStretch(1);
+                    form->addRow(QString(), policies);
+                }
+            }
+        }
+
         form = addCollapsibleSection(QStringLiteral("temporalDither"), QStringLiteral("Temporal dither"),
             // audit 2026-10-16: VP's temporal choice loads the sigma-delta itself.
             QStringLiteral("Which dither runs, and how VP's motion-aware dither (sigma-delta) uses the de-judder's motion. "
@@ -9814,7 +9919,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dv_tunnel_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
-                    { "source_class", "legacy" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
+                    { "source_class", "legacy" },   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
+                    // Content recognition (intent interpreter item 1, 2026-10-17).
+                    { "intent_content", "off" } };
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
                 // Numbers with a placeholder showing their default: empty, so
@@ -9823,7 +9930,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         key.startsWith(QStringLiteral("adaptive_")) || key == QStringLiteral("sdr_white_headroom") ||
                         key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength") ||
                         key == QStringLiteral("ssim_bitrate_floor") || key.startsWith(QStringLiteral("source_resolution_auto_")) ||
-                        key.startsWith(QStringLiteral("source_resolution_evidence_"))) &&
+                        key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
+                        key == QStringLiteral("intent_content_hold_seconds")) &&
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
                 return QStringLiteral("AUTO");
@@ -10217,6 +10325,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("temporal_dither_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();

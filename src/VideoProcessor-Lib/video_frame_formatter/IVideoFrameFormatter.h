@@ -97,6 +97,43 @@ struct DolbyVisionTunnelFrameMetadata
     uint8_t trimCount = 0;
     bool trimOverflow = false; // more L2/L8 blocks than kMaxTrims arrived
     Trim trims[kMaxTrims] = {};
+
+    // Content intent (intent interpreter item 1, 2026-10-17): L5 / L6 / L11,
+    // parsed for status, the scene descriptor and the content classifier only
+    // (no rendering change). Field layouts follow libdovi's public parser
+    // (quietvoid/dovi_tool, dolby_vision/src/rpu/extension/level5.rs,
+    // level6.rs, level11.rs); see CR210DolbyVisionTunnelFormatter.cpp.
+    // L5 active area: offsets in source pixels from each edge (13-bit fields).
+    bool hasActiveArea = false;
+    uint16_t activeAreaLeft = 0;
+    uint16_t activeAreaRight = 0;
+    uint16_t activeAreaTop = 0;
+    uint16_t activeAreaBottom = 0;
+    // L6 static ST 2086 / CTA-861.3 values carried in the DM: mastering
+    // display max (nits) and min (0.0001 nits), MaxCLL and MaxFALL (nits).
+    // MaxCLL 0 = not given (hasContentLight stays false then).
+    bool hasL6 = false;
+    uint16_t l6MaxDisplayMasteringLuminance = 0;
+    uint16_t l6MinDisplayMasteringLuminance = 0;
+    bool hasContentLight = false;
+    uint16_t maxCll = 0;
+    uint16_t maxFall = 0;
+    // L11 content type (0 default/unknown, 1 movies, 2 game, 3 sport,
+    // 4 user-generated, others reserved), white point, reference mode, and
+    // the intended picture-mode hints (2 bits each, 0 = no preference; the
+    // byte 2-3 layout is to be verified against the live "title L11" log line,
+    // which carries the raw bytes).
+    bool hasL11 = false;
+    uint8_t l11ContentType = 0;
+    uint8_t l11Whitepoint = 0;
+    bool l11ReferenceMode = false;
+    uint8_t l11Sharpness = 0;
+    uint8_t l11NoiseReduction = 0;
+    uint8_t l11MpegNoiseReduction = 0;
+    uint8_t l11FrameRateConversion = 0;
+    uint8_t l11Brightness = 0;
+    uint8_t l11Color = 0;
+    uint8_t l11Raw[4] = {};
 };
 
 /**

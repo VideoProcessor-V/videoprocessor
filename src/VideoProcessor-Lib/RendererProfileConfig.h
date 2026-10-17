@@ -717,6 +717,10 @@ namespace RendererProfileConfig
 			if (key == "dejudder_source_warp_filter") return IsChoice(value, { "catmull", "bilinear" });
 			if (key == "residual_stabilise_grain_guard" || key == "deband_vp_grain_guard") return IsChoice(value, { "on", "off" });
 			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
+			// Content recognition (intent interpreter item 1, 2026-10-17): default off;
+			// a new class is taken after this many seconds, at a cut.
+			if (key == "intent_content") return IsChoice(value, { "off", "on" });
+			if (key == "intent_content_hold_seconds") return IsNumberInRange(value, 1.0, 60.0);
 			if (key == "temporal_dither") return IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" });
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
@@ -1469,7 +1473,7 @@ namespace RendererProfileConfig
 			"eotf", "transfer", "colorspace", "primaries", "format",
 			"hdr_metadata", "interlaced", "scan", "source_rate", "cadence",
 			"width", "height", "resolution", "renderer", "actual_refresh",
-			"key", "ambient"
+			"key", "ambient", "content"
 		};
 
 		for (const GroupSpec& spec : specs)
@@ -2271,7 +2275,7 @@ namespace RendererProfileConfig
 						{ "eotf", "transfer", "colorspace", "primaries", "format",
 						  "hdr_metadata", "interlaced", "scan", "source_rate",
 						  "cadence", "width", "height", "resolution", "renderer",
-						  "actual_refresh", "key", "ambient" },
+						  "actual_refresh", "key", "ambient", "content" },
 						"[" + profileSection + "] when=", error)))
 					return false;
 				model.profiles.emplace(groupName + "." + profileName, std::move(profile));

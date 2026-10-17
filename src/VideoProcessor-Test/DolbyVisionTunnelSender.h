@@ -104,6 +104,69 @@ namespace Tests
             return dm;
         }
 
+        // Content intent (2026-10-17): extension blocks after the existing ones,
+        // written from libdovi's public field layout (dolby_vision/src/rpu/
+        // extension/level5.rs, level6.rs, level11.rs), independently of the parser.
+        inline void AppendExtension(std::vector<uint8_t>& dm, uint8_t level,
+            const std::vector<uint8_t>& payload, uint32_t declaredLength = 0xFFFFFFFFU)
+        {
+            const size_t at = dm.size();
+            dm.resize(at + 5 + payload.size(), 0);
+            Put32(dm.data() + at, declaredLength == 0xFFFFFFFFU ?
+                static_cast<uint32_t>(payload.size()) : declaredLength);
+            dm[at + 4] = level;
+            std::copy(payload.begin(), payload.end(), dm.begin() + at + 5);
+            ++dm[70];
+        }
+
+        inline void Append16(std::vector<uint8_t>& bytes, uint16_t value)
+        {
+            bytes.push_back(static_cast<uint8_t>(value >> 8));
+            bytes.push_back(static_cast<uint8_t>(value));
+        }
+
+        // L5 in the tunnel's 16-bit containers (8 bytes, like the tunnel's L1).
+        inline std::vector<uint8_t> L5Payload(uint16_t left, uint16_t right,
+            uint16_t top, uint16_t bottom)
+        {
+            std::vector<uint8_t> p;
+            for (const uint16_t v : { left, right, top, bottom })
+                Append16(p, v);
+            return p;
+        }
+
+        // L5 as the RPU packs it: four 13-bit fields, MSB first, in 7 bytes.
+        inline std::vector<uint8_t> L5PackedPayload(uint16_t left, uint16_t right,
+            uint16_t top, uint16_t bottom)
+        {
+            uint64_t bits = 0;
+            for (const uint16_t v : { left, right, top, bottom })
+                bits = (bits << 13) | (v & 0x1FFFU);
+            bits <<= 4; // 52 bits of fields + 4 zero bits = 56
+            std::vector<uint8_t> p(7);
+            for (int i = 6; i >= 0; --i, bits >>= 8)
+                p[static_cast<size_t>(i)] = static_cast<uint8_t>(bits & 0xFFU);
+            return p;
+        }
+
+        inline std::vector<uint8_t> L6Payload(uint16_t maxMastering, uint16_t minMastering,
+            uint16_t maxCll, uint16_t maxFall)
+        {
+            std::vector<uint8_t> p;
+            for (const uint16_t v : { maxMastering, minMastering, maxCll, maxFall })
+                Append16(p, v);
+            return p;
+        }
+
+        // L11: content_type, whitepoint | reference_mode_flag << 4, and the two
+        // hint bytes (sharpness, NR, MPEG NR, FRC; brightness, colour; 2 bits each).
+        inline std::vector<uint8_t> L11Payload(uint8_t contentType, uint8_t whitepoint,
+            bool referenceMode, uint8_t hints2 = 0, uint8_t hints3 = 0)
+        {
+            return { contentType, static_cast<uint8_t>((whitepoint & 0x0FU) | (referenceMode ? 0x10U : 0U)),
+                hints2, hints3 };
+        }
+
         inline std::vector<Packet> Packetize(const std::vector<uint8_t>& body,
             uint8_t current = 3, uint8_t affected = 3,
             bool noMetadata = false, bool eos = false)

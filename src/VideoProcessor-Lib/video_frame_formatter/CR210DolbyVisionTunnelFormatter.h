@@ -133,6 +133,7 @@ private:
 	std::array<uint16_t, 256> m_titleLevelCounts{};
 	bool m_titleLevelsLogged = false;
 	bool m_titleTrimLogged[2] = {};       // [0]=L2, [1]=L8
+	bool m_titleIntentLogged = false;     // content intent 2026-10-17: L11/L5/L6 line
 	bool m_hasAVX2 = false;
 	ConversionMethod m_conversionMethod = ConversionMethod::AUTO;
 	PTP_WORK m_conversionWork[MAX_WORKERS] = {};

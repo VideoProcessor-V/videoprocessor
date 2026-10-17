@@ -89,11 +89,15 @@ namespace MappingPolicies
             if (m.min.present) hdr.min_luma = LibplaceboNits(m.min);
             if (m.peak.present) hdr.max_luma = LibplaceboNits(m.peak);
         }
-        // The DV tunnel carries no MaxCLL/MaxFALL (the parser leaves them absent).
+        // Static sources only: a DV tunnel's L6 MaxCLL/MaxFALL (content intent
+        // 2026-10-17, tagged DvL6) is carried for status and is not given to
+        // libplacebo, so it stays out of today's mapping.
         if (policy.useContentLight)
         {
-            if (d.maxCll.present) hdr.max_cll = LibplaceboNits(d.maxCll);
-            if (d.maxFall.present) hdr.max_fall = LibplaceboNits(d.maxFall);
+            if (d.maxCll.present && d.maxCllSource != SceneFieldSource::DvL6)
+                hdr.max_cll = LibplaceboNits(d.maxCll);
+            if (d.maxFall.present && d.maxFallSource != SceneFieldSource::DvL6)
+                hdr.max_fall = LibplaceboNits(d.maxFall);
         }
         if (policy.useDynamicSceneStats && IsTransmittedDynamicSource(d.source) &&
             d.valid && d.HasSceneStats() && d.sceneMax.fromPq && d.sceneAvg.fromPq)

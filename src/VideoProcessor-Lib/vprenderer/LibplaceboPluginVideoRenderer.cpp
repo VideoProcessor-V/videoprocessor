@@ -673,3 +673,10 @@ bool LibplaceboPluginVideoRenderer::GetDolbyVisionLuminanceStatus(
 	status = {};
 	return m_renderer && m_renderer->GetDolbyVisionLuminanceStatus(status);
 }
+
+bool LibplaceboPluginVideoRenderer::GetContentIntentStatus(
+	ContentIntentStatus& status) const
+{
+	status = {};
+	return m_renderer && m_renderer->GetContentIntentStatus(status);
+}

@@ -76,6 +76,7 @@
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
+#include <ContentIntentObserver.h>
 #include <MotionConfig.h>
 #include <vprenderer/TemporalRenderer.h>
 #include <SubtitleBoxDetector.h>
@@ -1126,6 +1127,11 @@ namespace
 		InterpolationPolicy::Fallback interpolationFallback = InterpolationPolicy::Fallback::Hold;
 		bool interpolationFillGaps = false;
 		InterpolationPolicy::SourceClass sourceClass = InterpolationPolicy::SourceClass::Legacy;
+		// Content recognition (intent interpreter item 1, 2026-10-17; default off):
+		// the rule-based content class for the rules' `content` variable, and the
+		// seconds a new class must hold before it is taken (at a cut).
+		bool intentContent = false;
+		double intentContentHoldSeconds = 5.0;
 		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
 		// default is the faithful path, the other value the established one byte for byte;
 		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,
@@ -1350,7 +1356,7 @@ namespace
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
 			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
@@ -2394,7 +2400,8 @@ namespace
 			std::make_tuple("dejudder_pixel_trust_hi", 0.5, 32.0, &settings.dejudderPixelTrustHi),
 			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
 			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
-			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale) })
+			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale),
+			std::make_tuple("intent_content_hold_seconds", 1.0, 60.0, &settings.intentContentHoldSeconds) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -2605,6 +2612,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid source_class '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.sourceClass));
+		}
+		if (tryChoice("intent_content", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.intentContent = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid intent_content '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.intentContent ? "on" : "off");
 		}
 		if (tryChoice("optical_flow", raw))
 		{
@@ -5639,6 +5654,9 @@ struct LibplaceboVideoRenderer::Impl
 	bool ledMeasurementDisabledLogged = false;
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
+	// Content recognition (intent interpreter item 1, 2026-10-17): its own
+	// observer of the same walk, idle while intent_content is off.
+	const std::shared_ptr<ContentIntent::Observer> contentIntent = std::make_shared<ContentIntent::Observer>();
 	LedDrive::MeasurementHook ledMeasurement;
 	// Re-applies the output encoding libplacebo drops after a texture-input
 	// PRE_OUTPUT hook (the LED measurement and compensation hooks).
@@ -9781,6 +9799,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
 		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
 		changed(current.sourceClass != next.sourceClass, "source_class");
+		changed(current.intentContent != next.intentContent ||
+			current.intentContentHoldSeconds != next.intentContentHoldSeconds, "intent_content");
 		changed(current.temporalDither != next.temporalDither, "temporal_dither");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
@@ -24090,6 +24110,8 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
         std::atomic_load(&m_impl->queuedFrameObserver);
     if (statisticsObserver)
         statisticsObserver->BeginWalk(previewFrames.empty() ? 0 : previewFrames.size() - 1);
+    const std::shared_ptr<ContentIntent::Observer> contentIntent =
+        m_impl ? m_impl->contentIntent : std::shared_ptr<ContentIntent::Observer>();
     ActivePictureBounds proofBase;
     ActivePictureTransitionModel liveProofModel;
     bool inwardProofEligible = false;
@@ -24443,6 +24465,50 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
             preview.nearBlackEvaluated, preview.nearBlack);
         preview.identity = sample.identity;
         preview.observation = sample.observation;
+        // Content recognition (intent interpreter item 1, 2026-10-17): each new
+        // queued frame once, with the measured rates and the frame's DV L11/L5.
+        if (contentIntent && contentIntent->Enabled() && !queued.cadenceRepeat)
+        {
+            const DolbyVisionTunnelFrameMetadata* dm =
+                state.dolbyVisionTunnel && queued.converted && queued.converted->dolby.valid ?
+                &queued.converted->dolby : nullptr;
+            QueuedFrameStatistics::PictureRect picture;
+            picture.right = source.width;
+            picture.bottom = source.height;
+            const auto& bounds = preview.observation.bounds;
+            if (preview.observation.classification == ActivePictureClassification::BAR_CROP_TRUSTED &&
+                bounds.right > bounds.left && bounds.bottom > bounds.top)
+            {
+                picture.left = bounds.left;
+                picture.top = bounds.top;
+                picture.right = bounds.right;
+                picture.bottom = bounds.bottom;
+            }
+            else if (dm && dm->hasActiveArea &&
+                static_cast<int>(dm->activeAreaLeft) + dm->activeAreaRight < source.width &&
+                static_cast<int>(dm->activeAreaTop) + dm->activeAreaBottom < source.height)
+            {
+                // L5 lets the measurement skip the bars when VP has not found them.
+                picture.left = dm->activeAreaLeft;
+                picture.top = dm->activeAreaTop;
+                picture.right = source.width - dm->activeAreaRight;
+                picture.bottom = source.height - dm->activeAreaBottom;
+            }
+            ContentIntent::FrameContext context;
+            const double measuredCaptureHz = m_measuredFrameRate.load(std::memory_order_relaxed);
+            context.contentHz = queued.filmHz > 0.0 ? queued.filmHz :
+                measuredCaptureHz > 0.0 ? measuredCaptureHz : state.displayMode->RefreshRateHz();
+            const double measuredDisplayHz = m_impl->presentationTelemetry.Snapshot().measuredDisplayHz;
+            context.displayHz = measuredDisplayHz > 0.0 ? measuredDisplayHz :
+                m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+            context.pulldownLocked = queued.filmHz > 0.0;
+            context.sourceClass = m_impl->activeSettings.sourceClass;
+            context.l11Present = dm && dm->hasL11;
+            context.l11ContentType = dm ? dm->l11ContentType : 0;
+            context.discontinuity = queued.gapBefore || queued.frame.IsSourceDiscontinuity();
+            contentIntent->SetFrameContext(context);
+            contentIntent->ObserveFrame(queued.sourceSequence, rememberedIndex, source, picture);
+        }
         if (statisticsObserver)
         {
             QueuedFrameStatistics::PictureRect picture;
@@ -25918,6 +25984,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_pulldownDetection.store(m_impl->activeSettings.dejudderPulldown, std::memory_order_relaxed);
 			m_pulldownFixes.store(m_impl->activeSettings.pulldownFixes, std::memory_order_relaxed);
 			m_timingContinuityFixes.store(m_impl->activeSettings.timingContinuityFixes, std::memory_order_relaxed);
+			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
+				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
 			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
@@ -26872,6 +26940,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "interpolation_fallback=" << InterpolationPolicy::Name(s.interpolationFallback) << "\n"
 		<< "interpolation_fill_gaps=" << (s.interpolationFillGaps ? "on" : "off") << "\n"
 		<< "source_class=" << InterpolationPolicy::Name(s.sourceClass) << "\n"
+		<< "intent_content=" << (s.intentContent ? "on" : "off") << "\n"
+		<< "intent_content_hold_seconds=" << s.intentContentHoldSeconds << "\n"
 		<< "temporal_dither=" << s.temporalDither << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
@@ -26962,6 +27032,15 @@ bool LibplaceboVideoRenderer::GetDolbyVisionLuminanceStatus(
 	std::lock_guard<std::mutex> guard(m_impl->ingressStatusMutex);
 	status = m_impl->sourceLuminance;
 	return m_impl->sourceLuminanceObserved;
+}
+
+bool LibplaceboVideoRenderer::GetContentIntentStatus(ContentIntentStatus& status) const
+{
+	status = {};
+	if (!m_impl)
+		return false;
+	status = m_impl->contentIntent->Status();
+	return status.enabled;
 }
 
 bool LibplaceboVideoRenderer::GetSceneDescriptor(
