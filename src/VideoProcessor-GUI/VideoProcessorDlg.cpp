@@ -10492,6 +10492,15 @@ void CVideoProcessorDlg::RenderStart()
 			delete[] ew;
 
 			HandleRendererFailureFullscreen("libplacebo-start");
+			// Hunt 2 platform sweep: a refused plugin (build ID mismatch etc.) is
+			// refused for the life of the process; automatic retries cannot help.
+			// The fix is redeploying the pair and restarting VP (the probe is cached).
+			if (RendererId::IsLibplaceboRefused(selectedRenderer->libplaceboBeta) &&
+				m_rendererFailureNextRetryTick != 0)
+			{
+				m_rendererFailureNextRetryTick = 0;
+				DebugLog::Log("Renderer failure retry not scheduled: plugin refused (redeploy EXE and DLL from one build)");
+			}
 			UpdateState();
 			m_rendererRestartButton.EnableWindow(true);
 		}
@@ -12385,10 +12394,22 @@ void CVideoProcessorDlg::RebuildRendererCombo()
 
 	DirectShowVideoRendererIds(rendererIds);
 #if defined(_WIN64)
-	if (RendererId::IsLibplaceboAvailable())
-		rendererIds.push_back(RendererId::Libplacebo());
-	if (RendererId::IsLibplaceboAvailable(true))
-		rendererIds.push_back(RendererId::Libplacebo(true));
+	// Hunt 2 platform sweep: a refused plugin (EXE/DLL build ID mismatch, API,
+	// flavour) used to vanish from the list, so the configured VP Renderer
+	// silently fell back to another renderer and the refusal was only in the
+	// log. It stays listed; starting it fails with the refusal text in the
+	// renderer box. The DLL itself is never kept loaded.
+	for (const bool beta : { false, true })
+	{
+		if (RendererId::IsLibplaceboAvailable(beta))
+			rendererIds.push_back(RendererId::Libplacebo(beta));
+		else if (RendererId::IsLibplaceboRefused(beta))
+		{
+			DebugLog::Log("Renderer list: %s plugin refused; listed so its start reports why",
+				beta ? "VP Renderer (Beta)" : "VP Renderer");
+			rendererIds.push_back(RendererId::Libplacebo(beta));
+		}
+	}
 #endif
 
 	// Alpha is always first; remaining eligible renderers are shown in the

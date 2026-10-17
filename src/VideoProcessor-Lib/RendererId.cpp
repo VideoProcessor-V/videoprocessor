@@ -76,3 +76,14 @@ bool RendererId::IsLibplaceboAvailable(bool beta)
 	return false;
 #endif
 }
+
+
+bool RendererId::IsLibplaceboRefused(bool beta)
+{
+#if defined(_WIN64)
+	return LibplaceboPluginVideoRenderer::IsRefused(beta);
+#else
+	(void)beta;
+	return false;
+#endif
+}

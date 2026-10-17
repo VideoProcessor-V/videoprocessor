@@ -195,6 +195,13 @@ bool LibplaceboPluginVideoRenderer::IsAvailable(bool beta)
 }
 
 
+bool LibplaceboPluginVideoRenderer::IsRefused(bool beta)
+{
+	const PluginExports& plugin = GetPlugin(beta);
+	return plugin.module == nullptr && !plugin.failure.empty();
+}
+
+
 LibplaceboPluginVideoRenderer::LibplaceboPluginVideoRenderer(
 	IRendererCallback& callback,
 	uint32_t rendererGeneration,

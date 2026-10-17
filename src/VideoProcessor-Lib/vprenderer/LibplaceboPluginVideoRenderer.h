@@ -11,6 +11,10 @@ class LibplaceboPluginVideoRenderer final : public IVideoRenderer
 {
 public:
 	static bool IsAvailable(bool beta = false);
+	// Hunt 2 platform sweep: the plugin is present but was refused (build ID,
+	// API, flavour or exports). Such a renderer stays selectable so starting it
+	// shows the refusal instead of silently falling back to another renderer.
+	static bool IsRefused(bool beta = false);
 
 	LibplaceboPluginVideoRenderer(
 		IRendererCallback& callback,
