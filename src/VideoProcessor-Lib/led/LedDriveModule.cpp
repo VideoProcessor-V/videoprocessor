@@ -1290,10 +1290,13 @@ namespace LedDrive
 				// not only the controller's belief (a failed write of 50 left
 				// the projector at 51 while the script believed 50).
 				const DriverStatus status = driver->Status();
+				// Bug hunt 2: a pending resend counts only while the port has not
+				// seen the value since (the driver's reopen resync may have
+				// written it): never sent twice.
 				const bool lightAt = controller.Light() == current.ledCeiling && !status.busy &&
-					(status.lastSentLight < 0 || status.lastSentLight == current.ledCeiling) && resendLight < 0;
+					(status.lastSentLight < 0 ? resendLight < 0 : status.lastSentLight == current.ledCeiling);
 				const bool contrastAt = controller.Contrast() == 50 && !status.contrastBusy &&
-					(status.lastSentContrast < 0 || status.lastSentContrast == 50) && resendContrast < 0;
+					(status.lastSentContrast < 0 ? resendContrast < 0 : status.lastSentContrast == 50);
 				bool lightWritten = lightAt, contrastWritten = contrastAt;
 				const bool light = lightAt || driver->SendScript("LPW1", current.ledCeiling, &lightWritten);
 				const bool contrast = contrastAt || driver->SendScript("CNTR", 50, &contrastWritten);
@@ -1396,6 +1399,18 @@ namespace LedDrive
 					resendLight = -1;
 				if (!out.contrastSchedule.empty())
 					resendContrast = completeContrast = -1;
+				// Bug hunt 2: nothing to repeat when the port already has the value
+				// (the driver's resync after a reopen writes what the script
+				// intended): never sent twice.
+				if (resendLight >= 0 || resendContrast >= 0 || completeContrast >= 0)
+				{
+					const DriverStatus status = driver->Status();
+					if (!status.busy && status.lastSentLight >= 0 && status.lastSentLight == controller.Light())
+						resendLight = -1;
+					if (!status.contrastBusy && status.lastSentContrast >= 0 &&
+						status.lastSentContrast == controller.Contrast())
+						resendContrast = completeContrast = -1;
+				}
 				// Bug hunt 2 (#10): nothing more is sent once new settings have
 				// come (as for each CNTR of a schedule): a script LPW1 written after
 				// a switch to compensate would be taken as compensate's own.

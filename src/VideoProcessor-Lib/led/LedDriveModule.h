@@ -251,7 +251,8 @@ namespace LedDrive
 		int CutLevelLocked() const;
 		// cntr_pair_predict (post-merge audit 2026-10-17): the LPW1s still to land, as
 		// (ms from the current frame, LED fraction) in time order - those in flight and
-		// pendingLevel (this tick's, not yet written; -1 none) led_latency_ms ahead.
+		// pendingLevel (this tick's, not yet written; -1 none) or else the queued
+		// queuedLight, led_latency_ms after the driver's next send slot (bug hunt 2).
 		std::vector<std::pair<double, double>> LedLandingsLocked(int pendingLevel) const;
 		void HoldContrastLocked();
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
