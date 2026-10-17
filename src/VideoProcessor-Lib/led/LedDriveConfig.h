@@ -260,6 +260,39 @@ namespace LedDrive
 		// (the black given up for a shorter fade-up), CNTR to cut_cntr_level.
 		// 60 = no pre-lift; 255 = no cap and no pre-positioning (before 7c-3).
 		int blackPreliftMax = 120;
+		// Fix under test (compensate review 2026-10-17, "Before deploy" 2):
+		// preposition_black_only - the exit-from-black CNTR hold and the LED
+		// pre-lift apply only while the frame the LED lands on is truly black
+		// (IsTrueBlack: APL < 17 and highlight < 20, the custom dim's black),
+		// so a visible fade-in never carries CNTR at cut_cntr_level and its
+		// release step. Off = while black or very dark (APL < 20), as before.
+		// Note: black_prelift_max has an effect only when the look-ahead
+		// reaches further than one command gap plus led_latency_ms (the cut's
+		// own jump replaces the pre-lift before it is sent otherwise).
+		bool prepositionBlackOnly = true;
+		// Fix under test (review 2026-10-17, "Before deploy" 3):
+		// led_landing_ms - each LPW1 / CNTR lands led_latency_ms /
+		// cntr_latency_ms after the moment the driver wrote it (the driver's
+		// timestamp, mapped onto the frame clock), at the nearest frame. Off =
+		// the send is credited to the frame during which it was written and
+		// lands the latency (in whole frames) later, as before.
+		bool ledLandingMs = true;
+		// Experimental (review 2026-10-17, "Before deploy" 4), default off:
+		// cut_lead: window - a bright cut seen in the look-ahead window gets
+		// its LED jump as soon as it enters the window (not at the command
+		// latency ahead of it); until the cut the LED holds there and CNTR
+		// does not rise (port reserve for the cut's own commands; CNTR may
+		// still descend: never above need). The exit-from-black pre-lift keeps
+		// its cap. off = as before.
+		bool cutLeadWindow = false;
+		// LED look-ahead depth in time (review 2026-10-17, "Before deploy" 1;
+		// time-based, owner rule): 0 = as deep as the queue walk
+		// (active_picture_lookahead_frames). Above 0 the LED uses at most this
+		// far ahead, in source frames at the measured rate; the renderer can
+		// ask for a deeper walk with LedDriveModule::WantedLookaheadFrames()
+		// (not wired yet: needs the renderer's walk to visit the deeper
+		// frames for the LED observer only).
+		int ledLookaheadMs = 0;
 		// The fade-up's displayed-light ramp for the shortfall LED x CNTR x
 		// gain cannot yet reach: fast, bounded by the modelled light (the
 		// paired LED / CNTR move itself keeps the script-matched rates).
@@ -579,6 +612,10 @@ namespace LedDrive
 			Number("recovery_bias_pct", 0.0, 20.0),
 			Integer("cut_cntr_level", 50, 100),
 			Integer("black_prelift_max", 0, 255),
+			Boolean("preposition_black_only"),   // review 2026-10-17
+			Boolean("led_landing_ms"),           // review 2026-10-17
+			Choice("cut_lead", { "off", "window" }),   // review 2026-10-17, experimental
+			Integer("led_lookahead_ms", 0, 2000),     // review 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
 			Number("recovery_rate_min", 0.0, 10000.0),
 			Number("recovery_rate_max", 1.0, 10000.0),
@@ -920,6 +957,12 @@ namespace LedDrive
 		readNumber("recovery_bias_pct", result.recoveryBiasPct);
 		readInt("cut_cntr_level", 50, 100, result.cutCntrLevel);
 		readInt("black_prelift_max", 0, 255, result.blackPreliftMax);
+		// Review 2026-10-17.
+		config.TryGetBool(section, "preposition_black_only", result.prepositionBlackOnly);
+		config.TryGetBool(section, "led_landing_ms", result.ledLandingMs);
+		if (config.TryGetString(section, "cut_lead", value))
+			result.cutLeadWindow = ConfigFile::NormalizeName(value) == "window";
+		readInt("led_lookahead_ms", 0, 2000, result.ledLookaheadMs);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
 		readNumber("recovery_rate_min", result.recoveryRateMin);
 		readNumber("recovery_rate_max", result.recoveryRateMax);

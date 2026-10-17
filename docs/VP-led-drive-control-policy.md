@@ -17,8 +17,13 @@ E = 2.41) still apply. `script` mode is defined at the end.
   74 ≈ 2.5× the white of CNTR 50 at the same LED: the projector has a
   large reserve above CNTR 50.
 - **VP gain** is in code space: instantaneous, float, but it can only push
-  a pixel up to code 255 (≈1.2× the light of code 235) and can never add
-  light beyond that. It *can* always reduce.
+  a pixel up to reference white (code 235) and can never add light beyond
+  that. It *can* always reduce. (Corrected 2026-10-17: earlier versions of
+  this document said up to code 255, "≈1.2×, via codes 236–255". The
+  compensation shader does not do that: a boosted picture is rolled under
+  white by the knee (or clipped at 1.0 with `knee: 0`). Codes 236–255 carry
+  only the source's own whiter-than-white, which passes through unchanged
+  since the 2026-10-17 fix.)
 - **Pumping** comes from the floor or the content moving visibly within a
   scene. A cut masks any change that lands on the cut frame.
 
@@ -37,7 +42,7 @@ frame the renderer renders once and DXGI repeats, every 16.7 ms when the
 de-judder's extra presents are rendered — continuous in amplitude and
 unpaced by the serial port: they do all of whatever can be done without
 *adding* light (every reduction, every dump,
-and the first ≈20% of restoration via codes 236–255). CNTR is used only
+and restoration up to reference white; not beyond, see §1). CNTR is used only
 for the part software cannot do — restoring light beyond that — and only
 by the shortfall. The LED supplies the floor.
 
@@ -117,8 +122,9 @@ only as a ceiling.
    out of a shallow dim it is partial. If CNTR was never raised (the
    dimming was software-only, §3.1) there is nothing to dump.
 2. **Software keeps brightness up and contains the crush:** the VP gain
-   goes to its code ceiling (≈1.2× of what remains, via codes 236–255 —
-   it cannot replace what the dump removed) in the same frame;
+   goes to its ceiling (up to reference white; codes 236–255 are not
+   used for it, see §1. It cannot replace what the dump removed) in the
+   same frame;
    the knee compresses whatever would still exceed the DMD's maximum.
    Only if that compression would exceed the tolerance does the gain come
    below 1 (the gain branch of the highlight policy) — the scene plays
@@ -184,6 +190,33 @@ rate law. CNTR must never rise ahead of the LED's actual dimming.
   `cut_cntr_level` (held until the cut). In other scenes the head start is
   the early ramp at the scene rate plus the seen cut's single LED command
   landing on the cut frame. `black_prelift_max: 255` = before 7c-3.
+- **Review 2026-10-17 (docs/audit/VP-led-compensate-review-2026-10-17.md):**
+  - `black_prelift_max` has no effect when the look-ahead depth is at most
+    one command gap plus `led_latency_ms` (8 frames at 24p is 333 ms, but the
+    gap is 200 ms and the latency 80 ms). The cut's own jump replaces the
+    pre-lift in the driver's queue before it is sent: CNTR takes the first
+    port slot, and the LPW1 waits a gap.
+  - `preposition_black_only` (default on): the CNTR hold and the pre-lift
+    apply only while the frame is truly black (APL < 17 and highlight < 20,
+    the same test as the custom dim's black). A visible dark picture (a
+    fade-in) gets the early ramp instead, with no CNTR held at
+    `cut_cntr_level` and so no single-command release step. Off = APL < 20,
+    as built in 7c-3.
+  - `led_landing_ms` (default on): each LPW1 / CNTR lands `led_latency_ms` /
+    `cntr_latency_ms` after the moment the driver wrote it, at the nearest
+    frame. Before this, a send was credited to the start of the frame during
+    which it was written, which made the gain up to a frame early or late.
+    Off = by whole frames, as before.
+  - `cut_lead: window` (experimental, default off): a seen bright cut's LED
+    jump goes out as soon as the cut enters the look-ahead window. The LED
+    then holds, and CNTR does not rise (it may still come down), until the
+    cut, which keeps the port free for it. On a dark picture the jump keeps
+    `black_prelift_max`'s cap.
+  - `led_lookahead_ms` (default 0 = the queue walk's own depth): caps the
+    LED's look-ahead in time. The renderer does not yet walk deeper than
+    `active_picture_lookahead_frames` for the LED, so for now it can only
+    shorten the depth. Compensate logs a warning, once per change, when
+    look-ahead is on but the depth is 0.
 - **Exact dump** (restated for §3.3): the incoming scene's statistics size
   the CNTR dump to the tolerance, not to a fixed stopping point.
 

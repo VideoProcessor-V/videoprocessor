@@ -128,15 +128,19 @@ namespace LedDrive
 			{
 				++commands;
 				++sinceBurst;
+				// led_landing_ms (2026-10-17): the moment of the write.
+				const auto writtenAt = steady_clock::now();
 				if (sentLight >= 0)
 				{
 					++lightSends;
 					lastSentLight = sentLight;
+					lastLightSentAt = writtenAt;
 				}
 				if (sentContrast >= 0)
 				{
 					++contrastSends;
 					lastSentContrast = sentContrast;
+					lastContrastSentAt = writtenAt;
 				}
 			}
 		}
@@ -489,6 +493,18 @@ namespace LedDrive
 		// already taken but not yet written (a newer value simply follows it).
 		if (value < 0) ++contrastGeneration;
 		else scriptContrast = -1;   // audit 2026-10-16
+		wake.notify_one();
+	}
+
+	void BarcoAsciiDriver::CancelLight()
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		if (!opened || shuttingDown) return;
+		// As a script send does: a value already taken by the worker but not
+		// yet written is stopped by the generation.
+		pendingLight = -1;
+		pendingJump = false;
+		++lightGeneration;
 		wake.notify_one();
 	}
 
@@ -929,6 +945,8 @@ namespace LedDrive
 		status.lastSentLight = lastSentLight;
 		status.contrastSends = contrastSends;
 		status.lastSentContrast = lastSentContrast;
+		status.lastLightSentAt = lastLightSentAt;
+		status.lastContrastSentAt = lastContrastSentAt;
 		status.busy = pendingLight >= 0 || pendingContrast >= 0 || transmitting;
 		status.contrastBusy = pendingContrast >= 0 || contrastInFlight;   // audit 2026-10-16
 		status.sequenceBusy = !sequence.empty() || sequenceInFlight;

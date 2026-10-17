@@ -29,6 +29,7 @@ namespace LedDrive
 		void SetLight(int level) override;
 		void SetLightJump(int level) override;
 		void SetContrastAsync(int value) override;
+		void CancelLight() override;
 		bool SetLightNow(int level, int timeoutMs) override;
 		void BeginShutdown() override;
 		bool QueueSequence(const std::vector<std::pair<std::string, int>>& commands, int stepMs) override;
@@ -103,6 +104,9 @@ namespace LedDrive
 		int pendingContrast = -1;
 		int contrastSends = 0;
 		int lastSentContrast = -1;
+		// led_landing_ms (2026-10-17): when the newest LPW1 / CNTR was written.
+		std::chrono::steady_clock::time_point lastLightSentAt{};
+		std::chrono::steady_clock::time_point lastContrastSentAt{};
 		bool transmitting = false;
 		// audit 2026-10-16 (guarded by stateMutex): a value the worker has
 		// taken is sent only if its generation is unchanged once it holds the

@@ -128,6 +128,11 @@ namespace LedDrive
 		double FramePeriodMs() const;
 		int LatencyFrames() const;
 		size_t LookaheadDepth() const;
+		// led_lookahead_ms (review 2026-10-17) in source frames at the measured
+		// rate; 0 = the queue walk's own depth (active_picture_lookahead_frames).
+		// For the renderer: how far its queued-frame walk would have to reach
+		// for the LED alone (not wired in the renderer yet).
+		size_t WantedLookaheadFrames() const;
 		// The smoothed exact / predicted ratio applied to predictions.
 		double CorrectionRatio() const;
 
@@ -195,14 +200,17 @@ namespace LedDrive
 		bool idleRestored = false;
 		double framePeriodMs = 1000.0 / 60.0;
 		double sourceFps = 0.0;
-		struct Command { uint64_t frame; int level; };
+		// landMs (led_landing_ms, review 2026-10-17): when it lands on the
+		// frame clock (the driver's write time + led_latency_ms); -1 = by
+		// frames (the switch off, or no write time from the driver).
+		struct Command { uint64_t frame; int level; double landMs; };
 		std::deque<Command> commands;
 		int seenSends = 0;
 		int modelledLevel;
 		// 7c-1: the LED's light after the dead time, settling (as a fraction
 		// of the ceiling's flux), and the same for CNTR (its light factor).
 		SettleModel ledModel;
-		struct ContrastCommand { uint64_t frame; int value; };
+		struct ContrastCommand { uint64_t frame; int value; double landMs; };
 		std::deque<ContrastCommand> contrastCommands;
 		int seenContrastSends = 0;
 		SettleModel contrastModel;
@@ -239,6 +247,18 @@ namespace LedDrive
 		std::map<uint64_t, FrameStats> predictions;
 		std::atomic<int> sourceRange{ -1 };
 		size_t lookaheadDepth = 0;
+		// Review 2026-10-17: NowMs() of the last walk (SetLookaheadDepth; -1
+		// before any), and the depth-0 warning's state (-1 not yet decided,
+		// 0 depth available, 1 warned), logged by the module's thread.
+		double lastWalkWallMs = -1.0;
+		int lookaheadWarnState = -1;
+		std::string pendingWarning;
+		size_t LedLookaheadFramesLocked() const;
+		// led_landing_ms: the frame-clock time a send written at `sentAt`
+		// lands (+latencyMs), or -1 when it lands by frames.
+		double LandingMsLocked(std::chrono::steady_clock::time_point sentAt, int latencyMs,
+			double timeMs, double previousFrameMs, double previousWallMs) const;
+		bool LandsLocked(uint64_t frame, double landMs, int latencyFrames, double timeMs) const;
 		double correction = 1.0;
 		bool correctionSeeded = false;
 		// The output frame of the last correction update (audit 2026-10-16).

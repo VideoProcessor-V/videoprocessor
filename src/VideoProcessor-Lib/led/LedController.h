@@ -96,6 +96,11 @@ namespace LedDrive
 		// bright scene: the LED is pre-lifted (capped at black_prelift_max)
 		// and CNTR is to be held at cut_cntr_level until the cut.
 		bool preposition = false;
+		// cut_lead: window (review 2026-10-17): a bright cut's jump went out
+		// as the cut entered the look-ahead window and the cut has not reached
+		// the command's frame yet: in-scene sends wait (the LED holds, CNTR
+		// does not rise) so the port is free for the cut.
+		bool cutLeadHold = false;
 		double cutHighlight = 0.0;
 		double cutCeiling = 1e9;
 		std::string log;
@@ -211,6 +216,15 @@ namespace LedDrive
 
 	// A queued frame further ahead than the one a command is for: lets
 	// mode: compensate start a ramp early (docs/VP-led-drive-delta-1.md 4).
+	// Truly black (review 2026-10-17: the one definition, as the custom dim
+	// and the fade hold have used it): APL below 17 and the highlight
+	// percentile below 20, in code units. Gain x black = black, so nothing
+	// the LED or CNTR does shows on it.
+	inline bool IsTrueBlack(const FrameStats& stats)
+	{
+		return stats.apl < 17.0 && stats.highlight < 20.0;
+	}
+
 	struct Lookahead
 	{
 		FrameStats stats;
@@ -262,6 +276,8 @@ namespace LedDrive
 		double area = 0.0;
 		double previousApl = -1.0;
 		bool ramping = false;
+		// cut_lead: window: the jump for a cut still in the window was sent.
+		bool cutLeadSent = false;
 	};
 
 	// gain_led = flux(ceiling) / flux(LED level), in linear light.
