@@ -4572,7 +4572,9 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 		return false;
 	if (!ReadGeneralBoolean(config, "stats_overlay", false, m_stagedRuntimeSettings.statsOverlay, error) ||
 		!ReadGeneralBoolean(config, "use_frame_queue", true, m_stagedRuntimeSettings.useFrameQueue, error) ||
-		!ReadGeneralBoolean(config, "queue_auto_reset", true, m_stagedRuntimeSettings.queueAutoReset, error))
+		!ReadGeneralBoolean(config, "queue_auto_reset", true, m_stagedRuntimeSettings.queueAutoReset, error) ||
+		!ReadGeneralBoolean(config, "renderer_failure_keep_fullscreen", true,
+			m_stagedRuntimeSettings.rendererFailureKeepFullscreen, error))   // Bug hunt 2026-10-17
 		return false;
 	if (!Ambient::Read(config, m_stagedRuntimeSettings.ambient, error))
 		return false;
@@ -4885,6 +4887,18 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 		m_queueAutoResetConfigured = m_stagedRuntimeSettings.queueAutoReset;
 		if (m_rendererResetAutoCheck.GetSafeHwnd())
 			m_rendererResetAutoCheck.SetCheck(m_queueAutoResetConfigured ? BST_CHECKED : BST_UNCHECKED);
+	}
+	// Bug hunt 2026-10-17: [general] renderer_failure_keep_fullscreen.
+	if (m_stagedRuntimeSettings.rendererFailureKeepFullscreen !=
+		m_rendererFailureKeepFullscreen)
+	{
+		m_rendererFailureKeepFullscreen =
+			m_stagedRuntimeSettings.rendererFailureKeepFullscreen;
+		DebugLog::Log("Renderer failure policy: keep_fullscreen=%d retry=%s",
+			m_rendererFailureKeepFullscreen ? 1 : 0,
+			m_rendererFailureKeepFullscreen ? "2s,5s,10s,then-30s" : "manual");
+		if (!m_rendererFailureKeepFullscreen)
+			ResetRendererFailureRetry("policy-disabled");
 	}
 	// Applying settings replaces these session choices (survey: video
 	// conversion, the DirectShow transfer box and the capture device).
@@ -5371,8 +5385,11 @@ CVideoProcessorDlg::~CVideoProcessorDlg()
 		CloseHandle(m_configurationChangedEvent);
 		m_configurationChangedEvent = nullptr;
 	}
-	for (auto& captureDevice : m_captureDevices)
-		(*captureDevice).Release();
+	// Bug hunt 2026-10-17: the set owns exactly one reference per device
+	// (OnMessageCaptureDeviceFound attaches the posted reference and the set
+	// copy adds its own). Releasing each raw pointer here and then letting the
+	// set's CComPtrs release again on destruction was a double release.
+	m_captureDevices.clear();
 
 	// Capture release above prevents new callbacks and lets any final ingress
 	// lease drain. Do not destroy callback/UI state while a reset still retains
@@ -6098,6 +6115,16 @@ void CVideoProcessorDlg::OnRendererDirectShowPrimariesSelected()
 void CVideoProcessorDlg::OnBnClickedRendererFullScreenCheck()
 {
 	DbgLog((LOG_TRACE, 1, TEXT("CVideoProcessorDlg::OnBnClickedRendererFullScreenCheck()")));
+	// Bug hunt 2026-10-17: an operator toggle replaces the intent a renderer
+	// failure was holding; fullscreen-off restores the topology as usual.
+	if (m_fullscreenSuspendedByRendererFailure)
+	{
+		m_fullscreenSuspendedByRendererFailure = false;
+		DebugLog::Log(
+			"Renderer failure fullscreen suspension ended: reason=operator-toggle "
+			"fullscreen=%d",
+			m_rendererFullscreenCheck.GetCheck() ? 1 : 0);
+	}
 	if (m_rendererFullscreenCheck.GetCheck())
 	{
 		m_fullscreenEntryTransitionPending = true;
@@ -6847,6 +6874,7 @@ LRESULT CVideoProcessorDlg::OnMessageRendererStateChange(WPARAM wParam, LPARAM l
 		assert(oldRendererState == RendererState::RENDERSTATE_READY);
 
 		m_restartQueuedBecauseEotf = false;
+		ResetRendererFailureRetry("renderer-rendering");
 		const uint64_t latestCaptureSequence =
 			m_rendererIngressState->LatestCaptureSequence();
 		if (m_rendererCaptureVideoStateNotificationSequence == 0 ||
@@ -7161,7 +7189,7 @@ LRESULT CVideoProcessorDlg::OnMessageRendererStateChange(WPARAM wParam, LPARAM l
 		m_rendererStateText.SetWindowText(TEXT("Failed"));
 		m_windowedVideoWindow.SetWindowText(
 			TEXT("DirectShow renderer failed to build or start"));
-		m_rendererFullscreenCheck.SetCheck(FALSE);
+		HandleRendererFailureFullscreen("renderer-state-failed");
 		enableButtons = !m_rendererResetTransitionActive;
 		break;
 
@@ -7275,6 +7303,11 @@ bool CVideoProcessorDlg::TryFinalizeRendererRetirement(
 				ConvertHandoffToShutdown;
 		m_shutdownRendererRetirementBlocked = action ==
 			RendererRetirementService::IncompleteAction::RetainFailedShutdown;
+		// Bug hunt 2026-10-17: bound the wait (see PollShutdownRetirementDeadline).
+		if (m_shutdownRendererRetirementBlocked &&
+			m_shutdownRetirementBlockedDeadlineTick == 0)
+			m_shutdownRetirementBlockedDeadlineTick =
+				GetTickCount64() + ShutdownBlockedRetirementDeadlineMs;
 		if (convertHandoffToShutdown)
 		{
 			m_failedRendererRetirementNextRetryTick = 0;
@@ -7370,7 +7403,7 @@ bool CVideoProcessorDlg::TryFinalizeRendererRetirement(
 		{
 			m_rendererTransitionWindow.Hide();
 			m_windowedVideoWindow.ShowLogo(true);
-			m_rendererFullscreenCheck.SetCheck(FALSE);
+			HandleRendererFailureFullscreen("failed-renderer-retired");
 		}
 	}
 	return true;
@@ -8974,7 +9007,12 @@ void CVideoProcessorDlg::UpdateState()
 	if (m_failedRendererRetirement)
 	{
 		if (m_shutdownRendererRetirementBlocked)
+		{
+			// Bug hunt 2026-10-17: this used to return forever, so exit hung.
+			// The UI timer keeps calling UpdateState while it is blocked.
+			PollShutdownRetirementDeadline(GetTickCount64());
 			return;
+		}
 		const ULONGLONG now = GetTickCount64();
 		if (now < m_failedRendererRetirementNextRetryTick)
 			return;
@@ -9046,6 +9084,20 @@ void CVideoProcessorDlg::UpdateState()
 		{
 			CaptureStop();
 			return;
+		}
+
+		// Bug hunt 2026-10-17: exit requested while an earlier (non-exit) stop
+		// is STOPPING waited here forever for a READY notification that some
+		// devices never send. StopCapture is synchronous, so once it has
+		// returned the device is idle: treat it as READY when terminating.
+		if (m_wantToTerminate && m_captureDevice && !m_captureStopInProgress &&
+			m_captureDeviceState == CaptureDeviceState::CAPTUREDEVICESTATE_STOPPING)
+		{
+			DebugLog::Log(
+				"Capture stop during shutdown: state=STOPPING stop_returned=1 "
+				"action=treat-as-ready");
+			m_captureDeviceState = CaptureDeviceState::CAPTUREDEVICESTATE_READY;
+			CaptureGUIClear();
 		}
 
 		// If capture device is stopped we're happy to remove it
@@ -9201,7 +9253,12 @@ void CVideoProcessorDlg::UpdateState()
 			videoProcessorApp.RestoreDisplayTopology("fullscreen-off");
 		}
 
-		// If the renderer failed we don't auto-start it again but wait for something to happen
+		// If the renderer failed we don't auto-start it again here but wait for
+		// something to happen (a new capture state, Restart, or - bug hunt
+		// 2026-10-17 - the bounded retry in PollRendererFailureRetry). With
+		// renderer_failure_keep_fullscreen the check stays set on failure, so
+		// the block above keeps the fullscreen host and topology until the
+		// operator turns fullscreen off.
 		if (m_rendererState == RendererState::RENDERSTATE_FAILED)
 		{
 			// audit 2026-10-16: a renderer-start failure no longer restores
@@ -9264,6 +9321,157 @@ void CVideoProcessorDlg::UpdateState()
 	//assert(m_captureDeviceVideoState->valid);
 
 	DbgLog((LOG_TRACE, 1, TEXT("CVideoProcessorDlg::UpdateState(): - No changes")));
+}
+
+
+// Bug hunt 2026-10-17: every renderer-failure site used to clear the
+// fullscreen check, after which UpdateState destroyed the fullscreen host and
+// restored the pre-session display topology, and nothing retried. Keep the
+// intent (the check stays set; the host and topology stay) and schedule a
+// bounded retry. renderer_failure_keep_fullscreen=false keeps the old path.
+void CVideoProcessorDlg::HandleRendererFailureFullscreen(const char* site)
+{
+	if (!m_rendererFailureKeepFullscreen)
+	{
+		m_rendererFullscreenCheck.SetCheck(FALSE);
+		return;
+	}
+	const bool fullscreenIntent = m_rendererFullscreenCheck.GetCheck() != FALSE;
+	if (fullscreenIntent && !m_fullscreenSuspendedByRendererFailure)
+	{
+		m_fullscreenSuspendedByRendererFailure = true;
+		DebugLog::Log(
+			"Renderer failure fullscreen suspended: site=%s intent=kept "
+			"topology=retained host=%p",
+			site,
+			m_fullScreenVideoWindow ? m_fullScreenVideoWindow->GetHWND() : nullptr);
+	}
+	if (m_queueLaunchContractTerminalFailure)
+	{
+		// That failure asks for Restart Renderer explicitly; do not retry it.
+		m_rendererFailureNextRetryTick = 0;
+		return;
+	}
+	const uint32_t delayMs =
+		RendererFailureRetryDelayMs(m_rendererFailureRetryAttempt);
+	m_rendererFailureNextRetryTick = GetTickCount64() + delayMs;
+	DebugLog::Log(
+		"Renderer failure retry scheduled: site=%s attempt=%u delay_ms=%u "
+		"fullscreen_intent=%d",
+		site, m_rendererFailureRetryAttempt + 1, delayMs,
+		fullscreenIntent ? 1 : 0);
+}
+
+
+void CVideoProcessorDlg::ResetRendererFailureRetry(const char* reason)
+{
+	if (m_rendererFailureRetryAttempt == 0 &&
+		m_rendererFailureNextRetryTick == 0 &&
+		!m_fullscreenSuspendedByRendererFailure)
+		return;
+	DebugLog::Log(
+		"Renderer failure retry cleared: reason=%s attempts=%u "
+		"fullscreen_suspended=%d",
+		reason, m_rendererFailureRetryAttempt,
+		m_fullscreenSuspendedByRendererFailure ? 1 : 0);
+	m_rendererFailureRetryAttempt = 0;
+	m_rendererFailureNextRetryTick = 0;
+	m_fullscreenSuspendedByRendererFailure = false;
+}
+
+
+// Called from the 1-second UI timer. Retries only while the renderer is FAILED
+// with no renderer object, no lifecycle work in flight and a valid capture
+// state; otherwise the retry stays due and is re-evaluated on the next tick.
+void CVideoProcessorDlg::PollRendererFailureRetry(ULONGLONG now)
+{
+	if (m_rendererFailureNextRetryTick == 0 || now < m_rendererFailureNextRetryTick)
+		return;
+	if (!m_rendererFailureKeepFullscreen || m_wantToTerminate ||
+		m_queueLaunchContractTerminalFailure)
+	{
+		m_rendererFailureNextRetryTick = 0;
+		return;
+	}
+	if (m_rendererState != RendererState::RENDERSTATE_FAILED)
+	{
+		// Something else (new capture state, Restart) already moved on.
+		m_rendererFailureNextRetryTick = 0;
+		return;
+	}
+	if (m_videoRenderer || m_rendererConstructionActive ||
+		m_rendererRetirementPending || m_failedRendererRetirement ||
+		!m_captureDevice ||
+		m_captureDeviceState != CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING ||
+		!m_captureDeviceVideoState || !m_captureDeviceVideoState->valid)
+		return;
+
+	m_rendererFailureNextRetryTick = 0;
+	++m_rendererFailureRetryAttempt;
+	DebugLog::Log(
+		"Renderer failure automatic retry: attempt=%u fullscreen_intent=%d "
+		"fullscreen_suspended=%d",
+		m_rendererFailureRetryAttempt,
+		m_rendererFullscreenCheck.GetCheck() ? 1 : 0,
+		m_fullscreenSuspendedByRendererFailure ? 1 : 0);
+	// Same path as the Restart Renderer button.
+	OnBnClickedRendererRestart();
+}
+
+
+// Bug hunt 2026-10-17: m_shutdownRendererRetirementBlocked (a renderer whose
+// application-shutdown retirement could not complete) made UpdateState return
+// forever, so VP never exited. After the deadline, abandon the retained
+// renderer, stop and detach the capture device, and end the dialog. The
+// normal-exit path in the application then restores the display topology.
+void CVideoProcessorDlg::PollShutdownRetirementDeadline(ULONGLONG now)
+{
+	if (!m_shutdownRendererRetirementBlocked || !m_wantToTerminate)
+		return;
+	if (m_shutdownRetirementBlockedDeadlineTick == 0)
+		m_shutdownRetirementBlockedDeadlineTick =
+			now + ShutdownBlockedRetirementDeadlineMs;
+	if (now < m_shutdownRetirementBlockedDeadlineTick)
+		return;
+
+	DebugLog::Log(
+		"Renderer shutdown retirement deadline expired: renderer=%S "
+		"deadline_ms=%u capture=%d action=abandon-renderer-end-dialog",
+		static_cast<LPCTSTR>(m_retiringRendererName),
+		ShutdownBlockedRetirementDeadlineMs,
+		m_captureDevice ? 1 : 0);
+	// Deliberately leaked: its backend already failed to release, and
+	// destroying it here or in the dialog destructor would re-enter that
+	// backend on the UI thread. Process exit reclaims it.
+	if (m_failedRendererRetirement)
+		new std::shared_ptr<IVideoRenderer>(std::move(m_failedRendererRetirement));
+	m_shutdownRendererRetirementBlocked = false;
+
+	// No capture callback may outlive the dialog.
+	if (m_captureDevice)
+	{
+		try
+		{
+			if (m_captureDeviceState ==
+				CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING ||
+				m_captureDeviceState ==
+				CaptureDeviceState::CAPTUREDEVICESTATE_STOPPING)
+				m_captureDevice->StopCapture();
+		}
+		catch (const std::exception& e)
+		{
+			DebugLog::Log("Forced shutdown capture stop failed: %s", e.what());
+		}
+		catch (...)
+		{
+			DebugLog::Log("Forced shutdown capture stop failed: unknown exception");
+		}
+		m_captureDevice->SetCallbackHandler(nullptr);
+		m_captureDevice.Release();
+		m_captureDeviceState = CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN;
+	}
+	CloseOwnedTopLevelWindowsForShutdown();
+	CDialog::EndDialog(S_OK);
 }
 
 //
@@ -9570,7 +9778,17 @@ void CVideoProcessorDlg::CaptureStop()
 		"Capture stop dispatch: phase=before-stop termination=%d renderer_retired=%d",
 		m_wantToTerminate ? 1 : 0,
 		(!m_videoRenderer && !m_rendererRetirementPending) ? 1 : 0);
-	m_captureDevice->StopCapture();
+	m_captureStopInProgress = true;   // Bug hunt 2026-10-17
+	try
+	{
+		m_captureDevice->StopCapture();
+	}
+	catch (...)
+	{
+		m_captureStopInProgress = false;
+		throw;
+	}
+	m_captureStopInProgress = false;
 	DebugLog::Log(
 		"Capture stop dispatch: phase=after-stop termination=%d",
 		m_wantToTerminate ? 1 : 0);
@@ -10000,7 +10218,7 @@ void CVideoProcessorDlg::RenderStart()
 			m_windowedVideoWindow.SetWindowText(ew);
 			delete[] ew;
 
-			m_rendererFullscreenCheck.SetCheck(FALSE);
+			HandleRendererFailureFullscreen("libplacebo-start");
 			UpdateState();
 			m_rendererRestartButton.EnableWindow(true);
 		}
@@ -10289,8 +10507,9 @@ void CVideoProcessorDlg::RenderStart()
 			m_windowedVideoWindow.SetWindowText(ew);
 			delete[] ew;
 
-			// Ensure we're not full screen anymore and update state
-			m_rendererFullscreenCheck.SetCheck(FALSE);
+			// Bug hunt 2026-10-17: keep fullscreen intent (or, with
+			// renderer_failure_keep_fullscreen off, leave fullscreen as before)
+			HandleRendererFailureFullscreen("directshow-start");
 			UpdateState();
 
 			// Give the user a chance to try again
@@ -15894,6 +16113,7 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 	{
 		if (m_failedRendererRetirement)
 			UpdateState();
+		PollRendererFailureRetry(uiNow);         // Bug hunt 2026-10-17
 		// Stage 9: a lost detector falls back to the saved room.
 		if (m_ambientConfigured.mode == Ambient::Mode::Sensor)
 		{

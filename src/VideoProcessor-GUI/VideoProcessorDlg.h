@@ -536,6 +536,7 @@ protected:
 		bool statsOverlay = false;
 		bool useFrameQueue = true;
 		bool queueAutoReset = true;
+		bool rendererFailureKeepFullscreen = true;   // Bug hunt 2026-10-17
 		Ambient::Settings ambient;      // Stage 9: [ambient]
 		bool hasCaptureDevice = false;
 		CString captureDevice;
@@ -925,6 +926,27 @@ protected:
 	bool m_wantToRestartCapture = false;
 	bool m_wantToRestartRenderer = false;
 	bool m_wantToTerminate = false;
+
+	// Bug hunt 2026-10-17: [general] renderer_failure_keep_fullscreen (default
+	// true; false = the old behaviour, which cleared the fullscreen check and
+	// restored the display topology on any renderer failure, with no retry).
+	// When on, a failure keeps the operator's fullscreen intent (suspended by
+	// failure: host and topology stay) and retries the renderer while capture
+	// is valid, after 2 s, 5 s, 10 s and then every 30 s.
+	bool m_rendererFailureKeepFullscreen = true;
+	bool m_fullscreenSuspendedByRendererFailure = false;
+	uint32_t m_rendererFailureRetryAttempt = 0;
+	ULONGLONG m_rendererFailureNextRetryTick = 0;
+	void HandleRendererFailureFullscreen(const char* site);
+	void ResetRendererFailureRetry(const char* reason);
+	void PollRendererFailureRetry(ULONGLONG now);
+	// Bug hunt 2026-10-17: a blocked shutdown retirement used to make
+	// UpdateState return forever. Exit is forced after this deadline.
+	ULONGLONG m_shutdownRetirementBlockedDeadlineTick = 0;
+	void PollShutdownRetirementDeadline(ULONGLONG now);
+	// Bug hunt 2026-10-17: true only while CaptureStop is inside
+	// ACaptureDevice::StopCapture (which may pump messages).
+	bool m_captureStopInProgress = false;
 
 	// Stats overlay
 	// CPU actually charged to the process. Sampled here rather than in the
