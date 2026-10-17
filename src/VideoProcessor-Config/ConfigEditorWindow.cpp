@@ -12655,8 +12655,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         scriptAhead->setToolTip(QStringLiteral(
             "On (default): VP's copy of the script decides from the frame that will be on screen when its command "
             "reaches the projector, using the frames already queued (the queue profile sets how many; Low Latency "
-            "queues none). The script's own bands, steps, contrast logic and rhythm are kept. A cut to a brighter "
-            "scene gets that scene's light and contrast landing on its first frame; out of black the light may come "
+            "queues none; a shorter queue uses its last frame). The script's own bands, steps, contrast logic and "
+            "rhythm are kept. A rise is aimed so the light has settled by its frame, a fall lands on its frame. A cut "
+            "to a brighter scene gets that scene's light and contrast landing on its first frame; out of black the light may come "
             "up early, no higher than the pre-lift cap, while the picture is still black. When the queue covers the "
             "projector's response (LED latency plus settle) the lowest LED level is 'Lowest LED level', otherwise "
             "'Lowest LED level without look-ahead'. Off: decisions on the frame on screen, as your original script."));

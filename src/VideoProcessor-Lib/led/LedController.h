@@ -268,8 +268,9 @@ namespace LedDrive
 	{
 		enum class Kind
 		{
-			Current,   // no look-ahead reaches the landing frame: the frame on screen, as before
-			Ahead,     // the script's tick on the frame its command lands on
+			Current,   // nothing queued, or the command lands on the frame on screen: as before
+			Ahead,     // the script's tick on the frame its command lands on (a rise: where it
+			           // will have settled; a short queue: its last frame)
 			PreLift,   // black now and until a bright scene in the queue: the script's tick
 			           // on the frame on screen, the light not below `lightHold`
 			CutJump    // a cut to a brighter scene: straight to its targets, landing on its first frame

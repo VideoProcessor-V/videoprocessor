@@ -437,7 +437,7 @@ namespace LedDrive
 			pendingWarning = std::string("Dynamic Drive: look-ahead over ") + std::to_string(LookaheadDepthLocked()) +
 				" queued frame(s) (" + who + ")";
 		else if (state == 2 && lookaheadWarnState >= 0)
-			pendingWarning = std::string("Dynamic Drive: no frames queued ahead (Low Latency or a short queue): ") + who +
+			pendingWarning = std::string("Dynamic Drive: no frames queued ahead (Low Latency): ") + who +
 				" reacts to the frame on screen";
 		lookaheadWarnState = state;
 	}

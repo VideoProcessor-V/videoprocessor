@@ -121,36 +121,45 @@ namespace LedDrive
 		};
 		const double sendMs = in.nowMs + std::max(0.0, in.sendOffsetMs);
 		const uint64_t landSequence = frameAt(sendMs + in.ledLatencyMs);
+		// The frame by which a rise has settled (led_settle_ms after it lands).
+		const uint64_t settledSequence = frameAt(sendMs + in.ledLatencyMs + std::max(0, in.ledSettleMs));
 		const uint64_t furthest = in.ahead.back().first;
-		plan.covered = furthest >= frameAt(sendMs + in.ledLatencyMs + std::max(0, in.ledSettleMs));
+		plan.covered = furthest >= settledSequence;
 		plan.floor = plan.covered ? ScriptFloor::Covered : ScriptFloor::Reactive;
-		// A short queue (it does not reach the frame this tick's command lands
-		// on): the frame on screen, exactly as without look-ahead (owner).
-		if (furthest < landSequence) return plan;
 		// The script's targets under this tick's floor rule.
 		ScriptController controller = controllerIn;
 		controller.SetFloor(plan.floor);
 		controller.SetLightHold(-1);
 		auto highlightOf = [&](const FrameStats& stats) { return stats.maximum >= config.scriptHighlightCode; };
+		auto lightOf = [&](const FrameStats& stats)
+		{
+			return controller.LightTargetFor(std::max(0, static_cast<int>(stats.apl)));
+		};
+		// A cut's commands need no measuring time: the look-ahead already holds the
+		// scene's statistics (the script's screenshot delay was a coding limitation).
+		const double jumpSendMs = in.nowMs;
 
 		// A cut to a brighter scene in the queue (a cut, or black to picture):
 		// the script would only start climbing once it is on screen, one step a
-		// tick. Its first frame gets the scene's targets, landing on it.
+		// tick. Its first frame gets the scene's targets, landing on it. A queue
+		// shorter than the landing time still sees the cut early: its commands go
+		// out at once and land as close to it as the projector allows.
 		bool blackRun = ScriptBlackForPreposition(config, current);
 		bool previousBlack = blackRun;
+		uint64_t entrySequence = 0;   // the first frame of a brighter scene further away (0 none)
 		for (const auto& frame : in.ahead)
 		{
 			const FrameStats& stats = frame.second;
 			const bool black = ScriptBlackForPreposition(config, stats);
 			const bool entering = stats.cut || (previousBlack && !black);
-			const int lightTarget = controller.LightTargetFor(std::max(0, static_cast<int>(stats.apl)));
+			const int lightTarget = lightOf(stats);
 			if (entering && !black && lightTarget > in.light)
 			{
 				const double cutMs = displayMs(frame.first);
-				const double lightAt = std::max(sendMs, cutMs - in.ledLatencyMs);
+				const double lightAt = std::max(jumpSendMs, cutMs - in.ledLatencyMs);
 				// Sent now (waiting within this tick) when the next tick's first
 				// command would land after the cut.
-				if (lightAt - in.commandGapMs < in.nowMs + in.nextTickMs + std::max(0.0, in.sendOffsetMs))
+				if (lightAt - in.commandGapMs < in.nowMs + in.nextTickMs)
 				{
 					plan.kind = ScriptLookaheadPlan::Kind::CutJump;
 					plan.targetSequence = frame.first;
@@ -161,18 +170,18 @@ namespace LedDrive
 					plan.sends.push_back({ lightAt, true, lightTarget });
 					if (contrastTarget != in.contrast)
 					{
-						double contrastAt = std::max(sendMs, cutMs - in.cntrLatencyMs);
+						double contrastAt = std::max(jumpSendMs, cutMs - in.cntrLatencyMs);
 						// One command at a time: a CNTR coming down goes first (early
 						// is below need, late would be above it); one going up
 						// follows the LPW1.
 						if (std::abs(contrastAt - lightAt) < in.commandGapMs)
 							contrastAt = contrastTarget < in.contrast ? lightAt - in.commandGapMs : lightAt + in.commandGapMs;
-						if (contrastAt < sendMs)
+						if (contrastAt < jumpSendMs)
 						{
 							// No room before the LPW1: CNTR at once, the LPW1 one gap
 							// later (still no earlier than its landing time).
-							contrastAt = sendMs;
-							plan.sends.front().atMs = std::max(lightAt, sendMs + in.commandGapMs);
+							contrastAt = jumpSendMs;
+							plan.sends.front().atMs = std::max(lightAt, jumpSendMs + in.commandGapMs);
 						}
 						plan.sends.push_back({ contrastAt, false, contrastTarget });
 					}
@@ -193,21 +202,50 @@ namespace LedDrive
 					if (plan.lightHold > in.light) plan.preliftTarget = plan.lightHold;
 					return plan;
 				}
+				entrySequence = frame.first;
 				break;
 			}
 			blackRun = blackRun && black;
 			previousBlack = black;
 		}
 
-		// The script's tick on the frame its command lands on, when queued.
-		// A command that lands on the frame on screen: that frame, as before.
-		if (landSequence <= in.onScreenSequence) return plan;
-		const auto landing = std::find_if(in.ahead.begin(), in.ahead.end(),
-			[&](const std::pair<uint64_t, FrameStats>& frame) { return frame.first >= landSequence; });
-		if (landing == in.ahead.end()) return plan;
+		// The script's tick on the frame its command lands on (or, with a queue
+		// short of it, the furthest queued frame: the nearest to it there is).
+		// A rise is taken from the frame where it will have settled (latency +
+		// led_settle_ms), so the light has arrived by then; a fall lands on its
+		// frame (never below the need before it). One frame each, not a window's
+		// maximum, so frame-to-frame noise near a band edge biases nothing.
+		// Neither crosses into a brighter scene further away: its cut lands on
+		// its frame.
+		uint64_t last = std::min(settledSequence, furthest);
+		if (entrySequence != 0 && last >= entrySequence) last = entrySequence - 1;
+		const uint64_t landing = std::min(landSequence, furthest);
+		const FrameStats* chosen = nullptr;
+		uint64_t chosenSequence = in.onScreenSequence;
+		if (landing > in.onScreenSequence && (entrySequence == 0 || landing < entrySequence))
+		{
+			const auto at = std::find_if(in.ahead.begin(), in.ahead.end(),
+				[&](const std::pair<uint64_t, FrameStats>& frame) { return frame.first >= landing; });
+			if (at != in.ahead.end())
+			{
+				chosen = &at->second;
+				chosenSequence = at->first;
+			}
+		}
+		const int bestLight = lightOf(chosen ? *chosen : current);
+		const std::pair<uint64_t, FrameStats>* settled = nullptr;
+		for (const auto& frame : in.ahead)
+			if (frame.first > std::max(landing, in.onScreenSequence) && frame.first <= last) settled = &frame;
+		if (settled && lightOf(settled->second) > bestLight)
+		{
+			chosen = &settled->second;
+			chosenSequence = settled->first;
+		}
+		// A command that lands on the frame on screen, no rise: that frame, as before.
+		if (!chosen) return plan;
 		plan.kind = ScriptLookaheadPlan::Kind::Ahead;
-		plan.targetSequence = landing->first;
-		plan.stats = landing->second;
+		plan.targetSequence = chosenSequence;
+		plan.stats = *chosen;
 		return plan;
 	}
 
@@ -325,8 +363,9 @@ namespace LedDrive
 		// The script truncates the mean (mean2 = int(mean)).
 		const int apl = std::max(0, static_cast<int>(stats.apl));
 		// The script tested the brightest pixel of its 854x480 downscale; the
-		// brightest 3x3 block is the closest measure (a lamp under 0.5% of
-		// the picture still counts, unlike the percentile).
+		// maximum is the same measure (led_peak_full_coverage: the largest area
+		// mean over boxes of that share of the screen, picture only; off: the
+		// brightest 3x3 sample block).
 		const bool highlight = stats.maximum >= config.scriptHighlightCode;
 		out.lightTarget = LightTargetFor(apl);
 		out.contrastTarget = ContrastTargetFor(apl, highlight);

@@ -197,8 +197,9 @@ namespace VideoProcessorTest
 	TEST_CLASS(LedScriptLookaheadTests)
 	{
 	public:
-		// Off, or nothing queued (Low Latency), or a queue that does not reach the
-		// landing frame: the script's command stream is exactly as before.
+		// Off, or nothing queued (Low Latency, depth 0): the script's command stream
+		// is exactly as before. A queue short of the landing frame still looks ahead
+		// (its last frame, and a cut in it jumps at once).
 		TEST_METHOD(NoQueueOrSwitchOffKeepsTheScriptStream)
 		{
 			for (double fps : { 24.0, 60.0 })
@@ -207,7 +208,7 @@ namespace VideoProcessorTest
 				off.fps = fps;
 				off.lookahead = false;
 				off.Run(Programme(), 60000.0);
-				for (size_t queue : { size_t{ 0 }, size_t{ 1 }, size_t{ 3 } })
+				for (size_t queue : { size_t{ 0 } })
 				{
 					Simulation none = off;
 					none.landings.clear();
@@ -220,12 +221,39 @@ namespace VideoProcessorTest
 						(L"identical script stream with " + std::to_wstring(queue) + L" queued at " +
 							std::to_wstring(static_cast<int>(fps)) + L" fps").c_str());
 				}
+				// A short queue (Normal's four frames ahead): a bright cut seen in it is
+				// sent at once and lands earlier than the reactive script's.
+				const uint64_t cut = static_cast<uint64_t>(std::lround(4000.0 * fps / 1000.0));
+				const Scene scene = StepScene(cut, 30.0, 90.0, true, 150.0, 235.0);
+				Simulation reactive;
+				reactive.fps = fps;
+				reactive.lookahead = false;
+				reactive.startLight = ScriptController(reactive.config).LightTargetFor(30);
+				reactive.startContrast = ScriptController::ContrastTargetFor(30, false);
+				Simulation shortQueue = reactive;
+				shortQueue.lookahead = true;
+				shortQueue.queueFrames = 4;
+				reactive.Run(scene, 8000.0);
+				shortQueue.Run(scene, 8000.0);
+				const int target = ScriptController(reactive.config).LightTargetFor(90);
+				auto firstAt = [&](const Simulation& sim)
+				{
+					for (const Landing& l : sim.landings)
+						if (l.light && l.value == target) return l.ms;
+					return 1e300;
+				};
+				Assert::IsTrue(shortQueue.cutJumps >= 1, L"a short queue still jumps to a cut it sees");
+				Assert::IsTrue(firstAt(shortQueue) < firstAt(reactive), L"and its light lands earlier than reacting");
+				Assert::IsTrue(firstAt(shortQueue) >= reactive.Display(cut) - reactive.Period() - 1e-6,
+					L"but not before the cut's frame");
 			}
 		}
 
 		// In-scene: the script's step goes out so it lands on the frame it was decided
-		// for, within one tick, at 24/50/60 Hz and 50-150 ms latency. A brighter cut's
-		// targets land on its first frame.
+		// for, within one tick, at 24/50/60 Hz and 50-150 ms latency - a fall on the
+		// frame that darkens, a rise led_settle_ms ahead of the frame that brightens
+		// (so the light has settled by then). A brighter cut's targets land on its
+		// first frame.
 		TEST_METHOD(CommandsLandOnTheTargetFrame)
 		{
 			for (double fps : { 24.0, 50.0, 60.0 })
@@ -246,10 +274,11 @@ namespace VideoProcessorTest
 						const auto first = std::find_if(sim.landings.begin(), sim.landings.end(),
 							[&](const Landing& l) { return l.light && l.value > sim.startLight; });
 						Assert::IsTrue(first != sim.landings.end(), (L"the rise is commanded, " + where).c_str());
-						Assert::IsTrue(first->ms >= changeMs - sim.Period() - 1e-6,
-							(L"the step lands no earlier than its frame, " + where).c_str());
-						Assert::IsTrue(first->ms <= changeMs + sim.longestTickMs + 1e-6,
-							(L"the step lands within one tick of its frame, " + where).c_str());
+						const double riseMs = changeMs - sim.ledSettleMs;
+						Assert::IsTrue(first->ms >= riseMs - sim.Period() - 1e-6,
+							(L"the rise lands no earlier than its settle time before the frame, " + where).c_str());
+						Assert::IsTrue(first->ms <= riseMs + sim.longestTickMs + 1e-6,
+							(L"the rise lands within one tick of its settle time before the frame, " + where).c_str());
 						// Without look-ahead it lands at least the send time + latency late.
 						Simulation late = sim;
 						late.landings.clear();
@@ -260,6 +289,24 @@ namespace VideoProcessorTest
 						Assert::IsTrue(lateFirst != late.landings.end() &&
 							lateFirst->ms >= changeMs + sim.config.scriptMeasureMs + latency - 1e-6,
 							(L"without look-ahead the step is late, " + where).c_str());
+					}
+					// In-scene fall: the first lower LPW1 lands on the darker frame, within a tick.
+					{
+						Simulation sim;
+						sim.fps = fps;
+						sim.ledLatencyMs = sim.cntrLatencyMs = latency;
+						sim.startLight = ScriptController(sim.config).LightTargetFor(65);
+						sim.queueFrames = QueueFor(sim);
+						const uint64_t change = static_cast<uint64_t>(std::lround(4000.0 / sim.Period()));
+						sim.Run(StepScene(change, 65.0, 50.0, false, 150.0, 150.0), 8000.0);
+						const double changeMs = sim.Display(change);
+						const auto first = std::find_if(sim.landings.begin(), sim.landings.end(),
+							[&](const Landing& l) { return l.light && l.value < sim.startLight; });
+						Assert::IsTrue(first != sim.landings.end(), (L"the fall is commanded, " + where).c_str());
+						Assert::IsTrue(first->ms >= changeMs - sim.Period() - 1e-6,
+							(L"the fall lands no earlier than its frame, " + where).c_str());
+						Assert::IsTrue(first->ms <= changeMs + sim.longestTickMs + 1e-6,
+							(L"the fall lands within one tick of its frame, " + where).c_str());
 					}
 					// A bright cut: the scene's light lands on its first frame.
 					{
@@ -404,25 +451,43 @@ namespace VideoProcessorTest
 			ScriptLookaheadPlan plan = PlanScriptLookahead(config, controller, current, in);
 			Assert::IsTrue(plan.kind == ScriptLookaheadPlan::Kind::Current && !plan.covered, L"empty queue");
 			Assert::AreEqual(current.apl, plan.stats.apl);
+			// A darkening queue (APL falling a step a frame): the landing frame's.
 			for (uint64_t s = 101; s <= 106; ++s)
 			{
 				FrameStats f = current;
-				f.apl = static_cast<double>(s - 50);
+				f.apl = static_cast<double>(150 - s);
 				in.ahead.push_back({ s, f });
 			}
 			plan = PlanScriptLookahead(config, controller, current, in);
 			// 150 + 80 ms = frame 105 (5.52 frames); settle not covered (530 ms = frame 112).
 			Assert::IsTrue(plan.kind == ScriptLookaheadPlan::Kind::Ahead, L"the landing frame is queued");
 			Assert::AreEqual<uint64_t>(105, plan.targetSequence);
-			Assert::AreEqual(55.0, plan.stats.apl);
+			Assert::AreEqual(45.0, plan.stats.apl);
 			Assert::IsTrue(!plan.covered && plan.floor == ScriptFloor::Reactive, L"settle not covered");
 			for (uint64_t s = 107; s <= 113; ++s)
-				in.ahead.push_back({ s, current });
+			{
+				FrameStats f = current;
+				f.apl = static_cast<double>(150 - s);
+				in.ahead.push_back({ s, f });
+			}
 			plan = PlanScriptLookahead(config, controller, current, in);
 			Assert::IsTrue(plan.covered && plan.floor == ScriptFloor::Covered, L"latency + settle covered");
+			Assert::AreEqual<uint64_t>(105, plan.targetSequence, L"a fall: the landing frame");
+			// A brightening queue: the frame where the rise will have settled (112).
+			for (auto& frame : in.ahead) frame.second.apl = frame.first < 110 ? 30.0 : 90.0;
+			plan = PlanScriptLookahead(config, controller, current, in);
+			Assert::IsTrue(plan.kind == ScriptLookaheadPlan::Kind::Ahead, L"a rise is looked ahead");
+			Assert::AreEqual<uint64_t>(112, plan.targetSequence, L"a rise: where it will have settled");
+			for (auto& frame : in.ahead) frame.second.apl = static_cast<double>(150 - frame.first);
 			in.ahead.resize(4);   // frames 101-104: short of the landing frame
 			plan = PlanScriptLookahead(config, controller, current, in);
-			Assert::IsTrue(plan.kind == ScriptLookaheadPlan::Kind::Current, L"a short queue: the frame on screen");
+			Assert::IsTrue(plan.kind == ScriptLookaheadPlan::Kind::Ahead, L"a short queue looks ahead");
+			Assert::AreEqual<uint64_t>(104, plan.targetSequence, L"a short queue: its last frame");
+			// The landing time on the frame on screen (a slow source): that frame.
+			in.sourcePeriodMs = 1000.0;
+			in.ahead.resize(1);
+			plan = PlanScriptLookahead(config, controller, current, in);
+			Assert::IsTrue(plan.kind == ScriptLookaheadPlan::Kind::Current, L"landing on the frame on screen");
 		}
 
 		// Queue = look-ahead (owner 2026-10-17): the LED asks for the whole queue in

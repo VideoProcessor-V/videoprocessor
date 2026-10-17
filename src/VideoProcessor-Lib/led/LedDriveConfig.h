@@ -225,16 +225,19 @@ namespace LedDrive
 		int scriptEchoMs = 30;
 		// script_lookahead (owner 2026-10-17, default on): the internal script
 		// copy decides from the queued frame that will be on screen when its
-		// command lands (now + its send time + led_latency_ms), with the
+		// command lands (now + its send time + led_latency_ms; a rise from the
+		// frame where it will have settled, + led_settle_ms), with the
 		// script's own bands, steps, CNTR logic and rhythm. A cut to a brighter
 		// scene seen in the queue gets the scene's targets landing on its first
 		// frame; black before it allows a pre-lift up to black_prelift_max
 		// (preposition_black_only's black). With the look-ahead covering
 		// led_latency_ms + led_settle_ms the lowest level is led_floor (the
 		// script's bottom band continues its curve down to it), else
-		// led_floor_reactive. No queued frames (Low Latency, a short queue):
-		// the frame on screen, as before. Off: the script's decisions on the
-		// frame on screen and led_floor, exactly as before.
+		// led_floor_reactive. A queue short of the landing frame: its last
+		// frame (the nearest there is; a cut in it still jumps, at once). No
+		// queued frames (Low Latency): the frame on screen, as before. Off: the
+		// script's decisions on the frame on screen and led_floor, exactly as
+		// before.
 		bool scriptLookahead = true;
 		// mode: compensate ramps: levels per second, and no movement while
 		// |target - current| <= deadband. early_ramp lets the ramp start ahead
