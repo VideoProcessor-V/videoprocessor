@@ -244,6 +244,7 @@
     <ClInclude Include="DolbyVisionLuminanceStatus.h" />
     <ClInclude Include="SceneDescriptor.h" />
     <ClInclude Include="IntentDescriptor.h" />
+    <ClInclude Include="FileFrameTiming.h" />
     <ClInclude Include="ContentClassifier.h" />
     <ClInclude Include="ContentIntentObserver.h" />
     <ClInclude Include="DisplayProfile.h" />

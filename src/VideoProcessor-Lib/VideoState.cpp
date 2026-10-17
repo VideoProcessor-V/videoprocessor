@@ -95,6 +95,15 @@ uint32_t VideoState::BytesPerRow() const
 	case VideoFrameEncoding::R12B:
 	case VideoFrameEncoding::R12L:
 		return ((displayMode->FrameWidth() * 36) / 8);
+
+	// ABI 35: luma-plane row of the two-plane 4:2:0 encodings; the CbCr plane
+	// uses the same stride (width / 2 interleaved pairs, width rounded up even).
+	case VideoFrameEncoding::NV12:
+		return ((displayMode->FrameWidth() + 1) & ~1u);
+
+	case VideoFrameEncoding::P010:
+	case VideoFrameEncoding::P016:
+		return ((displayMode->FrameWidth() + 1) & ~1u) * 2;
 	}
 
 	throw std::runtime_error("Don't know how to calculate row bytes for given format");
@@ -103,5 +112,9 @@ uint32_t VideoState::BytesPerRow() const
 
 uint32_t VideoState::BytesPerFrame() const
 {
+	// Two-plane 4:2:0: luma rows plus ceil(height / 2) CbCr rows.
+	if (VideoFrameEncodingIsTwoPlane420(videoFrameEncoding))
+		return BytesPerRow() * (displayMode->FrameHeight() +
+			(displayMode->FrameHeight() + 1) / 2);
 	return BytesPerRow() * displayMode->FrameHeight();
 }

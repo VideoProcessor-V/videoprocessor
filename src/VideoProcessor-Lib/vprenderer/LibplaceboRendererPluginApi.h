@@ -21,8 +21,11 @@
 // scene minimum in DolbyVisionLuminanceStatus (2026-10-17);
 // 33: StopLedDriveForShutdown (2026-10-17 integration);
 // 34: GetContentIntentStatus and the DV L5/L6/L11 fields in
-// DolbyVisionTunnelFrameMetadata (content intent, 2026-10-17).
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 34;
+// DolbyVisionTunnelFrameMetadata (content intent, 2026-10-17);
+// 35: VP Renderer DirectShow filter - NV12/P010/P016 encodings, FileFrameTiming
+// and the file-frame IVideoRenderer methods (SupportsTimedFileFrames,
+// OnTimedVideoFrame, WaitForFileFrameSlot, CancelFileFrameWait).
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 35;
 static constexpr const char* VP_LIBPLACEBO_FLAVOR_EXPORT = "VideoProcessorLibplaceboIsBeta";
 static constexpr const char* VP_LIBPLACEBO_VERSION_EXPORT =
 	"VideoProcessorLibplaceboGetApiVersion";
