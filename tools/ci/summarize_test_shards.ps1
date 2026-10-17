@@ -33,6 +33,8 @@ $classSet = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($s in $shards) { foreach ($c in $s.classes) { [void]$classSet.Add($c) } }
 $expected = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($t in $planData.includedTests) { if ($classSet.Contains((ClassOf $t))) { [void]$expected.Add($t) } }
+# Tests of heavy classes are planned one by one (exact clauses).
+foreach ($s in $shards) { foreach ($t in @($s.exact)) { if ($t) { [void]$expected.Add($t) } } }
 
 $problems = New-Object System.Collections.Generic.List[string]
 $rows = New-Object System.Collections.Generic.List[object]

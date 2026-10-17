@@ -34,7 +34,9 @@ param(
     [string[]]$Exclude = @('RendererCaptureHarnessTests'),
     [string]$Weights = '',
     [double]$DefaultSecondsPerTest = 0.5,
-    [double]$SplitAboveFraction = 0.25
+    [double]$SplitAboveFraction = 0.25,
+    [string]$ClassesFile = '',
+    [double]$TargetShardSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
 if ($Shards -lt 1) { throw '-Shards must be at least 1' }
@@ -52,7 +54,37 @@ if ($all.Count -eq 0) { throw "No tests in $TestList" }
 $excludedSet = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($t in $all) { $c = ClassOf $t; if (@($Exclude | Where-Object { $c -like "*$_*" }).Count -gt 0) { [void]$excludedSet.Add($t) } }
 $excludedTests = @($all | Where-Object { $excludedSet.Contains($_) })
+# -ClassesFile (affected tier, select_ci_scope.ps1): only these classes (one per line, "Class" or
+# "Namespace::Class"); every other test must then be matched by no shard.
+$selectedOnly = $false
+if ($ClassesFile) {
+    $selectedOnly = $true
+    $wanted = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($w in (Get-Content $ClassesFile)) { if ($w.Trim()) { [void]$wanted.Add($w.Trim()) } }
+    foreach ($t in $all) {
+        $c = ClassOf $t
+        if (-not ($wanted.Contains($c) -or $wanted.Contains(($c -split '::')[-1]))) { [void]$excludedSet.Add($t) }
+    }
+    # A selected class's clause can also match another class (Tests::X:: inside UnitTests::X::):
+    # that class is selected too, never left matched-but-unplanned.
+    $hardExcluded = @($all | Where-Object { $c = ClassOf $_; @($Exclude | Where-Object { $c -like "*$_*" }).Count -gt 0 })
+    do {
+        $grown = $false
+        $selectedClauses = @($all | Where-Object { -not $excludedSet.Contains($_) } | ForEach-Object { (ClassOf $_) + '::' } | Sort-Object -Unique)
+        foreach ($t in @($excludedSet)) {
+            if ($hardExcluded -contains $t) { continue }
+            foreach ($cl in $selectedClauses) {
+                if ($t.Contains($cl)) {
+                    $cls = ClassOf $t
+                    foreach ($u in @($excludedSet | Where-Object { (ClassOf $_) -eq $cls })) { [void]$excludedSet.Remove($u) }
+                    $grown = $true; break
+                }
+            }
+        }
+    } while ($grown)
+}
 $included = @($all | Where-Object { -not $excludedSet.Contains($_) })
+if ($included.Count -eq 0) { throw 'No test selected' }
 
 $byClass = [ordered]@{}
 foreach ($t in $included) {
@@ -91,6 +123,8 @@ function TestWeight([string]$t) {
 }
 foreach ($t in $included) { if ($weightTable.ContainsKey($t) -or $weightTable.ContainsKey((ClassOf $t) + '::*')) { ++$weighted } }
 $total = ($included | ForEach-Object { TestWeight $_ } | Measure-Object -Sum).Sum
+# -TargetShardSeconds: as many shards as the measured load needs, at most -Shards.
+if ($TargetShardSeconds -gt 0) { $Shards = [int][math]::Max(1, [math]::Min($Shards, [math]::Ceiling($total / $TargetShardSeconds))) }
 $splitAbove = $SplitAboveFraction * $total / $Shards
 
 $groups = @{}
@@ -115,7 +149,7 @@ foreach ($g in ($groups.Keys | Sort-Object)) {
     }
 }
 $unitList = @($units | Sort-Object @{ Expression = 'Weight'; Descending = $true }, @{ Expression = 'Name'; Descending = $false })
-if ($unitList.Count -lt $Shards) { throw "Only $($unitList.Count) units for $Shards shards" }
+if ($unitList.Count -lt $Shards) { $Shards = $unitList.Count }
 
 $load = New-Object double[] $Shards
 $assigned = @(for ($i = 0; $i -lt $Shards; ++$i) { , (New-Object System.Collections.Generic.List[object]) })
@@ -164,6 +198,7 @@ if ($problems.Count -gt 0) { $problems | Select-Object -First 50 | ForEach-Objec
 
 [pscustomobject]@{
     shards        = $plan
+    selectedOnly  = $selectedOnly
     includedTests = $included
     excludedTests = $excludedTests
 } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $OutFile
