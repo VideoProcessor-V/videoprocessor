@@ -577,6 +577,28 @@ void showCanonicalShortcutSpelling(QWidget* root)
     }
 }
 
+// Hunt 2 (L6): a number field whose validator lets Intermediate input through
+// (0.3 under a 0.5 minimum) is clamped and rounded when it is left, as the
+// Picture fields are, so an out-of-range value is never stored. An inherited
+// or empty field is left alone.
+void clampNumberFieldOnLeave(QLineEdit* edit, double lo, double hi, int decimals)
+{
+    QObject::connect(edit, &QLineEdit::editingFinished, edit, [edit, lo, hi, decimals]() {
+        if (edit->property("inherited").toBool()) return;
+        const QString text = edit->text().trimmed();
+        if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0) return;
+        bool ok = false;
+        double value = QLocale::c().toDouble(text, &ok);
+        if (!ok) value = text.toDouble(&ok);
+        if (!ok) { edit->clear(); return; }
+        value = (std::min)(hi, (std::max)(lo, value));
+        const double scale = std::pow(10.0, decimals);
+        value = std::round(value * scale) / scale;
+        const QString clean = QString::number(value, 'g', 12);
+        if (clean != edit->text()) edit->setText(clean);
+    });
+}
+
 // Audit 2026-10-17: number boxes and drop-downs ignore the mouse wheel unless
 // they have the keyboard focus, so scrolling a page never changes the setting
 // under the pointer; the wheel scrolls the page instead. Installed on the
@@ -7563,6 +7585,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     label->setText(label->text() + QStringLiteral(" (") + range + QStringLiteral(")"));
                 edit->setAccessibleDescription(QStringLiteral("Allowed: %1.").arg(range));
                 connect(edit, &QLineEdit::editingFinished, this, [edit, lo, hi, decimals]() {
+                    // Leaving an inherited field untouched writes no override (hunt 2, L5).
+                    if (edit->property("inherited").toBool()) return;
                     QString text = edit->text().trimmed();
                     if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
                         return;   // unset: the default
@@ -7943,6 +7967,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (value.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0 && texts[i]) value.clear();
                 return value;
             };
+            // This profile's own value: text inherited from the default profile is
+            // not set here (hunt 2, L5). raw() still reads it for the handle's level.
+            auto own = [texts, raw](int i) {
+                return texts[i] && texts[i]->property("inherited").toBool() ? QString() : raw(i);
+            };
             auto matches = [raw](int p) {
                 // Off is the source size alone (the evidence does not apply).
                 const int keys = p == 0 ? 1 : 4;
@@ -7961,7 +7990,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto refresh = [=]() {
                 if (*applying) return;
                 bool anySet = false;
-                for (int i = 0; i < 4; ++i) anySet = anySet || !raw(i).isEmpty();
+                for (int i = 0; i < 4; ++i) anySet = anySet || !own(i).isEmpty();
                 if (!anySet)
                 {
                     // Audit 2026-10-16: the handle moves to the built-in level too (it kept the previous
@@ -8007,9 +8036,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             };
             connect(pictureSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
             // Not set: the handle already on the chosen position emits no valueChanged; the release writes it.
-            connect(pictureSlider, &QSlider::sliderReleased, this, [apply, raw, pictureSlider]() {
+            connect(pictureSlider, &QSlider::sliderReleased, this, [apply, own, pictureSlider]() {
                 for (int i = 0; i < 4; ++i)
-                    if (!raw(i).isEmpty()) return;
+                    if (!own(i).isEmpty()) return;
                 apply(pictureSlider->value());
             });
             connect(pictureReset, &QPushButton::clicked, this, [apply, pictureSlider]() { apply(pictureSlider->value()); });
@@ -8046,6 +8075,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     label->setText(label->text() + QStringLiteral(" (") + range + QStringLiteral(")"));
                 edit->setAccessibleDescription(QStringLiteral("Allowed: %1.").arg(range));
                 connect(edit, &QLineEdit::editingFinished, this, [edit, lo, hi, decimals]() {
+                    // Leaving an inherited field untouched writes no override (hunt 2, L5).
+                    if (edit->property("inherited").toBool()) return;
                     QString text = edit->text().trimmed();
                     if (text.isEmpty() || text.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0)
                         return;   // unset: the default
@@ -8409,6 +8440,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* renderAheadUtilisation = addText(QStringLiteral("De-judder: share of a source frame to use"),
             QStringLiteral("render_ahead_utilisation"));
         renderAheadUtilisation->setValidator(new QDoubleValidator(0.5, 1.0, 2, renderAheadUtilisation));
+        clampNumberFieldOnLeave(renderAheadUtilisation, 0.5, 1.0, 2);
         renderAheadUtilisation->setPlaceholderText(QStringLiteral("0.85"));
         renderAheadUtilisation->setToolTip(QStringLiteral(
             "With the per-source-frame budget: the share of a source frame's time the GPU may be busy (0.5 to 1.0; "
@@ -8446,6 +8478,52 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         debandGrainGuard->setToolTip(QStringLiteral(
             "On (default): VP's debander measures each block's grain and does not smooth it, with or without motion "
             "vectors; banded gradients are debanded as before. Off: the earlier debander, byte for byte."));
+        {
+            // Hunt 2 (L4): a setting that does nothing in the current state is greyed
+            // (greyedOff, audit 2026-10-14c), read from the effective values so an
+            // inherited or default choice counts. Profile loads trigger the refresh.
+            const auto grey = [](QWidget* widget, bool off)
+            {
+                widget->setProperty("greyedOff", off);
+                widget->setEnabled(!off);
+            };
+            auto syncGreyed = [grey, opticalFlow, opticalFlowGlobal, opticalFlowFallback, opticalFlowCost,
+                opticalFlowFb, renderAhead, dejudderGate, renderAheadUtilisation, renderAheadCredit,
+                sourceResolution, autoConfidence, evidenceSeconds, evidenceShots, interpolation,
+                interpolationGrain, debandVp, debandGrainGuard]()
+            {
+                // The engine's extras do nothing with VP's matcher only; the search
+                // fallback also needs the engine's camera motion.
+                const bool matcherOnly = effectiveChoiceValue(opticalFlow) == QStringLiteral("off");
+                grey(opticalFlowCost, matcherOnly);
+                grey(opticalFlowFb, matcherOnly);
+                grey(opticalFlowFallback, matcherOnly ||
+                    effectiveChoiceValue(opticalFlowGlobal) == QStringLiteral("off"));
+                // Render ahead's budget, queue credit and share apply only with it on;
+                // the share only with the per-source-frame budget.
+                const bool renderAheadOff = effectiveChoiceValue(renderAhead) != QStringLiteral("on");
+                grey(dejudderGate, renderAheadOff);
+                grey(renderAheadCredit, renderAheadOff);
+                grey(renderAheadUtilisation, renderAheadOff ||
+                    effectiveChoiceValue(dejudderGate) == QStringLiteral("refresh"));
+                // Auto's evidence is used only with Source resolution: Auto.
+                const bool sourceAuto = effectiveChoiceValue(sourceResolution) == QStringLiteral("auto");
+                for (QWidget* widget : { static_cast<QWidget*>(autoConfidence), static_cast<QWidget*>(evidenceSeconds),
+                    static_cast<QWidget*>(evidenceShots) })
+                    grey(widget, !sourceAuto);
+                const QString interpolationMode = effectiveChoiceValue(interpolation);
+                grey(interpolationGrain, interpolationMode != QStringLiteral("auto") &&
+                    interpolationMode != QStringLiteral("always"));
+                grey(debandGrainGuard, effectiveChoiceValue(debandVp) == QStringLiteral("off"));
+            };
+            for (QComboBox* driver : { opticalFlow, opticalFlowGlobal, renderAhead, dejudderGate, sourceResolution,
+                interpolation, debandVp })
+                connect(driver, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncGreyed](int) { syncGreyed(); });
+            auto* greyedRefresh = new QAction(debandGrainGuard);
+            greyedRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("greyed_state_refresh")));
+            connect(greyedRefresh, &QAction::triggered, this, [syncGreyed]() { syncGreyed(); });
+            syncGreyed();
+        }
         // Restore switch (DV tunnel bug hunt 2026-10-17).
         auto* dvTunnelFixes = addChoice(QStringLiteral("Dolby Vision tunnel fixes"),
             QStringLiteral("dv_tunnel_fixes"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -8535,6 +8613,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto* hold = addText(QStringLiteral("    Change class after"), QStringLiteral("intent_content_hold_seconds"),
                 QStringLiteral("s"));
             hold->setValidator(new QDoubleValidator(1.0, 60.0, 1, hold));
+            clampNumberFieldOnLeave(hold, 1.0, 60.0, 1);
             hold->setPlaceholderText(QStringLiteral("5"));
             hold->setAccessibleDescription(QStringLiteral("Value in s, 1-60."));
             hold->setToolTip(QStringLiteral(
@@ -10290,9 +10369,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 const bool hideUnspecifiedChoice = (defaultProfile && calibrationLutSlot) || (retiredRootDefault && (!raw.isEmpty() || field.key == QStringLiteral("sdr_lut_input_gamma"))) || rootRendererExplicitDefault ||
                     (defaultProfile && (sectionPrefix == QStringLiteral("vprenderer") || scalingAutoChoice) &&
                         autoIndex >= 0 &&
-                        // Only where Auto really is the default: an unset source_resolution
-                        // (native) or deband_vp (off) has an Auto choice too, and showed it
-                        // as if selected (2026-10-16); they show "Default: ..." instead.
+                        // Only where Auto really is the default (source_resolution has been
+                        // auto since 2026-10-16): an unset deband_vp (off) has an Auto choice
+                        // too, and showed it as if selected; it shows "Default: ..." instead.
                         (scalingAutoChoice || fallback(field.key).compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0));
                 if (auto* view = qobject_cast<QListView*>(combo->view()))
                     view->setRowHidden(0, hasUnspecifiedChoice &&
@@ -10442,6 +10521,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
 				refresh->trigger();
 		}
         updateToneControls();

@@ -9223,6 +9223,49 @@ void testUnfocusedNumberBoxesIgnoreTheWheel()
     require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "The wheel over a slider made an edit");
 }
 
+// Hunt 2 (L4/L5/L6): an inherited Picture level is "Not set" and leaving an inherited
+// field writes nothing; render ahead's settings are greyed while it is off; an
+// out-of-range share is clamped when the field is left.
+void testInheritedPictureFieldsAndGreyedRenderAhead()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]
+profile_change_display_seconds: 5
+"
+        "[vprenderer.Cinema]
+quality: high
+source_resolution_auto_min_confidence: 0.70
+"
+        "source_resolution_evidence_seconds: 5
+source_resolution_evidence_shots: 2
+"
+        "[vprenderer.Night]
+quality: high
+");
+    ConfigEditorWindow window(path, 0, true);
+    auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(requireControl<QLabel>(window, "config.vprenderer.picture_preset_name")->text().startsWith("Not set"),
+        "An inherited Picture level showed as this profile's own");
+    for (const char* name : { "config.vprenderer.source_resolution_auto_min_confidence",
+        "config.vprenderer.source_resolution_evidence_seconds", "config.vprenderer.source_resolution_evidence_shots" })
+        QMetaObject::invokeMethod(requireControl<QLineEdit>(window, name), "editingFinished", Qt::DirectConnection);
+    QCoreApplication::processEvents();
+    require(!apply->isEnabled(), "Leaving an inherited Picture field wrote an override");
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* share = requireControl<QLineEdit>(window, "config.vprenderer.render_ahead_utilisation");
+    require(!share->isEnabled() && !requireControl<QComboBox>(window, "config.vprenderer.dejudder_gate")->isEnabled() &&
+        !requireControl<QComboBox>(window, "config.vprenderer.render_ahead_queue_credit")->isEnabled(),
+        "Render ahead's settings are not greyed while it is off");
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.render_ahead"), "on");
+    require(share->isEnabled(), "Render ahead on did not enable its share");
+    share->setText("0.3");
+    QMetaObject::invokeMethod(share, "editingFinished", Qt::DirectConnection);
+    require(share->text() == "0.5", ("An out-of-range share was not clamped: " + share->text()).toStdString().c_str());
+}
+
 // Hunt 2 (M1/M2): the legacy queue fold and the profile value rewrites run once at
 // load as real migrations. The editor shows them as unsaved changes, the file is not
 // written until Save, Save keeps the original in .before-config-migration.<time>.bak,
@@ -9580,6 +9623,7 @@ int main(int argc, char** argv)
     failures += run("explicit auto dither shows Auto", testExplicitAutoDitherShowsAuto);
     failures += run("unfocused number boxes ignore the wheel", testUnfocusedNumberBoxesIgnoreTheWheel);
     failures += run("profile rewrites are backed-up load migrations", testProfileRewritesAreBackedUpLoadMigrations);
+    failures += run("inherited Picture fields and greyed render ahead", testInheritedPictureFieldsAndGreyedRenderAhead);
     failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
     failures += run("render-ahead controls show defaults and save", testRenderAheadControlsShowDefaultsAndSave);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
