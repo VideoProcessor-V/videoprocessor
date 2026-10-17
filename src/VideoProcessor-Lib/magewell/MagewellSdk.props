@@ -6,7 +6,15 @@
     <MagewellSdkRoot Condition="'$(MagewellSdkRoot)' == '' and '$(VP_MAGEWELL_SDK_ROOT)' != ''">$(VP_MAGEWELL_SDK_ROOT)</MagewellSdkRoot>
     <MagewellSdkRoot Condition="'$(MagewellSdkRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\3rdparty\magewell\SDKv3</MagewellSdkRoot>
   </PropertyGroup>
-  <Target Name="CheckMagewellDevelopmentHeaders" BeforeTargets="PrepareForBuild">
+  <!-- /p:VpCiNoMagewell=true (CI only): build without the proprietary SDK headers. The
+       vendor-facing sources are left out (Condition on their ClCompile items) and
+       MagewellBackend.cpp compiles a no-device stub. The default build is unchanged. -->
+  <ItemDefinitionGroup Condition="'$(VpCiNoMagewell)' == 'true'">
+    <ClCompile>
+      <PreprocessorDefinitions>VP_NO_MAGEWELL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <Target Name="CheckMagewellDevelopmentHeaders" BeforeTargets="PrepareForBuild" Condition="'$(VpCiNoMagewell)' != 'true'">
     <Error Condition="!Exists('$(MagewellSdkRoot)\Include\LibMWCapture\MWCapture.h')" Text="Set MagewellSdkRoot (or VP_MAGEWELL_SDK_ROOT) to the official MWCapture SDK's SDKv3 directory. Only the build machine needs these headers; users do not need the development SDK." />
   </Target>
 </Project>

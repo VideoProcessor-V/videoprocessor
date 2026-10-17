@@ -44,11 +44,14 @@ $filter = $clauses -join '|'
 $trx = Join-Path $OutDir "chain-gate.trx"
 Remove-Item $trx -ErrorAction SilentlyContinue
 $saved = @{}
-foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN") {
+foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN") {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)
 }
 $onScreenRequested = $OnScreen -or $env:VP_TEST_HARNESS_ONSCREEN -eq "1"
 $env:VP_TEST_GPU = "hardware"; $env:VP_TEST_ADAPTER = $Adapter; $env:VP_TEST_REQUIRE_GPU = "1"
+# Fail closed on the owner's machine: a test whose hardware precondition (desktop size, CPU class,
+# hardware D3D11 renderer) is missing fails instead of logging SKIP-NO-HARDWARE.
+$env:VP_TEST_REQUIRE_HARDWARE = "1"
 if ($OnScreen) { $env:VP_TEST_HARNESS_ONSCREEN = "1" }
 if ($Fullscreen) { $env:VP_TEST_HARNESS_FULLSCREEN = $Fullscreen }
 try {
@@ -71,7 +74,7 @@ $bad | ForEach-Object { "  $($_.outcome): $($_.testName)" }
 $markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+ [A-Za-z0-9_]+' -AllMatches | ForEach-Object { $_.Matches } |
     ForEach-Object { $_.Value } | Sort-Object -Unique)
 $markers | ForEach-Object { "  marker: $_" }
-$noGpu = @($markers | Where-Object { $_ -like "SKIP-NO-GPU *" })
+$noGpu = @($markers | Where-Object { $_ -like "SKIP-NO-GPU *" -or $_ -like "SKIP-NO-HARDWARE *" })
 $noTiming = @()
 if ($onScreenRequested) {
     $noTiming = @($markers | Where-Object { $_ -like "SKIP-NO-DISPLAY-TIMING *" })

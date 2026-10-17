@@ -11,6 +11,7 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
+#include "HardwarePrerequisites.h"
 
 #include <video_frame_formatter/CNoopVideoFrameFormatter.h>
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
@@ -1800,6 +1801,10 @@ namespace Tests
 
 		TEST_METHOD(DeckLinkConvertersSustained4K60PerformanceComparison)
 		{
+			// The sustained budgets are for a performance-class CPU (see HardwarePrerequisites.h).
+			std::string cpuReason;
+			if (!HardwarePrerequisites::RequireConditionOrSkip("DeckLinkConvertersSustained4K60PerformanceComparison",
+				HardwarePrerequisites::PerformanceCpu(cpuReason), cpuReason)) return;
 			bool allAveragesMeet60Fps = true;
 			bool allP95sMeet60Fps = true;
 			const auto recordResult = [&](const ConverterBenchmarkComparison& result)
