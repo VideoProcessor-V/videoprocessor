@@ -9408,19 +9408,10 @@ void testUnfocusedNumberBoxesIgnoreTheWheel()
 void testInheritedPictureFieldsAndGreyedRenderAhead()
 {
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[general]
-profile_change_display_seconds: 5
-"
-        "[vprenderer.Cinema]
-quality: high
-source_resolution_auto_min_confidence: 0.70
-"
-        "source_resolution_evidence_seconds: 5
-source_resolution_evidence_shots: 2
-"
-        "[vprenderer.Night]
-quality: high
-");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n"
+        "[vprenderer.Cinema]\nquality: high\nsource_resolution_auto_min_confidence: 0.70\n"
+        "source_resolution_evidence_seconds: 5\nsource_resolution_evidence_shots: 2\n"
+        "[vprenderer.Night]\nquality: high\n");
     ConfigEditorWindow window(path, 0, true);
     auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
     requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(1);
@@ -9453,27 +9444,13 @@ void testProfileRewritesAreBackedUpLoadMigrations()
 {
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
     const QByteArray original =
-        "[general]
-profile_change_display_seconds: 5
-renderer: VideoProcessor Renderer (Alpha)
-"
-        "[directshow]
-presentation_lead_frames: 2
-"
-        "[queue.Steady]
-steady_reserve_frames: 3
-"
-        "[vprenderer.Cinema]
-quality: high
-"
-        "[vprenderer.scaling.Sharp]
-downscaler: ewa_lanczos
-"
-        "[vprenderer.zoom.Scope]
-crop_wider_content_to_fill_screen: true
-"
-        "crop_wider_content_aspect_limit: not-a-ratio
-";
+        "[general]\nprofile_change_display_seconds: 5\nrenderer: VideoProcessor Renderer (Alpha)\n"
+        "[directshow]\npresentation_lead_frames: 2\n"
+        "[queue.Steady]\nsteady_reserve_frames: 3\n"
+        "[vprenderer.Cinema]\nquality: high\n"
+        "[vprenderer.scaling.Sharp]\ndownscaler: ewa_lanczos\n"
+        "[vprenderer.zoom.Scope]\ncrop_wider_content_to_fill_screen: true\n"
+        "crop_wider_content_aspect_limit: not-a-ratio\n";
     writeFixture(path, original);
     const auto showEveryProfile = [](ConfigEditorWindow& window)
     {
