@@ -174,4 +174,5 @@
   <ItemGroup><ClCompile Include="GrainPreservationTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="BugHunt20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="RenderAheadPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>
