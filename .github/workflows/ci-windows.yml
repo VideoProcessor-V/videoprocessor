@@ -115,7 +115,8 @@ jobs:
           # pwsh's PSModulePath would make it load PowerShell 7 modules (Get-FileHash not found).
           $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          $extra ='${{ steps.toolchain.outputs.extra }}' -split ' ' | Where-Object { $_ }
+          # Always an array: splatting a single string would pass it character by character.
+          $extra = @('${{ steps.toolchain.outputs.extra }}' -split ' ' | Where-Object { $_ })
           & '${{ steps.toolchain.outputs.msbuild }}' VideoProcessor.sln /t:Build /m /nr:false `
             /p:Configuration=Release /p:Platform=x64 /p:VpCiNoMagewell=true @extra /v:minimal
           $code = $LASTEXITCODE
