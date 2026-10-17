@@ -154,9 +154,10 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
     m_components.clear(); m_lines.clear(); m_workLimit = false;
     std::array<uint32_t,1024> barHistogram{};
     uint32_t barSamples=0;
-    const bool planar = source.format == AnalysisLumaFormat::P010 ||
+    const bool planar = (source.format == AnalysisLumaFormat::P010 ||
         source.format == AnalysisLumaFormat::P210 ||
-        source.format == AnalysisLumaFormat::DecodedDolbyVision422;
+        source.format == AnalysisLumaFormat::DecodedDolbyVision422) &&
+        !source.fullRangeYuv; // full-range planes: Sample() maps them to the limited domain (as packed DV)
     for(int y=0;y<h;++y)
     {
         if(y>=topEnd && y<bottomStart) continue;

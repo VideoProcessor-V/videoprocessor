@@ -87,6 +87,30 @@ and its `CB1/src/dvbridge_render.c` RGB8 packer at the same pinned revision.
 Its 12-bit intensity/chroma packing is the inverse of this unpacker. The
 reference's FEL composer operates upstream of that HDMI packing step.
 
+## GPU tunnel unpack (under test)
+
+`dv_tunnel_gpu_unpack: on` (renderer profile key, Config: Fixes under test;
+default `off` until validated live) moves the picture unpack to the GPU. The
+formatter still finds, CRC-checks and parses the DM packet on the CPU, reading
+only the packet's pixels (and, before lock, the 4096-pixel alignment probe);
+every lock, black, loss and EOS decision is unchanged. A picture that would be
+shown goes on as the raw frame (r210, or R10b/R10l: the r210 word << 2,
+R10l little endian; early upload when active) and
+`GpuDolbyVisionTunnelUnpack` writes the formatter's two planes exactly (r16
+intensity, rg16 alternating chroma, codes << 4). The shader arithmetic is
+transcribed in `vprenderer/DolbyVisionTunnelUnpackReference.h` and tested
+bit-exact against the scalar and AVX2 CPU unpack; the GPU test
+(`GpuDolbyVisionTunnelUnpackMatchesTheCpuUnpack`, `VP_TEST_GPU=hardware`, or
+WARP with `VP_TEST_DV_WARP=1`) compares the GPU planes to the CPU's. Scene,
+subtitle and active-picture analysis sample the same codes from the raw words
+(`PackedDolbyVision422`). If the GPU unpack fails, that picture is unpacked on
+the CPU at the render and the session returns to the CPU unpack (logged once);
+`VP_TEST_DV_UNPACK_FAIL=1` forces this for tests. After a failure the payloads
+already queued go straight to the CPU fallback (no GPU retry); a new render
+device may try the GPU again. A picture neither can unpack (e.g. the mode
+changed under queued payloads) is presented black. Decoded DV has one analysis
+domain key on both routes (placement and strides are left out of it).
+
 ## Luminance status
 
 The Modern view shows a **DV luminance (nits)** card while the tunnel is active:

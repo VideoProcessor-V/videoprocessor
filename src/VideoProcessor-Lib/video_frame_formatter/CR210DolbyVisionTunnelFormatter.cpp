@@ -593,11 +593,11 @@ void CR210DolbyVisionTunnelFormatter::LogTitleLevels(const char* reason)
 		FormatLevelCount(m_titleLevelCounts[254]).c_str(), other.empty() ? "none" : other.c_str());
 }
 
-bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
-	const VideoFrame& frame, BYTE* output)
+CR210DolbyVisionTunnelFormatter::FrameResult
+CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 {
-	if (!frame.GetData() || !output || m_outputSize <= 0)
-		return false;
+	if (!frame.GetData() || m_outputSize <= 0)
+		return FrameResult::REJECTED;
 	const auto* source = static_cast<const uint8_t*>(frame.GetData());
 	const uint64_t counter = frame.GetCounter(); // audit 2026-10-16
 	// EOS changes the immediate next picture to SDR even when its packet
@@ -967,17 +967,35 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 		m_metadata.rgbBitAlignment =
 			m_alignment == ByteAlignment::LEFT ? 1 :
 			m_alignment == ByteAlignment::RIGHT ? 2 : 0;
-	if (m_alignment == ByteAlignment::UNKNOWN || !m_metadata.valid)
+	// The renderer may use SDR only before DV lock or after explicit EOS.
+	// Invalid metadata after DV lock must not expose the packed RGB pixels.
+	return m_alignment == ByteAlignment::UNKNOWN || !m_metadata.valid ?
+		FrameResult::BLACK : FrameResult::PICTURE;
+}
+
+bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
+	const VideoFrame& frame, BYTE* output)
+{
+	if (!output)
+		return false;
+	const FrameResult result = AnalyzeFrame(frame);
+	if (result == FrameResult::REJECTED)
+		return false;
+	if (result == FrameResult::BLACK)
 	{
-		// The renderer may use SDR only before DV lock or after explicit EOS.
-		// Invalid metadata after DV lock must not expose the packed RGB pixels.
 		memset(output, 0, static_cast<size_t>(m_outputSize));
 		return true;
 	}
 
 	// P216-style semiplanar output, with exact 12-bit I/C codes.
-	const bool leftAligned = m_alignment == ByteAlignment::LEFT;
-	auto* outputWords = reinterpret_cast<uint16_t*>(output);
+	ConvertPicture(static_cast<const uint8_t*>(frame.GetData()),
+		reinterpret_cast<uint16_t*>(output), m_alignment == ByteAlignment::LEFT);
+	return true;
+}
+
+void CR210DolbyVisionTunnelFormatter::ConvertPicture(
+	const uint8_t* source, uint16_t* outputWords, bool leftAligned)
+{
 	if (m_workerCount > 0 &&
 		static_cast<uint64_t>(m_width) * m_height >= 1920ULL * 1080ULL)
 	{
@@ -999,6 +1017,14 @@ bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(
 	}
 	else
 		ConvertRows(source, outputWords, 0, m_height, leftAligned);
+}
+
+bool CR210DolbyVisionTunnelFormatter::UnpackPicture(
+	const void* source, BYTE* output, bool highAligned)
+{
+	if (!source || !output || m_outputSize <= 0)
+		return false;
+	ConvertPicture(static_cast<const uint8_t*>(source), reinterpret_cast<uint16_t*>(output), highAligned);
 	return true;
 }
 

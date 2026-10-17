@@ -659,7 +659,8 @@ namespace RendererProfileConfig
 				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
 				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
 				key == "dejudder_landing_check" || key == "dejudder_pulldown" || key == "dejudder_picture_area" ||
-				key == "fix_scene_cooldown" || key == "dither_vectors_new_frame" || key == "native_rgb_ingest")
+				key == "fix_scene_cooldown" || key == "dither_vectors_new_frame" || key == "native_rgb_ingest" ||
+				key == "dv_tunnel_gpu_unpack")
 				return IsChoice(value, { "on", "off" });
 			// Motion fixes (owner 2026-10-13 night): M1 texture tolerance, M3's
 			// cut test, the coarse search range, the forward/backward agreement.

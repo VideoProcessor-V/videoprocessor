@@ -18,6 +18,10 @@ enum class AnalysisLumaFormat
 	NativeYuv422,
 	DecodedDolbyVision422,
 	SdrTunnelRgb,
+	// dv_tunnel_gpu_unpack: the decoded DV planes live on the GPU; the same
+	// 12-bit I / alternating C codes are unpacked here from the raw r210 words
+	// at each sampled pixel (rgbBitAlignment: 1 high, 2 low eight bits).
+	PackedDolbyVision422,
 };
 
 // audit 2026-10-16: every format's Sample() emits the limited (studio) 10-bit
@@ -47,7 +51,7 @@ struct AnalysisLumaSource
 	VideoFrameEncoding encoding = VideoFrameEncoding::UNKNOWN;
 	ColorSpace colorspace = ColorSpace::UNKNOWN;
 	uint64_t generation = 0;
-	uint8_t rgbBitAlignment = 0; // SDR tunnel: 1 high, 2 low eight bits
+	uint8_t rgbBitAlignment = 0; // SDR / packed DV tunnel: 1 high, 2 low eight bits
 	std::shared_ptr<const void> backingOwner;
 	// audit 2026-10-16: YCbCr plane formats (P010, P210, decoded DV 4:2:2,
 	// native 4:2:2) carry full-range codes; Sample() maps them to the limited

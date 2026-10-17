@@ -52,6 +52,10 @@ struct AnalysisFrameInput
     bool rendererUsesNative = false;
     bool converted422 = false;
     bool dolbyVisionTunnel = false;
+    // dv_tunnel_gpu_unpack: the decoded planes are on the GPU only; sample the
+    // raw r210 words (native) with this RGB8 placement (1 high, 2 low eight
+    // bits). Zero: the CPU formatter's planes (converted).
+    uint8_t dolbyTunnelPackedAlignment = 0;
 };
 
 // The prepared source retains the selected frame pixels while sampling them
