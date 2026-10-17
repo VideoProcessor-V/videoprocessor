@@ -13,6 +13,11 @@ public:
 	// Explicit dispatch also permits the scalar and SIMD paths to be qualified.
 	enum class ConversionMethod { AUTO, SCALAR, AVX2 };
 	void SetConversionMethod(ConversionMethod method) { m_conversionMethod = method; }
+	// dv_tunnel_fixes (bug hunt 2026-10-17, restore switch, default on): the
+	// whole-raster SDR alignment probe, the grey SDR exit, the loss limit in
+	// source pictures and L2 trims before L8. Off = the formatter before them.
+	void SetBugHuntFixes(bool on) { m_bugHuntFixes = on; }
+	bool BugHuntFixes() const { return m_bugHuntFixes; }
 	CR210DolbyVisionTunnelFormatter();
 	~CR210DolbyVisionTunnelFormatter() override;
 	CR210DolbyVisionTunnelFormatter(const CR210DolbyVisionTunnelFormatter&) = delete;
@@ -87,6 +92,7 @@ private:
 	// Bug hunt 2026-10-17: source counter of the first picture of the current
 	// loss run (the loss limit counts source pictures, not analysed ones).
 	bool m_hasPacketLoss = false;
+	bool m_bugHuntFixes = true;   // dv_tunnel_fixes
 	uint64_t m_packetLossStartCounter = 0;
 	bool m_tunnelConfirmed = false;
 	bool m_currentPictureHasValidHeader = false;

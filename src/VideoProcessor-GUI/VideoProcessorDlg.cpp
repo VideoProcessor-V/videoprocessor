@@ -78,6 +78,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
 #include <MainConfigSchema.h>
+#include <led/LedShutdownRestore.h>
 #include <UnifiedProfileRuntime.h>
 
 
@@ -4574,7 +4575,9 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 		!ReadGeneralBoolean(config, "use_frame_queue", true, m_stagedRuntimeSettings.useFrameQueue, error) ||
 		!ReadGeneralBoolean(config, "queue_auto_reset", true, m_stagedRuntimeSettings.queueAutoReset, error) ||
 		!ReadGeneralBoolean(config, "renderer_failure_keep_fullscreen", true,
-			m_stagedRuntimeSettings.rendererFailureKeepFullscreen, error))   // Bug hunt 2026-10-17
+			m_stagedRuntimeSettings.rendererFailureKeepFullscreen, error) ||   // Bug hunt 2026-10-17
+		!ReadGeneralBoolean(config, "magewell_recover_faults", true,
+			m_stagedRuntimeSettings.magewellRecoverFaults, error))   // restore switch 2026-10-17
 		return false;
 	if (!Ambient::Read(config, m_stagedRuntimeSettings.ambient, error))
 		return false;
@@ -4888,6 +4891,8 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 		if (m_rendererResetAutoCheck.GetSafeHwnd())
 			m_rendererResetAutoCheck.SetCheck(m_queueAutoResetConfigured ? BST_CHECKED : BST_UNCHECKED);
 	}
+	// Restore switch 2026-10-17: [general] magewell_recover_faults (logged on change).
+	MagewellBackend::SetRecoverFaults(m_stagedRuntimeSettings.magewellRecoverFaults);
 	// Bug hunt 2026-10-17: [general] renderer_failure_keep_fullscreen.
 	if (m_stagedRuntimeSettings.rendererFailureKeepFullscreen !=
 		m_rendererFailureKeepFullscreen)
@@ -9440,6 +9445,19 @@ void CVideoProcessorDlg::PollShutdownRetirementDeadline(ULONGLONG now)
 		static_cast<LPCTSTR>(m_retiringRendererName),
 		ShutdownBlockedRetirementDeadlineMs,
 		m_captureDevice ? 1 : 0);
+	// Integration 2026-10-17: before leaking, stop the renderer's LED drive on
+	// its own thread (bounded: the blocked renderer may hold its locks), so the
+	// projector is restored to full light and CNTR is never left high.
+	if (m_failedRendererRetirement)
+	{
+		const std::shared_ptr<IVideoRenderer> renderer = m_failedRendererRetirement;
+		const LedDrive::BoundedRestoreResult restore = LedDrive::RunBoundedRestore(
+			[renderer]() { return renderer->StopLedDriveForShutdown(); },
+			ShutdownLedRestoreTimeoutMs);
+		DebugLog::Log(
+			"Forced shutdown LED restore: %s (timeout_ms=%u)",
+			LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
+	}
 	// Deliberately leaked: its backend already failed to release, and
 	// destroying it here or in the dialog destructor would re-enter that
 	// backend on the UI thread. Process exit reclaims it.

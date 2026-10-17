@@ -197,6 +197,7 @@
     <ClInclude Include="AmbientSensor.h" />
     <ClInclude Include="led\SerialPort.h" />
     <ClInclude Include="led\ProjectorDriver.h" />
+    <ClInclude Include="led\LedShutdownRestore.h" />
     <ClInclude Include="led\BarcoAsciiDriver.h" />
     <ClInclude Include="led\LedController.h" />
     <ClInclude Include="led\LedMeasurement.h" />

@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "CaptureTimestampGap.h"
+
 // Stage 6b: when the de-judder may run for a source frame, and (6b-2) whether
 // one more extra present may fill the next refresh. Pure logic, so the
 // renderer's rules are unit-tested without a GPU. "Off" (any reason other
@@ -205,18 +207,44 @@ namespace DejudderPolicy
 	// the RGB8 placement known) or
 	// untrusted (presented as black). The next frame B pairs with A only when
 	// both are the same trusted kind: never an untrusted B, never DV with SDR.
+	// Integration 2026-10-17: an SDR fallback is a picture only where the render shows
+	// it - r210 (sdrFallbackRenders). On R10b / R10l the tunnel's SDR fallback renders
+	// black, so it is untrusted there.
 	enum class DolbyVisionFrameKind { Picture, SdrFallback, Untrusted };
 	inline DolbyVisionFrameKind ClassifyDolbyVisionFrame(bool valid, bool requiresBlackFrame, bool allowSdrFallback,
-		bool rgbPlacementKnown)
+		bool rgbPlacementKnown, bool sdrFallbackRenders)
 	{
 		if (requiresBlackFrame) return DolbyVisionFrameKind::Untrusted;
 		if (valid) return DolbyVisionFrameKind::Picture;
-		return allowSdrFallback && rgbPlacementKnown ? DolbyVisionFrameKind::SdrFallback : DolbyVisionFrameKind::Untrusted;
+		return allowSdrFallback && rgbPlacementKnown && sdrFallbackRenders ?
+			DolbyVisionFrameKind::SdrFallback : DolbyVisionFrameKind::Untrusted;
 	}
 	inline bool DolbyVisionPairTrusted(bool tunnel, DolbyVisionFrameKind a, DolbyVisionFrameKind b)
 	{
 		if (!tunnel) return true;
 		return a == b && b != DolbyVisionFrameKind::Untrusted;
+	}
+
+	// Integration 2026-10-17: the optical-flow producer's break before a frame (no pair
+	// with the previous submission), by the same rules as the dequeue's pair: a gap or
+	// film update, pair times that are not adjacent (AdjacentPairTimes, with
+	// timing_continuity_fixes: checkTimes) and, on the DV tunnel, a pair that is not
+	// trusted (DolbyVisionPairTrusted). havePrev false: nothing submitted to pair with.
+	struct MotionAheadFrame
+	{
+		double time = 0.0;   // seconds; 0 = unknown
+		DolbyVisionFrameKind kind = DolbyVisionFrameKind::Untrusted;
+	};
+	inline bool MotionAheadBreakBefore(bool gapBefore, bool filmUpdate, bool checkTimes, double pairRateHz,
+		bool dvTunnel, bool havePrev, const MotionAheadFrame& previous, const MotionAheadFrame& frame)
+	{
+		if (gapBefore || filmUpdate)
+			return true;
+		if (!havePrev)
+			return false;
+		if (checkTimes && !CaptureTimestampGap::AdjacentPairTimes(previous.time, frame.time, pairRateHz))
+			return true;
+		return !DolbyVisionPairTrusted(dvTunnel, previous.kind, frame.kind);
 	}
 
 	// Whether extra presents may run (with Decide() == Active): strength > 0

@@ -537,6 +537,7 @@ protected:
 		bool useFrameQueue = true;
 		bool queueAutoReset = true;
 		bool rendererFailureKeepFullscreen = true;   // Bug hunt 2026-10-17
+		bool magewellRecoverFaults = true;   // restore switch 2026-10-17
 		Ambient::Settings ambient;      // Stage 9: [ambient]
 		bool hasCaptureDevice = false;
 		CString captureDevice;

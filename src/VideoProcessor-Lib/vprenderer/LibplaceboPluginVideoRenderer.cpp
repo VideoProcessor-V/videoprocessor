@@ -640,6 +640,11 @@ bool LibplaceboPluginVideoRenderer::SuspendLedDriveForTest(CString& reason)
 	return !m_renderer || m_renderer->SuspendLedDriveForTest(reason);
 }
 
+bool LibplaceboPluginVideoRenderer::StopLedDriveForShutdown()
+{
+	return !m_renderer || m_renderer->StopLedDriveForShutdown();
+}
+
 void LibplaceboPluginVideoRenderer::ResumeLedDriveAfterTest()
 {
 	if (m_renderer)

@@ -1045,6 +1045,10 @@ namespace
 		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
 		// non-certified reimplementation, see DolbyVisionTrims.h).
 		bool dvTrims = false;
+		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
+		// SDR alignment probe, the grey SDR exit, the loss limit in source pictures
+		// and L2 trims before L8 (CR210DolbyVisionTunnelFormatter). Off = before them.
+		bool dvTunnelFixes = true;
 		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
 		// signal by repeated frames is found and shown at its film rate.
 		bool dejudderPulldown = false;
@@ -1328,7 +1332,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|' << settings.dvTrims << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|' << settings.dvTrims << '|' << settings.dvTunnelFixes << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -1341,6 +1345,10 @@ namespace
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
+			// Film grain switches (docs/audit/grain-audit-2026-10-17.md): applied live, so they
+			// must change the fingerprint like the engine's extras above.
+			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
+			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
@@ -2456,6 +2464,7 @@ namespace
 			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
 			std::make_pair("dv_tunnel_gpu_unpack", &settings.dvTunnelGpuUnpack),
 			std::make_pair("dv_trims", &settings.dvTrims),
+			std::make_pair("dv_tunnel_fixes", &settings.dvTunnelFixes),
 			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
 			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
 			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
@@ -5672,6 +5681,7 @@ struct LibplaceboVideoRenderer::Impl
 	// Delta 11: the boost toe and the ANSI lift's strength (module or not).
 	std::atomic<double> ledBoostKnee{ 0.0 };
 	std::atomic<double> ledBoostKneeWidth{ 0.05 };
+	std::atomic<bool> ledWtwPassthrough{ true };   // led_wtw_passthrough ([led_drive], default on)
 	std::atomic<double> ledShadowLift{ 0.0 };
 	std::vector<const pl_hook*> frameHooks;
 	std::vector<std::string> activeCustomShaders;
@@ -5693,6 +5703,11 @@ struct LibplaceboVideoRenderer::Impl
 	// it re-engages only once 4 are queued again. Render-loop thread only.
 	bool motionAheadEngaged = false;
 	uint64_t motionAheadEngagedGeneration = 0;
+	// Integration 2026-10-17: the frame last submitted to the producer (its time and DV kind),
+	// for the break rule (DejudderPolicy::MotionAheadBreakBefore). Render-loop thread only.
+	bool motionAheadPrevKnown = false;
+	uint64_t motionAheadPrevGeneration = 0;
+	DejudderPolicy::MotionAheadFrame motionAheadPrev;
 	// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md).
 	std::atomic<bool> motionEngineReady{ false };
 	// The producer computing the pairs ahead (render thread starts / stops it; the
@@ -9407,6 +9422,8 @@ struct LibplaceboVideoRenderer::Impl
 			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
 			formatter = CreateAlphaFormatter(state->videoFrameEncoding,
 				videoConversionOverride, state->dolbyVisionTunnel);
+			if (auto* dv = dynamic_cast<CR210DolbyVisionTunnelFormatter*>(formatter.get()))
+				dv->SetBugHuntFixes(settings.dvTunnelFixes);   // dv_tunnel_fixes
 			formatter->OnVideoState(state);
 			formatterState = state;
 		}
@@ -9755,6 +9772,11 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback, "optical_flow_global_fallback");
 		changed(current.opticalFlowCostTrust != next.opticalFlowCostTrust, "optical_flow_cost_trust");
 		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
+		changed(current.interpolationGrain != next.interpolationGrain, "interpolation_grain");
+		changed(current.dejudderSourceWarpCatmull != next.dejudderSourceWarpCatmull, "dejudder_source_warp_filter");
+		changed(current.debandVpGrainGuard != next.debandVpGrainGuard, "deband_vp_grain_guard");
+		changed(current.debandGrain != next.debandGrain, "deband_grain");
+		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
 		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
@@ -9805,6 +9827,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
+		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -10212,6 +10235,16 @@ struct LibplaceboVideoRenderer::Impl
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
 		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
+		{
+			// dv_tunnel_fixes, live (restore switch 2026-10-17).
+			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
+			if (auto* dv = dynamic_cast<CR210DolbyVisionTunnelFormatter*>(formatter.get()))
+				if (dv->BugHuntFixes() != settings.dvTunnelFixes)
+				{
+					dv->SetBugHuntFixes(settings.dvTunnelFixes);
+					DebugLog::Log("Dolby Vision RGB tunnel: bug-hunt fixes %s (dv_tunnel_fixes)", settings.dvTunnelFixes ? "on" : "off");
+				}
+		}
 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
 		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
@@ -13238,9 +13271,11 @@ struct LibplaceboVideoRenderer::Impl
 			// (black frame) or a DV picture with an SDR fallback.
 			DejudderPolicy::DolbyVisionPairTrusted(dejudderDolbyVisionTunnel,
 				DejudderPolicy::ClassifyDolbyVisionFrame(current->dolby.valid, current->dolby.requiresBlackFrame,
-					current->dolby.allowSdrFallback, current->dolby.rgbBitAlignment == 1 || current->dolby.rgbBitAlignment == 2),
+					current->dolby.allowSdrFallback, current->dolby.rgbBitAlignment == 1 || current->dolby.rgbBitAlignment == 2,
+					current->rawEncoding == VideoFrameEncoding::R210),
 				DejudderPolicy::ClassifyDolbyVisionFrame(next->dolby.valid, next->dolby.requiresBlackFrame,
-					next->dolby.allowSdrFallback, next->dolby.rgbBitAlignment == 1 || next->dolby.rgbBitAlignment == 2));
+					next->dolby.allowSdrFallback, next->dolby.rgbBitAlignment == 1 || next->dolby.rgbBitAlignment == 2,
+					next->rawEncoding == VideoFrameEncoding::R210));
 		const auto usable = [](pl_tex tex)
 		{
 			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
@@ -19923,7 +19958,13 @@ struct LibplaceboVideoRenderer::Impl
             {
                 // The look-ahead reads the captured frame: its range as the picture's.
                 led->SetSourceRange(activeSettings.sourceRange == "full" ? 1 : activeSettings.sourceRange == "limited" ? 0 : -1);
-                compensation = led->BeginFrame(sourceSequence, nominalSourceRateHz);
+                // Integration 2026-10-17 (owner: measured, not nominal): the source rate the LED
+                // look-ahead converts led_lookahead_ms with is the measured one (the film rate
+                // when pulldown is locked, else the measured capture rate); nominal only when
+                // nothing is measured yet.
+                const double ledSourceRateHz = captureRateHz >= 10.0 && captureRateHz <= 240.0 ?
+                    captureRateHz : nominalSourceRateHz;
+                compensation = led->BeginFrame(sourceSequence, ledSourceRateHz);
                 if (led->WantsPredictions())
                 {
                     // The lookahead's raw-to-output transfer follows this frame's
@@ -19981,6 +20022,8 @@ struct LibplaceboVideoRenderer::Impl
                     ledBoostKneeWidth.load(std::memory_order_acquire));
                 CustomHookChain::SetHookParameter(frameHooks[i], "shadow_lift", ledShadowLift.load(std::memory_order_acquire));
                 CustomHookChain::SetHookParameter(frameHooks[i], "veil", compensation.veil);
+                CustomHookChain::SetHookParameter(frameHooks[i], "wtw_passthrough",
+                    ledWtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
@@ -22118,6 +22161,7 @@ void LibplaceboVideoRenderer::Build()
 	m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
 	m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
 	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
+	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
 	m_impl->displayRefreshRate.SetEventSink(
 		[this](const std::string& event, double actualRefreshRate,
 			double requestedRefreshRate, double previousRefreshRate)
@@ -22411,6 +22455,7 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	m_ledKnee = boostConfig.knee;
 	m_ledBoostKnee = boostConfig.gammaBoostKnee;
 	m_ledBoostKneeWidth = boostConfig.gammaBoostKneeWidth;
+	m_ledWtwPassthrough = boostConfig.wtwPassthrough;
 	// The shadow lift is part of adaptive gamma (owner 2026-10-14).
 	m_ledShadowLift = boostConfig.adaptiveGamma ? boostConfig.shadowLiftAnsi : 0.0;
 	if (m_impl)
@@ -22421,6 +22466,7 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
 		m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
 		m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
+		m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
 	}
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
 		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
@@ -23776,6 +23822,28 @@ bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
 		module->Stop();
 		DebugLog::Log("LED drive: stopped for the RS-232 connection test");
 	}
+	return true;
+}
+
+// Integration 2026-10-17: the forced shutdown's LED stop. The render state lock may be
+// held by the blocked retirement, so the module comes from the render loop's atomic copy
+// (or m_ledDrive when the lock is free at once). Stop() restores full light.
+bool LibplaceboVideoRenderer::StopLedDriveForShutdown()
+{
+	std::shared_ptr<LedDrive::LedDriveModule> module;
+	if (m_impl)
+		module = std::atomic_load(&m_impl->ledDrive);
+	if (!module)
+	{
+		std::unique_lock<std::mutex> guard(m_stateMutex, std::try_to_lock);
+		if (guard.owns_lock())
+			module = m_ledDrive;
+	}
+	if (!module)
+		return true;
+	DebugLog::Log("LED drive: stopping for the forced shutdown (restoring full light)");
+	module->Stop();
+	DebugLog::Log("LED drive: stopped for the forced shutdown");
 	return true;
 }
 
@@ -25470,6 +25538,17 @@ void LibplaceboVideoRenderer::RenderLoop()
 					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead)", queuedAhead);
 				}
 				const bool framesAhead = m_impl->motionAheadEngaged;
+				// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
+				// else the capture timestamp; 0 = not known).
+				LARGE_INTEGER aheadQpcFrequency{};
+				const bool aheadQpcKnown = QueryPerformanceFrequency(&aheadQpcFrequency) && aheadQpcFrequency.QuadPart > 0;
+				auto aheadTime = [&](const QueuedFrame& q) -> double {
+					if (q.filmHz > 0.0 && q.arrivalQpc > 0 && aheadQpcKnown)
+						return static_cast<double>(q.arrivalQpc) / static_cast<double>(aheadQpcFrequency.QuadPart);
+					if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
+						return static_cast<double>(q.frame.GetTimingTimestamp()) / static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
+					return 0.0;
+				};
 				for (QueuedFrame& ahead : motionAheadFrames)
 				{
 					const VideoState& aheadState = *ahead.state;
@@ -25482,7 +25561,27 @@ void LibplaceboVideoRenderer::RenderLoop()
 					// high-water mark would otherwise pass it and its pairs would never exist (audit 2026-10-16).
 					if (!prepared.source.IsValid())
 						break;
-					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, ahead.gapBefore || ahead.filmUpdate);
+					// Integration 2026-10-17: also a break when the pair's times are not adjacent
+					// (the dequeue's AdjacentPairTimes rule, with timing_continuity_fixes) or, on the
+					// DV tunnel, when the pair is not trusted (DolbyVisionPairTrusted).
+					DejudderPolicy::MotionAheadFrame aheadFrame;
+					aheadFrame.time = aheadTime(ahead);
+					if (ahead.converted)
+						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionFrame(ahead.converted->dolby.valid,
+							ahead.converted->dolby.requiresBlackFrame, ahead.converted->dolby.allowSdrFallback,
+							ahead.converted->dolby.rgbBitAlignment == 1 || ahead.converted->dolby.rgbBitAlignment == 2,
+							ahead.converted->rawEncoding == VideoFrameEncoding::R210);
+					const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
+						m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
+						aheadState.displayMode->RefreshRateHz();
+					const bool havePrev = m_impl->motionAheadPrevKnown && m_impl->motionAheadPrevGeneration == generation;
+					const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
+						m_impl->activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
+						havePrev, m_impl->motionAheadPrev, aheadFrame);
+					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
+					m_impl->motionAheadPrevKnown = true;
+					m_impl->motionAheadPrevGeneration = generation;
+					m_impl->motionAheadPrev = aheadFrame;
 				}
 			}
 			catch (const std::exception& e)
@@ -26754,6 +26853,12 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "optical_flow_global_fallback=" << (s.opticalFlowGlobalFallback ? "on" : "off") << "\n"
 		<< "optical_flow_cost_trust=" << (s.opticalFlowCostTrust ? "on" : "off") << "\n"
 		<< "optical_flow_fb_check=" << (s.opticalFlowFbCheck ? "on" : "off") << "\n"
+		<< "motion=" << s.motion.Fingerprint() << "\n"
+		<< "interpolation_grain=" << InterpolationPolicy::Name(s.interpolationGrain) << "\n"
+		<< "dejudder_source_warp_filter=" << (s.dejudderSourceWarpCatmull ? "catmull" : "bilinear") << "\n"
+		<< "deband_vp_grain_guard=" << (s.debandVpGrainGuard ? "on" : "off") << "\n"
+		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
+		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
 		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"
 		<< "interpolation_fallback=" << InterpolationPolicy::Name(s.interpolationFallback) << "\n"
 		<< "interpolation_fill_gaps=" << (s.interpolationFillGaps ? "on" : "off") << "\n"
@@ -26775,6 +26880,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "dv_trims=" << s.dvTrims << "\n"
+		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"

@@ -187,3 +187,6 @@ constexpr uint32_t RendererFailureRetryDelayMs(uint32_t attempt)
 // Bug hunt 2026-10-17: how long application shutdown waits for a renderer
 // whose shutdown retirement is retained before it ends the dialog anyway.
 constexpr uint32_t ShutdownBlockedRetirementDeadlineMs = 10000u;
+// Integration 2026-10-17: at that deadline, how long the LED drive's restore
+// (on its own thread) may take before the renderer is leaked anyway.
+constexpr uint32_t ShutdownLedRestoreTimeoutMs = 3000u;

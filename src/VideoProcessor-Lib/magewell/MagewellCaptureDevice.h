@@ -173,6 +173,9 @@ public:
 	// Bug hunt 2026-10-17: restart delay after recoverable capture fault
 	// number consecutiveFaults (1-based): 250 ms doubling, capped at 30 s.
 	static uint32_t RecoverableFaultBackoffMs(uint32_t consecutiveFaults);
+	// magewell_recover_faults (restore switch, default on); see MagewellBackend.h.
+	static void SetRecoverFaults(bool on);
+	static bool RecoverFaults();
 
 	static void OrderPrimariesByChromaticity(const double x[3], const double y[3],
 		int& redIndex, int& greenIndex, int& blueIndex);

@@ -366,7 +366,13 @@ namespace LedDrive
 		if (previousFrameMs >= 0.0 && previousWallMs >= 0.0)
 			sentMs = previousFrameMs + std::max(0.0, std::min(sentWallMs - previousWallMs, timeMs - previousFrameMs));
 		else
-			sentMs = timeMs - std::max(0.0, NowMs() - sentWallMs);
+		{
+			// Integration 2026-10-17: the first frame. Its wall time (lastFrameWallMs, set by
+			// BeginFrameAt just before) anchors timeMs; with a test or replay clock timeMs is
+			// not the wall clock, so "now" must not be assumed to be timeMs.
+			const double frameWallMs = lastFrameWallMs >= 0.0 ? lastFrameWallMs : NowMs();
+			sentMs = timeMs - std::max(0.0, frameWallMs - sentWallMs);
+		}
 		return sentMs + latencyMs;
 	}
 
@@ -1203,6 +1209,9 @@ namespace LedDrive
 				// its decision (which never depends on the port) and only for a
 				// command this tick does not send itself, so the script's own
 				// command stream is unchanged.
+				// script_resend_failed_writes off (restore switch): the pure script stream.
+				if (!current.scriptResendFailedWrites)
+					resendLight = resendContrast = -1;
 				if (resendLight >= 0 && (out.lightCommand >= 0 || CustomDimEngaged()))
 					resendLight = -1;
 				if (resendContrast >= 0 && !out.contrastSchedule.empty())

@@ -1155,6 +1155,9 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 	auto recoverableRetryAfter = std::chrono::steady_clock::time_point();
 	const auto recoverableFault = [&](const char* reason)
 	{
+		// magewell_recover_faults off (restore switch): end capture as before.
+		if (!RecoverFaults())
+			throw std::runtime_error(std::string(reason) + "; capture stopped. Restart required");
 		if (haveState && !validPending)
 			PublishInvalidVideoState(captureRunToken);
 		validPending = true;
@@ -1529,6 +1532,8 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 			}
 			catch (const std::exception& exception)
 			{
+				if (!RecoverFaults())
+					throw;   // magewell_recover_faults off: ends capture, as before
 				++droppedForBudget;
 				const auto now = std::chrono::steady_clock::now();
 				if (!budgetStarving)
@@ -1871,6 +1876,23 @@ ULONG MagewellCaptureDevice::Release(void)
 
 // Bug hunt 2026-10-17: delay before the device restart after recoverable fault
 // number `consecutiveFaults` (1-based): 250 ms doubling, capped at 30 s.
+namespace
+{
+	std::atomic<bool> g_magewellRecoverFaults{ true };   // magewell_recover_faults
+}
+
+void MagewellCaptureDevice::SetRecoverFaults(bool on)
+{
+	if (g_magewellRecoverFaults.exchange(on) != on)
+		DebugLog::Log("Magewell: recoverable capture faults %s (magewell_recover_faults)",
+			on ? "restart the device internally" : "end capture (restart required)");
+}
+
+bool MagewellCaptureDevice::RecoverFaults()
+{
+	return g_magewellRecoverFaults.load();
+}
+
 uint32_t MagewellCaptureDevice::RecoverableFaultBackoffMs(uint32_t consecutiveFaults)
 {
 	const uint32_t shift = consecutiveFaults == 0 ? 0 :

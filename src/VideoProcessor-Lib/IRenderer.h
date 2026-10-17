@@ -452,6 +452,13 @@ public:
 	// After the test: the LED drive starts again with the saved settings.
 	virtual void ResumeLedDriveAfterTest() {}
 
+	// Integration 2026-10-17: the forced shutdown (a blocked retirement leaks the
+	// renderer) stops the LED drive first, so it restores full light (LDMM 0,
+	// LPW1 to the ceiling, CNTR 50) and CNTR is never left high. Must not wait
+	// on the renderer's state lock; the caller bounds the call on its own thread
+	// (LedShutdownRestore.h). True when stopped or there is none.
+	virtual bool StopLedDriveForShutdown() { return true; }
+
 	// Rolling render cost, for judging whether a quality setting fits inside a
 	// frame period on this machine. Renderers without per-frame instrumentation
 	// return false so the OSD does not imply a measurement it does not have.

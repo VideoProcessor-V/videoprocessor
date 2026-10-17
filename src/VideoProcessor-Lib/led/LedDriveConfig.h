@@ -293,6 +293,16 @@ namespace LedDrive
 		// (not wired yet: needs the renderer's walk to visit the deeper
 		// frames for the LED observer only).
 		int ledLookaheadMs = 0;
+		// Restore switch (bug hunt 2026-10-17, default on): led_wtw_passthrough -
+		// under a boost (gain > 1) whiter-than-white keeps its own value in the
+		// LED compensation shader. Off = rolled under white with the boosted
+		// picture, as before.
+		bool wtwPassthrough = true;
+		// Restore switch (bug hunt 2026-10-17, default on): script_resend_failed_writes
+		// - internal_script re-sends a failed LPW1 / CNTR write at the next tick
+		// (only a command that tick does not send itself). Off = the pure script
+		// stream: a failed write is not repeated.
+		bool scriptResendFailedWrites = true;
 		// The fade-up's displayed-light ramp for the shortfall LED x CNTR x
 		// gain cannot yet reach: fast, bounded by the modelled light (the
 		// paired LED / CNTR move itself keeps the script-matched rates).
@@ -616,6 +626,8 @@ namespace LedDrive
 			Boolean("led_landing_ms"),           // review 2026-10-17
 			Choice("cut_lead", { "off", "window" }),   // review 2026-10-17, experimental
 			Integer("led_lookahead_ms", 0, 2000),     // review 2026-10-17
+			Boolean("led_wtw_passthrough"),           // restore switch 2026-10-17
+			Boolean("script_resend_failed_writes"),   // restore switch 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
 			Number("recovery_rate_min", 0.0, 10000.0),
 			Number("recovery_rate_max", 1.0, 10000.0),
@@ -963,6 +975,8 @@ namespace LedDrive
 		if (config.TryGetString(section, "cut_lead", value))
 			result.cutLeadWindow = ConfigFile::NormalizeName(value) == "window";
 		readInt("led_lookahead_ms", 0, 2000, result.ledLookaheadMs);
+		config.TryGetBool(section, "led_wtw_passthrough", result.wtwPassthrough);
+		config.TryGetBool(section, "script_resend_failed_writes", result.scriptResendFailedWrites);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
 		readNumber("recovery_rate_min", result.recoveryRateMin);
 		readNumber("recovery_rate_max", result.recoveryRateMax);

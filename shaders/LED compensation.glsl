@@ -108,6 +108,13 @@
 //!MAXIMUM 1.0
 0.0
 
+//!PARAM wtw_passthrough
+//!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under a boost, 0 = rolled under white (before 2026-10-17)
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+1.0
+
 //!HOOK PREOUTPUT
 //!BIND HOOKED
 //!DESC VideoProcessor LED drive compensation
@@ -169,7 +176,8 @@ vec4 hook()
     // BTB and WTW kept in all cases).
     if (gain > 1.0) {
         x = knee > 0.0001 ? soft_knee(x, knee) : min(x, vec3(1.0));
-        x = mix(x, before, vec3(greaterThan(before, vec3(1.0))));
+        if (wtw_passthrough > 0.5)
+            x = mix(x, before, vec3(greaterThan(before, vec3(1.0))));
     }
     color.rgb = linear ? spow(x, 1.0 / compensation_eotf) : x;
     return color;

@@ -13,4 +13,9 @@ namespace MagewellBackend
     CString UnavailableMessage(const CString& configuredDeviceName);
     void AppendDeviceNames(std::vector<std::wstring>& names);
     std::vector<std::wstring> ConnectionNames(const std::wstring& deviceName);
+    // [general] magewell_recover_faults (restore switch, bug hunt 2026-10-17,
+    // default on): recoverable capture faults restart the device internally.
+    // Off = they end capture (a manual Restart), as before. Process-wide.
+    void SetRecoverFaults(bool on);
+    bool RecoverFaults();
 }

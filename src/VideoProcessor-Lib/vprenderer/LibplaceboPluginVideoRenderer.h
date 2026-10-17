@@ -99,6 +99,7 @@ public:
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;
+	bool StopLedDriveForShutdown() override;
 	void ResumeLedDriveAfterTest() override;
 	bool SupportsNativeStatsOverlay() const override;
 	bool SetNativeStatsOverlay(const uint8_t* pixels, size_t byteCount,

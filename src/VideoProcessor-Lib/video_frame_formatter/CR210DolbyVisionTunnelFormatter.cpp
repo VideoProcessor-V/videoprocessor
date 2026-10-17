@@ -229,7 +229,7 @@ namespace
 	}
 
 	bool ParseMetadata(const uint8_t* dm, size_t length, ParsedPacket& result,
-		std::array<uint16_t, 256>& extensionLevels, RawTrimPayload* rawTrims)
+		std::array<uint16_t, 256>& extensionLevels, RawTrimPayload* rawTrims, bool l2First)
 	{
 		if (length < 71)
 			return false;
@@ -287,7 +287,16 @@ namespace
 				// take the slots first; L8 blocks are held aside and fill only
 				// the slots left after the last block, so a DM carrying many
 				// L8 blocks before its L2 blocks can no longer crowd L2 out.
-				if (level == 2)
+				if (!l2First)
+				{
+					// dv_tunnel_fixes off: the slots in block order.
+					if (parsed.trimCount >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
+						parsed.trimOverflow = true;
+					else if (ParseTrim(payload, payloadLength, level,
+						parsed.trims[parsed.trimCount]))
+						++parsed.trimCount;
+				}
+				else if (level == 2)
 				{
 					if (parsed.trimCount >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
 						parsed.trimOverflow = true;
@@ -587,7 +596,7 @@ bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnel(const uint8_t* source) con
 		// has G near 0 with R near 128. Mid-grey tunnel content relies on the
 		// noisy-B cue above.
 		if (neutral[placement] * 10 >= pairs * 2 * 8 &&
-			rDistanceFromG[placement] > 32 * pairs * 2)
+			(!m_bugHuntFixes || rDistanceFromG[placement] > 32 * pairs * 2))
 			return true;
 	}
 	return false;
@@ -799,7 +808,7 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 			}
 			if (!complete || copied != length)
 				break;
-			if (!ParseMetadata(body.data(), length, parsed, extensionLevels, rawTrims))
+			if (!ParseMetadata(body.data(), length, parsed, extensionLevels, rawTrims, m_bugHuntFixes))
 			{
 				failureReason = "unsupported/malformed metadata body";
 				break;
@@ -916,14 +925,23 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 		// pictures (counter span since the first loss, drops included) rather
 		// than analysed pictures, as the SDR exit and the ID-wrap guard do. A
 		// counter that goes backwards (reset/wrap) restarts the span.
-		if (!m_hasPacketLoss || counter < m_packetLossStartCounter)
+		if (!m_bugHuntFixes)
 		{
-			m_hasPacketLoss = true;
-			m_packetLossStartCounter = counter;
+			// dv_tunnel_fixes off: analysed pictures.
+			if (m_missingPacketFrames != (std::numeric_limits<uint32_t>::max)())
+				++m_missingPacketFrames;
 		}
-		const uint64_t lostPictures = counter - m_packetLossStartCounter + 1;
-		m_missingPacketFrames = static_cast<uint32_t>((std::min)(lostPictures,
-			static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())));
+		else
+		{
+			if (!m_hasPacketLoss || counter < m_packetLossStartCounter)
+			{
+				m_hasPacketLoss = true;
+				m_packetLossStartCounter = counter;
+			}
+			const uint64_t lostPictures = counter - m_packetLossStartCounter + 1;
+			m_missingPacketFrames = static_cast<uint32_t>((std::min)(lostPictures,
+				static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())));
+		}
 		if (!m_missingPacketReported && m_missingPacketFrames >= m_packetLossLimit)
 		{
 			DebugLog::Log("Dolby Vision RGB tunnel: %u pictures without usable metadata (last_header=%s reason=%s); %s",
@@ -984,7 +1002,29 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 		m_crcFailedCopies = m_recoveredPackets = m_metadataIdTransitions = 0;
 		m_majorityRecoveries = m_idAmbiguityResets = 0;
 	}
-	if (m_alignment == ByteAlignment::UNKNOWN)
+	if (m_alignment == ByteAlignment::UNKNOWN && !m_bugHuntFixes)
+	{
+		// dv_tunnel_fixes off: the first 4096 pixels, dark pixels voting for both.
+		const size_t sampleCount = (std::min)(
+			static_cast<size_t>(m_width) * m_height, size_t(4096));
+		size_t high8 = 0, low8 = 0;
+		for (size_t pixel = 0; pixel < sampleCount; ++pixel)
+		{
+			const uint32_t word = readWord(pixel);
+			const uint32_t r = (word >> 20) & 0x3FFU;
+			const uint32_t g = (word >> 10) & 0x3FFU;
+			const uint32_t b = word & 0x3FFU;
+			high8 += ((r | g | b) & 3U) == 0;
+			low8 += ((r | g | b) & 0x300U) == 0;
+		}
+		if (sampleCount > 0 && high8 * 100 >= sampleCount * 98 &&
+			high8 > low8 * 2)
+			m_alignment = ByteAlignment::LEFT;
+		else if (sampleCount > 0 && low8 * 100 >= sampleCount * 98 &&
+			low8 > high8 * 2)
+			m_alignment = ByteAlignment::RIGHT;
+	}
+	else if (m_alignment == ByteAlignment::UNKNOWN)
 	{
 		// Alignment alone does not identify Dolby Vision. It does let
 		// ordinary 8-bit RGB menus use the SDR passthrough path.

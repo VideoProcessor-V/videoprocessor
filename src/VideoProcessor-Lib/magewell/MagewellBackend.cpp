@@ -2,6 +2,7 @@
 #include "MagewellBackend.h"
 #include "MagewellCaptureDeviceDiscoverer.h"
 #include "MagewellSdkInstance.h"
+#include "MagewellCaptureDevice.h"
 
 namespace
 {
@@ -41,6 +42,16 @@ namespace MagewellBackend
     CComPtr<ACaptureDeviceDiscoverer> CreateDiscoverer(ICaptureDeviceDiscovererCallback& callback)
     {
         return CComPtr<ACaptureDeviceDiscoverer>(new MagewellCaptureDeviceDiscoverer(callback));
+    }
+
+    void SetRecoverFaults(bool on)
+    {
+        MagewellCaptureDevice::SetRecoverFaults(on);
+    }
+
+    bool RecoverFaults()
+    {
+        return MagewellCaptureDevice::RecoverFaults();
     }
 
     CString UnavailableMessage(const CString& configuredDeviceName)
