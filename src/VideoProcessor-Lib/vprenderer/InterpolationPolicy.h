@@ -91,13 +91,21 @@ namespace InterpolationPolicy
 
 	// Film-like: legacy = DejudderPolicy::IsFilmLike (measured rates up to about
 	// 30 fps and 48p HFR; fixed rates, kept as the default for existing files).
-	// measured = from measurement only: content recovered from a pulldown inside
-	// a faster signal is film; otherwise a source that owns at least two
-	// refreshes per frame (minus the de-judder's cadence tolerance) is
-	// film-like, anything faster is video. No fixed rate.
-	inline bool IsFilmLike(SourceClass sourceClass, double sourceHz, double displayHz, bool pulldownLocked)
+	// measured, classFixes off (the 2026-10-17 behaviour): content recovered
+	// from a pulldown inside a faster signal is film; otherwise a source that
+	// owns at least two refreshes per frame (minus the de-judder's cadence
+	// tolerance) is film-like, anything faster is video.
+	// Hunt 2 (cadence_class_fixes, 06-interp M2 / 15-intent C4): the class comes
+	// from the source alone, never from the display ratio - the display rate
+	// made 24p@30 and 30p@50 video (interpolated) and 60p@120 film. measured
+	// with the fixes classifies the measured content rate (the pulldown film
+	// rate when locked, else the capture rate) by the owner's film / video split
+	// (DejudderPolicy::IsFilmLike: 24/25/30p and 48p film, 50/60p video on any
+	// display); a lock alone is not film (50p carried in 120 Hz stays video).
+	inline bool IsFilmLike(SourceClass sourceClass, double sourceHz, double displayHz, bool pulldownLocked,
+		bool classFixes = true)
 	{
-		if (sourceClass == SourceClass::Legacy)
+		if (sourceClass == SourceClass::Legacy || classFixes)
 			return DejudderPolicy::IsFilmLike(sourceHz);
 		if (pulldownLocked)
 			return true;
@@ -162,6 +170,9 @@ namespace InterpolationPolicy
 		bool subtitleComposed = false;
 		bool haveNext = false;        // B queued and usable
 		bool perVsyncAvailable = false;  // Stage B (ratios below 1) built and enabled
+		// Hunt 2 (cadence_class_fixes, default on): the source-only class (M2) and
+		// film near a 1:1 ratio left to drift correction (L5).
+		bool classFixes = true;
 	};
 
 	struct Decision
@@ -196,10 +207,18 @@ namespace InterpolationPolicy
 		if (in.lowLatency) { d.reason = Reason::LowLatency; return d; }
 		if (in.interlaced) { d.reason = Reason::Interlaced; return d; }
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) { d.reason = Reason::UnknownRates; return d; }
-		d.filmLike = IsFilmLike(in.sourceClass, in.sourceHz, in.displayHz, in.pulldownLocked);
+		d.filmLike = IsFilmLike(in.sourceClass, in.sourceHz, in.displayHz, in.pulldownLocked, in.classFixes);
 		if (d.filmLike && DejudderTakes(in)) { d.reason = Reason::FilmToDejudder; return d; }
 		// Film at a whole cadence (the de-judder's own tolerance): its even cadence, never interpolated.
 		if (d.filmLike && DejudderPolicy::IsEvenCadence(d.ratio)) { d.reason = Reason::FilmIntegerRatio; return d; }
+		// Hunt 2 (06-interp L5): film within the de-judder's cadence tolerance of 1:1 (24p on
+		// 25 Hz, 25p on 25.6) is drift correction's, as near-1 video is - the relative
+		// kRatioTolerance below would otherwise send it to full interpolation.
+		if (in.classFixes && d.filmLike && std::abs(d.ratio - 1.0) <= DejudderPolicy::kCadenceTolerance)
+		{
+			d.reason = Reason::FilmIntegerRatio;
+			return d;
+		}
 		const int whole = WholeRatio(d.ratio);
 		// 1:1 or near it (drift correction), or a whole decimation (120p on 60 Hz).
 		if (whole == 1 || whole <= -2) { d.reason = Reason::IntegerRatio; return d; }

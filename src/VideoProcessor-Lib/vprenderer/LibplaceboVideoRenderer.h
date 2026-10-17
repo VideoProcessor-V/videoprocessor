@@ -262,6 +262,7 @@ private:
 	void BeginQueueGeneration(const char* reason, bool clearStopRequest = false);
 	void ClearQueueLocked(const char* reason);
 	size_t PrefillTargetLocked() const;
+	size_t LockedFilmQueueTarget(size_t desired) const;   // Hunt 2 (06-interp M3)
 	bool CanDequeueLocked() const;
 	void SetState(RendererState state);
 	void ApplyViewportTarget(bool configured, double aspect,
@@ -380,6 +381,10 @@ private:
 	bool m_pulldownFixesApplied = true;        // capture thread
 	// timing_continuity_fixes (Bug hunt 2026-10-17): refreshed by the render loop.
 	std::atomic<bool> m_timingContinuityFixes{true};
+	// cadence_class_fixes (Hunt 2, 2026-10-17): refreshed by the render loop.
+	std::atomic<bool> m_cadenceClassFixes{true};
+	bool m_cadenceClassFixesApplied = true;   // capture thread
+	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
 	// Capture timestamp breaks (UpdateFrameRateAndPPM's discontinuity branch).
 	std::atomic<uint64_t> m_captureTimestampBreaks{0};
 	std::atomic<bool> m_pulldownResetRequested{false};

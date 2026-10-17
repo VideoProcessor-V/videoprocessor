@@ -516,6 +516,7 @@ namespace VideoProcessorTest
 			Pulldown::Settings settings;
 			settings.keepLockAcrossMisses = false;
 			settings.rephaseInPlace = false;
+			settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = false;   // Hunt 2
 			return settings;
 		}
 

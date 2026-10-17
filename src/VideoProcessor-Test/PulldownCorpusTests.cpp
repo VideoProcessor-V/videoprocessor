@@ -842,6 +842,8 @@ namespace VideoProcessorTest
 			Pulldown::Detector detector;
 			Pulldown::Settings settings;
 			settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes;
+			// Hunt 2: cadence_class_fixes follows the same on / off (off = the 2026-10-14 behaviour).
+			settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = fixes;
 			detector.SetSettings(settings);
 			Pulldown::FilmClock clock;
 			clock.SetRebaseOnRateChange(true);   // timing_continuity_fixes default
@@ -1488,7 +1490,9 @@ namespace VideoProcessorTest
 
 		// C2 alone: real video, a held still, animation on twos (24p and 25p
 		// film drawn on twos, carried) and random holds never lock, fixes on or
-		// off. 30p drawn on twos (exactly 15 fps, the floor) is reported only.
+		// off. 30p drawn on twos (exactly 15 fps, the floor): Hunt 2 (06-interp
+		// H1) asserts no lock with the fixes at 60 and 59.94 (the floor is
+		// exclusive with a margin); off it is reported (inclusive at 60).
 		TEST_METHOD(RealFootageNeverLocksOnVideoStillsTwosOrRandom)
 		{
 			const auto start = std::chrono::steady_clock::now();
@@ -1533,8 +1537,8 @@ namespace VideoProcessorTest
 					}
 				}
 			}
-			// Reported, not asserted: 30p drawn on twos in 60 Hz is exactly
-			// kMinFilmHz (15 fps) and the floor is inclusive.
+			// 30p drawn on twos in 60 Hz is exactly kMinFilmHz (15 fps): asserted
+			// with the fixes (no lock at 60 or 59.94), reported without.
 			if (HasReel(*library, 30.0))
 			{
 				for (const Rate& signal : { Rate{ 60, 1 }, Rate{ 60000, 1001 } })
@@ -1543,14 +1547,20 @@ namespace VideoProcessorTest
 					tape.StartFilm(signal.den == 1 ? Rate{ 30, 1 } : Rate{ 30000, 1001 }, 30.0, 0, false, true);
 					tape.Film(10.0);
 					tape.Finish(6, 3.0);
-					const auto run = Replay(*library, tape.Frames(), tape.SignalHz(), true);
-					int locked = 0;
-					double filmHz = 0.0;
-					for (const Out& o : run) { locked += o.locked ? 1 : 0; filmHz = o.locked ? o.filmHz : filmHz; }
-					char text[200];
-					std::snprintf(text, sizeof(text), "INFO 30p on twos (15 fps) in %s: locked frames %d of %d (film %.3f)\n",
-						RateText(signal).c_str(), locked, static_cast<int>(run.size()), filmHz);
-					Logger::WriteMessage(text);
+					for (int fixes = 1; fixes >= 0; --fixes)
+					{
+						const auto run = Replay(*library, tape.Frames(), tape.SignalHz(), fixes == 1);
+						int locked = 0;
+						double filmHz = 0.0;
+						for (const Out& o : run) { locked += o.locked ? 1 : 0; filmHz = o.locked ? o.filmHz : filmHz; }
+						char text[200];
+						std::snprintf(text, sizeof(text), "%s 30p on twos (15 fps) in %s: locked frames %d of %d (film %.3f)\n",
+							fixes ? "H1" : "INFO [off]", RateText(signal).c_str(), locked, static_cast<int>(run.size()), filmHz);
+						Logger::WriteMessage(text);
+						if (fixes)
+							Assert::AreEqual(0, locked, Wide("30p on twos in " + RateText(signal) + ": H1 no lock at the 15 fps floor").c_str());
+						++streams;
+					}
 				}
 			}
 			char text[96];
@@ -1595,6 +1605,7 @@ namespace VideoProcessorTest
 					Pulldown::Detector detector;
 					Pulldown::Settings settings;
 					settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes == 1;
+					settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = fixes == 1;
 					detector.SetSettings(settings);
 					long long lockAt = -1;
 					for (long long i = 0; i < static_cast<long long>(frames.size()); ++i)

@@ -1164,6 +1164,11 @@ namespace
 		// pair's times), the film clock re-bases on a signal-rate change, and the timeline
 		// holds the last measured display rate; off = the behaviour before.
 		bool timingContinuityFixes = true;
+		// Hunt 2 2026-10-17 (06-interp, 02-dv classifier): the exclusive 15 fps pulldown floor,
+		// the film clock re-anchored on a re-phase (robust anchor), the queue target scaled while
+		// locked, the source-only film / video class, the content classifier's carrier / animation /
+		// static UI rules and content intent without look-ahead; off = the behaviour before.
+		bool cadenceClassFixes = true;
 		// Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17): the
 		// de-judder's extras queued straight after their frame (no vblank waits), so the next
 		// frame renders while they are shown; off until the owner's on-screen runs pass.
@@ -1370,7 +1375,7 @@ namespace
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -1487,6 +1492,9 @@ namespace
 		std::string section;
 		int priority = 0;
 		int specificity = 0;
+		// Hunt 2 (02-dv L6): the profile's when: rule reads `content`, so it may not set
+		// the content classifier's own inputs (RendererProfileConfig::IsContentClassifierInput).
+		bool contentGated = false;
 	};
 	void ApplyDisplayRuleOverrides(const ConfigFile& config, const DisplayRule& rule,
 		RendererSettings& settings);
@@ -1694,8 +1702,9 @@ namespace
                     if(group.name=="motion")section=ProfileSectionIdentity::Resolve(config,"vprenderer.motion",profileName);
                     else section = ProfileSectionIdentity::Resolve(config, root, profileName);
 				}
-				const DisplayRule rule = { group.name + "/" + profileName,
+				DisplayRule rule = { group.name + "/" + profileName,
 					section, profile->second.priority, 0 };
+				rule.contentGated = RendererProfileConfig::IsContentGated(profile->second);
 				ApplyDisplayRuleOverrides(config, rule, settings);
 				if (!activeProfiles.empty()) activeProfiles += ", ";
 				activeProfiles += rule.name;
@@ -2111,6 +2120,35 @@ namespace
 	{
 		if (rule.name.empty())
 			return;
+		// Hunt 2 (cadence_class_fixes, 02-dv L6): a profile selected by `content` that set the
+		// classifier's own inputs (intent_content, source_class, dejudder_pulldown,
+		// cadence_class_fixes) would drop itself and loop with the hold time: those keys are
+		// ignored there (the configuration check warns). Restored when this rule is done.
+		struct ContentInputsGuard
+		{
+			RendererSettings& settings;
+			bool active;
+			InterpolationPolicy::SourceClass sourceClass;
+			bool intentContent, dejudderPulldown, cadenceClassFixes;
+			~ContentInputsGuard()
+			{
+				if (!active)
+					return;
+				settings.sourceClass = sourceClass;
+				settings.intentContent = intentContent;
+				settings.dejudderPulldown = dejudderPulldown;
+				settings.cadenceClassFixes = cadenceClassFixes;
+			}
+		} contentInputsGuard{ settings, rule.contentGated && settings.cadenceClassFixes, settings.sourceClass,
+			settings.intentContent, settings.dejudderPulldown, settings.cadenceClassFixes };
+		if (contentInputsGuard.active)
+			for (const char* key : { "intent_content", "source_class", "dejudder_pulldown", "cadence_class_fixes" })
+			{
+				std::string ignored;
+				if (config.TryGetString(rule.section, key, ignored))
+					DebugLog::Log("profile '%s': %s ignored - its when: rule reads content (cadence_class_fixes)",
+						rule.section.c_str(), key);
+			}
 		if (const auto* values = config.GetSectionValues(rule.section))
 		{
 			settings.profileValues += rule.section + "{";
@@ -2563,6 +2601,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid timing_continuity_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.timingContinuityFixes ? "on" : "off");
+		}
+		if (tryChoice("cadence_class_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.cadenceClassFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid cadence_class_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.cadenceClassFixes ? "on" : "off");
 		}
 		// Render-ahead (docs/VP-render-ahead-design.md).
 		for (const auto& toggle : { std::make_pair("render_ahead", &settings.renderAhead),
@@ -5594,6 +5640,8 @@ struct LibplaceboVideoRenderer::Impl
 	InterpolationTimeline::Timeline vpTimeline;
 	bool vpTimelineActive = false;   // this source frame is presented by the timeline
 	bool vpSkipOutput = false;       // no refresh falls in this frame's interval (source faster)
+	bool vpSkipIsUpdate = false;     // Hunt 2 (06-interp L4): ... because it is a pulldown film update
+	unsigned long long vpFilmUpdates = 0;
 	double vpOutputPhase = 0.0;      // the phase of the refresh being drawn
 	bool vpPhasePlanesValid = false; // vpPhasePlanes hold this draw's picture
 	Dejudder::Planes vpPhasePlanes;
@@ -5710,9 +5758,9 @@ struct LibplaceboVideoRenderer::Impl
 	void LogVpTimeline(const char* what)
 	{
 		DebugLog::Log("Interpolation timeline: %s (phase %.3f; %llu pictures between frames, %llu without vectors or B, "
-			"%llu source frames skipped, %llu gap pairs, %llu restarts, %llu re-anchors, span %d)", what, vpOutputPhase,
-			vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpGapPairs, vpTimeline.Restarts(), vpTimeline.Reanchors(),
-			vpTimeline.LastSpanFrames());
+			"%llu source frames skipped, %llu film updates, %llu gap pairs, %llu restarts, %llu re-anchors, span %d)", what,
+			vpOutputPhase, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpFilmUpdates, vpGapPairs, vpTimeline.Restarts(),
+			vpTimeline.Reanchors(), vpTimeline.LastSpanFrames());
 	}
 	bool vpTimelineLogged = false;   // engaged / released, logged on change
 	bool dejudderMaskParamSet = false;
@@ -10328,6 +10376,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
 		changed(current.pulldownFixes != next.pulldownFixes, "pulldown_fixes");
 		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
+		changed(current.cadenceClassFixes != next.cadenceClassFixes, "cadence_class_fixes");
 		changed(current.renderAhead != next.renderAhead, "render_ahead");
 		changed(current.dejudderGate != next.dejudderGate, "dejudder_gate");
 		changed(current.renderAheadUtilisation != next.renderAheadUtilisation, "render_ahead_utilisation");
@@ -13856,6 +13905,7 @@ struct LibplaceboVideoRenderer::Impl
 			ii.subtitleComposed = false;
 			ii.haveNext = in.haveNext && in.nextMatches;
 			ii.perVsyncAvailable = true;   // Stage B: the per-vsync timeline (ratios below 1)
+			ii.classFixes = activeSettings.cadenceClassFixes;   // Hunt 2 (06-interp M2/L5)
 			interpolationDecision = InterpolationPolicy::Decide(ii);
 			interpolating = interpolationDecision.Interpolates();
 			LogInterpolationDecision(ii);
@@ -16947,7 +16997,14 @@ struct LibplaceboVideoRenderer::Impl
 				// VP deband's hold carries over the frame (unless the motion was invalidated,
 				// which already forgot it).
 				debander.CarryHold(sourceSequence);
-				if (++vpSkippedFrames == 1)
+				// Hunt 2 (06-interp L4): a pulldown film update (the same film time) is shown with
+				// the next film frame; counted apart from the frames a faster source skips.
+				if (vpSkipIsUpdate)
+				{
+					if (++vpFilmUpdates == 1)
+						LogVpTimeline("first pulldown film update (shown with the next film frame)");
+				}
+				else if (++vpSkippedFrames == 1)
 					LogVpTimeline("first source frame skipped (the source is faster than the display)");
 				return true;
 			}
@@ -22783,16 +22840,34 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
 		const double signalHz = measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz();
 		const bool fixes = m_pulldownFixes.load(std::memory_order_relaxed);
-		if (fixes != m_pulldownFixesApplied)
+		const bool classFixes = m_cadenceClassFixes.load(std::memory_order_relaxed);
+		if (fixes != m_pulldownFixesApplied || classFixes != m_cadenceClassFixesApplied)
 		{
+			const bool clockForm = fixes != m_pulldownFixesApplied;
 			m_pulldownFixesApplied = fixes;
+			m_cadenceClassFixesApplied = classFixes;
 			Pulldown::Settings settings;
 			settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes;
+			// Hunt 2 (cadence_class_fixes): the exclusive film floor (H1), lateness while the
+			// phase is uncertain (M1) and a retry that needs the locked phase to fail (L3).
+			settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = classFixes;
 			m_pulldown.SetSettings(settings);
 			// Bug hunt 2026-10-17: the clock's form changes with the switch (cadence-aware
 			// or not): start it over, and no pair across the change.
-			m_pulldownClock.Reset();
+			if (clockForm)
+			{
+				// Hunt 2 (L1): a clock in use restarting is a break whatever pulldown_fixes now says.
+				m_pulldownForceGap = m_pulldownForceGap || m_pulldownClock.InUse();
+				m_pulldownClock.Reset();
+				m_pulldown.MarkDiscontinuity();
+			}
+		}
+		// Hunt 2 (cadence_class_fixes, 06-interp L6): the second-largest anchor; toggled mid-lock the
+		// offsets start over and no pair crosses the change.
+		if (m_pulldownClock.SetRobustAnchor(classFixes))
+		{
 			m_pulldown.MarkDiscontinuity();
+			m_pulldownForceGap = true;
 		}
 		// Bug hunt 2026-10-17 (timing_continuity_fixes): the film clock re-bases when
 		// the film rate (from signalHz: measured or nominal) changes mid-lock.
@@ -22801,6 +22876,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		if (m_pulldownClock.SetRebaseOnRateChange(timingFixes))
 		{
 			m_pulldown.MarkDiscontinuity();
+			m_pulldownForceGap = true;   // Hunt 2 (L1)
 			DebugLog::Log("Pulldown: film clock re-basing %s (timing_continuity_fixes); clock restarted",
 				timingFixes ? "on" : "off");
 		}
@@ -22826,7 +22902,11 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				std::string("none");
 			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
 		}
-		m_pulldownCadence.store(decision.locked ? (decision.cycle << 16) | decision.unique : 0, std::memory_order_relaxed);
+		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
+		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
+		// the waiters when it changes.
+		if (m_pulldownCadence.exchange(cadence, std::memory_order_relaxed) != cadence && classFixes)
+			m_queueChanged.notify_all();
 		if (decision.drop)
 		{
 			// D1: a lock change (or a gap) on a dropped repeat marks the next kept frame.
@@ -22834,6 +22914,20 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				m_pulldown.MarkDiscontinuity();
 			m_pulldownSkipped.fetch_add(1, std::memory_order_relaxed);
 			return;
+		}
+		// Hunt 2 (cadence_class_fixes, 06-interp L1): a clock restarted by a switch toggle is a
+		// break even when pulldown_fixes is now off (the consume below ignores the mark then);
+		// kept across dropped repeats until this kept frame.
+		const bool forcedGap = m_pulldownForceGap;
+		m_pulldownForceGap = false;
+		if (forcedGap && classFixes)
+		{
+			if (!gapBefore)
+			{
+				gapCause = "pulldown film clock restarted (switch toggled)";
+				gapBefore = true;
+			}
+			gapFrames = 0;
 		}
 		// Consumed always (a mark left while the fixes were off must not fire later); labelled by cause.
 		if (m_pulldown.ConsumeDiscontinuity() && fixes)
@@ -22848,6 +22942,11 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		if (decision.rephased)
 		{
 			gapFrames = 0;
+			// Hunt 2 (cadence_class_fixes, 06-interp M1): the offsets from before the shift would
+			// hold the anchor for the clock's window and then step it mid-shot; this frame
+			// carries the re-phase discontinuity, so the clock re-anchors here.
+			if (classFixes)
+				m_pulldownClock.Reanchor();
 			DebugLog::Log("Pulldown: re-phased in place (lock kept)");
 		}
 		if (decision.locked)
@@ -25113,9 +25212,62 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     // led_lookahead_ms (2026-10-17): the frames beyond the active picture's own
     // look-ahead are walked for the statistics observer (the LED) only.
     const size_t activeCount = (std::min)(activePictureFrames, walkFrames.size());
+    const std::shared_ptr<ContentIntent::Observer> contentIntent =
+        m_impl ? m_impl->contentIntent : std::shared_ptr<ContentIntent::Observer>();
+    // Content recognition (intent interpreter item 1, 2026-10-17): each new queued frame
+    // once, with the measured rates and the frame's DV L11/L5. `observation` is the
+    // frame's active-picture observation (bars when trusted).
+    const auto observeContent = [&](const QueuedFrame& queued, const VideoState& state,
+        const AnalysisLumaSource& source, const auto& observation, size_t rememberedIndex)
+    {
+        const DolbyVisionTunnelFrameMetadata* dm =
+            state.dolbyVisionTunnel && queued.converted && queued.converted->dolby.valid ?
+            &queued.converted->dolby : nullptr;
+        QueuedFrameStatistics::PictureRect picture;
+        picture.right = source.width;
+        picture.bottom = source.height;
+        const auto& bounds = observation.bounds;
+        if (observation.classification == ActivePictureClassification::BAR_CROP_TRUSTED &&
+            bounds.right > bounds.left && bounds.bottom > bounds.top)
+        {
+            picture.left = bounds.left;
+            picture.top = bounds.top;
+            picture.right = bounds.right;
+            picture.bottom = bounds.bottom;
+        }
+        else if (dm && dm->hasActiveArea &&
+            static_cast<int>(dm->activeAreaLeft) + dm->activeAreaRight < source.width &&
+            static_cast<int>(dm->activeAreaTop) + dm->activeAreaBottom < source.height)
+        {
+            // L5 lets the measurement skip the bars when VP has not found them.
+            picture.left = dm->activeAreaLeft;
+            picture.top = dm->activeAreaTop;
+            picture.right = source.width - dm->activeAreaRight;
+            picture.bottom = source.height - dm->activeAreaBottom;
+        }
+        ContentIntent::FrameContext context;
+        const double measuredCaptureHz = m_measuredFrameRate.load(std::memory_order_relaxed);
+        context.contentHz = queued.filmHz > 0.0 ? queued.filmHz :
+            measuredCaptureHz > 0.0 ? measuredCaptureHz : state.displayMode->RefreshRateHz();
+        const double measuredDisplayHz = m_impl->presentationTelemetry.Snapshot().measuredDisplayHz;
+        context.displayHz = measuredDisplayHz > 0.0 ? measuredDisplayHz :
+            m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+        context.pulldownLocked = queued.filmHz > 0.0;
+        context.sourceClass = m_impl->activeSettings.sourceClass;
+        context.classFixes = m_impl->activeSettings.cadenceClassFixes;   // Hunt 2
+        context.l11Present = dm && dm->hasL11;
+        context.l11ContentType = dm ? dm->l11ContentType : 0;
+        context.discontinuity = queued.gapBefore || queued.frame.IsSourceDiscontinuity();
+        contentIntent->SetFrameContext(context);
+        contentIntent->ObserveFrame(queued.sourceSequence, rememberedIndex, source, picture);
+    };
+    // Hunt 2 (cadence_class_fixes, 02-dv M4): with the active-picture look-ahead at 0 the
+    // walk's frames feed content intent here (before, it waited for look-ahead frames forever).
+    const bool contentWithoutActive = activeCount == 0 && contentIntent && contentIntent->Enabled() &&
+        m_impl && m_impl->activeSettings.cadenceClassFixes;
     const auto observeStatisticsOnly = [&](size_t first)
     {
-        if (!statisticsObserver)
+        if (!statisticsObserver && !(first == 0 && contentWithoutActive))
             return;
         for (size_t index = first; index < walkFrames.size(); ++index)
         {
@@ -25150,7 +25302,10 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
                 picture.right = bounds.right;
                 picture.bottom = bounds.bottom;
             }
-            statisticsObserver->ObserveFrame(queued.sourceSequence, index, prepared.source, picture);
+            if (statisticsObserver)
+                statisticsObserver->ObserveFrame(queued.sourceSequence, index, prepared.source, picture);
+            if (first == 0 && contentWithoutActive && !queued.cadenceRepeat)
+                observeContent(queued, state, prepared.source, sample.observation, index);
         }
     };
     if (activeCount == 0)
@@ -25164,8 +25319,6 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
         activeFramesStorage.assign(walkFrames.begin(), walkFrames.begin() + static_cast<std::ptrdiff_t>(activeCount));
     std::vector<QueuedFrame>& previewFrames = activeCount < walkFrames.size() ? activeFramesStorage : walkFrames;
     bool walkBroken = false;   // a DV decode / metadata gap ended the walk
-    const std::shared_ptr<ContentIntent::Observer> contentIntent =
-        m_impl ? m_impl->contentIntent : std::shared_ptr<ContentIntent::Observer>();
     ActivePictureBounds proofBase;
     ActivePictureTransitionModel liveProofModel;
     bool inwardProofEligible = false;
@@ -25519,50 +25672,9 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
             preview.nearBlackEvaluated, preview.nearBlack);
         preview.identity = sample.identity;
         preview.observation = sample.observation;
-        // Content recognition (intent interpreter item 1, 2026-10-17): each new
-        // queued frame once, with the measured rates and the frame's DV L11/L5.
+        // Content recognition (intent interpreter item 1, 2026-10-17).
         if (contentIntent && contentIntent->Enabled() && !queued.cadenceRepeat)
-        {
-            const DolbyVisionTunnelFrameMetadata* dm =
-                state.dolbyVisionTunnel && queued.converted && queued.converted->dolby.valid ?
-                &queued.converted->dolby : nullptr;
-            QueuedFrameStatistics::PictureRect picture;
-            picture.right = source.width;
-            picture.bottom = source.height;
-            const auto& bounds = preview.observation.bounds;
-            if (preview.observation.classification == ActivePictureClassification::BAR_CROP_TRUSTED &&
-                bounds.right > bounds.left && bounds.bottom > bounds.top)
-            {
-                picture.left = bounds.left;
-                picture.top = bounds.top;
-                picture.right = bounds.right;
-                picture.bottom = bounds.bottom;
-            }
-            else if (dm && dm->hasActiveArea &&
-                static_cast<int>(dm->activeAreaLeft) + dm->activeAreaRight < source.width &&
-                static_cast<int>(dm->activeAreaTop) + dm->activeAreaBottom < source.height)
-            {
-                // L5 lets the measurement skip the bars when VP has not found them.
-                picture.left = dm->activeAreaLeft;
-                picture.top = dm->activeAreaTop;
-                picture.right = source.width - dm->activeAreaRight;
-                picture.bottom = source.height - dm->activeAreaBottom;
-            }
-            ContentIntent::FrameContext context;
-            const double measuredCaptureHz = m_measuredFrameRate.load(std::memory_order_relaxed);
-            context.contentHz = queued.filmHz > 0.0 ? queued.filmHz :
-                measuredCaptureHz > 0.0 ? measuredCaptureHz : state.displayMode->RefreshRateHz();
-            const double measuredDisplayHz = m_impl->presentationTelemetry.Snapshot().measuredDisplayHz;
-            context.displayHz = measuredDisplayHz > 0.0 ? measuredDisplayHz :
-                m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
-            context.pulldownLocked = queued.filmHz > 0.0;
-            context.sourceClass = m_impl->activeSettings.sourceClass;
-            context.l11Present = dm && dm->hasL11;
-            context.l11ContentType = dm ? dm->l11ContentType : 0;
-            context.discontinuity = queued.gapBefore || queued.frame.IsSourceDiscontinuity();
-            contentIntent->SetFrameContext(context);
-            contentIntent->ObserveFrame(queued.sourceSequence, rememberedIndex, source, picture);
-        }
+            observeContent(queued, state, source, preview.observation, rememberedIndex);
         if (statisticsObserver)
         {
             QueuedFrameStatistics::PictureRect picture;
@@ -26560,6 +26672,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (led)
 				ledWantedLookahead = led->WantedLookaheadFrames();
 		}
+		// Hunt 2 (cadence_class_fixes, 02-dv M4): content intent needs each queued frame once;
+		// with no active-picture look-ahead and no LED it walks the current frame and the next.
+		const bool contentWantsWalk = m_impl && m_impl->activeSettings.cadenceClassFixes &&
+			m_impl->contentIntent && m_impl->contentIntent->Enabled();
+		const size_t statisticsWalkDepth = (std::max)(ledWantedLookahead, contentWantsWalk ? size_t{ 1 } : size_t{ 0 });
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> previewLock(m_queueMutex);
@@ -26568,7 +26685,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			previewWaitMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - waitStarted).count();
             const auto walk = AlphaQueuePolicy::SelectLookaheadWalk(
-                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire), ledWantedLookahead,
+                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire), statisticsWalkDepth,
                 ActivePictureDecisionTimeline::MAX_LOOKAHEAD_FRAMES);
             const auto& window = walk.window;
             activePictureWalkFrames = walk.activePictureFrames;
@@ -26624,7 +26741,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		const size_t activePictureWalkNow =
 			m_activePictureLookaheadFrames.load(std::memory_order_acquire) > 0 ? activePictureWalkFrames : 0;
 		if (!activePicturePreviewFrames.empty() &&
-			(activePictureWalkNow > 0 || ledWantedLookahead > 0))
+			(activePictureWalkNow > 0 || ledWantedLookahead > 0 || contentWantsWalk))
 		{
 			const auto lookaheadStarted = SteadyClock::now();
 			try
@@ -27067,6 +27184,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_pulldownDetection.store(m_impl->activeSettings.dejudderPulldown, std::memory_order_relaxed);
 			m_pulldownFixes.store(m_impl->activeSettings.pulldownFixes, std::memory_order_relaxed);
 			m_timingContinuityFixes.store(m_impl->activeSettings.timingContinuityFixes, std::memory_order_relaxed);
+			m_cadenceClassFixes.store(m_impl->activeSettings.cadenceClassFixes, std::memory_order_relaxed);
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->pulldownFilmHz = frameFilmHz;
@@ -27251,10 +27369,12 @@ void LibplaceboVideoRenderer::RenderLoop()
                     m_impl->vpQueueError=0.95*m_impl->vpQueueError+0.05*(static_cast<double>(queueDepthAfterDequeue)-
                         static_cast<double>(desiredQueueDepth));
                     m_impl->vpTimeline.SetRateTrim(1.0+(std::max)(-0.003,(std::min)(0.003,0.0005*m_impl->vpQueueError)));
+                    const unsigned long long updatesBefore=m_impl->vpTimeline.Updates();
                     const auto& planned=m_impl->vpTimeline.Plan(frameGeneration,sourceSequence,ptsA,nextSourceSequence?nextPts:0.0,
                         rateHz,m_impl->TimelineDisplayHz(),frame.IsSourceDiscontinuity());
                     m_impl->vpTimelineActive=true;
                     m_impl->vpSkipOutput=planned.empty();
+                    m_impl->vpSkipIsUpdate=planned.empty()&&m_impl->vpTimeline.Updates()!=updatesBefore;
                     motionOutputs.clear();
                     for(const auto& o:planned){motionOutputs.push_back(o.pts);vpPhases.push_back(o.phase);}
                 } else if(m_impl->vpTimeline.Initialized()) {
@@ -27960,12 +28080,28 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 {
 	if (!m_useFrameQueue)
 		return 1;
-	const size_t desired = AlphaQueuePolicy::ClampDesiredDepthToCapacity(
-		m_frameQueueDesiredDepth, m_frameQueueMaxSize);
+	const size_t desired = LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(
+		m_frameQueueDesiredDepth, m_frameQueueMaxSize));
 	// render_ahead_queue_credit (design step 7): the queue gives back the frames the
 	// queued extras' lead adds to the latency (never below 2 queued frames). 0 unless on.
 	const size_t credit = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
 	return credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
+}
+
+
+// Hunt 2 (cadence_class_fixes, 06-interp M3: pulldown D2 wired). While a pulldown lock
+// holds, the queue holds film frames: target_frames (set for the signal) is scaled by
+// new / cycle so the queue's latency does not step by cycle / new at each lock change;
+// never below 2 frames (A shown, B queued: the interpolator's / de-judder's pair) or the
+// target itself. Re-resolved on every call from the current cadence.
+size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
+{
+	if (!m_cadenceClassFixes.load(std::memory_order_relaxed))
+		return desired;
+	const int cadence = m_pulldownCadence.load(std::memory_order_relaxed);
+	if (cadence == 0)
+		return desired;
+	return Pulldown::LockedQueueTarget(desired, Pulldown::FilmToSignalRatio(cadence >> 16, cadence & 0xffff), 2);
 }
 
 
@@ -28041,6 +28177,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
 		<< "pulldown_fixes=" << (s.pulldownFixes ? "on" : "off") << "\n"
 		<< "timing_continuity_fixes=" << (s.timingContinuityFixes ? "on" : "off") << "\n"
+		<< "cadence_class_fixes=" << (s.cadenceClassFixes ? "on" : "off") << "\n"
 		<< "render_ahead=" << (s.renderAhead ? "on" : "off") << "\n"
 		<< "dejudder_gate=" << s.dejudderGate << "\n"
 		<< "render_ahead_utilisation=" << s.renderAheadUtilisation << "\n"
