@@ -3,7 +3,8 @@
 **Latest owner direction (supersedes the per-shader sliders below):** keep it simple - for each
 shader, **list its add-on options with their relative performance cost, whether the motion (de-judder
 / matcher) needs to be on, and mark the "recommended" ones.** No per-shader slider needed. The
-interim Scaling slider (Off / Fast / Best) stays until this list replaces or complements it.
+interim Scaling slider (Off / Fast / Best) was removed 2026-10-16 (owner: superseded by the add-ons
+list on the Shaders page).
 
 **What Config can know about shader selection (explored 2026-10-16):** shader profiles are a global
 multi-select group (`[shader.standard.*]`, not per renderer profile), chosen by `when:` rules,
@@ -14,8 +15,8 @@ file, so with VP closed it cannot tell. Matching a shader: the `shader.standard.
 `glsl_file` is SSimDownscaler / FSRCNNX / ArtCNN. Note: SSimDownscaler is not in the shipped
 VideoProcessor.cfg (only in a test fixture).
 
-Status: agreed direction, not built. The committed Scaling slider (cc5917d5: Off / Fast / Best,
-separable throughout) is an interim; this plan replaces it.
+Status: the add-ons list is built (Shaders page, `config.shader.standard.addons`); the interim
+Scaling slider (cc5917d5) is removed.
 
 ## Owner's direction
 

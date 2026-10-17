@@ -7569,56 +7569,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // Stage 8-2: the adaptive downscale blend (SSIM / faithful).
         form = addCollapsibleSection(QStringLiteral("adaptiveDownscale"), QStringLiteral("Adaptive downscale"),
             QString::fromLatin1(kGpuCostLegend), false);
-        // Owner 2026-10-16: the Scaling slider - speed profiles Off, Fast, Best (each step costs more
-        // GPU time) - moving only VP's scaling additions (the blends below, the grain map from motion;
-        // the separable grain-true filter throughout - owner: more flexible than polar, which cannot
-        // scale one axis alone), with a master checkbox (unticked = Off). The fields
-        // stay editable (Custom). The 32-bit intermediates are precision (on by default, owner's
-        // standing rule) and stay out; the upscaler / downscaler are on the Scaling page.
-        auto* scalingBox = new QWidget;
-        scalingBox->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_box")));
-        auto* scalingBoxLayout = new QVBoxLayout(scalingBox);
-        scalingBoxLayout->setContentsMargins(0, 0, 0, 0);
-        auto* scalingRow = new QHBoxLayout;
-        auto* scalingSlider = new QSlider(Qt::Horizontal);
-        scalingSlider->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset")));
-        scalingSlider->setAccessibleName(QStringLiteral("Scaling"));
-        scalingSlider->setRange(0, 2);
-        scalingSlider->setPageStep(1);
-        scalingSlider->setTickPosition(QSlider::TicksBelow);
-        scalingSlider->setTickInterval(1);
-        scalingSlider->setToolTip(QStringLiteral(
-            "Speed profiles for VP's scaling additions, cheapest first: Off, Fast, Best. Each step costs more GPU "
-            "time and moves only the SSIM / CNN blends, the grain-true filter and the grain measure; the values appear "
-            "in the fields below and can be edited (Custom). The upscaler and downscaler are chosen on the Scaling page "
-            "and the shaders in the shader profiles; the blends act only where those shaders are enabled."));
-        auto* scalingReset = new QPushButton(QStringLiteral("Reset to preset"));
-        scalingReset->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_reset")));
-        scalingReset->setToolTip(QStringLiteral("Puts the fields back to the slider position's values."));
-        auto* scalingDefault = new QPushButton(QStringLiteral("Default"));
-        scalingDefault->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_default")));
-        scalingDefault->setToolTip(QStringLiteral("Back to the default, Off (no VP scaling additions; today's behaviour)."));
-        auto* scalingEnable = new QCheckBox(QStringLiteral("VP scaling additions"));
-        scalingEnable->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_enable")));
-        scalingEnable->setToolTip(QStringLiteral("Unticked: Off (the slider greyed). Ticked: the slider's level (Best the first time)."));
-        scalingRow->addWidget(scalingEnable);
-        scalingRow->addWidget(new QLabel(QStringLiteral("Off")));
-        scalingRow->addWidget(scalingSlider, 1);
-        scalingRow->addWidget(new QLabel(QStringLiteral("Best")));
-        scalingRow->addWidget(scalingReset);
-        scalingRow->addWidget(scalingDefault);
-        scalingBoxLayout->addLayout(scalingRow);
-        auto* scalingName = new QLabel;
-        scalingName->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_name")));
-        QFont scalingNameFont = scalingName->font();
-        scalingNameFont.setBold(true);
-        scalingName->setFont(scalingNameFont);
-        auto* scalingDescription = new QLabel;
-        scalingDescription->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_description")));
-        scalingDescription->setWordWrap(true);
-        scalingBoxLayout->addWidget(scalingName);
-        scalingBoxLayout->addWidget(scalingDescription);
-        form->addRow(QStringLiteral("Scaling"), scalingBox);
         auto* adaptiveOn = addChoice(QStringLiteral("SSIM / faithful blend"),
             QStringLiteral("adaptive_downscale"), { QStringLiteral("on"), QStringLiteral("off") });
         adaptiveOn->setToolTip(QStringLiteral(
@@ -8018,85 +7968,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "overlay). Auto: on, except in the queue named Low_Latency (renaming that queue changes Auto). The final "
             "output stage is 32-bit float always."));
         MarkGpuCost(form, fboFloat32, 2);
-        {
-            // The Scaling slider's three speed profiles (all choices; an unset field means its default).
-            // Off is the two blends off alone (the other keys then do nothing).
-            struct ScalingPosition { const char* name; const char* description; std::array<const char*, 4> values; };
-            static const std::array<const char*, 4> kDefaults = { "off", "off", "auto", "on" };
-            static const std::array<ScalingPosition, 3> kPositions = { {
-                { "Off (default)", "No VP scaling additions: the upscaler, downscaler and shaders chosen elsewhere run as they "
-                    "are (plain SSIM / CNN where those shaders are on). No extra GPU time.", { "off", "off", "ortho", "off" } },
-                { "Fast", "The SSIM downscale blend only (grain and hard edges lean to a faithful downscale, clean texture keeps "
-                    "SSIM), with the separable filter and the per-frame grain measure. Little GPU time.",
-                    { "on", "off", "ortho", "off" } },
-                { "Best", "Both blends (the CNN upscale blend too), the polar grain-true filter where both axes shrink "
-                    "alike (the separable one when only one axis shrinks), the grain measured per block along the motion. "
-                    "The most GPU time.", { "on", "on", "auto", "on" } } } };
-            const std::array<QComboBox*, 4> choices = { adaptiveOn, upscaleOn, adaptiveFaithful, adaptiveMap };
-            auto applying = std::make_shared<bool>(false);
-            auto lastOn = std::make_shared<int>(2);   // the level ticking the checkbox returns to
-            auto raw = [choices](int i) {
-                const QString v = choices[i]->currentData().toString().trimmed();
-                return v.isEmpty() ? QString::fromLatin1(kDefaults[i]) : v;
-            };
-            auto matches = [raw](int p) {
-                const int keys = p == 0 ? 2 : 4;
-                for (int i = 0; i < keys; ++i)
-                    if (raw(i).compare(QString::fromLatin1(kPositions[p].values[i]), Qt::CaseInsensitive) != 0) return false;
-                return true;
-            };
-            auto refresh = [=]() {
-                if (*applying) return;
-                for (int p = 0; p < 3; ++p)
-                    if (matches(p))
-                    {
-                        const QSignalBlocker blocker(scalingSlider);
-                        const QSignalBlocker checkBlocker(scalingEnable);
-                        scalingSlider->setValue(p);
-                        scalingEnable->setChecked(p > 0);
-                        scalingSlider->setEnabled(p > 0);
-                        if (p > 0) *lastOn = p;
-                        scalingName->setText(QString::fromLatin1(kPositions[p].name));
-                        scalingDescription->setText(QString::fromLatin1(kPositions[p].description));
-                        return;
-                    }
-                const QSignalBlocker checkBlocker(scalingEnable);
-                scalingEnable->setChecked(true);
-                scalingSlider->setEnabled(true);
-                scalingName->setText(QStringLiteral("Custom"));
-                scalingDescription->setText(QStringLiteral("The fields differ from %1. Reset to preset puts them back.")
-                    .arg(QString::fromLatin1(kPositions[scalingSlider->value()].name)));
-            };
-            auto apply = [=](int p) {
-                *applying = true;
-                for (int i = 0; i < 4; ++i)
-                {
-                    const int index = choices[i]->findData(QString::fromLatin1(kPositions[p].values[i]));
-                    if (index >= 0 && choices[i]->currentIndex() != index) choices[i]->setCurrentIndex(index);
-                }
-                *applying = false;
-                refresh();
-            };
-            connect(scalingSlider, &QSlider::valueChanged, this, [apply](int p) { apply(p); });
-            connect(scalingReset, &QPushButton::clicked, this, [apply, scalingSlider]() { apply(scalingSlider->value()); });
-            connect(scalingDefault, &QPushButton::clicked, this, [apply, scalingSlider]() {
-                const QSignalBlocker blocker(scalingSlider);
-                scalingSlider->setValue(0);
-                apply(0);
-            });
-            connect(scalingEnable, &QCheckBox::toggled, this, [apply, scalingSlider, lastOn](bool on) {
-                const int p = on ? *lastOn : 0;
-                const QSignalBlocker blocker(scalingSlider);
-                scalingSlider->setValue(p);
-                apply(p);
-            });
-            for (QComboBox* choice : choices)
-                connect(choice, qOverload<int>(&QComboBox::currentIndexChanged), this, [refresh](int) { refresh(); });
-            auto* scalingRefresh = new QAction(scalingSlider);
-            scalingRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("scaling_preset_refresh")));
-            connect(scalingRefresh, &QAction::triggered, this, [refresh]() { refresh(); });
-            refresh();
-        }
 
     }
 
@@ -9183,9 +9054,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("picture_preset_refresh"))))
-				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
-				controlName(sectionPrefix, QStringLiteral("scaling_preset_refresh"))))
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh"))))
@@ -10474,7 +10342,7 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
             const QString file = name.toLower();
             if (file.contains(QStringLiteral("ssimdownscaler")))
                 addons = {
-                    { "SSIM / faithful blend", "++", "no", "yes, for grainy film", "VP Renderer: Adaptive downscale (or the Scaling slider)" },
+                    { "SSIM / faithful blend", "++", "no", "yes, for grainy film", "VP Renderer: Adaptive downscale" },
                     { "Grain-true filter: Auto (polar where able) / 1D", "Auto ++ (about 2.4 ms more), 1D +", "no", "Auto", "Adaptive downscale" },
                     { "Grain map from motion", "+ with the de-judder on; +++ with it off (runs the matcher, about 5.5 ms at 4K)", "yes", "yes, with the de-judder on", "Adaptive downscale" },
                     { "Blend chroma too", "+", "no", "no (can fringe colour)", "Adaptive downscale" },
@@ -10482,7 +10350,7 @@ QWidget* ConfigEditorWindow::createStandardShadersPage()
                     { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Fixes under test" } };
             else if (file.contains(QStringLiteral("fsrcnnx")) || file.contains(QStringLiteral("artcnn")))
                 addons = {
-                    { "CNN / faithful blend", "++", "no", "not yet (awaiting the cinema check)", "VP Renderer: Adaptive upscale (or the Scaling slider's Best)" },
+                    { "CNN / faithful blend", "++", "no", "not yet (awaiting the cinema check)", "VP Renderer: Adaptive upscale" },
                     { "Steady CNN detail", "+", "yes", "yes (default on)", "Fixes under test" },
                     { "Gentler on poor streams", "negligible", "no", "yes (default on)", "Fixes under test" } };
             else if (file.contains(QStringLiteral("ssimsuperres")))
