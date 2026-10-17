@@ -136,7 +136,17 @@ jobs:
           }
           # vstest's native adapter ignores TEST_METHOD_ATTRIBUTE traits, so the GpuHardware /
           # GpuOnScreen tests are excluded by their class (as tools/run_chain_gate.ps1 selects them).
-          $filter = 'FullyQualifiedName!~RendererCaptureHarnessTests'
+          # Also excluded: tests that need the laptop's environment rather than a GPU category
+          # (first CI run, 2026-10-17): the runner's 1024x768 desktop clamps the window-layout
+          # tests, its 4 vCPUs miss the 4K60 converter budget, and the libplacebo renderer
+          # cannot initialize without a GPU/Vulkan driver.
+          $hostOnly = @(
+            'WindowResizeLayoutTests.ResizePreservesRequestedWindowBounds',
+            'WindowResizeLayoutTests.LayoutCompletesBeforeRendererNotification',
+            'DeckLinkConvertersSustained4K60PerformanceComparison',
+            'RendererMetadataCyclesReuseAcceptedSnapshotWithoutDiskReads')
+          $filter = (@('FullyQualifiedName!~RendererCaptureHarnessTests') +
+            ($hostOnly | ForEach-Object { "FullyQualifiedName!~$_" })) -join '&'
           $sw = [Diagnostics.Stopwatch]::StartNew()
           & '${{ steps.toolchain.outputs.vstest }}' x64\Release\VideoProcessor-Test.dll /Platform:x64 `
             "/TestCaseFilter:$filter" "/Logger:trx;LogFileName=cpu-tests.trx" "/ResultsDirectory:$trxDir"
