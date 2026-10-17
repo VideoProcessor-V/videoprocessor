@@ -191,3 +191,14 @@ The class changes only after N seconds and at a cut.
 ## Owner decision 2026-10-17
 
 Build all five. Config: one group headed "Experimental content-adaptive settings" with a checkbox per function (content recognition, motion intent, ambient adaptation, black protection, display mapping), each off by default, with its sub-settings (strength, ranges, taus) beneath its checkbox. The motion-intent policy question (vs dejudder_motion_rolloff) is decided after the display-only phase.
+
+## Owner decision 2026-10-17: motion intent as selectable policies
+
+Instead of one policy, motion intent offers several, chosen by the owner (exclusive buttons in Config, under the motion-intent checkbox):
+- **Display only** - per-shot analysis shown on the OSD/log, strength unchanged (the default when the checkbox is ticked).
+- **Ease on fast pans** - reduce strength as pan speed rises (today's dejudder_motion_rolloff behaviour, moved here as one policy).
+- **Keep fast pans, ease on slow deliberate shots** - full strength where judder is most visible; ease where the shot is slow, steady and the film look is likely intended.
+- **Visibility-weighted** - scale by the judder-visibility estimate J (pan speed band x edge contrast), easing on static and on blur-dominated shots.
+- **Metadata only** - act only on L11 frame-rate-conversion hints or real DV2 Authentic Motion when present; otherwise unchanged.
+
+All share the rules above: owner strength is the master and is never exceeded, changes only at cuts, dead band + short-shot inherit, video-class excluded, owner-set minimum (intent_motion_min). Key: intent_motion_policy = display | ease_fast | ease_slow | visibility | metadata. Each policy is logged with the inferred values so they can be compared on the same film.
