@@ -401,6 +401,24 @@ bool SourceGdiName(const DISPLAYCONFIG_PATH_INFO& path, std::wstring& name)
 	return !name.empty();
 }
 
+// Bug hunt 2 (M3): the target's native size from the display (its preferred
+// mode, from EDID). False when Windows cannot report it.
+bool TargetNativeSize(const DISPLAYCONFIG_PATH_INFO& path, uint32_t& width,
+	uint32_t& height)
+{
+	DISPLAYCONFIG_TARGET_PREFERRED_MODE preferred = {};
+	preferred.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE;
+	preferred.header.size = sizeof(preferred);
+	preferred.header.adapterId = path.targetInfo.adapterId;
+	preferred.header.id = path.targetInfo.id;
+	if (DisplayConfigGetDeviceInfo(&preferred.header) != ERROR_SUCCESS ||
+		preferred.width == 0 || preferred.height == 0)
+		return false;
+	width = preferred.width;
+	height = preferred.height;
+	return true;
+}
+
 bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 {
 	std::wstring device;
@@ -409,12 +427,11 @@ bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 		error = "cannot resolve display source name";
 		return false;
 	}
-	DEVMODEW best = {};
-	bool found = false;
 	// capture_display_fixes (post-merge audit 2026-10-17): off = the earlier ranking.
 	const bool fixes = CaptureDisplayFixes::Enabled();
 	// Bug hunt 2026-10-17: area first, then refresh; interlaced skipped
-	// (DisplayTopologySession::DisplayModeRanksAbove).
+	// (DisplayTopologySession::DisplayModeRanksAbove). Bug hunt 2 (M3): no
+	// mode above the display's native size (DSR/VSR, DCI compatibility).
 	const auto describe = [](const DEVMODEW& mode)
 	{
 		DisplayTopologySession::DisplayModeCandidate result;
@@ -425,21 +442,26 @@ bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 		result.interlaced = (mode.dmDisplayFlags & DM_INTERLACED) != 0;
 		return result;
 	};
+	std::vector<DEVMODEW> enumerated;
+	std::vector<DisplayTopologySession::DisplayModeCandidate> candidates;
 	for (DWORD index = 0;; ++index)
 	{
 		DEVMODEW candidate = {};
 		candidate.dmSize = sizeof(candidate);
 		if (!EnumDisplaySettingsExW(device.c_str(), index, &candidate, 0))
 			break;
-		const DisplayTopologySession::DisplayModeCandidate mode = describe(candidate);
-		if (!DisplayTopologySession::IsMaximumModeCandidate(mode, fixes))
-			continue;
-		if (!found || DisplayTopologySession::DisplayModeRanksAbove(mode, describe(best), fixes))
-		{
-			best = candidate;
-			found = true;
-		}
+		enumerated.push_back(candidate);
+		candidates.push_back(describe(candidate));
 	}
+	uint32_t nativeWidth = 0;
+	uint32_t nativeHeight = 0;
+	const bool nativeKnown = fixes && TargetNativeSize(path, nativeWidth, nativeHeight);
+	if (!nativeKnown)
+		nativeWidth = nativeHeight = 0;
+	const int chosen = DisplayTopologySession::ChooseMaximumMode(
+		candidates, nativeWidth, nativeHeight, fixes);
+	const bool found = chosen >= 0;
+	DEVMODEW best = found ? enumerated[static_cast<size_t>(chosen)] : DEVMODEW{};
 	if (!found || ChangeDisplaySettingsExW(device.c_str(), &best, nullptr,
 		CDS_TEST, nullptr) != DISP_CHANGE_SUCCESSFUL ||
 		ChangeDisplaySettingsExW(device.c_str(), &best, nullptr, 0, nullptr) !=
@@ -448,9 +470,11 @@ bool ApplyMaximumMode(const DISPLAYCONFIG_PATH_INFO& path, std::string& error)
 		error = "cannot apply maximum compatible display mode";
 		return false;
 	}
-	DebugLog::Log("Display maximum mode applied: device=%S resolution=%lux%lu refresh=%luHz",
+	DebugLog::Log("Display maximum mode applied: device=%S resolution=%lux%lu refresh=%luHz "
+		"native=%ux%u%s",
 		device.c_str(), best.dmPelsWidth, best.dmPelsHeight,
-		best.dmDisplayFrequency);
+		best.dmDisplayFrequency, nativeWidth, nativeHeight,
+		nativeKnown ? "" : " (unknown)");
 	return true;
 }
 
@@ -916,6 +940,69 @@ namespace DisplayTopologySession
 				activeSelected = &path;
 				break;
 			}
+		}
+		// Bug hunt 2 (2026-10-17, M2): CCD gives an inactive path no mode
+		// indices, so the exact single-path build below always failed and the
+		// advertised "the target may currently be inactive" never worked.
+		// Activate it with a paths-only topology (Windows chooses its modes);
+		// ApplyMaximumMode then picks the native mode. capture_display_fixes
+		// off = the earlier refusal.
+		if (!activeSelected && CaptureDisplayFixes::Enabled())
+		{
+			Topology pathOnly;
+			DISPLAYCONFIG_PATH_INFO path = *selected;
+			path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+			path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+			path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+			pathOnly.paths.push_back(path);
+			result = ERROR_SUCCESS;
+			const UINT32 supplied = SDC_TOPOLOGY_SUPPLIED | SDC_ALLOW_PATH_ORDER_CHANGES;
+			bool applied = SetDisplayConfig(1, pathOnly.paths.data(), 0, nullptr,
+				SDC_VALIDATE | supplied) == ERROR_SUCCESS &&
+				(result = SetDisplayConfig(1, pathOnly.paths.data(), 0, nullptr,
+					SDC_APPLY | supplied)) == ERROR_SUCCESS;
+			if (!applied)
+				applied = ApplyTopology(pathOnly, true, true, result) &&
+					ApplyTopology(pathOnly, false, true, result);
+			if (!applied || !WaitForOnlyTarget(selectedIdentity))
+			{
+				error = applied ?
+					"configured inactive target did not become the only active display" :
+					"SetDisplayConfig could not activate the inactive target (Windows error " +
+						std::to_string(result) + ")";
+				bool restored = false;
+				std::string restoreError;
+				RestorePending(statePath, "target-only-inactive-activation-failure",
+					restored, restoreError);
+				if (!restoreError.empty())
+					error += "; restore: " + restoreError;
+				return false;
+			}
+			Topology activated;
+			if (QueryTopology(QDC_ONLY_ACTIVE_PATHS, activated) != ERROR_SUCCESS ||
+				activated.paths.size() != 1)
+			{
+				error = "cannot read the activated target's display path";
+				bool restored = false;
+				std::string restoreError;
+				RestorePending(statePath, "target-only-inactive-query-failure",
+					restored, restoreError);
+				return false;
+			}
+			std::string maximumModeError;
+			if (!ApplyMaximumMode(activated.paths.front(), maximumModeError))
+			{
+				error = maximumModeError;
+				bool restored = false;
+				std::string restoreError;
+				RestorePending(statePath, "target-only-maximum-mode-failure", restored, restoreError);
+				if (!restoreError.empty())
+					error += "; restore: " + restoreError;
+				return false;
+			}
+			DebugLog::Log("Target-only display topology active: target='%S' "
+				"activated_from_inactive=1 recovery_pending=1", friendlyName.c_str());
+			return true;
 		}
 		const Topology& selectedTopology = activeSelected ? current : all;
 		const DISPLAYCONFIG_PATH_INFO& selectedPath = activeSelected ? *activeSelected : *selected;

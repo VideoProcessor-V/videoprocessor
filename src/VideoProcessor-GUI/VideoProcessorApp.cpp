@@ -2165,22 +2165,9 @@ BOOL CVideoProcessorApp::InitInstance()
 			ApplicationInterface::SourceName(interfaceSelection.source));
 		dlg.InterfaceMode(interfaceSelection.mode);
 
+		// Load first, as before: it also sets capture_display_fixes.
 		if (LoadTargetOnlyDisplaySessionMode() && dlg.StartsFullScreen())
-		{
-			std::string error;
-			const CString configuredTarget = dlg.FullscreenMonitorName();
-			if (DisplayTopologySession::BeginTargetOnly(
-				static_cast<LPCTSTR>(configuredTarget),
-				m_displayRecoveryStatePath, error))
-			{
-				m_targetOnlyDisplaySessionActive = true;
-			}
-			else
-			{
-				DebugLog::Log("Target-only display session skipped: %s; continuing with existing fullscreen fallback",
-					error.c_str());
-			}
-		}
+			BeginTargetOnlyDisplaySession(dlg.FullscreenMonitorName(), "startup");
 
 		// High priority is a latency preference, not a startup requirement. Some
 		// managed, remote, and diagnostic-launch contexts legitimately deny it;
@@ -2195,11 +2182,20 @@ BOOL CVideoProcessorApp::InitInstance()
 
 		const INT_PTR modalResult = dlg.DoModal();
 		RestoreDisplayTopology("normal-exit");
+		// Bug hunt 2 (2026-10-17, M1): the dialog destructor used to wait
+		// without a bound for the retirement worker and the reset coordinator.
+		// A blocked one left a windowless process holding the COM port, the
+		// capture card and GPU memory, with the crash state deleted as clean.
+		// Bound the wait; if a worker is still blocked, force the exit (LED
+		// and topology restore, crash state kept, process terminated).
+		if (!dlg.WaitForShutdownWorkers(ShutdownDeadline::WorkerQuiesceTimeoutMs))
+			dlg.ForceExitProcess("shutdown-workers-did-not-finish", "worker-join");
 		// audit 2026-10-16: only a genuine clean exit deletes the crash state.
 		// A FatalError ends the dialog through the ordinary close path, and
 		// DoModal returns -1/IDABORT when the dialog could not run at all.
-		crashStateClean = !dlg.FatalErrorRaised() &&
-			modalResult != -1 && modalResult != IDABORT;
+		crashStateClean = ShutdownDeadline::CrashStateClean(
+			dlg.FatalErrorRaised(), modalResult == -1 || modalResult == IDABORT,
+			false, true);
 		if (!crashStateClean)
 		{
 			DebugLog::Log(
@@ -2283,8 +2279,31 @@ int CVideoProcessorApp::ExitInstance()
 }
 
 
+bool CVideoProcessorApp::BeginTargetOnlyDisplaySession(const CString& target,
+	const char* reason)
+{
+	if (m_targetOnlyDisplaySessionActive || !LoadTargetOnlyDisplaySessionMode())
+		return false;
+	std::string error;
+	if (DisplayTopologySession::BeginTargetOnly(
+		static_cast<LPCTSTR>(target), m_displayRecoveryStatePath, error))
+	{
+		m_targetOnlyDisplaySessionActive = true;
+		DebugLog::Log("Target-only display session entered: reason=%s", reason);
+		return true;
+	}
+	DebugLog::Log("Target-only display session skipped: reason=%s %s; continuing with existing fullscreen fallback",
+		reason, error.c_str());
+	return false;
+}
+
+
 bool CVideoProcessorApp::RestoreDisplayTopology(const char* reason)
 {
+	// Bug hunt 2 (2026-10-17): the forced-exit watchdog may call this from its
+	// own thread.
+	static std::mutex restoreMutex;
+	std::lock_guard<std::mutex> lock(restoreMutex);
 	if (!m_targetOnlyDisplaySessionActive &&
 		!DisplayTopologySession::HasPendingRecovery(m_displayRecoveryStatePath))
 		return true;

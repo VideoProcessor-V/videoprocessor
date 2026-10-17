@@ -20,6 +20,10 @@ public:
 	virtual int ExitInstance();
 	BOOL PreTranslateMessage(MSG* message) override;
 	bool RestoreDisplayTopology(const char* reason);
+	// Bug hunt 2 (2026-10-17, L10): (re-)enters the target-only display
+	// session when fullscreen_monitor_session_mode asks for it and none is
+	// active (startup, and fullscreen on again after a fullscreen-off restore).
+	bool BeginTargetOnlyDisplaySession(const CString& target, const char* reason);
 
 	// DirectShow startup priming remains automatic. The public queue controls
 	// are the timestamp lead and maintained VP queue target, both expressed as

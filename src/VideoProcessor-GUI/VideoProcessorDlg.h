@@ -35,6 +35,7 @@
 #include <RendererPostStallResetAdvisor.h>
 #include <RendererResetCoordinator.h>
 #include <RendererResetPolicy.h>
+#include <GuiLifecyclePolicy.h>
 #include <RendererRetirementService.h>
 #include <RendererTransitionModel.h>
 #include <EotfTransitionStabilizer.h>
@@ -173,6 +174,14 @@ public:
 	// audit 2026-10-16: set by _FatalError so the App keeps crash state
 	// instead of treating the dialog end as a clean exit.
 	bool FatalErrorRaised() const { return m_fatalErrorRaised; }
+	// Bug hunt 2 (2026-10-17, H1/M1/L5): after DoModal returns, bounded wait
+	// for the renderer retirement worker and the reset coordinator. False =
+	// one of them is still blocked; the caller then forces the exit.
+	bool WaitForShutdownWorkers(DWORD timeoutMs);
+	// Forced exit (thread-safe, first caller wins): bounded LED restore on
+	// every reachable renderer, target-only topology restore, crash state
+	// kept, log flushed, then the process is terminated. Never returns.
+	[[noreturn]] void ForceExitProcess(const char* reason, const char* blocking);
 	void WindowedFullScreenMode(bool enabled = true);
 	void FullscreenMonitorName(const CString& name);
 	CString FullscreenMonitorName() const { return m_fullscreenMonitorName; }
@@ -611,6 +620,8 @@ protected:
 	// Content intent (intent interpreter item 1): the rules' `content` variable.
 	ContentIntentStatus m_contentStatus;
 	std::string m_contentValue;                  // as the rules last saw it ("" = off)
+	// Bug hunt 2 (H2): held across renderer stops/restarts (GuiLifecyclePolicy.h).
+	ContentRuleHold m_contentRuleHold;
 	void UpdateContentIntent(const char* reason);
 	CString ContentIntentLine() const;
 	std::unique_ptr<ConfigFile> m_stagedConfiguration;
@@ -948,9 +959,36 @@ protected:
 	void ResetRendererFailureRetry(const char* reason);
 	void PollRendererFailureRetry(ULONGLONG now);
 	// Bug hunt 2026-10-17: a blocked shutdown retirement used to make
-	// UpdateState return forever. Exit is forced after this deadline.
-	ULONGLONG m_shutdownRetirementBlockedDeadlineTick = 0;
-	void PollShutdownRetirementDeadline(ULONGLONG now);
+	// UpdateState return forever. Exit is forced after
+	// ShutdownBlockedRetirementDeadlineMs (m_shutdownDeadline brought forward).
+	// Bug hunt 2 (2026-10-17, H1): one shutdown deadline for every blocking
+	// kind, armed at the first close request (OnClose) and polled from the UI
+	// timers whatever blocks; a watchdog thread backs it up when the UI thread
+	// itself is blocked. See GuiLifecyclePolicy.h.
+	ShutdownDeadline::Tracker m_shutdownDeadline;
+	void ArmShutdownDeadline(const char* site);
+	void PollShutdownDeadline(ULONGLONG now);
+	ShutdownDeadline::Blockers CurrentShutdownBlockers() const;
+	// The renderer handed to the retirement worker (for the forced-exit LED
+	// restore while the worker may be blocked inside its Retire()).
+	std::mutex m_shutdownRetiringRendererMutex;
+	std::weak_ptr<IVideoRenderer> m_shutdownRetiringRenderer;
+	std::atomic<bool> m_forcedShutdownStarted{ false };
+	const DWORD m_uiThreadId = ::GetCurrentThreadId();
+	struct ShutdownWatchdogState
+	{
+		std::mutex mutex;
+		std::condition_variable wake;
+		bool cancelled = false;
+		CVideoProcessorDlg* dialog = nullptr;
+	};
+	std::shared_ptr<ShutdownWatchdogState> m_shutdownWatchdog;
+	// Bug hunt 2 (M5): when the renderer last entered RENDERING (0 = not
+	// rendering); the retry count clears only after sustained rendering.
+	ULONGLONG m_rendererRenderingSinceTick = 0;
+	// Bug hunt 2 (M4): destroys the fullscreen host and restores the topology
+	// when fullscreen is off and no renderer or lifecycle work holds the host.
+	void TeardownUnwantedFullscreenHost(const char* site);
 	// Bug hunt 2026-10-17: true only while CaptureStop is inside
 	// ACaptureDevice::StopCapture (which may pump messages).
 	bool m_captureStopInProgress = false;
