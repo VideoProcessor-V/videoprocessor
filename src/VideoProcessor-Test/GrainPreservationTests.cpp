@@ -406,36 +406,82 @@ namespace GrainPreservationTest
 		}
 
 		// deband_vp_grain_guard: VpDebander without vectors keeps grain of 0.5 code and more
-		// at the default threshold (1.5 codes) and at the low-bitrate maximum (3 codes), while
-		// a banded gradient is debanded exactly as before; off is the established debander
-		// (0.5-0.6x of 0.5-code grain).
+		// (white and soft) at 0.95x or more at the default threshold (1.5 codes) and at the
+		// low-bitrate maximum (3 codes), in 8-bit content and in the GPU test's 10-bit
+		// picture (8-bit-in-10 thresholds 6 and 12 codes; soft 0.5-code grain kept 0.91x
+		// on the GPU before the 2026-10-17 extremum test); banded gradients - 8-bit and
+		// 10-bit steps, gentle, steep and diagonal, linear and radial - are debanded
+		// exactly as by the Laplacian-only guard and as without a guard; off is the
+		// established debander (0.5-0.6x of 0.5-code grain).
 		TEST_METHOD(VpDebanderGuardKeepsGrainWithoutVectors)
 		{
+			auto check = [](const char* label, const Image& img, const Image& ramp, int margin, double thr, double radius, int depth, bool halfCode) {
+				const double source = Rms(img - ramp, margin);
+				const double lapMin = GrainPreserve::GuardLaplacianCodes(thr, depth);
+				const double extMin = GrainPreserve::GuardExtremumCodes(thr, depth);
+				const double guard = Rms(Deband(img, thr, radius, lapMin, extMin) - ramp, margin) / source;
+				const double legacy = Rms(Deband(img, thr, radius, 0.0, 0.0) - ramp, margin) / source;
+				char text[160];
+				snprintf(text, sizeof(text), "%s threshold %.1f: guard %.3f legacy %.3f", label, thr, guard, legacy);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(guard > 0.95 && guard < 1.05, W(text).c_str());
+				if (halfCode) Assert::IsTrue(legacy < 0.8, W(text).c_str());
+			};
 			for (bool soft : { false, true })
 				for (double sigma : kSigmas)
 					for (double thr : { 1.5, 3.0 })
 					{
 						std::mt19937 rng(909u + static_cast<unsigned>(sigma * 8) + (soft ? 1000u : 0u));
 						const Image g = Grain(kW, kH, sigma, soft, rng);
-						Image img(kW, kH);
+						Image img(kW, kH), ramp(kW, kH);
 						for (int y = 0; y < kH; ++y)
 							for (int x = 0; x < kW; ++x)
-								img.at(x, y) = std::round(100.0 + 0.07 * x + 0.03 * y + g.at(x, y));   // 8-bit content
-						Image ramp(kW, kH);
-						for (int y = 0; y < kH; ++y)
-							for (int x = 0; x < kW; ++x)
+							{
 								ramp.at(x, y) = 100.0 + 0.07 * x + 0.03 * y;
-						const double source = Rms(img - ramp, kMargin);
-						const double lapMin = GrainPreserve::GuardLaplacianCodes(thr, 8);
-						const double guard = Rms(Deband(img, thr, 16.0, lapMin) - ramp, kMargin) / source;
-						const double legacy = Rms(Deband(img, thr, 16.0, 0.0) - ramp, kMargin) / source;
-						char text[160];
-						snprintf(text, sizeof(text), "%s sigma %.1f threshold %.1f: guard %.3f legacy %.3f", soft ? "soft" : "white", sigma, thr, guard, legacy);
-						Logger::WriteMessage(text);
-						Assert::IsTrue(guard > 0.95 && guard < 1.05, W(text).c_str());
-						if (sigma == 0.5) Assert::IsTrue(legacy < 0.75, W(text).c_str());
+								img.at(x, y) = std::round(ramp.at(x, y) + g.at(x, y));   // 8-bit content
+							}
+						char label[64];
+						snprintf(label, sizeof(label), "8-bit %s sigma %.1f", soft ? "soft" : "white", sigma);
+						check(label, img, ramp, kMargin, thr, 16.0, 8, sigma == 0.5);
 					}
-			// Bands: a quantised gentle ramp loses the same error with and without the guard.
+			// LibplaceboLutParserTests VpDebanderKeepsGrainWithoutVectors' picture: 10-bit codes,
+			// grain sigma8 x 4, the same seeds, radius 64 (1080 / 128 x 16, clamped).
+			{
+				const int w = 256, h = 128, margin = 24;
+				Image ramp(w, h);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						ramp.at(x, y) = 400.0 + 0.28 * x + 0.12 * y;
+				for (double thr : { 6.0, 12.0 })
+					for (bool soft : { false, true })
+						for (double sigma8 : kSigmas)
+						{
+							std::mt19937 rng(61u + static_cast<unsigned>(sigma8 * 4) + (soft ? 100u : 0u));
+							const Image g = Grain(w, h, sigma8 * 4.0, soft, rng);
+							Image img(w, h);
+							for (size_t i = 0; i < img.v.size(); ++i) img.v[i] = static_cast<double>(std::lround(ramp.v[i] + g.v[i]));
+							char label[64];
+							snprintf(label, sizeof(label), "10-bit %s grain %.1f 8-bit codes", soft ? "soft" : "white", sigma8);
+							check(label, img, ramp, margin, thr, 64.0, 10, sigma8 == 0.5);
+						}
+			}
+			// Bands: a quantised gradient loses the same error with and without the guard, and
+			// the extremum test adds nothing to it (a quantised smooth gradient is monotone along
+			// every line through a pixel): the output is the Laplacian-only guard's, exactly.
+			auto bands = [](const char* label, const Image& ramp, const Image& banded, double thr, int depth, double radius, bool expectDebanded, bool sameAsLegacy) {
+				const double before = Rms(banded - ramp, kMargin);
+				const double lapMin = GrainPreserve::GuardLaplacianCodes(thr, depth);
+				const Image legacyOut = Deband(banded, thr, radius, 0.0, 0.0);
+				const Image lapOnly = Deband(banded, thr, radius, lapMin, 1e300);
+				const Image guardOut = Deband(banded, thr, radius, lapMin, GrainPreserve::GuardExtremumCodes(thr, depth));
+				const double legacy = Rms(legacyOut - ramp, kMargin), guard = Rms(guardOut - ramp, kMargin);
+				char text[200];
+				snprintf(text, sizeof(text), "%s: error %.3f -> legacy %.3f, guard %.3f", label, before, legacy, guard);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(guardOut.v == lapOnly.v, (L"the extremum test leaves bands alone; " + W(text)).c_str());
+				if (expectDebanded) Assert::IsTrue(legacy < 0.75 * before, W(text).c_str());
+				if (sameAsLegacy) Assert::AreEqual(legacy, guard, 0.01 * before, W(text).c_str());
+			};
 			for (double slope : { 1.0 / 32.0, 1.0 / 16.0, 1.0 / 8.0 })
 			{
 				Image ramp(kW, kH), banded(kW, kH);
@@ -445,18 +491,48 @@ namespace GrainPreservationTest
 						ramp.at(x, y) = 100.0 + slope * x;
 						banded.at(x, y) = std::round(ramp.at(x, y));
 					}
-				const double before = Rms(banded - ramp, kMargin);
-				const double legacy = Rms(Deband(banded, 1.5, 16.0, 0.0) - ramp, kMargin);
-				const double guard = Rms(Deband(banded, 1.5, 16.0, GrainPreserve::GuardLaplacianCodes(1.5, 8)) - ramp, kMargin);
-				char text[160];
-				snprintf(text, sizeof(text), "band slope %.4f: error %.3f -> legacy %.3f, guard %.3f", slope, before, legacy, guard);
-				Logger::WriteMessage(text);
-				Assert::IsTrue(legacy < 0.75 * before, W(text).c_str());
-				Assert::AreEqual(legacy, guard, 0.01 * before, W(text).c_str());
+				char label[64];
+				snprintf(label, sizeof(label), "8-bit band slope %.4f", slope);
+				bands(label, ramp, banded, 1.5, 8, 16.0, true, true);
+			}
+			// 10-bit pictures at the 8-bit-in-10 threshold: 4-code (8-bit) and 1-code (10-bit)
+			// steps, gentle to steep, along x and diagonal (1-code diagonal staircases have
+			// Laplacians of 2 codes on most pixels: the level stays above them). 8-bit bands
+			// narrower than 8 px are partly vetoed by the Laplacian share, as before the tune.
+			for (int step : { 4, 1 })
+				for (double slope : { 0.05, 0.125, 0.25, 0.5, 0.8 })
+					for (double ySlope : { 0.0, 0.3, 1.0 })
+					{
+						Image ramp(kW, kH), banded(kW, kH);
+						for (int y = 0; y < kH; ++y)
+							for (int x = 0; x < kW; ++x)
+							{
+								ramp.at(x, y) = 400.0 + slope * x + ySlope * slope * y;
+								banded.at(x, y) = step * std::round(ramp.at(x, y) / step);
+							}
+						char label[96];
+						snprintf(label, sizeof(label), "10-bit band step %d slope %.3f x %.1f", step, slope, ySlope);
+						bands(label, ramp, banded, 6.0, 10, 64.0, false, step == 1 || step / (slope * (1.0 + ySlope)) >= 8.0);
+					}
+			// A radial gradient (a vignette) in 8-bit steps: extrema only on its ridge lines.
+			{
+				Image ramp(kW, kH), banded(kW, kH);
+				for (int y = 0; y < kH; ++y)
+					for (int x = 0; x < kW; ++x)
+					{
+						const double r = std::hypot(x - 0.37 * kW, y - 0.61 * kH);
+						ramp.at(x, y) = 400.0 + 0.004 * r * r;
+						banded.at(x, y) = 4.0 * std::round(ramp.at(x, y) / 4.0);
+					}
+				bands("10-bit radial band", ramp, banded, 6.0, 10, 64.0, false, true);
 			}
 			Assert::AreEqual(0.5, GrainPreserve::GuardLaplacianCodes(1.5, 8), 1e-12);
 			Assert::AreEqual(0.5, GrainPreserve::GuardLaplacianCodes(3.0, 8), 1e-12, L"the bitrate allowance does not raise it");
-			Assert::AreEqual(2.0, GrainPreserve::GuardLaplacianCodes(6.0, 10), 1e-12, L"10-bit codes");
+			Assert::AreEqual(2.5, GrainPreserve::GuardLaplacianCodes(6.0, 10), 1e-12, L"10-bit codes: busy from 3 codes, off the integer");
+			Assert::AreEqual(2.5, GrainPreserve::GuardLaplacianCodes(12.0, 10), 1e-12);
+			Assert::AreEqual(0.5, GrainPreserve::GuardExtremumCodes(6.0, 10), 1e-12, L"half a 10-bit code");
+			Assert::AreEqual(0.5, GrainPreserve::GuardExtremumCodes(12.0, 10), 1e-12, L"the bitrate allowance does not raise it");
+			Assert::AreEqual(0.125, GrainPreserve::GuardExtremumCodes(1.5, 8), 1e-12);
 		}
 
 		// deband_grain off: libplacebo's deband adds no grain; threshold, radius and

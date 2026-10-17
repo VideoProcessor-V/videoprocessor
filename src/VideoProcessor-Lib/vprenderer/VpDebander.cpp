@@ -69,8 +69,8 @@ if (p.x < sz.x && p.y < sz.y) {
 #endif
 #ifdef SPATIAL_GUARD
     // deband_vp_grain_guard (owner 2026-10-17): this frame's own grain estimate, no
-    // vectors needed - the share of pixels per 16x16 block whose Laplacian exceeds
-    // lap_min (a band is flat but for its edges; grain is busy
+    // vectors needed - the share of busy pixels per 16x16 block (GUARD_BODY: Laplacian
+    // above lap_min or a local extremum; a band is flat but for its edges, grain is busy
     // everywhere), bilinear between block centres; blur vetoed from veto_lo to veto_hi.
     {
         float share = texture(grain_spatial, pos / 16.0 / vec2(textureSize(grain_spatial, 0))).r;
@@ -85,32 +85,47 @@ if (p.x < sz.x && p.y < sz.y) {
 )GLSL";
 
 		// The spatial grain estimate per 16x16 block (one workgroup): the share of the
-		// block's pixels whose Laplacian |4c - n - s - e - w| (largest channel) exceeds
-		// lap_min (GrainPreserve::GuardLaplacianCodes: a third of the threshold's
-		// content-step part, never raised by the low-bitrate allowance).
+		// block's busy pixels (GrainPreserve::GuardLaplacianCodes / GuardExtremumCodes):
+		// Laplacian |4c - n - s - e - w| (largest channel) above lap_min, or a strict
+		// local extremum along x, y or a diagonal by more than ext_min on both sides (a
+		// quantised smooth gradient is monotone along every line: never). The block and
+		// its one-pixel border are read once into shared memory (1.27 fetches a pixel).
 		const char* const GUARD_HEADER = R"GLSL(
 shared vec2 gg_sum[256];
+shared vec4 gg_tile[324];
 )GLSL";
 		const char* const GUARD_BODY = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 uint li = gl_LocalInvocationIndex;
 ivec2 sz = textureSize(src, 0);
+ivec2 hi = sz - ivec2(1);
+ivec2 origin = ivec2(gl_WorkGroupID.xy) * 16 - ivec2(1);
+for (uint i = li; i < 324u; i += 256u)
+    gg_tile[i] = texelFetch(src, clamp(origin + ivec2(int(i % 18u), int(i / 18u)), ivec2(0), hi), 0);
+barrier();
 vec2 v = vec2(0.0);
 if (p.x < sz.x && p.y < sz.y) {
-    ivec2 hi = sz - ivec2(1);
-    vec4 c = texelFetch(src, p, 0);
-    vec4 l = abs(4.0 * c - texelFetch(src, clamp(p + ivec2(1, 0), ivec2(0), hi), 0)
-                         - texelFetch(src, clamp(p - ivec2(1, 0), ivec2(0), hi), 0)
-                         - texelFetch(src, clamp(p + ivec2(0, 1), ivec2(0), hi), 0)
-                         - texelFetch(src, clamp(p - ivec2(0, 1), ivec2(0), hi), 0));
+    int t = (int(gl_LocalInvocationID.y) + 1) * 18 + int(gl_LocalInvocationID.x) + 1;
+    vec4 c = gg_tile[t];
+    vec4 dw = c - gg_tile[t - 1], de = c - gg_tile[t + 1];
+    vec4 dn = c - gg_tile[t - 18], ds = c - gg_tile[t + 18];
+    vec4 d1 = c - gg_tile[t - 19], d2 = c - gg_tile[t + 19];
+    vec4 d3 = c - gg_tile[t - 17], d4 = c - gg_tile[t + 17];
+    vec4 l = abs(dw + de + dn + ds);
+    // Extremum along a line: both differences above ext_min, or both below -ext_min.
+    vec4 x = max(max(max(min(dw, de), -max(dw, de)), max(min(dn, ds), -max(dn, ds))),
+                 max(max(min(d1, d2), -max(d1, d2)), max(min(d3, d4), -max(d3, d4))));
     float m = l.x;
+    float e = x.x;
 #if NCOMP > 1
     m = max(m, l.y);
+    e = max(e, x.y);
 #endif
 #if NCOMP > 2
     m = max(m, l.z);
+    e = max(e, x.z);
 #endif
-    v = vec2(m > lap_min ? 1.0 : 0.0, 1.0);
+    v = vec2((m > lap_min || e > ext_min) ? 1.0 : 0.0, 1.0);
 }
 gg_sum[li] = v;
 barrier();
@@ -288,6 +303,7 @@ if (li == 0u)
 			// deband_vp_grain_guard: the plane's spatial grain estimate first.
 			const bool useGuard = params.grainGuard;
 			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
+			const float extMin = static_cast<float>(GrainPreserve::GuardExtremumCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
 			const float vetoLo = static_cast<float>(GrainPreserve::kVetoLo);
 			const float vetoHi = static_cast<float>(GrainPreserve::kVetoHi);
 			if (useGuard)
@@ -305,7 +321,7 @@ if (li == 0u)
 					return false;
 				}
 				const pl_shader_desc gd[2] = { Sampled("src", in, false), Storage("guard_out", guard[slot][plane]) };
-				const pl_shader_var gv[1] = { { pl_var_float("lap_min"), &lapMin, true } };
+				const pl_shader_var gv[2] = { { pl_var_float("lap_min"), &lapMin, true }, { pl_var_float("ext_min"), &extMin, true } };
 				const std::string guardHeader = "#define NCOMP " + std::to_string(ncomp) + "\n" + GUARD_HEADER;
 				pl_custom_shader gc{};
 				gc.description = "VideoProcessor deband: grain guard";
@@ -316,8 +332,9 @@ if (li == 0u)
 				gc.descriptors = gd;
 				gc.num_descriptors = 2;
 				gc.variables = gv;
-				gc.num_variables = 1;
+				gc.num_variables = 2;
 				gc.compute = true;
+				gc.compute_shmem = sizeof(float) * (256 * 2 + 324 * 4);   // gg_sum + gg_tile
 				gc.compute_group_size[0] = 16;
 				gc.compute_group_size[1] = 16;
 				pl_shader gsh = pl_dispatch_begin(dispatch);

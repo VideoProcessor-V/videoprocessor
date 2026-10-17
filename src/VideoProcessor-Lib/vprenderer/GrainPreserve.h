@@ -88,24 +88,46 @@ vec4 NAME(vec2 p) \
 		return 0.5 + 2.5 * (1.0 - q);
 	}
 
-	// VpDebander's spatial grain guard (no vectors needed): per 16x16 block,
-	// the share of pixels whose Laplacian |4c - n - s - e - w| exceeds a third
-	// of the deband threshold - of the content-step part only (at most 1.5 8-bit
-	// steps): the low-bitrate allowance (up to 3 steps) raises the blur, never the
-	// level grain must reach to count as grain. A banded gradient is flat inside its bands (only
-	// the band edges exceed it: 0.31 at most for bands 8 px wide or wider, 0.36-0.41
-	// with light coding noise); grain exceeds it on 0.60 (white, 0.25 code), 0.84
-	// (white, 0.5 code) and 0.75 (soft, 0.5 code) of the pixels at the default
-	// 1.5-code threshold (grainwork/guard_sim.py in the audit's scratchpad). Blur is
-	// vetoed from kVetoLo (none) to kVetoHi (fully); bands 4 px wide are partly vetoed.
+	// VpDebander's spatial grain guard (no vectors needed): per 16x16 block, the
+	// share of busy pixels. A pixel is busy when
+	//  - its Laplacian |4c - n - s - e - w| (largest channel) exceeds a third of the
+	//    deband threshold - of the content-step part only (at most 1.5 8-bit steps):
+	//    the low-bitrate allowance (up to 3 steps) raises the blur, never the level
+	//    grain must reach to count as grain - snapped to the half code above it, so
+	//    integer-coded input never sits on the comparison (on the GPU a Laplacian of
+	//    exactly that many codes counted on some pixels and not others); or
+	//  - it is a strict local extremum along x, y or either diagonal (both neighbours
+	//    on that line above, or both below, it by more than a twelfth of the same
+	//    content step: half a 10-bit code at an 8-bit-in-10 threshold; 2026-10-17 tune
+	//    for soft 0.5-code grain, which slipped under the Laplacian alone - guard 0.91x).
+	//    A quantised smooth gradient is monotone along every line through a pixel, of
+	//    any slope and step size, so this never fires on clean bands: their share is
+	//    the Laplacian's alone, as before, and they are debanded identically.
+	// A banded gradient is flat inside its bands (only the band edges count: 0.31 at
+	// most for bands 8 px wide or wider, 0.40 for 4-code staircases at 0.8 code/px);
+	// grain is busy on 0.86 (white, 0.5 code) and 0.81 (soft, 0.5 code; blocks 0.74 and
+	// up) of the pixels at the 8-bit-in-10 threshold (CPU model, the GPU test's picture).
+	// Blur is vetoed from kVetoLo (none) to kVetoHi (fully); bands 4 px wide are partly vetoed.
 	constexpr double kLapShareOfThreshold = 1.0 / 3.0;
+	constexpr double kExtremumShareOfThreshold = 1.0 / 12.0;
 	constexpr double kVetoLo = 0.4, kVetoHi = 0.7;
-	// The Laplacian level (codes of the signal, colorDepth-scaled) above which a
-	// pixel counts as busy: a third of min(threshold, 1.5 8-bit steps).
-	inline double GuardLaplacianCodes(double thresholdCodes, int colorDepth)
+	// The content-step part of the threshold: min(threshold, 1.5 8-bit steps), in codes.
+	inline double GuardContentCodes(double thresholdCodes, int colorDepth)
 	{
 		const double eightBitStep = std::pow(2.0, (std::max)(0, colorDepth - 8));
-		return (std::min)(thresholdCodes, 1.5 * eightBitStep) * kLapShareOfThreshold;
+		return (std::min)(thresholdCodes, 1.5 * eightBitStep);
+	}
+	// The Laplacian level (codes of the signal, colorDepth-scaled) above which a
+	// pixel counts as busy: a third of the content step, snapped to the half code
+	// above it (integer-coded input: busy from the next whole code up, as before).
+	inline double GuardLaplacianCodes(double thresholdCodes, int colorDepth)
+	{
+		return std::floor(GuardContentCodes(thresholdCodes, colorDepth) * kLapShareOfThreshold + 1e-9) + 0.5;
+	}
+	// The step (codes) both neighbours on a line must exceed for a local extremum.
+	inline double GuardExtremumCodes(double thresholdCodes, int colorDepth)
+	{
+		return GuardContentCodes(thresholdCodes, colorDepth) * kExtremumShareOfThreshold;
 	}
 	inline double Smoothstep(double e0, double e1, double x)
 	{
