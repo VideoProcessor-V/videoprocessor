@@ -316,8 +316,10 @@ B it shows A. A composed (subtitle) or RGB picture keeps A.
 - The planes replace A's in the render: re-base, scaling, tone mapping, the dither and LED all run
   unchanged, so the chain stays HDR-safe.
 - VP deband decides per picture on a picture between frames (slot 1, no hold along A's field).
-- A frame the timeline skips is uploaded and noted (contiguity) but not estimated; the producer still
-  computes its pairs ahead.
+- A frame the timeline skips is not uploaded: the previous frame's planes are reused (counted with the
+  saved uploads), and it is noted (contiguity), not estimated and not presented; VP deband's hold
+  carries over it, and the producer still computes its pairs ahead. (Doc corrected, bug hunt
+  2026-10-17.)
 
 **Gap fill** (`interpolation_fill_gaps: on`, default off). While interpolating, B may follow a loss
 of 1 to 3 whole frames (`QueuedFrame::gapFrames`: missed capture frames, a dropped queued frame;
