@@ -5222,8 +5222,9 @@ namespace VideoProcessorTest
 			// projector connection test (Suspend/ResumeLedDriveForTest); 28:
 			// v1.4.02's diagnostics and profiles; 29: both (v1.4.02 merge); 30:
 			// GetLedDriveStatus (crash state); 31: GetSourceResolutionStatus
-			// (Stage 12, crash state); 32: the DV L1 scene minimum in the luminance status.
-			Assert::AreEqual(static_cast<uint32_t>(32),
+			// (Stage 12, crash state); 32: the DV L1 scene minimum in the luminance status;
+			// 33: StopLedDriveForShutdown (2026-10-17 integration).
+			Assert::AreEqual(static_cast<uint32_t>(33),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

@@ -6,7 +6,7 @@ the chain, before building more on it. Nothing here changes settings permanently
 
 ## Before you start (5 min)
 
-- Build in place: the latest x64 Release pair (VideoProcessor.exe + vprenderer DLL; plugin API 32 -
+- Build in place: the latest x64 Release pair (VideoProcessor.exe + vprenderer DLL; plugin API 33 -
   both from the same build).
 - Chain: Apple TV / UHD player -> HDFury Vertex2 (DV EDID, No Scaling) -> DeckLink (r210 capture).
 - Apple TV: Match Dynamic Range ON, Match Frame Rate ON, menus in SDR.

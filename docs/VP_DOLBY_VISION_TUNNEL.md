@@ -165,7 +165,8 @@ DV representation (DM matrices) is kept.
 The L1 scene minimum is shown on the DV luminance card ("Scene avg / min")
 and in the capture JSON (`scene_min_present`, `scene_min_nits`). It is not
 passed to the tone mapper, because libplacebo has no input for it. The
-renderer API is 32.
+renderer API is 33 (32 added the scene minimum; 33 added
+StopLedDriveForShutdown).
 
 ## Luminance status
 
