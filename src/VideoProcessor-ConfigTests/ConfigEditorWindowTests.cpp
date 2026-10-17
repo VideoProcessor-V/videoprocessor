@@ -4092,8 +4092,10 @@ void testUnrelatedContentRemainsExact()
     requireControl<QCheckBox>(advancedWindow, QStringLiteral("config.general.scene_detect"))->setChecked(true);
     save(advancedWindow);
     require(readBytes(path).contains("chroma_downsampling: ADVANCED"), "UI save changed ADVANCED");
-    require(advancedWindow.findChild<QWidget*>(QStringLiteral("config.directshow.conversion.chroma_downsampling")) == nullptr,
-        "Manual chroma policy leaked into UI");
+    // Hunt 2 (2026-10-17, owner: every setting has a Config control): the chroma policy now has a
+    // control; it shows the hand-edited value and an unrelated save keeps it.
+    require(requireControl<QComboBox>(advancedWindow, "config.directshow.conversion.chroma_downsampling")
+        ->currentData().toString() == "ADVANCED", "The chroma control does not show the hand-edited ADVANCED");
 }
 
 void testSceneDetectionDefaultsOffAndHidesManualOverrides()
