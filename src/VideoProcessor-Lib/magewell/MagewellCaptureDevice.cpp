@@ -1153,6 +1153,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 	auto budgetStarvingSince = std::chrono::steady_clock::time_point();
 	unsigned int recoverableFaults = 0;  // consecutive, reset by a delivered frame
 	auto recoverableRetryAfter = std::chrono::steady_clock::time_point();
+	int lastSignalLock = -1;  // the last signal read: 1 locked, 0 not, -1 none yet
 	const auto recoverableFault = [&](const char* reason)
 	{
 		// magewell_recover_faults off (restore switch): end capture as before.
@@ -1171,8 +1172,8 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		lastDeliveredFrameStart = -1;
 		budgetStarving = false;
 		++recoverableFaults;
-		const auto backoff = std::chrono::milliseconds(
-			RecoverableFaultBackoffMs(recoverableFaults));
+		const auto backoff = std::chrono::milliseconds(m_recoverableBackoffOverrideMs != 0 ?
+			m_recoverableBackoffOverrideMs : RecoverableFaultBackoffMs(recoverableFaults));
 		recoverableRetryAfter = std::chrono::steady_clock::now() + backoff;
 		if (recoverableFaults == 1)
 			DebugLog::Log(
@@ -1251,6 +1252,9 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 	while (m_captureThreadRunning.load(std::memory_order_acquire))
 	{
 		ULONGLONG notifyStatus = 0;
+		// Post-merge audit 2026-10-17: a signal change the card reported (not the
+		// synthetic 250 ms poll below).
+		bool realSignalChange = false;
 		const DWORD waitResult = WaitForSingleObject(notifyEvent, 100);
 		if (waitResult == WAIT_TIMEOUT)
 		{
@@ -1272,6 +1276,8 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 			notifyFailures = 0;
 			if (notifyStatus & MWCAP_NOTIFY_VIDEO_FRAME_BUFFERED)
 				lastFrameNotification = std::chrono::steady_clock::now();
+			realSignalChange = (notifyStatus &
+				(MWCAP_NOTIFY_VIDEO_SIGNAL_CHANGE | MWCAP_NOTIFY_INPUT_SPECIFIC_CHANGE)) != 0;
 		}
 
 		const bool formatEvent = (notifyStatus & (
@@ -1283,9 +1289,10 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		// audit 2026-10-16: set when this pass stopped/reconfigured capture, so
 		// a FRAME_BUFFERED bit in the same notification refers to the old stream.
 		bool captureReconfigured = false;
-		// Bug hunt 2026-10-17: hold off after a recoverable fault.
-		if (!haveState && recoverableFaults > 0 &&
-			std::chrono::steady_clock::now() < recoverableRetryAfter)
+		// Bug hunt 2026-10-17: hold off after a recoverable fault - but never
+		// past a real signal change (post-merge audit 2026-10-17).
+		if (RecoverableHoldOff(haveState, recoverableFaults, realSignalChange,
+			std::chrono::steady_clock::now(), recoverableRetryAfter))
 			continue;
 		if (formatEvent || !haveState)
 		{
@@ -1304,6 +1311,16 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 				continue;
 			}
 			signalFailures = 0;
+			// Post-merge audit 2026-10-17: unlocked -> locked is a new source; its
+			// faults start again from the shortest back-off.
+			if (signal.locked && lastSignalLock == 0 && recoverableFaults > 0)
+			{
+				DebugLog::Log("Magewell: signal locked again; recoverable fault back-off reset (%u fault(s))",
+					recoverableFaults);
+				recoverableFaults = 0;
+				recoverableRetryAfter = std::chrono::steady_clock::time_point();
+			}
+			lastSignalLock = signal.locked ? 1 : 0;
 
 			if (!haveCardState || !signal.SameFormatAs(current))
 			{
@@ -1895,6 +1912,12 @@ bool MagewellCaptureDevice::RecoverFaults()
 
 // Bug hunt 2026-10-17: delay before the device restart after recoverable fault
 // number `consecutiveFaults` (1-based): 250 ms doubling, capped at 30 s.
+bool MagewellCaptureDevice::RecoverableHoldOff(bool haveState, uint32_t consecutiveFaults, bool realSignalChange,
+	std::chrono::steady_clock::time_point now, std::chrono::steady_clock::time_point retryAfter)
+{
+	return !haveState && consecutiveFaults > 0 && !realSignalChange && now < retryAfter;
+}
+
 uint32_t MagewellCaptureDevice::RecoverableFaultBackoffMs(uint32_t consecutiveFaults)
 {
 	const uint32_t shift = consecutiveFaults == 0 ? 0 :

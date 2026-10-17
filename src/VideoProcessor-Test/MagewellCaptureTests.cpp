@@ -69,6 +69,10 @@ public:
 	{
 		device.m_memoryBudget = std::make_shared<MagewellCaptureMemoryBudget>(bytes);
 	}
+	static void SetRecoverableBackoff(MagewellCaptureDevice& device, uint32_t ms)
+	{
+		device.m_recoverableBackoffOverrideMs = ms;
+	}
 	static bool ReadFormat(MagewellCaptureDevice& device, BYTE& depth,
 		int& sampling, VideoFrameEncoding& encoding)
 	{
@@ -100,6 +104,7 @@ namespace Tests
 		std::atomic_bool streamFrames{ false };
 		std::atomic_bool formatEventPending{ false };
 		std::atomic<int> signalMode{ 0 }; // YUV, RGB12, invalid geometry, SDI RGB, unsupported RGB16.
+		std::atomic_bool signalUnlocked{ false };   // post-merge audit 2026-10-17: no lock
 		std::atomic<int> sdiDepth{ SDI_BIT_DEPTH_10BIT };
 		std::atomic_bool failCopies{ false };
 		HANDLE fakeNotifyEvent = nullptr;
@@ -321,7 +326,7 @@ namespace Tests
 		MW_RESULT FakeSignal(HCHANNEL, MWCAP_VIDEO_SIGNAL_STATUS* signal)
 		{
 			*signal = {};
-			signal->state = MWCAP_VIDEO_SIGNAL_LOCKED;
+			signal->state = signalUnlocked ? MWCAP_VIDEO_SIGNAL_NONE : MWCAP_VIDEO_SIGNAL_LOCKED;
 			signal->cx = 102;
 			signal->cy = 100;
 			signal->dwFrameDuration = 166667;
@@ -577,6 +582,7 @@ namespace Tests
 			stopCalls = unregisterCalls = notifyReads = startCalls = closeCalls = 0;
 			fakeDeviceTime = 1000000;
 			failDeviceTime = failOpen = streamFrames = formatEventPending = failCopies = false;
+			signalUnlocked = false;
 			selectedInput = 0;
 			scanEnabled = true;
 			signalMode = 0;
@@ -721,6 +727,71 @@ namespace Tests
 			Assert::IsTrue(recovered);
 			Assert::AreEqual(2, callback.validStates);
 			Assert::AreEqual(1, callback.invalidStates);
+		}
+
+		// Post-merge audit 2026-10-17: the recoverable-fault hold-off never delays a
+		// real signal change; unlocked -> locked resets the back-off.
+		TEST_METHOD(RecoverableHoldOffSkipsOnlyForARealSignalChange)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const auto later = now + std::chrono::seconds(30);
+			Assert::IsTrue(MagewellCaptureDevice::RecoverableHoldOff(false, 3, false, now, later), L"the poll waits");
+			Assert::IsFalse(MagewellCaptureDevice::RecoverableHoldOff(false, 3, true, now, later), L"a real change does not");
+			Assert::IsFalse(MagewellCaptureDevice::RecoverableHoldOff(false, 0, false, now, later), L"no fault");
+			Assert::IsFalse(MagewellCaptureDevice::RecoverableHoldOff(true, 3, false, now, later), L"capturing");
+			Assert::IsFalse(MagewellCaptureDevice::RecoverableHoldOff(false, 3, false, later, now), L"back-off over");
+		}
+
+		TEST_METHOD(SignalChangeDuringTheFaultHoldOffRestartsAtOnce)
+		{
+			QueueCallback callback;
+			const auto sdk = MagewellSdkTestAccess::Create(CaptureApi());
+			MWCAP_CHANNEL_INFO info = {};
+			MagewellCaptureDevice device(sdk, L"fake", info, TEXT("fake"));
+			MagewellCaptureTestAccess::SetRecoverableBackoff(device, 30000);   // the 30 s cap at once
+			device.SetCallbackHandler(&callback);
+			device.StartCapture(1);  // one frame, then the fake goes silent
+			const bool first = callback.Wait([&]() { return !callback.frames.empty(); });
+			// The stall fault (about 2 s): then the 30 s hold-off.
+			bool faulted = false;
+			const ULONGLONG faultUntil = GetTickCount64() + 5000;
+			while (!faulted && GetTickCount64() < faultUntil)
+			{
+				Sleep(50);
+				std::lock_guard<std::mutex> lock(callback.mutex);
+				faulted = callback.invalidStates > 0;
+			}
+			Sleep(300);
+			size_t framesBefore = 0;
+			{
+				std::lock_guard<std::mutex> lock(callback.mutex);
+				framesBefore = callback.frames.size();
+			}
+			// The source drops out and comes back: two real signal-change notifications.
+			signalUnlocked = true;
+			formatEventPending = true;
+			SetEvent(fakeNotifyEvent);
+			Sleep(300);
+			signalUnlocked = false;
+			formatEventPending = true;
+			streamFrames = true;
+			SetEvent(fakeNotifyEvent);
+			const ULONGLONG start = GetTickCount64();
+			bool recovered = false;
+			while (!recovered && GetTickCount64() < start + 5000)
+			{
+				Sleep(50);
+				SetEvent(fakeNotifyEvent);
+				std::lock_guard<std::mutex> lock(callback.mutex);
+				recovered = callback.validStates >= 2 && callback.frames.size() > framesBefore;
+			}
+			const ULONGLONG took = GetTickCount64() - start;
+			device.StopCapture();
+			device.SetCallbackHandler(nullptr);
+			Assert::IsTrue(first);
+			Assert::IsTrue(faulted, L"the stall fault happened");
+			Assert::IsTrue(recovered, (L"capture restarted within 5 s of the lock, not after the 30 s hold-off (" +
+				std::to_wstring(took) + L" ms)").c_str());
 		}
 
 		TEST_METHOD(SdiRgbDepthSelectsNativeFormatsAndConvertsTwelveBit)

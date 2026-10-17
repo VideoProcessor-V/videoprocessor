@@ -10,6 +10,7 @@
 
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -166,17 +167,23 @@ public:
 		int64_t currentStart100ns, uint32_t framePeriod100ns,
 		uint64_t maxGapFrames = 1000);
 
-	// audit 2026-10-16: CTA-861.3 numbers display primaries 0..2 without
-	// naming them (ST 2086 commonly sends G,B,R). Assign by chromaticity:
-	// largest x is red, largest y of the remaining two is green, the last is
-	// blue. Outputs the source index of each primary.
 	// Bug hunt 2026-10-17: restart delay after recoverable capture fault
 	// number consecutiveFaults (1-based): 250 ms doubling, capped at 30 s.
 	static uint32_t RecoverableFaultBackoffMs(uint32_t consecutiveFaults);
+	// Post-merge audit 2026-10-17: whether the capture loop waits out the
+	// recoverable-fault back-off now. A real signal-change notification (not the
+	// synthetic 250 ms poll) is never held off: the source changed, so the
+	// restart is tried at once.
+	static bool RecoverableHoldOff(bool haveState, uint32_t consecutiveFaults, bool realSignalChange,
+		std::chrono::steady_clock::time_point now, std::chrono::steady_clock::time_point retryAfter);
 	// magewell_recover_faults (restore switch, default on); see MagewellBackend.h.
 	static void SetRecoverFaults(bool on);
 	static bool RecoverFaults();
 
+	// audit 2026-10-16: CTA-861.3 numbers display primaries 0..2 without
+	// naming them (ST 2086 commonly sends G,B,R). Assign by chromaticity:
+	// largest x is red, largest y of the remaining two is green, the last is
+	// blue. Outputs the source index of each primary.
 	static void OrderPrimariesByChromaticity(const double x[3], const double y[3],
 		int& redIndex, int& greenIndex, int& blueIndex);
 
@@ -294,6 +301,9 @@ private:
 	// format change or Stop. This cap applies only to Magewell capture memory.
 	std::shared_ptr<MagewellCaptureMemoryBudget> m_memoryBudget =
 		std::make_shared<MagewellCaptureMemoryBudget>(1024ULL * 1024 * 1024);
+	// Tests only (MagewellCaptureTestAccess): a fixed recoverable-fault back-off
+	// in place of RecoverableFaultBackoffMs; 0 = the real one.
+	uint32_t m_recoverableBackoffOverrideMs = 0;
 
 	std::atomic<CaptureDeviceState> m_state{
 		CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN };
