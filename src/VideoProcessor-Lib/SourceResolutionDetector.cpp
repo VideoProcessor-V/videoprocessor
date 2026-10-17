@@ -342,20 +342,43 @@ namespace SourceResolution
 			}
 		out.bandEdgesRobust = robustEdges;
 		std::vector<double> stepsH(static_cast<size_t>(n - 1), 0.0), stepsV(static_cast<size_t>(n - 1), 0.0);
+		double signedH = 0.0, signedV = 0.0;
 		for (int y = 0; y < n; ++y)
 			for (int x = 0; x + 1 < n; ++x)
 			{
-				stepsH[static_cast<size_t>(x)] += std::abs(c[static_cast<size_t>(y) * n + x + 1] - c[static_cast<size_t>(y) * n + x]);
-				stepsV[static_cast<size_t>(x)] += std::abs(c[static_cast<size_t>(x + 1) * n + y] - c[static_cast<size_t>(x) * n + y]);
+			{
+				const int dh = c[static_cast<size_t>(y) * n + x + 1] - c[static_cast<size_t>(y) * n + x];
+				const int dv = c[static_cast<size_t>(x + 1) * n + y] - c[static_cast<size_t>(x) * n + y];
+				stepsH[static_cast<size_t>(x)] += std::abs(dh);
+				stepsV[static_cast<size_t>(x)] += std::abs(dv);
+				signedH += dh;
+				signedV += dv;
+			}
 			}
 		for (int x = 0; x + 1 < n; ++x) { stepsH[static_cast<size_t>(x)] /= n; stepsV[static_cast<size_t>(x)] /= n; }
 		double periodH = 0.0, periodV = 0.0;
 		const double gridH = GridBlockiness(stepsH, periodH), gridV = GridBlockiness(stepsV, periodV);
-		// Both axes: a coded picture is blocked both ways, while the quantisation steps of a
-		// slow gradient along one axis repeat at a fixed period too (a step every 1 / slope
-		// px) but only across that axis - those are bands, counted below, not blocking.
-		out.blockinessRobust = (std::min)(gridH, gridV);
-		out.blockPeriod = gridH >= gridV ? periodH : periodV;
+		// The stronger axis: a coded gradient shows its block edges only across the gradient
+		// (hunt 2 lead sweep; the minimum of both axes missed 2x-upscaled grids). The
+		// quantisation staircase of a slow gradient repeats at a fixed period too (a step every
+		// 1 / slope px), but it is flat between its steps (the median step is zero) and every
+		// step has the same sign; such an axis is bands (counted below), not blocking. Coded
+		// gradients change between the edges, and flat coded blocks step both ways.
+		auto staircase = [&](const std::vector<double>& steps, double signedSum) {
+			double total = 0.0;
+			for (double v : steps) total += v;
+			if (total <= 0.0) return false;
+			std::vector<double> sorted(steps);
+			std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+			const double median = sorted[sorted.size() / 2];
+			const double meanStep = total / steps.size();
+			const double coherence = std::fabs(signedSum) / (total * n);
+			return median <= 0.1 * meanStep && coherence > 0.9;
+		};
+		const double usedH = staircase(stepsH, signedH) ? 1.0 : gridH;
+		const double usedV = staircase(stepsV, signedV) ? 1.0 : gridV;
+		out.blockinessRobust = (std::max)(usedH, usedV);
+		out.blockPeriod = usedH >= usedV ? periodH : periodV;
 	}
 
 	namespace
@@ -429,9 +452,10 @@ namespace SourceResolution
 				{
 					double win = 0.0;
 					if (!window(b, W, win) || win <= 0.0) continue;
-					// A narrow boundary: the bins either side are near the inner level.
+					// A narrow boundary: the bins either side hold at most half of it (an upscaler's
+					// overshoot lobes sit beside a spread step; hunt 2 lead sweep, was a quarter).
 					const double side = (std::max)(ex[static_cast<size_t>((b - 1 + B) % B)], ex[static_cast<size_t>((b + W) % B)]);
-					if (side > 0.25 * win) continue;
+					if (side > 0.5 * win) continue;
 					// Against the best other phase (no overlap).
 					double other = 0.0;
 					for (int b2 = 0; b2 < B; ++b2)
