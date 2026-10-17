@@ -50,6 +50,7 @@
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
+#include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/OcclusionMaskHook.h>
@@ -983,6 +984,10 @@ namespace
 		// Roadmap item 2 (owner 2026-10-15, on): DeckLink R12B/R12L/r210 as
 		// native RGB (GpuRgbUnpack) instead of the CPU's 10-bit 4:2:0 P010.
 		bool nativeRgbIngest = true;
+		// DV extension item 7 (owner 2026-10-16, off until validated): the
+		// Dolby Vision tunnel's picture unpacked on the GPU; the CPU keeps the
+		// DM packet (its pixels only). A failed unpack falls back to the CPU.
+		bool dvTunnelGpuUnpack = false;
 		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
 		// signal by repeated frames is found and shown at its film rate.
 		bool dejudderPulldown = false;
@@ -1238,7 +1243,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|'
+			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2361,6 +2366,7 @@ namespace
 			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown),
 			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame),
 			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
+			std::make_pair("dv_tunnel_gpu_unpack", &settings.dvTunnelGpuUnpack),
 			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
 			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
 			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
@@ -4672,6 +4678,12 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
+	// dv_tunnel_gpu_unpack: the conversion thread reads the two flags; a
+	// failed unpack turns the session back to the CPU unpack (logged once).
+	std::atomic<bool> dvGpuWanted{ false };
+	std::atomic<bool> dvGpuFailed{ false };
+	std::unique_ptr<GpuDolbyVisionTunnelUnpack> dvUnpack;
+	bool dvGpuLogged = false;
 	// Stage 12 step A: the re-base of the source to its class height.
 	SourceRebase::Module sourceRebase;
 	pl_dispatch rebaseDispatch = nullptr;
@@ -4734,6 +4746,67 @@ struct LibplaceboVideoRenderer::Impl
 				rgbUnpack->Error().c_str());
 		return false;
 	}
+	// dv_tunnel_gpu_unpack: the CPU unpack of a tunnel picture handed on raw
+	// whose GPU unpack failed (the formatter's rows, single-threaded), into
+	// pixels in its P216 layout; false when the formatter no longer has the
+	// frame's geometry.
+	std::vector<BYTE> dvFallbackPixels;
+	bool UnpackDolbyVisionOnCpu(const QueuedFrame::ConvertedPayload& payload, int width, int height, std::vector<BYTE>& pixels)
+	{
+		if (!payload.Raw() || !payload.dvTunnelRaw || width <= 0 || height <= 0 ||
+			payload.rawRowBytes < static_cast<size_t>(width) * 4 ||
+			payload.rawBytes < payload.rawRowBytes * static_cast<size_t>(height))
+			return false;
+		std::lock_guard<std::mutex> formatterGuard(formatterMutex);
+		auto* dv = dynamic_cast<CR210DolbyVisionTunnelFormatter*>(formatter.get());
+		const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+		if (!dv || !formatterState || !formatterState->displayMode ||
+			formatterState->videoFrameEncoding != payload.rawEncoding ||
+			static_cast<size_t>(dv->GetOutFrameSize()) != bytes ||
+			static_cast<size_t>(formatterState->BytesPerRow()) != payload.rawRowBytes)
+			return false;
+		pixels.resize(bytes);
+		return dv->UnpackPicture(payload.rawFrame->GetData(), pixels.data(), payload.dvTunnelHighAligned);
+	}
+	// dv_tunnel_gpu_unpack: a Dolby Vision tunnel picture's planes (the CPU
+	// formatter's, exactly) unpacked on the GPU, or false (and the session back
+	// to the CPU unpack, logged once) when it fails.
+	bool UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
+		bool sessionFallback)
+	{
+		if (!dvUnpack)
+			dvUnpack = std::make_unique<GpuDolbyVisionTunnelUnpack>(log, d3d11->gpu);
+		SyncEarlyUpload();
+		EarlyUpload::Slot* slot = nullptr;
+		const pl_tex early = EarlyTexture(payload, slot);
+		bool unpacked = dvUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+			payload.dvTunnelHighAligned, planes, early);
+		if (slot)
+			earlyUpload->Used(*slot);
+		if (!unpacked && early)   // the early texture refused: the frame itself
+			unpacked = dvUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+				payload.dvTunnelHighAligned, planes);
+		if (unpacked)
+		{
+			if (!dvGpuLogged)
+			{
+				DebugLog::Log("Dolby Vision RGB tunnel: picture unpacked on the GPU to 12-bit 4:2:2 (%dx%d, RGB8 %s; the CPU reads only the DM packet)",
+					width, height, payload.dvTunnelHighAligned ? "high8" : "low8");
+				dvGpuLogged = true;
+			}
+			return true;
+		}
+		if (!sessionFallback)
+		{
+			DebugLog::Log("Dolby Vision RGB tunnel: a de-judder frame's GPU unpack failed (%s); that frame skipped",
+				dvUnpack->Error().c_str());
+			return false;
+		}
+		if (!dvGpuFailed.exchange(true))
+			DebugLog::Log("Dolby Vision RGB tunnel: the GPU unpack failed (%s); the CPU unpack for the rest of the session",
+				dvUnpack->Error().c_str());
+		return false;
+	}
 	// The planes of a raw payload: the GPU unpack, or false (and the session
 	// back to the CPU path) when it fails.
 	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
@@ -4741,6 +4814,8 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		if (!payload.Raw() || !d3d11)
 			return false;
+		if (payload.dvTunnelRaw)
+			return UnpackDolbyVisionPayload(payload, width, height, planes, sessionFallback);
 		if (!captureUnpack)
 			captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
 		SyncEarlyUpload();
@@ -5990,6 +6065,7 @@ struct LibplaceboVideoRenderer::Impl
 					pl_tex_destroy(d3d11->gpu, &texture);
 				captureUnpack.reset();   // its textures and dispatch, before the device
 				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
+				dvUnpack.reset();        // and the Dolby Vision tunnel unpack
 				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
 				if (earlyUpload->IsOpen())
 				{
@@ -8672,6 +8748,7 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
+		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
 		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
@@ -8978,12 +9055,16 @@ struct LibplaceboVideoRenderer::Impl
 		const bool rgbUnpack = !overridden && settings.nativeRgbIngest && GpuRgbUnpack::Supports(e) &&
 			(!r12 || (state->displayMode && state->displayMode->FrameWidth() % 8 == 0));
 		const bool yuv422 = e == VideoFrameEncoding::V210 || e == VideoFrameEncoding::UYVY || e == VideoFrameEncoding::HDYC;
-		std::string route = state->dolbyVisionTunnel ? "Dolby Vision 12-bit 4:2:2" :
+		const bool dvGpu = state->dolbyVisionTunnel && settings.dvTunnelGpuUnpack && !overridden &&
+			GpuDolbyVisionTunnelUnpack::Supports(e);
+		std::string route = state->dolbyVisionTunnel ? (dvGpu ? "Dolby Vision 12-bit 4:2:2 (GPU unpack; DM packet on the CPU)" :
+			"Dolby Vision 12-bit 4:2:2 (CPU unpack)") :
 			overridden ? "P010 (forced, CPU)" :
 			rgbUnpack ? "native RGB 4:4:4 (GPU unpack)" :
 			IsNativeRgbUpload(e, videoConversionOverride) ? "native RGB (libplacebo upload)" :
 			yuv422 ? (settings.capturePath == "gpu" ? "lossless P210 (GPU unpack)" : "lossless P210 (CPU)") : "P010 (CPU)";
-		if ((rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)) && EarlyActive())
+		if ((dvGpu || (!state->dolbyVisionTunnel && (rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)))) &&
+			EarlyActive())
 			route += ", uploaded early";
 		std::string gpuName = "unknown GPU";
 		{
@@ -9347,6 +9428,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.fixSceneCooldown != next.fixSceneCooldown, "fix_scene_cooldown");
 		changed(current.ditherVectorsNewFrame != next.ditherVectorsNewFrame, "dither_vectors_new_frame");
 		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
+		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
 			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
@@ -9550,6 +9632,10 @@ struct LibplaceboVideoRenderer::Impl
             input.convertedOwner = converted;
             input.convertedContract = converted->contract;
             input.dolby = converted->dolby;
+            // dv_tunnel_gpu_unpack: the planes are on the GPU; the analysis
+            // samples the raw frame with the planes' RGB8 placement.
+            if (converted->dvTunnelRaw)
+                input.dolbyTunnelPackedAlignment = converted->dvTunnelHighAligned ? 1 : 2;
         }
         auto prepared = PrepareAnalysisFrame(input);
         if (!prepared.IsValid()) return {}; // Pending conversion is never cached as evidence.
@@ -9749,6 +9835,7 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings = settings;
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
+		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
 		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
@@ -12753,6 +12840,7 @@ struct LibplaceboVideoRenderer::Impl
 		in.nextMatches = next && current &&
 			next->Bytes() == current->Bytes() && next->Raw() == current->Raw() &&
 			(!next->Raw() || next->rawEncoding == current->rawEncoding) &&
+			next->dvTunnelRaw == current->dvTunnelRaw &&
 			next->contract.sampleRange == contract.sampleRange &&
 			next->contract.colorDepth == contract.colorDepth &&
 			next->contract.bitShift == contract.bitShift;
@@ -12892,7 +12980,7 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		// native_rgb_ingest: an RGB raw frame gives the matcher its luma only
 		// (dst[0]; dst[1] untouched), unpacked as the frame A was.
-		if (payload.Raw() && GpuRgbUnpack::Supports(payload.rawEncoding))
+		if (payload.Raw() && !payload.dvTunnelRaw && GpuRgbUnpack::Supports(payload.rawEncoding))
 		{
 			if (!l.raw || !l.rgb || payload.rawEncoding != l.rawEncoding || !d3d11)
 				return false;
@@ -14940,11 +15028,22 @@ struct LibplaceboVideoRenderer::Impl
 			frameGpuTiming.BeginStage(
 				AlphaD3D11FrameGpuTimer::Stage::SourceUpload);
 			bool sourceUploaded = true;
+			// dv_tunnel_gpu_unpack: a failed GPU unpack of a tunnel picture
+			// already handed on raw is unpacked on the CPU here (the formatter's
+			// own rows), so the picture is still shown exactly.
+			bool dvCpuFallback = false;
 			if (convertedPayload->Raw())
 			{
 				// capture_path: gpu: the raw frame up as it is, unpacked into
 				// the same two planes.
 				sourceUploaded = UnpackRawPayload(*convertedPayload, width, height, textures);
+				if (!sourceUploaded && convertedPayload->dvTunnelRaw &&
+					UnpackDolbyVisionOnCpu(*convertedPayload, width, height, dvFallbackPixels))
+				{
+					planes[0].pixels = dvFallbackPixels.data();
+					planes[1].pixels = dvFallbackPixels.data() + p010RowBytes * static_cast<size_t>(height);
+					dvCpuFallback = true;
+				}
 				if (sourceUploaded)
 				{
 					image.planes[0] = pl_plane{};
@@ -14960,7 +15059,7 @@ struct LibplaceboVideoRenderer::Impl
 						image.planes[plane].flipped = state.invertedVertical;
 				}
 			}
-			else
+			if (!convertedPayload->Raw() || dvCpuFallback)
 				for (int plane = 0; plane < 2; ++plane)
 				{
 					sourceUploaded = pl_upload_plane(d3d11->gpu,
@@ -14985,7 +15084,10 @@ struct LibplaceboVideoRenderer::Impl
 				switch (state.videoFrameEncoding)
 				{
 				case VideoFrameEncoding::R210:
-					setIngressStatus("Dolby Vision RGB tunnel (12-bit 4:2:2)");
+				case VideoFrameEncoding::R10b:
+				case VideoFrameEncoding::R10l:
+					setIngressStatus(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
+						"Dolby Vision RGB tunnel (12-bit 4:2:2)");
 					break;
 				case VideoFrameEncoding::V210:
 					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
@@ -24034,22 +24136,9 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
 				((state->videoFrameEncoding != VideoFrameEncoding::R12B && state->videoFrameEncoding != VideoFrameEncoding::R12L) ||
 					state->displayMode->FrameWidth() % 8 == 0);
-			// libplacebo's native upload (ARGB / BGRA with native_rgb_ingest off):
-			// no conversion. The frame is marked prepared with an empty payload
-			// (the queue waits for one now that these encodings have a
-			// formatter; the native upload reads the frame itself).
-			if (!rgbRaw && IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride))
-			{
-				converted = std::make_shared<QueuedFrame::ConvertedPayload>();
-				converted->contract.sampleRange = VideoFrameSampleRange::FULL;
-				converted->contract.colorDepth = 8;
-				converted->contract.bitShift = 0;
-			}
-			else if (rgbRaw ||
-				(m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuCaptureUnpack::Supports(state->videoFrameEncoding)))
+			// The raw frame held for the render's GPU unpack (capture_path gpu,
+			// native_rgb_ingest, dv_tunnel_gpu_unpack).
+			auto makeRaw = [&]()
 			{
 				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
 				frame.SourceBufferAddRef();   // released with the payload
@@ -24077,6 +24166,35 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				if (m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() && state->displayMode)
 					raw->early = m_impl->earlyUpload->Upload(raw->rawFrame->GetData(), raw->rawRowBytes,
 						static_cast<int>(state->displayMode->FrameHeight()));
+				return raw;
+			};
+			// dv_tunnel_gpu_unpack: the DV formatter finds and checks the DM
+			// packet (its pixels only); the picture goes on raw and the render
+			// unpacks it on the GPU. Off, an override or a failed unpack this
+			// session: the CPU unpack.
+			const bool dvRaw = state->dolbyVisionTunnel &&
+				m_impl->dvGpuWanted.load(std::memory_order_acquire) &&
+				!m_impl->dvGpuFailed.load(std::memory_order_acquire) &&
+				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
+				GpuDolbyVisionTunnelUnpack::Supports(state->videoFrameEncoding) && state->displayMode;
+			// libplacebo's native upload (ARGB / BGRA with native_rgb_ingest off):
+			// no conversion. The frame is marked prepared with an empty payload
+			// (the queue waits for one now that these encodings have a
+			// formatter; the native upload reads the frame itself).
+			if (!rgbRaw && IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride))
+			{
+				converted = std::make_shared<QueuedFrame::ConvertedPayload>();
+				converted->contract.sampleRange = VideoFrameSampleRange::FULL;
+				converted->contract.colorDepth = 8;
+				converted->contract.bitShift = 0;
+			}
+			else if (rgbRaw ||
+				(m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
+				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
+				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
+				GpuCaptureUnpack::Supports(state->videoFrameEncoding)))
+			{
+				auto raw = makeRaw();
 				if (rgbRaw)
 				{
 					raw->contract.sampleRange = GpuRgbUnpack::FullRange(state->videoFrameEncoding) ?
@@ -24087,6 +24205,51 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				else
 					raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
 				converted = raw;
+			}
+			else if (dvRaw)
+			{
+				CR210DolbyVisionTunnelFormatter::FrameResult result = CR210DolbyVisionTunnelFormatter::FrameResult::REJECTED;
+				bool highAligned = false;
+				LONG byteCount = 0;
+				VideoFrameFormatterOutputContract contract;
+				DolbyVisionTunnelFrameMetadata dolby;
+				{
+					std::lock_guard<std::mutex> formatterGuard(m_impl->formatterMutex);
+					if (!m_impl->formatterState ||
+						m_impl->formatterState->colorspace != state->colorspace)
+					{
+						m_impl->formatter->OnVideoState(state);
+						m_impl->formatterState = state;
+					}
+					auto* dv = dynamic_cast<CR210DolbyVisionTunnelFormatter*>(m_impl->formatter.get());
+					if (!dv)
+						throw std::runtime_error("Dolby Vision tunnel formatter unavailable");
+					byteCount = dv->GetOutFrameSize();
+					if (byteCount <= 0)
+						throw std::runtime_error("formatter returned an empty frame size");
+					result = dv->AnalyzeFrame(frame);
+					if (result == CR210DolbyVisionTunnelFormatter::FrameResult::REJECTED)
+						throw std::runtime_error("frame conversion failed");
+					highAligned = dv->PlanesHighAligned();
+					contract = dv->GetOutputContract();
+					dolby = dv->GetDolbyVisionTunnelMetadata();
+				}
+				if (result == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE)
+				{
+					auto raw = makeRaw();
+					raw->dvTunnelRaw = true;
+					raw->dvTunnelHighAligned = highAligned;
+					converted = raw;
+				}
+				else
+				{
+					// No lock / no valid DM: the CPU path's zero planes (the render
+					// presents black or the SDR RGB passthrough; never these bytes).
+					converted = AcquireConversionPayload();
+					converted->pixels.assign(static_cast<size_t>(byteCount), 0);
+				}
+				converted->contract = contract;
+				converted->dolby = dolby;
 			}
 			else
 			{
@@ -25614,6 +25777,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "fix_scene_cooldown=" << s.fixSceneCooldown << "\n"
 		<< "dither_vectors_new_frame=" << s.ditherVectorsNewFrame << "\n"
 		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
+		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"

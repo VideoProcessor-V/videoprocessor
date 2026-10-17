@@ -165,6 +165,12 @@ private:
 			// capture_upload: early - the raw frame already uploaded on the
 			// conversion thread (an EarlyUpload::Slot; null: the render uploads).
 			std::shared_ptr<void> early;
+			// dv_tunnel_gpu_unpack: the raw frame is a Dolby Vision tunnel
+			// picture (dolby holds its checked DM); the render unpacks it with
+			// GpuDolbyVisionTunnelUnpack, RGB8 in the high (true) or low eight
+			// bits of the r210 channels.
+			bool dvTunnelRaw = false;
+			bool dvTunnelHighAligned = false;
 			bool Raw() const { return rawFrame != nullptr; }
 			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};
