@@ -10,11 +10,34 @@ way madVR is used: the player keeps its graph and VP does the rendering.
 | | |
 |---|---|
 | Merged and wired | Sub-branches A, B, C, D and F are merged into one branch. The filter now uses C's timing helpers, F's side-data parsers and D's FileHost. |
-| Built locally | The filter project. |
+| Built locally | Filter, test, Config tests and both renderer DLLs. Full CPU and Qt config suites pass apart from the one known GPU-bound test (see Local verification). |
 | Verified by CI | Each part built in the cloud on its own branch. The fully integrated branch has **not** had a complete CI run. |
 | Last complete integrated run | `39067602414`. Everything compiled except one line in the new graph test. That line is fixed in `dac27183`. |
 | Blocked | The run for `dac27183` (`39068830686`) was in progress when GitHub began answering every call with **"Sorry. Your account was suspended" (HTTP 403)**, at about 21:35 UTC. Since then nothing can be read from or pushed to the fork. |
 | Not on the fork | Local commit `2022309d`, the LED guard (it reached the fork only on the temporary `feat/vp-renderer-filter-next` branch, whose run was cancelled), and this report. |
+
+## Local verification (substitute for CI, 2026-10-17 evening)
+
+All builds were x64 Release with `VpCiNoMagewell=true`, run in CPU slot 1 one at a time with `/m:4 CL_MPCount=2`. All tests ran in a single process, off screen, with the GPU environment variables cleared.
+
+**Builds** (all succeeded):
+
+| Project | Time |
+|---|---|
+| VideoProcessor-VPRendererFilter (`VPRendererFilter.ax`) | 1 min |
+| VideoProcessor-Test, with its references | 7 min |
+| VideoProcessor-ConfigTests | 1 min |
+| VideoProcessor-VPRenderer | 1 min |
+| VideoProcessor-VPRendererBeta | 2 min |
+
+**CPU tests** (vstest on `VideoProcessor-Test.dll`, excluding `RendererCaptureHarnessTests`, 40 min): **3228 run, 3227 passed.**
+- The one failure is `RendererMetadataCyclesReuseAcceptedSnapshotWithoutDiskReads`, one of the four known hardware-bound tests. It was not rerun after the renderer DLL was built, because it opens the GPU renderer.
+- The graph test passed with its `SKIP-NO-GPU` marker.
+
+**Qt config tests** (`run_config_tests.ps1 -Shards 1`, off screen, 14 min): **139 passed in the end.**
+- On the first pass, 138 passed and `config keys activate the renderer and matcher settings` failed because the renderer DLL had not been built yet.
+- That test passes after building the DLL.
+- This includes `file playback controls validate, reset and save` and `every schema key has a Config control`.
 
 ## What was built
 
