@@ -7,9 +7,10 @@ name: ci-windows
 #  - Built with /p:VpCiNoMagewell=true: the proprietary MWCapture SDK headers are
 #    not available here, so the Magewell backend compiles to a no-device stub and
 #    its tests are left out. Nothing licensed is downloaded or committed.
-#  - Visual Studio 2022 (runner image) instead of Visual Studio 18 locally. The
-#    projects' own v142/v143 toolsets are used when the image has them (with MFC);
-#    otherwise the job overrides PlatformToolset / WindowsTargetPlatformVersion.
+#  - Visual Studio 18 Enterprise (runner image) vs 18 Community locally. The image
+#    lacks v142 ATL/MFC, which the job installs; the projects' own v142/v143
+#    toolsets are then used. Windows SDK 10.0.19041 is absent, so the job
+#    overrides WindowsTargetPlatformVersion to the newest installed SDK.
 #  - Qt 6.8.3 msvc2022_64 comes from install-qt-action (cached), passed as VP_QT_ROOT.
 #  - Tests: RendererCaptureHarnessTests (GpuHardware / GpuOnScreen) are excluded;
 #    libplacebo tests run on WARP or skip; footage tests skip (no D:\hfr).
@@ -65,6 +66,19 @@ jobs:
           Write-Host "MSVC tools: $($msvc -join ', ')"
           $mfc142 = @(Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*\atlmfc\lib\x64\mfc140u.lib') -ErrorAction SilentlyContinue).Count -gt 0
           Write-Host "v142 (14.29) MFC present: $mfc142"
+          if (($toolsets -contains 'v142') -and -not $mfc142) {
+            # The image has the v142 compiler but not its ATL/MFC; the MFC projects (Lib, GUI,
+            # renderers, tests) target v142 as locally, so add the same two components.
+            Write-Host "Installing v142 ATL/MFC (14.29) components"
+            $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
+            $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @('modify', '--installPath', "`"$vs`"",
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL',
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.MFC',
+              '--quiet', '--norestart', '--nocache')
+            Write-Host "vs_installer exit $($p.ExitCode)"
+            $mfc142 = @(Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*\atlmfc\lib\x64\mfc140u.lib') -ErrorAction SilentlyContinue).Count -gt 0
+            Write-Host "v142 (14.29) MFC present after install: $mfc142"
+          }
           $sdks = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory | ForEach-Object Name | Sort-Object { [version]$_ }
           Write-Host "Windows SDKs: $($sdks -join ', ')"
           $extra = @()
@@ -97,8 +111,11 @@ jobs:
         env:
           VP_QT_ROOT: ${{ env.QT_ROOT_DIR }}
         run: |
+          # tools/record_runtime_requirement.ps1 runs under Windows PowerShell 5.1 after each link;
+          # pwsh's PSModulePath would make it load PowerShell 7 modules (Get-FileHash not found).
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          $extra = '${{ steps.toolchain.outputs.extra }}' -split ' ' | Where-Object { $_ }
+          $extra ='${{ steps.toolchain.outputs.extra }}' -split ' ' | Where-Object { $_ }
           & '${{ steps.toolchain.outputs.msbuild }}' VideoProcessor.sln /t:Build /m /nr:false `
             /p:Configuration=Release /p:Platform=x64 /p:VpCiNoMagewell=true @extra /v:minimal
           $code = $LASTEXITCODE
