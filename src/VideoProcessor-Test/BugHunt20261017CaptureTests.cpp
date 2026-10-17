@@ -190,5 +190,15 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint32_t>(30000, RendererFailureRetryDelayMs(1000));
 			Assert::AreEqual<uint32_t>(10000, ShutdownBlockedRetirementDeadlineMs);
 		}
+
+		// Post-merge audit 2026-10-17: at most 10 automatic attempts, then manual Restart.
+		TEST_METHOD(RendererFailureRetryIsCappedAtTenAttempts)
+		{
+			Assert::AreEqual<uint32_t>(10, RendererFailureRetryMaxAttempts);
+			for (uint32_t made = 0; made < 10; ++made)
+				Assert::IsTrue(RendererFailureRetryAllowed(made));
+			Assert::IsFalse(RendererFailureRetryAllowed(10));
+			Assert::IsFalse(RendererFailureRetryAllowed(11));
+		}
 	};
 }

@@ -9357,6 +9357,20 @@ void CVideoProcessorDlg::HandleRendererFailureFullscreen(const char* site)
 		m_rendererFailureNextRetryTick = 0;
 		return;
 	}
+	if (!RendererFailureRetryAllowed(m_rendererFailureRetryAttempt))
+	{
+		// Post-merge audit 2026-10-17: bounded; Restart Renderer stays available.
+		// Logged once: the count then moves past the cap.
+		if (m_rendererFailureRetryAttempt == RendererFailureRetryMaxAttempts)
+		{
+			DebugLog::Log(
+				"Renderer failure retry stopped: site=%s after %u automatic attempt(s); "
+				"use Restart Renderer", site, m_rendererFailureRetryAttempt);
+			++m_rendererFailureRetryAttempt;
+		}
+		m_rendererFailureNextRetryTick = 0;
+		return;
+	}
 	const uint32_t delayMs =
 		RendererFailureRetryDelayMs(m_rendererFailureRetryAttempt);
 	m_rendererFailureNextRetryTick = GetTickCount64() + delayMs;

@@ -184,6 +184,15 @@ constexpr uint32_t RendererFailureRetryDelayMs(uint32_t attempt)
 		30000u;
 }
 
+// Post-merge audit 2026-10-17: the automatic renderer retry is bounded. After
+// this many attempts it stops (logged once) and leaves Restart Renderer to the
+// operator; a renderer that reaches rendering clears the count.
+constexpr uint32_t RendererFailureRetryMaxAttempts = 10u;
+constexpr bool RendererFailureRetryAllowed(uint32_t attemptsMade)
+{
+	return attemptsMade < RendererFailureRetryMaxAttempts;
+}
+
 // Bug hunt 2026-10-17: how long application shutdown waits for a renderer
 // whose shutdown retirement is retained before it ends the dialog anyway.
 constexpr uint32_t ShutdownBlockedRetirementDeadlineMs = 10000u;
