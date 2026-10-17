@@ -245,6 +245,10 @@
     <ClInclude Include="SceneDescriptor.h" />
     <ClInclude Include="IntentDescriptor.h" />
     <ClInclude Include="FileFrameTiming.h" />
+    <ClInclude Include="filesource\RationalRate.h" />
+    <ClInclude Include="filesource\FileClockMapper.h" />
+    <ClInclude Include="filesource\FilePlaybackState.h" />
+    <ClInclude Include="filesource\FileMediaTypeAdapter.h" />
     <ClInclude Include="ContentClassifier.h" />
     <ClInclude Include="ContentIntentObserver.h" />
     <ClInclude Include="DisplayProfile.h" />
