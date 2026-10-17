@@ -249,6 +249,10 @@ namespace
 		// (GetFrameQueueSize) and its capture-to-output delay (ExitLatencyMs).
 		std::vector<size_t> queueDepths;
 		std::vector<double> exitLatencyMs;
+		// Sampled once per sent frame through the whole run (render-ahead latency trend):
+		// seconds since the start, ExitLatencyMs, the queue depth and the dropped-frame count.
+		struct TrendSample { double seconds; double exitLatencyMs; size_t queueDepth; uint64_t dropped; };
+		std::vector<TrendSample> trend;
 		bool Logged(const std::string& text) const
 		{
 			for (const std::string& line : log)
@@ -737,6 +741,8 @@ namespace
 				}
 				MSG msg;
 				while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+				result.trend.push_back({ std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+					renderer->ExitLatencyMs(), renderer->GetFrameQueueSize(), renderer->DroppedFrameCount() });
 				if (std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(seconds * 0.5))
 				{
 					result.queueDepths.push_back(renderer->GetFrameQueueSize());
@@ -2910,6 +2916,17 @@ namespace Tests
 			// the fullscreen pass, reported separately.
 			int failures = 0;
 			const double runSeconds = seconds > 5.0 ? seconds : 30.0;
+			// VP_TEST_RENDER_AHEAD_CASE: only the cases whose name contains it (diagnostics; a
+			// filtered run is not the gate and says so).
+			std::string caseFilter;
+			{
+				char* cf = nullptr;
+				size_t cfn = 0;
+				if (_dupenv_s(&cf, &cfn, "VP_TEST_RENDER_AHEAD_CASE") == 0 && cf) caseFilter = cf;
+				std::free(cf);
+			}
+			if (!caseFilter.empty())
+				Logger::WriteMessage(("FILTERED RUN (not the gate): cases containing \"" + caseFilter + "\"").c_str());
 			for (const int mode : OnScreenModes())
 			{
 			g_harnessFullscreen = mode;
@@ -2917,10 +2934,41 @@ namespace Tests
 			int modeFailures = 0;
 			for (const Case& c : cases)
 			{
+				if (!caseFilter.empty() && std::string(c.name).find(caseFilter) == std::string::npos)
+					continue;
 				const RunResult r = Run(VideoFrameEncoding::V210, c.path, runSeconds, true, c.extra, true);
+				std::string trendReport;
+				// Latency trend (report): the capture-to-present delay's median per fifth of the run
+				// after the first, the queue depth and the frames dropped in the second half.
+				{
+					std::string trendLine = "   exit latency ms by fifth:";
+					uint64_t droppedMid = 0, droppedEnd = 0;
+					for (int fifth = 1; fifth < 5; ++fifth)
+					{
+						std::vector<double> latency;
+						std::vector<size_t> depth;
+						for (const RunResult::TrendSample& t : r.trend)
+							if (t.seconds >= runSeconds * fifth / 5.0 && t.seconds < runSeconds * (fifth + 1) / 5.0)
+							{
+								latency.push_back(t.exitLatencyMs);
+								depth.push_back(t.queueDepth);
+							}
+						char text[96];
+						sprintf_s(text, " %.1f (queue %.1f)", Median(latency), Median(depth));
+						trendLine += text;
+					}
+					for (const RunResult::TrendSample& t : r.trend)
+					{
+						if (t.seconds < runSeconds * 0.5) droppedMid = t.dropped;
+						droppedEnd = t.dropped;
+					}
+					trendReport = trendLine + "; dropped frames, second half " + std::to_string(droppedEnd - droppedMid) +
+						" (total " + std::to_string(droppedEnd) + ")";
+				}
 				Logger::WriteMessage((std::string("== [") + modeName + "] " + c.name + ": presented " + (r.presented ? "yes" : "NO")).c_str());
 				Logger::WriteMessage(("   de-judder: " + r.dejudderStatus).c_str());
 				Logger::WriteMessage(("   presentation: " + r.presentationStatus).c_str());
+				Logger::WriteMessage(trendReport.c_str());
 				std::string lastRenderAhead;
 				int gateChanges = 0, renderAheadLines = 0, renderFailures = 0;
 				for (const std::string& line : r.log)

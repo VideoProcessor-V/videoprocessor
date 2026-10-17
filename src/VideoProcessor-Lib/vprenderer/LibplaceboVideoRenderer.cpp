@@ -5290,6 +5290,7 @@ struct LibplaceboVideoRenderer::Impl
 	double openLoopDisplayConfigHz = 0.0, openLoopModeIntegerHz = 0.0;
 	OpenLoopDisplayRate::VBlankCadence openLoopCadence;
 	unsigned long long renderAheadOpenLoopFrames = 0, renderAheadLateByPresent = 0;
+	unsigned long long renderAheadFlushReanchors = 0;   // new anchors after a backlog flush
 	bool renderAheadOpenLoopLate = false;   // seen on the last frame's extras: the gate's lateness for this one
 
 	// The chain ends (a frame not queued by the plan): the next present is not
@@ -5516,7 +5517,7 @@ struct LibplaceboVideoRenderer::Impl
 		DebugLog::Log("Render-ahead: %s%s%s%llu extras presented, %llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
 			"(%llu presents after a hold), lead %.2f ms, target lead %.2f ms, gate %s (%s), latency floor %.2f ms, "
 			"p95 new frame %.2f ms, extra %.2f ms (own vectors) / %.2f ms (de-judder vectors), estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
-			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections, %llu re-anchors; shown - planned: interval 1 %+.2f refreshes "
+			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections, %llu re-anchors, %llu anchors lowered, %llu after a backlog flush; shown - planned: interval 1 %+.2f refreshes "
 			"(%llu, %llu on time), after holds %+.2f (%llu, %llu on time))",
 			holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "", dejudderExtraStats.extras,
 			renderAheadFrames, renderAheadRestarts, renderAheadLate, renderAheadDropped, renderAheadHeld,
@@ -5530,7 +5531,7 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadTimersReady ? "GPU timers" : "CPU timings", dejudderDisplayRate.hz,
 			OpenLoopDisplayRate::Name(dejudderDisplayRate.source), dejudderDisplayRate.openLoop ? "open" : "closed",
 			renderAheadOpenLoopFrames, renderAheadLateByPresent, renderAheadSchedule.EarlyCorrections(),
-			renderAheadSchedule.Reanchors(),
+			renderAheadSchedule.Reanchors(), renderAheadSchedule.AnchorsLowered(), renderAheadFlushReanchors,
 			renderAheadShownCount[0] ? renderAheadShownError[0] / renderAheadShownCount[0] : 0.0, renderAheadShownCount[0],
 			renderAheadShownOnTime[0], renderAheadShownCount[1] ? renderAheadShownError[1] / renderAheadShownCount[1] : 0.0,
 			renderAheadShownCount[1], renderAheadShownOnTime[1]);
@@ -5605,6 +5606,10 @@ struct LibplaceboVideoRenderer::Impl
 	double vpQueueError = 0.0;        // smoothed (queued - target) frames: the timeline's steering
 	uint64_t vpQueueGeneration = 0;   // the queue generation vpQueueError belongs to
 	std::atomic<bool> vpQueueErrorReset{ false };   // a backlog flush: the steering starts over
+	// Render-ahead: a backlog flush dropped queued frames to shed latency; the chain
+	// re-anchors on the next frame (else its fixed L holds the shed latency back in
+	// and the queue overflows again: a flush every few frames on the laptop panel).
+	std::atomic<bool> renderAheadFlushReanchor{ false };
 	// (3) A's planes as last uploaded: a refresh of the same source frame (and a frame no
 	// refresh shows) reuses them instead of uploading again.
 	pl_plane vpUploadedPlanes[2] = {};
@@ -14573,6 +14578,14 @@ struct LibplaceboVideoRenderer::Impl
 			// a drift-correction repeat): the chain starts again.
 			if (renderAheadExpectedPresent != 0 && mainPresentId != renderAheadExpectedPresent)
 				renderAheadSchedule.Break();
+			// A backlog flush shed queued latency: a new anchor follows it, without the
+			// lead's holds (Schedule::AnchorLatency withoutLead).
+			const bool flushReanchor = renderAheadFlushReanchor.exchange(false, std::memory_order_acq_rel);
+			if (flushReanchor)
+			{
+				renderAheadSchedule.Break();
+				++renderAheadFlushReanchors;
+			}
 			// Closed loop on DXGI's statistics, without waiting: the latest present on
 			// screen and the vsync it showed at (none on some internal panels: open loop).
 			double gridVsync = 0.0;
@@ -14634,7 +14647,7 @@ struct LibplaceboVideoRenderer::Impl
 			bool restart = false, behind = false;
 			// The furthest A's present can land: the presents in flight (frame latency),
 			// each at most a frame's refreshes, its own frame's and the lead.
-			const int queueDepth = vpOwnedSwapchain ? static_cast<int>(RenderAhead::kQueuedFrameLatency) : 2;
+			const int queueDepth = vpOwnedSwapchain ? static_cast<int>(renderAheadChainDepth.latency) : 2;
 			const double maxAhead = RenderAhead::PlannedLead(sourcePeriod, displayPeriod) +
 				(queueDepth + 1) * std::ceil(ratio - RenderAhead::kTolerance) * displayPeriod;
 			plannedFirstVsync = renderAheadSchedule.FirstVsync(now, displayPeriod, gridVsync, restart, behind, maxAhead);
@@ -14642,6 +14655,18 @@ struct LibplaceboVideoRenderer::Impl
 			// correction already made by the restart is made again when they show).
 			if (restart)
 				renderAheadSchedule.Break();
+			// An anchor taken in a backlog (start-up) places every chained frame long before
+			// its time: replaced, sustained only, on this frame's own vsync (a re-anchor, not
+			// late; Schedule::AnchorTooLate).
+			if (!restart && renderAheadSchedule.AnchorTooLate(plannedFirstVsync, callbackA,
+				RenderAhead::PlannedLead(sourcePeriod, displayPeriod), sourcePeriod))
+			{
+				DebugLog::Log("Render-ahead: anchor latency %.2f ms too late (this frame's %.2f ms): re-anchored on its own refresh",
+					renderAheadSchedule.AnchorLatency(false, plannedFirstVsync, callbackA) * 1000.0,
+					(plannedFirstVsync - callbackA) * 1000.0);
+				renderAheadSchedule.Break();
+				restart = true;
+			}
 			late = late || behind;
 			if (late)
 			{
@@ -14655,7 +14680,8 @@ struct LibplaceboVideoRenderer::Impl
 			// at the anchor (a restart's first vsync - film time) and kept by chained
 			// frames (Schedule::AnchorLatency, Bug hunt 05 H1: a floor over chained samples
 			// ratcheted upward on every inexact cadence). The floor window only reports it.
-			const double anchorLatency = renderAheadSchedule.AnchorLatency(restart, plannedFirstVsync, callbackA);
+			const double anchorLatency = renderAheadSchedule.AnchorLatency(restart, plannedFirstVsync, callbackA,
+				flushReanchor && restart ? renderAheadLead : 0.0);
 			dejudderLatencyFloor.Add(anchorLatency);
 			const int maxExtras = DejudderPolicy::MaxExtras(ratio);
 			// A hold-only frame leaves lateness's drop for the next frame with extras.
@@ -14666,8 +14692,14 @@ struct LibplaceboVideoRenderer::Impl
 				// behind at once; an open-loop drift correction only when sustained
 				// (SustainedLateness, bug hunt 05 M5). A re-anchor is never late (M2).
 				const double gateNow = RenderAheadNow();
-				const bool gateLate = behind || (late && !openLoopDrift) ||
-					(openLoopDrift && renderAheadDriftLateness.Note(gateNow));
+				// Open loop, a chain found behind is inferred the same way (the plan's grid
+				// is not the display's): sustained only too. On the laptop panel single
+				// composition hiccups (costs at 60% of the budget) stepped the ladder down
+				// every 5-10 s, faster than it may climb, to hold (render-ahead on-screen
+				// 2026-10-17). The frame still drops its extra; closed loop is unchanged.
+				const bool openLoopBehind = behind && openLoopFrame;
+				const bool gateLate = (behind && !openLoopBehind) || (late && !openLoopDrift && !openLoopBehind) ||
+					((openLoopDrift || openLoopBehind) && renderAheadDriftLateness.Note(gateNow));
 				gateLevel = UpdateRenderAheadGate(gateNow, sourcePeriod, displayPeriod, gateLate, maxExtras);
 				drops += gateLevel >= RenderAhead::HoldLevel(maxExtras) ? 16 : RenderAhead::DropsAt(gateLevel);
 			}
@@ -27358,7 +27390,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 								m_frameQueue.front().gapCause = "backlog flush";
 								m_frameQueue.front().gapFrames = 0;   // a flush: never a gap-fill pair
 								if (m_impl)
+								{
 									m_impl->vpQueueErrorReset.store(true, std::memory_order_release);
+									if (m_impl->activeSettings.renderAhead)
+										m_impl->renderAheadFlushReanchor.store(true, std::memory_order_release);
+								}
 							}
 							queueAfter = m_frameQueue.size();
 							if (!m_frameQueue.empty())

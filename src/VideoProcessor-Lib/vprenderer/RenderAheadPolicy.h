@@ -379,6 +379,7 @@ namespace RenderAhead
 			pending.clear();
 			anchored = false;
 			anchorLatency = 0.0;
+			tooLateSince = -1.0;
 			haveLastFilm = false;
 			lastFilm = 0.0;
 			arrivalJitter = 0.0;
@@ -396,16 +397,60 @@ namespace RenderAhead
 		// moves the chain and not L: the next frame's phases follow, it owns the
 		// refreshes back (FIFO: the intervals' sum is what the display shows), and the
 		// chain returns to the anchor's latency, which stays bounded.
-		double AnchorLatency(bool restart, double firstVsync, double filmTime)
+		// withoutLead (s): a restart that must add no latency anchors with the lead taken
+		// off, so A's own refresh is at phase 0 instead of holding for the lead (a re-anchor
+		// after a backlog flush: render-ahead on-screen 2026-10-17). In open loop the lead's
+		// holds are real display time, which FIFO back-pressure turns into queued input
+		// frames: the flush's re-anchor holding them again overflowed the queue once more,
+		// a cascade of flushes and re-anchors.
+		double AnchorLatency(bool restart, double firstVsync, double filmTime, double withoutLead = 0.0)
 		{
 			if (restart || !anchored)
 			{
-				anchorLatency = firstVsync - filmTime;
+				anchorLatency = firstVsync - filmTime - std::max(0.0, withoutLead);
 				anchored = true;
+				tooLateSince = -1.0;
 			}
 			return anchorLatency;
 		}
 		bool Anchored() const { return anchored; }
+
+		// The anchor's L is too late (render-ahead on-screen 2026-10-17): a chained frame
+		// whose own refresh comes more than a source period before the anchor would place
+		// it (phi0 below the restart's own -lead/P_s by more than one), for a second of
+		// film time without a break. An anchor taken while frames waited in a backlog (the
+		// renderer starting: L 1.1-1.5 s on the laptop) otherwise stays for good: every
+		// frame then holds the ownership cap (about 8 refreshes at 24/60), output runs at a
+		// third of the source rate and the input queue drops two frames in three. A frame
+		// the anchor places too early is never corrected by FirstVsync (the chain is ahead,
+		// not behind). True: replace the anchor now (the caller restarts on this frame's
+		// own vsync, a re-anchor, not late). One short dip (a queue that drained a frame)
+		// does not: the frame holds until its time, as designed.
+		bool AnchorTooLate(double firstVsync, double filmTime, double lead, double sourcePeriod)
+		{
+			if (!anchored || !(sourcePeriod > 0.0) || !std::isfinite(firstVsync) || !std::isfinite(filmTime))
+			{
+				tooLateSince = -1.0;
+				return false;
+			}
+			const double phi0 = (firstVsync - filmTime - anchorLatency - lead) / sourcePeriod;
+			if (!(phi0 < -std::max(0.0, lead) / sourcePeriod - kAnchorLateMarginPeriods))
+			{
+				tooLateSince = -1.0;
+				return false;
+			}
+			if (tooLateSince < 0.0)
+			{
+				tooLateSince = filmTime;
+				return false;
+			}
+			if (filmTime - tooLateSince < kAnchorLateSeconds)
+				return false;
+			tooLateSince = -1.0;
+			++anchorsLowered;
+			return true;
+		}
+		unsigned long long AnchorsLowered() const { return anchorsLowered; }
 
 		// The arrival jitter the phase tolerance allows for (FrameInput::arrivalJitter),
 		// from the film times themselves: the peak of |film - previous film - P_s| (the
@@ -581,6 +626,10 @@ namespace RenderAhead
 		int lateDrops = 0;
 		bool anchored = false;
 		double anchorLatency = 0.0;   // L at the anchor (AnchorLatency)
+		static constexpr double kAnchorLateMarginPeriods = 1.0;   // AnchorTooLate: source periods
+		static constexpr double kAnchorLateSeconds = 1.0;         // AnchorTooLate: sustained, film time
+		double tooLateSince = -1.0;   // film time of the first frame in the current too-late run
+		unsigned long long anchorsLowered = 0;
 		static constexpr double kJitterDecay = 0.999;
 		bool haveLastFilm = false;
 		double lastFilm = 0.0;

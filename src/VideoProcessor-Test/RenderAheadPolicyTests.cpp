@@ -174,6 +174,13 @@ namespace RenderAheadPolicyTest
 				const double firstVsync = schedule.FirstVsync(now, Pd, grid, restart, behind);
 				present(done, mainInterval, firstVsync);
 				const double lead = PlannedLead(Ps, Pd);
+				// As the renderer: an anchor too late for a second is replaced (a healthy
+				// chain never asks; counted as a restart so the assertions see it).
+				if (!restart && schedule.AnchorTooLate(firstVsync, film, lead, Ps))
+				{
+					schedule.Break();
+					restart = true;
+				}
 				const double floor = schedule.AnchorLatency(restart, firstVsync, film);
 				if (late || behind) ++r.lateObserved;
 				if (restart) ++r.restarts;
@@ -605,10 +612,24 @@ namespace RenderAheadPolicyTest
 			Assert::IsFalse(schedule.Anchored());
 			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 1.025, 1.0), 1e-12, L"the first frame anchors");
 			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 2.100, 2.0), 1e-12, L"chained: kept");
-			schedule.Commit(3.0, { { 1u, 2.9 } });
-			Assert::IsTrue(schedule.Observe(1u, 2.9 + 2.0 / 60.0, 1.0 / 60.0), L"late: the chain moves");
+			// The first observation after a new anchor re-anchors only (bug hunt 05 M2).
+			schedule.Commit(2.9, { { 1u, 2.8 } });
+			Assert::IsFalse(schedule.Observe(1u, 2.8 + 2.0 / 60.0, 1.0 / 60.0), L"first after the anchor: re-anchor");
+			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 2.9 + 2.0 / 60.0, 2.8), 1e-12, L"a re-anchor keeps L");
+			schedule.Commit(3.0, { { 2u, 2.9 } });
+			Assert::IsTrue(schedule.Observe(2u, 2.9 + 2.0 / 60.0, 1.0 / 60.0), L"late: the chain moves");
 			Assert::AreEqual(0.025, schedule.AnchorLatency(false, 3.0 + 2.0 / 60.0, 2.9), 1e-12, L"a correction keeps L");
 			Assert::AreEqual(0.031, schedule.AnchorLatency(true, 4.031, 4.0), 1e-12, L"a restart re-anchors");
+			// A re-anchor after a backlog flush takes the lead off: A's own refresh at phase 0.
+			const double Ps = 1001.0 / 24000.0, Pd = 1.0 / 60.0, lead = PlannedLead(Ps, Pd);
+			const double L = schedule.AnchorLatency(true, 5.2, 5.0, lead);
+			Assert::AreEqual(0.2 - lead, L, 1e-12, L"without the lead");
+			FrameInput in;
+			in.filmTime = 5.0; in.sourcePeriod = Ps; in.displayPeriod = Pd; in.firstVsync = 5.2;
+			in.latencyFloor = L; in.lead = lead; in.strength = 1.0; in.maxExtras = MaxExtras(Ps / Pd);
+			const FramePlan plan = PlanFrame(in);
+			Assert::AreEqual(0.0, plan.phi0, 1e-9, L"no lead hold");
+			Assert::IsTrue(plan.slots.size() >= 1 && plan.slots[0].render, L"the first refresh after A's own is an extra");
 			schedule.Reset();
 			Assert::IsFalse(schedule.Anchored());
 		}
@@ -1600,6 +1621,44 @@ namespace RenderAheadPolicyTest
 			schedule.Commit(4.0, { { 6u, 3.9 }, { 7u, 3.9 + Pd } });
 			Assert::IsFalse(schedule.Observe(6u, 3.9, Pd));
 			Assert::IsTrue(schedule.Observe(7u, 3.9 + 2 * Pd, Pd));
+		}
+
+		// On-screen 2026-10-17: an anchor taken in a start-up backlog (L 1.2 s) while the
+		// real latency is 0.2 s is replaced after a second of film time; one short dip and
+		// a healthy chain (phi0 from the restart's -lead/P_s upward) never replace it.
+		TEST_METHOD(AnchorTooLateIsReplacedWhenSustained)
+		{
+			const double Ps = 1001.0 / 24000.0, Pd = 1.0 / 60.0;
+			const double lead = PlannedLead(Ps, Pd);
+			Schedule schedule;
+			Assert::IsFalse(schedule.AnchorTooLate(1.0, 0.0, lead, Ps), L"not anchored");
+			schedule.AnchorLatency(true, 1.2, 0.0);   // the backlog anchor
+			// One frame that comes early, then a frame on the anchor: no replacement.
+			Assert::IsFalse(schedule.AnchorTooLate(10.0 * Ps + 0.2, 10.0 * Ps, lead, Ps));
+			Assert::IsFalse(schedule.AnchorTooLate(11.0 * Ps + 1.2 + lead, 11.0 * Ps, lead, Ps));
+			// Sustained: replaced once after a second, then the run starts again.
+			int replaced = 0, at = -1;
+			for (int i = 20; i < 20 + 48; ++i)
+				if (schedule.AnchorTooLate(i * Ps + 0.2, i * Ps, lead, Ps))
+				{
+					++replaced;
+					if (at < 0) at = i;
+					schedule.AnchorLatency(true, i * Ps + 0.2, i * Ps);
+				}
+			Assert::AreEqual(1, replaced, L"replaced once");
+			Assert::IsTrue(at >= 20 + 23 && at <= 20 + 25, L"after a second of film time");
+			Assert::AreEqual(1ull, schedule.AnchorsLowered());
+			// A healthy chain: the restart's phi0 is -lead/P_s, chained phases up to 1.
+			Schedule healthy;
+			healthy.AnchorLatency(true, 0.15, 0.0);
+			for (int i = 1; i < 2000; ++i)
+			{
+				const double phi0 = -lead / Ps + std::fmod(i * 0.37, 1.0 + lead / Ps);
+				Assert::IsFalse(healthy.AnchorTooLate(i * Ps + 0.15 + lead + phi0 * Ps, i * Ps, lead, Ps));
+			}
+			// Within the margin (less than a source period below the restart's phase).
+			for (int i = 1; i < 100; ++i)
+				Assert::IsFalse(healthy.AnchorTooLate(i * Ps + 0.15 - 0.9 * Ps, i * Ps, lead, Ps));
 		}
 
 		// M5: open-loop drift corrections reach the gate only when sustained (2 in 2 s).
