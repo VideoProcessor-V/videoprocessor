@@ -1180,6 +1180,7 @@ namespace VideoProcessorTest
 
 			LedDriveConfig script = tuned;
 			script.mode = Mode::Script;
+			script.scriptLookahead = false;   // the script copy without its look-ahead (owner 2026-10-17)
 			Assert::IsTrue(module.Reconfigure(port, script));
 			Assert::IsFalse(module.WantsPredictions());
 			std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -1493,11 +1494,15 @@ namespace VideoProcessorTest
 			Assert::IsTrue(defaults.correctionWeightByTime, L"On by default");
 		}
 
+		// script_lookahead off (owner 2026-10-17; on by default, when the script copy
+		// looks ahead through the queue): script mode wants no predictions.
 		TEST_METHOD(ScriptModeIgnoresTheLookahead)
 		{
 			LedDriveConfig script;
 			script.enabled = true;
 			script.mode = Mode::Script;
+			Assert::IsTrue(LedDriveModule(ProjectorConfig(), script).WantsPredictions(), L"script_lookahead on by default");
+			script.scriptLookahead = false;
 			LedDriveModule module(ProjectorConfig(), script);
 			Assert::IsFalse(module.WantsPredictions());
 			// The walk's observer measures nothing for script mode.

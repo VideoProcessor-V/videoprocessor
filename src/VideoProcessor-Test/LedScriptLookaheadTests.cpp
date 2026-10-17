@@ -81,11 +81,16 @@ namespace
 			ScriptController controller(config);
 			controller.Reset(startLight, startContrast);
 			double t = 0.0;
+			uint64_t lastOnScreen = 0;
 			while (t < durationMs)
 			{
 				const double tickStart = t;
 				const uint64_t onScreen = OnScreen(t);
 				FrameStats stats = StatsOf(scene, onScreen);
+				// As the module: a cut since the last tick is flagged on this one.
+				for (uint64_t s = lastOnScreen + 1; s < onScreen && scene.cut; ++s)
+					stats.cut = stats.cut || scene.cut(s);
+				lastOnScreen = onScreen;
 				double done = t;
 				auto send = [&](double at, bool light, int value)
 				{
@@ -242,7 +247,7 @@ namespace VideoProcessorTest
 						if (l.light && l.value == target) return l.ms;
 					return 1e300;
 				};
-				Assert::IsTrue(shortQueue.cutJumps >= 1, L"a short queue still jumps to a cut it sees");
+				Assert::IsTrue(shortQueue.cutJumps >= 1, L"a short queue still jumps to a bright cut");
 				Assert::IsTrue(firstAt(shortQueue) < firstAt(reactive), L"and its light lands earlier than reacting");
 				Assert::IsTrue(firstAt(shortQueue) >= reactive.Display(cut) - reactive.Period() - 1e-6,
 					L"but not before the cut's frame");

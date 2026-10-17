@@ -139,6 +139,47 @@ namespace LedDrive
 		// scene's statistics (the script's screenshot delay was a coding limitation).
 		const double jumpSendMs = in.nowMs;
 
+		// The scene's targets straight away, each landing on the scene's first
+		// frame (cutMs) or as soon as the projector allows.
+		auto cutJump = [&](uint64_t sequence, const FrameStats& stats, double cutMs, int lightTarget)
+		{
+			const double lightAt = std::max(jumpSendMs, cutMs - in.ledLatencyMs);
+			plan.kind = ScriptLookaheadPlan::Kind::CutJump;
+			plan.targetSequence = sequence;
+			plan.cutMs = cutMs;
+			plan.stats = stats;
+			const int contrastTarget = ScriptController::ContrastTargetFor(
+				std::max(0, static_cast<int>(stats.apl)), highlightOf(stats));
+			plan.sends.push_back({ lightAt, true, lightTarget });
+			if (contrastTarget != in.contrast)
+			{
+				double contrastAt = std::max(jumpSendMs, cutMs - in.cntrLatencyMs);
+				// One command at a time: a CNTR coming down goes first (early
+				// is below need, late would be above it); one going up
+				// follows the LPW1.
+				if (std::abs(contrastAt - lightAt) < in.commandGapMs)
+					contrastAt = contrastTarget < in.contrast ? lightAt - in.commandGapMs : lightAt + in.commandGapMs;
+				if (contrastAt < jumpSendMs)
+				{
+					// No room before the LPW1: CNTR at once, the LPW1 one gap
+					// later (still no earlier than its landing time).
+					contrastAt = jumpSendMs;
+					plan.sends.front().atMs = std::max(lightAt, jumpSendMs + in.commandGapMs);
+				}
+				plan.sends.push_back({ contrastAt, false, contrastTarget });
+			}
+			std::stable_sort(plan.sends.begin(), plan.sends.end(),
+				[](const ScriptTimedSend& a, const ScriptTimedSend& b) { return a.atMs < b.atMs; });
+		};
+		// A cut to a brighter scene since the last tick, already on screen (the
+		// queue was too short, or the tick too long, to see it coming): its
+		// targets at once rather than a step a tick.
+		if (current.cut && !ScriptBlackForPreposition(config, current) && lightOf(current) > in.light)
+		{
+			cutJump(in.onScreenSequence, current, in.onScreenMs, lightOf(current));
+			return plan;
+		}
+
 		// A cut to a brighter scene in the queue (a cut, or black to picture):
 		// the script would only start climbing once it is on screen, one step a
 		// tick. Its first frame gets the scene's targets, landing on it. A queue
@@ -156,37 +197,11 @@ namespace LedDrive
 			if (entering && !black && lightTarget > in.light)
 			{
 				const double cutMs = displayMs(frame.first);
-				const double lightAt = std::max(jumpSendMs, cutMs - in.ledLatencyMs);
 				// Sent now (waiting within this tick) when the next tick's first
 				// command would land after the cut.
-				if (lightAt - in.commandGapMs < in.nowMs + in.nextTickMs)
+				if (std::max(jumpSendMs, cutMs - in.ledLatencyMs) - in.commandGapMs < in.nowMs + in.nextTickMs)
 				{
-					plan.kind = ScriptLookaheadPlan::Kind::CutJump;
-					plan.targetSequence = frame.first;
-					plan.cutMs = cutMs;
-					plan.stats = stats;
-					const int contrastTarget = ScriptController::ContrastTargetFor(
-						std::max(0, static_cast<int>(stats.apl)), highlightOf(stats));
-					plan.sends.push_back({ lightAt, true, lightTarget });
-					if (contrastTarget != in.contrast)
-					{
-						double contrastAt = std::max(jumpSendMs, cutMs - in.cntrLatencyMs);
-						// One command at a time: a CNTR coming down goes first (early
-						// is below need, late would be above it); one going up
-						// follows the LPW1.
-						if (std::abs(contrastAt - lightAt) < in.commandGapMs)
-							contrastAt = contrastTarget < in.contrast ? lightAt - in.commandGapMs : lightAt + in.commandGapMs;
-						if (contrastAt < jumpSendMs)
-						{
-							// No room before the LPW1: CNTR at once, the LPW1 one gap
-							// later (still no earlier than its landing time).
-							contrastAt = jumpSendMs;
-							plan.sends.front().atMs = std::max(lightAt, jumpSendMs + in.commandGapMs);
-						}
-						plan.sends.push_back({ contrastAt, false, contrastTarget });
-					}
-					std::stable_sort(plan.sends.begin(), plan.sends.end(),
-						[](const ScriptTimedSend& a, const ScriptTimedSend& b) { return a.atMs < b.atMs; });
+					cutJump(frame.first, stats, cutMs, lightTarget);
 					return plan;
 				}
 				// Further away: black until then (the picture on screen and every
