@@ -1,6 +1,6 @@
-# LED drive — control policy (standalone, supersedes deltas 3 / 3b / 3-answers for behaviour)
+# Dynamic Drive — control policy (standalone, supersedes deltas 3 / 3b / 3-answers for behaviour)
 
-2026-10-11. This is the complete statement of how the LED drive controls
+2026-10-11. This is the complete statement of how Dynamic Drive controls
 the projector in `compensate` mode. Where earlier deltas differ, this file
 wins. Deltas 1, 2 and 4 (measurement, PRE_OUTPUT hook, gain order,
 E = 2.41) still apply. `script` mode is defined at the end.

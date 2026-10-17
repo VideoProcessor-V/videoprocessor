@@ -709,7 +709,6 @@ namespace ChainGpuProbe
 			if (!upload(still, gs))
 				return fail("plane upload failed");
 			auto signal = [](double code) { return (code - 64.0) / 876.0; };
-			auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
 			double reference502 = 0.0;
 			const double levels[] = { 255.0, 255.0, 200.0, 200.0, 150.0, 150.0, 100.0, 100.0 };
 			for (int f = 0; f < 8; ++f)
@@ -728,9 +727,11 @@ namespace ChainGpuProbe
 				const double light = std::pow(signal(grey), 2.41) / gain;
 				if (f == 0)
 					reference502 = light;
-				std::vector<double> expected = rampExpected;
-				for (size_t i = 0; i < 3; ++i)   // below black follows the boost (Beta LED test's formula)
-					expected[i] = (std::max)(0.0, 64.0 + 876.0 * spow(spow(signal(ramp[i]), 2.41) * gain, 1.0 / 2.41));   // codes stop at 0
+				// Bug hunt 2 2026-10-17, led_btb_passthrough (default on): below
+				// black leaves the LED hook as it came in, whatever the gain - the
+				// chain's own ramp codes. (Off: it followed the gain, codes stopping
+				// at 0: 64 + 876 * spow(spow(signal, 2.41) * gain, 1 / 2.41).)
+				const std::vector<double> expected = rampExpected;
 				char line[160];
 				std::snprintf(line, sizeof(line), "LED %3.0f (gain %.3f): grey 502 -> %d, light %.4f (%+.2f%%)\n",
 					levels[f], gain, grey, light, 100.0 * (light / reference502 - 1.0));

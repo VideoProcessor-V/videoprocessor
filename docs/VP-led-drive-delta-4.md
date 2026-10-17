@@ -1,4 +1,4 @@
-# LED drive module — delta 4: gain is defined on the final encoded value
+# Dynamic Drive module — delta 4: gain is defined on the final encoded value
 
 2026-10-11. One rule for the compensation shader; resolves the
 `compensation_eotf` 2.2-vs-2.41 question.

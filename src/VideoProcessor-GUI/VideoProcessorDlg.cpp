@@ -9478,7 +9478,7 @@ void CVideoProcessorDlg::PollShutdownRetirementDeadline(ULONGLONG now)
 			[renderer]() { return renderer->StopLedDriveForShutdown(); },
 			ShutdownLedRestoreTimeoutMs);
 		DebugLog::Log(
-			"Forced shutdown LED restore: %s (timeout_ms=%u)",
+			"Forced shutdown Dynamic Drive restore: %s (timeout_ms=%u)",
 			LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
 	}
 	// Deliberately leaked: its backend already failed to release, and
@@ -17363,7 +17363,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			rendererLine("de-judder", m_videoRenderer->GetDejudderStatus(text), text);
 			rendererLine("presentation", m_videoRenderer->GetPresentationTimingStatus(text), text);
 			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
-			rendererLine("LED drive", m_videoRenderer->GetLedDriveStatus(text), text);
+			rendererLine("Dynamic Drive", m_videoRenderer->GetLedDriveStatus(text), text);
 			rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
 			rendererLine("content", true, ContentIntentLine());
 		}
@@ -17372,7 +17372,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			// audit 2026-10-16: no renderer, so clear the renderer-owned keys
 			// instead of keeping a dead renderer's last values.
 			static const char* const kRendererKeys[] = {
-				"de-judder", "presentation", "render stall", "LED drive", "source resolution", "content" };
+				"de-judder", "presentation", "render stall", "Dynamic Drive", "source resolution", "content" };
 			for (const char* key : kRendererKeys)
 				crashState.SetValue(key, std::string("-"));
 		}

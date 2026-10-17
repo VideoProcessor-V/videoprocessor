@@ -24,7 +24,7 @@ namespace LedDrive
 
 			bool Open(std::string&) override
 			{
-				DebugLog::Log("LED drive: projector dry run - commands are logged, nothing is sent");
+				DebugLog::Log("Dynamic Drive: projector dry run - commands are logged, nothing is sent");
 				return true;
 			}
 
@@ -53,7 +53,7 @@ namespace LedDrive
 			void SetContrastAsync(int value) override
 			{
 				if (value < 0) return;
-				DebugLog::Log("LED drive: dry run, would set CNTR %d", value);
+				DebugLog::Log("Dynamic Drive: dry run, would set CNTR %d", value);
 				std::lock_guard<std::mutex> guard(mutex);
 				++status.commands;
 				++status.contrastSends;
@@ -68,7 +68,7 @@ namespace LedDrive
 					Record(value);
 				else
 				{
-					DebugLog::Log("LED drive: dry run, would set %s %d", mnemonic.c_str(), value);
+					DebugLog::Log("Dynamic Drive: dry run, would set %s %d", mnemonic.c_str(), value);
 					std::lock_guard<std::mutex> guard(mutex);
 					++status.commands;
 					if (mnemonic == "CNTR")
@@ -83,7 +83,7 @@ namespace LedDrive
 
 			bool SetContrast(int value) override
 			{
-				DebugLog::Log("LED drive: dry run, would set CNTR %d", value);
+				DebugLog::Log("Dynamic Drive: dry run, would set CNTR %d", value);
 				std::lock_guard<std::mutex> guard(mutex);
 				++status.commands;
 				return true;
@@ -100,7 +100,7 @@ namespace LedDrive
 		private:
 			void Record(int level)
 			{
-				DebugLog::Log("LED drive: dry run, would set LPW1 %d", level);
+				DebugLog::Log("Dynamic Drive: dry run, would set LPW1 %d", level);
 				std::lock_guard<std::mutex> guard(mutex);
 				++status.commands;
 				status.lastLight = level;
@@ -125,7 +125,7 @@ namespace LedDrive
 		bool alwaysSetContrast)
 	{
 		if (resetDimMode)
-			DebugLog::Log("LED drive: LED dim mode set to standard%s",
+			DebugLog::Log("Dynamic Drive: LED dim mode set to standard%s",
 				driver.SendNow("LDMM", 0, 0) ? "" : " (not confirmed)");
 		const LightRange range = driver.QueryLightRange();
 		const ProjectorState found = driver.ReadState();
@@ -145,12 +145,14 @@ namespace LedDrive
 			const bool contrast = driver.SetContrast(50);
 			summary << "; contrast set to 50" << (contrast ? "" : " (not confirmed)");
 		}
-		DebugLog::Log("LED drive: %s", summary.str().c_str());
+		DebugLog::Log("Dynamic Drive: %s", summary.str().c_str());
 		return summary.str();
 	}
 
-	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode, bool restoreContrast)
+	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode, bool restoreContrast,
+		RestoreOutcome* outcome)
 	{
+		RestoreOutcome result;
 		using namespace std::chrono;
 		driver.BeginShutdown();
 		// Standard dim mode first, then full light, then (after mode: script
@@ -181,15 +183,19 @@ namespace LedDrive
 			return std::max(1, left - remaining * perLater);
 		};
 		if (resetDimMode)
-			DebugLog::Log("LED drive: LED dim mode restored to standard%s",
-				driver.SendNow("LDMM", 0, budget()) ? "" : " (not confirmed)");
+		{
+			result.dimMode = driver.SendNow("LDMM", 0, budget());
+			DebugLog::Log("Dynamic Drive: LED dim mode restored to standard%s", result.dimMode ? "" : " (not confirmed)");
+		}
 		const bool ok = driver.SetLightNow(ledCeiling, budget());
-		DebugLog::Log("LED drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
+		result.light = ok;
+		DebugLog::Log("Dynamic Drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
 		if (restoreContrast)
 		{
-			const bool contrast = driver.SendNow("CNTR", 50, budget());
-			DebugLog::Log("LED drive: contrast restored to 50%s", contrast ? "" : " (not confirmed)");
+			result.contrast = driver.SendNow("CNTR", 50, budget());
+			DebugLog::Log("Dynamic Drive: contrast restored to 50%s", result.contrast ? "" : " (not confirmed)");
 		}
+		if (outcome) *outcome = result;
 		return ok;
 	}
 }

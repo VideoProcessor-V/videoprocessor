@@ -1,4 +1,4 @@
-# LED drive module — answers round 2: integrating the hardware design notes
+# Dynamic Drive module — answers round 2: integrating the hardware design notes
 
 2026-10-09. Reconciles "LED Drive Module — Design Notes for Planning Agent"
 (from the owner's projector-hardware discussion) with `VP-led-drive-module.md`

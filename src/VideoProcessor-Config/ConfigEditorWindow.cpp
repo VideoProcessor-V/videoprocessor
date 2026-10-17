@@ -4976,7 +4976,7 @@ QWidget* ConfigEditorWindow::createShell()
     QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"), 14);
     addLeaf(QStringLiteral("Actions"), 7);
     QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
-    addLeaf(QStringLiteral("LED drive"), 20);
+    addLeaf(QStringLiteral("Dynamic Drive"), 20);
     addLeaf(QStringLiteral("Logs"), 10);
     navLayout->addSpacing(8);
     QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"), 2);
@@ -6483,7 +6483,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         latencySpin->setSpecialValueText(QStringLiteral("Off"));
         latencySpin->setToolTip(QStringLiteral(
             "Off uses Target frames. A delay in ms becomes whole source frames "
-            "for each frame rate; a longer delay gives the LED drive and the crop "
+            "for each frame rate; a longer delay gives Dynamic Drive and the crop "
             "detector more frames to look ahead."));
         auto* latencyNote = helpLabel(QString());
         latencyNote->setObjectName(QStringLiteral("config.queue.target_latency_note"));
@@ -12508,7 +12508,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* driveForm = new QFormLayout(drive);
     driveForm->setContentsMargins(0, 0, 0, 0);
     driveForm->setVerticalSpacing(8);
-    auto* enabled = bindCheckField(QStringLiteral("LED drive on"), led, QStringLiteral("enabled"), false);
+    auto* enabled = bindCheckField(QStringLiteral("Dynamic Drive on"), led, QStringLiteral("enabled"), false);
     enabled->setAccessibleDescription(QStringLiteral(
         "Lets VideoProcessor drive the projector's LED. Off: nothing is sent to the projector."));
     driveForm->addRow(QString(), enabled);
@@ -12784,7 +12784,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "Projector gamma is how the projector turns the final signal into light; Compensate needs it to keep the "
         "picture's brightness exact while the LED dims. 2.41 is the FL35's light-meter measurement; change it "
         "only if a new measurement says otherwise. It does not change the gamma boost.\n"
-        "The gamma boost applies even with the LED drive off. Switching the LED drive on or off returns the "
+        "The gamma boost applies even with Dynamic Drive off. Switching Dynamic Drive on or off returns the "
         "projector to full light; other changes carry on from the current level.")));
 
     // Experimental: deeper fade to black with the projector's custom LED dim.
@@ -13047,7 +13047,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     testButton->setObjectName(controlName(projector, QStringLiteral("connection_test")));
     testButton->setToolTip(QStringLiteral(
         "Sets the LED to 60, reads it back, waits 5 seconds, sets 255 and reads it back (about 8 s). Uses the "
-        "saved settings (Apply first). With VideoProcessor running it pauses the LED drive for the test; it is "
+        "saved settings (Apply first). With VideoProcessor running it pauses Dynamic Drive for the test; it is "
         "refused while video is playing. Without VideoProcessor, Config opens the port itself."));
     auto* testResult = new QLabel;
     testResult->setObjectName(controlName(projector, QStringLiteral("connection_test.result")));
@@ -13304,6 +13304,15 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "On (default): when VP's gain brightens the picture, whiter-than-white detail keeps its own value instead "
         "of being rolled under white with the boosted picture (owner rule: keep BTB and WTW). Off: as before."));
     assistForm->addRow(QString(), wtw);
+    // Restore switch (bug hunt 2 2026-10-17): led_btb_passthrough.
+    auto* btb = bindCheckField(QStringLiteral("Below-black passes through unchanged (fix under test)"), led,
+        QStringLiteral("led_btb_passthrough"), true);
+    btb->setToolTip(QStringLiteral(
+        "On (default): blacker-than-black detail leaves VP's compensation exactly as captured - the gain and the "
+        "gamma boost act only on the picture above black, so below-black codes are never pushed to the floor and "
+        "clipped when the LED dims (owner rule: keep BTB and WTW). Off: below black is boosted and gained with the "
+        "picture, as before."));
+    assistForm->addRow(QString(), btb);
     // Post-merge audit 2026-10-17 (owner rule: CNTR above need is a defect): cntr_pair_predict.
     auto* pairPredict = bindCheckField(QStringLiteral("Contrast paired with the LED where it lands (fix under test)"), led,
         QStringLiteral("cntr_pair_predict"), true);
@@ -13710,7 +13719,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // In setup order (audit 2026-10-14c): what to choose, then the source's
     // own card, the connection, and the rest; Experimental last. Each card
     // shows only when the chosen source uses it.
-    cards->addCard(createCard(QStringLiteral("LED drive"),
+    cards->addCard(createCard(QStringLiteral("Dynamic Drive"),
         QStringLiteral("Dim the projector's LED with the picture, as your dimming script does."), drive));
     QWidget* connectionBox = createCard(QStringLiteral("Projector connection"),
         QStringLiteral("The serial link to the projector."), connection);
@@ -13840,7 +13849,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             driveForm->insertRow(0, QString(), note);
         }
     }
-    return createPage(QStringLiteral("LED drive"),
+    return createPage(QStringLiteral("Dynamic Drive"),
         QStringLiteral("Projector LED dimming and the gamma boost."), cards);
 }
 

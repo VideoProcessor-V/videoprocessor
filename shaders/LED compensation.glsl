@@ -1,7 +1,8 @@
 /*
- * LED drive compensation for VideoProcessor's VP Renderer (libplacebo)
+ * Dynamic Drive (LED drive) compensation for VideoProcessor's VP Renderer
+ * (libplacebo)
  *
- * Installed by the LED drive module (docs/VP-led-drive-module.md section 6),
+ * Installed by the Dynamic Drive module (docs/VP-led-drive-module.md section 6),
  * hooked at PREOUTPUT (libplacebo's PL_HOOK_PRE_OUTPUT; mpv-style shader files
  * spell it without the underscore - an unknown name is silently never run),
  * not as a standard shader. Runs at PRE_OUTPUT: after tone mapping, gamut
@@ -26,7 +27,7 @@
  *   boost_knee, boost_knee_width  delta 11: below boost_knee the boost
  *                blends (smoothstep over the width) into the identity, so the
  *                darkest tones keep their native contrast; 0 = the global
- *                boost as before. Below black is then untouched.
+ *                boost as before.
  *   shadow_lift, veil  delta 11's ANSI branch: a lift of the darks below the
  *                knee (0.10 when boost_knee is 0), shadow_lift x veil, where
  *                veil (0-1) is the LED module's per-frame estimate of the
@@ -36,6 +37,22 @@
  * Sign-preserving (BTB/WTW answers item 5): every power acts on |v| with v's
  * sign, so below-black detail (negative values here, before the limited-
  * range encode) survives the boost and the gain instead of being cut to 0.
+ *
+ * Below black passes through (btb_passthrough, led_btb_passthrough, default
+ * on; bug hunt 2 2026-10-17): a negative input leaves this hook with exactly
+ * the value it came in with - no boost, no lift, no gain. Why not the odd-
+ * symmetric gain (x *= gain on negatives too, the behaviour before)? The gain
+ * restores light the dimmed LED took away; a below-black code has no light to
+ * restore (the projector shows it as black), so scaling it changes nothing on
+ * screen except pushing it towards, and past, the limited-range encode floor:
+ * with gain 2.5 in linear light a BTB value grows ~1.46x and codes ~20 and
+ * below were clipped to the floor on every dimmed scene (the gamma boost's
+ * |v|^(2.2/2.4) expanded them slightly as well). Passing them through keeps
+ * every BTB code exactly as captured and distinct (PLUGE-style black-level
+ * setup still works, whatever the LED does), and the curve stays continuous
+ * (every branch maps 0 to 0) and monotonic: negatives map to themselves,
+ * non-negatives to non-negatives. Off = the sign-preserving boost and gain
+ * on negatives, as before.
  *
  * Above 1 - knee the result rolls off with slope 1 at the knee point and
  * approaches 1.0, so a boosted highlight keeps its gradation instead of
@@ -108,6 +125,13 @@
 //!MAXIMUM 1.0
 0.0
 
+//!PARAM btb_passthrough
+//!DESC led_btb_passthrough: 1 = below black leaves the hook as it came in, 0 = boosted and gained with the picture (before 2026-10-17)
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+1.0
+
 //!PARAM wtw_passthrough
 //!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under a boost, 0 = rolled under white (before 2026-10-17)
 //!TYPE float
@@ -117,7 +141,7 @@
 
 //!HOOK PREOUTPUT
 //!BIND HOOKED
-//!DESC VideoProcessor LED drive compensation
+//!DESC VideoProcessor Dynamic Drive compensation
 
 // Sign-preserving power: below-black values keep their sign and magnitude.
 vec3 spow(vec3 v, float e)
@@ -136,12 +160,19 @@ vec3 soft_knee(vec3 x, float k)
     return mix(x, rolled, step(vec3(t), x));
 }
 
+// Below black as it came in (btb_passthrough), applied to every result.
+vec3 below_black(vec3 result, vec3 original)
+{
+    return btb_passthrough > 0.5 ? mix(result, original, vec3(lessThan(original, vec3(0.0)))) : result;
+}
+
 vec4 hook()
 {
     vec4 color = HOOKED_texOff(0);
     float lift = shadow_lift * veil;
     if (gain == 1.0 && boost == 1.0 && !(lift > 0.0))
         return color;
+    vec3 original = color.rgb;
     vec3 v = color.rgb;
     // The gamma boost comes first: the old pipeline boosted VP's output, and
     // the projector's contrast or LED acted on that boosted signal.
@@ -162,13 +193,15 @@ vec4 hook()
         v += vec3(lift * k * 1.6875) * u * (vec3(1.0) - u) * (vec3(1.0) - u);
     }
     if (gain == 1.0)
-        return vec4(v, color.a);
+        return vec4(below_black(v, original), color.a);
     bool linear = gain_domain > 0.5;
     vec3 x = linear ? spow(v, compensation_eotf) : v;
     vec3 before = x;
     x *= gain;
     // Only a boost can push values past white; a reduction never needs the
-    // knee. The knee acts on the bright end only; below black is untouched.
+    // knee. The knee acts on the bright end only (it never touches negatives);
+    // below black is restored to its input value at the end when
+    // btb_passthrough is on (see the header), in both gain domains.
     // Bug hunt 2026-10-17: whiter-than-white (above 1, carried by the
     // extended-range restore) keeps its own value instead of being rolled
     // under white with the boosted picture. The knee's output stays below 1,
@@ -179,6 +212,6 @@ vec4 hook()
         if (wtw_passthrough > 0.5)
             x = mix(x, before, vec3(greaterThan(before, vec3(1.0))));
     }
-    color.rgb = linear ? spow(x, 1.0 / compensation_eotf) : x;
+    color.rgb = below_black(linear ? spow(x, 1.0 / compensation_eotf) : x, original);
     return color;
 }

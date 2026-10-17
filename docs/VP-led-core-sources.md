@@ -1,6 +1,6 @@
 # LED core and command sources (owner 2026-10-14; Python source retired 2026-10-15)
 
-The LED drive is one core with a command source to choose from, not a set of
+Dynamic Drive is one core with a command source to choose from, not a set of
 separate modes. The core opens the RS-232 port, sends the commands and keeps
 the logs; the source decides what to send. Setup and beta testing only need
 one setting changed: the source.
@@ -47,7 +47,7 @@ the reference copy is `tools\led-reference\main_vp.py`).
 
 ## Config
 
-The LED drive card starts with "LED drive on" and the command source, then
+The Dynamic Drive card starts with "Dynamic Drive on" and the command source, then
 adaptive gamma and, for the source that uses it, look-ahead (compensate) or
 script pacing with its two times (the script copy). Only what the chosen
 source uses is shown:
