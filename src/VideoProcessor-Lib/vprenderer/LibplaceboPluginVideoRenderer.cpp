@@ -110,14 +110,10 @@ namespace
 			return PluginExports{};
 		}
 
-		const auto isBeta = reinterpret_cast<bool (__cdecl*)()>(
-            GetProcAddress(result.module, VP_LIBPLACEBO_FLAVOR_EXPORT));
-        if (!isBeta || isBeta() != beta) {
-            DebugLog::Log("VP Renderer plugin flavor mismatch: path=%ls", pluginPath.c_str());
-            FreeLibrary(result.module);
-            return PluginExports{};
-        }
-        const uint32_t apiVersion = getApiVersion();
+		// Bug hunt 2026-10-17: the API version is checked before any other
+		// export is called. isBeta() used to be called first, so a plugin of a
+		// different API version was trusted with an ABI it may not share.
+		const uint32_t apiVersion = getApiVersion();
 		if (apiVersion != VP_LIBPLACEBO_PLUGIN_API_VERSION)
 		{
 			DebugLog::Log(
@@ -127,6 +123,13 @@ namespace
 			FreeLibrary(result.module);
 			return PluginExports{};
 		}
+		const auto isBeta = reinterpret_cast<bool (__cdecl*)()>(
+            GetProcAddress(result.module, VP_LIBPLACEBO_FLAVOR_EXPORT));
+        if (!isBeta || isBeta() != beta) {
+            DebugLog::Log("VP Renderer plugin flavor mismatch: path=%ls", pluginPath.c_str());
+            FreeLibrary(result.module);
+            return PluginExports{};
+        }
 
         const auto diagnostics=reinterpret_cast<VideoProcessorLibplaceboConfigureDiagnosticFn>(
             GetProcAddress(result.module,VP_LIBPLACEBO_DIAGNOSTIC_EXPORT));
