@@ -305,6 +305,19 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="VPRendererFilterTests.cpp" />
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterMediaTypes.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterRepack.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterPluginCheck.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterRegistration.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="SceneDetectorTests.cpp" />
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
