@@ -10492,11 +10492,16 @@ struct LibplaceboVideoRenderer::Impl
 		// new cause is always logged.
 		if (motionInvalidations <= 50 || now - motionInvalidateLogTick >= 5000 || cause != motionInvalidateLoggedCause)
 		{
+			// The text as before the MotionValidity wiring (the harness reads it): a frame gap
+			// names its own cause ("missed frames", "backlog flush", "queue overflow drop",
+			// "pulldown lock change"), and a release pending with other causes reads as the
+			// resync it is (the strongest request names the line, as the old flag did).
 			const char* detail = pending.cause == MotionValidity::Cause::Gap ?
 				motionGapDetail.load(std::memory_order_relaxed) : nullptr;
-			DebugLog::Log("De-judder: motion invalidated (%s%s%s; %llu in total); the vectors' users fall back until a fresh pair",
-				MotionValidity::Describe(pending.cause), detail ? ": " : "", detail ? detail : "",
-				static_cast<unsigned long long>(motionInvalidations));
+			const char* text = pending.release && !MotionValidity::ReleasesResources(pending.cause) ?
+				MotionValidity::Describe(MotionValidity::Cause::Resync) : detail ? detail : MotionValidity::Describe(pending.cause);
+			DebugLog::Log("De-judder: motion invalidated (%s; %llu in total); the vectors' users fall back until a fresh pair",
+				text, static_cast<unsigned long long>(motionInvalidations));
 			motionInvalidateLogTick = now;
 			motionInvalidateLoggedCause = cause;
 			motionRecoveryLogPending = true;
