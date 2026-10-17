@@ -51,3 +51,10 @@ the chain, before building more on it. Nothing here changes settings permanently
 - Set the switches back as you prefer; send the log (or the levels lines + any oddities) and the
   recordings location. Claude turns them into a chain-matrix "DV tunnel on" axis and the next steps
   (metadata layer, L1 into the LED look-ahead, a VP curve only if a shortfall shows).
+
+## Optional - HDFury Integral 2 in place of the Vertex2
+
+- Load a custom EDID with a full TV-led Dolby Vision block (copied from the Vertex2's working DV EDID, or from a DV TV) into one of the Integral 2's custom banks. Not an LLDV-only EDID (that makes the player send LLDV, not the tunnel). Claude can verify the EDID .bin first (Dolby VSVDB OUI 00-D0-46, TV-led; 4K60 RGB 8-bit; HDR10; checksums).
+- Scaling off, no custom HDR injection, no colour/range/chroma conversion.
+- Play a DV title: the levels line and DV card showing DM = tunnel intact; black/Fallback = bits altered.
+- Also note the DeckLink pixel format at 4K24/30/60 (Quad HDMI Recorder: RGB 4:4:4 likely only to 4K30).

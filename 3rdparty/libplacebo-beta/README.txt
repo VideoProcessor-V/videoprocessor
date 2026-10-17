@@ -47,7 +47,7 @@ Fork-only additions since (source/fl35-patches; any libplacebo rebuild must carr
  0003 renderer: optional rgba32f FBOs (output_fbo_float32, fbo_float32; VP S2)
  0004 custom_mpv: pl_mpv_user_shader_set_texture (2026-10-12; VP delta 8 R1): a
       user shader's own //!TEXTURE is pointed at a caller texture (the sigma-delta's
-      VPVEC vector field) and restored before destroy. One new export (515).
+      VPVEC vector field) and restored before destroy. One new export (the DLL exports 514 names; the .def lists 513, leaving out the internal memcpy_layout).
 Build (0004): MSYS2 mingw64, options as in VP-FORK.md; all 13 library tests passed.
 lib/libplacebo-377.lib regenerated from lib/libplacebo-377.def (MSVC lib.exe /def).
 On every rebuild: add each fork export (0004: pl_mpv_user_shader_set_texture) to
