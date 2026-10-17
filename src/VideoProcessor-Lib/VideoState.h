@@ -39,6 +39,11 @@ public:
 	// TV-led Dolby Vision HDMI RGB tunnel in DeckLink R210.
 	bool dolbyVisionTunnel = false;
 
+	// [general] newlldv: PQ / BT.2020 was inferred for a BT.2020, 10/12-bit
+	// source without an HDR InfoFrame (LLDV or HDR10 with the flag dropped).
+	// Rule variable hdr_inferred.
+	bool hdrInferred = false;
+
 	// Will be non-null if valid
 	HDRDataSharedPtr hdrData = nullptr;
 

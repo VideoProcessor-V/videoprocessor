@@ -333,6 +333,7 @@
     <ClInclude Include="StateVariables.h" />
     <ClInclude Include="UnifiedProfileRuntime.h" />
 	<ClInclude Include="SceneDetector.h" />
+	<ClInclude Include="HdrInference.h" />
 	<ClInclude Include="SourceResolutionDetector.h" />
 	<ClInclude Include="VectorStore.h" />
 	<ClInclude Include="MotionValidity.h" />
@@ -494,6 +495,7 @@
     <ClCompile Include="StateVariables.cpp" />
     <ClCompile Include="UnifiedProfileRuntime.cpp" />
 	<ClCompile Include="SceneDetector.cpp" />
+	<ClCompile Include="HdrInference.cpp" />
 	<ClCompile Include="SourceResolutionDetector.cpp" />
 	<ClCompile Include="KernelInverse.cpp" />
     <ClCompile Include="StringUtils.cpp" />

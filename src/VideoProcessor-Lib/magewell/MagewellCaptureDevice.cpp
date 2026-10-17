@@ -16,6 +16,7 @@
 
 #include <DebugLog.h>
 #include <VideoState.h>
+#include <AviInfoFrameColorimetry.h>
 
 #include <stdexcept>
 #include <algorithm>
@@ -297,6 +298,7 @@ void MagewellCaptureDevice::StartCapture(CaptureRunToken captureRunToken)
 		// Bug hunt 2026-10-17: each capture run logs its first HDR InfoFrame.
 		std::lock_guard<std::mutex> lock(m_hdrInfoFrameLogMutex);
 		m_lastHdrInfoFrameLog.clear();
+		m_lastAviInfoFrameLog.clear();
 	}
 	HCHANNEL channel = nullptr;
 	try
@@ -572,6 +574,45 @@ bool MagewellCaptureDevice::ReadHdrInfoFrame(
 }
 
 
+bool MagewellCaptureDevice::ReadAviBt2020(
+	HCHANNEL channel, const SignalDescription& signal) const
+{
+	DWORD validFlags = 0;
+	if (m_sdkInstance->Api().MWGetHDMIInfoFrameValidFlag(channel, &validFlags) != MW_SUCCEEDED ||
+		(validFlags & MWCAP_HDMI_INFOFRAME_MASK_AVI) == 0)
+		return false;
+	HDMI_INFOFRAME_PACKET packet = {};
+	if (m_sdkInstance->Api().MWGetHDMIInfoFramePacket(
+		channel, MWCAP_HDMI_INFOFRAME_ID_AVI, &packet) != MW_SUCCEEDED)
+		return false;
+	// The payload union starts at PB1 (the HDR read above takes byEOTF, PB1,
+	// from the same offset), so the AVI bytes PB1..PB3 are read from there.
+	const uint8_t* payload =
+		reinterpret_cast<const uint8_t*>(&packet.hdrInfoFramePayload);
+	const AviColorimetry avi = DecodeAviColorimetry(payload, 3);
+	// Cross-check the AVI pixel encoding with the SDK's RGB status; a mismatch
+	// means the layout assumption does not hold, so the AVI read is ignored.
+	const bool consistent = avi.valid && avi.pixelEncoding == 0 &&
+		signal.colorFormat == MWCAP_VIDEO_COLOR_FORMAT_RGB;
+	char description[160] = {};
+	_snprintf_s(description, _TRUNCATE, "Y=%d C=%d EC=%d bt2020=%d consistent=%d",
+		avi.pixelEncoding, avi.colorimetry, avi.extended, avi.bt2020 ? 1 : 0,
+		consistent ? 1 : 0);
+	bool changed = false;
+	{
+		std::lock_guard<std::mutex> lock(m_hdrInfoFrameLogMutex);
+		if (m_lastAviInfoFrameLog != description)
+		{
+			m_lastAviInfoFrameLog = description;
+			changed = true;
+		}
+	}
+	if (changed)
+		DebugLog::Log("Magewell AVI InfoFrame (RGB input): %s", description);
+	return consistent && avi.bt2020;
+}
+
+
 bool MagewellCaptureDevice::ReadSignal(
 	HCHANNEL channel, SignalDescription& signal) const
 {
@@ -660,7 +701,12 @@ bool MagewellCaptureDevice::ReadSignal(
 		break;
 	default:
 		// PQ and HLG imply BT.2020 content regardless of what the wire says.
+		// RGB carries its colorimetry only in the AVI InfoFrame (newlldv:
+		// BT.2020 RGB without a DRM InfoFrame must not read as BT.709).
 		if (signal.eotf == EOTF::PQ || signal.eotf == EOTF::HLG)
+			signal.colorSpace = ColorSpace::BT_2020;
+		else if (signal.colorFormat == MWCAP_VIDEO_COLOR_FORMAT_RGB &&
+			ReadAviBt2020(channel, signal))
 			signal.colorSpace = ColorSpace::BT_2020;
 		else if (signal.height >= 720)
 			signal.colorSpace = ColorSpace::REC_709;

@@ -336,7 +336,13 @@ Options:
       If omitted or disabled, the legacy timestamp/delivery path is unchanged.
 
   /newlldv
-      Enable the opt-in BT.2020 + SDR LLDV heuristic (requires both LLDV follow modes).
+      Treat BT.2020 without an HDR flag as HDR (LLDV/HDR10): a BT.2020, 10/12-bit
+      signal without an HDR InfoFrame is treated as PQ after 1.5 s, with
+      [lldv.*] profile metadata.
+
+  /newlldv_sdr_veto
+      With /newlldv, return real SDR sent as BT.2020 to SDR from picture
+      statistics (at a cut, after SDR evidence in two shots). Default on.
 
   /noui
       Hide the user interface; show video only.
@@ -824,6 +830,7 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	// renderer implementation details in the UI.
 	AppendConfigBoolOption(arguments, config, { "scene_correction_basic" }, L"/scene_correction_basic");
 	AppendConfigBoolOption(arguments, config, { "newlldv", "new_lldv" }, L"/newlldv");
+	AppendConfigBoolOption(arguments, config, { "newlldv_sdr_veto" }, L"/newlldv_sdr_veto");
 		AppendConfigBoolOption(arguments, config, { "dolby_vision_tunnel" }, L"/dolby_vision_tunnel");
 	AppendConfigBoolOption(arguments, config, { "noui", "no_ui" }, L"/noui");
 	AppendConfigBoolOption(arguments, config, { "startminimized", "start_minimized" }, L"/startminimized");
@@ -1142,6 +1149,7 @@ bool IsBooleanCommandLineOption(const wchar_t* argument)
 		IsCommandLineOption(argument, L"/disable_detection_features") ||
 		IsCommandLineOption(argument, L"/scene_correction_basic") ||
 		IsCommandLineOption(argument, L"/newlldv") ||
+		IsCommandLineOption(argument, L"/newlldv_sdr_veto") ||
 		IsCommandLineOption(argument, L"/dolby_vision_tunnel") ||
 		IsCommandLineOption(argument, L"/startminimized") ||
 		IsCommandLineOption(argument, L"/active_output_sweep") ||
@@ -2063,6 +2071,11 @@ BOOL CVideoProcessorApp::InitInstance()
 			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs, L"/newlldv", booleanValue))
 			{
 				dlg.EnableNewLldvHeuristic(booleanValue);
+			}
+			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs,
+				L"/newlldv_sdr_veto", booleanValue))
+			{
+				dlg.EnableHdrInferenceSdrVeto(booleanValue);
 			}
 			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs,
 				L"/dolby_vision_tunnel", booleanValue))

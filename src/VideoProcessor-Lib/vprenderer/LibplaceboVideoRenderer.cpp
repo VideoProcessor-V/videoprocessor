@@ -1526,6 +1526,7 @@ namespace
 				else if (variable == "key") value = "NONE";
 				else if (variable == "range" || variable == "scan") return false; // Reserved vocabulary until the capture API exposes it.
 				else if (variable == "hdr_metadata") value = state.hdrData && state.hdrData->IsValid() ? "true" : "false";
+				else if (variable == "hdr_inferred") value = state.hdrInferred ? "true" : "false";
 				else if (variable == "interlaced") value = state.displayMode && state.displayMode->IsInterlaced() ? "true" : "false";
 				else if (!state.displayMode) return false;
 				else if (variable == "source_rate") value = DisplayRuleExpression::NominalSourceRateText(state.displayMode->RefreshRateHz());   // rounded, shared spelling (audit 2026-10-16)

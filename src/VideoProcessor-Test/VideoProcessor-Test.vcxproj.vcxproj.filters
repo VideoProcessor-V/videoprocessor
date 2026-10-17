@@ -95,6 +95,7 @@
       <Filter>Resource Files</Filter>
     </ClCompile>
     <ClCompile Include="AnalysisLumaRangeTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="HdrInferenceTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="NativeRgbAnalysisTests.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>

@@ -59,6 +59,7 @@
 #include <ApplicationInterface.h>
 #include <ConfigurationApplyPolicy.h>
 #include <CaptureVideoStatePolicy.h>
+#include <HdrInference.h>
 #include <ConfigEditorCore.h>
 #include "ConfigurationRpcServer.h"
 #include "ModernOperatorView.h"
@@ -90,6 +91,7 @@
 #define WM_MESSAGE_RENDERER_QUEUE_CONTRACT_CHANGED       (WM_APP + 21)
 #define WM_MESSAGE_CONFIGURATION_RPC_REQUEST             (WM_APP + 22)
 #define WM_MESSAGE_PROJECTOR_TEST_DONE                   (WM_APP + 23)
+#define WM_MESSAGE_HDR_INFERENCE_PICTURE                 (WM_APP + 24)
 
 static_assert(WM_MESSAGE_DIRECTSHOW_NOTIFICATION !=
 	WM_MESSAGE_DIRECTSHOW_OWNER_COMPLETION,
@@ -183,6 +185,7 @@ public:
 	void SceneCorrectionUpstreamSample(bool enabled);
 	void SubtitleRepositioning(SubtitleRepositionMode mode);
 	void EnableNewLldvHeuristic(bool enabled = true);
+	void EnableHdrInferenceSdrVeto(bool enabled = true);
 	void EnableDolbyVisionTunnel(bool enabled = true);
 	void EnableBoundedInvalidCaptureRecovery(bool enabled);
 	void SetLldvMaxCll(double value);
@@ -367,7 +370,24 @@ protected:
 	bool m_lldvProfileApplyPending = false;
 	bool m_newLldvCandidateActive = false;
 	bool m_newLldvCandidateConfirmed = false;
-	DWORD m_newLldvCandidateSince = 0;
+	// Owner decision 2026-10-17: newlldv infers PQ for BT.2020, 10/12-bit,
+	// no-HDR-InfoFrame signals (LLDV and HDR10 with the flag dropped), with a
+	// picture-statistics SDR veto ([general] newlldv_sdr_veto, default on).
+	HdrInferenceTracker m_hdrInference;
+	bool m_hdrInferenceSdrVeto = true;
+	BitDepth m_captureInputBitDepth = BitDepth::UNKNOWN;
+	bool m_hdrInferredApplied = false;
+	std::string m_lastHdrInferenceEligibilityLog;
+	uint64_t m_hdrVetoUnsupportedLoggedGeneration = 0;
+	// The capture thread measures pictures only while this is set; the
+	// generation discards results from an earlier measuring period.
+	std::atomic<bool> m_hdrVetoMeasure{ false };
+	std::atomic<uint64_t> m_hdrVetoGeneration{ 0 };
+	// Capture-thread-only veto measurement state.
+	uint64_t m_hdrVetoCaptureGeneration = 0;
+	ULONGLONG m_hdrVetoLastSampleTick = 0;
+	HdrVetoCutDetector m_hdrVetoCutDetector;
+	std::vector<uint16_t> m_hdrVetoGrid;
 	int m_lldvChangeRestartDelaySeconds = -1;
 	bool m_lldvRestartPending = false;
 
@@ -1179,8 +1199,12 @@ protected:
 		const char* trigger);
 	void LivenessWatchdogWorker();
 	void ApplyNoUiLayout();
-	bool UpdateNewLldvCandidate();
-	bool IsNewLldvModeSelected();
+	HdrInferenceUpdate UpdateNewLldvCandidate();
+	bool HdrModesPermitInference();
+	HdrInferenceSignal BuildHdrInferenceSignal();
+	void UpdateHdrVetoMeasurement();
+	void ApplyHdrInferenceVeto(const HdrInferenceUpdate& update, const char* source);
+	void MeasureHdrVetoPicture(const VideoStateComPtr& state, const VideoFrame& frame);
 
 
 	bool BuildPushVideoState();
@@ -1248,6 +1272,7 @@ protected:
 	afx_msg LRESULT OnConfigurationEditorHotkey(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnConfigurationRpcRequest(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnProjectorTestDone(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnMessageHdrInferencePicture(WPARAM wParam, LPARAM lParam);
 	// RS-232 connection test (Config's LED drive page): the RPC waiting for it
 	// and its result, handed from the worker thread to the UI thread.
 	void StartProjectorTest(const std::shared_ptr<ConfigurationRpcServer::Pending>& pending);
