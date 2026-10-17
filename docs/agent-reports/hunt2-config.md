@@ -95,7 +95,8 @@ None. These are pure correctness and coverage fixes. New controls default to "No
   - The GitHub account was then suspended (HTTP 403), so neither the log nor the Config-test step could be read.
   - The base predates the exclusion of the 4 runner-bound tests, so this summary failure is expected. It is not confirmed.
   - Earlier runs: the a branch's run 39064201153 failed to build with C2001, which is fixed in 434c6ca7. The b and c runs were cancelled as redundant.
-- Local verification (laptop) of 434c6ca7, in the detached worktree D:\codexideoprocessor\hunt2-config-b, slot1:
+- Local verification (laptop) of 434c6ca7, in the detached worktree D:/codex/videoprocessor\hunt2-config-b, slot1:
   - Built VideoProcessor-ConfigTests, VideoProcessor-Test and VideoProcessor-VPRendererBeta (x64 Release, /p:VpCiNoMagewell=true; this machine has no Magewell SDK at E:\).
   - CPU tests: vstest with the CI filter (FullyQualifiedName!~RendererCaptureHarnessTests): 3094 run, 3094 passed, 0 failed. The 4 tests excluded on the runner pass here.
-  - Config tests: `toolsun_config_tests.ps1 -Shards 1`, off screen. 141 passed and 1 failed. The failure was "config keys activate the renderer and matcher settings": the Beta renderer DLL was not yet built in that worktree. After building it, that test passes, so 142 of 142 pass. One test is skipped because it needs a real window.
+  - Config tests: `tools
+un_config_tests.ps1 -Shards 1`, off screen. 141 passed and 1 failed. The failure was "config keys activate the renderer and matcher settings": the Beta renderer DLL was not yet built in that worktree. After building it, that test passes, so 142 of 142 pass. One test is skipped because it needs a real window.
