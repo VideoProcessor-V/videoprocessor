@@ -255,7 +255,8 @@ private:
 		std::vector<QueuedFrame>& previewFrames,
 		size_t queuedFutureFrames,
 		uint64_t lookaheadPolicyGeneration,
-		uint64_t continuityGeneration);
+		uint64_t continuityGeneration,
+		size_t activePictureFrames);   // the leading frames for the active picture; the rest feed the LED only
 	void ClearQueue(const char* reason = "queue clear");
 	void BeginQueueGeneration(const char* reason, bool clearStopRequest = false);
 	void ClearQueueLocked(const char* reason);

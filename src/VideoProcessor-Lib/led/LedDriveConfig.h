@@ -290,8 +290,8 @@ namespace LedDrive
 		// (active_picture_lookahead_frames). Above 0 the LED uses at most this
 		// far ahead, in source frames at the measured rate; the renderer can
 		// ask for a deeper walk with LedDriveModule::WantedLookaheadFrames()
-		// (not wired yet: needs the renderer's walk to visit the deeper
-		// frames for the LED observer only).
+		// (wired 2026-10-17: the walk visits the deeper frames for the LED
+		// observer only, so this extends the depth as well as capping it).
 		int ledLookaheadMs = 0;
 		// Restore switch (bug hunt 2026-10-17, default on): led_wtw_passthrough -
 		// under a boost (gain > 1) whiter-than-white keeps its own value in the

@@ -8268,17 +8268,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto* heading = new QLabel(QStringLiteral("<b>Repair dropped frames / hiccups</b>"));
             heading->setObjectName(controlName(sectionPrefix, QStringLiteral("hiccup_repair_heading")));
             form->addRow(heading);
-            // Post-merge audit 2026-10-17: the fill runs only while interpolating (the
-            // renderer's fillGap needs it); the separation comes with render-ahead.
+            // Render-ahead 2026-10-17: the renderer decides the fill independently of
+            // interpolation, so hiccup repair works with motion smoothing off.
             form->addRow(QString(), helpLabel(QStringLiteral(
-                "Currently works only while motion smoothing is on; standalone hiccup repair is coming.")));
+                "Works with motion smoothing on or off (under test, off by default).")));
         }
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
             { QStringLiteral("off"), QStringLiteral("on") });
         fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
         fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (pair across 1-3 missed frames)"));
         fillGaps->setToolTip(QStringLiteral(
-            "Currently works only while motion smoothing is on; standalone hiccup repair is coming. "
+            "Under test; works with motion smoothing on or off. "
             "When a stream loses one to three frames, On pairs the "
             "frames either side of the gap and fills the missing refreshes with pictures at their true time (the "
             "motion is checked as always; untrusted areas hold). Off (default) keeps the rule that no motion is "
@@ -8297,6 +8297,44 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Under test (default on). A jump in the capture's timestamps is treated as a break: no motion is carried "
             "across it. The film clock stays continuous when the measured capture rate replaces or resets the nominal one, "
             "and the 50/60p timeline keeps the last measured display rate while it is re-measured. Off: the earlier behaviour."));
+        // Render-ahead (docs/VP-render-ahead-design.md, owner 2026-10-17): processing follows the
+        // source frame rate, not the display refresh. Off by default until the on-screen runs pass.
+        auto* renderAhead = addChoice(QStringLiteral("De-judder: render ahead (under test)"), QStringLiteral("render_ahead"),
+            { QStringLiteral("off"), QStringLiteral("on") });
+        renderAhead->setToolTip(QStringLiteral(
+            "Under test (default off). On: a frame's de-judder in-between pictures are queued straight after the frame, "
+            "without waiting for each refresh, so the next frame starts rendering at once. The GPU then has a whole "
+            "source frame's time (41.7 ms at 24p) for a frame and its in-betweens, instead of one refresh (16.7 ms at "
+            "60 Hz): processing follows the source frame rate, not the display's. Cost: about the in-betweens' span "
+            "of extra display latency, reported so audio stays in step. Off: each in-between waits for the screen, as "
+            "before."));
+        auto* dejudderGate = addChoice(QStringLiteral("De-judder: GPU time budget (under test)"), QStringLiteral("dejudder_gate"),
+            { QStringLiteral("auto"), QStringLiteral("period"), QStringLiteral("refresh") });
+        dejudderGate->setItemText(dejudderGate->findData(QStringLiteral("auto")), QStringLiteral("Auto (per frame with render ahead)"));
+        dejudderGate->setItemText(dejudderGate->findData(QStringLiteral("period")), QStringLiteral("Per source frame"));
+        dejudderGate->setItemText(dejudderGate->findData(QStringLiteral("refresh")), QStringLiteral("Per refresh (the earlier rule)"));
+        dejudderGate->setToolTip(QStringLiteral(
+            "How VP decides the de-judder fits the GPU. Per source frame: the GPU work of a frame and its in-betweens "
+            "must fit the share of a source frame set below. When it does not, VP steps down one rung at a time and "
+            "never lowers precision: first the dither reuses the de-judder's motion instead of its own search, then the "
+            "least visible in-between is dropped, then the next, and last the picture holds (plain 3:2). It steps back "
+            "up when there is room. Per refresh: the earlier rule (a new frame's whole render plus 4 ms must fit one "
+            "refresh). Auto (default): per source frame with render ahead on, otherwise per refresh. Per source frame "
+            "without render ahead acts as per refresh."));
+        auto* renderAheadUtilisation = addText(QStringLiteral("De-judder: share of a source frame to use"),
+            QStringLiteral("render_ahead_utilisation"));
+        renderAheadUtilisation->setValidator(new QDoubleValidator(0.5, 1.0, 2, renderAheadUtilisation));
+        renderAheadUtilisation->setPlaceholderText(QStringLiteral("0.85"));
+        renderAheadUtilisation->setToolTip(QStringLiteral(
+            "With the per-source-frame budget: the share of a source frame's time the GPU may be busy (0.5 to 1.0; "
+            "default 0.85 = 85 %). The rest is margin for clock swings and the desktop. Higher keeps more in-betweens "
+            "on a slow GPU but risks late frames."));
+        auto* renderAheadCredit = addChoice(QStringLiteral("Render ahead: shorten the input queue (under test)"),
+            QStringLiteral("render_ahead_queue_credit"), { QStringLiteral("off"), QStringLiteral("on") });
+        renderAheadCredit->setToolTip(QStringLiteral(
+            "With render ahead on. On: the input queue is shortened by the frames render ahead adds, so the total "
+            "delay from capture to screen stays as it was. Off (default): the queue is unchanged and the added latency "
+            "is reported for audio."));
         // Film grain (owner 2026-10-17: never averaged or interpolated away; docs/audit/grain-audit-2026-10-17.md).
         // Each default is the faithful path; the other value is the established output.
         auto* interpolationGrain = addChoice(QStringLiteral("50/60p interpolation keeps film grain"),
@@ -9809,6 +9847,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
                     { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" },
+                    // Render-ahead (docs/VP-render-ahead-design.md).
+                    { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
                     { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
                     { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
@@ -9824,7 +9864,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if ((key.startsWith(QStringLiteral("dejudder_")) || key.startsWith(QStringLiteral("dither_")) ||
                         key.startsWith(QStringLiteral("adaptive_")) || key == QStringLiteral("sdr_white_headroom") ||
                         key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength") ||
-                        key == QStringLiteral("ssim_bitrate_floor") || key.startsWith(QStringLiteral("source_resolution_auto_")) ||
+                        key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("render_ahead_utilisation") ||
+                        key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                         key.startsWith(QStringLiteral("source_resolution_evidence_"))) &&
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
@@ -13140,9 +13181,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* lookaheadMs = numberControl(led, QStringLiteral("led_lookahead_ms"), 0, 2000, 0, 10, 0,
         QStringLiteral("queue depth"));
     lookaheadMs->setToolTip(QStringLiteral(
-        "Caps how far ahead the LED looks, in milliseconds (converted with the measured source rate): it can only "
-        "shorten the LED look-ahead, never deepen it. 0 (default) = no cap, as deep as the queue's look-ahead walk. "
-        "A deeper renderer walk is not wired yet, so values beyond the queue's depth change nothing."));
+        "How far ahead the LED looks, in milliseconds (converted with the measured source rate). It sets the depth "
+        "both ways: the renderer's walk over queued frames extends to it when it is deeper than the picture's own "
+        "look-ahead (only the LED uses the deeper frames), and it caps the LED below that depth. The walk never "
+        "goes past what is queued. 0 (default) = no setting: the LED looks as deep as the queue's look-ahead walk."));
     assistForm->addRow(QStringLiteral("LED look-ahead (ms)"), lookaheadMs);
     // Restore switch (bug hunt 2026-10-17): led_wtw_passthrough.
     auto* wtw = bindCheckField(QStringLiteral("Above-white keeps its value under a boost (fix under test)"), led,

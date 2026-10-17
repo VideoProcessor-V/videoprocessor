@@ -381,16 +381,21 @@ namespace LedDrive
 	{
 		if (!led.ledLandingMs || sentAt == std::chrono::steady_clock::time_point()) return -1.0;
 		const double sentWallMs = std::chrono::duration<double, std::milli>(sentAt - created).count();
-		double sentMs = timeMs;
+		// Render-ahead (BeginFrameAhead): a frame's time is its display time, aheadMs
+		// after its wall time; a send lands by the wall clock, so each frame's time is
+		// taken back to its wall time here (both 0 otherwise: unchanged).
+		const double previousMs = previousFrameMs - previousFrameAheadMs;
+		const double currentMs = timeMs - frameAheadMs;
+		double sentMs = currentMs;
 		if (previousFrameMs >= 0.0 && previousWallMs >= 0.0)
-			sentMs = previousFrameMs + std::max(0.0, std::min(sentWallMs - previousWallMs, timeMs - previousFrameMs));
+			sentMs = previousMs + std::max(0.0, std::min(sentWallMs - previousWallMs, currentMs - previousMs));
 		else
 		{
 			// Integration 2026-10-17: the first frame. Its wall time (lastFrameWallMs, set by
 			// BeginFrameAt just before) anchors timeMs; with a test or replay clock timeMs is
 			// not the wall clock, so "now" must not be assumed to be timeMs.
 			const double frameWallMs = lastFrameWallMs >= 0.0 ? lastFrameWallMs : NowMs();
-			sentMs = timeMs - std::max(0.0, frameWallMs - sentWallMs);
+			sentMs = currentMs - std::max(0.0, frameWallMs - sentWallMs);
 		}
 		return sentMs + latencyMs;
 	}
@@ -514,9 +519,24 @@ namespace LedDrive
 		return BeginFrameAt(sequence, NowMs(), sourceFpsIn);
 	}
 
+	CompensationGain LedDriveModule::BeginFrameAhead(uint64_t sequence, double aheadMs, double sourceFpsIn)
+	{
+		const double ahead = aheadMs > 0.0 && aheadMs < 1000.0 ? aheadMs : 0.0;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			nextFrameAheadMs = ahead;
+		}
+		return BeginFrameAt(sequence, NowMs() + ahead, sourceFpsIn);
+	}
+
 	CompensationGain LedDriveModule::BeginFrameAt(uint64_t sequence, double timeMs, double sourceFpsIn)
 	{
 		std::lock_guard<std::mutex> guard(mutex);
+		// Render-ahead: the previous and this frame's lead over the wall clock (0 for
+		// BeginFrame / a test clock), so that a send's landing stays on the wall clock.
+		previousFrameAheadMs = frameAheadMs;
+		frameAheadMs = nextFrameAheadMs;
+		nextFrameAheadMs = 0.0;
 		sourceFps = sourceFpsIn > 0.0 && sourceFpsIn < 1000.0 ? sourceFpsIn : 0.0;
 		double elapsed = framePeriodMs;
 		const double previousFrameMs = lastFrameMs, previousWallMs = lastFrameWallMs;   // led_landing_ms

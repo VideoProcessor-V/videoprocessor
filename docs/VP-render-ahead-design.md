@@ -150,3 +150,32 @@ drift-correction repeats.
     but late frames cannot be detected);
   - clock swings, which the ladder absorbs.
 - **Effort:** Phase 1 3-4 days, gate and ladder 2 days, tests 2 days.
+
+## As built (2026-10-17, feat/render-ahead; not yet judged on screen)
+
+- **Planner:** `vprenderer/RenderAheadPolicy.h` (pure). A owns the refreshes from its predicted
+  first vsync while (V - film time - L - lead) / P_s < 1. Phase <= 0 (a restart's lead) holds A.
+  A refresh A owns but does not render is a *hold*: the next present (the next extra, or B's
+  own present) gets SyncInterval 1 + holds (DXGI limit 4), so holds cost no GPU work. This
+  relies on DXGI's rule that a present with interval n is shown no sooner than n vblanks after
+  the previous one; the on-screen runs must confirm it.
+- **Lead:** `MaxExtras(P_s/P_d) x P_d` (the extras' span). The latency floor L is recorded
+  without the lead on chained frames and raw on anchors, so it cannot run away.
+- **Schedule:** predicted vsyncs chain from the last plan; closed loop on
+  `GetFrameStatistics` (no waits): a present shown > P_d/2 after its plan is late, the chain
+  moves and the next frame drops one extra. Without statistics it runs open loop.
+- **Gate:** `dejudder_gate auto|period|refresh` (auto = period with render_ahead; period
+  without render_ahead acts as refresh). p95 over 5 s of N (frame GPU timer), X and E (two
+  extra GPU timers on alternate extras, libplacebo pass timers suspended so disjoint
+  intervals never nest; CPU timings when the GPU timer is unsupported). Ladder: L0, L1 (only
+  when `dither_vectors own`), drop 1..n (smallest s*delta), hold. No automatic precision drop.
+- **Swapchain:** VP-owned chain only: buffers ceil(ratio)+2 (3..6; 6 before the rates are
+  measured), SetMaximumFrameLatency(3); otherwise 2 as before. The libplacebo-owned chain keeps
+  3 buffers / latency 2 (queued mode still works there, with less depth).
+- **Audio:** A's presentation target lead becomes its planned refresh minus Present's return.
+  `render_ahead_queue_credit on` lowers the dequeue depth by ceil(lead / P_s) (never below 2).
+- **LED:** `LedDriveModule::BeginFrameAhead` uses the chain's predicted refresh; sends still land
+  on the wall clock (led_landing_ms).
+- **Also in this branch:** hiccup repair without motion smoothing (the timeline presents a gap
+  pair alone; the matcher is kept while `interpolation_fill_gaps` is on), and the queued-frame
+  walk extended to the LED's `led_lookahead_ms` depth (the extra frames feed the LED only).

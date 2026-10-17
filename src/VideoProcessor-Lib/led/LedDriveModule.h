@@ -62,6 +62,10 @@ namespace LedDrive
 		CompensationGain BeginFrame(uint64_t sequence, double sourceFps = 0.0);
 		// The same with an explicit clock (tests).
 		CompensationGain BeginFrameAt(uint64_t sequence, double timeMs, double sourceFps = 0.0);
+		// Render-ahead (docs/VP-render-ahead-design.md step 6): a frame rendered aheadMs
+		// before it is displayed; its time is the predicted display time (now + aheadMs)
+		// and the sends' landing (led_landing_ms) stays on the wall clock.
+		CompensationGain BeginFrameAhead(uint64_t sequence, double aheadMs, double sourceFps = 0.0);
 		// Render thread, after a frame: the GPU pass's counts for a frame
 		// (sequence 0 when unknown).
 		void SubmitMeasurement(const RawMeasurement& raw, uint64_t sequence = 0);
@@ -131,7 +135,8 @@ namespace LedDrive
 		// led_lookahead_ms (review 2026-10-17) in source frames at the measured
 		// rate; 0 = the queue walk's own depth (active_picture_lookahead_frames).
 		// For the renderer: how far its queued-frame walk would have to reach
-		// for the LED alone (not wired in the renderer yet).
+		// for the LED alone (wired 2026-10-17: the walk visits max(active picture, this),
+		// the frames beyond the active picture feed the LED only).
 		size_t WantedLookaheadFrames() const;
 		// The smoothed exact / predicted ratio applied to predictions.
 		double CorrectionRatio() const;
@@ -197,6 +202,11 @@ namespace LedDrive
 		// audit 2026-10-16: NowMs() at the last BeginFrame (-1 before any),
 		// and the idle restore (led_idle_restore_s) done since it.
 		double lastFrameWallMs = -1.0;
+		// Render-ahead: how far ahead of the wall clock the next / the last / the
+		// previous frame's time is (0 = rendered when displayed, as before).
+		double nextFrameAheadMs = 0.0;
+		double frameAheadMs = 0.0;
+		double previousFrameAheadMs = 0.0;
 		bool idleRestored = false;
 		double framePeriodMs = 1000.0 / 60.0;
 		double sourceFps = 0.0;
