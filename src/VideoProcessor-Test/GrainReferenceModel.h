@@ -371,7 +371,7 @@ namespace GrainModel
 					ra += GrainPreserve::SplitAlongWeight(k) * rv;
 					ra2 += GrainPreserve::SplitAlongWeight(k) * rv * rv;
 				}
-				const double rho = std::fabs(ra) / std::sqrt(ra2 + 1e-12);
+				const double rho = GrainPreserve::SplitConsistency(ra, ra2, 1e-12);
 				const double gate = Smoothstep(GrainPreserve::kSplitCoherenceLo, GrainPreserve::kSplitCoherenceHi, coh) *
 					Smoothstep(GrainPreserve::kSplitConsistencyLo, GrainPreserve::kSplitConsistencyHi, rho);
 				const double base = lowc + ra * gate;

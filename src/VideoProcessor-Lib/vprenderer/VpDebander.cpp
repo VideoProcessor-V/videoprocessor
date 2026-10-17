@@ -55,7 +55,8 @@ if (p.x < sz.x && p.y < sz.y) {
         ra += along_w(k) * rv;
         ra2 += along_w(k) * rv * rv;
     }
-    vec4 rho = abs(ra) / sqrt(ra2 + rho_eps);
+    // The mean's significance: |mean| over its standard error (GrainPreserve::SplitConsistency).
+    vec4 rho = abs(ra) / sqrt(max(ra2 - ra * ra, vec4(0.0)) * along_inv_neff + rho_eps);
     vec4 base = lowc + ra * (smoothstep(coh_lo, coh_hi, coh) * smoothstep(rho_lo, rho_hi, rho));
     vec4 diff = abs(base - avg);
 #else
@@ -524,6 +525,7 @@ if (b.x < size.x && b.y < size.y) {
 			const float rhoEps = static_cast<float>(1e-12 * codeUnit * codeUnit);
 			const float cohLo = static_cast<float>(GrainPreserve::kSplitCoherenceLo), cohHi = static_cast<float>(GrainPreserve::kSplitCoherenceHi);
 			const float rhoLo = static_cast<float>(GrainPreserve::kSplitConsistencyLo), rhoHi = static_cast<float>(GrainPreserve::kSplitConsistencyHi);
+			const float alongInvNeff = static_cast<float>(GrainPreserve::SplitAlongInvNeff());
 			if (useSplit && !SplitLowBand(gpu, dispatch, in, slot, plane, ncomp, splitScale, codeUnit))
 				return false;
 			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
@@ -596,7 +598,7 @@ if (b.x < size.x && b.y < size.y) {
 				d[nd++] = Sampled("split_low", splitLow[slot][plane], true);
 				d[nd++] = Sampled("split_tensor", splitTensor[slot][plane], true);
 			}
-			pl_shader_var v[16];
+			pl_shader_var v[20];
 			int nv = 0;
 			v[nv++] = { pl_var_float("thr"), &thr, true };
 			v[nv++] = { pl_var_float("radius"), &radius, true };
@@ -618,6 +620,7 @@ if (b.x < size.x && b.y < size.y) {
 				v[nv++] = { pl_var_float("coh_hi"), &cohHi, true };
 				v[nv++] = { pl_var_float("rho_lo"), &rhoLo, true };
 				v[nv++] = { pl_var_float("rho_hi"), &rhoHi, true };
+				v[nv++] = { pl_var_float("along_inv_neff"), &alongInvNeff, true };
 			}
 			std::string header = "#define NCOMP " + std::to_string(ncomp) + "\n";
 			if (useHold) header += "#define HOLD 1\n";

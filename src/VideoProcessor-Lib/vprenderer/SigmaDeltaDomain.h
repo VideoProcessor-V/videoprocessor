@@ -45,7 +45,7 @@ namespace SigmaDeltaDomain
 
 	inline CodeLimits Limits(int colorBits, bool full)
 	{
-		const int bits = std::clamp(colorBits, 8, 16);
+		const int bits = (std::min)((std::max)(colorBits, 8), 16);
 		const double unit = std::ldexp(1.0, bits - 8);
 		CodeLimits l;
 		l.min = full ? 0.0 : unit;
@@ -66,9 +66,9 @@ namespace SigmaDeltaDomain
 	// decorrelation dither. Returns the emitted code; r is updated in place.
 	inline double QuantiseStep(double x, double& r, double d, const CodeLimits& limits, double noiseAmplitude)
 	{
-		const double k = std::clamp(std::floor(x + r + d + 0.5), limits.min, limits.max);
+		const double k = (std::min)((std::max)(std::floor(x + r + d + 0.5), limits.min), limits.max);
 		const double bound = ResidualBound(noiseAmplitude);
-		r = std::clamp(x + r - k, -bound, bound);
+		r = (std::min)((std::max)(x + r - k, -bound), bound);
 		return k;
 	}
 

@@ -126,12 +126,15 @@ vec4 NAME(vec2 p) \
 	// low band's structure tensor over kSplitTensorBlock px blocks) is a step's
 	// dipole whole, and grain's average along a line is small next to its RMS along
 	// that line. It is added where the contour is coherent (kSplitCoherence*) and
-	// consistent (|mean| / RMS of the residual along the line, kSplitConsistency*).
-	// CPU model (hunt 2, the GrainPreservationTests pictures): 8-bit steps 16 px wide in
-	// a 10-bit signal keep 3-28 % of the band fundamental with noise of 1-2 codes RMS
-	// (white or soft) or +/-1-step toggles on 10-20 % of the pixels (the spatial-share
-	// veto: 100 % at 2 codes, 91 % with 20 % toggles), clean bands 3 %; the noise passes
-	// at 0.96x or more and grain of 0.5-4 8-bit codes keeps 0.96-1.02x of its RMS.
+	// consistent along it (kSplitConsistency*): the mean's significance, |mean| over its
+	// standard error sqrt(variance x sum w^2) (hunt 2 lead sweep: |mean| / RMS fell
+	// below the gate once noise of half a step was added, so the steps' sharp part
+	// passed with the noise; soft 2-code noise kept 37 % of the band fundamental).
+	// CPU model (hunt 2 lead sweep, the GrainPreservationTests pictures): 8-bit steps 16 or
+	// 32 px wide in a 10-bit signal keep 3-18 % of the band fundamental with noise of 1-2
+	// codes RMS (white or soft) or +/-1-step toggles on 10-20 % of the pixels (the
+	// spatial-share veto: up to 100 %), clean bands 2-4 %; the noise passes at 0.95x or
+	// more and grain of 0.5-4 8-bit codes keeps 0.96-1.01x of its RMS.
 	// Cost: three half-resolution passes, a tensor pass per block, and 33 taps along
 	// the contour (two bilinear reads each) in the deband pass.
 	constexpr double kSplitSigma = 6.0;
@@ -140,7 +143,7 @@ vec4 NAME(vec2 p) \
 	constexpr double kSplitAlongStep = 2.0;
 	constexpr int kSplitAlongTaps = 16;          // each side
 	constexpr double kSplitCoherenceLo = 0.5, kSplitCoherenceHi = 0.8;
-	constexpr double kSplitConsistencyLo = 0.3, kSplitConsistencyHi = 0.55;
+	constexpr double kSplitConsistencyLo = 1.0, kSplitConsistencyHi = 2.0;   // standard errors
 	constexpr double kSplitTensorEps = 1e-6;    // codes^2 per px^2: a flat block is not coherent
 	// The tensor block in half-resolution px for a plane scale.
 	inline int SplitTensorHalfBlock(double scale)
@@ -159,6 +162,21 @@ vec4 NAME(vec2 p) \
 		}
 		const double d = k * kSplitAlongStep / kSplitAlongSigma;
 		return std::exp(-0.5 * d * d) / sum;
+	}
+
+	// sum w^2 of the normalised along-contour weights: the variance of their weighted mean
+	// per unit variance of independent samples (1 / the effective number of taps).
+	inline double SplitAlongInvNeff()
+	{
+		double s = 0.0;
+		for (int k = -kSplitAlongTaps; k <= kSplitAlongTaps; ++k) s += SplitAlongWeight(k) * SplitAlongWeight(k);
+		return s;
+	}
+	// The consistency of the residual along the contour: its weighted mean over the
+	// mean's standard error (ra, ra2 = the weighted mean and mean square).
+	inline double SplitConsistency(double ra, double ra2, double eps)
+	{
+		return std::fabs(ra) / std::sqrt((std::max)(ra2 - ra * ra, 0.0) * SplitAlongInvNeff() + eps);
 	}
 
 	// Gain limits of the per-block energy match (the interpolator's high band):
