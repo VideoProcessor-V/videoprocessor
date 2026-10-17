@@ -1157,5 +1157,115 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0, BoostExponent(ReadLedDriveConfig(offConfig)), 1e-12);
 			DeleteFileA(file);
 		}
+
+		// preposition_black_only (review 2026-10-17, default on): the CNTR
+		// hold and the pre-lift only while truly black (IsTrueBlack); a dark
+		// but visible picture gets the early ramp instead. Off = APL < 20.
+		TEST_METHOD(PrepositionBlackOnlyHoldsOnlyOnTrueBlack)
+		{
+			for (const bool blackOnly : { true, false })
+			{
+				LedDriveConfig config = Compensate();
+				config.blackPreliftMax = 120;
+				config.prepositionBlackOnly = blackOnly;
+				StatsBuilder bright(config);
+				double ahead = 0.0;
+				Lookahead look;
+				look.stats = Play(bright, ahead, 100.0, Frame(120.0));
+				look.cutAhead = true;
+				look.framesAhead = 8;
+				FrameStats dark;
+				dark.apl = dark.sustainedApl = 18.5;
+				dark.highlight = dark.sustainedHighlight = dark.maximum = 19.0;
+				Assert::IsFalse(IsTrueBlack(dark));
+				CompensateController visible(config);
+				visible.Reset(60);
+				const ControllerOutput out = visible.Tick(dark, 16.7, &look, true, true);
+				if (blackOnly)
+				{
+					Assert::IsFalse(out.preposition, L"on: a dark, visible picture is not held (no release step later)");
+					Assert::IsFalse(out.jump, L"on: the early ramp at the scene rate instead of the pre-lift jump");
+					Assert::IsTrue(out.lightCommand > 60 && out.lightCommand < 120);
+				}
+				else
+				{
+					Assert::IsTrue(out.preposition, L"off: held while very dark (APL < 20), as before");
+					Assert::AreEqual(120, out.lightCommand);
+				}
+				FrameStats black = dark;
+				black.apl = black.sustainedApl = 16.0;
+				black.highlight = black.sustainedHighlight = black.maximum = 16.0;
+				Assert::IsTrue(IsTrueBlack(black));
+				CompensateController onBlack(config);
+				onBlack.Reset(60);
+				const ControllerOutput blackOut = onBlack.Tick(black, 16.7, &look, true, true);
+				Assert::IsTrue(blackOut.preposition, L"truly black: pre-positioned either way");
+				Assert::AreEqual(120, blackOut.lightCommand);
+			}
+		}
+
+		// cut_lead: window (review 2026-10-17, experimental): a seen bright cut's
+		// jump goes out as soon as the cut enters the look-ahead window, then
+		// the LED holds (in-scene sends wait) until the cut arrives; off = the
+		// early ramp at the scene rate and the jump timed for the cut frame.
+		TEST_METHOD(CutLeadWindowJumpsWhenTheCutEntersTheWindow)
+		{
+			for (const bool lead : { true, false })
+			{
+				LedDriveConfig config = Compensate();
+				config.cutLeadWindow = lead;
+				StatsBuilder scene(config), bright(config);
+				double now = 0.0, ahead = 0.0;
+				Lookahead look;
+				look.stats = Play(bright, ahead, 100.0, Frame(120.0));
+				look.cutAhead = true;
+				look.framesAhead = 8;
+				CompensateController controller(config);
+				controller.Reset(130);   // the APL-30 scene's level
+				const FrameStats dim = Play(scene, now, 1000.0, Frame(30.0));
+				Assert::IsFalse(dim.cut);
+				ControllerOutput out = controller.Tick(dim, 16.7, &look, true, true);
+				if (lead)
+				{
+					Assert::AreEqual(255, out.lightCommand, L"the jump as the cut enters the window");
+					Assert::IsTrue(out.jump && out.cutLeadHold);
+					for (int tick = 0; tick < 5; ++tick)
+					{
+						out = controller.Tick(Play(scene, now, 1000.0 / 60.0, Frame(30.0)), 16.7, &look, true, true);
+						Assert::AreEqual(-1, out.lightCommand, L"nothing more until the cut");
+						Assert::IsTrue(out.cutLeadHold, L"in-scene sends wait (port reserve)");
+					}
+				}
+				else
+				{
+					Assert::IsTrue(out.lightCommand > 130 && out.lightCommand < 255 && !out.jump,
+						L"off: the early ramp at the scene rate");
+					Assert::IsFalse(out.cutLeadHold);
+				}
+				const FrameStats cut = Play(scene, now, 1000.0 / 60.0, Frame(120.0));
+				Assert::IsTrue(cut.cut);
+				out = controller.Tick(cut, 16.7, &look, true, true);
+				Assert::AreEqual(255, controller.Light(), L"at the scene's level on the cut");
+				Assert::IsFalse(out.cutLeadHold, L"the hold ends with the cut");
+				if (lead) Assert::AreEqual(-1, out.lightCommand, L"lead: already there, no second command");
+				else Assert::AreEqual(255, out.lightCommand, L"off: the seen cut's jump");
+			}
+			// A cut that leaves the window without arriving ends the hold.
+			LedDriveConfig config = Compensate();
+			config.cutLeadWindow = true;
+			StatsBuilder scene(config), bright(config);
+			double now = 0.0, ahead = 0.0;
+			Lookahead look;
+			look.stats = Play(bright, ahead, 100.0, Frame(120.0));
+			look.cutAhead = true;
+			CompensateController controller(config);
+			controller.Reset(130);
+			Assert::IsTrue(controller.Tick(Play(scene, now, 1000.0, Frame(30.0)), 16.7, &look, true, true).cutLeadHold);
+			look.cutAhead = false;
+			look.stats = Play(bright, ahead, 100.0, Frame(30.0));
+			const ControllerOutput after = controller.Tick(Play(scene, now, 1000.0 / 60.0, Frame(30.0)), 16.7,
+				&look, true, true);
+			Assert::IsFalse(after.cutLeadHold);
+		}
 	};
 }

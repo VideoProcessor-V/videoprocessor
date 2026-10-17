@@ -341,6 +341,7 @@ namespace LedDrive
 		area = 0.0;
 		previousApl = -1.0;
 		ramping = false;
+		cutLeadSent = false;
 	}
 
 	ControllerOutput CompensateController::Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead,
@@ -427,8 +428,12 @@ namespace LedDrive
 				// Not during a fade's gain hold unless the picture is truly
 				// black: the held gain would not compensate the LED's rise
 				// (audit stage7-step7c, Should fix 2).
+				// preposition_black_only (review 2026-10-17, default on): only
+				// while truly black, so a visible fade-in is never carried at
+				// cut_cntr_level and released in one step; off = APL < 20.
 				if (config.blackPreliftMax < 255 && !stats.cut && stats.apl < 20.0 &&
-					(!stats.fade || (stats.apl < 17.0 && stats.highlight < 20.0)))
+					(!stats.fade || IsTrueBlack(stats)) &&
+					(!config.prepositionBlackOnly || IsTrueBlack(stats)))
 				{
 					preposition = true;
 					target = std::max(target, std::min(aheadTarget,
@@ -462,6 +467,28 @@ namespace LedDrive
 		const double maxDown = (config.rateGainDown > 0.0 ? RampRate(distance, config.rateGainDown,
 			config.rateMinDown, config.rateMaxDown > 0.0 ? config.rateMaxDown : config.rateDown) :
 			config.rateDown) * elapsed / 1000.0;
+		// cut_lead: window (review 2026-10-17, experimental): a bright cut in
+		// the window beyond the command's frame - its jump now, then hold
+		// until the cut reaches the command's frame (the seen-cut jump below
+		// then has nothing left to do). The furthest frame stands for the new
+		// scene. On a dark picture the jump keeps black_prelift_max's cap.
+		bool leadHold = false;
+		if (!config.cutLeadWindow || !predicted || !ahead || !ahead->cutAhead || stats.cut)
+			cutLeadSent = false;
+		else if (!preposition)
+		{
+			const int aheadApl = std::max(0, static_cast<int>(ahead->stats.apl));
+			int leadTarget = std::max(config.ledFloorBlack, std::min(ceiling, aheadApl < 20 ?
+				config.ledFloorBlack : std::max(CurveLevel(config, aheadApl), floor)));
+			if (config.blackPreliftMax < 255 && stats.apl < 20.0)
+				leadTarget = std::min(leadTarget, std::max(config.blackPreliftMax, static_cast<int>(std::lround(level))));
+			leadHold = cutLeadSent || leadTarget > level + 0.5;
+			if (leadHold && !cutLeadSent)
+			{
+				target = leadTarget;
+				early = true;
+			}
+		}
 		// A seen cut lands now: jump to the new scene (the cut hides it). An
 		// unseen dark-to-bright cut: straight up, like the script's dump, so
 		// highlights are squashed only for the LED's response time.
@@ -482,6 +509,19 @@ namespace LedDrive
 			level = seenCut ? out.lightTarget : std::max(static_cast<double>(target), static_cast<double>(out.lightTarget));
 			ramping = false;
 			out.jump = true;
+		}
+		else if (leadHold)
+		{
+			// One command as the cut enters the window, then nothing more
+			// until it arrives.
+			if (!cutLeadSent)
+			{
+				level = target;
+				out.jump = true;
+				cutLeadSent = true;
+			}
+			ramping = false;
+			out.cutLeadHold = true;
 		}
 		else if (preposition)
 		{
@@ -535,7 +575,8 @@ namespace LedDrive
 			<< (out.lightCommand >= 0 ? " sent" : "")
 			<< " protection=" << protection << " area=" << area << " gain=" << out.gain
 			<< (stats.cut ? " cut" : "") << (stats.fade ? " fade" : "")
-			<< (seenCut ? " cut-jump" : brightDump ? " bright-dump" : "") << (covered ? "" : " reactive");
+			<< (seenCut ? " cut-jump" : brightDump ? " bright-dump" : "") << (out.cutLeadHold ? " cut-lead" : "")
+			<< (covered ? "" : " reactive");
 		out.log = log.str();
 		return out;
 	}

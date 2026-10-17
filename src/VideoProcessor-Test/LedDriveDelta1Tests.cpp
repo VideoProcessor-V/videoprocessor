@@ -1515,5 +1515,241 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0, module.CorrectionRatio(), 1e-12);
 			Assert::IsTrue(LedDriveModule(ProjectorConfig(), Compensate()).WantsPredictions());
 		}
+
+		// Review 2026-10-17: the new keys, their defaults and validation.
+		TEST_METHOD(Review20261017KeysAreReadWithTheirDefaults)
+		{
+			const LedDriveConfig defaults;
+			Assert::IsTrue(defaults.prepositionBlackOnly, L"preposition_black_only on by default");
+			Assert::IsTrue(defaults.ledLandingMs, L"led_landing_ms on by default");
+			Assert::IsFalse(defaults.cutLeadWindow, L"cut_lead off by default (experimental)");
+			Assert::AreEqual(0, defaults.ledLookaheadMs, L"led_lookahead_ms 0 = the queue walk's depth");
+			std::string error;
+			const std::string good = "[led_drive.Default]\npreposition_black_only: false\nled_landing_ms: false\n"
+				"cut_lead: window\nled_lookahead_ms: 380\n";
+			Assert::IsTrue(Validates(good, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(good);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::IsFalse(led.prepositionBlackOnly);
+			Assert::IsFalse(led.ledLandingMs);
+			Assert::IsTrue(led.cutLeadWindow);
+			Assert::AreEqual(380, led.ledLookaheadMs);
+			Assert::IsFalse(Validates("[led_drive.Default]\ncut_lead: early\n", error));
+			Assert::IsFalse(Validates("[led_drive.Default]\nled_lookahead_ms: 5000\n", error));
+		}
+
+		// led_lookahead_ms caps the LED's horizon in time (source frames at
+		// the measured rate) and is what the renderer would ask the walk for.
+		TEST_METHOD(LedLookaheadMsCapsTheHorizonInTime)
+		{
+			LedDriveConfig config = Compensate();
+			config.ledLookaheadMs = 100;
+			LedDriveModule module(ProjectorConfig(), config);
+			module.BeginFrameAt(0, 0.0, 24.0);
+			Assert::AreEqual<size_t>(2, module.WantedLookaheadFrames(), L"100 ms at 24p");
+			module.BeginFrameAt(0, FRAME_MS, 60.0);
+			Assert::AreEqual<size_t>(6, module.WantedLookaheadFrames(), L"100 ms at 60p");
+			config.ledLookaheadMs = 0;
+			LedDriveModule plain(ProjectorConfig(), config);
+			Assert::AreEqual<size_t>(0, plain.WantedLookaheadFrames(), L"0: the walk's own depth");
+			// A cut 8 frames away is acted on only once within 100 ms (6
+			// frames at 60p), although the walk sees 8.
+			auto firstLanding = [](int lookaheadMs)
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->contrast = 50;
+				LedDriveConfig led = Compensate();
+				led.ledLookaheadMs = lookaheadMs;
+				led.ledLandingMs = false;   // frame-exact landings for the comparison
+				LedDriveModule module(Port(50), led,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+				module.SubmitMeasurement(::Frame(120.0));
+				module.SetLookaheadDepth(8);
+				Predict(module, 1, 60, 30);
+				std::vector<double> levels(1, 255.0);
+				for (uint64_t sequence = 1; sequence <= 30; ++sequence)
+				{
+					module.BeginFrameAt(sequence, sequence * FRAME_MS, 60.0);
+					levels.push_back(module.ModelledLight());
+					WaitFor([&] { return !module.ProjectorStatus().busy; });
+				}
+				for (uint64_t sequence = 1; sequence < levels.size(); ++sequence)
+					if (levels[sequence] < 255.0) return sequence;
+				return uint64_t{ 0 };
+			};
+			Assert::AreEqual<uint64_t>(25, firstLanding(0), L"the walk's 8 frames");
+			Assert::AreEqual<uint64_t>(27, firstLanding(100), L"capped at 6 frames (100 ms at 60p)");
+		}
+
+		// led_landing_ms (review 2026-10-17): a send the driver held back for
+		// its command gap lands led_latency_ms after it was written (nearest
+		// frame), not latency frames after the frame it was written during.
+		TEST_METHOD(LandingIsTimedFromTheWriteInMilliseconds)
+		{
+			for (const bool landingMs : { true, false })
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->contrast = 50;
+				ProjectorConfig port = Port(100);
+				port.minCommandGapMs = 85;   // writes drift against the 50 ms frames
+				port.maxLevelsPerCommand = 0;
+				LedDriveConfig config = Compensate();
+				config.lookahead = false;
+				config.ledLandingMs = landingMs;
+				LedDriveModule module(port, config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.Start();
+				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+				const auto start = std::chrono::steady_clock::now();
+				auto clock = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); };
+				uint64_t sequence = 0;
+				// Bright frames until the module's frame period has settled on 50 ms.
+				module.SubmitMeasurement(Frame(235.0));
+				for (int frame = 0; frame < 40; ++frame)
+				{
+					module.BeginFrameAt(++sequence, clock());
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				const size_t firstWrite = projector->Writes().size();
+				std::vector<std::pair<double, double>> modelled;   // (frame time, modelled level)
+				module.SubmitMeasurement(Frame(16.0));
+				for (int frame = 0; frame < 40; ++frame)
+				{
+					const double now = clock();
+					module.BeginFrameAt(++sequence, now);
+					modelled.push_back({ now, module.ModelledLight() });
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				const double period = module.FramePeriodMs();
+				Assert::IsTrue(period > 40.0 && period < 75.0, (L"frame period " + std::to_wstring(period)).c_str());
+				const auto writes = projector->Writes();
+				const auto times = projector->WriteTimes();
+				int checked = 0, early = 0, outside = 0;
+				for (size_t i = firstWrite; i < writes.size(); ++i)
+				{
+					if (writes[i].rfind(":LPW1", 0) != 0 || writes[i].find('?') != std::string::npos) continue;
+					const int level = std::stoi(writes[i].substr(5));
+					const double written = std::chrono::duration<double, std::milli>(times[i] - start).count();
+					for (const auto& entry : modelled)
+						if (entry.second == level)
+						{
+							const double due = written + 100.0;
+							++checked;
+							if (entry.first < due - period / 2.0 - 3.0) ++early;
+							if (entry.first < due - period * 0.6 - 5.0 || entry.first > due + 100.0) ++outside;   // jitter margin
+							break;
+						}
+				}
+				Assert::IsTrue(checked >= 5, (L"landings checked: " + std::to_wstring(checked)).c_str());
+				// Off (whole frames from the frame each send was written during)
+				// is only exercised: under load its landings may fall either side.
+				Logger::WriteMessage((std::string(landingMs ? "on" : "off") + ": " + std::to_string(checked) +
+					" landings, " + std::to_string(early) + " early, " + std::to_string(outside) + " outside").c_str());
+				if (landingMs)
+					Assert::AreEqual(0, outside, L"on: every send lands at the frame nearest write + led_latency_ms");
+			}
+		}
+
+		// Bug hunt 2026-10-17 (internal_script): a CNTR whose write failed is
+		// sent again at the next tick with the value the script controller
+		// believes (it would never repeat it itself: CNTR stuck above need).
+		TEST_METHOD(ScriptResendsAFailedWriteAtTheNextTick)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.scriptPacing = false;
+			config.tickMs = 400;
+			ParseCurve("0:255, 255:255", config.curve);   // light stays at the ceiling
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			module.SubmitMeasurement(Frame(50.0));   // APL 45-60, no highlight: CNTR 51
+			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));   // that tick has ended
+			const int ticks = module.Ticks();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			module.SubmitMeasurement(Frame(50.0, 100, 235));   // a highlight: back to 50
+			Assert::IsTrue(WaitFor([&] { return module.Ticks() > ticks; }));
+			Assert::AreEqual(51, module.ProjectorStatus().lastSentContrast, L"the write of 50 failed");
+			const size_t before = projector->Writes().size();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = false;
+			}
+			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 3000),
+				L"CNTR 50 re-sent at the next tick");
+			const auto writes = projector->Writes();
+			Assert::IsTrue(std::count(writes.begin() + before, writes.end(), std::string(":CNTR50\r")) == 1,
+				L"once, with the controller's value");
+			std::this_thread::sleep_for(std::chrono::milliseconds(900));
+			const auto later = projector->Writes();
+			Assert::IsTrue(std::count(later.begin() + before, later.end(), std::string(":CNTR50\r")) == 1,
+				L"not repeated once it went through");
+			module.Stop();
+		}
+
+		// Bug hunt 2026-10-17 (internal_script): the idle restore decides from
+		// what the port last saw: CNTR 51 written, the write of 50 failed, so
+		// the script believes 50 - the restore still sends CNTR 50.
+		TEST_METHOD(ScriptIdleRestoreSendsContrastTheProjectorLastSaw)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.scriptPacing = false;
+			config.tickMs = 1500;
+			config.idleRestoreS = 1;
+			ParseCurve("0:255, 255:255", config.curve);
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			uint64_t sequence = 0;
+			// Frames keep coming (no idle restore) until the condition holds.
+			auto playUntil = [&](const std::function<bool()>& condition)
+			{
+				const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
+				while (!condition() && std::chrono::steady_clock::now() < end)
+				{
+					++sequence;
+					module.BeginFrameAt(sequence, sequence * FRAME_MS);
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				return condition();
+			};
+			module.SubmitMeasurement(Frame(50.0));
+			Assert::IsTrue(playUntil([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));   // that tick has ended
+			const int ticks = module.Ticks();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			module.SubmitMeasurement(Frame(50.0, 100, 235));
+			// Until the next tick has tried (and failed) 50.
+			Assert::IsTrue(playUntil([&] { return module.Ticks() > ticks; }));
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = false;
+			}
+			Assert::AreEqual(51, module.ProjectorStatus().lastSentContrast, L"the port last saw 51");
+			Assert::AreEqual(51, projector->contrast);
+			// Video stops: the idle restore runs before any further tick.
+			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 4000),
+				L"the idle restore sent CNTR 50 although the script believed 50");
+			module.Stop();
+		}
 	};
 }

@@ -158,11 +158,19 @@ vec4 hook()
         return vec4(v, color.a);
     bool linear = gain_domain > 0.5;
     vec3 x = linear ? spow(v, compensation_eotf) : v;
+    vec3 before = x;
     x *= gain;
     // Only a boost can push values past white; a reduction never needs the
     // knee. The knee acts on the bright end only; below black is untouched.
-    if (gain > 1.0)
+    // Bug hunt 2026-10-17: whiter-than-white (above 1, carried by the
+    // extended-range restore) keeps its own value instead of being rolled
+    // under white with the boosted picture. The knee's output stays below 1,
+    // so the result is still monotonic and WTW detail survives (owner rule:
+    // BTB and WTW kept in all cases).
+    if (gain > 1.0) {
         x = knee > 0.0001 ? soft_knee(x, knee) : min(x, vec3(1.0));
+        x = mix(x, before, vec3(greaterThan(before, vec3(1.0))));
+    }
     color.rgb = linear ? spow(x, 1.0 / compensation_eotf) : x;
     return color;
 }

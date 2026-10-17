@@ -1028,5 +1028,30 @@ namespace VideoProcessorTest
 					std::wstring(bad, bad + strlen(bad)).c_str());
 			}
 		}
+
+		// Bug hunt 2026-10-17: CancelLight (leaving compensate) drops the rest
+		// of a split dimming drop, so it does not keep landing under the next
+		// mode; a value already being written may still go out.
+		TEST_METHOD(CancelLightStopsASplitDrop)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.minCommandGapMs = 100;
+			config.maxLevelsPerCommand = 10;
+			auto driver = OpenDriver(projector, config);
+			Assert::IsTrue(driver->SetLightNow(255, 0));
+			const size_t before = LightCommands(projector->Writes()).size();
+			driver->SetLight(100);   // split: 245, 235, ... one per command gap
+			Assert::IsTrue(WaitFor([&] { return LightCommands(projector->Writes()).size() >= before + 2; }));
+			driver->CancelLight();
+			const size_t atCancel = LightCommands(projector->Writes()).size();
+			std::this_thread::sleep_for(std::chrono::milliseconds(600));
+			const size_t after = LightCommands(projector->Writes()).size();
+			Assert::IsTrue(after <= atCancel + 1, (L"LPW1 writes after the cancel: " +
+				std::to_wstring(after - atCancel)).c_str());
+			Assert::IsTrue(projector->light >= 215, L"the drop stopped near where it was");
+			Assert::IsFalse(driver->Status().busy, L"nothing left waiting");
+			driver->Close();
+		}
 	};
 }

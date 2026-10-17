@@ -3,6 +3,7 @@
 #include "LedDriveConfig.h"
 #include "SerialPort.h"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -47,6 +48,12 @@ namespace LedDrive
 		// The same for CNTR values (7c-1).
 		int contrastSends = 0;
 		int lastSentContrast = -1;
+		// led_landing_ms (2026-10-17): when the newest LPW1 / CNTR was written
+		// to the port (steady clock, taken at the write); the epoch (a
+		// default time_point) when unknown. The module lands each send
+		// led_latency_ms / cntr_latency_ms after this.
+		std::chrono::steady_clock::time_point lastLightSentAt{};
+		std::chrono::steady_clock::time_point lastContrastSentAt{};
 		// A light target is waiting or being transmitted.
 		bool busy = false;
 		// A CNTR value (SetContrastAsync) is waiting or being transmitted
@@ -114,6 +121,9 @@ namespace LedDrive
 		// ahead of a waiting LPW1 (CNTR commands are rare: only on integer
 		// crossings). A negative value drops a waiting one.
 		virtual void SetContrastAsync(int value) { (void)value; }
+		// Bug hunt 2026-10-17: drops a waiting LPW1 target and the rest of a
+		// split dimming drop (compensate's queue when the mode changes).
+		virtual void CancelLight() {}
 		virtual bool SendScript(const std::string& mnemonic, int value)
 		{
 			(void)mnemonic;

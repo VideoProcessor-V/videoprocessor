@@ -58,6 +58,7 @@ namespace LedDrive
 				++status.commands;
 				++status.contrastSends;
 				status.lastSentContrast = value;
+				status.lastContrastSentAt = std::chrono::steady_clock::now();
 			}
 
 			bool SendScript(const std::string& mnemonic, int value) override
@@ -73,6 +74,7 @@ namespace LedDrive
 					{
 						++status.contrastSends;
 						status.lastSentContrast = value;
+						status.lastContrastSentAt = std::chrono::steady_clock::now();
 					}
 				}
 				return true;
