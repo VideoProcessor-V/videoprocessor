@@ -74,8 +74,9 @@ namespace VideoProcessorTest
 			Assert::AreEqual(720u * (481u + 241u), nv12->BytesPerFrame());
 			auto p010 = FileState(VideoFrameEncoding::P010, 720, 481);
 			Assert::AreEqual(1440u * (481u + 241u), p010->BytesPerFrame());
-			auto p016 = FileState(VideoFrameEncoding::P016, 2, 1);
-			Assert::AreEqual(4u * (1u + 1u), p016->BytesPerFrame());
+			// DisplayMode's smallest size (100 lines) with an odd height.
+			auto p016 = FileState(VideoFrameEncoding::P016, 100, 101);
+			Assert::AreEqual(200u * (101u + 51u), p016->BytesPerFrame());
 		}
 
 		TEST_METHOD(OddWidthsRoundTheStrideUpToEven)
@@ -307,14 +308,14 @@ namespace VideoProcessorTest
 	public:
 		TEST_METHOD(Nv12IsWidenedIntoSixteenBitPlanes)
 		{
-			// 4x3: luma 3 rows, chroma ceil(3/2) = 2 rows; 4 samples per row.
-			auto state = FileState(VideoFrameEncoding::NV12, 4, 3);
+			// 104x101 (DisplayMode needs >= 100): luma 101 rows, chroma ceil(101/2) = 51 rows.
+			auto state = FileState(VideoFrameEncoding::NV12, 104, 101);
 			std::vector<uint8_t> in(state->BytesPerFrame());
 			for (size_t i = 0; i < in.size(); ++i)
 				in[i] = static_cast<uint8_t>(16 + i * 11);
 			CTwoPlane420VideoFrameFormatter formatter;
 			formatter.OnVideoState(state);
-			Assert::AreEqual(static_cast<LONG>(4 * 2 * (3 + 2)), formatter.GetOutFrameSize());
+			Assert::AreEqual(static_cast<LONG>(104 * 2 * (101 + 51)), formatter.GetOutFrameSize());
 			std::vector<uint8_t> out(formatter.GetOutFrameSize(), 0xCD);
 			VideoFrame frame(in.data(), 1, 0, nullptr);
 			Assert::IsTrue(formatter.FormatVideoFrame(frame, out.data()));
@@ -332,13 +333,13 @@ namespace VideoProcessorTest
 			const VideoFrameEncoding encodings[] = { VideoFrameEncoding::P010, VideoFrameEncoding::P016 };
 			for (const VideoFrameEncoding encoding : encodings)
 			{
-				auto state = FileState(encoding, 6, 5);   // odd height: 3 chroma rows
+				auto state = FileState(encoding, 106, 101);   // odd height: 51 chroma rows
 				std::vector<uint16_t> in(state->BytesPerFrame() / 2);
 				for (size_t i = 0; i < in.size(); ++i)
 					in[i] = static_cast<uint16_t>(encoding == VideoFrameEncoding::P010 ? ((64 + i * 7) & 0x3FF) << 6 : 4096 + i * 997);
 				CTwoPlane420VideoFrameFormatter formatter;
 				formatter.OnVideoState(state);
-				Assert::AreEqual(static_cast<LONG>(6 * 2 * (5 + 3)), formatter.GetOutFrameSize());
+				Assert::AreEqual(static_cast<LONG>(106 * 2 * (101 + 51)), formatter.GetOutFrameSize());
 				std::vector<uint16_t> out(formatter.GetOutFrameSize() / 2, 0);
 				VideoFrame frame(in.data(), 1, 0, nullptr);
 				Assert::IsTrue(formatter.FormatVideoFrame(frame, reinterpret_cast<BYTE*>(out.data())));

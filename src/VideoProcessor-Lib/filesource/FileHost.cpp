@@ -160,6 +160,17 @@ namespace FileSource
 			DebugLog::Log("File host: %s", error.c_str());
 			return false;
 		}
+		// The change notification is registered before the file is read, so an
+		// edit made at any moment after Start returns (or during it) is seen.
+		HANDLE change = INVALID_HANDLE_VALUE;
+		if (watch && !watcher.joinable())
+		{
+			change = FindFirstChangeNotificationW(ParentDirectory(path).c_str(), FALSE,
+				FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE);
+			if (change == INVALID_HANDLE_VALUE)
+				DebugLog::Log("File host: cannot watch %s (error %lu); configuration edits apply on the next file",
+					ToLog(ParentDirectory(path)).c_str(), GetLastError());
+		}
 		std::shared_ptr<const UnifiedProfileRuntime::Snapshot> snapshot;
 		bool initialized = false;
 		{
@@ -178,13 +189,16 @@ namespace FileSource
 		}
 		DebugLog::Log("File host: configuration %s (%s)", ToLog(path).c_str(),
 			initialized ? "profiles resolved, rules see source=file" : error.c_str());
-		if (watch && !watcher.joinable())
+		if (change != INVALID_HANDLE_VALUE)
 		{
 			stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 			if (stopEvent)
-				watcher = std::thread(&FileHost::WatchLoop, this, ParentDirectory(path));
+				watcher = std::thread(&FileHost::WatchLoop, this, change, ParentDirectory(path));
 			else
+			{
 				DebugLog::Log("File host: cannot watch the configuration (CreateEvent error %lu)", GetLastError());
+				FindCloseChangeNotification(change);
+			}
 		}
 		if (snapshot)
 			Apply(snapshot, "start");
@@ -458,16 +472,9 @@ namespace FileSource
 	}
 
 
-	void FileHost::WatchLoop(std::wstring directory)
+	void FileHost::WatchLoop(HANDLE change, std::wstring directory)
 	{
-		HANDLE change = FindFirstChangeNotificationW(directory.c_str(), FALSE,
-			FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE);
-		if (change == INVALID_HANDLE_VALUE)
-		{
-			DebugLog::Log("File host: cannot watch %s (error %lu); configuration edits apply on the next file",
-				ToLog(directory).c_str(), GetLastError());
-			return;
-		}
+		// `change` was registered by Start before the configuration was read.
 		ChangeDebouncer debouncer;
 		for (;;)
 		{

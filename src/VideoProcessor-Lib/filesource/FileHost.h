@@ -159,7 +159,7 @@ namespace FileSource
 		void TakeSettingsLocked(const ConfigFile& config);
 		void Apply(const std::shared_ptr<const UnifiedProfileRuntime::Snapshot>& snapshot, const char* reason);
 		void Refresh(const char* reason);
-		void WatchLoop(std::wstring directory);
+		void WatchLoop(HANDLE change, std::wstring directory);
 
 		FileHostEnvironment environment;
 		mutable std::mutex mutex;            // state below
