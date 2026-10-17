@@ -739,7 +739,10 @@ namespace LedDrive
 		// modelled CNTR light anyway). Also while the custom dim is leaving.
 		if (out.preposition && led.cntrAssist && applyGain && fadeToBlack != FadeToBlack::Deep && !out.holdGain)
 		{
-			const int level = CutLevelLocked();
+			int level = CutLevelLocked();
+			// Post-merge audit 2026-10-17: the cut_lead window's limit (CNTR does not
+			// rise while a cut is pending) caps the pre-position too.
+			if (out.cutLeadHold) level = std::min(level, pairing.Contrast());
 			pairing.SetHold(level);
 			if (contrastCommand < 0 && pairing.Contrast() < level)
 			{

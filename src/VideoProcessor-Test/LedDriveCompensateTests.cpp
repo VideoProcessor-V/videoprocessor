@@ -1090,6 +1090,20 @@ namespace VideoProcessorTest
 			Assert::AreEqual(50, pairing.Update(0.5, 1e9), L"released: back to what the pairing needs");
 		}
 
+		// Post-merge audit 2026-10-17 (B6): the limit (cut_lead window) caps the
+		// pre-position hold; before, the hold overrode it.
+		TEST_METHOD(CntrLimitCapsTheHold)
+		{
+			CntrPairing pairing;
+			pairing.Configure(2.41, 74, true, true);
+			pairing.SetHold(59);
+			Assert::AreEqual(-1, pairing.Update(1.0, 1e9, 50), L"limit 50: no rise to the hold");
+			Assert::AreEqual(50, pairing.Contrast());
+			Assert::AreEqual(55, pairing.Update(1.0, 1e9, 55), L"the hold up to the limit");
+			Assert::AreEqual(59, pairing.Update(1.0, 1e9, -1), L"no limit: the full hold");
+			Assert::AreEqual(52, pairing.Update(1.0, 1e9, 52), L"a lower limit brings it down");
+		}
+
 		// Delta 4: the boost's base is the output gamma VP encodes for, not the
 		// projector's compensation_eotf (now 2.41). Before the fix the exponent
 		// was compensation_eotf / gamma_boost, so 2.41 would have switched the

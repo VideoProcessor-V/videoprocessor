@@ -666,12 +666,15 @@ namespace LedDrive
 		// the way up instead: rise only once the need passes the current
 		// value's light by 2% (VP's gain covers that 2% meanwhile).
 		if (ceiling >= 50) wanted = std::min(wanted, ceiling);
+		// Post-merge audit 2026-10-17: the limit (cut_lead window, DMD clip) caps the
+		// pre-position hold too; before, the hold was applied last and overrode it.
+		const int effectiveHold = hold >= 50 && limit >= 50 ? std::min(hold, limit) : hold;
+		if (effectiveHold >= 50) wanted = std::max(wanted, effectiveHold);
 		if (limit >= 50) wanted = std::min(wanted, limit);
-		if (hold >= 50) wanted = std::max(wanted, hold);
 		int next = contrast;
 		if (wanted < contrast)
 			next = wanted;
-		else if (wanted > contrast && (need > Light(contrast) * 1.02 || wanted <= hold))
+		else if (wanted > contrast && (need > Light(contrast) * 1.02 || wanted <= effectiveHold))
 			next = wanted;
 		if (next == contrast) return -1;
 		contrast = next;
