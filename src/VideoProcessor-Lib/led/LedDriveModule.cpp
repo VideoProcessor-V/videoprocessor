@@ -456,6 +456,8 @@ namespace LedDrive
 			framePeriodMs = std::max(1.0, std::min(framePeriodMs + (elapsed - framePeriodMs) * 0.1, 100.0));   // 10 to 1000 frames per second
 		}
 		lastFrameMs = timeMs;
+		lastFrameWallMs = NowMs();   // audit 2026-10-16
+		idleRestored = false;
 		// Levels the driver wrote since the last frame: they went out during
 		// that frame.
 		if (compensating && applyGain && driver)
@@ -770,7 +772,50 @@ namespace LedDrive
 	double LedDriveModule::MsSinceLastFrame() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		return lastFrameMs < 0.0 ? 1e12 : NowMs() - lastFrameMs;
+		return MsSinceLastFrameLocked();
+	}
+
+	double LedDriveModule::MsSinceLastFrameLocked() const
+	{
+		// audit 2026-10-16: on the module's own clock when the frame arrived
+		// (BeginFrameAt's time may be another clock, as in the tests).
+		return lastFrameWallMs < 0.0 ? 1e12 : NowMs() - lastFrameWallMs;
+	}
+
+	// audit 2026-10-16: led_idle_restore_s in compensate - no video for that
+	// long (pause, stop): out of the custom dim (LDMM 0, when configured or
+	// engaged), CNTR to 50 when it is or may be elsewhere, the LED to the
+	// ceiling; the controller and models start again from there, waiting for
+	// a fresh measurement.
+	void LedDriveModule::RestoreIdleCompensateLocked()
+	{
+		if (!driver) return;
+		const DriverStatus status = driver->Status();
+		if (fadeToBlack != FadeToBlack::Normal || led.ftbCustomDim != FtbCustomDim::Off)
+			driver->QueueSequenceNow(CustomDimUp(led), led.ftbStepMs);
+		fadeToBlack = FadeToBlack::Normal;
+		blackSinceMs = -1.0;
+		if (pairing.Contrast() != 50 || status.contrastBusy ||
+			(status.lastSentContrast >= 0 && status.lastSentContrast != 50))
+			driver->SetContrastAsync(50);
+		driver->SetLightJump(led.ledCeiling);
+		compensator.Reset(led.ledCeiling);
+		pairing.Reset(50);
+		pairing.SetCeiling(-1);
+		pairing.SetBias(0.0);
+		pairing.SetHold(-1);
+		recovery.Stop();
+		pendingRecovery = false;
+		recoveryLimit = 1e9;
+		policy = ControllerOutput();
+		holding = false;
+		modelledLevel = led.ledCeiling;
+		commands.clear();
+		ledModel.Reset(LedFractionLocked(modelledLevel));
+		contrastCommands.clear();
+		contrastModel.Reset(1.0);
+		haveStats = false;
+		pendingCut = pendingFade = false;
 	}
 
 	bool LedDriveModule::CustomDimEngaged() const
@@ -850,7 +895,11 @@ namespace LedDrive
 			opened->Open(error);
 			driving = false;
 		}
-		BringToKnownState(*opened, led.ledCeiling, led.ftbCustomDim != FtbCustomDim::Off,
+		// audit 2026-10-16: LDMM 0 at every start on a driven projector (one
+		// command), not only while the custom dim is configured: a crash during
+		// the custom dim with the setting later switched off left the
+		// projector in custom mode.
+		BringToKnownState(*opened, led.ledCeiling, driving || led.ftbCustomDim != FtbCustomDim::Off,
 			led.mode == Mode::Script);
 		const LightRange range = opened->QueryLightRange();
 		DebugLog::Log("LED drive: running mode=%s protocol=%s tick=%d ms gamma_boost=%.2f led_latency=%d ms",
@@ -906,6 +955,7 @@ namespace LedDrive
 			const auto tickStart = std::chrono::steady_clock::now();
 			FrameStats stats;
 			bool have = false;
+			bool restoreScriptIdle = false;   // audit 2026-10-16
 			{
 				std::lock_guard<std::mutex> guard(mutex);
 				if (stopping) break;
@@ -932,7 +982,25 @@ namespace LedDrive
 						controller.Reset(controller.Light(), 50);
 					}
 				}
-				have = haveStats;
+				// audit 2026-10-16: led_idle_restore_s (0 = off) - no video for
+				// that long after frames had come (pause, stop): the projector
+				// goes back to full light once, and internal_script no longer
+				// acts on the last frame's statistics until frames return.
+				const bool idle = driving && current.idleRestoreS > 0 && lastFrameWallMs >= 0.0 &&
+					MsSinceLastFrameLocked() >= current.idleRestoreS * 1000.0;
+				if (idle && !idleRestored)
+				{
+					idleRestored = true;
+					if (compensating && applyGain)
+					{
+						RestoreIdleCompensateLocked();
+						DebugLog::Log("LED drive: no video for %d s; LED back to %d, CNTR 50 (led_idle_restore_s)",
+							current.idleRestoreS, led.ledCeiling);
+					}
+					else if (current.mode == Mode::Script && applyGain)
+						restoreScriptIdle = true;
+				}
+				have = haveStats && !idle;
 				if (!compensating)
 				{
 					stats = latest;
@@ -949,6 +1017,25 @@ namespace LedDrive
 				restoreAssist = false;
 				const bool ok = driver->SendScript("CNTR", 50);
 				DebugLog::Log("LED drive: left compensate; contrast set to 50%s", ok ? "" : " (not confirmed)");
+			}
+			if (restoreScriptIdle)
+			{
+				// audit 2026-10-16: led_idle_restore_s in internal_script - full
+				// light and CNTR 50 (only what differs from what the script
+				// believes), and the script carries on from there when video
+				// returns.
+				const bool light = controller.Light() == current.ledCeiling ||
+					driver->SendScript("LPW1", current.ledCeiling);
+				const bool contrast = controller.Contrast() == 50 || driver->SendScript("CNTR", 50);
+				controller.Reset(current.ledCeiling, 50);
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					if (smoothing) smoother.Reset(50);
+				}
+				sendsDone = std::chrono::steady_clock::now();
+				DebugLog::Log("LED drive: no video for %d s; LED back to %d%s, CNTR 50%s (led_idle_restore_s)",
+					current.idleRestoreS, current.ledCeiling, light ? "" : " (not confirmed)",
+					contrast ? "" : " (not confirmed)");
 			}
 
 			if (current.mode == Mode::Compensate)

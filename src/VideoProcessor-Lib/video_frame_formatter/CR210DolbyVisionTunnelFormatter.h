@@ -55,6 +55,18 @@ public:
 private:
 	static constexpr uint32_t MAX_WORKERS = 2;
 	enum class ByteAlignment { UNKNOWN, LEFT, RIGHT };
+	// audit 2026-10-16: DeckLink 10-bit RGB containers that can carry the
+	// RGB8 tunnel. R10b/R10l words are normalised to r210's [00 R G B]
+	// layout (word >> 2) for packet parsing; the unpack kernels use the
+	// equivalent constant shift (+2). Only CRC-valid packets prove that the
+	// card stored the tunnel bytes untouched in these containers.
+	enum class WordLayout { R210, R10_BIG_ENDIAN, R10_LITTLE_ENDIAN };
+	uint32_t ReadTunnelWord(const uint8_t* source, size_t pixel) const;
+	bool ReadPacketCopies(const uint8_t* source, size_t index, bool leftAligned,
+		uint8_t* packet);
+	bool LooksLikeTunnel(const uint8_t* source) const;
+	void BeginTitle();
+	void LogTitleLevels(const char* reason);
 	void ConvertRows(const uint8_t* source, uint16_t* output,
 		uint32_t firstRow, uint32_t rowCount, bool leftAligned) const;
 	void ConvertRowsAVX2(const uint8_t* source, uint16_t* output,
@@ -92,6 +104,21 @@ private:
 	bool m_hasActiveMetadataId = false;
 	uint64_t m_endOfStreamAfterCounter = 0;
 	bool m_hasEndOfStream = false;
+	// audit 2026-10-16: robustness / coverage state (see .cpp).
+	WordLayout m_wordLayout = WordLayout::R210;
+	bool m_tunnelCapable = true;          // false for interlaced modes
+	double m_frameRate = 24000.0 / 1001.0;
+	uint32_t m_packetLossLimit = 24;      // ~1.001 s, derived from frame rate
+	uint64_t m_sdrFallbackFrames = 48;    // ~2 s, derived from frame rate
+	bool m_sdrSuspect = false;
+	uint64_t m_sdrSuspectStartCounter = 0;
+	uint64_t m_lastHeaderCounter = 0;
+	bool m_hasLastHeaderCounter = false;
+	uint32_t m_idAmbiguityResets = 0;
+	uint32_t m_majorityRecoveries = 0;
+	std::array<uint16_t, 256> m_titleLevelCounts{};
+	bool m_titleLevelsLogged = false;
+	bool m_titleTrimLogged[2] = {};       // [0]=L2, [1]=L8
 	bool m_hasAVX2 = false;
 	ConversionMethod m_conversionMethod = ConversionMethod::AUTO;
 	PTP_WORK m_conversionWork[MAX_WORKERS] = {};

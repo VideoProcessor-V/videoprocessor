@@ -139,21 +139,41 @@ namespace Tests
             return packets;
         }
 
+        inline void Put32LittleEndian(uint8_t* bytes, uint32_t value)
+        {
+            for (unsigned byte = 0; byte < 4; ++byte)
+                bytes[byte] = static_cast<uint8_t>(value >> (byte * 8));
+        }
+
+        // audit 2026-10-16: encoder-side reference for every container and
+        // timing. The sender packs a known 12-bit I/C picture as HDMI RGB8
+        // (HDMI 1.4a 6.5.4), places each RGB8 byte in a DeckLink 10-bit field
+        // (high8 = byte << 2, low8 = byte), and writes the word as r210
+        // ([00 R G B] big-endian), R10b ([R G B pad] big-endian) or R10l
+        // ([R G B pad] little-endian), independently of the decoder.
         struct SenderPicture
         {
             VideoStateComPtr state;
             std::vector<uint16_t> intensity, chroma;
             std::vector<BYTE> input;
             bool high8;
+            VideoFrameEncoding encoding = VideoFrameEncoding::R210;
+            unsigned padding = 0;         // R10 bottom two bits, must be ignored
+            bool rangeConverted = false;  // card rescales 8-bit RGB to 64-940
 
-            SenderPicture(bool high, uint32_t width = 130, uint32_t height = 128)
-                : high8(high)
+            SenderPicture(bool high, uint32_t width = 130, uint32_t height = 128,
+                VideoFrameEncoding container = VideoFrameEncoding::R210,
+                unsigned timeScale = 24000, unsigned frameDuration = 1001,
+                bool interlaced = false, unsigned r10Padding = 0,
+                bool convertRange = false)
+                : high8(high), encoding(container), padding(r10Padding),
+                rangeConverted(convertRange)
             {
                 state = new VideoState();
                 state->valid = true;
                 state->displayMode = std::make_shared<DisplayMode>(
-                    width, height, false, 24000, 1001);
-                state->videoFrameEncoding = VideoFrameEncoding::R210;
+                    width, height, interlaced, timeScale, frameDuration);
+                state->videoFrameEncoding = container;
                 state->dolbyVisionTunnel = true;
                 intensity.resize(static_cast<size_t>(width) * height);
                 chroma.resize(intensity.size());
@@ -166,17 +186,52 @@ namespace Tests
                 }
             }
 
+            void WriteRgb8(size_t pixel, unsigned r8, unsigned g8, unsigned b8)
+            {
+                const unsigned rgb8[] = { r8, g8, b8 };
+                uint32_t field[3];
+                for (size_t i = 0; i < 3; ++i)
+                {
+                    field[i] = rangeConverted ?
+                        64U + (rgb8[i] * 876U + 127U) / 255U :
+                        rgb8[i] * (high8 ? 4U : 1U);
+                }
+                const uint32_t r210 = (field[0] << 20) | (field[1] << 10) | field[2];
+                const size_t width = state->displayMode->FrameWidth();
+                uint8_t* at = input.data() + (pixel / width) * state->BytesPerRow() +
+                    (pixel % width) * 4;
+                if (encoding == VideoFrameEncoding::R210)
+                    Put32(at, r210);
+                else if (encoding == VideoFrameEncoding::R10b)
+                    Put32(at, (r210 << 2) | (padding & 3U));
+                else
+                    Put32LittleEndian(at, (r210 << 2) | (padding & 3U));
+            }
+
             void Pack(size_t pixel)
             {
                 const unsigned y = intensity[pixel], c = chroma[pixel];
-                const unsigned rgb8[] = { c / 16, y / 16,
-                    (c % 16) * 16 + y % 16 };
-                const unsigned factor = high8 ? 4 : 1;
-                const uint32_t r210 = (rgb8[0] * factor << 20) |
-                    (rgb8[1] * factor << 10) | (rgb8[2] * factor);
+                WriteRgb8(pixel, c / 16, y / 16, (c % 16) * 16 + y % 16);
+            }
+
+            // Ordinary SDR RGB: a horizontal grey ramp (no tunnel structure).
+            void FillSdrRamp()
+            {
                 const size_t width = state->displayMode->FrameWidth();
-                Put32(input.data() + (pixel / width) * state->BytesPerRow() +
-                    (pixel % width) * 4, r210);
+                for (size_t pixel = 0; pixel < intensity.size(); ++pixel)
+                {
+                    const unsigned v = static_cast<unsigned>(
+                        (pixel % width) * 255 / (width - 1));
+                    WriteRgb8(pixel, v, v, v);
+                }
+            }
+
+            void SetFlat(uint16_t i, uint16_t c)
+            {
+                std::fill(intensity.begin(), intensity.end(), i);
+                std::fill(chroma.begin(), chroma.end(), c);
+                for (size_t pixel = 0; pixel < intensity.size(); ++pixel)
+                    Pack(pixel);
             }
 
             void Embed(const std::vector<Packet>& packets)
@@ -206,9 +261,9 @@ namespace Tests
                 }
             }
 
-            void CorruptCopy(size_t packet, size_t copy)
+            void CorruptCopy(size_t packet, size_t copy, size_t bit = 17)
             {
-                const size_t pixel = packet * 3072 + copy * 1024 + 17;
+                const size_t pixel = packet * 3072 + copy * 1024 + bit;
                 chroma[pixel] ^= 1;
                 Pack(pixel);
             }

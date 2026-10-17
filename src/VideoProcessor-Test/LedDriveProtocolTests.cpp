@@ -14,7 +14,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <algorithm>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -45,6 +47,18 @@ namespace
 		std::string error;
 		Assert::IsTrue(driver->Open(error), std::wstring(error.begin(), error.end()).c_str());
 		return driver;
+	}
+
+	// audit 2026-10-16 (second pass)
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			if (condition()) return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		return condition();
 	}
 
 	std::vector<std::string> LightCommands(const std::vector<std::string>& writes)
@@ -618,6 +632,279 @@ namespace VideoProcessorTest
 			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now() - start).count();
 			Assert::IsTrue(elapsed >= 1800, (L"sent after only " + std::to_wstring(elapsed) + L" ms").c_str());
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass): script sends fail 5 times (closing
+		// the port); the port is reopened by a later script send.
+		static void FailScriptSendsUntilClosed(std::shared_ptr<FakeProjector> projector, IProjectorDriver& driver,
+			int contrast)
+		{
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->writeFails = true;
+			}
+			for (int i = 0; i < 5; ++i)
+				Assert::IsFalse(driver.SendScript("CNTR", contrast));
+			std::lock_guard<std::mutex> guard(projector->mutex);
+			projector->writeFails = false;
+		}
+
+		static size_t LastIndexOf(const std::vector<std::string>& writes, const std::string& write)
+		{
+			for (size_t i = writes.size(); i > 0; --i)
+				if (writes[i - 1] == write) return i - 1;
+			return std::string::npos;
+		}
+
+		// audit 2026-10-16 (second pass, 1): after an outage in script mode the
+		// resync re-sends the value the script intended (50, which the script
+		// controller believes), not the last value that reached the port (58).
+		TEST_METHOD(ScriptResyncAfterFailedWritesSendsTheIntendedValue)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			Assert::IsTrue(driver->SendScript("CNTR", 58));
+			Assert::IsTrue(driver->SendScript("LPW1", 150));
+			FailScriptSendsUntilClosed(projector, *driver, 50);
+			Assert::AreEqual(58, driver->Status().lastSentContrast, L"58 is the last value written");
+			std::this_thread::sleep_for(std::chrono::milliseconds(2100));   // the reopen back-off
+			const size_t before = projector->Writes().size();
+			Assert::IsTrue(driver->SendScript("LPW1", 200), L"Reopens the port");
+			Assert::IsTrue(WaitFor([&] { const auto s = driver->Status(); return s.contrastSends > 1 && !s.busy && !s.contrastBusy; }));
+			std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			const auto writes = projector->Writes();
+			const std::vector<std::string> after(writes.begin() + before, writes.end());
+			Assert::IsTrue(std::find(after.begin(), after.end(), std::string(":ECHO1\r")) != after.end(), L"Handshake ECHO");
+			Assert::IsTrue(std::find(after.begin(), after.end(), std::string(":CNTR50\r")) != after.end(),
+				L"The intended CNTR 50 re-sent");
+			Assert::IsTrue(std::find(after.begin(), after.end(), std::string(":CNTR58\r")) == after.end(),
+				L"Never the stale 58 (CNTR left above the need)");
+			Assert::AreEqual(50, projector->contrast);
+			Assert::AreEqual(200, projector->light);
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 1): a resync target still waiting is
+		// dropped by a newer script send, so it cannot overwrite it. While the
+		// resync CNTR waits, contrastBusy is set (the module's pairing does not
+		// snap back to a stale lastSentContrast meanwhile).
+		TEST_METHOD(ResyncNeverOvertakesANewerScriptSend)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			Assert::IsTrue(driver->SendScript("CNTR", 58));
+			FailScriptSendsUntilClosed(projector, *driver, 55);
+			std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+			auto echoes = [&]
+			{
+				const auto writes = projector->Writes();
+				return static_cast<size_t>(std::count(writes.begin(), writes.end(), std::string(":ECHO1\r")));
+			};
+			const size_t echoesBefore = echoes();
+			// Unanswered, so the resync's ECHO is unanswered too and its targets
+			// wait out Barco's 2 s after it.
+			projector->silent = true;
+			Assert::IsFalse(driver->SendScript("LPW1", 200), L"Reopened; no reply");
+			Assert::IsTrue(WaitFor([&] { return echoes() > echoesBefore; }, 4000), L"The resync's ECHO");
+			std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			Assert::IsTrue(driver->Status().contrastBusy, L"The resync CNTR (55) is waiting");
+			projector->silent = false;
+			Assert::IsTrue(driver->SendScript("CNTR", 47), L"The script's newer value");
+			std::this_thread::sleep_for(std::chrono::milliseconds(400));
+			const auto writes = projector->Writes();
+			const size_t newest = LastIndexOf(writes, ":CNTR47\r");
+			Assert::AreNotEqual(std::string::npos, newest);
+			for (size_t i = newest + 1; i < writes.size(); ++i)
+				Assert::IsTrue(writes[i].rfind(":CNTR", 0) != 0, L"No CNTR after the script's newer one");
+			Assert::IsTrue(std::find(writes.begin(), writes.end(), std::string(":CNTR55\r")) == writes.end(),
+				L"The superseded resync value was never sent");
+			Assert::AreEqual(47, projector->contrast);
+			Assert::IsFalse(driver->Status().contrastBusy);
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 2): a read that closes the port ends
+		// the reply wait at once (no spin holding the port until ack timeout),
+		// and the port is reopened only after its back-off, which grows.
+		TEST_METHOD(ReadSideCloseEndsTheReplyWaitAndBacksOff)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.ackTimeoutMs = 1500;
+			auto driver = OpenDriver(projector, config);
+			auto opens = [&]
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				return projector->opens;
+			};
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->readCloses = true;
+			}
+			const auto start = std::chrono::steady_clock::now();
+			Assert::IsFalse(driver->SetLightNow(200, 0));
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			Assert::IsTrue(elapsed < 500, (L"reply wait lasted " + std::to_wstring(elapsed) + L" ms").c_str());
+			Assert::AreEqual(1, opens());
+			// After the 2 s back-off (and Barco's 2 s no-reply gap) one reopen;
+			// the read closes it again: the back-off doubles to 4 s.
+			Assert::IsFalse(driver->SetLightNow(210, 0));
+			Assert::AreEqual(2, opens(), L"Reopened once after the back-off");
+			std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+			Assert::AreEqual(2, opens(), L"Not reopened within the doubled back-off (the resync retries are refused)");
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->readCloses = false;
+			}
+			Assert::IsTrue(WaitFor([&] { return opens() == 3; }, 3000), L"Reopened after the 4 s back-off");
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 3): the exit restore's three commands
+		// (LDMM 0, LPW1, CNTR 50) keep Barco's 500 ms command gap.
+		TEST_METHOD(ExitRestoreKeepsTheCommandGap)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.minCommandGapMs = 500;
+			config.ackTimeoutMs = 200;
+			config.lightMin = 60;    // no range queries at Open
+			config.lightMax = 255;
+			auto driver = OpenDriver(projector, config);
+			Assert::IsTrue(driver->SendScript("CNTR", 66));
+			const auto start = std::chrono::steady_clock::now();
+			Assert::IsTrue(RestoreFullLight(*driver, 255, true, true));
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			Assert::IsTrue(elapsed < 1800, (L"restore took " + std::to_wstring(elapsed) + L" ms").c_str());
+			const auto writes = projector->Writes();
+			const auto times = projector->WriteTimes();
+			Assert::IsTrue(writes.size() >= 3);
+			const size_t n = writes.size();
+			Assert::AreEqual(std::string(":LDMM0\r"), writes[n - 3]);
+			Assert::AreEqual(std::string(":LPW1255\r"), writes[n - 2]);
+			Assert::AreEqual(std::string(":CNTR50\r"), writes[n - 1]);
+			for (size_t i = n - 2; i < n; ++i)
+			{
+				const double gap = std::chrono::duration<double, std::milli>(times[i] - times[i - 1]).count();
+				Assert::IsTrue(gap >= 490.0, (L"restore commands " + std::to_wstring(gap) + L" ms apart").c_str());
+			}
+			Assert::AreEqual(255, projector->light);
+			Assert::AreEqual(50, projector->contrast);
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 3): CNTR is restored only when needed.
+		TEST_METHOD(ExitRestoreSkipsContrastAlreadyAt50)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			Assert::IsTrue(driver->SendScript("CNTR", 50));
+			const size_t before = projector->Writes().size();
+			Assert::IsTrue(RestoreFullLight(*driver, 255, false, true));
+			const auto writes = projector->Writes();
+			Assert::AreEqual(before + 1, writes.size());
+			Assert::AreEqual(std::string(":LPW1255\r"), writes.back());
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 6): no target is queued after the
+		// exit restore began (the worker skipped it and kept waking).
+		TEST_METHOD(TargetsAfterShutdownAreRefused)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			driver->BeginShutdown();
+			driver->SetLight(150);
+			driver->SetLightJump(140);
+			const auto status = driver->Status();
+			Assert::IsFalse(status.busy, L"Nothing pending after BeginShutdown");
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(LightCommands(projector->Writes()).empty());
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 7): the exit restore tries one Open
+		// even during the reopen back-off.
+		TEST_METHOD(ExitRestoreReopensDuringTheBackoff)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			FailScriptSendsUntilClosed(projector, *driver, 60);
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				Assert::AreEqual(1, projector->opens);
+			}
+			Assert::IsTrue(RestoreFullLight(*driver, 255), L"Restored within the back-off");
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				Assert::AreEqual(2, projector->opens);
+			}
+			Assert::AreEqual(std::string(":LPW1255\r"), LightCommands(projector->Writes()).back());
+			Assert::AreEqual(255, projector->light);
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass, 8): a driver-thread command waiting
+		// out Barco's 2 s after a missing reply (holding the port) gives way to
+		// the exit restore instead of locking it out.
+		TEST_METHOD(ExitRestoreIsNotLockedOutByAWaitingCommand)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			projector->silent = true;
+			Assert::IsFalse(driver->SendScript("CNTR", 60), L"No reply: 2 s before the next command");
+			projector->silent = false;
+			const size_t before = projector->Writes().size();
+			Assert::IsTrue(driver->QueueSequence({ { "LDCR", 10 } }, 100));
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(driver->Status().sequenceBusy, L"The sequence command holds the port, waiting");
+			const auto start = std::chrono::steady_clock::now();
+			RestoreFullLight(*driver, 255);
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			Assert::IsTrue(elapsed < 1150, (L"restore took " + std::to_wstring(elapsed) + L" ms").c_str());
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			const auto writes = projector->Writes();
+			const std::vector<std::string> after(writes.begin() + before, writes.end());
+			Assert::IsTrue(std::find(after.begin(), after.end(), std::string(":LPW1255\r")) != after.end(),
+				L"The restore was sent");
+			Assert::IsTrue(std::find(after.begin(), after.end(), std::string(":LDCR10\r")) == after.end(),
+				L"The waiting sequence command was dropped");
+			driver->Close();
+		}
+
+		// audit 2026-10-16 (second pass): SetLightNow cancels an LPW1 the
+		// driver thread has taken but not yet written (waiting for the port).
+		TEST_METHOD(SetLightNowCancelsATakenTarget)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.ackTimeoutMs = 1500;
+			auto driver = OpenDriver(projector, config);
+			const size_t before = projector->Writes().size();
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->holdReplies = true;
+			}
+			std::thread script([&] { driver->SendScript("CNTR", 60); });
+			Assert::IsTrue(projector->WaitForWrites(before + 1));
+			driver->SetLight(100);
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(driver->Status().busy, L"100 is waiting for the port");
+			std::thread now([&] { driver->SetLightNow(255, 0); });
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			projector->Release();
+			script.join();
+			now.join();
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			const auto lights = LightCommands(projector->Writes());
+			Assert::IsTrue(std::find(lights.begin(), lights.end(), std::string(":LPW1100\r")) == lights.end(),
+				L"The replaced target was not sent");
+			Assert::AreEqual(std::string(":LPW1255\r"), lights.back());
+			Assert::AreEqual(255, projector->light);
 			driver->Close();
 		}
 

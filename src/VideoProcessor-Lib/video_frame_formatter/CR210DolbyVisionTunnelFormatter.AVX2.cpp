@@ -30,7 +30,40 @@ namespace
 			_mm256_extracti128_si256(words, 1));
 	}
 
-	template<unsigned Shift>
+	// audit 2026-10-16: word loaders. r210/R10b are big-endian words (byte
+	// swap); R10l is little-endian (direct load). Same code for r210.
+	template<bool BigEndian> struct WordLoader;
+	template<> struct WordLoader<true>
+	{
+		static __m256i Load8(const uint8_t* bytes, __m256i reverseEachWord) noexcept
+		{
+			return _mm256_shuffle_epi8(_mm256_loadu_si256(
+				reinterpret_cast<const __m256i*>(bytes)), reverseEachWord);
+		}
+		static uint32_t Load1(const uint8_t* b) noexcept
+		{
+			return (static_cast<uint32_t>(b[0]) << 24) |
+				(static_cast<uint32_t>(b[1]) << 16) |
+				(static_cast<uint32_t>(b[2]) << 8) | b[3];
+		}
+	};
+	template<> struct WordLoader<false>
+	{
+		static __m256i Load8(const uint8_t* bytes, __m256i) noexcept
+		{
+			return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bytes));
+		}
+		static uint32_t Load1(const uint8_t* b) noexcept
+		{
+			return (static_cast<uint32_t>(b[3]) << 24) |
+				(static_cast<uint32_t>(b[2]) << 16) |
+				(static_cast<uint32_t>(b[1]) << 8) | b[0];
+		}
+	};
+
+	// Shift: 0/2 = r210 low8/high8; 2/4 = R10b/R10l low8/high8 (the R10
+	// word is the r210 word << 2, so the same masks apply with Shift + 2).
+	template<unsigned Shift, bool BigEndian = true>
 	void ConvertRowsImpl(const uint8_t* source, uint16_t* output,
 		uint32_t width, uint32_t height, uint32_t stride,
 		uint32_t firstRow, uint32_t rowCount) noexcept
@@ -49,9 +82,8 @@ namespace
 			uint32_t x = 0;
 			for (; x + 8 <= width; x += 8)
 			{
-				const __m256i p = _mm256_shuffle_epi8(
-					_mm256_loadu_si256(reinterpret_cast<const __m256i*>(
-						input + static_cast<size_t>(x) * 4)), reverseEachWord);
+				const __m256i p = WordLoader<BigEndian>::Load8(
+					input + static_cast<size_t>(x) * 4, reverseEachWord);
 				const __m256i yHigh = _mm256_and_si256(
 					_mm256_srli_epi32(p, 2 + Shift), highMask);
 				const __m256i yLow = _mm256_and_si256(
@@ -67,11 +99,8 @@ namespace
 			}
 			for (; x < width; ++x)
 			{
-				const uint8_t* b = input + static_cast<size_t>(x) * 4;
-				const uint32_t p =
-					(static_cast<uint32_t>(b[0]) << 24) |
-					(static_cast<uint32_t>(b[1]) << 16) |
-					(static_cast<uint32_t>(b[2]) << 8) | b[3];
+				const uint32_t p = WordLoader<BigEndian>::Load1(
+					input + static_cast<size_t>(x) * 4);
 				y[x] = static_cast<uint16_t>(
 					((p >> (2 + Shift)) & 0xFF00U) |
 					((p << (4 - Shift)) & 0xF0U));
@@ -88,6 +117,27 @@ void CR210DolbyVisionTunnelFormatter::ConvertRowsAVX2(
 	const uint8_t* source, uint16_t* output, uint32_t firstRow,
 	uint32_t rowCount, bool leftAligned) const
 {
+	// audit 2026-10-16: R10b/R10l dispatch; the r210 branch is unchanged.
+	if (m_wordLayout == WordLayout::R10_BIG_ENDIAN)
+	{
+		if (leftAligned)
+			ConvertRowsImpl<4>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		else
+			ConvertRowsImpl<2>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		return;
+	}
+	if (m_wordLayout == WordLayout::R10_LITTLE_ENDIAN)
+	{
+		if (leftAligned)
+			ConvertRowsImpl<4, false>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		else
+			ConvertRowsImpl<2, false>(source, output, m_width, m_height, m_stride,
+				firstRow, rowCount);
+		return;
+	}
 	if (leftAligned)
 		ConvertRowsImpl<2>(source, output, m_width, m_height, m_stride,
 			firstRow, rowCount);

@@ -123,6 +123,9 @@ namespace LedDrive
 		// The startup correction to 50 and, after mode: script, the exit
 		// restore. mode: compensate never drives CNTR.
 		virtual bool SetContrast(int value) = 0;
+		// audit 2026-10-16: the spacing the projector needs between commands
+		// (min_command_gap_ms), for the exit restore's budget; 0 = none.
+		virtual int CommandGapMs() const { return 0; }
 		virtual void Close() = 0;
 		virtual DriverStatus Status() const = 0;
 	};
@@ -137,17 +140,22 @@ namespace LedDrive
 	// Startup: logs what the projector reports, then sets the light to the
 	// ceiling and CNTR to 50 when it is not already 50 (a previous run of the
 	// old script may have left 74). Returns a one-line summary.
-	// resetDimMode: also set the LED dim mode back to standard (LDMM 0) - used
-	// when the experimental custom dim is configured, so a crash cannot leave
-	// the projector in custom mode.
+	// resetDimMode: also set the LED dim mode back to standard (LDMM 0), so a
+	// crash cannot leave the projector in custom mode (audit 2026-10-16: the
+	// module asks for it at every start on a driven projector, not only while
+	// the experimental custom dim is configured).
 	// alwaysSetContrast: send CNTR 50 even when the projector reports 50, as
 	// the script did at its start (mode: script, step 7b).
 	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
 		bool alwaysSetContrast = false);
 
-	// Clean exit, disable or switch to log_only: light back to the ceiling,
-	// never blocking for more than a second. restoreContrast: CNTR back to 50
-	// as well, after the light (mode: script drove it).
+	// Clean exit, disable or switch to log_only: light back to the ceiling.
+	// restoreContrast: CNTR back to 50 as well, after the light (mode: script
+	// drove it; skipped when 50 was the last CNTR sent and none is pending).
+	// audit 2026-10-16: bounded by one second for a single command; with
+	// LDMM 0 and/or CNTR as well, by enough to keep the projector's command
+	// gap between them (CommandGapMs + 50 ms for each later one; 1.7 s for
+	// three at Barco's 500 ms), so no restore command is dropped.
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
 		bool restoreContrast = false);
 }

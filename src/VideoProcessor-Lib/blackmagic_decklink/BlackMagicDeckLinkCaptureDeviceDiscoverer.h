@@ -52,5 +52,7 @@ private:
 	std::map<IDeckLink*, ACaptureDeviceComPtr> m_captureDeviceMap;
 	DeckLinkCaptureFormatPreferences m_formatPreferences;
 
-	std::atomic<ULONG> m_refCount;
+	// audit 2026-10-16: was uninitialised. The GUI assigns `new` to a CComPtr
+	// (which AddRefs), so the count starts at 0.
+	std::atomic<ULONG> m_refCount{ 0 };
 };

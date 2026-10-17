@@ -203,6 +203,12 @@ namespace LedDrive
 		// new source frame). Off = the earlier weight, one output frame period
 		// per update (slower to converge when source frames repeat).
 		bool correctionWeightByTime = true;
+		// audit 2026-10-16: led_idle_restore_s - after this many seconds with
+		// no video frame (pause, stop), the LED goes back to led_ceiling and
+		// CNTR to 50 (and LDMM 0 when the custom dim is configured or engaged),
+		// and internal_script stops acting on the last frame's statistics until
+		// frames return. 0 = off (the projector stays where it was, as before).
+		int idleRestoreS = 10;
 		// The LED core (owner 2026-10-14): one place that holds the port,
 		// sends and logs, fed by a selectable command source -
 		// command_source: internal_script (VP's copy of the script's rules),
@@ -565,6 +571,7 @@ namespace LedDrive
 			Boolean("cntr_assist"),
 			Boolean("led_highlight_grain_suppress"),
 			Boolean("correction_weight_by_time"),
+			Integer("led_idle_restore_s", 0, 600),   // audit 2026-10-16
 			Integer("cntr_assist_max", 50, 100),
 			Boolean("cut_cntr_dump"),
 			Boolean("shaped_recovery"),
@@ -905,6 +912,7 @@ namespace LedDrive
 		config.TryGetBool(section, "cntr_assist", result.cntrAssist);
 		config.TryGetBool(section, "led_highlight_grain_suppress", result.highlightGrainSuppress);
 		config.TryGetBool(section, "correction_weight_by_time", result.correctionWeightByTime);
+		readInt("led_idle_restore_s", 0, 600, result.idleRestoreS);   // audit 2026-10-16
 		readInt("cntr_assist_max", 50, 100, result.cntrAssistMax);
 		config.TryGetBool(section, "cut_cntr_dump", result.cutCntrDump);
 		config.TryGetBool(section, "shaped_recovery", result.shapedRecovery);

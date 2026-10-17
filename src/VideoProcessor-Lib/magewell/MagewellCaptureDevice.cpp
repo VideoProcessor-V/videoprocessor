@@ -122,6 +122,44 @@ bool MagewellCaptureDevice::SignalDescription::SameFormatAs(
 
 
 //
+// Static helpers (audit 2026-10-16)
+//
+
+
+uint64_t MagewellCaptureDevice::MissedFramesBetween(int64_t previousStart100ns,
+	int64_t currentStart100ns, uint32_t framePeriod100ns, uint64_t maxGapFrames)
+{
+	if (framePeriod100ns == 0 || currentStart100ns <= previousStart100ns)
+		return 0;
+	const uint64_t delta = static_cast<uint64_t>(currentStart100ns - previousStart100ns);
+	// Nearest whole number of frame periods; jitter below half a period is 0.
+	const uint64_t periods = (delta + framePeriod100ns / 2) / framePeriod100ns;
+	if (periods <= 1 || periods > maxGapFrames)
+		return 0;
+	return periods - 1;
+}
+
+
+void MagewellCaptureDevice::OrderPrimariesByChromaticity(const double x[3],
+	const double y[3], int& redIndex, int& greenIndex, int& blueIndex)
+{
+	redIndex = 0;
+	for (int i = 1; i < 3; ++i)
+		if (x[i] > x[redIndex])
+			redIndex = i;
+	greenIndex = -1;
+	for (int i = 0; i < 3; ++i)
+	{
+		if (i == redIndex)
+			continue;
+		if (greenIndex < 0 || y[i] > y[greenIndex])
+			greenIndex = i;
+	}
+	blueIndex = 3 - redIndex - greenIndex;
+}
+
+
+//
 // Constructor & destructor
 //
 
@@ -455,23 +493,28 @@ bool MagewellCaptureDevice::ReadHdrInfoFrame(
 	// Chromaticity values carry a 0.00002 unit, luminance is in cd/m2 except
 	// the minimum which uses a 0.0001 unit.
 	//
-	// NOTE: CTA-861.3 numbers the primaries 0, 1 and 2 without naming them.
-	// Red, green, blue is assumed here. The raw values are logged below so the
-	// ordering can be confirmed against content with known mastering data.
+	// audit 2026-10-16: CTA-861.3 numbers the primaries 0, 1 and 2 without
+	// naming them and ST 2086 sources commonly send G,B,R. They were assumed
+	// R,G,B; now assigned by chromaticity (largest x red, largest y green).
 	const double chroma = 0.00002;
 
-	signal.hdrData.displayPrimaryRedX =
-		word(hdr.display_primaries_lsb_x0, hdr.display_primaries_msb_x0) * chroma;
-	signal.hdrData.displayPrimaryRedY =
-		word(hdr.display_primaries_lsb_y0, hdr.display_primaries_msb_y0) * chroma;
-	signal.hdrData.displayPrimaryGreenX =
-		word(hdr.display_primaries_lsb_x1, hdr.display_primaries_msb_x1) * chroma;
-	signal.hdrData.displayPrimaryGreenY =
-		word(hdr.display_primaries_lsb_y1, hdr.display_primaries_msb_y1) * chroma;
-	signal.hdrData.displayPrimaryBlueX =
-		word(hdr.display_primaries_lsb_x2, hdr.display_primaries_msb_x2) * chroma;
-	signal.hdrData.displayPrimaryBlueY =
-		word(hdr.display_primaries_lsb_y2, hdr.display_primaries_msb_y2) * chroma;
+	const double primaryX[3] = {
+		word(hdr.display_primaries_lsb_x0, hdr.display_primaries_msb_x0) * chroma,
+		word(hdr.display_primaries_lsb_x1, hdr.display_primaries_msb_x1) * chroma,
+		word(hdr.display_primaries_lsb_x2, hdr.display_primaries_msb_x2) * chroma };
+	const double primaryY[3] = {
+		word(hdr.display_primaries_lsb_y0, hdr.display_primaries_msb_y0) * chroma,
+		word(hdr.display_primaries_lsb_y1, hdr.display_primaries_msb_y1) * chroma,
+		word(hdr.display_primaries_lsb_y2, hdr.display_primaries_msb_y2) * chroma };
+	int redIndex = 0, greenIndex = 1, blueIndex = 2;
+	OrderPrimariesByChromaticity(primaryX, primaryY, redIndex, greenIndex, blueIndex);
+
+	signal.hdrData.displayPrimaryRedX = primaryX[redIndex];
+	signal.hdrData.displayPrimaryRedY = primaryY[redIndex];
+	signal.hdrData.displayPrimaryGreenX = primaryX[greenIndex];
+	signal.hdrData.displayPrimaryGreenY = primaryY[greenIndex];
+	signal.hdrData.displayPrimaryBlueX = primaryX[blueIndex];
+	signal.hdrData.displayPrimaryBlueY = primaryY[blueIndex];
 
 	signal.hdrData.whitePointX =
 		word(hdr.white_point_lsb_x, hdr.white_point_msb_x) * chroma;
@@ -495,9 +538,9 @@ bool MagewellCaptureDevice::ReadHdrInfoFrame(
 	signal.hasHdrData = true;
 
 	DebugLog::Log(
-		"Magewell HDR InfoFrame: eotf=%d primaries=(%.4f,%.4f)(%.4f,%.4f)(%.4f,%.4f) "
+		"Magewell HDR InfoFrame: eotf=%d wire order R,G,B=%d,%d,%d primaries R(%.4f,%.4f) G(%.4f,%.4f) B(%.4f,%.4f) "
 		"white=(%.4f,%.4f) maxLum=%.0f minLum=%.4f maxCLL=%.0f maxFALL=%.0f",
-		(int)hdr.byEOTF,
+		(int)hdr.byEOTF, redIndex, greenIndex, blueIndex,
 		signal.hdrData.displayPrimaryRedX, signal.hdrData.displayPrimaryRedY,
 		signal.hdrData.displayPrimaryGreenX, signal.hdrData.displayPrimaryGreenY,
 		signal.hdrData.displayPrimaryBlueX, signal.hdrData.displayPrimaryBlueY,
@@ -530,11 +573,12 @@ bool MagewellCaptureDevice::ReadSignal(
 		signal.width > 10000 || signal.height > 10000 ||
 		signal.frameDuration100ns == 0 ||
 		signal.frameDuration100ns >= MAGEWELL_CLOCK_TICKS_SECOND ||
-		static_cast<double>(MAGEWELL_CLOCK_TICKS_SECOND) /
-			signal.frameDuration100ns < 23.0 ||
-		static_cast<double>(MAGEWELL_CLOCK_TICKS_SECOND) /
-			signal.frameDuration100ns > 120.0)
-		throw std::runtime_error("Magewell reported invalid locked signal geometry or frame duration");
+		// audit 2026-10-16: shared refresh policy (about 10-240 Hz, unusual
+		// rates logged by DisplayMode) instead of a fixed 23-120 Hz reject.
+		!DisplayMode::IsRefreshRateSupported(
+			static_cast<double>(MAGEWELL_CLOCK_TICKS_SECOND) /
+			signal.frameDuration100ns))
+		throw std::runtime_error("Magewell reported invalid locked signal geometry or a frame rate outside the supported refresh range");
 	signal.colorFormat = status.colorFormat;
 	signal.quantRange = status.quantRange;
 
@@ -624,9 +668,27 @@ void MagewellCaptureDevice::ChooseCaptureFormat(
 	};
 	if (signal.colorFormat == MWCAP_VIDEO_COLOR_FORMAT_RGB)
 	{
+		// audit 2026-10-16 (BTB/WTW rule): VP's 8-bit ARGB is full range by
+		// encoding (formatter contract, GPU unpack, analysis); VideoState has
+		// no range field. Asking the card for FULL ARGB from a limited source
+		// makes it expand 16-235 and clip BTB/WTW. A limited 8-bit RGB source
+		// is therefore captured as RGB10 with LIMITED quantization and
+		// delivered as R10l, which VP already treats as limited RGB: the
+		// source's own range is kept, codes scale x4, BTB/WTW survive. Full or
+		// undeclared 8-bit RGB keeps the FULL ARGB route.
+		if (signal.bitDepth > 0 && signal.bitDepth <= 8 &&
+			signal.quantRange == MWCAP_VIDEO_QUANTIZATION_LIMITED &&
+			supports(MWFOURCC_RGB10))
+		{
+			fourcc = MWFOURCC_RGB10;
+			encoding = VideoFrameEncoding::R10l;
+			return;
+		}
 		if (signal.bitDepth > 0 && signal.bitDepth <= 8 &&
 			supports(MWFOURCC_ARGB))
 		{
+			if (signal.quantRange == MWCAP_VIDEO_QUANTIZATION_LIMITED)
+				DebugLog::Log("Magewell: limited-range 8-bit RGB captured as full-range ARGB (card lacks RGB10); BTB/WTW are clipped by the card");
 			fourcc = MWFOURCC_ARGB;
 			encoding = VideoFrameEncoding::ARGB_8BIT;
 			return;
@@ -935,12 +997,14 @@ void MagewellCaptureDevice::CaptureThread(CaptureRunToken captureRunToken)
 	// kills the whole application with no message and no log line. Every path
 	// out of the capture body is therefore contained here, including exceptions
 	// raised by VP's own frame and state callbacks.
+	bool aborted = false;  // audit 2026-10-16
 	try
 	{
 		CaptureThreadBody(captureRunToken);
 	}
 	catch (const std::exception& exception)
 	{
+		aborted = true;
 		DebugLog::Log("Magewell capture thread aborted: %s", exception.what());
 		if (m_state.load() == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING)
 		{
@@ -952,6 +1016,7 @@ void MagewellCaptureDevice::CaptureThread(CaptureRunToken captureRunToken)
 	}
 	catch (...)
 	{
+		aborted = true;
 		DebugLog::Log("Magewell capture thread aborted on an unknown exception");
 		if (m_state.load() == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING)
 		{
@@ -962,7 +1027,16 @@ void MagewellCaptureDevice::CaptureThread(CaptureRunToken captureRunToken)
 		catch (...) { DebugLog::Log("Magewell error callback threw"); }
 	}
 	m_captureThreadRunning.store(false, std::memory_order_release);
-	if (m_state.load() == CaptureDeviceState::CAPTUREDEVICESTATE_STARTING)
+	// audit 2026-10-16: an aborted thread used to leave the state CAPTURING
+	// with no thread behind it. Release the channel (the clock then holds its
+	// last value) and report READY so the GUI can restart capture; the
+	// invalid video state above is posted before this state change.
+	const bool abortedWhileCapturing = aborted &&
+		m_state.load() == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING;
+	if (abortedWhileCapturing)
+		m_outputCaptureData.store(false, std::memory_order_release);
+	if (abortedWhileCapturing ||
+		m_state.load() == CaptureDeviceState::CAPTUREDEVICESTATE_STARTING)
 	{
 		{
 			std::lock_guard<std::mutex> clockLock(m_clockMutex);
@@ -1008,6 +1082,10 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 	std::vector<uint8_t> scratch;
 	std::vector<DWORD> supportedFormats;
 	bool capturing = false;
+	// audit 2026-10-16: start time (100ns) of the last delivered frame, -1
+	// after any capture (re)start; used to count frames skipped by
+	// MWCAP_VIDEO_FRAME_ID_NEWEST_BUFFERED.
+	int64_t lastDeliveredFrameStart = -1;
 	std::string lastUnsupportedReason;
 	auto lastSignalPoll = std::chrono::steady_clock::now();
 	auto lastFrameNotification = lastSignalPoll;
@@ -1029,6 +1107,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 		}
 		buffers.clear();
 		haveState = false;
+		lastDeliveredFrameStart = -1;  // audit 2026-10-16
 		if (lastUnsupportedReason != reason)
 		{
 			lastUnsupportedReason = reason;
@@ -1129,6 +1208,9 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 			MWCAP_NOTIFY_HDMI_INFOFRAME_HDR |
 			MWCAP_NOTIFY_HDMI_INFOFRAME_AVI)) != 0;
 
+		// audit 2026-10-16: set when this pass stopped/reconfigured capture, so
+		// a FRAME_BUFFERED bit in the same notification refers to the old stream.
+		bool captureReconfigured = false;
 		if (formatEvent || !haveState)
 		{
 			SignalDescription signal;
@@ -1181,6 +1263,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 				}
 				buffers.clear();
 				current = signal;
+				lastDeliveredFrameStart = -1;  // audit 2026-10-16
 				continue;
 			}
 
@@ -1195,6 +1278,8 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 				}
 				buffers.clear();
 				current = signal;
+				captureReconfigured = true;  // audit 2026-10-16
+				lastDeliveredFrameStart = -1;
 
 				try { ChooseCaptureFormat(current, supportedFormats, fourcc, encoding); }
 				catch (const std::exception& exception)
@@ -1279,7 +1364,12 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 				throw std::runtime_error(
 					"Magewell stopped reporting buffered frames for two seconds; capture stopped. Restart required");
 
-			if (formatEvent)
+			// audit 2026-10-16: a notification can carry FRAME_BUFFERED together
+			// with a format bit (InfoFrame/AVI refresh, unchanged format). That
+			// frame used to be dropped; it is captured now unless this pass
+			// reconfigured capture.
+			if (formatEvent &&
+				(captureReconfigured || (notifyStatus & MWCAP_NOTIFY_VIDEO_FRAME_BUFFERED) == 0))
 				continue;
 		}
 
@@ -1423,6 +1513,23 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 			continue;
 		const timingclocktime_t captureTimestamp =
 			rawCaptureTicks - baseline;
+
+		// audit 2026-10-16: frames skipped by NEWEST_BUFFERED (the thread fell
+		// behind) were never counted; derive them from the frame timestamps.
+		if (lastDeliveredFrameStart >= 0)
+		{
+			const uint64_t missed = MissedFramesBetween(lastDeliveredFrameStart,
+				static_cast<int64_t>(rawCaptureTicks), current.frameDuration100ns);
+			if (missed > 0)
+			{
+				const uint64_t total = (m_missedVideoFrameCount += missed);
+				if (total == missed || total % 100 < missed)
+					DebugLog::Log("Magewell capture missed %llu frame(s) (total %llu)",
+						(unsigned long long)missed, (unsigned long long)total);
+			}
+		}
+		if (static_cast<int64_t>(rawCaptureTicks) > lastDeliveredFrameStart)
+			lastDeliveredFrameStart = static_cast<int64_t>(rawCaptureTicks);
 
 		LONGLONG deviceTime = 0;
 		if (m_sdkInstance->Api().MWGetDeviceTime(channel, &deviceTime) == MW_SUCCEEDED)

@@ -223,6 +223,65 @@ namespace VideoProcessorTest
 				return tiles;
 			}
 
+			// The dense grid (SourceResolution::PlaceTiles): one shot's sources at arbitrary tile
+			// places (unclipped video / PiP, the native UI, the text with its coverage).
+			struct PlacedShot
+			{
+				std::vector<SourceResolution::TilePlace> places;
+				std::vector<ShotTile> tiles;
+			};
+
+			PlacedShot MakePlacedShot(const Layout& l, const std::vector<SourceResolution::TilePlace>& places, int shot)
+			{
+				const Scene videoScene(100u + 7u * static_cast<unsigned>(shot)), pipScene(300u + 7u * static_cast<unsigned>(shot));
+				static const Scene uiScene(900u);
+				PlacedShot out;
+				out.places = places;
+				for (size_t i = 0; i < places.size(); ++i)
+				{
+					const int ox = places[i].x0, oy = places[i].y0;
+					ShotTile t;
+					t.map.assign(static_cast<size_t>(kTile) * kTile, kBackground);
+					t.coverage.assign(t.map.size(), 0);
+					t.base.assign(t.map.size(), static_cast<float>(l.background));
+					bool needVideo = false, needPip = false, needNative = false;
+					for (int y = 0; y < kTile; ++y)
+						for (int x = 0; x < kTile; ++x)
+						{
+							const Source s = At(l, ox + x, oy + y);
+							t.map[static_cast<size_t>(y) * kTile + x] = s;
+							needVideo |= s == kVideo || s == kDimmed;
+							needPip |= s == kPip;
+							needNative |= s == kNative;
+						}
+					if (needVideo) t.video = Raw(videoScene, l.videoRatio, ox, oy);
+					if (needPip) t.pip = Raw(pipScene, l.pipRatio, ox, oy);
+					std::vector<double> native;
+					if (needNative) native = Raw(uiScene, 1.0, ox, oy);
+					for (size_t p = 0; p < t.map.size(); ++p)
+					{
+						switch (t.map[p])
+						{
+						case kNative: t.base[p] = Code(native[p]); break;
+						case kBar: t.base[p] = static_cast<float>(SubtitleTextTestPattern::kWhite); break;
+						case kVideo: t.base[p] = Code(t.video[p]); break;
+						case kDimmed: t.base[p] = Code(t.video[p] * 0.35 + 0.04); break;
+						case kPip: t.base[p] = Code(t.pip[p]); break;
+						default: break;
+						}
+					}
+					for (size_t k = 0; k < l.text.size(); ++k)
+					{
+						const Line& line = l.text[k];
+						if (line.y0 + line.height + 12 < oy || line.y0 - 12 >= oy + kTile || line.x1 <= ox || line.x0 >= ox + kTile) continue;
+						SubtitleTextTestPattern::Draw(t.base, kTile, kTile, line.x0 - ox, line.x1 - ox, line.y0 - oy, line.height,
+							500u + static_cast<unsigned>(k), &t.coverage);
+					}
+					out.tiles.push_back(std::move(t));
+				}
+				return out;
+			}
+
 			// One analysed frame: the moving video at `offset` (a cut per shot, a small step per
 			// frame so no frame repeats); the UI static.
 			std::vector<SourceResolution::Spectrum> AnalyseFrame(const std::vector<ShotTile>& shot, double offset)
@@ -317,10 +376,10 @@ namespace VideoProcessorTest
 					const SourceResolution::FrameReading& r = o.first;
 					snprintf(line, sizeof(line),
 						"%-58s guard %-3s: frames %d (informative %d, read lower %d, mixed %d); declared %.3f, lowest %.3f, first at %.1f s | "
-						"first frame: tiles %d/%d text %d periodic %d ratio %.3f (v %.3f@%.3f h %.3f@%.3f floor v %.2f h %.2f) mixed %d picture %d overlay %d (%d rows x %d cols) overruled %.3f\n",
+						"first frame: tiles %d/%d text %d periodic %d ratio %.3f (v %.3f@%.3f h %.3f@%.3f floor v %.2f h %.2f) mixed %d picture %d overlay %d (%d rows x %d cols, ui %d, row most %d) overruled %.3f\n",
 						g == 0 ? name : "", g == 0 ? "on" : "off", o.frames, o.informative, o.lower, o.mixed, o.declared, o.lowest, o.firstDeclared,
 						r.informativeTiles, r.tiles, r.textTiles, r.periodicTiles, r.ratio, r.vertical.coherence, r.vertical.ratio, r.horizontal.coherence, r.horizontal.ratio,
-						r.vertical.floor, r.horizontal.floor, r.mixed ? 1 : 0, r.mixedPictureTiles, r.mixedOverlayTiles, r.mixedOverlayRows, r.mixedOverlayColumns, r.mixedRatio);
+						r.vertical.floor, r.horizontal.floor, r.mixed ? 1 : 0, r.mixedPictureTiles, r.mixedOverlayTiles, r.mixedOverlayRows, r.mixedOverlayColumns, r.mixedUiTiles, r.mixedRowMost, r.mixedRatio);
 					Logger::WriteMessage(line);
 				}
 			}
@@ -410,12 +469,13 @@ namespace VideoProcessorTest
 				cases.push_back({ l, true });
 			}
 			{
-				// Known limit: text-only UI confined to one tile row is a band like a subtitle.
+				// Text-only UI confined to one tile row: several lines per tile, not a subtitle band
+				// (Thresholds::mixedRowGuard).
 				Layout l;
-				l.name = "menu: 50% preview (top half) + list text only [limit]";
+				l.name = "menu: 50% preview (top half) + list text only";
 				l.video = { { 0, 0, 3840, 1080 } };
 				l.text = kListText;
-				cases.push_back({ l, false });
+				cases.push_back({ l, true });
 			}
 			{
 				// Known limit: the poster strip below a 75% preview reaches only the bottom 84 rows
@@ -460,7 +520,7 @@ namespace VideoProcessorTest
 			panel.native = { { 200, 200, 900, 800 } };
 			panel.text = { { 1100, 3700, 250, 64 }, { 1100, 3700, 420, 44 }, { 1100, 3700, 500, 44 }, { 1100, 3700, 580, 44 }, { 1100, 3700, 700, 44 } };
 			Layout panelText = Film(0.5);
-			panelText.name = "info panel (text only) over a 1080 film [limit]";
+			panelText.name = "info panel (text only, one tile row) over a 1080 film";
 			panelText.dimmed = { { 0, 0, 3840, 900 } };
 			panelText.text = { { 200, 3700, 250, 64 }, { 200, 3700, 420, 44 }, { 200, 3700, 500, 44 }, { 200, 3700, 580, 44 }, { 200, 3700, 700, 44 } };
 			Layout transport = Film(0.5);
@@ -550,8 +610,195 @@ namespace VideoProcessorTest
 			Assert::IsTrue(on.lowest >= 0.5 - 0.03, L"a lower-rate PiP never takes the frame below the main video's rate");
 		}
 
+		// Intent review (2026-10-16): native UI confined to one tile row - a bottom-half EPG or info
+		// panel over a 1080 film, a half-screen menu, a top info panel without artwork. The overlay
+		// tiles never span two rows; they are mixed because they are not a subtitle band
+		// (Thresholds::mixedRowGuard).
+		TEST_METHOD(HalfScreenNativeUiOverUpscaleIsNeverReBased)
+		{
+			Layout epg = Film(0.5);
+			epg.name = "bottom-half EPG (grid of entries, lines) over a 1080 film";
+			epg.dimmed = { { 0, 1080, 3840, 2160 } };
+			epg.bars = { { 0, 1470, 3840, 1473 }, { 0, 1630, 3840, 1633 } };   // grid rules
+			epg.text = { { 200, 1150, 1500, 44 }, { 1300, 2250, 1500, 44 }, { 2350, 3300, 1500, 44 }, { 3350, 3800, 1500, 44 },
+				{ 200, 1700, 1560, 36 }, { 1800, 3700, 1560, 36 },
+				{ 200, 1150, 1660, 44 }, { 1300, 2250, 1660, 44 }, { 2350, 3300, 1660, 44 }, { 3350, 3800, 1660, 44 } };
+			Layout menu = Film(0.5);
+			menu.name = "half-screen list menu (bottom half) over a 1080 film";
+			menu.dimmed = { { 0, 1080, 3840, 2160 } };
+			menu.text = kListText;
+			Layout info = Film(0.5);
+			info.name = "info panel (text only, top tile row) over a 1080 film";
+			info.dimmed = { { 0, 0, 3840, 900 } };
+			info.text = { { 200, 3700, 250, 64 }, { 200, 3700, 420, 44 }, { 200, 3700, 500, 44 }, { 200, 3700, 580, 44 }, { 200, 3700, 700, 44 } };
+			Layout side = Film(0.5);
+			side.name = "right-half panel (text, one column of tiles per row) over a 1080 film";
+			side.dimmed = { { 1920, 0, 3840, 2160 } };
+			side.text = { { 2000, 3700, 430, 44 }, { 2000, 3700, 510, 44 }, { 2000, 3700, 590, 44 } };
+			// Per case: never declared lower (strict), and at most one frame in twelve read lower. A
+			// sporadic frame the guard misses (a panel tile's band share or detail at a threshold
+			// on that frame's video) cannot re-base: any native frame in the tracker's window keeps
+			// the candidate native (Tracker::Candidate is the window's highest reading).
+			for (const Layout* l : { &epg, &menu, &info, &side })
+			{
+				Outcome on, off;
+				Run({ { l, 6 } }, on, off);
+				Report(l->name.c_str(), on, off);
+				char line[256];
+				snprintf(line, sizeof(line), "  %s: guard on - frames read lower %d of %d, mixed %d, lowest declared %.3f (guard off: read lower %d, lowest %.3f)\n",
+					l->name.c_str(), on.lower, on.frames, on.mixed, on.lowest, off.lower, off.lowest);
+				Logger::WriteMessage(line);
+				const std::wstring name(l->name.begin(), l->name.end());
+				Assert::AreEqual(1.0, on.lowest, (L"never declared lower: " + name).c_str());
+				Assert::IsTrue(on.lower * 12 <= on.frames, (L"at most one frame in twelve reads lower: " + name).c_str());
+			}
+		}
+
+		// The row rule's regression: subtitles - one or two lines in a band, top or bottom, wide,
+		// in a player's translucent caption box - are still ignored (no mixed frame, declared as
+		// without the guard).
+		TEST_METHOD(SubtitleBandsAreStillIgnoredByTheRowRule)
+		{
+			std::vector<Layout> cases;
+			auto add = [&](const char* name, std::vector<Line> text, std::vector<Rect> box = {}) {
+				Layout l = Film(0.5);
+				l.name = name;
+				l.text = std::move(text);
+				l.dimmed = std::move(box);
+				cases.push_back(std::move(l));
+			};
+			add("subtitle: one line, bottom tile row", { { 900, 2940, 1610, 56 } });
+			add("subtitle: two lines, bottom tile row", { { 1000, 2840, 1560, 56 }, { 900, 2940, 1640, 56 } });
+			add("subtitle: two small lines (40 px)", { { 1100, 2740, 1580, 40 }, { 1000, 2840, 1640, 40 } });
+			add("subtitle: one line, top tile row", { { 900, 2940, 520, 56 } });
+			add("subtitle: one very wide line", { { 560, 3280, 1610, 56 } });
+			add("subtitle: two lines in a translucent caption box", { { 1000, 2840, 1560, 56 }, { 900, 2940, 1640, 56 } }, { { 860, 1530, 2980, 1712 } });
+			int failures = 0;
+			for (const Layout& l : cases)
+			{
+				Outcome on, off;
+				Run({ { &l, 6 } }, on, off);
+				Report(l.name.c_str(), on, off);
+				if (on.mixed > 0 || std::fabs(on.declared - off.declared) > 1e-9 || std::fabs(on.declared - 0.5) > 0.03)
+				{
+					++failures;
+					Logger::WriteMessage("  FAILED: the subtitle changed the reading (mixed frames, or not declared 0.5)\n");
+				}
+			}
+			Assert::AreEqual(0, failures, L"subtitle bands stay ignored with the row rule on");
+		}
+
 		// The switch: off is the old reading, frame for frame (also checked on every frame of
 		// every scenario above), and the defaults are on.
+		// The monitor's dense grid (gap 2): switching between the base 4 x 2 grid and the 16-tile
+		// grid - here on every other frame, harsher than the monitor - is neither a cut nor a new
+		// shot: the mean and signature come from the base tiles (Thresholds::signatureTiles), which
+		// PlaceTiles puts first at the same places.
+		TEST_METHOD(DenseGridSwitchIsNotACut)
+		{
+			int base = 0, baseDense = 0;
+			const std::vector<SourceResolution::TilePlace> sparse = SourceResolution::PlaceTiles(0, 0, kWidth, kHeight, kTile, false, &base);
+			const std::vector<SourceResolution::TilePlace> dense = SourceResolution::PlaceTiles(0, 0, kWidth, kHeight, kTile, true, &baseDense);
+			Assert::AreEqual(8, static_cast<int>(sparse.size()));
+			Assert::AreEqual(16, static_cast<int>(dense.size()));
+			Assert::AreEqual(8, base);
+			Assert::AreEqual(8, baseDense);
+			for (size_t i = 0; i < sparse.size(); ++i)
+			{
+				int ox, oy;
+				Origin(static_cast<int>(i), ox, oy);
+				Assert::IsTrue(dense[i].x0 == sparse[i].x0 && dense[i].y0 == sparse[i].y0, L"the base tiles come first, at the same places");
+				Assert::IsTrue(sparse[i].x0 == ox && sparse[i].y0 == oy, L"PlaceTiles is the monitor's 4 x 2 placement");
+			}
+			const Layout film = Film(0.5);
+			SourceResolution::Thresholds tSparse, tDense, tDenseAll;
+			SourceResolution::SetTileCentres(sparse, tSparse);
+			tSparse.signatureTiles = base;
+			SourceResolution::SetTileCentres(dense, tDense);
+			tDense.signatureTiles = baseDense;
+			tDenseAll = tDense;
+			tDenseAll.signatureTiles = 0;   // the old signature over every tile (logged)
+			SourceResolution::Tracker sparseOnly, switching, switchingAll;
+			double t = 0.0;
+			for (int shot = 0; shot < 6; ++shot)
+			{
+				const PlacedShot s = MakePlacedShot(film, dense, shot);
+				for (int f = 0; f < 6; ++f, t += 0.5)
+				{
+					const double offset = (shot % 2 ? 0.2 : -0.2) + 3.0 * f / 1023.0;
+					const std::vector<SourceResolution::Spectrum> all = AnalyseFrame(s.tiles, offset);
+					const std::vector<SourceResolution::Spectrum> eight(all.begin(), all.begin() + 8);
+					const SourceResolution::FrameReading r8 = SourceResolution::ReadFrame(eight, tSparse);
+					const SourceResolution::FrameReading r16 = SourceResolution::ReadFrame(all, tDense);
+					const SourceResolution::FrameReading r16all = SourceResolution::ReadFrame(all, tDenseAll);
+					Assert::AreEqual(r8.mean, r16.mean, 0.0, L"the same frame has the same mean on either grid");
+					Assert::AreEqual(r8.signature, r16.signature, 0.0, L"and the same signature");
+					const bool useDense = f % 2 == 1;
+					sparseOnly.Update(r8, t);
+					switching.Update(useDense ? r16 : r8, t);
+					switchingAll.Update(useDense ? r16all : r8, t);
+				}
+			}
+			char line[200];
+			snprintf(line, sizeof(line), "cuts: base grid only %llu (shots %d); switching every frame %llu (shots %d); switching without signatureTiles %llu\n",
+				sparseOnly.Cuts(), sparseOnly.Shots(), switching.Cuts(), switching.Shots(), switchingAll.Cuts());
+			Logger::WriteMessage(line);
+			Assert::AreEqual(sparseOnly.Cuts(), switching.Cuts(), L"switching grids adds no cut");
+			Assert::AreEqual(sparseOnly.Shots(), switching.Shots(), L"and no shot");
+			// The declared value itself may differ in the last digits: the dense frames average 16
+			// tiles' curves, not 8 (the sub-bin peak moves by ~1e-5). Within a thousandth (the
+			// tracker's hysteresis is 0.03; the re-based height rounds to even lines).
+			Assert::AreEqual(sparseOnly.Ratio(), switching.Ratio(), 1e-3, L"and declares the same (within 1e-3)");
+		}
+
+		// A small picture-in-picture between the base tiles: the base grid never sees it (the 1080
+		// main reads 0.5 and would be re-based, softening the native PiP); the dense grid has a
+		// tile inside it and the frame reads native. A two-line subtitle straddling the lower base
+		// row and the bottom dense row stays ignored (the spread needs 0.3 of the height).
+		TEST_METHOD(DenseGridCatchesASmallPipBetweenTheBaseTiles)
+		{
+			int base = 0;
+			const std::vector<SourceResolution::TilePlace> sparse = SourceResolution::PlaceTiles(0, 0, kWidth, kHeight, kTile, false, &base);
+			const std::vector<SourceResolution::TilePlace> dense = SourceResolution::PlaceTiles(0, 0, kWidth, kHeight, kTile, true);
+			Layout pip = Film(0.5);
+			pip.name = "1080 main + 880 x 495 native PiP between the base tiles";
+			pip.pip = { { 1100, 820, 1980, 1315 } };
+			pip.pipRatio = 1.0;
+			const Rect& r = pip.pip.front();
+			auto overlaps = [&](const SourceResolution::TilePlace& p) { return p.x0 < r.x1 && p.x0 + kTile > r.x0 && p.y0 < r.y1 && p.y0 + kTile > r.y0; };
+			auto inside = [&](const SourceResolution::TilePlace& p) { return p.x0 >= r.x0 && p.x0 + kTile <= r.x1 && p.y0 >= r.y0 && p.y0 + kTile <= r.y1; };
+			bool seenByBase = false, insideDense = false;
+			for (const auto& p : sparse) seenByBase |= overlaps(p);
+			for (const auto& p : dense) insideDense |= inside(p);
+			Assert::IsFalse(seenByBase, L"fixture: no base tile touches the PiP");
+			Assert::IsTrue(insideDense, L"fixture: a dense tile lies inside the PiP");
+			SourceResolution::Thresholds tSparse, tDense;
+			SourceResolution::SetTileCentres(sparse, tSparse);
+			tSparse.signatureTiles = base;
+			SourceResolution::SetTileCentres(dense, tDense);
+			tDense.signatureTiles = base;
+			Layout subtitle = Film(0.5);
+			subtitle.text = { { 1000, 2840, 1690, 56 }, { 900, 2940, 1770, 56 } };
+			for (int shot = 0; shot < 3; ++shot)
+			{
+				const PlacedShot s = MakePlacedShot(pip, dense, shot);
+				std::vector<ShotTile> firstEight(s.tiles.begin(), s.tiles.begin() + base);
+				const SourceResolution::FrameReading rBase = SourceResolution::ReadFrame(AnalyseFrame(firstEight, 0.0), tSparse);
+				const SourceResolution::FrameReading rDense = SourceResolution::ReadFrame(AnalyseFrame(s.tiles, 0.0), tDense);
+				const PlacedShot sub = MakePlacedShot(subtitle, dense, shot);
+				const SourceResolution::FrameReading rSub = SourceResolution::ReadFrame(AnalyseFrame(sub.tiles, 0.0), tDense);
+				char line[320];
+				snprintf(line, sizeof(line), "shot %d: PiP base grid ratio %.3f mixed %d; dense ratio %.3f mixed %d (picture %d overlay %d, overruled %.3f); subtitle on the dense grid ratio %.3f mixed %d (overlay %d)\n",
+					shot, rBase.ratio, rBase.mixed ? 1 : 0, rDense.ratio, rDense.mixed ? 1 : 0, rDense.mixedPictureTiles, rDense.mixedOverlayTiles, rDense.mixedRatio,
+					rSub.ratio, rSub.mixed ? 1 : 0, rSub.mixedOverlayTiles);
+				Logger::WriteMessage(line);
+				Assert::IsTrue(!rBase.mixed && rBase.ratio < 0.9, L"the base grid misses the PiP and reads the main video's rate (the gap)");
+				Assert::IsTrue(rDense.mixed && rDense.ratio == 1.0, L"the dense grid catches the PiP: native");
+				Assert::IsFalse(rSub.mixed, L"a two-line subtitle across neighbouring dense rows is not mixed");
+				Assert::AreEqual(0.5, rSub.ratio, 0.03, L"and the film still reads its rate");
+			}
+		}
+
 		TEST_METHOD(GuardIsSwitchableAndOnByDefault)
 		{
 			const SourceResolution::Thresholds defaults;
@@ -574,6 +821,62 @@ namespace VideoProcessorTest
 			Assert::IsFalse(rOff.mixed);
 			Assert::AreEqual(0, rOff.mixedPictureTiles + rOff.mixedOverlayTiles, L"off: the guard does not run");
 			if (rOff.ratio < 1.0) Assert::IsTrue(rOn.mixed && rOn.ratio == 1.0, L"on: the lower reading is overruled");
+		}
+	};
+}
+
+// TEMP DIAGNOSTIC (remove before handing back)
+namespace VideoProcessorTest
+{
+	TEST_CLASS(MixedScreenDiagTemp)
+	{
+	public:
+		TEST_METHOD(Diag)
+		{
+			using namespace MixedScreen;
+			Layout two = Film(0.5);
+			two.name = "two lines";
+			two.text = { { 1000, 2840, 1560, 56 }, { 900, 2940, 1640, 56 } };
+			Layout menu = Film(0.5);
+			menu.name = "menu";
+			menu.dimmed = { { 0, 1080, 3840, 2160 } };
+			menu.text = kListText;
+			Layout info = Film(0.5);
+			info.name = "info";
+			info.dimmed = { { 0, 0, 3840, 900 } };
+			info.text = { { 200, 3700, 250, 64 }, { 200, 3700, 420, 44 }, { 200, 3700, 500, 44 }, { 200, 3700, 580, 44 }, { 200, 3700, 700, 44 } };
+			Layout up667 = Film(2.0 / 3.0); up667.name = "up667";
+			Layout up75 = Film(0.75); up75.name = "up75";
+			Layout up33 = Film(1.0 / 3.0); up33.name = "up33";
+			Layout nat = Film(1.0); nat.name = "native";
+			for (const Layout* l : { &info, &two, &menu, &up667, &up75, &up33, &nat })
+			{
+				std::vector<std::vector<float>> cache;
+				for (int shot = 0; shot < 6; ++shot)
+				{
+					const std::vector<ShotTile> tiles = MakeShot(*l, shot, cache);
+					for (int f = 0; f < 6; f += 6)
+					{
+						const double offset = (shot % 2 ? 0.2 : -0.2) + 3.0 * f / 1023.0;
+						const std::vector<SourceResolution::Spectrum> sp = AnalyseFrame(tiles, offset);
+						const SourceResolution::FrameReading r = SourceResolution::ReadFrame(sp);
+						char line[300];
+						snprintf(line, sizeof(line), "%s shot %d f %d: ratio %.3f mixed %d (mixedRatio %.3f) pic %d ov %d ui %d inf %d text %d\n", l->name.c_str(), shot, f, r.ratio, r.mixed, r.mixedRatio, r.mixedPictureTiles, r.mixedOverlayTiles, r.mixedUiTiles, r.informativeTiles, r.textTiles);
+						Logger::WriteMessage(line);
+						const double rate = r.mixed ? r.mixedRatio : r.ratio;
+						for (size_t i = 0; i < 8; ++i)
+						{
+							double lev = 0;
+							const double d = rate < 1.0 ? SourceResolution::DetailAbove(sp[i], rate, 3, &lev) : 0.0;
+							const int c = static_cast<int>(std::lround(rate * 256));
+							double cv = 0, ch = 0;
+							for (int m = c - 2; m <= c + 2; ++m) if (m >= 0 && m < 256) { cv = (std::max)(cv, sp[i].mirrorVertical[m]); ch = (std::max)(ch, sp[i].mirrorHorizontal[m]); }
+							snprintf(line, sizeof(line), "   tile %zu: sharp %.4f tb %.2f lines %d detail %.2f lvl %.2f coh %.2f/%.2f inf %d\n", i, sp[i].sharpSteps, sp[i].textBand, sp[i].textLines, d, lev, cv, ch, SourceResolution::Informative(sp[i]) ? 1 : 0);
+							Logger::WriteMessage(line);
+						}
+					}
+				}
+			}
 		}
 	};
 }

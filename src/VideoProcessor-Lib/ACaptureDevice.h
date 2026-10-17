@@ -70,7 +70,7 @@ public:
 
 private:
 
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // audit 2026-10-16: was uninitialised (callers assign it to a CComPtr)
 };
 
 

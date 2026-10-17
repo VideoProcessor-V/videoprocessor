@@ -64,6 +64,39 @@ struct DolbyVisionTunnelFrameMetadata
     bool hasSceneMetadata = false;
     uint16_t sceneMaxPq = 0;
     uint16_t sceneAvgPq = 0;
+    // audit 2026-10-16: L1 scene minimum (12-bit PQ code), valid when
+    // hasSceneMetadata. libplacebo has no scene-minimum input; carried for
+    // VP-owned curves and status only.
+    uint16_t sceneMinPq = 0;
+
+    // audit 2026-10-16: L2 / L8 display trims, parsed generically but NOT
+    // applied (no rendering change). Fields use the same big-endian 16-bit
+    // containers as the existing L1 parser. The L8 container layout is an
+    // assumption until a live packet is checked (raw bytes are logged once
+    // per title). 12-bit trim codes are kept as transmitted (unscaled).
+    struct Trim
+    {
+        uint8_t level = 0;              // 2 or 8
+        uint8_t targetDisplayIndex = 0; // L8 only (refers to L10 / predefined target)
+        uint16_t targetMaxPq = 0;       // L2 only (12-bit PQ code)
+        uint16_t slope = 0;
+        uint16_t offset = 0;
+        uint16_t power = 0;
+        uint16_t chromaWeight = 0;
+        uint16_t saturationGain = 0;
+        int16_t msWeight = 0;
+        bool hasMidContrastAndClip = false; // L8 optional
+        uint16_t midContrast = 0;
+        uint16_t clipTrim = 0;
+        bool hasSaturationVector = false;   // L8 optional
+        uint8_t saturationVector[6] = {};
+        bool hasHueVector = false;          // L8 optional
+        uint8_t hueVector[6] = {};
+    };
+    static constexpr uint8_t kMaxTrims = 8;
+    uint8_t trimCount = 0;
+    bool trimOverflow = false; // more L2/L8 blocks than kMaxTrims arrived
+    Trim trims[kMaxTrims] = {};
 };
 
 /**

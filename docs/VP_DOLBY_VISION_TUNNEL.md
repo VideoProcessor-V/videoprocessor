@@ -150,3 +150,25 @@ With peak detection enabled, L1 PQ fields remain supplied, while measured
 maxRGB/average fields can also influence libplacebo's adaptive target. L1 is
 therefore an input to VP's selected tone mapping, not a complete Dolby display
 mapping implementation.
+
+## VP fork additions (2026-10-16)
+
+These extend the behaviour described above; tests in `DolbyVisionTunnelFormatterTests.cpp`.
+
+- **Limits by time, not frames:** the metadata-loss limit is about 1 s converted at the signal's rate
+  (24 pictures at 23.976, 60 at 59.94); no fixed timing remains (raster and rate from the display mode).
+- **SDR switch without EOS:** while locked, if no CRC-valid header arrives and the pictures stop looking
+  like a tunnel for about 2 s (counted in source pictures), the formatter unlocks and allows SDR (logged).
+  Black is shown during that window; any valid header re-locks. This replaces "remain black until
+  Restart capture" for that case.
+- **Metadata ID wrap:** after 16 or more header-less pictures an ID match is ambiguous; cached DM is
+  dropped (black until fresh DM) instead of resuming stale matrices.
+- **Containers:** R10b and R10l DeckLink packings are accepted besides r210 (R10 word = r210 word << 2;
+  R10l little-endian); only a CRC-valid packet proves the bytes are exact. The GUI gate still enables the
+  tunnel for r210 only until widened.
+- **Packets:** a bitwise 2-of-3 majority vote recovers a packet when all three copies fail CRC (the CRC
+  stays the authority); multi-line DM up to 100 packets is tested.
+- **Interlaced modes** never lock DV (SDR passthrough only).
+- **Metadata:** the L1 scene minimum is carried (libplacebo has no field for it; for a future VP curve);
+  L2 and L8 trims are parsed but not applied; one log line per title lists which extension levels arrive
+  (and the first L2/L8 block decoded plus raw hex, to verify the layout on the first live run).

@@ -10,6 +10,10 @@
 
 #include "DisplayMode.h"
 
+#include <atomic>
+#include <cmath>
+#include <DebugLog.h>
+
 
 DisplayMode::DisplayMode(
 	unsigned int frameWidth,
@@ -39,8 +43,43 @@ DisplayMode::DisplayMode(
 	if (frameDuration >= timeScale)
 		throw std::runtime_error("frameDuration cannot be >= timeScale");
 
-	if (RefreshRateHz() < 23 || RefreshRateHz() > 120)
-		throw std::runtime_error("frameDuration and timeScaledo not lead to a valid refresh rate");
+	// audit 2026-10-16: the refresh limit is a policy (about 10-240 Hz), not a
+	// fixed 23-120 Hz reject; unusual rates are logged once per distinct rate.
+	const double refreshRateHz = RefreshRateHz();
+	if (!IsRefreshRateSupported(refreshRateHz))
+		throw std::runtime_error("frameDuration and timeScale do not lead to a supported refresh rate");
+	if (IsRefreshRateUnusual(refreshRateHz))
+	{
+		static std::atomic<long long> lastLoggedMilliHz{ -1 };
+		const long long milliHz = (long long)std::llround(refreshRateHz * 1000.0);
+		if (lastLoggedMilliHz.exchange(milliHz) != milliHz)
+			DebugLog::Log("DisplayMode: unusual refresh rate %.3f Hz (%ux%u%s) accepted by the %.0f-%.0f Hz policy",
+				refreshRateHz, frameWidth, frameHeight, interlaced ? "i" : "p",
+				MinimumRefreshRateHz(), MaximumRefreshRateHz());
+	}
+}
+
+
+bool DisplayMode::IsRefreshRateSupported(double refreshRateHz)
+{
+	// audit 2026-10-16
+	return refreshRateHz >= MinimumRefreshRateHz() &&
+		refreshRateHz <= MaximumRefreshRateHz();
+}
+
+
+bool DisplayMode::IsRefreshRateUnusual(double refreshRateHz)
+{
+	// audit 2026-10-16: 23.976 is the lowest common video rate, 120 the highest
+	// common HDMI video rate; a small tolerance keeps 23.976/119.88 ordinary.
+	return refreshRateHz < 23.0 || refreshRateHz > 120.5;
+}
+
+
+uint64_t DisplayMode::NanosecondsPerFrame() const
+{
+	// audit 2026-10-16
+	return ((uint64_t)m_frameDuration * 1000000000ULL + m_timeScale / 2) / m_timeScale;
 }
 
 

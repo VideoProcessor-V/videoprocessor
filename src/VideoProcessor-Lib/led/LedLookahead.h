@@ -33,7 +33,14 @@ namespace LedDrive
 	// and 12-bit RGB) rather than limited-range ones (YUV, 10-bit RGB). Its
 	// RGB luma uses BT.709 (or BT.2020) weights where the exact pass uses
 	// apl_weights; the correction ratio absorbs the difference.
+	// audit 2026-10-16: false whenever kAnalysisLumaSampleLimitedDomain (the
+	// sampler emits limited codes for every format).
 	bool LumaIsFullRange(const AnalysisLumaSource& luma);
+	// audit 2026-10-16: the source's own codes are full range and Sample()
+	// mapped them to the limited domain (8-bit/12-bit RGB, DV SDR-tunnel RGB,
+	// full-range YCbCr planes). MeasureRawFrame recovers the source code
+	// before applying source_range, so the auto range reads these as full.
+	bool SampleRemapsFullRange(const AnalysisLumaSource& luma);
 
 	// Measures a raw frame the way the GPU pass measures a rendered one: 3x3
 	// block means of the mapped luma, in code units, on a block grid of at

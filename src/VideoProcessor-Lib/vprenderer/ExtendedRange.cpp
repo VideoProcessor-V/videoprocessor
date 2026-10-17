@@ -437,7 +437,11 @@ color.a = 1.0;
 		{
 			if (!settings.hdrPassthrough) { d.reason = Reason::HdrSource; return d; }
 			if (!outputHdr) { d.reason = Reason::HdrSource; return d; }
-			if (!pl_color_space_equal(&sourceIn, &outputIn)) { d.reason = Reason::HdrMapped; return d; }
+			if (!pl_color_space_equal(&sourceIn, &outputIn) || settings.hdrDynamicToneMapping)
+			{
+				d.reason = Reason::HdrMapped;
+				return d;
+			}
 		}
 		else if (outputHdr) { d.reason = Reason::HdrOutput; return d; }
 		// 3: the calibration LUT.
@@ -541,8 +545,8 @@ color.a = 1.0;
 		restoreTexture.signature = 0x5650585252535454ull;   // "VPXRRSTT"
 		// Audit 2026-10-16: the late restore.
 		late.stages = PL_HOOK_PRE_OUTPUT;
-		late.input = PL_HOOK_SIG_TEX;
 		late.priv = this;
+		late.input = PL_HOOK_SIG_TEX;
 		late.hook = &Hooks::RunLate;
 		late.signature = 0x565058524C415445ull;   // "VPXRLATE"
 	}
@@ -812,38 +816,17 @@ color.a = 1.0;
 	// VP's own float texture. LUT mode: v from the SCALED restore's texture,
 	// the LUT's edge slope; gamut mode: the linear remainder through the
 	// matrix after libplacebo's gamut mapping.
-	pl_hook_res Hooks::RunLate(void* priv, const pl_hook_params* params)
+	// The late restore's shader, appended to VP's pass over the stage's texture.
+	bool Hooks::AppendLate(pl_shader sh, const pl_rect2df& rect) const
 	{
-		Hooks* self = static_cast<Hooks*>(priv);
-		if (!params->tex || !self->gpu || self->gpu != params->gpu)
-			return Failure();
-		const bool lutMode = self->decision.lut != nullptr;
-		const bool gamutMode = self->decision.libplaceboMapsPrimaries;
-		// Nothing to add (no SCALED picture this frame): leave the stage
-		// untouched rather than fail (a failure disables the hook for good).
-		if (lutMode == gamutMode || (lutMode && (!self->scaledValid || !self->restoreTex)))
-			return pl_hook_res{};
-		if (lutMode && !self->EnsureLut(params->gpu))
-			return Failure();
-		if (gamutMode && !self->remainder)
-			return Failure();
-		const int w = params->tex->params.w, h = params->tex->params.h;
-		pl_gpu owner = self->gpu;
-		if (!EnsureFloat(params->gpu, owner, self->lateTex, w, h))
-			return Failure();
-		pl_shader sh = pl_dispatch_begin(params->dispatch);
-		pl_sample_src src{};
-		src.tex = params->tex;
-		src.components = 4;
-		const pl_rect2df& rect = params->rect;
+		const bool lutMode = decision.lut != nullptr;
 		const float outRect[4] = { rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0 };
-		const pl_rect2df& sr = self->scaledRect;
-		const float scaledRect[4] = { sr.x0, sr.y0, sr.x1 - sr.x0, sr.y1 - sr.y0 };
-		const float carry[4] = { self->carryRect.x0, self->carryRect.y0,
-			self->carryRect.x1 - self->carryRect.x0, self->carryRect.y1 - self->carryRect.y0 };
-		const float lutMax[3] = { static_cast<float>(self->lutSize[0] - 1),
-			static_cast<float>(self->lutSize[1] - 1), static_cast<float>(self->lutSize[2] - 1) };
-		const float outputKind = TransferKindValue(self->decision.output);
+		const pl_rect2df& sr = scaledRect;
+		const float scaled[4] = { sr.x0, sr.y0, sr.x1 - sr.x0, sr.y1 - sr.y0 };
+		const float carry[4] = { carryRect.x0, carryRect.y0, carryRect.x1 - carryRect.x0, carryRect.y1 - carryRect.y0 };
+		const float lutMax[3] = { static_cast<float>(lutSize[0] - 1), static_cast<float>(lutSize[1] - 1),
+			static_cast<float>(lutSize[2] - 1) };
+		const float outputKind = TransferKindValue(decision.output);
 		std::string header;
 		pl_shader_var variables[5];
 		pl_shader_desc descriptors[2]{};
@@ -852,18 +835,18 @@ color.a = 1.0;
 		if (lutMode)
 		{
 			header = LATE_LUT_HEADER;
-			variables[numVariables++] = { pl_var_vec4("er_scaled_rect"), scaledRect, true };
+			variables[numVariables++] = { pl_var_vec4("er_scaled_rect"), scaled, true };
 			variables[numVariables++] = { pl_var_vec3("er_lut_max"), lutMax, true };
-			pl_shader_desc& scaled = descriptors[numDescriptors++];
-			scaled.desc.name = "er_scaled";
-			scaled.desc.type = PL_DESC_SAMPLED_TEX;
-			scaled.binding.object = self->restoreTex;
-			scaled.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
-			scaled.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+			pl_shader_desc& s = descriptors[numDescriptors++];
+			s.desc.name = "er_scaled";
+			s.desc.type = PL_DESC_SAMPLED_TEX;
+			s.binding.object = restoreTex;
+			s.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+			s.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
 			pl_shader_desc& table = descriptors[numDescriptors++];
 			table.desc.name = "er_lut";
 			table.desc.type = PL_DESC_SAMPLED_TEX;
-			table.binding.object = self->lutTex;
+			table.binding.object = lutTex;
 			table.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
 			table.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
 		}
@@ -872,12 +855,12 @@ color.a = 1.0;
 			header = std::string(TRANSFER_GLSL) + RESTORE_HEADER;
 			variables[numVariables++] = { pl_var_vec4("er_carry_rect"), carry, true };
 			variables[numVariables++] = { pl_var_float("er_out_kind"), &outputKind, true };
-			variables[numVariables++] = { pl_var_float("er_out_param"), &self->decision.output.param, true };
-			variables[numVariables++] = { pl_var_mat3("er_matrix"), self->decision.matrix, true };
+			variables[numVariables++] = { pl_var_float("er_out_param"), &decision.output.param, true };
+			variables[numVariables++] = { pl_var_mat3("er_matrix"), decision.matrix, true };
 			pl_shader_desc& rem = descriptors[numDescriptors++];
 			rem.desc.name = "er_remainder";
 			rem.desc.type = PL_DESC_SAMPLED_TEX;
-			rem.binding.object = self->remainder;
+			rem.binding.object = remainder;
 			rem.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
 			rem.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
 		}
@@ -891,7 +874,51 @@ color.a = 1.0;
 		custom.variables = variables;
 		custom.num_variables = numVariables;
 		custom.body = lutMode ? LATE_LUT_BODY : LATE_GAMUT_BODY;
-		if (!pl_shader_sample_direct(sh, &src) || !pl_shader_custom(sh, &custom))
+		return pl_shader_custom(sh, &custom);
+	}
+
+	// 0: nothing to add this frame, 1: ready, -1: failure.
+	int Hooks::LateReady(pl_gpu gpu)
+	{
+		if (!this->gpu || this->gpu != gpu)
+			return -1;
+		const bool lutMode = decision.lut != nullptr;
+		const bool gamutMode = decision.libplaceboMapsPrimaries;
+		// Nothing to add (no SCALED picture this frame): leave the stage
+		// untouched rather than fail (a failure disables the hook for good).
+		if (lutMode == gamutMode || (lutMode && (!scaledValid || !restoreTex)))
+			return 0;
+		if (lutMode && !EnsureLut(gpu))
+			return -1;
+		if (gamutMode && !remainder)
+			return -1;
+		return 1;
+	}
+
+	// The texture form: VP's own pass into its float texture. Audit
+	// 2026-10-16 (GPU run): an inline form in libplacebo's PRE_OUTPUT shader
+	// is rejected ("User hook tried resizing non-resizable stage!", then
+	// disabled), as at SCALED; so the picture goes through libplacebo's
+	// half-float texture first (about 1/4 code, as the 10b SCALED restore).
+	pl_hook_res Hooks::RunLate(void* priv, const pl_hook_params* params)
+	{
+		Hooks* self = static_cast<Hooks*>(priv);
+		if (!params->tex)
+			return Failure();
+		const int ready = self->LateReady(params->gpu);
+		if (ready == 0)
+			return pl_hook_res{};
+		if (ready < 0)
+			return Failure();
+		const int w = params->tex->params.w, h = params->tex->params.h;
+		pl_gpu owner = self->gpu;
+		if (!EnsureFloat(params->gpu, owner, self->lateTex, w, h))
+			return Failure();
+		pl_shader sh = pl_dispatch_begin(params->dispatch);
+		pl_sample_src src{};
+		src.tex = params->tex;
+		src.components = 4;
+		if (!pl_shader_sample_direct(sh, &src) || !self->AppendLate(sh, params->rect))
 		{
 			pl_dispatch_abort(params->dispatch, &sh);
 			return Failure();

@@ -46,6 +46,13 @@ namespace SourceResolution
 		// (neighbours a third of the range apart) inside its densest band a quarter of the
 		// tile high; 0 when the tile has too few sharp steps to judge.
 		double textBand = 0.0;
+		// The separate lines of sharp steps (text lines) along the axis of textBand; 0 when the
+		// tile has too few sharp steps to judge (mixed-screen guard: subtitles hold one or two).
+		int textLines = 0;
+		// The share of neighbour pairs (both axes) a third of the range apart: full-contrast steps
+		// one pixel wide, which an upscale (an edge spread over 1 / r pixels) rarely makes.
+		double sharpSteps = 0.0;
+		double sharpStepsV = 0.0, sharpStepsH = 0.0;   // per axis: steps down the columns / across the rows
 		// Planner Q5 (2026-10-16): the strongest repeat of either axis's autocorrelation
 		// (the window's own removed) at a lag of 3 .. n / 4 that stands after a dip: near
 		// 1 for exactly periodic content (fences, grilles, test patterns), 0 when none.
@@ -93,7 +100,7 @@ namespace SourceResolution
 		// a 1080 film, picture-in-picture). The re-base is whole-frame, so such a frame must count
 		// as native - re-basing it to the video's rate would soften the UI. When a frame reads
 		// lower, every tile is checked for native detail at that rate: power above the rate's
-		// Nyquist at least `mixedDetailDecades` above the resampled tiles' (their median) and at
+		// Nyquist at least `mixedDetailDecades` above the resampled tiles' (their lower quartile) and at
 		// least `mixedDetailFloorDecades` above the quantisation floor (noise in a flat area is
 		// not detail). Such a tile is
 		//   - a native picture tile when it is not resampled at the rate (coherence below
@@ -113,11 +120,63 @@ namespace SourceResolution
 		// one subtitle line ~1, two lines ~0.55 (measured on the synthetic fixtures).
 		double mixedTextBand = 0.45;
 		int mixedPictureTiles = 1;             // native picture tiles that make the frame mixed
+		// Native UI confined to one tile row (a bottom-half EPG or info panel, a half-screen menu
+		// over the film; intent review 2026-10-16): an overlay tile that is NOT text-like
+		// (textBand below mixedTextBand - several lines of text, icons, grid lines, a panel edge,
+		// rather than one or two subtitle lines in a band) makes the frame mixed wherever it is.
+		// Subtitles (one line ~1, two lines ~0.55) stay ignored; three or more subtitle lines in
+		// one tile would read as UI (the safe direction: native). false: overlay tiles count only
+		// through the two-rows-and-two-columns spread.
+		bool mixedRowGuard = true;
+		// ... and an overlay tile holding at least this many text lines (Spectrum::textLines) is UI
+		// too, text-like or not. 0: off (default) - the count is fragile: steep edges of the
+		// video under a two-line subtitle split or add runs (4 counted on one fixture shot), and
+		// a false mixed on subtitles disables the re-base on real films.
+		int mixedTextLines = 0;
+		// ... and a tile with at least this share of one-pixel full-contrast steps
+		// (Spectrum::sharpSteps) is native, never the resampled picture (left out of the
+		// reference); one that is informative and not text-like makes the frame mixed (with
+		// mixedRowGuard). Upscales measure 0.0000 (r 1/3) - 0.004 (r 3/4), native picture
+		// 0.014 - 0.018, UI text 0.03 - 0.05. <= 0: off.
+		double mixedSharpSteps = 0.01;
+		// Also mixed when one grid row holds at least this many overlay tiles, text-like or not.
+		// 0: off (default) - a subtitle line drawn across the full width of every tile of a row
+		// (SourceResolutionDetectorTests: SubtitleTextOverAnUpscale..., 4 tiles) is
+		// indistinguishable from a one-line UI band by tile statistics alone.
+		int mixedRowTiles = 0;
 		// The tile grid for the overlay spread: tiles are row-major in rows of this many (the
 		// monitors sample 4 x 2). <= 0: one row of all the tiles (the spread rule never fires).
 		int gridColumns = 4;
+		// Explicit tile centres, normalised to the picture (0..1), one per tile (PlaceTiles); when
+		// both sizes match the tile count they replace the gridColumns layout. The overlay spread
+		// is then: overlay tiles at least mixedSpreadHeight apart vertically AND mixedSpreadWidth
+		// apart horizontally (on the 4 x 2 grid: two rows and two columns, as before; on the dense
+		// grid a subtitle band touching two neighbouring rows, 0.125 apart, is not a spread).
+		std::vector<float> tileX, tileY;
+		double mixedSpreadHeight = 0.3, mixedSpreadWidth = 0.2;
+		// The frame mean, signature and so the tracker's cut / repeat tests come from the first
+		// this many tiles only (the base 4 x 2 grid, which PlaceTiles always puts first), so
+		// switching between the base and the dense grid is neither a cut nor a new shot.
+		// <= 0 or more than the tiles: all of them (as before).
+		int signatureTiles = 0;
 		int codeMaximum = 1023;           // the source's code range (floor)
 	};
+
+	// The monitor's tile placement (owner 2026-10-15; dense grid 2026-10-16): tiles of `tile` px
+	// on the 16-px grid inside the picture (x0, y0, w, h). The base grid is up to 4 x 2, each tile
+	// centred in its cell, row-major. `dense` (the monitor sets it while a lower reading is
+	// declared or being gathered) appends two more rows with the same columns, centred at h / 2 and
+	// 7h / 8 - the largest gap (between the base rows) and the bottom band where transport bars and
+	// corner picture-in-picture sit - when the picture is at least four tiles high. The base tiles
+	// always come first and sit where they do without `dense`.
+	struct TilePlace
+	{
+		int x0 = 0, y0 = 0;              // the tile's origin (pixels)
+		float centreX = 0, centreY = 0;  // its centre, normalised to the picture
+	};
+	std::vector<TilePlace> PlaceTiles(double x0, double y0, double w, double h, int tile, bool dense, int* baseTiles = nullptr);
+	// The centres as Thresholds::tileX / tileY.
+	void SetTileCentres(const std::vector<TilePlace>& places, Thresholds& thresholds);
 
 	// Enough texture on both axes to judge.
 	bool Informative(const Spectrum& spectrum, const Thresholds& thresholds = {});
@@ -174,6 +233,9 @@ namespace SourceResolution
 		int mixedPictureTiles = 0;    // tiles of native picture (not resampled at the reading's rate)
 		int mixedOverlayTiles = 0;    // tiles of native text / sharp overlay
 		int mixedOverlayRows = 0, mixedOverlayColumns = 0;   // the grid rows / columns they occupy
+		int mixedSharpTiles = 0;      // informative, not text-like tiles of one-pixel steps (mixedSharpSteps)
+		int mixedUiTiles = 0;         // overlay tiles that are not text-like (mixedRowGuard)
+		int mixedRowMost = 0;         // the most overlay tiles in one grid row (mixedRowTiles)
 		bool informative() const { return informativeTiles > 0; }
 	};
 

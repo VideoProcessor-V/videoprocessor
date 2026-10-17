@@ -77,4 +77,17 @@ ColorSpace Translate(BMDColorspace, uint32_t verticalLines);
 
 DisplayModeSharedPtr Translate(BMDDisplayMode, BMDFieldDominance dominance=bmdUnknownFieldDominance);
 
+// Table lookup only; throws for modes missing from the table.
 double FPS(BMDDisplayMode displayMode);
+
+// audit 2026-10-16: frame period from the mode table (false when unknown).
+bool DeckLinkModeTableFrameRate(BMDDisplayMode displayMode,
+	BMDTimeValue& frameDuration, BMDTimeScale& timeScale);
+
+// audit 2026-10-16: table entry when known, otherwise built from the card's
+// own description (width, height, GetFrameRate, field dominance). Throws only
+// when the card describes no usable geometry/rate.
+DisplayModeSharedPtr TranslateDeckLinkDisplayMode(BMDDisplayMode displayMode,
+	long width, long height, BMDTimeValue frameDuration, BMDTimeScale timeScale,
+	BMDFieldDominance dominance);
+DisplayModeSharedPtr TranslateDeckLinkDisplayMode(IDeckLinkDisplayMode* mode);

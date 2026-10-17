@@ -549,6 +549,127 @@ namespace VideoProcessorTest
 					L"Only the LDMM 0 safety reset, never custom-dim levels, outside compensate");
 		}
 
+		// audit 2026-10-16 (second pass, 5): LDMM 0 at every start, so a crash
+		// during the custom dim cannot leave the projector in custom mode once
+		// the experiment is switched off.
+		TEST_METHOD(StartupAlwaysResetsTheDimMode)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			Assert::IsTrue(config.ftbCustomDim == FtbCustomDim::Off);
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			const auto writes = projector->Writes();
+			Assert::AreEqual<size_t>(1, static_cast<size_t>(std::count(writes.begin(), writes.end(), std::string(":LDMM0\r"))),
+				L"One LDMM 0 at start with the custom dim off");
+			const auto ldmm = std::find(writes.begin(), writes.end(), std::string(":LDMM0\r"));
+			const auto light = std::find(writes.begin(), writes.end(), std::string(":LPW1255\r"));
+			Assert::IsTrue(ldmm < light, L"Before the light is set");
+		}
+
+		// Renders dark frames (look-ahead off: the frame on screen) until the
+		// LED has dimmed.
+		static void DimOnDarkFrames(LedDriveModule& module, std::shared_ptr<FakeProjector> projector)
+		{
+			module.SubmitMeasurement(Frame(16.0));
+			for (uint64_t sequence = 1; sequence <= 600 && projector->light >= 200; ++sequence)
+			{
+				module.BeginFrameAt(sequence, sequence * FRAME_MS);
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+			}
+		}
+
+		// audit 2026-10-16 (second pass, 9): led_idle_restore_s - no video
+		// for that long (pause, stop) and compensate puts the LED back to the
+		// ceiling and CNTR to 50, once.
+		TEST_METHOD(IdleRestoresFullLightInCompensate)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Assisted();
+			config.lookahead = false;
+			config.idleRestoreS = 1;
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			DimOnDarkFrames(module, projector);
+			Assert::IsTrue(projector->light < 255, L"The LED dimmed on the dark picture");
+			// Video stops: within led_idle_restore_s (+ a module tick) full light.
+			Assert::IsTrue(WaitFor([&] { return projector->light == 255 && projector->contrast == 50; }, 4000),
+				L"Full light and CNTR 50 after the idle time");
+			Assert::AreEqual(255.0, module.ModelledLight(), 1e-9, L"The model follows");
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			const size_t settled = projector->Writes().size();
+			std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+			Assert::AreEqual(settled, projector->Writes().size(), L"Restored once, not every tick");
+			// Video returns: compensate carries on.
+			module.SubmitMeasurement(Frame(16.0));
+			for (uint64_t sequence = 1000; sequence < 1300 && projector->light == 255; ++sequence)
+			{
+				module.BeginFrameAt(sequence, sequence * FRAME_MS);
+				WaitFor([&] { return !module.ProjectorStatus().busy; });
+			}
+			Assert::IsTrue(projector->light < 255, L"Dims again once frames return");
+		}
+
+		TEST_METHOD(IdleRestoreOffLeavesTheProjector)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			ProjectorConfig port = Port(50);
+			port.maxLevelsPerCommand = 0;
+			LedDriveConfig config = Compensate();
+			config.lookahead = false;
+			config.idleRestoreS = 0;
+			LedDriveModule module(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			DimOnDarkFrames(module, projector);
+			const int dimmed = projector->light;
+			Assert::IsTrue(dimmed < 255);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+			Assert::AreEqual(dimmed, projector->light, L"led_idle_restore_s 0: unchanged (as before)");
+		}
+
+		// audit 2026-10-16 (second pass, 9): internal_script restores full
+		// light and stops acting on the last frame's statistics while no video
+		// comes.
+		TEST_METHOD(IdleRestoresFullLightInScriptModeAndStopsTicking)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			LedDriveConfig config = Compensate();
+			config.mode = Mode::Script;
+			config.idleRestoreS = 1;
+			LedDriveModule module(Port(50), config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.Start();
+			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+			for (uint64_t frame = 1; projector->light == 255 && std::chrono::steady_clock::now() < end; ++frame)
+			{
+				module.SubmitMeasurement(Frame(16.0), frame);
+				module.BeginFrameAt(frame, frame * FRAME_MS);
+				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			}
+			Assert::IsTrue(projector->light < 255, L"The script dimmed the LED");
+			Assert::IsTrue(WaitFor([&] { return projector->light == 255 && projector->contrast == 50; }, 4000),
+				L"Full light and CNTR 50 after the idle time");
+			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			const int ticks = module.Ticks();
+			const size_t writes = projector->Writes().size();
+			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+			Assert::AreEqual(ticks, module.Ticks(), L"No script ticks on the stale statistics");
+			Assert::AreEqual(writes, projector->Writes().size(), L"Nothing more sent while idle");
+		}
+
 		TEST_METHOD(ExperimentalFadeToBlackNeedsTheLookahead)
 		{
 			auto projector = std::make_shared<FakeProjector>();
@@ -1266,6 +1387,54 @@ namespace VideoProcessorTest
 				static_cast<double>(raw.sum) / SUM_SCALE / raw.blocks, 0.05);
 			Assert::AreNotEqual(RawTransferSignature(source, target, &pl_color_map_default_params),
 				RawTransferSignature(source, source, &pl_color_map_default_params), L"A profile change rebuilds");
+		}
+
+		// audit 2026-10-16: Sample() emits full-range RGB in the limited code
+		// domain; the look-ahead must not convert it a second time (black read
+		// ~6% with source_range auto).
+		TEST_METHOD(FullRangeRgbLookaheadReadsBlackAsZeroAndWhiteAsFull)
+		{
+			const int width = 96, height = 54;
+			auto frame = [&](uint8_t level)
+			{
+				return std::vector<uint8_t>(static_cast<size_t>(width) * height * 4, level);
+			};
+			auto measure = [&](std::vector<uint8_t>& pixels, int range)
+			{
+				AnalysisLumaSource luma;
+				luma.data = pixels.data();
+				luma.dataBytes = pixels.size();
+				luma.width = width;
+				luma.height = height;
+				luma.rowBytes = static_cast<size_t>(width) * 4;
+				luma.format = AnalysisLumaFormat::NativeRgb;
+				luma.encoding = VideoFrameEncoding::BGRA_8BIT;
+				luma.colorspace = ColorSpace::REC_709;
+				Assert::IsTrue(luma.IsValid());
+				Assert::IsFalse(LumaIsFullRange(luma), L"Sample() returns limited codes");
+				Assert::IsTrue(SampleRemapsFullRange(luma));
+				QueuedFrameStatistics::PictureRect rect;
+				rect.right = width;
+				rect.bottom = height;
+				RawMeasurement raw;
+				Assert::IsTrue(MeasureRawFrame(luma, rect, IdentityRawTransfer(), raw, range));
+				// The mean block code; APL % = (code - 16) / 219.
+				return (static_cast<double>(raw.sum) / SUM_SCALE / raw.blocks - 16.0) / 219.0 * 100.0;
+			};
+			std::vector<uint8_t> black = frame(0), white = frame(255), grey = frame(128);
+			for (const int range : { -1, 1 })
+			{
+				Assert::AreEqual(0.0, measure(black, range), 0.05, L"Full-range RGB black is 0% APL");
+				Assert::AreEqual(100.0, measure(white, range), 0.05, L"Full-range RGB white is 100% APL");
+				// 8-bit 128 = 10-bit 514 of 1023.
+				Assert::AreEqual(514.0 / 1023.0 * 100.0, measure(grey, range), 0.15,
+					L"Mid grey as the source's full-range code");
+			}
+			// source_range: limited forced on the same RGB: the source's own codes
+			// read as 64-940 (514 -> (514 - 64) / 876), as before the sampler change.
+			Assert::AreEqual((514.0 - 64.0) / 876.0 * 100.0, measure(grey, 0), 0.15,
+				L"Forced limited reads the source codes, not the remapped ones");
+			Assert::AreEqual(0.0, measure(black, 0), 0.05);
 		}
 
 		TEST_METHOD(CorrectionRatioConvergesOnASyntheticMismatch)
