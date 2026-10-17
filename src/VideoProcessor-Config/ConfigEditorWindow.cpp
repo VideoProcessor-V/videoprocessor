@@ -12616,8 +12616,8 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         aheadRow = ahead;
         driveForm->addRow(QString(), ahead);
         aheadHelp = helpLabel(QStringLiteral(
-            "VP sees the coming frames and times each change for when the LED gets there. Off: it reacts to the "
-            "frame on screen."));
+            "VP sees the coming frames (every frame the queue profile holds; Low Latency holds none) and times each "
+            "change for when the LED gets there. Off: it reacts to the frame on screen."));
         driveForm->addRow(QString(), aheadHelp);
         // Owner 2026-10-15: the script copy in the original script's own
         // rhythm (the default) or a fixed loop.
@@ -12630,6 +12630,19 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             "same moments as your original script. Fixed loop: every 400 ms."));
         driveForm->addRow(QStringLiteral("Script pacing"), pacing);
         pacingRows.push_back(pacing);
+        // Owner 2026-10-17: script_lookahead - the script copy looks ahead too.
+        auto* scriptAhead = bindCheckField(QStringLiteral("Look-ahead for the script"), led,
+            QStringLiteral("script_lookahead"), true);
+        scriptAhead->setToolTip(QStringLiteral(
+            "On (default): VP's copy of the script decides from the frame that will be on screen when its command "
+            "reaches the projector, using the frames already queued (the queue profile sets how many; Low Latency "
+            "queues none). The script's own bands, steps, contrast logic and rhythm are kept. A cut to a brighter "
+            "scene gets that scene's light and contrast landing on its first frame; out of black the light may come "
+            "up early, no higher than the pre-lift cap, while the picture is still black. When the queue covers the "
+            "projector's response (LED latency plus settle) the lowest LED level is 'Lowest LED level', otherwise "
+            "'Lowest LED level without look-ahead'. Off: decisions on the frame on screen, as your original script."));
+        driveForm->addRow(QString(), scriptAhead);
+        pacingRows.push_back(scriptAhead);
         // Restore switch (bug hunt 2026-10-17): script_resend_failed_writes.
         auto* resend = bindCheckField(QStringLiteral("Re-send a failed LED / contrast write (fix under test)"), led,
             QStringLiteral("script_resend_failed_writes"), true);
@@ -12715,20 +12728,23 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     // Compensate's own settings: shown only when it is the command source
     // (audit 2026-10-14b: show only what the chosen source uses).
     std::vector<QWidget*> compensateRows;
+    // The floors: compensate's and, with script_lookahead (owner 2026-10-17), the script copy's.
+    std::vector<QWidget*> floorRows;
     auto* floor = levelControl(QStringLiteral("led_floor"), 100);
     driveForm->addRow(QStringLiteral("Lowest LED level"), floor);
-    compensateRows.push_back(floor);
-    compensateRows.push_back(helpLabel(QStringLiteral(
+    floorRows.push_back(floor);
+    floorRows.push_back(helpLabel(QStringLiteral(
         "How far the LED may dim in dark scenes, 60 (darkest) to 255 (never dims), when VP can see the "
-        "coming frames (Normal queue).")));
-    driveForm->addRow(QString(), compensateRows.back());
+        "coming frames far enough for the projector's response (Normal queue). The script copy's darkest band "
+        "continues its curve down to it.")));
+    driveForm->addRow(QString(), floorRows.back());
     auto* floorReactive = levelControl(QStringLiteral("led_floor_reactive"), 100);
     driveForm->addRow(QStringLiteral("Lowest LED level without look-ahead"), floorReactive);
-    compensateRows.push_back(floorReactive);
-    compensateRows.push_back(helpLabel(QStringLiteral(
+    floorRows.push_back(floorReactive);
+    floorRows.push_back(helpLabel(QStringLiteral(
         "Used when VP cannot see ahead (Low Latency queue): it cannot prepare for a bright scene, so it "
         "should not sit as low. Your script used 100.")));
-    driveForm->addRow(QString(), compensateRows.back());
+    driveForm->addRow(QString(), floorRows.back());
     auto* floorBlack = levelControl(QStringLiteral("led_floor_black"), 60);
     driveForm->addRow(QStringLiteral("Lowest level in fades to black"), floorBlack);
     compensateRows.push_back(floorBlack);
@@ -13292,10 +13308,10 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     auto* lookaheadMs = numberControl(led, QStringLiteral("led_lookahead_ms"), 0, 2000, 0, 10, 0,
         QStringLiteral("queue depth"));
     lookaheadMs->setToolTip(QStringLiteral(
-        "How far ahead the LED looks, in milliseconds (converted with the measured source rate). It sets the depth "
-        "both ways: the renderer's walk over queued frames extends to it when it is deeper than the picture's own "
-        "look-ahead (only the LED uses the deeper frames), and it caps the LED below that depth. The walk never "
-        "goes past what is queued. 0 (default) = no setting: the LED looks as deep as the queue's look-ahead walk."));
+        "An optional cap on how far ahead the LED looks, in milliseconds (converted with the measured source rate). "
+        "0 (default): every frame the queue profile has queued (Normal, Reliable: their queue; Low Latency: none, "
+        "so the LED reacts to the frame on screen). Above 0: at most that far, never past what is queued. "
+        "Independent of the active-picture look-ahead."));
     assistForm->addRow(QStringLiteral("LED look-ahead (ms)"), lookaheadMs);
     // Restore switch (bug hunt 2026-10-17): led_wtw_passthrough.
     auto* wtw = bindCheckField(QStringLiteral("Above-white keeps its value under a boost (fix under test)"), led,
@@ -13761,7 +13777,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         // (audits 2026-10-14b/c).
         QComboBox* source = ledSource;
         QCheckBox* adaptive = ledAdaptive;
-        auto show = [driveForm, responseForm, compensateRows, experimentBox, assistBox, speedsBox,
+        auto show = [driveForm, responseForm, compensateRows, floorRows, experimentBox, assistBox, speedsBox,
             profileBox, source, adaptive, compensateWarning, aheadRow, aheadHelp, maxUsable, whiteClips, pacingRows]()
         {
             const QString chosen = source ? source->currentData().toString() : QString();
@@ -13769,13 +13785,15 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             const bool own = compensate || chosen == QStringLiteral("internal_script");
             for (QWidget* row : compensateRows)
                 driveForm->setRowVisible(row, compensate);
+            for (QWidget* row : floorRows)
+                driveForm->setRowVisible(row, own);
             for (QWidget* box : { experimentBox, assistBox, speedsBox })
                 box->setVisible(compensate);
             for (QWidget* row : { maxUsable, whiteClips })
                 responseForm->setRowVisible(row, compensate);
             profileBox->setVisible(own);
-            // The script copy decides on the frame on screen, as the script did
-            // (look-ahead is compensate's).
+            // Compensate's look-ahead switch; the script copy's is script_lookahead
+            // (with the script pacing rows).
             driveForm->setRowVisible(aheadRow, compensate);
             driveForm->setRowVisible(aheadHelp, compensate);
             for (QWidget* row : pacingRows)

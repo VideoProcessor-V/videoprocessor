@@ -331,6 +331,7 @@
     <ClCompile Include="CustomHookChainTests.cpp" />
     <ClCompile Include="LedDriveProtocolTests.cpp" />
     <ClCompile Include="LedDriveControllerTests.cpp" />
+    <ClCompile Include="LedScriptLookaheadTests.cpp" />
     <ClCompile Include="LedDriveMeasurementTests.cpp" />
     <ClCompile Include="LedDriveCompensateTests.cpp" />
     <ClCompile Include="LedScriptCorrelationTests.cpp" />

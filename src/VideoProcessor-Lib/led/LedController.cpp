@@ -69,8 +69,146 @@ namespace LedDrive
 	// interpolated as before.
 	int ScriptController::LightTargetFor(int apl) const
 	{
-		const int level = IsBuiltInCurve(config.curve) ? ScriptLiteralLevel(apl) : CurveLevel(config, apl);
-		return std::max(config.ledFloor, std::min(level, config.ledCeiling));
+		int level = IsBuiltInCurve(config.curve) ? ScriptLiteralLevel(apl) : CurveLevel(config, apl);
+		int lowest = config.ledFloor;
+		if (floor == ScriptFloor::Reactive)
+			lowest = std::max(config.ledFloor, config.ledFloorReactive);
+		else if (floor == ScriptFloor::Covered && config.curve.size() >= 3 &&
+			config.curve[0].level == config.curve[1].level && config.curve[2].level > config.curve[1].level &&
+			config.curve[2].apl > config.curve[1].apl && apl < config.curve[1].apl)
+		{
+			// script_lookahead, covered (owner 2026-10-17): the flat bottom band
+			// continues the first rising segment's slope down to led_floor.
+			const CurvePoint& a = config.curve[1];
+			const CurvePoint& b = config.curve[2];
+			level = static_cast<int>(std::floor(a.level - static_cast<double>(a.apl - apl) *
+				(b.level - a.level) / (b.apl - a.apl)));
+		}
+		int target = std::max(lowest, std::min(level, config.ledCeiling));
+		if (lightHold >= 0) target = std::max(target, std::min(lightHold, config.ledCeiling));
+		return target;
+	}
+
+	int ScriptTickBoundMs(const LedDriveConfig& config)
+	{
+		const int sends = 2 * SETTLE_MS + 6 * FAST_STEP_MS;
+		return config.scriptPacing ? config.scriptMeasureMs + 6 * config.scriptEchoMs + sends :
+			std::max(config.tickMs, sends);
+	}
+
+	bool ScriptBlackForPreposition(const LedDriveConfig& config, const FrameStats& stats)
+	{
+		return config.prepositionBlackOnly ? IsTrueBlack(stats) : stats.apl < 20.0;
+	}
+
+	ScriptLookaheadPlan PlanScriptLookahead(const LedDriveConfig& config, const ScriptController& controllerIn,
+		const FrameStats& current, const ScriptLookaheadInput& in)
+	{
+		ScriptLookaheadPlan plan;
+		plan.stats = current;
+		plan.floor = ScriptFloor::Reactive;
+		if (in.ahead.empty() || in.sourcePeriodMs <= 0.0) return plan;   // no queue: as before
+		const double period = in.sourcePeriodMs;
+		// The source frame on screen at a frame-clock time.
+		auto frameAt = [&](double ms) -> uint64_t
+		{
+			const double frames = std::floor((ms - in.onScreenMs) / period + 1e-6);
+			return frames <= 0.0 ? in.onScreenSequence : in.onScreenSequence + static_cast<uint64_t>(frames);
+		};
+		auto displayMs = [&](uint64_t sequence)
+		{
+			return in.onScreenMs + static_cast<double>(sequence - in.onScreenSequence) * period;
+		};
+		const double sendMs = in.nowMs + std::max(0.0, in.sendOffsetMs);
+		const uint64_t landSequence = frameAt(sendMs + in.ledLatencyMs);
+		const uint64_t furthest = in.ahead.back().first;
+		plan.covered = furthest >= frameAt(sendMs + in.ledLatencyMs + std::max(0, in.ledSettleMs));
+		plan.floor = plan.covered ? ScriptFloor::Covered : ScriptFloor::Reactive;
+		// A short queue (it does not reach the frame this tick's command lands
+		// on): the frame on screen, exactly as without look-ahead (owner).
+		if (furthest < landSequence) return plan;
+		// The script's targets under this tick's floor rule.
+		ScriptController controller = controllerIn;
+		controller.SetFloor(plan.floor);
+		controller.SetLightHold(-1);
+		auto highlightOf = [&](const FrameStats& stats) { return stats.maximum >= config.scriptHighlightCode; };
+
+		// A cut to a brighter scene in the queue (a cut, or black to picture):
+		// the script would only start climbing once it is on screen, one step a
+		// tick. Its first frame gets the scene's targets, landing on it.
+		bool blackRun = ScriptBlackForPreposition(config, current);
+		bool previousBlack = blackRun;
+		for (const auto& frame : in.ahead)
+		{
+			const FrameStats& stats = frame.second;
+			const bool black = ScriptBlackForPreposition(config, stats);
+			const bool entering = stats.cut || (previousBlack && !black);
+			const int lightTarget = controller.LightTargetFor(std::max(0, static_cast<int>(stats.apl)));
+			if (entering && !black && lightTarget > in.light)
+			{
+				const double cutMs = displayMs(frame.first);
+				const double lightAt = std::max(sendMs, cutMs - in.ledLatencyMs);
+				// Sent now (waiting within this tick) when the next tick's first
+				// command would land after the cut.
+				if (lightAt - in.commandGapMs < in.nowMs + in.nextTickMs + std::max(0.0, in.sendOffsetMs))
+				{
+					plan.kind = ScriptLookaheadPlan::Kind::CutJump;
+					plan.targetSequence = frame.first;
+					plan.cutMs = cutMs;
+					plan.stats = stats;
+					const int contrastTarget = ScriptController::ContrastTargetFor(
+						std::max(0, static_cast<int>(stats.apl)), highlightOf(stats));
+					plan.sends.push_back({ lightAt, true, lightTarget });
+					if (contrastTarget != in.contrast)
+					{
+						double contrastAt = std::max(sendMs, cutMs - in.cntrLatencyMs);
+						// One command at a time: a CNTR coming down goes first (early
+						// is below need, late would be above it); one going up
+						// follows the LPW1.
+						if (std::abs(contrastAt - lightAt) < in.commandGapMs)
+							contrastAt = contrastTarget < in.contrast ? lightAt - in.commandGapMs : lightAt + in.commandGapMs;
+						if (contrastAt < sendMs)
+						{
+							// No room before the LPW1: CNTR at once, the LPW1 one gap
+							// later (still no earlier than its landing time).
+							contrastAt = sendMs;
+							plan.sends.front().atMs = std::max(lightAt, sendMs + in.commandGapMs);
+						}
+						plan.sends.push_back({ contrastAt, false, contrastTarget });
+					}
+					std::stable_sort(plan.sends.begin(), plan.sends.end(),
+						[](const ScriptTimedSend& a, const ScriptTimedSend& b) { return a.atMs < b.atMs; });
+					return plan;
+				}
+				// Further away: black until then (the picture on screen and every
+				// queued frame before it), so the light may come up to the
+				// pre-lift cap (black_prelift_max; 255 = no pre-positioning).
+				if (blackRun && config.blackPreliftMax < 255)
+				{
+					plan.kind = ScriptLookaheadPlan::Kind::PreLift;
+					plan.targetSequence = frame.first;
+					plan.cutMs = cutMs;
+					plan.stats = current;
+					plan.lightHold = std::min(lightTarget, config.blackPreliftMax);
+					if (plan.lightHold > in.light) plan.preliftTarget = plan.lightHold;
+					return plan;
+				}
+				break;
+			}
+			blackRun = blackRun && black;
+			previousBlack = black;
+		}
+
+		// The script's tick on the frame its command lands on, when queued.
+		// A command that lands on the frame on screen: that frame, as before.
+		if (landSequence <= in.onScreenSequence) return plan;
+		const auto landing = std::find_if(in.ahead.begin(), in.ahead.end(),
+			[&](const std::pair<uint64_t, FrameStats>& frame) { return frame.first >= landSequence; });
+		if (landing == in.ahead.end()) return plan;
+		plan.kind = ScriptLookaheadPlan::Kind::Ahead;
+		plan.targetSequence = landing->first;
+		plan.stats = landing->second;
+		return plan;
 	}
 
 	ScriptSmoother::ScriptSmoother(double rampMsIn) : rampMs(std::max(1.0, rampMsIn))

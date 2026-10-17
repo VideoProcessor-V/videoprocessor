@@ -560,6 +560,7 @@ void testEveryNewLedControlReachesVp()
             "Script pacing does not show the script's rhythm as the default");
         requireControl<QSpinBox>(window, "config.led_drive.default.script_measure_ms")->setValue(120);
         requireControl<QSpinBox>(window, "config.led_drive.default.script_echo_ms")->setValue(40);
+        requireControl<QCheckBox>(window, "config.led_drive.default.script_lookahead")->setChecked(false);
         shoot(window, "led-internal-script");
         requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->setChecked(true);
         selectData(source, "compensate");
@@ -592,8 +593,8 @@ void testEveryNewLedControlReachesVp()
     const LedDrive::ProjectorConfig projector = LedDrive::ReadProjectorConfig(config);
     require(led.enabled && led.mode == LedDrive::Mode::Compensate && led.commandSource == "compensate",
         "VP does not read Compensate as the source");
-    require(led.adaptiveGamma && !led.lookahead && led.scriptPacing && led.scriptMeasureMs == 120 && led.scriptEchoMs == 40,
-        "VP does not read adaptive gamma / look-ahead / script pacing as set");
+    require(led.adaptiveGamma && !led.lookahead && led.scriptPacing && led.scriptMeasureMs == 120 && led.scriptEchoMs == 40 &&
+        !led.scriptLookahead, "VP does not read adaptive gamma / look-ahead / script pacing / script look-ahead as set");
     require(projector.protocol == "barco_ascii" && projector.baud == 38400 && projector.lightMin == 60 &&
         projector.lightMax == 250 && projector.ackTimeoutMs == 400 && projector.minCommandGapMs == 150 &&
         projector.maxLevelsPerCommand == 10 && projector.burstCommands == 5 && projector.burstPauseMs == 3000 &&
@@ -606,6 +607,7 @@ void testEveryNewLedControlReachesVp()
         require(requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() == "compensate" &&
             requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->isChecked() &&
             !requireControl<QCheckBox>(window, "config.led_drive.default.lookahead")->isChecked() &&
+            !requireControl<QCheckBox>(window, "config.led_drive.default.script_lookahead")->isChecked() &&
             requireControl<QSpinBox>(window, "config.led_drive.default.script_measure_ms")->value() == 120 &&
             requireControl<QDoubleSpinBox>(window, "config.projector.default.baud")->value() == 38400 &&
             requireControl<QDoubleSpinBox>(window, "config.projector.default.light_min")->value() == 60 &&
@@ -1901,8 +1903,21 @@ void testLedDrivePageAndLiveSwitches()
     require(requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.script_pacing"))->isVisibleTo(&window) &&
         requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.script_measure_ms"))->isVisibleTo(&window),
         "VP's copy of the script does not show its pacing");
-    require(!requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"))->isVisibleTo(&window),
-        "Compensate's settings show for VP's copy of the script");
+    // Owner 2026-10-17: script_lookahead - the script copy's look-ahead switch (on) and the
+    // floors it uses show; compensate's own settings do not.
+    {
+        auto* scriptAhead = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.script_lookahead"));
+        require(scriptAhead->isVisibleTo(&window) && scriptAhead->isChecked(),
+            "The script copy's look-ahead is not offered (on)");
+        require(requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor"))->isVisibleTo(&window) &&
+            requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor_reactive"))->isVisibleTo(&window),
+            "The floors the script copy uses with look-ahead are not shown");
+        require(!requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.led_floor_black"))->isVisibleTo(&window) &&
+            !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.highlight_tolerance_stops"))->isVisibleTo(&window),
+            "Compensate's settings show for VP's copy of the script");
+        require(!requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.lookahead"))->isVisibleTo(&window),
+            "Compensate's look-ahead switch shows for VP's copy of the script");
+    }
     auto* boost = requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.gamma_boost"));
     auto* port = requireControl<QLineEdit>(window, QStringLiteral("config.projector.default.port"));
     require(port->text() == QStringLiteral("COM1"), "COM port did not load");

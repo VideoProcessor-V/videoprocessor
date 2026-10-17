@@ -161,6 +161,19 @@ namespace LedDrive
 		bool scriptPacing = true;
 		int scriptMeasureMs = 150;
 		int scriptEchoMs = 30;
+		// script_lookahead (owner 2026-10-17, default on): the internal script
+		// copy decides from the queued frame that will be on screen when its
+		// command lands (now + its send time + led_latency_ms), with the
+		// script's own bands, steps, CNTR logic and rhythm. A cut to a brighter
+		// scene seen in the queue gets the scene's targets landing on its first
+		// frame; black before it allows a pre-lift up to black_prelift_max
+		// (preposition_black_only's black). With the look-ahead covering
+		// led_latency_ms + led_settle_ms the lowest level is led_floor (the
+		// script's bottom band continues its curve down to it), else
+		// led_floor_reactive. No queued frames (Low Latency, a short queue):
+		// the frame on screen, as before. Off: the script's decisions on the
+		// frame on screen and led_floor, exactly as before.
+		bool scriptLookahead = true;
 		// mode: compensate ramps: levels per second, and no movement while
 		// |target - current| <= deadband. early_ramp lets the ramp start ahead
 		// of a cut the lookahead has seen.
@@ -219,8 +232,11 @@ namespace LedDrive
 		// configurations keep it on): VP's picture adapts to the LED - the
 		// gain across each step (script smoothing for the script sources, the
 		// compensation gain for compensate) and the ANSI shadow lift (its
-		// strength still shadow_lift_ansi). lookahead (default on): the
-		// queued-frame look-ahead of VP's internal sources; off = reactive.
+		// strength still shadow_lift_ansi). lookahead (default on): compensate's
+		// queued-frame look-ahead; off = reactive. The script copy has its own
+		// switch, script_lookahead. Both look through every frame the active
+		// queue profile has queued (owner 2026-10-17: queue = look-ahead; Low
+		// Latency queues nothing, so it is reactive), capped by led_lookahead_ms.
 		std::string commandSource;
 		int adaptiveGammaSetting = -1;   // adaptive_gamma as read: -1 not named
 		bool modeNamed = false;          // the file names `mode` (an older file)
@@ -285,13 +301,14 @@ namespace LedDrive
 		// still descend: never above need). The exit-from-black pre-lift keeps
 		// its cap. off = as before.
 		bool cutLeadWindow = false;
-		// LED look-ahead depth in time (review 2026-10-17, "Before deploy" 1;
-		// time-based, owner rule): 0 = as deep as the queue walk
-		// (active_picture_lookahead_frames). Above 0 the LED uses at most this
-		// far ahead, in source frames at the measured rate; the renderer can
-		// ask for a deeper walk with LedDriveModule::WantedLookaheadFrames()
-		// (wired 2026-10-17: the walk visits the deeper frames for the LED
-		// observer only, so this extends the depth as well as capping it).
+		// LED look-ahead cap in time (review 2026-10-17; time-based, owner rule):
+		// 0 = every frame queued under the active queue profile (owner
+		// 2026-10-17: queue = look-ahead, independent of
+		// active_picture_lookahead_frames). Above 0 the LED looks at most this
+		// far ahead, in source frames at the measured rate (never past what is
+		// queued). LedDriveModule::WantedLookaheadFrames() asks the renderer's
+		// walk for that depth; the frames beyond the active picture's own
+		// look-ahead feed the LED only.
 		int ledLookaheadMs = 0;
 		// Restore switch (bug hunt 2026-10-17, default on): led_wtw_passthrough -
 		// under a boost (gain > 1) whiter-than-white keeps its own value in the
@@ -600,6 +617,7 @@ namespace LedDrive
 			Choice("command_source", { "python", "internal_script", "compensate", "none" }),
 			Boolean("adaptive_gamma"),
 			Boolean("lookahead"),
+			Boolean("script_lookahead"),   // owner 2026-10-17
 			Custom("profile_file", [](const std::string& value) { return !ConfigFile::Trim(value).empty(); },
 				"the path of an LED profile file (relative to this configuration file, or absolute)"),
 			Integer("tick_ms", 50, 5000),
@@ -955,6 +973,7 @@ namespace LedDrive
 				result.adaptiveGammaSetting = adaptive ? 1 : 0;
 		}
 		config.TryGetBool(section, "lookahead", result.lookahead);
+		config.TryGetBool(section, "script_lookahead", result.scriptLookahead);
 		readNumber("rate_up", result.rateUp);
 		readNumber("rate_down", result.rateDown);
 		if (config.TryGetString(section, "rate_preset", value))

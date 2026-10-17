@@ -1556,7 +1556,8 @@ namespace VideoProcessorTest
 			Assert::AreEqual<size_t>(6, module.WantedLookaheadFrames(), L"100 ms at 60p");
 			config.ledLookaheadMs = 0;
 			LedDriveModule plain(ProjectorConfig(), config);
-			Assert::AreEqual<size_t>(0, plain.WantedLookaheadFrames(), L"0: the walk's own depth");
+			// Owner 2026-10-17: 0 = the whole queue (queue = look-ahead).
+			Assert::AreEqual<size_t>(LedDriveModule::WHOLE_QUEUE, plain.WantedLookaheadFrames(), L"0: every queued frame");
 			// A cut 8 frames away is acted on only once within 100 ms (6
 			// frames at 60p), although the walk sees 8.
 			auto firstLanding = [](int lookaheadMs)

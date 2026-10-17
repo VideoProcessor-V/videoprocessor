@@ -192,7 +192,7 @@ namespace LedDrive
 	bool LedDriveModule::WantsPredictions() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		return led.mode == Mode::Compensate;
+		return led.mode == Mode::Compensate || (led.mode == Mode::Script && led.scriptLookahead);
 	}
 
 	LedDriveConfig LedDriveModule::Config() const
@@ -365,10 +365,51 @@ namespace LedDrive
 		return static_cast<size_t>(std::lround(led.ledLookaheadMs / std::max(1.0, periodMs)));
 	}
 
+	bool LedDriveModule::LookaheadWantedLocked() const
+	{
+		return (led.mode == Mode::Compensate && led.lookahead) || (led.mode == Mode::Script && led.scriptLookahead);
+	}
+
 	size_t LedDriveModule::WantedLookaheadFrames() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		return led.mode == Mode::Compensate && led.lookahead ? LedLookaheadFramesLocked() : 0;
+		if (!LookaheadWantedLocked()) return 0;
+		// Owner 2026-10-17: queue = look-ahead - every frame the active queue
+		// profile has queued (not active_picture_lookahead_frames, which governs
+		// the active picture alone); led_lookahead_ms is an optional cap.
+		return led.ledLookaheadMs > 0 ? LedLookaheadFramesLocked() : WHOLE_QUEUE;
+	}
+
+	size_t LedDriveModule::LookaheadDepthLocked() const
+	{
+		const bool walkStale = lastWalkWallMs < 0.0 || NowMs() - lastWalkWallMs > 1000.0;
+		size_t depth = walkStale ? 0 : lookaheadDepth;
+		if (led.ledLookaheadMs > 0) depth = std::min(depth, LedLookaheadFramesLocked());
+		return depth;
+	}
+
+	void LedDriveModule::UpdateLookaheadWarningLocked()
+	{
+		// Owner 2026-10-17: no queue (Low Latency) or a short one is the reactive
+		// fallback, not a fault. A fault: the walk has queued frames ahead but no
+		// statistics come from them for a second.
+		const bool walking = LookaheadWantedLocked() && LookaheadDepthLocked() > 0;
+		const bool starved = walking && (lastPredictionWallMs < 0.0 || NowMs() - lastPredictionWallMs > 1000.0) &&
+			NowMs() - lastWalkWallMs <= 1000.0;
+		const int state = !LookaheadWantedLocked() ? -1 : starved ? 1 : walking ? 0 : 2;
+		if (state == lookaheadWarnState) return;
+		const char* who = led.mode == Mode::Script ? "the script copy" : "compensate";
+		if (state == 1)
+			pendingWarning = std::string("LED drive: WARNING - ") + who + " looks ahead and " +
+				std::to_string(lookaheadDepth) + " frame(s) are queued, but no statistics come from them: "
+				"every cut and exit from black is reactive";
+		else if (state == 0)
+			pendingWarning = std::string("LED drive: look-ahead over ") + std::to_string(LookaheadDepthLocked()) +
+				" queued frame(s) (" + who + ")";
+		else if (state == 2 && lookaheadWarnState >= 0)
+			pendingWarning = std::string("LED drive: no frames queued ahead (Low Latency or a short queue): ") + who +
+				" reacts to the frame on screen";
+		lookaheadWarnState = state;
 	}
 
 	// led_landing_ms (review 2026-10-17): the write time onto the frame clock.
@@ -498,6 +539,7 @@ namespace LedDrive
 	{
 		std::lock_guard<std::mutex> guard(mutex);
 		predictions[sequence] = predicted;
+		lastPredictionWallMs = NowMs();
 	}
 
 	FrameStats LedDriveModule::Corrected(const FrameStats& predicted) const
@@ -546,6 +588,7 @@ namespace LedDrive
 			framePeriodMs = std::max(1.0, std::min(framePeriodMs + (elapsed - framePeriodMs) * 0.1, 100.0));   // 10 to 1000 frames per second
 		}
 		lastFrameMs = timeMs;
+		lastFrameSequence = sequence;
 		lastFrameWallMs = NowMs();   // audit 2026-10-16
 		idleRestored = false;
 		// Levels the driver wrote since the last frame: they went out during
@@ -687,25 +730,8 @@ namespace LedDrive
 		size_t depth = led.lookahead ? lookaheadDepth : 0;
 		// led_lookahead_ms (review 2026-10-17): at most that far, when set.
 		if (led.ledLookaheadMs > 0) depth = std::min(depth, LedLookaheadFramesLocked());
-		// Review 2026-10-17: a clear warning (once per change) when the
-		// look-ahead is wanted but has no depth - active_picture_lookahead_frames
-		// 0 (the shipped sample, Low_Latency) or no walk for a second - so
-		// every cut is reactive.
-		{
-			const bool walkStale = lastWalkWallMs < 0.0 || NowMs() - lastWalkWallMs > 1000.0;
-			const int zero = led.lookahead && (lookaheadDepth == 0 || walkStale) ? 1 : 0;
-			if (zero != lookaheadWarnState)
-			{
-				if (zero)
-					pendingWarning = "LED drive: WARNING - compensate has lookahead on but a look-ahead depth of 0 "
-						"(the queue profile's active_picture_lookahead_frames is 0, or no queued-frame walk): "
-						"every cut and exit from black is reactive";
-				else if (lookaheadWarnState == 1)
-					pendingWarning = "LED drive: look-ahead depth available again (" + std::to_string(lookaheadDepth) +
-						" frames)";
-				lookaheadWarnState = zero;
-			}
-		}
+		// Owner 2026-10-17: the look-ahead log, a warning only for a real fault.
+		UpdateLookaheadWarningLocked();
 		const auto horizon = predictions.upper_bound(sequence + depth);
 		if (sequence != 0 && first != horizon)
 		{
@@ -1132,6 +1158,10 @@ namespace LedDrive
 			FrameStats stats;
 			bool have = false;
 			bool restoreScriptIdle = false;   // audit 2026-10-16
+			// script_lookahead (owner 2026-10-17): this tick's queued frames.
+			bool scriptAhead = false;
+			ScriptLookaheadInput aheadInput;
+			std::string scriptWarning;
 			{
 				std::lock_guard<std::mutex> guard(mutex);
 				if (stopping) break;
@@ -1184,7 +1214,37 @@ namespace LedDrive
 					stats.fade = pendingFade;
 					pendingCut = pendingFade = false;
 				}
+				if (current.mode == Mode::Script && current.scriptLookahead)
+				{
+					// The frames queued after the one being shown, corrected
+					// like compensate's predictions (and their maximum, the
+					// script's highlight test, by the same ratio).
+					scriptAhead = true;
+					UpdateLookaheadWarningLocked();
+					scriptWarning.swap(pendingWarning);
+					const size_t depth = LookaheadDepthLocked();
+					if (lastFrameSequence != 0 && depth > 0)
+						for (auto it = predictions.upper_bound(lastFrameSequence);
+							it != predictions.end() && it->first <= lastFrameSequence + depth; ++it)
+						{
+							FrameStats predicted = Corrected(it->second);
+							predicted.maximum = Scaled(it->second.maximum, correction);
+							aheadInput.ahead.push_back({ it->first, predicted });
+						}
+					aheadInput.onScreenSequence = lastFrameSequence;
+					aheadInput.onScreenMs = lastFrameMs;
+					aheadInput.nowMs = NowMs() -
+						std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
+					aheadInput.sourcePeriodMs = sourceFps > 0.0 ? 1000.0 / sourceFps : framePeriodMs;
+					aheadInput.sendOffsetMs = current.scriptPacing ? current.scriptMeasureMs : 0.0;
+					aheadInput.nextTickMs = ScriptTickBoundMs(current);
+					aheadInput.ledLatencyMs = projector.ledLatencyMs;
+					aheadInput.ledSettleMs = projector.ledSettleMs;
+					aheadInput.cntrLatencyMs = projector.cntrLatencyMs;
+					aheadInput.commandGapMs = std::max(projector.minCommandGapMs, current.scriptEchoMs);
+				}
 			}
+			if (!scriptWarning.empty()) DebugLog::Log("%s", scriptWarning.c_str());
 			auto sendsDone = tickStart;
 			// The script's sleep after an LPW1 when no CNTR follows it.
 			auto scriptFloor = tickStart;
@@ -1277,6 +1337,89 @@ namespace LedDrive
 			}
 			else if (have)
 			{
+				// script_lookahead (owner 2026-10-17): decide from the frame on screen
+				// when the command lands; no queued frames: the frame on screen.
+				if (scriptAhead)
+				{
+					aheadInput.light = controller.Light();
+					aheadInput.contrast = controller.Contrast();
+					const ScriptLookaheadPlan plan = PlanScriptLookahead(current, controller, stats, aheadInput);
+					controller.SetFloor(plan.floor);
+					controller.SetLightHold(plan.kind == ScriptLookaheadPlan::Kind::PreLift ? plan.lightHold : -1);
+					const auto atClock = [&](double ms)
+					{
+						return tickStart + std::chrono::microseconds(static_cast<long long>(
+							std::max(0.0, ms - aheadInput.nowMs) * 1000.0));
+					};
+					if (plan.kind == ScriptLookaheadPlan::Kind::Ahead)
+					{
+						const bool cut = stats.cut, fade = stats.fade;
+						stats = plan.stats;
+						stats.cut = cut;
+						stats.fade = fade;
+					}
+					else if (plan.kind == ScriptLookaheadPlan::Kind::CutJump)
+					{
+						// The cut's targets, each landing on its first frame.
+						bool smoothNow = false;
+						{
+							std::lock_guard<std::mutex> guard(mutex);
+							smoothNow = smoothing;
+						}
+						for (const ScriptTimedSend& send : plan.sends)
+						{
+							if (!WaitUntil(std::max(sendsDone, atClock(send.atMs)), generation))
+								break;
+							if (send.light)
+							{
+								if (CustomDimEngaged()) continue;
+								resendLight = scriptSend("LPW1", send.value);
+								controller.Reset(send.value, controller.Contrast());
+							}
+							else
+							{
+								if (smoothNow)
+								{
+									std::lock_guard<std::mutex> guard(mutex);
+									smoother.Plan({ { send.atMs + projector.cntrLatencyMs, send.value } });
+								}
+								resendContrast = scriptSend("CNTR", send.value);
+								controller.Reset(controller.Light(), send.value);
+								if (send.value != 50) contrastDriven = true;
+								if (smoothNow)
+								{
+									std::lock_guard<std::mutex> guard(mutex);
+									smoother.Sent(NowMs() + projector.cntrLatencyMs);
+								}
+							}
+							sendsDone = std::chrono::steady_clock::now();
+						}
+						DebugLog::Log("LED script: look-ahead cut in %.0f ms (frame %llu): light %d contrast %d%s",
+							plan.cutMs - aheadInput.nowMs, static_cast<unsigned long long>(plan.targetSequence),
+							controller.Light(), controller.Contrast(), applyGain ? "" : " (dry run)");
+						lastLogTime = std::chrono::steady_clock::now();
+						{
+							std::lock_guard<std::mutex> guard(mutex);
+							++ticks;
+						}
+						WaitUntil(std::max(sendsDone, tickStart + std::chrono::milliseconds(
+							current.scriptPacing ? std::max(current.scriptMeasureMs, 10) : current.tickMs)), generation);
+						continue;
+					}
+					else if (plan.kind == ScriptLookaheadPlan::Kind::PreLift && plan.preliftTarget >= 0 &&
+						!CustomDimEngaged())
+					{
+						// Black until the bright scene: the light comes up to the
+						// pre-lift cap now, the rest lands with the cut.
+						if (!WaitUntil(std::max(sendsDone, atClock(aheadInput.nowMs + aheadInput.sendOffsetMs)), generation))
+							continue;
+						resendLight = scriptSend("LPW1", plan.preliftTarget);
+						controller.Reset(plan.preliftTarget, controller.Contrast());
+						sendsDone = std::chrono::steady_clock::now();
+						DebugLog::Log("LED script: look-ahead exit from black in %.0f ms: pre-lift to %d%s",
+							plan.cutMs - aheadInput.nowMs, plan.preliftTarget, applyGain ? "" : " (dry run)");
+					}
+				}
 				const ControllerOutput out = controller.Tick(stats);
 				// Bug hunt 2026-10-17: repeat a failed write with what the script
 				// now believes, at the next tick's start. Review 2026-10-17: after

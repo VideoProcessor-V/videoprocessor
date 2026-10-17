@@ -137,7 +137,11 @@ namespace LedDrive
 		// For the renderer: how far its queued-frame walk would have to reach
 		// for the LED alone (wired 2026-10-17: the walk visits max(active picture, this),
 		// the frames beyond the active picture feed the LED only).
+		// Owner 2026-10-17 (queue = look-ahead): WHOLE_QUEUE (every queued frame)
+		// whenever the LED looks ahead (compensate with lookahead, internal_script
+		// with script_lookahead), or led_lookahead_ms's frames when set; 0 otherwise.
 		size_t WantedLookaheadFrames() const;
+		static constexpr size_t WHOLE_QUEUE = static_cast<size_t>(-1);
 		// The smoothed exact / predicted ratio applied to predictions.
 		double CorrectionRatio() const;
 
@@ -266,6 +270,19 @@ namespace LedDrive
 		// 0 depth available, 1 warned), logged by the module's thread.
 		double lastWalkWallMs = -1.0;
 		int lookaheadWarnState = -1;
+		// Owner 2026-10-17: NowMs() of the last prediction (-1 before any).
+		double lastPredictionWallMs = -1.0;
+		// The source sequence of the last BeginFrame (lastFrameMs is its time).
+		uint64_t lastFrameSequence = 0;
+		// The LED looks ahead in the current mode (compensate: lookahead;
+		// internal_script: script_lookahead).
+		bool LookaheadWantedLocked() const;
+		// The walk's future frames the LED may use now: 0 when no walk came for a
+		// second (Low Latency queues nothing), capped by led_lookahead_ms.
+		size_t LookaheadDepthLocked() const;
+		// The once-per-change look-ahead log (pendingWarning): a warning only for a
+		// real fault - frames queued and walked but no statistics from them.
+		void UpdateLookaheadWarningLocked();
 		std::string pendingWarning;
 		size_t LedLookaheadFramesLocked() const;
 		// led_landing_ms: the frame-clock time a send written at `sentAt`
