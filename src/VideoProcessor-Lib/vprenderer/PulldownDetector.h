@@ -48,6 +48,7 @@
 //    film rate while locked.
 // Pure logic: no GPU, no capture types.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -127,6 +128,11 @@ namespace Pulldown
 		bool lockChanged = false;   // the lock was gained, lost, restarted or re-phased at this frame
 		bool rephased = false;      // the phase moved at this frame; lock and film clock continue (D3)
 		bool discontinuity = false; // a lock change or counted miss is pending (ConsumeDiscontinuity)
+		// Audit 2026-10-16: how late this kept frame's slot shows its film
+		// frame against the earliest new slot of the cycle, and the most of
+		// any new slot, in seconds (0 with cadenceAwareClock off): FilmClock.
+		double cadenceLateness = 0.0;
+		double cadenceLatenessMax = 0.0;
 	};
 
 	// Behaviour fixes of the audit 2026-10-16, switchable (owner rule); off
@@ -135,6 +141,7 @@ namespace Pulldown
 	{
 		bool keepLockAcrossMisses = true;   // D4: a counted miss <= one cycle keeps the lock
 		bool rephaseInPlace = true;         // D3: a phase shift re-phases instead of unlocking
+		bool cadenceAwareClock = true;      // Decision::cadenceLateness for an even FilmClock at long cycles
 	};
 
 	// "23.976p film in 59.940 Hz (2 new of 5)".
@@ -265,19 +272,35 @@ namespace Pulldown
 				char expected = m_pattern[m_phase];
 				bool contradiction = expected == 'R' && !repeat;
 				// Audit 2026-10-16 (D3/D4): the cycle after a re-phase or a
-				// counted miss verifies it; a contradiction there drops the lock.
-				if (contradiction && m_probationUntil > 0 && m_frames <= m_probationUntil)
+				// counted miss verifies it; a contradiction there drops the lock,
+				// except that with re-phasing on one more re-phase may resolve it
+				// (a 23.976-in-60 slip inside the window, a miscounted miss) - if
+				// that finds no rotation, or its own verification is contradicted,
+				// the lock drops.
+				if (m_probationUntil > 0 && m_frames > m_probationUntil)
+				{
+					m_probationUntil = 0;
+					m_retrying = false;
+				}
+				bool unlock = false;
+				if (contradiction && m_probationUntil > 0)
+				{
+					unlock = !m_settings.rephaseInPlace || m_retrying;
+					m_retrying = true;
+					m_probationUntil = 0;
+				}
+				if (unlock)
 					Unlock();
 				else
 				{
-					bool rephased = false, provisional = false;
+					bool rephased = false;
 					if (m_settings.rephaseInPlace)
-						expected = Track(observed, expected, contradiction, rephased, provisional);
-					if (rephased || provisional)
-						contradiction = false;   // decided by the rotations that match: not a contradiction
+						expected = Track(observed, expected, contradiction, rephased);
+					if (m_retrying && !rephased && m_trackFrames == 0 && m_probationUntil == 0)
+						unlock = true;   // the retry found no rotation
 					if (contradiction)
 						m_contradictions.push_back(m_frames);
-					if (static_cast<int>(m_contradictions.size()) >= kContradictionsToUnlock)
+					if (unlock || static_cast<int>(m_contradictions.size()) >= kContradictionsToUnlock)
 						Unlock();
 					else
 					{
@@ -317,7 +340,9 @@ namespace Pulldown
 				m_contradictions.clear();
 				EndTracking();
 				m_probationUntil = 0;
+				m_retrying = false;
 				m_missCarry = false;
+				BuildLateness();
 				return Locked(decision, signalHz, repeat && pattern[m_phase] == 'R', true, false);
 			}
 			return decision;
@@ -347,6 +372,11 @@ namespace Pulldown
 			if (advance)
 				++m_filmIndex;
 			decision.filmIndex = m_filmIndex;
+			if (m_settings.cadenceAwareClock && signalHz > 0.0 && m_phase < static_cast<int>(m_lateness.size()))
+			{
+				decision.cadenceLateness = m_lateness[m_phase] / signalHz;
+				decision.cadenceLatenessMax = m_latenessMax / signalHz;
+			}
 			return decision;
 		}
 
@@ -360,7 +390,34 @@ namespace Pulldown
 			m_contradictions.clear();
 			EndTracking();
 			m_probationUntil = 0;
+			m_retrying = false;
 			m_missCarry = false;
+		}
+
+		// Audit 2026-10-16: per slot, how many signal frames after its film
+		// frame's even time the slot shows it (film frame j of the cycle is
+		// due at j x cycle / new), less the earliest new slot's; the most over
+		// the new slots. A repeat slot shows the latest film frame before it.
+		void BuildLateness()
+		{
+			const int cycle = static_cast<int>(m_pattern.size());
+			m_lateness.assign(static_cast<size_t>(cycle), 0.0);
+			const double hold = static_cast<double>(cycle) / static_cast<double>(m_unique);
+			double earliest = 1e9, latest = -1e9;
+			int film = -1;   // a leading repeat shows the previous cycle's last film frame
+			for (int k = 0; k < cycle; ++k)
+			{
+				film += m_pattern[k] == 'N' ? 1 : 0;
+				m_lateness[k] = k - film * hold;
+				if (m_pattern[k] == 'N')
+				{
+					earliest = m_lateness[k] < earliest ? m_lateness[k] : earliest;
+					latest = m_lateness[k] > latest ? m_lateness[k] : latest;
+				}
+			}
+			for (double& lateness : m_lateness)
+				lateness -= earliest;
+			m_latenessMax = latest - earliest;
 		}
 
 		void ResetState()
@@ -400,21 +457,39 @@ namespace Pulldown
 			m_trackFrames = 0;
 			m_candidates.clear();
 			m_currentFailed = false;
+			m_absorbed.clear();
+		}
+
+		// Tracking found no single rotation: the contradictions it decided by
+		// the rotations count after all, so content that only looks like a
+		// phase shift (video, another cadence) still unlocks on the usual rule.
+		void AbandonTracking()
+		{
+			for (uint64_t frame : m_absorbed)
+				m_contradictions.insert(std::upper_bound(m_contradictions.begin(), m_contradictions.end(), frame), frame);
+			EndTracking();
 		}
 
 		// Audit 2026-10-16 (D3): re-phase in place. Starts at a contradiction
 		// (a new picture on a repeat slot: a subtitle, or the phase moved) with
-		// every other phase whose slot is new; each frame keeps the phases (the
-		// rotations of the pattern) that match it. Once the locked phase has
-		// been contradicted again (a single subtitle leaves it matching), the
-		// frames are decided by the matching rotations - they all agree with
-		// the frame - and after exactly one cycle with one rotation left it is
-		// adopted. No rotation left, or the locked phase never failed again:
-		// tracking ends and the locked phase stands (contradictions count as
-		// before). Returns the slot value to decide this frame with.
-		char Track(char observed, char expected, bool contradiction, bool& rephased, bool& provisional)
+		// every other phase - the starting frame constrains none, as a restart
+		// or seek can begin part-way through a hold; each later frame keeps the
+		// phases (the rotations of the pattern) that match it. Once the locked
+		// phase has
+		// failed again (a single subtitle leaves it matching), the frames are
+		// decided by the matching rotations - they all agree with the frame,
+		// so only exact repeats are dropped - and their contradictions are held
+		// back; after one whole cycle matched exactly with one rotation left
+		// (unique: two rotations of the shortest pattern cannot agree over a
+		// cycle) it is adopted - the bound on the wrong-time window. No
+		// rotation left, or the locked
+		// phase never failed again: tracking ends, the held-back contradictions
+		// count and the locked phase stands. Returns the slot value to decide this frame with;
+		// clears `contradiction` when it is held back or resolved.
+		char Track(char observed, char expected, bool& contradiction, bool& rephased)
 		{
 			const int cycle = static_cast<int>(m_pattern.size());
+			bool restart = false, carry = false;
 			if (m_trackFrames > 0)
 			{
 				++m_trackFrames;
@@ -429,8 +504,25 @@ namespace Pulldown
 				if (observed != expected)
 					m_currentFailed = true;
 				if (m_candidates.empty())
-					EndTracking();
-				else if (m_trackFrames >= cycle)
+				{
+					// Every rotation died: start afresh from this frame. The first
+					// such restart keeps the held-back contradictions (a restart
+					// then a slip inside one cycle); after that they count, and only
+					// a new picture starts again.
+					if (m_restartsLeft > 0)
+					{
+						--m_restartsLeft;
+						carry = true;
+						m_trackFrames = 0;
+						restart = true;
+					}
+					else
+					{
+						AbandonTracking();
+						restart = observed == 'N';
+					}
+				}
+				else if (m_trackFrames > cycle)
 				{
 					if (m_currentFailed && m_candidates.size() == 1)
 					{
@@ -439,27 +531,34 @@ namespace Pulldown
 						// unlocks on the usual rule instead of re-phasing forever.
 						m_phase = m_candidates.front();
 						rephased = true;
+						contradiction = false;
 						m_probationUntil = m_frames + static_cast<uint64_t>(cycle);
 						EndTracking();
 						return m_pattern[m_phase];
 					}
-					EndTracking();
+					AbandonTracking();
 				}
 				else if (m_currentFailed)
 				{
-					provisional = true;
+					if (contradiction)
+					{
+						m_absorbed.push_back(m_frames);
+						contradiction = false;
+					}
 					return observed;
 				}
 				else
 					return expected;
 			}
-			if (contradiction)
+			if (contradiction || restart)
 			{
 				for (int phase = 0; phase < cycle; ++phase)
-					if (phase != m_phase && m_pattern[phase] == 'N')
+					if (phase != m_phase)
 						m_candidates.push_back(phase);
 				m_trackFrames = m_candidates.empty() ? 0 : 1;
 				m_currentFailed = false;
+				if (!carry)
+					m_restartsLeft = 1;
 			}
 			return expected;
 		}
@@ -471,6 +570,11 @@ namespace Pulldown
 		int m_trackFrames = 0;                 // D3: frames since the contradiction (0 not tracking)
 		std::vector<int> m_candidates;         // D3: phases of the latest frame that match since
 		bool m_currentFailed = false;          // D3: the locked phase failed after the contradiction
+		std::vector<uint64_t> m_absorbed;      // D3: contradictions held back while tracking
+		bool m_retrying = false;               // D3/D4: a verification was contradicted once
+		int m_restartsLeft = 0;                // D3: restarts that keep the held-back contradictions
+		std::vector<double> m_lateness;        // per slot, in signal frames (BuildLateness)
+		double m_latenessMax = 0.0;
 		std::deque<char> m_history;
 		std::deque<uint64_t> m_contradictions;   // frame numbers of recent contradictions
 		uint64_t m_frames = 0;
@@ -494,18 +598,26 @@ namespace Pulldown
 
 		// arrival and the result in seconds on any steady clock; the anchor
 		// over the last kWindowSeconds of film.
-		double Time(uint64_t filmIndex, double arrival, double filmHz)
+		// Audit 2026-10-16: lateness / latenessMax (Decision::cadenceLateness /
+		// cadenceLatenessMax; 0 = the 2026-10-14 behaviour) take the cadence's
+		// own deterministic lateness out of each offset, so the anchor is the
+		// largest arrival jitter, not the latest slot of the few cycles in the
+		// window - at long cycles (24p in 50, 24p in 30) that stepped the clock
+		// by milliseconds whenever such a slot left the window. latenessMax is
+		// added back, and the result is never before the frame arrived.
+		double Time(uint64_t filmIndex, double arrival, double filmHz, double lateness = 0.0, double latenessMax = 0.0)
 		{
 			if (!(filmHz > 0.0))
 				return arrival;
 			const double ideal = static_cast<double>(filmIndex) / filmHz;
-			m_offsets.push_back({ ideal, arrival - ideal });
+			m_offsets.push_back({ ideal, arrival - lateness - ideal });
 			while (m_offsets.size() > 1 && ideal - m_offsets.front().first > kWindowSeconds)
 				m_offsets.pop_front();
 			double anchor = m_offsets.front().second;
 			for (const auto& offset : m_offsets)
 				anchor = offset.second > anchor ? offset.second : anchor;
-			return anchor + ideal;
+			const double time = anchor + ideal + latenessMax;
+			return time > arrival ? time : arrival;
 		}
 
 	private:

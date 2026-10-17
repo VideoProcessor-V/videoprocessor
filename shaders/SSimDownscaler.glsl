@@ -11,12 +11,20 @@
 // You should have received a copy of the GNU Lesser General Public
 // License along with this library.
 
+// VideoProcessor audit 2026-10-16 (minimal fixes to the shipped shader):
+// - L2 pass 1, "mean & R" and the final pass run when the height OR the width
+//   shrinks (RPN: the two comparisons are 0/1, "+" is OR). Pass 2 keeps its
+//   width condition: it now always finds L2 (a width-only downscale used to
+//   run pass 2 without pass 1 having saved L2). Height-only and both-axis
+//   downscales run exactly the passes they ran before.
+// - mean & R: Sh / Sl is guarded against 0/0 (flat area: NaN * 0 = NaN in mix).
+
 //!HOOK POSTKERNEL
 //!BIND PREKERNEL
 //!BIND HOOKED
 //!SAVE L2
 //!WIDTH NATIVE_CROPPED.w
-//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >
+//!WHEN NATIVE_CROPPED.h POSTKERNEL.h > NATIVE_CROPPED.w POSTKERNEL.w > +
 //!COMPONENTS 3
 //!DESC SSimDownscaler L2 pass 1
 
@@ -93,7 +101,7 @@ vec4 hook() {
 //!BIND HOOKED
 //!BIND L2
 //!SAVE MR
-//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >
+//!WHEN NATIVE_CROPPED.h POSTKERNEL.h > NATIVE_CROPPED.w POSTKERNEL.w > +
 //!COMPONENTS 4
 //!DESC SSimDownscaler mean & R
 
@@ -151,13 +159,13 @@ vec4 hook() {
 
     float Sl = Luma(max(avg[1] - avg[0] * avg[0], 0.));
     float Sh = Luma(max(avg[2] - avg[0] * avg[0], 0.));
-    return vec4(avg[0], mix(sqrt((Sh + sigma_nsq) / (Sl + sigma_nsq)) * (1. + oversharp), clamp(Sh / Sl, 0., 1.), float(Sl > Sh)));
+    return vec4(avg[0], mix(sqrt((Sh + sigma_nsq) / (Sl + sigma_nsq)) * (1. + oversharp), clamp(Sh / max(Sl, 1e-30), 0., 1.), float(Sl > Sh)));
 }
 
 //!HOOK POSTKERNEL
 //!BIND HOOKED
 //!BIND MR
-//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >
+//!WHEN NATIVE_CROPPED.h POSTKERNEL.h > NATIVE_CROPPED.w POSTKERNEL.w > +
 //!DESC SSimDownscaler final pass
 
 #define locality    2.0

@@ -13,6 +13,7 @@
 #include <microsoft_directshow/MadVRShaderRuntimeState.h>
 #include <map>
 #include <climits>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -147,6 +148,16 @@ public:
 		std::vector<ConfiguredShaderRule>& selection,
 		std::vector<std::string>& activeSections,
 		std::string& reason);
+	// audit 2026-10-16: test seams for VP-0079 target-shader key resolution.
+	// Resolves `key` (empty = automatic) against an explicit source lookup,
+	// updating the process-wide key selections exactly as a key press does,
+	// and returns the active "group.member" names.  ResetTargetShaderSelections
+	// clears those process-wide selections (tests only).
+	static bool ResolveTargetShaderKeyWithSource(const ConfigFile& config,
+		const std::string& key,
+		const std::function<bool(const std::string&, std::string&)>& source,
+		std::vector<std::string>& names, std::string& reason);
+	static void ResetTargetShaderSelections();
 	static bool IsShaderFilenameCompatible(const std::string& filename,
 		ShaderRendererBackend backend);
 	// Resolves one shader filename under <executable>\shaders. Directory

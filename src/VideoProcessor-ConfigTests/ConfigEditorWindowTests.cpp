@@ -5773,6 +5773,104 @@ void testNewActionStartsUnconfigured()
         "Automatically drafted action still appeared enabled after saving");
 }
 
+// audit 2026-10-16: a failed save must not leave a drafted action disabled in
+// the document while its Enabled box still shows checked. The next save then
+// drafts it again (and unchecks the box) instead of silently saving it off.
+void testFailedSaveRollsBackActionDraft()
+{
+    QTemporaryDir directory;
+    const QString path = copyFixture(directory);
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(7);
+    window.show();
+    QCoreApplication::processEvents();
+    QTimer::singleShot(0, []
+    {
+        for (QWidget* widget : QApplication::topLevelWidgets())
+            if (auto* dialog = qobject_cast<QInputDialog*>(widget))
+            {
+                dialog->setTextValue(QStringLiteral("Rollback action"));
+                dialog->accept();
+                return;
+            }
+    });
+    requireControl<QPushButton>(window, QStringLiteral("config.actions.add"))->click();
+    QCoreApplication::processEvents();
+    QListWidget* events = requireControl<QListWidget>(window, QStringLiteral("config.actions.on"));
+    events->item(0)->setCheckState(Qt::Checked);
+    requireControl<QLineEdit>(window, QStringLiteral("config.actions.run"))->setText(QStringLiteral("sd"));
+    QCheckBox* enabled = requireControl<QCheckBox>(window, QStringLiteral("config.actions.enabled"));
+    enabled->setChecked(true);
+
+    // A read-only file makes the atomic replace fail after drafting.
+    require(QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::ReadUser),
+        "Cannot make the configuration read-only");
+    QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    require(apply->isEnabled(), "Apply was not enabled after the action edit");
+    apply->click();
+    QCoreApplication::processEvents();
+    const QString failed = requireControl<QLabel>(window, QStringLiteral("configurationStatus"))->text();
+    require(QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+        QFileDevice::ReadUser | QFileDevice::WriteUser), "Cannot make the configuration writable again");
+    require(!failed.startsWith(QStringLiteral("Changes saved")),
+        "Saving over a read-only configuration unexpectedly succeeded");
+    require(enabled->isChecked(), "A failed save changed the action's Enabled box");
+    require(!readBytes(path).contains("Rollback action"), "A failed save wrote the configuration");
+
+    save(window);
+    const QString status = requireControl<QLabel>(window, QStringLiteral("configurationStatus"))->text();
+    require(status.contains(QStringLiteral("disabled draft")),
+        "After a failed save the incomplete action was saved without being drafted again");
+    require(!enabled->isChecked() && readBytes(path).contains("enabled: false"),
+        "After a failed save the drafted action did not show as disabled");
+}
+
+// audit 2026-10-16: the legacy Config's fixed-shortcut validation in the
+// editor: duplicates, invalid chords and profile shortcuts that take a fixed
+// shortcut block Apply with a clear message and mark the field.
+void testShortcutConflictsBlockApply()
+{
+    QTemporaryDir directory;
+    const QString path = copyFixture(directory);
+    ConfigEditorWindow window(path, 0, true);
+    window.show();
+    QCoreApplication::processEvents();
+    QPushButton* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    QLabel* status = requireControl<QLabel>(window, QStringLiteral("configurationStatus"));
+    QLineEdit* capture1 = requireControl<QLineEdit>(window, QStringLiteral("config.shortcuts.capture_1"));
+
+    capture1->setText(QStringLiteral("Ctrl+2"));
+    QCoreApplication::processEvents();
+    require(!apply->isEnabled(), "A duplicate fixed shortcut left Apply enabled");
+    require(status->text().contains(QStringLiteral("must be unique")),
+        "A duplicate fixed shortcut did not say why Apply is blocked");
+    require(capture1->property("invalid").toBool(), "A duplicate fixed shortcut was not marked");
+
+    capture1->setText(QStringLiteral("Ctrl+"));
+    QCoreApplication::processEvents();
+    require(!apply->isEnabled(), "A shortcut that cannot be canonicalised left Apply enabled");
+    require(status->text().contains(QStringLiteral("not a valid shortcut")),
+        "An invalid shortcut did not say why Apply is blocked");
+
+    capture1->setText(QStringLiteral("Ctrl+9"));
+    QCoreApplication::processEvents();
+    require(apply->isEnabled(), "A corrected shortcut did not re-enable Apply");
+    require(!capture1->property("invalid").toBool(), "A corrected shortcut stayed marked");
+
+    QLineEdit* queueShortcut = requireControl<QLineEdit>(window, QStringLiteral("config.queue.shortcut"));
+    queueShortcut->setText(QStringLiteral("Ctrl+I"));
+    QCoreApplication::processEvents();
+    require(!apply->isEnabled(), "A profile shortcut taking a fixed shortcut left Apply enabled");
+    require(status->text().contains(QStringLiteral("already the fixed shortcut")),
+        "A profile shortcut clash did not say why Apply is blocked");
+    queueShortcut->setText(QStringLiteral("Ctrl+Alt+Q"));
+    QCoreApplication::processEvents();
+    save(window);
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("capture_1: Ctrl+9") && saved.contains("shortcut: Ctrl+Alt+Q"),
+        "Corrected shortcuts were not saved");
+}
+
 void testEmptyActionsShowEmptyState()
 {
     QTemporaryDir directory;
@@ -7429,10 +7527,18 @@ void testSharedProfileListControllerContract()
     controller.updateCurrentLabel(QStringLiteral("Live name"));
     require(list.item(0)->text() == QStringLiteral("Live name  (Default)"),
         "Shared profile component did not update its current name immediately");
+    // audit 2026-10-16: a move loads only the moved row, never the neighbour
+    // takeItem briefly makes current.
+    QStringList loaded;
+    QObject::connect(&list, &QListWidget::currentItemChanged, &parent,
+        [&loaded](QListWidgetItem* current)
+        { if (current) loaded.push_back(current->data(Qt::UserRole).toString()); });
     down.click();
     require(sections == QStringList{ QStringLiteral("profile.second"),
         QStringLiteral("profile.root") } && list.currentRow() == 1,
         "Shared profile component did not persist button reordering");
+    require(!loaded.contains(QStringLiteral("profile.second")),
+        "Moving a profile loaded its neighbour into the editor");
 
     require(list.model()->moveRow(QModelIndex(), 1, QModelIndex(), 0),
         "Shared profile component rejected model drag reordering");
@@ -8607,6 +8713,8 @@ int main(int argc, char** argv)
     failures += run("missing configuration can be created from editor",
         testMissingConfigurationCanBeCreatedFromEditor);
     failures += run("Apply OK Cancel contract", testApplyOkCancelContract);
+    failures += run("failed save rolls back action draft", testFailedSaveRollsBackActionDraft);   // audit 2026-10-16
+    failures += run("shortcut conflicts block Apply", testShortcutConflictsBlockApply);   // audit 2026-10-16
     failures += run("LED drive page and live switches", testLedDrivePageAndLiveSwitches);
     failures += run("de-judder box presets and mask", testDejudderBoxPresetsAndMask);
     failures += run("motion slider per rule profile", testMotionSliderPerRuleProfile);

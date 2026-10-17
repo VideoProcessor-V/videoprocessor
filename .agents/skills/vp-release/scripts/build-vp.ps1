@@ -82,7 +82,8 @@ try {
  $artifacts = @(foreach ($name in $names) {
   $file = Join-Path $Checkout "artifacts\installers\$name"
   $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-  $sidecar = (Get-Content -LiteralPath ($file + '.sha256') -Raw).Trim()
+  # audit 2026-10-16: the sidecars live in artifacts\installers\evidence (build_installer.ps1)
+  $sidecar = (Get-Content -LiteralPath (Join-Path $Checkout "artifacts\installers\evidence\$name.sha256") -Raw).Trim()
   if ($sidecar -ne "$hash  $name") { throw "Checksum sidecar mismatch: $name" }
   [ordered]@{ name=$name; sha256=$hash; length=(Get-Item -LiteralPath $file).Length }
  })
@@ -93,7 +94,8 @@ try {
  $receipt | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $evidence 'release-receipt.json') -Encoding UTF8
  New-Item -ItemType Directory -Path $outputFull | Out-Null
  foreach ($name in $names) {
-  foreach ($suffix in @('','.sha256')) { Copy-Item -LiteralPath (Join-Path $Checkout "artifacts\installers\$name$suffix") -Destination $outputFull }
+  Copy-Item -LiteralPath (Join-Path $Checkout "artifacts\installers\$name") -Destination $outputFull
+  Copy-Item -LiteralPath (Join-Path $Checkout "artifacts\installers\evidence\$name.sha256") -Destination $outputFull
  }
  Copy-Item -LiteralPath $manifestFile -Destination $outputFull
  Copy-Item -LiteralPath (Join-Path $Checkout 'artifacts\installer-build.json') -Destination $outputFull

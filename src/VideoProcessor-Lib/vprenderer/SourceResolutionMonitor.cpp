@@ -189,6 +189,7 @@ if (tile < int(tiles) && g.y < 256) {
 				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * kTile * kTile], kTile, kTile, spectra[static_cast<size_t>(i)], 1023);
 			SourceResolution::Thresholds thresholds;
 			if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
+			thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
 			const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, thresholds);
 			std::lock_guard<std::mutex> lock(aheadMutex);
 			aheadHaveJob = false;
@@ -535,6 +536,7 @@ if (tile < int(tiles) && g.y < 256) {
 		SourceResolution::Thresholds thresholds;
 		thresholds.codeMaximum = j.codeMaximum;
 		if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
+		thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
 
 		std::lock_guard<std::mutex> lock(mutex);

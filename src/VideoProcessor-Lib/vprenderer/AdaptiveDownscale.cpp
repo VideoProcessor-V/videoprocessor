@@ -259,9 +259,11 @@ if (q.x < size.x && q.y < size.y) {
 		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, int components, int depth, bool renderable,
 			bool linear, bool hostReadable = false)
 		{
-			// Audit 2026-10-16: the depth too (float32Picture can change it).
+			// Audit 2026-10-16: at least the depth asked for (float32Picture can raise it). Never
+			// "equal": a GPU format deeper than asked would recreate - and wipe - the texture
+			// every frame (the per-frame state, the residual hold).
 			if (tex && tex->params.w == w && tex->params.h == h && tex->params.format &&
-				tex->params.format->component_depth[0] == depth)
+				tex->params.format->component_depth[0] >= depth)
 				return true;
 			enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
 			if (renderable) caps = static_cast<enum pl_fmt_caps>(caps | PL_FMT_CAP_RENDERABLE);
@@ -437,7 +439,7 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		// The SSIM shader's own condition: the source is made shorter (the
 		// renderer's NATIVE_CROPPED.h > POSTKERNEL.h); and this picture too.
-		else if (!sourceDownscales || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f))
+		else if (!sourceDownscales || !(sy1 - sy0 > static_cast<float>(dh) + 0.5f || sx1 - sx0 > static_cast<float>(dw) + 0.5f))   // either axis (audit 2026-10-16)
 			return unchanged;
 		if (gpu && gpu != p->gpu)
 			Release();

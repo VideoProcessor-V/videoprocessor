@@ -43,12 +43,16 @@ bool SendExact(SOCKET socket, const uint8_t* bytes, size_t size)
 	return true;
 }
 
-bool ReceiveExact(SOCKET socket, uint8_t* bytes, size_t size)
+// audit 2026-10-16: timedOut tells a receive timeout (VP busy, outcome
+// unknown) from a closed or reset connection.
+bool ReceiveExact(SOCKET socket, uint8_t* bytes, size_t size, bool* timedOut = nullptr)
 {
+	if (timedOut) *timedOut = false;
 	while (size != 0)
 	{
 		const int count = recv(socket, reinterpret_cast<char*>(bytes),
 			static_cast<int>(std::min<size_t>(size, INT_MAX)), 0);
+		if (count < 0 && timedOut) *timedOut = WSAGetLastError() == WSAETIMEDOUT;
 		if (count <= 0) return false;
 		bytes += count;
 		size -= count;
@@ -156,7 +160,7 @@ bool ConfigurationRpcClient::Request(uint16_t operation,
 		operation == static_cast<uint16_t>(Operation::RunAction) ||
 		operation == static_cast<uint16_t>(Operation::ProjectorTest) ?
 		50000 : operation == static_cast<uint16_t>(Operation::GetActiveProfileStatus) ?
-		1500 : 10000;
+		1500 : 20000; // audit 2026-10-16: above the server's 15 s UI-thread wait
 	setsockopt(socket.value, SOL_SOCKET, SO_RCVTIMEO,
 		reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 	setsockopt(socket.value, SOL_SOCKET, SO_SNDTIMEO,
@@ -167,9 +171,14 @@ bool ConfigurationRpcClient::Request(uint16_t operation,
 		return false;
 	}
 	std::array<uint8_t, HeaderBytes> header{};
-	if (!ReceiveExact(socket.value, header.data(), header.size()))
+	bool timedOut = false;
+	if (!ReceiveExact(socket.value, header.data(), header.size(), &timedOut))
 	{
-		error = "VP did not complete the configuration version handshake. Update VP and Config UI together, or retry when VP is running.";
+		// audit 2026-10-16: a receive timeout is a busy VP, not a version
+		// mismatch; for Apply the change may or may not have been made.
+		error = timedOut ?
+			"VP is busy (timed out); the outcome is unknown. Check VP, then retry." :
+			"VP did not complete the configuration version handshake. Update VP and Config UI together, or retry when VP is running.";
 		return false;
 	}
 	if (header[0] == 'V' && header[1] == 'P' &&
@@ -191,9 +200,11 @@ bool ConfigurationRpcClient::Request(uint16_t operation,
 	wire.assign(header.begin(), header.end());
 	wire.resize(HeaderBytes + payloadBytes);
 	if (payloadBytes != 0 && !ReceiveExact(socket.value,
-		wire.data() + HeaderBytes, payloadBytes))
+		wire.data() + HeaderBytes, payloadBytes, &timedOut))
 	{
-		error = "VP returned an incomplete configuration response.";
+		error = timedOut ?
+			"VP is busy (timed out); the outcome is unknown. Check VP, then retry." :
+			"VP returned an incomplete configuration response.";
 		return false;
 	}
 	Frame decoded;

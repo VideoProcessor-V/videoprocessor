@@ -157,9 +157,16 @@ private:
         const int target = source + delta;
         if (source < 0 || target < 0 || target >= list_->count()) return;
         reordering_ = true;
-        QListWidgetItem* item = list_->takeItem(source);
-        list_->insertItem(target, item);
-        list_->setCurrentRow(target);
+        {
+            // audit 2026-10-16: takeItem moves the current row to the
+            // neighbour; with signals open currentItemChanged would load that
+            // neighbour into the editor mid-move. refresh() (via
+            // persistOrder) loads the moved row once the order is stable.
+            const QSignalBlocker blocker(list_);
+            QListWidgetItem* item = list_->takeItem(source);
+            list_->insertItem(target, item);
+            list_->setCurrentRow(target);
+        }
         reordering_ = false;
         persistOrder();
     }

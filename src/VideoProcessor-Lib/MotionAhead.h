@@ -27,6 +27,7 @@ namespace MotionAhead
 		Disabled,       // optical_flow: off (the matcher only)
 		LowLatency,     // a low-latency profile
 		NoEngine,       // no optical-flow engine (not NVIDIA, failed self-check, not built yet)
+		NoConsumer,     // neither the de-judder nor the interpolator estimates for this source (idle)
 	};
 
 	struct Decision
@@ -39,7 +40,11 @@ namespace MotionAhead
 
 	// `opticalFlow`: the optical_flow setting (owner 2026-10-16: the engine is the
 	// established default; optical_flow: off disables it).
-	inline Decision Decide(int configured, bool lowLatency, bool engineAvailable, size_t availableFutureFrames, bool opticalFlow = true)
+	// consumer: a motion estimate would run for this source (the de-judder or the interpolator:
+	// DejudderPolicy Active / NoNextFrame / NextFrameDiffers). Without one no frames are submitted
+	// (intent audit 2026-10-16: pairs were computed for 60p after film); the producer stays alive, idle.
+	inline Decision Decide(int configured, bool lowLatency, bool engineAvailable, size_t availableFutureFrames, bool opticalFlow = true,
+		bool consumer = true)
 	{
 		Decision d;
 		d.configured = (std::max)(0, (std::min)(kMaxDepth, configured));
@@ -47,6 +52,7 @@ namespace MotionAhead
 		if (!opticalFlow) d.reason = Reason::Disabled;
 		else if (d.configured == 0) d.reason = Reason::Off;
 		else if (lowLatency) d.reason = Reason::LowLatency;
+		else if (!consumer) d.reason = Reason::NoConsumer;
 		else if (!engineAvailable) d.reason = Reason::NoEngine;
 		else if (d.available == 0) d.reason = Reason::NoFramesAhead;
 		else
@@ -68,6 +74,7 @@ namespace MotionAhead
 		case Reason::Disabled: return "off (optical_flow off: the matcher runs)";
 		case Reason::LowLatency: return "off in low latency";
 		case Reason::NoEngine: return "no optical-flow engine (the matcher runs)";
+		case Reason::NoConsumer: return "idle (no motion estimate runs for this source)";
 		}
 		return "?";
 	}

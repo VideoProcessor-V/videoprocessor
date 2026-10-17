@@ -69,7 +69,8 @@ public:
         connect(install_, &QPushButton::clicked, this, [this] {
             if (QMessageBox::question(this, "Install update", "Install on this computer? Playback will stop if VP is running. Config will close and discard unsaved edits. Running local applications will restart afterward.", QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Ok) request("install");
         });
-        connect(mode_, &QComboBox::currentIndexChanged, this, [this] { saveSettings(); });
+        // audit 2026-10-16: show or hide "allow restart" as soon as the mode changes.
+        connect(mode_, &QComboBox::currentIndexChanged, this, [this] { restart_->setVisible(mode_->currentData() == "auto"); saveSettings(); });
         connect(channel_, &QComboBox::currentIndexChanged, this, [this] { saveSettings(); });
         connect(restart_, &QCheckBox::toggled, this, [this] { saveSettings(); });
         process_ = new QProcess(this);
@@ -107,8 +108,11 @@ public:
         }
         connectionLost_ = false; check_->setText("Check now");
         QSignalBlocker modeBlock(mode_), channelBlock(channel_), restartBlock(restart_);
-        mode_->setCurrentIndex(mode_->findData(state.value("mode").toString()));
-        channel_->setCurrentIndex(channel_->findData(state.value("channel").toString()));
+        // audit 2026-10-16: an unknown mode or channel from the helper keeps
+        // the current choice instead of blanking the combo (index -1), which
+        // would then save an empty value with the next preference change.
+        if (const int mode = mode_->findData(state.value("mode").toString()); mode >= 0) mode_->setCurrentIndex(mode);
+        if (const int channel = channel_->findData(state.value("channel").toString()); channel >= 0) channel_->setCurrentIndex(channel);
         restart_->setChecked(state.value("allowPlaybackRestart").toBool()); restart_->setVisible(mode_->currentData() == "auto");
         identity_->setText(QString("%1 · %2\n%3").arg(state.value("flavor").toString() == "config" ? "VideoProcessor Config only" : "VideoProcessor and Config", state.value("version").toString(), root_));
         status_->setText(state.value("status").toString());

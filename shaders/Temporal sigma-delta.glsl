@@ -442,7 +442,13 @@ bool last_in_a_;
 float luma_prev(ivec2 p)
 {
     p = clamp(p, ivec2(0), min(full_size, imageSize(PREV_NEXT)) - ivec2(1));
-    return dot((last_in_a_ ? imageLoad(PREV, p) : imageLoad(PREV_NEXT, p)).rgb, vec3(0.2126, 0.7152, 0.0722));
+    // Audit 2026-10-16: PREV/PREV_NEXT hold the quantizer's x = src * in_scale,
+    // which in true 10-bit mode (color_bits > 9) is 10-bit codes (x1023), while
+    // luma_cur and the match tolerance are in 8-bit units (x1023/4). Bring the
+    // stored value to 8-bit units (exact power-of-two scale); the 8-bit and
+    // limited-on-10-bit-swapchain modes already match (scale 1.0, unchanged).
+    float to8 = color_bits > 9.0 ? 0.25 : 1.0;
+    return dot((last_in_a_ ? imageLoad(PREV, p) : imageLoad(PREV_NEXT, p)).rgb, vec3(0.2126, 0.7152, 0.0722)) * to8;
 }
 
 // Full-resolution match of the 16x16 block displaced by v (full pixels).

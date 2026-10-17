@@ -145,7 +145,11 @@ private:
     bool hasActiveOwnedPopup() const;
     bool nativeOwnerIsValid() const;
     void applyChanges();
-	bool saveChanges();
+	// True when saved locally. A remote Apply runs in the background and
+	// returns false; afterRemoteApply runs once it has succeeded (audit
+	// 2026-10-16).
+	bool saveChanges(std::function<void()> afterRemoteApply = {});
+	void setRemoteApplyBusy(bool busy);
 	void rebuildConfigurationShell();
     void applyRendererVisibilityFilter(bool hideLegacyRenderers);
     bool notifyVideoProcessor();
@@ -302,6 +306,11 @@ private:
     QTimer* activeProfileTimer_ = nullptr;
     QThread* activeProfileThread_ = nullptr;
     QThread* manualCommandThread_ = nullptr;
+    // audit 2026-10-16: the RS-232 connection test and remote Apply/OK run
+    // off the UI thread; the destructor waits for them.
+    QThread* projectorTestThread_ = nullptr;
+    QThread* remoteApplyThread_ = nullptr;
+    QStringList invalidShortcutFields_; // audit 2026-10-16
     QTimer* shaderCacheStatusTimer_ = nullptr;
     QComboBox* actionRendererTarget_ = nullptr;
     QFormLayout* rendererShortcutForm_ = nullptr;

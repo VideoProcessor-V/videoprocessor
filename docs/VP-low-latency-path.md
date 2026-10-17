@@ -14,7 +14,7 @@ each work it out from the profile snapshot.
 | De-judder off | yes | `DejudderPolicy.h` (Reason::LowLatency), renderer releases it |
 | Optical-flow producer not started / depth 0 | yes | renderer `wantProducer ... && !lowLatency`; `MotionAhead::Decide` |
 | Queue frame minimum (5 for the look-ahead) exempt | yes | `VideoProcessorDlg.cpp` ~13011, `QueueLatency::ApplyFrameMinimum` |
-| `fbo_float32: auto` -> off (half-float buffers) | yes | renderer frame params |
+| `fbo_float32: auto` -> on (32-bit float; owner 2026-10-16: half-float was never agreed, higher precision is the default) | no (changed) | renderer frame params |
 | Grain map per frame (no matcher) | yes, **indirectly** - no explicit check; follows from the de-judder being off | `AdaptiveDownscale` uses the map only for the current frame |
 | `cinema_only` custom shaders skipped | yes | `CustomHookChain::Submitted`; side effect: a cinema-only SSimDownscaler also turns the adaptive downscale off |
 | Early upload (`capture_upload: early`, second D3D11 device) | **independent** - not tied to low latency; per renderer/input profile | renderer settings |
@@ -53,7 +53,7 @@ each work it out from the profile snapshot.
    Low_Latency, so existing files behave the same); the renderer and GUI read the property; the
    name test kept only as that default. One matching function everywhere.
 2. **One visible choice on the Queue page:** per queue profile, "Use VP's low-latency path" with what it
-   does (de-judder off, no frames ahead, half-float buffers, cinema-only shaders off, early upload on)
+   does (de-judder off, no frames ahead, cinema-only shaders off, early upload on; 32-bit float buffers kept)
    and a rate rule that accepts ranges (e.g. 48-61, both 50 and 60 Hz families) - prefilled for 50/60.
 3. **No duplicated renderer rules:** `capture_upload: auto` (new default) = early upload in the
    low-latency path, render-thread upload otherwise; likewise any other renderer setting that should

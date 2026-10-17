@@ -507,6 +507,109 @@ namespace SourceResolution
 		frame.bitrateQuality = 1.0 - (std::max)(blocked, banded);
 	}
 
+	namespace
+	{
+		// One tile's mirror coherence at `ratio` (the strongest within two candidates).
+		double CoherenceAt(const std::vector<double>& curve, double ratio, int n)
+		{
+			if (curve.size() != static_cast<size_t>(n) || ratio <= 0.0 || ratio >= 1.0) return 0.0;
+			const int centre = static_cast<int>(std::lround(ratio * n));
+			double v = 0.0;
+			for (int m = centre - 2; m <= centre + 2; ++m) if (m >= 0 && m < n) v = (std::max)(v, curve[static_cast<size_t>(m)]);
+			return v;
+		}
+
+		// One tile's curve floor (its median over the candidates, as MirrorPeak::floor): low
+		// beside a resample, high for sharp edges and text (coherent at almost every rate).
+		double CurveFloor(const std::vector<double>& curve, int n, const Thresholds& t)
+		{
+			const int from = (std::max)(n / 8, static_cast<int>(std::ceil(t.minimumRatio * n)));
+			const int to = (std::min)(n - 1, static_cast<int>(std::floor(t.maximumRatio * n)));
+			if (curve.size() != static_cast<size_t>(n) || to < from) return 0.0;
+			std::vector<double> body(curve.begin() + from, curve.begin() + to + 1);
+			std::nth_element(body.begin(), body.begin() + body.size() / 2, body.end());
+			return body[body.size() / 2];
+		}
+
+		// Mixed screens (Thresholds::mixedGuard; owner 2026-10-16): the frame read lower on the
+		// averaged curves; look for tiles holding native-resolution content at that rate - a UI
+		// around or over the video. See Thresholds for the rules.
+		void ReadMixedScreen(const std::vector<Spectrum>& tiles, const Thresholds& t, FrameReading& frame)
+		{
+			const bool both = frame.ratio < 1.0;
+			const bool useV = both || frame.ratioV < 1.0, useH = both || frame.ratioH < 1.0;
+			if (!useV && !useH) return;
+			// Detail is measured at the reading's rate (the both-axes reading uses one rate for both
+			// axes, as DetailAbove); resampling per axis at that axis's own rate.
+			const int axes = (useV ? 1 : 0) | (useH ? 2 : 0);
+			const double rate = both ? frame.ratio : (useV ? frame.ratioV : frame.ratioH);
+			const double rateV = frame.vertical.ratio, rateH = frame.horizontal.ratio;
+			const int n = tiles.front().n;
+			const double step = 1.0 / (std::max)(1, t.codeMaximum);
+			const double floorLevel = std::log10(step * step / 12.0) + t.mixedDetailFloorDecades;
+			const bool textGuard = t.textBand > 0.0 && t.textBand <= 1.0;
+			struct View { bool valid = false, coherent = false, incoherent = false, informative = false; double detail = 0.0, level = 0.0; };
+			std::vector<View> views(tiles.size());
+			std::vector<double> reference;
+			for (size_t i = 0; i < tiles.size(); ++i)
+			{
+				const Spectrum& s = tiles[i];
+				if (s.n != n || s.vertical.size() != static_cast<size_t>(n / 2 + 1) || s.horizontal.size() != s.vertical.size() ||
+					s.mirrorVertical.size() != static_cast<size_t>(n) || s.mirrorHorizontal.size() != static_cast<size_t>(n))
+					continue;
+				View& v = views[i];
+				double level = 0.0;
+				const double detail = DetailAbove(s, rate, axes, &level);
+				if (std::isinf(detail)) continue;
+				const double cohV = CoherenceAt(s.mirrorVertical, rateV, n), cohH = CoherenceAt(s.mirrorHorizontal, rateH, n);
+				v.valid = true;
+				v.detail = detail;
+				v.level = level;
+				// Resampled at the rate on an axis read (one tile's coherence can dip below the frame
+				// threshold on one axis: 0.36 / 0.53 measured on a clean 2x upscale; native detail
+				// reads 0.03 - 0.13 on both), or on none of them.
+				v.coherent = (useV && cohV >= t.coherence) || (useH && cohH >= t.coherence);
+				v.incoherent = !v.coherent;
+				v.informative = Informative(s, t);
+				const bool excluded = (textGuard && s.textBand >= t.textBand) || (t.periodicPeak > 0.0 && s.periodicPeak >= t.periodicPeak);
+				const double curveFloor = (std::max)(useV ? CurveFloor(s.mirrorVertical, n, t) : 0.0, useH ? CurveFloor(s.mirrorHorizontal, n, t) : 0.0);
+				// The resampled picture: the tiles that carry the reading themselves - not text or
+				// sharp edges, which are coherent at every rate (a high floor) and hold native detail.
+				if (v.coherent && v.informative && !excluded && s.textBand < t.mixedTextBand && curveFloor <= t.maximumFloor) reference.push_back(detail);
+			}
+			// No tile is resampled on its own (the reading came from the average only): nothing to
+			// compare with - left as before.
+			if (reference.empty()) return;
+			std::nth_element(reference.begin(), reference.begin() + reference.size() / 2, reference.end());
+			const double resampled = reference[reference.size() / 2];
+			const int count = static_cast<int>(tiles.size());
+			const int columns = t.gridColumns > 0 ? (std::min)(t.gridColumns, count) : count;
+			std::vector<bool> rows(static_cast<size_t>((count + columns - 1) / columns), false), cols(static_cast<size_t>(columns), false);
+			int picture = 0, overlay = 0;
+			for (size_t i = 0; i < tiles.size(); ++i)
+			{
+				const View& v = views[i];
+				if (!v.valid || v.detail < resampled + t.mixedDetailDecades || v.level < floorLevel) continue;
+				const bool textLike = tiles[i].textBand >= t.mixedTextBand;
+				if (!textLike && v.incoherent && v.informative) { ++picture; continue; }
+				++overlay;
+				rows[i / static_cast<size_t>(columns)] = true;
+				cols[i % static_cast<size_t>(columns)] = true;
+			}
+			frame.mixedPictureTiles = picture;
+			frame.mixedOverlayTiles = overlay;
+			frame.mixedOverlayRows = static_cast<int>(std::count(rows.begin(), rows.end(), true));
+			frame.mixedOverlayColumns = static_cast<int>(std::count(cols.begin(), cols.end(), true));
+			const bool spread = frame.mixedOverlayRows >= 2 && frame.mixedOverlayColumns >= 2;
+			if ((t.mixedPictureTiles > 0 && picture >= t.mixedPictureTiles) || spread)
+			{
+				frame.mixed = true;
+				frame.mixedRatio = both ? frame.ratio : rate;
+				frame.ratio = frame.ratioV = frame.ratioH = 1.0;
+			}
+		}
+	}
+
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& t)
 	{
 		FrameReading frame;
@@ -575,35 +678,59 @@ namespace SourceResolution
 		// Per axis, at the stricter single-axis coherence.
 		frame.ratioV = frame.vertical.coherence >= t.singleAxisCoherence && quietV && frame.vertical.ratio <= t.singleAxisMaximumRatio ? frame.vertical.ratio : 1.0;
 		frame.ratioH = frame.horizontal.coherence >= t.singleAxisCoherence && quietH && frame.horizontal.ratio <= t.singleAxisMaximumRatio ? frame.horizontal.ratio : 1.0;
+		// Mixed screens: a lower reading with native UI in the frame reads native (off: as before).
+		if (t.mixedGuard && (frame.ratio < 1.0 || frame.ratioV < 1.0 || frame.ratioH < 1.0)) ReadMixedScreen(tiles, t, frame);
 		return frame;
+	}
+
+	namespace
+	{
+		// DetailAbove on a pair of power spectra (bins 0..n/2). `axes`: 1 vertical, 2 horizontal,
+		// 3 both (the larger). `level`: the above band's mean log10 power on the axis chosen.
+		double DetailAboveSpectra(const std::vector<double>& vertical, const std::vector<double>& horizontal, double ratio, int axes, double* level)
+		{
+			const double unknown = std::numeric_limits<double>::infinity();
+			const size_t bins = vertical.size();
+			if (ratio <= 0.0 || ratio >= 1.0 || bins < 33 || horizontal.size() != bins || (axes & 3) == 0) return unknown;
+			const int half = static_cast<int>(bins) - 1;   // n / 2
+			const int n = 2 * half;
+			const double cut = ratio * half;               // r's Nyquist, in bins
+			// Below: the top of the source's own band; above: past the kernel's transition,
+			// short of the signal's own Nyquist. Block-coding harmonics are left out.
+			const int b0 = static_cast<int>(std::ceil(0.55 * cut)), b1 = static_cast<int>(std::floor(0.9 * cut));
+			const int a0 = static_cast<int>(std::ceil(1.15 * cut)), a1 = (std::min)(static_cast<int>(std::floor(0.97 * half)), a0 + (std::max)(4, b1 - b0));
+			if (a1 - a0 < 3 || b1 - b0 < 3) return unknown;
+			double best = -unknown;
+			for (int axis = 0; axis < 2; ++axis)
+			{
+				if (!(axes & (1 << axis))) continue;
+				const std::vector<double>& power = axis == 0 ? vertical : horizontal;
+				auto band = [&](int from, int to) {
+					double sum = 0.0;
+					int count = 0;
+					for (int k = from; k <= to; ++k)
+						if (!BlockHarmonic(k, n)) { sum += std::log10((std::max)(power[k], 1e-20)); ++count; }
+					return count > 0 ? sum / count : 0.0;
+				};
+				const double above = band(a0, a1), d = above - band(b0, b1);
+				if (d > best)
+				{
+					best = d;
+					if (level) *level = above;
+				}
+			}
+			return best;
+		}
 	}
 
 	double DetailAbove(const FrameReading& frame, double ratio)
 	{
-		const double unknown = std::numeric_limits<double>::infinity();
-		const size_t bins = frame.verticalPower.size();
-		if (ratio <= 0.0 || ratio >= 1.0 || bins < 33 || frame.horizontalPower.size() != bins) return unknown;
-		const int half = static_cast<int>(bins) - 1;   // n / 2
-		const int n = 2 * half;
-		const double cut = ratio * half;               // r's Nyquist, in bins
-		// Below: the top of the source's own band; above: past the kernel's transition,
-		// short of the signal's own Nyquist. Block-coding harmonics are left out.
-		const int b0 = static_cast<int>(std::ceil(0.55 * cut)), b1 = static_cast<int>(std::floor(0.9 * cut));
-		const int a0 = static_cast<int>(std::ceil(1.15 * cut)), a1 = (std::min)(static_cast<int>(std::floor(0.97 * half)), a0 + (std::max)(4, b1 - b0));
-		if (a1 - a0 < 3 || b1 - b0 < 3) return unknown;
-		double best = -unknown;
-		for (const std::vector<double>* power : { &frame.verticalPower, &frame.horizontalPower })
-		{
-			auto band = [&](int from, int to) {
-				double sum = 0.0;
-				int count = 0;
-				for (int k = from; k <= to; ++k)
-					if (!BlockHarmonic(k, n)) { sum += std::log10((std::max)((*power)[k], 1e-20)); ++count; }
-				return count > 0 ? sum / count : 0.0;
-			};
-			best = (std::max)(best, band(a0, a1) - band(b0, b1));
-		}
-		return best;
+		return DetailAboveSpectra(frame.verticalPower, frame.horizontalPower, ratio, 3, nullptr);
+	}
+
+	double DetailAbove(const Spectrum& tile, double ratio, int axes, double* level)
+	{
+		return DetailAboveSpectra(tile.vertical, tile.horizontal, ratio, axes, level);
 	}
 
 	FrameReading AxisFrame(const FrameReading& frame, bool vertical)
@@ -676,7 +803,9 @@ namespace SourceResolution
 		const double ratio = frame.ratio >= settings.nativeAbove ? 1.0 : frame.ratio;
 		// Variable bitrate (owner 2026-10-16): native needs detail above the rate in
 		// question - the declared one, else the lower one the window is gathering.
-		if (ratio >= 1.0)
+		// A mixed screen (ReadFrame's guard found native UI tiles) is native detail by itself:
+		// its averaged spectra hold the video, not the UI that made it native.
+		if (ratio >= 1.0 && !frame.mixed)
 		{
 			const double inQuestion = declared < 1.0 ? declared : Candidate();
 			const double reference = inQuestion < 1.0 ? ReferenceDetail(inQuestion) : std::numeric_limits<double>::infinity();
@@ -692,7 +821,8 @@ namespace SourceResolution
 		if (ratio >= 1.0)
 		{
 			lastNative = frame;
-			haveLastNative = !frame.verticalPower.empty();
+			// A mixed screen is not the stream's native rendition (F12 compares against that).
+			haveLastNative = !frame.verticalPower.empty() && !frame.mixed;
 			lastNativeShot = shot;
 			streak = 0;
 			streakDetail.clear();

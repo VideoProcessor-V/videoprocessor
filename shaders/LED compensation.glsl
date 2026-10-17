@@ -121,7 +121,11 @@ vec3 spow(vec3 v, float e)
 vec3 soft_knee(vec3 x, float k)
 {
     float t = 1.0 - k;
-    vec3 rolled = vec3(t) + vec3(k) * (vec3(1.0) - exp(-(x - vec3(t)) / k));
+    // Audit 2026-10-16: clamp the exponent at the knee. For x far below it
+    // with a small k, exp(-(x - t) / k) overflowed to +Inf and the mix below
+    // gave Inf * 0 = NaN; below the knee `rolled` is discarded anyway, so the
+    // output is unchanged wherever it was finite (as SDR tone shape.glsl).
+    vec3 rolled = vec3(t) + vec3(k) * (vec3(1.0) - exp(-max(x - vec3(t), vec3(0.0)) / k));
     return mix(x, rolled, step(vec3(t), x));
 }
 

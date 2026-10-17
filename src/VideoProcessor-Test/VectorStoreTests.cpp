@@ -130,6 +130,10 @@ namespace MotionAheadTest
 			Assert::AreEqual(0, Decide(4, true, true, 6).depth);
 			Assert::IsTrue(Decide(0, false, true, 6).reason == Reason::Off);
 			Assert::IsTrue(Decide(4, false, false, 6).reason == Reason::NoEngine);
+			// No motion estimate for this source (60p after film): nothing submitted, whatever is queued.
+			Assert::IsTrue(Decide(4, false, true, 6, true, false).reason == Reason::NoConsumer);
+			Assert::AreEqual(0, Decide(4, false, true, 6, true, false).depth);
+			Assert::IsTrue(Decide(4, true, true, 6, true, false).reason == Reason::LowLatency, L"low latency named first");
 			// Clamped to 0..4.
 			Assert::AreEqual(4, Decide(9, false, true, 9).depth);
 			Assert::AreEqual(0, Decide(-3, false, true, 9).depth);

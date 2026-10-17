@@ -53,6 +53,11 @@
     <ClCompile Include="SubtitleTranslationReversalTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ExtendedRangeCarryTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="MixedScreenSourceResolutionTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="AlphaSourceCropPolicyTests.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>
@@ -153,4 +158,5 @@
   <ItemGroup><ClCompile Include="SparseEntryEpisodeRecoveryTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="MotionValidityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="InterpolationPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>

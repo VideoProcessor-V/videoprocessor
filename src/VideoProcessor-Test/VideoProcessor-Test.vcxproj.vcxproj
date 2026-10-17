@@ -300,6 +300,9 @@
     </ClCompile>
     <ClCompile Include="SceneDetectorTests.cpp" />
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
+    <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
+    <ClCompile Include="ExtendedRangeCarryTests.cpp" />
+    <ClCompile Include="DisplayRuleExpressionAuditTests.cpp" />
     <ClCompile Include="VectorStoreTests.cpp" />
     <ClCompile Include="MotionValidityTests.cpp" />
     <ClCompile Include="InterpolationPolicyTests.cpp" />
@@ -319,6 +322,7 @@
     <ClCompile Include="CrashStateTests.cpp" />
     <ClCompile Include="RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="NvOpticalFlowTests.cpp" />
+    <ClCompile Include="PulldownReliabilityTests.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

@@ -258,6 +258,7 @@ private:
 	std::atomic<RendererState> m_state{RendererState::RENDERSTATE_UNKNOWN};
 	std::atomic_bool m_retirementSucceeded{true};
 	std::string m_requestedShaderSelector;
+	std::string m_requestedShaderFingerprint;   // the rules it resolved to (audit 2026-10-16)
 	std::mutex m_pendingShaderMutex;
 	std::string m_pendingShaderSelector;
 	std::vector<std::string> m_activeShaderSections;
@@ -351,6 +352,8 @@ private:
 	// refreshed from the active settings by the render loop; Reset asks for a
 	// fresh start.
 	std::atomic<bool> m_pulldownDetection{false};
+	std::atomic<bool> m_pulldownFixes{true};   // pulldown_fixes (audit 2026-10-16)
+	bool m_pulldownFixesApplied = true;        // capture thread
 	std::atomic<bool> m_pulldownResetRequested{false};
 	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
 	std::atomic<uint64_t> m_pulldownSkipped{0};

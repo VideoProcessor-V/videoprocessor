@@ -6,7 +6,14 @@ param(
     [string]$MSBuildPath, [string[]]$RuntimeDirectories, [switch]$SkipBuild, [switch]$PortableZip,
     [ValidateSet('full','config')][string]$Flavor = 'full',
     [ValidateSet('stable','beta')][string]$UpdateChannel = 'beta',
-    [ValidateRange(0,9007199254740991)][long]$ReleaseSequence = 0
+    [ValidateRange(0,9007199254740991)][long]$ReleaseSequence = 0,
+    # audit 2026-10-16: -NoUpdater leaves VideoProcessorUpdate.exe out of setup, the
+    # portable ZIP and the manifest's managed list (owner/FL35 deploys). Public
+    # releases keep the default and ship the helper.
+    [switch]$NoUpdater,
+    # audit 2026-10-16: optional official MWCapture SDK root, passed to MSBuild as
+    # /p:MagewellSdkRoot=... for isolated worktrees (AGENTS.md "Local x64 Release builds").
+    [string]$MagewellSdkRoot
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -32,7 +39,16 @@ try {
             $MSBuildPath = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
         }
         if (-not $MSBuildPath) { throw 'Install Visual Studio C++ build tools and Qt as documented.' }
-        & $MSBuildPath VideoProcessor.sln /t:Rebuild /m /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal /fl "/flp:logfile=$artifactRoot\installer-build.log;verbosity=normal"
+        # audit 2026-10-16: forward an explicit Magewell SDK root; confirm the header first.
+        $sdkArguments = @()
+        if ($MagewellSdkRoot) {
+            $sdkRoot = (Resolve-Path -LiteralPath $MagewellSdkRoot).Path.TrimEnd('\')
+            if (-not (Test-Path -LiteralPath (Join-Path $sdkRoot 'Include\LibMWCapture\MWCapture.h') -PathType Leaf)) {
+                throw "MagewellSdkRoot has no Include\LibMWCapture\MWCapture.h: $sdkRoot"
+            }
+            $sdkArguments += "/p:MagewellSdkRoot=$sdkRoot"
+        }
+        & $MSBuildPath VideoProcessor.sln /t:Rebuild /m /p:Configuration=Release /p:Platform=x64 @sdkArguments /nologo /v:minimal /fl "/flp:logfile=$artifactRoot\installer-build.log;verbosity=normal"
         if ($LASTEXITCODE -ne 0) { throw 'x64 Release solution rebuild failed. No installer was generated.' }
         $binaries = @(foreach ($relative in @('VideoProcessor-GUI.exe','VideoProcessorConfig.exe','VideoProcessorConfigDiscovery.dll','vprenderer/VideoProcessorVPRenderer.dll','vprenderer-beta/VideoProcessorVPRendererBeta.dll')) {
             $file = Join-Path $root "x64\Release\$relative"
@@ -60,7 +76,14 @@ try {
     $localRuntime = & (Join-Path $PSScriptRoot 'stage_app_local_runtime.ps1') -PayloadRoot $payload -RuntimeDirectories $RuntimeDirectories
     # The updater is managed .NET Framework code using Windows' existing runtime.
     # Stage it after native dependency closure, so it is not treated as a VC binary.
-    & (Join-Path $PSScriptRoot 'build_updater.ps1') -OutputPath (Join-Path $payload 'VideoProcessorUpdate.exe')
+    $updaterPath = Join-Path $payload 'VideoProcessorUpdate.exe'
+    if ($NoUpdater) {
+        # audit 2026-10-16: leave the helper out entirely; drop any stale copy so it
+        # cannot enter the managed file list, setup or the portable ZIP.
+        if (Test-Path -LiteralPath $updaterPath) { Remove-Item -LiteralPath $updaterPath -Force }
+    } else {
+        & (Join-Path $PSScriptRoot 'build_updater.ps1') -OutputPath $updaterPath
+    }
     $null = New-Item -ItemType Directory -Path (Join-Path $payload 'setup') -Force
     Copy-Item -LiteralPath (Join-Path $root 'packaging\installer\install-support.ps1') -Destination (Join-Path $payload 'setup')
     Copy-Item -LiteralPath (Join-Path $root 'docs\VP-0192_INSTALLER.md') -Destination (Join-Path $payload 'setup\RECOVERY.md')
@@ -81,11 +104,15 @@ try {
             $cleanupFiles += [ordered]@{ path=$portablePath; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
             return
         }
+        if ($NoUpdater -and $portablePath -eq 'VideoProcessorUpdate.exe') { return }  # audit 2026-10-16
         if ($Flavor -eq 'config' -and $portablePath -notmatch '^(config/|licenses/|LICENSE\.txt$|CONFIGURATION\.html$|VideoProcessorUpdate\.exe$)') { return }
         $policy = if ($relative -match '^shaders\\|^VideoProcessor\.cfg$') { 'seed' } else { 'managed' }
         [ordered]@{ path=$relative.Replace('\','/'); policy=$policy; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
     })
     if ($Flavor -eq 'config') { $localRuntime.files = @($localRuntime.files | Where-Object { $_.path -like 'config/*' }) }
+    # audit 2026-10-16: the managed list must agree with -NoUpdater either way.
+    $updaterManaged = @($files | Where-Object { $_.path -eq 'VideoProcessorUpdate.exe' }).Count -eq 1
+    if ($updaterManaged -eq [bool]$NoUpdater) { throw "Updater staging mismatch (NoUpdater=$([bool]$NoUpdater), managed=$updaterManaged)." }
     $protocol = Get-Content -LiteralPath (Join-Path $root 'src\VideoProcessor-ConfigCore\ConfigurationRpcProtocol.h') -Raw
     if ($protocol -notmatch 'constexpr\s+\w+\s+Version\s*=\s*(\d+)') { throw 'RPC protocol version not found.' }
     $rpcVersion = [int]$Matches[1]
@@ -94,6 +121,7 @@ try {
     [ordered]@{
         schemaVersion=1; applicationId=$(if ($Flavor -eq 'full') { 'VideoProcessor-42D852F1-70E9-43ED-8739-D61752106D59' } else { 'VideoProcessorConfig-BA15DBE8-210F-42AA-AE86-B4628395E77F' }); flavor=$Flavor; updateSequence=$ReleaseSequence; updateChannel=$UpdateChannel; rpcVersion=$rpcVersion; configurationVersion=$configurationVersion
         coreVersion=$CoreVersion; build=$identity.build; sourceCommit=$commit; sourceFingerprint=$identity.fingerprint; dirty=$identity.dirty; uninstallEntryPoint=$(if ($Flavor -eq 'full') { 'Uninstall VideoProcessor.lnk' } else { 'Uninstall VideoProcessor Config.lnk' }); runtimeMode='app-local'; appLocalRuntime=$localRuntime; compiler='Inno Setup 6.7.3'; files=$files; cleanupFiles=$cleanupFiles
+        updaterIncluded=(-not $NoUpdater)  # audit 2026-10-16
     } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payload 'INSTALL-MANIFEST.json') -Encoding UTF8
     $include = Join-Path $artifactRoot ('installer-payload-' + $Flavor + '.iss')
     $lines = @(foreach ($entry in $files) {
@@ -109,11 +137,25 @@ try {
     & $IsccPath @flavorArguments "/DPayloadRoot=$payload" "/DPayloadInclude=$include" "/DOutputRoot=$output" "/DCoreVersion=$CoreVersion" "/DBuildCommit=$buildLabel" "/DInstallerBaseName=$installerBaseName" "/DFileVersion=$fileVersion" "/DSetupIcon=$root\images\VideoProcessor.ico" (Join-Path $root 'packaging\installer\VideoProcessor.iss')
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
     $installer = Join-Path $output "$installerBaseName.exe"
-    "$((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash)  $([IO.Path]::GetFileName($installer))" |
-        Set-Content -LiteralPath ($installer + '.sha256') -Encoding ASCII
-    $manifestCopy = $installer + '.manifest.json'
+    # audit 2026-10-16: hashes and manifest copies are internal evidence (AGENTS.md
+    # "Published release assets"). Keep them in installers\evidence so a glob upload of
+    # artifacts\installers can only pick up setup EXEs, portable ZIPs and vp-update.json.
+    # new_update_release.ps1 reads the sidecars from this folder.
+    $evidence = Join-Path $output 'evidence'
+    $null = New-Item -ItemType Directory -Path $evidence -Force
+    # Rejected packages go outside the distributable directory as well.
+    $invalidRoot = Join-Path $artifactRoot 'installers-invalid'
+    function Move-VpInvalidArtifact([string]$File) {
+        $null = New-Item -ItemType Directory -Path $invalidRoot -Force
+        Move-Item -LiteralPath $File -Destination (Join-Path $invalidRoot ([IO.Path]::GetFileName($File) + '.invalid-' + [guid]::NewGuid().ToString('N')))
+    }
+    $installerName = [IO.Path]::GetFileName($installer)
+    $installerHash = Join-Path $evidence ($installerName + '.sha256')
+    "$((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash)  $installerName" |
+        Set-Content -LiteralPath $installerHash -Encoding ASCII
+    $manifestCopy = Join-Path $evidence ($installerName + '.manifest.json')
     Copy-Item -LiteralPath (Join-Path $payload 'INSTALL-MANIFEST.json') -Destination $manifestCopy
-    $distributionFiles = @($installer, ($installer + '.sha256'), $manifestCopy)
+    $distributionFiles = @($installer, $installerHash, $manifestCopy)
     if ($PortableZip) {
         & (Join-Path $PSScriptRoot 'test_portable_config_contract.ps1')
         # Export the same self-contained payload, without installing anything.
@@ -137,25 +179,41 @@ try {
         $portableManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $portable 'INSTALL-MANIFEST.json') -Encoding UTF8
         $portableName = if ($Flavor -eq 'full') { 'VideoProcessor' } else { 'VideoProcessorConfig' }
         $zip = Join-Path $output "$portableName-$CoreVersion-$buildLabel-x64-Portable.zip"
-        Compress-Archive -Path (Join-Path $portable '*') -DestinationPath $zip -Force
+        # audit 2026-10-16: Compress-Archive on Windows PowerShell 5.1 writes entry
+        # names with backslashes. Build the archive with ZipArchive and explicit
+        # forward-slash entry names (ZIP APPNOTE 4.4.17), in a stable order.
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+        $archive = [IO.Compression.ZipFile]::Open($zip, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($item in @(Get-ChildItem -LiteralPath $portable -Recurse -File | Sort-Object FullName)) {
+                $entryName = $item.FullName.Substring($portable.Length + 1).Replace('\','/')
+                $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $item.FullName, $entryName, [IO.Compression.CompressionLevel]::Optimal)
+            }
+        } finally { $archive.Dispose() }
         try {
             & (Join-Path $PSScriptRoot 'test_portable_config.ps1') -ZipPath $zip
         } catch {
-            Move-Item -LiteralPath $zip -Destination ($zip + '.invalid-' + [guid]::NewGuid().ToString('N'))
+            Move-VpInvalidArtifact $zip
             throw
         }
-        "$((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash)  $([IO.Path]::GetFileName($zip))" |
-            Set-Content -LiteralPath ($zip + '.sha256') -Encoding ASCII
-        $distributionFiles += @($zip, ($zip + '.sha256'))
+        $zipName = [IO.Path]::GetFileName($zip)
+        $zipHash = Join-Path $evidence ($zipName + '.sha256')
+        "$((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash)  $zipName" |
+            Set-Content -LiteralPath $zipHash -Encoding ASCII
+        $distributionFiles += @($zip, $zipHash)
     }
     $after = Get-VpSourceIdentity $root
     if ($after.build -ne $identity.build -or $after.fingerprint -ne $identity.fingerprint) {
         # Keep an interrupted package out of the distributable output directory.
-        foreach ($file in $distributionFiles) {
-            Move-Item -LiteralPath $file -Destination ($file + '.invalid-' + [guid]::NewGuid().ToString('N'))
-        }
+        foreach ($file in $distributionFiles) { Move-VpInvalidArtifact $file }
         throw 'Sources changed during packaging; the installer is invalid and must not be distributed.'
     }
+    # audit 2026-10-16: flag anything in the upload folder that is not publishable
+    # (for example sidecars left by an older builder). Nothing is deleted here.
+    $unpublishable = @(Get-ChildItem -LiteralPath $output -File | Where-Object { $_.Extension -notin @('.exe','.zip') -and $_.Name -ne 'vp-update.json' })
+    foreach ($file in $unpublishable) { Write-Warning "Not a publishable asset; move it out of artifacts\installers before uploading: $($file.Name)" }
     Write-Host "Installer: $installer"
     Write-Host "Source: $($identity.build)"
     Write-Host 'Publish only qualified builds with a signed vp-update.json descriptor. Windows publisher signing is separate. See docs/VP_UPDATES.md.'
