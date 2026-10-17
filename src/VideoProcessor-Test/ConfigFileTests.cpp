@@ -6232,10 +6232,17 @@ namespace VideoProcessorTest
 			Assert::AreEqual(9ull, viewport.screenAspect.denominator);
 			Assert::IsFalse(viewport.automaticCrop);
 			Assert::IsFalse(viewport.subtitleFit);
+			// The crop lives in the Zoom profiles, the layout Config saves
+			// (audit 2026-10-17: the sample opens without a migration).
+			Assert::IsTrue(RendererProfileConfig::ResolveZoom(
+				model, "viewport_16x9", viewport, error));
+			Assert::IsFalse(viewport.automaticCrop);
 			Assert::IsTrue(RendererProfileConfig::ResolveViewport(
 				model, "scope", 2, viewport, error));
 			Assert::AreEqual(47ull, viewport.screenAspect.numerator);
 			Assert::AreEqual(20ull, viewport.screenAspect.denominator);
+			Assert::IsTrue(RendererProfileConfig::ResolveZoom(
+				model, "scope", viewport, error));
 			Assert::IsTrue(viewport.automaticCrop);
 			Assert::IsFalse(viewport.subtitleFit); // Retired Screen setting is ignored.
 		}

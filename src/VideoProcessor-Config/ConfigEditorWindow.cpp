@@ -576,10 +576,45 @@ void showCanonicalShortcutSpelling(QWidget* root)
     }
 }
 
+// Audit 2026-10-17: number boxes and drop-downs ignore the mouse wheel unless
+// they have the keyboard focus, so scrolling a page never changes the setting
+// under the pointer; the wheel scrolls the page instead. Installed on the
+// application while an editor exists.
+class UnfocusedWheelGuard : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() != QEvent::Wheel) return false;
+        QWidget* control = qobject_cast<QWidget*>(watched);
+        // The control itself, or its inner line edit (two levels at most; an
+        // open drop-down's list is its own window and keeps the wheel).
+        for (int level = 0; control && level < 2; ++level)
+        {
+            if (qobject_cast<QAbstractSpinBox*>(control) || qobject_cast<QComboBox*>(control)) break;
+            control = control->isWindow() ? nullptr : control->parentWidget();
+        }
+        if (!control || (!qobject_cast<QAbstractSpinBox*>(control) && !qobject_cast<QComboBox*>(control)))
+            return false;
+        const QWidget* focus = QApplication::focusWidget();
+        if (focus && (focus == control || control->isAncestorOf(focus))) return false;
+        if (QWidget* parent = control->parentWidget())
+            QCoreApplication::sendEvent(parent, event);
+        return true;
+    }
+};
+
 QString effectiveChoiceValue(const QComboBox* combo)
 {
     if (!combo) return {};
     const QString selected = combo->currentData().toString();
+    // Not set: what applies without this profile's value (audit 2026-10-17:
+    // effectiveValue was the value loaded, so a cleared choice showed it).
+    if (selected.isEmpty() && combo->property("inheritedValue").isValid())
+        return combo->property("inheritedValue").toString().trimmed().toLower();
     return (selected.isEmpty() ? combo->property("effectiveValue").toString() : selected).trimmed().toLower();
 }
 
@@ -603,8 +638,12 @@ QToolButton* addChoiceUnsetButton(QComboBox* combo, QBoxLayout* layout, QObject*
 void markChoiceButtons(const QComboBox* combo, const QList<QRadioButton*>& radios, QToolButton* unset)
 {
     const bool unspecified = combo->currentData().toString().isEmpty();
+    // "(inherited)" only when the default profile sets the value; otherwise it
+    // is VP's own default (audit 2026-10-17).
+    const bool fromDefaultProfile = combo->property("inheritedFromDefault").isValid() ?
+        combo->property("inheritedFromDefault").toBool() : combo->property("inherited").toBool();
     const QString suffix = !unspecified ? QString() :
-        combo->property("inherited").toBool() ? QStringLiteral(" (inherited)") : QStringLiteral(" (default)");
+        fromDefaultProfile ? QStringLiteral(" (inherited)") : QStringLiteral(" (built-in default)");
     for (QRadioButton* radio : radios)
     {
         if (!radio->property("baseText").isValid()) radio->setProperty("baseText", radio->text());
@@ -1398,14 +1437,9 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     // navigation, and the fixed action footer usable without clipping.
     resize(1040, 700);
     setMinimumSize(1040, 700);
+    qApp->installEventFilter(new UnfocusedWheelGuard(this));
     loadConfiguration();
-    migrateLldvInputPolicy();
-    migrateSharedRefreshRate();
-	migrateRefreshRateSwitchMode();
-    migrateSeparatedRendererProfiles();
-    migrateUnifiedColorOutputProfiles();
-    migrateCalibrationProfiles();
-    migrateViewportZoomProfiles();
+    runLoadMigrations();
     if (!testMode_ && !noTarget_) loadDiscoveryCache();
     else if (testMode_)
     {
@@ -2064,13 +2098,7 @@ bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 		}
 	}
 	dirty_ = false;
-	migrateLldvInputPolicy();
-	migrateSharedRefreshRate();
-	migrateRefreshRateSwitchMode();
-	migrateSeparatedRendererProfiles();
-	migrateUnifiedColorOutputProfiles();
-	migrateCalibrationProfiles();
-	migrateViewportZoomProfiles();
+	runLoadMigrations();
 	loadDiscoveryCache();
 	preparedRemoteSwitch_.reset();
 	preparedLocalSwitch_.reset();
@@ -2216,11 +2244,105 @@ void ConfigEditorWindow::loadConfiguration()
 	dirty_ = configurationLoaded_ && (!document_->existedAtLoad ||
 		migratedLegacyInputPolicy);
 	hasPendingMigrations_ = migratedLegacyInputPolicy;
+	// A real migration keeps a copy of the original file (audit 2026-10-17).
+	if (migratedLegacyInputPolicy) document_->requiresMigrationBackup = document_->existedAtLoad;
+	seededMotionDefault_ = false;
     if (configurationLoaded_ && !document_->existedAtLoad)
     {
         seedCalibratedProfile(QStringLiteral("vprenderer"), QStringLiteral("vprenderer.Default"));
         seedCalibratedProfile(QStringLiteral("vprenderer.color"), QStringLiteral("vprenderer.color.Default"));
     }
+}
+
+void ConfigEditorWindow::runLoadMigrations()
+{
+    // One sequence for every load path (audit 2026-10-17: Cancel ran only
+    // the calibration step, so a reload showed a different document).
+    const std::string before = document_ ? document_->Serialize() : std::string();
+    migrateLldvInputPolicy();
+    migrateSharedRefreshRate();
+    migrateRefreshRateSwitchMode();
+    migrateSeparatedRendererProfiles();
+    migrateUnifiedColorOutputProfiles();
+    migrateCalibrationProfiles();
+    migrateViewportZoomProfiles();
+    // Any real migration keeps a backup of the original file on save.
+    if (document_ && configurationLoaded_ && document_->Serialize() != before)
+        document_->requiresMigrationBackup = document_->existedAtLoad;
+}
+
+void ConfigEditorWindow::discardEdits()
+{
+    // The working copy is discarded without touching the file or signaling
+    // VideoProcessor.
+    dirty_ = false;
+    if (remoteClient_ && document_)
+    {
+        const std::string baseline = document_->loadedBytes;
+        document_->LoadBytes(configPath_.toStdWString(), baseline);
+        savedSnapshot_ = captureDocumentSnapshot(*document_);
+        hasPendingMigrations_ = false;
+        seededMotionDefault_ = false;
+    }
+    else loadConfiguration();
+    runLoadMigrations();
+    rebuildConfigurationShell();
+}
+
+bool ConfigEditorWindow::configurationChangedOnDisk() const
+{
+    if (!document_ || remoteClient_ || noTarget_ || !configurationLoaded_ ||
+        document_->remoteSource || document_->path.empty())
+        return false;
+    QFile file(QString::fromStdWString(document_->path));
+    if (!file.exists()) return document_->existedAtLoad;
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    const QByteArray current = file.readAll();
+    if (!document_->existedAtLoad) return true;
+    return current.size() != static_cast<qsizetype>(document_->loadedBytes.size()) ||
+        std::memcmp(current.constData(), document_->loadedBytes.data(), document_->loadedBytes.size()) != 0;
+}
+
+bool ConfigEditorWindow::reloadIfChangedOnDisk()
+{
+    // Out-of-band edits (audit 2026-10-17): closing hides Config in the tray
+    // with the old document, so a later reveal reloads a clean editor whose
+    // file changed meanwhile. A dirty editor keeps its edits; saving asks.
+    if (dirty_ || remoteApplyThread_ || !configurationChangedOnDisk()) return false;
+    loadConfiguration();
+    runLoadMigrations();
+    rebuildConfigurationShell();
+    setStatus(QStringLiteral("The configuration changed outside Config; reloaded it."));
+    return true;
+}
+
+bool ConfigEditorWindow::resolveUnsavedEdits(const QString& action, bool reloadOnDiscard)
+{
+    if (!dirty_ || !promptsEnabled()) return true;
+    QMessageBox prompt(this);
+    prompt.setWindowTitle(QStringLiteral("Unsaved changes"));
+    prompt.setText(QStringLiteral("The configuration has unsaved changes."));
+    prompt.setInformativeText(QStringLiteral("Save them before %1, discard them, or keep editing?").arg(action));
+    prompt.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+    prompt.button(QMessageBox::Cancel)->setText(QStringLiteral("Keep editing"));
+    prompt.setDefaultButton(QMessageBox::Save);
+    const int answer = prompt.exec();
+    if (answer == QMessageBox::Save)
+        // A remote Apply finishes later and reports there; stay open meanwhile.
+        return saveChanges() && !dirty_;
+    if (answer == QMessageBox::Discard)
+    {
+        if (reloadOnDiscard) discardEdits();
+        else dirty_ = false;
+        return true;
+    }
+    return false;
+}
+
+void ConfigEditorWindow::requestExit()
+{
+    if (!resolveUnsavedEdits(QStringLiteral("exiting"), false)) return;
+    exitApplication();
 }
 
 void ConfigEditorWindow::migrateUnifiedColorOutputProfiles()
@@ -2725,8 +2847,11 @@ void ConfigEditorWindow::migrateRefreshRateSwitchMode()
 	if (!configurationLoaded_ || !document_) return;
 	const QString raw = value(QStringLiteral("general"),
 		QStringLiteral("switch_refresh_rate")).trimmed().toLower();
+	// An absent key is VP's default (fullscreen_only) and stays absent: the
+	// control shows the default without writing it (audit 2026-10-17).
+	if (raw.isEmpty()) return;
 	QString migrated = raw;
-	if (raw.isEmpty() || raw == QStringLiteral("true") || raw == QStringLiteral("yes") ||
+	if (raw == QStringLiteral("true") || raw == QStringLiteral("yes") ||
 		raw == QStringLiteral("on") || raw == QStringLiteral("1"))
 		migrated = QStringLiteral("fullscreen_only");
 	else if (raw == QStringLiteral("false") || raw == QStringLiteral("no") ||
@@ -4344,6 +4469,38 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
         setStatus(QStringLiteral("Still applying on the target; wait for it to finish."));
         return false;
     }
+    // Audit 2026-10-17: the file changed on disk after it was loaded (a hand
+    // edit, another tool): ask instead of silently overwriting it.
+    bool overwriteExternalChanges = false;
+    if (!remoteClient_ && configurationChangedOnDisk())
+    {
+        if (!promptsEnabled()) overwriteExternalChanges = true;   // tests without prompts: as before
+        else
+        {
+            QMessageBox prompt(this);
+            prompt.setWindowTitle(QStringLiteral("Configuration changed on disk"));
+            prompt.setText(QStringLiteral("VideoProcessor.cfg changed outside Config after it was loaded."));
+            prompt.setInformativeText(QStringLiteral("Reload it (your unsaved edits are discarded), overwrite it "
+                "with your edits (the other changes are lost), or cancel and keep editing."));
+            prompt.setStandardButtons(QMessageBox::Reset | QMessageBox::Save | QMessageBox::Cancel);
+            prompt.button(QMessageBox::Reset)->setText(QStringLiteral("Reload"));
+            prompt.button(QMessageBox::Save)->setText(QStringLiteral("Overwrite"));
+            prompt.setDefaultButton(QMessageBox::Cancel);
+            const int answer = prompt.exec();
+            if (answer == QMessageBox::Reset)
+            {
+                discardEdits();
+                setStatus(QStringLiteral("Reloaded the configuration from disk; your edits were discarded."));
+                return false;
+            }
+            if (answer != QMessageBox::Save)
+            {
+                setStatus(QStringLiteral("Not saved: the configuration changed on disk. Reload or overwrite it."), true);
+                return false;
+            }
+            overwriteExternalChanges = true;
+        }
+    }
     // audit 2026-10-16: canonical shortcut spelling and disabled action drafts
     // are written into the document only for this save. If validation or the
     // save fails, restore the document so it matches the controls again.
@@ -4384,6 +4541,15 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
             }
         }
     }
+
+    // The Motion page's starting profile was added only to show it: not
+    // written while it holds no settings (audit 2026-10-17), unless it is the
+    // only VP Renderer section (its header marks the unified layout that
+    // [general]'s startup keys are validated with).
+    if (seededMotionDefault_ &&
+        document_->SectionSettings("vprenderer.motion.Default").empty() &&
+        document_->SectionNamesWithPrefix("vprenderer").size() > 1)
+        document_->RemoveSection("vprenderer.motion.Default");
 
     // Saving is also the boundary at which an unfinished enabled action becomes
     // a draft.  Do not make users discover every required action field merely
@@ -4586,9 +4752,12 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
 		worker->start();
 		return false;
 	}
-    // Config is the interactive authority for this file. Save the user's
-    // validated editor state instead of refusing a stale-file conflict.
-    if (!ConfigEditorCore::SaveSafely(*document_, result, error, true))
+    // Any pending migration keeps a copy of the original file (audit 2026-10-17).
+    if (hasPendingMigrations_ && document_->existedAtLoad)
+        document_->requiresMigrationBackup = true;
+    // A conflict was resolved above (Overwrite); a change after that check
+    // is refused by SaveSafely rather than overwritten (audit 2026-10-17).
+    if (!ConfigEditorCore::SaveSafely(*document_, result, error, overwriteExternalChanges))
     {
         *document_ = *rollback; // audit 2026-10-16
         setStatus(QString::fromStdWString(error), true);
@@ -4596,6 +4765,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
         return false;
     }
     dirty_ = false;
+    hasPendingMigrations_ = false;
     saveButton_->setEnabled(true);
     if (applyButton_) applyButton_->setEnabled(false);
     savedSnapshot_ = captureDocumentSnapshot(*document_);
@@ -5003,15 +5173,7 @@ QWidget* ConfigEditorWindow::createShell()
         // is discarded without touching the file or signaling VideoProcessor.
         dirty_ = false;
         hide();
-		if (remoteClient_ && document_)
-		{
-			const std::string baseline = document_->loadedBytes;
-			document_->LoadBytes(configPath_.toStdWString(), baseline);
-			savedSnapshot_ = captureDocumentSnapshot(*document_);
-			hasPendingMigrations_ = false;
-		}
-		else loadConfiguration();
-		rebuildConfigurationShell();
+        discardEdits();
     });
     connect(applyButton_, &QPushButton::clicked, this, [this] { applyChanges(); });
     auto* saveShortcut = new QShortcut(QKeySequence::Save, root);
@@ -5328,12 +5490,19 @@ QWidget* ConfigEditorWindow::createStartupPage()
     });
     applyRendererVisibilityFilter(hideLegacy);
     prepareRendererPopup();
-	sourceForm->addRow(QStringLiteral("Switch refresh rate"), bindChoiceField(
+	auto* switchRefreshRate = bindChoiceField(
 		QStringLiteral("general"), QStringLiteral("switch_refresh_rate"),
 		{ QStringLiteral("never"), QStringLiteral("fullscreen_only"),
 		  QStringLiteral("always") },
 		{ QStringLiteral("Never"), QStringLiteral("Full Screen Only"),
-		  QStringLiteral("Always") }));
+		  QStringLiteral("Always") });
+	// Unset is VP's default, Full Screen Only: shown, not written (audit 2026-10-17).
+	if (value(QStringLiteral("general"), QStringLiteral("switch_refresh_rate")).trimmed().isEmpty())
+	{
+		const QSignalBlocker blocker(switchRefreshRate);
+		switchRefreshRate->setCurrentIndex(switchRefreshRate->findData(QStringLiteral("fullscreen_only")));
+	}
+	sourceForm->addRow(QStringLiteral("Switch refresh rate"), switchRefreshRate);
 	auto* profileChangeDisplay = new QSpinBox;
 	profileChangeDisplay->setObjectName(controlName(QStringLiteral("general"),
 		QStringLiteral("profile_change_display_seconds")));
@@ -5549,6 +5718,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             dirty_ = true;
             hasPendingMigrations_ = true;
+            // A real migration: keep the original file (audit 2026-10-17).
+            document_->requiresMigrationBackup = document_->existedAtLoad;
         }
     }
 
@@ -6030,10 +6201,44 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         check->setTristate(false);
         form->addRow(label, check);
         fields->push_back({ key, check, Field::Boolean });
-        connect(check, &QCheckBox::toggled, this,
-            [this, state, key, deprecatedViewportAlias, check](bool checked)
+        // Audit 2026-10-17: a named profile's own tick can be removed again
+        // ("Not set"), so the default profile's value (or VP's) applies. The
+        // button sits inside the check box's row, right of its indicator.
+        auto* unset = new QToolButton(check);
+        unset->setObjectName(check->objectName() + QStringLiteral(".unset"));
+        unset->setText(QStringLiteral("Not set"));
+        unset->setToolTip(QStringLiteral(
+            "Removes this profile's setting: the default profile's value (or the built-in default) applies."));
+        {
+            auto* inner = new QHBoxLayout(check);
+            inner->setContentsMargins(28, 0, 0, 0);
+            inner->addWidget(unset);
+            inner->addStretch(1);
+        }
+        unset->setVisible(false);
+        connect(unset, &QToolButton::clicked, this,
+            [this, state, key, deprecatedViewportAlias, check, unset]()
         {
             if (state->loading || state->section.isEmpty() || !document_) return;
+            const QString alias = deprecatedViewportAlias(key);
+            if (!alias.isEmpty())
+                document_->RemoveKnown(state->section.toStdString(), alias.toStdString().c_str());
+            document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str());
+            {
+                const QSignalBlocker blocker(check);
+                check->setChecked(configuredBooleanValue(check->property("inheritedValue").toString(), false));
+            }
+            check->setProperty("inherited", true);
+            check->style()->unpolish(check);
+            check->style()->polish(check);
+            unset->setVisible(false);
+            markDirty();
+        });
+        connect(check, &QCheckBox::toggled, this,
+            [this, state, key, deprecatedViewportAlias, check, unset](bool checked)
+        {
+            if (state->loading || state->section.isEmpty() || !document_) return;
+            unset->setVisible(check->property("namedProfile").toBool());
             if (check->property("inherited").toBool())
             {
                 check->setProperty("inherited", false);
@@ -6075,6 +6280,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 combo->style()->unpolish(combo);
                 combo->style()->polish(combo);
             }
+            // Keep the effective value current for every reader (audit 2026-10-17).
+            combo->setProperty("effectiveValue", selected.isEmpty() ?
+                combo->property("inheritedValue").toString() : selected);
             const bool canonicalDebanding =
                 sectionPrefix == QStringLiteral("vprenderer") &&
                 key == QStringLiteral("deband_strength");
@@ -7873,9 +8081,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md): beside the motion
         // source, as exclusive buttons (owner style); the drop-downs hold the values.
         {
-            auto* heading = new QLabel(QStringLiteral("<b>Frame interpolation (50/60p)</b>"));
+            // Owner 2026-10-17: motion smoothing and hiccup repair are separate groups.
+            auto* heading = new QLabel(QStringLiteral("<b>Motion smoothing (interpolation)</b>"));
             heading->setObjectName(controlName(sectionPrefix, QStringLiteral("interpolation_heading")));
             form->addRow(heading);
+            auto* note = helpLabel(QStringLiteral("Off for film (film keeps the de-judder). Hiccup repair is separate, below."));
+            note->setObjectName(controlName(sectionPrefix, QStringLiteral("interpolation_note")));
+            form->addRow(note);
         }
         struct ChoiceButton { const char* value; QString text; QString tip; };
         // Exclusive buttons over a hidden drop-down: returns the refresh step (also run on profile load).
@@ -7945,15 +8157,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "(default): as before - measured rates up to about 30 fps and 48p are film. Measured: film found inside "
             "the signal by pulldown detection, or a source that owns at least two display refreshes per frame; no "
             "fixed rates (48p on 60 Hz then counts as video)."));
-        auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
-            { QStringLiteral("off"), QStringLiteral("on") });
-        fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
-        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (pair across 1-3 missed frames)"));
-        fillGaps->setToolTip(QStringLiteral(
-            "When a stream loses one to three frames while interpolating, On pairs the frames either side of the gap "
-            "and fills the missing refreshes with pictures at their true time (the motion is checked as always; "
-            "untrusted areas hold). Off (default) keeps the rule that no motion is paired across a gap: the last "
-            "frame stays on screen until the next arrives."));
         {
             const auto syncMode = exclusiveButtons(interpolation, QStringLiteral("interpolation"), QStringLiteral("Interpolation"),
                 { { "off", QStringLiteral("Off"), QStringLiteral("Today's picture (the default).") },
@@ -7968,14 +8171,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 { { "hold", QStringLiteral("Hold the nearest frame"), QStringLiteral("Never a double image (the default).") },
                   { "blend", QStringLiteral("Blend the two frames"), QStringLiteral("A time-weighted mix, as a frame mixer.") } },
                 QStringLiteral("hold"), &fallbackButtons);
-            auto sync = [syncMode, syncFallback, interpolation, interpolationFallback, sourceClass, fillGaps, fallbackButtons]() {
+            auto sync = [syncMode, syncFallback, interpolation, interpolationFallback, sourceClass, fallbackButtons]() {
                 syncMode();
                 syncFallback();
-                // The fallback and the classification do nothing with interpolation off.
+                // The fallback and the classification do nothing with interpolation off. Hiccup
+                // repair is its own group and is never greyed by motion smoothing (owner 2026-10-17).
                 const bool off = effectiveChoiceValue(interpolation) != QStringLiteral("auto") &&
                     effectiveChoiceValue(interpolation) != QStringLiteral("always");
-                for (QWidget* w : { static_cast<QWidget*>(interpolationFallback), static_cast<QWidget*>(sourceClass),
-                         static_cast<QWidget*>(fillGaps) })
+                for (QWidget* w : { static_cast<QWidget*>(interpolationFallback), static_cast<QWidget*>(sourceClass) })
                 {
                     w->setProperty("greyedOff", off);
                     w->setEnabled(!off);
@@ -7989,6 +8192,20 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             connect(refresh, &QAction::triggered, this, [sync]() { sync(); });
             sync();
         }
+        {
+            auto* heading = new QLabel(QStringLiteral("<b>Repair dropped frames / hiccups</b>"));
+            heading->setObjectName(controlName(sectionPrefix, QStringLiteral("hiccup_repair_heading")));
+            form->addRow(heading);
+        }
+        auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
+            { QStringLiteral("off"), QStringLiteral("on") });
+        fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
+        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (pair across 1-3 missed frames)"));
+        fillGaps->setToolTip(QStringLiteral(
+            "Hiccup repair, separate from motion smoothing. When a stream loses one to three frames, On pairs the "
+            "frames either side of the gap and fills the missing refreshes with pictures at their true time (the "
+            "motion is checked as always; untrusted areas hold). Off (default) keeps the rule that no motion is "
+            "paired across a gap: the last frame stays on screen until the next arrives. (Key: interpolation_fill_gaps.)"));
         form = fixesForm;
         auto* pulldownFixes = addChoice(QStringLiteral("Film-in-video detection: keep the lock"), QStringLiteral("pulldown_fixes"),
             { QStringLiteral("on"), QStringLiteral("off") });
@@ -8057,7 +8274,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // list and the Dithering setting decide.
         auto* temporalDither = addChoice(QStringLiteral("Dither"), QStringLiteral("temporal_dither"),
             { QStringLiteral("auto"), QStringLiteral("off"), QStringLiteral("libplacebo"), QStringLiteral("sigma_delta") });
-        temporalDither->setItemText(temporalDither->findData(QStringLiteral("auto")), QStringLiteral("Not set (the shader list decides)"));
+        // One "Not set" (the unspecified item); an explicit auto is Auto (audit 2026-10-17).
+        temporalDither->setItemText(temporalDither->findData(QStringLiteral("auto")), QStringLiteral("Auto (the shader list decides)"));
         temporalDither->setItemText(temporalDither->findData(QStringLiteral("off")), QStringLiteral("Off"));
         temporalDither->setItemText(temporalDither->findData(QStringLiteral("libplacebo")), QStringLiteral("libplacebo"));
         temporalDither->setItemText(temporalDither->findData(QStringLiteral("sigma_delta")), QStringLiteral("VP's motion-aware dither (sigma-delta)"));   // audit 2026-10-16
@@ -8071,6 +8289,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             group->setExclusive(true);
             struct Choice { const char* value; const char* label; const char* tip; };
             static const Choice choices[] = {
+                { "auto", "Auto", "As before: the shader list and the Dithering setting decide." },
                 { "off", "Off", "No dither at all (libplacebo's off, the sigma-delta not loaded)." },
                 { "libplacebo", "libplacebo", "libplacebo's own dither, with the Dithering method on the Processing section "
                     "(Auto = blue noise; Off there = none). The sigma-delta is left out even if the shader list selects it." },
@@ -8109,17 +8328,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     r->setChecked(false);
                 }
                 group->setExclusive(true);
-                const char* values[] = { "off", "libplacebo", "sigma_delta" };
+                const char* values[] = { "auto", "off", "libplacebo", "sigma_delta" };
                 bool set = false;
-                for (int i = 0; i < 3; ++i)
+                for (int i = 0; i < 4; ++i)
                     if (v == QString::fromLatin1(values[i]))
                     {
                         const QSignalBlocker blocker(radios[static_cast<size_t>(i)]);
                         radios[static_cast<size_t>(i)]->setChecked(true);
                         set = true;
                     }
-                note->setText(set ? QString() : QStringLiteral("Not set: the shader list and the Dithering setting decide (as before)."));
-                note->setVisible(!set);
+                const bool autoMode = !set || v == QStringLiteral("auto");
+                note->setText(autoMode ? QStringLiteral("Auto: the shader list and the Dithering setting decide (as before).") : QString());
+                note->setVisible(autoMode);
                 markChoiceButtons(temporalDither, QList<QRadioButton*>(radios.begin(), radios.end()), unset);
             };
             connect(temporalDither, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
@@ -9615,6 +9835,24 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			field.widget->setProperty("effectiveValue", configured);
 			field.widget->setProperty("inherited",
 				!requiresExplicitValue && raw.isEmpty() && !defaultProfile);
+            {
+                // What applies when this profile's own value is removed ("Not
+                // set"): the default profile's value, else the built-in default
+                // (audit 2026-10-17: a cleared choice kept showing the old value).
+                QString inheritedValue;
+                bool inheritedFromDefault = false;
+                if (!requiresExplicitValue)
+                {
+                    if (!defaultProfile && !ownOnlyQueueField && list->count() > 0)
+                    {
+                        inheritedValue = profileValue(list->item(0)->data(Qt::UserRole).toString(), field.key);
+                        inheritedFromDefault = !inheritedValue.isEmpty();
+                    }
+                    if (inheritedValue.isEmpty()) inheritedValue = fallback(field.key);
+                }
+                field.widget->setProperty("inheritedValue", inheritedValue);
+                field.widget->setProperty("inheritedFromDefault", inheritedFromDefault);
+            }
 			if (requiresExplicitValue && raw.isEmpty())
 				field.widget->setToolTip(QStringLiteral(
 					"An explicit value is required for this setting."));
@@ -9675,6 +9913,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             {
                 auto* check = qobject_cast<QCheckBox*>(field.widget);
                 check->setChecked(configuredBooleanValue(configured, false));
+                check->setProperty("namedProfile", !defaultProfile);
+                if (auto* unset = check->findChild<QToolButton*>(check->objectName() + QStringLiteral(".unset")))
+                    unset->setVisible(!defaultProfile && !raw.isEmpty());
             }
             else
             {
@@ -10020,12 +10261,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // is the legacy unnamed form: the rename step converted it on every
         // load, so each reload looked like a new migration and Cancel kept a
         // dirty copy).
+        // In memory only (audit 2026-10-17): the header alone, so the page has a
+        // profile to show; its values are the built-in defaults (fallback), and
+        // the save drops the section again while it holds no settings.
         document_->AddSection("vprenderer.motion.Default");
-        const std::pair<const char*,const char*> defaults[]={
-            {"label","Default"},{"motion_engine","auto"},{"smooth_motion","off"},{"frame_mixer","oversample"},
-            {"deinterlace","auto"},{"deinterlace_algorithm","bwdif"},{"field_order","auto"},
-            {"deinterlace_cadence","field"},{"deinterlace_skip_spatial","false"}};
-        for(const auto& entry:defaults)document_->SetKnown("vprenderer.motion.Default",entry.first,entry.second);
+        seededMotionDefault_ = true;
         if(loadedClean)savedSnapshot_=captureDocumentSnapshot(*document_);
     }
     ProfileListPolicy listPolicy;
@@ -11913,6 +12153,36 @@ QWidget* ConfigEditorWindow::createActionsPage()
         QStringLiteral("Run external commands when selected VideoProcessor events occur."), splitter);
 }
 
+// Audit 2026-10-17 (LED number boxes): enough decimals to show a stored
+// value as it is, so touching the box does not round it (at most 6).
+static int ledDisplayDecimals(const QString& raw, int decimals)
+{
+    const QString text = raw.trimmed();
+    bool valid = false;
+    text.toDouble(&valid);
+    const int point = text.indexOf(u'.');
+    if (!valid || point < 0) return decimals;
+    int digits = 0;
+    for (int i = point + 1; i < text.size() && text[i].isDigit(); ++i) ++digits;
+    return std::max(decimals, std::min(digits, 6));
+}
+
+// A stored value outside the control's range is shown clamped: flag the box
+// (border, tool tip) and remember it for the page's note.
+static void flagClampedLedValue(QAbstractSpinBox* spin, const QString& raw, double minimum, double maximum)
+{
+    bool valid = false;
+    const double stored = raw.trimmed().toDouble(&valid);
+    if (!valid || (stored >= minimum && stored <= maximum)) return;
+    const QString note = QStringLiteral("The saved value %1 is outside %2 to %3; it is shown as %4 and kept in the "
+        "file until this box is changed.").arg(raw.trimmed()).arg(minimum).arg(maximum)
+        .arg(stored < minimum ? minimum : maximum);
+    spin->setProperty("clampedFrom", raw.trimmed());
+    spin->setProperty("clampedNote", note);
+    spin->setToolTip(spin->toolTip().isEmpty() ? note : spin->toolTip() + QStringLiteral("\n") + note);
+    spin->setStyleSheet(QStringLiteral("border: 1px solid #e0a040;"));
+}
+
 QWidget* ConfigEditorWindow::createLedDrivePage()
 {
     // Plain [led_drive.Default] / [projector.Default] settings (Stage 7). Only
@@ -11939,6 +12209,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         spin->setMaximumWidth(108);
         spin->setAlignment(Qt::AlignRight);
         spin->setValue(inRange ? configured : fallback);
+        flagClampedLedValue(spin, value(led, key), 0, 255);
         connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, key](int level)
         {
             if (!document_) return;
@@ -12093,6 +12364,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
             bool valid = false;
             const int configured = value(led, QString::fromLatin1(key)).toInt(&valid);
             spin->setValue(valid ? std::max(0, std::min(configured, maximum)) : fallback);
+            flagClampedLedValue(spin, value(led, QString::fromLatin1(key)), 0, maximum);
             const std::string name = key;
             connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, name](int ms)
             {
@@ -12194,7 +12466,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     projectorGamma->setObjectName(controlName(led, QStringLiteral("compensation_eotf")));
     projectorGamma->setAccessibleName(QStringLiteral("Projector gamma"));
     projectorGamma->setRange(1.0, 3.0);
-    projectorGamma->setDecimals(2);
+    projectorGamma->setDecimals(ledDisplayDecimals(value(led, QStringLiteral("compensation_eotf")), 2));
     projectorGamma->setSingleStep(0.01);
     projectorGamma->setMaximumWidth(120);
     projectorGamma->setAlignment(Qt::AlignRight);
@@ -12203,13 +12475,14 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         const double configured = value(led, QStringLiteral("compensation_eotf")).toDouble(&valid);
         // The spin box's own range (1.0-3.0, as the LED validation); was clamped to 1.8 (audit 2026-10-16).
         projectorGamma->setValue(valid ? std::max(1.0, std::min(configured, 3.0)) : 2.41);
+        flagClampedLedValue(projectorGamma, value(led, QStringLiteral("compensation_eotf")), 1.0, 3.0);
     }
     connect(projectorGamma, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-        [this, led](double exponent)
+        [this, led, projectorGamma](double exponent)
     {
         if (!document_) return;
         const std::string section = led.toStdString();
-        const std::string text = QString::number(exponent, 'f', 2).toStdString();
+        const std::string text = QString::number(exponent, 'f', projectorGamma->decimals()).toStdString();
         if (!document_->SetKnown(section, "compensation_eotf", text))
         {
             document_->AddSection(section);
@@ -12267,6 +12540,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         bool valid = false;
         const int configured = value(led, key).toInt(&valid);
         spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) : fallback);
+        flagClampedLedValue(spin, value(led, key), minimum, maximum);
         connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,
             [saveLed, key](int number) { saveLed(key, QString::number(number)); });
         return spin;
@@ -12418,6 +12692,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         bool valid = false;
         const int configured = value(projector, QStringLiteral("led_latency_ms")).toInt(&valid);
         latency->setValue(valid ? std::max(0, std::min(configured, 2000)) : 80);
+        flagClampedLedValue(latency, value(projector, QStringLiteral("led_latency_ms")), 0, 2000);
     }
     connect(latency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
     {
@@ -12450,6 +12725,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         // audit 2026-10-16: clamp to the control's range (0-2000), not 500.
         contrastLatency->setValue(valid ? std::max(contrastLatency->minimum(),
             std::min(configured, contrastLatency->maximum())) : 80);
+        flagClampedLedValue(contrastLatency, value(projector, QStringLiteral("cntr_latency_ms")), 0, 2000);
     }
     connect(contrastLatency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
     {
@@ -12589,7 +12865,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         auto* spin = new QDoubleSpinBox;
         spin->setObjectName(controlName(section, key));
         spin->setAccessibleName(accessibleSettingName(key));
-        spin->setDecimals(decimals);
+        spin->setDecimals(ledDisplayDecimals(value(section, key), decimals));
         spin->setSingleStep(step);
         spin->setRange(special.isEmpty() ? minimum : minimum - step, maximum);
         if (!special.isEmpty()) spin->setSpecialValueText(special);
@@ -12599,8 +12875,11 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         const double configured = value(section, key).toDouble(&valid);
         spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) :
             (special.isEmpty() ? fallback : spin->minimum()));
+        // A value below a special value's minimum is that special value (-1).
+        if (special.isEmpty() || !valid || configured >= minimum)
+            flagClampedLedValue(spin, value(section, key), minimum, maximum);
         connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [this, section, key, spin, decimals](double number)
+            [this, section, key, spin](double number)
         {
             if (!document_) return;
             const std::string name = section.toStdString();
@@ -12608,7 +12887,7 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
                 document_->RemoveKnown(name, key.toStdString().c_str());
             else
             {
-                const std::string text = QString::number(number, 'f', decimals).toStdString();
+                const std::string text = QString::number(number, 'f', spin->decimals()).toStdString();
                 if (!document_->SetKnown(name, key.toStdString().c_str(), text))
                 {
                     document_->AddSection(name);
@@ -12825,6 +13104,269 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "them to know how much light each LED level really gives."));
     advancedForm->addRow(QStringLiteral("Measured light per LED level"), fluxTable);
 
+    // Audit 2026-10-17: every LED setting VP reads has a control. The rest of
+    // [led_drive] (LedDriveConfig.h ApplyLedDriveSection), with the parser's
+    // ranges and defaults (LedDriveRules, LedDriveConfig); collapsed, expert.
+    auto* advancedLed = new QWidget;
+    auto* advancedLedForm = new QFormLayout(advancedLed);
+    advancedLedForm->setContentsMargins(0, 0, 0, 0);
+    advancedLedForm->setVerticalSpacing(8);
+    advancedLedForm->addRow(QString(), helpLabel(QStringLiteral(
+        "The curve and the step tables are your dimming script's tables: your script is the reference, and the "
+        "built-in values are its values. Leave a field at its default unless the script changed. Each Reset "
+        "removes the setting, so the built-in value (or an LED profile file's) applies.")));
+    auto ledResetButton = [](const QString& name)
+    {
+        auto* reset = new QToolButton;
+        reset->setObjectName(name + QStringLiteral(".reset"));
+        reset->setText(QStringLiteral("Reset"));
+        reset->setToolTip(QStringLiteral("Remove this setting: the built-in default applies."));
+        return reset;
+    };
+    auto advancedNumber = [this, led, advancedLedForm, ledResetButton](const char* keyText, double minimum,
+        double maximum, int decimals, double step, double fallback, const QString& suffix, const QString& label,
+        const QString& tip)
+    {
+        const QString key = QString::fromLatin1(keyText);
+        auto* spin = new QDoubleSpinBox;
+        spin->setObjectName(controlName(led, key));
+        spin->setAccessibleName(label);
+        const QString raw = value(led, key).trimmed();
+        spin->setDecimals(ledDisplayDecimals(raw, decimals));
+        spin->setSingleStep(step);
+        spin->setRange(minimum, maximum);
+        if (!suffix.isEmpty()) spin->setSuffix(suffix);
+        spin->setMaximumWidth(130);
+        spin->setAlignment(Qt::AlignRight);
+        bool valid = false;
+        const double configured = raw.toDouble(&valid);
+        spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) : fallback);
+        spin->setToolTip(tip + QStringLiteral("\nRange %1 to %2; default %3.")
+            .arg(minimum).arg(maximum).arg(fallback));
+        flagClampedLedValue(spin, raw, minimum, maximum);
+        auto* reset = ledResetButton(spin->objectName());
+        reset->setEnabled(!raw.isEmpty());
+        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [this, led, key, spin, reset](double number)
+        {
+            if (!document_) return;
+            const std::string section = led.toStdString();
+            const std::string text = QString::number(number, 'f', spin->decimals()).toStdString();
+            if (!document_->SetKnown(section, key.toStdString().c_str(), text))
+            {
+                document_->AddSection(section);
+                document_->SetKnown(section, key.toStdString().c_str(), text);
+            }
+            reset->setEnabled(true);
+            markDirty();
+        });
+        connect(reset, &QToolButton::clicked, this, [this, led, key, spin, reset, fallback]()
+        {
+            if (!document_) return;
+            document_->RemoveKnown(led.toStdString(), key.toStdString().c_str());
+            {
+                const QSignalBlocker blocker(spin);
+                spin->setValue(fallback);
+            }
+            reset->setEnabled(false);
+            markDirty();
+        });
+        auto* row = new QWidget;
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->addWidget(spin);
+        rowLayout->addWidget(reset);
+        rowLayout->addStretch(1);
+        advancedLedForm->addRow(label, row);
+        return spin;
+    };
+    auto advancedSwitch = [this, led, advancedLedForm, ledResetButton](const char* keyText, bool fallback,
+        const QString& label, const QString& tip)
+    {
+        const QString key = QString::fromLatin1(keyText);
+        auto* check = configuredCheck(label, value(led, key), fallback);
+        check->setObjectName(controlName(led, key));
+        check->setEnabled(true);
+        check->setToolTip(tip + (fallback ? QStringLiteral("\nDefault on.") : QStringLiteral("\nDefault off.")));
+        auto* reset = ledResetButton(check->objectName());
+        reset->setEnabled(!value(led, key).trimmed().isEmpty());
+        connect(check, &QCheckBox::toggled, this, [this, led, key, reset](bool checked)
+        {
+            if (!document_) return;
+            const std::string section = led.toStdString();
+            if (!document_->SetKnown(section, key.toStdString().c_str(), checked ? "true" : "false"))
+            {
+                document_->AddSection(section);
+                document_->SetKnown(section, key.toStdString().c_str(), checked ? "true" : "false");
+            }
+            reset->setEnabled(true);
+            markDirty();
+        });
+        connect(reset, &QToolButton::clicked, this, [this, led, key, check, reset, fallback]()
+        {
+            if (!document_) return;
+            document_->RemoveKnown(led.toStdString(), key.toStdString().c_str());
+            {
+                const QSignalBlocker blocker(check);
+                check->setChecked(fallback);
+            }
+            reset->setEnabled(false);
+            markDirty();
+        });
+        auto* row = new QWidget;
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->addWidget(check);
+        rowLayout->addWidget(reset);
+        rowLayout->addStretch(1);
+        advancedLedForm->addRow(QString(), row);
+        return check;
+    };
+    // Lists and tables in the parser's own syntax, checked with its parser.
+    auto advancedTable = [this, led, advancedLedForm, ledResetButton](const char* keyText,
+        const QString& fallback, std::function<bool(const std::string&)> parse, const QString& label,
+        const QString& syntax)
+    {
+        const QString key = QString::fromLatin1(keyText);
+        auto* edit = new QLineEdit;
+        edit->setObjectName(controlName(led, key));
+        edit->setAccessibleName(label);
+        edit->setPlaceholderText(fallback);
+        edit->setToolTip(syntax + QStringLiteral(".\nEmpty = the built-in value: ") + fallback);
+        const QString raw = value(led, key).trimmed();
+        edit->setText(raw);
+        auto* problem = new QLabel;
+        problem->setObjectName(controlName(led, key) + QStringLiteral(".problem"));
+        problem->setWordWrap(true);
+        problem->setStyleSheet(QStringLiteral("color: #e57373;"));
+        auto check = [edit, problem, parse, syntax]()
+        {
+            const std::string text = edit->text().trimmed().toStdString();
+            const bool ok = text.empty() || parse(text);
+            problem->setText(ok ? QString() :
+                QStringLiteral("Not valid (VP refuses the configuration until it is fixed): ") + syntax + QStringLiteral("."));
+            problem->setVisible(!ok);
+            edit->setProperty("invalidValue", !ok);
+        };
+        check();
+        auto* reset = ledResetButton(edit->objectName());
+        reset->setEnabled(!raw.isEmpty());
+        connect(edit, &QLineEdit::textEdited, this, [this, led, key, reset, check](const QString& text)
+        {
+            if (!document_) return;
+            const std::string section = led.toStdString();
+            const QString trimmed = text.trimmed();
+            if (trimmed.isEmpty())
+                document_->RemoveKnown(section, key.toStdString().c_str());
+            else if (!document_->SetKnown(section, key.toStdString().c_str(), trimmed.toLocal8Bit().constData()))
+            {
+                document_->AddSection(section);
+                document_->SetKnown(section, key.toStdString().c_str(), trimmed.toLocal8Bit().constData());
+            }
+            reset->setEnabled(!trimmed.isEmpty());
+            check();
+            markDirty();
+        });
+        connect(reset, &QToolButton::clicked, this, [this, led, key, edit, reset, check]()
+        {
+            if (!document_) return;
+            document_->RemoveKnown(led.toStdString(), key.toStdString().c_str());
+            {
+                const QSignalBlocker blocker(edit);
+                edit->clear();
+            }
+            reset->setEnabled(false);
+            check();
+            markDirty();
+        });
+        auto* row = new QWidget;
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->addWidget(edit, 1);
+        rowLayout->addWidget(reset);
+        advancedLedForm->addRow(label, row);
+        advancedLedForm->addRow(QString(), problem);
+        return edit;
+    };
+    const auto stepTable = [](const std::string& text) { LedDrive::StepTable table; return LedDrive::ParseStepTable(text, table); };
+    const QString stepSyntax = QStringLiteral(
+        "Descending distance:step pairs ending at 0, each step 1 or more (the script's table)");
+    advancedNumber("tick_ms", 50, 5000, 0, 10, 400, QStringLiteral(" ms"), QStringLiteral("Fixed loop interval"),
+        QStringLiteral("How often VP's copy of the script decides when Script pacing is Fixed loop."));
+    advancedNumber("deadband", 0, 50, 0, 1, 3, QStringLiteral(" levels"), QStringLiteral("Dead band"),
+        QStringLiteral("Compensate: no LED movement while the target is within this many levels."));
+    advancedNumber("led_ceiling", 1, 255, 0, 1, 255, QString(), QStringLiteral("Highest LED level"),
+        QStringLiteral("The brightest LED level VP sends."));
+    advancedTable("curve", QStringLiteral("0:100, 20:100, 40:200, 70:230, 100:255, 255:255"),
+        [](const std::string& text) { std::vector<LedDrive::CurvePoint> curve; return LedDrive::ParseCurve(text, curve); },
+        QStringLiteral("Light curve (APL:level)"),
+        QStringLiteral("Ascending APL:level pairs (0-255), at least two, e.g. 0:100, 40:200, 100:255 (the script's curve)"));
+    advancedNumber("knee", 0.0, 0.5, 2, 0.01, 0.08, QString(), QStringLiteral("Highlight knee"),
+        QStringLiteral("Compensate: where VP's gain starts rolling off highlights (part of the signal)."));
+    advancedNumber("anti_pump_band", 0, 50, 0, 1, 3, QStringLiteral(" levels"), QStringLiteral("Anti-pump band"),
+        QStringLiteral("Small target changes inside this band do not reverse a ramp."));
+    advancedTable("steps_up_dark", QStringLiteral("100:7, 50:5, 25:4, 10:1, 0:1"), stepTable,
+        QStringLiteral("Brightening steps (dark scenes)"), stepSyntax);
+    advancedTable("steps_up_bright", QStringLiteral("100:7, 50:4, 25:2, 10:1, 0:1"), stepTable,
+        QStringLiteral("Brightening steps (bright scenes)"), stepSyntax);
+    advancedNumber("steps_up_split_apl", 0, 255, 0, 1, 40, QString(), QStringLiteral("Dark / bright split (APL)"),
+        QStringLiteral("The APL that chooses between the dark and bright brightening tables."));
+    advancedTable("steps_down", QStringLiteral("100:5, 50:3, 25:2, 10:1, 0:1"), stepTable,
+        QStringLiteral("Dimming steps"), stepSyntax);
+    advancedTable("apl_weights", QStringLiteral("0.114, 0.587, 0.299"),
+        [](const std::string& text) { double weights[3]; return LedDrive::ParseWeights(text, weights); },
+        QStringLiteral("APL weights (R, G, B)"),
+        QStringLiteral("Three non-negative R, G, B weights summing to 1 (the script's effective weights)"));
+    advancedNumber("highlight_percentile", 50.0, 100.0, 1, 0.1, 99.5, QStringLiteral(" %"),
+        QStringLiteral("Highlight percentile"), QStringLiteral("The brightness percentile measured as the frame's highlight."));
+    advancedNumber("highlight_persist_ms", 0, 10000, 0, 10, 250, QStringLiteral(" ms"), QStringLiteral("Highlight hold"),
+        QStringLiteral("How long a highlight must last before it counts (flash rejection)."));
+    advancedNumber("apl_persist_ms", 0, 10000, 0, 10, 100, QStringLiteral(" ms"), QStringLiteral("APL hold"),
+        QStringLiteral("Compensate: the window for the sustained APL the LED aims at; a cut uses the new scene's APL at once."));
+    advancedNumber("highlight_area_small", 0.0, 1.0, 3, 0.001, 0.005, QString(), QStringLiteral("Small highlight area"),
+        QStringLiteral("Highlights covering less of the frame than this are small (keep it below the large area)."));
+    advancedNumber("highlight_area_large", 0.0, 1.0, 3, 0.001, 0.05, QString(), QStringLiteral("Large highlight area"),
+        QStringLiteral("Highlights covering more of the frame than this are large."));
+    advancedNumber("highlight_release_ms", 0, 60000, 0, 100, 2000, QStringLiteral(" ms"), QStringLiteral("Highlight release"),
+        QStringLiteral("How long the highlight protection stays after a highlight leaves."));
+    advancedSwitch("early_ramp", true, QStringLiteral("Start a ramp ahead of a cut the look-ahead has seen"),
+        QStringLiteral("Compensate with look-ahead."));
+    advancedSwitch("cut_jump", true, QStringLiteral("Jump the LED on a cut"),
+        QStringLiteral("On a scene cut the LED goes straight to the new scene's level instead of ramping."));
+    advancedSwitch("bright_cut_dump", true, QStringLiteral("Full light at once on a cut to a bright scene"),
+        QStringLiteral("Compensate: a cut to a bright scene takes the LED up at once."));
+    advancedNumber("cut_threshold", 1.0, 255.0, 1, 1.0, 24.0, QString(), QStringLiteral("Cut threshold (APL change)"),
+        QStringLiteral("The APL change between frames that counts as a scene cut."));
+    advancedNumber("fade_ms", 20, 5000, 0, 10, 250, QStringLiteral(" ms"), QStringLiteral("Fade detection window"),
+        QStringLiteral("How long a steady change must last to count as a fade."));
+    advancedNumber("fade_min_slope", 0.0, 1200.0, 1, 0.5, 12.0, QStringLiteral(" /s"), QStringLiteral("Fade minimum slope"),
+        QStringLiteral("The slowest APL change per second that counts as a fade."));
+    advancedNumber("ftb_black_ms", 100, 10000, 0, 50, 500, QStringLiteral(" ms"), QStringLiteral("Black before the custom dim"),
+        QStringLiteral("Experimental fade to black: how long the picture is black before the custom LED dim starts."));
+    advancedNumber("script_highlight_code", 16, 255, 0, 1, 215, QString(), QStringLiteral("Script highlight code"),
+        QStringLiteral("VP's copy of the script: a frame whose maximum reaches this code has a highlight (the script used 215)."));
+    auto* advancedLedHolder = new QWidget;
+    {
+        auto* holderLayout = new QVBoxLayout(advancedLedHolder);
+        holderLayout->setContentsMargins(0, 0, 0, 0);
+        auto* toggle = new QToolButton;
+        toggle->setObjectName(controlName(led, QStringLiteral("advanced_toggle")));
+        toggle->setText(QStringLiteral("Show the advanced LED settings"));
+        toggle->setCheckable(true);
+        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toggle->setArrowType(Qt::RightArrow);
+        holderLayout->addWidget(toggle);
+        holderLayout->addWidget(advancedLed);
+        advancedLed->setVisible(false);
+        connect(toggle, &QToolButton::toggled, this, [toggle, advancedLed](bool open)
+        {
+            advancedLed->setVisible(open);
+            toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+            toggle->setText(open ? QStringLiteral("Hide the advanced LED settings") :
+                QStringLiteral("Show the advanced LED settings"));
+        });
+    }
+
     // In setup order (audit 2026-10-14c): what to choose, then the source's
     // own card, the connection, and the rest; Experimental last. Each card
     // shows only when the chosen source uses it.
@@ -12867,6 +13409,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     QWidget* advancedBox = createCard(QStringLiteral("Advanced projector"),
         QStringLiteral("Serial details for other projectors; the defaults match the FL35."), advancedHolder);
     cards->addCard(advancedBox);
+    QWidget* advancedLedBox = createCard(QStringLiteral("Advanced LED"),
+        QStringLiteral("The script's tables and the remaining LED details; the defaults are your script's."), advancedLedHolder);
+    cards->addCard(advancedLedBox);
     QWidget* experimentBox = createCard(QStringLiteral("Experimental"),
         QStringLiteral("Compensate: deeper fade to black - test on the projector before relying on it."), experiment);
     cards->addCard(experimentBox);
@@ -12926,6 +13471,34 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [needPort](int) { needPort(); });
         connect(adaptive, &QCheckBox::toggled, this, [grey, show](bool) { grey(); show(); });
         connect(enabled, &QCheckBox::toggled, this, [onOff](bool) { onOff(); });
+        // The advanced LED settings belong to VP's own sources (audit 2026-10-17).
+        auto advancedLedSync = [advancedLedBox, source, enabled]()
+        {
+            const QString chosen = source ? source->currentData().toString() : QString();
+            advancedLedBox->setVisible(chosen == QStringLiteral("compensate") ||
+                chosen == QStringLiteral("internal_script"));
+            advancedLedBox->setEnabled(enabled->isChecked());
+        };
+        advancedLedSync();
+        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [advancedLedSync](int) { advancedLedSync(); });
+        connect(enabled, &QCheckBox::toggled, this, [advancedLedSync](bool) { advancedLedSync(); });
+    }
+    {
+        // Saved values outside a control's range, said once at the top of the
+        // page (audit 2026-10-17); each box is flagged too.
+        QStringList clamped;
+        for (QAbstractSpinBox* spin : cards->findChildren<QAbstractSpinBox*>())
+            if (spin->property("clampedFrom").isValid())
+                clamped.push_back(QStringLiteral("%1 = %2").arg(
+                    spin->objectName().section(u'.', -1), spin->property("clampedFrom").toString()));
+        if (!clamped.isEmpty())
+        {
+            auto* note = helpLabel(QStringLiteral("Saved values outside their control's range (shown clamped, "
+                "kept until changed): %1.").arg(clamped.join(QStringLiteral(", "))));
+            note->setObjectName(QStringLiteral("config.led_drive.default.clamped_note"));
+            note->setStyleSheet(QStringLiteral("color: #e0a040;"));
+            driveForm->insertRow(0, QString(), note);
+        }
     }
     return createPage(QStringLiteral("LED drive"),
         QStringLiteral("Projector LED dimming and the gamma boost."), cards);
@@ -13279,7 +13852,7 @@ void ConfigEditorWindow::setupTray()
     QAction* exit = menu->addAction(QStringLiteral("Exit"));
     tray_->setContextMenu(menu);
     connect(open, &QAction::triggered, this, [this] { reveal(); });
-    connect(exit, &QAction::triggered, this, [this] { exitApplication(); });
+    connect(exit, &QAction::triggered, this, [this] { requestExit(); });
     connect(tray_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason)
     {
         if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) reveal();
@@ -13348,6 +13921,7 @@ void ConfigEditorWindow::reveal()
     // Remove only already-posted close requests; a subsequent user close is
     // still delivered normally and returns the editor to the tray.
     QCoreApplication::removePostedEvents(this, QEvent::Close);
+    reloadIfChangedOnDisk();
     positionForReveal();
     showNormal();
     scopedTopmostEligible_ = true;
@@ -13386,6 +13960,13 @@ void ConfigEditorWindow::exitApplication()
 
 void ConfigEditorWindow::closeEvent(QCloseEvent* event)
 {
+    // Close with unsaved edits: Save / Discard / Keep editing (audit 2026-10-17).
+    if (!exitRequested_ && isVisible() &&
+        !resolveUnsavedEdits(QStringLiteral("closing"), tray_ && tray_->isVisible()))
+    {
+        event->ignore();
+        return;
+    }
     if (!exitRequested_ && tray_ && tray_->isVisible())
     {
         const HWND editor = reinterpret_cast<HWND>(effectiveWinId());
