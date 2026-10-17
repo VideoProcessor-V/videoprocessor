@@ -21,7 +21,8 @@ public:
 	bool FormatVideoFrame(const VideoFrame& frame, BYTE* output) override;
 	// dv_tunnel_gpu_unpack: everything FormatVideoFrame does except writing
 	// the planes. The DM packet is found and CRC-checked reading only its own
-	// pixels (plus a 4096-pixel alignment probe before lock); the metadata and
+	// pixels (plus a sparse whole-picture alignment probe while the placement
+	// is unknown, Bug hunt 2026-10-17); the metadata and
 	// contract are then current exactly as after FormatVideoFrame.
 	//   REJECTED  FormatVideoFrame would return false
 	//   BLACK     FormatVideoFrame would write zeros (no lock / no valid DM)
@@ -81,8 +82,12 @@ private:
 	uint32_t m_stride = 0;
 	LONG m_outputSize = 0;
 	ByteAlignment m_alignment = ByteAlignment::UNKNOWN;
-	uint32_t m_missingPacketFrames = 0;
+	uint32_t m_missingPacketFrames = 0;   // source pictures since the first loss
 	bool m_missingPacketReported = false;
+	// Bug hunt 2026-10-17: source counter of the first picture of the current
+	// loss run (the loss limit counts source pictures, not analysed ones).
+	bool m_hasPacketLoss = false;
+	uint64_t m_packetLossStartCounter = 0;
 	bool m_tunnelConfirmed = false;
 	bool m_currentPictureHasValidHeader = false;
 	uint32_t m_diagnosticFrames = 0;

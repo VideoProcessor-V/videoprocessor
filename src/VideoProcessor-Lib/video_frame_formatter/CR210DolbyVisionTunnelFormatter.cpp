@@ -259,6 +259,8 @@ namespace
 		// Reassembly has already validated the complete declared body. Unknown
 		// extension levels are bounded/skipped; they are not display trims.
 		size_t extension = 71;
+		DolbyVisionTunnelFrameMetadata::Trim l8Trims[DolbyVisionTunnelFrameMetadata::kMaxTrims];
+		uint8_t l8Count = 0; // Bug hunt 2026-10-17: L8 after L2, see below
 		for (unsigned block = 0; block < dm[70]; ++block)
 		{
 			if (length - extension < 5)
@@ -281,11 +283,22 @@ namespace
 					memcpy(raw.bytes, payload, (std::min)(static_cast<size_t>(payloadLength),
 						sizeof(raw.bytes)));
 				}
-				if (parsed.trimCount >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
+				// Bug hunt 2026-10-17: L2 trims (the ones dv_trims applies)
+				// take the slots first; L8 blocks are held aside and fill only
+				// the slots left after the last block, so a DM carrying many
+				// L8 blocks before its L2 blocks can no longer crowd L2 out.
+				if (level == 2)
+				{
+					if (parsed.trimCount >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
+						parsed.trimOverflow = true;
+					else if (ParseTrim(payload, payloadLength, level,
+						parsed.trims[parsed.trimCount]))
+						++parsed.trimCount;
+				}
+				else if (l8Count >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
 					parsed.trimOverflow = true;
-				else if (ParseTrim(payload, payloadLength, level,
-					parsed.trims[parsed.trimCount]))
-					++parsed.trimCount;
+				else if (ParseTrim(payload, payloadLength, level, l8Trims[l8Count]))
+					++l8Count;
 			}
 			if (level == 1)
 			{
@@ -302,6 +315,15 @@ namespace
 				parsed.sceneAvgPq = sceneAvg;
 			}
 			extension = end;
+		}
+		for (uint8_t i = 0; i < l8Count; ++i)
+		{
+			if (parsed.trimCount >= DolbyVisionTunnelFrameMetadata::kMaxTrims)
+			{
+				parsed.trimOverflow = true;
+				break;
+			}
+			parsed.trims[parsed.trimCount++] = l8Trims[i];
 		}
 		result.metadata = parsed;
 		return true;
@@ -390,6 +412,8 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 	m_alignment = ByteAlignment::UNKNOWN;
 	m_missingPacketFrames = 0;
 	m_missingPacketReported = false;
+	m_hasPacketLoss = false; // Bug hunt 2026-10-17
+	m_packetLossStartCounter = 0;
 	m_tunnelConfirmed = false;
 	m_currentPictureHasValidHeader = false;
 	m_diagnosticFrames = 0;
@@ -518,6 +542,7 @@ bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnel(const uint8_t* source) con
 	const uint32_t rows = (std::min)(m_height, 64U);
 	const uint32_t pairsPerRow = (std::min)(m_width / 2, 128U);
 	uint64_t roughB[2] = {}, roughG[2] = {}, neutral[2] = {}, pairs = 0;
+	uint64_t rDistanceFromG[2] = {}; // Bug hunt 2026-10-17: sum of |R - G|
 	for (uint32_t r = 0; r < rows; ++r)
 	{
 		const size_t y = (static_cast<size_t>(r) * 2 + 1) * m_height / (rows * 2);
@@ -541,6 +566,9 @@ bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnel(const uint8_t* source) con
 				neutral[placement] +=
 					(std::abs(static_cast<int>(first.r) - 128) <= 32 ? 1U : 0U) +
 					(std::abs(static_cast<int>(second.r) - 128) <= 32 ? 1U : 0U);
+				rDistanceFromG[placement] += static_cast<uint64_t>(
+					std::abs(static_cast<int>(first.r) - static_cast<int>(first.g)) +
+					std::abs(static_cast<int>(second.r) - static_cast<int>(second.g)));
 			}
 		}
 	}
@@ -553,8 +581,13 @@ bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnel(const uint8_t* source) con
 			roughB[placement] >= 3 * roughG[placement] + pairs)
 			return true;
 		// Near-neutral R (tunnel chroma high byte) on most samples, at any
-		// brightness. Also keeps flat grey SDR black: safe, just slower.
-		if (neutral[placement] * 10 >= pairs * 2 * 8)
+		// brightness. Bug hunt 2026-10-17: only when R does not follow G
+		// (mean |R - G| > 32). Grey SDR (a menu after the tunnel stops) has
+		// R = G and used to hold the SDR exit off indefinitely; tunnel black
+		// has G near 0 with R near 128. Mid-grey tunnel content relies on the
+		// noisy-B cue above.
+		if (neutral[placement] * 10 >= pairs * 2 * 8 &&
+			rDistanceFromG[placement] > 32 * pairs * 2)
 			return true;
 	}
 	return false;
@@ -874,12 +907,23 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 	{
 		m_missingPacketFrames = 0;
 		m_missingPacketReported = false;
+		m_hasPacketLoss = false;
 	}
 	else
 	{
 		++m_rejectedFrames;
-		if (m_missingPacketFrames != (std::numeric_limits<uint32_t>::max)())
-			++m_missingPacketFrames;
+		// Bug hunt 2026-10-17: the loss limit is time-based, so count source
+		// pictures (counter span since the first loss, drops included) rather
+		// than analysed pictures, as the SDR exit and the ID-wrap guard do. A
+		// counter that goes backwards (reset/wrap) restarts the span.
+		if (!m_hasPacketLoss || counter < m_packetLossStartCounter)
+		{
+			m_hasPacketLoss = true;
+			m_packetLossStartCounter = counter;
+		}
+		const uint64_t lostPictures = counter - m_packetLossStartCounter + 1;
+		m_missingPacketFrames = static_cast<uint32_t>((std::min)(lostPictures,
+			static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())));
 		if (!m_missingPacketReported && m_missingPacketFrames >= m_packetLossLimit)
 		{
 			DebugLog::Log("Dolby Vision RGB tunnel: %u pictures without usable metadata (last_header=%s reason=%s); %s",
@@ -944,23 +988,43 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 	{
 		// Alignment alone does not identify Dolby Vision. It does let
 		// ordinary 8-bit RGB menus use the SDR passthrough path.
-		const size_t sampleCount = (std::min)(
-			static_cast<size_t>(m_width) * m_height, size_t(4096));
-		size_t high8 = 0, low8 = 0;
-		for (size_t pixel = 0; pixel < sampleCount; ++pixel)
+		// Bug hunt 2026-10-17: the probe used to read only the first 4096
+		// pixels, and a dark pixel (no bits in either the low two or the high
+		// two of each 10-bit field) counted for both placements, so a
+		// letterboxed or dark top of the picture left the alignment UNKNOWN
+		// (black SDR for the whole title). Now a grid over the whole raster
+		// (as LooksLikeTunnel) is sampled and only discriminating pixels vote:
+		// high8 never sets the low two bits, low8 never sets the high two.
+		// Dark pixels count for neither; a decision needs kMinVotes votes and
+		// at most 2% of the non-dark samples contradicting it.
+		constexpr size_t kMinVotes = 16;
+		const uint32_t rows = (std::min)(m_height, 64U);
+		const uint32_t columns = (std::min)(m_width, 256U);
+		size_t leftVotes = 0, rightVotes = 0, contradictory = 0;
+		for (uint32_t r = 0; r < rows; ++r)
 		{
-			const uint32_t word = readWord(pixel);
-			const uint32_t r = (word >> 20) & 0x3FFU;
-			const uint32_t g = (word >> 10) & 0x3FFU;
-			const uint32_t b = word & 0x3FFU;
-			high8 += ((r | g | b) & 3U) == 0;
-			low8 += ((r | g | b) & 0x300U) == 0;
+			const size_t y = (static_cast<size_t>(r) * 2 + 1) * m_height / (rows * 2);
+			for (uint32_t c = 0; c < columns; ++c)
+			{
+				const size_t x = (static_cast<size_t>(c) * 2 + 1) * m_width / (columns * 2);
+				const uint32_t word = readWord(y * m_width + x);
+				const uint32_t bits = ((word >> 20) | (word >> 10) | word) & 0x3FFU;
+				const bool lowBits = (bits & 3U) != 0;     // impossible for high8
+				const bool highBits = (bits & 0x300U) != 0; // impossible for low8
+				if (highBits && !lowBits)
+					++leftVotes;
+				else if (lowBits && !highBits)
+					++rightVotes;
+				else if (lowBits && highBits)
+					++contradictory;
+			}
 		}
-		if (sampleCount > 0 && high8 * 100 >= sampleCount * 98 &&
-			high8 > low8 * 2)
+		const size_t nonDark = leftVotes + rightVotes + contradictory;
+		if (leftVotes >= kMinVotes &&
+			(rightVotes + contradictory) * 100 <= nonDark * 2)
 			m_alignment = ByteAlignment::LEFT;
-		else if (sampleCount > 0 && low8 * 100 >= sampleCount * 98 &&
-			low8 > high8 * 2)
+		else if (rightVotes >= kMinVotes &&
+			(leftVotes + contradictory) * 100 <= nonDark * 2)
 			m_alignment = ByteAlignment::RIGHT;
 	}
 	if (!m_metadata.valid)
