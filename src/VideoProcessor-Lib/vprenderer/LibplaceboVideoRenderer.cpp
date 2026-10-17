@@ -5055,13 +5055,17 @@ struct LibplaceboVideoRenderer::Impl
 	double vpCaptureRateHz = 0.0;     // the content rate the loop schedules with (film or measured capture)
 	uint64_t vpFillNextSequence = 0;  // B offered across a short loss (gap fill), else 0
 	double vpQueueError = 0.0;        // smoothed (queued - target) frames: the timeline's steering
+	uint64_t vpQueueGeneration = 0;   // the queue generation vpQueueError belongs to
+	std::atomic<bool> vpQueueErrorReset{ false };   // a backlog flush: the steering starts over
 	// (3) A's planes as last uploaded: a refresh of the same source frame (and a frame no
 	// refresh shows) reuses them instead of uploading again.
 	pl_plane vpUploadedPlanes[2] = {};
 	uint64_t vpUploadedSequence = 0, vpUploadedGeneration = 0;
 	unsigned long long vpUploadsSaved = 0;
-	// (12) Reset / ResetLiveQueue: the render loop forgets the last frame's video state, so
-	// the resync's own invalidation is not followed by a format-change one.
+	// (12) Reset only (its Resync already releases): the render loop forgets the last frame's
+	// video state, so the resync is not followed by a second, format-change invalidation (one
+	// stream-generation move, as before MotionValidity). ResetLiveQueue keeps it: QueueReset
+	// does not release, and a format change across it must still release.
 	std::atomic<bool> motionLastStateReset{ false };
 	unsigned long long vpSkippedFrames = 0, vpPhasePictures = 0, vpHeldPictures = 0, vpGapPairs = 0;
 	// The display rate the timeline schedules at: measured when known, else the monitor's.
@@ -5133,6 +5137,14 @@ struct LibplaceboVideoRenderer::Impl
 			++vpHeldPictures;
 		if (vpPhasePictures == 1 || vpPhasePictures % 2400 == 0)
 			LogVpTimeline("pictures");
+	}
+	// A picture between frames is drawn for this image: Stage B's picture is ready and the
+	// image renders A's own planes (a subtitle-composed picture keeps A and its A-aligned
+	// consumers: the residual hold motion, the grain field, the occlusion mask).
+	bool VpPhaseDrawn(const pl_frame& image) const
+	{
+		return vpPhasePlanesValid && image.num_planes == 2 && image.planes[0].texture == textures[0] &&
+			image.planes[1].texture == textures[1];
 	}
 	void LogVpTimeline(const char* what)
 	{
@@ -5507,7 +5519,9 @@ struct LibplaceboVideoRenderer::Impl
 	CustomHookChain::Chain sdrToneShape{ GlslHookLoader() };   // delta 13
 	CustomHookChain::Chain dvTrimsHook{ GlslHookLoader() };    // DV L2 trims (dv_trims)
 	bool dvTrimsConfigured = false;
-	std::string dvTrimsLogged;
+	std::string dvTrimsLogged;          // the state / reason last logged (on change)
+	std::string dvTrimsParamsLogged;    // the parameters last logged (at most every 10 s)
+	ULONGLONG dvTrimsParamsTick = 0;
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
 	bool ledCompensationConfigured = false;
@@ -15010,7 +15024,9 @@ struct LibplaceboVideoRenderer::Impl
 			const AlphaPresentationSnapshot presentation =
 				presentationTelemetry.Snapshot();
 			AlphaCadenceCorrectionInput correctionInput;
-			correctionInput.enabled = sceneDetectionEnabled && analysisSource.IsValid();
+			// Not while the interpolation timeline presents: it schedules every refresh and
+			// steers the queue itself (the rate trim); a drop or repeat would break its phases.
+			correctionInput.enabled = sceneDetectionEnabled && analysisSource.IsValid() && !vpTimelineActive;
 			// Queue replacement and detector/source replacement are independent
 			// reset boundaries. Fold both into the policy epoch so neither can
 			// inherit a pending action or retained phase from the other.
@@ -15743,10 +15759,14 @@ struct LibplaceboVideoRenderer::Impl
 		vpPhasePlanesValid = false;
 		if (vpTimelineActive)
 		{
-			// Stage B: no refresh in this frame's interval (the source is faster): uploaded
-			// and noted, not presented (as smooth motion skips).
+			// Stage B: no refresh in this frame's interval (the source is faster): noted for
+			// the motion run (contiguity), but not uploaded (the last planes are reused), not
+			// estimated and not presented (as smooth motion skips).
 			if (vpSkipOutput)
 			{
+				// VP deband's hold carries over the frame (unless the motion was invalidated,
+				// which already forgot it).
+				debander.CarryHold(sourceSequence);
 				if (++vpSkippedFrames == 1)
 					LogVpTimeline("first source frame skipped (the source is faster than the display)");
 				return true;
@@ -19573,7 +19593,13 @@ struct LibplaceboVideoRenderer::Impl
             pl_color_space display = target.color;
             pl_color_space_infer(&display);
             const bool pq = target.color.transfer == PL_COLOR_TRC_PQ;
-            const bool gammaSignal = !pq && !pl_color_space_is_hdr(&target.color);
+            // Review C5: only transfers that are a pure power law (or BT.1886 / sRGB,
+            // which LedDisplayGamma maps to 2.4 / 2.2); linear, HLG and others: off.
+            const enum pl_color_transfer trc = target.color.transfer;
+            const bool gammaSignal = trc == PL_COLOR_TRC_GAMMA18 || trc == PL_COLOR_TRC_GAMMA20 ||
+                trc == PL_COLOR_TRC_GAMMA22 || trc == PL_COLOR_TRC_GAMMA24 || trc == PL_COLOR_TRC_GAMMA26 ||
+                trc == PL_COLOR_TRC_GAMMA28 || trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
+            std::string params;
             DolbyVisionTrims::Selection selection;
             if (!activeSettings.dvTrims)
                 state = "off";
@@ -19582,7 +19608,7 @@ struct LibplaceboVideoRenderer::Impl
             else if (target.lut)
                 state = "off with a calibration LUT (it would act after the LUT)";
             else if (!pq && !gammaSignal)
-                state = "off for this output transfer (PQ or gamma outputs only)";
+                state = "off for this output transfer (PQ, gamma, BT.1886 or sRGB outputs only)";
             else
             {
                 selection = DolbyVisionTrims::Select(convertedPayload->dolby, display.hdr.max_luma);
@@ -19601,7 +19627,15 @@ struct LibplaceboVideoRenderer::Impl
                     dvTrimsHook.Ensure(hookTemplates);
                     const size_t start = frameHooks.size();
                     dvTrimsHook.Collect(false, frameHooks);
-                    const bool bt2020 = target.color.primaries == PL_COLOR_PRIM_BT_2020;
+                    // Review C4: the luminance coefficients of the output's own primaries.
+                    const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
+                    double kr = 0.2126, kg = 0.7152, kb = 0.0722;
+                    if (prim)
+                    {
+                        const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
+                        const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
+                        DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
+                    }
                     for (size_t i = start; i < frameHooks.size(); ++i)
                     {
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_slope", selection.params.slope);
@@ -19612,18 +19646,30 @@ struct LibplaceboVideoRenderer::Impl
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_signal_pq", pq ? 1.0 : 0.0);
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_gamma", LedDisplayGamma(target.color.transfer));
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_peak_nits", display.hdr.max_luma);
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kr", bt2020 ? 0.2627 : 0.2126);
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kb", bt2020 ? 0.0593 : 0.0722);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kr", kr);
+                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kb", kb);
                     }
                     state = frameHooks.size() == start ? "NOT applied (shaders\\DV trims.glsl did not load)" :
-                        "active: " + DolbyVisionTrims::Describe(selection);
+                        std::string("active: ") + selection.reason;
+                    if (frameHooks.size() > start)
+                        params = DolbyVisionTrims::Describe(selection);
                 }
             }
+            // Review S5: the reason on change; the parameters (they follow the
+            // scene) at most every 10 s, and only when they changed.
             if (state != dvTrimsLogged)
             {
                 dvTrimsLogged = activeSettings.dvTrims ? state : std::string();
                 DebugLog::Log("Dolby Vision trims (non-certified): %s (display peak %.1f nits)", state.c_str(),
                     static_cast<double>(display.hdr.max_luma));
+            }
+            const ULONGLONG trimsNow = GetTickCount64();
+            if (!params.empty() && params != dvTrimsParamsLogged &&
+                (dvTrimsParamsTick == 0 || trimsNow - dvTrimsParamsTick >= 10000))
+            {
+                dvTrimsParamsLogged = params;
+                dvTrimsParamsTick = trimsNow;
+                DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
             }
         }
         // LED drive, gain in: measurement first (it must see the picture before
@@ -19778,7 +19824,7 @@ struct LibplaceboVideoRenderer::Impl
             // (vectors of this source frame only; never with NLS - its map is not
             // linear; never starts the matcher).
             adaptiveDownscale.ClearMotion();
-            if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid && sourceSequence != 0 &&
+            if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) && sourceSequence != 0 &&
                 dejudder->Field() && dejudder->FrameTrust())
             {
                 AdaptiveDownscale::Motion motion;
@@ -19788,7 +19834,7 @@ struct LibplaceboVideoRenderer::Impl
                 motion.sourceCrop = renderImage.crop;
                 adaptiveDownscale.SetMotion(motion);
             }
-            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid &&
+            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) &&
                 sourceSequence != 0 && dejudder->GrainError())
             {
                 AdaptiveDownscale::GrainField field;
@@ -19848,7 +19894,7 @@ struct LibplaceboVideoRenderer::Impl
                 // (vectors of this source frame only; never with NLS - its map is not
                 // linear; never starts the matcher).
                 adaptiveDownscale.ClearMotion();
-                if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid && sourceSequence != 0 &&
+                if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) && sourceSequence != 0 &&
                     dejudder->Field() && dejudder->FrameTrust())
                 {
                     AdaptiveDownscale::Motion motion;
@@ -19858,7 +19904,7 @@ struct LibplaceboVideoRenderer::Impl
                     motion.sourceCrop = renderImage.crop;
                     adaptiveDownscale.SetMotion(motion);
                 }
-                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid &&
+                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !VpPhaseDrawn(renderImage) &&
                     sourceSequence != 0 && dejudder->GrainError())
                 {
                     AdaptiveDownscale::GrainField field;
@@ -19997,7 +20043,7 @@ struct LibplaceboVideoRenderer::Impl
             // position, so they hold at any re-base size (the vectors are the
             // native frame's; a factor change does not touch them).
             // (A picture between frames is not A: A's mask would sit t * v off.)
-            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !vpPhasePlanesValid &&
+            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&
                 dejudder->Occlusion(maskSlot);
             bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
@@ -21472,13 +21518,20 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			return;
 		}
 		// Consumed always (a mark left while the fixes were off must not fire later); labelled by cause.
-		if (m_pulldown.ConsumeDiscontinuity() && fixes && !gapBefore)
+		if (m_pulldown.ConsumeDiscontinuity() && fixes)
 		{
-			gapCause = decision.rephased ? "pulldown re-phase" : "pulldown lock change (on a skipped repeat)";
-			gapBefore = true;
+			if (!gapBefore)
+			{
+				gapCause = decision.rephased ? "pulldown re-phase" : "pulldown lock change (on a skipped repeat)";
+				gapBefore = true;
+			}
+			gapFrames = 0;   // the film timing changed: never a gap-fill pair, missed frames or not
 		}
 		if (decision.rephased)
+		{
+			gapFrames = 0;
 			DebugLog::Log("Pulldown: re-phased in place (lock kept)");
+		}
 		if (decision.locked)
 		{
 			filmHz = decision.filmHz;
@@ -22649,7 +22702,8 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 		m_impl->RequestPresentationStateReset();
 		// The discarded frames break the sequence: no pair or history across it.
 		m_impl->RequestMotionInvalidate(MotionValidity::Cause::QueueReset);
-		m_impl->motionLastStateReset.store(true, std::memory_order_release);
+		// The last frame's video state is kept: QueueReset does not release, so a format
+		// change across this reset still releases (SourceFormatChange).
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
@@ -25318,26 +25372,44 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (m_impl) m_impl->vpFillNextSequence = 0;
 			if (!m_frameQueue.empty())
 			{
-				const QueuedFrame& next = m_frameQueue.front();
+				// A frame's time as the timeline reads it: the film clock when pulldown is locked,
+				// else the capture timestamp (0 = not known).
+				LARGE_INTEGER qpcFrequencyPair{};
+				const bool qpcKnown = QueryPerformanceFrequency(&qpcFrequencyPair) && qpcFrequencyPair.QuadPart > 0;
+				auto frameTime = [&](double filmHz, int64_t arrival, const VideoFrame& f) -> double {
+					if (filmHz > 0.0 && arrival > 0 && qpcKnown)
+						return static_cast<double>(arrival) / static_cast<double>(qpcFrequencyPair.QuadPart);
+					if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
+						return static_cast<double>(f.GetTimingTimestamp()) / static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
+					return 0.0;
+				};
+				// While interpolating, B is the first frame after A that is not a pulldown film
+				// update (an update has no time of its own: the timeline gives it no refresh).
+				const bool interpolatingNow = m_impl && m_impl->interpolating;
+				const bool skipUpdate = interpolatingNow && m_frameQueue.front().filmUpdate && m_frameQueue.size() >= 2 &&
+					!m_frameQueue.front().gapBefore && !m_frameQueue[1].filmUpdate;
+				const QueuedFrame& next = skipUpdate ? m_frameQueue[1] : m_frameQueue.front();
 				// Gap fill (interpolation_fill_gaps, default off): while interpolating, B may
 				// follow a short loss of whole frames; the pair then spans the missing periods
-				// (the timeline's span). Never across a pulldown change, a flush or an update.
-				const bool fillGap = next.gapBefore && m_impl && m_impl->activeSettings.interpolationFillGaps &&
-					m_impl->interpolating && next.gapFrames >= 1 &&
-					next.gapFrames < static_cast<uint32_t>(InterpolationTimeline::kMaxSpanFrames);
+				// (the timeline's span). Never across a pulldown change, a flush or an update,
+				// and never when B's time is beyond the span (a stall, a clock step).
+				const double pairRateHz = frameFilmHz > 0.0 ? frameFilmHz : m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ?
+					m_measuredFrameRate.load(std::memory_order_relaxed) : (state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0);
+				const double timeA = frameTime(frameFilmHz, arrivalQpc, frame), timeB = frameTime(next.filmHz, next.arrivalQpc, next.frame);
+				const bool spanOk = pairRateHz > 0.0 && timeA > 0.0 && timeB > timeA &&
+					timeB - timeA <= (InterpolationTimeline::kMaxSpanFrames + 0.25) / pairRateHz;
+				const bool fillGap = next.gapBefore && interpolatingNow && m_impl->activeSettings.interpolationFillGaps &&
+					next.gapFrames >= 1 && next.gapFrames < static_cast<uint32_t>(InterpolationTimeline::kMaxSpanFrames) && spanOk;
 				if (next.generation == frameGeneration && !next.cadenceRepeat && (!next.gapBefore || fillGap) && !next.filmUpdate &&
+					(!skipUpdate || spanOk) &&
 					next.sourceSequence != sourceSequence && next.converted &&
 					SameDejudderVideoState(state, next.state))
 				{
 					nextConvertedPayload = next.converted;
 					nextSourceSequence = next.sourceSequence;
-					LARGE_INTEGER qpcFrequencyNext{};
-					if (next.filmHz > 0.0 && next.arrivalQpc > 0 && QueryPerformanceFrequency(&qpcFrequencyNext) && qpcFrequencyNext.QuadPart > 0)
-						nextPts = static_cast<double>(next.arrivalQpc) / static_cast<double>(qpcFrequencyNext.QuadPart);
-					else if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
-						nextPts = static_cast<double>(next.frame.GetTimingTimestamp()) /
-							static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
-					m_impl->vpFillNextSequence = fillGap ? next.sourceSequence : 0;
+					nextPts = timeB;
+					// A pair the estimate's adjacency test would refuse (across a gap or an update).
+					m_impl->vpFillNextSequence = fillGap || skipUpdate ? next.sourceSequence : 0;
 					if (fillGap && ++m_impl->vpGapPairs <= 20)
 						DebugLog::Log("Interpolation: gap pair across %u missed frame(s) (interpolation_fill_gaps)",
 							static_cast<unsigned>(next.gapFrames));
@@ -25650,6 +25722,11 @@ void LibplaceboVideoRenderer::RenderLoop()
                     // (8) Closed on the queue: the refresh spacing is trimmed (at most 0.3%) by the
                     // smoothed distance of the queue from its target, so a ppm difference between
                     // the capture and display clocks cannot walk the queue.
+                    // A backlog flush or a new queue generation starts the steering over.
+                    if(m_impl->vpQueueErrorReset.exchange(false,std::memory_order_acq_rel)||frameGeneration!=m_impl->vpQueueGeneration) {
+                        m_impl->vpQueueError=0.0;
+                        m_impl->vpQueueGeneration=frameGeneration;
+                    }
                     m_impl->vpQueueError=0.95*m_impl->vpQueueError+0.05*(static_cast<double>(queueDepthAfterDequeue)-
                         static_cast<double>(desiredQueueDepth));
                     m_impl->vpTimeline.SetRateTrim(1.0+(std::max)(-0.003,(std::min)(0.003,0.0005*m_impl->vpQueueError)));
@@ -25790,6 +25867,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 							{
 								m_frameQueue.front().gapBefore = true;
 								m_frameQueue.front().gapCause = "backlog flush";
+								m_frameQueue.front().gapFrames = 0;   // a flush: never a gap-fill pair
+								if (m_impl)
+									m_impl->vpQueueErrorReset.store(true, std::memory_order_release);
 							}
 							queueAfter = m_frameQueue.size();
 							if (!m_frameQueue.empty())

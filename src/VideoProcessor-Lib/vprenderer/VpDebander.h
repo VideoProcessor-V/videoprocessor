@@ -70,6 +70,20 @@ namespace VpDebander
 		// A missed-capture gap keeps the sequence contiguous, so the sequence
 		// check alone would carry the hold across it.
 		void ForgetHold() { weightSequence = 0; prevValid = false; }
+		// Interpolation Stage B: a source frame no refresh showed (a source faster than the
+		// display). The hold carries over it - the last weights stand for it - so the next
+		// shown frame still holds; a broken run (ForgetHold on an invalidation, a hole) does
+		// not carry.
+		void CarryHold(uint64_t sequence)
+		{
+			if (weightSequence != 0 && sequence == weightSequence + 1)
+			{
+				weightSequence = sequence;
+				prevValid = false;
+			}
+		}
+		uint64_t HoldSequence() const { return weightSequence; }
+		void SetHoldSequenceForTest(uint64_t sequence) { weightSequence = sequence; }
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long HeldFrames() const { return held; }

@@ -119,15 +119,15 @@ namespace Tests
 			for (int i = 0; i <= 1200; ++i)
 			{
 				const double t = i / 1000.0;
-				const double v = DolbyVisionTrims::Curve(t, p);
+				const double v = DolbyVisionTrims::Curve(t, p, 0.004);
 				Assert::IsTrue(v >= last, L"monotonic");
 				last = v;
 			}
-			Assert::AreEqual(DolbyVisionTrims::Curve(1.0, p) + 0.1, DolbyVisionTrims::Curve(1.1, p), 1e-12,
+			Assert::AreEqual(DolbyVisionTrims::Curve(1.0, p, 0.004) + 0.1, DolbyVisionTrims::Curve(1.1, p, 0.004), 1e-12,
 				L"above the peak: slope 1 from f(1) (nothing clipped)");
 			DolbyVisionTrims::Params neutral;
 			for (const double t : { 0.0, 0.25, 0.8, 1.0, 1.3 })
-				Assert::AreEqual(t, DolbyVisionTrims::Curve(t, neutral), 1e-12);
+				Assert::AreEqual(t, DolbyVisionTrims::Curve(t, neutral, 0.004), 1e-12);
 		}
 
 		TEST_METHOD(PixelTrimIsNeutralAtNeutralAndActsAsDescribed)
@@ -170,6 +170,164 @@ namespace Tests
 				DolbyVisionTrims::ApplyPixel(black, darker, signal);
 				Assert::AreEqual(-0.01, black[0], 1e-12);
 			}
+		}
+	
+		TEST_METHOD(CurveIsContinuousThroughBlackWithAPositiveOffset)
+		{
+			// Review C2: a positive offset fades in over the first PQ codes, so
+			// f(0) = 0 (no step from the untouched below-black) and the curve
+			// rises monotonically through the fade.
+			DolbyVisionTrims::Params lift;
+			lift.offset = 0.1;
+			const double fadeT = DolbyVisionTrims::kOffsetFadePq / DolbyVisionTrims::PqFromNits(100.0);
+			Assert::AreEqual(0.0, DolbyVisionTrims::Curve(0.0, lift, fadeT), 1e-12);
+			double last = 0.0;
+			for (int i = 1; i <= 400; ++i)
+			{
+				const double v = DolbyVisionTrims::Curve(fadeT * i / 200.0, lift, fadeT);
+				Assert::IsTrue(v >= last, L"monotonic through the fade");
+				Assert::IsTrue(v - last <= 0.1 / 200.0 + 0.01 / 200.0 + 1e-9, L"no step");
+				last = v;
+			}
+			// Through the pixel path: a pixel just above black stays next to black.
+			DolbyVisionTrims::Signal signal;
+			signal.pq = false;
+			signal.peakNits = 100.0;
+			signal.kr = 0.2126; signal.kg = 0.7152; signal.kb = 0.0722;
+			double tiny[3] = { 1e-4, 1e-4, 1e-4 };
+			DolbyVisionTrims::ApplyPixel(tiny, lift, signal);
+			Assert::IsTrue(tiny[0] < 0.01, L"0+ is not lifted to the offset");
+		}
+
+		TEST_METHOD(MixedSignNearBlackPixelsStayBounded)
+		{
+			// Review C1: a tiny positive luminance from mixed-sign channels (below-
+			// black in one channel) must not be multiplied into a bright speck by
+			// Y'/Y; luminance becomes Y' exactly and the chroma gain is bounded.
+			DolbyVisionTrims::Signal signal;
+			signal.pq = true;
+			signal.peakNits = 600.0;
+			DolbyVisionTrims::Params lift;
+			lift.offset = 0.2;
+			lift.saturationGain = 1.5;
+			const double nits[3] = { 0.08, -0.02, -0.01 };   // Y about 0.0005 nits
+			double rgb[3];
+			for (int c = 0; c < 3; ++c)
+				rgb[c] = DolbyVisionTrims::FromNits(nits[c], signal);
+			const double Y = signal.kr * nits[0] + signal.kg * nits[1] + signal.kb * nits[2];
+			Assert::IsTrue(Y > 0.0 && Y < 0.01);
+			DolbyVisionTrims::ApplyPixel(rgb, lift, signal);
+			double out[3];
+			for (int c = 0; c < 3; ++c)
+				out[c] = DolbyVisionTrims::ToNits(rgb[c], signal);
+			// Luminance becomes the curve's Y' exactly; the chroma (L - Y) is
+			// scaled by at most sat x kMaxChromaRatio (the old Y'/Y gain here was
+			// about 175: a 20-nit speck from a 0.08-nit channel).
+			const double Y2 = signal.kr * out[0] + signal.kg * out[1] + signal.kb * out[2];
+			const double peakPq = DolbyVisionTrims::PqFromNits(signal.peakNits);
+			const double expectY2 = DolbyVisionTrims::NitsFromPq(peakPq * DolbyVisionTrims::Curve(
+				DolbyVisionTrims::PqFromNits(Y) / peakPq, lift, DolbyVisionTrims::kOffsetFadePq / peakPq));
+			Assert::AreEqual(expectY2, Y2, expectY2 * 1e-6 + 1e-9, L"luminance = Y'");
+			for (int c = 0; c < 3; ++c)
+			{
+				Assert::IsTrue(std::fabs(out[c] - Y2) <= 1.5 * DolbyVisionTrims::kMaxChromaRatio * std::fabs(nits[c] - Y) + 1e-6,
+					(L"chroma gain bounded, channel " + std::to_wstring(c)).c_str());
+				Assert::IsTrue(out[c] < Y2 + 1.0, (L"no speck, channel " + std::to_wstring(c)).c_str());
+			}
+			// A dark but positive colourful pixel: chroma gain at most sat x kMaxChromaRatio.
+			const double dark[3] = { 0.5, 0.1, 0.05 };
+			for (int c = 0; c < 3; ++c)
+				rgb[c] = DolbyVisionTrims::FromNits(dark[c], signal);
+			const double Yd = signal.kr * dark[0] + signal.kg * dark[1] + signal.kb * dark[2];
+			DolbyVisionTrims::ApplyPixel(rgb, lift, signal);
+			double Yo = 0.0, o[3];
+			for (int c = 0; c < 3; ++c) o[c] = DolbyVisionTrims::ToNits(rgb[c], signal);
+			Yo = signal.kr * o[0] + signal.kg * o[1] + signal.kb * o[2];
+			Assert::IsTrue(std::fabs(o[0] - Yo) <= 1.5 * DolbyVisionTrims::kMaxChromaRatio * std::fabs(dark[0] - Yd) + 1e-6);
+		}
+
+		TEST_METHOD(CorruptTrimCodesAreRejected)
+		{
+			// Review C3: any L2 field beyond 12 bits skips the block; decoding clamps.
+			const uint16_t t100 = static_cast<uint16_t>(std::lround(DolbyVisionTrims::PqFromNits(100.0) * 4095.0));
+			Trim corrupt = L2(t100, 60000);
+			Assert::IsFalse(DolbyVisionTrims::Valid(corrupt));
+			Assert::IsFalse(DolbyVisionTrims::Select(Dm({ corrupt }), 100.0).apply, L"a corrupt block alone: nothing");
+			for (int field = 0; field < 5; ++field)
+			{
+				Trim t = L2(t100, 2048 - 400);
+				uint16_t* f[] = { &t.slope, &t.offset, &t.power, &t.chromaWeight, &t.saturationGain };
+				*f[field] = 4096;
+				Assert::IsFalse(DolbyVisionTrims::Valid(t));
+			}
+			const auto s = DolbyVisionTrims::Select(Dm({ corrupt, L2(t100, 2048 - 400) }), 100.0);
+			Assert::IsTrue(s.apply);
+			Assert::AreEqual(1.0 - 400 / 4096.0, s.params.slope, 1e-9, L"the valid block is used");
+			const auto clamped = DolbyVisionTrims::Decode(corrupt);
+			Assert::IsTrue(clamped.slope <= 1.5 && clamped.slope >= 0.5);
+		}
+
+		TEST_METHOD(LuminanceWeightsFollowThePrimaries)
+		{
+			// Review C4: Y row of RGB -> XYZ from the primaries.
+			const double d65[2] = { 0.3127, 0.3290 };
+			double kr, kg, kb;
+			{
+				const double r[2] = { 0.640, 0.330 }, g[2] = { 0.300, 0.600 }, b[2] = { 0.150, 0.060 };
+				DolbyVisionTrims::LuminanceWeights(r, g, b, d65, kr, kg, kb);
+				Assert::AreEqual(0.2126, kr, 2e-4); Assert::AreEqual(0.7152, kg, 2e-4); Assert::AreEqual(0.0722, kb, 2e-4);
+			}
+			{
+				const double r[2] = { 0.708, 0.292 }, g[2] = { 0.170, 0.797 }, b[2] = { 0.131, 0.046 };
+				DolbyVisionTrims::LuminanceWeights(r, g, b, d65, kr, kg, kb);
+				Assert::AreEqual(0.2627, kr, 2e-4); Assert::AreEqual(0.6780, kg, 2e-4); Assert::AreEqual(0.0593, kb, 2e-4);
+			}
+			{
+				const double r[2] = { 0.680, 0.320 }, g[2] = { 0.265, 0.690 }, b[2] = { 0.150, 0.060 };   // P3-D65
+				DolbyVisionTrims::LuminanceWeights(r, g, b, d65, kr, kg, kb);
+				Assert::AreEqual(0.2290, kr, 2e-4); Assert::AreEqual(0.6917, kg, 2e-4); Assert::AreEqual(0.0793, kb, 2e-4);
+			}
+			Assert::AreEqual(1.0, kr + kg + kb, 1e-9);
+		}
+
+		TEST_METHOD(ShoulderRollsOffInsteadOfClippingBelowThePeak)
+		{
+			// Review S3: slope + offset > 1 reaches 1 exactly at the peak, smoothly.
+			DolbyVisionTrims::Params p;
+			p.slope = 1.3;
+			p.offset = 0.1;
+			double last = -1.0, lastStep = 1e9;
+			for (int i = 600; i <= 1000; ++i)
+			{
+				const double v = DolbyVisionTrims::Curve(i / 1000.0, p, 0.004);
+				Assert::IsTrue(v > last || i == 1000, L"strictly rising below the peak (no clip)");
+				if (last >= 0.0 && i > 700)
+					Assert::IsTrue(v - last <= lastStep + 1e-9, L"the steps only shrink in the shoulder");
+				if (last >= 0.0) lastStep = v - last;
+				last = v;
+			}
+			Assert::AreEqual(1.0, DolbyVisionTrims::Curve(1.0, p, 0.004), 1e-12, L"1 at the peak");
+			Assert::IsTrue(DolbyVisionTrims::Curve(0.99, p, 0.004) < 1.0, L"below 1 before the peak");
+			Assert::AreEqual(1.05, DolbyVisionTrims::Curve(1.05, p, 0.004), 1e-12, L"above-white continues");
+		}
+	
+		TEST_METHOD(SaturationNeverPushesAChannelBelowBlack)
+		{
+			// Gamut: a strong saturation gain on a saturated pixel caps where the
+			// smallest non-negative channel would cross black.
+			DolbyVisionTrims::Signal signal;
+			signal.pq = true;
+			signal.peakNits = 600.0;
+			DolbyVisionTrims::Params p;
+			p.slope = 1.3; p.offset = 0.1; p.saturationGain = 1.5;
+			const double nits[3] = { 4.2, 244.0, 40.1 };
+			double rgb[3];
+			for (int c = 0; c < 3; ++c)
+				rgb[c] = DolbyVisionTrims::FromNits(nits[c], signal);
+			DolbyVisionTrims::ApplyPixel(rgb, p, signal);
+			for (int c = 0; c < 3; ++c)
+				Assert::IsTrue(rgb[c] >= -1e-9, (L"channel " + std::to_wstring(c) + L" stays at or above black").c_str());
+			Assert::IsTrue(DolbyVisionTrims::ToNits(rgb[1], signal) > nits[1], L"still lifted");
 		}
 	};
 }

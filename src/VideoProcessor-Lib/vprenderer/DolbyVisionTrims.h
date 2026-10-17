@@ -29,15 +29,24 @@
 //   1. linear light (nits) from the output signal: PQ, or a gamma signal
 //      times the display peak (SDR output)
 //   2. Y = luminance with the output's coefficients; t = PQ(Y) / PQ(peak)
-//   3. CDL on t (0..1): t' = clamp(t * slope + offset, 0, 1) ^ power; above
-//      the peak (t > 1, the kept above-white) the curve continues with slope
-//      1 from f(1), so nothing above white is clipped; Y <= 0 is untouched
-//      (below-black kept)
-//   4. RGB scaled by Y'/Y (hue and ratios kept)
-//   5. saturation around Y': saturation_gain x (Y'/Y)^chroma_weight,
-//      clamped to 0..2 (chroma_weight: how far chroma follows the intensity
-//      change)
-//   6. back to the output signal
+//   3. CDL on t (0..1): t' = shoulder(t * slope + offset_t) ^ power, where
+//      offset_t fades the offset in over the first kOffsetFadePq of PQ so
+//      the curve is continuous through black (f(0) = 0, below-black stays
+//      below), and the shoulder (review S3) rolls x off smoothly to 1 when
+//      slope + offset exceeds 1 (C1 at its start, flat at the peak) instead
+//      of hard-clipping highlights below the peak; above the peak (t > 1,
+//      the kept above-white) the curve continues with slope 1 from f(1), so
+//      nothing above white is clipped; Y <= 0 is untouched (below-black kept)
+//   4. the pixel's luminance becomes Y' and its chroma (L - Y) is scaled by
+//      a bounded gain: saturation_gain x (Y'/Y)^chroma_weight (0..2) times
+//      Y'/Y capped at kMaxChromaRatio. Near black (Y below the luminance of
+//      kNearBlackPq) the change is additive instead (chroma kept, the gain
+//      fading to 1 at Y = 0): a tiny or mixed-sign luminance can never turn
+//      into bright specks (review C1). Above twice that luminance this is
+//      exactly "RGB scaled by Y'/Y, then saturation around Y'". A gain above
+//      1 is also capped so no channel at or above black is pushed below it
+//      (gamut: no new below-black, no clipped hue shift).
+//   5. back to the output signal
 // Field decoding (12-bit, 2048 = neutral): slope = c/4096 + 0.5, offset =
 // c/4096 - 0.5, power = c/4096 + 0.5, chroma_weight = c/4096 - 0.5,
 // saturation_gain = c/4096 + 0.5. ms_weight is not used (it applies to
@@ -59,14 +68,31 @@ namespace DolbyVisionTrims
 			p.chromaWeight == 0.0 && p.saturationGain == 1.0;
 	}
 
+	// The pass's constants (the shader uses the same values).
+	constexpr double kOffsetFadePq = 16.0 / 4095.0;   // the offset fades in over 16 PQ codes
+	constexpr double kNearBlackPq = 64.0 / 4095.0;    // below its luminance the change is additive
+	constexpr double kMaxChromaRatio = 4.0;           // the luminance ratio chroma may follow
+
+	// Review C3: every L2 field is a 12-bit code; a block with any field out
+	// of range (a corrupt transport) is skipped, never decoded.
+	inline bool Valid(const DolbyVisionTunnelFrameMetadata::Trim& trim)
+	{
+		return trim.level == 2 && trim.targetMaxPq <= 4095 && trim.slope <= 4095 && trim.offset <= 4095 &&
+			trim.power <= 4095 && trim.chromaWeight <= 4095 && trim.saturationGain <= 4095;
+	}
+
+	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+	// Decoded within the 12-bit spec ranges (codes clamped to 0..4095).
 	inline Params Decode(const DolbyVisionTunnelFrameMetadata::Trim& trim)
 	{
+		auto code = [](uint16_t c) { return static_cast<double>(c > 4095 ? 4095 : c); };
 		Params p;
-		p.slope = trim.slope / 4096.0 + 0.5;
-		p.offset = trim.offset / 4096.0 - 0.5;
-		p.power = trim.power / 4096.0 + 0.5;
-		p.chromaWeight = trim.chromaWeight / 4096.0 - 0.5;
-		p.saturationGain = trim.saturationGain / 4096.0 + 0.5;
+		p.slope = Clamp(code(trim.slope) / 4096.0 + 0.5, 0.5, 1.5);
+		p.offset = Clamp(code(trim.offset) / 4096.0 - 0.5, -0.5, 0.5);
+		p.power = Clamp(code(trim.power) / 4096.0 + 0.5, 0.5, 1.5);
+		p.chromaWeight = Clamp(code(trim.chromaWeight) / 4096.0 - 0.5, -0.5, 0.5);
+		p.saturationGain = Clamp(code(trim.saturationGain) / 4096.0 + 0.5, 0.5, 1.5);
 		return p;
 	}
 
@@ -121,7 +147,7 @@ namespace DolbyVisionTrims
 		for (int i = 0; i < dm.trimCount && i < DolbyVisionTunnelFrameMetadata::kMaxTrims; ++i)
 		{
 			const auto& t = dm.trims[i];
-			if (t.level != 2 || t.targetMaxPq > 4095)
+			if (!Valid(t))
 				continue;
 			if (t.targetMaxPq <= s.displayPq &&
 				(s.lowerIndex < 0 || t.targetMaxPq > dm.trims[s.lowerIndex].targetMaxPq))
@@ -178,6 +204,24 @@ namespace DolbyVisionTrims
 		double kr = 0.2627, kg = 0.6780, kb = 0.0593;   // luminance coefficients
 	};
 
+	// Review C4: the luminance coefficients of RGB primaries (CIE xy of red,
+	// green, blue and white): row Y of the RGB -> XYZ matrix.
+	inline void LuminanceWeights(const double red[2], const double green[2], const double blue[2],
+		const double white[2], double& kr, double& kg, double& kb)
+	{
+		auto xyz = [](const double c[2], double v[3]) { v[0] = c[0] / c[1]; v[1] = 1.0; v[2] = (1.0 - c[0] - c[1]) / c[1]; };
+		double R[3], G[3], B[3], W[3];
+		xyz(red, R); xyz(green, G); xyz(blue, B); xyz(white, W);
+		// Solve [R G B] * S = W for the channel scales S (Cramer's rule).
+		auto det = [](const double a[3], const double b[3], const double c[3]) {
+			return a[0] * (b[1] * c[2] - b[2] * c[1]) - b[0] * (a[1] * c[2] - a[2] * c[1]) + c[0] * (a[1] * b[2] - a[2] * b[1]);
+		};
+		const double d = det(R, G, B);
+		kr = det(W, G, B) / d * R[1];
+		kg = det(R, W, B) / d * G[1];
+		kb = det(R, G, W) / d * B[1];
+	}
+
 	inline double ToNits(double v, const Signal& s)
 	{
 		if (s.pq)
@@ -194,14 +238,30 @@ namespace DolbyVisionTrims
 		return nits < 0.0 ? -a : a;
 	}
 
-	// The CDL on t (PQ of the luminance over PQ of the peak), continued with
-	// slope 1 above the peak.
-	inline double Curve(double t, const Params& p)
+	// The shoulder (review S3): x unchanged up to k = 2 - xMax, then
+	// k + (1 - k)(2u - u^2), u = (x - k) / (2 (1 - k)): C1 at k, exactly 1 at
+	// xMax (the value at the peak) with slope 0. xMax <= 1: identity.
+	inline double Shoulder(double x, double xMax)
+	{
+		if (xMax <= 1.0)
+			return x;
+		const double k = 2.0 - xMax;   // xMax <= 2 (slope <= 1.5, offset <= 0.5)
+		if (x <= k)
+			return x;
+		const double u = Clamp((x - k) / (2.0 * (1.0 - k)), 0.0, 1.0);
+		return k + (1.0 - k) * (2.0 * u - u * u);
+	}
+
+	// The CDL on t (PQ of the luminance over PQ of the peak). fadeT: the
+	// offset's fade-in width in t (kOffsetFadePq / PQ(peak)). Continuous
+	// through 0 (f(0) = 0), monotonic, continued with slope 1 above the peak.
+	inline double Curve(double t, const Params& p, double fadeT)
 	{
 		const double inside = t < 1.0 ? t : 1.0;
-		double v = inside * p.slope + p.offset;
-		v = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
-		v = std::pow(v, p.power);
+		const double fade = fadeT > 0.0 ? Clamp(inside / fadeT, 0.0, 1.0) : 1.0;
+		double v = inside * p.slope + p.offset * fade;
+		v = Shoulder(v < 0.0 ? 0.0 : v, p.slope + p.offset);
+		v = std::pow(Clamp(v, 0.0, 1.0), p.power);
 		return t > 1.0 ? v + (t - 1.0) : v;
 	}
 
@@ -216,16 +276,29 @@ namespace DolbyVisionTrims
 			return;
 		const double peakPq = PqFromNits(s.peakNits);
 		const double t = PqFromNits(Y) / peakPq;
-		const double t2 = Curve(t, p);
+		const double t2 = Curve(t, p, kOffsetFadePq / peakPq);
 		const double Y2 = NitsFromPq(t2 * peakPq);
 		const double r = Y2 / Y;
-		double sat = p.saturationGain * (p.chromaWeight == 0.0 ? 1.0 : std::pow(r > 1e-6 ? r : 1e-6, p.chromaWeight));
-		sat = sat < 0.0 ? 0.0 : (sat > 2.0 ? 2.0 : sat);
+		const double sat = Clamp(p.saturationGain *
+			(p.chromaWeight == 0.0 ? 1.0 : std::pow(r > 1e-6 ? r : 1e-6, p.chromaWeight)), 0.0, 2.0);
+		// Chroma gain: multiplicative (sat x r, r capped) from twice the
+		// near-black luminance, additive (sat, fading to 1 at Y = 0) below it.
+		const double yNear = NitsFromPq(kNearBlackPq);
+		const double w = Clamp((Y - yNear) / yNear, 0.0, 1.0);
+		const double additive = 1.0 + (sat - 1.0) * Clamp(Y / yNear, 0.0, 1.0);
+		const double multiplicative = sat * (r < kMaxChromaRatio ? r : kMaxChromaRatio);
+		double gain = additive + (multiplicative - additive) * w;
+		// Gamut: a gain above 1 never pushes a channel that was at or above
+		// black below it (it would be clipped, shifting hue): capped at
+		// Y' / (Y - L) over the channels with 0 <= L < Y.
 		for (int c = 0; c < 3; ++c)
-		{
-			const double scaled = L[c] * r;
-			rgb[c] = FromNits(Y2 + sat * (scaled - Y2), s);
-		}
+			if (gain > 1.0 && L[c] >= 0.0 && L[c] < Y)
+			{
+				const double limit = Y2 / (Y - L[c]);
+				gain = gain < limit ? gain : (limit > 1.0 ? limit : 1.0);
+			}
+		for (int c = 0; c < 3; ++c)
+			rgb[c] = FromNits(Y2 + gain * (L[c] - Y), s);
 	}
 
 	inline std::string Describe(const Selection& s)

@@ -3,6 +3,7 @@
 
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
+#include <vprenderer/VpDebander.h>
 
 #include <algorithm>
 #include <cmath>
@@ -424,6 +425,30 @@ namespace InterpolationTimelineTest
 			// A jump beyond the longest span restarts.
 			plain.Plan(1, 8, 100.40, 0.0, 50.0, 50.0, false);
 			Assert::AreEqual(1ull, plain.Restarts());
+		}
+	};
+}
+
+namespace InterpolationDebandHoldTest
+{
+	TEST_CLASS(InterpolationDebandHoldTests)
+	{
+	public:
+		// Stage B skips source frames no refresh shows; VP deband's hold carries over them
+		// (the next shown frame still holds), but never over a broken run.
+		TEST_METHOD(TheHoldCarriesOverSkippedFramesOnly)
+		{
+			VpDebander::Module module;
+			module.CarryHold(5);
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(module.HoldSequence()), L"no run: nothing to carry");
+			module.SetHoldSequenceForTest(10);
+			module.CarryHold(11);
+			Assert::AreEqual(11ull, static_cast<unsigned long long>(module.HoldSequence()), L"carried over the skipped frame");
+			module.CarryHold(13);
+			Assert::AreEqual(11ull, static_cast<unsigned long long>(module.HoldSequence()), L"a hole is not carried");
+			module.ForgetHold();
+			module.CarryHold(12);
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(module.HoldSequence()), L"an invalidation is not carried");
 		}
 	};
 }

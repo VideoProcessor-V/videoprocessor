@@ -128,6 +128,26 @@ float from_nits(float n)
     return sign(n) * pow(abs(n) / dv_peak_nits, 1.0 / dv_gamma);
 }
 
+// DolbyVisionTrims constants: the offset fade-in (16 PQ codes), the near-black
+// luminance (64 PQ codes) below which the change is additive, and the cap on
+// the luminance ratio chroma follows (review C1/C2).
+#define DV_OFFSET_FADE_PQ (16.0 / 4095.0)
+#define DV_NEAR_BLACK_PQ (64.0 / 4095.0)
+#define DV_MAX_CHROMA_RATIO 4.0
+
+// The shoulder (review S3): identity up to k = 2 - x_max, then a C1 roll-off
+// reaching exactly 1 at x_max with slope 0; x_max <= 1: identity.
+float dv_shoulder(float x, float x_max)
+{
+    if (x_max <= 1.0)
+        return x;
+    float k = 2.0 - x_max;
+    if (x <= k)
+        return x;
+    float u = clamp((x - k) / (2.0 * (1.0 - k)), 0.0, 1.0);
+    return k + (1.0 - k) * (2.0 * u - u * u);
+}
+
 vec4 hook()
 {
     vec4 color = HOOKED_texOff(0);
@@ -138,15 +158,27 @@ vec4 hook()
         return color;
     float peak_pq = pq_from_nits(dv_peak_nits);
     float t = pq_from_nits(Y) / peak_pq;
-    float v = clamp(min(t, 1.0) * dv_slope + dv_offset, 0.0, 1.0);
-    v = pow(v, dv_power);
+    float inside = min(t, 1.0);
+    float fade = clamp(inside / (DV_OFFSET_FADE_PQ / peak_pq), 0.0, 1.0);
+    float v = inside * dv_slope + dv_offset * fade;
+    v = dv_shoulder(max(v, 0.0), dv_slope + dv_offset);
+    v = pow(clamp(v, 0.0, 1.0), dv_power);
     if (t > 1.0)
         v += t - 1.0;
     float Y2 = nits_from_pq(v * peak_pq);
     float r = Y2 / Y;
     float sat = clamp(dv_sat_gain * (dv_chroma_weight == 0.0 ? 1.0 : pow(max(r, 1e-6), dv_chroma_weight)), 0.0, 2.0);
-    vec3 scaled = L * r;
-    vec3 outn = vec3(Y2) + sat * (scaled - vec3(Y2));
+    float y_near = nits_from_pq(DV_NEAR_BLACK_PQ);
+    float w = clamp((Y - y_near) / y_near, 0.0, 1.0);
+    float additive = 1.0 + (sat - 1.0) * clamp(Y / y_near, 0.0, 1.0);
+    float multiplicative = sat * min(r, DV_MAX_CHROMA_RATIO);
+    float gain = mix(additive, multiplicative, w);
+    // Gamut: a gain above 1 never pushes a channel at or above black below it.
+    for (int c = 0; c < 3; c++) {
+        if (gain > 1.0 && L[c] >= 0.0 && L[c] < Y)
+            gain = min(gain, max(Y2 / (Y - L[c]), 1.0));
+    }
+    vec3 outn = vec3(Y2) + gain * (L - vec3(Y));
     color.rgb = vec3(from_nits(outn.r), from_nits(outn.g), from_nits(outn.b));
     return color;
 }

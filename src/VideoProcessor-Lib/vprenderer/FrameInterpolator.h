@@ -30,8 +30,11 @@
 //   - an untrusted position (an occlusion hole or a failed match) takes the
 //     fallback: hold = the nearest frame's own pixel (t < 0.5: A, else B; the
 //     de-judder's "never a blend"), blend = (1 - t) A + t B (smooth motion's
-//     frame-mix parity); but where B's own block there is new (disocclusion:
-//     uncovered between A and B), B's pixel at any phase - only B has it;
+//     frame-mix parity); but where B's own block there is new and a trusted
+//     neighbouring block moves away from the position (disocclusion: uncovered
+//     between A and B; at least 2 source pixels at this phase), B's pixel at any
+//     phase - only B has it. New in B with nothing moving away is a bad match:
+//     the fallback stays;
 //   - a cut (the frame trust below min_trusted_share) holds the nearest frame
 //     whole, whatever the fallback.
 // The output planes have the input planes' formats and sizes, so everything

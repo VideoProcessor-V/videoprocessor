@@ -127,12 +127,29 @@ independent reimplementation from the published L2 fields (12-bit codes,
   to neutral at the mastering peak, and at or above the mastering peak nothing
   is applied.
 - Per pixel: luminance Y in nits from the output signal (PQ, or gamma x the
-  display peak); CDL `clamp(t * slope + offset, 0, 1) ^ power` on
-  `t = PQ(Y) / PQ(peak)` (continued with slope 1 above the peak, so kept
-  above-white is not clipped; Y <= 0 untouched); RGB scaled by Y'/Y; saturation
-  around Y' by `saturation_gain x (Y'/Y) ^ chroma_weight` (0..2).
-- Off with a calibration 3D LUT, for HLG/other outputs, and for pictures
-  without DM. The log reports the choice ("Dolby Vision trims").
+  display peak), with the output primaries' own luminance coefficients. A CDL
+  `x = t * slope + offset` on `t = PQ(Y) / PQ(peak)` follows, then
+  `shoulder(x) ^ power`:
+  - the offset fades in over the first 16 PQ codes, so the curve is
+    continuous through black and below-black stays below;
+  - when slope + offset exceeds 1, a C1 shoulder reaches 1 exactly at the
+    peak instead of hard-clipping highlights below it;
+  - above the peak the curve continues with slope 1, so the kept above-white
+    is not clipped; Y <= 0 is untouched.
+- The pixel's luminance becomes Y'. Its chroma (L - Y) is scaled by
+  `saturation_gain x (Y'/Y) ^ chroma_weight` (0..2) times Y'/Y, with Y'/Y
+  capped at 4:
+  - near black (below the luminance of 64 PQ codes) the change is additive,
+    with the gain fading to 1 at Y = 0, so tiny or mixed-sign pixels cannot
+    become bright specks;
+  - a gain above 1 never pushes a channel that was at or above black below it
+    (gamut).
+- L2 blocks with any field above 12 bits are skipped; decoded values are
+  clamped to the spec ranges.
+- Off with a calibration 3D LUT, for outputs other than PQ, a power-law gamma,
+  BT.1886 or sRGB (e.g. linear, HLG), and for pictures without DM. The log
+  reports the reason on change and the parameters at most every 10 s
+  ("Dolby Vision trims").
   The reference maths is `vprenderer/DolbyVisionTrims.h`. Tests:
   `DolbyVisionTrimsTests` (CPU) and `DolbyVisionTrimShaderMatchesItsReference`
   (GPU).

@@ -3702,27 +3702,59 @@ namespace VideoProcessorTest
 				for (size_t i = 0; i < unity.size(); ++i)
 					Assert::IsTrue(std::abs(static_cast<int>(baseline[i].r) - static_cast<int>(unity[i].r)) <= 1 &&
 						std::abs(static_cast<int>(baseline[i].b) - static_cast<int>(unity[i].b)) <= 1, L"neutral = untouched");
+				// A darkening trim, and a lifting one past 1 (the offset fade-in near
+				// black and the shoulder below the peak, reviews C2 / S3).
+				for (int variant = 0; variant < 2; ++variant)
+				{
 				DolbyVisionTrims::Params trim;
-				trim.slope = 0.85; trim.offset = 0.02; trim.power = 1.15; trim.chromaWeight = 0.2; trim.saturationGain = 1.2;
+				if (variant == 0) { trim.slope = 0.85; trim.offset = 0.02; trim.power = 1.15; trim.chromaWeight = 0.2; trim.saturationGain = 1.2; }
+				else { trim.slope = 1.3; trim.offset = 0.1; trim.power = 0.9; trim.chromaWeight = -0.3; trim.saturationGain = 1.15; }
 				set(trim, signal);
 				const auto trimmed = fixture.RenderCoordinateField(hook);
-				int changed = 0;
+				int changed = 0, loose = 0;
 				for (size_t i = 0; i < trimmed.size(); ++i)
 				{
-					double v[3] = { baseline[i].r / 255.0, baseline[i].g / 255.0, baseline[i].b / 255.0 };
+					// libplacebo hands PRE_OUTPUT an rgba16f intermediate: the reference
+					// takes the same half-precision input (11-bit significand).
+					auto half = [](double x)
+					{
+						if (x == 0.0) return 0.0;
+						int e = 0;
+						const double m = std::frexp(x, &e);
+						return std::ldexp(std::round(m * 2048.0) / 2048.0, e);
+					};
+					double v[3] = { half(baseline[i].r / 255.0), half(baseline[i].g / 255.0), half(baseline[i].b / 255.0) };
+					double scale = 0.0;   // the pixel's light scale (largest channel, nits)
+					for (int c = 0; c < 3; ++c)
+						scale = (std::max)(scale, std::fabs(DolbyVisionTrims::ToNits(v[c], signal)));
 					DolbyVisionTrims::ApplyPixel(v, trim, signal);
 					const uint8_t got[3] = { trimmed[i].r, trimmed[i].g, trimmed[i].b };
 					for (int c = 0; c < 3; ++c)
 					{
+						// Within 1.5 codes, or (where out = Y' + gain (L - Y) cancels large
+						// numbers into a channel of a few nits, at a gamut edge or under a
+						// strong saturation gain, and PQ is steep near black) within
+						// 5e-4 of the pixel's light in linear light: the GPU's float PQ
+						// maths cannot resolve that cancellation more exactly.
 						const double expected = 255.0 * (std::min)(1.0, (std::max)(0.0, v[c]));
-						Assert::AreEqual(expected, static_cast<double>(got[c]), 1.5,
-							(std::wstring(pq ? L"PQ " : L"gamma ") + L"pixel " + std::to_wstring(i) + L" channel " +
-								std::to_wstring(c)).c_str());
+						const double diff = std::fabs(expected - static_cast<double>(got[c]));
+						if (diff <= 1.5)
+							continue;
+						const double nitsDiff = std::fabs(DolbyVisionTrims::ToNits(expected / 255.0, signal) -
+							DolbyVisionTrims::ToNits(got[c] / 255.0, signal));
+						Assert::IsTrue(nitsDiff <= 2e-3 * scale + 1e-3, (std::wstring(pq ? L"PQ " : L"gamma ") + L"variant " +
+							std::to_wstring(variant) + L" pixel " + std::to_wstring(i) + L" channel " + std::to_wstring(c) + L": " +
+							std::to_wstring(expected) + L" vs " + std::to_wstring(got[c])).c_str());
+						++loose;
 					}
 					changed += got[0] != baseline[i].r || got[1] != baseline[i].g || got[2] != baseline[i].b;
 					++checked;
 				}
 				Assert::IsTrue(changed > static_cast<int>(trimmed.size()) / 2, L"the trim changes the picture");
+				Assert::IsTrue(loose * 100 <= static_cast<int>(trimmed.size()) * 3 * 5, L"at most 5% of samples beyond 1.5 codes");
+				Logger::WriteMessage((std::string(pq ? "PQ" : "gamma") + " variant " + std::to_string(variant) + ": " +
+					std::to_string(loose) + " samples beyond 1.5 codes\n").c_str());
+				}
 			}
 			// libplacebo's known PRE_OUTPUT log noise (the output-encoding bug the
 			// renderer repairs), as in the SDR tone shape test.
@@ -13554,13 +13586,17 @@ namespace VideoProcessorTest
 			DejudderGpuPlanes planesA, planesB;
 			UploadDejudderFrame(gpu, a, planesA);
 			UploadDejudderFrame(gpu, b, planesB);
-			// No motion. Blocks x 2..4: trusted, but B's content there is new (occlusion);
-			// blocks x 10..12: untrusted and new in B (disocclusion); the rest seen in both.
+			// Blocks x 0..9 still, x 13.. moving right by 16 px (away from the hole). Blocks
+			// x 2..4: trusted, but B's content there is new (occlusion: A alone); blocks x 10..12:
+			// untrusted and new in B. Block 12's neighbour 13 moves away from it (uncovered:
+			// B); blocks 10 and 11 have nothing moving away (a bad match: the hold, A at t 0.25).
+			// Checked over blocks 0..12 (the moving region's own warp is not the subject).
 			auto occluded = [](int bx) { return bx >= 2 && bx <= 4; };
 			auto disoccluded = [](int bx) { return bx >= 10 && bx <= 12; };
+			auto uncovered = [](int bx) { return bx == 12; };
 			InterpolatorField field;
 			MakeInterpolatorField(gpu, width, height, 1.0f, [&](int bx, int) {
-				return std::array<float, 4>{ 0.0f, 0.0f, disoccluded(bx) ? 0.0f : 1.0f, 0.0f }; }, field);
+				return std::array<float, 4>{ bx >= 13 ? 16.0f : 0.0f, 0.0f, disoccluded(bx) ? 0.0f : 1.0f, 0.0f }; }, field);
 			const int bx = width / 16, by = height / 16;
 			std::vector<float> mask(static_cast<size_t>(bx) * by * 4, 1.0f);
 			for (int y = 0; y < by; ++y)
@@ -13578,18 +13614,19 @@ namespace VideoProcessorTest
 			const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
 			int checked = 0, right = 0;
 			for (int y = 0; y < height; ++y)
-				for (int x = 0; x < width; ++x)
+				for (int x = 0; x < 13 * 16; ++x)
 				{
 					const int blockX = x / 16;
 					const size_t i = static_cast<size_t>(y) * width + x;
 					double expected;
 					if (occluded(blockX)) expected = a.luma[i];
-					else if (disoccluded(blockX)) expected = b.luma[i];
+					else if (uncovered(blockX)) expected = b.luma[i];
+					else if (disoccluded(blockX)) expected = a.luma[i];   // no uncover: the hold (t < 0.5)
 					else expected = (1.0 - t) * a.luma[i] + t * b.luma[i];
 					++checked;
 					right += std::abs(luma[i] - expected) <= 1.0;
 				}
-			Assert::AreEqual(checked, right, L"occluded: A alone; disoccluded: B; elsewhere the time blend");
+			Assert::AreEqual(checked, right, L"occluded: A alone; uncovered: B; new without uncover: the hold; elsewhere the time blend");
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}

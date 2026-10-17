@@ -56,12 +56,30 @@ if (q.x < size.x && q.y < size.y) {
             outv = phase < 0.5 ? a0 : b0;   // hold the nearest frame's own pixel
 #endif
 #ifdef OCCLUSION
-            // Disocclusion: no trusted A vector here and B's own block is content A did not
-            // have (uncovered between A and B): only B has it, at any phase.
+            // Disocclusion: no trusted A vector here, B's own block is content A did not have,
+            // and the uncover test passes - a trusted neighbouring block moves away from this
+            // position, by at least 2 source pixels at this phase (its content has left: the
+            // background behind it is showing). Only B has that content, at any phase. A bad
+            // match (new in B, but nothing moving away) keeps the fallback above.
             {
                 ivec2 osize = textureSize(occ_b, 0);
-                if (texelFetch(occ_b, clamp(ivec2(floor(lp / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
-                    outv = b0;
+                if (texelFetch(occ_b, clamp(ivec2(floor(lp / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5) {
+                    ivec2 fsize = textureSize(field, 0);
+                    ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+                    bool uncovered = false;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++) {
+                            ivec2 c = own + ivec2(dx, dy);
+                            if ((dx == 0 && dy == 0) || c.x < 0 || c.y < 0 || c.x >= fsize.x || c.y >= fsize.y)
+                                continue;
+                            vec4 f = texelFetch(field, c, 0);
+                            vec2 centre = (vec2(c) + vec2(0.5)) * 16.0;
+                            if (f.z > 0.5 && dot(f.xy, centre - lp) > 0.0 && phase * length(f.xy) >= 2.0)
+                                uncovered = true;
+                        }
+                    if (uncovered)
+                        outv = b0;
+                }
             }
 #endif
         }
