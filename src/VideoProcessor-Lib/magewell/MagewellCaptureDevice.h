@@ -105,7 +105,7 @@ private:
 
 	std::shared_ptr<MagewellCaptureMemoryBudget> m_budget;
 	std::vector<BYTE> m_data;
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // Bug hunt 2026-10-17: default-initialised for every constructor
 	std::mutex m_referenceMutex;
 	std::shared_ptr<MagewellCaptureBuffer> m_inFlightOwner;
 };
@@ -280,6 +280,9 @@ private:
 	std::atomic<double> m_hardwareLatencyMs{ 0 };
 	std::atomic<uint64_t> m_capturedVideoFrameCount{ 0 };
 	std::atomic<uint64_t> m_missedVideoFrameCount{ 0 };
+	// Bug hunt 2026-10-17: last HDR InfoFrame logged; logged again only on change.
+	mutable std::mutex m_hdrInfoFrameLogMutex;
+	mutable std::string m_lastHdrInfoFrameLog;
 	// Shared with every buffer so renderer-held frames remain charged after a
 	// format change or Stop. This cap applies only to Magewell capture memory.
 	std::shared_ptr<MagewellCaptureMemoryBudget> m_memoryBudget =
@@ -289,5 +292,5 @@ private:
 		CaptureDeviceState::CAPTUREDEVICESTATE_UNKNOWN };
 	ICaptureDeviceCallback* m_callback = nullptr;
 
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // Bug hunt 2026-10-17: default-initialised for every constructor
 };

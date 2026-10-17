@@ -1009,9 +1009,22 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 	}  // videoFrame
 
 	return S_OK;
-	}, [](const char* error)
+	}, [this](const char* error)
 	{
-		DebugLog::Log("BlackMagic: VideoInputFrameArrived exception contained: %s", error);
+		// Bug hunt 2026-10-17: a persistent fault repeats this per frame (up to
+		// 60 lines/s). Log at most once per 10 s with the count in between.
+		// Only the DeckLink frame callback thread reaches this.
+		const ULONGLONG now = GetTickCount64();
+		++m_frameArrivedExceptionCount;
+		if (m_frameArrivedExceptionLastLogTick != 0 &&
+			now - m_frameArrivedExceptionLastLogTick < 10000)
+			return;
+		DebugLog::Log(
+			"BlackMagic: VideoInputFrameArrived exception contained: %s "
+			"(%llu occurrence(s) since last report)",
+			error, static_cast<unsigned long long>(m_frameArrivedExceptionCount));
+		m_frameArrivedExceptionLastLogTick = now;
+		m_frameArrivedExceptionCount = 0;
 	});
 }
 

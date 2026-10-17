@@ -49,5 +49,5 @@ private:
 	std::vector<ACaptureDeviceComPtr> m_captureDevices;
 	bool m_started = false;
 
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // Bug hunt 2026-10-17: default-initialised for every constructor
 };

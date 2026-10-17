@@ -55,7 +55,7 @@ public:
 
 private:
 
-	std::atomic<ULONG> m_refCount;
+	std::atomic<ULONG> m_refCount{ 0 };   // Bug hunt 2026-10-17: was uninitialised (callers assign it to a CComPtr)
 };
 
 
