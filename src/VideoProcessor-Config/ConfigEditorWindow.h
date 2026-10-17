@@ -170,6 +170,7 @@ private:
     // Hunt 2 (M1/M2): legacy queue keys and profile value rewrites, once at load.
     void migrateLegacyQueueOwnership();
     void migrateProfileValueNormalisations();
+    void migrateLegacyRendererName();
     // Every load-time migration, in order: construction, target switch,
     // Cancel / Discard and reloads all run the same sequence.
     void runLoadMigrations();

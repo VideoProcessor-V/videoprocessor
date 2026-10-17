@@ -9276,6 +9276,7 @@ void testProfileRewritesAreBackedUpLoadMigrations()
     const QByteArray original =
         "[general]
 profile_change_display_seconds: 5
+renderer: VideoProcessor Renderer (Alpha)
 "
         "[directshow]
 presentation_lead_frames: 2
@@ -9324,6 +9325,8 @@ crop_wider_content_to_fill_screen: true
     require(saved.contains("downscaler: AUTO") && !saved.contains("ewa_lanczos") &&
         !saved.contains("not-a-ratio") && saved.contains("crop_wider_content_to_fill_screen: true"),
         (QByteArray("The profile value migrations were not saved: ") + saved).constData());
+    require(saved.contains("renderer: VP Renderer") && !saved.contains("(Alpha)"),
+        (QByteArray("The former renderer name was not migrated: ") + saved).constData());
     const QStringList backups = QDir(dir.path()).entryList(
         { QStringLiteral("VideoProcessor.cfg.before-config-migration.*.bak") }, QDir::Files);
     require(backups.size() == 1 && readBytes(dir.filePath(backups.front())) == original,

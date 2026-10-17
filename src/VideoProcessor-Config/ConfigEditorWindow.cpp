@@ -2301,6 +2301,7 @@ void ConfigEditorWindow::runLoadMigrations()
     migrateViewportZoomProfiles();
     migrateLegacyQueueOwnership();
     migrateProfileValueNormalisations();
+    migrateLegacyRendererName();
     // Any real migration keeps a backup of the original file on save.
     if (document_ && configurationLoaded_ && document_->Serialize() != before)
         document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -2955,6 +2956,21 @@ void ConfigEditorWindow::migrateLegacyQueueOwnership()
         migrated = true;
     }
     if (!migrated) return;
+    dirty_ = true;
+    hasPendingMigrations_ = true;
+    document_->requiresMigrationBackup = document_->existedAtLoad;
+}
+
+void ConfigEditorWindow::migrateLegacyRendererName()
+{
+    // Keep old configurations loadable, but migrate the former public display
+    // name in the pending document so the next editor save uses the final name.
+    // A real migration at load (hunt 2): dirty, and the original is backed up.
+    if (!configurationLoaded_ || !document_ ||
+        value(QStringLiteral("general"), QStringLiteral("renderer")).trimmed().compare(
+            QStringLiteral("VideoProcessor Renderer (Alpha)"), Qt::CaseInsensitive) != 0)
+        return;
+    document_->SetKnown("general", "renderer", "VP Renderer");
     dirty_ = true;
     hasPendingMigrations_ = true;
     document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -5414,16 +5430,9 @@ QWidget* ConfigEditorWindow::createPage(const QString& title, const QString& des
 
 QWidget* ConfigEditorWindow::createStartupPage()
 {
-    // Keep old configurations loadable, but migrate the former public display
-    // name in the pending document so the next editor save uses the final name.
-    if (configurationLoaded_ && document_ &&
-        value(QStringLiteral("general"), QStringLiteral("renderer")).compare(
-            QStringLiteral("VideoProcessor Renderer (Alpha)"), Qt::CaseInsensitive) == 0)
-    {
-        document_->SetKnown("general", "renderer", "VP Renderer");
-        dirty_ = true;
-        hasPendingMigrations_ = true;
-    }
+    // The former renderer display name is migrated at load (runLoadMigrations);
+    // this covers a page rebuilt from a document that did not pass through it.
+    migrateLegacyRendererName();
 
 	auto* cards = new ResponsiveCardGrid;
 	auto persistDiscoveredDefault = [this](const QString& key,
