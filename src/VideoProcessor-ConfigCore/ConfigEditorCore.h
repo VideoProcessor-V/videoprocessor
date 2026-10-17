@@ -24,6 +24,9 @@ namespace ConfigEditorCore
 		bool existedAtLoad = false;
 		bool remoteSource = false;
         bool requiresMigrationBackup = false;
+		// A UTF-8 byte-order mark seen at load: kept out of lines and
+		// written back by Serialize().
+		bool hasUtf8Bom = false;
 
 		bool Load(const std::wstring& input, std::wstring& error);
 		// Load exact bytes returned by a running VP without touching a local file.

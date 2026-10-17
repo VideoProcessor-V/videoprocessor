@@ -105,6 +105,7 @@ namespace ConfigEditorCore
 			{
 				lines.clear();
 				loadedBytes.clear();
+				hasUtf8Bom = false;
 				lineEnding = "\r\n";
 				hasTerminalLineEnding = true;
 				existedAtLoad = false;
@@ -133,7 +134,14 @@ namespace ConfigEditorCore
 		hasTerminalLineEnding = !bytes.empty() &&
 			(bytes.back() == '\r' || bytes.back() == '\n');
 		lines.clear();
-		size_t start = 0;
+		// VP's reader skips a UTF-8 BOM (ConfigFile::Load). Keep it out of the
+		// lines (else the first header is not a header) and write it back in
+		// Serialize() (audit 2026-10-17).
+		hasUtf8Bom = bytes.size() >= 3 &&
+			static_cast<unsigned char>(bytes[0]) == 0xEF &&
+			static_cast<unsigned char>(bytes[1]) == 0xBB &&
+			static_cast<unsigned char>(bytes[2]) == 0xBF;
+		size_t start = hasUtf8Bom ? 3 : 0;
 		while (start < bytes.size())
 		{
 			const size_t end = bytes.find_first_of("\r\n", start);
@@ -591,12 +599,16 @@ namespace ConfigEditorCore
 				continue;
 			}
 			if (!inside || text.empty()) continue;
+			// Like Find() and VP's reader: whichever of ':' or '=' comes first.
 			const size_t colon = text.find(':');
-			if (colon == std::string::npos) continue;
-			const std::string key = ConfigFile::Trim(text.substr(0, colon));
+			const size_t equal = text.find('=');
+			const size_t separator = colon == std::string::npos ? equal :
+				(equal == std::string::npos ? colon : std::min(colon, equal));
+			if (separator == std::string::npos) continue;
+			const std::string key = ConfigFile::Trim(text.substr(0, separator));
 			if (!key.empty())
 				result.emplace_back(key,
-					ConfigFile::Trim(text.substr(colon + 1)));
+					ConfigFile::Trim(text.substr(separator + 1)));
 		}
 		return result;
 	}
@@ -604,6 +616,7 @@ namespace ConfigEditorCore
 	std::string ConfigDocument::Serialize() const
 	{
 		std::ostringstream output;
+		if (hasUtf8Bom) output << "\xEF\xBB\xBF";
 		for (size_t index = 0; index < lines.size(); ++index)
 		{
 			output << lines[index];
