@@ -13134,6 +13134,64 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		// Occlusion (B's mask): a trusted A vector whose landing in B is content A did not have
+		// takes A alone (A's content goes behind it); an untrusted position whose own block of B
+		// is new (disoccluded) takes B at any phase - only B has it.
+		TEST_METHOD(InterpolatorOcclusionTakesAAndDisocclusionTakesB)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y, 4); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 9 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			// No motion. Blocks x 2..4: trusted, but B's content there is new (occlusion);
+			// blocks x 10..12: untrusted and new in B (disocclusion); the rest seen in both.
+			auto occluded = [](int bx) { return bx >= 2 && bx <= 4; };
+			auto disoccluded = [](int bx) { return bx >= 10 && bx <= 12; };
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f, [&](int bx, int) {
+				return std::array<float, 4>{ 0.0f, 0.0f, disoccluded(bx) ? 0.0f : 1.0f, 0.0f }; }, field);
+			const int bx = width / 16, by = height / 16;
+			std::vector<float> mask(static_cast<size_t>(bx) * by * 4, 1.0f);
+			for (int y = 0; y < by; ++y)
+				for (int x = 0; x < bx; ++x)
+					if (occluded(x) || disoccluded(x))
+						mask[(static_cast<size_t>(y) * bx + x) * 4] = 0.0f;
+			field.occlusion = MakeFloatTexture(gpu, bx, by, mask);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+			const float t = 0.25f;   // nearer A: the hold would show A
+			Dejudder::Planes out;
+			Assert::IsTrue(interpolator.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+				InterpolationPolicy::Fallback::Hold, out), InterpolatorError(interpolator, log).c_str());
+			const std::vector<uint16_t> luma = DownloadPlane(gpu, out.luma);
+			int checked = 0, right = 0;
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < width; ++x)
+				{
+					const int blockX = x / 16;
+					const size_t i = static_cast<size_t>(y) * width + x;
+					double expected;
+					if (occluded(blockX)) expected = a.luma[i];
+					else if (disoccluded(blockX)) expected = b.luma[i];
+					else expected = (1.0 - t) * a.luma[i] + t * b.luma[i];
+					++checked;
+					right += std::abs(luma[i] - expected) <= 1.0;
+				}
+			Assert::AreEqual(checked, right, L"occluded: A alone; disoccluded: B; elsewhere the time blend");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		// No valid vectors (an invalidation, no estimate for the pair): Stage B still draws
 		// every refresh - hold shows the nearest frame whole, blend the time-weighted mix.
 		TEST_METHOD(InterpolatorWithoutVectorsHoldsNearestOrBlends)

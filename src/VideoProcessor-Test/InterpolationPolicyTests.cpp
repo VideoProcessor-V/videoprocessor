@@ -361,6 +361,42 @@ namespace InterpolationTimelineTest
 			Assert::AreEqual(1ull, timeline.Repeats());
 		}
 
+		TEST_METHOD(GapsUpdatesSkipsAndTheTrim)
+		{
+			// A sequence hole within the span (a dropped queued frame) continues the cadence.
+			Timeline hole;
+			Feed(hole, 50.0, 60.0, 10);   // sequence 1..10
+			const auto& afterHole = hole.Plan(1, 12, 100.0 + 11 * 0.02, 100.0 + 12 * 0.02, 50.0, 60.0, false);
+			Assert::AreEqual(0ull, hole.Restarts(), L"a dropped frame does not restart the schedule");
+			Assert::IsTrue(afterHole.empty() || afterHole[0].phase < 1.0);
+			// A pulldown film update (the same film time, the next sequence): no refresh of its
+			// own, no restart, and the next film frame continues.
+			Timeline film;
+			Feed(film, 24.0, 60.0, 10);
+			const double last = 100.0 + 9.0 / 24.0;
+			Assert::IsTrue(film.Plan(1, 11, last, 0.0, 24.0, 60.0, false).empty(), L"an update has no refresh of its own");
+			Assert::AreEqual(1ull, film.Updates());
+			Assert::IsFalse(film.Plan(1, 12, last + 1.0 / 24.0, 0.0, 24.0, 60.0, false).empty());
+			Assert::AreEqual(0ull, film.Restarts());
+			// A repeat of a skipped frame (60p on 50 Hz) shows that frame, not an older phase.
+			Timeline fast;
+			std::vector<size_t> perFrame;
+			Feed(fast, 60.0, 50.0, 6, 0.0, 1, 100.0, &perFrame);
+			Assert::AreEqual(size_t{ 0 }, perFrame[5], L"the sixth frame is skipped");
+			const auto& repeat = fast.Plan(1, 6, 100.0 + 5.0 / 60.0, 0.0, 60.0, 50.0, false);
+			Assert::AreEqual(size_t{ 1 }, repeat.size());
+			Assert::AreEqual(0.0, repeat[0].phase);
+			Assert::AreEqual(100.0 + 5.0 / 60.0, repeat[0].pts, 1e-9);
+			// The trim: wider refresh spacing drains the queue (fewer refreshes per frame).
+			Timeline steady, trimmed;
+			trimmed.SetRateTrim(1.003);
+			const size_t plain = Feed(steady, 50.0, 60.0, 3000).size();
+			const size_t fewer = Feed(trimmed, 50.0, 60.0, 3000).size();
+			Assert::IsTrue(fewer < plain && fewer >= plain - 12, (L"trimmed " + std::to_wstring(fewer) + L" of " + std::to_wstring(plain)).c_str());
+			trimmed.SetRateTrim(5.0);
+			Assert::AreEqual(1.01, trimmed.RateTrim(), L"clamped");
+		}
+
 		TEST_METHOD(AGapPairSpansTheMissingPeriods)
 		{
 			// Gap fill: B two periods after A (one missed frame) spans 2 periods: the

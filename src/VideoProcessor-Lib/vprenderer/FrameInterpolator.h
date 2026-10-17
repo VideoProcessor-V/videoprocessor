@@ -25,12 +25,13 @@
 //     (the field's own rule, FieldVectorGlsl: bilinear between trusted block
 //     centres, the position's block decides; one fixed-point step) and blends
 //     A at p - t v with B at p + (1 - t) v by (1 - t, t) - a bidirectional warp;
-//     where B's occlusion mask (optional) says B's content there is new (not
-//     seen in A), the A sample alone;
+//     where B's occlusion mask (optional) says B's content at the landing is new
+//     (not seen in A), A's content goes behind it (occlusion): the A sample alone;
 //   - an untrusted position (an occlusion hole or a failed match) takes the
 //     fallback: hold = the nearest frame's own pixel (t < 0.5: A, else B; the
 //     de-judder's "never a blend"), blend = (1 - t) A + t B (smooth motion's
-//     frame-mix parity);
+//     frame-mix parity); but where B's own block there is new (disocclusion:
+//     uncovered between A and B), B's pixel at any phase - only B has it;
 //   - a cut (the frame trust below min_trusted_share) holds the nearest frame
 //     whole, whatever the fallback.
 // The output planes have the input planes' formats and sizes, so everything

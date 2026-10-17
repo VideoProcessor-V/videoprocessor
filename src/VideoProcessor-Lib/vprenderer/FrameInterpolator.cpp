@@ -55,6 +55,15 @@ if (q.x < size.x && q.y < size.y) {
 #else
             outv = phase < 0.5 ? a0 : b0;   // hold the nearest frame's own pixel
 #endif
+#ifdef OCCLUSION
+            // Disocclusion: no trusted A vector here and B's own block is content A did not
+            // have (uncovered between A and B): only B has it, at any phase.
+            {
+                ivec2 osize = textureSize(occ_b, 0);
+                if (texelFetch(occ_b, clamp(ivec2(floor(lp / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                    outv = b0;
+            }
+#endif
         }
     }
     imageStore(dst, q, outv);

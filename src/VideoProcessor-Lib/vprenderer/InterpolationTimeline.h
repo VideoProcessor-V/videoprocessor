@@ -23,9 +23,12 @@
 // - B's time when known: the span (B - A) in whole source periods, up to
 //   kMaxSpanFrames (gap fill: a pair across missed frames spans k + 1 periods);
 //   otherwise one period.
-// - A discontinuity (a new queue generation, a non-adjacent sequence, a rate
-//   change, time running backwards or a jump beyond the span) restarts the
-//   schedule at A's own time (phase 0).
+// - A discontinuity (a new queue generation, a sequence going back or jumping
+//   beyond the span, a rate change, time running backwards or a jump beyond the
+//   span) restarts the schedule at A's own time (phase 0); a gap within the span
+//   (missed or dropped frames) continues the display's cadence.
+// - A pulldown film update (the same film time) gets no refresh of its own.
+// - SetRateTrim closes the loop on the queue depth (the display period trimmed).
 // - A cadence repeat (the same sequence again) re-presents the last output
 //   without advancing.
 // - Never waits: the phases are a schedule; a missing B is the renderer's
@@ -64,7 +67,7 @@ namespace InterpolationTimeline
 				outputs.push_back({ pts, 0.0 });
 				return outputs;
 			}
-			const double period = 1.0 / sourceHz, displayPeriod = 1.0 / displayHz;
+			const double period = 1.0 / sourceHz, displayPeriod = trim / displayHz;
 			if (initialized && !discontinuity && generation == lastGeneration && sequence == lastSequence &&
 				sequence != 0)
 			{
@@ -73,11 +76,22 @@ namespace InterpolationTimeline
 				outputs.push_back(lastOutput);
 				return outputs;
 			}
+			if (initialized && !discontinuity && generation == lastGeneration && sequence == lastSequence + 1 &&
+				std::abs(pts - lastPts) <= 1e-6 * period)
+			{
+				// A pulldown film update (option b: the same film frame, updated, at its time):
+				// no new time - no refresh of its own; the schedule goes on with the next frame.
+				++updates;
+				lastSequence = sequence;
+				return outputs;
+			}
 			const bool rateChanged = initialized &&
 				(std::abs(sourceHz - lastSourceHz) > (std::max)(0.05, lastSourceHz * 0.001) ||
 				 std::abs(displayHz - lastDisplayHz) > (std::max)(0.1, lastDisplayHz * 0.001));
 			const bool restart = !initialized || discontinuity || generation != lastGeneration ||
-				sequence != lastSequence + 1 || rateChanged || !(pts > lastPts) ||
+				// A sequence hole within the span (a dropped queued frame) continues the schedule.
+				sequence <= lastSequence || sequence - lastSequence > static_cast<uint64_t>(kMaxSpanFrames) ||
+				rateChanged || !(pts > lastPts) ||
 				pts - lastPts > (kMaxSpanFrames + 0.5) * period;
 			if (restart)
 			{
@@ -126,8 +140,13 @@ namespace InterpolationTimeline
 				outputs.push_back({ pts, 0.0 });
 				return outputs;
 			}
-			if (outputs.empty()) ++skipped;
-			else lastOutput = outputs.back();
+			if (outputs.empty())
+			{
+				++skipped;
+				lastOutput = { clock, 0.0 };   // a repeat of a skipped frame shows it (phase 0), nothing stale
+			}
+			else
+				lastOutput = outputs.back();
 			lastGeneration = generation;
 			lastSequence = sequence;
 			lastPts = pts;
@@ -136,6 +155,11 @@ namespace InterpolationTimeline
 			return outputs;
 		}
 
+		// The display-period trim (closed-loop steering from the queue depth): > 1 spaces the
+		// refreshes wider, so fewer per source frame and the queue drains; clamped to +-1%.
+		void SetRateTrim(double value) { trim = (std::min)(1.01, (std::max)(0.99, value)); }
+		double RateTrim() const { return trim; }
+		unsigned long long Updates() const { return updates; }
 		const std::vector<Output>& Outputs() const { return outputs; }
 		bool Initialized() const { return initialized; }
 		double Clock() const { return clock; }
@@ -153,6 +177,7 @@ namespace InterpolationTimeline
 		double lastPts = 0.0, lastSourceHz = 0.0, lastDisplayHz = 0.0;
 		double clock = 0.0, nextOutput = 0.0;
 		int lastSpanFrames = 1;
-		unsigned long long restarts = 0, reanchors = 0, skipped = 0, repeats = 0;
+		unsigned long long restarts = 0, reanchors = 0, skipped = 0, repeats = 0, updates = 0;
+		double trim = 1.0;
 	};
 }

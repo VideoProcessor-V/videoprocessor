@@ -4955,6 +4955,17 @@ struct LibplaceboVideoRenderer::Impl
 	bool vpPhasePlanesValid = false; // vpPhasePlanes hold this draw's picture
 	Dejudder::Planes vpPhasePlanes;
 	uint64_t dejudderNextUploadedSequence = 0;   // the source frame in dejudderNextTextures (B)
+	double vpCaptureRateHz = 0.0;     // the content rate the loop schedules with (film or measured capture)
+	uint64_t vpFillNextSequence = 0;  // B offered across a short loss (gap fill), else 0
+	double vpQueueError = 0.0;        // smoothed (queued - target) frames: the timeline's steering
+	// (3) A's planes as last uploaded: a refresh of the same source frame (and a frame no
+	// refresh shows) reuses them instead of uploading again.
+	pl_plane vpUploadedPlanes[2] = {};
+	uint64_t vpUploadedSequence = 0, vpUploadedGeneration = 0;
+	unsigned long long vpUploadsSaved = 0;
+	// (12) Reset / ResetLiveQueue: the render loop forgets the last frame's video state, so
+	// the resync's own invalidation is not followed by a format-change one.
+	std::atomic<bool> motionLastStateReset{ false };
 	unsigned long long vpSkippedFrames = 0, vpPhasePictures = 0, vpHeldPictures = 0, vpGapPairs = 0;
 	// The display rate the timeline schedules at: measured when known, else the monitor's.
 	double TimelineDisplayHz() const
@@ -12978,8 +12989,9 @@ struct LibplaceboVideoRenderer::Impl
 			InterpolationPolicy::Input ii;
 			ii.mode = activeSettings.interpolation;
 			ii.sourceClass = activeSettings.sourceClass;
-			ii.sourceHz = in.sourceHz;
-			ii.displayHz = in.displayHz;
+			// The measured content rate and display rate the timeline schedules with.
+			ii.sourceHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : vpCaptureRateHz > 0.0 ? vpCaptureRateHz : in.sourceHz;
+			ii.displayHz = TimelineDisplayHz() > 0.0 ? TimelineDisplayHz() : in.displayHz;
 			ii.pulldownLocked = pulldownFilmHz > 0.0;
 			ii.dejudderStrength = in.strength;
 			ii.dejudderStrengthEven = in.strengthEven;
@@ -13010,6 +13022,14 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderEffectiveStrength = 1.0f;   // the true phase: no taste
 			const int whole = InterpolationPolicy::WholeRatio(interpolationDecision.ratio);
 			dejudderEvenCycle = whole >= 2 ? whole : 0;   // always: exact k/N at a whole ratio
+		}
+		else if (interpolationDecision.reason == InterpolationPolicy::Reason::NoNextFrame)
+		{
+			// Interpolating but for B (not queued yet, or a different layout): keep the matcher,
+			// the interpolator and the producer (the de-judder's own rules would release them for
+			// a video-rate source); this frame holds A.
+			reason = !in.haveNext ? DejudderPolicy::Reason::NoNextFrame : DejudderPolicy::Reason::NextFrameDiffers;
+			dejudderExtrasAllowed = false;
 		}
 		if (in.sourceHz > 0.0 && in.displayHz > 0.0)
 			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
@@ -13058,7 +13078,13 @@ struct LibplaceboVideoRenderer::Impl
 		// MotionValidity step 1 D: (A, B) only as adjacent frames of the current epoch
 		// (the dequeue already drops B after a gap, a repeat, a film update or a
 		// different state).
-		if (!motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
+		// Gap fill: the pair the render loop offered across a short loss (a dropped queued frame
+		// leaves a sequence hole), in the current epoch.
+		const bool fillPair = vpFillNextSequence != 0 && vpFillNextSequence == nextSourceSequence &&
+			nextSourceSequence > sourceSequence &&
+			nextSourceSequence - sourceSequence <= static_cast<uint64_t>(InterpolationTimeline::kMaxSpanFrames) &&
+			motionValidity.Current(motionValidity.EpochOfLastKept());
+		if (!fillPair && !motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
 			motionValidity.Epoch()))
 			return;
 		// Stage B: a frame no refresh shows (a source faster than the display) needs no
@@ -15271,7 +15297,19 @@ struct LibplaceboVideoRenderer::Impl
 			frameGpuTiming.BeginStage(
 				AlphaD3D11FrameGpuTimer::Stage::SourceUpload);
 			bool sourceUploaded = true;
-			if (convertedPayload->Raw())
+			// Stage B: a further refresh of the same source frame finds A's planes as uploaded;
+			// a frame no refresh shows needs none (its pair is not estimated).
+			const bool reuseUpload = vpTimelineActive && sourceSequence != 0 && textures[0] && textures[1] &&
+				vpUploadedPlanes[0].texture == textures[0] && vpUploadedPlanes[1].texture == textures[1] &&
+				((cadenceRepeat && vpUploadedSequence == sourceSequence && vpUploadedGeneration == frameGeneration) ||
+				 vpSkipOutput);
+			if (reuseUpload)
+			{
+				image.planes[0] = vpUploadedPlanes[0];
+				image.planes[1] = vpUploadedPlanes[1];
+				++vpUploadsSaved;
+			}
+			else if (convertedPayload->Raw())
 			{
 				// capture_path: gpu: the raw frame up as it is, unpacked into
 				// the same two planes.
@@ -15304,7 +15342,18 @@ struct LibplaceboVideoRenderer::Impl
 				}
 			frameGpuTiming.EndStage();
 			if (!sourceUploaded)
+			{
+				vpUploadedSequence = 0;
+				vpUploadedPlanes[0] = vpUploadedPlanes[1] = pl_plane{};
 				return false;
+			}
+			if (!reuseUpload)
+			{
+				vpUploadedPlanes[0] = image.planes[0];
+				vpUploadedPlanes[1] = image.planes[1];
+				vpUploadedSequence = sourceSequence;
+				vpUploadedGeneration = frameGeneration;
+			}
 			dejudderRgbLuma = nullptr;
 			UpdateDejudderEstimate(nextConvertedPayload, convertedPayload, formattedContract,
 				width, height, p010RowBytes, chromaHeight, lossless422Upload,
@@ -19506,7 +19555,7 @@ struct LibplaceboVideoRenderer::Impl
             // (vectors of this source frame only; never with NLS - its map is not
             // linear; never starts the matcher).
             adaptiveDownscale.ClearMotion();
-            if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0 &&
+            if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid && sourceSequence != 0 &&
                 dejudder->Field() && dejudder->FrameTrust())
             {
                 AdaptiveDownscale::Motion motion;
@@ -19516,7 +19565,7 @@ struct LibplaceboVideoRenderer::Impl
                 motion.sourceCrop = renderImage.crop;
                 adaptiveDownscale.SetMotion(motion);
             }
-            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) &&
+            if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid &&
                 sourceSequence != 0 && dejudder->GrainError())
             {
                 AdaptiveDownscale::GrainField field;
@@ -19576,7 +19625,7 @@ struct LibplaceboVideoRenderer::Impl
                 // (vectors of this source frame only; never with NLS - its map is not
                 // linear; never starts the matcher).
                 adaptiveDownscale.ClearMotion();
-                if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0 &&
+                if (!submittedNls && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid && sourceSequence != 0 &&
                     dejudder->Field() && dejudder->FrameTrust())
                 {
                     AdaptiveDownscale::Motion motion;
@@ -19586,7 +19635,7 @@ struct LibplaceboVideoRenderer::Impl
                     motion.sourceCrop = renderImage.crop;
                     adaptiveDownscale.SetMotion(motion);
                 }
-                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) &&
+                if (activeSettings.adaptive.grainMap && dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && !vpPhasePlanesValid &&
                     sourceSequence != 0 && dejudder->GrainError())
                 {
                     AdaptiveDownscale::GrainField field;
@@ -19724,7 +19773,8 @@ struct LibplaceboVideoRenderer::Impl
             // Stage 12: both map through the native source crop by relative
             // position, so they hold at any re-base size (the vectors are the
             // native frame's; a factor change does not touch them).
-            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat &&
+            // (A picture between frames is not A: A's mask would sit t * v off.)
+            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !vpPhasePlanesValid &&
                 dejudder->Occlusion(maskSlot);
             bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
@@ -20004,7 +20054,8 @@ struct LibplaceboVideoRenderer::Impl
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
                     pl_frame rebased{};
-                    if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebased, 0))
+                    // The picture being drawn (a Stage B picture between frames, or A).
+                    if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
                         frame = rebased;
                     else if (sourceRebase.Failures() == 1)
                         DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
@@ -20014,6 +20065,22 @@ struct LibplaceboVideoRenderer::Impl
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
                     pl_frame debanded{};
+                    // (6) The hold (slot 0) advances once per source frame on A itself, even when
+                    // every refresh of the frame shows a picture between frames: A's first draw.
+                    if (phasePicture && !cadenceRepeat)
+                    {
+                        pl_frame aFrame = source;
+                        bool aReady = true;
+                        if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+                        {
+                            pl_frame rebasedA{};
+                            aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebasedA, 1);
+                            if (aReady) aFrame = rebasedA;
+                        }
+                        pl_frame heldA{};
+                        if (aReady)
+                            (void)debander.Apply(d3d11->gpu, rebaseDispatch, aFrame, vpDebandParams, heldA, 0);
+                    }
                     // A picture between frames decides per picture (slot 1, no hold along A's field).
                     VpDebander::Params phaseParams = vpDebandParams;
                     if (phasePicture) { phaseParams.field = nullptr; phaseParams.grainError = nullptr; }
@@ -22316,6 +22383,7 @@ void LibplaceboVideoRenderer::Reset()
 		// with geometry from the discarded generation.
 		m_impl->RequestPresentationStateReset();
 		m_impl->RequestMotionInvalidate(MotionValidity::Cause::Resync);
+		m_impl->motionLastStateReset.store(true, std::memory_order_release);
 		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
 		m_impl->sourceMonitor.Discontinuity("resync or source change");
 	}
@@ -22358,6 +22426,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 		m_impl->RequestPresentationStateReset();
 		// The discarded frames break the sequence: no pair or history across it.
 		m_impl->RequestMotionInvalidate(MotionValidity::Cause::QueueReset);
+		m_impl->motionLastStateReset.store(true, std::memory_order_release);
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
@@ -24947,6 +25016,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			}
 			// A format change without a reset (normally a Reset comes first: then this is
 			// a harmless second invalidation). Releases the de-judder's resources.
+			if (m_impl && m_impl->motionLastStateReset.exchange(false, std::memory_order_acq_rel))
+				motionLastState = nullptr;
 			if (m_impl && motionLastState && state && motionLastState->valid && state->valid &&
 				!SameDejudderVideoState(motionLastState, state))
 				m_impl->RequestMotionInvalidate(MotionValidity::Cause::SourceFormatChange);
@@ -24956,6 +25027,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			nextConvertedPayload.reset();
 			nextSourceSequence = 0;
 			nextPts = 0.0;
+			if (m_impl) m_impl->vpFillNextSequence = 0;
 			if (!m_frameQueue.empty())
 			{
 				const QueuedFrame& next = m_frameQueue.front();
@@ -24977,6 +25049,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					else if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
 						nextPts = static_cast<double>(next.frame.GetTimingTimestamp()) /
 							static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
+					m_impl->vpFillNextSequence = fillGap ? next.sourceSequence : 0;
 					if (fillGap && ++m_impl->vpGapPairs <= 20)
 						DebugLog::Log("Interpolation: gap pair across %u missed frame(s) (interpolation_fill_gaps)",
 							static_cast<unsigned>(next.gapFrames));
@@ -25286,14 +25359,23 @@ void LibplaceboVideoRenderer::RenderLoop()
                         qpcFrequencyTimeline.QuadPart>0;
                     const double ptsA=film?static_cast<double>(arrivalQpc)/static_cast<double>(qpcFrequencyTimeline.QuadPart):sourcePts;
                     const double rateHz=frameFilmHz>0.0?frameFilmHz:captureRateHz;
+                    // (8) Closed on the queue: the refresh spacing is trimmed (at most 0.3%) by the
+                    // smoothed distance of the queue from its target, so a ppm difference between
+                    // the capture and display clocks cannot walk the queue.
+                    m_impl->vpQueueError=0.95*m_impl->vpQueueError+0.05*(static_cast<double>(queueDepthAfterDequeue)-
+                        static_cast<double>(desiredQueueDepth));
+                    m_impl->vpTimeline.SetRateTrim(1.0+(std::max)(-0.003,(std::min)(0.003,0.0005*m_impl->vpQueueError)));
                     const auto& planned=m_impl->vpTimeline.Plan(frameGeneration,sourceSequence,ptsA,nextSourceSequence?nextPts:0.0,
                         rateHz,m_impl->TimelineDisplayHz(),frame.IsSourceDiscontinuity());
                     m_impl->vpTimelineActive=true;
                     m_impl->vpSkipOutput=planned.empty();
                     motionOutputs.clear();
                     for(const auto& o:planned){motionOutputs.push_back(o.pts);vpPhases.push_back(o.phase);}
-                } else if(m_impl->vpTimeline.Initialized())
+                } else if(m_impl->vpTimeline.Initialized()) {
                     m_impl->vpTimeline.Reset();
+                    m_impl->vpQueueError=0.0;
+                }
+                m_impl->vpCaptureRateHz=frameFilmHz>0.0?frameFilmHz:captureRateHz;
                 if(m_impl->vpTimelineActive!=m_impl->vpTimelineLogged) {
                     m_impl->vpTimelineLogged=m_impl->vpTimelineActive;
                     m_impl->LogVpTimeline(m_impl->vpTimelineActive?"engaged (one picture per display refresh)":"released");
@@ -25358,6 +25440,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					dejudderExtrasSpentTime);
 
                     if(!rendered)break;
+                    // (5) Drift correction dropped this frame: no further refresh of it.
+                    if(correctionDecision.action==AlphaCadenceAction::Drop)break;
                     std::lock_guard<std::mutex> motionQueueGuard(m_queueMutex);
                     if(m_stopRequested||frameGeneration!=m_queueGeneration)break;
                 }
