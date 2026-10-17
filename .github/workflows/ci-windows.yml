@@ -3,17 +3,25 @@ name: ci-windows
 # Safety net for the owner's fork: x64 Release build of VideoProcessor.sln and the
 # CPU test suite on GitHub's Windows runners (no GPU, no capture card, no footage).
 #
+# Jobs: build (uploads the x64 Release outputs and the shard plan) -> six CPU test
+# shards and the Qt config editor tests in parallel -> test-summary (merges the shard
+# TRX files and fails unless every planned test ran exactly once and passed).
+#
 # Differences from the local build (see the "Toolchain" step output):
 #  - Built with /p:VpCiNoMagewell=true: the proprietary MWCapture SDK headers are
 #    not available here, so the Magewell backend compiles to a no-device stub and
 #    its tests are left out. Nothing licensed is downloaded or committed.
 #  - Visual Studio 18 Enterprise (runner image) vs 18 Community locally. The image
-#    lacks v142 ATL/MFC, which the job installs; the projects' own v142/v143
-#    toolsets are then used. Windows SDK 10.0.19041 is absent, so the job
+#    lacks v142 ATL/MFC: the job restores it from the Actions cache (keyed by the
+#    runner image and Visual Studio version) or installs it; the projects' own
+#    v142/v143 toolsets are then used. Windows SDK 10.0.19041 is absent, so the job
 #    overrides WindowsTargetPlatformVersion to the newest installed SDK.
 #  - Qt 6.8.3 msvc2022_64 comes from install-qt-action (cached), passed as VP_QT_ROOT.
-#  - Tests: RendererCaptureHarnessTests (GpuHardware / GpuOnScreen) are excluded;
-#    libplacebo tests run on WARP or skip; footage tests skip (no D:\hfr).
+#  - Tests: RendererCaptureHarnessTests (GpuHardware / GpuOnScreen) are not planned;
+#    libplacebo tests run on WARP or skip; footage tests skip (no D:\hfr). Tests whose
+#    hardware precondition is missing here (desktop size, CPU class, hardware D3D11
+#    renderer) detect it themselves and log SKIP-NO-HARDWARE, which the summary lists
+#    by name. Locally VP_TEST_REQUIRE_HARDWARE=1 makes the same tests fail instead.
 
 on:
   push:
@@ -28,12 +36,16 @@ concurrency:
   group: ci-windows-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  QT_VERSION: '6.8.3'
+  TEST_SHARDS: '6'
+
 jobs:
-  build-and-test:
+  build:
     runs-on: windows-2025
-    timeout-minutes: 150
-    env:
-      QT_VERSION: '6.8.3'
+    timeout-minutes: 60
+    outputs:
+      vstest: ${{ steps.toolchain.outputs.vstest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,14 +61,36 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
 
-      - name: Toolchain
-        id: toolchain
+      - name: Locate Visual Studio
+        id: vs
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $vsVersion = & $vswhere -latest -products * -property catalog_productDisplayVersion
-          Write-Host "Visual Studio: $vs ($vsVersion)"
+          $v142 = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*') -Directory -ErrorAction SilentlyContinue | Select-Object -Last 1
+          $atlmfc = if ($v142) { Join-Path $v142.FullName 'atlmfc' } else { '' }
+          Write-Host "Visual Studio: $vs ($vsVersion); v142 ATL/MFC path: $atlmfc; image $env:ImageVersion"
+          "path=$vs" >> $env:GITHUB_OUTPUT
+          "version=$vsVersion" >> $env:GITHUB_OUTPUT
+          "atlmfc=$atlmfc" >> $env:GITHUB_OUTPUT
+
+      # The v142 ATL/MFC components add their files under VC\Tools\MSVC\14.29.*\atlmfc, so that
+      # folder is cached; the key changes with the runner image and the Visual Studio version.
+      - name: Cache v142 ATL/MFC
+        id: atlmfc-cache
+        if: steps.vs.outputs.atlmfc != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.vs.outputs.atlmfc }}
+          key: v142-atlmfc-${{ runner.os }}-${{ env.ImageVersion }}-vs${{ steps.vs.outputs.version }}-14.29.16.11
+
+      - name: Toolchain
+        id: toolchain
+        shell: pwsh
+        run: |
+          $vs = '${{ steps.vs.outputs.path }}'
+          $vsVersion = '${{ steps.vs.outputs.version }}'
           $msbuild = Join-Path $vs 'MSBuild\Current\Bin\amd64\MSBuild.exe'
           $vstest = Get-ChildItem (Join-Path $vs 'Common7\IDE\Extensions\TestPlatform\vstest.console.exe') | Select-Object -First 1 -ExpandProperty FullName
           Write-Host "MSBuild: $msbuild"; Write-Host "vstest: $vstest"
@@ -65,18 +99,21 @@ jobs:
           $msvc = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC') -Directory | ForEach-Object Name
           Write-Host "MSVC tools: $($msvc -join ', ')"
           $mfc142 = @(Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*\atlmfc\lib\x64\mfc140u.lib') -ErrorAction SilentlyContinue).Count -gt 0
-          Write-Host "v142 (14.29) MFC present: $mfc142"
+          $atlSource = if ('${{ steps.atlmfc-cache.outputs.cache-hit }}' -eq 'true') { 'restored from the Actions cache' } elseif ($mfc142) { 'runner image' } else { '' }
+          Write-Host "v142 (14.29) MFC present: $mfc142 $atlSource"
           if (($toolsets -contains 'v142') -and -not $mfc142) {
             # The image has the v142 compiler but not its ATL/MFC; the MFC projects (Lib, GUI,
             # renderers, tests) target v142 as locally, so add the same two components.
             Write-Host "Installing v142 ATL/MFC (14.29) components"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
             $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
             $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @('modify', '--installPath', "`"$vs`"",
               '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL',
               '--add', 'Microsoft.VisualStudio.Component.VC.14.29.16.11.MFC',
               '--quiet', '--norestart', '--nocache')
-            Write-Host "vs_installer exit $($p.ExitCode)"
+            Write-Host "vs_installer exit $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds) s"
             $mfc142 = @(Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC\14.29.*\atlmfc\lib\x64\mfc140u.lib') -ErrorAction SilentlyContinue).Count -gt 0
+            $atlSource = "installed in $([int]$sw.Elapsed.TotalSeconds) s (cached for the next run)"
             Write-Host "v142 (14.29) MFC present after install: $mfc142"
           }
           $sdks = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory | ForEach-Object Name | Sort-Object { [version]$_ }
@@ -101,6 +138,7 @@ jobs:
           | Visual Studio | $vsVersion |
           | Platform toolsets | $($toolsets -join ', ') |
           | MSVC tools | $($msvc -join ', ') |
+          | v142 ATL/MFC | $(if ($mfc142) { $atlSource } else { 'unavailable' }) |
           | Windows SDKs | $($sdks -join ', ') |
           | Overrides | $(if ($extra) { $extra -join ' ' } else { 'none (project toolsets/SDKs used)' }) |
           | Qt | $env:QT_VERSION ($env:QT_ROOT_DIR) |
@@ -124,81 +162,164 @@ jobs:
           "### Build`n$(Get-Content build-time.txt)" >> $env:GITHUB_STEP_SUMMARY
           exit $code
 
-      - name: CPU tests (vstest, one process)
-        id: tests
+      - name: Plan test shards
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force ci-plan | Out-Null
+          & '${{ steps.toolchain.outputs.vstest }}' x64\Release\VideoProcessor-Test.dll /Platform:x64 `
+            /ListFullyQualifiedTests /ListTestsTargetPath:ci-plan\tests.txt | Out-Null
+          if (-not (Test-Path ci-plan\tests.txt)) { throw 'vstest wrote no test list' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci\plan_test_shards.ps1 `
+            -TestList ci-plan\tests.txt -Shards $env:TEST_SHARDS -OutFile ci-plan\shards.json | Tee-Object -FilePath ci-plan\plan.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $fence = '```'
+          "### Test shard plan`n$fence`n$((Get-Content ci-plan\plan.txt) -join "`n")`n$fence" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload test plan
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-plan
+          path: ci-plan/
+          if-no-files-found: error
+
+      # Everything the tests load at run time; intermediates, import libraries and symbols stay.
+      - name: Upload test binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-binaries
+          retention-days: 3
+          compression-level: 1
+          if-no-files-found: error
+          path: |
+            x64/Release/
+            ci-plan/
+            !x64/Release/obj/
+            !x64/Release/**/*.pdb
+            !x64/Release/**/*.lib
+            !x64/Release/**/*.exp
+            !x64/Release/**/*.ilk
+            !x64/Release/**/*.iobj
+            !x64/Release/**/*.ipdb
+            !x64/Release/**/*.obj
+
+  cpu-tests:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    name: cpu-tests (shard ${{ matrix.shard }})
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download test binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-binaries
+          path: .
+
+      - name: CPU tests (vstest)
+        shell: pwsh
+        run: |
+          $shard = ${{ matrix.shard }}
+          $plan = Get-Content ci-plan\shards.json -Raw | ConvertFrom-Json
+          if (@($plan.shards).Count -ne [int]$env:TEST_SHARDS) { throw "The plan has $(@($plan.shards).Count) shards, the matrix expects $env:TEST_SHARDS" }
+          $s = @($plan.shards | Where-Object { $_.index -eq $shard })[0]
           $trxDir = Join-Path $env:GITHUB_WORKSPACE 'test-results'
           New-Item -ItemType Directory -Force $trxDir | Out-Null
-          # Make sure no GPU/on-screen/footage switch leaks in from the image.
-          foreach ($k in 'VP_TEST_GPU','VP_TEST_REQUIRE_GPU','VP_TEST_HARNESS_ONSCREEN','VP_TEST_REAL_FOOTAGE','VP_PULLDOWN_RECORDINGS') {
+          # Make sure no GPU/on-screen/footage/require switch leaks in from the image.
+          foreach ($k in 'VP_TEST_GPU','VP_TEST_REQUIRE_GPU','VP_TEST_REQUIRE_HARDWARE','VP_TEST_HARNESS_ONSCREEN','VP_TEST_REAL_FOOTAGE','VP_PULLDOWN_RECORDINGS') {
             Remove-Item "Env:$k" -ErrorAction SilentlyContinue
           }
-          # vstest's native adapter ignores TEST_METHOD_ATTRIBUTE traits, so the GpuHardware /
-          # GpuOnScreen tests are excluded by their class (as tools/run_chain_gate.ps1 selects them).
-          # Also excluded: tests that need the laptop's environment rather than a GPU category
-          # (first CI run, 2026-10-17): the runner's 1024x768 desktop clamps the window-layout
-          # tests, its 4 vCPUs miss the 4K60 converter budget, and the libplacebo renderer
-          # cannot initialize without a GPU/Vulkan driver.
-          $hostOnly = @(
-            'ResizePreservesRequestedWindowBounds',
-            'LayoutCompletesBeforeRendererNotification',
-            'DeckLinkConvertersSustained4K60PerformanceComparison',
-            'RendererMetadataCyclesReuseAcceptedSnapshotWithoutDiskReads')
-          $filter = (@('FullyQualifiedName!~RendererCaptureHarnessTests') +
-            ($hostOnly | ForEach-Object { "FullyQualifiedName!~$_" })) -join '&'
+          Write-Host "Shard $shard of $($env:TEST_SHARDS): $($s.tests) tests, planned $($s.weight) s"
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          & '${{ steps.toolchain.outputs.vstest }}' x64\Release\VideoProcessor-Test.dll /Platform:x64 `
-            "/TestCaseFilter:$filter" "/Logger:trx;LogFileName=cpu-tests.trx" "/ResultsDirectory:$trxDir"
-          "Tests: $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (vstest exit $LASTEXITCODE)"
-          exit 0
-
-      - name: Test summary
-        if: always() && steps.tests.outcome != 'skipped'
-        shell: pwsh
-        run: |
-          $trx = Join-Path $env:GITHUB_WORKSPACE 'test-results\cpu-tests.trx'
-          if (-not (Test-Path $trx)) { "### Tests`nNo TRX written." >> $env:GITHUB_STEP_SUMMARY; exit 1 }
-          [xml]$x = Get-Content $trx -Raw
-          $results = @($x.TestRun.Results.UnitTestResult)
-          $passed = @($results | Where-Object outcome -eq 'Passed').Count
-          $failed = @($results | Where-Object outcome -eq 'Failed').Count
-          $other = @($results | Where-Object { $_.outcome -notin 'Passed','Failed' }).Count
-          # Tests that cannot run here (no footage, no GPU) pass after logging a SKIP-* marker.
-          $markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+' -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object Value)
-          $skipTests = @($results | Where-Object { $_.Output.StdOut -match 'SKIP-[A-Z-]+' }).Count
-          $byMarker = $markers | Group-Object | Sort-Object Count -Descending | ForEach-Object { "| $($_.Name) | $($_.Count) |" }
-          $summary = @"
-          ### CPU tests
-          | Total | Passed | Failed | Not run / other | Passed with SKIP marker |
-          |---|---|---|---|---|
-          | $($results.Count) | $passed | $failed | $other | $skipTests |
-
-          | SKIP marker | Count |
-          |---|---|
-          $($byMarker -join "`n")
-          "@
-          $summary >> $env:GITHUB_STEP_SUMMARY
-          $results | Where-Object { $_.outcome -ne 'Passed' } | ForEach-Object { "- $($_.outcome): $($_.testName)" } |
-            Select-Object -First 100 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
-          Write-Host "Total $($results.Count), passed $passed, failed $failed, other $other, skip-marked $skipTests"
-          if ($results.Count -eq 0 -or $failed -gt 0 -or $other -gt 0) { exit 1 }
-
-      - name: Config editor tests (Qt, off screen)
-        if: always() && steps.tests.outcome != 'skipped'
-        shell: pwsh
-        run: |
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          $out = Join-Path $env:GITHUB_WORKSPACE 'test-results\config-tests'
-          & .\tools\run_config_tests.ps1 -Shards 1 -OutDir $out
-          $code = $LASTEXITCODE
-          "### Config editor tests`nexit $code, $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (logs in the TRX artifact)" >> $env:GITHUB_STEP_SUMMARY
-          exit $code
+          & '${{ needs.build.outputs.vstest }}' x64\Release\VideoProcessor-Test.dll /Platform:x64 `
+            "/TestCaseFilter:$($s.filter)" "/Logger:trx;LogFileName=cpu-tests-shard$shard.trx" "/ResultsDirectory:$trxDir"
+          Write-Host "Shard $shard vstest: $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (exit $LASTEXITCODE)"
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci\summarize_test_shards.ps1 `
+            -Plan ci-plan\shards.json -TrxDir $trxDir -Shard $shard -Summary $env:GITHUB_STEP_SUMMARY
+          exit $LASTEXITCODE
 
       - name: Upload TRX
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: cpu-tests-trx-${{ github.sha }}
+          name: cpu-tests-trx-shard${{ matrix.shard }}
           path: test-results/
+          if-no-files-found: ignore
+
+  config-tests:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download test binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-binaries
+          path: .
+
+      - name: Config editor tests (Qt, off screen)
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $out = Join-Path $env:GITHUB_WORKSPACE 'test-results\config-tests'
+          # Off screen nothing takes focus, so the runner's four cores run four shards.
+          & .\tools\run_config_tests.ps1 -Shards 4 -OutDir $out
+          $code = $LASTEXITCODE
+          "### Config editor tests`nexit $code, $([int]$sw.Elapsed.TotalMinutes) min $($sw.Elapsed.Seconds) s (logs in the config-tests artifact)" >> $env:GITHUB_STEP_SUMMARY
+          exit $code
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: config-tests
+          path: test-results/
+          if-no-files-found: ignore
+
+  test-summary:
+    needs: [build, cpu-tests]
+    if: always() && needs.build.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download shard TRX files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cpu-tests-trx-shard*
+          path: test-results
+
+      - name: Download plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-plan
+          path: ci-plan
+
+      - name: Test summary
+        shell: pwsh
+        run: |
+          # Fails unless every planned test ran exactly once and passed; SKIP-NO-HARDWARE is listed
+          # separately with the test names. test-weights.json is the measured input for the next
+          # plan (tools/ci/test-weights.json).
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci\summarize_test_shards.ps1 `
+            -Plan ci-plan\shards.json -TrxDir test-results -Summary $env:GITHUB_STEP_SUMMARY `
+            -WeightsOut test-results\test-weights.json
+          exit $LASTEXITCODE
+
+      - name: Upload measured weights
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cpu-tests-weights
+          path: test-results/test-weights.json
           if-no-files-found: ignore
