@@ -1958,5 +1958,179 @@ namespace Tests
 				Assert::IsTrue(r.presented, (L"forced failure: frames still presented (CPU path)\n" + r.Tail()).c_str());
 			}
 		}
+
+		// --- VP's 50/60p interpolation through the renderer (docs/VP-interpolator-50-60-plan.md) ---
+		// The source rate is derived from the monitor's refresh (5/6 of it: 50p on a 60 Hz
+		// display, whatever the display), never a fixed rate (owner [[vp-general-not-fixed]]).
+		static double HarnessMonitorHz()
+		{
+			DEVMODEA mode{};
+			mode.dmSize = sizeof(mode);
+			return EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1 ?
+				static_cast<double>(mode.dmDisplayFrequency) : 60.0;
+		}
+
+		static FramePlan RatePlan(double sourceHz)
+		{
+			FramePlan plan;
+			plan.rateNumerator = static_cast<int>(std::lround(sourceHz * 1000.0));
+			plan.rateDenominator = 1000;
+			plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+			return plan;
+		}
+
+		static void ReportInterpolation(const char* name, const RunResult& r)
+		{
+			Logger::WriteMessage((std::string("== ") + name + ": " + r.dejudderStatus).c_str());
+			for (const std::string& line : r.log)
+				if (line.find("Interpolation") != std::string::npos || line.find("motion invalidated") != std::string::npos ||
+					line.find("interpolated=1") != std::string::npos || line.find("Motion engine") != std::string::npos)
+					Logger::WriteMessage(("   " + line).c_str());
+		}
+
+		TEST_METHOD(InterpolationRunsAtAMeasuredRateMismatch)
+		{
+			// auto at a non-integer ratio interpolates (the estimate runs for a video-rate
+			// source); at the display's own rate it passes through; off logs nothing.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const double display = HarnessMonitorHz();
+			{
+				const FramePlan plan = RatePlan(display * 5.0 / 6.0);
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, "interpolation: auto\n", false, &plan);
+				ReportInterpolation("mismatch, auto", r);
+				Assert::IsTrue(r.presented, (L"mismatch: frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Interpolation: interpolating"), (L"mismatch: interpolating\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("De-judder: motion estimated"), (L"mismatch: the motion estimated for the video source\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: failed"), (L"mismatch: no interpolation failure\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("extra render failed") || r.Logged("extra present failed"), (L"mismatch: no render failure\n" + r.Tail()).c_str());
+			}
+			{
+				const FramePlan plan = RatePlan(display);
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, false, "interpolation: auto\n", false, &plan);
+				ReportInterpolation("display rate, auto", r);
+				Assert::IsTrue(r.Logged("Interpolation: whole ratio: passes through"), (L"1:1: untouched\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"1:1: no estimate\n" + r.Tail()).c_str());
+			}
+			{
+				const FramePlan plan = RatePlan(display * 5.0 / 6.0);
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, false, "", false, &plan);
+				Assert::IsFalse(r.Logged("Interpolation:"), (L"off by default\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"off: no estimate\n" + r.Tail()).c_str());
+			}
+		}
+
+		TEST_METHOD(InterpolationLowLatencyFromTheFirstFrame)
+		{
+			// Zero queue / low latency: never interpolate, never wait for B (today's output),
+			// from the first frame (the queue profile applied before Build, as the app does).
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			g_harnessApplySnapshot = true;
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
+				"interpolation: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n", false, &plan);
+			g_harnessApplySnapshot = false;
+			ReportInterpolation("low latency", r);
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Interpolation: low-latency queue"), (L"off in low latency\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Interpolation: interpolating"), (L"never interpolating\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("interpolated=1"), (L"no interpolated picture\n" + r.Tail()).c_str());
+		}
+
+		TEST_METHOD(InterpolationStreamFaultsFallBackAndRecover)
+		{
+			// Missed frames and a resync during interpolation: the vectors are invalidated
+			// (MotionValidity), the interpolator holds, and it estimates again on a fresh pair.
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const double source = HarnessMonitorHz() * 5.0 / 6.0;
+			auto after = [](const RunResult& r, const std::string& marker, const std::string& text)
+			{
+				bool seen = false;
+				for (const std::string& line : r.log)
+				{
+					if (line.find(marker) != std::string::npos) seen = true;
+					else if (seen && line.find(text) != std::string::npos) return true;
+				}
+				return false;
+			};
+			{
+				FramePlan plan = RatePlan(source);
+				plan.step = [](int n) { FrameStep f; f.content = n; f.send = !(n == 80 || n == 81 || (n >= 120 && n <= 122)); return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, false, "interpolation: auto\n", false, &plan);
+				ReportInterpolation("missed frames", r);
+				Assert::IsTrue(r.Logged("capture missed"), (L"missed: counted\n" + r.Tail()).c_str());
+				Assert::IsTrue(after(r, "capture missed", "motion invalidated"), (L"missed: vectors invalidated\n" + r.Tail()).c_str());
+				Assert::IsTrue(after(r, "motion invalidated", "De-judder: estimating again"), (L"missed: recovers\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: failed"), (L"missed: no failure\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented);
+			}
+			{
+				FramePlan plan = RatePlan(source);
+				plan.resetAtSeconds = 2.0;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, false, "interpolation: auto\n", false, &plan);
+				ReportInterpolation("resync", r);
+				Assert::IsTrue(r.Logged("motion invalidated (resync"), (L"resync: released\n" + r.Tail()).c_str());
+				Assert::IsTrue(after(r, "motion invalidated (resync", "De-judder: estimating again"), (L"resync: recovers\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented);
+			}
+		}
+
+		TEST_METHOD(InterpolationIsExclusiveWithSmoothMotion)
+		{
+			// One motion engine (owner 2026-10-15): with libplacebo's smooth motion selected,
+			// VP's interpolation stays off (no estimate, no vectors).
+			if (!OnHardware())
+			{
+				Logger::WriteMessage(L"renderer capture harness: VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
+				"interpolation: auto\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
+			ReportInterpolation("smooth motion selected", r);
+			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Interpolation: interpolating"), (L"VP's interpolation off\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"no estimate\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.presented);
+		}
+
+		TEST_METHOD(InterpolationOnScreenFillsTheRepeatRefreshes)
+		{
+			// On the screen only (VP_TEST_HARNESS_ONSCREEN=1, real refresh statistics): at
+			// 5/6 of the display rate one refresh in six would repeat a frame; Stage A shows
+			// an interpolated picture there (the extras planner's interpolated=1 lines).
+			char* v = nullptr;
+			size_t n = 0;
+			const bool on = _dupenv_s(&v, &n, "VP_TEST_HARNESS_ONSCREEN") == 0 && v && std::string(v) == "1";
+			std::free(v);
+			if (!on || !OnHardware())
+			{
+				Logger::WriteMessage(L"on-screen harness: VP_TEST_HARNESS_ONSCREEN=1 and VP_TEST_GPU=hardware only; not run");
+				return;
+			}
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			for (const char* fallback : { "hold", "blend" })
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false,
+					std::string("interpolation: auto\ninterpolation_fallback: ") + fallback + "\n", true, &plan);
+				ReportInterpolation(fallback, r);
+				const std::wstring name(fallback, fallback + strlen(fallback));
+				Assert::IsTrue(r.Logged("interpolated=1"), (name + L": interpolated pictures presented\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: failed"), (name + L": no failure\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("extra render failed") || r.Logged("extra present failed"), (name + L": no render failure\n" + r.Tail()).c_str());
+			}
+		}
 	};
 }

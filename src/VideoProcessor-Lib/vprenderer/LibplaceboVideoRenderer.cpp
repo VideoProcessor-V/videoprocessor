@@ -4890,6 +4890,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool interpolating = false;              // this frame's extras interpolate
 	int interpolationReasonLogged = -1;
 	ULONGLONG interpolationLogTick = 0;
+	unsigned interpolationLogCount = 0;
 	unsigned long long interpolatedPresents = 0, interpolationFailures = 0;
 	bool dejudderMaskParamSet = false;
 	bool grainToleranceParamSet = false;
@@ -12945,9 +12946,12 @@ struct LibplaceboVideoRenderer::Impl
 		const int reason = static_cast<int>(interpolationDecision.reason);
 		if (reason == interpolationReasonLogged)
 			return;
+		// The first changes are all logged (the start: rates and the queue settling);
+		// then at most one line per 5 s.
 		const ULONGLONG now = GetTickCount64();
-		if (interpolationLogTick != 0 && now - interpolationLogTick < 5000)
+		if (interpolationLogCount >= 20 && interpolationLogTick != 0 && now - interpolationLogTick < 5000)
 			return;
+		++interpolationLogCount;
 		interpolationLogTick = now;
 		interpolationReasonLogged = reason;
 		DebugLog::Log("Interpolation: %s (interpolation=%s, fallback=%s, source_class=%s, source %.3f Hz%s, display %.3f Hz, "
@@ -13809,9 +13813,10 @@ struct LibplaceboVideoRenderer::Impl
 			if (dejudderExtraIds.size() > 256)
 				dejudderExtraIds.pop_front();
 			if (dejudderExtraStats.extras <= 200 || dejudderExtraStats.extras % 240 == 0)
-				DebugLog::Log("De-judder extra: source=%llu k=%d phi0=%.3f delta=%.3f shift=%.3f ms=%.2f block_ms=%.2f latency_floor_ms=%.2f extras=%llu",
+				DebugLog::Log("De-judder extra: source=%llu k=%d phi0=%.3f delta=%.3f shift=%.3f ms=%.2f block_ms=%.2f latency_floor_ms=%.2f extras=%llu%s",
 					static_cast<unsigned long long>(f.sourceSequence), extras, phi0, decision.delta, shift,
-					dejudderExtraStats.lastMs, blockMs, in.latencyFloor * 1000.0, dejudderExtraStats.extras);
+					dejudderExtraStats.lastMs, blockMs, in.latencyFloor * 1000.0, dejudderExtraStats.extras,
+					interpolating ? " interpolated=1" : "");
 			if (static_cast<double>(PerformanceCounterNow()) / qpc > decision.targetVsync)
 			{
 				++dejudderExtraStats.late;
