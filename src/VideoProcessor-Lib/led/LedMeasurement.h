@@ -91,27 +91,24 @@ namespace LedDrive
 	// the AreaPeakGrid boxes over [left,right) x [top,bottom); value(x, y, v)
 	// gives a pixel's normalised signal v (0..1, already boosted) or false.
 	// Masked pixels count neither value nor area; a box left with less than
-	// half its area is skipped. stride > 1 reads every stride-th pixel per
-	// axis, each standing for the stride x stride pixels it starts (bounded
-	// cost on large raw frames; never more than the box). Returns the code
+	// half its area is skipped. Every pixel is read: this is the reference
+	// (the look-ahead's fast path is AreaPeakAccumulator). Returns the code
 	// (16 + 219 v), or -1 when no box was measured.
 	template <typename Value>
 	double AreaAveragedMaximum(Value&& value, int left, int top, int right, int bottom,
-		double screenW, double screenH, const PixelRect* masks = nullptr, int maskCount = 0, int stride = 1)
+		double screenW, double screenH, const PixelRect* masks = nullptr, int maskCount = 0)
 	{
 		const int width = right - left, height = bottom - top;
 		if (width <= 0 || height <= 0) return -1.0;
 		const PeakGrid grid = AreaPeakGrid(width, height, screenW, screenH);
-		stride = (std::max)(1, (std::min)({ stride, static_cast<int>(std::floor(grid.boxW + 1e-9)),
-			static_cast<int>(std::floor(grid.boxH + 1e-9)) }));
 		struct Span { int at; int box; double w0, w1; };
-		auto spans = [stride](int count, double boxSize, int boxes)
+		auto spans = [](int count, double boxSize, int boxes)
 		{
 			std::vector<Span> out;
-			out.reserve(static_cast<size_t>(count / stride + 1));
-			for (int i = 0; i < count; i += stride)
+			out.reserve(static_cast<size_t>(count));
+			for (int i = 0; i < count; ++i)
 			{
-				const double a = i, b = (std::min)(i + stride, count);
+				const double a = i, b = i + 1.0;
 				const int box = (std::min)(boxes - 1, static_cast<int>(std::floor(a / boxSize)));
 				const double edge = box + 1 < boxes ? (box + 1) * boxSize : static_cast<double>(count);
 				const double w0 = (std::min)(b, edge) - a;
@@ -153,6 +150,63 @@ namespace LedDrive
 				best = (std::max)(best, sum[i] / area[i]);
 		return best < 0.0 ? -1.0 : 16.0 + 219.0 * best;
 	}
+
+	// Hunt 2 (look-ahead cost, owner 2026-10-17): AreaAveragedMaximum over
+	// every pixel (stride 1), fed one picture row at a time as 10-bit codes
+	// and a code -> value table (values 0..1). The same boxes, fractional
+	// edge weights, masks and half-area rule; equal to the template within
+	// float rounding. Separable: each row is added (with its row weight)
+	// into the column sums of the one or two box rows it falls in, and a box
+	// row's boxes are summed across once it is complete, so a 4K frame costs
+	// about a table read and an add per pixel.
+	class AreaPeakAccumulator
+	{
+	public:
+		AreaPeakAccumulator(int width, int height, double screenW, double screenH);
+		// Interval of excluded pixels [x0, x1), relative to the row start.
+		struct Span { int x0, x1; };
+		// The next row (0..height-1, in order): codes[0..width) shifted right
+		// by `shift` (a plane's upper bits, or 0) index `table`, whose values
+		// must be 0..1. excluded: sorted, disjoint spans whose pixels count
+		// neither value nor area (masks). Whole rows of one box row are
+		// batched (a few table reads per column-sum update); codesStayValid:
+		// `codes` (and `table`) stay readable until Result() (rows of a frame
+		// read in place), else the codes are copied.
+		void AddRow(const uint16_t* codes, int shift, const float* table,
+			const Span* excluded = nullptr, int excludedCount = 0, bool codesStayValid = false);
+		// The code (16 + 219 v) of the brightest box, or -1 when no box was
+		// measured; completes the remaining box rows.
+		double Result();
+		const PeakGrid& Grid() const { return grid; }
+
+	private:
+		struct Slot { std::vector<float> values; std::vector<double> area; double weight = 0.0; bool masked = false; };
+		static constexpr int MAX_PENDING = 4;
+		void Flush();
+		void Finish(int boxRow);
+		int width, height;
+		PeakGrid grid;
+		int taps = 1;                     // pixels spanned by the widest box column
+		int pad = 8;                      // zero floats after the column sums
+		std::vector<int> boxStart;        // per box column: its first pixel
+		std::vector<float> boxTaps;       // per box column: `taps` pixel weights from boxStart
+		std::vector<float> boxTaps8;      // the same padded to eight (vector box pass)
+		std::vector<double> boxAreaTaps;  // the same in double (the masked area)
+		std::vector<double> boxArea;      // per box column: the sum of its weights
+		std::vector<float> boxAreaF;      // the same in float (vector comparison)
+		std::vector<float> boxSums;
+		std::vector<int> rowBox;          // per pixel row: its (first) box row
+		std::vector<double> rowWeight;    // per pixel row: its share of that box row
+		Slot slots[2];                    // box rows r and r + 1 (by r & 1)
+		std::vector<float> scratch;
+		// Whole rows waiting to be added to box row pendingBoxRow2.
+		const uint16_t* pending[MAX_PENDING] = {};
+		std::vector<uint16_t> copies[MAX_PENDING];
+		int pendingCount = 0, pendingBoxRow2 = 0, pendingShift = 0;
+		const float* pendingTable = nullptr;
+		int nextRow = 0, pendingBoxRow = 0;
+		double best = -1.0;
+	};
 
 	// Code at or above which `percentile` percent of blocks lie below.
 	double HistogramPercentile(const uint32_t* histogram, uint32_t total, double percentile);
