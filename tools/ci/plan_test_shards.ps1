@@ -82,11 +82,14 @@ if ($Weights -and (Test-Path $Weights)) {
     (Get-Content $Weights -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $weightTable[$_.Name] = [double]$_.Value }
 }
 $weighted = 0
+# A key "Namespace::Class::*" gives the seconds of each test of that class without its own key.
 function TestWeight([string]$t) {
     if ($weightTable.ContainsKey($t)) { return [math]::Max($weightTable[$t], 0.01) }
+    $classKey = (ClassOf $t) + '::*'
+    if ($weightTable.ContainsKey($classKey)) { return [math]::Max($weightTable[$classKey], 0.01) }
     $DefaultSecondsPerTest
 }
-foreach ($t in $included) { if ($weightTable.ContainsKey($t)) { ++$weighted } }
+foreach ($t in $included) { if ($weightTable.ContainsKey($t) -or $weightTable.ContainsKey((ClassOf $t) + '::*')) { ++$weighted } }
 $total = ($included | ForEach-Object { TestWeight $_ } | Measure-Object -Sum).Sum
 $splitAbove = $SplitAboveFraction * $total / $Shards
 

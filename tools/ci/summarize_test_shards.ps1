@@ -12,7 +12,7 @@ own line with the test names, so it is never hidden among the other markers.
   summarize_test_shards.ps1 -Plan shards.json -TrxDir test-results            # all shards
   summarize_test_shards.ps1 -Plan shards.json -TrxDir test-results -Shard 2   # one shard's own check
 
--Summary appends Markdown (GitHub's job summary); -WeightsOut writes measured seconds per test,
+-Summary appends Markdown (GitHub's job summary); -WeightsOut writes measured seconds (per test from 1 s, else a per-class average),
 the input format of plan_test_shards.ps1 -Weights.
 #>
 param(
@@ -122,7 +122,12 @@ if ($Summary) { $md | Out-File -Append -Encoding utf8 $Summary }
 
 if ($WeightsOut) {
     $weights = [ordered]@{}
-    foreach ($r in ($rows | Sort-Object Test)) { $weights[$r.Test] = [math]::Round($r.Seconds, 2) }
+    # Compact: tests of 1 s or more by name, the rest as one per-test average per class ("Class::*").
+    foreach ($g in ($rows | Group-Object { ClassOf $_.Test } | Sort-Object Name)) {
+        $light = @($g.Group | Where-Object Seconds -lt 1)
+        if ($light.Count) { $weights[$g.Name + '::*'] = [math]::Round(($light | Measure-Object Seconds -Average).Average, 3) }
+        foreach ($r in ($g.Group | Where-Object Seconds -ge 1 | Sort-Object Test)) { $weights[$r.Test] = [math]::Round($r.Seconds, 1) }
+    }
     $weights | ConvertTo-Json | Set-Content -Encoding utf8 $WeightsOut
 }
 
