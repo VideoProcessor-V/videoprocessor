@@ -68,3 +68,7 @@ buffers held through the queue and look-ahead ("Capture raw route: up to N captu
 - DeckLink refcount + callback boundary (S); Magewell missed frames from timestamps/IDs (S).
 - Magewell HDR primaries by chromaticity, 4:4:4 path, repack off the notify thread / onto the GPU (M).
 - DV tunnel encoding-agnostic (M); DeckLink input frame allocator (M); Magewell Eco/USB + hot-plug (L).
+
+## DV tunnel at 60 Hz (2026-10-17)
+
+Full DV tunnel coverage needs bit-exact 8-bit RGB 4:4:4 at the source rate. Bar for 60 Hz DV: 2160p60 8-bit RGB 4:4:4 capture, untouched (any YUV/4:2:0 conversion destroys the tunnel). DeckLink Quad HDMI Recorder: manufacturer-style specs list RGB 4:4:4 only up to 4Kp30 and YUV (possibly 8-bit 4:2:0) at 2160p50/60; some reseller listings claim RGB to 4K60 - unverified. Implication: 24/25/30p DV tunnels at 12-bit; 50/60p DV would not. Verify with Blackmagic's manual and a live test (SDK pixel format reported for 4K60 RGB input via the Vertex2).
