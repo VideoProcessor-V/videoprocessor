@@ -12,6 +12,8 @@ one setting changed: the source.
 | `command_source` | `internal_script`, `compensate`, `none` | not set | Where the LED/CNTR commands come from. When it is not set, the older `mode` decides (see below). |
 | `adaptive_gamma` | bool | off when `command_source` is set | VP's picture adapts to the LED. This covers the gain across each step (script smoothing for the script copy, the compensation gain for compensate) **and** the ANSI shadow lift. The lift's strength is still `shadow_lift_ansi`, default 0. Only the picture: compensate drives the LED and CNTR either way. |
 | `lookahead` | bool | true | The queued-frame look-ahead of compensate. Off means it reacts to the frame on screen. |
+| `script_lookahead` | bool | true | The script copy's look-ahead (owner 2026-10-17): it decides from the queued frame that will be on screen when its command lands. Off means the script's decisions on the frame on screen, exactly as before. |
+| `led_lookahead_ms` | 0-2000 | 0 | An optional cap on both look-aheads. 0 = every frame the active queue profile has queued. |
 | `script_pacing` | `script`, `tick` | `script` | The script copy's rhythm. `script`: the original script's own loop - `script_measure_ms` (its screenshot, default 150) before it acts, `script_echo_ms` per command (its echo, default 30; an LPW1 costs two), its sleeps, and the next loop at once. `tick`: a fixed `tick_ms` loop (400 ms). |
 
 `command_source` maps onto the module's modes:
@@ -58,3 +60,43 @@ source uses is shown:
 
 An older file naming the Python source shows, and runs, VP's copy of the
 script.
+
+## The script is the reference for intent (owner 2026-10-17)
+
+The owner's script is the reference for what Dynamic Drive should do, not for
+its coding limitations. Its screenshot could not see the future, counted
+subtitles and overlays by accident, and was taken after a fixed delay. VP's
+copy keeps the script's bands, steps, contrast logic and rhythm, and changes
+only where the script was limited:
+
+- **Picture only, full coverage** (`led_picture_only`, `led_peak_full_coverage`,
+  both default on). The highlight peak is the largest area mean over boxes the
+  size of one pixel of the script's 854x480 INTER_AREA downscale, derived from
+  the real screen at run time, tiling the whole active picture. The detected
+  subtitle (and where a moved subtitle is shown) is left out of the peak, APL,
+  histogram and cut cells. With nothing detected, nothing is masked.
+- **Look-ahead** (`script_lookahead`, default on). The copy decides on the
+  queued frame that will be on screen when its command lands: send time plus
+  `led_latency_ms`, and for a rise plus `led_settle_ms`, so the light has
+  settled by its frame. A fall lands on its frame. A cut to a brighter scene
+  in the queue gets that scene's LPW1 and CNTR landing on its first frame. A
+  CNTR going down goes one command gap ahead of the LPW1, never after it. Out
+  of black, the light may rise early to `black_prelift_max`, and no higher
+  while the picture is still black (`preposition_black_only`'s black).
+- **Floor.** When the queue covers `led_latency_ms + led_settle_ms`, the
+  script's flat bottom band continues its curve down to `led_floor`, as
+  compensate does on its covered path. Otherwise the floor is
+  `led_floor_reactive`.
+- **Queue = look-ahead.** Both sources look through every frame the active
+  queue profile has queued, whatever `active_picture_lookahead_frames` is set
+  to. `led_lookahead_ms` is only an optional cap. Low Latency queues nothing,
+  so the script reacts to the frame on screen exactly as before. A queue shorter
+  than the landing time uses its last frame, and a cut seen in it is sent at
+  once. Only a real fault is logged as a warning: frames are queued but no
+  statistics come from them.
+- **CNTR is never left above need.** A schedule cut short by Apply or
+  Reconfigure is completed at the next tick with the value the controller
+  already believes. Failed idle-restore and leave-compensate writes are sent
+  again, and a failed leave-script CNTR 50 goes to the driver's retrying
+  queue.
+
