@@ -14194,6 +14194,7 @@ namespace VideoProcessorTest
 						params.thresholdCodes = threshold;
 						params.colorDepth = 10;
 						params.radiusScale = 1080.0 / H;
+						params.grainGuard = false;   // "never": the 2026-10-16 debander (the guard is the struct default since the integration)
 						VpDebander::Module never, guarded, legacy;
 						pl_frame outNever{}, outGuard{}, outLegacy{};
 						Assert::IsTrue(never.Apply(gpu, dispatch, frameOf(tex), params, outNever), ExtendedRangeGpuProbe::ToWide(never.LastError()).c_str());
@@ -14228,6 +14229,7 @@ namespace VideoProcessorTest
 				params.thresholdCodes = VpDebander::Strength(8.0, 10, 1.0, true);
 				params.colorDepth = 10;
 				params.radiusScale = 1080.0 / H;
+				params.grainGuard = false;   // without the guard (the struct default since the integration is on)
 				VpDebander::Params on = params;
 				on.grainGuard = true;
 				VpDebander::Module a, b;
