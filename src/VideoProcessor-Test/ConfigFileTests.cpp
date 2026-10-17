@@ -3275,7 +3275,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(DeckLinkYCbCr12CaptureChoice)
 		{
 			// Fix under test (owner 2026-10-15): a 12-bit YCbCr 4:2:2 signal was
-			// refused (the SDK has no 12-bit YCbCr format). rgb12 (default) asks
+			// refused (the SDK has no 12-bit YCbCr format). rgb12 (the default until bug hunt 2) asks
 			// for 12-bit RGB, v210 for 10-bit 4:2:2, off refuses as before; other
 			// signals are untouched.
 			const auto ycc12 = static_cast<BMDDetectedVideoInputFormatFlags>(
@@ -3300,7 +3300,7 @@ namespace VideoProcessorTest
 			// Other signals untouched.
 			Assert::AreEqual(static_cast<unsigned int>(ycc10), static_cast<unsigned int>(DeckLinkYCbCr12AsRgb12(ycc10)));
 			Assert::AreEqual(static_cast<unsigned int>(rgb12), static_cast<unsigned int>(DeckLinkYCbCr12AsV210(rgb12)));
-			// The switch: default rgb12; v210, off and a bad value from the file.
+			// The switch: default v210 (bug hunt 2); rgb12, off and a bad value from the file.
 			char temporaryDirectory[MAX_PATH] = {};
 			Assert::IsTrue(GetTempPathA(ARRAYSIZE(temporaryDirectory), temporaryDirectory) > 0);
 			const std::string path = std::string(temporaryDirectory) + "VideoProcessor-decklink-ycc12.cfg";
@@ -3319,7 +3319,9 @@ namespace VideoProcessorTest
 			DeckLinkCaptureFormatPreferences preferences;
 			std::string error;
 			Assert::IsTrue(read(nullptr, preferences, error));
-			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::Rgb12, L"default rgb12");
+			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::V210, L"default v210 (bug hunt 2, M4: BTB/WTW kept)");
+			Assert::IsTrue(read("rgb12", preferences, error));
+			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::Rgb12, L"rgb12 restores the earlier default");
 			Assert::IsTrue(read("v210", preferences, error));
 			Assert::IsTrue(preferences.ycbcr12 == DeckLinkCaptureFormatPreferences::YCbCr12Capture::V210);
 			Assert::IsTrue(read("off", preferences, error));

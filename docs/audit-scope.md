@@ -48,7 +48,7 @@ search", sigma-delta serial reference, "reused half-size planes byte-identical",
   - Tests: GpuRgbUnpackMatchesTheCpuDecode (52 cases byte-exact: 7 formats, BT.709/2020, padded
     rows; 4K timing report); NativeRgbIngestRunsThroughTheRenderer (all 7 variants, both capture
     paths, switch on and off, de-judder held on RGB).
-- `[decklink] ycbcr_12bit_capture` (rgb12 default / v210 / off): a signal the driver reports as 12-bit
+- `[decklink] ycbcr_12bit_capture` (v210 default since bug hunt 2, keeps BTB/WTW / rgb12 earlier default / off): a signal the driver reports as 12-bit
   YCbCr 4:2:2 was refused; now 12-bit RGB from the card when offered for the mode, else 10-bit 4:2:2.
   Test: DeckLinkYCbCr12CaptureChoice. **No Config control yet (options audit).**
 - f9369400: `capture_path` default `gpu` on both pathways (moved from "Low latency (experimental)" to
