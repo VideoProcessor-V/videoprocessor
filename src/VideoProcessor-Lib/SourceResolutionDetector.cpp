@@ -901,6 +901,7 @@ namespace SourceResolution
 		streak = 0;
 		streakDetail.clear();
 		renditionMode = false;
+		declaredByRendition = false;
 		lastMean = -1.0;
 		lastSignature = 0.0;
 		lastSeconds = -1.0;
@@ -1002,6 +1003,7 @@ namespace SourceResolution
 		{
 			declared = ratio;
 			renditionMode = false;
+			declaredByRendition = false;
 			return;
 		}
 		// F12: after a rendition change, time only (a mid-shot switch has no shots).
@@ -1012,6 +1014,7 @@ namespace SourceResolution
 			{
 				declared = candidate;
 				renditionMode = false;
+				declaredByRendition = true;
 			}
 			return;
 		}
@@ -1019,7 +1022,10 @@ namespace SourceResolution
 		// stays below the declared cutoff.
 		const double candidate = Candidate();
 		if (candidate < declared - settings.tolerance && Shots() >= settings.minimumShots && EvidenceSeconds() >= settings.minimumSeconds)
+		{
 			declared = candidate;
+			declaredByRendition = false;
+		}
 	}
 
 	double Tracker::Candidate() const

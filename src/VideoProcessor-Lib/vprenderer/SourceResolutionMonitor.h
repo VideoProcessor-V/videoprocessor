@@ -157,6 +157,10 @@ namespace SourceResolutionMonitor
 		// Tests without a GPU: one analysed frame from normalised tiles (kTile x kTile each),
 		// through the same path as a captured frame, synchronously.
 		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight);
+		// ... with the tiles' centres (normalised) and the base-grid count, as Frame() hands a
+		// captured job to the worker (SourceResolution::PlaceTiles; the dense grid included).
+		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+			const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles);
 
 	private:
 		struct Job

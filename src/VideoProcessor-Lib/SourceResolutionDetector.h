@@ -326,6 +326,10 @@ namespace SourceResolution
 		double EvidenceSeconds() const;
 		unsigned long long Cuts() const { return cuts; }
 		unsigned long long RenditionChanges() const { return renditionChanges; }
+		// The declared lower reading came from a rendition change (F12: time only, no shots), so
+		// its evidence is judged against renditionSeconds alone (audit 2026-10-17: the monitor's
+		// confidence also required minimumShots, so F12 could never engage auto mid-shot).
+		bool DeclaredByRendition() const { return declaredByRendition; }
 		// Frames reading none found without detail above the rate in question (no evidence).
 		unsigned long long Starved() const { return starved; }
 		// Height in lines for a native height, rounded to an even number; the
@@ -348,7 +352,7 @@ namespace SourceResolution
 		double streakRatio = 1.0;
 		std::vector<double> streakDetail;
 		double streakStart = 0.0;
-		bool renditionMode = false;
+		bool renditionMode = false, declaredByRendition = false;
 		unsigned long long renditionChanges = 0;
 		std::string lastReason;
 	};

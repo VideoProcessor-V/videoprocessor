@@ -74,6 +74,23 @@ if (tile < int(tiles) && g.y < 256) {
 		FlushHistory(true);
 	}
 
+	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+		const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles)
+	{
+		Job j;
+		j.values = tiles;
+		j.tiles = count;
+		j.codeMaximum = 1023;
+		j.scale = 1023.0;
+		j.seconds = seconds;
+		j.nativeWidth = nativeWidth;
+		j.nativeHeight = nativeHeight;
+		j.tileX = tileX;
+		j.tileY = tileY;
+		j.baseTiles = (std::min)(baseTiles, count);
+		Analyse(j);
+	}
+
 	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight)
 	{
 		Job j;
@@ -597,9 +614,16 @@ if (tile < int(tiles) && g.y < 256) {
 		double coherenceMean = 0.0;
 		for (const auto& c : coherence) coherenceMean += c.second;
 		coherenceMean = coherence.empty() ? 0.0 : coherenceMean / coherence.size();
-		const SourceResolution::Tracker::Settings& ts = tracker.GetSettings();
-		const double evidence = (std::min)(1.0, tracker.Shots() / static_cast<double>(ts.minimumShots)) *
-			(std::min)(1.0, tracker.EvidenceSeconds() / ts.minimumSeconds);
+		// The evidence behind a tracker's declared value: its shots and seconds against its
+		// standard - or, for a rendition change (F12, mid-shot, no shots), its seconds against
+		// renditionSeconds alone, as the tracker itself declared it.
+		auto evidenceOf = [](const SourceResolution::Tracker& t) {
+			const SourceResolution::Tracker::Settings& s = t.GetSettings();
+			if (t.DeclaredByRendition()) return (std::min)(1.0, t.EvidenceSeconds() / (std::max)(1e-9, s.renditionSeconds));
+			return (std::min)(1.0, t.Shots() / static_cast<double>((std::max)(1, s.minimumShots))) *
+				(std::min)(1.0, t.EvidenceSeconds() / (std::max)(1e-9, s.minimumSeconds));
+		};
+		const double evidence = evidenceOf(tracker);
 		const double clarity = (std::min)(1.0, (std::max)(0.0, (coherenceMean - thresholds.coherence) / 0.3));
 
 		// Spec 1b / 2d readings, smoothed over ~2 s (4 copies), snapped on a cut.
@@ -656,13 +680,11 @@ if (tile < int(tiles) && g.y < 256) {
 		// Per axis, only while the both-axes reading is native: each declared axis's
 		// evidence (the stricter standard) times how clearly that axis was resampled.
 		{
-			const SourceResolution::Tracker::Settings as = trackerV.GetSettings();
 			auto axisConfidence = [&](const SourceResolution::Tracker& t, const std::deque<std::pair<double, double>>& c) {
 				double mean = 0.0;
 				for (const auto& e : c) mean += e.second;
 				mean = c.empty() ? 0.0 : mean / c.size();
-				const double ev = (std::min)(1.0, t.Shots() / static_cast<double>(as.minimumShots)) *
-					(std::min)(1.0, t.EvidenceSeconds() / as.minimumSeconds);
+				const double ev = evidenceOf(t);
 				return ev * (std::min)(1.0, (std::max)(0.0, (mean - thresholds.singleAxisCoherence) / 0.3));
 			};
 			snapshot.axisRatioX = snapshot.axisRatioY = 1.0;
