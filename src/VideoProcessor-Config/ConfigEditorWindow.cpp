@@ -7415,6 +7415,122 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             connect(refresh, &QAction::triggered, this, [sync]() { sync(); });
             sync();
         }
+        // VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md): beside the motion
+        // source, as exclusive buttons (owner style); the drop-downs hold the values.
+        {
+            auto* heading = new QLabel(QStringLiteral("<b>Frame interpolation (50/60p)</b>"));
+            heading->setObjectName(controlName(sectionPrefix, QStringLiteral("interpolation_heading")));
+            form->addRow(heading);
+        }
+        struct ChoiceButton { const char* value; QString text; QString tip; };
+        // Exclusive buttons over a hidden drop-down: returns the refresh step (also run on profile load).
+        auto exclusiveButtons = [this, &form, sectionPrefix](QComboBox* combo, const QString& key, const QString& label,
+            const std::vector<ChoiceButton>& choices, const QString& fallback, QWidget** boxOut) -> std::function<void()> {
+            auto* box = new QWidget;
+            if (boxOut) *boxOut = box;
+            box->setObjectName(controlName(sectionPrefix, key + QStringLiteral(".buttons")));
+            auto* layout = new QHBoxLayout(box);
+            layout->setContentsMargins(0, 0, 0, 0);
+            auto* group = new QButtonGroup(box);
+            group->setExclusive(true);
+            QList<QRadioButton*> radios;
+            for (const ChoiceButton& c : choices)
+            {
+                auto* radio = new QRadioButton(c.text);
+                radio->setObjectName(controlName(sectionPrefix, key + QStringLiteral(".") + QString::fromLatin1(c.value)));
+                radio->setToolTip(c.tip);
+                group->addButton(radio);
+                layout->addWidget(radio);
+                radios.push_back(radio);
+                const QString value = QString::fromLatin1(c.value);
+                connect(radio, &QRadioButton::clicked, this, [combo, value]() {
+                    const int index = combo->findData(value);
+                    if (index >= 0 && combo->currentIndex() != index) combo->setCurrentIndex(index);
+                });
+            }
+            QToolButton* unset = addChoiceUnsetButton(combo, layout, this);
+            layout->addStretch(1);
+            form->addRow(label, box);
+            form->setRowVisible(combo, false);
+            auto sync = [combo, radios, unset, fallback]() {
+                QString value = effectiveChoiceValue(combo);
+                if (value.isEmpty() || (value == QStringLiteral("auto") && combo->findData(QStringLiteral("auto")) < 0))
+                    value = fallback;
+                for (QRadioButton* radio : radios)
+                {
+                    const QSignalBlocker block(radio);
+                    radio->setChecked(radio->objectName().endsWith(QStringLiteral(".") + value));
+                }
+                markChoiceButtons(combo, radios, unset);
+            };
+            connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
+            return sync;
+        };
+        auto* interpolation = addChoice(QStringLiteral("Frame interpolation"), QStringLiteral("interpolation"),
+            { QStringLiteral("off"), QStringLiteral("auto"), QStringLiteral("always") });
+        interpolation->setToolTip(QStringLiteral(
+            "VP's own HDR-safe frame interpolation for video sources (50p / 60p and other video rates), from the "
+            "motion vectors above. Off (default): today's picture. Auto: only where the source rate does not divide "
+            "the display rate (50p on a 60 Hz display): the refreshes that would repeat a frame show a picture at "
+            "their true time instead. Always: also at whole ratios (30p video on 60 Hz). Film stays with the "
+            "de-judder; 50/60p at the display's own rate is never touched; the low-latency queue switches it off. "
+            "Exclusive with libplacebo's smooth motion."));
+        auto* interpolationFallback = addChoice(QStringLiteral("Where the motion is not trusted"),
+            QStringLiteral("interpolation_fallback"), { QStringLiteral("hold"), QStringLiteral("blend") });
+        interpolationFallback->setToolTip(QStringLiteral(
+            "Where the motion vectors are not trusted (uncovered areas, failed matches): Hold (default) shows the "
+            "nearest source frame's own pixels there, never a double image (the de-judder's rule). Blend mixes the "
+            "two frames by their time, as libplacebo's frame mixer does. A scene cut always holds."));
+        auto* sourceClass = addChoice(QStringLiteral("Film or video"), QStringLiteral("source_class"),
+            { QStringLiteral("legacy"), QStringLiteral("measured") });
+        sourceClass->setItemText(sourceClass->findData(QStringLiteral("legacy")), QStringLiteral("Fixed rates (up to 30 fps and 48p are film)"));
+        sourceClass->setItemText(sourceClass->findData(QStringLiteral("measured")), QStringLiteral("Measured (film detected in the signal, or 2+ refreshes per frame)"));
+        sourceClass->setToolTip(QStringLiteral(
+            "Which sources count as film (the de-judder's) and which as video (the interpolator's). Fixed rates "
+            "(default): as before - measured rates up to about 30 fps and 48p are film. Measured: film found inside "
+            "the signal by pulldown detection, or a source that owns at least two display refreshes per frame; no "
+            "fixed rates (48p on 60 Hz then counts as video)."));
+        auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
+            { QStringLiteral("off"), QStringLiteral("on") });
+        fillGaps->setToolTip(QStringLiteral(
+            "Reserved, not built yet: a picture interpolated across frames a stream dropped. Off (default) keeps the "
+            "rule that no motion is paired across a gap."));
+        fillGaps->setEnabled(false);
+        fillGaps->setProperty("greyedOff", true);
+        {
+            const auto syncMode = exclusiveButtons(interpolation, QStringLiteral("interpolation"), QStringLiteral("Interpolation"),
+                { { "off", QStringLiteral("Off"), QStringLiteral("Today's picture (the default).") },
+                  { "auto", QStringLiteral("Auto (rate mismatch only)"), QStringLiteral(
+                      "Only where the source rate does not divide the display rate, e.g. 50p on 60 Hz.") },
+                  { "always", QStringLiteral("Always (video sources)"), QStringLiteral(
+                      "Also at whole ratios (30p video on 60 Hz): smooth-motion parity. Film keeps the de-judder.") } },
+                QStringLiteral("off"), nullptr);
+            QWidget* fallbackButtons = nullptr;
+            const auto syncFallback = exclusiveButtons(interpolationFallback, QStringLiteral("interpolation_fallback"),
+                QStringLiteral("Untrusted motion"),
+                { { "hold", QStringLiteral("Hold the nearest frame"), QStringLiteral("Never a double image (the default).") },
+                  { "blend", QStringLiteral("Blend the two frames"), QStringLiteral("A time-weighted mix, as a frame mixer.") } },
+                QStringLiteral("hold"), &fallbackButtons);
+            auto sync = [syncMode, syncFallback, interpolation, interpolationFallback, sourceClass, fallbackButtons]() {
+                syncMode();
+                syncFallback();
+                // The fallback and the classification do nothing with interpolation off.
+                const bool off = effectiveChoiceValue(interpolation) != QStringLiteral("auto") &&
+                    effectiveChoiceValue(interpolation) != QStringLiteral("always");
+                for (QWidget* w : { static_cast<QWidget*>(interpolationFallback), static_cast<QWidget*>(sourceClass) })
+                {
+                    w->setProperty("greyedOff", off);
+                    w->setEnabled(!off);
+                }
+                if (fallbackButtons)
+                    fallbackButtons->setEnabled(!off);
+            };
+            connect(interpolation, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
+            auto* refresh = new QAction(interpolation);
+            refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("interpolation_refresh")));
+            connect(refresh, &QAction::triggered, this, [sync]() { sync(); });
+            sync();
+        }
         form = fixesForm;
         auto* nativeRgb = addChoice(QStringLiteral("Native 10/12-bit RGB capture"),
             QStringLiteral("native_rgb_ingest"), { QStringLiteral("on"), QStringLiteral("off") });
@@ -8856,7 +8972,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "off" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
+                    { "motion_ahead_frames", "4" },
+                    // VP's 50/60p interpolation (owner defaults 2026-10-16).
+                    { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
+                    { "source_class", "legacy" } };   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
                 // Numbers with a placeholder showing their default: empty, so
@@ -9215,6 +9334,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("optical_flow_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("interpolation_refresh"))))
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("temporal_dither_refresh"))))

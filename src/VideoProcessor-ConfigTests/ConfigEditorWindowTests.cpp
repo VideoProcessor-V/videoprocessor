@@ -1566,6 +1566,52 @@ void testTemporalDitherButtons()
     require(readBytes(path).contains("temporal_dither: off"), "temporal_dither not saved");
 }
 
+void testInterpolationButtons()
+{
+    // docs/VP-interpolator-50-60-plan.md: the 50/60p interpolation as exclusive buttons beside the
+    // motion source (Off / Auto / Always; Hold / Blend), off and hold by default, the fallback and
+    // the classification greyed while it is off; saved as interpolation / interpolation_fallback.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.Cinema]\nquality: high\n[vprenderer.Sports]\ninterpolation: auto\ninterpolation_fallback: blend\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* off = requireControl<QRadioButton>(window, "config.vprenderer.interpolation.off");
+    auto* autoMode = requireControl<QRadioButton>(window, "config.vprenderer.interpolation.auto");
+    auto* always = requireControl<QRadioButton>(window, "config.vprenderer.interpolation.always");
+    auto* hold = requireControl<QRadioButton>(window, "config.vprenderer.interpolation_fallback.hold");
+    auto* blend = requireControl<QRadioButton>(window, "config.vprenderer.interpolation_fallback.blend");
+    auto* mode = requireControl<QComboBox>(window, "config.vprenderer.interpolation");
+    auto* fallback = requireControl<QComboBox>(window, "config.vprenderer.interpolation_fallback");
+    auto* sourceClass = requireControl<QComboBox>(window, "config.vprenderer.source_class");
+    auto* fillGaps = requireControl<QComboBox>(window, "config.vprenderer.interpolation_fill_gaps");
+    require(!fillGaps->isEnabled(), "gap fill (not built) is offered");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(off->isChecked() && !autoMode->isChecked() && !always->isChecked(), "off (the default) is not shown");
+    require(hold->isChecked() && !blend->isChecked(), "hold (the default) is not shown");
+    require(!sourceClass->isEnabled() && !fallback->isEnabled(), "the options are not greyed with interpolation off");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(autoMode->isChecked() && blend->isChecked(), "the saved auto / blend are not shown");
+    require(sourceClass->isEnabled(), "the classification is greyed with interpolation on");
+    always->click();
+    QCoreApplication::processEvents();
+    require(mode->currentData().toString() == "always" && !autoMode->isChecked(), "Always did not set interpolation always");
+    hold->click();
+    QCoreApplication::processEvents();
+    require(fallback->currentData().toString() == "hold" && !blend->isChecked(), "the fallback buttons are not exclusive");
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("interpolation: always") && saved.contains("interpolation_fallback: hold"),
+        (QByteArray("interpolation not saved: ") + saved.left(400)).constData());
+    off->click();
+    QCoreApplication::processEvents();
+    require(mode->currentData().toString() == "off" && !sourceClass->isEnabled(), "Off did not set interpolation off");
+}
+
 void testInheritedButtonsAndReorganisedSections()
 {
     // Audit 2026-10-16: an unset profile's exclusive buttons show the default profile's choice,
@@ -8568,6 +8614,7 @@ int main(int argc, char** argv)
     failures += run("shader add-ons list", testShaderAddonsList);
     failures += run("exclusive buttons: LED source and motion source", testExclusiveButtonsForLedSourceAndMotionSource);
     failures += run("temporal dither buttons", testTemporalDitherButtons);
+    failures += run("interpolation buttons", testInterpolationButtons);
     failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
     failures += run("queue use mode and low-latency path", testQueueUseModeAndLowLatencyPath);
     failures += run("inherited buttons and reorganised sections", testInheritedButtonsAndReorganisedSections);
