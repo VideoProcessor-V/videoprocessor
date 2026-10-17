@@ -5850,6 +5850,120 @@ namespace VideoProcessorTest
 			Assert::IsFalse(SigmaDeltaDomain::FromTarget(repr(PL_COLOR_LEVELS_FULL, 16, 0)).supported);
 		}
 
+		// Hunt 2 L2: the quantiser's code limits are the codes libplacebo-beta's
+		// output clamp keeps (fork patch 0002): reserved timing codes excluded,
+		// footroom/headroom kept; derived from the depth, not listed per case.
+		TEST_METHOD(SigmaDeltaCodeLimitsAreThePermissibleCodes)
+		{
+			const auto l8 = SigmaDeltaDomain::Limits(8, false);       // 8-bit, and 8-in-10 (stored as 4k)
+			Assert::AreEqual(1.0, l8.min);
+			Assert::AreEqual(254.0, l8.max);
+			Assert::AreEqual(4.0, l8.min * 4.0);                      // 8-in-10: 4..1016
+			Assert::AreEqual(1016.0, l8.max * 4.0);
+			const auto l10 = SigmaDeltaDomain::Limits(10, false);
+			Assert::AreEqual(4.0, l10.min);
+			Assert::AreEqual(1019.0, l10.max);
+			const auto l12 = SigmaDeltaDomain::Limits(12, false);
+			Assert::AreEqual(16.0, l12.min);
+			Assert::AreEqual(4079.0, l12.max);
+			const auto f8 = SigmaDeltaDomain::Limits(8, true);
+			Assert::AreEqual(0.0, f8.min);
+			Assert::AreEqual(255.0, f8.max);
+			const auto f10 = SigmaDeltaDomain::Limits(10, true);
+			Assert::AreEqual(1023.0, f10.max);
+		}
+
+		// CPU model of the shader's quantiser on a static pixel: the mean of the
+		// emitted codes over many refreshes, with the shader's IGN dither.
+		static double SigmaDeltaMean(double x, double amplitude, const SigmaDeltaDomain::CodeLimits& limits,
+			int refreshes, double* lo = nullptr, double* hi = nullptr, float px = 37.0f, float py = 11.0f)
+		{
+			double r = 0.0, sum = 0.0;
+			double mn = 1e9, mx = -1e9;
+			for (int f = 0; f < refreshes; ++f)
+			{
+				const double d = (SigmaDeltaDomain::Ign(px, py, f) - 0.5) * 2.0 * amplitude;
+				const double k = SigmaDeltaDomain::QuantiseStep(x, r, d, limits, amplitude);
+				sum += k;
+				mn = std::min(mn, k);
+				mx = std::max(mx, k);
+			}
+			if (lo) *lo = mn;
+			if (hi) *hi = mx;
+			return sum / refreshes;
+		}
+
+		// Hunt 2 L1: the residual bound includes the dither amplitude, so the
+		// time average is unbiased at every fraction and every amplitude (the
+		// old +-0.5 clamp gave up to ~0.06 code at amplitude 0.5).
+		TEST_METHOD(SigmaDeltaMeanIsUnbiasedAtAnyDitherAmplitude)
+		{
+			const auto limits = SigmaDeltaDomain::Limits(8, false);
+			const int n = 40000;
+			double worst = 0.0;
+			for (double amplitude : { 0.0, 0.15, 0.3, 0.5 })
+				for (int i = 1; i < 40; ++i)
+				{
+					const double x = 100.0 + i * 0.025;
+					for (float px : { 3.0f, 37.0f, 211.0f })
+						worst = std::max(worst, std::fabs(SigmaDeltaMean(x, amplitude, limits, n, nullptr, nullptr, px) - x));
+				}
+			Logger::WriteMessage(("sigma-delta worst mean error: " + std::to_string(worst) + " code\n").c_str());
+			// First-order loop with a bounded residual: |mean - x| <= bound / n.
+			Assert::IsTrue(worst < 1e-3, L"the time average equals the input (no fraction-dependent bias)");
+
+			// The old payload clamp (+-0.5) is what biased it: shown with the
+			// same loop, so the test fails if the bound regresses.
+			double oldWorst = 0.0;
+			for (int i = 1; i < 40; ++i)
+			{
+				const double x = 100.0 + i * 0.025;
+				double r = 0.0, sum = 0.0;
+				for (int f = 0; f < n; ++f)
+				{
+					const double d = (SigmaDeltaDomain::Ign(37.0f, 11.0f, f) - 0.5) * 2.0 * 0.5;
+					const double k = std::clamp(std::floor(x + r + d + 0.5), limits.min, limits.max);
+					r = std::clamp(x + r - k, -0.5, 0.5);
+					sum += k;
+				}
+				oldWorst = std::max(oldWorst, std::fabs(sum / n - x));
+			}
+			Assert::IsTrue(oldWorst > 0.01, L"the model reproduces the old clamp's bias (the test is meaningful)");
+		}
+
+		// Hunt 2 L2: near the outermost permissible codes the quantiser never
+		// emits a reserved code, and the mean still lands on the input (the
+		// feedback sees the code really emitted).
+		TEST_METHOD(SigmaDeltaNeverEmitsReservedCodes)
+		{
+			const int n = 40000;
+			struct Case { int bits; double x; };
+			for (const Case c : { Case{ 8, 1.05 }, Case{ 8, 1.5 }, Case{ 8, 253.95 }, Case{ 8, 253.5 },
+				Case{ 10, 4.2 }, Case{ 10, 1018.8 } })
+				for (double amplitude : { 0.15, 0.5 })
+				{
+					const auto limits = SigmaDeltaDomain::Limits(c.bits, false);
+					double lo = 0.0, hi = 0.0;
+					const double mean = SigmaDeltaMean(c.x, amplitude, limits, n, &lo, &hi);
+					Assert::IsTrue(lo >= limits.min && hi <= limits.max, L"no reserved timing code is emitted");
+					Assert::IsTrue(std::fabs(mean - c.x) < 2e-3, L"the mean lands on the input next to the limits");
+				}
+			// Beyond the permissible range (an overshoot) the output pins to the
+			// limit and the residual stays bounded (no wind-up): the moment the
+			// input returns inside, the mean recovers.
+			const auto limits = SigmaDeltaDomain::Limits(8, false);
+			double r = 0.0;
+			for (int f = 0; f < 1000; ++f)
+				Assert::AreEqual(254.0, SigmaDeltaDomain::QuantiseStep(255.6, r, 0.0, limits, 0.15));
+			Assert::IsTrue(r <= SigmaDeltaDomain::ResidualBound(0.15) + 1e-12, L"the residual is bounded at the limit");
+			// Full range keeps every code, 0 and the top included.
+			const auto full = SigmaDeltaDomain::Limits(8, true);
+			double rf = 0.0;
+			Assert::AreEqual(0.0, SigmaDeltaDomain::QuantiseStep(0.0, rf, 0.0, full, 0.15));
+			rf = 0.0;
+			Assert::AreEqual(255.0, SigmaDeltaDomain::QuantiseStep(255.0, rf, 0.0, full, 0.15));
+		}
+
 		// Stage 10: when preserve_extended_range is active, and why not.
 		TEST_METHOD(ExtendedRangeDecision)
 		{

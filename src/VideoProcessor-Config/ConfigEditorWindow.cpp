@@ -8049,6 +8049,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "sharp parts. On (default): when sharp full-resolution detail shows anywhere beside the upscaled video "
             "(not a subtitle line), the picture counts as native - no re-base, and an active one switches off at "
             "once. Off: the screen is read as a whole, as before."));
+        // Hunt 2 M2/M3: the coding readings behind auto deband and low-bitrate handling.
+        auto* codingFixes = addChoice(QStringLiteral("Bit depth and coding detection fixes"), QStringLiteral("source_coding_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        codingFixes->setToolTip(QStringLiteral(
+            "Fix under test (default on). How VP reads the source's real bit depth and its coding damage, which drive "
+            "auto debanding and low-bitrate handling. On: the bit depth is read from the flat parts of the picture and "
+            "codes used only by a few pixels count little, so 8-bit video upscaled or dithered into 10 bits reads 8-bit; "
+            "block edges are found at any spacing (an upscaled stream's 16- or 24-pixel blocks, not only 8 and 16) and "
+            "bands still count with noise or a soft upscaled edge. Off: the earlier readings."));
         // Owner 2026-10-16: the engine's options on the motion (de-judder) section, not here.
         QFormLayout* fixesForm = form;
         form = dejudderTasteForm;
@@ -8351,6 +8360,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         warpFilter->setToolTip(QStringLiteral(
             "How the de-judder samples the source when it warps it. Catmull-Rom (default) keeps fine grain; "
             "bilinear keeps only about half of it at half-pixel shifts. The rendered warp is Catmull-Rom either way."));
+        // Hunt 2 M1: how the NLS / NLS+ warp samples the source.
+        auto* nlsSampling = addChoice(QStringLiteral("NLS stretch sampling"),
+            QStringLiteral("nls_sampling"), { QStringLiteral("catmull"), QStringLiteral("bilinear") });
+        nlsSampling->setItemText(nlsSampling->findData(QStringLiteral("catmull")), QStringLiteral("Catmull-Rom (default, faithful)"));
+        nlsSampling->setItemText(nlsSampling->findData(QStringLiteral("bilinear")), QStringLiteral("Bilinear (the earlier output)"));
+        nlsSampling->setToolTip(QStringLiteral(
+            "How the nonlinear stretch (NLS, NLS+, NLS-V) reads the picture it reshapes. Catmull-Rom (default): a sharp "
+            "filter along the stretched axis that keeps grain and detail, widened where the stretch shrinks the "
+            "picture (the centre) so fine detail does not alias. Bilinear: the earlier output (softer, the centre "
+            "shrunk without a filter). Only matters while an NLS shader is active."));
+        MarkGpuCost(form, nlsSampling, 1);
         auto* residualGrainGuard = addChoice(QStringLiteral("Residual stabilise leaves grain alone"),
             QStringLiteral("residual_stabilise_grain_guard"), { QStringLiteral("on"), QStringLiteral("off") });
         residualGrainGuard->setToolTip(QStringLiteral(
@@ -9975,6 +9995,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
                     { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "deband_vp_exclusive", "on" },
                     { "dv_tunnel_fixes", "on" },
+                    // Hunt 2 M1: the NLS warp's sampling.
+                    { "nls_sampling", "catmull" }, { "source_coding_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
                     { "source_class", "legacy" },   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)

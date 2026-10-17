@@ -41,6 +41,16 @@ namespace SourceResolution
 		std::vector<unsigned> histogram;
 		double blockiness = 1.0, gradient = 0.0;
 		int blocks = 0, bandEdges = 0, flatBlocks = 0;
+		// Hunt 2 M2/M3 (source_coding_fixes, Thresholds::codingFixes): the robust readings.
+		// flatHistogram: codes of the low-activity 8x8 blocks only (range up to
+		// 2^(bits - 5) codes: ramps of an upscale and texture left out). blockinessRobust:
+		// the coding grid found at any period from 8 px to an eighth of the tile (an
+		// upscaled 8/16-px grid at 8 / r px), any phase, its boundary up to 3 px wide,
+		// against the other phases, on both axes (the weaker); blockPeriod is that period (0 = none). bandEdgesRobust:
+		// 8x8 blocks holding a band edge with two dominant levels, ramp or noise allowed.
+		std::vector<unsigned> flatHistogram;
+		double blockinessRobust = 1.0, blockPeriod = 0.0;
+		int bandEdgesRobust = 0;
 		// Overlay text (owner 2026-10-16, subtitles drawn by the player at the output
 		// resolution over an upscaled picture): the share of the tile's sharp steps
 		// (neighbours a third of the range apart) inside its densest band a quarter of the
@@ -160,6 +170,11 @@ namespace SourceResolution
 		// <= 0 or more than the tiles: all of them (as before).
 		int signatureTiles = 0;
 		int codeMaximum = 1023;           // the source's code range (floor)
+		// Hunt 2 M2/M3 (source_coding_fixes): the coding readings (effective bits, blocking,
+		// banding) from the robust measures (Spectrum::flatHistogram, blockinessRobust,
+		// bandEdgesRobust); false: the earlier fixed 8/16-px grid, exact two-level bands and
+		// one-pixel code occupancy, exactly as before.
+		bool codingFixes = true;
 	};
 
 	// The monitor's tile placement (owner 2026-10-15; dense grid 2026-10-16): tiles of `tile` px
@@ -243,7 +258,22 @@ namespace SourceResolution
 	// averaged per axis; a lower ratio only when both axes were resampled.
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& thresholds = {});
 	// The coding readings alone (part of ReadFrame).
-	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame);
+	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame, bool codingFixes = true);
+
+	// Hunt 2 M2: the effective bits of a code histogram: 16-code windows with at least 256
+	// pixels whose neighbouring windows hold within 3x as many (a smooth envelope: a narrow
+	// grain peak is no coarse step), each window's occupancy as a Hill number of order 4
+	// ((sum p^4)^(-1/3) / 16: equally used codes count fully, rarely used ones - an upscale's
+	// ramp values - little); the median window. 0 when no window can be judged.
+	double EffectiveBitsOf(const std::vector<unsigned long long>& histogram);
+	// Hunt 2 M3: the coding-grid blockiness of one axis's mean absolute step per position
+	// (`steps[x]` between x and x + 1). Returns 1 when no grid stands out; `period` gets the
+	// grid's period in pixels (0 = none).
+	double GridBlockiness(const std::vector<double>& steps, double& period);
+	// Hunt 2 M3: an 8x8 block (row-major codes) holds a band edge: two dominant levels a
+	// minimum to maximum step apart, at least 85 % of the block within a code of them (or
+	// on the ramp between), split along a line (few transitions after a 3x3 majority).
+	bool BandEdgeBlock(const int* block, int minimumStep, int maximumStep);
 
 	// Variable-bitrate streams (owner 2026-10-16): a starved frame can lose an
 	// upscale's mirror coherence and read "none found" (1) without holding any

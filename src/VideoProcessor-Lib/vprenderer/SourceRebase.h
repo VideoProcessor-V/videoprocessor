@@ -75,6 +75,9 @@ namespace SourceRebase
 		int Kernel() const { return kernel; }
 		bool KernelUsed() const { return kernelUsed; }
 		const std::string& LastError() const { return error; }
+		// C19: the last float fallback taken for a plane whose format is not renderable
+		// (empty: none); the renderer logs it once per change.
+		const std::string& FormatNote() const { return formatNote; }
 		unsigned long long Failures() const { return failures; }
 		float antiring = 0.5f;   // the faithful branch's value (Stage 8)
 		// Both axes, chroma planes: a separable Lanczos (two 1D passes) - the polar filter's
@@ -96,6 +99,7 @@ namespace SourceRebase
 			pl_tex out, int slot);
 		pl_shader_obj luts[kSlots][PL_MAX_PLANES] = {};
 		std::string error;
+		std::string formatNote;
 		unsigned long long failures = 0;
 	};
 }

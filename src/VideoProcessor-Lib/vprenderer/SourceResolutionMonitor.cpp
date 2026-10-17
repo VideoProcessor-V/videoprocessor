@@ -191,6 +191,7 @@ if (tile < int(tiles) && g.y < 256) {
 			SourceResolution::Thresholds thresholds;
 			if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 			thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
+			thresholds.codingFixes = codingFixes.load(std::memory_order_acquire);
 			const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, thresholds);
 			std::lock_guard<std::mutex> lock(aheadMutex);
 			aheadHaveJob = false;
@@ -552,6 +553,7 @@ if (tile < int(tiles) && g.y < 256) {
 		thresholds.codeMaximum = j.codeMaximum;
 		if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 		thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
+		thresholds.codingFixes = codingFixes.load(std::memory_order_acquire);
 		// The tiles' positions (the overlay spread) and the base grid for the frame signature:
 		// switching between the base and the dense grid is neither a cut nor a new shot.
 		if (j.tileX.size() == static_cast<size_t>(j.tiles) && j.tileY.size() == static_cast<size_t>(j.tiles))
