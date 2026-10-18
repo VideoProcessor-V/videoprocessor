@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <list>
 #include <map>
@@ -2373,6 +2374,79 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, withinCuts, L"no step inside a shot is a cut");
 			Assert::IsTrue(missed <= 2, L"the real cuts are found (a cut out of a fast pan may be missed: the safe direction)");
 			Budget("LatchFixesCalibration", started, 30);
+		}
+
+		// Gate verify 2026-10-17: the cut test on real films. VP_TEST_CUT_FILMS lists 3840x2160 8-bit
+		// 4:2:0 y4m files sampled at the monitor's analysis interval (0.5 s: one frame per analysed
+		// tile copy), separated by ';'; skipped when unset. Every frame is read as the monitor's worker
+		// reads it (ReadContent: the dense grid) and fed in order to two trackers, latch fixes on (the
+		// shape test) and off (the old tile-mean jump). Each step is written to <file>.cuts.csv
+		// (step, decorrelation, share, jump, cut with fixes, cut without) for comparison with the
+		// film's real cuts (ffmpeg scene detection on the full-rate film, scored outside the test).
+		TEST_METHOD(RealFilmCutDecisions)
+		{
+			using namespace SrcLatch;
+			const std::string films = Env("VP_TEST_CUT_FILMS");
+			if (films.empty()) { Logger::WriteMessage("RealFilmCutDecisions: VP_TEST_CUT_FILMS not set: skipped\n"); return; }
+			size_t from = 0;
+			while (from < films.size())
+			{
+				const size_t end = films.find(';', from);
+				const std::string path = films.substr(from, end == std::string::npos ? std::string::npos : end - from);
+				from = end == std::string::npos ? films.size() : end + 1;
+				if (path.empty()) continue;
+				const size_t slash = path.find_last_of("\\/");
+				Studio st(path.substr(0, slash));
+				long long size = 0;
+				{
+					WIN32_FILE_ATTRIBUTE_DATA a{};
+					Assert::IsTrue(GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &a) != 0, L"film not found");
+					size = (static_cast<long long>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+				}
+				const long long frameBytes = static_cast<long long>(SW) * SH * 3 / 2 + 6;
+				const int frames = static_cast<int>(size / frameBytes);
+				const int clip = st.corpus.Add(path.substr(slash + 1), true, frames);
+				Assert::IsTrue(clip >= 0, (L"corpus refused " + std::wstring(path.begin(), path.end())).c_str());
+				Content c;
+				c.name = "film";
+				c.clip = clip;
+				c.frame0 = 0;
+				c.frameStep = 1;
+				c.cycle = 1 << 30;
+				const int id = st.Add(c);
+				SourceResolution::Tracker::Settings on, off;
+				on.latchFixes = true;
+				off.latchFixes = false;
+				SourceResolution::Tracker fixes(on), old(off);
+				std::string csv = "step,seconds,decorrelation,share,jump,judged,cut_fixes,cut_old,mean\n";
+				SourceResolution::FrameReading last;
+				bool haveLast = false;
+				unsigned long long cutsOn = 0, cutsOff = 0;
+				for (int k = 0; k < frames; ++k)
+				{
+					const SourceResolution::FrameReading f = ReadContent(st, id, k, 1.0);
+					st.tiles.clear();
+					const double t = k * 0.5;
+					fixes.Update(f, t);
+					old.Update(f, t);
+					const bool cutOn = fixes.Cuts() != cutsOn, cutOff = old.Cuts() != cutsOff;
+					cutsOn = fixes.Cuts();
+					cutsOff = old.Cuts();
+					double dec = -1.0, share = -1.0, jump = -1.0;
+					bool judged = false;
+					if (haveLast)
+						judged = SourceResolution::PatternChange(last.pattern, last.patternFlat, f.pattern, f.patternFlat, f.blackLevel, f.noiseLevel, dec, share, &jump);
+					char line[200];
+					snprintf(line, sizeof(line), "%d,%.2f,%.4f,%.4f,%.4f,%d,%d,%d,%.4f\n", k, t, dec, share, jump, judged ? 1 : 0, cutOn ? 1 : 0, cutOff ? 1 : 0, f.mean);
+					csv += line;
+					last = f;
+					haveLast = true;
+				}
+				std::ofstream(path + ".cuts.csv", std::ios::binary) << csv;
+				char line[300];
+				snprintf(line, sizeof(line), "RESULT %s: %d analysed frames; cuts with latch fixes %llu, without %llu\n", path.c_str(), frames, cutsOn, cutsOff);
+				Logger::WriteMessage(line);
+			}
 		}
 
 		// ---- The tracker alone (synthetic readings; fast, minutes of time) ----
