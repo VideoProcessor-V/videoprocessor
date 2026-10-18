@@ -215,6 +215,12 @@ namespace LedDrive
 		void SetFloor(ScriptFloor floorIn) { floor = floorIn; }
 		ScriptFloor Floor() const { return floor; }
 		void SetLightHold(int level) { lightHold = level; }
+		// Intent interpreter (2026-10-17, LedDriveModule::SetIntentLimits): the
+		// lowest light level the intent limits allow (led_protect's shadow cap,
+		// ambient adaptation's veil floor); <= 0 = none (the script exactly).
+		// Never above led_ceiling.
+		void SetIntentFloor(int level) { intentFloor = level; }
+		int IntentFloor() const { return intentFloor; }
 
 	private:
 		LedDriveConfig config;
@@ -222,6 +228,7 @@ namespace LedDrive
 		int contrast;
 		ScriptFloor floor = ScriptFloor::Legacy;
 		int lightHold = -1;
+		int intentFloor = 0;
 	};
 
 	// script_lookahead (owner 2026-10-17): the script copy decides from the frame
@@ -362,11 +369,18 @@ namespace LedDrive
 		// the LED go that much lower, CNTR making up the difference.
 		void SetContrastHeadroom(double light) { contrastHeadroom = light > 1.0 ? light : 1.0; }
 		double ContrastHeadroom() const { return contrastHeadroom; }
+		// Intent interpreter (2026-10-17, LedDriveModule::SetIntentLimits): the
+		// lowest LED level the intent limits allow; every target (scene,
+		// black, fade, early ramp, cut) is raised to it, never above
+		// led_ceiling. <= 0 = none (the controller exactly as before).
+		void SetIntentFloor(int levelIn) { intentFloor = levelIn; }
+		int IntentFloor() const { return intentFloor; }
 
 	private:
 		LedDriveConfig config;
 		FluxModel flux;
 		double contrastHeadroom = 1.0;
+		int intentFloor = 0;
 		double level;
 		int light;
 		double protection = 0.0;

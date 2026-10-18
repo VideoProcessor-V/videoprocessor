@@ -142,6 +142,57 @@ namespace LedDrive
 		return recovery.Active() ? recovery.Displayed() : 1.0;
 	}
 
+	double LedDriveModule::IntentFloorShare(double shadowMinimumShare, double ambientBlackNits, double displayBlackNits)
+	{
+		double share = std::isfinite(shadowMinimumShare) ? std::max(0.0, std::min(1.0, shadowMinimumShare)) : 0.0;
+		if (std::isfinite(ambientBlackNits) && std::isfinite(displayBlackNits) && displayBlackNits > 0.0 &&
+			ambientBlackNits > displayBlackNits)
+		{
+			// One 1/6-stop step of the visible black (AmbientAdapt::kStepsPerStop).
+			const double step = std::pow(2.0, 1.0 / 6.0) - 1.0;
+			share = std::max(share, std::min(1.0, step * (ambientBlackNits - displayBlackNits) / displayBlackNits));
+		}
+		return share;
+	}
+
+	void LedDriveModule::ApplyIntentLimitsLocked()
+	{
+		intentFloorShare = IntentFloorShare(intentShadowShare, intentAmbientBlackNits, intentDisplayBlackNits);
+		// The lowest whole level with at least that share of the ceiling's flux;
+		// never above led_ceiling (the peak drive is never raised).
+		intentFloorLevel = intentFloorShare > 0.0 ? flux.LevelFor(intentFloorShare, 0, led.ledCeiling) : 0;
+		compensator.SetIntentFloor(intentFloorLevel);
+	}
+
+	void LedDriveModule::SetIntentLimits(double shadowMinimumShare, double ambientBlackNits)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		intentShadowShare = shadowMinimumShare;
+		intentAmbientBlackNits = ambientBlackNits;
+		ApplyIntentLimitsLocked();
+	}
+
+	void LedDriveModule::SetIntentLimits(double shadowMinimumShare, double ambientBlackNits, double displayBlackNits)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		intentShadowShare = shadowMinimumShare;
+		intentAmbientBlackNits = ambientBlackNits;
+		intentDisplayBlackNits = displayBlackNits;
+		ApplyIntentLimitsLocked();
+	}
+
+	int LedDriveModule::IntentFloorLevel() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return intentFloorLevel;
+	}
+
+	double LedDriveModule::IntentFloorShareNow() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return intentFloorShare;
+	}
+
 	double LedDriveModule::LedFractionLocked(double level) const
 	{
 		const double ceiling = flux.Flux(led.ledCeiling);
@@ -263,6 +314,7 @@ namespace LedDrive
 		statsBuilder = StatsBuilder(led);
 		compensator.Reconfigure(led, flux);
 		ConfigureModelsLocked();
+		ApplyIntentLimitsLocked();   // flux_table / led_ceiling may have changed
 		gain.knee = led.knee;
 		gain.eotf = led.compensationEotf;
 		if (started && driver)
@@ -953,6 +1005,7 @@ namespace LedDrive
 			// Only with look-ahead: leaving must be seen coming.
 			if (led.ftbCustomDim != FtbCustomDim::Off && black && !lightAhead && lookaheadCovers &&
 				timeMs - blackSinceMs >= led.ftbBlackMs && modelledLevel <= led.ledFloorBlack &&
+				intentFloorLevel <= 0 &&   // intent limits: never below their floor
 				!status.busy && !status.sequenceBusy &&
 				driver->QueueSequence(CustomDimDown(led), led.ftbStepMs))
 			{
@@ -965,7 +1018,7 @@ namespace LedDrive
 			}
 			break;
 		case FadeToBlack::Deep:
-			if ((!black || lightAhead || led.ftbCustomDim == FtbCustomDim::Off) &&
+			if ((!black || lightAhead || led.ftbCustomDim == FtbCustomDim::Off || intentFloorLevel > 0) &&
 				driver->QueueSequenceNow(CustomDimUp(led), led.ftbStepMs))
 			{
 				fadeToBlack = FadeToBlack::Leaving;
@@ -1465,6 +1518,11 @@ namespace LedDrive
 			}
 			else if (have)
 			{
+				// Intent limits (2026-10-17): the script's lowest light level.
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					controller.SetIntentFloor(intentFloorLevel);
+				}
 				// script_lookahead (owner 2026-10-17): decide from the frame on screen
 				// when the command lands; no queued frames: the frame on screen.
 				if (scriptAhead)

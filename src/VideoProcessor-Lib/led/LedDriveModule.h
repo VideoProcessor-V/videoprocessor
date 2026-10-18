@@ -152,6 +152,38 @@ namespace LedDrive
 		// The smoothed exact / predicted ratio applied to predictions.
 		double CorrectionRatio() const;
 
+		// Intent interpreter (2026-10-17; docs/VP-intent-interpreter-design.md
+		// sections 2 and 4). Thread-safe; any thread. Limits on how far the LED
+		// may dim, applied in compensate (every controller target, per output
+		// frame) and internal_script (the script's light targets and its cut /
+		// pre-lift jumps, per tick); log_only / picture_only send nothing, so
+		// nothing changes there. The peak drive is never raised: the floor is a
+		// lower bound only and never exceeds led_ceiling. 0 / 0 = no effect: the
+		// command stream is exactly as without the call.
+		// shadowMinimumShare (0..1, BlackIntent::LedMinimumShare, led_protect):
+		//   the LED's light share (flux(level) / flux(led_ceiling)) never goes
+		//   below it.
+		// ambientBlackNits (> displayBlackNits; ambient adaptation's effective
+		//   black B_eff): the share floor below which dimming cannot be seen
+		//   through the room's veil V = B_eff - B (IntentFloorShare). Needs the
+		//   display black B at full drive (the 3-argument form, or a value given
+		//   earlier); without it (B <= 0) the ambient floor is not applied.
+		// While a floor is in force the custom-dim fade to black does not
+		// engage (it would dim below the floor) and leaves if engaged.
+		void SetIntentLimits(double shadowMinimumShare, double ambientBlackNits);
+		void SetIntentLimits(double shadowMinimumShare, double ambientBlackNits, double displayBlackNits);
+		// The combined share floor: max(shadow share, ambient share) with the
+		// ambient share = min(1, (2^(1/6) - 1) x (B_eff - B) / B): the drive
+		// models the projector's black as B x s (the DMD's leakage scales with
+		// the LED's flux, so the native contrast stays fixed); the visible
+		// black is s x B + V and dimming further from that share lowers it by
+		// less than one 1/6-stop step (ambient adaptation's own step) against
+		// the best possible black V. 0 when there is no floor.
+		static double IntentFloorShare(double shadowMinimumShare, double ambientBlackNits, double displayBlackNits);
+		// The floor as an LPW1 level (flux_table; 0 = none) and as a share.
+		int IntentFloorLevel() const;
+		double IntentFloorShareNow() const;
+
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
 		void Run();
@@ -327,5 +359,13 @@ namespace LedDrive
 		double blackSinceMs = -1.0;
 		// The look-ahead reached the frame the last command lands on.
 		bool lookaheadCovers = false;
+
+		// Intent limits (SetIntentLimits) and the floor level they give.
+		void ApplyIntentLimitsLocked();
+		double intentShadowShare = 0.0;
+		double intentAmbientBlackNits = 0.0;
+		double intentDisplayBlackNits = 0.0;
+		double intentFloorShare = 0.0;
+		int intentFloorLevel = 0;
 	};
 }
