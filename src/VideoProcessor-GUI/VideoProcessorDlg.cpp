@@ -1691,8 +1691,7 @@ public:
 	void SetNominalRate(double nominalRateHz)
 	{
 		const double normalizedRate =
-			std::isfinite(nominalRateHz) && nominalRateHz >= 10.0 &&
-			nominalRateHz <= 240.0 ? nominalRateHz : 0.0;
+			DisplayRefreshBounds::Accepts(nominalRateHz) ? nominalRateHz : 0.0;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (std::fabs(m_nominalRateHz - normalizedRate) < 0.01)
@@ -1982,8 +1981,7 @@ private:
 				}
 				if (publishRate)
 				{
-					if (estimate.startupRateHz >= 10.0 &&
-						estimate.startupRateHz <= 240.0)
+					if (DisplayRefreshBounds::Accepts(estimate.startupRateHz))
 					{
 						std::lock_guard<std::mutex> lock(m_mutex);
 						if (m_targetGeneration == targetGeneration)
@@ -2478,7 +2476,7 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 			const double overrideRate = std::stod(setting.second, &valueLength);
 			if (valueLength != setting.second.length() ||
 				!std::isfinite(overrideRate) ||
-				overrideRate < 10.0 || overrideRate > 240.0)
+				!DisplayRefreshBounds::Accepts(overrideRate))
 			{
 				throw std::runtime_error("out of range");
 			}
@@ -2492,8 +2490,9 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 		{
 			DebugLog::Log(
 				"Display timing override ignored: invalid entry %s=%s "
-				"(expected nominal integer 1-1000 = rate 10.0-240.0 or AUTO)",
-				setting.first.c_str(), setting.second.c_str());
+				"(expected nominal integer 1-1000 = rate %.1f-%.1f or AUTO)",
+				setting.first.c_str(), setting.second.c_str(),
+				DisplayRefreshBounds::kMinimumHz, DisplayRefreshBounds::kMaximumHz);
 		}
 	}
 }
@@ -16559,7 +16558,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 	if (m_videoRenderer)
 	{
 		m_videoRenderer->SetRenderLoadDisplayRefreshRate(
-			displayRefreshRate >= 10.0 ? displayRefreshRate :
+			DisplayRefreshBounds::Accepts(displayRefreshRate) ? displayRefreshRate :
 			activeTargetRefreshRate);
 	}
 	const std::wstring monitorDeviceName = GetMonitorDeviceName(displayWindow);
@@ -17843,7 +17842,7 @@ void CVideoProcessorDlg::LogMadVRPostStallResetDiagnostics(
 	observation.materialStall = materialStall;
 	observation.queueDepth = stats.currentQueueSize;
 	observation.healthyQueueDepth = liveness.deliveryReserveFrames;
-	observation.framePeriodMs = measuredCaptureRateHz >= 10.0 ?
+	observation.framePeriodMs = CaptureRateBounds::Accepts(measuredCaptureRateHz) ?
 		1000.0 / measuredCaptureRateHz : 0.0;
 	observation.oldestQueuedAgeMs = static_cast<double>(
 		liveness.oldestRetainedSourceBufferAgeMs);

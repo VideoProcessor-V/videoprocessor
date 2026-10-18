@@ -7,6 +7,7 @@
  */
 
 #include <pch.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include <BoundedDeliveryGate.h>
 
@@ -898,8 +899,8 @@ void CBufferedLiveSourceVideoOutputPin::SetSceneTimingRates(
 	// correction is due within seconds/minutes and is not safely hideable.
 	constexpr double kMaximumSceneTimingMismatchPpm = 200.0;
 	const bool ratesInRange =
-		displayRefreshRateHz >= 10.0 && displayRefreshRateHz <= 240.0 &&
-		deliveryRateHz >= 10.0 && deliveryRateHz <= 240.0;
+		DisplayRefreshBounds::Accepts(displayRefreshRateHz) &&
+		CaptureRateBounds::Accepts(deliveryRateHz);
 	const double mismatchPpm = ratesInRange ?
 		abs((displayRefreshRateHz / deliveryRateHz - 1.0) * 1000000.0) : 0.0;
 	const bool cadenceCompatible =
@@ -3457,7 +3458,7 @@ DWORD CBufferedLiveSourceVideoOutputPin::ThreadProc()
 				sceneCadence.contentPhaseFrames = 0.0L;
 				const double currentDisplayRate =
 					m_sceneDisplayRefreshRateHz.load(std::memory_order_acquire);
-				if (currentDisplayRate >= 10.0 && currentDisplayRate <= 240.0)
+				if (DisplayRefreshBounds::Accepts(currentDisplayRate))
 					sceneCadence.displayRateHz = currentDisplayRate;
 				m_scenePhasePpmUnits.store(0, std::memory_order_release);
 				DebugLog::Log(
@@ -3784,8 +3785,8 @@ DWORD CBufferedLiveSourceVideoOutputPin::ThreadProc()
 				convertedSceneTimingGeneration == currentSceneTimingGeneration &&
 				SUCCEEDED(sampleTimeHr) &&
 				currentStop > currentStart &&
-				displayRateHz >= 10.0 && displayRateHz <= 240.0 &&
-				deliveryRateHz >= 10.0 && deliveryRateHz <= 240.0;
+				DisplayRefreshBounds::Accepts(displayRateHz) &&
+				CaptureRateBounds::Accepts(deliveryRateHz);
 
 			if (validSceneTiming)
 			{

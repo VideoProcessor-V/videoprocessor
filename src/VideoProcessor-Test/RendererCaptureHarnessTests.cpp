@@ -1346,6 +1346,7 @@ namespace Tests
 				"optical_flow_global_fallback: off\n", "optical_flow_cost_trust: on\n", "optical_flow_fb_check: on\n",
 				"interpolation_grain: blend\n", "dejudder_source_warp_filter: bilinear\n", "deband_vp_grain_guard: off\n",
 				"deband_grain: on\n", "residual_stabilise_grain_guard: off\n", "dv_tunnel_fixes: off\n",
+				"queue_timing_fixes: off\n",   // hunt 2 group 5
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
@@ -1394,7 +1395,7 @@ namespace Tests
 				{ "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
 				{ "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "residual_stabilise_grain_guard", "on" },
 				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
-				{ "dv_tunnel_fixes", "on" } };
+				{ "dv_tunnel_fixes", "on" }, { "queue_timing_fixes", "on" } };
 			for (const auto& entry : defaults)
 				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
 					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
@@ -1403,7 +1404,7 @@ namespace Tests
 				{ "interpolation_grain", "blend" }, { "dejudder_source_warp_filter", "bilinear" },
 				{ "deband_vp_grain_guard", "off" }, { "deband_grain", "on" }, { "residual_stabilise_grain_guard", "off" },
 				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
-				{ "dv_tunnel_fixes", "off" } };
+				{ "dv_tunnel_fixes", "off" }, { "queue_timing_fixes", "off" } };
 			for (const auto& flip : flips)
 			{
 				const std::string text = head + flip.first + ": " + flip.second + "\n";

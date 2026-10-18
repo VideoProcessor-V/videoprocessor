@@ -9,8 +9,8 @@
 namespace
 {
 constexpr uint64_t MINIMUM_RAW_INTERVALS = 12;
-constexpr double MINIMUM_RATE_HZ = 10.0;
-constexpr double MAXIMUM_RATE_HZ = 240.0;
+constexpr double MINIMUM_RATE_HZ = DisplayRefreshBounds::kMinimumHz;
+constexpr double MAXIMUM_RATE_HZ = DisplayRefreshBounds::kMaximumHz;
 constexpr double NOMINAL_TOLERANCE_RATIO = 0.02;
 constexpr double NOMINAL_TOLERANCE_HZ = 0.5;
 constexpr double RAW_NOMINAL_TOLERANCE_RATIO = 0.03;

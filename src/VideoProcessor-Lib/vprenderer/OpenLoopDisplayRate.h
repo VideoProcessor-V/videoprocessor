@@ -70,8 +70,12 @@ namespace OpenLoopDisplayRate
 	// The statistics' rate always wins. Without it, only render-ahead (open loop)
 	// takes a fallback; render_ahead off keeps the old hold (Choice{} - no rate).
 	// Order: the monitor's exact mode, DWM's measured period (when it agrees with the
-	// mode), the application's rate, the whole-hertz mode, the vblank cadence.
-	inline Choice Select(const Candidates& c, bool renderAhead)
+	// mode), the application's rate, the vblank cadence, the whole-hertz mode.
+	// Hunt 2 05-renderahead M5 (queue_timing_fixes, wholeHzLast): the whole-hertz
+	// mode (59 for 59.94, a 1.6% error: a repeat or a lateness about every second)
+	// is taken only when nothing better exists; it used to rank above the measured
+	// vblank cadence. wholeHzLast false: the old order.
+	inline Choice Select(const Candidates& c, bool renderAhead, bool wholeHzLast = true)
 	{
 		Choice choice;
 		if (DisplayRefreshBounds::Accepts(c.statisticsHz))
@@ -90,8 +94,10 @@ namespace OpenLoopDisplayRate
 			{ c.displayConfigHz, Source::DisplayConfig, DisplayRefreshBounds::Accepts(c.displayConfigHz) },
 			{ c.dwmHz, Source::Dwm, dwmUsable },
 			{ c.hostHz, Source::Host, DisplayRefreshBounds::Accepts(c.hostHz) },
-			{ c.modeIntegerHz, Source::ModeInteger, DisplayRefreshBounds::Accepts(c.modeIntegerHz) },
-			{ c.cadenceHz, Source::VBlankCadence, DisplayRefreshBounds::Accepts(c.cadenceHz) } };
+			{ wholeHzLast ? c.cadenceHz : c.modeIntegerHz, wholeHzLast ? Source::VBlankCadence : Source::ModeInteger,
+				DisplayRefreshBounds::Accepts(wholeHzLast ? c.cadenceHz : c.modeIntegerHz) },
+			{ wholeHzLast ? c.modeIntegerHz : c.cadenceHz, wholeHzLast ? Source::ModeInteger : Source::VBlankCadence,
+				DisplayRefreshBounds::Accepts(wholeHzLast ? c.modeIntegerHz : c.cadenceHz) } };
 		for (const auto& o : order)
 		{
 			if (o.usable)

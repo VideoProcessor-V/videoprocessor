@@ -16,7 +16,7 @@ constexpr bool WarmingEnabled = false;
 inline double FrameBudgetRate(double measuredHz, double nominalHz)
 {
     const auto valid = [](double hz) {
-        return std::isfinite(hz) && hz >= 10.0 && hz <= 500.0;
+        return CaptureRateBounds::Accepts(hz);
     };
     return valid(measuredHz) ? measuredHz : (valid(nominalHz) ? nominalHz : 0.0);
 }
@@ -32,8 +32,7 @@ inline double DisplayRate(DisplayRefreshRateInput input,
         return 0.0;
     if (warmingEnabled)
         return result.selectedRateHz;
-    return input.fresh && std::isfinite(input.candidateRateHz) &&
-        input.candidateRateHz >= 10.0 && input.candidateRateHz <= 240.0 ?
+    return input.fresh && DisplayRefreshBounds::Accepts(input.candidateRateHz) ?
         input.candidateRateHz : 0.0;
 }
 
