@@ -395,8 +395,7 @@ namespace DetailRestoreConfigTestsNs
 				const SourceResolution::FrameReading codedReading = Read(split(coded.v));
 				const SourceResolution::FrameReading staged = Read(split(out.v));
 				char line[200];
-				snprintf(line, sizeof(line), "frame %d (%s): coded ratio %.4f, after both stages %.4f, pulse gains %.3f / %.3f
-",
+				snprintf(line, sizeof(line), "frame %d (%s): coded ratio %.4f, after both stages %.4f, pulse gains %.3f / %.3f\n",
 					f, iFrame ? "I" : "B", codedReading.ratio, staged.ratio, stabilised.g1, stabilised.g2);
 				Logger::WriteMessage(line);
 				worstShift = (std::max)(worstShift, std::fabs(staged.ratio - codedReading.ratio));
@@ -404,8 +403,7 @@ namespace DetailRestoreConfigTestsNs
 				Assert::IsTrue(std::fabs(staged.ratio - 0.5) < 0.02, L"the real stages' output would still read 1080");
 			}
 			char line[160];
-			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, worst ratio shift %.4f
-", maxPulse, maxChange, worstShift);
+			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, worst ratio shift %.4f\n", maxPulse, maxChange, worstShift);
 			Logger::WriteMessage(line);
 			Assert::IsTrue(maxPulse > 1.05, L"the detail pulse engaged (the check exercised the stage)");
 		}
