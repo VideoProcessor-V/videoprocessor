@@ -68,6 +68,7 @@
     <ClCompile Include="BugHunt2GuiTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="BugHunt2CaptureTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="Integration20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="Hunt2MotionTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="PostMergeAudit20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="CaptureLayerAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -180,6 +181,7 @@
   <ItemGroup><ClCompile Include="GrainPreservationTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="PulldownCorpusTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="Hunt2CadenceClassTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="BugHunt20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="RenderAheadPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>

@@ -7,6 +7,7 @@
  */
 
 #include <pch.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include <dvdmedia.h>
 
@@ -2557,7 +2558,7 @@ bool DirectShowVideoRenderer::GetDetectedDisplayRefreshRate(
 	double& refreshRateHz) const
 {
 	refreshRateHz = m_madVRDetectedRefreshRateHz.load(std::memory_order_acquire);
-	return refreshRateHz >= 10.0 && refreshRateHz <= 240.0;
+	return DisplayRefreshBounds::Accepts(refreshRateHz);
 }
 
 void DirectShowVideoRenderer::UpdatePPMMeasurement(timingclocktime_t frameTime) const

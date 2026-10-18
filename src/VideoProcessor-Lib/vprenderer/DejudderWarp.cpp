@@ -3,6 +3,7 @@
 #include <vprenderer/GrainPreserve.h>
 #include <vprenderer/MotionAheadProducer.h>
 #include <OpticalFlowTrust.h>
+#include <vprenderer/DejudderPolicy.h>
 
 #include <chrono>
 
@@ -177,8 +178,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
     // Beyond the searches' own reach the engine can match a far, similar texture
     // across a cut (corpus 2026-10-16: the cut was warped): such a vector is no
     // candidate - zero motion with a failing SAD, so the block is not trusted on it.
+    // Hunt 2 04 M4: the SAD is in 8-bit codes (1.0 passed match_tolerance 3); 1e4 fails
+    // every tolerance, taper and split test.
     if (length(m) > reach) {
-        imageStore(dst, b, vec4(0.0, 0.0, 1.0, 1.0));
+        imageStore(dst, b, vec4(0.0, 0.0, 1e4, 1.0));
         return;
     }
     float s = 0.0;
@@ -2820,9 +2823,7 @@ if (q.x < size.x && q.y < size.y) {
 			Sampled("previous", previous, false), Sampled("prev_trust", frameTrust, false),
 			Sampled("global_two", globalTwo, false) };
 		// General: the range is given for a 1080-line working picture.
-		const int scaledRange = settings.referenceHeight != 0.0f && height > 0 ?
-			static_cast<int>(std::lround(settings.coarseRange * height / 1080.0)) : settings.coarseRange;
-		const int range = std::max(0, std::min(scaledRange, 16));
+		const int range = DejudderPolicy::ScaledSearchRange(settings.coarseRange, settings.referenceHeight, height);
 		const int useGlobal = settings.globalPrior ? 1 : 0;
 		const int useTemporal = settings.estCandidates && previousValid ? 1 : 0;
 		const int useGate = settings.estGate && settings.globalPrior && previousValid ? 1 : 0;
@@ -3473,7 +3474,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			Sampled("to_half", halfA, true), Storage("dst", outBackward) };
 		// The searches' reach in half-size pixels: the coarse search at 1/32 of the
 		// source (1/16 of the half size), +-coarseRange texels, plus the finer steps.
-		const float reach = static_cast<float>(std::max(1, settings.coarseRange) * 16 + 8);
+		// Hunt 2 04 M3: the range the search really uses (scaled to this height, clamped).
+		const float reach = DejudderPolicy::OpticalFlowReach(
+			DejudderPolicy::ScaledSearchRange(settings.coarseRange, settings.referenceHeight, height));
 		const pl_shader_var reachVar[1] = { { pl_var_float("reach"), &reach, true } };
 		if (!Dispatch("VideoProcessor de-judder: optical flow to blocks (forward)", ofWeighted ? weightedHeader.c_str() : header.c_str(),
 				OF_TO_SEARCH_BODY, fw, ofWeighted ? 5 : 4, reachVar, 1, blocksX, blocksY, 8) ||
@@ -3566,6 +3569,19 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		estimated = false;
 		grainErrorValid = false;
 		fillReady = false;
+		// Hunt 2 04 M1 (motion_history_fixes): the temporal state is the last estimated
+		// pair's; a pair whose A is not that pair's B (a pair in between was never
+		// estimated) starts it over - as ForgetHistory, the fade state kept. Before
+		// EnsureTextures, which consumes holdResetPending. The lowRes inner gets the same
+		// sequences and decides for itself.
+		if (base.historyFixes && !DejudderPolicy::MatcherHistoryChained(a.sequence, keptSequence))
+		{
+			if (previousValid || ofHintValid || keptSequence != 0)
+				++historyRestarts;
+			previousValid = false;
+			ofHintValid = false;
+			holdResetPending = true;
+		}
 		if (!EnsureTextures(a)) return false;
 		if (!b.luma || b.luma->params.w != width || b.luma->params.h != height)
 		{
@@ -3865,7 +3881,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustVarList.push_back({ pl_var_float("fade_floor"), &fadeFloor, true });
 			// The refinement's window: the global moves in half-texel steps (4 px at full size,
 			// 8 px when the low-resolution matcher searched); wider than half a step, 6 px minimum.
-			const float cameraWindow = HalvesForSearch() ? 8.0f : 6.0f;
+			// Hunt 2 04 L5: one step for every halving (an 8K input's 16 px step got 8 px).
+			const float cameraWindow = DejudderPolicy::CameraWindowPixels(SearchHalvings());
 			if (rolloffGlobal || cameraOut)
 				trustVarList.push_back({ pl_var_float("camera_window"), &cameraWindow, true });
 			if (settings.motionRolloff)

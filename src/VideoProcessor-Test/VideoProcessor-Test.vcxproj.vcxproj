@@ -316,6 +316,7 @@
     <ClCompile Include="BugHunt2GuiTests.cpp" />
     <ClCompile Include="BugHunt2CaptureTests.cpp" />
     <ClCompile Include="Integration20261017Tests.cpp" />
+    <ClCompile Include="Hunt2MotionTests.cpp" />
     <ClCompile Include="PostMergeAudit20261017Tests.cpp" />
     <ClCompile Include="CaptureLayerAuditTests.cpp" />
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp" />
@@ -344,6 +345,7 @@
     <ClCompile Include="NvOpticalFlowTests.cpp" />
     <ClCompile Include="PulldownReliabilityTests.cpp" />
     <ClCompile Include="PulldownCorpusTests.cpp" />
+    <ClCompile Include="Hunt2CadenceClassTests.cpp" />
     <ClCompile Include="BugHunt20261017Tests.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
@@ -378,6 +380,7 @@
 	<ClCompile Include="DisplayRefreshRateWindowTests.cpp" />
     <ClCompile Include="CadenceIntervalEstimateTests.cpp" />
     <ClCompile Include="AlphaQueuePolicyTests.cpp" />
+    <ClCompile Include="QueueTimingFixesTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />
     <ClCompile Include="ActivePictureDecisionTimelineTests.cpp" />

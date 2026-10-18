@@ -2491,6 +2491,7 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 			size_t valueLength = 0;
 			const double overrideRate = std::stod(setting.second, &valueLength);
 			if (valueLength != setting.second.length() ||
+				!std::isfinite(overrideRate) ||
 				!DisplayRefreshBounds::Accepts(overrideRate))   // bug hunt 2 (L2)
 			{
 				throw std::runtime_error("out of range");
@@ -17172,7 +17173,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 	if (m_videoRenderer)
 	{
 		m_videoRenderer->SetRenderLoadDisplayRefreshRate(
-			displayRefreshRate >= 10.0 ? displayRefreshRate :
+			DisplayRefreshBounds::Accepts(displayRefreshRate) ? displayRefreshRate :
 			activeTargetRefreshRate);
 	}
 	const std::wstring monitorDeviceName = GetMonitorDeviceName(displayWindow);
@@ -18456,7 +18457,7 @@ void CVideoProcessorDlg::LogMadVRPostStallResetDiagnostics(
 	observation.materialStall = materialStall;
 	observation.queueDepth = stats.currentQueueSize;
 	observation.healthyQueueDepth = liveness.deliveryReserveFrames;
-	observation.framePeriodMs = measuredCaptureRateHz >= 10.0 ?
+	observation.framePeriodMs = CaptureRateBounds::Accepts(measuredCaptureRateHz) ?
 		1000.0 / measuredCaptureRateHz : 0.0;
 	observation.oldestQueuedAgeMs = static_cast<double>(
 		liveness.oldestRetainedSourceBufferAgeMs);

@@ -11,6 +11,7 @@
 #include <afxstr.h>
 #include <memory>
 #include <WallClock.h>
+#include <DisplayRefreshRatePolicy.h>
 
 
 /**
@@ -67,8 +68,8 @@ public:
 	// (was a hard 23-120 Hz reject in this constructor and in Magewell).
 	// Accepted: MinimumRefreshRateHz()..MaximumRefreshRateHz(). Rates outside
 	// the usual video range (23-120 Hz) are accepted but logged once per rate.
-	static double MinimumRefreshRateHz() { return 10.0; }
-	static double MaximumRefreshRateHz() { return 240.0; }
+	static double MinimumRefreshRateHz() { return CaptureRateBounds::kMinimumHz; }
+	static double MaximumRefreshRateHz() { return CaptureRateBounds::kMaximumHz; }
 	static bool IsRefreshRateSupported(double refreshRateHz);
 	static bool IsRefreshRateUnusual(double refreshRateHz);
 

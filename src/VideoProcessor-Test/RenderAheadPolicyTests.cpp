@@ -1211,7 +1211,8 @@ namespace RenderAheadPolicyTest
 			const double hz = 60000.0 / 1001.0;
 			OpenLoopDisplayRate::Candidates c = All(hz);
 			c.dwmHz = 59.95;   // DWM's measured period: close to, not exactly, the mode
-			auto pick = [&]() { return OpenLoopDisplayRate::Select(c, true); };
+			// The old order (queue_timing_fixes off): the whole-Hz mode before the cadence.
+			auto pick = [&]() { return OpenLoopDisplayRate::Select(c, true, false); };
 			Assert::IsTrue(pick().source == S::DisplayConfig, L"the monitor's exact mode first");
 			Assert::AreEqual(hz, pick().hz);
 			Assert::IsTrue(pick().openLoop);

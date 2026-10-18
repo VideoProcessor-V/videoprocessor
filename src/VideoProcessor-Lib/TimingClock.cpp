@@ -14,17 +14,17 @@
 
 double TimingClockDiffMs(timingclocktime_t start, timingclocktime_t stop, timingclocktime_t ticksPerSecond)
 {
-	const timingclocktime_t diff = stop - start;
-	
-	if (ticksPerSecond == 0)
+	// Hunt 2 13-timing L2: the result keeps its sub-millisecond part (the integer
+	// division used to truncate every latency readout toward zero, about 0.5 ms
+	// low on average), and a clock without a rate (0 or negative ticks per second)
+	// gives 0 instead of an integer division by zero. Whole seconds and the
+	// remainder are converted separately, so no tick is lost and diff * 1000 can
+	// never overflow.
+	if (ticksPerSecond <= 0)
 		return 0.0;
-
-	// Bug hunt 2 (L12): the earlier integer (diff * 1000) / ticksPerSecond
-	// truncated to whole milliseconds (and overflowed for large diffs).
-	// Split into whole seconds and the remainder so both parts are exact
-	// before the single conversion to double: sub-millisecond latency kept.
-	const timingclocktime_t seconds = diff / ticksPerSecond;
-	const timingclocktime_t remainder = diff % ticksPerSecond;
-	return static_cast<double>(seconds) * 1000.0 +
-		static_cast<double>(remainder) * 1000.0 / static_cast<double>(ticksPerSecond);
+	const timingclocktime_t diff = stop - start;
+	const timingclocktime_t wholeSeconds = diff / ticksPerSecond;
+	const timingclocktime_t remainderTicks = diff % ticksPerSecond;
+	return static_cast<double>(wholeSeconds) * 1000.0 +
+		static_cast<double>(remainderTicks) * 1000.0 / static_cast<double>(ticksPerSecond);
 }

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <utility>
 #include <vector>
@@ -237,11 +238,85 @@ namespace DejudderPolicy
 			p.dolby.rgbBitAlignment == 1 || p.dolby.rgbBitAlignment == 2,
 			p.captureEncoding == VideoFrameEncoding::R210);
 	}
-	// The dequeue's DV rule for the next frame B after A (nextMatches).
-	template <typename Payload>
-	inline bool DolbyVisionNextPairs(bool tunnel, const Payload& a, const Payload& b)
+	// Hunt 2 02-dv L2 (motion_history_fixes): the DV display-management matrices a DV
+	// picture's I/C samples are decoded with (the doviMetadataCache key: nonlinear,
+	// nonlinearOffset, linear), kept by value so two frames compare byte for byte.
+	struct DolbyVisionMatrices
 	{
-		return DolbyVisionPairTrusted(tunnel, ClassifyDolbyVisionPayload(a), ClassifyDolbyVisionPayload(b));
+		float values[21] = {};
+		bool operator==(const DolbyVisionMatrices& o) const
+		{
+			return std::memcmp(values, o.values, sizeof(values)) == 0;
+		}
+		bool operator!=(const DolbyVisionMatrices& o) const { return !(*this == o); }
+	};
+	template <typename Dolby>
+	inline DolbyVisionMatrices DolbyVisionMatricesOf(const Dolby& dm)
+	{
+		static_assert(sizeof(dm.nonlinear) + sizeof(dm.nonlinearOffset) + sizeof(dm.linear) == sizeof(float) * 21,
+			"DV matrices: 9 + 3 + 9 floats");
+		DolbyVisionMatrices m;
+		std::memcpy(m.values, dm.nonlinear, sizeof(dm.nonlinear));
+		std::memcpy(m.values + 9, dm.nonlinearOffset, sizeof(dm.nonlinearOffset));
+		std::memcpy(m.values + 12, dm.linear, sizeof(dm.linear));
+		return m;
+	}
+	// A trusted DV pair whose two pictures were coded under different matrices is not a
+	// pair (blended samples would be decoded with one matrix). Only Picture-to-Picture
+	// pairs carry matrices; every other kind decides as DolbyVisionPairTrusted.
+	inline bool DolbyVisionPairTrusted(bool tunnel, DolbyVisionFrameKind a, DolbyVisionFrameKind b,
+		const DolbyVisionMatrices& ma, const DolbyVisionMatrices& mb, bool requireSameMatrices)
+	{
+		if (!DolbyVisionPairTrusted(tunnel, a, b))
+			return false;
+		if (!tunnel || !requireSameMatrices || a != DolbyVisionFrameKind::Picture)
+			return true;
+		return ma == mb;
+	}
+	// The dequeue's DV rule for the next frame B after A (nextMatches).
+	// requireSameMatrices (motion_history_fixes): two DV pictures pair only under
+	// byte-equal DM matrices.
+	template <typename Payload>
+	inline bool DolbyVisionNextPairs(bool tunnel, const Payload& a, const Payload& b, bool requireSameMatrices = false)
+	{
+		return DolbyVisionPairTrusted(tunnel, ClassifyDolbyVisionPayload(a), ClassifyDolbyVisionPayload(b),
+			DolbyVisionMatricesOf(a.dolby), DolbyVisionMatricesOf(b.dolby), requireSameMatrices);
+	}
+
+	// Hunt 2 04 M1 (motion_history_fixes): the matcher's temporal state (the previous
+	// searches, the H2 hysteresis, the engine's hints) belongs to the last pair it
+	// estimated, ending at keptSequence. A pair whose A is not that frame (a pair was
+	// never estimated in between: no B yet, a skipped output) starts the history over.
+	// Sequence 0 = unknown (direct use, the tests): treated as chained (as before).
+	inline bool MatcherHistoryChained(uint64_t aSequence, uint64_t keptSequence)
+	{
+		return aSequence == 0 || aSequence == keptSequence;
+	}
+
+	// Hunt 2 04 M3: the block search's coarse range as Search uses it - given for a
+	// 1080-line working picture and scaled to the height the search runs at
+	// (referenceHeight != 0), clamped to 0..16 - and the reach the optical-flow
+	// engine's vectors must stay within (half-size pixels: the coarse step at 1/16 of
+	// the half size, +-range, plus the finer steps).
+	inline int ScaledSearchRange(int coarseRange, float referenceHeight, int height)
+	{
+		const int scaled = referenceHeight != 0.0f && height > 0 ?
+			static_cast<int>(std::lround(coarseRange * height / 1080.0)) : coarseRange;
+		return (std::max)(0, (std::min)(scaled, 16));
+	}
+	inline float OpticalFlowReach(int searchRange)
+	{
+		return static_cast<float>((std::max)(1, searchRange) * 16 + 8);
+	}
+
+	// Hunt 2 04 L5: the camera refinement's window (source pixels). The global moves
+	// in half-texel steps of 4 px at full size, doubling for each halving of the
+	// search (4, 8, 16 px for an 8K input halved twice); the window is one step,
+	// never under 6 px (1080p: 6, 4K: 8, as before; 8K: 16 instead of 8).
+	inline float CameraWindowPixels(int searchHalvings)
+	{
+		const int h = (std::max)(0, (std::min)(searchHalvings, 8));
+		return (std::max)(6.0f, 4.0f * static_cast<float>(1 << h));
 	}
 
 	// Integration 2026-10-17: the optical-flow producer's break before a frame (no pair
@@ -254,9 +329,11 @@ namespace DejudderPolicy
 		double time = 0.0;   // seconds; 0 = unknown
 		bool filmClock = false;   // time is the film clock (pulldown locked), not the capture clock
 		DolbyVisionFrameKind kind = DolbyVisionFrameKind::Untrusted;
+		DolbyVisionMatrices matrices;   // Hunt 2 02-dv L2: a DV picture's DM matrices
 	};
 	inline bool MotionAheadBreakBefore(bool gapBefore, bool filmUpdate, bool checkTimes, double pairRateHz,
-		bool dvTunnel, bool havePrev, const MotionAheadFrame& previous, const MotionAheadFrame& frame)
+		bool dvTunnel, bool havePrev, const MotionAheadFrame& previous, const MotionAheadFrame& frame,
+		bool requireSameMatrices = false)
 	{
 		if (gapBefore || filmUpdate)
 			return true;
@@ -265,7 +342,8 @@ namespace DejudderPolicy
 		if (checkTimes && !CaptureTimestampGap::AdjacentPairTimes(previous.time, previous.filmClock,
 			frame.time, frame.filmClock, pairRateHz))
 			return true;
-		return !DolbyVisionPairTrusted(dvTunnel, previous.kind, frame.kind);
+		return !DolbyVisionPairTrusted(dvTunnel, previous.kind, frame.kind, previous.matrices, frame.matrices,
+			requireSameMatrices);
 	}
 
 	// Whether extra presents may run (with Decide() == Active): strength > 0

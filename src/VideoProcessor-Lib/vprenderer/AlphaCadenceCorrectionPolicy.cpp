@@ -1,12 +1,92 @@
 #include <pch.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include "AlphaCadenceCorrectionPolicy.h"
 
 #include <algorithm>
 #include <cmath>
 
+void AlphaArrivalRateEstimator::Reset()
+{
+	*this = AlphaArrivalRateEstimator();
+}
+
+void AlphaArrivalRateEstimator::Add(double arrivalSeconds, double rateHintHz)
+{
+	if (!(arrivalSeconds > 0.0) || !std::isfinite(arrivalSeconds))
+		return;
+	const bool hinted = CaptureRateBounds::Accepts(rateHintHz);
+	const double rate = hinted ? rateHintHz : 60.0;
+	if (m_started && arrivalSeconds == m_last)
+		return;    // the same frame again (a film frame's update): no new period
+	if (m_started && arrivalSeconds < m_last)
+		Reset();   // a clock step back: start over
+	double periods = 1.0;
+	if (m_started && hinted)
+	{
+		// The periods since the last frame, counted with the hint (the card's rate is
+		// within ppm of the truth, so rounding finds them): a missed or dropped frame
+		// advances the index by its periods instead of bending the line. The slope
+		// itself stays measured on QPC.
+		const double elapsed = (arrivalSeconds - m_last) * rateHintHz;
+		if (elapsed > kMaximumGapSeconds * rateHintHz)
+			Reset();   // a break, not missed frames
+		else
+			periods = (std::max)(1.0, std::floor(elapsed + 0.5));
+	}
+	if (!m_started)
+	{
+		m_started = true;
+		m_t0 = arrivalSeconds;
+		m_index = 0.0;
+	}
+	else
+	{
+		m_index += periods;
+	}
+	m_last = arrivalSeconds;
+	const double keep = std::exp(-1.0 / (rate * kWindowSeconds));
+	const double x = m_index;
+	const double y = arrivalSeconds - m_t0;
+	m_w = m_w * keep + 1.0;
+	m_x = m_x * keep + x;
+	m_y = m_y * keep + y;
+	m_xx = m_xx * keep + x * x;
+	m_xy = m_xy * keep + x * y;
+}
+
+double AlphaArrivalRateEstimator::RateHz() const
+{
+	if (!m_started || m_last - m_t0 < kMinimumSpanSeconds || m_w < 2.0)
+		return 0.0;
+	const double meanX = m_x / m_w;
+	const double meanY = m_y / m_w;
+	const double sxx = m_xx / m_w - meanX * meanX;
+	const double sxy = m_xy / m_w - meanX * meanY;
+	if (!(sxx > 0.0) || !(sxy > 0.0))
+		return 0.0;
+	const double hz = sxx / sxy;   // 1 / (seconds per frame)
+	return CaptureRateBounds::Accepts(hz) ? hz : 0.0;
+}
+
+uint32_t AlphaCadenceCorrectionPolicy::FramesFor(double seconds, double rateHz,
+	uint32_t legacy, bool timingFixes)
+{
+	if (!timingFixes || !CaptureRateBounds::Accepts(rateHz))
+		return legacy;
+	return static_cast<uint32_t>((std::max)(1.0, std::ceil(seconds * rateHz)));
+}
+
+double AlphaCadenceCorrectionPolicy::FilterAlpha(double rateHz, bool timingFixes)
+{
+	if (!timingFixes || !CaptureRateBounds::Accepts(rateHz))
+		return RATE_FILTER_ALPHA;
+	return 1.0 - std::exp(-1.0 / (rateHz * RATE_FILTER_SECONDS));
+}
+
 void AlphaCadenceCorrectionPolicy::Reset(uint64_t generation)
 {
+	m_arrivalRate.Reset();
 	m_generation = generation;
 	m_phaseFrames = 0.0;
 	m_stableSamples = 0;
@@ -60,12 +140,23 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 	decision.diagnostic.safeSceneBoundary = input.safeSceneBoundary;
 	decision.diagnostic.sceneEventId = input.sceneEventId;
 	const bool ratesInRange =
-		input.captureRateHz >= 10.0 && input.captureRateHz <= 240.0 &&
-		input.displayRateHz >= 10.0 && input.displayRateHz <= 500.0;
+		CaptureRateBounds::Accepts(input.captureRateHz) &&
+		DisplayRefreshBounds::Accepts(input.displayRateHz);
 	if (!input.enabled ||
 		input.presentationEvidence != AlphaPresentationEvidence::Stable ||
 		!ratesInRange)
 	{
+		if (input.timingFixes)
+		{
+			// Hunt 2 13-timing L6: a disabled policy keeps no phase and no pending
+			// action (its -1/+1 reservation would be off by one on re-enable).
+			m_phaseFrames = 0.0;
+			m_cooldownFrames = 0;
+			m_verificationAction = AlphaCadenceAction::None;
+			m_verificationDebt = 0;
+			m_verificationPresentId = 0;
+			m_arrivalRate.Reset();
+		}
 		m_stableSamples = 0;
 		m_rateFilterSamples = 0;
 		m_filteredPhasePerFrame = 0.0;
@@ -87,11 +178,49 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 		return decision;
 	}
 
-	const double rawPhasePerFrame =
-		input.captureRateHz / input.displayRateHz - 1.0;
+	const bool fixes = input.timingFixes;
+	const uint32_t predictionSamples = FramesFor(PREDICTION_SECONDS,
+		input.captureRateHz, MINIMUM_PREDICTION_SAMPLES, fixes);
+	const uint32_t stableSamples = FramesFor(STABLE_SECONDS,
+		input.captureRateHz, MINIMUM_STABLE_SAMPLES, fixes);
+	const uint32_t cooldownFrames = FramesFor(COOLDOWN_SECONDS,
+		input.captureRateHz, COOLDOWN_FRAMES, fixes);
+	// Hunt 2 13-timing M1: with arrival times the capture rate is measured on QPC,
+	// the display rate's clock; the card's clock (tens of ppm from QPC) would show
+	// a mismatch the queue never sees. Without arrival times, a nominal fallback
+	// rate (after a timestamp break) is not a measurement and does not feed the
+	// filter.
+	double captureRateHz = input.captureRateHz;
+	bool updateFilter = true;
+	if (fixes)
+	{
+		if (input.arrivalSeconds > 0.0)
+		{
+			m_arrivalRate.Add(input.arrivalSeconds, input.captureRateHz);
+			captureRateHz = m_arrivalRate.RateHz();
+			updateFilter = captureRateHz > 0.0;
+		}
+		else
+		{
+			updateFilter = input.captureRateMeasured;
+		}
+		if (!updateFilter && m_rateFilterSamples == 0)
+		{
+			decision.phaseFrames = m_phaseFrames;
+			decision.timingStatus = AlphaCadenceTimingStatus::Measuring;
+			decision.blockReason = AlphaCadenceBlockReason::StabilizingRates;
+			return decision;
+		}
+	}
+	const double rawPhasePerFrame = updateFilter ?
+		captureRateHz / input.displayRateHz - 1.0 : m_filteredPhasePerFrame;
 	decision.diagnostic.rawMismatchPpm =
 		rawPhasePerFrame * 1000000.0;
-	if (m_rateFilterSamples < MINIMUM_PREDICTION_SAMPLES)
+	if (!updateFilter)
+	{
+		// The filter keeps its value until the rate is measured again.
+	}
+	else if (m_rateFilterSamples < predictionSamples)
 	{
 		++m_rateFilterSamples;
 		m_filteredPhasePerFrame +=
@@ -101,7 +230,8 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 	else
 	{
 		m_filteredPhasePerFrame +=
-			(rawPhasePerFrame - m_filteredPhasePerFrame) * RATE_FILTER_ALPHA;
+			(rawPhasePerFrame - m_filteredPhasePerFrame) *
+			FilterAlpha(input.captureRateHz, fixes);
 	}
 	const double filteredMismatchPpm =
 		std::abs(m_filteredPhasePerFrame) * 1000000.0;
@@ -134,14 +264,14 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 					input.presentationDebt + 1 == m_verificationDebt)
 				: input.presentationDebt == m_verificationDebt + 1;
 		m_verificationPending = false;
-		m_cooldownFrames = COOLDOWN_FRAMES;
+		m_cooldownFrames = cooldownFrames;
 		decision.verificationCompleted = true;
 	}
 	decision.lastVerificationValid = m_lastVerificationValid;
 	decision.lastVerificationSucceeded = m_lastVerificationSucceeded;
 	decision.verificationPending = m_verificationPending;
 
-	if (m_stableSamples < MINIMUM_STABLE_SAMPLES)
+	if (m_stableSamples < stableSamples)
 	{
 		++m_stableSamples;
 		decision.phaseFrames = m_phaseFrames;
@@ -152,6 +282,13 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 	}
 
 	m_phaseFrames += m_filteredPhasePerFrame;
+	if (fixes)
+	{
+		// Hunt 2 13-timing M1: bounded, so an action held back by the queue gates
+		// cannot let the phase run on for the whole generation.
+		m_phaseFrames = (std::max)(-MAXIMUM_PHASE_FRAMES,
+			(std::min)(MAXIMUM_PHASE_FRAMES, m_phaseFrames));
+	}
 	decision.diagnostic.phaseFrames = m_phaseFrames;
 	const double signedFilteredPpm = m_filteredPhasePerFrame * 1000000.0;
 	decision.diagnostic.filteredMismatchPpm =
@@ -179,7 +316,7 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 			signedFilteredPpm >= MINIMUM_PREDICTION_PPM) ||
 		(m_predictionDirection == AlphaCadenceAction::Repeat &&
 			signedFilteredPpm <= -MINIMUM_PREDICTION_PPM);
-	if (m_rateFilterSamples >= MINIMUM_PREDICTION_SAMPLES &&
+	if (m_rateFilterSamples >= predictionSamples &&
 		predictionDirectionAgrees && !m_verificationPending)
 	{
 		decision.predictedAction = m_predictionDirection;
@@ -203,7 +340,7 @@ AlphaCadenceCorrectionDecision AlphaCadenceCorrectionPolicy::Evaluate(
 	}
 	decision.timingStatus = m_verificationPending
 		? AlphaCadenceTimingStatus::Verifying
-		: (m_rateFilterSamples < MINIMUM_PREDICTION_SAMPLES
+		: (m_rateFilterSamples < predictionSamples
 			? AlphaCadenceTimingStatus::Measuring
 			: (decision.predictionValid
 				? AlphaCadenceTimingStatus::Forecasting

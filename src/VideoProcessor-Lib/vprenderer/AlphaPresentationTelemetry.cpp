@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include "AlphaPresentationTelemetry.h"
 
@@ -108,7 +109,7 @@ void AlphaPresentationTelemetry::Observe(
 		return;
 	}
 	m_lastPresentId = sample.presentCount;
-	if (m_cadenceSamples != 0 && sample.expectedDisplayHz >= 10.0)
+	if (m_cadenceSamples != 0 && DisplayRefreshBounds::Accepts(sample.expectedDisplayHz))
 	{
 		const uint32_t intervalRefreshes =
 			sample.syncRefreshCount - m_lastSyncRefresh;

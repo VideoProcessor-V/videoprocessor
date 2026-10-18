@@ -2544,6 +2544,61 @@ namespace VideoProcessorTest
             pl_mpv_user_shader_destroy(&hook);
         }
 
+        // Hunt 2 10-layout T6 (M1): a failing NLS hook makes libplacebo draw a plain stretch
+        // into the NLS screen rectangle; the de-judder cache copied that picture at
+        // PRE_OUTPUT. The recovery's redraw into the linear fit must leave no cached picture
+        // (the renderer invalidates the cache in the fallback, so this frame's extras hold).
+        // Without the invalidation the stale full-width stretch stays cached (the defect).
+        BEGIN_TEST_METHOD_ATTRIBUTE(NlsHookFailureRetryLeavesNoStaleDejudderCache)
+            TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+        END_TEST_METHOD_ATTRIBUTE()
+        TEST_METHOD(NlsHookFailureRetryLeavesNoStaleDejudderCache) {
+            TargetLutGpuFixture fixture;Assert::IsTrue(fixture.Create());
+            const pl_gpu gpu=fixture.Gpu();
+            const pl_fmt format=pl_find_fmt(gpu,PL_FMT_UNORM,4,8,8,static_cast<pl_fmt_caps>(
+                PL_FMT_CAP_SAMPLEABLE|PL_FMT_CAP_RENDERABLE|PL_FMT_CAP_HOST_READABLE|PL_FMT_CAP_BLITTABLE));
+            Assert::IsNotNull(format);
+            std::vector<RgbaPixel> white(16*16,RgbaPixel{255,255,255,255});
+            pl_tex_params sourceParams{};sourceParams.w=16;sourceParams.h=16;sourceParams.format=format;
+            sourceParams.sampleable=true;sourceParams.initial_data=white.data();
+            pl_tex source=pl_tex_create(gpu,&sourceParams);Assert::IsNotNull(source);
+            pl_tex_params targetParams{};targetParams.w=32;targetParams.h=16;targetParams.format=format;
+            targetParams.renderable=true;targetParams.host_readable=true;targetParams.blit_dst=true;
+            pl_tex output=pl_tex_create(gpu,&targetParams);Assert::IsNotNull(output);
+            pl_hook broken{};broken.stages=PL_HOOK_RGB;broken.input=PL_HOOK_SIG_NONE;
+            broken.signature=0x0070197;
+            broken.hook=[](void*,const pl_hook_params*) {pl_hook_res r{};r.failed=true;return r;};
+            const pl_rect2df nlsScreen{0,0,32,16}, linearFit{8,0,24,16};
+            for(const bool fixed:{false,true}) {
+                fixture.ResetFailedHook(broken.signature);
+                DejudderRendered::Cache cache;
+                cache.Arm(7);
+                std::vector<const pl_hook*> hooks={&broken,cache.Hook()};
+                pl_render_params params=pl_render_fast_params;
+                params.hooks=hooks.data();params.num_hooks=static_cast<int>(hooks.size());
+                pl_frame image=TargetLutGpuFixture::MakeRgbFrame(source);
+                pl_frame target=TargetLutGpuFixture::MakeRgbFrame(output);
+                const pl_frame fullTarget=target;
+                target.crop=nlsScreen;
+                const auto result=NlsHookRecovery::RenderOwned(fixture.Renderer(),gpu,image,target,fullTarget,params,hooks,&broken,
+                    [&]() {target.crop=linearFit;if(fixed) cache.Invalidate();},
+                    [&](const pl_frame& s,const pl_frame& d,pl_render_params& p) {
+                        return pl_render_image(fixture.Renderer(),&s,&d,&p);});
+                pl_gpu_finish(gpu);
+                Assert::IsTrue(result.retried,L"the failed NLS hook was retried");
+                Assert::IsTrue(result.rendered);
+                const pl_tex cached=cache.Texture(7);
+                if(fixed)
+                    Assert::IsNull(cached,L"after the recovery no picture of the failed draw is cached");
+                else {
+                    Assert::IsNotNull(cached,L"control: without the invalidation the failed draw's picture stays");
+                    Assert::AreEqual(32,cached->params.w,L"control: it is the full-width NLS-rectangle stretch");
+                }
+                cache.Release();
+            }
+            pl_tex_destroy(gpu,&output);pl_tex_destroy(gpu,&source);
+        }
+
         TEST_METHOD(SubtitleGpuComposesBeforeCropAcrossAspectChangesAndNlsRecovery) {
             TargetLutGpuFixture fixture;Assert::IsTrue(fixture.Create());
             const auto* hook=CreateSubtitleCutPasteHook(fixture.Gpu());Assert::IsNotNull(hook);

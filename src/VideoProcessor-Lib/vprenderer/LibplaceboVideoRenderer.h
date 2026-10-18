@@ -262,6 +262,7 @@ private:
 	void BeginQueueGeneration(const char* reason, bool clearStopRequest = false);
 	void ClearQueueLocked(const char* reason);
 	size_t PrefillTargetLocked() const;
+	size_t LockedFilmQueueTarget(size_t desired) const;   // Hunt 2 (06-interp M3)
 	bool CanDequeueLocked() const;
 	void SetState(RendererState state);
 	void ApplyViewportTarget(bool configured, double aspect,
@@ -380,6 +381,22 @@ private:
 	bool m_pulldownFixesApplied = true;        // capture thread
 	// timing_continuity_fixes (Bug hunt 2026-10-17): refreshed by the render loop.
 	std::atomic<bool> m_timingContinuityFixes{true};
+	// cadence_class_fixes (Hunt 2, 2026-10-17): refreshed by the render loop.
+	std::atomic<bool> m_cadenceClassFixes{true};
+	bool m_cadenceClassFixesApplied = true;   // capture thread
+	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
+	// motion_history_fixes (Hunt 2 fix group 5): refreshed by the render loop.
+	std::atomic<bool> m_motionHistoryFixes{true};
+	// Hunt 2 04 L4: incoming frames dropped to preserve queued cadence repeats since the
+	// last enqueued frame; the next enqueued frame carries them as a gap. Under m_queueMutex.
+	uint32_t m_repeatPreservingDrops = 0;
+	// queue_timing_fixes (hunt 2 group 5, 13-timing): refreshed by the render loop.
+	// The beyond-target backlog age, the timeline steering in seconds, the overflow
+	// drop's gap merge and the look-ahead floor of the credit-reduced target.
+	std::atomic<bool> m_queueTimingFixes{true};
+	// The look-ahead's queue frames (MotionAhead::QueueFramesFor) while it is wanted,
+	// else 0: the floor of a render_ahead_queue_credit-reduced target (13-timing M3).
+	std::atomic<size_t> m_queueTargetFloor{0};
 	// Capture timestamp breaks (UpdateFrameRateAndPPM's discontinuity branch).
 	std::atomic<uint64_t> m_captureTimestampBreaks{0};
 	std::atomic<bool> m_pulldownResetRequested{false};

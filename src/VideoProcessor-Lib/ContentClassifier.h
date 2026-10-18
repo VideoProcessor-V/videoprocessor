@@ -14,6 +14,7 @@
 // Pure: no renderer, GPU or capture types (the observer feeds it).
 
 #include <IntentDescriptor.h>
+#include <vprenderer/PulldownDetector.h>
 
 #include <algorithm>
 #include <cmath>
@@ -68,6 +69,25 @@ namespace ContentIntent
     constexpr double kAnimationMinSeconds = 4.0;
     // Static UI: zero motion with static edges for at least this long.
     constexpr double kStaticUiSeconds = 8.0;
+
+    // Hunt 2 (cadence_class_fixes, 02-dv M2/M3), on by default:
+    // - Carrier repeats are judged by the rates, not by run evenness (3:2 runs
+    //   2,1 are not even; native animation on twos at 24p is): holds are a
+    //   carrier's when the capture rate is video-class (a faster carrier), no
+    //   pulldown lock gives the film rate, and every new picture is held for
+    //   the same number of frames or one more (pulldown's own spread, as
+    //   Pulldown::IsEvenPattern) - then the pictures' own rate (capture rate x
+    //   new pictures per frame) decides film / video, and it is never animation.
+    // - At a film-like rate (or under a lock) animation needs positive evidence:
+    //   the new pictures change by at least kAnimationChangeCodes and by at least
+    //   kAnimationChangeContrast times the held frames' difference (drawn holds
+    //   are near-exact; a dark or locked-off film shot sits near kHeldCodes in
+    //   both, its "holds" are noise).
+    // - At a film-like rate static UI needs kStaticUiFilmFactor times the still
+    //   (a long locked-off shot is not a menu).
+    constexpr double kAnimationChangeCodes = 4.0 * kHeldCodes;
+    constexpr double kAnimationChangeContrast = 4.0;
+    constexpr double kStaticUiFilmFactor = 3.0;
 
     // The reduced luma grid of one frame (10-bit limited codes).
     struct LumaGrid
@@ -233,6 +253,12 @@ namespace ContentIntent
         double widePanShare = 0.0;   // share of moving frames at kWidePanHps or more
         double holdShare = 0.0;      // share of new pictures held for one frame or more
         bool evenHolds = false;      // every new picture held the same number of frames
+        // Hunt 2 (cadence_class_fixes): every new picture held one or more frames,
+        // the runs differing by at most one (a carrier's pulldown spread).
+        bool uniformHolds = false;
+        double pictureShare = 1.0;   // new pictures per frame over the counted runs
+        double newDiffCodes = 0.0;   // mean difference of the new pictures (valid, non-held)
+        double heldDiffCodes = 0.0;  // mean difference of the held frames
         double flatShare = 0.0;      // mean flat share
         double stillSeconds = 0.0;   // current run of zero motion with static edges
     };
@@ -262,6 +288,7 @@ namespace ContentIntent
             f.held = m.held;
             f.speedHps = std::hypot(m.dxHeights, m.dyHeights) * contentHz;
             f.flatShare = m.flatShare;
+            f.diffCodes = m.meanDiffCodes;
             m_frames.push_back(f);
             while (!m_frames.empty() && m_frames.front().time <= m_time - kWindowSeconds)
                 m_frames.pop_front();
@@ -280,18 +307,26 @@ namespace ContentIntent
                 return s;
             s.seconds = m_frames.back().time - m_frames.front().time + (m_frames.size() > 1 ?
                 (m_frames.back().time - m_frames.front().time) / (m_frames.size() - 1) : 0.0);
-            size_t moving = 0, wide = 0, measured = 0;
-            double speed = 0.0, flat = 0.0;
+            size_t moving = 0, wide = 0, measured = 0, held = 0;
+            double speed = 0.0, flat = 0.0, newDiff = 0.0, heldDiff = 0.0;
             for (const Frame& f : m_frames)
             {
                 flat += f.flatShare;
                 if (!f.valid) continue;
                 ++measured;
-                if (f.held) continue;
+                if (f.held)
+                {
+                    ++held;
+                    heldDiff += f.diffCodes;
+                    continue;
+                }
                 ++moving;
+                newDiff += f.diffCodes;
                 speed += f.speedHps;
                 wide += f.speedHps >= kWidePanHps ? 1 : 0;
             }
+            s.newDiffCodes = moving ? newDiff / moving : 0.0;
+            s.heldDiffCodes = held ? heldDiff / held : 0.0;
             s.flatShare = flat / m_frames.size();
             s.motionValid = measured >= 8;
             if (moving)
@@ -300,8 +335,8 @@ namespace ContentIntent
                 s.widePanShare = static_cast<double>(wide) / moving;
             }
             // Hold runs after each new picture (a new picture = a valid non-held frame).
-            size_t pictures = 0, heldPictures = 0;
-            int firstRun = -1;
+            size_t pictures = 0, heldPictures = 0, runFrames = 0;
+            int firstRun = -1, minRun = 0, maxRun = 0;
             bool even = true;
             for (size_t i = 0; i < m_frames.size(); ++i)
             {
@@ -313,12 +348,22 @@ namespace ContentIntent
                 const int run = static_cast<int>(j - i - 1);
                 ++pictures;
                 heldPictures += run > 0 ? 1 : 0;
-                if (firstRun < 0) firstRun = run;
-                else if (run != firstRun) even = false;
+                runFrames += static_cast<size_t>(run) + 1;
+                if (firstRun < 0) { firstRun = minRun = maxRun = run; }
+                else
+                {
+                    if (run != firstRun) even = false;
+                    minRun = (std::min)(minRun, run);
+                    maxRun = (std::max)(maxRun, run);
+                }
             }
             if (pictures)
+            {
                 s.holdShare = static_cast<double>(heldPictures) / pictures;
+                s.pictureShare = static_cast<double>(pictures) / static_cast<double>(runFrames);
+            }
             s.evenHolds = pictures >= 4 && even;
+            s.uniformHolds = pictures >= 4 && minRun >= 1 && maxRun - minRun <= 1;
             return s;
         }
 
@@ -330,6 +375,7 @@ namespace ContentIntent
             bool held = false;
             double speedHps = 0.0;
             double flatShare = 0.0;
+            double diffCodes = 0.0;
         };
         std::deque<Frame> m_frames;
         double m_stillSeconds = 0.0;
@@ -349,7 +395,24 @@ namespace ContentIntent
         bool filmLike = false;
         bool pulldownLocked = false;
         WindowStats stats;
+        // Hunt 2 (cadence_class_fixes, default on): the rate-based carrier test,
+        // animation evidence at film rates and the film-rate static UI still;
+        // carrierFilmLike = the classification at the pictures' own rate
+        // (contentHz x stats.pictureShare), used only when the holds are a
+        // carrier's. A lock alone is not film with the fixes (the film rate is).
+        bool classFixes = true;
+        bool carrierFilmLike = false;
+        double contentHz = 0.0;   // the measured content rate (the carrier's, without a lock)
     };
+
+    // Hunt 2: the holds are a faster carrier's repeats (see kAnimationChangeCodes).
+    inline bool CarrierHolds(const ClassifierInput& in)
+    {
+        // Pictures at or under the pulldown film floor (30p drawn on twos in 60 Hz: 15 per
+        // second) are drawn holds, not a carrier's: the same floor as Pulldown's lock.
+        return in.classFixes && in.rateKnown && !in.pulldownLocked && !in.filmLike && in.stats.uniformHolds &&
+            Pulldown::AboveFilmFloor(in.contentHz * in.stats.pictureShare, true);
+    }
 
     struct Classification
     {
@@ -371,15 +434,21 @@ namespace ContentIntent
             return c;
         }
         const WindowStats& s = in.stats;
-        if (s.stillSeconds >= kStaticUiSeconds)
+        const bool filmRate = in.rateKnown && (in.filmLike || in.pulldownLocked);
+        const bool carrier = CarrierHolds(in);
+        const double staticSeconds = in.classFixes && filmRate ? kStaticUiSeconds * kStaticUiFilmFactor : kStaticUiSeconds;
+        if (s.stillSeconds >= staticSeconds)
         {
             c.content = ContentClass::StaticUi;
             c.source = IntentSource::Inferred;
             c.reason = "long zero motion with static edges";
             return c;
         }
+        const bool carrierVeto = in.classFixes ? carrier : (s.evenHolds && !in.pulldownLocked);
+        const bool animationEvidence = !in.classFixes || !filmRate ||
+            (s.newDiffCodes >= kAnimationChangeCodes && s.newDiffCodes >= kAnimationChangeContrast * s.heldDiffCodes);
         if (s.motionValid && s.seconds >= kAnimationMinSeconds && s.holdShare >= kAnimationHoldShare &&
-            s.flatShare >= kAnimationFlatShare && !(s.evenHolds && !in.pulldownLocked))
+            s.flatShare >= kAnimationFlatShare && !carrierVeto && animationEvidence)
         {
             c.content = ContentClass::Animation;
             c.source = IntentSource::Inferred;
@@ -388,11 +457,12 @@ namespace ContentIntent
         }
         if (!in.rateKnown)
             return c;
-        if (in.pulldownLocked || in.filmLike)
+        if ((in.pulldownLocked && !in.classFixes) || in.filmLike || (carrier && in.carrierFilmLike))
         {
             c.content = ContentClass::Film;
             c.source = IntentSource::Inferred;
-            c.reason = in.pulldownLocked ? "pulldown lock" : "film-like measured rate";
+            c.reason = in.filmLike ? (in.pulldownLocked ? "pulldown lock at a film rate" : "film-like measured rate") :
+                in.pulldownLocked ? "pulldown lock" : "carrier repeats at a film rate";
             return c;
         }
         c.source = IntentSource::Inferred;

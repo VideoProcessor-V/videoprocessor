@@ -50,6 +50,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -88,6 +89,16 @@ namespace Pulldown
 	// The lowest film rate a lock may imply: below it, repeats are artistic
 	// (animation on twos, held frames), not a carrier's pulldown.
 	constexpr double kMinFilmHz = 15.0;
+	// Hunt 2 (cadence_class_fixes, 06-interp H1): the floor is exclusive, with a
+	// relative margin wider than the 1000/1001 family (0.1%) and the measured
+	// signal rate's noise, so 30p drawn on twos (15.000 at 60 Hz, 14.985 at
+	// 59.94, and either side of 15 on a wobbling measured 60) never locks,
+	// whatever the signal rate. Film rates from 16 fps up are untouched.
+	constexpr double kFilmFloorMargin = 0.01;
+	inline bool AboveFilmFloor(double filmHz, bool exclusive)
+	{
+		return exclusive ? filmHz > kMinFilmHz * (1.0 + kFilmFloorMargin) : filmHz >= kMinFilmHz;
+	}
 
 	// Real pulldown holds every picture for floor(cycle / new) or
 	// ceil(cycle / new) frames. `pattern` is one cycle, 'N' new, 'R' repeat.
@@ -133,6 +144,11 @@ namespace Pulldown
 		// any new slot, in seconds (0 with cadenceAwareClock off): FilmClock.
 		double cadenceLateness = 0.0;
 		double cadenceLatenessMax = 0.0;
+		// Hunt 2 (cadence_class_fixes, 06-interp M1): the locked phase failed while a
+		// re-phase is being tracked, so this frame's slot (and lateness) is unknown;
+		// with trackingLatenessMax its lateness is reported as the most (it cannot
+		// raise the FilmClock's anchor).
+		bool phaseUncertain = false;
 	};
 
 	// Behaviour fixes of the audit 2026-10-16, switchable (owner rule); off
@@ -142,6 +158,10 @@ namespace Pulldown
 		bool keepLockAcrossMisses = true;   // D4: a counted miss <= one cycle keeps the lock
 		bool rephaseInPlace = true;         // D3: a phase shift re-phases instead of unlocking
 		bool cadenceAwareClock = true;      // Decision::cadenceLateness for an even FilmClock at long cycles
+		// Hunt 2 (cadence_class_fixes, 06-interp), on by default; off = the behaviour before.
+		bool exclusiveFilmFloor = true;     // H1: the 15 fps floor is exclusive with a relative margin
+		bool trackingLatenessMax = true;    // M1: while the locked phase is contradicted, lateness = the most
+		bool retryNeedsFailure = true;      // L3: a retry unlocks only when the locked phase failed again
 	};
 
 	// "23.976p film in 59.940 Hz (2 new of 5)".
@@ -185,7 +205,27 @@ namespace Pulldown
 			m_pendingDiscontinuity = false;
 		}
 
-		void SetSettings(const Settings& settings) { m_settings = settings; }
+		// Hunt 2 (06-interp L2): a settings change mid-lock leaves no stale D3/D4
+		// state (tracking candidates not advanced while re-phasing was off, a
+		// probation or a retry of the other rules); the lock itself is kept.
+		void SetSettings(const Settings& settings)
+		{
+			const bool differs = settings.keepLockAcrossMisses != m_settings.keepLockAcrossMisses ||
+				settings.rephaseInPlace != m_settings.rephaseInPlace ||
+				settings.cadenceAwareClock != m_settings.cadenceAwareClock ||
+				settings.exclusiveFilmFloor != m_settings.exclusiveFilmFloor ||
+				settings.trackingLatenessMax != m_settings.trackingLatenessMax ||
+				settings.retryNeedsFailure != m_settings.retryNeedsFailure;
+			m_settings = settings;
+			if (!differs)
+				return;
+			EndTracking();
+			m_probationUntil = 0;
+			m_retrying = false;
+			m_missCarry = false;
+			m_abandonedFailed = false;
+			m_rephases.clear();
+		}
 		const Settings& GetSettings() const { return m_settings; }
 
 		// Feed every captured frame in order: `repeat` = same content as the
@@ -297,7 +337,17 @@ namespace Pulldown
 					if (m_settings.rephaseInPlace)
 						expected = Track(observed, expected, contradiction, rephased);
 					if (m_retrying && !rephased && m_trackFrames == 0 && m_probationUntil == 0)
-						unlock = true;   // the retry found no rotation
+					{
+						// The retry found no rotation. Hunt 2 (06-interp L3): a lone
+						// contradiction (a subtitle) after which the locked phase never
+						// failed again leaves a correct lock - it counts on the usual
+						// 3-in-1 s rule (AbandonTracking counted it) and the retry ends.
+						if (!m_settings.retryNeedsFailure || m_abandonedFailed)
+							unlock = true;
+						else
+							m_retrying = false;
+						m_abandonedFailed = false;
+					}
 					// Corpus 2026-10-17: kContradictionsToUnlock re-phases within the
 					// time a lock needs are another cadence beating against a short
 					// pattern (24p in 50 under a 2:2 lock re-phases every half second,
@@ -344,7 +394,7 @@ namespace Pulldown
 				for (char c : pattern)
 					unique += c == 'N' ? 1 : 0;
 				const double filmHz = signalHz * unique / cycle;
-				if (!IsEvenPattern(pattern) || !(filmHz >= kMinFilmHz))
+				if (!IsEvenPattern(pattern) || !AboveFilmFloor(filmHz, m_settings.exclusiveFilmFloor))
 					break;
 				m_locked = true;
 				m_pattern = pattern;
@@ -390,6 +440,15 @@ namespace Pulldown
 			{
 				decision.cadenceLateness = m_lateness[m_phase] / signalHz;
 				decision.cadenceLatenessMax = m_latenessMax / signalHz;
+				// Hunt 2 (06-interp M1): the locked phase is contradicted while a
+				// re-phase is tracked, so m_phase's lateness may be wrong by up to
+				// the most; reported as the most, the offset can only be lower than
+				// the truth and never raises the clock's (largest-offset) anchor.
+				if (m_settings.trackingLatenessMax && m_trackFrames > 0 && m_currentFailed)
+				{
+					decision.phaseUncertain = true;
+					decision.cadenceLateness = decision.cadenceLatenessMax;
+				}
 			}
 			return decision;
 		}
@@ -407,6 +466,7 @@ namespace Pulldown
 			m_retrying = false;
 			m_missCarry = false;
 			m_rephases.clear();
+			m_abandonedFailed = false;
 		}
 
 		// Audit 2026-10-16: per slot, how many signal frames after its film
@@ -480,6 +540,7 @@ namespace Pulldown
 		// phase shift (video, another cadence) still unlocks on the usual rule.
 		void AbandonTracking()
 		{
+			m_abandonedFailed = m_currentFailed;   // Hunt 2 (L3): whether the locked phase failed again
 			for (uint64_t frame : m_absorbed)
 				m_contradictions.insert(std::upper_bound(m_contradictions.begin(), m_contradictions.end(), frame), frame);
 			EndTracking();
@@ -572,6 +633,7 @@ namespace Pulldown
 						m_candidates.push_back(phase);
 				m_trackFrames = m_candidates.empty() ? 0 : 1;
 				m_currentFailed = false;
+				m_abandonedFailed = false;
 				if (!carry)
 					m_restartsLeft = 1;
 			}
@@ -587,6 +649,7 @@ namespace Pulldown
 		bool m_currentFailed = false;          // D3: the locked phase failed after the contradiction
 		std::vector<uint64_t> m_absorbed;      // D3: contradictions held back while tracking
 		bool m_retrying = false;               // D3/D4: a verification was contradicted once
+		bool m_abandonedFailed = false;        // Hunt 2 (L3): the last abandoned tracking saw the locked phase fail
 		int m_restartsLeft = 0;                // D3: restarts that keep the held-back contradictions
 		std::deque<uint64_t> m_rephases;       // D3: frames of the recent re-phases in this lock
 		std::vector<double> m_lateness;        // per slot, in signal frames (BuildLateness)
@@ -642,6 +705,32 @@ namespace Pulldown
 			return true;
 		}
 		bool InUse() const { return m_haveLast || !m_offsets.empty(); }
+
+		// Hunt 2 (cadence_class_fixes, 06-interp M1): a pulldown re-phase moves every
+		// later film frame's arrival against its index by a signal frame or more; the
+		// offsets from before it would hold the anchor (their maximum) for the whole
+		// window and then step it. Drops the offset history only: the ideal time and
+		// its re-base continuity are kept, so the clock goes on from the re-phased
+		// frame (which carries the pulldown discontinuity: no pair across it).
+		void Reanchor() { m_offsets.clear(); }
+
+		// Hunt 2 (cadence_class_fixes, 06-interp L6): the anchor is the second
+		// largest offset in the window (with three or more), so one late arrival
+		// (a callback spike) no longer times every frame late for the window and
+		// then steps back; that frame itself is still never timed before it
+		// arrived. Returns true when the form changed while the clock is in use
+		// (the caller marks a discontinuity, as for SetRebaseOnRateChange).
+		bool SetRobustAnchor(bool on)
+		{
+			if (on == m_robust)
+				return false;
+			m_robust = on;
+			if (!InUse())
+				return false;
+			Reanchor();
+			return true;
+		}
+		bool RobustAnchor() const { return m_robust; }
 		// Relative change of the film rate that re-bases.
 		static constexpr double kRebaseTolerance = 1e-6;
 		unsigned long long Rebases() const { return m_rebases; }
@@ -679,8 +768,19 @@ namespace Pulldown
 			while (m_offsets.size() > 1 && ideal - m_offsets.front().first > kWindowSeconds)
 				m_offsets.pop_front();
 			double anchor = m_offsets.front().second;
+			double second = -1e300;
 			for (const auto& offset : m_offsets)
-				anchor = offset.second > anchor ? offset.second : anchor;
+			{
+				if (offset.second > anchor)
+				{
+					second = anchor;
+					anchor = offset.second;
+				}
+				else if (offset.second > second && &offset != &m_offsets.front())
+					second = offset.second;
+			}
+			if (m_robust && m_offsets.size() >= 3)
+				anchor = second;
 			const double time = anchor + ideal + latenessMax;
 			return time > arrival ? time : arrival;
 		}
@@ -689,6 +789,7 @@ namespace Pulldown
 		std::deque<std::pair<double, double>> m_offsets;   // (ideal time, arrival - ideal)
 		// Bug hunt 2026-10-17: the re-based ideal time (rebasing on only).
 		bool m_rebase = false;
+		bool m_robust = false;   // Hunt 2 (L6): second-largest anchor
 		uint64_t m_baseIndex = 0;
 		double m_baseTime = 0.0;
 		double m_filmHz = 0.0;
@@ -697,4 +798,26 @@ namespace Pulldown
 		bool m_haveLast = false;
 		unsigned long long m_rebases = 0;
 	};
+
+	// Hunt 2 (cadence_class_fixes, 06-interp M3: D2 wired). A locked queue holds
+	// film frames, so a frame-count target set for the signal (target_frames)
+	// would hold cycle / new times the latency (x2.5 at 3:2) and step it at every
+	// lock change. While locked the target is scaled by FilmToSignalRatio (D2's
+	// own formula: frames = round(target x new / cycle)), never below
+	// min(target, minimumFrames) - the depth the interpolator / de-judder need
+	// (A shown and B queued) - nor below one. Re-resolved whenever the cadence
+	// changes (the caller passes the current one). Not locked: the target.
+	inline double FilmToSignalRatio(int cycle, int unique)
+	{
+		return cycle > 0 && unique > 0 && unique < cycle ? static_cast<double>(unique) / static_cast<double>(cycle) : 1.0;
+	}
+	inline size_t LockedQueueTarget(size_t targetFrames, double filmToSignalRatio, size_t minimumFrames)
+	{
+		if (!(filmToSignalRatio > 0.0 && filmToSignalRatio < 1.0) || targetFrames == 0)
+			return targetFrames;
+		const double scaled = std::round(static_cast<double>(targetFrames) * filmToSignalRatio);
+		const size_t frames = scaled < 1.0 ? size_t{ 1 } : static_cast<size_t>(scaled);
+		const size_t floor = targetFrames < minimumFrames ? targetFrames : minimumFrames;
+		return frames > floor ? frames : floor;
+	}
 }
