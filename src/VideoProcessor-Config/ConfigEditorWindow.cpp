@@ -581,6 +581,24 @@ void showCanonicalShortcutSpelling(QWidget* root)
 // (0.3 under a 0.5 minimum) is clamped and rounded when it is left, as the
 // Picture fields are, so an out-of-range value is never stored. An inherited
 // or empty field is left alone.
+// A number field that moves in fixed steps (detail_pulse_cap, texture_restore_cap): on leaving,
+// the clamped value snaps to the nearest step from the minimum. Connected after clampNumberFieldOnLeave.
+void snapNumberFieldToStep(QLineEdit* edit, double lo, double hi, double step)
+{
+    QObject::connect(edit, &QLineEdit::editingFinished, edit, [edit, lo, hi, step]() {
+        if (edit->property("inherited").toBool()) return;
+        const QString text = edit->text().trimmed();
+        if (text.isEmpty()) return;
+        bool ok = false;
+        double value = QLocale::c().toDouble(text, &ok);
+        if (!ok) value = text.toDouble(&ok);
+        if (!ok) return;
+        value = (std::min)(hi, (std::max)(lo, lo + std::round((value - lo) / step) * step));
+        const QString clean = QString::number(std::round(value * 100.0) / 100.0, 'g', 12);
+        if (clean != edit->text()) edit->setText(clean);
+    });
+}
+
 void clampNumberFieldOnLeave(QLineEdit* edit, double lo, double hi, int decimals)
 {
     QObject::connect(edit, &QLineEdit::editingFinished, edit, [edit, lo, hi, decimals]() {
@@ -8820,6 +8838,74 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     form->addRow(QString(), policies);
                 }
             }
+
+            // Detail pulse stabilisation and texture restore (docs/VP-detail-restore.md, 2026-10-17):
+            // two picture stages that run before scaling, after the VP debander. Each has its own
+            // default (named in its tip); the caps are greyed while their stage is off.
+            auto* detailPulse = addChoice(QStringLiteral("Detail pulse stabilise"), QStringLiteral("detail_pulse_stabilise"),
+                { QStringLiteral("on"), QStringLiteral("off") });
+            detailPulse->setItemText(detailPulse->findData(QStringLiteral("on")), QStringLiteral("On (default)"));
+            detailPulse->setItemText(detailPulse->findData(QStringLiteral("off")), QStringLiteral("Off"));
+            detailPulse->setToolTip(QStringLiteral(
+                "On (default): a starved stream codes some frames finely and others coarsely, so the fine detail and "
+                "the grain \"breathe\" with the group of pictures. This scales each frame's own fine detail up "
+                "towards the level of its best-coded recent neighbour (never beyond the cap below; a picture with "
+                "steady detail is left exactly as it is). Nothing is copied or averaged between frames: every frame "
+                "keeps its own grain. Cuts, fades and motion the player cannot follow restart it. Runs before "
+                "scaling and never changes source-resolution detection. Off: the stage is not run at all. "
+                "(Key: detail_pulse_stabilise.)"));
+            MarkGpuCost(form, detailPulse, 1);
+            auto* detailPulseCap = addText(QStringLiteral("    Detail pulse: strongest lift"), QStringLiteral("detail_pulse_cap"),
+                QStringLiteral("x"));
+            detailPulseCap->setValidator(new QDoubleValidator(1.0, 1.5, 2, detailPulseCap));
+            clampNumberFieldOnLeave(detailPulseCap, 1.0, 1.5, 2);
+            snapNumberFieldToStep(detailPulseCap, 1.0, 1.5, 0.05);
+            detailPulseCap->setPlaceholderText(QStringLiteral("1.35"));
+            detailPulseCap->setAccessibleDescription(QStringLiteral("Value in x, 1.00-1.50 in steps of 0.05."));
+            detailPulseCap->setToolTip(QStringLiteral(
+                "The most a frame's fine detail is raised towards its best neighbour, as a multiple (1.00-1.50 in "
+                "steps of 0.05, default 1.35). 1.00 = no lift. It only ever raises detail the frame already has. "
+                "(Key: detail_pulse_cap.)"));
+            auto* textureRestore = addChoice(QStringLiteral("Texture restore (experimental)"), QStringLiteral("texture_restore"),
+                { QStringLiteral("off"), QStringLiteral("statistical") });
+            textureRestore->setItemText(textureRestore->findData(QStringLiteral("off")), QStringLiteral("Off (default)"));
+            textureRestore->setItemText(textureRestore->findData(QStringLiteral("statistical")), QStringLiteral("Statistical (experimental)"));
+            textureRestore->setToolTip(QStringLiteral(
+                "Off (default). Statistical: repairs the picture towards the original where the stream starved it. "
+                "Per area VP separates the grain from the real scene texture, then scales this frame's own grain and "
+                "texture up towards the best-coded recent frame (never beyond the cap below). Grain is kept per frame "
+                "and never averaged or smoothed away; nothing is synthesised, so a frame with no grain left gets none. "
+                "Texture is only restored where the picture is in focus: out-of-focus areas never gain detail. "
+                "Runs before scaling and never changes source-resolution detection. (Key: texture_restore.)"));
+            MarkGpuCost(form, textureRestore, 2);
+            auto* textureRestoreCap = addText(QStringLiteral("    Texture restore: strongest lift"), QStringLiteral("texture_restore_cap"),
+                QStringLiteral("x"));
+            textureRestoreCap->setValidator(new QDoubleValidator(1.0, 2.0, 2, textureRestoreCap));
+            clampNumberFieldOnLeave(textureRestoreCap, 1.0, 2.0, 2);
+            snapNumberFieldToStep(textureRestoreCap, 1.0, 2.0, 0.05);
+            textureRestoreCap->setPlaceholderText(QStringLiteral("1.50"));
+            textureRestoreCap->setAccessibleDescription(QStringLiteral("Value in x, 1.00-2.00 in steps of 0.05."));
+            textureRestoreCap->setToolTip(QStringLiteral(
+                "The most grain or in-focus texture is raised towards the reference, as a multiple (1.00-2.00 in "
+                "steps of 0.05, default 1.50). 1.00 = no lift. It only scales what the frame already has. "
+                "(Key: texture_restore_cap.)"));
+            {
+                // The caps do nothing while their stage is off (read from the effective values).
+                auto syncDetailCaps = [detailPulse, detailPulseCap, textureRestore, textureRestoreCap]() {
+                    const bool pulseOn = effectiveChoiceValue(detailPulse) != QStringLiteral("off");
+                    detailPulseCap->setProperty("greyedOff", !pulseOn);
+                    detailPulseCap->setEnabled(pulseOn);
+                    const bool restoreOn = effectiveChoiceValue(textureRestore) == QStringLiteral("statistical");
+                    textureRestoreCap->setProperty("greyedOff", !restoreOn);
+                    textureRestoreCap->setEnabled(restoreOn);
+                };
+                connect(detailPulse, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncDetailCaps](int) { syncDetailCaps(); });
+                connect(textureRestore, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncDetailCaps](int) { syncDetailCaps(); });
+                auto* detailRefresh = new QAction(detailPulse);
+                detailRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("detail_restore_refresh")));
+                connect(detailRefresh, &QAction::triggered, this, [syncDetailCaps]() { syncDetailCaps(); });
+                syncDetailCaps();
+            }
         }
 
         form = addCollapsibleSection(QStringLiteral("temporalDither"), QStringLiteral("Temporal dither"),
@@ -10293,7 +10379,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
                     { "source_class", "legacy" },   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                     // Content recognition (intent interpreter item 1, 2026-10-17).
-                    { "intent_content", "off" } };
+                    { "intent_content", "off" },
+                    // Detail pulse stabilisation and texture restore (docs/VP-detail-restore.md).
+                    { "detail_pulse_stabilise", "on" }, { "texture_restore", "off" } };
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
                 // Numbers with a placeholder showing their default: empty, so
@@ -10304,7 +10392,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("render_ahead_utilisation") ||
                         key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                         key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
-                        key == QStringLiteral("intent_content_hold_seconds")) &&
+                        key == QStringLiteral("intent_content_hold_seconds") ||
+                        key == QStringLiteral("detail_pulse_cap") || key == QStringLiteral("texture_restore_cap")) &&
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
                 return QStringLiteral("AUTO");
@@ -10687,6 +10776,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("detail_restore_refresh"))))
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
