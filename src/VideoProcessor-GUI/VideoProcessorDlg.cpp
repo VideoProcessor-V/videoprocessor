@@ -13816,17 +13816,21 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	// When probing stops (switch, profile, renderer or an invalid state), a
 	// hand-off ends with it, and a new generation makes the capture thread's
 	// probe start again from "not handed off" when probing resumes.
+	// A veto preview (BuildHdrVetoSdrState, bug hunt 3 C2) leaves the hand-off probe alone.
 	const bool probeHandoff = m_dvTunnelHandoffEnabled &&
 		DolbyVisionTunnelGateWouldOpen(tunnelGate);
-	if (!probeHandoff && m_dvTunnelHandoffProbe.load(std::memory_order_acquire))
+	if (!m_hdrVetoPreviewing)
 	{
-		m_dvTunnelHandedOff = false;
-		m_dvTunnelHandoffGeneration.fetch_add(1, std::memory_order_acq_rel);
+		if (!probeHandoff && m_dvTunnelHandoffProbe.load(std::memory_order_acquire))
+		{
+			m_dvTunnelHandedOff = false;
+			m_dvTunnelHandoffGeneration.fetch_add(1, std::memory_order_acq_rel);
+		}
+		m_dvTunnelHandoffProbe.store(probeHandoff, std::memory_order_release);
+		if (tunnelGate.handedOff && DolbyVisionTunnelGateWouldOpen(tunnelGate))
+			DebugLog::Log("Dolby Vision RGB tunnel: signal handed to the normal path (not a tunnel; dv_tunnel_handoff): %s",
+				m_dvTunnelHandoffReason.c_str());
 	}
-	m_dvTunnelHandoffProbe.store(probeHandoff, std::memory_order_release);
-	if (tunnelGate.handedOff && DolbyVisionTunnelGateWouldOpen(tunnelGate))
-		DebugLog::Log("Dolby Vision RGB tunnel: signal handed to the normal path (not a tunnel; dv_tunnel_handoff): %s",
-			m_dvTunnelHandoffReason.c_str());
 	if (videoState->dolbyVisionTunnel)
 	{
 		videoState->eotf = EOTF::PQ;
