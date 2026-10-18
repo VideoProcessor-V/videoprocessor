@@ -72,6 +72,8 @@
 #include <vprenderer/SourceRebase.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 #include <vprenderer/VpDebander.h>
+#include <vprenderer/DetailPulse.h>
+#include <vprenderer/TextureRestore.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
@@ -1152,6 +1154,17 @@ namespace
 		// or on) with its grain guard, libplacebo's automatic deband (deband_strength auto)
 		// is off; an explicit deband_strength (light / default) is kept. off = both run.
 		bool debandVpExclusive = true;
+		// detail_pulse_stabilise / texture_restore (docs/VP-detail-restore.md, 2026-10-17):
+		// run after the VP debander on the plane libplacebo scales from, before every scaling
+		// step; both read the source-resolution monitor's original frame never. detail_pulse_stabilise
+		// on (default) scales each frame's own detail towards its best-coded recent neighbour
+		// (cap detail_pulse_cap); texture_restore statistical (off by default, experimental)
+		// repairs grain and in-focus texture towards the reference (cap texture_restore_cap).
+		// Off = the stage is not called at all.
+		bool detailPulseStabilise = true;
+		double detailPulseCap = DetailPulse::kDefaultCap;
+		bool textureRestore = false;
+		double textureRestoreCap = TextureRestore::kDefaultCap;
 		bool dejudderSourceWarpCatmull = true;
 		// Hunt 2 M1: nls_sampling. catmull (default): the NLS / NLS+ warp samples the
 		// source with a separable Catmull-Rom widened by the map's local minification
@@ -1394,7 +1407,7 @@ namespace
 			// must change the fingerprint like the engine's extras above.
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
-			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
+			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
@@ -2464,7 +2477,9 @@ namespace
 			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
 			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale),
-			std::make_tuple("intent_content_hold_seconds", 1.0, 60.0, &settings.intentContentHoldSeconds) })
+			std::make_tuple("intent_content_hold_seconds", 1.0, 60.0, &settings.intentContentHoldSeconds),
+			std::make_tuple("detail_pulse_cap", DetailPulse::kCapMin, DetailPulse::kCapMax, &settings.detailPulseCap),
+			std::make_tuple("texture_restore_cap", TextureRestore::kCapMin, TextureRestore::kCapMax, &settings.textureRestoreCap) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -2542,7 +2557,8 @@ namespace
 			// Film grain (owner 2026-10-17): the faithful defaults on / deband_grain off.
 			std::make_pair("residual_stabilise_grain_guard", &settings.adaptive.residualGrainGuard),
 			std::make_pair("deband_grain", &settings.debandGrain),
-			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive) })
+			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive),
+			std::make_pair("detail_pulse_stabilise", &settings.detailPulseStabilise) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -2707,6 +2723,15 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid deband_vp_grain_guard '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), !settings.debandVpGrainGuard ? "off" : settings.debandVpGrainSplit ? "on" : "veto");
+		}
+		// texture_restore: off | statistical (docs/VP-detail-restore.md).
+		if (tryChoice("texture_restore", raw))
+		{
+			if (raw == "off" || raw == "statistical")
+				settings.textureRestore = raw == "statistical";
+			else
+				DebugLog::Log("profile '%s': invalid texture_restore '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.textureRestore ? "statistical" : "off");
 		}
 		if (tryChoice("dejudder_source_warp_filter", raw))
 		{
@@ -5100,6 +5125,18 @@ struct LibplaceboVideoRenderer::Impl
 	VpDebander::Params vpDebandParams;
 	double debandThreshold = 0.0;
 	std::string debandLogged;
+	// detail_pulse_stabilise / texture_restore (docs/VP-detail-restore.md): this frame's
+	// parameters, whether each runs on it (off or not applicable = never called), the states
+	// logged, and the last source frame the look-ahead measured.
+	DetailPulse::Module detailPulse;
+	DetailPulse::Params detailPulseParams;
+	TextureRestore::Module textureRestore;
+	TextureRestore::Params textureRestoreParams;
+	bool detailPulseRuns = false;
+	bool textureRestoreRuns = false;
+	std::string detailPulseLogged;
+	std::string textureRestoreLogged;
+	uint64_t detailPulseAheadSequence = 0;
 	// Delta 15 S8-2 / 2c: this frame's weight scale from the bitrate quality (1 = clean).
 	double bitrateWeightScale = 1.0;
 	pl_tex rgbIngestLuma = nullptr;
@@ -7009,6 +7046,8 @@ struct LibplaceboVideoRenderer::Impl
 				sourceRebase.Release(d3d11->gpu);   // Stage 12: its textures
 				sourceMonitor.Release(d3d11->gpu);  // and the tile readback
 				debander.Release(d3d11->gpu);       // and the debander's planes
+				detailPulse.Release(d3d11->gpu);    // detail pulse stabilisation's history
+				textureRestore.Release(d3d11->gpu); // and texture restore's
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				dejudderOutput.Release();
@@ -10444,6 +10483,10 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.debandVpGrainGuard != next.debandVpGrainGuard || current.debandVpGrainSplit != next.debandVpGrainSplit, "deband_vp_grain_guard");
 		changed(current.debandGrain != next.debandGrain, "deband_grain");
 		changed(current.debandVpExclusive != next.debandVpExclusive, "deband_vp_exclusive");
+		changed(current.detailPulseStabilise != next.detailPulseStabilise, "detail_pulse_stabilise");
+		changed(current.detailPulseCap != next.detailPulseCap, "detail_pulse_cap");
+		changed(current.textureRestore != next.textureRestore, "texture_restore");
+		changed(current.textureRestoreCap != next.textureRestoreCap, "texture_restore_cap");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
@@ -11198,6 +11241,11 @@ struct LibplaceboVideoRenderer::Impl
 				line += "; held along the vectors (" + std::to_string(debander.HeldFrames()) + " frames)";
 			descriptions.push_back(line);
 		}
+		// detail_pulse_stabilise / texture_restore: one line each while they run.
+		if (detailPulseRuns && !detailPulseLogged.empty())
+			descriptions.push_back(detailPulseLogged);
+		if (textureRestoreRuns && !textureRestoreLogged.empty())
+			descriptions.push_back(textureRestoreLogged);
 		std::lock_guard<std::mutex> guard(shaderStatusMutex);
 		activeCustomShaders = descriptions;
 	}
@@ -11656,6 +11704,8 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderEstimatedEpoch = 0;
 		adaptiveDownscale.ForgetMap();
 		debander.ForgetHold();
+		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
+		textureRestore.Forget();
 		const int cause = static_cast<int>(pending.cause);
 		const ULONGLONG now = GetTickCount64();
 		// The first 50 are all logged; then at most one line per 5 s, but a
@@ -20398,7 +20448,12 @@ struct LibplaceboVideoRenderer::Impl
 			// plane-sized: they start over (no motion invalidation, so this frame's
 			// estimate and its consumers are unchanged).
 			if (previousRebase != rebaseFactor || previousRebaseX != rebaseFactorX)
+			{
 				debander.ForgetHold();
+				detailPulse.Forget();      // the planes change size: both histories restart
+				textureRestore.Forget();
+				detailPulseAheadSequence = 0;
+			}
 			std::string state;
 			if ((wanted < 1.0 || wantedX < 1.0) && rebasePaused)
 				state = "Re-base: paused " + std::to_string(rebasePauseSeconds) + " s after a failure (" + sourceRebase.LastError() +
@@ -20465,6 +20520,93 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				debandLogged = debandState;
 				DebugLog::Log("%s", debandState.c_str());
+			}
+			// detail_pulse_stabilise / texture_restore (docs/VP-detail-restore.md): the parameters
+			// for this frame, after the re-base factor is known. Off = never called (byte-identical
+			// to today); not applied while smooth motion or deinterlacing runs (as the debander).
+			// The source-resolution monitor above has already read the original frame.
+			{
+				const bool wasPulse = detailPulseRuns, wasRestore = textureRestoreRuns;
+				detailPulseRuns = textureRestoreRuns = false;
+				detailPulseParams = DetailPulse::Params();
+				textureRestoreParams = TextureRestore::Params();
+				std::string pulseState, restoreState;
+				if ((activeSettings.detailPulseStabilise || activeSettings.textureRestore) && luma && !temporal)
+				{
+					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+					const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
+					// The content rate the de-judder and the interpolator schedule with: the pulldown
+					// film rate, else the measured capture rate, else the nominal rate; 0 = unknown.
+					double contentHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : vpCaptureRateHz > 0.0 ? vpCaptureRateHz : nominalSourceRateHz;
+					if (!std::isfinite(contentHz) || contentHz <= 0.0) contentHz = 0.0;
+					// The de-judder's vectors only under exactly the debander's validity condition.
+					pl_tex field = nullptr;
+					if (dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)
+						field = dejudder->Field();
+					const double fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
+					const double fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
+					const double quality = snap.reading ? snap.bitrateQuality : 1.0;
+					const double lines = nativeHeight * rebaseFactor;
+					if (activeSettings.detailPulseStabilise)
+					{
+						detailPulseRuns = true;
+						DetailPulse::Params& p = detailPulseParams;
+						p.cap = (std::max)(DetailPulse::kCapMin, (std::min)(DetailPulse::kCapMax, activeSettings.detailPulseCap));
+						p.colorDepth = depth;
+						p.planeLines = lines;
+						p.sourceHz = contentHz;
+						p.bitrateQuality = quality;
+						p.field = field;
+						p.fieldScale = fieldScale;
+						p.fieldScaleX = fieldScaleX;
+						p.sequence = sourceSequence;
+						char text[160];
+						snprintf(text, sizeof(text), "Detail pulse stabilise: on (cap %.2f)", p.cap);
+						pulseState = text;
+					}
+					if (activeSettings.textureRestore)
+					{
+						textureRestoreRuns = true;
+						TextureRestore::Params& p = textureRestoreParams;
+						p.cap = (std::max)(TextureRestore::kCapMin, (std::min)(TextureRestore::kCapMax, activeSettings.textureRestoreCap));
+						p.colorDepth = depth;
+						p.planeLines = lines;
+						p.sourceHz = contentHz;
+						p.bitrateQuality = quality;
+						p.field = field;
+						p.fieldScale = fieldScale;
+						p.fieldScaleX = fieldScaleX;
+						p.sequence = sourceSequence;
+						char text[160];
+						snprintf(text, sizeof(text), "Texture restore: statistical (cap %.2f)", p.cap);
+						restoreState = text;
+					}
+				}
+				else if (temporal)
+				{
+					if (activeSettings.detailPulseStabilise)
+						pulseState = "Detail pulse stabilise: not applied while smooth motion or deinterlacing runs";
+					if (activeSettings.textureRestore)
+						restoreState = "Texture restore: not applied while smooth motion or deinterlacing runs";
+				}
+				if (!activeSettings.detailPulseStabilise && !detailPulseLogged.empty())
+					pulseState = "Detail pulse stabilise: off";
+				if (!activeSettings.textureRestore && !textureRestoreLogged.empty())
+					restoreState = "Texture restore: off";
+				// A stage that stopped running (switched off, or a temporal mode) starts over when it returns.
+				if (wasPulse && !detailPulseRuns) detailPulse.Forget();
+				if (wasRestore && !textureRestoreRuns) textureRestore.Forget();
+				if (!detailPulseRuns) detailPulseAheadSequence = 0;
+				if (!pulseState.empty() && pulseState != detailPulseLogged)
+				{
+					detailPulseLogged = pulseState;
+					DebugLog::Log("%s", pulseState.c_str());
+				}
+				if (!restoreState.empty() && restoreState != textureRestoreLogged)
+				{
+					textureRestoreLogged = restoreState;
+					DebugLog::Log("%s", restoreState.c_str());
+				}
 			}
 		}
 
@@ -21914,6 +22056,43 @@ struct LibplaceboVideoRenderer::Impl
                         frame = debanded;
                     else if (debander.Failures() == 1)
                         DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
+                }
+                // detail_pulse_stabilise, then texture_restore (docs/VP-detail-restore.md): re-base ->
+                // debander -> detail pulse -> texture restore, all before libplacebo's scaling. Never
+                // on a picture between frames (Stage B), never while smooth motion / deinterlacing
+                // runs (those flags are false then), never on renderImage: the source-resolution
+                // monitor read the original frame above. A cadence repeat passes the same sequence
+                // (the modules reuse the frame's decision and never advance their history).
+                if ((detailPulseRuns || textureRestoreRuns) && !phasePicture)
+                {
+                    if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+                    if (detailPulseRuns)
+                    {
+                        // Look-ahead (optional): the next source frame's band energies when it is
+                        // already uploaded (the de-judder's B) and no re-base is engaged (the same
+                        // domain); once per new source frame.
+                        if (!cadenceRepeat && nextSourceSequence != 0 && detailPulseAheadSequence != nextSourceSequence &&
+                            dejudderNextUploadedSequence == nextSourceSequence && dejudderNextTextures[0] && !dejudderRgbLuma &&
+                            rebaseFactor == 1.0 && rebaseFactorX == 1.0)
+                        {
+                            detailPulseAheadSequence = nextSourceSequence;
+                            (void)detailPulse.MeasureAhead(d3d11->gpu, rebaseDispatch, dejudderNextTextures[0],
+                                dejudderNextUploadedSequence, detailPulseParams);
+                        }
+                        pl_frame pulsed{};
+                        if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
+                            frame = pulsed;
+                        else if (detailPulse.Failures() == 1)
+                            DebugLog::Log("Detail pulse stabilise failed (%s); the frame is rendered without it", detailPulse.LastError().c_str());
+                    }
+                    if (textureRestoreRuns)
+                    {
+                        pl_frame restored{};
+                        if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
+                            frame = restored;
+                        else if (textureRestore.Failures() == 1)
+                            DebugLog::Log("Texture restore failed (%s); the frame is rendered without it", textureRestore.LastError().c_str());
+                    }
                 }
                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
                 {
@@ -28381,6 +28560,10 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_coding_fixes=" << (s.sourceCodingFixes ? "on" : "off") << "\n"
 		<< "deband_vp_grain_guard=" << (!s.debandVpGrainGuard ? "off" : s.debandVpGrainSplit ? "on" : "veto") << "\n"
 		<< "deband_vp_exclusive=" << (s.debandVpExclusive ? "on" : "off") << "\n"
+		<< "detail_pulse_stabilise=" << (s.detailPulseStabilise ? "on" : "off") << "\n"
+		<< "detail_pulse_cap=" << s.detailPulseCap << "\n"
+		<< "texture_restore=" << (s.textureRestore ? "statistical" : "off") << "\n"
+		<< "texture_restore_cap=" << s.textureRestoreCap << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
 		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"

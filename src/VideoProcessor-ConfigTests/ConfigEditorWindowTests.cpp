@@ -1685,6 +1685,77 @@ void testContentAdaptiveGroup()
     require(mode->currentData().toString() == "off" && !hold->isEnabled(), "unticking did not turn it off");
 }
 
+void testDetailRestoreControls()
+{
+    // docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise (default on), detail_pulse_cap,
+    // texture_restore (default off) and texture_restore_cap sit in the "Experimental content-adaptive
+    // settings" group, each with a tooltip; the caps are greyed while their stage is off and snap to
+    // steps of 0.05 within their range; choices and caps round-trip to the cfg.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer]\nquality: high\n[vprenderer.Film]\ntexture_restore: statistical\ntexture_restore_cap: 1.75\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* content = window.findChild<QWidget*>(QStringLiteral("rendererSection.contentAdaptive.content"));
+    require(content != nullptr, "the content-adaptive group's content");
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto* pulse = requireControl<QComboBox>(window, "config.vprenderer.detail_pulse_stabilise");
+    auto* pulseCap = requireControl<QLineEdit>(window, "config.vprenderer.detail_pulse_cap");
+    auto* restore = requireControl<QComboBox>(window, "config.vprenderer.texture_restore");
+    auto* restoreCap = requireControl<QLineEdit>(window, "config.vprenderer.texture_restore_cap");
+    for (QWidget* control : std::initializer_list<QWidget*>{ pulse, pulseCap, restore, restoreCap })
+    {
+        require(content->isAncestorOf(control), "a detail control is outside the content-adaptive group");
+        require(!control->toolTip().trimmed().isEmpty(), "a detail control has no tooltip");
+    }
+    require(pulse->toolTip().contains("never averaged") || pulse->toolTip().contains("nothing is copied", Qt::CaseInsensitive),
+        "the detail pulse tooltip does not say grain is kept per frame");
+    require(restore->toolTip().contains("out-of-focus") && restore->toolTip().contains("nothing is synthesised"),
+        "the texture restore tooltip does not say it never adds detail out of focus or synthesises");
+    require(pulse->toolTip().contains("source-resolution") && restore->toolTip().contains("source-resolution"),
+        "the tooltips do not say source-resolution detection is unchanged");
+    require(pulse->toolTip().contains("GPU cost") && restore->toolTip().contains("GPU cost"), "the tooltips have no cost class");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto effectiveChoiceValueForTest = [](const QComboBox* combo) {
+        const QString selected = combo->currentData().toString();
+        return selected.isEmpty() ? combo->property("inheritedValue").toString().trimmed().toLower() : selected;
+    };
+    require(effectiveChoiceValueForTest(pulse) == QStringLiteral("on"), "detail pulse is not on by default");
+    require(effectiveChoiceValueForTest(restore) == QStringLiteral("off"), "texture restore is not off by default");
+    require(pulseCap->isEnabled() && !restoreCap->isEnabled(), "the caps are not greyed from the effective stage values");
+    require(pulseCap->placeholderText() == QStringLiteral("1.35") && restoreCap->placeholderText() == QStringLiteral("1.50"),
+        "the cap placeholders are not the defaults");
+    // A named profile shows its own values.
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(restore->currentData().toString() == QStringLiteral("statistical"), "the profile's texture restore is not shown");
+    require(restoreCap->text() == QStringLiteral("1.75") && restoreCap->isEnabled(), "the profile's cap is not shown or is greyed");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    // Round trip: set each, apply, read the cfg.
+    pulse->setCurrentIndex(pulse->findData(QStringLiteral("off")));
+    restore->setCurrentIndex(restore->findData(QStringLiteral("statistical")));
+    QCoreApplication::processEvents();
+    require(!pulseCap->isEnabled() && restoreCap->isEnabled(), "the caps did not follow the stage choices");
+    pulse->setCurrentIndex(pulse->findData(QStringLiteral("on")));
+    QCoreApplication::processEvents();
+    pulseCap->setText(QStringLiteral("1.9"));
+    pulseCap->editingFinished();
+    require(pulseCap->text() == QStringLiteral("1.5"), (QByteArray("the detail pulse cap was not clamped: ") + pulseCap->text().toUtf8()).constData());
+    pulseCap->setText(QStringLiteral("1.22"));
+    pulseCap->editingFinished();
+    require(pulseCap->text() == QStringLiteral("1.2"), (QByteArray("the detail pulse cap did not snap to 0.05: ") + pulseCap->text().toUtf8()).constData());
+    restoreCap->setText(QStringLiteral("1.6"));
+    restoreCap->editingFinished();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("detail_pulse_cap: 1.2") && saved.contains("texture_restore: statistical") &&
+        saved.contains("texture_restore_cap: 1.6"),
+        (QByteArray("detail restore settings not saved: ") + saved.left(500)).constData());
+}
+
 void testInheritedButtonsAndReorganisedSections()
 {
     // Audit 2026-10-16: an unset profile's exclusive buttons show the default profile's choice,
@@ -9781,6 +9852,7 @@ int main(int argc, char** argv)
     failures += run("temporal dither buttons", testTemporalDitherButtons);
     failures += run("interpolation buttons", testInterpolationButtons);
     failures += run("content-adaptive group", testContentAdaptiveGroup);
+    failures += run("detail restore controls", testDetailRestoreControls);
     failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
     failures += run("queue use mode and low-latency path", testQueueUseModeAndLowLatencyPath);
     failures += run("inherited buttons and reorganised sections", testInheritedButtonsAndReorganisedSections);
