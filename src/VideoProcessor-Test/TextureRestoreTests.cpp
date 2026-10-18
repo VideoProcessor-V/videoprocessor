@@ -661,6 +661,26 @@ namespace TextureRestoreTestsNs
 				const Image t2 = twice.Frame(b2, Frame(42));
 				Assert::AreEqual(0.0, MaxAbsDiff(o2, t2), L"the repeat did not advance the references");
 			}
+			// Hunt 3 F7: a repeat with ANOTHER picture (A moved 6 px: a phase picture, an extra)
+			// leaves the references and the previous low band as they were: the next frame is the
+			// same as without the repeat.
+			{
+				Model once, twice;
+				const Image i0 = coded(a, true), b1 = coded(a, false);
+				std::mt19937 g(9u);
+				const Image b2 = Dctq(Sum(a, Grain(kW, kH, 2.0, false, g)), 24.0);
+				Image moved(kW, kH);
+				for (int y = 0; y < kH; ++y)
+					for (int x = 0; x < kW; ++x) moved.at(x, y) = b1.get(x - 6, y);
+				once.Frame(i0, Frame(50));
+				twice.Frame(i0, Frame(50));
+				once.Frame(b1, Frame(51));
+				twice.Frame(b1, Frame(51));
+				twice.Frame(moved, Frame(51));
+				Assert::IsTrue(twice.LastWasRepeat());
+				Assert::AreEqual(0.0, MaxAbsDiff(once.Frame(b2, Frame(52)), twice.Frame(b2, Frame(52))),
+					L"a repeat of another picture changes nothing for the next frame");
+			}
 		}
 
 		TEST_METHOD(TextureRestoreIsRateIndependent)
@@ -1014,6 +1034,104 @@ namespace TextureRestoreTestsNs
 				module.Release(gpu);
 			}
 			pl_tex_destroy(gpu, &fieldTex);
+		}
+
+		TEST_METHOD(TextureRestoreGpuRepeatOfAnotherPictureKeepsTheReferences)
+		{
+			// Hunt 3 F7: a repeat whose picture is another one (a Stage B phase picture, an extra:
+			// A moved 4 px) writes its own low bands; the next new frame still compares against A's
+			// (its low-band change veto and cut test). The repeat and every later frame follow the
+			// model (half a code on 99.9 % of the pixels, 2 codes everywhere).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(171u);
+			const Image a = Scene(kW + 8, kH, rng);
+			TextureRestore::Module module;
+			Model model;
+			auto check = [&](const Image& in, const TextureRestore::Params& p, const char* what) {
+				pl_tex tex = UploadLuma(gpu, in);
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), Wide(module.LastError()).c_str());
+				const Image gpuOut = Download(gpu, out.planes[0].texture);
+				const Image cpuOut = model.Frame(in, p);
+				int over = 0;
+				double worst = 0.0;
+				for (size_t i = 0; i < gpuOut.v.size(); ++i)
+				{
+					const double d = std::fabs(gpuOut.v[i] - cpuOut.v[i]);
+					worst = (std::max)(worst, d);
+					over += d > 0.5 ? 1 : 0;
+				}
+				char text[160];
+				snprintf(text, sizeof(text), "%s: worst %.3f codes, %d px over 0.5", what, worst, over);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(worst <= 2.0 && over <= static_cast<int>(gpuOut.v.size() / 1000), Wide(text).c_str());
+				pl_tex_destroy(gpu, &tex);
+			};
+			for (int t = 0; t < 7; ++t)
+			{
+				Image f(kW, kH);
+				for (int y = 0; y < kH; ++y)
+					for (int x = 0; x < kW; ++x) f.at(x, y) = a.at(x + 4, y);
+				const Image in = Quantised(Dctq(Sum(f, Grain(kW, kH, 1.5 * kCode8, true, rng)), IsI(t, 8) ? 4.0 : 24.0));
+				const TextureRestore::Params p = Frame(1100 + t);
+				char what[64];
+				snprintf(what, sizeof(what), "frame %d", t);
+				check(in, p, what);
+				if (t == 3)
+				{
+					Image moved(kW, kH);
+					for (int y = 0; y < kH; ++y)
+						for (int x = 0; x < kW; ++x) moved.at(x, y) = in.get(x - 4, y);
+					check(moved, p, "repeat of frame 3, moved 4 px");
+				}
+			}
+			module.Release(gpu);
+		}
+
+		TEST_METHOD(TextureRestoreGpuForeignGeometryKeepsTheReferences)
+		{
+			// Hunt 3 (crossfade lead): the path being left (a half-size plane) takes the frame's
+			// gains with its own bands; the main path's references are untouched.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(181u);
+			const Image a = Scene(kW, kH, rng);
+			TextureRestore::Module module;
+			Model model;
+			double worstMain = 0.0, worstForeign = 0.0;
+			for (int t = 0; t < 6; ++t)
+			{
+				const Image in = Quantised(Dctq(Sum(a, Grain(kW, kH, 1.5 * kCode8, true, rng)), IsI(t, 8) ? 4.0 : 24.0));
+				const TextureRestore::Params p = Frame(1200 + t);
+				pl_tex tex = UploadLuma(gpu, in);
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), Wide(module.LastError()).c_str());
+				const Image cpuOut = model.Frame(in, p);
+				Image halfPic(kW / 2, kH / 2);
+				for (int y = 0; y < halfPic.h; ++y)
+					for (int x = 0; x < halfPic.w; ++x)
+						halfPic.at(x, y) = std::round(0.25 * (in.at(2 * x, 2 * y) + in.at(2 * x + 1, 2 * y) + in.at(2 * x, 2 * y + 1) + in.at(2 * x + 1, 2 * y + 1)));
+				TextureRestore::Params pf = p;
+				pf.planeLines = kH / 2;
+				pl_tex stex = UploadLuma(gpu, halfPic);
+				pl_frame foreign{};
+				Assert::IsTrue(module.ApplyForeign(gpu, dev.dispatch, LumaFrame(stex), pf, foreign), Wide(module.LastError()).c_str());
+				Assert::IsTrue(foreign.planes[0].texture != out.planes[0].texture, L"its own output texture");
+				const Image fo = Download(gpu, foreign.planes[0].texture), fm = model.ForeignFrame(halfPic, pf);
+				for (size_t i = 0; i < fo.v.size(); ++i) worstForeign = (std::max)(worstForeign, std::fabs(fo.v[i] - fm.v[i]));
+				const Image mo = Download(gpu, out.planes[0].texture);
+				for (size_t i = 0; i < mo.v.size(); ++i) worstMain = (std::max)(worstMain, std::fabs(mo.v[i] - cpuOut.v[i]));
+				pl_tex_destroy(gpu, &tex);
+				pl_tex_destroy(gpu, &stex);
+			}
+			char text[160];
+			snprintf(text, sizeof(text), "foreign geometry: worst %.3f codes (foreign), %.3f (main)", worstForeign, worstMain);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(worstForeign <= 2.0 && worstMain <= 2.0, Wide(text).c_str());
+			module.Release(gpu);
 		}
 
 		TEST_METHOD(TextureRestoreGpuTiming)

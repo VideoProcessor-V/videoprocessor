@@ -570,6 +570,12 @@ if (p.x < sz.x && p.y < sz.y) {
 		impl = nullptr;
 	}
 
+	bool Module::ApplyForeign(pl_gpu, pl_dispatch, const pl_frame&, const Params&, pl_frame&)
+	{
+		error = "not implemented";
+		return false;
+	}
+
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
 	{
 		error.clear();

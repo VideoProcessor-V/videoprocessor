@@ -758,6 +758,37 @@ for (int q = 0; q < 4; q++) {
 		return true;
 	}
 
+	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
+	{
+		double kr = 0.2126, kb = 0.0722;
+		switch (system)
+		{
+		case PL_COLOR_SYSTEM_BT_601: kr = 0.299; kb = 0.114; break;
+		case PL_COLOR_SYSTEM_BT_2020_NC:
+		case PL_COLOR_SYSTEM_BT_2020_C: kr = 0.2627; kb = 0.0593; break;
+		case PL_COLOR_SYSTEM_SMPTE_240M: kr = 0.212; kb = 0.087; break;
+		case PL_COLOR_SYSTEM_BT_709: break;
+		default:
+			if (primaries == PL_COLOR_PRIM_BT_2020) { kr = 0.2627; kb = 0.0593; }
+			break;
+		}
+		out[0] = kr;
+		out[1] = 1.0 - kr - kb;
+		out[2] = kb;
+	}
+
+	bool Module::ApplyForeign(pl_gpu, pl_dispatch, const pl_frame&, const Params&, pl_frame&)
+	{
+		error = "not implemented";
+		return false;
+	}
+
+	bool Module::MeasureAhead(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& next, uint64_t sequence, const Params& params,
+		VpDebander::Module*, const VpDebander::Params*)
+	{
+		return next.num_planes > 0 && MeasureAhead(gpu, dispatch, next.planes[0].texture, sequence, params);
+	}
+
 	bool Module::MeasureAhead(pl_gpu gpu, pl_dispatch dispatch, pl_tex luma, uint64_t sequence, const Params& params)
 	{
 		error.clear();

@@ -254,6 +254,17 @@ namespace TextureRestoreModel
 			return ApplyGains(y, b);
 		}
 
+		// Hunt 3 (the crossfade's path being left): the last frame's gains on a picture of
+		// another geometry: its own bands at its own scale, the tile gains at the same picture
+		// position. Never advances.
+		Image ForeignFrame(const Image& y, const TextureRestore::Params& p) const
+		{
+			using namespace TextureRestore;
+			if (!(EffectiveCap(p.cap) > 1.0) || !have) return y;
+			const double scale = Scale(p.planeLines > 0.0 ? p.planeLines : y.h);
+			return ApplyGains(y, MakeBands(y, scale), static_cast<double>(width) / y.w, static_cast<double>(height) / y.h);
+		}
+
 	private:
 		bool have = false, forget = false, lastCut = false, lastRepeat = false;
 		uint64_t sequence = 0;
@@ -478,7 +489,9 @@ namespace TextureRestoreModel
 		}
 
 		// APPLY: the pixel split and the gains, bilinear between tile centres.
-		Image ApplyGains(const Image& y, const Bands& b) const
+		// rx, ry: decided plane px per plane px of y (hunt 3: a picture of another geometry reads
+		// the tile gains at the same picture position; 1 = the decided geometry itself).
+		Image ApplyGains(const Image& y, const Bands& b, double rx = 1.0, double ry = 1.0) const
 		{
 			using namespace TextureRestore;
 			Image out(y.w, y.h);
@@ -504,7 +517,7 @@ namespace TextureRestoreModel
 					e1 /= 9.0;
 					const double dd1 = d1.at(x + 1, yy + 1);
 					const double dd2 = b.g1.at(x, yy) - LowAt(b.low2, x, yy);
-					const Vec4 g = gains.bilinear((x + 0.5) / T - 0.5, (yy + 0.5) / T - 0.5);
+					const Vec4 g = gains.bilinear((x + 0.5) * rx / T - 0.5, (yy + 0.5) * ry / T - 0.5);
 					const double f = Clamp(1.0 - kWienerKappa * g.w / (e1 + kEnergyEps), 0.0, 1.0);
 					out.at(x, yy) = y.at(x, yy) + (g.x - 1.0) * (1.0 - f) * dd1 + (g.y - 1.0) * f * dd1 + (g.z - 1.0) * f * dd2;
 				}

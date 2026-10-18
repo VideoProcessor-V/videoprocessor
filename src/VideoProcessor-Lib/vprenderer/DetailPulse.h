@@ -3,6 +3,7 @@
 #include <libplacebo/renderer.h>
 
 #include <vprenderer/GrainPreserve.h>
+#include <vprenderer/VpDebander.h>
 
 #include <algorithm>
 #include <cmath>
@@ -148,7 +149,20 @@ namespace DetailPulse
 		double fieldScale = 1.0;       // native px per plane px down (1 / re-base factor)
 		double fieldScaleX = 0.0;      // across (0 = fieldScale)
 		uint64_t sequence = 0;         // this source frame; a repeat (same) never advances the history
+		// Hunt 3 F8/F9: a one-plane RGB(A) picture (an RGB capture, the subtitle move's composed
+		// picture) is stabilised on its luma Y = Kr R + Kg G + Kb B, the same delta added to R, G
+		// and B (adding d to R, G and B adds d to Y and leaves Cb, Cr unchanged, so it is the
+		// YCbCr pulse exactly). lumaSystem: the YCbCr system the picture was decoded from (its
+		// Kr, Kb; unknown = BT.2020 NC for BT.2020 primaries, else BT.709). codeLevels: the code
+		// domain a float RGB picture's luma is measured in (the YCbCr source's levels, so a
+		// composed picture reads the same codes as the planes it was made from; unknown = the
+		// frame's own levels). A UNORM RGB plane reads its own codes.
+		enum pl_color_system lumaSystem = PL_COLOR_SYSTEM_UNKNOWN;
+		enum pl_color_levels codeLevels = PL_COLOR_LEVELS_UNKNOWN;
 	};
+
+	// Hunt 3 F8: Kr, Kg, Kb of a YCbCr system (the luma of an RGB picture).
+	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3]);
 
 	class Module
 	{
@@ -161,11 +175,25 @@ namespace DetailPulse
 		// `source` with its luma plane stabilised into this module's texture (other planes
 		// pass through); false (and `out` untouched) on any failure: the caller renders the
 		// frame as it was.
+		// A repeat (the same sequence again) applies the stored decision to the picture given,
+		// with that picture's own bands (hunt 3 F6: a Stage B phase picture, a gap fill or a
+		// de-judder extra is another picture than A).
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
+		// Hunt 3 (the crossfade's path being left): the current decision (HistorySequence())
+		// on a picture of another plane geometry (another re-base factor). Its own bands at its
+		// own scale (params.planeLines), the tile weights read at the same picture position;
+		// never advances or restarts the history; its own output texture, so the frame Apply
+		// returned stays valid. False when no decision is held.
+		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// Optional look-ahead: measure the next source frame's band energies (its luma plane,
 		// in the same domain as Apply's: only when no re-base is engaged) so the reference
 		// can include it. Safe to skip.
 		bool MeasureAhead(pl_gpu gpu, pl_dispatch dispatch, pl_tex luma, uint64_t sequence, const Params& params);
+		// Hunt 3 F4: the look-ahead in Apply's domain. Apply measures the frame after VP's
+		// debander; the next frame is debanded the same way first (per picture, the debander's
+		// look-ahead slot, its hold left alone) when `debander` and a threshold are given.
+		bool MeasureAhead(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& next, uint64_t sequence, const Params& params,
+			VpDebander::Module* debander, const VpDebander::Params* deband);
 		// A discontinuity (MotionValidity invalidation, re-base factor change, cut known to
 		// the caller): the history restarts at the next frame.
 		void Forget();

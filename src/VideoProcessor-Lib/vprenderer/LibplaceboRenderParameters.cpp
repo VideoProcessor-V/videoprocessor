@@ -147,6 +147,15 @@ namespace LibplaceboRenderParameters
 		}
 	}
 
+	bool SdrAmbientLift(double, double, double, enum pl_color_transfer, float&, float&)
+	{
+		return false;   // phase 1 (tests first)
+	}
+
+	void ApplySdrAmbientLift(float, float, pl_color_adjustment&)
+	{
+	}
+
 	pl_color_space MakeSwapchainColorHint(const pl_color_space& output)
 	{
 		pl_color_space hint = output;

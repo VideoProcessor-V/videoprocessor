@@ -156,7 +156,15 @@ namespace TextureRestore
 		// through); false (and `out` untouched) on any failure: the caller renders the frame as
 		// it was. cap 1.0 returns `source` itself. A repeated sequence reuses its frame's gains
 		// and never advances the references; a non-consecutive one (or 0) restarts them.
+		// Hunt 3 F7: a repeat writes its own low bands (its picture may be another one: a Stage
+		// B phase picture, a gap fill, a de-judder extra), never the previous frame's set the
+		// next new frame compares against.
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
+		// Hunt 3 (the crossfade's path being left): the current frame's gains (HistorySequence())
+		// on a picture of another plane geometry (another re-base factor): its own bands at its
+		// own scale, the tile gains read at the same picture position. Never advances or
+		// restarts the references; its own textures (the frame Apply returned stays valid).
+		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// A discontinuity (MotionValidity invalidation, re-base change): references restart.
 		void Forget();
 		void Release(pl_gpu gpu);

@@ -5,6 +5,11 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <AmbientAdaptation.h>
+#include <IntentInterpreterSupport.h>
+#include <vprenderer/LibplaceboRenderParameters.h>
+#include "ExtendedRangeGpuProbe.h"
+#include <algorithm>
+#include <vector>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -244,6 +249,168 @@ namespace VideoProcessorTest
             AmbientAdapt::FillStatus(s, f, 0.05, 0.05, status);
             Assert::AreEqual(0.05f, status.targetBlackNits);
             Assert::AreEqual(std::string("strength 0: display black"), std::string(status.reason));
+        }
+    };
+
+    // Hunt 3 F2: ambient adaptation for SDR input (LibplaceboRenderParameters::SdrAmbientLift).
+    // Off / strength 0 / a dark room: nothing changes (bit-identical). Lit room at strength 1:
+    // the BT.1886 black lift V' = s V + o reaches the output codes - black raised, white fixed,
+    // code order (BTB < black < ... < WTW) kept, and on the owner's display the picture shows
+    // as on a display whose black is the effective black.
+    namespace AmbientSdr
+    {
+        // B_eff from the real stepper (a cut, the filter settled on `lux`).
+        inline double EffectiveBlack(double strength, double lux, double owner)
+        {
+            AmbientAdapt::Settings s = On();
+            s.strength = strength;
+            IntentInterpreter::AmbientApplyState st;
+            return IntentInterpreter::AmbientStep(st, s, true, lux, owner, true, 1.0);
+        }
+
+        inline double Bt1886(double v, double black, double white)
+        {
+            const double lb = std::pow(black, 1.0 / 2.4), lw = std::pow(white, 1.0 / 2.4);
+            return std::pow((std::max)(0.0, (lw - lb) * v + lb), 2.4);
+        }
+
+        inline int Lifted(int code, float contrast, float brightness)
+        {
+            const double v = (code - 64) / 876.0;
+            return static_cast<int>(std::lround(64.0 + 876.0 * (contrast * v + brightness)));
+        }
+    }
+
+    TEST_CLASS(AmbientSdrLiftTests)
+    {
+    public:
+        TEST_METHOD(AmbientSdrStrengthZeroChangesNothing)
+        {
+            for (double owner : { 0.0, 0.02, 0.05 })
+            {
+                const double eff0 = AmbientSdr::EffectiveBlack(0.0, 200.0, owner);
+                Assert::IsTrue(SameBits(owner, eff0), L"strength 0: the owner's black exactly");
+                float c = 7.0f, b = 7.0f;
+                Assert::IsFalse(LibplaceboRenderParameters::SdrAmbientLift(owner, eff0, 100.0, PL_COLOR_TRC_BT_1886, c, b),
+                    L"strength 0: no adjustment");
+                Assert::IsFalse(LibplaceboRenderParameters::SdrAmbientLift(owner, AmbientSdr::EffectiveBlack(1.0, 0.0, owner), 100.0,
+                    PL_COLOR_TRC_BT_1886, c, b), L"a dark room at strength 1: no adjustment");
+            }
+        }
+
+        TEST_METHOD(AmbientSdrLiftReachesTheCodes)
+        {
+            // Output codes of a 10-bit limited SDR ramp (BTB 4 .. WTW 1019) at strength 0 and 1 in
+            // a lit room (200 lux x 0.01 cd/m2 per lux: a 2-nit veil, capped at 1 nit) on a 100-nit
+            // BT.1886 display with black 0.05 nit.
+            const double owner = 0.05, white = 100.0;
+            const double eff1 = AmbientSdr::EffectiveBlack(1.0, 200.0, owner);
+            Assert::IsTrue(eff1 > owner, L"(lit room: the effective black rose)");
+            float c = 1.0f, b = 0.0f;
+            Assert::IsTrue(LibplaceboRenderParameters::SdrAmbientLift(owner, eff1, white, PL_COLOR_TRC_BT_1886, c, b));
+            Assert::IsTrue(c > 0.0f && c < 1.0f && b > 0.0f, L"a lift: contrast below 1, brightness above 0");
+            Assert::AreEqual(1.0, double(c) + double(b), 1e-6, L"white fixed (s + o = 1)");
+            const int codes[] = { 4, 16, 40, 64, 70, 80, 100, 128, 200, 300, 512, 700, 900, 940, 980, 1019 };
+            int last = -1;
+            std::string row0, row1;
+            for (int code : codes)
+            {
+                const int l1 = AmbientSdr::Lifted(code, c, b);
+                row0 += std::to_string(code) + " ";
+                row1 += std::to_string(l1) + " ";
+                if (code <= 940)
+                    Assert::IsTrue(l1 >= code, L"never lowered (BTB rises with black)");
+                Assert::IsTrue(l1 > last, L"code order kept");
+                last = l1;
+            }
+            Logger::WriteMessage(("strength 0: " + row0 + "\nstrength 1: " + row1).c_str());
+            Assert::IsTrue(AmbientSdr::Lifted(64, c, b) > 64, L"black raised");
+            Assert::AreEqual(940, AmbientSdr::Lifted(940, c, b), L"white unchanged");
+            Assert::IsTrue(AmbientSdr::Lifted(4, c, b) < AmbientSdr::Lifted(64, c, b), L"BTB stays below black");
+            Assert::IsTrue(AmbientSdr::Lifted(1019, c, b) > 940, L"WTW stays above white");
+            // On the owner's display the lifted signal shows as on a display with black B_eff.
+            for (int i = 0; i <= 100; ++i)
+            {
+                const double v = i / 100.0;
+                const double shown = AmbientSdr::Bt1886(c * v + b, owner, white);
+                Assert::AreEqual(AmbientSdr::Bt1886(v, eff1, white), shown, 1e-5 * white);
+            }
+            // Pure power transfers follow their own exponent; piecewise / unknown ones are left alone.
+            float c2 = 1.0f, b2 = 0.0f;
+            Assert::IsTrue(LibplaceboRenderParameters::SdrAmbientLift(owner, eff1, white, PL_COLOR_TRC_GAMMA22, c2, b2));
+            Assert::IsFalse(LibplaceboRenderParameters::SdrAmbientLift(owner, eff1, white, PL_COLOR_TRC_SRGB, c2, b2));
+            Assert::IsFalse(LibplaceboRenderParameters::SdrAmbientLift(owner, eff1, white, PL_COLOR_TRC_PQ, c2, b2));
+            // On top of an existing adjustment: RGB' = s (c RGB + b) + o.
+            pl_color_adjustment adj = pl_color_adjustment_neutral;
+            adj.saturation = 1.2f;
+            adj.contrast = 1.1f;
+            adj.brightness = 0.01f;
+            LibplaceboRenderParameters::ApplySdrAmbientLift(c, b, adj);
+            Assert::AreEqual(1.1f * c, adj.contrast, 1e-6f);
+            Assert::AreEqual(0.01f * c + b, adj.brightness, 1e-6f);
+            Assert::AreEqual(1.2f, adj.saturation);
+        }
+    };
+
+    // GPU (for Claude: WARP or VP_TEST_GPU=hardware): the real libplacebo render of a BT.1886 SDR
+    // grey ramp with extended range on, strength 0 vs 1.
+    TEST_CLASS(AmbientSdrGpuTests)
+    {
+    public:
+        TEST_METHOD(AmbientSdrGpuLiftReachesTheOutputCodes)
+        {
+            pl_log_params logParams{};
+            logParams.log_level = PL_LOG_NONE;
+            pl_log log = pl_log_create(PL_API_VER, &logParams);
+            std::string device;
+            const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+            Logger::WriteMessage(("GPU tests on: " + device + "\n").c_str());
+            pl_d3d11 d3d = pl_d3d11_create(log, &deviceParams);
+            Assert::IsNotNull(d3d, L"Could not create the libplacebo test device");
+            pl_renderer renderer = pl_renderer_create(log, d3d->gpu);
+            const std::vector<int> codes = { 4, 40, 64, 80, 128, 300, 600, 900, 940, 1019 };
+            const ExtendedRangeGpuProbe::Planes planes = ExtendedRangeGpuProbe::Greys(codes);
+            ExtendedRangeGpuProbe::Case base;
+            base.sourceTransfer = base.outputTransfer = PL_COLOR_TRC_BT_1886;
+            base.sourcePrimaries = base.outputPrimaries = PL_COLOR_PRIM_BT_709;
+            pl_render_params plain = pl_render_default_params;
+            base.params = &plain;
+            const ExtendedRangeGpuProbe::Result none = ExtendedRangeGpuProbe::Render(d3d->gpu, renderer, planes, base);
+            Assert::IsTrue(none.ok, ExtendedRangeGpuProbe::ToWide(none.error).c_str());
+            const double owner = 0.05, white = 100.0;
+            std::vector<ExtendedRangeGpuProbe::Result> results;
+            float c1 = 1.0f, b1 = 0.0f;
+            for (double strength : { 0.0, 1.0 })
+            {
+                pl_render_params p = plain;
+                pl_color_adjustment adj = pl_color_adjustment_neutral;
+                float c = 1.0f, b = 0.0f;
+                if (LibplaceboRenderParameters::SdrAmbientLift(owner, AmbientSdr::EffectiveBlack(strength, 200.0, owner), white,
+                    PL_COLOR_TRC_BT_1886, c, b))
+                {
+                    LibplaceboRenderParameters::ApplySdrAmbientLift(c, b, adj);
+                    p.color_adjustment = &adj;
+                    c1 = c;
+                    b1 = b;
+                }
+                ExtendedRangeGpuProbe::Case k = base;
+                k.params = &p;
+                results.push_back(ExtendedRangeGpuProbe::Render(d3d->gpu, renderer, planes, k));
+                Assert::IsTrue(results.back().ok, ExtendedRangeGpuProbe::ToWide(results.back().error).c_str());
+            }
+            const std::vector<int> c0 = ExtendedRangeGpuProbe::Columns(results[0], int(codes.size()), 1.0);
+            const std::vector<int> cl = ExtendedRangeGpuProbe::Columns(results[1], int(codes.size()), 1.0);
+            const std::vector<int> cn = ExtendedRangeGpuProbe::Columns(none, int(codes.size()), 1.0);
+            Logger::WriteMessage(("no adjustment " + ExtendedRangeGpuProbe::Join(cn) + "\nstrength 0 " + ExtendedRangeGpuProbe::Join(c0) +
+                "\nstrength 1 " + ExtendedRangeGpuProbe::Join(cl)).c_str());
+            Assert::IsTrue(results[0].pixels == none.pixels, L"strength 0: bit-identical output");
+            for (size_t i = 0; i < codes.size(); ++i)
+                Assert::IsTrue(std::abs(cl[i] - AmbientSdr::Lifted(codes[i], c1, b1)) <= 1, L"strength 1: the predicted lift (+-1 code)");
+            Assert::IsTrue(cl[2] > c0[2] && cl[8] == c0[8], L"black raised, white unchanged");
+            Assert::IsTrue(cl[0] < cl[2] && cl[9] > cl[8], L"BTB / WTW kept");
+            pl_renderer_destroy(&renderer);
+            pl_d3d11_destroy(&d3d);
+            pl_log_destroy(&log);
         }
     };
 }
