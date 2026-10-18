@@ -3055,9 +3055,17 @@ namespace Tests
 			plan.step = [gapA, gapB](int n) { FrameStep f; f.content = n; f.send = !(n == gapA || n == gapB); return f; };
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.5, false,
 				"dejudder_strength: 0.5\ninterpolation: off\ninterpolation_fill_gaps: on\n", false, &plan);
-			int creates = 0, pairs = 0, idleReleases = 0;
+			int creates = 0, pairs = 0, idleReleases = 0, stallsAfterGap = 0;
+			bool loadedBeforeGap = false;
 			for (const std::string& line : r.log)
 			{
+				if (line.find("Motion engine: loaded idle") != std::string::npos && pairs == 0)
+				{
+					loadedBeforeGap = true;
+					Logger::WriteMessage(("  " + line + "\n").c_str());
+				}
+				if (pairs > 0 && line.find("Alpha backlog recovery") != std::string::npos && line.find("render_stall") != std::string::npos)
+					++stallsAfterGap;
 				if (line.find("Motion engine: created") != std::string::npos) { ++creates; Logger::WriteMessage(("  " + line + "\n").c_str()); }
 				if (line.find("gap pair across") != std::string::npos) { ++pairs; Logger::WriteMessage(("  " + line + "\n").c_str()); }
 				if (line.find("Motion engine: released while idle") != std::string::npos) ++idleReleases;
@@ -3065,13 +3073,22 @@ namespace Tests
 					Logger::WriteMessage(("  " + line + "\n").c_str());
 			}
 			char text[200];
-			snprintf(text, sizeof(text), "H3-F4 source %.3f Hz: gap pairs %d, motion engine created %d time(s), idle releases %d\n",
-				source, pairs, creates, idleReleases);
+			snprintf(text, sizeof(text), "H3-F4 source %.3f Hz: gap pairs %d, motion engine created %d time(s), idle releases %d, "
+				"loaded before the first gap %d, render-stall flushes after it %d\n",
+				source, pairs, creates, idleReleases, loadedBeforeGap ? 1 : 0, stallsAfterGap);
 			Logger::WriteMessage(text);
+			if (pairs < 2)   // the evidence when a gap was not paired
+			for (const std::string& line : r.log)
+				if (line.find("missed") != std::string::npos || line.find("gap") != std::string::npos ||
+					line.find("flush") != std::string::npos || line.find("Interpolation") != std::string::npos ||
+					line.find("De-judder:") != std::string::npos || line.find("backlog") != std::string::npos ||
+					line.find("discontinu") != std::string::npos || line.find("not paired") != std::string::npos)
+					Logger::WriteMessage(("  | " + line + "\n").c_str());
 			Assert::IsTrue(r.presented, (L"presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(pairs >= 2, HarnessWide(std::string("both gaps paired\n") + text).c_str());
 			Assert::AreEqual(1, creates, HarnessWide(std::string("created once, kept idle between the gaps\n") + text).c_str());
 			Assert::AreEqual(0, idleReleases, HarnessWide(std::string("no low-memory release\n") + text).c_str());
+			Assert::IsTrue(loadedBeforeGap, HarnessWide(std::string("loaded idle at the source's start, before any gap\n") + text).c_str());
 		}
 
 		// Bug hunt 3 F7 (opt-in, VP_TEST_H3_LOOKAHEAD=1, hardware): the automatic active-picture

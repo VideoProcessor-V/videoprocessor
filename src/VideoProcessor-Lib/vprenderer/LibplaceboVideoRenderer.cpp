@@ -5526,6 +5526,11 @@ struct LibplaceboVideoRenderer::Impl
 	CComPtr<IDXGIAdapter3> motionEngineBudgetAdapter;
 	unsigned long long dejudderCreates = 0;
 	unsigned long long motionEngineIdleReleasesLogged = 0;
+	// H3 F4 follow-up: load the idle engine (and the interpolator) once at a source's start, so
+	// the first hiccup does not pay its creation on the render thread (about 100 ms here, 9.7 s
+	// under CPU load: a backlog flush that swallowed the next gap). Set at renderer start and at
+	// a resync / format change; cleared once loaded or when low memory released it.
+	bool motionEngineWarmPending = true;
 	// Hunt 2 04 M2: the A of the pair whose field the matcher's live outputs hold (0 = none).
 	// After an ahead estimate it is B while A is still showing, so A's repeat draws must not
 	// read the live field as A's (the extras read their snapshot).
@@ -6019,7 +6024,7 @@ struct LibplaceboVideoRenderer::Impl
 	// stream-generation move, as before MotionValidity). ResetLiveQueue keeps it: QueueReset
 	// does not release, and a format change across it must still release.
 	std::atomic<bool> motionLastStateReset{ false };
-	unsigned long long vpSkippedFrames = 0, vpPhasePictures = 0, vpHeldPictures = 0, vpGapPairs = 0;
+	unsigned long long vpSkippedFrames = 0, vpPhasePictures = 0, vpHeldPictures = 0, vpGapPairs = 0, vpGapPairsRefused = 0;
 	// The display rate the timeline schedules at: measured when known, else the monitor's.
 	// Bug hunt 2026-10-17 (timing_continuity_fixes): the last good measurement is held
 	// while a cadence reset zeroes it (DisplayRateHold); the monitor's rate only when
@@ -12017,7 +12022,10 @@ struct LibplaceboVideoRenderer::Impl
 			return;
 		motionInvalidations += pending.invalidations;
 		if (pending.release)
+		{
 			ReleaseDejudder();
+			motionEngineWarmPending = true;   // H3 F4: a new source loads the idle engine again
+		}
 		else
 		{
 			if (dejudder)
@@ -14506,7 +14514,8 @@ struct LibplaceboVideoRenderer::Impl
 			!activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
 			activeSettings.interpolation == InterpolationPolicy::Mode::Off && !interpolating && !vpGapFillStandalone &&
 			dejudderReason == DejudderPolicy::Reason::Off &&
-			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0])
+			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0] &&
+			!(activeSettings.interpolationFillGaps && motionEngineWarmPending))   // H3 F4: load the idle engine first
 		{
 			if (dejudderStatusTick != 0)
 			{
@@ -14694,8 +14703,14 @@ struct LibplaceboVideoRenderer::Impl
 			if (held && activeSettings.interpolationFillGaps && repairPossible)
 				PollMotionEngineBudget(width, height, true);
 			const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
+			// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
+			if (!held && keepForGaps && motionEngineWarmPending)
+				WarmIdleMotionEngine(contract, lossless422, nativeRgb);
+			else if (!keepForGaps)
+				motionEngineWarmPending = false;   // not wanted for this source: the first gap pair creates it
 			if (held && !keepForGaps)
 			{
+				motionEngineWarmPending = false;   // recreated by the next gap pair, never mid-play
 				if (activeSettings.interpolationFillGaps && repairPossible && motionEngineIdle.Pressured() &&
 					motionEngineIdleReleasesLogged != motionEngineIdle.Pressures())
 				{
@@ -14786,6 +14801,45 @@ struct LibplaceboVideoRenderer::Impl
 			// Bug hunt 3 F10: a gap pair's field spans the missed periods too.
 			dejudderEstimatedPeriods = InterpolationTimeline::FieldPeriods(fillPair && vpFillGapFrames > 0, vpFillGapFrames);
 		}
+	}
+
+	// H3 F4 follow-up: create the matcher, its optical-flow engine and textures, and the
+	// interpolator's planes and passes once, on A's own planes (A -> A); nothing they produce
+	// is used (no live field, no picture), and the history is forgotten.
+	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb)
+	{
+		motionEngineWarmPending = false;
+		if (nativeRgb || dejudderRgbLuma || !textures[0] || !textures[1] || !d3d11 || !d3d11->gpu)
+			return;
+		Dejudder::Planes a;
+		a.luma = textures[0];
+		a.chroma = textures[1];
+		a.chromaShiftX = 1;
+		a.chromaShiftY = lossless422 ? 0 : 1;
+		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
+		const auto started = std::chrono::steady_clock::now();
+		const bool estimated = RunDejudderEstimate(a, a, 0, 0);
+		dejudderLiveFieldFrom = 0;
+		bool pictured = false;
+		if (estimated && dejudder)
+		{
+			Interpolator::Motion motion;
+			motion.field = dejudder->Field();
+			motion.frameTrust = dejudder->FrameTrust();
+			motion.subField = dejudder->SubField();
+			motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+			if (!frameInterpolator)
+				frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+			frameInterpolator->SetGrain(activeSettings.interpolationGrain);
+			Dejudder::Planes scratch;
+			pictured = frameInterpolator->Run(a, a, motion, 0.5f, activeSettings.interpolationFallback, scratch);
+			vpPhasePlanesValid = false;
+		}
+		if (dejudder)
+			dejudder->ForgetHistory();
+		DebugLog::Log("Motion engine: loaded idle for hiccup repair at the source's start (%.1f ms; estimate %s, interpolator %s)",
+			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
+			estimated ? "ok" : "failed", pictured ? "ok" : "not run");
 	}
 
 	// Bug hunt 3 F4: one DXGI video memory reading a second for the idle motion engine's
@@ -28777,6 +28831,16 @@ void LibplaceboVideoRenderer::RenderLoop()
 						DebugLog::Log("Interpolation: gap pair across %u missed frame(s) (interpolation_fill_gaps)",
 							static_cast<unsigned>(next.gapFrames));
 				}
+				// H3 F4 follow-up: a gap hiccup repair could not pair, with the reason (evidence).
+				else if (m_impl && next.gapBefore && m_impl->activeSettings.interpolationFillGaps &&
+					++m_impl->vpGapPairsRefused <= 20)
+					DebugLog::Log("Interpolation: gap not paired (%u missed, span ok %d (%.1f ms at %.3f Hz), fill %d, "
+						"generation %d, repeat %d, update %d, adjacent %d, converted %d, same state %d, low latency %d)",
+						static_cast<unsigned>(next.gapFrames), spanOk ? 1 : 0, (timeB - timeA) * 1000.0, pairRateHz,
+						fillGap ? 1 : 0, next.generation == frameGeneration ? 1 : 0, next.cadenceRepeat ? 1 : 0,
+						next.filmUpdate ? 1 : 0, adjacentOk ? 1 : 0, next.converted ? 1 : 0,
+						SameDejudderVideoState(state, next.state) ? 1 : 0,
+						m_impl->lowLatencyQueueActive.load(std::memory_order_acquire) ? 1 : 0);
 			}
 			aheadConvertedPayload.reset();
 			aheadSourceSequence = 0;

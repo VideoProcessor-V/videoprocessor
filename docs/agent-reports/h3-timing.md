@@ -62,3 +62,22 @@ recovery headroom check.
   QueueLookahead, Hunt2CadenceClass*: **80/80 passed** (`D:/codex/h3t-logs/trx2`).
 - Config (off screen, 1 shard, queue/look-ahead): 6/6 passed.
 - test/real-footage-suite (8ceaaa33) is on an older base (167 files differ), so it was not merged in here.
+
+## Follow-up: H3IdleMotionEngineKeptAcrossHiccups failed on the coordinator's run (second gap not paired)
+
+Cause: not the reuse of the kept engine; the pairing is decided at the dequeue before the engine. The engine was still
+created lazily at the first hiccup, on the render thread (MotionWarp, its optical-flow engine, textures, the
+interpolator's passes). Unloaded that cost about 100 ms, which flushed the backlog (5 frames dropped). Under CPU load
+(14 busy processes, reproduced 3 runs of 4) the first estimate took 9.7 s (`cpu_last_ms=9735` in the source-upload
+stage, `render_cycle_ms=9737`, 201 frames dropped), which swallowed the second gap and the rest of the run.
+
+Fix: the idle engine is loaded once at the source's start (`WarmIdleMotionEngine`: an A -> A estimate and one
+interpolator picture on A's planes; no live field, no picture used, history forgotten). It runs again after a
+resync or format change, and never in the middle of playback; after a low-memory release the next gap pair recreates
+it. Logged as "Motion engine: loaded idle for hiccup repair at the source's start (x ms)" (83-130 ms here, once 1.06 s
+on a cold cache). A refused gap is now logged with its reason ("Interpolation: gap not paired (...)"). The test asserts
+the engine was loaded before the first gap and reports render-stall flushes after it.
+
+Evidence: 2 unloaded runs plus 18 under load: 19 of 20 paired both gaps with no render-stall flush after a gap (before
+the fix, 3 of 4 runs under load failed). One loaded run (before the "not paired" log was added) paired only one gap,
+with no stall after the gap. Its cause is not identified; if it comes back, the new log line will show it.
