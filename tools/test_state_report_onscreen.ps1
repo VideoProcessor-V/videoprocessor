@@ -18,7 +18,7 @@
      WM_COMMAND ID_COMMAND_STATE_REPORT (33207) instead.
   4. Waits for a new logs\reports\vp-report-*.zip and validates it with
      Test-StateReportBundle: store-only zip readable, required entries,
-     manifest fields (format_version 1, 32-hex build_id, plugin_api 38 (the current VP_LIBPLACEBO_PLUGIN_API_VERSION),
+     manifest fields (format_version 1, 32-hex build_id, plugin_api 39 (the current VP_LIBPLACEBO_PLUGIN_API_VERSION),
      SHA-256 of VideoProcessor.exe and the renderer DLL equal to the files on
      disk), renderer history present with presented frames (VP Renderer),
      exe frame rows present, no path outside VP, no user or computer name,
@@ -42,7 +42,7 @@ param(
 	[string]$Chord = 'Ctrl+Alt+D',
 	[int]$PlaybackTimeoutSeconds = 90,
 	[int]$ReportTimeoutSeconds = 30,
-	[int]$ExpectedPluginApi = 38,
+	[int]$ExpectedPluginApi = 39,
 	[string]$ValidateOnly
 )
 

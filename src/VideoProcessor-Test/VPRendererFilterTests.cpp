@@ -459,9 +459,9 @@ namespace Tests
 	public:
 		TEST_METHOD(AcceptsMatchingVersionAndFlavor)
 		{
-			PluginExportProbe probe = Complete(38, false);
+			PluginExportProbe probe = Complete(39, false);
 			std::string reason;
-			Assert::IsTrue(CheckPluginExports(probe, 38, kId, false, reason) == PluginCheck::Ok);
+			Assert::IsTrue(CheckPluginExports(probe, 39, kId, false, reason) == PluginCheck::Ok);
 		}
 
 		TEST_METHOD(RefusesApiMismatchBeforeAnyOtherCall)
@@ -470,38 +470,38 @@ namespace Tests
 			PluginExportProbe probe = Complete(34, false);
 			probe.isBeta = [&flavorCalled]() { flavorCalled = true; return false; };
 			std::string reason;
-			Assert::IsTrue(CheckPluginExports(probe, 38, kId, false, reason) == PluginCheck::ApiMismatch);
+			Assert::IsTrue(CheckPluginExports(probe, 39, kId, false, reason) == PluginCheck::ApiMismatch);
 			Assert::IsFalse(flavorCalled);
-			Assert::IsTrue(reason.find("expects 38") != std::string::npos);
+			Assert::IsTrue(reason.find("expects 39") != std::string::npos);
 			Assert::IsTrue(reason.find("reports 34") != std::string::npos);
 
-			probe = Complete(37, false);
-			Assert::IsTrue(CheckPluginExports(probe, 38, kId, false, reason) == PluginCheck::ApiMismatch);
+			probe = Complete(38, false);
+			Assert::IsTrue(CheckPluginExports(probe, 39, kId, false, reason) == PluginCheck::ApiMismatch);
 		}
 
 		TEST_METHOD(RefusesMissingExports)
 		{
 			std::string reason;
-			PluginExportProbe noVersion = Complete(38, false);
+			PluginExportProbe noVersion = Complete(39, false);
 			noVersion.getApiVersion = nullptr;
-			Assert::IsTrue(CheckPluginExports(noVersion, 38, kId, false, reason) == PluginCheck::MissingExports);
-			PluginExportProbe noCreate = Complete(38, false);
+			Assert::IsTrue(CheckPluginExports(noVersion, 39, kId, false, reason) == PluginCheck::MissingExports);
+			PluginExportProbe noCreate = Complete(39, false);
 			noCreate.hasCreate = false;
-			Assert::IsTrue(CheckPluginExports(noCreate, 38, kId, false, reason) == PluginCheck::MissingExports);
-			PluginExportProbe noDestroy = Complete(38, false);
+			Assert::IsTrue(CheckPluginExports(noCreate, 39, kId, false, reason) == PluginCheck::MissingExports);
+			PluginExportProbe noDestroy = Complete(39, false);
 			noDestroy.hasDestroy = false;
-			Assert::IsTrue(CheckPluginExports(noDestroy, 38, kId, false, reason) == PluginCheck::MissingExports);
+			Assert::IsTrue(CheckPluginExports(noDestroy, 39, kId, false, reason) == PluginCheck::MissingExports);
 		}
 
 		TEST_METHOD(RefusesWrongOrMissingFlavor)
 		{
 			std::string reason;
-			PluginExportProbe beta = Complete(38, true);
-			Assert::IsTrue(CheckPluginExports(beta, 38, kId, false, reason) == PluginCheck::FlavorMismatch);
-			Assert::IsTrue(CheckPluginExports(beta, 38, kId, true, reason) == PluginCheck::Ok);
-			PluginExportProbe none = Complete(38, false);
+			PluginExportProbe beta = Complete(39, true);
+			Assert::IsTrue(CheckPluginExports(beta, 39, kId, false, reason) == PluginCheck::FlavorMismatch);
+			Assert::IsTrue(CheckPluginExports(beta, 39, kId, true, reason) == PluginCheck::Ok);
+			PluginExportProbe none = Complete(39, false);
 			none.isBeta = nullptr;
-			Assert::IsTrue(CheckPluginExports(none, 38, kId, false, reason) == PluginCheck::FlavorMissing);
+			Assert::IsTrue(CheckPluginExports(none, 39, kId, false, reason) == PluginCheck::FlavorMissing);
 		}
 
 		TEST_METHOD(CandidatePathsPreferTheInstallLayout)
@@ -521,18 +521,18 @@ namespace Tests
 		{
 			std::string reason;
 			bool flavorCalled = false;
-			PluginExportProbe other = Complete(38, false);
+			PluginExportProbe other = Complete(39, false);
 			other.getBuildId = []() { return "0123456789abcdef0123456789abcdee"; };
 			other.isBeta = [&flavorCalled]() { flavorCalled = true; return false; };
-			Assert::IsTrue(CheckPluginExports(other, 38, kId, false, reason) == PluginCheck::BuildIdMismatch);
+			Assert::IsTrue(CheckPluginExports(other, 39, kId, false, reason) == PluginCheck::BuildIdMismatch);
 			Assert::IsFalse(flavorCalled);
 			Assert::IsTrue(reason.find("same build") != std::string::npos);
-			PluginExportProbe older = Complete(38, false);
+			PluginExportProbe older = Complete(39, false);
 			older.getBuildId = nullptr;
-			Assert::IsTrue(CheckPluginExports(older, 38, kId, false, reason) == PluginCheck::BuildIdMismatch);
-			PluginExportProbe placeholder = Complete(38, false);
+			Assert::IsTrue(CheckPluginExports(older, 39, kId, false, reason) == PluginCheck::BuildIdMismatch);
+			PluginExportProbe placeholder = Complete(39, false);
 			placeholder.getBuildId = []() { return "unknown"; };
-			Assert::IsTrue(CheckPluginExports(placeholder, 38, "unknown", false, reason) == PluginCheck::BuildIdMismatch);
+			Assert::IsTrue(CheckPluginExports(placeholder, 39, "unknown", false, reason) == PluginCheck::BuildIdMismatch);
 			Assert::AreEqual(std::string("build-id-mismatch"), std::string(ToString(PluginCheck::BuildIdMismatch)));
 			// The filter's loader passes its own VpBuildIdentity::Id(), a real ID.
 			Assert::IsTrue(VpBuildIdentity::IsWellFormed(VpBuildIdentity::Id()));
