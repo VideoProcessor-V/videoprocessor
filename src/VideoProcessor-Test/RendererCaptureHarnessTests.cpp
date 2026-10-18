@@ -593,6 +593,17 @@ namespace
 			g_log.clear();
 		}
 		const std::string folder = Here();
+		// A persistent shader cache beside the test DLL (gate fix 2026-10-17), as a deployed VP
+		// keeps one beside its exe: only the first renderer of a build compiles its shaders, so a
+		// cold compile (up to ~3 s of render stall under load) no longer lands inside a test's
+		// timed window. The renderer reads VP_TEST_SHADER_CACHE_DIR in place of the exe folder.
+		{
+			const std::string cache = folder + "vp-harness-shader-cache";
+			CreateDirectoryA(cache.c_str(), nullptr);
+			CreateDirectoryA((cache + "\\vprenderer").c_str(), nullptr);
+			CreateDirectoryA((cache + "\\vprenderer-beta").c_str(), nullptr);
+			SetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", cache.c_str());
+		}
 		const std::string dllPath = folder + "vprenderer\\VideoProcessorVPRenderer.dll";
 		HMODULE dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 		Assert::IsNotNull(dll, (L"cannot load " + std::wstring(dllPath.begin(), dllPath.end())).c_str());
