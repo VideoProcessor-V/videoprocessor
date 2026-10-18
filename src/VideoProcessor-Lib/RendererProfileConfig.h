@@ -14,6 +14,7 @@
 #include "HdrTargetLuminance.h"
 #include "ToneMappingTuning.h"
 #include "MotionConfig.h"
+#include "RetiredSettings.h"
 
 #include <algorithm>
 #include <cctype>
@@ -618,6 +619,8 @@ namespace RendererProfileConfig
 
 		if (group == "input")
         {
+            // Pruning 2026-10-17: a retired key loads with any value and is ignored (logged by the renderer).
+            if (RetiredSettings::FindKey(key)) return true;
             const int tuning = ToneMappingTuning::Find(key);
             if (tuning >= 0) {
                 ToneMappingTuning::Override parsed;
@@ -638,6 +641,7 @@ namespace RendererProfileConfig
 			if (key == "dejudder_strength") return IsNumberInRange(value, 0.0, 1.0);
 			// Delta 10: even (2:2) cadences, and which rates take it.
 			if (key == "dejudder_strength_even") return IsNumberInRange(value, 0.0, 1.0);
+			// "30" / "30_and_29.97": retired spellings, still loaded (RetiredSettings migrates them).
 			if (key == "dejudder_even_rates") return IsChoice(value, { "whole", "whole_and_1001", "30", "30_and_29.97" });
 			if (key == "dejudder_match_tolerance") return IsNumberInRange(value, 0.5, 16.0);
 			// 6b-2: below this share of trusted blocks a frame is held whole
@@ -658,8 +662,7 @@ namespace RendererProfileConfig
 				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
 				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
 				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
-				key == "dejudder_landing_check" || key == "dejudder_pulldown" || key == "dejudder_picture_area" ||
-				key == "fix_scene_cooldown" || key == "dither_vectors_new_frame" || key == "native_rgb_ingest" ||
+				key == "dejudder_landing_check" || key == "dejudder_pulldown" || key == "native_rgb_ingest" ||
 				key == "dv_tunnel_gpu_unpack" || key == "dv_trims" ||
 				key == "dv_tunnel_fixes")   // restore switch 2026-10-17
 				return IsChoice(value, { "on", "off" });
@@ -767,6 +770,7 @@ namespace RendererProfileConfig
 				key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale")
 				return IsChoice(value, { "on", "off" });
 			if (key == "adaptive_upscale_w_base") return IsNumberInRange(value, 0.0, 1.0);
+			// "polar": retired 2026-10-17 (runs as auto), still loaded.
 			if (key == "adaptive_faithful") return IsChoice(value, { "polar", "ortho", "auto" });
 			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")
 				return IsNumberInRange(value, 0.0, 1.0);

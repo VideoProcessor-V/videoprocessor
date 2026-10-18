@@ -89,6 +89,16 @@ search", sigma-delta serial reference, "reused half-size planes byte-identical",
   TheRenderer (V210 / R12B, 24p de-judder: every frame after the first read early, no fallbacks);
   quick tier 2191/2192.
 
+## Pruning, phase 1 (2026-10-17, feat/prune-options)
+
+- Retired (always on; old files load, the renderer logs one line, Config keeps the text):
+  `fix_scene_cooldown`, `dejudder_picture_area`, `dither_vectors_new_frame`. Retired values:
+  `adaptive_faithful: polar` (runs as auto), `dejudder_even_rates: 30 / 30_and_29.97` (whole /
+  whole_and_1001). Mechanism src/VideoProcessor-Lib/RetiredSettings.h; inventory and the owner's
+  unsure list in docs/VP-prune-inventory-2026-10-17.md. Tests: RetiredRendererSettingsMigrate,
+  OldConfigurationWithRetiredSettingsLoads, OlderShippedConfigurationsLoad (VP_TEST_OLD_CONFIGS),
+  Config "retired renderer settings survive config save and reopen".
+
 ## Known test notes
 
 - WindowResizeLayoutTests::ShellStylePlacementWithoutSizingHintsIsNotReverted and

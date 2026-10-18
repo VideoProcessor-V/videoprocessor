@@ -28,6 +28,7 @@
 #include <microsoft_directshow/video_renderers/DirectShowVideoRenderers.h>
 #include <RendererConfigView.h>
 #include <RendererProfileConfig.h>
+#include <RetiredSettings.h>
 #include <ShaderConfigValidation.h>
 #include <UnifiedProfileRuntime.h>
 #include <VideoConversionOverride.h>
@@ -294,6 +295,88 @@ namespace VideoProcessorTest
                 std::wstring(error.begin(), error.end()).c_str());
             Assert::AreEqual(size_t{ 1 }, madvr.size());
             Assert::IsTrue(madvr.front().none);
+        }
+
+        // Pruning 2026-10-17 (RetiredSettings.h): retired keys are known, migrated values map to
+        // their replacements, and every other key is untouched.
+        TEST_METHOD(RetiredRendererSettingsMigrate)
+        {
+            for (const char* key : { "fix_scene_cooldown", "dejudder_picture_area", "dither_vectors_new_frame" })
+                Assert::IsNotNull(RetiredSettings::FindKey(key), std::wstring(key, key + strlen(key)).c_str());
+            for (const char* key : { "native_rgb_ingest", "capture_path", "optical_flow", "dejudder_warp_stage" })
+                Assert::IsNull(RetiredSettings::FindKey(key), std::wstring(key, key + strlen(key)).c_str());
+            Assert::AreEqual(std::string("auto"), RetiredSettings::Migrate("adaptive_faithful", "Polar"));
+            Assert::AreEqual(std::string("ortho"), RetiredSettings::Migrate("adaptive_faithful", "ortho"));
+            Assert::AreEqual(std::string("auto"), RetiredSettings::Migrate("adaptive_faithful", "auto"));
+            Assert::AreEqual(std::string("whole"), RetiredSettings::Migrate("dejudder_even_rates", "30"));
+            Assert::AreEqual(std::string("whole_and_1001"), RetiredSettings::Migrate("dejudder_even_rates", "30_and_29.97"));
+            Assert::AreEqual(std::string("whole_and_1001"), RetiredSettings::Migrate("dejudder_even_rates", "whole_and_1001"));
+            Assert::AreEqual(std::string("30"), RetiredSettings::Migrate("dejudder_search_range", "30"));
+            const RetiredSettings::Value* value = RetiredSettings::FindValue("adaptive_faithful", "polar");
+            Assert::IsNotNull(value);
+            Assert::IsTrue(RetiredSettings::ValueNote("vprenderer.Cinema", *value).find("runs as auto") != std::string::npos);
+        }
+
+        // Pruning 2026-10-17: an old file holding every retired key and value, in the base
+        // renderer section and in named profiles, loads with no error.
+        TEST_METHOD(OldConfigurationWithRetiredSettingsLoads)
+        {
+            CachedConfigTestFile file;
+            std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n"
+                "[vprenderer]\nquality: high\nfix_scene_cooldown: off\ndejudder_picture_area: off\n"
+                "dither_vectors_new_frame: off\nadaptive_faithful: polar\ndejudder_even_rates: 30\n"
+                "[vprenderer.Cinema]\nfix_scene_cooldown: on\ndejudder_even_rates: 30_and_29.97\n"
+                "adaptive_faithful: polar\n"
+                "[vprenderer.input.film]\ndejudder_picture_area: on\ndither_vectors_new_frame: on\n";
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            std::string error;
+            Assert::IsTrue(MainConfigSchema::Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+            RendererProfileConfig::Model model;
+            Assert::IsTrue(RendererProfileConfig::Read(config, model, error), std::wstring(error.begin(), error.end()).c_str());
+            UnifiedProfileRuntime::Runtime runtime;
+            Assert::IsTrue(runtime.Initialize(config, {}, error), std::wstring(error.begin(), error.end()).c_str());
+        }
+
+        // Pruning 2026-10-17: older shipped configurations (VP_TEST_OLD_CONFIGS = a folder of
+        // .cfg files, e.g. VideoProcessor.cfg from earlier releases) still load. Skipped when unset.
+        TEST_METHOD(OlderShippedConfigurationsLoad)
+        {
+            char folder[MAX_PATH] = {};
+            if (GetEnvironmentVariableA("VP_TEST_OLD_CONFIGS", folder, MAX_PATH) == 0)
+            {
+                Logger::WriteMessage("VP_TEST_OLD_CONFIGS not set; skipped");
+                return;
+            }
+            WIN32_FIND_DATAA found{};
+            const std::string pattern = std::string(folder) + "\\*.cfg";
+            HANDLE search = FindFirstFileA(pattern.c_str(), &found);
+            Assert::IsTrue(search != INVALID_HANDLE_VALUE, L"VP_TEST_OLD_CONFIGS has no .cfg files");
+            int loaded = 0;
+            do
+            {
+                const std::string path = std::string(folder) + "\\" + found.cFileName;
+                std::ifstream in(path, std::ios::binary);
+                const std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                CachedConfigTestFile file;
+                std::ofstream(file.path, std::ios::binary) << contents;
+                ConfigFile config;
+                const std::wstring name(path.begin(), path.end());
+                Assert::IsTrue(config.Load(file.path, ConfigFile::ReadPolicy::Fresh), name.c_str());
+                std::string error;
+                const bool ok = MainConfigSchema::Validate(config, error);
+                Assert::IsTrue(ok, (name + L": " + std::wstring(error.begin(), error.end())).c_str());
+                RendererProfileConfig::Model model;
+                Assert::IsTrue(RendererProfileConfig::Read(config, model, error),
+                    (name + L": " + std::wstring(error.begin(), error.end())).c_str());
+                UnifiedProfileRuntime::Runtime runtime;
+                Assert::IsTrue(runtime.Initialize(config, {}, error),
+                    (name + L": " + std::wstring(error.begin(), error.end())).c_str());
+                Logger::WriteMessage(("loaded " + path + "\n").c_str());
+                ++loaded;
+            } while (FindNextFileA(search, &found));
+            FindClose(search);
+            Assert::IsTrue(loaded > 0);
         }
 
         // Planner 2026-10-12: libplacebo's debanding is off for HDR in every
@@ -893,7 +976,13 @@ namespace VideoProcessorTest
                 Case{ "nls_sampling", "lanczos", false },
                 Case{ "source_coding_fixes", "on", true }, Case{ "source_coding_fixes", "off", true },
                 Case{ "source_coding_fixes", "auto", false },
+                // "polar" is retired (runs as auto) but still loads (pruning 2026-10-17).
                 Case{ "adaptive_faithful", "ortho", true }, Case{ "adaptive_faithful", "polar", true },
+                Case{ "adaptive_faithful", "spline", false },
+                // Retired keys (RetiredSettings.h): any value loads; the renderer ignores it.
+                Case{ "fix_scene_cooldown", "off", true }, Case{ "fix_scene_cooldown", "on", true },
+                Case{ "dejudder_picture_area", "off", true }, Case{ "dejudder_picture_area", "anything", true },
+                Case{ "dither_vectors_new_frame", "off", true },
                 Case{ "adaptive_faithful", "auto", true },   // Auto is the owner-chosen default (2026-10-16)
                 Case{ "dejudder_est_candidates", "off", true }, Case{ "dejudder_est_qpel", "on", true },
                 Case{ "dejudder_est_gate", "maybe", false }, Case{ "dejudder_est_lambda", "0.5", true },
