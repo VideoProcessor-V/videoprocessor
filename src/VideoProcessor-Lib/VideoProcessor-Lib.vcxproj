@@ -205,11 +205,20 @@
     <ClInclude Include="led\LedMeasurementHook.h" />
     <ClInclude Include="led\LedLookahead.h" />
     <ClInclude Include="led\LedRawTransfer.h" />
+    <ClInclude Include="led\LedDriveArbiter.h" />
+    <ClInclude Include="led\LedDriveHoldover.h" />
+    <ClInclude Include="filesource\FileHost.h" />
+    <ClInclude Include="filesource\FileHostSettings.h" />
+    <ClInclude Include="SourceRuleVariable.h" />
     <ClInclude Include="QueuedFrameStatistics.h" />
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
     <ClInclude Include="CrashState.h" />
+    <ClInclude Include="DiagnosticHistory.h" />
+    <ClInclude Include="StateReport.h" />
+    <ClInclude Include="StateReportSettings.h" />
+    <ClInclude Include="StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />
     <ClInclude Include="DisplayMode.h" />
@@ -246,6 +255,12 @@
     <ClInclude Include="DolbyVisionLuminanceStatus.h" />
     <ClInclude Include="SceneDescriptor.h" />
     <ClInclude Include="IntentDescriptor.h" />
+    <ClInclude Include="FileFrameTiming.h" />
+    <ClInclude Include="filesource\RationalRate.h" />
+    <ClInclude Include="filesource\FileClockMapper.h" />
+    <ClInclude Include="filesource\FilePlaybackState.h" />
+    <ClInclude Include="filesource\FileMediaTypeAdapter.h" />
+    <ClInclude Include="filesource\FileSideData.h" />
     <ClInclude Include="ContentClassifier.h" />
     <ClInclude Include="ContentIntentObserver.h" />
     <ClInclude Include="MotionIntent.h" />
@@ -368,6 +383,9 @@
     <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h" />
+    <ClInclude Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.h" />
+    <ClInclude Include="vprenderer\FileFrameClock.h" />
+    <ClInclude Include="vprenderer\FileFrameSlotGate.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CV210toP010VideoFrameFormatter.h" />
@@ -385,6 +403,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="CrashState.cpp" />
+    <ClCompile Include="StateReport.cpp" />
     <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="WindowsDisplayDiagnostics.cpp" />
     <ClCompile Include="ACaptureDevice.cpp" />
@@ -435,11 +454,15 @@
     <ClCompile Include="led\LedDriveModule.cpp" />
     <ClCompile Include="led\ConnectionTest.cpp" />
     <ClCompile Include="led\LedLookahead.cpp" />
+    <ClCompile Include="led\LedDriveArbiter.cpp" />
+    <ClCompile Include="led\LedDriveHoldover.cpp" />
+    <ClCompile Include="filesource\FileHost.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
     <ClCompile Include="EOTF.cpp" />
     <ClCompile Include="guid.cpp" />
     <ClCompile Include="HDRData.cpp" />
+    <ClCompile Include="filesource\FileSideData.cpp" />
     <ClCompile Include="InputLocked.cpp" />
     <ClCompile Include="IRenderer.cpp" />
 	<ClCompile Include="EotfTransitionStabilizer.cpp" />
@@ -522,6 +545,7 @@
     <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
+    <ClCompile Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CV210toP010VideoFrameFormatter.cpp" />

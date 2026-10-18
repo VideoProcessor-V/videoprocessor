@@ -11,6 +11,7 @@
 #include <vprenderer/BufferedPictureExpansion.h>
 #include <vprenderer/AlphaConversionTimingWindow.h>
 #include <vprenderer/PulldownDetector.h>
+#include <vprenderer/FileFrameSlotGate.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <atomic>
@@ -51,6 +52,13 @@ public:
 	bool OnVideoState(VideoStateComPtr& videoState) override;
 	bool SupportsDynamicVideoState() const override { return true; }
 	void OnVideoFrame(VideoFrame& videoFrame) override;
+	// ABI 37 (VP Renderer DirectShow filter): file frames carry their own
+	// presentation time and rate; capture frames keep OnVideoFrame unchanged.
+	bool SupportsTimedFileFrames() const override { return true; }
+	void OnTimedVideoFrame(VideoFrame& videoFrame,
+		const FileFrameTiming& timing) override;
+	bool WaitForFileFrameSlot(uint32_t timeoutMs) override;
+	void CancelFileFrameWait() override;
 	bool HasPresentedLiveFrame() const override
 	{
 		return m_hasPresentedLiveFrame.load(std::memory_order_acquire);
@@ -127,6 +135,9 @@ public:
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	// Report-a-problem: this DLL's DiagnosticHistory rings as JSONL (src "renderer").
+	bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
+		int64_t referenceQpc) const override;
 	// Intent interpreter items 2-5 (2026-10-17): motion / ambient / black / display.
 	bool GetIntentStatus(IntentStatus& status) const override;
 	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
@@ -237,6 +248,14 @@ private:
 		// drawn by the source): the same film frame updated - shown at once,
 		// at that film frame's time, never paired for motion.
 		bool filmUpdate = false;
+		// ABI 37: a file frame (OnTimedVideoFrame). It leaves the queue at its
+		// due time (filePresentationQpc less the presentation lead) instead of
+		// on queue depth; filmHz / arrivalQpc above are its film clock.
+		bool fileFrame = false;
+		int64_t filePresentationQpc = 0;   // 0 = due at once
+		bool filePaused = false;           // shown at once and held
+		bool fileMotionOff = false;        // playback rate != 1 or paused: no motion pair
+		bool fileDiscontinuity = false;    // seek / step / rate change before this frame
 		int64_t enqueueQpc = 0;
 		std::shared_ptr<const ConvertedPayload> converted;
 		bool conversionInProgress = false;
@@ -274,6 +293,26 @@ private:
 	void ApplyViewportTarget(bool configured, double aspect,
 		const char* reason);
 	void UpdateFrameRateAndPPM(timingclocktime_t frameTimestamp);
+	// The queue admission shared by OnVideoFrame and OnTimedVideoFrame (the
+	// former's code, moved unchanged; file fields only set file frames).
+	struct FileQueueFields
+	{
+		int64_t presentationQpc = 0;
+		bool paused = false;
+		bool motionOff = false;
+		bool discontinuity = false;
+	};
+	void EnqueueFrame(VideoFrame& videoFrame, const VideoStateComPtr& frameState,
+		uint64_t enqueueGeneration, int64_t callbackQpc, int64_t arrivalQpc,
+		bool gapBefore, const char* gapCause, uint32_t gapFrames, double filmHz,
+		bool filmUpdate, const FileQueueFields* file);
+	// ABI 37: QPC ticks until the queue's head (a file frame) is due; 0 when
+	// due, or when the head is not a file frame (capture: unchanged).
+	int64_t FileHeadTicksUntilDueLocked() const;
+	// The render loop's dequeue wait: CanDequeueLocked, then (file heads only)
+	// the head's due time.
+	void WaitForDequeueLocked(std::unique_lock<std::mutex>& lock);
+	bool FileFrameSlotFreeLocked() const;
 	void ResetFrameRateAndPPM();
 	void ApplyPendingShaderSelectionLocked();
 	IRendererCallback& m_callback;
@@ -299,6 +338,13 @@ private:
 
 	mutable std::mutex m_queueMutex;
 	std::condition_variable m_queueChanged;
+	// ABI 37: WaitForFileFrameSlot / CancelFileFrameWait (own mutex; never
+	// held with m_queueMutex across a wait).
+	FileFrameSlotGate m_fileSlotGate;
+	std::atomic<uint64_t> m_fileTimingRejected{0};
+	// The file film clock as last logged (the filter's streaming thread only).
+	double m_fileLoggedFilmHz = -1.0;
+	bool m_fileLoggedMotionOff = false;
 	std::deque<QueuedFrame> m_frameQueue;
 	ActivePictureDecisionTimeline m_activePictureTimeline;
 	size_t m_frameQueueDesiredDepth = 1;
@@ -439,6 +485,10 @@ private:
 	// from, and whether it is stopped for a test.
 	std::shared_ptr<const ConfigFile> m_ledDriveConfiguration;
 	bool m_ledDriveSuspended = false;
+	// VP Renderer filter (2026-10-17): file_led_holdover_ms while the applied
+	// snapshot says source=file (the DirectShow filter's FileHost); 0 for the
+	// capture app, whose LED drive is never parked (LedDriveHoldover.h).
+	uint32_t m_ledHoldoverMs = 0;
 	// gamma_boost (and the hook's knee/EOTF) as last published, for new Impls.
 	double m_ledGammaBoost = 0.0;   // the gamma_boost setting (0 = off)
 	double m_ledCompensationEotf = 2.2;

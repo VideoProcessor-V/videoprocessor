@@ -24,6 +24,7 @@
 #include <ConfigEditorCore.h>
 #include <ConfigurationRpcClient.h>
 #include <RendererProfileConfig.h>
+#include <MainConfigSchema.h>
 #include <QueueLatency.h>
 #include <led/LedDriveConfig.h>
 
@@ -1104,6 +1105,7 @@ const FixedShortcutField kApplicationShortcutFields[] = {
     { "Exit fullscreen", "fullscreen_exit", "Esc" },
     { "Toggle statistics", "toggle_stats_overlay", "Ctrl+I" },
     { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
+    { "Save problem report", "state_report", "Ctrl+Alt+D" },
     { "Re-apply rules", "reapply_rules", "" },
     { "Room lights (dark / lit)", "room_lights", "" },
     { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
@@ -5901,8 +5903,83 @@ QWidget* ConfigEditorWindow::createStartupPage()
         QStringLiteral("Monitor targeting and refresh-rate behavior. Refresh switching currently applies to VP Renderer."), source));
     cards->addCard(createCard(QStringLiteral("Input processing"),
         QStringLiteral("Shared source conversion and metadata defaults. Apply restarts the renderer; renderer pages may override each value."), input));
+    // VP Renderer DirectShow filter (2026-10-17): [general] keys read only by the
+    // filter's FileHost when MPC-HC / MPC-BE play a local file through VP.
+    auto* filePlayback = new QWidget;
+    auto* fileForm = new QFormLayout(filePlayback);
+    fileForm->setContentsMargins(0, 0, 0, 0);
+    fileForm->setVerticalSpacing(8);
+    auto fileMillisecondsField = [this](const QString& key, const QString& accessible, int minimum,
+        int maximum, int fallback, const QString& special, const QString& tip) -> QWidget*
+    {
+        const QString general = QStringLiteral("general");
+        auto* row = new QWidget;
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        auto* spin = new QSpinBox;
+        spin->setObjectName(controlName(general, key));
+        spin->setAccessibleName(accessible);
+        spin->setRange(minimum, maximum);
+        spin->setSingleStep(10);
+        spin->setSuffix(QStringLiteral(" ms"));
+        spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
+        spin->setAlignment(Qt::AlignRight);
+        spin->setMaximumWidth(128);
+        if (!special.isEmpty())
+            spin->setSpecialValueText(special);
+        spin->setToolTip(tip + QStringLiteral(" %1 to %2 ms; default %3 ms.").arg(minimum).arg(maximum).arg(fallback));
+        // Unset or out of range shows the default without writing it.
+        bool valid = false;
+        const int configured = value(general, key).trimmed().toInt(&valid);
+        spin->setValue(valid && configured >= minimum && configured <= maximum ? configured : fallback);
+        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, spin, key](int milliseconds)
+        {
+            if (!document_) return;
+            const std::string keyText = key.toStdString();
+            if (!document_->SetKnown("general", keyText.c_str(), std::to_string(milliseconds)))
+            {
+                document_->AddSection("general");
+                document_->SetKnown("general", keyText.c_str(), std::to_string(milliseconds));
+            }
+            editOrder_[spin->objectName()] = ++editSerial_;
+            markDirty();
+        });
+        auto* reset = new QToolButton;
+        reset->setObjectName(spin->objectName() + QStringLiteral(".reset"));
+        reset->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+        reset->setFixedSize(26, 26);
+        reset->setToolTip(QStringLiteral("Reset %1 to %2 ms (default)").arg(accessible).arg(fallback));
+        reset->setAccessibleName(reset->toolTip());
+        connect(reset, &QToolButton::clicked, spin, [spin, fallback] { spin->setValue(fallback); });
+        rowLayout->addWidget(spin);
+        rowLayout->addWidget(reset);
+        rowLayout->addStretch(1);
+        return row;
+    };
+    fileForm->addRow(QStringLiteral("Picture offset (A/V)"), fileMillisecondsField(
+        QStringLiteral("file_av_offset_ms"), QStringLiteral("File playback picture offset"),
+        MainConfigSchema::FileAvOffsetMinMs, MainConfigSchema::FileAvOffsetMaxMs,
+        MainConfigSchema::FileAvOffsetDefaultMs, QString(),
+        QStringLiteral("Moves the picture against the sound for files played through the VP Renderer filter: "
+            "positive shows the picture later, negative earlier. Capture is not affected.")));
+    fileForm->addRow(QStringLiteral("Dynamic Drive hold between files"), fileMillisecondsField(
+        QStringLiteral("file_led_holdover_ms"), QStringLiteral("Dynamic Drive hold between files"),
+        MainConfigSchema::FileLedHoldoverMinMs, MainConfigSchema::FileLedHoldoverMaxMs,
+        MainConfigSchema::FileLedHoldoverDefaultMs, QStringLiteral("Off"),
+        QStringLiteral("The player rebuilds its graph for every file. The filter keeps Dynamic Drive running this "
+            "long so the next file carries on from the current LED level instead of flashing the projector to "
+            "full light; with no next file it then restores full light as usual. Off: full light at once.")));
+    auto* fileNote = new QLabel(QStringLiteral(
+        "Profiles can tell the two apart: <b>when: $source==\"file\"</b> matches file playback, "
+        "<b>$source==\"capture\"</b> VideoProcessor.exe."));
+    fileNote->setWordWrap(true);
+    fileForm->addRow(fileNote);
+
     cards->addCard(createCard(QStringLiteral("Room lights"),
         QStringLiteral("Dark or lit room, for profiles that render to the room's black."), ambient));
+    cards->addCard(createCard(QStringLiteral("File playback (VP Renderer filter)"),
+        QStringLiteral("Local files played in MPC-HC / MPC-BE through VP's processing. Read by the filter when it starts and when this file changes."),
+        filePlayback));
     return createPage(QStringLiteral("General"), QStringLiteral("Choose how VideoProcessor starts and which hardware it uses."), cards);
 }
 
@@ -14573,6 +14650,32 @@ QWidget* ConfigEditorWindow::createLogsPage()
     layout->addWidget(helpLabel(QStringLiteral(
         "Enhanced logging keeps all logs and writes additional live telemetry files. Use it only while diagnosing an issue.")));
 
+    // Report-a-problem (StateReportSettings.h): the switches beside the
+    // Shortcuts page's "Save problem report" (default Ctrl+Alt+D).
+    auto* reportsTitle = new QLabel(QStringLiteral("Problem reports"));
+    reportsTitle->setObjectName(QStringLiteral("config.logging.reports_title"));
+    QFont reportsFont = reportsTitle->font();
+    reportsFont.setBold(true);
+    reportsTitle->setFont(reportsFont);
+    layout->addWidget(reportsTitle);
+    auto* autoReport = bindCheckField(QStringLiteral("Save a problem report automatically"),
+        QStringLiteral("logging"), QStringLiteral("auto_report"), false);
+    autoReport->setAccessibleDescription(QStringLiteral(
+        "When VP recovers from a stall or a source gap, or a renderer reset fails, it saves a problem report "
+        "by itself: at most one every 10 minutes and five per run. Default: off."));
+    layout->addWidget(autoReport);
+    auto* reportThumbnail = bindCheckField(QStringLiteral("Include a small picture in problem reports"),
+        QStringLiteral("logging"), QStringLiteral("report_thumbnail"), false);
+    reportThumbnail->setAccessibleDescription(QStringLiteral(
+        "Adds a 480-pixel-wide copy of the next rendered frame to each report (VP Renderer only). "
+        "Default: off - reports then hold no pictures."));
+    layout->addWidget(reportThumbnail);
+    layout->addWidget(helpLabel(QStringLiteral(
+        "Press the problem-report shortcut (Shortcuts page, default Ctrl+Alt+D) or choose \"Save problem report\" "
+        "in VP's window menu right after you see a problem. VP saves the last few seconds of its state - timings, "
+        "decisions, Dynamic Drive commands, settings, the log and system details, without your name or private "
+        "folder paths - to logs\reports (the newest 20 are kept). Send the .zip file with a short description.")));
+
     QString logDirectory = QFileInfo(configPath_).absoluteDir().filePath(QStringLiteral("logs"));
     const QString logPath = QDir(logDirectory).filePath(QStringLiteral("vp.log"));
     auto* actions = new QHBoxLayout;
@@ -14587,10 +14690,30 @@ QWidget* ConfigEditorWindow::createLogsPage()
 	}
     openFolder->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor logs."));
     openLog->setAccessibleDescription(QStringLiteral("Open the current VideoProcessor log."));
+    auto* openReports = new QPushButton(QStringLiteral("Open reports folder"));
+    openReports->setObjectName(QStringLiteral("config.logging.open_reports"));
+    openReports->setEnabled(!remoteClient_);
+    if (remoteClient_)
+        openReports->setToolTip(QStringLiteral("Reports are on the VP computer."));
+    openReports->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor problem reports."));
     actions->addWidget(openFolder);
     actions->addWidget(openLog);
+    actions->addWidget(openReports);
     actions->addStretch();
     layout->addLayout(actions);
+    const QString reportsDirectory = QDir(logDirectory).filePath(QStringLiteral("reports"));
+    connect(openReports, &QPushButton::clicked, this, [this, reportsDirectory]
+    {
+        if (!QDir(reportsDirectory).exists())
+        {
+            QMessageBox::information(this, QStringLiteral("Problem reports"),
+                QStringLiteral("No problem report has been saved yet. Press the problem-report shortcut in VP first."));
+            return;
+        }
+        if (!openPathExternally(reportsDirectory))
+            QMessageBox::warning(this, QStringLiteral("Problem reports"),
+                QStringLiteral("Windows could not open the reports folder."));
+    });
     connect(openFolder, &QPushButton::clicked, this, [this, logDirectory]
     {
         if (!QDir(logDirectory).exists())

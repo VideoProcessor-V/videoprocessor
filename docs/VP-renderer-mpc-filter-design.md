@@ -6,6 +6,12 @@ IVideoRenderer methods), `feat/vp-renderer-filter-a` (ABI 35 file frames in the 
 renderer), `-b`, `-c`, `-d` and `-f` (LAV IMediaSideData -> HDR10 / HDR10+ / Dolby Vision). None
 is merged here. File and line references below are at merge-v1.4.02 (2026-10-17; plugin API 34).
 
+**Renumbered at integration (2026-10-17, `integ/mpc-state`):** the filter's contract is plugin API **37**, not 35.
+Integ took 35 (the required build-ID export) and the report-a-problem hotkey took 36
+(`IVideoRenderer::WriteDiagnosticHistory`); the four file-frame methods follow it in the vtable. The filter now
+also applies the executable's build-ID pair rule to the renderer DLL it loads. `feat/intent-remainder` (which
+also claimed 36) becomes 38 when it merges. "ABI 35" below means that contract.
+
 ## Decided (owner, 2026-10-17)
 
 - Local-file playback on the HTPC through "VP Renderer", a DirectShow video renderer filter for

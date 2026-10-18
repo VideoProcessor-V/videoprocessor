@@ -30,6 +30,12 @@ public:
 	bool OnVideoState(VideoStateComPtr& videoState) override;
 	bool SupportsDynamicVideoState() const override;
 	void OnVideoFrame(VideoFrame& videoFrame) override;
+	// ABI 37 (VP Renderer DirectShow filter): forwarded to the plugin.
+	bool SupportsTimedFileFrames() const override;
+	void OnTimedVideoFrame(VideoFrame& videoFrame,
+		const FileFrameTiming& timing) override;
+	bool WaitForFileFrameSlot(uint32_t timeoutMs) override;
+	void CancelFileFrameWait() override;
 	bool HasPresentedLiveFrame() const override;
 	const char* PresentedLiveFrameEvidence() const override;
 	HRESULT OnWindowsEvent(LONG_PTR param1, LONG_PTR param2) override;
@@ -97,6 +103,8 @@ public:
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
+		int64_t referenceQpc) const override;
 	bool GetIntentStatus(IntentStatus& status) const override;
 	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
 	bool GetPresentationTargetTiming(double& leadMs,

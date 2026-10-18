@@ -277,6 +277,32 @@ void LibplaceboPluginVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 }
 
 
+bool LibplaceboPluginVideoRenderer::SupportsTimedFileFrames() const
+{
+	return m_renderer && m_renderer->SupportsTimedFileFrames();
+}
+
+
+void LibplaceboPluginVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
+	const FileFrameTiming& timing)
+{
+	m_renderer->OnTimedVideoFrame(videoFrame, timing);
+}
+
+
+bool LibplaceboPluginVideoRenderer::WaitForFileFrameSlot(uint32_t timeoutMs)
+{
+	return m_renderer && m_renderer->WaitForFileFrameSlot(timeoutMs);
+}
+
+
+void LibplaceboPluginVideoRenderer::CancelFileFrameWait()
+{
+	if (m_renderer)
+		m_renderer->CancelFileFrameWait();
+}
+
+
 bool LibplaceboPluginVideoRenderer::HasPresentedLiveFrame() const
 {
 	return m_renderer->HasPresentedLiveFrame();
@@ -725,6 +751,14 @@ bool LibplaceboPluginVideoRenderer::GetContentIntentStatus(
 {
 	status = {};
 	return m_renderer && m_renderer->GetContentIntentStatus(status);
+}
+
+bool LibplaceboPluginVideoRenderer::WriteDiagnosticHistory(
+	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
+{
+	// The DLL catches internally; it records into its own module's rings.
+	return m_renderer && sink &&
+		m_renderer->WriteDiagnosticHistory(sink, context, referenceQpc);
 }
 
 bool LibplaceboPluginVideoRenderer::GetIntentStatus(IntentStatus& status) const

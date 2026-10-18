@@ -1531,7 +1531,7 @@ namespace RendererProfileConfig
 			"eotf", "transfer", "colorspace", "primaries", "format",
 			"hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
 			"cadence", "width", "height", "resolution", "renderer", "actual_refresh",
-			"key", "ambient", "content"
+			"key", "ambient", "content", "source"
 		};
 
 		for (const GroupSpec& spec : specs)
@@ -2355,7 +2355,7 @@ namespace RendererProfileConfig
 						{ "eotf", "transfer", "colorspace", "primaries", "format",
 						  "hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
 						  "cadence", "width", "height", "resolution", "renderer",
-						  "actual_refresh", "key", "ambient", "content" },
+						  "actual_refresh", "key", "ambient", "content", "source" },
 						"[" + profileSection + "] when=", error)))
 					return false;
 				model.profiles.emplace(groupName + "." + profileName, std::move(profile));

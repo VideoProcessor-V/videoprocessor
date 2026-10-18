@@ -55,6 +55,15 @@ const TCHAR* ToString(const VideoFrameEncoding videoFrameEncoding)
 
 	case VideoFrameEncoding::DNxHR:
 		return TEXT("DNxHR Encoded");
+
+	case VideoFrameEncoding::NV12:
+		return TEXT("YUV 4:2:0 8-bit (NV12)");
+
+	case VideoFrameEncoding::P010:
+		return TEXT("YUV 4:2:0 10-bit (P010)");
+
+	case VideoFrameEncoding::P016:
+		return TEXT("YUV 4:2:0 16-bit (P016)");
 	}
 
 	throw std::runtime_error("VideoFrameEncoding ToString() failed, value not recognized");
@@ -85,6 +94,13 @@ uint32_t VideoFrameEncodingBitsPerPixel(const VideoFrameEncoding videoFrameEncod
 	case VideoFrameEncoding::R12L:  // audit 2026-10-16: little-endian R12B
 		// DeckLink R12B packs three 12-bit RGB components per pixel.
 		return 36;
+
+	case VideoFrameEncoding::NV12:
+		return 12;
+
+	case VideoFrameEncoding::P010:
+	case VideoFrameEncoding::P016:
+		return 24;
 	}
 
 	throw std::runtime_error("Don't know how to bits per pixel for VideoFrameEncoding");
@@ -105,6 +121,15 @@ uint32_t VideoFrameEncodingFourCC(const VideoFrameEncoding videoFrameEncoding)
 
 	case VideoFrameEncoding::V210:
 		return FCC('v210');
+
+	case VideoFrameEncoding::NV12:
+		return FCC('NV12');
+
+	case VideoFrameEncoding::P010:
+		return FCC('P010');
+
+	case VideoFrameEncoding::P016:
+		return FCC('P016');
 	}
 
 	throw std::runtime_error("Don't know fourCC for VideoFrameEncoding");

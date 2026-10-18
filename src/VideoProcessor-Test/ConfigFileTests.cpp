@@ -5419,8 +5419,10 @@ namespace VideoProcessorTest
 			// 33: StopLedDriveForShutdown (2026-10-17 integration); 34: GetContentIntentStatus
 			// and the DV L5/L6/L11 metadata fields (content intent, 2026-10-17); 35: the
 			// required build-ID export (hunt 2; the build ID is the mechanical pair check);
-			// 36: state-report diagnostic history; 37: the MPC filter's file-frame methods;
-			// 38: GetIntentStatus / SetAmbientLux (intent interpreter items 2-5).
+			// 36: IVideoRenderer::WriteDiagnosticHistory (report-a-problem, 2026-10-17);
+			// 37: the VP Renderer DirectShow filter (NV12/P010/P016, FileFrameTiming,
+			// file-frame methods; claimed 35 on its branch); 38: GetIntentStatus /
+			// SetAmbientLux (intent interpreter items 2-5; claimed 36 on its branch).
 			Assert::AreEqual(static_cast<uint32_t>(38),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}

@@ -25,13 +25,18 @@
 // metadata itself stays inside the DLL, GetContentIntentStatus needed it);
 // 35: the required build-ID export below (hunt 2, 2026-10-17). Raised so an
 // older executable, which does not check build IDs, refuses this DLL too.
-// 36: the state-report diagnostic history (MPC/state-report branch); 37: the
-// MPC VP Renderer filter's file-frame methods; 38: GetIntentStatus /
-// SetAmbientLux (intent interpreter items 2-5, 2026-10-17). The check is
-// equality, so a gap in the numbering is harmless.
+// 36: IVideoRenderer::WriteDiagnosticHistory (report-a-problem, 2026-10-17).
+// 37: VP Renderer DirectShow filter (MPC-HC/BE; claimed 35 on its branch,
+// renumbered at the 2026-10-17 integ/mpc-state merge) - NV12/P010/P016
+// encodings, FileFrameTiming and the file-frame IVideoRenderer methods
+// (SupportsTimedFileFrames, OnTimedVideoFrame, WaitForFileFrameSlot,
+// CancelFileFrameWait), after WriteDiagnosticHistory in the vtable.
+// 38: GetIntentStatus / SetAmbientLux (intent interpreter items 2-5,
+// 2026-10-17; claimed 36 on its branch), after the file-frame methods in the
+// vtable. The check is equality, so a gap in the numbering is harmless.
 //
-// The counter is maintained by hand and can collide across branches (the MPC
-// branch also plans 35) or miss a layout change. The build ID is the
+// The counter is maintained by hand and can collide across branches or miss
+// a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
@@ -62,6 +67,16 @@ using VideoProcessorLibplaceboCreateRendererFn = IVideoRenderer* (__cdecl *)(
 	VideoProcessorLibplaceboLogSink logSink);
 using VideoProcessorLibplaceboDestroyRendererFn = void (__cdecl *)(
 	IVideoRenderer* renderer);
+
+// Optional export (VP Renderer filter, 2026-10-17), outside the versioned
+// contract: resolve it with GetProcAddress and tolerate its absence. Ends an
+// LED drive the filter process is holding between graphs (file_led_holdover_ms,
+// led/LedDriveHoldover.h) through its normal stop, which restores full light.
+// Returns 1 when one was held. The filter calls it when it is going away for
+// good (never from DllMain).
+static constexpr const char* VP_LIBPLACEBO_END_HELD_LED_DRIVE_EXPORT =
+	"VideoProcessorLibplaceboEndHeldLedDrive";
+using VideoProcessorLibplaceboEndHeldLedDriveFn = int (__cdecl *)();
 
 static constexpr const char* VP_LIBPLACEBO_DIAGNOSTIC_EXPORT = "VideoProcessorLibplaceboConfigureAnalysisDiagnosticSink";
 using VideoProcessorLibplaceboConfigureDiagnosticFn = void (__cdecl *)(void*,

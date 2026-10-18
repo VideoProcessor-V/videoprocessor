@@ -2801,6 +2801,11 @@ void testEveryPageRoundTrips()
     require(renderedCaptureShortcut->text() == QStringLiteral("Ctrl+Alt+S"),
         "Rendered-output capture did not default to Ctrl+Alt+S");
     renderedCaptureShortcut->setText(QStringLiteral("Ctrl+Alt+C"));
+    QLineEdit* stateReportShortcut = requireControl<QLineEdit>(window,
+        QStringLiteral("config.shortcuts.state_report"));
+    require(stateReportShortcut->text() == QStringLiteral("Ctrl+Alt+D"),
+        "Save problem report did not default to Ctrl+Alt+D");
+    stateReportShortcut->setText(QStringLiteral("Ctrl+Alt+Q"));
     QLineEdit* reapplyRulesShortcut = requireControl<QLineEdit>(window,
         QStringLiteral("config.shortcuts.reapply_rules"));
     require(reapplyRulesShortcut->text().isEmpty(),
@@ -2839,6 +2844,14 @@ void testEveryPageRoundTrips()
     require(!requireControl<QSpinBox>(window,
         QStringLiteral("config.logging.debug_log_retention"))->isEnabled(),
         "Log retention remained editable while enhanced logging was enabled");
+    QCheckBox* autoReport = requireControl<QCheckBox>(window,
+        QStringLiteral("config.logging.auto_report"));
+    require(!autoReport->isChecked(), "Automatic problem reports did not default to off");
+    autoReport->setChecked(true);
+    QCheckBox* reportThumbnail = requireControl<QCheckBox>(window,
+        QStringLiteral("config.logging.report_thumbnail"));
+    require(!reportThumbnail->isChecked(), "Problem-report picture did not default to off");
+    reportThumbnail->setChecked(true);
     requireControl<QCheckBox>(window, QStringLiteral("config.logging.debug"))->setChecked(false);
     requireControl<QCheckBox>(window, QStringLiteral("config.logging.enabled"))->setChecked(false);
     require(!requireControl<QSpinBox>(window,
@@ -3100,6 +3113,7 @@ void testEveryPageRoundTrips()
         "container_colorspace: REC709", "max_cll: 1200", "max_fall: 450",
         "fullscreen_toggle: Ctrl+F", "config_editor: Ctrl+E",
         "capture_rendered_output: Ctrl+Alt+C", "toggle_noui: Alt+U",
+        "state_report: Ctrl+Alt+Q", "auto_report: true", "report_thumbnail: true",
         "reapply_rules: Ctrl+Alt+R",
         "foreground_only: true",
         "renderer: *", "run: C:\\Tools\\verified-action.cmd 42",
@@ -9855,6 +9869,36 @@ void testProfileRewritesAreBackedUpLoadMigrations()
     require(readBytes(path) == saved, "Reopening the migrated file wrote it");
 }
 
+void testFilePlaybackControlsValidateResetAndSave()
+{
+    // VP Renderer filter (2026-10-17): [general] file_av_offset_ms and file_led_holdover_ms have
+    // number boxes with the schema's ranges, show the defaults when unset, reset to the default
+    // and save under their keys.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nfile_av_offset_ms: -120\n[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    auto* offset = requireControl<QSpinBox>(window, "config.general.file_av_offset_ms");
+    auto* holdover = requireControl<QSpinBox>(window, "config.general.file_led_holdover_ms");
+    require(offset->value() == -120, "the configured picture offset is not shown");
+    require(holdover->value() == MainConfigSchema::FileLedHoldoverDefaultMs,
+        "an unset LED hold-over does not show its default");
+    require(offset->minimum() == MainConfigSchema::FileAvOffsetMinMs &&
+        offset->maximum() == MainConfigSchema::FileAvOffsetMaxMs, "the picture offset range is not the schema's");
+    require(holdover->minimum() == MainConfigSchema::FileLedHoldoverMinMs &&
+        holdover->maximum() == MainConfigSchema::FileLedHoldoverMaxMs, "the LED hold-over range is not the schema's");
+    require(!offset->toolTip().isEmpty() && !holdover->toolTip().isEmpty(), "a file playback control has no tooltip");
+    require(readBytes(path).indexOf("file_led_holdover_ms") < 0, "opening Config wrote the unset hold-over");
+    offset->setValue(5000);
+    require(offset->value() == MainConfigSchema::FileAvOffsetMaxMs, "the picture offset accepted a value out of range");
+    holdover->setValue(1500);
+    requireControl<QToolButton>(window, "config.general.file_av_offset_ms.reset")->click();
+    require(offset->value() == MainConfigSchema::FileAvOffsetDefaultMs, "reset did not restore the default offset");
+    save(window);
+    const QByteArray saved = readBytes(path);
+    require(saved.contains("file_av_offset_ms: 0") && saved.contains("file_led_holdover_ms: 1500") &&
+        saved.contains("quality: high"), (QByteArray("the file playback keys did not save: ") + saved).constData());
+}
+
 int run(const char* name, const std::function<void()>& test)
 {
     const QString testName = QString::fromUtf8(name);
@@ -10149,6 +10193,7 @@ int main(int argc, char** argv)
     failures += run("inherited Picture fields and greyed render ahead", testInheritedPictureFieldsAndGreyedRenderAhead);
     failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
     failures += run("render-ahead controls show defaults and save", testRenderAheadControlsShowDefaultsAndSave);
+    failures += run("file playback controls validate, reset and save", testFilePlaybackControlsValidateResetAndSave);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
     return failures == 0 ? 0 : 1;

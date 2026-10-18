@@ -193,7 +193,7 @@ namespace Tests
             Assert::IsTrue(format >= int(AnalysisLumaFormat::P010) &&
                 format <= int(AnalysisLumaFormat::SdrTunnelRgb));
             Assert::IsTrue(encoding >= int(VideoFrameEncoding::UNKNOWN) &&
-                encoding <= int(VideoFrameEncoding::DNxHR));
+                encoding <= int(VideoFrameEncoding::P016));
             Assert::IsTrue(colorspace >= int(ColorSpace::UNKNOWN) && colorspace <= int(ColorSpace::BT_2020));
             Assert::IsTrue(script >= int(SubtitleScriptHint::GeneralMixed) && script <= int(SubtitleScriptHint::Thai));
             Assert::IsTrue(alignment >= 0 && alignment <= 2);

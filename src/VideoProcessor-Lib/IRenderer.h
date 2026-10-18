@@ -11,6 +11,7 @@
 #include <SubtitlePreviewMode.h>
 #include <DolbyVisionLuminanceStatus.h>
 #include <IntentDescriptor.h>
+#include <FileFrameTiming.h>
 
 
 #include <VideoFrame.h>
@@ -20,6 +21,7 @@
 #include <RendererResetRequest.h>
 #include <RendererOutputContractStatus.h>
 #include <SubtitleRepositionMode.h>
+#include <DiagnosticHistory.h>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -631,6 +633,39 @@ public:
 		return false;
 	}
 
+	// Report-a-problem (2026-10-17): the renderer DLL writes its own
+	// DiagnosticHistory rings (DiagnosticHistory.h; one Global() per module)
+	// into `sink` as JSONL rows tagged src "renderer", times relative to
+	// referenceQpc. Never throws; false when the renderer has no history.
+	virtual bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
+		int64_t referenceQpc) const
+	{
+		(void)sink;
+		(void)context;
+		(void)referenceQpc;
+		return false;
+	}
+
+	// ABI 37 (VP Renderer DirectShow filter; claimed 35 on its branch, after
+	// 36's WriteDiagnosticHistory in the vtable): frames from a file source.
+	// The frame carries its own presentation time and exact source rate, so the
+	// renderer skips capture timing (rate/PPM measurement, pulldown detection)
+	// and fills its film clock directly. Capture frames keep OnVideoFrame and
+	// are unchanged. The default forwards to OnVideoFrame (capture semantics).
+	virtual bool SupportsTimedFileFrames() const { return false; }
+	virtual void OnTimedVideoFrame(VideoFrame& videoFrame,
+		const FileFrameTiming&)
+	{
+		OnVideoFrame(videoFrame);
+	}
+	// A file source never drops: the filter's Receive waits here until the
+	// queue has room. True when a frame can be queued without a drop; false on
+	// timeout or after CancelFileFrameWait (flush, stop), in which case the
+	// caller retries or abandons the sample. Must not hold locks the render
+	// thread needs.
+	virtual bool WaitForFileFrameSlot(uint32_t /*timeoutMs*/) { return true; }
+	// Wakes every WaitForFileFrameSlot with false until the next timed frame.
+	virtual void CancelFileFrameWait() {}
 	// Intent interpreter items 2-5 (2026-10-17): motion intent, ambient
 	// adaptation, black protection, display mapping readout. False (status
 	// default: every function off) when the renderer has none.

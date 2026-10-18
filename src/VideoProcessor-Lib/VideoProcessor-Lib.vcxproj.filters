@@ -58,6 +58,23 @@
 	<Filter Include="Source Files\libplacebo">
 	  <UniqueIdentifier>{16172c8f-08a8-48a8-b202-9549e85b140c}</UniqueIdentifier>
 	</Filter>
+    <Filter Include="Header Files\filesource">
+      <UniqueIdentifier>{5d0b8a3e-2f61-4c7e-9a41-7c3e1f0b6d25}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="filesource\RationalRate.h">
+      <Filter>Header Files\filesource</Filter>
+    </ClInclude>
+    <ClInclude Include="filesource\FileClockMapper.h">
+      <Filter>Header Files\filesource</Filter>
+    </ClInclude>
+    <ClInclude Include="filesource\FilePlaybackState.h">
+      <Filter>Header Files\filesource</Filter>
+    </ClInclude>
+    <ClInclude Include="filesource\FileMediaTypeAdapter.h">
+      <Filter>Header Files\filesource</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ShaderConfigValidation.cpp">
@@ -168,6 +185,9 @@
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
+    <ClInclude Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.h">
+      <Filter>Header Files\video_frame_formatter</Filter>
+    </ClInclude>
     <ClInclude Include="ACaptureDevice.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -205,6 +225,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="HDRData.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="filesource\FileSideData.h">
       <Filter>Header Files</Filter>
     </ClInclude>
 	<ClInclude Include="CaptureVideoStatePolicy.h">
@@ -483,6 +506,9 @@
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
+    <ClCompile Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.cpp">
+      <Filter>Source Files\video_frame_formatter</Filter>
+    </ClCompile>
     <ClCompile Include="ACaptureDevice.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -530,6 +556,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="HDRData.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="filesource\FileSideData.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="IRenderer.cpp">
