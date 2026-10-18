@@ -196,15 +196,18 @@ def moving_card(sw, sh, cut, seed=2):
     layout = []
     for i, (name, f) in enumerate(bands):
         y0 = i * bh
+        # a different mean level per band: the per-row colour fit needs luma variation
+        m = 0.35 + 0.3 * ((i * 3) % len(bands)) / max(len(bands) - 1, 1)
+        Y[y0:y0 + bh] = m
         yy = np.arange(bh)[:, None]
         if name[0] in "pns":
             k = round(f * cut * sw)
-            Y[y0:y0 + bh] = 0.5 + AMP * np.cos(2 * math.pi * k * x / sw) * np.ones((bh, 1))
+            Y[y0:y0 + bh] = m + AMP * np.cos(2 * math.pi * k * x / sw) * np.ones((bh, 1))
         elif name[0] == "d":
             k = round(f * cut * sw)
-            Y[y0:y0 + bh] = 0.5 + AMP * np.cos(2 * math.pi * (k * x / sw + (k / sw) * (y0 + yy)))
+            Y[y0:y0 + bh] = m + AMP * np.cos(2 * math.pi * (k * x / sw + (k / sw) * (y0 + yy)))
         elif name == "grain":
-            Y[y0:y0 + bh] = 0.5 + 1.5 * GRAIN * grain((bh, sw), rng)   # periodic in x (FFT synthesis)
+            Y[y0:y0 + bh] = m + 1.5 * GRAIN * grain((bh, sw), rng)   # periodic in x (FFT synthesis)
         layout.append(dict(kind=name, frac=f, y0=y0, y1=y0 + bh))
     return Y, layout
 
@@ -711,21 +714,25 @@ def analyse_shift(caps, sw, sh, cache):
             y0 = geo.to_out_y(bd["y0"]) + 6
             y1 = geo.to_out_y(bd["y1"] - 1) - 6
             per_band[bd["kind"]].append((window_energy(O, y0, y1, 8, R.shape[1] - 8),
-                                         window_energy(R, y0, y1, 8, R.shape[1] - 8)))
+                                         window_energy(R, y0, y1, 8, R.shape[1] - 8),
+                                         window_energy(O - R, y0, y1, 8, R.shape[1] - 8)))
     # the source band's own window energy (amplitude AMP sinusoid)
     xs = np.arange(WIN)
     s = AMP * np.cos(2 * math.pi * 0.17 * xs)[None, :] * np.ones((WIN, 1))
     S = float((np.abs(np.fft.fft2((s - s.mean()) * hann2())) ** 2).sum())
     flat = per_band["flat"]
-    flat_var = float(np.mean(np.var(np.stack([e for e, _ in flat]), axis=0))) if len(flat) > 1 else 0.0
+    flat_var = float(np.mean(np.var(np.stack([e for e, _, _ in flat]), axis=0))) if len(flat) > 1 else 0.0
+    flat_err = float(np.mean([e.mean() for _, _, e in flat])) if flat else 0.0   # dither / noise floor
     out = dict(geometry=gcheck, taus=[round(t, 3) for t in taus], bands={})
     for name, series in per_band.items():
         if name == "flat" or len(series) < 2:
             continue
-        D = np.stack([eo - er for eo, er in series])        # (t, windows)
+        D = np.stack([eo - er for eo, er, _ in series])        # (t, windows)
         var = np.var(D, axis=0).mean() - flat_var
+        err = float(np.mean([e.mean() for _, _, e in series])) - flat_err
         out["bands"][name] = dict(shimmer=float(math.sqrt(max(var, 0.0)) / S),
-                                  excess=float(D.mean() / S))
+                                  excess=float(D.mean() / S),
+                                  motion_err=max(err, 0.0) / S)
     def cls(name):
         return {"p": "pass", "n": "near", "s": "stop", "d": "diag"}.get(name[0], "grain")
     groups = {}
@@ -733,13 +740,21 @@ def analyse_shift(caps, sw, sh, cache):
         groups.setdefault(cls(name), []).append(v["shimmer"])
     out["summary"] = {g: float(np.sqrt(np.mean(np.square(v)))) for g, v in groups.items()}
     out["summary"]["all"] = float(np.sqrt(np.mean([x ** 2 for v in groups.values() for x in v])))
+    # motion error: energy of (output - ideal of the same motion) per band, the dither floor
+    # removed, as a fraction of the source band's energy (dB); stop = moving moire / crawl
+    eg = {}
+    for name, v in out["bands"].items():
+        eg.setdefault(cls(name), []).append(v["motion_err"])
+    for g, v in eg.items():
+        out["summary"]["err_" + g] = db(float(np.mean(v)))
+    out["summary"]["err_all"] = db(float(np.mean([x for v in eg.values() for x in v])))
     return out
 
 
 def analyse_seq(caps, frames, sw, sh, cache, asset):
     """Real pan (clip library): each capture registered to the nearest ideal-resampled source frame
-    plus a sub-pixel x shift; shimmer = temporal std of the per-window high-band (above half the
-    output Nyquist) energy difference, relative to the reference's high-band energy."""
+    plus a sub-pixel x shift; in the fine-detail band, the error energy against that motion-matched
+    ideal (dB) and the shimmer (temporal std of each window's relative band-energy error)."""
     geo, gcheck = capture_geometry(caps[0], sw, sh)
     # the clip's picture rows (bars are code 64 in the asset)
     act = np.nonzero(frames[0].mean(axis=1) > 70)[0]
@@ -752,17 +767,21 @@ def analyse_seq(caps, frames, sw, sh, cache, asset):
     ry0 = int(math.ceil(geo.to_out_y(a0))) + 8
     ry1 = int(math.floor(geo.to_out_y(a1 - 1))) - 8
     cx0, cx1 = 48, refs[0].shape[1] - 48
+    # the fine-detail band: 0.3..0.95 of the highest frequency the source can carry at the output
+    # (the output Nyquist, or below it when upscaling); real film has little energy above, where
+    # the 8-bit dither would dominate
+    lim = min(1.0, 1.0 / geo.sx)
     fq = cheb_freq()
-    hb = fq >= 0.5
-    D, ER = [], []
+    hb = (fq >= 0.3 * lim) & (fq <= 0.95 * lim)
+    D, ER, EE = [], [], []
     picks = []
     fkey = key + ("fft", ry0, ry1)
-    if fkey not in cache:
-        cache[fkey] = [np.conj(np.fft.fft2(R[ry0:ry1, cx0:cx1] - R[ry0:ry1, cx0:cx1].mean())) for R in refs]
+    if fkey not in cache:   # frame selection on a 2x-decimated grid (the sub-pixel shift is full-res)
+        cache[fkey] = [np.conj(np.fft.fft2(R[ry0:ry1:2, cx0:cx1:2] - R[ry0:ry1:2, cx0:cx1:2].mean())) for R in refs]
     rf = cache[fkey]
     for cap in caps:
         O = colour_fit(cap, geo, [refs[0], refs[0] * 0, refs[0] * 0], sigma=10)[0]
-        Of = np.fft.fft2(O[ry0:ry1, cx0:cx1] - O[ry0:ry1, cx0:cx1].mean())
+        Of = np.fft.fft2(O[ry0:ry1:2, cx0:cx1:2] - O[ry0:ry1:2, cx0:cx1:2].mean())
         best = None
         for i, Rf in enumerate(rf):
             F = Of * Rf
@@ -781,12 +800,18 @@ def analyse_seq(caps, frames, sw, sh, cache, asset):
         er = window_energy(Rs, ry0, ry1, cx0, cx1, hb)
         D.append(eo - er)
         ER.append(er)
+        EE.append(window_energy(O - Rs, ry0, ry1, cx0, cx1, hb))
     D = np.stack(D)
     ER = np.stack(ER)
-    mean_er = float(ER.mean())
+    EE = np.stack(EE)
+    # shimmer: temporal std of each window's relative high-band energy error (floor: the median
+    # window energy, so flat windows do not divide by ~0), averaged over windows
+    floor = float(np.median(ER))
+    rel = D / (ER + floor)
     return dict(geometry=gcheck, picks=picks,
-                summary=dict(shimmer=float(math.sqrt(np.var(D, axis=0).mean()) / mean_er),
-                             hf_excess=float(D.mean() / mean_er)))
+                summary=dict(shimmer=float(np.std(rel, axis=0).mean()),
+                             hf_excess=float(D.sum() / ER.sum()),
+                             hf_err_db=db(float(EE.sum() / ER.sum()))))
 
 
 # ---------------------------------------------------------------------------- stage configurations
@@ -835,6 +860,47 @@ MOTION_CONFIGS = {"default", "deband_vp_on", "detail_pulse_off", "texture_restor
                   "ctl_down_gpu_noaa", "ctl_up_nearest", "down_lanczos", "up_ewa_lanczossharp"}
 PAN_SPEEDS = [3, 8]             # source pixels per 24p frame (synthetic): 72 and 192 px/s at 24 fps
 REAL_PANS = ["pan_120pxs_23976p", "pan_480pxs_23976p"]
+
+
+# Hybrid scaler blend sweep (owner 2026-10-18): VP's adaptive scalers with their branch shader.
+# Downscale: out = faithful + w (SSIM - faithful), w = adaptive_w_base x (1 - edge) x grain term
+# (SSimDownscaler after Mitchell, as the cinema configuration); upscale: out = cnn + (1 - w)
+# (faithful - cnn), w = adaptive_upscale_w_base x grain term (ArtCNN doubler branch).
+BLEND_WEIGHTS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+BLEND_PAIRS = [((3840, 2160), (2560, 1600)), ((3840, 2160), (1920, 1080)), ((1920, 1080), (2560, 1600))]
+SHADER_SECTIONS = {
+    "standard.ssim_downscaler": "[shader.standard.ssim_downscaler]\\nshader_type: custom\\nlabel: SSimDownscaler\\n"
+                                "stage: post_resize\\norder: 20\\nglsl_file: SSimDownscaler.glsl\\n",
+    "standard.artcnn": "[shader.standard.artcnn]\\nshader_type: custom\\nlabel: ArtCNN\\nstage: pre_resize\\n"
+                       "order: 16\\nglsl_file: ArtCNN_C4F16.glsl\\n",
+}
+
+
+def shader_extra(profiles):
+    return "[shader.standard]\\ntype: multi\\nlabel: Off\\n" + "".join(SHADER_SECTIONS[p] for p in profiles)
+
+
+def blend_rows():
+    rows = []
+    for src, out in BLEND_PAIRS:
+        pn = pair_name(src, out)
+        down = fit_rect(src[0], src[1], out[0], out[1])[4] < 1
+        for w in BLEND_WEIGHTS:
+            if down:
+                keys = [("downscaler", "mitchell"), ("adaptive_downscale", "on"), ("adaptive_w_base", "%.2f" % w)]
+                prof = ["standard.ssim_downscaler"]
+                name = "hyb_down_w%.2f" % w
+            else:
+                keys = [("adaptive_upscale", "on"), ("adaptive_upscale_w_base", "%.2f" % w)]
+                prof = ["standard.artcnn"]
+                name = "hyb_up_w%.2f" % w
+            extra = base_extra(keys) + shader_extra(prof)
+            common = (src[0], src[1], out[0], out[1])
+            rows.append([pn + "__bstill__" + name, *common, "still_%dx%d.u16" % src, "still", 0, 4.4,
+                         "2.6,3.0,3.4,3.8", extra, ",".join(prof)])
+            rows.append([pn + "__bshift8__" + name, *common, "moving_%dx%d_%dx%d.u16" % (src + out), "shift", 8, 5.4,
+                         ",".join("%.2f" % (2.4 + 0.27 * i) for i in range(10)), extra, ",".join(prof)])
+    return rows
 
 
 def applies(scope, src, out):
@@ -888,6 +954,7 @@ def prepare(args):
                         for clip in REAL_PANS:
                             rows.append([pn + "__real_%s__" % clip.split("_")[1] + name, *common, "%s_1920x1080.u16" % clip,
                                          "seq", 0, 5.4, ",".join("%.2f" % (2.4 + 0.27 * i) for i in range(10)), extra, shaders])
+    rows += blend_rows()
     with open(os.path.join(d, "plan.tsv"), "w", newline="\n") as f:
         f.write("# name\tsw\tsh\tow\toh\tasset\tmode\tshift\tseconds\tcaptures\textra\tshaders\n")
         for r in rows:
@@ -980,9 +1047,9 @@ def validate(args):
                 mres[k] = m["summary"]
                 print("%s %-14s motion shimmer %s" % (pn, k, {a: round(b, 4) for a, b in m["summary"].items()}), flush=True)
             results[pn]["motion"] = mres
-            checks["motion_ideal_small"] = mres["ideal"]["all"] < 0.02
+            checks["motion_ideal_small"] = mres["ideal"]["all"] < 0.02 and mres["ideal"]["err_all"] < -40
             if abs(geo.sx - 1) > 1e-9:
-                checks["motion_nearest_worse"] = mres["nearest"]["all"] > 1.5 * mres["sinc"]["all"]
+                checks["motion_nearest_worse"] = mres["nearest"]["err_all"] > mres["sinc"]["err_all"] + 6
             results[pn]["checks"] = checks
             print(pn, "checks:", checks, flush=True)
             ok_all &= all(checks.values())
@@ -1085,7 +1152,7 @@ def run(args):
             pairs.append(p)
     groups = []
     for p in pairs:
-        for kind in ("__still__", "__shift", "__real_"):
+        for kind in ("__still__", "__shift", "__real_", "__bstill__", "__bshift"):
             if any(r["name"].startswith(p + kind) for r in rows):
                 groups.append(p + kind)
     if args.only:
@@ -1134,14 +1201,16 @@ def summarise(results):
             t["codes_mod4"] = r.get("codes_mod4")
         elif r["mode"] == "shift":
             t.setdefault("shimmer", []).append(s["all"])
-            t.setdefault("shimmer_stop", []).append(s.get("stop"))
-            t.setdefault("shimmer_near", []).append(s.get("near"))
+            t.setdefault("motion_err", []).append(s.get("err_all"))
+            t.setdefault("motion_err_stop", []).append(s.get("err_stop"))
+            t.setdefault("motion_err_near", []).append(s.get("err_near"))
         else:
             t.setdefault("real_shimmer", []).append(s["shimmer"])
             t.setdefault("real_hf_excess", []).append(s["hf_excess"])
+            t.setdefault("real_hf_err", []).append(s.get("hf_err_db"))
     for pair in table.values():
         for t in pair.values():
-            for k in ("shimmer", "shimmer_stop", "shimmer_near", "real_shimmer", "real_hf_excess"):
+            for k in ("shimmer", "motion_err", "motion_err_stop", "motion_err_near", "real_shimmer", "real_hf_excess", "real_hf_err"):
                 if k in t:
                     v = [x for x in t[k] if x is not None]
                     t[k] = float(np.mean(v)) if v else None
@@ -1159,10 +1228,12 @@ def verdict(t, base):
         d = t["alias_db"] - base["alias_db"]
         if d > 1.5: notes.append("alias +%.1f dB" % d)
         elif d < -1.5: notes.append("alias %.1f dB" % d)
-    if t.get("shimmer") and base.get("shimmer"):
-        r = t["shimmer"] / base["shimmer"]
-        if r > 1.2: notes.append("shimmer x%.2f" % r)
-        elif r < 0.83: notes.append("shimmer x%.2f" % r)
+    if t.get("motion_err") is not None and base.get("motion_err") is not None:
+        d = t["motion_err"] - base["motion_err"]
+        if abs(d) > 1.5: notes.append("pan err %+.1f dB" % d)
+    if t.get("real_shimmer") and base.get("real_shimmer"):
+        r = t["real_shimmer"] / base["real_shimmer"]
+        if r > 1.25 or r < 0.8: notes.append("real-pan shimmer x%.2f" % r)
     if t.get("mtf_0.6") is not None and base.get("mtf_0.6") is not None:
         d = t["mtf_0.6"] - base["mtf_0.6"]
         if abs(d) > 0.03: notes.append("MTF0.6 %+.2f" % d)
@@ -1184,16 +1255,16 @@ def report(args):
         o = [int(v) for v in out.split("x")]
         x0, y0, w, h, sc = fit_rect(s[0], s[1], o[0], o[1])
         lines.append("\n### %s -> %s (scale x%.3f, picture %gx%g)\n" % (src[1:], out, sc, w, h))
-        lines.append("| stage config | alias dB | chroma alias dB | grain err dB | MTF 0.4-0.6 | MTF 0.6-0.8 | MTF 0.8-0.95 | ringing % | shimmer | shimmer stop | real-pan shimmer | vs default |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("| stage config | alias dB | chroma alias dB | grain err dB | MTF 0.4-0.6 | MTF 0.6-0.8 | MTF 0.8-0.95 | ringing % | pan err dB | pan moire (stop) dB | shimmer | real-pan HF err dB | real-pan shimmer | vs default |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         order = [c[0] for c in CONFIGS]
         for cfg in sorted(rows, key=lambda c: order.index(c) if c in order else 99):
             t = rows[cfg]
-            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 cfg, fmt(t.get("alias_db")), fmt(t.get("alias_chroma_db")), fmt(t.get("grain_err_db")),
                 fmt(t.get("mtf_0.4"), "%.2f"), fmt(t.get("mtf_0.6"), "%.2f"), fmt(t.get("mtf_0.8"), "%.2f"),
-                fmt(t.get("ringing")), fmt(t.get("shimmer"), "%.3f"), fmt(t.get("shimmer_stop"), "%.3f"),
-                fmt(t.get("real_shimmer"), "%.3f"), "baseline" if cfg == "default" else verdict(t, base)))
+                fmt(t.get("ringing")), fmt(t.get("motion_err")), fmt(t.get("motion_err_stop")), fmt(t.get("shimmer"), "%.4f"),
+                fmt(t.get("real_hf_err")), fmt(t.get("real_shimmer"), "%.3f"), "baseline" if cfg == "default" else verdict(t, base)))
     text = "\n".join(lines) + "\n"
     with open(os.path.join(args.dir, args.results.replace(".json", ".md")), "w") as f:
         f.write(text)
@@ -1221,8 +1292,10 @@ def gate(args):
             fails.append("%s: MTF 0.6-0.8 %.2f < %.2f" % (pair, t["mtf_0.6"], lim["mtf_0.6_min"]))
         if t.get("ringing") is not None and t["ringing"] > lim["ringing_max"]:
             fails.append("%s: ringing %.1f%% > %.1f%%" % (pair, t["ringing"], lim["ringing_max"]))
-        if t.get("shimmer") is not None and "shimmer_max" in lim and t["shimmer"] > lim["shimmer_max"]:
-            fails.append("%s: shimmer %.3f > %.3f" % (pair, t["shimmer"], lim["shimmer_max"]))
+        if t.get("motion_err") is not None and "motion_err_db_max" in lim and t["motion_err"] > lim["motion_err_db_max"]:
+            fails.append("%s: pan error %.1f dB > %.1f" % (pair, t["motion_err"], lim["motion_err_db_max"]))
+        if t.get("real_shimmer") is not None and "real_shimmer_max" in lim and t["real_shimmer"] > lim["real_shimmer_max"]:
+            fails.append("%s: real-pan shimmer %.3f > %.3f" % (pair, t["real_shimmer"], lim["real_shimmer_max"]))
         if not t.get("geometry_ok", True):
             fails.append("%s: picture rectangle is not the aspect-preserving fit" % pair)
         for ctl in ("ctl_down_gpu_noaa", "ctl_up_nearest"):
