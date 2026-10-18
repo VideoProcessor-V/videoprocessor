@@ -443,6 +443,8 @@
     <ClCompile Include="QueueTimingFixesTests.cpp" />
     <ClCompile Include="EfficiencyTests.cpp" />
     <ClCompile Include="RealFootageSuiteTests.cpp" />
+    <ClCompile Include="QueueStressTests.cpp" />
+    <ClCompile Include="QueueStressLaneTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />
     <ClCompile Include="ActivePictureDecisionTimelineTests.cpp" />

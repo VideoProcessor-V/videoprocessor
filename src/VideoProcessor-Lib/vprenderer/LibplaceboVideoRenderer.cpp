@@ -26682,6 +26682,15 @@ void LibplaceboVideoRenderer::SetFrameQueueMaxSize(size_t size)
 			m_frameQueue.pop_front();
 			++purgedFrames;
 		}
+		// Queue stress harness 2026-10-18 (queue_timing_fixes): the purge is a queue drop like
+		// the backlog flush and the overflow - the frame after it carries a no-fill gap (its
+		// cause in the log; no pair, history or film timing across the dropped frames).
+		if (purgedFrames > 0 && !m_frameQueue.empty() && m_queueTimingFixes.load(std::memory_order_relaxed))
+		{
+			m_frameQueue.front().gapBefore = true;
+			m_frameQueue.front().gapCause = "queue resize";
+			m_frameQueue.front().gapFrames = 0;
+		}
 		if (purgedFrames > 0)
 		{
 			const uint64_t droppedTotal =

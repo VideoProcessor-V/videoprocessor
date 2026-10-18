@@ -232,4 +232,6 @@
   <ItemGroup><ClCompile Include="GeneralRateMatrixTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="BugHunt20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="RenderAheadPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="QueueStressTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="QueueStressLaneTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>
