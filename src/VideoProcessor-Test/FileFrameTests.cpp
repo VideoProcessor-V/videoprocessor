@@ -113,9 +113,11 @@ namespace VideoProcessorTest
 			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::DNxHR) + 3, static_cast<int>(VideoFrameEncoding::P016));
 		}
 
-		TEST_METHOD(PluginApiVersionIs35)
+		// Claimed 35 on the filter branch; 37 after integ's build ID (35) and the
+		// report-a-problem WriteDiagnosticHistory (36), integ/mpc-state 2026-10-17.
+		TEST_METHOD(PluginApiVersionIs37)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(35), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(37), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 	};
 
