@@ -344,6 +344,11 @@ Options:
       With /newlldv, return real SDR sent as BT.2020 to SDR from picture
       statistics (at a cut, after SDR evidence in two shots). Default on.
 
+  /dv_tunnel_handoff
+      With the DV tunnel on, hand a signal that is not a tunnel (10-bit RGB,
+      or BT.2020 RGB without a tunnel header: LLDV / HDR10 as RGB) to the
+      normal path, where newlldv can infer PQ. Default on.
+
   /noui
       Hide the user interface; show video only.
 
@@ -832,6 +837,7 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	AppendConfigBoolOption(arguments, config, { "scene_correction_basic" }, L"/scene_correction_basic");
 	AppendConfigBoolOption(arguments, config, { "newlldv", "new_lldv" }, L"/newlldv");
 	AppendConfigBoolOption(arguments, config, { "newlldv_sdr_veto" }, L"/newlldv_sdr_veto");
+	AppendConfigBoolOption(arguments, config, { "dv_tunnel_handoff" }, L"/dv_tunnel_handoff");
 		AppendConfigBoolOption(arguments, config, { "dolby_vision_tunnel" }, L"/dolby_vision_tunnel");
 	AppendConfigBoolOption(arguments, config, { "noui", "no_ui" }, L"/noui");
 	AppendConfigBoolOption(arguments, config, { "startminimized", "start_minimized" }, L"/startminimized");
@@ -1151,6 +1157,7 @@ bool IsBooleanCommandLineOption(const wchar_t* argument)
 		IsCommandLineOption(argument, L"/scene_correction_basic") ||
 		IsCommandLineOption(argument, L"/newlldv") ||
 		IsCommandLineOption(argument, L"/newlldv_sdr_veto") ||
+		IsCommandLineOption(argument, L"/dv_tunnel_handoff") ||
 		IsCommandLineOption(argument, L"/dolby_vision_tunnel") ||
 		IsCommandLineOption(argument, L"/startminimized") ||
 		IsCommandLineOption(argument, L"/active_output_sweep") ||
@@ -2082,6 +2089,11 @@ BOOL CVideoProcessorApp::InitInstance()
 				L"/dolby_vision_tunnel", booleanValue))
 			{
 				dlg.EnableDolbyVisionTunnel(booleanValue);
+			}
+			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs,
+				L"/dv_tunnel_handoff", booleanValue))
+			{
+				dlg.EnableDolbyVisionTunnelHandoff(booleanValue);
 			}
 
 			if (wcscmp(pArgs[i], L"/lldv_max_cll") == 0 && (i + 1) < iNumOfArgs)

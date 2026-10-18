@@ -53,14 +53,19 @@ HdrInferenceEligibility EvaluateHdrInferenceEligibility(
 		result.reason = "colorimetry is not BT.2020";
 	else if (signal.bitDepth <= 0)
 		result.reason = "source bit depth unknown";
-	else if (signal.bitDepth < 10)
+	else if (signal.bitDepth < 10 && !signal.lldvIndicated && !signal.dvTunnelHandedOff)
 		result.reason = "source is below 10-bit";
 	else if (signal.explicitSettingsForbid)
 		result.reason = "explicit hdr_colorspace REC709 forbids HDR10 inference";
 	else
 	{
 		result.eligible = true;
-		result.reason = "BT.2020, 10/12-bit, no HDR InfoFrame";
+		// DV input fixes 2026-10-18: 8-bit qualifies only with an LLDV
+		// indication (the Dolby VSIF, or the DV tunnel hand-off on a DV
+		// input); see HdrInferenceSignal.
+		result.reason = signal.bitDepth >= 10 ? "BT.2020, 10/12-bit, no HDR InfoFrame" :
+			signal.lldvIndicated ? "BT.2020, 8-bit, no HDR InfoFrame, Dolby VSIF says LLDV" :
+			"BT.2020, 8-bit, no HDR InfoFrame, not a DV tunnel on a DV input (handed off)";
 	}
 	return result;
 }

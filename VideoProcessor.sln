@@ -25,6 +25,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-ConfigDiscov
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-ConfigTests", "src\VideoProcessor-ConfigTests\VideoProcessor-ConfigTests.vcxproj", "{C8CA4B71-E41A-45D2-88FC-E96724DF68E4}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-DvLoopback", "src\VideoProcessor-DvLoopback\VideoProcessor-DvLoopback.vcxproj", "{6D2B7C41-9E35-4F0A-B8D2-5A1C3E7F9D60}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-OutputProbe", "src\VideoProcessor-OutputProbe\VideoProcessor-OutputProbe.vcxproj", "{3F68A7E3-3B0B-4493-8DD0-FF33D51B15DB}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-VPRendererBeta", "src\VideoProcessor-VPRenderer\VideoProcessor-VPRendererBeta.vcxproj", "{D4AB7E36-6A11-4DCA-8CA0-9C7F55376E10}"
@@ -225,6 +227,11 @@ Global
 		{C8CA4B71-E41A-45D2-88FC-E96724DF68E4}.Release|x64.ActiveCfg = Release|x64
 		{C8CA4B71-E41A-45D2-88FC-E96724DF68E4}.Release|x64.Build.0 = Release|x64
 		{C8CA4B71-E41A-45D2-88FC-E96724DF68E4}.Release|x86.ActiveCfg = Release|x64
+		{6D2B7C41-9E35-4F0A-B8D2-5A1C3E7F9D60}.Debug|x64.ActiveCfg = Release|x64
+		{6D2B7C41-9E35-4F0A-B8D2-5A1C3E7F9D60}.Debug|x86.ActiveCfg = Release|x64
+		{6D2B7C41-9E35-4F0A-B8D2-5A1C3E7F9D60}.Release|x64.ActiveCfg = Release|x64
+		{6D2B7C41-9E35-4F0A-B8D2-5A1C3E7F9D60}.Release|x64.Build.0 = Release|x64
+		{6D2B7C41-9E35-4F0A-B8D2-5A1C3E7F9D60}.Release|x86.ActiveCfg = Release|x64
 		{3F68A7E3-3B0B-4493-8DD0-FF33D51B15DB}.Debug|x64.ActiveCfg = Release|x64
 		{3F68A7E3-3B0B-4493-8DD0-FF33D51B15DB}.Debug|x86.ActiveCfg = Release|x64
 		{3F68A7E3-3B0B-4493-8DD0-FF33D51B15DB}.Release|x64.ActiveCfg = Release|x64

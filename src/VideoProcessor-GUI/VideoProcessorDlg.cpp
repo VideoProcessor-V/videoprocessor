@@ -93,6 +93,11 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <vprenderer/OptionalRendererLayout.h>
 #include <SourceRuleVariable.h>
+#include <DolbyVisionTunnelGate.h>
+#include <HdrInferenceSignalBuilder.h>
+#include <LldvStaticMetadata.h>
+#include <RawCaptureRecorder.h>
+#include <ShortcutDefaults.h>
 
 
 #include "VideoProcessorDlg.h"
@@ -619,41 +624,37 @@ struct ShortcutDefinition
 {
 	const char* configKey;
 	WORD command;
-	WORD defaultKey;
-	BYTE defaultModifiers;
-	bool rendererSpecific = false;
 };
 
+// The compiled default chord of each command comes from ShortcutDefaults.h
+// (DV input fixes 2026-10-18: one table for VP and Config, checked for
+// collisions by ShortcutDefaultsTests).
 const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
 {
-
-	{ "auto_set",              ID_COMMAND_AUTO_SET,               'A',       FCONTROL | FSHIFT },
-	{ "fullscreen_exit",       ID_COMMAND_FULLSCREEN_EXIT,        VK_ESCAPE, 0 },
-	{ "fullscreen_toggle",     ID_COMMAND_FULLSCREEN_TOGGLE,
-		ConfigurationLiveApply::ViewToggleDefaultKey,
-		ConfigurationLiveApply::ViewToggleDefaultModifiers },
-	{ "toggle_stats_overlay",  ID_COMMAND_TOGGLE_STATS_OVERLAY,   'I',       FCONTROL },
-	{ "capture_rendered_output", ID_COMMAND_CAPTURE_RENDERED_OUTPUT, 'S',     FCONTROL | FALT },
-	{ "state_report",          ID_COMMAND_STATE_REPORT,
-		StateReportSettings::kShortcutDefaultKey,
-		StateReportSettings::kShortcutDefaultModifiers },
-	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES,            0,         0 },
-	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS,              0,         0 },
-	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES,           'I',       FCONTROL | FALT },
-	{ "pq_set",                ID_COMMAND_PQ_SET,                 'P',       FCONTROL | FSHIFT },
-	{ "renderer_restart",      ID_COMMAND_RENDERER_RESTART,       'R',       FSHIFT },
-	{ "renderer_reset",        ID_COMMAND_RENDERER_RESET,         'R',       0 },
-	{ "capture_1",             ID_COMMAND_CAPTURE_1,              '1',       FCONTROL },
-	{ "capture_2",             ID_COMMAND_CAPTURE_2,              '2',       FCONTROL },
-	{ "capture_3",             ID_COMMAND_CAPTURE_3,              '3',       FCONTROL },
-	{ "capture_4",             ID_COMMAND_CAPTURE_4,              '4',       FCONTROL },
-	{ "video_conversion_off",  ID_COMMAND_VC_NONE,                'V',       0 },
-	{ "video_conversion_p010", ID_COMMAND_VC_P010,                'V',       FSHIFT },
-	{ "config_editor",         ID_COMMAND_CONFIG_EDITOR,          'S',       FCONTROL | FSHIFT },
-	{ "toggle_noui",           ID_COMMAND_TOGGLE_NO_UI,
-		ConfigurationLiveApply::VideoOnlyToggleDefaultKey,
-		ConfigurationLiveApply::VideoOnlyToggleDefaultModifiers },
-	{ "display_rules_auto",    ID_COMMAND_DISPLAY_RULE_AUTO,      VK_F4,     0, true },
+	{ "auto_set",              ID_COMMAND_AUTO_SET },
+	{ "fullscreen_exit",       ID_COMMAND_FULLSCREEN_EXIT },
+	{ "fullscreen_toggle",     ID_COMMAND_FULLSCREEN_TOGGLE },
+	{ "toggle_stats_overlay",  ID_COMMAND_TOGGLE_STATS_OVERLAY },
+	{ "capture_rendered_output", ID_COMMAND_CAPTURE_RENDERED_OUTPUT },
+	// Report-a-problem (StateReport.h); default Ctrl+Alt+D.
+	{ "state_report",          ID_COMMAND_STATE_REPORT },
+	// Raw capture recording (RawCaptureRecorder.h; needs VP_RAW_CAPTURE_PATH).
+	{ "raw_capture",           ID_COMMAND_RAW_CAPTURE_TOGGLE },
+	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES },
+	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS },
+	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES },
+	{ "pq_set",                ID_COMMAND_PQ_SET },
+	{ "renderer_restart",      ID_COMMAND_RENDERER_RESTART },
+	{ "renderer_reset",        ID_COMMAND_RENDERER_RESET },
+	{ "capture_1",             ID_COMMAND_CAPTURE_1 },
+	{ "capture_2",             ID_COMMAND_CAPTURE_2 },
+	{ "capture_3",             ID_COMMAND_CAPTURE_3 },
+	{ "capture_4",             ID_COMMAND_CAPTURE_4 },
+	{ "video_conversion_off",  ID_COMMAND_VC_NONE },
+	{ "video_conversion_p010", ID_COMMAND_VC_P010 },
+	{ "config_editor",         ID_COMMAND_CONFIG_EDITOR },
+	{ "toggle_noui",           ID_COMMAND_TOGGLE_NO_UI },
+	{ "display_rules_auto",    ID_COMMAND_DISPLAY_RULE_AUTO },
 };
 
 // audit 2026-10-16: keyboard auto-repeat (a held key) re-dispatches only the
@@ -831,15 +832,22 @@ HACCEL CreateConfiguredAccelerators(
 
 	for (const auto& definition : SHORTCUT_DEFINITIONS)
 	{
-		if (hasUnifiedRendererConfig && definition.rendererSpecific)
+		const ShortcutDefault* compiled = FindShortcutDefault(definition.configKey);
+		const bool rendererSpecific = compiled && compiled->rendererSpecific;
+		if (hasUnifiedRendererConfig && rendererSpecific)
 			continue;
-		ACCEL accelerator = { static_cast<BYTE>(FVIRTKEY | definition.defaultModifiers), definition.defaultKey, definition.command };
-		bool hasBinding = definition.defaultKey != 0;
+		// ShortcutDefaults.h: the compiled default (none when empty).
+		ACCEL defaultAccelerator = {};
+		const bool hasDefault = compiled && compiled->chord[0] != '\0' &&
+			TryParseShortcut(compiled->chord, defaultAccelerator);
+		defaultAccelerator.cmd = definition.command;
+		ACCEL accelerator = defaultAccelerator;
+		bool hasBinding = hasDefault;
 		std::string configuredValue;
 		const ConfigFile& config =
-			definition.rendererSpecific ? rendererConfig : mainConfig;
+			rendererSpecific ? rendererConfig : mainConfig;
 		const bool hasConfig =
-			definition.rendererSpecific ? hasRendererConfig : hasMainConfig;
+			rendererSpecific ? hasRendererConfig : hasMainConfig;
 		if (hasConfig &&
 			config.TryGetString("shortcuts", definition.configKey, configuredValue))
 		{
@@ -882,14 +890,14 @@ HACCEL CreateConfiguredAccelerators(
 			// A duplicate user binding is ambiguous, so retain the command's
 			// compiled default when it is still available. Bug hunt 2 (L6):
 			// every collision and its resolution is logged (it was silent).
-			if (definition.defaultKey == 0)
+			if (!hasDefault)
 			{
 				DebugLog::Log("Shortcut collision: [shortcuts] %s duplicates an earlier "
 					"binding; no compiled default, command left unbound",
 					definition.configKey);
 				continue;
 			}
-			accelerator = { static_cast<BYTE>(FVIRTKEY | definition.defaultModifiers), definition.defaultKey, definition.command };
+			accelerator = defaultAccelerator;
 			const unsigned int defaultBinding = (static_cast<unsigned int>(accelerator.fVirt) << 16) | accelerator.key;
 			const bool defaultFree = bindings.insert(defaultBinding).second;
 			if (defaultFree)
@@ -2160,6 +2168,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_MESSAGE(WM_MESSAGE_PROJECTOR_TEST_DONE, &CVideoProcessorDlg::OnProjectorTestDone)
 	ON_MESSAGE(WM_MESSAGE_STATE_REPORT_DONE, &CVideoProcessorDlg::OnStateReportDone)
 	ON_MESSAGE(WM_MESSAGE_HDR_INFERENCE_PICTURE, &CVideoProcessorDlg::OnMessageHdrInferencePicture)
+	ON_MESSAGE(WM_MESSAGE_DV_TUNNEL_HANDOFF, &CVideoProcessorDlg::OnMessageDvTunnelHandoff)
 	ON_MESSAGE(WM_MODERN_OPERATOR_ACTION, &CVideoProcessorDlg::OnMessageModernOperatorAction)
 
 	// Command handlers (from accelerator)
@@ -2179,6 +2188,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_COMMAND(ID_COMMAND_TOGGLE_STATS_OVERLAY, &CVideoProcessorDlg::OnCommandToggleStatsOverlay)
 	ON_COMMAND(ID_COMMAND_CAPTURE_RENDERED_OUTPUT, &CVideoProcessorDlg::OnCommandCaptureRenderedOutput)
 	ON_COMMAND(ID_COMMAND_STATE_REPORT, &CVideoProcessorDlg::OnCommandStateReport)
+	ON_COMMAND(ID_COMMAND_RAW_CAPTURE_TOGGLE, &CVideoProcessorDlg::OnCommandRawCaptureToggle)
 	ON_COMMAND(ID_COMMAND_DISPLAY_RULE_AUTO, &CVideoProcessorDlg::OnCommandDisplayRuleAuto)
 	ON_COMMAND(ID_COMMAND_CONFIG_EDITOR, &CVideoProcessorDlg::OnCommandConfigEditor)
 	ON_COMMAND(ID_COMMAND_TOGGLE_NO_UI, &CVideoProcessorDlg::OnCommandToggleNoUi)
@@ -5552,6 +5562,33 @@ void CVideoProcessorDlg::EnableDolbyVisionTunnel(bool enabled)
 	DebugLog::Log("Dolby Vision RGB tunnel: enabled=%d", enabled ? 1 : 0);
 }
 
+// [general] dv_tunnel_handoff (DV input fixes 2026-10-18, default on).
+void CVideoProcessorDlg::EnableDolbyVisionTunnelHandoff(bool enabled)
+{
+	m_dvTunnelHandoffEnabled = enabled;
+	DebugLog::Log("dv_tunnel_handoff: %s", enabled ? "on" : "off");
+}
+
+// A profile whose DV mode is DV Tunneling owns the capture for the LLDV /
+// newlldv decisions - except a signal the hand-off proved is not a tunnel and,
+// with dv_tunnel_handoff on, a YCbCr capture (the tunnel is only ever RGB
+// 4:4:4; DV input fixes 2026-10-18).
+bool CVideoProcessorDlg::ProfileTunnelClaimsSignal() const
+{
+	if (m_profileDolbyVisionTunnelOverride != 1 || DvTunnelHandedOff())
+		return false;
+	const VideoState* state = m_captureDeviceVideoState;
+	return !(m_dvTunnelHandoffEnabled && state &&
+		DolbyVisionTunnelImpossibleEncoding(state->videoFrameEncoding));
+}
+
+bool CVideoProcessorDlg::DvTunnelHandedOff() const
+{
+	return m_dvTunnelHandoffEnabled && m_dvTunnelHandedOff &&
+		m_dvTunnelHandedOffGeneration ==
+			m_dvTunnelHandoffGeneration.load(std::memory_order_acquire);
+}
+
 void CVideoProcessorDlg::SetLldvMaxCll(double value)
 {
 	m_lldvMaxCllOverride = value;
@@ -8903,6 +8940,15 @@ LRESULT CVideoProcessorDlg::OnStateReportDone(WPARAM, LPARAM lParam)
 	return 0;
 }
 
+// Raw capture recording on / off (RawCaptureRecorder.h): the status line is
+// logged by the recorder and shown like the rendered-output capture status.
+void CVideoProcessorDlg::OnCommandRawCaptureToggle()
+{
+	const std::string status = RawCaptureRecorder::Instance().Toggle();
+	OnRendererDetailString(CString(status.c_str()),
+		m_rendererGeneration.load(std::memory_order_acquire));
+}
+
 void CVideoProcessorDlg::OnCommandCaptureAnalysisDiagnostics(bool includeFrames)
 {
 	auto& trace = AnalysisDiagnosticTrace::Instance();
@@ -9074,6 +9120,17 @@ void CVideoProcessorDlg::OnCaptureDeviceCardStateChange(CaptureDeviceCardStateCo
 
 	assert(cardState);
 
+	// Raw capture recording (opt-in): what the card reports, for the sidecar.
+	if (RawCaptureRecorder::Instance().Enabled())
+	{
+		std::vector<std::string> other;
+		for (const CString& line : cardState->other)
+			other.emplace_back(CStringA(line).GetString());
+		RawCaptureRecorder::Instance().OnCardState(std::string(),
+			CStringA(ToString(cardState->inputEncoding)).GetString(),
+			CStringA(ToString(cardState->inputBitDepth)).GetString(), other);
+	}
+
 	PostMessage(
 		WM_MESSAGE_CAPTURE_DEVICE_CARD_STATE_CHANGE,
 		(WPARAM)cardState.Detach(),
@@ -9107,6 +9164,14 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoStateChange(
 		return;
 	}
 
+	// Raw capture recording (opt-in, RawCaptureRecorder.h).
+	if (RawCaptureRecorder::Instance().Enabled())
+	{
+		RawCaptureRecorder::Instance().OnCardState(CStringA(source->GetName()).GetString(),
+			std::string("(unchanged)"), std::string("(unchanged)"), {});
+		RawCaptureRecorder::Instance().OnVideoState(*videoState);
+	}
+
 	const CaptureVideoStateChangeClass changeClass =
 		ClassifyCaptureVideoStateChange(
 			m_lastPublishedValidCaptureVideoState,
@@ -9114,6 +9179,11 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoStateChange(
 	if (videoState->valid)
 		m_lastPublishedValidCaptureVideoState = videoState;
 	m_latestCaptureVideoStateChangeClass = changeClass;
+	// DV tunnel hand-off: a new signal starts a new probe generation (a
+	// hand-off belongs to the signal it was decided on).
+	if (changeClass == CaptureVideoStateChangeClass::Initial ||
+		changeClass == CaptureVideoStateChangeClass::MaterialSignal)
+		m_dvTunnelHandoffGeneration.fetch_add(1, std::memory_order_acq_rel);
 	const RendererIngressState::CaptureSequenceSnapshot beforePublication =
 		m_rendererIngressState->CaptureSequences();
 	const bool materialStateAcknowledgementPending =
@@ -9195,6 +9265,10 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 	const bool measureHdrVeto =
 		m_hdrVetoMeasure.load(std::memory_order_acquire);
 	VideoStateComPtr hdrVetoState;
+	const bool probeDvTunnelHandoff =
+		m_dvTunnelHandoffProbe.load(std::memory_order_acquire);
+	VideoStateComPtr handoffState;
+	uint64_t handoffGeneration = 0;
 	{
 		std::lock_guard<std::mutex> sourceLock(
 			m_captureVideoStateNotificationMutex);
@@ -9203,6 +9277,12 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 			return;
 		if (measureHdrVeto)
 			hdrVetoState = m_lastPublishedValidCaptureVideoState;
+		if (probeDvTunnelHandoff)
+		{
+			handoffState = m_lastPublishedValidCaptureVideoState;
+			handoffGeneration =
+				m_dvTunnelHandoffGeneration.load(std::memory_order_acquire);
+		}
 		ingressLease = m_rendererIngressState->TryAcquire();
 		if (!ingressLease)
 		{
@@ -9230,6 +9310,9 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 			m_captureIngressLastRejectedFrameCounter = 0;
 		}
 	}
+	// Raw capture recording (opt-in, RawCaptureRecorder.h): the frame as the
+	// card delivered it, outside the state-notification lock.
+	RawCaptureRecorder::Instance().OnFrame(videoFrame);
 	if (!ingressLease)
 	{
 		{
@@ -9304,10 +9387,54 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 		DiagnosticHistory::Global().RecordFrame(record);
 		m_diagnosticCapturedFrames.fetch_add(1, std::memory_order_relaxed);
 	}
+	// DV tunnel hand-off: while a signal is handed off, the probe runs before
+	// the renderer so the first tunnel picture (CRC-valid header) never
+	// reaches the normal path; it and its successors are held back until the
+	// UI has given the signal back to the tunnel formatter.
+	bool handoffProbed = false;
+	if (probeDvTunnelHandoff && m_dvTunnelHandoffCaptureActive &&
+		handoffGeneration == m_dvTunnelHandoffCaptureGeneration &&
+		m_dvTunnelHandoffCaptureProbe.HandedOff())
+	{
+		handoffProbed = true;
+		if (ProbeDvTunnelHandoff(handoffState, videoFrame, handoffGeneration) ==
+			DolbyVisionTunnelHandoffEvent::TakeBack)
+		{
+			m_dvTunnelTakeBackRenderer = renderer.get();
+			m_dvTunnelTakeBackHeldFrames = 0;
+		}
+	}
+	if (m_dvTunnelTakeBackPending.load(std::memory_order_acquire))
+	{
+		// Released by a renderer other than the one that had the normal-path
+		// state (the restart), by the UI, or - as a last resort, should the
+		// restart never come - after about two seconds of pictures.
+		const double rate = handoffState && handoffState->displayMode ?
+			handoffState->displayMode->RefreshRateHz() : 0.0;
+		const uint64_t limit = static_cast<uint64_t>((std::max)(2.0, std::ceil((rate > 0 ? rate : 24.0) * 2.0)));
+		if (renderer.get() != m_dvTunnelTakeBackRenderer)
+			m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+		else if (++m_dvTunnelTakeBackHeldFrames > limit)
+		{
+			m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+			DebugLog::Log("Dolby Vision RGB tunnel hand-off: %llu pictures held back after the take-back without a renderer change; releasing",
+				static_cast<unsigned long long>(m_dvTunnelTakeBackHeldFrames));
+		}
+		else
+			return;
+	}
 	renderer->OnVideoFrame(videoFrame);
 	// newlldv SDR veto: picture statistics after the renderer has the frame.
 	if (measureHdrVeto)
 		MeasureHdrVetoPicture(hdrVetoState, videoFrame);
+	// DV tunnel hand-off probe: after the renderer has the frame too.
+	if (probeDvTunnelHandoff)
+	{
+		if (!handoffProbed)
+			ProbeDvTunnelHandoff(handoffState, videoFrame, handoffGeneration);
+	}
+	else
+		m_dvTunnelHandoffCaptureActive = false;
 	if (renderer->HasPresentedLiveFrame() &&
 		!m_transitionRevealPosted.exchange(
 			true, std::memory_order_acq_rel))
@@ -12828,68 +12955,25 @@ bool CVideoProcessorDlg::HdrModesPermitInference()
 
 HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
 {
-	HdrInferenceSignal signal;
-	signal.enabled = m_useNewLldvHeuristic;
-	const VideoState* state = m_captureDeviceVideoState;
-	signal.valid = state && state->valid;
-	if (!signal.valid)
-		return signal;
-	signal.colorspace = state->colorspace;
-	signal.eotf = state->eotf;
-	signal.hdrInfoFrame = state->hdrData != nullptr;
-	switch (m_captureInputBitDepth)
-	{
-	case BitDepth::BITDEPTH_8BIT: signal.bitDepth = 8; break;
-	case BitDepth::BITDEPTH_10BIT: signal.bitDepth = 10; break;
-	case BitDepth::BITDEPTH_12BIT: signal.bitDepth = 12; break;
-	default:
-		// The card did not report the wire depth: use the capture encoding.
-		switch (state->videoFrameEncoding)
-		{
-		case VideoFrameEncoding::UYVY:
-		case VideoFrameEncoding::HDYC:
-		case VideoFrameEncoding::ARGB_8BIT:
-		case VideoFrameEncoding::BGRA_8BIT:
-			signal.bitDepth = 8; break;
-		case VideoFrameEncoding::V210:
-		case VideoFrameEncoding::R210:
-		case VideoFrameEncoding::R10b:
-		case VideoFrameEncoding::R10l:
-			signal.bitDepth = 10; break;
-		case VideoFrameEncoding::R12B:
-		case VideoFrameEncoding::R12L:
-			signal.bitDepth = 12; break;
-		default:
-			signal.bitDepth = 0; break;
-		}
-		break;
-	}
-	// The DV tunnel (same predicate as BuildPushVideoState) and a profile that
-	// forces it own the signal; the inference never applies to them.
+	// HdrInferenceSignalBuilder.h (2026-10-17: moved unchanged so the
+	// incoming-HDR-mode tests build the same signal).
 	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
 		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
 	const int rendererIndex = m_rendererCombo.GetCurSel();
 	const RendererId* rendererId = rendererIndex >= 0 ?
 		reinterpret_cast<const RendererId*>(
 			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
-	signal.dolbyVisionTunnel = m_profileDolbyVisionTunnelOverride == 1 ||
-		(enableDolbyVisionTunnel && rendererId &&
-			rendererId->backend == RendererBackend::LIBPLACEBO &&
-			state->videoFrameEncoding == VideoFrameEncoding::R210 &&
-			state->eotf == EOTF::SDR);
-	signal.explicitSettingsForbid = !HdrModesPermitInference();
-	const DisplayModeSharedPtr& mode = state->displayMode;
-	uint64_t key = static_cast<uint64_t>(state->videoFrameEncoding) & 0xff;
-	if (mode)
-	{
-		key = (key << 14) ^ (mode->FrameWidth() & 0x3fff);
-		key = (key << 14) ^ (mode->FrameHeight() & 0x3fff);
-		key = (key << 20) ^ (static_cast<uint64_t>(
-			std::llround(mode->RefreshRateHz() * 1000.0)) & 0xfffff);
-		key = (key << 1) ^ (mode->IsInterlaced() ? 1 : 0);
-	}
-	signal.signalKey = key;
-	return signal;
+	DolbyVisionTunnelGateInput tunnelGate;
+	tunnelGate.tunnelSwitch = enableDolbyVisionTunnel;
+	tunnelGate.profileForcesTunnel = m_profileDolbyVisionTunnelOverride == 1;
+	tunnelGate.libplaceboRenderer = rendererId &&
+		rendererId->backend == RendererBackend::LIBPLACEBO;
+	tunnelGate.handedOff = DvTunnelHandedOff();   // DV input fixes 2026-10-18
+	tunnelGate.declineYCbCr = m_dvTunnelHandoffEnabled;
+	const VideoState* state = m_captureDeviceVideoState;
+	return BuildHdrInferenceSignalFromState(state, m_useNewLldvHeuristic,
+		m_captureInputBitDepth, tunnelGate,
+		state && state->valid ? !HdrModesPermitInference() : false);
 }
 
 HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
@@ -12953,7 +13037,7 @@ HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
 void CVideoProcessorDlg::UpdateHdrVetoMeasurement()
 {
 	const bool measure = m_hdrInference.WantsPictureStatistics() &&
-		m_profileDolbyVisionTunnelOverride != 1 && HdrModesPermitInference();
+		!ProfileTunnelClaimsSignal() && HdrModesPermitInference();
 	const bool previous = m_hdrVetoMeasure.load(std::memory_order_acquire);
 	if (measure == previous)
 		return;
@@ -13097,6 +13181,113 @@ LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
 	return 0;
 }
 
+namespace
+{
+	// Capture thread -> UI thread: the DV tunnel hand-off probe's decision.
+	struct DvTunnelHandoffMessage
+	{
+		uint64_t generation = 0;
+		DolbyVisionTunnelHandoffEvent event = DolbyVisionTunnelHandoffEvent::None;
+		uint64_t counter = 0;
+		uint64_t windowPictures = 0;
+		std::string reason;
+		std::string content;
+	};
+}
+
+DolbyVisionTunnelHandoffEvent CVideoProcessorDlg::ProbeDvTunnelHandoff(const VideoStateComPtr& state,
+	const VideoFrame& frame, uint64_t generation)
+{
+	// WARNING: capture thread. DolbyVisionTunnelHandoff.h: a CRC check of the
+	// first packet and two sparse grids per picture (well under a millisecond
+	// at 2160p), after the renderer has the frame.
+	if (!state || !state->valid || !state->displayMode || !frame.GetData())
+		return DolbyVisionTunnelHandoffEvent::None;
+	if (!m_dvTunnelHandoffCaptureActive || generation != m_dvTunnelHandoffCaptureGeneration)
+	{
+		// A new signal: the UI pushes its state through the ordinary path.
+		m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+		DolbyVisionTunnelHandoffSignal signal;
+		signal.colorspace = state->colorspace;
+		signal.hdrInfoFrame = state->hdrData != nullptr;
+		signal.vsif = state->dolbyVisionVsif;
+		signal.frameRate = state->displayMode->RefreshRateHz();
+		m_dvTunnelHandoffCaptureProbe.Reset(signal);
+		m_dvTunnelHandoffCaptureGeneration = generation;
+		m_dvTunnelHandoffCaptureActive = true;
+	}
+	CR210DolbyVisionTunnelFormatter::RasterView raster;
+	raster.data = frame.GetData();
+	raster.width = static_cast<uint32_t>(state->displayMode->FrameWidth());
+	raster.height = static_cast<uint32_t>(state->displayMode->FrameHeight());
+	raster.stride = state->BytesPerRow();
+	raster.encoding = state->videoFrameEncoding;
+	const DolbyVisionTunnelHandoffEvent event =
+		m_dvTunnelHandoffCaptureProbe.OnFrame(raster, frame.GetCounter());
+	if (event == DolbyVisionTunnelHandoffEvent::None)
+		return event;
+	if (event == DolbyVisionTunnelHandoffEvent::TakeBack)
+		m_dvTunnelTakeBackPending.store(true, std::memory_order_release);
+	std::unique_ptr<DvTunnelHandoffMessage> message(new DvTunnelHandoffMessage());
+	message->generation = generation;
+	message->event = event;
+	message->counter = frame.GetCounter();
+	message->windowPictures = m_dvTunnelHandoffCaptureProbe.WindowPictures();
+	message->reason = m_dvTunnelHandoffCaptureProbe.Reason();
+	message->content = ToString(m_dvTunnelHandoffCaptureProbe.LastContent());
+	if (PostMessage(WM_MESSAGE_DV_TUNNEL_HANDOFF,
+		reinterpret_cast<WPARAM>(message.get()), 0))
+		message.release();
+	else
+		m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+	return event;
+}
+
+LRESULT CVideoProcessorDlg::OnMessageDvTunnelHandoff(WPARAM wParam, LPARAM)
+{
+	std::unique_ptr<DvTunnelHandoffMessage> message(
+		reinterpret_cast<DvTunnelHandoffMessage*>(wParam));
+	// A take-back holds frames back on the capture thread until a renderer
+	// with the tunnel state takes them (a restarted renderer, or this one if
+	// it accepts the state in place). A take-back that changes nothing here
+	// releases them at once.
+	const bool takeBack = message && message->event == DolbyVisionTunnelHandoffEvent::TakeBack;
+	if (!message || !m_dvTunnelHandoffEnabled ||
+		message->generation != m_dvTunnelHandoffGeneration.load(std::memory_order_acquire))
+	{
+		if (takeBack)
+			m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+		return 0;
+	}
+	const bool handOff = message->event == DolbyVisionTunnelHandoffEvent::HandOff;
+	if (handOff == DvTunnelHandedOff())
+	{
+		if (takeBack)
+			m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+		return 0;
+	}
+	m_dvTunnelHandedOff = handOff;
+	m_dvTunnelHandedOffGeneration = message->generation;
+	m_dvTunnelHandoffReason = message->reason + " (content " + message->content + ")";
+	DebugLog::Log(handOff ?
+		"Dolby Vision RGB tunnel hand-off: picture %llu: %s; no tunnel evidence for %llu pictures; the normal path takes the signal (newlldv may infer PQ)" :
+		"Dolby Vision RGB tunnel hand-off: picture %llu: %s; the tunnel takes the signal back (%llu-picture window)",
+		static_cast<unsigned long long>(message->counter), m_dvTunnelHandoffReason.c_str(),
+		static_cast<unsigned long long>(message->windowPictures));
+	UpdateNewLldvCandidate();
+	const bool rendererAcceptedState = BuildPushVideoState();
+	if (m_videoRenderer && m_rendererState == RendererState::RENDERSTATE_RENDERING &&
+		(!m_videoRenderer->SupportsDynamicVideoState() || !rendererAcceptedState))
+	{
+		DebugLog::Log("Dolby Vision RGB tunnel hand-off: renderer cannot change the tunnel path in place; restarting renderer");
+		m_wantToRestartRenderer = true;
+	}
+	else if (takeBack)
+		m_dvTunnelTakeBackPending.store(false, std::memory_order_release);
+	UpdateState();
+	return 0;
+}
+
 void CVideoProcessorDlg::ApplyHdrInferenceVeto(const HdrInferenceUpdate& update,
 	const char* source)
 {
@@ -13184,7 +13375,10 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	// picture-statistics veto may return the epoch to SDR.
 	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
 		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
-	const bool isHDFuryLLDV = m_profileDolbyVisionTunnelOverride != 1 &&
+	// DV input fixes 2026-10-18: a signal the tunnel hand-off proved is not a
+	// tunnel, and a YCbCr capture (never a tunnel), are LLDV / HDR10 material
+	// even under a profile whose DV mode is DV Tunneling.
+	const bool isHDFuryLLDV = !ProfileTunnelClaimsSignal() &&
 		(m_useNewLldvHeuristic
 			? (m_newLldvCandidateConfirmed && HdrModesPermitInference())
 			: isLegacyHDFuryLLDV);
@@ -13240,6 +13434,8 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		" newlldv=" + (m_useNewLldvHeuristic ? "1" : "0") +
 		" hdr_modes_permit=" + (HdrModesPermitInference() ? "1" : "0") +
 		" inference=" + ToString(m_hdrInference.State());
+	RawCaptureRecorder::Instance().SetProcessingNote(lldvDecisionDiagnostic +
+		" dolby_vision_tunnel_switch=" + (enableDolbyVisionTunnel ? "1" : "0"));
 	if (lldvDecisionDiagnostic != m_lastLldvDecisionDiagnostic)
 	{
 		DebugLog::Log("%s", lldvDecisionDiagnostic.c_str());
@@ -13368,31 +13564,21 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 				const double profileMasteringMax =
 					activeLldv && activeLldv->hasMasteringMaxLuminance ?
 						activeLldv->masteringMaxLuminance : -1.0;
-				auto resolveLldvValue = [](double commandLineValue,
-					double profileValue, double fallback, bool strictlyPositive)
-				{
-					const bool hasCommandLineValue = strictlyPositive ?
-						commandLineValue > 0.0 : commandLineValue >= 0.0;
-					if (hasCommandLineValue)
-						return commandLineValue;
-					const bool hasProfileValue = strictlyPositive ?
-						profileValue > 0.0 : profileValue >= 0.0;
-					return hasProfileValue ? profileValue : fallback;
-				};
-				videoState->hdrData->maxCll = resolveLldvValue(
-					m_lldvMaxCllOverride, profileMaxCll,
-					lldvDefaults.maxCll, false);
-				videoState->hdrData->maxFall = resolveLldvValue(
-					m_lldvMaxFallOverride, profileMaxFall,
-					lldvDefaults.maxFall, false);
+				// LldvStaticMetadata.h (2026-10-17: moved unchanged so the
+				// incoming-HDR-mode tests check the same resolution).
+				LldvCommandLineMetadata lldvCommandLine;
+				lldvCommandLine.maxCll = m_lldvMaxCllOverride;
+				lldvCommandLine.maxFall = m_lldvMaxFallOverride;
+				lldvCommandLine.masteringMinLuminance = m_lldvMasteringMinLuminanceOverride;
+				lldvCommandLine.masteringMaxLuminance = m_lldvMasteringMaxLuminanceOverride;
+				const RendererProfileConfig::LldvMetadata lldvEffective =
+					ResolveLldvStaticMetadata(activeLldv, m_useNewLldvHeuristic, lldvCommandLine);
+				videoState->hdrData->maxCll = lldvEffective.maxCll;
+				videoState->hdrData->maxFall = lldvEffective.maxFall;
 				videoState->hdrData->masteringDisplayMinLuminance =
-					resolveLldvValue(m_lldvMasteringMinLuminanceOverride,
-						profileMasteringMin,
-						lldvDefaults.masteringMinLuminance, false);
+					lldvEffective.masteringMinLuminance;
 				videoState->hdrData->masteringDisplayMaxLuminance =
-					resolveLldvValue(m_lldvMasteringMaxLuminanceOverride,
-						profileMasteringMax,
-						lldvDefaults.masteringMaxLuminance, true);
+					lldvEffective.masteringMaxLuminance;
 				DebugLog::Log(
 					"LLDV effective metadata: profile=%s command_line=%g/%g/%g/%g profile_values=%g/%g/%g/%g defaults=%g/%g/%g/%g effective=%g/%g/%g/%g",
 					!activeLldv || activeLldv->profile.empty() ? "(none)" :
@@ -13434,11 +13620,32 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	const RendererId* rendererId = rendererIndex >= 0 ?
 		reinterpret_cast<const RendererId*>(
 			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
-	videoState->dolbyVisionTunnel = enableDolbyVisionTunnel &&
-		rendererId && rendererId->backend == RendererBackend::LIBPLACEBO &&
-		m_captureDeviceVideoState->valid &&
-		m_captureDeviceVideoState->videoFrameEncoding == VideoFrameEncoding::R210 &&
-		m_captureDeviceVideoState->eotf == EOTF::SDR;
+	// DolbyVisionTunnelGate.h (2026-10-17: the same predicate, shared with the
+	// DV loopback harness and the HDR-mode tests).
+	DolbyVisionTunnelGateInput tunnelGate;
+	tunnelGate.tunnelSwitch = enableDolbyVisionTunnel;
+	tunnelGate.libplaceboRenderer = rendererId &&
+		rendererId->backend == RendererBackend::LIBPLACEBO;
+	tunnelGate.captureStateValid = m_captureDeviceVideoState->valid;
+	tunnelGate.encoding = m_captureDeviceVideoState->videoFrameEncoding;
+	tunnelGate.eotf = m_captureDeviceVideoState->eotf;
+	tunnelGate.handedOff = DvTunnelHandedOff();   // DV input fixes 2026-10-18
+	videoState->dolbyVisionTunnel = DolbyVisionTunnelGateOpen(tunnelGate);
+	// The capture thread probes the pictures while the gate would take them.
+	// When probing stops (switch, profile, renderer or an invalid state), a
+	// hand-off ends with it, and a new generation makes the capture thread's
+	// probe start again from "not handed off" when probing resumes.
+	const bool probeHandoff = m_dvTunnelHandoffEnabled &&
+		DolbyVisionTunnelGateWouldOpen(tunnelGate);
+	if (!probeHandoff && m_dvTunnelHandoffProbe.load(std::memory_order_acquire))
+	{
+		m_dvTunnelHandedOff = false;
+		m_dvTunnelHandoffGeneration.fetch_add(1, std::memory_order_acq_rel);
+	}
+	m_dvTunnelHandoffProbe.store(probeHandoff, std::memory_order_release);
+	if (tunnelGate.handedOff && DolbyVisionTunnelGateWouldOpen(tunnelGate))
+		DebugLog::Log("Dolby Vision RGB tunnel: signal handed to the normal path (not a tunnel; dv_tunnel_handoff): %s",
+			m_dvTunnelHandoffReason.c_str());
 	if (videoState->dolbyVisionTunnel)
 	{
 		videoState->eotf = EOTF::PQ;
@@ -13466,7 +13673,7 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 			hdr.maxFall = 1000;
 		DebugLog::Log("Dolby Vision RGB tunnel: effective source R210/12-bit 4:2:2 PQ BT.2020");
 	}
-	else if (enableDolbyVisionTunnel)
+	else if (enableDolbyVisionTunnel && !tunnelGate.handedOff)
 		DebugLog::Log("Dolby Vision RGB tunnel: waiting for R210 SDR capture state");
 
 	m_builtVideoState = videoState;

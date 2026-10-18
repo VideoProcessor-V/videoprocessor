@@ -44,6 +44,12 @@ struct HdrInferenceSignal
 	bool hdrInfoFrame = false;          // the source sent static HDR metadata
 	int bitDepth = 0;                   // source bit depth; 0 = unknown
 	bool dolbyVisionTunnel = false;     // the DV tunnel owns this signal
+	// DV input fixes 2026-10-18: an explicit LLDV indication lets an 8-bit
+	// signal qualify (LLDV dithered to RGB 8-bit is still source-mapped PQ):
+	// the Dolby VSIF says low-latency, or the DV tunnel hand-off probe proved
+	// a BT.2020 signal on a DV input (tunnel switch on) is not a tunnel.
+	bool lldvIndicated = false;
+	bool dvTunnelHandedOff = false;
 	// Explicit owner settings that force a non-HDR10 reading. hdr_colorspace
 	// REC709 declares the source's primaries as Rec.709.
 	bool explicitSettingsForbid = false;

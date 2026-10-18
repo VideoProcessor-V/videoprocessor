@@ -1,6 +1,7 @@
 #pragma once
 
 #include <video_frame_formatter/IVideoFrameFormatter.h>
+#include <VideoFrameEncoding.h>
 #include <Windows.h>
 #include <cstdint>
 #include <array>
@@ -27,7 +28,8 @@ public:
 	// dv_tunnel_gpu_unpack: everything FormatVideoFrame does except writing
 	// the planes. The DM packet is found and CRC-checked reading only its own
 	// pixels (plus a sparse whole-picture alignment probe while the placement
-	// is unknown, Bug hunt 2026-10-17); the metadata and
+	// is unknown, Bug hunt 2026-10-17; and the last row of a picture it would
+	// unpack, the truncated-frame check, DV input fixes 2026-10-18); the metadata and
 	// contract are then current exactly as after FormatVideoFrame.
 	//   REJECTED  FormatVideoFrame would return false
 	//   BLACK     FormatVideoFrame would write zeros (no lock / no valid DM)
@@ -44,6 +46,32 @@ public:
 	// unpack's fallback for a frame already handed on raw), with the same row
 	// workers. Not concurrent with FormatVideoFrame (callers hold one lock).
 	bool UnpackPicture(const void* source, BYTE* output, bool highAligned);
+
+	// DV input fixes 2026-10-18: the formatter's own rules on a raw raster,
+	// without formatter state (the GUI's tunnel hand-off probe runs them on
+	// the capture thread; DolbyVisionTunnelHandoff.h).
+	struct RasterView
+	{
+		const void* data = nullptr;
+		uint32_t width = 0;
+		uint32_t height = 0;
+		uint32_t stride = 0;
+		VideoFrameEncoding encoding = VideoFrameEncoding::UNKNOWN;
+	};
+	// A CRC-valid first packet with a supported header (any copy or the 2-of-3
+	// vote), in either RGB8 placement. highAligned: the placement found.
+	static bool HasTunnelHeader(const RasterView& raster, bool* highAligned = nullptr);
+	// What the 10-bit fields carry (the placement grid AnalyzeFrame uses):
+	// RGB8 in the high or the low eight bits, 10-bit content (both ends of
+	// the fields in use: never a tunnel stored untouched), or undecided
+	// (dark / too few samples).
+	enum class RgbContent { UNKNOWN, HIGH8, LOW8, TEN_BIT };
+	static RgbContent ClassifyRgbContent(const RasterView& raster);
+	// The tunnel-content cue the SDR exit uses (either placement).
+	static bool LooksLikeTunnelContent(const RasterView& raster);
+	// The truncated-frame check (last row all zero).
+	static bool LastRowBlank(const RasterView& raster);
+	uint64_t TruncatedFrames() const { return m_truncatedFrames; }
 	LONG GetOutFrameSize() const override { return m_outputSize; }
 	VideoFrameFormatterOutputContract GetOutputContract() const override
 	{
@@ -130,6 +158,7 @@ private:
 	bool m_hasLastHeaderCounter = false;
 	uint32_t m_idAmbiguityResets = 0;
 	uint32_t m_majorityRecoveries = 0;
+	uint64_t m_truncatedFrames = 0;       // DV input fixes 2026-10-18
 	std::array<uint16_t, 256> m_titleLevelCounts{};
 	bool m_titleLevelsLogged = false;
 	bool m_titleTrimLogged[2] = {};       // [0]=L2, [1]=L8

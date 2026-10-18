@@ -63,6 +63,7 @@
 #include <ConfigurationApplyPolicy.h>
 #include <CaptureVideoStatePolicy.h>
 #include <HdrInference.h>
+#include <DolbyVisionTunnelHandoff.h>
 #include <ConfigEditorCore.h>
 #include "ConfigurationRpcServer.h"
 #include "ModernOperatorView.h"
@@ -96,6 +97,7 @@
 #define WM_MESSAGE_PROJECTOR_TEST_DONE                   (WM_APP + 23)
 #define WM_MESSAGE_HDR_INFERENCE_PICTURE                 (WM_APP + 24)
 #define WM_MESSAGE_STATE_REPORT_DONE                     (WM_APP + 25)
+#define WM_MESSAGE_DV_TUNNEL_HANDOFF                     (WM_APP + 26)
 
 static_assert(WM_MESSAGE_DIRECTSHOW_NOTIFICATION !=
 	WM_MESSAGE_DIRECTSHOW_OWNER_COMPLETION,
@@ -199,6 +201,7 @@ public:
 	void EnableNewLldvHeuristic(bool enabled = true);
 	void EnableHdrInferenceSdrVeto(bool enabled = true);
 	void EnableDolbyVisionTunnel(bool enabled = true);
+	void EnableDolbyVisionTunnelHandoff(bool enabled = true);
 	void EnableBoundedInvalidCaptureRecovery(bool enabled);
 	void SetLldvMaxCll(double value);
 	void SetLldvMaxFall(double value);
@@ -317,6 +320,7 @@ public:
 	void MaybeAutoReport(const char* reason);
 	void RecordDiagnosticStats(double sourceHz, double displayHz);
 	void ShowStateReportToast(const std::string& value);
+	void OnCommandRawCaptureToggle();
 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
 
@@ -408,6 +412,30 @@ protected:
 	ULONGLONG m_hdrVetoLastSampleTick = 0;
 	HdrVetoCutDetector m_hdrVetoCutDetector;
 	std::vector<uint16_t> m_hdrVetoGrid;
+	// DV input fixes 2026-10-18 ([general] dv_tunnel_handoff, default on):
+	// with the tunnel gate open, the capture thread's probe
+	// (DolbyVisionTunnelHandoff.h) hands a signal that is not a tunnel to the
+	// normal path, and takes it back on a CRC-valid header. The generation
+	// counts material capture states (capture thread); a hand-off belongs to
+	// the generation it was decided in.
+	bool m_dvTunnelHandoffEnabled = true;
+	bool m_dvTunnelHandedOff = false;
+	uint64_t m_dvTunnelHandedOffGeneration = 0;
+	std::atomic<bool> m_dvTunnelHandoffProbe{ false };
+	std::atomic<uint64_t> m_dvTunnelHandoffGeneration{ 1 };
+	// Set by the capture thread when a tunnel header arrives on a handed-off
+	// signal: frames are held back from the renderer (the normal path would
+	// show packed pixels) until the UI has pushed the tunnel state again.
+	std::atomic<bool> m_dvTunnelTakeBackPending{ false };
+	// Capture-thread-only probe state.
+	DolbyVisionTunnelHandoffProbe m_dvTunnelHandoffCaptureProbe;
+	uint64_t m_dvTunnelHandoffCaptureGeneration = 0;
+	bool m_dvTunnelHandoffCaptureActive = false;
+	const void* m_dvTunnelTakeBackRenderer = nullptr;
+	uint64_t m_dvTunnelTakeBackHeldFrames = 0;
+	std::string m_dvTunnelHandoffReason;
+	bool DvTunnelHandedOff() const;
+	bool ProfileTunnelClaimsSignal() const;
 	int m_lldvChangeRestartDelaySeconds = -1;
 	bool m_lldvRestartPending = false;
 
@@ -1271,6 +1299,7 @@ protected:
 	void UpdateHdrVetoMeasurement();
 	void ApplyHdrInferenceVeto(const HdrInferenceUpdate& update, const char* source);
 	void MeasureHdrVetoPicture(const VideoStateComPtr& state, const VideoFrame& frame);
+	DolbyVisionTunnelHandoffEvent ProbeDvTunnelHandoff(const VideoStateComPtr& state, const VideoFrame& frame, uint64_t generation);
 
 
 	bool BuildPushVideoState();
@@ -1340,6 +1369,7 @@ protected:
 	afx_msg LRESULT OnProjectorTestDone(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnStateReportDone(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMessageHdrInferencePicture(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnMessageDvTunnelHandoff(WPARAM wParam, LPARAM lParam);
 	// RS-232 connection test (Config's LED drive page): the RPC waiting for it
 	// and its result, handed from the worker thread to the UI thread.
 	void StartProjectorTest(const std::shared_ptr<ConfigurationRpcServer::Pending>& pending);

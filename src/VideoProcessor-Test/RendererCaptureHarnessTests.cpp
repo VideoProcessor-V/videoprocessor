@@ -30,6 +30,9 @@
 #include <vector>
 
 #include "DolbyVisionTunnelSender.h"
+#include <dv_loopback/DvLoopbackPattern.h>
+#include <dv_loopback/DvCaptureContainer.h>
+#include <RawCaptureCorpus.h>
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // capture_path (owner 2026-10-13): the shipped VP renderer DLL driven like the
@@ -2745,6 +2748,206 @@ namespace Tests
 			g_harnessDvFrames.clear();
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
+		}
+
+		// DV loopback (2026-10-17), GPU: the loop pattern (scenes with advance
+		// metadata and no_md, an EOS -> SDR -> DV segment, the every-code and
+		// ramp pictures; VPV packer -> r210 low8 container) through the
+		// renderer with the CPU and the GPU unpack. Both run the whole stream
+		// without conversion failures, lock DV, take the EOS SDR passthrough,
+		// and present identical codes for a still ramp picture.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvAutotestGpuLoopPatternRendersThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvAutotestGpuLoopPatternRendersThroughTheRenderer)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("DvAutotestGpuLoopPatternRendersThroughTheRenderer")) return;
+			g_harnessWidth = 1920;
+			g_harnessHeight = 1080;
+			DvLoopback::SequenceConfig config;
+			config.width = 1920;
+			config.height = 1080;
+			config.sceneFrames = 12;
+			config.sdrStart = 48;
+			config.sdrLength = 24;
+			config.period = 96;
+			const DvLoopback::PatternSequence sequence(config);
+			DvLoopback::ContainerOptions container;
+			container.rowBytes = ((1920 + 63) / 64) * 256;
+			g_harnessDvFrames.clear();
+			for (uint32_t k = 0; k < config.period; ++k)
+			{
+				std::vector<BYTE> bytes;
+				DvLoopback::WrapRgb8(sequence.Make(k).rgb8, 1920, 1080, container, bytes);
+				g_harnessDvFrames.push_back(bytes);
+			}
+			g_harnessDolbyVision = true;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-dv-autotest";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			const std::string settings = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			FramePlan stream;
+			stream.rateNumerator = 24000;
+			stream.step = [](int n) { return FrameStep{ true, n % 96, 0 }; };
+			for (const bool gpu : { false, true })
+			{
+				const std::string name = gpu ? "GPU unpack" : "CPU unpack";
+				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 9.0, true,
+					std::string(gpu ? "dv_tunnel_gpu_unpack: on\n" : "dv_tunnel_gpu_unpack: off\n") + settings, false, &stream);
+				Assert::IsTrue(r.presented, HarnessWide(name + ": frames presented\n").c_str());
+				Assert::IsTrue(r.Logged("CRC-validated r210 RGB8 alignment"), HarnessWide(name + ": DV lock").c_str());
+				Assert::IsTrue(r.Logged("EOS boundary; allowing SDR RGB passthrough"), HarnessWide(name + ": EOS -> SDR").c_str());
+				Assert::IsFalse(r.Logged("Alpha conversion failed"), (HarnessWide(name) + L": conversion\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("could not be unpacked on the GPU or the CPU"), HarnessWide(name).c_str());
+				if (gpu)
+					Assert::IsTrue(r.Logged("Dolby Vision RGB tunnel: picture unpacked on the GPU"), L"the GPU unpack ran");
+			}
+			// A still ramp picture (scene 1): CPU and GPU unpack present the same codes.
+			FramePlan still;
+			still.rateNumerator = 24000;
+			still.captureAtSeconds = 2.5;
+			still.step = [](int) { return FrameStep{ true, 14, 0 }; };
+			std::string hashes[2];
+			for (int gpu = 0; gpu < 2; ++gpu)
+			{
+				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 3.5, true,
+					std::string(gpu ? "dv_tunnel_gpu_unpack: on\n" : "dv_tunnel_gpu_unpack: off\n") + settings, false, &still);
+				hashes[gpu] = CaptureHash(r);
+				Assert::IsFalse(hashes[gpu].empty(), (L"capture written\n" + r.Tail()).c_str());
+			}
+			Assert::AreEqual(hashes[0], hashes[1], L"CPU and GPU unpack present the same codes for the loop pattern");
+		}
+
+		// DV loopback (2026-10-17), GPU: a neutral IPT ramp (Ct = Cp = 2048,
+		// 16 I levels, profile-5 IPTPQc2 matrices) renders as neutral grey bars
+		// (R = G = B within a few codes) that brighten monotonically with I:
+		// the decode -> reshaping -> LMS -> RGB chain keeps neutrals neutral
+		// and order. A reference-free render check of the whole DV path.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvAutotestGpuNeutralIptRampRendersNeutralAndMonotonic)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvAutotestGpuNeutralIptRampRendersNeutralAndMonotonic)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("DvAutotestGpuNeutralIptRampRendersNeutralAndMonotonic")) return;
+			const uint32_t w = 1920, h = 1080;
+			g_harnessWidth = static_cast<int>(w);
+			g_harnessHeight = static_cast<int>(h);
+			DvLoopback::IptPicture picture;
+			picture.Resize(w, h);
+			for (uint32_t y = 0; y < h; ++y)
+				for (uint32_t x = 0; x < w; ++x)
+					picture.i[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(400 + (x * 16 / w) * 200);
+			DvLoopback::DmFields dm = DvLoopback::DmFields::Ipt();
+			dm.ext.push_back(DvLoopback::Ext::L1(0, 3500, 1500));
+			DvLoopback::PacketHeader header;
+			header.currentId = header.affectedId = 1;
+			std::vector<uint8_t> rgb;
+			Assert::IsTrue(DvLoopback::BuildTunnelRgb8(picture, dm, header, rgb));
+			DvLoopback::ContainerOptions container;
+			container.rowBytes = ((w + 63) / 64) * 256;
+			std::vector<BYTE> bytes;
+			DvLoopback::WrapRgb8(rgb, w, h, container, bytes);
+			g_harnessDvFrames = { bytes };
+			g_harnessDolbyVision = true;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-dv-autotest";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan still;
+			still.rateNumerator = 24000;
+			still.captureAtSeconds = 2.5;
+			still.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			const RunResult r = Run(VideoFrameEncoding::R210, "standard", 3.5, true,
+				"[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &still);
+			Assert::IsFalse(r.captureMetadata.empty(), (L"capture written\n" + r.Tail()).c_str());
+			int cw = 0, ch = 0;
+			const std::vector<int> codes = LoadCaptureRgb(r.captureMetadata, cw, ch);
+			Assert::IsFalse(codes.empty(), L"capture PNG readable");
+			int previous = -1;
+			for (int bar = 0; bar < 16; ++bar)
+			{
+				const int x = (2 * bar + 1) * cw / 32, y = ch / 2;
+				const size_t at = (static_cast<size_t>(y) * cw + x) * 3;
+				const int R = codes[at], G = codes[at + 1], B = codes[at + 2];
+				Logger::WriteMessage(("bar " + std::to_string(bar) + ": " + std::to_string(R) + " " + std::to_string(G) + " " + std::to_string(B) + "\n").c_str());
+				Assert::IsTrue(std::abs(R - G) <= 8 && std::abs(B - G) <= 8, (L"bar " + std::to_wstring(bar) + L" is not neutral").c_str());
+				if (G > 70)   // above output black: strictly brighter with I
+					Assert::IsTrue(G > previous, (L"bar " + std::to_wstring(bar) + L" not brighter than the previous").c_str());
+				previous = (std::max)(previous, G);
+			}
+		}
+
+		// LLDV-vs-tunnel check (2026-10-17), GPU, opt-in: renders frames of a
+		// recorded DV tunnel corpus through VP to the LLDV EDID's target, one
+		// still capture per frame, for tools/dv_compare/dv_lldv_vs_tunnel.py
+		// (--tunnel-render). VP_TEST_DV_RENDER_CORPUS = the tunnel recording
+		// segment, VP_TEST_DV_RENDER_OUT = the output folder,
+		// VP_TEST_DV_RENDER_EVERY = every k-th frame (default 6),
+		// VP_TEST_DV_RENDER_EXTRA = renderer profile lines, "\n" for new lines
+		// (e.g. "[vprenderer.Default]\nsdr_target_nits: 1000\nsdr_black_nits: 0.005\ntarget_primaries: bt2020").
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvAutotestGpuRendersTunnelCorpusForLldvCompare)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvAutotestGpuRendersTunnelCorpusForLldvCompare)
+		{
+			const HarnessScope harnessScope;
+			auto env = [](const char* name) {
+				char* v = nullptr;
+				size_t n = 0;
+				std::string out;
+				if (_dupenv_s(&v, &n, name) == 0 && v) out = v;
+				std::free(v);
+				return out; };
+			const std::string corpus = env("VP_TEST_DV_RENDER_CORPUS"), out = env("VP_TEST_DV_RENDER_OUT");
+			if (corpus.empty() || out.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvAutotestGpuRendersTunnelCorpusForLldvCompare\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvAutotestGpuRendersTunnelCorpusForLldvCompare")) return;
+			std::string extra = env("VP_TEST_DV_RENDER_EXTRA");
+			for (size_t at = extra.find("\\n"); at != std::string::npos; at = extra.find("\\n", at))
+				extra.replace(at, 2, "\n");
+			const std::string everyText = env("VP_TEST_DV_RENDER_EVERY");
+			const int every = (std::max)(1, everyText.empty() ? 6 : std::atoi(everyText.c_str()));
+			RawCorpusSegment seg;
+			std::string error;
+			Assert::IsTrue(LoadRawCorpusSegment(corpus, seg, error), HarnessWide(error).c_str());
+			g_harnessWidth = static_cast<int>(seg.width);
+			g_harnessHeight = static_cast<int>(seg.height);
+			g_harnessDolbyVision = true;
+			CreateDirectoryA(out.c_str(), nullptr);
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-dv-render";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			size_t rendered = 0;
+			for (size_t j = 0; j < seg.frames.size(); j += static_cast<size_t>(every))
+			{
+				std::vector<uint8_t> bytes;
+				if (!seg.LoadFrame(j, bytes)) continue;
+				g_harnessDvFrames = { std::vector<BYTE>(bytes.begin(), bytes.end()) };
+				FramePlan still;
+				still.rateNumerator = static_cast<int>(seg.rateNumerator);
+				still.rateDenominator = static_cast<int>(seg.rateDenominator);
+				still.captureAtSeconds = 2.0;
+				still.step = [](int) { return FrameStep{ true, 0, 0 }; };
+				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 3.0, true, extra, false, &still);
+				if (r.captureMetadata.size() < 5) continue;
+				const std::string png = r.captureMetadata.substr(0, r.captureMetadata.size() - 5) + ".png";
+				char name[64];
+				snprintf(name, sizeof(name), "\\frame_%06zu.png", j + 1);
+				if (CopyFileA(png.c_str(), (out + name).c_str(), FALSE))
+					++rendered;
+			}
+			Logger::WriteMessage(("rendered " + std::to_string(rendered) + " tunnel frames to " + out + "\n").c_str());
+			Assert::IsTrue(rendered > 0, L"no frame rendered");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)

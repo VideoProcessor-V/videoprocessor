@@ -22,6 +22,7 @@ VideoState::VideoState(const VideoState& other):
 	invertedVertical = other.invertedVertical;
 	dolbyVisionTunnel = other.dolbyVisionTunnel;
 	hdrInferred = other.hdrInferred;
+	dolbyVisionVsif = other.dolbyVisionVsif;   // DV input fixes 2026-10-18
 
 	// Deepcopy
 	if (other.hdrData)

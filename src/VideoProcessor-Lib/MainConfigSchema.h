@@ -112,6 +112,7 @@ namespace MainConfigSchema
 			ConfigSchema::Boolean("newlldv"),
 			ConfigSchema::Boolean("new_lldv"),
 			ConfigSchema::Boolean("newlldv_sdr_veto"),
+			ConfigSchema::Boolean("dv_tunnel_handoff"),   // DV input fixes 2026-10-18
 			// Interface resolution deliberately validates this value non-fatally:
 			// malformed persisted values log and fall back to Classic rather than
 			// making capture startup fail.
