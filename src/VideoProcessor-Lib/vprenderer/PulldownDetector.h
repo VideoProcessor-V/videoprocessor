@@ -807,6 +807,14 @@ namespace Pulldown
 	// min(target, minimumFrames) - the depth the interpolator / de-judder need
 	// (A shown and B queued) - nor below one. Re-resolved whenever the cadence
 	// changes (the caller passes the current one). Not locked: the target.
+	// Gate r3 (2026-10-18): the fewest frames a locked queue may target while a pair user (the
+	// de-judder, the interpolator, hiccup repair) needs B. The steady dequeue takes A when the
+	// queue reaches its target, so the frame that just arrived is never B: B is the frame before
+	// it, queued (and converted) a frame earlier. A target of 2 left B unconverted at every
+	// dequeue ("next frame not ready"), so the de-judder never estimated on locked film - and
+	// the motion-ahead floor, which needs a running estimate, could not lift it. A, B and the
+	// arrival: 3. A frame count of the queue's structure, not a rate.
+	constexpr size_t kLockedQueuePairFrames = 3;
 	inline double FilmToSignalRatio(int cycle, int unique)
 	{
 		return cycle > 0 && unique > 0 && unique < cycle ? static_cast<double>(unique) / static_cast<double>(cycle) : 1.0;
