@@ -61,6 +61,7 @@
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
+#include <vprenderer/UploadReuse.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
 #include <vprenderer/RendererDiagnosticCodes.h>
 #include <vprenderer/FrameInterpolator.h>
@@ -1275,6 +1276,12 @@ namespace
 		// derived from the measured rate (DejudderPolicy::IsFilmLike(hz, true), no fixed bands) and
 		// the gap-fill span as a time (InterpolationTimeline::MaxSpanFrames); off = the behaviour before.
 		bool generalRateFixes = true;
+		// Efficiency round 2026-10-18 (docs/agent-reports/efficiency.md): work the renderer did
+		// twice is done once - the frame shown takes the planes the de-judder uploaded for it
+		// as the next frame (UploadReuse.h), and the look-ahead walk measures a frame's active
+		// picture only for an observer that still wants the frame. Bit-identical output; off =
+		// the earlier behaviour (both computations again).
+		bool efficiencyFixes = true;
 		// Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17): the
 		// de-judder's extras queued straight after their frame (no vblank waits), so the next
 		// frame renders while they are shown; off until the owner's on-screen runs pass.
@@ -1482,7 +1489,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|' << settings.efficiencyFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2811,6 +2818,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid general_rate_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.generalRateFixes ? "on" : "off");
+		}
+		if (tryChoice("efficiency_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.efficiencyFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid efficiency_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.efficiencyFixes ? "on" : "off");
 		}
 		// Render-ahead (docs/VP-render-ahead-design.md).
 		for (const auto& toggle : { std::make_pair("render_ahead", &settings.renderAhead),
@@ -6000,6 +6015,19 @@ struct LibplaceboVideoRenderer::Impl
 	bool vpPhasePlanesValid = false; // vpPhasePlanes hold this draw's picture
 	Dejudder::Planes vpPhasePlanes;
 	uint64_t dejudderNextUploadedSequence = 0;   // the source frame in dejudderNextTextures (B)
+	// Efficiency round 2026-10-18 (efficiency_fixes, UploadReuse.h): how dejudderNextTextures /
+	// dejudderAheadTextures were filled (swapped with them), so that the frame shown takes
+	// B's planes as uploaded instead of uploading its payload a second time.
+	struct DejudderPlaneUpload
+	{
+		UploadReuse::Record record;
+		std::weak_ptr<const QueuedFrame::ConvertedPayload> payload;
+		pl_plane planes[2] = {};   // pl_upload_plane's planes (the CPU route)
+		void Clear() { record = UploadReuse::Record{}; payload.reset(); planes[0] = planes[1] = pl_plane{}; }
+	};
+	DejudderPlaneUpload dejudderNextUpload, dejudderAheadUpload;
+	unsigned long long uploadsReused = 0, uploadsReuseMissed = 0;
+	ULONGLONG uploadReuseLogTick = 0;
 	double vpCaptureRateHz = 0.0;     // the content rate the loop schedules with (film or measured capture)
 	uint64_t vpFillNextSequence = 0;  // B offered across a short loss (gap fill), else 0
 	int vpFillMaxSpan = InterpolationTimeline::kMaxSpanFrames;   // that pair's span limit (general_rate_fixes: from its rate)
@@ -6280,6 +6308,8 @@ struct LibplaceboVideoRenderer::Impl
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		dejudderNextUploadedSequence = 0;
+		dejudderNextUpload.Clear();
+		dejudderAheadUpload.Clear();
 		for (pl_tex& tex : dejudderAheadTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		if (dejudderRgbScratch && d3d11) pl_tex_destroy(d3d11->gpu, &dejudderRgbScratch);
@@ -11033,6 +11063,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.motionHistoryFixes != next.motionHistoryFixes, "motion_history_fixes");
 		changed(current.queueTimingFixes != next.queueTimingFixes, "queue_timing_fixes");
 		changed(current.generalRateFixes != next.generalRateFixes, "general_rate_fixes");
+		changed(current.efficiencyFixes != next.efficiencyFixes, "efficiency_fixes");
 		changed(current.renderAhead != next.renderAhead, "render_ahead");
 		changed(current.dejudderGate != next.dejudderGate, "dejudder_gate");
 		changed(current.renderAheadUtilisation != next.renderAheadUtilisation, "render_ahead_utilisation");
@@ -14925,6 +14956,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			std::swap(dejudderNextTextures[0], dejudderAheadTextures[0]);
 			std::swap(dejudderNextTextures[1], dejudderAheadTextures[1]);
+			std::swap(dejudderNextUpload, dejudderAheadUpload);   // efficiency_fixes: the records follow
 			dejudderNextUploadedSequence = nextSourceSequence;
 			dejudderEstimatedSequence = sourceSequence;
 			dejudderEstimatedEpoch = motionValidity.Epoch();
@@ -14934,7 +14966,7 @@ struct LibplaceboVideoRenderer::Impl
 		LogDejudderAhead();
 		// B: the same plane layout as A's upload above.
 		dejudderNextUploadedSequence = 0;
-		if (!UploadDejudderPlanes(*next, dejudderNextTextures))
+		if (!UploadDejudderPlanes(next, dejudderNextTextures, &dejudderNextUpload, nextSourceSequence))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 				DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
@@ -15008,11 +15040,40 @@ struct LibplaceboVideoRenderer::Impl
 	}
 
 	// The next frames' planes (B, or C ahead) in B's layout.
-	bool UploadDejudderPlanes(const QueuedFrame::ConvertedPayload& payload, pl_tex (&dst)[2])
+	// upload (efficiency_fixes): filled with how the planes were made, for the reuse when this
+	// frame is shown; cleared first (a failed or luma-only upload is never reused).
+	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2],
+		DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0)
 	{
+		if (upload)
+			upload->Clear();
+		if (!payloadPtr)
+			return false;
+		const QueuedFrame::ConvertedPayload& payload = *payloadPtr;
 		const DejudderUploadLayout& l = dejudderLayout;
 		if (!l.valid || payload.Bytes() != l.pixelBytes)
 			return false;
+		auto record = [&](bool raw, const pl_plane* planes)
+		{
+			if (!upload)
+				return;
+			upload->record.valid = true;
+			upload->record.payload = payloadPtr.get();
+			// Gate r3 (2026-10-18, measured on the GeForce): the payload's source frame. It was never
+			// recorded, so CanReuse (r.sequence == q.sequence) refused every reuse as "layout differs".
+			upload->record.sequence = sequence;
+			upload->record.width = l.width;
+			upload->record.height = l.height;
+			upload->record.chromaHeight = l.chromaHeight;
+			upload->record.rowBytes = l.rowBytes;
+			upload->record.raw = raw;
+			upload->payload = payloadPtr;
+			if (planes)
+			{
+				upload->planes[0] = planes[0];
+				upload->planes[1] = planes[1];
+			}
+		};
 		// native_rgb_ingest: an RGB raw frame gives the matcher its luma only
 		// (dst[0]; dst[1] untouched), unpacked as the frame A was.
 		if (payload.Raw() && !payload.dvTunnelRaw && GpuRgbUnpack::Supports(payload.rawEncoding))
@@ -15041,7 +15102,10 @@ struct LibplaceboVideoRenderer::Impl
 			// capture_path: gpu; the route and format must be B's (A's layout).
 			if (!l.raw || payload.rawEncoding != l.rawEncoding || payload.dvTunnelRaw != l.dvTunnelRaw)
 				return false;
-			return UnpackRawPayload(payload, l.width, l.height, dst, false);
+			if (!UnpackRawPayload(payload, l.width, l.height, dst, false))
+				return false;
+			record(true, nullptr);
+			return true;
 		}
 		struct pl_plane_data planes[2]{};
 		const BYTE* yPixels = payload.pixels.data();
@@ -15066,6 +15130,78 @@ struct LibplaceboVideoRenderer::Impl
 		for (int plane = 0; plane < 2; ++plane)
 			if (!pl_upload_plane(d3d11->gpu, &uploaded[plane], &dst[plane], &planes[plane]))
 				return false;
+		record(false, uploaded);
+		return true;
+	}
+
+	// efficiency_fixes (UploadReuse.h): the frame about to be shown was the last frame's B,
+	// uploaded (or GPU-unpacked) for the motion estimate from this same payload in this same
+	// layout. Its planes are swapped in as the frame's own (bit-identical: the same bytes,
+	// route and formats) and `out` receives the planes the upload would have made. False:
+	// upload as before. YCbCr routes only (the RGB route uploads the matcher's luma alone).
+	bool TakeNextPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payload, uint64_t sourceSequence,
+		int width, int height, int chromaHeight, size_t rowBytes, bool flipped, pl_plane* out)
+	{
+		if (!payload)
+			return false;
+		UploadReuse::Record record = dejudderNextUpload.record;
+		// The recorded payload's identity holds only while that payload is alive.
+		const auto alive = dejudderNextUpload.payload.lock();
+		record.payload = alive.get();
+		UploadReuse::Request request;
+		request.enabled = activeSettings.efficiencyFixes;
+		request.payload = payload.get();
+		request.sequence = sourceSequence;
+		request.width = width;
+		request.height = height;
+		request.chromaHeight = chromaHeight;
+		request.rowBytes = rowBytes;
+		request.raw = payload->Raw();
+		request.texturesPresent = dejudderNextTextures[0] && dejudderNextTextures[1];
+		request.uploadedSequenceMatches = sourceSequence != 0 && dejudderNextUploadedSequence == sourceSequence;
+		if (!UploadReuse::CanReuse(record, request))
+		{
+			// The next frame's planes were there but could not be taken: counted (and the first
+			// few logged), so an on-screen run shows whether the saving engages.
+			if (request.enabled && request.uploadedSequenceMatches && ++uploadsReuseMissed <= 5)
+				DebugLog::Log("Efficiency: the next frame's planes not reused for frame %llu (%s)",
+					static_cast<unsigned long long>(sourceSequence),
+					!record.valid ? "not recorded" : record.payload != request.payload ? "another payload" :
+					!request.texturesPresent ? "no planes" : "layout differs");
+			return false;
+		}
+		std::swap(textures[0], dejudderNextTextures[0]);
+		std::swap(textures[1], dejudderNextTextures[1]);
+		if (request.raw)
+		{
+			// As the GPU unpack's planes are described below (UnpackRawPayload).
+			out[0] = pl_plane{};
+			out[0].texture = textures[0];
+			out[0].components = 1;
+			out[0].component_mapping[0] = PL_CHANNEL_Y;
+			out[1] = pl_plane{};
+			out[1].texture = textures[1];
+			out[1].components = 2;
+			out[1].component_mapping[0] = PL_CHANNEL_CB;
+			out[1].component_mapping[1] = PL_CHANNEL_CR;
+		}
+		else
+			for (int plane = 0; plane < 2; ++plane)
+			{
+				// pl_upload_plane's description of the same upload, on the swapped-in texture.
+				out[plane] = dejudderNextUpload.planes[plane];
+				out[plane].texture = textures[plane];
+				out[plane].shift_x = 0.0f;
+				out[plane].shift_y = 0.0f;
+			}
+		for (int plane = 0; plane < 2; ++plane)
+			out[plane].flipped = flipped;
+		// dejudderNextTextures now hold the previous frame's planes: nothing valid there.
+		dejudderNextUploadedSequence = 0;
+		dejudderNextUpload.Clear();
+		if (++uploadsReused == 1 || uploadsReused % 2400 == 0)
+			DebugLog::Log("Efficiency: the frame shown took the planes uploaded for the motion estimate (%llu frames, "
+				"no second upload; %llu not reused)", uploadsReused, uploadsReuseMissed);
 		return true;
 	}
 
@@ -15292,7 +15428,8 @@ struct LibplaceboVideoRenderer::Impl
 			if (timing) timing->EndStage();
 			return done;
 		};
-		steps.uploadAfter = [this]() { return UploadDejudderPlanes(*dejudderAheadPayload, dejudderAheadTextures); };
+		steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload,
+			dejudderAheadPayloadSequence); };
 		steps.estimate = [this, timing](uint64_t bSequence, uint64_t cSequence)
 		{
 			Dejudder::Planes b, c;
@@ -17685,11 +17822,18 @@ struct LibplaceboVideoRenderer::Impl
 				vpUploadedPlanes[0].texture == textures[0] && vpUploadedPlanes[1].texture == textures[1] &&
 				((cadenceRepeat && vpUploadedSequence == sourceSequence && vpUploadedGeneration == frameGeneration) ||
 				 vpSkipOutput);
+			// efficiency_fixes: this frame was the last frame's B, uploaded for its motion estimate.
+			const bool reuseNext = !reuseUpload && TakeNextPlanes(convertedPayload, sourceSequence, width, height,
+				chromaHeight, p010RowBytes, state.invertedVertical, image.planes);
 			if (reuseUpload)
 			{
 				image.planes[0] = vpUploadedPlanes[0];
 				image.planes[1] = vpUploadedPlanes[1];
 				++vpUploadsSaved;
+			}
+			else if (reuseNext)
+			{
+				// image.planes are set; nothing is uploaded or unpacked.
 			}
 			else if (convertedPayload->Raw())
 			{
@@ -17718,7 +17862,7 @@ struct LibplaceboVideoRenderer::Impl
 						image.planes[plane].flipped = state.invertedVertical;
 				}
 			}
-			if (!reuseUpload && (!convertedPayload->Raw() || dvCpuFallback))
+			if (!reuseUpload && !reuseNext && (!convertedPayload->Raw() || dvCpuFallback))
 				for (int plane = 0; plane < 2; ++plane)
 				{
 					sourceUploaded = pl_upload_plane(d3d11->gpu,
@@ -27256,6 +27400,8 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     // walk's frames feed content intent here (before, it waited for look-ahead frames forever).
     const bool contentWithoutActive = activeCount == 0 && contentIntent && contentIntent->Enabled() &&
         m_impl && m_impl->activeSettings.cadenceClassFixes;
+    // Efficiency round 2026-10-18 (efficiency_fixes): skip frames no observer still wants.
+    const bool efficiencyFixes = m_impl && m_impl->activeSettings.efficiencyFixes;
     const auto observeStatisticsOnly = [&](size_t first)
     {
         if (!statisticsObserver && !intentWanted && !(first == 0 && contentWithoutActive))
@@ -27285,6 +27431,15 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
                 if (state.dolbyVisionTunnel) break;   // never bridge a decode / metadata gap
                 continue;
             }
+            // efficiency_fixes: the LED and content intent each measure a frame once, the first
+            // time a walk reaches it; a frame both would ignore is not measured for them again
+            // (it was extracted once per walk, i.e. once per queued frame ahead of it).
+            const bool wantsStatistics = statisticsWant &&
+                (!efficiencyFixes || statisticsObserver->WantsFrame(queued.sourceSequence));
+            const bool wantsContent = contentWant &&
+                (!efficiencyFixes || contentIntent->WantsFrame(queued.sourceSequence));
+            if (efficiencyFixes && !wantsStatistics && !wantsContent && !intentWant)
+                continue;
             auto identity = queued.activePictureIdentity;
             identity.analysisDomainKey = prepared.domainKey;
             const ActivePictureEvidence evidence = queued.activePicturePreviewAnalyzed &&
@@ -27304,9 +27459,9 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
                 picture.right = bounds.right;
                 picture.bottom = bounds.bottom;
             }
-            if (statisticsWant)
+            if (wantsStatistics)
                 statisticsObserver->ObserveFrame(queued.sourceSequence, index, prepared.source, picture);
-            if (contentWant)
+            if (wantsContent)
                 observeContent(queued, state, prepared.source, sample.observation, index);
             if (intentWant)
                 feedIntent(queued, state, prepared.source, picture, index);
@@ -30416,6 +30571,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "motion_history_fixes=" << (s.motionHistoryFixes ? "on" : "off") << "\n"
 		<< "queue_timing_fixes=" << (s.queueTimingFixes ? "on" : "off") << "\n"
 		<< "general_rate_fixes=" << (s.generalRateFixes ? "on" : "off") << "\n"
+		<< "efficiency_fixes=" << (s.efficiencyFixes ? "on" : "off") << "\n"
 		<< "render_ahead=" << (s.renderAhead ? "on" : "off") << "\n"
 		<< "dejudder_gate=" << s.dejudderGate << "\n"
 		<< "render_ahead_utilisation=" << s.renderAheadUtilisation << "\n"

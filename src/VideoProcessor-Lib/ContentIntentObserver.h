@@ -113,6 +113,14 @@ namespace ContentIntent
 
         void BeginWalk(size_t) override {}
 
+        // Efficiency round 2026-10-18: ObserveFrame's own early return (off, or seen in an
+        // earlier walk), checked without building the grid.
+        bool WantsFrame(uint64_t sourceSequence) const override
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            return m_enabled && !(m_haveLast && sourceSequence <= m_lastSequence);
+        }
+
         void ObserveFrame(uint64_t sourceSequence, size_t, const AnalysisLumaSource& luma,
             const QueuedFrameStatistics::PictureRect& picture) override
         {

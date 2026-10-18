@@ -46,6 +46,7 @@
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
+#include "HardwarePrerequisites.h"
 #include "ChainGpuProbe.h"
 #include "SigmaDeltaBiasProbe.h"
 #include "GrainReferenceModel.h"
@@ -10378,6 +10379,319 @@ namespace VideoProcessorTest
 			deband.Release(gpu);
 			pl_tex_destroy(gpu, &lumaTex);
 			pl_tex_destroy(gpu, &chromaTex);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		// Efficiency round 2026-10-18 (efficiency_fixes, vprenderer/UploadReuse.h): the frame shown
+		// takes the planes the de-judder uploaded for it as the next frame. That is exact because
+		// an upload is a pure function of the payload and the layout: the same bytes through the
+		// same route (the CPU route's pl_upload_plane of P010 / P210, or capture_path gpu's raw
+		// upload + GpuCaptureUnpack) give the same planes in whichever texture pair they land,
+		// including a pair that held another size or format before. Checked byte for byte here
+		// (WARP by default; VP_TEST_GPU=hardware on the GeForce).
+		TEST_METHOD(UploadReuseRoutesAreBitIdentical)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 1920, height = 1080;
+			uint32_t seed = 0x9e3779b9u;
+			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+			auto readable = [&](pl_tex src) {
+				// Gate r3 (2026-10-18, on the GeForce): a plane the GPU unpack wrote with imageStore and
+				// then blitted into a host-readable copy read back stale texels (wrong for both
+				// unpacks, differently); downloaded directly it is exact (GpuCaptureUnpackMatchesTheCpu-
+				// Formatters reads the same way). So the unpack's planes are made host-readable
+				// (SetHostReadableForTest) and downloaded directly; the CPU route's uploads keep the copy.
+				if (src->params.host_readable)
+				{
+					std::vector<uint8_t> direct(static_cast<size_t>(src->params.w) * src->params.h * src->params.format->texel_size);
+					pl_tex_transfer_params dd{};
+					dd.tex = src;
+					dd.ptr = direct.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dd), L"download");
+					return direct;
+				}
+				pl_tex_params p{};
+				p.w = src->params.w;
+				p.h = src->params.h;
+				p.format = src->params.format;
+				p.host_readable = true;
+				p.blit_dst = true;
+				pl_tex copy = pl_tex_create(gpu, &p);
+				Assert::IsNotNull(copy, L"a host-readable copy");
+				pl_tex_blit_params b{};
+				b.src = src;
+				b.dst = copy;
+				pl_tex_blit(gpu, &b);
+				std::vector<uint8_t> bytes(static_cast<size_t>(p.w) * p.h * src->params.format->texel_size);
+				pl_tex_transfer_params d{};
+				d.tex = copy;
+				d.ptr = bytes.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"download");
+				pl_tex_destroy(gpu, &copy);
+				return bytes;
+			};
+			auto samePlanes = [&](pl_tex (&x)[2], pl_tex (&y)[2], const wchar_t* what) {
+				for (int plane = 0; plane < 2; ++plane)
+				{
+					Assert::IsTrue(x[plane] && y[plane], what);
+					Assert::IsTrue(x[plane]->params.format == y[plane]->params.format &&
+						x[plane]->params.w == y[plane]->params.w && x[plane]->params.h == y[plane]->params.h,
+						(std::wstring(what) + L": the same format and size").c_str());
+					const std::vector<uint8_t> bx = readable(x[plane]), by = readable(y[plane]);
+					if (bx != by)
+					{
+						size_t differ = 0, first = bx.size(), last = 0;
+						for (size_t i = 0; i < bx.size() && i < by.size(); ++i)
+							if (bx[i] != by[i]) { ++differ; first = (std::min)(first, i); last = i; }
+						const size_t rowBytes = static_cast<size_t>(x[plane]->params.w) * x[plane]->params.format->texel_size;
+						char text[256];
+						snprintf(text, sizeof(text), "plane %d (%dx%d %s): %zu bytes differ, first at row %zu col byte %zu, last at row %zu col byte %zu",
+							plane, x[plane]->params.w, x[plane]->params.h, x[plane]->params.format->name, differ,
+							first / rowBytes, first % rowBytes, last / rowBytes, last % rowBytes);
+						Logger::WriteMessage(text);
+					}
+					Assert::IsTrue(bx == by, (std::wstring(what) + L": the same bytes").c_str());
+				}
+			};
+			// A pair that held something else before (another size and format): recreated alike.
+			auto stale = [&](pl_tex (&pair)[2]) {
+				pl_tex_params p{};
+				p.w = 64;
+				p.h = 32;
+				p.format = pl_find_named_fmt(gpu, "rgba8");
+				p.sampleable = true;
+				for (pl_tex& t : pair) t = pl_tex_create(gpu, &p);
+			};
+			// The CPU route (P010 4:2:0 and P210 4:2:2), as RenderLocked and UploadDejudderPlanes upload it.
+			for (const bool fullHeightChroma : { false, true })
+			{
+				const int chromaHeight = fullHeightChroma ? height : (height + 1) / 2;
+				const size_t rowBytes = static_cast<size_t>(width) * 2;
+				std::vector<uint8_t> payload(rowBytes * height + rowBytes * chromaHeight);
+				for (size_t i = 0; i + 1 < payload.size(); i += 2)
+				{
+					const uint16_t code = static_cast<uint16_t>((next() % 1024) << 6);
+					payload[i] = static_cast<uint8_t>(code & 0xff);
+					payload[i + 1] = static_cast<uint8_t>(code >> 8);
+				}
+				auto upload = [&](pl_tex (&dst)[2], pl_plane (&out)[2]) {
+					pl_plane_data planes[2]{};
+					planes[0].type = PL_FMT_UNORM;
+					planes[0].width = width;
+					planes[0].height = height;
+					planes[0].component_size[0] = 16;
+					planes[0].component_map[0] = PL_CHANNEL_Y;
+					planes[0].pixel_stride = sizeof(uint16_t);
+					planes[0].row_stride = rowBytes;
+					planes[0].pixels = payload.data();
+					planes[1] = planes[0];
+					planes[1].width = (width + 1) / 2;
+					planes[1].height = chromaHeight;
+					planes[1].component_size[1] = 16;
+					planes[1].component_map[0] = PL_CHANNEL_CB;
+					planes[1].component_map[1] = PL_CHANNEL_CR;
+					planes[1].pixel_stride = sizeof(uint16_t) * 2;
+					planes[1].pixels = payload.data() + rowBytes * static_cast<size_t>(height);
+					for (int plane = 0; plane < 2; ++plane)
+						Assert::IsTrue(pl_upload_plane(gpu, &out[plane], &dst[plane], &planes[plane]), L"pl_upload_plane");
+				};
+				pl_tex shown[2] = {}, next2[2] = {};
+				stale(next2);
+				pl_plane shownPlanes[2]{}, nextPlanes[2]{};
+				upload(shown, shownPlanes);
+				upload(next2, nextPlanes);
+				const wchar_t* what = fullHeightChroma ? L"P210 CPU route" : L"P010 CPU route";
+				samePlanes(shown, next2, what);
+				for (int plane = 0; plane < 2; ++plane)
+				{
+					// The description the reuse hands on (TakeNextPlanes) is the upload's own.
+					Assert::AreEqual(shownPlanes[plane].components, nextPlanes[plane].components, what);
+					for (int c = 0; c < 4; ++c)
+						Assert::AreEqual(shownPlanes[plane].component_mapping[c], nextPlanes[plane].component_mapping[c], what);
+				}
+				for (pl_tex* t : { &shown[0], &shown[1], &next2[0], &next2[1] }) pl_tex_destroy(gpu, t);
+			}
+			// capture_path gpu: the raw V210 / UYVY frame up and unpacked (GpuCaptureUnpack).
+			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::V210, VideoFrameEncoding::UYVY })
+			{
+				const size_t rowBytes = encoding == VideoFrameEncoding::V210 ?
+					static_cast<size_t>((width + 47) / 48) * 128 : static_cast<size_t>(width) * 2;
+				std::vector<uint8_t> raw(rowBytes * height);
+				for (uint8_t& b : raw) b = static_cast<uint8_t>(next());
+				GpuCaptureUnpack shownUnpack(fixture.Log(), gpu), nextUnpack(fixture.Log(), gpu);
+				shownUnpack.SetHostReadableForTest(true);
+				nextUnpack.SetHostReadableForTest(true);
+				pl_tex shown[2] = {}, next2[2] = {};
+				stale(next2);
+				Assert::IsTrue(shownUnpack.Unpack(encoding, raw.data(), rowBytes, width, height, shown), L"unpack (shown)");
+				Assert::IsTrue(nextUnpack.Unpack(encoding, raw.data(), rowBytes, width, height, next2), L"unpack (next)");
+				samePlanes(shown, next2, encoding == VideoFrameEncoding::V210 ? L"V210 GPU unpack" : L"UYVY GPU unpack");
+				for (pl_tex* t : { &shown[0], &shown[1], &next2[0], &next2[1] }) pl_tex_destroy(gpu, t);
+			}
+		}
+
+		// The efficiency round's GPU benchmark (Claude runs it on the GeForce / the 3090):
+		// VP_TEST_GPU=hardware (VP_TEST_REQUIRE_HARDWARE=1 makes a missing GPU fail). Report only:
+		// per source frame at 4K and 1080p, wall clock with the GPU drained (mean of 12 after a
+		// warm-up), the stages the round touched or ranked:
+		//   - the source upload on each route (what efficiency_fixes saves per new frame while the
+		//     de-judder estimates: the frame shown no longer uploads its payload a second time);
+		//   - the de-judder's PRE_OUTPUT cache of the rendered picture (a full render with and
+		//     without the cache hook armed: the candidate "fused cache" of the report);
+		//   - re-base 2:1 and the source-resolution monitor for scale.
+		TEST_METHOD(EfficiencyStageCostsOnThisGpu)
+		{
+			if (!HardwarePrerequisites::RequireConditionOrSkip("EfficiencyStageCostsOnThisGpu",
+				ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware (WARP times mean nothing)"))
+				return;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			auto timed = [&](const std::string& name, const std::function<bool()>& pass) {
+				for (int i = 0; i < 3; ++i)
+					Assert::IsTrue(pass(), ExtendedRangeGpuProbe::ToWide(name + ": failed").c_str());
+				pl_gpu_finish(gpu);
+				const int runs = 12;
+				const auto start = std::chrono::steady_clock::now();
+				for (int i = 0; i < runs; ++i) pass();
+				pl_gpu_finish(gpu);
+				const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / runs;
+				char line[200];
+				snprintf(line, sizeof(line), "  %-66s %7.3f ms\n", name.c_str(), ms);
+				Logger::WriteMessage(line);
+				return ms;
+			};
+			uint32_t seed = 0x2545f491u;
+			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+			Logger::WriteMessage("Efficiency stage costs (this GPU, per source frame):\n");
+			for (const auto size : { std::make_pair(3840, 2160), std::make_pair(1920, 1080) })
+			{
+				const int width = size.first, height = size.second;
+				const std::string tag = std::to_string(width) + "x" + std::to_string(height);
+				// The CPU route (P010 4:2:0 / P210 4:2:2).
+				double cpuRouteMs[2] = {};
+				for (const bool fullHeightChroma : { false, true })
+				{
+					const int chromaHeight = fullHeightChroma ? height : (height + 1) / 2;
+					const size_t rowBytes = static_cast<size_t>(width) * 2;
+					std::vector<uint8_t> payload(rowBytes * height + rowBytes * chromaHeight);
+					for (size_t i = 0; i + 1 < payload.size(); i += 2)
+					{
+						const uint16_t code = static_cast<uint16_t>((64 + next() % 877) << 6);
+						payload[i] = static_cast<uint8_t>(code & 0xff);
+						payload[i + 1] = static_cast<uint8_t>(code >> 8);
+					}
+					pl_tex dst[2] = {};
+					cpuRouteMs[fullHeightChroma ? 1 : 0] = timed(tag + (fullHeightChroma ? " P210" : " P010") +
+						" upload (CPU route; saved per new frame)", [&] {
+						pl_plane_data planes[2]{};
+						planes[0].type = PL_FMT_UNORM;
+						planes[0].width = width;
+						planes[0].height = height;
+						planes[0].component_size[0] = 16;
+						planes[0].component_map[0] = PL_CHANNEL_Y;
+						planes[0].pixel_stride = sizeof(uint16_t);
+						planes[0].row_stride = rowBytes;
+						planes[0].pixels = payload.data();
+						planes[1] = planes[0];
+						planes[1].width = (width + 1) / 2;
+						planes[1].height = chromaHeight;
+						planes[1].component_size[1] = 16;
+						planes[1].component_map[0] = PL_CHANNEL_CB;
+						planes[1].component_map[1] = PL_CHANNEL_CR;
+						planes[1].pixel_stride = sizeof(uint16_t) * 2;
+						planes[1].pixels = payload.data() + rowBytes * static_cast<size_t>(height);
+						pl_plane out[2]{};
+						return pl_upload_plane(gpu, &out[0], &dst[0], &planes[0]) && pl_upload_plane(gpu, &out[1], &dst[1], &planes[1]);
+					});
+					pl_tex_destroy(gpu, &dst[0]);
+					pl_tex_destroy(gpu, &dst[1]);
+				}
+				// capture_path gpu (the default): the raw V210 frame up and unpacked.
+				const size_t v210Row = static_cast<size_t>((width + 47) / 48) * 128;
+				std::vector<uint8_t> raw(v210Row * height);
+				for (uint8_t& b : raw) b = static_cast<uint8_t>(next());
+				GpuCaptureUnpack unpack(fixture.Log(), gpu);
+				pl_tex planes[2] = {};
+				const double rawMs = timed(tag + " V210 raw upload + GPU unpack (default route; saved)", [&] {
+					return unpack.Unpack(VideoFrameEncoding::V210, raw.data(), v210Row, width, height, planes);
+				});
+				// The de-judder's rendered-picture cache: a render of the frame to an output of the
+				// same size, with and without the PRE_OUTPUT cache hook armed (fbo_float32 as the
+				// renderer's default: rgba32f intermediates).
+				pl_tex_params tp{};
+				tp.w = width;
+				tp.h = height;
+				tp.format = pl_find_named_fmt(gpu, "rgb10a2");
+				tp.renderable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"render target");
+				pl_frame source{};
+				source.num_planes = 2;
+				source.planes[0].texture = planes[0];
+				source.planes[0].components = 1;
+				source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				source.planes[1].texture = planes[1];
+				source.planes[1].components = 2;
+				source.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				source.repr = pl_color_repr_hdtv;
+				source.repr.bits.sample_depth = 16;
+				source.repr.bits.color_depth = 10;
+				source.color = pl_color_space_bt709;
+				source.crop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+				pl_frame out{};
+				out.num_planes = 1;
+				out.planes[0].texture = target;
+				out.planes[0].components = 3;
+				out.planes[0].component_mapping[0] = PL_CHANNEL_R;
+				out.planes[0].component_mapping[1] = PL_CHANNEL_G;
+				out.planes[0].component_mapping[2] = PL_CHANNEL_B;
+				out.repr = pl_color_repr_rgb;
+				out.repr.bits.color_depth = 10;
+				out.color = pl_color_space_bt709;
+				out.crop = source.crop;
+				pl_render_params params = pl_render_high_quality_params;
+				params.dither_params = nullptr;
+				DejudderRendered::Cache cache;
+				const pl_hook* hooks[1] = { cache.Hook() };
+				uint64_t sequence = 0;
+				const double renderMs = timed(tag + " render (high quality, no hooks)", [&] {
+					return pl_render_image(fixture.Renderer(), &source, &out, &params);
+				});
+				pl_render_params cached = params;
+				cached.hooks = hooks;
+				cached.num_hooks = 1;
+				const double cachedMs = timed(tag + " render with the de-judder cache armed", [&] {
+					cache.Arm(++sequence);
+					return pl_render_image(fixture.Renderer(), &source, &out, &cached);
+				});
+				char line[260];
+				snprintf(line, sizeof(line), "  %s: efficiency_fixes saves %.3f ms (default route) / %.3f ms (P010) / %.3f ms (P210) per new "
+					"frame with the de-judder on; the cache costs %.3f ms per new frame with extras (fused-cache candidate)\n",
+					tag.c_str(), rawMs, cpuRouteMs[0], cpuRouteMs[1], cachedMs - renderMs);
+				Logger::WriteMessage(line);
+				cache.Release();
+				// For scale: the re-base and the monitor's tile copy.
+				SourceRebase::Module rebase;
+				pl_frame rebased{};
+				timed(tag + " re-base 2:1 (polar luma + separable chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, rebased); });
+				rebase.Release(gpu);
+				SourceResolutionMonitor::Monitor monitor;
+				double seconds = 0.0;
+				timed(tag + " source-resolution monitor tile copy (2 Hz)", [&] {
+					monitor.Frame(gpu, dispatch, source, ++sequence, seconds);
+					seconds += 0.6;
+					return true;
+				});
+				monitor.Release(gpu);
+				pl_tex_destroy(gpu, &target);
+				pl_tex_destroy(gpu, &planes[0]);
+				pl_tex_destroy(gpu, &planes[1]);
+			}
 			pl_dispatch_destroy(&dispatch);
 		}
 

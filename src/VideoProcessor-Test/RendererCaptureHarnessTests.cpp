@@ -1430,7 +1430,7 @@ namespace Tests
 				{ "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "residual_stabilise_grain_guard", "on" },
 				{ "deband_vp_exclusive", "on" },
 				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
-				{ "dv_tunnel_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" } };
+				{ "dv_tunnel_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" } };
 			for (const auto& entry : defaults)
 				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
 					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
@@ -1440,7 +1440,7 @@ namespace Tests
 				{ "deband_vp_grain_guard", "off" }, { "deband_grain", "on" }, { "residual_stabilise_grain_guard", "off" },
 				{ "deband_vp_grain_guard", "veto" }, { "deband_vp_exclusive", "off" },
 				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
-				{ "dv_tunnel_fixes", "off" }, { "queue_timing_fixes", "off" }, { "general_rate_fixes", "off" } };
+				{ "dv_tunnel_fixes", "off" }, { "queue_timing_fixes", "off" }, { "general_rate_fixes", "off" }, { "efficiency_fixes", "off" } };
 			for (const auto& flip : flips)
 			{
 				const std::string text = head + flip.first + ": " + flip.second + "\n";
@@ -1684,6 +1684,67 @@ namespace Tests
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(EfficiencyFixesArePixelIdentical)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EfficiencyFixesArePixelIdentical)
+		{
+			const HarnessScope harnessScope;
+			// Efficiency round 2026-10-18 (efficiency_fixes): with the de-judder estimating (24p film),
+			// the frame shown takes the planes uploaded for it as the next frame (UploadReuse.h). The
+			// presented codes (VP-0133's raw_r10_sha256) are identical with the fix on and off, on the
+			// default route (capture_path gpu: raw V210 + GPU unpack) and the CPU route (standard: P210),
+			// and the reuse really engages (logged) only with the fix on. The picture changes every 2 s
+			// (48 frames) and the capture is taken mid-segment (3 s), so every frame around it is the
+			// same picture (dithering off): a reuse showing stale or wrong planes would differ from off.
+			if (!RequireHardwareOrSkip("EfficiencyFixesArePixelIdentical")) return;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-efficiency-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 3.0;
+			plan.step = [](int n) { return FrameStep{ true, n / 48, 0 }; };
+			struct Outcome { std::string hash; bool reused = false; bool estimated = false; std::string missed; };
+			auto run = [&](const char* capturePath, bool fixes, const wchar_t* name) {
+				// Gate r3 (2026-10-18, on the GeForce): with dejudder_strength 1.0 the capture landed on a
+				// main present or on a de-judder extra (the warped rendered picture) depending on timing,
+				// so the same still picture gave one of two codes in either mode (off and on swapped them
+				// run to run). The occlusion mask alone keeps the estimate on film (B uploaded, the reuse
+				// path exercised) without extras: every present is a main one.
+				const std::string extra = std::string("dejudder_strength: 0\nocclusion_mask: on\nefficiency_fixes: ") + (fixes ? "on" : "off") +
+					"\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
+				const RunResult r = Run(VideoFrameEncoding::V210, capturePath, 4.5, true, extra, false, &plan);
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
+				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				Outcome o;
+				o.hash = text.substr(k + 19, 64);
+				o.reused = r.Logged("Efficiency: the frame shown took the planes uploaded for the motion estimate");
+				o.estimated = r.Logged("De-judder: motion estimated");
+				for (const std::string& line : r.log)
+					if (line.find("Efficiency: the next frame's planes not reused") != std::string::npos)
+						o.missed += line + "\n";
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + o.hash + (o.reused ? " (reused)" : "") +
+					(o.estimated ? " (estimated)" : "") + "\n" + o.missed).c_str());
+				return o;
+			};
+			for (const char* capturePath : { "gpu", "standard" })
+			{
+				const std::wstring route = capturePath[0] == 'g' ? L"gpu route" : L"CPU route";
+				const Outcome off = run(capturePath, false, (route + L", efficiency_fixes off").c_str());
+				const Outcome on = run(capturePath, true, (route + L", efficiency_fixes on").c_str());
+				Assert::IsTrue(off.estimated && on.estimated, (route + L": the de-judder estimated (the next frame was uploaded)").c_str());
+				Assert::IsFalse(off.reused, (route + L": off never reuses").c_str());
+				Assert::IsTrue(on.reused, (route + L": on reuses the next frame's planes").c_str());
+				Assert::AreEqual(off.hash, on.hash, (route + L": identical presented codes").c_str());
+			}
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(OneAxisRebaseKeepsTheAspectRatio)
