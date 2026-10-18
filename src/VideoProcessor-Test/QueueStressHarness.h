@@ -190,7 +190,9 @@ namespace QueueStress
 		static const std::vector<RatePair> rates = {
 			{ 60000.0 / 1001.0, 24000.0 / 1001.0 }, { 60.0, 24.0 }, { 50.0, 25.0 }, { 60000.0 / 1001.0, 30000.0 / 1001.0 },
 			{ 60000.0 / 1001.0, 60000.0 / 1001.0 }, { 50.0, 50.0 }, { 24000.0 / 1001.0, 24000.0 / 1001.0 }, { 24.0, 24.0 },
-			{ 25.0, 25.0 }, { 30000.0 / 1001.0, 30000.0 / 1001.0 }, { 120.0, 24.0 }, { 59.94, 59.94 } };
+			{ 25.0, 25.0 }, { 30000.0 / 1001.0, 30000.0 / 1001.0 }, { 120.0, 24.0 }, { 59.94, 59.94 },
+			// Streaming apps: 24p film in 29.97 (one repeat in five), the owner's main case.
+			{ 30000.0 / 1001.0, 24000.0 / 1001.0 }, { 30.0, 24.0 } };
 		return rates;
 	}
 	inline const std::vector<double>& DisplayRates()
@@ -270,6 +272,8 @@ namespace QueueStress
 		long long signalFrames = 0, kept = 0, dequeued = 0, pairs = 0, fillPairs = 0, flushes = 0, overflowDrops = 0;
 		long long invalidations = 0, locks = 0, restarts = 0, raFrames = 0, raExtras = 0, raLate = 0, gateDowns = 0;
 		long long holds = 0, resizePurges = 0, reanchors = 0;
+		// Q1: stale frames on hardware / callback time, stale-delivery gaps, film clock floor holds.
+		long long staleHardware = 0, staleCallback = 0, staleGaps = 0, clockFloorHolds = 0, clockLateArrivals = 0;
 		size_t maxDepth = 0, maxPending = 0, maxCostWindow = 0;
 		double maxLatency = 0.0, maxSteadyLatency = 0.0;
 		int maxGateLevel = 0;
@@ -295,13 +299,14 @@ namespace QueueStress
 
 	// ---- the source model ----
 	constexpr long long kTicksPerSecond = 10000000;   // the capture clock (100 ns)
-	constexpr double kFreshAgeSeconds = 0.5;          // OnVideoFrame: hardware arrival only for frames younger than this
+	constexpr double kFreshAgeSeconds = CaptureArrival::kFreshAgeSeconds;   // OnVideoFrame's fresh limit
 
 	struct SignalFrame
 	{
 		long long index = 0;
 		double callback = 0.0;    // QPC seconds the callback runs (delivery)
-		double arrival = 0.0;     // the renderer's arrival (hardware time when fresh, else the callback)
+		double arrival = 0.0;     // the renderer's arrival (the lane sets it: CaptureArrival, as OnVideoFrame)
+		double hardware = 0.0;    // the hardware arrival on the QPC clock (the end of the frame)
 		long long ticks = 0;      // the capture clock
 		bool repeat = false;      // the content repeats the previous delivered frame
 		bool resync = false;      // a resync before it (restart / format / rate change)
@@ -429,6 +434,7 @@ namespace QueueStress
 					--burstLeft;
 					burst.push_back(f);
 					burst.back().arrival = hardwareQpc;
+					burst.back().hardware = hardwareQpc;
 					if (burstLeft == 0)
 					{
 						for (SignalFrame& b : burst)
@@ -445,6 +451,7 @@ namespace QueueStress
 				f.callback = (std::max)(callback, lastCallback + 1e-5);   // callbacks are serial
 				lastCallback = f.callback;
 				f.arrival = f.callback - hardwareQpc < kFreshAgeSeconds ? hardwareQpc : f.callback;
+				f.hardware = hardwareQpc;
 				out.push_back(f);
 				while (duplicateLeft > 0)
 				{
@@ -522,6 +529,7 @@ namespace QueueStress
 		{
 			pd.reset(new Pulldown::Detector());
 			clock = Pulldown::FilmClock();
+			floorHoldsSeen = lateSeen = 0;
 			settingsApplied = false;
 			forceGap = false;
 			filmTime = 0.0;
@@ -534,8 +542,9 @@ namespace QueueStress
 			disturbFilmHz = 0.0;
 		}
 
-		void OnSignal(const SignalFrame& f)
+		void OnSignal(const SignalFrame& delivered)
 		{
+			SignalFrame f = delivered;   // the arrival is the lane's decision (below)
 			++result.stats.signalFrames;
 			pendingLost += f.lost;
 			pendingHard = pendingHard || f.hard;
@@ -582,6 +591,16 @@ namespace QueueStress
 				}
 			}
 			lastTicks = f.ticks;
+			// Q1 (queue_timing_fixes): the arrival, as OnVideoFrame (CaptureArrival); a stale
+			// delivery's gap is marked on the kept frame after the detector.
+			{
+				const CaptureArrival::Result ar = arrivals.Next(f.callback, true, f.hardware, !brk && !f.resync,
+					sc.sw.queueFixes && !legacyQ1);
+				f.arrival = ar.arrival;
+				if (ar.kind == CaptureArrival::Kind::StaleHardware) ++result.stats.staleHardware;
+				if (ar.kind == CaptureArrival::Kind::StaleCallback) ++result.stats.staleCallback;
+				if (ar.staleStart || ar.staleEnd) staleGapPending = true;
+			}
 			if (missed > 0)
 			{
 				gapBefore = true;
@@ -604,6 +623,7 @@ namespace QueueStress
 				pd->SetSettings(s);
 				settingsApplied = true;
 			}
+			clock.SetLateGuard(!legacyQ1);   // pulldown_fixes (default on)
 			if (clock.SetRobustAnchor(true)) { pd->MarkDiscontinuity(); forceGap = true; }
 			if (clock.SetRebaseOnRateChange(true)) { pd->MarkDiscontinuity(); forceGap = true; }
 			const bool wasLocked = pd->Locked();
@@ -625,6 +645,13 @@ namespace QueueStress
 				if (gapBefore)
 					pd->MarkDiscontinuity();
 				return;   // the repeat is not queued; its truth carries to the next kept frame
+			}
+			if (staleGapPending)
+			{
+				staleGapPending = false;
+				gapBefore = true;
+				gapFrames = 0;
+				++result.stats.staleGaps;
 			}
 			if (gapBefore || d.rephased || d.update || d.phaseUncertain || FilmHzChanged(d))
 				lastDisturbance = f.callback;
@@ -650,6 +677,10 @@ namespace QueueStress
 				else
 				{
 					time = clock.Time(d.filmIndex, f.arrival, filmHz, d.cadenceLateness, d.cadenceLatenessMax);
+					result.stats.clockFloorHolds += static_cast<long long>(clock.FloorHolds()) - floorHoldsSeen;
+					result.stats.clockLateArrivals += static_cast<long long>(clock.LateArrivals()) - lateSeen;
+					floorHoldsSeen = static_cast<long long>(clock.FloorHolds());
+					lateSeen = static_cast<long long>(clock.LateArrivals());
 					CheckFilmClock(f, d, time, filmHz);
 					filmTime = time;
 				}
@@ -747,6 +778,9 @@ namespace QueueStress
 		void NoteArrivalDisturbance(double now) { quietResetAt = now; }
 		bool jitterNow = false;
 		Mutation mutation = Mutation::None;
+		// Q1 off (the renderer before 2026-10-18): stale frames on the callback time, no gap,
+		// no late-arrival guard in the film clock. For before/after comparisons only.
+		bool legacyQ1 = false;
 
 	private:
 		const Scenario& sc;
@@ -761,6 +795,9 @@ namespace QueueStress
 		double measuredHz = 0.0, nominalHz = 0.0;
 		long long pendingLost = 0;
 		bool pendingHard = false;
+		CaptureArrival::Tracker arrivals;   // not restarted on a resync (as the renderer)
+		bool staleGapPending = false;
+		long long floorHoldsSeen = 0, lateSeen = 0;   // the clock's counters (restarted with it)
 	};
 
 	// ---- the presentation model ----
@@ -1581,6 +1618,7 @@ namespace QueueStress
 	{
 		bool resizeMarksGap = false;   // the queue-resize purge fix (see docs/agent-reports/queue-stress.md)
 		Mutation mutation = Mutation::None;
+		bool legacyQ1 = false;         // the renderer before the Q1 fix (docs/agent-reports/q1-stale-burst.md)
 	};
 
 	inline Result Run(const Scenario& s, const RunOptions& o = RunOptions())
@@ -1590,13 +1628,18 @@ namespace QueueStress
 		const std::vector<SignalFrame> frames = source.Generate();
 		Lane lane(s, r);
 		lane.mutation = o.mutation;
+		lane.legacyQ1 = o.legacyQ1;
 		// Arrival disturbances (jitter, bursts, drift): the film clock may follow the arrivals.
 		std::vector<std::pair<double, double>> arrivalWindows;
-		for (const Event& e : s.events)
+		std::vector<Event> ordered = s.events;
+		std::sort(ordered.begin(), ordered.end(), [](const Event& x, const Event& y) { return x.t < y.t; });
+		double rateNow = s.signalHz;   // the signal rate at each event (a burst holds frames at it)
+		for (const Event& e : ordered)
 		{
 			const double t = 1.25 + e.t;
+			if (e.kind == Ev::RateSwing) rateNow = e.a;
 			if (e.kind == Ev::Jitter) arrivalWindows.push_back({ t, t + e.a });
-			if (e.kind == Ev::Burst) arrivalWindows.push_back({ t, t + e.a / s.signalHz + 0.1 });
+			if (e.kind == Ev::Burst) arrivalWindows.push_back({ t, t + e.a / rateNow + 0.1 });
 			if (e.kind == Ev::Drift) arrivalWindows.push_back({ t, t + 1e9 });
 		}
 		for (const SignalFrame& f : frames)

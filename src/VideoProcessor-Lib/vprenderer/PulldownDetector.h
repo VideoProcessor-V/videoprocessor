@@ -676,6 +676,9 @@ namespace Pulldown
 		void Reset()
 		{
 			m_offsets.clear();
+			m_late.clear();
+			m_haveTime = false;
+			m_lastTime = 0.0;
 			m_baseIndex = 0;
 			m_baseTime = 0.0;
 			m_filmHz = 0.0;
@@ -704,7 +707,31 @@ namespace Pulldown
 			Reset();
 			return true;
 		}
-		bool InUse() const { return m_haveLast || !m_offsets.empty(); }
+		bool InUse() const { return m_haveLast || m_haveTime || !m_offsets.empty(); }
+
+		// Q1 (queue stress 2026-10-18; pulldown_fixes, default on): the late-arrival guard.
+		// A capture that stalls and then delivers its held frames at once hands them over
+		// late; timed at the callback, their offsets were up to the stall above the rest,
+		// the anchor (the largest offset) timed every later frame that late for the window
+		// and then stepped the clock back ~0.46 s inside the lock with no discontinuity.
+		// With the guard:
+		// - an offset more than kLateArrivalSeconds above the window's anchor is a late
+		//   arrival: that frame is still never timed before it arrived, but its offset stays
+		//   out of the window, so the next on-time frames keep the clock's level;
+		// - late arrivals that persist for kLatePersistSeconds of film are the new level
+		//   (a real arrival step): they join the window and the clock steps forward;
+		// - the clock never runs backwards while in use (Reset starts it over): a frame that
+		//   would be timed at or before the previous one is timed just after it, so the
+		//   on-time frames after a late run catch up (bounded by the run's lateness) instead.
+		// Off: the 2026-10-17 behaviour. Toggled, the caller restarts the clock (the
+		// pulldown_fixes switch's clockForm Reset).
+		static constexpr double kLateArrivalSeconds = 0.25;
+		static constexpr double kLatePersistSeconds = kWindowSeconds / 2.0;
+		static constexpr double kMinStepSeconds = 1e-6;
+		void SetLateGuard(bool on) { m_lateGuard = on; }
+		bool LateGuard() const { return m_lateGuard; }
+		unsigned long long LateArrivals() const { return m_lateArrivals; }
+		unsigned long long FloorHolds() const { return m_floorHolds; }
 
 		// Hunt 2 (cadence_class_fixes, 06-interp M1): a pulldown re-phase moves every
 		// later film frame's arrival against its index by a signal frame or more; the
@@ -712,7 +739,8 @@ namespace Pulldown
 		// window and then step it. Drops the offset history only: the ideal time and
 		// its re-base continuity are kept, so the clock goes on from the re-phased
 		// frame (which carries the pulldown discontinuity: no pair across it).
-		void Reanchor() { m_offsets.clear(); }
+		// Q1: the late arrivals are dropped too; the never-backwards floor is kept.
+		void Reanchor() { m_offsets.clear(); m_late.clear(); }
 
 		// Hunt 2 (cadence_class_fixes, 06-interp L6): the anchor is the second
 		// largest offset in the window (with three or more), so one late arrival
@@ -764,9 +792,44 @@ namespace Pulldown
 				m_lastIdeal = ideal;
 				m_haveLast = true;
 			}
-			m_offsets.push_back({ ideal, arrival - lateness - ideal });
+			const double offset = arrival - lateness - ideal;
+			if (m_lateGuard && !m_offsets.empty())
+			{
+				// Q1: judged against the window as it stands for this frame.
+				while (m_offsets.size() > 1 && ideal - m_offsets.front().first > kWindowSeconds)
+					m_offsets.pop_front();
+				const double before = Anchor();
+				if (offset > before + kLateArrivalSeconds)
+				{
+					m_late.push_back({ ideal, offset });
+					if (ideal - m_late.front().first < kLatePersistSeconds)
+					{
+						++m_lateArrivals;
+						return Floor(before + ideal + latenessMax, arrival);
+					}
+					// A lasting step of the arrivals: the new level.
+					for (const auto& late : m_late)
+						m_offsets.push_back(late);
+					m_late.clear();
+				}
+				else
+				{
+					m_late.clear();
+					m_offsets.push_back({ ideal, offset });
+				}
+			}
+			else
+				m_offsets.push_back({ ideal, offset });
 			while (m_offsets.size() > 1 && ideal - m_offsets.front().first > kWindowSeconds)
 				m_offsets.pop_front();
+			return Floor(Anchor() + ideal + latenessMax, arrival);
+		}
+
+	private:
+		// The largest offset in the window; with the robust anchor and three or more,
+		// the second largest (Hunt 2 L6).
+		double Anchor() const
+		{
 			double anchor = m_offsets.front().second;
 			double second = -1e300;
 			for (const auto& offset : m_offsets)
@@ -781,8 +844,22 @@ namespace Pulldown
 			}
 			if (m_robust && m_offsets.size() >= 3)
 				anchor = second;
-			const double time = anchor + ideal + latenessMax;
-			return time > arrival ? time : arrival;
+			return anchor;
+		}
+
+		// Never before the frame arrived; with the guard, never at or before the previous time.
+		double Floor(double time, double arrival)
+		{
+			if (time < arrival)
+				time = arrival;
+			if (m_lateGuard && m_haveTime && time <= m_lastTime)
+			{
+				time = m_lastTime + kMinStepSeconds;
+				++m_floorHolds;
+			}
+			m_lastTime = time;
+			m_haveTime = true;
+			return time;
 		}
 
 	private:
@@ -790,6 +867,12 @@ namespace Pulldown
 		// Bug hunt 2026-10-17: the re-based ideal time (rebasing on only).
 		bool m_rebase = false;
 		bool m_robust = false;   // Hunt 2 (L6): second-largest anchor
+		// Q1: the late-arrival guard (on by default; pulldown_fixes off turns it off).
+		bool m_lateGuard = true;
+		std::deque<std::pair<double, double>> m_late;   // late arrivals not (yet) in the window
+		bool m_haveTime = false;
+		double m_lastTime = 0.0;
+		unsigned long long m_lateArrivals = 0, m_floorHolds = 0;
 		uint64_t m_baseIndex = 0;
 		double m_baseTime = 0.0;
 		double m_filmHz = 0.0;

@@ -54,16 +54,17 @@ namespace
 	// failing repro in QueueStressRepros); the fuzz run fails only on a new signature.
 	const std::set<std::string>& KnownSignatures()
 	{
-		static const std::set<std::string> known = {
-			// Q1: a burst of frames older than 0.5 s (callback arrival) steps the film clock back
-			// ~2 s later (QueueStressRepros::StaleBurstFilmClockRunsBackwards).
-			"FILMCLOCK_BACKWARDS",
-			// The same burst seen by the quiet-lock spacing and lateness checks (every one of
-			// them within 8 s after a burst in a 3000-scenario soak).
-			"FILMCLOCK_SPACING",
-			"FILMCLOCK_UNBOUNDED",
-		};
+		// Q1 (the stale burst stepping the film clock back) is fixed (docs/agent-reports/
+		// q1-stale-burst.md): FILMCLOCK_BACKWARDS / SPACING / UNBOUNDED are new failures again.
+		static const std::set<std::string> known = {};
 		return known;
+	}
+
+	// VP_QSTRESS_LEGACY_Q1=1: the soak runs the renderer before the Q1 fix (before/after counts).
+	RunOptions& SoakOptions()
+	{
+		static RunOptions options = [] { RunOptions o; o.legacyQ1 = EnvInt("VP_QSTRESS_LEGACY_Q1", 0) == 1; return o; }();
+		return options;
 	}
 
 	// queue_timing_fixes off is the old behaviour by design: a failure that the switch on
@@ -73,7 +74,7 @@ namespace
 		if (s.sw.queueFixes) return false;
 		Scenario on = s;
 		on.sw.queueFixes = true;
-		return !Run(on).Failed(signature);
+		return !Run(on, SoakOptions()).Failed(signature);
 	}
 
 	std::string Summary(const Result& r)
@@ -106,7 +107,7 @@ namespace
 			if (!repros.count(sig))
 			{
 				int runs = 0;
-				const Scenario minimal = Minimise(s, sig, [](const Scenario& x) { return Run(x); }, &runs);
+				const Scenario minimal = Minimise(s, sig, [](const Scenario& x) { return Run(x, SoakOptions()); }, &runs);
 				repros[sig] = minimal;
 				out << "  minimised " << sig << " in " << runs << " runs: " << Describe(minimal) << "\n";
 			}
@@ -149,7 +150,7 @@ namespace QueueStressTest
 				const Scenario s = Random(static_cast<uint64_t>(seed));
 				simulated += s.seconds;
 				std::ostringstream detail;
-				const Result r = Run(s);
+				const Result r = Run(s, SoakOptions());
 				const std::set<std::string> u = Check(s, r, repros, detail);
 				if (!r.failures.empty())
 				{
@@ -393,6 +394,7 @@ namespace QueueStressTest
 	// Minimal repros of the defects the harness found (docs/agent-reports/queue-stress.md).
 	// They fail until the defect is fixed; each is the auto-minimised scenario (seed + event
 	// list) and, where the cause is one component, the same defect on that component alone.
+	// Q1 is fixed (docs/agent-reports/q1-stale-burst.md): its repros pass and guard the fix.
 	TEST_CLASS(QueueStressRepros)
 	{
 	public:
@@ -433,6 +435,184 @@ namespace QueueStressTest
 				last = t;
 			}
 			Assert::IsTrue(text.empty(), W("film clock ran backwards: " + text).c_str());
+		}
+
+		// Q1 fix (CaptureArrival): a stalled capture's held frames keep their hardware time
+		// while it is plausible; the first stale frame of a run is a delivery gap; a break or a
+		// clock on another base falls back to the callback time, and the first fresh frame
+		// after such a run is a gap too. queue_timing_fixes off: the callback time, no gaps.
+		TEST_METHOD(StaleArrivalTrackerKeepsPlausibleHardwareTime)
+		{
+			CaptureArrival::Tracker t;
+			const double period = 1.0 / 30.0;
+			double now = 100.0;
+			for (int i = 0; i < 10; ++i, now += period)
+			{
+				const CaptureArrival::Result r = t.Next(now + 0.002, true, now, true, true);
+				Assert::IsTrue(r.kind == CaptureArrival::Kind::Fresh && r.arrival == now && !r.staleStart && !r.staleEnd);
+			}
+			// A 0.8 s stall: the held frames delivered together at the end.
+			const double delivered = now + 0.8;
+			int starts = 0;
+			for (double hw = now; hw < delivered - CaptureArrival::kFreshAgeSeconds; hw += period)
+			{
+				const CaptureArrival::Result r = t.Next(delivered, true, hw, true, true);
+				Assert::IsTrue(r.kind == CaptureArrival::Kind::StaleHardware, L"plausible: the hardware time");
+				Assert::AreEqual(hw, r.arrival);
+				starts += r.staleStart ? 1 : 0;
+				Assert::IsFalse(r.staleEnd);
+			}
+			Assert::AreEqual(1, starts, L"one delivery gap per stale run");
+			CaptureArrival::Result r = t.Next(delivered + 0.001, true, delivered - 0.1, true, true);
+			Assert::IsTrue(r.kind == CaptureArrival::Kind::Fresh && !r.staleEnd, L"hardware-timed run: no second gap");
+			// A stale frame across a timestamp break: the callback time; the run stays on it.
+			r = t.Next(delivered + 1.0, true, delivered + 0.2, false, true);
+			Assert::IsTrue(r.kind == CaptureArrival::Kind::StaleCallback && r.arrival == delivered + 1.0 && r.staleStart);
+			r = t.Next(delivered + 1.0001, true, delivered + 0.25, true, true);
+			Assert::IsTrue(r.kind == CaptureArrival::Kind::StaleCallback, L"the chain needs a fresh frame first");
+			r = t.Next(delivered + 1.05, true, delivered + 1.0, true, true);
+			Assert::IsTrue(r.kind == CaptureArrival::Kind::Fresh && r.staleEnd, L"the first fresh frame after callback times: a gap");
+			// Hardware time running backwards inside a stale run: implausible.
+			r = t.Next(delivered + 2.0, true, delivered + 0.9, true, true);
+			Assert::IsTrue(r.kind == CaptureArrival::Kind::StaleCallback);
+			// A timing clock on another base (every frame old): never trusted.
+			CaptureArrival::Tracker other;
+			for (int i = 0; i < 5; ++i)
+				Assert::IsTrue(other.Next(10.0 + i * period, true, 5.0 + i * period, true, true).kind == CaptureArrival::Kind::StaleCallback);
+			// queue_timing_fixes off: the behaviour before (callback time, no gaps).
+			CaptureArrival::Tracker off;
+			off.Next(1.0, true, 0.99, true, false);
+			r = off.Next(2.0, true, 1.02, true, false);
+			Assert::IsTrue(r.kind == CaptureArrival::Kind::StaleCallback && !r.staleStart && r.arrival == 2.0);
+			Assert::IsFalse(off.Next(2.01, true, 2.0, true, false).staleEnd);
+		}
+
+		// Q1 fix (FilmClock late-arrival guard): after a stale run on callback times the clock
+		// never runs backwards and is back on the arrivals within the run's lateness; a lasting
+		// step of the arrivals is accepted (the clock steps forward), never early.
+		TEST_METHOD(FilmClockLateGuardBoundedCatchUpAndLastingStep)
+		{
+			for (double f : { 24000.0 / 1001.0, 24.0, 25.0 })
+			{
+				Pulldown::FilmClock clock;
+				clock.SetRobustAnchor(true);
+				clock.SetRebaseOnRateChange(true);
+				double last = -1.0, late = 0.0;
+				const double burstAt = 10.0 + 104 / f + 0.6;
+				for (uint64_t n = 1; n < 400; ++n)
+				{
+					double arrival = 10.0 + n / f + 0.002;
+					if (n >= 100 && n <= 104) arrival = burstAt;
+					const double t = clock.Time(n, arrival, f);
+					Assert::IsTrue(t > last && t >= arrival, L"monotonic, never early");
+					// Caught up once the on-time arrivals pass the late run (a period of slack).
+					if (arrival > burstAt + 1.0 / f)
+						late = (std::max)(late, t - arrival);
+					last = t;
+				}
+				Assert::IsTrue(late < 0.005, W(Fmt("caught up: %.1f ms after arrival", late * 1000.0)).c_str());
+				Assert::IsTrue(clock.LateArrivals() == 5, L"the five late frames stayed out of the window");
+
+				Pulldown::FilmClock step;
+				last = -1.0;
+				double after = 0.0;
+				for (uint64_t n = 1; n < 400; ++n)
+				{
+					const double arrival = 10.0 + n / f + 0.002 + (n >= 150 ? 0.4 : 0.0);
+					const double t = step.Time(n, arrival, f);
+					Assert::IsTrue(t > last && t >= arrival, L"monotonic, never early (lasting step)");
+					if (n >= 150 + static_cast<uint64_t>(f * (Pulldown::FilmClock::kLatePersistSeconds + 0.5)))
+						after = (std::max)(after, t - arrival);
+					last = t;
+				}
+				Assert::IsTrue(after < 0.005, W(Fmt("lasting step: %.1f ms after arrival", after * 1000.0)).c_str());
+			}
+		}
+
+		// Q1 on the owner's paths: 24p film in 29.97 (streaming apps, one repeat in five) and
+		// 24p film in 59.94 (3:2), output 60 Hz, locked; 1-4 stale bursts of 2-60 frames.
+		// VP_QSTRESS_BURST=<n> scenarios per path (default 40). Every scenario also runs the
+		// renderer before the fix (legacyQ1) for the before/after counts (stale-burst.txt).
+		TEST_METHOD(StaleBurstFilmSoak)
+		{
+			const int count = EnvInt("VP_QSTRESS_BURST", 40);
+			struct Path { const char* name; double signal, picture; uint64_t salt; };
+			const Path paths[] = { { "24p in 29.97", 30000.0 / 1001.0, 24000.0 / 1001.0, 0x2997ull },
+				{ "24p in 59.94", 60000.0 / 1001.0, 24000.0 / 1001.0, 0x5994ull } };
+			std::ostringstream out;
+			std::string failures;
+			for (const Path& p : paths)
+			{
+				int failNow = 0, failBefore = 0, backwardsNow = 0, backwardsBefore = 0, relocks = 0, unlockedEnd = 0, clockGuardOnly = 0;
+				long long guardHolds = 0, guardLate = 0;
+				long long staleHw = 0, staleCb = 0, gaps = 0, holds = 0, bursts = 0;
+				for (int i = 1; i <= count; ++i)
+				{
+					Rng r((p.salt << 20) + static_cast<uint64_t>(i));
+					Scenario s;
+					s.name = "stale-burst";
+					s.seed = static_cast<uint64_t>(i);
+					s.seconds = std::floor(r.U(150.0, 300.0));
+					s.signalHz = p.signal;
+					s.pictureHz = p.picture;
+					s.displayHz = 60.0;
+					s.sw.renderAhead = r.P(0.5);
+					s.sw.fillGaps = r.P(0.75);
+					s.sw.lookaheadAuto = r.P(0.75);
+					s.sw.closedLoop = r.P(0.6);
+					const int n = r.I(1, 4);
+					for (int k = 0; k < n; ++k)
+						s.events.push_back({ Ev::Burst, std::floor(r.U(30.0, s.seconds - 30.0) * 1000.0) / 1000.0,
+							static_cast<double>(r.I(2, 60)), 0.0 });
+					std::sort(s.events.begin(), s.events.end(), [](const Event& x, const Event& y) { return x.t < y.t; });
+					bursts += n;
+					const Result now = Run(s);
+					RunOptions legacy;
+					legacy.legacyQ1 = true;
+					const Result before = Run(s, legacy);
+					if (!now.failures.empty())
+					{
+						++failNow;
+						failures += p.name + std::string(": ") + Describe(s) + " -> " + now.failures.front().invariant + " @" +
+							Fmt("%.3f", now.failures.front().t) + ": " + now.failures.front().detail + "\n";
+					}
+					failBefore += before.failures.empty() ? 0 : 1;
+					// The film clock's guard alone (queue_timing_fixes off: stale frames on the callback
+					// time, pulldown_fixes on): no film clock failure either.
+					Scenario guardOnly = s;
+					guardOnly.sw.queueFixes = false;
+					const Result guard = Run(guardOnly);
+					for (const char* sig : { "FILMCLOCK_BACKWARDS", "FILMCLOCK_SPACING", "FILMCLOCK_UNBOUNDED", "FILMCLOCK_EARLY",
+						"CADENCE_NO_RELOCK" })
+						if (guard.Failed(sig))
+						{
+							++clockGuardOnly;
+							failures += p.name + std::string(" (guard only): ") + Describe(guardOnly) + " -> " + sig + "\n";
+							break;
+						}
+					guardHolds += guard.stats.clockFloorHolds;
+					guardLate += guard.stats.clockLateArrivals;
+					backwardsNow += now.Failed("FILMCLOCK_BACKWARDS") ? 1 : 0;
+					backwardsBefore += before.Failed("FILMCLOCK_BACKWARDS") ? 1 : 0;
+					relocks += now.stats.locks > 1 ? 1 : 0;
+					unlockedEnd += now.Failed("CADENCE_NO_RELOCK") ? 1 : 0;
+					staleHw += now.stats.staleHardware;
+					staleCb += now.stats.staleCallback;
+					gaps += now.stats.staleGaps;
+					holds += now.stats.clockFloorHolds;
+				}
+				out << p.name << " (display 60): " << count << " scenarios, " << bursts << " bursts. Before: " << failBefore
+					<< " failing, " << backwardsBefore << " with film clock reversals. After: " << failNow << " failing, "
+					<< backwardsNow << " with reversals; lock lost and re-acquired in " << relocks << ", unlocked at the end in "
+					<< unlockedEnd << "; stale frames on hardware time " << staleHw << ", on callback time " << staleCb
+					<< "; stale-delivery gaps " << gaps << "; clock floor holds " << holds << ". Guard only (queue_timing_fixes off): "
+					<< clockGuardOnly << " with film clock failures, " << guardLate << " late arrivals kept out, " << guardHolds
+					<< " floor holds\n";
+			}
+			std::ofstream(OutDir() + "\\stale-burst.txt") << out.str() << failures;
+			Log(out.str());
+			Log(failures.substr(0, 20000));
+			Assert::IsTrue(failures.empty(), W("stale-burst failures:\n" + failures.substr(0, 2000)).c_str());
 		}
 	};
 }
