@@ -9676,6 +9676,18 @@ void testHiccupRepairIsSeparateFromMotionSmoothing()
         "the motion smoothing note is missing");
     auto* fillGaps = requireControl<QComboBox>(window, "config.vprenderer.interpolation_fill_gaps");
     require(fillGaps->isEnabled(), "hiccup repair is disabled with interpolation off");
+    // Owner decision 2026-10-18: hiccup repair is on by default; motion smoothing stays off.
+    {
+        const QString selected = fillGaps->currentData().toString();
+        const QString effective = selected.isEmpty() ?
+            fillGaps->property("inheritedValue").toString().trimmed().toLower() : selected;
+        require(effective == QStringLiteral("on"),
+            ("hiccup repair is not on by default: " + effective.toStdString()).c_str());
+        require(fillGaps->toolTip().contains("On (default)"),
+            ("the fill-gaps tooltip does not name On as the default: " + fillGaps->toolTip().toStdString()).c_str());
+        require(requireControl<QRadioButton>(window, "config.vprenderer.interpolation.off")->isChecked(),
+            "motion smoothing is not off");
+    }
     requireControl<QRadioButton>(window, "config.vprenderer.interpolation.always")->click();
     QCoreApplication::processEvents();
     requireControl<QRadioButton>(window, "config.vprenderer.interpolation.off")->click();

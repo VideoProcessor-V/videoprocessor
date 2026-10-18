@@ -52,7 +52,7 @@ exclusivity (`DejudderPolicy::ResolveEngine`); motion invalidation (`RequestMoti
 |---|---|---|
 | `interpolation` | off / auto (non-integer ratio only) / always (smooth-motion parity) | off |
 | `interpolation_fallback` | hold / blend | hold |
-| `interpolation_fill_gaps` | off / on | off |
+| `interpolation_fill_gaps` | off / on | on (owner 2026-10-18; was off) |
 | `source_class` | measured / legacy (the IsFilmLike generalisation) | legacy |
 
 Queue minimum: 1 frame ahead (5 with the producer); low latency exempt.
@@ -328,6 +328,9 @@ B it shows A. A composed (subtitle) or RGB picture keeps A.
 > heading "Repair dropped frames / hiccups", never greyed. Default still off (under test); the
 > key is still `interpolation_fill_gaps`. The "while interpolating" and "greyed" wording below
 > is superseded.
+>
+> **Update 2026-10-18 (owner decision):** `interpolation_fill_gaps` (hiccup repair) is now on by
+> default. Motion smoothing (`interpolation`) stays off.
 
 **Gap fill** (`interpolation_fill_gaps: on`, default off). ~~While interpolating,~~ B may follow a loss
 of 1 to 3 whole frames (`QueuedFrame::gapFrames`: missed capture frames, a dropped queued frame;

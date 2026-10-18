@@ -8599,17 +8599,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // Render-ahead 2026-10-17: the renderer decides the fill independently of
             // interpolation, so hiccup repair works with motion smoothing off.
             form->addRow(QString(), helpLabel(QStringLiteral(
-                "Works with motion smoothing on or off (under test, off by default).")));
+                "Works with motion smoothing on or off (on by default; owner 2026-10-18).")));
         }
+        // Owner 2026-10-18: hiccup repair is on by default; motion smoothing (interpolation) stays off.
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
-            { QStringLiteral("off"), QStringLiteral("on") });
+            { QStringLiteral("on"), QStringLiteral("off") });
+        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (default; pair across 1-3 missed frames)"));
         fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
-        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (pair across 1-3 missed frames)"));
         fillGaps->setToolTip(QStringLiteral(
-            "Under test; works with motion smoothing on or off. "
+            "On (default); works with motion smoothing on or off, and motion smoothing stays off by default. "
             "When a stream loses one to three frames, On pairs the "
             "frames either side of the gap and fills the missing refreshes with pictures at their true time (the "
-            "motion is checked as always; untrusted areas hold). Off (default) keeps the rule that no motion is "
+            "motion is checked as always; untrusted areas hold). Off keeps the rule that no motion is "
             "paired across a gap: the last frame stays on screen until the next arrives. (Key: interpolation_fill_gaps.)"));
         form = fixesForm;
         auto* pulldownFixes = addChoice(QStringLiteral("Film-in-video detection: keep the lock"), QStringLiteral("pulldown_fixes"),
@@ -10650,7 +10651,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     // Hunt 2 M1: the NLS warp's sampling.
                     { "nls_sampling", "catmull" }, { "source_coding_fixes", "on" },
                     // VP's 50/60p interpolation (owner defaults 2026-10-16).
-                    { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
+                    { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "on" },
                     { "source_class", "legacy" },   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                     // Content recognition (intent interpreter item 1, 2026-10-17).
                     { "intent_content", "off" },

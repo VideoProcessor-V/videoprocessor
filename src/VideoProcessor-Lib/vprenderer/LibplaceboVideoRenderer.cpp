@@ -1161,7 +1161,7 @@ namespace
 		// gap fill off; the film / video classification legacy (IsFilmLike) or measured.
 		InterpolationPolicy::Mode interpolation = InterpolationPolicy::Mode::Off;
 		InterpolationPolicy::Fallback interpolationFallback = InterpolationPolicy::Fallback::Hold;
-		bool interpolationFillGaps = false;
+		bool interpolationFillGaps = true;   // hiccup repair: on by default (owner 2026-10-18)
 		InterpolationPolicy::SourceClass sourceClass = InterpolationPolicy::SourceClass::Legacy;
 		// Content recognition (intent interpreter item 1, 2026-10-17; default off):
 		// the rule-based content class for the rules' `content` variable, and the
@@ -28642,7 +28642,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 				const bool skipUpdate = interpolatingNow && m_frameQueue.front().filmUpdate && m_frameQueue.size() >= 2 &&
 					!m_frameQueue.front().gapBefore && !m_frameQueue[1].filmUpdate;
 				const QueuedFrame& next = skipUpdate ? m_frameQueue[1] : m_frameQueue.front();
-				// Gap fill (interpolation_fill_gaps, default off): while interpolating, B may
+				// Gap fill (interpolation_fill_gaps, default on since 2026-10-18): while interpolating, B may
 				// follow a short loss of whole frames; the pair then spans the missing periods
 				// (the timeline's span). Never across a pulldown change, a flush or an update,
 				// and never when B's time is beyond the span (a stall, a clock step).

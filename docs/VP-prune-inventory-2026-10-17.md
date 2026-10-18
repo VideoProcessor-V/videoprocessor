@@ -107,7 +107,7 @@ the keys in the file as written (configuration is user data) and has no control 
 | `motion_engine` auto/vp/smooth_motion | auto | keep-unique | one-or-the-other rule (owner 2026-10-15) | RPC:797 |
 | `interpolation` off/auto/always | off | keep-unique | kept for other users (owner not a fan) | RPC:715 |
 | `interpolation_fallback` hold/blend | hold | keep-unique | blend = the frame-mixer parity the owner asked for | RPC:716 |
-| `interpolation_fill_gaps` | off | keep-unique | gap fill (wanted, distinct from interpolation) | RPC:717 |
+| `interpolation_fill_gaps` | on (owner 2026-10-18) | keep-unique | gap fill (wanted, distinct from interpolation) | RPC:717 |
 | `interpolation_grain` preserve/blend | preserve | unsure | grain restore switch; `blend` averages grain (against the grain rule) | RPC:719 |
 | `source_class` legacy/measured | legacy | keep (phase 2, B2) | the measured classifier is batch B2 | RPC:727 |
 

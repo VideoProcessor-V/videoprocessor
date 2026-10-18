@@ -378,6 +378,47 @@ namespace Tests
                 DeleteFileA(file.c_str());
         }
     };
+    // Owner decision 2026-10-18 (integration round 3): hiccup repair
+    // (interpolation_fill_gaps) is on by default; motion smoothing (interpolation)
+    // stays off. Read through the renderer DLL's settings dump.
+    TEST_CLASS(HiccupRepairDefaultTests)
+    {
+    public:
+        TEST_METHOD(HiccupRepairDefaultsOnAndInterpolationStaysOff)
+        {
+            const std::string folder = Here();
+            HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr,
+                LOAD_WITH_ALTERED_SEARCH_PATH);
+            Assert::IsNotNull(dll, L"the renderer DLL next to the tests");
+            using Export = int(__cdecl*)(const char*, char*, int);
+            const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+            Assert::IsNotNull(reinterpret_cast<void*>(describe));
+            int callIndex = 0;
+            auto dump = [&](const std::string& keys) {
+                const std::string path = folder + "vp-hiccup-default-test-" + std::to_string(callIndex++) + ".cfg";
+                {
+                    std::ofstream config(path, std::ios::trunc | std::ios::binary);
+                    config << "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n" << keys;
+                }
+                std::vector<char> buffer(1 << 20);
+                const int length = describe(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+                DeleteFileA(path.c_str());
+                Assert::IsTrue(length > 0, L"the export ran");
+                return std::string(buffer.data());
+            };
+            auto line = [](const std::string& text, const std::string& key) {
+                const size_t at = text.find("\n" + key + "=");
+                if (at == std::string::npos) return std::string("(missing)");
+                const size_t start = at + key.size() + 2;
+                return text.substr(start, text.find('\n', start) - start);
+            };
+            const std::string base = dump("");
+            Assert::AreEqual(std::string("on"), line(base, "interpolation_fill_gaps"), L"hiccup repair default");
+            Assert::AreEqual(std::string("off"), line(base, "interpolation"), L"motion smoothing default");
+            Assert::AreEqual(std::string("off"), line(dump("interpolation_fill_gaps: off\n"),"interpolation_fill_gaps"),
+                L"an explicit off still wins");
+        }
+    };
     // Owner 2026-10-17: active_picture_lookahead_frames follows the queue unless set.
     TEST_CLASS(QueueLookaheadTests)
     {
