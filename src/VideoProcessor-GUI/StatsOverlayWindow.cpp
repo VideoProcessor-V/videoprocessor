@@ -746,6 +746,18 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 		DrawText(hdc, line, PADDING, y);
 		y += lineHeight;
 	}
+	// Intent interpreter items 2-5 (2026-10-17): only while each function is on.
+	const std::pair<LPCTSTR, const CString*> intentLines[] = {
+		{ TEXT("Motion intent:    %-s"), &m_stats.motionIntent }, { TEXT("Ambient:          %-s"), &m_stats.ambientIntent },
+		{ TEXT("Black:            %-s"), &m_stats.blackIntent }, { TEXT("Display:          %-s"), &m_stats.displayIntent } };
+	for (const auto& intentLine : intentLines)
+	{
+		if (intentLine.second->IsEmpty())
+			continue;
+		line.Format(intentLine.first, static_cast<LPCTSTR>(*intentLine.second));
+		DrawText(hdc, line, PADDING, y);
+		y += lineHeight;
+	}
 
 	if (m_stats.activeShaders.empty())
 		line.Format(TEXT("Shaders:          None"));
@@ -1045,6 +1057,9 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 		++lineCount;
 	if (!stats.content.IsEmpty())
 		++lineCount;
+	for (const CString* intentLine : { &stats.motionIntent, &stats.ambientIntent, &stats.blackIntent, &stats.displayIntent })
+		if (!intentLine->IsEmpty())
+			++lineCount;
 	if (!stats.dejudderStatus.IsEmpty())
 		++lineCount;
 	const int lineHeight =
