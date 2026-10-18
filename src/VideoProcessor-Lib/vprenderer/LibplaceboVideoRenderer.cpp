@@ -24776,7 +24776,12 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		return;
 	// The frame's hardware arrival on the QPC clock: the capture clock and
 	// QPC read back to back give the frame's age at this moment.
+	// Q1 (queue stress 2026-10-18): the hardware time is kept at any age; the
+	// CaptureArrival tracker below decides whether a stale frame (>= 0.5 s old)
+	// keeps it (queue_timing_fixes, when plausible) or the callback time.
 	int64_t arrivalQpc = 0;
+	int64_t hardwareQpc = 0;
+	bool hardwareAgeKnown = false;
 	{
 		const timingclocktime_t frameTicks = videoFrame.GetTimingTimestamp();
 		if (m_timingClock && frameTicks > 0)
@@ -24789,13 +24794,16 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				LARGE_INTEGER frequency{};
 				QueryPerformanceFrequency(&frequency);
 				const timingclocktime_t age = nowTicks - frameTicks;
-				if (ticksPerSecond > 0 && frequency.QuadPart > 0 && age >= 0 && age < ticksPerSecond / 2)
-					arrivalQpc = nowQpc - static_cast<int64_t>(static_cast<double>(age) *
+				if (ticksPerSecond > 0 && frequency.QuadPart > 0 && age >= 0)
+				{
+					hardwareQpc = nowQpc - static_cast<int64_t>(static_cast<double>(age) *
 						static_cast<double>(frequency.QuadPart) / static_cast<double>(ticksPerSecond));
+					hardwareAgeKnown = true;
+				}
 			}
 			catch (const std::exception&)
 			{
-				arrivalQpc = 0;   // the callback time is used
+				hardwareAgeKnown = false;   // the callback time is used
 			}
 		}
 	}
@@ -24820,11 +24828,45 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	// 9+ periods, an odd jump, a backward step) is a gap too - not whole missed
 	// frames, so never filled - else motion pairs and history carry across it.
 	const bool timingFixes = m_timingContinuityFixes.load(std::memory_order_relaxed);
-	if (timingFixes && m_captureTimestampBreaks.load(std::memory_order_relaxed) != breaksBefore)
+	const bool timestampBreak = m_captureTimestampBreaks.load(std::memory_order_relaxed) != breaksBefore;
+	if (timingFixes && timestampBreak)
 	{
 		gapBefore = true;
 		gapFrames = 0;
 		gapCause = "capture timestamp discontinuity";
+	}
+	// Q1 (queue stress 2026-10-18, queue_timing_fixes): the arrival. A stale frame (a stalled
+	// capture delivering its held frames at once) keeps its hardware time when plausible,
+	// else the callback time (as before). The delivery discontinuity is a no-fill gap, marked
+	// on the kept frame after the pulldown detector (the cadence lock is kept, no gap-fill
+	// pair spans the stall).
+	{
+		LARGE_INTEGER arrivalFrequency{};
+		QueryPerformanceFrequency(&arrivalFrequency);
+		const double qpcPerSecond = static_cast<double>(arrivalFrequency.QuadPart);
+		const bool queueFixes = m_queueTimingFixes.load(std::memory_order_relaxed);
+		if (qpcPerSecond > 0.0)
+		{
+			const CaptureArrival::Result arrival = m_captureArrival.Next(
+				static_cast<double>(callbackQpc) / qpcPerSecond, hardwareAgeKnown,
+				static_cast<double>(hardwareQpc) / qpcPerSecond, !timestampBreak, queueFixes);
+			arrivalQpc = arrival.Hardware() ? hardwareQpc : 0;
+			if (arrival.staleStart || arrival.staleEnd)
+			{
+				m_captureStaleGapPending = true;
+				m_captureStaleGapCause = arrival.staleStart ? "stale capture delivery" : "stale capture delivery ended";
+				const uint64_t stale = ++m_captureStaleRuns;
+				if ((stale & (stale - 1)) == 0)
+					DebugLog::Log("Capture: %s (age %.0f ms, %s time; runs %llu, stale frames on hardware time %llu, on callback time %llu)",
+						m_captureStaleGapCause, static_cast<double>(callbackQpc - hardwareQpc) * 1000.0 / qpcPerSecond,
+						arrival.Hardware() ? "hardware" : "callback", static_cast<unsigned long long>(stale),
+						m_captureArrival.StaleHardware(), m_captureArrival.StaleCallback());
+			}
+		}
+		else
+			arrivalQpc = 0;
+		if (!queueFixes)
+			m_captureStaleGapPending = false;
 	}
 	if (m_timingClock && counter % 20 == 0)
 	{
@@ -24927,6 +24969,8 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			DebugLog::Log("Pulldown: film clock re-basing %s (timing_continuity_fixes); clock restarted",
 				timingFixes ? "on" : "off");
 		}
+		// Q1 (pulldown_fixes): the film clock's late-arrival guard (never backwards inside a lock).
+		m_pulldownClock.SetLateGuard(fixes);
 		const bool wasLocked = m_pulldown.Locked();
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
 		// D4: the counted misses keep the lock (verified over the next cycle).
@@ -25031,6 +25075,16 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		m_pulldownCadence.store(0, std::memory_order_relaxed);
 		if (!gapBefore)
 			gapCause = "pulldown off";
+		gapBefore = true;
+		gapFrames = 0;
+	}
+	// Q1 (queue_timing_fixes): a stale delivery's gap, kept across dropped pulldown repeats
+	// until this kept frame; never filled.
+	if (m_captureStaleGapPending)
+	{
+		m_captureStaleGapPending = false;
+		if (!gapBefore)
+			gapCause = m_captureStaleGapCause;
 		gapBefore = true;
 		gapFrames = 0;
 	}

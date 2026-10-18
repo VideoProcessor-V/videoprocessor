@@ -11,6 +11,7 @@
 #include <vprenderer/BufferedPictureExpansion.h>
 #include <vprenderer/AlphaConversionTimingWindow.h>
 #include <vprenderer/PulldownDetector.h>
+#include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameSlotGate.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
@@ -442,6 +443,12 @@ private:
 	std::atomic<bool> m_cadenceClassFixes{true};
 	bool m_cadenceClassFixesApplied = true;   // capture thread
 	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
+	// Q1 (queue stress 2026-10-18, queue_timing_fixes): stale-frame arrivals and their
+	// delivery gap (capture thread).
+	CaptureArrival::Tracker m_captureArrival;
+	bool m_captureStaleGapPending = false;
+	const char* m_captureStaleGapCause = nullptr;
+	uint64_t m_captureStaleRuns = 0;
 	// motion_history_fixes (Hunt 2 fix group 5): refreshed by the render loop.
 	std::atomic<bool> m_motionHistoryFixes{true};
 	// Hunt 2 04 L4: incoming frames dropped to preserve queued cadence repeats since the
