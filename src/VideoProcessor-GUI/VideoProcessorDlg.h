@@ -672,6 +672,10 @@ protected:
 	// Owner 2026-10-17: active_picture_lookahead_frames follows the queue unless set.
 	bool m_activePictureLookaheadLoggedConfigured = false;
 	size_t StartupActivePictureLookaheadFrames();
+	// Bug hunt 3 F2: the look-ahead is automatic (follows the queue), told to the renderer
+	// so the locked-film queue scaling takes no floor from it.
+	bool m_activePictureLookaheadAutomatic = true;
+	void ApplyStartupActivePictureLookahead();
 	std::unique_ptr<ConfigFile> m_stagedConfiguration;
 	ConfigurationApplyPolicy::Action m_stagedConfigurationAction =
 		ConfigurationApplyPolicy::Action::SaveOnly;

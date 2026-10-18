@@ -85,6 +85,11 @@ public:
 	static constexpr double kMinimumSpanSeconds = 10.0;
 	// A longer silence is a break: the estimate starts over.
 	static constexpr double kMaximumGapSeconds = 1.0;
+	// Bug hunt 3 F3: a rate hint that moves by more than this share (a pulldown lock
+	// change: the signal rate <-> the film rate, whose frames carry the film clock) starts
+	// the fit over; the old index counted periods of the other rate (as VBlankGridRate
+	// does for another display rate). A card's 1000/1001 step (0.1%) keeps the fit.
+	static constexpr double kHintChangeShare = 0.01;
 
 	void Reset();
 	// One frame (the index advances by one per call). rateHintHz sets the
@@ -97,6 +102,7 @@ private:
 	double m_t0 = 0.0;
 	double m_last = 0.0;
 	double m_index = 0.0;
+	double m_hintHz = 0.0;   // the hint the index counts periods of (0 = none yet)
 	double m_w = 0.0, m_x = 0.0, m_y = 0.0, m_xx = 0.0, m_xy = 0.0;
 };
 

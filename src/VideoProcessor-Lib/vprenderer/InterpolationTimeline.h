@@ -56,6 +56,40 @@ namespace InterpolationTimeline
 		return gapFillPair && !interpolating;
 	}
 
+	// Bug hunt 3 F5: a standalone gap pair on a source the de-judder is active on keeps
+	// the de-judder's decision for that frame - the owner's strength (dejudder_strength,
+	// even or uneven) times the motion-intent scale, and the even cycle - instead of
+	// forcing 1.0: the timeline draws the pair's pictures at phase x strength (the
+	// de-judder's own partial motion). Any other reason: the true phase (strength 1).
+	struct StandaloneGapDecision
+	{
+		bool keepActive = false;   // the de-judder's Active decision stands (strength, even cycle)
+		float strength = 1.0f;     // the strength for this frame
+		float phaseScale = 1.0f;   // the timeline's phases are multiplied by this
+	};
+	inline StandaloneGapDecision StandaloneGap(bool dejudderActive, float effectiveStrength)
+	{
+		StandaloneGapDecision d;
+		if (!dejudderActive)
+			return d;
+		const float s = std::isfinite(effectiveStrength) ? (std::min)(1.0f, (std::max)(0.0f, effectiveStrength)) : 1.0f;
+		d.keepActive = true;
+		d.strength = effectiveStrength;
+		d.phaseScale = s;
+		return d;
+	}
+
+	// Bug hunt 3 F10: the source periods the estimated pair's vector field spans: a gap pair
+	// across `gapFrames` missed frames spans gapFrames + 1 (an adjacent pair, or a pulldown
+	// update skipped within one film period, spans 1). Consumers that take the field as
+	// "current" one-period motion (texture_restore follows references by -field) accept it
+	// only when it spans exactly one period.
+	inline int FieldPeriods(bool gapPair, uint32_t gapFrames)
+	{
+		return gapPair ? 1 + static_cast<int>((std::min)(gapFrames, static_cast<uint32_t>(kMaxSpanFrames))) : 1;
+	}
+	inline bool OnePeriodField(int periods) { return periods == 1; }
+
 	struct Output
 	{
 		double pts = 0.0;     // the refresh time on the source clock (seconds)

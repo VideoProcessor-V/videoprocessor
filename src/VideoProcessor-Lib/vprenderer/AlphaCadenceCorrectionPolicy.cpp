@@ -21,6 +21,11 @@ void AlphaArrivalRateEstimator::Add(double arrivalSeconds, double rateHintHz)
 		return;    // the same frame again (a film frame's update): no new period
 	if (m_started && arrivalSeconds < m_last)
 		Reset();   // a clock step back: start over
+	if (m_started && hinted && m_hintHz > 0.0 &&
+		std::abs(rateHintHz - m_hintHz) > kHintChangeShare * m_hintHz)
+		Reset();   // Bug hunt 3 F3: another rate (a pulldown lock change): start over
+	if (hinted)
+		m_hintHz = rateHintHz;
 	double periods = 1.0;
 	if (m_started && hinted)
 	{

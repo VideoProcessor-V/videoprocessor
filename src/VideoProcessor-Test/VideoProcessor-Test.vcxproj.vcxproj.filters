@@ -43,6 +43,9 @@
     <ClCompile Include="IntentInterpreterTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="H3TimingTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="FileSourceRuleVariableTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

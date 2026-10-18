@@ -10799,8 +10799,7 @@ void CVideoProcessorDlg::RenderStart()
 				videoProcessorApp.GetQueueStartupPrerollFrames(),
 				videoProcessorApp.GetQueueSteadyReserveFrames(),
 				videoProcessorApp.HasQueueSteadyReserveFrames());
-			m_videoRenderer->SetActivePictureLookaheadFrames(
-				StartupActivePictureLookaheadFrames());
+			ApplyStartupActivePictureLookahead();
 			ApplyRequestedShaderSelection();
 			m_rendererTransitionWindow.KeepOnTop();
 			// Match the DirectShow startup contract. Alpha owns its detector and
@@ -10978,8 +10977,7 @@ void CVideoProcessorDlg::RenderStart()
 		m_videoRenderer->SetPresentationLeadFrames(
 			videoProcessorApp.GetPresentationLeadFrames(),
 			videoProcessorApp.HasPresentationLeadFrames());
-		m_videoRenderer->SetActivePictureLookaheadFrames(
-			StartupActivePictureLookaheadFrames());
+		ApplyStartupActivePictureLookahead();
 		ApplyRequestedShaderSelection();
 		m_rendererTransitionWindow.KeepOnTop();
 		m_videoRenderer->SetSceneAwareTimingCorrection(m_sceneAwareTimingCorrection);
@@ -11097,8 +11095,7 @@ void CVideoProcessorDlg::RenderStart()
 			m_videoRenderer->SetPresentationLeadFrames(
 				videoProcessorApp.GetPresentationLeadFrames(),
 				videoProcessorApp.HasPresentationLeadFrames());
-			m_videoRenderer->SetActivePictureLookaheadFrames(
-				StartupActivePictureLookaheadFrames());
+			ApplyStartupActivePictureLookahead();
 			m_rendererTransitionWindow.KeepOnTop();
 			m_videoRenderer->SetSceneAwareTimingCorrection(m_sceneAwareTimingCorrection);
 			m_videoRenderer->SetSceneCorrectionUpstreamSample(
@@ -14339,6 +14336,12 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				desiredTargetFrames, desiredQueueSize, snapshot->queue.lowLatencyPath ? 1 : 0);
 			m_activePictureLookaheadLoggedConfigured = lookaheadConfigured;
 		}
+		if (m_activePictureLookaheadAutomatic == lookaheadConfigured)
+		{
+			m_activePictureLookaheadAutomatic = !lookaheadConfigured;
+			m_videoRenderer->SetActivePictureLookaheadAutomatic(m_activePictureLookaheadAutomatic);
+			queuePolicyChanged = true;
+		}
 		if (videoProcessorApp.GetActivePictureLookaheadFrames() != desiredLookahead)
 		{
 			videoProcessorApp.SetActivePictureLookaheadFrames(desiredLookahead);
@@ -14742,7 +14745,12 @@ void CVideoProcessorDlg::UpdateContentIntent(const char* reason)
 size_t CVideoProcessorDlg::StartupActivePictureLookaheadFrames()
 {
 	if (m_profileQueueDefaultsCaptured || videoProcessorApp.IsActivePictureLookaheadConfigured())
+	{
+		m_activePictureLookaheadAutomatic = m_profileQueueDefaultsCaptured ?
+			!m_activePictureLookaheadLoggedConfigured : false;
 		return videoProcessorApp.GetActivePictureLookaheadFrames();
+	}
+	m_activePictureLookaheadAutomatic = true;
 	const size_t frames = QueueLookahead::ResolveActivePictureLookahead(false, 0, false,
 		videoProcessorApp.GetQueueSteadyReserveFrames(), GetRendererVideoFrameQueueSizeMax());
 	if (frames != videoProcessorApp.GetActivePictureLookaheadFrames())
@@ -14752,6 +14760,17 @@ size_t CVideoProcessorDlg::StartupActivePictureLookaheadFrames()
 		videoProcessorApp.SetActivePictureLookaheadFrames(frames);
 	}
 	return frames;
+}
+
+// Bug hunt 3 F2: the startup look-ahead and whether it is automatic (the locked-film
+// queue scaling takes no floor from an automatic look-ahead).
+void CVideoProcessorDlg::ApplyStartupActivePictureLookahead()
+{
+	if (!m_videoRenderer)
+		return;
+	const size_t frames = StartupActivePictureLookaheadFrames();
+	m_videoRenderer->SetActivePictureLookaheadAutomatic(m_activePictureLookaheadAutomatic);
+	m_videoRenderer->SetActivePictureLookaheadFrames(frames);
 }
 
 // Intent interpreter items 2-5 (2026-10-17): once a second, the room reading for

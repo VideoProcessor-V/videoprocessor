@@ -319,6 +319,34 @@ namespace DejudderPolicy
 		return (std::max)(6.0f, 4.0f * static_cast<float>(1 << h));
 	}
 
+	// Bug hunt 3 F1: the engine's whole-frame (global) vector is in cells of 8 source px at
+	// full size (4 px of the half size the search runs on), doubling for each halving of the
+	// search input (MotionWarp::SearchHalvings: 4K 16 px, 8K 32 px). It was read as 8 px at
+	// every size, so a 4K pan read half its speed and an 8K pan a quarter.
+	inline double EngineCellSourcePixels(int searchHalvings)
+	{
+		const int h = (std::max)(0, (std::min)(searchHalvings, 8));
+		return 8.0 * static_cast<double>(1 << h);
+	}
+	// The global vector (gx, gy) in source pixels per frame.
+	inline double EngineGlobalSourcePixels(double gx, double gy, int searchHalvings)
+	{
+		return EngineCellSourcePixels(searchHalvings) * std::hypot(gx, gy);
+	}
+	// The halvings MotionWarp makes for an input of `height` lines (HalvesForSearch: lowRes
+	// and height^2 >= 2 x 1080^2, again on the inner's half size); a model for the tests.
+	inline int SearchHalvingsFor(bool lowRes, int height)
+	{
+		int halvings = 0;
+		long long h = height;
+		while (lowRes && h > 0 && h * h >= 2LL * 1080 * 1080 && halvings < 8)
+		{
+			++halvings;
+			h = (h + 1) / 2;
+		}
+		return halvings;
+	}
+
 	// Integration 2026-10-17: the optical-flow producer's break before a frame (no pair
 	// with the previous submission), by the same rules as the dequeue's pair: a gap or
 	// film update, pair times that are not adjacent (AdjacentPairTimes, with

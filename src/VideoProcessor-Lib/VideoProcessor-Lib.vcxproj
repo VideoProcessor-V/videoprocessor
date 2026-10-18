@@ -365,6 +365,7 @@
 	<ClInclude Include="vprenderer\InterpolationPolicy.h" />
 	<ClInclude Include="vprenderer\FrameInterpolator.h" />
 	<ClInclude Include="vprenderer\InterpolationTimeline.h" />
+	<ClInclude Include="vprenderer\MotionEngineIdle.h" />
 	<ClInclude Include="vprenderer\CaptureTimestampGap.h" />
 	<ClInclude Include="vprenderer\DisplayRateHold.h" />
 	<ClInclude Include="MotionAhead.h" />
