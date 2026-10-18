@@ -913,7 +913,23 @@ namespace LedDrive
 				led.cntrPairPredict ? LedLandingsLocked(out.lightCommand >= 0 && applyGain &&
 					fadeToBlack != FadeToBlack::Deep ? out.lightCommand : -1) : std::vector<std::pair<double, double>>(),
 				CommandLeadMs(projector.cntrLatencyMs, frameAheadMs));
-			contrastCommand = pairing.Update(1.0 / std::max(1e-6, pairedLed), out.vpHeadroom, limit);
+			// cntr_pair_predict, bright cut's fade-up (cntr-cut fix 2026-10-18, owner rule: CNTR
+			// never above need): VP's gain is held under the fade-up's gain ceiling (GainLocked:
+			// min(recoveryLimit, ...), recoveryLimit <= the ceiling), so the software share the
+			// pairing credits is at most that ceiling. vpHeadroom alone came from the sustained
+			// highlight, which still held the previous scene's lower highlight for
+			// highlight_persist_ms after the cut: CNTR fell to 50 on headroom the fade-up does
+			// not allow, then rose again (55 50 54 ... at the real frame rate) once the window
+			// saw the new scene. And during the fade-up CNTR never rises (7c-2): the ceiling
+			// follows each descent down. Off = vpHeadroom and the dump point only, as before.
+			double headroom = out.vpHeadroom;
+			if (led.cntrPairPredict && pairing.Ceiling() >= 0 && (recovery.Active() || pendingRecovery))
+			{
+				headroom = std::min(headroom, recovery.Active() ? recovery.GainCeiling() :
+					std::max(1.0, pendingRecoveryCeiling));
+				pairing.SetCeiling(std::min(pairing.Ceiling(), pairing.Contrast()));
+			}
+			contrastCommand = pairing.Update(1.0 / std::max(1e-6, pairedLed), headroom, limit);
 			if (contrastCommand >= 0) driver->SetContrastAsync(contrastCommand);
 		}
 		if (contrastCommand > 50) assistContrastDriven = true;

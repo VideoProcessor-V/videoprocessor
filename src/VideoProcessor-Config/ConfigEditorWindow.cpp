@@ -13701,8 +13701,9 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     pairPredict->setToolTip(QStringLiteral(
         "On (default): each contrast step is chosen for the LED as it will be when the step lands (contrast "
         "response time ahead: the LED commands in flight and its settling), so contrast is never left above "
-        "what is needed when it arrives - for example while the LED rises out of a dark scene. Off: paired "
-        "with the LED as it is now (the earlier behaviour)."));
+        "what is needed when it arrives - for example while the LED rises out of a dark scene. During the "
+        "fade-up after a bright cut contrast only goes down, counting only the picture gain the fade-up allows. "
+        "Off: paired with the LED as it is now (the earlier behaviour)."));
     assistForm->addRow(QString(), pairPredict);
     assistForm->addRow(QString(), helpLabel(QStringLiteral(
         "On a cut to a brighter scene the contrast goes to the cut level (auto = where white starts to clip, 59 "

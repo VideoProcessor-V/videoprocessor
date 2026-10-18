@@ -512,8 +512,9 @@ namespace LedDrive
 		void Configure(double eotf, int maxUsable, bool enabled, bool softwareFirst);
 		void Reset(int contrast = 50);
 		// 7c-2, during a bright cut's fade-up: CNTR never above `value` (the
-		// dump point; -1 = no limit), and the need raised by `bias` (0.03 =
-		// 3%) so a residual descends on the bright side.
+		// dump point; -1 = no limit; with cntr_pair_predict the module lowers it
+		// with each descent, so CNTR never rises during the fade-up), and the
+		// need raised by `bias` (0.03 = 3%) so a residual descends on the bright side.
 		void SetCeiling(int value) { ceiling = value; }
 		int Ceiling() const { return ceiling; }
 		void SetBias(double value) { bias = value; }
