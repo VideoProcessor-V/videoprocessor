@@ -49,8 +49,30 @@ namespace
 		return driver;
 	}
 
+	// Flaky-test fix 2026-10-18: the driver on the test's manual clock (command
+	// gaps, back-offs and write times); Open runs while the clock moves, as its
+	// queries keep the command gap. The fake projector stamps writes on it too.
+	std::unique_ptr<IProjectorDriver> OpenDriver(std::shared_ptr<FakeProjector> projector,
+		ProjectorConfig config, TestClock& clock)
+	{
+		projector->clock = clock.clock;
+		auto driver = CreateProjectorDriver("barco_ascii", config,
+			[projector] { return std::make_unique<FakePort>(projector); }, clock);
+		std::string error;
+		bool opened = false;
+		Assert::IsTrue(clock.During([&] { opened = driver->Open(error); }));
+		Assert::IsTrue(opened, std::wstring(error.begin(), error.end()).c_str());
+		IProjectorDriver* raw = driver.get();
+		clock.driverIdle = [raw]
+		{
+			const DriverStatus status = raw->Status();
+			return !status.busy && !status.contrastBusy && !status.sequenceBusy;
+		};
+		return driver;
+	}
+
 	// audit 2026-10-16 (second pass)
-	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 		while (std::chrono::steady_clock::now() < deadline)
@@ -319,13 +341,14 @@ namespace VideoProcessorTest
 				config.minCommandGapMs = 120;
 				config.burstCommands = burst;
 				config.burstPauseMs = 600;
-				auto driver = OpenDriver(projector, config);
-				// The controller asks every 10 ms; only some targets go out.
-				const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1700);
-				for (int level = 100; std::chrono::steady_clock::now() < end; ++level)
+				TestClock clock;
+				auto driver = OpenDriver(projector, config, clock);
+				// The controller asks every 10 ms (on the driver's clock) for 1.7 s;
+				// only some targets go out.
+				for (int level = 100; level < 270; ++level)
 				{
 					driver->SetLight(100 + level % 100);
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+					Assert::IsTrue(clock.Run(10.0, 10.0, 0));
 				}
 				driver->Close();
 				return projector->WriteTimes();
@@ -579,13 +602,15 @@ namespace VideoProcessorTest
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
-			auto driver = OpenDriver(projector);
+			TestClock clock;
+			auto driver = OpenDriver(projector, FastConfig(), clock);
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->writeFails = true;
 			}
 			driver->SetContrastAsync(55);
-			std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+			// Five failed writes 200 ms apart close the port; it reopens 2 s later.
+			Assert::IsTrue(clock.Run(1300, 10.0, 0));
 			Assert::AreEqual(-1, driver->Status().lastSentContrast, L"Nothing was written");
 			Assert::IsTrue(driver->Status().contrastBusy, L"55 is still to be sent");
 			{
@@ -593,17 +618,17 @@ namespace VideoProcessorTest
 				projector->writeFails = false;
 				Assert::AreEqual(1, projector->opens, L"Not reopened before its back-off");
 			}
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
 			auto echoes = [&]
 			{
 				const auto writes = projector->Writes();
 				return static_cast<size_t>(std::count(writes.begin(), writes.end(), std::string(":ECHO1\r")));
 			};
 			const size_t echoesBefore = echoes();
-			while (std::chrono::steady_clock::now() < deadline &&
-				(driver->Status().lastSentContrast != 55 || driver->Status().busy || echoes() == echoesBefore))
-				std::this_thread::sleep_for(std::chrono::milliseconds(20));
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			Assert::IsTrue(clock.RunUntil([&]
+				{
+					return driver->Status().lastSentContrast == 55 && !driver->Status().busy && echoes() != echoesBefore;
+				}, 4000, 10.0, 0));
+			Assert::IsTrue(clock.Run(200, 10.0, 0));
 			Assert::AreEqual(55, driver->Status().lastSentContrast);
 			Assert::AreEqual(55, projector->contrast);
 			Assert::IsFalse(driver->Status().busy);
@@ -623,15 +648,18 @@ namespace VideoProcessorTest
 		TEST_METHOD(ScriptSendsKeepTheNoReplyBackoff)
 		{
 			auto projector = std::make_shared<FakeProjector>();
-			auto driver = OpenDriver(projector);
+			TestClock clock;
+			auto driver = OpenDriver(projector, FastConfig(), clock);
 			projector->silent = true;
 			Assert::IsFalse(driver->SendScript("CNTR", 60));
 			projector->silent = false;
-			const auto start = std::chrono::steady_clock::now();
-			Assert::IsTrue(driver->SendScript("CNTR", 61));
-			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-				std::chrono::steady_clock::now() - start).count();
-			Assert::IsTrue(elapsed >= 1800, (L"sent after only " + std::to_wstring(elapsed) + L" ms").c_str());
+			const double start = clock.Ms();
+			bool sent = false;
+			Assert::IsTrue(clock.During([&] { sent = driver->SendScript("CNTR", 61); }));
+			Assert::IsTrue(sent);
+			const double elapsed = clock.Ms() - start;
+			Assert::IsTrue(elapsed >= 2000.0 - TestClock::TOLERANCE_MS,
+				(L"sent after only " + std::to_wstring(elapsed) + L" ms").c_str());
 			driver->Close();
 		}
 
@@ -663,12 +691,13 @@ namespace VideoProcessorTest
 		TEST_METHOD(ScriptResyncAfterFailedWritesSendsTheIntendedValue)
 		{
 			auto projector = std::make_shared<FakeProjector>();
-			auto driver = OpenDriver(projector);
+			TestClock clock;
+			auto driver = OpenDriver(projector, FastConfig(), clock);
 			Assert::IsTrue(driver->SendScript("CNTR", 58));
 			Assert::IsTrue(driver->SendScript("LPW1", 150));
 			FailScriptSendsUntilClosed(projector, *driver, 50);
 			Assert::AreEqual(58, driver->Status().lastSentContrast, L"58 is the last value written");
-			std::this_thread::sleep_for(std::chrono::milliseconds(2100));   // the reopen back-off
+			Assert::IsTrue(clock.Run(2100, 10.0, 0));   // the reopen back-off
 			const size_t before = projector->Writes().size();
 			Assert::IsTrue(driver->SendScript("LPW1", 200), L"Reopens the port");
 			Assert::IsTrue(WaitFor([&] { const auto s = driver->Status(); return s.contrastSends > 1 && !s.busy && !s.contrastBusy; }));
@@ -692,10 +721,11 @@ namespace VideoProcessorTest
 		TEST_METHOD(ResyncNeverOvertakesANewerScriptSend)
 		{
 			auto projector = std::make_shared<FakeProjector>();
-			auto driver = OpenDriver(projector);
+			TestClock clock;
+			auto driver = OpenDriver(projector, FastConfig(), clock);
 			Assert::IsTrue(driver->SendScript("CNTR", 58));
 			FailScriptSendsUntilClosed(projector, *driver, 55);
-			std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+			Assert::IsTrue(clock.Run(2100, 10.0, 0));
 			auto echoes = [&]
 			{
 				const auto writes = projector->Writes();
@@ -706,12 +736,16 @@ namespace VideoProcessorTest
 			// wait out Barco's 2 s after it.
 			projector->silent = true;
 			Assert::IsFalse(driver->SendScript("LPW1", 200), L"Reopened; no reply");
-			Assert::IsTrue(WaitFor([&] { return echoes() > echoesBefore; }, 4000), L"The resync's ECHO");
-			std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			Assert::IsTrue(clock.RunUntil([&] { return echoes() > echoesBefore; }, 4000, 10.0, 0), L"The resync's ECHO");
+			Assert::IsTrue(clock.Run(150, 10.0, 0));
 			Assert::IsTrue(driver->Status().contrastBusy, L"The resync CNTR (55) is waiting");
 			projector->silent = false;
-			Assert::IsTrue(driver->SendScript("CNTR", 47), L"The script's newer value");
-			std::this_thread::sleep_for(std::chrono::milliseconds(400));
+			bool sent = false;
+			// Two parked on the clock: this send (Barco's 2 s) and the driver thread
+			// holding the resync targets for the same 2 s.
+			Assert::IsTrue(clock.During([&] { sent = driver->SendScript("CNTR", 47); }, 10.0, 1));
+			Assert::IsTrue(sent, L"The script's newer value");
+			Assert::IsTrue(clock.Run(400, 10.0, 0));
 			const auto writes = projector->Writes();
 			const size_t newest = LastIndexOf(writes, ":CNTR47\r");
 			Assert::AreNotEqual(std::string::npos, newest);
@@ -732,7 +766,8 @@ namespace VideoProcessorTest
 			auto projector = std::make_shared<FakeProjector>();
 			ProjectorConfig config = FastConfig();
 			config.ackTimeoutMs = 1500;
-			auto driver = OpenDriver(projector, config);
+			TestClock clock;
+			auto driver = OpenDriver(projector, config, clock);
 			auto opens = [&]
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
@@ -742,6 +777,7 @@ namespace VideoProcessorTest
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->readCloses = true;
 			}
+			// The reply wait itself is real time (ack_timeout_ms 1500): it ends at once.
 			const auto start = std::chrono::steady_clock::now();
 			Assert::IsFalse(driver->SetLightNow(200, 0));
 			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -749,16 +785,18 @@ namespace VideoProcessorTest
 			Assert::IsTrue(elapsed < 500, (L"reply wait lasted " + std::to_wstring(elapsed) + L" ms").c_str());
 			Assert::AreEqual(1, opens());
 			// After the 2 s back-off (and Barco's 2 s no-reply gap) one reopen;
-			// the read closes it again: the back-off doubles to 4 s.
-			Assert::IsFalse(driver->SetLightNow(210, 0));
+			// the read closes it again: the back-off doubles to 4 s. On the clock.
+			bool lit = true;
+			Assert::IsTrue(clock.During([&] { lit = driver->SetLightNow(210, 0); }));
+			Assert::IsFalse(lit);
 			Assert::AreEqual(2, opens(), L"Reopened once after the back-off");
-			std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+			Assert::IsTrue(clock.Run(2500, 10.0, 0));
 			Assert::AreEqual(2, opens(), L"Not reopened within the doubled back-off (the resync retries are refused)");
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->readCloses = false;
 			}
-			Assert::IsTrue(WaitFor([&] { return opens() == 3; }, 3000), L"Reopened after the 4 s back-off");
+			Assert::IsTrue(clock.RunUntil([&] { return opens() == 3; }, 3000, 10.0, 0), L"Reopened after the 4 s back-off");
 			driver->Close();
 		}
 
@@ -1038,14 +1076,18 @@ namespace VideoProcessorTest
 			ProjectorConfig config = FastConfig();
 			config.minCommandGapMs = 100;
 			config.maxLevelsPerCommand = 10;
-			auto driver = OpenDriver(projector, config);
-			Assert::IsTrue(driver->SetLightNow(255, 0));
+			TestClock clock;
+			auto driver = OpenDriver(projector, config, clock);
+			bool lit = false;
+			Assert::IsTrue(clock.During([&] { lit = driver->SetLightNow(255, 0); }));
+			Assert::IsTrue(lit);
 			const size_t before = LightCommands(projector->Writes()).size();
 			driver->SetLight(100);   // split: 245, 235, ... one per command gap
-			Assert::IsTrue(WaitFor([&] { return LightCommands(projector->Writes()).size() >= before + 2; }));
+			Assert::IsTrue(clock.RunUntil([&] { return LightCommands(projector->Writes()).size() >= before + 2; },
+				5000, 10.0, 0));
 			driver->CancelLight();
 			const size_t atCancel = LightCommands(projector->Writes()).size();
-			std::this_thread::sleep_for(std::chrono::milliseconds(600));
+			Assert::IsTrue(clock.Run(600, 10.0, 0));
 			const size_t after = LightCommands(projector->Writes()).size();
 			Assert::IsTrue(after <= atCancel + 1, (L"LPW1 writes after the cancel: " +
 				std::to_wstring(after - atCancel)).c_str());
@@ -1084,15 +1126,16 @@ namespace VideoProcessorTest
 		// Post-merge audit 2026-10-17 (B3): the worker took an LPW1 while another command
 		// held the port, then waits its command gap inside Transact; interrupt runs the
 		// interruption (CancelLight or SetLightNow) during that wait. The LPW1 is never sent.
-		static void LightInsideTheGapWait(const std::function<void(IProjectorDriver&)>& interrupt,
-			std::shared_ptr<FakeProjector>& projectorOut, std::unique_ptr<IProjectorDriver>& driverOut)
+		static void LightInsideTheGapWait(const std::function<bool(IProjectorDriver&, TestClock&)>& interrupt,
+			std::shared_ptr<FakeProjector>& projectorOut, std::unique_ptr<IProjectorDriver>& driverOut,
+			TestClock& clock)
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			ProjectorConfig config = FastConfig();
 			config.minCommandGapMs = 800;
 			config.ackTimeoutMs = 600;
-			auto driver = OpenDriver(projector, config);
-			std::this_thread::sleep_for(std::chrono::milliseconds(900));   // Open's gap has passed
+			auto driver = OpenDriver(projector, config, clock);
+			Assert::IsTrue(clock.Run(900, 10.0, 0));   // Open's gap has passed (on the clock)
 			projector->holdReplies = true;
 			std::thread busy([&] { driver->SetContrast(60); });   // holds the port for its reply
 			std::this_thread::sleep_for(std::chrono::milliseconds(80));
@@ -1100,18 +1143,21 @@ namespace VideoProcessorTest
 			std::this_thread::sleep_for(std::chrono::milliseconds(80));
 			projector->Release();    // SetContrast's reply: the 800 ms gap starts now
 			busy.join();
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));   // the worker is in the gap wait
-			interrupt(*driver);
-			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+			// The worker is parked in the gap wait; the clock stays put until the interruption.
+			Assert::IsTrue(clock.Settle(0));
+			Assert::IsTrue(interrupt(*driver, clock));
+			Assert::IsTrue(clock.Run(1200, 10.0, 0));
 			projectorOut = projector;
 			driverOut = std::move(driver);
 		}
 
 		TEST_METHOD(CancelLightStopsAnLpw1InsideTheGapWait)
 		{
+			TestClock clock;
 			std::shared_ptr<FakeProjector> projector;
 			std::unique_ptr<IProjectorDriver> driver;
-			LightInsideTheGapWait([](IProjectorDriver& d) { d.CancelLight(); }, projector, driver);
+			LightInsideTheGapWait([](IProjectorDriver& d, TestClock&) { d.CancelLight(); return true; }, projector, driver,
+				clock);
 			const auto writes = projector->Writes();
 			Assert::IsTrue(std::find(writes.begin(), writes.end(), std::string(":LPW1200\r")) == writes.end(),
 				L"the cancelled LPW1 200 was not sent");
@@ -1121,9 +1167,15 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(SetLightNowStopsAnLpw1InsideTheGapWait)
 		{
+			TestClock clock;
 			std::shared_ptr<FakeProjector> projector;
 			std::unique_ptr<IProjectorDriver> driver;
-			LightInsideTheGapWait([](IProjectorDriver& d) { Assert::IsTrue(d.SetLightNow(150, 0)); }, projector, driver);
+			LightInsideTheGapWait([](IProjectorDriver& d, TestClock& c)
+				{
+					// SetLightNow keeps the command gap itself, on the clock.
+					bool lit = false;
+					return c.During([&] { lit = d.SetLightNow(150, 0); }) && lit;
+				}, projector, driver, clock);
 			const auto writes = projector->Writes();
 			Assert::IsTrue(std::find(writes.begin(), writes.end(), std::string(":LPW1200\r")) == writes.end(),
 				L"the replaced LPW1 200 was not sent");

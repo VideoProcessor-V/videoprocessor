@@ -89,6 +89,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -7971,7 +7972,13 @@ void exerciseRemoteTargetSwitch(bool automatic)
     int addressSize = sizeof(address);
     require(getsockname(listener, reinterpret_cast<sockaddr*>(&address),
         &addressSize) == 0, "Cannot read the RPC stall port");
-    std::thread stalledServer([listener, path = path.toStdString(), remoteBytes]
+    // Flaky-test fix 2026-10-18: the first reply is held until the test has seen the
+    // loading screen (release), instead of a fixed 450 ms that a loaded machine
+    // could outlast; the server ends when the test is done (finished), not after
+    // a fixed accept timeout between the window's requests.
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    std::thread stalledServer([listener, path = path.toStdString(), remoteBytes, release, finished]
     {
         const auto receiveExact = [](SOCKET socket, uint8_t* bytes, size_t count)
         {
@@ -7987,13 +7994,18 @@ void exerciseRemoteTargetSwitch(bool automatic)
         };
         for (int request = 0; request < 3; ++request)
         {
-            fd_set readable;
-            FD_ZERO(&readable);
-            FD_SET(listener, &readable);
-            // The window's next request can follow the reply by more than 2 s on a
-            // loaded laptop (planner 2026-10-14): wait up to 6 s, still bounded.
-            timeval timeout{ 6, 0 };
-            if (select(0, &readable, nullptr, nullptr, &timeout) <= 0) break;
+            // The window's next request can follow the reply by seconds on a loaded
+            // machine: wait until the test is done (bounded at 60 s).
+            int ready = 0;
+            for (int waitedMs = 0; ready == 0 && !finished->load() && waitedMs < 60000; waitedMs += 100)
+            {
+                fd_set readable;
+                FD_ZERO(&readable);
+                FD_SET(listener, &readable);
+                timeval timeout{ 0, 100000 };
+                ready = select(0, &readable, nullptr, nullptr, &timeout);
+            }
+            if (ready <= 0) break;
             const SOCKET client = accept(listener, nullptr, nullptr);
             if (client == INVALID_SOCKET) break;
             std::array<uint8_t, HeaderBytes> header{};
@@ -8022,7 +8034,8 @@ void exerciseRemoteTargetSwitch(bool automatic)
             std::vector<uint8_t> wire;
             Encode(response, wire);
             if (request == 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(450));
+                for (int waitedMs = 0; !release->load() && !finished->load() && waitedMs < 60000; waitedMs += 5)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
             size_t sent = 0;
             while (sent < wire.size())
             {
@@ -8036,14 +8049,23 @@ void exerciseRemoteTargetSwitch(bool automatic)
         }
         closesocket(listener);
     });
+    struct ServerDone
+    {
+        std::shared_ptr<std::atomic<bool>> release, finished;
+        ~ServerDone() { release->store(true); finished->store(true); }
+    };
     struct ThreadJoin
     {
         std::thread& thread;
-        ~ThreadJoin() { if (thread.joinable()) thread.join(); }
-    } join{ stalledServer };
+        ServerDone done;
+        ~ThreadJoin() { done.release->store(true); done.finished->store(true); if (thread.joinable()) thread.join(); }
+    } join{ stalledServer, { release, finished } };
 
     ConfigEditorWindow window(path, 0, true, {}, {},
         {}, 41686, {}, true, !automatic);
+    // Ends the stall before the window (whose destructor waits for its request)
+    // goes, also when a check below fails.
+    ServerDone releaseFirst{ release, finished };
     window.show();
     QApplication::processEvents();
     QElapsedTimer dispatch;
@@ -8062,7 +8084,10 @@ void exerciseRemoteTargetSwitch(bool automatic)
         QMetaObject::invokeMethod(choice, "activated", Qt::DirectConnection,
             Q_ARG(int, 2));
     }
-    require(dispatch.elapsed() < 250,
+    // The first reply is held until released below, so a connection made on the
+    // UI thread would block here until the server's 60 s bound: 5 s still tells
+    // the two apart on a loaded machine (was 250 ms against a 450 ms stall).
+    require(dispatch.elapsed() < 5000,
         "Connecting to a remote VP blocked the UI thread");
     auto* overlay = requireControl<QWidget>(window,
         "config.targetSwitchOverlay");
@@ -8085,10 +8110,11 @@ void exerciseRemoteTargetSwitch(bool automatic)
     QApplication::processEvents();
     require(overlay->geometry() == window.centralWidget()->rect(),
         "The loading screen did not follow a window resize");
+    release->store(true);   // the stalled reply goes out now
     QElapsedTimer completion;
     completion.start();
     while (window.findChild<QWidget*>("config.targetSwitchOverlay") &&
-        completion.elapsed() < 8000)
+        completion.elapsed() < 30000)
     {
         QApplication::processEvents();
         QThread::msleep(5);

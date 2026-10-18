@@ -79,7 +79,9 @@ namespace
 		return config;
 	}
 
-	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	// Real-time waits only for what needs no time on the drive's clock (a port
+	// write and its echo); the bound is generous so machine load cannot fail it.
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 		while (std::chrono::steady_clock::now() < deadline)
@@ -130,18 +132,30 @@ namespace
 			module.SubmitPrediction(sequence, builder.Build(Frame(sequence < cut ? 120.0 : 18.0), sequence * FRAME_MS));
 	}
 
-	// Renders sequences 1.. at 60 Hz until `until`; returns the modelled LED
-	// level seen on each sequence.
-	std::vector<double> Render(LedDriveModule& module, uint64_t until, std::vector<double>* gains = nullptr)
+	// One output frame at timeMs, the clock moved there first; depth > 0 is the
+	// renderer's queued-frame walk, which comes with every frame.
+	CompensationGain FrameAt(LedDriveModule& module, TestClock& clock, uint64_t sequence, double timeMs,
+		size_t depth = 0, double sourceFps = 0.0)
+	{
+		clock.To(timeMs);
+		if (depth > 0) module.SetLookaheadDepth(depth);
+		return module.BeginFrameAt(sequence, timeMs, sourceFps);
+	}
+
+	// Renders sequences 1.. at 60 Hz until `until`, the clock at each frame's
+	// time; returns the modelled LED level seen on each sequence.
+	std::vector<double> Render(LedDriveModule& module, TestClock& clock, uint64_t until,
+		std::vector<double>* gains = nullptr)
 	{
 		std::vector<double> levels(1, 255.0);
 		for (uint64_t sequence = 1; sequence <= until; ++sequence)
 		{
+			clock.To(sequence * FRAME_MS);
 			const CompensationGain gain = module.BeginFrameAt(sequence, sequence * FRAME_MS);
 			levels.push_back(module.ModelledLight());
 			if (gains) gains->push_back(gain.gain);
-			// The driver sends between frames, as it would in real time.
-			WaitFor([&] { return !module.ProjectorStatus().busy; });
+			// The driver sends between frames (at this frame's time).
+			clock.Settle();
 		}
 		return levels;
 	}
@@ -369,9 +383,11 @@ namespace VideoProcessorTest
 			config.ftbCustomFloor = 30;
 			config.ftbTurnStep = 5;
 			config.ftbBlackMs = 200;
+			TestClock clock;
 			{
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				const auto startup = projector->Writes();
@@ -394,14 +410,18 @@ namespace VideoProcessorTest
 					for (int i = 0; i < frames; ++i)
 					{
 						++sequence;
+						clock.To(sequence * FRAME_MS);
+						module.SetLookaheadDepth(3);   // the renderer's walk, every frame
 						module.BeginFrameAt(sequence, sequence * FRAME_MS);
-						WaitFor([&] { return !module.ProjectorStatus().busy; });
+						clock.Settle();
 					}
 				};
 				for (int i = 0; i < 300 && !module.CustomDimEngaged(); ++i) render(1);
 				Assert::IsTrue(module.CustomDimEngaged(), L"The custom dim engaged on a black picture");
 				Assert::IsTrue(module.ModelledLight() <= config.ledFloorBlack, L"Only after the LED reached its floor");
-				Assert::IsTrue(WaitFor([&] { return !module.ProjectorStatus().sequenceBusy; }, 5000));
+				// The sequence's ftb_step_ms steps run on the clock: frames keep coming.
+				for (int i = 0; i < 300 && module.ProjectorStatus().sequenceBusy; ++i) render(1);
+				Assert::IsFalse(module.ProjectorStatus().sequenceBusy);
 
 				std::vector<std::string> dim;
 				std::vector<std::chrono::steady_clock::time_point> times;
@@ -427,10 +447,7 @@ namespace VideoProcessorTest
 				// - one LDMM 0 at once, then the LED straight to the new level.
 				predict(sequence + 10, sequence + 400, 120.0);
 				for (int i = 0; i < 40 && module.CustomDimEngaged(); ++i)
-				{
 					render(1);
-					std::this_thread::sleep_for(std::chrono::milliseconds(5));
-				}
 				Assert::IsFalse(module.CustomDimEngaged(), L"The custom dim ends before the bright scene");
 				const auto after = projector->Writes();
 				std::vector<std::string> added(after.begin() + before, after.end());
@@ -457,33 +474,38 @@ namespace VideoProcessorTest
 			config.ftbCustomDim = FtbCustomDim::Together;
 			config.ftbStepMs = 100;
 			config.ftbBlackMs = 200;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-			module.SetLookaheadDepth(3);
 			StatsBuilder builder(module.Config());
 			for (uint64_t s = 1; s < 400; ++s)
 				module.SubmitPrediction(s, builder.Build(Frame(16.0), s * FRAME_MS));
 			module.SubmitMeasurement(Frame(16.0));
 			uint64_t sequence = 0;
-			for (int i = 0; i < 300 && !module.CustomDimEngaged(); ++i)
+			auto render = [&]
 			{
 				++sequence;
+				clock.To(sequence * FRAME_MS);
+				module.SetLookaheadDepth(3);   // the renderer's walk, every frame
 				module.BeginFrameAt(sequence, sequence * FRAME_MS);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
-			}
+				clock.Settle();
+			};
+			for (int i = 0; i < 300 && !module.CustomDimEngaged(); ++i) render();
 			Assert::IsTrue(module.CustomDimEngaged());
-			Assert::IsTrue(WaitFor([&] { return !module.ProjectorStatus().sequenceBusy; }, 5000));
+			for (int i = 0; i < 300 && module.ProjectorStatus().sequenceBusy; ++i) render();
+			Assert::IsFalse(module.ProjectorStatus().sequenceBusy);
 			const size_t before = projector->Writes().size();
 
 			LedDriveConfig script = config;
 			script.mode = Mode::Script;
 			Assert::IsTrue(module.Reconfigure(port, script), L"A mode change is applied live");
 			Assert::IsFalse(module.CustomDimEngaged(), L"Leaving the compensate mode leaves the custom dim");
-			Assert::IsTrue(WaitFor([&] { return projector->Writes().size() > before; }, 3000));
-			// Let script mode run a little; it may send LPW1, but only after LDMM 0.
-			std::this_thread::sleep_for(std::chrono::milliseconds(600));
+			Assert::IsTrue(clock.RunUntil([&] { return projector->Writes().size() > before; }, 3000));
+			// Let script mode run a little (on the clock); it may send LPW1, but only after LDMM 0.
+			Assert::IsTrue(clock.Run(600));
 			const auto after = projector->Writes();
 			Assert::AreEqual(std::string(":LDMM0\r"), after[before], L"LDMM 0 is the first command after the switch");
 			for (size_t i = before + 1; i < after.size(); ++i)
@@ -505,11 +527,12 @@ namespace VideoProcessorTest
 			config.ftbStepMs = 100;
 			config.ftbBlackMs = 200;
 			config.lookahead = false;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-			module.SetLookaheadDepth(3);
 			StatsBuilder builder(module.Config());
 			for (uint64_t s = 1; s < 400; ++s)
 				module.SubmitPrediction(s, builder.Build(Frame(16.0), s * FRAME_MS));
@@ -518,8 +541,10 @@ namespace VideoProcessorTest
 			for (int i = 0; i < 300; ++i)
 			{
 				++sequence;
+				clock.To(sequence * FRAME_MS);
+				module.SetLookaheadDepth(3);   // queued frames walked, every frame
 				module.BeginFrameAt(sequence, sequence * FRAME_MS);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 			Assert::IsFalse(module.CustomDimEngaged(), L"look-ahead off: the queued frames are not used");
 			Assert::IsTrue(projector->light < 255, L"but the LED still dims on the frame on screen");
@@ -575,13 +600,14 @@ namespace VideoProcessorTest
 
 		// Renders dark frames (look-ahead off: the frame on screen) until the
 		// LED has dimmed.
-		static void DimOnDarkFrames(LedDriveModule& module, std::shared_ptr<FakeProjector> projector)
+		static void DimOnDarkFrames(LedDriveModule& module, std::shared_ptr<FakeProjector> projector, TestClock& clock)
 		{
 			module.SubmitMeasurement(Frame(16.0));
 			for (uint64_t sequence = 1; sequence <= 600 && projector->light >= 200; ++sequence)
 			{
+				clock.To(sequence * FRAME_MS);
 				module.BeginFrameAt(sequence, sequence * FRAME_MS);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 		}
 
@@ -597,26 +623,32 @@ namespace VideoProcessorTest
 			LedDriveConfig config = Assisted();
 			config.lookahead = false;
 			config.idleRestoreS = 1;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-			DimOnDarkFrames(module, projector);
+			DimOnDarkFrames(module, projector, clock);
 			Assert::IsTrue(projector->light < 255, L"The LED dimmed on the dark picture");
 			// Video stops: within led_idle_restore_s (+ a module tick) full light.
-			Assert::IsTrue(WaitFor([&] { return projector->light == 255 && projector->contrast == 50; }, 4000),
+			const double stopped = clock.Ms();
+			Assert::IsTrue(clock.RunUntil([&] { return projector->light == 255 && projector->contrast == 50; }, 4000),
 				L"Full light and CNTR 50 after the idle time");
+			Assert::IsTrue(clock.Ms() - stopped >= 1000.0, L"not before led_idle_restore_s");
 			Assert::AreEqual(255.0, module.ModelledLight(), 1e-9, L"The model follows");
-			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			Assert::IsTrue(clock.Run(300));
 			const size_t settled = projector->Writes().size();
-			std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+			Assert::IsTrue(clock.Run(1500));
 			Assert::AreEqual(settled, projector->Writes().size(), L"Restored once, not every tick");
 			// Video returns: compensate carries on.
 			module.SubmitMeasurement(Frame(16.0));
+			const double resumed = clock.Ms();
 			for (uint64_t sequence = 1000; sequence < 1300 && projector->light == 255; ++sequence)
 			{
+				clock.To(resumed + (sequence - 999) * FRAME_MS);
 				module.BeginFrameAt(sequence, sequence * FRAME_MS);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 			Assert::IsTrue(projector->light < 255, L"Dims again once frames return");
 		}
@@ -630,14 +662,16 @@ namespace VideoProcessorTest
 			LedDriveConfig config = Compensate();
 			config.lookahead = false;
 			config.idleRestoreS = 0;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-			DimOnDarkFrames(module, projector);
+			DimOnDarkFrames(module, projector, clock);
 			const int dimmed = projector->light;
 			Assert::IsTrue(dimmed < 255);
-			std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+			Assert::IsTrue(clock.Run(1800));
 			Assert::AreEqual(dimmed, projector->light, L"led_idle_restore_s 0: unchanged (as before)");
 		}
 
@@ -651,24 +685,26 @@ namespace VideoProcessorTest
 			LedDriveConfig config = Compensate();
 			config.mode = Mode::Script;
 			config.idleRestoreS = 1;
+			TestClock clock;
 			LedDriveModule module(Port(50), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-			const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
-			for (uint64_t frame = 1; projector->light == 255 && std::chrono::steady_clock::now() < end; ++frame)
+			Assert::IsTrue(clock.Settle());
+			for (uint64_t frame = 1; projector->light == 255 && frame <= 300; ++frame)
 			{
 				module.SubmitMeasurement(Frame(16.0), frame);
 				module.BeginFrameAt(frame, frame * FRAME_MS);
-				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+				Assert::IsTrue(clock.Run(FRAME_MS, FRAME_MS));
 			}
 			Assert::IsTrue(projector->light < 255, L"The script dimmed the LED");
-			Assert::IsTrue(WaitFor([&] { return projector->light == 255 && projector->contrast == 50; }, 4000),
+			Assert::IsTrue(clock.RunUntil([&] { return projector->light == 255 && projector->contrast == 50; }, 4000),
 				L"Full light and CNTR 50 after the idle time");
-			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			Assert::IsTrue(clock.Run(300));
 			const int ticks = module.Ticks();
 			const size_t writes = projector->Writes().size();
-			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+			Assert::IsTrue(clock.Run(1200));
 			Assert::AreEqual(ticks, module.Ticks(), L"No script ticks on the stale statistics");
 			Assert::AreEqual(writes, projector->Writes().size(), L"Nothing more sent while idle");
 		}
@@ -682,15 +718,17 @@ namespace VideoProcessorTest
 			LedDriveConfig config = Compensate();
 			config.ftbCustomDim = FtbCustomDim::Together;
 			config.ftbBlackMs = 100;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(16.0));
 			for (uint64_t frame = 1; frame <= 200; ++frame)
 			{
-				module.BeginFrameAt(0, frame * FRAME_MS); // no look-ahead (Low_Latency)
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				FrameAt(module, clock, 0, frame * FRAME_MS); // no look-ahead (Low_Latency)
+				clock.Settle();
 			}
 			Assert::IsTrue(module.ModelledLight() <= config.ledFloorBlack);
 			Assert::IsFalse(module.CustomDimEngaged(), L"Without look-ahead the custom dim never engages");
@@ -989,8 +1027,10 @@ namespace VideoProcessorTest
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
+			TestClock clock;
 			LedDriveModule module(Port(80), Compensate(),
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(18.0));
@@ -999,9 +1039,9 @@ namespace VideoProcessorTest
 			std::vector<double> levels(1, 255.0);
 			for (int frame = 1; frame <= 8; ++frame)
 			{
-				gains.push_back(module.BeginFrameAt(0, frame * FRAME_MS).gain);
+				gains.push_back(FrameAt(module, clock, 0, frame * FRAME_MS).gain);
 				levels.push_back(module.ModelledLight());
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 			Assert::AreEqual(5, module.LatencyFrames(), L"80 ms at 60 Hz, in whole frames");
 			// The first command (253) went out on frame 1; LED and gain land on 6.
@@ -1019,8 +1059,10 @@ namespace VideoProcessorTest
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
+			TestClock clock;
 			LedDriveModule module(Port(50), Compensate(),
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(120.0));
@@ -1028,7 +1070,7 @@ namespace VideoProcessorTest
 			const uint64_t cut = 20;
 			Predict(module, 1, 40, cut);
 			std::vector<double> gains;
-			const std::vector<double> levels = Render(module, cut + 2, &gains);
+			const std::vector<double> levels = Render(module, clock, cut + 2, &gains);
 			Assert::AreEqual(3, module.LatencyFrames());
 			for (uint64_t sequence = 1; sequence < cut; ++sequence)
 			{
@@ -1047,26 +1089,30 @@ namespace VideoProcessorTest
 			projector->contrast = 50;
 			ProjectorConfig port = Port(50);
 			port.minCommandGapMs = 300;
+			TestClock clock;
 			LedDriveModule module(port, Compensate(),
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
-			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
+			// The start-up's commands keep the 300 ms gap too, on the clock.
+			Assert::IsTrue(clock.RunUntil([&] { return module.DrivingProjector() && projector->light == 255; }));
+			// The start-up's last command gap has passed.
+			Assert::IsTrue(clock.Run(400));
+			const double started = clock.Ms();
 			module.SubmitMeasurement(Frame(18.0));
 			std::vector<int> sentAt;
 			int seen = module.ProjectorStatus().lightSends;
-			const auto started = std::chrono::steady_clock::now();
 			for (uint64_t frame = 1; frame <= 60; ++frame)
 			{
-				const CompensationGain gain = module.BeginFrameAt(0, frame * FRAME_MS);
+				const CompensationGain gain = FrameAt(module, clock, 0, started + frame * FRAME_MS);
 				Assert::AreEqual(255.0 / module.ModelledLight(), gain.gain, 1e-9);
-				std::this_thread::sleep_for(std::chrono::milliseconds(16));
+				clock.Settle();
 				const DriverStatus status = module.ProjectorStatus();
 				if (status.lightSends != seen) sentAt.push_back(status.lastSentLight);
 				seen = status.lightSends;
 			}
-			// At most one send per 300 ms of real time (plus the first).
-			const double elapsedMs = std::chrono::duration<double, std::milli>(
-				std::chrono::steady_clock::now() - started).count();
+			// At most one send per 300 ms on the drive's clock (plus the first).
+			const double elapsedMs = clock.Ms() - started;
 			Assert::IsTrue(sentAt.size() >= 2 && sentAt.size() <= static_cast<size_t>(elapsedMs / 300.0) + 1,
 				(L"sends in ~1.6 s: " + std::to_wstring(sentAt.size())).c_str());
 			// The model holds one of the sent levels, never an unsent target.
@@ -1144,8 +1190,10 @@ namespace VideoProcessorTest
 			ProjectorConfig port = Port(50);
 			port.maxLevelsPerCommand = 0;
 			LedDriveConfig config = Compensate();
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(18.0));
@@ -1154,8 +1202,8 @@ namespace VideoProcessorTest
 			{
 				for (int i = 0; i < frames; ++i, ++frame)
 				{
-					module.BeginFrameAt(0, frame * FRAME_MS);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					FrameAt(module, clock, 0, frame * FRAME_MS);
+					clock.Settle();
 				}
 			};
 			render(60);
@@ -1183,7 +1231,7 @@ namespace VideoProcessorTest
 			script.scriptLookahead = false;   // the script copy without its look-ahead (owner 2026-10-17)
 			Assert::IsTrue(module.Reconfigure(port, script));
 			Assert::IsFalse(module.WantsPredictions());
-			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			Assert::IsTrue(clock.Run(300));
 			Assert::AreEqual(startupRestores, fullLightWrites(), L"compensate -> script: no restore");
 			Assert::IsTrue(module.Reconfigure(port, tuned));
 			Assert::IsTrue(module.WantsPredictions());
@@ -1219,8 +1267,10 @@ namespace VideoProcessorTest
 			port.maxLevelsPerCommand = 0;
 			LedDriveConfig config = Compensate();
 			config.earlyRamp = false; // the command timing alone
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(120.0));
@@ -1234,9 +1284,9 @@ namespace VideoProcessorTest
 			for (uint64_t sequence = 1; sequence <= cut + 2 && landedAt == 0; ++sequence)
 				for (int repeat = 0; repeat < (sequence % 2 ? 3 : 2) && landedAt == 0; ++repeat, ++frame)
 				{
-					module.BeginFrameAt(sequence, frame * FRAME_MS, 24.0);
+					FrameAt(module, clock, sequence, frame * FRAME_MS, 8, 24.0);
 					if (module.ModelledLight() < 255.0) landedAt = sequence;
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					clock.Settle();
 				}
 			Assert::AreEqual(5, module.LatencyFrames(), L"Dead time is in output frames");
 			Assert::AreEqual(1000.0 / 24.0, module.SourceFramePeriodMs(), 1e-9);
@@ -1258,8 +1308,10 @@ namespace VideoProcessorTest
 			ApplyRatePreset(config, true); // reach the black floor quickly
 			config.blackPreliftMax = 120;
 			config.ledFloorBlack = 60;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SetLookaheadDepth(8);
@@ -1272,8 +1324,8 @@ namespace VideoProcessorTest
 			for (uint64_t sequence = 1; sequence < cut + 60; ++sequence)
 			{
 				module.SubmitMeasurement(Frame(sequence < cut ? 16.0 : 120.0), sequence);
-				module.BeginFrameAt(sequence, sequence * FRAME_MS);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				FrameAt(module, clock, sequence, sequence * FRAME_MS, 8);
+				clock.Settle();
 				// Once at the black floor, until the cut's own jump goes out
 				// (latency frames ahead of the cut).
 				if (sequence > 300 && sequence + 5 < cut)
@@ -1283,8 +1335,7 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(contrastBeforeCut, L"CNTR pre-positioned to cut_cntr_level before the cut");
 			Assert::AreEqual(255, projector->light, L"the scene's level after the cut");
-			Assert::IsTrue(WaitFor([&] { return module.AssistContrast() == 50; }) || module.AssistContrast() <= 59,
-				L"CNTR descends paired after the cut");
+			Assert::IsTrue(module.AssistContrast() <= 59, L"CNTR descends paired after the cut");
 			module.Stop();
 			Assert::AreEqual(50, projector->contrast);
 		}
@@ -1305,15 +1356,17 @@ namespace VideoProcessorTest
 			{
 				auto projector = std::make_shared<FakeProjector>();
 				projector->contrast = 50;
+				TestClock clock;
 				LedDriveModule module(Port(50), Compensate(),
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				module.SubmitMeasurement(::Frame(120.0));
 				module.SetLookaheadDepth(depth);
 				Assert::AreEqual(depth, module.LookaheadDepth());
 				Predict(module, 1, 60, 30);
-				const std::vector<double> levels = Render(module, 30);
+				const std::vector<double> levels = Render(module, clock, 30);
 				for (uint64_t sequence = 1; sequence < levels.size(); ++sequence)
 					if (levels[sequence] < 255.0) return sequence;
 				return uint64_t{ 0 };
@@ -1573,19 +1626,20 @@ namespace VideoProcessorTest
 				LedDriveConfig led = Compensate();
 				led.ledLookaheadMs = lookaheadMs;
 				led.ledLandingMs = false;   // frame-exact landings for the comparison
+				TestClock clock;
 				LedDriveModule module(Port(50), led,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				module.SubmitMeasurement(::Frame(120.0));
-				module.SetLookaheadDepth(8);
 				Predict(module, 1, 60, 30);
 				std::vector<double> levels(1, 255.0);
 				for (uint64_t sequence = 1; sequence <= 30; ++sequence)
 				{
-					module.BeginFrameAt(sequence, sequence * FRAME_MS, 60.0);
+					FrameAt(module, clock, sequence, sequence * FRAME_MS, 8, 60.0);
 					levels.push_back(module.ModelledLight());
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					clock.Settle();
 				}
 				for (uint64_t sequence = 1; sequence < levels.size(); ++sequence)
 					if (levels[sequence] < 255.0) return sequence;
@@ -1610,19 +1664,23 @@ namespace VideoProcessorTest
 				LedDriveConfig config = Compensate();
 				config.lookahead = false;
 				config.ledLandingMs = landingMs;
+				TestClock testClock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, testClock);
+				Bind(testClock, module, projector);
 				module.Start();
-				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-				const auto start = std::chrono::steady_clock::now();
-				auto clock = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); };
+				// The start-up keeps the 85 ms gap too, on the clock.
+				Assert::IsTrue(testClock.RunUntil([&] { return module.DrivingProjector() && projector->light == 255; }));
+				const auto start = testClock.clock->Now();
+				auto clock = [&] { return std::chrono::duration<double, std::milli>(testClock.clock->Now() - start).count(); };
 				uint64_t sequence = 0;
-				// Bright frames until the module's frame period has settled on 50 ms.
+				// Bright frames until the module's frame period has settled on 50 ms;
+				// the driver's gap runs on the clock in 5 ms steps between frames.
 				module.SubmitMeasurement(Frame(235.0));
 				for (int frame = 0; frame < 40; ++frame)
 				{
 					module.BeginFrameAt(++sequence, clock());
-					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+					Assert::IsTrue(testClock.Run(50.0, 5.0));
 				}
 				const size_t firstWrite = projector->Writes().size();
 				std::vector<std::pair<double, double>> modelled;   // (frame time, modelled level)
@@ -1632,7 +1690,7 @@ namespace VideoProcessorTest
 					const double now = clock();
 					module.BeginFrameAt(++sequence, now);
 					modelled.push_back({ now, module.ModelledLight() });
-					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+					Assert::IsTrue(testClock.Run(50.0, 5.0));
 				}
 				const double period = module.FramePeriodMs();
 				Assert::IsTrue(period > 40.0 && period < 75.0, (L"frame period " + std::to_wstring(period)).c_str());
@@ -1676,32 +1734,34 @@ namespace VideoProcessorTest
 			config.scriptPacing = false;
 			config.tickMs = 400;
 			ParseCurve("0:255, 255:255", config.curve);   // light stays at the ceiling
+			TestClock clock;
 			LedDriveModule module(Port(50), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(50.0));   // APL 45-60, no highlight: CNTR 51
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));   // that tick has ended
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			Assert::IsTrue(clock.Settle());   // that tick has ended
 			const int ticks = module.Ticks();
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->writeFails = true;
 			}
 			module.SubmitMeasurement(Frame(50.0, 100, 235));   // a highlight: back to 50
-			Assert::IsTrue(WaitFor([&] { return module.Ticks() > ticks; }));
+			Assert::IsTrue(clock.RunUntil([&] { return module.Ticks() > ticks; }));
 			Assert::AreEqual(51, module.ProjectorStatus().lastSentContrast, L"the write of 50 failed");
 			const size_t before = projector->Writes().size();
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->writeFails = false;
 			}
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 3000),
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }, 3000),
 				L"CNTR 50 re-sent at the next tick");
 			const auto writes = projector->Writes();
 			Assert::IsTrue(std::count(writes.begin() + before, writes.end(), std::string(":CNTR50\r")) == 1,
 				L"once, with the controller's value");
-			std::this_thread::sleep_for(std::chrono::milliseconds(900));
+			Assert::IsTrue(clock.Run(900));
 			const auto later = projector->Writes();
 			Assert::IsTrue(std::count(later.begin() + before, later.end(), std::string(":CNTR50\r")) == 1,
 				L"not repeated once it went through");
@@ -1720,13 +1780,15 @@ namespace VideoProcessorTest
 			config.scriptPacing = false;
 			config.tickMs = 400;
 			ParseCurve("0:255, 255:255", config.curve);
+			TestClock clock;
 			LedDriveModule module(Port(50), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(50.0));
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			Assert::IsTrue(clock.Settle());
 			const size_t before = projector->Writes().size();
 			projector->silent = true;   // written, never answered
 			module.SubmitMeasurement(Frame(50.0, 100, 235));   // a highlight: back to 50
@@ -1735,11 +1797,11 @@ namespace VideoProcessorTest
 				const auto writes = projector->Writes();
 				return std::count(writes.begin() + before, writes.end(), std::string(":CNTR50\r"));
 			};
-			Assert::IsTrue(WaitFor([&] { return count50() == 1; }), L"CNTR 50 written");
-			std::this_thread::sleep_for(std::chrono::milliseconds(300));
+			Assert::IsTrue(clock.RunUntil([&] { return count50() == 1; }), L"CNTR 50 written");
+			Assert::IsTrue(clock.Run(300));
 			projector->silent = false;
 			// Past Barco's 2 s after the missing reply and several ticks.
-			std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+			Assert::IsTrue(clock.Run(3000));
 			Assert::AreEqual(static_cast<std::ptrdiff_t>(1), static_cast<std::ptrdiff_t>(count50()),
 				L"a dropped reply is not re-sent");
 			module.Stop();
@@ -1758,26 +1820,27 @@ namespace VideoProcessorTest
 			config.tickMs = 1500;
 			config.idleRestoreS = 1;
 			ParseCurve("0:255, 255:255", config.curve);
+			TestClock clock;
 			LedDriveModule module(Port(50), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			uint64_t sequence = 0;
-			// Frames keep coming (no idle restore) until the condition holds.
+			// Frames keep coming every 50 ms (no idle restore) until the condition holds.
 			auto playUntil = [&](const std::function<bool()>& condition)
 			{
-				const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
-				while (!condition() && std::chrono::steady_clock::now() < end)
+				for (int frame = 0; frame < 80 && !condition(); ++frame)
 				{
 					++sequence;
 					module.BeginFrameAt(sequence, sequence * FRAME_MS);
-					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+					clock.Run(50.0);
 				}
 				return condition();
 			};
 			module.SubmitMeasurement(Frame(50.0));
 			Assert::IsTrue(playUntil([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));   // that tick has ended
+			Assert::IsTrue(clock.Settle());   // that tick has ended
 			const int ticks = module.Ticks();
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
@@ -1793,7 +1856,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(51, module.ProjectorStatus().lastSentContrast, L"the port last saw 51");
 			Assert::AreEqual(51, projector->contrast);
 			// Video stops: the idle restore runs before any further tick.
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 4000),
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }, 4000),
 				L"the idle restore sent CNTR 50 although the script believed 50");
 			module.Stop();
 		}
@@ -2003,26 +2066,28 @@ namespace VideoProcessorTest
 			config.tickMs = 400;
 			config.scriptResendFailedWrites = false;
 			ParseCurve("0:255, 255:255", config.curve);
+			TestClock clock;
 			LedDriveModule module(Port(50), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(50.0));
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			Assert::IsTrue(clock.Settle());
 			const int ticks = module.Ticks();
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->writeFails = true;
 			}
 			module.SubmitMeasurement(Frame(50.0, 100, 235));
-			Assert::IsTrue(WaitFor([&] { return module.Ticks() > ticks; }));
+			Assert::IsTrue(clock.RunUntil([&] { return module.Ticks() > ticks; }));
 			const size_t before = projector->Writes().size();
 			{
 				std::lock_guard<std::mutex> guard(projector->mutex);
 				projector->writeFails = false;
 			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(1300));   // three more ticks
+			Assert::IsTrue(clock.Run(1300));   // three more ticks
 			const auto writes = projector->Writes();
 			Assert::IsTrue(std::count(writes.begin() + before, writes.end(), std::string(":CNTR50\r")) == 0,
 				L"off: a failed write is not repeated");
@@ -2044,15 +2109,17 @@ namespace VideoProcessorTest
 				config.tickMs = 400;
 				config.scriptResendFailedWrites = resend;
 				ParseCurve("0:255, 255:255", config.curve);
+				TestClock clock;
 				LedDriveModule module(Port(50), config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				module.SubmitMeasurement(Frame(50.0));
-				Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"CNTR 51");
+				Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 51; }), L"CNTR 51");
 				module.SubmitMeasurement(Frame(50.0, 100, 235));
-				Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }), L"CNTR 50");
-				std::this_thread::sleep_for(std::chrono::milliseconds(900));
+				Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }), L"CNTR 50");
+				Assert::IsTrue(clock.Run(900));
 				module.Stop();
 				return projector->Writes();
 			};

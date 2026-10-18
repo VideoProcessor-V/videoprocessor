@@ -78,7 +78,7 @@ namespace
 		return stats;
 	}
 
-	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 		while (std::chrono::steady_clock::now() < deadline)
@@ -325,7 +325,9 @@ namespace VideoProcessorTest
 			port.readBack = true;
 			port.ledLatencyMs = 80;
 			port.ledSettleMs = 0;
-			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			TestClock clock;
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }), L"compensate started");
 			double time = 0.0;
@@ -334,9 +336,9 @@ namespace VideoProcessorTest
 			{
 				module.SubmitMeasurement(Frame(18.0));
 				time += 1000.0 / 60.0;
-				const CompensationGain gain = module.BeginFrameAt(0, time);
+				const CompensationGain gain = BeginFrameOn(clock, module, 0, time);
 				anyGain = anyGain || (gain.active && std::fabs(gain.gain - 1.0) > 1e-9);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 			Assert::IsTrue(WaitFor([&] { return projector->light < 255; }), L"the LED is dimmed with adaptive gamma off");
 			Assert::IsFalse(anyGain, L"the picture's gain stays at 1 with adaptive gamma off");
@@ -362,7 +364,9 @@ namespace VideoProcessorTest
 			LedDriveConfig picture = config;
 			picture.mode = Mode::PictureOnly;
 			{
-				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+				TestClock clock;
+				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }), L"compensate started");
 				double time = 0.0;
@@ -370,8 +374,8 @@ namespace VideoProcessorTest
 				{
 					module.SubmitMeasurement(Frame(18.0));
 					time += 1000.0 / 60.0;
-					module.BeginFrameAt(0, time);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					BeginFrameOn(clock, module, 0, time);
+					clock.Settle();
 				}
 				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }), L"compensate dimmed the LED");
 				Assert::IsFalse(module.Reconfigure(port, picture), L"picture_only needs a new module (no port)");
@@ -475,8 +479,10 @@ namespace VideoProcessorTest
 			port.ledLatencyMs = 80;
 			port.ledSettleMs = 0;
 			{
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				Assert::AreEqual(1.0, module.CurrentGain().gain, 1e-9);
@@ -484,9 +490,9 @@ namespace VideoProcessorTest
 				CompensationGain gain;
 				for (int frame = 1; frame <= 30; ++frame)
 				{
-					gain = module.BeginFrameAt(0, frame * 1000.0 / 60.0);
+					gain = BeginFrameOn(clock, module, 0, frame * 1000.0 / 60.0);
 					// Let the driver send before the next frame looks.
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					clock.Settle();
 				}
 				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }));
 				Assert::IsTrue(gain.active);
@@ -740,8 +746,10 @@ namespace VideoProcessorTest
 			port.minCommandGapMs = 0;
 			port.readBack = true;
 			{
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				// A dark scene with a sustained 1% highlight: the LED dims as far
@@ -752,8 +760,8 @@ namespace VideoProcessorTest
 				{
 					time = frame * 1000.0 / 60.0;
 					module.SubmitMeasurement(Frame(18.0, 100, 230));
-					gain = module.BeginFrameAt(0, time);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					gain = BeginFrameOn(clock, module, 0, time);
+					clock.Settle();
 				}
 				Assert::IsTrue(module.AssistContrast() > 50, L"CNTR assists");
 				Assert::IsTrue(module.AssistContrast() <= config.cntrAssistMax,
@@ -795,15 +803,17 @@ namespace VideoProcessorTest
 			port.minCommandGapMs = 0;
 			port.readBack = true;
 			{
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				for (int frame = 1; frame <= 300; ++frame)
 				{
 					module.SubmitMeasurement(Frame(18.0, 100, 230));
-					module.BeginFrameAt(0, frame * 1000.0 / 60.0);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					BeginFrameOn(clock, module, 0, frame * 1000.0 / 60.0);
+					clock.Settle();
 				}
 				Assert::IsTrue(projector->light < 255);
 				Assert::AreEqual(50, module.AssistContrast());
@@ -941,17 +951,26 @@ namespace VideoProcessorTest
 				port.ackTimeoutMs = 60;
 				port.minCommandGapMs = 0;
 				port.readBack = true;
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				double time = 0.0;
+				// Flaky-test fix 2026-10-18: this test was written against frames fed
+				// much faster than real time (the statistics' own clock, SubmitMeasurement's
+				// time, then barely moves between frames). Kept so, deterministically: the
+				// module's clock runs at a tenth of the frame clock. At the real-time rate
+				// CNTR rises again during the fade-up (55 54 52 51 50 54 ...): reported in
+				// docs/agent-reports/flaky-tests.md for the owner, not changed here.
 				auto render = [&](const RawMeasurement& raw)
 				{
 					time += 1000.0 / 60.0;
 					module.SubmitMeasurement(raw);
+					clock.To(time / 10.0);
 					const CompensationGain gain = module.BeginFrameAt(0, time);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					clock.Settle();
 					return gain;
 				};
 				for (int frame = 0; frame < 600; ++frame) render(Frame(18.0, 100, 200));
@@ -975,6 +994,8 @@ namespace VideoProcessorTest
 					previousDisplayed = module.RecoveryDisplayed();
 				}
 				Assert::IsFalse(module.Recovering(), L"the fade-up ends");
+				const size_t writesAtFadeEnd = projector->Writes().size();
+				const double msAtFadeEnd = clock.Ms();
 				// Let a held CNTR finish its paired descent.
 				for (int frame = 0; frame < 300 && module.AssistContrast() > 50; ++frame)
 					render(Frame(120.0, 100, 235));
@@ -984,8 +1005,16 @@ namespace VideoProcessorTest
 					if (writes[i].rfind(":CNTR", 0) == 0 && writes[i] != ":CNTR?\r")
 						after.push_back(std::stoi(writes[i].substr(5)));
 				Assert::IsFalse(after.empty());
+				std::wstring sequenceText = dump ? L"dump:" : L"held:";
+				for (size_t i = writesBefore; i < writes.size(); ++i)
+				{
+					if (i == writesAtFadeEnd) sequenceText += L" |fade end " + std::to_wstring(msAtFadeEnd) + L"|";
+					if (writes[i].rfind(":CNTR", 0) == 0 && writes[i] != ":CNTR?\r")
+						sequenceText += L" " + std::to_wstring(std::stoi(writes[i].substr(5)));
+				}
+				sequenceText += L" end " + std::to_wstring(clock.Ms());
 				for (size_t i = 1; i < after.size(); ++i)
-					Assert::IsTrue(after[i] <= after[i - 1], L"CNTR never rises during the fade-up");
+					Assert::IsTrue(after[i] <= after[i - 1], (L"CNTR never rises during the fade-up, " + sequenceText).c_str());
 				if (dump)
 				{
 					Assert::AreEqual(55, after.front(), L"one command to cut_cntr_level, never to 50 because of the cut");

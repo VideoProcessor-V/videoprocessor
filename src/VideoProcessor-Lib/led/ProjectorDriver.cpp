@@ -18,7 +18,7 @@ namespace LedDrive
 		class NoneDriver : public IProjectorDriver
 		{
 		public:
-			explicit NoneDriver(const ProjectorConfig& configIn) : config(configIn) {}
+			NoneDriver(const ProjectorConfig& configIn, ClockPtr clockIn) : config(configIn), clock(std::move(clockIn)) {}
 
 			const char* Protocol() const override { return "none"; }
 
@@ -58,7 +58,7 @@ namespace LedDrive
 				++status.commands;
 				++status.contrastSends;
 				status.lastSentContrast = value;
-				status.lastContrastSentAt = std::chrono::steady_clock::now();
+				status.lastContrastSentAt = clock->Now();
 			}
 
 			bool SendScript(const std::string& mnemonic, int value, bool* written = nullptr) override
@@ -75,7 +75,7 @@ namespace LedDrive
 					{
 						++status.contrastSends;
 						status.lastSentContrast = value;
-						status.lastContrastSentAt = std::chrono::steady_clock::now();
+						status.lastContrastSentAt = clock->Now();
 					}
 				}
 				return true;
@@ -107,18 +107,20 @@ namespace LedDrive
 			}
 
 			ProjectorConfig config;
+			ClockPtr clock;
 			mutable std::mutex mutex;
 			DriverStatus status{ "dry-run", false, 0, 0, -1 };
 		};
 	}
 
 	std::unique_ptr<IProjectorDriver> CreateProjectorDriver(const std::string& protocol,
-		const ProjectorConfig& config, const SerialPortFactory& portFactory)
+		const ProjectorConfig& config, const SerialPortFactory& portFactory, ClockPtr clock)
 	{
+		if (!clock) clock = SteadyClock();
 		if (protocol == "barco_ascii")
 			return std::make_unique<BarcoAsciiDriver>(config,
-				portFactory ? portFactory() : nullptr);
-		return std::make_unique<NoneDriver>(config);
+				portFactory ? portFactory() : nullptr, clock);
+		return std::make_unique<NoneDriver>(config, clock);
 	}
 
 	std::string BringToKnownState(IProjectorDriver& driver, int ledCeiling, bool resetDimMode,

@@ -67,9 +67,10 @@ namespace LedDrive
 	}
 
 	LedDriveModule::LedDriveModule(const ProjectorConfig& projectorIn, const LedDriveConfig& ledIn,
-		SerialPortFactory portFactoryIn)
-		: projector(projectorIn), led(ledIn), portFactory(std::move(portFactoryIn)),
-		flux(projectorIn.fluxTable), statsBuilder(ledIn), created(std::chrono::steady_clock::now()),
+		SerialPortFactory portFactoryIn, ClockPtr clockIn)
+		: clock(clockIn ? std::move(clockIn) : SteadyClock()),
+		projector(projectorIn), led(ledIn), portFactory(std::move(portFactoryIn)),
+		flux(projectorIn.fluxTable), statsBuilder(ledIn), created(clock->Now()),
 		compensator(ledIn, flux), modelledLevel(ledIn.ledCeiling), lookahead(*this),
 		rawTransfer(std::make_shared<const RawTransfer>(IdentityRawTransfer()))
 	{
@@ -170,7 +171,7 @@ namespace LedDrive
 
 	double LedDriveModule::NowMs() const
 	{
-		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - created).count();
+		return std::chrono::duration<double, std::milli>(clock->Now() - created).count();
 	}
 
 	int LedDriveModule::LatencyFramesLocked() const
@@ -203,7 +204,7 @@ namespace LedDrive
 	{
 		// The driver writes it at its next slot; a CNTR waiting or in flight takes
 		// that slot first and the LPW1 follows a command gap later.
-		const auto now = std::chrono::steady_clock::now();
+		const auto now = clock->Now();
 		double delayMs = 0.0;
 		if (status.nextSendAt != std::chrono::steady_clock::time_point() && status.nextSendAt > now)
 			delayMs = std::chrono::duration<double, std::milli>(status.nextSendAt - now).count();
@@ -1086,13 +1087,13 @@ namespace LedDrive
 	bool LedDriveModule::WaitUntil(std::chrono::steady_clock::time_point when)
 	{
 		std::unique_lock<std::mutex> lock(mutex);
-		return !wake.wait_until(lock, when, [this] { return stopping; });
+		return !clock->WaitUntil(wake, lock, when, [this] { return stopping; });
 	}
 
 	bool LedDriveModule::WaitUntil(std::chrono::steady_clock::time_point when, uint64_t generation)
 	{
 		std::unique_lock<std::mutex> lock(mutex);
-		return !wake.wait_until(lock, when, [this, generation] { return stopping || configGeneration != generation; });
+		return !clock->WaitUntil(wake, lock, when, [this, generation] { return stopping || configGeneration != generation; });
 	}
 
 	void LedDriveModule::Run()
@@ -1117,13 +1118,13 @@ namespace LedDrive
 		if (startLed.pythonSourceRetired)
 			DebugLog::Log("Dynamic Drive: command_source: python / mode: listen is retired; this configuration runs VP's "
 				"copy of the script (internal_script), which drives the port itself");
-		std::unique_ptr<IProjectorDriver> opened = CreateProjectorDriver(protocol, startProjector, portFactory);
+		std::unique_ptr<IProjectorDriver> opened = CreateProjectorDriver(protocol, startProjector, portFactory, clock);
 		std::string error;
 		bool driving = protocol != "none";
 		if (!opened->Open(error))
 		{
 			DebugLog::Log("Dynamic Drive: %s; continuing as a dry run", error.c_str());
-			opened = CreateProjectorDriver("none", startProjector, portFactory);
+			opened = CreateProjectorDriver("none", startProjector, portFactory, clock);
 			opened->Open(error);
 			driving = false;
 		}
@@ -1206,7 +1207,7 @@ namespace LedDrive
 		auto logResend = [&](const char* mnemonic, int value)
 		{
 			++resendsNotLogged;
-			const auto now = std::chrono::steady_clock::now();
+			const auto now = clock->Now();
 			if (resendLogTime == std::chrono::steady_clock::time_point{} ||
 				now - resendLogTime >= std::chrono::seconds(10))
 			{
@@ -1233,10 +1234,10 @@ namespace LedDrive
 		};
 		setSmoothing(smoothingWanted(), 50);
 		std::string lastLog;
-		auto lastLogTime = std::chrono::steady_clock::now();
+		auto lastLogTime = clock->Now();
 		for (;;)
 		{
-			const auto tickStart = std::chrono::steady_clock::now();
+			const auto tickStart = clock->Now();
 			FrameStats stats;
 			bool have = false;
 			bool restoreScriptIdle = false;   // audit 2026-10-16
@@ -1333,7 +1334,7 @@ namespace LedDrive
 					aheadInput.onScreenSequence = lastFrameSequence;
 					aheadInput.onScreenMs = lastFrameMs;
 					aheadInput.nowMs = NowMs() -
-						std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
+						std::chrono::duration<double, std::milli>(clock->Now() - tickStart).count();
 					aheadInput.sourcePeriodMs = sourceFps > 0.0 ? 1000.0 / sourceFps : framePeriodMs;
 					aheadInput.sendOffsetMs = current.scriptPacing ? current.scriptMeasureMs : 0.0;
 					aheadInput.nextTickMs = ScriptTickBoundMs(current);
@@ -1393,7 +1394,7 @@ namespace LedDrive
 					if (smoothing) smoother.Reset(50);
 					if (retry) idleRestored = false;
 				}
-				sendsDone = std::chrono::steady_clock::now();
+				sendsDone = clock->Now();
 				if (idleRetries == 0)
 					DebugLog::Log("Dynamic Drive: no video for %d s; LED back to %d%s, CNTR 50%s (led_idle_restore_s)",
 						current.idleRestoreS, current.ledCeiling, light ? "" : " (not confirmed)",
@@ -1440,7 +1441,7 @@ namespace LedDrive
 					pendingLogSent = false;
 				}
 				if (!warning.empty()) DebugLog::Log("%s", warning.c_str());
-				const auto now = std::chrono::steady_clock::now();
+				const auto now = clock->Now();
 				if (!log.empty() && (sent || now - lastLogTime >= std::chrono::seconds(10)))
 				{
 					DebugLog::Log("%s%s", log.c_str(), applyGain ? "" : " (dry run)");
@@ -1451,7 +1452,7 @@ namespace LedDrive
 			{
 				// Delta 12: no port, no controller; the statistics feed the
 				// picture terms in BeginFrame(). A heartbeat in the log only.
-				const auto now = std::chrono::steady_clock::now();
+				const auto now = clock->Now();
 				if (now - lastLogTime >= std::chrono::seconds(10))
 				{
 					double veil = 0.0;
@@ -1520,12 +1521,12 @@ namespace LedDrive
 									smoother.Sent(NowMs() + projector.cntrLatencyMs);
 								}
 							}
-							sendsDone = std::chrono::steady_clock::now();
+							sendsDone = clock->Now();
 						}
 						DebugLog::Log("LED script: look-ahead cut in %.0f ms (frame %llu): light %d contrast %d%s",
 							plan.cutMs - aheadInput.nowMs, static_cast<unsigned long long>(plan.targetSequence),
 							controller.Light(), controller.Contrast(), applyGain ? "" : " (dry run)");
-						lastLogTime = std::chrono::steady_clock::now();
+						lastLogTime = clock->Now();
 						{
 							std::lock_guard<std::mutex> guard(mutex);
 							++ticks;
@@ -1543,7 +1544,7 @@ namespace LedDrive
 							continue;
 						resendLight = scriptSend("LPW1", plan.preliftTarget);
 						controller.Reset(plan.preliftTarget, controller.Contrast());
-						sendsDone = std::chrono::steady_clock::now();
+						sendsDone = clock->Now();
 						DebugLog::Log("LED script: look-ahead exit from black in %.0f ms: pre-lift to %d%s",
 							plan.cutMs - aheadInput.nowMs, plan.preliftTarget, applyGain ? "" : " (dry run)");
 					}
@@ -1587,7 +1588,7 @@ namespace LedDrive
 				{
 					logResend("LPW1", controller.Light());
 					resendLight = scriptSend("LPW1", controller.Light());
-					sendsDone = std::chrono::steady_clock::now();
+					sendsDone = clock->Now();
 				}
 				if ((resendContrast >= 0 || completeContrast >= 0) && settingsUnchanged())
 				{
@@ -1610,7 +1611,7 @@ namespace LedDrive
 							smoother.Sent(landMs);
 						}
 					}
-					sendsDone = std::chrono::steady_clock::now();
+					sendsDone = clock->Now();
 				}
 				if (current.scriptPacing)
 				{
@@ -1620,7 +1621,7 @@ namespace LedDrive
 					std::vector<ScriptSend> sends;
 					const int lengthMs = PaceScriptTick(out, current.scriptMeasureMs, current.scriptEchoMs, sends);
 					const double tickStartMs = NowMs() -
-						std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tickStart).count();
+						std::chrono::duration<double, std::milli>(clock->Now() - tickStart).count();
 					bool smoothNow = false;
 					{
 						std::lock_guard<std::mutex> guard(mutex);
@@ -1656,10 +1657,10 @@ namespace LedDrive
 								smoother.Sent(NowMs() + projector.cntrLatencyMs);
 							}
 						}
-						sendsDone = std::chrono::steady_clock::now();
+						sendsDone = clock->Now();
 					}
 					scriptFloor = tickStart + std::chrono::milliseconds(std::max(lengthMs, 10));   // never a spin
-					const auto now = std::chrono::steady_clock::now();
+					const auto now = clock->Now();
 					if (out.lightCommand >= 0 || !out.contrastSchedule.empty() ||
 						now - lastLogTime >= std::chrono::seconds(10))
 					{
@@ -1700,7 +1701,7 @@ namespace LedDrive
 				if (out.lightCommand >= 0 && !CustomDimEngaged() && settingsUnchanged())
 				{
 					resendLight = scriptSend("LPW1", out.lightCommand);
-					sendsDone = std::chrono::steady_clock::now();
+					sendsDone = clock->Now();
 					// The script slept 200 ms after LPW1 even with no CNTR to
 					// follow; keep that with a tick_ms below it (audit note 4).
 					if (out.contrastSchedule.empty())
@@ -1718,7 +1719,7 @@ namespace LedDrive
 					}
 					previousOffset = step.offsetMs;
 					resendContrast = scriptSend("CNTR", step.contrast);
-					sendsDone = std::chrono::steady_clock::now();
+					sendsDone = clock->Now();
 					if (step.contrast != 50) contrastDriven = true;
 					if (smoothNow)
 					{
@@ -1726,7 +1727,7 @@ namespace LedDrive
 						smoother.Sent(NowMs() + projector.cntrLatencyMs);
 					}
 				}
-				const auto now = std::chrono::steady_clock::now();
+				const auto now = clock->Now();
 				// Log changes, plus a heartbeat every ten seconds.
 				if (out.lightCommand >= 0 || !out.contrastSchedule.empty() ||
 					now - lastLogTime >= std::chrono::seconds(10))

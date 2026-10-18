@@ -78,7 +78,7 @@ namespace
 	double Peak(const RawMeasurement& raw) { return static_cast<double>(raw.maximum) / SUM_SCALE; }
 	double Apl(const RawMeasurement& raw) { return static_cast<double>(raw.sum) / SUM_SCALE / raw.blocks; }
 
-	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 		while (std::chrono::steady_clock::now() < deadline)
@@ -215,8 +215,10 @@ namespace VideoProcessorTest
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
 			{
+				TestClock clock;
 				LedDriveModule module(FastProjector(), FastScript(),
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
 				Assert::IsTrue(WaitFor([&]
@@ -229,9 +231,10 @@ namespace VideoProcessorTest
 				{
 					module.SubmitMeasurement(Uniform(10.0));
 					module.BeginFrame(static_cast<uint64_t>(frame + 1));
+					Assert::IsTrue(clock.Run(1000.0 / 60.0, 5.0));
 				}
-				Assert::IsTrue(WaitFor([&] { return projector->light < 240; }), L"Dark scene dims the LED");
-				Assert::IsTrue(WaitFor([&] { return projector->contrast > 51; }, 5000),
+				Assert::IsTrue(clock.RunUntil([&] { return projector->light < 240; }), L"Dark scene dims the LED");
+				Assert::IsTrue(clock.RunUntil([&] { return projector->contrast > 51; }, 5000),
 					L"Dark scene raises the projector's real CNTR");
 				module.BeginFrame(6);
 				Assert::IsFalse(module.CurrentGain().active, L"script_smoothing off: VP's picture untouched");
@@ -249,13 +252,15 @@ namespace VideoProcessorTest
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
 			const ProjectorConfig port = FastProjector();
+			TestClock clock;
 			LedDriveModule module(port, FastScript(),
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			for (int frame = 0; frame < 5; ++frame)
 				module.SubmitMeasurement(Uniform(10.0));
-			Assert::IsTrue(WaitFor([&] { return projector->contrast >= 53; }, 5000), L"the script raised CNTR");
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast >= 53; }, 5000), L"the script raised CNTR");
 
 			LedDriveConfig compensate = FastScript();
 			compensate.mode = Mode::Compensate;
@@ -276,7 +281,7 @@ namespace VideoProcessorTest
 				if (!reset)
 					Assert::IsFalse(gain.active, L"compensate touched the picture before CNTR was back at 50");
 				compensated = reset && gain.active;
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				Assert::IsTrue(clock.Run(10.0, 5.0));
 			}
 			Assert::IsTrue(compensated, L"compensate starts once CNTR is back at 50");
 			const auto writes = projector->Writes();
@@ -295,22 +300,24 @@ namespace VideoProcessorTest
 			LedDriveConfig config = FastScript();
 			config.scriptSmoothing = true;
 			{
+				TestClock clock;
 				LedDriveModule module(FastProjector(), config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				module.SubmitMeasurement(Uniform(10.0));
 				bool bridged = false;
-				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-				for (uint64_t frame = 1; std::chrono::steady_clock::now() < deadline && projector->contrast < 54; ++frame)
+				// Frames every 4 ms on the clock, for up to 5 s.
+				for (uint64_t frame = 1; frame <= 1250 && projector->contrast < 54; ++frame)
 				{
 					module.SubmitMeasurement(Uniform(10.0));
 					const CompensationGain gain = module.BeginFrame(frame);
+					Assert::IsTrue(clock.Run(4.0, 4.0));
 					if (!gain.active) continue;
 					Assert::IsTrue(gain.domain == GainDomain::Encoded);
 					Assert::IsTrue(gain.gain <= 1.0 + 1e-12, L"Never brighter than the projector's own CNTR");
 					bridged = bridged || gain.gain < 1.0 - 1e-6;
-					std::this_thread::sleep_for(std::chrono::milliseconds(4));
 				}
 				Assert::IsTrue(projector->contrast >= 54, L"The script raised the real CNTR");
 				Assert::IsTrue(bridged, L"VP's gain bridged the steps");
@@ -323,12 +330,13 @@ namespace VideoProcessorTest
 			int ports = 0;
 			LedDriveConfig config = FastScript();
 			config.mode = Mode::LogOnly;
+			TestClock clock;
 			LedDriveModule module(FastProjector(), config,
-				[&ports] { ++ports; return std::unique_ptr<ISerialPort>(); });
+				[&ports] { ++ports; return std::unique_ptr<ISerialPort>(); }, clock);
 			module.Start();
 			for (int frame = 0; frame < 5; ++frame)
 				module.SubmitMeasurement(Uniform(10.0));
-			Assert::IsTrue(WaitFor([&] { return module.Ticks() >= 5; }));
+			Assert::IsTrue(clock.RunUntil([&] { return module.Ticks() >= 5; }));
 			Assert::IsFalse(module.DrivingProjector());
 			Assert::IsFalse(module.CurrentGain().active);
 			Assert::AreEqual(1.0, module.CurrentGain().gain, 1e-12);
@@ -766,12 +774,14 @@ namespace VideoProcessorTest
 		{
 			auto projector = std::make_shared<FakeProjector>();
 			projector->openFails = true;
+			TestClock clock;
 			LedDriveModule module(FastProjector(), FastScript(),
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			for (int frame = 0; frame < 5; ++frame)
 				module.SubmitMeasurement(Uniform(10.0));
-			Assert::IsTrue(WaitFor([&] { return module.Ticks() >= 5; }));
+			Assert::IsTrue(clock.RunUntil([&] { return module.Ticks() >= 5; }));
 			Assert::IsFalse(module.DrivingProjector());
 			Assert::IsFalse(module.CurrentGain().active, L"Without the LED dimming, no compensating gain");
 			module.Stop();
