@@ -190,6 +190,11 @@ namespace Hunt2CadenceClass
 			Assert::AreEqual(size_t{ 1 }, LockedQueueTarget(1, 0.4, 2), L"never above the target");
 			Assert::AreEqual(size_t{ 4 }, LockedQueueTarget(4, 1.0, 2), L"not locked: the target");
 			Assert::AreEqual(size_t{ 0 }, LockedQueueTarget(0, 0.4, 2));
+			// The look-ahead minimum (motion-ahead depth 4 + the frame shown = 5) is kept: at the
+			// default target of 5 nothing changes; a deeper target still shrinks to it.
+			Assert::AreEqual(size_t{ 5 }, LockedQueueTarget(5, 0.4, 5), L"motion-ahead keeps its 5");
+			Assert::AreEqual(size_t{ 5 }, LockedQueueTarget(12, 0.4, 5), L"12 at 3:2 -> 5 (the look-ahead floor)");
+			Assert::AreEqual(size_t{ 8 }, LockedQueueTarget(20, 0.4, 5), L"20 at 3:2 -> 8");
 			// The latency is kept (within a frame's rounding) across the lock: target / signal Hz
 			// unlocked vs frames / film Hz locked, any carrier.
 			for (const auto& c : { std::make_pair(60.0, 0.4), std::make_pair(50.0, 0.5), std::make_pair(120.0, 0.2) })

@@ -28210,8 +28210,10 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 // Hunt 2 (cadence_class_fixes, 06-interp M3: pulldown D2 wired). While a pulldown lock
 // holds, the queue holds film frames: target_frames (set for the signal) is scaled by
 // new / cycle so the queue's latency does not step by cycle / new at each lock change;
-// never below 2 frames (A shown, B queued: the interpolator's / de-judder's pair) or the
-// target itself. Re-resolved on every call from the current cadence.
+// never below the frames the queue's look-ahead users need (A shown and B queued for the
+// interpolator / de-judder; the optical-flow look-ahead's depth + 1, MotionAhead::QueueFramesFor;
+// the active-picture look-ahead + 1) or the target itself. Re-resolved on every call from
+// the current cadence.
 size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
 {
 	if (!m_cadenceClassFixes.load(std::memory_order_relaxed))
@@ -28219,7 +28221,17 @@ size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
 	const int cadence = m_pulldownCadence.load(std::memory_order_relaxed);
 	if (cadence == 0)
 		return desired;
-	return Pulldown::LockedQueueTarget(desired, Pulldown::FilmToSignalRatio(cadence >> 16, cadence & 0xffff), 2);
+	size_t minimum = 2;
+	if (m_impl)
+	{
+		const int motionDepth = m_impl->motionAheadDepth.load(std::memory_order_acquire);
+		if (motionDepth > 0)
+			minimum = (std::max)(minimum, MotionAhead::QueueFramesFor(motionDepth));
+	}
+	const size_t activeLookahead = m_activePictureLookaheadFrames.load(std::memory_order_acquire);
+	if (activeLookahead > 0)
+		minimum = (std::max)(minimum, activeLookahead + 1);
+	return Pulldown::LockedQueueTarget(desired, Pulldown::FilmToSignalRatio(cadence >> 16, cadence & 0xffff), minimum);
 }
 
 
