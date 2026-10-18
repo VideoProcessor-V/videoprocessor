@@ -691,6 +691,17 @@ protected:
 	StateReport::AutoReportLimiter m_autoReportLimiter;
 	std::atomic<bool> m_stateReportBusy{ false };
 	ULONGLONG m_stateReportBusySince = 0;   // UI thread (bug hunt 3 C10)
+	// Bug hunt 3 (SH11): the report worker stays detached (it never touches
+	// the dialog) but signals `done`, so the exit waits for it (bounded)
+	// instead of killing it mid-write; `cancel` skips its thumbnail wait.
+	struct StateReportWorkerState
+	{
+		std::mutex mutex;
+		std::condition_variable doneChanged;
+		bool done = false;
+		std::atomic<bool> cancel{ false };
+	};
+	std::shared_ptr<StateReportWorkerState> m_stateReportWorker;
 	std::atomic<uint64_t> m_diagnosticCapturedFrames{ 0 };
 	std::atomic<uint64_t> m_diagnosticRejectedFrames{ 0 };
 	uint64_t m_diagnosticLastCapturedFrames = 0;

@@ -74,6 +74,14 @@ namespace StateReport
 	std::vector<std::wstring> ListReports(const std::wstring& directory);
 	// Deletes the oldest reports beyond `keep`; returns the names removed.
 	std::vector<std::wstring> ApplyRetention(const std::wstring& directory, int keep = kDefaultKeep);
+	// Bug hunt 3 (SH11, 2026-10-18): a report write that never finished (VP
+	// killed or ended mid-write) left "vp-report-<time>.zip.partial", which
+	// retention never saw. Removes such files older than olderThanMs (a write
+	// in progress - possibly another instance's - is younger). ApplyRetention
+	// calls it.
+	constexpr uint64_t kStalePartialMs = 5ull * 60 * 1000;
+	std::vector<std::wstring> RemoveStalePartials(const std::wstring& directory,
+		uint64_t olderThanMs = kStalePartialMs);
 
 	// Lower-case hex SHA-256 of a file; empty when it cannot be read.
 	std::string Sha256File(const std::wstring& path, uint64_t* bytes = nullptr);
@@ -171,8 +179,13 @@ namespace StateReport
 		explicit AutoReportLimiter(uint64_t minimumIntervalMs = 10ull * 60 * 1000, int maxPerSession = 5)
 			: minimumIntervalMs_(minimumIntervalMs), maxPerSession_(maxPerSession) {}
 		// True (and counted) when an automatic report may be written now.
-		bool Allow(uint64_t nowMs)
+		// Bug hunt 3 (SH11): busy = a report is being written; then nothing
+		// is written and no slot is spent (it used to be counted, and the
+		// save then refused as "already saving").
+		bool Allow(uint64_t nowMs, bool busy = false)
 		{
+			if (busy)
+				return false;
 			if (count_ >= maxPerSession_)
 				return false;
 			if (count_ > 0 && nowMs - lastMs_ < minimumIntervalMs_)
