@@ -800,7 +800,10 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.frameBlank = !frame.informative();
 		snapshot.frameBlack = frame.black;
 		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
-		snapshot.declaredRatio = tracker.Ratio();
+		// Latch precision (2026-10-17): the declared rate as the exact rendition behind it - an even
+		// size of the frame within SourceResolution::kSnapBins of this tile's sweep, the simplest ratio (SnapRatio):
+		// 128-px tiles at 1080 read a 540-line source as ~542, re-based 0.4 % off.
+		snapshot.declaredRatio = SourceResolution::SnapRatio(tracker.Ratio(), j.nativeHeight, T);
 		snapshot.confidence = tracker.Ratio() < 1.0 ? evidence * clarity : 0.0;
 		// Per axis, only while the both-axes reading is native: each declared axis's
 		// evidence (the stricter standard) times how clearly that axis was resampled.
@@ -816,8 +819,8 @@ if (tile < int(tiles) && g.y < ts) {
 			snapshot.axisConfidence = 0.0;
 			if (tracker.Ratio() >= 1.0 && (trackerV.Ratio() < 1.0 || trackerH.Ratio() < 1.0))
 			{
-				snapshot.axisRatioY = trackerV.Ratio();
-				snapshot.axisRatioX = trackerH.Ratio();
+				snapshot.axisRatioY = SourceResolution::SnapRatio(trackerV.Ratio(), j.nativeHeight, T);
+				snapshot.axisRatioX = SourceResolution::SnapRatio(trackerH.Ratio(), j.nativeWidth, T);
 				double c = 1.0;
 				if (trackerV.Ratio() < 1.0) c = (std::min)(c, axisConfidence(trackerV, coherenceV));
 				if (trackerH.Ratio() < 1.0) c = (std::min)(c, axisConfidence(trackerH, coherenceH));

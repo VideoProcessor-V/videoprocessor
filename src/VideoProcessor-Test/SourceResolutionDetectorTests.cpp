@@ -2012,5 +2012,57 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("~900 (0.42)"), SourceResolution::Describe(900.0 / 2160, 2160));
 			Assert::AreEqual(std::string("~540 (0.50)"), SourceResolution::Describe(0.5, 1080), L"from the frame's own height");
 		}
+
+		// Latch precision (2026-10-17): a reading within the snap reach (kSnapBins of the tile's
+		// sweep; readings measured within +0.52 bin) snaps to the exact rendition - an even size,
+		// the simplest ratio to the frame - at both tile sizes. No list of classes: each rung
+		// follows from the frame size and the reading alone.
+		TEST_METHOD(SnapRatioDeclaresTheExactRendition)
+		{
+			struct Case { int frame, lines; };
+			const Case cases[] = {
+				{ 2160, 540 }, { 2160, 720 }, { 2160, 810 }, { 2160, 900 }, { 2160, 1080 }, { 2160, 1260 }, { 2160, 1440 }, { 2160, 1620 },
+				{ 1080, 360 }, { 1080, 432 }, { 1080, 480 }, { 1080, 540 }, { 1080, 576 }, { 1080, 720 }, { 1080, 810 },
+				{ 1920, 720 }, { 1920, 960 }, { 1920, 1280 }, { 1920, 1440 },   // widths: anamorphic DVD, 960, 720p, HDV
+			};
+			char line[200];
+			for (const Case& c : cases)
+				for (int tile : { 128, 256 })
+				{
+					const double truth = static_cast<double>(c.lines) / c.frame;
+					const double bin = 1.0 / tile;
+					for (double off : { -0.7, -0.52, -0.45, -0.3, -0.1, 0.0, 0.1, 0.3, 0.45, 0.52, 0.7 })
+					{
+						const double reading = truth + off * bin;
+						const double snapped = SourceResolution::SnapRatio(reading, c.frame, tile);
+						snprintf(line, sizeof(line), "%d of %d, tile %d, reading %+.2f bin (%.4f, %.1f lines): snapped %.6f (%.2f lines)",
+							c.lines, c.frame, tile, off, reading, reading * c.frame, snapped, snapped * c.frame);
+						const std::string text(line);
+						Assert::AreEqual(truth, snapped, 0.0, std::wstring(text.begin(), text.end()).c_str());
+					}
+				}
+			// Off any ladder (1000 of 2160 = 25/54): exact too while the reading is within about a
+			// fifth of a bin; further out a simpler ratio within reach is taken (7/15 = 1008 lines).
+			for (double off : { -0.4, -0.2, 0.0, 0.1, 0.18 })
+				Assert::AreEqual(1000.0 / 2160, SourceResolution::SnapRatio(1000.0 / 2160 + off / 256, 2160, 256), 0.0, L"1000 of 2160");
+			// The integration's case: 128-px tiles at 1080 read 540 lines as ~542; exactly 1/2 now.
+			Assert::AreEqual(0.5, SourceResolution::SnapRatio(542.0 / 1080, 1080, 128), 0.0, L"542 of 1080 -> exactly 0.5000");
+			Assert::AreEqual(std::string("~540 (0.50)"), SourceResolution::Describe(SourceResolution::SnapRatio(542.0 / 1080, 1080, 128), 1080));
+			// Unchanged: native, no frame, no tile.
+			Assert::AreEqual(1.0, SourceResolution::SnapRatio(1.0, 2160, 256), 0.0);
+			Assert::AreEqual(0.5013, SourceResolution::SnapRatio(0.5013, 0, 256), 0.0);
+			Assert::AreEqual(0.5013, SourceResolution::SnapRatio(0.5013, 2160, 0), 0.0);
+			// Always an even size below the frame.
+			for (int frame : { 480, 720, 1080, 1440, 2160, 1920, 3840 })
+				for (int tile : { 128, 256 })
+					for (double r = 0.25; r < 0.95; r += 0.0037)
+					{
+						const double snapped = SourceResolution::SnapRatio(r, frame, tile);
+						const double lines = snapped * frame;
+						Assert::AreEqual(0.0, lines - std::round(lines), 1e-9, L"a whole number of lines");
+						Assert::AreEqual(0, static_cast<int>(std::lround(lines)) % 2, L"an even number");
+						Assert::IsTrue(std::fabs(snapped - r) <= SourceResolution::kSnapBins / tile + 1e-12 || std::fabs(snapped - r) <= 1.0 / frame + 1e-12, L"within the snap reach");
+					}
+		}
 	};
 }
