@@ -708,7 +708,7 @@ def analyse_shift(caps, sw, sh, cache):
         return np.real((Th[rows] * ph[None, :]) @ E)
 
     per_band = {b["kind"]: [] for b in mv["layout"]}
-    taus = []
+    taus, costs = [], []
     src_energy = None
     for cap in caps:
         O = colour_fit_rows(cap, geo, R0)
@@ -734,6 +734,7 @@ def analyse_shift(caps, sw, sh, cache):
                 d = a + gr * (b - a); fd = cost(d)
         tau = (a + b) / 2
         taus.append(tau)
+        costs.append(cost(tau))
         R = reference(tau)
         for bd in mv["layout"]:
             y0 = geo.to_out_y(bd["y0"]) + 6
@@ -745,16 +746,23 @@ def analyse_shift(caps, sw, sh, cache):
     xs = np.arange(WIN)
     s = AMP * np.cos(2 * math.pi * 0.17 * xs)[None, :] * np.ones((WIN, 1))
     S = float((np.abs(np.fft.fft2((s - s.mean()) * hann2())) ** 2).sum())
+    # captures that match no position of the pan (a held / blended / torn frame) are counted and
+    # left out of the band metrics; the registration residual tells them apart
+    med = float(np.median(costs))
+    keep = [i for i, c in enumerate(costs) if c <= 4 * med + 1e-9]
+    if len(keep) >= 2:
+        per_band = {k: [v[i] for i in keep if i < len(v)] for k, v in per_band.items()}
     flat = per_band["flat"]
     flat_var = float(np.mean(np.var(np.stack([e for e, _, _ in flat]), axis=0))) if len(flat) > 1 else 0.0
     flat_err = float(np.mean([e.mean() for _, _, e in flat])) if flat else 0.0   # dither / noise floor
-    out = dict(geometry=gcheck, taus=[round(t, 3) for t in taus], bands={})
+    out = dict(geometry=gcheck, taus=[round(t, 3) for t in taus], residuals=[round(c / med, 2) for c in costs],
+               unmatched=len(costs) - len(keep), bands={})
     for name, series in per_band.items():
         if name == "flat" or len(series) < 2:
             continue
         D = np.stack([eo - er for eo, er, _ in series])        # (t, windows)
         var = np.var(D, axis=0).mean() - flat_var
-        err = float(np.mean([e.mean() for _, _, e in series])) - flat_err
+        err = float(np.median([e.mean() for _, _, e in series])) - flat_err
         out["bands"][name] = dict(shimmer=float(math.sqrt(max(var, 0.0)) / S),
                                   excess=float(D.mean() / S),
                                   motion_err=max(err, 0.0) / S)
@@ -1384,6 +1392,8 @@ def summarise(results):
         elif r["mode"] == "shift":
             t.setdefault("shimmer", []).append(s["all"])
             t.setdefault("motion_err", []).append(s.get("err_all"))
+            t["unmatched"] = t.get("unmatched", 0) + r.get("unmatched", 0)
+            t["pan_frames"] = t.get("pan_frames", 0) + len(r.get("taus", []))
             t.setdefault("motion_err_stop", []).append(s.get("err_stop"))
             t.setdefault("motion_err_near", []).append(s.get("err_near"))
         else:
@@ -1437,20 +1447,51 @@ def report(args):
         o = [int(v) for v in out.split("x")]
         x0, y0, w, h, sc = fit_rect(s[0], s[1], o[0], o[1])
         lines.append("\n### %s -> %s (scale x%.3f, picture %gx%g)\n" % (src[1:], out, sc, w, h))
-        lines.append("| stage config | alias dB | chroma alias dB | grain err dB | MTF 0.4-0.6 | MTF 0.6-0.8 | MTF 0.8-0.95 | ringing % | pan err dB | pan moire (stop) dB | shimmer | real-pan HF err dB | real-pan shimmer | vs default |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("| stage config | alias dB | chroma alias dB | grain err dB | MTF 0.4-0.6 | MTF 0.6-0.8 | MTF 0.8-0.95 | ringing % | pan err dB | pan moire (stop) dB | shimmer | unmatched pan frames | real-pan HF err dB | real-pan shimmer | vs default |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         order = [c[0] for c in CONFIGS]
         for cfg in sorted(rows, key=lambda c: order.index(c) if c in order else 99):
             t = rows[cfg]
-            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 cfg, fmt(t.get("alias_db")), fmt(t.get("alias_chroma_db")), fmt(t.get("grain_err_db")),
                 fmt(t.get("mtf_0.4"), "%.2f"), fmt(t.get("mtf_0.6"), "%.2f"), fmt(t.get("mtf_0.8"), "%.2f"),
-                fmt(t.get("ringing")), fmt(t.get("motion_err")), fmt(t.get("motion_err_stop")), fmt(t.get("shimmer"), "%.4f"),
+                fmt(t.get("ringing")), fmt(t.get("motion_err")), fmt(t.get("motion_err_stop")), fmt(t.get("shimmer"), "%.3f"),
+                ("%d/%d" % (t["unmatched"], t["pan_frames"])) if t.get("pan_frames") else "-",
                 fmt(t.get("real_hf_err")), fmt(t.get("real_shimmer"), "%.3f"), "baseline" if cfg == "default" else verdict(t, base)))
-    text = "\n".join(lines) + "\n\n### GPU cost per frame (D3D11 timestamps)\n\n" + cost_report(args.dir)
+    text = ("\n".join(lines) + "\n\n### Hybrid scaler blend sweep\n" + blend_report(table) +
+            "\n### GPU cost per frame (D3D11 timestamps)\n\n" + cost_report(args.dir))
     with open(os.path.join(args.dir, args.results.replace(".json", ".md")), "w") as f:
         f.write(text)
     print(text)
+
+
+def blend_report(table):
+    """Hybrid scaler blend sweep: per pair, the blend weight rows and the pick. Information first:
+    among the weights within 1 dB of the lowest aliasing whose ringing is within 1.5 points of the
+    lowest, the one with the highest passband (MTF 0.6-0.8 of Nyquist)."""
+    out = []
+    for pair in sorted(table):
+        rows = {c: t for c, t in table[pair].items() if c.startswith("hyb_")}
+        if not rows:
+            continue
+        out.append("\n#### %s\n" % pair)
+        out.append("| blend w_base | alias dB | ringing % | MTF 0.4-0.6 | MTF 0.6-0.8 | grain err dB | pan err dB | pan moire dB | shimmer |")
+        out.append("|---|---|---|---|---|---|---|---|---|")
+        for c in sorted(rows):
+            t = rows[c]
+            out.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                c.split("_w")[1], fmt(t.get("alias_db")), fmt(t.get("ringing")), fmt(t.get("mtf_0.4"), "%.2f"),
+                fmt(t.get("mtf_0.6"), "%.2f"), fmt(t.get("grain_err_db")), fmt(t.get("motion_err")),
+                fmt(t.get("motion_err_stop")), fmt(t.get("shimmer"), "%.3f")))
+        ok = {c: t for c, t in rows.items() if t.get("alias_db") is not None and t.get("ringing") is not None}
+        if ok:
+            amin = min(t["alias_db"] for t in ok.values())
+            rmin = min(t["ringing"] for t in ok.values())
+            cand = [c for c, t in ok.items() if t["alias_db"] <= amin + 1.0 and t["ringing"] <= rmin + 1.5] or list(ok)
+            pick = max(cand, key=lambda c: ok[c].get("mtf_0.6") or 0)
+            out.append("\nPick: w_base %s (alias %.1f dB, ringing %.1f%%, MTF 0.6-0.8 %s)." % (
+                pick.split("_w")[1], ok[pick]["alias_db"], ok[pick]["ringing"], fmt(ok[pick].get("mtf_0.6"), "%.2f")))
+    return "\n".join(out) + "\n"
 
 
 def gate(args):
