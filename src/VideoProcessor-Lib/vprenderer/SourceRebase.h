@@ -56,7 +56,8 @@ namespace SourceRebase
 		// module's textures and its crop scaled to match. False (and `out`
 		// untouched) on any failure: the caller renders the native frame.
 		// `slot` keeps separate textures for frames that must coexist (the
-		// main frame and a de-judder extra).
+		// main frame and a de-judder extra; hunt 3: kSlotCrossfade, the
+		// crossfade's path being left, beside both).
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factor, pl_frame& out, int slot = 0)
 		{
 			return Apply(gpu, dispatch, source, factor, factor, out, slot);
@@ -86,9 +87,10 @@ namespace SourceRebase
 		// below black next to the picture edge vs the polar's ~1), which show when cropping
 		// is off. false = polar for chroma too.
 		bool separable = true;
+		static constexpr int kSlotCrossfade = 2;
 
 	private:
-		static constexpr int kSlots = 2;
+		static constexpr int kSlots = 3;
 		pl_tex textures[kSlots][PL_MAX_PLANES] = {};
 		pl_tex inverseTemp[kSlots] = {};   // the first (horizontal) inverse pass
 		pl_tex separableTemp[kSlots][PL_MAX_PLANES] = {};   // the separable filter's first pass

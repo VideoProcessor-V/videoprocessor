@@ -321,6 +321,27 @@ namespace DetailPulseModel
 			return f;
 		}
 
+		// Hunt 3 (the crossfade's path being left): the held decision on a picture of another
+		// geometry (its own bands at its own scale; the tile weights read at the same picture
+		// position: plane px x (decided size / this size)). Never advances.
+		Frame ProcessForeign(const Image& luma, const Settings& s) const
+		{
+			Frame f = last;
+			f.repeat = true;
+			const double scale = DetailPulse::Scale(s.planeLines > 0.0 ? s.planeLines : luma.h);
+			const Bands b = MakeBands(luma, scale);
+			const double T = DetailPulse::kTilePx;
+			const double rx = static_cast<double>(geoW) / luma.w, ry = static_cast<double>(geoH) / luma.h;
+			f.out = Image(luma.w, luma.h);
+			for (int yy = 0; yy < luma.h; ++yy)
+				for (int x = 0; x < luma.w; ++x)
+				{
+					const double w = GrainModel::Bilinear(last.tileWeight, (x + 0.5) * rx / T, (yy + 0.5) * ry / T);
+					f.out.at(x, yy) = luma.at(x, yy) + w * ((last.g1 - 1.0) * b.d1.at(x, yy) + (last.g2 - 1.0) * b.d2.at(x, yy));
+				}
+			return f;
+		}
+
 		// The next source frame's energies (the ring's look-ahead entry).
 		void MeasureAhead(const Image& luma, uint64_t sequence, const Settings& s)
 		{

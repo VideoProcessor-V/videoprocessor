@@ -111,6 +111,25 @@ namespace LibplaceboRenderParameters
 	void ApplyTargetLuminance(bool inputIsSdr, float targetNits, float blackNits,
 		pl_color_space& target);
 
+	// Hunt 3 F2: ambient adaptation for SDR input. The equal source/target references above
+	// keep SDR codes as they are, so sdr_black_nits never reaches an SDR picture (intended:
+	// the signal is display-referred and the display's own calibration owns its black;
+	// CONFIGURATION.html). Ambient adaptation's rise of the effective black above the owner's
+	// black (the room's veil x strength) is applied for SDR input as the BT.1886 black lift
+	// it stands for: on the owner's display (black B, white W, exponent g of the source
+	// transfer) the picture is shown as on a display whose black is B_eff:
+	//   L(V') = EOTF_B(V') = EOTF_Beff(V)  =>  V' = s V + o,
+	//   s = (lw - le) / (lw - lb), o = (le - lb) / (lw - lb), lb = B^(1/g), le = B_eff^(1/g), lw = W^(1/g)
+	// - affine in the signal (s + o = 1: white fixed; s > 0: code order kept, BTB stays below
+	// black and WTW above white, both carried as values), applied by libplacebo's colour
+	// decode (pl_color_adjustment contrast s, brightness o) before anything else.
+	// False (nothing changes, bit-identical) when B_eff <= B (ambient off, strength 0, a dark
+	// room) or the source transfer is not a power law (BT.1886, gamma 1.8-2.8).
+	bool SdrAmbientLift(double ownerBlackNits, double effectiveBlackNits, double whiteNits,
+		enum pl_color_transfer sourceTransfer, float& contrast, float& brightness);
+	// The lift on top of an existing adjustment (saturation etc.): RGB' = s (c RGB + b) + o.
+	void ApplySdrAmbientLift(float contrast, float brightness, pl_color_adjustment& adjustment);
+
 	// Contain the pre-upstream-4dbc490b D3D11 max_luma-based HDR selection.
 	// This copy is transport metadata only; HDR tone mapping keeps its target.
 	pl_color_space MakeSwapchainColorHint(const pl_color_space& output);

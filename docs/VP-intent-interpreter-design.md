@@ -132,6 +132,20 @@ code after compensation.
 - render to B_eff through the BT.1886 black point (ResolveTargetBlack);
 - optional BT.2390 surround gamma between owner-set dark and lit endpoints.
 
+**SDR input (hunt 3 F2, as built).** For SDR input the source and target keep the fixed SDR
+reference (the signal is display-referred; `sdr_black_nits` is intentionally not applied to SDR
+input: the display's own calibration owns its black). The target-black route above therefore
+cannot reach an SDR picture, so for SDR the rise of the black above the owner's (B_eff - B) is
+applied as the BT.1886 black lift itself (LibplaceboRenderParameters::SdrAmbientLift): on the
+owner's display (black B = `sdr_black_nits`, white W = `sdr_target_nits`, exponent g of the
+source transfer) the picture shows as on a display whose black is B_eff,
+`V' = s V + o`, `s = (lw - le) / (lw - lb)`, `o = (le - lb) / (lw - lb)`, `lx = x^(1/g)`. It is
+affine in the signal (white fixed, code order kept, BTB/WTW carried), applied through
+libplacebo's colour decode (pl_color_adjustment contrast / brightness, on top of the configured
+saturation) before any scaling or the extended-range carry. Power-law sources only (BT.1886,
+gamma 1.8-2.8); others are logged as not applied. Off, strength 0 or a dark room (B_eff = B):
+no adjustment, bit-identical. HDR input keeps the target-black route.
+
 **LED:** dimming floor raised to B_eff. Dimming below the veil cannot be seen. Peak drive never rises
 automatically.
 

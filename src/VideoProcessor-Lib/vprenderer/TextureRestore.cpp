@@ -23,7 +23,11 @@
 //  7. REF    per tile: smoothed statistics, carried references, gains (tile grid)
 //  8. APPLY  per pixel: G1 again in shared memory, the pixel split, the gains -> 16-bit output
 //                                                                     (reads once, writes once)
-// A repeated sequence runs 1-3 and 8 with the frame's own gains.
+// A repeated sequence runs 1-3 and 8 with the frame's own gains, its low bands in a set of its
+// own (hunt 3 F7: a repeat may show another picture - a Stage B phase picture, a gap fill, an
+// extra - and the next new frame compares against the frame before it, not that picture). A
+// picture of another geometry (the crossfade's path being left) runs 1-3 and 8 on textures of
+// its own, the gains read at the same picture position.
 namespace TextureRestore
 {
 	namespace
@@ -373,7 +377,13 @@ shared float s_d[AW * AW];
 vec4 gain_at(ivec2 p)
 {
     ivec2 tm = textureSize(gains, 0) - ivec2(1);
+#ifdef XGEO
+    // Hunt 3: a picture of another geometry reads the decided tile grid at the same picture
+    // position (decided plane px = this plane px x tile_ratio).
+    vec2 uv = (vec2(p) + vec2(0.5)) * tile_ratio / float(TPX) - vec2(0.5);
+#else
     vec2 uv = (vec2(p) + vec2(0.5)) / float(TPX) - vec2(0.5);
+#endif
     ivec2 i0 = ivec2(floor(uv));
     vec2 f = uv - vec2(i0);
     vec4 a = texelFetch(gains, clamp(i0, ivec2(0), tm), 0);
@@ -538,6 +548,8 @@ if (p.x < sz.x && p.y < sz.y) {
 	struct Module::Impl
 	{
 		pl_tex out = nullptr, half = nullptr, tmp = nullptr, low[2] = {};
+		pl_tex lowRepeat = nullptr;                                    // a repeat's own low bands (F7)
+		pl_tex fOut = nullptr, fHalf = nullptr, fTmp = nullptr, fLow = nullptr;   // ApplyForeign's
 		pl_tex statsA = nullptr, statsB = nullptr, grain = nullptr, ref[2] = {}, gains = nullptr, state[2] = {};
 		int cur = 0;                // low / ref / state of the last frame that advanced
 		bool have = false, forget = false;
@@ -563,11 +575,96 @@ if (p.x < sz.x && p.y < sz.y) {
 		if (impl && gpu)
 		{
 			for (pl_tex* t : { &impl->out, &impl->half, &impl->tmp, &impl->low[0], &impl->low[1], &impl->statsA, &impl->statsB,
-				&impl->grain, &impl->ref[0], &impl->ref[1], &impl->gains, &impl->state[0], &impl->state[1] })
+				&impl->grain, &impl->ref[0], &impl->ref[1], &impl->gains, &impl->state[0], &impl->state[1],
+				&impl->lowRepeat, &impl->fOut, &impl->fHalf, &impl->fTmp, &impl->fLow })
 				if (*t) pl_tex_destroy(gpu, t);
 		}
 		delete impl;
 		impl = nullptr;
+	}
+
+	bool Module::ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
+	{
+		error.clear();
+		if (!gpu || !dispatch || source.num_planes <= 0)
+		{
+			error = "nothing to restore";
+			return false;
+		}
+		if (!(EffectiveCap(params.cap) > 1.0))
+		{
+			result = source;   // cap 1.0: the input itself, as Apply
+			return true;
+		}
+		if (!impl || !impl->have || impl->forget || !impl->gains)
+		{
+			error = "no gains held";
+			return false;
+		}
+		const pl_tex luma = source.planes[0].texture;
+		if (!luma || !luma->params.sampleable || !pl_color_system_is_ycbcr_like(source.repr.sys) ||
+			source.planes[0].component_mapping[0] != PL_CHANNEL_Y)
+		{
+			error = "plane 0 is not luma";
+			++failures;
+			return false;
+		}
+		Impl& m = *impl;
+		const int w = luma->params.w, h = luma->params.h;
+		const double scale = Scale(params.planeLines > 0.0 ? params.planeLines : h);
+		const int hw = (w + 1) / 2, hh = (h + 1) / 2;
+		const pl_fmt f2 = FloatFormat(gpu, 2), f1 = FloatFormat(gpu, 1);
+		if (!Ensure(gpu, m.fOut, w, h, StorableLike(gpu, luma->params.format), true) || !Ensure(gpu, m.fHalf, hw, hh, f1) ||
+			!Ensure(gpu, m.fTmp, hw, hh, f2) || !Ensure(gpu, m.fLow, hw, hh, f2))
+		{
+			error = "no float texture for the other geometry";
+			++failures;
+			return false;
+		}
+		const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : luma->params.format->component_depth[0];
+		const double cu = luma->params.format->type == PL_FMT_FLOAT ?
+			1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
+			std::pow(2.0, source.repr.bits.bit_shift) / (std::pow(2.0, sampleDepth) - 1.0);
+		const int r1 = Radius1(scale);
+		const std::string w1 = WeightsGlsl("w1", "R1", r1, [&](int k) { return Weight1(k, scale); });
+		const double s2 = kSigma2 * scale, s3 = kSigma3 * scale;
+		const std::string w23 = WeightsGlsl("w2", "R2", HalfRadius(s2), [&](int k) { return HalfWeight(k, s2); }) +
+			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
+		{
+			const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
+			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", m.fHalf) };
+			const pl_shader_desc dx[2] = { Sampled("src", m.fHalf), Storage("dst", m.fTmp) };
+			const pl_shader_desc dy[2] = { Sampled("src", m.fTmp), Storage("dst", m.fLow) };
+			if (!Pass(dispatch, "VideoProcessor texture restore: half (other geometry)", std::string(), HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
+				!Pass(dispatch, "VideoProcessor texture restore: low bands across (other geometry)", w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
+				!Pass(dispatch, "VideoProcessor texture restore: low bands down (other geometry)", w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))
+			{
+				error = "the low band passes failed";
+				++failures;
+				return false;
+			}
+		}
+		{
+			// The decided tile size (the gains' grid), this picture's own bands.
+			const float eps = static_cast<float>(kEnergyEps * cu * cu);
+			const float ratio[2] = { static_cast<float>(m.w) / w, static_cast<float>(m.h) / h };
+			const std::string header = "#define XGEO 1\n#define TPX " + std::to_string(m.tile) + "\n#define KAPPA " + Num(kWienerKappa) + "\n" +
+				w1 + LOW_AT_GLSL + APPLY_HEADER;
+			const int aw = 18, aa = aw + 2 * r1;
+			const size_t shmem = sizeof(float) * (aa * aa + aa * aw + aw * aw);
+			const pl_shader_desc d[4] = { Sampled("src", luma), Sampled("low", m.fLow), Sampled("gains", m.gains), Storage("dst", m.fOut) };
+			const pl_shader_var v[2] = { { pl_var_float("eps"), &eps, true }, { pl_var_vec2("tile_ratio"), ratio, true } };
+			if (!Pass(dispatch, "VideoProcessor texture restore (other geometry)", header, APPLY_BODY, d, 4, v, 2, (w + 15) / 16, (h + 15) / 16, shmem))
+			{
+				error = "the apply pass failed";
+				++failures;
+				return false;
+			}
+		}
+		pl_frame frame = source;
+		frame.planes[0].texture = m.fOut;
+		result = frame;
+		return true;
 	}
 
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
@@ -640,10 +737,13 @@ if (p.x < sz.x && p.y < sz.y) {
 			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
 		const std::string tileDef = "#define TPX " + std::to_string(T) + "\n";
 
-		// The frame's own textures: a repeat rewrites its frame's low bands (the same picture) and
-		// reuses its gains; a new frame writes the other set and reads the previous one.
+		// The frame's own textures: a new frame writes the other set and reads the previous one;
+		// a repeat reuses its frame's gains with its own low bands (hunt 3 F7: its picture may be
+		// another one, and m.low[m.cur] stays the one the next new frame compares against).
 		const int next = repeat ? m.cur : 1 - m.cur;
-		const pl_tex low = m.low[next];
+		if (repeat && !Ensure(gpu, m.lowRepeat, hw, hh, f2))
+			return fail("no float texture for the low bands");
+		const pl_tex low = repeat ? m.lowRepeat : m.low[next];
 
 		// 1-3: the half-resolution low bands.
 		{

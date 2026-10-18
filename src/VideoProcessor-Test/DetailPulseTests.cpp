@@ -203,6 +203,131 @@ namespace DetailPulseTestsNs
 		return m;
 	}
 
+	// A picture moved by (dx, dy) px, edges clamped (a Stage B phase picture / an extra of a pan).
+	inline Image Shifted(const Image& a, int dx, int dy)
+	{
+		Image s(a.w, a.h);
+		for (int y = 0; y < a.h; ++y)
+			for (int x = 0; x < a.w; ++x) s.at(x, y) = a.get(x - dx, y - dy);
+		return s;
+	}
+
+	// 2x2 box down (the crossfade's other re-base, in the tests).
+	inline Image HalfBox(const Image& a)
+	{
+		Image h((a.w + 1) / 2, (a.h + 1) / 2);
+		for (int y = 0; y < h.h; ++y)
+			for (int x = 0; x < h.w; ++x)
+				h.at(x, y) = std::round(0.25 * (a.get(2 * x, 2 * y) + a.get(2 * x + 1, 2 * y) + a.get(2 * x, 2 * y + 1) + a.get(2 * x + 1, 2 * y + 1)));
+		return h;
+	}
+
+	// The GPU tests' device (WARP unless VP_TEST_GPU=hardware) and r16 luma helpers.
+	struct PulseGpu
+	{
+		pl_log log = nullptr;
+		pl_d3d11 d3d = nullptr;
+		pl_gpu gpu = nullptr;
+		pl_dispatch dispatch = nullptr;
+		std::string device;
+		PulseGpu()
+		{
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			log = pl_log_create(PL_API_VER, &logParams);
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			Logger::WriteMessage(("GPU tests on: " + device + "\n").c_str());
+			d3d = pl_d3d11_create(log, &deviceParams);
+			Assert::IsNotNull(d3d, L"Could not create the libplacebo test device");
+			gpu = d3d->gpu;
+			dispatch = pl_dispatch_create(log, gpu);
+		}
+		~PulseGpu()
+		{
+			pl_dispatch_destroy(&dispatch);
+			pl_d3d11_destroy(&d3d);
+			pl_log_destroy(&log);
+		}
+		pl_tex Upload(const Image& img) const
+		{
+			std::vector<uint16_t> data(img.v.size());
+			for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint16_t>(static_cast<int>(img.v[i]) << 6);
+			pl_tex_params p{};
+			p.w = img.w; p.h = img.h; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = data.data();
+			return pl_tex_create(gpu, &p);
+		}
+		// One-plane rgba32f: the 10-bit limited luma as normalised RGB with a chroma offset per
+		// channel that leaves Kr R + Kg G + Kb B = Y (the subtitle move's composed picture).
+		pl_tex UploadRgb(const Image& img, const double k[3], const double offset[3]) const
+		{
+			std::vector<float> data(img.v.size() * 4);
+			for (size_t i = 0; i < img.v.size(); ++i)
+			{
+				const double y = (img.v[i] - 64.0) / 876.0;
+				for (int c = 0; c < 3; ++c) data[i * 4 + c] = static_cast<float>(y + offset[c]);
+				data[i * 4 + 3] = 1.0f;
+			}
+			(void)k;
+			pl_tex_params p{};
+			p.w = img.w; p.h = img.h; p.format = pl_find_named_fmt(gpu, "rgba32f"); p.sampleable = true; p.initial_data = data.data();
+			return pl_tex_create(gpu, &p);
+		}
+		Image Readback(pl_tex tex) const
+		{
+			const int w = tex->params.w, h = tex->params.h;
+			pl_tex_params rp{};
+			rp.w = w; rp.h = h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+			pl_tex readable = pl_tex_create(gpu, &rp);
+			pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+			pl_tex_blit(gpu, &bp);
+			std::vector<uint16_t> raw(static_cast<size_t>(w) * h);
+			pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+			Assert::IsTrue(pl_tex_download(gpu, &d));
+			pl_tex_destroy(gpu, &readable);
+			Image out(w, h);
+			for (size_t i = 0; i < raw.size(); ++i) out.v[i] = raw[i] / 64.0;
+			return out;
+		}
+		// rgba float plane -> per channel images (normalised values).
+		std::vector<Image> ReadbackRgb(pl_tex tex) const
+		{
+			const int w = tex->params.w, h = tex->params.h;
+			pl_tex_params rp{};
+			rp.w = w; rp.h = h; rp.format = pl_find_named_fmt(gpu, "rgba32f"); rp.host_readable = true; rp.blit_dst = true;
+			pl_tex readable = pl_tex_create(gpu, &rp);
+			pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+			pl_tex_blit(gpu, &bp);
+			std::vector<float> raw(static_cast<size_t>(w) * h * 4);
+			pl_tex_transfer_params d{}; d.tex = readable; d.ptr = raw.data();
+			Assert::IsTrue(pl_tex_download(gpu, &d));
+			pl_tex_destroy(gpu, &readable);
+			std::vector<Image> out(4, Image(w, h));
+			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+				for (int c = 0; c < 4; ++c) out[c].v[i] = raw[i * 4 + c];
+			return out;
+		}
+		static pl_frame LumaFrame(pl_tex tex)
+		{
+			pl_frame f{};
+			f.num_planes = 1;
+			f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+			f.color = pl_color_space_bt709;
+			return f;
+		}
+		static pl_frame RgbFrame(pl_tex tex)
+		{
+			pl_frame f{};
+			f.num_planes = 1;
+			f.planes[0].texture = tex; f.planes[0].components = 4;
+			for (int i = 0; i < 4; ++i) f.planes[0].component_mapping[i] = i;
+			f.repr.sys = PL_COLOR_SYSTEM_RGB; f.repr.levels = PL_COLOR_LEVELS_FULL;
+			f.color = pl_color_space_bt709;
+			return f;
+		}
+	};
+
 	TEST_CLASS(DetailPulseTests)
 	{
 	public:
@@ -601,6 +726,283 @@ namespace DetailPulseTestsNs
 			pl_dispatch_destroy(&dispatch);
 			pl_d3d11_destroy(&d3d);
 			pl_log_destroy(&log);
+		}
+
+		TEST_METHOD(DetailPulseRepeatOfAShiftedPictureHasNoGhost)
+		{
+			// Hunt 3 F6: a repeat whose picture is another one (a Stage B phase picture, a gap
+			// fill, a de-judder extra: A moved along a pan) takes the frame's decision with ITS
+			// OWN bands. With A's stored low band instead, D2 = G1(S) - L_A carries the motion
+			// displacement: a ghost of A's low band x (g2 - 1). The model (the shader's reference)
+			// must equal the picture's own bands exactly; the stale form's ghost is measured.
+			const int w = 256, h = 192, margin = 40;
+			const Coded c = MakeCoded(w, h, 8, 23.976, 4.0, false, 1201u);
+			Settings s;
+			const std::vector<Frame> all = Run(c.frames, s);
+			int kk = 1;
+			for (int k = 1; k < static_cast<int>(all.size()); ++k)
+				if (all[k].g2 > all[kk].g2) kk = k;
+			Model m;
+			std::vector<Frame> out;
+			for (int k = 0; k <= kk; ++k) out.push_back(m.Process(c.frames[k], k + 1, s));
+			const Frame& a = out[kk];
+			Assert::IsTrue(a.g2 > 1.02, L"(a B-frame with a mid-band gain)");
+			const Image shifted = Shifted(c.frames[kk], 6, 4);
+			const Frame rep = m.Process(shifted, kk + 1, s);
+			Assert::IsTrue(rep.repeat);
+			const double scale = DetailPulse::Scale(h);
+			const DetailPulseModel::Bands own = DetailPulseModel::MakeBands(shifted, scale);
+			const Image expected = DetailPulseModel::ApplyGains(shifted, own, a.tileWeight, a.g1, a.g2);
+			Assert::IsTrue(MaxAbsDiff(rep.out, expected) == 0.0, L"the repeat uses the picture's own bands");
+			// The stale form (A's low band): its difference to the correct output is the ghost.
+			const DetailPulseModel::Bands bandsA = DetailPulseModel::MakeBands(c.frames[kk], scale);
+			double ghost = 0.0, n = 0.0;
+			for (int y = margin; y < h - margin; ++y)
+				for (int x = margin; x < w - margin; ++x)
+				{
+					const double g1 = shifted.at(x, y) - own.d1.at(x, y);
+					const double staleD2 = g1 - GrainModel::LowAt(bandsA.lowHalf, x + 0.5, y + 0.5);
+					const double wt = GrainModel::Bilinear(a.tileWeight, (x + 0.5) / DetailPulse::kTilePx, (y + 0.5) / DetailPulse::kTilePx);
+					const double stale = shifted.at(x, y) + wt * ((a.g1 - 1.0) * own.d1.at(x, y) + (a.g2 - 1.0) * staleD2);
+					ghost += (stale - rep.out.at(x, y)) * (stale - rep.out.at(x, y));
+					n += 1.0;
+				}
+			ghost = std::sqrt(ghost / n);
+			// The correct repeat's delta follows the picture: the shifted picture's delta is A's
+			// delta shifted (an even move keeps the half-resolution boxes aligned, so the bands are
+			// shift-equivariant), wherever the tile weights are flat.
+			double follow = 0.0;
+			bool flat = true;
+			for (double v : a.tileWeight.v) flat = flat && v > 0.999;
+			if (flat)
+				for (int y = margin; y < h - margin; ++y)
+					for (int x = margin; x < w - margin; ++x)
+						follow = (std::max)(follow, std::fabs((rep.out.at(x, y) - shifted.at(x, y)) - (a.out.at(x - 6, y - 4) - c.frames[kk].at(x - 6, y - 4))));
+			char text[200];
+			snprintf(text, sizeof(text), "repeat of a picture moved (6, 4) px: stale-low ghost RMS %.4f codes (g2 %.3f); correct delta vs A's moved delta %.2e (flat weights %d)",
+				ghost, a.g2, follow, flat ? 1 : 0);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(ghost > 0.02, W(text).c_str());
+			Assert::IsTrue(follow < 1e-9, W(text).c_str());
+		}
+
+		TEST_METHOD(DetailPulseGpuRepeatOfAShiftedPictureMatchesModel)
+		{
+			// Hunt 3 F6 (GPU vs model): frame 5 repeated with the picture moved (4, 2) px, then
+			// the sequence goes on: the repeat and every later frame within 0.05 codes of the model.
+			PulseGpu g;
+			const int w = 200, h = 136;
+			const Coded c = MakeCoded(w, h, 9, 23.976, 4.0, false, 1301u);
+			DetailPulse::Module module;
+			Model model;
+			Settings s;
+			double worstRepeat = 0.0, worst = 0.0;
+			std::vector<pl_tex> textures;
+			for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
+			{
+				const uint64_t seq = static_cast<uint64_t>(k) + 1;
+				DetailPulse::Params p;
+				p.sequence = seq;
+				textures.push_back(g.Upload(c.frames[k]));
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), p, out), W(module.LastError().c_str()).c_str());
+				worst = (std::max)(worst, MaxAbsDiff(g.Readback(out.planes[0].texture), model.Process(c.frames[k], seq, s).out));
+				if (k == 5)
+				{
+					const Image moved = Shifted(c.frames[k], 4, 2);
+					textures.push_back(g.Upload(moved));
+					Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), p, out), W(module.LastError().c_str()).c_str());
+					worstRepeat = MaxAbsDiff(g.Readback(out.planes[0].texture), model.Process(moved, seq, s).out);
+				}
+			}
+			char text[160];
+			snprintf(text, sizeof(text), "repeat of a moved picture: worst GPU vs model %.4f codes (repeat), %.4f (frames)", worstRepeat, worst);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(worstRepeat < 0.05 && worst < 0.05, W(text).c_str());
+			module.Release(g.gpu);
+			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+		}
+
+		TEST_METHOD(DetailPulseGpuForeignGeometryKeepsTheHistory)
+		{
+			// Hunt 3 (crossfade lead): the path being left (another re-base: a half-size plane) takes
+			// the frame's decision with its own bands; the main path's output and history are
+			// untouched (the frame Apply returned stays valid; the next frames are as without it).
+			PulseGpu g;
+			const int w = 200, h = 136;
+			const Coded c = MakeCoded(w, h, 8, 23.976, 4.0, false, 1401u);
+			DetailPulse::Module module;
+			Model model;
+			Settings s, half;
+			half.planeLines = (h + 1) / 2;
+			double worstMain = 0.0, worstForeign = 0.0;
+			std::vector<pl_tex> textures;
+			for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
+			{
+				const uint64_t seq = static_cast<uint64_t>(k) + 1;
+				DetailPulse::Params p;
+				p.sequence = seq;
+				textures.push_back(g.Upload(c.frames[k]));
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), p, out), W(module.LastError().c_str()).c_str());
+				const Frame f = model.Process(c.frames[k], seq, s);
+				const Image halfPic = HalfBox(c.frames[k]);
+				textures.push_back(g.Upload(halfPic));
+				DetailPulse::Params pf = p;
+				pf.planeLines = half.planeLines;
+				pl_frame foreign{};
+				Assert::IsTrue(module.ApplyForeign(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), pf, foreign), W(module.LastError().c_str()).c_str());
+				Assert::IsTrue(foreign.planes[0].texture != out.planes[0].texture, L"its own output texture");
+				worstForeign = (std::max)(worstForeign, MaxAbsDiff(g.Readback(foreign.planes[0].texture), model.ProcessForeign(halfPic, half).out));
+				worstMain = (std::max)(worstMain, MaxAbsDiff(g.Readback(out.planes[0].texture), f.out));
+				Assert::AreEqual(model.HistoryFrames(), module.HistoryFrames(), L"the history is not touched");
+			}
+			char text[160];
+			snprintf(text, sizeof(text), "foreign geometry: worst GPU vs model %.4f codes (foreign), %.4f (main)", worstForeign, worstMain);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(worstForeign < 0.05 && worstMain < 0.05, W(text).c_str());
+			module.Release(g.gpu);
+			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+		}
+
+		TEST_METHOD(DetailPulseGpuRgbPictureMatchesLumaAndKeepsHistory)
+		{
+			// Hunt 3 F8 / F9: a one-plane RGB picture (the subtitle move's composed picture during
+			// a cue) is stabilised on its luma in the planes' codes: the same delta on R, G and B
+			// (= the luma model's delta / 876), and the history runs on through the cue (frames 3-5
+			// RGB, the rest planes) without a restart.
+			PulseGpu g;
+			const int w = 200, h = 136;
+			const Coded c = MakeCoded(w, h, 9, 23.976, 4.0, false, 1501u);
+			double k[3];
+			DetailPulse::LumaWeights(PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709, k);
+			// Chroma offsets with Kr a + Kg b + Kb c = 0 (Y recovered exactly).
+			const double offset[3] = { 0.03, -(k[0] * 0.03 + k[2] * -0.05) / k[1], -0.05 };
+			DetailPulse::Module module;
+			Model model;
+			Settings s;
+			double worst = 0.0, worstSpread = 0.0;
+			std::vector<pl_tex> textures;
+			for (int f = 0; f < static_cast<int>(c.frames.size()); ++f)
+			{
+				const uint64_t seq = static_cast<uint64_t>(f) + 1;
+				const bool rgb = f >= 3 && f <= 5;
+				DetailPulse::Params p;
+				p.sequence = seq;
+				p.lumaSystem = PL_COLOR_SYSTEM_BT_709;
+				p.codeLevels = PL_COLOR_LEVELS_LIMITED;
+				textures.push_back(rgb ? g.UploadRgb(c.frames[f], k, offset) : g.Upload(c.frames[f]));
+				pl_frame out{};
+				const bool ok = module.Apply(g.gpu, g.dispatch, rgb ? PulseGpu::RgbFrame(textures.back()) : PulseGpu::LumaFrame(textures.back()), p, out);
+				Assert::IsTrue(ok, W(("frame " + std::to_string(f) + ": " + module.LastError()).c_str()).c_str());
+				const Frame mf = model.Process(c.frames[f], seq, s);
+				if (rgb)
+				{
+					const std::vector<Image> ch = g.ReadbackRgb(out.planes[0].texture);
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x)
+						{
+							const double yIn = (c.frames[f].at(x, y) - 64.0) / 876.0;
+							const double want = (mf.out.at(x, y) - c.frames[f].at(x, y)) / 876.0;
+							double lo = 1e9, hi = -1e9;
+							for (int cc = 0; cc < 3; ++cc)
+							{
+								const double d = ch[cc].at(x, y) - (yIn + offset[cc]);
+								lo = (std::min)(lo, d);
+								hi = (std::max)(hi, d);
+								worst = (std::max)(worst, std::fabs(d - want) * 876.0);
+							}
+							worstSpread = (std::max)(worstSpread, (hi - lo) * 876.0);
+						}
+				}
+				else
+					worst = (std::max)(worst, MaxAbsDiff(g.Readback(out.planes[0].texture), mf.out));
+				Assert::AreEqual(model.HistoryFrames(), module.HistoryFrames(), L"the history runs through the cue");
+			}
+			char text[160];
+			snprintf(text, sizeof(text), "RGB cue frames: worst GPU vs luma model %.4f codes, R/G/B delta spread %.5f codes", worst, worstSpread);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(worst < 0.05 && worstSpread < 0.01, W(text).c_str());
+			Assert::AreEqual(8, module.HistoryFrames(), L"no restart at the cue's start or end");
+			module.Release(g.gpu);
+			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+		}
+
+		TEST_METHOD(DetailPulseGpuNonLumaPlaneIsCountedAsInactive)
+		{
+			// Hunt 3 F8: a picture the pulse cannot read (plane 0 neither luma nor RGB) is a counted
+			// failure with its reason (the renderer reports "inactive"), never a silent no-op.
+			PulseGpu g;
+			const Image img = PictureImage(64, 32);
+			pl_tex t = g.Upload(img);
+			pl_frame f = PulseGpu::LumaFrame(t);
+			f.planes[0].component_mapping[0] = PL_CHANNEL_CB;
+			DetailPulse::Module module;
+			DetailPulse::Params p;
+			p.sequence = 1;
+			pl_frame out{};
+			Assert::IsFalse(module.Apply(g.gpu, g.dispatch, f, p, out));
+			Assert::AreEqual(1ull, module.Failures(), L"counted");
+			Assert::IsFalse(module.LastError().empty());
+			module.Release(g.gpu);
+			pl_tex_destroy(g.gpu, &t);
+		}
+
+		TEST_METHOD(DetailPulseGpuLookAheadInTheDebandedDomain)
+		{
+			// Hunt 3 F4: Apply measures the frame after VP's debander; the look-ahead must measure
+			// the next frame debanded too. A steady banded picture (the same frame every time):
+			// with the look-ahead debanded the gain is exactly 1 (the output is the debanded input
+			// bit for bit); measured raw it carries the band energy the debander removed (gain > 1).
+			PulseGpu g;
+			const int w = 192, h = 128;
+			Image banded(w, h);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const double ramp = 300.0 + 120.0 * x / w + 40.0 * y / h;
+					banded.at(x, y) = 4.0 * std::floor(ramp / 4.0) + std::round(1.5 * std::sin(6.283185307 * (x + 2 * y) / 9.0));
+				}
+			pl_tex tex = g.Upload(banded);
+			VpDebander::Module debander;
+			VpDebander::Params dp;
+			dp.thresholdCodes = 6.0;
+			dp.colorDepth = 10;
+			dp.radiusScale = h / 1080.0;
+			for (int mode = 0; mode < 2; ++mode)
+			{
+				const bool debandAhead = mode == 1;
+				DetailPulse::Module module;
+				double moved = 0.0;
+				for (int k = 0; k < 10; ++k)
+				{
+					const uint64_t seq = static_cast<uint64_t>(k) + 1;
+					DetailPulse::Params p;
+					p.sequence = seq;
+					dp.sequence = seq;
+					pl_frame cur{};
+					Assert::IsTrue(debander.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(tex), dp, cur, 0), W(debander.LastError().c_str()).c_str());
+					const Image debandedIn = g.Readback(cur.planes[0].texture);
+					if (k > 0)
+					{
+						if (debandAhead)
+							Assert::IsTrue(module.MeasureAhead(g.gpu, g.dispatch, PulseGpu::LumaFrame(tex), seq + 1, p, &debander, &dp), W(module.LastError().c_str()).c_str());
+						else
+							Assert::IsTrue(module.MeasureAhead(g.gpu, g.dispatch, tex, seq + 1, p), W(module.LastError().c_str()).c_str());
+					}
+					pl_frame out{};
+					Assert::IsTrue(module.Apply(g.gpu, g.dispatch, cur, p, out), W(module.LastError().c_str()).c_str());
+					moved = (std::max)(moved, MaxAbsDiff(g.Readback(out.planes[0].texture), debandedIn));
+				}
+				char text[160];
+				snprintf(text, sizeof(text), "steady banded picture, look-ahead %s: worst change %.4f codes", debandAhead ? "debanded" : "raw", moved);
+				Logger::WriteMessage(text);
+				if (debandAhead)
+					Assert::IsTrue(moved == 0.0, W(text).c_str());
+				module.Release(g.gpu);
+			}
+			debander.Release(g.gpu);
+			pl_tex_destroy(g.gpu, &tex);
 		}
 
 		TEST_METHOD(DetailPulseGpuTiming)

@@ -84,7 +84,10 @@ namespace VpDebander
 		// `source` with every plane debanded into this module's textures;
 		// false (and `out` untouched) on any failure: the caller renders the
 		// frame as it was. `slot` 0 = the main frame (keeps the hold state),
-		// 1 = a de-judder extra (decides per frame, leaves the state alone).
+		// 1 = a de-judder extra (decides per frame, leaves the state alone); hunt 3:
+		// kSlotLookAhead = the detail pulse's look-ahead picture, kSlotCrossfade = the
+		// crossfade's path being left (both per frame, the state left alone; their own
+		// textures, so the frame a lower slot returned stays valid).
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out, int slot = 0);
 		void Release(pl_gpu gpu);
 		// A motion discontinuity (MotionValidity, plan step 1 E): the hold weights
@@ -109,9 +112,11 @@ namespace VpDebander
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long HeldFrames() const { return held; }
+		static constexpr int kSlotLookAhead = 2;
+		static constexpr int kSlotCrossfade = 3;
 
 	private:
-		static constexpr int kSlots = 2;
+		static constexpr int kSlots = 4;
 		pl_tex out[kSlots][PL_MAX_PLANES] = {};
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
