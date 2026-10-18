@@ -174,6 +174,22 @@ namespace DiagnosticHistory
 				const unsigned char c = static_cast<unsigned char>(source[index]);
 				destination[index] = c < 0x20 ? ' ' : static_cast<char>(c);
 			}
+		// Bug hunt 3 (C8): a cut never splits a UTF-8 character (the report's
+		// JSON would carry an invalid byte sequence): an incomplete trailing
+		// sequence is dropped whole.
+		if (source && index > 0 && source[index])
+		{
+			size_t lead = index;
+			while (lead > 0 && (static_cast<unsigned char>(destination[lead - 1]) & 0xC0) == 0x80)
+				--lead;
+			if (lead > 0)
+			{
+				const unsigned char first = static_cast<unsigned char>(destination[lead - 1]);
+				const size_t length = first >= 0xF0 ? 4 : first >= 0xE0 ? 3 : first >= 0xC0 ? 2 : 1;
+				if (length > 1 && index - (lead - 1) < length)
+					index = lead - 1;
+			}
+		}
 		for (; index < size; ++index)
 			destination[index] = '\0';
 	}

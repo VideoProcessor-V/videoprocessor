@@ -35,6 +35,17 @@ enum class HdrInferenceState
 
 const char* ToString(HdrInferenceState state);
 
+// Explicit owner settings that allow the inference: an hdr_colorspace of
+// Rec.709 contradicts a BT.2020 HDR reading, and so (bug hunt 3 C6) does a
+// container colorspace override to anything but BT.2020 - the owner then says
+// the signal is not a BT.2020 container, which the inference requires.
+// containerOverride: the container override (UNKNOWN = follow the input).
+inline bool HdrSettingsPermitInference(bool hdrColorspaceRec709, ColorSpace containerOverride)
+{
+	return !hdrColorspaceRec709 &&
+		(containerOverride == ColorSpace::UNKNOWN || containerOverride == ColorSpace::BT_2020);
+}
+
 struct HdrInferenceSignal
 {
 	bool enabled = false;               // [general] newlldv

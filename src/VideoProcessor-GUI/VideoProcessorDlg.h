@@ -63,6 +63,7 @@
 #include <ConfigurationApplyPolicy.h>
 #include <CaptureVideoStatePolicy.h>
 #include <HdrInference.h>
+#include <HdrVetoCaptureGate.h>
 #include <ConfigEditorCore.h>
 #include "ConfigurationRpcServer.h"
 #include "ModernOperatorView.h"
@@ -403,11 +404,14 @@ protected:
 	// generation discards results from an earlier measuring period.
 	std::atomic<bool> m_hdrVetoMeasure{ false };
 	std::atomic<uint64_t> m_hdrVetoGeneration{ 0 };
-	// Capture-thread-only veto measurement state.
-	uint64_t m_hdrVetoCaptureGeneration = 0;
-	ULONGLONG m_hdrVetoLastSampleTick = 0;
-	HdrVetoCutDetector m_hdrVetoCutDetector;
+	// Veto measurement cadence, cut detector and the switch on the cut frame
+	// (bug hunt 3 C2): armed by the UI thread, used by the capture thread.
+	HdrVetoCaptureGate m_hdrVetoGate;
+	// Capture-thread-only sample grid.
 	std::vector<uint16_t> m_hdrVetoGrid;
+	// BuildHdrVetoSdrState: BuildPushVideoState computes the vetoed state only.
+	bool m_hdrVetoPreviewing = false;
+	VideoStateComPtr m_hdrVetoPreview;
 	int m_lldvChangeRestartDelaySeconds = -1;
 	bool m_lldvRestartPending = false;
 
@@ -639,6 +643,7 @@ protected:
 	StateReportSettings::Settings m_stateReportSettings;
 	StateReport::AutoReportLimiter m_autoReportLimiter;
 	std::atomic<bool> m_stateReportBusy{ false };
+	ULONGLONG m_stateReportBusySince = 0;   // UI thread (bug hunt 3 C10)
 	std::atomic<uint64_t> m_diagnosticCapturedFrames{ 0 };
 	std::atomic<uint64_t> m_diagnosticRejectedFrames{ 0 };
 	uint64_t m_diagnosticLastCapturedFrames = 0;
@@ -1270,10 +1275,18 @@ protected:
 	HdrInferenceSignal BuildHdrInferenceSignal();
 	void UpdateHdrVetoMeasurement();
 	void ApplyHdrInferenceVeto(const HdrInferenceUpdate& update, const char* source);
-	void MeasureHdrVetoPicture(const VideoStateComPtr& state, const VideoFrame& frame);
+	// Capture thread. Returns the SDR state to queue this frame with when the
+	// armed veto's cut is on this frame (bug hunt 3 C2), else null.
+	VideoStateComPtr MeasureHdrVetoPicture(const VideoStateComPtr& state, const VideoFrame& frame,
+		uint64_t generation);
+	// UI thread: the effective state the armed veto returns to, and the gate
+	// kept armed with it while the veto is armed (bug hunt 3 C2).
+	VideoStateComPtr BuildHdrVetoSdrState();
+	void RefreshHdrVetoGate();
 
 
 	bool BuildPushVideoState();
+	bool BuildPushVideoStateCore();
 	void BuildPushRestartVideoState();
 	void ScheduleNewLldvRendererRestart();
 	void ObserveEotfTransition(EOTF observed, bool valid, const char* source);
