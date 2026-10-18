@@ -407,7 +407,7 @@ namespace QueueStressTest
 		// not break the gate; remove the attribute block when fix/q1-stale-burst is merged.
 		BEGIN_TEST_METHOD_ATTRIBUTE(StaleBurstFilmClockRunsBackwards)
 			TEST_METHOD_ATTRIBUTE(L"TestCategory", L"KnownFailing")
-			TEST_DESCRIPTION("Q1 pending fix/q1-stale-burst")
+			TEST_METHOD_ATTRIBUTE(L"Description", L"Q1 pending fix/q1-stale-burst")
 			TEST_IGNORE()
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(StaleBurstFilmClockRunsBackwards)
@@ -426,7 +426,7 @@ namespace QueueStressTest
 		// not break the gate; remove the attribute block when fix/q1-stale-burst is merged.
 		BEGIN_TEST_METHOD_ATTRIBUTE(StaleBurstFilmClockAlone)
 			TEST_METHOD_ATTRIBUTE(L"TestCategory", L"KnownFailing")
-			TEST_DESCRIPTION("Q1 pending fix/q1-stale-burst")
+			TEST_METHOD_ATTRIBUTE(L"Description", L"Q1 pending fix/q1-stale-burst")
 			TEST_IGNORE()
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(StaleBurstFilmClockAlone)
