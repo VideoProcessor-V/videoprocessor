@@ -30,6 +30,9 @@
 #include <vector>
 
 #include "DolbyVisionTunnelSender.h"
+#include <calibration/CalibrationController.h>
+#include <calibration/CalibrationSimulation.h>
+#include <calibration/PatternCodes.h>
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // capture_path (owner 2026-10-13): the shipped VP renderer DLL driven like the
@@ -305,6 +308,9 @@ namespace
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
 		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
 		std::function<FrameStep(int)> step;
+		// Called once per loop iteration with the seconds since the start (automatic
+		// calibration: patterns shown through the running renderer).
+		std::function<void(IVideoRenderer&, double)> tick;
 	};
 
 	// Every harness global and the environment variables the tests set, saved and restored
@@ -716,6 +722,8 @@ namespace
 						CStringA(captureStatus).GetString() + "\n").c_str());
 					captureRequested = true;
 				}
+				if (plan && plan->tick)
+					plan->tick(*renderer, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 				if (step.send)
 				{
 					std::vector<BYTE>& buffer = ring[n % ring.size()];
@@ -3409,6 +3417,197 @@ namespace Tests
 			Assert::IsTrue(menu.sourceStatus.find("source_resolution auto") != std::string::npos &&
 				menu.sourceStatus.find("not read") == std::string::npos, (L"the mixed screen was read (anchor)\n" + menu.Tail()).c_str());
 			Assert::IsFalse(menu.Logged("Re-base:"), (L"native UI over half the screen: never re-based\n" + menu.Tail()).c_str());
+		}
+
+		// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md), GPU only
+		// (VP_TEST_GPU=hardware): patches through the running renderer. The
+		// backbuffer is read back (PatternReadback, 10-bit swapchains) to prove the
+		// codes are exact - no sigma-delta, dither, LUT or tone mapping on the patch -
+		// for full field, a 10% window with its surround, and a BTB code; then video
+		// resumes.
+		BEGIN_TEST_METHOD_ATTRIBUTE(CalibrationPatternsAreExactCodesInTheBackbuffer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(CalibrationPatternsAreExactCodesInTheBackbuffer)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("CalibrationPatternsAreExactCodesInTheBackbuffer")) return;
+			struct Shot
+			{
+				Calibration::PatternRequest request;
+				Calibration::PatternOutputInfo after;
+				bool shown = false, checked = false;
+				std::string error;
+			};
+			Calibration::PatternOutputInfo format;
+			bool formatRead = false;
+			Shot shots[3];
+			bool ended = false;
+			FramePlan plan;
+			plan.tick = [&](IVideoRenderer& renderer, double t)
+			{
+				if (!formatRead && t >= 1.0)
+				{
+					formatRead = renderer.GetCalibrationOutput(format);
+					if (!formatRead) return;
+					std::string reason;
+					if (!Calibration::PatternFormatSupported(format, reason)) return;
+					const double grey = 0.5, btb = Calibration::LimitedCodeToSignal(4);
+					const Calibration::PatchCodes white = Calibration::CodesForSignal(format, { 1.0, 1.0, 1.0 });
+					const Calibration::PatchCodes mid = Calibration::CodesForSignal(format, { grey, grey * 0.5, grey * 0.25 });
+					const Calibration::PatchCodes black = Calibration::CodesForSignal(format, { 0.0, 0.0, 0.0 });
+					const Calibration::PatchCodes below = Calibration::CodesForSignal(format, { btb, btb, btb });
+					for (int c = 0; c < 3; ++c)
+					{
+						shots[0].request.patch[c] = white.container[c];
+						shots[1].request.patch[c] = mid.container[c];
+						shots[1].request.background[c] = black.container[c];
+						shots[2].request.patch[c] = format.limitedRange ? below.container[c] : black.container[c];
+					}
+					shots[1].request.windowAreaPercent = 10.0f;
+				}
+				for (int i = 0; i < 3; ++i)
+				{
+					const double at = 1.2 + 0.8 * i;
+					if (formatRead && !shots[i].shown && t >= at)
+					{
+						shots[i].request.active = true;
+						shots[i].request.generation = static_cast<uint64_t>(i + 1);
+						shots[i].request.flags = Calibration::PatternReadback;
+						CString reason;
+						shots[i].shown = renderer.SetCalibrationPattern(shots[i].request, reason);
+						shots[i].error = CStringA(reason).GetString();
+					}
+					if (shots[i].shown && !shots[i].checked && t >= at + 0.6)
+					{
+						renderer.GetCalibrationOutput(shots[i].after);
+						shots[i].checked = true;
+					}
+				}
+				if (!ended && shots[2].checked && t >= 4.0)
+				{
+					Calibration::PatternRequest off;
+					CString reason;
+					ended = renderer.SetCalibrationPattern(off, reason);
+				}
+			};
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false, std::string(), false, &plan);
+			Logger::WriteMessage(("format: container " + std::to_string(format.containerBits) + " code " +
+				std::to_string(format.codeBits) + (format.limitedRange ? " limited" : " full") + " " +
+				std::to_string(format.width) + "x" + std::to_string(format.height) + " " +
+				std::to_string(format.refreshHz) + " Hz\n").c_str());
+			Assert::IsTrue(r.presented, (L"video presented before the patterns\n" + r.Tail()).c_str());
+			Assert::IsTrue(formatRead && format.available, L"GetCalibrationOutput reports the output");
+			std::string reason;
+			Assert::IsTrue(Calibration::PatternFormatSupported(format, reason), std::wstring(reason.begin(), reason.end()).c_str());
+			for (int i = 0; i < 3; ++i)
+			{
+				const Shot& s = shots[i];
+				Assert::IsTrue(s.shown, std::wstring(s.error.begin(), s.error.end()).c_str());
+				Assert::AreEqual(static_cast<uint64_t>(i + 1), s.after.presentedGeneration, L"the patch was presented");
+				Assert::IsTrue(s.after.presentsOfGeneration >= 2, L"presented every refresh");
+				if (format.containerBits != 10)
+				{
+					Logger::WriteMessage("SKIP-READBACK 8-bit swapchain: presentation checked, codes not read back\n");
+					continue;
+				}
+				Assert::AreEqual(static_cast<uint64_t>(i + 1), s.after.readbackGeneration, L"read back");
+				for (int c = 0; c < 3; ++c)
+				{
+					Assert::AreEqual(static_cast<int>(s.request.patch[c]), static_cast<int>(s.after.readbackCenter[c]),
+						L"the centre pixel holds the exact patch code");
+					const int cornerWant = i == 1 ? s.request.background[c] : s.request.patch[c];
+					Assert::AreEqual(cornerWant, static_cast<int>(s.after.readbackCorner[c]),
+						i == 1 ? L"the corner holds the surround" : L"full field reaches the corner");
+				}
+			}
+			Assert::IsTrue(ended, L"patterns ended");
+			Assert::IsTrue(r.Logged("Calibration patterns: started"), r.Tail().c_str());
+			Assert::IsTrue(r.Logged("Calibration patterns: ended"), r.Tail().c_str());
+		}
+
+		// The whole session (Quick plan) through the running renderer with a
+		// simulated meter reading the codes the renderer was asked to show: the
+		// wizard's patch timing (present twice, then settle) and its end state
+		// (patterns off, video back) on the real GPU. GPU only.
+		BEGIN_TEST_METHOD_ATTRIBUTE(CalibrationDryRunThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(CalibrationDryRunThroughTheRenderer)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("CalibrationDryRunThroughTheRenderer")) return;
+			char base[MAX_PATH];
+			GetTempPathA(MAX_PATH, base);
+			const std::string folder = std::string(base) + "vp-calibration-gpu-" + std::to_string(GetTickCount64());
+			CreateDirectoryA(folder.c_str(), nullptr);
+			const std::string config = folder + "\\VideoProcessor.cfg";
+			{
+				std::ofstream file(config, std::ios::binary);
+				file << "[vprenderer.color.Rec709]\ncalibration_lut_enabled: false\ncalibration_lut_bt709: none\n";
+			}
+			std::shared_ptr<Calibration::RendererPatternSink> sink;
+			std::shared_ptr<Calibration::CalibrationSession> session;
+			std::unique_ptr<Calibration::ISessionClock> clock = Calibration::CreateSystemClock();
+			std::thread worker;
+			bool started = false;
+			Calibration::SessionStatus final;
+			FramePlan plan;
+			plan.tick = [&](IVideoRenderer& renderer, double t)
+			{
+				if (!started && t >= 1.0)
+				{
+					started = true;
+					IVideoRenderer* raw = &renderer;
+					sink = std::make_shared<Calibration::RendererPatternSink>(
+						[raw]() { return std::shared_ptr<IVideoRenderer>(raw, [](IVideoRenderer*) {}); });
+					Calibration::CalibrationSettings settings;
+					settings.plan = Calibration::PlanChoice::Quick;
+					settings.warmupMinutes = 0;
+					settings.settleMs = 40;
+					settings.verifyAfter = false;
+					settings.lutSize = 17;
+					Calibration::SessionEnvironment env;
+					env.vpRoot = folder;
+					env.configPath = config;
+					env.displayName = "gpu-dry-run";
+					Calibration::RendererPatternSink* s = sink.get();
+					std::unique_ptr<Calibration::IMeter> meter(new Calibration::SimulatedScreenMeter(
+						[s](Calibration::Vec3& device) { return s->Showing(device); },
+						Calibration::SimulatedDisplayParams(), Calibration::SimulatedMeterParams(), nullptr));
+					session = std::make_shared<Calibration::CalibrationSession>(settings, env, std::move(meter), 0.002,
+						*sink, *clock);
+					session->Start();
+					worker = std::thread([session]()
+					{
+						while (session->Step())
+							if (session->Status().step == Calibration::SessionStep::Placement && session->Status().haveReading)
+								session->Continue();
+					});
+				}
+				if (started && worker.joinable() && (session->Finished() ||
+					session->Status().step == Calibration::SessionStep::Review || t >= 28.0))
+				{
+					if (session->Status().step != Calibration::SessionStep::Review) session->Cancel();
+					else session->Discard();
+					worker.join();
+					final = session->Status();
+				}
+			};
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 30.0, false, std::string(), false, &plan);
+			if (worker.joinable())
+			{
+				session->Cancel();
+				worker.join();
+			}
+			Logger::WriteMessage(("dry run: " + std::string(Calibration::ToString(final.step)) + " measured " +
+				std::to_string(final.measured) + " skipped " + std::to_string(final.skipped) + " format " + final.format +
+				"\n" + final.message + "\n" + final.review + "\n").c_str());
+			Assert::IsTrue(r.presented, r.Tail().c_str());
+			Assert::IsTrue(final.step == Calibration::SessionStep::Discarded,
+				(L"the dry run reached the review\n" + std::wstring(final.message.begin(), final.message.end())).c_str());
+			Assert::IsTrue(final.measured > 50);
+			Assert::IsTrue(r.Logged("Calibration patterns: ended"), r.Tail().c_str());
 		}
 	};
 }

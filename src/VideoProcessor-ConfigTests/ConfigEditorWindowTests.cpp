@@ -8947,6 +8947,8 @@ void testEverySchemaKeyHasAConfigControl()
         { "directshow.ppm", { "directshow.ppm" }, keysOf(MainConfigSchema::PpmRules()) },
         { "shortcuts", { "shortcuts" }, keysOf(MainConfigSchema::ShortcutSwitchRules()) },
         { "ambient", { "ambient" }, keysOf(Ambient::SchemaRules()) },
+        // Automatic calibration: every [calibration] key has a control on the Calibration page.
+        { "calibration", { "calibration" }, keysOf(Calibration::ConfigRules()) },
         { "lldv", { "lldv" }, keysOf(MainConfigSchema::LldvRules()) },
         { "logging", { "logging" }, keysOf(MainConfigSchema::LoggingRules()) },
         // RendererProfileConfig's validators also own the [queue.*] and [lldv.*] profile groups.

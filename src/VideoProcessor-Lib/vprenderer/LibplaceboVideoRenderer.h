@@ -151,6 +151,8 @@ public:
 		int width, int height, int stride) override;
 	bool GetConversionPerformance(double& currentUs, double& avg10s, double& max10s) const override;
 	bool GetFrameRateAndPPM(double& measuredFps, int& ppmDeviation) const override;
+	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const override;
+	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason) override;
 
 private:
 	struct Impl;
@@ -429,6 +431,11 @@ private:
 	// new Impl, starts in the right path (it was lost until the next snapshot apply).
 	bool m_lowLatencyQueue = false;
 	void UpdateLedDrive(const ConfigFile& configuration);
+	// Automatic calibration: a patch replaces video while this is set (the render
+	// loop presents it each refresh; incoming frames are dropped). The LED drive
+	// is stopped (full light) for the patches and restarted after them.
+	std::atomic_bool m_calibrationPatternActive{false};
+	bool m_calibrationLedSuspended = false;
 };
 
 // Tests only (planner Q4): see LibplaceboVideoRenderer.cpp.

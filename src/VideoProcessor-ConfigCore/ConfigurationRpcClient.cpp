@@ -348,6 +348,30 @@ bool ConfigurationRpcClient::RunAction(const std::string& action,
 	return true;
 }
 
+bool ConfigurationRpcClient::Calibration(const std::string& command,
+	const std::string& arguments, std::string& status, std::string& error) const
+{
+	status.clear();
+	Frame request;
+	if (command.empty() || command.size() > 32 || arguments.size() > 4096 ||
+		!WriteString(request.payload, command) ||
+		!WriteString(request.payload, arguments))
+	{
+		error = "Invalid calibration command.";
+		return false;
+	}
+	std::vector<uint8_t> response;
+	if (!Request(static_cast<uint16_t>(Operation::Calibration),
+		request.payload, response, error)) return false;
+	size_t cursor = 0;
+	if (!ReadString(response, cursor, status) || cursor != response.size())
+	{
+		error = "VP returned an invalid calibration response.";
+		return false;
+	}
+	return true;
+}
+
 bool ConfigurationRpcClient::RunProjectorTest(ProjectorTestResult& result,
 	std::string& error) const
 {

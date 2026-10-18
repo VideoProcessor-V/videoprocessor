@@ -32,7 +32,11 @@ namespace ConfigurationRpcProtocol
 		RunAction = 8,
 		// RS-232 connection test (LED drive page). Response: pass byte,
 		// refused byte, summary string, details string.
-		ProjectorTest = 9
+		ProjectorTest = 9,
+		// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): request
+		// command string + arguments string; response one status string
+		// ("key: value" lines). VP answers at once; the run is on its worker.
+		Calibration = 10
 	};
 
 	struct Frame
@@ -81,6 +85,7 @@ namespace ConfigurationRpcProtocol
 		case static_cast<uint16_t>(Operation::SelectProfile):
 		case static_cast<uint16_t>(Operation::RunAction):
 		case static_cast<uint16_t>(Operation::ProjectorTest):
+		case static_cast<uint16_t>(Operation::Calibration):
 			return true;
 		default:
 			return false;

@@ -670,6 +670,25 @@ bool LibplaceboPluginVideoRenderer::GetDejudderStatus(CString& status) const
 	return m_renderer && m_renderer->GetDejudderStatus(status);
 }
 
+bool LibplaceboPluginVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInfo& info) const
+{
+	if (m_renderer)
+		return m_renderer->GetCalibrationOutput(info);
+	return IVideoRenderer::GetCalibrationOutput(info);
+}
+
+bool LibplaceboPluginVideoRenderer::SetCalibrationPattern(const Calibration::PatternRequest& request,
+	CString& reason)
+{
+	reason.Empty();
+	if (!m_renderer)
+	{
+		reason = TEXT("the VP Renderer is not running");
+		return !request.active;
+	}
+	return m_renderer->SetCalibrationPattern(request, reason);
+}
+
 bool LibplaceboPluginVideoRenderer::SuspendLedDriveForTest(CString& reason)
 {
 	reason.Empty();

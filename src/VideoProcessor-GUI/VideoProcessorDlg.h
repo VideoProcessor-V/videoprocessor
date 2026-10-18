@@ -63,6 +63,7 @@
 #include <HdrInference.h>
 #include <ConfigEditorCore.h>
 #include "ConfigurationRpcServer.h"
+#include <calibration/CalibrationController.h>
 #include "ModernOperatorView.h"
 
 #include "resource.h"
@@ -93,6 +94,7 @@
 #define WM_MESSAGE_CONFIGURATION_RPC_REQUEST             (WM_APP + 22)
 #define WM_MESSAGE_PROJECTOR_TEST_DONE                   (WM_APP + 23)
 #define WM_MESSAGE_HDR_INFERENCE_PICTURE                 (WM_APP + 24)
+#define WM_MESSAGE_CALIBRATION_APPLIED                   (WM_APP + 25)
 
 static_assert(WM_MESSAGE_DIRECTSHOW_NOTIFICATION !=
 	WM_MESSAGE_DIRECTSHOW_OWNER_COMPLETION,
@@ -1311,6 +1313,12 @@ protected:
 	afx_msg LRESULT OnConfigurationRpcRequest(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnProjectorTestDone(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMessageHdrInferencePicture(WPARAM wParam, LPARAM lParam);
+	// Automatic calibration (Config's Calibration page): the wizard's session,
+	// created on the first calibration RPC; the configuration it changed is
+	// applied on the UI thread.
+	afx_msg LRESULT OnCalibrationApplied(WPARAM wParam, LPARAM lParam);
+	std::unique_ptr<Calibration::CalibrationController> m_calibration;
+	ConfigurationRpcProtocol::Frame HandleCalibrationRpc(const ConfigurationRpcProtocol::Frame& request);
 	// RS-232 connection test (Config's LED drive page): the RPC waiting for it
 	// and its result, handed from the worker thread to the UI thread.
 	void StartProjectorTest(const std::shared_ptr<ConfigurationRpcServer::Pending>& pending);
