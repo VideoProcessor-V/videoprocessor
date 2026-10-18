@@ -13791,10 +13791,18 @@ namespace VideoProcessorTest
 			size_t length = 0;
 			const bool full = _dupenv_s(&value, &length, "VP_TEST_MATRIX") == 0 && value && std::string(value) == "full";
 			std::free(value);
+			// VP_TEST_MATRIX_ONLY: run only the combinations whose name contains this text.
+			std::string only;
+			value = nullptr;
+			if (_dupenv_s(&value, &length, "VP_TEST_MATRIX_ONLY") == 0 && value)
+				only = value;
+			std::free(value);
 			std::string report;
 			int passed = 0;
 			for (const ChainGpuProbe::Combo& combo : ChainGpuProbe::MatrixCombos(full))
 			{
+				if (!only.empty() && combo.Name().find(only) == std::string::npos)
+					continue;
 				TargetLutGpuFixture fixture;
 				Assert::IsTrue(fixture.Create());
 				std::string log;

@@ -168,7 +168,8 @@ namespace
 	std::vector<uint16_t> g_harnessLumaPicture;
 	// The picture moving (2026-10-17, the mixed-screen rule test): shifted left by this many
 	// pixels per content step (0 = still), except the top g_harnessLumaStaticRows rows (a static
-	// overlay); g_harnessShotFrames > 0 adds a brightness cut every that many content steps.
+	// overlay); g_harnessShotFrames > 0 adds a cut (the picture moved a third of the width on and a
+	// brightness jump) every that many content steps.
 	int g_harnessLumaShift = 0;
 	int g_harnessLumaStaticRows = 0;
 	int g_harnessShotFrames = 0;
@@ -188,9 +189,15 @@ namespace
 					{
 						const bool moving = y >= g_harnessLumaStaticRows;
 						long long sx = (std::min)(x, width - 1);
-						if (moving && g_harnessLumaShift != 0)
+						// A cut moves the picture too (gate fix 2026-10-17): the latch fixes judge a
+						// cut by the tile pattern's decorrelation, so a brightness jump alone is an
+						// in-shot flash. Each shot starts a third of the width further on (an even
+						// offset: a 2x upscale keeps its phase).
+						const long long shotOffset = moving && g_harnessShotFrames > 0 ?
+							static_cast<long long>((n / g_harnessShotFrames) % 3) * ((width / 3) & ~1) : 0;
+						if (moving && (g_harnessLumaShift != 0 || shotOffset != 0))
 						{
-							sx = (sx + static_cast<long long>(g_harnessLumaShift) * n) % width;
+							sx = (sx + static_cast<long long>(g_harnessLumaShift) * n + shotOffset) % width;
 							if (sx < 0) sx += width;
 						}
 						int value = g_harnessLumaPicture[static_cast<size_t>(y) * width + static_cast<size_t>(sx)];
@@ -1721,8 +1728,36 @@ namespace Tests
 			const std::string here = Here();
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
 			FramePlan plan;
-			plan.captureAtSeconds = 3.0;
+			// Gate fix 2026-10-17: capture at 5 s, not 3 s. Each Run starts a renderer with an empty
+			// shader cache (the test host keeps no cache file), so the first frames stall 1.9-2.1 s on
+			// shader compilation and a backlog flush; the automatic crop then engages at source frame
+			// 95-103, and a 3-s capture sometimes took frame 93 - the letterboxed frame before the
+			// crop, pillarboxed at 16:9 (x 508-3363), which read as a moved layout. The crop decision
+			// itself was identical in the passing and failing runs.
+			plan.captureAtSeconds = 5.0;
 			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			// The source frame of the capture and of the automatic crop's first application: a
+			// capture before the crop engaged is reported as such, not as a layout move.
+			auto capturedFrame = [](const RunResult& r) -> long long {
+				const std::string marker = "Rendered-output capture complete: source=";
+				for (const std::string& line : r.log)
+				{
+					const size_t at = line.find(marker);
+					if (at != std::string::npos)
+						return std::atoll(line.c_str() + at + marker.size());
+				}
+				return -1;
+			};
+			auto cropFrame = [](const RunResult& r) -> long long {
+				const std::string marker = "Alpha source crop: sequence=";
+				for (const std::string& line : r.log)
+				{
+					const size_t at = line.find(marker);
+					if (at != std::string::npos && line.find(" applied=1 ") != std::string::npos)
+						return std::atoll(line.c_str() + at + marker.size());
+				}
+				return -1;
+			};
 			auto load = [](const std::string& json, int& w, int& h) {
 				std::vector<int> codes;
 				std::string png = json.substr(0, json.size() - 5) + ".png";
@@ -1790,7 +1825,18 @@ namespace Tests
 				for (int i = 0; i < 2; ++i)
 				{
 					const std::string extra = std::string(resolutions[i]) + "[vprenderer.Default]\ndithering: off\ndeband: off\n" + c.viewport + (c.nls ? nlsShader : std::string());
-					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, extra, false, &plan);
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false, extra, false, &plan);
+					if (c.bars > 0)
+					{
+						const long long captured = capturedFrame(r);
+						const long long cropped = cropFrame(r);
+						char text[200];
+						snprintf(text, sizeof(text), "  source_resolution %s: crop first applied at source frame %lld, captured frame %lld\n",
+							i == 0 ? "native" : "1080", cropped, captured);
+						Logger::WriteMessage(text);
+						Assert::IsTrue(cropped >= 0 && captured >= cropped,
+							(HarnessWide(std::string("the capture follows the automatic crop\n") + text) + r.Tail()).c_str());
+					}
 					Assert::IsFalse(r.captureMetadata.empty(), (L"capture written\n" + r.Tail()).c_str());
 					int shown = 0;
 					for (const std::string& line : r.log)
@@ -2852,11 +2898,19 @@ namespace Tests
 			// (the timeline spans them); off (default) - no pair across the gap.
 			if (!RequireHardwareOrSkip("InterpolationGapFillPairsAcrossMissedFrames")) return;
 			const double source = HarnessMonitorHz() * 5.0 / 6.0;
+			// Gate fix 2026-10-17: the gaps sit after the warm-up. Every Run builds a new renderer
+			// whose shader cache starts empty (the test host has no persistent cache file), so the
+			// first interpolated pictures compile their shaders: 0.2-0.6 s per HLSL shader here, up
+			// to 2.9 s of render stall with a CPU build running beside it, ending in a backlog flush
+			// that invalidates the vectors. The old gaps (frames 90 and 150-151, 1.8 s and 3.1 s)
+			// fell inside that window, so the pair was never made - on the base build too (3 of 3
+			// runs failed under load, integration 2 of 3). At 5.0 s and 6.5 s they test the pairing.
+			const int gapA = static_cast<int>(source * 5.0), gapB = static_cast<int>(source * 6.5);
 			for (const bool fill : { true, false })
 			{
 				FramePlan plan = RatePlan(source);
-				plan.step = [](int n) { FrameStep f; f.content = n; f.send = !(n == 90 || (n >= 150 && n <= 151)); return f; };
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.0, false,
+				plan.step = [gapA, gapB](int n) { FrameStep f; f.content = n; f.send = !(n == gapA || (n >= gapB && n <= gapB + 1)); return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.5, false,
 					std::string("interpolation: auto\ninterpolation_fill_gaps: ") + (fill ? "on" : "off") + "\n", false, &plan);
 				ReportInterpolation(fill ? "gap fill on" : "gap fill off", r);
 				Assert::IsTrue(r.Logged("capture missed"), (L"the gaps were counted\n" + r.Tail()).c_str());
@@ -3386,7 +3440,7 @@ namespace Tests
 			g_harnessWidth = w;
 			g_harnessHeight = h;
 			g_harnessLumaShift = 2;     // 1 master pixel per frame: still an exact 2x upscale
-			g_harnessShotFrames = 36;   // a cut (brightness jump) every 1.5 s at 24p
+			g_harnessShotFrames = 36;   // a cut (new framing and a brightness jump) every 1.5 s at 24p
 			const FramePlan plan = RatePlan(24.0);
 			const std::string settings = "source_resolution: auto\nsource_resolution_evidence_shots: 1\nsource_resolution_evidence_seconds: 2\n";
 			auto report = [](const char* name, const RunResult& r) {

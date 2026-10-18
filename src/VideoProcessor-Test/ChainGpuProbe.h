@@ -1600,6 +1600,36 @@ namespace ChainGpuProbe
 				refGot.push_back(ref.Channel(static_cast<int>((k * 64 + 32) * combo.scale), rampY, 1));
 				line += " " + std::to_string(got.back());
 			}
+			// Each ramp step's flat centre (source x k*64+12 .. k*64+51, rows 70-91, clear of the
+			// scaler's edges): the chain's mean, min and max there and the reference's mean. One
+			// pixel of a dithered sigma-delta is not its level; the patch mean is.
+			std::vector<double> patchMean, refPatchMean;
+			std::vector<int> patchMin, patchMax;
+			for (size_t k = 0; k < ramp.size(); ++k)
+			{
+				double s = 0.0, rs = 0.0;
+				int n = 0, lo = 1023, hi = 0;
+				for (int y = static_cast<int>(std::ceil(70 * combo.scale)); y < static_cast<int>(92 * combo.scale); ++y)
+					for (int x = static_cast<int>(std::ceil((k * 64 + 12) * combo.scale)); x < static_cast<int>((k * 64 + 52) * combo.scale); ++x)
+					{
+						const int v = r.Channel(x, y, 1);
+						s += v; rs += ref.Channel(x, y, 1); ++n;
+						lo = (std::min)(lo, v); hi = (std::max)(hi, v);
+					}
+				patchMean.push_back(n ? s / n : 0.0);
+				refPatchMean.push_back(n ? rs / n : 0.0);
+				patchMin.push_back(lo);
+				patchMax.push_back(hi);
+			}
+			{
+				char text[64];
+				line += "; patch mean (min-max, reference mean):";
+				for (size_t k = 0; k < ramp.size(); ++k)
+				{
+					std::snprintf(text, sizeof(text), " %.2f (%d-%d, %.2f)", patchMean[k], patchMin[k], patchMax[k], refPatchMean[k]);
+					line += text;
+				}
+			}
 			outcome.report += line + "\n";
 			// On 7.360 the encoding repair (any PRE_OUTPUT texture hook: the LED
 			// shader) re-encodes about 0.42 code low on average (measured on WARP
@@ -1642,15 +1672,32 @@ namespace ChainGpuProbe
 					// above white only on some paths), as the reference shows.
 					int want = ramp[k];
 					if (!combo.stage10)
-						want = refGot[k];
+						want = combo.eightBit ? static_cast<int>(std::lround(refPatchMean[k])) : refGot[k];
 					else if (combo.fullRange)
 						want = (std::min)(1023, (std::max)(0, static_cast<int>(std::lround((ramp[k] - 64) * 1023.0 / 876.0))));
 					// Above white through the upscale shaders (SSimSuperRes on the
 					// clipped white, plus 7.360's repair bias): up to 3 codes low.
 					const int tolerance = combo.eightBit ? 4 : ((upCnn && ramp[k] > 940) ? 3 : 2);
-					if (std::abs(got[k] - want) > tolerance)
-						return fail("ramp code " + std::to_string(ramp[k]) + " came out " + std::to_string(got[k]) +
+					// 8-in-10 (gate fix 2026-10-17): the level is the step's patch mean, not one
+					// pixel. A level between two 8-bit codes (4 apart here) is dithered between
+					// them (k = round(x + r + d) with |r| <= 0.5 + noise_amplitude puts a pixel up
+					// to 1 + 2 * noise_amplitude steps from x), so a single pixel can read 5 codes
+					// from an ideal level while the mean is exact. Measured at scale 1.50, full range, code 900: the
+					// shaping reference is 974.39 (976 ideal; the stable DLL's repair bias), and
+					// the chain's three-frame mean 974.34 with pixels at 971 and 975. Which side
+					// of the sigma-delta's 0.13-code rgba16f snap such a level falls (243 exactly,
+					// or 242.87 and dithered) moved with hunt 2's Catmull NLS sampling; the base
+					// shader and the 0.5 bound give the same pixels. The mean keeps the same
+					// tolerance and would catch a biased level that one pixel cannot.
+					const double level = combo.eightBit ? patchMean[k] : static_cast<double>(got[k]);
+					if (std::fabs(level - want) > tolerance)
+					{
+						char text[64];
+						std::snprintf(text, sizeof(text), "%.2f", level);
+						return fail("ramp code " + std::to_string(ramp[k]) + " came out " +
+							(combo.eightBit ? std::string(text) + " (patch mean)" : std::to_string(got[k])) +
 							" (expected " + std::to_string(want) + ")");
+					}
 				}
 			}
 			else if (combo.stage10 && !combo.fullRange)
