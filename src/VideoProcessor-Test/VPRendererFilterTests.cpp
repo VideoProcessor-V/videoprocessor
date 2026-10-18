@@ -451,6 +451,9 @@ namespace Tests
 	};
 
 
+	// A well-formed build ID shared by the plugin-check probes and the expected ID.
+	static constexpr const char* kId = "0123456789abcdef0123456789abcdef";
+
 	TEST_CLASS(VPRendererFilterPluginCheckTests)
 	{
 	public:
@@ -512,6 +515,29 @@ namespace Tests
 			Assert::IsTrue(PluginCandidatePaths(L"", false).empty());
 		}
 
+		// Integration 2026-10-17: the filter applies the executable's build-ID pair
+		// rule after the API version and before the flavor; no override.
+		TEST_METHOD(RefusesAnotherBuildBeforeTheFlavor)
+		{
+			std::string reason;
+			bool flavorCalled = false;
+			PluginExportProbe other = Complete(37, false);
+			other.getBuildId = []() { return "0123456789abcdef0123456789abcdee"; };
+			other.isBeta = [&flavorCalled]() { flavorCalled = true; return false; };
+			Assert::IsTrue(CheckPluginExports(other, 37, kId, false, reason) == PluginCheck::BuildIdMismatch);
+			Assert::IsFalse(flavorCalled);
+			Assert::IsTrue(reason.find("same build") != std::string::npos);
+			PluginExportProbe older = Complete(37, false);
+			older.getBuildId = nullptr;
+			Assert::IsTrue(CheckPluginExports(older, 37, kId, false, reason) == PluginCheck::BuildIdMismatch);
+			PluginExportProbe placeholder = Complete(37, false);
+			placeholder.getBuildId = []() { return "unknown"; };
+			Assert::IsTrue(CheckPluginExports(placeholder, 37, "unknown", false, reason) == PluginCheck::BuildIdMismatch);
+			Assert::AreEqual(std::string("build-id-mismatch"), std::string(ToString(PluginCheck::BuildIdMismatch)));
+			// The filter's loader passes its own VpBuildIdentity::Id(), a real ID.
+			Assert::IsTrue(VpBuildIdentity::IsWellFormed(VpBuildIdentity::Id()));
+		}
+
 	private:
 		static PluginExportProbe Complete(uint32_t version, bool beta)
 		{
@@ -519,6 +545,7 @@ namespace Tests
 			probe.hasCreate = true;
 			probe.hasDestroy = true;
 			probe.getApiVersion = [version]() { return version; };
+			probe.getBuildId = []() { return kId; };
 			probe.isBeta = [beta]() { return beta; };
 			return probe;
 		}
