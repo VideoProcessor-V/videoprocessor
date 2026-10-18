@@ -3308,7 +3308,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const size_t blocks = static_cast<size_t>(blocksX) * blocksY;
 		const bool fb = settings.opticalFlowFbCheck &&
 			OpticalFlowTrust::FbWeights(flow.fbError, flow.gridW, flow.gridH, NvOpticalFlow::Engine::Grid,
-				MotionAhead::Flow::kBlockPx, blocksX, blocksY, settings.consistencyPixels, ofFbWeights);
+				MotionAhead::Flow::kBlockPx, blocksX, blocksY, ConsistencyPixels(), ofFbWeights);
 		if (!OpticalFlowTrust::Combine(settings.opticalFlowCostTrust ? &flow.costWeight : nullptr, fb ? &ofFbWeights : nullptr,
 				blocks, ofWeights))
 			return true;   // nothing to apply: exactly as without the extras
@@ -3460,7 +3460,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					if (read)
 					{
 						float unusedSecond[4];
-						MotionAhead::FlowGlobal(vectors, costs, gw, gh, engineGlobal[d], unusedSecond);
+						MotionAhead::FlowGlobal(vectors, costs, gw, gh, engineGlobal[d], unusedSecond, settings.generalRates);
 					}
 				}
 				engineGlobalValid = read;
@@ -3718,7 +3718,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		if (searchOnly)
 			return true;   // lowRes inner: the outer refines (estimated stays false)
 		const float tolerance = settings.matchTolerance;
-		const float consistency = settings.consistencyPixels;
+		const float consistency = ConsistencyPixels();   // fixed-constant batch B4 2026-10-18
 		const pl_shader_var variables[2] = {
 			{ pl_var_float("tolerance"), &tolerance, true },
 			{ pl_var_float("consistency"), &consistency, true } };
@@ -3882,7 +3882,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The refinement's window: the global moves in half-texel steps (4 px at full size,
 			// 8 px when the low-resolution matcher searched); wider than half a step, 6 px minimum.
 			// Hunt 2 04 L5: one step for every halving (an 8K input's 16 px step got 8 px).
-			const float cameraWindow = DejudderPolicy::CameraWindowPixels(SearchHalvings());
+			// Fixed-constant batch B4 (2026-10-18, general_rate_fixes): continuous in the height.
+			const float cameraWindow = DejudderPolicy::CameraWindowPixels(SearchHalvings(), height, settings.generalRates);
 			if (rolloffGlobal || cameraOut)
 				trustVarList.push_back({ pl_var_float("camera_window"), &cameraWindow, true });
 			if (settings.motionRolloff)

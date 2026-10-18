@@ -25,6 +25,7 @@
 #include <ConfigurationRpcClient.h>
 #include <RendererProfileConfig.h>
 #include <QueueLatency.h>
+#include <RefreshKey.h>
 #include <led/LedDriveConfig.h>
 
 #include <QAbstractItemView>
@@ -2302,6 +2303,7 @@ void ConfigEditorWindow::runLoadMigrations()
     migrateLegacyQueueOwnership();
     migrateProfileValueNormalisations();
     migrateLegacyRendererName();
+    migrateRefreshKeys();
     // Any real migration keeps a backup of the original file on save.
     if (document_ && configurationLoaded_ && document_->Serialize() != before)
         document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -2411,6 +2413,39 @@ void ConfigEditorWindow::migrateUnifiedColorOutputProfiles()
     document_->requiresMigrationBackup = document_->existedAtLoad;
     dirty_ = true;
     hasPendingMigrations_ = true;
+}
+
+// Fixed-constant batch B7 (2026-10-18; owner 2026-10-17: one refresh-key convention, with cfg
+// migration + backup): the keyed sections' saved band keys that stand for a 1000/1001 rate (23, 29,
+// 59, 119 ...) are written as that rate (23.976, 29.97, 59.94, 119.88 ...). Integer rates (24, 50,
+// 60 ...) and values are kept; a key whose exact spelling is already present gives way to it.
+// runLoadMigrations keeps the backup of the original file on save.
+void ConfigEditorWindow::migrateRefreshKeys()
+{
+    if (!configurationLoaded_ || !document_) return;
+    bool migrated = false;
+    for (const auto& section : document_->SectionNames())
+    {
+        if (!RefreshKey::IsKeyedSection(ConfigFile::NormalizeName(section))) continue;
+        const auto settings = document_->SectionSettings(section);
+        std::vector<std::string> keys;
+        for (const auto& setting : settings) keys.push_back(ConfigFile::NormalizeName(setting.first));
+        for (const auto& rename : RefreshKey::PlanSection(keys))
+        {
+            std::string value;
+            for (const auto& setting : settings)
+                if (ConfigFile::NormalizeName(setting.first) == rename.from) value = setting.second;
+            if (!rename.drop)
+                document_->SetKnown(section, rename.to.c_str(), value);
+            document_->RemoveKnown(section, rename.from.c_str());
+            migrated = true;
+        }
+    }
+    if (migrated)
+    {
+        dirty_ = true;
+        hasPendingMigrations_ = true;
+    }
 }
 
 void ConfigEditorWindow::migrateCalibrationProfiles()
@@ -8571,7 +8606,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "everything slower than the 50 Hz television rate (below 49 fps) is film-like, 50 fps and faster is video. "
             "24, 25, 30 and 48 fps are classed as before; odd rates between 31 and 47 fps are now film-like. "
             "Repairing dropped frames pairs across a gap of up to about 1/6 second at any frame rate (1-3 missed frames "
-            "at 24p, up to 9 at 60p) instead of a fixed 1-3 frames. Off: the earlier fixed rate bands and frame count."));
+            "at 24p, up to 9 at 60p) instead of a fixed 1-3 frames. Above 60 fps the frame counts tuned at 60 fps keep "
+            "their time: motion vectors computed ahead (4 frames at 60 fps, 8 at 120), the queue's time-target ceiling, "
+            "the debander's hold and the DirectShow priming evidence. Up to 2160 lines nothing changes with the picture "
+            "height; taller pictures scale the matcher's tolerances. 24 and 60 fps at 1080 and 2160 lines are unchanged. "
+            "Off: the earlier fixed rate bands and frame counts."));
         // Render-ahead (docs/VP-render-ahead-design.md, owner 2026-10-17): processing follows the
         // source frame rate, not the display refresh. Off by default until the on-screen runs pass.
         auto* renderAhead = addChoice(QStringLiteral("De-judder: render ahead (under test)"), QStringLiteral("render_ahead"),

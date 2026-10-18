@@ -346,6 +346,10 @@
 	<ClInclude Include="vprenderer\CaptureTimestampGap.h" />
 	<ClInclude Include="vprenderer\DisplayRateHold.h" />
 	<ClInclude Include="MotionAhead.h" />
+	<ClInclude Include="GeneralRate.h" />
+	<ClInclude Include="GeneralRateLog.h" />
+	<ClInclude Include="RefreshKey.h" />
+	<ClInclude Include="microsoft_directshow\DirectShowRatePolicy.h" />
 	<ClInclude Include="KernelInverse.h" />
 	<ClInclude Include="vprenderer\AlphaNativeRgbIngress.h" />
     <ClInclude Include="SubtitleRepositionMode.h" />

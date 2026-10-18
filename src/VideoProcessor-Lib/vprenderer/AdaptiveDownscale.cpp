@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "AdaptiveDownscale.h"
+#include <GeneralRateLog.h>
 
 #include <libplacebo/dispatch.h>
 #include <libplacebo/filters.h>
@@ -467,7 +468,9 @@ float rs_slope(float y)
 	{
 		settings = value;
 		sequence = sourceSequence;
-		frameSeconds = seconds > 0.0f ? seconds : 1.0f / 24.0f;
+		static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+		frameSeconds = GeneralRate::NoteFallback(fallback, seconds > 0.0f, "adaptive downscale frame time", 24.0) ?
+			seconds : 1.0f / 24.0f;
 	}
 
 	GuardTransferParams GuardTransfer(const pl_color_space& source)

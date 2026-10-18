@@ -43,6 +43,7 @@
 #include <RendererQueueLaunchContractModel.h>
 #include <QueueProfileRestartPolicy.h>
 #include <QueueLatency.h>
+#include <RefreshKey.h>
 #include <EventActionLauncher.h>
 #include <UnifiedProfileRuntime.h>
 #include <VideoFrame.h>
@@ -344,7 +345,7 @@ protected:
 
 	int m_resyncPendingResetSeconds = -1;  // Countdown timer for scheduled reset after resync/refresh rate change (-1 = no reset pending)
 	double m_lastKnownRefreshRate = 0.0;  // Track last refresh rate for change detection (0 = not initialized)
-	std::map<int, double> m_displayRefreshRateOverridesHz;
+	std::map<double, double> m_displayRefreshRateOverridesHz;   // key: the refresh key's rate (RefreshKey)
 
 	// One shared transition state receives both capture-event and periodic EOTF
 	// observations. Only its confirmed commit may rebuild a non-dynamic renderer.

@@ -28,6 +28,8 @@
 #include <microsoft_directshow/DirectShowEpochPrimePolicy.h>
 #include <microsoft_directshow/DirectShowVideoTimingAdapter.h>
 #include <LiveEpochConvergenceController.h>
+#include <GeneralRateLog.h>
+#include <microsoft_directshow/DirectShowRatePolicy.h>
 #include <LiveSteadyQueuePolicy.h>
 #include <RationalLiveOutputSequencer.h>
 #include "CBufferedLiveSourceVideoOutputPin.h"
@@ -251,7 +253,12 @@ bool CBufferedLiveSourceVideoOutputPin::RunWithDeliveryHeld(
 	// One 23.976 Hz delivery interval is 41.7 ms. Give a normal paced Deliver
 	// enough time to return while retaining a hard upper bound for a renderer
 	// that is genuinely stuck.
-	constexpr std::chrono::milliseconds deliveryHoldTimeout(50);
+	// Fixed-constant batch B3 (2026-10-18, sweep #15, general_rate_fixes): the hold covers one
+	// measured delivery interval plus 15 % and is never under 50 ms - unchanged from 23 fps up
+	// (23.976: 1.15 x 41.7 = 48.0 -> 50 ms), longer below it (15 fps: 76.7 ms) where 50 ms was
+	// shorter than one frame.
+	const std::chrono::milliseconds deliveryHoldTimeout((DirectShowRatePolicy::DeliveryHoldTimeoutUs(
+		GeneralRate::ProcessEnabled(), m_timeScale, m_frameDurationTicks) + 999) / 1000);   // whole ms, rounded up
 	const bool executed = TryRunBoundedDeliveryTransaction(
 		m_deliveryGate, deliveryHoldTimeout, [&]()
 		{
@@ -262,7 +269,8 @@ bool CBufferedLiveSourceVideoOutputPin::RunWithDeliveryHeld(
 	if (!executed)
 	{
 		DebugLog::Log(
-			"Shaders: coherent delivery hold deferred after 50ms; current chain retained so graph control remains runnable");
+			"Shaders: coherent delivery hold deferred after %.1fms; current chain retained so graph control remains runnable",
+			std::chrono::duration<double, std::milli>(deliveryHoldTimeout).count());
 		return false;
 	}
 	DebugLog::Log(
@@ -2483,6 +2491,7 @@ DWORD CBufferedLiveSourceVideoOutputPin::ThreadProc()
 			convergenceInput.sceneCadenceActive =
 				outputCadence == RationalLiveOutputCadence::Display;
 			convergenceInput.observationTickMs = GetTickCount64();
+			convergenceInput.generalRates = GeneralRate::ProcessEnabled();   // fixed-constant batch B3 2026-10-18
 			const LiveEpochConvergenceDecision failureConvergenceDecision =
 				epochConvergenceController.Observe(convergenceInput);
 			if (convergenceInput.targetConfigured)
@@ -2657,6 +2666,7 @@ DWORD CBufferedLiveSourceVideoOutputPin::ThreadProc()
 			convergenceInput.sceneCadenceActive =
 				outputCadence == RationalLiveOutputCadence::Display;
 			convergenceInput.observationTickMs = GetTickCount64();
+			convergenceInput.generalRates = GeneralRate::ProcessEnabled();   // fixed-constant batch B3 2026-10-18
 			const LiveEpochConvergenceDecision convergenceDecision =
 				epochConvergenceController.Observe(convergenceInput);
 			if (steadyTargetConfigured)
@@ -4198,10 +4208,11 @@ DWORD CBufferedLiveSourceVideoOutputPin::ThreadProc()
 			}
 
 			// Log CLOCK_SMART timing stats periodically
-			static uint64_t smartLogCounter = 0;
+			// Fixed-constant batch B7 (2026-10-18): every 10 s (was every 600 frames).
+			static GeneralRate::LogInterval smartLogInterval = GeneralRate::LogInterval::ForFrames(600);
 			if ((m_timestamp == DirectShowStartStopTimeMethod::DS_SSTM_CLOCK_SMART ||
 				m_timestamp == DirectShowStartStopTimeMethod::DS_SSTM_CLOCK_SMART2) &&
-				++smartLogCounter % 600 == 0)
+				smartLogInterval.Due())
 			{
 				REFERENCE_TIME start = 0, stop = 0;
 				pSample->GetTime(&start, &stop);
@@ -4870,7 +4881,9 @@ void CBufferedLiveSourceVideoOutputPin::UpdateActivePictureAspectRatio(
 	const int height = signedHeight > 0 ? signedHeight : -signedHeight;
 	const size_t pitch = static_cast<size_t>(width) * sizeof(uint16_t);
 	double framesPerSecond = 60.0;
-	if (m_timeScale > 0 && m_frameDurationTicks > 0)
+	static GeneralRate::FallbackNotice activePictureRateFallback;   // fixed-constant batch B7
+	if (GeneralRate::NoteFallback(activePictureRateFallback, m_timeScale > 0 && m_frameDurationTicks > 0,
+		"DirectShow active-picture analysis", framesPerSecond))
 		framesPerSecond = static_cast<double>(m_timeScale) / m_frameDurationTicks;
 	const ActivePictureAnalyzerResult analysis = m_frameProcessor.AnalyzeActivePicture({
 		{ bytes, static_cast<size_t>(std::max<LONG>(0, sample->GetActualDataLength())),
@@ -5263,6 +5276,10 @@ void CBufferedLiveSourceVideoOutputPin::SubtitleAnalysisWorker()
 	uint64_t analysisCount = 0;
 	uint64_t totalAnalysisUs = 0;
 	uint64_t maximumAnalysisUs = 0;
+	// Fixed-constant batch B7 (2026-10-18): the statistics every 2 s (was every 120 frames).
+	uint64_t windowAnalyses = 0;
+	GeneralRate::LogInterval analysisLog = GeneralRate::LogInterval::ForFrames(120);
+	analysisLog.Due();   // the first window starts now
 
 	for (;;)
 	{
@@ -5301,6 +5318,7 @@ void CBufferedLiveSourceVideoOutputPin::SubtitleAnalysisWorker()
 				result.pictureBottom, std::memory_order_release);
 		}
 		++analysisCount;
+		++windowAnalyses;
 		totalAnalysisUs += analysisUs;
 		maximumAnalysisUs = std::max(maximumAnalysisUs, analysisUs);
 
@@ -5356,13 +5374,15 @@ void CBufferedLiveSourceVideoOutputPin::SubtitleAnalysisWorker()
 				frame.frameNumber);
 		}
 
-		if (analysisCount % 120 == 0)
+		if (windowAnalyses > 0 && analysisLog.Due())
 		{
 			DebugLog::Log(
-				"SUBTITLE ANALYZER: 120-frame avg=%.3fms max=%.3fms active=%s confidence=%u",
-				static_cast<double>(totalAnalysisUs) / 120000.0,
+				"SUBTITLE ANALYZER: %llu-frame avg=%.3fms max=%.3fms active=%s confidence=%u",
+				static_cast<unsigned long long>(windowAnalyses),
+				static_cast<double>(totalAnalysisUs) / (1000.0 * static_cast<double>(windowAnalyses)),
 				static_cast<double>(maximumAnalysisUs) / 1000.0,
 				result.active ? "YES" : "NO", result.confidence);
+			windowAnalyses = 0;
 			totalAnalysisUs = 0;
 			maximumAnalysisUs = 0;
 		}
@@ -6589,7 +6609,8 @@ bool CBufferedLiveSourceVideoOutputPin::CompositeTrackedSubtitle(
 	auto rejectCurrentFrame = [&](const char* reason) {
 		++rejectedFrames;
 		const bool usedCache = renderCachedSubtitle();
-		if (rejectedFrames <= 5 || rejectedFrames % 120 == 0)
+		static GeneralRate::LogInterval rejectedLog = GeneralRate::LogInterval::ForFrames(120);   // B7: 2 s, was 120 rejects
+		if (rejectedFrames <= 5 || rejectedLog.Due())
 			DebugLog::Log(
 				"SUBTITLE LIVE DETECTOR: rejected frame (%s%s), count=%llu",
 				reason, usedCache ? "; cached glyphs retained" : "",
@@ -7622,7 +7643,8 @@ bool CBufferedLiveSourceVideoOutputPin::RelocateSubtitleInP010(
 
 	const uint64_t relocationCount =
 		m_subtitleRelocationCount.fetch_add(1, std::memory_order_relaxed) + 1;
-	if (relocationCount <= 5 || relocationCount % 120 == 0)
+	static GeneralRate::LogInterval relocationLog = GeneralRate::LogInterval::ForFrames(120);   // B7: 2 s, was 120 relocations
+	if (relocationCount <= 5 || relocationLog.Due())
 	{
 		DebugLog::Log(
 			"SUBTITLE REPOSITION: frame=%llu relocation=%llu confidence=%u "
@@ -7641,26 +7663,16 @@ size_t CBufferedLiveSourceVideoOutputPin::GetBufferingTarget() {
 
 	size_t nominalTarget = (m_frameQueueMaxSize.load(std::memory_order_relaxed) / 8);
 	double fps = 60.0;
-	if (m_timeScale > 0 && m_frameDurationTicks > 0) fps = (double)m_timeScale / (double)m_frameDurationTicks;
+	static GeneralRate::FallbackNotice bufferingRateFallback;   // fixed-constant batch B7
+	const bool fpsMeasured = GeneralRate::NoteFallback(bufferingRateFallback,
+		m_timeScale > 0 && m_frameDurationTicks > 0, "DirectShow startup buffering target", fps);
+	if (fpsMeasured) fps = (double)m_timeScale / (double)m_frameDurationTicks;
 
 	// Calculate frame-rate appropriate target with MINIMUM of 3 frames
-	// Low FPS (< 30fps like 23.976): Need MORE frames for stable buffering at higher lead times
-	// High FPS (>= 30fps): Need more frames for smooth playback
-	size_t frames;
-	if (fps < 30.0)
-	{
-		// LOW FPS: At 23.976fps, each frame is ~42ms. With 200ms lead time, we need
-		// at least 5 frames buffered (5 * 42ms = 210ms > 200ms lead time)
-		// Use nominalTarget directly (no halving) for low fps
-		frames = std::max<size_t>(5, nominalTarget);
-	}
-	else
-	{
-		frames = nominalTarget + 1;
-	}
-
-	// CRITICAL: Ensure minimum of 3 frames for MadVR buffering stability
-	frames = std::max<size_t>(3, frames);
+	// (legacy: below 30 fps max(5, nominalTarget), else nominalTarget + 1; fixed-constant batch
+	// B3 2026-10-18, general_rate_fixes: StartupBufferingFrames, no 30 fps step).
+	size_t frames = DirectShowRatePolicy::StartupBufferingFrames(nominalTarget, fps,
+		GeneralRate::ProcessEnabled() && fpsMeasured);
 
 	const size_t configuredStartup =
 		m_configuredStartupPrerollFrames.load(std::memory_order_acquire);

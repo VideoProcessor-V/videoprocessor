@@ -6,6 +6,7 @@
 
 #include <map>
 #include <vprenderer/NvOpticalFlow.h>
+#include <GeneralRate.h>
 
 namespace MotionAhead { struct Flow; }
 #include <memory>
@@ -252,6 +253,12 @@ namespace Dejudder
 		// given per frame at referenceRateHz and converted to this rate.
 		double sourceHz = 0.0;
 		double referenceRateHz = 24000.0 / 1001.0;
+		// Fixed-constant batch B4 (2026-10-18, general_rate_fixes): the matcher's remaining pixel
+		// distances follow its working height - the forward/backward consistency (and the optical-flow
+		// engine's FB tolerance) by GeneralScale::AboveReference (unchanged up to 2160 lines), the
+		// camera refinement's window continuously (DejudderPolicy::CameraWindowPixels(height)) instead
+		// of a step at the half-search threshold (about 1527 lines). false = the legacy values.
+		bool generalRates = true;
 		// Black bars (owner 2026-10-14): only blocks inside the picture count.
 		// Blocks outside it (letterbox / pillarbox bars) are untrusted (they
 		// stay still and the warp interpolates only between picture blocks),
@@ -520,6 +527,12 @@ namespace Dejudder
 		bool HalvesForSearch() const
 		{
 			return settings.lowRes && static_cast<long long>(height) * height >= 2LL * 1080 * 1080;
+		}
+		// The forward/backward agreement (half-resolution px of this matcher's picture): as set up to
+		// 2160 lines, by height above (fixed-constant batch B4 2026-10-18, general_rate_fixes).
+		float ConsistencyPixels() const
+		{
+			return static_cast<float>(settings.consistencyPixels * GeneralScale::AboveReference(height, settings.generalRates));
 		}
 		pl_tex FadeStateTexture() const { return fadeState ? fadeState : inner ? inner->FadeStateTexture() : nullptr; }
 		bool EnsureTextures(const Planes& a);

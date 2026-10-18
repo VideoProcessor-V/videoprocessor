@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include <LiveEpochConvergenceController.h>
+#include <GeneralRate.h>
 
 #include <algorithm>
 #include <limits>
@@ -319,6 +320,20 @@ uint64_t LiveEpochConvergenceController::PacedDeliveryMaximumUs(
 		nominalFrameDurationUs + nominalFrameDurationUs / 2;
 }
 
+uint32_t LiveEpochConvergenceController::PacedWarmupDeliveries(
+	uint64_t nominalFrameDurationUs, bool general)
+{
+	const double rateHz = nominalFrameDurationUs > 0 ? 1.0e6 / static_cast<double>(nominalFrameDurationUs) : 0.0;
+	return GeneralRate::FramesWithFloor(kMinimumPacedWarmupDeliveries, rateHz, general);
+}
+
+uint32_t LiveEpochConvergenceController::RequiredPacedDeliveries(
+	uint64_t nominalFrameDurationUs, bool general)
+{
+	const double rateHz = nominalFrameDurationUs > 0 ? 1.0e6 / static_cast<double>(nominalFrameDurationUs) : 0.0;
+	return GeneralRate::FramesWithFloor(kRequiredPacedDeliveries, rateHz, general);
+}
+
 size_t LiveEpochConvergenceController::PacedPrimingDepth() const
 {
 	return std::max(kMinimumPacedPrimingDepth, m_desiredVpDepth + 1);
@@ -353,8 +368,8 @@ bool LiveEpochConvergenceController::IsPacedDelivery(
 bool LiveEpochConvergenceController::HasPacedPrimeEvidence(
 	const LiveEpochConvergenceInput& input) const
 {
-	if (m_successfulDeliveryCount < kMinimumPacedWarmupDeliveries ||
-		m_consecutivePacedDeliveryCount < kRequiredPacedDeliveries ||
+	if (m_successfulDeliveryCount < PacedWarmupDeliveries(input.nominalFrameDurationUs, input.generalRates) ||
+		m_consecutivePacedDeliveryCount < RequiredPacedDeliveries(input.nominalFrameDurationUs, input.generalRates) ||
 		input.vpConvertedDepth < PacedPrimingDepth())
 		return false;
 

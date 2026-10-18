@@ -171,6 +171,7 @@ private:
     void migrateLegacyQueueOwnership();
     void migrateProfileValueNormalisations();
     void migrateLegacyRendererName();
+    void migrateRefreshKeys();
     // Every load-time migration, in order: construction, target switch,
     // Cancel / Discard and reloads all run the same sequence.
     void runLoadMigrations();

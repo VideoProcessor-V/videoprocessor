@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstddef>
 
+#include "GeneralRate.h"
+
 // Stage 5: a queue target expressed as time. target_latency_ms is turned into
 // the existing frame count (target_frames) for the current source rate and
 // handed to the unchanged frame-count pacing; nothing here is a presentation
@@ -13,18 +15,28 @@ namespace QueueLatency
 	constexpr size_t MaxTargetFrames = 16;
 	constexpr int MaxTargetLatencyMs = 1000;
 
-	// ceil(ms x rate), at least one frame and at most MaxTargetFrames. A rate
+	// Fixed-constant batch B3 (2026-10-18, sweep #6, general_rate_fixes): the ceiling of a time
+	// target. MaxTargetFrames at and below 60 Hz (unchanged); above it the same time (16 frames at
+	// 60 Hz = 267 ms: 32 at 120 Hz, 64 at 240 Hz), so a 120p time target is not silently cut to a
+	// quarter of the 24p one. The queue capacity still bounds it (ClampToCapacity). Off: 16.
+	inline size_t MaxFramesForLatency(double rateHz, bool general = true)
+	{
+		return GeneralRate::FramesWithFloor(MaxTargetFrames, rateHz, general);
+	}
+
+	// ceil(ms x rate), at least one frame and at most MaxFramesForLatency. A rate
 	// that lands a hair above a whole frame (23.976 x 125.1 ms) is not pushed
 	// up a frame by floating-point noise.
-	inline size_t FramesForLatency(int latencyMs, double rateHz)
+	inline size_t FramesForLatency(int latencyMs, double rateHz, bool general = true)
 	{
 		if (latencyMs <= 0 || !(rateHz > 0.0))
 			return 1;
 		const double exact = static_cast<double>(latencyMs) * rateHz / 1000.0;
 		double frames = std::ceil(exact - 1e-6);
 		if (frames < 1.0) frames = 1.0;
-		if (frames > static_cast<double>(MaxTargetFrames))
-			frames = static_cast<double>(MaxTargetFrames);
+		const double ceiling = static_cast<double>(MaxFramesForLatency(rateHz, general));
+		if (frames > ceiling)
+			frames = ceiling;
 		return static_cast<size_t>(frames);
 	}
 
@@ -59,7 +71,7 @@ namespace QueueLatency
 	inline TargetDecision ResolveTargetFrames(
 		bool ownHasLatency, int ownLatencyMs,
 		bool ownHasFrames, size_t ownFrames,
-		int baseLatencyMs, size_t baseFrames, double rateHz)
+		int baseLatencyMs, size_t baseFrames, double rateHz, bool general = true)
 	{
 		TargetDecision decision;
 		decision.rateHz = rateHz;
@@ -73,7 +85,7 @@ namespace QueueLatency
 			latency = baseLatencyMs;
 		if (latency > 0 && rateHz > 0.0)
 		{
-			decision.frames = FramesForLatency(latency, rateHz);
+			decision.frames = FramesForLatency(latency, rateHz, general);
 			decision.fromLatency = true;
 			decision.latencyMs = latency;
 		}

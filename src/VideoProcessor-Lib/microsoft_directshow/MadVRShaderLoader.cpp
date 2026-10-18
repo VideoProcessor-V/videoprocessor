@@ -13,6 +13,7 @@
 #include <ConfigFile.h>
 #include <DebugLog.h>
 #include <DisplayRuleExpression.h>
+#include <RefreshKey.h>
 #include <RendererProfileConfig.h>
 #include <AspectRatio.h>
 #include <ActivePictureTransitionModel.h>
@@ -2483,8 +2484,8 @@ MadVRShaderSelection MadVRShaderLoader::ApplyConfiguredShaders(IBaseFilter* rend
 
 	const double refreshRate = videoState.displayMode ?
 		videoState.displayMode->RefreshRateHz() : 0.0;
-	const int nominalRate = refreshRate > 0.0 ?
-		static_cast<int>(std::floor(refreshRate + 0.0001)) : 0;
+	// Fixed-constant batch B7 (2026-10-18): the shared band key (RefreshKey::LegacyKey).
+	const int nominalRate = RefreshKey::LegacyKey(refreshRate);
 	DebugLog::Log("Shaders: evaluating input signal=%s refresh=%.6f Hz nominal=%d",
 		SignalName(videoState.eotf), refreshRate, nominalRate);
 

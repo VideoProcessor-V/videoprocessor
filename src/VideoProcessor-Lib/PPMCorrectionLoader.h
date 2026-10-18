@@ -12,6 +12,7 @@
 #include <set>
 class ConfigFile;
 #include <string>
+#include <vector>
 
 /**
  * PPM (Parts Per Million) correction loader for refresh rate specific timing adjustments.
@@ -78,11 +79,12 @@ private:
      * @param targetRate The desired refresh rate
      * @return matching rate key, or 0 if no suitable match found
      */
-    int FindBestMatch(double targetRate) const;
+    double FindBestMatch(double targetRate) const;
 
-    // Map of refresh rate (as integer) to PPM correction value
-    std::map<int, int> m_corrections;
-    std::set<int> m_automaticRates;
+    // Map of refresh-key rate to PPM correction value (fixed-constant batch B7 2026-10-18: keys
+    // are rates in the shared RefreshKey convention - 60, 59.94, 60000/1001; 0 = no match).
+    std::map<double, int> m_corrections;
+    std::set<double> m_automaticRates;
     
     // Tolerance for matching refresh rates (e.g., 59.94 matches 60)
     static constexpr double REFRESH_RATE_TOLERANCE = 0.5;

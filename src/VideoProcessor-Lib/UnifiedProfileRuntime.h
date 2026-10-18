@@ -32,6 +32,10 @@ namespace UnifiedProfileRuntime
 		// the queue must hold (5) when the selected renderer / input profiles have it on (optical
 		// flow on, vectors ahead on, a de-judder strength set); 0 when off.
 		size_t lookAheadQueueFrames = 0;
+		// Fixed-constant batch B3 (2026-10-18): general_rate_fixes of the selected display / input
+		// profiles (on unless a profile says off) - for the GUI's queue target and the DirectShow pin
+		// (GeneralRate::SetProcessEnabled). The look-ahead frames above follow the source rate with it.
+		bool generalRateFixes = true;
 		StateVariables::Snapshot variables;
 
 		bool LookupVariable(const std::string& name, std::string& value) const

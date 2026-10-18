@@ -14,6 +14,8 @@
 #include <ConfigFile.h>
 
 #include "PPMCorrectionLoader.h"
+#include "GeneralRate.h"
+#include "RefreshKey.h"
 
 PPMCorrectionLoader::PPMCorrectionLoader()
 {
@@ -116,7 +118,7 @@ bool PPMCorrectionLoader::LoadCorrections(const ConfigFile& unifiedConfig)
 
             for (const auto& correction : m_corrections)
             {
-                DbgLog((LOG_TRACE, 1, TEXT("PPMCorrectionLoader: %d Hz = %d PPM"),
+                DbgLog((LOG_TRACE, 1, TEXT("PPMCorrectionLoader: %.3f Hz = %d PPM"),
                     correction.first, correction.second));
             }
 
@@ -159,11 +161,12 @@ bool PPMCorrectionLoader::ParseConfigLine(const std::string& line)
 
         try
         {
-            // Parse refresh rate (integer)
-            int refreshRate = std::stoi(refreshRateStr);
-            if (refreshRate <= 0 || refreshRate > 1000)
+            // Parse the refresh key (fixed-constant batch B7 2026-10-18: RefreshKey - an integer,
+            // decimal or ratio rate; saved band keys were migrated at load).
+            double refreshRate = 0.0;
+            if (!RefreshKey::Parse(refreshRateStr, refreshRate) || refreshRate > 1000.0)
             {
-                DbgLog((LOG_WARNING, 1, TEXT("PPMCorrectionLoader: Invalid refresh rate %d (must be 1-1000)"), refreshRate));
+                DbgLog((LOG_WARNING, 1, TEXT("PPMCorrectionLoader: Invalid refresh rate %S (must be a rate up to 1000)"), refreshRateStr.c_str()));
                 continue;
             }
 
@@ -174,7 +177,7 @@ bool PPMCorrectionLoader::ParseConfigLine(const std::string& line)
                 m_corrections[refreshRate] = 0;
                 m_automaticRates.insert(refreshRate);
                 parsedAny = true;
-                DbgLog((LOG_TRACE, 2, TEXT("PPMCorrectionLoader: Parsed %d Hz = AUTO (auto-calibration)"), refreshRate));
+                DbgLog((LOG_TRACE, 2, TEXT("PPMCorrectionLoader: Parsed %.3f Hz = AUTO (auto-calibration)"), refreshRate));
                 continue;
             }
 
@@ -191,7 +194,7 @@ bool PPMCorrectionLoader::ParseConfigLine(const std::string& line)
             m_automaticRates.erase(refreshRate);
             parsedAny = true;
 
-            DbgLog((LOG_TRACE, 2, TEXT("PPMCorrectionLoader: Parsed %d Hz = %d PPM"), refreshRate, ppmValue));
+            DbgLog((LOG_TRACE, 2, TEXT("PPMCorrectionLoader: Parsed %.3f Hz = %d PPM"), refreshRate, ppmValue));
         }
         catch (const std::exception&)
         {
@@ -208,7 +211,7 @@ int PPMCorrectionLoader::GetPPMCorrection(double refreshRate) const
         return 0;
 
     // Find the best matching refresh rate
-    int bestMatch = FindBestMatch(refreshRate);
+    const double bestMatch = FindBestMatch(refreshRate);
     
     if (bestMatch == 0)
         return 0;
@@ -216,7 +219,7 @@ int PPMCorrectionLoader::GetPPMCorrection(double refreshRate) const
     auto it = m_corrections.find(bestMatch);
     if (it != m_corrections.end())
     {
-        DbgLog((LOG_TRACE, 1, TEXT("PPMCorrectionLoader: Using %d PPM correction for %.3f Hz (matched %d Hz)"), 
+        DbgLog((LOG_TRACE, 1, TEXT("PPMCorrectionLoader: Using %d PPM correction for %.3f Hz (matched %.3f Hz)"), 
             it->second, refreshRate, bestMatch));
         return it->second;
     }
@@ -224,45 +227,19 @@ int PPMCorrectionLoader::GetPPMCorrection(double refreshRate) const
     return 0;
 }
 
-int PPMCorrectionLoader::FindBestMatch(double targetRate) const
+double PPMCorrectionLoader::FindBestMatch(double targetRate) const
 {
     if (m_corrections.empty())
-        return 0;
+        return 0.0;
 
-    int bestMatch = 0;
-    double bestDistance = 1000000.0; // Large initial value
-
-    // FIRST: Try truncated rate (first two digits before decimal)
-    // e.g., 59.94 Hz ? 59 (not 60)
-    // e.g., 29.97 Hz ? 29 (not 30)
-    int truncatedRate = static_cast<int>(targetRate);
-    auto it = m_corrections.find(truncatedRate);
-    if (it != m_corrections.end())
-    {
-        double truncDistance = std::abs(targetRate - truncatedRate);
-        if (truncDistance < bestDistance)
-        {
-            bestMatch = truncatedRate;
-            bestDistance = truncDistance;
-        }
-    }
-
-    // SECOND: Fall back to tolerance-based matching if truncation didn't find anything
-    // Only use tolerance matching if we haven't already found a truncated match
-    if (bestMatch == 0)
-    {
-        for (const auto& correction : m_corrections)
-        {
-            double distance = std::abs(targetRate - correction.first);
-            
-            // Accept matches within tolerance
-            if (distance <= REFRESH_RATE_TOLERANCE && distance < bestDistance)
-            {
-                bestMatch = correction.first;
-                bestDistance = distance;
-            }
-        }
-    }
-
-    return bestMatch;
+    // Fixed-constant batch B7 (2026-10-18): the shared refresh-key lookup (RefreshKey::Find).
+    // general_rate_fixes: an exact key (59.94, 60), then an integer key's band (59 for 59.94: a
+    // file the migration has not seen), then the nearest within REFRESH_RATE_TOLERANCE. Off: the
+    // truncated integer key (59.94 -> 59), then the nearest within the tolerance, as before.
+    std::vector<double> keys;
+    keys.reserve(m_corrections.size());
+    for (const auto& correction : m_corrections)
+        keys.push_back(correction.first);
+    const int index = RefreshKey::Find(keys, targetRate, GeneralRate::ProcessEnabled());
+    return index < 0 ? 0.0 : keys[static_cast<size_t>(index)];
 }

@@ -5,6 +5,7 @@
 #include <pch.h>
 #include <VideoFrame.h>
 #include <VideoState.h>
+#include <GeneralRateLog.h>
 #include <CpuFeatures.h>
 #include "CR210DolbyVisionTunnelFormatter.h"
 
@@ -570,7 +571,9 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 	// scramble the packet/raster order. Never lock DV on it (SDR only).
 	m_tunnelCapable = !state->displayMode->IsInterlaced();
 	const double rate = state->displayMode->RefreshRateHz();
-	m_frameRate = rate > 0 ? rate : 24000.0 / 1001.0;
+	static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+	m_frameRate = GeneralRate::NoteFallback(fallback, rate > 0, "CR210 DV tunnel packet-loss limits", 24000.0 / 1001.0) ?
+		rate : 24000.0 / 1001.0;
 	m_packetLossLimit = static_cast<uint32_t>((std::max)(1.0,
 		std::floor(m_frameRate * kPacketLossSeconds + 0.5)));
 	m_sdrFallbackFrames = static_cast<uint64_t>((std::max)(2.0,

@@ -13,6 +13,7 @@
 
 #include <guid.h>
 #include <DebugLog.h>
+#include <GeneralRate.h>
 #include <RendererQueueLaunchAudit.h>
 #include <microsoft_directshow/live_source_filter/CLiveSource.h>
 #include <microsoft_directshow/live_source_filter/ALiveSourceVideoOutputPin.h>
@@ -293,7 +294,8 @@ void DirectShowVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		m_frameLatencyEntry = TimingClockDiffMs(frameTime, clockTime, m_timingClock->TimingClockTicksPerSecond());
 		
 		// Diagnostic: Check DirectShow clock synchronization (every 10 seconds)
-		if (m_frameCounter % 600 == 0 && m_referenceClock)
+		static GeneralRate::LogInterval clockLog = GeneralRate::LogInterval::ForFrames(600);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+		if (m_referenceClock && clockLog.Due())
 		{
 			REFERENCE_TIME dsClockTime = 0;
 			if (SUCCEEDED(m_referenceClock->GetTime(&dsClockTime)))

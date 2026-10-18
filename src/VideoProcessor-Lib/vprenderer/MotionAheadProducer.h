@@ -17,6 +17,7 @@
 // for the session (logged) and everything falls back.
 
 #include <AnalysisLumaSource.h>
+#include <MotionAhead.h>
 #include <OpticalFlowTrust.h>
 #include <VectorStore.h>
 #include <vprenderer/NvOpticalFlow.h>
@@ -71,12 +72,21 @@ namespace MotionAhead
 	// half-cell grid, refined by the mean of the cells within one cell of it), its share
 	// of the confident cells as the ambiguity, and the most common vector away from it as
 	// the second layer (when at least 10 % of the cells hold it).
+	// Fixed-constant batch B4 (2026-10-18, sweep #11, general_rate_fixes): the vote range (+-40
+	// texels: D1 searches +-32) as set up for a working picture of up to 2160 lines, by height
+	// above it (GeneralScale::AboveReference of the field's lines: 8 full-size lines per cell row).
+	constexpr int kFlowVoteRange = 40;
+	inline int FlowVoteRange(int gridH, bool general = true)
+	{
+		return GeneralScale::AboveReferencePixels(kFlowVoteRange, 8.0 * (std::max)(0, gridH), general);
+	}
+
 	inline void FlowGlobal(const std::vector<int16_t>& vectors, const std::vector<uint8_t>& costs, int gridW, int gridH,
-		float global[4], float second[4])
+		float global[4], float second[4], bool general = true)
 	{
 		// Units: one engine cell (4 half-size px) = one 1/8-size texel; votes in half texels.
-		static constexpr int kRange = 40;              // +-40 texels (D1 searches +-32)
-		static constexpr int kBins = 4 * kRange + 1;   // half-texel bins
+		const int kRange = FlowVoteRange(gridH, general);   // +-40 texels up to 2160 lines (D1 searches +-32)
+		const int kBins = 4 * kRange + 1;                   // half-texel bins
 		global[0] = global[1] = 0.0f; global[2] = 1.0f; global[3] = 1.0f;
 		second[0] = second[1] = second[2] = second[3] = 0.0f;
 		const size_t cells = static_cast<size_t>(gridW) * gridH;
@@ -87,7 +97,7 @@ namespace MotionAhead
 		const uint8_t costLimit = sorted[sorted.size() / 2];
 		std::vector<int> votes(static_cast<size_t>(kBins) * kBins, 0);
 		long confident = 0;
-		auto binOf = [](int16_t v) { return static_cast<int>(std::lround(v / 32.0 / 4.0 * 2.0)) + 2 * kRange; };
+		auto binOf = [kRange](int16_t v) { return static_cast<int>(std::lround(v / 32.0 / 4.0 * 2.0)) + 2 * kRange; };
 		for (size_t i = 0; i < cells; ++i)
 		{
 			if (costs[i] > costLimit) continue;
@@ -199,6 +209,11 @@ namespace MotionAhead
 		// quarter with the half-size inner matcher); 0 = the frame's half size.
 		void SetTargetSize(int w, int h) { targetW.store(w, std::memory_order_release); targetH.store(h, std::memory_order_release); }
 		uint64_t LastSubmitted() const { return lastSubmitted.load(std::memory_order_acquire); }
+		// Fixed-constant batch B3 (2026-10-18): the pending submissions follow the depth in use
+		// (MotionAhead::PendingJobsFor: 6 at the default depth, as before).
+		void SetDepth(int depth) { maxPendingJobs.store(PendingJobsFor(depth), std::memory_order_release); }
+		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
+		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
 
 		// The consumer: the pair's flow if it is ready (a hit), else null (a miss).
 		FlowPtr Take(uint64_t from, uint64_t to);
@@ -223,6 +238,8 @@ namespace MotionAhead
 		std::thread worker;
 		std::atomic<bool> running{ false }, engineReady{ false };
 		std::atomic<uint64_t> lastSubmitted{ 0 };
+		std::atomic<size_t> maxPendingJobs{ 6 };
+		std::atomic<bool> generalRates{ true };
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::vector<uint8_t> quarterBuffer;
 		std::string error;
