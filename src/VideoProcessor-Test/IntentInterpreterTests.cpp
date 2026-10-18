@@ -305,8 +305,15 @@ namespace Tests
             const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
             Assert::IsNotNull(reinterpret_cast<void*>(describe));
             Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf));
-            const std::string path = folder + "vp-intent-keys-test.cfg";
+            // A new file per call: the configuration cache keys on path, size and
+            // modification time, so rewriting one file within the same second with a
+            // same-length value (ease_fast -> ease_slow) would read the cached copy.
+            int callIndex = 0;
+            std::vector<std::string> written;
+            std::string path;
             auto call = [&](Export function, const std::string& keys) {
+                path = folder + "vp-intent-keys-test-" + std::to_string(callIndex++) + ".cfg";
+                written.push_back(path);
                 {
                     std::ofstream config(path, std::ios::trunc | std::ios::binary);
                     config << "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n" << keys;
@@ -367,7 +374,8 @@ namespace Tests
                 "ambient_screen_reflect: 0.03\n", "ambient_max_black_nits: 3\n", "ambient_tau_up_s: 20\n",
                 "ambient_tau_down_s: 100\n", "intent_black: report\n", "intent_display: report\n", "intent_ease_s: 0.5\n" })
                 Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, key), std::wstring(key, key + std::strlen(key)).c_str());
-            DeleteFileA(path.c_str());
+            for (const std::string& file : written)
+                DeleteFileA(file.c_str());
         }
     };
     // Owner 2026-10-17: active_picture_lookahead_frames follows the queue unless set.
