@@ -19,14 +19,17 @@ Everything was local: no remote calls and no GPU runs. Each branch's agent repor
 | 10 | test/real-footage-suite @ 8ceaaa33 | 58c00b17 | Only the vcxproj conflicted. The two fixes (maximally even lock, stream-start cut judge) merged cleanly. |
 | 11 | test/queue-stress @ 93f20fe1 | 79775aa1 + 6ba64910 | vcxproj. The Q1 repros were marked TEST_IGNORE / KnownFailing "Q1 pending fix/q1-stale-burst". |
 | 12 | fix/q1-stale-burst @ 7efcf7f0 (coordinator addition) | b29fa7f2 + e62f4673 | none. The ignore markings were removed, and both repros pass. |
-| 13 | perf/detail-pulse @ c106339b (coordinator addition; base 11cf28e0, merged last) | 462a95bc | Harness fingerprint change list: both keys. detail_pulse_fast is covered by the Config coverage test. |
+| 13 | perf/detail-pulse @ c106339b (coordinator addition; base 11cf28e0) | 462a95bc | Harness fingerprint change list: both keys. detail_pulse_fast is covered by the Config coverage test. |
+| 14 | fix/h3-latch @ 61288d09 (coordinator addition; base 8ceaaa33) | 7d217dde + ea7ae114 | Config defaults table and LVR fingerprint: both keys inserted beside source_resolution_latch_fixes. Detector header: kept SnapRatio and FrameEvidence. Render-ahead extras: kept the crossfade mix and added the start-up hold clear. **Real failure (merge 14):** `SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce`, "the fade made no cut". With the cut fixes, the held shot's own cut (moment 10.0 s) is confirmed at the first fade frame (10.5 s). The judge is right, so the test was fixed: it now counts a new switch moment, or a confirmed cut whose moment is in the fade (ea7ae114). It passes. |
 
 RefreshKey migration (merge 3): ConfigFile::Load rewrites `m_sections` in memory only, and ConfigFile has no save. In the Config editor, `migrateRefreshKeys` sets `dirty_` and `hasPendingMigrations_`. runLoadMigrations then sets `requiresMigrationBackup` whenever the document changed, so the save keeps a backup.
 
 ## Verification
 
-- **Build.** x64 Release through the shared runner. The first build hit LNK1103/LNK1318 (stale .iobj/.ipdb and Lib pch.obj); 18 files were deleted. The rebuild and the builds after the q1 and pulse merges: rc 0.
-- **Build identity.** 28/28 on the final build (ID eec0a501967ca171dc4c0d9eade074ef).
+- **Build.** x64 Release through the shared runner. The first build hit LNK1103/LNK1318 (stale .iobj/.ipdb and Lib pch.obj); 18 files were deleted, and the rebuild passed. The builds after each later merge: rc 0.
+  - After the h3-latch merge, two builds hit LNK1104 on `vprenderer\VideoProcessorVPRenderer.dll`. A transient lock not held by any of my processes; the retry built.
+  - Final build (ea7ae114): rc 0.
+- **Build identity.** 28/28 on the final build (ID f3536a635215a3c20c55adf276141010).
 - **CPU suite.** Single-threaded vstest with TRX (`D:\codex\vp-r5-logs\trx\cpu.trx`), on the build with merges 1-12. Excluded: RendererCaptureHarnessTests, NlsHookFailureRetry..., DvAutotestGpu*, DolbyVisionGpuUnpack....
   - 3899 total: 3897 passed, 1 failed, 1 not run (LongTakeCameraMoveIsNotACut, ignored by its branch).
   - The real-footage suite ran on D:\testclips (about 90 min).
@@ -36,7 +39,12 @@ RefreshKey migration (merge 3): ConfigFile::Load rewrites `m_sections` in memory
   - Total CPU load was 100 % from other agents. v210 averaged 7-8 ms, against 4.4 ms in the same suite earlier.
   - No converter changed in this round. The only formatter edit is a log-only fallback notice in CR210DolbyVisionTunnelFormatter.
   - Environmental; rerun them on an idle machine.
-- **Config tests.** Off screen, 1 shard. On merges 1-12: 154 passed, 0 failed, 1 skipped. After the pulse merge: 154 passed, 0 failed, 1 skipped (needs a real window); gate passed.
+- **After the h3-latch merge** (`latch.trx`): every SourceResolution*, RealFootage*, StartupCropHold, MixedScreen, ActivePicture*, AlphaSourceCrop, crop and layout, DetailPulse / DetailRestore / TextureRestore and ConfigFileTests test, plus EveryProfileKeyChangesTheLiveSettingsFingerprint and IntegrationKeysReachTheSettingsAndTheirDefaultsAreFaithful.
+  - 946 run: 945 passed, 1 failed (the fade test above).
+  - On the final build the fade test and the two key tests pass: 3/3 (`fade2.trx`).
+- **Config tests.** Off screen, 1 shard, gate passed every time: 154 passed, 0 failed, 1 skipped (needs a real window).
+  - Run on merges 1-12, after the pulse merge, and after the h3-latch merge.
+  - The final commit changes only a CPU test file.
 
 ## GPU tests for the coordinator (VP_TEST_GPU=hardware)
 
