@@ -86,6 +86,8 @@ namespace LedDrive
 		}
 		int target = std::max(lowest, std::min(level, config.ledCeiling));
 		if (lightHold >= 0) target = std::max(target, std::min(lightHold, config.ledCeiling));
+		// Intent limits (2026-10-17): never below the intent floor.
+		if (intentFloor > 0) target = std::max(target, std::min(intentFloor, config.ledCeiling));
 		return target;
 	}
 
@@ -598,6 +600,9 @@ namespace LedDrive
 			std::max(CurveLevel(config, apl), floor);
 		out.lightTarget = std::max(config.ledFloorBlack, std::min(ceiling,
 			std::max(base, static_cast<int>(highlightFloor))));
+		// Intent limits (2026-10-17): never below the intent floor (black too:
+		// dimming below the room's veil cannot be seen).
+		if (intentFloor > 0) out.lightTarget = std::max(out.lightTarget, std::min(ceiling, intentFloor));
 
 		// Early ramp: a cut or a large APL change in the queue. Brightening
 		// ahead of it is free (headroom only grows); dimming ahead of it stops
@@ -681,6 +686,9 @@ namespace LedDrive
 				early = true;
 			}
 		}
+		// Intent limits (2026-10-17): the early ramp, the pre-lift and the cut
+		// lead never take the target below the intent floor either.
+		if (intentFloor > 0) target = std::max(target, std::min(ceiling, intentFloor));
 		// A seen cut lands now: jump to the new scene (the cut hides it). An
 		// unseen dark-to-bright cut: straight up, like the script's dump, so
 		// highlights are squashed only for the LED's response time.
