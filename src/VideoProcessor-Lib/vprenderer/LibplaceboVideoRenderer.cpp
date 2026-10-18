@@ -5384,6 +5384,8 @@ struct LibplaceboVideoRenderer::Impl
 	ULONGLONG openLoopCandidatesTick = 0, openLoopCadenceTick = 0;
 	double openLoopDisplayConfigHz = 0.0, openLoopModeIntegerHz = 0.0;
 	OpenLoopDisplayRate::VBlankCadence openLoopCadence;
+	OpenLoopDisplayRate::VBlankGridRate openLoopGridRate;   // the real refresh from DWM's vblanks (hunt 2 05 M5)
+	bool openLoopGridRateLogged = false;
 	unsigned long long renderAheadOpenLoopFrames = 0, renderAheadLateByPresent = 0;
 	unsigned long long renderAheadFlushReanchors = 0;   // new anchors after a backlog flush
 	bool renderAheadOpenLoopLate = false;   // seen on the last frame's extras: the gate's lateness for this one
@@ -5428,6 +5430,7 @@ struct LibplaceboVideoRenderer::Impl
 	OpenLoopDisplayRate::Choice SelectDejudderDisplayRate()
 	{
 		OpenLoopDisplayRate::Candidates c;
+		int64_t dwmVblank = 0;
 		c.statisticsHz = presentationTelemetry.Snapshot().measuredDisplayHz;
 		if (activeSettings.renderAhead && !DisplayRefreshBounds::Accepts(c.statisticsHz))
 		{
@@ -5438,8 +5441,7 @@ struct LibplaceboVideoRenderer::Impl
 				openLoopDisplayConfigHz = MonitorDisplayConfigHz(videoHwnd);
 				openLoopModeIntegerHz = MonitorRefreshHz(videoHwnd);
 			}
-			int64_t vblank = 0;
-			DwmCompositionTiming(c.dwmHz, vblank);
+			DwmCompositionTiming(c.dwmHz, dwmVblank);
 			c.displayConfigHz = openLoopDisplayConfigHz;
 			c.modeIntegerHz = openLoopModeIntegerHz;
 			c.hostHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
@@ -5472,7 +5474,32 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			c.cadenceHz = openLoopCadence.Hz();
 		}
-		const OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, activeSettings.renderAhead, activeSettings.queueTimingFixes);
+		OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, activeSettings.renderAhead, activeSettings.queueTimingFixes);
+		// Hunt 2 05-renderahead M5 (queue_timing_fixes): in open loop the planned rate is
+		// refined to the display's real refresh, measured from DWM's vblank times, so the
+		// chain does not drift into a lateness correction (a dropped extra) every few
+		// minutes. Only DWM vblanks at the planned rate (the same display) are used.
+		if (activeSettings.queueTimingFixes && choice.openLoop)
+		{
+			LARGE_INTEGER frequency{};
+			if (dwmVblank > 0 && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 &&
+				DisplayRefreshBounds::Accepts(c.dwmHz) &&
+				std::abs(c.dwmHz - choice.hz) <= OpenLoopDisplayRate::kDwmAgreesWithMode * choice.hz)
+				openLoopGridRate.Add(static_cast<double>(dwmVblank) / static_cast<double>(frequency.QuadPart), choice.hz);
+			const double refined = openLoopGridRate.Refine(choice.hz);
+			if (refined != choice.hz && !openLoopGridRateLogged)
+			{
+				openLoopGridRateLogged = true;
+				DebugLog::Log("Render-ahead: open loop, display rate refined from DWM vblanks: %.6f Hz (planned %.6f Hz from %s)",
+					refined, choice.hz, OpenLoopDisplayRate::Name(choice.source));
+			}
+			choice.hz = refined;
+		}
+		else
+		{
+			openLoopGridRate.Reset();
+			openLoopGridRateLogged = false;
+		}
 		if (activeSettings.renderAhead && OpenLoopDisplayRate::Changed(dejudderDisplayRateLogged, choice))
 		{
 			if (choice.openLoop)
@@ -27698,10 +27725,13 @@ void LibplaceboVideoRenderer::RenderLoop()
 							oldestBeforeMs = queuedAgeMs(m_frameQueue.front());
 						// The queue's own frame rate (hunt 2 13-timing H1): while a pulldown
 						// lock holds the queue holds film frames, so the front frame's film
-						// rate; otherwise the capture rate.
+						// rate; otherwise the signal's rate (measured, else nominal), not the
+						// dequeued frame's film rate once the queue has left the lock.
 						const bool queueFixes = m_queueTimingFixes.load(std::memory_order_relaxed);
-						const double queueRateHz = queueFixes && !m_frameQueue.empty() &&
-							m_frameQueue.front().filmHz > 0.0 ? m_frameQueue.front().filmHz : captureRateHz;
+						const double signalRateHz = measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
+							(state && state->displayMode ? state->displayMode->RefreshRateHz() : captureRateHz);
+						const double queueRateHz = queueFixes ? AlphaQueuePolicy::QueueFrameRateHz(
+							m_frameQueue.empty() ? 0.0 : m_frameQueue.front().filmHz, signalRateHz) : captureRateHz;
 						recoveredBacklog = AlphaQueuePolicy::ShouldRecoverBacklog(
 							queueBefore,
 							recoveryTarget,

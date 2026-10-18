@@ -15,8 +15,25 @@ void AlphaArrivalRateEstimator::Add(double arrivalSeconds, double rateHintHz)
 {
 	if (!(arrivalSeconds > 0.0) || !std::isfinite(arrivalSeconds))
 		return;
-	if (m_started && !(arrivalSeconds > m_last))
-		Reset();   // a clock step back or a repeated time: start over
+	const bool hinted = CaptureRateBounds::Accepts(rateHintHz);
+	const double rate = hinted ? rateHintHz : 60.0;
+	if (m_started && arrivalSeconds == m_last)
+		return;    // the same frame again (a film frame's update): no new period
+	if (m_started && arrivalSeconds < m_last)
+		Reset();   // a clock step back: start over
+	double periods = 1.0;
+	if (m_started && hinted)
+	{
+		// The periods since the last frame, counted with the hint (the card's rate is
+		// within ppm of the truth, so rounding finds them): a missed or dropped frame
+		// advances the index by its periods instead of bending the line. The slope
+		// itself stays measured on QPC.
+		const double elapsed = (arrivalSeconds - m_last) * rateHintHz;
+		if (elapsed > kMaximumGapSeconds * rateHintHz)
+			Reset();   // a break, not missed frames
+		else
+			periods = (std::max)(1.0, std::floor(elapsed + 0.5));
+	}
 	if (!m_started)
 	{
 		m_started = true;
@@ -25,10 +42,9 @@ void AlphaArrivalRateEstimator::Add(double arrivalSeconds, double rateHintHz)
 	}
 	else
 	{
-		m_index += 1.0;
+		m_index += periods;
 	}
 	m_last = arrivalSeconds;
-	const double rate = CaptureRateBounds::Accepts(rateHintHz) ? rateHintHz : 60.0;
 	const double keep = std::exp(-1.0 / (rate * kWindowSeconds));
 	const double x = m_index;
 	const double y = arrivalSeconds - m_t0;

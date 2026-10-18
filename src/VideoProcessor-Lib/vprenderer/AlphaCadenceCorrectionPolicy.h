@@ -83,6 +83,8 @@ class AlphaArrivalRateEstimator
 public:
 	static constexpr double kWindowSeconds = 120.0;
 	static constexpr double kMinimumSpanSeconds = 10.0;
+	// A longer silence is a break: the estimate starts over.
+	static constexpr double kMaximumGapSeconds = 1.0;
 
 	void Reset();
 	// One frame (the index advances by one per call). rateHintHz sets the

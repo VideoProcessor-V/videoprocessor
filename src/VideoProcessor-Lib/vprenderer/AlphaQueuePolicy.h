@@ -177,6 +177,15 @@ namespace AlphaQueuePolicy
 			static_cast<double>(NormalizeDesiredDepth(desiredDepth)) * framePeriodMs;
 	}
 
+	// The rate of the frames the queue holds (hunt 2 13-timing H1): while a pulldown
+	// lock holds they are film frames (frontFilmHz, ~41.7 ms apart at 3:2 on a 60 Hz
+	// signal); otherwise the signal's frames. Judging a film queue with the signal's
+	// period would call target+1 stale again.
+	inline double QueueFrameRateHz(double frontFilmHz, double signalRateHz)
+	{
+		return frontFilmHz > 0.0 && std::isfinite(frontFilmHz) ? frontFilmHz : signalRateHz;
+	}
+
 	inline bool ShouldRecoverBacklog(size_t queueDepth, size_t desiredDepth,
 		double oldestQueuedAgeMs, double renderCycleMs, double frameRateHz,
 		bool staleBeyondTarget = false)

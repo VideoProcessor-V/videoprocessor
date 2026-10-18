@@ -163,6 +163,86 @@ namespace OpenLoopDisplayRate
 		double last = 0.0;
 	};
 
+	// The display's real refresh period from DWM's vblank times (hunt 2 05-renderahead
+	// M5, queue_timing_fixes). Every open-loop rate is a mode or a nominal period, ppm
+	// (or, for a whole-hertz mode, 1.6%) from the display's real refresh: a chain planned
+	// with it drifts until a lateness correction moves it a refresh (about every 170 s
+	// at 100 ppm and 60 Hz) - a dropped extra each time. DWM stamps each vblank on QPC;
+	// a least-squares line through (refresh index, vblank time), exponentially weighted
+	// over kWindowSeconds, gives the real period. The refresh index between two samples
+	// is counted with the nominal rate (samples at most kMaximumGapSeconds apart, so a
+	// 2% nominal error cannot miscount). Refine returns the measured rate when it agrees
+	// with the planned one (kDwmAgreesWithMode: the same display), else the planned.
+	class VBlankGridRate
+	{
+	public:
+		static constexpr double kWindowSeconds = 60.0;
+		static constexpr double kMinimumSpanSeconds = 10.0;
+		static constexpr double kMaximumGapSeconds = 0.25;
+
+		void Reset() { *this = VBlankGridRate(); }
+
+		void Add(double vblankSeconds, double nominalHz)
+		{
+			if (!DisplayRefreshBounds::Accepts(nominalHz) || !(vblankSeconds > 0.0) || !std::isfinite(vblankSeconds))
+				return;
+			if (started && vblankSeconds == last)
+				return;   // the same vblank read again
+			if (started && (vblankSeconds < last || vblankSeconds - last > kMaximumGapSeconds ||
+				std::abs(nominalHz - nominal) > kDwmAgreesWithMode * nominal))
+				Reset();  // a step back, a gap, or another display rate: start over
+			if (!started)
+			{
+				started = true;
+				t0 = vblankSeconds;
+				index = 0.0;
+				nominal = nominalHz;
+			}
+			else
+			{
+				const double periods = std::floor((vblankSeconds - last) * nominalHz + 0.5);
+				if (periods < 1.0)
+					return;   // a vblank read twice within one refresh
+				index += periods;
+			}
+			const double keep = last > 0.0 ? std::exp(-(vblankSeconds - last) / kWindowSeconds) : 1.0;
+			last = vblankSeconds;
+			const double x = index;
+			const double y = vblankSeconds - t0;
+			w = w * keep + 1.0;
+			sx = sx * keep + x;
+			sy = sy * keep + y;
+			sxx = sxx * keep + x * x;
+			sxy = sxy * keep + x * y;
+		}
+
+		// 0 until kMinimumSpanSeconds of vblanks are in.
+		double Hz() const
+		{
+			if (!started || last - t0 < kMinimumSpanSeconds || w < 3.0)
+				return 0.0;
+			const double mx = sx / w, my = sy / w;
+			const double vxx = sxx / w - mx * mx;
+			const double vxy = sxy / w - mx * my;
+			if (!(vxx > 0.0) || !(vxy > 0.0))
+				return 0.0;
+			const double hz = vxx / vxy;
+			return DisplayRefreshBounds::Accepts(hz) ? hz : 0.0;
+		}
+
+		double Refine(double plannedHz) const
+		{
+			const double hz = Hz();
+			return hz > 0.0 && plannedHz > 0.0 && std::abs(hz - plannedHz) <= kDwmAgreesWithMode * plannedHz ?
+				hz : plannedHz;
+		}
+
+	private:
+		bool started = false;
+		double t0 = 0.0, last = 0.0, index = 0.0, nominal = 0.0;
+		double w = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+	};
+
 	// Open-loop lateness by QPC (no statistics to say when a present was shown): a
 	// render-ahead present whose Present call returned more than one refresh after
 	// the vsync it was planned for cannot have been shown on time. One refresh, not

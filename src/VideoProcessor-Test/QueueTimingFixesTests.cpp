@@ -8,6 +8,7 @@
 // 15-intent C3 (rate bounds through one place, no copied literals).
 
 #include <DisplayRefreshRatePolicy.h>
+#include <RendererProfileConfig.h>
 #include <TimingClock.h>
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
 #include <vprenderer/AlphaQueuePolicy.h>
@@ -17,7 +18,6 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
-#include <filesystem>
 #include <windows.h>
 #include <fstream>
 #include <regex>
@@ -34,6 +34,7 @@ namespace Tests
 		{
 			int flushes = 0;
 			int holds = 0;          // gate waits after the startup fill (a repeated refresh)
+			int settledHolds = 0;   // gate waits once the steering has built its margin (kSettleSeconds)
 			size_t maxDepth = 0;
 			double firstFlushSeconds = -1.0;
 		};
@@ -55,15 +56,31 @@ namespace Tests
 		// with arrival jitter; the timeline consumes one source frame per
 		// period / trim of display time; the dequeue gate, the steering and the backlog
 		// check after each render are the renderer's own (AlphaQueuePolicy).
+		// signalHz > 0: pulldown - film frames at rateHz carried by a signal at signalHz
+		// (3:2 for 24 on 60); each film frame enters the queue on the signal frame that
+		// starts it. flushRateHz: the rate the backlog check is given (0 = rateHz).
+		// The steering builds its one-frame margin at 0.05% (about 2000 frames, 83 s at
+		// 24p); before that, arrival jitter at the gate's own depth can hold a refresh.
+		constexpr double kSettleSeconds = 200.0;
+
 		inline Result Run(double rateHz, double ppm, double jitterMs, bool fixes, double seconds,
-			size_t target = 5)
+			size_t target = 5, double signalHz = 0.0, double flushRateHz = 0.0)
 		{
 			Result result;
 			const double period = 1.0 / rateHz;
 			const double arrivalPeriod = period * (1.0 + ppm * 1e-6);
+			const double signalPeriod = signalHz > 0.0 ? (1.0 / signalHz) * (1.0 + ppm * 1e-6) : 0.0;
+			if (flushRateHz <= 0.0)
+				flushRateHz = rateHz;
 			Lcg random;
 			uint64_t nextIndex = 0;
 			auto arrivalTime = [&](uint64_t index) {
+				if (signalHz > 0.0)
+				{
+					// The first signal frame at or after the film frame's start.
+					const double signalIndex = std::ceil(static_cast<double>(index) * signalHz / rateHz - 1e-9);
+					return 0.010 + signalIndex * signalPeriod;
+				}
 				return 0.010 + static_cast<double>(index) * arrivalPeriod;
 			};
 			std::vector<double> jitter;   // per frame, drawn in order
@@ -95,6 +112,8 @@ namespace Tests
 				{
 					if (!startup)
 						++result.holds;
+					if (!startup && now >= kSettleSeconds)
+						++result.settledHolds;
 					now = (std::max)(now, nextArrival());
 					continue;
 				}
@@ -107,7 +126,7 @@ namespace Tests
 				result.maxDepth = (std::max)(result.maxDepth, queue.size());
 				const double oldestAgeMs = queue.empty() ? 0.0 : (now - queue.front()) * 1000.0;
 				if (AlphaQueuePolicy::ShouldRecoverBacklog(queue.size(), target, oldestAgeMs,
-					cycle * 1000.0, rateHz, fixes))
+					cycle * 1000.0, flushRateHz, fixes))
 				{
 					while (queue.size() > target)
 						queue.pop_front();
@@ -166,7 +185,7 @@ namespace Tests
 					Logger::WriteMessage((L"fixed " + what + L": holds " + std::to_wstring(fixed.holds) +
 						L" max depth " + std::to_wstring(fixed.maxDepth)).c_str());
 					if (ppm == 0.0)
-						Assert::AreEqual(0, fixed.holds, (L"no gate hold after the fill: " + what).c_str());
+						Assert::AreEqual(0, fixed.settledHolds, (L"no gate hold once the margin is built: " + what).c_str());
 					Assert::IsTrue(fixed.maxDepth <= 5 + 2, (L"the queue stays within target+2: " + what).c_str());
 				}
 			}
@@ -232,6 +251,32 @@ namespace Tests
 			}
 			const QueueTimingSim::Result film = QueueTimingSim::Run(24.0, 50.0, 3.0, true, 900.0);
 			Assert::AreEqual(0, film.flushes, L"the steering loop at the film rate: no flush");
+		}
+
+		// The lead's 3:2 case: a 60 Hz signal carrying 24 Hz film, the queue holding film
+		// frames (arriving 3, 2, 3, 2 signal periods apart), the timeline consuming them at
+		// the film rate. The backlog check is given the queue's own rate
+		// (QueueFrameRateHz: the front frame's film rate), so the steady state never
+		// flushes; given the signal's rate (60) it would flush at target+1 (5 film frames
+		// ~208 ms old, minus 5 signal periods 83 ms = 125 ms >= 100 ms).
+		TEST_METHOD(PulldownThreeTwoSteadyStateNeverFlushes)
+		{
+			Assert::AreEqual(24.0, AlphaQueuePolicy::QueueFrameRateHz(24.0, 60.0), L"locked: the film rate");
+			Assert::AreEqual(60.0, AlphaQueuePolicy::QueueFrameRateHz(0.0, 60.0), L"not locked: the signal");
+			const double queueRate = AlphaQueuePolicy::QueueFrameRateHz(24.0, 60.0);
+			for (double ppm : { 0.0, 100.0, -100.0 })
+			{
+				const QueueTimingSim::Result film = QueueTimingSim::Run(24.0, ppm, 1.0, true, 900.0, 5, 60.0, queueRate);
+				const std::wstring what = L"3:2 ppm " + std::to_wstring(ppm);
+				Assert::AreEqual(0, film.flushes, (L"no flush at the queue's film rate: " + what).c_str());
+				Assert::IsTrue(film.maxDepth <= 5 + 2, (L"within target+2: " + what).c_str());
+			}
+			const QueueTimingSim::Result signal = QueueTimingSim::Run(24.0, 0.0, 1.0, true, 900.0, 5, 60.0, 60.0);
+			Assert::IsTrue(signal.flushes >= 1, L"judged at the signal's rate the film queue flushes");
+			// 23.976 film on 59.94 too.
+			const QueueTimingSim::Result ntsc = QueueTimingSim::Run(24000.0 / 1001.0, 0.0, 1.0, true, 900.0, 5,
+				60000.0 / 1001.0, AlphaQueuePolicy::QueueFrameRateHz(24000.0 / 1001.0, 60000.0 / 1001.0));
+			Assert::AreEqual(0, ntsc.flushes, L"23.976 on 59.94: no flush");
 		}
 
 		// L3: the steering's smoothing is the same time at every source rate.
@@ -330,6 +375,33 @@ namespace Tests
 
 		// M1: a real mismatch whose action the queue holds back cannot grow the
 		// phase without limit.
+		// M1: the QPC arrival-rate estimate counts a missed or dropped frame's periods
+		// (no bend in the line), ignores a film frame's update at the same time, and
+		// starts over after a break.
+		TEST_METHOD(ArrivalRateCountsMissedFramesAndIgnoresUpdates)
+		{
+			for (double rate : { 24.0, 59.94, 120.0 })
+			{
+				const double real = rate * (1.0 + 40e-6);   // the QPC rate of the frames
+				AlphaArrivalRateEstimator estimator;
+				const uint64_t frames = static_cast<uint64_t>(rate * 300.0);
+				for (uint64_t k = 0; k < frames; ++k)
+				{
+					if (k % 997 == 500)
+						continue;   // a missed capture frame
+					const double t = 10.0 + static_cast<double>(k) / real +
+						(static_cast<int>((k * 7919) % 11) - 5) * 0.0002;
+					estimator.Add(t, rate);
+					if (k % 1500 == 0)
+						estimator.Add(t, rate);   // the same frame updated
+				}
+				const double ppm = (estimator.RateHz() / real - 1.0) * 1e6;
+				Assert::IsTrue(std::abs(ppm) < 2.0, (L"rate " + std::to_wstring(rate) + L" error ppm " + std::to_wstring(ppm)).c_str());
+				estimator.Add(10.0 + static_cast<double>(frames) / real + 5.0, rate);   // a 5 s break
+				Assert::AreEqual(0.0, estimator.RateHz(), L"a break starts the estimate over");
+			}
+		}
+
 		TEST_METHOD(CadencePhaseIsBounded)
 		{
 			AlphaCadenceCorrectionPolicy policy;
@@ -454,6 +526,51 @@ namespace Tests
 			c.hostHz = 59.94;
 			c.cadenceHz = 59.9;
 			Assert::IsTrue(OpenLoopDisplayRate::Select(c, true).source == S::Host, L"the application's rate stays above");
+		}
+
+		// 05-renderahead M5 (rest): the open-loop rate is refined to the display's real
+		// refresh from DWM's vblank times, from a nominal mode and from a whole-hertz mode;
+		// another display's vblanks (a different rate) are not taken.
+		TEST_METHOD(OpenLoopRateIsRefinedFromDwmVBlanks)
+		{
+			for (double planned : { 60000.0 / 1001.0, 59.0, 50.0, 144.0 })
+			{
+				const double real = (planned == 59.0 ? 60000.0 / 1001.0 : planned) * (1.0 - 80e-6);
+				OpenLoopDisplayRate::VBlankGridRate grid;
+				Assert::AreEqual(planned, grid.Refine(planned), L"nothing measured: the planned rate");
+				double t = 20.0;
+				uint64_t k = 0;
+				uint64_t refresh = 0;
+				while (t < 20.0 + 90.0)
+				{
+					// Read once per source frame (every 2 or 3 refreshes), with a missed read.
+					refresh += (k % 2 == 0) ? 2 : 3;
+					if (k % 211 == 100)
+						refresh += 3;
+					t = 20.0 + static_cast<double>(refresh) / real + ((k * 7919) % 7) * 1e-5;
+					grid.Add(t, planned);
+					if (k % 50 == 0)
+						grid.Add(t, planned);   // the same vblank read twice
+					++k;
+				}
+				const double refined = grid.Refine(planned);
+				const double ppm = (refined / real - 1.0) * 1e6;
+				Assert::IsTrue(std::abs(ppm) < 5.0, (L"planned " + std::to_wstring(planned) + L" ppm " + std::to_wstring(ppm)).c_str());
+				Assert::AreEqual(120.0, grid.Refine(120.0), L"a rate the vblanks disagree with is kept");
+			}
+			OpenLoopDisplayRate::VBlankGridRate grid;
+			for (int i = 0; i < 2000; ++i)
+				grid.Add(5.0 + i / 60.0, 60.0);
+			grid.Add(5.0 + 2000 / 60.0 + 1.0, 60.0);   // a 1 s gap: start over
+			Assert::AreEqual(0.0, grid.Hz());
+		}
+
+		TEST_METHOD(QueueTimingFixesIsAValidatedSwitch)
+		{
+			std::string expected;
+			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "queue_timing_fixes", "on", expected));
+			Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", "queue_timing_fixes", "off", expected));
+			Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", "queue_timing_fixes", "auto", expected));
 		}
 
 		// 15-intent C3: one display bound, one capture bound.
