@@ -52,6 +52,10 @@ public:
 		std::string details;
 	};
 	bool RunProjectorTest(ProjectorTestResult& result, std::string& error) const;
+	// Automatic calibration: one wizard command ("status", "detect", "start",
+	// "continue", "skip", "cancel", "apply", "discard"); the status text back.
+	bool Calibration(const std::string& command, const std::string& arguments,
+		std::string& status, std::string& error) const;
 	bool ApplyConfig(const std::string& baseline,
 		const std::string& candidate, ApplyResult& result,
 		std::string& error) const;

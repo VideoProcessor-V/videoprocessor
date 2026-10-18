@@ -4,6 +4,7 @@
 #include "AmbientConfig.h"
 #include "QueueConfiguration.h"
 #include "led/LedDriveConfig.h"
+#include "calibration/CalibrationConfig.h"
 
 #include <algorithm>
 #include <cctype>
@@ -58,7 +59,8 @@ namespace MainConfigSchema
 			section == "shaders" ||
 			section.rfind("shaders.", 0) == 0 ||
 			section.rfind("shader.", 0) == 0 ||
-			LedDrive::OwnsSection(section);
+			LedDrive::OwnsSection(section) ||
+			Calibration::OwnsSection(section);
 	}
 
 	inline bool BoundedInvalidCaptureRecoveryEnabled(const ConfigFile& config)
@@ -389,6 +391,9 @@ namespace MainConfigSchema
 			config, "directshow.ppm", ppmRules, error))
 			return false;
 		if (!LedDrive::Validate(config, error))
+			return false;
+		// Automatic calibration: the [calibration] section.
+		if (!Calibration::ValidateConfig(config, error))
 			return false;
 		if (const auto* aliases = config.GetSectionValues("renderer_alias"))
 			for (const auto& alias : *aliases)

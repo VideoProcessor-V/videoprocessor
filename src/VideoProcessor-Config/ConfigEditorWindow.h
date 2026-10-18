@@ -115,6 +115,11 @@ private:
     QWidget* createShortcutsPage();
     QWidget* createLogsPage();
     QWidget* createLedDrivePage();
+    // Automatic calibration: the [calibration] settings and the wizard (VP runs
+    // the session; this page sends RPC commands and shows its status).
+    QWidget* createCalibrationPage();
+    void runCalibrationCommand(const QString& command);
+    void applyCalibrationStatus(const QString& text, const QString& error, const QString& command);
     QWidget* createProfilePage(const QString& title, const QString& description,
         const QString& sectionPrefix);
     QWidget* createCard(const QString& title, const QString& description, QWidget* content);
@@ -335,6 +340,11 @@ private:
     // off the UI thread; the destructor waits for them.
     QThread* projectorTestThread_ = nullptr;
     QThread* remoteApplyThread_ = nullptr;
+    QThread* calibrationRpcThread_ = nullptr;
+    QTimer* calibrationTimer_ = nullptr;
+    QString calibrationLastStep_;
+    bool calibrationActive_ = false;
+    bool calibrationProbeRunning_ = false;
     QStringList invalidShortcutFields_; // audit 2026-10-16
     QTimer* shaderCacheStatusTimer_ = nullptr;
     QComboBox* actionRendererTarget_ = nullptr;

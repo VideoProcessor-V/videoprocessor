@@ -127,6 +127,8 @@ public:
 	bool GetConversionPerformance(
 		double& currentUs, double& avg10s, double& max10s) const override;
 	bool GetFrameRateAndPPM(double& measuredFps, int& ppmDeviation) const override;
+	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const override;
+	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason) override;
 
 private:
 	IVideoRenderer* m_renderer = nullptr;

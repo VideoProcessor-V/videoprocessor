@@ -1,11 +1,11 @@
-# Automatic calibration (design, 2026-10-17; not built)
+# Automatic calibration (design, 2026-10-17; built 2026-10-18 on feat/calibration-remainder)
 
-> **Status 2026-10-17:** the pure, hardware-free core (pattern plan, display model, LUT,
-> LED fits, outputs, simulators) is built on branch `feat/calibration-core` (de1d92a0),
-> not merged. Still to build: the Argyll meter under ConPTY, the pattern source, the
-> session and the wizard. Owner 2026-10-17: support other meters through ArgyllCMS's
-> instrument list (i1Display/Calibrite, Spyder X/X2, ColorMunki, i1Pro, JETI), with a
-> vendor-SDK slot; the Calibrite below is the first meter, not the only one.
+> **Status 2026-10-18:** built on `feat/calibration-remainder`: the core (de1d92a0) plus the
+> ArgyllCMS meter under ConPTY, renderer patterns, the session, the RPC and the Config wizard.
+> User guide: docs/calibration/AUTO-CALIBRATION.md; report: docs/agent-reports/calibration-remainder.md.
+> **Change from this design:** patches bypass the sigma-delta and dither (exact whole codes,
+> owner 2026-10-17), rather than measuring through the sigma-delta. Not yet built: the LED
+> characterisation runs and the ambient-light check.
 
 ## Summary
 

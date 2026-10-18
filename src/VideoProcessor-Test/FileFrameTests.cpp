@@ -116,10 +116,12 @@ namespace VideoProcessorTest
 		// Claimed 35 on the filter branch; 37 after integ's build ID (35) and the
 		// report-a-problem WriteDiagnosticHistory (36), integ/mpc-state 2026-10-17;
 		// 38 since the intent interpreter's GetIntentStatus / SetAmbientLux
-		// (integ/2026-10-17 round 3). The version check is equality.
-		TEST_METHOD(PluginApiVersionIs38)
+		// (integ/2026-10-17 round 3); 39 since automatic calibration's
+		// GetCalibrationOutput / SetCalibrationPattern (integration round 4; claimed
+		// 36 on its branch). The version check is equality.
+		TEST_METHOD(PluginApiVersionIs39)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(38), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(39), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 	};
 

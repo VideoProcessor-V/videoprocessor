@@ -2169,6 +2169,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_MESSAGE(WM_MESSAGE_STATE_REPORT_DONE, &CVideoProcessorDlg::OnStateReportDone)
 	ON_MESSAGE(WM_MESSAGE_HDR_INFERENCE_PICTURE, &CVideoProcessorDlg::OnMessageHdrInferencePicture)
 	ON_MESSAGE(WM_MESSAGE_DV_TUNNEL_HANDOFF, &CVideoProcessorDlg::OnMessageDvTunnelHandoff)
+	ON_MESSAGE(WM_MESSAGE_CALIBRATION_APPLIED, &CVideoProcessorDlg::OnCalibrationApplied)
 	ON_MESSAGE(WM_MODERN_OPERATOR_ACTION, &CVideoProcessorDlg::OnMessageModernOperatorAction)
 
 	// Command handlers (from accelerator)
@@ -3257,6 +3258,61 @@ void CVideoProcessorDlg::StartProjectorTest(
 	}).detach();
 }
 
+// Automatic calibration: the wizard's commands. The controller answers at
+// once; measurements run on its worker thread.
+ConfigurationRpcProtocol::Frame CVideoProcessorDlg::HandleCalibrationRpc(
+	const ConfigurationRpcProtocol::Frame& request)
+{
+	using namespace ConfigurationRpcProtocol;
+	size_t cursor = 2;
+	std::string command, arguments;
+	if (!ReadString(request.payload, cursor, command) || command.empty() || command.size() > 32 ||
+		!ReadString(request.payload, cursor, arguments) || arguments.size() > 4096 ||
+		cursor != request.payload.size())
+		return ConfigurationRpcError(request.operation, "Invalid calibration request.");
+	if (!m_calibration)
+	{
+		Calibration::CalibrationController::Hooks hooks;
+		hooks.renderer = [this]()
+		{
+			return std::atomic_load_explicit(&m_videoRenderer, std::memory_order_acquire);
+		};
+		hooks.activeColorProfile = []()
+		{
+			ActiveProfileStatus::Snapshot snapshot;
+			if (!ActiveProfileStatus::Read(GetCurrentProcessId(), snapshot)) return std::string();
+			return std::string(snapshot.color, strnlen_s(snapshot.color, sizeof(snapshot.color)));
+		};
+		hooks.displayName = []()
+		{
+			ConfigFile config;
+			std::string name;
+			if (config.Load(ConfigFile::DEFAULT_FILENAME, ConfigFile::ReadPolicy::Fresh))
+				config.TryGetString("general", "fullscreen_monitor_name", name);
+			return ConfigFile::Trim(name);
+		};
+		const HWND window = GetSafeHwnd();
+		hooks.applied = [window]() { ::PostMessageW(window, WM_MESSAGE_CALIBRATION_APPLIED, 0, 0); };
+		m_calibration.reset(new Calibration::CalibrationController(hooks));
+	}
+	const std::string text = m_calibration->Handle(command, arguments);
+	Frame response;
+	response.operation = static_cast<uint16_t>(request.operation | ResponseFlag);
+	if (!WriteString(response.payload, text))
+		return ConfigurationRpcError(request.operation, "The calibration status exceeded the RPC limit.");
+	return response;
+}
+
+LRESULT CVideoProcessorDlg::OnCalibrationApplied(WPARAM, LPARAM)
+{
+	// The session saved the calibration LUT keys (after its backups); publish
+	// them like a Config Apply.
+	DebugLog::Log("Calibration: applying the saved configuration (calibration LUTs)");
+	if (!ApplySavedConfiguration(false))
+		DebugLog::Log("Calibration: the saved configuration could not be applied at once; it applies on the next restart");
+	return 0;
+}
+
 LRESULT CVideoProcessorDlg::OnProjectorTestDone(WPARAM, LPARAM)
 {
 	// Also when the renderer was created during the test (audit stage8-rs232
@@ -3285,7 +3341,8 @@ ConfigurationRpcProtocol::Frame CVideoProcessorDlg::HandleConfigurationRpc(
 		operation != static_cast<uint16_t>(Operation::GetCapabilities) &&
 		operation != static_cast<uint16_t>(Operation::ApplyConfig) &&
 		operation != static_cast<uint16_t>(Operation::SelectProfile) &&
-		operation != static_cast<uint16_t>(Operation::RunAction))
+		operation != static_cast<uint16_t>(Operation::RunAction) &&
+		operation != static_cast<uint16_t>(Operation::Calibration))
 		return ConfigurationRpcError(operation, "Unsupported RPC operation.");
 	if (m_wantToTerminate)
 		return ConfigurationRpcError(operation, "VideoProcessor is stopping.");
@@ -3330,6 +3387,8 @@ ConfigurationRpcProtocol::Frame CVideoProcessorDlg::HandleConfigurationRpc(
 		response.operation = static_cast<uint16_t>(operation | ResponseFlag);
 		return response;
 	}
+	if (operation == static_cast<uint16_t>(Operation::Calibration))
+		return HandleCalibrationRpc(request);
 	if (operation == static_cast<uint16_t>(Operation::RunAction))
 	{
 		size_t cursor = 2;
@@ -5334,6 +5393,8 @@ bool CVideoProcessorDlg::TryGetDisplayRefreshRateOverride(
 CVideoProcessorDlg::~CVideoProcessorDlg()
 {
 	m_configurationRpcServer.Stop();
+	if (m_calibration)
+		m_calibration->Shutdown();
 	KillTimer(PROFILE_CHANGE_OVERLAY_TIMER_ID);
 	KillTimer(ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID);
 	ClearStagedConfiguration();
@@ -11406,6 +11467,10 @@ void CVideoProcessorDlg::DestroyVideoRenderer()
 	m_freshRendererProfileName.clear();
 	if (!m_videoRenderer)
 		return;
+	// Automatic calibration: patches stop and a run is cancelled before the
+	// renderer goes (the session never calls a renderer being destroyed).
+	if (m_calibration)
+		m_calibration->RendererGoing();
 	if (m_fullscreenRetargetPending)
 		ClearFullscreenRetarget(true);
 	m_rendererCaptureVideoStateNotificationSequence = 0;
@@ -16861,6 +16926,9 @@ void CVideoProcessorDlg::OnClose()
 	// Bug hunt 2 (H1): the exit is bounded from the first close request.
 	ArmShutdownDeadline("close");
 	m_configurationRpcServer.Stop();
+	// Automatic calibration: cancel a run (patterns off, meter closed) first.
+	if (m_calibration)
+		m_calibration->Shutdown();
 	KillTimer(FULLSCREEN_FOCUS_TIMER_ID);
 	if (m_fullscreenRetargetPending)
 		ClearFullscreenRetarget(false);

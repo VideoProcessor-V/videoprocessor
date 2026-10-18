@@ -353,6 +353,9 @@
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="SourceResolutionLatchTests.cpp" />
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
+    <ClCompile Include="CalibrationCoreTests.cpp" />
+    <ClCompile Include="CalibrationRemainderTests.cpp" />
+    <ClCompile Include="CalibrationMeterTests.cpp" />
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
     <ClCompile Include="BugHunt2GuiTests.cpp" />
@@ -487,6 +490,12 @@
   <ItemGroup>
     <ProjectReference Include="..\VideoProcessor-Lib\VideoProcessor-Lib.vcxproj">
       <Project>{85f8c0f9-ac94-470e-9302-16fc536e506f}</Project>
+    </ProjectReference>
+    <!-- Build order only: CalibrationMeterTests runs x64/Release/test-tools/fake_spotread.exe. -->
+    <ProjectReference Include="..\VideoProcessor-FakeSpotread\VideoProcessor-FakeSpotread.vcxproj">
+      <Project>{6c1e2b7a-3f4d-4e8a-9b21-7d5c0a9e4f31}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

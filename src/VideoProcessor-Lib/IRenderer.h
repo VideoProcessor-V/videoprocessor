@@ -22,6 +22,7 @@
 #include <RendererOutputContractStatus.h>
 #include <SubtitleRepositionMode.h>
 #include <DiagnosticHistory.h>
+#include "calibration/CalibrationPattern.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -681,6 +682,30 @@ public:
 	virtual void SetAmbientLux(double lux, bool valid, double nowSeconds)
 	{
 		(void)lux; (void)valid; (void)nowSeconds;
+	}
+
+	// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md, plugin API
+	// 39; claimed 36 on its branch, after the intent methods in the vtable):
+	// the output a patch is shown in (swapchain depth, colour depth,
+	// range, transfer, size, measured refresh) and which patch generation was
+	// presented. False (info.available false, info.reason set) when this
+	// renderer cannot show patches.
+	virtual bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const
+	{
+		info = Calibration::PatternOutputInfo();
+		const char text[] = "this renderer cannot show calibration patches (use VP Renderer)";
+		for (size_t i = 0; i < sizeof(text) && i < sizeof(info.reason); ++i) info.reason[i] = text[i];
+		return false;
+	}
+
+	// Shows a patch (exact codes written to the backbuffer; the sigma-delta,
+	// dither, LUT and all shading bypassed for the patch only) or, with
+	// request.active false, returns to video. While a patch is active the
+	// renderer drops incoming frames and holds the LED drive at full light.
+	virtual bool SetCalibrationPattern(const Calibration::PatternRequest&, CString& reason)
+	{
+		reason = TEXT("this renderer cannot show calibration patches (use VP Renderer)");
+		return false;
 	}
 
 };

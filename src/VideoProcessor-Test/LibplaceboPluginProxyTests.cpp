@@ -468,7 +468,27 @@ namespace VideoProcessorTest
 			Assert::IsTrue((std::is_same_v<
 				decltype(&LibplaceboPluginVideoRenderer::CancelFileFrameWait),
 				void (LibplaceboPluginVideoRenderer::*)()>));
-			Assert::AreEqual(static_cast<uint32_t>(38), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(39), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+		}
+
+		TEST_METHOD(IntentAndCalibrationHaveExplicitProxyOverrides)
+		{
+			// ABI 38 (intent: GetIntentStatus / SetAmbientLux) and ABI 39 (automatic
+			// calibration, claimed 36 on its branch, appended after the intent methods):
+			// every call is forwarded to the plugin.
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::GetIntentStatus),
+				bool (LibplaceboPluginVideoRenderer::*)(IntentStatus&) const>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::SetAmbientLux),
+				void (LibplaceboPluginVideoRenderer::*)(double, bool, double)>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::GetCalibrationOutput),
+				bool (LibplaceboPluginVideoRenderer::*)(Calibration::PatternOutputInfo&) const>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::SetCalibrationPattern),
+				bool (LibplaceboPluginVideoRenderer::*)(const Calibration::PatternRequest&, CString&)>));
+			Assert::AreEqual(static_cast<uint32_t>(39), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 
 		TEST_METHOD(ShutdownFinalizationHasExplicitProxyOverride)

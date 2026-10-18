@@ -165,6 +165,8 @@ public:
 		int width, int height, int stride) override;
 	bool GetConversionPerformance(double& currentUs, double& avg10s, double& max10s) const override;
 	bool GetFrameRateAndPPM(double& measuredFps, int& ppmDeviation) const override;
+	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const override;
+	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason) override;
 
 private:
 	struct Impl;
@@ -311,7 +313,7 @@ private:
 	int64_t FileHeadTicksUntilDueLocked() const;
 	// The render loop's dequeue wait: CanDequeueLocked, then (file heads only)
 	// the head's due time.
-	void WaitForDequeueLocked(std::unique_lock<std::mutex>& lock);
+	void WaitForDequeueLocked(std::unique_lock<std::mutex>& lock, bool wakeOnCalibrationPattern = false);
 	bool FileFrameSlotFreeLocked() const;
 	void ResetFrameRateAndPPM();
 	void ApplyPendingShaderSelectionLocked();
@@ -502,6 +504,11 @@ private:
 	// new Impl, starts in the right path (it was lost until the next snapshot apply).
 	bool m_lowLatencyQueue = false;
 	void UpdateLedDrive(const ConfigFile& configuration);
+	// Automatic calibration: a patch replaces video while this is set (the render
+	// loop presents it each refresh; incoming frames are dropped). The LED drive
+	// is stopped (full light) for the patches and restarted after them.
+	std::atomic_bool m_calibrationPatternActive{false};
+	bool m_calibrationLedSuspended = false;
 };
 
 // Tests only (planner Q4): see LibplaceboVideoRenderer.cpp.

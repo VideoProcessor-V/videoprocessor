@@ -82,6 +82,7 @@
 #include <led/LedDriveArbiter.h>
 #include <led/LedDriveHoldover.h>
 #include <filesource/FileHostSettings.h>
+#include <calibration/CalibrationPattern.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
@@ -7315,6 +7316,7 @@ struct LibplaceboVideoRenderer::Impl
 				pl_tex_destroy(d3d11->gpu, &statsOverlayTexture);
 				pl_tex_destroy(d3d11->gpu, &sweepOverlayTexture);
 				pl_tex_destroy(d3d11->gpu, &profileOverlayTexture);
+				pl_tex_destroy(d3d11->gpu, &calibrationPatchTexture);
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
 				captureUnpack.reset();   // its textures and dispatch, before the device
@@ -7414,6 +7416,198 @@ struct LibplaceboVideoRenderer::Impl
 	bool externalStateAbandonedForShutdown = false;
 
 	bool dvTransitionBlackActive = false;
+
+	// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): the patch
+	// the render loop presents instead of video, as raw codes written to the
+	// backbuffer. No libplacebo pass runs for it, so the sigma-delta, dither,
+	// LUT, tone / gamut mapping and every hook are bypassed for the patch only;
+	// the swapchain, its DXGI colour space and HDR signalling stay as they are.
+	std::mutex calibrationPatternMutex;
+	Calibration::PatternRequest calibrationPattern;
+	std::atomic<uint64_t> calibrationPresentedGeneration{ 0 };
+	std::atomic<uint64_t> calibrationPresentsOfGeneration{ 0 };
+	std::atomic<uint32_t> calibrationSurfaceWidth{ 0 };
+	std::atomic<uint32_t> calibrationSurfaceHeight{ 0 };
+	std::atomic<int> calibrationTargetTransfer{ -1 };   // pl_color_transfer of the last video frame's target
+	pl_tex calibrationPatchTexture = nullptr;
+	bool calibrationWindowFallbackLogged = false;
+	bool calibrationFailureLogged = false;
+	mutable std::mutex calibrationOutputCacheMutex;
+	Calibration::PatternOutputInfo calibrationOutputCache;
+	std::atomic<uint64_t> calibrationReadbackGeneration{ 0 };
+	std::atomic<uint32_t> calibrationReadbackCenter{ 0 };   // R10G10B10A2 words
+	std::atomic<uint32_t> calibrationReadbackCorner{ 0 };
+
+	// Tests (PatternReadback): the filled backbuffer's centre and corner pixels.
+	void ReadBackCalibrationPattern(ID3D11Texture2D* backbuffer, uint64_t generation)
+	{
+		std::vector<uint32_t> pixels;
+		D3D11_TEXTURE2D_DESC desc{};
+		std::string error;
+		if (!ReadR10Texture(backbuffer, pixels, desc, error) || pixels.empty())
+		{
+			DebugLog::Log("Calibration patterns: readback unavailable (%s)", error.c_str());
+			return;
+		}
+		calibrationReadbackCenter.store(pixels[static_cast<size_t>(desc.Height / 2) * desc.Width + desc.Width / 2],
+			std::memory_order_release);
+		calibrationReadbackCorner.store(pixels[0], std::memory_order_release);
+		calibrationReadbackGeneration.store(generation, std::memory_order_release);
+	}
+
+	// Writes the patch into fbo: the background, then the window (a cleared
+	// texture of the same format blitted 1:1, so the codes stay exact).
+	bool FillCalibrationPattern(pl_tex fbo, const Calibration::PatternRequest& pattern)
+	{
+		if (!fbo || !d3d11 || !d3d11->gpu) return false;
+		const pl_gpu gpu = d3d11->gpu;
+		const double maxValue =
+			negotiatedSwapchainFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? 1023.0 :
+			negotiatedSwapchainFormat == DXGI_FORMAT_R8G8B8A8_UNORM ||
+			negotiatedSwapchainFormat == DXGI_FORMAT_B8G8R8A8_UNORM ? 255.0 : 0.0;
+		if (!(maxValue > 0.0) || !fbo->params.renderable) return false;
+		const float patch[4] = {
+			static_cast<float>(pattern.patch[0] / maxValue), static_cast<float>(pattern.patch[1] / maxValue),
+			static_cast<float>(pattern.patch[2] / maxValue), 1.0f };
+		const float background[4] = {
+			static_cast<float>(pattern.background[0] / maxValue), static_cast<float>(pattern.background[1] / maxValue),
+			static_cast<float>(pattern.background[2] / maxValue), 1.0f };
+		const int width = fbo->params.w, height = fbo->params.h;
+		const Calibration::PixelRect rect = Calibration::PatchWindowRect(width, height, pattern.windowAreaPercent);
+		const bool fullField = rect.left == 0 && rect.top == 0 && rect.right == width && rect.bottom == height;
+		if (fullField)
+		{
+			pl_tex_clear(gpu, fbo, patch);
+			return true;
+		}
+		bool windowed = fbo->params.blit_dst;
+		if (windowed && (!calibrationPatchTexture || calibrationPatchTexture->params.w != rect.Width() ||
+			calibrationPatchTexture->params.h != rect.Height() ||
+			calibrationPatchTexture->params.format != fbo->params.format))
+		{
+			pl_tex_destroy(gpu, &calibrationPatchTexture);
+			pl_tex_params params{};
+			params.w = rect.Width();
+			params.h = rect.Height();
+			params.format = fbo->params.format;
+			params.renderable = true;
+			params.blit_src = true;
+			calibrationPatchTexture = pl_tex_create(gpu, &params);
+			windowed = calibrationPatchTexture != nullptr;
+		}
+		if (!windowed)
+		{
+			// The surface cannot take a blit: full field (exact codes still).
+			if (!calibrationWindowFallbackLogged)
+			{
+				calibrationWindowFallbackLogged = true;
+				DebugLog::Log("Calibration patterns: windowed patch unavailable on this surface (blit_dst=%d); full field shown",
+					fbo->params.blit_dst ? 1 : 0);
+			}
+			pl_tex_clear(gpu, fbo, patch);
+			return true;
+		}
+		pl_tex_clear(gpu, fbo, background);
+		pl_tex_clear(gpu, calibrationPatchTexture, patch);
+		pl_tex_blit_params blit{};
+		blit.src = calibrationPatchTexture;
+		blit.dst = fbo;
+		blit.src_rc.x0 = 0; blit.src_rc.y0 = 0; blit.src_rc.z0 = 0;
+		blit.src_rc.x1 = rect.Width(); blit.src_rc.y1 = rect.Height(); blit.src_rc.z1 = 1;
+		blit.dst_rc.x0 = rect.left; blit.dst_rc.y0 = rect.top; blit.dst_rc.z0 = 0;
+		blit.dst_rc.x1 = rect.right; blit.dst_rc.y1 = rect.bottom; blit.dst_rc.z1 = 1;
+		blit.sample_mode = PL_TEX_SAMPLE_NEAREST;
+		pl_tex_blit(gpu, &blit);
+		return true;
+	}
+
+	// One refresh of the current patch (the caller holds renderMutex).
+	bool PresentCalibrationPattern()
+	{
+		if (!d3d11 || !d3d11->gpu || !swapchain || outputResourcesRetired)
+			return false;
+		Calibration::PatternRequest pattern;
+		{
+			std::lock_guard<std::mutex> guard(calibrationPatternMutex);
+			pattern = calibrationPattern;
+		}
+		if (!pattern.active)
+			return false;
+		bool filled = false;
+		bool presented = false;
+		uint32_t width = 0, height = 0;
+		if (vpOwnedSwapchain)
+		{
+			CComPtr<ID3D11Texture2D> backbuffer;
+			if (FAILED(vpOwnedSwapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))) || !backbuffer)
+				return false;
+			pl_d3d11_wrap_params wrapParams{};
+			wrapParams.tex = static_cast<ID3D11Resource*>(backbuffer.p);
+			pl_tex targetTexture = pl_d3d11_wrap(d3d11->gpu, &wrapParams);
+			if (targetTexture)
+			{
+				width = static_cast<uint32_t>(targetTexture->params.w);
+				height = static_cast<uint32_t>(targetTexture->params.h);
+				filled = FillCalibrationPattern(targetTexture, pattern);
+				pl_gpu_flush(d3d11->gpu);
+				pl_tex_destroy(d3d11->gpu, &targetTexture);
+				if (filled && (pattern.flags & Calibration::PatternReadback) &&
+					calibrationReadbackGeneration.load(std::memory_order_acquire) != pattern.generation)
+					ReadBackCalibrationPattern(backbuffer, pattern.generation);
+			}
+			backbuffer.Release();
+			if (filled)
+				presented = SUCCEEDED(vpOwnedSwapchain->Present(1, 0));
+		}
+		else
+		{
+			struct pl_swapchain_frame frame{};
+			if (!pl_swapchain_start_frame(swapchain, &frame))
+				return false;
+			if (frame.fbo)
+			{
+				width = static_cast<uint32_t>(frame.fbo->params.w);
+				height = static_cast<uint32_t>(frame.fbo->params.h);
+			}
+			filled = FillCalibrationPattern(frame.fbo, pattern);
+			if (filled && (pattern.flags & Calibration::PatternReadback) &&
+				calibrationReadbackGeneration.load(std::memory_order_acquire) != pattern.generation)
+			{
+				pl_gpu_flush(d3d11->gpu);
+				ReadBackCalibrationPattern(nullptr, pattern.generation);
+			}
+			if (!filled)
+			{
+				struct pl_frame target{};
+				pl_frame_from_swapchain(&target, &frame);
+				const float black[] = { 0.0f, 0.0f, 0.0f };
+				pl_frame_clear(d3d11->gpu, &target, black);
+			}
+			presented = pl_swapchain_submit_frame(swapchain);
+			if (presented)
+				pl_swapchain_swap_buffers(swapchain);
+			presented = presented && filled;
+		}
+		if (!presented)
+		{
+			if (!calibrationFailureLogged)
+			{
+				calibrationFailureLogged = true;
+				DebugLog::Log("Calibration patterns: present failed (filled=%d format=%d)", filled ? 1 : 0,
+					static_cast<int>(negotiatedSwapchainFormat));
+			}
+			return false;
+		}
+		calibrationSurfaceWidth.store(width, std::memory_order_release);
+		calibrationSurfaceHeight.store(height, std::memory_order_release);
+		if (calibrationPresentedGeneration.load(std::memory_order_acquire) != pattern.generation)
+		{
+			calibrationPresentsOfGeneration.store(0, std::memory_order_release);
+			calibrationPresentedGeneration.store(pattern.generation, std::memory_order_release);
+		}
+		calibrationPresentsOfGeneration.fetch_add(1, std::memory_order_acq_rel);
+		return true;
+	}
 
 	bool PresentBlackFrame(bool logPresentation = true)
 	{
@@ -17950,6 +18144,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Ambient adaptation (intent interpreter item 3, 2026-10-17): the black this frame
 		// renders to; exactly sdr_black_nits while ambient_adapt is off or at strength 0.
 		const double renderBlackNits = IntentTargetBlackNits(sourceSequence);
+		calibrationTargetTransfer.store(static_cast<int>(baseTarget.color.transfer), std::memory_order_release);
 		LibplaceboRenderParameters::ApplyTargetLuminance(
 			inputIsSdr, static_cast<float>(sdrTargetNits),
 			static_cast<float>(renderBlackNits), baseTarget.color);
@@ -23994,6 +24189,9 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	const int64_t callbackQpc = PerformanceCounterNow();
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
+	// Automatic calibration: patches replace video; frames are not queued.
+	if (m_calibrationPatternActive.load(std::memory_order_acquire))
+		return;
 	// The frame's hardware arrival on the QPC clock: the capture clock and
 	// QPC read back to back give the frame's age at this moment.
 	int64_t arrivalQpc = 0;
@@ -24566,12 +24764,21 @@ int64_t LibplaceboVideoRenderer::FileHeadTicksUntilDueLocked() const
 }
 
 
-void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock)
+void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock,
+	bool wakeOnCalibrationPattern)
 {
+	// wakeOnCalibrationPattern (integration round 4): the render loop's preview
+	// wait also returns when a calibration patch starts, as on its branch; the
+	// caller checks m_calibrationPatternActive and presents the patch instead.
+	const auto calibrationActive = [this, wakeOnCalibrationPattern]() {
+		return wakeOnCalibrationPattern &&
+			m_calibrationPatternActive.load(std::memory_order_acquire);
+	};
 	for (;;)
 	{
-		m_queueChanged.wait(lock, [this]() { return m_stopRequested || CanDequeueLocked(); });
-		if (m_stopRequested)
+		m_queueChanged.wait(lock, [this, &calibrationActive]() {
+			return m_stopRequested || CanDequeueLocked() || calibrationActive(); });
+		if (m_stopRequested || calibrationActive())
 			return;
 		// Capture heads: 0 at once, the wait above unchanged.
 		const int64_t ticks = FileHeadTicksUntilDueLocked();
@@ -26429,6 +26636,145 @@ bool LibplaceboVideoRenderer::GetPresentationTargetTiming(
 // RS-232 connection test: stop the LED drive (it restores full light and
 // closes the port), unless video is playing; ResumeLedDriveAfterTest starts it
 // again from the saved settings.
+bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInfo& info) const
+{
+	info = Calibration::PatternOutputInfo();
+	auto setReason = [&info](const char* text) { strncpy_s(info.reason, sizeof(info.reason), text, _TRUNCATE); };
+	if (!m_impl || !m_implInitialized.load(std::memory_order_acquire))
+	{
+		setReason("the VP Renderer is not running (start VP with any source)");
+		return false;
+	}
+	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
+	{
+		setReason("the VP Renderer is not rendering (start VP with any source)");
+		return false;
+	}
+	// The format fields are render-thread state: read under renderMutex, which
+	// the loop releases between refreshes; a cached copy answers when it stays busy.
+	bool fresh = false;
+	for (int attempt = 0; attempt < 100 && !fresh; ++attempt)
+	{
+		std::unique_lock<std::mutex> guard(m_impl->renderMutex, std::try_to_lock);
+		if (!guard.owns_lock())
+		{
+			Sleep(2);
+			continue;
+		}
+		Calibration::PatternOutputInfo current;
+		const DXGI_FORMAT format = m_impl->negotiatedSwapchainFormat;
+		current.containerBits =
+			format == DXGI_FORMAT_R10G10B10A2_UNORM ? 10 :
+			format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 16 :
+			format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM ? 8 : 0;
+		current.codeBits = current.containerBits;
+		const std::string depth = m_impl->activeSettings.displayBitDepth;
+		if ((depth == "8" || depth == "10") && (current.containerBits == 8 || current.containerBits == 10))
+			current.codeBits = (std::min)(current.containerBits, static_cast<uint32_t>(std::stoi(depth)));
+		current.limitedRange = Impl::EncodingLevels(m_impl->actualOutput.encoding) == PL_COLOR_LEVELS_LIMITED;
+		current.bt2020 = m_impl->TargetIsBt2020();
+		const int transfer = m_impl->calibrationTargetTransfer.load(std::memory_order_acquire);
+		current.transfer = transfer == PL_COLOR_TRC_PQ ? Calibration::SignalTransfer::Pq :
+			transfer == PL_COLOR_TRC_HLG ? Calibration::SignalTransfer::Hlg : Calibration::SignalTransfer::Sdr;
+		double hz = m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+		if (!(hz > 0.0)) hz = MonitorRefreshHz(m_videoHwnd);
+		current.refreshHz = hz;
+		current.available = m_impl->swapchain != nullptr && !m_impl->outputResourcesRetired;
+		if (!current.available) strncpy_s(current.reason, sizeof(current.reason), "the output is not ready", _TRUNCATE);
+		std::lock_guard<std::mutex> cache(m_impl->calibrationOutputCacheMutex);
+		m_impl->calibrationOutputCache = current;
+		fresh = true;
+	}
+	{
+		std::lock_guard<std::mutex> cache(m_impl->calibrationOutputCacheMutex);
+		info = m_impl->calibrationOutputCache;
+	}
+	if (!fresh && info.containerBits == 0)
+	{
+		setReason("the VP Renderer is busy; try again");
+		return false;
+	}
+	info.width = m_impl->calibrationSurfaceWidth.load(std::memory_order_acquire);
+	info.height = m_impl->calibrationSurfaceHeight.load(std::memory_order_acquire);
+	info.presentedGeneration = m_impl->calibrationPresentedGeneration.load(std::memory_order_acquire);
+	info.presentsOfGeneration = m_impl->calibrationPresentsOfGeneration.load(std::memory_order_acquire);
+	info.readbackGeneration = m_impl->calibrationReadbackGeneration.load(std::memory_order_acquire);
+	const uint32_t center = m_impl->calibrationReadbackCenter.load(std::memory_order_acquire);
+	const uint32_t corner = m_impl->calibrationReadbackCorner.load(std::memory_order_acquire);
+	for (int c = 0; c < 3; ++c)
+	{
+		info.readbackCenter[c] = static_cast<uint16_t>((center >> (10 * c)) & 0x3FF);
+		info.readbackCorner[c] = static_cast<uint16_t>((corner >> (10 * c)) & 0x3FF);
+	}
+	return info.available;
+}
+
+bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason)
+{
+	reason.Empty();
+	if (!m_impl)
+	{
+		reason = TEXT("the VP Renderer is not running");
+		return !request.active;
+	}
+	if (request.active)
+	{
+		if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
+		{
+			reason = TEXT("the VP Renderer is not rendering (start VP with any source)");
+			return false;
+		}
+		{
+			std::lock_guard<std::mutex> guard(m_impl->calibrationPatternMutex);
+			m_impl->calibrationPattern = request;
+		}
+		if (!m_calibrationPatternActive.load(std::memory_order_acquire))
+		{
+			// The LED drive stops (Stop() restores full light: LDMM 0, LPW1 to the
+			// ceiling, CNTR 50) so no APL command moves the light between patches.
+			std::shared_ptr<LedDrive::LedDriveModule> module;
+			{
+				std::unique_lock<std::mutex> guard(m_stateMutex);
+				module = m_ledDrive;
+				if (module)
+				{
+					m_ledDrive.reset();
+					m_ledDriveSignature.clear();
+					m_ledDriveSuspended = true;
+					m_calibrationLedSuspended = true;
+					std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+					std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
+				}
+			}
+			if (module)
+				module->Stop();
+			m_impl->calibrationWindowFallbackLogged = false;
+			m_impl->calibrationFailureLogged = false;
+			m_calibrationPatternActive.store(true, std::memory_order_release);
+			BeginQueueGeneration("calibration patterns");
+			DebugLog::Log("Calibration patterns: started (video paused, Dynamic Drive %s)",
+				module ? "stopped at full light" : "not running");
+		}
+		m_queueChanged.notify_all();
+		return true;
+	}
+	if (!m_calibrationPatternActive.exchange(false, std::memory_order_acq_rel))
+		return true;
+	{
+		std::lock_guard<std::mutex> guard(m_impl->calibrationPatternMutex);
+		m_impl->calibrationPattern.active = false;
+	}
+	BeginQueueGeneration("calibration patterns ended");
+	m_queueChanged.notify_all();
+	if (m_calibrationLedSuspended)
+	{
+		m_calibrationLedSuspended = false;
+		ResumeLedDriveAfterTest();
+	}
+	DebugLog::Log("Calibration patterns: ended (video resumes)");
+	return true;
+}
+
 bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
 {
 	reason.Empty();
@@ -28295,11 +28641,33 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// frame alone with nothing queued); depth only, no scheduling change.
 		const bool intentWalkActive = m_impl && m_impl->intentInterpreter->Active();
 		size_t intentWantedLookahead = 0;
+		// Automatic calibration: while a patch is active it is presented every
+		// refresh instead of video (Present paces the loop at the display's rate).
+		if (m_impl && m_calibrationPatternActive.load(std::memory_order_acquire))
+		{
+			{
+				std::lock_guard<std::mutex> queueGuard(m_queueMutex);
+				if (m_stopRequested) break;
+			}
+			bool patternPresented = false;
+			{
+				std::lock_guard<std::mutex> renderGuard(m_impl->renderMutex);
+				patternPresented = m_impl->PresentCalibrationPattern();
+			}
+			if (!patternPresented)
+			{
+				std::unique_lock<std::mutex> idle(m_queueMutex);
+				m_queueChanged.wait_for(idle, std::chrono::milliseconds(20));
+			}
+			continue;
+		}
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> previewLock(m_queueMutex);
-			WaitForDequeueLocked(previewLock);   // ABI 37: file heads at their due time
+			WaitForDequeueLocked(previewLock, true);   // ABI 37: file heads at their due time;
+			// calibration: also woken when a patch starts (handled below)
 			if (m_stopRequested) break;
+			if (m_calibrationPatternActive.load(std::memory_order_acquire)) continue;
 			previewWaitMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - waitStarted).count();
             intentWantedLookahead = intentWalkActive ? IntentInterpreter::WantedWalkFrames(m_frameQueue.size()) : 0;

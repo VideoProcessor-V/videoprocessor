@@ -5422,8 +5422,10 @@ namespace VideoProcessorTest
 			// 36: IVideoRenderer::WriteDiagnosticHistory (report-a-problem, 2026-10-17);
 			// 37: the VP Renderer DirectShow filter (NV12/P010/P016, FileFrameTiming,
 			// file-frame methods; claimed 35 on its branch); 38: GetIntentStatus /
-			// SetAmbientLux (intent interpreter items 2-5; claimed 36 on its branch).
-			Assert::AreEqual(static_cast<uint32_t>(38),
+			// SetAmbientLux (intent interpreter items 2-5; claimed 36 on its branch);
+			// 39: GetCalibrationOutput / SetCalibrationPattern (automatic calibration;
+			// claimed 36 on its branch).
+			Assert::AreEqual(static_cast<uint32_t>(39),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

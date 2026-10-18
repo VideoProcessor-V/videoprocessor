@@ -34,13 +34,16 @@
 // 38: GetIntentStatus / SetAmbientLux (intent interpreter items 2-5,
 // 2026-10-17; claimed 36 on its branch), after the file-frame methods in the
 // vtable. The check is equality, so a gap in the numbering is harmless.
+// 39: GetCalibrationOutput / SetCalibrationPattern (automatic calibration,
+// 2026-10-17; claimed 36 on its branch), after GetIntentStatus /
+// SetAmbientLux in the vtable.
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 38;
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 39;
 static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
 	"VideoProcessorLibplaceboGetBuildId";
 // Returns the DLL's 32-hex-digit build ID (static storage); never throws.

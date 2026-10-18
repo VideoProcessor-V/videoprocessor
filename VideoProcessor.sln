@@ -38,6 +38,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-StreamRecord
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-VPRendererFilter", "src\VideoProcessor-VPRendererFilter\VideoProcessor-VPRendererFilter.vcxproj", "{1A02A006-A2C2-48F8-A2F8-BC068739B3F4}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VideoProcessor-FakeSpotread", "src\VideoProcessor-FakeSpotread\VideoProcessor-FakeSpotread.vcxproj", "{6C1E2B7A-3F4D-4E8A-9B21-7D5C0A9E4F31}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -278,6 +280,11 @@ Global
 		{1A02A006-A2C2-48F8-A2F8-BC068739B3F4}.Release - PGO Optimize|x64.Build.0 = Release|x64
 		{1A02A006-A2C2-48F8-A2F8-BC068739B3F4}.Release|x64.ActiveCfg = Release|x64
 		{1A02A006-A2C2-48F8-A2F8-BC068739B3F4}.Release|x64.Build.0 = Release|x64
+		{6C1E2B7A-3F4D-4E8A-9B21-7D5C0A9E4F31}.Debug|x64.ActiveCfg = Release|x64
+		{6C1E2B7A-3F4D-4E8A-9B21-7D5C0A9E4F31}.Debug|x86.ActiveCfg = Release|x64
+		{6C1E2B7A-3F4D-4E8A-9B21-7D5C0A9E4F31}.Release|x64.ActiveCfg = Release|x64
+		{6C1E2B7A-3F4D-4E8A-9B21-7D5C0A9E4F31}.Release|x64.Build.0 = Release|x64
+		{6C1E2B7A-3F4D-4E8A-9B21-7D5C0A9E4F31}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
