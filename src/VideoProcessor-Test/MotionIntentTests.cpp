@@ -97,7 +97,10 @@ namespace Tests
         {
             IntentInterpreter::Observer observer;
             uint64_t sequence = 0;
-            Rig(MotionIntentPolicy policy, double minScale = 0.5, double minShot = 0.5, bool rolloff = false)
+            // easeSeconds 0: the instant decision at the cut (the rules these observer
+            // tests pin); the fade model has its own tests (MotionIntentEaseTests).
+            Rig(MotionIntentPolicy policy, double minScale = 0.5, double minShot = 0.5, bool rolloff = false,
+                double easeSeconds = 0.0)
             {
                 IntentInterpreter::Switches sw;
                 sw.motion = true;
@@ -106,6 +109,7 @@ namespace Tests
                 m.minScale = minScale;
                 m.minShotSeconds = minShot;
                 m.rolloffOn = rolloff;
+                m.easeSeconds = easeSeconds;
                 observer.Configure(sw, m);
             }
             // Returns the first sequence of the frames fed.
@@ -450,6 +454,211 @@ namespace Tests
             rig.observer.ObserveGrid(++rig.sequence, b.Window(100), gap);
             v.from = rig.sequence - 1; v.to = rig.sequence;
             Assert::IsFalse(rig.observer.NoteVectors(v), L"after a discontinuity: no pair");
+        }
+    };
+
+    // The fade model (owner decision 2026-10-17, intent_ease_s): provisional value at the
+    // cut, a monotonic rate-limited ease toward the better-informed estimate, settle and
+    // hold; 0 = the instant rules; a cut mid-ease restarts cleanly.
+    TEST_CLASS(MotionIntentEaseTests)
+    {
+    public:
+        static Decision Wants(double candidate)
+        {
+            Decision d;
+            d.candidate = candidate;
+            d.source = IntentSource::Inferred;
+            return d;
+        }
+
+        static CutInput Ready(double minScale = 0.5)
+        {
+            CutInput in;
+            in.decisionReady = true;
+            in.minScale = minScale;
+            return in;
+        }
+
+        TEST_METHOD(ProvisionalAtTheCut)
+        {
+            {
+                // Confident: the queued evidence covers >= kEaseConfidentSeconds.
+                Applier a;
+                const CutResult r = a.OnCutEased(Wants(0.5), Ready(), Shot(0.0, 0.0, 0.0, 24), 1.5);
+                Assert::IsTrue(r.changed, L"confident: applied at the cut");
+                Near(0.5, a.Applied(), L"confident provisional");
+                Assert::IsTrue(a.Easing(), L"easing after the cut");
+            }
+            {
+                // Low confidence (4 queued frames at 24p, 0.17 s): the previous value carries over.
+                Applier a;
+                a.OnCut(Wants(0.6), Ready());
+                Near(0.6, a.Applied(), L"previous");
+                const CutResult r = a.OnCutEased(Wants(1.0), Ready(), Shot(0.3, 0.0, 1.0, 4), 1.5);
+                Assert::IsFalse(r.changed, L"low confidence: no jump");
+                Near(0.6, a.Applied(), L"carried over");
+                Assert::IsTrue(a.Easing());
+            }
+            {
+                // No statistics yet (a missed cut): carried over; the ease waits for a target.
+                Applier a;
+                a.OnCutEased(Wants(1.0), CutInput(), ShotStats(), 1.5);
+                Assert::IsTrue(a.Easing());
+                Decision none = Wants(1.0);
+                none.decided = false;
+                Assert::IsFalse(a.Progress(none, ShotStats(), 1.0 / 24.0, 0.5, false), L"no target: no move");
+            }
+            {
+                // Fades and known short shots keep the previous value without an ease.
+                Applier a;
+                CutInput fade = Ready();
+                fade.fadeBoundary = true;
+                a.OnCutEased(Wants(0.5), fade, Shot(0.0, 0.0, 0.0, 24), 1.5);
+                Assert::IsFalse(a.Easing(), L"fade: no ease");
+                Near(1.0, a.Applied(), L"fade keeps");
+                CutInput brief = Ready();
+                brief.shotEndKnown = true;
+                brief.shotSeconds = 0.5;
+                brief.minShotSeconds = 2.0;
+                a.OnCutEased(Wants(0.5), brief, Shot(0.0, 0.0, 0.0, 12), 1.5);
+                Assert::IsFalse(a.Easing(), L"short shot: no ease");
+                Near(1.0, a.Applied(), L"short shot inherits");
+            }
+        }
+
+        TEST_METHOD(MonotonicBoundedEaseThenSettle)
+        {
+            const double ease = 1.5, dt = 1.0 / 24.0, minScale = 0.5;
+            Applier a;
+            a.OnCutEased(Wants(0.5), Ready(), Shot(0.0, 0.0, 0.0, 4), ease);   // carried over: 1.0
+            Near(1.0, a.Applied(), L"start");
+            const double maxStep = (1.0 - minScale) * dt / ease + 1e-12;
+            double previous = a.Applied();
+            int frames = 0;
+            while (a.Easing() && frames < 1000)
+            {
+                a.Progress(Wants(0.5), Shot(0.0, 0.0, 0.0, 24), dt, minScale, false);
+                ++frames;
+                const double now = a.Applied();
+                Assert::IsTrue(now <= previous + 1e-12, L"monotonic toward the target");
+                Assert::IsTrue(previous - now <= maxStep, L"rate-limited");
+                Assert::IsTrue(now >= 0.5 - 1e-12 && now <= 1.0, L"bounded, no overshoot");
+                previous = now;
+            }
+            Assert::AreEqual(36, frames, L"settles at intent_ease_s (36 frames at 24p)");
+            Near(0.5, a.Applied(), L"reached the estimate within the ease", 1e-9);
+            // Settled: holds for the rest of the shot whatever the estimate does.
+            Assert::IsFalse(a.Progress(Wants(1.0), Shot(0.3, 0.0, 1.0, 48), dt, minScale, false), L"held");
+            Near(0.5, a.Applied(), L"held value");
+            // A target that changes during the ease: followed, still bounded and rate-limited.
+            Applier b;
+            b.OnCutEased(Wants(0.9), Ready(), Shot(0.0, 0.0, 0.0, 4), ease);
+            for (int i = 0; i < 6; ++i) b.Progress(Wants(0.5), Shot(0.0, 0.0, 0.0, 24), dt, minScale, false);
+            const double mid = b.Applied();
+            b.Progress(Wants(1.0), Shot(0.0, 0.0, 0.0, 24), dt, minScale, false);
+            Assert::IsTrue(b.Applied() > mid && b.Applied() - mid <= maxStep, L"turns back, rate-limited");
+            // A short shot whose end becomes known stops the ease and holds.
+            const double before = b.Applied();
+            Assert::IsFalse(b.Progress(Wants(0.5), Shot(0.0, 0.0, 0.0, 24), dt, minScale, true));
+            Assert::IsFalse(b.Easing(), L"short shot stops the ease");
+            Near(before, b.Applied(), L"holds", 1e-12);
+        }
+
+        TEST_METHOD(EaseZeroIsTheInstantRule)
+        {
+            struct Case { double candidate; bool ready, fade, endKnown; double shotSeconds; double minScale; };
+            const Case cases[] = {
+                { 0.95, true, false, false, 0.0, 0.5 }, { 0.5, false, false, false, 0.0, 0.5 },
+                { 0.5, true, true, false, 0.0, 0.5 }, { 0.5, true, false, true, 1.0, 0.5 },
+                { 0.5, true, false, true, 3.0, 0.5 }, { 0.55, true, false, false, 0.0, 0.8 },
+                { 1.0, true, false, false, 0.0, 0.5 }, { 0.6, true, false, false, 0.0, 0.3 } };
+            Applier instant, eased;
+            for (const Case& c : cases)
+            {
+                CutInput in;
+                in.decisionReady = c.ready;
+                in.fadeBoundary = c.fade;
+                in.shotEndKnown = c.endKnown;
+                in.shotSeconds = c.shotSeconds;
+                in.minShotSeconds = 2.0;
+                in.minScale = c.minScale;
+                const CutResult x = instant.OnCut(Wants(c.candidate), in);
+                const CutResult y = eased.OnCutEased(Wants(c.candidate), in, Shot(0.1, 0.0, 0.5, 4), 0.0);
+                Assert::AreEqual(x.changed, y.changed);
+                Assert::AreEqual(x.applied, y.applied);
+                Assert::AreEqual(std::string(x.reason), std::string(y.reason));
+                Assert::IsFalse(eased.Easing(), L"ease 0: never easing");
+                Assert::IsFalse(eased.Progress(Wants(0.5), Shot(0.0, 0.0, 0.0, 24), 1.0, 0.5, false),
+                    L"ease 0: no mid-shot change");
+            }
+            // The observer with ease 0 equals the pinned instant behaviour.
+            Rig rig(MotionIntentPolicy::Visibility, 0.5, 0.5, false, 0.0);
+            const Canvas a(1200, 7, 100, 400), b(1200, 99, 500, 900);
+            const uint64_t shotA = rig.Feed(a, 24, 0);
+            const uint64_t shotB = rig.Feed(b, 24, 2);
+            Near(0.5, rig.observer.AppliedMotionScale(shotA), L"A at its cut");
+            for (uint64_t s = shotA + 1; s < shotB; ++s)
+                Near(0.5, rig.observer.AppliedMotionScale(s), L"no change mid-shot");
+            Near(1.0, rig.observer.AppliedMotionScale(shotB), L"B at its cut");
+        }
+
+        TEST_METHOD(CutMidEaseRestartsCleanly)
+        {
+            const double dt = 1.0 / 24.0;
+            Applier a;
+            a.OnCutEased(Wants(0.5), Ready(), Shot(0.0, 0.0, 0.0, 4), 1.5);
+            for (int i = 0; i < 12; ++i) a.Progress(Wants(0.5), Shot(0.0, 0.0, 0.0, 24), dt, 0.5, false);
+            const double mid = a.Applied();
+            Assert::IsTrue(mid < 1.0 && mid > 0.5, L"mid-ease");
+            // A cut mid-ease, low confidence: carries the mid value over and starts a fresh ease.
+            a.OnCutEased(Wants(1.0), Ready(), Shot(0.3, 0.0, 1.0, 4), 1.5);
+            Near(mid, a.Applied(), L"carried over from mid-ease", 1e-12);
+            Assert::IsTrue(a.Easing(), L"a fresh ease");
+            int frames = 0;
+            while (a.Easing() && frames < 1000)
+            {
+                a.Progress(Wants(1.0), Shot(0.3, 0.0, 1.0, 24), dt, 0.5, false);
+                ++frames;
+            }
+            Assert::AreEqual(36, frames, L"the new ease runs its full length");
+            Near(1.0, a.Applied(), L"reaches the new shot's estimate", 1e-9);
+        }
+
+        TEST_METHOD(ObserverEasesTowardTheBetterInformedEstimate)
+        {
+            // A queue of 4 frames: the display reaches B's cut with only 4 frames of B seen.
+            Rig rig(MotionIntentPolicy::Visibility, 0.5, 0.5, false, 1.5);
+            const Canvas a(1200, 7, 100, 400), b(1200, 99, 500, 900);
+            const uint64_t shotA = rig.Feed(a, 48, 0);   // static: 0.5 (confident)
+            Near(0.5, rig.observer.AppliedMotionScale(shotA), L"A provisional (confident)");
+            for (uint64_t s = shotA + 1; s < shotA + 48; ++s) rig.observer.AppliedMotionScale(s);
+            const uint64_t shotB = rig.Feed(b, 4, 2);   // a visible pan, first 4 frames only
+            Near(0.5, rig.observer.AppliedMotionScale(shotB), L"low confidence at B's cut: A's value carried");
+            double previous = 0.5;
+            int offset = 108;
+            for (int i = 1; i < 72; ++i)
+            {
+                rig.Feed(b, 1, 2, FilmContext(), offset);   // one more frame arrives in the queue
+                offset += 2;
+                const double now = rig.observer.AppliedMotionScale(shotB + static_cast<uint64_t>(i));
+                Assert::IsTrue(now >= previous - 1e-12, L"eases monotonically toward the pan's 1.0");
+                Assert::IsTrue(now - previous <= 0.5 / 1.5 / 24.0 + 1e-9, L"rate-limited");
+                previous = now;
+            }
+            Near(1.0, previous, L"settled at the better-informed estimate", 1e-6);
+            Assert::AreEqual(std::string("settled: holds for the shot"), std::string(rig.observer.MotionStatus().reason));
+        }
+
+        TEST_METHOD(ShotEaseStepBasics)
+        {
+            ShotEase e;
+            Assert::AreEqual(0.7, e.Step(0.7, 0.2, 1.0, 0.1, true), L"inactive: unchanged");
+            e.Start(0.0);
+            Assert::IsFalse(e.Active(), L"0 = no ease");
+            e.Start(1.0);
+            Assert::AreEqual(0.7, e.Step(0.7, 0.2, 1.0, 0.1, false), L"no target: no move");
+            Near(0.6, e.Step(0.7, 0.2, 1.0, 0.1, true), L"range x dt / ease", 1e-12);
+            Near(0.2, e.Step(0.21, 0.2, 1.0, 0.1, true), L"never past the target", 1e-12);
         }
     };
 }

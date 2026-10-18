@@ -332,18 +332,21 @@ namespace Tests
                 { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "intent_motion_min", "0.5" },
                 { "intent_motion_min_shot_s", "2" }, { "ambient_adapt", "off" }, { "ambient_adapt_strength", "1" },
                 { "ambient_screen_reflect", "0.01" }, { "ambient_max_black_nits", "1" }, { "ambient_tau_up_s", "15" },
-                { "ambient_tau_down_s", "90" }, { "intent_black", "off" }, { "intent_display", "off" } };
+                { "ambient_tau_down_s", "90" }, { "intent_black", "off" }, { "intent_display", "off" },
+                { "intent_ease_s", "1.5" } };
             for (const auto& d : defaults)
                 expect(base, d.first, d.second);
             const std::string set = call(describe,
                 "intent_motion: on\nintent_motion_policy: ease_slow\nintent_motion_min: 0.25\nintent_motion_min_shot_s: 4\n"
                 "ambient_adapt: on\nambient_adapt_strength: 0.5\nambient_screen_reflect: 0.02\nambient_max_black_nits: 2.5\n"
-                "ambient_tau_up_s: 30\nambient_tau_down_s: 120\nintent_black: led_protect\nintent_display: report\n");
+                "ambient_tau_up_s: 30\nambient_tau_down_s: 120\nintent_black: led_protect\nintent_display: report\n"
+                "intent_ease_s: 0\n");
             const std::pair<const char*, const char*> values[] = {
                 { "intent_motion", "on" }, { "intent_motion_policy", "ease_slow" }, { "intent_motion_min", "0.25" },
                 { "intent_motion_min_shot_s", "4" }, { "ambient_adapt", "on" }, { "ambient_adapt_strength", "0.5" },
                 { "ambient_screen_reflect", "0.02" }, { "ambient_max_black_nits", "2.5" }, { "ambient_tau_up_s", "30" },
-                { "ambient_tau_down_s", "120" }, { "intent_black", "led_protect" }, { "intent_display", "report" } };
+                { "ambient_tau_down_s", "120" }, { "intent_black", "led_protect" }, { "intent_display", "report" },
+                { "intent_ease_s", "0" } };
             for (const auto& v : values)
                 expect(set, v.first, v.second);
             for (const char* policy : { "display", "ease_fast", "ease_slow", "visibility", "metadata" })
@@ -353,7 +356,8 @@ namespace Tests
             const std::string invalid = call(describe,
                 "intent_motion: auto\nintent_motion_policy: fast\nintent_motion_min: 1.5\nintent_motion_min_shot_s: 0.2\n"
                 "ambient_adapt: yes\nambient_adapt_strength: -1\nambient_screen_reflect: 2\nambient_max_black_nits: 11\n"
-                "ambient_tau_up_s: 0.5\nambient_tau_down_s: 2000\nintent_black: on\nintent_display: on\n");
+                "ambient_tau_up_s: 0.5\nambient_tau_down_s: 2000\nintent_black: on\nintent_display: on\n"
+                "intent_ease_s: 6\n");
             for (const auto& d : defaults)
                 expect(invalid, d.first, d.second);
             // Every key changes the fingerprint (live-apply change detection).
@@ -361,7 +365,7 @@ namespace Tests
             for (const char* key : { "intent_motion: on\n", "intent_motion_policy: visibility\n", "intent_motion_min: 0.7\n",
                 "intent_motion_min_shot_s: 3\n", "ambient_adapt: on\n", "ambient_adapt_strength: 0.4\n",
                 "ambient_screen_reflect: 0.03\n", "ambient_max_black_nits: 3\n", "ambient_tau_up_s: 20\n",
-                "ambient_tau_down_s: 100\n", "intent_black: report\n", "intent_display: report\n" })
+                "ambient_tau_down_s: 100\n", "intent_black: report\n", "intent_display: report\n", "intent_ease_s: 0.5\n" })
                 Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, key), std::wstring(key, key + std::strlen(key)).c_str());
             DeleteFileA(path.c_str());
         }
@@ -483,6 +487,7 @@ namespace Tests
             sw.motion = true;
             IntentInterpreter::MotionSettings ms;
             ms.policy = MotionIntentPolicy::Visibility;
+            ms.easeSeconds = 0.0;   // the instant rule (the fade model is checked below)
             IntentInterpreter::Observer observer;
             observer.Configure(sw, ms);
             std::vector<Entry> queue = { Entry{ false, 1 } };
@@ -500,6 +505,25 @@ namespace Tests
             observer.ObserveGrid(++s, TexturedGrid(2, 500, 900), Film());
             Assert::AreEqual(1.0, observer.AppliedMotionScale(cut), L"the cut arrives alone: missed");
             Assert::AreEqual(std::string("missed cut: waits for the next cut"), std::string(observer.MotionStatus().reason));
+            // The fade model (intent_ease_s 1.5): in low latency the value carries over at the
+            // cut and eases toward the shot's estimate as its frames arrive, then holds.
+            {
+                IntentInterpreter::MotionSettings eased = ms;
+                eased.easeSeconds = 1.5;
+                IntentInterpreter::Observer o;
+                o.Configure(sw, eased);
+                uint64_t q = 0;
+                double previous = 1.0;
+                for (int i = 0; i < 60; ++i)
+                {
+                    o.ObserveGrid(++q, TexturedGrid(1, 100, 400), Film());
+                    const double now = o.AppliedMotionScale(q);
+                    Assert::IsTrue(now <= previous + 1e-12 && previous - now <= 0.5 / 1.5 / 24.0 + 1e-9,
+                        L"eases in, rate-limited");
+                    previous = now;
+                }
+                Assert::IsTrue(previous < 1.0, L"the static shot's estimate eased in without look-ahead");
+            }
         }
     };
 

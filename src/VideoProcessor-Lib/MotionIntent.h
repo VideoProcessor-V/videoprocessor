@@ -277,6 +277,9 @@ namespace MotionIntent
         double metadata = 1.0;               // the metadata value when present
         double easeFast = 1.0, easeSlow = 1.0, visibility = 1.0;   // every measured policy, for comparison
         const char* reason = "";
+        // False only when the policy needs shot statistics it does not have yet
+        // (the fade model then has no target to ease toward).
+        bool decided = true;
     };
 
     inline Decision Evaluate(const ShotStats& s, const PolicyInput& in)
@@ -342,6 +345,7 @@ namespace MotionIntent
         if (!s.valid)
         {
             d.reason = "no motion statistics";
+            d.decided = false;
             return d;
         }
         d.candidate = d.inferred;
@@ -370,7 +374,63 @@ namespace MotionIntent
         const char* reason = "";
     };
 
-    // The scale on screen; changes only through OnCut (and Reset).
+    // ---- the fade model (owner decision 2026-10-17, key intent_ease_s) ----
+    // At a cut the look-ahead holds only the first queued frames of the new
+    // shot (a few tenths of a second). With intent_ease_s > 0 the cut applies a
+    // PROVISIONAL value: the policy's value when the queued evidence covers at
+    // least kEaseConfidentSeconds of the shot, otherwise the previous value
+    // carried over. Over the first intent_ease_s of the shot the value then
+    // eases toward the better-informed estimate as more frames arrive,
+    // rate-limited to the full scale range (1 - intent_motion_min) per
+    // intent_ease_s, never overshooting; at intent_ease_s the value settles and
+    // holds for the rest of the shot. intent_ease_s 0 = the instant decision at
+    // the cut alone (OnCut). Documented constant, not a key:
+    constexpr double kEaseConfidentSeconds = 0.5;
+
+    // Rate-limited follower toward a target; shared by motion intent and black
+    // protection's LED share. Pure.
+    class ShotEase
+    {
+    public:
+        // A cut: start a new ease of `easeSeconds` (0 = no easing).
+        void Start(double easeSeconds)
+        {
+            m_easeSeconds = easeSeconds > 0.0 && std::isfinite(easeSeconds) ? easeSeconds : 0.0;
+            m_elapsed = 0.0;
+            m_active = m_easeSeconds > 0.0;
+        }
+        void Stop() { m_active = false; }
+        bool Active() const { return m_active; }
+        double Elapsed() const { return m_elapsed; }
+
+        // One displayed source frame of dtSeconds: `value` moves toward
+        // `target` by at most range x dt / easeSeconds (never past it); at
+        // easeSeconds the ease settles (inactive; the value then holds).
+        double Step(double value, double target, double range, double dtSeconds, bool haveTarget)
+        {
+            if (!m_active)
+                return value;
+            const double dt = dtSeconds > 0.0 && std::isfinite(dtSeconds) ? dtSeconds : 0.0;
+            m_elapsed += dt;
+            if (haveTarget && std::isfinite(target))
+            {
+                const double limit = (std::max)(0.0, range) * dt / m_easeSeconds;
+                const double delta = target - value;
+                value += (std::max)(-limit, (std::min)(limit, delta));
+            }
+            if (m_elapsed >= m_easeSeconds - 1e-9)
+                m_active = false;   // settled: hold
+            return value;
+        }
+
+    private:
+        double m_easeSeconds = 0.0;
+        double m_elapsed = 0.0;
+        bool m_active = false;
+    };
+
+    // The scale on screen; changes only through OnCut / OnCutEased and, while
+    // a shot's ease runs, Progress (and Reset).
     class Applier
     {
     public:
@@ -378,10 +438,62 @@ namespace MotionIntent
         {
             m_applied = 1.0;
             m_source = IntentSource::Off;
+            m_ease.Stop();
         }
 
         double Applied() const { return m_applied; }
         IntentSource Source() const { return m_source; }
+        bool Easing() const { return m_ease.Active(); }
+
+        // The cut under the fade model; easeSeconds 0 = OnCut exactly.
+        CutResult OnCutEased(const Decision& d, const CutInput& in, const ShotStats& s, double easeSeconds)
+        {
+            m_ease.Stop();
+            if (!(easeSeconds > 0.0))
+                return OnCut(d, in);
+            if (in.fadeBoundary || (in.shotEndKnown && in.shotSeconds < in.minShotSeconds))
+                return OnCut(d, in);   // fades keep the previous value; a short shot inherits it (no ease)
+            CutResult r;
+            if (in.decisionReady && s.seconds >= kEaseConfidentSeconds - 1e-9)
+            {
+                r = OnCut(d, in);   // confident: the provisional value is the decision (dead band applies)
+                if (r.changed) r.reason = "provisional (confident) at the cut; easing";
+            }
+            else
+            {
+                m_applied = ClampScale(m_applied, in.minScale);
+                r.applied = m_applied;
+                r.source = m_source;
+                r.reason = "provisional: previous value carried over (low confidence); easing";
+            }
+            m_ease.Start(easeSeconds);
+            return r;
+        }
+
+        // A newly displayed frame of the shot being eased: follow the updated
+        // estimate (rate-limited, no dead band); a short shot whose end became
+        // known stops the ease and holds. Returns true when the value moved.
+        bool Progress(const Decision& d, const ShotStats& s, double dtSeconds, double minScale, bool shortShotKnown)
+        {
+            if (!m_ease.Active())
+                return false;
+            if (shortShotKnown)
+            {
+                m_ease.Stop();
+                return false;
+            }
+            const double lo = ClampScale(minScale, 0.0);
+            const double before = m_applied;
+            // A target exists once the shot has statistics, or when the policy
+            // decides without them (metadata hint, display only, video class).
+            (void)s;
+            const bool haveTarget = d.decided;
+            const double target = ClampScale(d.candidate, lo);
+            m_applied = ClampScale(m_ease.Step(m_applied, target, 1.0 - lo, dtSeconds, haveTarget), lo);
+            if (m_applied != before)
+                m_source = m_applied < 1.0 ? (d.source != IntentSource::Off ? d.source : m_source) : IntentSource::Off;
+            return m_applied != before;
+        }
 
         CutResult OnCut(const Decision& d, const CutInput& in)
         {
@@ -418,6 +530,7 @@ namespace MotionIntent
     private:
         double m_applied = 1.0;
         IntentSource m_source = IntentSource::Off;
+        ShotEase m_ease;
     };
 
     // The comparison log line ("motion scale <policy> metadata=... inferred=...").

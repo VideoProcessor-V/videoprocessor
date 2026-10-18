@@ -76,10 +76,11 @@ namespace IntentInterpreter
         double minScale = 0.5;           // intent_motion_min
         double minShotSeconds = 2.0;     // intent_motion_min_shot_s
         bool rolloffOn = false;          // dejudder_motion_rolloff
+        double easeSeconds = 1.5;        // intent_ease_s (the fade model; 0 = instant at the cut)
         bool operator==(const MotionSettings& o) const
         {
             return policy == o.policy && minScale == o.minScale && minShotSeconds == o.minShotSeconds &&
-                rolloffOn == o.rolloffOn;
+                rolloffOn == o.rolloffOn && easeSeconds == o.easeSeconds;
         }
     };
 
@@ -272,6 +273,7 @@ namespace IntentInterpreter
             shot.rateKnown = rateKnown;
             shot.l11Present = context.l11Present;
             shot.l11FrameRateConversion = context.l11FrameRateConversion;
+            if (hz > 0.0) shot.contentHz = hz;
             // Shadows (only while black protection is on).
             if (m_switches.black && grid.Valid() &&
                 (shot.shadowSeconds < 0.0 || shot.acc.Seconds() - shot.shadowSeconds >= kShadowIntervalSeconds - 1e-9))
@@ -420,6 +422,7 @@ namespace IntentInterpreter
             bool filmLike = false;
             bool l11Present = false;
             uint8_t l11FrameRateConversion = 0;
+            double contentHz = 0.0;          // the newest measured content rate (the ease's frame period)
             BlackIntent::ShadowStats shadows;
             bool shadowsMeasured = false;
             double shadowSeconds = -1.0;
@@ -451,6 +454,7 @@ namespace IntentInterpreter
                 return;
             if (m_displayValid && sequence < m_displaySequence)
                 return;
+            const bool newFrame = !m_displayValid || sequence > m_displaySequence;
             m_displaySequence = sequence;
             m_displayValid = true;
             size_t index = m_shots.size();
@@ -467,6 +471,8 @@ namespace IntentInterpreter
                     DecideLocked(m_shots[index], index > 0 ? &m_shots[index - 1] : nullptr);
                 m_descriptor.shotSequence = m_displayShotStart;
             }
+            else if (newFrame && m_switches.motion && m_applier.Easing())
+                EaseLocked(m_shots[index]);
             if (index > 0)
                 m_shots.erase(m_shots.begin(), m_shots.begin() + static_cast<std::ptrdiff_t>(index));
         }
@@ -482,12 +488,37 @@ namespace IntentInterpreter
             in.shotSeconds = shot.acc.Seconds();
             in.minShotSeconds = m_motion.minShotSeconds;
             in.minScale = m_motion.minScale;
-            m_lastCut = m_applier.OnCut(d, in);
+            m_lastCut = m_applier.OnCutEased(d, in, stats, m_motion.easeSeconds);
             m_lastCutStats = stats;
             m_descriptor.motionScale = IntentField<float>::Make(static_cast<float>(m_applier.Applied()),
                 m_applier.Source());
             DebugLog::Log("Motion intent: shot %llu: %s", static_cast<unsigned long long>(shot.start),
                 MotionIntent::LogLine(m_motion.policy, d, stats, m_lastCut).c_str());
+        }
+
+        // The fade model: one newly displayed frame of the shot being eased; the
+        // estimate from every frame of the shot seen so far, the value
+        // rate-limited toward it (MotionIntent::Applier::Progress).
+        void EaseLocked(const Shot& shot)
+        {
+            const MotionIntent::ShotStats stats = shot.acc.Stats();
+            const MotionIntent::Decision d = MotionIntent::Evaluate(stats, PolicyInputLocked(shot));
+            const double dt = shot.contentHz > 0.0 ? 1.0 / shot.contentHz : 0.0;
+            const bool shortShot = shot.ended && shot.acc.Seconds() < m_motion.minShotSeconds;
+            const bool moved = m_applier.Progress(d, stats, dt, m_motion.minScale, shortShot);
+            m_lastCutStats = stats;
+            if (moved)
+                m_descriptor.motionScale = IntentField<float>::Make(static_cast<float>(m_applier.Applied()),
+                    m_applier.Source());
+            if (!m_applier.Easing())
+            {
+                m_lastCut.applied = m_applier.Applied();
+                m_lastCut.source = m_applier.Source();
+                m_lastCut.reason = shortShot ? "short shot: ease stopped, holds" : "settled: holds for the shot";
+                DebugLog::Log("Motion intent: shot %llu: settled at %.2f (estimate %.2f from %.2f s, %s)",
+                    static_cast<unsigned long long>(shot.start), m_applier.Applied(), d.candidate, stats.seconds,
+                    m_lastCut.reason);
+            }
         }
 
         void ResetLocked()

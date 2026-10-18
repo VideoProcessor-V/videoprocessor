@@ -1150,6 +1150,7 @@ namespace
 		MotionIntentPolicy intentMotionPolicy = MotionIntentPolicy::Display;
 		double intentMotionMin = 0.5;
 		double intentMotionMinShotSeconds = 2.0;
+		double intentEaseSeconds = 1.5;   // intent_ease_s: the fade model (0 = instant at the cut)
 		bool ambientAdapt = false;
 		double ambientAdaptStrength = 1.0;
 		double ambientScreenReflect = 0.01;
@@ -1418,7 +1419,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2489,6 +2490,7 @@ namespace
 			std::make_tuple("intent_content_hold_seconds", 1.0, 60.0, &settings.intentContentHoldSeconds),
 			std::make_tuple("intent_motion_min", 0.0, 1.0, &settings.intentMotionMin),
 			std::make_tuple("intent_motion_min_shot_s", 0.5, 30.0, &settings.intentMotionMinShotSeconds),
+			std::make_tuple("intent_ease_s", 0.0, 5.0, &settings.intentEaseSeconds),
 			std::make_tuple("ambient_adapt_strength", 0.0, 1.0, &settings.ambientAdaptStrength),
 			std::make_tuple("ambient_screen_reflect", 0.0, 1.0, &settings.ambientScreenReflect),
 			std::make_tuple("ambient_max_black_nits", 0.0, 10.0, &settings.ambientMaxBlackNits),
@@ -6264,6 +6266,13 @@ struct LibplaceboVideoRenderer::Impl
 	IntentInterpreter::AmbientApplyState ambientApply;    // render thread
 	uint64_t ambientCutsSeen = 0;                         // render thread
 	IntentInterpreter::LedIntentLimits ledIntentLimitsSent;   // render thread
+	// The fade model for led_protect's share (intent_ease_s): provisional at the
+	// cut, eased toward the share of the better-measured shot, then held.
+	MotionIntent::ShotEase blackShareEase;                // render thread
+	double blackShareApplied = 0.0;                       // render thread
+	uint64_t blackShareShot = 0;                          // render thread
+	bool blackShareValid = false;                         // render thread
+	std::chrono::steady_clock::time_point blackShareTime;  // render thread
 	int blackIntentLogged = -1;                           // render thread: steps below last logged
 	std::string displayIntentLogged;                      // render thread
 	LedDrive::MeasurementHook ledMeasurement;
@@ -10538,7 +10547,8 @@ struct LibplaceboVideoRenderer::Impl
 			current.intentContentHoldSeconds != next.intentContentHoldSeconds, "intent_content");
 		changed(current.intentMotion != next.intentMotion || current.intentMotionPolicy != next.intentMotionPolicy ||
 			current.intentMotionMin != next.intentMotionMin ||
-			current.intentMotionMinShotSeconds != next.intentMotionMinShotSeconds, "intent_motion");
+			current.intentMotionMinShotSeconds != next.intentMotionMinShotSeconds ||
+			current.intentEaseSeconds != next.intentEaseSeconds, "intent_motion");
 		changed(current.ambientAdapt != next.ambientAdapt || current.ambientAdaptStrength != next.ambientAdaptStrength ||
 			current.ambientScreenReflect != next.ambientScreenReflect || current.ambientMaxBlackNits != next.ambientMaxBlackNits ||
 			current.ambientTauUpSeconds != next.ambientTauUpSeconds ||
@@ -14015,6 +14025,7 @@ struct LibplaceboVideoRenderer::Impl
 		motion.policy = s.intentMotionPolicy;
 		motion.minScale = s.intentMotionMin;
 		motion.minShotSeconds = s.intentMotionMinShotSeconds;
+		motion.easeSeconds = s.intentEaseSeconds;
 		motion.rolloffOn = s.dejudderMotionRolloff;
 		intentInterpreter->Configure(switches, motion);
 		if (switches.Any())
@@ -14081,6 +14092,42 @@ struct LibplaceboVideoRenderer::Impl
 	// Black protection (report / led_protect) for the shot on screen, the display
 	// mapping readout, and the LED's intent limits; per rendered frame, cheap
 	// (pure), logged on a change only.
+	// led_protect's share under the fade model (intent_ease_s; owner decision
+	// 2026-10-17). At the shot's first displayed frame: the share measured from
+	// the queued frames when they gave statistics, otherwise the previous share
+	// carried over; over the first intent_ease_s it follows the shot's newer
+	// measurements rate-limited (the full 0..1 range per intent_ease_s), then it
+	// holds for the rest of the shot. intent_ease_s 0: the measured share at once
+	// (as before).
+	double EaseBlackShare(double measured, bool haveMeasurement)
+	{
+		const double ease = activeSettings.intentEaseSeconds;
+		if (!(ease > 0.0))
+		{
+			blackShareValid = false;
+			return measured;
+		}
+		const uint64_t shot = intentInterpreter->DisplayedShotStart();
+		if (!blackShareValid || shot != blackShareShot)
+		{
+			blackShareShot = shot;
+			if (haveMeasurement || !blackShareValid)
+				blackShareApplied = measured;   // provisional at the cut (carried over without statistics)
+			blackShareValid = true;
+			blackShareEase.Start(ease);
+			blackShareTime = std::chrono::steady_clock::now();
+			return blackShareApplied;
+		}
+		// Display time since the previous rendered frame (wall clock: repeats and
+		// extra refreshes add no source frames but do pass time on screen).
+		const auto nowTime = std::chrono::steady_clock::now();
+		const double dt = (std::min)(0.25, (std::max)(0.0,
+			std::chrono::duration<double>(nowTime - blackShareTime).count()));
+		blackShareTime = nowTime;
+		blackShareApplied = blackShareEase.Step(blackShareApplied, measured, 1.0, dt, haveMeasurement);
+		return blackShareApplied;
+	}
+
 	void EvaluateIntentBlackDisplay(const SceneDescriptor& scene, const DisplayProfile& display)
 	{
 		const BlackIntentMode mode = activeSettings.intentBlack;
@@ -14097,9 +14144,12 @@ struct LibplaceboVideoRenderer::Impl
 			black.mode = mode;
 			if (mode == BlackIntentMode::LedProtect)
 			{
-				share = BlackIntent::LedMinimumShare(shadows, display.peakNits, display.blackNits);
+				share = EaseBlackShare(BlackIntent::LedMinimumShare(shadows, display.peakNits, display.blackNits),
+					shadows.valid);
 				black.ledMinimumShare = static_cast<float>(share);
 			}
+			else
+				blackShareValid = false;
 			const int logged = black.valid ? black.stepsBelow * 1000 + static_cast<int>(share * 100.0 + 0.5) : -2;
 			if (logged != blackIntentLogged)
 			{
@@ -28765,6 +28815,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "intent_motion_policy=" << ToString(s.intentMotionPolicy) << "\n"
 		<< "intent_motion_min=" << s.intentMotionMin << "\n"
 		<< "intent_motion_min_shot_s=" << s.intentMotionMinShotSeconds << "\n"
+		<< "intent_ease_s=" << s.intentEaseSeconds << "\n"
 		<< "ambient_adapt=" << (s.ambientAdapt ? "on" : "off") << "\n"
 		<< "ambient_adapt_strength=" << s.ambientAdaptStrength << "\n"
 		<< "ambient_screen_reflect=" << s.ambientScreenReflect << "\n"

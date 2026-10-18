@@ -230,6 +230,7 @@ namespace VideoProcessorTest
             struct Number { const char* key; double lo, hi; };
             const Number numbers[] = {
                 { "intent_motion_min", 0.0, 1.0 }, { "intent_motion_min_shot_s", 0.5, 30.0 },
+                { "intent_ease_s", 0.0, 5.0 },
                 { "ambient_adapt_strength", 0.0, 1.0 }, { "ambient_screen_reflect", 0.0, 1.0 },
                 { "ambient_max_black_nits", 0.0, 10.0 }, { "ambient_tau_up_s", 1.0, 600.0 },
                 { "ambient_tau_down_s", 1.0, 1800.0 } };

@@ -8984,6 +8984,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 wireIntentToggle(display, {});
             }
 
+            // The fade model (owner decision 2026-10-17): shared by motion intent and
+            // black protection's LED share; always editable (it changes nothing while both are off).
+            addIntentNumber(QStringLiteral("Ease intent changes over"), QStringLiteral("intent_ease_s"),
+                QStringLiteral("s"), 0.0, 5.0, 1, QStringLiteral("1.5"), QStringLiteral(
+                    "Experimental. At a cut VP has seen only the first queued frames of the new shot, so motion "
+                    "intent and black protection's LED share apply a provisional value there (or keep the previous "
+                    "one when the evidence is thin), then ease toward the better-informed value over this many "
+                    "seconds as more of the shot arrives, and hold it for the rest of the shot (seconds, 0-5, "
+                    "default 1.5). 0 = decide once at the cut and change instantly. Never raises dejudder_strength. "
+                    "(Key: intent_ease_s.)"));
+
             auto* intentRefresh = new QAction(contentMode);
             intentRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_adaptive_refresh")));
             connect(intentRefresh, &QAction::triggered, this, [intentSyncs]() {
@@ -10477,7 +10488,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                         key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
                         key == QStringLiteral("intent_content_hold_seconds") ||
-                        key.startsWith(QStringLiteral("intent_motion_")) || key.startsWith(QStringLiteral("ambient_"))) &&
+                        key.startsWith(QStringLiteral("intent_motion_")) || key == QStringLiteral("intent_ease_s") ||
+                        key.startsWith(QStringLiteral("ambient_"))) &&
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
                 return QStringLiteral("AUTO");

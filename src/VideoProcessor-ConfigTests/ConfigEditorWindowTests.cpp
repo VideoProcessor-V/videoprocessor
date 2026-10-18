@@ -1740,6 +1740,12 @@ void testIntentRemainderGroup()
         require(requireControl<QLineEdit>(window, QString("config.vprenderer.") + key)->isEnabled(),
             (QByteArray("not enabled when on: ") + key).constData());
     require(radioBox->isEnabled() && blackBox->isEnabled(), "the policy / black choice stays greyed when on");
+    // The fade model (intent_ease_s): shared, always editable, tooltip names its key.
+    {
+        auto* ease = requireControl<QLineEdit>(window, "config.vprenderer.intent_ease_s");
+        tip(ease, "intent_ease_s");
+        require(ease->isEnabled() && ease->placeholderText() == "1.5", "intent_ease_s is not editable / wrong default");
+    }
     require(blackCombo->currentData().toString() == "report" && reportRadio->isChecked(),
         "ticking black protection did not select report");
     require(radios[0]->isChecked(), "the default policy is not Display only");

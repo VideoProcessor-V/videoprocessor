@@ -732,6 +732,7 @@ namespace RendererProfileConfig
 			if (key == "intent_motion_policy") return IsChoice(value, { "display", "ease_fast", "ease_slow", "visibility", "metadata" });
 			if (key == "intent_motion_min") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "intent_motion_min_shot_s") return IsNumberInRange(value, 0.5, 30.0);
+			if (key == "intent_ease_s") return IsNumberInRange(value, 0.0, 5.0);
 			if (key == "ambient_adapt") return IsChoice(value, { "off", "on" });
 			if (key == "ambient_adapt_strength") return IsNumberInRange(value, 0.0, 1.0);
 			if (key == "ambient_screen_reflect") return IsNumberInRange(value, 0.0, 1.0);
