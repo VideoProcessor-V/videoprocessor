@@ -1137,8 +1137,17 @@ namespace VideoProcessorTest
 			auto driver = OpenDriver(projector, config, clock);
 			Assert::IsTrue(clock.Run(900, 10.0, 0));   // Open's gap has passed (on the clock)
 			projector->holdReplies = true;
+			const size_t writesBefore = projector->Writes().size();
 			std::thread busy([&] { driver->SetContrast(60); });   // holds the port for its reply
-			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+			// Integration round 4: wait (real time, bounded) until SetContrast is on the
+			// wire, instead of a fixed 80 ms. Under a loaded machine the thread could start
+			// late, the light worker took the port first and the test then failed and hung.
+			if (!projector->WaitForWrites(writesBefore + 1, 10000))
+			{
+				projector->Release();
+				busy.join();
+				Assert::Fail(L"SetContrast did not reach the port");
+			}
 			driver->SetLight(200);   // the worker takes it and waits for the port
 			std::this_thread::sleep_for(std::chrono::milliseconds(80));
 			projector->Release();    // SetContrast's reply: the 800 ms gap starts now
