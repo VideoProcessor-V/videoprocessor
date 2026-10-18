@@ -97,6 +97,8 @@ public:
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	bool GetIntentStatus(IntentStatus& status) const override;
+	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;

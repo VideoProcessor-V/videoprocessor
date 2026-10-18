@@ -726,3 +726,15 @@ bool LibplaceboPluginVideoRenderer::GetContentIntentStatus(
 	status = {};
 	return m_renderer && m_renderer->GetContentIntentStatus(status);
 }
+
+bool LibplaceboPluginVideoRenderer::GetIntentStatus(IntentStatus& status) const
+{
+	status = {};
+	return m_renderer && m_renderer->GetIntentStatus(status);
+}
+
+void LibplaceboPluginVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSeconds)
+{
+	if (m_renderer)
+		m_renderer->SetAmbientLux(lux, valid, nowSeconds);
+}

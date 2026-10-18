@@ -631,4 +631,21 @@ public:
 		return false;
 	}
 
+	// Intent interpreter items 2-5 (2026-10-17): motion intent, ambient
+	// adaptation, black protection, display mapping readout. False (status
+	// default: every function off) when the renderer has none.
+	virtual bool GetIntentStatus(IntentStatus& status) const
+	{
+		status = {};
+		return false;
+	}
+
+	// Ambient adaptation input from the GUI's [ambient] detector (about 1 Hz):
+	// the newest room reading in lux, `valid` false when the detector is lost
+	// or ambient switching is off. `nowSeconds` is GetTickCount64() / 1000.
+	virtual void SetAmbientLux(double lux, bool valid, double nowSeconds)
+	{
+		(void)lux; (void)valid; (void)nowSeconds;
+	}
+
 };
