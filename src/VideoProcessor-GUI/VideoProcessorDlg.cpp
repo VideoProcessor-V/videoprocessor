@@ -40,6 +40,8 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <led/ConnectionTest.h>
 #include <CrashState.h>
 #include <AmbientConfig.h>
+#include <IntentInterpreterSupport.h>
+#include <QueueLookahead.h>
 #include <led/LedDriveConfig.h>
 #include <led/SerialPort.h>
 #include <vector>
@@ -10478,7 +10480,7 @@ void CVideoProcessorDlg::RenderStart()
 				videoProcessorApp.GetQueueSteadyReserveFrames(),
 				videoProcessorApp.HasQueueSteadyReserveFrames());
 			m_videoRenderer->SetActivePictureLookaheadFrames(
-				videoProcessorApp.GetActivePictureLookaheadFrames());
+				StartupActivePictureLookaheadFrames());
 			ApplyRequestedShaderSelection();
 			m_rendererTransitionWindow.KeepOnTop();
 			// Match the DirectShow startup contract. Alpha owns its detector and
@@ -10657,7 +10659,7 @@ void CVideoProcessorDlg::RenderStart()
 			videoProcessorApp.GetPresentationLeadFrames(),
 			videoProcessorApp.HasPresentationLeadFrames());
 		m_videoRenderer->SetActivePictureLookaheadFrames(
-			videoProcessorApp.GetActivePictureLookaheadFrames());
+			StartupActivePictureLookaheadFrames());
 		ApplyRequestedShaderSelection();
 		m_rendererTransitionWindow.KeepOnTop();
 		m_videoRenderer->SetSceneAwareTimingCorrection(m_sceneAwareTimingCorrection);
@@ -10776,7 +10778,7 @@ void CVideoProcessorDlg::RenderStart()
 				videoProcessorApp.GetPresentationLeadFrames(),
 				videoProcessorApp.HasPresentationLeadFrames());
 			m_videoRenderer->SetActivePictureLookaheadFrames(
-				videoProcessorApp.GetActivePictureLookaheadFrames());
+				StartupActivePictureLookaheadFrames());
 			m_rendererTransitionWindow.KeepOnTop();
 			m_videoRenderer->SetSceneAwareTimingCorrection(m_sceneAwareTimingCorrection);
 			m_videoRenderer->SetSceneCorrectionUpstreamSample(
@@ -13976,10 +13978,23 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				desiredStartupPreroll, desiredTargetFrames, true);
 			queuePolicyChanged = true;
 		}
-		const size_t desiredLookahead =
+		// Owner 2026-10-17: absent from the profile and the default section, the
+		// look-ahead follows the queue (QueueLookahead.h); an explicit value wins.
+		const bool lookaheadConfigured = snapshot->queue.hasActivePictureLookaheadFrames ||
+			videoProcessorApp.IsActivePictureLookaheadConfigured();
+		const size_t desiredLookahead = QueueLookahead::ResolveActivePictureLookahead(lookaheadConfigured,
 			snapshot->queue.hasActivePictureLookaheadFrames ?
 			snapshot->queue.activePictureLookaheadFrames :
-			m_profileBaseActivePictureLookaheadFrames;
+			m_profileBaseActivePictureLookaheadFrames,
+			snapshot->queue.lowLatencyPath, desiredTargetFrames, desiredQueueSize);
+		if (videoProcessorApp.GetActivePictureLookaheadFrames() != desiredLookahead ||
+			lookaheadConfigured != m_activePictureLookaheadLoggedConfigured)
+		{
+			DebugLog::Log("Queue: active_picture_lookahead_frames=%zu (%s; profile=%s target=%zu queue_size=%zu low_latency=%d)",
+				desiredLookahead, lookaheadConfigured ? "configured" : "auto", snapshot->queue.profile.c_str(),
+				desiredTargetFrames, desiredQueueSize, snapshot->queue.lowLatencyPath ? 1 : 0);
+			m_activePictureLookaheadLoggedConfigured = lookaheadConfigured;
+		}
 		if (videoProcessorApp.GetActivePictureLookaheadFrames() != desiredLookahead)
 		{
 			videoProcessorApp.SetActivePictureLookaheadFrames(desiredLookahead);
@@ -14374,6 +14389,60 @@ void CVideoProcessorDlg::UpdateContentIntent(const char* reason)
 		DisplayName(status.source), reason);
 	m_contentValue = value;
 	RefreshUnifiedProfilesForRuleContext(reason);
+}
+
+// Owner 2026-10-17: the active-picture look-ahead for a renderer start. After a
+// queue profile was applied, the value it resolved; otherwise, absent from the
+// default queue section, it follows the queue (QueueLookahead.h; the
+// low-latency path is a queue-profile property, so normal here).
+size_t CVideoProcessorDlg::StartupActivePictureLookaheadFrames()
+{
+	if (m_profileQueueDefaultsCaptured || videoProcessorApp.IsActivePictureLookaheadConfigured())
+		return videoProcessorApp.GetActivePictureLookaheadFrames();
+	const size_t frames = QueueLookahead::ResolveActivePictureLookahead(false, 0, false,
+		videoProcessorApp.GetQueueSteadyReserveFrames(), GetRendererVideoFrameQueueSizeMax());
+	if (frames != videoProcessorApp.GetActivePictureLookaheadFrames())
+	{
+		DebugLog::Log("Queue: active_picture_lookahead_frames=%zu (auto; no queue profile, target=%zu queue_size=%zu)",
+			frames, videoProcessorApp.GetQueueSteadyReserveFrames(), GetRendererVideoFrameQueueSizeMax());
+		videoProcessorApp.SetActivePictureLookaheadFrames(frames);
+	}
+	return frames;
+}
+
+// Intent interpreter items 2-5 (2026-10-17): once a second, the room reading for
+// ambient adaptation (sensor: the newest reading; manual: lit = lux_lit, dark =
+// 0 lux; off or detector lost: invalid) and the renderer's intent status for
+// the stats overlay (toggled only) and the crash state; each change is logged.
+void CVideoProcessorDlg::UpdateIntentInterpreter()
+{
+	const bool rendering = m_videoRenderer &&
+		m_rendererState == RendererState::RENDERSTATE_RENDERING;
+	IntentStatus status;
+	if (rendering)
+	{
+		const double now = static_cast<double>(GetTickCount64()) / 1000.0;
+		double lux = 0.0;
+		const Ambient::Room overrideRoom = m_ambientOverrideRoom;
+		const bool valid = IntentInterpreter::AmbientLuxFromDetector(m_ambientState, now, lux,
+			m_ambientOverride ? &overrideRoom : nullptr);
+		m_videoRenderer->SetAmbientLux(lux, valid, now);
+		if (!m_videoRenderer->GetIntentStatus(status))
+			status = IntentStatus();
+	}
+	m_intentStatus = status;
+	const std::string keys[4] = {
+		IntentInterpreter::MotionLogKey(status.motion), IntentInterpreter::AmbientLogKey(status.ambient),
+		IntentInterpreter::BlackLogKey(status.black), IntentInterpreter::DisplayIntentLine(status.display) };
+	static const char* const kNames[4] = { "Motion intent", "Ambient", "Black", "Display" };
+	for (int i = 0; i < 4; ++i)
+	{
+		if (keys[i] == m_intentLogKeys[i])
+			continue;
+		if (rendering || keys[i].empty())
+			DebugLog::Log("Intent interpreter: %s: %s", kNames[i], keys[i].empty() ? "off" : keys[i].c_str());
+		m_intentLogKeys[i] = keys[i];
+	}
 }
 
 // "sports (inferred)" / "film (from metadata)"; empty while the switch is off.
@@ -16818,6 +16887,7 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 			UpdateAmbient("ambient-sensor");
 		}
 		UpdateContentIntent("content-intent");   // intent interpreter item 1
+		UpdateIntentInterpreter();               // intent interpreter items 2-5
 		UpdateActiveOutputSweep(uiNow);
 
 		// A source can publish its BT.2020/SDR state only once at startup.
@@ -17980,13 +18050,18 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			rendererLine("Dynamic Drive", m_videoRenderer->GetLedDriveStatus(text), text);
 			rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
 			rendererLine("content", true, ContentIntentLine());
+			rendererLine("motion intent", true, CString(IntentInterpreter::MotionIntentLine(m_intentStatus.motion).c_str()));
+			rendererLine("ambient", true, CString(IntentInterpreter::AmbientIntentLine(m_intentStatus.ambient).c_str()));
+			rendererLine("black intent", true, CString(IntentInterpreter::BlackIntentLine(m_intentStatus.black).c_str()));
+			rendererLine("display intent", true, CString(IntentInterpreter::DisplayIntentLine(m_intentStatus.display).c_str()));
 		}
 		else
 		{
 			// audit 2026-10-16: no renderer, so clear the renderer-owned keys
 			// instead of keeping a dead renderer's last values.
 			static const char* const kRendererKeys[] = {
-				"de-judder", "presentation", "render stall", "Dynamic Drive", "source resolution", "content" };
+				"de-judder", "presentation", "render stall", "Dynamic Drive", "source resolution", "content",
+				"motion intent", "ambient", "black intent", "display intent" };
 			for (const char* key : kRendererKeys)
 				crashState.SetValue(key, std::string("-"));
 		}
@@ -18254,6 +18329,10 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		stats.keyOverrides = KeyOverrideSummary();
 		stats.room = AmbientOverlayLine();
 		stats.content = ContentIntentLine();
+		stats.motionIntent = CString(IntentInterpreter::MotionIntentLine(m_intentStatus.motion).c_str());
+		stats.ambientIntent = CString(IntentInterpreter::AmbientIntentLine(m_intentStatus.ambient).c_str());
+		stats.blackIntent = CString(IntentInterpreter::BlackIntentLine(m_intentStatus.black).c_str());
+		stats.displayIntent = CString(IntentInterpreter::DisplayIntentLine(m_intentStatus.display).c_str());
 		stats.activeShaders = m_videoRenderer->ActiveShaders();
 	}
 	// A graph reset can briefly make the renderer non-rendering while the same

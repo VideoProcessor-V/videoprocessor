@@ -25,13 +25,17 @@
 // metadata itself stays inside the DLL, GetContentIntentStatus needed it);
 // 35: the required build-ID export below (hunt 2, 2026-10-17). Raised so an
 // older executable, which does not check build IDs, refuses this DLL too.
+// 36: the state-report diagnostic history (MPC/state-report branch); 37: the
+// MPC VP Renderer filter's file-frame methods; 38: GetIntentStatus /
+// SetAmbientLux (intent interpreter items 2-5, 2026-10-17). The check is
+// equality, so a gap in the numbering is harmless.
 //
 // The counter is maintained by hand and can collide across branches (the MPC
 // branch also plans 35) or miss a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 35;
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 38;
 static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
 	"VideoProcessorLibplaceboGetBuildId";
 // Returns the DLL's 32-hex-digit build ID (static storage); never throws.

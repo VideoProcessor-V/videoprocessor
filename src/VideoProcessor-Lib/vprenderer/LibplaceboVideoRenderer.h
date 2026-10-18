@@ -127,6 +127,9 @@ public:
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	// Intent interpreter items 2-5 (2026-10-17): motion / ambient / black / display.
+	bool GetIntentStatus(IntentStatus& status) const override;
+	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
 	// DV next step (f): the last rendered frame's format-neutral scene
 	// descriptor and display profile (SceneDescriptor.h / DisplayProfile.h),
 	// for future consumers (LED look-ahead, stats). False until a frame was rendered.
@@ -257,7 +260,10 @@ private:
 		size_t queuedFutureFrames,
 		uint64_t lookaheadPolicyGeneration,
 		uint64_t continuityGeneration,
-		size_t activePictureFrames);   // the leading frames for the active picture; the rest feed the LED only
+		size_t activePictureFrames,    // the leading frames for the active picture; the rest feed the LED only
+		// The statistics observer's (LED's) own depth: frames beyond it are walked for the
+		// intent observer only (2026-10-17, queue-fed intent observer).
+		size_t statisticsFutureFrames = static_cast<size_t>(-1));
 	void ClearQueue(const char* reason = "queue clear");
 	void BeginQueueGeneration(const char* reason, bool clearStopRequest = false);
 	void ClearQueueLocked(const char* reason);

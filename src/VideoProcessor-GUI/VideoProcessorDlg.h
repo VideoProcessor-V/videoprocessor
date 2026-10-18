@@ -644,6 +644,14 @@ protected:
 	ContentRuleHold m_contentRuleHold;
 	void UpdateContentIntent(const char* reason);
 	CString ContentIntentLine() const;
+	// Intent interpreter items 2-5 (2026-10-17): the lux feed to the renderer and
+	// the status it publishes (motion / ambient / black / display), once a second.
+	IntentStatus m_intentStatus;
+	std::string m_intentLogKeys[4];             // the last logged state per function
+	void UpdateIntentInterpreter();
+	// Owner 2026-10-17: active_picture_lookahead_frames follows the queue unless set.
+	bool m_activePictureLookaheadLoggedConfigured = false;
+	size_t StartupActivePictureLookaheadFrames();
 	std::unique_ptr<ConfigFile> m_stagedConfiguration;
 	ConfigurationApplyPolicy::Action m_stagedConfigurationAction =
 		ConfigurationApplyPolicy::Action::SaveOnly;

@@ -19,6 +19,24 @@
     <ClCompile Include="ContentIntentTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="AmbientAdaptationTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="BlackIntentTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DisplayIntentTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LedIntentLimitsTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MotionIntentTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="IntentInterpreterTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

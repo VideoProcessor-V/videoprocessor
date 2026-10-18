@@ -185,6 +185,73 @@ namespace VideoProcessorTest
                     wide(v).c_str());
         }
 
+        TEST_METHOD(ActivePictureLookaheadAcceptsZeroToEightAndAbsence)
+        {
+            // Owner 2026-10-17: absent = automatic (follows the queue); an explicit 0-8 overrides.
+            std::string expected;
+            for (const char* v : { "0", "1", "4", "8" })
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("queue", "active_picture_lookahead_frames", v, expected));
+            for (const char* v : { "-1", "9", "auto", "" })
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("queue", "active_picture_lookahead_frames", v, expected));
+            RendererProfileConfig::Model model;
+            CachedConfigTestFile absent;
+            std::ofstream(absent.path) << "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n";
+            ConfigFile config;
+            Assert::IsTrue(config.Load(absent.path));
+            std::string error;
+            Assert::IsTrue(RendererProfileConfig::Read(config, model, error), std::wstring(error.begin(), error.end()).c_str());
+            CachedConfigTestFile zero;
+            std::ofstream(zero.path) << "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\nactive_picture_lookahead_frames: 0\n";
+            ConfigFile config2;
+            Assert::IsTrue(config2.Load(zero.path));
+            Assert::IsTrue(RendererProfileConfig::Read(config2, model, error), std::wstring(error.begin(), error.end()).c_str());
+        }
+
+        TEST_METHOD(IntentRemainderKeysValidate)
+        {
+            // Intent interpreter remainder (2026-10-17): the 12 experimental keys (contract:
+            // choices and numeric ranges), all default off.
+            std::string expected;
+            auto wide = [](const char* v) { const std::string s(v); return std::wstring(s.begin(), s.end()); };
+            struct Choice { const char* key; std::vector<const char*> good; std::vector<const char*> bad; };
+            const std::vector<Choice> choices = {
+                { "intent_motion", { "off", "on" }, { "auto", "true", "1", "" } },
+                { "intent_motion_policy", { "display", "ease_fast", "ease_slow", "visibility", "metadata" },
+                    { "on", "off", "ease", "Display only", "" } },
+                { "ambient_adapt", { "off", "on" }, { "auto", "yes", "" } },
+                { "intent_black", { "off", "report", "led_protect" }, { "on", "protect", "led", "" } },
+                { "intent_display", { "off", "report" }, { "on", "led_protect", "" } } };
+            for (const auto& c : choices)
+            {
+                for (const char* v : c.good)
+                    Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", c.key, v, expected), wide(c.key).c_str());
+                for (const char* v : c.bad)
+                    Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", c.key, v, expected), wide(c.key).c_str());
+            }
+            struct Number { const char* key; double lo, hi; };
+            const Number numbers[] = {
+                { "intent_motion_min", 0.0, 1.0 }, { "intent_motion_min_shot_s", 0.5, 30.0 },
+                { "intent_ease_s", 0.0, 5.0 },
+                { "ambient_adapt_strength", 0.0, 1.0 }, { "ambient_screen_reflect", 0.0, 1.0 },
+                { "ambient_max_black_nits", 0.0, 10.0 }, { "ambient_tau_up_s", 1.0, 600.0 },
+                { "ambient_tau_down_s", 1.0, 1800.0 } };
+            for (const auto& n : numbers)
+            {
+                const std::string key = n.key;
+                for (double v : { n.lo, (n.lo + n.hi) / 2.0, n.hi })
+                    Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("input", key, std::to_string(v), expected),
+                        wide(key.c_str()).c_str());
+                for (double v : { n.lo - 0.01, n.hi + 0.01 })
+                    Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, std::to_string(v), expected),
+                        wide(key.c_str()).c_str());
+                for (const char* v : { "abc", "", "on" })
+                    Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, v, expected), wide(key.c_str()).c_str());
+            }
+            // Unknown intent-like keys stay rejected.
+            for (const char* key : { "intent_motion_policies", "ambient_adapt_mode", "intent_black_mode", "intent_displays" })
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("input", key, "on", expected), wide(key).c_str());
+        }
+
         TEST_METHOD(LowLatencyPathAndLegacyTargetAreNotInherited)
         {
             // Audit 2026-10-16: low_latency_path on the default queue profile must not reach the
@@ -5351,8 +5418,10 @@ namespace VideoProcessorTest
 			// (Stage 12, crash state); 32: the DV L1 scene minimum in the luminance status;
 			// 33: StopLedDriveForShutdown (2026-10-17 integration); 34: GetContentIntentStatus
 			// and the DV L5/L6/L11 metadata fields (content intent, 2026-10-17); 35: the
-			// required build-ID export (hunt 2; the build ID is the mechanical pair check).
-			Assert::AreEqual(static_cast<uint32_t>(35),
+			// required build-ID export (hunt 2; the build ID is the mechanical pair check);
+			// 36: state-report diagnostic history; 37: the MPC filter's file-frame methods;
+			// 38: GetIntentStatus / SetAmbientLux (intent interpreter items 2-5).
+			Assert::AreEqual(static_cast<uint32_t>(38),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

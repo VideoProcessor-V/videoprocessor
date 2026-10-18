@@ -203,3 +203,38 @@ Instead of one policy, motion intent offers several, chosen by the owner (exclus
 - **Metadata only** - act only on L11 frame-rate-conversion hints or real DV2 Authentic Motion when present; otherwise unchanged.
 
 All share the rules above: owner strength is the master and is never exceeded, changes only at cuts, dead band + short-shot inherit, video-class excluded, owner-set minimum (intent_motion_min). Key: intent_motion_policy = display | ease_fast | ease_slow | visibility | metadata. Each policy is logged with the inferred values so they can be compared on the same film.
+
+## Status 2026-10-17 (intent remainder)
+
+Items 2-5 are built behind the same group in Config, "Experimental content-adaptive settings" (renderer keys, default profile and every `[vprenderer.<name>]` profile; validated in `RendererProfileConfig.h`). Every function is a checkbox, off by default, with its sub-settings beneath it (greyed while off); every control has a tooltip naming its key. Content recognition (`intent_content`, `intent_content_hold_seconds`) is item 1.
+
+| Function | Control | Key | Values | Default |
+|---|---|---|---|---|
+| Motion intent | checkbox | `intent_motion` | off, on | off |
+| | exclusive buttons: Display only / Ease on fast pans / Keep fast pans, ease on slow deliberate shots / Visibility-weighted / Metadata only | `intent_motion_policy` | display, ease_fast, ease_slow, visibility, metadata | display |
+| | Minimum strength scale | `intent_motion_min` | 0.0 - 1.0 | 0.5 |
+| | Shortest shot that changes the scale (s) | `intent_motion_min_shot_s` | 0.5 - 30 | 2.0 |
+| Ambient adaptation | checkbox | `ambient_adapt` | off, on | off |
+| | Strength | `ambient_adapt_strength` | 0.0 - 1.0 | 1.0 |
+| | Screen reflectance (cd/m2 per lux) | `ambient_screen_reflect` | 0.0 - 1.0 | 0.01 |
+| | Maximum effective black (nits) | `ambient_max_black_nits` | 0.0 - 10.0 | 1.0 |
+| | Brighten time constant (s) | `ambient_tau_up_s` | 1 - 600 | 15 |
+| | Darken time constant (s) | `ambient_tau_down_s` | 1 - 1800 | 90 |
+| Black protection | checkbox (ticking selects Report only) + exclusive choice Report only / Protect shadows from LED dimming | `intent_black` | off, report, led_protect | off |
+| Display mapping readout | checkbox | `intent_display` | off, report | off |
+| Fade model (motion intent, black protection LED share) | Ease intent changes over (s) | `intent_ease_s` | 0 - 5 | 1.5 |
+
+**Fade model (owner decision 2026-10-17, `intent_ease_s`).** At a cut the queue holds only the first
+frames of the new shot (about 0.17 s with a 4-frame queue at 24p). The cut applies a provisional value
+(the policy's value when the queued evidence covers at least 0.5 s of the shot, otherwise the previous
+value carried over); over the first `intent_ease_s` seconds of the shot the value eases toward the
+better-informed estimate as more frames arrive, rate-limited to the full range per `intent_ease_s` and
+never overshooting; then it settles and holds for the rest of the shot. Fades and short shots keep
+the previous value (no ease). 0 = the instant decision at the cut. Black protection's LED share uses
+the same model; ambient adaptation keeps its own slow filter.
+
+**Rationale for the two defaults that differ from the phase-A text above.** With a per-function checkbox as the off switch, `intent_motion_min` 1.0 (or strength 0) would make a ticked motion intent inert, so the default is 0.5: a ticked function does something visible, yet never more than halves the owner's de-judder strength for a shot. Likewise `ambient_adapt_strength` 1.0: the checkbox is the off switch, and a ticked function renders the full room-light veil into the black. Strength 0 still must be bit-identical (tested by the core).
+
+**Rules carried by the controls.** Motion intent never raises `dejudder_strength`; it only scales it down (scale in [`intent_motion_min`, 1]), at cuts. Ambient adaptation uses the `[ambient]` light sensor (manual mode: the lit room's `lux_lit`) and is meant for rooms that are not dark theatres. Black protection never moves code 0 or BTB/WTW. Motion constants are documented constants in code, not keys.
+
+**User-facing docs.** `CONFIGURATION.html` does not list renderer-profile keys (the optical-flow, de-judder and `intent_content` keys are not there either), so no entries were added; the Config tooltips are the user-facing reference for these keys.

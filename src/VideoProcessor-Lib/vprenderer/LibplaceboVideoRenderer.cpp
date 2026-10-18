@@ -81,6 +81,11 @@
 #include <led/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
 #include <ContentIntentObserver.h>
+#include <IntentInterpreterObserver.h>
+#include <IntentInterpreterSupport.h>
+#include <AmbientAdaptation.h>
+#include <BlackIntent.h>
+#include <DisplayIntent.h>
 #include <MotionConfig.h>
 #include <vprenderer/TemporalRenderer.h>
 #include <SubtitleBoxDetector.h>
@@ -1151,6 +1156,24 @@ namespace
 		// seconds a new class must hold before it is taken (at a cut).
 		bool intentContent = false;
 		double intentContentHoldSeconds = 5.0;
+		// Intent interpreter items 2-5 (2026-10-17; every function default off;
+		// docs/VP-intent-interpreter-design.md): motion intent (a multiplier on the
+		// de-judder strength in [intent_motion_min, 1], decided per shot, applied at
+		// cuts), ambient adaptation (render to the effective black B_eff), black
+		// protection (report / LED shadow cap) and the display mapping readout.
+		bool intentMotion = false;
+		MotionIntentPolicy intentMotionPolicy = MotionIntentPolicy::Display;
+		double intentMotionMin = 0.5;
+		double intentMotionMinShotSeconds = 2.0;
+		double intentEaseSeconds = 1.5;   // intent_ease_s: the fade model (0 = instant at the cut)
+		bool ambientAdapt = false;
+		double ambientAdaptStrength = 1.0;
+		double ambientScreenReflect = 0.01;
+		double ambientMaxBlackNits = 1.0;
+		double ambientTauUpSeconds = 15.0;
+		double ambientTauDownSeconds = 90.0;
+		BlackIntentMode intentBlack = BlackIntentMode::Off;
+		bool intentDisplay = false;
 		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
 		// default is the faithful path, the other value the established one byte for byte;
 		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,
@@ -1441,7 +1464,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2567,7 +2590,15 @@ namespace
 			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale),
 			std::make_tuple("intent_content_hold_seconds", 1.0, 60.0, &settings.intentContentHoldSeconds),
 			std::make_tuple("detail_pulse_cap", DetailPulse::kCapMin, DetailPulse::kCapMax, &settings.detailPulseCap),
-			std::make_tuple("texture_restore_cap", TextureRestore::kCapMin, TextureRestore::kCapMax, &settings.textureRestoreCap) })
+			std::make_tuple("texture_restore_cap", TextureRestore::kCapMin, TextureRestore::kCapMax, &settings.textureRestoreCap),
+			std::make_tuple("intent_motion_min", 0.0, 1.0, &settings.intentMotionMin),
+			std::make_tuple("intent_motion_min_shot_s", 0.5, 30.0, &settings.intentMotionMinShotSeconds),
+			std::make_tuple("intent_ease_s", 0.0, 5.0, &settings.intentEaseSeconds),
+			std::make_tuple("ambient_adapt_strength", 0.0, 1.0, &settings.ambientAdaptStrength),
+			std::make_tuple("ambient_screen_reflect", 0.0, 1.0, &settings.ambientScreenReflect),
+			std::make_tuple("ambient_max_black_nits", 0.0, 10.0, &settings.ambientMaxBlackNits),
+			std::make_tuple("ambient_tau_up_s", 1.0, 600.0, &settings.ambientTauUpSeconds),
+			std::make_tuple("ambient_tau_down_s", 1.0, 1800.0, &settings.ambientTauDownSeconds) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -2883,6 +2914,44 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid intent_content '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.intentContent ? "on" : "off");
+		}
+		// Intent interpreter items 2-5 (2026-10-17).
+		for (const auto& toggle : { std::make_pair("intent_motion", &settings.intentMotion),
+			std::make_pair("ambient_adapt", &settings.ambientAdapt) })
+		{
+			if (!tryChoice(toggle.first, raw))
+				continue;
+			if (raw == "on" || raw == "off")
+				*toggle.second = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
+					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
+		}
+		if (tryChoice("intent_motion_policy", raw))
+		{
+			MotionIntentPolicy policy = settings.intentMotionPolicy;
+			if (ParseMotionIntentPolicy(raw, policy))
+				settings.intentMotionPolicy = policy;
+			else
+				DebugLog::Log("profile '%s': invalid intent_motion_policy '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), ToString(settings.intentMotionPolicy));
+		}
+		if (tryChoice("intent_black", raw))
+		{
+			BlackIntentMode mode = settings.intentBlack;
+			if (ParseBlackIntentMode(raw, mode))
+				settings.intentBlack = mode;
+			else
+				DebugLog::Log("profile '%s': invalid intent_black '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), ToString(settings.intentBlack));
+		}
+		if (tryChoice("intent_display", raw))
+		{
+			if (raw == "report" || raw == "off")
+				settings.intentDisplay = raw == "report";
+			else
+				DebugLog::Log("profile '%s': invalid intent_display '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.intentDisplay ? "report" : "off");
 		}
 		if (tryChoice("optical_flow", raw))
 		{
@@ -5075,7 +5144,6 @@ private:
 	bool m_active = false;
 };
 
-
 struct LibplaceboVideoRenderer::Impl
 {
 	SceneDetector sceneDetector;
@@ -6384,6 +6452,32 @@ struct LibplaceboVideoRenderer::Impl
 	// Content recognition (intent interpreter item 1, 2026-10-17): its own
 	// observer of the same walk, idle while intent_content is off.
 	const std::shared_ptr<ContentIntent::Observer> contentIntent = std::make_shared<ContentIntent::Observer>();
+	// Intent interpreter items 2-5 (2026-10-17): the shot observer of the same walk
+	// (idle while every intent function is off), and the ambient / black / display
+	// state. intentMutex guards the ambient filter and the published statuses
+	// (SetAmbientLux and GetIntentStatus come from the GUI thread).
+	const std::shared_ptr<IntentInterpreter::Observer> intentInterpreter =
+		std::make_shared<IntentInterpreter::Observer>();
+	mutable std::mutex intentMutex;
+	AmbientAdapt::Settings ambientSettings;               // intentMutex
+	AmbientAdapt::Filter ambientFilter;                   // intentMutex
+	double ambientAppliedBlackNits = 0.0;                 // intentMutex: B_eff rendered now (0 = off)
+	BlackIntentStatus blackIntentStatus;                  // intentMutex
+	DisplayIntentStatus displayIntentStatus;              // intentMutex
+	BlackIntentMode intentBlackPublished = BlackIntentMode::Off;   // intentMutex
+	bool intentDisplayPublished = false;                  // intentMutex
+	IntentInterpreter::AmbientApplyState ambientApply;    // render thread
+	uint64_t ambientCutsSeen = 0;                         // render thread
+	IntentInterpreter::LedIntentLimits ledIntentLimitsSent;   // render thread
+	// The fade model for led_protect's share (intent_ease_s): provisional at the
+	// cut, eased toward the share of the better-measured shot, then held.
+	MotionIntent::ShotEase blackShareEase;                // render thread
+	double blackShareApplied = 0.0;                       // render thread
+	uint64_t blackShareShot = 0;                          // render thread
+	bool blackShareValid = false;                         // render thread
+	std::chrono::steady_clock::time_point blackShareTime;  // render thread
+	int blackIntentLogged = -1;                           // render thread: steps below last logged
+	std::string displayIntentLogged;                      // render thread
 	LedDrive::MeasurementHook ledMeasurement;
 	// Re-applies the output encoding libplacebo drops after a texture-input
 	// PRE_OUTPUT hook (the LED measurement and compensation hooks).
@@ -10660,6 +10754,16 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.sourceClass != next.sourceClass, "source_class");
 		changed(current.intentContent != next.intentContent ||
 			current.intentContentHoldSeconds != next.intentContentHoldSeconds, "intent_content");
+		changed(current.intentMotion != next.intentMotion || current.intentMotionPolicy != next.intentMotionPolicy ||
+			current.intentMotionMin != next.intentMotionMin ||
+			current.intentMotionMinShotSeconds != next.intentMotionMinShotSeconds ||
+			current.intentEaseSeconds != next.intentEaseSeconds, "intent_motion");
+		changed(current.ambientAdapt != next.ambientAdapt || current.ambientAdaptStrength != next.ambientAdaptStrength ||
+			current.ambientScreenReflect != next.ambientScreenReflect || current.ambientMaxBlackNits != next.ambientMaxBlackNits ||
+			current.ambientTauUpSeconds != next.ambientTauUpSeconds ||
+			current.ambientTauDownSeconds != next.ambientTauDownSeconds, "ambient_adapt");
+		changed(current.intentBlack != next.intentBlack, "intent_black");
+		changed(current.intentDisplay != next.intentDisplay, "intent_display");
 		changed(current.temporalDither != next.temporalDither, "temporal_dither");
 		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
@@ -14122,6 +14226,202 @@ struct LibplaceboVideoRenderer::Impl
 		}
 	}
 
+	// ---- Intent interpreter items 2-5 (2026-10-17) ----
+	// The switches and settings from the active profile (render loop, per frame;
+	// each consumer logs only on a change).
+	void ConfigureIntentInterpreter()
+	{
+		const RendererSettings& s = activeSettings;
+		IntentInterpreter::Switches switches;
+		switches.content = s.intentContent;
+		switches.motion = s.intentMotion;
+		switches.ambient = s.ambientAdapt;
+		switches.black = s.intentBlack != BlackIntentMode::Off;
+		switches.display = s.intentDisplay;
+		IntentInterpreter::MotionSettings motion;
+		motion.policy = s.intentMotionPolicy;
+		motion.minScale = s.intentMotionMin;
+		motion.minShotSeconds = s.intentMotionMinShotSeconds;
+		motion.easeSeconds = s.intentEaseSeconds;
+		motion.rolloffOn = s.dejudderMotionRolloff;
+		intentInterpreter->Configure(switches, motion);
+		if (switches.Any())
+		{
+			const ContentIntentStatus content = contentIntent->Status();
+			intentInterpreter->SetContentField(IntentField<ContentClass>::Make(content.content,
+				content.content == ContentClass::Unknown ? IntentSource::Off : content.source));
+		}
+		AmbientAdapt::Settings ambient;
+		ambient.enabled = s.ambientAdapt;
+		ambient.strength = s.ambientAdaptStrength;
+		ambient.screenReflectNitsPerLux = s.ambientScreenReflect;
+		ambient.maxBlackNits = s.ambientMaxBlackNits;
+		ambient.tauUpSeconds = s.ambientTauUpSeconds;
+		ambient.tauDownSeconds = s.ambientTauDownSeconds;
+		std::lock_guard<std::mutex> guard(intentMutex);
+		intentBlackPublished = s.intentBlack;
+		intentDisplayPublished = s.intentDisplay;
+		const AmbientAdapt::Settings& was = ambientSettings;
+		if (was.enabled != ambient.enabled || was.strength != ambient.strength ||
+			was.screenReflectNitsPerLux != ambient.screenReflectNitsPerLux || was.maxBlackNits != ambient.maxBlackNits ||
+			was.tauUpSeconds != ambient.tauUpSeconds || was.tauDownSeconds != ambient.tauDownSeconds)
+		{
+			ambientSettings = ambient;
+			ambientFilter.Configure(ambient);
+			DebugLog::Log("Ambient adaptation: %s strength=%.2f screen_reflect=%.4f cd/m2 per lux max_black=%.3f nits "
+				"tau up %.0f s down %.0f s", ambient.enabled ? "on" : "off", ambient.strength,
+				ambient.screenReflectNitsPerLux, ambient.maxBlackNits, ambient.tauUpSeconds, ambient.tauDownSeconds);
+		}
+	}
+
+	// The black the frame renders to: the owner's sdr_black_nits exactly while
+	// ambient_adapt is off or its strength is 0 (bit-identical); otherwise the
+	// quantised B_eff, stepped only when the picture crosses a shot boundary (or by
+	// the filter's slew on a picture without cuts). Also moves the shot observer's
+	// display position (motion intent decides at the same cuts).
+	double IntentTargetBlackNits(uint64_t sourceSequence)
+	{
+		intentInterpreter->AdvanceDisplay(sourceSequence);
+		const uint64_t cuts = intentInterpreter->DisplayedCuts();
+		const bool atCut = cuts != ambientCutsSeen;
+		ambientCutsSeen = cuts;
+		std::lock_guard<std::mutex> guard(intentMutex);
+		const AmbientAdapt::Settings& settings = ambientSettings;
+		if (!settings.enabled || !(settings.strength > 0.0))
+		{
+			ambientApply.valid = false;
+			ambientAppliedBlackNits = 0.0;
+			return sdrBlackNits;
+		}
+		const double before = ambientApply.valid ? ambientApply.applied : sdrBlackNits;
+		const double now = static_cast<double>(GetTickCount64()) / 1000.0;
+		const double black = IntentInterpreter::AmbientStep(ambientApply, settings, ambientFilter.Valid(),
+			ambientFilter.SmoothedLux(), sdrBlackNits, atCut, now);
+		if (black != before)
+			DebugLog::Log("Ambient adaptation: target black %.5f -> %.5f nits (%s; smoothed %.1f lux, owner black %.5f nits)",
+				before, black, atCut ? "at a cut" : "slew on a static picture", ambientFilter.SmoothedLux(), sdrBlackNits);
+		ambientAppliedBlackNits = black;
+		intentInterpreter->SetAmbientField(IntentField<float>::Make(static_cast<float>(black),
+			black != sdrBlackNits ? IntentSource::Inferred : IntentSource::Off));
+		return black;
+	}
+
+	// Black protection (report / led_protect) for the shot on screen, the display
+	// mapping readout, and the LED's intent limits; per rendered frame, cheap
+	// (pure), logged on a change only.
+	// led_protect's share under the fade model (intent_ease_s; owner decision
+	// 2026-10-17). At the shot's first displayed frame: the share measured from
+	// the queued frames when they gave statistics, otherwise the previous share
+	// carried over; over the first intent_ease_s it follows the shot's newer
+	// measurements rate-limited (the full 0..1 range per intent_ease_s), then it
+	// holds for the rest of the shot. intent_ease_s 0: the measured share at once
+	// (as before).
+	double EaseBlackShare(double measured, bool haveMeasurement)
+	{
+		const double ease = activeSettings.intentEaseSeconds;
+		if (!(ease > 0.0))
+		{
+			blackShareValid = false;
+			return measured;
+		}
+		const uint64_t shot = intentInterpreter->DisplayedShotStart();
+		if (!blackShareValid || shot != blackShareShot)
+		{
+			blackShareShot = shot;
+			if (haveMeasurement || !blackShareValid)
+				blackShareApplied = measured;   // provisional at the cut (carried over without statistics)
+			blackShareValid = true;
+			blackShareEase.Start(ease);
+			blackShareTime = std::chrono::steady_clock::now();
+			return blackShareApplied;
+		}
+		// Display time since the previous rendered frame (wall clock: repeats and
+		// extra refreshes add no source frames but do pass time on screen).
+		const auto nowTime = std::chrono::steady_clock::now();
+		const double dt = (std::min)(0.25, (std::max)(0.0,
+			std::chrono::duration<double>(nowTime - blackShareTime).count()));
+		blackShareTime = nowTime;
+		blackShareApplied = blackShareEase.Step(blackShareApplied, measured, 1.0, dt, haveMeasurement);
+		return blackShareApplied;
+	}
+
+	void EvaluateIntentBlackDisplay(const SceneDescriptor& scene, const DisplayProfile& display)
+	{
+		const BlackIntentMode mode = activeSettings.intentBlack;
+		BlackIntentStatus black;
+		black.mode = mode;
+		double share = 0.0;
+		if (mode != BlackIntentMode::Off)
+		{
+			const BlackIntent::ShadowStats shadows = intentInterpreter->DisplayedShadows();
+			IntentField<float> l1;
+			if (scene.sceneMin.present)
+				l1 = IntentField<float>::Make(scene.sceneMin.nits, IntentSource::DvL1);
+			black = BlackIntent::Evaluate(mode, shadows, l1, display.peakNits, display.blackNits);
+			black.mode = mode;
+			if (mode == BlackIntentMode::LedProtect)
+			{
+				share = EaseBlackShare(BlackIntent::LedMinimumShare(shadows, display.peakNits, display.blackNits),
+					shadows.valid);
+				black.ledMinimumShare = static_cast<float>(share);
+			}
+			else
+				blackShareValid = false;
+			const int logged = black.valid ? black.stepsBelow * 1000 + static_cast<int>(share * 100.0 + 0.5) : -2;
+			if (logged != blackIntentLogged)
+			{
+				blackIntentLogged = logged;
+				DebugLog::Log("Black intent: %s %s: %d of %d shadow steps below %.5f nits (display black %.5f, "
+					"L1 min %s, p1/p5/p10 %.5f/%.5f/%.5f nits) LED minimum share %.3f",
+					ToString(mode), black.valid ? "valid" : "no statistics", black.stepsBelow, black.stepsTotal,
+					black.thresholdNits, display.blackNits,
+					l1.valid ? std::to_string(l1.value).c_str() : "absent", shadows.p1Nits, shadows.p5Nits, shadows.p10Nits, share);
+			}
+			if (black.valid)
+				intentInterpreter->SetBlackField(IntentField<float>::Make(static_cast<float>(black.stepsBelow),
+					l1.valid ? IntentSource::DvL1 : IntentSource::Inferred));
+		}
+		else
+			blackIntentLogged = -1;
+		DisplayIntentStatus mapping;
+		if (activeSettings.intentDisplay)
+		{
+			mapping = DisplayIntent::Evaluate(true, scene, display, 0.0);
+			mapping.enabled = true;
+			if (displayIntentLogged != mapping.line)
+			{
+				displayIntentLogged = mapping.line;
+				DebugLog::Log("Display intent: %s", mapping.line[0] ? mapping.line : "no scene maximum");
+			}
+			if (mapping.valid)
+				intentInterpreter->SetDisplayField(IntentField<float>::Make(mapping.compressionStops,
+					mapping.sceneMaxSource));
+		}
+		else
+			displayIntentLogged.clear();
+		IntentInterpreter::LedIntentLimits limits;
+		{
+			std::lock_guard<std::mutex> guard(intentMutex);
+			limits.ambientBlackNits = ambientAppliedBlackNits > sdrBlackNits ? ambientAppliedBlackNits : 0.0;
+			blackIntentStatus = black;
+			displayIntentStatus = mapping;
+		}
+		limits.shadowMinimumShare = share;
+		if (IntentInterpreter::LedLimitsDiffer(limits, ledIntentLimitsSent))
+		{
+			const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
+			if (led)
+			{
+				// The display black at full drive lets the LED drive derive the
+				// ambient share floor (LedDriveModule::SetIntentLimits).
+				led->SetIntentLimits(limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
+				DebugLog::Log("Intent interpreter: LED intent limits shadow minimum share %.3f, ambient black %.5f nits, display black %.5f nits",
+					limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
+				ledIntentLimitsSent = limits;
+			}
+		}
+	}
+
 	// The caller holds renderMutex. Queue-generation validation and rendering
 	// share that lock so a frame removed before a reset cannot cross the reset
 	// boundary while waiting to enter libplacebo.
@@ -14199,6 +14499,10 @@ struct LibplaceboVideoRenderer::Impl
 		// Delta 10 (general): the strength the extras run at, and on an even
 		// cadence its cycle N (extras at the exact phases k/N).
 		dejudderEffectiveStrength = static_cast<float>(DejudderPolicy::EffectiveStrength(in));
+		// Motion intent (intent interpreter item 2, 2026-10-17): the owner's strength times
+		// the per-shot scale in [intent_motion_min, 1], changed only at cuts (1 while off).
+		if (activeSettings.intentMotion)
+			dejudderEffectiveStrength *= static_cast<float>(intentInterpreter->AppliedMotionScale(sourceSequence));
 		dejudderEvenCycle = DejudderPolicy::EvenCycle(DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz));
 		// 50/60p interpolation (plan step 2 / 4): from the same measured rates; it takes
 		// a source the de-judder does not (exclusive per frame).
@@ -14600,6 +14904,20 @@ struct LibplaceboVideoRenderer::Impl
 			// z < 0.9 usable) for source_resolution auto's fast-pan switch.
 			if (flow && flow->global[0][2] < 0.9f)
 				sourceMonitor.SetMotion(8.0 * std::hypot(static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1])), bSequence);
+			// Motion intent (2026-10-17): the same whole-frame motion for this valid pair (the
+			// vectors-valid state accepted it above), in picture heights per frame; read-only.
+			if (flow && intentInterpreter->Active())
+			{
+				const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
+					dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
+				IntentInterpreter::VectorSample vectors;
+				vectors.from = aSequence;
+				vectors.to = bSequence;
+				vectors.valid = flow->global[0][3] > 0.5f && flow->global[0][2] < 0.9f && pictureHeight > 0;
+				vectors.heightsPerFrame = pictureHeight > 0 ? 8.0 * std::hypot(static_cast<double>(flow->global[0][0]),
+					static_cast<double>(flow->global[0][1])) / pictureHeight : 0.0;
+				intentInterpreter->NoteVectors(vectors);
+			}
 			dejudder->SetExternalFlow(std::move(flow));
 			motionProducer->Prune(aSequence);
 		}
@@ -17541,9 +17859,12 @@ struct LibplaceboVideoRenderer::Impl
         if (renderTargetTransfer != PL_COLOR_TRC_UNKNOWN)
             baseTarget.color.transfer = renderTargetTransfer;
 		baseTarget.color.primaries = TargetPlPrimaries();
+		// Ambient adaptation (intent interpreter item 3, 2026-10-17): the black this frame
+		// renders to; exactly sdr_black_nits while ambient_adapt is off or at strength 0.
+		const double renderBlackNits = IntentTargetBlackNits(sourceSequence);
 		LibplaceboRenderParameters::ApplyTargetLuminance(
 			inputIsSdr, static_cast<float>(sdrTargetNits),
-			static_cast<float>(sdrBlackNits), baseTarget.color);
+			static_cast<float>(renderBlackNits), baseTarget.color);
 		// DV next step (f): display profile from today's target settings, and
 		// the mapping policy's libplacebo parameters compared bit for bit with
 		// the HDR metadata actually given to libplacebo (no behaviour change:
@@ -17552,7 +17873,7 @@ struct LibplaceboVideoRenderer::Impl
 			DisplayProfileRendererSettings displaySettings;
 			displaySettings.targetNits = sdrTargetNits;
 			displaySettings.resolvedBlackNits = LibplaceboRenderParameters::ResolveTargetBlack(
-				static_cast<float>(sdrBlackNits));
+				static_cast<float>(renderBlackNits));
 			displaySettings.outputEotf = ToDisplayEotf(baseTarget.color.transfer);
 			displaySettings.targetGamut = ToDisplayGamut(baseTarget.color.primaries);
 			displaySettings.displayBitDepth = activeSettings.displayBitDepth;
@@ -17589,6 +17910,21 @@ struct LibplaceboVideoRenderer::Impl
 				sceneDisplayProfile = displayProfile;
 				sceneDescriptorObserved = true;
 			}
+		}
+		// Black protection / display mapping readout (intent interpreter items 4-5,
+		// report only; led_protect hands the LED its shadow cap). Off: nothing runs.
+		if (activeSettings.intentBlack != BlackIntentMode::Off || activeSettings.intentDisplay ||
+			activeSettings.ambientAdapt || ledIntentLimitsSent.shadowMinimumShare != 0.0 ||
+			ledIntentLimitsSent.ambientBlackNits != 0.0)
+		{
+			DisplayProfileRendererSettings intentDisplaySettings;
+			intentDisplaySettings.targetNits = sdrTargetNits;
+			intentDisplaySettings.resolvedBlackNits = LibplaceboRenderParameters::ResolveTargetBlack(
+				static_cast<float>(renderBlackNits));
+			intentDisplaySettings.outputEotf = ToDisplayEotf(baseTarget.color.transfer);
+			intentDisplaySettings.targetGamut = ToDisplayGamut(baseTarget.color.primaries);
+			intentDisplaySettings.displayBitDepth = activeSettings.displayBitDepth;
+			EvaluateIntentBlackDisplay(frameScene, DisplayProfiles::FromRendererSettings(intentDisplaySettings));
 		}
 		std::ostringstream luminanceSignature;
 		luminanceSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
@@ -26005,7 +26341,8 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     size_t queuedFutureFrames,
     uint64_t lookaheadPolicyGeneration,
     uint64_t subtitleContinuityGeneration,
-    size_t activePictureFrames)
+    size_t activePictureFrames,
+    size_t statisticsFutureFrames)
 {
     const uint8_t availableLookahead = static_cast<uint8_t>((std::min)(
         queuedFutureFrames, size_t{UINT8_MAX}));
@@ -26013,7 +26350,56 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     const std::shared_ptr<QueuedFrameStatistics::IObserver> statisticsObserver =
         std::atomic_load(&m_impl->queuedFrameObserver);
     if (statisticsObserver)
-        statisticsObserver->BeginWalk(walkFrames.empty() ? 0 : walkFrames.size() - 1);
+        statisticsObserver->BeginWalk((std::min)(walkFrames.empty() ? size_t{0} : walkFrames.size() - 1,
+            statisticsFutureFrames));
+    // Intent interpreter items 2-5 (2026-10-17): the shot observer sees each new
+    // queued frame once (every walked frame, the LED's deeper ones included),
+    // with the measured rates and the frame's DV L11 / L5; idle while every
+    // intent function is off.
+    const std::shared_ptr<IntentInterpreter::Observer> intentInterpreter =
+        m_impl ? m_impl->intentInterpreter : std::shared_ptr<IntentInterpreter::Observer>();
+    const bool intentWanted = intentInterpreter && intentInterpreter->Active();
+    const auto feedIntent = [&](const QueuedFrame& queued, const VideoState& state, const AnalysisLumaSource& source,
+        QueuedFrameStatistics::PictureRect picture, size_t index)
+    {
+        if (!intentWanted || queued.cadenceRepeat || !state.displayMode)
+            return;
+        const DolbyVisionTunnelFrameMetadata* dm =
+            state.dolbyVisionTunnel && queued.converted && queued.converted->dolby.valid ?
+            &queued.converted->dolby : nullptr;
+        const bool fullRaster = picture.left == 0 && picture.top == 0 &&
+            picture.right == source.width && picture.bottom == source.height;
+        if (fullRaster && dm && dm->hasActiveArea &&
+            static_cast<int>(dm->activeAreaLeft) + dm->activeAreaRight < source.width &&
+            static_cast<int>(dm->activeAreaTop) + dm->activeAreaBottom < source.height)
+        {
+            // L5 lets the measurement skip the bars when VP has not found them.
+            picture.left = dm->activeAreaLeft;
+            picture.top = dm->activeAreaTop;
+            picture.right = source.width - dm->activeAreaRight;
+            picture.bottom = source.height - dm->activeAreaBottom;
+        }
+        IntentInterpreter::FrameContext context;
+        const double measuredCaptureHz = m_measuredFrameRate.load(std::memory_order_relaxed);
+        context.contentHz = queued.filmHz > 0.0 ? queued.filmHz :
+            measuredCaptureHz > 0.0 ? measuredCaptureHz : state.displayMode->RefreshRateHz();
+        const double measuredDisplayHz = m_impl->presentationTelemetry.Snapshot().measuredDisplayHz;
+        context.displayHz = measuredDisplayHz > 0.0 ? measuredDisplayHz :
+            m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+        context.pulldownLocked = queued.filmHz > 0.0;
+        context.sourceClass = m_impl->activeSettings.sourceClass;
+        context.l11Present = dm && dm->hasL11;
+        context.l11FrameRateConversion = dm ? dm->l11FrameRateConversion : 0;
+        context.discontinuity = queued.gapBefore || queued.frame.IsSourceDiscontinuity();
+        context.transfer = dm || state.eotf == EOTF::PQ ? BlackIntent::Transfer::Pq :
+            state.eotf == EOTF::SDR || state.eotf == EOTF::UNKNOWN ? BlackIntent::Transfer::Gamma :
+            BlackIntent::Transfer::Unknown;
+        context.gamma = 2.4;   // BT.1886 for gamma sources
+        context.sdrWhiteNits = m_impl->sdrTargetNits;
+        context.displayBlackNits = m_impl->sdrBlackNits;
+        intentInterpreter->SetFrameContext(context);
+        intentInterpreter->ObserveFrame(queued.sourceSequence, index, source, picture);
+    };
     // led_lookahead_ms (2026-10-17): the frames beyond the active picture's own
     // look-ahead are walked for the statistics observer (the LED) only.
     const size_t activeCount = (std::min)(activePictureFrames, walkFrames.size());
@@ -26072,12 +26458,23 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
         m_impl && m_impl->activeSettings.cadenceClassFixes;
     const auto observeStatisticsOnly = [&](size_t first)
     {
-        if (!statisticsObserver && !(first == 0 && contentWithoutActive))
+        if (!statisticsObserver && !intentWanted && !(first == 0 && contentWithoutActive))
             return;
+        // Queue-fed intent observer (2026-10-17): a frame the observer has seen in an
+        // earlier walk is analysed again only when the LED still wants it (one analysis
+        // per source frame for the intent alone).
+        const uint64_t intentSeen = intentWanted ? intentInterpreter->LastObservedSequence() : 0;
         for (size_t index = first; index < walkFrames.size(); ++index)
         {
             const QueuedFrame& queued = walkFrames[index];
             if (!queued.state || !queued.state->displayMode || !queued.frame.GetData())
+                continue;
+            const bool statisticsWant = statisticsObserver && index <= statisticsFutureFrames;
+            const bool intentWant = intentWanted && !queued.cadenceRepeat && queued.sourceSequence > intentSeen;
+            // Content intent keeps its own depth (current + next, or the LED's) when intent walks deeper.
+            const bool contentWant = first == 0 && contentWithoutActive && !queued.cadenceRepeat &&
+                index <= (std::max)(statisticsFutureFrames, size_t{ 1 });
+            if (!statisticsWant && !intentWant && !contentWant)
                 continue;
             const VideoState& state = *queued.state;
             const auto prepared = Impl::PrepareFrameAnalysis(queued.frame, state, queued.converted,
@@ -26107,10 +26504,12 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
                 picture.right = bounds.right;
                 picture.bottom = bounds.bottom;
             }
-            if (statisticsObserver)
+            if (statisticsWant)
                 statisticsObserver->ObserveFrame(queued.sourceSequence, index, prepared.source, picture);
-            if (first == 0 && contentWithoutActive && !queued.cadenceRepeat)
+            if (contentWant)
                 observeContent(queued, state, prepared.source, sample.observation, index);
+            if (intentWant)
+                feedIntent(queued, state, prepared.source, picture, index);
         }
     };
     if (activeCount == 0)
@@ -26480,6 +26879,22 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
         // Content recognition (intent interpreter item 1, 2026-10-17).
         if (contentIntent && contentIntent->Enabled() && !queued.cadenceRepeat)
             observeContent(queued, state, source, preview.observation, rememberedIndex);
+        if (intentWanted)
+        {
+            QueuedFrameStatistics::PictureRect picture;
+            picture.right = source.width;
+            picture.bottom = source.height;
+            const auto& bounds = preview.observation.bounds;
+            if (preview.observation.classification == ActivePictureClassification::BAR_CROP_TRUSTED &&
+                bounds.right > bounds.left && bounds.bottom > bounds.top)
+            {
+                picture.left = bounds.left;
+                picture.top = bounds.top;
+                picture.right = bounds.right;
+                picture.bottom = bounds.bottom;
+            }
+            feedIntent(queued, state, source, picture, rememberedIndex);
+        }
         if (statisticsObserver)
         {
             QueuedFrameStatistics::PictureRect picture;
@@ -27482,6 +27897,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 		const bool contentWantsWalk = m_impl && m_impl->activeSettings.cadenceClassFixes &&
 			m_impl->contentIntent && m_impl->contentIntent->Enabled();
 		const size_t statisticsWalkDepth = (std::max)(ledWantedLookahead, contentWantsWalk ? size_t{ 1 } : size_t{ 0 });
+		// Queue-fed intent observer (2026-10-17, owner): while any intent function is on,
+		// the walk covers the queue ahead (IntentInterpreter::WantedWalkFrames; the current
+		// frame alone with nothing queued); depth only, no scheduling change.
+		const bool intentWalkActive = m_impl && m_impl->intentInterpreter->Active();
+		size_t intentWantedLookahead = 0;
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> previewLock(m_queueMutex);
@@ -27489,8 +27909,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (m_stopRequested) break;
 			previewWaitMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - waitStarted).count();
+            intentWantedLookahead = intentWalkActive ? IntentInterpreter::WantedWalkFrames(m_frameQueue.size()) : 0;
             const auto walk = AlphaQueuePolicy::SelectLookaheadWalk(
-                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire), statisticsWalkDepth,
+                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire),
+                (std::max)(statisticsWalkDepth, intentWantedLookahead),
                 ActivePictureDecisionTimeline::MAX_LOOKAHEAD_FRAMES);
             const auto& window = walk.window;
             activePictureWalkFrames = walk.activePictureFrames;
@@ -27546,7 +27968,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		const size_t activePictureWalkNow =
 			m_activePictureLookaheadFrames.load(std::memory_order_acquire) > 0 ? activePictureWalkFrames : 0;
 		if (!activePicturePreviewFrames.empty() &&
-			(activePictureWalkNow > 0 || ledWantedLookahead > 0 || contentWantsWalk))
+			(activePictureWalkNow > 0 || ledWantedLookahead > 0 || contentWantsWalk || intentWantedLookahead > 0))
 		{
 			const auto lookaheadStarted = SteadyClock::now();
 			try
@@ -27556,7 +27978,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					activePictureAvailableLookahead,
 					activePictureLookaheadPolicyGeneration,
 					activePictureContinuityGeneration,
-					activePictureWalkNow);
+					activePictureWalkNow,
+					ledWantedLookahead);
 			}
 			catch (const std::exception& e)
 			{
@@ -28029,6 +28452,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 				MotionAhead::QueueFramesFor(m_impl->activeSettings.motionAheadFrames) : 0, std::memory_order_relaxed);
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
+			m_impl->ConfigureIntentInterpreter();
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
 			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
@@ -29054,6 +29478,19 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_class=" << InterpolationPolicy::Name(s.sourceClass) << "\n"
 		<< "intent_content=" << (s.intentContent ? "on" : "off") << "\n"
 		<< "intent_content_hold_seconds=" << s.intentContentHoldSeconds << "\n"
+		<< "intent_motion=" << (s.intentMotion ? "on" : "off") << "\n"
+		<< "intent_motion_policy=" << ToString(s.intentMotionPolicy) << "\n"
+		<< "intent_motion_min=" << s.intentMotionMin << "\n"
+		<< "intent_motion_min_shot_s=" << s.intentMotionMinShotSeconds << "\n"
+		<< "intent_ease_s=" << s.intentEaseSeconds << "\n"
+		<< "ambient_adapt=" << (s.ambientAdapt ? "on" : "off") << "\n"
+		<< "ambient_adapt_strength=" << s.ambientAdaptStrength << "\n"
+		<< "ambient_screen_reflect=" << s.ambientScreenReflect << "\n"
+		<< "ambient_max_black_nits=" << s.ambientMaxBlackNits << "\n"
+		<< "ambient_tau_up_s=" << s.ambientTauUpSeconds << "\n"
+		<< "ambient_tau_down_s=" << s.ambientTauDownSeconds << "\n"
+		<< "intent_black=" << ToString(s.intentBlack) << "\n"
+		<< "intent_display=" << (s.intentDisplay ? "report" : "off") << "\n"
 		<< "temporal_dither=" << s.temporalDither << "\n"
 		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
@@ -29162,6 +29599,51 @@ bool LibplaceboVideoRenderer::GetContentIntentStatus(ContentIntentStatus& status
 		return false;
 	status = m_impl->contentIntent->Status();
 	return status.enabled;
+}
+
+// Intent interpreter items 2-5 (2026-10-17): what the GUI shows (stats overlay,
+// crash state, log). False when every one of the four functions is off.
+bool LibplaceboVideoRenderer::GetIntentStatus(IntentStatus& status) const
+{
+	status = {};
+	if (!m_impl)
+		return false;
+	status.motion = m_impl->intentInterpreter->MotionStatus();
+	std::lock_guard<std::mutex> guard(m_impl->intentMutex);
+	const double ownerBlack = m_impl->sdrBlackNits;
+	AmbientAdapt::FillStatus(m_impl->ambientSettings, m_impl->ambientFilter, ownerBlack,
+		m_impl->ambientAppliedBlackNits > 0.0 ? m_impl->ambientAppliedBlackNits : ownerBlack, status.ambient);
+	status.ambient.enabled = m_impl->ambientSettings.enabled;
+	if (status.ambient.enabled && !status.ambient.sensorValid)
+		CopyIntentText(status.ambient.reason, "no room reading (detector off or lost)");
+	else if (status.ambient.enabled && !(m_impl->ambientSettings.strength > 0.0))
+		CopyIntentText(status.ambient.reason, "strength 0");
+	if (m_impl->intentBlackPublished != BlackIntentMode::Off)
+	{
+		status.black = m_impl->blackIntentStatus;
+		status.black.mode = m_impl->intentBlackPublished;
+	}
+	if (m_impl->intentDisplayPublished)
+	{
+		status.display = m_impl->displayIntentStatus;
+		status.display.enabled = true;
+	}
+	return status.motion.enabled || status.ambient.enabled || status.black.mode != BlackIntentMode::Off ||
+		status.display.enabled;
+}
+
+// The GUI's [ambient] detector reading, about once a second (IRenderer contract).
+void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSeconds)
+{
+	if (!m_impl)
+		return;
+	std::lock_guard<std::mutex> guard(m_impl->intentMutex);
+	if (!m_impl->ambientSettings.enabled)
+		return;
+	if (valid && std::isfinite(lux))
+		m_impl->ambientFilter.AddReading(lux < 0.0 ? 0.0 : lux, nowSeconds);
+	else
+		m_impl->ambientFilter.Tick(nowSeconds);
 }
 
 bool LibplaceboVideoRenderer::GetSceneDescriptor(
