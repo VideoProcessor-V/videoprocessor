@@ -6625,6 +6625,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             [this, state, key](int selected)
         {
             if (state->loading || state->section.isEmpty() || !document_) return;
+            // Automatic (the minimum, shown as Auto) is an absent key, never a written number.
+            if (key == QStringLiteral("active_picture_lookahead_frames") && selected < 0)
+            {
+                document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str());
+                markDirty();
+                return;
+            }
             document_->SetKnown(state->section.toStdString(),
                 key.toStdString().c_str(), std::to_string(selected));
             markDirty();
@@ -6744,7 +6751,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         addInteger(QStringLiteral("Startup pre-roll"), QStringLiteral("startup_preroll_frames"),
             0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Active-picture lookahead"), QStringLiteral("active_picture_lookahead_frames"),
-            0, 8, QStringLiteral("frames"));
+            -1, 8, QStringLiteral("frames"));
+        {
+            // Owner decision 2026-10-17: the look-ahead follows the queue when the key is absent.
+            auto* lookahead = qobject_cast<QSpinBox*>(fields->back().widget);
+            lookahead->setSpecialValueText(QStringLiteral("Auto"));
+            lookahead->setToolTip(QStringLiteral(
+                "Auto (default; the key is absent): the look-ahead follows the queue. A normal queue profile uses "
+                "min(target frames - 1, queue size - 1, 8) queued future frames; a low-latency profile uses 0. "
+                "A number from 0 to 8 overrides it, including 0 (no look-ahead). Raising it never enlarges the "
+                "queue. (Key: active_picture_lookahead_frames.)"));
+        }
         addInteger(QStringLiteral("Queue reset delay"), QStringLiteral("reset_after_render_restart_seconds"),
             1, INT_MAX, QStringLiteral("seconds"));
         addInteger(QStringLiteral("Queue recovery threshold"), QStringLiteral("reset_queue_too_large_percent"),
@@ -10243,7 +10260,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
                 queueValue(QStringLiteral("target_latency_ms")) <= 0 &&
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
-                queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
+                queueValue(QStringLiteral("active_picture_lookahead_frames")) <= 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
                 queueValue(QStringLiteral("reset_queue_too_large_percent")) == policy.resetPercent)
             {
@@ -10323,7 +10340,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (key == QStringLiteral("lead_frames")) return QStringLiteral("1");
                 if (key == QStringLiteral("target_frames")) return QStringLiteral("4");
                 if (key == QStringLiteral("target_latency_ms")) return QStringLiteral("0");
-                if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("0");
+                if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("auto");
                 if (key == QStringLiteral("startup_preroll_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("steady_reserve_frames")) return QStringLiteral("4");
                 if (key == QStringLiteral("reset_after_render_restart_seconds")) return QStringLiteral("5");
@@ -10636,7 +10653,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 else qobject_cast<QLineEdit*>(field.widget)->setText(displayed);
             }
             else if (field.kind == Field::Integer)
-                qobject_cast<QSpinBox*>(field.widget)->setValue(configured.toInt());
+            {
+                bool numeric = false;
+                int number = configured.toInt(&numeric);
+                // Absent / auto: the look-ahead follows the queue (shown as Auto).
+                if (!numeric && field.key == QStringLiteral("active_picture_lookahead_frames")) number = -1;
+                qobject_cast<QSpinBox*>(field.widget)->setValue(number);
+            }
             else if (field.kind == Field::SdrGamma)
             {
                 const QString mode = configured.toLower();
@@ -10962,7 +10985,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("startup_preroll_frames", 0);
             setValue("target_frames", selected->target);
             setValue("target_latency_ms", 0);
-            setValue("active_picture_lookahead_frames", 0);
+            // Stays automatic (follows the queue): the preset removes any explicit value.
+            document_->RemoveKnown(section, "active_picture_lookahead_frames");
             setValue("reset_after_render_restart_seconds", 5);
             setValue("reset_queue_too_large_percent", selected->resetPercent);
             for (const Field& field : *fields)
@@ -10974,6 +10998,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     else if (field.key == QStringLiteral("target_frames")) value = selected->target;
                     else if (field.key == QStringLiteral("reset_after_render_restart_seconds")) value = 5;
                     else if (field.key == QStringLiteral("reset_queue_too_large_percent")) value = selected->resetPercent;
+                    else if (field.key == QStringLiteral("active_picture_lookahead_frames")) value = -1;
                     QSignalBlocker blocker(field.widget);
                     qobject_cast<QSpinBox*>(field.widget)->setValue(value);
                 }

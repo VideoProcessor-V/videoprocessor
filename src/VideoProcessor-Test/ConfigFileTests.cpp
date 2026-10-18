@@ -184,6 +184,28 @@ namespace VideoProcessorTest
                     wide(v).c_str());
         }
 
+        TEST_METHOD(ActivePictureLookaheadAcceptsZeroToEightAndAbsence)
+        {
+            // Owner 2026-10-17: absent = automatic (follows the queue); an explicit 0-8 overrides.
+            std::string expected;
+            for (const char* v : { "0", "1", "4", "8" })
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("queue", "active_picture_lookahead_frames", v, expected));
+            for (const char* v : { "-1", "9", "auto", "" })
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("queue", "active_picture_lookahead_frames", v, expected));
+            RendererProfileConfig::Model model;
+            CachedConfigTestFile absent;
+            std::ofstream(absent.path) << "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n";
+            ConfigFile config;
+            Assert::IsTrue(config.Load(absent.path));
+            std::string error;
+            Assert::IsTrue(RendererProfileConfig::Read(config, model, error), std::wstring(error.begin(), error.end()).c_str());
+            CachedConfigTestFile zero;
+            std::ofstream(zero.path) << "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\nactive_picture_lookahead_frames: 0\n";
+            ConfigFile config2;
+            Assert::IsTrue(config2.Load(zero.path));
+            Assert::IsTrue(RendererProfileConfig::Read(config2, model, error), std::wstring(error.begin(), error.end()).c_str());
+        }
+
         TEST_METHOD(IntentRemainderKeysValidate)
         {
             // Intent interpreter remainder (2026-10-17): the 12 experimental keys (contract:
