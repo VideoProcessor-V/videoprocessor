@@ -755,6 +755,7 @@ namespace RendererProfileConfig
 			if (key == "cadence_class_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 2026-10-17
 			if (key == "motion_history_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 fix group 5
 			if (key == "queue_timing_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 group 5 (queue/cadence timing)
+			if (key == "efficiency_fixes") return IsChoice(value, { "on", "off" });   // efficiency round 2026-10-18
 			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the
 			// de-judder's gate per source period, its GPU budget and the queue credit.
 			if (key == "render_ahead" || key == "render_ahead_queue_credit") return IsChoice(value, { "on", "off" });

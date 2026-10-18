@@ -8551,6 +8551,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "correction's timings are in seconds at every frame rate and follow the real queue depth; a dropped frame's "
             "gap is kept; render ahead without frame statistics prefers the measured refresh over the whole-hertz mode. "
             "Off: the earlier behaviour."));
+        // Efficiency round 2026-10-18 (docs/agent-reports/efficiency.md).
+        auto* efficiency = addChoice(QStringLiteral("Efficiency fixes"), QStringLiteral("efficiency_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        efficiency->setToolTip(QStringLiteral(
+            "Under test (default on). Work done twice is done once, with the same picture: the frame shown uses the "
+            "planes already uploaded for the motion estimate when it was the next frame (one upload per frame saved "
+            "while the de-judder runs), and the look-ahead measures a queued frame's picture area only while the LED "
+            "or content recognition still needs that frame. Off: the earlier behaviour."));
         // Render-ahead (docs/VP-render-ahead-design.md, owner 2026-10-17): processing follows the
         // source frame rate, not the display refresh. Off by default until the on-screen runs pass.
         auto* renderAhead = addChoice(QStringLiteral("De-judder: render ahead (under test)"), QStringLiteral("render_ahead"),
@@ -10306,7 +10314,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" }, { "efficiency_fixes", "on" },
                     // Render-ahead (docs/VP-render-ahead-design.md).
                     { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.

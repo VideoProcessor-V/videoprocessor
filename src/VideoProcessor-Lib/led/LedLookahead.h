@@ -96,6 +96,9 @@ namespace LedDrive
 		void BeginWalk(size_t futureFrames) override;
 		void ObserveFrame(uint64_t sourceSequence, size_t framesAhead,
 			const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& activePicture) override;
+		// Efficiency round 2026-10-18: ObserveFrame's own early returns (predictions off, a frame
+		// already measured), checked without measuring.
+		bool WantsFrame(uint64_t sourceSequence) const override;
 		// Hunt 2 (owner 2026-10-17), from the render thread every frame: the
 		// output screen in source raster pixels (the script's box size; 0 =
 		// the frame fills the screen) and the current frame's detected

@@ -237,6 +237,16 @@ namespace LedDrive
 		module.SetLookaheadDepth(futureFrames);
 	}
 
+	// The same tests, in the same order, as ObserveFrame's returns before it measures. The
+	// builder's reset on a settings change is deferred to the next frame measured, which is
+	// the first one to use it.
+	bool LookaheadObserver::WantsFrame(uint64_t sourceSequence) const
+	{
+		if (!module.WantsPredictions()) return false;
+		return !(sourceSequence != 0 && sourceSequence <= lastSequence &&
+			lastSequence - sourceSequence < 1000);
+	}
+
 	void LookaheadObserver::ObserveFrame(uint64_t sourceSequence, size_t framesAhead,
 		const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& activePicture)
 	{

@@ -31,5 +31,9 @@ namespace QueuedFrameStatistics
 		virtual void BeginWalk(size_t futureFrames) = 0;
 		virtual void ObserveFrame(uint64_t sourceSequence, size_t framesAhead,
 			const AnalysisLumaSource& luma, const PictureRect& activePicture) = 0;
+		// Efficiency round 2026-10-18 (efficiency_fixes): false when ObserveFrame would ignore
+		// this frame now (already observed, or off), so the walk skips measuring its active
+		// picture for it. Must not change state; the default observes every frame.
+		virtual bool WantsFrame(uint64_t sourceSequence) const { (void)sourceSequence; return true; }
 	};
 }
