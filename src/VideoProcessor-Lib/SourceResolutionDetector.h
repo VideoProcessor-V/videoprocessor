@@ -363,6 +363,27 @@ namespace SourceResolution
 	// would no longer fit the 0.5 s tile interval on the CPU worker).
 	int TileSize(double height, int maximum = 256);
 
+	// The exact rendition behind a measured rate (latch precision, 2026-10-17). FindPeak reads
+	// the rate on the tile's own sweep - candidates m / n, bins 1/n apart - with a parabolic
+	// sub-bin offset; on an asymmetric coherence peak the offset is biased upwards by a
+	// fraction of a bin (measured +0.03 to +0.45 bin per frame, up to +0.52 at the window's
+	// maximum, which the tracker declares), so a 128-px tile (bins 8.4 lines apart at 1080)
+	// read a 540-line source as ~542 (0.4 % off) where a 256-px tile, bins half as wide,
+	// rounded to 540. The re-base needs the true size: the source had a whole number of lines,
+	// an even number as every rendition the monitor re-bases to. Of the even sizes of
+	// `frameSize` within kSnapBins of the reading (0.75 / tile of the rate either way: the
+	// measured error with a margin), the one whose ratio to the frame is the simplest
+	// fraction - the smallest denominator, the nearest on a tie. Derived from the measurement
+	// and the frame only, no list of classes: 540 in 1080 is exactly 1/2, 576 in 1080 8/15,
+	// 900 in 2160 5/12. A size off any simple ratio (1000 of 2160 = 25/54) stays exact while
+	// the reading is within about a fifth of a bin; further out a simpler neighbour within
+	// reach is taken (the sweep cannot tell them apart). `frameSize` is the axis's whole frame
+	// size (the height for the declared and vertical ratios, the width for the horizontal
+	// one: a letterboxed or pillarboxed picture scales as the frame does). A ratio of 1 or
+	// more, or no frame size / tile, comes back unchanged.
+	constexpr double kSnapBins = 0.75;
+	double SnapRatio(double ratio, int frameSize, int tile);
+
 	// The declared reading over time.
 	class Tracker
 	{

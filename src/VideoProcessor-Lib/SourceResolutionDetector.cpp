@@ -191,11 +191,23 @@ namespace SourceResolution
 				const int kFrom = (std::max)({ 2, half - band, m - n / 2 });
 				const int kTo = (m - 5) / 2;   // m - k - k >= 5
 				if (kTo - kFrom < 2) continue;
+				// Latch precision (2026-10-17): on a 128-px tile the band is a few bins wide and the
+				// harmonics with their neighbours are 3/8 of all bins, so some candidates kept no pair
+				// at all (m = 42, 43 near 1/3: read 0, the peak taken at 44 - a 720-line source in 2160
+				// read as 746, 360 in 1080 lost). Such a candidate leaves out the harmonics alone - below
+				// the coding signatures (7/8, 15/16, 31/32 and the levels FindPeak reads around them keep
+				// the full exclusion). On the 256-px tile (the thresholds' size) every candidate the
+				// sweep and its checks read keeps three pairs: unchanged.
+				int kept = 0;
+				for (int k = kFrom; k <= kTo; ++k) if (!BlockHarmonic(k, n) && !BlockHarmonic(m - k, n)) ++kept;
+				const bool exactOnly = kept < 3 && m < 7 * n / 8 - 2;
+				const int period = n / 16;
+				auto excluded = [&](int bin) { return exactOnly ? period >= 2 && bin % period == 0 : BlockHarmonic(bin, n); };
 				std::complex<double> sum(0.0, 0.0);
 				double magnitude = 0.0;
 				for (int k = kFrom; k <= kTo; ++k)
 				{
-					if (BlockHarmonic(k, n) || BlockHarmonic(m - k, n)) continue;
+					if (excluded(k) || excluded(m - k)) continue;
 					for (int l = 0; l < n; ++l)
 					{
 						const std::complex<double> product = lines[static_cast<size_t>(l) * bins + k] * lines[static_cast<size_t>(l) * bins + (m - k)];
@@ -1284,6 +1296,35 @@ namespace SourceResolution
 		int size = 128;
 		while (size * 2 <= maximum && std::fabs(std::log2(wanted / (size * 2.0))) < std::fabs(std::log2(wanted / size))) size *= 2;
 		return (std::min)(maximum, size);
+	}
+
+	double SnapRatio(double ratio, int frameSize, int tile)
+	{
+		if (!(ratio > 0.0) || ratio >= 1.0 || frameSize <= 2 || tile <= 0) return ratio;
+		const double size = ratio * frameSize;
+		const double reach = kSnapBins * frameSize / tile;   // in lines (columns)
+		auto gcd = [](int a, int b) { while (b) { const int r = a % b; a = b; b = r; } return a; };
+		int best = -1, bestDenominator = 0;
+		double bestDistance = 0.0;
+		for (int lines = 2 * static_cast<int>(std::ceil((size - reach) * 0.5)); lines <= size + reach; lines += 2)
+		{
+			if (lines <= 0 || lines >= frameSize) continue;
+			const int denominator = frameSize / gcd(lines, frameSize);
+			const double distance = std::fabs(lines - size);
+			if (best < 0 || denominator < bestDenominator || (denominator == bestDenominator && distance < bestDistance))
+			{
+				best = lines;
+				bestDenominator = denominator;
+				bestDistance = distance;
+			}
+		}
+		if (best < 0)
+		{
+			// No even size within reach (a frame under ~1.3 tiles): the nearest even size.
+			best = 2 * static_cast<int>(std::lround(size * 0.5));
+			if (best <= 0 || best >= frameSize) return ratio;
+		}
+		return static_cast<double>(best) / frameSize;
 	}
 
 	double DetailAbove(const Spectrum& tile, double ratio, int axes, double* level)
