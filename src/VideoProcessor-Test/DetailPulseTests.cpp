@@ -234,6 +234,13 @@ namespace DetailPulseTestsNs
 		{
 			pl_log_params logParams{};
 			logParams.log_level = PL_LOG_NONE;
+			// VP_TEST_PL_LOG=1: libplacebo's errors (a shader that does not compile) into the test log.
+			char flag[8] = {};
+			if (GetEnvironmentVariableA("VP_TEST_PL_LOG", flag, sizeof(flag)) > 0 && flag[0] == '1')
+			{
+				logParams.log_level = PL_LOG_ERR;
+				logParams.log_cb = [](void*, enum pl_log_level, const char* msg) { Logger::WriteMessage(msg); Logger::WriteMessage("\n"); };
+			}
 			log = pl_log_create(PL_API_VER, &logParams);
 			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
 			Logger::WriteMessage(("GPU tests on: " + device + "\n").c_str());
@@ -1005,81 +1012,265 @@ namespace DetailPulseTestsNs
 			pl_tex_destroy(g.gpu, &tex);
 		}
 
+		TEST_METHOD(DetailPulseGpuFastMatchesOriginal)
+		{
+			// detail_pulse_fast against the original passes (detail_pulse_fast off) on the same
+			// inputs: new frames with and without a field, a look-ahead, repeats of a moved picture
+			// (hunt 3 F6), another geometry (the crossfade's path being left) and a one-plane RGB
+			// cue; odd sizes (partial tiles, odd half planes). The error budget: at most one r16
+			// storage step (1/64 of a 10-bit code) on a pixel, where another fp32 rounding of the
+			// same sums lands on the other side of a storage step; the share of such pixels is
+			// reported. The fast path is also checked against the model (0.05 codes, as
+			// DetailPulseGpuMatchesModel).
+			PulseGpu g;
+			double worstLuma = 0.0, worstRgb = 0.0, worstModel = 0.0;
+			int changedPixels = 0;
+			long long compared = 0, differing = 0;
+			auto compare = [&](const Image& x, const Image& y) {
+				for (size_t i = 0; i < x.v.size(); ++i)
+				{
+					const double d = std::fabs(x.v[i] - y.v[i]);
+					worstLuma = (std::max)(worstLuma, d);
+					differing += d > 0.0 ? 1 : 0;
+				}
+				compared += static_cast<long long>(x.v.size());
+			};
+			for (int geo = 0; geo < 2; ++geo)
+			{
+				const int w = geo == 0 ? 200 : 233, h = geo == 0 ? 136 : 121;
+				const Coded c = MakeCoded(w, h, 10, 23.976, 4.0, false, 1601u + geo);
+				Field marked((w + 15) / 16, (h + 15) / 16, 1.0);
+				for (int by = 2; by < 5; ++by)
+					for (int bx = 3; bx < 6; ++bx) marked.at(bx, by) = 0.1;
+				std::vector<float> fieldData;
+				for (double t : marked.trust) { fieldData.push_back(0.0f); fieldData.push_back(0.0f); fieldData.push_back(static_cast<float>(t)); fieldData.push_back(0.0f); }
+				pl_tex_params fp{};
+				fp.w = marked.w; fp.h = marked.h; fp.format = pl_find_named_fmt(g.gpu, "rgba32f"); fp.sampleable = true; fp.initial_data = fieldData.data();
+				pl_tex fieldTex = pl_tex_create(g.gpu, &fp);
+				double k3[3];
+				DetailPulse::LumaWeights(PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709, k3);
+				const double offset[3] = { 0.03, -(k3[0] * 0.03 + k3[2] * -0.05) / k3[1], -0.05 };
+				std::vector<pl_tex> textures;
+				for (int useField = 0; useField < 2; ++useField)
+				{
+					DetailPulse::Module fast, orig;
+					Model model;
+					Settings s;
+					for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
+					{
+						const uint64_t seq = static_cast<uint64_t>(k) + 1;
+						DetailPulse::Params p;
+						p.sequence = seq;
+						p.field = useField ? fieldTex : nullptr;
+						p.lumaSystem = PL_COLOR_SYSTEM_BT_709;
+						p.codeLevels = PL_COLOR_LEVELS_LIMITED;
+						DetailPulse::Params po = p;
+						po.fast = false;
+						if (!useField && k > 0 && k + 1 < static_cast<int>(c.frames.size()))
+						{
+							textures.push_back(g.Upload(c.frames[k + 1]));
+							Assert::IsTrue(fast.MeasureAhead(g.gpu, g.dispatch, textures.back(), seq + 1, p), W(fast.LastError().c_str()).c_str());
+							Assert::IsTrue(orig.MeasureAhead(g.gpu, g.dispatch, textures.back(), seq + 1, po), W(orig.LastError().c_str()).c_str());
+							model.MeasureAhead(c.frames[k + 1], seq + 1, s);
+						}
+						const bool rgb = useField && k >= 6 && k <= 7;
+						textures.push_back(rgb ? g.UploadRgb(c.frames[k], k3, offset) : g.Upload(c.frames[k]));
+						const pl_frame in = rgb ? PulseGpu::RgbFrame(textures.back()) : PulseGpu::LumaFrame(textures.back());
+						pl_frame a{}, b{};
+						Assert::IsTrue(fast.Apply(g.gpu, g.dispatch, in, p, a), W(fast.LastError().c_str()).c_str());
+						Assert::IsTrue(orig.Apply(g.gpu, g.dispatch, in, po, b), W(orig.LastError().c_str()).c_str());
+						const Frame mf = model.Process(c.frames[k], seq, s, useField ? &marked : nullptr);
+						if (rgb)
+						{
+							const std::vector<Image> ca = g.ReadbackRgb(a.planes[0].texture), cb = g.ReadbackRgb(b.planes[0].texture);
+							for (int cc = 0; cc < 3; ++cc) worstRgb = (std::max)(worstRgb, 876.0 * MaxAbsDiff(ca[cc], cb[cc]));
+						}
+						else
+						{
+							const Image ia = g.Readback(a.planes[0].texture), ib = g.Readback(b.planes[0].texture);
+							compare(ia, ib);
+							worstModel = (std::max)(worstModel, MaxAbsDiff(ia, mf.out));
+							for (size_t i = 0; i < ia.v.size(); ++i) changedPixels += ia.v[i] != c.frames[k].v[i] ? 1 : 0;
+						}
+						if (k == 4 || k == 8)
+						{
+							// A repeat of another picture (moved), then another geometry.
+							const Image moved = Shifted(c.frames[k], 3 + geo, 2);
+							textures.push_back(g.Upload(moved));
+							Assert::IsTrue(fast.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), p, a), W(fast.LastError().c_str()).c_str());
+							Assert::IsTrue(orig.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), po, b), W(orig.LastError().c_str()).c_str());
+							const Image ra = g.Readback(a.planes[0].texture);
+							compare(ra, g.Readback(b.planes[0].texture));
+							worstModel = (std::max)(worstModel, MaxAbsDiff(ra, model.Process(moved, seq, s, useField ? &marked : nullptr).out));
+							const Image halfPic = HalfBox(c.frames[k]);
+							textures.push_back(g.Upload(halfPic));
+							DetailPulse::Params pf = p, pfo = po;
+							pf.planeLines = pfo.planeLines = (h + 1) / 2;
+							Assert::IsTrue(fast.ApplyForeign(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), pf, a), W(fast.LastError().c_str()).c_str());
+							Assert::IsTrue(orig.ApplyForeign(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures.back()), pfo, b), W(orig.LastError().c_str()).c_str());
+							compare(g.Readback(a.planes[0].texture), g.Readback(b.planes[0].texture));
+						}
+						Assert::AreEqual(orig.HistoryFrames(), fast.HistoryFrames());
+					}
+					fast.Release(g.gpu);
+					orig.Release(g.gpu);
+				}
+				for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+				pl_tex_destroy(g.gpu, &fieldTex);
+			}
+			char text[256];
+			snprintf(text, sizeof(text), "fast vs original: worst %.6f codes (luma; %lld of %lld pixels differ, %.4f %%), %.6f codes (RGB); fast vs model %.4f codes; %d pixels changed by the pulse",
+				worstLuma, differing, compared, 100.0 * differing / (std::max)(compared, 1LL), worstRgb, worstModel, changedPixels);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(changedPixels > 0, W(text).c_str());
+			Assert::IsTrue(worstLuma <= 1.0 / 64.0 + 1e-9 && worstRgb < 0.01 && worstModel < 0.05, W(text).c_str());
+		}
+
 		TEST_METHOD(DetailPulseGpuTiming)
 		{
-			// Apply at 3840x2160 and 1920x1080 (r16 luma, 4:2:0 chroma passing through), median over
-			// consecutive frames (measure + reduce + apply), CPU wall clock around pl_gpu_finish.
+			// Apply at 3840x2160, 2560x1600 and 1920x1080 (r16 luma, 4:2:0 chroma passing through),
+			// detail_pulse_fast off and on, median over frames, CPU wall clock around pl_gpu_finish:
+			//  - new frames with gains (two pictures alternating, the second with 0.75 x the first's
+			//    detail: measure + reduce + apply, a gain above 1 on every other frame);
+			//  - new frames steady (one picture: gain exactly 1 after the first);
+			//  - repeats of another picture (hunt 3 F6: a de-judder extra or gap fill; the apply
+			//    pass alone, with a gain above 1).
 			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
 			{
 				Logger::WriteMessage("DetailPulseGpuTiming: skipped (VP_TEST_GPU=hardware not set)");
 				return;
 			}
-			pl_log_params logParams{};
-			logParams.log_level = PL_LOG_NONE;
-			pl_log log = pl_log_create(PL_API_VER, &logParams);
-			std::string device;
-			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
-			pl_d3d11 d3d = pl_d3d11_create(log, &deviceParams);
-			Assert::IsNotNull(d3d, L"Could not create the libplacebo test device");
-			pl_gpu gpu = d3d->gpu;
-			pl_dispatch dispatch = pl_dispatch_create(log, gpu);
+			PulseGpu g;
 			LARGE_INTEGER freq;
 			QueryPerformanceFrequency(&freq);
-			for (int size = 0; size < 2; ++size)
+			const int sizes[3][2] = { { 3840, 2160 }, { 2560, 1600 }, { 1920, 1080 } };
+			for (const auto& size : sizes)
 			{
-				const int w = size == 0 ? 3840 : 1920, h = size == 0 ? 2160 : 1080;
+				const int w = size[0], h = size[1];
 				std::mt19937 rng(1u);
-				std::uniform_int_distribution<int> code(200, 800);
-				pl_tex planes[3] = {};
-				for (int p = 0; p < 3; ++p)
+				std::uniform_int_distribution<int> noise(-35, 35);
+				std::vector<uint16_t> da(static_cast<size_t>(w) * h), db(da.size());
+				for (size_t i = 0; i < da.size(); ++i)
 				{
-					const int pw = p == 0 ? w : w / 2, ph = p == 0 ? h : h / 2;
-					std::vector<uint16_t> data(static_cast<size_t>(pw) * ph);
-					for (uint16_t& v : data) v = static_cast<uint16_t>(code(rng) << 6);
+					const int n = noise(rng);
+					da[i] = static_cast<uint16_t>((512 + n) << 6);
+					db[i] = static_cast<uint16_t>(static_cast<int>(std::lround(512 + 0.75 * n)) << 6);
+				}
+				auto plane = [&](int pw, int ph, const uint16_t* data) {
 					pl_tex_params tp{};
-					tp.w = pw; tp.h = ph; tp.format = pl_find_named_fmt(gpu, "r16"); tp.sampleable = true; tp.initial_data = data.data();
-					planes[p] = pl_tex_create(gpu, &tp);
-					Assert::IsNotNull(planes[p]);
-				}
-				pl_frame frame{};
-				frame.num_planes = 3;
-				for (int p = 0; p < 3; ++p)
+					tp.w = pw; tp.h = ph; tp.format = pl_find_named_fmt(g.gpu, "r16"); tp.sampleable = true; tp.initial_data = data;
+					pl_tex t = pl_tex_create(g.gpu, &tp);
+					Assert::IsNotNull(t);
+					return t;
+				};
+				std::vector<uint16_t> chroma(static_cast<size_t>(w / 2) * (h / 2), static_cast<uint16_t>(512 << 6));
+				pl_tex lumaA = plane(w, h, da.data()), lumaB = plane(w, h, db.data());
+				pl_tex cb = plane(w / 2, h / 2, chroma.data()), cr = plane(w / 2, h / 2, chroma.data());
+				auto frameOf = [&](pl_tex luma) {
+					pl_frame frame{};
+					frame.num_planes = 3;
+					const pl_tex t[3] = { luma, cb, cr };
+					for (int p = 0; p < 3; ++p) { frame.planes[p].texture = t[p]; frame.planes[p].components = 1; }
+					frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+					frame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+					frame.planes[2].component_mapping[0] = PL_CHANNEL_CR;
+					frame.repr.sys = PL_COLOR_SYSTEM_BT_709; frame.repr.levels = PL_COLOR_LEVELS_LIMITED;
+					frame.repr.bits.sample_depth = 16; frame.repr.bits.color_depth = 10; frame.repr.bits.bit_shift = 6;
+					frame.color = pl_color_space_bt709;
+					return frame;
+				};
+				const pl_frame fa = frameOf(lumaA), fb = frameOf(lumaB);
+				std::string gpuLines;
+				DetailPulse::SetPassTimers(g.gpu, true);
+				std::string line = "DetailPulseGpuTiming on " + g.device + ": " + std::to_string(w) + "x" + std::to_string(h);
+				for (int fast = 0; fast < 2; ++fast)
 				{
-					frame.planes[p].texture = planes[p];
-					frame.planes[p].components = 1;
+					double median[3] = {}, batched[3] = {};
+					for (int mode = 0; mode < 3; ++mode)
+					{
+						DetailPulse::Module module;
+						std::vector<double> ms, cpuMs;
+						uint64_t seq = 0;
+						for (int k = 0; k < 48; ++k)
+						{
+							DetailPulse::Params p;
+							p.fast = fast == 1;
+							pl_frame out{};
+							const bool timedRepeat = mode == 2 && k >= 2;
+							if (!timedRepeat) ++seq;
+							p.sequence = seq;
+							const pl_frame& in = mode == 0 ? ((k & 1) ? fb : fa) : mode == 1 ? fa : (k == 1 ? fb : fa);
+							pl_gpu_finish(g.gpu);
+							LARGE_INTEGER t0, t1;
+							QueryPerformanceCounter(&t0);
+							Assert::IsTrue(module.Apply(g.gpu, g.dispatch, in, p, out), W(module.LastError().c_str()).c_str());
+							LARGE_INTEGER tc;
+							QueryPerformanceCounter(&tc);
+							pl_gpu_finish(g.gpu);
+							QueryPerformanceCounter(&t1);
+							if (k >= 8) ms.push_back(1000.0 * (t1.QuadPart - t0.QuadPart) / freq.QuadPart);
+							if (k >= 8) cpuMs.push_back(1000.0 * (tc.QuadPart - t0.QuadPart) / freq.QuadPart);
+							if ((mode == 0 && k == 9) || (mode == 2 && k == 47))
+							{
+								// A gain above 1 here (not the copy path).
+								const Image o = g.Readback(out.planes[0].texture);
+								const uint16_t* src = mode == 0 ? db.data() : da.data();
+								int changed = 0;
+								for (size_t i = 0; i < o.v.size(); i += 97) changed += o.v[i] != src[i] / 64.0 ? 1 : 0;
+								Assert::IsTrue(changed > 0, L"the timed frames carry a gain");
+							}
+						}
+						if (GetEnvironmentVariableA("VP_TEST_PULSE_FRAMES", nullptr, 0) > 0)
+						{
+							std::string all = "frames " + std::to_string(w) + (fast ? " fast" : " original") + " mode " + std::to_string(mode) + ":";
+							for (double v : ms) { char t[16]; snprintf(t, sizeof(t), " %.2f", v); all += t; }
+							all += " | cpu:";
+							for (double v : cpuMs) { char t[16]; snprintf(t, sizeof(t), " %.2f", v); all += t; }
+							Logger::WriteMessage(all.c_str());
+						}
+						std::sort(ms.begin(), ms.end());
+						median[mode] = ms[ms.size() / 2];
+						// Throughput: 4 batches of 32 frames between two finishes (no per-frame sync
+						// latency, the GPU kept at its clocks), the median batch per frame.
+						std::vector<double> batches;
+						double gpuMs[4];
+						DetailPulse::PassTimes(gpuMs, true);
+						for (int b = 0; b < 4; ++b)
+						{
+							pl_gpu_finish(g.gpu);
+							LARGE_INTEGER t0, t1;
+							QueryPerformanceCounter(&t0);
+							for (int k = 0; k < 32; ++k)
+							{
+								DetailPulse::Params p;
+								p.fast = fast == 1;
+								if (mode != 2) ++seq;
+								p.sequence = seq;
+								pl_frame out{};
+								const pl_frame& in = mode == 0 ? ((seq & 1) ? fa : fb) : fa;
+								Assert::IsTrue(module.Apply(g.gpu, g.dispatch, in, p, out), W(module.LastError().c_str()).c_str());
+							}
+							pl_gpu_finish(g.gpu);
+							QueryPerformanceCounter(&t1);
+							batches.push_back(1000.0 * (t1.QuadPart - t0.QuadPart) / freq.QuadPart / 32.0);
+						}
+						std::sort(batches.begin(), batches.end());
+						batched[mode] = 0.5 * (batches[1] + batches[2]);
+						DetailPulse::PassTimes(gpuMs, true);
+						char gt[160];
+						snprintf(gt, sizeof(gt), "  [%s %s gpu: low %.3f, measure %.3f, reduce %.3f, apply %.3f ms]", fast ? "fast" : "orig",
+							mode == 0 ? "new" : mode == 1 ? "steady" : "repeat", gpuMs[3], gpuMs[0], gpuMs[1], gpuMs[2]);
+						gpuLines += gt;
+					}
+					char text[256];
+					snprintf(text, sizeof(text), " | %s: new %.3f ms, steady %.3f ms, repeat %.3f ms (batched %.3f / %.3f / %.3f)", fast ? "fast" : "original",
+						median[0], median[1], median[2], batched[0], batched[1], batched[2]);
+					line += text;
 				}
-				frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
-				frame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
-				frame.planes[2].component_mapping[0] = PL_CHANNEL_CR;
-				frame.repr.sys = PL_COLOR_SYSTEM_BT_709; frame.repr.levels = PL_COLOR_LEVELS_LIMITED;
-				frame.repr.bits.sample_depth = 16; frame.repr.bits.color_depth = 10; frame.repr.bits.bit_shift = 6;
-				frame.color = pl_color_space_bt709;
-				DetailPulse::Module module;
-				std::vector<double> ms;
-				for (int k = 0; k < 40; ++k)
-				{
-					DetailPulse::Params p;
-					p.sequence = static_cast<uint64_t>(k) + 1;
-					pl_frame out{};
-					pl_gpu_finish(gpu);
-					LARGE_INTEGER t0, t1;
-					QueryPerformanceCounter(&t0);
-					Assert::IsTrue(module.Apply(gpu, dispatch, frame, p, out), W(module.LastError().c_str()).c_str());
-					pl_gpu_finish(gpu);
-					QueryPerformanceCounter(&t1);
-					if (k >= 8) ms.push_back(1000.0 * (t1.QuadPart - t0.QuadPart) / freq.QuadPart);
-				}
-				std::sort(ms.begin(), ms.end());
-				char text[160];
-				snprintf(text, sizeof(text), "DetailPulseGpuTiming on %s: %dx%d median %.3f ms (min %.3f, max %.3f)",
-					device.c_str(), w, h, ms[ms.size() / 2], ms.front(), ms.back());
-				Logger::WriteMessage(text);
-				module.Release(gpu);
-				for (pl_tex& t : planes) pl_tex_destroy(gpu, &t);
+				DetailPulse::SetPassTimers(g.gpu, false);
+				Logger::WriteMessage((line + " ||" + gpuLines).c_str());
+				for (pl_tex t : { lumaA, lumaB, cb, cr }) pl_tex_destroy(g.gpu, &t);
 			}
-			pl_dispatch_destroy(&dispatch);
-			pl_d3d11_destroy(&d3d);
-			pl_log_destroy(&log);
 		}
 
 		TEST_METHOD(DetailPulseRealClipBreathing)

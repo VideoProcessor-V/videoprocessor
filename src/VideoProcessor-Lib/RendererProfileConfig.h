@@ -750,6 +750,7 @@ namespace RendererProfileConfig
 			// the caps are the module headers' ranges.
 			if (key == "detail_pulse_stabilise") return IsChoice(value, { "on", "off" });
 			if (key == "detail_pulse_cap") return IsNumberInRange(value, 1.0, 1.5);
+			if (key == "detail_pulse_fast") return IsChoice(value, { "on", "off" });
 			if (key == "texture_restore") return IsChoice(value, { "off", "statistical" });
 			if (key == "texture_restore_cap") return IsNumberInRange(value, 1.0, 2.0);
 			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });

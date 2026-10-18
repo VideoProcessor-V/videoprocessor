@@ -28,6 +28,10 @@
 // One-plane RGB (hunt 3 F8 / F9): the luma of R, G, B in the source's codes, the same delta on
 // all three. The CPU keeps only which ring slot is whose and how many consecutive frames stand
 // behind it; every value lives on the GPU (no readback).
+// detail_pulse_fast (default on; Params::fast, off = the passes above): a low band pass at half
+// resolution first (once per picture, into an fp32 texture), then the measure, reduce and
+// apply passes reading it back; a repeat or another geometry runs the low band pass and the
+// apply pass. See "detail_pulse_fast" below and docs/agent-reports/detail-pulse-perf.md.
 namespace DetailPulse
 {
 	namespace
@@ -407,6 +411,383 @@ for (int q = 0; q < 4; q++) {
 }
 )GLSL";
 
+		// ---- detail_pulse_fast (2026-10-18): the same maths, fewer reads and less repeated work ----
+		//  - The low band has its own pass at half resolution (32 x 32 texels per workgroup, so
+		//    its Gaussian's border is read 1.7 times per texel instead of 3), once per picture into
+		//    an fp32 texture; the measure and apply passes read their 18 x 18 texels back. The
+		//    value at a position is computed exactly as before (the 2x2 box at the clamped half
+		//    position, the separable Gaussian at clamped positions, the same order of sums).
+		//  - The plane's codes come in 2 x 2 quads by textureGather (one read for four codes;
+		//    clamp-to-edge addressing = code_at's clamped positions).
+		//  - The filters run register-blocked with literal weights (a thread computes 8 adjacent
+		//    horizontal or 4 adjacent vertical outputs from shared memory with odd row pitches),
+		//    each output's sum in the original order.
+		//  - The measure pass's sums: three strided steps instead of two 9-step trees (another
+		//    fp32 summation order: the tile energies move by ~1e-7 relative).
+		//  - An apply block whose gains are exactly 1 or whose tile weights are all exactly 0 is
+		//    a copy of the source (the delta is exactly 0 there): dead zone, restart, untrusted.
+		// Shared memory: one array carved by offsets; the reduction scratch reuses the codes'.
+		constexpr int kLowTile = 32;   // LT in the low pass
+		const char* const QUAD_FUNCS = R"GLSL(
+float code_at(ivec2 p)
+{
+#ifdef DP_RGB
+    vec4 t = texelFetch(src, p, 0);
+    return luma_mul * dot(t.rgb, luma_w) + luma_add;
+#else
+    return code_scale * texelFetch(src, p, 0).r;
+#endif
+}
+
+// The codes of the 2 x 2 texels from p: (0,0), (1,0), (0,1), (1,1).
+vec4 quad_codes(ivec2 p, vec2 isz)
+{
+#ifdef GATHER
+    vec2 uv = vec2(p + ivec2(1)) * isz;
+#ifdef DP_RGB
+    vec4 r = textureGather(src, uv, 0);
+    vec4 g = textureGather(src, uv, 1);
+    vec4 b = textureGather(src, uv, 2);
+    // textureGather: x (0,1), y (1,1), z (1,0), w (0,0)
+    return vec4(luma_mul * dot(vec3(r.w, g.w, b.w), luma_w) + luma_add,
+                luma_mul * dot(vec3(r.z, g.z, b.z), luma_w) + luma_add,
+                luma_mul * dot(vec3(r.x, g.x, b.x), luma_w) + luma_add,
+                luma_mul * dot(vec3(r.y, g.y, b.y), luma_w) + luma_add);
+#else
+    vec4 t = textureGather(src, uv, 0);
+    return vec4(code_scale * t.w, code_scale * t.z, code_scale * t.x, code_scale * t.y);
+#endif
+#else
+    ivec2 hi = textureSize(src, 0) - ivec2(1);
+    return vec4(code_at(clamp(p, ivec2(0), hi)), code_at(clamp(p + ivec2(1, 0), ivec2(0), hi)),
+                code_at(clamp(p + ivec2(0, 1), ivec2(0), hi)), code_at(clamp(p + ivec2(1, 1), ivec2(0), hi)));
+#endif
+}
+)GLSL";
+
+		// The low band pass: LT x LT half-resolution texels per workgroup.
+		const char* const LOW_HEADER_FAST = R"GLSL(
+#define LT 32
+#define LR (LT + 2 * GP_R)
+// Odd row pitches (a warp reading down a column hits 32 banks).
+#define LRP (LR + 1)
+#define LTP (LT + 1)
+#define O_HOR (LR * LRP)
+shared float sm[LR * LRP + LR * LTP];
+)GLSL";
+
+		const char* const LOW_BODY_FAST = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 sz = textureSize(src, 0);
+vec2 isz = vec2(1.0) / vec2(sz);
+ivec2 hsz = (sz + ivec2(1)) / 2;
+ivec2 hhi = hsz - ivec2(1);
+ivec2 q0 = ivec2(gl_WorkGroupID.xy) * LT;
+ivec2 ob = q0 - ivec2(GP_R);
+// The 2x2 boxes at the clamped half-resolution positions (GrainModel::Low).
+for (int i = int(li); i < LR * LR; i += 256) {
+    vec4 q = quad_codes(clamp(ob + ivec2(i % LR, i / LR), ivec2(0), hhi) * 2, isz);
+    sm[(i / LR) * LRP + i % LR] = 0.25 * (q.x + q.y + q.z + q.w);
+}
+barrier();
+// The horizontal Gaussian on every box row, at this block's columns: a thread per row and 8
+// columns (LR * LT / 8 <= 256 items).
+if (int(li) < LR * (LT / 8)) {
+    int r = int(li) % LR, g = int(li) / LR;
+    gp_across8(r * LRP + 8 * g, O_HOR + r * LTP + 8 * g);
+}
+barrier();
+// The vertical Gaussian (the low band): a thread per column and 4 rows.
+{
+    int c = int(li % 32u), r0 = 4 * int(li / 32u);
+    vec4 l = gp_down4(O_HOR + r0 * LTP + c);
+    for (int k = 0; k < 4; k++) {
+        ivec2 p = q0 + ivec2(c, r0 + k);
+        if (p.x < hsz.x && p.y < hsz.y)
+            imageStore(low_out, p, vec4(l[k], 0.0, 0.0, 1.0));
+    }
+}
+)GLSL";
+
+		const char* const BAND_DECL_FAST = R"GLSL(
+#define BLK 32
+#define HB 16
+#define SW (BLK + 2 * R1)
+#define HL (HB + 2)
+// Odd row pitches: a warp reading down a column (one row per lane) hits 32 banks.
+#define SWP (SW + 1)
+#define BLKP (BLK + 1)
+#define O_SY 0
+#define O_SH (O_SY + SW * SWP)
+#define O_SLOW (O_SH + SW * BLKP)
+shared float sm[O_SLOW + HL * HL];
+)GLSL";
+
+		const char* const BAND_FUNCS_FAST = R"GLSL(
+// The low band around the half block qb (and a one-texel border), from the low pass.
+void low_fetch(ivec2 qb, ivec2 hhi, int n)
+{
+    for (int i = int(gl_LocalInvocationIndex); i < n; i += 256)
+        sm[O_SLOW + i] = texelFetch(low_in, clamp(qb - ivec2(1) + ivec2(i % HL, i / HL), ivec2(0), hhi), 0).r;
+}
+// The block's codes by quads.
+void block_codes(ivec2 origin, vec2 isz, int n)
+{
+    for (int i = int(gl_LocalInvocationIndex); i < n; i += 256) {
+        int gx = i % (SW / 2), gy = i / (SW / 2);
+        vec4 q = quad_codes(origin - ivec2(R1) + 2 * ivec2(gx, gy), isz);
+        int b = O_SY + 2 * gy * SWP + 2 * gx;
+        sm[b] = q.x;
+        sm[b + 1] = q.y;
+        sm[b + SWP] = q.z;
+        sm[b + SWP + 1] = q.w;
+    }
+}
+// Their horizontal fine half: a thread per row and 8 columns (n = SW * BLK / 8 <= 256, or 0).
+void block_across(int n)
+{
+    int i = int(gl_LocalInvocationIndex);
+    if (i < n) {
+        int r = i % SW, g = i / SW;
+        across8(O_SY + r * SWP + 8 * g, O_SH + r * BLKP + 8 * g);
+    }
+}
+// The bands of this thread's 4 pixels: column x, rows y0 .. y0 + 3 (y0 a multiple of 4). The
+// same arithmetic per pixel as before (fine: the vertical sum in the same order; low: the
+// bilinear read-back with its weights 0.75 / 0.25), the shared loads held in registers.
+void bands4(int x, int y0, out vec4 d1, out vec4 d2)
+{
+    vec4 g1 = fine4(O_SH + y0 * BLKP + x);
+    float gx = (float(x) + 0.5) * 0.5 - 0.5;
+    int ix = int(floor(gx));
+    float fx = gx - float(ix);
+    int b = O_SLOW + (y0 / 2) * HL + ix + 1;
+    float h0 = sm[b] * (1.0 - fx) + sm[b + 1] * fx;
+    float h1 = sm[b + HL] * (1.0 - fx) + sm[b + HL + 1] * fx;
+    float h2 = sm[b + 2 * HL] * (1.0 - fx) + sm[b + 2 * HL + 1] * fx;
+    float h3 = sm[b + 3 * HL] * (1.0 - fx) + sm[b + 3 * HL + 1] * fx;
+    vec4 low = vec4(h0 * (1.0 - 0.75) + h1 * 0.75, h1 * (1.0 - 0.25) + h2 * 0.25,
+                    h1 * (1.0 - 0.75) + h2 * 0.75, h2 * (1.0 - 0.25) + h3 * 0.25);
+    int c = O_SY + (y0 + R1) * SWP + x + R1;
+    vec4 y = vec4(sm[c], sm[c + SWP], sm[c + 2 * SWP], sm[c + 3 * SWP]);
+    d1 = y - g1;
+    d2 = g1 - low;
+}
+)GLSL";
+
+		const char* const FAST_MEASURE_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 sz = textureSize(src, 0);
+vec2 isz = vec2(1.0) / vec2(sz);
+ivec2 hsz = (sz + ivec2(1)) / 2;
+ivec2 hhi = hsz - ivec2(1);
+ivec2 blk = ivec2(gl_WorkGroupID.xy);
+ivec2 origin = blk * BLK;
+ivec2 qb = blk * HB;
+low_fetch(qb, hhi, HL * HL);
+block_codes(origin, isz, (SW / 2) * (SW / 2));
+barrier();
+block_across(SW * (BLK / 8));
+barrier();
+// A warp reads 32 px rows of the block (no shared-memory bank conflicts), each thread a column
+// of 4 rows.
+vec4 acc = vec4(0.0);   // D1^2, D2^2, pixels, untrusted pixels
+#ifdef FIELD
+ivec2 fs = textureSize(field, 0);
+#endif
+int px = int(li % 32u), py0 = 4 * int(li / 32u);
+vec4 d1s, d2s;
+bands4(px, py0, d1s, d2s);
+for (int q = 0; q < 4; q++) {
+    ivec2 o = ivec2(px, py0 + q);
+    ivec2 p = origin + o;
+    if (p.x < sz.x && p.y < sz.y) {
+        float d1 = d1s[q];
+        float d2 = d2s[q];
+        float untrusted = 0.0;
+#ifdef FIELD
+        // The de-judder's block under the centre of the pixel's 2 x 2 cell (as before).
+        vec2 lp = vec2(origin + (o / 2) * 2 + ivec2(1)) * to_field;
+        if (texelFetch(field, clamp(ivec2(floor(lp / 16.0)), ivec2(0), fs - ivec2(1)), 0).z <= trust_min)
+            untrusted = 1.0;
+#endif
+        acc += vec4(d1 * d1, d2 * d2, 1.0, untrusted);
+    }
+}
+ivec2 hl = ivec2(int(li % 16u), int(li / 16u));
+ivec2 hq = qb + hl;
+float shift = sm[O_SLOW + 9 * HL + 9];
+vec4 hacc = vec4(0.0);
+if (hq.x < hsz.x && hq.y < hsz.y) {
+    float l = sm[O_SLOW + (hl.y + 1) * HL + hl.x + 1];
+    hacc = vec4(l - shift, (l - shift) * (l - shift), 1.0, 0.0);
+}
+// The sums over the workgroup: 5 values (d1^2, d2^2, untrusted, low - shift, its square) in
+// three strided steps (3 barriers instead of a 9-step tree); the pixel counts are the tile's
+// own sizes. fp32 sums in another order than the original tree's (well inside fp32 for 1024
+// terms; the gains differ by ~1e-7 at most).
+barrier();
+sm[li] = acc.x;
+sm[256u + li] = acc.y;
+sm[512u + li] = acc.w;
+sm[768u + li] = hacc.x;
+sm[1024u + li] = hacc.y;
+barrier();
+if (li < 160u) {
+    uint b = (li / 32u) * 256u + li % 32u;
+    float a = 0.0;
+    for (uint k = 0u; k < 256u; k += 32u)
+        a += sm[b + k];
+    sm[1280u + li] = a;
+}
+barrier();
+if (li < 20u) {
+    uint b = 1280u + (li / 4u) * 32u + li % 4u;
+    float a = 0.0;
+    for (uint k = 0u; k < 32u; k += 4u)
+        a += sm[b + k];
+    sm[1440u + li] = a;
+}
+barrier();
+if (li == 0u) {
+    vec4 tot = vec4(0.0);
+    vec3 htot = vec3(0.0);
+    tot.x = sm[1440] + sm[1441] + sm[1442] + sm[1443];
+    tot.y = sm[1444] + sm[1445] + sm[1446] + sm[1447];
+    tot.w = sm[1448] + sm[1449] + sm[1450] + sm[1451];
+    htot.x = sm[1452] + sm[1453] + sm[1454] + sm[1455];
+    htot.y = sm[1456] + sm[1457] + sm[1458] + sm[1459];
+    ivec2 tn = min(ivec2(BLK), sz - origin);
+    ivec2 hn2 = min(ivec2(HB), hsz - qb);
+    float n = float(tn.x * tn.y);
+    float hn = float(hn2.x * hn2.y);
+    float hm = htot.x / hn;
+    float mean_l = shift + hm;
+    float spread = sqrt(max(htot.y / hn - hm * hm, 0.0));
+    imageStore(stats_out, blk, vec4(tot.x / n, tot.y / n, mean_l, spread));
+    float u = tot.w / n;
+    float change = 0.0;
+    float w = 1.0;
+    float measurable = 1.0;
+#ifdef PREV
+    vec4 pv = texelFetch(prev_stats, blk, 0);
+    change = max(abs(mean_l - pv.z), abs(spread - pv.w));
+    float en = (tot.x + tot.y) / n, ep = pv.x + pv.y;
+    if (en > energy_jump * ep || ep > energy_jump * en)
+        measurable = 0.0;
+#endif
+#ifdef FIELD
+    w = 1.0 - smoothstep(0.0, untrusted_share, u);
+#elif defined(PREV)
+    w = 1.0 - smoothstep(veto_codes, 2.0 * veto_codes, change);
+#endif
+    imageStore(weight_out, blk, vec4(w, u, change, measurable));
+}
+)GLSL";
+
+		const char* const FAST_APPLY_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 sz = textureSize(src, 0);
+vec2 isz = vec2(1.0) / vec2(sz);
+ivec2 hhi = (sz + ivec2(1)) / 2 - ivec2(1);
+ivec2 nt = textureSize(weight_in, 0);
+ivec2 blk = ivec2(gl_WorkGroupID.xy);
+ivec2 origin = blk * BLK;
+ivec2 qb = blk * HB;
+#ifndef XGEO
+if (li < 9u)
+    stile[li] = texelFetch(weight_in, clamp(blk - ivec2(1) + ivec2(int(li % 3u), int(li / 3u)), ivec2(0), nt - ivec2(1)), 0).x;
+#endif
+vec2 gm = texelFetch(ring, ivec2(RING, 0), 0).xy - vec2(1.0);
+barrier();
+// Gains of exactly 1, or a weight of exactly 0 on every tile this block reads: the delta is
+// exactly 0 on every pixel, the block is the source (bit for bit).
+bool work = gm.x != 0.0 || gm.y != 0.0;
+#ifndef XGEO
+float wmax = 0.0;
+for (int i = 0; i < 9; i++)
+    wmax = max(wmax, stile[i]);
+work = work && wmax > 0.0;
+#endif
+low_fetch(qb, hhi, work ? HL * HL : 0);
+block_codes(origin, isz, work ? (SW / 2) * (SW / 2) : 0);
+barrier();
+block_across(work ? SW * (BLK / 8) : 0);
+barrier();
+int px = int(li % 32u), py0 = 4 * int(li / 32u);
+vec4 d1s = vec4(0.0), d2s = vec4(0.0);
+if (work)
+    bands4(px, py0, d1s, d2s);
+for (int q = 0; q < 4; q++) {
+    ivec2 o = ivec2(px, py0 + q);
+    ivec2 p = origin + o;
+    if (p.x < sz.x && p.y < sz.y) {
+        if (work) {
+            float d1 = d1s[q];
+            float d2 = d2s[q];
+#ifdef XGEO
+            vec2 tp = (vec2(p) + 0.5) * tile_ratio / float(BLK) - 0.5;
+            ivec2 t0 = ivec2(floor(tp));
+            vec2 tf = tp - vec2(t0);
+            ivec2 a = clamp(t0, ivec2(0), nt - ivec2(1));
+            ivec2 b = clamp(t0 + ivec2(1), ivec2(0), nt - ivec2(1));
+            float top = texelFetch(weight_in, a, 0).x * (1.0 - tf.x) + texelFetch(weight_in, ivec2(b.x, a.y), 0).x * tf.x;
+            float bottom = texelFetch(weight_in, ivec2(a.x, b.y), 0).x * (1.0 - tf.x) + texelFetch(weight_in, b, 0).x * tf.x;
+#else
+            vec2 tp = (vec2(p) + 0.5) / float(BLK) - 0.5;
+            ivec2 t0 = ivec2(floor(tp));
+            vec2 tf = tp - vec2(t0);
+            ivec2 a = clamp(t0, ivec2(0), nt - ivec2(1)) - blk + ivec2(1);
+            ivec2 b = clamp(t0 + ivec2(1), ivec2(0), nt - ivec2(1)) - blk + ivec2(1);
+            float top = stile[a.y * 3 + a.x] * (1.0 - tf.x) + stile[a.y * 3 + b.x] * tf.x;
+            float bottom = stile[b.y * 3 + a.x] * (1.0 - tf.x) + stile[b.y * 3 + b.x] * tf.x;
+#endif
+            float w = top * (1.0 - tf.y) + bottom * tf.y;
+            float delta = w * (gm.x * d1 + gm.y * d2);
+#ifdef DP_RGB
+            vec4 t = texelFetch(src, p, 0);
+            imageStore(dst, p, vec4(t.rgb + vec3(delta / luma_mul), t.a));
+#else
+            imageStore(dst, p, vec4(texelFetch(src, p, 0).r + delta / code_scale, 0.0, 0.0, 1.0));
+#endif
+        } else {
+#ifdef DP_RGB
+            imageStore(dst, p, texelFetch(src, p, 0));
+#else
+            imageStore(dst, p, vec4(texelFetch(src, p, 0).r, 0.0, 0.0, 1.0));
+#endif
+        }
+    }
+}
+)GLSL";
+
+		double LowWeightAt(int i, double sigma) { return GrainPreserve::LowWeight(i, sigma); }
+
+		// A blocked convolution: `outputs` sums, consecutive along `stride`, each in the
+		// sum-of-w(k)-x(k) order of fw_conv / gp_conv, from outputs + 2 radius loads. Stored to
+		// sm[o + j] (store) or returned as a vec4 (4 outputs).
+		std::string BlockedConvGlsl(const char* name, int radius, double (*weight)(int, double), double param,
+			int outputs, const char* stride, bool store)
+		{
+			std::string s = store ? std::string("void ") + name + "(int b, int o)\n{\n" : std::string("vec4 ") + name + "(int b)\n{\n";
+			for (int i = 0; i < outputs + 2 * radius; ++i)
+				s += "    float v" + std::to_string(i) + " = sm[b + " + std::to_string(i) + " * " + stride + "];\n";
+			s += store ? "    float a;\n" : "    vec4 g;\n    float a;\n";
+			const char* comp = "xyzw";
+			for (int j = 0; j < outputs; ++j)
+			{
+				s += "    a = 0.0;\n";
+				for (int k = -radius; k <= radius; ++k)
+				{
+					char line[96];
+					snprintf(line, sizeof(line), "    a += %.9g * v%d;\n", weight(k, param), j + k + radius);
+					s += line;
+				}
+				s += store ? "    sm[o + " + std::to_string(j) + "] = a;\n" : std::string("    g.") + comp[j] + " = a;\n";
+			}
+			return s + (store ? "}\n" : "    return g;\n}\n");
+		}
+
 		std::string WeightsGlsl(const char* name, const char* radiusName, int radius, double (*weight)(int, double), double scale)
 		{
 			const std::string taps = std::to_string(2 * radius + 1);
@@ -476,8 +857,25 @@ for (int q = 0; q < 4; q++) {
 			return fmt && pl_tex_recreate(gpu, &tex, &tp);
 		}
 
+		// Diagnostics (SetPassTimers): GPU time per pass kind (measure, reduce, apply).
+		struct PassTimers
+		{
+			pl_gpu gpu = nullptr;
+			pl_timer timer[4] = {};
+			double ns[4] = {};
+			int count[4] = {};
+			void Drain()
+			{
+				for (int i = 0; i < 4; ++i)
+					if (timer[i])
+						for (uint64_t t; (t = pl_timer_query(gpu, timer[i])) != 0;) { ns[i] += static_cast<double>(t); ++count[i]; }
+			}
+		};
+		PassTimers g_timers;
+
 		bool Compute(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
-			const pl_shader_desc* desc, int numDesc, const pl_shader_var* vars, int numVars, size_t shmem, int groupsX, int groupsY)
+			const pl_shader_desc* desc, int numDesc, const pl_shader_var* vars, int numVars, size_t shmem, int groupsX, int groupsY,
+			int pass = -1)
 		{
 			pl_custom_shader custom{};
 			custom.description = description;
@@ -504,6 +902,11 @@ for (int q = 0; q < 4; q++) {
 			compute.dispatch_size[0] = groupsX;
 			compute.dispatch_size[1] = groupsY;
 			compute.dispatch_size[2] = 1;
+			if (pass >= 0 && g_timers.gpu)
+			{
+				g_timers.Drain();
+				compute.timer = g_timers.timer[pass];
+			}
 			return pl_dispatch_compute(dispatch, &compute);
 		}
 
@@ -523,6 +926,11 @@ for (int q = 0; q < 4; q++) {
 			int tilesX = 0, tilesY = 0;
 			std::string bandHeader;
 			size_t bandShmem = 0;
+			// detail_pulse_fast: its header (textureGather when the plane's format allows it) and
+			// shared memory with the low band computed / read back.
+			std::string fastHeader, lowHeader;
+			size_t fastShmem = 0, lowShmem = 0;
+			int halfW = 0, halfH = 0, lowTilesX = 0, lowTilesY = 0;
 			float codeScale = 1.0f;
 			// Hunt 3 F8 / F9: a one-plane RGB picture (code = lumaMul x dot(rgb, lumaW) + lumaAdd).
 			bool rgb = false;
@@ -539,6 +947,8 @@ for (int q = 0; q < 4; q++) {
 		pl_tex weight = nullptr;         // per tile: veto weight, untrusted share, change
 		pl_tex aheadStats = nullptr, aheadWeight = nullptr;
 		pl_tex ring = nullptr;           // kRingSlots entries, then the decision, then the look-ahead
+		pl_tex low = nullptr;            // detail_pulse_fast: the last picture's half-resolution low band (fp32 scratch)
+		pl_tex lowForeign = nullptr;     // ApplyForeign's
 		int statsIndex = 0;              // stats[statsIndex] = lastSequence's
 		int cur = 0;                     // ring slot of lastSequence
 		int behind = 0;                  // consecutive frames in the ring behind lastSequence
@@ -580,6 +990,23 @@ for (int q = 0; q < 4; q++) {
 				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + LOW_HEADER;
 			const int sw = kTilePx + 2 * c.r1, hl = kTilePx / 2 + 2, rb = hl + 2 * c.gpR;
 			c.bandShmem = sizeof(float) * (sw * sw + sw * kTilePx + hl * hl + 1024 + rb * rb + rb * hl);
+			c.halfW = (c.geometry.w + 1) / 2;
+			c.halfH = (c.geometry.h + 1) / 2;
+			// detail_pulse_fast: the band passes' and the low pass's headers (textureGather when
+			// the plane's format allows it, else four clamped fetches).
+			const std::string gather = luma->params.format->gatherable ? "#define GATHER 1\n" : "";
+			c.fastHeader = "#define R1 " + std::to_string(c.r1) + "\n#define RING " + std::to_string(kRingSlots) + "\n" + gather +
+				BAND_DECL_FAST + BlockedConvGlsl("across8", c.r1, FineWeight, c.geometry.scale, 8, "1", true) +
+				BlockedConvGlsl("fine4", c.r1, FineWeight, c.geometry.scale, 4, "BLKP", false) +
+				QUAD_FUNCS + BAND_FUNCS_FAST;
+			c.lowHeader = "#define GP_R " + std::to_string(c.gpR) + "\n" + gather + LOW_HEADER_FAST +
+				BlockedConvGlsl("gp_across8", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 8, "1", true) +
+				BlockedConvGlsl("gp_down4", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 4, "LTP", false) + QUAD_FUNCS;
+			c.fastShmem = sizeof(float) * (sw * (sw + 1) + sw * (kTilePx + 1) + hl * hl + 9);
+			const int lr = kLowTile + 2 * c.gpR;
+			c.lowShmem = sizeof(float) * (lr * (lr + 1) + lr * (kLowTile + 1));
+			c.lowTilesX = (c.halfW + kLowTile - 1) / kLowTile;
+			c.lowTilesY = (c.halfH + kLowTile - 1) / kLowTile;
 			// One code of the signal in the plane texture's normalised units (VpDebander's).
 			const int sampleDepth = frame && frame->repr.bits.sample_depth > 0 ? frame->repr.bits.sample_depth : luma->params.format->component_depth[0];
 			const int shift = frame ? frame->repr.bits.bit_shift : 0;
@@ -662,12 +1089,31 @@ for (int q = 0; q < 4; q++) {
 			return ring != nullptr;
 		}
 
+		// detail_pulse_fast: the picture's half-resolution low band into lowOut (fp32).
+		bool LowPass(pl_dispatch dispatch, pl_tex luma, const Constants& c, pl_tex lowOut, bool timed, std::string& error)
+		{
+			const pl_shader_desc d[2] = { Sampled("src", luma), Storage("low_out", lowOut) };
+			pl_shader_var v[3];
+			const int nv = CodeVars(c, v);
+			if (!Compute(dispatch, "VideoProcessor detail pulse: low band", Defines(c) + c.lowHeader, LOW_BODY_FAST, d, 2, v, nv,
+				c.lowShmem, c.lowTilesX, c.lowTilesY, timed ? 3 : -1))
+			{
+				error = "the low band pass failed";
+				return false;
+			}
+			return true;
+		}
+
 		// Measure (pass 1) and reduce (pass 2). ahead: the look-ahead (no previous frame, no
-		// field; the ring's look-ahead entry).
+		// field; the ring's look-ahead entry). detail_pulse_fast: the low band pass first, into
+		// lowTex (read back by the measure pass and by the apply pass after it).
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
-			bool ahead, int cur, int nValid, int nUse, bool aheadValid, std::string& error)
+			bool ahead, int cur, int nValid, int nUse, bool aheadValid, std::string& error, pl_tex lowTex = nullptr)
 		{
+			const bool fast = params.fast && lowTex;
+			if (fast && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
+				return false;
 			const bool useField = !ahead && params.field != nullptr;
 			const bool usePrev = !ahead && prevStats != nullptr;
 			const float toField[2] = {
@@ -678,11 +1124,12 @@ for (int q = 0; q < 4; q++) {
 			const float vetoCodes = static_cast<float>(VetoCodes(params.bitrateQuality, params.colorDepth));
 			const float energyJump = static_cast<float>(kTileEnergyJump);
 			{
-				pl_shader_desc d[5];
+				pl_shader_desc d[6];
 				int nd = 0;
 				d[nd++] = Sampled("src", luma);
 				d[nd++] = Storage("stats_out", statsOut);
 				d[nd++] = Storage("weight_out", weightOut);
+				if (fast) d[nd++] = Sampled("low_in", lowTex);
 				if (usePrev) d[nd++] = Sampled("prev_stats", prevStats);
 				if (useField) d[nd++] = Sampled("field", params.field);
 				pl_shader_var v[10];
@@ -695,12 +1142,12 @@ for (int q = 0; q < 4; q++) {
 					v[nv++] = { pl_var_float("trust_min"), &trustMin, true };
 					v[nv++] = { pl_var_float("untrusted_share"), &untrustedShare, true };
 				}
-				std::string header = Defines(c) + c.bandHeader;
+				std::string header = Defines(c) + (fast ? c.fastHeader : c.bandHeader);
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (usePrev) header = "#define PREV 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
 				if (!Compute(dispatch, ahead ? "VideoProcessor detail pulse: measure (look-ahead)" : "VideoProcessor detail pulse: measure",
-					header, MEASURE_BODY, d, nd, v, nv, MeasureShmem(c), c.tilesX, c.tilesY))
+					header, fast ? FAST_MEASURE_BODY : MEASURE_BODY, d, nd, v, nv, fast ? c.fastShmem : MeasureShmem(c), c.tilesX, c.tilesY, ahead ? -1 : 0))
 				{
 					error = "the measure pass failed";
 					return false;
@@ -737,7 +1184,7 @@ for (int q = 0; q < 4; q++) {
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
 				if (!Compute(dispatch, ahead ? "VideoProcessor detail pulse: reduce (look-ahead)" : "VideoProcessor detail pulse: reduce",
-					header, REDUCE_BODY, d, 3, v, 13, sizeof(float) * 1024, 1, 1))
+					header, REDUCE_BODY, d, 3, v, 13, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
 				{
 					error = "the reduce pass failed";
 					return false;
@@ -748,23 +1195,53 @@ for (int q = 0; q < 4; q++) {
 
 		// The apply pass: the held decision on `luma`'s own bands into dst. tileRatio: the decided
 		// geometry per this picture's px (null: this picture is the decided geometry).
+		// detail_pulse_fast when lowTex is given: the picture's low band read from it, computed
+		// into it first when computeLow (a repeat or another geometry; a new frame's measure pass
+		// computed it already).
 		bool ApplyPass(pl_dispatch dispatch, pl_tex luma, pl_tex dst, pl_tex weight, pl_tex ring, const Constants& c,
-			const float* tileRatio, std::string& error)
+			const float* tileRatio, std::string& error, pl_tex lowTex = nullptr, bool computeLow = false)
 		{
-			const pl_shader_desc d[4] = { Sampled("src", luma), Storage("dst", dst), Sampled("weight_in", weight), Sampled("ring", ring) };
+			const bool fast = lowTex != nullptr;
+			if (fast && computeLow && !LowPass(dispatch, luma, c, lowTex, tileRatio == nullptr, error))
+				return false;
+			pl_shader_desc d[5] = { Sampled("src", luma), Storage("dst", dst), Sampled("weight_in", weight), Sampled("ring", ring) };
+			int nd = 4;
+			if (fast) d[nd++] = Sampled("low_in", lowTex);
 			pl_shader_var v[4];
 			int nv = CodeVars(c, v);
 			if (tileRatio) v[nv++] = { pl_var_vec2("tile_ratio"), tileRatio, true };
-			std::string header = Defines(c) + c.bandHeader + APPLY_HEADER;
+			std::string header = fast ? Defines(c) + APPLY_HEADER + c.fastHeader : Defines(c) + c.bandHeader + APPLY_HEADER;
 			if (tileRatio) header = "#define XGEO 1\n" + header;
+			const size_t shmem = fast ? c.fastShmem : c.bandShmem + sizeof(float) * 9;
 			if (!Compute(dispatch, tileRatio ? "VideoProcessor detail pulse: apply (other geometry)" : "VideoProcessor detail pulse: apply",
-				header, APPLY_BODY, d, 4, v, nv, c.bandShmem + sizeof(float) * 9, c.tilesX, c.tilesY))
+				header, fast ? FAST_APPLY_BODY : APPLY_BODY, d, nd, v, nv, shmem, c.tilesX, c.tilesY, tileRatio ? -1 : 2))
 			{
 				error = "the apply pass failed";
 				return false;
 			}
 			return true;
 		}
+	}
+
+	void SetPassTimers(pl_gpu gpu, bool on)
+	{
+		if (g_timers.gpu)
+			for (pl_timer& t : g_timers.timer) pl_timer_destroy(g_timers.gpu, &t);
+		g_timers = PassTimers();
+		if (on && gpu)
+		{
+			g_timers.gpu = gpu;
+			for (pl_timer& t : g_timers.timer) t = pl_timer_create(gpu);
+		}
+	}
+
+	void PassTimes(double ms[4], bool reset)
+	{
+		g_timers.Drain();
+		for (int i = 0; i < 4; ++i)
+			ms[i] = g_timers.count[i] > 0 ? g_timers.ns[i] / g_timers.count[i] / 1e6 : 0.0;
+		if (reset)
+			for (int i = 0; i < 4; ++i) { g_timers.ns[i] = 0.0; g_timers.count[i] = 0; }
 	}
 
 	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
@@ -807,7 +1284,7 @@ for (int q = 0; q < 4; q++) {
 		if (impl)
 		{
 			for (pl_tex* tex : { &impl->out, &impl->outForeign, &impl->stats[0], &impl->stats[1], &impl->weight,
-				&impl->aheadStats, &impl->aheadWeight, &impl->ring })
+				&impl->aheadStats, &impl->aheadWeight, &impl->ring, &impl->low, &impl->lowForeign })
 			{
 				if (*tex && gpu) pl_tex_destroy(gpu, tex);
 				*tex = nullptr;
@@ -850,7 +1327,7 @@ for (int q = 0; q < 4; q++) {
 		const bool consecutive = sameGeometry && m.lastSequence != 0 && params.sequence == m.lastSequence + 1;
 		pl_fmt f4 = Float32(gpu, 4);
 		if (!Ensure(gpu, m.out, c.geometry.w, c.geometry.h, StorableLike(gpu, luma->params.format), true) ||
-			!f4 || !EnsureRing(gpu, m.ring))
+			!f4 || !EnsureRing(gpu, m.ring) || (params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
@@ -873,7 +1350,7 @@ for (int q = 0; q < 4; q++) {
 				m.aheadGeometry == c.geometry;
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, aheadValid, error))
+				false, slot, nValid, nUse, aheadValid, error, params.fast ? m.low : nullptr))
 			{
 				++failures;
 				m.decided = false;
@@ -887,7 +1364,9 @@ for (int q = 0; q < 4; q++) {
 			m.decided = true;
 			if (aheadValid) ++aheadUsed;
 		}
-		if (!ApplyPass(dispatch, luma, m.out, m.weight, m.ring, c, nullptr, error))
+		// detail_pulse_fast: a new frame reads back the low band its measure pass wrote; a repeat
+		// (another picture: hunt 3 F6) computes its own.
+		if (!ApplyPass(dispatch, luma, m.out, m.weight, m.ring, c, nullptr, error, params.fast ? m.low : nullptr, repeat))
 		{
 			++failures;
 			return false;
@@ -917,14 +1396,15 @@ for (int q = 0; q < 4; q++) {
 		Impl& m = *impl;
 		Constants c;
 		Prepare(luma, params, c, &source);
-		if (!Ensure(gpu, m.outForeign, c.geometry.w, c.geometry.h, StorableLike(gpu, luma->params.format), true))
+		if (!Ensure(gpu, m.outForeign, c.geometry.w, c.geometry.h, StorableLike(gpu, luma->params.format), true) ||
+			(params.fast && !Ensure(gpu, m.lowForeign, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
 			return false;
 		}
 		const float ratio[2] = { static_cast<float>(m.geometry.w) / c.geometry.w, static_cast<float>(m.geometry.h) / c.geometry.h };
-		if (!ApplyPass(dispatch, luma, m.outForeign, m.weight, m.ring, c, ratio, error))
+		if (!ApplyPass(dispatch, luma, m.outForeign, m.weight, m.ring, c, ratio, error, params.fast ? m.lowForeign : nullptr, true))
 		{
 			++failures;
 			return false;
@@ -968,7 +1448,7 @@ for (int q = 0; q < 4; q++) {
 		Prepare(luma, params, c, &measured);
 		pl_fmt f4 = Float32(gpu, 4);
 		if (!f4 || !EnsureRing(gpu, m.ring) || !Ensure(gpu, m.aheadStats, c.tilesX, c.tilesY, f4) ||
-			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4))
+			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4) || (params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
@@ -976,7 +1456,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, false, error))
+			true, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
 		{
 			++failures;
 			return false;
@@ -1008,7 +1488,7 @@ for (int q = 0; q < 4; q++) {
 		c.codeScale = m.codeScale;
 		pl_fmt f4 = Float32(gpu, 4);
 		if (!f4 || !EnsureRing(gpu, m.ring) || !Ensure(gpu, m.aheadStats, c.tilesX, c.tilesY, f4) ||
-			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4))
+			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4) || (params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
@@ -1016,7 +1496,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, false, error))
+			true, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
 		{
 			++failures;
 			return false;

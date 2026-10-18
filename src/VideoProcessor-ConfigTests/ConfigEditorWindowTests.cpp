@@ -1726,7 +1726,8 @@ void testDetailRestoreControls()
     auto* pulseCap = requireControl<QLineEdit>(window, "config.vprenderer.detail_pulse_cap");
     auto* restore = requireControl<QComboBox>(window, "config.vprenderer.texture_restore");
     auto* restoreCap = requireControl<QLineEdit>(window, "config.vprenderer.texture_restore_cap");
-    for (QWidget* control : std::initializer_list<QWidget*>{ pulse, pulseCap, restore, restoreCap })
+    auto* pulseFast = requireControl<QComboBox>(window, "config.vprenderer.detail_pulse_fast");   // 2026-10-18
+    for (QWidget* control : std::initializer_list<QWidget*>{ pulse, pulseCap, pulseFast, restore, restoreCap })
     {
         require(content->isAncestorOf(control), "a detail control is outside the content-adaptive group");
         require(!control->toolTip().trimmed().isEmpty(), "a detail control has no tooltip");
@@ -1746,6 +1747,7 @@ void testDetailRestoreControls()
     };
     require(effectiveChoiceValueForTest(pulse) == QStringLiteral("on"), "detail pulse is not on by default");
     require(effectiveChoiceValueForTest(restore) == QStringLiteral("off"), "texture restore is not off by default");
+    require(effectiveChoiceValueForTest(pulseFast) == QStringLiteral("on") && pulseFast->isEnabled(), "the detail pulse fast path is not on by default");
     require(pulseCap->isEnabled() && !restoreCap->isEnabled(), "the caps are not greyed from the effective stage values");
     require(pulseCap->placeholderText() == QStringLiteral("1.35") && restoreCap->placeholderText() == QStringLiteral("1.50"),
         "the cap placeholders are not the defaults");
@@ -1761,8 +1763,10 @@ void testDetailRestoreControls()
     restore->setCurrentIndex(restore->findData(QStringLiteral("statistical")));
     QCoreApplication::processEvents();
     require(!pulseCap->isEnabled() && restoreCap->isEnabled(), "the caps did not follow the stage choices");
+    require(!pulseFast->isEnabled(), "the fast path choice is not greyed while the pulse is off");
     pulse->setCurrentIndex(pulse->findData(QStringLiteral("on")));
     QCoreApplication::processEvents();
+    pulseFast->setCurrentIndex(pulseFast->findData(QStringLiteral("off")));
     pulseCap->setText(QStringLiteral("1.9"));
     pulseCap->editingFinished();
     require(pulseCap->text() == QStringLiteral("1.5"), (QByteArray("the detail pulse cap was not clamped: ") + pulseCap->text().toUtf8()).constData());
@@ -1775,7 +1779,7 @@ void testDetailRestoreControls()
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
     require(saved.contains("detail_pulse_cap: 1.2") && saved.contains("texture_restore: statistical") &&
-        saved.contains("texture_restore_cap: 1.6"),
+        saved.contains("texture_restore_cap: 1.6") && saved.contains("detail_pulse_fast: off"),
         (QByteArray("detail restore settings not saved: ") + saved.left(500)).constData());
 }
 

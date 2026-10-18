@@ -1397,6 +1397,7 @@ namespace Tests
 				"queue_timing_fixes: off\n", "cadence_class_fixes: off\n", "motion_history_fixes: off\n",   // hunt 2 group 5
 				"detail_pulse_stabilise: off\n", "detail_pulse_cap: 1.2\n", "texture_restore: statistical\n", "texture_restore_cap: 1.8\n",
 				"general_rate_fixes: off\n",   // fixed-constant batch 2026-10-18
+				"detail_pulse_fast: off\n",
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
@@ -1568,12 +1569,14 @@ namespace Tests
 			const std::string baseDump = call(describe, head);
 			const std::string baseFingerprint = call(fingerprintOf, head);
 			const std::pair<const char*, const char*> defaults[] = {
-				{ "detail_pulse_stabilise", "on" }, { "detail_pulse_cap", "1.35" }, { "texture_restore", "off" }, { "texture_restore_cap", "1.5" } };
+				{ "detail_pulse_stabilise", "on" }, { "detail_pulse_cap", "1.35" }, { "texture_restore", "off" }, { "texture_restore_cap", "1.5" },
+				{ "detail_pulse_fast", "on" } };
 			for (const auto& entry : defaults)
 				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
 					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
 			const std::pair<const char*, const char*> flips[] = {
-				{ "detail_pulse_stabilise", "off" }, { "detail_pulse_cap", "1.2" }, { "texture_restore", "statistical" }, { "texture_restore_cap", "1.8" } };
+				{ "detail_pulse_stabilise", "off" }, { "detail_pulse_cap", "1.2" }, { "texture_restore", "statistical" }, { "texture_restore_cap", "1.8" },
+				{ "detail_pulse_fast", "off" } };
 			for (const auto& flip : flips)
 			{
 				const std::string text = head + flip.first + ": " + flip.second + "\n";
