@@ -41,59 +41,59 @@ Neither runs on a de-judder extra (a picture between frames) or while smooth mot
 deinterlacing runs (as the debander). A cadence repeat (same source sequence) reuses the frame's
 decision and never advances the history.
 
-## detail_pulse_stabilise (research option e)
+## detail_pulse_stabilise (research option e) - as built
 
 Starved encodes code I-frames finely and B-frames coarsely, so fine detail (and grain) pulses
 with the GOP ("breathing"). The stabiliser scales each frame's OWN detail up towards the level
 of its best-coded recent neighbour. Nothing is copied between frames, so grain stays per-frame.
+The exact maths and constants are in DetailPulse.h (shared with the CPU model).
 
-1. Two luma detail bands at the plane's resolution: `D1 = Y - G(s1) Y`, `D2 = G(s1) Y - G(s2) Y`,
-   s1 = 1.0 px, s2 = 2.5 px at 2160 lines and below (x GrainScale above). Separable Gaussians.
-2. Band energies per tile, then a robust frame energy per band (tiles in black bars or below the
-   coding-noise floor excluded; trimmed mean).
-3. History: a small ring of per-frame band energies (and the frame's mean luma for the fade
-   check), one entry per source frame, kept on the GPU. Reference per band
-   `R = max_k E_k * decay^(age_k seconds)` over the frames since the last cut, within a window of
-   ~0.5 s (the content rate converts it to frames). Optional look-ahead: the next source frame's
-   energies when it is already uploaded and no re-base is engaged (same domain).
-4. Frame gain per band `g = clamp(sqrt(R / E), 1, cap)` with a dead zone for estimator noise
-   (a picture with steady detail gets exactly 1). An I-frame (the best) gets 1.
-5. Per-tile veto: with valid vectors, tiles whose blocks are untrusted keep gain 1; without
-   vectors, tiles whose low band changed beyond the coding-noise allowance since the previous
-   frame keep gain 1 (new content, flashes). Gains are smoothed between tile centres.
-6. Cuts and fades: a large frame-wide low-band change (cut) or a steady mean-luma ramp (fade)
-   restarts the history (gain 1 on that frame). MotionValidity invalidations restart it too.
-7. Output `Y' = Y + (g1 - 1) D1 + (g2 - 1) D2`; chroma passes untouched.
+1. Two luma bands: `D1 = Y - G(1.0) Y`, `D2 = G(1.0) Y - L`, L = Gaussian 2.5 px held at half
+   resolution; sigmas x GrainScale above 2160 lines.
+2. Per 32 px tile: band energies, low-band mean and spread. Frame energy per band = winsorised
+   mean over tiles that are above the noise floor, not vetoed and not jumping (new content).
+3. History: a GPU ring of per-frame energies. `R = max(E_j x 0.9^(age s))` over a 0.17 s window
+   (frames from the measured content rate; 0.5 s lifted a CRF 32 I-frame by 1.04 because a
+   P-frame was coded better). Look-ahead: the next frame's energies (MeasureAhead) when it is
+   uploaded, no re-base is engaged and it is comparable. Causal alone cuts breathing 43-46 %
+   on the real clip; with the look-ahead 58-60 %.
+4. Gain per band `g = sqrt(R / E / 1.01)` outside a 1 % dead zone, clamped to [1, cap]. The
+   best frame gets exactly 1.
+5. Per-tile veto (bilinear between tiles): with valid vectors, the untrusted share of the tile;
+   without, the change of the tile's low-band mean/spread beyond 4x the coding-noise RMS
+   (motion-tolerant: a pan keeps the gain, new content or a flash does not).
+6. Restarts (gain 1): cut (over half the tiles changed), fade (mean luma ramp on two frames),
+   Forget, sequence gap, geometry change. A repeat reuses the decision.
+7. `Y' = Y + w ((g1 - 1) D1 + (g2 - 1) D2)`; chroma untouched. Passes: measure (per tile,
+   fused), reduce (one workgroup), apply (fused). Estimated 4K: 0.55-0.7 ms on the 3050 Ti,
+   0.15-0.2 ms on the 3090.
 
-Everything stays on the GPU (no readback); the gain is deterministic for a given input
-sequence. Cost target: 4K <= 1.0 ms on the 3050 Ti, about 0.3 ms on the 3090.
+## texture_restore: off | statistical (experimental) - as built
 
-## texture_restore: off | statistical (experimental)
+Constants in TextureRestore.h (shared with the CPU model).
 
-Per tile (16 plane px x GrainScale) the detail is split into:
-
-- **grain**: the spatially uncorrelated, unstructured part of the fine band (the residual where
-  the local structure tensor is incoherent; level from a robust noise estimate of the tile);
-- **scene texture**: the structured part of both bands (coherent orientation, energy above the
-  grain level).
-
-A per-tile reference (grain level, texture energy, focus evidence, low-band mean) is kept from
-the best-coded recent frame: a peak-hold with a decay in seconds, carried along the vectors when
-they are valid; without vectors only tiles whose low band did not change keep their reference
-(others restart from the current frame). Cuts, fades and invalidations restart it.
-
-- Grain: the current frame's own grain component is scaled towards the reference grain level
-  (`clamp(sqrt(Gref / G), 1, cap)`). Grain sits on the film, not the scene, so this applies in
-  defocused areas too, but it only scales grain this frame already has: nothing is synthesised,
-  and a frame with no grain left gets none.
-- Scene texture: scaled towards the reference texture energy (`clamp(sqrt(Tref / T), 1, cap)`)
-  only where the focus gate passes: the current tile shows in-focus evidence (sharp edge
-  acutance / fine-to-mid band ratio above the defocus level) and the reference tile had real
-  texture. A defocused tile (or one whose focus was pulled since the reference) gets texture
-  gain 1: no added energy.
-
-Output `Y' = Y + (gG - 1) grain + (gT - 1) texture`; chroma untouched. Cost target: 4K
-<= 2.5 ms on the 3050 Ti, about 0.6 ms on the 3090.
+- Bands: D1 = Y - G(1) (fine), D2 = G(1) - L2 (mid), D3 = L2 - L3 (low-mid); L2, L3 = Gaussians
+  of 2.5 and 6 px at half resolution; x GrainScale.
+- Grain level per 16 px tile: the mean of its 4 quietest of 16 sub-blocks, then the minimum over
+  the 5 x 5 neighbouring tiles (grain is everywhere on the film; texture is local). Per pixel the
+  fine band is split by its local 3x3 energy: the part above 2x the grain level is texture, the
+  rest grain.
+- Focus evidence F = T2 / (T2 + E3) (the mid band against the low-mid band). Compression removes
+  D1 but keeps D2/D3 (x265 clips: D2 0.83-0.94, D3 0.95-0.99 of the original), so F barely moves
+  with bitrate; optical defocus widens edges and lowers it (0.28 at 1 px blur, 0.12 at 3 px).
+  Texture gain needs current and reference in focus, F and mid-band texture not fallen more than
+  coding explains (a focus pull blocks it), and texture above grain + coding noise in both.
+- References per tile (grain level, T1, T2, F): peak-hold, energy halving in 2 s at the measured
+  rate, carried bilinearly along trusted vectors; untrusted blocks restart; without vectors only
+  tiles whose low band did not change keep their reference. Cuts, fades, Forget, gaps restart.
+- Gains in [1, cap]: grain `sqrt(Nref / (N x 1.35))` on the grain part (only grain the frame
+  has: no synthesis), texture `sqrt(Tref / T)` x focus gate on the texture part.
+  `Y' = Y + (gG - 1)(1 - f) D1 + (gT1 - 1) f D1 + (gT2 - 1) f D2`.
+- Passes: half box, two half-res Gaussians, per-tile stats, tile-grid grain/frame/reference,
+  fused apply. Estimated 4K: 1.2-1.4 ms on the 3050 Ti, 0.3-0.4 ms on the 3090.
+- On the real clips it is safe and nearly inert (the camera pans: without vectors nothing is
+  restored; with a stand-in field B-frame detail 0.776 -> 0.780 of the original). Its effect is
+  on static or vector-tracked coded texture.
 
 ## Settings (Config: "Experimental content-adaptive settings" group)
 
