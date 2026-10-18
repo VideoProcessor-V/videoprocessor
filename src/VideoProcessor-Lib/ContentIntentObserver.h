@@ -15,6 +15,7 @@
 #include <AnalysisLumaSource.h>
 #include <ContentClassifier.h>
 #include <DebugLog.h>
+#include <DiagnosticHistory.h>
 #include <IntentDescriptor.h>
 #include <QueuedFrameStatistics.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -166,6 +167,10 @@ namespace ContentIntent
                     DisplayName(now.source), now.reason, in.stats.meanPanHps, in.stats.widePanShare,
                     in.stats.holdShare, in.stats.flatShare, in.stats.seconds, context.contentHz, context.displayHz,
                     context.pulldownLocked ? 1 : 0, context.l11Present ? std::to_string(context.l11ContentType).c_str() : "absent");
+                // Report-a-problem: a = content class, b = source, x = pan, y = wide-pan share.
+                DiagnosticHistory::Global().RecordDecision("content-intent", ToString(now.content),
+                    static_cast<int64_t>(now.content), static_cast<int64_t>(now.source),
+                    in.stats.meanPanHps, in.stats.widePanShare);
             }
             m_status.enabled = true;
             m_status.content = m_hysteresis.Current().content;

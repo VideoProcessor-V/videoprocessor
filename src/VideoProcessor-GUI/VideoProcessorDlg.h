@@ -29,6 +29,8 @@
 #include <PixelValueRange.h>
 #include <OutputReadinessController.h>
 #include <ShortcutRepeatGuard.h>
+#include <StateReport.h>
+#include <StateReportSettings.h>
 #include <CCie1931Control.h>
 #include <IRenderer.h>
 #include <ProcessCpuUsageMeter.h>
@@ -93,6 +95,7 @@
 #define WM_MESSAGE_CONFIGURATION_RPC_REQUEST             (WM_APP + 22)
 #define WM_MESSAGE_PROJECTOR_TEST_DONE                   (WM_APP + 23)
 #define WM_MESSAGE_HDR_INFERENCE_PICTURE                 (WM_APP + 24)
+#define WM_MESSAGE_STATE_REPORT_DONE                     (WM_APP + 25)
 
 static_assert(WM_MESSAGE_DIRECTSHOW_NOTIFICATION !=
 	WM_MESSAGE_DIRECTSHOW_OWNER_COMPLETION,
@@ -306,6 +309,14 @@ public:
 	void OnCommandAutoSet();
 	void OnCommandToggleStatsOverlay();
 	void OnCommandCaptureRenderedOutput();
+	// Report-a-problem (StateReport.h): the state_report shortcut and the
+	// system-menu item. trigger: "hotkey", "menu" or "auto:<reason>".
+	void OnCommandStateReport();
+	void SaveStateReport(const char* trigger);
+	// auto_report: a report on a recovery reset or render stall, rate-limited.
+	void MaybeAutoReport(const char* reason);
+	void RecordDiagnosticStats(double sourceHz, double displayHz);
+	void ShowStateReportToast(const std::string& value);
 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
 
@@ -621,8 +632,17 @@ protected:
 		bool sceneDetect = false;
 		unsigned int profileChangeDisplaySeconds =
 			ProfileChangeOverlay::DefaultDisplaySeconds;
+		StateReportSettings::Settings stateReport;   // [logging] auto_report, report_thumbnail
 	};
 	StagedRuntimeSettings m_stagedRuntimeSettings;
+	// Report-a-problem (owner 2026-10-17).
+	StateReportSettings::Settings m_stateReportSettings;
+	StateReport::AutoReportLimiter m_autoReportLimiter;
+	std::atomic<bool> m_stateReportBusy{ false };
+	std::atomic<uint64_t> m_diagnosticCapturedFrames{ 0 };
+	std::atomic<uint64_t> m_diagnosticRejectedFrames{ 0 };
+	uint64_t m_diagnosticLastCapturedFrames = 0;
+	ULONGLONG m_diagnosticLastStatsTick = 0;
 	// Stage 9: room lights for the rules' `ambient` variable.
 	Ambient::Settings m_ambientConfigured;
 	Ambient::State m_ambientState;
@@ -1310,6 +1330,7 @@ protected:
 	afx_msg LRESULT OnConfigurationEditorHotkey(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnConfigurationRpcRequest(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnProjectorTestDone(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnStateReportDone(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnMessageHdrInferencePicture(WPARAM wParam, LPARAM lParam);
 	// RS-232 connection test (Config's LED drive page): the RPC waiting for it
 	// and its result, handed from the worker thread to the UI thread.

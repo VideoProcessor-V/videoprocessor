@@ -275,7 +275,10 @@ namespace MainConfigSchema
 		return {
 			ConfigSchema::Boolean("enabled"),
 			ConfigSchema::Boolean("debug"),
-			ConfigSchema::Any("debug_log_retention")
+			ConfigSchema::Any("debug_log_retention"),
+			// Report-a-problem (StateReportSettings.h), both default off.
+			ConfigSchema::Boolean("auto_report"),
+			ConfigSchema::Boolean("report_thumbnail")
 		};
 	}
 

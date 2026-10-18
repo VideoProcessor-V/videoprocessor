@@ -1086,6 +1086,7 @@ const FixedShortcutField kApplicationShortcutFields[] = {
     { "Exit fullscreen", "fullscreen_exit", "Esc" },
     { "Toggle statistics", "toggle_stats_overlay", "Ctrl+I" },
     { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
+    { "Save problem report", "state_report", "Ctrl+Alt+D" },
     { "Re-apply rules", "reapply_rules", "" },
     { "Room lights (dark / lit)", "room_lights", "" },
     { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
@@ -14268,6 +14269,32 @@ QWidget* ConfigEditorWindow::createLogsPage()
     layout->addWidget(helpLabel(QStringLiteral(
         "Enhanced logging keeps all logs and writes additional live telemetry files. Use it only while diagnosing an issue.")));
 
+    // Report-a-problem (StateReportSettings.h): the switches beside the
+    // Shortcuts page's "Save problem report" (default Ctrl+Alt+D).
+    auto* reportsTitle = new QLabel(QStringLiteral("Problem reports"));
+    reportsTitle->setObjectName(QStringLiteral("config.logging.reports_title"));
+    QFont reportsFont = reportsTitle->font();
+    reportsFont.setBold(true);
+    reportsTitle->setFont(reportsFont);
+    layout->addWidget(reportsTitle);
+    auto* autoReport = bindCheckField(QStringLiteral("Save a problem report automatically"),
+        QStringLiteral("logging"), QStringLiteral("auto_report"), false);
+    autoReport->setAccessibleDescription(QStringLiteral(
+        "When VP recovers from a stall or a source gap, or a renderer reset fails, it saves a problem report "
+        "by itself: at most one every 10 minutes and five per run. Default: off."));
+    layout->addWidget(autoReport);
+    auto* reportThumbnail = bindCheckField(QStringLiteral("Include a small picture in problem reports"),
+        QStringLiteral("logging"), QStringLiteral("report_thumbnail"), false);
+    reportThumbnail->setAccessibleDescription(QStringLiteral(
+        "Adds a 480-pixel-wide copy of the next rendered frame to each report (VP Renderer only). "
+        "Default: off - reports then hold no pictures."));
+    layout->addWidget(reportThumbnail);
+    layout->addWidget(helpLabel(QStringLiteral(
+        "Press the problem-report shortcut (Shortcuts page, default Ctrl+Alt+D) or choose \"Save problem report\" "
+        "in VP's window menu right after you see a problem. VP saves the last few seconds of its state - timings, "
+        "decisions, Dynamic Drive commands, settings, the log and system details, without your name or private "
+        "folder paths - to logs\reports (the newest 20 are kept). Send the .zip file with a short description.")));
+
     QString logDirectory = QFileInfo(configPath_).absoluteDir().filePath(QStringLiteral("logs"));
     const QString logPath = QDir(logDirectory).filePath(QStringLiteral("vp.log"));
     auto* actions = new QHBoxLayout;
@@ -14282,10 +14309,30 @@ QWidget* ConfigEditorWindow::createLogsPage()
 	}
     openFolder->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor logs."));
     openLog->setAccessibleDescription(QStringLiteral("Open the current VideoProcessor log."));
+    auto* openReports = new QPushButton(QStringLiteral("Open reports folder"));
+    openReports->setObjectName(QStringLiteral("config.logging.open_reports"));
+    openReports->setEnabled(!remoteClient_);
+    if (remoteClient_)
+        openReports->setToolTip(QStringLiteral("Reports are on the VP computer."));
+    openReports->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor problem reports."));
     actions->addWidget(openFolder);
     actions->addWidget(openLog);
+    actions->addWidget(openReports);
     actions->addStretch();
     layout->addLayout(actions);
+    const QString reportsDirectory = QDir(logDirectory).filePath(QStringLiteral("reports"));
+    connect(openReports, &QPushButton::clicked, this, [this, reportsDirectory]
+    {
+        if (!QDir(reportsDirectory).exists())
+        {
+            QMessageBox::information(this, QStringLiteral("Problem reports"),
+                QStringLiteral("No problem report has been saved yet. Press the problem-report shortcut in VP first."));
+            return;
+        }
+        if (!openPathExternally(reportsDirectory))
+            QMessageBox::warning(this, QStringLiteral("Problem reports"),
+                QStringLiteral("Windows could not open the reports folder."));
+    });
     connect(openFolder, &QPushButton::clicked, this, [this, logDirectory]
     {
         if (!QDir(logDirectory).exists())

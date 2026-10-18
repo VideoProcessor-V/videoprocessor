@@ -2523,6 +2523,11 @@ void testEveryPageRoundTrips()
     require(renderedCaptureShortcut->text() == QStringLiteral("Ctrl+Alt+S"),
         "Rendered-output capture did not default to Ctrl+Alt+S");
     renderedCaptureShortcut->setText(QStringLiteral("Ctrl+Alt+C"));
+    QLineEdit* stateReportShortcut = requireControl<QLineEdit>(window,
+        QStringLiteral("config.shortcuts.state_report"));
+    require(stateReportShortcut->text() == QStringLiteral("Ctrl+Alt+D"),
+        "Save problem report did not default to Ctrl+Alt+D");
+    stateReportShortcut->setText(QStringLiteral("Ctrl+Alt+Q"));
     QLineEdit* reapplyRulesShortcut = requireControl<QLineEdit>(window,
         QStringLiteral("config.shortcuts.reapply_rules"));
     require(reapplyRulesShortcut->text().isEmpty(),
@@ -2561,6 +2566,14 @@ void testEveryPageRoundTrips()
     require(!requireControl<QSpinBox>(window,
         QStringLiteral("config.logging.debug_log_retention"))->isEnabled(),
         "Log retention remained editable while enhanced logging was enabled");
+    QCheckBox* autoReport = requireControl<QCheckBox>(window,
+        QStringLiteral("config.logging.auto_report"));
+    require(!autoReport->isChecked(), "Automatic problem reports did not default to off");
+    autoReport->setChecked(true);
+    QCheckBox* reportThumbnail = requireControl<QCheckBox>(window,
+        QStringLiteral("config.logging.report_thumbnail"));
+    require(!reportThumbnail->isChecked(), "Problem-report picture did not default to off");
+    reportThumbnail->setChecked(true);
     requireControl<QCheckBox>(window, QStringLiteral("config.logging.debug"))->setChecked(false);
     requireControl<QCheckBox>(window, QStringLiteral("config.logging.enabled"))->setChecked(false);
     require(!requireControl<QSpinBox>(window,
@@ -2822,6 +2835,7 @@ void testEveryPageRoundTrips()
         "container_colorspace: REC709", "max_cll: 1200", "max_fall: 450",
         "fullscreen_toggle: Ctrl+F", "config_editor: Ctrl+E",
         "capture_rendered_output: Ctrl+Alt+C", "toggle_noui: Alt+U",
+        "state_report: Ctrl+Alt+Q", "auto_report: true", "report_thumbnail: true",
         "reapply_rules: Ctrl+Alt+R",
         "foreground_only: true",
         "renderer: *", "run: C:\\Tools\\verified-action.cmd 42",

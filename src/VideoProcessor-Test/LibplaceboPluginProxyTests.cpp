@@ -10,6 +10,11 @@
 #include <UnifiedProfileRuntime.h>
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"
 #include "../VideoProcessor-Lib/VpBuildIdentity.h"
+#include "../VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h"
+#include <DiagnosticHistory.h>
+#include <memory>
+#include <sstream>
+#include <string>
 #include "HardwarePrerequisites.h"
 #include <atomic>
 #include <fstream>
@@ -334,6 +339,107 @@ namespace VideoProcessorTest
 				Assert::IsTrue(VpBuildIdentity::CheckPair(VpBuildIdentity::Id(), pluginId.c_str(), message),
 					std::wstring(message.begin(), message.end()).c_str());
 			}
+		}
+
+		// Report-a-problem (API 36): the proxy forwards the renderer DLL's history
+		// (without an override IVideoRenderer's default returns false: no rows).
+		TEST_METHOD(WriteDiagnosticHistoryHasExplicitProxyOverride)
+		{
+			using ExpectedMethod = bool (LibplaceboPluginVideoRenderer::*)(
+				VpDiagnosticHistorySink, void*, int64_t) const;
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::WriteDiagnosticHistory),
+				ExpectedMethod>));
+		}
+
+		// What LibplaceboVideoRenderer::WriteDiagnosticHistory sends across the plugin
+		// boundary: JSONL rows tagged "renderer", in whole lines, through a C sink.
+		TEST_METHOD(RendererDiagnosticHistoryReachesCSinkAsTaggedRows)
+		{
+			struct Collected
+			{
+				std::string text;
+				size_t chunks = 0;
+				bool wholeLines = true;
+			};
+			struct Sink
+			{
+				static void __cdecl Append(void* context, const char* data, size_t length)
+				{
+					auto* collected = static_cast<Collected*>(context);
+					++collected->chunks;
+					if (length == 0 || data[length - 1] != '\n')
+						collected->wholeLines = false;
+					collected->text.append(data, length);
+				}
+			};
+			auto recorder = std::make_unique<DiagnosticHistory::Recorder>();
+			const int64_t reference = DiagnosticHistory::NowQpc();
+			// A full frame ring (more than one 64 KB chunk), a hold and a decision.
+			for (uint64_t i = 0; i < DiagnosticHistory::kFrameCapacity; ++i)
+			{
+				DiagnosticHistory::FrameRecord frame;
+				frame.stage = DiagnosticHistory::StagePresented;
+				frame.counter = i;
+				frame.renderMs = 1.5f;
+				recorder->RecordFrame(frame);
+			}
+			DiagnosticHistory::FrameRecord hold;
+			hold.stage = DiagnosticHistory::StageRepeated;
+			hold.holdReason = RendererDiagnostics::HoldRenderAheadGate;
+			recorder->RecordFrame(hold);
+			recorder->RecordDecision("ra-gate", "late frame", 0, 3, 4.0, 5.0);
+			recorder->RecordLed("LPW1", "sent", 412, 1, 412.0);
+
+			Collected collected;
+			Assert::IsFalse(DiagnosticHistory::WriteJsonlToSink(*recorder, "renderer", reference,
+				nullptr, &collected));
+			Assert::IsTrue(DiagnosticHistory::WriteJsonlToSink(*recorder, "renderer", reference,
+				&Sink::Append, &collected));
+			Assert::IsTrue(collected.chunks > 1, L"a full frame ring spans several chunks");
+			Assert::IsTrue(collected.wholeLines, L"every chunk ends on a line boundary");
+			std::istringstream lines(collected.text);
+			std::string line;
+			size_t rows = 0, frames = 0;
+			bool decision = false, led = false, holdRow = false;
+			while (std::getline(lines, line))
+			{
+				++rows;
+				Assert::AreEqual(size_t(0), line.find("{\"src\":\"renderer\",\"ring\":"));
+				Assert::IsTrue(line.back() == '}');
+				if (line.find("\"ring\":\"frame\"") != std::string::npos) ++frames;
+				if (line.find("\"ring\":\"decision\"") != std::string::npos &&
+					line.find("\"name\":\"ra-gate\"") != std::string::npos) decision = true;
+				if (line.find("\"ring\":\"led\"") != std::string::npos &&
+					line.find("\"a\":412") != std::string::npos) led = true;
+				if (line.find("\"stage\":\"repeated\"") != std::string::npos &&
+					line.find("\"hold\":31") != std::string::npos) holdRow = true;
+			}
+			Assert::AreEqual(size_t(DiagnosticHistory::kFrameCapacity), frames);
+			Assert::IsTrue(decision && led && holdRow);
+			Assert::AreEqual(frames + 2 + 5, rows);   // + decision, LED, 5 ring_meta rows
+		}
+
+		// The hold codes written into frame rows (RendererDiagnosticCodes.h).
+		TEST_METHOD(DejudderHoldTextsMapToStableCodes)
+		{
+			using namespace RendererDiagnostics;
+			Assert::AreEqual(uint32_t(HoldNoMotionEstimate), ClassifyDejudderHold("no motion estimate for this frame"));
+			Assert::AreEqual(uint32_t(HoldVectorsInvalid), ClassifyDejudderHold("frame gap"));
+			Assert::AreEqual(uint32_t(HoldCadenceRepeat), ClassifyDejudderHold("cadence repeat"));
+			Assert::AreEqual(uint32_t(HoldComposedWithoutPicture), ClassifyDejudderHold("composed source without the cached picture"));
+			Assert::AreEqual(uint32_t(HoldComposedSubtitle), ClassifyDejudderHold("composed source (subtitle moving)"));
+			Assert::AreEqual(uint32_t(HoldTimingUnknown), ClassifyDejudderHold("timing not known: display rate"));
+			Assert::AreEqual(uint32_t(HoldNoSwapchain), ClassifyDejudderHold("no present id"));
+			Assert::AreEqual(uint32_t(HoldRenderAheadGate), ClassifyDejudderHold("render-ahead gate: hold (extras dropped)"));
+			Assert::AreEqual(uint32_t(HoldRenderAheadDropped), ClassifyDejudderHold("render-ahead: extras dropped (gate or late)"));
+			Assert::AreEqual(uint32_t(HoldRenderAheadPhase), ClassifyDejudderHold("render-ahead: every refresh after the frame's own is a hold (phase)"));
+			Assert::AreEqual(uint32_t(HoldExtraFailed), ClassifyDejudderHold("no swapchain frame"));
+			Assert::AreEqual(uint32_t(HoldExtraFailed), ClassifyDejudderHold("rendered warp failed"));
+			Assert::AreEqual(uint32_t(HoldPlannerStop), ClassifyDejudderHold("past the next frame"));
+			Assert::AreEqual(uint32_t(HoldNextFrameLate), ClassifyDejudderHold("the frame after extras showed a refresh late"));
+			Assert::AreEqual(uint32_t(HoldOther), ClassifyDejudderHold("something new"));
+			Assert::AreEqual(uint32_t(HoldOther), ClassifyDejudderHold(nullptr));
 		}
 
 		TEST_METHOD(PostStallTelemetrySuppressionHasExplicitProxyOverride)

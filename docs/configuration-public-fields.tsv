@@ -44,6 +44,7 @@ shortcuts.render.<index>	render-shortcut	VP shortcut	no
 shortcuts.foreground_only	shortcut-foreground-only	VP shortcut focus	no
 shortcuts.toggle_noui	shortcut-toggle-noui	VP window presentation	no
 shortcuts.show_profiles	shortcut-show-profiles	VP profile overlay	no
+shortcuts.state_report	shortcut-state-report	VP problem report	no
 vprenderer.when	vprenderer-when	VP Renderer	no
 vprenderer.shortcut	vprenderer-shortcut	VP Renderer	no
 vprenderer.quality	vprenderer-quality	VP Renderer	no
@@ -200,3 +201,5 @@ vprenderer.motion.deinterlace_algorithm	vprenderer-motion-deinterlace-algorithm	
 vprenderer.motion.field_order	vprenderer-motion-field-order	VP Renderer	yes
 vprenderer.motion.deinterlace_cadence	vprenderer-motion-deinterlace-cadence	VP Renderer	no
 vprenderer.motion.deinterlace_skip_spatial	vprenderer-motion-deinterlace-skip-spatial	VP Renderer	no
+logging.auto_report	logging-auto-report	VP problem report	no
+logging.report_thumbnail	logging-report-thumbnail	VP problem report	no

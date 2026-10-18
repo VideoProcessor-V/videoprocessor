@@ -127,6 +127,9 @@ public:
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	// Report-a-problem: this DLL's DiagnosticHistory rings as JSONL (src "renderer").
+	bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
+		int64_t referenceQpc) const override;
 	// DV next step (f): the last rendered frame's format-neutral scene
 	// descriptor and display profile (SceneDescriptor.h / DisplayProfile.h),
 	// for future consumers (LED look-ahead, stats). False until a frame was rendered.

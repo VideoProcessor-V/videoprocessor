@@ -2,6 +2,7 @@
 #include "BarcoAsciiDriver.h"
 
 #include "../DebugLog.h"
+#include "../DiagnosticHistory.h"
 
 #include <algorithm>
 #include <cctype>
@@ -137,6 +138,15 @@ namespace LedDrive
 		lastWriteOk = written;
 		if (wrote) *wrote = written;
 		{
+			// Report-a-problem (DiagnosticHistory, LED ring): every command written or
+			// failed. name = mnemonic, a = x = the level sent (-1 for a query),
+			// b = 1 when written.
+			const int level = sentLight >= 0 ? sentLight : sentContrast;
+			DiagnosticHistory::Global().RecordLed(mnemonic ? mnemonic : "command",
+				written ? (level >= 0 ? "sent" : "query sent") : "write failed",
+				level, written ? 1 : 0, static_cast<double>(level));
+		}
+		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (written)
 			{
@@ -182,6 +192,8 @@ namespace LedDrive
 				reopenAt = failedAt + milliseconds(reopenBackoffMs);
 				DebugLog::Log("Dynamic Drive: %d projector writes failed in a row; %s closed, reopening in %d ms",
 					writeFailures, config.port.c_str(), reopenBackoffMs);
+				DiagnosticHistory::Global().RecordLed("port-close", "writes failed in a row",
+					writeFailures, reopenBackoffMs);
 			}
 		}
 		else
@@ -238,6 +250,7 @@ namespace LedDrive
 				}
 				DebugLog::Log("Dynamic Drive: no %s reply within %d ms to \"%s\"",
 					mnemonic, timeoutMs, Printable(command).c_str());
+				DiagnosticHistory::Global().RecordLed(mnemonic ? mnemonic : "command", "no reply", timeoutMs);
 			}
 		}
 		if (written)
@@ -255,6 +268,7 @@ namespace LedDrive
 				reopenAt = closedAt + milliseconds(reopenBackoffMs);
 				DebugLog::Log("Dynamic Drive: reading %s failed; port closed, reopening in %d ms",
 					config.port.c_str(), reopenBackoffMs);
+				DiagnosticHistory::Global().RecordLed("port-close", "read failed", 0, reopenBackoffMs);
 			}
 		}
 		int gap = config.minCommandGapMs;
@@ -323,6 +337,7 @@ namespace LedDrive
 				wake.notify_one();
 			}
 			++reopensUnlogged;
+			DiagnosticHistory::Global().RecordLed("port-reopen", "reopened after a failure");
 			if (lastReopenLog == steady_clock::time_point() || now - lastReopenLog >= seconds(10))
 			{
 				DebugLog::Log("Dynamic Drive: %s reopened (%d reopen(s) since the last report)",
@@ -335,6 +350,7 @@ namespace LedDrive
 		}
 		reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
 		reopenAt = now + milliseconds(reopenBackoffMs);
+		DiagnosticHistory::Global().RecordLed("port-reopen", "reopen failed", 0, reopenBackoffMs);
 		error = openError + "; retrying in " + std::to_string(reopenBackoffMs) + " ms";
 		return false;
 	}
@@ -403,6 +419,7 @@ namespace LedDrive
 		{
 			if (!port) error = "no serial port";
 			DebugLog::Log("Dynamic Drive: %s; projector control disabled", error.c_str());
+			DiagnosticHistory::Global().RecordLed("port-open", "open failed: control disabled", config.baud);
 			return false;
 		}
 		{
@@ -442,6 +459,10 @@ namespace LedDrive
 		}
 		worker = std::thread(&BarcoAsciiDriver::Worker, this);
 		const LightRange reported = QueryLightRange();
+		// a = baud, b = 1 acknowledged framing, x/y = light range (0 when unknown).
+		DiagnosticHistory::Global().RecordLed("port-open", framing.name, config.baud,
+			framing.acknowledged ? 1 : 0, reported.known ? reported.minimum : 0.0,
+			reported.known ? reported.maximum : 0.0);
 		DebugLog::Log("Dynamic Drive: barco_ascii on %s %d baud, framing=%s acknowledged=%d range=%s",
 			config.port.c_str(), config.baud, framing.name, framing.acknowledged ? 1 : 0,
 			reported.known ? (std::to_string(reported.minimum) + "-" +
@@ -943,9 +964,11 @@ namespace LedDrive
 
 	void BarcoAsciiDriver::Close()
 	{
+		bool wasOpened = false;   // report-a-problem: only a real close is recorded
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
 			stopping = true;
+			wasOpened = opened;
 			opened = false;
 			pendingLight = -1;
 			pendingContrast = -1;
@@ -954,6 +977,8 @@ namespace LedDrive
 		gapWake.notify_all();   // audit 2026-10-16
 		if (worker.joinable()) worker.join();
 		if (port) port->Close();
+		if (wasOpened)
+			DiagnosticHistory::Global().RecordLed("port-close", "driver closed");
 	}
 
 	DriverStatus BarcoAsciiDriver::Status() const
