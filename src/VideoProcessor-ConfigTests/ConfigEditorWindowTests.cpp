@@ -2335,6 +2335,70 @@ void testQueueTargetDelayIsOnTheQueuePage()
     require(readBytes(path).contains("target_latency_ms: 0"), "The preset did not switch the delay off in the file");
 }
 
+void testActivePictureLookaheadIsAutomaticWhenAbsent()
+{
+    // Owner decision 2026-10-17: absent = automatic (follows the queue); an explicit value, including 0, overrides.
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.First]\nquality: high\n"
+        "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n"
+        "[queue.Other]\nqueue_size: 16\ntarget_frames: 4\nactive_picture_lookahead_frames: 3\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(1);
+    auto* profiles = requireControl<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+    auto select = [profiles](const QString& section)
+    {
+        for (int row = 0; row < profiles->count(); ++row)
+            if (profiles->item(row)->data(Qt::UserRole).toString().compare(section, Qt::CaseInsensitive) == 0)
+            {
+                profiles->setCurrentRow(row);
+                QCoreApplication::processEvents();
+                return true;
+            }
+        return false;
+    };
+    auto* spin = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+    auto* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    require(spin->toolTip().contains("(Key: active_picture_lookahead_frames.)") &&
+        spin->toolTip().contains("min(target frames - 1, queue size - 1, 8)") && spin->toolTip().contains("low-latency profile uses 0"),
+        "the tooltip does not state the automatic rule and key");
+    require(select(QStringLiteral("queue.other")) && spin->value() == 3, "an explicit value is not shown");
+    require(select(QStringLiteral("queue.normal")) && spin->value() == spin->minimum() && spin->text() == QStringLiteral("Auto"),
+        "an absent key does not show Auto");
+    apply->click();
+    QCoreApplication::processEvents();
+    require(!readBytes(path).contains("[queue.Other]\nactive_picture_lookahead_frames") &&
+        readBytes(path).count("active_picture_lookahead_frames") == 1, "saving wrote the key for an Auto profile");
+    spin->setValue(0);
+    QCoreApplication::processEvents();
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).count("active_picture_lookahead_frames: 0") == 1, "an explicit 0 is not saved");
+    spin->setValue(6);
+    QCoreApplication::processEvents();
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).contains("active_picture_lookahead_frames: 6"), "an explicit value does not round-trip");
+    spin->setValue(spin->minimum());
+    QCoreApplication::processEvents();
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).count("active_picture_lookahead_frames") == 1, "returning to Auto did not remove the key");
+    // A buffering preset no longer writes it; it removes an explicit value.
+    require(select(QStringLiteral("queue.normal")), "Normal missing");
+    auto* policy = requireControl<QComboBox>(window, QStringLiteral("config.queue.policy_preset"));
+    policy->setCurrentIndex(policy->findData(QStringLiteral("reliable")));
+    QCoreApplication::processEvents();
+    require(spin->value() == spin->minimum(), "a preset left an explicit look-ahead");
+    require(policy->currentData().toString() == QStringLiteral("reliable"), "an Auto look-ahead no longer matches the preset");
+    apply->click();
+    QCoreApplication::processEvents();
+    require(readBytes(path).count("active_picture_lookahead_frames") == 1, "the preset wrote or kept the key");
+}
+
 void testShaderSettingsComeFromTheShaderFile()
 {
     QTemporaryDir dir;
@@ -9899,6 +9963,7 @@ int main(int argc, char** argv)
     failures += run("shader settings come from the shader file", testShaderSettingsComeFromTheShaderFile);
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);
+    failures += run("active-picture lookahead automatic when absent", testActivePictureLookaheadIsAutomaticWhenAbsent);
     failures += run("target dropdown refreshes inline", testTargetDropdownRefreshesInline);
     failures += run("remote target switch keeps window responsive",
         testRemoteTargetSwitchKeepsWindowResponsive);
