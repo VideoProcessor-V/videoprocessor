@@ -374,6 +374,7 @@
 	<ClCompile Include="DisplayRefreshRateWindowTests.cpp" />
     <ClCompile Include="CadenceIntervalEstimateTests.cpp" />
     <ClCompile Include="AlphaQueuePolicyTests.cpp" />
+    <ClCompile Include="QueueTimingFixesTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />
     <ClCompile Include="ActivePictureDecisionTimelineTests.cpp" />

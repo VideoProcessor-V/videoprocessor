@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include <RationalLiveOutputSequencer.h>
 
@@ -228,7 +229,7 @@ bool RationalLiveOutputSequencer::IsValidInput(
 		m_theoreticalFrameDuration <= 0)
 		return false;
 	return input.cadence != RationalLiveOutputCadence::Display ||
-		(input.displayRateHz >= 10.0 && input.displayRateHz <= 240.0);
+		DisplayRefreshBounds::Accepts(input.displayRateHz);
 }
 
 VideoReferenceTime RationalLiveOutputSequencer::OffsetForSlot(uint64_t slot) const

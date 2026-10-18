@@ -62,6 +62,40 @@ struct AlphaCadenceCorrectionInput
 	bool safeSceneBoundary = false;
 	uint64_t sceneEventId = 0;
 	uint64_t sourceSequence = 0;
+	// queue_timing_fixes (hunt 2 13-timing M1, M2, L6): the capture rate is
+	// measured on QPC from the frames' arrival times (the display rate's clock),
+	// the warm-ups, cooldown and rate filter are seconds converted with the capture
+	// rate, the phase is bounded, and a disabled policy forgets its phase.
+	bool timingFixes = false;
+	// The frame's arrival on QPC in seconds (0 = unknown).
+	double arrivalSeconds = 0.0;
+	// captureRateHz is a measurement, not the nominal fallback (used only without
+	// arrival times).
+	bool captureRateMeasured = true;
+};
+
+// The capture rate on QPC (hunt 2 13-timing M1): an exponentially weighted least-
+// squares line through (frame index, arrival time). Arrival jitter averages out
+// over the window; the rate is that of the frames that really enter the queue, on
+// the same clock as the measured display rate. 0 until kMinimumSpanSeconds.
+class AlphaArrivalRateEstimator
+{
+public:
+	static constexpr double kWindowSeconds = 120.0;
+	static constexpr double kMinimumSpanSeconds = 10.0;
+
+	void Reset();
+	// One frame (the index advances by one per call). rateHintHz sets the
+	// forgetting per frame; it need not be exact.
+	void Add(double arrivalSeconds, double rateHintHz);
+	double RateHz() const;
+
+private:
+	bool m_started = false;
+	double m_t0 = 0.0;
+	double m_last = 0.0;
+	double m_index = 0.0;
+	double m_w = 0.0, m_x = 0.0, m_y = 0.0, m_xx = 0.0, m_xy = 0.0;
 };
 
 struct AlphaCadenceDiagnosticSnapshot
@@ -141,6 +175,25 @@ private:
 	static constexpr double RATE_FILTER_ALPHA = 1.0 / 600.0;
 	static constexpr double MINIMUM_PREDICTION_PPM = 1.0;
 	static constexpr double DIRECTION_REVERSAL_PPM = 2.0;
+	// queue_timing_fixes (M2): the same timings in seconds (the frame counts above
+	// at 60 Hz), converted with the capture rate.
+	static constexpr double STABLE_SECONDS = 2.0;
+	static constexpr double PREDICTION_SECONDS = 10.0;
+	static constexpr double COOLDOWN_SECONDS = 2.0;
+	static constexpr double RATE_FILTER_SECONDS = 10.0;
+	// queue_timing_fixes (M1): the phase never runs further than this.
+	static constexpr double MAXIMUM_PHASE_FRAMES = 2.0;
+
+public:
+	// Frames for a time at a rate (at least 1); the legacy count without fixes.
+	static uint32_t FramesFor(double seconds, double rateHz, uint32_t legacy, bool timingFixes);
+	static double FilterAlpha(double rateHz, bool timingFixes);
+	static uint32_t LegacyStableSamples() { return MINIMUM_STABLE_SAMPLES; }
+	static uint32_t LegacyPredictionSamples() { return MINIMUM_PREDICTION_SAMPLES; }
+	static uint32_t LegacyCooldownFrames() { return COOLDOWN_FRAMES; }
+
+private:
+	AlphaArrivalRateEstimator m_arrivalRate;
 
 	uint64_t m_generation = 0;
 	double m_phaseFrames = 0.0;

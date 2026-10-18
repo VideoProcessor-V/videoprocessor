@@ -666,7 +666,7 @@ void testEveryNewRendererControlReachesVp()
         { "sdr_tone_shape", "knee", true }, { "sdr_white_headroom", "0.1", false }, { "sdr_knee_start", "0.7", false },
         { "sdr_knee_strength", "0.6", false }, { "sdr_contrast_recovery", "1.2", false },
         { "adaptive_downscale", "on", true }, { "adaptive_upscale", "on", true }, { "upscale_light", "gamma", true },
-        { "fbo_float32", "on", true } };
+        { "fbo_float32", "on", true }, { "queue_timing_fixes", "off", true } };
     {
         ConfigEditorWindow window(path, 0, true);
         window.resize(1500, 1600);

@@ -114,6 +114,21 @@ struct DisplayRefreshBounds
 	}
 };
 
+// The general bounds for a capture (source) frame rate: DisplayMode's accepted
+// range (DisplayMode::MinimumRefreshRateHz/MaximumRefreshRateHz return these).
+// Hunt 2 15-intent C3: every capture-rate check goes through this one bound and
+// every display-rate check through DisplayRefreshBounds, never a copied literal
+// (RateBoundLiteralTests forbids them).
+struct CaptureRateBounds
+{
+	static constexpr double kMinimumHz = 10.0;
+	static constexpr double kMaximumHz = 240.0;
+	static bool Accepts(double hz)
+	{
+		return hz >= kMinimumHz && hz <= kMaximumHz;   // false for NaN
+	}
+};
+
 // Select a display mode in two intentional passes. The first pass accepts an
 // exactly equivalent rational or tight driver rounding. Only if that fails is
 // the closest cadence-family candidate accepted within the bounded fallback

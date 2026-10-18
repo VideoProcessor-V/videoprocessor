@@ -1,4 +1,5 @@
 #include <pch.h>
+#include "DisplayRefreshRatePolicy.h"
 
 #include <DisplayRefreshRateEstimator.h>
 
@@ -20,7 +21,7 @@ constexpr uint64_t kMinimumRecentRawIntervals = 12;
 
 bool IsUsableRate(double value)
 {
-	return std::isfinite(value) && value >= 10.0 && value <= 240.0;
+	return DisplayRefreshBounds::Accepts(value);
 }
 }
 

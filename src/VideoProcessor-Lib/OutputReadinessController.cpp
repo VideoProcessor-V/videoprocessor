@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <DisplayRefreshRatePolicy.h>
 
 #include <OutputReadinessController.h>
 
@@ -8,8 +9,8 @@
 
 namespace
 {
-constexpr double kMinimumRefreshHz = 10.0;
-constexpr double kMaximumRefreshHz = 240.0;
+constexpr double kMinimumRefreshHz = DisplayRefreshBounds::kMinimumHz;
+constexpr double kMaximumRefreshHz = DisplayRefreshBounds::kMaximumHz;
 constexpr double kRefreshFamilyToleranceRatio = 0.02;
 constexpr double kRefreshFamilyToleranceHz = 0.5;
 
