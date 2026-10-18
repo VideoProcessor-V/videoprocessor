@@ -181,6 +181,13 @@ namespace
 	int g_harnessLumaShift = 0;
 	int g_harnessLumaStaticRows = 0;
 	int g_harnessShotFrames = 0;
+	// Aliasing suite (2026-10-18): a chroma picture for g_harnessLumaPicture (Cb then Cr, each
+	// (width / 2) x height 10-bit codes, 4:2:2 co-sited; empty = neutral), a frame sequence in
+	// place of the one picture (FrameStep::content picks one, modulo the count; luma only), and
+	// no input-profile rule (the run uses the base profile, as a 24p film source does).
+	std::vector<uint16_t> g_harnessChromaPicture;
+	std::vector<std::vector<uint16_t>> g_harnessLumaFrames;
+	bool g_harnessNoInputRule = false;
 
 	// One moving frame: vertical bars in luma, a chroma ramp, shifted by n.
 	void FillV210(std::vector<BYTE>& frame, int width, int height, size_t rowBytes, int n)
@@ -191,8 +198,15 @@ namespace
 			const bool bar = y < g_harnessBarRows || y >= height - g_harnessBarRows;
 			for (int pack = 0; pack < (width + 5) / 6; ++pack)
 			{
-				const bool picture = g_harnessLumaPicture.size() == static_cast<size_t>(width) * height;
+				const size_t pixels = static_cast<size_t>(width) * height;
+				const std::vector<uint16_t>* sequenceFrame = g_harnessLumaFrames.empty() ? nullptr :
+					&g_harnessLumaFrames[static_cast<size_t>(n) % g_harnessLumaFrames.size()];
+				const bool sequence = sequenceFrame && sequenceFrame->size() == pixels;
+				const bool picture = g_harnessLumaPicture.size() == pixels || sequence;
+				const bool chromaPicture = g_harnessChromaPicture.size() == pixels;
 				auto luma = [&](int x) {
+					if (sequence)
+						return static_cast<uint32_t>((*sequenceFrame)[static_cast<size_t>(y) * width + static_cast<size_t>((std::min)(x, width - 1))]);
 					if (picture)
 					{
 						const bool moving = y >= g_harnessLumaStaticRows;
@@ -217,7 +231,16 @@ namespace
 						return static_cast<uint32_t>(value);
 					}
 					return bar ? 64u : static_cast<uint32_t>(64 + ((x + 4 * n) / 32 % 2) * 700 + (y % 64)); };
-				auto chroma = [&](int x) { return bar || picture ? 512u : static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
+				// V210 chroma order per pack: Cb0 Cr0 Cb2 Cr2 Cb4 Cr4 (chroma(x) for x = pack start + 0..5).
+				auto chroma = [&](int x) {
+					if (chromaPicture)
+					{
+						const int pack0 = x - x % 6, k = x % 6;
+						const int cx = (std::min)((pack0 + (k / 2) * 2) / 2, width / 2 - 1);
+						const size_t plane = (k % 2) ? static_cast<size_t>(width / 2) * height : 0;
+						return static_cast<uint32_t>(g_harnessChromaPicture[plane + static_cast<size_t>(y) * (width / 2) + cx]);
+					}
+					return bar || picture ? 512u : static_cast<uint32_t>(512 + ((x + y) % 128) - 64); };
 				const int x = pack * 6;
 				row[pack * 4 + 0] = chroma(x) | (luma(x) << 10) | (chroma(x + 1) << 20);
 				row[pack * 4 + 1] = luma(x + 1) | (chroma(x + 2) << 10) | (luma(x + 2) << 20);
@@ -260,6 +283,7 @@ namespace
 		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
+		std::vector<std::string> captureMetadatas;   // every completed capture's sidecar, in order (plan->captureTimes)
 		// Sampled once per sent frame through the second half of the run: the renderer's queue depth
 		// (GetFrameQueueSize) and its capture-to-output delay (ExitLatencyMs).
 		std::vector<size_t> queueDepths;
@@ -323,6 +347,7 @@ namespace
 		double paceScale = 1.0;          // < 1: the source clock runs fast (drift)
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
 		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
+		std::vector<double> captureTimes;   // more captures (aliasing suite): each time, retried while one is queued
 		std::function<FrameStep(int)> step;
 		// Called once per loop iteration with the seconds since the start (automatic
 		// calibration: patterns shown through the running renderer).
@@ -340,6 +365,9 @@ namespace
 		int lumaShift = 0;
 		int lumaStaticRows = 0;
 		int shotFrames = 0;
+		std::vector<uint16_t> chromaPicture;
+		std::vector<std::vector<uint16_t>> lumaFrames;
+		bool noInputRule = false;
 		bool dolbyVision = false;
 		std::vector<std::vector<BYTE>> dvFrames;
 		int width = 1920, height = 1080;
@@ -361,6 +389,9 @@ namespace
 		g.lumaShift = g_harnessLumaShift;
 		g.lumaStaticRows = g_harnessLumaStaticRows;
 		g.shotFrames = g_harnessShotFrames;
+		g.chromaPicture = g_harnessChromaPicture;
+		g.lumaFrames = g_harnessLumaFrames;
+		g.noInputRule = g_harnessNoInputRule;
 		g.dolbyVision = g_harnessDolbyVision;
 		g.dvFrames = g_harnessDvFrames;
 		g.width = g_harnessWidth;
@@ -384,6 +415,9 @@ namespace
 		g_harnessLumaShift = g.lumaShift;
 		g_harnessLumaStaticRows = g.lumaStaticRows;
 		g_harnessShotFrames = g.shotFrames;
+		g_harnessChromaPicture = g.chromaPicture;
+		g_harnessLumaFrames = g.lumaFrames;
+		g_harnessNoInputRule = g.noInputRule;
 		g_harnessDolbyVision = g.dolbyVision;
 		g_harnessDvFrames = g.dvFrames;
 		g_harnessWidth = g.width;
@@ -639,7 +673,7 @@ namespace
 		{
 			std::ofstream config(configPath, std::ios::trunc);
 			config << "[general]\npersist_profile_selection: false\n"
-				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film || plan ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
+				"[vprenderer.input.low_latency]\nwhen: $source_rate " << (g_harnessNoInputRule ? "< 0" : (film || plan ? "> 0" : "> 59")) << "\ncapture_path: " << capturePath << "\n"
 				<< extra;
 		}
 		// A small window off the screen.
@@ -739,6 +773,7 @@ namespace
 				1e6 * rateDenominator / rateNumerator * (plan ? plan->paceScale : 1.0)));
 			const double ticksPerUs = static_cast<double>(clock.TimingClockTicksPerSecond()) / 1e6;
 			bool resetDone = false, captureRequested = false;
+			size_t captureIndex = 0;
 			const timingclocktime_t startTicks = clock.TimingClockNow();
 			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
 			{
@@ -759,6 +794,16 @@ namespace
 					Logger::WriteMessage(("capture request: " + std::string(accepted ? "accepted - " : "refused - ") +
 						CStringA(captureStatus).GetString() + "\n").c_str());
 					captureRequested = true;
+				}
+				if (plan && captureIndex < plan->captureTimes.size() &&
+					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->captureTimes[captureIndex]))
+				{
+					CString captureStatus;
+					if (renderer->RequestRenderedOutputCapture(captureStatus))
+					{
+						++captureIndex;
+						captureRequested = true;
+					}
 				}
 				if (plan && plan->tick)
 					plan->tick(*renderer, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
@@ -800,12 +845,14 @@ namespace
 			{
 				// The capture's file is written asynchronously: wait for its log line.
 				const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-				while (std::chrono::steady_clock::now() < until && result.captureMetadata.empty())
+				while (std::chrono::steady_clock::now() < until &&
+					(result.captureMetadata.empty() || result.captureMetadatas.size() < captureIndex))
 				{
 					MSG msg;
 					while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
 					{
 						std::lock_guard<std::mutex> guard(g_logMutex);
+						result.captureMetadatas.clear();
 						for (const std::string& line : g_log)
 						{
 							const size_t at = line.find("Rendered-output capture complete");
@@ -814,6 +861,7 @@ namespace
 							{
 								const size_t end = line.find(" raw_bytes=", m);
 								result.captureMetadata = line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9);
+								result.captureMetadatas.push_back(result.captureMetadata);
 							}
 						}
 					}
@@ -4376,6 +4424,188 @@ namespace Tests
 				Assert::IsTrue(info.toneCurveOutputNits[i] >= info.toneCurveOutputNits[i - 1]);
 				Assert::IsTrue(info.toneCurveOutputNits[i] <= info.targetPeakNits * 1.01f + 0.01f);
 			}
+		}
+
+		// Aliasing and moire suite (2026-10-18, docs/agent-reports/aliasing.md): the shipped renderer
+		// DLL renders the plan's test cards (tools/aliasing/alias_suite.py writes the cards and the
+		// plan) off screen at each plan output size and captures the presented frames (VP-0133) into
+		// VP_ALIAS_DIR\captures; the analysis and the regression gate are alias_suite.py's. Plan rows
+		// (tab separated): name, source w, h, output w, h, asset, mode (still | shift | seq), shift
+		// per frame, seconds, capture times (comma separated), extra configuration (\n escaped),
+		// shader profiles (comma separated or -). A row with <name>.done is skipped (resume);
+		// VP_ALIAS_FILTER keeps the rows whose name contains it.
+		BEGIN_TEST_METHOD_ATTRIBUTE(AliasingSuiteCaptures)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(AliasingSuiteCaptures)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("AliasingSuiteCaptures")) return;
+			auto env = [](const char* name) {
+				char* v = nullptr;
+				size_t n = 0;
+				std::string value = _dupenv_s(&v, &n, name) == 0 && v ? v : "";
+				std::free(v);
+				return value;
+			};
+			const std::string dir = env("VP_ALIAS_DIR"), filter = env("VP_ALIAS_FILTER");
+			if (dir.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-ALIAS-DIR AliasingSuiteCaptures: set VP_ALIAS_DIR (alias_suite.py prepare)\n");
+				return;
+			}
+			std::ifstream planFile(dir + "\\plan.tsv");
+			Assert::IsTrue(planFile.good(), L"plan.tsv in VP_ALIAS_DIR");
+			const std::string captures = dir + "\\captures";
+			CreateDirectoryA(captures.c_str(), nullptr);
+			const std::wstring shots = HarnessTempFolder(L"vp-alias-shots");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			auto readU16 = [](const std::string& path) {
+				std::ifstream in(path, std::ios::binary | std::ios::ate);
+				std::vector<uint16_t> data;
+				if (!in) return data;
+				const std::streamoff bytes = in.tellg();
+				data.resize(static_cast<size_t>(bytes / 2));
+				in.seekg(0);
+				in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size() * 2));
+				return data;
+			};
+			std::string line;
+			int ran = 0, failed = 0;
+			std::string loadedAsset;
+			std::vector<uint16_t> asset;
+			while (std::getline(planFile, line))
+			{
+				if (!line.empty() && line.back() == '\r') line.pop_back();
+				if (line.empty() || line[0] == '#') continue;
+				std::vector<std::string> f;
+				for (size_t at = 0;;)
+				{
+					const size_t tab = line.find('\t', at);
+					f.push_back(line.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
+					if (tab == std::string::npos) break;
+					at = tab + 1;
+				}
+				Assert::IsTrue(f.size() >= 12, HarnessWide("plan row: " + line).c_str());
+				const std::string name = f[0];
+				if (!filter.empty() && name.find(filter) == std::string::npos) continue;
+				const std::string done = captures + "\\" + name + ".done";
+				if (GetFileAttributesA(done.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+				const int sw = std::atoi(f[1].c_str()), sh = std::atoi(f[2].c_str());
+				const int ow = std::atoi(f[3].c_str()), oh = std::atoi(f[4].c_str());
+				const std::string mode = f[6];
+				const int shift = std::atoi(f[7].c_str());
+				const double seconds = std::atof(f[8].c_str());
+				const size_t pixels = static_cast<size_t>(sw) * sh;
+				if (f[5] != loadedAsset)
+				{
+					asset = readU16(dir + "\\" + f[5]);
+					loadedAsset = f[5];
+				}
+				g_harnessWidth = sw;
+				g_harnessHeight = sh;
+				g_harnessWindowWidth = ow;
+				g_harnessWindowHeight = oh;
+				g_harnessNoInputRule = true;
+				g_harnessLumaPicture.clear();
+				g_harnessChromaPicture.clear();
+				g_harnessLumaFrames.clear();
+				g_harnessLumaShift = 0;
+				size_t frames = 1;
+				if (mode == "seq")
+				{
+					frames = asset.size() / pixels;
+					Assert::IsTrue(frames >= 2, HarnessWide(name + ": sequence asset").c_str());
+					for (size_t i = 0; i < frames; ++i)
+						g_harnessLumaFrames.emplace_back(asset.begin() + i * pixels, asset.begin() + (i + 1) * pixels);
+				}
+				else
+				{
+					Assert::IsTrue(asset.size() >= pixels * 2, HarnessWide(name + ": card asset " + f[5]).c_str());
+					g_harnessLumaPicture.assign(asset.begin(), asset.begin() + pixels);
+					g_harnessChromaPicture.assign(asset.begin() + pixels, asset.begin() + pixels * 2);
+					if (mode == "shift")
+					{
+						g_harnessLumaShift = shift;
+						g_harnessChromaPicture.clear();   // the harness moves luma only
+					}
+				}
+				std::string extra;
+				for (size_t i = 0; i < f[10].size(); ++i)
+				{
+					if (f[10][i] == '\\' && i + 1 < f[10].size() && f[10][i + 1] == 'n') { extra += '\n'; ++i; }
+					else extra += f[10][i];
+				}
+				g_harnessShaderProfiles.clear();
+				if (f[11] != "-")
+					for (size_t at = 0;;)
+					{
+						const size_t comma = f[11].find(',', at);
+						g_harnessShaderProfiles.push_back(f[11].substr(at, comma == std::string::npos ? std::string::npos : comma - at));
+						if (comma == std::string::npos) break;
+						at = comma + 1;
+					}
+				FramePlan plan;
+				plan.rateNumerator = 24000;
+				plan.rateDenominator = 1001;
+				for (size_t at = 0; at < f[9].size();)
+				{
+					const size_t comma = f[9].find(',', at);
+					plan.captureTimes.push_back(std::atof(f[9].substr(at, comma == std::string::npos ? std::string::npos : comma - at).c_str()));
+					if (comma == std::string::npos) break;
+					at = comma + 1;
+				}
+				const size_t period = frames > 1 ? 2 * frames - 2 : 1;   // a sequence plays forward then back (no cut)
+				plan.step = [mode, frames, period](int n) {
+					if (mode == "still") return FrameStep{ true, 0, 0 };
+					if (mode == "seq")
+					{
+						const size_t k = static_cast<size_t>(n) % period;
+						return FrameStep{ true, static_cast<int>(k < frames ? k : period - k), 0 };
+					}
+					return FrameStep{ true, n, 0 };
+				};
+				const auto began = std::chrono::steady_clock::now();
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, true, extra, false, &plan);
+				std::ofstream log(captures + "\\" + name + ".log", std::ios::trunc);
+				static const char* keys[] = { "resolved render options", "igma", "exture", "ulse", "eband",
+					"ource resolution", "apture", "bit depth", "ither", "wapchain", "De-judder", "nterpolation",
+					"daptive", "disabled", "error", "failed", "Rebase", "rebase" };
+				for (const std::string& l : r.log)
+					for (const char* k : keys)
+						if (l.find(k) != std::string::npos) { log << l << "\n"; break; }
+				log << "dejudder status: " << r.dejudderStatus << "\npresentation: " << r.presentationStatus <<
+					"\nsource: " << r.sourceStatus << "\n";
+				int copied = 0;
+				for (const std::string& json : r.captureMetadatas)
+				{
+					// The R10 codes (R, G, B per pixel, uint16, row-major) for the analysis; the PNG goes.
+					const std::string png = json.substr(0, json.size() - 5) + ".png";
+					int cw = 0, chh = 0;
+					const std::vector<int> rgb = LoadCaptureRgb(json, cw, chh);
+					if (cw == ow && chh == oh && !rgb.empty())
+					{
+						std::vector<uint16_t> codes(rgb.begin(), rgb.end());
+						std::ofstream out(captures + "\\" + name + "__" + std::to_string(copied) + ".rgb10", std::ios::binary | std::ios::trunc);
+						out.write(reinterpret_cast<const char*>(codes.data()), static_cast<std::streamsize>(codes.size() * 2));
+						++copied;
+					}
+					else
+						Logger::WriteMessage((name + ": capture " + std::to_string(cw) + "x" + std::to_string(chh) + " unreadable or not the output size\n").c_str());
+					DeleteFileA(png.c_str());
+					DeleteFileA(json.c_str());
+				}
+				const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+				Logger::WriteMessage((name + ": " + std::to_string(copied) + " of " + std::to_string(plan.captureTimes.size()) +
+					" captures, presented " + (r.presented ? "yes" : "no") + ", " + std::to_string(took) + " s\n").c_str());
+				++ran;
+				if (copied == 0 || !r.presented) { ++failed; continue; }
+				std::ofstream(done) << copied << "\n";
+			}
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			Logger::WriteMessage(("aliasing captures: " + std::to_string(ran) + " runs, " + std::to_string(failed) +
+				" without captures\n").c_str());
+			Assert::AreEqual(0, failed, L"every run captured its frames");
 		}
 	};
 }
