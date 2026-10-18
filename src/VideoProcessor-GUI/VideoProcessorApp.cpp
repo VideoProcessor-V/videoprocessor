@@ -21,6 +21,7 @@
 #include <DisplayTopologySession.h>
 #include <CaptureDisplayFixes.h>
 #include <MainConfigSchema.h>
+#include <ConfigBoolSwitches.h>
 #include <UnifiedProfileRuntime.h>
 #include <StateVariables.h>
 #include <ApplicationInterface.h>
@@ -342,7 +343,8 @@ Options:
 
   /newlldv_sdr_veto
       With /newlldv, return real SDR sent as BT.2020 to SDR from picture
-      statistics (at a cut, after SDR evidence in two shots). Default on.
+      statistics (at a cut, after SDR evidence in two shots). Default on;
+      /newlldv_sdr_veto false (or newlldv_sdr_veto: false) turns it off.
 
   /noui
       Hide the user interface; show video only.
@@ -654,11 +656,24 @@ bool TryGetFirstConfigBool(const ConfigFile& config, const std::initializer_list
 	return false;
 }
 
-void AppendConfigBoolOption(std::vector<std::wstring>& arguments, const ConfigFile& config, const std::initializer_list<const char*> keys, const wchar_t* commandLineSwitch)
+// Bug hunt 3 (CFG1): the switch for a configured true, and "<switch> false"
+// for a configured false of a default-on key (ConfigBoolSwitches), so such a
+// key can be turned off from the configuration.
+void AppendConfigBoolOption(std::vector<std::wstring>& arguments, const ConfigFile& config, const char* key)
 {
+	const ConfigBoolSwitches::Option* option = ConfigBoolSwitches::Find(key);
+	if (!option)
+		throw std::logic_error(std::string("configuration boolean without a switch: ") + key);
 	bool enabled = false;
-	if (TryGetFirstConfigBool(config, keys, enabled) && enabled)
-		arguments.emplace_back(commandLineSwitch);
+	bool configured = false;
+	for (const char* name : option->keys)
+		if (name && TryGetFirstConfigBool(config, { name }, enabled))
+		{
+			configured = true;
+			break;
+		}
+	for (std::wstring& token : ConfigBoolSwitches::Tokens(*option, configured, enabled))
+		arguments.emplace_back(std::move(token));
 }
 
 void AppendConfigStringOption(std::vector<std::wstring>& arguments, const ConfigFile& config, const std::initializer_list<const char*> keys, const wchar_t* commandLineSwitch)
@@ -785,28 +800,26 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	// The default Queue profile owns the renderer hard capacity. The configured
 	// arguments precede the literal process command line, so a deliberate
 	// /queue_size always remains the highest-priority override.
-	std::string queueSize;
-	if (tryGetDefaultQueueString("queue_size", queueSize))
+	// Hunt 3 (CFG9): [general] queue_size (validated, never read before) is a
+	// compatibility fallback after [command_line].
+	std::string queueSize, queueSizeSource;
+	if (QueueConfiguration::TryGetHardCapacityString(config, queueSize, queueSizeSource))
 	{
 		arguments.emplace_back(L"/queue_size");
 		arguments.emplace_back(StringToWideString(queueSize));
+		const bool legacyLocation = queueSizeSource == "command_line" || queueSizeSource == "general";
 		DbgLog((LOG_TRACE, 1,
-			TEXT("VideoProcessor: Renderer queue control selected: hard capacity=%S source=[%S] queue_size"),
-			queueSize.c_str(), defaultQueueSection.c_str()));
-	}
-	else if (config.TryGetString("command_line", "queue_size", queueSize))
-	{
-		arguments.emplace_back(L"/queue_size");
-		arguments.emplace_back(StringToWideString(queueSize));
-		DbgLog((LOG_TRACE, 1,
-			TEXT("VideoProcessor: Renderer queue control selected: hard capacity=%S source=[command_line] queue_size compatibility fallback"),
-			queueSize.c_str()));
+			TEXT("VideoProcessor: Renderer queue control selected: hard capacity=%S source=[%S] queue_size%S"),
+			queueSize.c_str(), queueSizeSource.c_str(), legacyLocation ? " compatibility fallback" : ""));
+		if (legacyLocation)
+			DebugLog::Log("queue_size %s read from the legacy [%s] section (Config moves it into [queue])",
+				queueSize.c_str(), queueSizeSource.c_str());
 	}
 
 	if (config.HasSection("general") || config.HasSection("command_line"))
 	{
-	AppendConfigBoolOption(arguments, config, { "fullscreen" }, L"/fullscreen");
-	AppendConfigBoolOption(arguments, config, { "windowedfullscreenmode", "windowed_fullscreen_mode" }, L"/windowedfullscreenmode");
+	AppendConfigBoolOption(arguments, config, "fullscreen");
+	AppendConfigBoolOption(arguments, config, "windowedfullscreenmode");
 	AppendConfigStringOption(arguments, config, { "renderer" }, L"/renderer");
 	AppendConfigStringOption(arguments, config, { "capture_device" }, L"/capture_device");
 	AppendConfigStringOption(arguments, config, { "capture_input" }, L"/capture_input");
@@ -820,7 +833,7 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	AppendConfigStringOption(arguments, config, { "renderer_transfer_function" }, L"/renderer_transfer_function");
 	AppendConfigStringOption(arguments, config, { "renderer_transfer_matrix" }, L"/renderer_transfer_matrix");
 	AppendConfigStringOption(arguments, config, { "renderer_primaries" }, L"/renderer_primaries");
-	AppendConfigBoolOption(arguments, config, { "scene_detect", "scene" }, L"/scene_detect");
+	AppendConfigBoolOption(arguments, config, "scene_detect");
 	// Retain the old spelling as a compatibility alias.  The clearer Boolean
 	// override below is appended last and therefore takes precedence if both
 	// are present in a configuration file.
@@ -828,12 +841,12 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	// DirectShow uses the advanced upstream-sample correction by default.  This
 	// config-only switch preserves a deliberate Basic override without exposing
 	// renderer implementation details in the UI.
-	AppendConfigBoolOption(arguments, config, { "scene_correction_basic" }, L"/scene_correction_basic");
-	AppendConfigBoolOption(arguments, config, { "newlldv", "new_lldv" }, L"/newlldv");
-	AppendConfigBoolOption(arguments, config, { "newlldv_sdr_veto" }, L"/newlldv_sdr_veto");
-		AppendConfigBoolOption(arguments, config, { "dolby_vision_tunnel" }, L"/dolby_vision_tunnel");
-	AppendConfigBoolOption(arguments, config, { "noui", "no_ui" }, L"/noui");
-	AppendConfigBoolOption(arguments, config, { "startminimized", "start_minimized" }, L"/startminimized");
+	AppendConfigBoolOption(arguments, config, "scene_correction_basic");
+	AppendConfigBoolOption(arguments, config, "newlldv");
+	AppendConfigBoolOption(arguments, config, "newlldv_sdr_veto");
+	AppendConfigBoolOption(arguments, config, "dolby_vision_tunnel");
+	AppendConfigBoolOption(arguments, config, "noui");
+	AppendConfigBoolOption(arguments, config, "startminimized");
 	}
 
 	// DirectShow timing/conversion controls are intentionally separated from

@@ -589,7 +589,33 @@ namespace LedDrive
 	{
 		std::lock_guard<std::mutex> guard(mutex);
 		predictions[sequence] = predicted;
+		// Hunt 3: bounded whatever the frame sequence does.
+		while (predictions.size() > MAX_PREDICTIONS)
+			predictions.erase(predictions.begin());
 		lastPredictionWallMs = NowMs();
+	}
+
+	void LedDriveModule::ResetLookahead()
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		ResetLookaheadLocked();
+	}
+
+	void LedDriveModule::ResetLookaheadLocked()
+	{
+		predictions.clear();
+		lastMeasuredSequence = 0;
+		lastFrameSequence = 0;
+		lookaheadEpoch.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	bool LedDriveModule::PredictionFor(uint64_t sequence, FrameStats& out) const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		const auto found = predictions.find(sequence);
+		if (found == predictions.end()) return false;
+		out = found->second;
+		return true;
 	}
 
 	FrameStats LedDriveModule::Corrected(const FrameStats& predicted) const
@@ -638,6 +664,18 @@ namespace LedDrive
 			framePeriodMs = std::max(1.0, std::min(framePeriodMs + (elapsed - framePeriodMs) * 0.1, 100.0));   // 10 to 1000 frames per second
 		}
 		lastFrameMs = timeMs;
+		// Hunt 3 (LED2): the source sequence went backwards - a new stream
+		// (a hold-over drive adopted by the next file): the last stream's
+		// predictions and look-ahead state no longer apply. A small step back
+		// (a repeated earlier frame) is not one: a restart at the stream's first
+		// frames, or further back than the prediction history.
+		if (sequence != 0 && lastFrameSequence != 0 && sequence < lastFrameSequence &&
+			(sequence <= 2 || sequence + PREDICTION_HISTORY < lastFrameSequence))
+		{
+			DebugLog::Log("Dynamic Drive: source sequence restarted (%llu after %llu); look-ahead reset",
+				static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(lastFrameSequence));
+			ResetLookaheadLocked();
+		}
 		lastFrameSequence = sequence;
 		lastFrameWallMs = NowMs();   // audit 2026-10-16
 		idleRestored = false;
@@ -1195,6 +1233,10 @@ namespace LedDrive
 		// (a stuck 51). Not a failed write, so not under
 		// script_resend_failed_writes; the script itself was never interrupted.
 		int completeContrast = -1;
+		// Hunt 3 (LED4): the cut-short schedule's LPW1, when the settings came
+		// before it was written (script_pacing's measure window): sent before
+		// completeContrast, so the step keeps the script's order (LPW1 first).
+		int completeLight = -1;
 		// Set when this tick's sends were cut short by new settings.
 		bool cutShort = false;
 		// Bug hunt 2: idle-restore passes that found a write failed and tried again.
@@ -1273,6 +1315,7 @@ namespace LedDrive
 					current = led;
 					const DriverStatus status = driver->Status();
 					const int contrastNow = controller.Contrast();
+					const int lightNow = controller.Light();
 					controller = ScriptController(current);
 					controller.Reset(status.lastSentLight >= 0 ? status.lastSentLight : current.ledCeiling,
 						contrastNow);
@@ -1281,9 +1324,20 @@ namespace LedDrive
 					// controller believes: complete it at the next tick. A failed
 					// write is already queued as a resend (not sent twice).
 					completeContrast = -1;
+					completeLight = -1;
 					if (cutShort && status.lastSentContrast >= 0 && status.lastSentContrast != contrastNow &&
 						resendContrast < 0 && !status.contrastBusy)
 					{
+						// Hunt 3 (LED4): the schedule's LPW1 was not written either
+						// (Apply inside script_pacing's measure window): it is
+						// completed too, ahead of the CNTR, and the controller
+						// carries on from it.
+						if (status.lastSentLight >= 0 && status.lastSentLight != lightNow && resendLight < 0 &&
+							!status.busy)
+						{
+							completeLight = lightNow;
+							controller.Reset(lightNow, contrastNow);
+						}
 						completeContrast = contrastNow;
 						// script_smoothing: the cut schedule's unsent landings never
 						// come; the bridge restarts from the projector's value.
@@ -1590,6 +1644,13 @@ namespace LedDrive
 						status.lastSentContrast == controller.Contrast())
 						resendContrast = completeContrast = -1;
 				}
+				// The cut schedule's LPW1 is not needed once the port has it.
+				if (completeLight >= 0)
+				{
+					const DriverStatus status = driver->Status();
+					if (!status.busy && status.lastSentLight == completeLight)
+						completeLight = -1;
+				}
 				// Bug hunt 2 (#10): nothing more is sent once new settings have
 				// come (as for each CNTR of a schedule): a script LPW1 written after
 				// a switch to compensate would be taken as compensate's own.
@@ -1606,6 +1667,17 @@ namespace LedDrive
 					resendLight = scriptSend("LPW1", controller.Light());
 					sendsDone = clock->Now();
 				}
+				// Hunt 3 (LED4): the cut schedule's LPW1 first - before its CNTR, or
+				// before this tick's own schedule (the controller already believes it,
+				// so the tick would not send it).
+				if (completeLight >= 0 && settingsUnchanged())
+				{
+					DebugLog::Log("Dynamic Drive: LPW1 %d sent (its schedule was cut short by new settings)", completeLight);
+					if (!CustomDimEngaged())
+						resendLight = scriptSend("LPW1", completeLight);
+					sendsDone = clock->Now();
+				}
+				completeLight = -1;
 				if ((resendContrast >= 0 || completeContrast >= 0) && settingsUnchanged())
 				{
 					if (resendContrast >= 0)

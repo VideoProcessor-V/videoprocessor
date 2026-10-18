@@ -200,3 +200,29 @@ vprenderer.motion.deinterlace_algorithm	vprenderer-motion-deinterlace-algorithm	
 vprenderer.motion.field_order	vprenderer-motion-field-order	VP Renderer	yes
 vprenderer.motion.deinterlace_cadence	vprenderer-motion-deinterlace-cadence	VP Renderer	no
 vprenderer.motion.deinterlace_skip_spatial	vprenderer-motion-deinterlace-skip-spatial	VP Renderer	no
+general.file_av_offset_ms	general-file-playback	VP Renderer filter file playback	no
+general.file_led_holdover_ms	general-file-playback	VP Renderer filter file playback	no
+vprenderer.capture_path	vprenderer-capture-path	VP Renderer capture	no
+vprenderer.capture_upload	vprenderer-capture-upload	VP Renderer capture	no
+vprenderer.optical_flow	vprenderer-optical-flow	VP Renderer motion	no
+vprenderer.optical_flow_global	vprenderer-optical-flow	VP Renderer motion	no
+vprenderer.optical_flow_global_fallback	vprenderer-optical-flow	VP Renderer motion	no
+vprenderer.optical_flow_cost_trust	vprenderer-optical-flow	VP Renderer motion	no
+vprenderer.optical_flow_fb_check	vprenderer-optical-flow	VP Renderer motion	no
+vprenderer.interpolation_fill_gaps	vprenderer-hiccup-repair	VP Renderer motion	no
+vprenderer.interpolation_grain	vprenderer-hiccup-repair	VP Renderer motion	no
+vprenderer.intent_content	vprenderer-intent-content	VP Renderer content recognition	no
+vprenderer.intent_content_hold_seconds	vprenderer-intent-content	VP Renderer content recognition	no
+vprenderer.source_resolution_latch_fixes	vprenderer-source-resolution-latch	VP Renderer source resolution	no
+vprenderer.source_resolution_engage_max_wait_s	vprenderer-source-resolution-latch	VP Renderer source resolution	no
+vprenderer.source_resolution_crossfade_s	vprenderer-source-resolution-latch	VP Renderer source resolution	no
+vprenderer.source_resolution_release_fade_s	vprenderer-source-resolution-latch	VP Renderer source resolution	no
+vprenderer.pulldown_fixes	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.timing_continuity_fixes	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.cadence_class_fixes	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.motion_history_fixes	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.queue_timing_fixes	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.render_ahead	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.dejudder_gate	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.render_ahead_utilisation	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.render_ahead_queue_credit	vprenderer-timing-switches	VP Renderer timing	no

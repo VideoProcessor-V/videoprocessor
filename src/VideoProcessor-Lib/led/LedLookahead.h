@@ -111,6 +111,17 @@ namespace LedDrive
 		StatsBuilder builder;
 		uint64_t builderGeneration = 0;
 		uint64_t lastSequence = 0;
+		// Hunt 3 (LED1): the builder's clock. sourceSequence x the current
+		// source period jumped backwards whenever the rate changed (pulldown
+		// lock lost: film frames counted at the capture period) or a stream
+		// restarted its sequence, so the persistence windows never expired.
+		// Instead each newly measured frame advances it by the frames since
+		// the last one at the current period: monotonic by construction.
+		double streamTimeMs = 0.0;
+		bool haveStreamTime = false;
+		// Hunt 3 (LED2): LedDriveModule::ResetLookahead()'s count when this
+		// observer last started a stream (its state is dropped on a change).
+		uint64_t streamEpoch = 0;
 		std::shared_ptr<const RawTransfer> transfer;
 		std::vector<float> boosted;
 		double boostedExponent = 0.0;   // the boost the table was built with

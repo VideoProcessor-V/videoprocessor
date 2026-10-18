@@ -16,6 +16,7 @@
 #include <ConfigFile.h>
 #include <led/LedDriveConfig.h>
 #include <MainConfigSchema.h>
+#include <QueueConfiguration.h>
 #include <set>
 #include <iterator>
 #include <algorithm>
@@ -9009,7 +9010,8 @@ void testEverySchemaKeyHasAConfigControl()
         { "general:interface", "command-line interface choice" },
         { "general:frame_offset", "legacy location: Config moves [general] frame_offset to [directshow] frame_offset, "
             "which has the control" },
-        { "general:queue_size", "legacy location: Config moves [command_line] queue_size into [queue.*], which has the control" },
+        { "general:queue_size", "legacy location: VP reads [command_line] then [general] queue_size after the default "
+            "queue profile (hunt 3, CFG9); Config moves both into [queue.*], which has the control" },
         { "general:renderer_start_stop_time_method", "legacy location: the [directshow] control replaces the [general] value on edit" },
         { "general:renderer_nominal_range", "legacy location: the [directshow] control replaces the [general] value on edit" },
         { "general:renderer_transfer_function", "legacy location: the [directshow] control replaces the [general] value on edit" },
@@ -9603,6 +9605,237 @@ void testProfileRewritesAreBackedUpLoadMigrations()
     require(readBytes(path) == saved, "Reopening the migrated file wrote it");
 }
 
+// Bug hunt 3 (2026-10-18, hunter D): Config findings CFG2-CFG7.
+void testHunt3LatchTimingFieldsShowDefaultsAndGrey()
+{
+    // CFG2: the latch timing fields show 20 / 1.5 / 0.25 (not "Auto") and are greyed
+    // unless Source resolution is Auto with the latch fixes on.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    const std::pair<const char*, const char*> fields[] = { { "source_resolution_engage_max_wait_s", "20" },
+        { "source_resolution_crossfade_s", "1.5" }, { "source_resolution_release_fade_s", "0.25" } };
+    for (const auto& field : fields)
+    {
+        auto* edit = requireControl<QLineEdit>(window, QStringLiteral("config.vprenderer.") + field.first);
+        require(edit->text().isEmpty() && edit->placeholderText() == QLatin1String(field.second),
+            (std::string(field.first) + " shows '" + edit->text().toStdString() + "' / placeholder '" +
+                edit->placeholderText().toStdString() + "', not its default " + field.second).c_str());
+        require(edit->isEnabled(), (std::string(field.first) + " is greyed with Auto and the latch fixes on").c_str());
+    }
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.source_resolution_latch_fixes"), "off");
+    for (const auto& field : fields)
+        require(!requireControl<QLineEdit>(window, QStringLiteral("config.vprenderer.") + field.first)->isEnabled(),
+            (std::string(field.first) + " is not greyed with the latch fixes off").c_str());
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.source_resolution_latch_fixes"), "on");
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.source_resolution"), "native");
+    for (const auto& field : fields)
+        require(!requireControl<QLineEdit>(window, QStringLiteral("config.vprenderer.") + field.first)->isEnabled(),
+            (std::string(field.first) + " is not greyed with Source resolution: Native").c_str());
+}
+
+void testHunt3RetiredEvenRatesSayWhatTheyMapTo()
+{
+    // CFG3: a retired dejudder_even_rates value says what it maps to, and the Motion
+    // slider reads it as that value (the Cinema level, not Custom).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\ndejudder_strength: 0.25\ndejudder_strength_even: 0\n"
+        "dejudder_even_rates: 30\ndejudder_object_strength: 0.5\ndejudder_motion_rolloff: on\n"
+        "dejudder_roll_floor: 0.25\ndejudder_roll_lo: 8\ndejudder_roll_hi: 24\n");
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* evenRates = requireControl<QComboBox>(window, "config.vprenderer.dejudder_even_rates");
+    require(evenRates->currentData().toString() == "30" && evenRates->currentText().contains("retired") &&
+        evenRates->currentText().contains("Whole-number"),
+        ("the retired value does not say what it maps to: " + evenRates->currentText().toStdString()).c_str());
+    auto* name = requireControl<QLabel>(window, "config.vprenderer.motion_preset_name");
+    require(name->text().startsWith("Cinema"),
+        ("the Motion slider does not read the retired value as whole: " + name->text().toStdString()).c_str());
+}
+
+void testHunt3InterpolationGrainFollowsHiccupRepair()
+{
+    // CFG4: the grain choice is used by hiccup repair's gap fill, so it is not greyed
+    // while Fill dropped frames is on (motion smoothing off).
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\ninterpolation: off\ninterpolation_fill_gaps: on\n");
+    ConfigEditorWindow window(path, 0, true);
+    requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    auto* grain = requireControl<QComboBox>(window, "config.vprenderer.interpolation_grain");
+    require(grain->isEnabled(), "interpolation_grain is greyed while hiccup repair uses it");
+    selectData(requireControl<QComboBox>(window, "config.vprenderer.interpolation_fill_gaps"), "off");
+    require(!grain->isEnabled(), "interpolation_grain is not greyed with interpolation and hiccup repair off");
+}
+
+void testHunt3ContentGatedProfileGreysClassifierInputs()
+{
+    // CFG5: in a profile whose when: reads $content, the renderer ignores the classifier's
+    // own inputs (with cadence_class_fixes on): greyed, with the reason; other profiles are not.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n"
+        "[vprenderer.Sports]\nwhen: $content == \"sports\"\nsource_class: video\n");
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    for (const char* key : { "intent_content.check", "source_class", "dejudder_pulldown", "cadence_class_fixes" })
+    {
+        auto* widget = requireControl<QWidget>(window, QStringLiteral("config.vprenderer.") + key);
+        require(!widget->isEnabled() && widget->toolTip().contains("Ignored in this profile"),
+            (std::string(key) + " is not greyed with the reason in a content-gated profile").c_str());
+    }
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    for (const char* key : { "intent_content.check", "dejudder_pulldown", "cadence_class_fixes" })
+    {
+        auto* widget = requireControl<QWidget>(window, QStringLiteral("config.vprenderer.") + key);
+        require(widget->isEnabled() && !widget->toolTip().contains("Ignored in this profile"),
+            (std::string(key) + " stayed greyed in a profile without a content rule").c_str());
+    }
+}
+
+void testHunt3LegacyQueueFoldTargetsQueueSection()
+{
+    // CFG6: legacy queue values fold into [queue] (what VP reads first), not the first
+    // queue section in the file, and [queue] (renamed, as Config saves only [queue.*])
+    // stays VP's default; CFG9: [general] queue_size folds too.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[queue.Game]\nwhen: ${source_rate} > 59\nqueue_size: 2\n"
+        "[queue]\ntarget_frames: 3\n"
+        "[directshow]\npresentation_lead_frames: 4\n"
+        "[general]\nfullscreen: false\nqueue_size: 24\n"
+        "[vprenderer.Cinema]\nquality: high\n");
+    ConfigEditorWindow window(path, 0, true);
+    QCoreApplication::processEvents();
+    save(window);
+    ConfigFile saved;
+    require(saved.Load(path.toStdString()), "the saved file does not load");
+    std::string text = readBytes(path).toStdString();
+    std::replace(text.begin(), text.end(), '\n', '|');
+    std::string value, defaultQueue;
+    require(QueueConfiguration::ResolveDefaultSection(saved, defaultQueue) && defaultQueue != "queue.Game",
+        ("the former [queue] is no longer VP's default queue: " + text).c_str());
+    require(saved.TryGetString(defaultQueue, "target_frames", value) && value == "3",
+        ("the default queue is not the former [queue]: " + text).c_str());
+    require(saved.TryGetString(defaultQueue, "lead_frames", value) && value == "4",
+        ("presentation_lead_frames did not fold into [queue]: " + text).c_str());
+    require(saved.TryGetString(defaultQueue, "queue_size", value) && value == "24",
+        ("[general] queue_size did not fold into [queue]: " + text).c_str());
+    require(saved.TryGetString("queue.Game", "queue_size", value) && value == "2",
+        "the first queue section was changed by the fold");
+    require(!saved.TryGetString("queue.Game", "lead_frames", value), "the fold wrote into the first queue section");
+    require(!saved.TryGetString("general", "queue_size", value), "[general] queue_size stayed after the fold");
+}
+
+void testHunt3RemoteDiscardFoldsLikeALoad()
+{
+    // CFG7: Discard on a remote target runs the same input-policy fold and empty-header
+    // removal as a fresh load (the controls show the folded value after Cancel).
+    using namespace ConfigurationRpcProtocol;
+    QTemporaryDir directory;
+    const QString path = directory.filePath("VideoProcessor.cfg");
+    const std::string remoteBytes =
+        "[general]\nfullscreen: false\n[vprenderer.input]\nvideo_conversion: V210_TO_P010\n"
+        "[vprenderer.Cinema]\nquality: high\n";
+    writeFixture(path, QByteArray::fromStdString(remoteBytes));
+    WSADATA data{};
+    require(WSAStartup(MAKEWORD(2, 2), &data) == 0, "Cannot initialize the RPC fixture");
+    struct WinsockCleanup { ~WinsockCleanup() { WSACleanup(); } } cleanup;
+    const SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    require(listener != INVALID_SOCKET, "Cannot open the RPC listener");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    require(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0 &&
+        listen(listener, 4) == 0, "Cannot listen for RPC requests");
+    int addressSize = sizeof(address);
+    require(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &addressSize) == 0,
+        "Cannot read the RPC port");
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    std::thread server([listener, path = path.toStdString(), remoteBytes, finished]
+    {
+        const auto receiveExact = [](SOCKET socket, uint8_t* bytes, size_t count)
+        {
+            while (count != 0)
+            {
+                const int received = recv(socket, reinterpret_cast<char*>(bytes), static_cast<int>(count), 0);
+                if (received <= 0) return false;
+                bytes += received;
+                count -= received;
+            }
+            return true;
+        };
+        while (!finished->load())
+        {
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(listener, &readable);
+            timeval timeout{ 0, 50000 };
+            if (select(0, &readable, nullptr, nullptr, &timeout) <= 0) continue;
+            const SOCKET client = accept(listener, nullptr, nullptr);
+            if (client == INVALID_SOCKET) break;
+            std::array<uint8_t, HeaderBytes> header{};
+            uint8_t compatibility[2]{};
+            if (receiveExact(client, header.data(), header.size()) &&
+                receiveExact(client, compatibility, sizeof(compatibility)))
+            {
+                const uint16_t operation = Read16(header.data() + 6);
+                Frame response;
+                response.operation = operation | ResponseFlag;
+                if (operation == static_cast<uint16_t>(Operation::GetCapabilities))
+                {
+                    Write16(response.payload, ConfigurationCompatibilityVersion);
+                    WriteString(response.payload, "1.3.test");
+                    for (int list = 0; list < 6; ++list)
+                        Write32(response.payload, 0);
+                }
+                else if (operation == static_cast<uint16_t>(Operation::GetConfig))
+                {
+                    WriteString(response.payload, path);
+                    WriteString(response.payload, remoteBytes);
+                }
+                std::vector<uint8_t> wire;
+                Encode(response, wire);
+                size_t sent = 0;
+                while (sent < wire.size())
+                {
+                    const int count = send(client, reinterpret_cast<const char*>(wire.data() + sent),
+                        static_cast<int>(wire.size() - sent), 0);
+                    if (count <= 0) break;
+                    sent += count;
+                }
+            }
+            closesocket(client);
+        }
+        closesocket(listener);
+    });
+    struct Join
+    {
+        std::thread& thread; std::shared_ptr<std::atomic<bool>> finished;
+        ~Join() { finished->store(true); if (thread.joinable()) thread.join(); }
+    } join{ server, finished };
+    {
+        ConfigEditorWindow window(path, 0, true, {}, {}, QStringLiteral("localhost"),
+            ntohs(address.sin_port), QStringLiteral("TEST VP"));
+        QCoreApplication::processEvents();
+        const auto conversion = [&window]
+        {
+            return requireControl<QComboBox>(window,
+                QStringLiteral("config.vprenderer.input_processing.video_conversion"))->currentData().toString();
+        };
+        require(conversion() == "V210_TO_P010", ("the remote load did not fold the input policy: " +
+            conversion().toStdString()).c_str());
+        requireControl<QPushButton>(window, "cancelConfiguration")->click();
+        QCoreApplication::processEvents();
+        require(conversion() == "V210_TO_P010", ("the remote Discard did not fold the input policy like a load: " +
+            conversion().toStdString()).c_str());
+    }
+}
+
 int run(const char* name, const std::function<void()>& test)
 {
     const QString testName = QString::fromUtf8(name);
@@ -9893,6 +10126,12 @@ int main(int argc, char** argv)
     failures += run("inherited Picture fields and greyed render ahead", testInheritedPictureFieldsAndGreyedRenderAhead);
     failures += run("hiccup repair is separate from motion smoothing", testHiccupRepairIsSeparateFromMotionSmoothing);
     failures += run("render-ahead controls show defaults and save", testRenderAheadControlsShowDefaultsAndSave);
+    failures += run("hunt 3: latch timing fields show defaults and grey", testHunt3LatchTimingFieldsShowDefaultsAndGrey);
+    failures += run("hunt 3: retired even rates say what they map to", testHunt3RetiredEvenRatesSayWhatTheyMapTo);
+    failures += run("hunt 3: interpolation grain follows hiccup repair", testHunt3InterpolationGrainFollowsHiccupRepair);
+    failures += run("hunt 3: content-gated profile greys classifier inputs", testHunt3ContentGatedProfileGreysClassifierInputs);
+    failures += run("hunt 3: legacy queue fold targets [queue]", testHunt3LegacyQueueFoldTargetsQueueSection);
+    failures += run("hunt 3: remote discard folds like a load", testHunt3RemoteDiscardFoldsLikeALoad);
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
     return failures == 0 ? 0 : 1;
