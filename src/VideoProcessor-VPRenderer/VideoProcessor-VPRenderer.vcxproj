@@ -119,6 +119,8 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
