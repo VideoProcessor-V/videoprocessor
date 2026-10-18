@@ -212,6 +212,7 @@
     <ClInclude Include="CrashState.h" />
     <ClInclude Include="DiagnosticHistory.h" />
     <ClInclude Include="StateReport.h" />
+    <ClInclude Include="StateReportSettings.h" />
     <ClInclude Include="StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />

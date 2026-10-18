@@ -259,7 +259,7 @@ namespace VideoProcessorTest
 			WriteFileText(folder + "\\a.bin", "binary A");
 			WriteFileText(folder + "\\b.dll", "binary B");
 			WriteFileText(vp + "\\VideoProcessor.cfg",
-				"[general]\n# comment kept\nqueue_size: 48\npassword: hunter2\napi_key = abc123\n"
+				"[general]\n# comment kept\nqueue_size: 48\npassword: hunter2\napi_key = Zq9secretKey\n"
 				"media = " + folder + "\\..\\Videos\\Film.mkv\nlog = " + vp + "\\logs\\vp.log\n");
 
 			StateReport::Inputs inputs;
@@ -354,7 +354,7 @@ namespace VideoProcessorTest
 				Assert::IsFalse(Contains(entry.data, parent), Widen("temp path in " + entry.name).c_str());
 				Assert::IsFalse(Contains(entry.data, "\\Users\\"), Widen("Users in " + entry.name).c_str());
 				Assert::IsFalse(Contains(entry.data, "hunter2"), Widen("secret in " + entry.name).c_str());
-				Assert::IsFalse(Contains(entry.data, "abc123"), Widen("secret in " + entry.name).c_str());
+				Assert::IsFalse(Contains(entry.data, "Zq9secretKey"), Widen("secret in " + entry.name).c_str());
 				Assert::IsFalse(Contains(entry.data, "CINEMA-PC"), Widen("host in " + entry.name).c_str());
 				Assert::IsFalse(Contains(entry.data, "victor"), Widen("user in " + entry.name).c_str());
 			}
