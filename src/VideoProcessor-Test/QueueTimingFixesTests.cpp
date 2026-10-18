@@ -600,6 +600,11 @@ namespace Tests
 			const std::regex rateWord(R"(hz|refresh|fps|framerate|frame_rate|rate\b)");
 			const std::regex constant(R"(constexpr\s+double\s+\w*(min|max)\w*(rate|refresh|hz)\w*\s*=\s*(10|240|480|500)(\.0+)?\s*;)");
 			const std::regex returned(R"(refresh\w*hz\s*\(\)\s*(const\s*)?\{\s*return\s+(10|240|480|500)(\.0+)?\s*;)");
+			// Fixed-constant batch 2026-10-18 (B1): two shapes that escaped the patterns above - a
+			// period bound as a clock divided by a rate (qpcFrequency / 240) and an expected /
+			// observed display rate compared with a literal bound.
+			const std::regex periodBound(R"((qpc|frequency|ticks)\w*\s*/\s*(10|240|480|500)\b)");
+			const std::regex expectedBound(R"(\b(expected|observed)\w*\s*[<>]=?\s*(10|240|480|500)(\.0+)?\b)");
 			std::vector<std::string> offenders;
 			std::vector<std::string> files;
 			for (const char* folder : { "VideoProcessor-Lib", "VideoProcessor-GUI", "VideoProcessor-Config", "VideoProcessor-VPRenderer" })
@@ -624,7 +629,8 @@ namespace Tests
 						lower.resize(comment);
 					const bool offends =
 						(std::regex_search(lower, comparison) && std::regex_search(lower, rateWord)) ||
-						std::regex_search(lower, constant) || std::regex_search(lower, returned);
+						std::regex_search(lower, constant) || std::regex_search(lower, returned) ||
+						std::regex_search(lower, periodBound) || std::regex_search(lower, expectedBound);
 					if (offends)
 						offenders.push_back(name + ":" + std::to_string(number));
 				}

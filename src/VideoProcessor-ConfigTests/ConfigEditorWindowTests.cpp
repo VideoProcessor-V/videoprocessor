@@ -1786,8 +1786,25 @@ void testQueueUseModeAndLowLatencyPath()
     requireControl<QPushButton>(window, "applyConfiguration")->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    require(saved.contains("${cadence} == 49-61"), (QByteArray("the 50/60 Hz rule not saved: ") + saved).constData());
+    // Fixed-constant batch 2026-10-18: the class rule (50 Hz and faster), not the fixed 49-61 band.
+    require(saved.contains("${cadence} >= 49"), (QByteArray("the video-rate rule not saved: ") + saved).constData());
+    require(!saved.contains("49-61"), "the fixed 49-61 band written");
     require(saved.contains("low_latency_path: on"), "low_latency_path not saved");
+    {
+        // A queue saved with the earlier 49-61 rule still reads as the rate button, kept as written.
+        QFile legacy(path); require(legacy.open(QIODevice::WriteOnly), "legacy fixture");
+        legacy.write("[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n[queue.Game]\nqueue_size: 2\ntarget_frames: 1\n"
+            "when: ${cadence} == 49-61\n");
+        legacy.close();
+        ConfigEditorWindow reopened(path, 0, true);
+        auto* reopenedProfiles = requireControl<QListWidget>(reopened, "config.queue.profiles");
+        reopenedProfiles->setCurrentRow(1);
+        QCoreApplication::processEvents();
+        require(requireControl<QRadioButton>(reopened, "config.queue.use_mode.rate5060")->isChecked(),
+            "a saved 49-61 rule is not shown as the rate button");
+        require(!requireControl<QRadioButton>(reopened, "config.queue.use_mode.rules")->isChecked(),
+            "a saved 49-61 rule is shown as By rules");
+    }
 }
 
 void testDeckLinkYCbCr12Control()

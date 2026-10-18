@@ -64,6 +64,9 @@ namespace DejudderPolicy
 		// the safety net). The de-judder, its mask and the estimate step aside;
 		// with no estimate every vector consumer takes its no-vector fallback.
 		bool smoothMotion = false;
+		// Fixed-constant batch 2026-10-18 (general_rate_fixes, default on): the film / video
+		// class from the derived rule (IsFilmLike(sourceHz, true)); off = the fixed bands.
+		bool generalRates = true;
 	};
 
 	// Refreshes per source frame (P_s / P_d).
@@ -78,9 +81,34 @@ namespace DejudderPolicy
 	// The source class: film-like sources are the measured rates up to about
 	// 30 fps and 48p HFR film; 50p and 60p (sport, video) and anything else
 	// are video, never de-juddered on any display (owner).
+	//
+	// Legacy (general_rate_fixes off): fixed bands, up to 30.5 Hz and 47.5-48.5 Hz.
 	inline bool IsFilmLike(double sourceHz)
 	{
 		return (sourceHz > 0.0 && sourceHz <= 30.5) || (sourceHz >= 47.5 && sourceHz <= 48.5);
+	}
+
+	// Fixed-constant batch 2026-10-18 (general_rate_fixes, owner [[vp-general-not-fixed]]):
+	// the class derived from the measured content rate and one standard constant, with no
+	// list of film rates. Video starts at the lowest broadcast video picture rate - 50 Hz,
+	// the 625-line / 50 Hz family (the 525-line family, 60000/1001, is higher) - less a
+	// relative measurement tolerance. Every slower measured rate is film-like (24, 25, 30,
+	// 47.952, 48 and their 1000/1001 forms, as before, and also the odd rates between
+	// 30.5 and 47.5 that the fixed bands called video); 49 Hz and up (50, 59.94, 60, 100,
+	// 119.88, 120, 144, 240) is video on any display, as before. The 2% tolerance is far
+	// wider than clock drift or the 1000/1001 offset (0.1%) and narrower than the gap
+	// down to 48 (4%).
+	constexpr double kVideoRateFloorHz = 50.0;          // standard: the 50 Hz television family
+	constexpr double kVideoRateFloorTolerance = 0.02;   // relative measured-rate tolerance
+	inline double VideoRateFloorHz()
+	{
+		return kVideoRateFloorHz * (1.0 - kVideoRateFloorTolerance);   // 49 Hz
+	}
+	inline bool IsFilmLike(double sourceHz, bool generalRates)
+	{
+		if (!generalRates)
+			return IsFilmLike(sourceHz);
+		return sourceHz > 0.0 && sourceHz < VideoRateFloorHz();   // false for NaN
 	}
 
 	// +-0.05 refreshes absorbs the 1000/1001 rates and measured drift.
@@ -133,7 +161,7 @@ namespace DejudderPolicy
 	// film-like source.
 	inline double EffectiveStrength(const Input& in)
 	{
-		if (!IsFilmLike(in.sourceHz))
+		if (!IsFilmLike(in.sourceHz, in.generalRates))
 			return 0.0;
 		const double ratio = CadenceRatio(in.sourceHz, in.displayHz);
 		if (IsUnevenCadence(ratio))
@@ -173,7 +201,7 @@ namespace DejudderPolicy
 		if (!extras && !alone)
 			return Reason::IneligibleCadence;
 		// Without extras the estimate runs for the mask / map alone: film-like sources only.
-		if (!extras && !IsFilmLike(in.sourceHz))
+		if (!extras && !IsFilmLike(in.sourceHz, in.generalRates))
 			return Reason::VideoRateMaskOnly;
 		if (in.nativeRgb) return Reason::NativeRgb;
 		if (!in.planeFormatsUsable) return Reason::PlaneFormat;

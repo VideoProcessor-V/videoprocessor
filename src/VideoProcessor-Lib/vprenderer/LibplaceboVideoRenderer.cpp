@@ -1208,6 +1208,10 @@ namespace
 		// credit-reduced target keeps the look-ahead's frames, and open loop ranks the
 		// whole-hertz mode below the vblank cadence; off = the behaviour before.
 		bool queueTimingFixes = true;
+		// Fixed-constant batch 2026-10-18 (owner [[vp-general-not-fixed]]): the film / video class
+		// derived from the measured rate (DejudderPolicy::IsFilmLike(hz, true), no fixed bands) and
+		// the gap-fill span as a time (InterpolationTimeline::MaxSpanFrames); off = the behaviour before.
+		bool generalRateFixes = true;
 		// Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17): the
 		// de-judder's extras queued straight after their frame (no vblank waits), so the next
 		// frame renders while they are shown; off until the owner's on-screen runs pass.
@@ -1415,7 +1419,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2703,6 +2707,14 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid queue_timing_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.queueTimingFixes ? "on" : "off");
+		}
+		if (tryChoice("general_rate_fixes", raw))   // fixed-constant batch 2026-10-18
+		{
+			if (raw == "on" || raw == "off")
+				settings.generalRateFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid general_rate_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.generalRateFixes ? "on" : "off");
 		}
 		// Render-ahead (docs/VP-render-ahead-design.md).
 		for (const auto& toggle : { std::make_pair("render_ahead", &settings.renderAhead),
@@ -5817,6 +5829,7 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t dejudderNextUploadedSequence = 0;   // the source frame in dejudderNextTextures (B)
 	double vpCaptureRateHz = 0.0;     // the content rate the loop schedules with (film or measured capture)
 	uint64_t vpFillNextSequence = 0;  // B offered across a short loss (gap fill), else 0
+	int vpFillMaxSpan = InterpolationTimeline::kMaxSpanFrames;   // that pair's span limit (general_rate_fixes: from its rate)
 	// Hiccup repair without motion smoothing (owner 2026-10-17): this frame's B is a gap
 	// pair the timeline presents alone (vectors and phases for that pair only).
 	bool vpGapFillStandalone = false;
@@ -10595,6 +10608,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.cadenceClassFixes != next.cadenceClassFixes, "cadence_class_fixes");
 		changed(current.motionHistoryFixes != next.motionHistoryFixes, "motion_history_fixes");
 		changed(current.queueTimingFixes != next.queueTimingFixes, "queue_timing_fixes");
+		changed(current.generalRateFixes != next.generalRateFixes, "general_rate_fixes");
 		changed(current.renderAhead != next.renderAhead, "render_ahead");
 		changed(current.dejudderGate != next.dejudderGate, "dejudder_gate");
 		changed(current.renderAheadUtilisation != next.renderAheadUtilisation, "render_ahead_utilisation");
@@ -14112,6 +14126,7 @@ struct LibplaceboVideoRenderer::Impl
 		in.planeFormatsUsable = nativeRgb || (dejudderRgbLuma ? usable(dejudderRgbLuma) :
 			(usable(textures[0]) && usable(textures[1])));
 		in.smoothMotion = smoothMotionEngine || temporalRenderer.Mixing();
+		in.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch 2026-10-18
 		DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
 		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
 		// Delta 10 (general): the strength the extras run at, and on an even
@@ -14141,6 +14156,7 @@ struct LibplaceboVideoRenderer::Impl
 			ii.haveNext = in.haveNext && in.nextMatches;
 			ii.perVsyncAvailable = true;   // Stage B: the per-vsync timeline (ratios below 1)
 			ii.classFixes = activeSettings.cadenceClassFixes;   // Hunt 2 (06-interp M2/L5)
+			ii.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch 2026-10-18
 			interpolationDecision = InterpolationPolicy::Decide(ii);
 			interpolating = interpolationDecision.Interpolates();
 			LogInterpolationDecision(ii);
@@ -14235,7 +14251,7 @@ struct LibplaceboVideoRenderer::Impl
 		// leaves a sequence hole), in the current epoch.
 		const bool fillPair = vpFillNextSequence != 0 && vpFillNextSequence == nextSourceSequence &&
 			nextSourceSequence > sourceSequence &&
-			nextSourceSequence - sourceSequence <= static_cast<uint64_t>(InterpolationTimeline::kMaxSpanFrames) &&
+			nextSourceSequence - sourceSequence <= static_cast<uint64_t>((std::max)(vpFillMaxSpan, 1)) &&
 			motionValidity.Current(motionValidity.EpochOfLastKept());
 		if (!fillPair && !motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
 			motionValidity.Epoch()))
@@ -27565,14 +27581,17 @@ void LibplaceboVideoRenderer::RenderLoop()
 				const double pairRateHz = frameFilmHz > 0.0 ? frameFilmHz : m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ?
 					m_measuredFrameRate.load(std::memory_order_relaxed) : (state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0);
 				const double timeA = frameTime(frameFilmHz, arrivalQpc, frame), timeB = frameTime(next.filmHz, next.arrivalQpc, next.frame);
+				// Fixed-constant batch 2026-10-18 (general_rate_fixes): the span as a time at the pair's rate.
+				const int maxSpan = InterpolationTimeline::MaxPairSpanFrames(pairRateHz,
+					m_impl ? m_impl->TimelineDisplayHz() : 0.0, m_impl && m_impl->activeSettings.generalRateFixes);
 				const bool spanOk = pairRateHz > 0.0 && timeA > 0.0 && timeB > timeA &&
-					timeB - timeA <= (InterpolationTimeline::kMaxSpanFrames + 0.25) / pairRateHz;
+					timeB - timeA <= (maxSpan + 0.25) / pairRateHz;
 				// Owner 2026-10-17: hiccup repair decides independently of motion smoothing;
 				// with interpolation not presenting this source the timeline presents the gap
 				// pair alone (its vectors and phases), every other frame as before.
 				const bool fillGap = m_impl && InterpolationTimeline::GapFillPair(next.gapBefore,
 					m_impl->activeSettings.interpolationFillGaps, next.gapFrames, spanOk,
-					m_impl->lowLatencyQueueActive.load(std::memory_order_acquire));
+					m_impl->lowLatencyQueueActive.load(std::memory_order_acquire), maxSpan);
 				const bool gapFillStandalone = InterpolationTimeline::GapFillStandalone(fillGap, interpolatingNow);
 				// Bug hunt 2026-10-17 (timing_continuity_fixes): an ordinary pair whose times
 				// are both known is at most 1.5 periods apart (a clock step no gap reported).
@@ -27590,6 +27609,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					nextPts = timeB;
 					// A pair the estimate's adjacency test would refuse (across a gap or an update).
 					m_impl->vpFillNextSequence = fillGap || skipUpdate ? next.sourceSequence : 0;
+					m_impl->vpFillMaxSpan = maxSpan;
 					// Standalone hiccup repair: the timeline presents this pair (interpolation off
 					// or not taking this source).
 					m_impl->vpGapFillStandalone = gapFillStandalone;
@@ -27958,6 +27978,7 @@ void LibplaceboVideoRenderer::RenderLoop()
                     m_impl->vpQueueSteering.Update(queueDepthAfterDequeue,desiredQueueDepth,rateHz,
                         m_queueTimingFixes.load(std::memory_order_relaxed));
                     m_impl->vpTimeline.SetRateTrim(m_impl->vpQueueSteering.RateTrim());
+                    m_impl->vpTimeline.SetSpanInTime(m_impl->activeSettings.generalRateFixes);   // fixed-constant batch 2026-10-18
                     const unsigned long long updatesBefore=m_impl->vpTimeline.Updates();
                     const auto& planned=m_impl->vpTimeline.Plan(frameGeneration,sourceSequence,ptsA,nextSourceSequence?nextPts:0.0,
                         rateHz,m_impl->TimelineDisplayHz(),frame.IsSourceDiscontinuity());
@@ -28805,6 +28826,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "cadence_class_fixes=" << (s.cadenceClassFixes ? "on" : "off") << "\n"
 		<< "motion_history_fixes=" << (s.motionHistoryFixes ? "on" : "off") << "\n"
 		<< "queue_timing_fixes=" << (s.queueTimingFixes ? "on" : "off") << "\n"
+		<< "general_rate_fixes=" << (s.generalRateFixes ? "on" : "off") << "\n"
 		<< "render_ahead=" << (s.renderAhead ? "on" : "off") << "\n"
 		<< "dejudder_gate=" << s.dejudderGate << "\n"
 		<< "render_ahead_utilisation=" << s.renderAheadUtilisation << "\n"

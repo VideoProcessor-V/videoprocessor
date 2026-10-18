@@ -346,6 +346,7 @@
     <ClCompile Include="PulldownReliabilityTests.cpp" />
     <ClCompile Include="PulldownCorpusTests.cpp" />
     <ClCompile Include="Hunt2CadenceClassTests.cpp" />
+    <ClCompile Include="GeneralRateMatrixTests.cpp" />
     <ClCompile Include="BugHunt20261017Tests.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>

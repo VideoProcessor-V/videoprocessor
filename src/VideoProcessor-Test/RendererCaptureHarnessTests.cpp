@@ -1348,6 +1348,7 @@ namespace Tests
 				"deband_grain: on\n", "residual_stabilise_grain_guard: off\n", "dv_tunnel_fixes: off\n",
 				"deband_vp_grain_guard: veto\n", "deband_vp_exclusive: off\n",
 				"queue_timing_fixes: off\n", "cadence_class_fixes: off\n", "motion_history_fixes: off\n",   // hunt 2 group 5
+				"general_rate_fixes: off\n",   // fixed-constant batch 2026-10-18
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
@@ -1397,7 +1398,7 @@ namespace Tests
 				{ "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "residual_stabilise_grain_guard", "on" },
 				{ "deband_vp_exclusive", "on" },
 				{ "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
-				{ "dv_tunnel_fixes", "on" }, { "queue_timing_fixes", "on" } };
+				{ "dv_tunnel_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" } };
 			for (const auto& entry : defaults)
 				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
 					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
@@ -1407,7 +1408,7 @@ namespace Tests
 				{ "deband_vp_grain_guard", "off" }, { "deband_grain", "on" }, { "residual_stabilise_grain_guard", "off" },
 				{ "deband_vp_grain_guard", "veto" }, { "deband_vp_exclusive", "off" },
 				{ "optical_flow_global_fallback", "off" }, { "optical_flow_cost_trust", "on" }, { "optical_flow_fb_check", "on" },
-				{ "dv_tunnel_fixes", "off" }, { "queue_timing_fixes", "off" } };
+				{ "dv_tunnel_fixes", "off" }, { "queue_timing_fixes", "off" }, { "general_rate_fixes", "off" } };
 			for (const auto& flip : flips)
 			{
 				const std::string text = head + flip.first + ": " + flip.second + "\n";

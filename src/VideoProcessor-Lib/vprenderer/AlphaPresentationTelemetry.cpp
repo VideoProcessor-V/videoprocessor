@@ -15,10 +15,10 @@ namespace
 
 	bool MatchesExpectedDisplayRate(double observed, double expected)
 	{
-		if (expected < 10.0 || expected > 500.0)
+		// Fixed-constant batch 2026-10-18 (B1): the shared display bounds, not copied literals.
+		if (expected < DisplayRefreshBounds::kMinimumHz || expected > DisplayRefreshBounds::kMaximumHz)
 			return true;
-		return std::isfinite(observed) && observed >= 10.0 &&
-			observed <= 500.0 &&
+		return std::isfinite(observed) && DisplayRefreshBounds::Accepts(observed) &&
 			std::abs(observed - expected) / expected <=
 				MAX_EXPECTED_RATE_RELATIVE_ERROR;
 	}

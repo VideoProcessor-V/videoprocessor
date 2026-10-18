@@ -102,11 +102,13 @@ namespace InterpolationPolicy
 	// rate when locked, else the capture rate) by the owner's film / video split
 	// (DejudderPolicy::IsFilmLike: 24/25/30p and 48p film, 50/60p video on any
 	// display); a lock alone is not film (50p carried in 120 Hz stays video).
+	// Fixed-constant batch 2026-10-18 (general_rate_fixes, default on): the film / video split
+	// is DejudderPolicy's derived rule (generalRates); off = its fixed bands.
 	inline bool IsFilmLike(SourceClass sourceClass, double sourceHz, double displayHz, bool pulldownLocked,
-		bool classFixes = true)
+		bool classFixes = true, bool generalRates = true)
 	{
 		if (sourceClass == SourceClass::Legacy || classFixes)
-			return DejudderPolicy::IsFilmLike(sourceHz);
+			return DejudderPolicy::IsFilmLike(sourceHz, generalRates);
 		if (pulldownLocked)
 			return true;
 		const double ratio = Ratio(sourceHz, displayHz);
@@ -173,6 +175,9 @@ namespace InterpolationPolicy
 		// Hunt 2 (cadence_class_fixes, default on): the source-only class (M2) and
 		// film near a 1:1 ratio left to drift correction (L5).
 		bool classFixes = true;
+		// Fixed-constant batch 2026-10-18 (general_rate_fixes, default on): the derived film /
+		// video split (DejudderPolicy::IsFilmLike(sourceHz, true)).
+		bool generalRates = true;
 	};
 
 	struct Decision
@@ -194,6 +199,7 @@ namespace InterpolationPolicy
 		d.evenIncludes1001 = in.dejudderEvenIncludes1001;
 		d.sourceHz = in.sourceHz;
 		d.displayHz = in.displayHz;
+		d.generalRates = in.generalRates;
 		return DejudderPolicy::EffectiveStrength(d) > 0.0;
 	}
 
@@ -207,7 +213,8 @@ namespace InterpolationPolicy
 		if (in.lowLatency) { d.reason = Reason::LowLatency; return d; }
 		if (in.interlaced) { d.reason = Reason::Interlaced; return d; }
 		if (!(in.sourceHz > 0.0) || !(in.displayHz > 0.0)) { d.reason = Reason::UnknownRates; return d; }
-		d.filmLike = IsFilmLike(in.sourceClass, in.sourceHz, in.displayHz, in.pulldownLocked, in.classFixes);
+		d.filmLike = IsFilmLike(in.sourceClass, in.sourceHz, in.displayHz, in.pulldownLocked, in.classFixes,
+			in.generalRates);
 		if (d.filmLike && DejudderTakes(in)) { d.reason = Reason::FilmToDejudder; return d; }
 		// Film at a whole cadence (the de-judder's own tolerance): its even cadence, never interpolated.
 		if (d.filmLike && DejudderPolicy::IsEvenCadence(d.ratio)) { d.reason = Reason::FilmIntegerRatio; return d; }
