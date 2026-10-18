@@ -56,6 +56,7 @@ public:
 	void SetQueueFramePolicy(size_t startupPrerollFrames,
 		size_t steadyReserveFrames, bool hasSteadyReserveFrames) override;
 	void SetActivePictureLookaheadFrames(size_t frames) override;
+	void SetActivePictureLookaheadAutomatic(bool automatic) override;
 	void SetSceneAwareTimingCorrection(bool enabled) override;
 	uint64_t SceneAwareCorrectionDropCount() const override;
 	uint64_t SceneAwareCorrectionRepeatCount() const override;

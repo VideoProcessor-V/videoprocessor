@@ -5427,8 +5427,9 @@ namespace VideoProcessorTest
 			// file-frame methods; claimed 35 on its branch); 38: GetIntentStatus /
 			// SetAmbientLux (intent interpreter items 2-5; claimed 36 on its branch);
 			// 39: GetCalibrationOutput / SetCalibrationPattern (automatic calibration;
-			// claimed 36 on its branch).
-			Assert::AreEqual(static_cast<uint32_t>(39),
+			// claimed 36 on its branch); 40: SetActivePictureLookaheadAutomatic (bug hunt 3
+			// F2, integration round 5).
+			Assert::AreEqual(static_cast<uint32_t>(40),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

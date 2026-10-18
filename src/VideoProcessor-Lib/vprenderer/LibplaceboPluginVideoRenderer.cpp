@@ -442,6 +442,13 @@ void LibplaceboPluginVideoRenderer::SetActivePictureLookaheadFrames(
 }
 
 
+void LibplaceboPluginVideoRenderer::SetActivePictureLookaheadAutomatic(
+	bool automatic)
+{
+	m_renderer->SetActivePictureLookaheadAutomatic(automatic);
+}
+
+
 void LibplaceboPluginVideoRenderer::SetSceneAwareTimingCorrection(bool enabled)
 {
 	m_renderer->SetSceneAwareTimingCorrection(enabled);

@@ -211,7 +211,12 @@ namespace IntentInterpreter
             std::lock_guard<std::mutex> guard(m_mutex);
             if (!m_switches.Any() || (m_haveLast && sourceSequence <= m_lastSequence))
                 return;
-            const bool contiguous = m_haveLast && !context.discontinuity && !formatChange;
+            // Bug hunt 3 F6: a frame the walk skipped (an analysis that failed, a conversion
+            // failure, a DV gap) leaves a hole in the sequence: the next frame is not measured
+            // against the one before the hole as if one frame apart (twice the pan speed, a
+            // cut judged across two frames). Repeats carry their frame's sequence (never here).
+            const bool contiguous = m_haveLast && sourceSequence == m_lastSequence + 1 &&
+                !context.discontinuity && !formatChange;
             const ContentIntent::FrameMeasure m = ContentIntent::Measure(
                 contiguous ? m_previous : ContentIntent::LumaGrid(), grid);
             const bool cut = m.cut || formatChange || (m_shots.empty());
@@ -223,20 +228,11 @@ namespace IntentInterpreter
                 for (const uint16_t v : grid.luma) sum += v;
                 mean = sum / grid.luma.size();
             }
-            bool fading = false;
-            if (m.valid && !m.cut && m_previousValid)
-            {
-                const double delta = mean - m_previousMean;
-                const int sign = delta >= MotionIntent::kFadeStepCodes ? 1 : delta <= -MotionIntent::kFadeStepCodes ? -1 : 0;
-                m_fadeRun = sign != 0 && sign == m_fadeSign ? m_fadeRun + 1 : (sign != 0 ? 1 : 0);
-                m_fadeSign = sign;
-                fading = m_fadeRun >= MotionIntent::kFadeMinRun;
-            }
-            else
-            {
-                m_fadeRun = 0;
-                m_fadeSign = 0;
-            }
+            // Bug hunt 3 F9: the fade thresholds in time (codes per second, run and window in
+            // seconds) at this frame's content rate.
+            const int fadeWindowFrames = MotionIntent::FadeWindowFrames(context.contentHz);
+            const bool fading = m_fade.Step(m.valid && !m.cut && m_previousValid, mean - m_previousMean,
+                context.contentHz);
             const bool nearBlack = grid.Valid() && mean <= MotionIntent::kNearBlackCodes;
             const bool fadeFlag = fading || nearBlack;
             if (cut)
@@ -245,7 +241,7 @@ namespace IntentInterpreter
                 {
                     Shot& last = m_shots.back();
                     last.ended = true;
-                    last.fadeAtEnd = m_framesSinceFade <= MotionIntent::kFadeWindowFrames;
+                    last.fadeAtEnd = m_framesSinceFade <= fadeWindowFrames;
                 }
                 Shot shot;
                 shot.start = sourceSequence;
@@ -256,7 +252,7 @@ namespace IntentInterpreter
             m_framesSinceFade = fadeFlag ? 0 : (m_framesSinceFade < 1000000 ? m_framesSinceFade + 1 : m_framesSinceFade);
             Shot& shot = m_shots.back();
             ++shot.frames;
-            if (fadeFlag && shot.frames <= MotionIntent::kFadeWindowFrames)
+            if (fadeFlag && shot.frames <= fadeWindowFrames)
                 shot.fadeAtStart = true;
             const double hz = context.contentHz;
             const double dt = hz > 0.0 ? 1.0 / hz : 0.0;
@@ -531,8 +527,7 @@ namespace IntentInterpreter
             m_previous = ContentIntent::LumaGrid();
             m_previousValid = false;
             m_previousMean = 0.0;
-            m_fadeRun = 0;
-            m_fadeSign = 0;
+            m_fade.Reset();
             m_framesSinceFade = 1000000;
             m_haveLast = false;
             m_lastSequence = 0;
@@ -558,8 +553,7 @@ namespace IntentInterpreter
         ContentIntent::LumaGrid m_previous;
         bool m_previousValid = false;
         double m_previousMean = 0.0;
-        int m_fadeRun = 0;
-        int m_fadeSign = 0;
+        MotionIntent::FadeRun m_fade;
         int m_framesSinceFade = 1000000;
         bool m_haveLast = false;
         uint64_t m_lastSequence = 0;

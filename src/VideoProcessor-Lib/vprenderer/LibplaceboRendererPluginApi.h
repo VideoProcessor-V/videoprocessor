@@ -39,13 +39,15 @@
 // SetAmbientLux in the vtable. Calibration phase 2 grew PatternOutputInfo
 // (VP's tone curve and the HDR metadata sent) within 39, before any 39 build
 // shipped (integration round 4).
+// 40: SetActivePictureLookaheadAutomatic (bug hunt 3 F2, integration round 5),
+// after GetCalibrationOutput / SetCalibrationPattern in the vtable.
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 39;
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 40;
 static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
 	"VideoProcessorLibplaceboGetBuildId";
 // Returns the DLL's 32-hex-digit build ID (static storage); never throws.

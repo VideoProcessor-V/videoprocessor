@@ -708,4 +708,13 @@ public:
 		return false;
 	}
 
+	// Bug hunt 3 F2 (after SetAmbientLux in the vtable): the active-picture look-ahead
+	// given by SetActivePictureLookaheadFrames is automatic (it follows the queue,
+	// active_picture_lookahead_frames absent) rather than an explicit value. An automatic
+	// look-ahead sets no floor on the locked-film queue target.
+	virtual void SetActivePictureLookaheadAutomatic(bool automatic)
+	{
+		(void)automatic;
+	}
+
 };

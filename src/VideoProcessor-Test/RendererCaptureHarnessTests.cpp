@@ -12,6 +12,7 @@
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <ConfigFile.h>
 #include <UnifiedProfileRuntime.h>
+#include <QueueLookahead.h>
 
 #include <algorithm>
 #include <chrono>
@@ -294,6 +295,10 @@ namespace
 	// The queue target (0: 4 for film, 3 otherwise) and, as the app does, the profile snapshot
 	// applied before Build (the queue profile reaches the renderer that way).
 	size_t g_harnessQueueTarget = 0;
+	// Bug hunt 3 F7: the active-picture look-ahead given to the renderer after Build, as the
+	// app does (-1: not called; the renderer's own 0). g_harnessLookaheadAutomatic: told as automatic.
+	int g_harnessActivePictureLookahead = -1;
+	bool g_harnessLookaheadAutomatic = false;
 	bool g_harnessApplySnapshot = false;
 	// Shader profile sections the run selects after Build (e.g. "standard.sigma_delta";
 	// their [shader.*] sections go in the configuration's extra text).
@@ -340,6 +345,8 @@ namespace
 		int width = 1920, height = 1080;
 		int windowWidth = 640, windowHeight = 360;
 		size_t queueTarget = 0;
+		int activePictureLookahead = -1;
+		bool lookaheadAutomatic = false;
 		bool applySnapshot = false;
 		std::vector<std::string> shaderProfiles;
 		bool shadersSelected = false;
@@ -361,6 +368,8 @@ namespace
 		g.windowWidth = g_harnessWindowWidth;
 		g.windowHeight = g_harnessWindowHeight;
 		g.queueTarget = g_harnessQueueTarget;
+		g.activePictureLookahead = g_harnessActivePictureLookahead;
+		g.lookaheadAutomatic = g_harnessLookaheadAutomatic;
 		g.applySnapshot = g_harnessApplySnapshot;
 		g.shaderProfiles = g_harnessShaderProfiles;
 		g.shadersSelected = g_harnessShadersSelected;
@@ -382,6 +391,8 @@ namespace
 		g_harnessWindowWidth = g.windowWidth;
 		g_harnessWindowHeight = g.windowHeight;
 		g_harnessQueueTarget = g.queueTarget;
+		g_harnessActivePictureLookahead = g.activePictureLookahead;
+		g_harnessLookaheadAutomatic = g.lookaheadAutomatic;
 		g_harnessApplySnapshot = g.applySnapshot;
 		g_harnessShaderProfiles = g.shaderProfiles;
 		g_harnessShadersSelected = g.shadersSelected;
@@ -712,6 +723,11 @@ namespace
 					renderer->Build();
 			}
 			renderer->SetQueueFramePolicy(2, g_harnessQueueTarget ? g_harnessQueueTarget : (film ? 4 : 3), true);
+			if (g_harnessActivePictureLookahead >= 0)
+			{
+				renderer->SetActivePictureLookaheadAutomatic(g_harnessLookaheadAutomatic);
+				renderer->SetActivePictureLookaheadFrames(static_cast<size_t>(g_harnessActivePictureLookahead));
+			}
 			renderer->Start();
 			resources.Started();
 			// A ring of frames that outlives anything the queue holds.
@@ -3319,6 +3335,113 @@ namespace Tests
 					(std::wstring(fill ? L"on: gap pairs made\n" : L"off: no gap pair\n") + r.Tail()).c_str());
 				Assert::IsTrue(r.presented);
 			}
+		}
+
+		// Bug hunt 3 F4 (owner 2026-10-18): hiccup repair on a video-rate source with a de-judder
+		// profile (strength 0.5: the de-judder idles there, IneligibleCadence) keeps the motion
+		// engine loaded and idle: the second gap pair does not create it again. Reports the
+		// creation count and the render_ms of the frames around each gap (frame pacing trace).
+		BEGIN_TEST_METHOD_ATTRIBUTE(H3IdleMotionEngineKeptAcrossHiccups)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(H3IdleMotionEngineKeptAcrossHiccups)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("H3IdleMotionEngineKeptAcrossHiccups")) return;
+			const double source = HarnessMonitorHz();
+			const int gapA = static_cast<int>(source * 5.0), gapB = static_cast<int>(source * 6.5);
+			FramePlan plan = RatePlan(source);
+			plan.step = [gapA, gapB](int n) { FrameStep f; f.content = n; f.send = !(n == gapA || n == gapB); return f; };
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.5, false,
+				"dejudder_strength: 0.5\ninterpolation: off\ninterpolation_fill_gaps: on\n", false, &plan);
+			int creates = 0, pairs = 0, idleReleases = 0, stallsAfterGap = 0;
+			bool loadedBeforeGap = false;
+			for (const std::string& line : r.log)
+			{
+				if (line.find("Motion engine: loaded idle") != std::string::npos && pairs == 0)
+				{
+					loadedBeforeGap = true;
+					Logger::WriteMessage(("  " + line + "\n").c_str());
+				}
+				if (pairs > 0 && line.find("Alpha backlog recovery") != std::string::npos && line.find("render_stall") != std::string::npos)
+					++stallsAfterGap;
+				if (line.find("Motion engine: created") != std::string::npos) { ++creates; Logger::WriteMessage(("  " + line + "\n").c_str()); }
+				if (line.find("gap pair across") != std::string::npos) { ++pairs; Logger::WriteMessage(("  " + line + "\n").c_str()); }
+				if (line.find("Motion engine: released while idle") != std::string::npos) ++idleReleases;
+				if (line.find("De-judder:") != std::string::npos && line.find("strength") != std::string::npos)
+					Logger::WriteMessage(("  " + line + "\n").c_str());
+			}
+			char text[200];
+			snprintf(text, sizeof(text), "H3-F4 source %.3f Hz: gap pairs %d, motion engine created %d time(s), idle releases %d, "
+				"loaded before the first gap %d, render-stall flushes after it %d\n",
+				source, pairs, creates, idleReleases, loadedBeforeGap ? 1 : 0, stallsAfterGap);
+			Logger::WriteMessage(text);
+			if (pairs < 2)   // the evidence when a gap was not paired
+			for (const std::string& line : r.log)
+				if (line.find("missed") != std::string::npos || line.find("gap") != std::string::npos ||
+					line.find("flush") != std::string::npos || line.find("Interpolation") != std::string::npos ||
+					line.find("De-judder:") != std::string::npos || line.find("backlog") != std::string::npos ||
+					line.find("discontinu") != std::string::npos || line.find("not paired") != std::string::npos)
+					Logger::WriteMessage(("  | " + line + "\n").c_str());
+			Assert::IsTrue(r.presented, (L"presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(pairs >= 2, HarnessWide(std::string("both gaps paired\n") + text).c_str());
+			Assert::AreEqual(1, creates, HarnessWide(std::string("created once, kept idle between the gaps\n") + text).c_str());
+			Assert::AreEqual(0, idleReleases, HarnessWide(std::string("no low-memory release\n") + text).c_str());
+			Assert::IsTrue(loadedBeforeGap, HarnessWide(std::string("loaded idle at the source's start, before any gap\n") + text).c_str());
+		}
+
+		// Bug hunt 3 F7 (opt-in, VP_TEST_H3_LOOKAHEAD=1, hardware): the automatic active-picture
+		// look-ahead's cost, measured. 4K 59.94 P010 (the CPU formatter), letterboxed 2.39 with the
+		// automatic crop on the scope screen and the classic subtitles, queue target 5: the key
+		// absent (automatic: 4 frames) against an explicit 0. Reports lookahead_avg_ms /
+		// lookahead_max_ms from the renderer's pre-render timing lines; asserts only that both ran.
+		TEST_METHOD(H3LookaheadCostCropSubtitle4K)
+		{
+			const HarnessScope harnessScope;
+			char* opt = nullptr;
+			size_t optLength = 0;
+			const bool optIn = _dupenv_s(&opt, &optLength, "VP_TEST_H3_LOOKAHEAD") == 0 && opt && std::string(opt) == "1";
+			std::free(opt);
+			if (!optIn) { Logger::WriteMessage("H3LookaheadCostCropSubtitle4K: VP_TEST_H3_LOOKAHEAD not set: skipped\n"); return; }
+			if (!RequireHardwareOrSkip("H3LookaheadCostCropSubtitle4K")) return;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			g_harnessBarRows = 276;
+			g_harnessQueueTarget = 5;
+			const std::string extra = "[vprenderer.viewport]\nscreen_aspect: 2.35:1\nautomatic_crop: true\n"
+				"[vprenderer.subtitles.Classic]\ntype: classic\n";
+			auto number = [](const std::string& line, const std::string& key) -> double {
+				const size_t at = line.find(key + "=");
+				return at == std::string::npos ? -1.0 : std::atof(line.c_str() + at + key.size() + 1);
+			};
+			std::string summary = "H3-F7 active-picture look-ahead cost (4K 59.94 P010, crop + subtitles, target 5):\n";
+			bool bothRan = true;
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				const bool automatic = pass == 0;
+				g_harnessActivePictureLookahead = automatic ?
+					static_cast<int>(QueueLookahead::ResolveActivePictureLookahead(false, 0, false, 5, 32)) : 0;
+				g_harnessLookaheadAutomatic = automatic;
+				const RunResult r = Run(VideoFrameEncoding::V210, "standard", 12.0, false, extra);
+				double avgSum = 0.0, maxMs = 0.0;
+				int windows = 0;
+				for (const std::string& line : r.log)
+					if (line.find("Alpha pre-render timing:") != std::string::npos)
+					{
+						const double avg = number(line, "lookahead_avg_ms"), peak = number(line, "lookahead_max_ms");
+						if (avg >= 0.0) { avgSum += avg; ++windows; }
+						if (peak > maxMs) maxMs = peak;
+					}
+				char line[260];
+				snprintf(line, sizeof(line), "  key %s (look-ahead %d): lookaheadMs avg %.3f (over %d windows), max %.3f, presented %d\n",
+					automatic ? "absent" : "0", g_harnessActivePictureLookahead, windows ? avgSum / windows : 0.0, windows, maxMs,
+					r.presented ? 1 : 0);
+				summary += line;
+				Logger::WriteMessage(line);
+				bothRan = bothRan && r.presented;
+			}
+			Logger::WriteMessage(summary.c_str());
+			Assert::IsTrue(bothRan, HarnessWide("both runs presented\n" + summary).c_str());
 		}
 
 		// Gate verify 2026-10-17 (opt-in, VP_TEST_GATE_VERIFY=1): hiccup repair early and in steady

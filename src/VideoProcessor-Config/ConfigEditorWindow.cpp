@@ -28,6 +28,7 @@
 #include <ShortcutDefaults.h>
 #include <QueueLatency.h>
 #include <RefreshKey.h>
+#include <QueueLookahead.h>
 #include <led/LedDriveConfig.h>
 
 #include <QAbstractItemView>
@@ -6777,6 +6778,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         {
             if (state->loading || state->section.isEmpty() || !document_) return;
             // Automatic (the minimum, shown as Auto) is an absent key, never a written number.
+            if (key == QStringLiteral("active_picture_lookahead_frames"))
+            {
+                // Bug hunt 3 F8: the explicit-0 notice follows the edit.
+                if (auto* notice = findChild<QLabel*>(QStringLiteral("config.queue.active_picture_lookahead_notice")))
+                    notice->setVisible(selected == 0);
+            }
             if (key == QStringLiteral("active_picture_lookahead_frames") && selected < 0)
             {
                 document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str());
@@ -6912,6 +6919,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 "min(target frames - 1, queue size - 1, 8) queued future frames; a low-latency profile uses 0. "
                 "A number from 0 to 8 overrides it, including 0 (no look-ahead). Raising it never enlarges the "
                 "queue. (Key: active_picture_lookahead_frames.)"));
+            // Bug hunt 3 F8: an explicit 0 (older queue presets saved one) keeps the automatic
+            // look-ahead off; shown, never migrated (the owner decides).
+            auto* lookaheadNotice = helpLabel(QString::fromLatin1(QueueLookahead::kExplicitZeroLookaheadNotice));
+            lookaheadNotice->setObjectName(QStringLiteral("config.queue.active_picture_lookahead_notice"));
+            lookaheadNotice->setVisible(false);
+            form->addRow(QString(), lookaheadNotice);
         }
         addInteger(QStringLiteral("Queue reset delay"), QStringLiteral("reset_after_render_restart_seconds"),
             1, INT_MAX, QStringLiteral("seconds"));
@@ -10949,6 +10962,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 // Absent / auto: the look-ahead follows the queue (shown as Auto).
                 if (!numeric && field.key == QStringLiteral("active_picture_lookahead_frames")) number = -1;
                 qobject_cast<QSpinBox*>(field.widget)->setValue(number);
+                // Bug hunt 3 F8: a saved explicit 0 (own or inherited from the default queue profile).
+                if (field.key == QStringLiteral("active_picture_lookahead_frames"))
+                    if (auto* notice = findChild<QLabel*>(QStringLiteral("config.queue.active_picture_lookahead_notice")))
+                        notice->setVisible(QueueLookahead::ExplicitZeroLookahead(configured.toStdString()));
             }
             else if (field.kind == Field::SdrGamma)
             {

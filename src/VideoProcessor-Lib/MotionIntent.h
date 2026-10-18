@@ -76,16 +76,59 @@ namespace MotionIntent
     // when the display reaches its cut; otherwise the cut was missed and the
     // value waits for the next cut.
     constexpr int kMinDecisionPairs = 2;
-    // Fades: a frame whose mean luma moves at least kFadeStepCodes (10-bit
-    // codes per frame) in the same direction as the previous kFadeMinRun - 1
-    // frames, without a cut, is fading; a frame whose mean luma is at or below
-    // kNearBlackCodes (limited 64..940) is near black. A cut with a fading or
-    // near-black frame within kFadeWindowFrames on either side is a fade
-    // boundary: the previous value is kept.
-    constexpr double kFadeStepCodes = 1.0;
-    constexpr int kFadeMinRun = 3;
+    // Fades: a frame whose mean luma moves at least FadeStepCodes (10-bit codes
+    // per frame: kFadeStepCodesPerSecond at the content rate) in the same
+    // direction as the frames before it for kFadeMinRunSeconds, without a cut,
+    // is fading; a frame whose mean luma is at or below kNearBlackCodes
+    // (limited 64..940) is near black. A cut with a fading or near-black frame
+    // within kFadeWindowSeconds on either side is a fade boundary: the previous
+    // value is kept. Bug hunt 3 F9: in time, not frames (identical at 24p: 1
+    // code per frame, a run of 3 frames, a window of 6; at 48p HFR a 4 s fade
+    // of 100 codes moves 0.52 codes per frame and was missed).
+    constexpr double kFadeStepCodesPerSecond = 24.0;
+    constexpr double kFadeMinRunSeconds = 3.0 / 24.0;
     constexpr double kNearBlackCodes = 80.0;
-    constexpr int kFadeWindowFrames = 6;
+    constexpr double kFadeWindowSeconds = 6.0 / 24.0;
+    // The rate the frame counts fall back to while the content rate is unknown
+    // (the values before: 1 code, 3 frames, 6 frames).
+    constexpr double kFadeUnknownRateHz = 24.0;
+
+    inline double FadeRateHz(double contentHz)
+    {
+        return std::isfinite(contentHz) && contentHz > 0.0 ? contentHz : kFadeUnknownRateHz;
+    }
+    inline double FadeStepCodes(double contentHz) { return kFadeStepCodesPerSecond / FadeRateHz(contentHz); }
+    inline int FadeMinRunFrames(double contentHz)
+    {
+        return (std::max)(1, static_cast<int>(std::lround(kFadeMinRunSeconds * FadeRateHz(contentHz))));
+    }
+    inline int FadeWindowFrames(double contentHz)
+    {
+        return (std::max)(1, static_cast<int>(std::lround(kFadeWindowSeconds * FadeRateHz(contentHz))));
+    }
+
+    // The fade run: one frame's mean-luma change (measurable: a valid pair without
+    // a cut, else the run starts over); true while the frame is fading.
+    struct FadeRun
+    {
+        int run = 0;
+        int sign = 0;
+        bool Step(bool measurable, double meanDelta, double contentHz)
+        {
+            if (!measurable)
+            {
+                run = 0;
+                sign = 0;
+                return false;
+            }
+            const double step = FadeStepCodes(contentHz);
+            const int s = meanDelta >= step ? 1 : meanDelta <= -step ? -1 : 0;
+            run = s != 0 && s == sign ? run + 1 : (s != 0 ? 1 : 0);
+            sign = s;
+            return run >= FadeMinRunFrames(contentHz);
+        }
+        void Reset() { run = 0; sign = 0; }
+    };
 
     inline double Smoothstep(double lo, double hi, double x)
     {

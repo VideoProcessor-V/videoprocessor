@@ -90,6 +90,7 @@ public:
 	void SetQueueFramePolicy(size_t startupPrerollFrames,
 		size_t steadyReserveFrames, bool hasSteadyReserveFrames) override;
 	void SetActivePictureLookaheadFrames(size_t frames) override;
+	void SetActivePictureLookaheadAutomatic(bool automatic) override;   // Bug hunt 3 F2
 	void SetSceneAwareTimingCorrection(bool enabled) override;
 	uint64_t SceneAwareCorrectionDropCount() const override;
 	uint64_t SceneAwareCorrectionRepeatCount() const override;
@@ -385,6 +386,8 @@ private:
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
 	std::atomic<size_t> m_activePictureLookaheadFrames{0};
+	// Bug hunt 3 F2: the look-ahead above follows the queue (no locked-film floor).
+	std::atomic<bool> m_activePictureLookaheadAutomatic{false};
 	uint64_t m_activePictureLookaheadLoggedGeneration = 0;
 	size_t m_activePictureLookaheadLoggedAvailable = 0xff;
     CropDiagnosticThrottle m_picturePreviewDiagnostics;

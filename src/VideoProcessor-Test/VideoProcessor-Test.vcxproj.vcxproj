@@ -192,6 +192,7 @@
     <ClCompile Include="LedIntentLimitsTests.cpp" />
     <ClCompile Include="MotionIntentTests.cpp" />
     <ClCompile Include="IntentInterpreterTests.cpp" />
+    <ClCompile Include="H3TimingTests.cpp" />
     <ClCompile Include="FileSourceRuleVariableTests.cpp" />
     <ClCompile Include="FileHostTests.cpp" />
     <ClCompile Include="LedDriveArbiterTests.cpp" />
