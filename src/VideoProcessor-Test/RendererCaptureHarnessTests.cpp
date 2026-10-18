@@ -651,7 +651,20 @@ namespace
 			CreateDirectoryA((cache + "\\vprenderer-beta").c_str(), nullptr);
 			SetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", cache.c_str());
 		}
-		const std::string dllPath = folder + "vprenderer\\VideoProcessorVPRenderer.dll";
+		// VP_TEST_RENDERER_DIR (aliasing suite): another build's x64\Release folder whose renderer DLL
+		// runs instead (same source, so the same plugin ABI), e.g. an integration worktree's binaries.
+		std::string rendererFolder = folder;
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			if (_dupenv_s(&v, &n, "VP_TEST_RENDERER_DIR") == 0 && v && v[0])
+			{
+				rendererFolder = v;
+				if (rendererFolder.back() != '\\' && rendererFolder.back() != '/') rendererFolder += "\\";
+			}
+			std::free(v);
+		}
+		const std::string dllPath = rendererFolder + "vprenderer\\VideoProcessorVPRenderer.dll";
 		HMODULE dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 		Assert::IsNotNull(dll, (L"cannot load " + std::wstring(dllPath.begin(), dllPath.end())).c_str());
 		using Create = IVideoRenderer* (__cdecl*)(IRendererCallback*, uint32_t, HWND, ITimingClock*, bool, size_t,
@@ -4377,6 +4390,8 @@ namespace Tests
 				for (const std::string& l : r.log)
 					for (const char* k : keys)
 						if (l.find(k) != std::string::npos) { log << l << "\n"; break; }
+				log << "renderer_dir=" << env("VP_TEST_RENDERER_DIR") << " shader_dir=" << env("VP_TEST_SHADER_DIR") <<
+					" adapter=" << env("VP_TEST_ADAPTER") << "\n";
 				log << "shader_profiles_selected=" << (g_harnessShadersSelected ? 1 : 0) << " requested=" << f[11] << "\n";
 				log << "gpu_timing: valid=" << (r.gpuValid ? 1 : 0) << " frame_ms_avg=" << r.gpuFrameMsAvg << " frame_ms_peak=" <<
 					r.gpuFrameMsPeak << " core_ms_avg=" << r.gpuCoreMsAvg << " core_ms_peak=" << r.gpuCoreMsPeak << " frames=" <<

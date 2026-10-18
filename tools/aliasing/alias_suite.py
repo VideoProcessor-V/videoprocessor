@@ -567,6 +567,28 @@ def ringing(O, rect_out, geo):
 
 
 # ---------------------------------------------------------------------------- still analysis
+REFCACHE = None   # a folder for the ideal references (float64 .npy), set by analyse_one
+
+
+def disk_cached(name, compute):
+    """The ideal references cost seconds to minutes; computed once per pair and kept on disk."""
+    if not REFCACHE:
+        return compute()
+    path = os.path.join(REFCACHE, name + ".npy")
+    if os.path.exists(path):
+        try:
+            return np.load(path)
+        except Exception:
+            pass
+    a = np.asarray(compute())
+    os.makedirs(REFCACHE, exist_ok=True)
+    tmp = path + ".%d.tmp" % os.getpid()
+    with open(tmp, "wb") as f:
+        np.save(f, a)
+    os.replace(tmp, path)
+    return a
+
+
 def still_reference(sw, sh, geo, cache):
     key = (sw, sh, geo.ow, geo.oh, round(geo.x0, 3), round(geo.y0, 3), round(geo.w, 3), round(geo.h, 3))
     if key not in cache:
@@ -574,8 +596,9 @@ def still_reference(sw, sh, geo, cache):
         Yq = (to_ycode(Y).astype(float) - 64) / 876
         Cbq = (to_ccode(Cb).astype(float) - 512) / 896
         Crq = (to_ccode(Cr).astype(float) - 512) / 896
-        cache[key] = dict(src=(Yq, Cbq, Crq), tiles=tiles,
-                          ref=[ideal_resample(Yq, geo), ideal_resample(Cbq, geo, True), ideal_resample(Crq, geo, True)])
+        ref = disk_cached("still_%dx%d_%dx%d" % (sw, sh, geo.ow, geo.oh), lambda: np.stack(
+            [ideal_resample(Yq, geo), ideal_resample(Cbq, geo, True), ideal_resample(Crq, geo, True)]))
+        cache[key] = dict(src=(Yq, Cbq, Crq), tiles=tiles, ref=[ref[0], ref[1], ref[2]])
     return cache[key]
 
 
@@ -655,8 +678,8 @@ def analyse_shift(caps, sw, sh, cache):
     if key not in cache:
         Y, layout = moving_card(sw, sh, min(0.5, 0.5 * geo.sx))
         Yq = (to_ycode(Y).astype(float) - 64) / 876
-        My = ideal_matrix(sh, geo.rows(), min(0.5, 0.5 * geo.sy))
-        T = My @ Yq
+        T = disk_cached("moving_T_%dx%d_%dx%d" % (sw, sh, geo.ow, geo.oh),
+                        lambda: ideal_matrix(sh, geo.rows(), min(0.5, 0.5 * geo.sy)) @ Yq)
         cache[key] = dict(T=T, That=np.fft.fft(T, axis=1), layout=layout, Yq=Yq)
     mv = cache[key]
     W = sw
@@ -763,7 +786,8 @@ def analyse_seq(caps, frames, sw, sh, cache, asset):
     a0, a1 = act[0], act[-1] + 1
     key = ("seq", asset, geo.ow, geo.oh)
     if key not in cache:
-        refs = [ideal_resample((f.astype(float) - 64) / 876, geo) for f in frames]
+        refs = disk_cached("seq_%s_%dx%d" % (os.path.splitext(asset)[0], geo.ow, geo.oh), lambda: np.stack(
+            [ideal_resample((f.astype(float) - 64) / 876, geo) for f in frames]))
         cache[key] = refs
     refs = cache[key]
     ry0 = int(math.ceil(geo.to_out_y(a0))) + 8
@@ -1138,6 +1162,8 @@ _WSEQ = {}
 
 def analyse_one(d, row, files):
     """One run's captures -> metrics (a worker process keeps its own reference cache)."""
+    global REFCACHE
+    REFCACHE = os.environ.get("VP_ALIAS_REFCACHE") or os.path.join(d, "refcache")
     cap_dir = os.path.join(d, "captures")
     caps = [load_capture(os.path.join(cap_dir, f), row["ow"], row["oh"]) for f in files]
     # The owner's link is 8-bit: a capture with 10-bit codes (VP's 10-bit swapchain without the
@@ -1167,6 +1193,38 @@ def analyse_one(d, row, files):
         info = dict(mode=row["mode"], error=repr(e))
     info["analysis_s"] = round(time.time() - t0, 1)
     return row["name"], files, info
+
+
+def precompute_pair(d, src, out, assets):
+    """The ideal references of one source x output pair, into <dir>/refcache."""
+    global REFCACHE
+    REFCACHE = os.environ.get("VP_ALIAS_REFCACHE") or os.path.join(d, "refcache")
+    geo = Geometry(src[0], src[1], out[0], out[1])
+    t0 = time.time()
+    still_reference(src[0], src[1], geo, {})
+    Y, _ = moving_card(src[0], src[1], min(0.5, 0.5 * geo.sx))
+    Yq = (to_ycode(Y).astype(float) - 64) / 876
+    disk_cached("moving_T_%dx%d_%dx%d" % (src[0], src[1], out[0], out[1]),
+                lambda: ideal_matrix(src[1], geo.rows(), min(0.5, 0.5 * geo.sy)) @ Yq)
+    for asset in assets:
+        frames = np.fromfile(os.path.join(d, asset), np.uint16).reshape(-1, src[1], src[0])
+        disk_cached("seq_%s_%dx%d" % (os.path.splitext(asset)[0], out[0], out[1]), lambda: np.stack(
+            [ideal_resample((f.astype(float) - 64) / 876, geo) for f in frames]))
+    return "%s %.0fs" % (pair_name(src, out), time.time() - t0)
+
+
+def precompute(args):
+    from concurrent.futures import ProcessPoolExecutor
+    pairs = {}
+    for row in read_plan(args.dir):
+        k = ((row["sw"], row["sh"]), (row["ow"], row["oh"]))
+        pairs.setdefault(k, set())
+        if row["mode"] == "seq":
+            pairs[k].add(row["asset"])
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        for r in pool.map(precompute_pair, [args.dir] * len(pairs), [k[0] for k in pairs], [k[1] for k in pairs],
+                          [sorted(v) for v in pairs.values()]):
+            print("references:", r, flush=True)
 
 
 def pending_runs(d, results, reanalyse):
@@ -1222,19 +1280,37 @@ def analyse(args, delete=False):
     return results
 
 
+def gpu_tenants(tag):
+    """Other agents' GPU work: any process (not a shell or this suite) whose command line contains
+    one of the '|'-separated tags."""
+    parts = [t for t in tag.split("|") if t]
+    q = "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+    try:
+        procs = json.loads(subprocess.run(["powershell", "-NoProfile", "-Command", q],
+                                          capture_output=True, text=True).stdout or "[]")
+    except ValueError:
+        return []
+    busy = []
+    for p in procs:
+        cl, name = p.get("CommandLine") or "", (p.get("Name") or "").lower()
+        if name.startswith(("powershell", "bash", "sh.exe", "conhost")) or "alias_suite" in cl:
+            continue
+        if any(t in cl for t in parts):
+            busy.append(str(p["ProcessId"]))
+    return busy
+
+
 def wait_for_gpu(tag):
-    """GPU etiquette: wait while another agent's vstest / testhost (command line containing tag) runs."""
+    """GPU etiquette: wait while another agent's GPU work (see gpu_tenants) runs."""
     if not tag:
         return
-    q = ("Get-CimInstance Win32_Process -Filter \"Name like 'vstest%' or Name like 'testhost%'\" | "
-         "Where-Object { $_.CommandLine -match 'TAG' } | Measure-Object | ForEach-Object { $_.Count }").replace("TAG", tag)
     waited = 0
     while True:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", q], capture_output=True, text=True).stdout.strip()
-        if out in ("", "0"):
+        busy = gpu_tenants(tag)
+        if not busy:
             break
         if waited % 300 == 0:
-            print("waiting for the GPU (%s running, %d s)" % (tag, waited), flush=True)
+            print("waiting for the GPU (%s: pids %s, %d s)" % (tag, ",".join(busy), waited), flush=True)
         time.sleep(30)
         waited += 30
 
@@ -1259,7 +1335,10 @@ def run(args):
     env["VP_ALIAS_DIR"] = os.path.abspath(d)
     env["VP_TEST_GPU"] = "hardware"
     # the renderer finds the bundled shaders (sigma-delta, SSIM, FSRCNNX) beside the test binaries
-    env["VP_TEST_SHADER_DIR"] = os.path.abspath(args.bin)
+    env["VP_TEST_SHADER_DIR"] = os.path.abspath(args.renderer_bin or args.bin)
+    if args.renderer_bin:
+        # another build's renderer DLL (and shaders), driven by this build's test harness
+        env["VP_TEST_RENDERER_DIR"] = os.path.abspath(args.renderer_bin)
     if args.adapter:
         env["VP_TEST_ADAPTER"] = args.adapter   # e.g. NVIDIA: the off-screen window would otherwise use the panel's iGPU
     for g in groups:
@@ -1413,14 +1492,16 @@ def gate(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["prepare", "validate", "run", "analyse", "report", "gate"])
+    ap.add_argument("command", choices=["prepare", "precompute", "validate", "run", "analyse", "report", "gate"])
     ap.add_argument("--dir", default=os.environ.get("VP_ALIAS_DIR", r"D:\codex\alias-suite"))
     ap.add_argument("--bin", default=None, help="x64\\Release folder with VideoProcessor-Test.dll")
+    ap.add_argument("--renderer-bin", default=None, help="x64 Release folder whose renderer DLL and shaders run")
     ap.add_argument("--vstest", default=r"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\Extensions\TestPlatform\vstest.console.exe")
     ap.add_argument("--results", default="results.json")
     ap.add_argument("--thresholds", default=os.path.join(HERE, "alias_thresholds.json"))
     ap.add_argument("--only", default=None)
-    ap.add_argument("--wait-for", default="pulse-fast", help="wait while test processes with this in the command line run")
+    ap.add_argument("--wait-for", default="pulse-fast|vp-scale-render|VP-NN-TrainKit",
+                    help="'|'-separated command-line tags of other agents' GPU work to wait for")
     ap.add_argument("--no-real", action="store_true")
     ap.add_argument("--plan-only", action="store_true", help="prepare: rewrite plan.tsv only (cards untouched)")
     ap.add_argument("--reanalyse", action="store_true")
@@ -1432,6 +1513,8 @@ def main():
     args = ap.parse_args()
     if args.command == "prepare":
         prepare(args)
+    elif args.command == "precompute":
+        precompute(args)
     elif args.command == "validate":
         sys.exit(validate(args))
     elif args.command == "run":
