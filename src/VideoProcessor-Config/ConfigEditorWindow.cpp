@@ -5398,6 +5398,28 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "converts it to 12-bit RGB when it offers that for the mode (full precision), otherwise 10-bit 4:2:2. "
         "10-bit 4:2:2: always the card's 10-bit YCbCr. Refuse: the earlier behaviour, no picture."));
     hardwareForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
+    // Hunt 2 15-intent C11 (every setting has a Config control): Bill's [decklink] RGB packings.
+    // Not set = Auto (the card's format); nothing is written until a value is chosen.
+    const auto addPacking = [&](const char* key, const QString& label, const QStringList& formats)
+    {
+        QStringList values{ QString() }, labels{ QStringLiteral("Not set (Auto)") };
+        for (const QString& format : formats)
+        {
+            values << format;
+            labels << (format == QStringLiteral("AUTO") ? QStringLiteral("Auto") : format);
+        }
+        auto* packing = bindChoiceField(QStringLiteral("decklink"), QString::fromLatin1(key), values, labels);
+        packing->setToolTip(QStringLiteral(
+            "DeckLink only (Bill's setting): the pixel packing VP asks the card for in this RGB depth. Auto lets "
+            "the card choose. (Key: %1.)").arg(QString::fromLatin1(key)));
+        hardwareForm->addRow(label, packing);
+    };
+    addPacking("rgb_8bit_packing", QStringLiteral("8-bit RGB packing (DeckLink)"),
+        { QStringLiteral("AUTO"), QStringLiteral("ARGB"), QStringLiteral("BGRA") });
+    addPacking("rgb_10bit_packing", QStringLiteral("10-bit RGB packing (DeckLink)"),
+        { QStringLiteral("AUTO"), QStringLiteral("R210"), QStringLiteral("R10B"), QStringLiteral("R10L") });
+    addPacking("rgb_12bit_packing", QStringLiteral("12-bit RGB packing (DeckLink)"),
+        { QStringLiteral("AUTO"), QStringLiteral("R12B"), QStringLiteral("R12L") });
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);
     behaviorLayout->setContentsMargins(0, 0, 0, 0);
@@ -5452,6 +5474,13 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "lines (486 / 480 NTSC, 576 PAL). Off: Bill's earlier behaviour - highest refresh first, interlaced "
         "allowed, 486 lines left without a colour space and 576 on the analog PAL entry."));
     behaviorLayout->addWidget(captureDisplayFixes);
+    // Hunt 2 15-intent C11: Bill's [general] bounded_invalid_capture_recovery (default on).
+    auto* boundedRecovery = bindCheckField(QStringLiteral("Recover from a lasting invalid capture signal (Bill)"),
+        QStringLiteral("general"), QStringLiteral("bounded_invalid_capture_recovery"), true);
+    boundedRecovery->setToolTip(QStringLiteral(
+        "Bill's setting, on by default: when the capture signal stays invalid, VP recovers the capture within a "
+        "bounded time by itself. Off: the earlier behaviour. (Key: bounded_invalid_capture_recovery.)"));
+    behaviorLayout->addWidget(boundedRecovery);
     auto* persistSelection = bindCheckField(QStringLiteral("Keep key-selected profiles after restart"),
         QStringLiteral("general"), QStringLiteral("persist_profile_selection"), false);
     persistSelection->setToolTip(QStringLiteral(
@@ -6975,6 +7004,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("report_bt2020_to_display"))->setToolTip(QStringLiteral(
                 "Request BT.2020 signalling to the display. This does not change the rendering gamut."));
 
+        // Hunt 2 15-intent C11: Bill's subtitle detection work mode (a display setting).
+        auto* subtitleDetection = addChoice(QStringLiteral("Subtitle detection work mode (Bill)"),
+            QStringLiteral("subtitle_detection_optimization"),
+            { QStringLiteral("baseline"), QStringLiteral("buffers"), QStringLiteral("shared_samples") });
+        subtitleDetection->setItemText(subtitleDetection->findData(QStringLiteral("baseline")), QStringLiteral("Baseline"));
+        subtitleDetection->setItemText(subtitleDetection->findData(QStringLiteral("buffers")), QStringLiteral("Reused buffers"));
+        subtitleDetection->setItemText(subtitleDetection->findData(QStringLiteral("shared_samples")), QStringLiteral("Shared samples"));
+        subtitleDetection->setToolTip(QStringLiteral(
+            "Bill's setting. How the subtitle detector organises its work: Baseline (default), reused Buffers, or "
+            "Shared samples. Same detections; only the CPU cost differs. (Key: subtitle_detection_optimization.)"));
         form = addCollapsibleSection(QStringLiteral("outputExperiments"),
             QStringLiteral("Output Experiments (beta)"), QStringLiteral(
                 "Implementation diagnostics for repeatable renderer testing. "
@@ -8306,6 +8345,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "locked. Film / video is judged from the source alone (never from the display rate), and content recognition "
             "no longer takes 3:2 film or dark film for animation or a still menu, and also runs without look-ahead frames. "
             "Off: the earlier behaviour."));
+        // Hunt 2 fix group 5 (motion).
+        auto* motionHistory = addChoice(QStringLiteral("Motion history fixes"), QStringLiteral("motion_history_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        motionHistory->setToolTip(QStringLiteral(
+            "Under test (default on). The motion search starts its history over when a frame pair was skipped, and "
+            "forgets its strength ramp at a break; a repeated frame never uses the next pair's motion; the frame "
+            "estimated ahead follows the same timing and Dolby Vision rules as the next frame, and Dolby Vision frames "
+            "pair only under the same colour matrices; changing a motion setting or the motion source restarts the "
+            "motion; a frame dropped to keep a queued repeat counts as a gap. Off: the earlier behaviour."));
         // Render-ahead (docs/VP-render-ahead-design.md, owner 2026-10-17): processing follows the
         // source frame rate, not the display refresh. Off by default until the on-screen runs pass.
         auto* renderAhead = addChoice(QStringLiteral("De-judder: render ahead (under test)"), QStringLiteral("render_ahead"),
@@ -9376,6 +9424,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* offset = addText(QStringLiteral("Inward offset / Classic padding"), QStringLiteral("offset_pixels"), QStringLiteral("source pixels"));
         offset->setValidator(new QIntValidator(0,500,offset));
         offset->setToolTip(QStringLiteral("Offsets the whole moved subtitle box: bottom subtitles move higher and top subtitles move lower. Text stays centered within the box; extension to the black bar does not count toward centering. In Classic, this is the original subtitle padding."));
+        // Hunt 2 15-intent C11 (every setting has a Config control): Bill's detection keys.
+        auto* holdMs = addText(QStringLiteral("Detection hold"), QStringLiteral("subtitle_hold_ms"), QStringLiteral("ms"));
+        holdMs->setValidator(new QIntValidator(0,1000,holdMs));
+        holdMs->setToolTip(QStringLiteral("Bill's setting. How long a detected subtitle is kept after the detector loses it "
+            "(0-1000 ms, default 250), so a brief miss does not drop the box. (Key: subtitle_hold_ms.)"));
+        auto* nearBar = addText(QStringLiteral("Near-bar distance"), QStringLiteral("subtitle_near_bar_px"), QStringLiteral("source pixels"));
+        nearBar->setValidator(new QIntValidator(0,200,nearBar));
+        nearBar->setToolTip(QStringLiteral("Bill's setting. A subtitle this close to the black bar (0-200 source pixels, "
+            "default 20) counts as next to it. (Key: subtitle_near_bar_px.)"));
         auto* commonForm=form;
         form = addCollapsibleSection(QStringLiteral("classic"), QStringLiteral("Classic picture movement"), QString(), true);
         auto* classicSection=profileFieldsLayout->itemAt(profileFieldsLayout->count()-1)->widget();
@@ -9846,6 +9903,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if (key.startsWith(QStringLiteral("calibration_lut_"))) return QStringLiteral("none");
                 if (key.startsWith(QStringLiteral("diagnostic_")) || key == QStringLiteral("output_diagnostics")) return QStringLiteral("false");
                 if (key == QStringLiteral("output_path_profile")) return QStringLiteral("legacy");
+                if (key == QStringLiteral("subtitle_detection_optimization")) return QStringLiteral("baseline");
                 return QStringLiteral("auto");
             }
             if (sectionPrefix == QStringLiteral("queue"))
@@ -9880,6 +9938,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 if(key == QStringLiteral("subtitle_engage_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_ENGAGE_DRIFT_MS);
                 if(key == QStringLiteral("subtitle_release_drift_ms")) return QString::number(RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_RELEASE_DRIFT_MS);
                 if(key == QStringLiteral("subtitle_target_buffer_pixels")) return QStringLiteral("10");
+                if(key == QStringLiteral("subtitle_hold_ms")) return QStringLiteral("250");
+                if(key == QStringLiteral("subtitle_near_bar_px")) return QStringLiteral("20");
                 if(key == QStringLiteral("subtitle_text_color")) return QStringLiteral("FFFFFF");
                 if(key == QStringLiteral("subtitle_generated_gray_color")) return value(section,QStringLiteral("type"))==QStringLiteral("black") ? QStringLiteral("000000") : QStringLiteral("040404");
                 if(key == QStringLiteral("minimum_headroom_pixels")) return QStringLiteral("12");
@@ -9960,7 +10020,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" },
                     // Render-ahead (docs/VP-render-ahead-design.md).
                     { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
@@ -10988,8 +11048,63 @@ QWidget* ConfigEditorWindow::createDirectShowPage()
         { QStringLiteral("AUTO"), QStringLiteral("BT2020"), QStringLiteral("DCI-P3"), QStringLiteral("BT709"),
           QStringLiteral("NTSC_SYSM"), QStringLiteral("NTSC_SYSBG"), QStringLiteral("CIE1931_ZYX"), QStringLiteral("ACES") }));
 
+    // Hunt 2 15-intent C11 (every setting has a Config control): Bill's [directshow.conversion]
+    // and [directshow.ppm] keys. Empty / Not set = the built-in default; nothing is written
+    // until a value is entered.
+    // A text field that creates its section when the file has none yet (bindTextField
+    // writes only into an existing section).
+    const auto sectionText = [this](const QString& sectionName, const QString& key)
+    {
+        const QString configured = value(sectionName, key);
+        auto* edit = new QLineEdit(configured.compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 ?
+            QStringLiteral("Auto") : configured);
+        edit->setObjectName(controlName(sectionName, key));
+        edit->setAccessibleName(accessibleSettingName(key));
+        connect(edit, &QLineEdit::textChanged, this, [this, sectionName, key](const QString& text)
+        {
+            if (!document_) return;
+            const std::string s = sectionName.toStdString(), k = key.toStdString();
+            if (text.trimmed().isEmpty()) document_->RemoveKnown(s, k.c_str());
+            else if (!document_->SetKnown(s, k.c_str(), text.trimmed().toLocal8Bit().constData()))
+            {
+                document_->AddSection(s);
+                document_->SetKnown(s, k.c_str(), text.trimmed().toLocal8Bit().constData());
+            }
+            markDirty();
+        });
+        return edit;
+    };
+    auto* conversion = new QWidget;
+    auto* conversionForm = new QFormLayout(conversion);
+    conversionForm->setContentsMargins(0, 0, 0, 0);
+    conversionForm->setVerticalSpacing(8);
+    conversionForm->addRow(QStringLiteral("Conversion method"), bindChoiceField(QStringLiteral("directshow.conversion"),
+        QStringLiteral("conversion_method"),
+        { QString(), QStringLiteral("auto"), QStringLiteral("simd"), QStringLiteral("optimized"), QStringLiteral("standard") },
+        { QStringLiteral("Not set (Auto)"), QStringLiteral("Auto"), QStringLiteral("SIMD"), QStringLiteral("Optimized"),
+          QStringLiteral("Standard") }));
+    // chroma_downsampling stays manual-only by design (opt-in ADVANCED P010 chroma; the
+    // coverage test's allow-list and testUnrelatedContentRemainsExact).
+    for (const auto& core : { std::make_pair("min_core_count", "Minimum cores"), std::make_pair("max_core_count", "Maximum cores") })
+    {
+        auto* edit = sectionText(QStringLiteral("directshow.conversion"), QString::fromLatin1(core.first));
+        edit->setValidator(new QIntValidator(1, INT_MAX, edit));
+        edit->setPlaceholderText(QStringLiteral("Not set (automatic)"));
+        edit->setToolTip(QStringLiteral("Bill's setting: the CPU cores the frame conversion may use (1 or more). "
+            "Empty = automatic. (Key: %1.)").arg(QString::fromLatin1(core.first)));
+        conversionForm->addRow(QString::fromLatin1(core.second), edit);
+    }
+    auto* ppm = sectionText(QStringLiteral("directshow.ppm"), QStringLiteral("ppm"));
+    ppm->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("(?i)a|au|aut|auto|-?[0-9]{0,7}")), ppm));
+    ppm->setPlaceholderText(QStringLiteral("Not set (AUTO)"));
+    ppm->setToolTip(QStringLiteral("Bill's setting: the capture clock's deviation in parts per million that DirectShow "
+        "timing corrects for - AUTO (measured) or an integer from -1000000 to 1000000. (Key: [directshow.ppm] ppm.)"));
+    conversionForm->addRow(QStringLiteral("Clock correction (ppm)"), ppm);
     cards->addCard(createCard(QStringLiteral("Timing"),
         QStringLiteral("Timing controls used only by DirectShow renderers."), timing));
+    cards->addCard(createCard(QStringLiteral("Conversion"),
+        QStringLiteral("DirectShow frame conversion and clock correction (Bill's settings)."), conversion));
     cards->addCard(createCard(QStringLiteral("Renderer overrides"),
         QStringLiteral("DirectShow color overrides. Auto lets the renderer decide."), overrides));
     return createPage(QStringLiteral("General"),

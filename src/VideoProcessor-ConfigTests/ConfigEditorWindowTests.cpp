@@ -17,6 +17,7 @@
 #include <led/LedDriveConfig.h>
 #include <MainConfigSchema.h>
 #include <set>
+#include <regex>
 #include <iterator>
 #include <algorithm>
 #include <fstream>
@@ -8849,14 +8850,31 @@ static std::set<std::string> RendererValidatedKeys()
         if (start == std::string::npos) continue;
         const size_t end = text.find("\n\tinline ", start + 10);
         const std::string body = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        const std::string marker = "key == \"";
-        for (size_t at = body.find(marker); at != std::string::npos; at = body.find(marker, at + 1))
-        {
-            const size_t open = at + marker.size();
-            const size_t close = body.find('"', open);
-            if (close != std::string::npos) keys.insert(body.substr(open, close - open));
-        }
+        // Hunt 2 15-intent C11: any spacing (`key=="x"` was missed before).
+        static const std::regex marker(R"re(key\s*==\s*"([^"]+)")re");
+        for (std::sregex_iterator it(body.begin(), body.end(), marker), last; it != last; ++it)
+            keys.insert((*it)[1].str());
     }
+    return keys;
+}
+
+// Hunt 2 15-intent C11: every key of every MainConfigSchema rule list (GeneralRules and the
+// lists inside Validate: [general] recovery, queue, [directshow], [decklink],
+// [directshow.conversion], [directshow.ppm], [shortcuts], queue recovery, LLDV, logging),
+// read from the schema's source: ConfigSchema::<Type>("key" ...) and { "key", <validator> }.
+static std::set<std::string> MainSchemaKeys()
+{
+    std::string path = __FILE__;
+    std::replace(path.begin(), path.end(), '/', '\\');
+    path.resize(path.rfind("\\src\\") + 5);
+    std::ifstream file(path + "VideoProcessor-Lib\\MainConfigSchema.h", std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::set<std::string> keys;
+    static const std::regex typed(R"re(ConfigSchema::\w+\(\s*"([A-Za-z0-9_]+)")re");
+    static const std::regex custom(R"re(\{\s*"([a-z0-9_]+)",\s*\[)re");
+    for (const std::regex* pattern : { &typed, &custom })
+        for (std::sregex_iterator it(text.begin(), text.end(), *pattern), last; it != last; ++it)
+            keys.insert((*it)[1].str());
     return keys;
 }
 
@@ -8921,8 +8939,14 @@ void testEverySchemaKeyHasAConfigControl()
         { "subtitle_box_padding_sides_percent", "legacy subtitle key" },
         { "subtitle_box_padding_top_percent", "legacy subtitle key" },
         { "subtitle_box_padding_bottom_percent", "legacy subtitle key" },
-        { "subtitle_hold_ms", "legacy subtitle key" }, { "subtitle_move_inset", "legacy subtitle key" },
-        { "subtitle_near_bar_px", "legacy subtitle key" }, { "subtitle_padding_pixels", "legacy subtitle key" },
+        { "subtitle_move_inset", "legacy subtitle key" }, { "subtitle_padding_pixels", "legacy subtitle key" },
+        // MainConfigSchema: names used only inside a validator, not keys.
+        { "value", "validator helper name (frame_offset's integer form), not a key" },
+        { "alias", "validator helper name ([renderer_alias] values are per-alias keys), not a key" },
+        { "chroma_downsampling", "deliberately manual-only: the opt-in ADVANCED P010 chroma policy has no UI "
+            "(testUnrelatedContentRemainsExact requires it hidden)" },
+        { "presentation_lead_frames", "legacy: Config migrates [directshow] presentation_lead_frames into the "
+            "first queue profile's lead_frames, which has the control" },
         { "subtitle_fit", "retired Screen setting (ignored)" },
         { "temporal_fill", "alias: legacy Subtitles switch for cleanup_fill temporal (cleanup_fill has the control)" },
     };
@@ -8935,7 +8959,13 @@ void testEverySchemaKeyHasAConfigControl()
     for (const auto& rule : LedDrive::LedDriveRules()) check("led_drive", rule.key);
     for (const auto& rule : LedDrive::ProjectorRules()) check("projector", rule.key);
     for (const auto& rule : MainConfigSchema::GeneralRules()) check("general", rule.key);
+    const std::set<std::string> schemaKeys = MainSchemaKeys();
+    require(schemaKeys.count("rgb_10bit_packing") && schemaKeys.count("ppm") && schemaKeys.count("fullscreen"),
+        "the main schema's keys were not found");
+    for (const std::string& key : schemaKeys) check("schema", key);
     const std::set<std::string> rendererKeys = RendererValidatedKeys();
+    require(rendererKeys.count("subtitle_detection_optimization") != 0,
+        "the renderer validators' unspaced keys were not found");
     require(rendererKeys.size() > 100, "the renderer validators' keys were not found");
     for (const std::string& key : rendererKeys) check("renderer", key);
     std::string list;
