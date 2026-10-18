@@ -36,7 +36,9 @@
 // vtable. The check is equality, so a gap in the numbering is harmless.
 // 39: GetCalibrationOutput / SetCalibrationPattern (automatic calibration,
 // 2026-10-17; claimed 36 on its branch), after GetIntentStatus /
-// SetAmbientLux in the vtable.
+// SetAmbientLux in the vtable. Calibration phase 2 grew PatternOutputInfo
+// (VP's tone curve and the HDR metadata sent) within 39, before any 39 build
+// shipped (integration round 4).
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the

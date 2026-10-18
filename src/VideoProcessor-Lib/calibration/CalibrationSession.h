@@ -71,6 +71,9 @@ namespace Calibration
 		Discarded,
 		Cancelled,
 		Failed,
+		// Phase 2 (appended: the text names, not the numbers, cross the RPC).
+		UserAction,   // waiting for the user to do what the instruction says (room lights), then Continue
+		Done,         // a verify-only run finished (nothing to apply)
 	};
 
 	const char* ToString(SessionStep step);
@@ -79,6 +82,7 @@ namespace Calibration
 	struct SessionStatus
 	{
 		SessionStep step = SessionStep::Idle;
+		std::string kind = "calibration"; // calibration, led, ambient, hdr_verify
 		std::string instruction;          // what the user should do now
 		std::string message;              // the last event / error
 		int patchIndex = 0, patchCount = 0;
@@ -112,29 +116,52 @@ namespace Calibration
 		double displayLatencySeconds = 0.0;
 	};
 
-	class CalibrationSession
+	// What the controller runs: the LUT calibration (CalibrationSession) or a
+	// phase 2 run (CalibrationRunBase.h). Commands from any thread; Step()
+	// on the controller's worker until Finished().
+	class ICalibrationRun
+	{
+	public:
+		virtual ~ICalibrationRun() = default;
+		virtual void Start() = 0;
+		virtual void Continue() = 0;
+		virtual void Skip() = 0;
+		virtual void Cancel() = 0;
+		virtual void Apply() = 0;
+		virtual void Discard() = 0;
+		virtual void Touch() = 0;
+		virtual bool Step() = 0;
+		virtual bool Finished() const = 0;
+		virtual SessionStatus Status() const = 0;
+		virtual double SecondsSinceTouch() = 0;
+		// Arguments of a command ("key: value" lines), before it is sent: the
+		// ambient check's lux for Continue. Default: ignored.
+		virtual void SetArguments(const std::string& arguments) { (void)arguments; }
+	};
+
+	class CalibrationSession final : public ICalibrationRun
 	{
 	public:
 		CalibrationSession(const CalibrationSettings& settings, const SessionEnvironment& environment,
 			std::unique_ptr<IMeter> meter, double meterFloorNits, IPatternSink& patterns, ISessionClock& clock);
-		~CalibrationSession();
+		~CalibrationSession() override;
 
 		// Commands (any thread).
-		void Start();
-		void Continue();
-		void Skip();
-		void Cancel();
-		void Apply();
-		void Discard();
+		void Start() override;
+		void Continue() override;
+		void Skip() override;
+		void Cancel() override;
+		void Apply() override;
+		void Discard() override;
 		// The UI is alive (the design's "Config silent for 60 s" safety).
-		void Touch();
+		void Touch() override;
 
 		// The worker: one unit of work. False once finished.
-		bool Step();
-		bool Finished() const;
-		SessionStatus Status() const;
+		bool Step() override;
+		bool Finished() const override;
+		SessionStatus Status() const override;
 		// The client last touched the session this long ago.
-		double SecondsSinceTouch();
+		double SecondsSinceTouch() override;
 
 		// Results (after Fitting).
 		const DisplayModel& Model() const { return model; }

@@ -49,6 +49,24 @@ namespace Calibration
 		uint16_t readbackCenter[3] = { 0, 0, 0 };
 		uint16_t readbackCorner[3] = { 0, 0, 0 };
 		char reason[256] = {};           // why patterns are unavailable
+		// Phase 2, HDR (PQ) verify: VP's own tone mapping for the source last
+		// rendered, sampled by the renderer with libplacebo's tone curve
+		// (pl_tone_map_sample with the frame's colour-map parameters), and the
+		// HDR metadata VP signals to the display. toneCurveCount 0 = not known
+		// (no video frame yet, or an SDR output). Nits in, nits out, rising.
+		// The layout change is a plugin ABI change: the API number stays at
+		// phase 1's value on this branch and is renumbered at merge.
+		static constexpr uint32_t ToneCurveMax = 64;
+		uint32_t toneCurveCount = 0;
+		float toneCurveSourceNits[ToneCurveMax] = {};
+		float toneCurveOutputNits[ToneCurveMax] = {};
+		float sourcePeakNits = 0.0f;     // the source's peak as libplacebo infers it
+		float targetPeakNits = 0.0f;     // VP's tone-mapping target (the display peak VP maps to)
+		float targetBlackNits = 0.0f;
+		bool toneMappingActive = false;  // false: VP passes the source through (noop)
+		char toneFunction[32] = {};      // libplacebo's tone-mapping function name
+		// What VP sends (the target colour space's HDR metadata).
+		float sentMaxLuma = 0.0f, sentMinLuma = 0.0f, sentMaxCll = 0.0f, sentMaxFall = 0.0f;
 	};
 
 	// PatternRequest::flags

@@ -70,6 +70,14 @@ namespace LedDrive
 			return 10000.0 * std::pow(std::max(n - c1, 0.0) / (c2 - c3 * n), 1.0 / m1);
 		}
 
+		double NitsToPq(double nits)
+		{
+			const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
+			const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
+			const double p = std::pow(std::max(0.0, std::min(nits / 10000.0, 1.0)), m1);
+			return std::pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
+		}
+
 		double HlgToNits(double x)
 		{
 			const double a = 0.17883277, b = 0.28466892, c = 0.55991073;
@@ -155,5 +163,44 @@ namespace LedDrive
 		Hash(hash, &function, sizeof(function));
 		if (colorMap) Hash(hash, &colorMap->tone_constants, sizeof(colorMap->tone_constants));
 		return hash;
+	}
+
+	ToneCurveSamples SampleToneCurve(const pl_color_space& sourceIn, const pl_color_space& targetIn,
+		const pl_color_map_params* colorMap, int count)
+	{
+		ToneCurveSamples out;
+		pl_color_space source{}, target{};
+		float range[4] = {};
+		Infer(sourceIn, targetIn, source, target, range);
+		pl_tone_map_params toneMap{};
+		toneMap.function = colorMap && colorMap->tone_mapping_function ?
+			colorMap->tone_mapping_function : &pl_tone_map_spline;
+		toneMap.constants = colorMap ? colorMap->tone_constants : pl_color_map_default_params.tone_constants;
+		toneMap.input_scaling = PL_HDR_NITS;
+		toneMap.output_scaling = PL_HDR_NITS;
+		toneMap.input_min = range[0];
+		toneMap.input_max = range[1];
+		toneMap.output_min = range[2];
+		toneMap.output_max = range[3];
+		toneMap.hdr = source.hdr;
+		pl_tone_map_params_infer(&toneMap);
+		const bool noop = pl_tone_map_params_noop(&toneMap);
+		out.sourceBlack = range[0];
+		out.sourcePeak = range[1];
+		out.targetBlack = range[2];
+		out.targetPeak = range[3];
+		out.active = !noop;
+		out.function = toneMap.function && toneMap.function->name ? toneMap.function->name : "";
+		const int n = std::max(2, std::min(count, 64));
+		const double lo = 0.005, hi = std::max(static_cast<double>(range[1]), 0.01);
+		for (int i = 0; i < n; ++i)
+		{
+			// Evenly spaced in PQ: dense where tone curves bend (the shoulder).
+			const double nits = PqToNits(NitsToPq(lo) + (NitsToPq(hi) - NitsToPq(lo)) * i / (n - 1));
+			out.sourceNits[i] = static_cast<float>(nits);
+			out.outputNits[i] = noop ? static_cast<float>(nits) : pl_tone_map_sample(static_cast<float>(nits), &toneMap);
+		}
+		out.count = n;
+		return out;
 	}
 }

@@ -23,4 +23,20 @@ namespace LedDrive
 	// Changes whenever BuildRawTransfer would build a different table.
 	uint64_t RawTransferSignature(const pl_color_space& source, const pl_color_space& target,
 		const pl_color_map_params* colorMap);
+
+	// Automatic calibration phase 2 (HDR verify): libplacebo's tone curve for
+	// this source / target / colour map, in nits, at `count` source levels
+	// (evenly spaced in PQ from 0.005 nits to the source peak) - the same inference and
+	// pl_tone_map_sample call as BuildRawTransfer.
+	struct ToneCurveSamples
+	{
+		int count = 0;
+		float sourceNits[64] = {};
+		float outputNits[64] = {};
+		float sourcePeak = 0.0f, sourceBlack = 0.0f, targetPeak = 0.0f, targetBlack = 0.0f;
+		bool active = false;           // false: the mapping is a no-op
+		const char* function = "";     // the function's name (static storage)
+	};
+	ToneCurveSamples SampleToneCurve(const pl_color_space& source, const pl_color_space& target,
+		const pl_color_map_params* colorMap, int count = 64);
 }

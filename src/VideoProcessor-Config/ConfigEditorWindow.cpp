@@ -14688,6 +14688,9 @@ namespace
             { QStringLiteral("discarded"), QStringLiteral("Discarded") },
             { QStringLiteral("cancelled"), QStringLiteral("Cancelled") },
             { QStringLiteral("failed"), QStringLiteral("Stopped") },
+            // Phase 2.
+            { QStringLiteral("user_action"), QStringLiteral("Your turn") },
+            { QStringLiteral("done"), QStringLiteral("Done") },
         };
         return titles.value(step, step);
     }
@@ -14695,7 +14698,8 @@ namespace
     bool calibrationStepFinal(const QString& step)
     {
         return step.isEmpty() || step == QStringLiteral("idle") || step == QStringLiteral("applied") ||
-            step == QStringLiteral("discarded") || step == QStringLiteral("cancelled") || step == QStringLiteral("failed");
+            step == QStringLiteral("discarded") || step == QStringLiteral("cancelled") || step == QStringLiteral("failed") ||
+            step == QStringLiteral("done");
     }
 }
 
@@ -14918,6 +14922,57 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
         "One run writes the BT.709, P3-D65 and BT.2020 LUTs; Apply attaches them to the live Color / Output profile."),
         target));
 
+    // ------------------------------------------- phase 2: the other runs
+    auto* runs = new QWidget;
+    auto* runsForm = new QFormLayout(runs);
+    runsForm->setContentsMargins(0, 0, 0, 0);
+    runsForm->setVerticalSpacing(8);
+    auto* fluxStep = integer(QStringLiteral("led_flux_step"), 1, 50, 5, QStringLiteral("LPW1 steps"));
+    fluxStep->setToolTip(QStringLiteral("Dynamic Drive run: the flux sweep's LPW1 step, from full light down to the "
+        "lowest level VP drives and back up (both directions show the hysteresis)."));
+    runsForm->addRow(QStringLiteral("Flux sweep step"), fluxStep);
+    auto* dwell = integer(QStringLiteral("led_dwell_ms"), 500, 20000, 3000, QStringLiteral("ms"));
+    dwell->setToolTip(QStringLiteral("Wait after each LPW1 change before the meter reads (the LED settling plus margin)."));
+    runsForm->addRow(QStringLiteral("LED dwell"), dwell);
+    runsForm->addRow(QStringLiteral("Readings per level"),
+        integer(QStringLiteral("led_reads_per_level"), 1, 8, 2, QStringLiteral("readings")));
+    auto* cntrMax = integer(QStringLiteral("led_cntr_sweep_max"), 50, 100, 74, QString());
+    cntrMax->setToolTip(QStringLiteral("The highest CNTR the run sets (from 50 up). Find where code 235 stops gaining "
+        "(dmd_clip_cntr) and where light stops rising (cntr_max_usable). CNTR goes back to 50 at the end or on Cancel."));
+    runsForm->addRow(QStringLiteral("CNTR sweep up to"), cntrMax);
+    runsForm->addRow(QStringLiteral("CNTR dwell"),
+        integer(QStringLiteral("led_cntr_dwell_ms"), 200, 20000, 1500, QStringLiteral("ms")));
+    auto* sensorPort = bindTextField(section, QStringLiteral("led_sensor_port"));
+    sensorPort->setPlaceholderText(QStringLiteral("None (latency not measured)"));
+    sensorPort->setMaximumWidth(160);
+    sensorPort->setToolTip(QStringLiteral("A fast light sensor (photodiode or VEML7700 in a fast mode on a "
+        "microcontroller, one reading per line: value, or device microseconds and value) on its own COM port. A "
+        "colorimeter is too slow for the LED's response time; without this sensor latency and settle are not measured."));
+    runsForm->addRow(QStringLiteral("Fast light sensor port"), sensorPort);
+    runsForm->addRow(QStringLiteral("Fast sensor speed"),
+        integer(QStringLiteral("led_sensor_baud"), 1200, 2000000, 115200, QStringLiteral("baud")));
+    runsForm->addRow(QStringLiteral("Steps per direction"),
+        integer(QStringLiteral("led_step_repeats"), 1, 10, 3, QString()));
+    auto* hdrCurve = bindChoiceField(section, QStringLiteral("hdr_verify_tone_curve"),
+        { QStringLiteral("vp"), QStringLiteral("bt2390"), QStringLiteral("none") },
+        { QStringLiteral("VP's own tone mapping"), QStringLiteral("BT.2390 model"), QStringLiteral("None (PQ as sent)") });
+    hdrCurve->setToolTip(QStringLiteral("HDR verify: the target for each PQ patch. VP's own = the tone curve VP uses for "
+        "the playing HDR source (falls back to BT.2390 before the first HDR frame)."));
+    runsForm->addRow(QStringLiteral("HDR verify target"), hdrCurve);
+    runsForm->addRow(QStringLiteral("HDR source peak (model)"),
+        number(QStringLiteral("hdr_verify_source_peak"), 100.0, 10000.0, 1000.0, 0, QStringLiteral("cd/m²")));
+    auto* record = bindCheckField(QStringLiteral("Record real meter transcripts (test-data format)"), section,
+        QStringLiteral("record_transcripts"), false);
+    record->setToolTip(QStringLiteral("Saves every spotread session as a script for VP's tests "
+        "(recorded_<meter>_<time>.txt): commit one to src\\VideoProcessor-Test\\data\\spotread."));
+    runsForm->addRow(QString(), record);
+    auto* transcripts = bindTextField(section, QStringLiteral("transcript_folder"));
+    transcripts->setPlaceholderText(QStringLiteral("luts\\calibration\\transcripts"));
+    runsForm->addRow(QStringLiteral("Transcript folder"), browseRow(transcripts, true, QString()));
+    cards->addCard(createCard(QStringLiteral("Dynamic Drive, room light and HDR runs"), QStringLiteral(
+        "Choose the run in Calibrate. The Dynamic Drive run steps the projector's LED and CNTR within its ranges and "
+        "always restores full light and CNTR 50."), runs));
+
     // ------------------------------------------------------------ wizard
     auto* wizard = new QWidget;
     auto* wizardLayout = new QVBoxLayout(wizard);
@@ -14952,6 +15007,33 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     review->setMinimumHeight(140);
     review->setVisible(false);
     wizardLayout->addWidget(review);
+    // Phase 2: which run Start begins, and the room's lux for the ambient check.
+    auto* runRow = new QWidget;
+    auto* runLayout = new QHBoxLayout(runRow);
+    runLayout->setContentsMargins(0, 0, 0, 0);
+    runLayout->addWidget(new QLabel(QStringLiteral("Run")));
+    auto* runKind = new QComboBox;
+    runKind->setObjectName(QStringLiteral("calibration.wizard.kind"));
+    runKind->addItem(QStringLiteral("Display calibration (3D LUTs)"), QStringLiteral("calibration"));
+    runKind->addItem(QStringLiteral("Dynamic Drive characterisation (projector LED / CNTR)"), QStringLiteral("led"));
+    runKind->addItem(QStringLiteral("Ambient-light check (screen reflectance)"), QStringLiteral("ambient"));
+    runKind->addItem(QStringLiteral("HDR (PQ) verify"), QStringLiteral("hdr_verify"));
+    runKind->setToolTip(QStringLiteral("Display calibration builds the LUTs. Dynamic Drive measures the flux table, the "
+        "CNTR curve and (with a fast sensor) the LED timing. Ambient-light measures black and white with the room "
+        "lights off and on (ambient_screen_reflect). HDR verify measures PQ tracking and dE ITP."));
+    runLayout->addWidget(runKind, 1);
+    runLayout->addWidget(new QLabel(QStringLiteral("Room light")));
+    auto* lux = new QDoubleSpinBox;
+    lux->setObjectName(QStringLiteral("calibration.wizard.lux"));
+    lux->setRange(0.0, 200000.0);
+    lux->setDecimals(1);
+    lux->setSuffix(QStringLiteral(" lux"));
+    lux->setSpecialValueText(QStringLiteral("Sensor"));
+    lux->setMaximumWidth(130);
+    lux->setToolTip(QStringLiteral("Ambient-light check without VP's light sensor: the room's lux, sent with Continue "
+        "(a phone light-meter app is close enough). Sensor: VP's [ambient] sensor reading; a dark room counts as 0."));
+    runLayout->addWidget(lux);
+    wizardLayout->addWidget(runRow);
     auto* buttons = new QWidget;
     auto* buttonLayout = new QHBoxLayout(buttons);
     buttonLayout->setContentsMargins(0, 0, 0, 0);
@@ -14966,11 +15048,16 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
         button->setEnabled(action.first == QStringLiteral("start"));
         buttonLayout->addWidget(button);
         const QString command = action.first;
-        connect(button, &QPushButton::clicked, this, [this, command]()
+        connect(button, &QPushButton::clicked, this, [this, command, runKind, lux]()
         {
             if (command == QStringLiteral("start") && dirty_)
                 setWarningStatus(QStringLiteral("Calibration uses the saved settings: Apply your changes first."));
-            runCalibrationCommand(command);
+            QString arguments;
+            if (command == QStringLiteral("start"))
+                arguments = QStringLiteral("kind: ") + runKind->currentData().toString();
+            else if (command == QStringLiteral("continue") && lux->value() > 0.0)
+                arguments = QStringLiteral("lux: ") + QString::number(lux->value(), 'f', 1);
+            runCalibrationCommand(command, arguments);
         });
     }
     buttonLayout->addStretch(1);
@@ -15004,7 +15091,7 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
         cards);
 }
 
-void ConfigEditorWindow::runCalibrationCommand(const QString& command)
+void ConfigEditorWindow::runCalibrationCommand(const QString& command, const QString& arguments)
 {
     if (noTarget_ || calibrationRpcThread_) return;
     const bool remote = remoteClient_ != nullptr;
@@ -15013,11 +15100,12 @@ void ConfigEditorWindow::runCalibrationCommand(const QString& command)
     struct Outcome { bool ok = false; QString text, error; };
     const auto outcome = std::make_shared<Outcome>();
     const std::string commandText = command.toStdString();
-    QThread* worker = QThread::create([outcome, host, rpcPort, commandText]()
+    const std::string argumentText = arguments.toStdString();
+    QThread* worker = QThread::create([outcome, host, rpcPort, commandText, argumentText]()
     {
         ConfigurationRpcClient client(host.toStdString(), rpcPort);
         std::string status, error;
-        outcome->ok = client.Calibration(commandText, std::string(), status, error);
+        outcome->ok = client.Calibration(commandText, argumentText, status, error);
         outcome->text = QString::fromStdString(status);
         outcome->error = QString::fromStdString(error);
     });
@@ -15100,10 +15188,12 @@ void ConfigEditorWindow::applyCalibrationStatus(const QString& text, const QStri
     else
     {
         progress->setRange(0, 1);
-        progress->setValue(state == QStringLiteral("review") || state == QStringLiteral("applied") ? 1 : 0);
+        progress->setValue(state == QStringLiteral("review") || state == QStringLiteral("applied") ||
+            state == QStringLiteral("done") ? 1 : 0);
         progress->setFormat(QString());
     }
-    const bool showReview = state == QStringLiteral("review") || state == QStringLiteral("applied");
+    const bool showReview = state == QStringLiteral("review") || state == QStringLiteral("applied") ||
+        state == QStringLiteral("done");
     review->setVisible(showReview);
     if (showReview)
     {
@@ -15120,7 +15210,8 @@ void ConfigEditorWindow::applyCalibrationStatus(const QString& text, const QStri
         !s.value(QStringLiteral("diff")).startsWith(QStringLiteral("Apply is not possible"));
     const QMap<QString, bool> enabled = {
         { QStringLiteral("start"), calibrationStepFinal(state) },
-        { QStringLiteral("continue"), state == QStringLiteral("meter_calibration") || state == QStringLiteral("placement") },
+        { QStringLiteral("continue"), state == QStringLiteral("meter_calibration") || state == QStringLiteral("placement") ||
+            state == QStringLiteral("user_action") },
         { QStringLiteral("skip"), state == QStringLiteral("warm_up") },
         { QStringLiteral("apply"), canApply },
         { QStringLiteral("discard"), state == QStringLiteral("review") },
@@ -15139,7 +15230,9 @@ void ConfigEditorWindow::applyCalibrationStatus(const QString& text, const QStri
     // The run changed the configuration VP uses: reload it here too.
     if (state == QStringLiteral("applied") && previous != QStringLiteral("applied") && command == QStringLiteral("status"))
     {
-        setStatus(QStringLiteral("Calibration applied: VP attached the new LUTs. Reloading the configuration."));
+        setStatus(s.value(QStringLiteral("kind")) == QStringLiteral("calibration") || s.value(QStringLiteral("kind")).isEmpty() ?
+            QStringLiteral("Calibration applied: VP attached the new LUTs. Reloading the configuration.") :
+            QStringLiteral("Calibration result applied. Reloading the configuration."));
         if (!dirty_) discardEdits();
     }
 }

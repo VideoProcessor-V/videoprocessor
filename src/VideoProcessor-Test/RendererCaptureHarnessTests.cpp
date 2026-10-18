@@ -4124,5 +4124,45 @@ namespace Tests
 			Assert::IsTrue(final.measured > 50);
 			Assert::IsTrue(r.Logged("Calibration patterns: ended"), r.Tail().c_str());
 		}
+
+		// Calibration phase 2 (HDR verify), GPU only: the renderer reports VP's own
+		// tone curve (libplacebo's, for the frame's colour mapping) and the HDR
+		// metadata it sends with the output format - on a PQ output only. On an SDR
+		// output the fields stay empty (the verify run refuses SDR).
+		BEGIN_TEST_METHOD_ATTRIBUTE(CalibrationToneCurveReportedWithTheOutput)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(CalibrationToneCurveReportedWithTheOutput)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("CalibrationToneCurveReportedWithTheOutput")) return;
+			Calibration::PatternOutputInfo info;
+			bool read = false;
+			FramePlan plan;
+			plan.tick = [&](IVideoRenderer& renderer, double t)
+			{
+				if (!read && t >= 1.5) read = renderer.GetCalibrationOutput(info);
+			};
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, false, std::string(), false, &plan);
+			Assert::IsTrue(r.presented, r.Tail().c_str());
+			Assert::IsTrue(read, L"GetCalibrationOutput reports the output");
+			Logger::WriteMessage(("transfer " + std::to_string(static_cast<int>(info.transfer)) + " tone points " +
+				std::to_string(info.toneCurveCount) + " function " + info.toneFunction + " source peak " +
+				std::to_string(info.sourcePeakNits) + " target peak " + std::to_string(info.targetPeakNits) + "\n").c_str());
+			if (info.transfer != Calibration::SignalTransfer::Pq)
+			{
+				Assert::AreEqual(0u, info.toneCurveCount, L"no tone curve on an SDR output");
+				Logger::WriteMessage("SKIP-PQ-OUTPUT the harness output is SDR: run with an HDR output for the curve checks\n");
+				return;
+			}
+			Assert::IsTrue(info.toneCurveCount >= 2);
+			Assert::IsTrue(info.targetPeakNits > 0.0f && info.sourcePeakNits > 0.0f);
+			for (uint32_t i = 1; i < info.toneCurveCount; ++i)
+			{
+				Assert::IsTrue(info.toneCurveSourceNits[i] > info.toneCurveSourceNits[i - 1]);
+				Assert::IsTrue(info.toneCurveOutputNits[i] >= info.toneCurveOutputNits[i - 1]);
+				Assert::IsTrue(info.toneCurveOutputNits[i] <= info.targetPeakNits * 1.01f + 0.01f);
+			}
+		}
 	};
 }

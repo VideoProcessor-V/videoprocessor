@@ -994,7 +994,7 @@ namespace VideoProcessorTest
 			// Every rule key appears exactly once in the schema.
 			std::set<std::string> keys;
 			for (const ConfigSchema::KeyRule& r : ConfigRules()) Assert::IsTrue(keys.insert(r.key).second);
-			Assert::AreEqual(size_t(22), keys.size());
+			Assert::AreEqual(size_t(34), keys.size());   // 22 + 12 from calibration phase 2
 
 			for (const char* bad : { "plan: huge\n", "meter_port: -1\n", "lut_size: 32\n", "display_type: l; rm\n",
 				"patch_window_percent: 120\n", "unknown_key: 1\n", "verify_after: maybe\n" })

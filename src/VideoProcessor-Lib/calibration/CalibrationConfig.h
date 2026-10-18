@@ -75,6 +75,23 @@ namespace Calibration
 		double targetWhitePercent = 100.0;
 		int lutSize = 33;
 		bool verifyAfter = true;
+
+		// Phase 2 (docs/agent-reports/calibration-phase2.md).
+		// Real-meter transcripts saved in the test-data script format.
+		bool recordTranscripts = false;
+		std::string transcriptFolder;      // "" = <vp>\luts\calibration\transcripts
+		// Dynamic Drive (LED) characterisation run.
+		int ledFluxStep = 5;               // LPW1 step of the flux sweep (both directions)
+		int ledDwellMs = 3000;             // after each LPW1 change, before the readings
+		int ledReadsPerLevel = 2;          // white readings per LPW1 level
+		int ledCntrSweepMax = 74;          // the highest CNTR of the sweep (clamped to the profile)
+		int ledCntrDwellMs = 1500;         // after each CNTR change
+		std::string ledSensorPort;         // fast light sensor for latency / settle ("" = not measured)
+		int ledSensorBaud = 115200;
+		int ledStepRepeats = 3;            // step responses per direction
+		// HDR (PQ) verify run.
+		double hdrVerifySourcePeak = 1000.0;  // the BT.2390 model's source peak when VP's curve is unknown
+		std::string hdrVerifyToneCurve = "vp"; // vp (VP's own, else bt2390), bt2390, none
 	};
 
 	inline const char* ToString(DisplayKind kind)
@@ -155,6 +172,26 @@ namespace Calibration
 			ConfigSchema::Number("target_white_percent", 25.0, 100.0),
 			ConfigSchema::Choice("lut_size", { "17", "33", "65" }),
 			ConfigSchema::Boolean("verify_after"),
+			// Phase 2.
+			ConfigSchema::Boolean("record_transcripts"),
+			ConfigSchema::Any("transcript_folder"),
+			ConfigSchema::Integer("led_flux_step", 1, 50),
+			ConfigSchema::Integer("led_dwell_ms", 500, 20000),
+			ConfigSchema::Integer("led_reads_per_level", 1, 8),
+			ConfigSchema::Integer("led_cntr_sweep_max", 50, 100),
+			ConfigSchema::Integer("led_cntr_dwell_ms", 200, 20000),
+			ConfigSchema::KeyRule{ "led_sensor_port", [](const std::string& value)
+				{
+					const std::string port = ConfigFile::NormalizeName(value);
+					if (port.empty() || port == "none") return true;
+					return port.size() > 3 && port.compare(0, 3, "com") == 0 &&
+						port.find_first_not_of("0123456789", 3) == std::string::npos &&
+						std::atoi(port.c_str() + 3) >= 1 && std::atoi(port.c_str() + 3) <= 256;
+				}, "empty (none) or COM1 through COM256" },
+			ConfigSchema::Integer("led_sensor_baud", 1200, 2000000),
+			ConfigSchema::Integer("led_step_repeats", 1, 10),
+			ConfigSchema::Number("hdr_verify_source_peak", 100.0, 10000.0),
+			ConfigSchema::Choice("hdr_verify_tone_curve", { "vp", "bt2390", "none" }),
 		};
 		return rules;
 	}
@@ -247,6 +284,36 @@ namespace Calibration
 			if (n == 17 || n == 33 || n == 65) s.lutSize = n;
 		}
 		if (config.TryGetString(section, "verify_after", raw)) Detail::ParseBool(raw, s.verifyAfter);
+		if (config.TryGetString(section, "record_transcripts", raw)) Detail::ParseBool(raw, s.recordTranscripts);
+		if (config.TryGetString(section, "transcript_folder", raw)) s.transcriptFolder = ConfigFile::Trim(raw);
+		auto readInt = [&](const char* key, int lo, int hi, int& out)
+		{
+			if (!config.TryGetString(section, key, raw)) return;
+			const int v = std::atoi(ConfigFile::Trim(raw).c_str());
+			if (v >= lo && v <= hi) out = v;
+		};
+		readInt("led_flux_step", 1, 50, s.ledFluxStep);
+		readInt("led_dwell_ms", 500, 20000, s.ledDwellMs);
+		readInt("led_reads_per_level", 1, 8, s.ledReadsPerLevel);
+		readInt("led_cntr_sweep_max", 50, 100, s.ledCntrSweepMax);
+		readInt("led_cntr_dwell_ms", 200, 20000, s.ledCntrDwellMs);
+		readInt("led_sensor_baud", 1200, 2000000, s.ledSensorBaud);
+		readInt("led_step_repeats", 1, 10, s.ledStepRepeats);
+		if (config.TryGetString(section, "led_sensor_port", raw))
+		{
+			s.ledSensorPort = ConfigFile::Trim(raw);
+			if (ConfigFile::NormalizeName(s.ledSensorPort) == "none") s.ledSensorPort.clear();
+		}
+		if (config.TryGetString(section, "hdr_verify_source_peak", raw))
+		{
+			double v = 0.0;
+			if (Detail::ReadNumber(raw, v) && v >= 100.0 && v <= 10000.0) s.hdrVerifySourcePeak = v;
+		}
+		if (config.TryGetString(section, "hdr_verify_tone_curve", raw))
+		{
+			const std::string n = ConfigFile::NormalizeName(raw);
+			if (n == "vp" || n == "bt2390" || n == "none") s.hdrVerifyToneCurve = n;
+		}
 		// Clamp what the schema allows but the session cannot use.
 		if (s.nearBlackMaxReads < 1) s.nearBlackMaxReads = 1;
 		if (s.readTimeoutSeconds < 5) s.readTimeoutSeconds = 5;

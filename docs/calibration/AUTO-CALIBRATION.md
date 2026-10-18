@@ -16,6 +16,10 @@ LUTs to your live Color / Output profile.
 Until you press Apply, nothing in your configuration changes. Discard and
 Cancel leave `VideoProcessor.cfg` exactly as it was.
 
+The same wizard also characterises a projector's Dynamic Drive (LED),
+measures the screen's reflectance of room light and verifies an HDR
+display (section 12).
+
 The wizard works with any ArgyllCMS-supported meter. The result is a set
 of `.cube` files, a display profile, a verification report and a backup
 of your configuration.
@@ -150,7 +154,7 @@ and create a CCSS for a colorimeter.
 
 One report in VP's design notes has a Calibrite Display Plus HL hanging
 in ArgyllCMS 3.1.0. VP's real-meter path has also not yet been run on
-real hardware (see section 12). So:
+real hardware (see section 13). So:
 
 - buy from a seller that accepts returns;
 - install the current ArgyllCMS release and test the meter with it;
@@ -162,8 +166,9 @@ real hardware (see section 12). So:
 ## 5. Setting up
 
 Open the Config app, connect it to the running VP and go to the
-**Calibration** page. It has four cards: Meter, Display and patches,
-Target and LUT, and Calibrate. Changes need **Apply** in the Config app
+**Calibration** page. It has five cards: Meter, Display and patches,
+Target and LUT, Dynamic Drive, room light and HDR runs (section 12),
+and Calibrate. Changes need **Apply** in the Config app
 before **Start** uses them, because the wizard uses the saved settings.
 
 All values are stored in the `[calibration]` section of
@@ -421,6 +426,9 @@ gets an entry.
 - **Dynamic Drive (the LED drive) is held at full light** while patches
   show, so the light does not change during measuring. VP restarts it
   when the patches end.
+- **The Dynamic Drive characterisation** (section 12.1) drives LPW1 and
+  CNTR itself, inside the projector's ranges, and restores full light,
+  LDMM 0 and CNTR 50 on every way out, before the patches end.
 - **A renderer restart cancels the run.** A new signal or VP closing does
   the same. The renderer is returned to video.
 - **Config silent for 60 seconds cancels the run** during a measuring
@@ -450,20 +458,226 @@ gets an entry.
 VP's runtime log has more detail, for example a line starting
 "Calibration patterns: started".
 
-## 12. Current limits
+## 12. The other runs: Dynamic Drive, room light, HDR verify
+
+The **Run** list in the Calibrate card picks what Start does:
+
+| Run | What it measures | What it can change |
+|---|---|---|
+| Display calibration (3D LUTs) | Sections 6 and 7. | The calibration LUT keys. |
+| Dynamic Drive characterisation | The projector's light against its LED drive (LPW1) and contrast (CNTR); the LED's timing with a fast sensor. | `[projector.default]` flux_table, led_latency_ms, led_settle_ms, cntr_latency_ms, cntr_settle_ms, cntr_max_usable, dmd_clip_cntr; `[led_drive.default]` compensation_eotf. |
+| Ambient-light check | Screen black and white with the room lights off and on. | `[vprenderer]` ambient_screen_reflect. |
+| HDR (PQ) verify | How the display tracks PQ, with VP's tone mapping. | Nothing (a report). |
+
+All of them use the meter, placement and safety of the main wizard. The
+results that change settings end in the same Review as a calibration:
+the exact edits as a diff, then Apply (with the same backups and
+key-only edits as section 7.2) or Discard. Each run has its own folder,
+`luts\calibration\<display>\<timestamp>-led` (`-ambient`, `-hdr`), and
+an entry in `index.json`.
+
+The settings are on the **Dynamic Drive, room light and HDR runs** card:
+
+| Key | Control label | Default | Meaning |
+|---|---|---|---|
+| `led_flux_step` | Flux sweep step | 5 | The LPW1 step of the flux sweep. 1 to 50. |
+| `led_dwell_ms` | LED dwell | 3000 ms | Wait after each LPW1 change before reading. 500 to 20000. |
+| `led_reads_per_level` | Readings per level | 2 | White readings at each LPW1 level. 1 to 8. |
+| `led_cntr_sweep_max` | CNTR sweep up to | 74 | The highest CNTR the run sets. 50 to 100 (never above the projector's maximum). |
+| `led_cntr_dwell_ms` | CNTR dwell | 1500 ms | Wait after each CNTR change. 200 to 20000. |
+| `led_sensor_port` | Fast light sensor port | none | A fast light sensor's COM port, for the LED timing. |
+| `led_sensor_baud` | Fast sensor speed | 115200 | Its baud rate. |
+| `led_step_repeats` | Steps per direction | 3 | Timed steps per direction. 1 to 10. |
+| `hdr_verify_tone_curve` | HDR verify target | VP's own | `vp`, `bt2390` or `none` (section 12.3). |
+| `hdr_verify_source_peak` | HDR source peak (model) | 1000 cd/m2 | The BT.2390 model's source peak when VP's own curve is not known. |
+| `record_transcripts` | Record real meter transcripts | off | Section 12.4. |
+| `transcript_folder` | Transcript folder | `luts\calibration\transcripts` | Where recordings go. |
+
+### 12.1 Dynamic Drive characterisation (projector LED)
+
+For a projector with VP's RS-232 LED drive (the Barco F35 / FL35). It
+replaces the guessed values VP's Dynamic Drive uses today with measured
+ones.
+
+**Before you start:**
+
+- `[projector.default]` must name the protocol (`barco_ascii`) and the
+  port, as for the Dynamic Drive itself. The run uses the Dynamic Drive's
+  own driver on its own connection; VP stops its Dynamic Drive while the
+  patches show, so the port is free.
+- Let the projector warm up. The run has a warm-up step (`warmup_minutes`).
+- Darken the room. Place the meter as for a calibration.
+
+**What it does, in order:**
+
+1. A short greyscale at full light. Its effective gamma is
+   `compensation_eotf`.
+2. A white patch while LPW1 steps from full light (your `led_ceiling`,
+   255 by default) down to the lowest level VP ever drives
+   (`led_floor_black`, 60 by default), then back up. Two readings at each
+   level after the dwell. Black is measured at every fourth level. The
+   two directions show any hysteresis; the table is their mean, relative
+   to full light.
+3. At full light, CNTR from 50 up to `led_cntr_sweep_max`: code 235
+   (white), the highest legal code (WTW, limited range only) and black at
+   every step. Where white stops rising is `dmd_clip_cntr` (the DMD's
+   maximum); where every code stops rising is `cntr_max_usable`. CNTR then
+   goes back to 50.
+4. With a fast light sensor only: LED, CNTR and picture steps, each
+   recorded at the sensor's rate and fitted with a dead time plus a
+   first-order settle (an internal ramp is detected when it fits better).
+   The medians are `led_latency_ms` / `led_settle_ms` and
+   `cntr_latency_ms` / `cntr_settle_ms`. The picture steps give how much
+   later the LED lands than a picture change sent at the same time
+   (reported).
+5. Full light and CNTR 50 are restored, then the fits run and the Review
+   shows the results and the diff.
+
+It takes about 10 to 15 minutes with the defaults (about 18 with the
+fast sensor). The progress bar shows the time left.
+
+**Safety, at every step:**
+
+- Every LPW1 value stays between the lowest level VP drives and full
+  light, inside the projector's range (`light_min` / `light_max`, and the
+  projector's own range when read-back is on). Every CNTR value stays
+  between 50 and the sweep maximum, never above 100.
+- Full light (LPW1 to the ceiling), the standard dim mode (LDMM 0) and
+  CNTR 50 are sent at the start, at the end, on Cancel, on any error
+  (meter, projector, renderer), when Config goes silent for 60 s, when VP
+  closes, and before the patches end. If the projector does not confirm
+  the restore, VP tries again and the Review says so in capitals.
+- While the run drives the projector, a file
+  `luts\calibration\led-run-active.txt` exists. If VP stops in the middle
+  (a crash, power), its next start sees the file, sends full light,
+  LDMM 0 and CNTR 50, and removes it. VP's Dynamic Drive also sets full
+  light and CNTR 50 when it starts.
+
+**The fast light sensor.** A colorimeter takes a second or more per
+reading; the LED settles in about a tenth of that. For the timings,
+connect a fast sensor on its own COM port: a photodiode (BPW34 / OPT101)
+on a microcontroller's ADC at 1 kHz is best; a VEML7700 in a fast mode
+(25 ms) works. It prints one reading per line, either the value, or the
+device's microseconds then the value (`123456 0.734`, also
+`t=123456 v=0.734`). VP times plain values on arrival; device times are
+aligned to VP's clock, which removes USB jitter. It cannot share the
+projector's port or the room light sensor's port while `[ambient]` mode
+is `sensor`. Without it, the timing keys are left as they are.
+
+**Results** in the run folder:
+
+| File | What it is |
+|---|---|
+| `led_characterisation.cfg` | The keys Apply writes. |
+| `projector_profile_measured.txt` | The same values as device-profile sections (below). |
+| `led.json` | Every sample, the fits, the black tables and the restore result. |
+| `raw.jsonl`, `report.html` | The journal and a readable report. |
+
+**Device profiles (`.vpprojector`).** The Dynamic Drive device profiles
+(`profiles\dynamic-drive\*.vpprojector`, from the device-profile work)
+hold the same facts per projector. `projector_profile_measured.txt` has
+them in profile form: `[light] curve`, `[contrast] max_usable` and
+`dmd_clip`, `[timing] latency_ms`, `settle_ms`, `contrast_latency_ms` and
+`contrast_settle_ms`. To keep them in a profile, copy
+`barco-fl35.vpprojector`, replace those keys, raise `[profile] version`
+and point `[projector.default] device_profile` at the copy. The keys
+Apply writes to `[projector.default]` override a profile's values, so
+either route gives the same Dynamic Drive.
+
+### 12.2 Ambient-light check (screen reflectance)
+
+The intent interpreter's ambient adaptation (the Light-Sense-like room
+adaptation) needs to know how much the screen's black rises per lux of
+room light: `ambient_screen_reflect`, in cd/m2 per lux. This run measures
+it.
+
+1. Start with **Ambient-light check** selected. Place the meter as for a
+   calibration.
+2. **Your turn: lights off.** Switch the room lights off as when you
+   watch, then press Continue. VP measures black and white.
+3. **Your turn: lights on.** Switch them on as you normally have them
+   when lit, then press Continue. VP measures black and white again.
+4. The Review shows both, the black rise, and the suggestion
+   `ambient_screen_reflect = (black lit - black dark) / (lux lit - lux dark)`,
+   with the same figure from white as a cross-check.
+
+**The lux values** come from VP's room light sensor (`[ambient]` mode
+`sensor`). Without it, type the room's lux in the **Room light** box
+before you press Continue (a phone light-meter app is close enough); a
+dark room counts as 0 lux. At least 5 lux of difference is needed. The
+Review warns when the light changed by more than 20% during a
+measurement or when white and black disagree.
+
+**Apply** writes the value to `[vprenderer]` (a renderer profile key; a
+profile that sets its own value keeps it). The value is also kept in
+`ambient.cfg` in the run folder; a value VP rejects (outside 0..1) is
+refused with the reason.
+
+### 12.3 HDR (PQ) verify
+
+Checks an HDR display through VP's real HDR output. Play an HDR source
+with VP's HDR output on (the output must be PQ; an SDR output is refused
+with a message), then Start with **HDR (PQ) verify** selected.
+
+- The patches are exact PQ codes in VP's output. The HDR metadata VP
+  sends is left exactly as it is; the Review lists it (mastering max /
+  min, MaxCLL, MaxFALL).
+- The first patch is PQ 10000: the display's measured peak.
+- Then greys from 0.05 cd/m2 up to the source's peak (with 203 cd/m2,
+  the HDR reference white), and P3 primaries and secondaries at 100 and
+  400 cd/m2.
+- **The target** is what VP itself would send for that source light:
+  - `vp` (default): VP's own tone mapping for the playing source. The
+    renderer reports libplacebo's curve with the frame's settings
+    (function, source peak, the target peak VP maps to). When VP maps to
+    a display peak lower than the source's, the targets follow that
+    curve; otherwise they are the source light. Before VP has rendered an
+    HDR frame, the BT.2390 model is used and the Review says so.
+  - `bt2390`: the ITU-R BT.2390 EETF from `hdr_verify_source_peak` to
+    VP's target peak (else the measured display peak).
+  - `none`: the PQ code's light is the target.
+- **The report**, per patch: target and measured luminance, the tracking
+  error in percent and **dE ITP** (ITU-R BT.2124; about 1 is a just
+  visible difference). The summary has the mean, 95th percentile and
+  maximum. A patch whose target is above the display's measured peak is
+  marked and not counted; the black patch and the peak probe are
+  reported but not counted. The guide verdict is mean <= 2 and max <= 4.
+- Nothing in the configuration changes. The run ends in **Done** with
+  `hdr_verify.json` and `report.html` in its folder.
+
+### 12.4 Recording real meter transcripts
+
+VP's meter code was built against modelled spotread output. With
+**Record real meter transcripts** on, every spotread session (the main
+wizard and the other runs) is saved, when the meter closes, as
+`recorded_<meter>_<timestamp>.txt` in the transcript folder. The file is
+in the same script format as the test transcripts in
+`src\VideoProcessor-Test\data\spotread` (README there): the output lines,
+prompts, the keys VP sent, the meter's time per reading and spotread's
+exit code, with the meter, the Argyll version and spotread's arguments
+in the header. The install folder is not recorded. Send or commit one
+as `recorded_<meter>.txt`: it replaces the modelled transcripts in VP's
+tests. Turn recording off afterwards; it is off by default.
+
+## 13. Current limits
 
 Be aware of these:
 
-- **LED characterisation is not in the wizard yet.** The flux table, the
-  CNTR curve and the LED latency are not measured by the wizard. They
-  stay as they are today.
-- **Ambient light checks are not wired.** The wizard does not check or
-  report room light. Darken the room yourself.
-- **HDR (PQ) output measurement is implemented, but SDR is the tested
-  path.** Treat an HDR run as experimental.
 - **The real-meter path has not been run on real hardware.** No meter was
-  available while the feature was built. It is covered by a hardware test
-  that is off by default and is switched on with `VP_TEST_METER=1`. The
-  rest was tested with a fake spotread program and a simulated display.
-  Expect rough edges with your first real meter. Use the Dry run first,
-  then the Quick plan, before a long run.
+  available while the feature was built. It is covered by hardware tests
+  that are off by default (`VP_TEST_METER=1`). The rest was tested with a
+  fake spotread program and a simulated display. Expect rough edges with
+  your first real meter. Use the Dry run first, then the Quick plan,
+  before a long run. Record a transcript (12.4) with your first sessions.
+- **The Dynamic Drive run has not driven the real projector yet.** Its
+  restore is covered by a hardware test (`VP_TEST_PROJECTOR=COMn`). Stay
+  near the projector for the first run.
+- **The LED timing needs a fast light sensor.** Without one, the run
+  measures the flux table, the CNTR curve and compensation_eotf only.
+- **Custom LED dim (LDMM 1) is not characterised.** The run always keeps
+  the standard dim mode.
+- **HDR verify on a real HDR output is untested.** VP's tone-curve report
+  needs a GPU run; until then trust the per-patch numbers more than the
+  verdict.
+- **Room light during a calibration is not watched.** Darken the room
+  yourself. The ambient-light check measures it deliberately instead.
