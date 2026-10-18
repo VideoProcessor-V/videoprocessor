@@ -408,7 +408,12 @@ namespace LedDrive
 		// cntr_pair_predict - compensate's CNTR pairs against the LED where it will be
 		// when the CNTR lands (cntr_latency_ms ahead: the LPW1s in flight and the
 		// settle), not the LED now, so CNTR is never above the need when it lands
-		// (an LED rising from a dark scene). Off = paired against the LED now, as before.
+		// (an LED rising from a dark scene). cntr-cut fix 2026-10-18, same switch: during a
+		// bright cut's fade-up the software share it credits is at most the fade-up's gain
+		// ceiling (VP's gain cannot go higher then), and CNTR never rises (its ceiling follows
+		// each descent), so CNTR no longer drops to 50 on the previous scene's highlight and
+		// rises again. Off = paired against the LED now with vpHeadroom and the dump point
+		// only, as before.
 		bool cntrPairPredict = true;
 		// The fade-up's displayed-light ramp for the shortfall LED x CNTR x
 		// gain cannot yet reach: fast, bounded by the modelled light (the

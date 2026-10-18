@@ -199,6 +199,7 @@
     <ClInclude Include="led\ProjectorDriver.h" />
     <ClInclude Include="led\LedShutdownRestore.h" />
     <ClInclude Include="led\BarcoAsciiDriver.h" />
+    <ClInclude Include="led\LedClock.h" />
     <ClInclude Include="led\LedController.h" />
     <ClInclude Include="led\LedMeasurement.h" />
     <ClInclude Include="led\LedDriveModule.h" />

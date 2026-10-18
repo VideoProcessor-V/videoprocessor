@@ -19,7 +19,10 @@ namespace LedDrive
 	class BarcoAsciiDriver : public IProjectorDriver
 	{
 	public:
-		BarcoAsciiDriver(const ProjectorConfig& config, std::unique_ptr<ISerialPort> port);
+		// clock: command gaps, back-offs, sequence steps and write times (the steady
+		// clock in production). A reply's ack_timeout_ms stays on the real clock.
+		BarcoAsciiDriver(const ProjectorConfig& config, std::unique_ptr<ISerialPort> port,
+			ClockPtr clock = SteadyClock());
 		~BarcoAsciiDriver() override;
 
 		const char* Protocol() const override { return "barco_ascii"; }
@@ -85,6 +88,7 @@ namespace LedDrive
 		int Clamp(int level) const;
 		void Worker();
 
+		const ClockPtr clock;
 		ProjectorConfig config;
 		std::unique_ptr<ISerialPort> port;
 		Framing framing;

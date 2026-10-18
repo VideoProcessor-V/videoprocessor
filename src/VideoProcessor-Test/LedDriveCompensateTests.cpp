@@ -78,7 +78,7 @@ namespace
 		return stats;
 	}
 
-	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 		while (std::chrono::steady_clock::now() < deadline)
@@ -87,6 +87,260 @@ namespace
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		}
 		return condition();
+	}
+
+	// cntr-cut fix 2026-10-18: a bright cut through the module at the real frame
+	// rate. The module's clock moves with the frames (one frame period each), so
+	// every time-based statistic (the sustained highlight's highlight_persist_ms,
+	// the LED's settle) ages as it does on the projector.
+	struct CutOptions
+	{
+		double fps = 24.0;
+		bool dump = true;          // cut_cntr_dump
+		bool lookahead = false;    // a cut seen in the queue (predictions over half a second)
+		bool pairPredict = true;   // cntr_pair_predict
+		bool legacyPort = false;   // the original test's port: no command gap, read-back on
+	};
+
+	struct CutRun
+	{
+		CutOptions options;
+		bool started = false;
+		int before = 0;              // the assist's CNTR a second before the cut
+		std::vector<int> after;      // CNTR written from then on
+		bool contrastBeforeLight = false;
+		bool recoveryStarted = false;
+		bool recovered = false;
+		bool climbed = true;
+		bool gainUnderCeiling = true;
+		bool neverRises = true;
+		int final = 0;
+		int projector = 0;
+		std::wstring aboveNeed;
+		std::wstring trace;
+
+		std::wstring Where() const
+		{
+			return L"(" + std::to_wstring(options.fps) + L" fps, " + (options.lookahead ? L"look-ahead, " : L"reactive, ") +
+				(options.dump ? L"dump) " : L"held) ");
+		}
+	};
+
+	double MsOn(const TestClock& clock, LedDrive::Clock::time_point when)
+	{
+		return std::chrono::duration<double, std::milli>(when - clock.origin).count();
+	}
+
+	CutRun RunCompensateCut(const CutOptions& options)
+	{
+		CutRun run;
+		run.options = options;
+		auto projector = std::make_shared<FakeProjector>();
+		projector->contrast = 50;
+		LedDriveConfig config = Assisted();
+		ApplyRatePreset(config, true);
+		config.maxCutDip = 0.3;
+		config.shapedRecovery = true;
+		config.cutCntrDump = options.dump;
+		config.cutCntrLevel = 55;   // below where the dim scene's CNTR sits, so a dump shows
+		config.lookahead = options.lookahead;
+		config.cntrPairPredict = options.pairPredict;
+		ProjectorConfig port;       // the owner's defaults: led/cntr latency 80 ms, settle 300 ms, gap 200 ms
+		port.protocol = "barco_ascii";
+		port.terminator = Terminator::Cr;   // the fake projector's framing (with read-back off Auto sends the script's)
+		if (options.legacyPort)
+		{
+			port.ackTimeoutMs = 60;
+			port.minCommandGapMs = 0;
+			port.readBack = true;
+		}
+		TestClock clock;
+		LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+		Bind(clock, module, projector);
+		module.Start();
+		if (!clock.RunUntil([&] { return module.DrivingProjector(); }, 5000))
+			return run;
+		run.started = true;
+
+		const double period = 1000.0 / options.fps;
+		const double time0 = clock.Ms();
+		const uint64_t cut = static_cast<uint64_t>(std::lround(10.0 * options.fps)) + 1;
+		const uint64_t mark = cut - static_cast<uint64_t>(std::lround(options.fps));
+		const uint64_t last = cut + static_cast<uint64_t>(std::lround(8.0 * options.fps));
+		const size_t depth = static_cast<size_t>(std::ceil(0.5 * options.fps));
+		auto rawFor = [&](uint64_t s) { return s < cut ? Frame(18.0, 100, 200) : Frame(120.0, 100, 235); };
+		if (options.lookahead)
+		{
+			StatsBuilder builder(module.Config());
+			for (uint64_t s = 1; s <= last + depth; ++s)
+				module.SubmitPrediction(s, builder.Build(rawFor(s), time0 + s * period));
+		}
+		// The new scene (1% of the picture at white): the fade-up's gain ceiling, and
+		// the software headroom left by the large-area share; with the LED at or above
+		// `carried` (and the recovery bias) VP's gain alone compensates, so any CNTR
+		// above 50 is above need.
+		const double ceiling = std::pow(2.0, config.highlightToleranceStops);
+		double large = std::max(0.0, std::min((0.01 - config.highlightAreaSmall) /
+			(config.highlightAreaLarge - config.highlightAreaSmall), 1.0));
+		large = large * large * (3.0 - 2.0 * large);
+		const double headroom = std::pow(2.0, config.highlightToleranceStops * (1.0 - large));
+		const double carried = (1.0 + config.recoveryBiasPct / 100.0) / headroom;
+
+		size_t writesBefore = 0;
+		int previous = 0;
+		double previousDisplayed = 0.0;
+		std::wstring rises;
+		for (uint64_t s = 1; s <= last; ++s)
+		{
+			if (s == mark)
+			{
+				run.before = previous = module.AssistContrast();
+				writesBefore = projector->Writes().size();
+			}
+			module.SubmitMeasurement(rawFor(s), s);
+			const double t = time0 + s * period;
+			clock.To(t);
+			if (options.lookahead) module.SetLookaheadDepth(depth);
+			const CompensationGain gain = module.BeginFrameAt(s, t, options.fps);
+			clock.Settle();
+			if (s < mark) continue;
+			const int assist = module.AssistContrast();
+			if (assist > previous)
+			{
+				run.neverRises = false;
+				rises += L" " + std::to_wstring(previous) + L"->" + std::to_wstring(assist) + L"@" +
+					std::to_wstring(static_cast<int>(std::lround(t - (time0 + cut * period)))) + L"ms";
+			}
+			previous = assist;
+			if (s < cut) continue;
+			if (module.Recovering())
+			{
+				run.recoveryStarted = true;
+				if (gain.gain > ceiling + 1e-6) run.gainUnderCeiling = false;
+				if (module.RecoveryDisplayed() < previousDisplayed - 1e-9) run.climbed = false;
+				previousDisplayed = module.RecoveryDisplayed();
+			}
+			else if (run.recoveryStarted)
+				run.recovered = true;
+			const double fraction = module.ModelledLight() / 255.0;
+			if (fraction >= carried + 1e-9 && assist > 50)
+				run.aboveNeed += L" CNTR " + std::to_wstring(assist) + L" with the LED at " + std::to_wstring(fraction) +
+					L" @" + std::to_wstring(static_cast<int>(std::lround(t - (time0 + cut * period)))) + L"ms";
+		}
+		run.final = module.AssistContrast();
+		{
+			std::lock_guard<std::mutex> guard(projector->mutex);
+			run.projector = projector->contrast;
+		}
+		const auto writes = projector->Writes();
+		const auto times = projector->WriteTimes();
+		size_t firstContrast = writes.size(), firstLight = writes.size();
+		run.trace = run.Where() + (rises.empty() ? L"" : L"rises:" + rises + L"; ") + L"CNTR after the cut (ms):";
+		for (size_t i = writesBefore; i < writes.size(); ++i)
+		{
+			const bool contrast = writes[i].rfind(":CNTR", 0) == 0 && writes[i].find('?') == std::string::npos;
+			const bool light = writes[i].rfind(":LPW1", 0) == 0 && writes[i].find('?') == std::string::npos;
+			if (contrast)
+			{
+				const int value = std::stoi(writes[i].substr(5));
+				run.after.push_back(value);
+				run.trace += L" " + std::to_wstring(value) + L"@" +
+					std::to_wstring(static_cast<int>(std::lround(MsOn(clock, times[i]) - (time0 + cut * period))));
+				if (firstContrast == writes.size()) firstContrast = i;
+			}
+			if (light && firstLight == writes.size()) firstLight = i;
+		}
+		run.contrastBeforeLight = firstContrast < firstLight;
+		run.trace += L" (writes " + std::to_wstring(writes.size()) + L":";
+		for (size_t i = 0; i < writes.size() && i < 8; ++i)
+			run.trace += L" " + std::wstring(writes[i].begin(), writes[i].end() - 1);
+		run.trace += L")";
+		module.Stop();
+		return run;
+	}
+
+	// internal_script through the module at the real frame rate: a dark scene
+	// with highlights (the script's CNTR 74), then a bright cut (its CNTR 50).
+	struct ScriptCutRun
+	{
+		bool started = false;
+		int before = 0;
+		std::vector<int> after;
+		int projector = 0;
+		double cutMs = 0.0;
+		double firstLandsMs = 1e300;
+		std::wstring trace;
+	};
+
+	ScriptCutRun RunScriptCut(double fps, bool lookahead)
+	{
+		ScriptCutRun run;
+		auto projector = std::make_shared<FakeProjector>();
+		projector->contrast = 50;
+		LedDriveConfig config;
+		config.enabled = true;
+		config.mode = Mode::Script;
+		config.scriptLookahead = lookahead;
+		ProjectorConfig port;   // the owner's defaults
+		port.protocol = "barco_ascii";
+		port.terminator = Terminator::Cr;   // the fake projector's framing
+		TestClock clock;
+		LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+		Bind(clock, module, projector);
+		module.Start();
+		if (!clock.RunUntil([&] { return module.DrivingProjector(); }, 5000))
+			return run;
+		run.started = true;
+		const double period = 1000.0 / fps;
+		const double time0 = clock.Ms();
+		const uint64_t cut = static_cast<uint64_t>(std::lround(30.0 * fps)) + 1;
+		const uint64_t mark = cut - static_cast<uint64_t>(std::lround(fps));
+		const uint64_t last = cut + static_cast<uint64_t>(std::lround(10.0 * fps));
+		// Deep enough to cover measure + latency + settle and the next tick.
+		const size_t depth = static_cast<size_t>(std::ceil(1.2 * fps));
+		auto rawFor = [&](uint64_t s) { return s < cut ? Frame(18.0, 100, 200) : Frame(120.0, 100, 235); };
+		if (lookahead)
+		{
+			StatsBuilder builder(module.Config());
+			for (uint64_t s = 1; s <= last + depth; ++s)
+				module.SubmitPrediction(s, builder.Build(rawFor(s), time0 + s * period));
+		}
+		run.cutMs = time0 + cut * period;
+		size_t writesBefore = 0;
+		for (uint64_t s = 1; s <= last; ++s)
+		{
+			if (s == mark)
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				run.before = projector->contrast;
+				writesBefore = projector->writes.size();
+			}
+			module.SubmitMeasurement(rawFor(s), s);
+			const double t = time0 + s * period;
+			clock.To(t);
+			if (lookahead) module.SetLookaheadDepth(depth);
+			module.BeginFrameAt(s, t, fps);
+			clock.Settle();
+		}
+		clock.Run(1000.0);
+		{
+			std::lock_guard<std::mutex> guard(projector->mutex);
+			run.projector = projector->contrast;
+		}
+		const auto writes = projector->Writes();
+		const auto times = projector->WriteTimes();
+		run.trace = L"CNTR from a second before the cut (ms from the cut):";
+		for (size_t i = writesBefore; i < writes.size(); ++i)
+			if (writes[i].rfind(":CNTR", 0) == 0 && writes[i].find('?') == std::string::npos)
+			{
+				const int value = std::stoi(writes[i].substr(5));
+				const double at = MsOn(clock, times[i]);
+				if (run.after.empty()) run.firstLandsMs = at + port.cntrLatencyMs;
+				run.after.push_back(value);
+				run.trace += L" " + std::to_wstring(value) + L"@" + std::to_wstring(static_cast<int>(std::lround(at - run.cutMs)));
+			}
+		module.Stop();
+		return run;
 	}
 }
 
@@ -325,7 +579,9 @@ namespace VideoProcessorTest
 			port.readBack = true;
 			port.ledLatencyMs = 80;
 			port.ledSettleMs = 0;
-			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			TestClock clock;
+			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }), L"compensate started");
 			double time = 0.0;
@@ -334,9 +590,9 @@ namespace VideoProcessorTest
 			{
 				module.SubmitMeasurement(Frame(18.0));
 				time += 1000.0 / 60.0;
-				const CompensationGain gain = module.BeginFrameAt(0, time);
+				const CompensationGain gain = BeginFrameOn(clock, module, 0, time);
 				anyGain = anyGain || (gain.active && std::fabs(gain.gain - 1.0) > 1e-9);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 			Assert::IsTrue(WaitFor([&] { return projector->light < 255; }), L"the LED is dimmed with adaptive gamma off");
 			Assert::IsFalse(anyGain, L"the picture's gain stays at 1 with adaptive gamma off");
@@ -362,7 +618,9 @@ namespace VideoProcessorTest
 			LedDriveConfig picture = config;
 			picture.mode = Mode::PictureOnly;
 			{
-				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+				TestClock clock;
+				LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }), L"compensate started");
 				double time = 0.0;
@@ -370,8 +628,8 @@ namespace VideoProcessorTest
 				{
 					module.SubmitMeasurement(Frame(18.0));
 					time += 1000.0 / 60.0;
-					module.BeginFrameAt(0, time);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					BeginFrameOn(clock, module, 0, time);
+					clock.Settle();
 				}
 				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }), L"compensate dimmed the LED");
 				Assert::IsFalse(module.Reconfigure(port, picture), L"picture_only needs a new module (no port)");
@@ -475,8 +733,10 @@ namespace VideoProcessorTest
 			port.ledLatencyMs = 80;
 			port.ledSettleMs = 0;
 			{
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				Assert::AreEqual(1.0, module.CurrentGain().gain, 1e-9);
@@ -484,9 +744,9 @@ namespace VideoProcessorTest
 				CompensationGain gain;
 				for (int frame = 1; frame <= 30; ++frame)
 				{
-					gain = module.BeginFrameAt(0, frame * 1000.0 / 60.0);
+					gain = BeginFrameOn(clock, module, 0, frame * 1000.0 / 60.0);
 					// Let the driver send before the next frame looks.
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					clock.Settle();
 				}
 				Assert::IsTrue(WaitFor([&] { return projector->light < 255; }));
 				Assert::IsTrue(gain.active);
@@ -740,8 +1000,10 @@ namespace VideoProcessorTest
 			port.minCommandGapMs = 0;
 			port.readBack = true;
 			{
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				// A dark scene with a sustained 1% highlight: the LED dims as far
@@ -752,8 +1014,8 @@ namespace VideoProcessorTest
 				{
 					time = frame * 1000.0 / 60.0;
 					module.SubmitMeasurement(Frame(18.0, 100, 230));
-					gain = module.BeginFrameAt(0, time);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					gain = BeginFrameOn(clock, module, 0, time);
+					clock.Settle();
 				}
 				Assert::IsTrue(module.AssistContrast() > 50, L"CNTR assists");
 				Assert::IsTrue(module.AssistContrast() <= config.cntrAssistMax,
@@ -795,15 +1057,17 @@ namespace VideoProcessorTest
 			port.minCommandGapMs = 0;
 			port.readBack = true;
 			{
+				TestClock clock;
 				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				for (int frame = 1; frame <= 300; ++frame)
 				{
 					module.SubmitMeasurement(Frame(18.0, 100, 230));
-					module.BeginFrameAt(0, frame * 1000.0 / 60.0);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
+					BeginFrameOn(clock, module, 0, frame * 1000.0 / 60.0);
+					clock.Settle();
 				}
 				Assert::IsTrue(projector->light < 255);
 				Assert::AreEqual(50, module.AssistContrast());
@@ -924,86 +1188,131 @@ namespace VideoProcessorTest
 		// The module: a bright cut after a CNTR-assisted dark scene dumps CNTR
 		// once, the fade-up limits the gain to the new scene's ceiling, CNTR
 		// never rises during it, and it ends with the gain back to normal.
+		// cntr-cut fix 2026-10-18: at the real frame rate (the module's clock
+		// moves with the frames). It was written against frames fed much faster
+		// than real time, where the sustained highlight never caught up with the
+		// new scene during the fade-up; at the real rate CNTR went 55 51 50 54 52
+		// 51 50 (docs/agent-reports/cntr-bright-cut.md).
 		TEST_METHOD(ModuleBrightCutDumpsContrastAndFadesUp)
 		{
 			for (const bool dump : { true, false })
 			{
-				auto projector = std::make_shared<FakeProjector>();
-				projector->contrast = 50;
-				LedDriveConfig config = Assisted();
-				ApplyRatePreset(config, true);
-				config.maxCutDip = 0.3;
-				config.shapedRecovery = true;
-				config.cutCntrDump = dump;
-				config.cutCntrLevel = 55; // below where the dim scene's CNTR sits, so a dump shows
-				ProjectorConfig port;
-				port.protocol = "barco_ascii";
-				port.ackTimeoutMs = 60;
-				port.minCommandGapMs = 0;
-				port.readBack = true;
-				LedDriveModule module(port, config,
-					[projector] { return std::make_unique<FakePort>(projector); });
-				module.Start();
-				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
-				double time = 0.0;
-				auto render = [&](const RawMeasurement& raw)
-				{
-					time += 1000.0 / 60.0;
-					module.SubmitMeasurement(raw);
-					const CompensationGain gain = module.BeginFrameAt(0, time);
-					WaitFor([&] { return !module.ProjectorStatus().busy; });
-					return gain;
-				};
-				for (int frame = 0; frame < 600; ++frame) render(Frame(18.0, 100, 200));
-				const int before = module.AssistContrast();
-				Assert::IsTrue(before > 50, L"the dark scene raised CNTR");
-				Assert::IsTrue(WaitFor([&] { return projector->contrast == before; }));
-				const size_t writesBefore = projector->Writes().size();
-
-				Assert::IsTrue(before <= 59, L"with highlights CNTR stops at dmd_clip_cntr (59)");
-				// The cut: a bright scene with highlights at white (ceiling 2^tolerance).
-				const double ceiling = std::pow(2.0, config.highlightToleranceStops);
-				CompensationGain gain = render(Frame(120.0, 100, 235));
-				Assert::IsTrue(module.Recovering(), L"the fade-up starts on the cut");
-				Assert::IsTrue(gain.gain <= ceiling + 1e-6, L"the gain goes no higher than the new scene's ceiling");
-				double previousDisplayed = module.RecoveryDisplayed();
-				for (int frame = 0; frame < 900 && module.Recovering(); ++frame)
-				{
-					gain = render(Frame(120.0, 100, 235));
-					Assert::IsTrue(gain.gain <= ceiling + 1e-6);
-					Assert::IsTrue(module.RecoveryDisplayed() >= previousDisplayed - 1e-9, L"the fade-up only climbs");
-					previousDisplayed = module.RecoveryDisplayed();
-				}
-				Assert::IsFalse(module.Recovering(), L"the fade-up ends");
-				// Let a held CNTR finish its paired descent.
-				for (int frame = 0; frame < 300 && module.AssistContrast() > 50; ++frame)
-					render(Frame(120.0, 100, 235));
-				std::vector<int> after;
-				const auto writes = projector->Writes();
-				for (size_t i = writesBefore; i < writes.size(); ++i)
-					if (writes[i].rfind(":CNTR", 0) == 0 && writes[i] != ":CNTR?\r")
-						after.push_back(std::stoi(writes[i].substr(5)));
-				Assert::IsFalse(after.empty());
-				for (size_t i = 1; i < after.size(); ++i)
-					Assert::IsTrue(after[i] <= after[i - 1], L"CNTR never rises during the fade-up");
+				CutOptions options;
+				options.fps = 60.0;
+				options.dump = dump;
+				options.legacyPort = true;
+				const CutRun run = RunCompensateCut(options);
+				Logger::WriteMessage(run.trace.c_str());
+				Assert::IsTrue(run.started, run.trace.c_str());
+				Assert::IsTrue(run.before > 50 && run.before <= 59,
+					L"the dark scene raised CNTR, with highlights no higher than dmd_clip_cntr (59)");
+				Assert::IsTrue(run.recoveryStarted, L"the fade-up starts on the cut");
+				Assert::IsTrue(run.gainUnderCeiling, L"the gain goes no higher than the new scene's ceiling");
+				Assert::IsTrue(run.climbed, L"the fade-up only climbs");
+				Assert::IsTrue(run.recovered, L"the fade-up ends");
+				Assert::IsFalse(run.after.empty());
+				Assert::IsTrue(run.neverRises, (L"CNTR never rises after the cut, " + run.trace).c_str());
+				Assert::IsTrue(run.aboveNeed.empty(), (L"CNTR never above need: " + run.aboveNeed + L" " + run.trace).c_str());
 				if (dump)
 				{
-					Assert::AreEqual(55, after.front(), L"one command to cut_cntr_level, never to 50 because of the cut");
-					// Audit stage7-step7c: the cut's CNTR goes out before the LED's jump.
-					size_t firstContrast = writes.size(), firstLight = writes.size();
-					for (size_t i = writesBefore; i < writes.size(); ++i)
-					{
-						if (firstContrast == writes.size() && writes[i] == ":CNTR55\r") firstContrast = i;
-						if (firstLight == writes.size() && writes[i].rfind(":LPW1", 0) == 0 && writes[i] != ":LPW1?\r")
-							firstLight = i;
-					}
-					Assert::IsTrue(firstContrast < firstLight, L"CNTR first, then the LPW1 a command gap later");
+					Assert::AreEqual(55, run.after.front(), L"one command to cut_cntr_level, never to 50 because of the cut");
+					Assert::IsTrue(run.contrastBeforeLight, L"CNTR first, then the LPW1 a command gap later");
 				}
 				else
-					Assert::IsTrue(after.front() > 55 && after.size() > 1, L"held through the cut, descending paired");
-				Assert::AreEqual(50, module.AssistContrast(), L"back to 50 in the bright scene");
-				module.Stop();
+					Assert::IsTrue(run.after.front() > 55 && run.after.size() > 1, L"held through the cut, descending paired");
+				Assert::AreEqual(50, run.final, L"back to 50 in the bright scene");
 			}
+		}
+
+		// cntr-cut fix 2026-10-18 (owner rule: CNTR never above need): a bright
+		// cut at the real frame rate, 23.976 / 24 / 50 / 59.94, reactive and with
+		// the look-ahead (a seen cut), dumped and held, with the owner's port
+		// defaults (200 ms command gap, no read-back). CNTR never rises from the
+		// cut on, is 50 whenever the LED alone carries the new scene, and the
+		// fade-up runs as designed.
+		TEST_METHOD(BrightCutContrastNeverRisesAtRealFrameRates)
+		{
+			for (const double fps : { 24000.0 / 1001.0, 24.0, 50.0, 60000.0 / 1001.0 })
+				for (const bool lookahead : { false, true })
+					for (const bool dump : { true, false })
+					{
+						CutOptions options;
+						options.fps = fps;
+						options.dump = dump;
+						options.lookahead = lookahead;
+						const CutRun run = RunCompensateCut(options);
+						const std::wstring where = run.Where();
+						Logger::WriteMessage(run.trace.c_str());
+						Assert::IsTrue(run.started, (where + run.trace).c_str());
+						Assert::IsFalse(run.after.empty(), (L"CNTR commanded, " + where + run.trace).c_str());
+						Assert::IsTrue(run.before > 50, (L"the dark scene raised CNTR, " + where).c_str());
+						Assert::IsTrue(run.recoveryStarted && run.recovered, (L"the fade-up runs and ends, " + where).c_str());
+						Assert::IsTrue(run.climbed, (L"the fade-up only climbs, " + where).c_str());
+						Assert::IsTrue(run.gainUnderCeiling, (L"the gain stays under the ceiling, " + where).c_str());
+						Assert::IsTrue(run.neverRises, (L"CNTR never rises after the cut, " + where + run.trace).c_str());
+						Assert::IsTrue(run.aboveNeed.empty(),
+							(L"CNTR never above need, " + where + run.aboveNeed + L" " + run.trace).c_str());
+						Assert::AreEqual(50, run.final, (L"back to 50, " + where).c_str());
+						Assert::AreEqual(50, run.projector, (L"the projector at 50, " + where).c_str());
+						// The cut's CNTR: cut_cntr_level, or lower when the driver's next slot
+						// already has the paired descent (the 200 ms gap keeps only the newest;
+						// with the look-ahead CNTR may also descend a little before the cut,
+						// paired with the LED's early ramp).
+						if (dump)
+						{
+							const auto dumped = std::find_if(run.after.begin(), run.after.end(), [](int c) { return c <= 55; });
+							Assert::IsTrue(dumped != run.after.end(),
+								(L"the cut's CNTR goes to cut_cntr_level or below, " + where + run.trace).c_str());
+						}
+					}
+		}
+
+		// cntr_pair_predict off: the pairing as before the fix (the vpHeadroom of
+		// the sustained highlight, the dump point as the only ceiling), which at
+		// the real frame rate lets CNTR rise again during the fade-up.
+		TEST_METHOD(BrightCutPairPredictOffIsThePreviousPairing)
+		{
+			for (const double fps : { 24.0, 60.0 })
+			{
+				CutOptions options;
+				options.fps = fps;
+				options.pairPredict = false;
+				options.legacyPort = true;   // every CNTR the pairing asks for is written
+				const CutRun run = RunCompensateCut(options);
+				Assert::IsTrue(run.started && run.recovered, run.trace.c_str());
+				Assert::IsFalse(run.neverRises, (L"off: CNTR rises again during the fade-up, " + run.trace).c_str());
+				Assert::AreEqual(50, run.final);
+			}
+		}
+
+		// internal_script (the owner's script as intent), with and without
+		// script_lookahead, at the four rates: after a bright cut CNTR goes down
+		// to the script's target for the new scene (50) and never rises again;
+		// with the look-ahead it goes there in one command, landing by the cut's
+		// first frame.
+		TEST_METHOD(ScriptBrightCutContrastNeverRisesAtRealFrameRates)
+		{
+			for (const double fps : { 24000.0 / 1001.0, 24.0, 50.0, 60000.0 / 1001.0 })
+				for (const bool lookahead : { false, true })
+				{
+					const ScriptCutRun run = RunScriptCut(fps, lookahead);
+					Logger::WriteMessage(run.trace.c_str());
+					const std::wstring where = L"(" + std::to_wstring(fps) + L" fps, script_lookahead " +
+						(lookahead ? L"on) " : L"off) ");
+					Assert::IsTrue(run.started, (where + run.trace).c_str());
+					Assert::AreEqual(74, run.before, (L"the dark scene's script target, " + where + run.trace).c_str());
+					Assert::IsFalse(run.after.empty(), (L"CNTR commanded after the cut, " + where).c_str());
+					for (size_t i = 1; i < run.after.size(); ++i)
+						Assert::IsTrue(run.after[i] <= run.after[i - 1], (L"CNTR never rises, " + where + run.trace).c_str());
+					Assert::AreEqual(50, run.after.back(), (L"the script's target for the bright scene, " + where).c_str());
+					Assert::AreEqual(50, run.projector, (L"the projector at 50, " + where).c_str());
+					if (lookahead)
+					{
+						Assert::AreEqual(50, run.after.front(), (L"one command to the target, " + where + run.trace).c_str());
+						Assert::IsTrue(run.firstLandsMs <= run.cutMs + 1000.0 / fps + 1e-6,
+							(L"landing by the cut's first frame, " + where + run.trace).c_str());
+					}
+				}
 		}
 
 		// 7c-3 (policy 3.5; owner's black-frames note): on black with a bright

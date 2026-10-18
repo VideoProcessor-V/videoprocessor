@@ -1,5 +1,6 @@
 #pragma once
 
+#include "LedClock.h"
 #include "LedDriveConfig.h"
 #include "SerialPort.h"
 
@@ -49,7 +50,8 @@ namespace LedDrive
 		int contrastSends = 0;
 		int lastSentContrast = -1;
 		// led_landing_ms (2026-10-17): when the newest LPW1 / CNTR was written
-		// to the port (steady clock, taken at the write); the epoch (a
+		// to the port (the driver's clock - the steady clock in production -
+		// taken at the write); the epoch (a
 		// default time_point) when unknown. The module lands each send
 		// led_latency_ms / cntr_latency_ms after this.
 		std::chrono::steady_clock::time_point lastLightSentAt{};
@@ -153,8 +155,10 @@ namespace LedDrive
 
 	// protocol: "barco_ascii" or "none" (see EffectiveProtocol). The port
 	// factory is only called for a protocol that needs a port.
+	// clock: the drivers' time source (command gaps, write times); the steady
+	// clock in production.
 	std::unique_ptr<IProjectorDriver> CreateProjectorDriver(const std::string& protocol,
-		const ProjectorConfig& config, const SerialPortFactory& portFactory);
+		const ProjectorConfig& config, const SerialPortFactory& portFactory, ClockPtr clock = SteadyClock());
 
 	// Startup: logs what the projector reports, then sets the light to the
 	// ceiling and CNTR to 50 when it is not already 50 (a previous run of the

@@ -2,6 +2,7 @@
 
 #include <atomic>
 
+#include "LedClock.h"
 #include "LedController.h"
 #include "LedDriveConfig.h"
 #include "LedLookahead.h"
@@ -45,7 +46,8 @@ namespace LedDrive
 	{
 	public:
 		LedDriveModule(const ProjectorConfig& projector, const LedDriveConfig& led,
-			SerialPortFactory portFactory = [] { return CreateWin32SerialPort(); });
+			SerialPortFactory portFactory = [] { return CreateWin32SerialPort(); },
+			ClockPtr clock = SteadyClock());
 		~LedDriveModule();
 		LedDriveModule(const LedDriveModule&) = delete;
 		LedDriveModule& operator=(const LedDriveModule&) = delete;
@@ -208,6 +210,9 @@ namespace LedDrive
 		double MsSinceLastFrameLocked() const;
 		void RestoreIdleCompensateLocked();
 
+		// The module's and its driver's time source (the steady clock; a manual
+		// clock in tests). Declared before `created`, which reads it.
+		const ClockPtr clock;
 		ProjectorConfig projector;
 		LedDriveConfig led;
 		SerialPortFactory portFactory;

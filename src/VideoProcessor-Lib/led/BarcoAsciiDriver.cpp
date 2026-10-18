@@ -40,10 +40,10 @@ namespace LedDrive
 	}
 
 	BarcoAsciiDriver::BarcoAsciiDriver(const ProjectorConfig& configIn,
-		std::unique_ptr<ISerialPort> portIn)
-		: config(configIn), port(std::move(portIn)),
+		std::unique_ptr<ISerialPort> portIn, ClockPtr clockIn)
+		: clock(clockIn ? std::move(clockIn) : SteadyClock()), config(configIn), port(std::move(portIn)),
 		framing{ "cr", false, "\r", configIn.readBack },
-		nextSendAllowed(std::chrono::steady_clock::now())
+		nextSendAllowed(clock->Now())
 	{
 	}
 
@@ -92,7 +92,7 @@ namespace LedDrive
 			const auto superseded = [&] { return generation && *generation != expectedGeneration; };
 			if (superseded()) return false;
 			const steady_clock::time_point allowed = nextSendAllowed;
-			const auto now = steady_clock::now();
+			const auto now = clock->Now();
 			if (allowed > now)
 			{
 				auto until = allowed;
@@ -111,12 +111,17 @@ namespace LedDrive
 				// so the restore is not locked out of the port.
 				if (abortable)
 				{
-					gapWake.wait_until(lock, until, [&] { return shuttingDown || stopping || superseded(); });
+					clock->WaitUntil(gapWake, lock, until, [&] { return shuttingDown || stopping || superseded(); });
 					if (shuttingDown || stopping) return false;
 				}
 				else
-					while (steady_clock::now() < until && !superseded())
-						gapWake.wait_until(lock, until);
+				{
+					// The bounded exit's gap wait is also a real-time budget (the same
+					// deadline on the steady clock), so a test clock never holds up an exit.
+					const auto realUntil = steady_clock::now() + (until - now);
+					while (clock->Now() < until && !superseded() && (maxGapWaitMs < 0 || steady_clock::now() < realUntil))
+						clock->WaitOnce(gapWake, lock, until);
+				}
 			}
 			// Rechecked after the gap wait, under stateMutex.
 			if (superseded())
@@ -153,7 +158,7 @@ namespace LedDrive
 				++commands;
 				++sinceBurst;
 				// led_landing_ms (2026-10-17): the moment of the write.
-				const auto writtenAt = steady_clock::now();
+				const auto writtenAt = clock->Now();
 				if (sentLight >= 0)
 				{
 					++lightSends;
@@ -174,7 +179,7 @@ namespace LedDrive
 			// audit 2026-10-16: an unplugged port fails every command; log the
 			// first failure, then at most once per 10 s with a count, and after
 			// 5 failures in a row close the port so it is reopened.
-			const auto failedAt = steady_clock::now();
+			const auto failedAt = clock->Now();
 			++writeFailures;
 			++unloggedWriteFailures;
 			if (!writeFailureLogged || failedAt - lastWriteFailureLog >= seconds(10))
@@ -198,7 +203,7 @@ namespace LedDrive
 		}
 		else
 		{
-			const auto now = steady_clock::now();
+			const auto now = clock->Now();
 			if (unloggedWriteFailures > 0 && now - lastWriteFailureLog >= seconds(10))
 			{
 				DebugLog::Log("Dynamic Drive: projector writes succeed again (%d failed write(s) since the last report)",
@@ -212,6 +217,7 @@ namespace LedDrive
 		}
 		if (written && framing.acknowledged)
 		{
+			// The reply wait is an I/O timeout: real time, not the drive's clock.
 			const auto deadline = steady_clock::now() + milliseconds(timeoutMs);
 			std::string line;
 			for (;;)
@@ -263,7 +269,7 @@ namespace LedDrive
 				// unplugged): treated like repeated write failures - reopened only
 				// after the back-off (2 s doubling to 30 s), so the next command
 				// does not reopen, resync and close again at once.
-				const auto closedAt = steady_clock::now();
+				const auto closedAt = clock->Now();
 				reopenBackoffMs = reopenBackoffMs == 0 ? 2000 : std::min(reopenBackoffMs * 2, 30000);
 				reopenAt = closedAt + milliseconds(reopenBackoffMs);
 				DebugLog::Log("Dynamic Drive: reading %s failed; port closed, reopening in %d ms",
@@ -281,13 +287,13 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(stateMutex);
 		// audit 2026-10-16: kept apart, so the script and sequence sends (no
 		// command gap) still keep it.
-		if (noReply) replyBackoffUntil = steady_clock::now() + milliseconds(2000);
+		if (noReply) replyBackoffUntil = clock->Now() + milliseconds(2000);
 		if (config.burstCommands > 0 && sinceBurst >= config.burstCommands)
 		{
 			gap = std::max(gap, config.burstPauseMs);
 			sinceBurst = 0;
 		}
-		nextSendAllowed = steady_clock::now() + milliseconds(gap);
+		nextSendAllowed = clock->Now() + milliseconds(gap);
 		return ok;
 	}
 
@@ -301,7 +307,7 @@ namespace LedDrive
 	{
 		using namespace std::chrono;
 		if (port->IsOpen()) return true;
-		const auto now = steady_clock::now();
+		const auto now = clock->Now();
 		if (now < reopenAt)
 		{
 			// audit 2026-10-16: the exit restore tries one Open regardless of
@@ -565,7 +571,7 @@ namespace LedDrive
 		if (!opened || shuttingDown) return false;
 		sequence.assign(commands.begin(), commands.end());
 		sequenceStepMs = std::max(1, stepMs);
-		sequenceNextAllowed = std::chrono::steady_clock::now();
+		sequenceNextAllowed = clock->Now();
 		wake.notify_one();
 		return true;
 	}
@@ -588,7 +594,7 @@ namespace LedDrive
 			if (!opened) return false;
 		}
 		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
-		const auto start = steady_clock::now();
+		const auto start = steady_clock::now();   // the port lock's wait is real time
 		if (timeoutMs > 0)
 		{
 			if (!lock.try_lock_for(milliseconds(timeoutMs / 2))) return false;
@@ -626,7 +632,7 @@ namespace LedDrive
 		int gapMs = 0;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
-			const auto now = steady_clock::now();
+			const auto now = clock->Now();
 			if (nextSendAllowed > now)
 				gapMs = static_cast<int>(duration_cast<milliseconds>(nextSendAllowed - now).count()) + 1;
 		}
@@ -660,7 +666,7 @@ namespace LedDrive
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (shuttingDown) return false;
 			// audit 2026-10-16: but Barco's 2 s after a missing reply stays.
-			nextSendAllowed = std::max(std::chrono::steady_clock::now(), replyBackoffUntil);
+			nextSendAllowed = std::max(clock->Now(), replyBackoffUntil);
 			sinceBurst = 0;
 			// audit 2026-10-16: this is now the newest value for its command.
 			// A resync target (or any value) the driver thread still holds or
@@ -711,7 +717,7 @@ namespace LedDrive
 	bool BarcoAsciiDriver::SetLightNow(int level, int timeoutMs)
 	{
 		using namespace std::chrono;
-		const auto start = steady_clock::now();
+		const auto start = steady_clock::now();   // the port lock's wait is real time
 		int clamped = 0;
 		{
 			std::lock_guard<std::mutex> guard(stateMutex);
@@ -786,15 +792,15 @@ namespace LedDrive
 				{
 					// Experimental custom dim: its own spacing (ftb_step_ms, like
 					// the old script's 100 ms contrast steps), ahead of targets.
-					while (!stopping && std::chrono::steady_clock::now() < sequenceNextAllowed)
-						wake.wait_until(lock, sequenceNextAllowed);
+					while (!stopping && clock->Now() < sequenceNextAllowed)
+						clock->WaitOnce(wake, lock, sequenceNextAllowed);
 					if (stopping) return;
 					if (shuttingDown || sequence.empty()) continue;
 					const std::pair<std::string, int> command = sequence.front();
 					sequence.pop_front();
 					sequenceInFlight = true;
 					// audit 2026-10-16: Barco's 2 s after a missing reply stays.
-					nextSendAllowed = std::max(std::chrono::steady_clock::now(), replyBackoffUntil);
+					nextSendAllowed = std::max(clock->Now(), replyBackoffUntil);
 					lock.unlock();
 					{
 						std::lock_guard<std::timed_mutex> guard(portMutex);
@@ -809,15 +815,15 @@ namespace LedDrive
 					}
 					lock.lock();
 					sequenceInFlight = false;
-					sequenceNextAllowed = std::chrono::steady_clock::now() +
+					sequenceNextAllowed = clock->Now() +
 						std::chrono::milliseconds(sequenceStepMs);
 					if (sequence.empty()) ++sequencesDone;
 					continue;
 				}
 				// Wait out the gap or pause here, where Close() can interrupt
 				// it, and keep taking newer targets meanwhile.
-				while (!stopping && std::chrono::steady_clock::now() < nextSendAllowed)
-					wake.wait_until(lock, nextSendAllowed);
+				while (!stopping && clock->Now() < nextSendAllowed)
+					clock->WaitOnce(wake, lock, nextSendAllowed);
 				if (stopping) return;
 				if (shuttingDown)
 				{

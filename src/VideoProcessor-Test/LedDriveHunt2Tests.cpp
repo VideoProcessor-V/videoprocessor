@@ -38,7 +38,9 @@ namespace
 		return raw;
 	}
 
-	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 3000)
+	// Real-time waits only for what needs no time on the drive's clock (a port
+	// write and its echo); the bound is generous so machine load cannot fail it.
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 		while (std::chrono::steady_clock::now() < deadline)
@@ -107,25 +109,29 @@ namespace VideoProcessorTest
 				config.scriptMeasureMs = 1200;
 				config.scriptEchoMs = 50;
 				config.tickMs = 1000;
+				TestClock clock;
 				LedDriveModule module(Port(), config,
-					[projector] { return std::make_unique<FakePort>(projector); });
+					[projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
 				module.Start();
 				Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 				module.SubmitMeasurement(Frame(50.0));   // APL 45-60, no highlight: CNTR 51
-				Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }, 5000), L"the script raised CNTR to 51");
-				const auto raised = std::chrono::steady_clock::now();
+				Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 51; }, 5000, 5.0),
+					L"the script raised CNTR to 51");
+				const double raised = clock.Ms();
 				module.SubmitMeasurement(Frame(50.0, 100, 235));   // a highlight: the next tick decides 50
 				// Inside the next tick's window between its decision and its CNTR write.
-				std::this_thread::sleep_until(raised + std::chrono::milliseconds(pacing ? 700 : 900));
+				Assert::IsTrue(clock.Run(pacing ? 700 : 900, 5.0));
+				Assert::AreEqual(raised + (pacing ? 700 : 900), clock.Ms(), TestClock::TOLERANCE_MS);
 				const size_t before = projector->Writes().size();
 				const int atApply = projector->contrast;
 				LedDriveConfig tuned = config;
 				tuned.highlightToleranceStops = 0.5;   // a compensate-only value: the script is unchanged
 				Assert::IsTrue(module.Reconfigure(Port(), tuned));
-				Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 1500),
+				Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }, 1500),
 					pacing ? L"script pacing: CNTR 50 sent after the cut-short tick" :
 						L"tick loop: CNTR 50 sent after the cut-short tick");
-				std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+				Assert::IsTrue(clock.Run(1500));
 				const auto writes = projector->Writes();
 				Assert::AreEqual(static_cast<size_t>(atApply == 51 ? 1 : 0), Count(writes, before, ":CNTR50\r"),
 					L"CNTR 50 written once after the apply");
@@ -142,29 +148,31 @@ namespace VideoProcessorTest
 			projector->contrast = 50;
 			LedDriveConfig config = Script();
 			config.idleRestoreS = 1;
+			TestClock clock;
 			LedDriveModule module(Port(), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			uint64_t sequence = 0;
 			module.SubmitMeasurement(Frame(50.0));
-			const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000);
-			while (projector->contrast != 51 && std::chrono::steady_clock::now() < end)
+			// Frames every 50 ms on the clock until the script has raised CNTR.
+			for (int frame = 0; frame < 80 && projector->contrast != 51; ++frame)
 			{
 				++sequence;
 				module.BeginFrameAt(sequence, sequence * FRAME_MS);
-				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				Assert::IsTrue(clock.Run(50.0));
 			}
 			Assert::AreEqual(51, projector->contrast, L"the script raised CNTR to 51");
 			// Video stops; the restore (after 1 s) fails to write.
 			SetWriteFails(*projector, true);
-			std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+			Assert::IsTrue(clock.Run(1500));
 			Assert::AreEqual(51, projector->contrast, L"the restore's write failed");
 			SetWriteFails(*projector, false);
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 1500),
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }, 1500),
 				L"the idle restore tried CNTR 50 again");
 			const size_t after = projector->Writes().size();
-			std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+			Assert::IsTrue(clock.Run(1000));
 			Assert::AreEqual(static_cast<size_t>(0), Count(projector->Writes(), after, ":CNTR50\r"),
 				L"not repeated once written");
 			module.Stop();
@@ -189,15 +197,18 @@ namespace VideoProcessorTest
 			ApplyRatePreset(config, true);
 			ProjectorConfig port = Port();
 			port.ledLatencyMs = 80;
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			for (int frame = 1; frame <= 600 && projector->contrast == 50; ++frame)
 			{
 				module.SubmitMeasurement(Frame(18.0, 100, 230));
+				clock.To(frame * FRAME_MS);
 				module.BeginFrameAt(0, frame * FRAME_MS);
-				WaitFor([&] { return !module.ProjectorStatus().busy; });
+				clock.Settle();
 			}
 			Assert::IsTrue(WaitFor([&] { return projector->contrast > 50; }), L"the CNTR assist raised CNTR");
 			const int assisted = projector->contrast;
@@ -206,9 +217,9 @@ namespace VideoProcessorTest
 			SetWriteFails(*projector, true);
 			LedDriveConfig script = Script();
 			Assert::IsTrue(module.Reconfigure(port, script));
-			std::this_thread::sleep_for(std::chrono::milliseconds(60));
+			Assert::IsTrue(clock.Run(60));
 			SetWriteFails(*projector, false);
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 2000),
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }, 2000),
 				(L"CNTR re-sent to 50 (was " + std::to_wstring(assisted) + L")").c_str());
 			module.Stop();
 		}
@@ -220,21 +231,23 @@ namespace VideoProcessorTest
 			auto projector = std::make_shared<FakeProjector>();
 			projector->contrast = 50;
 			LedDriveConfig config = Script();
+			TestClock clock;
 			LedDriveModule module(Port(), config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			module.SubmitMeasurement(Frame(50.0));
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 51; }), L"the script raised CNTR to 51");
+			Assert::IsTrue(clock.Run(100));
 			SetWriteFails(*projector, true);
 			LedDriveConfig compensate = config;
 			compensate.mode = Mode::Compensate;
 			compensate.cntrAssist = false;
 			Assert::IsTrue(module.Reconfigure(Port(), compensate));
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::IsTrue(clock.Run(100));
 			SetWriteFails(*projector, false);
-			Assert::IsTrue(WaitFor([&] { return projector->contrast == 50; }, 3000), L"CNTR 50 written after all");
+			Assert::IsTrue(clock.RunUntil([&] { return projector->contrast == 50; }, 3000), L"CNTR 50 written after all");
 			module.Stop();
 		}
 
@@ -276,10 +289,13 @@ namespace VideoProcessorTest
 			ProjectorConfig port = Port();
 			port.minCommandGapMs = 400;
 			LedDriveConfig config = Script();
+			TestClock clock;
 			LedDriveModule module(port, config,
-				[projector] { return std::make_unique<FakePort>(projector); });
+				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
 			module.Start();
-			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }, 8000));
+			// The start-up keeps the 400 ms gap, on the clock.
+			Assert::IsTrue(clock.RunUntil([&] { return module.DrivingProjector() && projector->light == 255; }, 8000));
 			const DriverStatus status = module.ProjectorStatus();
 			Assert::IsTrue(status.nextSendAt != std::chrono::steady_clock::time_point(), L"known after a write");
 			Assert::IsTrue(status.nextSendAt >= status.lastLightSentAt, L"at or after the last write");
