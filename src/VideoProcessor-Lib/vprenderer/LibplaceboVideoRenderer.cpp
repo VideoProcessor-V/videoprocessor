@@ -71,6 +71,7 @@
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/SourceRebase.h>
 #include <vprenderer/SourceResolutionMonitor.h>
+#include <vprenderer/StartupCropHold.h>
 #include <vprenderer/VpDebander.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
@@ -1179,6 +1180,14 @@ namespace
 		// cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a
 		// short release fade; off = the behaviour before (and no fades).
 		bool sourceResolutionLatchFixes = true;
+		// h3-latch 2026-10-18: [vprenderer] source_resolution_cut_fixes (default on, with the latch fixes):
+		// camera moves, scrolls, dark passes and flashes are not cuts, same-level shot / reverse-shot cuts
+		// are, and shots also need part of the evidence time (SourceResolution::Tracker::Settings::cutFixes).
+		bool sourceResolutionCutFixes = true;
+		// h3-latch 2026-10-18 (K3): [vprenderer] active_picture_startup_hold (default on): until the first crop
+		// decision of a queue generation the output is black, or the remembered crop of the same source
+		// (StartupCropHold); presentation only.
+		bool activePictureStartupHold = true;
 		double sourceResolutionEngageMaxWait = 20.0;   // s: the longest wait for a switching moment
 		double sourceResolutionCrossfade = 1.5;        // s: the crossfade after that wait
 		double sourceResolutionReleaseFade = 0.25;     // s: the fade back to native (at most 0.25)
@@ -1415,7 +1424,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionCutFixes << '|' << settings.activePictureStartupHold << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2671,6 +2680,22 @@ namespace
 			else
 				DebugLog::Log("profile '%s': invalid source_resolution_latch_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionLatchFixes ? "on" : "off");
+		}
+		if (tryChoice("active_picture_startup_hold", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.activePictureStartupHold = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid active_picture_startup_hold '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.activePictureStartupHold ? "on" : "off");
+		}
+		if (tryChoice("source_resolution_cut_fixes", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceResolutionCutFixes = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_resolution_cut_fixes '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceResolutionCutFixes ? "on" : "off");
 		}
 		if (tryChoice("timing_continuity_fixes", raw))
 		{
@@ -6262,6 +6287,13 @@ struct LibplaceboVideoRenderer::Impl
 	bool nlsGeometryAvailable = false;
 	bool nlsTransitionWithdrawn = false;
 	ActivePictureBounds nlsGeometry;
+	// h3-latch (K3): the start-up crop hold. BeginQueueGeneration (any thread) bumps the request
+	// counter; the render thread begins a hold when it sees a new value.
+	StartupCropHold startupCropHold;
+	std::atomic<uint64_t> startupHoldRequests{ 1 };
+	uint64_t startupHoldSeen = 0;
+	bool startupHoldBlack = false;
+	StartupCropHold::Action startupHoldLogged = StartupCropHold::Action::Present;
 	ActivePictureClassification nlsGeometryClassification =
 		ActivePictureClassification::UNAVAILABLE;
 	bool latestActivePictureObservationSupportsCrop = false;
@@ -10587,6 +10619,8 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
 		changed(current.sourceResolutionLatchFixes != next.sourceResolutionLatchFixes, "source_resolution_latch_fixes");
+		changed(current.sourceResolutionCutFixes != next.sourceResolutionCutFixes, "source_resolution_cut_fixes");
+		changed(current.activePictureStartupHold != next.activePictureStartupHold, "active_picture_startup_hold");
 		changed(current.sourceResolutionEngageMaxWait != next.sourceResolutionEngageMaxWait ||
 			current.sourceResolutionCrossfade != next.sourceResolutionCrossfade ||
 			current.sourceResolutionReleaseFade != next.sourceResolutionReleaseFade, "source_resolution_crossfade_s");
@@ -15478,6 +15512,7 @@ struct LibplaceboVideoRenderer::Impl
 				target.planes[0].texture = fbo;
 				pl_frame_clear(d3d11->gpu, &target, black);
 				rendered = pl_render_image(renderer, &image, &target, extraParams);
+				if (rendered && startupHoldBlack) pl_frame_clear(d3d11->gpu, &target, black);   // h3-latch K3
 				pl_gpu_flush(d3d11->gpu);
 				pl_tex_destroy(d3d11->gpu, &fbo);
 				backbuffer.Release();
@@ -15503,6 +15538,7 @@ struct LibplaceboVideoRenderer::Impl
 				target.planes[0].texture = frame.fbo;
 				pl_frame_clear(d3d11->gpu, &target, black);
 				rendered = pl_render_image(renderer, &image, &target, extraParams);
+				if (rendered && startupHoldBlack) pl_frame_clear(d3d11->gpu, &target, black);   // h3-latch K3
 				// An acquired frame must be submitted: on a failed extra show A
 				// itself again, never a black or partial picture - with the
 				// sigma-delta's own search (A did not move: no extra's vectors).
@@ -19995,6 +20031,53 @@ struct LibplaceboVideoRenderer::Impl
 				source.crop.x1 = static_cast<float>(finalSourceGeometry.right);
 				source.crop.y1 = static_cast<float>(finalSourceGeometry.bottom);
 			}
+			// h3-latch (K3): the start-up crop hold - until this generation's first crop decision, black, or
+			// the remembered crop of the same source (presentation only; nothing above is changed by it).
+			{
+				startupCropHold.SetEnabled(activeSettings.activePictureStartupHold);
+				const uint64_t requests = startupHoldRequests.load(std::memory_order_acquire);
+				const double holdNow = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+				if (requests != startupHoldSeen)
+				{
+					startupHoldSeen = requests;
+					startupCropHold.Begin(holdNow);
+				}
+				const bool cropApplied = (nlsOwnsPresentationGeometry && nlsActivePictureAvailable) || cropDecision.applyCrop || aspectLimitFill.applied;
+				const bool fullRasterDecided = fullRasterPresentationAuthorityAvailable &&
+					fullRasterPresentationAuthoritySourceGeneration == analysisSource.generation;
+				StartupCropHold::Key holdKey;
+				holdKey.width = width;
+				holdKey.height = height;
+				holdKey.format = AlphaSourceFormatKey(state);
+				StartupCropHold::Rect applied;
+				applied.left = static_cast<int>(source.crop.x0);
+				applied.top = static_cast<int>(source.crop.y0);
+				applied.right = static_cast<int>(source.crop.x1);
+				applied.bottom = static_cast<int>(source.crop.y1);
+				StartupCropHold::Action hold = startupCropHold.Frame(holdKey, holdNow,
+					automaticSourceCropRequested || nlsRequested, cropApplied || fullRasterDecided, cropApplied, applied);
+				// NLS maps its own geometry: no remembered crop under it, the black hold instead.
+				if (hold == StartupCropHold::Action::Remembered && nlsRequested)
+					hold = StartupCropHold::Action::Black;
+				if (hold == StartupCropHold::Action::Remembered)
+				{
+					const StartupCropHold::Rect& r = startupCropHold.RememberedCrop();
+					source.crop.x0 = static_cast<float>(r.left);
+					source.crop.y0 = static_cast<float>(r.top);
+					source.crop.x1 = static_cast<float>(r.right);
+					source.crop.y1 = static_cast<float>(r.bottom);
+				}
+				startupHoldBlack = hold == StartupCropHold::Action::Black;
+				if (hold != startupHoldLogged)
+				{
+					DebugLog::Log("Active picture start-up hold: %s -> %s (sequence=%llu generation=%llu crop_applied=%d full_raster=%d remembered=%d,%d-%d,%d timeouts=%llu)",
+						StartupCropHold::Name(startupHoldLogged), StartupCropHold::Name(hold), static_cast<unsigned long long>(sourceSequence),
+						static_cast<unsigned long long>(frameGeneration), cropApplied ? 1 : 0, fullRasterDecided ? 1 : 0,
+						startupCropHold.RememberedCrop().left, startupCropHold.RememberedCrop().top, startupCropHold.RememberedCrop().right,
+						startupCropHold.RememberedCrop().bottom, startupCropHold.Timeouts());
+					startupHoldLogged = hold;
+				}
+			}
 			NlsPresentationCropDecision nlsPresentationCrop;
 			nlsPresentationCrop.source = finalSourceGeometry;
 			if (nlsOwnsPresentationGeometry)
@@ -20524,6 +20607,7 @@ struct LibplaceboVideoRenderer::Impl
 			sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
 			sourceMonitor.SetCodingFixes(activeSettings.sourceCodingFixes);
 			sourceMonitor.SetLatchFixes(activeSettings.sourceResolutionLatchFixes);
+			sourceMonitor.SetCutFixes(activeSettings.sourceResolutionCutFixes);
 			sourceMonitor.SetEngageTiming(activeSettings.sourceResolutionEngageMaxWait, activeSettings.sourceResolutionCrossfade,
 				activeSettings.sourceResolutionReleaseFade);
 			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
@@ -22267,6 +22351,9 @@ struct LibplaceboVideoRenderer::Impl
         calibrationStatusAvailable = rendered;
         if (rendered) lastRenderedTargetTransfer = ToSdrTransfer(baseTarget.color.transfer);
         calibrationLutAttached = rendered && targetLutApplied;
+		// h3-latch (K3): held black until the first crop decision (the frame was rendered as usual).
+		if (rendered && startupHoldBlack)
+			pl_frame_clear(d3d11->gpu, &baseTarget, black);
 		const int64_t swapStartQpc = PerformanceCounterNow();
 		bool submitted = false;
 		if (vpOwnedSwapchain)
@@ -28624,6 +28711,8 @@ void LibplaceboVideoRenderer::BeginQueueGeneration(
 				m_impl->sceneDescriptorObserved = false;
 				m_impl->sourceLuminanceQueueGeneration = generation;
 			}
+			// h3-latch (K3): the start-up crop hold restarts with every generation.
+			m_impl->startupHoldRequests.fetch_add(1, std::memory_order_acq_rel);
 			m_impl->renderLoadMeter.ResetForGeneration(generation);
 			m_impl->coreRenderLoadMeter.ResetForGeneration(generation);
 			m_impl->originalPrRenderLoadMeter.ResetForGeneration(generation);
@@ -28799,6 +28888,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
 		<< "source_resolution_latch_fixes=" << (s.sourceResolutionLatchFixes ? "on" : "off") << "\n"
+		<< "source_resolution_cut_fixes=" << (s.sourceResolutionCutFixes ? "on" : "off") << "\n"
+		<< "active_picture_startup_hold=" << (s.activePictureStartupHold ? "on" : "off") << "\n"
 		<< "source_resolution_engage_max_wait_s=" << s.sourceResolutionEngageMaxWait << "\n"
 		<< "source_resolution_crossfade_s=" << s.sourceResolutionCrossfade << "\n"
 		<< "source_resolution_release_fade_s=" << s.sourceResolutionReleaseFade << "\n"

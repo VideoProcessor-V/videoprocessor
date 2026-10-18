@@ -57,6 +57,7 @@
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/SourceResolutionMonitor.h>
+#include <vprenderer/StartupCropHold.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -174,6 +175,8 @@ namespace RealFootage
 		double firstDeclared = -1.0, minDeclared = 1.0;
 		std::vector<std::pair<double, double>> declared;   // (seconds, declared ratio) at each change
 		int analyses = 0, lowerReadings = 0, nativeReadings = 0, blank = 0;
+		std::vector<std::string> declaredEvidence;   // shots / evidence seconds at each declared change
+		unsigned long long flashes = 0, coveredSteps = 0;
 	};
 
 	struct LaneResult
@@ -203,6 +206,7 @@ namespace RealFootage
 		std::vector<int> signalClipFrame;      // per signal frame: the clip frame shown
 		std::vector<double> signalTime;
 		SrResult srOn, srOff;
+		SrResult srCutOff;   // h3-latch: latch fixes on, source_resolution_cut_fixes off (the judge before)
 		long long exactLocks = 0;              // locks with raw bit-exact repeat flags (fixes on only)
 	};
 
@@ -272,20 +276,21 @@ namespace RealFootage
 			if (m_sr)
 			{
 				m_srMonitors.clear();
-				for (int i = 0; i < 2; ++i)
+				for (int i = 0; i < kSrLanes; ++i)
 				{
+					// 0: latch fixes + cut fixes (default), 1: latch fixes off, 2: latch fixes, cut fixes off.
 					std::unique_ptr<SourceResolutionMonitor::Monitor> m(new SourceResolutionMonitor::Monitor());
 					m->SetSelection("auto");
-					m->SetLatchFixes(i == 0);
+					m->SetLatchFixes(i != 1);
+					m->SetCutFixes(i == 0);
 					m->SetEngageTiming(20.0, 1.5, 0.25);
 					m_srMonitors.push_back(std::move(m));
+					m_srJobs[i].clear();
+					m_srFx[i] = m_srFy[i] = 1.0;
+					m_srCuts[i] = 0;
 				}
-				m_srJobs[0].clear();
-				m_srJobs[1].clear();
+				m_srQueue.clear();
 				m_srLastSubmit = -1e9;
-				m_srFx[0] = m_srFx[1] = 1.0;
-				m_srFy[0] = m_srFy[1] = 1.0;
-				m_srCuts[0] = m_srCuts[1] = 0;
 			}
 		}
 
@@ -603,7 +608,33 @@ namespace RealFootage
 			m_reanchorsSeen = m_timeline.Reanchors();
 		}
 
+		// The renderer's look-ahead (sourceAheadFrames): the queued frames after the one rendered are shown
+		// to LookAheadFrame before it is rendered. Modelled as kSrQueuedFrames frames queued ahead: each
+		// arriving frame goes to the look-ahead, and the frame that many frames older is rendered (its
+		// tile copy and AutoFactors).
+		static constexpr size_t kSrQueuedFrames = 3;
 		void SourceResolutionStep(const SignalFrame& f, const Kept& k)
+		{
+			SrQueued q;
+			q.f = f;
+			q.k = k;
+			q.luma = std::make_shared<std::vector<uint8_t>>(*f.luma);
+			q.f.luma = q.luma.get();
+			const int W = f.width, H = f.height;
+			const std::vector<uint8_t>& luma = *q.luma;
+			for (auto& m : m_srMonitors)
+				m->LookAheadFrame(k.sequence, W, H, [&luma, W](int x, int y) { return static_cast<int>(luma[static_cast<size_t>(y) * W + x]) * 4; },
+					0, 0, W, H);
+			m_srQueue.push_back(std::move(q));
+			if (m_srQueue.size() > kSrQueuedFrames)
+			{
+				SrQueued front = std::move(m_srQueue.front());
+				m_srQueue.pop_front();
+				SourceResolutionRender(front.f, front.k);
+			}
+		}
+
+		void SourceResolutionRender(const SignalFrame& f, const Kept& k)
 		{
 			const double t = k.enqueue;
 			const int W = f.width, H = f.height;
@@ -612,7 +643,7 @@ namespace RealFootage
 			if (t - m_srLastSubmit >= 0.5)
 			{
 				m_srLastSubmit = t;
-				for (int i = 0; i < 2; ++i)
+				for (int i = 0; i < kSrLanes; ++i)
 				{
 					int base = 0;
 					const std::vector<SourceResolution::TilePlace> places =
@@ -622,6 +653,7 @@ namespace RealFootage
 					SrJob j;
 					j.due = t + kTileLatency;
 					j.seconds = t;
+					j.sequence = k.sequence;
 					j.count = static_cast<int>(places.size());
 					j.base = base;
 					j.size = size;
@@ -643,16 +675,16 @@ namespace RealFootage
 					m_srJobs[i].push_back(std::move(j));
 				}
 			}
-			for (int i = 0; i < 2; ++i)
+			for (int i = 0; i < kSrLanes; ++i)
 			{
 				SourceResolutionMonitor::Monitor& m = *m_srMonitors[static_cast<size_t>(i)];
-				SrResult& r = i == 0 ? result.srOn : result.srOff;
+				SrResult& r = i == 0 ? result.srOn : i == 1 ? result.srOff : result.srCutOff;
 				r.run = true;
-				r.latchFixes = i == 0;
+				r.latchFixes = i != 1;
 				while (!m_srJobs[i].empty() && m_srJobs[i].front().due <= t + 1e-9)
 				{
 					SrJob& j = m_srJobs[i].front();
-					m.AnalyseTilesForTest(j.values, j.count, j.seconds, W, H, j.tx, j.ty, j.base, j.size, black);
+					m.AnalyseTilesForTest(j.values, j.count, j.seconds, W, H, j.tx, j.ty, j.base, j.size, black, j.sequence);
 					++r.analyses;
 					const SourceResolutionMonitor::Snapshot s = m.Read();
 					if (s.frameBlank)
@@ -662,12 +694,18 @@ namespace RealFootage
 					if (s.declaredRatio < 1.0 && r.firstDeclared < 0)
 						r.firstDeclared = j.seconds;
 					if (r.declared.empty() ? s.declaredRatio < 1.0 : std::fabs(r.declared.back().second - s.declaredRatio) > 1e-9)
+					{
 						r.declared.push_back({ j.seconds, s.declaredRatio });
+						r.declaredEvidence.push_back(Fmt("%d shots %.1f s conf %.2f", s.shots, s.evidenceSeconds, s.confidence));
+					}
+					r.flashes = s.flashes;
+					r.coveredSteps = s.coveredSteps;
 					r.minDeclared = (std::min)(r.minDeclared, s.declaredRatio);
 					if (s.cuts != m_srCuts[i])
 					{
 						m_srCuts[i] = s.cuts;
-						r.cutTimes.push_back(j.seconds);
+						// The cut's own moment (a deferred confirmation reports the frame after the cut).
+						r.cutTimes.push_back(s.lastCutSeconds >= 0.0 ? s.lastCutSeconds : j.seconds);
 					}
 					m_srJobs[i].pop_front();
 				}
@@ -694,7 +732,16 @@ namespace RealFootage
 			double due = 0.0, seconds = 0.0;
 			std::vector<float> values, tx, ty;
 			int count = 0, base = 0, size = 0;
+			uint64_t sequence = 0;
 		};
+		struct SrQueued
+		{
+			SignalFrame f;
+			Kept k;
+			std::shared_ptr<std::vector<uint8_t>> luma;
+		};
+		static constexpr int kSrLanes = 3;
+		std::deque<SrQueued> m_srQueue;
 
 		bool m_classifier, m_sr, m_exactShadow;
 		std::unique_ptr<Pulldown::Detector> m_pd, m_exact;
@@ -718,9 +765,9 @@ namespace RealFootage
 		bool m_havePending = false;
 		std::unique_ptr<ContentIntent::Observer> m_observer;
 		std::vector<std::unique_ptr<SourceResolutionMonitor::Monitor>> m_srMonitors;
-		std::deque<SrJob> m_srJobs[2];
-		double m_srLastSubmit = -1e9, m_srFx[2] = { 1, 1 }, m_srFy[2] = { 1, 1 };
-		unsigned long long m_srCuts[2] = { 0, 0 };
+		std::deque<SrJob> m_srJobs[kSrLanes];
+		double m_srLastSubmit = -1e9, m_srFx[kSrLanes] = { 1, 1, 1 }, m_srFy[kSrLanes] = { 1, 1, 1 };
+		unsigned long long m_srCuts[kSrLanes] = { 0, 0, 0 };
 	};
 
 	// ---- decoded-frame helpers ----
@@ -2023,37 +2070,47 @@ namespace RealFootage
 				spec.sourceResolution = true;
 				const RunResult& r = s.Result(spec);
 				const LaneResult& on = On(r);
-				const std::vector<double> found = Relative(on.srOn.cutTimes), foundOff = Relative(on.srOff.cutTimes);
+				const std::vector<double> found = Relative(on.srOn.cutTimes), foundOff = Relative(on.srOff.cutTimes),
+					foundCutOff = Relative(on.srCutOff.cutTimes);
 				int engages = 0;
 				for (const SrChange& ch : on.srOn.changes)
 					engages += ch.toY < ch.fromY ? 1 : 0;
-				std::string declared;
-				for (const auto& d : on.srOn.declared)
-					declared += Fmt(" %.1fs->%.2f", d.first - 1.0, d.second);
+				std::string declared, declaredCutOff;
+				for (size_t d = 0; d < on.srOn.declared.size(); ++d)
+					declared += Fmt(" %.1fs->%.2f (%s)", on.srOn.declared[d].first - 1.0, on.srOn.declared[d].second,
+						d < on.srOn.declaredEvidence.size() ? on.srOn.declaredEvidence[d].c_str() : "");
+				for (const auto& d : on.srCutOff.declared)
+					declaredCutOff += Fmt(" %.1fs->%.2f", d.first - 1.0, d.second);
+				// R3-2 (h3-latch): native footage never even declares a lower source.
+				const bool neverDeclared = on.srOn.declared.empty();
 				if (c->hasCuts)
 				{
 					// The scene-score list is a lower bound of the real cuts (it misses hard cuts in action:
 					// ToS 51.5 s), and fast whip pans decorrelate every tile at the 0.5 s spacing, so cuts not
 					// in the list are reported, not failed. Asserted: native footage never engages auto, most
 					// listed cuts are found (recall >= 0.6), and the latch fixes find at least as many as before.
-					const CutMatch m = MatchCuts(c->cuts, found), mo = MatchCuts(c->cuts, foundOff);
+					const CutMatch m = MatchCuts(c->cuts, found), mo = MatchCuts(c->cuts, foundOff), mc = MatchCuts(c->cuts, foundCutOff);
 					const double recall = m.truth ? static_cast<double>(m.matched) / m.truth : 1.0;
-					const bool pass = engages == 0 && recall >= 0.6 && m.matched >= mo.matched;
-					s.Add("source-resolution", c->id, "cuts found, native never engaged", pass,
-						Fmt("truth %d, found %d, matched %d (recall %.2f), unlisted %d; missed %s; latch fixes off: found %d matched %d; engages %d; declared%s; readings native %d lower %d blank %d",
-							m.truth, m.found, m.matched, recall, m.falseCuts, JoinD(m.missed).c_str(), mo.found, mo.matched, engages,
-							declared.empty() ? " never" : declared.c_str(), on.srOn.nativeReadings, on.srOn.lowerReadings, on.srOn.blank));
+					const bool pass = engages == 0 && neverDeclared && recall >= 0.6 && m.matched >= mo.matched;
+					s.Add("source-resolution", c->id, "cuts found, native never declared or engaged", pass,
+						Fmt("truth %d, found %d, matched %d (recall %.2f), unlisted %d; missed %s; cut fixes off: found %d matched %d unlisted %d, declared%s; latch fixes off: found %d matched %d; engages %d; declared%s; flashes %llu, covered steps %llu; readings native %d lower %d blank %d",
+							m.truth, m.found, m.matched, recall, m.falseCuts, JoinD(m.missed).c_str(), mc.found, mc.matched, mc.falseCuts,
+							declaredCutOff.empty() ? " never" : declaredCutOff.c_str(), mo.found, mo.matched, engages,
+							declared.empty() ? " never" : declared.c_str(), on.srOn.flashes, on.srOn.coveredSteps, on.srOn.nativeReadings,
+							on.srOn.lowerReadings, on.srOn.blank));
 					failures += pass ? 0 : 1;
 				}
 				else
 				{
 					// A cut-free shot (by scene score): native never engaged; its cuts are reported (a long
 					// take's dolly to an extreme close-up and a credits scroll change every tile).
-					const bool pass = engages == 0;
-					s.Add("source-resolution", c->id, "cut-free shot: native never engaged (cuts reported)", pass,
-						Fmt("cuts %s (latch fixes off %s); engages %d; declared%s; native %d lower %d blank %d", JoinD(found).c_str(),
-							JoinD(foundOff).c_str(), engages, declared.empty() ? " never" : declared.c_str(), on.srOn.nativeReadings,
-							on.srOn.lowerReadings, on.srOn.blank));
+					// h3-latch (R3-1): a cut-free shot has no cut (a long take's dolly to an extreme close-up, a pass
+					// through a dark occluder and a credits scroll change every tile but no two consecutive frames).
+					const bool pass = engages == 0 && neverDeclared && found.empty();
+					s.Add("source-resolution", c->id, "cut-free shot: no cut, native never declared or engaged", pass,
+						Fmt("cuts %s (cut fixes off %s; latch fixes off %s); engages %d; declared%s; flashes %llu, covered steps %llu; native %d lower %d blank %d",
+							JoinD(found).c_str(), JoinD(foundCutOff).c_str(), JoinD(foundOff).c_str(), engages, declared.empty() ? " never" : declared.c_str(),
+							on.srOn.flashes, on.srOn.coveredSteps, on.srOn.nativeReadings, on.srOn.lowerReadings, on.srOn.blank));
 					failures += pass ? 0 : 1;
 				}
 			}
@@ -2077,13 +2134,18 @@ namespace RealFootage
 				const double expected = declared + kTileLatency + 20.0;
 				const bool pass = engage && engage->why.find("crossfade") != std::string::npos && std::fabs(engage->fade - 1.5) < 1e-9 &&
 					declared >= 9.5 && declared <= 11.5 && std::fabs(at - expected) <= 0.7;
-				// Round 3 (deferred): the long take's dolly to an extreme close-up at 28.5 s reads as a cut
-				// (every tile decorrelates with a level jump), so auto engages there mid-shot, before the
-				// crossfade is due. See docs/agent-reports/real-footage-suite.md, R3-1.
-				s.Deferred("source-resolution", spec.label, "long take crossfades after the wait", pass,
-					Fmt("declared %.2f s (expect ~10), engaged %.2f s (expect %.2f) by '%s', fade %.2f s, ratio %.2f; cuts %s; latch fixes off: %zu changes, declared %.2f",
+				// R3-1 (fixed by h3-latch, source_resolution_cut_fixes): the long take's dolly to an extreme close-up
+				// at 28.5 s read as a cut, so auto engaged there mid-shot before the crossfade was due.
+				const SrChange* engageCutOff = nullptr;
+				for (const SrChange& ch : on.srCutOff.changes)
+					if (ch.toY < ch.fromY) { engageCutOff = &ch; break; }
+				s.Add("source-resolution", spec.label, "long take crossfades after the wait", pass,
+					Fmt("declared %.2f s (expect ~10), engaged %.2f s (expect %.2f) by '%s', fade %.2f s, ratio %.2f; cuts %s; cut fixes off: engaged %.2f s by '%s', cuts %s; latch fixes off: %zu changes, declared %.2f",
 						declared, at, expected, engage ? engage->why.c_str() : "never", engage ? engage->fade : 0.0, engage ? engage->toY : 1.0,
-						JoinD(Relative(on.srOn.cutTimes)).c_str(), on.srOff.changes.size(), on.srOff.firstDeclared < 0 ? -1.0 : on.srOff.firstDeclared - 1.0));
+						JoinD(Relative(on.srOn.cutTimes)).c_str(), engageCutOff ? engageCutOff->t - 1.0 : -1.0,
+						engageCutOff ? engageCutOff->why.c_str() : "never", JoinD(Relative(on.srCutOff.cutTimes)).c_str(),
+						on.srOff.changes.size(), on.srOff.firstDeclared < 0 ? -1.0 : on.srOff.firstDeclared - 1.0));
+				failures += pass ? 0 : 1;
 				// The part fixed here (the evidence standard at the stream start) is asserted.
 				const bool evidence = declared >= 9.5 && declared <= 11.5;
 				s.Add("source-resolution", spec.label, "evidence standard kept at the stream start (10 s in one shot)", evidence,
@@ -2313,14 +2375,14 @@ namespace RealFootage
 			// A real cut (an unrelated picture) is still one.
 			const SourceResolution::FrameReading c = frame(0.0, 0.1, 1.0, 99);
 			tracker.Update(c, 4.0);
+			// (source_resolution_cut_fixes: confirmed when the next analysed frame shows the new shot persists.)
+			tracker.Update(frame(0.0, 0.1001, 1.0, 99), 4.5);
 			Assert::AreEqual(1ull, tracker.Cuts(), L"an unrelated shape is a cut");
+			Assert::AreEqual(4.0, tracker.LastCutSeconds(), 1e-9, L"at its own moment");
 		}
 	
-		// R3-1 (bug hunt round 3, not fixed here): a camera move inside a long take is not a cut.
-		// Needs the clip library; enable when the cut judge is recalibrated on real footage.
-		BEGIN_TEST_METHOD_ATTRIBUTE(LongTakeCameraMoveIsNotACut)
-			TEST_IGNORE()
-		END_TEST_METHOD_ATTRIBUTE()
+		// R3-1 (bug hunt round 3, fixed by h3-latch: source_resolution_cut_fixes): a camera move inside a
+		// long take is not a cut. Needs the clip library (skipped without it).
 		TEST_METHOD(LongTakeCameraMoveIsNotACut)
 		{
 			using namespace RealFootage;
@@ -2335,4 +2397,405 @@ namespace RealFootage
 			Assert::AreEqual(size_t{ 0 }, On(r).srOn.cutTimes.size(), L"the scene-cut-free long take has no tracker cut");
 		}
 };
+
+	// h3-latch (source_resolution_cut_fixes): the cut judge's rules on synthetic readings (no footage).
+	TEST_CLASS(SourceResolutionCutFixesTests)
+	{
+		// A 32-value tile pattern (8 tiles x 4 quadrants) between 0.2 and 0.6 from a seed.
+		static std::vector<double> Pattern(unsigned seed)
+		{
+			std::vector<double> p(32);
+			unsigned x = seed * 2654435761u + 12345u;
+			for (double& v : p)
+			{
+				x = x * 1103515245u + 12345u;
+				v = 0.2 + 0.4 * ((x >> 16) & 0x7fff) / 32767.0;
+			}
+			return p;
+		}
+		static std::vector<double> Mix(const std::vector<double>& a, const std::vector<double>& b, double m)
+		{
+			std::vector<double> p(a.size());
+			for (size_t i = 0; i < a.size(); ++i) p[i] = (1.0 - m) * a[i] + m * b[i];
+			return p;
+		}
+		// A luma distribution centred on `bin`.
+		static std::vector<double> Distribution(int bin)
+		{
+			std::vector<double> d(SourceResolution::kDistributionBins, 0.0);
+			for (int i = -2; i <= 2; ++i) d[static_cast<size_t>((std::max)(0, (std::min)(SourceResolution::kDistributionBins - 1, bin + i)))] += 0.2;
+			return d;
+		}
+		static SourceResolution::FrameReading Reading(const std::vector<double>& pattern, const std::vector<double>& distribution, double signature,
+			double ratio = 1.0, bool informative = false)
+		{
+			SourceResolution::FrameReading f;
+			f.tiles = 8;
+			f.informativeTiles = informative ? 8 : 0;
+			f.pattern = pattern;
+			f.patternFlat.assign(pattern.size(), 0);
+			f.distribution = distribution;
+			double sum = 0.0;
+			for (double v : pattern) sum += v;
+			f.mean = sum / pattern.size();
+			f.signature = signature;   // a changing frame (not a repeat)
+			f.ratio = ratio;
+			return f;
+		}
+		// Small per-frame noise so consecutive frames are new pictures.
+		static std::vector<double> Jitter(const std::vector<double>& p, unsigned seed, double amount = 0.002)
+		{
+			std::vector<double> q = p;
+			unsigned x = seed * 747796405u + 1u;
+			for (double& v : q)
+			{
+				x = x * 1103515245u + 12345u;
+				v += amount * (((x >> 16) & 0x7fff) / 32767.0 - 0.5);
+			}
+			return q;
+		}
+		static SourceResolution::Tracker::Settings Fixes(bool cutFixes)
+		{
+			SourceResolution::Tracker::Settings s;
+			s.latchFixes = true;
+			s.cutFixes = cutFixes;
+			return s;
+		}
+
+		// A 2-frame flash (lightning: half the picture lights up) inside a shot: the look-ahead's judge
+		// cancels it within the flash window, and a real cut later stands once the window has passed.
+		TEST_METHOD(FrameJudgeFlashIsCancelledAndCutStands)
+		{
+			const SourceResolution::Tracker::Settings s = Fixes(true);
+			SourceResolution::FrameCutJudge judge;
+			const std::vector<double> a = Pattern(1), b = Pattern(2);
+			std::vector<double> flash = a;
+			for (size_t i = 0; i < 16; ++i) flash[i] += 0.35;
+			const double per = 1.0 / 24.0, black = 64.0 / 1023.0, noise = 2.0 / 1023.0;
+			uint64_t seq = 100;
+			for (unsigned i = 0; i < 24; ++i) judge.Frame(++seq, Jitter(a, i), black, noise, per, s);
+			const uint64_t flashAt = seq + 1;
+			Assert::IsTrue(judge.Frame(++seq, flash, black, noise, per, s), L"the flash's first frame is a candidate");
+			judge.Frame(++seq, Jitter(flash, 99), black, noise, per, s);
+			for (unsigned i = 0; i < 24; ++i) judge.Frame(++seq, Jitter(a, 200 + i), black, noise, per, s);
+			Assert::IsTrue(judge.Cancelled(flashAt), L"back to the shape before within 0.25 s: a flash");
+			SourceResolution::FrameEvidence e = judge.Evidence(101, seq);
+			Assert::IsTrue(e.covered);
+			Assert::IsFalse(e.cut, L"a flash is no cut");
+			const uint64_t cutAt = seq + 1;
+			for (unsigned i = 0; i < 24; ++i) judge.Frame(++seq, Jitter(b, 300 + i), black, noise, per, s);
+			Assert::IsFalse(judge.Cancelled(cutAt));
+			e = judge.Evidence(cutAt - 1, cutAt);
+			Assert::IsTrue(e.covered && e.cut && !e.unresolved, L"a cut to another shot stands");
+			// Not covered: a gap in the frames shown to the look-ahead.
+			judge.Frame(seq + 10, b, black, noise, per, s);
+			Assert::IsFalse(judge.Evidence(seq, seq + 10).covered);
+		}
+
+		// A camera move: the shape changes completely over 0.5 s but little between two frames. The
+		// look-ahead sees no cut, so the tracker counts none; with the cut fixes off the same tiles are a cut.
+		TEST_METHOD(CameraMoveWithLookAheadIsNotACut)
+		{
+			const std::vector<double> a = Pattern(3), b = Pattern(4), c = Pattern(5);
+			SourceResolution::FrameCutJudge judge;
+			const SourceResolution::Tracker::Settings s = Fixes(true);
+			uint64_t seq = 0;
+			std::vector<std::vector<double>> frames;
+			// 12 frames per 0.5 s at 24 fps: a -> b -> c, morphing frame by frame.
+			for (int i = 0; i <= 36; ++i)
+				frames.push_back(i <= 12 ? a : i <= 24 ? Mix(a, b, (i - 12) / 12.0) : Mix(b, c, (i - 24) / 12.0));
+			for (size_t i = 0; i < frames.size(); ++i) judge.Frame(++seq, Jitter(frames[i], static_cast<unsigned>(i)), 64.0 / 1023.0, 2.0 / 1023.0, 1.0 / 24.0, s);
+			Assert::AreEqual(size_t{ 0 }, judge.Candidates().size(), L"no jump between consecutive frames");
+			const SourceResolution::EvidenceSource look = [&judge](uint64_t from, uint64_t to) { return judge.Evidence(from, to); };
+			auto run = [&](bool cutFixes) {
+				SourceResolution::Tracker t(Fixes(cutFixes));
+				// A still opening (its motion level settles), then the move at the 0.5 s tile spacing.
+				for (int k = 0; k < 8; ++k)
+					t.Update(Reading(Jitter(a, 500 + k), Distribution(8), 900.0 + k), 6.0 + 0.5 * k);
+				const int at[] = { 0, 12, 24, 36 };
+				for (int k = 0; k < 4; ++k)
+				{
+					const int i = at[k];
+					t.Update(Reading(Jitter(frames[static_cast<size_t>(i)], static_cast<unsigned>(i)), Distribution(8 + 4 * k), 1.0 + k), 10.0 + 0.5 * k, false,
+						static_cast<uint64_t>(i + 1), &look);
+				}
+				return t.Cuts();
+			};
+			Assert::AreEqual(0ull, run(true), L"camera move with the look-ahead: no cut");
+			Assert::IsTrue(run(false) >= 1ull, L"cut fixes off: the move reads as a cut (the bug)");
+		}
+
+		// Tiles alone (no look-ahead): a flash caught by an analysed frame returns at the next one -
+		// no cut; a real cut is confirmed one analysed frame later and keeps its own moment.
+		TEST_METHOD(TileFlashIsNotACutAndCutKeepsItsMoment)
+		{
+			const std::vector<double> a = Pattern(6), b = Pattern(7);
+			std::vector<double> flash = a;
+			for (size_t i = 0; i < 16; ++i) flash[i] += 0.45;
+			SourceResolution::Tracker t(Fixes(true));
+			double time = 0.0;
+			unsigned n = 0;
+			auto feed = [&](const std::vector<double>& p, int bin) { t.Update(Reading(Jitter(p, n), Distribution(bin), ++n), time); time += 0.5; };
+			for (int i = 0; i < 12; ++i) feed(a, 8);
+			feed(flash, 14);
+			feed(a, 8);
+			for (int i = 0; i < 6; ++i) feed(a, 8);
+			Assert::AreEqual(0ull, t.Cuts(), L"a flash that returns is no cut");
+			Assert::IsTrue(t.Flashes() >= 1ull);
+			const double cutTime = time;
+			feed(b, 20);
+			Assert::AreEqual(0ull, t.Cuts(), L"deferred: confirmed at the next analysed frame");
+			Assert::AreEqual(2ull, t.CutMoments(), L"but a switch moment at once (the flash was one too)");
+			feed(b, 20);
+			Assert::AreEqual(1ull, t.Cuts());
+			Assert::AreEqual(cutTime, t.LastCutSeconds(), 1e-9, L"the cut keeps the moment of its first frame");
+			// The same with the cut fixes off: the flash counts.
+			SourceResolution::Tracker old(Fixes(false));
+			time = 0.0;
+			for (unsigned i = 0; i < 12; ++i) { old.Update(Reading(Jitter(a, i), Distribution(8), 1000.0 + i), time); time += 0.5; }
+			old.Update(Reading(flash, Distribution(14), 2000.0), time); time += 0.5;
+			old.Update(Reading(Jitter(a, 77), Distribution(8), 2001.0), time);
+			Assert::IsTrue(old.Cuts() >= 1ull, L"cut fixes off: the flash reads as cuts");
+		}
+
+		// Shot / reverse-shot at one level: decorrelation 0.78-0.90 with no level jump, under the 0.9 alone
+		// threshold. With the cut fixes a cut when the next analysed frame confirms the new shape persists.
+		TEST_METHOD(SameLevelShotReverseShotIsACut)
+		{
+			const std::vector<double> a = Pattern(8), b = Pattern(9);
+			double best = 0.62;
+			for (double m = 0.4; m <= 0.8; m += 0.01)
+			{
+				double d = 0.0, sh = 0.0, jump = 0.0;
+				SourceResolution::PatternChange(a, std::vector<char>(32, 0), Mix(a, b, m), std::vector<char>(32, 0), 64.0 / 1023.0, 2.0 / 1023.0, d, sh, &jump);
+				if (d >= 0.84) { best = m; break; }
+			}
+			const std::vector<double> r = Mix(a, b, best);
+			double d = 0.0, sh = 0.0, jump = 0.0;
+			Assert::IsTrue(SourceResolution::PatternChange(a, std::vector<char>(32, 0), r, std::vector<char>(32, 0), 64.0 / 1023.0, 2.0 / 1023.0, d, sh, &jump));
+			Assert::IsTrue(d >= 0.75 && d < 0.9 && jump < 0.2, L"a near miss of the old rule");
+			auto run = [&](bool cutFixes) {
+				SourceResolution::Tracker t(Fixes(cutFixes));
+				double time = 0.0;
+				unsigned n = 0;
+				for (int i = 0; i < 12; ++i) { t.Update(Reading(Jitter(a, n), Distribution(10), ++n), time); time += 0.5; }
+				for (int i = 0; i < 4; ++i) { t.Update(Reading(Jitter(r, n), Distribution(13), ++n), time); time += 0.5; }
+				return t.Cuts();
+			};
+			Assert::AreEqual(1ull, run(true));
+			Assert::AreEqual(0ull, run(false), L"the latch fixes judge missed it");
+		}
+
+		// A scroll or pan inside one lighting: the tiles' shape changes, the luma distribution does not.
+		TEST_METHOD(UnchangedDistributionIsNotACut)
+		{
+			const std::vector<double> a = Pattern(10), b = Pattern(11);
+			SourceResolution::Tracker t(Fixes(true)), old(Fixes(false));
+			double time = 0.0;
+			for (unsigned i = 0; i < 12; ++i)
+			{
+				const auto f = Reading(Jitter(a, i), Distribution(9), 1.0 + i);
+				t.Update(f, time); old.Update(f, time); time += 0.5;
+			}
+			for (unsigned i = 0; i < 3; ++i)
+			{
+				const auto f = Reading(Jitter(b, 50 + i), Distribution(9), 100.0 + i);
+				t.Update(f, time); old.Update(f, time); time += 0.5;
+			}
+			Assert::AreEqual(0ull, t.Cuts());
+			Assert::AreEqual(1ull, old.Cuts(), L"cut fixes off: a cut");
+		}
+
+		// A pass through a dark occluder: the frame's level above black is near zero; it is not compared,
+		// and the shot on both sides is the same shape.
+		TEST_METHOD(DarkPassIsNotACut)
+		{
+			const std::vector<double> a = Pattern(12);
+			std::vector<double> dark = Pattern(13);
+			for (double& v : dark) v = 64.0 / 1023.0 + (v - 0.2) * 0.02;
+			SourceResolution::Tracker t(Fixes(true));
+			double time = 0.0;
+			for (unsigned i = 0; i < 12; ++i) { t.Update(Reading(Jitter(a, i), Distribution(9), 1.0 + i), time); time += 0.5; }
+			t.Update(Reading(dark, Distribution(2), 50.0), time); time += 0.5;
+			for (unsigned i = 0; i < 4; ++i) { t.Update(Reading(Jitter(a, 60 + i), Distribution(9), 60.0 + i), time); time += 0.5; }
+			Assert::AreEqual(0ull, t.Cuts());
+		}
+
+		// R3-2: fast cuts with a few stray lower readings of native footage reach three shots in about a
+		// second; with the cut fixes the shots also need half the evidence time, so nothing is declared.
+		TEST_METHOD(FastCutsOnStrayReadingsDoNotDeclare)
+		{
+			auto run = [](bool cutFixes) {
+				SourceResolution::Tracker t(Fixes(cutFixes));
+				double time = 0.0;
+				unsigned n = 0;
+				for (int i = 0; i < 20; ++i) { t.Update(Reading(Jitter(Pattern(20), n), Distribution(8), ++n, 1.0, true), time); time += 0.5; }
+				double lowest = 1.0;
+				// Four short shots (2 analysed frames each) reading 0.75, then native again.
+				for (unsigned shot = 0; shot < 4; ++shot)
+					for (int i = 0; i < 2; ++i)
+					{
+						t.Update(Reading(Jitter(Pattern(21 + shot), n), Distribution(10 + 5 * static_cast<int>(shot)), ++n, 0.75, true), time);
+						time += 0.5;
+						lowest = (std::min)(lowest, t.Ratio());
+					}
+				return lowest;
+			};
+			Assert::AreEqual(1.0, run(true), 1e-9, L"never declared");
+			Assert::IsTrue(run(false) < 1.0, L"cut fixes off: declared on the shots (the near miss)");
+		}
+	};
+
+	// h3-latch K3 (active_picture_startup_hold): black until the first crop decision, the remembered
+	// crop of the same source after a reset, a bounded hold, nothing to wait for without auto crop.
+	TEST_CLASS(StartupCropHoldTests)
+	{
+		TEST_METHOD(BlackUntilTheFirstDecisionThenRememberedAfterAReset)
+		{
+			StartupCropHold hold;
+			StartupCropHold::Key key;
+			key.width = 3840; key.height = 2160; key.format = 7;
+			StartupCropHold::Rect crop;
+			crop.left = 0; crop.top = 276; crop.right = 3840; crop.bottom = 1884;
+			const StartupCropHold::Rect none;
+			hold.Begin(10.0);
+			// Start-up: no decision for 1.0 s - black, not the uncropped picture.
+			for (double t = 10.0; t < 11.0; t += 1.0 / 24.0)
+				Assert::IsTrue(hold.Frame(key, t, true, false, false, none) == StartupCropHold::Action::Black);
+			// The first decision ends the hold at once.
+			Assert::IsTrue(hold.Frame(key, 11.0, true, true, true, crop) == StartupCropHold::Action::Present);
+			Assert::IsFalse(hold.Holding());
+			// A live queue reset with the same source: the remembered crop at once, until the new decision.
+			hold.Begin(20.0);
+			Assert::IsTrue(hold.Frame(key, 20.0, true, false, false, none) == StartupCropHold::Action::Remembered);
+			Assert::AreEqual(276, hold.RememberedCrop().top);
+			Assert::IsTrue(hold.Frame(key, 20.5, true, true, true, crop) == StartupCropHold::Action::Present);
+			// A different source after a reset: black again (its bars are not known).
+			StartupCropHold::Key other = key;
+			other.height = 1080; other.width = 1920;
+			hold.Begin(30.0);
+			Assert::IsTrue(hold.Frame(other, 30.0, true, false, false, none) == StartupCropHold::Action::Black);
+		}
+
+		TEST_METHOD(FullRasterNeedsNoHoldAndTheHoldIsBounded)
+		{
+			StartupCropHold hold;
+			StartupCropHold::Key key;
+			key.width = 1920; key.height = 1080; key.format = 3;
+			const StartupCropHold::Rect none;
+			hold.Begin(0.0);
+			// No decision ever (the detector cannot decide): the picture still appears after the bound.
+			Assert::IsTrue(hold.Frame(key, 0.1, true, false, false, none) == StartupCropHold::Action::Black);
+			Assert::IsTrue(hold.Frame(key, hold.MaximumHold() + 0.01, true, false, false, none) == StartupCropHold::Action::Present);
+			Assert::AreEqual(1ull, hold.Timeouts());
+			// A trusted full raster is a decision; after a reset of the same source there is nothing to hold.
+			Assert::IsTrue(hold.Frame(key, 5.0, true, true, false, none) == StartupCropHold::Action::Present);
+			hold.Begin(6.0);
+			Assert::IsTrue(hold.Frame(key, 6.0, true, false, false, none) == StartupCropHold::Action::Present);
+			// Automatic crop off: nothing to wait for; switch off: never black.
+			hold.Begin(7.0);
+			Assert::IsTrue(hold.Frame(StartupCropHold::Key{}, 7.0, false, false, false, none) == StartupCropHold::Action::Present);
+			hold.SetEnabled(false);
+			hold.Begin(8.0);
+			Assert::IsTrue(hold.Frame(StartupCropHold::Key{}, 8.0, true, false, false, none) == StartupCropHold::Action::Present);
+		}
+	};
+
+	// The gate-verify cut method (docs/agent-reports/gate-verify.md section 2; tools/score_film_cuts.py):
+	// 2-fps 8-bit 4:2:0 y4m samples of a film (VP_TEST_CUT_FILMS, ';'-separated paths), the base 4 x 2 grid
+	// plus the dense rows at the picture's tile size, each frame 0.5 s apart through two trackers: the cut
+	// fixes on (column cut_fixes) and off (column cut_old = the latch fixes' judge). A deferred cut is
+	// written on the step it belongs to (LastCutSeconds). Writes <film>.cuts.csv for the scoring script.
+	TEST_CLASS(SourceResolutionFilmCuts)
+	{
+		TEST_METHOD(RealFilmCutDecisionsCutFixes)
+		{
+			const std::string films = RealClip::Env("VP_TEST_CUT_FILMS");
+			if (films.empty()) { Logger::WriteMessage("RealFilmCutDecisionsCutFixes: VP_TEST_CUT_FILMS not set: skipped\n"); return; }
+			size_t from = 0;
+			while (from < films.size())
+			{
+				const size_t end = films.find(';', from);
+				const std::string path = films.substr(from, end == std::string::npos ? std::string::npos : end - from);
+				from = end == std::string::npos ? films.size() : end + 1;
+				if (path.empty()) continue;
+				FILE* file = nullptr;
+				Assert::AreEqual(0, static_cast<int>(fopen_s(&file, path.c_str(), "rb")), L"film not found");
+				char header[512] = {};
+				Assert::IsTrue(fgets(header, sizeof(header), file) != nullptr);
+				int W = 0, H = 0;
+				for (const char* p = header; *p; ++p)
+				{
+					if (p[0] == ' ' && p[1] == 'W') W = atoi(p + 2);
+					if (p[0] == ' ' && p[1] == 'H') H = atoi(p + 2);
+				}
+				Assert::IsTrue(W > 0 && H > 0);
+				const double black = 64.0 / 1023.0;
+				const int tile = SourceResolution::TileSize(H);
+				int base = 0;
+				const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(0, 0, W, H, tile, true, &base);
+				SourceResolution::Tracker::Settings on, off;
+				on.latchFixes = off.latchFixes = true;
+				on.cutFixes = true;
+				off.cutFixes = false;
+				SourceResolution::Tracker fixes(on), old(off);
+				std::vector<uint8_t> y(static_cast<size_t>(W) * H), chroma(static_cast<size_t>(W) * H / 2);
+				std::vector<float> values(static_cast<size_t>(tile) * tile);
+				struct Row { double seconds, dec, share, jump, mean; int judged, cutOn, cutOff; };
+				std::vector<Row> rows;
+				SourceResolution::FrameReading last;
+				bool haveLast = false;
+				unsigned long long cutsOn = 0, cutsOff = 0;
+				char line[256];
+				for (int k = 0;; ++k)
+				{
+					if (!fgets(line, sizeof(line), file) || strncmp(line, "FRAME", 5) != 0) break;
+					if (fread(y.data(), 1, y.size(), file) != y.size() || fread(chroma.data(), 1, chroma.size(), file) != chroma.size()) break;
+					std::vector<SourceResolution::Spectrum> spectra(places.size());
+					for (size_t p = 0; p < places.size(); ++p)
+					{
+						for (int r = 0; r < tile; ++r)
+							for (int c = 0; c < tile; ++c)
+								values[static_cast<size_t>(r) * tile + c] = static_cast<float>(y[static_cast<size_t>(places[p].y0 + r) * W + places[p].x0 + c] * 4) / 1023.0f;
+						SourceResolution::Analyse(values.data(), tile, tile, spectra[p], 1023);
+					}
+					SourceResolution::Thresholds th;
+					SourceResolution::SetTileCentres(places, th);
+					th.signatureTiles = base;
+					th.blackLevel = black;
+					const SourceResolution::FrameReading f = SourceResolution::ReadFrame(spectra, th);
+					const double t = k * 0.5;
+					fixes.Update(f, t);
+					old.Update(f, t);
+					Row row{ t, -1.0, -1.0, -1.0, f.mean, 0, 0, 0 };
+					if (haveLast)
+						row.judged = SourceResolution::PatternChange(last.pattern, last.patternFlat, f.pattern, f.patternFlat, f.blackLevel, f.noiseLevel, row.dec, row.share, &row.jump) ? 1 : 0;
+					rows.push_back(row);
+					if (fixes.Cuts() != cutsOn)
+					{
+						cutsOn = fixes.Cuts();
+						const double at = fixes.LastCutSeconds();
+						for (size_t i = rows.size(); i-- > 0;)
+							if (std::fabs(rows[i].seconds - at) < 1e-6) { rows[i].cutOn = 1; break; }
+					}
+					if (old.Cuts() != cutsOff) { cutsOff = old.Cuts(); rows.back().cutOff = 1; }
+					last = f;
+					haveLast = true;
+				}
+				fclose(file);
+				std::string csv = "step,seconds,decorrelation,share,jump,judged,cut_fixes,cut_old,mean\n";
+				for (size_t i = 0; i < rows.size(); ++i)
+				{
+					snprintf(line, sizeof(line), "%zu,%.2f,%.4f,%.4f,%.4f,%d,%d,%d,%.4f\n", i, rows[i].seconds, rows[i].dec, rows[i].share, rows[i].jump,
+						rows[i].judged, rows[i].cutOn, rows[i].cutOff, rows[i].mean);
+					csv += line;
+				}
+				const std::string out = RealClip::Env("VP_TEST_CUT_OUT").empty() ? path + ".h3.cuts.csv" : RealClip::Env("VP_TEST_CUT_OUT") + "\\" + path.substr(path.find_last_of("\\/") + 1) + ".h3.cuts.csv";
+				FILE* o = nullptr;
+				if (fopen_s(&o, out.c_str(), "wb") == 0 && o) { fwrite(csv.data(), 1, csv.size(), o); fclose(o); }
+				snprintf(line, sizeof(line), "RESULT %s: %zu analysed frames; cuts with cut fixes %llu, without %llu; flashes %llu; csv %s\n", path.c_str(), rows.size(), cutsOn, cutsOff, fixes.Flashes(), out.c_str());
+				Logger::WriteMessage(line);
+			}
+		}
+	};
 }

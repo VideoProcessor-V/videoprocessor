@@ -747,6 +747,8 @@ namespace RendererProfileConfig
 			if (key == "source_coding_fixes") return IsChoice(value, { "on", "off" });   // hunt 2 M2/M3
 			// Latch review 2026-10-17: the latch fixes and the switch timing (seconds).
 			if (key == "source_resolution_latch_fixes") return IsChoice(value, { "on", "off" });
+			if (key == "source_resolution_cut_fixes") return IsChoice(value, { "on", "off" });
+			if (key == "active_picture_startup_hold") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_engage_max_wait_s") return IsNumberInRange(value, 0.0, 600.0);
 			if (key == "source_resolution_crossfade_s") return IsNumberInRange(value, 0.0, 10.0);
 			if (key == "source_resolution_release_fade_s") return IsNumberInRange(value, 0.0, 0.25);

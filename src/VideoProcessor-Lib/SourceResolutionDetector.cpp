@@ -1094,6 +1094,14 @@ namespace SourceResolution
 				if (t.latchFixes)
 				{
 					for (int q = 0; q < 4; ++q) { frame.pattern.push_back(s.quadrants[q]); frame.patternFlat.push_back(flat ? 1 : 0); }
+					// h3-latch: the luma distribution of the same (not flat bar) tiles, from their code histograms.
+					if (!flat && !s.histogram.empty())
+					{
+						if (frame.distribution.empty()) frame.distribution.assign(static_cast<size_t>(kDistributionBins), 0.0);
+						const size_t codes = s.histogram.size();
+						for (size_t v = 0; v < codes; ++v)
+							frame.distribution[(std::min)(static_cast<size_t>(kDistributionBins - 1), v * kDistributionBins / codes)] += s.histogram[v];
+					}
 				}
 				// A flat bar tile stays out of the mean / signature unless every tile is flat (black).
 				if (!flat || allFlat)
@@ -1119,6 +1127,12 @@ namespace SourceResolution
 				frame.verticalPower[k] += s.vertical[k];
 				frame.horizontalPower[k] += s.horizontal[k];
 			}
+		}
+		{
+			double total = 0.0;
+			for (double v : frame.distribution) total += v;
+			if (total > 0.0) for (double& v : frame.distribution) v /= total;
+			else frame.distribution.clear();
 		}
 		frame.mean = counted > 0 ? sum / counted : sum / signatureTiles;
 		frame.signature = signature;
@@ -1277,6 +1291,14 @@ namespace SourceResolution
 		return true;
 	}
 
+	double DistributionChange(const std::vector<double>& a, const std::vector<double>& b)
+	{
+		if (a.empty() || a.size() != b.size()) return -1.0;
+		double d = 0.0;
+		for (size_t i = 0; i < a.size(); ++i) d += std::fabs(a[i] - b[i]);
+		return 0.5 * d;
+	}
+
 	int TileSize(double height, int maximum)
 	{
 		// 256 px at 2160 (the size the detector's thresholds were measured with).
@@ -1345,6 +1367,9 @@ namespace SourceResolution
 	{
 		Discontinuity("reset");
 		cuts = 0;
+		moments = flashes = coveredSteps = 0;
+		lastCutSeconds = -1.0;
+		lastMomentSpan = 0.0;
 		discontinuities = 0;
 		lastReason.clear();
 	}
@@ -1370,11 +1395,172 @@ namespace SourceResolution
 		lastPatternFlat.clear();
 		lastPatternSeconds = -1.0;
 		cutJudge = CutJudge{};
+		lastDistribution.clear();
+		lastPatternSequence = 0;
+		pending = Pending{};
 		++discontinuities;
 		lastReason = reason ? reason : "";
 	}
 
 	void Tracker::Update(const FrameReading& frame, double seconds, bool repeated)
+	{
+		Update(frame, seconds, repeated, 0, nullptr);
+	}
+
+	bool Tracker::Dark(const FrameReading& frame) const
+	{
+		if (settings.darkLevel <= 0.0) return false;
+		double sum = 0.0;
+		int count = 0;
+		for (size_t i = 0; i < frame.pattern.size(); ++i)
+			if (i >= frame.patternFlat.size() || !frame.patternFlat[i]) { sum += frame.pattern[i]; ++count; }
+		if (count == 0) return false;
+		return sum / count - frame.blackLevel < settings.darkLevel * (1.0 - frame.blackLevel);
+	}
+
+	void Tracker::ConfirmCut(double cutSeconds, double span)
+	{
+		++shot;
+		++cuts;
+		haveLastNative = false;
+		streak = 0;
+		streakDetail.clear();
+		lastCutSpan = span;
+		lastCutSeconds = cutSeconds;
+		// A deferred confirmation: the frames analysed since the cut belong to the new shot.
+		for (auto it = window.rbegin(); it != window.rend() && it->seconds >= cutSeconds - 1e-9; ++it)
+			it->shot = shot;
+	}
+
+	void Tracker::KeepPattern(const FrameReading& frame, double seconds, uint64_t sequence)
+	{
+		lastPattern = frame.pattern;
+		lastPatternFlat = frame.patternFlat;
+		lastDistribution = frame.distribution;
+		lastPatternSeconds = seconds;
+		lastPatternSequence = sequence;
+	}
+
+	void Tracker::CutFixesStep(const FrameReading& frame, double seconds, uint64_t sequence, const EvidenceSource* look)
+	{
+		const Settings& s = settings;
+		const double black = frame.blackLevel, noise = frame.noiseLevel;
+		// A frame without a shape of its own (black, flat) or a dark one is not compared: the next
+		// frame with a shape is judged against the last one (a fade through black between two shots is
+		// a cut, a pass through a dark occluder inside a shot is not).
+		double d0 = 0.0, s0 = 0.0;
+		if (!PatternChange(frame.pattern, frame.patternFlat, frame.pattern, frame.patternFlat, black, noise, d0, s0) || Dark(frame))
+			return;
+		if (lastPattern.empty())
+		{
+			// The first shape of a stream: its motion is not known yet (as after a cut).
+			cutJudge.motion = (std::max)(cutJudge.motion, s.cutMotionAfterCut);
+			KeepPattern(frame, seconds, sequence);
+			return;
+		}
+		const double dt = lastPatternSeconds >= 0.0 ? seconds - lastPatternSeconds : 0.0;
+		// A candidate from the last step: confirmed or dropped with this frame.
+		if (pending.active)
+		{
+			const Pending p = pending;
+			pending = Pending{};
+			bool decided = false, isCut = false, returned = false;
+			if (look && *look && p.from != 0 && p.to > p.from)
+			{
+				// The look-ahead has seen the flash window since.
+				const FrameEvidence again = (*look)(p.from, p.to);
+				if (again.covered && !again.unresolved) { decided = true; isCut = again.cut; }
+			}
+			if (!decided)
+			{
+				double dr = 0.0, sr = 0.0, jr = 0.0;
+				if (PatternChange(p.before, p.beforeFlat, frame.pattern, frame.patternFlat, black, noise, dr, sr, &jr))
+					returned = !(CutRule(dr, jr, p.motionBefore, s) || NearRule(dr, jr, p.motionBefore, s));
+				isCut = !returned;
+				if (isCut && p.nearMiss)
+				{
+					// Shot / reverse-shot: the new shape persists.
+					double ds = 0.0, ss = 0.0;
+					isCut = PatternChange(p.candidate, p.candidateFlat, frame.pattern, frame.patternFlat, black, noise, ds, ss) &&
+						ds <= (std::max)(s.nearStable, p.motionBefore + s.cutMotionMargin - 0.1);
+				}
+			}
+			if (isCut) ConfirmCut(p.seconds, p.span);
+			else
+			{
+				++flashes;
+				cutJudge.motion = p.motionBefore;
+			}
+			if (returned)
+			{
+				// Back to the shape before the flash: this step is the flash's end, not judged.
+				KeepPattern(frame, seconds, sequence);
+				return;
+			}
+		}
+		double decorrelation = 0.0, share = 0.0, jump = 0.0;
+		if (!PatternChange(lastPattern, lastPatternFlat, frame.pattern, frame.patternFlat, black, noise, decorrelation, share, &jump))
+		{
+			KeepPattern(frame, seconds, sequence);
+			return;
+		}
+		const double moved = DistributionChange(lastDistribution, frame.distribution);
+		const bool distributionMoved = moved < 0.0 || moved >= s.distributionMinimum;
+		FrameEvidence ev;
+		bool covered = false;
+		if (look && *look && sequence != 0 && lastPatternSequence != 0 && sequence > lastPatternSequence)
+		{
+			ev = (*look)(lastPatternSequence, sequence);
+			covered = ev.covered;
+		}
+		const double motionBefore = cutJudge.motion;
+		bool strong = false, nearMiss = false;
+		if (covered)
+		{
+			++coveredSteps;
+			strong = distributionMoved && ev.cut &&
+				((decorrelation >= s.cutDecorrelation && jump >= s.cutJump) || decorrelation >= s.coveredAlone);
+		}
+		else
+		{
+			strong = distributionMoved && CutRule(decorrelation, jump, motionBefore, s);
+			nearMiss = distributionMoved && !strong && (moved < 0.0 || moved >= s.nearDistributionMinimum) &&
+				NearRule(decorrelation, jump, motionBefore, s);
+		}
+		if (strong || nearMiss)
+		{
+			cutJudge.motion = (std::max)(cutJudge.motion, s.cutMotionAfterCut);
+			if (strong)
+			{
+				++moments;
+				lastMomentSpan = dt;
+			}
+			if (covered && !ev.unresolved)
+				ConfirmCut(seconds, dt);
+			else
+			{
+				pending.active = true;
+				pending.nearMiss = nearMiss;
+				pending.before = lastPattern;
+				pending.beforeFlat = lastPatternFlat;
+				pending.candidate = frame.pattern;
+				pending.candidateFlat = frame.patternFlat;
+				pending.seconds = seconds;
+				pending.span = dt;
+				pending.motionBefore = motionBefore;
+				pending.from = covered ? lastPatternSequence : 0;
+				pending.to = covered ? sequence : 0;
+			}
+		}
+		else
+		{
+			const double a = s.cutMotionSeconds > 0.0 ? 1.0 - std::exp(-(std::max)(0.0, dt) / s.cutMotionSeconds) : 1.0;
+			cutJudge.motion += a * (decorrelation - cutJudge.motion);
+		}
+		KeepPattern(frame, seconds, sequence);
+	}
+
+	void Tracker::Update(const FrameReading& frame, double seconds, bool repeated, uint64_t sequence, const EvidenceSource* look)
 	{
 		// Time running backwards or a gap with no frames: a discontinuity the
 		// caller may not have reported (a skip, a pause on the source side).
@@ -1392,7 +1578,9 @@ namespace SourceResolution
 		if (frame.tiles > 0)
 		{
 			bool cut = false;
-			if (settings.latchFixes)
+			if (settings.latchFixes && settings.cutFixes)
+				CutFixesStep(frame, seconds, sequence, look);   // confirms its cuts itself (ConfirmCut)
+			else if (settings.latchFixes)
 			{
 				// Latch fixes: a cut is a change of shape, compared with the last frame that had one
 				// (so a fade through black between two shots is a cut, a fade within a shot is not).
@@ -1429,7 +1617,13 @@ namespace SourceResolution
 				cut = haveLast && std::fabs(frame.mean - lastMean) > settings.cutLevel;
 				if (cut) lastCutSpan = dt;
 			}
-			if (cut) { ++shot; ++cuts; haveLastNative = false; streak = 0; streakDetail.clear(); }
+			if (cut)
+			{
+				++shot; ++cuts; haveLastNative = false; streak = 0; streakDetail.clear();
+				++moments;
+				lastMomentSpan = lastCutSpan;
+				lastCutSeconds = seconds;
+			}
 			lastMean = frame.mean;
 			lastSignature = frame.signature;
 			haveLast = true;
@@ -1556,8 +1750,11 @@ namespace SourceResolution
 		const double candidate = Candidate();
 		// Latch fixes (owner 2026-10-17): the shots OR the time, whichever comes first - the tiles are
 		// independent readings, so one long shot can confirm on its own.
+		// Cut fixes (R3-2): the shots also need part of the time, so a burst of fast cuts on a few
+		// stray readings of native footage does not declare.
+		const double shotSeconds = CutFixesActive() ? settings.shotEvidenceShare * settings.minimumSeconds : 0.0;
 		const bool enough = settings.latchFixes
-			? Shots() >= settings.minimumShots || EvidenceSeconds() >= settings.minimumSeconds
+			? (Shots() >= settings.minimumShots && EvidenceSeconds() >= shotSeconds - 1e-9) || EvidenceSeconds() >= settings.minimumSeconds
 			: Shots() >= settings.minimumShots && EvidenceSeconds() >= settings.minimumSeconds;
 		if (candidate < declared - settings.tolerance && enough)
 		{
@@ -1597,6 +1794,132 @@ namespace SourceResolution
 	{
 		if (declared >= 1.0 || nativeHeight <= 0) return nativeHeight;
 		return 2 * static_cast<int>(std::lround(declared * nativeHeight * 0.5));
+	}
+
+	namespace
+	{
+		// The per-frame rule: the shape-aware cut at the per-frame motion level, the alone path at
+		// max(frameAlone, motion + frameAloneMargin) (consecutive frames barely decorrelate inside a
+		// shot, so the floor is lower than at the 0.5 s spacing; fast close motion raises the motion).
+		bool FrameRule(double decorrelation, double jump, double motion, const Tracker::Settings& s)
+		{
+			return (decorrelation >= (std::max)(s.frameDecorrelation, motion + s.cutMotionMargin) && jump >= s.cutJump) ||
+				decorrelation >= (std::max)(s.frameAlone, motion + s.frameAloneMargin);
+		}
+	}
+
+	void FrameCutJudge::Reset()
+	{
+		last.clear();
+		motion = 0.0;
+		started = false;
+		candidates.clear();
+		runs.clear();
+		decorrelations.clear();
+	}
+
+	void FrameCutJudge::Seen(uint64_t sequence)
+	{
+		if (!runs.empty() && sequence > runs.back().second && sequence - runs.back().second <= kMaximumSequenceGap)
+			runs.back().second = sequence;
+		else if (runs.empty() || sequence > runs.back().second)
+			runs.push_back({ sequence, sequence });
+		// About a minute of frames at any rate in use is plenty for the tracker's steps.
+		const uint64_t keep = 4096;
+		while (runs.size() > 64 || (!runs.empty() && sequence - runs.front().second > keep)) runs.pop_front();
+		while (!candidates.empty() && sequence - candidates.front().sequence > keep) candidates.pop_front();
+		while (!decorrelations.empty() && sequence - decorrelations.front().first > keep) decorrelations.pop_front();
+	}
+
+	bool FrameCutJudge::Frame(uint64_t sequence, const std::vector<double>& pattern, double blackLevel, double noise,
+		double secondsPerFrame, const Tracker::Settings& s)
+	{
+		if (!runs.empty() && sequence <= runs.back().second) return false;   // seen already
+		Seen(sequence);
+		if (pattern.empty()) return false;
+		const double per = secondsPerFrame > 0.0 && secondsPerFrame < 1.0 ? secondsPerFrame : 1.0 / 24.0;
+		double sum = 0.0;
+		for (double v : pattern) sum += v;
+		// A dark frame is not compared (as the tracker's Dark).
+		if (s.darkLevel > 0.0 && sum / pattern.size() - blackLevel < s.darkLevel * (1.0 - blackLevel)) return false;
+		const std::vector<char> none(pattern.size(), 0);
+		// Pending candidates: past the window = a cut; back to the shape before = a flash.
+		bool returned = false;
+		for (Candidate& c : candidates)
+		{
+			if (c.cancelled || c.confirmed) continue;
+			if (sequence > c.deadline) { c.confirmed = true; c.before.clear(); continue; }
+			double dr = 0.0, sr = 0.0, jr = 0.0;
+			if (PatternChange(c.before, none, pattern, none, blackLevel, noise, dr, sr, &jr) && !Tracker::CutRule(dr, jr, c.motionBefore, s))
+			{
+				c.cancelled = true;
+				c.before.clear();
+				motion = c.motionBefore;
+				returned = true;
+			}
+		}
+		if (returned)
+		{
+			last = pattern;   // the flash's frames are not compared with what follows
+			return false;
+		}
+		double decorrelation = 0.0, share = 0.0, jump = 0.0;
+		if (!last.empty() && PatternChange(last, none, pattern, none, blackLevel, noise, decorrelation, share, &jump))
+		{
+			decorrelations.push_back({ sequence, decorrelation });
+			if (FrameRule(decorrelation, jump, motion, s))
+			{
+				Candidate c;
+				c.sequence = sequence;
+				c.decorrelation = decorrelation;
+				c.motionBefore = motion;
+				c.before = last;
+				const uint64_t window = s.frameFlashSeconds > 0.0 ? static_cast<uint64_t>(std::ceil(s.frameFlashSeconds / per - 1e-9)) : 0;
+				c.deadline = sequence + window;
+				c.confirmed = window == 0;
+				if (c.confirmed) c.before.clear();
+				candidates.push_back(std::move(c));
+				motion = (std::max)(motion, s.cutMotionAfterCut);
+				last = pattern;
+				return true;
+			}
+			const double a = s.cutMotionSeconds > 0.0 ? 1.0 - std::exp(-per / s.cutMotionSeconds) : 1.0;
+			motion += a * (decorrelation - motion);
+			last = pattern;
+			return false;
+		}
+		double d = 0.0, sh = 0.0;
+		if (PatternChange(pattern, none, pattern, none, blackLevel, noise, d, sh)) { last = pattern; started = true; }
+		return false;
+	}
+
+	FrameEvidence FrameCutJudge::Evidence(uint64_t from, uint64_t to) const
+	{
+		FrameEvidence e;
+		if (to <= from || runs.empty()) return e;
+		for (const auto& r : runs)
+			if (r.first <= from && r.second >= to) { e.covered = true; break; }
+		if (!e.covered) return e;
+		const uint64_t newest = runs.back().second;
+		int pendingCuts = 0, cuts = 0;
+		for (const Candidate& c : candidates)
+		{
+			if (c.sequence <= from || c.sequence > to || c.cancelled) continue;
+			if (c.confirmed || newest > c.deadline) ++cuts;
+			else ++pendingCuts;
+		}
+		e.cut = cuts + pendingCuts > 0;
+		e.unresolved = e.cut && cuts == 0;
+		for (const auto& d : decorrelations)
+			if (d.first > from && d.first <= to) e.maximumDecorrelation = (std::max)(e.maximumDecorrelation, d.second);
+		return e;
+	}
+
+	bool FrameCutJudge::Cancelled(uint64_t sequence) const
+	{
+		for (const Candidate& c : candidates)
+			if (c.sequence == sequence) return c.cancelled;
+		return false;
 	}
 
 	std::string Describe(double ratio, int nativeHeight)
