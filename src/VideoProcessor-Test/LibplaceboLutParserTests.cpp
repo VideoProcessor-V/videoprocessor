@@ -9405,10 +9405,12 @@ namespace VideoProcessorTest
 			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
 
 			SourceResolutionMonitor::Monitor monitor;
-			// Integration 2026-10-17: the behaviour before the latch fixes, as the latch branch pinned
-			// its other pre-fix monitor tests (its wait text, 128-px tiles at 1080 reading 540 lines as
-			// ~542, and its switch triggers differ; SourceResolutionLatchTests cover the fixes).
-			monitor.SetLatchFixes(false);
+			// Gate fix 2026-10-17: the latch fixes on (the default) again. The integration had pinned
+			// them off for the ~542 reading of a 540-line source at 128-px tiles; fix/latch-540-exact
+			// (0ccfc561) declares the exact rendition, and both wait texts are accepted below.
+			auto isWaiting = [](const std::string& text) {
+				return text == "waiting for the next cut or black" || text.rfind("confirmed: waiting for a cut", 0) == 0;
+			};
 			// Owner 2026-10-16: the auto history, one file per session, the newest 5 kept.
 			char tempPath[MAX_PATH] = {};
 			GetTempPathA(MAX_PATH, tempPath);
@@ -9457,7 +9459,7 @@ namespace VideoProcessorTest
 					if (!why.empty())
 					{
 						log.push_back("shot " + std::to_string(shot) + ": " + why);
-						if (why == "waiting for the next cut or black" && waitingAtShot < 0) waitingAtShot = shot;
+						if (isWaiting(why) && waitingAtShot < 0) waitingAtShot = shot;
 						if (why == "engaged at a cut" && engagedAtShot < 0) engagedAtShot = shot;
 					}
 				}
@@ -9476,7 +9478,9 @@ namespace VideoProcessorTest
 			// the change cannot be seen - a second monitor waiting to engage, then one black frame.
 			{
 				SourceResolutionMonitor::Monitor faded;
-				faded.SetLatchFixes(false);   // integration 2026-10-17: as the main monitor above
+				// The fade is under test, not the latch fixes' crossfade after the wait (20 s by default,
+				// shorter than this 40-s fade): no crossfade here.
+				faded.SetEngageTiming(600.0, 1.5, 0.25);
 				double t = 0.0;
 				std::string fadedWhy;
 				double fadedFactor = 1.0;
@@ -9497,7 +9501,7 @@ namespace VideoProcessorTest
 						for (int k = 0; k < 400 && faded.Read().frames == before; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 						t += 0.5;
 						fadedFactor = faded.AutoFactor(H, 0.8, fadedWhy, t);
-						waiting = fadedWhy == "waiting for the next cut or black";
+						waiting = isWaiting(fadedWhy);
 						pl_tex_destroy(gpu, &tex);
 					}
 				}
@@ -9527,7 +9531,9 @@ namespace VideoProcessorTest
 				Logger::WriteMessage(("fade: " + fadedWhy + "\n").c_str());
 				Assert::IsFalse(sawCut, L"the fade made no cut");
 				Assert::AreEqual(0.5, fadedFactor, 1e-9, L"engaged in the fade");
-				Assert::AreEqual(std::string("engaged during a black or flat frame"), fadedWhy, L"at the fade's dark end");
+				// Latch fixes on: a real black or a low-detail moment; off: the earlier text.
+				Assert::IsTrue(fadedWhy == "engaged during a black or flat frame" || fadedWhy == "engaged during a real black" ||
+					fadedWhy == "engaged during a low-detail moment", ExtendedRangeGpuProbe::ToWide("at the fade's dark end: " + fadedWhy).c_str());
 				faded.Release(gpu);
 			}
 
