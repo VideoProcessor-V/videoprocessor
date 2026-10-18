@@ -5598,6 +5598,19 @@ void CVideoProcessorDlg::EnableDolbyVisionTunnelHandoff(bool enabled)
 	DebugLog::Log("dv_tunnel_handoff: %s", enabled ? "on" : "off");
 }
 
+// A profile whose DV mode is DV Tunneling owns the capture for the LLDV /
+// newlldv decisions - except a signal the hand-off proved is not a tunnel and,
+// with dv_tunnel_handoff on, a YCbCr capture (the tunnel is only ever RGB
+// 4:4:4; DV input fixes 2026-10-18).
+bool CVideoProcessorDlg::ProfileTunnelClaimsSignal() const
+{
+	if (m_profileDolbyVisionTunnelOverride != 1 || DvTunnelHandedOff())
+		return false;
+	const VideoState* state = m_captureDeviceVideoState;
+	return !(m_dvTunnelHandoffEnabled && state &&
+		DolbyVisionTunnelImpossibleEncoding(state->videoFrameEncoding));
+}
+
 bool CVideoProcessorDlg::DvTunnelHandedOff() const
 {
 	return m_dvTunnelHandoffEnabled && m_dvTunnelHandedOff &&
@@ -12622,6 +12635,7 @@ HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
 	tunnelGate.libplaceboRenderer = rendererId &&
 		rendererId->backend == RendererBackend::LIBPLACEBO;
 	tunnelGate.handedOff = DvTunnelHandedOff();   // DV input fixes 2026-10-18
+	tunnelGate.declineYCbCr = m_dvTunnelHandoffEnabled;
 	const VideoState* state = m_captureDeviceVideoState;
 	return BuildHdrInferenceSignalFromState(state, m_useNewLldvHeuristic,
 		m_captureInputBitDepth, tunnelGate,
@@ -12689,8 +12703,7 @@ HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
 void CVideoProcessorDlg::UpdateHdrVetoMeasurement()
 {
 	const bool measure = m_hdrInference.WantsPictureStatistics() &&
-		(m_profileDolbyVisionTunnelOverride != 1 || DvTunnelHandedOff()) &&
-		HdrModesPermitInference();
+		!ProfileTunnelClaimsSignal() && HdrModesPermitInference();
 	const bool previous = m_hdrVetoMeasure.load(std::memory_order_acquire);
 	if (measure == previous)
 		return;
@@ -13029,10 +13042,9 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
 		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
 	// DV input fixes 2026-10-18: a signal the tunnel hand-off proved is not a
-	// tunnel is LLDV / HDR10 material even under a profile that forces the
-	// tunnel.
-	const bool isHDFuryLLDV =
-		(m_profileDolbyVisionTunnelOverride != 1 || DvTunnelHandedOff()) &&
+	// tunnel, and a YCbCr capture (never a tunnel), are LLDV / HDR10 material
+	// even under a profile whose DV mode is DV Tunneling.
+	const bool isHDFuryLLDV = !ProfileTunnelClaimsSignal() &&
 		(m_useNewLldvHeuristic
 			? (m_newLldvCandidateConfirmed && HdrModesPermitInference())
 			: isLegacyHDFuryLLDV);

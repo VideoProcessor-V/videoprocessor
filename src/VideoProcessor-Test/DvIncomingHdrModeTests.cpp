@@ -64,10 +64,12 @@ namespace Tests
 			return state;
 		}
 
-		DolbyVisionTunnelGateInput Gate(bool tunnelSwitch)
+		DolbyVisionTunnelGateInput Gate(bool tunnelSwitch, bool profileForcesTunnel = false, bool declineYCbCr = true)
 		{
 			DolbyVisionTunnelGateInput g;
-			g.tunnelSwitch = tunnelSwitch;
+			g.tunnelSwitch = tunnelSwitch || profileForcesTunnel;
+			g.profileForcesTunnel = profileForcesTunnel;
+			g.declineYCbCr = declineYCbCr;
 			g.libplaceboRenderer = true;
 			return g;
 		}
@@ -91,6 +93,8 @@ namespace Tests
 		{
 			HdrInferenceTracker tracker;
 			bool tunnelSwitch = true;
+			bool profileForcesTunnel = false;   // the active profile's DV mode is DV Tunneling
+			bool declineYCbCr = true;           // dv_tunnel_handoff
 			bool newlldv = true;
 			uint64_t nowMs = 0;
 			std::vector<std::string> events;
@@ -101,11 +105,12 @@ namespace Tests
 				Mode mode = Mode::Sdr;
 				for (uint64_t t = 0; t <= forMs; t += stepMs, nowMs += stepMs)
 				{
-					const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(state.p, newlldv, s.wireDepth, Gate(tunnelSwitch), false);
+					const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(state.p, newlldv, s.wireDepth,
+						Gate(tunnelSwitch, profileForcesTunnel, declineYCbCr), false);
 					const HdrInferenceUpdate u = tracker.OnSignal(signal, nowMs);
 					if (u.event != HdrInferenceEvent::None)
 						events.push_back(std::string(s.name) + ": " + ToString(u.event));
-					DolbyVisionTunnelGateInput gate = Gate(tunnelSwitch);
+					DolbyVisionTunnelGateInput gate = Gate(tunnelSwitch, profileForcesTunnel, declineYCbCr);
 					gate.captureStateValid = true;
 					gate.encoding = s.encoding;
 					gate.eotf = s.eotf;
@@ -236,6 +241,53 @@ namespace Tests
 			d.tunnelSwitch = false;
 			Assert::AreEqual(static_cast<int>(Mode::Sdr), static_cast<int>(d.Apply(kTunnel, 2000)));
 			Assert::AreEqual(static_cast<int>(Mode::InferredPq), static_cast<int>(d.Apply(kLldv, 2000)));
+		}
+
+		// DV input fix 5 (2026-10-18): a profile whose DV mode is DV Tunneling
+		// used to own every capture (DolbyVisionTunnelOwnsSignal), so LLDV as
+		// YCbCr 4:2:2 (the Apple TV's usual 12-bit LLDV, through the Integral 2)
+		// and HDR10 without its InfoFrame were never inferred as PQ while such a
+		// profile matched. The tunnel only ever arrives as 8-bit RGB 4:4:4, so a
+		// YCbCr capture is declined and goes to the normal LLDV / newlldv path;
+		// the tunnel itself (r210 SDR) is still the profile's. dv_tunnel_handoff
+		// off reproduces the old behaviour.
+		TEST_METHOD(DvTunnelingProfileDeclinesYCbCrLldvAndHdr10)
+		{
+			const IncomingSignal lldv10{ "LLDV 10-bit 4:2:2", VideoFrameEncoding::V210, EOTF::SDR, ColorSpace::BT_2020, false, BitDepth::BITDEPTH_10BIT };
+			const IncomingSignal lldv12{ "LLDV 12-bit 4:2:2", VideoFrameEncoding::V210, EOTF::SDR, ColorSpace::BT_2020, false, BitDepth::BITDEPTH_12BIT };
+			const IncomingSignal hdr10x12{ "HDR10 12-bit 4:2:2 with InfoFrame", VideoFrameEncoding::V210, EOTF::PQ, ColorSpace::BT_2020, true, BitDepth::BITDEPTH_12BIT };
+			const IncomingSignal hdr10x12NoIf{ "HDR10 12-bit 4:2:2 without InfoFrame", VideoFrameEncoding::V210, EOTF::SDR, ColorSpace::BT_2020, false, BitDepth::BITDEPTH_12BIT };
+			const IncomingSignal uyvy{ "LLDV 8-bit UYVY (no newlldv: below 10-bit)", VideoFrameEncoding::UYVY, EOTF::SDR, ColorSpace::BT_2020, false, BitDepth::BITDEPTH_8BIT };
+			struct Expect { const IncomingSignal* s; Mode fixed; Mode old; };
+			const Expect cases[] = {
+				{ &lldv10, Mode::InferredPq, Mode::Sdr }, { &lldv12, Mode::InferredPq, Mode::Sdr },
+				{ &kHdr10NoInfoFrame, Mode::InferredPq, Mode::Sdr }, { &hdr10x12NoIf, Mode::InferredPq, Mode::Sdr },
+				{ &kHdr10, Mode::Hdr10, Mode::Hdr10 }, { &hdr10x12, Mode::Hdr10, Mode::Hdr10 },
+				{ &uyvy, Mode::Sdr, Mode::Sdr }, { &kTunnel, Mode::Tunnel, Mode::Tunnel } };
+			for (const bool decline : { true, false })
+				for (const Expect& e : cases)
+				{
+					ModeDriver d;
+					d.tunnelSwitch = false;            // the profile alone selects the tunnel
+					d.profileForcesTunnel = true;
+					d.declineYCbCr = decline;
+					const Mode got = d.Apply(*e.s, 3000);
+					const Mode want = decline ? e.fixed : e.old;
+					Logger::WriteMessage((std::string(decline ? "fixed: " : "dv_tunnel_handoff off: ") + e.s->name + " -> " +
+						ModeName(got) + "\n").c_str());
+					Assert::AreEqual(static_cast<int>(want), static_cast<int>(got), Wide(std::string(decline ? "fixed: " : "old: ") + e.s->name).c_str());
+					// The gate never opens for YCbCr, either way.
+					DolbyVisionTunnelGateInput gate = Gate(false, true, decline);
+					gate.captureStateValid = true;
+					gate.encoding = e.s->encoding;
+					gate.eotf = e.s->eotf;
+					if (e.s->encoding != VideoFrameEncoding::R210)
+						Assert::IsFalse(DolbyVisionTunnelGateOpen(gate));
+					const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(StateOf(*e.s).p, true, e.s->wireDepth,
+						Gate(false, true, decline), false);
+					Assert::AreEqual(e.s->encoding == VideoFrameEncoding::R210 || !decline, signal.dolbyVisionTunnel,
+						Wide(std::string("tunnel owns: ") + e.s->name).c_str());
+				}
 		}
 
 		// DV input fix 1 (2026-10-18; was FINDING A): LLDV / HDR10 sent as

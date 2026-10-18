@@ -21,6 +21,13 @@
 // colorimetry) is handed off: the gate closes for it (the normal r210 path
 // shows it) and the tunnel no longer owns it, so newlldv can infer PQ. A
 // CRC-valid header seen later takes the signal back.
+//
+// The tunnel is only ever 8-bit RGB 4:4:4 on the link, so a YCbCr capture
+// (V210 / UYVY / HDYC: Apple TV LLDV is usually YCbCr 4:2:2 12-bit) can never
+// be a tunnel. Under the same switch, a profile whose DV mode is DV Tunneling
+// no longer owns a YCbCr signal either (it used to own every signal, so
+// newlldv never inferred PQ for LLDV / HDR10 without InfoFrame whenever such
+// a profile matched); the gate itself never opened for YCbCr.
 #include <EOTF.h>
 #include <VideoFrameEncoding.h>
 
@@ -35,7 +42,16 @@ struct DolbyVisionTunnelGateInput
 	// DV input fixes 2026-10-18: the hand-off probe proved this signal is not
 	// a tunnel (only set while dv_tunnel_handoff is on).
 	bool handedOff = false;
+	// [general] dv_tunnel_handoff: YCbCr is never claimed (see above).
+	bool declineYCbCr = true;
 };
+
+// A capture the HDMI tunnel can never arrive in (YCbCr 4:2:2).
+inline bool DolbyVisionTunnelImpossibleEncoding(VideoFrameEncoding encoding)
+{
+	return encoding == VideoFrameEncoding::V210 || encoding == VideoFrameEncoding::UYVY ||
+		encoding == VideoFrameEncoding::HDYC;
+}
 
 // The tunnel formatter would take this capture if it were not handed off:
 // the condition under which the hand-off probe watches the pictures.
@@ -57,6 +73,8 @@ inline bool DolbyVisionTunnelGateOpen(const DolbyVisionTunnelGateInput& in)
 // never a signal the hand-off probe proved is not a tunnel.
 inline bool DolbyVisionTunnelOwnsSignal(const DolbyVisionTunnelGateInput& in)
 {
+	if (in.declineYCbCr && DolbyVisionTunnelImpossibleEncoding(in.encoding))
+		return false;
 	return !in.handedOff && (in.profileForcesTunnel || (in.tunnelSwitch && in.libplaceboRenderer &&
 		in.encoding == VideoFrameEncoding::R210 && in.eotf == EOTF::SDR));
 }

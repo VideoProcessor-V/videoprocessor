@@ -19,7 +19,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include "DvTunnelReferenceEncoder.h"
 #include <dv_loopback/DvLoopbackHarness.h>
+#include <cmath>
 
 #include <algorithm>
 #include <cstdio>
@@ -354,11 +356,247 @@ namespace Tests
 			}
 			return out;
 		}
+
+		// DV input fixes 2026-10-18: the same frame as the independent reference
+		// encoder's DM (values only; L1 / L2 / L5 / L6 - the levels the
+		// reference writes the way VP reads them).
+		DvReference::Dm ToReferenceDm(const RpuFrame& f)
+		{
+			DvReference::Dm dm;
+			const auto ycc = f.Get("ycc"), off = f.Get("off"), lms = f.Get("lms");
+			for (int k = 0; k < 9; ++k)
+			{
+				dm.yccToRgb[k] = static_cast<int>(ycc.at(k));
+				dm.rgbToLms[k] = static_cast<int>(lms.at(k));
+			}
+			for (int k = 0; k < 3; ++k)
+				dm.offsets[k] = static_cast<uint32_t>(off.at(k));
+			dm.sceneRefresh = static_cast<unsigned>(f.Get("refresh").at(0));
+			dm.signalBitDepth = static_cast<unsigned>(f.Get("depth").at(0));
+			dm.signalColorSpace = static_cast<unsigned>(f.Get("cs").at(0));
+			dm.fullRange = static_cast<unsigned>(f.Get("full").at(0));
+			dm.sourceMinPq = static_cast<unsigned>(f.Get("minpq").at(0));
+			dm.sourceMaxPq = static_cast<unsigned>(f.Get("maxpq").at(0));
+			for (const auto& field : f.fields)
+			{
+				const std::vector<long long>& v = field.second;
+				if (field.first == "L1") dm.AddL1(unsigned(v[0]), unsigned(v[1]), unsigned(v[2]));
+				else if (field.first == "L2") dm.AddL2(unsigned(v[0]), unsigned(v[1]), unsigned(v[2]), unsigned(v[3]),
+					unsigned(v[4]), unsigned(v[5]), int(v[6]));
+				else if (field.first == "L5") dm.AddL5(unsigned(v[0]), unsigned(v[1]), unsigned(v[2]), unsigned(v[3]));
+				else if (field.first == "L6") dm.AddL6(unsigned(v[0]), unsigned(v[1]), unsigned(v[2]), unsigned(v[3]));
+			}
+			return dm;
+		}
+
+		// The 12-bit codes of PQ black (zero light) under a DM: the code whose
+		// normalised value equals the DM's YCCtoRGB offset (VP's 2^28 scale),
+		// full or limited range as the DM signals.
+		struct BlackCodes { uint16_t i, ct, cp; };
+		BlackCodes BlackOf(const DvReference::Dm& dm)
+		{
+			auto code = [&dm](uint32_t offset, bool luma) {
+				const double o = static_cast<double>(offset) / 268435456.0;
+				const double c = dm.fullRange ? o * 4095.0 : (luma ? 256.0 + o * 3504.0 : 256.0 + o * 3584.0);
+				return static_cast<uint16_t>((std::min)(4095.0, (std::max)(0.0, std::floor(c + 0.5))));
+			};
+			return { code(dm.offsets[0], true), code(dm.offsets[1], false), code(dm.offsets[2], false) };
+		}
+
+		enum class LegitPicture { AllBlack, DeepestBlack, Letterboxed, FadeToBlack };
+
+		// A legitimate picture under the DM, as planes for DvReference::Encode.
+		void LegitPlanes(LegitPicture kind, const BlackCodes& black, uint32_t w, uint32_t h, uint32_t seed,
+			std::vector<uint16_t>& i, std::vector<uint16_t>& ct, std::vector<uint16_t>& cp)
+		{
+			i.assign(static_cast<size_t>(w) * h, black.i);
+			ct.assign(static_cast<size_t>(w / 2) * h, black.ct);
+			cp.assign(static_cast<size_t>(w / 2) * h, black.cp);
+			if (kind == LegitPicture::AllBlack)
+				return;
+			if (kind == LegitPicture::DeepestBlack)
+			{
+				// The lowest intensity code anywhere (below the DM's black for a
+				// limited-range or offset DM), neutral chroma.
+				std::fill(i.begin(), i.end(), uint16_t(0));
+				return;
+			}
+			const uint32_t bar = kind == LegitPicture::Letterboxed ? h / 8 : 0;
+			for (uint32_t y = bar; y < h - bar; ++y)
+				for (uint32_t x = 0; x < w; ++x)
+				{
+					const int content = 300 + static_cast<int>((x * 2800) / w) + static_cast<int>(y * 3) + static_cast<int>(seed % 7);
+					const int chroma = static_cast<int>((x + y + seed) % 400) - 200;
+					// Fade: 2% of the way from black to the picture.
+					const int scale = kind == LegitPicture::FadeToBlack ? 2 : 100;
+					i[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>((std::min)(4095, black.i + (content - black.i) * scale / 100));
+					if (x % 2 == 0)
+						ct[static_cast<size_t>(y) * (w / 2) + x / 2] = static_cast<uint16_t>((std::max)(0, (std::min)(4095, black.ct + chroma * scale / 100)));
+					else
+						cp[static_cast<size_t>(y) * (w / 2) + x / 2] = static_cast<uint16_t>((std::max)(0, (std::min)(4095, black.cp - chroma * scale / 100)));
+				}
+		}
+
+		// The non-linear (PQ-domain) values an all-zero tunnel word would decode
+		// to under the DM, full range: M * (0 - offset). Real light is never
+		// negative, so a zero word is not a picture any source produces.
+		double ZeroWordMinimum(const DvReference::Dm& dm)
+		{
+			double lowest = 1e9;
+			for (int row = 0; row < 3; ++row)
+			{
+				double v = 0;
+				for (int col = 0; col < 3; ++col)
+					v -= (dm.yccToRgb[row * 3 + col] / 8192.0) * (dm.offsets[col] / 268435456.0);
+				lowest = (std::min)(lowest, v);
+			}
+			return lowest;
+		}
+
+		struct LegitResult { size_t frames = 0, accepted = 0, failures = 0; std::string first; };
+
+		// Every legitimate picture kind under every DM in `dms`, packed by the
+		// independent reference encoder, through VP's capture container and
+		// tunnel formatter: never rejected as truncated, always decoded.
+		LegitResult RunLegitimate(const std::vector<std::pair<DvReference::Dm, bool>>& dms, const std::string& name)
+		{
+			LegitResult out;
+			const uint32_t w = 640;
+			uint32_t h = 108;
+			for (const auto& d : dms)
+			{
+				DvReference::Header hdr;
+				const size_t packets = DvReference::PacketBits(DvReference::Body(d.first), hdr).size();
+				h = (std::max)(h, static_cast<uint32_t>((packets * kPixelsPerPacket + w - 1) / w + 32));
+			}
+			for (const bool high8 : { false, true })
+			{
+				AnalyzerOptions options;
+				options.collectLog = false;
+				options.keepFrames = false;
+				DvLoopbackAnalyzer analyzer(options);
+				LoopFaults faults;
+				faults.container.high8 = high8;
+				DvSimulatedLoop loop(analyzer, faults);
+				loop.Begin(w, h, 24000, 1001);
+				uint32_t index = 0;
+				for (size_t k = 0; k < dms.size(); ++k)
+				{
+					const BlackCodes black = BlackOf(dms[k].first);
+					for (const LegitPicture kind : { LegitPicture::AllBlack, LegitPicture::DeepestBlack,
+						LegitPicture::Letterboxed, LegitPicture::FadeToBlack })
+					{
+						std::vector<uint16_t> i, ct, cp;
+						LegitPlanes(kind, black, w, h, static_cast<uint32_t>(k), i, ct, cp);
+						DvReference::Header hdr;
+						hdr.current = hdr.affected = index & 15;
+						LoopFrame lf;
+						lf.index = index++;
+						Assert::IsTrue(DvReference::Encode(w, h, i, ct, cp, &dms[k].first, hdr, lf.rgb8), L"raster too small");
+						loop.Send(lf, 0);
+						++out.frames;
+						if (!dms[k].second)
+							continue;   // a DM VP rejects as documented (e.g. 14-bit): not a decode case
+						const bool decoded = analyzer.LastShown() == Shown::Picture;
+						out.accepted += decoded ? 1 : 0;
+						if (!decoded)
+						{
+							++out.failures;
+							if (out.first.empty())
+								out.first = name + " DM " + std::to_string(k) + " picture kind " + std::to_string(static_cast<int>(kind)) +
+									(high8 ? " high8" : " low8") + ": shown " + ToString(analyzer.LastShown());
+						}
+					}
+				}
+				loop.End();
+			}
+			return out;
+		}
 	}
 
 	TEST_CLASS(DvRpuAnchorTests)
 	{
 	public:
+		// DV input fixes 2026-10-18: proof that the truncated-frame check (an
+		// all-zero last row) never rejects a legitimate frame.
+		//  1. Algebra: an all-zero tunnel word is I = 0 with a chroma sample of
+		//     0. Under every DM (synthetic and all real RPUs, full range) it
+		//     decodes to a negative non-linear value, M * (0 - offset) < 0: no
+		//     non-negative light produces it. Under a limited-range DM, code 0
+		//     is below the black code (256) besides.
+		//  2. Packing: PQ black (the DM's own black codes), the deepest
+		//     intensity code with neutral chroma, letterboxed pictures (black
+		//     bars at the bottom) and a fade 2% from black, packed by the
+		//     independent reference encoder under every DM, in both RGB8
+		//     placements, are all decoded - none rejected.
+		TEST_METHOD(TruncationCheckNeverRejectsALegitimateFrame)
+		{
+			// Synthetic DMs: plain IPT, rich metadata, and a profile-8-style
+			// YCbCr DM with luma offset and limited range.
+			std::vector<std::pair<DvReference::Dm, bool>> synthetic;
+			DvReference::Dm plain = DvReference::Dm::Ipt();
+			plain.AddL1(0, 2081, 819);
+			synthetic.push_back({ plain, true });
+			DvReference::Dm rich = plain;
+			rich.AddL2(2851, 2100, 2000, 2048, 2048, 2048, 2048);
+			rich.AddL5(0, 0, 280, 280);
+			rich.AddL6(1000, 1, 1000, 400);
+			rich.AddL8(1, 2048, 2048, 2048, 2048, 2048, 2048, true);
+			rich.AddL11(1, 0, true);
+			synthetic.push_back({ rich, true });
+			DvReference::Dm ycc = plain;
+			ycc.offsets = { 16777216u, 134217728u, 134217728u };
+			ycc.signalColorSpace = 0;
+			ycc.fullRange = 0;
+			synthetic.push_back({ ycc, true });
+			for (const auto& d : synthetic)
+				Assert::IsTrue(ZeroWordMinimum(d.first) < -0.05, L"synthetic DM: a zero word decodes negative");
+			const LegitResult s = RunLegitimate(synthetic, "synthetic");
+			Logger::WriteMessage(("synthetic DMs: " + std::to_string(s.frames) + " frames, " + std::to_string(s.accepted) +
+				" decoded, " + std::to_string(s.failures) + " failures " + s.first + "\n").c_str());
+			Assert::AreEqual<size_t>(0, s.failures, std::wstring(s.first.begin(), s.first.end()).c_str());
+
+			// Every real RPU (committed fixtures and, when present, the corpus).
+			std::vector<std::string> files = Files(FixtureFolder(), "*.dm.txt");
+			const std::string corpus = CorpusFolder();
+			if (!corpus.empty())
+			{
+				const std::vector<std::string> more = Files(corpus, "*.dm.txt");
+				files.insert(files.end(), more.begin(), more.end());
+			}
+			size_t frames = 0, decoded = 0, dms = 0, limited = 0;
+			double worstZero = -1e9;
+			for (const std::string& file : files)
+			{
+				std::vector<std::pair<DvReference::Dm, bool>> list;
+				for (const RpuFrame& f : ReadDmLines(file))
+				{
+					bool accepted = false;
+					ExpectedDecode(ToDm(f), accepted);
+					const DvReference::Dm dm = ToReferenceDm(f);
+					list.push_back({ dm, accepted });
+					++dms;
+					if (!dm.fullRange)
+					{
+						++limited;
+						Assert::IsTrue(BlackOf(dm).i > 0, L"limited range: code 0 is below black");
+					}
+					const double zero = ZeroWordMinimum(dm);
+					worstZero = (std::max)(worstZero, zero);
+					Assert::IsTrue(zero < -0.01, std::wstring(file.begin(), file.end()).c_str());
+				}
+				const LegitResult r = RunLegitimate(list, file);
+				Assert::AreEqual<size_t>(0, r.failures, std::wstring(r.first.begin(), r.first.end()).c_str());
+				frames += r.frames;
+				decoded += r.accepted;
+			}
+			Logger::WriteMessage(("real RPU DMs: " + std::to_string(dms) + " (" + std::to_string(limited) + " limited range) in " +
+				std::to_string(files.size()) + " files; zero word decodes to at most " + std::to_string(worstZero) +
+				" (negative = impossible light); " + std::to_string(frames) + " legitimate frames packed, " +
+				std::to_string(decoded) + " decoded, 0 rejected\n").c_str());
+			Assert::IsTrue(decoded > 0);
+		}
+
 		// The committed real-RPU fixtures (and, when present, the whole RPU
 		// corpus): dovi_tool's reading survives the tunnel and VP's decode.
 		TEST_METHOD(RealRpuMetadataDecodesAsDoviToolReadsIt)

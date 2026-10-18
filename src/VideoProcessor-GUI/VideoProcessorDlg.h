@@ -424,6 +424,7 @@ protected:
 	uint64_t m_dvTunnelTakeBackHeldFrames = 0;
 	std::string m_dvTunnelHandoffReason;
 	bool DvTunnelHandedOff() const;
+	bool ProfileTunnelClaimsSignal() const;
 	int m_lldvChangeRestartDelaySeconds = -1;
 	bool m_lldvRestartPending = false;
 

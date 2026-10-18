@@ -63,6 +63,28 @@ No DV decode maths changed; BTB/WTW untouched (no range or level changes anywher
   is a user binding for `reapply_rules` in the Config tests, which a default would have
   taken over. `kReservedShortcuts` keeps Ctrl+Alt+D for state_report until it merges.
 
+## Follow-ups (coordinator, same day)
+
+5. **DV Tunneling profile claimed LLDV YCbCr.** `DolbyVisionTunnelOwnsSignal` returned true
+   for any capture under a profile whose DV mode is DV Tunneling (`profileForcesTunnel`), and
+   `BuildPushVideoState` / the SDR veto excluded the profile outright
+   (`m_profileDolbyVisionTunnelOverride != 1`), so Apple TV LLDV as YCbCr 4:2:2 and HDR10
+   without its InfoFrame were never inferred as PQ while such a profile matched. The tunnel is
+   only ever 8-bit RGB 4:4:4, so YCbCr (V210 / UYVY / HDYC) is now declined
+   (`DolbyVisionTunnelImpossibleEncoding`, `ProfileTunnelClaimsSignal`) under
+   `dv_tunnel_handoff`; the gate never opened for YCbCr anyway. Test:
+   `DvTunnelingProfileDeclinesYCbCrLldvAndHdr10` (10/12-bit 4:2:2 BT.2020 with and without
+   the InfoFrame, 8-bit UYVY, and the tunnel still the profile's; switch off = old result).
+6. **Truncation check proof.** `DvRpuAnchorTests.TruncationCheckNeverRejectsALegitimateFrame`:
+   an all-zero word is I = 0 with chroma 0; under all 1374 real RPU DMs (46 files: fixtures +
+   the 37-RPU corpus; all full range) and the synthetic DMs (IPT, rich, limited-range YCbCr) it
+   decodes to a negative PQ-domain value (at most -0.151), which no light produces, and a
+   limited-range DM puts code 0 below black. Packing PQ black (each DM's own black codes), the
+   deepest intensity code, letterboxed pictures (black bottom bars) and a fade 2% from black
+   with the independent reference encoder, in both RGB8 placements: 10984 of 10992 frames
+   decoded, 0 rejected (the 8 others are the profile-4 14-bit DM VP rejects as documented).
+   No stronger check was needed; the tunnel metadata carries no frame-size field to use.
+
 ## Tests (CPU, single-threaded, TRX; no GPU)
 
 New: `DvIncomingHdrModeTests.TenBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAndInferredPq`,
@@ -78,9 +100,10 @@ Two existing formatter tests embedded valid metadata into an all-zero picture (t
 truncated-frame signature); they now restore a tunnel near-black picture first.
 
 Results on the final build (x64 Release, full solution rc=0):
-- CPU (vstest, single-threaded, TRX `dv-fixes-logs	rxinal2.trx`): every DolbyVision*, Dv*,
-  HdrInference*, Shortcut*, ConfigEditorCore, ConfigFile, MainConfigSchema, RawCapture class:
-  **490 / 490 passed**.
+- CPU (vstest, single-threaded, TRX `dv-fixes-logs	rxinal3.trx`, after the follow-ups):
+  every DolbyVision*, Dv*, HdrInference*, Lldv*, Shortcut*, ConfigEditorCore, ConfigFile,
+  MainConfigSchema, RawCapture class: **492 / 492 passed**.
+- Config tests after the follow-ups (shortcut / DV / LLDV / control coverage): 24 / 24 passed.
 - Config tests (off screen, 1 shard): 142 passed, 1 failed, 1 skipped (needs a real window).
   The failure (`remote target switch keeps window responsive`) ran while a build was
   linking; rerun on the final build with the shortcut / DV / LLDV tests: 11 / 11 passed.
@@ -91,9 +114,5 @@ Results on the final build (x64 Release, full solution rc=0):
 - Docs updated: `docs/VP-dv-tunnel-autotest.md` (mode table, section 4 fixes, owner steps:
   Ctrl+Alt+W), `docs/dv/LLDV-vs-tunnel-check.md` (Ctrl+Alt+W; RGB conversion no longer black),
   `docs/agent-reports/dv-tunnel-autotest.md`.
-- Open question: a profile whose DV mode is "DV Tunneling" (override 1) still makes the
-  tunnel own LLDV **YCbCr** (V210) input, so newlldv never infers PQ for it (pre-existing,
-  deliberate-looking per-profile LLDV vs tunnel choice; not changed). Handed-off RGB signals
-  are released from it.
 - Not GPU-verified: the renderer path after a hand-off is VP's ordinary r210 path; a
   hand-off or take-back restarts the renderer (it rejects a tunnel-flag change in place).

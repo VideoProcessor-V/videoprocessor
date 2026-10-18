@@ -100,6 +100,7 @@ tracker, and LLDV static metadata resolution in VideoProcessorDlg's order:
 | LLDV / HDR10 as 10-bit RGB in r210, tunnel switch on | tunnel formatter for ~1 s (black), then handed off: normal path, newlldv PQ | `TenBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAndInferredPq` |
 | LLDV as 8-bit RGB, BT.2020, tunnel switch on | SDR passthrough for ~1 s, then handed off: normal path, PQ (8-bit decision below) | `EightBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAsPq` |
 | 8-bit RGB BT.709 (SDR menu), tunnel switch on | tunnel SDR passthrough (never handed off) | `OnlyNonTunnelSignalsAreHandedOff` |
+| LLDV / HDR10 YCbCr 4:2:2 (10/12-bit) under a DV Tunneling profile | normal path: newlldv PQ (or HDR10 from the InfoFrame); YCbCr is never a tunnel | `DvTunnelingProfileDeclinesYCbCrLldvAndHdr10` |
 
 Transitions LLDV -> tunnel -> HDR10 -> SDR -> LLDV -> HDR10 without InfoFrame -> tunnel
 -> LLDV follow the tracker's epochs (the tunnel ends a PQ epoch; LLDV -> HDR10 without
@@ -229,8 +230,14 @@ laptop; `--send` changes the display's HDR mode and is for owner-present runs on
   header, valid DM) with an all-zero last row is rejected (the renderer keeps the previous
   picture), logged ("incomplete frame (last row blank, truncated transfer)"), and its
   CRC-verified metadata kept. Under `dv_tunnel_fixes` (default on). Not detectable: a
-  truncation that leaves the previous frame's bytes in the tail. Test:
-  `TruncatedFrameWithIntactMetadataIsRejectedNotDecoded`.
+  truncation that leaves the previous frame's bytes in the tail. Tests:
+  `TruncatedFrameWithIntactMetadataIsRejectedNotDecoded`, and the proof that no legitimate
+  frame trips it, `TruncationCheckNeverRejectsALegitimateFrame` (a zero word decodes to
+  negative light under all 1374 real RPU DMs; PQ black, letterboxed and fading frames packed
+  by the reference encoder under every DM are all decoded).
+- **Fix 5 (2026-10-18): a DV Tunneling profile no longer claims YCbCr input.** The tunnel is
+  only ever 8-bit RGB 4:4:4; LLDV / HDR10 as YCbCr 4:2:2 goes to the normal LLDV / newlldv
+  path even while such a profile matches (`dv_tunnel_handoff`).
 
 ## 5. Tier 4: the hardware loop
 
