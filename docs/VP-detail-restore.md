@@ -37,9 +37,28 @@ scaling step. A re-base factor change restarts both histories.
 The monitor's input is taken before the hook runs (LibplaceboVideoRenderer: sourceMonitor.Frame
 on renderImage), so the stages cannot reach it. A CPU test pins this (DetailRestoreConfigTests).
 
-Neither runs on a de-judder extra (a picture between frames) or while smooth motion /
-deinterlacing runs (as the debander). A cadence repeat (same source sequence) reuses the frame's
-decision and never advances the history.
+Neither runs while smooth motion / deinterlacing runs (as the debander). A cadence repeat (same
+source sequence) reuses the frame's decision and never advances the history. A picture between
+frames (a Stage B phase picture, a hiccup gap fill, a de-judder extra) is a repeat of its source
+frame: the frame's decision on THAT picture's own bands (hunt 3 F6/F7: A's stored low band on a
+moved picture was a ghost of A; texture restore's repeat keeps its low bands in a set of its own,
+so the next frame still compares against A). The history advances on A as drawn: re-based and
+debanded (hunt 3 F5), the same domain as every other frame; the look-ahead measures the next
+frame debanded too (per picture, the debander's look-ahead slot; hunt 3 F4).
+
+During a source-resolution crossfade (source_resolution_latch_fixes) the path being left carries
+the same stages: VP deband per picture, the detail pulse's and texture restore's decision of the
+frame on its own bands at its own geometry (ApplyForeign: tile weights / gains read at the same
+picture position; never advancing). The two paths are mixed in the output signal domain by VP's
+PRE_OUTPUT hooks (CrossfadeMix.h, hunt 3 F1: BTB/WTW carried exactly, the extended-range late
+restore once per path), on A's present and on every source-warp extra (F3); libplacebo's frame
+mixer only as the fallback.
+
+One-plane RGB pictures (an RGB capture; the subtitle move's composed picture during a cue) are
+stabilised by the detail pulse on their luma, in the source's codes, with the same delta added to
+R, G and B (= the YCbCr pulse exactly): the history runs on through subtitle cues (hunt 3 F8/F9).
+Texture restore stays luma-plane only; a picture a stage cannot read is counted and the status
+says "inactive (reason)" instead of "on".
 
 ## detail_pulse_stabilise (research option e) - as built
 
@@ -63,7 +82,7 @@ The exact maths and constants are in DetailPulse.h (shared with the CPU model).
    without, the change of the tile's low-band mean/spread beyond 4x the coding-noise RMS
    (motion-tolerant: a pan keeps the gain, new content or a flash does not).
 6. Restarts (gain 1): cut (over half the tiles changed), fade (mean luma ramp on two frames),
-   Forget, sequence gap, geometry change. A repeat reuses the decision.
+   Forget, sequence gap, geometry change. A repeat reuses the decision (on its own bands).
 7. `Y' = Y + w ((g1 - 1) D1 + (g2 - 1) D2)`; chroma untouched. Passes: measure (per tile,
    fused), reduce (one workgroup), apply (fused). Estimated 4K: 0.55-0.7 ms on the 3050 Ti,
    0.15-0.2 ms on the 3090.

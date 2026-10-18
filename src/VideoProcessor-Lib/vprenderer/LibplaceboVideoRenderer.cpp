@@ -75,6 +75,7 @@
 #include <vprenderer/SourceResolutionMonitor.h>
 #include <vprenderer/VpDebander.h>
 #include <vprenderer/DetailPulse.h>
+#include <vprenderer/CrossfadeMix.h>
 #include <vprenderer/TextureRestore.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
@@ -5306,6 +5307,18 @@ struct LibplaceboVideoRenderer::Impl
 	double rebaseFade = 1.0, rebaseFromFactor = 1.0, rebaseFromFactorX = 1.0;
 	uint64_t rebaseFadeRender = 0;   // a per-draw counter for the mix signatures
 	bool rebaseFadeFailedLogged = false;
+	// Hunt 3 F1: the crossfade mixed in the output signal domain by VP's PRE_OUTPUT hooks
+	// (CrossfadeMix.h; BTB/WTW kept, the calibration LUT's late restore per path); libplacebo's
+	// frame mixer only as the fallback.
+	CrossfadeMix::Mixer crossfadeMixer;
+	int crossfadeMixLogged = -1;   // 1 = VP signal mix, 0 = fell back to libplacebo's mixer
+	// Hunt 3 F2: ambient adaptation for SDR input - this frame's BT.1886 black lift (applied
+	// through the frame's colour adjustment; invalid = nothing changes) and the adjustment the
+	// frame's parameters point at (a member: the de-judder extras render with them later).
+	bool ambientSdrLift = false;
+	float ambientSdrContrast = 1.0f, ambientSdrBrightness = 0.0f;
+	std::string ambientSdrLogged;
+	pl_color_adjustment frameColorAdjustment{};
 	unsigned long long rebaseFailuresSeen = 0;
 	std::string rebaseFormatNoteLogged;   // C19: the re-base's float fallback, logged once per change
 	SteadyClock::time_point rebasePausedUntil{};
@@ -5335,6 +5348,11 @@ struct LibplaceboVideoRenderer::Impl
 	std::string detailPulseLogged;
 	std::string textureRestoreLogged;
 	uint64_t detailPulseAheadSequence = 0;
+	// Hunt 3 F8: why the stage did not run on the last frame it was asked to (empty: it ran);
+	// the status then says "inactive (...)" instead of "on".
+	std::string detailPulseInactive;
+	std::string textureRestoreInactive;
+	std::string detailPulseFailLogged, textureRestoreFailLogged;   // each reason logged once
 	// Delta 15 S8-2 / 2c: this frame's weight scale from the bitrate quality (1 = clean).
 	double bitrateWeightScale = 1.0;
 	pl_tex rgbIngestLuma = nullptr;
@@ -5345,6 +5363,86 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderRgbBt2020 = false;
 	pl_tex dejudderRgbScratch = nullptr;
 	bool rgbGpuLogged = false;
+	// Hunt 3 (crossfade lead): the crossfade's path being left carries the stages the path
+	// being entered has - VP's debander (per picture, its crossfade slot), the detail pulse's and
+	// texture restore's decision of this source frame on the picture's own bands (ApplyForeign:
+	// another geometry, never advancing) - so none of them drops out in one step when a fade
+	// starts. `from` is re-based already; fromY is its factor (the stages' sizes follow it).
+	void CrossfadeFromStages(pl_frame& from, double fromY, uint64_t sequence)
+	{
+		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+		const double ratio = rebaseFactor > 0.0 ? fromY / rebaseFactor : 1.0;
+		if (debandThreshold > 0.0)
+		{
+			VpDebander::Params p = vpDebandParams;
+			p.field = nullptr;
+			p.grainError = nullptr;
+			p.radiusScale = vpDebandParams.radiusScale * ratio;
+			pl_frame debanded{};
+			if (debander.Apply(d3d11->gpu, rebaseDispatch, from, p, debanded, VpDebander::Module::kSlotCrossfade))
+				from = debanded;
+		}
+		if (detailPulseRuns && sequence != 0 && detailPulse.HistorySequence() == sequence)
+		{
+			DetailPulse::Params p = detailPulseParams;
+			p.planeLines = detailPulseParams.planeLines * ratio;
+			pl_frame pulsed{};
+			if (detailPulse.ApplyForeign(d3d11->gpu, rebaseDispatch, from, p, pulsed))
+				from = pulsed;
+		}
+		if (textureRestoreRuns && sequence != 0 && textureRestore.HistorySequence() == sequence)
+		{
+			TextureRestore::Params p = textureRestoreParams;
+			p.planeLines = textureRestoreParams.planeLines * ratio;
+			pl_frame restored{};
+			if (textureRestore.ApplyForeign(d3d11->gpu, rebaseDispatch, from, p, restored))
+				from = restored;
+		}
+	}
+
+	// Hunt 3 F1: the crossfade mixed in the output signal domain (CrossfadeMix.h): `from` (the
+	// path being left) rendered with the picture-stage hooks and captured at PRE_OUTPUT, then
+	// `to` rendered with the mix hook right after the extended-range late restore. BTB/WTW are
+	// carried exactly (no linear-light clamp), the late restore runs once per path before the
+	// mix. False (nothing shown yet): the caller falls back to libplacebo's frame mixer.
+	bool RenderCrossfadeMix(const pl_frame& from, const pl_frame& to, const pl_frame& destination,
+		const pl_render_params& parameters, const pl_color_space* historyColor, double weight)
+	{
+		const pl_hook* late = extendedRangeHooks.LateRestore();
+		bool ok = crossfadeMixer.RenderFrom(renderer, d3d11->gpu, from, destination, parameters, late);
+		if (ok)
+		{
+			std::vector<const pl_hook*> mixed = crossfadeMixer.WithMix(parameters.hooks, parameters.num_hooks, late, weight);
+			// The mix is a texture-input PRE_OUTPUT hook: libplacebo 7.360 then drops the output
+			// encoding unless the repair runs first at OUTPUT (OutputEncodingRepair.h).
+			const pl_render_errors errors = pl_renderer_get_errors(renderer);
+			if (std::find(mixed.begin(), mixed.end(), outputEncodingRepair.Get()) == mixed.end() &&
+				OutputEncodingRepair::Needed(mixed, &errors, destination.lut ? destination.lut_type : PL_LUT_UNKNOWN))
+			{
+				outputEncodingRepair.SetTarget(destination.repr);
+				mixed.insert(mixed.begin(), outputEncodingRepair.Get());
+			}
+			pl_render_params withMix = parameters;
+			withMix.hooks = mixed.data();
+			withMix.num_hooks = static_cast<int>(mixed.size());
+			const unsigned long long before = crossfadeMixer.Mixed();
+			++rebaseFadeRender;
+			ok = temporalRenderer.Render(renderer, to, destination, withMix, historyColor) && crossfadeMixer.Mixed() > before;
+		}
+		const int state = ok ? 1 : 0;
+		if (state != crossfadeMixLogged)
+		{
+			crossfadeMixLogged = state;
+			if (ok)
+				DebugLog::Log("Source resolution crossfade: mixed in the output signal domain (VP hooks; BTB/WTW carried, "
+					"the late restore per path)");
+			else
+				DebugLog::Log("Source resolution crossfade: VP's signal-domain mix failed (%llu failures); libplacebo's frame "
+					"mixer instead (it clips BTB while the fade runs)", crossfadeMixer.Failures());
+		}
+		return ok;
+	}
+
 	bool UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
 	{
 		if (!payload.Raw() || !d3d11)
@@ -7339,6 +7437,7 @@ struct LibplaceboVideoRenderer::Impl
 				debander.Release(d3d11->gpu);       // and the debander's planes
 				detailPulse.Release(d3d11->gpu);    // detail pulse stabilisation's history
 				textureRestore.Release(d3d11->gpu); // and texture restore's
+				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				dejudderOutput.Release();
@@ -15765,6 +15864,8 @@ struct LibplaceboVideoRenderer::Impl
 			pl_frame image = *f.image;
 			const pl_render_params* extraParams = &params;
 			bool renderedCrop = false;
+			pl_frame extraFrom{};       // hunt 3 F3: the crossfade's path being left for this extra
+			bool extraFade = false;
 			pl_tex warpedPicture = nullptr;
 			pl_tex warpedDisplacement = nullptr;   // planner D2: per pixel, for the sigma-delta
 			// With M6 the picture moves per pixel: the sigma-delta follows the
@@ -15826,6 +15927,9 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				image.planes[0].texture = warped.luma;
 				image.planes[1].texture = warped.chroma;
+				// Hunt 3 F3: during a crossfade the extra is mixed like the main present (its own
+				// path being left from the native warped planes).
+				const pl_frame warpedNative = image;
 				// Stage 12: an extra shows the same re-based source as the main frame.
 				if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
 				{
@@ -15864,6 +15968,22 @@ struct LibplaceboVideoRenderer::Impl
 					pl_frame restored{};
 					if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, image, textureRestoreParams, restored))
 						image = restored;
+				}
+				// Hunt 3 F3: the extra's path being left (the crossfade runs on every present of the
+				// fade, not only on A's), with the same stages (CrossfadeFromStages).
+				if (rebaseFade < 1.0 && !temporalRenderer.Active())
+				{
+					extraFrom = warpedNative;
+					extraFade = true;
+					if (rebaseFromFactor < 1.0 || rebaseFromFactorX < 1.0)
+					{
+						pl_frame rebasedFrom{};
+						extraFade = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, warpedNative, rebaseFromFactorX, rebaseFromFactor,
+							rebasedFrom, SourceRebase::Module::kSlotCrossfade);
+						if (extraFade) extraFrom = rebasedFrom;
+					}
+					if (extraFade)
+						CrossfadeFromStages(extraFrom, rebaseFromFactor, f.sourceSequence);
 				}
 			}
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
@@ -15979,7 +16099,8 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				target.planes[0].texture = fbo;
 				pl_frame_clear(d3d11->gpu, &target, black);
-				rendered = pl_render_image(renderer, &image, &target, extraParams);
+				rendered = (extraFade && RenderCrossfadeMix(extraFrom, image, target, *extraParams, nullptr, rebaseFade)) ||
+					pl_render_image(renderer, &image, &target, extraParams);
 				pl_gpu_flush(d3d11->gpu);
 				pl_tex_destroy(d3d11->gpu, &fbo);
 				backbuffer.Release();
@@ -16004,7 +16125,8 @@ struct LibplaceboVideoRenderer::Impl
 				}
 				target.planes[0].texture = frame.fbo;
 				pl_frame_clear(d3d11->gpu, &target, black);
-				rendered = pl_render_image(renderer, &image, &target, extraParams);
+				rendered = (extraFade && RenderCrossfadeMix(extraFrom, image, target, *extraParams, nullptr, rebaseFade)) ||
+					pl_render_image(renderer, &image, &target, extraParams);
 				// An acquired frame must be submitted: on a failed extra show A
 				// itself again, never a black or partial picture - with the
 				// sigma-delta's own search (A did not move: no extra's vectors).
@@ -17954,6 +18076,41 @@ struct LibplaceboVideoRenderer::Impl
 		LibplaceboRenderParameters::ApplyTargetLuminance(
 			inputIsSdr, static_cast<float>(sdrTargetNits),
 			static_cast<float>(renderBlackNits), baseTarget.color);
+		// Hunt 3 F2: for SDR input the target black above stays the SDR reference (sdr_black_nits
+		// is not applied to SDR: the signal is display-referred, CONFIGURATION.html), so ambient
+		// adaptation's rise of the black reaches the picture as the BT.1886 black lift it stands
+		// for (LibplaceboRenderParameters::SdrAmbientLift, through the frame's colour adjustment).
+		// Off, strength 0 or a dark room: renderBlackNits is the owner's black exactly and
+		// nothing changes (bit-identical).
+		{
+			float contrast = 1.0f, brightness = 0.0f;
+			ambientSdrLift = inputIsSdr && LibplaceboRenderParameters::SdrAmbientLift(sdrBlackNits, renderBlackNits,
+				sdrTargetNits, image.color.transfer, contrast, brightness);
+			ambientSdrContrast = ambientSdrLift ? contrast : 1.0f;
+			ambientSdrBrightness = ambientSdrLift ? brightness : 0.0f;
+			std::string state;
+			char text[256];
+			if (ambientSdrLift)
+			{
+				snprintf(text, sizeof(text), "Ambient adaptation (SDR input): BT.1886 black lift, contrast %.6f brightness %.6f "
+					"(effective black %.5f nits over the owner's %.5f, white %.1f nits)", ambientSdrContrast, ambientSdrBrightness,
+					renderBlackNits, sdrBlackNits, sdrTargetNits);
+				state = text;
+			}
+			else if (inputIsSdr && renderBlackNits > sdrBlackNits)
+			{
+				snprintf(text, sizeof(text), "Ambient adaptation (SDR input): not applied (source transfer %s is not a power law)",
+					pl_color_transfer_name(image.color.transfer));
+				state = text;
+			}
+			else if (!ambientSdrLogged.empty())
+				state = "Ambient adaptation (SDR input): no lift (the owner's black)";
+			if (!state.empty() && state != ambientSdrLogged)
+			{
+				ambientSdrLogged = state;
+				DebugLog::Log("%s", state.c_str());
+			}
+		}
 		// DV next step (f): display profile from today's target settings, and
 		// the mapping policy's libplacebo parameters compared bit for bit with
 		// the HDR metadata actually given to libplacebo (no behaviour change:
@@ -21234,8 +21391,15 @@ struct LibplaceboVideoRenderer::Impl
 						p.fieldScale = fieldScale;
 						p.fieldScaleX = fieldScaleX;
 						p.sequence = sourceSequence;
-						char text[160];
-						snprintf(text, sizeof(text), "Detail pulse stabilise: on (cap %.2f)", p.cap);
+						// Hunt 3 F8 / F9: a one-plane RGB picture (an RGB capture, the subtitle move's
+						// composed picture) is stabilised on its luma in the source's codes.
+						p.lumaSystem = image.repr.sys;
+						p.codeLevels = image.repr.levels;
+						char text[200];
+						if (detailPulseInactive.empty())
+							snprintf(text, sizeof(text), "Detail pulse stabilise: on (cap %.2f)", p.cap);
+						else
+							snprintf(text, sizeof(text), "Detail pulse stabilise: inactive (%s)", detailPulseInactive.c_str());
 						pulseState = text;
 					}
 					if (activeSettings.textureRestore)
@@ -21251,8 +21415,11 @@ struct LibplaceboVideoRenderer::Impl
 						p.fieldScale = fieldScale;
 						p.fieldScaleX = fieldScaleX;
 						p.sequence = sourceSequence;
-						char text[160];
-						snprintf(text, sizeof(text), "Texture restore: statistical (cap %.2f)", p.cap);
+						char text[200];
+						if (textureRestoreInactive.empty())
+							snprintf(text, sizeof(text), "Texture restore: statistical (cap %.2f)", p.cap);
+						else
+							snprintf(text, sizeof(text), "Texture restore: inactive (%s)", textureRestoreInactive.c_str());
 						restoreState = text;
 					}
 				}
@@ -21271,6 +21438,8 @@ struct LibplaceboVideoRenderer::Impl
 				if (wasPulse && !detailPulseRuns) detailPulse.Forget();
 				if (wasRestore && !textureRestoreRuns) textureRestore.Forget();
 				if (!detailPulseRuns) detailPulseAheadSequence = 0;
+				if (!detailPulseRuns) detailPulseInactive.clear();
+				if (!textureRestoreRuns) textureRestoreInactive.clear();
 				if (!pulseState.empty() && pulseState != detailPulseLogged)
 				{
 					detailPulseLogged = pulseState;
@@ -22554,6 +22723,14 @@ struct LibplaceboVideoRenderer::Impl
             outputEncodingRepairLogged = true;
         }
         pl_render_params frameParams = renderParams;
+        // Hunt 3 F2: ambient adaptation's SDR black lift, on top of the configured adjustment
+        // (saturation): libplacebo's colour decode, before anything else sees the picture.
+        if (ambientSdrLift)
+        {
+            frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
+            LibplaceboRenderParameters::ApplySdrAmbientLift(ambientSdrContrast, ambientSdrBrightness, frameColorAdjustment);
+            frameParams.color_adjustment = &frameColorAdjustment;
+        }
         // Hunt 2 picture sweep: deband_vp_exclusive yields libplacebo's automatic deband to VP's
         // debander, which is idle while smooth motion or deinterlacing runs; those frames keep
         // libplacebo's deband as configured (otherwise nothing would deband them).
@@ -22711,6 +22888,11 @@ struct LibplaceboVideoRenderer::Impl
                         DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
                 }
                 // Stage 12 §2b/§2d: VP's debander at source resolution.
+                // Hunt 3 F5: A's debanded picture (the hold's draw) is also the picture the detail
+                // stages' history advances on below, so the history has one domain (debanded),
+                // as on every frame drawn as itself.
+                pl_frame stageBA{};
+                bool stageBAReady = false;
                 if (debandThreshold > 0.0)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
@@ -22728,8 +22910,11 @@ struct LibplaceboVideoRenderer::Impl
                             if (aReady) aFrame = rebasedA;
                         }
                         pl_frame heldA{};
-                        if (aReady)
-                            (void)debander.Apply(d3d11->gpu, rebaseDispatch, aFrame, vpDebandParams, heldA, 0);
+                        if (aReady && debander.Apply(d3d11->gpu, rebaseDispatch, aFrame, vpDebandParams, heldA, 0))
+                        {
+                            stageBA = heldA;
+                            stageBAReady = true;
+                        }
                     }
                     // A picture between frames decides per picture (slot 1, no hold along A's field).
                     VpDebander::Params phaseParams = vpDebandParams;
@@ -22742,23 +22927,26 @@ struct LibplaceboVideoRenderer::Impl
                 }
                 // detail_pulse_stabilise, then texture_restore (docs/VP-detail-restore.md): re-base ->
                 // debander -> detail pulse -> texture restore, all before libplacebo's scaling. Never
-                // on a picture between frames (Stage B), never while smooth motion / deinterlacing
-                // runs (those flags are false then), never on renderImage: the source-resolution
-                // monitor read the original frame above. A cadence repeat passes the same sequence
-                // (the modules reuse the frame's decision and never advance their history).
+                // while smooth motion / deinterlacing runs (those flags are false then), never on
+                // renderImage: the source-resolution monitor read the original frame above. A
+                // cadence repeat passes the same sequence (the modules reuse the frame's decision
+                // with the bands of the picture drawn and never advance their history).
                 if (detailPulseRuns || textureRestoreRuns)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
                     // A Stage B picture between frames takes its frame's decision as a repeat (no
                     // refresh-to-refresh detail flicker). The history advances once per source frame
-                    // on A itself (re-based as drawn), as the debander's hold: A's first draw.
+                    // on A itself (re-based and debanded as drawn), as the debander's hold: A's first
+                    // draw.
                     if (phasePicture && !cadenceRepeat &&
                         ((detailPulseRuns && detailPulse.HistorySequence() != sourceSequence) ||
                          (textureRestoreRuns && textureRestore.HistorySequence() != sourceSequence)))
                     {
                         pl_frame aFrame = source;
                         bool aReady = true;
-                        if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+                        if (stageBAReady)
+                            aFrame = stageBA;   // hunt 3 F5: the debander's own draw of A
+                        else if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
                         {
                             pl_frame rebasedA{};
                             aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebasedA, 1);
@@ -22779,48 +22967,80 @@ struct LibplaceboVideoRenderer::Impl
                     if (detailPulseRuns)
                     {
                         // Look-ahead (optional): the next source frame's band energies when it is
-                        // already uploaded (the de-judder's B) and no re-base is engaged (the same
-                        // domain); once per new source frame.
+                        // already uploaded (the de-judder's B) and no re-base is engaged; once per new
+                        // source frame. Hunt 3 F4: in Apply's domain - B through VP's debander (per
+                        // picture, its look-ahead slot) when the debander runs on this frame.
                         if (!cadenceRepeat && nextSourceSequence != 0 && detailPulseAheadSequence != nextSourceSequence &&
-                            dejudderNextUploadedSequence == nextSourceSequence && dejudderNextTextures[0] && !dejudderRgbLuma &&
-                            rebaseFactor == 1.0 && rebaseFactorX == 1.0)
+                            dejudderNextUploadedSequence == nextSourceSequence && dejudderNextTextures[0] && dejudderNextTextures[1] &&
+                            !dejudderRgbLuma && image.num_planes == 2 && rebaseFactor == 1.0 && rebaseFactorX == 1.0)
                         {
                             detailPulseAheadSequence = nextSourceSequence;
-                            (void)detailPulse.MeasureAhead(d3d11->gpu, rebaseDispatch, dejudderNextTextures[0],
-                                dejudderNextUploadedSequence, detailPulseParams);
+                            pl_frame next = image;
+                            next.planes[0].texture = dejudderNextTextures[0];
+                            next.planes[1].texture = dejudderNextTextures[1];
+                            (void)detailPulse.MeasureAhead(d3d11->gpu, rebaseDispatch, next, dejudderNextUploadedSequence, detailPulseParams,
+                                debandThreshold > 0.0 ? &debander : nullptr, &vpDebandParams);
                         }
                         pl_frame pulsed{};
                         if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
+                        {
                             frame = pulsed;
-                        else if (detailPulse.Failures() == 1)
-                            DebugLog::Log("Detail pulse stabilise failed (%s); the frame is rendered without it", detailPulse.LastError().c_str());
+                            detailPulseInactive.clear();
+                        }
+                        else
+                        {
+                            // Hunt 3 F8: counted and reported ("inactive (...)" in the status), logged
+                            // whenever the reason changes.
+                            if (detailPulse.LastError() != detailPulseFailLogged)
+                                DebugLog::Log("Detail pulse stabilise: not applied (%s; %llu frames so far); the frame is rendered without it",
+                                    detailPulse.LastError().c_str(), detailPulse.Failures());
+                            detailPulseFailLogged = detailPulse.LastError();
+                            detailPulseInactive = detailPulse.LastError();
+                        }
                     }
                     if (textureRestoreRuns)
                     {
                         pl_frame restored{};
                         if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
+                        {
                             frame = restored;
-                        else if (textureRestore.Failures() == 1)
-                            DebugLog::Log("Texture restore failed (%s); the frame is rendered without it", textureRestore.LastError().c_str());
+                            textureRestoreInactive.clear();
+                        }
+                        else
+                        {
+                            if (textureRestore.LastError() != textureRestoreFailLogged)
+                                DebugLog::Log("Texture restore: not applied (%s; %llu frames so far); the frame is rendered without it",
+                                    textureRestore.LastError().c_str(), textureRestore.Failures());
+                            textureRestoreFailLogged = textureRestore.LastError();
+                            textureRestoreInactive = textureRestore.LastError();
+                        }
                     }
                 }
                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
                 {
-                    // The crossfade (owner 2026-10-17): both paths of this one frame, rendered by
-                    // libplacebo's frame mixer into float intermediates and mixed linearly before
-                    // the output stage (dither, encoding) - exact at both ends (FadeMixTimestamps).
-                    // VP deband (when on) stays on the path being shown fully; the path left is drawn
-                    // without it for the fade's duration.
+                    // The crossfade (owner 2026-10-17): both paths of this one frame, exact at both
+                    // ends. Hunt 3 (lead): the path being left carries the same stages (VP deband per
+                    // picture, the detail pulse's and texture restore's decision of this frame on its
+                    // own bands), so none drops out in one step when the fade starts.
                     pl_frame from = unrebased;
                     bool fromReady = true;
                     if (rebaseFromFactor < 1.0 || rebaseFromFactorX < 1.0)
                     {
                         pl_frame rebasedFrom{};
-                        fromReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, unrebased, rebaseFromFactorX, rebaseFromFactor, rebasedFrom, 1);
+                        fromReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, unrebased, rebaseFromFactorX, rebaseFromFactor, rebasedFrom,
+                            SourceRebase::Module::kSlotCrossfade);
                         if (fromReady) from = rebasedFrom;
                     }
                     if (fromReady)
                     {
+                        CrossfadeFromStages(from, rebaseFromFactor, sourceSequence);
+                        // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
+                        // (CrossfadeMix.h): BTB/WTW carried exactly, the extended-range late restore
+                        // (calibration LUT, wide gamut) once per path before the mix.
+                        if (RenderCrossfadeMix(from, frame, destination, parameters,
+                            extendedRangeRelabelled ? &source.color : nullptr, rebaseFade))
+                            return true;
+                        // The fallback: libplacebo's frame mixer (linear light: BTB clipped while it runs).
                         float timestamps[2];
                         SourceResolutionMonitor::Monitor::FadeMixTimestamps(rebaseFade, timestamps);
                         const pl_frame* frames[2] = { &from, &frame };

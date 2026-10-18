@@ -5,6 +5,7 @@
 
 #include <vprenderer/CrossfadeMix.h>
 #include <vprenderer/ExtendedRange.h>
+#include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 
 #include <libplacebo/d3d11.h>
@@ -251,6 +252,15 @@ namespace CrossfadeMixTestsNs
 			pl_color_space prepared = to.color;
 			ExtendedRange::Prepare(decision, hooks, prepared, out.color, list, false);
 			to.color = from.color = prepared;
+			// As the renderer: libplacebo 7.360 drops the output encoding after a texture-input
+			// PRE_OUTPUT hook (the late restore, the mix) unless the repair runs first at OUTPUT.
+			OutputEncodingRepair::Hook repair;
+			repair.SetTarget(out.repr);
+			auto withRepair = [&](std::vector<const pl_hook*>& hooks) {
+				if (OutputEncodingRepair::Needed(hooks, nullptr, lut ? PL_LUT_NORMALIZED : PL_LUT_UNKNOWN))
+					hooks.insert(hooks.begin(), repair.Get());
+			};
+			withRepair(list);
 			params.hooks = list.empty() ? nullptr : list.data();
 			params.num_hooks = static_cast<int>(list.size());
 			const float black[3] = { 0.0f, 0.0f, 0.0f };
@@ -282,7 +292,9 @@ namespace CrossfadeMixTestsNs
 					result.error = "RenderFrom";
 				else
 				{
-					const std::vector<const pl_hook*> withMix = mixer.WithMix(params.hooks, params.num_hooks, late, w);
+					std::vector<const pl_hook*> withMix = mixer.WithMix(params.hooks, params.num_hooks, late, w);
+					if (std::find(withMix.begin(), withMix.end(), repair.Get()) == withMix.end())
+						withRepair(withMix);
 					pl_render_params p2 = params;
 					p2.hooks = withMix.data();
 					p2.num_hooks = static_cast<int>(withMix.size());

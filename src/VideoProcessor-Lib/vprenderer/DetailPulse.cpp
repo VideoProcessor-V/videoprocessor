@@ -15,15 +15,19 @@
 //  1. measure (one 16 x 16 workgroup per 32 x 32 tile): the plane's codes around the tile and
 //     the 2x2 boxes around its half-resolution block go into shared memory; the fine Gaussian
 //     and the wide half-resolution low band are done there (separable); the tile's band
-//     energies, low-band mean and spread, untrusted share and veto weight are written, and
-//     its 16 x 16 half-resolution low band (the apply pass reads it back).
+//     energies, low-band mean and spread, untrusted share and veto weight are written.
 //  2. reduce (one workgroup): the frame's energies from the tiles, the cut and fade checks,
 //     the reference from the ring, the gains; the frame's entry into the ring.
-//  3. apply (one workgroup per 32 x 32 block): the bands again (shared memory), the gains
-//     times the tile weight (bilinear between tile centres), added to the source sample.
-// A cadence repeat runs the apply pass alone, with the stored decision. The CPU keeps only
-// which ring slot is whose and how many consecutive frames stand behind it; every value
-// lives on the GPU (no readback).
+//  3. apply (one workgroup per 32 x 32 block): the bands of the picture being drawn (both,
+//     in shared memory, as the measure pass has them), the gains times the tile weight
+//     (bilinear between tile centres), added to the source sample.
+// A repeat runs the apply pass alone, with the stored decision and the bands of the picture
+// it is given (hunt 3 F6: a Stage B phase picture, a gap fill or a de-judder extra is another
+// picture than A; A's stored low band on it was a ghost of A). A picture of another geometry
+// (the crossfade's path being left) reads the tile weights at the same picture position.
+// One-plane RGB (hunt 3 F8 / F9): the luma of R, G, B in the source's codes, the same delta on
+// all three. The CPU keeps only which ring slot is whose and how many consecutive frames stand
+// behind it; every value lives on the GPU (no readback).
 namespace DetailPulse
 {
 	namespace
@@ -42,6 +46,18 @@ shared float sy[SW * SW];
 shared float sh[SW * BLK];
 shared float slow[HL * HL];
 shared float rd[1024];
+
+// The plane's code at p: the luma plane's sample, or (one-plane RGB) the luma of R, G, B in
+// the source's codes.
+float code_at(ivec2 p)
+{
+#ifdef RGB
+    vec4 t = texelFetch(src, p, 0);
+    return luma_mul * dot(t.rgb, luma_w) + luma_add;
+#else
+    return code_scale * texelFetch(src, p, 0).r;
+#endif
+}
 
 // The fine band's vertical half on this block's pixel o (sh holds the horizontal half).
 float fine_at(ivec2 o)
@@ -91,7 +107,7 @@ void load_block(ivec2 origin, ivec2 hi)
 {
     uint li = gl_LocalInvocationIndex;
     for (int i = int(li); i < SW * SW; i += 256)
-        sy[i] = code_scale * texelFetch(src, clamp(origin - ivec2(R1) + ivec2(i % SW, i / SW), ivec2(0), hi), 0).r;
+        sy[i] = code_at(clamp(origin - ivec2(R1) + ivec2(i % SW, i / SW), ivec2(0), hi));
     barrier();
     for (int i = int(li); i < SW * BLK; i += 256) {
         int r = i / BLK, c = i % BLK;
@@ -103,10 +119,43 @@ void load_block(ivec2 origin, ivec2 hi)
 }
 )GLSL";
 
-		// Measure only: the half-resolution boxes and the low band's horizontal half.
-		const char* const MEASURE_HEADER = R"GLSL(
+		// The half-resolution low band around a block's half block, in shared memory (the
+		// measure and the apply pass: every pass reads the picture it is given).
+		const char* const LOW_HEADER = R"GLSL(
 shared float sbox[RB * RB];
 shared float shor[RB * HL];
+
+// slow = the low band over the half block qb and a one-texel border (GrainModel::Low: the
+// 2x2 boxes at the clamped half-resolution positions, then the separable Gaussian, edges
+// clamped at each step). Ends without a barrier: the caller's next one covers slow.
+void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
+{
+    uint li = gl_LocalInvocationIndex;
+    ivec2 ob = qb - ivec2(1 + GP_R);
+    for (int i = int(li); i < RB * RB; i += 256) {
+        ivec2 b = clamp(ob + ivec2(i % RB, i / RB), ivec2(0), hhi) * 2;
+        sbox[i] = 0.25 * (code_at(clamp(b, ivec2(0), hi)) + code_at(clamp(b + ivec2(1, 0), ivec2(0), hi)) +
+                          code_at(clamp(b + ivec2(0, 1), ivec2(0), hi)) + code_at(clamp(b + ivec2(1, 1), ivec2(0), hi)));
+    }
+    barrier();
+    for (int i = int(li); i < RB * HL; i += 256) {
+        int r = i / HL, c = i % HL;
+        int x = clamp(qb.x - 1 + c, 0, hhi.x) - ob.x;
+        float a = 0.0;
+        for (int k = -GP_R; k <= GP_R; k++)
+            a += gp_w(k) * sbox[r * RB + x + k];
+        shor[i] = a;
+    }
+    barrier();
+    for (int i = int(li); i < HL * HL; i += 256) {
+        int r = i / HL, c = i % HL;
+        int y = clamp(qb.y - 1 + r, 0, hhi.y) - ob.y;
+        float a = 0.0;
+        for (int k = -GP_R; k <= GP_R; k++)
+            a += gp_w(k) * shor[(y + k) * HL + c];
+        slow[i] = a;
+    }
+}
 )GLSL";
 
 		const char* const MEASURE_BODY = R"GLSL(
@@ -119,32 +168,8 @@ ivec2 hhi = hsz - ivec2(1);
 ivec2 blk = ivec2(gl_WorkGroupID.xy);
 ivec2 origin = blk * BLK;
 ivec2 qb = blk * HB;
-// The 2x2 boxes at the clamped half-resolution positions around the half block
-// (GrainModel::Low: box, then the separable Gaussian, edges clamped at each step).
-ivec2 ob = qb - ivec2(1 + GP_R);
-for (int i = int(li); i < RB * RB; i += 256) {
-    ivec2 b = clamp(ob + ivec2(i % RB, i / RB), ivec2(0), hhi) * 2;
-    sbox[i] = 0.25 * code_scale * (texelFetch(src, clamp(b, ivec2(0), hi), 0).r + texelFetch(src, clamp(b + ivec2(1, 0), ivec2(0), hi), 0).r +
-                                   texelFetch(src, clamp(b + ivec2(0, 1), ivec2(0), hi), 0).r + texelFetch(src, clamp(b + ivec2(1, 1), ivec2(0), hi), 0).r);
-}
+load_low(qb, hi, hhi);
 load_block(origin, hi);
-for (int i = int(li); i < RB * HL; i += 256) {
-    int r = i / HL, c = i % HL;
-    int x = clamp(qb.x - 1 + c, 0, hhi.x) - ob.x;
-    float a = 0.0;
-    for (int k = -GP_R; k <= GP_R; k++)
-        a += gp_w(k) * sbox[r * RB + x + k];
-    shor[i] = a;
-}
-barrier();
-for (int i = int(li); i < HL * HL; i += 256) {
-    int r = i / HL, c = i % HL;
-    int y = clamp(qb.y - 1 + r, 0, hhi.y) - ob.y;
-    float a = 0.0;
-    for (int k = -GP_R; k <= GP_R; k++)
-        a += gp_w(k) * shor[(y + k) * HL + c];
-    slow[i] = a;
-}
 barrier();
 // The bands' energies over this invocation's 2 x 2 pixels.
 vec4 acc = vec4(0.0);   // D1^2, D2^2, pixels, untrusted pixels
@@ -176,9 +201,6 @@ vec4 hacc = vec4(0.0);
 if (hq.x < hsz.x && hq.y < hsz.y) {
     float l = slow[(hl.y + 1) * HL + hl.x + 1];
     hacc = vec4(l - shift, (l - shift) * (l - shift), 1.0, 0.0);
-#ifndef AHEAD
-    imageStore(half_out, hq, vec4(l, 0.0, 0.0, 1.0));
-#endif
 }
 vec4 tot = reduce4(acc);
 vec4 htot = reduce4(hacc);
@@ -330,15 +352,17 @@ uint li = gl_LocalInvocationIndex;
 ivec2 lid = ivec2(gl_LocalInvocationID.xy);
 ivec2 sz = textureSize(src, 0);
 ivec2 hi = sz - ivec2(1);
-ivec2 hhi = textureSize(half_in, 0) - ivec2(1);
+ivec2 hhi = (sz + ivec2(1)) / 2 - ivec2(1);
 ivec2 nt = textureSize(weight_in, 0);
 ivec2 blk = ivec2(gl_WorkGroupID.xy);
 ivec2 origin = blk * BLK;
 ivec2 qb = blk * HB;
-for (int i = int(li); i < HL * HL; i += 256)
-    slow[i] = texelFetch(half_in, clamp(qb - ivec2(1) + ivec2(i % HL, i / HL), ivec2(0), hhi), 0).r;
+#ifndef XGEO
 if (li < 9u)
     stile[li] = texelFetch(weight_in, clamp(blk - ivec2(1) + ivec2(int(li % 3u), int(li / 3u)), ivec2(0), nt - ivec2(1)), 0).x;
+#endif
+// This picture's own bands (hunt 3 F6): its low band, then its codes and the fine band.
+load_low(qb, hi, hhi);
 load_block(origin, hi);
 barrier();
 vec2 gm = texelFetch(ring, ivec2(RING, 0), 0).xy - vec2(1.0);
@@ -349,6 +373,17 @@ for (int q = 0; q < 4; q++) {
         float g1 = fine_at(o);
         float d1 = sy[(o.y + R1) * SW + o.x + R1] - g1;
         float d2 = g1 - low_at(o);
+#ifdef XGEO
+        // Another geometry: the decided tile grid at the same picture position (decided plane
+        // px = this plane px x tile_ratio), bilinear between tile centres (edges clamped).
+        vec2 tp = (vec2(p) + 0.5) * tile_ratio / float(BLK) - 0.5;
+        ivec2 t0 = ivec2(floor(tp));
+        vec2 tf = tp - vec2(t0);
+        ivec2 a = clamp(t0, ivec2(0), nt - ivec2(1));
+        ivec2 b = clamp(t0 + ivec2(1), ivec2(0), nt - ivec2(1));
+        float top = texelFetch(weight_in, a, 0).x * (1.0 - tf.x) + texelFetch(weight_in, ivec2(b.x, a.y), 0).x * tf.x;
+        float bottom = texelFetch(weight_in, ivec2(a.x, b.y), 0).x * (1.0 - tf.x) + texelFetch(weight_in, b, 0).x * tf.x;
+#else
         // The tile weight, bilinear between tile centres (edges clamped).
         vec2 tp = (vec2(p) + 0.5) / float(BLK) - 0.5;
         ivec2 t0 = ivec2(floor(tp));
@@ -357,10 +392,17 @@ for (int q = 0; q < 4; q++) {
         ivec2 b = clamp(t0 + ivec2(1), ivec2(0), nt - ivec2(1)) - blk + ivec2(1);
         float top = stile[a.y * 3 + a.x] * (1.0 - tf.x) + stile[a.y * 3 + b.x] * tf.x;
         float bottom = stile[b.y * 3 + a.x] * (1.0 - tf.x) + stile[b.y * 3 + b.x] * tf.x;
+#endif
         float w = top * (1.0 - tf.y) + bottom * tf.y;
         float delta = w * (gm.x * d1 + gm.y * d2);
         // Added to the source sample itself: a gain of 1 gives it back exactly.
+#ifdef RGB
+        // The same delta on R, G and B: the luma moves by it, Cb and Cr stay.
+        vec4 t = texelFetch(src, p, 0);
+        imageStore(dst, p, vec4(t.rgb + vec3(delta / luma_mul), t.a));
+#else
         imageStore(dst, p, vec4(texelFetch(src, p, 0).r + delta / code_scale, 0.0, 0.0, 1.0));
+#endif
     }
 }
 )GLSL";
@@ -473,6 +515,7 @@ for (int q = 0; q < 4; q++) {
 			bool operator==(const Geometry& o) const { return w == o.w && h == o.h && scale == o.scale; }
 		};
 
+
 		struct Constants
 		{
 			Geometry geometry;
@@ -481,13 +524,17 @@ for (int q = 0; q < 4; q++) {
 			std::string bandHeader;
 			size_t bandShmem = 0;
 			float codeScale = 1.0f;
+			// Hunt 3 F8 / F9: a one-plane RGB picture (code = lumaMul x dot(rgb, lumaW) + lumaAdd).
+			bool rgb = false;
+			float lumaMul = 1.0f, lumaAdd = 0.0f;
+			float lumaW[3] = { 0.0f, 0.0f, 0.0f };
 		};
 	}
 
 	struct Module::Impl
 	{
-		pl_tex out = nullptr;            // the stabilised luma
-		pl_tex half = nullptr;           // this source frame's half-resolution low band (codes)
+		pl_tex out = nullptr;            // the stabilised plane (a new frame or a repeat)
+		pl_tex outForeign = nullptr;     // ApplyForeign's (the crossfade's path being left)
 		pl_tex stats[2] = {};            // per tile: E1, E2, low mean, low spread (this frame's and the previous one's)
 		pl_tex weight = nullptr;         // per tile: veto weight, untrusted share, change
 		pl_tex aheadStats = nullptr, aheadWeight = nullptr;
@@ -500,11 +547,25 @@ for (int q = 0; q < 4; q++) {
 		Geometry geometry;
 		uint64_t aheadSequence = 0;
 		Geometry aheadGeometry;
-		float codeScale = 0.0f;          // the last Apply's (MeasureAhead reads the same signal)
+		float codeScale = 0.0f;          // the last luma-plane Apply's (MeasureAhead on a bare texture reads the same signal)
 	};
 
 	namespace
 	{
+		// What plane 0 of a frame is to the pulse: 0 a luma plane, 1 a one-plane RGB(A) picture,
+		// -1 neither.
+		int PlaneKind(const pl_frame& source)
+		{
+			const pl_plane& p = source.planes[0];
+			if (p.components == 1 && p.component_mapping[0] == PL_CHANNEL_Y)
+				return 0;
+			if (source.num_planes == 1 && p.components >= 3 && p.component_mapping[0] == PL_CHANNEL_R &&
+				p.component_mapping[1] == PL_CHANNEL_G && p.component_mapping[2] == PL_CHANNEL_B &&
+				!pl_color_system_is_ycbcr_like(source.repr.sys))
+				return 1;
+			return -1;
+		}
+
 		void Prepare(pl_tex luma, const Params& params, Constants& c, const pl_frame* frame)
 		{
 			c.geometry.w = luma->params.w;
@@ -516,22 +577,72 @@ for (int q = 0; q < 4; q++) {
 			c.tilesY = (c.geometry.h + kTilePx - 1) / kTilePx;
 			c.bandHeader = "#define R1 " + std::to_string(c.r1) + "\n" + "#define RING " + std::to_string(kRingSlots) + "\n" +
 				WeightsGlsl("fw", "FW_R", c.r1, FineWeight, c.geometry.scale) +
-				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER;
-			const int sw = kTilePx + 2 * c.r1, hl = kTilePx / 2 + 2;
-			c.bandShmem = sizeof(float) * (sw * sw + sw * kTilePx + hl * hl + 1024);
+				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + LOW_HEADER;
+			const int sw = kTilePx + 2 * c.r1, hl = kTilePx / 2 + 2, rb = hl + 2 * c.gpR;
+			c.bandShmem = sizeof(float) * (sw * sw + sw * kTilePx + hl * hl + 1024 + rb * rb + rb * hl);
 			// One code of the signal in the plane texture's normalised units (VpDebander's).
 			const int sampleDepth = frame && frame->repr.bits.sample_depth > 0 ? frame->repr.bits.sample_depth : luma->params.format->component_depth[0];
 			const int shift = frame ? frame->repr.bits.bit_shift : 0;
-			const double codeUnit = luma->params.format->type == PL_FMT_FLOAT ?
+			const bool isFloat = luma->params.format->type == PL_FMT_FLOAT;
+			const double codeUnit = isFloat ?
 				1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
 				std::pow(2.0, shift) / (std::pow(2.0, sampleDepth) - 1.0);
 			c.codeScale = static_cast<float>(1.0 / codeUnit);
+			c.rgb = frame && PlaneKind(*frame) == 1;
+			if (c.rgb)
+			{
+				double k[3];
+				LumaWeights(params.lumaSystem, frame->color.primaries, k);
+				for (int i = 0; i < 3; ++i) c.lumaW[i] = static_cast<float>(k[i]);
+				if (isFloat)
+				{
+					// A float picture holds normalised decoded values: back to the source's codes
+					// (a composed picture reads the codes of the planes it was made from).
+					enum pl_color_levels levels = params.codeLevels;
+					if (levels == PL_COLOR_LEVELS_UNKNOWN)
+						levels = pl_color_levels_guess(&frame->repr);
+					const double step = std::pow(2.0, params.colorDepth - 8);
+					if (levels == PL_COLOR_LEVELS_LIMITED)
+					{
+						c.lumaMul = static_cast<float>(219.0 * step);
+						c.lumaAdd = static_cast<float>(16.0 * step);
+					}
+					else
+					{
+						c.lumaMul = static_cast<float>(std::pow(2.0, params.colorDepth) - 1.0);
+						c.lumaAdd = 0.0f;
+					}
+				}
+				else
+				{
+					c.lumaMul = c.codeScale;   // an integer RGB plane: its own codes
+					c.lumaAdd = 0.0f;
+				}
+			}
+		}
+
+		std::string Defines(const Constants& c)
+		{
+			return c.rgb ? "#define RGB 1\n" : "";
+		}
+
+		// The plane-reading variables (code_scale, or the RGB luma's).
+		int CodeVars(const Constants& c, pl_shader_var* v)
+		{
+			if (!c.rgb)
+			{
+				v[0] = { pl_var_float("code_scale"), &c.codeScale, true };
+				return 1;
+			}
+			v[0] = { pl_var_float("luma_mul"), &c.lumaMul, true };
+			v[1] = { pl_var_float("luma_add"), &c.lumaAdd, true };
+			v[2] = { pl_var_vec3("luma_w"), c.lumaW, true };
+			return 3;
 		}
 
 		size_t MeasureShmem(const Constants& c)
 		{
-			const int hl = kTilePx / 2 + 2, rb = hl + 2 * c.gpR;
-			return c.bandShmem + sizeof(float) * (rb * rb + rb * hl);
+			return c.bandShmem;
 		}
 
 		bool EnsureRing(pl_gpu gpu, pl_tex& ring)
@@ -551,10 +662,10 @@ for (int q = 0; q < 4; q++) {
 			return ring != nullptr;
 		}
 
-		// Measure (pass 1) and reduce (pass 2). ahead: the look-ahead (no half band, no previous
-		// frame, no field; the ring's look-ahead entry).
+		// Measure (pass 1) and reduce (pass 2). ahead: the look-ahead (no previous frame, no
+		// field; the ring's look-ahead entry).
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
-			pl_tex halfOut, pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
+			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
 			bool ahead, int cur, int nValid, int nUse, bool aheadValid, std::string& error)
 		{
 			const bool useField = !ahead && params.field != nullptr;
@@ -567,17 +678,15 @@ for (int q = 0; q < 4; q++) {
 			const float vetoCodes = static_cast<float>(VetoCodes(params.bitrateQuality, params.colorDepth));
 			const float energyJump = static_cast<float>(kTileEnergyJump);
 			{
-				pl_shader_desc d[6];
+				pl_shader_desc d[5];
 				int nd = 0;
 				d[nd++] = Sampled("src", luma);
 				d[nd++] = Storage("stats_out", statsOut);
 				d[nd++] = Storage("weight_out", weightOut);
-				if (!ahead) d[nd++] = Storage("half_out", halfOut);
 				if (usePrev) d[nd++] = Sampled("prev_stats", prevStats);
 				if (useField) d[nd++] = Sampled("field", params.field);
-				pl_shader_var v[8];
-				int nv = 0;
-				v[nv++] = { pl_var_float("code_scale"), &c.codeScale, true };
+				pl_shader_var v[10];
+				int nv = CodeVars(c, v);
 				if (usePrev && !useField) v[nv++] = { pl_var_float("veto_codes"), &vetoCodes, true };
 				if (usePrev) v[nv++] = { pl_var_float("energy_jump"), &energyJump, true };
 				if (useField)
@@ -586,7 +695,7 @@ for (int q = 0; q < 4; q++) {
 					v[nv++] = { pl_var_float("trust_min"), &trustMin, true };
 					v[nv++] = { pl_var_float("untrusted_share"), &untrustedShare, true };
 				}
-				std::string header = c.bandHeader + MEASURE_HEADER;
+				std::string header = Defines(c) + c.bandHeader;
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (usePrev) header = "#define PREV 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
@@ -636,6 +745,45 @@ for (int q = 0; q < 4; q++) {
 			}
 			return true;
 		}
+
+		// The apply pass: the held decision on `luma`'s own bands into dst. tileRatio: the decided
+		// geometry per this picture's px (null: this picture is the decided geometry).
+		bool ApplyPass(pl_dispatch dispatch, pl_tex luma, pl_tex dst, pl_tex weight, pl_tex ring, const Constants& c,
+			const float* tileRatio, std::string& error)
+		{
+			const pl_shader_desc d[4] = { Sampled("src", luma), Storage("dst", dst), Sampled("weight_in", weight), Sampled("ring", ring) };
+			pl_shader_var v[4];
+			int nv = CodeVars(c, v);
+			if (tileRatio) v[nv++] = { pl_var_vec2("tile_ratio"), tileRatio, true };
+			std::string header = Defines(c) + c.bandHeader + APPLY_HEADER;
+			if (tileRatio) header = "#define XGEO 1\n" + header;
+			if (!Compute(dispatch, tileRatio ? "VideoProcessor detail pulse: apply (other geometry)" : "VideoProcessor detail pulse: apply",
+				header, APPLY_BODY, d, 4, v, nv, c.bandShmem + sizeof(float) * 9, c.tilesX, c.tilesY))
+			{
+				error = "the apply pass failed";
+				return false;
+			}
+			return true;
+		}
+	}
+
+	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
+	{
+		double kr = 0.2126, kb = 0.0722;
+		switch (system)
+		{
+		case PL_COLOR_SYSTEM_BT_601: kr = 0.299; kb = 0.114; break;
+		case PL_COLOR_SYSTEM_BT_2020_NC:
+		case PL_COLOR_SYSTEM_BT_2020_C: kr = 0.2627; kb = 0.0593; break;
+		case PL_COLOR_SYSTEM_SMPTE_240M: kr = 0.212; kb = 0.087; break;
+		case PL_COLOR_SYSTEM_BT_709: break;
+		default:
+			if (primaries == PL_COLOR_PRIM_BT_2020) { kr = 0.2627; kb = 0.0593; }
+			break;
+		}
+		out[0] = kr;
+		out[1] = 1.0 - kr - kb;
+		out[2] = kb;
 	}
 
 	Module::~Module()
@@ -658,7 +806,7 @@ for (int q = 0; q < 4; q++) {
 	{
 		if (impl)
 		{
-			for (pl_tex* tex : { &impl->out, &impl->half, &impl->stats[0], &impl->stats[1], &impl->weight,
+			for (pl_tex* tex : { &impl->out, &impl->outForeign, &impl->stats[0], &impl->stats[1], &impl->weight,
 				&impl->aheadStats, &impl->aheadWeight, &impl->ring })
 			{
 				if (*tex && gpu) pl_tex_destroy(gpu, tex);
@@ -684,23 +832,25 @@ for (int q = 0; q < 4; q++) {
 			++failures;
 			return false;
 		}
-		if (source.planes[0].components != 1 || source.planes[0].component_mapping[0] != PL_CHANNEL_Y)
+		// Hunt 3 F8: counted (the renderer reports the stage inactive), never a silent no-op.
+		if (PlaneKind(source) < 0)
 		{
-			error = "the first plane is not a luma plane";
+			error = "the first plane is neither luma nor one-plane RGB";
+			++failures;
 			return false;
 		}
 		if (!impl) impl = new Impl();
 		Impl& m = *impl;
 		Constants c;
 		Prepare(luma, params, c, &source);
-		m.codeScale = c.codeScale;
+		if (!c.rgb)
+			m.codeScale = c.codeScale;
 		const bool sameGeometry = m.decided && c.geometry == m.geometry;
 		const bool repeat = sameGeometry && params.sequence != 0 && params.sequence == m.lastSequence;
 		const bool consecutive = sameGeometry && m.lastSequence != 0 && params.sequence == m.lastSequence + 1;
-		const int hw = (c.geometry.w + 1) / 2, hh = (c.geometry.h + 1) / 2;
-		pl_fmt f1 = Float32(gpu, 1), f4 = Float32(gpu, 4);
+		pl_fmt f4 = Float32(gpu, 4);
 		if (!Ensure(gpu, m.out, c.geometry.w, c.geometry.h, StorableLike(gpu, luma->params.format), true) ||
-			!f1 || !f4 || !EnsureRing(gpu, m.ring))
+			!f4 || !EnsureRing(gpu, m.ring))
 		{
 			error = "no storable textures";
 			++failures;
@@ -709,8 +859,7 @@ for (int q = 0; q < 4; q++) {
 		if (!repeat)
 		{
 			const int next = 1 - m.statsIndex;
-			if (!Ensure(gpu, m.half, hw, hh, f1) || !Ensure(gpu, m.stats[next], c.tilesX, c.tilesY, f4) ||
-				!Ensure(gpu, m.weight, c.tilesX, c.tilesY, f4))
+			if (!Ensure(gpu, m.stats[next], c.tilesX, c.tilesY, f4) || !Ensure(gpu, m.weight, c.tilesX, c.tilesY, f4))
 			{
 				error = "no storable textures";
 				++failures;
@@ -722,7 +871,7 @@ for (int q = 0; q < 4; q++) {
 			const int nUse = (std::min)(nValid, WindowFrames(params.sourceHz));
 			const bool aheadValid = m.aheadSequence != 0 && params.sequence != 0 && m.aheadSequence == params.sequence + 1 &&
 				m.aheadGeometry == c.geometry;
-			if (!MeasureAndReduce(dispatch, luma, params, c, m.half, m.stats[next], m.weight,
+			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
 				false, slot, nValid, nUse, aheadValid, error))
 			{
@@ -738,18 +887,10 @@ for (int q = 0; q < 4; q++) {
 			m.decided = true;
 			if (aheadValid) ++aheadUsed;
 		}
+		if (!ApplyPass(dispatch, luma, m.out, m.weight, m.ring, c, nullptr, error))
 		{
-			const pl_shader_desc d[5] = { Sampled("src", luma), Storage("dst", m.out), Sampled("half_in", m.half),
-				Sampled("weight_in", m.weight), Sampled("ring", m.ring) };
-			const pl_shader_var v[1] = { { pl_var_float("code_scale"), &c.codeScale, true } };
-			const std::string header = c.bandHeader + APPLY_HEADER;
-			if (!Compute(dispatch, "VideoProcessor detail pulse: apply", header, APPLY_BODY, d, 5, v, 1,
-				c.bandShmem + sizeof(float) * 9, c.tilesX, c.tilesY))
-			{
-				error = "the apply pass failed";
-				++failures;
-				return false;
-			}
+			++failures;
+			return false;
 		}
 		pl_frame frame = source;
 		frame.planes[0].texture = m.out;
@@ -758,35 +899,91 @@ for (int q = 0; q < 4; q++) {
 		return true;
 	}
 
-	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
+	bool Module::ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
 	{
-		double kr = 0.2126, kb = 0.0722;
-		switch (system)
+		error.clear();
+		if (!gpu || !dispatch || source.num_planes <= 0 || !impl || !impl->decided || !impl->ring || !impl->weight)
 		{
-		case PL_COLOR_SYSTEM_BT_601: kr = 0.299; kb = 0.114; break;
-		case PL_COLOR_SYSTEM_BT_2020_NC:
-		case PL_COLOR_SYSTEM_BT_2020_C: kr = 0.2627; kb = 0.0593; break;
-		case PL_COLOR_SYSTEM_SMPTE_240M: kr = 0.212; kb = 0.087; break;
-		case PL_COLOR_SYSTEM_BT_709: break;
-		default:
-			if (primaries == PL_COLOR_PRIM_BT_2020) { kr = 0.2627; kb = 0.0593; }
-			break;
+			error = "no decision held";
+			return false;
 		}
-		out[0] = kr;
-		out[1] = 1.0 - kr - kb;
-		out[2] = kb;
-	}
-
-	bool Module::ApplyForeign(pl_gpu, pl_dispatch, const pl_frame&, const Params&, pl_frame&)
-	{
-		error = "not implemented";
-		return false;
+		const pl_tex luma = source.planes[0].texture;
+		if (!luma || !luma->params.sampleable || PlaneKind(source) < 0)
+		{
+			error = "the first plane is neither luma nor one-plane RGB";
+			++failures;
+			return false;
+		}
+		Impl& m = *impl;
+		Constants c;
+		Prepare(luma, params, c, &source);
+		if (!Ensure(gpu, m.outForeign, c.geometry.w, c.geometry.h, StorableLike(gpu, luma->params.format), true))
+		{
+			error = "no storable textures";
+			++failures;
+			return false;
+		}
+		const float ratio[2] = { static_cast<float>(m.geometry.w) / c.geometry.w, static_cast<float>(m.geometry.h) / c.geometry.h };
+		if (!ApplyPass(dispatch, luma, m.outForeign, m.weight, m.ring, c, ratio, error))
+		{
+			++failures;
+			return false;
+		}
+		pl_frame frame = source;
+		frame.planes[0].texture = m.outForeign;
+		result = frame;
+		return true;
 	}
 
 	bool Module::MeasureAhead(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& next, uint64_t sequence, const Params& params,
-		VpDebander::Module*, const VpDebander::Params*)
+		VpDebander::Module* debander, const VpDebander::Params* deband)
 	{
-		return next.num_planes > 0 && MeasureAhead(gpu, dispatch, next.planes[0].texture, sequence, params);
+		error.clear();
+		if (!gpu || !dispatch || next.num_planes <= 0 || !next.planes[0].texture || sequence == 0 || PlaneKind(next) != 0)
+		{
+			error = "nothing to measure ahead";
+			return false;
+		}
+		pl_frame measured = next;
+		if (debander && deband && deband->thresholdCodes > 0.0)
+		{
+			// Hunt 3 F4: as Apply's frame - the debander first, per picture (no hold along a
+			// field that belongs to the current frame), in its look-ahead slot.
+			VpDebander::Params p = *deband;
+			p.field = nullptr;
+			p.grainError = nullptr;
+			p.sequence = sequence;
+			pl_frame debanded{};
+			if (!debander->Apply(gpu, dispatch, next, p, debanded, VpDebander::Module::kSlotLookAhead))
+			{
+				error = "the look-ahead deband failed (" + debander->LastError() + ")";
+				return false;
+			}
+			measured = debanded;
+		}
+		if (!impl) impl = new Impl();
+		Impl& m = *impl;
+		const pl_tex luma = measured.planes[0].texture;
+		Constants c;
+		Prepare(luma, params, c, &measured);
+		pl_fmt f4 = Float32(gpu, 4);
+		if (!f4 || !EnsureRing(gpu, m.ring) || !Ensure(gpu, m.aheadStats, c.tilesX, c.tilesY, f4) ||
+			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4))
+		{
+			error = "no storable textures";
+			++failures;
+			return false;
+		}
+		m.aheadSequence = 0;
+		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
+			true, 0, 0, 0, false, error))
+		{
+			++failures;
+			return false;
+		}
+		m.aheadSequence = sequence;
+		m.aheadGeometry = c.geometry;
+		return true;
 	}
 
 	bool Module::MeasureAhead(pl_gpu gpu, pl_dispatch dispatch, pl_tex luma, uint64_t sequence, const Params& params)
@@ -800,7 +997,7 @@ for (int q = 0; q < 4; q++) {
 		if (!impl) impl = new Impl();
 		Impl& m = *impl;
 		// The next frame shares the current one's representation: the code scale is the last
-		// Apply's (a bare texture does not say where its signal's bits sit).
+		// luma-plane Apply's (a bare texture does not say where its signal's bits sit).
 		if (!(m.codeScale > 0.0f))
 		{
 			error = "no frame applied yet";
@@ -818,7 +1015,7 @@ for (int q = 0; q < 4; q++) {
 			return false;
 		}
 		m.aheadSequence = 0;
-		if (!MeasureAndReduce(dispatch, luma, params, c, nullptr, m.aheadStats, m.aheadWeight, nullptr, m.ring,
+		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
 			true, 0, 0, 0, false, error))
 		{
 			++failures;
