@@ -112,6 +112,13 @@ struct DisplayRefreshBounds
 	{
 		return hz >= kMinimumHz && hz <= kMaximumHz;   // false for NaN
 	}
+	// Fixed-constant batch 2026-10-18 (B1): a refresh period in clock ticks (QPC), checked
+	// against the same bounds (the scene-timing phase used to copy 10-240 Hz).
+	static bool AcceptsPeriod(long long periodTicks, long long ticksPerSecond)
+	{
+		return periodTicks > 0 && ticksPerSecond > 0 &&
+			Accepts(static_cast<double>(ticksPerSecond) / static_cast<double>(periodTicks));
+	}
 };
 
 // The general bounds for a capture (source) frame rate: DisplayMode's accepted

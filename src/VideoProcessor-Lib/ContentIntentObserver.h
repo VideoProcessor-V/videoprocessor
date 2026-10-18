@@ -42,6 +42,10 @@ namespace ContentIntent
         // Hunt 2 (cadence_class_fixes, default on): the source-only film / video
         // class (InterpolationPolicy::IsFilmLike) and the classifier's fixes.
         bool classFixes = true;
+        // general_rate_fixes (fixed-constant batch 2026-10-18, default on): the
+        // film / video split is the derived rule; off = DejudderPolicy's fixed
+        // bands, as for the renderer's own classification (integration round 4).
+        bool generalRates = true;
     };
 
     // The existing film / video classification (source_class) at the
@@ -52,7 +56,7 @@ namespace ContentIntent
         rateKnown = c.contentHz > 0.0 &&
             (c.sourceClass == InterpolationPolicy::SourceClass::Legacy || c.classFixes || c.pulldownLocked || c.displayHz > 0.0);
         return rateKnown && InterpolationPolicy::IsFilmLike(c.sourceClass, c.contentHz, c.displayHz, c.pulldownLocked,
-            c.classFixes);
+            c.classFixes, c.generalRates);
     }
 
     // The reduced grid from any sampler (sample(x, y, luma) -> bool), cell

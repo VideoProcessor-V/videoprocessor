@@ -6255,8 +6255,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         if (sectionPrefix == QStringLiteral("queue"))
         {
             // Owner 2026-10-16: when this queue is used - Off (chosen by hand or shortcut only), By rules
-            // (the formula below), or 50/60 Hz sources (the rule written for 50, 59.94 and 60 Hz).
-            static const QString kRate5060 = QStringLiteral("${cadence} == 49-61");
+            // (the formula below), or video-rate sources.
+            // Fixed-constant batch 2026-10-18 (owner [[vp-general-not-fixed]]): the button writes the
+            // class rule - every source at the video rate floor and above (DejudderPolicy::VideoRateFloorHz,
+            // 49 Hz: 50, 59.94, 60, 100, 119.88, 120, 144, 240 ...) - instead of the fixed 49-61 band,
+            // which missed 100/120p. A saved 49-61 rule still reads as this button (and is kept as
+            // written until the button is clicked again).
+            static const QString kRate5060 = QStringLiteral("${cadence} >= 49");
+            static const QString kRate5060Legacy = QStringLiteral("${cadence} == 49-61");
+            const auto isRateRule = [](const QString& text) { return text == kRate5060 || text == kRate5060Legacy; };
             rateRow->setVisible(false);
             auto* useRow = new QWidget;
             useRow->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode")));
@@ -6268,11 +6275,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             offButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.off")));
             auto* rulesButton = new QRadioButton(QStringLiteral("By rules"));
             rulesButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rules")));
-            auto* rateButton = new QRadioButton(QStringLiteral("50/60 Hz sources"));
+            auto* rateButton = new QRadioButton(QStringLiteral("50 Hz and faster sources"));
             rateButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rate5060")));
             rateButton->setToolTip(QStringLiteral(
-                "Writes the rule ${cadence} == 49-61: 50, 59.94 and 60 Hz signals. Film sent in a 60 Hz signal (3:2) "
-                "matches too until the cadence detection keeps it on the regular path."));
+                "Writes the rule ${cadence} >= 49: every video-rate signal (50, 59.94, 60, 100, 120 Hz and faster), the "
+                "same 50 Hz floor the film / video classification uses. Film sent in a 60 Hz signal (3:2) matches too "
+                "until the cadence detection keeps it on the regular path. A rule saved as ${cadence} == 49-61 (50/60 Hz "
+                "only) still shows here and is kept until this button is clicked again."));
             auto* group = new QButtonGroup(useRow);
             group->setExclusive(true);
             for (QRadioButton* b : { offButton, rulesButton, rateButton })
@@ -6282,21 +6291,21 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             useLayout->addStretch();
             detailLayout->insertWidget(ruleIndex, useRow);
-            auto syncUse = [rule, useRule, offButton, rulesButton, rateButton]
+            auto syncUse = [rule, useRule, offButton, rulesButton, rateButton, isRateRule]
             {
                 const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
                 const QSignalBlocker a(offButton), b(rulesButton), c(rateButton);
                 offButton->setChecked(text.isEmpty() && !useRule->isChecked());
-                rateButton->setChecked(text == kRate5060);
-                rulesButton->setChecked(useRule->isChecked() && text != kRate5060);
+                rateButton->setChecked(isRateRule(text));
+                rulesButton->setChecked(useRule->isChecked() && !isRateRule(text));
             };
             connect(rule, &QPlainTextEdit::textChanged, this, syncUse);
             connect(useRule, &QCheckBox::toggled, this, syncUse);
             // Audit 2026-10-16: a hand-written rule is kept aside when Off or 50/60 Hz replaces it, and
             // By rules brings it back; an empty rule is not saved (the profile reads Off), so say so.
-            auto keepCustom = [rule]() {
+            auto keepCustom = [rule, isRateRule]() {
                 const QString text = rule->toPlainText().trimmed();
-                if (!text.isEmpty() && text != kRate5060) rule->setProperty("customRule", text);
+                if (!text.isEmpty() && !isRateRule(text)) rule->setProperty("customRule", text);
             };
             rule->setPlaceholderText(QStringLiteral("Type the rule here; an empty rule is not saved (the queue is then Off)."));
             connect(offButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
@@ -6305,10 +6314,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 rule->clear();
                 useRule->setChecked(false);
             });
-            connect(rulesButton, &QRadioButton::toggled, this, [rule, useRule](bool on) {
+            connect(rulesButton, &QRadioButton::toggled, this, [rule, useRule, isRateRule](bool on) {
                 if (!on) return;
                 const QString text = rule->toPlainText().trimmed();
-                if (text.isEmpty() || text == kRate5060)
+                if (text.isEmpty() || isRateRule(text))
                     rule->setPlainText(rule->property("customRule").toString());
                 useRule->setChecked(true);
                 rule->setFocus();
@@ -8616,13 +8625,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // Owner 2026-10-18: hiccup repair is on by default; motion smoothing (interpolation) stays off.
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
             { QStringLiteral("on"), QStringLiteral("off") });
-        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (default; pair across 1-3 missed frames)"));
+        fillGaps->setItemText(fillGaps->findData(QStringLiteral("on")), QStringLiteral("On (default; pair across gaps up to about 1/6 s)"));
         fillGaps->setItemText(fillGaps->findData(QStringLiteral("off")), QStringLiteral("Off"));
+        // Fixed-constant batch 2026-10-18: the span is a time at the measured rate (general_rate_fixes).
         fillGaps->setToolTip(QStringLiteral(
             "On (default); works with motion smoothing on or off, and motion smoothing stays off by default. "
-            "When a stream loses one to three frames, On pairs the "
+            "When a stream loses frames for up to about 1/6 second (1-3 frames at 24p, up to 4 at 30p, up to 9 at 60p: "
+            "the same time at every frame rate), On pairs the "
             "frames either side of the gap and fills the missing refreshes with pictures at their true time (the "
-            "motion is checked as always; untrusted areas hold). Off keeps the rule that no motion is "
+            "motion is checked as always; untrusted areas hold). Longer gaps are never paired. With General "
+            "frame-rate rules off the gap is 1-3 frames at any rate. Off keeps the rule that no motion is "
             "paired across a gap: the last frame stays on screen until the next arrives. (Key: interpolation_fill_gaps.)"));
         form = fixesForm;
         auto* pulldownFixes = addChoice(QStringLiteral("Film-in-video detection: keep the lock"), QStringLiteral("pulldown_fixes"),
@@ -8665,6 +8677,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "correction's timings are in seconds at every frame rate and follow the real queue depth; a dropped frame's "
             "gap is kept; render ahead without frame statistics prefers the measured refresh over the whole-hertz mode. "
             "Off: the earlier behaviour."));
+        // Fixed-constant batch 2026-10-18 (owner: no fixed rates, cadences or resolutions).
+        auto* generalRates = addChoice(QStringLiteral("General frame-rate rules"), QStringLiteral("general_rate_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        generalRates->setToolTip(QStringLiteral(
+            "Under test (default on). Film / video is judged from the measured frame rate with no fixed list of rates: "
+            "everything slower than the 50 Hz television rate (below 49 fps) is film-like, 50 fps and faster is video. "
+            "24, 25, 30 and 48 fps are classed as before; odd rates between 31 and 47 fps are now film-like. "
+            "Repairing dropped frames pairs across a gap of up to about 1/6 second at any frame rate (1-3 missed frames "
+            "at 24p, up to 9 at 60p) instead of a fixed 1-3 frames. Off: the earlier fixed rate bands and frame count."));
         // Render-ahead (docs/VP-render-ahead-design.md, owner 2026-10-17): processing follows the
         // source frame rate, not the display refresh. Off by default until the on-screen runs pass.
         auto* renderAhead = addChoice(QStringLiteral("De-judder: render ahead (under test)"), QStringLiteral("render_ahead"),
@@ -10666,7 +10687,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" },
                     // Render-ahead (docs/VP-render-ahead-design.md).
                     { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.

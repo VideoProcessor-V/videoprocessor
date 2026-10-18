@@ -1260,7 +1260,10 @@ namespace VideoProcessorTest
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 60.0; i.displayHz = 50.0; }) == Reason::IneligibleCadence);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 58.0; }) == Reason::IneligibleCadence); // ~1, nothing to fill
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 50.0; }) == Reason::IneligibleCadence); // 1.2: video
-            Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::IneligibleCadence); // 1.5
+            // 40 fps on 60 Hz (1.5): fixed bands (general_rate_fixes off) called it video; the derived
+            // class (below the 49 Hz video floor, fixed-constant batch 2026-10-18) makes it film.
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; i.generalRates = false; }) == Reason::IneligibleCadence);
+            Assert::IsTrue(with([](auto& i) { i.sourceHz = 40.0; }) == Reason::Active);
             Assert::IsTrue(with([](auto& i) { i.sourceHz = 30.6; }) == Reason::IneligibleCadence); // 1.96: within 0.05 of 2
             Assert::IsFalse(DejudderPolicy::IsUnevenCadence(1.03));   // ~1: nothing to fill
             // Film under 2 refreshes per frame (owner 2026-10-14): 24p and 23.976p

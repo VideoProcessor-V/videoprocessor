@@ -96,6 +96,9 @@ namespace IntentInterpreter
         // Frames were lost before this one or the source marked a discontinuity:
         // no motion pair with the previous frame (not a cut by itself).
         bool discontinuity = false;
+        // general_rate_fixes (integration round 4): the film / video split the
+        // motion intent's shots use follows the renderer's switch.
+        bool generalRates = true;
         // For the shadow percentiles (BlackIntent::ShadowStatsFromCodes).
         BlackIntent::Transfer transfer = BlackIntent::Transfer::Unknown;
         double gamma = 2.4;              // BT.1886 for gamma sources
@@ -269,6 +272,7 @@ namespace IntentInterpreter
             classify.displayHz = context.displayHz;
             classify.pulldownLocked = context.pulldownLocked;
             classify.sourceClass = context.sourceClass;
+            classify.generalRates = context.generalRates;
             shot.filmLike = ContentIntent::FilmLike(classify, rateKnown);
             shot.rateKnown = rateKnown;
             shot.l11Present = context.l11Present;

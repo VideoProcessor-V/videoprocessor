@@ -1010,12 +1010,12 @@ void CBufferedLiveSourceVideoOutputPin::SetSceneTimingPhase(
 	int64_t refreshPeriodQpc,
 	int64_t qpcFrequency)
 {
-	// A valid refresh period is approximately 10-240 Hz. Reject stale or bogus
+	// A valid refresh period is within the display refresh bounds. Reject stale or bogus
 	// UI/DWM data rather than allowing a timing diagnostic to perturb delivery.
+	// Fixed-constant batch 2026-10-18 (B1): DisplayRefreshBounds (10-500 Hz), not a copied
+	// 10-240 Hz, so 360/480 Hz panels keep their phase.
 	const bool valid =
-		vblankQpc > 0 && qpcFrequency > 0 && refreshPeriodQpc > 0 &&
-		refreshPeriodQpc <= qpcFrequency / 10 &&
-		refreshPeriodQpc >= qpcFrequency / 240;
+		vblankQpc > 0 && DisplayRefreshBounds::AcceptsPeriod(refreshPeriodQpc, qpcFrequency);
 	if (!valid)
 	{
 		m_sceneLastVBlankQpc.store(0, std::memory_order_release);

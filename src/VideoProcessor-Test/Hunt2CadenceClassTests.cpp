@@ -481,6 +481,26 @@ namespace Hunt2CadenceClass
 			Assert::IsFalse(known, L"off: waits for the display rate");
 		}
 
+		// Integration round 4: the observer's film check follows general_rate_fixes
+		// (40 fps: film by the derived rule, video by the fixed bands).
+		TEST_METHOD(ObserverFilmCheckFollowsGeneralRateFixes)
+		{
+			FrameContext c;
+			c.contentHz = 40.0;
+			c.displayHz = 60.0;
+			c.sourceClass = InterpolationPolicy::SourceClass::Measured;
+			bool known = false;
+			Assert::IsTrue(FilmLike(c, known), L"on (default): 40 fps is below the video floor, film");
+			Assert::IsTrue(known);
+			c.generalRates = false;
+			Assert::IsFalse(FilmLike(c, known), L"off: the fixed bands, 40 fps is video");
+			c.contentHz = 24.0;
+			Assert::IsTrue(FilmLike(c, known), L"off: 24p stays film");
+			c.generalRates = true;
+			c.contentHz = 59.94;
+			Assert::IsFalse(FilmLike(c, known), L"on: 59.94 stays video");
+		}
+
 		// 02-dv L6: a profile selected by `content` that sets the classifier's inputs warns.
 		TEST_METHOD(ContentGatedProfilesWarnForClassifierInputs)
 		{
