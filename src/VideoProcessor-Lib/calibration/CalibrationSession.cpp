@@ -95,6 +95,8 @@ namespace Calibration
 		case SessionStep::Discarded: return "discarded";
 		case SessionStep::Cancelled: return "cancelled";
 		case SessionStep::Failed: return "failed";
+		case SessionStep::UserAction: return "user_action";
+		case SessionStep::Done: return "done";
 		}
 		return "unknown";
 	}
@@ -102,7 +104,7 @@ namespace Calibration
 	bool IsFinal(SessionStep step)
 	{
 		return step == SessionStep::Applied || step == SessionStep::Discarded || step == SessionStep::Cancelled ||
-			step == SessionStep::Failed;
+			step == SessionStep::Failed || step == SessionStep::Done;
 	}
 
 	PlanKind ToPlanKind(PlanChoice choice)
@@ -139,6 +141,7 @@ namespace Calibration
 	{
 		std::ostringstream out;
 		out << "step: " << ToString(s.step) << "\n"
+			<< "kind: " << s.kind << "\n"
 			<< "instruction: " << Escape(s.instruction) << "\n"
 			<< "message: " << Escape(s.message) << "\n"
 			<< "patch: " << s.patchIndex << "/" << s.patchCount << "\n"
@@ -177,9 +180,10 @@ namespace Calibration
 			const std::string value = line.substr(colon + 2);
 			if (key == "step")
 			{
-				for (int i = 0; i <= static_cast<int>(SessionStep::Failed); ++i)
+				for (int i = 0; i <= static_cast<int>(SessionStep::Done); ++i)
 					if (value == ToString(static_cast<SessionStep>(i))) { parsed.step = static_cast<SessionStep>(i); sawStep = true; }
 			}
+			else if (key == "kind") parsed.kind = value;
 			else if (key == "instruction") parsed.instruction = Unescape(value);
 			else if (key == "message") parsed.message = Unescape(value);
 			else if (key == "patch") sscanf_s(value.c_str(), "%d/%d", &parsed.patchIndex, &parsed.patchCount);

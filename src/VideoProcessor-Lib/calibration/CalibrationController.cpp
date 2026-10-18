@@ -1,7 +1,13 @@
 #include <pch.h>
 
 #include "CalibrationController.h"
+#include "AmbientCheck.h"
 #include "CalibrationSimulation.h"
+#include "HdrVerify.h"
+#include "TranscriptRecorder.h"
+
+#include "../AmbientConfig.h"
+#include "../led/SerialPort.h"
 
 #include "../ConfigFile.h"
 #include "../IRenderer.h"
@@ -45,7 +51,7 @@ namespace Calibration
 		{
 			return step == SessionStep::OpeningMeter || step == SessionStep::MeterCalibration ||
 				step == SessionStep::Placement || step == SessionStep::WarmUp || step == SessionStep::Measuring ||
-				step == SessionStep::Verifying;
+				step == SessionStep::Verifying || step == SessionStep::UserAction;
 		}
 	}
 
@@ -131,7 +137,7 @@ namespace Calibration
 	void CalibrationController::Shutdown()
 	{
 		stopping.store(true);
-		std::shared_ptr<CalibrationSession> current;
+		std::shared_ptr<ICalibrationRun> current;
 		std::shared_ptr<RendererPatternSink> currentSink;
 		{
 			std::lock_guard<std::mutex> guard(mutex);
@@ -156,7 +162,7 @@ namespace Calibration
 
 	void CalibrationController::RendererGoing()
 	{
-		std::shared_ptr<CalibrationSession> current;
+		std::shared_ptr<ICalibrationRun> current;
 		std::shared_ptr<RendererPatternSink> currentSink;
 		{
 			std::lock_guard<std::mutex> guard(mutex);
@@ -276,10 +282,35 @@ namespace Calibration
 				return nullptr;
 			}
 		}
+		if (settings.recordTranscripts)
+		{
+			// Phase 2: the real meter's session in the test-data script format.
+			const std::string folder = !settings.transcriptFolder.empty() ? settings.transcriptFolder :
+				(currentVpRoot.empty() ? std::string(".") : currentVpRoot) + "\\luts\\calibration\\transcripts";
+			ISessionClock* clock = hooks.clock;
+			const std::string meterName = options.instrumentName;
+			std::string version;
+			{
+				std::lock_guard<std::mutex> guard(probeMutex);
+				version = probe.usage.version;
+			}
+			auto counter = std::make_shared<int>(0);
+			return std::unique_ptr<IMeter>(new SpotreadMeter(options, [folder, clock, meterName, version, counter]()
+			{
+				const RunTimestamp stamp = clock->LocalTime();
+				std::string name = TranscriptFileName(meterName, stamp.Format());
+				if ((*counter)++ > 0) name.insert(name.size() - 4, "-" + std::to_string(*counter));
+				std::vector<std::string> header = {
+					"Recorded by VideoProcessor (record_transcripts) " + stamp.Format(),
+					"meter: " + meterName,
+					"ArgyllCMS spotread version: " + (version.empty() ? std::string("unknown (press Detect first)") : version) };
+				return std::unique_ptr<ITerminal>(new RecordingTerminal(CreateConPtyTerminal(), folder + "\\" + name, header));
+			}));
+		}
 		return std::unique_ptr<IMeter>(new SpotreadMeter(options, [] { return CreateConPtyTerminal(); }));
 	}
 
-	std::string CalibrationController::Start(std::string& error)
+	std::string CalibrationController::Start(const std::string& arguments, std::string& error)
 	{
 		{
 			std::lock_guard<std::mutex> guard(mutex);
@@ -290,6 +321,13 @@ namespace Calibration
 			}
 		}
 		JoinWorker();
+		std::string kind = "calibration";
+		ArgumentValue(arguments, "kind", kind);
+		if (kind != "calibration" && kind != "led" && kind != "ambient" && kind != "hdr_verify")
+		{
+			error = "Unknown calibration run '" + kind + "' (calibration, led, ambient or hdr_verify).";
+			return std::string();
+		}
 		ConfigFile config;
 		const std::string requested = hooks.configPath ? hooks.configPath() : std::string();
 		if (!config.Load(requested.empty() ? ConfigFile::DEFAULT_FILENAME : requested, ConfigFile::ReadPolicy::Fresh))
@@ -310,13 +348,75 @@ namespace Calibration
 		environment.activeColorSection = hooks.activeColorProfile ? hooks.activeColorProfile() : std::string();
 		environment.displayName = !settings.displayName.empty() ? settings.displayName :
 			hooks.displayName ? hooks.displayName() : std::string();
+		currentVpRoot = environment.vpRoot;
+
+		// Phase 2: the Dynamic Drive run needs the projector (and optionally the
+		// fast sensor) before anything starts.
+		std::unique_ptr<IProjectorControl> projector;
+		std::unique_ptr<ITimedLightSensor> fastSensor;
+		LedDrive::ProjectorConfig projectorConfig;
+		LedDrive::LedDriveConfig ledConfig;
+		if (kind == "led")
+		{
+			projectorConfig = LedDrive::ReadProjectorConfig(config);
+			ledConfig = LedDrive::ReadLedDriveConfig(config);
+			if (hooks.projectorFactory)
+				projector = hooks.projectorFactory(projectorConfig, error);
+			else if (ConfigFile::NormalizeName(projectorConfig.protocol) != "barco_ascii")
+				error = "The Dynamic Drive characterisation needs the projector's RS-232 connection: set [projector.default] "
+					"protocol to barco_ascii and its port (Config > Dynamic Drive).";
+			else
+				projector.reset(new DriverProjectorControl(projectorConfig, [] { return LedDrive::CreateWin32SerialPort(); }));
+			if (!projector) return std::string();
+			if (!settings.ledSensorPort.empty())
+			{
+				Ambient::Settings ambient;
+				std::string ambientError;
+				Ambient::Read(config, ambient, ambientError);
+				if (ConfigFile::NormalizeName(settings.ledSensorPort) == ConfigFile::NormalizeName(projectorConfig.port))
+				{
+					error = "led_sensor_port " + settings.ledSensorPort + " is the projector's RS-232 port; the fast light "
+						"sensor needs its own port.";
+					return std::string();
+				}
+				if (ambient.mode == Ambient::Mode::Sensor &&
+					ConfigFile::NormalizeName(settings.ledSensorPort) == ConfigFile::NormalizeName(ambient.port))
+				{
+					error = "led_sensor_port " + settings.ledSensorPort + " is the room light sensor's port, which VP holds "
+						"while [ambient] mode is sensor. Use another port, or set [ambient] mode to manual for this run.";
+					return std::string();
+				}
+				if (hooks.sensorFactory)
+					fastSensor = hooks.sensorFactory(settings, error);
+				else
+					fastSensor.reset(new SerialTimedLightSensor(settings.ledSensorPort, settings.ledSensorBaud,
+						[] { return LedDrive::CreateWin32SerialPort(); }, SerialTimedLightSensor::Clock()));
+				if (!fastSensor && !error.empty()) return std::string();
+			}
+		}
+
 		auto newSink = std::make_shared<RendererPatternSink>(hooks.renderer);
 		double floor = 0.0;
 		std::unique_ptr<IMeter> meter = CreateMeter(settings, *newSink, floor, error);
 		if (!meter) return std::string();
-		auto newSession = std::make_shared<CalibrationSession>(settings, environment, std::move(meter), floor, *newSink,
-			*hooks.clock);
+		std::shared_ptr<ICalibrationRun> newSession;
+		if (kind == "led")
+			newSession = std::make_shared<LedCharacterizationRun>(settings, environment, std::move(meter), floor, *newSink,
+				*hooks.clock, std::move(projector), std::move(fastSensor), projectorConfig, ledConfig);
+		else if (kind == "ambient")
+			newSession = std::make_shared<AmbientCheckRun>(settings, environment, std::move(meter), floor, *newSink,
+				*hooks.clock, hooks.roomLux);
+		else if (kind == "hdr_verify")
+			newSession = std::make_shared<HdrVerifyRun>(settings, environment, std::move(meter), floor, *newSink, *hooks.clock);
+		else
+			newSession = std::make_shared<CalibrationSession>(settings, environment, std::move(meter), floor, *newSink,
+				*hooks.clock);
 		newSession->Start();
+		if (newSession->Finished())
+		{
+			error = newSession->Status().message;
+			return std::string();
+		}
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			// The old session first: its destructor may still use its own sink.
@@ -324,7 +424,7 @@ namespace Calibration
 			sink = newSink;
 		}
 		stopping.store(false);
-		DebugLog::Log("Calibration: started (plan %s, meter %s, display kind %s)", ToString(settings.plan),
+		DebugLog::Log("Calibration: started %s (plan %s, meter %s, display kind %s)", kind.c_str(), ToString(settings.plan),
 			settings.meterModel.c_str(), ToString(settings.displayKind));
 		worker = std::thread([this, newSession, newSink]()
 		{
@@ -338,8 +438,14 @@ namespace Calibration
 					newSession->Cancel();
 				}
 			}
+			// VP closing mid-run: the run still finishes (LED restore, patterns off).
+			if (!newSession->Finished())
+			{
+				newSession->Cancel();
+				newSession->Step();
+			}
 			const SessionStatus final = newSession->Status();
-			DebugLog::Log("Calibration: finished (%s) %s", ToString(final.step), final.message.c_str());
+			DebugLog::Log("Calibration: finished %s (%s) %s", final.kind.c_str(), ToString(final.step), final.message.c_str());
 			if (final.step == SessionStep::Applied && hooks.applied) hooks.applied();
 		});
 		return StatusText();
@@ -347,7 +453,6 @@ namespace Calibration
 
 	std::string CalibrationController::Handle(const std::string& command, const std::string& arguments)
 	{
-		(void)arguments;
 		std::string error;
 		if (command == "status") return StatusText();
 		if (command == "detect")
@@ -362,15 +467,16 @@ namespace Calibration
 		}
 		if (command == "start")
 		{
-			const std::string text = Start(error);
+			const std::string text = Start(arguments, error);
 			return error.empty() ? text : "error: " + Escape(error) + "\n" + StatusText();
 		}
-		std::shared_ptr<CalibrationSession> current;
+		std::shared_ptr<ICalibrationRun> current;
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			current = session;
 		}
 		if (!current) return "error: No calibration is running.\n" + StatusText();
+		current->SetArguments(arguments);
 		if (command == "continue") current->Continue();
 		else if (command == "skip") current->Skip();
 		else if (command == "cancel") current->Cancel();

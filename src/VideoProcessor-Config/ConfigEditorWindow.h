@@ -118,7 +118,7 @@ private:
     // Automatic calibration: the [calibration] settings and the wizard (VP runs
     // the session; this page sends RPC commands and shows its status).
     QWidget* createCalibrationPage();
-    void runCalibrationCommand(const QString& command);
+    void runCalibrationCommand(const QString& command, const QString& arguments = QString());
     void applyCalibrationStatus(const QString& text, const QString& error, const QString& command);
     QWidget* createProfilePage(const QString& title, const QString& description,
         const QString& sectionPrefix);

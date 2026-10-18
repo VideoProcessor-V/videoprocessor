@@ -7106,6 +7106,12 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<uint64_t> calibrationReadbackGeneration{ 0 };
 	std::atomic<uint32_t> calibrationReadbackCenter{ 0 };   // R10G10B10A2 words
 	std::atomic<uint32_t> calibrationReadbackCorner{ 0 };
+	// Phase 2 (HDR verify): VP's tone curve for the last video frame and the
+	// metadata it sends, rebuilt only when the colour mapping changes.
+	uint64_t calibrationToneSignature = 0;
+	mutable std::mutex calibrationToneMutex;
+	LedDrive::ToneCurveSamples calibrationTone;
+	pl_hdr_metadata calibrationSentHdr{};
 
 	// Tests (PatternReadback): the filled backbuffer's centre and corner pixels.
 	void ReadBackCalibrationPattern(ID3D11Texture2D* backbuffer, uint64_t generation)
@@ -21271,6 +21277,24 @@ struct LibplaceboVideoRenderer::Impl
                 DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
             }
         }
+        // Automatic calibration phase 2 (HDR verify): VP's own tone curve for this
+        // frame's colour mapping, rebuilt only when that changes (a hash per frame).
+        if (target.color.transfer == PL_COLOR_TRC_PQ)
+        {
+            const pl_color_map_params* toneColorMap = renderParams.color_map_params ?
+                renderParams.color_map_params : &pl_color_map_default_params;
+            const uint64_t toneSignature =
+                LedDrive::RawTransferSignature(renderImage.color, target.color, toneColorMap);
+            if (toneSignature != calibrationToneSignature)
+            {
+                calibrationToneSignature = toneSignature;
+                const LedDrive::ToneCurveSamples samples =
+                    LedDrive::SampleToneCurve(renderImage.color, target.color, toneColorMap);
+                std::lock_guard<std::mutex> toneGuard(calibrationToneMutex);
+                calibrationTone = samples;
+                calibrationSentHdr = target.color.hdr;
+            }
+        }
         // LED drive, gain in: measurement first (it must see the picture before
         // the gain), then the compensation hook with this frame's parameters.
         const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
@@ -25426,6 +25450,29 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
 	{
 		info.readbackCenter[c] = static_cast<uint16_t>((center >> (10 * c)) & 0x3FF);
 		info.readbackCorner[c] = static_cast<uint16_t>((corner >> (10 * c)) & 0x3FF);
+	}
+	if (info.transfer == Calibration::SignalTransfer::Pq)
+	{
+		std::lock_guard<std::mutex> toneGuard(m_impl->calibrationToneMutex);
+		const LedDrive::ToneCurveSamples& tone = m_impl->calibrationTone;
+		const uint32_t n = (std::min)(static_cast<uint32_t>((std::max)(tone.count, 0)),
+			Calibration::PatternOutputInfo::ToneCurveMax);
+		info.toneCurveCount = n;
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			info.toneCurveSourceNits[i] = tone.sourceNits[i];
+			info.toneCurveOutputNits[i] = tone.outputNits[i];
+		}
+		info.sourcePeakNits = tone.sourcePeak;
+		info.targetPeakNits = tone.targetPeak;
+		info.targetBlackNits = tone.targetBlack;
+		info.toneMappingActive = tone.active;
+		strncpy_s(info.toneFunction, sizeof(info.toneFunction), tone.function ? tone.function : "", _TRUNCATE);
+		const pl_hdr_metadata& sent = m_impl->calibrationSentHdr;
+		info.sentMaxLuma = sent.max_luma;
+		info.sentMinLuma = sent.min_luma;
+		info.sentMaxCll = sent.max_cll;
+		info.sentMaxFall = sent.max_fall;
 	}
 	return info.available;
 }

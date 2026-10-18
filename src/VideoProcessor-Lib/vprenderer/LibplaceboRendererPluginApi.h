@@ -26,7 +26,9 @@
 // 35: the required build-ID export below (hunt 2, 2026-10-17). Raised so an
 // older executable, which does not check build IDs, refuses this DLL too.
 // 36: GetCalibrationOutput / SetCalibrationPattern (automatic calibration,
-// 2026-10-17).
+// 2026-10-17). Calibration phase 2 (feat/calibration-phase2) extends
+// PatternOutputInfo (VP's tone curve and the HDR metadata sent) without
+// raising the number on its branch: renumber at merge.
 //
 // The counter is maintained by hand and can collide across branches (the MPC
 // branch also plans 35) or miss a layout change. The build ID is the

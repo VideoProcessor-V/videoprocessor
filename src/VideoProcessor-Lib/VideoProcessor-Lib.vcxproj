@@ -218,6 +218,11 @@
     <ClInclude Include="calibration\CalibrationSession.h" />
     <ClInclude Include="calibration\CalibrationSimulation.h" />
     <ClInclude Include="calibration\CalibrationController.h" />
+    <ClInclude Include="calibration\CalibrationRunBase.h" />
+    <ClInclude Include="calibration\LedRun.h" />
+    <ClInclude Include="calibration\AmbientCheck.h" />
+    <ClInclude Include="calibration\HdrVerify.h" />
+    <ClInclude Include="calibration\TranscriptRecorder.h" />
     <ClInclude Include="led\LedController.h" />
     <ClInclude Include="led\LedMeasurement.h" />
     <ClInclude Include="led\LedDriveModule.h" />
@@ -458,6 +463,11 @@
     <ClCompile Include="calibration\CalibrationSession.cpp" />
     <ClCompile Include="calibration\CalibrationSimulation.cpp" />
     <ClCompile Include="calibration\CalibrationController.cpp" />
+    <ClCompile Include="calibration\CalibrationRunBase.cpp" />
+    <ClCompile Include="calibration\LedRun.cpp" />
+    <ClCompile Include="calibration\AmbientCheck.cpp" />
+    <ClCompile Include="calibration\HdrVerify.cpp" />
+    <ClCompile Include="calibration\TranscriptRecorder.cpp" />
     <ClCompile Include="led\LedController.cpp" />
     <ClCompile Include="led\LedMeasurement.cpp" />
     <ClCompile Include="led\LedDriveModule.cpp" />

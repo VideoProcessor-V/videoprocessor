@@ -66,6 +66,7 @@
     <ClCompile Include="CalibrationCoreTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="CalibrationRemainderTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="CalibrationMeterTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="CalibrationPhase2Tests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="SdrToneShapeWtwTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="BugHunt20261017CaptureTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="BugHunt2GuiTests.cpp"><Filter>Source Files</Filter></ClCompile>

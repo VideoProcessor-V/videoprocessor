@@ -99,6 +99,8 @@ namespace CalibrationTest
 	{
 	public:
 		ScriptedTerminal(const std::string& scriptName, double* now) : lines(ReadLines(TranscriptPath(scriptName))), clock(now) {}
+		// A script from its lines (a recorded transcript in a scratch folder).
+		ScriptedTerminal(const std::vector<std::string>& scriptLines, double* now) : lines(scriptLines), clock(now) {}
 
 		bool Start(const std::wstring& program, const std::wstring& commandLine, const std::wstring&,
 			std::string& error) override

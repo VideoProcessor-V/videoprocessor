@@ -8,8 +8,12 @@
 // Commands (first line), arguments as "key: value" lines:
 //   status    the session status (FormatStatus) plus the Argyll probe state
 //   detect    find ArgyllCMS and run `spotread -?` in the background
-//   start     a new session from the saved [calibration] settings
+//   start     a new run from the saved [calibration] settings; argument
+//             "kind: calibration | led | ambient | hdr_verify" (default
+//             calibration: the LUT session; phase 2: the Dynamic Drive
+//             characterisation, the ambient-light check, the HDR verify)
 //   continue | skip | cancel | apply | discard
+//             (continue may carry "lux: <n>" for the ambient check)
 //
 // Safety: the renderer going away (restart, new signal, exit) cancels the
 // run; Config silent for 60 s during a measuring step cancels it; the
@@ -17,6 +21,7 @@
 
 #include "CalibrationSession.h"
 #include "ArgyllInstall.h"
+#include "LedRun.h"
 
 #include <atomic>
 #include <functional>
@@ -64,6 +69,11 @@ namespace Calibration
 			std::function<std::unique_ptr<IMeter>(const CalibrationSettings&, IPatternSink&, double& floorNits,
 				std::string& error)> meterFactory;
 			ISessionClock* clock = nullptr;
+			// Phase 2. The room's lux from VP's light sensor (false when none).
+			std::function<bool(double& lux)> roomLux;
+			// Tests: replace the projector connection / the fast light sensor.
+			std::function<std::unique_ptr<IProjectorControl>(const LedDrive::ProjectorConfig&, std::string& error)> projectorFactory;
+			std::function<std::unique_ptr<ITimedLightSensor>(const CalibrationSettings&, std::string& error)> sensorFactory;
 		};
 
 		explicit CalibrationController(Hooks hooks);
@@ -79,7 +89,7 @@ namespace Calibration
 
 	private:
 		std::string StatusText();
-		std::string Start(std::string& error);
+		std::string Start(const std::string& arguments, std::string& error);
 		void JoinWorker();
 		void StartProbe(const std::string& argyllPath);
 		std::unique_ptr<IMeter> CreateMeter(const CalibrationSettings& settings, IPatternSink& sink, double& floorNits,
@@ -89,7 +99,8 @@ namespace Calibration
 		std::unique_ptr<ISessionClock> systemClock;
 		mutable std::mutex mutex;
 		std::shared_ptr<RendererPatternSink> sink;
-		std::shared_ptr<CalibrationSession> session;
+		std::shared_ptr<ICalibrationRun> session;
+		std::string currentVpRoot;   // the folder of the configuration the run started from
 		std::thread worker;
 		std::atomic_bool stopping{ false };
 		std::atomic_bool appliedNotified{ false };

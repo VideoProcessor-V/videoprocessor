@@ -2416,6 +2416,20 @@ CVideoProcessorDlg::CVideoProcessorDlg():
 			if (m_ambientConfigured.mode != Ambient::Mode::Off)
 				DebugLog::Log("Room lights: %s (%s)", m_ambientValue.c_str(), Ambient::Name(m_ambientConfigured.mode));
 		}
+		{
+			// Automatic calibration phase 2: a Dynamic Drive characterisation that
+			// was interrupted (VP crashed while it drove the projector) left a
+			// marker; restore full light, CNTR 50 and LDMM 0 before anything else
+			// opens the projector's port.
+			std::string configFolder = profileConfig.GetLoadedPath();
+			const size_t slash = configFolder.find_last_of("\\/");
+			configFolder = slash == std::string::npos ? std::string(".") : configFolder.substr(0, slash);
+			const std::string recovered = Calibration::RecoverInterruptedLedRun(configFolder,
+				LedDrive::ReadProjectorConfig(profileConfig), LedDrive::ReadLedDriveConfig(profileConfig).ledCeiling,
+				[] { return LedDrive::CreateWin32SerialPort(); });
+			if (!recovered.empty())
+				DebugLog::Log("%s", recovered.c_str());
+		}
 		std::string profileError;
 		if (!m_profileRuntime.Initialize(profileConfig,
 			GetUnifiedProfileSourceLookup(), profileError))
@@ -3318,6 +3332,12 @@ ConfigurationRpcProtocol::Frame CVideoProcessorDlg::HandleCalibrationRpc(
 		};
 		const HWND window = GetSafeHwnd();
 		hooks.applied = [window]() { ::PostMessageW(window, WM_MESSAGE_CALIBRATION_APPLIED, 0, 0); };
+		// Phase 2 (ambient-light check): the room light sensor's newest reading.
+		hooks.roomLux = [this](double& lux)
+		{
+			uint64_t sequence = 0;
+			return m_ambientSensor.Newest(sequence, lux);
+		};
 		m_calibration.reset(new Calibration::CalibrationController(hooks));
 	}
 	const std::string text = m_calibration->Handle(command, arguments);

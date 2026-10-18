@@ -4,8 +4,12 @@
 > ArgyllCMS meter under ConPTY, renderer patterns, the session, the RPC and the Config wizard.
 > User guide: docs/calibration/AUTO-CALIBRATION.md; report: docs/agent-reports/calibration-remainder.md.
 > **Change from this design:** patches bypass the sigma-delta and dither (exact whole codes,
-> owner 2026-10-17), rather than measuring through the sigma-delta. Not yet built: the LED
-> characterisation runs and the ambient-light check.
+> owner 2026-10-17), rather than measuring through the sigma-delta.
+> **Phase 2 (2026-10-18, `feat/calibration-phase2`):** the Dynamic Drive (LED) characterisation
+> run, the ambient-light check (ambient_screen_reflect), the HDR (PQ) verify with dE ITP and the
+> real-meter transcript recording; report docs/agent-reports/calibration-phase2.md. Latency and
+> settle need a fast light sensor (`led_sensor_port`); a colorimeter alone gives the flux table,
+> the CNTR curve and compensation_eotf. Custom-dim (LDMM 1) characterisation is not built.
 
 ## Summary
 
