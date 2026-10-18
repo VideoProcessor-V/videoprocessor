@@ -5306,8 +5306,9 @@ namespace VideoProcessorTest
 			// (Stage 12, crash state); 32: the DV L1 scene minimum in the luminance status;
 			// 33: StopLedDriveForShutdown (2026-10-17 integration); 34: GetContentIntentStatus
 			// and the DV L5/L6/L11 metadata fields (content intent, 2026-10-17); 35: the
-			// required build-ID export (hunt 2; the build ID is the mechanical pair check).
-			Assert::AreEqual(static_cast<uint32_t>(35),
+			// required build-ID export (hunt 2; the build ID is the mechanical pair check);
+			// 36: GetIntentStatus / SetAmbientLux (intent interpreter items 2-5).
+			Assert::AreEqual(static_cast<uint32_t>(36),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

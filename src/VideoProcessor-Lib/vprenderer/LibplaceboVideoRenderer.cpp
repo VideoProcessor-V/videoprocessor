@@ -5005,25 +5005,6 @@ private:
 	bool m_active = false;
 };
 
-// Intent interpreter (2026-10-17): LedDriveModule::SetIntentLimits(shadowMinimumShare,
-// ambientBlackNits) is the core agent's (led/*, contract signature). TEMPORARY BRIDGE
-// for the motion branch only: it calls the method when the module has it and does
-// nothing otherwise, so this branch compiles before and after the core branch lands.
-// The lead may replace it with the direct call after the merge.
-namespace IntentLedBridge
-{
-	template <typename Module>
-	auto SetIntentLimits(Module& module, double share, double ambientBlackNits, int)
-		-> decltype(module.SetIntentLimits(share, ambientBlackNits), bool())
-	{
-		module.SetIntentLimits(share, ambientBlackNits);
-		return true;
-	}
-	template <typename Module>
-	bool SetIntentLimits(Module&, double, double, long) { return false; }
-}
-
-
 struct LibplaceboVideoRenderer::Impl
 {
 	SceneDetector sceneDetector;
@@ -14164,11 +14145,11 @@ struct LibplaceboVideoRenderer::Impl
 			const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
 			if (led)
 			{
-				const bool sent = IntentLedBridge::SetIntentLimits(*led, limits.shadowMinimumShare,
-					limits.ambientBlackNits, 0);
-				DebugLog::Log("Intent interpreter: LED intent limits shadow minimum share %.3f, ambient black %.5f nits (%s)",
-					limits.shadowMinimumShare, limits.ambientBlackNits,
-					sent ? "sent" : "the LED module has no SetIntentLimits in this build");
+				// The display black at full drive lets the LED drive derive the
+				// ambient share floor (LedDriveModule::SetIntentLimits).
+				led->SetIntentLimits(limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
+				DebugLog::Log("Intent interpreter: LED intent limits shadow minimum share %.3f, ambient black %.5f nits, display black %.5f nits",
+					limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
 				ledIntentLimitsSent = limits;
 			}
 		}
