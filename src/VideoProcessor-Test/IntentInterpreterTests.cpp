@@ -13,6 +13,9 @@
 #include <ActivePictureEvidence.h>
 #include <AnalysisFrame.h>
 #include <QueueLookahead.h>
+#include <QueueConfiguration.h>
+#include <ConfigFile.h>
+#include <RendererProfileConfig.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <chrono>
 #include <cstdlib>
@@ -385,6 +388,48 @@ namespace Tests
             Assert::AreEqual(size_t(6), ResolveActivePictureLookahead(true, 6, false, 5, 3), L"explicit above the queue");
             Assert::AreEqual(size_t(3), ResolveActivePictureLookahead(true, 3, true, 1, 1), L"explicit on low latency");
             Assert::AreEqual(size_t(8), ResolveActivePictureLookahead(true, 12, false, 5, 32), L"explicit still capped at 8");
+        }
+        // The runtime matches the Config editor: a named queue profile without the key
+        // takes the default (first) queue section's explicit value, and that counts as
+        // configured; absent everywhere = auto (QueueLookahead).
+        TEST_METHOD(InheritedExplicitValueCountsAsConfigured)
+        {
+            auto resolveFor = [](const char* text, const char* name) {
+                char directory[MAX_PATH]{}, file[MAX_PATH]{};
+                GetTempPathA(MAX_PATH, directory);
+                GetTempFileNameA(directory, "vpq", 0, file);
+                { std::ofstream(file) << text; }
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file));
+                std::string error;
+                RendererProfileConfig::Model model;
+                Assert::IsTrue(RendererProfileConfig::Read(config, model, error), std::wstring(error.begin(), error.end()).c_str());
+                RendererProfileConfig::ResolvedQueue queue;
+                Assert::IsTrue(RendererProfileConfig::ResolveQueue(model, name, queue, error), std::wstring(error.begin(), error.end()).c_str());
+                // As VideoProcessorApp (default section) and the queue-profile apply do.
+                std::string raw;
+                const bool defaultHas = QueueConfiguration::TryGetDefaultString(config, "active_picture_lookahead_frames", raw);
+                const size_t defaultValue = defaultHas ? static_cast<size_t>(std::stoul(raw)) : 0;
+                DeleteFileA(file);
+                const size_t target = queue.hasTargetFrames ? queue.targetFrames : 4;
+                const size_t size = queue.hasQueueSize ? queue.queueSize : 32;
+                return QueueLookahead::ResolveActivePictureLookahead(queue.hasActivePictureLookaheadFrames || defaultHas,
+                    queue.hasActivePictureLookaheadFrames ? queue.activePictureLookaheadFrames : defaultValue,
+                    queue.lowLatencyPath, target, size);
+            };
+            const char* inherited = "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\nactive_picture_lookahead_frames: 3\n"
+                "[queue.Cinema]\nqueue_size: 32\ntarget_frames: 7\n[queue.Low_Latency]\nqueue_size: 1\ntarget_frames: 1\n";
+            Assert::AreEqual(size_t(3), resolveFor(inherited, "normal"), L"explicit");
+            Assert::AreEqual(size_t(3), resolveFor(inherited, "cinema"), L"inherited explicit value: configured, not auto 6");
+            Assert::AreEqual(size_t(3), resolveFor(inherited, "low_latency"), L"inherited explicit value wins on low latency too");
+            const char* absent = "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n"
+                "[queue.Cinema]\nqueue_size: 32\ntarget_frames: 7\n[queue.Low_Latency]\nqueue_size: 1\ntarget_frames: 1\n";
+            Assert::AreEqual(size_t(4), resolveFor(absent, "normal"), L"absent everywhere: auto");
+            Assert::AreEqual(size_t(6), resolveFor(absent, "cinema"), L"auto from its own target");
+            Assert::AreEqual(size_t(0), resolveFor(absent, "low_latency"), L"auto low latency: 0");
+            const char* explicitZero = "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\nactive_picture_lookahead_frames: 0\n"
+                "[queue.Cinema]\nqueue_size: 32\ntarget_frames: 7\n";
+            Assert::AreEqual(size_t(0), resolveFor(explicitZero, "cinema"), L"an inherited explicit 0 stays 0");
         }
     };
 
