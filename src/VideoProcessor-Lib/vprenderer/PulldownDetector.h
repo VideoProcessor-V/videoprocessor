@@ -125,6 +125,36 @@ namespace Pulldown
 		return true;
 	}
 
+	// Real-footage suite 2026-10-18 (cadence_class_fixes): a carrier's pulldown - any rate
+	// conversion by timestamps - spreads the new pictures as evenly as the cycle allows: picture
+	// j starts at slot floor(j x cycle / new), so the pattern is a rotation of that (maximally
+	// even) word. IsEvenPattern only bounds each hold to floor / ceil(cycle / new), which two
+	// cadences in one picture also meet: 24p film (2:3) with a 30p graphic (2:2) at 59.94 Hz
+	// repeat whole frames 7 times in 10 with holds 2,2,2,1,1,1,1 - a "41.958p film" lock that
+	// re-timed the film and the graphic to an even clock. 3:2, 2:2, 24p in 25/30/50, 25p in 60
+	// and every other real pulldown pass unchanged.
+	inline bool IsMaximallyEvenPattern(const std::string& pattern)
+	{
+		const int length = static_cast<int>(pattern.size());
+		int unique = 0;
+		for (char c : pattern)
+			unique += c == 'N' ? 1 : 0;
+		if (unique < 1 || unique >= length)
+			return false;
+		std::string word(static_cast<size_t>(length), 'R');
+		for (int j = 0; j < unique; ++j)
+			word[static_cast<size_t>(j * length / unique)] = 'N';
+		for (int rotation = 0; rotation < length; ++rotation)
+		{
+			bool match = true;
+			for (int k = 0; k < length && match; ++k)
+				match = pattern[static_cast<size_t>(k)] == word[static_cast<size_t>((k + rotation) % length)];
+			if (match)
+				return true;
+		}
+		return false;
+	}
+
 	struct Decision
 	{
 		bool drop = false;        // an expected repeat that is a repeat: not queued
@@ -162,6 +192,8 @@ namespace Pulldown
 		bool exclusiveFilmFloor = true;     // H1: the 15 fps floor is exclusive with a relative margin
 		bool trackingLatenessMax = true;    // M1: while the locked phase is contradicted, lateness = the most
 		bool retryNeedsFailure = true;      // L3: a retry unlocks only when the locked phase failed again
+		// Real-footage suite 2026-10-18 (cadence_class_fixes): a lock needs a maximally even pattern.
+		bool maximallyEvenPattern = true;
 	};
 
 	// "23.976p film in 59.940 Hz (2 new of 5)".
@@ -215,7 +247,8 @@ namespace Pulldown
 				settings.cadenceAwareClock != m_settings.cadenceAwareClock ||
 				settings.exclusiveFilmFloor != m_settings.exclusiveFilmFloor ||
 				settings.trackingLatenessMax != m_settings.trackingLatenessMax ||
-				settings.retryNeedsFailure != m_settings.retryNeedsFailure;
+				settings.retryNeedsFailure != m_settings.retryNeedsFailure ||
+				settings.maximallyEvenPattern != m_settings.maximallyEvenPattern;
 			m_settings = settings;
 			if (!differs)
 				return;
@@ -394,7 +427,8 @@ namespace Pulldown
 				for (char c : pattern)
 					unique += c == 'N' ? 1 : 0;
 				const double filmHz = signalHz * unique / cycle;
-				if (!IsEvenPattern(pattern) || !AboveFilmFloor(filmHz, m_settings.exclusiveFilmFloor))
+				if (!IsEvenPattern(pattern) || (m_settings.maximallyEvenPattern && !IsMaximallyEvenPattern(pattern)) ||
+					!AboveFilmFloor(filmHz, m_settings.exclusiveFilmFloor))
 					break;
 				m_locked = true;
 				m_pattern = pattern;
