@@ -777,6 +777,7 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 		const size_t frames = static_cast<size_t>(
 			std::stoul(activePictureLookaheadFrames));
 		videoProcessorApp.SetActivePictureLookaheadFrames(frames);
+		videoProcessorApp.SetActivePictureLookaheadConfigured(true);
 		DbgLog((LOG_TRACE, 1,
 			TEXT("VideoProcessor: Active-picture look-ahead configured: frames=%zu"),
 			frames));

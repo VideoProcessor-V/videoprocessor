@@ -10,6 +10,12 @@
 #include <IntentDescriptor.h>
 #include <IntentInterpreterObserver.h>
 #include <IntentInterpreterSupport.h>
+#include <ActivePictureEvidence.h>
+#include <AnalysisFrame.h>
+#include <QueueLookahead.h>
+#include <vprenderer/AlphaQueuePolicy.h>
+#include <chrono>
+#include <cstdlib>
 #include <Windows.h>
 #include <cmath>
 #include <cstdint>
@@ -17,6 +23,8 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <memory>
+#include <sstream>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -353,6 +361,234 @@ namespace Tests
                 "ambient_tau_down_s: 100\n", "intent_black: report\n", "intent_display: report\n" })
                 Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, key), std::wstring(key, key + std::strlen(key)).c_str());
             DeleteFileA(path.c_str());
+        }
+    };
+    // Owner 2026-10-17: active_picture_lookahead_frames follows the queue unless set.
+    TEST_CLASS(QueueLookaheadTests)
+    {
+    public:
+        TEST_METHOD(AbsentFollowsTheQueue)
+        {
+            using QueueLookahead::ResolveActivePictureLookahead;
+            Assert::AreEqual(size_t(4), ResolveActivePictureLookahead(false, 0, false, 5, 32), L"Normal: target 5 -> 4");
+            Assert::AreEqual(size_t(0), ResolveActivePictureLookahead(false, 0, true, 5, 32), L"Low latency: 0");
+            Assert::AreEqual(size_t(2), ResolveActivePictureLookahead(false, 0, false, 5, 3), L"short queue: queue_size - 1");
+            Assert::AreEqual(size_t(8), ResolveActivePictureLookahead(false, 0, false, 20, 32), L"cap 8");
+            Assert::AreEqual(size_t(0), ResolveActivePictureLookahead(false, 0, false, 1, 1), L"one frame: nothing ahead");
+            Assert::AreEqual(size_t(0), ResolveActivePictureLookahead(false, 0, false, 0, 0), L"nothing known");
+        }
+
+        TEST_METHOD(AnExplicitValueAlwaysWins)
+        {
+            using QueueLookahead::ResolveActivePictureLookahead;
+            Assert::AreEqual(size_t(0), ResolveActivePictureLookahead(true, 0, false, 5, 32), L"explicit 0");
+            Assert::AreEqual(size_t(6), ResolveActivePictureLookahead(true, 6, false, 5, 3), L"explicit above the queue");
+            Assert::AreEqual(size_t(3), ResolveActivePictureLookahead(true, 3, true, 1, 1), L"explicit on low latency");
+            Assert::AreEqual(size_t(8), ResolveActivePictureLookahead(true, 12, false, 5, 32), L"explicit still capped at 8");
+        }
+    };
+
+    // The queue-fed intent observer (owner 2026-10-17): the walk covers the queue ahead
+    // while an intent function is on, with active_picture_lookahead_frames 0 and no LED.
+    TEST_CLASS(QueueFedIntentWalkTests)
+    {
+        struct Entry { bool cadenceRepeat = false; uint64_t sequence = 0; };
+
+    public:
+        TEST_METHOD(WantedDepthIsTheQueueAheadAndAtLeastTheCurrentFrame)
+        {
+            Assert::AreEqual(size_t(1), IntentInterpreter::WantedWalkFrames(0));
+            Assert::AreEqual(size_t(1), IntentInterpreter::WantedWalkFrames(1), L"low latency: current frame");
+            Assert::AreEqual(size_t(4), IntentInterpreter::WantedWalkFrames(5));
+            Assert::AreEqual(IntentInterpreter::kMaxWalkFrames, IntentInterpreter::WantedWalkFrames(200), L"bounded");
+        }
+
+        TEST_METHOD(ObserverSeesTheQueueWithActivePictureLookaheadZero)
+        {
+            IntentInterpreter::Switches sw;
+            sw.motion = true;
+            IntentInterpreter::Observer observer;
+            observer.Configure(sw, IntentInterpreter::MotionSettings());
+            std::vector<Entry> queue;
+            for (uint64_t s = 1; s <= 6; ++s)
+                queue.push_back(Entry{ s == 4, s });   // one cadence repeat
+            // active_picture_lookahead_frames 0, no LED: only the intent depth.
+            const auto walk = AlphaQueuePolicy::SelectLookaheadWalk(queue, 0, (std::max)(size_t{0},
+                IntentInterpreter::WantedWalkFrames(queue.size())), 8);
+            Assert::AreEqual(size_t(0), walk.activePictureFrames, L"no active-picture work");
+            Assert::AreEqual(size_t(5), walk.window.indices.size(), L"the current frame and the queue ahead (repeat skipped)");
+            // The walk (observeStatisticsOnly) skips frames already observed before decoding.
+            uint64_t decoded = 0;
+            for (int round = 0; round < 3; ++round)
+                for (const size_t index : walk.window.indices)
+                {
+                    if (queue[index].sequence <= observer.LastObservedSequence())
+                        continue;
+                    ++decoded;
+                    observer.ObserveGrid(queue[index].sequence, TexturedGrid(1, 100, 400), Film());
+                }
+            Assert::AreEqual(uint64_t(5), decoded, L"one analysis per source frame");
+            Assert::AreEqual(uint64_t(5), observer.FramesObserved());
+            Assert::AreEqual(uint64_t(6), observer.LastObservedSequence());
+        }
+
+        TEST_METHOD(LowLatencyWalksTheCurrentFrameOnly)
+        {
+            IntentInterpreter::Switches sw;
+            sw.motion = true;
+            IntentInterpreter::MotionSettings ms;
+            ms.policy = MotionIntentPolicy::Visibility;
+            IntentInterpreter::Observer observer;
+            observer.Configure(sw, ms);
+            std::vector<Entry> queue = { Entry{ false, 1 } };
+            const auto walk = AlphaQueuePolicy::SelectLookaheadWalk(queue, 0, IntentInterpreter::WantedWalkFrames(queue.size()), 8);
+            Assert::AreEqual(size_t(1), walk.window.indices.size(), L"current frame only");
+            // Frame by frame as they arrive: a cut has no measured pair yet when shown, so
+            // it waits (the missed-cut rule); nothing changes mid-shot.
+            uint64_t s = 0;
+            for (int i = 0; i < 24; ++i)
+            {
+                observer.ObserveGrid(++s, TexturedGrid(1, 100, 400), Film());
+                Assert::AreEqual(1.0, observer.AppliedMotionScale(s), L"first shot: missed at its cut");
+            }
+            const uint64_t cut = s + 1;
+            observer.ObserveGrid(++s, TexturedGrid(2, 500, 900), Film());
+            Assert::AreEqual(1.0, observer.AppliedMotionScale(cut), L"the cut arrives alone: missed");
+            Assert::AreEqual(std::string("missed cut: waits for the next cut"), std::string(observer.MotionStatus().reason));
+        }
+    };
+
+    // CPU cost of the walk per frame (owner 2026-10-17). Off by default: set
+    // VP_TEST_BENCH=1 (and optionally VP_TEST_BENCH_OUT=<file>). Times the CPU work the
+    // walk does per source frame: PrepareAnalysisFrame (native v210), the active-picture
+    // evidence (ExtractActivePictureEvidence) and the intent observer's step (grid +
+    // measure), on synthetic 3840x2160 and 1920x1080 frames. No GPU.
+    TEST_CLASS(IntentWalkBenchmark)
+    {
+        static double Ms(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
+        {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        }
+
+    public:
+        TEST_METHOD(WalkCpuCostPerFrame)
+        {
+            char flag[8] = {};
+            if (GetEnvironmentVariableA("VP_TEST_BENCH", flag, sizeof(flag)) == 0 || flag[0] != '1')
+            {
+                Logger::WriteMessage("IntentWalkBenchmark skipped (set VP_TEST_BENCH=1)");
+                return;
+            }
+            std::ostringstream report;
+            const int sizes[2][2] = { { 3840, 2160 }, { 1920, 1080 } };
+            constexpr int kIterations = 12;
+            for (const auto& size : sizes)
+            {
+                const int w = size[0], h = size[1];
+                const int bars = h / 8;   // letterbox bars top and bottom
+                // ---- P010 (Y plane, then interleaved UV), textured with bars ----
+                auto p010 = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(w) * h * 3);
+                uint32_t state = 12345u;
+                uint16_t* y = reinterpret_cast<uint16_t*>(p010->data());
+                for (int row = 0; row < h; ++row)
+                    for (int x = 0; x < w; ++x)
+                    {
+                        state = state * 1664525u + 1013904223u;
+                        const int code = row < bars || row >= h - bars ? 0 : 100 + static_cast<int>((state >> 8) % 800u);
+                        y[static_cast<size_t>(row) * w + x] = static_cast<uint16_t>(code << 6);
+                    }
+                uint16_t* uv = y + static_cast<size_t>(w) * h;
+                for (size_t i = 0; i < static_cast<size_t>(w) * h / 2; ++i) uv[i] = static_cast<uint16_t>(512 << 6);
+                AnalysisLumaSource p010Source;
+                p010Source.data = p010->data();
+                p010Source.dataBytes = p010->size();
+                p010Source.width = w;
+                p010Source.height = h;
+                p010Source.rowBytes = static_cast<size_t>(w) * 2;
+                p010Source.chromaRowBytes = static_cast<size_t>(w) * 2;
+                p010Source.format = AnalysisLumaFormat::P010;
+                p010Source.colorspace = ColorSpace::REC_709;
+                p010Source.fullRangeYuv = false;
+                p010Source.backingOwner = p010;
+                // ---- native v210 ----
+                const size_t v210Row = static_cast<size_t>((w + 47) / 48) * 128;
+                auto v210 = std::make_shared<std::vector<uint8_t>>(v210Row * h);
+                uint32_t* words = reinterpret_cast<uint32_t*>(v210->data());
+                for (size_t i = 0; i < v210->size() / 4; ++i)
+                {
+                    state = state * 1664525u + 1013904223u;
+                    const uint32_t a = 64 + (state >> 8) % 876u, b = 64 + (state >> 12) % 876u, c = 512;
+                    words[i] = (i % 2 == 0) ? (c | (a << 10) | (c << 20)) : (b | (c << 10) | (a << 20));
+                }
+                AnalysisFrameInput input;
+                input.nativeData = v210->data();
+                input.nativeBytes = v210->size();
+                input.nativeRowBytes = v210Row;
+                input.nativeOwner = v210;
+                input.width = w;
+                input.height = h;
+                input.encoding = VideoFrameEncoding::V210;
+                input.colorspace = ColorSpace::REC_709;
+                input.sourceGeneration = 1;
+                input.profile = AnalysisSourceProfile::QueuedCapture;
+                double prepareMs = 0.0, v210EvidenceMs = 0.0, p010EvidenceMs = 0.0, observeP010Ms = 0.0, observeV210Ms = 0.0;
+                bool v210Valid = false;
+                IntentInterpreter::Switches sw;
+                sw.motion = true;
+                sw.black = true;
+                IntentInterpreter::Observer observer;
+                observer.Configure(sw, IntentInterpreter::MotionSettings());
+                observer.SetFrameContext(Film());
+                QueuedFrameStatistics::PictureRect rect;
+                rect.top = bars;
+                rect.right = w;
+                rect.bottom = h - bars;
+                uint64_t seq = 0;
+                for (int i = 0; i < kIterations; ++i)
+                {
+                    auto t0 = std::chrono::steady_clock::now();
+                    const PreparedAnalysisFrame prepared = PrepareAnalysisFrame(input);
+                    auto t1 = std::chrono::steady_clock::now();
+                    v210Valid = prepared.IsValid();
+                    if (v210Valid)
+                    {
+                        const ActivePictureEvidence e = ExtractActivePictureEvidence(prepared.source);
+                        (void)e;
+                    }
+                    auto t2 = std::chrono::steady_clock::now();
+                    const ActivePictureEvidence e2 = ExtractActivePictureEvidence(p010Source);
+                    (void)e2;
+                    auto t3 = std::chrono::steady_clock::now();
+                    observer.ObserveFrame(++seq, 0, p010Source, rect);
+                    auto t4 = std::chrono::steady_clock::now();
+                    if (v210Valid)
+                        observer.ObserveFrame(++seq, 0, prepared.source, rect);
+                    auto t5 = std::chrono::steady_clock::now();
+                    if (i == 0) continue;   // warm-up
+                    prepareMs += Ms(t0, t1);
+                    v210EvidenceMs += Ms(t1, t2);
+                    p010EvidenceMs += Ms(t2, t3);
+                    observeP010Ms += Ms(t3, t4);
+                    observeV210Ms += Ms(t4, t5);
+                }
+                const double n = kIterations - 1;
+                const double v210Frame = (prepareMs + v210EvidenceMs + observeV210Ms) / n;
+                const double p010Frame = (p010EvidenceMs + observeP010Ms) / n;
+                report << w << "x" << h << ": v210 prepare " << prepareMs / n << " ms, v210 evidence " << v210EvidenceMs / n
+                    << " ms, v210 intent step " << observeV210Ms / n << " ms (valid " << v210Valid << "); P010 evidence "
+                    << p010EvidenceMs / n << " ms, P010 intent step " << observeP010Ms / n << " ms. Per source frame: v210 "
+                    << v210Frame << " ms, P010 " << p010Frame << " ms. At 24 fps: intent-only walk (each frame once) v210 "
+                    << 24.0 * v210Frame << " ms/s, P010 " << 24.0 * p010Frame << " ms/s; uncached walk of current + 4 ahead "
+                    << "(5 analyses per render) v210 " << 120.0 * v210Frame << " ms/s, P010 " << 120.0 * p010Frame << " ms/s\n";
+                Assert::IsTrue(observer.FramesObserved() > 0);
+            }
+            Logger::WriteMessage(report.str().c_str());
+            char out[MAX_PATH] = {};
+            if (GetEnvironmentVariableA("VP_TEST_BENCH_OUT", out, sizeof(out)) > 0)
+            {
+                std::ofstream file(out, std::ios::trunc);
+                file << report.str();
+            }
         }
     };
 }

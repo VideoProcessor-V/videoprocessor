@@ -25738,7 +25738,8 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     size_t queuedFutureFrames,
     uint64_t lookaheadPolicyGeneration,
     uint64_t subtitleContinuityGeneration,
-    size_t activePictureFrames)
+    size_t activePictureFrames,
+    size_t statisticsFutureFrames)
 {
     const uint8_t availableLookahead = static_cast<uint8_t>((std::min)(
         queuedFutureFrames, size_t{UINT8_MAX}));
@@ -25746,7 +25747,8 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     const std::shared_ptr<QueuedFrameStatistics::IObserver> statisticsObserver =
         std::atomic_load(&m_impl->queuedFrameObserver);
     if (statisticsObserver)
-        statisticsObserver->BeginWalk(walkFrames.empty() ? 0 : walkFrames.size() - 1);
+        statisticsObserver->BeginWalk((std::min)(walkFrames.empty() ? size_t{0} : walkFrames.size() - 1,
+            statisticsFutureFrames));
     // Intent interpreter items 2-5 (2026-10-17): the shot observer sees each new
     // queued frame once (every walked frame, the LED's deeper ones included),
     // with the measured rates and the frame's DV L11 / L5; idle while every
@@ -25802,10 +25804,18 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     {
         if (!statisticsObserver && !intentWanted)
             return;
+        // Queue-fed intent observer (2026-10-17): a frame the observer has seen in an
+        // earlier walk is analysed again only when the LED still wants it (one analysis
+        // per source frame for the intent alone).
+        const uint64_t intentSeen = intentWanted ? intentInterpreter->LastObservedSequence() : 0;
         for (size_t index = first; index < walkFrames.size(); ++index)
         {
             const QueuedFrame& queued = walkFrames[index];
             if (!queued.state || !queued.state->displayMode || !queued.frame.GetData())
+                continue;
+            const bool statisticsWant = statisticsObserver && index <= statisticsFutureFrames;
+            const bool intentWant = intentWanted && !queued.cadenceRepeat && queued.sourceSequence > intentSeen;
+            if (!statisticsWant && !intentWant)
                 continue;
             const VideoState& state = *queued.state;
             const auto prepared = Impl::PrepareFrameAnalysis(queued.frame, state, queued.converted,
@@ -25835,9 +25845,10 @@ void LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
                 picture.right = bounds.right;
                 picture.bottom = bounds.bottom;
             }
-            if (statisticsObserver)
+            if (statisticsWant)
                 statisticsObserver->ObserveFrame(queued.sourceSequence, index, prepared.source, picture);
-            feedIntent(queued, state, prepared.source, picture, index);
+            if (intentWant)
+                feedIntent(queued, state, prepared.source, picture, index);
         }
     };
     if (activeCount == 0)
@@ -27263,6 +27274,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (led)
 				ledWantedLookahead = led->WantedLookaheadFrames();
 		}
+		// Queue-fed intent observer (2026-10-17, owner): while any intent function is on,
+		// the walk covers the queue ahead (IntentInterpreter::WantedWalkFrames; the current
+		// frame alone with nothing queued); depth only, no scheduling change.
+		const bool intentWalkActive = m_impl && m_impl->intentInterpreter->Active();
+		size_t intentWantedLookahead = 0;
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> previewLock(m_queueMutex);
@@ -27270,8 +27286,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (m_stopRequested) break;
 			previewWaitMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - waitStarted).count();
+            intentWantedLookahead = intentWalkActive ? IntentInterpreter::WantedWalkFrames(m_frameQueue.size()) : 0;
             const auto walk = AlphaQueuePolicy::SelectLookaheadWalk(
-                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire), ledWantedLookahead,
+                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire),
+                (std::max)(ledWantedLookahead, intentWantedLookahead),
                 ActivePictureDecisionTimeline::MAX_LOOKAHEAD_FRAMES);
             const auto& window = walk.window;
             activePictureWalkFrames = walk.activePictureFrames;
@@ -27327,7 +27345,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		const size_t activePictureWalkNow =
 			m_activePictureLookaheadFrames.load(std::memory_order_acquire) > 0 ? activePictureWalkFrames : 0;
 		if (!activePicturePreviewFrames.empty() &&
-			(activePictureWalkNow > 0 || ledWantedLookahead > 0))
+			(activePictureWalkNow > 0 || ledWantedLookahead > 0 || intentWantedLookahead > 0))
 		{
 			const auto lookaheadStarted = SteadyClock::now();
 			try
@@ -27337,7 +27355,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					activePictureAvailableLookahead,
 					activePictureLookaheadPolicyGeneration,
 					activePictureContinuityGeneration,
-					activePictureWalkNow);
+					activePictureWalkNow,
+					ledWantedLookahead);
 			}
 			catch (const std::exception& e)
 			{

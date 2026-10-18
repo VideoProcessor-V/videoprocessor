@@ -46,6 +46,19 @@ namespace IntentInterpreter
     constexpr double kShadowIntervalSeconds = 0.5;
     // Shot records kept ahead of the display (look-ahead depth is small).
     constexpr size_t kMaxShots = 32;
+    // Queue-fed observer (owner 2026-10-17): the most frames ahead the render loop
+    // walks for the intent observer (the queue ahead, bounded; documented, not a key).
+    constexpr size_t kMaxWalkFrames = 32;
+
+    // The walk depth the intent observer wants with `queued` frames in the queue
+    // (current included): the whole queue ahead, bounded by kMaxWalkFrames, and at
+    // least 1 so the walk runs with the current frame alone (low latency: a cut is
+    // then decided as it arrives, under the missed-cut rule).
+    inline size_t WantedWalkFrames(size_t queued)
+    {
+        const size_t ahead = queued > 1 ? queued - 1 : 0;
+        return (std::max)(size_t{1}, (std::min)(ahead, kMaxWalkFrames));
+    }
 
     struct Switches
     {
@@ -133,6 +146,14 @@ namespace IntentInterpreter
             }
             if (shadowsTurnedOn)
                 for (Shot& shot : m_shots) shot.shadowSeconds = -1.0;
+        }
+
+        // The newest source frame observed (0 = none yet): the walk skips frames at or
+        // below it before decoding them.
+        uint64_t LastObservedSequence() const
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            return m_haveLast ? m_lastSequence : 0;
         }
 
         bool Active() const

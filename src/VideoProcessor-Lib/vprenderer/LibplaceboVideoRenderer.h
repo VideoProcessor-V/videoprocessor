@@ -260,7 +260,10 @@ private:
 		size_t queuedFutureFrames,
 		uint64_t lookaheadPolicyGeneration,
 		uint64_t continuityGeneration,
-		size_t activePictureFrames);   // the leading frames for the active picture; the rest feed the LED only
+		size_t activePictureFrames,    // the leading frames for the active picture; the rest feed the LED only
+		// The statistics observer's (LED's) own depth: frames beyond it are walked for the
+		// intent observer only (2026-10-17, queue-fed intent observer).
+		size_t statisticsFutureFrames = static_cast<size_t>(-1));
 	void ClearQueue(const char* reason = "queue clear");
 	void BeginQueueGeneration(const char* reason, bool clearStopRequest = false);
 	void ClearQueueLocked(const char* reason);

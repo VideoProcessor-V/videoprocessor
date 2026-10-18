@@ -41,6 +41,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <CrashState.h>
 #include <AmbientConfig.h>
 #include <IntentInterpreterSupport.h>
+#include <QueueLookahead.h>
 #include <led/LedDriveConfig.h>
 #include <led/SerialPort.h>
 #include <vector>
@@ -10478,7 +10479,7 @@ void CVideoProcessorDlg::RenderStart()
 				videoProcessorApp.GetQueueSteadyReserveFrames(),
 				videoProcessorApp.HasQueueSteadyReserveFrames());
 			m_videoRenderer->SetActivePictureLookaheadFrames(
-				videoProcessorApp.GetActivePictureLookaheadFrames());
+				StartupActivePictureLookaheadFrames());
 			ApplyRequestedShaderSelection();
 			m_rendererTransitionWindow.KeepOnTop();
 			// Match the DirectShow startup contract. Alpha owns its detector and
@@ -10657,7 +10658,7 @@ void CVideoProcessorDlg::RenderStart()
 			videoProcessorApp.GetPresentationLeadFrames(),
 			videoProcessorApp.HasPresentationLeadFrames());
 		m_videoRenderer->SetActivePictureLookaheadFrames(
-			videoProcessorApp.GetActivePictureLookaheadFrames());
+			StartupActivePictureLookaheadFrames());
 		ApplyRequestedShaderSelection();
 		m_rendererTransitionWindow.KeepOnTop();
 		m_videoRenderer->SetSceneAwareTimingCorrection(m_sceneAwareTimingCorrection);
@@ -10776,7 +10777,7 @@ void CVideoProcessorDlg::RenderStart()
 				videoProcessorApp.GetPresentationLeadFrames(),
 				videoProcessorApp.HasPresentationLeadFrames());
 			m_videoRenderer->SetActivePictureLookaheadFrames(
-				videoProcessorApp.GetActivePictureLookaheadFrames());
+				StartupActivePictureLookaheadFrames());
 			m_rendererTransitionWindow.KeepOnTop();
 			m_videoRenderer->SetSceneAwareTimingCorrection(m_sceneAwareTimingCorrection);
 			m_videoRenderer->SetSceneCorrectionUpstreamSample(
@@ -13976,10 +13977,23 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				desiredStartupPreroll, desiredTargetFrames, true);
 			queuePolicyChanged = true;
 		}
-		const size_t desiredLookahead =
+		// Owner 2026-10-17: absent from the profile and the default section, the
+		// look-ahead follows the queue (QueueLookahead.h); an explicit value wins.
+		const bool lookaheadConfigured = snapshot->queue.hasActivePictureLookaheadFrames ||
+			videoProcessorApp.IsActivePictureLookaheadConfigured();
+		const size_t desiredLookahead = QueueLookahead::ResolveActivePictureLookahead(lookaheadConfigured,
 			snapshot->queue.hasActivePictureLookaheadFrames ?
 			snapshot->queue.activePictureLookaheadFrames :
-			m_profileBaseActivePictureLookaheadFrames;
+			m_profileBaseActivePictureLookaheadFrames,
+			snapshot->queue.lowLatencyPath, desiredTargetFrames, desiredQueueSize);
+		if (videoProcessorApp.GetActivePictureLookaheadFrames() != desiredLookahead ||
+			lookaheadConfigured != m_activePictureLookaheadLoggedConfigured)
+		{
+			DebugLog::Log("Queue: active_picture_lookahead_frames=%zu (%s; profile=%s target=%zu queue_size=%zu low_latency=%d)",
+				desiredLookahead, lookaheadConfigured ? "configured" : "auto", snapshot->queue.profile.c_str(),
+				desiredTargetFrames, desiredQueueSize, snapshot->queue.lowLatencyPath ? 1 : 0);
+			m_activePictureLookaheadLoggedConfigured = lookaheadConfigured;
+		}
 		if (videoProcessorApp.GetActivePictureLookaheadFrames() != desiredLookahead)
 		{
 			videoProcessorApp.SetActivePictureLookaheadFrames(desiredLookahead);
@@ -14374,6 +14388,25 @@ void CVideoProcessorDlg::UpdateContentIntent(const char* reason)
 		DisplayName(status.source), reason);
 	m_contentValue = value;
 	RefreshUnifiedProfilesForRuleContext(reason);
+}
+
+// Owner 2026-10-17: the active-picture look-ahead for a renderer start. After a
+// queue profile was applied, the value it resolved; otherwise, absent from the
+// default queue section, it follows the queue (QueueLookahead.h; the
+// low-latency path is a queue-profile property, so normal here).
+size_t CVideoProcessorDlg::StartupActivePictureLookaheadFrames()
+{
+	if (m_profileQueueDefaultsCaptured || videoProcessorApp.IsActivePictureLookaheadConfigured())
+		return videoProcessorApp.GetActivePictureLookaheadFrames();
+	const size_t frames = QueueLookahead::ResolveActivePictureLookahead(false, 0, false,
+		videoProcessorApp.GetQueueSteadyReserveFrames(), GetRendererVideoFrameQueueSizeMax());
+	if (frames != videoProcessorApp.GetActivePictureLookaheadFrames())
+	{
+		DebugLog::Log("Queue: active_picture_lookahead_frames=%zu (auto; no queue profile, target=%zu queue_size=%zu)",
+			frames, videoProcessorApp.GetQueueSteadyReserveFrames(), GetRendererVideoFrameQueueSizeMax());
+		videoProcessorApp.SetActivePictureLookaheadFrames(frames);
+	}
+	return frames;
 }
 
 // Intent interpreter items 2-5 (2026-10-17): once a second, the room reading for
