@@ -738,6 +738,12 @@ namespace RendererProfileConfig
 			if (key == "deband_vp_grain_guard") return IsChoice(value, { "on", "veto", "off" });
 			// 15-intent C14: libplacebo's automatic deband off while VP's grain-guarded debander runs.
 			if (key == "deband_vp_exclusive") return IsChoice(value, { "on", "off" });
+			// Detail pulse stabilisation and texture restore (docs/VP-detail-restore.md, 2026-10-17):
+			// the caps are the module headers' ranges.
+			if (key == "detail_pulse_stabilise") return IsChoice(value, { "on", "off" });
+			if (key == "detail_pulse_cap") return IsNumberInRange(value, 1.0, 1.5);
+			if (key == "texture_restore") return IsChoice(value, { "off", "statistical" });
+			if (key == "texture_restore_cap") return IsNumberInRange(value, 1.0, 2.0);
 			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
 			// Content recognition (intent interpreter item 1, 2026-10-17): default off;
 			// a new class is taken after this many seconds, at a cut.

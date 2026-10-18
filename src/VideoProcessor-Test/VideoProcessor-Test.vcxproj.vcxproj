@@ -297,6 +297,14 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -326,6 +334,9 @@
     <ClCompile Include="InterpolationPolicyTests.cpp" />
     <ClCompile Include="RenderAheadPolicyTests.cpp" />
     <ClCompile Include="GrainPreservationTests.cpp" />
+    <ClCompile Include="DetailPulseTests.cpp" />
+    <ClCompile Include="TextureRestoreTests.cpp" />
+    <ClCompile Include="DetailRestoreConfigTests.cpp" />
     <ClCompile Include="KernelInverseTests.cpp" />
     <ClCompile Include="WindowResizeLayoutTests.cpp" />
     <ClCompile Include="AlphaPresentationTelemetryTests.cpp" />

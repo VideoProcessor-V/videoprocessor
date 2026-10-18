@@ -1366,6 +1366,7 @@ namespace Tests
 				"deband_grain: on\n", "residual_stabilise_grain_guard: off\n", "dv_tunnel_fixes: off\n",
 				"deband_vp_grain_guard: veto\n", "deband_vp_exclusive: off\n",
 				"queue_timing_fixes: off\n", "cadence_class_fixes: off\n", "motion_history_fixes: off\n",   // hunt 2 group 5
+				"detail_pulse_stabilise: off\n", "detail_pulse_cap: 1.2\n", "texture_restore: statistical\n", "texture_restore_cap: 1.8\n",
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
@@ -1500,6 +1501,94 @@ namespace Tests
 				Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
 			}
 			DeleteFileA(path.c_str());
+		}
+
+		// docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise / detail_pulse_cap /
+		// texture_restore / texture_restore_cap are parsed, dumped and change the fingerprint
+		// (applied live); the defaults are on / 1.35 / off / 1.5; out-of-range caps keep the default.
+		TEST_METHOD(DetailRestoreKeysReachTheSettings)
+		{
+			const HarnessScope harnessScope;
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Export = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
+			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
+			const std::string path = folder + "vp-detail-restore-keys-test.cfg";
+			auto call = [&](Export function, const std::string& text) {
+				{
+					std::ofstream config(path, std::ios::trunc | std::ios::binary);
+					config << text;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				Assert::IsTrue(length > 0, L"the export ran");
+				return std::string(buffer.data());
+			};
+			auto line = [](const std::string& dump, const std::string& key) {
+				const size_t at = dump.find("\n" + key + "=");
+				if (at == std::string::npos) return std::string();
+				const size_t start = at + key.size() + 2;
+				return dump.substr(start, dump.find('\n', start) - start);
+			};
+			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
+			const std::string baseDump = call(describe, head);
+			const std::string baseFingerprint = call(fingerprintOf, head);
+			const std::pair<const char*, const char*> defaults[] = {
+				{ "detail_pulse_stabilise", "on" }, { "detail_pulse_cap", "1.35" }, { "texture_restore", "off" }, { "texture_restore_cap", "1.5" } };
+			for (const auto& entry : defaults)
+				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
+					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
+			const std::pair<const char*, const char*> flips[] = {
+				{ "detail_pulse_stabilise", "off" }, { "detail_pulse_cap", "1.2" }, { "texture_restore", "statistical" }, { "texture_restore_cap", "1.8" } };
+			for (const auto& flip : flips)
+			{
+				const std::string text = head + flip.first + ": " + flip.second + "\n";
+				const std::wstring name(flip.first, flip.first + strlen(flip.first));
+				Assert::AreEqual(std::string(flip.second), line(call(describe, text), flip.first), (L"parsed: " + name).c_str());
+				Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
+			}
+			// Out of range / not a choice: the default is kept.
+			Assert::AreEqual(std::string("1.35"), line(call(describe, head + "detail_pulse_cap: 1.9\n"), "detail_pulse_cap"), L"cap above the range");
+			Assert::AreEqual(std::string("1.5"), line(call(describe, head + "texture_restore_cap: 0.5\n"), "texture_restore_cap"), L"cap below the range");
+			Assert::AreEqual(std::string("off"), line(call(describe, head + "texture_restore: neural\n"), "texture_restore"), L"not a choice");
+			DeleteFileA(path.c_str());
+		}
+
+		// For the lead's lead (never run by the plumbing agent): the source-resolution monitor reads the
+		// original frame, so its reading is the same with both stages on and off. The same still 4K
+		// picture, source_resolution auto (the monitor reads it every run), once with both stages off and
+		// once with both on: the status line (effective size, bitrate quality, bits) is identical, the
+		// stages ran in the second (logged) and not in the first, and neither failed.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailRestoreGpuSourceMonitorUnchanged)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DetailRestoreGpuSourceMonitorUnchanged)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("DetailRestoreGpuSourceMonitorUnchanged")) return;
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			FramePlan plan;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			const std::string common = "source_resolution: auto\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			const RunResult off = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
+				"detail_pulse_stabilise: off\ntexture_restore: off\n" + common, false, &plan);
+			const RunResult on = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
+				"detail_pulse_stabilise: on\ntexture_restore: statistical\n" + common, false, &plan);
+			Logger::WriteMessage(("off: " + off.sourceStatus + "\non:  " + on.sourceStatus + "\n").c_str());
+			Assert::IsTrue(off.presented && on.presented, L"frames presented");
+			Assert::IsFalse(off.Logged("Detail pulse stabilise: on") || off.Logged("Texture restore: statistical"), (L"off: the stages are not called\n" + off.Tail()).c_str());
+			Assert::IsTrue(on.Logged("Detail pulse stabilise: on") && on.Logged("Texture restore: statistical"), (L"on: the stages are set up\n" + on.Tail()).c_str());
+			Assert::IsFalse(on.Logged("Detail pulse stabilise failed") || on.Logged("Texture restore failed"), (L"on: no failure\n" + on.Tail()).c_str());
+			Assert::IsTrue(off.sourceStatus.find("Source resolution:") == 0, L"the monitor read the source (off)");
+			Assert::AreEqual(off.sourceStatus, on.sourceStatus, L"the source-resolution monitor's reading is identical with the stages on");
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(NativeAndNewSettingsOffArePixelIdentical)
