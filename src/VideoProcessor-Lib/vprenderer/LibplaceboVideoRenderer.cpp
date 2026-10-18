@@ -98,6 +98,7 @@
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include <DolbyVisionTunnelPresentation.h>
 #include <video_frame_formatter/CUYVYtoP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CUYVYtoP210VideoFrameFormatter.h>
 #include <video_frame_formatter/CV210toP010VideoFrameFormatter.h>
@@ -15921,12 +15922,10 @@ struct LibplaceboVideoRenderer::Impl
 		// r210 only (Bug hunt 2026-10-17, kept): libplacebo's native upload has
 		// no plane format for R10b / R10l ([R10 G10 B10 00], AlphaNativeRgbIngress.h),
 		// so their SDR fallback would show nothing; they stay black until DV is trusted.
-		const bool tunnelRgbFallback = state.dolbyVisionTunnel &&
-			state.videoFrameEncoding == VideoFrameEncoding::R210 &&
-			convertedPayload && !convertedPayload->dolby.valid &&
-			convertedPayload->dolby.allowSdrFallback &&
-			(convertedPayload->dolby.rgbBitAlignment == 1 ||
-				convertedPayload->dolby.rgbBitAlignment == 2);
+		// The rule lives in DolbyVisionTunnelPresentation.h (2026-10-17, unchanged;
+		// shared with the DV loopback harness).
+		const bool tunnelRgbFallback = state.dolbyVisionTunnel && convertedPayload &&
+			DolbyVisionTunnelSdrPassthrough(state.videoFrameEncoding, convertedPayload->dolby);
 		const bool tunnelActive =
 			state.dolbyVisionTunnel && !tunnelRgbFallback;
 		// Hunt 2 (08 #3): the SDR picture shown on the DV-tunnel wrapper is SDR

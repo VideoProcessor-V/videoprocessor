@@ -306,6 +306,7 @@ public:
 	void OnCommandAutoSet();
 	void OnCommandToggleStatsOverlay();
 	void OnCommandCaptureRenderedOutput();
+	void OnCommandRawCaptureToggle();
 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
 

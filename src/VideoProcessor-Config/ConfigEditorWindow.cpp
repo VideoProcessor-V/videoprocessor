@@ -1100,7 +1100,8 @@ const FixedShortcutField kCaptureShortcutFields[] = {
     { "DeckLink input 3", "capture_3", "Ctrl+3" },
     { "DeckLink input 4", "capture_4", "Ctrl+4" },
     { "Video conversion off", "video_conversion_off", "V" },
-    { "V210 to P010 conversion", "video_conversion_p010", "Shift+V" }
+    { "V210 to P010 conversion", "video_conversion_p010", "Shift+V" },
+    { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture_toggle", "Ctrl+Alt+D" }
 };
 
 struct ShortcutIssue

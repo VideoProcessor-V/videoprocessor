@@ -84,6 +84,10 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <MainConfigSchema.h>
 #include <led/LedShutdownRestore.h>
 #include <UnifiedProfileRuntime.h>
+#include <DolbyVisionTunnelGate.h>
+#include <HdrInferenceSignalBuilder.h>
+#include <LldvStaticMetadata.h>
+#include <RawCaptureRecorder.h>
 
 
 #include "VideoProcessorDlg.h"
@@ -623,6 +627,8 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
 		ConfigurationLiveApply::ViewToggleDefaultModifiers },
 	{ "toggle_stats_overlay",  ID_COMMAND_TOGGLE_STATS_OVERLAY,   'I',       FCONTROL },
 	{ "capture_rendered_output", ID_COMMAND_CAPTURE_RENDERED_OUTPUT, 'S',     FCONTROL | FALT },
+	// Raw capture recording (RawCaptureRecorder.h; needs VP_RAW_CAPTURE_PATH).
+	{ "raw_capture_toggle",    ID_COMMAND_RAW_CAPTURE_TOGGLE,     'D',       FCONTROL | FALT },
 	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES,            0,         0 },
 	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS,              0,         0 },
 	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES,           'I',       FCONTROL | FALT },
@@ -2218,6 +2224,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_COMMAND(ID_COMMAND_VC_P010, &CVideoProcessorDlg::SetVideoConversionP010)
 	ON_COMMAND(ID_COMMAND_TOGGLE_STATS_OVERLAY, &CVideoProcessorDlg::OnCommandToggleStatsOverlay)
 	ON_COMMAND(ID_COMMAND_CAPTURE_RENDERED_OUTPUT, &CVideoProcessorDlg::OnCommandCaptureRenderedOutput)
+	ON_COMMAND(ID_COMMAND_RAW_CAPTURE_TOGGLE, &CVideoProcessorDlg::OnCommandRawCaptureToggle)
 	ON_COMMAND(ID_COMMAND_DISPLAY_RULE_AUTO, &CVideoProcessorDlg::OnCommandDisplayRuleAuto)
 	ON_COMMAND(ID_COMMAND_CONFIG_EDITOR, &CVideoProcessorDlg::OnCommandConfigEditor)
 	ON_COMMAND(ID_COMMAND_TOGGLE_NO_UI, &CVideoProcessorDlg::OnCommandToggleNoUi)
@@ -8613,6 +8620,15 @@ void CVideoProcessorDlg::OnCommandCaptureRenderedOutput()
 		status, m_rendererGeneration.load(std::memory_order_acquire));
 }
 
+// Raw capture recording on / off (RawCaptureRecorder.h): the status line is
+// logged by the recorder and shown like the rendered-output capture status.
+void CVideoProcessorDlg::OnCommandRawCaptureToggle()
+{
+	const std::string status = RawCaptureRecorder::Instance().Toggle();
+	OnRendererDetailString(CString(status.c_str()),
+		m_rendererGeneration.load(std::memory_order_acquire));
+}
+
 void CVideoProcessorDlg::OnCommandCaptureAnalysisDiagnostics(bool includeFrames)
 {
 	auto& trace = AnalysisDiagnosticTrace::Instance();
@@ -8782,6 +8798,17 @@ void CVideoProcessorDlg::OnCaptureDeviceCardStateChange(CaptureDeviceCardStateCo
 
 	assert(cardState);
 
+	// Raw capture recording (opt-in): what the card reports, for the sidecar.
+	if (RawCaptureRecorder::Instance().Enabled())
+	{
+		std::vector<std::string> other;
+		for (const CString& line : cardState->other)
+			other.emplace_back(CStringA(line).GetString());
+		RawCaptureRecorder::Instance().OnCardState(std::string(),
+			CStringA(ToString(cardState->inputEncoding)).GetString(),
+			CStringA(ToString(cardState->inputBitDepth)).GetString(), other);
+	}
+
 	PostMessage(
 		WM_MESSAGE_CAPTURE_DEVICE_CARD_STATE_CHANGE,
 		(WPARAM)cardState.Detach(),
@@ -8813,6 +8840,14 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoStateChange(
 				m_captureVideoStateSourceEpoch),
 			m_captureVideoStateSource);
 		return;
+	}
+
+	// Raw capture recording (opt-in, RawCaptureRecorder.h).
+	if (RawCaptureRecorder::Instance().Enabled())
+	{
+		RawCaptureRecorder::Instance().OnCardState(CStringA(source->GetName()).GetString(),
+			std::string("(unchanged)"), std::string("(unchanged)"), {});
+		RawCaptureRecorder::Instance().OnVideoState(*videoState);
 	}
 
 	const CaptureVideoStateChangeClass changeClass =
@@ -8935,6 +8970,9 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 			m_captureIngressLastRejectedFrameCounter = 0;
 		}
 	}
+	// Raw capture recording (opt-in, RawCaptureRecorder.h): the frame as the
+	// card delivered it, outside the state-notification lock.
+	RawCaptureRecorder::Instance().OnFrame(videoFrame);
 	if (!ingressLease)
 	{
 		// Keep diagnostics sparse on this timing-sensitive callback: log the
@@ -12493,68 +12531,23 @@ bool CVideoProcessorDlg::HdrModesPermitInference()
 
 HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
 {
-	HdrInferenceSignal signal;
-	signal.enabled = m_useNewLldvHeuristic;
-	const VideoState* state = m_captureDeviceVideoState;
-	signal.valid = state && state->valid;
-	if (!signal.valid)
-		return signal;
-	signal.colorspace = state->colorspace;
-	signal.eotf = state->eotf;
-	signal.hdrInfoFrame = state->hdrData != nullptr;
-	switch (m_captureInputBitDepth)
-	{
-	case BitDepth::BITDEPTH_8BIT: signal.bitDepth = 8; break;
-	case BitDepth::BITDEPTH_10BIT: signal.bitDepth = 10; break;
-	case BitDepth::BITDEPTH_12BIT: signal.bitDepth = 12; break;
-	default:
-		// The card did not report the wire depth: use the capture encoding.
-		switch (state->videoFrameEncoding)
-		{
-		case VideoFrameEncoding::UYVY:
-		case VideoFrameEncoding::HDYC:
-		case VideoFrameEncoding::ARGB_8BIT:
-		case VideoFrameEncoding::BGRA_8BIT:
-			signal.bitDepth = 8; break;
-		case VideoFrameEncoding::V210:
-		case VideoFrameEncoding::R210:
-		case VideoFrameEncoding::R10b:
-		case VideoFrameEncoding::R10l:
-			signal.bitDepth = 10; break;
-		case VideoFrameEncoding::R12B:
-		case VideoFrameEncoding::R12L:
-			signal.bitDepth = 12; break;
-		default:
-			signal.bitDepth = 0; break;
-		}
-		break;
-	}
-	// The DV tunnel (same predicate as BuildPushVideoState) and a profile that
-	// forces it own the signal; the inference never applies to them.
+	// HdrInferenceSignalBuilder.h (2026-10-17: moved unchanged so the
+	// incoming-HDR-mode tests build the same signal).
 	const bool enableDolbyVisionTunnel = m_profileDolbyVisionTunnelOverride >= 0
 		? m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel;
 	const int rendererIndex = m_rendererCombo.GetCurSel();
 	const RendererId* rendererId = rendererIndex >= 0 ?
 		reinterpret_cast<const RendererId*>(
 			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
-	signal.dolbyVisionTunnel = m_profileDolbyVisionTunnelOverride == 1 ||
-		(enableDolbyVisionTunnel && rendererId &&
-			rendererId->backend == RendererBackend::LIBPLACEBO &&
-			state->videoFrameEncoding == VideoFrameEncoding::R210 &&
-			state->eotf == EOTF::SDR);
-	signal.explicitSettingsForbid = !HdrModesPermitInference();
-	const DisplayModeSharedPtr& mode = state->displayMode;
-	uint64_t key = static_cast<uint64_t>(state->videoFrameEncoding) & 0xff;
-	if (mode)
-	{
-		key = (key << 14) ^ (mode->FrameWidth() & 0x3fff);
-		key = (key << 14) ^ (mode->FrameHeight() & 0x3fff);
-		key = (key << 20) ^ (static_cast<uint64_t>(
-			std::llround(mode->RefreshRateHz() * 1000.0)) & 0xfffff);
-		key = (key << 1) ^ (mode->IsInterlaced() ? 1 : 0);
-	}
-	signal.signalKey = key;
-	return signal;
+	DolbyVisionTunnelGateInput tunnelGate;
+	tunnelGate.tunnelSwitch = enableDolbyVisionTunnel;
+	tunnelGate.profileForcesTunnel = m_profileDolbyVisionTunnelOverride == 1;
+	tunnelGate.libplaceboRenderer = rendererId &&
+		rendererId->backend == RendererBackend::LIBPLACEBO;
+	const VideoState* state = m_captureDeviceVideoState;
+	return BuildHdrInferenceSignalFromState(state, m_useNewLldvHeuristic,
+		m_captureInputBitDepth, tunnelGate,
+		state && state->valid ? !HdrModesPermitInference() : false);
 }
 
 HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
@@ -12905,6 +12898,8 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		" newlldv=" + (m_useNewLldvHeuristic ? "1" : "0") +
 		" hdr_modes_permit=" + (HdrModesPermitInference() ? "1" : "0") +
 		" inference=" + ToString(m_hdrInference.State());
+	RawCaptureRecorder::Instance().SetProcessingNote(lldvDecisionDiagnostic +
+		" dolby_vision_tunnel_switch=" + (enableDolbyVisionTunnel ? "1" : "0"));
 	if (lldvDecisionDiagnostic != m_lastLldvDecisionDiagnostic)
 	{
 		DebugLog::Log("%s", lldvDecisionDiagnostic.c_str());
@@ -13033,31 +13028,21 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 				const double profileMasteringMax =
 					activeLldv && activeLldv->hasMasteringMaxLuminance ?
 						activeLldv->masteringMaxLuminance : -1.0;
-				auto resolveLldvValue = [](double commandLineValue,
-					double profileValue, double fallback, bool strictlyPositive)
-				{
-					const bool hasCommandLineValue = strictlyPositive ?
-						commandLineValue > 0.0 : commandLineValue >= 0.0;
-					if (hasCommandLineValue)
-						return commandLineValue;
-					const bool hasProfileValue = strictlyPositive ?
-						profileValue > 0.0 : profileValue >= 0.0;
-					return hasProfileValue ? profileValue : fallback;
-				};
-				videoState->hdrData->maxCll = resolveLldvValue(
-					m_lldvMaxCllOverride, profileMaxCll,
-					lldvDefaults.maxCll, false);
-				videoState->hdrData->maxFall = resolveLldvValue(
-					m_lldvMaxFallOverride, profileMaxFall,
-					lldvDefaults.maxFall, false);
+				// LldvStaticMetadata.h (2026-10-17: moved unchanged so the
+				// incoming-HDR-mode tests check the same resolution).
+				LldvCommandLineMetadata lldvCommandLine;
+				lldvCommandLine.maxCll = m_lldvMaxCllOverride;
+				lldvCommandLine.maxFall = m_lldvMaxFallOverride;
+				lldvCommandLine.masteringMinLuminance = m_lldvMasteringMinLuminanceOverride;
+				lldvCommandLine.masteringMaxLuminance = m_lldvMasteringMaxLuminanceOverride;
+				const RendererProfileConfig::LldvMetadata lldvEffective =
+					ResolveLldvStaticMetadata(activeLldv, m_useNewLldvHeuristic, lldvCommandLine);
+				videoState->hdrData->maxCll = lldvEffective.maxCll;
+				videoState->hdrData->maxFall = lldvEffective.maxFall;
 				videoState->hdrData->masteringDisplayMinLuminance =
-					resolveLldvValue(m_lldvMasteringMinLuminanceOverride,
-						profileMasteringMin,
-						lldvDefaults.masteringMinLuminance, false);
+					lldvEffective.masteringMinLuminance;
 				videoState->hdrData->masteringDisplayMaxLuminance =
-					resolveLldvValue(m_lldvMasteringMaxLuminanceOverride,
-						profileMasteringMax,
-						lldvDefaults.masteringMaxLuminance, true);
+					lldvEffective.masteringMaxLuminance;
 				DebugLog::Log(
 					"LLDV effective metadata: profile=%s command_line=%g/%g/%g/%g profile_values=%g/%g/%g/%g defaults=%g/%g/%g/%g effective=%g/%g/%g/%g",
 					!activeLldv || activeLldv->profile.empty() ? "(none)" :
@@ -13099,11 +13084,16 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	const RendererId* rendererId = rendererIndex >= 0 ?
 		reinterpret_cast<const RendererId*>(
 			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
-	videoState->dolbyVisionTunnel = enableDolbyVisionTunnel &&
-		rendererId && rendererId->backend == RendererBackend::LIBPLACEBO &&
-		m_captureDeviceVideoState->valid &&
-		m_captureDeviceVideoState->videoFrameEncoding == VideoFrameEncoding::R210 &&
-		m_captureDeviceVideoState->eotf == EOTF::SDR;
+	// DolbyVisionTunnelGate.h (2026-10-17: the same predicate, shared with the
+	// DV loopback harness and the HDR-mode tests).
+	DolbyVisionTunnelGateInput tunnelGate;
+	tunnelGate.tunnelSwitch = enableDolbyVisionTunnel;
+	tunnelGate.libplaceboRenderer = rendererId &&
+		rendererId->backend == RendererBackend::LIBPLACEBO;
+	tunnelGate.captureStateValid = m_captureDeviceVideoState->valid;
+	tunnelGate.encoding = m_captureDeviceVideoState->videoFrameEncoding;
+	tunnelGate.eotf = m_captureDeviceVideoState->eotf;
+	videoState->dolbyVisionTunnel = DolbyVisionTunnelGateOpen(tunnelGate);
 	if (videoState->dolbyVisionTunnel)
 	{
 		videoState->eotf = EOTF::PQ;

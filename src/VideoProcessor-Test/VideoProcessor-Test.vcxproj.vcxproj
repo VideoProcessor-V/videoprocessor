@@ -186,6 +186,10 @@
     <ClCompile Include="SceneDescriptorTests.cpp" />
     <ClCompile Include="ContentIntentTests.cpp" />
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp" />
+    <ClCompile Include="DvTunnelLoopbackTests.cpp" />
+    <ClCompile Include="DvIncomingHdrModeTests.cpp" />
+    <ClCompile Include="DvRawCorpusTests.cpp" />
+    <ClCompile Include="DvRpuAnchorTests.cpp" />
     <ClCompile Include="MovingPictureTransitionTests.cpp" />
     <ClCompile Include="SubtitleBoxDetectorTests.cpp" />
     <ClCompile Include="SubtitleOpaqueCardRefinementTests.cpp" />
