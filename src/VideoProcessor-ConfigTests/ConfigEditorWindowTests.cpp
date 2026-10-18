@@ -1640,7 +1640,7 @@ void testContentAdaptiveGroup()
     // Intent interpreter item 1 (owner decision 2026-10-17): one group "Experimental content-adaptive
     // settings", a checkbox per function, default off; content recognition's checkbox writes
     // intent_content on/off and its hold time sits beneath it, greyed while it is off; the other
-    // four functions are greyed placeholders.
+    // four functions are tested in testIntentRemainderGroup.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
     QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
     file.write("[vprenderer]\nquality: high\n[vprenderer.Sports]\nintent_content_hold_seconds: 8\n");
@@ -1652,13 +1652,6 @@ void testContentAdaptiveGroup()
     auto* check = requireControl<QCheckBox>(window, "config.vprenderer.intent_content.check");
     auto* mode = requireControl<QComboBox>(window, "config.vprenderer.intent_content");
     auto* hold = requireControl<QLineEdit>(window, "config.vprenderer.intent_content_hold_seconds");
-    for (const char* planned : { "config.vprenderer.intent_motion_planned", "config.vprenderer.intent_ambient_planned",
-        "config.vprenderer.intent_black_planned", "config.vprenderer.intent_display_planned" })
-    {
-        auto* placeholder = requireControl<QCheckBox>(window, planned);
-        require(!placeholder->isEnabled() && !placeholder->isChecked(), "a planned function is not a greyed placeholder");
-    }
-    requireControl<QWidget>(window, "config.vprenderer.intent_motion_policy_planned");
     profiles->setCurrentRow(0);
     QCoreApplication::processEvents();
     require(!check->isChecked(), "content recognition is not off by default");
@@ -1683,6 +1676,119 @@ void testContentAdaptiveGroup()
     check->click();
     QCoreApplication::processEvents();
     require(mode->currentData().toString() == "off" && !hold->isEnabled(), "unticking did not turn it off");
+}
+
+void testIntentRemainderGroup()
+{
+    // Intent remainder (2026-10-17): motion intent (with its five exclusive policies), ambient
+    // adaptation, black protection and the display mapping readout, each a checkbox over a hidden
+    // drop-down, sub-settings greyed while off, tooltips naming their key.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer]\nquality: high\n# preserve me\n[vprenderer.Sports]\nintent_motion_policy: ease_slow\nambient_tau_up_s: 20\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
+    auto tip = [](const QWidget* w, const char* key) {
+        require(!w->toolTip().isEmpty() && w->toolTip().contains(QString::fromLatin1(key)),
+            (QByteArray("tooltip missing or without its key: ") + key).constData());
+    };
+    auto* motion = requireControl<QCheckBox>(window, "config.vprenderer.intent_motion.check");
+    auto* ambient = requireControl<QCheckBox>(window, "config.vprenderer.ambient_adapt.check");
+    auto* black = requireControl<QCheckBox>(window, "config.vprenderer.intent_black.check");
+    auto* display = requireControl<QCheckBox>(window, "config.vprenderer.intent_display.check");
+    tip(motion, "intent_motion"); tip(ambient, "ambient_adapt"); tip(black, "intent_black"); tip(display, "intent_display");
+    require(motion->toolTip().contains("never raises dejudder_strength") && motion->toolTip().contains("experimental", Qt::CaseInsensitive) &&
+        motion->toolTip().contains("default off"), "motion tooltip lacks the rules");
+    require(ambient->toolTip().contains("[ambient]") && ambient->toolTip().contains("lux_lit") &&
+        ambient->toolTip().contains("not dark theatres"), "ambient tooltip lacks the sensor / room statement");
+    require(black->toolTip().contains("code 0") && black->toolTip().contains("BTB"), "black tooltip lacks the code 0 / BTB rule");
+    const char* policies[] = { "display", "ease_fast", "ease_slow", "visibility", "metadata" };
+    QList<QRadioButton*> radios;
+    for (const char* p : policies)
+    {
+        auto* r = requireControl<QRadioButton>(window, QString("config.vprenderer.intent_motion_policy.") + p);
+        tip(r, "intent_motion_policy");
+        radios.push_back(r);
+    }
+    require(radios[0]->text().startsWith("Display only") && radios[1]->text().startsWith("Ease on fast pans") &&
+        radios[2]->text().startsWith("Keep fast pans, ease on slow deliberate shots") &&
+        radios[3]->text().startsWith("Visibility-weighted") && radios[4]->text().startsWith("Metadata only"),
+        "policy button labels are wrong");
+    const char* numbers[] = { "intent_motion_min", "intent_motion_min_shot_s", "ambient_adapt_strength",
+        "ambient_screen_reflect", "ambient_max_black_nits", "ambient_tau_up_s", "ambient_tau_down_s" };
+    auto* radioBox = requireControl<QWidget>(window, "config.vprenderer.intent_motion_policy.buttons");
+    auto* blackBox = requireControl<QWidget>(window, "config.vprenderer.intent_black.buttons");
+    auto* reportRadio = requireControl<QRadioButton>(window, "config.vprenderer.intent_black.report");
+    auto* protectRadio = requireControl<QRadioButton>(window, "config.vprenderer.intent_black.led_protect");
+    tip(reportRadio, "intent_black"); tip(protectRadio, "intent_black");
+    auto* blackCombo = requireControl<QComboBox>(window, "config.vprenderer.intent_black");
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    require(!motion->isChecked() && !ambient->isChecked() && !black->isChecked() && !display->isChecked(),
+        "an experimental function is not off by default");
+    for (const char* key : numbers)
+    {
+        auto* edit = requireControl<QLineEdit>(window, QString("config.vprenderer.") + key);
+        tip(edit, key);
+        require(!edit->isEnabled(), (QByteArray("not greyed while off: ") + key).constData());
+    }
+    require(!radioBox->isEnabled() && !blackBox->isEnabled(), "the policy / black choice is not greyed while off");
+    motion->click(); ambient->click(); black->click(); display->click();
+    QCoreApplication::processEvents();
+    for (const char* key : numbers)
+        require(requireControl<QLineEdit>(window, QString("config.vprenderer.") + key)->isEnabled(),
+            (QByteArray("not enabled when on: ") + key).constData());
+    require(radioBox->isEnabled() && blackBox->isEnabled(), "the policy / black choice stays greyed when on");
+    require(blackCombo->currentData().toString() == "report" && reportRadio->isChecked(),
+        "ticking black protection did not select report");
+    require(radios[0]->isChecked(), "the default policy is not Display only");
+    // Exclusive: choosing one unchecks the others.
+    radios[3]->click();
+    QCoreApplication::processEvents();
+    for (int i = 0; i < 5; ++i) require(radios[i]->isChecked() == (i == 3), "policy buttons are not exclusive");
+    protectRadio->click();
+    requireControl<QLineEdit>(window, "config.vprenderer.intent_motion_min")->setText("0.4");
+    requireControl<QLineEdit>(window, "config.vprenderer.ambient_tau_down_s")->setText("120");
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    QByteArray saved = readBytes(path);
+    const QByteArray status = requireControl<QLabel>(window, "configurationStatus")->text().toUtf8();
+    for (const char* line : { "intent_motion: on", "intent_motion_policy: visibility", "intent_motion_min: 0.4",
+        "ambient_adapt: on", "ambient_tau_down_s: 120", "intent_black: led_protect", "intent_display: report",
+        "# preserve me" })
+        require(saved.contains(line), (QByteArray("not saved / not preserved [") + status + "]: " + line + " | " + QByteArray(saved.left(600)).replace('\n', ' ')).constData());
+    // Only the edited keys were added; untouched ones were not written.
+    for (const char* absent : { "intent_motion_min_shot_s", "ambient_adapt_strength", "ambient_screen_reflect",
+        "ambient_max_black_nits" })
+        require(!saved.contains(absent), (QByteArray("unedited key written: ") + absent).constData());
+    // Black off / report / led_protect through the controls.
+    black->click();
+    QCoreApplication::processEvents();
+    require(blackCombo->currentData().toString() == "off" && !blackBox->isEnabled(),
+        "unticking black protection did not turn it off");
+    black->click();
+    reportRadio->click();
+    QCoreApplication::processEvents();
+    require(blackCombo->currentData().toString() == "report", "report not selected");
+    // A named profile: its own policy and tau, the default profile's switches inherited.
+    profiles->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    require(radios[2]->isChecked(), "the named profile policy is not shown");
+    require(requireControl<QLineEdit>(window, "config.vprenderer.ambient_tau_up_s")->text() == "20",
+        "the profile tau is not shown");
+    require(motion->isChecked(), "the inherited motion switch is not shown in the named profile");
+    radios[4]->click();
+    QCoreApplication::processEvents();
+    profiles->setCurrentRow(0);
+    QCoreApplication::processEvents();
+    requireControl<QPushButton>(window, "applyConfiguration")->click();
+    QCoreApplication::processEvents();
+    saved = readBytes(path);
+    require(saved.contains("intent_motion_policy: metadata") && saved.contains("ambient_tau_up_s: 20") &&
+        saved.contains("# preserve me"),
+        (QByteArray("profile round trip failed: ") + saved.left(800)).constData());
 }
 
 void testInheritedButtonsAndReorganisedSections()
@@ -9781,6 +9887,7 @@ int main(int argc, char** argv)
     failures += run("temporal dither buttons", testTemporalDitherButtons);
     failures += run("interpolation buttons", testInterpolationButtons);
     failures += run("content-adaptive group", testContentAdaptiveGroup);
+    failures += run("intent remainder group", testIntentRemainderGroup);
     failures += run("queue target by frames or time", testQueueTargetByFramesOrTime);
     failures += run("queue use mode and low-latency path", testQueueUseModeAndLowLatencyPath);
     failures += run("inherited buttons and reorganised sections", testInheritedButtonsAndReorganisedSections);

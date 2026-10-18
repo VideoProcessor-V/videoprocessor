@@ -8718,7 +8718,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 
         // Intent interpreter (docs/VP-intent-interpreter-design.md; owner decision 2026-10-17): one
         // group with a checkbox per function, each off by default, its sub-settings beneath it. Item 1
-        // (content recognition) is built; the other four are placeholders until they are.
+        // (content recognition) and items 2-5 (motion, ambient, black, display) are all built.
         form = addCollapsibleSection(QStringLiteral("contentAdaptive"), QStringLiteral("Experimental content-adaptive settings"),
             QStringLiteral("Each function is off by default. Rule-based (no AI): VP measures the picture and reads the "
                 "Dolby Vision metadata, and only steers settings you already set, within your limits."), false);
@@ -8780,46 +8780,198 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             connect(contentRefresh, &QAction::triggered, this, [syncContent]() { syncContent(); });
             syncContent();
 
-            // Placeholders for items 2-5 (not built yet): shown greyed so the group's layout is fixed.
-            struct Planned { const char* id; QString text; QString tip; };
-            const Planned planned[] = {
-                { "intent_motion_planned", QStringLiteral("Motion intent (planned)"), QStringLiteral(
-                    "Not built yet. Per-shot motion analysis; the policies below choose what it may do with the "
-                    "de-judder strength (never above yours, only at cuts).") },
-                { "intent_ambient_planned", QStringLiteral("Ambient adaptation (planned)"), QStringLiteral(
-                    "Not built yet. Living rooms: render to the black the room light leaves visible.") },
-                { "intent_black_planned", QStringLiteral("Black protection (planned)"), QStringLiteral(
-                    "Not built yet. Reports shadow steps lost below the display black; later protects them.") },
-                { "intent_display_planned", QStringLiteral("Display mapping readout (planned)"), QStringLiteral(
-                    "Not built yet. Shows the scene-to-display compression and the trim in use.") } };
-            for (const Planned& p : planned)
-            {
-                auto* check = new QCheckBox(p.text);
-                check->setObjectName(controlName(sectionPrefix, QString::fromLatin1(p.id)));
-                check->setToolTip(p.tip);
-                check->setEnabled(false);
-                form->addRow(QString(), check);
-                if (QString::fromLatin1(p.id) == QStringLiteral("intent_motion_planned"))
-                {
-                    auto* policies = new QWidget;
-                    policies->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_motion_policy_planned")));
-                    auto* policyLayout = new QHBoxLayout(policies);
-                    policyLayout->setContentsMargins(24, 0, 0, 0);
-                    auto* group = new QButtonGroup(policies);
-                    group->setExclusive(true);
-                    for (const QString& text : { QStringLiteral("Display only"), QStringLiteral("Ease on fast pans"),
-                        QStringLiteral("Ease on slow shots"), QStringLiteral("Visibility-weighted"),
-                        QStringLiteral("Metadata only") })
+            // Items 2-5 (owner decision 2026-10-17): a checkbox per function over a hidden drop-down
+            // holding the value, its sub-settings beneath, greyed while the function is off.
+            struct IntentToggle { QComboBox* combo; QCheckBox* check; QToolButton* unset; };
+            auto intentSyncs = std::make_shared<std::vector<std::function<void()>>>();
+            // onValue: what ticking the box selects (on, or report for black protection).
+            auto addIntentToggle = [&](const QString& label, const QString& key, const QString& tip,
+                const QStringList& choices, const QString& onValue) -> IntentToggle {
+                auto* combo = addChoice(label, key, choices);
+                form->setRowVisible(combo, false);
+                auto* row = new QWidget;
+                row->setObjectName(controlName(sectionPrefix, key + QStringLiteral(".row")));
+                auto* rowLayout = new QHBoxLayout(row);
+                rowLayout->setContentsMargins(0, 0, 0, 0);
+                auto* check = new QCheckBox(label);
+                check->setObjectName(controlName(sectionPrefix, key + QStringLiteral(".check")));
+                check->setToolTip(tip);
+                rowLayout->addWidget(check);
+                QToolButton* unset = addChoiceUnsetButton(combo, rowLayout, this);
+                rowLayout->addStretch(1);
+                form->addRow(QString(), row);
+                connect(check, &QCheckBox::clicked, this, [combo, onValue](bool checked) {
+                    const int index = combo->findData(checked ? onValue : QStringLiteral("off"));
+                    if (index >= 0 && combo->currentIndex() != index) combo->setCurrentIndex(index);
+                });
+                return { combo, check, unset };
+            };
+            // Wires the checkbox state; greyTargets are greyed while the function is off.
+            auto wireIntentToggle = [&](const IntentToggle& t, const QList<QWidget*>& greyTargets) {
+                auto sync = [t, greyTargets]() {
+                    const bool on = effectiveChoiceValue(t.combo) != QStringLiteral("off");
                     {
-                        auto* radio = new QRadioButton(text);
-                        radio->setEnabled(false);
-                        group->addButton(radio);
-                        policyLayout->addWidget(radio);
+                        const QSignalBlocker block(t.check);
+                        t.check->setChecked(on);
                     }
-                    policyLayout->addStretch(1);
-                    form->addRow(QString(), policies);
-                }
+                    const bool inherited = t.combo->currentData().toString().isEmpty();
+                    t.check->setProperty("inherited", inherited);
+                    t.check->style()->unpolish(t.check);
+                    t.check->style()->polish(t.check);
+                    if (t.unset)
+                        t.unset->setVisible(!inherited && t.combo->count() > 0 &&
+                            t.combo->itemData(0).toString().isEmpty());
+                    for (QWidget* w : greyTargets)
+                    {
+                        w->setProperty("greyedOff", !on);
+                        w->setEnabled(on);
+                    }
+                };
+                connect(t.combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [sync](int) { sync(); });
+                intentSyncs->push_back(sync);
+                sync();
+            };
+            auto addIntentNumber = [&](const QString& label, const QString& key, const QString& unit,
+                double lo, double hi, int decimals, const QString& placeholder, const QString& tip) {
+                auto* edit = addText(QStringLiteral("    ") + label, key, unit);
+                edit->setValidator(new QDoubleValidator(lo, hi, decimals, edit));
+                clampNumberFieldOnLeave(edit, lo, hi, decimals);
+                edit->setPlaceholderText(placeholder);
+                edit->setAccessibleDescription(QStringLiteral("%1 to %2%3.").arg(lo).arg(hi)
+                    .arg(unit.isEmpty() ? QString() : QStringLiteral(" ") + unit));
+                edit->setToolTip(tip);
+                return edit;
+            };
+
+            // Motion intent.
+            {
+                const auto motion = addIntentToggle(QStringLiteral("Motion intent"), QStringLiteral("intent_motion"),
+                    QStringLiteral(
+                        "Experimental, default off. On: VP analyses each shot's motion and, by the policy below, may "
+                        "scale your de-judder strength DOWN for that shot. It never raises dejudder_strength (yours "
+                        "is the master), and the scale only changes at cuts (shots shorter than the time below keep "
+                        "the previous scale; fades keep it; video-class sources are left alone). With the policy "
+                        "\"Display only\" (the default) it only reports on the stats overlay and in the log. Off: "
+                        "nothing is analysed and the strength is exactly yours. (Key: intent_motion.)"),
+                    { QStringLiteral("off"), QStringLiteral("on") }, QStringLiteral("on"));
+                auto* policy = addChoice(QStringLiteral("Motion intent policy"), QStringLiteral("intent_motion_policy"),
+                    { QStringLiteral("display"), QStringLiteral("ease_fast"), QStringLiteral("ease_slow"),
+                      QStringLiteral("visibility"), QStringLiteral("metadata") });
+                policy->setItemText(policy->findData(QStringLiteral("display")), QStringLiteral("Display only"));
+                policy->setItemText(policy->findData(QStringLiteral("ease_fast")), QStringLiteral("Ease on fast pans"));
+                policy->setItemText(policy->findData(QStringLiteral("ease_slow")), QStringLiteral("Keep fast pans, ease on slow deliberate shots"));
+                policy->setItemText(policy->findData(QStringLiteral("visibility")), QStringLiteral("Visibility-weighted"));
+                policy->setItemText(policy->findData(QStringLiteral("metadata")), QStringLiteral("Metadata only"));
+                policy->setToolTip(QStringLiteral(
+                    "Experimental. What motion intent may do with the de-judder strength; it only ever scales yours "
+                    "down, at cuts. Default Display only. (Key: intent_motion_policy.)"));
+                QWidget* policyBox = nullptr;
+                const auto syncPolicy = exclusiveButtons(policy, QStringLiteral("intent_motion_policy"),
+                    QStringLiteral("    Policy"),
+                    { { "display", QStringLiteral("Display only"), QStringLiteral(
+                          "Per-shot analysis on the stats overlay and in the log; the strength is unchanged (the "
+                          "default). Motion intent never raises dejudder_strength. (Key: intent_motion_policy.)") },
+                      { "ease_fast", QStringLiteral("Ease on fast pans"), QStringLiteral(
+                          "Scale the strength down as the pan speed rises (the de-judder's motion roll-off, as one "
+                          "policy). Never above your strength; changes at cuts. (Key: intent_motion_policy.)") },
+                      { "ease_slow", QStringLiteral("Keep fast pans, ease on slow deliberate shots"), QStringLiteral(
+                          "Full strength where judder is most visible; scaled down where the shot is slow and steady "
+                          "and the film look is likely intended. Never above your strength. (Key: intent_motion_policy.)") },
+                      { "visibility", QStringLiteral("Visibility-weighted"), QStringLiteral(
+                          "Scale by the estimated judder visibility (pan speed band and edge contrast): eased on "
+                          "static and blur-dominated shots. Never above your strength. (Key: intent_motion_policy.)") },
+                      { "metadata", QStringLiteral("Metadata only"), QStringLiteral(
+                          "Acts only on Dolby Vision L11 frame-rate-conversion hints or Authentic Motion metadata "
+                          "when present; otherwise unchanged. Never above your strength. (Key: intent_motion_policy.)") } },
+                    QStringLiteral("display"), &policyBox);
+                intentSyncs->push_back(syncPolicy);
+                auto* motionMin = addIntentNumber(QStringLiteral("Minimum strength scale"), QStringLiteral("intent_motion_min"),
+                    QString(), 0.0, 1.0, 2, QStringLiteral("0.5"), QStringLiteral(
+                        "Experimental. The lowest factor motion intent may apply to your de-judder strength (0-1, "
+                        "default 0.5): 1 = never reduce, 0 = may switch the de-judder off for a shot. It never "
+                        "raises the strength. (Key: intent_motion_min.)"));
+                auto* motionShot = addIntentNumber(QStringLiteral("Shortest shot that changes the scale"),
+                    QStringLiteral("intent_motion_min_shot_s"), QStringLiteral("s"), 0.5, 30.0, 1, QStringLiteral("2"),
+                    QStringLiteral(
+                        "Experimental. A shot shorter than this (seconds, 0.5-30, default 2) keeps the previous scale, "
+                        "so rapid cutting never makes the strength flutter. (Key: intent_motion_min_shot_s.)"));
+                wireIntentToggle(motion, { policyBox, motionMin, motionShot });
             }
+
+            // Ambient adaptation.
+            {
+                const auto ambient = addIntentToggle(QStringLiteral("Ambient adaptation"), QStringLiteral("ambient_adapt"),
+                    QStringLiteral(
+                        "Experimental, default off. For rooms that are not dark theatres: VP renders to the black "
+                        "the room light leaves visible (screen reflection of the room light adds to the display's "
+                        "black), using the [ambient] light sensor (or, in manual mode, the lit room's lux_lit), "
+                        "applied at cuts with slow time constants. It never moves code 0 or BTB. "
+                        "Off: no change. (Key: ambient_adapt.)"),
+                    { QStringLiteral("off"), QStringLiteral("on") }, QStringLiteral("on"));
+                auto* strength = addIntentNumber(QStringLiteral("Strength"), QStringLiteral("ambient_adapt_strength"),
+                    QString(), 0.0, 1.0, 2, QStringLiteral("1"), QStringLiteral(
+                        "Experimental. How much of the room light's veil is rendered into the black (0-1, default 1 = "
+                        "all of it; 0 changes nothing). (Key: ambient_adapt_strength.)"));
+                auto* reflect = addIntentNumber(QStringLiteral("Screen reflectance"), QStringLiteral("ambient_screen_reflect"),
+                    QStringLiteral("cd/m2 per lux"), 0.0, 1.0, 4, QStringLiteral("0.01"), QStringLiteral(
+                        "Experimental. How much light the screen reflects back per lux of room light (0-1 cd/m2 per "
+                        "lux, default 0.01). Effective black = display black + strength x lux x this. "
+                        "(Key: ambient_screen_reflect.)"));
+                auto* maxBlack = addIntentNumber(QStringLiteral("Maximum effective black"), QStringLiteral("ambient_max_black_nits"),
+                    QStringLiteral("nits"), 0.0, 10.0, 2, QStringLiteral("1"), QStringLiteral(
+                        "Experimental. The black level the adaptation never exceeds (0-10 nits, default 1). "
+                        "(Key: ambient_max_black_nits.)"));
+                auto* tauUp = addIntentNumber(QStringLiteral("Brighten time constant"), QStringLiteral("ambient_tau_up_s"),
+                    QStringLiteral("s"), 1.0, 600.0, 1, QStringLiteral("15"), QStringLiteral(
+                        "Experimental. How slowly the target follows a rising room light (seconds, 1-600, default 15). "
+                        "(Key: ambient_tau_up_s.)"));
+                auto* tauDown = addIntentNumber(QStringLiteral("Darken time constant"), QStringLiteral("ambient_tau_down_s"),
+                    QStringLiteral("s"), 1.0, 1800.0, 1, QStringLiteral("90"), QStringLiteral(
+                        "Experimental. How slowly the target follows a falling room light (seconds, 1-1800, default 90). "
+                        "(Key: ambient_tau_down_s.)"));
+                wireIntentToggle(ambient, { strength, reflect, maxBlack, tauUp, tauDown });
+            }
+
+            // Black protection.
+            {
+                const auto black = addIntentToggle(QStringLiteral("Black protection"), QStringLiteral("intent_black"),
+                    QStringLiteral(
+                        "Experimental, default off. Ticking it selects Report only: shadow steps lost below the "
+                        "display's black are measured and shown in the stats overlay and log. The second choice "
+                        "also stops the LED dimming from crushing the shadows. Black protection never moves code 0 "
+                        "or BTB. Off: nothing is measured. (Key: intent_black.)"),
+                    { QStringLiteral("off"), QStringLiteral("report"), QStringLiteral("led_protect") }, QStringLiteral("report"));
+                black.combo->setItemText(black.combo->findData(QStringLiteral("report")), QStringLiteral("Report only"));
+                black.combo->setItemText(black.combo->findData(QStringLiteral("led_protect")), QStringLiteral("Protect shadows from LED dimming"));
+                QWidget* blackBox = nullptr;
+                const auto syncBlack = exclusiveButtons(black.combo, QStringLiteral("intent_black"),
+                    QStringLiteral("    Mode"),
+                    { { "report", QStringLiteral("Report only"), QStringLiteral(
+                          "Measures and reports lost shadow steps; changes nothing. (Key: intent_black.)") },
+                      { "led_protect", QStringLiteral("Protect shadows from LED dimming"), QStringLiteral(
+                          "Also limits how far the LED dimming may go so the shadows stay; never moves code 0 or "
+                          "BTB. (Key: intent_black.)") } },
+                    QStringLiteral("report"), &blackBox);
+                intentSyncs->push_back(syncBlack);
+                wireIntentToggle(black, { blackBox });
+            }
+
+            // Display mapping readout.
+            {
+                const auto display = addIntentToggle(QStringLiteral("Display mapping readout"), QStringLiteral("intent_display"),
+                    QStringLiteral(
+                        "Experimental, default off. Shows the scene-to-display compression and the trim in use on "
+                        "the stats overlay and in the log. Changes nothing in the picture. Off: no readout. "
+                        "(Key: intent_display.)"),
+                    { QStringLiteral("off"), QStringLiteral("report") }, QStringLiteral("report"));
+                wireIntentToggle(display, {});
+            }
+
+            auto* intentRefresh = new QAction(contentMode);
+            intentRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("intent_adaptive_refresh")));
+            connect(intentRefresh, &QAction::triggered, this, [intentSyncs]() {
+                for (const auto& step : *intentSyncs) step();
+            });
         }
 
         form = addCollapsibleSection(QStringLiteral("temporalDither"), QStringLiteral("Temporal dither"),
@@ -10293,7 +10445,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "interpolation", "off" }, { "interpolation_fallback", "hold" }, { "interpolation_fill_gaps", "off" },
                     { "source_class", "legacy" },   // audit 2026-10-16: showed "Default: Auto" (the runtime's 4)
                     // Content recognition (intent interpreter item 1, 2026-10-17).
-                    { "intent_content", "off" } };
+                    { "intent_content", "off" },
+                    // Intent remainder (2026-10-17): all experimental, default off.
+                    { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "ambient_adapt", "off" },
+                    { "intent_black", "off" }, { "intent_display", "off" } };
                 for (const auto& entry : choiceDefaults)
                     if (key == QLatin1String(entry.first)) return QString::fromLatin1(entry.second);
                 // Numbers with a placeholder showing their default: empty, so
@@ -10304,7 +10459,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("render_ahead_utilisation") ||
                         key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                         key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
-                        key == QStringLiteral("intent_content_hold_seconds")) &&
+                        key == QStringLiteral("intent_content_hold_seconds") ||
+                        key.startsWith(QStringLiteral("intent_motion_")) || key.startsWith(QStringLiteral("ambient_"))) &&
                     key != QStringLiteral("dejudder_preset"))
                     return QString();
                 return QStringLiteral("AUTO");
@@ -10687,6 +10843,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
+				refresh->trigger();
+			if (auto* refresh = profileFields->findChild<QAction*>(
+				controlName(sectionPrefix, QStringLiteral("intent_adaptive_refresh"))))
 				refresh->trigger();
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
