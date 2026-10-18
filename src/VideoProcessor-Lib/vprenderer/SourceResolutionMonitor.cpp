@@ -403,6 +403,19 @@ if (tile < int(tiles) && g.y < ts) {
 				Fail("the readback failed", seconds);
 				continue;
 			}
+			// Tests only (gate r3 2026-10-18): VP_TEST_SOURCE_MONITOR_DIGEST=1 logs a digest of the
+			// tiles the monitor read, so a GPU test can show its input is bit-identical whatever
+			// runs after it (the detail stages). Off in ordinary runs; read per readback (a few a
+			// second) so a test process that keeps the renderer DLL loaded can switch it.
+			char digestValue[8] = {};
+			if (GetEnvironmentVariableA("VP_TEST_SOURCE_MONITOR_DIGEST", digestValue, sizeof(digestValue)) > 0 && digestValue[0] == '1')
+			{
+				uint64_t fnv = 1469598103934665603ull;
+				const unsigned char* bytes = reinterpret_cast<const unsigned char*>(done.values.data());
+				for (size_t b = 0; b < done.values.size() * sizeof(float); ++b) { fnv ^= bytes[b]; fnv *= 1099511628211ull; }
+				DebugLog::Log("Source resolution input digest: tiles %d, tile %d, fnv %016llx", done.tiles, done.tileSize,
+					static_cast<unsigned long long>(fnv));
+			}
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				job = std::move(done);   // a newer copy replaces one the worker has not started

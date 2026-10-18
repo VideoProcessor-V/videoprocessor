@@ -190,6 +190,15 @@ namespace Hunt2CadenceClass
 			Assert::AreEqual(size_t{ 1 }, LockedQueueTarget(1, 0.4, 2), L"never above the target");
 			Assert::AreEqual(size_t{ 4 }, LockedQueueTarget(4, 1.0, 2), L"not locked: the target");
 			Assert::AreEqual(size_t{ 0 }, LockedQueueTarget(0, 0.4, 2));
+			// Gate r3 (2026-10-18): the renderer's pair floor is A, B converted and the arrival
+			// (kLockedQueuePairFrames = 3). The harness's 24-in-29.97 run: target 3 stays 3 (2 left
+			// B unconverted at every dequeue and the de-judder never estimated); 3:2 with a target
+			// of 4 keeps 3; a target below the floor is never raised.
+			Assert::AreEqual(size_t{ 3 }, Pulldown::kLockedQueuePairFrames);
+			Assert::AreEqual(size_t{ 3 }, LockedQueueTarget(3, 0.8, Pulldown::kLockedQueuePairFrames), L"24 in 30: 3 stays 3");
+			Assert::AreEqual(size_t{ 3 }, LockedQueueTarget(4, 0.4, Pulldown::kLockedQueuePairFrames), L"3:2, target 4: 3");
+			Assert::AreEqual(size_t{ 2 }, LockedQueueTarget(2, 0.4, Pulldown::kLockedQueuePairFrames), L"never above the target");
+			Assert::AreEqual(size_t{ 5 }, LockedQueueTarget(12, 0.4, Pulldown::kLockedQueuePairFrames), L"deeper targets still scale");
 			// The look-ahead minimum (motion-ahead depth 4 + the frame shown = 5) is kept: at the
 			// default target of 5 nothing changes; a deeper target still shrinks to it.
 			Assert::AreEqual(size_t{ 5 }, LockedQueueTarget(5, 0.4, 5), L"motion-ahead keeps its 5");

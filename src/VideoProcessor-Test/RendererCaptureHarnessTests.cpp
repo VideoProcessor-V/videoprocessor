@@ -21,6 +21,7 @@
 #include <fstream>
 #include <functional>
 #include <cstring>
+#include <set>
 #include <sstream>
 #include <map>
 #include <random>
@@ -1127,7 +1128,8 @@ namespace Tests
 				Logger::WriteMessage((std::string("== ") + name + ": " + r.dejudderStatus).c_str());
 				for (const std::string& line : r.log)
 					if (line.find("missed") != std::string::npos || line.find("discontinuity") != std::string::npos ||
-						line.find("motion invalidated") != std::string::npos || line.find("Pulldown") != std::string::npos)
+						line.find("motion invalidated") != std::string::npos || line.find("Pulldown") != std::string::npos ||
+						line.find("De-judder") != std::string::npos || line.find("Interpolation") != std::string::npos)
 						Logger::WriteMessage(("   " + line).c_str());
 			};
 			// Missed frames: two, then three, lost mid-stream. Counted (no rate
@@ -1588,12 +1590,36 @@ namespace Tests
 			FramePlan plan;
 			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
 			const std::string common = "source_resolution: auto\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			const std::string stagesOn = "detail_pulse_stabilise: on\ntexture_restore: statistical\n" + common;
+			// Gate r3 (2026-10-18): the first renderer with the stages on compiles their 4K
+			// shaders (measured: with a cold cache nothing is presented in the 4 s window); one
+			// warm-up run fills the harness shader cache, so the two runs compared see warm shaders.
+			Run(VideoFrameEncoding::V210, "gpu", 4.0, false, stagesOn, false, &plan);
+			// The tiles the monitor read, as a digest per readback (VP_TEST_SOURCE_MONITOR_DIGEST):
+			// the still picture gives the same tiles in every readback of both runs.
+			SetEnvironmentVariableW(L"VP_TEST_SOURCE_MONITOR_DIGEST", L"1");
 			const RunResult off = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
 				"detail_pulse_stabilise: off\ntexture_restore: off\n" + common, false, &plan);
-			const RunResult on = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
-				"detail_pulse_stabilise: on\ntexture_restore: statistical\n" + common, false, &plan);
+			const RunResult on = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, stagesOn, false, &plan);
+			SetEnvironmentVariableW(L"VP_TEST_SOURCE_MONITOR_DIGEST", nullptr);
 			Logger::WriteMessage(("off: " + off.sourceStatus + "\non:  " + on.sourceStatus + "\n").c_str());
-			Assert::IsTrue(off.presented && on.presented, L"frames presented");
+			Assert::IsTrue(off.presented, (L"frames presented (off)\n" + off.Tail()).c_str());
+			Assert::IsTrue(on.presented, (L"frames presented (on)\n" + on.Tail()).c_str());
+			auto digests = [](const RunResult& r)
+			{
+				std::set<std::string> found;
+				for (const std::string& line : r.log)
+				{
+					const size_t at = line.find("Source resolution input digest: ");
+					if (at != std::string::npos) found.insert(line.substr(at));
+				}
+				return found;
+			};
+			const std::set<std::string> offDigests = digests(off), onDigests = digests(on);
+			for (const std::string& d : offDigests) Logger::WriteMessage(("off " + d + "\n").c_str());
+			for (const std::string& d : onDigests) Logger::WriteMessage(("on  " + d + "\n").c_str());
+			Assert::IsTrue(offDigests.size() == 1 && onDigests == offDigests,
+				L"the source-resolution monitor's input is bit-identical with the stages on (one digest in both runs)");
 			Assert::IsFalse(off.Logged("Detail pulse stabilise: on") || off.Logged("Texture restore: statistical"), (L"off: the stages are not called\n" + off.Tail()).c_str());
 			Assert::IsTrue(on.Logged("Detail pulse stabilise: on") && on.Logged("Texture restore: statistical"), (L"on: the stages are set up\n" + on.Tail()).c_str());
 			Assert::IsFalse(on.Logged("Detail pulse stabilise failed") || on.Logged("Texture restore failed"), (L"on: no failure\n" + on.Tail()).c_str());
