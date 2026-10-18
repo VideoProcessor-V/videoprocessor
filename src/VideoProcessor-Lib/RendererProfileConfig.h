@@ -726,6 +726,20 @@ namespace RendererProfileConfig
 			// a new class is taken after this many seconds, at a cut.
 			if (key == "intent_content") return IsChoice(value, { "off", "on" });
 			if (key == "intent_content_hold_seconds") return IsNumberInRange(value, 1.0, 60.0);
+			// Intent remainder (2026-10-17): motion intent, ambient adaptation, black protection and
+			// display mapping readout; all experimental, default off.
+			if (key == "intent_motion") return IsChoice(value, { "off", "on" });
+			if (key == "intent_motion_policy") return IsChoice(value, { "display", "ease_fast", "ease_slow", "visibility", "metadata" });
+			if (key == "intent_motion_min") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "intent_motion_min_shot_s") return IsNumberInRange(value, 0.5, 30.0);
+			if (key == "ambient_adapt") return IsChoice(value, { "off", "on" });
+			if (key == "ambient_adapt_strength") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "ambient_screen_reflect") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "ambient_max_black_nits") return IsNumberInRange(value, 0.0, 10.0);
+			if (key == "ambient_tau_up_s") return IsNumberInRange(value, 1.0, 600.0);
+			if (key == "ambient_tau_down_s") return IsNumberInRange(value, 1.0, 1800.0);
+			if (key == "intent_black") return IsChoice(value, { "off", "report", "led_protect" });
+			if (key == "intent_display") return IsChoice(value, { "off", "report" });
 			if (key == "temporal_dither") return IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" });
 			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
 			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
