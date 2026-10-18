@@ -52,4 +52,7 @@ RefreshKey migration (merge 3): ConfigFile::Load rewrites `m_sections` in memory
 
 - FileSourceVpRendererSurvivesRateSeekAndPauseOrders also needs VP_TEST_FILTER_CLIP.
 - H3LookaheadCostCropSubtitle4K also needs VP_TEST_H3_LOOKAHEAD=1.
+- h3-latch: SourceResolutionRebasesThroughTheRenderer and RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking (both in the harness class), with `active_picture_startup_hold` on.
+  - Check the K3 start-up hold on screen: "Active picture start-up hold" in vp.log.
+  - Replay `cosmos_longtake@upscale2x`.
 - `tools\test_state_report_onscreen.ps1` now expects plugin_api 40.
