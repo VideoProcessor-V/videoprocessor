@@ -405,13 +405,6 @@ namespace QueueStressTest
 		// the (second) largest offset over its 2 s window (PulldownDetector.h:747-787), so every
 		// frame is timed that late for 2 s and then the clock steps back ~0.46 s inside the
 		// lock with no discontinuity: the timeline restarts and the motion pair is refused.
-		// Known failing by design until the Q1 fix lands (integration round 5): ignored so it does
-		// not break the gate; remove the attribute block when fix/q1-stale-burst is merged.
-		BEGIN_TEST_METHOD_ATTRIBUTE(StaleBurstFilmClockRunsBackwards)
-			TEST_METHOD_ATTRIBUTE(L"TestCategory", L"KnownFailing")
-			TEST_METHOD_ATTRIBUTE(L"Description", L"Q1 pending fix/q1-stale-burst")
-			TEST_IGNORE()
-		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(StaleBurstFilmClockRunsBackwards)
 		{
 			Scenario s; s.name = "minimal"; s.seed = 72ull; s.seconds = 223; s.signalHz = 60; s.pictureHz = 24; s.displayHz = 24000.0 / 1001.0;
@@ -424,13 +417,6 @@ namespace QueueStressTest
 
 		// Q1 on Pulldown::FilmClock alone: frames 0..199 of 24p film; frames 100..104 arrive
 		// 0.6 s late (the stale part of a burst, timed at the callback), the rest on time.
-		// Known failing by design until the Q1 fix lands (integration round 5): ignored so it does
-		// not break the gate; remove the attribute block when fix/q1-stale-burst is merged.
-		BEGIN_TEST_METHOD_ATTRIBUTE(StaleBurstFilmClockAlone)
-			TEST_METHOD_ATTRIBUTE(L"TestCategory", L"KnownFailing")
-			TEST_METHOD_ATTRIBUTE(L"Description", L"Q1 pending fix/q1-stale-burst")
-			TEST_IGNORE()
-		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(StaleBurstFilmClockAlone)
 		{
 			Pulldown::FilmClock clock;
