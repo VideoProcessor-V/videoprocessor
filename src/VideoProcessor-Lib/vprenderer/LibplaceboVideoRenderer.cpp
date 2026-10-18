@@ -1212,6 +1212,9 @@ namespace
 		// Off = the stage is not called at all.
 		bool detailPulseStabilise = true;
 		double detailPulseCap = DetailPulse::kDefaultCap;
+		// detail_pulse_fast (2026-10-18, default on): the same pulse in fewer GPU passes' work
+		// (docs/agent-reports/detail-pulse-perf.md); off = the original passes, for A/B.
+		bool detailPulseFast = DetailPulse::kDefaultFast;
 		bool textureRestore = false;
 		double textureRestoreCap = TextureRestore::kDefaultCap;
 		bool dejudderSourceWarpCatmull = true;
@@ -1475,7 +1478,7 @@ namespace
 			// must change the fingerprint like the engine's extras above.
 			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
-			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
+			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.detailPulseFast << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
 			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
@@ -2687,7 +2690,8 @@ namespace
 			std::make_pair("residual_stabilise_grain_guard", &settings.adaptive.residualGrainGuard),
 			std::make_pair("deband_grain", &settings.debandGrain),
 			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive),
-			std::make_pair("detail_pulse_stabilise", &settings.detailPulseStabilise) })
+			std::make_pair("detail_pulse_stabilise", &settings.detailPulseStabilise),
+			std::make_pair("detail_pulse_fast", &settings.detailPulseFast) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -10885,6 +10889,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.debandVpExclusive != next.debandVpExclusive, "deband_vp_exclusive");
 		changed(current.detailPulseStabilise != next.detailPulseStabilise, "detail_pulse_stabilise");
 		changed(current.detailPulseCap != next.detailPulseCap, "detail_pulse_cap");
+		changed(current.detailPulseFast != next.detailPulseFast, "detail_pulse_fast");
 		changed(current.textureRestore != next.textureRestore, "texture_restore");
 		changed(current.textureRestoreCap != next.textureRestoreCap, "texture_restore_cap");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
@@ -21383,6 +21388,7 @@ struct LibplaceboVideoRenderer::Impl
 						detailPulseRuns = true;
 						DetailPulse::Params& p = detailPulseParams;
 						p.cap = (std::max)(DetailPulse::kCapMin, (std::min)(DetailPulse::kCapMax, activeSettings.detailPulseCap));
+						p.fast = activeSettings.detailPulseFast;
 						p.colorDepth = depth;
 						p.planeLines = lines;
 						p.sourceHz = contentHz;
@@ -30162,6 +30168,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "deband_vp_exclusive=" << (s.debandVpExclusive ? "on" : "off") << "\n"
 		<< "detail_pulse_stabilise=" << (s.detailPulseStabilise ? "on" : "off") << "\n"
 		<< "detail_pulse_cap=" << s.detailPulseCap << "\n"
+		<< "detail_pulse_fast=" << (s.detailPulseFast ? "on" : "off") << "\n"
 		<< "texture_restore=" << (s.textureRestore ? "statistical" : "off") << "\n"
 		<< "texture_restore_cap=" << s.textureRestoreCap << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"

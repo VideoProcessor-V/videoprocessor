@@ -9139,6 +9139,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 "The most a frame's fine detail is raised towards its best neighbour, as a multiple (1.00-1.50 in "
                 "steps of 0.05, default 1.35). 1.00 = no lift. It only ever raises detail the frame already has. "
                 "(Key: detail_pulse_cap.)"));
+            auto* detailPulseFast = addChoice(QStringLiteral("    Detail pulse: fast path"), QStringLiteral("detail_pulse_fast"),
+                { QStringLiteral("on"), QStringLiteral("off") });
+            detailPulseFast->setItemText(detailPulseFast->findData(QStringLiteral("on")), QStringLiteral("On (default)"));
+            detailPulseFast->setItemText(detailPulseFast->findData(QStringLiteral("off")), QStringLiteral("Off (original passes)"));
+            detailPulseFast->setToolTip(QStringLiteral(
+                "On (default): the detail pulse runs in about half the GPU time (a separate low-band pass computed "
+                "once per picture, fewer texture reads, and areas left exactly as they are only copied). The "
+                "picture is the same: identical to the original passes except where a pixel can land one 16-bit "
+                "storage step apart from another rounding of the same sums. Off: the original passes, for "
+                "comparison. (Key: detail_pulse_fast.)"));
             auto* textureRestore = addChoice(QStringLiteral("Texture restore (experimental)"), QStringLiteral("texture_restore"),
                 { QStringLiteral("off"), QStringLiteral("statistical") });
             textureRestore->setItemText(textureRestore->findData(QStringLiteral("off")), QStringLiteral("Off (default)"));
@@ -9164,10 +9174,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 "(Key: texture_restore_cap.)"));
             {
                 // The caps do nothing while their stage is off (read from the effective values).
-                auto syncDetailCaps = [detailPulse, detailPulseCap, textureRestore, textureRestoreCap]() {
+                auto syncDetailCaps = [detailPulse, detailPulseCap, detailPulseFast, textureRestore, textureRestoreCap]() {
                     const bool pulseOn = effectiveChoiceValue(detailPulse) != QStringLiteral("off");
                     detailPulseCap->setProperty("greyedOff", !pulseOn);
                     detailPulseCap->setEnabled(pulseOn);
+                    detailPulseFast->setProperty("greyedOff", !pulseOn);
+                    detailPulseFast->setEnabled(pulseOn);
                     const bool restoreOn = effectiveChoiceValue(textureRestore) == QStringLiteral("statistical");
                     textureRestoreCap->setProperty("greyedOff", !restoreOn);
                     textureRestoreCap->setEnabled(restoreOn);
@@ -10656,7 +10668,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     // Content recognition (intent interpreter item 1, 2026-10-17).
                     { "intent_content", "off" },
                     // Detail pulse stabilisation and texture restore (docs/VP-detail-restore.md).
-                    { "detail_pulse_stabilise", "on" }, { "texture_restore", "off" },
+                    { "detail_pulse_stabilise", "on" }, { "detail_pulse_fast", "on" }, { "texture_restore", "off" },
                     // Intent remainder (2026-10-17): all experimental, default off.
                     { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "ambient_adapt", "off" },
                     { "intent_black", "off" }, { "intent_display", "off" } };

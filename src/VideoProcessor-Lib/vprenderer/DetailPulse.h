@@ -58,6 +58,7 @@ namespace DetailPulse
 	constexpr double kSigmaWide = 2.5;
 	// The tile: the measure and apply passes' 32 x 32 work block (16 x 16 threads, 2 x 2 px each).
 	constexpr int kTilePx = 32;
+	constexpr bool kDefaultFast = true;   // detail_pulse_fast
 	// History (research-gate tuning on D:\hfr\breathing, 2026-10-17): a window of 0.17 s (4
 	// frames at 23.976) keeps the I-frame gain at 1.00 on CRF 32, where a P-frame five frames
 	// before the I-frame was coded better than the I-frame itself (a 0.5 s window lifted that
@@ -159,10 +160,20 @@ namespace DetailPulse
 		// frame's own levels). A UNORM RGB plane reads its own codes.
 		enum pl_color_system lumaSystem = PL_COLOR_SYSTEM_UNKNOWN;
 		enum pl_color_levels codeLevels = PL_COLOR_LEVELS_UNKNOWN;
+		// detail_pulse_fast (2026-10-18, default on): the same maths in fewer texture reads (2 x 2
+		// quads by textureGather, the measure pass's low band reused by a new frame's apply pass,
+		// blocks whose weight or gains are exactly 1 copied). Off = the original passes (A/B).
+		bool fast = kDefaultFast;
 	};
 
 	// Hunt 3 F8: Kr, Kg, Kb of a YCbCr system (the luma of an RGB picture).
 	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3]);
+
+	// Diagnostics (tests, one GPU at a time): GPU time per pass kind - 0 measure, 1 reduce,
+	// 2 apply, 3 low band (detail_pulse_fast; look-ahead and other-geometry passes are not
+	// timed) - averaged over the completed passes since the last reset.
+	void SetPassTimers(pl_gpu gpu, bool on);
+	void PassTimes(double ms[4], bool reset);
 
 	class Module
 	{

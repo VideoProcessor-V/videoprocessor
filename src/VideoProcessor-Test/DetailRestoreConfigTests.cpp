@@ -212,6 +212,12 @@ namespace DetailRestoreConfigTestsNs
 				Assert::IsTrue(Valid("detail_pulse_stabilise", v), Wide(v).c_str());
 			for (const char* v : { "auto", "statistical", "1", "" })
 				Assert::IsFalse(Valid("detail_pulse_stabilise", v), Wide(v).c_str());
+			// detail_pulse_fast (2026-10-18): on (default) / off.
+			for (const char* v : { "on", "off", "Off" })
+				Assert::IsTrue(Valid("detail_pulse_fast", v), Wide(v).c_str());
+			for (const char* v : { "auto", "fast", "1", "" })
+				Assert::IsFalse(Valid("detail_pulse_fast", v), Wide(v).c_str());
+			Assert::IsTrue(DetailPulse::kDefaultFast && DetailPulse::Params().fast, L"detail_pulse_fast defaults on");
 			for (const char* v : { "off", "statistical", "Statistical" })
 				Assert::IsTrue(Valid("texture_restore", v), Wide(v).c_str());
 			for (const char* v : { "on", "auto", "neural", "" })
