@@ -669,7 +669,9 @@ def analyse_shift(caps, sw, sh, cache):
     E = np.exp(2j * math.pi * np.outer(kfreq[wts > 0], pos) / W) * wts[wts > 0][:, None] / W
     Th = mv["That"][:, wts > 0]
 
-    R0 = np.real(Th @ E)
+    if "R0" not in mv:
+        mv["R0"] = np.real(Th @ E)
+    R0 = mv["R0"]
     periodic = abs((geo.c1 - geo.c0) - W * geo.sx) < 1e-6 and abs(geo.x0 - geo.c0) < 1e-6
     R0hat = np.fft.fft(R0, axis=1)
     fo = np.fft.fftfreq(R0.shape[1])
@@ -821,8 +823,11 @@ SHARPEN = ("[shader.standard]\\nshader_type: standard\\n"
 
 
 def base_extra(keys):
-    # the base profile (no input rule): 8-bit output as the owner's FL35 link, sigma-delta auto
-    lines = ["[vprenderer.Default]", "display_bit_depth: 8"] + ["%s: %s" % kv for kv in keys]
+    # the base profile (no input rule): 8-bit output with VP's temporal sigma-delta, as the owner's
+    # FL35 link (temporal_dither auto would leave libplacebo's 8-bit dither); a config's own key wins
+    base = [("display_bit_depth", "8"), ("temporal_dither", "sigma_delta")]
+    own = {k for k, _ in keys}
+    lines = ["[vprenderer.Default]"] + ["%s: %s" % kv for kv in base if kv[0] not in own] + ["%s: %s" % kv for kv in keys]
     return "\\n".join(lines) + "\\n"
 
 
@@ -835,17 +840,17 @@ CONFIGS = [
     ("texture_restore_on", [("texture_restore", "statistical")], "all", "-"),
     ("rebase_1080", [("source_resolution", "1080")], "down4k", "-"),
     ("src_native", [("source_resolution", "native")], "all", "-"),
-    ("adaptive_down_on", [("adaptive_downscale", "on")], "down", "-"),
+    ("hybrid_down_ssim", [("downscaler", "mitchell"), ("adaptive_downscale", "on")], "down", "standard.ssim_downscaler"),
     ("down_lanczos", [("downscaler", "lanczos")], "down", "-"),
     ("down_mitchell", [("downscaler", "mitchell")], "down", "-"),
     ("down_gamma", [("downscale_light", "gamma")], "down", "-"),
-    ("adaptive_up_on", [("adaptive_upscale", "on")], "up", "-"),
+    ("hybrid_up_fsrcnnx", [("adaptive_upscale", "on")], "up", "standard.cnn,standard.ssim_superres"),
     ("up_ewa_lanczossharp", [("upscaler", "ewa_lanczossharp")], "up", "-"),
     ("up_lanczos", [("upscaler", "lanczos")], "up", "-"),
     ("up_gamma", [("upscale_light", "gamma")], "up", "-"),
     ("motion_on", [("interpolation", "always")], "all", "-"),
     ("sigma_off", [("temporal_dither", "off")], "all", "-"),
-    ("sigma_on", [("temporal_dither", "sigma_delta")], "all", "-"),
+    ("dither_libplacebo", [("temporal_dither", "libplacebo")], "all", "-"),
     ("dither_off_all", [("temporal_dither", "off"), ("dithering", "off")], "all", "-"),
     ("all_detail_off", [("deband", "off"), ("deband_vp", "off"), ("detail_pulse_stabilise", "off"),
                         ("texture_restore", "off"), ("source_resolution", "native")], "all", "-"),
@@ -855,8 +860,8 @@ CONFIGS = [
     ("ctl_down_gpu_noaa", [("downscaler", "gpu")], "down", "-"),
     ("ctl_up_nearest", [("upscaler", "nearest")], "up", "-"),
 ]
-MOTION_CONFIGS = {"default", "deband_vp_on", "detail_pulse_off", "texture_restore_on", "rebase_1080", "adaptive_down_on",
-                  "adaptive_up_on", "motion_on", "sigma_off", "all_detail_off", "all_detail_on",
+MOTION_CONFIGS = {"default", "deband_vp_on", "detail_pulse_off", "texture_restore_on", "rebase_1080", "hybrid_down_ssim",
+                  "hybrid_up_fsrcnnx", "motion_on", "sigma_off", "all_detail_off", "all_detail_on",
                   "ctl_down_gpu_noaa", "ctl_up_nearest", "down_lanczos", "up_ewa_lanczossharp"}
 PAN_SPEEDS = [3, 8]             # source pixels per 24p frame (synthetic): 72 and 192 px/s at 24 fps
 REAL_PANS = ["pan_120pxs_23976p", "pan_480pxs_23976p"]
@@ -865,14 +870,16 @@ REAL_PANS = ["pan_120pxs_23976p", "pan_480pxs_23976p"]
 # Hybrid scaler blend sweep (owner 2026-10-18): VP's adaptive scalers with their branch shader.
 # Downscale: out = faithful + w (SSIM - faithful), w = adaptive_w_base x (1 - edge) x grain term
 # (SSimDownscaler after Mitchell, as the cinema configuration); upscale: out = cnn + (1 - w)
-# (faithful - cnn), w = adaptive_upscale_w_base x grain term (ArtCNN doubler branch).
+# (faithful - cnn), w = adaptive_upscale_w_base x grain term (FSRCNNX doubler branch).
 BLEND_WEIGHTS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 BLEND_PAIRS = [((3840, 2160), (2560, 1600)), ((3840, 2160), (1920, 1080)), ((1920, 1080), (2560, 1600))]
 SHADER_SECTIONS = {
     "standard.ssim_downscaler": "[shader.standard.ssim_downscaler]\\nshader_type: custom\\nlabel: SSimDownscaler\\n"
                                 "stage: post_resize\\norder: 20\\nglsl_file: SSimDownscaler.glsl\\n",
-    "standard.artcnn": "[shader.standard.artcnn]\\nshader_type: custom\\nlabel: ArtCNN\\nstage: pre_resize\\n"
-                       "order: 16\\nglsl_file: ArtCNN_C4F16.glsl\\n",
+    # FSRCNNX: the luma doubler the renderer's own CNN test drives (ArtCNN did not engage in the
+    # off-screen harness: the adaptive upscale logged prescale ratio 1)
+    "standard.cnn": "[shader.standard.cnn]\\nshader_type: custom\\nlabel: FSRCNNX\\nstage: pre_resize\\n"
+                    "order: 10\\nglsl_file: FSRCNNX_x2_16-0-4-1.glsl\\n",
 }
 
 
@@ -892,8 +899,8 @@ def blend_rows():
                 name = "hyb_down_w%.2f" % w
             else:
                 keys = [("adaptive_upscale", "on"), ("adaptive_upscale_w_base", "%.2f" % w)]
-                prof = ["standard.artcnn"]
-                name = "hyb_up_w%.2f" % w
+                prof = ["standard.cnn", "standard.ssim_superres"]
+                name = "hyb_fsrcnnx_w%.2f" % w
             extra = base_extra(keys) + shader_extra(prof)
             common = (src[0], src[1], out[0], out[1])
             rows.append([pn + "__bstill__" + name, *common, "still_%dx%d.u16" % src, "still", 0, 4.4,
@@ -901,6 +908,56 @@ def blend_rows():
             rows.append([pn + "__bshift8__" + name, *common, "moving_%dx%d_%dx%d.u16" % (src + out), "shift", 8, 5.4,
                          ",".join("%.2f" % (2.4 + 0.27 * i) for i in range(10)), extra, ",".join(prof)])
     return rows
+
+
+SHADER_SECTIONS["standard.ssim_superres"] = ("[shader.standard.ssim_superres]\\nshader_type: custom\\nlabel: SSimSuperRes\\n"
+                                             "stage: post_resize\\norder: 25\\nglsl_file: SSimSuperRes.glsl\\n")
+
+
+def cost_rows(sources, outputs):
+    """GPU cost per scaler configuration (no captures: the readback would add GPU work); the
+    renderer's D3D11 timestamp render-load window is logged at the end of each run."""
+    rows = []
+    for src in sources:
+        for out in outputs:
+            pn = pair_name(src, out)
+            s = fit_rect(src[0], src[1], out[0], out[1])[4]
+            cfgs = [("default", [], [])]
+            if s < 1:
+                cfgs += [("sep_lanczos", [("downscaler", "lanczos")], []),
+                         ("sep_mitchell", [("downscaler", "mitchell")], []),
+                         ("hyb_down_ssim", [("downscaler", "mitchell"), ("adaptive_downscale", "on")], ["standard.ssim_downscaler"])]
+            elif s > 1:
+                cfgs += [("sep_lanczos", [("upscaler", "lanczos")], []),
+                         ("polar_ewa_lanczossharp", [("upscaler", "ewa_lanczossharp")], []),
+                         ("hyb_up_fsrcnnx_superres", [("adaptive_upscale", "on")], ["standard.cnn", "standard.ssim_superres"])]
+            if src[1] > 1080 and s < 1:
+                cfgs.append(("rebase_1080", [("source_resolution", "1080")], []))
+            for name, keys, prof in cfgs:
+                extra = base_extra(keys) + (shader_extra(prof) if prof else "")
+                rows.append([pn + "__cost__" + name, src[0], src[1], out[0], out[1], "still_%dx%d.u16" % src, "still", 0, 6.0,
+                             "", extra, ",".join(prof) if prof else "-"])
+    return rows
+
+
+def cost_report(d):
+    import re
+    lines = ["| source -> output | scaler configuration | GPU ms/frame (avg) | peak | core render ms (avg) | GPU frames |",
+             "|---|---|---|---|---|---|"]
+    for row in read_plan(d):
+        if "__cost__" not in row["name"]:
+            continue
+        path = os.path.join(d, "captures", row["name"] + ".log")
+        if not os.path.exists(path):
+            continue
+        m = re.search(r"gpu_timing: valid=(\d) frame_ms_avg=([\d.e+-]+) frame_ms_peak=([\d.e+-]+) core_ms_avg=([\d.e+-]+) "
+                      r"core_ms_peak=([\d.e+-]+) frames=(\d+)", open(path, errors="replace").read())
+        if not m:
+            continue
+        pair, _, cfg = row["name"].split("__")
+        lines.append("| %dx%d -> %dx%d | %s | %.2f | %.2f | %.2f | %s |" % (
+            row["sw"], row["sh"], row["ow"], row["oh"], cfg, float(m.group(2)), float(m.group(3)), float(m.group(4)), m.group(6)))
+    return "\n".join(lines) + "\n"
 
 
 def applies(scope, src, out):
@@ -923,7 +980,7 @@ def prepare(args):
     sources = parse_sizes(os.environ.get("VP_ALIAS_SOURCES", DEFAULT_SOURCES))
     outputs = parse_sizes(os.environ.get("VP_ALIAS_OUTPUTS", DEFAULT_OUTPUTS))
     rows = []
-    for sw, sh in sources:
+    for sw, sh in ([] if args.plan_only else sources):
         Y, Cb, Cr, _ = still_card(sw, sh)
         np.concatenate([to_ycode(Y).ravel(), to_ccode(Cb).ravel(), to_ccode(Cr).ravel()]).tofile(
             os.path.join(d, "still_%dx%d.u16" % (sw, sh)))
@@ -931,7 +988,7 @@ def prepare(args):
             Ym, _ = moving_card(sw, sh, pair_cut(sw, sh, ow, oh))
             np.concatenate([to_ycode(Ym).ravel(), np.full(sw * sh, 512, np.uint16)]).tofile(
                 os.path.join(d, "moving_%dx%d_%dx%d.u16" % (sw, sh, ow, oh)))
-    if not args.no_real:
+    if not args.no_real and not args.plan_only:
         for clip in REAL_PANS:
             path = os.path.join(d, "%s_1920x1080.u16" % clip)
             if not os.path.exists(path):
@@ -942,7 +999,7 @@ def prepare(args):
             for name, keys, scope, shaders in CONFIGS:
                 if not applies(scope, src, out):
                     continue
-                extra = base_extra(keys) + (SHARPEN if shaders != "-" else "")
+                extra = base_extra(keys) + (shader_extra(shaders.split(",")) if shaders != "-" else "")
                 common = (src[0], src[1], out[0], out[1])
                 rows.append([pn + "__still__" + name, *common, "still_%dx%d.u16" % src, "still", 0, 4.4,
                              "2.6,3.0,3.4,3.8", extra, shaders])
@@ -955,6 +1012,7 @@ def prepare(args):
                             rows.append([pn + "__real_%s__" % clip.split("_")[1] + name, *common, "%s_1920x1080.u16" % clip,
                                          "seq", 0, 5.4, ",".join("%.2f" % (2.4 + 0.27 * i) for i in range(10)), extra, shaders])
     rows += blend_rows()
+    rows += cost_rows(sources, outputs)
     with open(os.path.join(d, "plan.tsv"), "w", newline="\n") as f:
         f.write("# name\tsw\tsh\tow\toh\tasset\tmode\tshift\tseconds\tcaptures\textra\tshaders\n")
         for r in rows:
@@ -1015,8 +1073,12 @@ def validate(args):
             if abs(geo.sx - 1) < 1e-9:
                 # 1:1 (e.g. 1080 on 1080, or 1080 letterboxed in 1200): no resampling, every
                 # control is the identity and must match the ideal
-                checks = {"identity_all_equal": all(abs(results[pn]["%s_10" % k]["alias_db"] - i) < 1
-                                                    for k in kinds), "ideal_near_floor": i < -40}
+                # (chroma is still upsampled 2x horizontally from 4:2:2, so the chroma controls differ)
+                lum = [results[pn]["%s_10" % k]["alias_db"] for k in ("ideal", "sinc", "nearest", "bilinear_noaa")]
+                checks = {"luma_identity_at_floor": max(lum) < -60, "ideal_near_floor": i < -40,
+                          "chroma_nearest_worse": results[pn]["nearest_10"]["alias_chroma_db"] >
+                          results[pn]["sinc_10"]["alias_chroma_db"] + 6,
+                          "sharpened_detected": results[pn]["sharpened_10"]["alias_db"] > -40}
                 results[pn]["checks"] = checks
                 print(pn, "checks:", checks, flush=True)
                 ok_all &= all(checks.values())
@@ -1070,57 +1132,93 @@ def read_plan(d):
     return rows
 
 
-def analyse(args, delete=False):
-    d = args.dir
+_WCACHE = {}
+_WSEQ = {}
+
+
+def analyse_one(d, row, files):
+    """One run's captures -> metrics (a worker process keeps its own reference cache)."""
     cap_dir = os.path.join(d, "captures")
-    res_path = os.path.join(d, args.results)
-    results = json.load(open(res_path)) if os.path.exists(res_path) else {}
-    cache = {}
-    seq_frames = {}
+    caps = [load_capture(os.path.join(cap_dir, f), row["ow"], row["oh"]) for f in files]
+    # The owner's link is 8-bit: a capture with 10-bit codes (VP's 10-bit swapchain without the
+    # sigma-delta) is rounded to 8-bit codes, as the link would truncate it (the sigma-delta's
+    # output is already on 8-bit codes).
+    mid = caps[0][caps[0].shape[0] // 2]
+    link8 = bool(np.any(mid % 4))
+    if link8:
+        caps = [(np.rint(c / 4.0) * 4).clip(0, 1020).astype(np.uint16) for c in caps]
+    t0 = time.time()
+    try:
+        if row["mode"] == "still":
+            avg = np.mean(np.stack([c.astype(float) for c in caps]), axis=0)
+            info = analyse_still(avg, row["sw"], row["sh"], _WCACHE)
+            info["codes_mod4"] = [int(v) for v in sorted(set(np.unique(mid[:, 1] % 4)))]
+            info["captures"] = len(caps)
+        elif row["mode"] == "shift":
+            info = analyse_shift(caps, row["sw"], row["sh"], _WCACHE)
+        else:
+            if row["asset"] not in _WSEQ:
+                a = np.fromfile(os.path.join(d, row["asset"]), np.uint16)
+                _WSEQ[row["asset"]] = a.reshape(-1, row["sh"], row["sw"])
+            info = analyse_seq(caps, _WSEQ[row["asset"]], row["sw"], row["sh"], _WCACHE, row["asset"])
+        info["mode"] = row["mode"]
+        info["link8_rounded"] = link8
+    except Exception as e:  # keep going; the report lists failures
+        info = dict(mode=row["mode"], error=repr(e))
+    info["analysis_s"] = round(time.time() - t0, 1)
+    return row["name"], files, info
+
+
+def pending_runs(d, results, reanalyse):
+    cap_dir = os.path.join(d, "captures")
+    if not os.path.isdir(cap_dir):
+        return []
+    listing = os.listdir(cap_dir)
+    out = []
     for row in read_plan(d):
         name = row["name"]
-        if name in results and not args.reanalyse:
+        if name in results and not reanalyse:
             continue
-        files = sorted([f for f in os.listdir(cap_dir) if f.startswith(name + "__") and f.endswith(".rgb10")],
-                       key=lambda s: int(s.rsplit("__", 1)[1].split(".")[0])) if os.path.isdir(cap_dir) else []
-        if not files:
+        # only runs whose capture is complete (the .done marker is written after the files)
+        if name + ".done" not in listing:
             continue
-        caps = [load_capture(os.path.join(cap_dir, f), row["ow"], row["oh"]) for f in files]
-        # The owner's link is 8-bit: a capture with 10-bit codes (VP's 10-bit swapchain without the
-        # sigma-delta) is rounded to 8-bit codes, as the link would truncate it (the sigma-delta's
-        # output is already on 8-bit codes).
-        mid = caps[0][caps[0].shape[0] // 2]
-        link8 = bool(np.any(mid % 4))
-        if link8:
-            caps = [(np.rint(c / 4.0) * 4).clip(0, 1020).astype(np.uint16) for c in caps]
-        t0 = time.time()
-        try:
-            info = {}
-            if row["mode"] == "still":
-                avg = np.mean(np.stack([c.astype(float) for c in caps]), axis=0)
-                lvl = sorted(set(np.unique(mid[:, 1] % 4)))
-                info = analyse_still(avg, row["sw"], row["sh"], cache)
-                info["codes_mod4"] = [int(v) for v in lvl]
-                info["captures"] = len(caps)
-            elif row["mode"] == "shift":
-                info = analyse_shift(caps, row["sw"], row["sh"], cache)
-            else:
-                if row["asset"] not in seq_frames:
-                    a = np.fromfile(os.path.join(d, row["asset"]), np.uint16)
-                    seq_frames[row["asset"]] = a.reshape(-1, row["sh"], row["sw"])
-                info = analyse_seq(caps, seq_frames[row["asset"]], row["sw"], row["sh"], cache, row["asset"])
-            info["mode"] = row["mode"]
-            info["link8_rounded"] = link8
-            results[name] = info
-            print("%-60s %s (%.1fs)" % (name, json.dumps(info.get("summary"))[:150], time.time() - t0), flush=True)
-        except Exception as e:  # keep going; the report lists failures
-            results[name] = dict(mode=row["mode"], error=repr(e))
-            print(name, "ERROR", e, flush=True)
-        if delete:
-            for f in files:
-                os.remove(os.path.join(cap_dir, f))
-        with open(res_path, "w") as f:
-            json.dump(results, f)
+        files = sorted([f for f in listing if f.startswith(name + "__") and f.endswith(".rgb10")],
+                       key=lambda s: int(s.rsplit("__", 1)[1].split(".")[0]))
+        if files:
+            out.append((row, files))
+    return out
+
+
+def analyse(args, delete=False):
+    """Analyse every completed run's captures (a pool of --workers processes); with --watch keep
+    going until <dir>/captures/STOP exists and nothing is pending."""
+    from concurrent.futures import ProcessPoolExecutor
+    d = args.dir
+    res_path = os.path.join(d, args.results)
+    results = json.load(open(res_path)) if os.path.exists(res_path) else {}
+    delete = delete or args.delete
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        while True:
+            todo = pending_runs(d, results, args.reanalyse)
+            if args.reanalyse:
+                args.reanalyse = False
+            futures = [pool.submit(analyse_one, d, row, files) for row, files in todo]
+            for fut in futures:
+                name, files, info = fut.result()
+                results[name] = info
+                print("%-60s %s (%.1fs)" % (name, json.dumps(info.get("summary", info.get("error")))[:150],
+                                            info["analysis_s"]), flush=True)
+                if delete:
+                    for f in files:
+                        os.remove(os.path.join(d, "captures", f))
+                with open(res_path, "w") as f:
+                    json.dump(results, f)
+            if not args.watch:
+                break
+            if not todo:
+                if os.path.exists(os.path.join(d, "captures", "STOP")):
+                    break
+                time.sleep(20)
     return results
 
 
@@ -1152,7 +1250,7 @@ def run(args):
             pairs.append(p)
     groups = []
     for p in pairs:
-        for kind in ("__still__", "__shift", "__real_", "__bstill__", "__bshift"):
+        for kind in ("__still__", "__shift", "__real_", "__bstill__", "__bshift", "__cost__"):
             if any(r["name"].startswith(p + kind) for r in rows):
                 groups.append(p + kind)
     if args.only:
@@ -1160,6 +1258,10 @@ def run(args):
     env = dict(os.environ)
     env["VP_ALIAS_DIR"] = os.path.abspath(d)
     env["VP_TEST_GPU"] = "hardware"
+    # the renderer finds the bundled shaders (sigma-delta, SSIM, FSRCNNX) beside the test binaries
+    env["VP_TEST_SHADER_DIR"] = os.path.abspath(args.bin)
+    if args.adapter:
+        env["VP_TEST_ADAPTER"] = args.adapter   # e.g. NVIDIA: the off-screen window would otherwise use the panel's iGPU
     for g in groups:
         wait_for_gpu(args.wait_for)
         env["VP_ALIAS_FILTER"] = g
@@ -1171,7 +1273,8 @@ def run(args):
         t0 = time.time()
         p = subprocess.run(cmd, env=env, capture_output=True, text=True)
         print("captures %s: rc %d (%.0fs)" % (g, p.returncode, time.time() - t0), flush=True)
-        analyse(args, delete=True)
+        if not args.no_analyse:
+            analyse(args, delete=True)
 
 
 # ---------------------------------------------------------------------------- report and gate
@@ -1265,7 +1368,7 @@ def report(args):
                 fmt(t.get("mtf_0.4"), "%.2f"), fmt(t.get("mtf_0.6"), "%.2f"), fmt(t.get("mtf_0.8"), "%.2f"),
                 fmt(t.get("ringing")), fmt(t.get("motion_err")), fmt(t.get("motion_err_stop")), fmt(t.get("shimmer"), "%.4f"),
                 fmt(t.get("real_hf_err")), fmt(t.get("real_shimmer"), "%.3f"), "baseline" if cfg == "default" else verdict(t, base)))
-    text = "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n\n### GPU cost per frame (D3D11 timestamps)\n\n" + cost_report(args.dir)
     with open(os.path.join(args.dir, args.results.replace(".json", ".md")), "w") as f:
         f.write(text)
     print(text)
@@ -1319,7 +1422,13 @@ def main():
     ap.add_argument("--only", default=None)
     ap.add_argument("--wait-for", default="pulse-fast", help="wait while test processes with this in the command line run")
     ap.add_argument("--no-real", action="store_true")
+    ap.add_argument("--plan-only", action="store_true", help="prepare: rewrite plan.tsv only (cards untouched)")
     ap.add_argument("--reanalyse", action="store_true")
+    ap.add_argument("--no-analyse", action="store_true", help="run: captures only (an analyse --watch runs alongside)")
+    ap.add_argument("--watch", action="store_true")
+    ap.add_argument("--delete", action="store_true", help="analyse: delete the raw captures once analysed")
+    ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--adapter", default="NVIDIA", help="run: VP_TEST_ADAPTER substring ('' = the window's adapter)")
     args = ap.parse_args()
     if args.command == "prepare":
         prepare(args)
